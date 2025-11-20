@@ -29,21 +29,21 @@ extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
 void kernel_main(void) {
 	terminal_initialize();
-	printf("Hello, kernel World!\n");
+	printf("Hello!\n");
 	unsigned long cr3 = read_cr3();
 	unsigned long cr0 = read_cr0();
-	printf("CR3="); print_hex(cr3);
+	/* printf("CR3="); print_hex(cr3);
 	printf(" CR0="); print_hex(cr0);
-	printf("\n");
+	printf("\n"); */
 	unsigned long expected = (unsigned long)(&boot_page_directory) - 0xC0000000UL;
-	printf("EXP="); print_hex(expected);
+	/* printf("EXP="); print_hex(expected);
 	printf("\n");
 	if (cr3 == expected) {
 		printf("PAGING OK\n");
 	} else {
 		printf("PAGING MISMATCH\n");
-	}
+	} */
 	unsigned long *pd = (unsigned long*)0xFFFFF000UL;
-	printf("PDE0="); print_hex(pd[0]);
-	printf("\n");
+	/* printf("PDE0="); print_hex(pd[0]);
+	printf("\n"); */
 }
