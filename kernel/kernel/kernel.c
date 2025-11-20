@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <kernel/tty.h>
 
 static inline unsigned long read_cr3(void) {
@@ -24,7 +25,7 @@ static void print_hex(unsigned long v) {
 	printf(buf);
 }
 
-extern char boot_page_directory;
+extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
 void kernel_main(void) {
 	terminal_initialize();
