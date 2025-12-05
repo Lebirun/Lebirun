@@ -1,10 +1,9 @@
 #include <kernel/registers.h>
-#include <string.h>      
+#include <string.h>
 #include <stdint.h>
 
-#include "../include/kernel/tty.h"
+#include <kernel/tty.h>
 #include "io.h"
-#include "idt.h"
 
 extern void isr0(void);
 extern void isr1(void);
@@ -55,6 +54,8 @@ extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
 
+volatile uint32_t tick_count = 0;
+
 static const char* exception_messages[] = {
     "Divide-by-zero",
     "Debug",
@@ -104,11 +105,13 @@ static void print_hex(uint32_t value)
 
 void interrupt_handler(registers_t* regs)
 {
-    terminal_writestring(">>> TRAPPED INT 0x");
-    print_hex(regs->int_no);
-    terminal_writestring(" | EIP=0x");
-    print_hex(regs->eip);
-    terminal_writestring(" <<<\n");
+    if (regs->int_no < 32) {
+        terminal_writestring(">>> TRAPPED INT 0x");
+        print_hex(regs->int_no);
+        terminal_writestring(" | EIP=0x");
+        print_hex(regs->eip);
+        terminal_writestring(" <<<\n");
+    }
 
     if (regs->int_no < 32) {
         terminal_writestring("\n\n!!! KERNEL PANIC !!!\n");
@@ -131,12 +134,32 @@ void interrupt_handler(registers_t* regs)
         for (;;) __asm__ ("hlt");
     } else {
         uint8_t irq = regs->int_no - 32;
-
-        if (irq >= 8)
-            outb(0xA0, 0x20);   
-        outb(0x20, 0x20);        
-
+        if (irq >= 8) outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+        
+        if (irq == 0) {
+            tick_count++;
+            if (tick_count % 100 == 0) {
+                terminal_writestring("TICK! (");
+                char buf[10];
+                uint32_t temp = tick_count;
+                int i = 9;
+                buf[9] = '\0';
+                do { buf[--i] = '0' + (temp % 10); temp /= 10; } while (temp);
+                terminal_writestring(&buf[i]);
+                terminal_writestring(" ticks)\n");
+            }
+        }
     }
+}
+
+void keyboard_disable(void) {
+    outb(0x64, 0x20);
+    uint8_t cmd_byte = inb(0x60);
+    cmd_byte &= ~0x01;
+    outb(0x64, 0x60);
+    outb(0x60, cmd_byte);
+    terminal_writestring("Keyboard IRQ disabled.\n");
 }
 
 void pic_remap(void)
@@ -149,8 +172,8 @@ void pic_remap(void)
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xff);    
-    outb(0xA1, 0xff);
+    outb(0x21, 0xFE);
+    outb(0xA1, 0xFF);
 }
 
 static struct idt_entry {

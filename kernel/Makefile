@@ -1,6 +1,7 @@
 DEFAULT_HOST!=../default-host.sh
-HOST?=DEFAULT_HOST
+HOST?=$(DEFAULT_HOST)
 HOSTARCH!=../target-triplet-to-arch.sh $(HOST)
+CC?=gcc
 
 CFLAGS?=-O2 -g
 CPPFLAGS?=
@@ -34,14 +35,14 @@ kernel/kernel.o \
 ../libc/string/memcpy.o \
 ../libc/string/memmove.o \
 ../libc/string/memcmp.o \
-../libc/string/strlen.o \
+../libc/string/strlen.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \
 $(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
 $(ARCHDIR)/crtend.o \
-$(ARCHDIR)/crtn.o \
+$(ARCHDIR)/crtn.o
 
 LINK_LIST=\
 $(LDFLAGS) \
@@ -50,18 +51,20 @@ $(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
 $(LIBS) \
 $(ARCHDIR)/crtend.o \
-$(ARCHDIR)/crtn.o \
+$(ARCHDIR)/crtn.o
 
 .PHONY: all clean install install-headers install-kernel
 .SUFFIXES: .o .c .S
 
 all: lebirun.kernel
 
+
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld
-	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(CFLAGS) $(LINK_LIST)
+	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	grub-file --is-x86-multiboot lebirun.kernel
 
 $(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
+	mkdir -p $(ARCHDIR)
 	OBJ=`$(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=$(@F)` && cp "$$OBJ" $@
 
 .c.o:

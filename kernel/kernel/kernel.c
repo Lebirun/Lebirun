@@ -2,16 +2,19 @@
 #include <stdint.h>
 #include <kernel/tty.h>
 #include <kernel/gdt.h>
-#include "../arch/i386/idt.h"
+#include <kernel/idt.h>
+#include <kernel/pit.h>
+#include "../arch/i386/io.h"
 
-static inline void outb(uint16_t port, uint8_t val) {
+
+/* static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %b0, %w1" : : "a"(val), "d"(port));
 }
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ("inb %w1, %b0" : "=a"(ret) : "d"(port));
     return ret;
-}
+} */
 
 static inline unsigned long read_cr3(void) {
     unsigned long val;
@@ -38,17 +41,6 @@ static void print_hex(unsigned long v) {
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
-static void init_paging(void) {
-    boot_page_directory[0] = 0x83;
-
-    boot_page_directory[768] = 0x83 | (0x00100000 >> 12); 
-
-    asm volatile ("mov %%cr3, %%eax; mov %%eax, %%cr3" : : : "eax");
-}
-
-uint32_t a = 10;
-uint32_t b = 0;
-
 void kernel_main(void) {
     terminal_initialize();
     gdt_init();
@@ -71,17 +63,46 @@ void kernel_main(void) {
 	printf("PDE0="); print_hex(pd[0]);
 	printf("\n");
 	pic_remap();
-	terminal_writestring("About to execute STI... fingers crossed\n");
+    keyboard_disable();
+    pit_init(100);
+
+    terminal_writestring("PIC master mask: 0x");
+    uint8_t master_mask = inb(0x21);
+    print_hex(master_mask);
+    terminal_writestring("\nPIC slave mask: 0x");
+    uint8_t slave_mask = inb(0xA1);
+    print_hex(slave_mask);
+    terminal_writestring("\n");
+
+	terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
-	terminal_writestring("Triggering INT 0... expect panic on vector 0x0!\n");
+    terminal_writestring("Starting PIT delay test...\n");
+    uint32_t start_ticks = tick_count;  
+    delay(5000);
+    terminal_writestring("Waiting 5 seconds for ticks...\n");  
+    uint32_t elapsed = tick_count - start_ticks;
+    terminal_writestring("Elapsed ticks: ");
+    char buf[10]; uint32_t temp = elapsed; int i=9; buf[9]='\0';
+    do { buf[--i] = '0' + (temp % 10); temp /= 10; } while (temp);
+    terminal_writestring(&buf[i] ? &buf[i] : "0"); 
+    terminal_writestring("\n");
+    if (elapsed >= 450) {  
+        terminal_writestring("PIT WORKS! ~");
+        terminal_writestring(&buf[i] ? &buf[i] : "0");
+        terminal_writestring(" ticks counted.\n");
+    } else {
+        terminal_writestring("PIT SILENT - check masks!\n");
+    }
+
+	/*terminal_writestring("Triggering INT 0...\n");
 
 	asm volatile ("int $0");
 
 	terminal_writestring("This NEVER prints if IDT works\n");
 
-	terminal_writestring("Kernel idle loop started. HLTing...\n");
+	terminal_writestring("Kernel idle loop started. HLTing...\n");*/
 
     for (;;) {
         asm volatile ("hlt");
