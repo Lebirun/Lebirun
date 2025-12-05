@@ -30,6 +30,11 @@ LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 KERNEL_OBJS=\
 $(KERNEL_ARCH_OBJS) \
 kernel/kernel.o \
+../libc/string/memset.o \
+../libc/string/memcpy.o \
+../libc/string/memmove.o \
+../libc/string/memcmp.o \
+../libc/string/strlen.o \
 
 OBJS=\
 $(ARCHDIR)/crti.o \
@@ -37,8 +42,6 @@ $(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
 $(ARCHDIR)/crtend.o \
 $(ARCHDIR)/crtn.o \
-$(ARCHDIR)/idt.o \
-$(ARCHDIR)/interrupts.o \
 
 LINK_LIST=\
 $(LDFLAGS) \
@@ -48,8 +51,6 @@ $(KERNEL_OBJS) \
 $(LIBS) \
 $(ARCHDIR)/crtend.o \
 $(ARCHDIR)/crtn.o \
-$(ARCHDIR)/idt.o \
-$(ARCHDIR)/interrupts.o \
 
 .PHONY: all clean install install-headers install-kernel
 .SUFFIXES: .o .c .S

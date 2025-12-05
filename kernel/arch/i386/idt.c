@@ -104,6 +104,12 @@ static void print_hex(uint32_t value)
 
 void interrupt_handler(registers_t* regs)
 {
+    terminal_writestring(">>> TRAPPED INT 0x");
+    print_hex(regs->int_no);
+    terminal_writestring(" | EIP=0x");
+    print_hex(regs->eip);
+    terminal_writestring(" <<<\n");
+
     if (regs->int_no < 32) {
         terminal_writestring("\n\n!!! KERNEL PANIC !!!\n");
         terminal_writestring("Exception: ");
@@ -130,9 +136,6 @@ void interrupt_handler(registers_t* regs)
             outb(0xA0, 0x20);   
         outb(0x20, 0x20);        
 
-        // Example: uncomment this later for a visible timer tick
-        // static uint32_t ticks = 0;
-        // if (irq == 0 && (++ticks % 100 == 0)) terminal_writestring(".");
     }
 }
 
@@ -156,7 +159,7 @@ static struct idt_entry {
     uint8_t  always0;
     uint8_t  flags;
     uint16_t base_hi;
-} __attribute__((packed)) idt[256];
+} __attribute__((packed)) idt[256] __attribute__((section(".data")));
 
 static struct {
     uint16_t limit;
@@ -230,4 +233,9 @@ void idt_init(void)
     idt_set_gate(47, (uint32_t)isr47);
 
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
+
+    outb(0x3F8, 'I');
+    outb(0x3F8, 'D');
+    outb(0x3F8, 'T');
+    outb(0x3F8, '\n');
 }
