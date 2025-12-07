@@ -4,17 +4,9 @@
 #include <kernel/gdt.h>
 #include <kernel/idt.h>
 #include <kernel/pit.h>
+#include <kernel/keyboard.h>
+#include <kernel/common.h>
 #include "../arch/i386/io.h"
-
-
-/* static inline void outb(uint16_t port, uint8_t val) {
-    asm volatile ("outb %b0, %w1" : : "a"(val), "d"(port));
-}
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    asm volatile ("inb %w1, %b0" : "=a"(ret) : "d"(port));
-    return ret;
-} */
 
 static inline unsigned long read_cr3(void) {
     unsigned long val;
@@ -26,17 +18,6 @@ static inline unsigned long read_cr0(void) {
     unsigned long val;
     __asm__ volatile ("mov %%cr0, %0" : "=r"(val));
     return val;
-}
-
-void print_hex(unsigned long v) {
-    char buf[9];
-    buf[8] = '\0';
-    for (int i = 0; i < 8; ++i) {
-        unsigned int nib = (v >> ((7 - i) * 4)) & 0xF;
-        buf[i] = (nib < 10) ? ('0' + nib) : ('A' + (nib - 10));
-    }
-    printf("0x");
-    printf(buf);
 }
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
@@ -63,9 +44,10 @@ void kernel_main(void) {
 	printf("PDE0="); print_hex(pd[0]);
 	printf("\n");
 	pic_remap();
-    keyboard_disable();
+    //keyboard_disable();
     calibrate_pit();
     pit_init(100);
+    keyboard_init();
 
     terminal_writestring("PIC master mask: 0x");
     uint8_t master_mask = inb(0x21);
@@ -80,6 +62,7 @@ void kernel_main(void) {
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
     for (;;) {
-        asm volatile ("hlt");
+        char c = getchar();
+        terminal_putchar(c);
     }
 }

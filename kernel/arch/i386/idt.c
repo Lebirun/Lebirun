@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <kernel/tty.h>
 #include <kernel/debug.h>
+#include <kernel/keyboard.h>
 #include "io.h"
 
 extern void isr0(void);
@@ -91,18 +92,6 @@ static const char* exception_messages[] = {
     "Triple Fault"
 };
 
-static void print_hex(uint32_t value)
-{
-    const char digits[] = "0123456789ABCDEF";
-    char buf[11] = "0x00000000";
-    int i;
-    for (i = 9; i >= 2; i--) {
-        buf[i] = digits[value & 0xF];
-        value >>= 4;
-    }
-    terminal_writestring(buf);
-}
-
 void interrupt_handler(registers_t* regs)
 {
     if (regs->int_no < 32) {
@@ -149,6 +138,8 @@ void interrupt_handler(registers_t* regs)
                 terminal_writestring(&buf[i]);
                 terminal_writestring(" ticks)\n");
             }
+        } else if (irq == 1) {
+            keyboard_handler(regs);
         }
     }
 }
@@ -172,7 +163,7 @@ void pic_remap(void)
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFE);
+    outb(0x21, 0xFC);
     outb(0xA1, 0xFF);
 }
 

@@ -6,6 +6,7 @@
 #include <kernel/tty.h>
 
 #include "vga.h"
+#include "io.h"
 
 static const size_t VGA_WIDTH = 80;
 static const size_t VGA_HEIGHT = 25;
@@ -15,6 +16,18 @@ static size_t terminal_row;
 static size_t terminal_column;
 static uint8_t terminal_color;
 static uint16_t* terminal_buffer;
+
+static void terminal_updatecursor(void) {
+    uint16_t pos = terminal_row * VGA_WIDTH + terminal_column;
+    outb(0x3D4, 14);
+    outb(0x3D5, (pos >> 8) & 0xFF);
+    outb(0x3D4, 15);
+    outb(0x3D5, pos & 0xFF);
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, (inb(0x3D5) & 0xC0) | 14);
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, (inb(0x3D5) & 0xE0) | 15);
+}
 
 void terminal_initialize(void) {
 	terminal_row = 0;
@@ -27,6 +40,7 @@ void terminal_initialize(void) {
 			terminal_buffer[index] = vga_entry(' ', terminal_color);
 		}
 	}
+	terminal_updatecursor();
 }
 
 void terminal_setcolor(uint8_t color) {
@@ -47,23 +61,36 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
-	unsigned char uc = c;
-	if (c == '\n') {
-		terminal_column = 0;
-		if (++terminal_row == VGA_HEIGHT) {
-			terminal_scroll();
-			terminal_row = VGA_HEIGHT - 1;
-		}
-		return;
-	}
-	terminal_putentryat(uc, terminal_color, terminal_column, terminal_row);
-	if (++terminal_column == VGA_WIDTH) {
-		terminal_column = 0;
-		if (++terminal_row == VGA_HEIGHT) {
-			terminal_scroll();
-			terminal_row = VGA_HEIGHT - 1;
-		}
-	}
+    unsigned char uc = c;
+
+    if (c == '\n') {
+        terminal_column = 0;
+        if (++terminal_row == VGA_HEIGHT) {
+            terminal_scroll();
+            terminal_row = VGA_HEIGHT - 1;
+        }
+        terminal_updatecursor();
+        return;
+    }
+
+    if (c == '\b') {
+        if (terminal_column > 0) {
+            terminal_column--;
+            terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
+        }
+        terminal_updatecursor();
+        return;
+    }
+
+    terminal_putentryat(uc, terminal_color, terminal_column, terminal_row);
+    if (++terminal_column == VGA_WIDTH) {
+        terminal_column = 0;
+        if (++terminal_row == VGA_HEIGHT) {
+            terminal_scroll();
+            terminal_row = VGA_HEIGHT - 1;
+        }
+    }
+    terminal_updatecursor();
 }
 
 void terminal_write(const char* data, size_t size) {

@@ -1,10 +1,8 @@
 #include <stdint.h>
 #include <kernel/tty.h>
 #include <kernel/idt.h>
+#include <kernel/common.h>
 #include "io.h"
-
-/* Defined in kernel.c */
-extern void print_hex(unsigned long v);
 
 void pit_init(uint32_t freq) {
     uint32_t divisor = 1193182 / freq; 
