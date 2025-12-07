@@ -1,8 +1,8 @@
 #include <kernel/registers.h>
 #include <string.h>
 #include <stdint.h>
-
 #include <kernel/tty.h>
+#include <kernel/debug.h>
 #include "io.h"
 
 extern void isr0(void);
@@ -139,7 +139,7 @@ void interrupt_handler(registers_t* regs)
         
         if (irq == 0) {
             tick_count++;
-            if (tick_count % 100 == 0) {
+            if (debugMode && (tick_count % 100 == 0)) {
                 terminal_writestring("TICK! (");
                 char buf[10];
                 uint32_t temp = tick_count;

@@ -28,7 +28,7 @@ static inline unsigned long read_cr0(void) {
     return val;
 }
 
-static void print_hex(unsigned long v) {
+void print_hex(unsigned long v) {
     char buf[9];
     buf[8] = '\0';
     for (int i = 0; i < 8; ++i) {
@@ -64,6 +64,7 @@ void kernel_main(void) {
 	printf("\n");
 	pic_remap();
     keyboard_disable();
+    calibrate_pit();
     pit_init(100);
 
     terminal_writestring("PIC master mask: 0x");
@@ -77,32 +78,6 @@ void kernel_main(void) {
 	terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");
 	terminal_writestring("STI completed! Interrupts enabled.\n");
-
-    terminal_writestring("Starting PIT delay test...\n");
-    uint32_t start_ticks = tick_count;  
-    delay(5000);
-    terminal_writestring("Waiting 5 seconds for ticks...\n");  
-    uint32_t elapsed = tick_count - start_ticks;
-    terminal_writestring("Elapsed ticks: ");
-    char buf[10]; uint32_t temp = elapsed; int i=9; buf[9]='\0';
-    do { buf[--i] = '0' + (temp % 10); temp /= 10; } while (temp);
-    terminal_writestring(&buf[i] ? &buf[i] : "0"); 
-    terminal_writestring("\n");
-    if (elapsed >= 450) {  
-        terminal_writestring("PIT WORKS! ~");
-        terminal_writestring(&buf[i] ? &buf[i] : "0");
-        terminal_writestring(" ticks counted.\n");
-    } else {
-        terminal_writestring("PIT SILENT - check masks!\n");
-    }
-
-	/*terminal_writestring("Triggering INT 0...\n");
-
-	asm volatile ("int $0");
-
-	terminal_writestring("This NEVER prints if IDT works\n");
-
-	terminal_writestring("Kernel idle loop started. HLTing...\n");*/
 
     for (;;) {
         asm volatile ("hlt");

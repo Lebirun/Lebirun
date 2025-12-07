@@ -5,5 +5,6 @@
 
 void pit_init(uint32_t freq);
 void delay(uint32_t ms);
+void calibrate_pit(void);
 
 #endif
