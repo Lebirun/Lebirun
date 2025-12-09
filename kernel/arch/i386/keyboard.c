@@ -9,27 +9,28 @@ static unsigned int head = 0;
 static unsigned int tail = 0;
 
 static bool shift_pressed = false;
+static bool e0_prefix = false;
 
 static const char qwerty_lowercase[128] = {
-    0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
-    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '{', '}', '\n', 0, 'a', 's',
-    'd', 'f', 'g', 'h', 'j', 'k', 'l', ':', '"', '~', 0, '|', 'z', 'x', 'c', 'v',
-    'b', 'n', 'm', '<', '>', '?', 0, '*', 0, ' ', 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,   'a', 's',
+    'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'','`', 0,  '\\', 'z', 'x', 'c', 'v',
+    'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   '-', 0,   0,   0,   '+', 0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
 };
 
 static const char qwerty_uppercase[128] = {
-    0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
-    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S',
-    'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|', 'Z', 'X', 'C', 'V',
-    'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    0,   27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,   'A', 'S',
+    'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z', 'X', 'C', 'V',
+    'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   '-', 0,   0,   0,   '+', 0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
 };
 
 static void buffer_put(char c) {
@@ -47,47 +48,57 @@ char getchar(void) {
 
 void keyboard_handler(registers_t* regs) {
     (void)regs;
-    static bool shift_pressed = false;
 
     uint8_t scancode = inb(0x60);
 
-    // terminal_writestring("Raw: 0x"); print_hex(scancode); ... \n
+    if (scancode == 0xE0) {
+        e0_prefix = true;
+        return;
+    }
+
+    if (e0_prefix) {
+        e0_prefix = false;
+        return;
+    }
 
     bool is_release = (scancode & 0x80) != 0;
     uint8_t code = scancode & 0x7F;
 
     if (is_release) {
-        // terminal_writestring("--- RELEASE HANDLED ---\n");
         if (code == 0x2A || code == 0x36) {
             shift_pressed = false;
-            // terminal_writestring("SHIFT RELEASED!\n");
-        } else {
-            // terminal_writestring("Unknown release ignored\n");
         }
         return;
     }
 
     if (code == 0x2A || code == 0x36) {
         shift_pressed = true;
-        // terminal_writestring("SHIFT PRESSED!\n");
         return;
     }
 
     char c = shift_pressed ? qwerty_uppercase[code] : qwerty_lowercase[code];
     if (c != 0) {
-        terminal_putchar(c);
+        buffer_put(c);
     }
-    // terminal_writestring(" (0x"); print_hex(scancode); terminal_writestring(")\n");
 }
 
 void keyboard_init(void) {
+    while (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+
     outb(0x64, 0x20); 
     uint8_t cmd = inb(0x60);
-    cmd |= 0x01;
-    outb(0x64, 0x60);
+    cmd |= 0x01;      
+    cmd &= ~0x10;      
+    outb(0x64, 0x60);  
     outb(0x60, cmd);
-    terminal_writestring("Keyboard controller IRQ enabled.\n");
 
-    outb(0x60, 0xFF); 
-    terminal_writestring("Kbd reset sent (no ACK wait).\n");
+    outb(0x60, 0xF4);
+
+    while (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+
+    terminal_writestring("Keyboard initialized.\n");
 }

@@ -9,7 +9,10 @@ int putchar(int ic) {
 	char c = (char) ic;
 	terminal_write(&c, sizeof(c));
 #else
-	// TODO: Implement stdio and the write system call.
+	/* Userspace stdio: write system call not yet implemented.
+	 * For now, this is a no-op in userspace builds.
+	 */
+	(void)ic;
 #endif
 	return ic;
 }

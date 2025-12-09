@@ -2,6 +2,8 @@
 #define COMMON_H
 
 #include <stdio.h>
+#include <stdint.h>
+#include "../arch/i386/io.h"
 
 typedef unsigned char bool;
 #define true  1
@@ -15,6 +17,24 @@ static inline void print_hex(unsigned long v) {
         buf[i] = (nib < 10) ? ('0' + nib) : ('A' + (nib - 10));
     }
     printf("%s", buf);
+}
+
+static inline uint32_t read_cr3(void) {
+    uint32_t val;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(val));
+    return val;
+}
+
+static inline uint32_t read_cr0(void) {
+    uint32_t val;
+    __asm__ volatile ("mov %%cr0, %0" : "=r"(val));
+    return val;
+}
+
+static void serial_puts(const char *str) {
+    while (*str) {
+        outb(0x3F8, *str++);
+    }
 }
 
 #endif

@@ -31,6 +31,7 @@ SECTIONS
 		*(COMMON)
 		*(.bss)
 		*(.bootstrap_stack)
+		_memory_map_start = .;
 	}
 	_kernel_end = .;
 }

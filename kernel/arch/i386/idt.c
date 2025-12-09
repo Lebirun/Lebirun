@@ -115,7 +115,7 @@ void interrupt_handler(registers_t* regs)
         print_hex(regs->eip);
         if (regs->int_no == 14) { 
             uint32_t fault_addr;
-            __asm__ ("mov %%cr2, %0" : "=r" (fault_addr));
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             terminal_writestring("\nPage fault at address 0x");
             print_hex(fault_addr);
         }

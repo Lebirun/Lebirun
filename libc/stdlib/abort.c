@@ -4,12 +4,19 @@
 __attribute__((__noreturn__))
 void abort(void) {
 #if defined(__is_libk)
-	// TODO: Add proper kernel panic.
-	printf("kernel: panic: abort()\n");
+	printf("\n\n!!! KERNEL PANIC !!!\n");
+	printf("abort() called - system halted.\n");
+	__asm__ volatile ("cli");
+	while (1) {
+		__asm__ volatile ("hlt");
+	}
 #else
-	// TODO: Abnormally terminate the process as if by SIGABRT.
+	/* Userspace: abnormally terminate the process.
+	 * Ideally this would raise SIGABRT, but signals are not yet implemented.
+	 * For now, print a message and loop forever.
+	 */
 	printf("abort()\n");
-#endif
 	while (1) { }
+#endif
 	__builtin_unreachable();
 }
