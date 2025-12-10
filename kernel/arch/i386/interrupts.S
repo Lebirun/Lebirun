@@ -72,8 +72,10 @@ isr_noerr 47
 isr_common_stub:
     pusha
 
-    mov %ds, %ax
-    push %eax
+    push %ds
+    push %es
+    push %fs
+    push %gs
 
     mov $0x10, %ax
     mov %ax, %ds
@@ -85,12 +87,11 @@ isr_common_stub:
     call interrupt_handler
     add $4, %esp            
 
-    pop %eax
-    mov %ax, %ds
-    mov %ax, %es
-    mov %ax, %fs
-    mov %ax, %gs
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
 
     popa
-    add $8, %esp            
+    add $8, %esp
     iret                    

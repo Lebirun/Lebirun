@@ -4,6 +4,7 @@
 #include <kernel/tty.h>
 #include <kernel/debug.h>
 #include <kernel/keyboard.h>
+#include <kernel/task.h>
 #include "io.h"
 
 extern void isr0(void);
@@ -128,18 +129,22 @@ void interrupt_handler(registers_t* regs)
         
         if (irq == 0) {
             tick_count++;
-            if (debugMode && (tick_count % 100 == 0)) {
-                terminal_writestring("TICK! (");
-                char buf[10];
-                uint32_t temp = tick_count;
-                int i = 9;
-                buf[9] = '\0';
-                do { buf[--i] = '0' + (temp % 10); temp /= 10; } while (temp);
-                terminal_writestring(&buf[i]);
-                terminal_writestring(" ticks)\n");
+            static uint32_t slice = 0;
+            if (++slice % 10 == 0) {
+                asm volatile ("cli");
+                schedule();
+                asm volatile ("sti");
             }
         } else if (irq == 1) {
             keyboard_handler(regs);
+        }
+
+        if (debugMode) {
+            terminal_writestring("IRQ ");
+            print_hex(irq);
+            terminal_writestring(" handled (tick=");
+            print_hex(tick_count);
+            terminal_writestring(")\n");
         }
     }
 }
