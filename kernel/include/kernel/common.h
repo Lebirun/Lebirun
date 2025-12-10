@@ -31,7 +31,7 @@ static inline uint32_t read_cr0(void) {
     return val;
 }
 
-static void serial_puts(const char *str) {
+static inline __attribute__((unused)) void serial_puts(const char *str) {
     while (*str) {
         outb(0x3F8, *str++);
     }

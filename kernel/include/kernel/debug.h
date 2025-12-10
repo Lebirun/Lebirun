@@ -3,6 +3,8 @@
 
 #include <kernel/common.h>
 
-static bool debugMode = false;
+extern bool debugMode;
+
+#define DPRINTF(fmt, ...) do { if (debugMode) printf(fmt, ##__VA_ARGS__); } while (0)
 
 #endif

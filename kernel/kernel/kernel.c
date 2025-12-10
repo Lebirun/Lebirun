@@ -9,7 +9,10 @@
 #include <kernel/keyboard.h>
 #include <kernel/common.h>
 #include <kernel/mem_map.h>
+#include <kernel/debug.h>
 #include "../arch/i386/io.h"
+
+bool debugMode = false;
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
@@ -21,49 +24,36 @@ void kernel_main(void) {
 
     init_mem_map(multiboot_magic, multiboot_ptr);
 
-    void *test_page = pmm_alloc_page();
-    if (test_page) {
-        printf("Test alloc: Page at 0x"); print_hex((unsigned long)test_page); printf("\n");
+    pfa_init();
+
+    uint32_t test_frame = pfa_alloc();
+    if (test_frame) {
+        printf("PFA Test alloc: Frame at 0x%08X\n", test_frame);
+        
+        uint32_t second_frame = pfa_alloc();
+        printf("PFA Second alloc: 0x%08X\n", second_frame);
+        pfa_free(test_frame);
+        printf("Freed first frame.\n");
+        
+        uint32_t third_frame = pfa_alloc();
+        printf("PFA Third (reuse?): 0x%08X\n", third_frame);
+        
     } else {
-        printf("Test alloc: Failed (map too small?)\n");
+        printf("PFA alloc failed - check map!\n");
     }
 
-    if (test_page) {
-        void *kernel_pt = pmm_alloc_low_page();
-        if (kernel_pt) {
-            printf("Alloc'd PT at 0x"); print_hex((unsigned long)kernel_pt); printf("\n");
+    heap_init();
 
-            uint32_t *boot_pde = (uint32_t *)0xFFFFF000;
-            boot_pde[769] = ((uint32_t)kernel_pt & ~0xFFF) | 3;
-
-            uint32_t *pt = (uint32_t *)kernel_pt;
-            uint32_t pt_index = 2; 
-            pt[pt_index] = ((uint32_t)test_page & ~0xFFF) | 3;
-
-            uint32_t cr3_phys = (uint32_t)(read_cr3() & ~0xFFF);
-            __asm__ volatile ("movl %0, %%cr3\n\t"
-                              "movl %0, %%cr3" : : "r" (cr3_phys));
-
-            char *virt_buf = (char *)0xC0402000;
-            *(uint32_t *)virt_buf = 0xDEADBEEF;
-            if (*(uint32_t *)virt_buf == 0xDEADBEEF) {
-                printf("Aligned + zero + write OK (virt: 0x"); print_hex(*(uint32_t *)virt_buf); printf(")\n");
-            }
-            strcpy(virt_buf, "Hello safe virt RAM!");
-            printf("Virt test: %s\n", virt_buf);
-        } else {
-            printf("PT alloc failed - no high mapping.\n");
-        }
-    }
-
-    char *heap_buf = malloc_virt(1024);
+    char *heap_buf = kmalloc(1024);
     if (heap_buf) {
         strcpy(heap_buf, "Hello heap!");
-        printf("Heap test: %s\n", heap_buf); 
-        free_virt(heap_buf);
+        printf("Heap test: %s\n", heap_buf);
+        kfree(heap_buf);
     } else {
         printf("Heap alloc failed.\n");
     }
+
+    heap_dump();
 
     serial_puts("Lebirun is about to start up!\n");
 
@@ -87,8 +77,8 @@ void kernel_main(void) {
 	printf("\n");
 	pic_remap();
     //keyboard_disable();
-    calibrate_pit();
-    pit_init(100);
+    pit_init(100);    
+    calibrate_pit();  
     keyboard_init();
 
     terminal_writestring("PIC master mask: 0x");
