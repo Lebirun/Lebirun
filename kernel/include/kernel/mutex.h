@@ -7,7 +7,7 @@
 typedef struct mutex {
     int locked;
     uint32_t owner;
-    task_t* wait_head;
+    wait_queue_t waiters;
 } mutex_t;
 
 void mutex_init(mutex_t* m);

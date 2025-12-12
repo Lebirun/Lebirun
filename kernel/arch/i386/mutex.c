@@ -6,7 +6,7 @@
 void mutex_init(mutex_t* m) {
     m->locked = 0;
     m->owner = 0;
-    m->wait_head = NULL;
+    waitq_init(&m->waiters);
 }
 
 void mutex_lock(mutex_t* m) {
@@ -21,17 +21,11 @@ void mutex_lock(mutex_t* m) {
 
     task_t* t = current_task;
     if (!t) { unlock_scheduler(); return; }
-    if (!m->wait_head) {
-        m->wait_head = t;
-        t->wait_next = t;
-    } else {
-        task_t* tail = m->wait_head;
-        while (tail->wait_next && tail->wait_next != m->wait_head) tail = tail->wait_next;
-        tail->wait_next = t;
-        t->wait_next = m->wait_head;
-    }
+    if (t->in_wait_queue || t->waiting_queue) { unlock_scheduler(); return; }
+    waitq_add(&m->waiters, t);
+    t->state = TASK_BLOCKED;
     unlock_scheduler();
-    block_current();
+    schedule();
 }
 
 void mutex_unlock(mutex_t* m) {
@@ -40,23 +34,14 @@ void mutex_unlock(mutex_t* m) {
     if (!m->locked) { unlock_scheduler(); return; }
     if (m->owner != (current_task ? current_task->id : 0)) { unlock_scheduler(); return; }
 
-    if (!m->wait_head) {
+    task_t* waiter = waitq_pop(&m->waiters);
+    if (!waiter) {
         m->locked = 0;
         m->owner = 0;
         unlock_scheduler();
         return;
     }
-    task_t* waiter = m->wait_head;
-    task_t* tail = waiter;
-    while (tail->wait_next && tail->wait_next != waiter) tail = tail->wait_next;
-    if (tail == waiter) {
-        m->wait_head = NULL;
-    } else {
-        m->wait_head = waiter->wait_next;
-        tail->wait_next = m->wait_head;
-    }
-    waiter->wait_next = NULL;
     m->owner = waiter->id;
-    if (waiter->state == TASK_BLOCKED) waiter->state = TASK_READY;
+    if (waiter->state != TASK_DEAD) waiter->state = TASK_READY;
     unlock_scheduler();
 }

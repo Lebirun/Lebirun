@@ -143,9 +143,7 @@ registers_t* interrupt_handler(registers_t* regs)
         if (debugMode) {
             terminal_writestring("IRQ ");
             print_hex(irq);
-            terminal_writestring(" handled (tick=");
-            print_hex(tick_count);
-            terminal_writestring(")\n");
+            terminal_writestring(" handled\n");
         }
     }
 

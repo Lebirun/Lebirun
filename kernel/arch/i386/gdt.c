@@ -1,6 +1,7 @@
 #include <kernel/gdt.h>
 #include <kernel/tty.h>
 #include <stdint.h>
+#include <string.h>
 
 typedef struct {
     uint16_t limit_low;
@@ -16,8 +17,56 @@ typedef struct {
     uint32_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-static gdt_entry_t gdt[3];
+static gdt_entry_t gdt[6];
 static gdt_ptr_t gdtp;
+
+typedef struct {
+    uint32_t prev_tss;
+    uint32_t esp0;
+    uint32_t ss0;
+    uint32_t esp1;
+    uint32_t ss1;
+    uint32_t esp2;
+    uint32_t ss2;
+    uint32_t cr3;
+    uint32_t eip;
+    uint32_t eflags;
+    uint32_t eax;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t ebx;
+    uint32_t esp;
+    uint32_t ebp;
+    uint32_t esi;
+    uint32_t edi;
+    uint32_t es;
+    uint32_t cs;
+    uint32_t ss;
+    uint32_t ds;
+    uint32_t fs;
+    uint32_t gs;
+    uint32_t ldt;
+    uint16_t trap;
+    uint16_t iomap_base;
+} __attribute__((packed)) tss_entry_t;
+
+static tss_entry_t tss;
+
+static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran);
+
+static void write_tss(int num, uint16_t ss0, uint32_t esp0) {
+    uint32_t base = (uint32_t)&tss;
+    uint32_t limit = sizeof(tss_entry_t);
+    gdt_set_gate(num, base, limit, 0x89, 0x00);
+    memset(&tss, 0, sizeof(tss));
+    tss.ss0 = ss0;
+    tss.esp0 = esp0;
+    tss.iomap_base = sizeof(tss_entry_t);
+}
+
+void tss_set_esp0(uint32_t esp0) {
+    tss.esp0 = esp0;
+}
 
 static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt[num].base_low    = (base & 0xFFFF);
@@ -32,10 +81,10 @@ static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access,
 extern void gdt_flush(uint32_t);
 
 void gdt_init(void) {
-    gdtp.limit = (sizeof(gdt_entry_t) * 3) - 1;
+    gdtp.limit = (sizeof(gdt_entry_t) * 6) - 1;
     gdtp.base  = (uint32_t)&gdt;
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 6; i++) {
         gdt[i].base_low    = 0;
         gdt[i].base_mid    = 0;
         gdt[i].base_high   = 0;
@@ -49,9 +98,17 @@ void gdt_init(void) {
     gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
 
+    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
+    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+
+    write_tss(5, 0x10, 0);
+
     asm volatile ("lgdt %0" : : "m"(gdtp) : "memory");
 
     gdt_flush(0x10);
+
+    uint16_t tss_selector = 0x28;
+    asm volatile ("ltr %w0" : : "r"(tss_selector) : "memory");
 
     terminal_writestring("GDT table set up.\n");
     terminal_writestring("GDT loaded via LGDT.\n");

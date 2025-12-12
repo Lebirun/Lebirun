@@ -14,7 +14,7 @@
 #include <kernel/mutex.h>
 #include "../arch/i386/io.h"
 
-bool debugMode = false; 
+bool debugMode = true; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
@@ -27,7 +27,7 @@ void idle_task(void) {
         reap_dead_tasks();
         if (tick_count - last_print >= 1000) {
             mutex_lock(&print_lock);
-            printf("Idle from Task 2! Tick: %d\n", tick_count);
+            printf("Idle from Task %u (pid=%u)! Tick: %d\n", current_task ? current_task->id : 0, getpid(), tick_count);
             mutex_unlock(&print_lock);
             last_print = tick_count;
         }
@@ -149,26 +149,26 @@ void kernel_main(void) {
     asm volatile ("sti");
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
-    printf("About to create blinker task...\n");
+    DPRINTF("About to create blinker task...\n");
     blink_task_ptr = create_task(blinker_task, TASK_READY);
     if (blink_task_ptr) {
-        printf("Blink task created successfully (ptr=0x%08X)\n", (uint32_t)blink_task_ptr);
+        DPRINTF("Blink task created successfully: id=%u pid=%u ptr=0x%08X\n", blink_task_ptr->id, blink_task_ptr->pid, (uint32_t)blink_task_ptr);
     } else {
         printf("Failed to create blinker - check heap!\n");
     }
 
-    printf("Creating joiner task...\n");
+    DPRINTF("Creating joiner task...\n");
     task_t* joiner = create_task(joiner_task, TASK_READY);
     if (joiner) {
-        printf("Joiner task created successfully (ptr=0x%08X)\n", (uint32_t)joiner);
+        DPRINTF("Joiner task created successfully: id=%u pid=%u ptr=0x%08X\n", joiner->id, joiner->pid, (uint32_t)joiner);
     } else {
         printf("Failed to create joiner - check heap!\n");
     }
 
-    printf("Creating idle task...\n");
+    DPRINTF("Creating idle task...\n");
     task_t* idle = create_task(idle_task, TASK_READY);
     if (idle) {
-        printf("Idle task created successfully (ptr=0x%08X)\n", (uint32_t)idle);
+        DPRINTF("Idle task created successfully: id=%u pid=%u ptr=0x%08X\n", idle->id, idle->pid, (uint32_t)idle);
     } else {
         printf("Failed to create idle - check heap!\n");
     }

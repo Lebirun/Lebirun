@@ -1,7 +1,9 @@
 #include <kernel/task.h>
+#include <kernel/debug.h>
 #include <kernel/registers.h>
 #include <kernel/common.h>
 #include <kernel/mem_map.h>
+#include <kernel/gdt.h>
 #include <string.h>
 
 static int scheduler_lock = 0;
@@ -17,14 +19,120 @@ static volatile int schedule_force = 0;
 
 #define TASK_STACK_SIZE 16384
 #define SCHED_DEFAULT_TIMESLICE 5
+#define KERNEL_STACK_SIZE 4096
+
+static void sleepq_remove(task_t* t) {
+    if (!t || !t->in_sleep_queue) return;
+    task_t** ptr = &sleep_queue_head;
+    while (*ptr) {
+        if (*ptr == t) {
+            *ptr = t->sleep_next;
+            t->sleep_next = NULL;
+            t->in_sleep_queue = 0;
+            return;
+        }
+        ptr = &(*ptr)->sleep_next;
+    }
+}
+
+pid_t getpid(void) {
+    return current_task ? (pid_t)current_task->pid : 0;
+}
+
+task_t* task_find(pid_t pid) {
+    lock_scheduler();
+    task_t* t = ready_queue_head;
+    if (t) {
+        do {
+            if (t->pid == pid) {
+                unlock_scheduler();
+                return t;
+            }
+            t = t->next;
+        } while (t && t != ready_queue_head);
+    }
+
+    task_t* d = dead_queue_head;
+    while (d) {
+        if (d->pid == pid) {
+            unlock_scheduler();
+            return d;
+        }
+        d = d->wait_next;
+    }
+    unlock_scheduler();
+    return NULL;
+}
+
+void waitq_init(wait_queue_t* q) {
+    if (!q) return;
+    q->head = NULL;
+}
+
+void waitq_add(wait_queue_t* q, task_t* t) {
+    if (!q || !t) return;
+    if (t->in_wait_queue || t->waiting_queue) return;
+    t->wait_next = q->head;
+    q->head = t;
+    t->in_wait_queue = 1;
+    t->waiting_queue = q;
+}
+
+task_t* waitq_pop(wait_queue_t* q) {
+    if (!q || !q->head) return NULL;
+    task_t* t = q->head;
+    while (t && t->state == TASK_DEAD) {
+        q->head = t->wait_next;
+        t->wait_next = NULL;
+        t->in_wait_queue = 0;
+        t->waiting_queue = NULL;
+        t = q->head;
+    }
+    if (!t) return NULL;
+    q->head = t->wait_next;
+    t->wait_next = NULL;
+    t->in_wait_queue = 0;
+    t->waiting_queue = NULL;
+    return t;
+}
+
+void waitq_wake_all(wait_queue_t* q) {
+    if (!q) return;
+    task_t* t;
+    while ((t = waitq_pop(q))) {
+        if (t->state == TASK_BLOCKED) t->state = TASK_READY;
+    }
+}
+
+void waitq_remove(wait_queue_t* q, task_t* t) {
+    if (!q || !t || !q->head) return;
+    if (q->head == t) {
+        q->head = t->wait_next;
+        t->wait_next = NULL;
+        t->in_wait_queue = 0;
+        t->waiting_queue = NULL;
+        return;
+    }
+    task_t* prev = q->head;
+    task_t* cur = prev->wait_next;
+    while (cur) {
+        if (cur == t) {
+            prev->wait_next = cur->wait_next;
+            cur->wait_next = NULL;
+            cur->in_wait_queue = 0;
+            cur->waiting_queue = NULL;
+            return;
+        }
+        prev = cur;
+        cur = cur->wait_next;
+    }
+}
 
 void init_tasks(void) {
     current_task = (task_t*)kmalloc(sizeof(task_t));
-    heap_block_t *current_block = (heap_block_t *)((uint8_t *)current_task - sizeof(heap_block_t));
-    printf("init_tasks: current_task user_ptr=0x%08X block_hdr=0x%08X magic=0x%08X\n", (uint32_t)current_task, (uint32_t)current_block, current_block->magic);
-
     memset(current_task, 0, sizeof(task_t));
     current_task->id = 0;
+    current_task->pid = 0;
     current_task->state = TASK_RUNNING;
     current_task->regs.cr3 = read_cr3();
     current_task->next = NULL;
@@ -32,23 +140,28 @@ void init_tasks(void) {
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->stack_base = NULL;
     current_task->stack_size = 0;
+    current_task->kernel_stack_base = NULL;
+    current_task->kernel_stack_size = 0;
     current_task->wake_tick = 0;
     current_task->sleep_next = NULL;
     current_task->in_sleep_queue = 0;
+    current_task->in_wait_queue = 0;
     current_task->wait_next = NULL;
-    current_task->join_waiter = NULL;
+    current_task->waiting_queue = NULL;
+    current_task->join_target = NULL;
+    waitq_init(&current_task->join_waiters);
+    current_task->join_refs = 0;
     current_task->exit_code = 0;
     uint32_t boot_esp = 0;
     asm volatile ("movl %%esp, %0" : "=r" (boot_esp));
     current_task->regs.esp = boot_esp;
+    tss_set_esp0(boot_esp);
 
     current_task->regs.eip = 0;
     current_task->regs.eflags = 0x202;
     current_task->regs.cs = 0x08;
     current_task->regs.ds = current_task->regs.es = current_task->regs.fs = current_task->regs.gs = 0x10;
     ready_queue_head = NULL;
-    printf("Task 0 created (kernel main), ESP=0x%08X\n", current_task->regs.esp);
-    printf("Init done: current=%d, head=%p\n", current_task->id, (void*)ready_queue_head);
 }
 
 void lock_scheduler(void) {
@@ -98,17 +211,22 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state) {
 
     task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
     uint8_t* stack_base = (uint8_t*)kmalloc(TASK_STACK_SIZE);
-    if (!new_task || !stack_base) {
+    uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    if (!new_task || !stack_base || !kernel_stack_base) {
         printf("Task alloc fail!\n");
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
+        if (kernel_stack_base) kfree(kernel_stack_base);
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
     memset(stack_base, 0, TASK_STACK_SIZE);
+    memset(kernel_stack_base, 0, KERNEL_STACK_SIZE);
 
     static uint32_t next_id = 1;
-    new_task->id = next_id++;
+    new_task->id = next_id;
+    new_task->pid = next_id;
+    next_id++;
     new_task->state = initial_state;
     new_task->next = NULL;
     new_task->regs.cr3 = read_cr3();
@@ -116,11 +234,17 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state) {
     new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->stack_base = stack_base;
     new_task->stack_size = TASK_STACK_SIZE;
+    new_task->kernel_stack_base = kernel_stack_base;
+    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
     new_task->wake_tick = 0;
     new_task->sleep_next = NULL;
     new_task->in_sleep_queue = 0;
+    new_task->in_wait_queue = 0;
     new_task->wait_next = NULL;
-    new_task->join_waiter = NULL;
+    new_task->waiting_queue = NULL;
+    new_task->join_target = NULL;
+    waitq_init(&new_task->join_waiters);
+    new_task->join_refs = 0;
     new_task->exit_code = 0;
 
     uint32_t* esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
@@ -155,35 +279,8 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state) {
     lock_scheduler();
     add_task_to_runqueue(new_task);
     unlock_scheduler();
-    printf("Queue after create: head=%p (id=%d)\n", (void*)ready_queue_head, ready_queue_head ? ready_queue_head->id : -1);
 
-    printf("Task %d created at EIP 0x%08X, ESP 0x%08X\n", new_task->id, (uint32_t)entry, new_task->regs.esp);
-
-    heap_block_t *new_block_hdr = (heap_block_t *)((uint8_t *)new_task - sizeof(heap_block_t));
-    heap_block_t *stack_block_hdr = (heap_block_t *)((uint8_t *)stack_base - sizeof(heap_block_t));
-    printf(" new_task hdr=0x%08X magic=0x%08X size=%u\n", (uint32_t)new_block_hdr, new_block_hdr->magic, new_block_hdr->size);
-    printf(" stack_base hdr=0x%08X magic=0x%08X size=%u\n", (uint32_t)stack_block_hdr, stack_block_hdr->magic, stack_block_hdr->size);
-
-    if ((uintptr_t)new_task & 0x3) {
-        printf("WARNING: new_task pointer unaligned 0x%08X\n", (uint32_t)new_task);
-        heap_verify();
-    }
-    if ((new_task->regs.esp & 0x3) != 0) {
-        printf("WARNING: new_task ESP unaligned 0x%08X\n", new_task->regs.esp);
-    }
-
-    heap_verify();
-    task_t* t = ready_queue_head;
-    if (t) {
-        int i = 0;
-        printf("Task list dump:\n");
-        do {
-            printf("  [%d] ptr=0x%08X id=%d next=0x%08X\n", i, (uint32_t)t, t->id, (uint32_t)t->next);
-            t = t->next;
-            i++;
-            if (i > 10) break;
-        } while (t && t != ready_queue_head);
-    }
+    DPRINTF("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X ptr=0x%08X\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, (uint32_t)new_task);
 
     return new_task;
 }
@@ -234,10 +331,17 @@ void task_exit(uint32_t exit_code) {
     if (!current_task) return;
     lock_scheduler();
     current_task->exit_code = exit_code;
-    current_task->state = TASK_DEAD;
-    if (current_task->join_waiter && current_task->join_waiter->state == TASK_BLOCKED) {
-        current_task->join_waiter->state = TASK_READY;
+    sleepq_remove(current_task);
+    if (current_task->waiting_queue) {
+        waitq_remove(current_task->waiting_queue, current_task);
     }
+    if (current_task->join_target) {
+        if (current_task->join_target->join_refs) current_task->join_target->join_refs--;
+        waitq_remove(&current_task->join_target->join_waiters, current_task);
+        current_task->join_target = NULL;
+    }
+    current_task->state = TASK_DEAD;
+    waitq_wake_all(&current_task->join_waiters);
     remove_task_from_runqueue(current_task);
     current_task->wait_next = dead_queue_head;
     dead_queue_head = current_task;
@@ -260,11 +364,33 @@ void reap_dead_tasks(void) {
     task_t* t = dead_queue_head;
     dead_queue_head = NULL;
     unlock_scheduler();
+
+    task_t* keep = NULL;
     while (t) {
         task_t* next = t->wait_next;
+        t->wait_next = NULL;
+        if (t->join_refs != 0 || t->in_wait_queue) {
+            t->wait_next = keep;
+            keep = t;
+            t = next;
+            continue;
+        }
         if (t->stack_base) kfree(t->stack_base);
+        if (t->kernel_stack_base) kfree(t->kernel_stack_base);
         kfree(t);
         t = next;
+    }
+
+    if (keep) {
+        lock_scheduler();
+        task_t* k = keep;
+        while (k) {
+            task_t* knext = k->wait_next;
+            k->wait_next = dead_queue_head;
+            dead_queue_head = k;
+            k = knext;
+        }
+        unlock_scheduler();
     }
 }
 
@@ -275,6 +401,11 @@ void switch_to(task_t* next) {
     current_task = next;
     prev->state = TASK_READY;
     next->state = TASK_RUNNING;
+
+    if (next->kernel_stack_base && next->kernel_stack_size) {
+        uint32_t esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
+        tss_set_esp0(esp0);
+    }
 
     if (next->regs.esp != 0 && 
         !((next->regs.esp >= 0xC0000000 && next->regs.esp < 0xD0000000) ||
@@ -322,10 +453,17 @@ void task_kill(task_t* task, uint32_t exit_code) {
     }
     lock_scheduler();
     task->exit_code = exit_code;
-    task->state = TASK_DEAD;
-    if (task->join_waiter && task->join_waiter->state == TASK_BLOCKED) {
-        task->join_waiter->state = TASK_READY;
+    sleepq_remove(task);
+    if (task->waiting_queue) {
+        waitq_remove(task->waiting_queue, task);
     }
+    if (task->join_target) {
+        if (task->join_target->join_refs) task->join_target->join_refs--;
+        waitq_remove(&task->join_target->join_waiters, task);
+        task->join_target = NULL;
+    }
+    task->state = TASK_DEAD;
+    waitq_wake_all(&task->join_waiters);
     remove_task_from_runqueue(task);
     task->wait_next = dead_queue_head;
     dead_queue_head = task;
@@ -342,11 +480,13 @@ int task_join(task_t* task, uint32_t* exit_code) {
         return 0;
     }
 
-    if (task->join_waiter && task->join_waiter != current_task) {
+    if (current_task->in_wait_queue || current_task->waiting_queue) {
         unlock_scheduler();
         return -1;
     }
-    task->join_waiter = current_task;
+    task->join_refs++;
+    current_task->join_target = task;
+    waitq_add(&task->join_waiters, current_task);
     current_task->state = TASK_BLOCKED;
     unlock_scheduler();
 
@@ -354,8 +494,8 @@ int task_join(task_t* task, uint32_t* exit_code) {
 
     lock_scheduler();
     if (exit_code) *exit_code = task->exit_code;
-
-    if (task->join_waiter == current_task) task->join_waiter = NULL;
+    if (task->join_refs) task->join_refs--;
+    current_task->join_target = NULL;
     unlock_scheduler();
     return 0;
 }
@@ -414,6 +554,11 @@ registers_t* schedule_from_irq(registers_t* regs) {
     if (current_task->state == TASK_RUNNING) current_task->state = TASK_READY;
     next->state = TASK_RUNNING;
     current_task = next;
+
+    if (next->kernel_stack_base && next->kernel_stack_size) {
+        uint32_t esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
+        tss_set_esp0(esp0);
+    }
 
     if (next->regs.esp == 0) return regs;
     return (registers_t*)next->regs.esp;
