@@ -54,7 +54,7 @@ typedef struct heap_block {
     uint8_t is_free;
     struct heap_block *next;
     struct heap_block *prev;
-} __attribute__((packed)) heap_block_t;
+} heap_block_t;
 
 typedef struct {
     uint32_t start_addr;
@@ -89,5 +89,8 @@ void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
 uint32_t heap_free_space(void);
+
+uint32_t heap_block_size_for_ptr(void *ptr);
+void heap_verify(void);
 
 #endif

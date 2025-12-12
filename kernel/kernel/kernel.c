@@ -11,15 +11,27 @@
 #include <kernel/mem_map.h>
 #include <kernel/debug.h>
 #include <kernel/task.h>
+#include <kernel/mutex.h>
 #include "../arch/i386/io.h"
 
-bool debugMode = true;
+bool debugMode = false; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
+static mutex_t print_lock;
+static task_t* blink_task_ptr = NULL;
+
 void idle_task(void) {
+    static uint32_t last_print = 0;
     while (1) {
-        printf("Idle from Task 2! Tick: %d\n", tick_count);
+        reap_dead_tasks();
+        if (tick_count - last_print >= 1000) {
+            mutex_lock(&print_lock);
+            printf("Idle from Task 2! Tick: %d\n", tick_count);
+            mutex_unlock(&print_lock);
+            last_print = tick_count;
+        }
+        yield();
         asm volatile ("hlt");
     }
 }
@@ -31,11 +43,28 @@ void blinker_task(void) {
     print_hex(ds_val);
     terminal_writestring(" Tick start\n");
 
-    while (1) {
+    for (int i = 0; i < 50; i++) {
+        mutex_lock(&print_lock);
         terminal_writestring("B");
-        for (volatile uint32_t i = 0; i < 10000; i++);
-        schedule();
+        mutex_unlock(&print_lock);
+        sleep_ms(100);
     }
+    mutex_lock(&print_lock);
+    terminal_writestring("blinker exiting\n");
+    mutex_unlock(&print_lock);
+    task_exit(0);
+}
+
+void joiner_task(void) {
+    while (!blink_task_ptr) {
+        sleep_ms(10);
+    }
+    uint32_t code = 0;
+    int rc = task_join(blink_task_ptr, &code);
+    mutex_lock(&print_lock);
+    printf("joiner: task_join rc=%d exit_code=%u\n", rc, code);
+    mutex_unlock(&print_lock);
+    task_exit(0);
 }
 
 extern uint32_t multiboot_magic;
@@ -80,6 +109,8 @@ void kernel_main(void) {
 
     heap_dump();
 
+    mutex_init(&print_lock);
+
     serial_puts("Lebirun is about to start up!\n");
 
     gdt_init();
@@ -101,9 +132,9 @@ void kernel_main(void) {
 	printf("PDE0="); print_hex(pd[0]);
 	printf("\n");
 	pic_remap();
+    init_tasks();
     pit_init(100);    
     calibrate_pit();
-    init_tasks();  
     keyboard_init();
 
     terminal_writestring("PIC master mask: 0x");
@@ -119,11 +150,19 @@ void kernel_main(void) {
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
     printf("About to create blinker task...\n");
-    task_t* blink = create_task(blinker_task, TASK_READY);
-    if (blink) {
-        printf("Blink task created successfully (ptr=0x%08X)\n", (uint32_t)blink);
+    blink_task_ptr = create_task(blinker_task, TASK_READY);
+    if (blink_task_ptr) {
+        printf("Blink task created successfully (ptr=0x%08X)\n", (uint32_t)blink_task_ptr);
     } else {
         printf("Failed to create blinker - check heap!\n");
+    }
+
+    printf("Creating joiner task...\n");
+    task_t* joiner = create_task(joiner_task, TASK_READY);
+    if (joiner) {
+        printf("Joiner task created successfully (ptr=0x%08X)\n", (uint32_t)joiner);
+    } else {
+        printf("Failed to create joiner - check heap!\n");
     }
 
     printf("Creating idle task...\n");
@@ -134,15 +173,11 @@ void kernel_main(void) {
         printf("Failed to create idle - check heap!\n");
     }
 
-    printf("Starting manual scheduler test...\n");
+    printf("Starting manual scheduler test with keyboard...\n");
     while (1) {
-        printf("Main from Task %d! Tick: %d\n", current_task->id, tick_count);
-        for (volatile uint32_t i = 0; i < 1000000; i++);
-        schedule();
+        char c = getchar();
+        if (c) terminal_putchar(c); 
+        asm volatile ("hlt");  
+        schedule();  
     }
-
-    // for (;;) {
-    //     char c = getchar();
-    //     terminal_putchar(c);
-    // }
 }

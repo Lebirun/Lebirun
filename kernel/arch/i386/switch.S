@@ -27,3 +27,5 @@ switch_to_asm:
     popl %esi
     popl %ebx
     popl %ebp
+
+    ret

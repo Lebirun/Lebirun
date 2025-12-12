@@ -69,6 +69,8 @@ isr_noerr 45
 isr_noerr 46
 isr_noerr 47
 
+isr_noerr 48
+
 isr_common_stub:
     pusha
 
@@ -86,6 +88,8 @@ isr_common_stub:
     push %esp               
     call interrupt_handler
     add $4, %esp            
+
+    mov %eax, %esp
 
     pop %gs
     pop %fs

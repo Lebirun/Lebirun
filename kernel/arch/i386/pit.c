@@ -4,7 +4,9 @@
 #include <kernel/common.h>
 #include "io.h"
 
+uint32_t pit_freq = 100;
 void pit_init(uint32_t freq) {
+    pit_freq = freq;
     uint32_t divisor = 1193182 / freq; 
     outb(0x43, 0x36);  
     outb(0x40, divisor & 0xFF);        
@@ -14,7 +16,7 @@ void pit_init(uint32_t freq) {
 }
 
 void delay(uint32_t ms) {
-    uint32_t ticks_needed = (ms * 100) / 1000;
+    uint32_t ticks_needed = (ms * pit_freq) / 1000;
     uint32_t start = tick_count;
     while (tick_count - start < ticks_needed) {
         asm volatile("hlt");

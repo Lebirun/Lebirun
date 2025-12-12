@@ -351,6 +351,8 @@ static void heap_map_page(uint32_t virt_addr) {
 
     uint32_t *pd = (uint32_t *)0xFFFFF000;
 
+    DPRINTF("heap_map_page: virt=0x"); if (debugMode) print_hex(virt_addr); DPRINTF(" pd_idx=%u pt_idx=%u\n", pd_idx, pt_idx);
+
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
         if (!pt_page) {
@@ -358,9 +360,12 @@ static void heap_map_page(uint32_t virt_addr) {
             return;
         }
         pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
+        DPRINTF("heap_map_page: Created PD entry for idx %u -> phys 0x", pd_idx); if (debugMode) print_hex((uint32_t)pt_page); DPRINTF("\n");
     }
 
     uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+
+    DPRINTF("heap_map_page: PT pointer 0x"); if (debugMode) print_hex((uint32_t)pt); DPRINTF("\n");
 
     if (!(pt[pt_idx] & 1)) {
         void *phys_page = pmm_alloc_page();
@@ -369,12 +374,14 @@ static void heap_map_page(uint32_t virt_addr) {
             return;
         }
         pt[pt_idx] = ((uint32_t)phys_page & ~0xFFF) | 3;
+        DPRINTF("heap_map_page: Mapped phys 0x"); if (debugMode) print_hex((uint32_t)phys_page); DPRINTF(" at virt 0x"); if (debugMode) print_hex(virt_addr); DPRINTF("\n");
 
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
 }
 
 static void heap_expand(uint32_t new_end) {
+    DPRINTF("heap_expand: request new_end=0x"); if (debugMode) print_hex(new_end); DPRINTF("\n");
     if (new_end > kernel_heap.max_addr) {
         new_end = kernel_heap.max_addr;
     }
@@ -387,6 +394,7 @@ static void heap_expand(uint32_t new_end) {
 
     kernel_heap.end_addr = new_end;
     kernel_heap.total_size = new_end - kernel_heap.start_addr;
+    DPRINTF("heap_expand: new end=0x"); if (debugMode) print_hex(kernel_heap.end_addr); DPRINTF("\n");
 }
 
 void heap_init(void) {
@@ -398,6 +406,23 @@ void heap_init(void) {
     kernel_heap.used_size = 0;
 
     heap_expand(HEAP_START + HEAP_INITIAL_SIZE);
+
+    uint32_t pd_idx = HEAP_START >> 22;
+    uint32_t *pd = (uint32_t *)0xFFFFF000;
+    if (!(pd[pd_idx] & 1)) {
+        void *pt_page = pmm_alloc_low_page();
+        if (!pt_page) {
+            printf("heap_init: Failed to allocate low page for heap PDE!\n");
+        } else {
+            pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
+            uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+            memset(pt, 0, PAGE_SIZE);
+            uint32_t cr3;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
+            printf("heap_init: PDE[%u] created for heap (PDE=0x%08X)\n", pd_idx, pd[pd_idx]);
+        }
+    }
 
     heap_block_t *initial_block = (heap_block_t *)HEAP_START;
     initial_block->magic = HEAP_MAGIC;
@@ -483,6 +508,7 @@ void *kmalloc(size_t size) {
         uint32_t needed = size + sizeof(heap_block_t) + PAGE_SIZE;
         uint32_t new_end = kernel_heap.end_addr + needed;
 
+        DPRINTF("kmalloc: expanding to new_end=0x"); if (debugMode) print_hex(new_end); DPRINTF("\n");
         if (new_end > kernel_heap.max_addr) {
             printf("kmalloc: Heap exhausted\n");
             return NULL;
@@ -490,7 +516,13 @@ void *kmalloc(size_t size) {
 
         heap_expand(new_end);
 
+        if (kernel_heap.end_addr > kernel_heap.max_addr) {
+            printf("kmalloc: After expand, end > max (0x%08X > 0x%08X)\n", kernel_heap.end_addr, kernel_heap.max_addr);
+            return NULL;
+        }
+
         heap_block_t *new_block = (heap_block_t *)(kernel_heap.end_addr - needed + PAGE_SIZE);
+        DPRINTF("kmalloc: new_block at 0x"); if (debugMode) print_hex((uint32_t)new_block); DPRINTF("\n");
         new_block->magic = HEAP_MAGIC;
         new_block->size = needed - sizeof(heap_block_t);
         new_block->is_free = 1;
@@ -518,7 +550,14 @@ void *kmalloc(size_t size) {
     block->is_free = 0;
     kernel_heap.used_size += block->size + sizeof(heap_block_t);
 
-    return (void *)((uint8_t *)block + sizeof(heap_block_t));
+    void *user_ptr = (void *)((uint8_t *)block + sizeof(heap_block_t));
+
+    if (((uintptr_t)user_ptr & 0x3) != 0) {
+        printf("kmalloc: WARNING - returned pointer not 4-byte aligned: 0x%08X\n", (uint32_t)user_ptr);
+        heap_verify();
+    }
+
+    return user_ptr;
 }
 
 void *kmalloc_aligned(size_t size, uint32_t alignment) {
@@ -616,4 +655,25 @@ uint32_t heap_free_space(void) {
         block = block->next;
     }
     return free;
+}
+
+uint32_t heap_block_size_for_ptr(void *ptr) {
+    if (!ptr) return 0;
+    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    if (block->magic != HEAP_MAGIC) return 0;
+    return block->size;
+}
+
+void heap_verify(void) {
+    printf("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
+    heap_block_t *block = kernel_heap.free_list;
+    int i = 0;
+    while (block) {
+        printf(" heap block %d: addr=0x%08X size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
+               i, (uint32_t)block, block->size, block->is_free, block->magic,
+               (uint32_t)block->next, (uint32_t)block->prev);
+        block = block->next;
+        i++;
+        if (i > 100) { printf(" heap_verify: stopping early (>100)\n"); break; }
+    }
 }

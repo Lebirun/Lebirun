@@ -55,6 +55,7 @@ extern void isr44(void);
 extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
+extern void isr48(void);
 
 volatile uint32_t tick_count = 0;
 
@@ -93,7 +94,7 @@ static const char* exception_messages[] = {
     "Triple Fault"
 };
 
-void interrupt_handler(registers_t* regs)
+registers_t* interrupt_handler(registers_t* regs)
 {
     if (regs->int_no < 32) {
         terminal_writestring(">>> TRAPPED INT 0x");
@@ -123,18 +124,18 @@ void interrupt_handler(registers_t* regs)
         terminal_writestring("\n\nSystem halted.");
         for (;;) __asm__ ("hlt");
     } else {
+        if (regs->int_no == 48) {
+            return schedule_from_irq(regs);
+        }
+
         uint8_t irq = regs->int_no - 32;
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
         
         if (irq == 0) {
             tick_count++;
-            static uint32_t slice = 0;
-            if (++slice % 10 == 0) {
-                asm volatile ("cli");
-                schedule();
-                asm volatile ("sti");
-            }
+            wake_sleeping_tasks();
+            regs = schedule_from_irq(regs);
         } else if (irq == 1) {
             keyboard_handler(regs);
         }
@@ -147,6 +148,8 @@ void interrupt_handler(registers_t* regs)
             terminal_writestring(")\n");
         }
     }
+
+    return regs;
 }
 
 void keyboard_disable(void) {
@@ -250,6 +253,7 @@ void idt_init(void)
     idt_set_gate(45, (uint32_t)isr45);
     idt_set_gate(46, (uint32_t)isr46);
     idt_set_gate(47, (uint32_t)isr47);
+    idt_set_gate(48, (uint32_t)isr48);
 
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 
