@@ -21,23 +21,23 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
     }
 
     multiboot_t *mb = (multiboot_t *) (mb_ptr + 0xC0000000);
-    DPRINTF("MB flags: 0x"); if (debugMode) print_hex(mb->flags); DPRINTF("\n");
+    DPRINTF4("MB flags: 0x"); DEBUG_HEX4(mb->flags); DPRINTF4("\n");
 
     if (!(mb->flags & (1 << 6))) {
         printf("No MEMINFO - skip map.\n");
         return;
     }
 
-    DPRINTF("Mmap addr: 0x"); if (debugMode) print_hex((unsigned long)mb->mmap_addr); DPRINTF("\n");
-    DPRINTF("Mmap virt: 0x"); if (debugMode) print_hex((unsigned long)(mb->mmap_addr + 0xC0000000)); DPRINTF("\n");
-    DPRINTF("  Length: 0x"); if (debugMode) print_hex(mb->mmap_length); DPRINTF("\n");
+    DPRINTF4("Mmap addr: 0x"); DEBUG_HEX4((unsigned long)mb->mmap_addr); DPRINTF4("\n");
+    DPRINTF4("Mmap virt: 0x"); DEBUG_HEX4((unsigned long)(mb->mmap_addr + 0xC0000000)); DPRINTF4("\n");
+    DPRINTF4("  Length: 0x"); DEBUG_HEX4(mb->mmap_length); DPRINTF4("\n");
 
     multiboot_memory_map_t *entry = (multiboot_memory_map_t *) (mb->mmap_addr + 0xC0000000);
     uint8_t *mmap_virt_start = (uint8_t *)entry;
     uint8_t *mmap_virt_end = mmap_virt_start + mb->mmap_length;
 
-    DPRINTF("Raw map dump:\n");
-    DPRINTF(" mmap_virt_start=0x"); if (debugMode) print_hex((unsigned long)mmap_virt_start); DPRINTF(" mmap_virt_end=0x"); if (debugMode) print_hex((unsigned long)mmap_virt_end); DPRINTF("\n");
+    DPRINTF5("Raw map dump:\n");
+    DPRINTF5(" mmap_virt_start=0x"); DEBUG_HEX5((unsigned long)mmap_virt_start); DPRINTF5(" mmap_virt_end=0x"); DEBUG_HEX5((unsigned long)mmap_virt_end); DPRINTF5("\n");
     uint32_t entry_count = 0;
     while ((uint8_t *)entry < mmap_virt_end) {
         if (entry->size == 0) break;
@@ -45,11 +45,11 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
         uint64_t base = ((uint64_t)entry->base_addr_high << 32) | entry->base_addr_low;
         uint64_t len = ((uint64_t)entry->length_high << 32) | entry->length_low;
 
-        DPRINTF("Entry %d: Addr 0x", entry_count); if (debugMode) print_hex((unsigned long)entry); DPRINTF(" size=0x"); if (debugMode) print_hex(entry->size); DPRINTF(" Type %d, Base 0x", entry->type); if (debugMode) print_hex((unsigned long)base); DPRINTF("\n");
-        DPRINTF("  Len 0x"); if (debugMode) print_hex((unsigned long)len); DPRINTF("\n");
+        DPRINTF5("Entry %d: Addr 0x", entry_count); DEBUG_HEX5((unsigned long)entry); DPRINTF5(" size=0x"); DEBUG_HEX5(entry->size); DPRINTF5(" Type %d, Base 0x", entry->type); DEBUG_HEX5((unsigned long)base); DPRINTF5("\n");
+        DPRINTF5("  Len 0x"); DEBUG_HEX5((unsigned long)len); DPRINTF5("\n");
 
         if (entry->type == 1 && len > 0) {
-            DPRINTF("  -> Usable ~%lu KB\n", (unsigned long)(len / 1024));
+            DPRINTF5("  -> Usable ~%lu KB\n", (unsigned long)(len / 1024));
         }
 
             entry = (multiboot_memory_map_t *) ((uint8_t *)entry + entry->size + 4);
@@ -84,24 +84,24 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
     }
     num_regions = merged_count;
 
-    DPRINTF("Merged: %d regions\n", num_regions);
+    DPRINTF3("Merged: %d regions\n", num_regions);
     uint64_t total_mb = 0;
     for (uint32_t i = 0; i < num_regions; i++) {
         uint64_t end = memory_map[i].base + memory_map[i].length;
-        DPRINTF(" [%d] 0x", i); if (debugMode) print_hex((unsigned long)memory_map[i].base); DPRINTF("\n");
-        DPRINTF("  - 0x"); if (debugMode) print_hex((unsigned long)end); DPRINTF("\n");
+        DPRINTF4(" [%d] 0x", i); DEBUG_HEX4((unsigned long)memory_map[i].base); DPRINTF4("\n");
+        DPRINTF4("  - 0x"); DEBUG_HEX4((unsigned long)end); DPRINTF4("\n");
         unsigned long mb = (unsigned long)(memory_map[i].length / 1024 / 1024);
         unsigned long kb = (unsigned long)(memory_map[i].length / 1024);
-        DPRINTF("  (%lu MB / %lu KB)\n", mb, kb);
+        DPRINTF4("  (%lu MB / %lu KB)\n", mb, kb);
         total_mb += mb;
     }
-    DPRINTF("Total usable: %lu MB\n", total_mb);
+    DPRINTF3("Total usable: %lu MB\n", total_mb);
 
     if (num_regions > 0) {
         uint32_t kernel_end_phys = (uint32_t)_kernel_end - 0xC0000000;
         kernel_end_phys = (kernel_end_phys + 0xFFF) & ~0xFFF;
 
-        DPRINTF("Kernel ends at phys 0x"); if (debugMode) print_hex(kernel_end_phys); DPRINTF("\n");
+        DPRINTF3("Kernel ends at phys 0x"); DEBUG_HEX3(kernel_end_phys); DPRINTF3("\n");
 
         bump_current = kernel_end_phys;
         active_region = 0;
@@ -130,8 +130,8 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
             }
         }
 
-        DPRINTF("PMM bump ready: Starting at 0x"); if (debugMode) print_hex((unsigned long)bump_current); DPRINTF("\n");
-        DPRINTF("PMM low bump starting at 0x"); if (debugMode) print_hex((unsigned long)low_bump); DPRINTF("\n");
+        DPRINTF3("PMM bump ready: Starting at 0x"); DEBUG_HEX3((unsigned long)bump_current); DPRINTF3("\n");
+        DPRINTF3("PMM low bump starting at 0x"); DEBUG_HEX3((unsigned long)low_bump); DPRINTF3("\n");
     }
 }
 
@@ -345,13 +345,83 @@ void *pmm_alloc_low_page(void) {
     return NULL;
 }
 
+void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    uint32_t *pd = (uint32_t *)0xFFFFF000;
+
+    if (!(pd[pd_idx] & 1)) {
+        void *pt_page = pmm_alloc_low_page();
+        if (!pt_page) {
+            printf("vmm_map_page: Failed to alloc page table\n");
+            return;
+        }
+        pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | (flags & 0xFFF);
+        uint32_t *pt_new = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+        memset(pt_new, 0, PAGE_SIZE);
+    } else {
+        if ((flags & 0x4) && !(pd[pd_idx] & 0x4)) {
+            pd[pd_idx] |= 0x4;
+        }
+    }
+
+    uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+    pt[pt_idx] = (phys_addr & ~0xFFF) | (flags & 0xFFF);
+    __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+}
+
+void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
+    if (size == 0) return;
+    uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
+    uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    for (uint32_t v = start; v < end; v += PAGE_SIZE) {
+        uint32_t pd_idx = v >> 22;
+        uint32_t pt_idx = (v >> 12) & 0x3FF;
+        uint32_t *pd = (uint32_t *)0xFFFFF000;
+
+        if (!(pd[pd_idx] & 1)) {
+            void *pt_page = pmm_alloc_low_page();
+            if (!pt_page) {
+                printf("vmm_map_range_alloc: Failed to alloc page table\n");
+                return;
+            }
+            pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | (flags & 0xFFF);
+            uint32_t *pt_new = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+            memset(pt_new, 0, PAGE_SIZE);
+        } else {
+            if ((flags & 0x4) && !(pd[pd_idx] & 0x4)) {
+                pd[pd_idx] |= 0x4;
+                uint32_t cr3;
+                __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+                __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+            }
+        }
+
+        uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+        if (!(pt[pt_idx] & 1)) {
+            void *phys_page = pmm_alloc_page();
+            if (!phys_page) {
+                printf("vmm_map_range_alloc: Failed to alloc phys page\n");
+                return;
+            }
+            pt[pt_idx] = ((uint32_t)phys_page & ~0xFFF) | (flags & 0xFFF);
+            __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+        } else {
+            pt[pt_idx] = (pt[pt_idx] & ~0xFFF) | (flags & 0xFFF);
+            __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+        }
+    }
+}
+
 static void heap_map_page(uint32_t virt_addr) {
     uint32_t pd_idx = virt_addr >> 22;
     uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
 
     uint32_t *pd = (uint32_t *)0xFFFFF000;
 
-    DPRINTF("heap_map_page: virt=0x"); if (debugMode) print_hex(virt_addr); DPRINTF(" pd_idx=%u pt_idx=%u\n", pd_idx, pt_idx);
+    DPRINTF4("heap_map_page: virt=0x"); DEBUG_HEX4(virt_addr); DPRINTF4(" pd_idx=%u pt_idx=%u\n", pd_idx, pt_idx);
 
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
@@ -360,12 +430,12 @@ static void heap_map_page(uint32_t virt_addr) {
             return;
         }
         pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
-        DPRINTF("heap_map_page: Created PD entry for idx %u -> phys 0x", pd_idx); if (debugMode) print_hex((uint32_t)pt_page); DPRINTF("\n");
+        DPRINTF4("heap_map_page: Created PD entry for idx %u -> phys 0x", pd_idx); DEBUG_HEX4((uint32_t)pt_page); DPRINTF4("\n");
     }
 
     uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
 
-    DPRINTF("heap_map_page: PT pointer 0x"); if (debugMode) print_hex((uint32_t)pt); DPRINTF("\n");
+    DPRINTF4("heap_map_page: PT pointer 0x"); DEBUG_HEX4((uint32_t)pt); DPRINTF4("\n");
 
     if (!(pt[pt_idx] & 1)) {
         void *phys_page = pmm_alloc_page();
@@ -374,14 +444,14 @@ static void heap_map_page(uint32_t virt_addr) {
             return;
         }
         pt[pt_idx] = ((uint32_t)phys_page & ~0xFFF) | 3;
-        DPRINTF("heap_map_page: Mapped phys 0x"); if (debugMode) print_hex((uint32_t)phys_page); DPRINTF(" at virt 0x"); if (debugMode) print_hex(virt_addr); DPRINTF("\n");
+        DPRINTF4("heap_map_page: Mapped phys 0x"); DEBUG_HEX4((uint32_t)phys_page); DPRINTF4(" at virt 0x"); DEBUG_HEX4(virt_addr); DPRINTF4("\n");
 
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
 }
 
 static void heap_expand(uint32_t new_end) {
-    DPRINTF("heap_expand: request new_end=0x"); if (debugMode) print_hex(new_end); DPRINTF("\n");
+    DPRINTF4("heap_expand: request new_end=0x"); DEBUG_HEX4(new_end); DPRINTF4("\n");
     if (new_end > kernel_heap.max_addr) {
         new_end = kernel_heap.max_addr;
     }
@@ -676,4 +746,22 @@ void heap_verify(void) {
         i++;
         if (i > 100) { printf(" heap_verify: stopping early (>100)\n"); break; }
     }
+}
+
+void vmm_debug_page(uint32_t virt_addr) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+    uint32_t *pd = (uint32_t *)0xFFFFF000;
+    
+    printf("VMM debug 0x%08X: PD[%u]=0x%08X", virt_addr, pd_idx, pd[pd_idx]);
+    if (pd[pd_idx] & 1) {
+        uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+        printf(" PT[%u]=0x%08X", pt_idx, pt[pt_idx]);
+        if (pt[pt_idx] & 1) {
+            printf(" (P%s%s)", 
+                   (pt[pt_idx] & 2) ? "W" : "R",
+                   (pt[pt_idx] & 4) ? "U" : "S");
+        }
+    }
+    printf("\n");
 }

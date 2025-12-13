@@ -5,7 +5,8 @@
 #include <kernel/debug.h>
 #include <kernel/keyboard.h>
 #include <kernel/task.h>
-#include "io.h"
+#include <kernel/syscall.h>
+#include <kernel/io.h>
 
 extern void isr0(void);
 extern void isr1(void);
@@ -56,6 +57,7 @@ extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
 extern void isr48(void);
+extern void isr128(void);
 
 volatile uint32_t tick_count = 0;
 
@@ -126,6 +128,9 @@ registers_t* interrupt_handler(registers_t* regs)
     } else {
         if (regs->int_no == 48) {
             return schedule_from_irq(regs);
+        } else if (regs->int_no == 128) {
+            do_syscall(regs);
+            return regs;
         }
 
         uint8_t irq = regs->int_no - 32;
@@ -140,7 +145,7 @@ registers_t* interrupt_handler(registers_t* regs)
             keyboard_handler(regs);
         }
 
-        if (debugMode) {
+        if (debugMode && debugLevel >= 5) {
             terminal_writestring("IRQ ");
             print_hex(irq);
             terminal_writestring(" handled\n");
@@ -193,6 +198,15 @@ void idt_set_gate(uint8_t n, uintptr_t handler)
     idt[n].sel     = 0x08;
     idt[n].always0 = 0;
     idt[n].flags   = 0x8E;
+}
+
+void idt_set_gate_flags(uint8_t n, uintptr_t handler, uint8_t flags)
+{
+    idt[n].base_lo = handler & 0xFFFF;
+    idt[n].base_hi = (handler >> 16) & 0xFFFF;
+    idt[n].sel     = 0x08;
+    idt[n].always0 = 0;
+    idt[n].flags   = flags;
 }
 
 void idt_init(void)
@@ -252,6 +266,8 @@ void idt_init(void)
     idt_set_gate(46, (uint32_t)isr46);
     idt_set_gate(47, (uint32_t)isr47);
     idt_set_gate(48, (uint32_t)isr48);
+
+    idt_set_gate_flags(128, (uint32_t)isr128, 0xEE);
 
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 

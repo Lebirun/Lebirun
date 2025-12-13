@@ -1,0 +1,52 @@
+#ifndef _SYSCALL_H
+#define _SYSCALL_H
+
+#define SYS_EXIT  0
+#define SYS_WRITE 1
+#define SYS_READ  3
+
+static inline int syscall0(int num) {
+    int ret;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int syscall1(int num, int arg1) {
+    int ret;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(arg1)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int syscall2(int num, int arg1, int arg2) {
+    int ret;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(arg1), "c"(arg2)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int syscall3(int num, int arg1, int arg2, int arg3) {
+    int ret;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3)
+        : "memory"
+    );
+    return ret;
+}
+
+#endif

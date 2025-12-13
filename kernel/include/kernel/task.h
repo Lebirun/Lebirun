@@ -17,38 +17,39 @@ typedef struct wait_queue {
 } wait_queue_t;
 
 typedef struct task {
-    task_state_t state;
-    registers_t regs;
     uint32_t id;
-    uint32_t pid;
-    struct task* next;
-    uint32_t time_slice;
-    uint32_t base_time_slice;
-    void* stack_base;
+    pid_t pid; 
+    task_state_t state;
+    struct task *next;
+    struct task *sleep_next;
+    int in_sleep_queue;
+    int in_wait_queue;
+    struct task *wait_next;
+    wait_queue_t *waiting_queue;
+    struct task *join_target;
+    wait_queue_t join_waiters;
+    int join_refs;
+    uint32_t exit_code;
+    registers_t regs;
+    uint32_t cr3;
+    int time_slice;
+    int base_time_slice;
+    uint8_t *stack_base;
     uint32_t stack_size;
-    void* kernel_stack_base;
+    uint8_t *kernel_stack_base;
     uint32_t kernel_stack_size;
     uint32_t wake_tick;
-    struct task* sleep_next;
-    uint8_t in_sleep_queue;
-    uint8_t in_wait_queue;
-    struct task* wait_next;
-    wait_queue_t* waiting_queue;
-    struct task* join_target;
-    wait_queue_t join_waiters;
-    uint32_t join_refs;
-    uint32_t exit_code;
+    bool is_user;
 } task_t;
 
 extern task_t* current_task;
 extern task_t* ready_queue_head;
-typedef uint32_t pid_t;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
 
 void init_tasks(void);
-task_t* create_task(void (*entry)(void), task_state_t initial_state);
+task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
 void schedule(void);
 registers_t* schedule_from_irq(registers_t* regs);
 extern void save_context(void);

@@ -72,6 +72,9 @@ extern uint32_t num_regions;
 extern uint8_t pfa_bitmap[BITMAP_BYTES];
 extern heap_t kernel_heap;
 
+void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
+void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags);
+
 void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint32_t num);
@@ -92,5 +95,6 @@ uint32_t heap_free_space(void);
 
 uint32_t heap_block_size_for_ptr(void *ptr);
 void heap_verify(void);
+void vmm_debug_page(uint32_t virt_addr);
 
 #endif

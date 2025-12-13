@@ -3,11 +3,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include "../arch/i386/io.h"
+#include <stdbool.h>
+#include <kernel/io.h>
 
-typedef unsigned char bool;
-#define true  1
-#define false 0
+typedef uint32_t pid_t;
 
 static inline void print_hex(unsigned long v) {
     char buf[9];

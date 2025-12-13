@@ -1,12 +1,15 @@
-#include "io.h"
+#include <kernel/io.h>
 #include <kernel/tty.h>
 #include <kernel/debug.h>
 #include <kernel/keyboard.h>
+#include <kernel/task.h>
 
 #define BUFFER_SIZE 256
 static char key_buffer[BUFFER_SIZE];
 static unsigned int head = 0;
 static unsigned int tail = 0;
+
+static wait_queue_t keyboard_waiters;
 
 static bool shift_pressed = false;
 static bool e0_prefix = false;
@@ -39,11 +42,24 @@ static void buffer_put(char c) {
     if (head == tail) tail = (tail + 1) % BUFFER_SIZE;
 }
 
-char getchar(void) {
-    while (head == tail) asm volatile("hlt");
+int keyboard_has_data(void) {
+    return head != tail;
+}
+
+char keyboard_getchar_nb(void) {
+    if (head == tail) return 0;
     char c = key_buffer[tail];
     tail = (tail + 1) % BUFFER_SIZE;
     return c;
+}
+
+wait_queue_t* keyboard_get_waitq(void) {
+    return &keyboard_waiters;
+}
+
+char getchar(void) {
+    while (!keyboard_has_data()) asm volatile("hlt");
+    return keyboard_getchar_nb();
 }
 
 void keyboard_handler(registers_t* regs) {
@@ -79,6 +95,7 @@ void keyboard_handler(registers_t* regs) {
     char c = shift_pressed ? qwerty_uppercase[code] : qwerty_lowercase[code];
     if (c != 0) {
         buffer_put(c);
+        waitq_wake_all(&keyboard_waiters);
     }
 }
 
@@ -99,6 +116,12 @@ void keyboard_init(void) {
     while (inb(0x64) & 0x01) {
         inb(0x60);
     }
+
+    waitq_init(&keyboard_waiters);
+
+    uint8_t master_mask = inb(0x21);
+    master_mask &= ~(1 << 1);
+    outb(0x21, master_mask);
 
     terminal_writestring("Keyboard initialized.\n");
 }

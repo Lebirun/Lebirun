@@ -1,4 +1,25 @@
+# ISO and staging
 *.iso
 isodir
 sysroot
+
+# Build artifacts
+*.o
+*.d
+*.bin
+*.a
+*.kernel
+obj/
+**/obj/
+build/
+**/build/
+
+# Embedded/copied user binaries
+kernel/arch/**/user_shell.bin
+kernel/arch/**/user_shell_bin.o
+
+# IDE/editor
 .vscode
+*~
+*.swp
+.DS_Store

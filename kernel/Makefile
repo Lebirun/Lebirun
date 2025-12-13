@@ -2,6 +2,8 @@ DEFAULT_HOST!=../default-host.sh
 HOST?=$(DEFAULT_HOST)
 HOSTARCH!=../target-triplet-to-arch.sh $(HOST)
 CC?=gcc
+LD:=$(HOST)-ld
+OBJCOPY:=$(HOST)-objcopy
 
 CFLAGS?=-O2 -g
 CPPFLAGS?=
@@ -28,9 +30,15 @@ CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
+# User shell binary (flat binary embedded)
+USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
+USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
+
 KERNEL_OBJS=\
 $(KERNEL_ARCH_OBJS) \
+$(USER_SHELL_OBJ) \
 kernel/kernel.o \
+kernel/launch_user.o \
 ../libc/string/memset.o \
 ../libc/string/memcpy.o \
 ../libc/string/memmove.o \
@@ -58,7 +66,6 @@ $(ARCHDIR)/crtn.o
 
 all: lebirun.kernel
 
-
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld
 	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	grub-file --is-x86-multiboot lebirun.kernel
@@ -73,8 +80,26 @@ $(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
 .S.o:
 	$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
+# Build user shell as flat binary
+# NOTE: shell.c is now in userprog/ and uses userlibc. We only wrap the binary here.
+# Run 'make -C ../userprog' first to produce user_shell.bin
+
+$(USER_SHELL_BIN):
+	$(MAKE) -C ../userprog
+
+# Wrap user_shell.bin as an object with start/end symbols
+$(USER_SHELL_OBJ): $(USER_SHELL_BIN)
+	$(OBJCOPY) -I binary -O elf32-i386 -B i386 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		--redefine-sym _binary_arch_i386_user_shell_bin_start=user_shell_bin_start \
+		--redefine-sym _binary_arch_i386_user_shell_bin_end=user_shell_bin_end \
+		--redefine-sym _binary_arch_i386_user_shell_bin_size=user_shell_bin_size \
+		$< $@
+
 clean:
 	rm -f lebirun.kernel
+	rm -f $(USER_SHELL_OBJ)
+	rm -f $(USER_SHELL_BIN)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
 

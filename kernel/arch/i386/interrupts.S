@@ -68,8 +68,9 @@ isr_noerr 44
 isr_noerr 45
 isr_noerr 46
 isr_noerr 47
-
 isr_noerr 48
+
+isr_noerr 128
 
 isr_common_stub:
     pusha

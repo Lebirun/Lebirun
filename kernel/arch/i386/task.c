@@ -4,7 +4,9 @@
 #include <kernel/common.h>
 #include <kernel/mem_map.h>
 #include <kernel/gdt.h>
+#include <kernel/tty.h>
 #include <string.h>
+#include <stdio.h>
 
 static int scheduler_lock = 0;
 extern volatile uint32_t tick_count;
@@ -20,6 +22,8 @@ static volatile int schedule_force = 0;
 #define TASK_STACK_SIZE 16384
 #define SCHED_DEFAULT_TIMESLICE 5
 #define KERNEL_STACK_SIZE 4096
+
+#define USER_STACK_TOP 0x00800000u
 
 static void sleepq_remove(task_t* t) {
     if (!t || !t->in_sleep_queue) return;
@@ -206,13 +210,13 @@ static inline void remove_task_from_runqueue(task_t* task) {
     if (cur == ready_queue_head) ready_queue_head = cur->next;
 }
 
-task_t* create_task(void (*entry)(void), task_state_t initial_state) {
+task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode) {
     if (!entry) return NULL;
 
     task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
-    uint8_t* stack_base = (uint8_t*)kmalloc(TASK_STACK_SIZE);
+    uint8_t* stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
     uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
-    if (!new_task || !stack_base || !kernel_stack_base) {
+    if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
@@ -220,7 +224,7 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state) {
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
-    memset(stack_base, 0, TASK_STACK_SIZE);
+    if (stack_base) memset(stack_base, 0, TASK_STACK_SIZE);
     memset(kernel_stack_base, 0, KERNEL_STACK_SIZE);
 
     static uint32_t next_id = 1;
@@ -246,41 +250,71 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state) {
     waitq_init(&new_task->join_waiters);
     new_task->join_refs = 0;
     new_task->exit_code = 0;
+    new_task->is_user = user_mode;
 
-    uint32_t* esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
+    if (user_mode) {
+        vmm_map_range_alloc(USER_STACK_TOP - TASK_STACK_SIZE, TASK_STACK_SIZE, 0x7);
 
-    *--esp = 0x202;           
-    *--esp = 0x08;            
-    *--esp = (uint32_t)entry;  
+        uint32_t* kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
+        
+        uint32_t user_esp = USER_STACK_TOP - 16;
+        
+        *--kesp = 0x23;
+        *--kesp = user_esp;
+        *--kesp = 0x202;
+        *--kesp = 0x1B;
+        *--kesp = (uint32_t)entry;
+        
+        *--kesp = 0;
+        *--kesp = 0;
+        
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        *--kesp = 0;
+        
+        *--kesp = 0x23;
+        *--kesp = 0x23;
+        *--kesp = 0x23;
+        *--kesp = 0x23;
 
-    *--esp = 0;               
-    *--esp = 48;               
-
-    *--esp = 0; 
-    *--esp = 0; 
-    *--esp = 0; 
-    *--esp = 0; 
-    *--esp = 0;
-    *--esp = 0; 
-    *--esp = 0; 
-    *--esp = 0;
-
-    *--esp = 0x10; 
-    *--esp = 0x10;
-    *--esp = 0x10; 
-    *--esp = 0x10;
-
-    new_task->regs.esp = (uint32_t)esp;
-    new_task->regs.eip = (uint32_t)entry;
-    new_task->regs.eflags = 0x202;
-    new_task->regs.cs = 0x08;
-    new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x10;
+        new_task->regs.esp = (uint32_t)kesp;
+        new_task->regs.eip = (uint32_t)entry;
+        new_task->regs.eflags = 0x202;
+        new_task->regs.cs = 0x1B;
+        new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x23;
+        
+        registers_t* frame = (registers_t*)kesp;
+        printf("User task frame at 0x%08X:\n", (uint32_t)kesp);
+        printf("  EIP=0x%08X CS=0x%04X EFLAGS=0x%08X\n", frame->eip, frame->cs, frame->eflags);
+        printf("  useresp=0x%08X SS=0x%04X\n", frame->useresp, frame->ss);
+        printf("  DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n", frame->ds, frame->es, frame->fs, frame->gs);
+    } else {
+        uint32_t* esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
+        *--esp = 0x202;
+        *--esp = 0x08;
+        *--esp = (uint32_t)entry;
+        *--esp = 0;
+        *--esp = 48;
+        *--esp = 0; *--esp = 0; *--esp = 0; *--esp = 0; *--esp = 0;
+        *--esp = 0; *--esp = 0; *--esp = 0;
+        *--esp = 0x10; *--esp = 0x10; *--esp = 0x10; *--esp = 0x10;
+        new_task->regs.esp = (uint32_t)esp;
+        new_task->regs.eip = (uint32_t)entry;
+        new_task->regs.eflags = 0x202;
+        new_task->regs.cs = 0x08;
+        new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x10;
+    }
 
     lock_scheduler();
     add_task_to_runqueue(new_task);
     unlock_scheduler();
 
-    DPRINTF("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X ptr=0x%08X\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, (uint32_t)new_task);
+    DPRINTF2("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X ptr=0x%08X%s\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, (uint32_t)new_task, user_mode ? " (USER)" : "");
 
     return new_task;
 }
@@ -561,5 +595,14 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     if (next->regs.esp == 0) return regs;
+    
+    if (next->is_user) {
+        registers_t* frame = (registers_t*)next->regs.esp;
+        DPRINTF2("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
+               frame->eip, frame->cs, frame->useresp, frame->ss);
+        DPRINTF2("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
+               frame->ds, frame->es, frame->fs, frame->gs);
+    }
+    
     return (registers_t*)next->regs.esp;
 }
