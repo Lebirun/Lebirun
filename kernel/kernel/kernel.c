@@ -16,8 +16,8 @@
 #include <kernel/io.h>
 #include "launch_user.h"
 
-bool debugMode = false; 
-int debugLevel = 1; 
+bool debugMode = true; 
+int debugLevel = 3; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
@@ -107,7 +107,11 @@ void kernel_main(void) {
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
     extern uint8_t user_shell_bin_start[], user_shell_bin_end[];
+    printf("heap: verify before launching user\n");
+    heap_verify();
     task_t* shell = launch_user_binary(user_shell_bin_start, user_shell_bin_end);
+    printf("heap: verify after launch attempt\n");
+    heap_verify();
     if (!shell) {
         printf("Failed to launch user shell\n");
     } else {

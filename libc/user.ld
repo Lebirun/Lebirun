@@ -6,7 +6,7 @@ SECTIONS
     . = 0x00400000;
 
     .text : {
-        *(.text.entry) 
+        *(.text.entry)
         *(.text .text.*)
     }
 

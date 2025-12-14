@@ -1,3 +1,4 @@
+// NOTE: THIS SHELL IS A STUB!!! IT WILL BE REPLACED WITH A BETTER SHELL LATER ONCE SOME THINGS ARE DONE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

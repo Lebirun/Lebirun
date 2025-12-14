@@ -46,9 +46,9 @@ int keyboard_has_data(void) {
     return head != tail;
 }
 
-char keyboard_getchar_nb(void) {
-    if (head == tail) return 0;
-    char c = key_buffer[tail];
+int keyboard_getchar_nb(void) {
+    if (head == tail) return -1;
+    int c = (unsigned char)key_buffer[tail];
     tail = (tail + 1) % BUFFER_SIZE;
     return c;
 }
@@ -57,7 +57,7 @@ wait_queue_t* keyboard_get_waitq(void) {
     return &keyboard_waiters;
 }
 
-char getchar(void) {
+int getchar(void) {
     while (!keyboard_has_data()) asm volatile("hlt");
     return keyboard_getchar_nb();
 }

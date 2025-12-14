@@ -139,6 +139,7 @@ void init_tasks(void) {
     current_task->pid = 0;
     current_task->state = TASK_RUNNING;
     current_task->regs.cr3 = read_cr3();
+    current_task->cr3 = read_cr3();
     current_task->next = NULL;
     current_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
@@ -156,6 +157,7 @@ void init_tasks(void) {
     waitq_init(&current_task->join_waiters);
     current_task->join_refs = 0;
     current_task->exit_code = 0;
+    current_task->syscall_frame = NULL;
     uint32_t boot_esp = 0;
     asm volatile ("movl %%esp, %0" : "=r" (boot_esp));
     current_task->regs.esp = boot_esp;
@@ -211,13 +213,21 @@ static inline void remove_task_from_runqueue(task_t* task) {
 }
 
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode) {
+    return create_task_with_cr3(entry, initial_state, user_mode, read_cr3());
+}
+
+task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint32_t cr3) {
     if (!entry) return NULL;
+
+    printf("create_task_with_cr3: verify heap before alloc\n");
+    heap_verify();
 
     task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
     uint8_t* stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
     uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
+        heap_verify();
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
         if (kernel_stack_base) kfree(kernel_stack_base);
@@ -233,7 +243,9 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_m
     next_id++;
     new_task->state = initial_state;
     new_task->next = NULL;
-    new_task->regs.cr3 = read_cr3();
+    new_task->regs.cr3 = cr3;
+    new_task->cr3 = cr3;
+    printf("create_task_with_cr3: new task id=%u cr3=0x%08X\n", new_task->id, cr3);
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->stack_base = stack_base;
@@ -251,10 +263,9 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_m
     new_task->join_refs = 0;
     new_task->exit_code = 0;
     new_task->is_user = user_mode;
+    new_task->syscall_frame = NULL;
 
     if (user_mode) {
-        vmm_map_range_alloc(USER_STACK_TOP - TASK_STACK_SIZE, TASK_STACK_SIZE, 0x7);
-
         uint32_t* kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
         
         uint32_t user_esp = USER_STACK_TOP - 16;
@@ -392,6 +403,26 @@ void sleep_ms(uint32_t ms) {
     sleep_ticks(ticks);
 }
 
+void task_free_user_memory(task_t* t) {
+    if (!t) return;
+
+    if (t->user_pages && t->user_pages_count > 0) {
+        for (uint32_t i = 0; i < t->user_pages_count; i++) {
+            if (t->user_pages[i]) {
+                pfa_free(t->user_pages[i]);
+            }
+        }
+        kfree(t->user_pages);
+        t->user_pages = NULL;
+        t->user_pages_count = 0;
+    }
+
+    if (t->pd_phys) {
+        vmm_free_page_directory(t->pd_phys);
+        t->pd_phys = 0;
+    }
+}
+
 void reap_dead_tasks(void) {
     if (!dead_queue_head) return;
     lock_scheduler();
@@ -409,6 +440,7 @@ void reap_dead_tasks(void) {
             t = next;
             continue;
         }
+        task_free_user_memory(t);
         if (t->stack_base) kfree(t->stack_base);
         if (t->kernel_stack_base) kfree(t->kernel_stack_base);
         kfree(t);
@@ -560,7 +592,9 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
 registers_t* schedule_from_irq(registers_t* regs) {
     if (!current_task || !ready_queue_head) return regs;
 
-    save_irq_frame_into_task(current_task, regs, (uint32_t)regs);
+    if (!current_task->syscall_frame) {
+        save_irq_frame_into_task(current_task, regs, (uint32_t)regs);
+    }
 
     if (!schedule_force) {
         if (current_task->time_slice > 0) current_task->time_slice--;
@@ -594,15 +628,42 @@ registers_t* schedule_from_irq(registers_t* regs) {
         tss_set_esp0(esp0);
     }
 
-    if (next->regs.esp == 0) return regs;
-    
-    if (next->is_user) {
-        registers_t* frame = (registers_t*)next->regs.esp;
-        DPRINTF2("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
-               frame->eip, frame->cs, frame->useresp, frame->ss);
-        DPRINTF2("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
-               frame->ds, frame->es, frame->fs, frame->gs);
+    if (next->cr3 && next->cr3 != read_cr3()) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(next->cr3) : "memory");
+    }
+
+    registers_t* return_frame;
+    if (next->syscall_frame) {
+        return_frame = next->syscall_frame;
+        next->syscall_frame = NULL;
+        DPRINTF4("Resuming from syscall frame at 0x%08X\n", (uint32_t)return_frame);
+    } else {
+        if (next->regs.esp == 0) return regs;
+        return_frame = (registers_t*)next->regs.esp;
     }
     
-    return (registers_t*)next->regs.esp;
+    if (next->is_user) {
+        DPRINTF4("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
+               return_frame->eip, return_frame->cs, return_frame->useresp, return_frame->ss);
+        DPRINTF4("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
+               return_frame->ds, return_frame->es, return_frame->fs, return_frame->gs);
+        
+        return_frame->ds = return_frame->es = return_frame->fs = return_frame->gs = 0x23;
+        return_frame->cs = 0x1B;
+        return_frame->ss = 0x23;
+    }
+    
+    return return_frame;
+}
+
+void set_syscall_frame(registers_t *frame) {
+    if (current_task) {
+        current_task->syscall_frame = frame;
+    }
+}
+
+void clear_syscall_frame(void) {
+    if (current_task) {
+        current_task->syscall_frame = NULL;
+    }
 }

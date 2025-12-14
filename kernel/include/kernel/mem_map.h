@@ -75,6 +75,14 @@ extern heap_t kernel_heap;
 void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags);
 
+uint32_t vmm_create_page_directory(void);
+void vmm_free_page_directory(uint32_t pd_phys);
+void vmm_set_cr3(uint32_t pd_phys);
+uint32_t vmm_get_cr3(void);
+
+void vmm_register_kernel_cr3(uint32_t pd_phys);
+uint32_t vmm_get_kernel_cr3(void);
+
 void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint32_t num);
@@ -96,5 +104,20 @@ uint32_t heap_free_space(void);
 uint32_t heap_block_size_for_ptr(void *ptr);
 void heap_verify(void);
 void vmm_debug_page(uint32_t virt_addr);
+
+void vmm_unmap_page(uint32_t virt_addr);
+void vmm_map_temp(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
+void vmm_unmap_temp(uint32_t virt_addr);
+
+void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
+uint32_t *vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags, uint32_t *out_count);
+void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags);
+void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint32_t size);
+
+void pmm_zero_page_phys(uint32_t phys_addr);
+
+void dump_map_debug(void);
+void dump_pd_pt_for_virt(uint32_t virt_addr);
+void vmm_dump_for_pd(uint32_t pd_phys, uint32_t virt_addr);
 
 #endif

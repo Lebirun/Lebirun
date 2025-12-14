@@ -1,12 +1,10 @@
-#include <stdio.h>
 #include <stdlib.h>
 
 #if defined(__is_libk)
 
 __attribute__((__noreturn__))
-void abort(void) {
-	printf("\n\n!!! KERNEL PANIC !!!\n");
-	printf("abort() called - system halted.\n");
+void exit(int status) {
+	(void)status;
 	__asm__ volatile ("cli");
 	while (1) {
 		__asm__ volatile ("hlt");
@@ -19,8 +17,8 @@ void abort(void) {
 #include <unistd.h>
 
 __attribute__((__noreturn__))
-void abort(void) {
-	_exit(127);
+void exit(int status) {
+	_exit(status);
 	__builtin_unreachable();
 }
 

@@ -40,6 +40,10 @@ typedef struct task {
     uint32_t kernel_stack_size;
     uint32_t wake_tick;
     bool is_user;
+    registers_t *syscall_frame;
+    uint32_t pd_phys;
+    uint32_t *user_pages;
+    uint32_t user_pages_count;
 } task_t;
 
 extern task_t* current_task;
@@ -50,6 +54,7 @@ task_t* task_find(pid_t pid);
 
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
+task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint32_t cr3);
 void schedule(void);
 registers_t* schedule_from_irq(registers_t* regs);
 extern void save_context(void);
@@ -73,5 +78,10 @@ void waitq_add(wait_queue_t* q, task_t* t);
 task_t* waitq_pop(wait_queue_t* q);
 void waitq_wake_all(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
+
+void task_free_user_memory(task_t* t);
+
+void set_syscall_frame(registers_t *frame);
+void clear_syscall_frame(void);
 
 #endif

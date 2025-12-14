@@ -7,11 +7,11 @@ void keyboard_handler(registers_t* regs);
 void keyboard_init(void);
 
 int keyboard_has_data(void);
-char keyboard_getchar_nb(void);
+int keyboard_getchar_nb(void);
 
 #include <kernel/task.h>
 wait_queue_t* keyboard_get_waitq(void);
 
-char getchar(void);
+int getchar(void);
 
 #endif

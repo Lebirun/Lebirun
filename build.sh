@@ -2,8 +2,8 @@
 set -e
 . ./headers.sh
 
-echo "Building userlibc..."
-(cd userlibc && $MAKE)
+echo "Building libc-common..."
+(cd libc-common && $MAKE)
 
 echo "Building userprog..."
 (cd userprog && $MAKE)

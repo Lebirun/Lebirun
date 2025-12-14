@@ -1,11 +1,8 @@
-#ifndef _STDIO_H
-#define _STDIO_H 1
+#ifndef _UNISTD_H
+#define _UNISTD_H 1
 
 #include <sys/cdefs.h>
 #include <stddef.h>
-#include <stdarg.h>
-
-#define EOF (-1)
 
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
@@ -15,10 +12,11 @@
 extern "C" {
 #endif
 
-int printf(const char* __restrict, ...);
-int putchar(int);
-int puts(const char*);
-int getchar(void);
+__attribute__((__noreturn__))
+void _exit(int status);
+
+int read(int fd, void* buf, size_t count);
+int write(int fd, const void* buf, size_t count);
 
 #ifdef __cplusplus
 }

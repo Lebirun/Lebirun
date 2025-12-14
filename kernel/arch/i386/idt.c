@@ -7,6 +7,7 @@
 #include <kernel/task.h>
 #include <kernel/syscall.h>
 #include <kernel/io.h>
+#include <kernel/mem_map.h>
 
 extern void isr0(void);
 extern void isr1(void);
@@ -122,6 +123,11 @@ registers_t* interrupt_handler(registers_t* regs)
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             terminal_writestring("\nPage fault at address 0x");
             print_hex(fault_addr);
+            if (fault_addr >= 0xF7000000 && fault_addr < 0xF7003000) {
+                terminal_writestring("\n-- Temp mapping diagnostics --\n");
+                dump_map_debug();
+                dump_pd_pt_for_virt(fault_addr & ~0xFFF);
+            }
         }
         terminal_writestring("\n\nSystem halted.");
         for (;;) __asm__ ("hlt");

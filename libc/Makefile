@@ -1,5 +1,5 @@
 DEFAULT_HOST!=../default-host.sh
-HOST?=DEFAULT_HOST
+HOST?=$(DEFAULT_HOST)
 HOSTARCH!=../target-triplet-to-arch.sh $(HOST)
 
 CFLAGS?=-O2 -g
@@ -13,10 +13,12 @@ EXEC_PREFIX?=$(PREFIX)
 INCLUDEDIR?=$(PREFIX)/include
 LIBDIR?=$(EXEC_PREFIX)/lib
 
+LIBC_COMMON=../libc-common
+
 CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra
-CPPFLAGS:=$(CPPFLAGS) -D__is_libc -Iinclude
+CPPFLAGS:=$(CPPFLAGS) -D__is_libc -Iinclude -I$(LIBC_COMMON)/include
 LIBK_CFLAGS:=$(CFLAGS)
-LIBK_CPPFLAGS:=$(CPPFLAGS) -D__is_libk
+LIBK_CPPFLAGS:=$(CPPFLAGS) -D__is_libk -I../kernel/include
 
 ARCHDIR=arch/$(HOSTARCH)
 
@@ -27,19 +29,26 @@ CPPFLAGS:=$(CPPFLAGS) $(ARCH_CPPFLAGS)
 LIBK_CFLAGS:=$(LIBK_CFLAGS) $(KERNEL_ARCH_CFLAGS)
 LIBK_CPPFLAGS:=$(LIBK_CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 
+COMMON_OBJS=\
+$(LIBC_COMMON)/errno/errno.o \
+$(LIBC_COMMON)/string/memcmp.o \
+$(LIBC_COMMON)/string/memcpy.o \
+$(LIBC_COMMON)/string/memmove.o \
+$(LIBC_COMMON)/string/memset.o \
+$(LIBC_COMMON)/string/strlen.o \
+$(LIBC_COMMON)/string/strcpy.o \
+$(LIBC_COMMON)/string/strcmp.o \
+$(LIBC_COMMON)/string/strncmp.o
+
 FREEOBJS=\
 $(ARCH_FREEOBJS) \
-errno/errno.o \
 stdio/printf.o \
 stdio/putchar.o \
 stdio/puts.o \
+stdio/getchar.o \
 stdlib/abort.o \
-string/memcmp.o \
-string/memcpy.o \
-string/memmove.o \
-string/memset.o \
-string/strlen.o \
-string/strcpy.o \
+stdlib/exit.o \
+syscall/syscalls.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \
@@ -50,19 +59,21 @@ $(HOSTEDOBJS) \
 
 LIBK_OBJS=$(FREEOBJS:.o=.libk.o)
 
-#BINARIES=libc.a libk.a # Not ready for libc yet.
-BINARIES=libk.a
+BINARIES=libc.a libk.a
 
-.PHONY: all clean install install-headers install-libs
+.PHONY: all clean install install-headers install-libs libc-common
 .SUFFIXES: .o .libk.o .c .S
 
-all: $(BINARIES)
+all: libc-common $(BINARIES)
 
-libc.a: $(OBJS)
-	$(AR) rcs $@ $(OBJS)
+libc-common:
+	$(MAKE) -C $(LIBC_COMMON)
 
-libk.a: $(LIBK_OBJS)
-	$(AR) rcs $@ $(LIBK_OBJS)
+libc.a: $(OBJS) $(COMMON_OBJS)
+	$(AR) rcs $@ $(OBJS) $(COMMON_OBJS)
+
+libk.a: $(LIBK_OBJS) $(COMMON_OBJS)
+	$(AR) rcs $@ $(LIBK_OBJS) $(COMMON_OBJS)
 
 .c.o:
 	$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
@@ -80,12 +91,14 @@ clean:
 	rm -f $(BINARIES) *.a
 	rm -f $(OBJS) $(LIBK_OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) $(LIBK_OBJS:.o=.d) *.d */*.d */*/*.d
+	$(MAKE) -C $(LIBC_COMMON) clean
 
 install: install-headers install-libs
 
 install-headers:
 	mkdir -p $(DESTDIR)$(INCLUDEDIR)
 	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
+	cp -R --preserve=timestamps $(LIBC_COMMON)/include/. $(DESTDIR)$(INCLUDEDIR)/.
 
 install-libs: $(BINARIES)
 	mkdir -p $(DESTDIR)$(LIBDIR)

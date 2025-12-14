@@ -1,9 +1,13 @@
 #ifndef _SYSCALL_H
-#define _SYSCALL_H
+#define _SYSCALL_H 1
+
+#include <sys/cdefs.h>
 
 #define SYS_EXIT  0
 #define SYS_WRITE 1
 #define SYS_READ  3
+
+#ifndef __is_libk
 
 static inline int syscall0(int num) {
     int ret;
@@ -48,5 +52,7 @@ static inline int syscall3(int num, int arg1, int arg2, int arg3) {
     );
     return ret;
 }
+
+#endif
 
 #endif

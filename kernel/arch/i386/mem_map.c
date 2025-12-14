@@ -5,12 +5,27 @@
 
 extern char _kernel_end[];
 
+static void temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
+static void temp_unmap_raw(uint32_t temp_virt);
+
 mem_region_t memory_map[MAX_REGIONS];
 uint32_t num_regions = 0;
 uint64_t bump_current = 0;
 static uint32_t active_region = 0;
 uint64_t low_bump = 0;
 static uint32_t kernel_reserved_frames = 0;
+static uint32_t kernel_pd_phys = 0;
+
+static struct {
+    uint32_t v;
+    uint32_t pd_idx;
+    uint32_t pt_idx;
+    uint32_t old;
+    uint32_t newval;
+    uint32_t pd1023;
+    uint32_t pd_pde;
+    uint32_t op_count;
+} map_debug = {0};
 
 heap_t kernel_heap;
 
@@ -222,14 +237,45 @@ void pfa_init(void) {
 
     uint32_t actual_free = count_free_frames();
     if (actual_free != total_free_frames) {
-        printf("PFA WARNING: counted %u but bitmap shows %u free\n", total_free_frames, actual_free);
+        printf("PFA WARNING: counted %u but bitmap shows %u free\n", (uint32_t)total_free_frames, actual_free);
+    }
+
+    uint32_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    vmm_register_kernel_cr3(cr3);
+
+    uint32_t *pd = (uint32_t *)0xFFFFF000;
+    uint32_t temp_pd_idx = 0xF7000000 >> 22;
+    if (!(pd[temp_pd_idx] & 1)) {
+        uint64_t try = (low_bump + 0xFFF) & ~0xFFF;
+        void *pt_page = NULL;
+        for (uint32_t i = 0; i < num_regions; i++) {
+            uint64_t rstart = memory_map[i].base;
+            uint64_t rend = rstart + memory_map[i].length;
+            if (try >= rstart && try + 4096 <= rend && try < 0x00400000) {
+                low_bump = try + 4096;
+                pt_page = (void *)(uint32_t)try;
+                uint32_t idx_alloc = (uint32_t)(try / PAGE_SIZE);
+                if (idx_alloc < TOTAL_PAGES) set_bit(idx_alloc);
+                break;
+            }
+        }
+        if (pt_page) {
+            pd[temp_pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
+            uint32_t pt_addr = 0xFFC00000 + (temp_pd_idx << 12);
+            __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+            uint32_t *pt = (uint32_t *)pt_addr;
+            memset(pt, 0, PAGE_SIZE);
+            uint32_t idx_alloc = ((uint32_t)pt_page) / PAGE_SIZE;
+            printf("PFA: Temp mapping PT ready (PDE[%u]=0x%08X) phys=0x%08X idx=%u\n", temp_pd_idx, pd[temp_pd_idx], (uint32_t)pt_page, idx_alloc);
+        }
     }
 }
 
 uint32_t pfa_alloc(void) {
     uint32_t addr = find_free_frames(1);
     if (addr) {
-        if (addr < 0x00400000) memset((void*)addr, 0, PAGE_SIZE);
+        if (addr < 0x00400000) pmm_zero_page_phys(addr);
     }
     return addr;
 }
@@ -307,9 +353,7 @@ void *pmm_alloc_page(void) {
             if (idx_alloc < TOTAL_PAGES) {
                 set_bit(idx_alloc);
             }
-            if (alloc_start < 0x00400000) {
-                memset(page, 0, 4096);
-            }
+            printf("pmm_alloc_page: alloc page phys=0x%08X idx=%u\n", (uint32_t)page, idx_alloc);
             return page;
         }
 
@@ -330,18 +374,44 @@ void *pmm_alloc_low_page(void) {
     if (low_bump == 0) return NULL;
 
     uint64_t try = (low_bump + 0xFFF) & ~0xFFF;
-    for (uint32_t i = 0; i < num_regions; i++) {
-        uint64_t rstart = memory_map[i].base;
-        uint64_t rend = rstart + memory_map[i].length;
-        if (try >= rstart && try + 4096 <= rend && try < 0x00400000) {
-            low_bump = try + 4096;
-            void *page = (void *)(uint32_t)try;
-            uint32_t idx_alloc = (uint32_t)(try / PAGE_SIZE);
-            if (idx_alloc < TOTAL_PAGES) set_bit(idx_alloc);
-            memset(page, 0, 4096);
-            return page;
+
+    while (try < 0x00400000) {
+        int in_region = 0;
+        for (uint32_t i = 0; i < num_regions; i++) {
+            uint64_t rstart = memory_map[i].base;
+            uint64_t rend = rstart + memory_map[i].length;
+            if (try >= rstart && try + PAGE_SIZE <= rend && try < 0x00400000) {
+                in_region = 1;
+                uint32_t idx_alloc = (uint32_t)(try / PAGE_SIZE);
+                if (idx_alloc < TOTAL_PAGES && !test_bit(idx_alloc)) {
+                    low_bump = try + PAGE_SIZE;
+                    set_bit(idx_alloc);
+                    void *page = (void *)(uint32_t)try;
+                    printf("pmm_alloc_low_page: alloc page phys=0x%08X idx=%u\n", (uint32_t)page, idx_alloc);
+                    pmm_zero_page_phys((uint32_t)page);
+                    return page;
+                } else {
+                    try += PAGE_SIZE;
+                    low_bump = try;
+                    break;
+                }
+            }
+        }
+
+        if (!in_region) {
+            uint64_t next_start = 0;
+            for (uint32_t i = 0; i < num_regions; i++) {
+                uint64_t rstart = memory_map[i].base;
+                if (rstart > try && rstart < 0x00400000) {
+                    if (next_start == 0 || rstart < next_start) next_start = rstart;
+                }
+            }
+            if (next_start == 0) return NULL;
+            try = next_start;
+            low_bump = try;
         }
     }
+
     return NULL;
 }
 
@@ -358,7 +428,9 @@ void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
             return;
         }
         pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | (flags & 0xFFF);
-        uint32_t *pt_new = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+        uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+        __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+        uint32_t *pt_new = (uint32_t *)pt_addr;
         memset(pt_new, 0, PAGE_SIZE);
     } else {
         if ((flags & 0x4) && !(pd[pd_idx] & 0x4)) {
@@ -388,7 +460,9 @@ void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
                 return;
             }
             pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | (flags & 0xFFF);
-            uint32_t *pt_new = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+            uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+            __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+            uint32_t *pt_new = (uint32_t *)pt_addr;
             memset(pt_new, 0, PAGE_SIZE);
         } else {
             if ((flags & 0x4) && !(pd[pd_idx] & 0x4)) {
@@ -406,11 +480,23 @@ void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
                 printf("vmm_map_range_alloc: Failed to alloc phys page\n");
                 return;
             }
-            pt[pt_idx] = ((uint32_t)phys_page & ~0xFFF) | (flags & 0xFFF);
+            uint32_t old = pt[pt_idx];
+            uint32_t newval = ((uint32_t)phys_page & ~0xFFF) | (flags & 0xFFF);
+            pt[pt_idx] = newval;
+            map_debug.v = v; map_debug.pd_idx = pd_idx; map_debug.pt_idx = pt_idx; map_debug.old = old; map_debug.newval = newval; map_debug.pd1023 = ((uint32_t *)0xFFFFF000)[1023]; map_debug.pd_pde = pd[pd_idx]; map_debug.op_count++;
+            printf("vmm_map_range_alloc: map v=0x%08X pd_idx=%u pt_idx=%u -> phys=0x%08X old=0x%08X new=0x%08X (pd[1023]=0x%08X pd=%08X)\n",
+                   v, pd_idx, pt_idx, (uint32_t)phys_page, old, newval, map_debug.pd1023, map_debug.pd_pde);
             __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+            heap_verify();
         } else {
-            pt[pt_idx] = (pt[pt_idx] & ~0xFFF) | (flags & 0xFFF);
+            uint32_t old = pt[pt_idx];
+            uint32_t newval = (old & ~0xFFF) | (flags & 0xFFF);
+            pt[pt_idx] = newval;
+            map_debug.v = v; map_debug.pd_idx = pd_idx; map_debug.pt_idx = pt_idx; map_debug.old = old; map_debug.newval = newval; map_debug.pd1023 = ((uint32_t *)0xFFFFF000)[1023]; map_debug.pd_pde = pd[pd_idx]; map_debug.op_count++;
+            printf("vmm_map_range_alloc: remap v=0x%08X pd_idx=%u pt_idx=%u old=0x%08X new=0x%08X (pd[1023]=0x%08X pd=%08X)\n",
+                   v, pd_idx, pt_idx, old, newval, map_debug.pd1023, map_debug.pd_pde);
             __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+            heap_verify();
         }
     }
 }
@@ -430,6 +516,10 @@ static void heap_map_page(uint32_t virt_addr) {
             return;
         }
         pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
+        uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+        __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+        uint32_t *pt_new = (uint32_t *)pt_addr;
+        memset(pt_new, 0, PAGE_SIZE);
         DPRINTF4("heap_map_page: Created PD entry for idx %u -> phys 0x", pd_idx); DEBUG_HEX4((uint32_t)pt_page); DPRINTF4("\n");
     }
 
@@ -458,6 +548,8 @@ static void heap_expand(uint32_t new_end) {
 
     new_end = (new_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
+    if (new_end <= kernel_heap.end_addr) return;
+
     for (uint32_t addr = kernel_heap.end_addr; addr < new_end; addr += PAGE_SIZE) {
         heap_map_page(addr);
     }
@@ -477,19 +569,18 @@ void heap_init(void) {
 
     heap_expand(HEAP_START + HEAP_INITIAL_SIZE);
 
-    uint32_t pd_idx = HEAP_START >> 22;
     uint32_t *pd = (uint32_t *)0xFFFFF000;
+    uint32_t pd_idx = HEAP_START >> 22;
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
         if (!pt_page) {
             printf("heap_init: Failed to allocate low page for heap PDE!\n");
         } else {
             pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
-            uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+            uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+            __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+            uint32_t *pt = (uint32_t *)pt_addr;
             memset(pt, 0, PAGE_SIZE);
-            uint32_t cr3;
-            __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
             printf("heap_init: PDE[%u] created for heap (PDE=0x%08X)\n", pd_idx, pd[pd_idx]);
         }
     }
@@ -515,6 +606,8 @@ static heap_block_t *find_best_fit(size_t size) {
     while (current) {
         if (current->magic != HEAP_MAGIC) {
             printf("Heap corruption detected at 0x%08X\n", (uint32_t)current);
+            printf("Last map op: v=0x%08X pd_idx=%u pt_idx=%u old=0x%08X new=0x%08X pd[1023]=0x%08X pd_pde=0x%08X op_count=%u\n",
+                   map_debug.v, map_debug.pd_idx, map_debug.pt_idx, map_debug.old, map_debug.newval, map_debug.pd1023, map_debug.pd_pde, map_debug.op_count);
             return NULL;
         }
 
@@ -764,4 +857,362 @@ void vmm_debug_page(uint32_t virt_addr) {
         }
     }
     printf("\n");
+}
+
+static volatile int temp_map_lock = 0;
+
+static inline void temp_lock_acquire(uint32_t *eflags_out) {
+    __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
+    __asm__ volatile ("cli");
+    while (__sync_lock_test_and_set(&temp_map_lock, 1)) {
+    }
+}
+
+static inline void temp_lock_release(uint32_t eflags) {
+    __sync_lock_release(&temp_map_lock);
+    if (eflags & (1 << 9)) __asm__ volatile ("sti");
+}
+
+static void temp_map_raw(uint32_t temp_virt, uint32_t phys_addr) {
+    uint32_t orig_cr3;
+    uint32_t flags;
+    temp_lock_acquire(&flags);
+
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+    DPRINTF("temp_map_raw: temp_virt=0x"); DEBUG_HEX4(temp_virt); DPRINTF(" phys=0x"); DEBUG_HEX4(phys_addr); DPRINTF(" orig_cr3=0x"); DEBUG_HEX4(orig_cr3); DPRINTF(" kernel_pd=0x"); DEBUG_HEX4(kernel_pd_phys); DPRINTF("\n");
+    if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_pd_phys) : "memory");
+    }
+
+    uint32_t pd_idx = temp_virt >> 22;
+    uint32_t pt_idx = (temp_virt >> 12) & 0x3FF;
+    uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+    uint32_t pd_entry = ((uint32_t *)0xFFFFF000)[pd_idx];
+    if (!(pd_entry & 1)) {
+        DPRINTF4("temp_map_raw: WARNING - PD entry not present for temp mapping (pd_idx=%u)\n", pd_idx);
+    }
+
+    uint32_t *pt = (uint32_t *)pt_addr;
+    pt[pt_idx] = (phys_addr & ~0xFFF) | 3;
+    __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
+
+    if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+    }
+
+    temp_lock_release(flags);
+}
+
+static void temp_unmap_raw(uint32_t temp_virt) {
+    uint32_t orig_cr3;
+    uint32_t flags;
+    temp_lock_acquire(&flags);
+
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+    if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_pd_phys) : "memory");
+    }
+
+    uint32_t pd_idx = temp_virt >> 22;
+    uint32_t pt_idx = (temp_virt >> 12) & 0x3FF;
+    uint32_t pt_addr = 0xFFC00000 + (pd_idx << 12);
+    uint32_t pd_entry = ((uint32_t *)0xFFFFF000)[pd_idx];
+    DPRINTF4("temp_unmap_raw: temp_virt=0x"); DEBUG_HEX4(temp_virt); DPRINTF4(" pd_idx=%u pt_idx=%u pt_addr=0x", pd_idx, pt_idx); DEBUG_HEX4(pt_addr); DPRINTF4(" pd_entry=0x"); DEBUG_HEX4(pd_entry); DPRINTF4("\n");
+
+    __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
+
+    if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+    }
+
+    temp_lock_release(flags);
+}
+
+uint32_t vmm_create_page_directory(void) {
+    void *pd_page = pmm_alloc_low_page();
+    if (!pd_page) {
+        printf("vmm_create_page_directory: Failed to allocate PD page\n");
+        return 0;
+    }
+    uint32_t pd_phys = (uint32_t)pd_page;
+
+    uint32_t temp_virt = 0xF7000000;
+    temp_map_raw(temp_virt, pd_phys);
+
+    uint32_t *new_pd = (uint32_t *)temp_virt;
+    memset(new_pd, 0, PAGE_SIZE);
+
+    uint32_t *cur_pd = (uint32_t *)0xFFFFF000;
+    for (uint32_t i = 768; i < 1023; i++) {
+        new_pd[i] = cur_pd[i];
+    }
+
+    new_pd[1023] = (pd_phys & ~0xFFF) | 3;
+
+    temp_unmap_raw(temp_virt);
+
+    return pd_phys;
+}
+
+void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    uint32_t temp_pd_virt = 0xF7000000;
+    printf("vmm_map_page_in_pd: pd_phys=0x%08X virt=0x%08X phys=0x%08X flags=0x%X\n", pd_phys, virt_addr, phys_addr, flags);
+    temp_map_raw(temp_pd_virt, pd_phys);
+    uint32_t *foreign_pd = (uint32_t *)temp_pd_virt;
+    uint32_t pd_entry = foreign_pd[pd_idx];
+    printf("vmm_map_page_in_pd: foreign_pd[pd_idx]=0x%08X\n", pd_entry);
+
+    uint32_t pt_phys;
+    if (!(pd_entry & 1)) {
+            printf("vmm_map_page_in_pd: pd entry not present for idx %u - allocating PT\n", pd_idx);
+            void *pt_page = pmm_alloc_low_page();
+            if (!pt_page) {
+                printf("vmm_map_page_in_pd: Failed to alloc PT\n");
+                temp_unmap_raw(temp_pd_virt);
+                return;
+            }
+            pt_phys = (uint32_t)pt_page;
+            foreign_pd[pd_idx] = (pt_phys & ~0xFFF) | (flags | 3);
+            printf("vmm_map_page_in_pd: allocated PT phys=0x%08X\n", pt_phys);
+            if ((flags & 0x4) && !(foreign_pd[pd_idx] & 0x4)) {
+                foreign_pd[pd_idx] |= 0x4;
+            }
+    } else {
+            pt_phys = pd_entry & ~0xFFF;
+            if ((flags & 0x4) && !(foreign_pd[pd_idx] & 0x4)) {
+                foreign_pd[pd_idx] |= 0x4;
+            }
+    }
+
+    temp_unmap_raw(temp_pd_virt);
+
+    uint32_t temp_pt_virt = 0xF7001000;
+    printf("vmm_map_page_in_pd: mapping into PT phys=0x%08X pt_idx=%u\n", pt_phys, pt_idx);
+    temp_map_raw(temp_pt_virt, pt_phys);
+    uint32_t *foreign_pt = (uint32_t *)temp_pt_virt;
+
+    if (!(foreign_pt[pt_idx] & 1)) {
+        printf("vmm_map_page_in_pd: PT entry not present - writing entry\n");
+    }
+    foreign_pt[pt_idx] = (phys_addr & ~0xFFF) | (flags & 0xFFF);
+    uint32_t fb = foreign_pt[pt_idx];
+    printf("vmm_map_page_in_pd: wrote PT entry = 0x%08X\n", fb);
+
+    temp_unmap_raw(temp_pt_virt);
+}
+
+void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags) {
+    if (size == 0) return;
+    uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
+    uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    for (uint32_t v = start; v < end; v += PAGE_SIZE) {
+        void *phys_page = pmm_alloc_page();
+        if (!phys_page) {
+            printf("vmm_map_range_in_pd: Failed to alloc phys page\n");
+            return;
+        }
+        vmm_map_page_in_pd(pd_phys, v, (uint32_t)phys_page, flags);
+    }
+}
+
+uint32_t* vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags, uint32_t *out_count) {
+    if (size == 0) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    
+    uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
+    uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    uint32_t num_pages = (end - start) / PAGE_SIZE;
+    
+    uint32_t *pages = (uint32_t *)kmalloc(num_pages * sizeof(uint32_t));
+    if (!pages) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    
+    uint32_t idx = 0;
+    for (uint32_t v = start; v < end; v += PAGE_SIZE) {
+        void *phys_page = pmm_alloc_page();
+        if (!phys_page) {
+            printf("vmm_map_range_in_pd_tracked: Failed to alloc phys page\n");
+            for (uint32_t i = 0; i < idx; i++) {
+                pfa_free(pages[i]);
+            }
+            kfree(pages);
+            if (out_count) *out_count = 0;
+            return NULL;
+        }
+        pages[idx++] = (uint32_t)phys_page;
+        vmm_map_page_in_pd(pd_phys, v, (uint32_t)phys_page, flags);
+    }
+    
+    if (out_count) *out_count = num_pages;
+    return pages;
+}
+
+void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint32_t size) {
+    const uint8_t *s = (const uint8_t *)src;
+    uint32_t offset = 0;
+
+    while (offset < size) {
+        uint32_t page_offset = (dest_virt + offset) & 0xFFF;
+        uint32_t chunk = PAGE_SIZE - page_offset;
+        if (chunk > size - offset) chunk = size - offset;
+
+        uint32_t virt_page = (dest_virt + offset) & ~0xFFF;
+        uint32_t pd_idx = virt_page >> 22;
+        uint32_t pt_idx = (virt_page >> 12) & 0x3FF;
+
+        uint32_t temp_pd_virt = 0xF7000000;
+        temp_map_raw(temp_pd_virt, pd_phys);
+        uint32_t *foreign_pd = (uint32_t *)temp_pd_virt;
+        if (!(foreign_pd[pd_idx] & 1)) {
+            printf("vmm_copy_to_pd: PD entry not present for 0x%08X (pd_idx=%u) pd_phys=0x%08X\n", virt_page, pd_idx, pd_phys);
+            temp_unmap_raw(temp_pd_virt);
+            return;
+        }
+        uint32_t pt_phys = foreign_pd[pd_idx] & ~0xFFF;
+        temp_unmap_raw(temp_pd_virt);
+        printf("vmm_copy_to_pd: pt_phys=0x%08X pt_idx=%u\n", pt_phys, pt_idx);
+
+        uint32_t temp_pt_virt = 0xF7001000;
+        temp_map_raw(temp_pt_virt, pt_phys);
+        uint32_t *foreign_pt = (uint32_t *)temp_pt_virt;
+        if (!(foreign_pt[pt_idx] & 1)) {
+            printf("vmm_copy_to_pd: PT entry not present for 0x%08X\n", virt_page);
+            temp_unmap_raw(temp_pt_virt);
+            return;
+        }
+        uint32_t page_phys = foreign_pt[pt_idx] & ~0xFFF;
+        temp_unmap_raw(temp_pt_virt);
+
+        uint32_t temp_data_virt = 0xF7002000;
+        temp_map_raw(temp_data_virt, page_phys);
+        memcpy((void *)(temp_data_virt + page_offset), s + offset, chunk);
+        temp_unmap_raw(temp_data_virt);
+
+        offset += chunk;
+    }
+}
+
+void vmm_unmap_page(uint32_t virt_addr) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+    uint32_t *pd = (uint32_t *)0xFFFFF000;
+
+    if (!(pd[pd_idx] & 1)) return;
+
+    uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+    pt[pt_idx] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+}
+
+void vmm_register_kernel_cr3(uint32_t pd_phys) {
+    kernel_pd_phys = pd_phys;
+}
+
+uint32_t vmm_get_kernel_cr3(void) {
+    return kernel_pd_phys;
+}
+
+void dump_map_debug(void) {
+    printf("map_debug: v=0x%08X pd_idx=%u pt_idx=%u old=0x%08X new=0x%08X pd1023=0x%08X pd_pde=0x%08X op_count=%u\n",
+           map_debug.v, map_debug.pd_idx, map_debug.pt_idx, map_debug.old, map_debug.newval, map_debug.pd1023, map_debug.pd_pde, map_debug.op_count);
+}
+
+void dump_pd_pt_for_virt(uint32_t virt_addr) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+    uint32_t pd_entry = ((uint32_t *)0xFFFFF000)[pd_idx];
+    uint32_t *pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+    uint32_t pt_entry = pt[pt_idx];
+    printf("dump_pd_pt_for_virt: virt=0x%08X pd_idx=%u pt_idx=%u pd_entry=0x%08X pt_entry=0x%08X\n", virt_addr, pd_idx, pt_idx, pd_entry, pt_entry);
+}
+
+void vmm_dump_for_pd(uint32_t pd_phys, uint32_t virt_addr) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    uint32_t temp_pd_virt = 0xF7000000;
+    temp_map_raw(temp_pd_virt, pd_phys);
+    uint32_t *foreign_pd = (uint32_t *)temp_pd_virt;
+    uint32_t pd_entry = foreign_pd[pd_idx];
+    printf("vmm_dump_for_pd: pd_phys=0x%08X virt=0x%08X pd_entry=0x%08X\n", pd_phys, virt_addr, pd_entry);
+    if (!(pd_entry & 1)) {
+        temp_unmap_raw(temp_pd_virt);
+        return;
+    }
+    uint32_t pt_phys = pd_entry & ~0xFFF;
+    temp_unmap_raw(temp_pd_virt);
+
+    uint32_t temp_pt_virt = 0xF7001000;
+    temp_map_raw(temp_pt_virt, pt_phys);
+    uint32_t *foreign_pt = (uint32_t *)temp_pt_virt;
+    uint32_t pt_entry = foreign_pt[pt_idx];
+    printf("vmm_dump_for_pd: pt_phys=0x%08X pt_entry=0x%08X\n", pt_phys, pt_entry);
+    temp_unmap_raw(temp_pt_virt);
+}
+
+void pmm_zero_page_phys(uint32_t phys_addr) {
+    uint32_t temp_virt = 0xF7003000;
+    printf("pmm_zero_page_phys: zeroing phys=0x%08X\n", phys_addr);
+    temp_map_raw(temp_virt, phys_addr);
+
+    uint32_t pre = *(volatile uint32_t *)temp_virt;
+    printf("pmm_zero_page_phys: pre-zero first dword=0x%08X\n", pre);
+
+    uint32_t eflags;
+    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
+    int had_if = (eflags & (1<<9)) != 0;
+    if (had_if) __asm__ volatile ("cli");
+
+    uint32_t cur_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+    printf("pmm_zero_page_phys: cur_cr3 before memset=0x%08X\n", cur_cr3);
+
+    volatile uint32_t *w = (volatile uint32_t *)temp_virt;
+    for (uint32_t i = 0; i < PAGE_SIZE / 4; i++) {
+        w[i] = 0;
+    }
+
+    uint32_t post = *(volatile uint32_t *)temp_virt;
+    printf("pmm_zero_page_phys: post-zero first dword=0x%08X\n", post);
+
+    if (had_if) __asm__ volatile ("sti");
+
+    temp_unmap_raw(temp_virt);
+}
+
+void vmm_set_cr3(uint32_t pd_phys) {
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
+}
+
+uint32_t vmm_get_cr3(void) {
+    uint32_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    return cr3;
+}
+
+void vmm_free_page_directory(uint32_t pd_phys) {
+    if (!pd_phys) return;
+
+    uint32_t temp_pd_virt = 0xF7000000;
+    temp_map_raw(temp_pd_virt, pd_phys);
+    uint32_t *pd = (uint32_t *)temp_pd_virt;
+
+    for (uint32_t i = 0; i < 768; i++) {
+        if (pd[i] & 1) {
+            uint32_t pt_phys = pd[i] & ~0xFFF;
+            pfa_free(pt_phys);
+        }
+    }
+
+    temp_unmap_raw(temp_pd_virt);
+
+    pfa_free(pd_phys);
 }

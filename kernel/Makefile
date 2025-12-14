@@ -16,8 +16,10 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
+LIBC_COMMON=../libc-common
+
 CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra
-CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
+CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude -I$(LIBC_COMMON)/include
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lk -lgcc
 
@@ -30,7 +32,6 @@ CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
-# User shell binary (flat binary embedded)
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
 
@@ -39,11 +40,13 @@ $(KERNEL_ARCH_OBJS) \
 $(USER_SHELL_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
-../libc/string/memset.o \
-../libc/string/memcpy.o \
-../libc/string/memmove.o \
-../libc/string/memcmp.o \
-../libc/string/strlen.o
+$(LIBC_COMMON)/string/memset.o \
+$(LIBC_COMMON)/string/memcpy.o \
+$(LIBC_COMMON)/string/memmove.o \
+$(LIBC_COMMON)/string/memcmp.o \
+$(LIBC_COMMON)/string/strlen.o \
+$(LIBC_COMMON)/string/strcmp.o \
+$(LIBC_COMMON)/string/strncmp.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \

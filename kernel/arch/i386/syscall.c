@@ -49,10 +49,12 @@ static int sys_read(int fd, char *buf, int len) {
         waitq_add(wq, current_task);
         block_current();
     }
+    clear_syscall_frame();
 
-    char key = keyboard_getchar_nb();
-    if (key) {
-        memcpy((void*)buf_addr, &key, 1);
+    int key = keyboard_getchar_nb();
+    if (key >= 0) {
+        char c = (char)key;
+        memcpy((void*)buf_addr, &c, 1);
         return 1;
     }
     return 0;
@@ -61,13 +63,18 @@ static int sys_read(int fd, char *buf, int len) {
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
+    set_syscall_frame(regs);
+
     if (num < 0 || num >= NR_SYSCALLS || !syscall_table[num]) {
+        clear_syscall_frame();
         regs->eax = -38;
         return;
     }
 
     regs->eax = ((int (*)(int, const char *, int))syscall_table[num])(
         regs->ebx, (const char *)regs->ecx, regs->edx);
+    
+    clear_syscall_frame();
 }
 
 void syscall_init(void) {
