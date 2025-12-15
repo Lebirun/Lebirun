@@ -59,6 +59,7 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
     }
     
     t->pd_phys = new_pd;
+    t->user_brk = (code_addr + size + 0xFFF) & ~0xFFFu;
     
     uint32_t total_pages = code_page_count + stack_page_count;
     t->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));

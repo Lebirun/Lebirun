@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -36,11 +37,28 @@ int main(int argc, char **argv) {
 
         if (strcmp(line, "help") == 0) {
             puts("Available commands:");
-            puts("  help - show this message");
-            puts("  echo <text> - echo text");
-            puts("  exit - exit shell");
+            puts("  help     - show this message");
+            puts("  echo <t> - echo text");
+            puts("  pid      - show PID");
+            puts("  ticks    - show tick count");
+            puts("  sleep N  - sleep N milliseconds");
+            puts("  exit     - exit shell");
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
+        } else if (strcmp(line, "pid") == 0) {
+            printf("PID: %d\n", getpid());
+        } else if (strcmp(line, "ticks") == 0) {
+            printf("Ticks: %u\n", getticks());
+        } else if (strncmp(line, "sleep ", 6) == 0) {
+            int ms = 0;
+            const char *p = &line[6];
+            while (*p >= '0' && *p <= '9') {
+                ms = ms * 10 + (*p - '0');
+                p++;
+            }
+            printf("Sleeping %d ms...\n", ms);
+            sleep_ms(ms);
+            puts("Awake!");
         } else if (strcmp(line, "exit") == 0) {
             puts("Goodbye!\n");
             exit(0);

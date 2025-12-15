@@ -18,6 +18,15 @@ void _exit(int status);
 int read(int fd, void* buf, size_t count);
 int write(int fd, const void* buf, size_t count);
 
+int getpid(void);
+int yield(void);
+int sleep_ms(int ms);
+int waitpid(int pid, int *status, int options);
+void *sbrk(int inc);
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off);
+int kill(int pid, int sig);
+unsigned int getticks(void);
+
 #ifdef __cplusplus
 }
 #endif

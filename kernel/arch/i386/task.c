@@ -298,6 +298,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.eflags = 0x202;
         new_task->regs.cs = 0x1B;
         new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x23;
+        new_task->user_brk = 0; /* will be set by launcher to code end or managed by sbrk */
         
         registers_t* frame = (registers_t*)kesp;
         printf("User task frame at 0x%08X:\n", (uint32_t)kesp);

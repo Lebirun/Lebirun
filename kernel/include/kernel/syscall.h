@@ -5,6 +5,16 @@
 #include <kernel/common.h>
 
 #define SYSCALL_WRITE 1
+#define SYSCALL_GETPID 2
+#define SYSCALL_READ 3
+#define SYSCALL_YIELD 4
+#define SYSCALL_SLEEP 5
+#define SYSCALL_WAITPID 6
+#define SYSCALL_SBRK 7
+#define SYSCALL_MMAP 8
+#define SYSCALL_KILL 9
+#define SYSCALL_GETTICKS 10
+
 #define USER_CS 0x1B
 #define USER_DS 0x23
 #define KERNEL_CS 0x08

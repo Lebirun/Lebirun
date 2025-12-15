@@ -16,7 +16,7 @@
 #include <kernel/io.h>
 #include "launch_user.h"
 
-bool debugMode = true; 
+bool debugMode = false; 
 int debugLevel = 3; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
