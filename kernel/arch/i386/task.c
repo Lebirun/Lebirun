@@ -5,6 +5,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/gdt.h>
 #include <kernel/tty.h>
+#include <kernel/elf.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -789,13 +790,19 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         return -1;
     }
 
-    DPRINTF2("task_exec: replacing task %d with new binary (%u bytes)\n", current_task->pid, bin_size);
+    int elf_valid = elf_validate(bin_start, bin_size);
+    if (elf_valid != 0) {
+        printf("task_exec: ELF validation failed (%d)\n", elf_valid);
+        task_exit(127);
+        return -1;
+    }
+
+    DPRINTF2("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
 
     uint32_t old_pd = current_task->pd_phys;
     uint32_t *old_user_pages = current_task->user_pages;
     uint32_t old_user_pages_count = current_task->user_pages_count;
 
-    uint32_t code_addr = 0x00400000;
     uint32_t stack_top = 0x00800000;
     uint32_t stack_size = 0x4000;
 
@@ -806,24 +813,30 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         return -1;
     }
 
-    uint32_t code_page_count = 0;
-    uint32_t stack_page_count = 0;
+    elf_info_t elf_info;
+    uint32_t *elf_pages = NULL;
+    uint32_t elf_page_count = 0;
 
-    uint32_t *code_pages = vmm_map_range_in_pd_tracked(new_pd, code_addr, bin_size, 0x7, &code_page_count);
-    if (!code_pages) {
-        printf("task_exec: failed to map code\n");
+    int load_result = elf_load_to_pd(new_pd, bin_start, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    if (load_result != 0) {
+        printf("task_exec: ELF loading failed (%d)\n", load_result);
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
         vmm_free_page_directory(new_pd);
         task_exit(127);
         return -1;
     }
 
-    vmm_copy_to_pd(new_pd, code_addr, bin_start, bin_size);
-
+    uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         printf("task_exec: failed to map stack\n");
-        for (uint32_t i = 0; i < code_page_count; i++) pfa_free(code_pages[i]);
-        kfree(code_pages);
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
         vmm_free_page_directory(new_pd);
         task_exit(127);
         return -1;
@@ -846,22 +859,22 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         vmm_free_page_directory(old_pd);
     }
 
-    current_task->user_brk = (code_addr + bin_size + 0xFFF) & ~0xFFFu;
+    current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
-    uint32_t total_pages = code_page_count + stack_page_count;
+    uint32_t total_pages = elf_page_count + stack_page_count;
     current_task->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));
     if (current_task->user_pages) {
-        memcpy(current_task->user_pages, code_pages, code_page_count * sizeof(uint32_t));
-        memcpy(current_task->user_pages + code_page_count, stack_pages, stack_page_count * sizeof(uint32_t));
+        memcpy(current_task->user_pages, elf_pages, elf_page_count * sizeof(uint32_t));
+        memcpy(current_task->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint32_t));
         current_task->user_pages_count = total_pages;
     } else {
         current_task->user_pages_count = 0;
     }
 
-    kfree(code_pages);
+    kfree(elf_pages);
     kfree(stack_pages);
 
-    regs->eip = code_addr;
+    regs->eip = elf_info.entry_point;
     regs->useresp = stack_top - 16;
     regs->ebp = 0;
     regs->eax = 0;
@@ -874,7 +887,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
     regs->eflags = 0x202;
 
-    DPRINTF2("task_exec: new entry at 0x%08X, stack at 0x%08X\n", code_addr, regs->useresp);
+    DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, regs->useresp);
 
     return 0;
 }

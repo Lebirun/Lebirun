@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
 static void test_fork(void) {
     printf("About to fork...\n");
@@ -55,13 +56,13 @@ int main(int argc, char **argv) {
 
         if (strcmp(line, "help") == 0) {
             puts("Available commands:");
-            puts("  help     - show this message");
-            puts("  echo <t> - echo text");
-            puts("  pid      - show PID");
-            puts("  ticks    - show tick count");
-            puts("  sleep N  - sleep N milliseconds");
-            puts("  fork     - test fork syscall");
-            puts("  exit     - exit shell");
+            puts("  help      - show this message");
+            puts("  echo <t>  - echo text");
+            puts("  pid       - show PID");
+            puts("  ticks     - show tick count");
+            puts("  sleep N   - sleep N milliseconds");
+            puts("  fork      - test fork syscall");
+            puts("  exit      - exit shell");
         } else if (strcmp(line, "fork") == 0) {
             test_fork();
         } else if (strncmp(line, "echo ", 5) == 0) {

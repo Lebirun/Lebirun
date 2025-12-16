@@ -156,9 +156,9 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
 static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
-    mutex_lock(&print_lock);
+    asm volatile("cli");
     printf("sys_exit: user task exiting with code %d\n", code);
-    mutex_unlock(&print_lock);
+    asm volatile("sti");
     task_exit((uint32_t)code);
     return 0;
 }
@@ -169,11 +169,11 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
     if (buf_addr + len >= 0xC0000000) return -1;
 
-    mutex_lock(&print_lock);
+    asm volatile("cli");
     for (int i = 0; i < len; i++) {
         terminal_putchar(buf[i]);
     }
-    mutex_unlock(&print_lock);
+    asm volatile("sti");
     return len;
 }
 
