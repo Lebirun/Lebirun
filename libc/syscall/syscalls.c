@@ -51,4 +51,21 @@ unsigned int getticks(void) {
 	return (unsigned int)syscall0(SYS_GETTICKS);
 }
 
+unsigned int time(void *unused) {
+	(void)unused;
+	return (unsigned int)syscall0(SYS_TIME);
+}
+
+int isatty(int fd) {
+	return syscall1(SYS_ISATTY, fd);
+}
+
+int fork(void) {
+	return syscall0(SYS_FORK);
+}
+
+int exec(const void *bin, unsigned int size) {
+	return syscall2(SYS_EXEC, (int)bin, (int)size);
+}
+
 #endif

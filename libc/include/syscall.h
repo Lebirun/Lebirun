@@ -14,6 +14,10 @@
 #define SYS_MMAP     8
 #define SYS_KILL     9
 #define SYS_GETTICKS 10
+#define SYS_TIME     11
+#define SYS_ISATTY   12
+#define SYS_FORK     13
+#define SYS_EXEC     14
 
 #ifndef __is_libk
 

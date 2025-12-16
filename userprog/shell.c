@@ -4,6 +4,24 @@
 #include <string.h>
 #include <unistd.h>
 
+static void test_fork(void) {
+    printf("About to fork...\n");
+    int pid = fork();
+    if (pid < 0) {
+        printf("Fork failed!\n");
+    } else if (pid == 0) {
+        printf("Child process! PID=%d\n", getpid());
+        printf("Child exiting.\n");
+        exit(42);
+    } else {
+        printf("Parent process! PID=%d, child PID=%d\n", getpid(), pid);
+        int status = 0;
+        printf("Parent waiting for child...\n");
+        int ret = waitpid(pid, &status, 0);
+        printf("waitpid returned %d, status=%d\n", ret, status);
+    }
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -42,7 +60,10 @@ int main(int argc, char **argv) {
             puts("  pid      - show PID");
             puts("  ticks    - show tick count");
             puts("  sleep N  - sleep N milliseconds");
+            puts("  fork     - test fork syscall");
             puts("  exit     - exit shell");
+        } else if (strcmp(line, "fork") == 0) {
+            test_fork();
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
         } else if (strcmp(line, "pid") == 0) {

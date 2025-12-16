@@ -20,27 +20,27 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
         return NULL;
     }
 
-    printf("launch_user: created PD=0x%08X, mapping without CR3 switch\n", new_pd);
-    heap_verify();
+    DPRINTF3("launch_user: created PD=0x%08X, mapping without CR3 switch\n", new_pd);
+    if (debugMode && debugLevel >= 3) heap_verify();
 
     uint32_t code_page_count = 0;
     uint32_t stack_page_count = 0;
     
     uint32_t *code_pages = vmm_map_range_in_pd_tracked(new_pd, code_addr, size, 0x7, &code_page_count);
-    printf("launch_user: mapped code region at 0x%08X size=%u (%u pages)\n", code_addr, size, code_page_count);
-    heap_verify();
+    DPRINTF3("launch_user: mapped code region at 0x%08X size=%u (%u pages)\n", code_addr, size, code_page_count);
+    if (debugMode && debugLevel >= 3) heap_verify();
 
     vmm_copy_to_pd(new_pd, code_addr, bin_start, size);
-    printf("launch_user: copied %u bytes to 0x%08X\n", size, code_addr);
-    heap_verify();
+    DPRINTF3("launch_user: copied %u bytes to 0x%08X\n", size, code_addr);
+    if (debugMode && debugLevel >= 3) heap_verify();
 
-    printf("launch_user: verifying mapping for code at 0x%08X in PD=0x%08X\n", code_addr, new_pd);
+    DPRINTF5("launch_user: verifying mapping for code at 0x%08X in PD=0x%08X\n", code_addr, new_pd);
     vmm_dump_for_pd(new_pd, code_addr);
 
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7, &stack_page_count);
-    printf("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
-    heap_verify();
-    printf("launch_user: verifying mapping for stack at 0x%08X in PD=0x%08X\n", USER_STACK_TOP - USER_STACK_SIZE, new_pd);
+    DPRINTF3("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
+    if (debugMode && debugLevel >= 3) heap_verify();
+    DPRINTF5("launch_user: verifying mapping for stack at 0x%08X in PD=0x%08X\n", USER_STACK_TOP - USER_STACK_SIZE, new_pd);
     vmm_dump_for_pd(new_pd, USER_STACK_TOP - USER_STACK_SIZE);
 
     task_t* t = create_task_with_cr3((void*)code_addr, TASK_READY, true, new_pd);

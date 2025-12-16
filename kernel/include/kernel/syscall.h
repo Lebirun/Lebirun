@@ -14,6 +14,8 @@
 #define SYSCALL_MMAP 8
 #define SYSCALL_KILL 9
 #define SYSCALL_GETTICKS 10
+#define SYSCALL_FORK 13
+#define SYSCALL_EXEC 14
 
 #define USER_CS 0x1B
 #define USER_DS 0x23

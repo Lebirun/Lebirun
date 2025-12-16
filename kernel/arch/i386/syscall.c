@@ -20,8 +20,12 @@ extern mutex_t print_lock;
 #define SYSCALL_MMAP 8
 #define SYSCALL_KILL 9
 #define SYSCALL_GETTICKS 10
+#define SYSCALL_TIME 11
+#define SYSCALL_ISATTY 12
+#define SYSCALL_FORK 13
+#define SYSCALL_EXEC 14
 
-#define NR_SYSCALLS 11
+#define NR_SYSCALLS 15
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -72,6 +76,7 @@ static int sys_sbrk(int inc, const char *unused, int unused2) {
     if ((int)inc < 0) return -1;
     uint32_t old = current_task->user_brk;
     uint32_t newbrk = (old + (uint32_t)inc + 0xFFF) & ~0xFFFu;
+    if (newbrk >= 0x007F0000 || newbrk < old) return -1;
     vmm_map_range_alloc(old, newbrk - old, 0x7);
     current_task->user_brk = newbrk;
     return (int)old;
@@ -97,10 +102,54 @@ static int sys_kill(int pid, const char *unused, int code) {
 static int sys_getticks(int unused, const char *unused2, int unused3) {
     (void)unused; (void)unused2; (void)unused3;
     extern volatile uint32_t tick_count;
-    mutex_lock(&print_lock);
-    printf("SYSCALL GETTICKS: pid=%u tick_count=%u\n", current_task ? current_task->pid : 0, tick_count);
-    mutex_unlock(&print_lock);
     return (int)tick_count;
+}
+
+static int sys_time(int unused, const char *unused2, int unused3) {
+    (void)unused; (void)unused2; (void)unused3;
+    extern volatile uint32_t tick_count;
+    extern uint32_t pit_freq;
+    if (pit_freq == 0) return 0;
+    return (int)(tick_count / pit_freq);
+}
+
+static int sys_isatty(int fd, const char *unused, int unused2) {
+    (void)unused; (void)unused2;
+    if (fd >= 0 && fd <= 2) return 1;
+    return 0;
+}
+
+static registers_t *fork_regs_ptr = NULL;
+
+static int sys_fork(int unused, const char *unused2, int unused3) {
+    (void)unused; (void)unused2; (void)unused3;
+    if (!fork_regs_ptr) {
+        printf("sys_fork: no registers pointer\n");
+        return -1;
+    }
+    return (int)task_fork(fork_regs_ptr);
+}
+
+static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
+    (void)unused;
+    uint32_t bin_addr = (uint32_t)bin_ptr;
+    uint32_t bin_size = (uint32_t)(uintptr_t)size_ptr;
+
+    if (bin_addr >= 0xC0000000 || bin_addr < 0x1000) {
+        printf("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
+        return -1;
+    }
+    if (bin_size == 0 || bin_size > 0x100000) {
+        printf("sys_exec: invalid size %u\n", bin_size);
+        return -1;
+    }
+
+    if (!fork_regs_ptr) {
+        printf("sys_exec: no registers pointer\n");
+        return -1;
+    }
+
+    return task_exec((const uint8_t *)bin_addr, bin_size, fork_regs_ptr);
 }
 
 
@@ -154,9 +203,11 @@ void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
     set_syscall_frame(regs);
+    fork_regs_ptr = regs;
 
     if (num < 0 || num >= NR_SYSCALLS || !syscall_table[num]) {
         clear_syscall_frame();
+        fork_regs_ptr = NULL;
         regs->eax = -38;
         return;
     }
@@ -165,6 +216,7 @@ void do_syscall(registers_t *regs) {
         regs->ebx, (const char *)regs->ecx, regs->edx);
     
     clear_syscall_frame();
+    fork_regs_ptr = NULL;
 }
 
 void syscall_init(void) {
@@ -179,4 +231,8 @@ void syscall_init(void) {
     syscall_table[SYSCALL_MMAP] = sys_mmap;
     syscall_table[SYSCALL_KILL] = sys_kill;
     syscall_table[SYSCALL_GETTICKS] = sys_getticks;
+    syscall_table[SYSCALL_TIME] = sys_time;
+    syscall_table[SYSCALL_ISATTY] = sys_isatty;
+    syscall_table[SYSCALL_FORK] = sys_fork;
+    syscall_table[SYSCALL_EXEC] = sys_exec;
 }

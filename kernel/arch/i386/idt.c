@@ -118,11 +118,23 @@ registers_t* interrupt_handler(registers_t* regs)
         print_hex(regs->err_code);
         terminal_writestring("\nEIP = 0x");
         print_hex(regs->eip);
-        if (regs->int_no == 14) { 
+        if (regs->int_no == 14) {
             uint32_t fault_addr;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             terminal_writestring("\nPage fault at address 0x");
             print_hex(fault_addr);
+            uint32_t cur_cr3;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+            terminal_writestring("\nCR3 = 0x"); print_hex(cur_cr3);
+            if (current_task) {
+                terminal_writestring(" current_task PD = 0x"); print_hex(current_task->pd_phys);
+                terminal_writestring(" current_task pid = "); print_hex(current_task->pid);
+            }
+
+            terminal_writestring("\n-- PD/PT dump for fault address (user PD) --\n");
+            if (current_task && current_task->pd_phys) vmm_dump_for_pd(current_task->pd_phys, fault_addr & ~0xFFF);
+            terminal_writestring("\n-- PD/PT dump for fault address (kernel) --\n");
+            vmm_dump_for_pd(vmm_get_kernel_cr3(), fault_addr & ~0xFFF);
             if (fault_addr >= 0xF7000000 && fault_addr < 0xF7003000) {
                 terminal_writestring("\n-- Temp mapping diagnostics --\n");
                 dump_map_debug();

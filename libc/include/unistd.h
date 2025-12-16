@@ -26,6 +26,11 @@ void *sbrk(int inc);
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, long off);
 int kill(int pid, int sig);
 unsigned int getticks(void);
+unsigned int time(void *unused);
+int isatty(int fd);
+
+int fork(void);
+int exec(const void *bin, unsigned int size);
 
 #ifdef __cplusplus
 }

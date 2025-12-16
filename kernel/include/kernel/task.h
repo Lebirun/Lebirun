@@ -85,4 +85,7 @@ void task_free_user_memory(task_t* t);
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);
 
+pid_t task_fork(registers_t *parent_regs);
+int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs);
+
 #endif

@@ -76,6 +76,7 @@ void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags);
 
 uint32_t vmm_create_page_directory(void);
+uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_pages, uint32_t *out_user_pages_count);
 void vmm_free_page_directory(uint32_t pd_phys);
 void vmm_set_cr3(uint32_t pd_phys);
 uint32_t vmm_get_cr3(void);
@@ -113,6 +114,9 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
 uint32_t *vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags, uint32_t *out_count);
 void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags);
 void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint32_t size);
+
+void vmm_temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
+void vmm_temp_unmap_raw(uint32_t temp_virt);
 
 void pmm_zero_page_phys(uint32_t phys_addr);
 
