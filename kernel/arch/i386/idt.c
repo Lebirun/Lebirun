@@ -158,6 +158,8 @@ registers_t* interrupt_handler(registers_t* regs)
         if (irq == 0) {
             tick_count++;
             wake_sleeping_tasks();
+            extern void fb_tick(void);
+            fb_tick();
             regs = schedule_from_irq(regs);
         } else if (irq == 1) {
             keyboard_handler(regs);

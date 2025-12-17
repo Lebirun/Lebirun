@@ -4,6 +4,8 @@
 #include <string.h>
 
 #include <kernel/tty.h>
+#include <kernel/framebuffer.h>
+#include <kernel/psf.h>
 
 #include "vga.h"
 #include <kernel/io.h>
@@ -16,8 +18,14 @@ static size_t terminal_row;
 static size_t terminal_column;
 static uint8_t terminal_color;
 static uint16_t* terminal_buffer;
+static bool use_framebuffer = false;
+static psf_font_t loaded_font;
 
 static void terminal_updatecursor(void) {
+    if (use_framebuffer) {
+        fb_update_cursor();
+        return;
+    }
     uint16_t pos = terminal_row * VGA_WIDTH + terminal_column;
     outb(0x3D4, 14);
     outb(0x3D5, (pos >> 8) & 0xFF);
@@ -43,6 +51,13 @@ void terminal_initialize(void) {
 	terminal_updatecursor();
 }
 
+void terminal_init_fb(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp, uint8_t type) {
+    if (fb_init(addr, width, height, pitch, bpp, type) == 0) {
+        use_framebuffer = true;
+        fb_set_colors(0xFFAAAAAA, 0xFF000000);
+    }
+}
+
 void terminal_setcolor(uint8_t color) {
 	terminal_color = color;
 }
@@ -52,6 +67,10 @@ void terminal_putentryat(unsigned char c, uint8_t color, size_t x, size_t y) {
 	terminal_buffer[index] = vga_entry(c, color);
 }
 void terminal_scroll(void) {
+    if (use_framebuffer) {
+        fb_scroll();
+        return;
+    }
 	const size_t bytes = VGA_WIDTH * (VGA_HEIGHT - 1) * sizeof(uint16_t);
 	memmove(terminal_buffer, terminal_buffer + VGA_WIDTH, bytes);
 	const size_t last_row = VGA_HEIGHT - 1;
@@ -61,6 +80,11 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
+    if (use_framebuffer) {
+        fb_write_char(c);
+        fb_update_cursor();
+        return;
+    }
     unsigned char uc = c;
 
     if (c == '\n') {
@@ -100,4 +124,28 @@ void terminal_write(const char* data, size_t size) {
 
 void terminal_writestring(const char* data) {
 	terminal_write(data, strlen(data));
+}
+
+int terminal_load_psf_font(const void *data, size_t size) {
+    if (!use_framebuffer) {
+        return -1;
+    }
+    const uint8_t *b = (const uint8_t *)data;
+    printf("PSF: first4=%02X%02X%02X%02X size=%u\n", b[0], b[1], b[2], b[3], (unsigned)size);
+    if (b[0] == 0x1F && b[1] == 0x8B) {
+        printf("PSF: file appears gzipped; mkinitrd can decompress gz files but you can also run: gunzip -c file.psf.gz > unifont.psf\n");
+    }
+    if (b[0] == 0x01 && b[1] == 0x66 && b[2] == 0x63 && b[3] == 0x70) {
+        printf("PSF: file appears to be PCF (magic 0x70636601). Converter commands:\n");
+        printf("  pcf2bdf unifont.pcf > unifont.bdf\n");
+        printf("  bdf2psf -f 2 -g 16 unifont.bdf > unifont.psf\n");
+        printf("Alternatively use the precompiled PSF in unifont-*/font/precompiled/*.psf.gz\n");
+    }
+    if (psf_load(data, size, &loaded_font) == 0) {
+        fb_set_font(&loaded_font);
+        fb_clear();
+        return 0;
+    }
+    printf("PSF: psf_load failed\n");
+    return -1;
 }

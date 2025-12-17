@@ -35,9 +35,29 @@ LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
 
+UNIFONT_BIN=fonts/unifont.psf
+UNIFONT_OBJ=$(ARCHDIR)/unifont_bin.o
+
+$(UNIFONT_OBJ): $(wildcard $(UNIFONT_BIN))
+	@if [ -f "$(UNIFONT_BIN)" ]; then \
+		echo "Embedding font from $(UNIFONT_BIN) -> $@"; \
+		$(OBJCOPY) -I binary -O elf32-i386 -B i386 \
+			--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+			--redefine-sym _binary_fonts_unifont_psf_start=unifont_psf_start \
+			--redefine-sym _binary_fonts_unifont_psf_end=unifont_psf_end \
+			--redefine-sym _binary_fonts_unifont_psf_size=unifont_psf_size \
+			$(UNIFONT_BIN) $@; \
+	else \
+		echo "Creating stub $@ (no font present)"; \
+		printf '.section .rodata\n.global unifont_psf_start\nunifont_psf_start:\n.byte 0\n.global unifont_psf_end\nunifont_psf_end:\n' > $(ARCHDIR)/unifont_stub.S; \
+		$(CC) -c $(ARCHDIR)/unifont_stub.S -o $@; \
+		rm -f $(ARCHDIR)/unifont_stub.S; \
+	fi
+
 KERNEL_OBJS=\
 $(KERNEL_ARCH_OBJS) \
 $(USER_SHELL_OBJ) \
+$(UNIFONT_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
 $(LIBC_COMMON)/string/memset.o \
@@ -83,14 +103,9 @@ $(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
 .S.o:
 	$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
-# Build user shell as flat binary
-# NOTE: shell.c is now in userprog/ and uses userlibc. We only wrap the binary here.
-# Run 'make -C ../userprog' first to produce user_shell.bin
-
 $(USER_SHELL_BIN):
 	$(MAKE) -C ../userprog
 
-# Wrap user_shell.bin as an object with start/end symbols
 $(USER_SHELL_OBJ): $(USER_SHELL_BIN)
 	$(OBJCOPY) -I binary -O elf32-i386 -B i386 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
@@ -103,6 +118,7 @@ clean:
 	rm -f lebirun.kernel
 	rm -f $(USER_SHELL_OBJ)
 	rm -f $(USER_SHELL_BIN)
+	rm -f $(UNIFONT_OBJ)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
 
