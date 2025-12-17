@@ -18,6 +18,12 @@
 #define SYS_ISATTY   12
 #define SYS_FORK     13
 #define SYS_EXEC     14
+#define SYS_INITRD_COUNT 15
+#define SYS_INITRD_STAT 16
+#define SYS_INITRD_READ 17
+#define SYS_OPEN 18
+#define SYS_CLOSE 19
+#define SYS_FSTAT 20
 
 #ifndef __is_libk
 

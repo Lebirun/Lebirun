@@ -8,6 +8,10 @@
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,6 +35,14 @@ int isatty(int fd);
 
 int fork(void);
 int exec(const void *bin, unsigned int size);
+
+int initrd_count(void);
+int initrd_stat(int index, char *name, unsigned int *length);
+int initrd_read(int index, void *buf, unsigned int maxlen);
+
+int open(const char *path, int flags);
+int close(int fd);
+int fstat(int fd, unsigned int *size, unsigned char *type);
 
 #ifdef __cplusplus
 }

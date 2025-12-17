@@ -14,6 +14,7 @@
 #include <kernel/mutex.h>
 #include <kernel/syscall.h>
 #include <kernel/io.h>
+#include <kernel/initrd.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -64,6 +65,49 @@ void kernel_main(void) {
     }
 
     heap_dump();
+
+    uint32_t mb_page = multiboot_ptr & ~0xFFF;
+    vmm_map_page(mb_page + 0xC0000000, mb_page, 0x003);
+
+    multiboot_t *mb = (multiboot_t *)(multiboot_ptr + 0xC0000000);
+    printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
+
+    printf("MB: first 32 bytes: ");
+    uint8_t *mbb = (uint8_t *)mb;
+    for (uint32_t i = 0; i < 32; i++) {
+        printf("%02X", mbb[i]);
+        if (i % 4 == 3) printf(" ");
+    }
+    printf("\n");
+
+    if (mb->mods_count > 0 && mb->mods_addr) {
+        uint32_t mods_start_page = mb->mods_addr & ~0xFFF;
+        uint32_t mods_end_page = (mb->mods_addr + mb->mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
+        printf("MB: Mapping modules array phys 0x%08X - 0x%08X\n", mods_start_page, mods_end_page);
+        for (uint32_t phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
+            vmm_map_page(phys + 0xC0000000, phys, 0x003);
+        }
+
+        multiboot_module_t *modarr = (multiboot_module_t *)(mb->mods_addr + 0xC0000000);
+        for (uint32_t i = 0; i < mb->mods_count; i++) {
+            uint32_t ms = modarr[i].mod_start;
+            uint32_t me = modarr[i].mod_end;
+            uint32_t msize = me - ms;
+            printf("MB: module[%u]: phys 0x%08X-0x%08X (%u bytes) cmdline=0x%08X\n", i, ms, me, msize, modarr[i].cmdline);
+
+            uint32_t pstart = ms & ~0xFFF;
+            vmm_map_page(pstart + 0xC0000000, pstart, 0x003);
+            uint8_t *mstart = (uint8_t *)(ms + 0xC0000000);
+            printf("MB: first 16 bytes of module[%u]: ", i);
+            for (uint32_t b = 0; b < 16 && b < msize; b++) printf("%02X", mstart[b]);
+            printf("\n");
+        }
+
+        initrd_init(mb->mods_count, mb->mods_addr);
+        initrd_list_files();
+    } else {
+        printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
+    }
 
     mutex_init(&print_lock);
 

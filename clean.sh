@@ -12,3 +12,4 @@ done
 rm -rf sysroot
 rm -rf isodir
 rm -rf lebirun.iso
+rm -f initrd.img

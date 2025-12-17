@@ -87,4 +87,4 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
     if (stack_pages) kfree(stack_pages);
 
     return t;
-}
+} 

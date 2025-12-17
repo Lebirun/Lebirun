@@ -11,3 +11,9 @@ echo "Building userprog..."
 for PROJECT in $PROJECTS; do
   (cd $PROJECT && DESTDIR="$SYSROOT" $MAKE install)
 done
+
+echo "Building initrd..."
+if [ -d "initrd" ]; then
+  chmod +x mkinitrd.sh
+  ./mkinitrd.sh initrd initrd.img
+fi

@@ -68,4 +68,28 @@ int exec(const void *bin, unsigned int size) {
 	return syscall2(SYS_EXEC, (int)bin, (int)size);
 }
 
+int initrd_count(void) {
+	return syscall0(SYS_INITRD_COUNT);
+}
+
+int initrd_stat(int index, char *name, unsigned int *length) {
+	return syscall3(SYS_INITRD_STAT, index, (int)name, (int)length);
+}
+
+int initrd_read(int index, void *buf, unsigned int maxlen) {
+	return syscall3(SYS_INITRD_READ, index, (int)buf, (int)maxlen);
+}
+
+int open(const char *path, int flags) {
+	return syscall2(SYS_OPEN, (int)path, flags);
+}
+
+int close(int fd) {
+	return syscall1(SYS_CLOSE, fd);
+}
+
+int fstat(int fd, unsigned int *size, unsigned char *type) {
+	return syscall3(SYS_FSTAT, fd, (int)size, (int)type);
+}
+
 #endif
