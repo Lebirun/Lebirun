@@ -8,6 +8,10 @@ static uint32_t cursor_prev_y = 0;
 static int cursor_visible = 1;
 static int cursor_drawn = 0;
 
+#define MAX_COLS 256
+#define MAX_ROWS 128
+static char screen_buffer[MAX_ROWS][MAX_COLS];
+
 static void fb_draw_cursor_block(uint32_t cx, uint32_t cy, uint32_t color) {
     if (!fb.font) return;
     uint32_t px = cx * fb.font->width;
@@ -199,6 +203,10 @@ void fb_set_font(psf_font_t *font) {
         fb.font = font;
         fb.cols = fb.width / font->width;
         fb.rows = fb.height / font->height;
+        fb_clear();
+        cursor_drawn = 0;
+        cursor_prev_x = fb.cursor_x;
+        cursor_prev_y = fb.cursor_y;
     }
 }
 
@@ -217,6 +225,16 @@ void fb_clear(void) {
     }
     fb.cursor_x = 0;
     fb.cursor_y = 0;
+    
+    for (uint32_t row = 0; row < MAX_ROWS; row++) {
+        for (uint32_t col = 0; col < MAX_COLS; col++) {
+            screen_buffer[row][col] = ' ';
+        }
+    }
+    
+    cursor_drawn = 0;
+    cursor_prev_x = 0;
+    cursor_prev_y = 0;
 }
 
 void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
@@ -230,6 +248,10 @@ void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
 void fb_putchar(char c, uint32_t cx, uint32_t cy) {
     if (!fb.font || !fb.font->glyphs) {
         return;
+    }
+    
+    if (cy < MAX_ROWS && cx < MAX_COLS) {
+        screen_buffer[cy][cx] = c;
     }
     
     uint8_t uc = (uint8_t)c;
@@ -262,6 +284,15 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
 }
 
 void fb_scroll(void) {
+    if (cursor_drawn) {
+        char old_char = ' ';
+        if (cursor_prev_y < MAX_ROWS && cursor_prev_x < MAX_COLS) {
+            old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
+        }
+        fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+        cursor_drawn = 0;
+    }
+    
     uint32_t line_height = fb.font->height;
     uint32_t copy_height = (fb.rows - 1) * line_height;
     
@@ -280,6 +311,22 @@ void fb_scroll(void) {
         for (uint32_t x = 0; x < fb.width; x++) {
             pixel[x] = fb.bg_color;
         }
+    }
+    
+    for (uint32_t row = 0; row < fb.rows - 1 && row < MAX_ROWS - 1; row++) {
+        for (uint32_t col = 0; col < fb.cols && col < MAX_COLS; col++) {
+            screen_buffer[row][col] = screen_buffer[row + 1][col];
+        }
+    }
+
+    if (fb.rows > 0 && fb.rows - 1 < MAX_ROWS) {
+        for (uint32_t col = 0; col < fb.cols && col < MAX_COLS; col++) {
+            screen_buffer[fb.rows - 1][col] = ' ';
+        }
+    }
+    
+    if (cursor_prev_y > 0) {
+        cursor_prev_y--;
     }
 }
 
@@ -336,14 +383,26 @@ void fb_write_string(const char *str) {
 
 void fb_update_cursor(void) {
     if (cursor_drawn && (cursor_prev_x != fb.cursor_x || cursor_prev_y != fb.cursor_y)) {
-        fb_draw_cursor_block(cursor_prev_x, cursor_prev_y, fb.bg_color);
+        if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
+            char old_char = ' ';
+            if (cursor_prev_y < MAX_ROWS && cursor_prev_x < MAX_COLS) {
+                old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
+            }
+            fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+        }
         cursor_drawn = 0;
     }
     if (cursor_drawn && !cursor_visible) {
-        fb_draw_cursor_block(cursor_prev_x, cursor_prev_y, fb.bg_color);
+        if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
+            char old_char = ' ';
+            if (cursor_prev_y < MAX_ROWS && cursor_prev_x < MAX_COLS) {
+                old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
+            }
+            fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+        }
         cursor_drawn = 0;
     }
-    if (cursor_visible) {
+    if (cursor_visible && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
         fb_draw_cursor_block(fb.cursor_x, fb.cursor_y, fb.fg_color);
         cursor_prev_x = fb.cursor_x;
         cursor_prev_y = fb.cursor_y;
