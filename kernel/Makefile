@@ -153,8 +153,5 @@ install-kernel: lebirun.kernel
 	mkdir -p $(DESTDIR)$(BOOTDIR)
 	cp lebirun.kernel $(DESTDIR)$(BOOTDIR)
 
-include/%.h: $(LIBC_COMMON)/include/%.h
-	@mkdir -p $(dir $@)
-	@cp --preserve=timestamps $< $@
-
--include $(OBJS:.o=.d)
+KERNEL_OWN_OBJS = $(filter-out $(LIBC_COMMON)/%,$(OBJS))
+-include $(KERNEL_OWN_OBJS:.o=.d)
