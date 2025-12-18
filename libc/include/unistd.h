@@ -49,6 +49,10 @@ int fb_setcolors(unsigned int fg, unsigned int bg);
 int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp, unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row);
 int fb_clear(void);
 
+int console_switch(int console_num);
+int console_getcur(void);
+int console_clear(int console_num);
+
 #ifdef __cplusplus
 }
 #endif

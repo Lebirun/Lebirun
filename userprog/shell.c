@@ -210,10 +210,35 @@ static void cmd_colors(void) {
     puts("\nColors demo complete! (default colors restored)");
 }
 
+static void cmd_console(const char *arg) {
+    if (!arg || *arg == '\0') {
+        int cur = console_getcur();
+        printf("Current console: %d (F%d)\n", cur, cur + 1);
+        puts("Usage: console <number>  (0-8, where 0=F1, 8=F9)");
+        puts("You can also press Ctrl+Alt+F1-F9 to switch consoles.");
+        return;
+    }
+
+    int console_num = 0;
+    const char *p = arg;
+    while (*p >= '0' && *p <= '9') {
+        console_num = console_num * 10 + (*p - '0');
+        p++;
+    }
+
+    if (console_num < 0 || console_num > 8) {
+        printf("Invalid console number: %d (must be 0-8)\n", console_num);
+        return;
+    }
+
+    printf("Switching to console %d (F%d)...\n", console_num, console_num + 1);
+    console_switch(console_num);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    printf("\n=== Lebirun Mini Shell ===\n");
+    printf("=== Lebirun Mini Shell ===\n");
     printf("Type 'help' for available commands.\n\n");
 
     char line[64];
@@ -255,6 +280,7 @@ int main(int argc, char **argv) {
             puts("  read <fd|name>  - read from fd or open+read name");
             puts("  close <fd> - close fd");
             puts("  colors     - 32-bit color graphics demo!");
+            puts("  console N  - switch to console N (0-8)");
             puts("  exit       - exit shell");
         } else if (strcmp(line, "fork") == 0) {
             test_fork();
@@ -270,6 +296,10 @@ int main(int argc, char **argv) {
             cmd_close(&line[6]);
         } else if (strcmp(line, "colors") == 0) {
             cmd_colors();
+        } else if (strncmp(line, "console ", 8) == 0) {
+            cmd_console(&line[8]);
+        } else if (strcmp(line, "console") == 0) {
+            cmd_console(NULL);
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
         } else if (strcmp(line, "pid") == 0) {

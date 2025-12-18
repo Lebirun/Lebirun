@@ -2,13 +2,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-
 #include <kernel/tty.h>
 #include <kernel/framebuffer.h>
 #include <kernel/psf.h>
+#include <kernel/console.h>
+#include <kernel/io.h>
+#include <kernel/common.h>
 
 #include "vga.h"
-#include <kernel/io.h>
 
 static const size_t VGA_WIDTH = 80;
 static const size_t VGA_HEIGHT = 25;
@@ -80,6 +81,13 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
+    serial_putchar(c);
+    
+    if (use_framebuffer && console_is_initialized()) {
+        console_putchar(c);
+        return;
+    }
+
     if (use_framebuffer) {
         fb_write_char(c);
         fb_update_cursor();
@@ -130,22 +138,10 @@ int terminal_load_psf_font(const void *data, size_t size) {
     if (!use_framebuffer) {
         return -1;
     }
-    const uint8_t *b = (const uint8_t *)data;
-    printf("PSF: first4=%02X%02X%02X%02X size=%u\n", b[0], b[1], b[2], b[3], (unsigned)size);
-    if (b[0] == 0x1F && b[1] == 0x8B) {
-        printf("PSF: file appears gzipped; mkinitrd can decompress gz files but you can also run: gunzip -c file.psf.gz > unifont.psf\n");
-    }
-    if (b[0] == 0x01 && b[1] == 0x66 && b[2] == 0x63 && b[3] == 0x70) {
-        printf("PSF: file appears to be PCF (magic 0x70636601). Converter commands:\n");
-        printf("  pcf2bdf unifont.pcf > unifont.bdf\n");
-        printf("  bdf2psf -f 2 -g 16 unifont.bdf > unifont.psf\n");
-        printf("Alternatively use the precompiled PSF in unifont-*/font/precompiled/*.psf.gz\n");
-    }
     if (psf_load(data, size, &loaded_font) == 0) {
         fb_set_font(&loaded_font);
         fb_clear();
         return 0;
     }
-    printf("PSF: psf_load failed\n");
     return -1;
 }

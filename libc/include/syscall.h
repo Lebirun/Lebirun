@@ -28,6 +28,9 @@
 #define SYS_FB_SETCOLORS 22
 #define SYS_FB_GETINFO 23
 #define SYS_FB_CLEAR 24
+#define SYS_CONSOLE_SWITCH 25
+#define SYS_CONSOLE_GETCUR 26
+#define SYS_CONSOLE_CLEAR 27
 
 #ifndef __is_libk
 

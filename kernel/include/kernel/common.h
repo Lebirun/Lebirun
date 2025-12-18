@@ -36,4 +36,8 @@ static inline __attribute__((unused)) void serial_puts(const char *str) {
     }
 }
 
+static inline __attribute__((unused)) void serial_putchar(char c) {
+    outb(0x3F8, (uint8_t)c);
+}
+
 #endif

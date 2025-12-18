@@ -8,6 +8,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/initrd.h>
 #include <kernel/framebuffer.h>
+#include <kernel/console.h>
 
 extern mutex_t print_lock;
 
@@ -36,8 +37,11 @@ extern mutex_t print_lock;
 #define SYSCALL_FB_SETCOLORS 22
 #define SYSCALL_FB_GETINFO 23
 #define SYSCALL_FB_CLEAR 24
+#define SYSCALL_CONSOLE_SWITCH 25
+#define SYSCALL_CONSOLE_GETCUR 26
+#define SYSCALL_CONSOLE_CLEAR 27
 
-#define NR_SYSCALLS 25
+#define NR_SYSCALLS 28
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -279,6 +283,25 @@ static int sys_fb_clear(int unused1, const char *unused2, int unused3) {
     return 0;
 }
 
+static int sys_console_switch(int console_num, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    console_switch(console_num);
+    return 0;
+}
+
+static int sys_console_getcur(int unused1, const char *unused2, int unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    return console_get_current();
+}
+
+static int sys_console_clear(int console_num, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    console_clear(console_num);
+    return 0;
+}
+
 static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
@@ -296,8 +319,14 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr + len >= 0xC0000000) return -1;
 
     asm volatile("cli");
-    for (int i = 0; i < len; i++) {
-        terminal_putchar(buf[i]);
+    framebuffer_t *fb = fb_get();
+    if (fb && fb->font && console_is_initialized()) {
+        int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+        console_write_to(con_id, (const char *)buf, (size_t)len);
+    } else {
+        for (int i = 0; i < len; i++) {
+            terminal_putchar(buf[i]);
+        }
     }
     asm volatile("sti");
     return len;
@@ -310,14 +339,18 @@ static int sys_read(int fd, char *buf, int len) {
     if (buf_addr + len >= 0xC0000000) return -1;
 
     if (fd == 0) {
-        while (!keyboard_has_data()) {
-            wait_queue_t *wq = keyboard_get_waitq();
+        int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+        
+        while (!keyboard_has_data_for(con_id)) {
+            wait_queue_t *wq = keyboard_get_waitq_for(con_id);
+            if (!wq) return -1;
             waitq_add(wq, current_task);
             block_current();
+            con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
         }
         clear_syscall_frame();
 
-        int key = keyboard_getchar_nb();
+        int key = keyboard_getchar_nb_for(con_id);
         if (key >= 0) {
             char c = (char)key;
             memcpy((void*)buf_addr, &c, 1);
@@ -375,4 +408,7 @@ void syscall_init(void) {
     syscall_table[SYSCALL_FB_SETCOLORS] = sys_fb_setcolors;
     syscall_table[SYSCALL_FB_GETINFO] = sys_fb_getinfo;
     syscall_table[SYSCALL_FB_CLEAR] = sys_fb_clear;
+    syscall_table[SYSCALL_CONSOLE_SWITCH] = sys_console_switch;
+    syscall_table[SYSCALL_CONSOLE_GETCUR] = sys_console_getcur;
+    syscall_table[SYSCALL_CONSOLE_CLEAR] = sys_console_clear;
 }

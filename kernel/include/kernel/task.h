@@ -45,6 +45,7 @@ typedef struct task {
     uint32_t pd_phys;
     uint32_t *user_pages;
     uint32_t user_pages_count;
+    int console_id;
 } task_t;
 
 extern task_t* current_task;

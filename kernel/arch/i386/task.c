@@ -247,6 +247,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->next = NULL;
     new_task->regs.cr3 = cr3;
     new_task->cr3 = cr3;
+    new_task->console_id = -1; 
     DPRINTF3("create_task_with_cr3: new task id=%u cr3=0x%08X\n", new_task->id, cr3);
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;

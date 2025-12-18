@@ -3,16 +3,32 @@
 #include <kernel/debug.h>
 #include <kernel/keyboard.h>
 #include <kernel/task.h>
+#include <kernel/console.h>
 
 #define BUFFER_SIZE 256
-static char key_buffer[BUFFER_SIZE];
-static unsigned int head = 0;
-static unsigned int tail = 0;
+static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];
+static unsigned int head[NUM_CONSOLES];
+static unsigned int tail[NUM_CONSOLES];
 
-static wait_queue_t keyboard_waiters;
+static wait_queue_t keyboard_waiters[NUM_CONSOLES];
 
 static bool shift_pressed = false;
+static bool ctrl_pressed = false;
+static bool alt_pressed = false;
 static bool e0_prefix = false;
+
+#define SCANCODE_F1  0x3B
+#define SCANCODE_F2  0x3C
+#define SCANCODE_F3  0x3D
+#define SCANCODE_F4  0x3E
+#define SCANCODE_F5  0x3F
+#define SCANCODE_F6  0x40
+#define SCANCODE_F7  0x41
+#define SCANCODE_F8  0x42
+#define SCANCODE_F9  0x43
+
+#define SCANCODE_CTRL  0x1D
+#define SCANCODE_ALT   0x38
 
 static const char qwerty_lowercase[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
@@ -37,24 +53,43 @@ static const char qwerty_uppercase[128] = {
 };
 
 static void buffer_put(char c) {
-    key_buffer[head] = c;
-    head = (head + 1) % BUFFER_SIZE;
-    if (head == tail) tail = (tail + 1) % BUFFER_SIZE;
+    int cur = console_is_initialized() ? console_get_current() : 0;
+    key_buffers[cur][head[cur]] = c;
+    head[cur] = (head[cur] + 1) % BUFFER_SIZE;
+    if (head[cur] == tail[cur]) tail[cur] = (tail[cur] + 1) % BUFFER_SIZE;
 }
 
 int keyboard_has_data(void) {
-    return head != tail;
+    int cur = console_is_initialized() ? console_get_current() : 0;
+    return keyboard_has_data_for(cur);
 }
 
 int keyboard_getchar_nb(void) {
-    if (head == tail) return -1;
-    int c = (unsigned char)key_buffer[tail];
-    tail = (tail + 1) % BUFFER_SIZE;
+    int cur = console_is_initialized() ? console_get_current() : 0;
+    return keyboard_getchar_nb_for(cur);
+}
+
+int keyboard_has_data_for(int console_id) {
+    if (console_id < 0 || console_id >= NUM_CONSOLES) return 0;
+    return head[console_id] != tail[console_id];
+}
+
+int keyboard_getchar_nb_for(int console_id) {
+    if (console_id < 0 || console_id >= NUM_CONSOLES) return -1;
+    if (head[console_id] == tail[console_id]) return -1;
+    int c = (unsigned char)key_buffers[console_id][tail[console_id]];
+    tail[console_id] = (tail[console_id] + 1) % BUFFER_SIZE;
     return c;
 }
 
 wait_queue_t* keyboard_get_waitq(void) {
-    return &keyboard_waiters;
+    int cur = console_is_initialized() ? console_get_current() : 0;
+    return &keyboard_waiters[cur];
+}
+
+wait_queue_t* keyboard_get_waitq_for(int console_id) {
+    if (console_id < 0 || console_id >= NUM_CONSOLES) return NULL;
+    return &keyboard_waiters[console_id];
 }
 
 int getchar(void) {
@@ -83,6 +118,10 @@ void keyboard_handler(registers_t* regs) {
     if (is_release) {
         if (code == 0x2A || code == 0x36) {
             shift_pressed = false;
+        } else if (code == SCANCODE_CTRL) {
+            ctrl_pressed = false;
+        } else if (code == SCANCODE_ALT) {
+            alt_pressed = false;
         }
         return;
     }
@@ -91,11 +130,28 @@ void keyboard_handler(registers_t* regs) {
         shift_pressed = true;
         return;
     }
+    if (code == SCANCODE_CTRL) {
+        ctrl_pressed = true;
+        return;
+    }
+    if (code == SCANCODE_ALT) {
+        alt_pressed = true;
+        return;
+    }
+
+    if (ctrl_pressed && alt_pressed) {
+        if (code >= SCANCODE_F1 && code <= SCANCODE_F9) {
+            int console_num = code - SCANCODE_F1;
+            console_switch(console_num);
+            return;
+        }
+    }
 
     char c = shift_pressed ? qwerty_uppercase[code] : qwerty_lowercase[code];
     if (c != 0) {
         buffer_put(c);
-        waitq_wake_all(&keyboard_waiters);
+        int cur = console_is_initialized() ? console_get_current() : 0;
+        waitq_wake_all(&keyboard_waiters[cur]);
     }
 }
 
@@ -117,7 +173,10 @@ void keyboard_init(void) {
         inb(0x60);
     }
 
-    waitq_init(&keyboard_waiters);
+    for (int i = 0; i < NUM_CONSOLES; i++) {
+        head[i] = tail[i] = 0;
+        waitq_init(&keyboard_waiters[i]);
+    }
 
     uint8_t master_mask = inb(0x21);
     master_mask &= ~(1 << 1);

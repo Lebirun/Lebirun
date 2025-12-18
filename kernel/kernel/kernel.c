@@ -16,6 +16,7 @@
 #include <kernel/io.h>
 #include <kernel/initrd.h>
 #include <kernel/framebuffer.h>
+#include <kernel/console.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -69,19 +70,12 @@ void kernel_main(void) {
 
     uint32_t mb_page = multiboot_ptr & ~0xFFF;
     vmm_map_page(mb_page + 0xC0000000, mb_page, 0x003);
-
     multiboot_t *mb = (multiboot_t *)(multiboot_ptr + 0xC0000000);
-    printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
 
     if (mb->flags & (1 << 12)) {
-        printf("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
-               (unsigned long long)mb->framebuffer_addr, 
-               mb->framebuffer_width, mb->framebuffer_height,
-               mb->framebuffer_pitch, mb->framebuffer_bpp, mb->framebuffer_type);
         terminal_init_fb(mb->framebuffer_addr, mb->framebuffer_width, 
                         mb->framebuffer_height, mb->framebuffer_pitch,
                         mb->framebuffer_bpp, mb->framebuffer_type);
-        printf("Framebuffer console initialized!\n");
 
         extern uint8_t unifont_psf_start[] __attribute__((weak));
         extern uint8_t unifont_psf_end[] __attribute__((weak));
@@ -89,17 +83,19 @@ void kernel_main(void) {
         uintptr_t u_end = (uintptr_t)unifont_psf_end;
         size_t unifont_size = 0;
         if (u_end > u_start) unifont_size = (size_t)(u_end - u_start);
-        printf("Embedded font info: start=0x%08X end=0x%08X size=%u\n", (unsigned)u_start, (unsigned)u_end, (unsigned)unifont_size);
         if (unifont_size > 0) {
-            if (terminal_load_psf_font(unifont_psf_start, unifont_size) == 0) {
-                printf("Loaded embedded Unifont (%u bytes)\n", (unsigned)unifont_size);
-            } else {
-                printf("Failed to load embedded font\n");
-            }
-        } else {
-            printf("No embedded font present\n");
+            terminal_load_psf_font(unifont_psf_start, unifont_size);
         }
+
+        console_init();
+
+        printf("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
+               (unsigned long long)mb->framebuffer_addr, 
+               mb->framebuffer_width, mb->framebuffer_height,
+               mb->framebuffer_pitch, mb->framebuffer_bpp, mb->framebuffer_type);
     }
+
+    printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
 
     printf("MB: first 32 bytes: ");
     uint8_t *mbb = (uint8_t *)mb;
@@ -182,13 +178,16 @@ void kernel_main(void) {
     extern uint8_t user_shell_bin_start[], user_shell_bin_end[];
     printf("heap: verify before launching user\n");
     heap_verify();
+
     task_t* shell = launch_user_binary(user_shell_bin_start, user_shell_bin_end);
     printf("heap: verify after launch attempt\n");
     heap_verify();
     if (!shell) {
         printf("Failed to launch user shell\n");
     } else {
-        printf("User shell launched (PID %u)!\n", shell->pid);
+        shell->console_id = 1;
+        printf("User shell launched (PID %u) on console F2!\n", shell->pid);
+        printf("Press CTRL+ALT+F2 to access the shell.\n");
     }
 
     while (1) {

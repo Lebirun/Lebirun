@@ -19,9 +19,6 @@ static uint32_t initrd_version = 1;
 
 initrd_fd_t fd_table[INITRD_MAX_FDS];
 
-static inline void serial_putchar(char c) {
-    outb(0x3F8, (uint8_t)c);
-}
 
 static void serial_printf_hex(uint32_t val) {
     char buf[9];

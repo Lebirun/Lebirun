@@ -118,4 +118,16 @@ int fb_clear(void) {
 	return syscall0(SYS_FB_CLEAR);
 }
 
+int console_switch(int console_num) {
+	return syscall1(SYS_CONSOLE_SWITCH, console_num);
+}
+
+int console_getcur(void) {
+	return syscall0(SYS_CONSOLE_GETCUR);
+}
+
+int console_clear(int console_num) {
+	return syscall1(SYS_CONSOLE_CLEAR, console_num);
+}
+
 #endif

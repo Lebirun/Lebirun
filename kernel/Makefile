@@ -153,9 +153,6 @@ install-kernel: lebirun.kernel
 	mkdir -p $(DESTDIR)$(BOOTDIR)
 	cp lebirun.kernel $(DESTDIR)$(BOOTDIR)
 
-# Ensure top-level headers are available for in-tree builds
-# Some dependency files reference headers under include/; provide a rule
-# to copy them from $(LIBC_COMMON)/include when requested.
 include/%.h: $(LIBC_COMMON)/include/%.h
 	@mkdir -p $(dir $@)
 	@cp --preserve=timestamps $< $@
