@@ -92,4 +92,30 @@ int fstat(int fd, unsigned int *size, unsigned char *type) {
 	return syscall3(SYS_FSTAT, fd, (int)size, (int)type);
 }
 
+int fb_putpixel(int x, int y, unsigned int color) {
+	return syscall3(SYS_FB_PUTPIXEL, x, y, (int)color);
+}
+
+int fb_setcolors(unsigned int fg, unsigned int bg) {
+	return syscall2(SYS_FB_SETCOLORS, (int)fg, (int)bg);
+}
+
+int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp, unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row) {
+	unsigned int info[6] = {0,0,0,0,0,0};
+	int ret = syscall1(SYS_FB_GETINFO, (int)info);
+	if (ret == 0) {
+		if (width) *width = info[0];
+		if (height) *height = info[1];
+		if (bpp) *bpp = info[2];
+		if (font_height) *font_height = info[3];
+		if (rows) *rows = info[4];
+		if (cursor_row) *cursor_row = info[5];
+	}
+	return ret;
+}
+
+int fb_clear(void) {
+	return syscall0(SYS_FB_CLEAR);
+}
+
 #endif

@@ -68,6 +68,27 @@ $(LIBC_COMMON)/string/strlen.o \
 $(LIBC_COMMON)/string/strcmp.o \
 $(LIBC_COMMON)/string/strncmp.o
 
+$(LIBC_COMMON)/string/memset.o:
+	$(MAKE) -C $(LIBC_COMMON) string/memset.o
+
+$(LIBC_COMMON)/string/memcpy.o:
+	$(MAKE) -C $(LIBC_COMMON) string/memcpy.o
+
+$(LIBC_COMMON)/string/memmove.o:
+	$(MAKE) -C $(LIBC_COMMON) string/memmove.o
+
+$(LIBC_COMMON)/string/memcmp.o:
+	$(MAKE) -C $(LIBC_COMMON) string/memcmp.o
+
+$(LIBC_COMMON)/string/strlen.o:
+	$(MAKE) -C $(LIBC_COMMON) string/strlen.o
+
+$(LIBC_COMMON)/string/strcmp.o:
+	$(MAKE) -C $(LIBC_COMMON) string/strcmp.o
+
+$(LIBC_COMMON)/string/strncmp.o:
+	$(MAKE) -C $(LIBC_COMMON) string/strncmp.o
+
 OBJS=\
 $(ARCHDIR)/crti.o \
 $(ARCHDIR)/crtbegin.o \
@@ -131,5 +152,12 @@ install-headers:
 install-kernel: lebirun.kernel
 	mkdir -p $(DESTDIR)$(BOOTDIR)
 	cp lebirun.kernel $(DESTDIR)$(BOOTDIR)
+
+# Ensure top-level headers are available for in-tree builds
+# Some dependency files reference headers under include/; provide a rule
+# to copy them from $(LIBC_COMMON)/include when requested.
+include/%.h: $(LIBC_COMMON)/include/%.h
+	@mkdir -p $(dir $@)
+	@cp --preserve=timestamps $< $@
 
 -include $(OBJS:.o=.d)

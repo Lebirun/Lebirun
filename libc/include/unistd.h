@@ -44,6 +44,11 @@ int open(const char *path, int flags);
 int close(int fd);
 int fstat(int fd, unsigned int *size, unsigned char *type);
 
+int fb_putpixel(int x, int y, unsigned int color);
+int fb_setcolors(unsigned int fg, unsigned int bg);
+int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp, unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row);
+int fb_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

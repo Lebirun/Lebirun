@@ -1,9 +1,9 @@
-// NOTE: THIS SHELL IS A STUB!!! IT WILL BE REPLACED WITH A BETTER SHELL LATER ONCE SOME THINGS ARE DONE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <graphics.h>
 
 #define O_RDONLY 0
 
@@ -185,6 +185,31 @@ static void cmd_close(const char *arg) {
     }
 }
 
+static void cmd_colors(void) {
+    unsigned int width, height, bpp, font_h, rows, cursor_row;
+    if (fb_getinfo(&width, &height, &bpp, &font_h, &rows, &cursor_row) != 0) {
+        puts("Failed to get framebuffer info");
+        return;
+    }
+    printf("Framebuffer: %ux%u @ %u bpp, font_h=%u, rows=%u, cursor_row=%u\n", width, height, bpp, font_h, rows, cursor_row);
+    puts("Drawing colorful graphics demo...\n");
+
+    gfx_demo();
+
+    fb_setcolors(0x00FF00, 0x000000);
+    puts("Green text!");
+    fb_setcolors(0xFF00FF, 0x000000);
+    puts("Magenta text!");
+    fb_setcolors(0x00FFFF, 0x000000);
+    puts("Cyan text!");
+    fb_setcolors(0xFFFF00, 0x000000);
+    puts("Yellow text!");
+    fb_setcolors(0xFF8800, 0x000000);
+    puts("Orange text!");
+    fb_setcolors(0xAAAAAA, 0x000000);
+    puts("\nColors demo complete! (default colors restored)");
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -229,6 +254,7 @@ int main(int argc, char **argv) {
             puts("  open <path> - open file, returns fd");
             puts("  read <fd|name>  - read from fd or open+read name");
             puts("  close <fd> - close fd");
+            puts("  colors     - 32-bit color graphics demo!");
             puts("  exit       - exit shell");
         } else if (strcmp(line, "fork") == 0) {
             test_fork();
@@ -242,6 +268,8 @@ int main(int argc, char **argv) {
             cmd_read(&line[5]);
         } else if (strncmp(line, "close ", 6) == 0) {
             cmd_close(&line[6]);
+        } else if (strcmp(line, "colors") == 0) {
+            cmd_colors();
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
         } else if (strcmp(line, "pid") == 0) {

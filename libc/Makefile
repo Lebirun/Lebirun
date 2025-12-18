@@ -48,7 +48,11 @@ stdio/puts.o \
 stdio/getchar.o \
 stdlib/abort.o \
 stdlib/exit.o \
-syscall/syscalls.o
+syscall/syscalls.o \
+graphics/graphics.o \
+graphics/bar.o \
+graphics/squares.o \
+graphics/circle.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \

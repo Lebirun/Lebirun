@@ -24,6 +24,10 @@
 #define SYS_OPEN 18
 #define SYS_CLOSE 19
 #define SYS_FSTAT 20
+#define SYS_FB_PUTPIXEL 21
+#define SYS_FB_SETCOLORS 22
+#define SYS_FB_GETINFO 23
+#define SYS_FB_CLEAR 24
 
 #ifndef __is_libk
 
