@@ -6,6 +6,9 @@
 #include <graphics.h>
 
 #define O_RDONLY 0
+#define SHELL_PATH_MAX 256
+
+static char cwd[SHELL_PATH_MAX] = "/";
 
 static void test_fork(void) {
     printf("About to fork...\n");
@@ -23,6 +26,61 @@ static void test_fork(void) {
         int ret = waitpid(pid, &status, 0);
         printf("waitpid returned %d, status=%d\n", ret, status);
     }
+}
+
+static void resolve_path(const char *path, char *out, size_t outsize) {
+    if (!path || !out || outsize == 0) return;
+
+    char temp[SHELL_PATH_MAX * 2];
+    if (path[0] == '/') {
+        strncpy(temp, path, sizeof(temp)-1);
+        temp[sizeof(temp)-1] = '\0';
+    } else {
+        if (strcmp(cwd, "/") == 0) {
+            snprintf(temp, sizeof(temp), "/%s", path);
+        } else {
+            snprintf(temp, sizeof(temp), "%s/%s", cwd, path);
+        }
+    }
+
+    char comps[16][SHELL_PATH_MAX];
+    int compc = 0;
+    const char *p = temp;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char comp[SHELL_PATH_MAX];
+        int i = 0;
+        while (*p && *p != '/' && i < (int)sizeof(comp)-1) comp[i++] = *p++;
+        comp[i] = '\0';
+        if (strcmp(comp, ".") == 0) continue;
+        if (strcmp(comp, "..") == 0) {
+            if (compc > 0) compc--;
+            continue;
+        }
+        if (compc < 16) {
+            strncpy(comps[compc], comp, SHELL_PATH_MAX-1);
+            comps[compc][SHELL_PATH_MAX-1] = '\0';
+            compc++;
+        }
+    }
+
+    if (compc == 0) {
+        strncpy(out, "/", outsize);
+        out[outsize-1] = '\0';
+        return;
+    }
+
+    size_t pos = 0;
+    out[pos++] = '/';
+    for (int i = 0; i < compc; i++) {
+        size_t need = strlen(comps[i]);
+        if (pos + need + 1 >= outsize) break;
+        memcpy(out + pos, comps[i], need);
+        pos += need;
+        if (i + 1 < compc) out[pos++] = '/';
+    }
+    out[pos] = '\0';
 }
 
 static void cmd_initrd_ls(void) {
@@ -235,6 +293,113 @@ static void cmd_console(const char *arg) {
     console_switch(console_num);
 }
 
+static void cmd_vfs_mounts(void) {
+    int count = vfs_mounts();
+    printf("Total mounts: %d\n", count);
+}
+
+static void cmd_vfs_ls(const char *arg) {
+    char path[SHELL_PATH_MAX];
+    if (arg && *arg) resolve_path(arg, path, sizeof(path)); else strncpy(path, cwd, sizeof(path) - 1);
+
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("Cannot open '%s'\n", path);
+        return;
+    }
+    
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) == 0) {
+        if ((type & 0x02) == 0 && (type & 0x08) == 0) {
+            printf("'%s' is not a directory (type=%u)\n", path, type);
+            vfs_close_fd(fd);
+            return;
+        }
+    }
+    
+    printf("Contents of %s:\n", path);
+    char name[64];
+    unsigned int entry_type = 0;
+    for (unsigned int i = 0; i < 100; i++) {
+        if (vfs_readdir(fd, name, &entry_type, i) < 0) break;
+        const char *type_str = (entry_type == 2 || entry_type == 8) ? "DIR " : "FILE";
+        printf("  [%s] %s\n", type_str, name);
+    }
+    vfs_close_fd(fd);
+}
+
+static void cmd_vfs_cat(const char *arg) {
+    if (!arg || *arg == '\0') {
+        puts("Usage: vcat <path>");
+        return;
+    }
+    
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("Cannot open '%s'\n", path);
+        return;
+    }
+    
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) < 0) {
+        printf("Cannot stat '%s'\n", path);
+        vfs_close_fd(fd);
+        return;
+    }
+    
+    if (type & 0x02) {
+        printf("'%s' is a directory\n", path);
+        vfs_close_fd(fd);
+        return;
+    }
+    
+    if (size > 4096) {
+        printf("File too large (%u bytes), showing first 4096\n", size);
+        size = 4096;
+    }
+    
+    static char buf[4097];
+    int rd = vfs_read_fd(fd, buf, size);
+    if (rd > 0) {
+        buf[rd] = '\0';
+        puts(buf);
+    } else {
+        puts("Failed to read file");
+    }
+    vfs_close_fd(fd);
+}
+
+static void cmd_cd(const char *arg) {
+    char path[SHELL_PATH_MAX];
+    if (!arg || !*arg) {
+        strncpy(cwd, "/", sizeof(cwd));
+        return;
+    }
+    resolve_path(arg, path, sizeof(path));
+    
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("cd: cannot access '%s'\n", path);
+        return;
+    }
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) < 0 || ((type & 0x02) == 0 && (type & 0x08) == 0)) {
+        printf("cd: '%s' is not a directory\n", path);
+        vfs_close_fd(fd);
+        return;
+    }
+    vfs_close_fd(fd);
+    strncpy(cwd, path, sizeof(cwd)-1);
+    cwd[sizeof(cwd)-1] = '\0';
+}
+
+static void cmd_pwd(void) {
+    printf("%s\n", cwd);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -281,9 +446,20 @@ int main(int argc, char **argv) {
             puts("  close <fd> - close fd");
             puts("  colors     - 32-bit color graphics demo!");
             puts("  console N  - switch to console N (0-8)");
+            puts("  mounts     - list VFS mounts");
+            puts("  ls [path]  - list VFS directory");
+            puts("  cd <path>  - change directory");
+            puts("  pwd        - print working directory");
+            puts("  vcat <path> - read file via VFS");
             puts("  exit       - exit shell");
         } else if (strcmp(line, "fork") == 0) {
             test_fork();
+        } else if (strcmp(line, "pwd") == 0) {
+            cmd_pwd();
+        } else if (strcmp(line, "cd") == 0) {
+            cmd_cd(NULL);
+        } else if (strncmp(line, "cd ", 3) == 0) {
+            cmd_cd(&line[3]);
         } else if (strcmp(line, "initrd ls") == 0) {
             cmd_initrd_ls();
         } else if (strncmp(line, "initrd cat ", 11) == 0) {
@@ -300,6 +476,14 @@ int main(int argc, char **argv) {
             cmd_console(&line[8]);
         } else if (strcmp(line, "console") == 0) {
             cmd_console(NULL);
+        } else if (strcmp(line, "mounts") == 0) {
+            cmd_vfs_mounts();
+        } else if (strcmp(line, "ls") == 0) {
+            cmd_vfs_ls(NULL);
+        } else if (strncmp(line, "ls ", 3) == 0) {
+            cmd_vfs_ls(&line[3]);
+        } else if (strncmp(line, "vcat ", 5) == 0) {
+            cmd_vfs_cat(&line[5]);
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
         } else if (strcmp(line, "pid") == 0) {

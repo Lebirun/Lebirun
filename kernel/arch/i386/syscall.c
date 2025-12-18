@@ -9,6 +9,7 @@
 #include <kernel/initrd.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
+#include <kernel/vfs.h>
 
 extern mutex_t print_lock;
 
@@ -40,8 +41,14 @@ extern mutex_t print_lock;
 #define SYSCALL_CONSOLE_SWITCH 25
 #define SYSCALL_CONSOLE_GETCUR 26
 #define SYSCALL_CONSOLE_CLEAR 27
+#define SYSCALL_VFS_OPEN 28
+#define SYSCALL_VFS_CLOSE 29
+#define SYSCALL_VFS_READ 30
+#define SYSCALL_VFS_READDIR 31
+#define SYSCALL_VFS_STAT 32
+#define SYSCALL_VFS_MOUNTS 33
 
-#define NR_SYSCALLS 28
+#define NR_SYSCALLS 34
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -362,6 +369,76 @@ static int sys_read(int fd, char *buf, int len) {
     return initrd_read(fd, (void *)buf_addr, (uint32_t)len);
 }
 
+static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
+    (void)unused;
+    uint32_t path_addr = (uint32_t)path_ptr;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -1;
+    int flags = (int)(uintptr_t)flags_ptr;
+    return vfs_open_path((const char *)path_addr, flags);
+}
+
+static int sys_vfs_close(int fd, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    return vfs_close_fd(fd);
+}
+
+static int sys_vfs_read(int fd, const char *buf, int len) {
+    uint32_t buf_addr = (uint32_t)buf;
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    return vfs_read_fd(fd, (void *)buf_addr, (uint32_t)len);
+}
+
+static int sys_vfs_readdir(registers_t *regs) {
+    int fd = (int)regs->ebx;
+    uint32_t name_addr = regs->ecx;
+    uint32_t type_addr = regs->edx;
+    uint32_t index = regs->esi;
+    
+    if (name_addr && (name_addr >= 0xC0000000 || name_addr < 0x1000)) return -1;
+    if (type_addr && (type_addr >= 0xC0000000 || type_addr < 0x1000)) return -1;
+    
+    dirent_t entry;
+    int ret = vfs_readdir_fd(fd, &entry, index);
+    if (ret < 0) return ret;
+    
+    if (name_addr) {
+        int i = 0;
+        for (; i < 63 && entry.name[i]; i++) {
+            ((char*)name_addr)[i] = entry.name[i];
+        }
+        ((char*)name_addr)[i] = '\0';
+    }
+    
+    if (type_addr) {
+        *(uint32_t*)type_addr = entry.type;
+    }
+    
+    return 0;
+}
+
+static int sys_vfs_stat(int fd, const char *size_ptr, int type_ptr) {
+    uint32_t size_addr = (uint32_t)size_ptr;
+    uint32_t type_addr = (uint32_t)type_ptr;
+    uint32_t size = 0, flags = 0;
+    
+    int ret = vfs_stat_fd(fd, &size, &flags);
+    if (ret < 0) return ret;
+    
+    if (size_addr && size_addr < 0xC0000000 && size_addr >= 0x1000) {
+        *(uint32_t*)size_addr = size;
+    }
+    if (type_addr && type_addr < 0xC0000000 && type_addr >= 0x1000) {
+        *(uint32_t*)type_addr = flags;
+    }
+    return 0;
+}
+
+static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    vfs_list_mounts();
+    return vfs_get_mount_count();
+}
+
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
@@ -375,8 +452,12 @@ void do_syscall(registers_t *regs) {
         return;
     }
 
-    regs->eax = ((int (*)(int, const char *, int))syscall_table[num])(
-        regs->ebx, (const char *)regs->ecx, regs->edx);
+    if (num == SYSCALL_VFS_READDIR) {
+        regs->eax = sys_vfs_readdir(regs);
+    } else {
+        regs->eax = ((int (*)(int, const char *, int))syscall_table[num])(
+            regs->ebx, (const char *)regs->ecx, regs->edx);
+    }
     
     clear_syscall_frame();
     fork_regs_ptr = NULL;
@@ -411,4 +492,10 @@ void syscall_init(void) {
     syscall_table[SYSCALL_CONSOLE_SWITCH] = sys_console_switch;
     syscall_table[SYSCALL_CONSOLE_GETCUR] = sys_console_getcur;
     syscall_table[SYSCALL_CONSOLE_CLEAR] = sys_console_clear;
+    syscall_table[SYSCALL_VFS_OPEN] = sys_vfs_open;
+    syscall_table[SYSCALL_VFS_CLOSE] = sys_vfs_close;
+    syscall_table[SYSCALL_VFS_READ] = sys_vfs_read;
+    syscall_table[SYSCALL_VFS_READDIR] = (void*)1;
+    syscall_table[SYSCALL_VFS_STAT] = sys_vfs_stat;
+    syscall_table[SYSCALL_VFS_MOUNTS] = sys_vfs_mounts;
 }

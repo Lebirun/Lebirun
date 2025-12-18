@@ -130,4 +130,28 @@ int console_clear(int console_num) {
 	return syscall1(SYS_CONSOLE_CLEAR, console_num);
 }
 
+int vfs_open(const char *path, int flags) {
+	return syscall2(SYS_VFS_OPEN, (int)path, flags);
+}
+
+int vfs_close_fd(int fd) {
+	return syscall1(SYS_VFS_CLOSE, fd);
+}
+
+int vfs_read_fd(int fd, void *buf, unsigned int count) {
+	return syscall3(SYS_VFS_READ, fd, (int)buf, (int)count);
+}
+
+int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index) {
+	return syscall4(SYS_VFS_READDIR, fd, (int)name, (int)type, (int)index);
+}
+
+int vfs_stat(int fd, unsigned int *size, unsigned int *type) {
+	return syscall3(SYS_VFS_STAT, fd, (int)size, (int)type);
+}
+
+int vfs_mounts(void) {
+	return syscall0(SYS_VFS_MOUNTS);
+}
+
 #endif

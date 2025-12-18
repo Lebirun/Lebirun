@@ -16,6 +16,8 @@ extern "C" {
 #endif
 
 int printf(const char* __restrict, ...);
+int snprintf(char* __restrict, size_t, const char* __restrict, ...);
+int vsnprintf(char* __restrict, size_t, const char* __restrict, va_list);
 int putchar(int);
 int puts(const char*);
 int getchar(void);

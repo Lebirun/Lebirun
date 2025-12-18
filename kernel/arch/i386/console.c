@@ -1,6 +1,7 @@
 #include <kernel/console.h>
 #include <kernel/framebuffer.h>
 #include <kernel/tty.h>
+#include <kernel/common.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -100,6 +101,10 @@ void console_putchar_to(int console_num, char c) {
     
     if (console_num < 0 || console_num >= NUM_CONSOLES) {
         console_num = current_console;
+    }
+    
+    if (console_num == 0) {
+        serial_putchar(c);
     }
     
     console_t *con = &consoles[console_num];

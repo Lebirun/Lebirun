@@ -76,4 +76,6 @@ int initrd_stat(const char *path, uint32_t *size, uint8_t *type, uint8_t *perms)
 
 void initrd_init_fds(void);
 
+void initrd_vfs_register(void);
+
 #endif

@@ -43,12 +43,14 @@ $(LIBC_COMMON)/string/strncmp.o
 FREEOBJS=\
 $(ARCH_FREEOBJS) \
 stdio/printf.o \
+stdio/snprintf.o \
 stdio/putchar.o \
 stdio/puts.o \
 stdio/getchar.o \
 stdlib/abort.o \
 stdlib/exit.o \
 syscall/syscalls.o \
+string/strncpy.o \
 graphics/graphics.o \
 graphics/bar.o \
 graphics/squares.o \

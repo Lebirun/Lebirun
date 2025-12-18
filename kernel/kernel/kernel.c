@@ -17,6 +17,7 @@
 #include <kernel/initrd.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
+#include <kernel/vfs.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -130,6 +131,8 @@ void kernel_main(void) {
 
         initrd_init(mb->mods_count, mb->mods_addr);
         initrd_list_files();
+        vfs_init();
+        initrd_vfs_register();
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }

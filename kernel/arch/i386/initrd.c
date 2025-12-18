@@ -1,6 +1,7 @@
 #include <kernel/initrd.h>
 #include <kernel/mem_map.h>
 #include <kernel/common.h>
+#include <kernel/vfs.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -19,6 +20,10 @@ static uint32_t initrd_version = 1;
 
 initrd_fd_t fd_table[INITRD_MAX_FDS];
 
+static vfs_node_t *initrd_vfs_nodes = NULL;
+static uint32_t initrd_vfs_node_count = 0;
+static vfs_node_t *initrd_vfs_root = NULL;
+static dirent_t initrd_dirent;
 
 static void serial_printf_hex(uint32_t val) {
     char buf[9];
@@ -384,4 +389,145 @@ int initrd_stat(const char *path, uint32_t *size, uint8_t *type, uint8_t *perms)
     if (perms) *perms = f->permissions;
 
     return 0;
+}
+
+static uint32_t initrd_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    if (!node || !buffer) return 0;
+    uint32_t idx = node->inode;
+    if (idx >= file_count) return 0;
+    initrd_file_t *f = &files[idx];
+    if (f->type != INITRD_TYPE_FILE) return 0;
+    if (offset >= f->length) return 0;
+    uint32_t avail = f->length - offset;
+    uint32_t to_read = (size < avail) ? size : avail;
+    memcpy(buffer, f->data + offset, to_read);
+    return to_read;
+}
+
+static void initrd_vfs_open(vfs_node_t *node, uint32_t flags) {
+    (void)node;
+    (void)flags;
+}
+
+static void initrd_vfs_close(vfs_node_t *node) {
+    (void)node;
+}
+
+static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint32_t index) {
+    if (!node || !(node->flags & VFS_DIRECTORY)) return NULL;
+    uint32_t parent_idx = node->inode;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < file_count; i++) {
+        uint16_t pi = files[i].parent_index;
+        int match = 0;
+        if (node == initrd_vfs_root) {
+            match = (pi == 0xFFFF || pi == 0);
+        } else {
+            match = (pi == parent_idx);
+        }
+        if (match) {
+            if (count == index) {
+                for (int j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
+                    initrd_dirent.name[j] = files[i].name[j];
+                    initrd_dirent.name[j + 1] = '\0';
+                }
+                initrd_dirent.inode = i;
+                initrd_dirent.type = (files[i].type == INITRD_TYPE_DIR) ? VFS_DIRECTORY : VFS_FILE;
+                return &initrd_dirent;
+            }
+            count++;
+        }
+    }
+    return NULL;
+}
+
+static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
+    if (!node || !name || !(node->flags & VFS_DIRECTORY)) return NULL;
+    uint32_t parent_idx = node->inode;
+    for (uint32_t i = 0; i < file_count; i++) {
+        uint16_t pi = files[i].parent_index;
+        int match = 0;
+        if (node == initrd_vfs_root) {
+            match = (pi == 0xFFFF || pi == 0);
+        } else {
+            match = (pi == parent_idx);
+        }
+        if (match && strcmp(files[i].name, name) == 0) {
+            return &initrd_vfs_nodes[i];
+        }
+    }
+    return NULL;
+}
+
+static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoint) {
+    (void)device;
+    (void)mountpoint;
+    
+    if (!files || file_count == 0) {
+        printf("INITRD_VFS: No files to mount\n");
+        return NULL;
+    }
+    
+    initrd_vfs_node_count = file_count + 1;
+    initrd_vfs_nodes = (vfs_node_t *)kmalloc(initrd_vfs_node_count * sizeof(vfs_node_t));
+    if (!initrd_vfs_nodes) {
+        printf("INITRD_VFS: Failed to allocate nodes\n");
+        return NULL;
+    }
+    memset(initrd_vfs_nodes, 0, initrd_vfs_node_count * sizeof(vfs_node_t));
+    
+    initrd_vfs_root = &initrd_vfs_nodes[file_count];
+    initrd_vfs_root->name[0] = '/';
+    initrd_vfs_root->name[1] = '\0';
+    initrd_vfs_root->flags = VFS_DIRECTORY;
+    initrd_vfs_root->inode = 0xFFFFFFFF;
+    initrd_vfs_root->length = 0;
+    initrd_vfs_root->readdir = initrd_vfs_readdir;
+    initrd_vfs_root->finddir = initrd_vfs_finddir;
+    initrd_vfs_root->parent = NULL;
+    
+    for (uint32_t i = 0; i < file_count; i++) {
+        vfs_node_t *n = &initrd_vfs_nodes[i];
+        for (int j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
+            n->name[j] = files[i].name[j];
+            n->name[j + 1] = '\0';
+        }
+        n->inode = i;
+        n->length = files[i].length;
+        n->uid = files[i].uid;
+        n->gid = files[i].gid;
+        n->mask = files[i].permissions;
+        if (files[i].type == INITRD_TYPE_DIR) {
+            n->flags = VFS_DIRECTORY;
+            n->readdir = initrd_vfs_readdir;
+            n->finddir = initrd_vfs_finddir;
+        } else {
+            n->flags = VFS_FILE;
+            n->read = initrd_vfs_read;
+        }
+        n->open = initrd_vfs_open;
+        n->close = initrd_vfs_close;
+        if (files[i].parent_index == 0xFFFF) {
+            n->parent = initrd_vfs_root;
+        } else if (files[i].parent_index < file_count) {
+            n->parent = &initrd_vfs_nodes[files[i].parent_index];
+        } else {
+            n->parent = initrd_vfs_root;
+        }
+    }
+    
+    printf("INITRD_VFS: Mounted %u files\n", file_count);
+    return initrd_vfs_root;
+}
+
+static vfs_fs_type_t initrd_fs_type = {
+    .name = "initrd",
+    .mount = initrd_vfs_do_mount,
+    .unmount = NULL,
+    .next = NULL
+};
+
+void initrd_vfs_register(void) {
+    vfs_register_fs(&initrd_fs_type);
+    vfs_mount(NULL, "/initrd", "initrd");
 }

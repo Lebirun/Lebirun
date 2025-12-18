@@ -31,6 +31,12 @@
 #define SYS_CONSOLE_SWITCH 25
 #define SYS_CONSOLE_GETCUR 26
 #define SYS_CONSOLE_CLEAR 27
+#define SYS_VFS_OPEN 28
+#define SYS_VFS_CLOSE 29
+#define SYS_VFS_READ 30
+#define SYS_VFS_READDIR 31
+#define SYS_VFS_STAT 32
+#define SYS_VFS_MOUNTS 33
 
 #ifndef __is_libk
 
@@ -78,6 +84,16 @@ static inline int syscall3(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
+static inline int syscall4(int num, int arg1, int arg2, int arg3, int arg4) {
+    int ret;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4)
+        : "memory"
+    );
+    return ret;
+}
 #endif
 
 #endif

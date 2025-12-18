@@ -25,6 +25,7 @@ static volatile int schedule_force = 0;
 #define KERNEL_STACK_SIZE 4096
 
 #define USER_STACK_TOP 0x00800000u
+#define USER_STACK_SIZE 0x10000
 
 static uint32_t next_task_id = 1;
 

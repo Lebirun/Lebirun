@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x4000
+#define USER_STACK_SIZE 0x10000
 
 task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
     if (!bin_start || !bin_end || bin_end <= bin_start) return NULL;

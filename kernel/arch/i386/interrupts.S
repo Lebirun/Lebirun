@@ -99,5 +99,4 @@ isr_common_stub:
 
     popa
     add $8, %esp
-    iret
     iret                    

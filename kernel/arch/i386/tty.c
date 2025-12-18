@@ -81,12 +81,12 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
-    serial_putchar(c);
-    
     if (use_framebuffer && console_is_initialized()) {
         console_putchar(c);
         return;
     }
+
+    serial_putchar(c);
 
     if (use_framebuffer) {
         fb_write_char(c);
