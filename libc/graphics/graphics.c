@@ -120,11 +120,7 @@ void gfx_demo_with_options(const struct gfx_demo_opts *opts) {
     gfx_draw_squares(opts->sq_size, sq_y, opts->colors, opts->colors_count, (unsigned int)computed_x_start, opts->sq_spacing);
 
     unsigned int sq_bottom = sq_y + opts->sq_size;
-    int cy = gfx_compute_circle_center_below(sq_bottom, (int)opts->circle_gap, opts->circle_radius);
-    int cx = gfx_compute_circle_center_x(opts->circle_radius, opts->circle_x_anchor, opts->circle_x_offset, opts->x_start, opts->sq_size);
-    if (cx < 0) return;
-    gfx_draw_circle(cx, cy, opts->circle_radius);
-
-    unsigned int bottom_pixel = (unsigned int)(cy + opts->circle_radius);
+    
+    unsigned int bottom_pixel = sq_bottom;
     gfx_advance_cursor_past_pixels(bar_y, bottom_pixel);
 }
