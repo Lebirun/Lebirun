@@ -7,6 +7,9 @@ for PROJECT in $PROJECTS; do
   (cd "$PROJECT" && DESTDIR="$SYSROOT" $MAKE install)
 done
 
+echo "Building user programs..."
+(cd userprog && $MAKE all)
+
 if [ -d "initrd" ]; then
   echo "Building initrd..."
   chmod +x mkinitrd.sh

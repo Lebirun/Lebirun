@@ -4,6 +4,7 @@ LD = i686-elf-ld
 LIBC = ../libc
 LIBC_COMMON = ../libc-common
 KERNEL_DIR = ../kernel/arch/i386
+INITRD_DIR = ../initrd
 CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -nostdlib -fno-stack-protector -fno-pic -m32 -O2
 CPPFLAGS = -I$(LIBC)/include -I$(LIBC_COMMON)/include
 LDFLAGS = -T $(LIBC)/user.ld
@@ -11,18 +12,21 @@ LDFLAGS = -T $(LIBC)/user.ld
 CRT0 = $(LIBC)/crt/crt0.o
 LIBC_A = $(LIBC)/libc.a
 
-PROGRAMS = shell.bin
+PROGRAMS = shell.bin pong.bin
 
 KERNEL_USER_SHELL = ../kernel/arch/i386/user_shell.bin
 
-.PHONY: copy-shell
+.PHONY: copy-shell copy-pong
 
 copy-shell: shell.bin
 	cp shell.bin $(KERNEL_USER_SHELL)
 
+copy-pong: pong.bin
+	cp pong.bin $(INITRD_DIR)/pong.bin
+
 .PHONY: all clean libc
 
-all: libc crt0 $(PROGRAMS) copy-shell
+all: libc crt0 $(PROGRAMS) copy-shell copy-pong
 
 libc:
 	$(MAKE) -C $(LIBC)
@@ -45,3 +49,4 @@ clean:
 	rm -f *.o *.bin
 	rm -f $(KERNEL_USER_SHELL)
 	rm -f $(CRT0)
+	rm -f $(INITRD_DIR)/pong.bin

@@ -82,7 +82,7 @@ void terminal_scroll(void) {
 
 void terminal_putchar(char c) {
     if (use_framebuffer && console_is_initialized()) {
-        console_putchar(c);
+        console_putchar_to(0, c);
         return;
     }
 

@@ -199,21 +199,28 @@ static inline void add_task_to_runqueue(task_t* new_task) {
 }
 
 static inline void remove_task_from_runqueue(task_t* task) {
-    if (!ready_queue_head) return;
-    if (task == current_task && task == ready_queue_head && task->next == task) {
-        ready_queue_head = NULL;
+    if (!ready_queue_head || !task) return;
+    
+    if (task->next == task) {
+        if (task == ready_queue_head) {
+            ready_queue_head = NULL;
+        }
         return;
     }
+    
     task_t* prev = ready_queue_head;
-    task_t* cur = ready_queue_head;
-    do {
-        if (cur == task) break;
-        prev = cur;
-        cur = cur->next;
-    } while (cur != ready_queue_head);
-    if (cur != task) return;
-    prev->next = cur->next;
-    if (cur == ready_queue_head) ready_queue_head = cur->next;
+    while (prev->next != task) {
+        prev = prev->next;
+        if (prev == ready_queue_head) {
+            return;
+        }
+    }
+    
+    prev->next = task->next;
+    
+    if (task == ready_queue_head) {
+        ready_queue_head = task->next;
+    }
 }
 
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode) {
@@ -415,6 +422,7 @@ void task_free_user_memory(task_t* t) {
         for (uint32_t i = 0; i < t->user_pages_count; i++) {
             if (t->user_pages[i]) {
                 pfa_free(t->user_pages[i]);
+                t->user_pages[i] = 0;
             }
         }
         kfree(t->user_pages);
@@ -439,12 +447,20 @@ void reap_dead_tasks(void) {
     while (t) {
         task_t* next = t->wait_next;
         t->wait_next = NULL;
+        if (t->is_user) {
+            t->wait_next = keep;
+            keep = t;
+            t = next;
+            continue;
+        }
+
         if (t->join_refs != 0 || t->in_wait_queue) {
             t->wait_next = keep;
             keep = t;
             t = next;
             continue;
         }
+
         task_free_user_memory(t);
         if (t->stack_base) kfree(t->stack_base);
         if (t->kernel_stack_base) kfree(t->kernel_stack_base);
@@ -541,12 +557,59 @@ void task_kill(task_t* task, uint32_t exit_code) {
     unlock_scheduler();
 }
 
+static void free_dead_task_resources(task_t* t) {
+    if (!t || t->state != TASK_DEAD) return;
+    
+    if (dead_queue_head == t) {
+        dead_queue_head = t->wait_next;
+    } else {
+        task_t* prev = dead_queue_head;
+        while (prev && prev->wait_next != t) prev = prev->wait_next;
+        if (prev) prev->wait_next = t->wait_next;
+    }
+    t->wait_next = NULL;
+    
+    unlock_scheduler();
+    
+    if (t->user_pages && t->user_pages_count > 0) {
+        for (uint32_t i = 0; i < t->user_pages_count; i++) {
+            if (t->user_pages[i]) {
+                pfa_free(t->user_pages[i]);
+                t->user_pages[i] = 0;
+            }
+        }
+        kfree(t->user_pages);
+        t->user_pages = NULL;
+        t->user_pages_count = 0;
+    }
+    
+    if (t->pd_phys) {
+        vmm_free_page_directory(t->pd_phys);
+        t->pd_phys = 0;
+    }
+    
+    if (t->stack_base) {
+        kfree(t->stack_base);
+        t->stack_base = NULL;
+    }
+    if (t->kernel_stack_base) {
+        kfree(t->kernel_stack_base);
+        t->kernel_stack_base = NULL;
+    }
+    kfree(t);
+    
+    lock_scheduler();
+}
+
 int task_join(task_t* task, uint32_t* exit_code) {
     if (!task || task == current_task) return -1;
 
     lock_scheduler();
     if (task->state == TASK_DEAD) {
         if (exit_code) *exit_code = task->exit_code;
+        if (task->join_refs == 0 && !task->in_wait_queue) {
+            free_dead_task_resources(task);
+        }
         unlock_scheduler();
         return 0;
     }
@@ -567,6 +630,10 @@ int task_join(task_t* task, uint32_t* exit_code) {
     if (exit_code) *exit_code = task->exit_code;
     if (task->join_refs) task->join_refs--;
     current_task->join_target = NULL;
+    
+    if (task->join_refs == 0 && task->state == TASK_DEAD && !task->in_wait_queue) {
+        free_dead_task_resources(task);
+    }
     unlock_scheduler();
     return 0;
 }
@@ -696,9 +763,18 @@ void clear_syscall_frame(void) {
     }
 }
 
+#define FORK_MIN_FREE_PAGES 64
+
 pid_t task_fork(registers_t *parent_regs) {
     if (!current_task || !current_task->is_user) {
         printf("task_fork: can only fork user tasks\n");
+        return -1;
+    }
+
+    uint32_t free_pages = pfa_count_free();
+    uint32_t needed_pages = current_task->user_pages_count + FORK_MIN_FREE_PAGES;
+    if (free_pages < needed_pages) {
+        printf("task_fork: insufficient memory (free=%u, need~%u)\n", free_pages, needed_pages);
         return -1;
     }
 
@@ -760,6 +836,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->user_pages = child_user_pages;
     child->user_pages_count = child_user_pages_count;
     child->user_brk = current_task->user_brk;
+    child->console_id = current_task->console_id;
 
     registers_t *child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KERNEL_STACK_SIZE - sizeof(registers_t));
     memcpy(child_frame, parent_regs, sizeof(registers_t));
@@ -792,10 +869,16 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         return -1;
     }
 
+    uint32_t free_pages = pfa_count_free();
+    uint32_t needed_estimate = 20;
+    if (free_pages < needed_estimate) {
+        printf("task_exec: insufficient memory (free=%u)\n", free_pages);
+        return -1;
+    }
+
     int elf_valid = elf_validate(bin_start, bin_size);
     if (elf_valid != 0) {
         printf("task_exec: ELF validation failed (%d)\n", elf_valid);
-        task_exit(127);
         return -1;
     }
 
@@ -811,7 +894,6 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     uint32_t new_pd = vmm_create_page_directory();
     if (!new_pd) {
         printf("task_exec: failed to create page directory\n");
-        task_exit(127);
         return -1;
     }
 
@@ -827,7 +909,6 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
-        task_exit(127);
         return -1;
     }
 
@@ -840,7 +921,6 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
-        task_exit(127);
         return -1;
     }
 
@@ -864,6 +944,14 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
     uint32_t total_pages = elf_page_count + stack_page_count;
+    if (total_pages == 0 || total_pages > 65536) {
+        printf("task_exec: suspicious total_pages=%u\n", total_pages);
+        kfree(elf_pages);
+        kfree(stack_pages);
+        vmm_free_page_directory(new_pd);
+        return -1;
+    }
+
     current_task->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));
     if (current_task->user_pages) {
         memcpy(current_task->user_pages, elf_pages, elf_page_count * sizeof(uint32_t));

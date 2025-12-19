@@ -164,7 +164,7 @@ void kernel_main(void) {
 	printf("\n");
 	pic_remap();
     init_tasks();
-    pit_init(100);    
+    pit_init(1000);
     calibrate_pit();
     keyboard_init();
     syscall_init();
@@ -185,13 +185,11 @@ void kernel_main(void) {
     printf("heap: verify before launching user\n");
     heap_verify();
 
-    task_t* shell = launch_user_binary(user_shell_bin_start, user_shell_bin_end);
+    task_t* shell = launch_user_binary(user_shell_bin_start, user_shell_bin_end, 1);
     printf("heap: verify after launch attempt\n");
     heap_verify();
     if (!shell) {
         printf("Failed to launch user shell\n");
-    } else {
-        shell->console_id = 1;
     }
 
     while (1) {

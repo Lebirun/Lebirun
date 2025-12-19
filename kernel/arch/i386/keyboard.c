@@ -4,6 +4,7 @@
 #include <kernel/keyboard.h>
 #include <kernel/task.h>
 #include <kernel/console.h>
+#include <kernel/task.h>
 
 #define BUFFER_SIZE 256
 static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];

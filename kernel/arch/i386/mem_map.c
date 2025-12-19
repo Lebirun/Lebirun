@@ -608,6 +608,8 @@ static heap_block_t *find_best_fit(size_t size) {
             printf("Heap corruption detected at 0x%08X\n", (uint32_t)current);
             printf("Last map op: v=0x%08X pd_idx=%u pt_idx=%u old=0x%08X new=0x%08X pd[1023]=0x%08X pd_pde=0x%08X op_count=%u\n",
                    map_debug.v, map_debug.pd_idx, map_debug.pt_idx, map_debug.old, map_debug.newval, map_debug.pd1023, map_debug.pd_pde, map_debug.op_count);
+            heap_verify();
+            dump_map_debug();
             return NULL;
         }
 
@@ -624,9 +626,11 @@ static heap_block_t *find_best_fit(size_t size) {
 }
 
 static void split_block(heap_block_t *block, size_t size) {
+    if (block->size < size + sizeof(heap_block_t) + HEAP_MIN_BLOCK) return;
+
     size_t remaining = block->size - size - sizeof(heap_block_t);
 
-    if (remaining >= HEAP_MIN_BLOCK + sizeof(heap_block_t)) {
+    if (remaining >= HEAP_MIN_BLOCK) {
         heap_block_t *new_block = (heap_block_t *)((uint8_t *)block + sizeof(heap_block_t) + size);
         new_block->magic = HEAP_MAGIC;
         new_block->size = remaining;
@@ -644,18 +648,32 @@ static void split_block(heap_block_t *block, size_t size) {
 
 static void coalesce_free_blocks(heap_block_t *block) {
     if (block->next && block->next->is_free) {
-        block->size += sizeof(heap_block_t) + block->next->size;
-        block->next = block->next->next;
-        if (block->next) {
-            block->next->prev = block;
+        heap_block_t *next = block->next;
+        uint32_t block_end = (uint32_t)block + sizeof(heap_block_t) + block->size;
+        if (block_end == (uint32_t)next) {
+            block->size += sizeof(heap_block_t) + next->size;
+            block->next = next->next;
+            if (block->next) {
+                block->next->prev = block;
+            }
+            next->magic = 0xDEAD0001;
+        } else {
+            DPRINTF3("coalesce: skip non-adjacent next (block_end=0x%08X next=0x%08X)\n", block_end, (uint32_t)next);
         }
     }
 
     if (block->prev && block->prev->is_free) {
-        block->prev->size += sizeof(heap_block_t) + block->size;
-        block->prev->next = block->next;
-        if (block->next) {
-            block->next->prev = block->prev;
+        heap_block_t *prev = block->prev;
+        uint32_t prev_end = (uint32_t)prev + sizeof(heap_block_t) + prev->size;
+        if (prev_end == (uint32_t)block) {
+            prev->size += sizeof(heap_block_t) + block->size;
+            prev->next = block->next;
+            if (block->next) {
+                block->next->prev = prev;
+            }
+            block->magic = 0xDEAD0002;
+        } else {
+            DPRINTF3("coalesce: skip non-adjacent prev (prev_end=0x%08X block=0x%08X)\n", prev_end, (uint32_t)block);
         }
     }
 }
@@ -668,8 +686,9 @@ void *kmalloc(size_t size) {
     heap_block_t *block = find_best_fit(size);
 
     if (!block) {
+        uint32_t old_end = kernel_heap.end_addr;
         uint32_t needed = size + sizeof(heap_block_t) + PAGE_SIZE;
-        uint32_t new_end = kernel_heap.end_addr + needed;
+        uint32_t new_end = old_end + needed;
 
         DPRINTF("kmalloc: expanding to new_end=0x"); if (debugMode) print_hex(new_end); DPRINTF("\n");
         if (new_end > kernel_heap.max_addr) {
@@ -684,21 +703,51 @@ void *kmalloc(size_t size) {
             return NULL;
         }
 
-        heap_block_t *new_block = (heap_block_t *)(kernel_heap.end_addr - needed + PAGE_SIZE);
-        DPRINTF("kmalloc: new_block at 0x"); if (debugMode) print_hex((uint32_t)new_block); DPRINTF("\n");
-        new_block->magic = HEAP_MAGIC;
-        new_block->size = needed - sizeof(heap_block_t);
-        new_block->is_free = 1;
-        new_block->next = NULL;
+        heap_block_t *adjacent = NULL;
+        for (heap_block_t *iter = kernel_heap.free_list; iter; iter = iter->next) {
+            uint32_t iter_end = (uint32_t)iter + sizeof(heap_block_t) + iter->size;
+            if (iter->is_free && iter_end == old_end) {
+                adjacent = iter;
+                break;
+            }
+        }
 
-        heap_block_t *last = kernel_heap.free_list;
-        if (!last) {
-            kernel_heap.free_list = new_block;
-            new_block->prev = NULL;
+        if (adjacent) {
+            uint32_t added = kernel_heap.end_addr - old_end;
+            adjacent->size += added;
         } else {
-            while (last->next) last = last->next;
-            last->next = new_block;
-            new_block->prev = last;
+            if (kernel_heap.end_addr <= old_end + sizeof(heap_block_t)) {
+                printf("kmalloc: Expand produced no usable space\n");
+                return NULL;
+            }
+
+            heap_block_t *new_block = (heap_block_t *)old_end;
+            uint32_t new_block_size = kernel_heap.end_addr - old_end - sizeof(heap_block_t);
+            DPRINTF("kmalloc: new_block at 0x"); if (debugMode) print_hex((uint32_t)new_block); DPRINTF("\n");
+            new_block->magic = HEAP_MAGIC;
+            new_block->size = new_block_size;
+            new_block->is_free = 1;
+            new_block->next = NULL;
+            new_block->prev = NULL;
+
+            heap_block_t *prev = NULL;
+            heap_block_t *cur = kernel_heap.free_list;
+            while (cur && (uint32_t)cur < (uint32_t)new_block) {
+                prev = cur;
+                cur = cur->next;
+            }
+            if (!prev) {
+                new_block->next = kernel_heap.free_list;
+                if (kernel_heap.free_list) kernel_heap.free_list->prev = new_block;
+                kernel_heap.free_list = new_block;
+            } else {
+                new_block->next = prev->next;
+                new_block->prev = prev;
+                if (prev->next) prev->next->prev = new_block;
+                prev->next = new_block;
+            }
+
+            coalesce_free_blocks(new_block);
         }
 
         block = find_best_fit(size);
@@ -714,6 +763,8 @@ void *kmalloc(size_t size) {
     kernel_heap.used_size += block->size + sizeof(heap_block_t);
 
     void *user_ptr = (void *)((uint8_t *)block + sizeof(heap_block_t));
+
+    DPRINTF3("kmalloc: alloc size=%u block=0x%08X ptr=0x%08X\n", (uint32_t)size, (uint32_t)block, (uint32_t)user_ptr);
 
     if (((uintptr_t)user_ptr & 0x3) != 0) {
         printf("kmalloc: WARNING - returned pointer not 4-byte aligned: 0x%08X\n", (uint32_t)user_ptr);
@@ -744,8 +795,12 @@ void kfree(void *ptr) {
 
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
 
+    DPRINTF3("kfree: ptr=0x%08X block=0x%08X magic=0x%08X size=%u\n",
+             (uint32_t)ptr, (uint32_t)block, block->magic, block->size);
+
     if (block->magic != HEAP_MAGIC) {
-        printf("kfree: Invalid pointer 0x%08X\n", (uint32_t)ptr);
+        printf("kfree: Invalid pointer 0x%08X (bad magic 0x%08X)\n", (uint32_t)ptr, block->magic);
+        heap_verify();
         return;
     }
 
@@ -827,6 +882,18 @@ uint32_t heap_block_size_for_ptr(void *ptr) {
     return block->size;
 }
 
+static void dump_memory_around(uint32_t addr, uint32_t radius) {
+    uint32_t start = (addr >= radius) ? (addr - radius) : 0;
+    uint32_t end = addr + radius;
+    if (start < kernel_heap.start_addr) start = kernel_heap.start_addr;
+    if (end > kernel_heap.end_addr) end = kernel_heap.end_addr;
+
+    printf(" dump mem around 0x%08X (0x%08X - 0x%08X):\n", addr, start, end);
+    for (uint32_t a = start; a < end; a += 4) {
+        printf("  0x%08X: 0x%08X\n", a, *(volatile uint32_t *)a);
+    }
+}
+
 void heap_verify(void) {
     printf("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
     heap_block_t *block = kernel_heap.free_list;
@@ -835,6 +902,46 @@ void heap_verify(void) {
         printf(" heap block %d: addr=0x%08X size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
                i, (uint32_t)block, block->size, block->is_free, block->magic,
                (uint32_t)block->next, (uint32_t)block->prev);
+
+        uint32_t baddr = (uint32_t)block;
+        if (baddr < kernel_heap.start_addr || baddr + sizeof(heap_block_t) > kernel_heap.end_addr) {
+            printf("heap_verify: ERROR - block header out of heap bounds: 0x%08X\n", baddr);
+            dump_memory_around(baddr, 64);
+            break;
+        }
+
+        if (block->magic != HEAP_MAGIC) {
+            printf("heap_verify: ERROR - invalid magic at 0x%08X (magic=0x%08X)\n", baddr, block->magic);
+            dump_memory_around(baddr, 64);
+            break;
+        }
+
+        uint32_t block_end = baddr + sizeof(heap_block_t) + block->size;
+        if (block_end > kernel_heap.end_addr) {
+            printf("heap_verify: ERROR - block extends past heap end: block_end=0x%08X heap_end=0x%08X\n", block_end, kernel_heap.end_addr);
+            dump_memory_around(baddr, 64);
+            break;
+        }
+
+        if (block->next) {
+            uint32_t naddr = (uint32_t)block->next;
+            if (naddr <= baddr) {
+                printf("heap_verify: ERROR - next pointer not ascending (0x%08X -> 0x%08X)\n", baddr, naddr);
+                dump_memory_around(baddr, 64);
+                break;
+            }
+            if (block->next->prev != block) {
+                printf("heap_verify: ERROR - next->prev inconsistency at 0x%08X\n", naddr);
+                dump_memory_around(naddr, 64);
+                break;
+            }
+            if (naddr < block_end) {
+                printf("heap_verify: ERROR - overlapping blocks 0x%08X and 0x%08X (block_end=0x%08X)\n", baddr, naddr, block_end);
+                dump_memory_around(baddr, 64);
+                break;
+            }
+        }
+
         block = block->next;
         i++;
         if (i > 100) { printf(" heap_verify: stopping early (>100)\n"); break; }
@@ -1221,6 +1328,14 @@ void vmm_free_page_directory(uint32_t pd_phys) {
 uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_pages, uint32_t *out_user_pages_count) {
     if (!src_pd_phys) return 0;
 
+    uint32_t user_page_capacity = 512;
+    uint32_t user_page_count = 0;
+    uint32_t *user_pages = (uint32_t *)kmalloc(user_page_capacity * sizeof(uint32_t));
+    if (!user_pages) {
+        printf("vmm_clone_page_directory: Failed to allocate user_pages array\n");
+        return 0;
+    }
+
     uint32_t eflags;
     __asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags));
     
@@ -1237,6 +1352,7 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
             __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
         }
         if (eflags & (1 << 9)) __asm__ volatile ("sti");
+        kfree(user_pages);
         return 0;
     }
     uint32_t new_pd_phys = (uint32_t)new_pd_page;
@@ -1252,18 +1368,6 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
     uint32_t *new_pd = (uint32_t *)temp_new_pd;
     memset(new_pd, 0, PAGE_SIZE);
     temp_unmap_raw(temp_new_pd);
-
-    uint32_t user_page_capacity = 64;
-    uint32_t user_page_count = 0;
-    uint32_t *user_pages = (uint32_t *)kmalloc(user_page_capacity * sizeof(uint32_t));
-    if (!user_pages) {
-        pfa_free(new_pd_phys);
-        if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
-        }
-        if (eflags & (1 << 9)) __asm__ volatile ("sti");
-        return 0;
-    }
 
     temp_map_raw(temp_src_pd, src_pd_phys);
     uint32_t *src_pd = (uint32_t *)temp_src_pd;
@@ -1333,15 +1437,11 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
             DPRINTF3("vmm_clone: set new_pt[%u]=0x%08X verify=0x%08X\n", pt_idx, (new_page_phys & ~0xFFF) | pte_flags, verify_pte);
 
             if (user_page_count >= user_page_capacity) {
-                user_page_capacity *= 2;
-                uint32_t *new_arr = (uint32_t *)krealloc(user_pages, user_page_capacity * sizeof(uint32_t));
-                if (!new_arr) {
-                    temp_unmap_raw(temp_src_pt);
-                    temp_unmap_raw(temp_new_pt);
-                    temp_unmap_raw(temp_src_pd);
-                    goto cleanup_fail;
-                }
-                user_pages = new_arr;
+                printf("vmm_clone: user_pages array full (capacity=%u)!\n", user_page_capacity);
+                temp_unmap_raw(temp_src_pt);
+                temp_unmap_raw(temp_new_pt);
+                temp_unmap_raw(temp_src_pd);
+                goto cleanup_fail;
             }
             user_pages[user_page_count++] = new_page_phys;
         }

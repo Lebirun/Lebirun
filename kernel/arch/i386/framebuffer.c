@@ -413,7 +413,7 @@ void fb_update_cursor(void) {
 void fb_tick(void) {
     static int tick_counter = 0;
     tick_counter++;
-    if (tick_counter >= 50) {
+    if (tick_counter >= 500) {
         tick_counter = 0;
         cursor_visible = !cursor_visible;
         fb_update_cursor();

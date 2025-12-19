@@ -9,7 +9,7 @@
 #define USER_STACK_TOP 0x00800000u
 #define USER_STACK_SIZE 0x10000
 
-task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
+task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int console_id) {
     if (!bin_start || !bin_end || bin_end <= bin_start) return NULL;
     uint32_t size = (uint32_t)(bin_end - bin_start);
 
@@ -68,9 +68,24 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
 
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
-    t->console_id = 1;
+    t->console_id = console_id;
 
     uint32_t total_pages = elf_page_count + stack_page_count;
+
+    if (total_pages == 0 || total_pages > 65536) {
+        printf("launch_user_binary: suspicious total_pages=%u\n", total_pages);
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        if (stack_pages) {
+            for (uint32_t i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
+            kfree(stack_pages);
+        }
+        vmm_free_page_directory(new_pd);
+        return NULL;
+    }
+
     t->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));
     if (t->user_pages) {
         if (elf_pages) {

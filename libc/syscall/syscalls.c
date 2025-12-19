@@ -12,6 +12,10 @@ int read(int fd, void* buf, size_t count) {
 	return syscall3(SYS_READ, fd, (int)buf, (int)count);
 }
 
+int read_nb(int fd, void* buf, size_t count) {
+	return syscall3(SYS_READ_NB, fd, (int)buf, (int)count);
+}
+
 int write(int fd, const void* buf, size_t count) {
 	return syscall3(SYS_WRITE, fd, (int)buf, (int)count);
 }
@@ -128,6 +132,10 @@ int console_getcur(void) {
 
 int console_clear(int console_num) {
 	return syscall1(SYS_CONSOLE_CLEAR, console_num);
+}
+
+int console_setcursor(int x, int y) {
+	return syscall2(SYS_CONSOLE_SETCURSOR, x, y);
 }
 
 int vfs_open(const char *path, int flags) {

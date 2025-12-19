@@ -3,6 +3,6 @@
 
 #include <kernel/task.h>
 
-task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end);
+task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int console_id);
 
 #endif

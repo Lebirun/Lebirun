@@ -51,8 +51,10 @@ extern mutex_t print_lock;
 #define SYSCALL_VFS_CREATE 35
 #define SYSCALL_VFS_MKDIR 36
 #define SYSCALL_VFS_UNLINK 37
+#define SYSCALL_CONSOLE_SETCURSOR 38
+#define SYSCALL_READ_NB 39
 
-#define NR_SYSCALLS 38
+#define NR_SYSCALLS 40
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -101,20 +103,77 @@ static int sys_sbrk(int inc, const char *unused, int unused2) {
     }
     if (!current_task) return -1;
     if ((int)inc < 0) return -1;
+    
     uint32_t old = current_task->user_brk;
     uint32_t newbrk = (old + (uint32_t)inc + 0xFFF) & ~0xFFFu;
     if (newbrk >= 0x007F0000 || newbrk < old) return -1;
-    vmm_map_range_alloc(old, newbrk - old, 0x7);
+    
+    
+    uint32_t start_page = (old + 0xFFF) & ~0xFFFu;
+    uint32_t num_new_pages = (newbrk - start_page) / 0x1000;
+    
+    if (num_new_pages > 0) {
+
+        uint32_t page_count = 0;
+        uint32_t *new_pages = vmm_map_range_in_pd_tracked(
+            current_task->pd_phys, start_page, newbrk - start_page, 0x7, &page_count);
+        
+        if (!new_pages && num_new_pages > 0) {
+            return -1; 
+        }
+        
+        if (new_pages && page_count > 0) {
+            uint32_t old_count = current_task->user_pages_count;
+            uint32_t new_count = old_count + page_count;
+            uint32_t *expanded = (uint32_t *)kmalloc(new_count * sizeof(uint32_t));
+            if (expanded) {
+                if (current_task->user_pages && old_count > 0) {
+                    memcpy(expanded, current_task->user_pages, old_count * sizeof(uint32_t));
+                    kfree(current_task->user_pages);
+                }
+                memcpy(expanded + old_count, new_pages, page_count * sizeof(uint32_t));
+                current_task->user_pages = expanded;
+                current_task->user_pages_count = new_count;
+            }
+            kfree(new_pages);
+        }
+    }
+    
     current_task->user_brk = newbrk;
     return (int)old;
 }
 
 static int sys_mmap(int len, const char *unused, int prot) {
     (void)unused; (void)prot;
-    if (len <= 0) return -1;
+    if (len <= 0 || !current_task) return -1;
+    
     uint32_t base = 0x00600000;
     uint32_t size = (len + 0xFFF) & ~0xFFFu;
-    vmm_map_range_alloc(base, size, 0x7);
+    
+    uint32_t page_count = 0;
+    uint32_t *new_pages = vmm_map_range_in_pd_tracked(
+        current_task->pd_phys, base, size, 0x7, &page_count);
+    
+    if (!new_pages && size > 0) {
+        return -1; 
+    }
+    
+    if (new_pages && page_count > 0) {
+        uint32_t old_count = current_task->user_pages_count;
+        uint32_t new_count = old_count + page_count;
+        uint32_t *expanded = (uint32_t *)kmalloc(new_count * sizeof(uint32_t));
+        if (expanded) {
+            if (current_task->user_pages && old_count > 0) {
+                memcpy(expanded, current_task->user_pages, old_count * sizeof(uint32_t));
+                kfree(current_task->user_pages);
+            }
+            memcpy(expanded + old_count, new_pages, page_count * sizeof(uint32_t));
+            current_task->user_pages = expanded;
+            current_task->user_pages_count = new_count;
+        }
+        kfree(new_pages);
+    }
+    
     return (int)base;
 }
 
@@ -313,6 +372,14 @@ static int sys_console_clear(int console_num, const char *unused1, int unused2) 
     return 0;
 }
 
+static int sys_console_setcursor(int x, const char *y_ptr, int unused) {
+    (void)unused;
+    int y = (int)(uintptr_t)y_ptr;
+    int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+    console_setcursor(con_id, x, y);
+    return 0;
+}
+
 static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
@@ -371,6 +438,31 @@ static int sys_read(int fd, char *buf, int len) {
     }
     
     return initrd_read(fd, (void *)buf_addr, (uint32_t)len);
+}
+
+static int sys_read_nb(int fd, char *buf, int len) {
+    if (!buf || len <= 0) return -1;
+    uint32_t buf_addr = (uint32_t)buf;
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    if (buf_addr + len >= 0xC0000000) return -1;
+
+    if (fd == 0) {
+        int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+        
+        if (!keyboard_has_data_for(con_id)) {
+            return 0;
+        }
+
+        int key = keyboard_getchar_nb_for(con_id);
+        if (key >= 0) {
+            char c = (char)key;
+            memcpy((void*)buf_addr, &c, 1);
+            return 1;
+        }
+        return 0;
+    }
+    
+    return -1;
 }
 
 static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
@@ -618,6 +710,7 @@ void syscall_init(void) {
     syscall_table[SYSCALL_CONSOLE_SWITCH] = sys_console_switch;
     syscall_table[SYSCALL_CONSOLE_GETCUR] = sys_console_getcur;
     syscall_table[SYSCALL_CONSOLE_CLEAR] = sys_console_clear;
+    syscall_table[SYSCALL_CONSOLE_SETCURSOR] = sys_console_setcursor;
     syscall_table[SYSCALL_VFS_OPEN] = sys_vfs_open;
     syscall_table[SYSCALL_VFS_CLOSE] = sys_vfs_close;
     syscall_table[SYSCALL_VFS_READ] = sys_vfs_read;
@@ -628,4 +721,5 @@ void syscall_init(void) {
     syscall_table[SYSCALL_VFS_CREATE] = sys_vfs_create;
     syscall_table[SYSCALL_VFS_MKDIR] = sys_vfs_mkdir;
     syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
+    syscall_table[SYSCALL_READ_NB] = sys_read_nb;
 }

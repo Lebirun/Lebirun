@@ -386,14 +386,22 @@ int vfs_open_path(const char *path, int flags) {
 
 int vfs_close_fd(int fd) {
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
-    if (!fd_table[fd].in_use) return -1;
     
-    vfs_close(fd_table[fd].node);
+    mutex_lock(&vfs_lock);
+    if (!fd_table[fd].in_use) {
+        mutex_unlock(&vfs_lock);
+        return -1;
+    }
+    
+    vfs_node_t *node = fd_table[fd].node;
     
     fd_table[fd].in_use = 0;
     fd_table[fd].node = NULL;
     fd_table[fd].offset = 0;
     fd_table[fd].flags = 0;
+    mutex_unlock(&vfs_lock);
+    
+    if (node) vfs_close(node);
     
     return 0;
 }

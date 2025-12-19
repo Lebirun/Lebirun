@@ -230,6 +230,38 @@ void console_clear(int console_num) {
     }
 }
 
+void console_setcursor(int console_num, int x, int y) {
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    
+    console_t *con = &consoles[console_num];
+    framebuffer_t *fb = fb_get();
+    uint32_t cols = fb ? fb->cols : 80;
+    uint32_t rows = fb ? fb->rows : 25;
+    
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if ((uint32_t)x >= cols) x = cols - 1;
+    if ((uint32_t)y >= rows) y = rows - 1;
+    
+    con->cursor_x = (uint32_t)x;
+    con->cursor_y = (uint32_t)y;
+    
+    if (console_num == current_console && fb) {
+        fb->cursor_x = con->cursor_x;
+        fb->cursor_y = con->cursor_y;
+        fb_update_cursor();
+    }
+}
+
+int console_getcursor(int console_num, int *x, int *y) {
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    
+    console_t *con = &consoles[console_num];
+    if (x) *x = (int)con->cursor_x;
+    if (y) *y = (int)con->cursor_y;
+    return 0;
+}
+
 bool console_is_initialized(void) {
     return console_initialized;
 }

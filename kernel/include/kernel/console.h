@@ -29,5 +29,7 @@ void console_write(const char *data, size_t size);
 void console_write_to(int console_num, const char *data, size_t size);
 void console_writestring(const char *data);
 void console_clear(int console_num);
+void console_setcursor(int console_num, int x, int y);
+int console_getcursor(int console_num, int *x, int *y);
 
 #endif

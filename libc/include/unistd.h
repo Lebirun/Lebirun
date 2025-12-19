@@ -20,6 +20,7 @@ __attribute__((__noreturn__))
 void _exit(int status);
 
 int read(int fd, void* buf, size_t count);
+int read_nb(int fd, void* buf, size_t count);
 int write(int fd, const void* buf, size_t count);
 
 int getpid(void);
@@ -52,6 +53,7 @@ int fb_clear(void);
 int console_switch(int console_num);
 int console_getcur(void);
 int console_clear(int console_num);
+int console_setcursor(int x, int y);
 
 int vfs_open(const char *path, int flags);
 int vfs_close_fd(int fd);
