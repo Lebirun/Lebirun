@@ -59,6 +59,10 @@ int vfs_read_fd(int fd, void *buf, unsigned int count);
 int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index);
 int vfs_stat(int fd, unsigned int *size, unsigned int *type);
 int vfs_mounts(void);
+int vfs_write_fd(int fd, const void *buf, unsigned int count);
+int vfs_create(const char *path, unsigned int perms);
+int vfs_mkdir(const char *path, unsigned int perms);
+int vfs_unlink(const char *path);
 
 #ifdef __cplusplus
 }

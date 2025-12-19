@@ -15,6 +15,7 @@
 #include <kernel/syscall.h>
 #include <kernel/io.h>
 #include <kernel/initrd.h>
+#include <kernel/ramfs.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
 #include <kernel/vfs.h>
@@ -35,6 +36,7 @@ extern task_t* ready_queue_head;
 
 void kernel_main(void) {
     terminal_initialize();
+    console_init();
 
     init_mem_map(multiboot_magic, multiboot_ptr);
 
@@ -133,6 +135,7 @@ void kernel_main(void) {
         initrd_list_files();
         vfs_init();
         initrd_vfs_register();
+        ramfs_vfs_register();
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -189,8 +192,6 @@ void kernel_main(void) {
         printf("Failed to launch user shell\n");
     } else {
         shell->console_id = 1;
-        printf("User shell launched (PID %u) on console F2!\n", shell->pid);
-        printf("Press CTRL+ALT+F2 to access the shell.\n");
     }
 
     while (1) {

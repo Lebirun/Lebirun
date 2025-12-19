@@ -154,4 +154,20 @@ int vfs_mounts(void) {
 	return syscall0(SYS_VFS_MOUNTS);
 }
 
+int vfs_write_fd(int fd, const void *buf, unsigned int count) {
+	return syscall3(SYS_VFS_WRITE, fd, (int)buf, (int)count);
+}
+
+int vfs_create(const char *path, unsigned int perms) {
+	return syscall2(SYS_VFS_CREATE, (int)path, (int)perms);
+}
+
+int vfs_mkdir(const char *path, unsigned int perms) {
+	return syscall2(SYS_VFS_MKDIR, (int)path, (int)perms);
+}
+
+int vfs_unlink(const char *path) {
+	return syscall1(SYS_VFS_UNLINK, (int)path);
+}
+
 #endif

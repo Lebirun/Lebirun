@@ -44,6 +44,10 @@ void delay_inMins(uint32_t mins) {
     delay(mins * 60 * 1000);
 }
 
+uint32_t pit_get_ticks(void) {
+    return tick_count;
+}
+
 void calibrate_pit(void) {
     printf("Calibrating PIT (fast)...\n");
     

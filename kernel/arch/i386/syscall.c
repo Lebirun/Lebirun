@@ -47,8 +47,12 @@ extern mutex_t print_lock;
 #define SYSCALL_VFS_READDIR 31
 #define SYSCALL_VFS_STAT 32
 #define SYSCALL_VFS_MOUNTS 33
+#define SYSCALL_VFS_WRITE 34
+#define SYSCALL_VFS_CREATE 35
+#define SYSCALL_VFS_MKDIR 36
+#define SYSCALL_VFS_UNLINK 37
 
-#define NR_SYSCALLS 34
+#define NR_SYSCALLS 38
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -439,6 +443,128 @@ static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
     return vfs_get_mount_count();
 }
 
+static int sys_vfs_write(int fd, const char *buf, int len) {
+    uint32_t buf_addr = (uint32_t)buf;
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    return vfs_write_fd(fd, (const void *)buf_addr, (uint32_t)len);
+}
+
+static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
+    (void)unused;
+    uint32_t path_addr = (uint32_t)path_ptr;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -1;
+    const char *path = (const char *)path_addr;
+    uint32_t perms = (uint32_t)(uintptr_t)perms_ptr;
+    
+    char parent_path[256];
+    char filename[64];
+    int len = 0;
+    while (path[len]) len++;
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
+        filename[len < 63 ? len : 63] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    } else {
+        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        int j = 0;
+        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    }
+    
+    vfs_node_t *parent = vfs_namei(parent_path);
+    if (!parent) return -1;
+    return vfs_create(parent, filename, perms);
+}
+
+static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
+    (void)unused;
+    uint32_t path_addr = (uint32_t)path_ptr;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -1;
+    const char *path = (const char *)path_addr;
+    uint32_t perms = (uint32_t)(uintptr_t)perms_ptr;
+    
+    char parent_path[256];
+    char dirname[64];
+    int len = 0;
+    while (path[len]) len++;
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        for (int i = 0; i < len && i < 63; i++) dirname[i] = path[i];
+        dirname[len < 63 ? len : 63] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
+        dirname[j] = '\0';
+    } else {
+        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        int j = 0;
+        for (int i = last_slash + 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
+        dirname[j] = '\0';
+    }
+    
+    vfs_node_t *parent = vfs_namei(parent_path);
+    if (!parent) return -1;
+    return vfs_mkdir(parent, dirname, perms);
+}
+
+static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    uint32_t path_addr = (uint32_t)path_ptr;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -1;
+    const char *path = (const char *)path_addr;
+    
+    char parent_path[256];
+    char filename[64];
+    int len = 0;
+    while (path[len]) len++;
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
+        filename[len < 63 ? len : 63] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    } else {
+        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        int j = 0;
+        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    }
+    
+    vfs_node_t *parent = vfs_namei(parent_path);
+    if (!parent) return -1;
+    return vfs_unlink(parent, filename);
+}
+
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
@@ -498,4 +624,8 @@ void syscall_init(void) {
     syscall_table[SYSCALL_VFS_READDIR] = (void*)1;
     syscall_table[SYSCALL_VFS_STAT] = sys_vfs_stat;
     syscall_table[SYSCALL_VFS_MOUNTS] = sys_vfs_mounts;
+    syscall_table[SYSCALL_VFS_WRITE] = sys_vfs_write;
+    syscall_table[SYSCALL_VFS_CREATE] = sys_vfs_create;
+    syscall_table[SYSCALL_VFS_MKDIR] = sys_vfs_mkdir;
+    syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
 }

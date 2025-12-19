@@ -37,6 +37,10 @@
 #define SYS_VFS_READDIR 31
 #define SYS_VFS_STAT 32
 #define SYS_VFS_MOUNTS 33
+#define SYS_VFS_WRITE 34
+#define SYS_VFS_CREATE 35
+#define SYS_VFS_MKDIR 36
+#define SYS_VFS_UNLINK 37
 
 #ifndef __is_libk
 

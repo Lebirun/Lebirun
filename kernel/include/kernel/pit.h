@@ -12,4 +12,6 @@ void delay_inMs(uint32_t ms);
 void delay_inSecs(uint32_t secs);
 void delay_inMins(uint32_t mins);
 
+uint32_t pit_get_ticks(void);
+
 #endif

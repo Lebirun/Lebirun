@@ -52,6 +52,9 @@ typedef int (*create_type_t)(struct vfs_node *parent, const char *name, uint32_t
 typedef int (*unlink_type_t)(struct vfs_node *parent, const char *name);
 typedef int (*mkdir_type_t)(struct vfs_node *parent, const char *name, uint32_t perms);
 typedef int (*truncate_type_t)(struct vfs_node *, uint32_t length);
+typedef int (*rename_type_t)(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
+typedef int (*chmod_type_t)(struct vfs_node *, uint32_t mode);
+typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
 
 typedef struct vfs_node {
     char name[VFS_MAX_NAME];
@@ -62,6 +65,9 @@ typedef struct vfs_node {
     uint32_t inode;
     uint32_t length;
     uint32_t impl;
+    uint32_t atime;
+    uint32_t mtime;
+    uint32_t ctime;
     
     read_type_t read;
     write_type_t write;
@@ -73,6 +79,9 @@ typedef struct vfs_node {
     unlink_type_t unlink;
     mkdir_type_t mkdir;
     truncate_type_t truncate;
+    rename_type_t rename;
+    chmod_type_t chmod;
+    chown_type_t chown;
     
     struct vfs_node *ptr;
     struct vfs_node *parent;

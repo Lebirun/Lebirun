@@ -68,6 +68,7 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end) {
 
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    t->console_id = 1;
 
     uint32_t total_pages = elf_page_count + stack_page_count;
     t->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));

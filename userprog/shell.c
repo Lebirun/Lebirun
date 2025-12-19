@@ -158,91 +158,6 @@ static void cmd_initrd_cat(const char *arg) {
     }
 }
 
-static void cmd_open(const char *arg) {
-    if (!arg || *arg == '\0') {
-        puts("Usage: open <path>");
-        return;
-    }
-    int fd = open(arg, O_RDONLY);
-    if (fd < 0) {
-        printf("Failed to open '%s'\n", arg);
-    } else {
-        printf("Opened '%s' as fd %d\n", arg, fd);
-    }
-}
-
-static void cmd_read(const char *arg) {
-    if (!arg || *arg == '\0') {
-        puts("Usage: read <fd|name>");
-        return;
-    }
-
-    int is_num = 1;
-    for (const char *p = arg; *p; p++) {
-        if (*p < '0' || *p > '9') { is_num = 0; break; }
-    }
-
-    static char buf[4097];
-    if (is_num) {
-        int fd = 0;
-        const char *p = arg;
-        while (*p >= '0' && *p <= '9') { fd = fd * 10 + (*p - '0'); p++; }
-        int rd = read(fd, buf, 4096);
-        if (rd < 0) {
-            printf("Failed to read fd %d\n", fd);
-        } else if (rd == 0) {
-            printf("EOF on fd %d\n", fd);
-        } else {
-            if (rd > 4096) rd = 4096;
-            buf[rd] = '\0';
-            printf("Read %d bytes:\n%s\n", rd, buf);
-        }
-        return;
-    } else {
-        int fd = open(arg, O_RDONLY);
-        if (fd < 0) {
-            printf("Failed to open '%s' for read\n", arg);
-            return;
-        }
-        int rd = read(fd, buf, 4096);
-        if (rd < 0) {
-            printf("Failed to read '%s' (fd %d)\n", arg, fd);
-            close(fd);
-            return;
-        } else if (rd == 0) {
-            printf("EOF on '%s' (fd %d)\n", arg, fd);
-            close(fd);
-            return;
-        } else {
-            if (rd > 4096) rd = 4096;
-            buf[rd] = '\0';
-            printf("Read %d bytes from '%s':\n%s\n", rd, arg, buf);
-        }
-        close(fd);
-    }
-} 
-
-static void cmd_close(const char *arg) {
-    if (!arg || *arg == '\0') {
-        puts("Usage: close <fd>");
-        return;
-    }
-    if (arg[0] < '0' || arg[0] > '9') {
-        printf("close: expected numeric fd, got '%s'\n", arg);
-        return;
-    }
-    int fd = 0;
-    const char *p = arg;
-    while (*p >= '0' && *p <= '9') { fd = fd * 10 + (*p - '0'); p++; }
-
-    int ret = close(fd);
-    if (ret < 0) {
-        printf("Failed to close fd %d\n", fd);
-    } else {
-        printf("Closed fd %d\n", fd);
-    }
-}
-
 static void cmd_colors(void) {
     unsigned int width, height, bpp, font_h, rows, cursor_row;
     if (fb_getinfo(&width, &height, &bpp, &font_h, &rows, &cursor_row) != 0) {
@@ -400,6 +315,102 @@ static void cmd_pwd(void) {
     printf("%s\n", cwd);
 }
 
+static void cmd_touch(const char *arg) {
+    if (!arg || *arg == '\0') {
+        puts("Usage: touch <path>");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_create(path, 0x06);
+    if (ret < 0) {
+        printf("touch: cannot create '%s'\n", path);
+    } else {
+        printf("Created '%s'\n", path);
+    }
+}
+
+static void cmd_mkdir_shell(const char *arg) {
+    if (!arg || *arg == '\0') {
+        puts("Usage: mkdir <path>");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_mkdir(path, 0x07);
+    if (ret < 0) {
+        printf("mkdir: cannot create directory '%s'\n", path);
+    } else {
+        printf("Created directory '%s'\n", path);
+    }
+}
+
+static void cmd_rm(const char *arg) {
+    if (!arg || *arg == '\0') {
+        puts("Usage: rm <path>");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_unlink(path);
+    if (ret < 0) {
+        printf("rm: cannot remove '%s'\n", path);
+    } else {
+        printf("Removed '%s'\n", path);
+    }
+}
+
+static void cmd_write_file(const char *arg) {
+    if (!arg || *arg == '\0') {
+        puts("Usage: write <path> <text>");
+        return;
+    }
+    const char *space = arg;
+    while (*space && *space != ' ') space++;
+    if (*space != ' ') {
+        puts("Usage: write <path> <text>");
+        return;
+    }
+    int pathlen = (int)(space - arg);
+    if (pathlen <= 0 || pathlen >= SHELL_PATH_MAX) {
+        puts("Invalid path");
+        return;
+    }
+    char rawpath[SHELL_PATH_MAX];
+    for (int i = 0; i < pathlen; i++) rawpath[i] = arg[i];
+    rawpath[pathlen] = '\0';
+    
+    char path[SHELL_PATH_MAX];
+    resolve_path(rawpath, path, sizeof(path));
+    
+    const char *text = space + 1;
+    int textlen = 0;
+    while (text[textlen]) textlen++;
+    
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        int ret = vfs_create(path, 0x06);
+        if (ret < 0) {
+            printf("write: cannot create '%s'\n", path);
+            return;
+        }
+        fd = vfs_open(path, O_RDONLY);
+        if (fd < 0) {
+            printf("write: cannot open '%s' after create\n", path);
+            return;
+        }
+    }
+    
+    int written = vfs_write_fd(fd, text, (unsigned int)textlen);
+    vfs_close_fd(fd);
+    
+    if (written < 0) {
+        printf("write: failed to write to '%s'\n", path);
+    } else {
+        printf("Wrote %d bytes to '%s'\n", written, path);
+    }
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -441,9 +452,6 @@ int main(int argc, char **argv) {
             puts("  fork       - test fork syscall");
             puts("  initrd ls  - list initrd files");
             puts("  initrd cat N|name - show file by index or name");
-            puts("  open <path> - open file, returns fd");
-            puts("  read <fd|name>  - read from fd or open+read name");
-            puts("  close <fd> - close fd");
             puts("  colors     - 32-bit color graphics demo!");
             puts("  console N  - switch to console N (0-8)");
             puts("  mounts     - list VFS mounts");
@@ -451,6 +459,10 @@ int main(int argc, char **argv) {
             puts("  cd <path>  - change directory");
             puts("  pwd        - print working directory");
             puts("  vcat <path> - read file via VFS");
+            puts("  touch <path> - create empty file");
+            puts("  mkdir <path> - create directory");
+            puts("  rm <path>  - remove file/empty dir");
+            puts("  write <path> <text> - write text to file");
             puts("  exit       - exit shell");
         } else if (strcmp(line, "fork") == 0) {
             test_fork();
@@ -464,12 +476,6 @@ int main(int argc, char **argv) {
             cmd_initrd_ls();
         } else if (strncmp(line, "initrd cat ", 11) == 0) {
             cmd_initrd_cat(&line[11]);
-        } else if (strncmp(line, "open ", 5) == 0) {
-            cmd_open(&line[5]);
-        } else if (strncmp(line, "read ", 5) == 0) {
-            cmd_read(&line[5]);
-        } else if (strncmp(line, "close ", 6) == 0) {
-            cmd_close(&line[6]);
         } else if (strcmp(line, "colors") == 0) {
             cmd_colors();
         } else if (strncmp(line, "console ", 8) == 0) {
@@ -484,6 +490,14 @@ int main(int argc, char **argv) {
             cmd_vfs_ls(&line[3]);
         } else if (strncmp(line, "vcat ", 5) == 0) {
             cmd_vfs_cat(&line[5]);
+        } else if (strncmp(line, "touch ", 6) == 0) {
+            cmd_touch(&line[6]);
+        } else if (strncmp(line, "mkdir ", 6) == 0) {
+            cmd_mkdir_shell(&line[6]);
+        } else if (strncmp(line, "rm ", 3) == 0) {
+            cmd_rm(&line[3]);
+        } else if (strncmp(line, "write ", 6) == 0) {
+            cmd_write_file(&line[6]);
         } else if (strncmp(line, "echo ", 5) == 0) {
             puts(&line[5]);
         } else if (strcmp(line, "pid") == 0) {
