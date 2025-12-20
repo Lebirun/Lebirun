@@ -43,6 +43,10 @@
 #define SYS_VFS_UNLINK 37
 #define SYS_CONSOLE_SETCURSOR 38
 #define SYS_READ_NB 39
+#define SYS_SATA_TEST 40
+#define SYS_SATA_INFO 41
+#define SYS_SATA_SMART 42
+#define SYS_SATA_IRQ 43
 
 #ifndef __is_libk
 

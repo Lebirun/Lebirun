@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <syscall.h>
 
 #define O_RDONLY 0
 #define SHELL_PATH_MAX 256
@@ -140,6 +141,7 @@ void help() {
     printf("mkdir <path>\n");
     printf("rm <path>\n");
     printf("write <path> <text>\n");
+    printf("sata [test|info|smart|irq]\n");
 }
 
 void echo(const char *line) {
@@ -322,6 +324,51 @@ void writer(const char *arg) {
     }
 }
 
+void sata(const char *arg) {
+    if (!arg || *arg == '\0') {
+        printf("sata: usage: sata [test|info|smart|irq]\n");
+        printf("  test - run SATA read/write test\n");
+        printf("  info - show AHCI controller info\n");
+        printf("  smart - show S.M.A.R.T. data\n");
+        printf("  irq [on|off] - enable/disable interrupts\n");
+        return;
+    }
+    
+    if (strcmp(arg, "test") == 0) {
+        printf("Running SATA read/write test...\n");
+        int result = syscall0(SYS_SATA_TEST);
+        if (result == 0) {
+            printf("SATA test completed successfully!\n");
+        } else {
+            printf("SATA test failed (error %d)\n", result);
+        }
+    } else if (strcmp(arg, "info") == 0) {
+        printf("AHCI Controller Information:\n");
+        int num_ports = syscall0(SYS_SATA_INFO);
+        if (num_ports >= 0) {
+            printf("Active ports: %d\n", num_ports);
+        }
+    } else if (strcmp(arg, "smart") == 0) {
+        printf("Reading S.M.A.R.T. data from port 0...\n");
+        syscall1(SYS_SATA_SMART, 0);
+    } else if (strncmp(arg, "irq", 3) == 0) {
+        const char *sub = arg + 3;
+        while (*sub == ' ') sub++;
+        if (strcmp(sub, "on") == 0) {
+            printf("Enabling SATA interrupts...\n");
+            syscall1(SYS_SATA_IRQ, 1);
+        } else if (strcmp(sub, "off") == 0) {
+            printf("Disabling SATA interrupts...\n");
+            syscall1(SYS_SATA_IRQ, 0);
+        } else {
+            printf("Usage: sata irq [on|off]\n");
+        }
+    } else {
+        printf("sata: unknown subcommand '%s'\n", arg);
+        printf("Use 'sata test', 'sata info', 'sata smart', or 'sata irq [on|off]'\n");
+    }
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     char line[128];
@@ -366,6 +413,10 @@ int main(int argc, char **argv) {
             const char *arg = line + 5;
             while (*arg == ' ') arg++;
             writer((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "sata", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
+            const char *arg = line + 4;
+            while (*arg == ' ') arg++;
+            sata((*arg == '\0') ? NULL : arg);
         } else if (is_executable_path(line)) {
             run_binary(line);
         } else {

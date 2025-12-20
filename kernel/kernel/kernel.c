@@ -19,6 +19,7 @@
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
 #include <kernel/vfs.h>
+#include <kernel/drivers/sata/ahci.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -176,6 +177,25 @@ void kernel_main(void) {
     uint8_t slave_mask = inb(0xA1);
     print_hex(slave_mask);
     terminal_writestring("\n");
+
+    if (ahci_init() == 0) {
+        printf("AHCI SATA driver initialized successfully\n");
+        
+        ahci_port_t *port = ahci_get_port(0);
+        if (port) {
+            uint8_t test_sector[512];
+            if (ahci_read_sectors(port, 0, 1, test_sector) == 0) {
+                printf("AHCI: Successfully read sector 0 from drive\n");
+                printf("AHCI: First 16 bytes: ");
+                for (int i = 0; i < 16; i++) {
+                    printf("%02X ", test_sector[i]);
+                }
+                printf("\n");
+            }
+        }
+    } else {
+        printf("AHCI SATA driver not available (no controller found)\n");
+    }
 
 	terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");

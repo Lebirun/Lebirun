@@ -1,4 +1,3 @@
-#include <kernel/registers.h>
 #include <string.h>
 #include <stdint.h>
 #include <kernel/tty.h>
@@ -8,6 +7,8 @@
 #include <kernel/syscall.h>
 #include <kernel/io.h>
 #include <kernel/mem_map.h>
+#include <kernel/registers.h>
+#include <kernel/idt.h>
 
 extern void isr0(void);
 extern void isr1(void);
@@ -61,6 +62,47 @@ extern void isr48(void);
 extern void isr128(void);
 
 volatile uint32_t tick_count = 0;
+
+#define MAX_IRQ_HANDLERS 16
+static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS] = {0};
+
+void irq_register_handler(uint8_t irq, irq_handler_t handler) {
+    if (irq < MAX_IRQ_HANDLERS) {
+        irq_handlers[irq] = handler;
+    }
+}
+
+void irq_unregister_handler(uint8_t irq) {
+    if (irq < MAX_IRQ_HANDLERS) {
+        irq_handlers[irq] = NULL;
+    }
+}
+
+void irq_unmask(uint8_t irq) {
+    uint16_t port;
+    uint8_t value;
+    if (irq < 8) {
+        port = 0x21;
+    } else {
+        port = 0xA1;
+        irq -= 8;
+    }
+    value = inb(port) & ~(1 << irq);
+    outb(port, value);
+}
+
+void irq_mask(uint8_t irq) {
+    uint16_t port;
+    uint8_t value;
+    if (irq < 8) {
+        port = 0x21;
+    } else {
+        port = 0xA1;
+        irq -= 8;
+    }
+    value = inb(port) | (1 << irq);
+    outb(port, value);
+}
 
 static const char* exception_messages[] = {
     "Divide-by-zero",
@@ -164,6 +206,8 @@ registers_t* interrupt_handler(registers_t* regs)
             regs = schedule_from_irq(regs);
         } else if (irq == 1) {
             keyboard_handler(regs);
+        } else if (irq < MAX_IRQ_HANDLERS && irq_handlers[irq]) {
+            irq_handlers[irq](regs);
         }
 
         if (debugMode && debugLevel >= 5) {

@@ -19,3 +19,5 @@ kernel/arch/**/user_shell_bin.o
 *~
 *.swp
 .DS_Store
+
+*.qcow2

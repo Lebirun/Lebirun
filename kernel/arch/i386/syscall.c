@@ -10,6 +10,7 @@
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
 #include <kernel/vfs.h>
+#include <kernel/drivers/sata/ahci.h>
 
 extern mutex_t print_lock;
 
@@ -53,8 +54,12 @@ extern mutex_t print_lock;
 #define SYSCALL_VFS_UNLINK 37
 #define SYSCALL_CONSOLE_SETCURSOR 38
 #define SYSCALL_READ_NB 39
+#define SYSCALL_SATA_TEST 40
+#define SYSCALL_SATA_INFO 41
+#define SYSCALL_SATA_SMART 42
+#define SYSCALL_SATA_IRQ 43
 
-#define NR_SYSCALLS 40
+#define NR_SYSCALLS 44
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -661,6 +666,64 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     return vfs_unlink(parent, filename);
 }
 
+static int sys_sata_test(int unused1, const char *unused2, int unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    return ahci_test_rw();
+}
+
+static int sys_sata_info(int unused1, const char *unused2, int unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    ahci_controller_t *ctrl = ahci_get_controller();
+    if (!ctrl || !ctrl->initialized) {
+        printf("SATA: No AHCI controller initialized\n");
+        return -1;
+    }
+    ahci_debug_info();
+    return (int)ctrl->num_ports;
+}
+
+static int sys_sata_smart(int port_num, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    ahci_port_t *port = ahci_get_port((uint32_t)port_num);
+    if (!port) {
+        printf("SMART: No SATA drive on port %d\n", port_num);
+        return -1;
+    }
+    
+    int status = ahci_smart_get_status(port);
+    if (status < 0) {
+        printf("SMART: Failed to get status (enabling SMART...)\n");
+        if (ahci_smart_enable(port) < 0) {
+            printf("SMART: Failed to enable\n");
+            return -1;
+        }
+        status = ahci_smart_get_status(port);
+    }
+    
+    if (status == 0) {
+        printf("SMART: Drive health OK\n");
+    } else if (status == 1) {
+        printf("SMART: Drive health WARNING - failure predicted!\n");
+    }
+    
+    smart_data_t data;
+    if (ahci_smart_read_data(port, &data) == 0) {
+        ahci_smart_print(&data);
+    }
+    
+    return status;
+}
+
+static int sys_sata_irq(int enable, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    if (enable) {
+        ahci_enable_interrupts();
+    } else {
+        ahci_disable_interrupts();
+    }
+    return 0;
+}
+
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
@@ -726,4 +789,8 @@ void syscall_init(void) {
     syscall_table[SYSCALL_VFS_MKDIR] = sys_vfs_mkdir;
     syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
     syscall_table[SYSCALL_READ_NB] = sys_read_nb;
+    syscall_table[SYSCALL_SATA_TEST] = sys_sata_test;
+    syscall_table[SYSCALL_SATA_INFO] = sys_sata_info;
+    syscall_table[SYSCALL_SATA_SMART] = sys_sata_smart;
+    syscall_table[SYSCALL_SATA_IRQ] = sys_sata_irq;
 }

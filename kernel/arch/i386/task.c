@@ -663,11 +663,7 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
 
 registers_t* schedule_from_irq(registers_t* regs) {
     if (!current_task || !ready_queue_head) return regs;
-
-    // If we're currently executing inside a syscall, do not preempt on timer IRQs.
-    // The scheduler can only safely switch using a fully saved IRQ frame; when
-    // `syscall_frame` is set we must let the syscall run to a safe point (or
-    // explicitly yield via int 48).
+    
     if (regs->int_no != 48 && current_task->syscall_frame) {
         return regs;
     }
