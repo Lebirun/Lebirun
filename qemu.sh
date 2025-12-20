@@ -9,6 +9,7 @@ qemu-system-$(./target-triplet-to-arch.sh $HOST) \
     -no-reboot \
     -device ahci,id=ahci0 \
     -drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 \
-    -device ide-hd,drive=sata0,bus=ahci0.0
+    -device ide-hd,drive=sata0,bus=ahci0.0 \
+    -boot d
 
 # Add "-d int,cpu_reset" for spammy QEMU built-in debugging output

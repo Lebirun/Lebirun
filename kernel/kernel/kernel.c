@@ -20,6 +20,7 @@
 #include <kernel/console.h>
 #include <kernel/vfs.h>
 #include <kernel/drivers/sata/ahci.h>
+#include <kernel/fs/ext4/ext4.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -137,6 +138,8 @@ void kernel_main(void) {
         vfs_init();
         initrd_vfs_register();
         ramfs_vfs_register();
+        ext4_init();
+        ext4_vfs_register();
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -191,6 +194,12 @@ void kernel_main(void) {
                     printf("%02X ", test_sector[i]);
                 }
                 printf("\n");
+            }
+
+            if (vfs_mount(NULL, "/disk", "ext4") == 0) {
+                printf("EXT4 filesystem mounted on /disk\n");
+            } else {
+                printf("Failed to mount ext4 filesystem (disk may not be formatted)\n");
             }
         }
     } else {
