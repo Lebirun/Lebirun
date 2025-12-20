@@ -3,10 +3,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #define O_RDONLY 0
 #define SHELL_PATH_MAX 256
-#define MAX_BIN_SIZE (64 * 1024)
 
 static char cwd[SHELL_PATH_MAX] = "/";
 
@@ -67,10 +67,6 @@ static int run_binary(const char *path) {
     if (vfs_stat(fd, &size, &type) < 0) { printf("Cannot stat '%s'\n", resolved); goto err; }
     if (type & 0x02) { printf("'%s' is a directory\n", resolved); goto err; }
     if (size == 0) { printf("'%s' is empty\n", resolved); goto err; }
-    if (size > MAX_BIN_SIZE) {
-        printf("'%s' is too large (%u bytes, max %d)\n", resolved, size, MAX_BIN_SIZE);
-        goto err;
-    }
 
     bin = (uint8_t *)sbrk((int)size);
     if (!bin || bin == (uint8_t *)-1) { printf("Failed to allocate %u bytes\n", size); goto err; }
@@ -109,6 +105,7 @@ static inline int is_executable_path(const char *cmd) {
 static int read_line(char *buf, size_t cap) {
     size_t pos = 0;
     if (!buf || cap == 0) return 0;
+    bool overflow = false;
     while (1) {
         int in = getchar();
         if (in < 0) continue;
@@ -116,13 +113,17 @@ static int read_line(char *buf, size_t cap) {
         if (c == '\n' || c == '\r') {
             putchar('\n');
             buf[pos] = '\0';
+            if (overflow) printf("Input truncated to %zu characters\n", cap - 1);
             return 1;
         }
         if (c == '\b' || c == 127) {
             if (pos) { pos--; putchar('\b'); putchar(' '); putchar('\b'); }
             continue;
         }
-        if (c >= 32 && pos + 1 < cap) { buf[pos++] = c; putchar(c); }
+        if (c >= 32) {
+            if (pos + 1 < cap) { buf[pos++] = c; putchar(c); }
+            else { overflow = true; putchar('\a'); }
+        }
     }
 }
 
@@ -131,13 +132,194 @@ void help() {
     printf("help\n");
     printf("echo\n");
     printf("ticks\n");
+    printf("cd <path>\n");
+    printf("ls [path]\n");
+    printf("cat <path>\n");
+    printf("pwd\n");
+    printf("touch <path>\n");
+    printf("mkdir <path>\n");
+    printf("rm <path>\n");
+    printf("write <path> <text>\n");
 }
 
-void echo(char line[128]) {
-    char *p = &line[4];
+void echo(const char *line) {
+    if (!line) { putchar('\n'); return; }
+    const char *p = line + 4;
     while (*p == ' ') p++;
     if (*p == '\0') putchar('\n');
     else puts(p);
+}
+
+void ls(const char *arg) {
+    char path[SHELL_PATH_MAX];
+    if (arg && *arg) {
+        resolve_path(arg, path, sizeof(path));
+    } else {
+        strncpy(path, cwd, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("ls: cannot access '%s'\n", path);
+        return;
+    }
+
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) == 0) {
+        if ((type & 0x02) == 0 && (type & 0x08) == 0) {
+            printf("ls: '%s' is not a directory\n", path);
+            vfs_close_fd(fd);
+            return;
+        }
+    }
+
+    printf("Contents of %s:\n", path);
+    char name[64];
+    unsigned int entry_type = 0;
+    for (unsigned int i = 0; i < 100; i++) {
+        if (vfs_readdir(fd, name, &entry_type, i) < 0) break;
+        const char *type_str = (entry_type == 2 || entry_type == 8) ? "DIR " : "FILE";
+        printf("  [%s] %s\n", type_str, name);
+    }
+    vfs_close_fd(fd);
+}
+
+void cd(const char *path) {
+    char resolved[SHELL_PATH_MAX];
+    if (!path || *path == '\0') {
+        strncpy(cwd, "/", sizeof(cwd));
+        cwd[sizeof(cwd) - 1] = '\0';
+        return;
+    }
+    resolve_path(path, resolved, sizeof(resolved));
+
+    int fd = vfs_open(resolved, O_RDONLY);
+    if (fd < 0) {
+        printf("cd: cannot access '%s'\n", resolved);
+        return;
+    }
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) < 0 || ((type & 0x02) == 0 && (type & 0x08) == 0)) {
+        printf("cd: '%s' is not a directory\n", resolved);
+        vfs_close_fd(fd);
+        return;
+    }
+    vfs_close_fd(fd);
+    strncpy(cwd, resolved, sizeof(cwd) - 1);
+    cwd[sizeof(cwd) - 1] = '\0';
+}
+
+void cat(const char *arg) {
+    char path[SHELL_PATH_MAX];
+    if (!arg || *arg == '\0') {
+        printf("cat: missing operand\n");
+        return;
+    }
+    resolve_path(arg, path, sizeof(path));
+
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) { printf("cat: cannot open '%s'\n", path); return; }
+
+    unsigned int size = 0, type = 0;
+    if (vfs_stat(fd, &size, &type) < 0) { printf("cat: cannot stat '%s'\n", path); vfs_close_fd(fd); return; }
+    if (type & 0x02) { printf("cat: '%s' is a directory\n", path); vfs_close_fd(fd); return; }
+
+    char buf[256];
+    int rd;
+    while ((rd = vfs_read_fd(fd, buf, sizeof(buf))) > 0) {
+        for (int i = 0; i < rd; i++) putchar(buf[i]);
+    }
+    if (rd < 0) printf("cat: read error on '%s'\n", path);
+    vfs_close_fd(fd);
+}
+
+void pwd() {
+    printf("%s\n", cwd);
+}
+
+void touch(const char *arg) {
+    if (!arg || *arg == '\0') {
+        printf("touch: missing operand\n");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_create(path, 0x06);
+    if (ret < 0) {
+        printf("touch: cannot create '%s'\n", path);
+    } else {
+        printf("Created '%s'\n", path);
+    }
+}
+
+void mkdir(const char *arg) {
+    if (!arg || *arg == '\0') {
+        printf("mkdir: missing operand\n");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_mkdir(path, 0x07);
+    if (ret < 0) {
+        printf("mkdir: cannot create directory '%s'\n", path);
+    } else {
+        printf("Created directory '%s'\n", path);
+    }
+}
+
+void rm(const char *arg) {
+    if (!arg || *arg == '\0') {
+        printf("rm: missing operand\n");
+        return;
+    }
+    char path[SHELL_PATH_MAX];
+    resolve_path(arg, path, sizeof(path));
+    int ret = vfs_unlink(path);
+    if (ret < 0) {
+        printf("rm: cannot remove '%s'\n", path);
+    } else {
+        printf("Removed '%s'\n", path);
+    }
+}
+
+void writer(const char *arg) {
+    if (!arg || *arg == '\0') {
+        printf("write: usage: write <path> <text>\n");
+        return;
+    }
+    const char *space = arg;
+    while (*space && *space != ' ') space++;
+    if (*space != ' ') { printf("write: usage: write <path> <text>\n"); return; }
+    int pathlen = (int)(space - arg);
+    if (pathlen <= 0 || pathlen >= SHELL_PATH_MAX) { printf("write: invalid path\n"); return; }
+    char rawpath[SHELL_PATH_MAX];
+    for (int i = 0; i < pathlen; i++) rawpath[i] = arg[i];
+    rawpath[pathlen] = '\0';
+
+    char path[SHELL_PATH_MAX];
+    resolve_path(rawpath, path, sizeof(path));
+
+    const char *text = space + 1;
+    int textlen = 0;
+    while (text[textlen]) textlen++;
+
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        int ret = vfs_create(path, 0x06);
+        if (ret < 0) { printf("write: cannot create '%s'\n", path); return; }
+        fd = vfs_open(path, O_RDONLY);
+        if (fd < 0) { printf("write: cannot open '%s' after create\n", path); return; }
+    }
+
+    int written = vfs_write_fd(fd, text, (unsigned int)textlen);
+    vfs_close_fd(fd);
+
+    if (written < 0) {
+        printf("write: failed to write to '%s'\n", path);
+    } else {
+        printf("Wrote %d bytes to '%s'\n", written, path);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -154,6 +336,36 @@ int main(int argc, char **argv) {
             echo(line);
         } else if (strcmp(line, "ticks") == 0) {
             printf("Ticks: %u\n", getticks());
+        } else if (strncmp(line, "cd", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
+            const char *arg = line + 2;
+            while (*arg == ' ') arg++;
+            cd((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "ls", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
+            const char *arg = line + 2;
+            while (*arg == ' ') arg++;
+            ls((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "cat", 3) == 0 && (line[3] == '\0' || line[3] == ' ')) {
+            const char *arg = line + 3;
+            while (*arg == ' ') arg++;
+            cat((*arg == '\0') ? NULL : arg);
+        } else if (strcmp(line, "pwd") == 0) {
+            pwd();
+        } else if (strncmp(line, "touch", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+            const char *arg = line + 5;
+            while (*arg == ' ') arg++;
+            touch((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "mkdir", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+            const char *arg = line + 5;
+            while (*arg == ' ') arg++;
+            mkdir((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "rm", 2) == 0 && (line[2] == '\0' || line[2] == ' ')) {
+            const char *arg = line + 2;
+            while (*arg == ' ') arg++;
+            rm((*arg == '\0') ? NULL : arg);
+        } else if (strncmp(line, "write", 5) == 0 && (line[5] == '\0' || line[5] == ' ')) {
+            const char *arg = line + 5;
+            while (*arg == ' ') arg++;
+            writer((*arg == '\0') ? NULL : arg);
         } else if (is_executable_path(line)) {
             run_binary(line);
         } else {

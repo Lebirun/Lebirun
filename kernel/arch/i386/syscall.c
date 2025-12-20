@@ -479,8 +479,10 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 }
 
 static int sys_vfs_read(int fd, const char *buf, int len) {
+    if (!buf || len <= 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
     return vfs_read_fd(fd, (void *)buf_addr, (uint32_t)len);
 }
 
@@ -536,8 +538,10 @@ static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
 }
 
 static int sys_vfs_write(int fd, const char *buf, int len) {
+    if (!buf || len <= 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
     return vfs_write_fd(fd, (const void *)buf_addr, (uint32_t)len);
 }
 

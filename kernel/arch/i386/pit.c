@@ -40,7 +40,6 @@ static uint32_t calibrated_freq = 100;
 static uint32_t current_divisor = 0;
 static uint64_t uptime_ticks = 0;
 static uint32_t last_tick = 0;
-static uint32_t tick_remainder_us = 0;
 static uint32_t us_per_tick = 10000;
 
 typedef void (*pit_callback_t)(uint32_t ticks);
