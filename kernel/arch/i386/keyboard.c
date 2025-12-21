@@ -148,6 +148,13 @@ void keyboard_handler(registers_t* regs) {
         }
     }
 
+    if (ctrl_pressed && code == 0x2E) {
+        buffer_put(0x03);
+        int cur = console_is_initialized() ? console_get_current() : 0;
+        waitq_wake_all(&keyboard_waiters[cur]);
+        return;
+    }
+
     char c = shift_pressed ? qwerty_uppercase[code] : qwerty_lowercase[code];
     if (c != 0) {
         buffer_put(c);

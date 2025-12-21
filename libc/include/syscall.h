@@ -48,6 +48,16 @@
 #define SYS_SATA_SMART 42
 #define SYS_SATA_IRQ 43
 
+#define SYS_NET_IFCONFIG 44
+#define SYS_NET_PING 45
+#define SYS_NET_ARP 46
+#define SYS_NET_DNS 47
+#define SYS_NET_DHCP 48
+#define SYS_NET_GETINFO 49
+#define SYS_NET_ARP_GET 50
+#define SYS_NET_PING_ONE 51
+#define SYS_NET_DNS_RESOLVE 52
+
 #ifndef __is_libk
 
 static inline int syscall0(int num) {

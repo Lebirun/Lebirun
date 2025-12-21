@@ -21,6 +21,7 @@
 #include <kernel/vfs.h>
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/fs/ext4/ext4.h>
+#include <kernel/drivers/net/net.h>
 #include "launch_user.h"
 
 bool debugMode = false; 
@@ -205,6 +206,8 @@ void kernel_main(void) {
     } else {
         printf("AHCI SATA driver not available (no controller found)\n");
     }
+
+    net_init();
 
 	terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");

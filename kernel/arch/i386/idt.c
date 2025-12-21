@@ -203,6 +203,8 @@ registers_t* interrupt_handler(registers_t* regs)
             reap_dead_tasks();
             extern void fb_tick(void);
             fb_tick();
+            extern void net_tick(void);
+            net_tick();
             regs = schedule_from_irq(regs);
         } else if (irq == 1) {
             keyboard_handler(regs);

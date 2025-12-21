@@ -11,6 +11,7 @@
 #include <kernel/console.h>
 #include <kernel/vfs.h>
 #include <kernel/drivers/sata/ahci.h>
+#include <kernel/drivers/net/net.h>
 
 extern mutex_t print_lock;
 
@@ -58,8 +59,17 @@ extern mutex_t print_lock;
 #define SYSCALL_SATA_INFO 41
 #define SYSCALL_SATA_SMART 42
 #define SYSCALL_SATA_IRQ 43
+#define SYSCALL_NET_IFCONFIG 44
+#define SYSCALL_NET_PING 45
+#define SYSCALL_NET_ARP 46
+#define SYSCALL_NET_DNS 47
+#define SYSCALL_NET_DHCP 48
+#define SYSCALL_NET_GETINFO 49
+#define SYSCALL_NET_ARP_GET 50
+#define SYSCALL_NET_PING_ONE 51
+#define SYSCALL_NET_DNS_RESOLVE 52
 
-#define NR_SYSCALLS 44
+#define NR_SYSCALLS 53
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -733,6 +743,176 @@ static int sys_sata_irq(int enable, const char *unused2, int unused3) {
     return 0;
 }
 
+static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
+    (void)unused; (void)unused2; (void)unused3;
+    netif_t *netif = netif_get_default();
+    if (!netif) {
+        printf("No network interface found\n");
+        return -1;
+    }
+    netif_print_info(netif);
+    return 0;
+}
+
+static int sys_net_ping(int ip_packed, const char *unused2, int count) {
+    (void)unused2;
+    printf("[DEBUG] sys_net_ping called with ip=0x%08X count=%d\n", ip_packed, count);
+    ipv4_addr_t target = u32_to_ipv4((uint32_t)ip_packed);
+    if (count <= 0) count = 4;
+    if (count > 100) count = 100;
+    return ping(target, count, 3000);
+}
+
+static int sys_net_arp(int unused, const char *unused2, int unused3) {
+    (void)unused; (void)unused2; (void)unused3;
+    arp_print_cache();
+    return 0;
+}
+
+static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
+    (void)unused;
+    printf("[DEBUG] sys_net_dns called with hostname=%s\n", hostname ? hostname : "(null)");
+    if (!hostname) return -1;
+    ipv4_addr_t resolved;
+    int ret = dns_resolve(hostname, &resolved);
+    if (ret == 0) {
+        printf("DNS: %s -> %u.%u.%u.%u\n", hostname,
+               resolved.octets[0], resolved.octets[1],
+               resolved.octets[2], resolved.octets[3]);
+        if (result_ptr) {
+            *(uint32_t *)result_ptr = ipv4_to_u32(resolved);
+        }
+    } else {
+        printf("DNS: Failed to resolve %s\n", hostname);
+    }
+    return ret;
+}
+
+static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    netif_t *netif = netif_get_default();
+    if (!netif) {
+        printf("No network interface found\n");
+        return -1;
+    }
+    if (cmd == 0) {
+        if (dhcp_is_bound(netif)) {
+            printf("DHCP: Bound\n");
+            return 1;
+        } else {
+            printf("DHCP: Not bound\n");
+            return 0;
+        }
+    } else if (cmd == 1) {
+        printf("DHCP: Starting...\n");
+        dhcp_start(netif);
+        return 0;
+    }
+    return -1;
+}
+
+typedef struct {
+    char name[16];
+    uint8_t mac[6];
+    uint8_t _pad1[2];
+    uint32_t ipv4;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns;
+    uint32_t mtu;
+    uint8_t link_up;
+    uint8_t dhcp_configured;
+    uint8_t _pad2[2];
+} __attribute__((packed)) netinfo_user_t;
+
+typedef struct {
+    uint32_t ip;
+    uint8_t mac[6];
+    uint8_t valid;
+    uint8_t _pad;
+} __attribute__((packed)) arp_entry_user_t;
+
+static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    if (!buf_ptr) return -1;
+    
+    netif_t *netif = netif_get_default();
+    if (!netif) return -1;
+    
+    netinfo_user_t *info = (netinfo_user_t *)buf_ptr;
+    
+    for (int i = 0; i < 15 && netif->name[i]; i++) {
+        info->name[i] = netif->name[i];
+    }
+    info->name[15] = '\0';
+    
+    for (int i = 0; i < 6; i++) {
+        info->mac[i] = netif->mac.addr[i];
+    }
+    
+    info->ipv4 = ipv4_to_u32(netif->ipv4);
+    info->netmask = ipv4_to_u32(netif->netmask);
+    info->gateway = ipv4_to_u32(netif->gateway);
+    info->dns = ipv4_to_u32(netif->dns_server);
+    info->mtu = netif->mtu;
+    info->link_up = netif->link_up;
+    info->dhcp_configured = netif->dhcp_configured;
+    
+    return 0;
+}
+
+extern int arp_get_cache(uint32_t *ips, uint8_t *macs, int max_entries);
+
+typedef struct {
+    uint32_t ip;
+    uint8_t mac[6];
+} __attribute__((packed)) arp_user_entry_t;
+
+static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) {
+    if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
+    
+    uint32_t ips[16];
+    uint8_t macs[16 * 6];
+    
+    if (max_entries > 16) max_entries = 16;
+    
+    int count = arp_get_cache(ips, macs, max_entries);
+    
+    arp_user_entry_t *entries = (arp_user_entry_t *)buf_ptr;
+    for (int i = 0; i < count; i++) {
+        entries[i].ip = ips[i];
+        for (int j = 0; j < 6; j++) {
+            entries[i].mac[j] = macs[i * 6 + j];
+        }
+    }
+    
+    *(int *)count_ptr = count;
+    
+    return 0;
+}
+
+extern int ping_one(ipv4_addr_t target, uint16_t seq, uint32_t timeout_ms);
+
+static int sys_net_ping_one(int ip_packed, const char *seq_ptr, int timeout_ms) {
+    ipv4_addr_t target = u32_to_ipv4((uint32_t)ip_packed);
+    uint16_t seq = (uint16_t)(int)(size_t)seq_ptr;
+    if (timeout_ms <= 0) timeout_ms = 3000;
+    return ping_one(target, seq, (uint32_t)timeout_ms);
+}
+
+static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unused) {
+    (void)unused;
+    const char *hostname = (const char *)hostname_ptr;
+    if (!hostname || !result_ptr) return -1;
+    
+    ipv4_addr_t resolved;
+    int ret = dns_resolve(hostname, &resolved);
+    if (ret == 0) {
+        *(uint32_t *)result_ptr = ipv4_to_u32(resolved);
+    }
+    return ret;
+}
+
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
@@ -802,4 +982,13 @@ void syscall_init(void) {
     syscall_table[SYSCALL_SATA_INFO] = sys_sata_info;
     syscall_table[SYSCALL_SATA_SMART] = sys_sata_smart;
     syscall_table[SYSCALL_SATA_IRQ] = sys_sata_irq;
+    syscall_table[SYSCALL_NET_IFCONFIG] = sys_net_ifconfig;
+    syscall_table[SYSCALL_NET_PING] = sys_net_ping;
+    syscall_table[SYSCALL_NET_ARP] = sys_net_arp;
+    syscall_table[SYSCALL_NET_DNS] = sys_net_dns;
+    syscall_table[SYSCALL_NET_DHCP] = sys_net_dhcp;
+    syscall_table[SYSCALL_NET_GETINFO] = sys_net_getinfo;
+    syscall_table[SYSCALL_NET_ARP_GET] = sys_net_arp_get;
+    syscall_table[SYSCALL_NET_PING_ONE] = sys_net_ping_one;
+    syscall_table[SYSCALL_NET_DNS_RESOLVE] = sys_net_dns_resolve;
 }
