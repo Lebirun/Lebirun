@@ -12,6 +12,7 @@
 #include <kernel/vfs.h>
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/drivers/net/net.h>
+#include <kernel/drivers/net/http.h>
 
 extern mutex_t print_lock;
 
@@ -68,8 +69,9 @@ extern mutex_t print_lock;
 #define SYSCALL_NET_ARP_GET 50
 #define SYSCALL_NET_PING_ONE 51
 #define SYSCALL_NET_DNS_RESOLVE 52
+#define SYSCALL_NET_HTTP_GET 53
 
-#define NR_SYSCALLS 53
+#define NR_SYSCALLS 54
 
 static void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -913,6 +915,46 @@ static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unu
     return ret;
 }
 
+typedef struct {
+    const char *url;
+    uint8_t *buffer;
+    uint32_t buffer_size;
+    uint32_t *out_size;
+    int *status_code;
+} __attribute__((packed)) http_request_user_t;
+
+static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    if (!req_ptr) return -1;
+    
+    http_request_user_t *req = (http_request_user_t *)req_ptr;
+    if (!req->url || !req->buffer || req->buffer_size == 0) return -1;
+    
+    uint32_t url_addr = (uint32_t)req->url;
+    uint32_t buf_addr = (uint32_t)req->buffer;
+    if (url_addr >= 0xC0000000 || url_addr < 0x1000) return -1;
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    
+    uint32_t downloaded = 0;
+    int ret = http_download(req->url, req->buffer, req->buffer_size, &downloaded);
+    
+    if (req->out_size) {
+        uint32_t out_addr = (uint32_t)req->out_size;
+        if (out_addr < 0xC0000000 && out_addr >= 0x1000) {
+            *(req->out_size) = downloaded;
+        }
+    }
+    
+    if (req->status_code) {
+        uint32_t status_addr = (uint32_t)req->status_code;
+        if (status_addr < 0xC0000000 && status_addr >= 0x1000) {
+            *(req->status_code) = (ret == 0) ? 200 : -1;
+        }
+    }
+    
+    return ret;
+}
+
 void do_syscall(registers_t *regs) {
     int num = regs->eax;
 
@@ -991,4 +1033,5 @@ void syscall_init(void) {
     syscall_table[SYSCALL_NET_ARP_GET] = sys_net_arp_get;
     syscall_table[SYSCALL_NET_PING_ONE] = sys_net_ping_one;
     syscall_table[SYSCALL_NET_DNS_RESOLVE] = sys_net_dns_resolve;
+    syscall_table[SYSCALL_NET_HTTP_GET] = sys_net_http_get;
 }

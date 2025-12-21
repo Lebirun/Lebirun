@@ -57,6 +57,7 @@
 #define SYS_NET_ARP_GET 50
 #define SYS_NET_PING_ONE 51
 #define SYS_NET_DNS_RESOLVE 52
+#define SYS_NET_HTTP_GET 53
 
 #ifndef __is_libk
 

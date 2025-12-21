@@ -12,13 +12,11 @@ obj/
 build/
 **/build/
 
-kernel/arch/**/user_shell.bin
-kernel/arch/**/user_shell_bin.o
-
 .vscode
 *~
 *.swp
 .DS_Store
 
 *.qcow2
+*.img
 *.raw
