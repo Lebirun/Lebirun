@@ -21,3 +21,4 @@ kernel/arch/**/user_shell_bin.o
 .DS_Store
 
 *.qcow2
+*.raw
