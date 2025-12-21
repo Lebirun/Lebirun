@@ -399,19 +399,28 @@ static int sys_write(int fd, const char *buf, int len) {
     if ((fd != 1 && fd != 2) || !buf || len < 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
-    if (buf_addr + len >= 0xC0000000) return -1;
+    if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
-    asm volatile("cli");
     framebuffer_t *fb = fb_get();
-    if (fb && fb->font && console_is_initialized()) {
-        int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
-        console_write_to(con_id, (const char *)buf, (size_t)len);
-    } else {
-        for (int i = 0; i < len; i++) {
-            terminal_putchar(buf[i]);
+    int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+    
+    int written = 0;
+    while (written < len) {
+        int chunk = len - written;
+        if (chunk > 64) chunk = 64; 
+        
+        asm volatile("cli");
+        if (fb && fb->font && console_is_initialized()) {
+            console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
+        } else {
+            for (int i = 0; i < chunk; i++) {
+                terminal_putchar(((const char *)buf_addr)[written + i]);
+            }
         }
+        asm volatile("sti");
+        
+        written += chunk;
     }
-    asm volatile("sti");
     return len;
 }
 

@@ -230,9 +230,10 @@ void cat(const char *arg) {
     char buf[256];
     int rd;
     while ((rd = vfs_read_fd(fd, buf, sizeof(buf))) > 0) {
-        for (int i = 0; i < rd; i++) putchar(buf[i]);
+        write(STDOUT_FILENO, buf, rd);
     }
     if (rd < 0) printf("cat: read error on '%s'\n", path);
+    else putchar('\n');
     vfs_close_fd(fd);
 }
 
