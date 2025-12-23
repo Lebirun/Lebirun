@@ -16,8 +16,13 @@ void exit(int status) {
 
 #include <unistd.h>
 
+extern void __run_atexit(void);
+extern void __set_exit_status(int status);
+
 __attribute__((__noreturn__))
 void exit(int status) {
+	__set_exit_status(status);
+	__run_atexit();
 	_exit(status);
 	__builtin_unreachable();
 }

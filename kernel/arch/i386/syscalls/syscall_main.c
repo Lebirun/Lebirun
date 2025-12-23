@@ -38,4 +38,5 @@ void syscall_init(void) {
     syscalls_vfs_init();
     syscalls_sata_init();
     syscalls_net_init();
+    syscalls_termios_init();
 }

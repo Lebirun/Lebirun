@@ -2,6 +2,8 @@
 
 #include <syscall.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <fcntl.h>
 
 void _exit(int status) {
 	syscall1(SYS_EXIT, status);
@@ -55,7 +57,7 @@ unsigned int getticks(void) {
 	return (unsigned int)syscall0(SYS_GETTICKS);
 }
 
-unsigned int time(void *unused) {
+static unsigned int sys_time(void *unused) {
 	(void)unused;
 	return (unsigned int)syscall0(SYS_TIME);
 }
@@ -84,7 +86,7 @@ int initrd_read(int index, void *buf, unsigned int maxlen) {
 	return syscall3(SYS_INITRD_READ, index, (int)buf, (int)maxlen);
 }
 
-int open(const char *path, int flags) {
+int open(const char *path, int flags, ...) {
 	return syscall2(SYS_OPEN, (int)path, flags);
 }
 
@@ -92,7 +94,7 @@ int close(int fd) {
 	return syscall1(SYS_CLOSE, fd);
 }
 
-int fstat(int fd, unsigned int *size, unsigned char *type) {
+int fstat_simple(int fd, unsigned int *size, unsigned char *type) {
 	return syscall3(SYS_FSTAT, fd, (int)size, (int)type);
 }
 

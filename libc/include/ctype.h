@@ -7,6 +7,10 @@
 extern "C" {
 #endif
 
+static inline int isascii(int c) {
+    return (c & ~0x7f) == 0;
+}
+
 static inline int isalpha(int c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
@@ -25,6 +29,10 @@ static inline int isxdigit(int c) {
 
 static inline int isspace(int c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static inline int isblank(int c) {
+    return c == ' ' || c == '\t';
 }
 
 static inline int isupper(int c) {
@@ -57,6 +65,10 @@ static inline int toupper(int c) {
 
 static inline int tolower(int c) {
     return isupper(c) ? c + 32 : c;
+}
+
+static inline int toascii(int c) {
+    return c & 0x7f;
 }
 
 #ifdef __cplusplus

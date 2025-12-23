@@ -46,33 +46,78 @@ stdio/printf.o \
 stdio/snprintf.o \
 stdio/sprintf.o \
 stdio/fprintf.o \
+stdio/sscanf.o \
 stdio/file.o \
 stdio/putchar.o \
 stdio/puts.o \
 stdio/getchar.o \
+stdio/perror.o \
 stdlib/abort.o \
+stdlib/assert.o \
 stdlib/exit.o \
 stdlib/atoi.o \
 stdlib/atol.o \
 stdlib/strtol.o \
 stdlib/strtoul.o \
 stdlib/malloc.o \
+stdlib/abs.o \
+stdlib/env.o \
+stdlib/stdlib_ext.o \
 syscall/syscalls.o \
-string/strncpy.o \
-string/strcat.o \
+unistd/unistd.o \
+	termios/getset.o \
+	termios/controls.o \
+	termios/speed.o \
+	termios/raw.o \
+	termios/pgrp.o \
+	termios/ioctl.o \
+	string/strncpy.o \
+	string/strcat.o \
 string/strncat.o \
 string/strchr.o \
 string/strrchr.o \
 string/strstr.o \
 string/memchr.o \
+string/mempcpy.o \
 string/strdup.o \
 string/strspn.o \
 string/strcspn.o \
 string/strtok.o \
+string/strerror.o \
+string/string_ext.o \
 graphics/graphics.o \
 graphics/bar.o \
 graphics/squares.o \
-graphics/circle.o
+graphics/circle.o \
+stat/stat.o \
+signal/signal.o \
+fcntl/fcntl.o \
+time/time.o \
+setjmp/setjmp.o \
+sgtty/sgtty.o \
+locale/locale.o \
+wchar/wchar.o \
+select/select.o \
+pwd/pwd.o \
+dirent/dirent.o \
+mman/mman.o \
+wait/wait.o \
+inttypes/inttypes.o \
+fnmatch/fnmatch.o \
+regex/regex.o \
+getopt/getopt.o \
+term/term.o \
+uchar/uchar.o \
+glob/glob.o \
+error/error.o \
+libgen/libgen.o \
+sched/sched.o \
+math/math.o \
+utime/utime.o \
+iconv/iconv.o \
+spawn/spawn.o \
+random/random.o \
+gettext/gettext.o
 
 HOSTEDOBJS=\
 $(ARCH_HOSTEDOBJS) \
@@ -88,10 +133,16 @@ BINARIES=libc.a libk.a
 .PHONY: all clean install install-headers install-libs libc-common
 .SUFFIXES: .o .libk.o .c .S
 
-all: libc-common $(BINARIES)
+all: libc-common $(BINARIES) crt0
 
 libc-common:
 	$(MAKE) -C $(LIBC_COMMON)
+
+crt0: crt/crt0.o
+	cp crt/crt0.o lib/crt0.o
+
+crt/crt0.o: crt/crt0.c
+	$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
 
 libc.a: $(OBJS) $(COMMON_OBJS)
 	$(AR) rcs $@ $(OBJS) $(COMMON_OBJS)
@@ -115,6 +166,7 @@ clean:
 	rm -f $(BINARIES) *.a
 	rm -f $(OBJS) $(LIBK_OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) $(LIBK_OBJS:.o=.d) *.d */*.d */*/*.d
+	rm -f lib/crt0.o crt/crt0.o crt/crt0.d
 	$(MAKE) -C $(LIBC_COMMON) clean
 
 install: install-headers install-libs
@@ -124,9 +176,10 @@ install-headers:
 	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
 	cp -R --preserve=timestamps $(LIBC_COMMON)/include/. $(DESTDIR)$(INCLUDEDIR)/.
 
-install-libs: $(BINARIES)
+install-libs: $(BINARIES) crt/crt0.o
 	mkdir -p $(DESTDIR)$(LIBDIR)
 	cp $(BINARIES) $(DESTDIR)$(LIBDIR)
+	cp crt/crt0.o $(DESTDIR)$(LIBDIR)
 
 -include $(OBJS:.o=.d)
 -include $(LIBK_OBJS:.o=.d)

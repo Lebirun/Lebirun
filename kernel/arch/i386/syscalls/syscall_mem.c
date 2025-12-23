@@ -12,15 +12,13 @@ static int sys_sbrk(int inc, const char *unused, int unused2) {
     uint32_t newbrk = (old + (uint32_t)inc + 0xFFF) & ~0xFFFu;
     if (newbrk >= 0x007F0000 || newbrk < old) return -1;
     
-    uint32_t start_page = (old + 0xFFF) & ~0xFFFu;
-    uint32_t num_new_pages = (newbrk - start_page) / 0x1000;
-    
-    if (num_new_pages > 0) {
+    uint32_t old_page_end = (old + 0xFFF) & ~0xFFFu;
+    if (newbrk > old_page_end) {
         uint32_t page_count = 0;
         uint32_t *new_pages = vmm_map_range_in_pd_tracked(
-            current_task->pd_phys, start_page, newbrk - start_page, 0x7, &page_count);
+            current_task->pd_phys, old_page_end, newbrk - old_page_end, 0x7, &page_count);
         
-        if (!new_pages && num_new_pages > 0) {
+        if (!new_pages && (newbrk > old_page_end)) {
             return -1;
         }
         

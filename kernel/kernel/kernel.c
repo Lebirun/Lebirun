@@ -24,7 +24,7 @@
 #include <kernel/drivers/net/net.h>
 #include "launch_user.h"
 
-bool debugMode = false; 
+bool debugMode = true; 
 int debugLevel = 3; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));

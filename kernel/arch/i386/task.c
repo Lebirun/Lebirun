@@ -25,7 +25,9 @@ static volatile int schedule_force = 0;
 #define KERNEL_STACK_SIZE 4096
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000
+#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_GAP  0x1000u
+#define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 
 static uint32_t next_task_id = 1;
 
@@ -279,7 +281,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     if (user_mode) {
         uint32_t* kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
         
-        uint32_t user_esp = USER_STACK_TOP - 16;
+        uint32_t user_esp = USER_STACK_INIT_ESP;
         
         *--kesp = 0x23;
         *--kesp = user_esp;
@@ -668,11 +670,13 @@ registers_t* schedule_from_irq(registers_t* regs) {
         return regs;
     }
 
-    if (!current_task->syscall_frame) {
+    if (current_task->state != TASK_DEAD) {
         save_irq_frame_into_task(current_task, regs, (uint32_t)regs);
     }
 
-    if (!schedule_force) {
+    int must_switch = (current_task->state == TASK_DEAD);
+
+    if (!schedule_force && !must_switch) {
         if (current_task->time_slice > 0) current_task->time_slice--;
         if (current_task->time_slice != 0) return regs;
     }
@@ -680,20 +684,27 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     current_task->time_slice = current_task->base_time_slice;
 
-    task_t* next = current_task->next;
-    if (!next) return regs;
-
-    int i = 0;
+    task_t* next = ready_queue_head;
+    task_t* start = next;
     int safety = 0;
-    while (next && next->state != TASK_READY) {
-        if (next == current_task) return regs;
+    
+    while (next) {
+        if (next->state == TASK_READY && next != current_task) {
+            break;
+        }
         next = next->next;
-        if (++i > 256) return regs;
-        if (++safety > 10000) {
-            return regs;
+        if (next == start || ++safety > 10000) {
+            next = NULL;
+            break;
         }
     }
-    if (!next || next == current_task) return regs;
+
+    if (!next && must_switch) {
+        printf("schedule: no runnable tasks, system halted\n");
+        for (;;) asm volatile ("hlt");
+    }
+    
+    if (!next) return regs;
 
     if (current_task->state == TASK_RUNNING) current_task->state = TASK_READY;
     next->state = TASK_RUNNING;
@@ -709,47 +720,47 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     registers_t* return_frame;
-    if (next->syscall_frame) {
-        return_frame = next->syscall_frame;
-        next->syscall_frame = NULL;
-        DPRINTF4("Resuming from syscall frame at 0x%08X\n", (uint32_t)return_frame);
-    } else {
-        if (next->regs.esp == 0) return regs;
-        return_frame = (registers_t*)next->regs.esp;
-    }
+    if (next->regs.esp == 0) return regs;
+    return_frame = (registers_t*)next->regs.esp;
     
-    if (next->is_user) {
-        DPRINTF4("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
-               return_frame->eip, return_frame->cs, return_frame->useresp, return_frame->ss);
-        DPRINTF4("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
-               return_frame->ds, return_frame->es, return_frame->fs, return_frame->gs);
+    if (next->syscall_frame) {
+        DPRINTF4("Resuming kernel context for blocked syscall at 0x%08X\n", return_frame->eip);
+    } else {
+        DPRINTF4("Resuming from IRQ frame at 0x%08X\n", return_frame->eip);
+        
+        if (next->is_user) {
+            DPRINTF4("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
+                   return_frame->eip, return_frame->cs, return_frame->useresp, return_frame->ss);
+            DPRINTF4("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
+                   return_frame->ds, return_frame->es, return_frame->fs, return_frame->gs);
 
-        uint32_t check_virt[2] = { return_frame->eip & ~0xFFFu, return_frame->useresp & ~0xFFFu };
-        for (int ci = 0; ci < 2; ci++) {
-            uint32_t v = check_virt[ci];
-            uint32_t pd_idx = v >> 22;
-            uint32_t pt_idx = (v >> 12) & 0x3FF;
+            uint32_t check_virt[2] = { return_frame->eip & ~0xFFFu, return_frame->useresp & ~0xFFFu };
+            for (int ci = 0; ci < 2; ci++) {
+                uint32_t v = check_virt[ci];
+                uint32_t pd_idx = v >> 22;
+                uint32_t pt_idx = (v >> 12) & 0x3FF;
 
-            uint32_t temp_pd = 0xF7000000;
-            uint32_t temp_pt = 0xF7001000;
+                uint32_t temp_pd = 0xF7000000;
+                uint32_t temp_pt = 0xF7001000;
 
-            vmm_temp_map_raw(temp_pd, next->pd_phys);
-            uint32_t pde = ((uint32_t *)temp_pd)[pd_idx];
-            if (pde & 1) {
-                uint32_t pt_phys = pde & ~0xFFF;
-                vmm_temp_map_raw(temp_pt, pt_phys);
-                uint32_t pte = ((uint32_t *)temp_pt)[pt_idx];
-                vmm_temp_unmap_raw(temp_pt);
-                DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pt_idx=%u pde=0x%08X pte=0x%08X\n", v, pd_idx, pt_idx, pde, pte);
-            } else {
-                DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pde=0x%08X (no PT)\n", v, pd_idx, pde);
+                vmm_temp_map_raw(temp_pd, next->pd_phys);
+                uint32_t pde = ((uint32_t *)temp_pd)[pd_idx];
+                if (pde & 1) {
+                    uint32_t pt_phys = pde & ~0xFFF;
+                    vmm_temp_map_raw(temp_pt, pt_phys);
+                    uint32_t pte = ((uint32_t *)temp_pt)[pt_idx];
+                    vmm_temp_unmap_raw(temp_pt);
+                    DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pt_idx=%u pde=0x%08X pte=0x%08X\n", v, pd_idx, pt_idx, pde, pte);
+                } else {
+                    DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pde=0x%08X (no PT)\n", v, pd_idx, pde);
+                }
+                vmm_temp_unmap_raw(temp_pd);
             }
-            vmm_temp_unmap_raw(temp_pd);
-        }
 
-        return_frame->ds = return_frame->es = return_frame->fs = return_frame->gs = 0x23;
-        return_frame->cs = 0x1B;
-        return_frame->ss = 0x23;
+            return_frame->ds = return_frame->es = return_frame->fs = return_frame->gs = 0x23;
+            return_frame->cs = 0x1B;
+            return_frame->ss = 0x23;
+        }
     }
 
     return return_frame;
@@ -874,15 +885,23 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     }
 
     uint32_t free_pages = pfa_count_free();
-    uint32_t needed_estimate = 20;
+    uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
         printf("task_exec: insufficient memory (free=%u)\n", free_pages);
         return -1;
     }
 
-    int elf_valid = elf_validate(bin_start, bin_size);
+    uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
+    if (!kernel_bin) {
+        printf("task_exec: failed to allocate kernel buffer\n");
+        return -1;
+    }
+    memcpy(kernel_bin, bin_start, bin_size);
+
+    int elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
         printf("task_exec: ELF validation failed (%d)\n", elf_valid);
+        kfree(kernel_bin);
         return -1;
     }
 
@@ -892,12 +911,13 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     uint32_t *old_user_pages = current_task->user_pages;
     uint32_t old_user_pages_count = current_task->user_pages_count;
 
-    uint32_t stack_top = 0x00800000;
-    uint32_t stack_size = 0x4000;
+    uint32_t stack_top = USER_STACK_TOP;
+    uint32_t stack_size = USER_STACK_SIZE;
 
     uint32_t new_pd = vmm_create_page_directory();
     if (!new_pd) {
         printf("task_exec: failed to create page directory\n");
+        kfree(kernel_bin);
         return -1;
     }
 
@@ -905,7 +925,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     uint32_t *elf_pages = NULL;
     uint32_t elf_page_count = 0;
 
-    int load_result = elf_load_to_pd(new_pd, bin_start, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    int load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         printf("task_exec: ELF loading failed (%d)\n", load_result);
         if (elf_pages) {
@@ -913,8 +933,11 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
+        kfree(kernel_bin);
         return -1;
     }
+
+    kfree(kernel_bin);
 
     uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
@@ -969,7 +992,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     kfree(stack_pages);
 
     regs->eip = elf_info.entry_point;
-    regs->useresp = stack_top - 16;
+    regs->useresp = stack_top - USER_STACK_GAP - 16;
     regs->ebp = 0;
     regs->eax = 0;
     regs->ebx = 0;

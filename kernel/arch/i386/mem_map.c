@@ -16,6 +16,9 @@ uint64_t low_bump = 0;
 static uint32_t kernel_reserved_frames = 0;
 static uint32_t kernel_pd_phys = 0;
 
+reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
+uint32_t num_reserved_regions = 0;
+
 static struct {
     uint32_t v;
     uint32_t pd_idx;
@@ -148,6 +151,25 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
         DPRINTF3("PMM bump ready: Starting at 0x"); DEBUG_HEX3((unsigned long)bump_current); DPRINTF3("\n");
         DPRINTF3("PMM low bump starting at 0x"); DEBUG_HEX3((unsigned long)low_bump); DPRINTF3("\n");
     }
+
+    num_reserved_regions = 0;
+    if (mb->mods_count > 0 && mb->mods_addr) {
+        uint32_t *mods_ptr = (uint32_t *)(mb->mods_addr + 0xC0000000);
+        
+        for (uint32_t i = 0; i < mb->mods_count && num_reserved_regions < MAX_RESERVED_REGIONS; i++) {
+            uint32_t mod_start = mods_ptr[i * 4];    
+            uint32_t mod_end = mods_ptr[i * 4 + 1];   
+            
+            uint32_t start_page = mod_start & ~0xFFF;
+            uint32_t end_page = (mod_end + 0xFFF) & ~0xFFF;
+            
+            reserved_regions[num_reserved_regions].start_phys = start_page;
+            reserved_regions[num_reserved_regions].end_phys = end_page;
+            num_reserved_regions++;
+            
+            DPRINTF3("Reserved module %u: phys 0x%08X - 0x%08X\n", i, start_page, end_page);
+        }
+    }
 }
 
 uint8_t pfa_bitmap[BITMAP_BYTES];
@@ -232,6 +254,22 @@ void pfa_init(void) {
             printf("PFA: Region %u skipped (low RAM protected)\n", r);
         }
     }
+
+    for (uint32_t i = 0; i < num_reserved_regions; i++) {
+        uint32_t start_frame = reserved_regions[i].start_phys / PAGE_SIZE;
+        uint32_t end_frame = reserved_regions[i].end_phys / PAGE_SIZE;
+        uint32_t reserved_count = 0;
+        for (uint32_t f = start_frame; f < end_frame && f < TOTAL_PAGES; f++) {
+            if (!test_bit(f)) {
+                set_bit(f);
+                total_free_frames--;
+                reserved_count++;
+            }
+        }
+        printf("PFA: Reserved region %u [0x%08X-0x%08X]: %u frames marked as used\n",
+               i, reserved_regions[i].start_phys, reserved_regions[i].end_phys, reserved_count);
+    }
+
     uint64_t total_mb = (total_free_frames + 255ULL) / 256ULL;
     printf("PFA ready: %llu total free frames (~%llu MB)\n", total_free_frames, total_mb);
 
@@ -424,6 +462,9 @@ void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
         if (!pt_page) {
+            pt_page = pmm_alloc_page();
+        }
+        if (!pt_page) {
             printf("vmm_map_page: Failed to alloc page table\n");
             return;
         }
@@ -455,6 +496,9 @@ void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
 
         if (!(pd[pd_idx] & 1)) {
             void *pt_page = pmm_alloc_low_page();
+            if (!pt_page) {
+                pt_page = pmm_alloc_page();
+            }
             if (!pt_page) {
                 printf("vmm_map_range_alloc: Failed to alloc page table\n");
                 return;
@@ -511,6 +555,9 @@ static void heap_map_page(uint32_t virt_addr) {
 
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
+        if (!pt_page) {
+            pt_page = pmm_alloc_page();
+        }
         if (!pt_page) {
             printf("heap_map_page: Failed to alloc page table\n");
             return;
@@ -573,6 +620,9 @@ void heap_init(void) {
     uint32_t pd_idx = HEAP_START >> 22;
     if (!(pd[pd_idx] & 1)) {
         void *pt_page = pmm_alloc_low_page();
+        if (!pt_page) {
+            pt_page = pmm_alloc_page();
+        }
         if (!pt_page) {
             printf("heap_init: Failed to allocate low page for heap PDE!\n");
         } else {
@@ -1046,10 +1096,14 @@ void vmm_temp_unmap_raw(uint32_t temp_virt) {
 uint32_t vmm_create_page_directory(void) {
     void *pd_page = pmm_alloc_low_page();
     if (!pd_page) {
+        pd_page = pmm_alloc_page();
+    }
+    if (!pd_page) {
         printf("vmm_create_page_directory: Failed to allocate PD page\n");
         return 0;
     }
     uint32_t pd_phys = (uint32_t)pd_page;
+    pmm_zero_page_phys(pd_phys);
 
     uint32_t temp_virt = 0xF7000000;
     temp_map_raw(temp_virt, pd_phys);
@@ -1085,11 +1139,15 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
             DPRINTF5("vmm_map_page_in_pd: pd entry not present for idx %u - allocating PT\n", pd_idx);
             void *pt_page = pmm_alloc_low_page();
             if (!pt_page) {
+                pt_page = pmm_alloc_page();
+            }
+            if (!pt_page) {
                 printf("vmm_map_page_in_pd: Failed to alloc PT\n");
                 temp_unmap_raw(temp_pd_virt);
                 return;
             }
             pt_phys = (uint32_t)pt_page;
+            pmm_zero_page_phys(pt_phys);
             foreign_pd[pd_idx] = (pt_phys & ~0xFFF) | (flags | 3);
             DPRINTF5("vmm_map_page_in_pd: allocated PT phys=0x%08X\n", pt_phys);
             if ((flags & 0x4) && !(foreign_pd[pd_idx] & 0x4)) {
@@ -1116,6 +1174,12 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
     DPRINTF5("vmm_map_page_in_pd: wrote PT entry = 0x%08X\n", foreign_pt[pt_idx]);
 
     temp_unmap_raw(temp_pt_virt);
+
+    uint32_t cur_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+    if (cur_cr3 == pd_phys) {
+        __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    }
 }
 
 void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags) {
@@ -1129,6 +1193,7 @@ void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, ui
             printf("vmm_map_range_in_pd: Failed to alloc phys page\n");
             return;
         }
+        pmm_zero_page_phys((uint32_t)phys_page);
         vmm_map_page_in_pd(pd_phys, v, (uint32_t)phys_page, flags);
     }
 }
@@ -1161,6 +1226,7 @@ uint32_t* vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint
             if (out_count) *out_count = 0;
             return NULL;
         }
+        pmm_zero_page_phys((uint32_t)phys_page);
         pages[idx++] = (uint32_t)phys_page;
         vmm_map_page_in_pd(pd_phys, v, (uint32_t)phys_page, flags);
     }
@@ -1347,6 +1413,9 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
 
     void *new_pd_page = pmm_alloc_low_page();
     if (!new_pd_page) {
+        new_pd_page = pmm_alloc_page();
+    }
+    if (!new_pd_page) {
         printf("vmm_clone_page_directory: Failed to allocate new PD\n");
         if (kernel_pd_phys && orig_cr3 != kernel_pd_phys) {
             __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
@@ -1380,6 +1449,9 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
         uint32_t pde_flags = src_pde & 0xFFF;
 
         void *new_pt_page = pmm_alloc_low_page();
+        if (!new_pt_page) {
+            new_pt_page = pmm_alloc_page();
+        }
         if (!new_pt_page) {
             printf("vmm_clone_page_directory: Failed to allocate PT for pd_idx %u\n", pd_idx);
             temp_unmap_raw(temp_src_pd);

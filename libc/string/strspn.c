@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 size_t strspn(const char *s, const char *accept) {
+    if (!s || !accept) return 0;
     size_t count = 0;
     while (*s) {
         const char *a = accept;

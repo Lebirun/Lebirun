@@ -136,6 +136,7 @@ static int print_number(const char* prefix, size_t prefix_len,
 }
 
 int printf(const char* restrict format, ...) {
+    if (!format) return -1;
     va_list parameters;
     va_start(parameters, format);
 

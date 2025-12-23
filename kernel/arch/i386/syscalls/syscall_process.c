@@ -64,7 +64,7 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
         printf("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
         return -1;
     }
-    if (bin_size == 0 || bin_size > 0x100000) {
+    if (bin_size == 0 || bin_size > 0x1000000) {
         printf("sys_exec: invalid size %u\n", bin_size);
         return -1;
     }

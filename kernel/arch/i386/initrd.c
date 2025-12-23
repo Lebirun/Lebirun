@@ -159,8 +159,6 @@ void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
         return;
     }
 
-    uint32_t data_section_offset = sizeof(initrd_header_t) + file_count * sizeof(initrd_file_header_t);
-    uint32_t expected_off = data_section_offset;
     uint32_t total_bytes = 0;
 
     for (uint32_t i = 0; i < file_count; i++) {
@@ -176,11 +174,6 @@ void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
         uint32_t len = file_headers[i].length;
 
         if (files[i].type == INITRD_TYPE_FILE) {
-            if (hdr_off != expected_off) {
-                printf("INITRD: header[%u] offset mismatch (header=%u expected=%u) - using expected\n", i, hdr_off, expected_off);
-                hdr_off = expected_off;
-            }
-
             if (hdr_off + len > mod_size) {
                 printf("INITRD: File %u (%s) has out-of-bounds offset/length (off=%u len=%u mod_size=%u)\n", i, file_headers[i].name, hdr_off, len, mod_size);
                 kfree(files);
@@ -192,16 +185,11 @@ void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
             files[i].offset = hdr_off;
             files[i].data = initrd_base + hdr_off;
 
-            expected_off += len;
             total_bytes += len;
         } else {
             files[i].offset = 0;
             files[i].data = NULL;
         }
-    }
-
-    if (expected_off > mod_size) {
-        printf("INITRD: Warning - data section extends beyond module size (expected_end=%u mod_size=%u)\n", expected_off, mod_size);
     }
 
     initrd_init_fds();
@@ -400,7 +388,29 @@ static uint32_t initrd_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size
     if (offset >= f->length) return 0;
     uint32_t avail = f->length - offset;
     uint32_t to_read = (size < avail) ? size : avail;
+
+    if (initrd_should_log()) {
+        uint32_t cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+        printf("INITRD: read dest=0x%08X src=0x%08X offset=%u to_read=%u cr3=0x%08X\n",
+               (uint32_t)buffer, (uint32_t)(f->data + offset), offset, to_read, cr3);
+        if (to_read >= 4) {
+            printf("INITRD: src first4: %02X %02X %02X %02X\n",
+                   f->data[offset], f->data[offset+1], f->data[offset+2], f->data[offset+3]);
+            printf("INITRD: dest-before first4: %02X %02X %02X %02X\n",
+                   ((uint8_t*)buffer)[0], ((uint8_t*)buffer)[1], ((uint8_t*)buffer)[2], ((uint8_t*)buffer)[3]);
+        }
+    }
+
     memcpy(buffer, f->data + offset, to_read);
+
+    if (initrd_should_log()) {
+        if (to_read >= 4) {
+            printf("INITRD: dest-after first4: %02X %02X %02X %02X\n",
+                   ((uint8_t*)buffer)[0], ((uint8_t*)buffer)[1], ((uint8_t*)buffer)[2], ((uint8_t*)buffer)[3]);
+        }
+    }
+
     return to_read;
 }
 

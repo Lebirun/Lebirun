@@ -51,7 +51,7 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
     DPRINTF3("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
     if (debugMode && debugLevel >= 3) heap_verify();
 
-    task_t* t = create_task_with_cr3((void*)elf_info.entry_point, TASK_READY, true, new_pd);
+    task_t* t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
     if (!t) {
         printf("launch_user_binary: create_task failed\n");
         if (elf_pages) {
@@ -69,6 +69,8 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
     t->console_id = console_id;
+    
+    t->state = TASK_READY;
 
     uint32_t total_pages = elf_page_count + stack_page_count;
 

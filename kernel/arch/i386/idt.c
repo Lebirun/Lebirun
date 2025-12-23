@@ -142,6 +142,84 @@ static const char* exception_messages[] = {
 registers_t* interrupt_handler(registers_t* regs)
 {
     if (regs->int_no < 32) {
+        if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
+            uint32_t fault_addr;
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+            printf("User task %d page fault at 0x%08X (EIP=0x%08X) - killing task\n",
+                   current_task->pid, fault_addr, regs->eip);
+            printf("Regs: ESP=0x%08X EBP=0x%08X EAX=0x%08X\n",
+                   regs->useresp, regs->ebp, regs->eax);
+
+            if (current_task && current_task->pd_phys) {
+                uint32_t eip_pd_idx = regs->eip >> 22;
+                uint32_t eip_pt_idx = (regs->eip >> 12) & 0x3FF;
+                uint32_t temp_pd = 0xF7000000;
+                uint32_t temp_pt = 0xF7001000;
+                uint32_t temp_stack = 0xF7002000;
+
+                vmm_temp_map_raw(temp_pd, current_task->pd_phys);
+                uint32_t *user_pd = (uint32_t *)temp_pd;
+                uint32_t pde = user_pd[eip_pd_idx];
+                printf("User EIP PDE[%u]=0x%08X\n", eip_pd_idx, pde);
+                if (pde & 1) {
+                    uint32_t pt_phys = pde & ~0xFFF;
+                    vmm_temp_map_raw(temp_pt, pt_phys);
+                    uint32_t *user_pt = (uint32_t *)temp_pt;
+                    uint32_t pte = user_pt[eip_pt_idx];
+                    printf("User EIP PTE[%u]=0x%08X\n", eip_pt_idx, pte);
+
+                    if (pte & 1) {
+                        uint32_t page_phys = pte & ~0xFFF;
+                        uint32_t stack_page = regs->ebp & ~0xFFF;
+                        uint32_t stack_page_phys = 0;
+                        if ((regs->ebp & ~0xFFF) == (regs->eip & ~0xFFF)) {
+                            stack_page_phys = page_phys;
+                        } else {
+                            uint32_t stack_pd_idx = regs->ebp >> 22;
+                            uint32_t stack_pt_idx = (regs->ebp >> 12) & 0x3FF;
+                            uint32_t stack_pde = user_pd[stack_pd_idx];
+                            if (stack_pde & 1) {
+                                uint32_t stack_pt_phys = stack_pde & ~0xFFF;
+                                vmm_temp_map_raw(temp_pt, stack_pt_phys);
+                                uint32_t *stack_pt = (uint32_t *)temp_pt;
+                                uint32_t stack_pte = stack_pt[stack_pt_idx];
+                                if (stack_pte & 1) stack_page_phys = stack_pte & ~0xFFF;
+                                vmm_temp_unmap_raw(temp_pt);
+                            }
+                        }
+
+                        if (stack_page_phys) {
+                            vmm_temp_map_raw(temp_stack, stack_page_phys);
+                            uint32_t off = (regs->ebp + 4) & 0xFFF;
+                            uint32_t caller_ret = *((uint32_t *)(temp_stack + off));
+                            printf("Caller return address = 0x%08X\n", caller_ret);
+                            uint32_t off_fmt = (regs->ebp + 8) & 0xFFF;
+                            uint32_t fmt_arg = *((uint32_t *)(temp_stack + off_fmt));
+                            printf("Printf format arg = 0x%08X\n", fmt_arg);
+
+                            printf("Stack dump around EBP (addr=0x%08X):\n", regs->ebp);
+                            int start_off = -0x20;
+                            for (int i = start_off; i <= 0x20; i += 4) {
+                                uint32_t offw = (regs->ebp + i) & 0xFFF;
+                                uint32_t val = *((uint32_t *)(temp_stack + offw));
+                                printf("  [EBP%+04d] = 0x%08X\n", i, val);
+                            }
+
+                            vmm_temp_unmap_raw(temp_stack);
+                        } else {
+                            printf("Caller return address: stack page not present\n");
+                        }
+                    }
+
+                    vmm_temp_unmap_raw(temp_pt);
+                }
+                vmm_temp_unmap_raw(temp_pd);
+            }
+
+            task_exit(139);
+            for (;;) __asm__ ("hlt");
+        }
+        
         terminal_writestring(">>> TRAPPED INT 0x");
         print_hex(regs->int_no);
         terminal_writestring(" | EIP=0x");

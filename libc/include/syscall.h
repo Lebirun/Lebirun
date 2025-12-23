@@ -59,6 +59,15 @@
 #define SYS_NET_DNS_RESOLVE 52
 #define SYS_NET_HTTP_GET 53
 
+#define SYS_TCGETATTR 54
+#define SYS_TCSETATTR 55
+#define SYS_IOCTL     56
+#define SYS_TCFLUSH   57
+#define SYS_TCFLOW    58
+#define SYS_TCDRAIN   59
+#define SYS_TCGETPGRP 60
+#define SYS_TCSETPGRP 61
+
 #ifndef __is_libk
 
 static inline int syscall0(int num) {

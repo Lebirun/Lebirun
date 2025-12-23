@@ -6,7 +6,9 @@
 #include <stdbool.h>
 #include <kernel/io.h>
 
+#ifndef __pid_t_defined
 typedef uint32_t pid_t;
+#endif
 
 static inline void print_hex(unsigned long v) {
     char buf[9];

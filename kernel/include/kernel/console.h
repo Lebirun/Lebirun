@@ -18,6 +18,10 @@ typedef struct {
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t scroll_offset;
+
+    int esc_state;
+    char esc_buf[32];
+    int esc_len;
 } console_t;
 
 void console_init(void);

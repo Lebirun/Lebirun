@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 char *strstr(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return NULL;
     if (!*needle) return (char *)haystack;
     for (; *haystack; haystack++) {
         const char *h = haystack;

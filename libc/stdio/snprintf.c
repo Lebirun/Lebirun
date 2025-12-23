@@ -47,7 +47,7 @@ static size_t itoa64(int64_t value, char* buf, int base, bool* is_negative) {
 }
 
 int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
-    if (size == 0) return 0;
+    if (!buf || !format || size == 0) return 0;
     
     size_t written = 0;
     char numbuf[68];

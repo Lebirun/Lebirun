@@ -78,7 +78,8 @@ static int run_binary(const char *path) {
     fd = -1;
 
     if (rd < 4 || bin[0] != 0x7F || bin[1] != 'E' || bin[2] != 'L' || bin[3] != 'F') {
-        printf("'%s' is not a valid ELF binary\n", resolved);
+        printf("'%s' is not a valid ELF binary (read %d bytes, first 4: %02X %02X %02X %02X)\n", 
+               resolved, rd, bin[0], bin[1], bin[2], bin[3]);
         return -1;
     }
 

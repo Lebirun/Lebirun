@@ -5,12 +5,14 @@ LIBC = ../libc
 LIBC_COMMON = ../libc-common
 KERNEL_DIR = ../kernel/arch/i386
 INITRD_DIR = ../initrd
+NCURSES_DIR = ncurses
 CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -nostdlib -fno-stack-protector -fno-pic -m32 -O2
-CPPFLAGS = -I$(LIBC)/include -I$(LIBC_COMMON)/include
+CPPFLAGS = -I$(NCURSES_DIR)/include -I$(LIBC)/include -I$(LIBC_COMMON)/include
 LDFLAGS = -T $(LIBC)/user.ld
 
 CRT0 = $(LIBC)/crt/crt0.o
 LIBC_A = $(LIBC)/libc.a
+NCURSES_A = $(INITRD_DIR)/libncurses.a
 
 PROGRAMS = shell.bin pong.bin
 

@@ -85,6 +85,14 @@ extern uint32_t num_regions;
 extern uint8_t pfa_bitmap[BITMAP_BYTES];
 extern heap_t kernel_heap;
 
+#define MAX_RESERVED_REGIONS 8
+typedef struct {
+    uint32_t start_phys;
+    uint32_t end_phys;
+} reserved_region_t;
+extern reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
+extern uint32_t num_reserved_regions;
+
 void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags);
 

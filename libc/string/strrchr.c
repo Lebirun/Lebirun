@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 char *strrchr(const char *s, int c) {
+    if (!s) return NULL;
     const char *last = NULL;
     while (*s) {
         if (*s == (char)c) last = s;

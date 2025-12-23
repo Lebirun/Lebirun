@@ -4,6 +4,7 @@
 static char *strtok_next = NULL;
 
 char *strtok(char *str, const char *delim) {
+    if (!delim) return NULL;
     if (str) strtok_next = str;
     if (!strtok_next) return NULL;
     
