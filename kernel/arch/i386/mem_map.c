@@ -638,13 +638,15 @@ void heap_init(void) {
     heap_block_t *initial_block = (heap_block_t *)HEAP_START;
     initial_block->magic = HEAP_MAGIC;
     initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
+    initial_block->alloc_size = 0;
+    initial_block->flags = 0;
     initial_block->is_free = 1;
     initial_block->next = NULL;
     initial_block->prev = NULL;
 
     kernel_heap.free_list = initial_block;
 
-    printf("Heap initialized: 0x%08X - 0x%08X (%u KB)\n",
+    printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [with canary protection]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
            kernel_heap.total_size / 1024);
 }
@@ -684,6 +686,8 @@ static void split_block(heap_block_t *block, size_t size) {
         heap_block_t *new_block = (heap_block_t *)((uint8_t *)block + sizeof(heap_block_t) + size);
         new_block->magic = HEAP_MAGIC;
         new_block->size = remaining;
+        new_block->alloc_size = 0;
+        new_block->flags = 0;
         new_block->is_free = 1;
         new_block->next = block->next;
         new_block->prev = block;
@@ -728,16 +732,106 @@ static void coalesce_free_blocks(heap_block_t *block) {
     }
 }
 
+#define CANARY_OVERHEAD (sizeof(uint32_t) * 2)
+
+static inline uint32_t *get_head_canary(heap_block_t *block) {
+    return (uint32_t *)((uint8_t *)block + sizeof(heap_block_t));
+}
+
+static inline uint32_t *get_tail_canary(heap_block_t *block) {
+    return (uint32_t *)((uint8_t *)block + sizeof(heap_block_t) + 
+                        sizeof(uint32_t) + block->alloc_size);
+}
+
+static inline void *get_user_ptr(heap_block_t *block) {
+    return (void *)((uint8_t *)block + sizeof(heap_block_t) + sizeof(uint32_t));
+}
+
+static inline heap_block_t *get_block_from_ptr(void *ptr) {
+    return (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t) - sizeof(uint32_t));
+}
+
+static void set_canaries(heap_block_t *block) {
+    *get_head_canary(block) = HEAP_CANARY_HEAD;
+    *get_tail_canary(block) = HEAP_CANARY_TAIL;
+}
+
+int heap_check_canaries(void *ptr) {
+    if (!ptr) return -1;
+    
+    heap_block_t *block = get_block_from_ptr(ptr);
+    
+    if (block->magic != HEAP_MAGIC) {
+        printf("heap_check_canaries: bad magic 0x%08X at block 0x%08X\n", 
+               block->magic, (uint32_t)block);
+        return -1;
+    }
+    
+    uint32_t head = *get_head_canary(block);
+    uint32_t tail = *get_tail_canary(block);
+    
+    if (head != HEAP_CANARY_HEAD) {
+        printf("HEAP CORRUPTION: Head canary corrupted at 0x%08X (expected 0x%08X, got 0x%08X)\n",
+               (uint32_t)ptr, HEAP_CANARY_HEAD, head);
+        return -1;
+    }
+    
+    if (tail != HEAP_CANARY_TAIL) {
+        printf("HEAP CORRUPTION: Tail canary corrupted at 0x%08X (expected 0x%08X, got 0x%08X) - buffer overflow!\n",
+               (uint32_t)ptr, HEAP_CANARY_TAIL, tail);
+        printf("  Block size: %u, alloc_size: %u\n", block->size, block->alloc_size);
+        return -1;
+    }
+    
+    return 0;
+}
+
+int heap_validate_ptr(void *ptr) {
+    if (!ptr) return -1;
+    
+    heap_block_t *block = get_block_from_ptr(ptr);
+    
+    uint32_t block_addr = (uint32_t)block;
+    if (block_addr < kernel_heap.start_addr || 
+        block_addr >= kernel_heap.end_addr) {
+        printf("heap_validate_ptr: block 0x%08X outside heap bounds\n", block_addr);
+        return -1;
+    }
+    
+    if (block->magic != HEAP_MAGIC) {
+        printf("heap_validate_ptr: bad magic 0x%08X\n", block->magic);
+        return -1;
+    }
+    
+    if (block->is_free) {
+        printf("heap_validate_ptr: block is free (use-after-free?)\n");
+        return -1;
+    }
+    
+    return heap_check_canaries(ptr);
+}
+
+static void poison_memory(void *ptr, size_t size, uint8_t pattern) {
+    memset(ptr, pattern, size);
+}
+
 void *kmalloc(size_t size) {
     if (size == 0) return NULL;
+    
+    if (size > SIZE_MAX - CANARY_OVERHEAD - 7) {
+        printf("kmalloc: size overflow detected\n");
+        return NULL;
+    }
 
-    size = (size + 7) & ~7;
+    size_t orig_size = size;
+    size_t total_size = size + CANARY_OVERHEAD;
+    total_size = (total_size + 7) & ~7;
 
-    heap_block_t *block = find_best_fit(size);
+    heap_block_t *block = find_best_fit(total_size);
 
     if (!block) {
         uint32_t old_end = kernel_heap.end_addr;
-        uint32_t needed = size + sizeof(heap_block_t) + PAGE_SIZE;
+        uint32_t needed = total_size + sizeof(heap_block_t) + PAGE_SIZE;
         uint32_t new_end = old_end + needed;
 
         DPRINTF("kmalloc: expanding to new_end=0x"); if (debugMode) print_hex(new_end); DPRINTF("\n");
@@ -776,6 +870,8 @@ void *kmalloc(size_t size) {
             DPRINTF("kmalloc: new_block at 0x"); if (debugMode) print_hex((uint32_t)new_block); DPRINTF("\n");
             new_block->magic = HEAP_MAGIC;
             new_block->size = new_block_size;
+            new_block->alloc_size = 0;
+            new_block->flags = 0;
             new_block->is_free = 1;
             new_block->next = NULL;
             new_block->prev = NULL;
@@ -800,21 +896,26 @@ void *kmalloc(size_t size) {
             coalesce_free_blocks(new_block);
         }
 
-        block = find_best_fit(size);
+        block = find_best_fit(total_size);
         if (!block) {
             printf("kmalloc: Failed after expand\n");
             return NULL;
         }
     }
 
-    split_block(block, size);
+    split_block(block, total_size);
 
     block->is_free = 0;
+    block->alloc_size = orig_size;
+    block->flags = 0;
     kernel_heap.used_size += block->size + sizeof(heap_block_t);
 
-    void *user_ptr = (void *)((uint8_t *)block + sizeof(heap_block_t));
+    set_canaries(block);
+    
+    void *user_ptr = get_user_ptr(block);
 
-    DPRINTF3("kmalloc: alloc size=%u block=0x%08X ptr=0x%08X\n", (uint32_t)size, (uint32_t)block, (uint32_t)user_ptr);
+    DPRINTF3("kmalloc: alloc size=%u (total=%u) block=0x%08X ptr=0x%08X\n", 
+             (uint32_t)orig_size, (uint32_t)total_size, (uint32_t)block, (uint32_t)user_ptr);
 
     if (((uintptr_t)user_ptr & 0x3) != 0) {
         printf("kmalloc: WARNING - returned pointer not 4-byte aligned: 0x%08X\n", (uint32_t)user_ptr);
@@ -824,9 +925,52 @@ void *kmalloc(size_t size) {
     return user_ptr;
 }
 
+void *ksafe_alloc(size_t size, uint32_t flags) {
+    if (size == 0) return NULL;
+    
+    if (size > SIZE_MAX - CANARY_OVERHEAD - 7) {
+        printf("ksafe_alloc: size overflow detected\n");
+        return NULL;
+    }
+    
+    void *ptr = kmalloc(size);
+    if (!ptr) return NULL;
+    
+    heap_block_t *block = get_block_from_ptr(ptr);
+    block->flags = flags;
+    
+    if (flags & KMALLOC_ZERO) {
+        memset(ptr, 0, size);
+    } else if (!(flags & KMALLOC_NO_POISON)) {
+        #ifdef DEBUG
+        poison_memory(ptr, size, HEAP_POISON_ALLOC);
+        #endif
+    }
+    
+    return ptr;
+}
+
+void *kcalloc(size_t nmemb, size_t size) {
+    if (nmemb == 0 || size == 0) return NULL;
+    
+    if (nmemb > SIZE_MAX / size) {
+        printf("kcalloc: integer overflow detected (%u * %u)\n", 
+               (uint32_t)nmemb, (uint32_t)size);
+        return NULL;
+    }
+    
+    size_t total = nmemb * size;
+    return ksafe_alloc(total, KMALLOC_ZERO);
+}
+
 void *kmalloc_aligned(size_t size, uint32_t alignment) {
     if (size == 0) return NULL;
     if (alignment == 0) alignment = 1;
+
+    if (size > SIZE_MAX - alignment - sizeof(void *)) {
+        printf("kmalloc_aligned: size overflow\n");
+        return NULL;
+    }
 
     size_t alloc_size = size + alignment + sizeof(void *);
     void *ptr = kmalloc(alloc_size);
@@ -843,7 +987,7 @@ void *kmalloc_aligned(size_t size, uint32_t alignment) {
 void kfree(void *ptr) {
     if (!ptr) return;
 
-    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    heap_block_t *block = get_block_from_ptr(ptr);
 
     DPRINTF3("kfree: ptr=0x%08X block=0x%08X magic=0x%08X size=%u\n",
              (uint32_t)ptr, (uint32_t)block, block->magic, block->size);
@@ -858,10 +1002,53 @@ void kfree(void *ptr) {
         printf("kfree: Double free detected at 0x%08X\n", (uint32_t)ptr);
         return;
     }
+    
+    if (heap_check_canaries(ptr) != 0) {
+        printf("kfree: Memory corruption detected for ptr 0x%08X - refusing to free\n", (uint32_t)ptr);
+        return;
+    }
+    
+    if (block->flags & KMALLOC_SECURE) {
+        memset(ptr, 0, block->alloc_size);
+    } else if (!(block->flags & KMALLOC_NO_POISON)) {
+        poison_memory(ptr, block->alloc_size, HEAP_POISON_FREED);
+    }
 
     block->is_free = 1;
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
 
+    coalesce_free_blocks(block);
+}
+
+void ksafe_free(void *ptr) {
+    kfree(ptr); 
+}
+
+void kfree_secure(void *ptr) {
+    if (!ptr) return;
+    
+    heap_block_t *block = get_block_from_ptr(ptr);
+    
+    if (block->magic != HEAP_MAGIC) {
+        printf("kfree_secure: Invalid pointer 0x%08X\n", (uint32_t)ptr);
+        return;
+    }
+    
+    if (block->is_free) {
+        printf("kfree_secure: Double free detected at 0x%08X\n", (uint32_t)ptr);
+        return;
+    }
+    
+    if (heap_check_canaries(ptr) != 0) {
+        printf("kfree_secure: Memory corruption at 0x%08X\n", (uint32_t)ptr);
+        return;
+    }
+    
+    memset(ptr, 0, block->alloc_size);
+    
+    block->is_free = 1;
+    kernel_heap.used_size -= block->size + sizeof(heap_block_t);
+    
     coalesce_free_blocks(block);
 }
 
@@ -872,21 +1059,28 @@ void *krealloc(void *ptr, size_t new_size) {
         return NULL;
     }
 
-    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    heap_block_t *block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         printf("krealloc: Invalid pointer\n");
         return NULL;
     }
+    
+    if (heap_check_canaries(ptr) != 0) {
+        printf("krealloc: Memory corruption detected, refusing to reallocate\n");
+        return NULL;
+    }
 
-    if (block->size >= new_size) {
+    if (block->alloc_size >= new_size) {
+        block->alloc_size = new_size;
+        set_canaries(block);
         return ptr;
     }
 
     void *new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
 
-    memcpy(new_ptr, ptr, block->size);
+    memcpy(new_ptr, ptr, block->alloc_size);
     kfree(ptr);
 
     return new_ptr;
@@ -927,9 +1121,9 @@ uint32_t heap_free_space(void) {
 
 uint32_t heap_block_size_for_ptr(void *ptr) {
     if (!ptr) return 0;
-    heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    heap_block_t *block = get_block_from_ptr(ptr);
     if (block->magic != HEAP_MAGIC) return 0;
-    return block->size;
+    return block->alloc_size; 
 }
 
 static void dump_memory_around(uint32_t addr, uint32_t radius) {
@@ -948,9 +1142,11 @@ void heap_verify(void) {
     printf("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
     heap_block_t *block = kernel_heap.free_list;
     int i = 0;
+    int corruption_found = 0;
+    
     while (block) {
-        printf(" heap block %d: addr=0x%08X size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
-               i, (uint32_t)block, block->size, block->is_free, block->magic,
+        printf(" heap block %d: addr=0x%08X size=%u alloc_size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
+               i, (uint32_t)block, block->size, block->alloc_size, block->is_free, block->magic,
                (uint32_t)block->next, (uint32_t)block->prev);
 
         uint32_t baddr = (uint32_t)block;
@@ -971,6 +1167,22 @@ void heap_verify(void) {
             printf("heap_verify: ERROR - block extends past heap end: block_end=0x%08X heap_end=0x%08X\n", block_end, kernel_heap.end_addr);
             dump_memory_around(baddr, 64);
             break;
+        }
+        
+        if (!block->is_free && block->alloc_size > 0) {
+            uint32_t *head_canary = get_head_canary(block);
+            uint32_t *tail_canary = get_tail_canary(block);
+            
+            if (*head_canary != HEAP_CANARY_HEAD) {
+                printf("heap_verify: ERROR - head canary corrupted at block 0x%08X (got 0x%08X)\n", 
+                       baddr, *head_canary);
+                corruption_found++;
+            }
+            if (*tail_canary != HEAP_CANARY_TAIL) {
+                printf("heap_verify: ERROR - tail canary corrupted at block 0x%08X (got 0x%08X) - BUFFER OVERFLOW!\n", 
+                       baddr, *tail_canary);
+                corruption_found++;
+            }
         }
 
         if (block->next) {
@@ -995,6 +1207,10 @@ void heap_verify(void) {
         block = block->next;
         i++;
         if (i > 100) { printf(" heap_verify: stopping early (>100)\n"); break; }
+    }
+    
+    if (corruption_found > 0) {
+        printf("heap_verify: FOUND %d CANARY CORRUPTIONS!\n", corruption_found);
     }
 }
 
@@ -1210,6 +1426,7 @@ uint32_t* vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint
     
     uint32_t *pages = (uint32_t *)kmalloc(num_pages * sizeof(uint32_t));
     if (!pages) {
+        printf("vmm_map_range_in_pd_tracked: kmalloc failed for %u pages (%u bytes)\n", num_pages, num_pages * 4);
         if (out_count) *out_count = 0;
         return NULL;
     }
@@ -1218,7 +1435,7 @@ uint32_t* vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint
     for (uint32_t v = start; v < end; v += PAGE_SIZE) {
         void *phys_page = pmm_alloc_page();
         if (!phys_page) {
-            printf("vmm_map_range_in_pd_tracked: Failed to alloc phys page\n");
+            printf("vmm_map_range_in_pd_tracked: Failed to alloc phys page %u/%u (free=%u)\n", idx, num_pages, pfa_count_free());
             for (uint32_t i = 0; i < idx; i++) {
                 pfa_free(pages[i]);
             }

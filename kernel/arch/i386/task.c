@@ -6,8 +6,22 @@
 #include <kernel/gdt.h>
 #include <kernel/tty.h>
 #include <kernel/elf.h>
+#include <kernel/console.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+static void task_error(const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    printf("%s", buf);
+    if (current_task && current_task->console_id >= 0 && console_is_initialized()) {
+        console_write_to(current_task->console_id, buf, (size_t)n);
+    }
+}
 
 static int scheduler_lock = 0;
 extern volatile uint32_t tick_count;
@@ -247,6 +261,9 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
+    new_task->cwd[0] = '/';
+    new_task->cwd[1] = '\0';
+    task_init_fds(new_task);
     if (stack_base) memset(stack_base, 0, TASK_STACK_SIZE);
     memset(kernel_stack_base, 0, KERNEL_STACK_SIZE);
 
@@ -719,6 +736,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
         __asm__ volatile ("mov %0, %%cr3" : : "r"(next->cr3) : "memory");
     }
 
+    if (next->tls_base) {
+        gdt_set_tls(GDT_TLS_ENTRY_1, next->tls_base, next->tls_limit);
+    }
+
     registers_t* return_frame;
     if (next->regs.esp == 0) return regs;
     return_frame = (registers_t*)next->regs.esp;
@@ -775,6 +796,56 @@ void set_syscall_frame(registers_t *frame) {
 void clear_syscall_frame(void) {
     if (current_task) {
         current_task->syscall_frame = NULL;
+    }
+}
+
+void task_init_fds(task_t *task) {
+    if (!task) return;
+    memset(task->fds, 0, sizeof(task->fds));
+    task->fds[0].in_use = 1;
+    task->fds[0].type = FD_TYPE_STDIN;
+    task->fds[0].ref_count = 1;
+    task->fds[1].in_use = 1;
+    task->fds[1].type = FD_TYPE_STDOUT;
+    task->fds[1].ref_count = 1;
+    task->fds[2].in_use = 1;
+    task->fds[2].type = FD_TYPE_STDERR;
+    task->fds[2].ref_count = 1;
+}
+
+int task_fd_alloc(task_t *task) {
+    if (!task) return -1;
+    for (int i = 3; i < TASK_MAX_FDS; i++) {
+        if (!task->fds[i].in_use) {
+            task->fds[i].in_use = 1;
+            task->fds[i].ref_count = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+void task_fd_free(task_t *task, int fd) {
+    if (!task || fd < 0 || fd >= TASK_MAX_FDS) return;
+    if (!task->fds[fd].in_use) return;
+    task->fds[fd].in_use = 0;
+    task->fds[fd].ref_count = 0;
+    task->fds[fd].node = NULL;
+    task->fds[fd].offset = 0;
+    task->fds[fd].flags = 0;
+    task->fds[fd].private_data = NULL;
+}
+
+task_fd_t *task_fd_get(task_t *task, int fd) {
+    if (!task || fd < 0 || fd >= TASK_MAX_FDS) return NULL;
+    if (!task->fds[fd].in_use) return NULL;
+    return &task->fds[fd];
+}
+
+void task_fd_close_all(task_t *task) {
+    if (!task) return;
+    for (int i = 3; i < TASK_MAX_FDS; i++) {
+        task_fd_free(task, i);
     }
 }
 
@@ -852,6 +923,17 @@ pid_t task_fork(registers_t *parent_regs) {
     child->user_pages_count = child_user_pages_count;
     child->user_brk = current_task->user_brk;
     child->console_id = current_task->console_id;
+    child->tls_base = current_task->tls_base;
+    child->tls_limit = current_task->tls_limit;
+    memcpy(child->cwd, current_task->cwd, sizeof(child->cwd));
+    memcpy(child->fds, current_task->fds, sizeof(child->fds));
+    for (int i = 0; i < TASK_MAX_FDS; i++) {
+        if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
+            child->fds[i].ref_count++;
+        }
+    }
+    child->envp = NULL;
+    child->envc = 0;
 
     registers_t *child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KERNEL_STACK_SIZE - sizeof(registers_t));
     memcpy(child_frame, parent_regs, sizeof(registers_t));
@@ -876,31 +958,31 @@ pid_t task_fork(registers_t *parent_regs) {
 
 int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     if (!current_task || !current_task->is_user) {
-        printf("task_exec: can only exec in user tasks\n");
+        task_error("task_exec: can only exec in user tasks\n");
         return -1;
     }
     if (!bin_start || bin_size == 0) {
-        printf("task_exec: invalid binary\n");
+        task_error("task_exec: invalid binary\n");
         return -1;
     }
 
     uint32_t free_pages = pfa_count_free();
     uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
-        printf("task_exec: insufficient memory (free=%u)\n", free_pages);
+        task_error("task_exec: insufficient memory (free=%u need=%u)\n", free_pages, needed_estimate);
         return -1;
     }
 
     uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
     if (!kernel_bin) {
-        printf("task_exec: failed to allocate kernel buffer\n");
+        task_error("task_exec: failed to allocate kernel buffer (%u bytes)\n", bin_size);
         return -1;
     }
     memcpy(kernel_bin, bin_start, bin_size);
 
     int elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
-        printf("task_exec: ELF validation failed (%d)\n", elf_valid);
+        task_error("task_exec: ELF validation failed (%d)\n", elf_valid);
         kfree(kernel_bin);
         return -1;
     }
@@ -916,7 +998,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
 
     uint32_t new_pd = vmm_create_page_directory();
     if (!new_pd) {
-        printf("task_exec: failed to create page directory\n");
+        task_error("task_exec: failed to create page directory\n");
         kfree(kernel_bin);
         return -1;
     }
@@ -927,7 +1009,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
 
     int load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
-        printf("task_exec: ELF loading failed (%d)\n", load_result);
+        task_error("task_exec: ELF loading failed (%d)\n", load_result);
         if (elf_pages) {
             for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
@@ -942,7 +1024,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
-        printf("task_exec: failed to map stack\n");
+        task_error("task_exec: failed to map stack\n");
         if (elf_pages) {
             for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
@@ -972,7 +1054,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
 
     uint32_t total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
-        printf("task_exec: suspicious total_pages=%u\n", total_pages);
+        task_error("task_exec: suspicious total_pages=%u\n", total_pages);
         kfree(elf_pages);
         kfree(stack_pages);
         vmm_free_page_directory(new_pd);
@@ -1003,6 +1085,9 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     regs->cs = 0x1B;
     regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
     regs->eflags = 0x202;
+
+    current_task->tls_base = 0;
+    current_task->tls_limit = 0;
 
     DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, regs->useresp);
 

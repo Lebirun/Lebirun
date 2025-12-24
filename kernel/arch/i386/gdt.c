@@ -17,7 +17,7 @@ typedef struct {
     uint32_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-static gdt_entry_t gdt[6];
+static gdt_entry_t gdt[8];
 static gdt_ptr_t gdtp;
 
 typedef struct {
@@ -68,6 +68,15 @@ void tss_set_esp0(uint32_t esp0) {
     tss.esp0 = esp0;
 }
 
+void gdt_set_tls(int entry, uint32_t base, uint32_t limit) {
+    if (entry < 6 || entry > 7) return;
+    gdt_set_gate(entry, base, limit, 0xF2, 0xCF);
+}
+
+uint16_t gdt_get_tls_selector(int entry) {
+    return (entry * 8) | 3;
+}
+
 static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt[num].base_low    = (base & 0xFFFF);
     gdt[num].base_mid    = (base >> 16) & 0xFF;
@@ -81,10 +90,10 @@ static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access,
 extern void gdt_flush(uint32_t);
 
 void gdt_init(void) {
-    gdtp.limit = (sizeof(gdt_entry_t) * 6) - 1;
+    gdtp.limit = (sizeof(gdt_entry_t) * 8) - 1;
     gdtp.base  = (uint32_t)&gdt;
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 8; i++) {
         gdt[i].base_low    = 0;
         gdt[i].base_mid    = 0;
         gdt[i].base_high   = 0;
@@ -102,6 +111,9 @@ void gdt_init(void) {
     gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
 
     write_tss(5, 0x10, 0);
+    
+    gdt_set_gate(6, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+    gdt_set_gate(7, 0, 0xFFFFFFFF, 0xF2, 0xCF);
 
     asm volatile ("lgdt %0" : : "m"(gdtp) : "memory");
 

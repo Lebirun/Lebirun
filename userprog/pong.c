@@ -108,7 +108,7 @@ static void draw_game(void) {
     }
     
     printf("\n  Player 1: %u   |   Player 2: %u\n", player[0].score, player[1].score);
-    printf("  [W/S] P1 Move   [I/K] P2 Move   [Q] Quit\n");
+    printf("  [W/S] P1 Move   [I/K] P2 Move   [Q] Quit");
 }
 
 static void reset_ball(void) {
@@ -253,15 +253,17 @@ int main(void) {
     printf("  W/S  - Move Player 1 (left paddle)\n");
     printf("  I/K  - Move Player 2 (right paddle, PvP only)\n");
     printf("  Q    - Quit game\n\n");
-    printf("Press '1' for vs AI, '2' for PvP: ");
+    printf("Press '1' for vs AI, '2' for PvP: \n");
     
     while (1) {
         int c = getchar();
         if (c == '1') {
             pvp_mode = 0;
+            printf("vs AI selected\n");
             break;
         } else if (c == '2') {
             pvp_mode = 1;
+            printf("PvP selected\n");
             break;
         } else if (c == 'q' || c == 'Q' || c == 27) {
             printf("\nExiting...\n");

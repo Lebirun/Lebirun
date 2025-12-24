@@ -15,10 +15,13 @@
 #define VFS_O_RDONLY    0x0000
 #define VFS_O_WRONLY    0x0001
 #define VFS_O_RDWR      0x0002
-#define VFS_O_APPEND    0x0008
-#define VFS_O_CREAT     0x0200
-#define VFS_O_TRUNC     0x0400
-#define VFS_O_EXCL      0x0800
+#define VFS_O_CREAT     0x0040
+#define VFS_O_EXCL      0x0080
+#define VFS_O_TRUNC     0x0200
+#define VFS_O_APPEND    0x0400
+#define VFS_O_NONBLOCK  0x0800
+#define VFS_O_DIRECTORY 0x10000
+#define VFS_O_CLOEXEC   0x80000
 
 #define VFS_SEEK_SET    0
 #define VFS_SEEK_CUR    1

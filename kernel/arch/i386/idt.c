@@ -238,6 +238,17 @@ registers_t* interrupt_handler(registers_t* regs)
         print_hex(regs->err_code);
         terminal_writestring("\nEIP = 0x");
         print_hex(regs->eip);
+        if (regs->int_no == 13) { 
+            terminal_writestring("\nSegment registers: DS=0x");
+            print_hex(regs->ds);
+            terminal_writestring(" ES=0x");
+            print_hex(regs->es);
+            terminal_writestring(" FS=0x");
+            print_hex(regs->fs);
+            terminal_writestring(" GS=0x");
+            print_hex(regs->gs);
+            terminal_writestring("\n");
+        }
         if (regs->int_no == 14) {
             uint32_t fault_addr;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));

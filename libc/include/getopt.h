@@ -1,34 +1,27 @@
 #ifndef _GETOPT_H
-#define _GETOPT_H 1
-
-#include <sys/cdefs.h>
+#define _GETOPT_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+int getopt(int, char * const [], const char *);
 extern char *optarg;
-extern int optind;
-extern int opterr;
-extern int optopt;
-
-int getopt(int argc, char * const argv[], const char *optstring);
+extern int optind, opterr, optopt, optreset;
 
 struct option {
-    const char *name;
-    int has_arg;
-    int *flag;
-    int val;
+	const char *name;
+	int has_arg;
+	int *flag;
+	int val;
 };
 
-#define no_argument       0
-#define required_argument 1
-#define optional_argument 2
+int getopt_long(int, char *const *, const char *, const struct option *, int *);
+int getopt_long_only(int, char *const *, const char *, const struct option *, int *);
 
-int getopt_long(int argc, char * const argv[], const char *optstring,
-                const struct option *longopts, int *longindex);
-int getopt_long_only(int argc, char * const argv[], const char *optstring,
-                     const struct option *longopts, int *longindex);
+#define no_argument        0
+#define required_argument  1
+#define optional_argument  2
 
 #ifdef __cplusplus
 }

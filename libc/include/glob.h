@@ -1,47 +1,49 @@
-#ifndef _GLOB_H
-#define _GLOB_H 1
-
-#include <sys/cdefs.h>
-#include <stddef.h>
+#ifndef	_GLOB_H
+#define	_GLOB_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define GLOB_ERR        (1 << 0)
-#define GLOB_MARK       (1 << 1)
-#define GLOB_NOSORT     (1 << 2)
-#define GLOB_DOOFFS     (1 << 3)
-#define GLOB_NOCHECK    (1 << 4)
-#define GLOB_APPEND     (1 << 5)
-#define GLOB_NOESCAPE   (1 << 6)
-#define GLOB_PERIOD     (1 << 7)
-#define GLOB_MAGCHAR    (1 << 8)
-#define GLOB_ALTDIRFUNC (1 << 9)
-#define GLOB_BRACE      (1 << 10)
-#define GLOB_NOMAGIC    (1 << 11)
-#define GLOB_TILDE      (1 << 12)
-#define GLOB_ONLYDIR    (1 << 13)
-#define GLOB_TILDE_CHECK (1 << 14)
+#include <features.h>
 
-#define GLOB_NOSPACE    1
-#define GLOB_ABORTED    2
-#define GLOB_NOMATCH    3
+#define __NEED_size_t
+
+#include <bits/alltypes.h>
 
 typedef struct {
-    size_t gl_pathc;
-    char **gl_pathv;
-    size_t gl_offs;
-    int gl_flags;
-    void (*gl_closedir)(void *);
-    void *(*gl_readdir)(void *);
-    void *(*gl_opendir)(const char *);
-    int (*gl_lstat)(const char *, void *);
-    int (*gl_stat)(const char *, void *);
+	size_t gl_pathc;
+	char **gl_pathv;
+	size_t gl_offs;
+	int __dummy1;
+	void *__dummy2[5];
 } glob_t;
 
-int glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *pglob);
-void globfree(glob_t *pglob);
+int  glob(const char *__restrict, int, int (*)(const char *, int), glob_t *__restrict);
+void globfree(glob_t *);
+
+#define GLOB_ERR      0x01
+#define GLOB_MARK     0x02
+#define GLOB_NOSORT   0x04
+#define GLOB_DOOFFS   0x08
+#define GLOB_NOCHECK  0x10
+#define GLOB_APPEND   0x20
+#define GLOB_NOESCAPE 0x40
+#define	GLOB_PERIOD   0x80
+
+#define GLOB_TILDE       0x1000
+#define GLOB_TILDE_CHECK 0x4000
+
+#define GLOB_NOSPACE 1
+#define GLOB_ABORTED 2
+#define GLOB_NOMATCH 3
+#define GLOB_NOSYS   4
+
+#if defined(_LARGEFILE64_SOURCE)
+#define glob64 glob
+#define globfree64 globfree
+#define glob64_t glob_t
+#endif
 
 #ifdef __cplusplus
 }

@@ -1,16 +1,16 @@
-#ifndef _ALLOCA_H
-#define _ALLOCA_H 1
-
-#include <sys/cdefs.h>
-#include <stddef.h>
+#ifndef	_ALLOCA_H
+#define	_ALLOCA_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define alloca(size) __builtin_alloca(size)
+#define	__NEED_size_t
+#include <bits/alltypes.h>
 
-void *alloca(size_t size);
+void *alloca(size_t);
+
+#define alloca __builtin_alloca
 
 #ifdef __cplusplus
 }

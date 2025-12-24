@@ -14,6 +14,23 @@ static uint32_t ramfs_next_inode = 1;
 static ramfs_stats_t ramfs_stats;
 static int ramfs_stats_initialized = 0;
 
+static uint32_t ramfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static void ramfs_vfs_open(vfs_node_t *node, uint32_t flags);
+static void ramfs_vfs_close(vfs_node_t *node);
+static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t length);
+static int ramfs_vfs_chmod(vfs_node_t *node, uint32_t mode);
+static int ramfs_vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
+static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index);
+static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name);
+static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags);
+static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name);
+static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
+static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name, 
+                            vfs_node_t *new_parent, const char *new_name);
+static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn);
+static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
+
 static void ramfs_init_stats(void) {
     if (!ramfs_stats_initialized) {
         ramfs_stats.total_size = RAMFS_MAX_TOTAL_SIZE;
@@ -229,6 +246,28 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
     
     ramfs_stats.file_count++;
     
+    vfs_node_t *vn = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (vn) {
+        memset(vn, 0, sizeof(vfs_node_t));
+        strncpy(vn->name, name, VFS_MAX_NAME - 1);
+        vn->name[VFS_MAX_NAME - 1] = '\0';
+        vn->flags = VFS_FILE;
+        vn->inode = ramfs_next_inode++;
+        vn->length = 0;
+        vn->mask = permissions;
+        vn->uid = 0;
+        vn->gid = 0;
+        vn->atime = node->atime;
+        vn->mtime = node->mtime;
+        vn->ctime = node->ctime;
+        vn->parent = parent->vfs_node;
+        vn->private_data = node;
+        
+        ramfs_setup_vfs_file_callbacks(vn);
+        
+        node->vfs_node = vn;
+    }
+    
     ramfs_node_unlock(parent);
     ramfs_unlock();
     
@@ -276,6 +315,28 @@ int ramfs_create_dir(const char *path, uint8_t permissions) {
     parent->mtime = ramfs_get_time();
     
     ramfs_stats.dir_count++;
+    
+    vfs_node_t *vn = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (vn) {
+        memset(vn, 0, sizeof(vfs_node_t));
+        strncpy(vn->name, name, VFS_MAX_NAME - 1);
+        vn->name[VFS_MAX_NAME - 1] = '\0';
+        vn->flags = VFS_DIRECTORY;
+        vn->inode = ramfs_next_inode++;
+        vn->length = 0;
+        vn->mask = permissions;
+        vn->uid = 0;
+        vn->gid = 0;
+        vn->atime = node->atime;
+        vn->mtime = node->mtime;
+        vn->ctime = node->ctime;
+        vn->parent = parent->vfs_node;
+        vn->private_data = node;
+        
+        ramfs_setup_vfs_dir_callbacks(vn);
+        
+        node->vfs_node = vn;
+    }
     
     ramfs_node_unlock(parent);
     ramfs_unlock();
@@ -1362,5 +1423,5 @@ static vfs_fs_type_t ramfs_fs_type = {
 void ramfs_vfs_register(void) {
     ramfs_init();
     vfs_register_fs(&ramfs_fs_type);
-    vfs_mount(NULL, "/ramfs", "ramfs");
+    vfs_mount(NULL, "/", "ramfs");
 }

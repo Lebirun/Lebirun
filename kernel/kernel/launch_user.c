@@ -4,6 +4,8 @@
 #include <kernel/debug.h>
 #include <kernel/elf.h>
 #include "launch_user.h"
+#include <kernel/console.h>
+#include <stdio.h>
 #include <string.h>
 
 #define USER_STACK_TOP 0x00800000u

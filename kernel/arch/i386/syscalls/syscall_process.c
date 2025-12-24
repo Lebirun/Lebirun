@@ -1,4 +1,17 @@
 #include "syscall_defs.h"
+#include <stdarg.h>
+
+static void syscall_error(const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    printf("%s", buf);
+    if (current_task && current_task->console_id >= 0 && console_is_initialized()) {
+        console_write_to(current_task->console_id, buf, (size_t)n);
+    }
+}
 
 static int sys_getpid(int unused, const char *unused2, int unused3) {
     (void)unused;
@@ -61,16 +74,16 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
     uint32_t bin_size = (uint32_t)(uintptr_t)size_ptr;
 
     if (bin_addr >= 0xC0000000 || bin_addr < 0x1000) {
-        printf("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
+        syscall_error("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
         return -1;
     }
     if (bin_size == 0 || bin_size > 0x1000000) {
-        printf("sys_exec: invalid size %u\n", bin_size);
+        syscall_error("sys_exec: invalid size %u\n", bin_size);
         return -1;
     }
 
     if (!fork_regs_ptr) {
-        printf("sys_exec: no registers pointer\n");
+        syscall_error("sys_exec: no registers pointer\n");
         return -1;
     }
 

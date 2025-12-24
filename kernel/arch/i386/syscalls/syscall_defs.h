@@ -4,6 +4,7 @@
 #include <kernel/registers.h>
 #include <kernel/syscall.h>
 #include <kernel/tty.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <kernel/keyboard.h>
 #include <kernel/mutex.h>
@@ -79,8 +80,108 @@
 #define SYSCALL_TCDRAIN 59
 #define SYSCALL_TCGETPGRP 60
 #define SYSCALL_TCSETPGRP 61
+#define SYSCALL_WRITEV 62
+#define SYSCALL_LSEEK 63
+#define SYSCALL_EXECVE 64
+#define SYSCALL_DUP 65
+#define SYSCALL_DUP2 66
+#define SYSCALL_PIPE 67
+#define SYSCALL_SIGACTION 68
+#define SYSCALL_SIGPROCMASK 69
+#define SYSCALL_STAT 71
+#define SYSCALL_GETCWD 72
+#define SYSCALL_CHDIR 73
+#define SYSCALL_CHDIR 73
+#define SYSCALL_ACCESS 74
+#define SYSCALL_CLOCK_GETTIME 75
+#define SYSCALL_GETTIMEOFDAY 76
+#define SYSCALL_MUNMAP 77
+#define SYSCALL_MPROTECT 78
+#define SYSCALL_FCNTL 79
+#define SYSCALL_GETDENTS 80
+#define SYSCALL_TRUNCATE 81
+#define SYSCALL_FTRUNCATE 82
+#define SYSCALL_RENAME 83
+#define SYSCALL_LINK 84
+#define SYSCALL_SYMLINK 85
+#define SYSCALL_READLINK 86
+#define SYSCALL_UMASK 87
 
-#define NR_SYSCALLS 62
+#define NR_SYSCALLS 88
+
+struct kernel_stat {
+    unsigned long long st_dev;
+    int __st_dev_padding;
+    long __st_ino_truncated;
+    unsigned int st_mode;
+    unsigned int st_nlink;
+    unsigned int st_uid;
+    unsigned int st_gid;
+    unsigned long long st_rdev;
+    int __st_rdev_padding;
+    long long st_size;
+    long st_blksize;
+    long long st_blocks;
+    struct {
+        long tv_sec;
+        long tv_nsec;
+    } __st_atim32, __st_mtim32, __st_ctim32;
+    unsigned long long st_ino;
+    struct {
+        long tv_sec;
+        long tv_nsec;
+    } st_atim, st_mtim, st_ctim;
+};
+
+struct kernel_sigaction {
+    void (*sa_handler)(int);
+    unsigned long sa_flags;
+    void (*sa_restorer)(void);
+    unsigned long sa_mask;
+};
+
+#define S_IFMT  00170000
+#define S_IFSOCK 0140000
+#define S_IFLNK  0120000
+#define S_IFREG  0100000
+#define S_IFBLK  0060000
+#define S_IFDIR  0040000
+#define S_IFCHR  0020000
+#define S_IFIFO  0010000
+#define S_ISUID  0004000
+#define S_ISGID  0002000
+#define S_ISVTX  0001000
+
+#define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
+#define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
+#define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
+#define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
+#define S_ISBLK(m)  (((m) & S_IFMT) == S_IFBLK)
+#define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
+#define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
+
+#define S_IRWXU 00700
+#define S_IRUSR 00400
+#define S_IWUSR 00200
+#define S_IXUSR 00100
+#define S_IRWXG 00070
+#define S_IRGRP 00040
+#define S_IWGRP 00020
+#define S_IXGRP 00010
+#define S_IRWXO 00007
+#define S_IROTH 00004
+#define S_IWOTH 00002
+#define S_IXOTH 00001
+
+struct kernel_timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+struct kernel_timeval {
+    long tv_sec;
+    long tv_usec;
+};
 
 #define NCCS 32
 
@@ -184,6 +285,7 @@ void syscalls_vfs_init(void);
 void syscalls_sata_init(void);
 void syscalls_net_init(void);
 void syscalls_termios_init(void);
+void syscalls_posix_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
 

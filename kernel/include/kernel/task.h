@@ -5,6 +5,15 @@
 #include <kernel/registers.h>
 #include <stdint.h>
 
+#define TASK_MAX_FDS 64
+
+#define FD_TYPE_FILE   0
+#define FD_TYPE_PIPE_R 1
+#define FD_TYPE_PIPE_W 2
+#define FD_TYPE_STDIN  3
+#define FD_TYPE_STDOUT 4
+#define FD_TYPE_STDERR 5
+
 typedef enum {
     TASK_READY = 0,
     TASK_RUNNING,
@@ -15,6 +24,16 @@ typedef enum {
 typedef struct wait_queue {
     struct task* head;
 } wait_queue_t;
+
+typedef struct {
+    int in_use;
+    int type;
+    void *node;
+    uint32_t offset;
+    uint32_t flags;
+    int ref_count;
+    void *private_data;
+} task_fd_t;
 
 typedef struct task {
     uint32_t id;
@@ -46,6 +65,12 @@ typedef struct task {
     uint32_t *user_pages;
     uint32_t user_pages_count;
     int console_id;
+    uint32_t tls_base;
+    uint32_t tls_limit;
+    char cwd[256];
+    char **envp;
+    int envc;
+    task_fd_t fds[TASK_MAX_FDS];
 } task_t;
 
 extern task_t* current_task;
@@ -85,6 +110,12 @@ void task_free_user_memory(task_t* t);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);
+
+void task_init_fds(task_t *task);
+int task_fd_alloc(task_t *task);
+void task_fd_free(task_t *task, int fd);
+task_fd_t *task_fd_get(task_t *task, int fd);
+void task_fd_close_all(task_t *task);
 
 pid_t task_fork(registers_t *parent_regs);
 int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs);

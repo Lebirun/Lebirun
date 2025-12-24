@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/tty.h>
 #include <kernel/mutex.h>
+#include <kernel/task.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -265,8 +266,96 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
     return best;
 }
 
+static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
+    if (!path || !resolved || size == 0) return -1;
+    
+    if (path[0] == '/') {
+        size_t i = 0;
+        while (path[i] && i < size - 1) { resolved[i] = path[i]; i++; }
+        resolved[i] = '\0';
+        return 0;
+    }
+    
+    const char *cwd = "/";
+    if (current_task && current_task->cwd[0]) {
+        cwd = current_task->cwd;
+    }
+    
+    size_t cwd_len = 0;
+    while (cwd[cwd_len]) cwd_len++;
+    
+    size_t path_len = 0;
+    while (path[path_len]) path_len++;
+    
+    size_t pos = 0;
+    for (size_t i = 0; i < cwd_len && pos < size - 1; i++) {
+        resolved[pos++] = cwd[i];
+    }
+
+    if (pos > 0 && resolved[pos - 1] != '/' && pos < size - 1) {
+        resolved[pos++] = '/';
+    }
+    
+    for (size_t i = 0; i < path_len && pos < size - 1; i++) {
+        resolved[pos++] = path[i];
+    }
+    resolved[pos] = '\0';
+    
+    return 0;
+}
+
+static void vfs_normalize_path(char *path) {
+    if (!path || path[0] != '/') return;
+    
+    char *src = path;
+    char *dst = path;
+    char *components[64];
+    int count = 0;
+    
+    while (*src) {
+        while (*src == '/') src++;
+        if (*src == '\0') break;
+        
+        char *comp_start = src;
+        while (*src && *src != '/') src++;
+        size_t comp_len = src - comp_start;
+        
+        if (comp_len == 1 && comp_start[0] == '.') {
+            continue;
+        } else if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
+            if (count > 0) count--;
+            continue;
+        }
+        
+        if (count < 64) {
+            components[count++] = comp_start;
+            if (*src) *src++ = '\0';
+        }
+    }
+    
+    dst = path;
+    *dst++ = '/';
+    for (int i = 0; i < count; i++) {
+        char *comp = components[i];
+        while (*comp) *dst++ = *comp++;
+        if (i < count - 1) *dst++ = '/';
+    }
+    *dst = '\0';
+    
+    if (path[1] == '\0') return;
+}
+
 vfs_node_t *vfs_namei(const char *path) {
-    if (!path || path[0] != '/') return NULL;
+    if (!path) return NULL;
+    
+    char resolved[VFS_MAX_PATH];
+    if (path[0] != '/') {
+        if (vfs_resolve_path(path, resolved, sizeof(resolved)) < 0) return NULL;
+        vfs_normalize_path(resolved);
+        path = resolved;
+    }
+    
+    if (path[0] != '/') return NULL;
     if (path[0] == '/' && path[1] == '\0') return vfs_root;
     
     vfs_mount_t *mount = find_mount_for_path(path);
@@ -352,11 +441,74 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     return buf;
 }
 
+static int vfs_split_path(const char *path, char *parent_buf, size_t parent_size, 
+                          char *name_buf, size_t name_size) {
+    if (!path || !parent_buf || !name_buf) return -1;
+    
+    int len = 0;
+    while (path[len]) len++;
+    
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    
+    if (last_slash < 0) {
+        parent_buf[0] = '/';
+        parent_buf[1] = '\0';
+        int j = 0;
+        while (path[j] && j < (int)name_size - 1) { name_buf[j] = path[j]; j++; }
+        name_buf[j] = '\0';
+    } else if (last_slash == 0) {
+        parent_buf[0] = '/';
+        parent_buf[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < (int)name_size - 1; i++, j++) name_buf[j] = path[i];
+        name_buf[j] = '\0';
+    } else {
+        int i = 0;
+        while (i < last_slash && i < (int)parent_size - 1) { parent_buf[i] = path[i]; i++; }
+        parent_buf[i] = '\0';
+        int j = 0;
+        for (int k = last_slash + 1; k < len && j < (int)name_size - 1; k++, j++) name_buf[j] = path[k];
+        name_buf[j] = '\0';
+    }
+    
+    return 0;
+}
+
 int vfs_open_path(const char *path, int flags) {
     if (!path) return -1;
     
     vfs_node_t *node = vfs_namei(path);
+    
+    if (!node && (flags & VFS_O_CREAT)) {
+        char parent_path[VFS_MAX_PATH];
+        char filename[VFS_MAX_NAME];
+        
+        if (vfs_split_path(path, parent_path, sizeof(parent_path), 
+                           filename, sizeof(filename)) < 0) {
+            return -1;
+        }
+        
+        vfs_node_t *parent = vfs_namei(parent_path);
+        if (!parent) return -1;
+        
+        int ret = vfs_create(parent, filename, VFS_FILE);
+        if (ret < 0 && !(flags & VFS_O_EXCL)) {
+            node = vfs_namei(path);
+        } else if (ret == 0) {
+            node = vfs_namei(path);
+        }
+        
+        if (!node) return -1;
+    }
+    
     if (!node) return -1;
+    
+    if ((flags & VFS_O_TRUNC) && node->truncate) {
+        node->truncate(node, 0);
+    }
     
     mutex_lock(&vfs_lock);
     
@@ -377,7 +529,7 @@ int vfs_open_path(const char *path, int flags) {
     
     fd_table[fd].in_use = 1;
     fd_table[fd].node = node;
-    fd_table[fd].offset = 0;
+    fd_table[fd].offset = (flags & VFS_O_APPEND) ? node->length : 0;
     fd_table[fd].flags = flags;
     
     mutex_unlock(&vfs_lock);
@@ -498,6 +650,11 @@ int vfs_readdir_fd(int fd, dirent_t *entry, uint32_t index) {
 }
 
 vfs_node_t *vfs_get_root(void) {
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0) {
+            return mounts[i].root;
+        }
+    }
     return vfs_root;
 }
 
@@ -536,7 +693,7 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
     
     uint32_t count = 0;
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
-        if (mounts[i].in_use) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, "/") != 0) {
             if (count == index) {
                 const char *path = mounts[i].path;
                 if (path[0] == '/') path++;
@@ -553,6 +710,15 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
                 return &root_dirent;
             }
             count++;
+        }
+    }
+    
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
+            if (mounts[i].root->readdir) {
+                return mounts[i].root->readdir(mounts[i].root, index - count);
+            }
+            break;
         }
     }
     
@@ -579,6 +745,17 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
         if (strncmp(mounts[i].path, search_path, len) == 0 &&
             (mounts[i].path[len] == '/' || mounts[i].path[len] == '\0')) {
             return mounts[i].root;
+        }
+    }
+    
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (!mounts[i].in_use) continue;
+        if (strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
+            if (mounts[i].root->finddir) {
+                vfs_node_t *found = mounts[i].root->finddir(mounts[i].root, name);
+                if (found) return found;
+            }
+            break;
         }
     }
     

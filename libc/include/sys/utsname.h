@@ -1,23 +1,26 @@
-#ifndef _SYS_UTSNAME_H
-#define _SYS_UTSNAME_H 1
-
-#include <sys/cdefs.h>
+#ifndef	_SYS_UTSNAME_H
+#define	_SYS_UTSNAME_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define _UTSNAME_LENGTH 65
+#include <features.h>
 
 struct utsname {
-    char sysname[_UTSNAME_LENGTH];
-    char nodename[_UTSNAME_LENGTH];
-    char release[_UTSNAME_LENGTH];
-    char version[_UTSNAME_LENGTH];
-    char machine[_UTSNAME_LENGTH];
+	char sysname[65];
+	char nodename[65];
+	char release[65];
+	char version[65];
+	char machine[65];
+#ifdef _GNU_SOURCE
+	char domainname[65];
+#else
+	char __domainname[65];
+#endif
 };
 
-int uname(struct utsname *buf);
+int uname (struct utsname *);
 
 #ifdef __cplusplus
 }

@@ -12,6 +12,16 @@
 #define HEAP_MAGIC 0xDEADBEEF
 #define HEAP_MIN_BLOCK 16
 
+#define HEAP_CANARY_HEAD 0xCAFEBABE  
+#define HEAP_CANARY_TAIL 0xDEADC0DE  
+#define HEAP_POISON_FREED 0xFE         
+#define HEAP_POISON_ALLOC 0xCD        
+#define HEAP_POISON_REDZONE 0xFD       
+
+#define KMALLOC_ZERO      0x01         
+#define KMALLOC_NO_POISON 0x02       
+#define KMALLOC_SECURE    0x04        
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -63,7 +73,9 @@ typedef struct {
 
 typedef struct heap_block {
     uint32_t magic;
-    uint32_t size;
+    uint32_t size;          
+    uint32_t alloc_size;     
+    uint32_t flags;         
     uint8_t is_free;
     struct heap_block *next;
     struct heap_block *prev;
@@ -122,6 +134,20 @@ void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
 uint32_t heap_free_space(void);
+
+void *ksafe_alloc(size_t size, uint32_t flags);
+void *kcalloc(size_t nmemb, size_t size);      
+void ksafe_free(void *ptr);                   
+void kfree_secure(void *ptr);                
+
+int heap_check_canaries(void *ptr);              
+int heap_validate_ptr(void *ptr);                
+
+#define SAFE_MUL_SIZE(a, b, result) \
+    (((b) != 0 && (a) > SIZE_MAX / (b)) ? 0 : (*(result) = (a) * (b), 1))
+
+#define SAFE_ADD_SIZE(a, b, result) \
+    (((a) > SIZE_MAX - (b)) ? 0 : (*(result) = (a) + (b), 1))
 
 uint32_t heap_block_size_for_ptr(void *ptr);
 void heap_verify(void);

@@ -169,6 +169,9 @@ void kernel_main(void) {
 	printf("\n");
 	pic_remap();
     init_tasks();
+    
+    initrd_copy_to_root();
+    
     pit_init(1000);
     calibrate_pit();
     keyboard_init();

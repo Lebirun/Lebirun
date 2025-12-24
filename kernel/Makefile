@@ -16,12 +16,10 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
-LIBC_COMMON=../libc-common
-
 CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra
-CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude -I$(LIBC_COMMON)/include
+CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
 LDFLAGS:=$(LDFLAGS)
-LIBS:=$(LIBS) -nostdlib -lk -lgcc
+LIBS:=$(LIBS) -nostdlib -lgcc
 
 ARCHDIR=arch/$(HOSTARCH)
 
@@ -60,34 +58,7 @@ $(USER_SHELL_OBJ) \
 $(UNIFONT_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
-$(LIBC_COMMON)/string/memset.o \
-$(LIBC_COMMON)/string/memcpy.o \
-$(LIBC_COMMON)/string/memmove.o \
-$(LIBC_COMMON)/string/memcmp.o \
-$(LIBC_COMMON)/string/strlen.o \
-$(LIBC_COMMON)/string/strcmp.o \
-$(LIBC_COMMON)/string/strncmp.o
-
-$(LIBC_COMMON)/string/memset.o:
-	$(MAKE) -C $(LIBC_COMMON) string/memset.o
-
-$(LIBC_COMMON)/string/memcpy.o:
-	$(MAKE) -C $(LIBC_COMMON) string/memcpy.o
-
-$(LIBC_COMMON)/string/memmove.o:
-	$(MAKE) -C $(LIBC_COMMON) string/memmove.o
-
-$(LIBC_COMMON)/string/memcmp.o:
-	$(MAKE) -C $(LIBC_COMMON) string/memcmp.o
-
-$(LIBC_COMMON)/string/strlen.o:
-	$(MAKE) -C $(LIBC_COMMON) string/strlen.o
-
-$(LIBC_COMMON)/string/strcmp.o:
-	$(MAKE) -C $(LIBC_COMMON) string/strcmp.o
-
-$(LIBC_COMMON)/string/strncmp.o:
-	$(MAKE) -C $(LIBC_COMMON) string/strncmp.o
+lib/string.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \
@@ -153,5 +124,4 @@ install-kernel: lebirun.kernel
 	mkdir -p $(DESTDIR)$(BOOTDIR)
 	cp lebirun.kernel $(DESTDIR)$(BOOTDIR)
 
-KERNEL_OWN_OBJS = $(filter-out $(LIBC_COMMON)/%,$(OBJS))
--include $(KERNEL_OWN_OBJS:.o=.d)
+-include $(OBJS:.o=.d)

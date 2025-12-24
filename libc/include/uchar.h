@@ -1,22 +1,26 @@
 #ifndef _UCHAR_H
-#define _UCHAR_H 1
-
-#include <sys/cdefs.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <wchar.h>
+#define _UCHAR_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef uint_least16_t char16_t;
-typedef uint_least32_t char32_t;
+#if __cplusplus < 201103L
+typedef unsigned short char16_t;
+typedef unsigned char32_t;
+#endif
 
-size_t mbrtoc16(char16_t *pc16, const char *s, size_t n, mbstate_t *ps);
-size_t c16rtomb(char *s, char16_t c16, mbstate_t *ps);
-size_t mbrtoc32(char32_t *pc32, const char *s, size_t n, mbstate_t *ps);
-size_t c32rtomb(char *s, char32_t c32, mbstate_t *ps);
+#define __NEED_mbstate_t
+#define __NEED_size_t
+
+#include <features.h>
+#include <bits/alltypes.h>
+
+size_t c16rtomb(char *__restrict, char16_t, mbstate_t *__restrict);
+size_t mbrtoc16(char16_t *__restrict, const char *__restrict, size_t, mbstate_t *__restrict);
+
+size_t c32rtomb(char *__restrict, char32_t, mbstate_t *__restrict);
+size_t mbrtoc32(char32_t *__restrict, const char *__restrict, size_t, mbstate_t *__restrict);
 
 #ifdef __cplusplus
 }

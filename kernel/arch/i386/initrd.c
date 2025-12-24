@@ -2,6 +2,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/common.h>
 #include <kernel/vfs.h>
+#include <kernel/ramfs.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -540,4 +541,151 @@ static vfs_fs_type_t initrd_fs_type = {
 void initrd_vfs_register(void) {
     vfs_register_fs(&initrd_fs_type);
     vfs_mount(NULL, "/initrd", "initrd");
+}
+
+void initrd_copy_to_root(void) {
+    if (!files || file_count == 0) {
+        printf("INITRD: No files to copy to root\n");
+        return;
+    }
+    
+    printf("INITRD: Copying %u files to /...\n", file_count);
+    
+    uint32_t dirs_created = 0;
+    uint32_t files_copied = 0;
+    uint32_t errors = 0;
+
+    {
+        const char *root_dirs[] = {
+            "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
+            "/usr", "/var", "/tmp", "/proc", "/run", "/root",
+            NULL
+        };
+        for (const char **p = root_dirs; *p; p++) {
+            int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            if (r == 0) {
+                printf("INITRD: Created root dir %s\n", *p);
+                dirs_created++;
+            } else {
+                printf("INITRD: Failed to create root dir %s (%d)\n", *p, r);
+                errors++;
+            }
+        }
+        
+        const char *nested_dirs[] = {
+            "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
+            "/var/log", "/var/run", "/var/tmp",
+            NULL
+        };
+        for (const char **p = nested_dirs; *p; p++) {
+            int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            if (r == 0) {
+                printf("INITRD: Created nested dir %s\n", *p);
+                dirs_created++;
+            } else {
+                printf("INITRD: Failed to create nested dir %s (%d)\n", *p, r);
+                errors++;
+            }
+        }
+    }
+    
+    for (uint32_t i = 0; i < file_count; i++) {
+        initrd_file_t *f = &files[i];
+        
+        if (!f || f->name[0] == '\0') {
+            continue;
+        }
+        
+        char destpath[INITRD_MAX_PATH];
+        destpath[0] = '\0';
+        {
+            char tmp[INITRD_MAX_PATH];
+            tmp[0] = '\0';
+            int cur = (int)i;
+            while (cur >= 0 && cur < (int)file_count) {
+                char namebuf[VFS_MAX_NAME];
+                int k = 0;
+                while (k < VFS_MAX_NAME - 1 && files[cur].name[k]) { 
+                    namebuf[k] = files[cur].name[k]; 
+                    k++; 
+                }
+                namebuf[k] = '\0';
+                char newtmp[INITRD_MAX_PATH];
+                if (tmp[0] == '\0') {
+                    snprintf(newtmp, sizeof(newtmp), "/%s", namebuf);
+                } else {
+                    snprintf(newtmp, sizeof(newtmp), "/%s%s", namebuf, tmp);
+                }
+                strncpy(tmp, newtmp, sizeof(tmp) - 1);
+                tmp[sizeof(tmp) - 1] = '\0';
+                if (files[cur].parent_index == 0xFFFF || files[cur].parent_index >= file_count) {
+                    break;
+                }
+                cur = (int)files[cur].parent_index;
+            }
+            strncpy(destpath, tmp, sizeof(destpath) - 1);
+            destpath[sizeof(destpath) - 1] = '\0';
+        }
+
+        printf("INITRD_COPY: i=%u name='%s' parent=%u type=%u dest='%s'\n", 
+               (unsigned)i, files[i].name, files[i].parent_index, files[i].type, destpath);
+
+        bool is_root_level_dir = (files[i].parent_index == 0xFFFF && files[i].type == INITRD_TYPE_DIR);
+        if (is_root_level_dir) {
+            bool is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
+                                     strcmp(destpath, "/etc") == 0 || strcmp(destpath, "/home") == 0 ||
+                                     strcmp(destpath, "/lib") == 0 || strcmp(destpath, "/sbin") == 0 ||
+                                     strcmp(destpath, "/usr") == 0 || strcmp(destpath, "/var") == 0 ||
+                                     strcmp(destpath, "/tmp") == 0 || strcmp(destpath, "/proc") == 0 ||
+                                     strcmp(destpath, "/run") == 0 || strcmp(destpath, "/root") == 0);
+            if (is_standard_root) {
+                printf("INITRD: Skipping root-level dir %s (already created independently)\n", destpath);
+                continue;
+            }
+        }
+
+        int dlen = (int)strlen(destpath);
+        for (int cp = 1; cp < dlen; cp++) {
+            if (destpath[cp] == '/') {
+                char sub[INITRD_MAX_PATH];
+                int sublen = cp;
+                memcpy(sub, destpath, sublen);
+                sub[sublen] = '\0';
+                if (sublen > 1) {
+                    int r = ramfs_create_dir(sub, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+                    (void)r; 
+                }
+            }
+        }
+
+        if (f->type == INITRD_TYPE_DIR) {
+            int ret = ramfs_create_dir(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            if (ret == 0) {
+                dirs_created++;
+            } else if (ret != RAMFS_ERR_EXIST) {
+                printf("  mkdir %s FAILED (%d)\n", destpath, ret);
+                errors++;
+            }
+        } else {
+            int ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE);
+            if (ret == 0 || ret == RAMFS_ERR_EXIST) {
+                if (f->data && f->length > 0) {
+                    int written = ramfs_write(destpath, 0, f->data, f->length);
+                    if (written >= 0) {
+                        files_copied++;
+                    } else {
+                        printf("  write %s FAILED (%d)\n", destpath, written);
+                        errors++;
+                    }
+                } else {
+                    files_copied++;
+                }
+            } else {
+                printf("  create %s FAILED (%d)\n", destpath, ret);
+                errors++;
+            }
+        }
+    }
+    
+    printf("INITRD: Copied %u dirs, %u files (%u errors)\n", dirs_created, files_copied, errors);
 }

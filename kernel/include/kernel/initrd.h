@@ -78,4 +78,6 @@ void initrd_init_fds(void);
 
 void initrd_vfs_register(void);
 
+void initrd_copy_to_root(void);
+
 #endif

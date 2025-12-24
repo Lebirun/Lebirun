@@ -1,0 +1,5 @@
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+export HOME=/root
+export USER=root
+export TERM=vt100
+export SHELL=/bin/sh
