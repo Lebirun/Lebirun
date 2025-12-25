@@ -1,6 +1,14 @@
 #include "syscall_defs.h"
 #include <stdarg.h>
 
+#define WNOHANG   1
+#define WUNTRACED 2
+#define WCONTINUED 8
+
+#define P_ALL  0
+#define P_PID  1
+#define P_PGID 2
+
 static void syscall_error(const char *fmt, ...) {
     char buf[256];
     va_list ap;
@@ -33,22 +41,78 @@ static int sys_sleep(int ms, const char *unused, int unused2) {
     return 0;
 }
 
-static int sys_waitpid(int pid, const char *status_ptr, int unused) {
-    (void)unused;
-    if (pid <= 0) return -1;
-    task_t* t = task_find((pid_t)pid);
-    if (!t) return -1;
-    uint32_t exit_code = 0;
-    int r = task_join(t, &exit_code);
-    if (r != 0) return -1;
-
-    if (status_ptr) {
-        uint32_t addr = (uint32_t)status_ptr;
-        if (addr >= 0xC0000000 || addr < 0x1000) return -1;
-        if (addr + sizeof(uint32_t) >= 0xC0000000) return -1;
-        memcpy((void*)addr, &exit_code, sizeof(uint32_t));
+static int sys_waitpid(int pid, const char *status_ptr, int options) {
+    if (pid == 0) pid = -1;
+    
+    if (pid > 0) {
+        task_t* t = task_find((pid_t)pid);
+        if (!t) return -ECHILD;
+        
+        if (options & WNOHANG) {
+            if (t->state != TASK_DEAD) return 0;
+        }
+        
+        uint32_t exit_code = 0;
+        int r = task_join(t, &exit_code);
+        if (r != 0) return -ECHILD;
+        
+        if (status_ptr) {
+            uint32_t addr = (uint32_t)status_ptr;
+            if (addr >= 0xC0000000 || addr < 0x1000) return -EFAULT;
+            int status = (exit_code & 0xFF) << 8;
+            memcpy((void*)addr, &status, sizeof(int));
+        }
+        return (int)pid;
     }
-    return (int)pid;
+    
+    return -ECHILD;
+}
+
+static int sys_wait4(int pid, const char *status_ptr, int options) {
+    return sys_waitpid(pid, status_ptr, options);
+}
+
+struct siginfo_k {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    int _pad[29];
+};
+
+static int sys_waitid(int idtype, const char *id_ptr, int infop) {
+    int id = (int)(uintptr_t)id_ptr;
+    uint32_t info_addr = (uint32_t)infop;
+    
+    pid_t target_pid = -1;
+    
+    if (idtype == P_PID) {
+        target_pid = (pid_t)id;
+    } else if (idtype == P_ALL) {
+        target_pid = -1;
+    } else if (idtype == P_PGID) {
+        target_pid = -1;
+    } else {
+        return -EINVAL;
+    }
+    
+    if (target_pid > 0) {
+        task_t *t = task_find(target_pid);
+        if (!t) return -ECHILD;
+        
+        uint32_t exit_code = 0;
+        int r = task_join(t, &exit_code);
+        if (r != 0) return -ECHILD;
+        
+        if (info_addr && info_addr < 0xC0000000 && info_addr >= 0x1000) {
+            struct siginfo_k *info = (struct siginfo_k *)info_addr;
+            memset(info, 0, sizeof(struct siginfo_k));
+            info->si_signo = 17;
+            info->si_code = 1;
+        }
+        return 0;
+    }
+    
+    return -ECHILD;
 }
 
 static int sys_kill(int pid, const char *unused, int code) {
@@ -90,12 +154,26 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
     return task_exec((const uint8_t *)bin_addr, bin_size, fork_regs_ptr);
 }
 
+static int sys_vfork(int unused1, const char *unused2, int unused3) {
+    (void)unused1; (void)unused2; (void)unused3;
+    return sys_fork(0, NULL, 0);
+}
+
+static int sys_clone(int flags, const char *child_stack, int ptid) {
+    (void)flags; (void)child_stack; (void)ptid;
+    return sys_fork(0, NULL, 0);
+}
+
 void syscalls_process_init(void) {
     syscall_table[SYSCALL_GETPID] = sys_getpid;
     syscall_table[SYSCALL_YIELD] = sys_yield;
     syscall_table[SYSCALL_SLEEP] = sys_sleep;
     syscall_table[SYSCALL_WAITPID] = sys_waitpid;
+    syscall_table[SYSCALL_WAIT4] = sys_wait4;
+    syscall_table[SYSCALL_WAITID] = sys_waitid;
     syscall_table[SYSCALL_KILL] = sys_kill;
     syscall_table[SYSCALL_FORK] = sys_fork;
     syscall_table[SYSCALL_EXEC] = sys_exec;
+    syscall_table[SYSCALL_VFORK] = sys_vfork;
+    syscall_table[SYSCALL_CLONE] = sys_clone;
 }

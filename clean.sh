@@ -13,3 +13,4 @@ rm -rf isodir
 rm -rf lebirun.iso
 rm -f initrd.img
 rm -rf include
+rm -rf rootfs.img

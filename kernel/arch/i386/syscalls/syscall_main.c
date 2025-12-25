@@ -55,7 +55,6 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 4:   return SYSCALL_WRITE;
         case 5:   return SYSCALL_VFS_OPEN;
         case 6:   return SYSCALL_VFS_CLOSE;
-        case 295: return SYSCALL_VFS_OPEN;
         
         case 2:   return SYSCALL_FORK;
         case 7:   return SYSCALL_WAITPID;
@@ -67,9 +66,12 @@ static int linux_to_kernel_syscall(int linux_nr) {
         
         case 45:  return SYSCALL_SBRK;
         case 90:  return SYSCALL_MMAP;
-        case 192: return SYSCALL_MMAP;
+        case 192: return SYSCALL_MMAP2;
         case 91:  return SYSCALL_MUNMAP;
         case 125: return SYSCALL_MPROTECT;
+        case 163: return SYSCALL_MREMAP;
+        case 219: return SYSCALL_MADVISE;
+        case 218: return SYSCALL_MINCORE;
         
         case 18:  return SYSCALL_STAT;
         case 106: return SYSCALL_STAT;
@@ -80,19 +82,34 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 54:  return SYSCALL_IOCTL;
         case 221: return SYSCALL_IOCTL;
         case 141: return SYSCALL_VFS_READDIR;
-        case 220: return SYSCALL_VFS_READDIR;
+        case 220: return SYSCALL_GETDENTS64;
         case 19:  return SYSCALL_LSEEK;
         case 140: return SYSCALL_LSEEK;
         case 146: return SYSCALL_WRITEV;
+        case 145: return SYSCALL_READV;
+        case 180: return SYSCALL_PREAD64;
+        case 181: return SYSCALL_PWRITE64;
         
         case 63:  return SYSCALL_DUP;
         case 41:  return SYSCALL_DUP2;
+        case 330: return SYSCALL_DUP3;
         case 42:  return SYSCALL_PIPE;
+        case 331: return SYSCALL_PIPE2;
         
         case 67:  return SYSCALL_SIGACTION;
         case 126: return SYSCALL_SIGPROCMASK;
-        case 174: return SYSCALL_SIGACTION;
-        case 175: return SYSCALL_SIGPROCMASK;
+        case 174: return SYSCALL_RT_SIGACTION;
+        case 175: return SYSCALL_RT_SIGPROCMASK;
+        case 176: return SYSCALL_RT_SIGPENDING;
+        case 177: return SYSCALL_RT_SIGSUSPEND;
+        case 178: return SYSCALL_RT_SIGTIMEDWAIT;
+        case 179: return SYSCALL_RT_SIGQUEUEINFO;
+        case 173: return SYSCALL_RT_SIGRETURN;
+        case 238: return SYSCALL_TKILL;
+        case 270: return SYSCALL_TGKILL;
+        case 186: return SYSCALL_SIGALTSTACK;
+        case 29:  return SYSCALL_PAUSE;
+        case 27:  return SYSCALL_ALARM;
         
         case 13:  return SYSCALL_TIME;
         case 78:  return SYSCALL_GETTIMEOFDAY;
@@ -101,46 +118,119 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 162: return SYSCALL_SLEEP;
         
         case 12:  return SYSCALL_CHDIR;
+        case 133: return SYSCALL_FCHDIR;
         case 183: return SYSCALL_GETCWD;
         case 33:  return SYSCALL_ACCESS;
         
         case 39:  return SYSCALL_VFS_MKDIR;
-        case 296: return SYSCALL_VFS_MKDIR;
         case 10:  return SYSCALL_VFS_UNLINK;
-        case 301: return SYSCALL_VFS_UNLINK;
         case 8:   return SYSCALL_VFS_CREATE;
         
-        case 173: return -38;
+        case 82:  return SYSCALL_SELECT;
+        case 142: return SYSCALL_SELECT;
+        case 168: return SYSCALL_POLL;
+        case 309: return SYSCALL_PPOLL;
         
-        case 240: return -38;
-        case 422: return -38;
-        case 258: return SYSCALL_GETPID;
-        case 243: return -38;
+        case 359: return SYSCALL_SOCKET;
+        case 360: return SYSCALL_SOCKETPAIR;
+        case 361: return SYSCALL_BIND;
+        case 362: return SYSCALL_CONNECT;
+        case 363: return SYSCALL_LISTEN;
+        case 364: return SYSCALL_ACCEPT;
+        case 365: return SYSCALL_GETSOCKOPT;
+        case 366: return SYSCALL_SETSOCKOPT;
+        case 367: return SYSCALL_GETSOCKNAME;
+        case 368: return SYSCALL_GETPEERNAME;
+        case 369: return SYSCALL_SENDTO;
+        case 370: return SYSCALL_SENDMSG;
+        case 371: return SYSCALL_RECVFROM;
+        case 372: return SYSCALL_RECVMSG;
+        case 373: return SYSCALL_SHUTDOWN;
+        case 364 + 300: return SYSCALL_ACCEPT4;
         
-        case 122: return -38;
-        case 191: return -38;
-        case 224: return SYSCALL_GETPID;
-        case 158: return SYSCALL_YIELD;
-        case 172: return -38;
+        case 295: return SYSCALL_OPENAT;
+        case 296: return SYSCALL_MKDIRAT;
+        case 297: return SYSCALL_MKNODAT;
+        case 298: return SYSCALL_FCHOWNAT;
+        case 301: return SYSCALL_UNLINKAT;
+        case 302: return SYSCALL_RENAMEAT;
+        case 303: return SYSCALL_LINKAT;
+        case 304: return SYSCALL_SYMLINKAT;
+        case 305: return SYSCALL_READLINKAT;
+        case 306: return SYSCALL_FCHMODAT;
+        case 307: return SYSCALL_FACCESSAT;
+        case 300: return SYSCALL_FSTATAT;
+        case 320: return SYSCALL_UTIMENSAT;
+        case 353: return SYSCALL_RENAMEAT2;
         
-        case 24:  return -38;
-        case 47:  return -38;
-        case 49:  return -38;
-        case 50:  return -38;
-        case 199: return -38;
-        case 200: return -38;
-        case 201: return -38;
-        case 202: return -38;
+        case 24:  return SYSCALL_GETUID;
+        case 199: return SYSCALL_GETUID;
+        case 47:  return SYSCALL_GETGID;
+        case 200: return SYSCALL_GETGID;
+        case 49:  return SYSCALL_GETEUID;
+        case 201: return SYSCALL_GETEUID;
+        case 50:  return SYSCALL_GETEGID;
+        case 202: return SYSCALL_GETEGID;
+        case 23:  return SYSCALL_SETUID;
+        case 213: return SYSCALL_SETUID;
+        case 46:  return SYSCALL_SETGID;
+        case 214: return SYSCALL_SETGID;
+        case 70:  return SYSCALL_SETREUID;
+        case 203: return SYSCALL_SETREUID;
+        case 71:  return SYSCALL_SETREGID;
+        case 204: return SYSCALL_SETREGID;
+        case 164: return SYSCALL_SETRESUID;
+        case 208: return SYSCALL_SETRESUID;
+        case 170: return SYSCALL_SETRESGID;
+        case 210: return SYSCALL_SETRESGID;
+        case 165: return SYSCALL_GETRESUID;
+        case 209: return SYSCALL_GETRESUID;
+        case 171: return SYSCALL_GETRESGID;
+        case 211: return SYSCALL_GETRESGID;
+        case 138: return SYSCALL_SETFSUID;
+        case 215: return SYSCALL_SETFSUID;
+        case 139: return SYSCALL_SETFSGID;
+        case 216: return SYSCALL_SETFSGID;
+        case 80:  return SYSCALL_GETGROUPS;
+        case 205: return SYSCALL_GETGROUPS;
+        case 81:  return SYSCALL_SETGROUPS;
+        case 206: return SYSCALL_SETGROUPS;
+        case 132: return SYSCALL_GETPGID;
+        case 57:  return SYSCALL_SETPGID;
+        case 65:  return SYSCALL_GETPGRP;
+        case 66:  return SYSCALL_SETSID;
+        case 147: return SYSCALL_GETSID;
+        case 64:  return SYSCALL_GETPPID;
+        case 224: return SYSCALL_GETTID;
         
-        case 55:  return SYSCALL_FCNTL;
-        case 38:  return SYSCALL_RENAME;
-        case 268: return -38;
-        case 102: return -38;
-        case 118: return -38;
-        case 119: return -38;
-        case 120: return -38;
-        case 168: return -38;
-        case 169: return -38;
+        case 122: return SYSCALL_UNAME;
+        case 116: return SYSCALL_SYSINFO;
+        case 76:  return SYSCALL_GETRLIMIT;
+        case 191: return SYSCALL_GETRLIMIT;
+        case 75:  return SYSCALL_SETRLIMIT;
+        case 77:  return SYSCALL_GETRUSAGE;
+        case 340: return SYSCALL_PRLIMIT64;
+        
+        case 355: return SYSCALL_GETRANDOM;
+        case 172: return SYSCALL_PRCTL;
+        
+        case 254: return SYSCALL_EPOLL_CREATE;
+        case 329: return SYSCALL_EPOLL_CREATE1;
+        case 255: return SYSCALL_EPOLL_CTL;
+        case 256: return SYSCALL_EPOLL_WAIT;
+        case 319: return SYSCALL_EPOLL_PWAIT;
+        case 323: return SYSCALL_EVENTFD;
+        case 328: return SYSCALL_EVENTFD2;
+        
+        case 258: return SYSCALL_SET_TID_ADDRESS;
+        case 240: return SYSCALL_FUTEX;
+        case 311: return SYSCALL_SET_ROBUST_LIST;
+        case 312: return SYSCALL_GET_ROBUST_LIST;
+        
+        case 120: return SYSCALL_CLONE;
+        case 190: return SYSCALL_VFORK;
+        case 114 + 1: return SYSCALL_WAIT4;
+        case 284: return SYSCALL_WAITID;
         
         case 92:  return SYSCALL_TRUNCATE;
         case 93:  return SYSCALL_FTRUNCATE;
@@ -148,6 +238,15 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 83:  return SYSCALL_SYMLINK;
         case 85:  return SYSCALL_READLINK;
         case 60:  return SYSCALL_UMASK;
+        case 15:  return SYSCALL_FCHMOD;
+        case 94:  return SYSCALL_FCHOWN;
+        case 118: return SYSCALL_FSYNC;
+        case 148: return SYSCALL_FDATASYNC;
+        case 143: return SYSCALL_FLOCK;
+        case 38:  return SYSCALL_RENAME;
+        case 55:  return SYSCALL_FCNTL;
+        
+        case 243: return -243;
         
         default:
             return -1;
@@ -160,45 +259,24 @@ void do_syscall(registers_t *regs) {
     
     num = linux_to_kernel_syscall(linux_nr);
     
-    if (num == -38) {
-        switch (linux_nr) {
-            case 174:
-            case 175:
-            case 258:
-                regs->eax = (linux_nr == 258) ? 1 : 0;
-                return;
-            case 243: {
-                struct user_desc *u_info = (struct user_desc *)regs->ebx;
-                regs->eax = do_set_thread_area(u_info);
-                return;
-            }
-            case 24: case 47: case 49: case 50:
-            case 199: case 200: case 201: case 202:
-                regs->eax = 0;
-                return;
-            case 122:
-                regs->eax = -38;
-                return;
-            default:
-                regs->eax = -38;
-                return;
-        }
+    if (num == -243) {
+        struct user_desc *u_info = (struct user_desc *)regs->ebx;
+        regs->eax = do_set_thread_area(u_info);
+        return;
     }
     
     if (num < 0) {
-        printf("[SYSCALL] Unknown Linux syscall %d (EBX=%d ECX=%d EDX=%d)\n",
-               linux_nr, regs->ebx, regs->ecx, regs->edx);
-        regs->eax = -38;
+        regs->eax = -ENOSYS;
         return;
     }
 
     set_syscall_frame(regs);
     fork_regs_ptr = regs;
 
-    if (num < 0 || num >= NR_SYSCALLS || !syscall_table[num]) {
+    if (num >= NR_SYSCALLS || !syscall_table[num]) {
         clear_syscall_frame();
         fork_regs_ptr = NULL;
-        regs->eax = -38;
+        regs->eax = -ENOSYS;
         return;
     }
 
@@ -226,4 +304,14 @@ void syscall_init(void) {
     syscalls_net_init();
     syscalls_termios_init();
     syscalls_posix_init();
+    syscalls_select_init();
+    syscalls_socket_init();
+    syscalls_at_init();
+    syscalls_signal_init();
+    syscalls_ids_init();
+    syscalls_misc_init();
+    syscalls_epoll_init();
+    syscalls_pthread_init();
+    syscalls_shm_init();
+    syscalls_dl_init();
 }

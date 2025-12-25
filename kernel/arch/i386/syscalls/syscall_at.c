@@ -1,0 +1,277 @@
+#include "syscall_defs.h"
+
+#define AT_FDCWD -100
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR        0x200
+#define AT_SYMLINK_FOLLOW   0x400
+#define AT_EACCESS          0x200
+#define AT_EMPTY_PATH       0x1000
+
+static const char *resolve_at_path(int dirfd, const char *pathname, char *resolved, size_t size) {
+    if (!pathname) return NULL;
+    
+    uint32_t path_addr = (uint32_t)(uintptr_t)pathname;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return NULL;
+    
+    if (pathname[0] == '/') {
+        return pathname;
+    }
+    
+    if (dirfd == AT_FDCWD) {
+        const char *cwd = current_task ? current_task->cwd : "/";
+        if (!cwd[0]) cwd = "/";
+        
+        size_t cwd_len = 0;
+        while (cwd[cwd_len]) cwd_len++;
+        
+        size_t path_len = 0;
+        while (pathname[path_len]) path_len++;
+        
+        if (cwd_len + 1 + path_len + 1 > size) return NULL;
+        
+        size_t pos = 0;
+        for (size_t i = 0; i < cwd_len && pos < size - 1; i++) {
+            resolved[pos++] = cwd[i];
+        }
+        if (pos > 0 && resolved[pos - 1] != '/' && pos < size - 1) {
+            resolved[pos++] = '/';
+        }
+        for (size_t i = 0; i < path_len && pos < size - 1; i++) {
+            resolved[pos++] = pathname[i];
+        }
+        resolved[pos] = '\0';
+        return resolved;
+    }
+    
+    return pathname;
+}
+
+static int sys_openat(int dirfd, const char *pathname, int flags) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    return vfs_open_path(path, flags);
+}
+
+static int sys_mkdirat(int dirfd, const char *pathname, int mode) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    char parent_path[256];
+    char dirname[64];
+    
+    int len = 0;
+    while (path[len]) len++;
+    
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        for (int i = 0; i < len && i < 63; i++) dirname[i] = path[i];
+        dirname[len < 63 ? len : 63] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
+        dirname[j] = '\0';
+    } else {
+        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        int j = 0;
+        for (int i = last_slash + 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
+        dirname[j] = '\0';
+    }
+    
+    vfs_node_t *parent = vfs_namei(parent_path);
+    if (!parent) return -ENOENT;
+    
+    return vfs_mkdir(parent, dirname, (uint32_t)mode);
+}
+
+static int sys_mknodat(int dirfd, const char *pathname, int mode) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    (void)mode;
+    return -ENOSYS;
+}
+
+static int sys_fchownat(int dirfd, const char *pathname, int owner) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) return -ENOENT;
+    
+    (void)owner;
+    return 0;
+}
+
+static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    char parent_path[256];
+    char filename[64];
+    
+    int len = 0;
+    while (path[len]) len++;
+    
+    int last_slash = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+    
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
+        filename[len < 63 ? len : 63] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        int j = 0;
+        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    } else {
+        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        int j = 0;
+        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        filename[j] = '\0';
+    }
+    
+    vfs_node_t *parent = vfs_namei(parent_path);
+    if (!parent) return -ENOENT;
+    
+    (void)flags;
+    return vfs_unlink(parent, filename);
+}
+
+static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd) {
+    (void)olddirfd; (void)oldpath; (void)newdirfd;
+    return -ENOSYS;
+}
+
+static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
+    (void)olddirfd; (void)oldpath; (void)newdirfd;
+    return -ENOSYS;
+}
+
+static int sys_symlinkat(int target_ptr, const char *newdirfd_ptr, int linkpath) {
+    (void)target_ptr; (void)newdirfd_ptr; (void)linkpath;
+    return -ENOSYS;
+}
+
+static int sys_readlinkat(int dirfd, const char *pathname, int buf_ptr) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    (void)buf_ptr;
+    return -EINVAL;
+}
+
+static int sys_fchmodat(int dirfd, const char *pathname, int mode) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) return -ENOENT;
+    
+    node->mask = (uint32_t)mode & 0777;
+    return 0;
+}
+
+static int sys_faccessat(int dirfd, const char *pathname, int mode) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) return -ENOENT;
+    
+    (void)mode;
+    return 0;
+}
+
+static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {
+    char resolved[256];
+    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    
+    uint32_t buf_addr = (uint32_t)statbuf;
+    if (!buf_addr || buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
+    
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) return -ENOENT;
+    
+    struct kernel_stat *st = (struct kernel_stat *)buf_addr;
+    memset(st, 0, sizeof(struct kernel_stat));
+    
+    st->st_dev = 1;
+    st->st_ino = node->inode ? node->inode : 1;
+    st->__st_ino_truncated = (long)st->st_ino;
+    
+    uint32_t mode;
+    if (node->flags & VFS_DIRECTORY) mode = S_IFDIR | 0755;
+    else if (node->flags & VFS_SYMLINK) mode = S_IFLNK | 0777;
+    else if (node->flags & VFS_CHARDEVICE) mode = S_IFCHR | 0660;
+    else if (node->flags & VFS_BLOCKDEVICE) mode = S_IFBLK | 0660;
+    else if (node->flags & VFS_PIPE) mode = S_IFIFO | 0644;
+    else mode = S_IFREG | (node->mask ? node->mask : 0644);
+    
+    st->st_mode = mode;
+    st->st_nlink = 1;
+    st->st_uid = node->uid;
+    st->st_gid = node->gid;
+    st->st_rdev = 0;
+    st->st_size = node->length;
+    st->st_blksize = 4096;
+    st->st_blocks = (node->length + 511) / 512;
+    st->st_atim.tv_sec = node->atime;
+    st->st_mtim.tv_sec = node->mtime;
+    st->st_ctim.tv_sec = node->ctime;
+    st->__st_atim32.tv_sec = node->atime;
+    st->__st_mtim32.tv_sec = node->mtime;
+    st->__st_ctim32.tv_sec = node->ctime;
+    
+    return 0;
+}
+
+static int sys_utimensat(int dirfd, const char *pathname, int times_ptr) {
+    (void)dirfd; (void)pathname; (void)times_ptr;
+    return 0;
+}
+
+static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd) {
+    return sys_renameat(olddirfd, oldpath, newdirfd);
+}
+
+void syscalls_at_init(void) {
+    syscall_table[SYSCALL_OPENAT] = sys_openat;
+    syscall_table[SYSCALL_MKDIRAT] = sys_mkdirat;
+    syscall_table[SYSCALL_MKNODAT] = sys_mknodat;
+    syscall_table[SYSCALL_FCHOWNAT] = sys_fchownat;
+    syscall_table[SYSCALL_UNLINKAT] = sys_unlinkat;
+    syscall_table[SYSCALL_RENAMEAT] = sys_renameat;
+    syscall_table[SYSCALL_LINKAT] = sys_linkat;
+    syscall_table[SYSCALL_SYMLINKAT] = sys_symlinkat;
+    syscall_table[SYSCALL_READLINKAT] = sys_readlinkat;
+    syscall_table[SYSCALL_FCHMODAT] = sys_fchmodat;
+    syscall_table[SYSCALL_FACCESSAT] = sys_faccessat;
+    syscall_table[SYSCALL_FSTATAT] = sys_fstatat;
+    syscall_table[SYSCALL_UTIMENSAT] = sys_utimensat;
+    syscall_table[SYSCALL_RENAMEAT2] = sys_renameat2;
+}

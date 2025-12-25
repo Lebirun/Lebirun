@@ -14,8 +14,7 @@ if [ ! -d "$INITRD_DIR" ]; then
     exit 1
 fi
 
-MAGIC=0x4452544E 
-VERSION=2
+MAGIC=0x4452544E
 HEADER_SIZE=16
 FILE_HEADER_SIZE=88
 
@@ -36,7 +35,7 @@ if [ "$NUM_ENTRIES" -eq 0 ]; then
     echo "Warning: No entries found in $INITRD_DIR, creating empty initrd"
 fi
 
-echo "Creating initrd v$VERSION with $NUM_ENTRIES entries..."
+echo "Creating initrd with $NUM_ENTRIES entries..."
 
 > "$TMPDIR/path_to_index.txt"
 INDEX=0
@@ -68,7 +67,7 @@ rm -f "$OUTPUT"
 touch "$OUTPUT"
 
 perl -e 'print pack("V", 0x4452544E)' >> "$OUTPUT"
-perl -e 'print pack("V", $ARGV[0])' "$VERSION" >> "$OUTPUT"
+perl -e 'print pack("V", 2)' >> "$OUTPUT"
 perl -e 'print pack("V", $ARGV[0])' "$NUM_ENTRIES" >> "$OUTPUT"
 perl -e 'print pack("V", 0)' >> "$OUTPUT"
 

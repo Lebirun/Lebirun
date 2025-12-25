@@ -71,6 +71,36 @@ typedef struct task {
     char **envp;
     int envc;
     task_fd_t fds[TASK_MAX_FDS];
+    
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t euid;
+    uint32_t egid;
+    uint32_t suid;
+    uint32_t sgid;
+    uint32_t fsuid;
+    uint32_t fsgid;
+    uint32_t groups[32];
+    int ngroups;
+    
+    pid_t pgid;
+    pid_t sid;
+    pid_t ppid;
+    
+    uint32_t sig_pending;
+    uint32_t sig_blocked;
+    struct {
+        void (*handler)(int);
+        uint32_t flags;
+        uint32_t mask;
+    } sigactions[32];
+    void *sig_altstack;
+    size_t sig_altstack_size;
+    
+    int *clear_child_tid;
+    void *robust_list;
+    size_t robust_list_len;
+    char name[16];
 } task_t;
 
 extern task_t* current_task;
@@ -104,6 +134,8 @@ void waitq_init(wait_queue_t* q);
 void waitq_add(wait_queue_t* q, task_t* t);
 task_t* waitq_pop(wait_queue_t* q);
 void waitq_wake_all(wait_queue_t* q);
+void waitq_wake_one(wait_queue_t* q);
+void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
 
 void task_free_user_memory(task_t* t);
@@ -119,5 +151,9 @@ void task_fd_close_all(task_t *task);
 
 pid_t task_fork(registers_t *parent_regs);
 int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs);
+int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs,
+                        int argc, char **argv, int envc, char **envp);
+pid_t task_create_thread(void (*entry)(void));
+pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
 
 #endif

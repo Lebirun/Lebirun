@@ -128,6 +128,19 @@ void waitq_wake_all(wait_queue_t* q) {
     }
 }
 
+void waitq_wake_one(wait_queue_t *q) {
+    if (!q) return;
+    task_t *t = waitq_pop(q);
+    if (t && t->state == TASK_BLOCKED) t->state = TASK_READY;
+}
+
+void waitq_wait(wait_queue_t *q) {
+    if (!q || !current_task) return;
+    waitq_add(q, current_task);
+    current_task->state = TASK_BLOCKED;
+    yield();
+}
+
 void waitq_remove(wait_queue_t* q, task_t* t) {
     if (!q || !t || !q->head) return;
     if (q->head == t) {
@@ -1092,4 +1105,484 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, regs->useresp);
 
     return 0;
+}
+
+int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs,
+                        int argc, char **argv, int envc, char **envp) {
+    if (!current_task || !current_task->is_user) {
+        task_error("task_exec_with_args: can only exec in user tasks\n");
+        return -1;
+    }
+    if (!bin_start || bin_size == 0) {
+        task_error("task_exec_with_args: invalid binary\n");
+        return -1;
+    }
+
+    uint32_t free_pages = pfa_count_free();
+    uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (free_pages < needed_estimate) {
+        task_error("task_exec_with_args: insufficient memory\n");
+        return -1;
+    }
+
+    uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
+    if (!kernel_bin) {
+        task_error("task_exec_with_args: failed to allocate kernel buffer\n");
+        return -1;
+    }
+    memcpy(kernel_bin, bin_start, bin_size);
+
+    char **k_argv = NULL;
+    char **k_envp = NULL;
+    
+    if (argc > 0 && argv) {
+        k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
+        if (!k_argv) { kfree(kernel_bin); return -1; }
+        for (int i = 0; i < argc; i++) {
+            int len = 0;
+            while (argv[i][len]) len++;
+            k_argv[i] = (char *)kmalloc(len + 1);
+            if (!k_argv[i]) {
+                for (int j = 0; j < i; j++) kfree(k_argv[j]);
+                kfree(k_argv); kfree(kernel_bin);
+                return -1;
+            }
+            for (int j = 0; j <= len; j++) k_argv[i][j] = argv[i][j];
+        }
+        k_argv[argc] = NULL;
+    }
+    
+    if (envc > 0 && envp) {
+        k_envp = (char **)kmalloc((envc + 1) * sizeof(char *));
+        if (!k_envp) {
+            if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+            kfree(kernel_bin);
+            return -1;
+        }
+        for (int i = 0; i < envc; i++) {
+            int len = 0;
+            while (envp[i][len]) len++;
+            k_envp[i] = (char *)kmalloc(len + 1);
+            if (!k_envp[i]) {
+                for (int j = 0; j < i; j++) kfree(k_envp[j]);
+                kfree(k_envp);
+                if (k_argv) { for (int j = 0; j < argc; j++) kfree(k_argv[j]); kfree(k_argv); }
+                kfree(kernel_bin);
+                return -1;
+            }
+            for (int j = 0; j <= len; j++) k_envp[i][j] = envp[i][j];
+        }
+        k_envp[envc] = NULL;
+    }
+
+    int elf_valid = elf_validate(kernel_bin, bin_size);
+    if (elf_valid != 0) {
+        task_error("task_exec_with_args: ELF validation failed\n");
+        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        kfree(kernel_bin);
+        return -1;
+    }
+
+    uint32_t old_pd = current_task->pd_phys;
+    uint32_t *old_user_pages = current_task->user_pages;
+    uint32_t old_user_pages_count = current_task->user_pages_count;
+
+    uint32_t stack_top = USER_STACK_TOP;
+    uint32_t stack_size = USER_STACK_SIZE;
+
+    uint32_t new_pd = vmm_create_page_directory();
+    if (!new_pd) {
+        task_error("task_exec_with_args: failed to create page directory\n");
+        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        kfree(kernel_bin);
+        return -1;
+    }
+
+    elf_info_t elf_info;
+    uint32_t *elf_pages = NULL;
+    uint32_t elf_page_count = 0;
+
+    int load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    if (load_result != 0) {
+        task_error("task_exec_with_args: ELF loading failed\n");
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        vmm_free_page_directory(new_pd);
+        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        kfree(kernel_bin);
+        return -1;
+    }
+
+    kfree(kernel_bin);
+
+    uint32_t stack_page_count = 0;
+    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
+    if (!stack_pages) {
+        task_error("task_exec_with_args: failed to map stack\n");
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        vmm_free_page_directory(new_pd);
+        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        return -1;
+    }
+
+    current_task->pd_phys = new_pd;
+    current_task->cr3 = new_pd;
+    current_task->regs.cr3 = new_pd;
+    vmm_set_cr3(new_pd);
+
+    if (old_user_pages && old_user_pages_count > 0) {
+        for (uint32_t i = 0; i < old_user_pages_count; i++) {
+            if (old_user_pages[i]) {
+                pfa_free(old_user_pages[i]);
+            }
+        }
+        kfree(old_user_pages);
+    }
+    if (old_pd) {
+        vmm_free_page_directory(old_pd);
+    }
+
+    current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+
+    uint32_t total_pages = elf_page_count + stack_page_count;
+    if (total_pages == 0 || total_pages > 65536) {
+        task_error("task_exec_with_args: suspicious total_pages=%u\n", total_pages);
+        kfree(elf_pages);
+        kfree(stack_pages);
+        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        vmm_free_page_directory(new_pd);
+        return -1;
+    }
+
+    current_task->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));
+    if (current_task->user_pages) {
+        memcpy(current_task->user_pages, elf_pages, elf_page_count * sizeof(uint32_t));
+        memcpy(current_task->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint32_t));
+        current_task->user_pages_count = total_pages;
+    } else {
+        current_task->user_pages_count = 0;
+    }
+
+    kfree(elf_pages);
+    kfree(stack_pages);
+
+    uint32_t sp = stack_top - USER_STACK_GAP - 16;
+    
+    uint32_t *envp_ptrs = NULL;
+    uint32_t *argv_ptrs = NULL;
+    
+    if (envc > 0 && k_envp) {
+        envp_ptrs = (uint32_t *)kmalloc((envc + 1) * sizeof(uint32_t));
+        for (int i = envc - 1; i >= 0; i--) {
+            int len = 0;
+            while (k_envp[i][len]) len++;
+            sp -= (len + 1 + 3) & ~3;
+            char *dst = (char *)sp;
+            for (int j = 0; j <= len; j++) dst[j] = k_envp[i][j];
+            envp_ptrs[i] = sp;
+        }
+        envp_ptrs[envc] = 0;
+    }
+    
+    if (argc > 0 && k_argv) {
+        argv_ptrs = (uint32_t *)kmalloc((argc + 1) * sizeof(uint32_t));
+        for (int i = argc - 1; i >= 0; i--) {
+            int len = 0;
+            while (k_argv[i][len]) len++;
+            sp -= (len + 1 + 3) & ~3;
+            char *dst = (char *)sp;
+            for (int j = 0; j <= len; j++) dst[j] = k_argv[i][j];
+            argv_ptrs[i] = sp;
+        }
+        argv_ptrs[argc] = 0;
+    }
+    
+    sp = sp & ~0xF;
+    
+    if (envp_ptrs) {
+        sp -= (envc + 1) * sizeof(uint32_t);
+        uint32_t *envp_stack = (uint32_t *)sp;
+        for (int i = 0; i <= envc; i++) envp_stack[i] = envp_ptrs[i];
+    }
+    uint32_t envp_ptr_val = sp;
+    
+    if (argv_ptrs) {
+        sp -= (argc + 1) * sizeof(uint32_t);
+        uint32_t *argv_stack = (uint32_t *)sp;
+        for (int i = 0; i <= argc; i++) argv_stack[i] = argv_ptrs[i];
+    }
+    uint32_t argv_ptr_val = sp;
+    
+    sp -= 4;
+    *(uint32_t *)sp = envp_ptr_val;
+    sp -= 4;
+    *(uint32_t *)sp = argv_ptr_val;
+    sp -= 4;
+    *(uint32_t *)sp = (uint32_t)argc;
+    sp -= 4;
+    *(uint32_t *)sp = 0;
+    
+    if (argv_ptrs) kfree(argv_ptrs);
+    if (envp_ptrs) kfree(envp_ptrs);
+    if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+    if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+
+    regs->eip = elf_info.entry_point;
+    regs->useresp = sp;
+    regs->ebp = 0;
+    regs->eax = 0;
+    regs->ebx = 0;
+    regs->ecx = 0;
+    regs->edx = 0;
+    regs->esi = 0;
+    regs->edi = 0;
+    regs->cs = 0x1B;
+    regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
+    regs->eflags = 0x202;
+
+    current_task->tls_base = 0;
+    current_task->tls_limit = 0;
+
+    return 0;
+}
+
+pid_t task_create_thread(void (*entry)(void)) {
+    if (!current_task || !current_task->is_user) {
+        return -1;
+    }
+    
+    task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
+    if (!new_task) return -1;
+    
+    memset(new_task, 0, sizeof(task_t));
+    
+    new_task->kernel_stack_base = (uint8_t *)kmalloc(KERNEL_STACK_SIZE);
+    if (!new_task->kernel_stack_base) {
+        kfree(new_task);
+        return -1;
+    }
+    memset(new_task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
+    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    
+    new_task->id = next_task_id++;
+    new_task->pid = new_task->id;
+    new_task->state = TASK_READY;
+    new_task->is_user = true;
+    new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
+    new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
+    
+    new_task->pd_phys = current_task->pd_phys;
+    new_task->cr3 = current_task->cr3;
+    new_task->user_pages = NULL;
+    new_task->user_pages_count = 0;
+    new_task->user_brk = current_task->user_brk;
+    new_task->console_id = current_task->console_id;
+    
+    for (int i = 0; i < 256; i++) {
+        new_task->cwd[i] = current_task->cwd[i];
+    }
+    
+    uint32_t thread_stack_size = 0x4000;
+    uint32_t thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
+    uint32_t thread_stack_top = thread_stack_base + thread_stack_size;
+    
+    uint32_t stack_page_count = 0;
+    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
+    if (!stack_pages) {
+        kfree(new_task->kernel_stack_base);
+        kfree(new_task);
+        return -1;
+    }
+    
+    new_task->user_pages = stack_pages;
+    new_task->user_pages_count = stack_page_count;
+    
+    current_task->user_brk = thread_stack_top + 0x1000;
+    
+    uint32_t *stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = thread_stack_top - 16;
+    stack_ptr--;
+    *stack_ptr = 0x202;
+    stack_ptr--;
+    *stack_ptr = 0x1B;
+    stack_ptr--;
+    *stack_ptr = (uint32_t)entry;
+    
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    
+    new_task->regs.esp = (uint32_t)stack_ptr;
+
+    new_task->regs.cr3 = new_task->cr3;
+    new_task->regs.eip = (uint32_t)entry;
+    new_task->regs.useresp = thread_stack_top - 16;
+    new_task->regs.cs = 0x1B;
+    new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = new_task->regs.ss = 0x23;
+    new_task->regs.eflags = 0x202;
+    
+    lock_scheduler();
+    add_task_to_runqueue(new_task);
+    unlock_scheduler();
+    
+    return new_task->pid;
+}
+
+pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
+    if (!current_task || !current_task->is_user) {
+        return -1;
+    }
+    
+    task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
+    if (!new_task) return -1;
+    
+    memset(new_task, 0, sizeof(task_t));
+    
+    new_task->kernel_stack_base = (uint8_t *)kmalloc(KERNEL_STACK_SIZE);
+    if (!new_task->kernel_stack_base) {
+        kfree(new_task);
+        return -1;
+    }
+    memset(new_task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
+    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    
+    new_task->id = next_task_id++;
+    new_task->pid = new_task->id;
+    new_task->state = TASK_READY;
+    new_task->is_user = true;
+    new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
+    new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
+    
+    new_task->pd_phys = current_task->pd_phys;
+    new_task->cr3 = current_task->cr3;
+    new_task->user_pages = NULL;
+    new_task->user_pages_count = 0;
+    new_task->user_brk = current_task->user_brk;
+    new_task->console_id = current_task->console_id;
+    
+    for (int i = 0; i < 256; i++) {
+        new_task->cwd[i] = current_task->cwd[i];
+    }
+    
+    uint32_t thread_stack_size = 0x4000;
+    uint32_t thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
+    uint32_t thread_stack_top = thread_stack_base + thread_stack_size;
+    
+    uint32_t stack_page_count = 0;
+    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
+    if (!stack_pages) {
+        kfree(new_task->kernel_stack_base);
+        kfree(new_task);
+        return -1;
+    }
+    
+    new_task->user_pages = stack_pages;
+    new_task->user_pages_count = stack_page_count;
+    
+    current_task->user_brk = thread_stack_top + 0x1000;
+    
+    uint32_t zero_val = 0;
+    uint32_t arg_val = (uint32_t)arg;
+    vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 16, &zero_val, 4);
+    vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 12, &arg_val, 4);
+    
+    uint32_t *stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = thread_stack_top - 16;
+    stack_ptr--;
+    *stack_ptr = 0x202;
+    stack_ptr--;
+    *stack_ptr = 0x1B;
+    stack_ptr--;
+    *stack_ptr = (uint32_t)entry;
+    
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = 0x23;
+    
+    new_task->regs.esp = (uint32_t)stack_ptr;
+
+    new_task->regs.cr3 = new_task->cr3;
+    new_task->regs.eip = (uint32_t)entry;
+    new_task->regs.useresp = thread_stack_top - 16;
+    new_task->regs.cs = 0x1B;
+    new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = new_task->regs.ss = 0x23;
+    new_task->regs.eflags = 0x202;
+    
+    lock_scheduler();
+    add_task_to_runqueue(new_task);
+    unlock_scheduler();
+    
+    return new_task->pid;
 }

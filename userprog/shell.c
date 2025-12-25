@@ -592,9 +592,40 @@ void cmd_export(const char *arg) {
     
     const char *val = eq + 1;
     
-    if (shell_setenv(key, val) < 0) {
+    char expanded_val[MAX_ENV_VAL];
+    expand_vars(val, expanded_val, sizeof(expanded_val));
+    
+    if (shell_setenv(key, expanded_val) < 0) {
         printf("export: failed to set %s\n", key);
     }
+}
+
+static int try_var_assignment(const char *line) {
+    const char *eq = line;
+    while (*eq && *eq != '=' && *eq != ' ') eq++;
+    if (*eq != '=') return 0;
+    if (eq == line) return 0;
+    
+    for (const char *p = line; p < eq; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '_')) {
+            return 0;
+        }
+    }
+    
+    char key[MAX_ENV_KEY];
+    int keylen = (int)(eq - line);
+    if (keylen >= MAX_ENV_KEY) return 0;
+    
+    for (int i = 0; i < keylen; i++) key[i] = line[i];
+    key[keylen] = '\0';
+    
+    const char *val = eq + 1;
+    char expanded_val[MAX_ENV_VAL];
+    expand_vars(val, expanded_val, sizeof(expanded_val));
+    
+    shell_setenv(key, expanded_val);
+    return 1;
 }
 
 void cmd_unset(const char *arg) {
@@ -673,6 +704,7 @@ int main(int argc, char **argv) {
             cmd_unset((*arg == '\0') ? NULL : arg);
         } else if (strcmp(line, "env") == 0 || strcmp(line, "set") == 0) {
             cmd_env();
+        } else if (try_var_assignment(line)) {
         } else if (is_executable_path(line)) {
             run_binary(line);
         } else {

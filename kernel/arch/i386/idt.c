@@ -170,7 +170,6 @@ registers_t* interrupt_handler(registers_t* regs)
 
                     if (pte & 1) {
                         uint32_t page_phys = pte & ~0xFFF;
-                        uint32_t stack_page = regs->ebp & ~0xFFF;
                         uint32_t stack_page_phys = 0;
                         if ((regs->ebp & ~0xFFF) == (regs->eip & ~0xFFF)) {
                             stack_page_phys = page_phys;

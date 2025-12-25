@@ -18,6 +18,90 @@
 #include <kernel/drivers/net/net.h>
 #include <kernel/drivers/net/http.h>
 
+#define EPERM    1
+#define ENOENT   2
+#define ESRCH    3
+#define EINTR    4
+#define EIO      5
+#define ENXIO    6
+#define E2BIG    7
+#define ENOEXEC  8
+#define EBADF    9
+#define ECHILD   10
+#define EAGAIN   11
+#define ENOMEM   12
+#define EACCES   13
+#define EFAULT   14
+#define ENOTBLK  15
+#define EBUSY    16
+#define EEXIST   17
+#define EXDEV    18
+#define ENODEV   19
+#define ENOTDIR  20
+#define EISDIR   21
+#define EINVAL   22
+#define ENFILE   23
+#define EMFILE   24
+#define ENOTTY   25
+#define ETXTBSY  26
+#define EFBIG    27
+#define ENOSPC   28
+#define ESPIPE   29
+#define EROFS    30
+#define EMLINK   31
+#define EPIPE    32
+#define EDOM     33
+#define ERANGE   34
+#define EDEADLK  35
+#define ENAMETOOLONG 36
+#define ENOLCK   37
+#define ENOSYS   38
+#define ENOTEMPTY 39
+#define ELOOP    40
+#define EWOULDBLOCK EAGAIN
+#define ENOMSG   42
+#define EIDRM    43
+#define ENOSTR   60
+#define ENODATA  61
+#define ETIME    62
+#define ENOSR    63
+#define ENOLINK  67
+#define EPROTO   71
+#define EBADMSG  74
+#define EOVERFLOW 75
+#define EILSEQ   84
+#define ERESTART 85
+#define ENOTSOCK 88
+#define EDESTADDRREQ 89
+#define EMSGSIZE 90
+#define EPROTOTYPE 91
+#define ENOPROTOOPT 92
+#define EPROTONOSUPPORT 93
+#define ESOCKTNOSUPPORT 94
+#define EOPNOTSUPP 95
+#define ENOTSUP  EOPNOTSUPP
+#define EPFNOSUPPORT 96
+#define EAFNOSUPPORT 97
+#define EADDRINUSE 98
+#define EADDRNOTAVAIL 99
+#define ENETDOWN 100
+#define ENETUNREACH 101
+#define ENETRESET 102
+#define ECONNABORTED 103
+#define ECONNRESET 104
+#define ENOBUFS  105
+#define EISCONN  106
+#define ENOTCONN 107
+#define ESHUTDOWN 108
+#define ETOOMANYREFS 109
+#define ETIMEDOUT 110
+#define ECONNREFUSED 111
+#define EHOSTDOWN 112
+#define EHOSTUNREACH 113
+#define EALREADY 114
+#define EINPROGRESS 115
+#define ESTALE   116
+
 #define SYSCALL_EXIT 0
 #define SYSCALL_WRITE 1
 #define SYSCALL_GETPID 2
@@ -91,7 +175,6 @@
 #define SYSCALL_STAT 71
 #define SYSCALL_GETCWD 72
 #define SYSCALL_CHDIR 73
-#define SYSCALL_CHDIR 73
 #define SYSCALL_ACCESS 74
 #define SYSCALL_CLOCK_GETTIME 75
 #define SYSCALL_GETTIMEOFDAY 76
@@ -107,7 +190,183 @@
 #define SYSCALL_READLINK 86
 #define SYSCALL_UMASK 87
 
-#define NR_SYSCALLS 88
+#define SYSCALL_SELECT 88
+#define SYSCALL_POLL 89
+#define SYSCALL_PPOLL 90
+
+#define SYSCALL_SOCKET 91
+#define SYSCALL_SOCKETPAIR 92
+#define SYSCALL_BIND 93
+#define SYSCALL_CONNECT 94
+#define SYSCALL_LISTEN 95
+#define SYSCALL_ACCEPT 96
+#define SYSCALL_ACCEPT4 97
+#define SYSCALL_GETSOCKOPT 98
+#define SYSCALL_SETSOCKOPT 99
+#define SYSCALL_GETSOCKNAME 100
+#define SYSCALL_GETPEERNAME 101
+#define SYSCALL_SENDTO 102
+#define SYSCALL_SENDMSG 103
+#define SYSCALL_RECVFROM 104
+#define SYSCALL_RECVMSG 105
+#define SYSCALL_SHUTDOWN 106
+
+#define SYSCALL_OPENAT 107
+#define SYSCALL_MKDIRAT 108
+#define SYSCALL_MKNODAT 109
+#define SYSCALL_FCHOWNAT 110
+#define SYSCALL_UNLINKAT 111
+#define SYSCALL_RENAMEAT 112
+#define SYSCALL_LINKAT 113
+#define SYSCALL_SYMLINKAT 114
+#define SYSCALL_READLINKAT 115
+#define SYSCALL_FCHMODAT 116
+#define SYSCALL_FACCESSAT 117
+#define SYSCALL_FSTATAT 118
+#define SYSCALL_UTIMENSAT 119
+#define SYSCALL_RENAMEAT2 120
+
+#define SYSCALL_RT_SIGACTION 121
+#define SYSCALL_RT_SIGPROCMASK 122
+#define SYSCALL_RT_SIGPENDING 123
+#define SYSCALL_RT_SIGSUSPEND 124
+#define SYSCALL_RT_SIGRETURN 125
+#define SYSCALL_RT_SIGTIMEDWAIT 126
+#define SYSCALL_RT_SIGQUEUEINFO 127
+#define SYSCALL_TGKILL 128
+#define SYSCALL_TKILL 129
+#define SYSCALL_SIGALTSTACK 130
+#define SYSCALL_PAUSE 131
+#define SYSCALL_ALARM 132
+
+#define SYSCALL_GETUID 133
+#define SYSCALL_GETGID 134
+#define SYSCALL_GETEUID 135
+#define SYSCALL_GETEGID 136
+#define SYSCALL_SETUID 137
+#define SYSCALL_SETGID 138
+#define SYSCALL_SETEUID 139
+#define SYSCALL_SETEGID 140
+#define SYSCALL_SETREUID 141
+#define SYSCALL_SETREGID 142
+#define SYSCALL_SETRESUID 143
+#define SYSCALL_SETRESGID 144
+#define SYSCALL_GETRESUID 145
+#define SYSCALL_GETRESGID 146
+#define SYSCALL_SETFSUID 147
+#define SYSCALL_SETFSGID 148
+#define SYSCALL_GETGROUPS 149
+#define SYSCALL_SETGROUPS 150
+#define SYSCALL_GETPGID 151
+#define SYSCALL_SETPGID 152
+#define SYSCALL_GETPGRP 153
+#define SYSCALL_SETSID 154
+#define SYSCALL_GETSID 155
+#define SYSCALL_GETPPID 156
+#define SYSCALL_GETPID2 157
+#define SYSCALL_GETTID 158
+
+#define SYSCALL_UNAME 159
+#define SYSCALL_SYSINFO 160
+#define SYSCALL_GETRLIMIT 161
+#define SYSCALL_SETRLIMIT 162
+#define SYSCALL_GETRUSAGE 163
+#define SYSCALL_PRLIMIT64 164
+
+#define SYSCALL_MMAP2 165
+#define SYSCALL_MREMAP 166
+#define SYSCALL_MADVISE 167
+#define SYSCALL_MINCORE 168
+
+#define SYSCALL_PREAD64 169
+#define SYSCALL_PWRITE64 170
+#define SYSCALL_READV 171
+#define SYSCALL_FCHDIR 172
+#define SYSCALL_FCHMOD 173
+#define SYSCALL_FCHOWN 174
+#define SYSCALL_FSYNC 175
+#define SYSCALL_FDATASYNC 176
+#define SYSCALL_FLOCK 177
+#define SYSCALL_GETDENTS64 178
+
+#define SYSCALL_DUP3 179
+#define SYSCALL_PIPE2 180
+#define SYSCALL_EVENTFD 181
+#define SYSCALL_EVENTFD2 182
+#define SYSCALL_EPOLL_CREATE 183
+#define SYSCALL_EPOLL_CREATE1 184
+#define SYSCALL_EPOLL_CTL 185
+#define SYSCALL_EPOLL_WAIT 186
+#define SYSCALL_EPOLL_PWAIT 187
+
+#define SYSCALL_SET_TID_ADDRESS 188
+#define SYSCALL_FUTEX 189
+#define SYSCALL_SET_ROBUST_LIST 190
+#define SYSCALL_GET_ROBUST_LIST 191
+#define SYSCALL_CLONE 192
+#define SYSCALL_VFORK 193
+#define SYSCALL_WAIT4 194
+#define SYSCALL_WAITID 195
+
+#define SYSCALL_GETRANDOM 196
+#define SYSCALL_PRCTL 197
+#define SYSCALL_ARCH_PRCTL 198
+
+#define SYSCALL_TIMERFD_CREATE 199
+#define SYSCALL_TIMERFD_SETTIME 200
+#define SYSCALL_TIMERFD_GETTIME 201
+#define SYSCALL_SIGNALFD 202
+#define SYSCALL_SIGNALFD4 203
+#define SYSCALL_INOTIFY_INIT 204
+#define SYSCALL_INOTIFY_INIT1 205
+#define SYSCALL_INOTIFY_ADD_WATCH 206
+#define SYSCALL_INOTIFY_RM_WATCH 207
+#define SYSCALL_POSIX_OPENPT 208
+#define SYSCALL_GRANTPT 209
+#define SYSCALL_UNLOCKPT 210
+#define SYSCALL_PTSNAME 211
+
+#define SYSCALL_SETITIMER 212
+#define SYSCALL_GETITIMER 213
+#define SYSCALL_CHMOD 214
+#define SYSCALL_CHOWN 215
+#define SYSCALL_LCHOWN 216
+#define SYSCALL_NANOSLEEP 217
+#define SYSCALL_SIGRETURN 218
+#define SYSCALL_SETENV 219
+#define SYSCALL_GETENV 220
+#define SYSCALL_UNSETENV 221
+#define SYSCALL_CLEARENV 222
+
+#define SYSCALL_PTHREAD_CREATE 223
+#define SYSCALL_PTHREAD_EXIT 224
+#define SYSCALL_PTHREAD_JOIN 225
+#define SYSCALL_PTHREAD_DETACH 226
+#define SYSCALL_PTHREAD_SELF 227
+#define SYSCALL_PTHREAD_MUTEX_INIT 228
+#define SYSCALL_PTHREAD_MUTEX_DESTROY 229
+#define SYSCALL_PTHREAD_MUTEX_LOCK 230
+#define SYSCALL_PTHREAD_MUTEX_TRYLOCK 231
+#define SYSCALL_PTHREAD_MUTEX_UNLOCK 232
+#define SYSCALL_PTHREAD_COND_INIT 233
+#define SYSCALL_PTHREAD_COND_DESTROY 234
+#define SYSCALL_PTHREAD_COND_WAIT 235
+#define SYSCALL_PTHREAD_COND_SIGNAL 236
+#define SYSCALL_PTHREAD_COND_BROADCAST 237
+
+#define SYSCALL_SHMGET 238
+#define SYSCALL_SHMAT 239
+#define SYSCALL_SHMDT 240
+#define SYSCALL_SHMCTL 241
+#define SYSCALL_SHM_OPEN 242
+#define SYSCALL_SHM_UNLINK 243
+
+#define SYSCALL_DLOPEN 244
+#define SYSCALL_DLSYM 245
+#define SYSCALL_DLCLOSE 246
+#define SYSCALL_DLERROR 247
+
+#define NR_SYSCALLS 260
 
 struct kernel_stat {
     unsigned long long st_dev;
@@ -183,89 +442,14 @@ struct kernel_timeval {
     long tv_usec;
 };
 
-#define NCCS 32
+#define TIOCGETA    TCGETS
+#define TIOCSETA    TCSETS
+#define TIOCSETAW   TCSETSW
+#define TIOCSETAF   TCSETSF
 
-#define VEOF     0
-#define VEOL     1
-#define VERASE   3
-#define VKILL    5
-#define VINTR    8
-#define VQUIT    9
-#define VSUSP    10
-#define VSTART   12
-#define VSTOP    13
-#define VMIN     16
-#define VTIME    17
+#define kernel_termios termios
 
-#define IGNBRK  0x00001
-#define BRKINT  0x00002
-#define IGNPAR  0x00004
-#define INPCK   0x00010
-#define ISTRIP  0x00020
-#define INLCR   0x00040
-#define IGNCR   0x00080
-#define ICRNL   0x00100
-#define IXON    0x00200
-#define IXOFF   0x00400
-#define IXANY   0x00800
-
-#define OPOST   0x00001
-#define ONLCR   0x00002
-
-#define CSIZE   0x00300
-#define CS5     0x00000
-#define CS6     0x00100
-#define CS7     0x00200
-#define CS8     0x00300
-#define CSTOPB  0x00400
-#define CREAD   0x00800
-#define PARENB  0x01000
-#define PARODD  0x02000
-#define HUPCL   0x04000
-#define CLOCAL  0x08000
-
-#define ECHOKE  0x00001
-#define ECHOE   0x00002
-#define ECHOK   0x00004
-#define ECHO    0x00008
-#define ECHONL  0x00010
-#define ECHOCTL 0x00040
-#define ISIG    0x00080
-#define ICANON  0x00100
-#define IEXTEN  0x00400
-#define NOFLSH  0x80000000
-
-#define TIOCGETA    0x5401
-#define TIOCSETA    0x5402
-#define TIOCSETAW   0x5403
-#define TIOCSETAF   0x5404
-#define TIOCGWINSZ  0x5413
-#define TIOCSWINSZ  0x5414
-#define TIOCGPGRP   0x540F
-#define TIOCSPGRP   0x5410
-#define FIONREAD    0x541B
-#define FIONBIO     0x5421
-
-typedef uint32_t tcflag_t;
-typedef uint8_t  cc_t;
-typedef uint32_t speed_t;
-
-struct kernel_termios {
-    tcflag_t c_iflag;
-    tcflag_t c_oflag;
-    tcflag_t c_cflag;
-    tcflag_t c_lflag;
-    cc_t     c_cc[NCCS];
-    speed_t  c_ispeed;
-    speed_t  c_ospeed;
-};
-
-struct kernel_winsize {
-    unsigned short ws_row;
-    unsigned short ws_col;
-    unsigned short ws_xpixel;
-    unsigned short ws_ypixel;
-};
+#define kernel_winsize winsize
 
 extern struct kernel_termios tty_termios[NUM_CONSOLES];
 extern struct kernel_winsize tty_winsize[NUM_CONSOLES];
@@ -286,7 +470,20 @@ void syscalls_sata_init(void);
 void syscalls_net_init(void);
 void syscalls_termios_init(void);
 void syscalls_posix_init(void);
+void syscalls_select_init(void);
+void syscalls_socket_init(void);
+void syscalls_at_init(void);
+void syscalls_signal_init(void);
+void syscalls_ids_init(void);
+void syscalls_misc_init(void);
+void syscalls_epoll_init(void);
+void syscalls_pthread_init(void);
+void syscalls_shm_init(void);
+void syscalls_dl_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
+
+void procfs_init(void);
+void devfs_init(void);
 
 #endif

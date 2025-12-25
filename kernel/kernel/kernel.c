@@ -24,7 +24,7 @@
 #include <kernel/drivers/net/net.h>
 #include "launch_user.h"
 
-bool debugMode = true; 
+bool debugMode = false; 
 int debugLevel = 3; 
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
@@ -103,6 +103,9 @@ void kernel_main(void) {
 
     printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
 
+    uint32_t saved_mods_count = mb->mods_count;
+    uint32_t saved_mods_addr = mb->mods_addr;
+
     printf("MB: first 32 bytes: ");
     uint8_t *mbb = (uint8_t *)mb;
     for (uint32_t i = 0; i < 32; i++) {
@@ -141,6 +144,11 @@ void kernel_main(void) {
         ramfs_vfs_register();
         ext4_init();
         ext4_vfs_register();
+        
+        extern void procfs_init(void);
+        extern void devfs_init(void);
+        procfs_init();
+        devfs_init();
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -170,12 +178,14 @@ void kernel_main(void) {
 	pic_remap();
     init_tasks();
     
-    initrd_copy_to_root();
-    
     pit_init(1000);
     calibrate_pit();
     keyboard_init();
     syscall_init();
+
+    if (saved_mods_count >= 2) {
+        rootfs_init(saved_mods_count, saved_mods_addr);
+    }
 
     terminal_writestring("PIC master mask: 0x");
     uint8_t master_mask = inb(0x21);

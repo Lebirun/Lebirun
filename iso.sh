@@ -19,6 +19,13 @@ else
     echo "Warning: no initrd.img found; continuing without initrd module"
 fi
 
+if [ -f rootfs.img ]; then
+    cp rootfs.img isodir/boot/rootfs.img
+    echo "Copied rootfs.img to ISO ($(stat -c%s rootfs.img) bytes)"
+else
+    echo "Warning: no rootfs.img found; continuing without rootfs module"
+fi
+
 cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=20
 set default=0
@@ -26,6 +33,7 @@ set default=0
 menuentry "Lebirun" {
 	multiboot /boot/lebirun.kernel
 	module /boot/initrd.img
+	module /boot/rootfs.img
 	boot
 }
 EOF

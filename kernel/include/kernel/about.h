@@ -1,13 +1,20 @@
 #ifndef ABOUT_H
 #define ABOUT_H
 
-#define LEB_NAME "Lebirun"
-#define LEB_VER "0.1.0 Alpha 1"
+#include <stdint.h>
 
-#define LEBKRNL_NAME "Lebirun Kernel"
-#define LEBKRNL_VER "0.1.0 Alpha 1"
+#define SYSNAME "Lebirun"
+#define NODENAME "lebirun"
+#define RELEASE "0.1.0"
+#define VERSION "0.1.0"
+#define MACHINE "i386"
 
-#define LEBLIBC_NAME "LebLibc"
-#define LEBLIBC_VER "0.1.0 Alpha 1"
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+};
 
 #endif
