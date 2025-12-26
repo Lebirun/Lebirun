@@ -70,7 +70,7 @@ static void clear_moving_objects(void) {
 }
 
 static void place_objects(void) {
-    int i, py, px;
+    int i, py;
     
     for (i = 0; i < 2; i++) {
         for (py = 0; py < PADDLE_HEIGHT; py++) {
@@ -246,6 +246,7 @@ static void init_game(void) {
 }
 
 int main(void) {
+    
     clear_screen();
     cursor_home();
     printf("=== PONG for Lebirun OS ===\n\n");

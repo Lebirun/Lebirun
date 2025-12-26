@@ -6,8 +6,8 @@
 #include <kernel/vfs.h>
 #include <kernel/mutex.h>
 
-#define RAMFS_MAX_FILE_SIZE    65536
 #define RAMFS_MAX_TOTAL_SIZE   (4 * 1024 * 1024)
+#define RAMFS_MAX_FILE_SIZE    RAMFS_MAX_TOTAL_SIZE
 #define RAMFS_BLOCK_SIZE       4096
 #define RAMFS_MAX_NAME_LEN     VFS_MAX_NAME
 

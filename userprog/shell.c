@@ -273,17 +273,16 @@ static int read_line(char *buf, size_t cap) {
             return 0;
         }
         if (c == '\n' || c == '\r') {
-            putchar('\n');
             buf[pos] = '\0';
             if (overflow) printf("Input truncated to %zu characters\n", cap - 1);
             return 1;
         }
         if (c == '\b' || c == 127) {
-            if (pos) { pos--; putchar('\b'); putchar(' '); putchar('\b'); fflush(stdout); }
+            if (pos) pos--;
             continue;
         }
         if (c >= 32) {
-            if (pos + 1 < cap) { buf[pos++] = c; putchar(c); fflush(stdout); }
+            if (pos + 1 < cap) { buf[pos++] = c; }
             else { overflow = true; putchar('\a'); fflush(stdout); }
         }
     }

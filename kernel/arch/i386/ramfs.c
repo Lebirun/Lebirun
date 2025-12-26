@@ -3,6 +3,7 @@
 #include <kernel/common.h>
 #include <kernel/mem_map.h>
 #include <kernel/idt.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -210,6 +211,7 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
     ramfs_lock();
     ramfs_node_t *parent = ramfs_find_parent(path, name, sizeof(name));
     if (!parent || parent->type != 1) {
+        DPRINTF1("RAMFS_CREATE_FILE: Failed to find parent for '%s' (parent=%p)\n", path, parent);
         ramfs_unlock();
         return RAMFS_ERR_NOENT;
     }
@@ -217,6 +219,7 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
     ramfs_node_lock(parent);
     
     if (ramfs_find_child(parent, name)) {
+        DPRINTF2("RAMFS_CREATE_FILE: File '%s' already exists in parent\n", name);
         ramfs_node_unlock(parent);
         ramfs_unlock();
         return RAMFS_ERR_EXIST;
@@ -266,6 +269,9 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
         ramfs_setup_vfs_file_callbacks(vn);
         
         node->vfs_node = vn;
+        DPRINTF2("RAMFS_CREATE_FILE: Created '%s' ramfs_node=%p vfs_node=%p\n", path, node, vn);
+    } else {
+        DPRINTF1("RAMFS_CREATE_FILE: Failed to allocate VFS node for '%s'\n", path);
     }
     
     ramfs_node_unlock(parent);
@@ -624,6 +630,8 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     ramfs_lock();
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node || node->type != 0) {
+        DPRINTF1("RAMFS_WRITE: Failed to find node for '%s' (node=%p type=%d)\n", 
+                 path, node, node ? node->type : -1);
         ramfs_unlock();
         return RAMFS_ERR_NOENT;
     }
@@ -678,6 +686,10 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     if (node->vfs_node) {
         node->vfs_node->length = node->length;
         node->vfs_node->mtime = node->mtime;
+        DPRINTF2("RAMFS_WRITE: '%s' ramfs_node->length=%u vfs_node->length=%u vfs_node=%p\n", 
+               node->name, node->length, node->vfs_node->length, node->vfs_node);
+    } else {
+        DPRINTF1("RAMFS: WARNING: node->vfs_node is NULL for '%s', cannot update vfs length\n", node->name);
     }
     
     ramfs_node_unlock(node);
@@ -1031,6 +1043,14 @@ static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
     while (child) {
         if (strcmp(child->name, name) == 0) {
             vfs_node_t *result = child->vfs_node;
+            if (result) {
+                result->length = child->length;
+                result->atime = child->atime;
+                result->mtime = child->mtime;
+                result->ctime = child->ctime;
+                DPRINTF2("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%u\n", 
+                       name, child, result, result->length);
+            }
             ramfs_node_unlock(rn);
             ramfs_unlock();
             return result;

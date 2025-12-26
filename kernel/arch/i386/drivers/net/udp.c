@@ -72,6 +72,7 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
 }
 
 void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint32_t len) {
+    (void)dest;
     if (!netif || !data || len < sizeof(udp_header_t)) return;
 
     udp_header_t *udp = (udp_header_t *)data;

@@ -36,8 +36,6 @@ static vfs_node_t proc_vmstat;
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 
-static char proc_buffer[4096];
-
 extern volatile uint32_t tick_count;
 extern uint32_t pit_freq;
 

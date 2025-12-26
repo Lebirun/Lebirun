@@ -256,6 +256,7 @@ int tcp_disconnect(tcp_socket_t *sock, uint32_t timeout_ms) {
 }
 
 void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint32_t len) {
+    (void)dest;
     if (!netif || !data || len < sizeof(tcp_header_t)) return;
 
     tcp_header_t *tcp = (tcp_header_t *)data;

@@ -147,8 +147,9 @@ registers_t* interrupt_handler(registers_t* regs)
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             printf("User task %d page fault at 0x%08X (EIP=0x%08X) - killing task\n",
                    current_task->pid, fault_addr, regs->eip);
-            printf("Regs: ESP=0x%08X EBP=0x%08X EAX=0x%08X\n",
-                   regs->useresp, regs->ebp, regs->eax);
+            printf("Regs: ESP=0x%08X EBP=0x%08X EAX=0x%08X EBX=0x%08X ECX=0x%08X EDX=0x%08X\n",
+                   regs->useresp, regs->ebp, regs->eax, regs->ebx, regs->ecx, regs->edx);
+            printf("      ESI=0x%08X EDI=0x%08X\n", regs->esi, regs->edi);
 
             if (current_task && current_task->pd_phys) {
                 uint32_t eip_pd_idx = regs->eip >> 22;
@@ -170,6 +171,21 @@ registers_t* interrupt_handler(registers_t* regs)
 
                     if (pte & 1) {
                         uint32_t page_phys = pte & ~0xFFF;
+                        
+                        uint32_t temp_code = 0xF7003000;
+                        vmm_temp_map_raw(temp_code, page_phys);
+                        uint32_t code_offset = regs->eip & 0xFFF;
+                        printf("Instructions at EIP (0x%08X, offset 0x%X in page):\n", regs->eip, code_offset);
+                        for (int i = -8; i < 16; i++) {
+                            uint32_t off = (code_offset + i) & 0xFFF;
+                            if (i == 0) printf("[");
+                            printf("%02X", *((uint8_t*)(temp_code + off)));
+                            if (i == 0) printf("]");
+                            printf(" ");
+                        }
+                        printf("\n");
+                        vmm_temp_unmap_raw(temp_code);
+                        
                         uint32_t stack_page_phys = 0;
                         if ((regs->ebp & ~0xFFF) == (regs->eip & ~0xFFF)) {
                             stack_page_phys = page_phys;
@@ -207,6 +223,28 @@ registers_t* interrupt_handler(registers_t* regs)
                             vmm_temp_unmap_raw(temp_stack);
                         } else {
                             printf("Caller return address: stack page not present\n");
+                        }
+                        
+                        uint32_t esp_pd_idx = regs->useresp >> 22;
+                        uint32_t esp_pt_idx = (regs->useresp >> 12) & 0x3FF;
+                        uint32_t esp_pde = user_pd[esp_pd_idx];
+                        if (esp_pde & 1) {
+                            uint32_t esp_pt_phys = esp_pde & ~0xFFF;
+                            vmm_temp_map_raw(temp_pt, esp_pt_phys);
+                            uint32_t *esp_pt = (uint32_t *)temp_pt;
+                            uint32_t esp_pte = esp_pt[esp_pt_idx];
+                            vmm_temp_unmap_raw(temp_pt);
+                            if (esp_pte & 1) {
+                                uint32_t esp_page_phys = esp_pte & ~0xFFF;
+                                vmm_temp_map_raw(temp_stack, esp_page_phys);
+                                printf("Stack dump around ESP (addr=0x%08X):\n", regs->useresp);
+                                for (int i = 0; i <= 0x40; i += 4) {
+                                    uint32_t offw = (regs->useresp + i) & 0xFFF;
+                                    uint32_t val = *((uint32_t *)(temp_stack + offw));
+                                    printf("  [ESP+%04X] = 0x%08X\n", i, val);
+                                }
+                                vmm_temp_unmap_raw(temp_stack);
+                            }
                         }
                     }
 

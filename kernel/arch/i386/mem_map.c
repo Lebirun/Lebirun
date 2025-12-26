@@ -914,7 +914,7 @@ void *kmalloc(size_t size) {
     
     void *user_ptr = get_user_ptr(block);
 
-    DPRINTF3("kmalloc: alloc size=%u (total=%u) block=0x%08X ptr=0x%08X\n", 
+    DPRINTF4("kmalloc: alloc size=%u (total=%u) block=0x%08X ptr=0x%08X\n", 
              (uint32_t)orig_size, (uint32_t)total_size, (uint32_t)block, (uint32_t)user_ptr);
 
     if (((uintptr_t)user_ptr & 0x3) != 0) {
@@ -1139,13 +1139,13 @@ static void dump_memory_around(uint32_t addr, uint32_t radius) {
 }
 
 void heap_verify(void) {
-    printf("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
+    DPRINTF4("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
     heap_block_t *block = kernel_heap.free_list;
     int i = 0;
     int corruption_found = 0;
     
     while (block) {
-        printf(" heap block %d: addr=0x%08X size=%u alloc_size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
+        DPRINTF4(" heap block %d: addr=0x%08X size=%u alloc_size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
                i, (uint32_t)block, block->size, block->alloc_size, block->is_free, block->magic,
                (uint32_t)block->next, (uint32_t)block->prev);
 
@@ -1339,6 +1339,34 @@ uint32_t vmm_create_page_directory(void) {
     return pd_phys;
 }
 
+uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr) {
+    uint32_t pd_idx = virt_addr >> 22;
+    uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    uint32_t temp_pd_virt = 0xF7000000;
+    temp_map_raw(temp_pd_virt, pd_phys);
+    uint32_t *foreign_pd = (uint32_t *)temp_pd_virt;
+    uint32_t pd_entry = foreign_pd[pd_idx];
+    temp_unmap_raw(temp_pd_virt);
+
+    if (!(pd_entry & 1)) {
+        return 0;
+    }
+
+    uint32_t pt_phys = pd_entry & ~0xFFF;
+    uint32_t temp_pt_virt = 0xF7001000;
+    temp_map_raw(temp_pt_virt, pt_phys);
+    uint32_t *foreign_pt = (uint32_t *)temp_pt_virt;
+    uint32_t pt_entry = foreign_pt[pt_idx];
+    temp_unmap_raw(temp_pt_virt);
+
+    if (!(pt_entry & 1)) {
+        return 0;
+    }
+
+    return pt_entry & ~0xFFF;
+}
+
 void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pd_idx = virt_addr >> 22;
     uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
@@ -1491,6 +1519,48 @@ void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint3
         uint32_t temp_data_virt = 0xF7002000;
         temp_map_raw(temp_data_virt, page_phys);
         memcpy((void *)(temp_data_virt + page_offset), s + offset, chunk);
+        temp_unmap_raw(temp_data_virt);
+
+        offset += chunk;
+    }
+}
+
+void vmm_read_from_pd(uint32_t pd_phys, uint32_t src_virt, void *dest, uint32_t size) {
+    uint8_t *d = (uint8_t *)dest;
+    uint32_t offset = 0;
+
+    while (offset < size) {
+        uint32_t page_offset = (src_virt + offset) & 0xFFF;
+        uint32_t chunk = PAGE_SIZE - page_offset;
+        if (chunk > size - offset) chunk = size - offset;
+
+        uint32_t virt_page = (src_virt + offset) & ~0xFFF;
+        uint32_t pd_idx = virt_page >> 22;
+        uint32_t pt_idx = (virt_page >> 12) & 0x3FF;
+
+        uint32_t temp_pd_virt = 0xF7000000;
+        temp_map_raw(temp_pd_virt, pd_phys);
+        uint32_t *foreign_pd = (uint32_t *)temp_pd_virt;
+        if (!(foreign_pd[pd_idx] & 1)) {
+            temp_unmap_raw(temp_pd_virt);
+            return;
+        }
+        uint32_t pt_phys = foreign_pd[pd_idx] & ~0xFFF;
+        temp_unmap_raw(temp_pd_virt);
+
+        uint32_t temp_pt_virt = 0xF7001000;
+        temp_map_raw(temp_pt_virt, pt_phys);
+        uint32_t *foreign_pt = (uint32_t *)temp_pt_virt;
+        if (!(foreign_pt[pt_idx] & 1)) {
+            temp_unmap_raw(temp_pt_virt);
+            return;
+        }
+        uint32_t page_phys = foreign_pt[pt_idx] & ~0xFFF;
+        temp_unmap_raw(temp_pt_virt);
+
+        uint32_t temp_data_virt = 0xF7002000;
+        temp_map_raw(temp_data_virt, page_phys);
+        memcpy(d + offset, (void *)(temp_data_virt + page_offset), chunk);
         temp_unmap_raw(temp_data_virt);
 
         offset += chunk;

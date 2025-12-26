@@ -158,9 +158,11 @@ void vmm_map_temp(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_unmap_temp(uint32_t virt_addr);
 
 void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
+uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr);
 uint32_t *vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags, uint32_t *out_count);
 void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags);
 void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint32_t size);
+void vmm_read_from_pd(uint32_t pd_phys, uint32_t src_virt, void *dest, uint32_t size);
 
 void vmm_temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
 void vmm_temp_unmap_raw(uint32_t temp_virt);

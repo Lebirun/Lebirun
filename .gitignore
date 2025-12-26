@@ -22,3 +22,5 @@ build/
 *.raw
 
 !libc/lib/*
+
+!root/*

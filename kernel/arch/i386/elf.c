@@ -176,6 +176,12 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
 
         for (uint32_t page = 0; page < segment_pages; page++) {
             uint32_t page_vaddr = vaddr_start + page * PAGE_SIZE;
+            
+            uint32_t existing_phys = vmm_get_phys_in_pd(pd_phys, page_vaddr);
+            if (existing_phys != 0) {
+                continue;
+            }
+            
             uint32_t phys = pfa_alloc();
             if (!phys) {
                 DPRINTF1("elf_load: out of physical memory\n");
@@ -197,7 +203,21 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
         }
 
         if (filesz > 0) {
+            printf("ELF: Copying %u bytes from ELF offset 0x%X to vaddr 0x%08X\n", filesz, offset, vaddr);
+            printf("ELF: First 16 bytes of source: ");
+            for (uint32_t b = 0; b < 16 && b < filesz; b++) {
+                printf("%02X ", data[offset + b]);
+            }
+            printf("\n");
             vmm_copy_to_pd(pd_phys, vaddr, data + offset, filesz);
+            
+            uint8_t verify[16];
+            vmm_read_from_pd(pd_phys, vaddr, verify, (filesz < 16) ? filesz : 16);
+            printf("ELF: First 16 bytes at dest: ");
+            for (uint32_t b = 0; b < 16 && b < filesz; b++) {
+                printf("%02X ", verify[b]);
+            }
+            printf("\n");
         }
 
         if (vaddr < info->load_base) {

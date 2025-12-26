@@ -302,7 +302,7 @@ void devfs_init(void) {
     dev_port.ref_count = 1;
     
     for (int i = 0; i < 64; i++) {
-        entropy_pool[i] = 0x5A5A5A5A ^ (i * 0x13579BDF);
+        entropy_pool[i] = 0x5A5A5A5A ^ ((uint32_t)i * 0x13579BDF);
     }
     
     pty_init();

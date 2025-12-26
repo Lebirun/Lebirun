@@ -2,6 +2,7 @@
 #include <kernel/tty.h>
 #include <kernel/mutex.h>
 #include <kernel/task.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -631,6 +632,9 @@ int vfs_stat_fd(int fd, uint32_t *size, uint32_t *flags) {
     
     if (size) *size = node->length;
     if (flags) *flags = node->flags;
+    
+    DPRINTF2("VFS_STAT: fd=%d node=%p name='%s' length=%u flags=0x%X\n", 
+           fd, node, node->name, node->length, node->flags);
     
     return 0;
 }

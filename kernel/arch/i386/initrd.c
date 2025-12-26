@@ -3,6 +3,7 @@
 #include <kernel/common.h>
 #include <kernel/vfs.h>
 #include <kernel/ramfs.h>
+#include <kernel/debug.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -768,14 +769,17 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         if (rfiles[i].type == INITRD_TYPE_FILE) {
             rfiles[i].offset = hdrs[i].offset;
             rfiles[i].data = rootfs_base + hdrs[i].offset;
+            DPRINTF4("ROOTFS_HDR[%u]: '%s' type=FILE offset=%u length=%u data=%p\n", 
+                   i, rfiles[i].name, rfiles[i].offset, rfiles[i].length, rfiles[i].data);
         } else {
             rfiles[i].offset = 0;
             rfiles[i].data = NULL;
+            DPRINTF4("ROOTFS_HDR[%u]: '%s' type=DIR parent=%u\n", 
+                   i, rfiles[i].name, rfiles[i].parent_index);
         }
     }
 
     printf("ROOTFS: Copying %u files to /...\n", num_entries);
-    printf("ROOTFS: Creating base directories...\n");
     
     uint32_t dirs_created = 0;
     uint32_t files_copied = 0;
@@ -790,7 +794,6 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         if (r == 0) dirs_created++;
     }
-    printf("ROOTFS: Created %u base dirs\n", dirs_created);
     
     const char *nested_dirs[] = {
         "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
@@ -801,7 +804,6 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         if (r == 0) dirs_created++;
     }
-    printf("ROOTFS: Created nested dirs, starting file copy...\n");
 
     for (uint32_t i = 0; i < num_entries; i++) {
         initrd_file_t *f = &rfiles[i];
@@ -869,21 +871,33 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
             }
         }
 
+        uint8_t perms = f->permissions;
+        if (!perms) {
+            perms = (f->type == INITRD_TYPE_DIR)
+                        ? (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC)
+                        : (VFS_PERM_READ | VFS_PERM_WRITE);
+        }
+
         if (f->type == INITRD_TYPE_DIR) {
-            int ret = ramfs_create_dir(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            int ret = ramfs_create_dir(destpath, perms);
             if (ret == 0) dirs_created++;
             else if (ret != RAMFS_ERR_EXIST) errors++;
         } else {
-            int ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE);
+            DPRINTF4("ROOTFS: Creating file '%s' length=%u data=%p\n", destpath, f->length, f->data);
+            int ret = ramfs_create_file(destpath, perms);
+            DPRINTF4("ROOTFS: ramfs_create_file returned %d\n", ret);
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
                     int written = ramfs_write(destpath, 0, f->data, f->length);
+                    DPRINTF4("ROOTFS: ramfs_write returned %d for '%s'\n", written, destpath);
                     if (written >= 0) files_copied++;
                     else errors++;
                 } else {
+                    DPRINTF1("ROOTFS: WARNING: no data for '%s' (data=%p length=%u)\n", destpath, f->data, f->length);
                     files_copied++;
                 }
             } else {
+                DPRINTF1("ROOTFS: ERROR: ramfs_create_file failed for '%s' ret=%d\n", destpath, ret);
                 errors++;
             }
         }

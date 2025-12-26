@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <time.h>
+#include <sys/time.h>
 #include <limits.h>
 
 typedef long ssize_t;
@@ -413,7 +414,6 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     return syscall3(SYS_SIGACTION, signum, (int)act, (int)oldact);
 }
 
-typedef unsigned long sigset_t;
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     return syscall3(SYS_SIGPROCMASK, how, (int)set, (int)oldset);
 }
@@ -423,8 +423,7 @@ int clock_gettime(int clockid, struct timespec *tp) {
 }
 
 struct timeval;
-struct timezone;
-int gettimeofday(struct timeval *tv, struct timezone *tz) {
+int gettimeofday(struct timeval *__restrict tv, void *__restrict tz) {
     return syscall2(SYS_GETTIMEOFDAY, (int)tv, (int)tz);
 }
 
@@ -919,16 +918,20 @@ int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout
     return syscall5(SYS_EPOLL_PWAIT, epfd, (int)events, maxevents, timeout, (int)sigmask);
 }
 
-typedef struct {
-    unsigned long fds_bits[32];
-} fd_set_internal;
-
-int select(int nfds, void *readfds, void *writefds, void *exceptfds, struct timeval *timeout) {
+int select(int nfds,
+           fd_set *__restrict readfds,
+           fd_set *__restrict writefds,
+           fd_set *__restrict exceptfds,
+           struct timeval *__restrict timeout) {
     return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout);
 }
 
-int pselect(int nfds, void *readfds, void *writefds, void *exceptfds,
-            const struct timespec *timeout, const sigset_t *sigmask) {
+int pselect(int nfds,
+            fd_set *__restrict readfds,
+            fd_set *__restrict writefds,
+            fd_set *__restrict exceptfds,
+            const struct timespec *__restrict timeout,
+            const sigset_t *__restrict sigmask) {
     return syscall6(SYS_PSELECT6, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout, (int)sigmask);
 }
 

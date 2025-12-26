@@ -791,7 +791,12 @@ registers_t* schedule_from_irq(registers_t* regs) {
                 vmm_temp_unmap_raw(temp_pd);
             }
 
-            return_frame->ds = return_frame->es = return_frame->fs = return_frame->gs = 0x23;
+            return_frame->ds = return_frame->es = return_frame->fs = 0x23;
+            if (next->tls_base) {
+                return_frame->gs = gdt_get_tls_selector(GDT_TLS_ENTRY_1);
+            } else {
+                return_frame->gs = 0x23;
+            }
             return_frame->cs = 0x1B;
             return_frame->ss = 0x23;
         }
@@ -1086,8 +1091,38 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     kfree(elf_pages);
     kfree(stack_pages);
 
+    current_task->tls_base = 0;
+    current_task->tls_limit = 0;
+
+    uint32_t sp = stack_top - USER_STACK_GAP - 16;
+    uint32_t zero = 0;
+    
+    const char *prog_name = "program";
+    int prog_len = 0;
+    while (prog_name[prog_len]) prog_len++;
+    sp -= (prog_len + 1 + 3) & ~3;
+    uint32_t prog_addr = sp;
+    vmm_copy_to_pd(new_pd, sp, prog_name, prog_len + 1);
+    
+    sp = sp & ~0xF;
+    
+    sp -= 4;
+    vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
+    sp -= 4;
+    vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
+    
+    sp -= 4;
+    vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
+    
+    sp -= 4;
+    vmm_copy_to_pd(new_pd, sp, &prog_addr, sizeof(uint32_t));
+    
+    sp -= 4;
+    uint32_t argc_val = 1;
+    vmm_copy_to_pd(new_pd, sp, &argc_val, sizeof(uint32_t));
+
     regs->eip = elf_info.entry_point;
-    regs->useresp = stack_top - USER_STACK_GAP - 16;
+    regs->useresp = sp;
     regs->ebp = 0;
     regs->eax = 0;
     regs->ebx = 0;
@@ -1099,10 +1134,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
     regs->eflags = 0x202;
 
-    current_task->tls_base = 0;
-    current_task->tls_limit = 0;
-
-    DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, regs->useresp);
+    DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, sp);
 
     return 0;
 }
@@ -1309,28 +1341,34 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     
     sp = sp & ~0xF;
     
+    uint32_t zero = 0;
+    sp -= 4;
+    *(uint32_t *)sp = zero;
+    sp -= 4;
+    *(uint32_t *)sp = zero;
+    
     if (envp_ptrs) {
-        sp -= (envc + 1) * sizeof(uint32_t);
-        uint32_t *envp_stack = (uint32_t *)sp;
-        for (int i = 0; i <= envc; i++) envp_stack[i] = envp_ptrs[i];
+        for (int i = envc; i >= 0; i--) {
+            sp -= 4;
+            *(uint32_t *)sp = envp_ptrs[i];
+        }
+    } else {
+        sp -= 4;
+        *(uint32_t *)sp = zero;
     }
-    uint32_t envp_ptr_val = sp;
     
     if (argv_ptrs) {
-        sp -= (argc + 1) * sizeof(uint32_t);
-        uint32_t *argv_stack = (uint32_t *)sp;
-        for (int i = 0; i <= argc; i++) argv_stack[i] = argv_ptrs[i];
+        for (int i = argc; i >= 0; i--) {
+            sp -= 4;
+            *(uint32_t *)sp = argv_ptrs[i];
+        }
+    } else {
+        sp -= 4;
+        *(uint32_t *)sp = zero;
     }
-    uint32_t argv_ptr_val = sp;
     
     sp -= 4;
-    *(uint32_t *)sp = envp_ptr_val;
-    sp -= 4;
-    *(uint32_t *)sp = argv_ptr_val;
-    sp -= 4;
     *(uint32_t *)sp = (uint32_t)argc;
-    sp -= 4;
-    *(uint32_t *)sp = 0;
     
     if (argv_ptrs) kfree(argv_ptrs);
     if (envp_ptrs) kfree(envp_ptrs);

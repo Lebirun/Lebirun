@@ -60,5 +60,6 @@ clean:
 	rm -f *.o *.bin *.so
 	rm -f $(KERNEL_USER_SHELL)
 	rm -f $(INITRD_DIR)/pong.bin
+	rm -f $(INITRD_DIR)/stdio_test.bin
 	rm -f $(SYSROOT_BIN)/test100
 	rm -f $(SYSROOT_LIB)/libtest.so
