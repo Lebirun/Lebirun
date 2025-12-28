@@ -27,32 +27,40 @@ static int sys_exit(int code, const char *unused1, int unused2) {
 }
 
 static int sys_write(int fd, const char *buf, int len) {
-    if ((fd != 1 && fd != 2) || !buf || len < 0) return -1;
+    if (!buf || len < 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
-    framebuffer_t *fb = fb_get();
-    int con_id = current_task ? current_task->console_id : 0;
-    
-    int written = 0;
-    while (written < len) {
-        int chunk = len - written;
-        if (chunk > 64) chunk = 64;
+    if (fd == 1 || fd == 2) {
+        framebuffer_t *fb = fb_get();
+        int con_id = current_task ? current_task->console_id : 0;
         
-        asm volatile("cli");
-        if (fb && fb->font && console_is_initialized()) {
-            console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
-        } else {
-            for (int i = 0; i < chunk; i++) {
-                terminal_putchar(((const char *)buf_addr)[written + i]);
+        int written = 0;
+        while (written < len) {
+            int chunk = len - written;
+            if (chunk > 64) chunk = 64;
+            
+            asm volatile("cli");
+            if (fb && fb->font && console_is_initialized()) {
+                console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
+            } else {
+                for (int i = 0; i < chunk; i++) {
+                    terminal_putchar(((const char *)buf_addr)[written + i]);
+                }
             }
+            asm volatile("sti");
+            
+            written += chunk;
         }
-        asm volatile("sti");
-        
-        written += chunk;
+        return len;
     }
-    return len;
+    
+    if (fd >= 3) {
+        return vfs_write_fd(fd, (const void *)buf_addr, (uint32_t)len);
+    }
+    
+    return -1;
 }
 
 static int sys_read(int fd, char *buf, int len) {
@@ -171,6 +179,10 @@ static int sys_read(int fd, char *buf, int len) {
         }
     }
     
+    if (fd >= 3) {
+        return vfs_read_fd(fd, (void *)buf_addr, (uint32_t)len);
+    }
+    
     return initrd_read(fd, (void *)buf_addr, (uint32_t)len);
 }
 
@@ -211,7 +223,7 @@ struct iovec {
 };
 
 static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
-    if ((fd != 1 && fd != 2) || !iov_ptr || iovcnt <= 0) return -1;
+    if (!iov_ptr || iovcnt <= 0) return -1;
     
     uint32_t iov_addr = (uint32_t)iov_ptr;
     if (iov_addr >= 0xC0000000 || iov_addr < 0x1000) return -1;
@@ -235,8 +247,9 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
 }
 
 static int sys_lseek(int fd, const char *offset_ptr, int whence) {
-    (void)fd; (void)offset_ptr; (void)whence;
-    return 0;
+    int32_t offset = (int32_t)(uintptr_t)offset_ptr;
+    if (fd < 3) return -1;
+    return vfs_seek(fd, offset, whence);
 }
 
 void syscalls_core_init(void) {

@@ -12,6 +12,8 @@
 #define MAX_ENV_KEY 64
 #define MAX_ENV_VAL 256
 
+#define SHELL_MAX_ARGS 32
+
 static char cwd[SHELL_PATH_MAX] = "/";
 
 static struct {
@@ -194,14 +196,36 @@ static int search_path(const char *cmd, char *resolved, size_t res_size) {
     return 0;
 }
 
-static int run_binary(const char *cmdline) {
-    char cmd[SHELL_PATH_MAX];
-    const char *p = cmdline;
-    int i = 0;
-    while (*p && *p != ' ' && i < SHELL_PATH_MAX - 1) {
-        cmd[i++] = *p++;
+static int split_args(char *line, char **argv, int max_args) {
+    if (!line || !argv || max_args <= 0) return 0;
+    int argc = 0;
+    char *p = line;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        if (argc + 1 >= max_args) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        if (*p) *p++ = '\0';
     }
-    cmd[i] = '\0';
+
+    argv[argc] = NULL;
+    return argc;
+}
+
+static int run_binary(const char *cmdline) {
+    if (!cmdline || *cmdline == '\0') return 0;
+
+    char buf[128];
+    strncpy(buf, cmdline, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *argv[SHELL_MAX_ARGS];
+    int argc = split_args(buf, argv, SHELL_MAX_ARGS);
+    if (argc <= 0) return 0;
+
+    const char *cmd = argv[0];
     
     char resolved[SHELL_PATH_MAX];
     
@@ -214,45 +238,17 @@ static int run_binary(const char *cmdline) {
         }
     }
 
-    int fd = -1;
-    uint8_t *bin = 0;
-    unsigned int size = 0, type = 0;
-
-    fd = vfs_open(resolved, O_RDONLY);
-    if (fd < 0) { printf("Cannot open '%s'\n", resolved); return -1; }
-    if (vfs_stat(fd, &size, &type) < 0) { printf("Cannot stat '%s'\n", resolved); goto err; }
-    if (type & 0x02) { printf("'%s' is a directory\n", resolved); goto err; }
-    if (size == 0) { printf("'%s' is empty\n", resolved); goto err; }
-
-    bin = (uint8_t *)sbrk((int)size);
-    if (!bin || bin == (uint8_t *)-1) { printf("Failed to allocate %u bytes\n", size); goto err; }
-
-    int rd = vfs_read_fd(fd, bin, size);
-    if (rd <= 0) { printf("Failed to read '%s'\n", resolved); goto err; }
-    vfs_close_fd(fd);
-    fd = -1;
-
-    if (rd < 4 || bin[0] != 0x7F || bin[1] != 'E' || bin[2] != 'L' || bin[3] != 'F') {
-        printf("'%s' is not a valid ELF binary (read %d bytes, first 4: %02X %02X %02X %02X)\n", 
-               resolved, rd, bin[0], bin[1], bin[2], bin[3]);
-        return -1;
-    }
-
     int pid = fork();
     if (pid < 0) { printf("Fork failed\n"); return -1; }
     if (pid == 0) {
-        int ret = exec(bin, (unsigned int)rd);
-        printf("exec failed: %d\n", ret);
+        int ret = execve(resolved, argv, NULL);
+        printf("execve failed: %d\n", ret);
         exit(1);
     }
 
     int status = 0;
     waitpid(pid, &status, 0);
     return status;
-
-err:
-    if (fd >= 0) vfs_close_fd(fd);
-    return -1;
 }
 
 static inline int is_executable_path(const char *cmd) {
@@ -437,6 +433,12 @@ void cd(const char *path) {
         return;
     }
     vfs_close_fd(fd);
+
+    if (chdir(resolved) < 0) {
+        printf("cd: cannot enter '%s'\n", resolved);
+        return;
+    }
+
     strncpy(cwd, resolved, sizeof(cwd) - 1);
     cwd[sizeof(cwd) - 1] = '\0';
     
@@ -651,6 +653,7 @@ int main(int argc, char **argv) {
     char line[128];
 
     init_env();
+    chdir("/");
 
     while (1) {
         printf("leb:%s> ", cwd);
