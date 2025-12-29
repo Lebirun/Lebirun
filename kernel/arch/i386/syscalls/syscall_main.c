@@ -314,4 +314,5 @@ void syscall_init(void) {
     syscalls_pthread_init();
     syscalls_shm_init();
     syscalls_dl_init();
+    syscalls_regex_init();
 }

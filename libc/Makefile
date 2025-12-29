@@ -16,7 +16,7 @@ EXEC_PREFIX?=$(PREFIX)
 INCLUDEDIR?=$(PREFIX)/include
 LIBDIR?=$(EXEC_PREFIX)/lib
 
-LEBIRUN_OBJS = src/syscalls.o src/dirent.o
+LEBIRUN_OBJS = src/syscalls.o src/dirent.o src/setjmp.o
 
 .PHONY: all clean install install-headers install-libs
 
@@ -27,6 +27,9 @@ src/syscalls.o: src/syscalls.c
 
 src/dirent.o: src/dirent.c
 	$(CC) -c -ffreestanding -nostdinc -isystem include -O2 -o $@ $<
+
+src/setjmp.o: src/setjmp.S
+	$(CC) -c -o $@ $<
 
 lib/liblebirun.a: $(LEBIRUN_OBJS)
 	$(AR) rcs $@ $(LEBIRUN_OBJS)

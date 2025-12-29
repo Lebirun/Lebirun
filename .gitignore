@@ -20,6 +20,7 @@ build/
 *.qcow2
 *.img
 *.raw
+*.so
 
 !libc/lib/*
 

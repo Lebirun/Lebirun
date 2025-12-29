@@ -253,6 +253,8 @@ int waitpid(int pid, int *status, int options) {
     return syscall3(SYS_WAITPID, pid, (int)status, options);
 }
 
+int wait(int *status) { return waitpid(-1, status, 0); }
+
 unsigned int getticks(void) {
     return (unsigned int)syscall0(SYS_GETTICKS);
 }
@@ -1270,3 +1272,172 @@ char *dlerror(void) {
     if (ret <= 0) return (void *)0;
     return err_buf;
 }
+
+#define SYS_REGCOMP (248 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_REGEXEC (249 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_REGFREE (250 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_REGERROR (251 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_FNMATCH (252 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GLOB (253 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GLOBFREE (254 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SSCANF (255 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SCANF_GETCHAR (256 | LEBIRUN_SYSCALL_FLAG)
+
+typedef long regoff_t;
+
+typedef struct re_pattern_buffer {
+    size_t re_nsub;
+    void *__opaque, *__padding[4];
+    size_t __nsub2;
+    char __padding2;
+} regex_t;
+
+typedef struct {
+    regoff_t rm_so;
+    regoff_t rm_eo;
+} regmatch_t;
+
+typedef struct {
+    size_t gl_pathc;
+    char **gl_pathv;
+    size_t gl_offs;
+    int __dummy1;
+    void *__dummy2[5];
+} glob_t;
+
+int regcomp(regex_t *__restrict preg, const char *__restrict pattern, int cflags) {
+    return syscall3(SYS_REGCOMP, (int)preg, (int)pattern, cflags);
+}
+
+int regexec(const regex_t *__restrict preg, const char *__restrict string,
+            size_t nmatch, regmatch_t *__restrict pmatch, int eflags) {
+    int packed = ((int)nmatch << 16) | ((int)(uintptr_t)pmatch & 0xFFFF);
+    (void)eflags;
+    return syscall3(SYS_REGEXEC, (int)preg, (int)string, packed);
+}
+
+void regfree(regex_t *preg) {
+    syscall1(SYS_REGFREE, (int)preg);
+}
+
+size_t regerror(int errcode, const regex_t *__restrict preg,
+                char *__restrict errbuf, size_t errbuf_size) {
+    int packed = ((int)(uintptr_t)errbuf << 16) | ((int)errbuf_size & 0xFFFF);
+    return syscall3(SYS_REGERROR, errcode, (int)preg, packed);
+}
+
+int fnmatch(const char *pattern, const char *string, int flags) {
+    return syscall3(SYS_FNMATCH, (int)pattern, (int)string, flags);
+}
+
+int glob(const char *__restrict pattern, int flags,
+         int (*errfunc)(const char *, int), glob_t *__restrict pglob) {
+    (void)errfunc;
+    return syscall3(SYS_GLOB, (int)pattern, flags, (int)pglob);
+}
+
+void globfree(glob_t *pglob) {
+    syscall1(SYS_GLOBFREE, (int)pglob);
+}
+
+static int internal_getchar(void) {
+    return syscall0(SYS_SCANF_GETCHAR);
+}
+
+int vsscanf(const char *__restrict str, const char *__restrict format, __builtin_va_list ap) {
+    uint32_t args[20];
+    int arg_count = 0;
+    const char *f = format;
+    
+    while (*f && arg_count < 20) {
+        if (*f == '%') {
+            f++;
+            if (*f == '%') { f++; continue; }
+            if (*f == '*') { f++; }
+            while (*f >= '0' && *f <= '9') f++;
+            if (*f == 'h' || *f == 'l' || *f == 'L' || *f == 'z' || *f == 't' || *f == 'j') {
+                f++;
+                if (*f == 'h' || *f == 'l') f++;
+            }
+            if (*f == 'd' || *f == 'i' || *f == 'u' || *f == 'x' || *f == 'X' ||
+                *f == 'o' || *f == 's' || *f == 'c' || *f == 'n' || *f == 'p' ||
+                *f == '[' || *f == 'f' || *f == 'e' || *f == 'g') {
+                args[arg_count++] = (uint32_t)__builtin_va_arg(ap, void *);
+            }
+            if (*f == '[') {
+                while (*f && *f != ']') f++;
+            }
+            if (*f) f++;
+        } else {
+            f++;
+        }
+    }
+    
+    return syscall3(SYS_SSCANF, (int)str, (int)format, (int)args);
+}
+
+int sscanf(const char *__restrict str, const char *__restrict format, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, format);
+    int ret = vsscanf(str, format, ap);
+    __builtin_va_end(ap);
+    return ret;
+}
+
+int vscanf(const char *__restrict format, __builtin_va_list ap) {
+    char buf[1024];
+    int i = 0;
+    int c;
+    while (i < 1023 && (c = internal_getchar()) != '\n' && c != -1) {
+        buf[i++] = (char)c;
+    }
+    buf[i] = '\0';
+    return vsscanf(buf, format, ap);
+}
+
+int scanf(const char *__restrict format, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, format);
+    int ret = vscanf(format, ap);
+    __builtin_va_end(ap);
+    return ret;
+}
+
+struct __FILE_impl {
+    int fd;
+    int flags;
+    int ungetc_buf;
+    int has_ungetc;
+    char *buf;
+    size_t buf_size;
+    size_t buf_pos;
+    size_t buf_len;
+    int error;
+    int eof;
+};
+
+typedef struct __FILE_impl FILE;
+
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+int vfscanf(FILE *__restrict stream, const char *__restrict format, __builtin_va_list ap) {
+    if (!stream) return -1;
+    char buf[1024];
+    int len = read(stream->fd, buf, 1023);
+    if (len <= 0) return -1;
+    buf[len] = '\0';
+    return vsscanf(buf, format, ap);
+}
+
+int fscanf(FILE *__restrict stream, const char *__restrict format, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, format);
+    int ret = vfscanf(stream, format, ap);
+    __builtin_va_end(ap);
+    return ret;
+}
+
+struct passwd { char *pw_name; char *pw_passwd; unsigned pw_uid; unsigned pw_gid; char *pw_gecos; char *pw_dir; char *pw_shell; };
+struct passwd *getpwnam(const char *name) { (void)name; return (struct passwd *)0; }

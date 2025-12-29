@@ -366,7 +366,19 @@
 #define SYSCALL_DLCLOSE 246
 #define SYSCALL_DLERROR 247
 
-#define NR_SYSCALLS 260
+#define SYSCALL_REGCOMP 248
+#define SYSCALL_REGEXEC 249
+#define SYSCALL_REGFREE 250
+#define SYSCALL_REGERROR 251
+#define SYSCALL_FNMATCH 252
+#define SYSCALL_GLOB 253
+#define SYSCALL_GLOBFREE 254
+#define SYSCALL_SSCANF 255
+#define SYSCALL_SCANF_GETCHAR 256
+#define SYSCALL_REGSUB 257
+#define SYSCALL_REGEXEC_EX 258
+
+#define NR_SYSCALLS 270
 
 struct kernel_stat {
     unsigned long long st_dev;
@@ -480,6 +492,7 @@ void syscalls_epoll_init(void);
 void syscalls_pthread_init(void);
 void syscalls_shm_init(void);
 void syscalls_dl_init(void);
+void syscalls_regex_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
 
