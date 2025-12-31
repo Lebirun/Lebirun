@@ -205,7 +205,7 @@ void vfs_close(vfs_node_t *node) {
 dirent_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
     if (!node) return NULL;
 
-    if ((node->flags & VFS_DIRECTORY) == 0 && 
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY &&
         (node->flags & VFS_MOUNTPOINT) == 0) {
         return NULL;
     }
@@ -219,28 +219,28 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     if (!node || !name) return NULL;
-    if ((node->flags & VFS_DIRECTORY) == 0 && (node->flags & VFS_MOUNTPOINT) == 0) return NULL;
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY && (node->flags & VFS_MOUNTPOINT) == 0) return NULL;
     if (node->finddir) return node->finddir(node, name);
     return NULL;
 }
 
 int vfs_create(vfs_node_t *parent, const char *name, uint32_t flags) {
     if (!parent || !name) return -1;
-    if ((parent->flags & VFS_DIRECTORY) == 0) return -1;
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
     if (parent->create) return parent->create(parent, name, flags);
     return -1;
 }
 
 int vfs_unlink(vfs_node_t *parent, const char *name) {
     if (!parent || !name) return -1;
-    if ((parent->flags & VFS_DIRECTORY) == 0) return -1;
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
     if (parent->unlink) return parent->unlink(parent, name);
     return -1;
 }
 
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) {
     if (!parent || !name) return -1;
-    if ((parent->flags & VFS_DIRECTORY) == 0) return -1;
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
     if (parent->mkdir) return parent->mkdir(parent, name, perms);
     return -1;
 }

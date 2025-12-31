@@ -105,7 +105,22 @@ while IFS= read -r FILEPATH; do
 
         SIZE=$(stat -c%s "$FILE_TO_ADD")
 
-        if [ -x "$FILEPATH" ]; then
+        IS_ELF="no"
+        if [ "$(dd if="$FILE_TO_ADD" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+            IS_ELF="yes"
+        fi
+        IS_SHEBANG="no"
+        if [ "$(dd if="$FILE_TO_ADD" bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "2321" ]; then
+            IS_SHEBANG="yes"
+        fi
+        IN_BIN_DIR="no"
+        case "$RELPATH" in
+            bin/*|sbin/*|usr/bin/*|usr/sbin/*)
+                IN_BIN_DIR="yes"
+                ;;
+        esac
+
+        if [ -x "$FILEPATH" ] || [ "$IS_ELF" = "yes" ] || [ "$IS_SHEBANG" = "yes" ] || [ "$IN_BIN_DIR" = "yes" ]; then
             PERM=$((PERM_READ | PERM_EXEC))
         else
             PERM=$PERM_READ

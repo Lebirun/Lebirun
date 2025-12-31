@@ -12,6 +12,9 @@
 #define VFS_SYMLINK     0x06
 #define VFS_MOUNTPOINT  0x08
 
+#define VFS_TYPE_MASK   0x07
+#define VFS_GET_TYPE(flags) ((flags) & VFS_TYPE_MASK)
+
 #define VFS_O_RDONLY    0x0000
 #define VFS_O_WRONLY    0x0001
 #define VFS_O_RDWR      0x0002

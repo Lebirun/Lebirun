@@ -16,7 +16,7 @@ static int sys_fb_setcolors(int fg, const char *bg_ptr, int unused) {
 static int sys_fb_getinfo(int info_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     uint32_t info_addr = (uint32_t)info_ptr;
-    if (info_addr >= 0xC0000000 || info_addr < 0x1000) return -1;
+    if (info_addr >= 0xC0000000 || info_addr < 0x1000) return -EFAULT;
 
     framebuffer_t *fb = fb_get();
     uint32_t *info = (uint32_t *)info_addr;

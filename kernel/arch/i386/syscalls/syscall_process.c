@@ -36,26 +36,33 @@ static int sys_yield(int unused, const char *unused2, int unused3) {
 
 static int sys_sleep(int ms, const char *unused, int unused2) {
     (void)unused; (void)unused2;
-    if (ms <= 0) return -1;
+    if (ms <= 0) return -EINVAL;
     sleep_ms((uint32_t)ms);
     return 0;
 }
 
 static int sys_waitpid(int pid, const char *status_ptr, int options) {
-    if (pid == 0) pid = -1;
-    
+    if (!current_task) return -ESRCH;
+
+    pid_t pgid_filter = 0;
+    if (pid == 0) {
+        pgid_filter = current_task->pgid ? current_task->pgid : current_task->pid;
+        pid = -(int)pgid_filter;
+    }
+
     if (pid > 0) {
         task_t* t = task_find((pid_t)pid);
         if (!t) return -ECHILD;
-        
+        if (t->ppid != current_task->pid) return -ECHILD;
+
         if (options & WNOHANG) {
             if (t->state != TASK_DEAD) return 0;
         }
-        
+
         uint32_t exit_code = 0;
         int r = task_join(t, &exit_code);
         if (r != 0) return -ECHILD;
-        
+
         if (status_ptr) {
             uint32_t addr = (uint32_t)status_ptr;
             if (addr >= 0xC0000000 || addr < 0x1000) return -EFAULT;
@@ -64,8 +71,50 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         }
         return (int)pid;
     }
-    
-    return -ECHILD;
+
+    if (pid < -1) {
+        pgid_filter = (pid_t)(-pid);
+    }
+
+    if (pid != -1 && pid >= 0) {
+        return -EINVAL;
+    }
+
+    if (!task_has_child_of(current_task->pid, pgid_filter)) {
+        return -ECHILD;
+    }
+
+    for (;;) {
+        task_t *dead = task_find_dead_child_of(current_task->pid, pgid_filter);
+        if (dead) {
+            current_task->waiting_for_any_child = 0;
+            pid_t dead_pid = dead->pid;
+            uint32_t exit_code = 0;
+            int r = task_join(dead, &exit_code);
+            if (r != 0) return -ECHILD;
+
+            if (status_ptr) {
+                uint32_t addr = (uint32_t)status_ptr;
+                if (addr >= 0xC0000000 || addr < 0x1000) return -EFAULT;
+                int status = (exit_code & 0xFF) << 8;
+                memcpy((void*)addr, &status, sizeof(int));
+            }
+            return (int)dead_pid;
+        }
+
+        if (options & WNOHANG) {
+            return 0;
+        }
+
+        current_task->waiting_for_any_child = 1;
+        current_task->state = TASK_BLOCKED;
+        schedule();
+        current_task->waiting_for_any_child = 0;
+
+        if (!task_has_child_of(current_task->pid, pgid_filter)) {
+            return -ECHILD;
+        }
+    }
 }
 
 static int sys_wait4(int pid, const char *status_ptr, int options) {
@@ -117,9 +166,32 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
 
 static int sys_kill(int pid, const char *unused, int code) {
     (void)unused;
+    int sig = code;
+    
+    if (sig == 0) {
+        if (pid == 0) return 0;
+        if (pid > 0) {
+            task_t *t = task_find((pid_t)pid);
+            return t ? 0 : -ESRCH;
+        }
+        return 0;
+    }
+    
+    if (pid == 0) {
+        return 0;
+    }
+    
+    if (pid == -1) {
+        return 0;
+    }
+    
+    if (pid < -1) {
+        return 0;
+    }
+    
     task_t* t = task_find((pid_t)pid);
-    if (!t) return -1;
-    task_kill(t, (uint32_t)code);
+    if (!t) return -ESRCH;
+    task_kill(t, (uint32_t)sig);
     return 0;
 }
 
@@ -127,7 +199,7 @@ static int sys_fork(int unused, const char *unused2, int unused3) {
     (void)unused; (void)unused2; (void)unused3;
     if (!fork_regs_ptr) {
         printf("sys_fork: no registers pointer\n");
-        return -1;
+        return -EAGAIN;
     }
     return (int)task_fork(fork_regs_ptr);
 }
@@ -139,16 +211,16 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
 
     if (bin_addr >= 0xC0000000 || bin_addr < 0x1000) {
         syscall_error("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
-        return -1;
+        return -EFAULT;
     }
     if (bin_size == 0 || bin_size > 0x1000000) {
         syscall_error("sys_exec: invalid size %u\n", bin_size);
-        return -1;
+        return -EINVAL;
     }
 
     if (!fork_regs_ptr) {
         syscall_error("sys_exec: no registers pointer\n");
-        return -1;
+        return -EAGAIN;
     }
 
     return task_exec((const uint8_t *)bin_addr, bin_size, fork_regs_ptr);

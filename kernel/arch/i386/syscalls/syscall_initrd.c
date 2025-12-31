@@ -7,7 +7,7 @@ static int sys_initrd_count(int unused, const char *unused2, int unused3) {
 
 static int sys_initrd_stat(int index, const char *name_buf, int len_ptr) {
     initrd_file_t *f = initrd_get_file((uint32_t)index);
-    if (!f) return -1;
+    if (!f) return -ENOENT;
     
     uint32_t name_addr = (uint32_t)name_buf;
     uint32_t len_addr = (uint32_t)len_ptr;
@@ -30,10 +30,10 @@ static int sys_initrd_stat(int index, const char *name_buf, int len_ptr) {
 
 static int sys_initrd_read(int index, const char *buf, int maxlen) {
     initrd_file_t *f = initrd_get_file((uint32_t)index);
-    if (!f) return -1;
+    if (!f) return -ENOENT;
     
     uint32_t buf_addr = (uint32_t)buf;
-    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
     
     uint32_t to_copy = (uint32_t)maxlen;
     if (to_copy > f->length) to_copy = f->length;
@@ -45,7 +45,7 @@ static int sys_initrd_read(int index, const char *buf, int maxlen) {
 static int sys_open(int path_ptr, const char *flags_ptr, int unused) {
     (void)unused;
     uint32_t path_addr = (uint32_t)path_ptr;
-    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -1;
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -EFAULT;
     
     const char *path = (const char *)path_addr;
     int flags = (int)(uintptr_t)flags_ptr;
@@ -62,13 +62,13 @@ static int sys_fstat(int fd, const char *size_ptr, int type_ptr) {
     uint32_t size_addr = (uint32_t)size_ptr;
     uint32_t type_addr = (uint32_t)type_ptr;
     
-    if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (fd < 0 || fd >= INITRD_MAX_FDS) return -EBADF;
     
     extern initrd_fd_t fd_table[];
-    if (!fd_table[fd].in_use) return -1;
+    if (!fd_table[fd].in_use) return -EBADF;
     
     initrd_file_t *f = initrd_get_file(fd_table[fd].file_index);
-    if (!f) return -1;
+    if (!f) return -ENOENT;
     
     if (size_addr && size_addr < 0xC0000000 && size_addr >= 0x1000) {
         *(uint32_t *)size_addr = f->length;

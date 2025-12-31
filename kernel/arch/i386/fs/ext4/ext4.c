@@ -152,7 +152,7 @@ static dirent_t *ext4_vfs_readdir(vfs_node_t *node, uint32_t index) {
         return NULL;
     }
 
-    if (!(node->flags & VFS_DIRECTORY)) {
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
         return NULL;
     }
 
@@ -180,7 +180,7 @@ static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name) {
         return NULL;
     }
 
-    if (!(node->flags & VFS_DIRECTORY)) {
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
         return NULL;
     }
 
@@ -204,7 +204,7 @@ static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags)
         return -1;
     }
 
-    if (!(parent->flags & VFS_DIRECTORY)) {
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) {
         return -1;
     }
 
@@ -228,7 +228,7 @@ static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
         return -1;
     }
 
-    if (!(parent->flags & VFS_DIRECTORY)) {
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) {
         return -1;
     }
 
@@ -241,7 +241,7 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) 
         return -1;
     }
 
-    if (!(parent->flags & VFS_DIRECTORY)) {
+    if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) {
         return -1;
     }
 

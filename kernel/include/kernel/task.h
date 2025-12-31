@@ -86,6 +86,7 @@ typedef struct task {
     pid_t pgid;
     pid_t sid;
     pid_t ppid;
+    int waiting_for_any_child;
     
     uint32_t sig_pending;
     uint32_t sig_blocked;
@@ -108,6 +109,9 @@ extern task_t* ready_queue_head;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
+
+int task_has_child_of(pid_t parent_pid, pid_t pgid_filter);
+task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);
 
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);

@@ -286,6 +286,11 @@ void do_syscall(registers_t *regs) {
         regs->eax = ((int (*)(int, const char *, int))syscall_table[num])(
             regs->ebx, (const char *)regs->ecx, regs->edx);
     }
+
+    if ((int)regs->eax < 0) {
+        int err = -(int)regs->eax;
+        (void)err;
+    }
     
     clear_syscall_frame();
     fork_regs_ptr = NULL;

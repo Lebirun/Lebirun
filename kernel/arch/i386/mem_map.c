@@ -457,6 +457,10 @@ void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pd_idx = virt_addr >> 22;
     uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
 
+    if (virt_addr >= 0xC0000000) {
+        flags &= ~0x4;
+    }
+
     uint32_t *pd = (uint32_t *)0xFFFFF000;
 
     if (!(pd[pd_idx] & 1)) {
@@ -488,6 +492,10 @@ void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
     if (size == 0) return;
     uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
     uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    if (start >= 0xC0000000) {
+        flags &= ~0x4;
+    }
 
     for (uint32_t v = start; v < end; v += PAGE_SIZE) {
         uint32_t pd_idx = v >> 22;
@@ -1329,7 +1337,7 @@ uint32_t vmm_create_page_directory(void) {
 
     uint32_t *cur_pd = (uint32_t *)0xFFFFF000;
     for (uint32_t i = 768; i < 1023; i++) {
-        new_pd[i] = cur_pd[i];
+        new_pd[i] = cur_pd[i] & ~0x4;
     }
 
     new_pd[1023] = (pd_phys & ~0xFFF) | 3;
@@ -1370,6 +1378,10 @@ uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr) {
 void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pd_idx = virt_addr >> 22;
     uint32_t pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    if (virt_addr >= 0xC0000000) {
+        flags &= ~0x4;
+    }
 
     uint32_t temp_pd_virt = 0xF7000000;
     DPRINTF5("vmm_map_page_in_pd: pd_phys=0x%08X virt=0x%08X phys=0x%08X flags=0x%X\n", pd_phys, virt_addr, phys_addr, flags);
@@ -1431,6 +1443,10 @@ void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, ui
     uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
     uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
+    if (start >= 0xC0000000) {
+        flags &= ~0x4;
+    }
+
     for (uint32_t v = start; v < end; v += PAGE_SIZE) {
         void *phys_page = pmm_alloc_page();
         if (!phys_page) {
@@ -1451,6 +1467,10 @@ uint32_t* vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint
     uint32_t start = virt_addr & ~(PAGE_SIZE - 1);
     uint32_t end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     uint32_t num_pages = (end - start) / PAGE_SIZE;
+
+    if (start >= 0xC0000000) {
+        flags &= ~0x4;
+    }
     
     uint32_t *pages = (uint32_t *)kmalloc(num_pages * sizeof(uint32_t));
     if (!pages) {
@@ -1811,7 +1831,8 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
 
     for (uint32_t i = 768; i < 1023; i++) {
         temp_map_raw(temp_new_pd, new_pd_phys);
-        ((uint32_t *)temp_new_pd)[i] = src_pd[i];
+        uint32_t pde = src_pd[i] & ~0x4;
+        ((uint32_t *)temp_new_pd)[i] = pde;
         temp_unmap_raw(temp_new_pd);
     }
 

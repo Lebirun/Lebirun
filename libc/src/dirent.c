@@ -26,9 +26,7 @@ static inline int syscall3(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
-int getdents(int fd, struct dirent *dirp, size_t count) {
-    return syscall3(SYS_GETDENTS, fd, (int)dirp, (int)count);
-}
+extern int getdents(int fd, struct dirent *dirp, size_t count);
 
 DIR *opendir(const char *name) {
     int fd = open(name, O_RDONLY | O_DIRECTORY);

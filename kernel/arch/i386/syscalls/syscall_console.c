@@ -2,7 +2,7 @@
 
 static int sys_console_switch(int console_num, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return -EINVAL;
     console_switch(console_num);
     return 0;
 }
@@ -14,7 +14,7 @@ static int sys_console_getcur(int unused1, const char *unused2, int unused3) {
 
 static int sys_console_clear(int console_num, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return -EINVAL;
     console_clear(console_num);
     return 0;
 }

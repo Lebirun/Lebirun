@@ -207,6 +207,66 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, int info_ptr) {
     return 0;
 }
 
+static int deliver_signal_to_task(task_t *target, int sig) {
+    if (!target) return -ESRCH;
+
+    if (sig == SIGKILL) {
+        task_kill(target, 128 + SIGKILL);
+        return 0;
+    }
+
+    if (sig == SIGTERM) {
+        task_kill(target, 128 + SIGTERM);
+        return 0;
+    }
+
+    if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
+        target->state = TASK_BLOCKED;
+        return 0;
+    }
+
+    if (sig == SIGCONT) {
+        if (target->state == TASK_BLOCKED) {
+            target->state = TASK_READY;
+        }
+        return 0;
+    }
+
+    uint32_t idx = target->pid % 256;
+    task_signals[idx].pending.sig[sig / 64] |= (1UL << (sig % 64));
+    return 0;
+}
+
+static int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    if (pgid <= 0) return 0;
+
+    int count = 0;
+    lock_scheduler();
+    task_t *t = ready_queue_head;
+    if (t) {
+        int guard = 0;
+        do {
+            if (!t) break;
+            uint32_t a = (uint32_t)t;
+            if (a < 0xC0000000u) break;
+            if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
+
+            pid_t t_pgid = t->pgid ? t->pgid : t->pid;
+            if (t_pgid == pgid) {
+                if (count < out_cap) {
+                    out[count++] = t->pid;
+                }
+            }
+
+            t = t->next;
+            guard++;
+        } while (t && t != ready_queue_head && guard < 4096);
+    }
+    unlock_scheduler();
+    return count;
+}
+
 static int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     (void)unused;
     int sig = (int)(uintptr_t)sig_ptr;
@@ -214,38 +274,45 @@ static int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     
     if (sig == 0) {
-        task_t *t = task_find((pid_t)pid);
-        return t ? 0 : -ESRCH;
-    }
-    
-    task_t *target = task_find((pid_t)pid);
-    if (!target) return -ESRCH;
-    
-    if (sig == SIGKILL) {
-        task_kill(target, 128 + SIGKILL);
-        return 0;
-    }
-    
-    if (sig == SIGTERM) {
-        task_kill(target, 128 + SIGTERM);
-        return 0;
-    }
-    
-    if (sig == SIGSTOP || sig == SIGTSTP) {
-        target->state = TASK_BLOCKED;
-        return 0;
-    }
-    
-    if (sig == SIGCONT) {
-        if (target->state == TASK_BLOCKED) {
-            target->state = TASK_READY;
+        if (pid > 0) {
+            task_t *t = task_find((pid_t)pid);
+            return t ? 0 : -ESRCH;
         }
-        return 0;
+        if (!current_task) return -ESRCH;
+        pid_t pgid = 0;
+        if (pid == 0) pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+        else pgid = (pid_t)(-pid);
+        pid_t tmp[1];
+        return collect_pids_in_pgrp(pgid, tmp, 1) > 0 ? 0 : -ESRCH;
     }
-    
-    uint32_t idx = target->pid % 256;
-    task_signals[idx].pending.sig[sig / 64] |= (1UL << (sig % 64));
-    
+
+    if (pid > 0) {
+        task_t *target = task_find((pid_t)pid);
+        if (!target) return -ESRCH;
+        return deliver_signal_to_task(target, sig);
+    }
+
+    if (!current_task) return -ESRCH;
+
+    pid_t pgid = 0;
+    if (pid == 0) {
+        pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+    } else {
+        pgid = (pid_t)(-pid);
+    }
+    if (pgid <= 0) return -EINVAL;
+
+    pid_t pids[256];
+    int n = collect_pids_in_pgrp(pgid, pids, 256);
+    if (n <= 0) return -ESRCH;
+
+    for (int i = 0; i < n; i++) {
+        task_t *t = task_find(pids[i]);
+        if (t) {
+            deliver_signal_to_task(t, sig);
+        }
+    }
+
     return 0;
 }
 

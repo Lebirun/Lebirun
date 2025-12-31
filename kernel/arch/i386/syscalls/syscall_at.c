@@ -223,14 +223,27 @@ static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {
     st->st_dev = 1;
     st->st_ino = node->inode ? node->inode : 1;
     st->__st_ino_truncated = (long)st->st_ino;
-    
+
+    uint32_t perms = 0;
+    if (node->mask) {
+        if ((node->mask & ~0x07u) == 0) {
+            if (node->mask & VFS_PERM_READ) perms |= 0444;
+            if (node->mask & VFS_PERM_WRITE) perms |= 0222;
+            if (node->mask & VFS_PERM_EXEC) perms |= 0111;
+        } else {
+            perms = node->mask & 07777u;
+        }
+    }
+
     uint32_t mode;
-    if (node->flags & VFS_DIRECTORY) mode = S_IFDIR | 0755;
-    else if (node->flags & VFS_SYMLINK) mode = S_IFLNK | 0777;
-    else if (node->flags & VFS_CHARDEVICE) mode = S_IFCHR | 0660;
-    else if (node->flags & VFS_BLOCKDEVICE) mode = S_IFBLK | 0660;
-    else if (node->flags & VFS_PIPE) mode = S_IFIFO | 0644;
-    else mode = S_IFREG | (node->mask ? node->mask : 0644);
+    switch (VFS_GET_TYPE(node->flags)) {
+        case VFS_DIRECTORY:   mode = S_IFDIR | (perms ? perms : 0755); break;
+        case VFS_SYMLINK:     mode = S_IFLNK | (perms ? perms : 0777); break;
+        case VFS_CHARDEVICE:  mode = S_IFCHR | (perms ? perms : 0660); break;
+        case VFS_BLOCKDEVICE: mode = S_IFBLK | (perms ? perms : 0660); break;
+        case VFS_PIPE:        mode = S_IFIFO | (perms ? perms : 0644); break;
+        default:              mode = S_IFREG | (perms ? perms : 0644); break;
+    }
     
     st->st_mode = mode;
     st->st_nlink = 1;

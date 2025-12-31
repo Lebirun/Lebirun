@@ -43,6 +43,10 @@ int elf_validate(const uint8_t *data, uint32_t size) {
         return -8;
     }
 
+    if (ehdr->e_entry >= 0xC0000000 || ehdr->e_entry < 0x1000) {
+        return -9;
+    }
+
     return 0;
 }
 

@@ -1,4 +1,5 @@
 #include <kernel/task.h>
+#include <kernel/pipe.h>
 #include <kernel/debug.h>
 #include <kernel/registers.h>
 #include <kernel/common.h>
@@ -7,9 +8,15 @@
 #include <kernel/tty.h>
 #include <kernel/elf.h>
 #include <kernel/console.h>
+#include <kernel/creds.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+
+#define KERR_EPERM   1
+#define KERR_EIO     5
+#define KERR_ENOEXEC 8
+#define KERR_ENOMEM  12
 
 static void task_error(const char *fmt, ...) {
     char buf[256];
@@ -63,11 +70,20 @@ pid_t getpid(void) {
     return current_task ? (pid_t)current_task->pid : 0;
 }
 
+static int task_ptr_valid(task_t *t) {
+    if (!t) return 0;
+    uint32_t a = (uint32_t)t;
+    if ((a & 0xFFFF0000u) == 0xFEFE0000u) return 0;
+    if (a < 0xC0000000) return 0;
+    return 1;
+}
+
 task_t* task_find(pid_t pid) {
     lock_scheduler();
     task_t* t = ready_queue_head;
     if (t) {
         do {
+            if (!task_ptr_valid(t)) break;
             if (t->pid == pid) {
                 unlock_scheduler();
                 return t;
@@ -77,10 +93,61 @@ task_t* task_find(pid_t pid) {
     }
 
     task_t* d = dead_queue_head;
-    while (d) {
+    while (d && task_ptr_valid(d)) {
         if (d->pid == pid) {
             unlock_scheduler();
             return d;
+        }
+        d = d->wait_next;
+    }
+    unlock_scheduler();
+    return NULL;
+}
+
+int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
+    int found = 0;
+    lock_scheduler();
+
+    task_t *t = ready_queue_head;
+    if (t) {
+        do {
+            if (!task_ptr_valid(t)) break;
+            if (t->ppid == parent_pid) {
+                if (pgid_filter <= 0 || t->pgid == pgid_filter) {
+                    found = 1;
+                    break;
+                }
+            }
+            t = t->next;
+        } while (t && t != ready_queue_head);
+    }
+
+    if (!found) {
+        task_t *d = dead_queue_head;
+        while (d && task_ptr_valid(d)) {
+            if (d->ppid == parent_pid) {
+                if (pgid_filter <= 0 || d->pgid == pgid_filter) {
+                    found = 1;
+                    break;
+                }
+            }
+            d = d->wait_next;
+        }
+    }
+
+    unlock_scheduler();
+    return found;
+}
+
+task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
+    lock_scheduler();
+    task_t *d = dead_queue_head;
+    while (d && task_ptr_valid(d)) {
+        if (d->ppid == parent_pid) {
+            if (pgid_filter <= 0 || d->pgid == pgid_filter) {
+                unlock_scheduler();
+                return d;
+            }
         }
         d = d->wait_next;
     }
@@ -105,14 +172,19 @@ void waitq_add(wait_queue_t* q, task_t* t) {
 task_t* waitq_pop(wait_queue_t* q) {
     if (!q || !q->head) return NULL;
     task_t* t = q->head;
-    while (t && t->state == TASK_DEAD) {
+    while (t) {
+        if (!task_ptr_valid(t)) {
+            q->head = NULL;
+            return NULL;
+        }
+        if (t->state != TASK_DEAD) break;
         q->head = t->wait_next;
         t->wait_next = NULL;
         t->in_wait_queue = 0;
         t->waiting_queue = NULL;
         t = q->head;
     }
-    if (!t) return NULL;
+    if (!t || !task_ptr_valid(t)) return NULL;
     q->head = t->wait_next;
     t->wait_next = NULL;
     t->in_wait_queue = 0;
@@ -143,6 +215,10 @@ void waitq_wait(wait_queue_t *q) {
 
 void waitq_remove(wait_queue_t* q, task_t* t) {
     if (!q || !t || !q->head) return;
+    if (!task_ptr_valid(q->head)) {
+        q->head = NULL;
+        return;
+    }
     if (q->head == t) {
         q->head = t->wait_next;
         t->wait_next = NULL;
@@ -153,6 +229,10 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
     task_t* prev = q->head;
     task_t* cur = prev->wait_next;
     while (cur) {
+        if (!task_ptr_valid(cur)) {
+            prev->wait_next = NULL;
+            return;
+        }
         if (cur == t) {
             prev->wait_next = cur->wait_next;
             cur->wait_next = NULL;
@@ -283,6 +363,9 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->id = next_task_id;
     new_task->pid = next_task_id;
     next_task_id++;
+
+    creds_init_task(new_task->pid);
+
     new_task->state = initial_state;
     new_task->next = NULL;
     new_task->regs.cr3 = cr3;
@@ -305,6 +388,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     waitq_init(&new_task->join_waiters);
     new_task->join_refs = 0;
     new_task->exit_code = 0;
+    new_task->waiting_for_any_child = 0;
     new_task->is_user = user_mode;
     new_task->syscall_frame = NULL;
 
@@ -434,6 +518,14 @@ void task_exit(uint32_t exit_code) {
     remove_task_from_runqueue(current_task);
     current_task->wait_next = dead_queue_head;
     dead_queue_head = current_task;
+
+    if (current_task->ppid > 0) {
+        task_t *parent = task_find((pid_t)current_task->ppid);
+        if (parent && parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
+            parent->state = TASK_READY;
+        }
+    }
+
     unlock_scheduler();
     schedule();
     for (;;) asm volatile ("hlt");
@@ -476,7 +568,7 @@ void reap_dead_tasks(void) {
     unlock_scheduler();
 
     task_t* keep = NULL;
-    while (t) {
+    while (t && task_ptr_valid(t)) {
         task_t* next = t->wait_next;
         t->wait_next = NULL;
         if (t->is_user) {
@@ -503,7 +595,7 @@ void reap_dead_tasks(void) {
     if (keep) {
         lock_scheduler();
         task_t* k = keep;
-        while (k) {
+        while (k && task_ptr_valid(k)) {
             task_t* knext = k->wait_next;
             k->wait_next = dead_queue_head;
             dead_queue_head = k;
@@ -914,6 +1006,13 @@ pid_t task_fork(registers_t *parent_regs) {
     child->id = next_task_id;
     child->pid = next_task_id;
     next_task_id++;
+
+    creds_copy_task(current_task->pid, child->pid);
+
+    child->ppid = current_task->pid;
+    child->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+    child->sid = current_task->sid ? current_task->sid : current_task->pid;
+
     child->state = TASK_READY;
     child->next = NULL;
     child->cr3 = child_pd;
@@ -943,11 +1042,17 @@ pid_t task_fork(registers_t *parent_regs) {
     child->console_id = current_task->console_id;
     child->tls_base = current_task->tls_base;
     child->tls_limit = current_task->tls_limit;
+    child->waiting_for_any_child = 0;
     memcpy(child->cwd, current_task->cwd, sizeof(child->cwd));
     memcpy(child->fds, current_task->fds, sizeof(child->fds));
     for (int i = 0; i < TASK_MAX_FDS; i++) {
         if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
             child->fds[i].ref_count++;
+        }
+        if (child->fds[i].in_use && (child->fds[i].type == FD_TYPE_PIPE_R || child->fds[i].type == FD_TYPE_PIPE_W) && child->fds[i].private_data) {
+            pipe_t *p = (pipe_t *)child->fds[i].private_data;
+            if (child->fds[i].type == FD_TYPE_PIPE_R) p->readers++;
+            else p->writers++;
         }
     }
     child->envp = NULL;
@@ -1143,24 +1248,24 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
                         int argc, char **argv, int envc, char **envp) {
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
-        return -1;
+        return -KERR_EPERM;
     }
     if (!bin_start || bin_size == 0) {
         task_error("task_exec_with_args: invalid binary\n");
-        return -1;
+        return -KERR_ENOEXEC;
     }
 
     uint32_t free_pages = pfa_count_free();
     uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
         task_error("task_exec_with_args: insufficient memory\n");
-        return -1;
+        return -KERR_ENOMEM;
     }
 
     uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
     if (!kernel_bin) {
         task_error("task_exec_with_args: failed to allocate kernel buffer\n");
-        return -1;
+        return -KERR_ENOMEM;
     }
     memcpy(kernel_bin, bin_start, bin_size);
 
@@ -1169,7 +1274,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     
     if (argc > 0 && argv) {
         k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
-        if (!k_argv) { kfree(kernel_bin); return -1; }
+        if (!k_argv) { kfree(kernel_bin); return -KERR_ENOMEM; }
         for (int i = 0; i < argc; i++) {
             int len = 0;
             while (argv[i][len]) len++;
@@ -1177,7 +1282,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
             if (!k_argv[i]) {
                 for (int j = 0; j < i; j++) kfree(k_argv[j]);
                 kfree(k_argv); kfree(kernel_bin);
-                return -1;
+                return -KERR_ENOMEM;
             }
             for (int j = 0; j <= len; j++) k_argv[i][j] = argv[i][j];
         }
@@ -1189,7 +1294,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (!k_envp) {
             if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
             kfree(kernel_bin);
-            return -1;
+            return -KERR_ENOMEM;
         }
         for (int i = 0; i < envc; i++) {
             int len = 0;
@@ -1200,7 +1305,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
                 kfree(k_envp);
                 if (k_argv) { for (int j = 0; j < argc; j++) kfree(k_argv[j]); kfree(k_argv); }
                 kfree(kernel_bin);
-                return -1;
+                return -KERR_ENOMEM;
             }
             for (int j = 0; j <= len; j++) k_envp[i][j] = envp[i][j];
         }
@@ -1213,7 +1318,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
         if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
         kfree(kernel_bin);
-        return -1;
+        return -KERR_ENOEXEC;
     }
 
     uint32_t old_pd = current_task->pd_phys;
@@ -1229,7 +1334,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
         if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
         kfree(kernel_bin);
-        return -1;
+        return -KERR_ENOMEM;
     }
 
     elf_info_t elf_info;
@@ -1247,7 +1352,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
         if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
         kfree(kernel_bin);
-        return -1;
+        return -KERR_ENOEXEC;
     }
 
     kfree(kernel_bin);
@@ -1263,7 +1368,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         vmm_free_page_directory(new_pd);
         if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
         if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
-        return -1;
+        return -KERR_ENOMEM;
     }
 
     current_task->pd_phys = new_pd;
@@ -1293,7 +1398,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
         if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
         vmm_free_page_directory(new_pd);
-        return -1;
+        return -KERR_ENOEXEC;
     }
 
     current_task->user_pages = (uint32_t *)kmalloc(total_pages * sizeof(uint32_t));

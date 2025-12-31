@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <kernel/creds.h>
 
 typedef struct {
     uint32_t uid;
@@ -302,6 +303,8 @@ static int sys_setpgid(int pid, const char *pgid_ptr, int unused) {
     
     uint32_t idx = t->pid % 256;
     task_creds[idx].pgid = (pid_t)pgid;
+
+    t->pgid = (pid_t)pgid;
     
     return 0;
 }
@@ -320,6 +323,11 @@ static int sys_setsid(int unused1, const char *unused2, int unused3) {
     
     creds->sid = pid;
     creds->pgid = pid;
+
+    if (current_task) {
+        current_task->sid = pid;
+        current_task->pgid = pid;
+    }
     
     return (int)pid;
 }
@@ -357,13 +365,41 @@ void creds_init_task(pid_t pid) {
     task_creds[idx].umask_val = 022;
     task_creds[idx].pgid = pid;
     task_creds[idx].sid = pid;
+
+    task_t *t = task_find(pid);
+    if (t) {
+        t->pgid = pid;
+        t->sid = pid;
+    }
 }
 
 void creds_copy_task(pid_t parent_pid, pid_t child_pid) {
     uint32_t parent_idx = parent_pid % 256;
     uint32_t child_idx = child_pid % 256;
     memcpy(&task_creds[child_idx], &task_creds[parent_idx], sizeof(task_creds_t));
-    task_creds[child_idx].pgid = child_pid;
+    
+    task_t *child = task_find(child_pid);
+    if (child) {
+        child->pgid = task_creds[child_idx].pgid;
+        child->sid = task_creds[child_idx].sid;
+        child->ppid = parent_pid;
+    }
+}
+
+pid_t creds_get_pgid(pid_t pid) {
+    if (pid == 0) pid = current_task ? current_task->pid : 0;
+    if (pid == 0) return 0;
+    task_t *t = task_find(pid);
+    if (!t) return 0;
+    return task_creds[t->pid % 256].pgid;
+}
+
+pid_t creds_get_sid(pid_t pid) {
+    if (pid == 0) pid = current_task ? current_task->pid : 0;
+    if (pid == 0) return 0;
+    task_t *t = task_find(pid);
+    if (!t) return 0;
+    return task_creds[t->pid % 256].sid;
 }
 
 void syscalls_ids_init(void) {

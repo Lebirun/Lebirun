@@ -998,7 +998,7 @@ static int ramfs_vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
 }
 
 static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
-    if (!node || !(node->flags & VFS_DIRECTORY)) return NULL;
+    if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     
     ramfs_node_t *rn = (ramfs_node_t *)node->private_data;
     if (!rn || rn->type != 1) return NULL;
@@ -1031,7 +1031,7 @@ static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
-    if (!node || !name || !(node->flags & VFS_DIRECTORY)) return NULL;
+    if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     
     ramfs_node_t *rn = (ramfs_node_t *)node->private_data;
     if (!rn || rn->type != 1) return NULL;
@@ -1077,7 +1077,7 @@ static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn) {
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
 
 static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags) {
-    if (!parent || !name || !(parent->flags & VFS_DIRECTORY)) return RAMFS_ERR_INVAL;
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
     
     ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
     if (!prn || prn->type != 1) return RAMFS_ERR_NOTDIR;
@@ -1160,7 +1160,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags
 }
 
 static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name) {
-    if (!parent || !name || !(parent->flags & VFS_DIRECTORY)) return RAMFS_ERR_INVAL;
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
     
     ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
     if (!prn || prn->type != 1) return RAMFS_ERR_NOTDIR;
@@ -1227,7 +1227,7 @@ static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name) {
 }
 
 static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) {
-    if (!parent || !name || !(parent->flags & VFS_DIRECTORY)) return RAMFS_ERR_INVAL;
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
     
     ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
     if (!prn || prn->type != 1) return RAMFS_ERR_NOTDIR;

@@ -426,7 +426,7 @@ static void initrd_vfs_close(vfs_node_t *node) {
 }
 
 static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint32_t index) {
-    if (!node || !(node->flags & VFS_DIRECTORY)) return NULL;
+    if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     uint32_t parent_idx = node->inode;
     uint32_t count = 0;
     for (uint32_t i = 0; i < file_count; i++) {
@@ -454,7 +454,7 @@ static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
-    if (!node || !name || !(node->flags & VFS_DIRECTORY)) return NULL;
+    if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     uint32_t parent_idx = node->inode;
     for (uint32_t i = 0; i < file_count; i++) {
         uint16_t pi = files[i].parent_index;
@@ -668,7 +668,7 @@ void initrd_copy_to_root(void) {
                 errors++;
             }
         } else {
-            int ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE);
+            int ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
                     int written = ramfs_write(destpath, 0, f->data, f->length);
@@ -875,7 +875,7 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         if (!perms) {
             perms = (f->type == INITRD_TYPE_DIR)
                         ? (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC)
-                        : (VFS_PERM_READ | VFS_PERM_WRITE);
+                        : (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         }
 
         if (f->type == INITRD_TYPE_DIR) {

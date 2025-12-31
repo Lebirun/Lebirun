@@ -1,13 +1,24 @@
+#define _GNU_SOURCE 1
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <time.h>
 #include <sys/time.h>
 #include <limits.h>
+#include <signal.h>
 
-typedef long ssize_t;
-typedef unsigned int mode_t;
-typedef long off_t;
+#define __NEED_ssize_t
+#define __NEED_mode_t
+#define __NEED_off_t
+#define __NEED_pthread_t
+#define __NEED_pthread_attr_t
+#define __NEED_pthread_mutex_t
+#define __NEED_pthread_mutexattr_t
+#define __NEED_pthread_cond_t
+#define __NEED_pthread_condattr_t
+#define __NEED_key_t
+#include <bits/alltypes.h>
 
 #include <errno.h>
 
@@ -198,9 +209,11 @@ void _exit(int status) {
     __builtin_unreachable();
 }
 
+/*
 void exit(int status) {
     _exit(status);
 }
+*/
 
 int read(int fd, void *buf, size_t count) {
     int ret = syscall3(SYS_READ, fd, (int)buf, (int)count);
@@ -246,11 +259,21 @@ int exec(const void *bin, unsigned int size) {
 }
 
 int fork(void) {
-    return syscall0(SYS_FORK);
+    int ret = syscall0(SYS_FORK);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int waitpid(int pid, int *status, int options) {
-    return syscall3(SYS_WAITPID, pid, (int)status, options);
+    int ret = syscall3(SYS_WAITPID, pid, (int)status, options);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int wait(int *status) { return waitpid(-1, status, 0); }
@@ -371,7 +394,12 @@ int pipe(int pipefd[2]) {
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
-    return syscall3(SYS_EXECVE, (int)pathname, (int)argv, (int)envp);
+    int ret = syscall3(SYS_EXECVE, (int)pathname, (int)argv, (int)envp);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 char *getcwd(char *buf, size_t size) {
@@ -411,13 +439,28 @@ off_t lseek(int fd, off_t offset, int whence) {
     return syscall3(SYS_LSEEK, fd, (int)offset, whence);
 }
 
-struct sigaction;
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
-    return syscall3(SYS_SIGACTION, signum, (int)act, (int)oldact);
+    int ret = syscall3(SYS_SIGACTION, signum, (int)act, (int)oldact);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    return syscall3(SYS_SIGPROCMASK, how, (int)set, (int)oldset);
+    int ret = syscall3(SYS_SIGPROCMASK, how, (int)set, (int)oldset);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
+}
+
+int sigsuspend(const sigset_t *mask) {
+    int ret = syscall2(124 | LEBIRUN_SYSCALL_FLAG, (int)mask, sizeof(sigset_t));
+    errno = EINTR;
+    return -1;
 }
 
 int clock_gettime(int clockid, struct timespec *tp) {
@@ -464,11 +507,28 @@ int creat(const char *pathname, mode_t mode) {
 }
 
 int kill(int pid, int sig) {
-    return syscall2(SYS_KILL, pid, sig);
+    int ret = syscall2(SYS_KILL, pid, sig);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
 }
 
 int fcntl(int fd, int cmd, ...) {
-    return syscall2(SYS_FCNTL, fd, cmd);
+    int arg = 0;
+    if (cmd != 1 && cmd != 3) {
+        va_list ap;
+        va_start(ap, cmd);
+        arg = va_arg(ap, int);
+        va_end(ap);
+    }
+    int ret = syscall3(SYS_FCNTL, fd, cmd, arg);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int truncate(const char *path, off_t length) {
@@ -572,10 +632,46 @@ int getppid(void) { return syscall0(156 | LEBIRUN_SYSCALL_FLAG); }
 int gettid(void) { return syscall0(158 | LEBIRUN_SYSCALL_FLAG); }
 
 int getpgid(int pid) { return syscall1(151 | LEBIRUN_SYSCALL_FLAG, pid); }
-int setpgid(int pid, int pgid) { return syscall2(152 | LEBIRUN_SYSCALL_FLAG, pid, pgid); }
+int setpgid(int pid, int pgid) {
+    int ret = syscall2(152 | LEBIRUN_SYSCALL_FLAG, pid, pgid);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
+}
 int getpgrp(void) { return syscall0(153 | LEBIRUN_SYSCALL_FLAG); }
-int setsid(void) { return syscall0(154 | LEBIRUN_SYSCALL_FLAG); }
+int setsid(void) {
+    int ret = syscall0(154 | LEBIRUN_SYSCALL_FLAG);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
+}
 int getsid(int pid) { return syscall1(155 | LEBIRUN_SYSCALL_FLAG, pid); }
+
+int tcgetpgrp(int fd) {
+    int ret = syscall1(60 | LEBIRUN_SYSCALL_FLAG, fd);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
+}
+
+int tcsetpgrp(int fd, int pgrp) {
+    int ret = syscall2(61 | LEBIRUN_SYSCALL_FLAG, fd, pgrp);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
+}
+
+int killpg(int pgrp, int sig) {
+    return kill(-pgrp, sig);
+}
 
 int dup3(int oldfd, int newfd, int flags) {
     return syscall3(179 | LEBIRUN_SYSCALL_FLAG, oldfd, newfd, flags);
@@ -671,6 +767,10 @@ int wait4(int pid, int *wstatus, int options, void *rusage) {
     return syscall3(194 | LEBIRUN_SYSCALL_FLAG, pid, (int)wstatus, options);
 }
 
+int wait3(int *wstatus, int options, void *rusage) {
+    return wait4(-1, wstatus, options, rusage);
+}
+
 int waitid(int idtype, int id, void *infop, int options) {
     return syscall4(195 | LEBIRUN_SYSCALL_FLAG, idtype, id, (int)infop, options);
 }
@@ -697,7 +797,16 @@ long sysconf(int name) {
 }
 
 int ioctl(int fd, unsigned long request, ...) {
-    return syscall2(56 | 0x80000000, fd, (int)request);
+    va_list ap;
+    va_start(ap, request);
+    uintptr_t argp = (uintptr_t)va_arg(ap, void *);
+    va_end(ap);
+    int ret = syscall3(56 | 0x80000000, fd, (int)request, (int)argp);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int tcgetattr(int fd, void *termios_p) {
@@ -727,41 +836,47 @@ int raise(int sig) {
     return kill(getpid(), sig);
 }
 
-typedef void (*sighandler_t)(int);
+int sigemptyset(sigset_t *set) {
+    if (set) memset(set, 0, sizeof(sigset_t));
+    return 0;
+}
+
+int sigfillset(sigset_t *set) {
+    if (set) memset(set, 0xff, sizeof(sigset_t));
+    return 0;
+}
+
+int sigaddset(sigset_t *set, int signum) {
+    if (set && signum > 0 && signum < 128) {
+        set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] |= (1UL << ((signum - 1) % (sizeof(unsigned long) * 8)));
+    }
+    return 0;
+}
+
+int sigdelset(sigset_t *set, int signum) {
+    if (set && signum > 0 && signum < 128) {
+        set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] &= ~(1UL << ((signum - 1) % (sizeof(unsigned long) * 8)));
+    }
+    return 0;
+}
+
+int sigismember(const sigset_t *set, int signum) {
+    if (set && signum > 0 && signum < 128) {
+        return (set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] >> ((signum - 1) % (sizeof(unsigned long) * 8))) & 1;
+    }
+    return 0;
+}
+
 sighandler_t signal(int signum, sighandler_t handler) {
-    (void)signum; (void)handler;
-    return (sighandler_t)0;
-}
-
-int sigemptyset(void *set) {
-    if (set) memset(set, 0, sizeof(unsigned long));
-    return 0;
-}
-
-int sigfillset(void *set) {
-    if (set) memset(set, 0xff, sizeof(unsigned long));
-    return 0;
-}
-
-int sigaddset(void *set, int signum) {
-    if (set && signum > 0 && signum < 32) {
-        *(unsigned long *)set |= (1UL << signum);
+    struct sigaction act, oldact;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    if (sigaction(signum, &act, &oldact) < 0) {
+        return (sighandler_t)-1;
     }
-    return 0;
-}
-
-int sigdelset(void *set, int signum) {
-    if (set && signum > 0 && signum < 32) {
-        *(unsigned long *)set &= ~(1UL << signum);
-    }
-    return 0;
-}
-
-int sigismember(const void *set, int signum) {
-    if (set && signum > 0 && signum < 32) {
-        return (*(const unsigned long *)set >> signum) & 1;
-    }
-    return 0;
+    return oldact.sa_handler;
 }
 
 static inline int syscall5(int num, int arg1, int arg2, int arg3, int arg4, int arg5) {
@@ -1103,12 +1218,6 @@ void cfmakeraw(void *termios_p) {
 #define SYS_DLCLOSE (246 | LEBIRUN_SYSCALL_FLAG)
 #define SYS_DLERROR (247 | LEBIRUN_SYSCALL_FLAG)
 
-typedef unsigned long pthread_t;
-typedef struct { int __data; } pthread_attr_t;
-typedef struct { int __data; } pthread_mutex_t;
-typedef struct { int __data; } pthread_mutexattr_t;
-typedef struct { int __data; } pthread_cond_t;
-typedef struct { int __data; } pthread_condattr_t;
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
@@ -1180,7 +1289,7 @@ int pthread_equal(pthread_t t1, pthread_t t2) {
 }
 
 int pthread_attr_init(pthread_attr_t *attr) {
-    if (attr) attr->__data = 0;
+    if (attr) memset(attr, 0, sizeof(*attr));
     return 0;
 }
 
@@ -1190,17 +1299,19 @@ int pthread_attr_destroy(pthread_attr_t *attr) {
 }
 
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate) {
-    if (attr) attr->__data = detachstate;
+    (void)attr;
+    (void)detachstate;
     return 0;
 }
 
 int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate) {
-    if (detachstate) *detachstate = attr ? attr->__data : 0;
+    (void)attr;
+    if (detachstate) *detachstate = 0;
     return 0;
 }
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
-    if (attr) attr->__data = 0;
+    if (attr) memset(attr, 0, sizeof(*attr));
     return 0;
 }
 
@@ -1210,7 +1321,7 @@ int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
 }
 
 int pthread_condattr_init(pthread_condattr_t *attr) {
-    if (attr) attr->__data = 0;
+    if (attr) memset(attr, 0, sizeof(*attr));
     return 0;
 }
 
@@ -1226,8 +1337,6 @@ int pthread_condattr_destroy(pthread_condattr_t *attr) {
 #define IPC_SET    1
 #define IPC_STAT   2
 #define IPC_PRIVATE 0
-
-typedef int key_t;
 
 int shmget(key_t key, size_t size, int shmflg) {
     return syscall3(SYS_SHMGET, key, (int)size, shmflg);
@@ -1283,27 +1392,8 @@ char *dlerror(void) {
 #define SYS_SSCANF (255 | LEBIRUN_SYSCALL_FLAG)
 #define SYS_SCANF_GETCHAR (256 | LEBIRUN_SYSCALL_FLAG)
 
-typedef long regoff_t;
-
-typedef struct re_pattern_buffer {
-    size_t re_nsub;
-    void *__opaque, *__padding[4];
-    size_t __nsub2;
-    char __padding2;
-} regex_t;
-
-typedef struct {
-    regoff_t rm_so;
-    regoff_t rm_eo;
-} regmatch_t;
-
-typedef struct {
-    size_t gl_pathc;
-    char **gl_pathv;
-    size_t gl_offs;
-    int __dummy1;
-    void *__dummy2[5];
-} glob_t;
+#include <regex.h>
+#include <glob.h>
 
 int regcomp(regex_t *__restrict preg, const char *__restrict pattern, int cflags) {
     return syscall3(SYS_REGCOMP, (int)preg, (int)pattern, cflags);
