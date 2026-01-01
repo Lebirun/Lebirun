@@ -201,7 +201,10 @@ void keyboard_handler(registers_t* regs) {
     }
 
     bool shift = shift_is_down();
-    char c = shift ? qwerty_uppercase[code] : qwerty_lowercase[code];
+    char c = qwerty_lowercase[code];
+    if (!is_alpha(c) && shift) {
+        c = qwerty_uppercase[code];
+    }
     c = apply_caps_shift(c, shift);
     if (c != 0) {
         buffer_put(c);
