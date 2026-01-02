@@ -112,7 +112,7 @@ static int sys_pthread_exit(int retval_ptr, const char *unused1, int unused2) {
         }
     }
     
-    task_exit(0);
+    task_exit_deferred(0);
     return 0;
 }
 

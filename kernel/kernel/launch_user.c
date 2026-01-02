@@ -5,13 +5,59 @@
 #include <kernel/elf.h>
 #include "launch_user.h"
 #include <kernel/console.h>
+#include <kernel/vfs.h>
 #include <stdio.h>
 #include <string.h>
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000
+#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_GAP  0x1000u
 
-task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int console_id) {
+static uint32_t align_down_u32(uint32_t v, uint32_t align) {
+    if (align == 0) return v;
+    return v & ~(align - 1u);
+}
+
+static int setup_initial_stack(uint32_t pd_phys, const char *argv0, uint32_t *out_useresp) {
+    if (!out_useresp) return -1;
+
+    uint32_t sp = USER_STACK_TOP - USER_STACK_GAP;
+
+    uint32_t zero = 0;
+    uint32_t argc_val = 1;
+
+    const char *prog_name = (argv0 && argv0[0]) ? argv0 : "program";
+    int prog_len = 0;
+    while (prog_name[prog_len]) prog_len++;
+
+    sp -= (uint32_t)((prog_len + 1 + 3) & ~3);
+    uint32_t prog_addr = sp;
+    vmm_copy_to_pd(pd_phys, sp, prog_name, (uint32_t)(prog_len + 1));
+
+    sp = align_down_u32(sp, 16);
+
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
+
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
+
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
+
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &prog_addr, sizeof(uint32_t));
+
+    sp -= 4;
+    vmm_copy_to_pd(pd_phys, sp, &argc_val, sizeof(uint32_t));
+
+    *out_useresp = sp;
+    return 0;
+}
+
+static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t *bin_end, int console_id, const char *argv0) {
     if (!bin_start || !bin_end || bin_end <= bin_start) return NULL;
     uint32_t size = (uint32_t)(bin_end - bin_start);
 
@@ -53,6 +99,21 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
     DPRINTF3("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
     if (debugMode && debugLevel >= 3) heap_verify();
 
+    uint32_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
+    if (setup_initial_stack(new_pd, argv0, &initial_useresp) != 0) {
+        printf("launch_user_binary: failed to setup initial user stack\n");
+        if (elf_pages) {
+            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        if (stack_pages) {
+            for (uint32_t i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
+            kfree(stack_pages);
+        }
+        vmm_free_page_directory(new_pd);
+        return NULL;
+    }
+
     task_t* t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
     if (!t) {
         printf("launch_user_binary: create_task failed\n");
@@ -71,6 +132,9 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
     t->console_id = console_id;
+
+    registers_t *frame = (registers_t *)(uintptr_t)t->regs.esp;
+    frame->useresp = initial_useresp;
     
     t->state = TASK_READY;
 
@@ -107,4 +171,54 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
     if (stack_pages) kfree(stack_pages);
 
     return t;
-} 
+}
+
+task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int console_id) {
+    return launch_user_binary_common(bin_start, bin_end, console_id, "program");
+}
+
+task_t* launch_user_path(const char *path, int console_id) {
+    if (!path || path[0] == '\0') return NULL;
+
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) {
+        printf("launch_user_path: '%s' not found\n", path);
+        return NULL;
+    }
+
+    if (VFS_GET_TYPE(node->flags) != VFS_FILE) {
+        printf("launch_user_path: '%s' is not a regular file\n", path);
+        return NULL;
+    }
+
+    uint32_t size = node->length;
+    if (size == 0 || size > (32u * 1024u * 1024u)) {
+        printf("launch_user_path: '%s' invalid size %u\n", path, size);
+        return NULL;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc(size);
+    if (!buf) {
+        printf("launch_user_path: OOM (%u bytes)\n", size);
+        return NULL;
+    }
+
+    uint32_t off = 0;
+    while (off < size) {
+        uint32_t chunk = size - off;
+        if (chunk > 4096) chunk = 4096;
+        uint32_t r = vfs_read(node, off, chunk, buf + off);
+        if (r == 0) break;
+        off += r;
+    }
+
+    if (off != size) {
+        printf("launch_user_path: short read (%u/%u) for '%s'\n", off, size, path);
+        kfree(buf);
+        return NULL;
+    }
+
+    task_t *t = launch_user_binary_common(buf, buf + size, console_id, path);
+    kfree(buf);
+    return t;
+}

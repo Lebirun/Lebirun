@@ -253,7 +253,7 @@ void init_tasks(void) {
     current_task->state = TASK_RUNNING;
     current_task->regs.cr3 = read_cr3();
     current_task->cr3 = read_cr3();
-    current_task->next = NULL;
+    current_task->next = current_task;
     current_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->stack_base = NULL;
@@ -280,7 +280,7 @@ void init_tasks(void) {
     current_task->regs.eflags = 0x202;
     current_task->regs.cs = 0x08;
     current_task->regs.ds = current_task->regs.es = current_task->regs.fs = current_task->regs.gs = 0x10;
-    ready_queue_head = NULL;
+    ready_queue_head = current_task;
 }
 
 void lock_scheduler(void) {
@@ -296,9 +296,8 @@ void unlock_scheduler(void) {
 
 static inline void add_task_to_runqueue(task_t* new_task) {
     if (!ready_queue_head) {
-        ready_queue_head = current_task;
-        current_task->next = new_task;
-        new_task->next = current_task;
+        ready_queue_head = new_task;
+        new_task->next = new_task;
     } else {
         task_t* tail = ready_queue_head;
         while (tail->next != ready_queue_head) tail = tail->next;
@@ -501,6 +500,12 @@ void wake_sleeping_tasks(void) {
 }
 
 void task_exit(uint32_t exit_code) {
+    task_exit_deferred(exit_code);
+    schedule();
+    for (;;) asm volatile ("hlt");
+}
+
+void task_exit_deferred(uint32_t exit_code) {
     if (!current_task) return;
     lock_scheduler();
     current_task->exit_code = exit_code;
@@ -527,8 +532,6 @@ void task_exit(uint32_t exit_code) {
     }
 
     unlock_scheduler();
-    schedule();
-    for (;;) asm volatile ("hlt");
 }
 
 void sleep_ms(uint32_t ms) {
@@ -804,14 +807,16 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
     schedule_force = 0;
 
-    current_task->time_slice = current_task->base_time_slice;
+    if (!must_switch) {
+        current_task->time_slice = current_task->base_time_slice;
+    }
 
     task_t* next = ready_queue_head;
     task_t* start = next;
     int safety = 0;
     
     while (next) {
-        if (next->state == TASK_READY && next != current_task) {
+        if ((next->state == TASK_READY || next->state == TASK_RUNNING) && next != current_task) {
             break;
         }
         next = next->next;
@@ -830,6 +835,12 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     if (current_task->state == TASK_RUNNING) current_task->state = TASK_READY;
     next->state = TASK_RUNNING;
+    
+    if (next->id == 0 && next->regs.eip == 0) {
+        current_task = next;
+        return regs;
+    }
+    
     current_task = next;
 
     if (next->kernel_stack_base && next->kernel_stack_size) {

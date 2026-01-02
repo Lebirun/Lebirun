@@ -172,7 +172,7 @@ int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
 	char numbuf[68];
 	
 	#define PUTC(c) do { \
-		if (buf && written < size - 1) buf[written] = (c); \
+		if (buf && size > 0 && written < size - 1) buf[written] = (c); \
 		written++; \
 	} while(0)
 	

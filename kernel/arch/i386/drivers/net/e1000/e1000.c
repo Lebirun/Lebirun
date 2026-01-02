@@ -9,6 +9,29 @@
 
 static e1000_device_t g_e1000_dev;
 
+static void e1000_ensure_mmio_mapped(e1000_device_t *dev) {
+    if (!dev) return;
+    if (dev->bar_type != 0) return;
+
+    uint32_t bar0_phys = dev->bar0 & 0xFFFFFFF0;
+    if (!bar0_phys) return;
+
+    const uint32_t expected_virt = 0xFC000000;
+    if (dev->bar0_virt == expected_virt) return;
+
+    static int warned = 0;
+    if (!warned) {
+        warned = 1;
+        printf("E1000: Warning: bar0_virt=0x%08X (bar0_phys=0x%08X), remapping to 0x%08X\n",
+               dev->bar0_virt, bar0_phys, expected_virt);
+    }
+
+    for (uint32_t off = 0; off < 0x20000; off += PAGE_SIZE) {
+        vmm_map_page(expected_virt + off, bar0_phys + off, 0x003);
+    }
+    dev->bar0_virt = expected_virt;
+}
+
 static inline void outl(uint16_t port, uint32_t value) {
     __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
 }
@@ -35,6 +58,7 @@ static void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t of
 
 static inline uint32_t e1000_read(e1000_device_t *dev, uint32_t reg) {
     if (dev->bar_type == 0) {
+        e1000_ensure_mmio_mapped(dev);
         return *((volatile uint32_t *)(dev->bar0_virt + reg));
     } else {
         outl(dev->io_base, reg);
@@ -44,6 +68,7 @@ static inline uint32_t e1000_read(e1000_device_t *dev, uint32_t reg) {
 
 static inline void e1000_write(e1000_device_t *dev, uint32_t reg, uint32_t value) {
     if (dev->bar_type == 0) {
+        e1000_ensure_mmio_mapped(dev);
         *((volatile uint32_t *)(dev->bar0_virt + reg)) = value;
     } else {
         outl(dev->io_base, reg);

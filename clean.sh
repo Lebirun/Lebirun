@@ -8,6 +8,27 @@ for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
   fi
 done
 
+if [ -d "userprog/coreutils" ]; then
+  echo "Cleaning coreutils..."
+  (cd userprog/coreutils && $MAKE clean)
+fi
+
+if [ -d "userprog/lsh" ]; then
+  echo "Cleaning lsh..."
+  if [ -f "userprog/lsh/.build/config.mk" ]; then
+    (cd userprog/lsh && $MAKE clean)
+  fi
+  find userprog/lsh -type f -name '*.o' -delete
+fi
+
+rm -f root/bin/lsh
+rm -f userprog/lsh/lsh
+rm -f userprog/lsh/highlight
+rm -f userprog/lsh/lsh.bin
+rm -f userprog/lsh/liblsh.gnu.sym
+rm -f userprog/lsh/liblsh.darwin.sym
+rm -rf userprog/lsh/.build
+rm -rf userprog/lsh/build-cross
 rm -rf sysroot
 rm -rf isodir
 rm -rf lebirun.iso

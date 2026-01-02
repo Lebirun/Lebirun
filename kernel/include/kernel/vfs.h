@@ -137,6 +137,7 @@ int vfs_unlink(vfs_node_t *parent, const char *name);
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
 
 vfs_node_t *vfs_namei(const char *path);
+vfs_node_t *vfs_namei_nofollow(const char *path);
 vfs_node_t *vfs_lookup(const char *path);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 

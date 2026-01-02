@@ -56,6 +56,7 @@ void ramfs_vfs_register(void);
 
 int ramfs_create_file(const char *path, uint8_t permissions);
 int ramfs_create_dir(const char *path, uint8_t permissions);
+int ramfs_create_symlink(const char *path, const char *target, uint8_t permissions);
 int ramfs_unlink(const char *path);
 int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t size);
 int ramfs_read(const char *path, uint32_t offset, uint8_t *buffer, uint32_t size);

@@ -97,6 +97,10 @@ $(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
 
 $(USER_SHELL_BIN):
 	$(MAKE) -C ../userprog
+	@if [ ! -f "$@" ]; then \
+		echo "Creating stub $@ (no user shell built)"; \
+		printf '\0' > $@; \
+	fi
 
 $(USER_SHELL_OBJ): $(USER_SHELL_BIN)
 	$(OBJCOPY) -I binary -O elf32-i386 -B i386 \

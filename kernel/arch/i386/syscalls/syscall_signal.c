@@ -396,7 +396,7 @@ void signal_deliver_pending(void) {
                     case SIGCONT:
                         continue;
                     default:
-                        task_exit(128 + sig);
+                        task_exit_deferred(128 + sig);
                         return;
                 }
             }

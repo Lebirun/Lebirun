@@ -131,6 +131,7 @@ void sleep_ticks(uint32_t ticks);
 void wake_sleeping_tasks(void);
 void reap_dead_tasks(void);
 void task_exit(uint32_t exit_code);
+void task_exit_deferred(uint32_t exit_code);
 void sleep_ms(uint32_t ms);
 int task_join(task_t* task, uint32_t* exit_code);
 

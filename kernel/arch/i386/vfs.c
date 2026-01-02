@@ -346,64 +346,167 @@ static void vfs_normalize_path(char *path) {
     if (path[1] == '\0') return;
 }
 
-vfs_node_t *vfs_namei(const char *path) {
-    if (!path) return NULL;
-    
+#define VFS_MAX_SYMLINKS 8
+
+static int vfs_readlink_node(vfs_node_t *node, char *buf, size_t size) {
+    if (!node || !buf || size == 0) return -1;
+    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -1;
+
+    uint32_t n = vfs_read(node, 0, (uint32_t)(size - 1), (uint8_t *)buf);
+    if (n >= size) n = (uint32_t)(size - 1);
+    buf[n] = '\0';
+    if (n == 0) return -1;
+    return (int)n;
+}
+
+static int vfs_build_symlink_path(char *out, size_t outsz,
+                                  const char *base_dir,
+                                  const char *target,
+                                  const char *rest_raw) {
+    if (!out || outsz == 0 || !base_dir || !target || !rest_raw) return -1;
+
+    char tmp[VFS_MAX_PATH];
+    tmp[0] = '\0';
+
+    if (target[0] == '/') {
+        strncpy(tmp, target, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+    } else {
+        if (strcmp(base_dir, "/") == 0) {
+            snprintf(tmp, sizeof(tmp), "/%s", target);
+        } else {
+            snprintf(tmp, sizeof(tmp), "%s/%s", base_dir, target);
+        }
+    }
+
+    if (rest_raw[0] != '\0') {
+        size_t len = strlen(tmp);
+        if (len + strlen(rest_raw) + 1 >= sizeof(tmp)) return -1;
+        for (size_t i = 0; rest_raw[i] && len + i + 1 < sizeof(tmp); i++) {
+            tmp[len + i] = rest_raw[i];
+            tmp[len + i + 1] = '\0';
+        }
+    }
+
+    strncpy(out, tmp, outsz - 1);
+    out[outsz - 1] = '\0';
+    return 0;
+}
+
+static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int depth) {
+    if (!in_path) return NULL;
+    if (depth > VFS_MAX_SYMLINKS) return NULL;
+
     char resolved[VFS_MAX_PATH];
+    const char *path = in_path;
+
     if (path[0] != '/') {
         if (vfs_resolve_path(path, resolved, sizeof(resolved)) < 0) return NULL;
         vfs_normalize_path(resolved);
         path = resolved;
     }
-    
+
     if (path[0] != '/') return NULL;
     if (path[0] == '/' && path[1] == '\0') return vfs_root;
-    
+
     vfs_mount_t *mount = find_mount_for_path(path);
     vfs_node_t *node;
     const char *remaining;
-    
+
+    char prefix[VFS_MAX_PATH];
+    prefix[0] = '\0';
+
     if (mount && mount->root) {
         node = mount->root;
         remaining = path + strlen(mount->path);
         if (*remaining == '/') remaining++;
+        strncpy(prefix, mount->path, sizeof(prefix) - 1);
+        prefix[sizeof(prefix) - 1] = '\0';
+        size_t plen = strlen(prefix);
+        if (plen > 1 && prefix[plen - 1] == '/') prefix[plen - 1] = '\0';
     } else {
         node = vfs_root;
         remaining = path + 1;
+        strncpy(prefix, "/", sizeof(prefix) - 1);
+        prefix[sizeof(prefix) - 1] = '\0';
     }
-    
+
     if (*remaining == '\0') return node;
-    
+
     char component[VFS_MAX_NAME];
     while (*remaining) {
         while (*remaining == '/') remaining++;
         if (*remaining == '\0') break;
-        
+
         int i = 0;
         while (*remaining && *remaining != '/' && i < VFS_MAX_NAME - 1) {
             component[i++] = *remaining++;
         }
         component[i] = '\0';
-        
+
         if (i == 0) continue;
-        
+
         if (strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
-            if (node->parent) node = node->parent;
+            if (node->parent) {
+                node = node->parent;
+                if (strcmp(prefix, "/") != 0) {
+                    char *last = strrchr(prefix, '/');
+                    if (last) {
+                        if (last == prefix) {
+                            prefix[1] = '\0';
+                        } else {
+                            *last = '\0';
+                        }
+                    }
+                }
+            }
             continue;
         }
-        
+
+        const char *rest_raw = remaining;
+        const char *rest_non_slash = rest_raw;
+        while (*rest_non_slash == '/') rest_non_slash++;
+        int has_more = (*rest_non_slash != '\0');
+
         vfs_node_t *next = vfs_finddir(node, component);
         if (!next) return NULL;
-        
+
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
             next = next->ptr;
         }
-        
+
+        if (VFS_GET_TYPE(next->flags) == VFS_SYMLINK && (has_more || follow_final)) {
+            char target[VFS_MAX_PATH];
+            if (vfs_readlink_node(next, target, sizeof(target)) >= 0) {
+                char newpath[VFS_MAX_PATH];
+                if (vfs_build_symlink_path(newpath, sizeof(newpath), prefix, target, rest_raw) < 0) return NULL;
+                vfs_normalize_path(newpath);
+                return vfs_namei_internal(newpath, follow_final, depth + 1);
+            }
+        }
+
         node = next;
+
+        char new_prefix[VFS_MAX_PATH];
+        if (strcmp(prefix, "/") == 0) {
+            snprintf(new_prefix, sizeof(new_prefix), "/%s", component);
+        } else {
+            snprintf(new_prefix, sizeof(new_prefix), "%s/%s", prefix, component);
+        }
+        strncpy(prefix, new_prefix, sizeof(prefix) - 1);
+        prefix[sizeof(prefix) - 1] = '\0';
     }
-    
+
     return node;
+}
+
+vfs_node_t *vfs_namei(const char *path) {
+    return vfs_namei_internal(path, 1, 0);
+}
+
+vfs_node_t *vfs_namei_nofollow(const char *path) {
+    return vfs_namei_internal(path, 0, 0);
 }
 
 vfs_node_t *vfs_lookup(const char *path) {

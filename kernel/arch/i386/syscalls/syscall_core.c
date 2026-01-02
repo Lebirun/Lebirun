@@ -23,7 +23,7 @@ static int sys_exit(int code, const char *unused1, int unused2) {
     asm volatile("cli");
     printf("sys_exit: user task exiting with code %d\n", code);
     asm volatile("sti");
-    task_exit((uint32_t)code);
+    task_exit_deferred((uint32_t)code);
     return 0;
 }
 

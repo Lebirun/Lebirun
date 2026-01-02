@@ -709,8 +709,33 @@ static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
 }
 
 static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
-    (void)path_ptr; (void)buf_ptr; (void)bufsiz;
-    return -1;
+    uint32_t path_addr = (uint32_t)path_ptr;
+    uint32_t buf_addr = (uint32_t)(uintptr_t)buf_ptr;
+
+    if (!current_task) return -ESRCH;
+    if (bufsiz <= 0) return -EINVAL;
+
+    if (!path_addr || path_addr >= 0xC0000000 || path_addr < 0x1000) return -EFAULT;
+    if (!buf_addr || buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
+    if (buf_addr + (uint32_t)bufsiz >= 0xC0000000) return -EFAULT;
+
+    vfs_node_t *node = vfs_namei_nofollow((const char *)path_addr);
+    if (!node) return -ENOENT;
+    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -EINVAL;
+
+    char target[VFS_MAX_PATH];
+    uint32_t n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
+    if (n >= sizeof(target)) n = sizeof(target) - 1;
+    target[n] = '\0';
+
+    uint32_t copy_len = n;
+    if (copy_len > (uint32_t)bufsiz) copy_len = (uint32_t)bufsiz;
+
+    for (uint32_t i = 0; i < copy_len; i++) {
+        ((char *)buf_addr)[i] = target[i];
+    }
+
+    return (int)copy_len;
 }
 
 static int sys_dup3(int oldfd, int newfd, int flags) {

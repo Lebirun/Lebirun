@@ -253,8 +253,19 @@ registers_t* interrupt_handler(registers_t* regs)
                 vmm_temp_unmap_raw(temp_pd);
             }
 
-            task_exit(139);
-            for (;;) __asm__ ("hlt");
+            task_exit_deferred(139);
+            return schedule_from_irq(regs);
+        }
+
+        if (regs->int_no == 14 && !(regs->err_code & 0x4) && current_task && current_task->is_user && current_task->syscall_frame) {
+            uint32_t fault_addr;
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+            if (fault_addr < 0xC0000000) {
+                printf("User task %d page fault in syscall at 0x%08X (EIP=0x%08X) - killing task\n",
+                       current_task->pid, fault_addr, regs->eip);
+                task_exit_deferred(139);
+                return schedule_from_irq(regs);
+            }
         }
         
         terminal_writestring(">>> TRAPPED INT 0x");
@@ -316,6 +327,9 @@ registers_t* interrupt_handler(registers_t* regs)
             return schedule_from_irq(regs);
         } else if (regs->int_no == 128) {
             do_syscall(regs);
+            if (current_task && current_task->state == TASK_DEAD) {
+                return schedule_from_irq(regs);
+            }
             return regs;
         }
 
@@ -328,14 +342,44 @@ registers_t* interrupt_handler(registers_t* regs)
             wake_sleeping_tasks();
             reap_dead_tasks();
             extern void fb_tick(void);
+            uint32_t orig_cr3;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+            }
+
             fb_tick();
             extern void net_tick(void);
             net_tick();
+
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+            }
+
             regs = schedule_from_irq(regs);
         } else if (irq == 1) {
+            uint32_t orig_cr3;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+            }
             keyboard_handler(regs);
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+            }
         } else if (irq < MAX_IRQ_HANDLERS && irq_handlers[irq]) {
+            uint32_t orig_cr3;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+            }
             irq_handlers[irq](regs);
+            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+            }
         }
 
         if (debugMode && debugLevel >= 5) {

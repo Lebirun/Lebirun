@@ -187,6 +187,13 @@ void kernel_main(void) {
         rootfs_init(saved_mods_count, saved_mods_addr);
     }
 
+    (void)ramfs_create_dir("/bin", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    (void)ramfs_unlink("/bin/sh");
+    int sl = ramfs_create_symlink("/bin/sh", "/bin/lsh", VFS_PERM_READ | VFS_PERM_EXEC);
+    if (sl != 0 && sl != RAMFS_ERR_EXIST) {
+        printf("BOOT: failed to create /bin/sh symlink (%d)\n", sl);
+    }
+
     terminal_writestring("PIC master mask: 0x");
     uint8_t master_mask = inb(0x21);
     print_hex(master_mask);
@@ -226,11 +233,10 @@ void kernel_main(void) {
     asm volatile ("sti");
 	terminal_writestring("STI completed! Interrupts enabled.\n");
 
-    extern uint8_t user_shell_bin_start[], user_shell_bin_end[];
     printf("heap: verify before launching user\n");
     heap_verify();
 
-    task_t* shell = launch_user_binary(user_shell_bin_start, user_shell_bin_end, 1);
+    task_t* shell = launch_user_path("/bin/lsh", 1);
     printf("heap: verify after launch attempt\n");
     heap_verify();
     if (!shell) {

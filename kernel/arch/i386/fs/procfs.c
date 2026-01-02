@@ -120,14 +120,26 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
     int len = 0;
     
     if (current_task && current_task->user_brk > 0) {
-        len += snprintf(buf + len, sizeof(buf) - len,
-            "00100000-%08x r-xp 00000000 00:00 0 [text]\n",
-            0x00400000);
-        len += snprintf(buf + len, sizeof(buf) - len,
-            "00400000-%08x rw-p 00000000 00:00 0 [heap]\n",
-            current_task->user_brk);
-        len += snprintf(buf + len, sizeof(buf) - len,
-            "007f0000-00800000 rw-p 00000000 00:00 0 [stack]\n");
+        if (len < (int)sizeof(buf) - 1) {
+            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+                "00100000-%08x r-xp 00000000 00:00 0 [text]\n",
+                0x00400000);
+            if (n > 0) len += n;
+            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+        }
+        if (len < (int)sizeof(buf) - 1) {
+            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+                "00400000-%08x rw-p 00000000 00:00 0 [heap]\n",
+                current_task->user_brk);
+            if (n > 0) len += n;
+            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+        }
+        if (len < (int)sizeof(buf) - 1) {
+            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+                "007f0000-00800000 rw-p 00000000 00:00 0 [stack]\n");
+            if (n > 0) len += n;
+            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+        }
     }
     
     if (offset >= (uint32_t)len) return 0;

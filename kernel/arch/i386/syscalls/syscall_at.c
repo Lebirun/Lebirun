@@ -177,9 +177,23 @@ static int sys_readlinkat(int dirfd, const char *pathname, int buf_ptr) {
     char resolved[256];
     const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
-    
-    (void)buf_ptr;
-    return -EINVAL;
+
+    uint32_t buf_addr = (uint32_t)buf_ptr;
+    if (!buf_addr || buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
+
+    vfs_node_t *node = vfs_namei_nofollow(path);
+    if (!node) return -ENOENT;
+    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -EINVAL;
+
+    char target[VFS_MAX_PATH];
+    uint32_t n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
+    if (n >= sizeof(target)) n = sizeof(target) - 1;
+    target[n] = '\0';
+
+    for (uint32_t i = 0; i < n; i++) {
+        ((char *)buf_addr)[i] = target[i];
+    }
+    return (int)n;
 }
 
 static int sys_fchmodat(int dirfd, const char *pathname, int mode) {

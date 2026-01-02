@@ -209,12 +209,6 @@ void _exit(int status) {
     __builtin_unreachable();
 }
 
-/*
-void exit(int status) {
-    _exit(status);
-}
-*/
-
 int read(int fd, void *buf, size_t count) {
     int ret = syscall3(SYS_READ, fd, (int)buf, (int)count);
     if (ret < 0) { errno = EBADF; return -1; }
@@ -616,7 +610,8 @@ int putenv(char *string) {
     return ret;
 }
 
-char **environ = (char**)0;
+static char *lebirun_empty_environ[] = { (char *)0 };
+char **environ = lebirun_empty_environ;
 
 int getuid(void) { return syscall0(133 | LEBIRUN_SYSCALL_FLAG); }
 int geteuid(void) { return syscall0(135 | LEBIRUN_SYSCALL_FLAG); }
