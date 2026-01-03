@@ -17,8 +17,8 @@ typedef struct {
     uint32_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-static gdt_entry_t gdt[8];
-static gdt_ptr_t gdtp;
+static gdt_entry_t gdt[8] __attribute__((aligned(8)));
+static gdt_ptr_t gdtp __attribute__((aligned(8)));
 
 typedef struct {
     uint32_t prev_tss;
@@ -121,8 +121,4 @@ void gdt_init(void) {
 
     uint16_t tss_selector = 0x28;
     asm volatile ("ltr %w0" : : "r"(tss_selector) : "memory");
-
-    terminal_writestring("GDT table set up.\n");
-    terminal_writestring("GDT loaded via LGDT.\n");
-    terminal_writestring("GDT segments reloaded.\n");
 }

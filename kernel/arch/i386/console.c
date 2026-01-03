@@ -8,6 +8,7 @@
 static console_t consoles[NUM_CONSOLES];
 static int current_console = 0;
 static int console_initialized = 0;
+static int console_batch = 0;
 
 void console_init(void) {
     for (int i = 0; i < NUM_CONSOLES; i++) {
@@ -147,7 +148,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         if (is_active && fb) {
             fb->cursor_x = col;
             fb->cursor_y = row;
-            fb_update_cursor();
+            if (!console_batch) fb_update_cursor();
         }
         break;
     }
@@ -162,21 +163,21 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         int n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         con->cursor_y += n;
         if (con->cursor_y >= rows) con->cursor_y = rows - 1;
-        if (is_active && fb) { fb->cursor_y = con->cursor_y; fb_update_cursor(); }
+        if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
         break;
     }
     case 'C': {
         int n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         con->cursor_x += n;
         if (con->cursor_x >= cols) con->cursor_x = cols - 1;
-        if (is_active && fb) { fb->cursor_x = con->cursor_x; fb_update_cursor(); }
+        if (is_active && fb) { fb->cursor_x = con->cursor_x; if (!console_batch) fb_update_cursor(); }
         break;
     }
     case 'D': {
         int n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         if (con->cursor_x >= (uint32_t)n) con->cursor_x -= n;
         else con->cursor_x = 0;
-        if (is_active && fb) { fb->cursor_x = con->cursor_x; fb_update_cursor(); }
+        if (is_active && fb) { fb->cursor_x = con->cursor_x; if (!console_batch) fb_update_cursor(); }
         break;
     }
     case 'J': {
@@ -313,7 +314,7 @@ void console_putchar_to(int console_num, char c) {
         if (is_active && fb) {
             fb->cursor_x = con->cursor_x;
             fb->cursor_y = con->cursor_y;
-            fb_update_cursor();
+            if (!console_batch) fb_update_cursor();
         }
         return;
     }
@@ -322,7 +323,7 @@ void console_putchar_to(int console_num, char c) {
         con->cursor_x = 0;
         if (is_active && fb) {
             fb->cursor_x = 0;
-            fb_update_cursor();
+            if (!console_batch) fb_update_cursor();
         }
         return;
     }
@@ -334,7 +335,7 @@ void console_putchar_to(int console_num, char c) {
             if (is_active && fb) {
                 fb->cursor_x = con->cursor_x;
                 fb_putchar(' ', con->cursor_x, con->cursor_y);
-                fb_update_cursor();
+                if (!console_batch) fb_update_cursor();
             }
         }
         return;
@@ -372,7 +373,7 @@ void console_putchar_to(int console_num, char c) {
     if (is_active && fb) {
         fb->cursor_x = con->cursor_x;
         fb->cursor_y = con->cursor_y;
-        fb_update_cursor();
+        if (!console_batch) fb_update_cursor();
     }
 }
 
@@ -383,8 +384,18 @@ void console_write(const char *data, size_t size) {
 }
 
 void console_write_to(int console_num, const char *data, size_t size) {
+    console_batch++;
     for (size_t i = 0; i < size; i++) {
         console_putchar_to(console_num, data[i]);
+    }
+    console_batch--;
+    if (console_batch == 0 && console_initialized) {
+        framebuffer_t *fb = fb_get();
+        if (fb && fb->font && console_num == current_console) {
+            fb->cursor_x = consoles[current_console].cursor_x;
+            fb->cursor_y = consoles[current_console].cursor_y;
+            fb_update_cursor();
+        }
     }
 }
 

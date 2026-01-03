@@ -395,7 +395,7 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
     
-    uint32_t idx = current_task->pid % 256;
+    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
     
     if (old_value) {
         memcpy(old_value, &task_itimers[idx][which], sizeof(struct itimerval_k));
@@ -413,7 +413,7 @@ static int sys_getitimer(int which, struct itimerval_k *curr_value) {
     if (!current_task) return -ESRCH;
     if (!curr_value) return -EFAULT;
     
-    uint32_t idx = current_task->pid % 256;
+    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
     memcpy(curr_value, &task_itimers[idx][which], sizeof(struct itimerval_k));
     
     return 0;
@@ -423,7 +423,7 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     if (!current_task) return 0;
     
-    uint32_t idx = current_task->pid % 256;
+    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
     uint32_t old_alarm = alarm_ticks[idx];
     
     if (seconds > 0) {

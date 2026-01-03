@@ -19,9 +19,13 @@ typedef struct {
 
 static task_creds_t task_creds[256];
 
+static inline uint32_t task_creds_index(pid_t pid) {
+    return ((uint32_t)pid) & 255u;
+}
+
 static task_creds_t *get_task_creds(void) {
     if (!current_task) return NULL;
-    uint32_t idx = current_task->pid % 256;
+    uint32_t idx = task_creds_index(current_task->pid);
     return &task_creds[idx];
 }
 
@@ -287,7 +291,7 @@ static int sys_getpgid(int pid, const char *unused1, int unused2) {
     task_t *t = task_find((pid_t)pid);
     if (!t) return -ESRCH;
     
-    uint32_t idx = t->pid % 256;
+    uint32_t idx = task_creds_index(t->pid);
     return (int)task_creds[idx].pgid;
 }
 
@@ -301,7 +305,7 @@ static int sys_setpgid(int pid, const char *pgid_ptr, int unused) {
     task_t *t = task_find((pid_t)pid);
     if (!t) return -ESRCH;
     
-    uint32_t idx = t->pid % 256;
+    uint32_t idx = task_creds_index(t->pid);
     task_creds[idx].pgid = (pid_t)pgid;
 
     t->pgid = (pid_t)pgid;
@@ -340,7 +344,7 @@ static int sys_getsid(int pid, const char *unused1, int unused2) {
     task_t *t = task_find((pid_t)pid);
     if (!t) return -ESRCH;
     
-    uint32_t idx = t->pid % 256;
+    uint32_t idx = task_creds_index(t->pid);
     return (int)task_creds[idx].sid;
 }
 
@@ -360,7 +364,7 @@ static int sys_gettid(int unused1, const char *unused2, int unused3) {
 }
 
 void creds_init_task(pid_t pid) {
-    uint32_t idx = pid % 256;
+    uint32_t idx = task_creds_index(pid);
     memset(&task_creds[idx], 0, sizeof(task_creds_t));
     task_creds[idx].umask_val = 022;
     task_creds[idx].pgid = pid;
@@ -374,8 +378,8 @@ void creds_init_task(pid_t pid) {
 }
 
 void creds_copy_task(pid_t parent_pid, pid_t child_pid) {
-    uint32_t parent_idx = parent_pid % 256;
-    uint32_t child_idx = child_pid % 256;
+    uint32_t parent_idx = task_creds_index(parent_pid);
+    uint32_t child_idx = task_creds_index(child_pid);
     memcpy(&task_creds[child_idx], &task_creds[parent_idx], sizeof(task_creds_t));
     
     task_t *child = task_find(child_pid);
@@ -391,7 +395,7 @@ pid_t creds_get_pgid(pid_t pid) {
     if (pid == 0) return 0;
     task_t *t = task_find(pid);
     if (!t) return 0;
-    return task_creds[t->pid % 256].pgid;
+    return task_creds[task_creds_index(t->pid)].pgid;
 }
 
 pid_t creds_get_sid(pid_t pid) {
@@ -399,7 +403,7 @@ pid_t creds_get_sid(pid_t pid) {
     if (pid == 0) return 0;
     task_t *t = task_find(pid);
     if (!t) return 0;
-    return task_creds[t->pid % 256].sid;
+    return task_creds[task_creds_index(t->pid)].sid;
 }
 
 void syscalls_ids_init(void) {

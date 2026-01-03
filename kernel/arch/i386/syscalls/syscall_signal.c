@@ -81,7 +81,7 @@ static task_signals_t task_signals[256];
 
 static task_signals_t *get_task_signals(void) {
     if (!current_task) return NULL;
-    uint32_t idx = current_task->pid % 256;
+    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
     return &task_signals[idx];
 }
 
@@ -232,7 +232,7 @@ static int deliver_signal_to_task(task_t *target, int sig) {
         return 0;
     }
 
-    uint32_t idx = target->pid % 256;
+    uint32_t idx = ((uint32_t)target->pid) & 255u;
     task_signals[idx].pending.sig[sig / 64] |= (1UL << (sig % 64));
     return 0;
 }
@@ -408,7 +408,7 @@ void signal_deliver_pending(void) {
 }
 
 void signals_init_task(pid_t pid) {
-    uint32_t idx = pid % 256;
+    uint32_t idx = ((uint32_t)pid) & 255u;
     memset(&task_signals[idx], 0, sizeof(task_signals_t));
     
     for (int i = 0; i < NSIG; i++) {

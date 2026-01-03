@@ -35,6 +35,15 @@ boot_page_directory:
 .global boot_page_table1
 boot_page_table1:
 .skip 4096
+.global boot_page_table2
+boot_page_table2:
+.skip 4096
+.global boot_page_table3
+boot_page_table3:
+.skip 4096
+.global boot_page_table4
+boot_page_table4:
+.skip 4096
 .global multiboot_magic
 multiboot_magic: .skip 4
 .global multiboot_ptr
@@ -45,9 +54,9 @@ multiboot_ptr: .skip 4
 _start:
     movl %eax, multiboot_magic_low
     movl %ebx, multiboot_ptr_low
-    
+
     movl $(boot_page_table1 - 0xC0000000), %edi
-    movl $0, %esi
+    movl $0x00000000, %esi
     movl $1024, %ecx
 1:
     movl %esi, %edx
@@ -56,9 +65,55 @@ _start:
     addl $4096, %esi
     addl $4, %edi
     loop 1b
+
+    movl $(boot_page_table2 - 0xC0000000), %edi
+    movl $0x00400000, %esi
+    movl $1024, %ecx
+2:
+    movl %esi, %edx
+    orl $0x003, %edx
+    movl %edx, (%edi)
+    addl $4096, %esi
+    addl $4, %edi
+    loop 2b
+
+    movl $(boot_page_table3 - 0xC0000000), %edi
+    movl $0x00800000, %esi
+    movl $1024, %ecx
+3:
+    movl %esi, %edx
+    orl $0x003, %edx
+    movl %edx, (%edi)
+    addl $4096, %esi
+    addl $4, %edi
+    loop 3b
+
+    movl $(boot_page_table4 - 0xC0000000), %edi
+    movl $0x00C00000, %esi
+    movl $1024, %ecx
+4:
+    movl %esi, %edx
+    orl $0x003, %edx
+    movl %edx, (%edi)
+    addl $4096, %esi
+    addl $4, %edi
+    loop 4b
+
     movl $(boot_page_table1 - 0xC0000000 + 0x003), %eax
-    movl %eax, boot_page_directory - 0xC0000000 + 0
+    movl %eax, boot_page_directory - 0xC0000000 + 0*4
     movl %eax, boot_page_directory - 0xC0000000 + 768*4
+
+    movl $(boot_page_table2 - 0xC0000000 + 0x003), %eax
+    movl %eax, boot_page_directory - 0xC0000000 + 1*4
+    movl %eax, boot_page_directory - 0xC0000000 + 769*4
+
+    movl $(boot_page_table3 - 0xC0000000 + 0x003), %eax
+    movl %eax, boot_page_directory - 0xC0000000 + 2*4
+    movl %eax, boot_page_directory - 0xC0000000 + 770*4
+
+    movl $(boot_page_table4 - 0xC0000000 + 0x003), %eax
+    movl %eax, boot_page_directory - 0xC0000000 + 3*4
+    movl %eax, boot_page_directory - 0xC0000000 + 771*4
    
     movl $(boot_page_directory - 0xC0000000 + 0x003), %eax
     movl %eax, boot_page_directory - 0xC0000000 + 1023*4
@@ -69,10 +124,10 @@ _start:
     orl $0x80010000, %ecx
     movl %ecx, %cr0
    
-    lea 4f, %ecx
+    lea 5f, %ecx
     jmp *%ecx
 .section .text
-4:
+5:
     movl multiboot_magic_low, %eax
     movl %eax, multiboot_magic
     movl multiboot_ptr_low, %eax

@@ -216,12 +216,27 @@ void fb_set_colors(uint32_t fg, uint32_t bg) {
 }
 
 void fb_clear(void) {
-    uint32_t *pixel = fb.addr;
+    uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
+    if (bytes_per_pixel == 0) return;
+
     for (uint32_t y = 0; y < fb.height; y++) {
+        uint8_t *row = (uint8_t *)fb.addr + y * fb.pitch;
         for (uint32_t x = 0; x < fb.width; x++) {
-            pixel[x] = fb.bg_color;
+            uint8_t *p = row + x * bytes_per_pixel;
+            if (fb.bpp == 32) {
+                *(uint32_t *)p = fb.bg_color;
+            } else if (fb.bpp == 24) {
+                p[0] = (uint8_t)(fb.bg_color & 0xFF);
+                p[1] = (uint8_t)((fb.bg_color >> 8) & 0xFF);
+                p[2] = (uint8_t)((fb.bg_color >> 16) & 0xFF);
+            } else if (fb.bpp == 16) {
+                uint8_t r = (uint8_t)((fb.bg_color >> 16) & 0xFF);
+                uint8_t g = (uint8_t)((fb.bg_color >> 8) & 0xFF);
+                uint8_t b = (uint8_t)(fb.bg_color & 0xFF);
+                uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                *(uint16_t *)p = rgb565;
+            }
         }
-        pixel = (uint32_t *)((uint8_t *)pixel + fb.pitch);
     }
     fb.cursor_x = 0;
     fb.cursor_y = 0;
@@ -241,8 +256,30 @@ void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
     if (x >= fb.width || y >= fb.height) {
         return;
     }
-    uint32_t *pixel = (uint32_t *)((uint8_t *)fb.addr + y * fb.pitch + x * 4);
-    *pixel = color;
+    uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
+    if (bytes_per_pixel == 0) {
+        return;
+    }
+    uint32_t offset = y * fb.pitch + x * bytes_per_pixel;
+    uint32_t fb_size = fb.pitch * fb.height;
+    if (offset >= fb_size || fb_size - offset < bytes_per_pixel) {
+        return;
+    }
+
+    uint8_t *p = (uint8_t *)fb.addr + offset;
+    if (fb.bpp == 32) {
+        *(uint32_t *)p = color;
+    } else if (fb.bpp == 24) {
+        p[0] = (uint8_t)(color & 0xFF);
+        p[1] = (uint8_t)((color >> 8) & 0xFF);
+        p[2] = (uint8_t)((color >> 16) & 0xFF);
+    } else if (fb.bpp == 16) {
+        uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+        uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+        uint8_t b = (uint8_t)(color & 0xFF);
+        uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        *(uint16_t *)p = rgb565;
+    }
 }
 
 void fb_putchar(char c, uint32_t cx, uint32_t cy) {
@@ -295,21 +332,38 @@ void fb_scroll(void) {
     
     uint32_t line_height = fb.font->height;
     uint32_t copy_height = (fb.rows - 1) * line_height;
+
+    uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
+    if (bytes_per_pixel == 0) return;
+    uint32_t line_bytes = fb.width * bytes_per_pixel;
     
     uint8_t *dst = (uint8_t *)fb.addr;
     uint8_t *src = (uint8_t *)fb.addr + line_height * fb.pitch;
     
     for (uint32_t y = 0; y < copy_height; y++) {
-        memcpy(dst, src, fb.width * 4);
+        memcpy(dst, src, line_bytes);
         dst += fb.pitch;
         src += fb.pitch;
     }
     
     uint32_t last_row_start = (fb.rows - 1) * line_height;
     for (uint32_t y = last_row_start; y < fb.height; y++) {
-        uint32_t *pixel = (uint32_t *)((uint8_t *)fb.addr + y * fb.pitch);
+        uint8_t *row = (uint8_t *)fb.addr + y * fb.pitch;
         for (uint32_t x = 0; x < fb.width; x++) {
-            pixel[x] = fb.bg_color;
+            uint8_t *p = row + x * bytes_per_pixel;
+            if (fb.bpp == 32) {
+                *(uint32_t *)p = fb.bg_color;
+            } else if (fb.bpp == 24) {
+                p[0] = (uint8_t)(fb.bg_color & 0xFF);
+                p[1] = (uint8_t)((fb.bg_color >> 8) & 0xFF);
+                p[2] = (uint8_t)((fb.bg_color >> 16) & 0xFF);
+            } else if (fb.bpp == 16) {
+                uint8_t r = (uint8_t)((fb.bg_color >> 16) & 0xFF);
+                uint8_t g = (uint8_t)((fb.bg_color >> 8) & 0xFF);
+                uint8_t b = (uint8_t)(fb.bg_color & 0xFF);
+                uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                *(uint16_t *)p = rgb565;
+            }
         }
     }
     

@@ -19,7 +19,9 @@ extern volatile uint32_t tick_count;
 static int check_fd_readable(int fd) {
     if (fd < 0 || fd >= TASK_MAX_FDS) return 0;
     if (fd == 0) {
-        int con_id = current_task ? current_task->console_id : 0;
+        int con_id = current_task ? current_task->console_id : console_get_current();
+        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
+        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
         return keyboard_has_data_for(con_id) ? 1 : 0;
     }
     if (current_task && current_task->fds[fd].in_use) {

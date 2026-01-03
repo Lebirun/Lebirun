@@ -9,6 +9,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/registers.h>
 #include <kernel/idt.h>
+#include <kernel/vring.h>
 
 extern void isr0(void);
 extern void isr1(void);
@@ -142,6 +143,28 @@ static const char* exception_messages[] = {
 registers_t* interrupt_handler(registers_t* regs)
 {
     if (regs->int_no < 32) {
+        if (regs->int_no == 14) {
+            uint32_t fault_addr;
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+            
+            uint8_t access_type = 0;
+            if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
+            else access_type |= VRING_PERM_READ;
+            if (regs->err_code & 0x10) access_type |= VRING_PERM_EXEC;
+            
+            if (current_kproc && current_kproc->vring_minor != 0) {
+                if (!vring_check_access(current_kproc->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
+                    vring_panic_forbidden(current_kproc->vring_minor, fault_addr, access_type);
+                }
+            }
+            
+            if (current_task && current_task->vring_minor != 0 && !current_task->is_user) {
+                if (!vring_check_access(current_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
+                    vring_panic_forbidden(current_task->vring_minor, fault_addr, access_type);
+                }
+            }
+        }
+        
         if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
             uint32_t fault_addr;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
@@ -339,6 +362,7 @@ registers_t* interrupt_handler(registers_t* regs)
         
         if (irq == 0) {
             tick_count++;
+
             wake_sleeping_tasks();
             reap_dead_tasks();
             extern void fb_tick(void);

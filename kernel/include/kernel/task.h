@@ -102,6 +102,9 @@ typedef struct task {
     void *robust_list;
     size_t robust_list_len;
     char name[16];
+    
+    uint8_t vring_minor;
+    bool is_kernel_task;
 } task_t;
 
 extern task_t* current_task;
@@ -122,6 +125,7 @@ extern void save_context(void);
 extern void switch_to(task_t* next);
 void lock_scheduler(void);
 void unlock_scheduler(void);
+void add_task_to_runqueue(task_t* new_task);
 
 void yield(void);
 void block_current(void);
@@ -160,5 +164,8 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
                         int argc, char **argv, int envc, char **envp);
 pid_t task_create_thread(void (*entry)(void));
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
+
+bool task_is_kernel_pid(int32_t pid);
+void task_set_vring(task_t *task, uint8_t vring_minor);
 
 #endif

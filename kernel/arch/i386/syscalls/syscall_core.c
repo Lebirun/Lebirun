@@ -17,6 +17,14 @@ static void tty_echo_char(int con_id, char c) {
     }
 }
 
+static pid_t tty_get_my_pgrp(void) {
+    pid_t my_pgrp = creds_get_pgid(0);
+    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pgid;
+    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pid;
+    if (my_pgrp == 0) my_pgrp = 1;
+    return my_pgrp;
+}
+
 static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
@@ -79,15 +87,15 @@ static int sys_write(int fd, const char *buf, int len) {
             int chunk = len - written;
             if (chunk > 64) chunk = 64;
             
-            asm volatile("cli");
             if (fb && fb->font && console_is_initialized()) {
-                console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
+                kprint_write(con_id, (const char *)(buf_addr + written), (size_t)chunk);
             } else {
+                asm volatile("cli");
                 for (int i = 0; i < chunk; i++) {
                     terminal_putchar(((const char *)buf_addr)[written + i]);
                 }
+                asm volatile("sti");
             }
-            asm volatile("sti");
             
             written += chunk;
         }
@@ -137,12 +145,13 @@ static int sys_read(int fd, char *buf, int len) {
     }
 
     if (fd == 0) {
-        int con_id = current_task ? current_task->console_id : 0;
+        int con_id = current_task ? current_task->console_id : console_get_current();
+        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
         int fg_pgrp = tty_pgrp[con_id];
         if (fg_pgrp != 0) {
-            pid_t my_pgrp = creds_get_pgid(0);
+            pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
                 if (current_task) {
                     current_task->state = TASK_BLOCKED;
@@ -268,13 +277,13 @@ static int sys_read_nb(int fd, char *buf, int len) {
     if (buf_addr + len >= 0xC0000000) return -1;
 
     if (current_task && fd >= 0 && fd < TASK_MAX_FDS && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
-        int con_id = current_task ? current_task->console_id : 0;
-
+        int con_id = current_task ? current_task->console_id : console_get_current();
+        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
         int fg_pgrp = tty_pgrp[con_id];
         if (fg_pgrp != 0) {
-            pid_t my_pgrp = creds_get_pgid(0);
+            pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
                 return -EAGAIN;
             }
@@ -341,7 +350,6 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
         uint32_t base = (uint32_t)iov[i].iov_base;
         uint32_t len = iov[i].iov_len;
         
-        if (len == 0) continue;
         if (base >= 0xC0000000 || base < 0x1000) continue;
         if (base + len >= 0xC0000000) continue;
         

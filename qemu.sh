@@ -1,6 +1,19 @@
 #!/bin/sh
 set -e
 . ./iso.sh
+
+if [ -t 0 ]; then
+    _OLD_STTY="$(stty -g 2>/dev/null || true)"
+    cleanup_tty() {
+        if [ -n "$_OLD_STTY" ]; then
+            stty "$_OLD_STTY" 2>/dev/null || stty sane 2>/dev/null || true
+        else
+            stty sane 2>/dev/null || true
+        fi
+    }
+    trap cleanup_tty EXIT INT TERM HUP
+fi
+
 qemu-system-$(./target-triplet-to-arch.sh $HOST) \
     -m 4G \
     -cdrom lebirun.iso \

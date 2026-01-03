@@ -135,8 +135,6 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
 
     registers_t *frame = (registers_t *)(uintptr_t)t->regs.esp;
     frame->useresp = initial_useresp;
-    
-    t->state = TASK_READY;
 
     uint32_t total_pages = elf_page_count + stack_page_count;
 
@@ -169,6 +167,11 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
 
     if (elf_pages) kfree(elf_pages);
     if (stack_pages) kfree(stack_pages);
+
+    t->state = TASK_READY;
+    lock_scheduler();
+    add_task_to_runqueue(t);
+    unlock_scheduler();
 
     return t;
 }

@@ -9,6 +9,7 @@
 #include <kernel/elf.h>
 #include <kernel/console.h>
 #include <kernel/creds.h>
+#include <kernel/vring.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -17,6 +18,20 @@
 #define KERR_EIO     5
 #define KERR_ENOEXEC 8
 #define KERR_ENOMEM  12
+
+static void serial_print(const char *s) {
+    while (*s) {
+        serial_putchar(*s++);
+    }
+}
+
+static void serial_hex(uint32_t v) {
+    serial_print("0x");
+    for (int i = 28; i >= 0; i -= 4) {
+        int d = (v >> i) & 0xF;
+        serial_putchar(d < 10 ? '0' + d : 'A' + d - 10);
+    }
+}
 
 static void task_error(const char *fmt, ...) {
     char buf[256];
@@ -258,8 +273,17 @@ void init_tasks(void) {
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->stack_base = NULL;
     current_task->stack_size = 0;
-    current_task->kernel_stack_base = NULL;
-    current_task->kernel_stack_size = 0;
+    
+    uint8_t* task0_kstack = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    if (task0_kstack) {
+        memset(task0_kstack, 0, KERNEL_STACK_SIZE);
+        current_task->kernel_stack_base = task0_kstack;
+        current_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    } else {
+        current_task->kernel_stack_base = NULL;
+        current_task->kernel_stack_size = 0;
+    }
+    
     current_task->wake_tick = 0;
     current_task->sleep_next = NULL;
     current_task->in_sleep_queue = 0;
@@ -274,12 +298,19 @@ void init_tasks(void) {
     uint32_t boot_esp = 0;
     asm volatile ("movl %%esp, %0" : "=r" (boot_esp));
     current_task->regs.esp = boot_esp;
-    tss_set_esp0(boot_esp);
+    
+    if (current_task->kernel_stack_base) {
+        tss_set_esp0((uint32_t)current_task->kernel_stack_base + current_task->kernel_stack_size);
+    } else {
+        tss_set_esp0(boot_esp);
+    }
 
     current_task->regs.eip = 0;
     current_task->regs.eflags = 0x202;
     current_task->regs.cs = 0x08;
     current_task->regs.ds = current_task->regs.es = current_task->regs.fs = current_task->regs.gs = 0x10;
+    current_task->vring_minor = 0;
+    current_task->is_kernel_task = false;
     ready_queue_head = current_task;
 }
 
@@ -294,7 +325,7 @@ void unlock_scheduler(void) {
     }
 }
 
-static inline void add_task_to_runqueue(task_t* new_task) {
+void add_task_to_runqueue(task_t* new_task) {
     if (!ready_queue_head) {
         ready_queue_head = new_task;
         new_task->next = new_task;
@@ -390,6 +421,8 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->waiting_for_any_child = 0;
     new_task->is_user = user_mode;
     new_task->syscall_frame = NULL;
+    new_task->vring_minor = 0;
+    new_task->is_kernel_task = false;
 
     if (user_mode) {
         uint32_t* kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
@@ -447,10 +480,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.cs = 0x08;
         new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x10;
     }
-
-    lock_scheduler();
-    add_task_to_runqueue(new_task);
-    unlock_scheduler();
 
     DPRINTF2("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X ptr=0x%08X%s\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, (uint32_t)new_task, user_mode ? " (USER)" : "");
 
@@ -790,25 +819,44 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
 
 registers_t* schedule_from_irq(registers_t* regs) {
     if (!current_task || !ready_queue_head) return regs;
+
+    task_t* prev_task = current_task;
     
-    if (regs->int_no != 48 && current_task->syscall_frame) {
+    uint32_t entry_cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));
+    uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+    if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+    }
+    
+    int must_switch = (prev_task->state == TASK_DEAD);
+
+    if (regs->int_no != 48 && prev_task->syscall_frame && !must_switch) {
+        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+        }
         return regs;
     }
 
-    if (current_task->state != TASK_DEAD) {
-        save_irq_frame_into_task(current_task, regs, (uint32_t)regs);
+    if (!must_switch) {
+        save_irq_frame_into_task(prev_task, regs, (uint32_t)regs);
     }
 
-    int must_switch = (current_task->state == TASK_DEAD);
-
-    if (!schedule_force && !must_switch) {
-        if (current_task->time_slice > 0) current_task->time_slice--;
-        if (current_task->time_slice != 0) return regs;
+    bool is_idle = (prev_task->id == 0 && !prev_task->is_user);
+    
+    if (!schedule_force && !must_switch && !is_idle) {
+        if (prev_task->time_slice > 0) prev_task->time_slice--;
+        if (prev_task->time_slice != 0) {
+            if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+            }
+            return regs;
+        }
     }
     schedule_force = 0;
 
     if (!must_switch) {
-        current_task->time_slice = current_task->base_time_slice;
+        prev_task->time_slice = prev_task->base_time_slice;
     }
 
     task_t* next = ready_queue_head;
@@ -816,7 +864,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int safety = 0;
     
     while (next) {
-        if ((next->state == TASK_READY || next->state == TASK_RUNNING) && next != current_task) {
+        if ((next->state == TASK_READY || next->state == TASK_RUNNING) && next != prev_task) {
             break;
         }
         next = next->next;
@@ -831,78 +879,95 @@ registers_t* schedule_from_irq(registers_t* regs) {
         for (;;) asm volatile ("hlt");
     }
     
-    if (!next) return regs;
-
-    if (current_task->state == TASK_RUNNING) current_task->state = TASK_READY;
-    next->state = TASK_RUNNING;
-    
-    if (next->id == 0 && next->regs.eip == 0) {
-        current_task = next;
+    if (!next) {
+        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+        }
         return regs;
     }
-    
+
+    registers_t* return_frame;
+    if (next->regs.esp == 0) {
+        if (must_switch) {
+            printf("schedule: next task has null frame, system halted\n");
+            for (;;) asm volatile ("hlt");
+        }
+        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+        }
+        return regs;
+    }
+
+    uint32_t next_esp = next->regs.esp;
+    if (!((next_esp >= 0xC0000000u && next_esp < 0xD0000000u) ||
+          (next_esp >= HEAP_START && next_esp < (HEAP_START + HEAP_MAX_SIZE)))) {
+        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+        }
+        return regs;
+    }
+    return_frame = (registers_t*)next_esp;
+
+    uint32_t gs_val = return_frame->gs & 0xFFFF;
+    uint32_t fs_val = return_frame->fs & 0xFFFF;
+    uint32_t es_val = return_frame->es & 0xFFFF;
+    uint32_t ds_val = return_frame->ds & 0xFFFF;
+    uint32_t cs_val = return_frame->cs & 0xFFFF;
+
+    int valid_gs = (gs_val == 0x10 || gs_val == 0x23 || gs_val == 0x33 || gs_val == 0x3B || gs_val == 0);
+    int valid_fs = (fs_val == 0x10 || fs_val == 0x23 || fs_val == 0);
+    int valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
+    int valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
+    int valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
+
+    if (!valid_gs || !valid_fs || !valid_es || !valid_ds || !valid_cs) {
+        serial_print("SCHED: BAD FRAME esp=");
+        serial_hex(next->regs.esp);
+        serial_print(" gs=");
+        serial_hex(gs_val);
+        serial_print(" fs=");
+        serial_hex(fs_val);
+        serial_print(" es=");
+        serial_hex(es_val);
+        serial_print(" ds=");
+        serial_hex(ds_val);
+        serial_print(" cs=");
+        serial_hex(cs_val);
+        serial_print(" task=");
+        serial_hex(next->id);
+        serial_print("\n");
+        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+        }
+        return regs;
+    }
+
+    if (prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
+    next->state = TASK_RUNNING;
     current_task = next;
+
+    if (next->is_user && ((return_frame->cs & 0x3) == 0x3)) {
+        return_frame->ds = return_frame->es = return_frame->fs = 0x23;
+        if (next->tls_base) {
+            return_frame->gs = gdt_get_tls_selector(GDT_TLS_ENTRY_1);
+        } else {
+            return_frame->gs = 0x23;
+        }
+        return_frame->cs = 0x1B;
+        return_frame->ss = 0x23;
+    }
 
     if (next->kernel_stack_base && next->kernel_stack_size) {
         uint32_t esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
         tss_set_esp0(esp0);
     }
 
-    if (next->cr3 && next->cr3 != read_cr3()) {
-        __asm__ volatile ("mov %0, %%cr3" : : "r"(next->cr3) : "memory");
-    }
-
     if (next->tls_base) {
         gdt_set_tls(GDT_TLS_ENTRY_1, next->tls_base, next->tls_limit);
     }
 
-    registers_t* return_frame;
-    if (next->regs.esp == 0) return regs;
-    return_frame = (registers_t*)next->regs.esp;
-    
-    if (next->syscall_frame) {
-        DPRINTF4("Resuming kernel context for blocked syscall at 0x%08X\n", return_frame->eip);
-    } else {
-        DPRINTF4("Resuming from IRQ frame at 0x%08X\n", return_frame->eip);
-        
-        if (next->is_user) {
-            DPRINTF4("Switch to user: EIP=0x%08X CS=0x%04X ESP=0x%08X SS=0x%04X\n",
-                   return_frame->eip, return_frame->cs, return_frame->useresp, return_frame->ss);
-            DPRINTF4("  Segs: DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n",
-                   return_frame->ds, return_frame->es, return_frame->fs, return_frame->gs);
-
-            uint32_t check_virt[2] = { return_frame->eip & ~0xFFFu, return_frame->useresp & ~0xFFFu };
-            for (int ci = 0; ci < 2; ci++) {
-                uint32_t v = check_virt[ci];
-                uint32_t pd_idx = v >> 22;
-                uint32_t pt_idx = (v >> 12) & 0x3FF;
-
-                uint32_t temp_pd = 0xF7000000;
-                uint32_t temp_pt = 0xF7001000;
-
-                vmm_temp_map_raw(temp_pd, next->pd_phys);
-                uint32_t pde = ((uint32_t *)temp_pd)[pd_idx];
-                if (pde & 1) {
-                    uint32_t pt_phys = pde & ~0xFFF;
-                    vmm_temp_map_raw(temp_pt, pt_phys);
-                    uint32_t pte = ((uint32_t *)temp_pt)[pt_idx];
-                    vmm_temp_unmap_raw(temp_pt);
-                    DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pt_idx=%u pde=0x%08X pte=0x%08X\n", v, pd_idx, pt_idx, pde, pte);
-                } else {
-                    DPRINTF4("switch-check: virt=0x%08X pd_idx=%u pde=0x%08X (no PT)\n", v, pd_idx, pde);
-                }
-                vmm_temp_unmap_raw(temp_pd);
-            }
-
-            return_frame->ds = return_frame->es = return_frame->fs = 0x23;
-            if (next->tls_base) {
-                return_frame->gs = gdt_get_tls_selector(GDT_TLS_ENTRY_1);
-            } else {
-                return_frame->gs = 0x23;
-            }
-            return_frame->cs = 0x1B;
-            return_frame->ss = 0x23;
-        }
+    if (next->cr3 && next->cr3 != read_cr3()) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(next->cr3) : "memory");
     }
 
     return return_frame;
@@ -1739,4 +1804,14 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     unlock_scheduler();
     
     return new_task->pid;
+}
+
+bool task_is_kernel_pid(int32_t pid) {
+    return pid < 0;
+}
+
+void task_set_vring(task_t *task, uint8_t vring_minor) {
+    if (!task) return;
+    task->vring_minor = vring_minor;
+    task->is_kernel_task = (vring_minor != 0);
 }

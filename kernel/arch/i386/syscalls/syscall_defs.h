@@ -13,6 +13,7 @@
 #include <kernel/initrd.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
+#include <kernel/vring.h>
 #include <kernel/vfs.h>
 #include <kernel/pipe.h>
 #include <kernel/drivers/sata/ahci.h>

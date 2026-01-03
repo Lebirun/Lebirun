@@ -22,9 +22,10 @@
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/fs/ext4/ext4.h>
 #include <kernel/drivers/net/net.h>
+#include <kernel/vring.h>
 #include "launch_user.h"
 
-bool debugMode = false;
+bool debugMode = true;
 int debugLevel = 3;
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
@@ -38,6 +39,9 @@ extern task_t* current_task;
 extern task_t* ready_queue_head;
 
 void kernel_main(void) {
+    gdt_init();
+    idt_init();
+
     terminal_initialize();
     console_init();
 
@@ -76,6 +80,7 @@ void kernel_main(void) {
 
     uint32_t mb_page = multiboot_ptr & ~0xFFF;
     vmm_map_page(mb_page + 0xC0000000, mb_page, 0x003);
+    
     multiboot_t *mb = (multiboot_t *)(multiboot_ptr + 0xC0000000);
 
     if (mb->flags & (1 << 12)) {
@@ -157,8 +162,6 @@ void kernel_main(void) {
 
     serial_puts("Lebirun is about to start up!\n");
 
-    gdt_init();
-    idt_init();
 	unsigned long cr3 = read_cr3();
 	unsigned long cr0 = read_cr0();
 	printf("CR3="); print_hex(cr3);
@@ -177,6 +180,11 @@ void kernel_main(void) {
 	printf("\n");
 	pic_remap();
     init_tasks();
+    
+    vring_init();
+    kproc_init();
+    kproc_print_init();
+    printf("VRING: Virtual rings initialized (ring 0.1 = kprint, PID -1)\n");
     
     pit_init(1000);
     calibrate_pit();
@@ -241,6 +249,21 @@ void kernel_main(void) {
     heap_verify();
     if (!shell) {
         printf("Failed to launch user shell\n");
+    } else {
+        printf("Shell launched: task_id=%u is_user=%d state=%d on console 1\n", 
+               shell->id, shell->is_user, shell->state);
+        
+        extern task_t* ready_queue_head;
+        task_t* t = ready_queue_head;
+        printf("Run queue: ");
+        if (t) {
+            task_t* start = t;
+            do {
+                printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
+                t = t->next;
+            } while (t && t != start);
+        }
+        printf("\n");
     }
 
     while (1) {

@@ -7,7 +7,8 @@
 #include <kernel/io.h>
 
 #ifndef __pid_t_defined
-typedef uint32_t pid_t;
+typedef int32_t pid_t;
+#define __pid_t_defined
 #endif
 
 static inline void print_hex(unsigned long v) {
