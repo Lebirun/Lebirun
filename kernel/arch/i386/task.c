@@ -370,14 +370,36 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     if (!entry) return NULL;
 
     DPRINTF3("create_task_with_cr3: verify heap before alloc\n");
-    if (debugMode && debugLevel >= 3) heap_verify();
+    if (debugMode && debugLevel >= 3) {
+        static uint32_t last_verify_tick = 0;
+        static uint32_t last_seen_tick = 0;
+        static uint32_t same_tick_calls = 0;
+        extern volatile uint32_t tick_count;
+        uint32_t now = tick_count;
+        if (now != last_seen_tick) {
+            last_seen_tick = now;
+            same_tick_calls = 0;
+        }
+        if ((now - last_verify_tick) >= 250 || (same_tick_calls++ & 0x3F) == 0) {
+            heap_verify();
+            last_verify_tick = tick_count;
+        }
+    }
 
     task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
     uint8_t* stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
     uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
-        if (debugMode && debugLevel >= 3) heap_verify();
+        if (debugMode && debugLevel >= 3) {
+            static uint32_t last_verify_tick_fail = 0;
+            extern volatile uint32_t tick_count;
+            uint32_t now = tick_count;
+            if ((now - last_verify_tick_fail) >= 50) {
+                heap_verify();
+                last_verify_tick_fail = now;
+            }
+        }
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
         if (kernel_stack_base) kfree(kernel_stack_base);

@@ -74,7 +74,15 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     }
 
     DPRINTF3("launch_user: created PD=0x%08X for ELF binary\n", new_pd);
-    if (debugMode && debugLevel >= 3) heap_verify();
+    if (debugMode && debugLevel >= 3) {
+        static uint32_t last_verify_tick = 0;
+        extern volatile uint32_t tick_count;
+        uint32_t now = tick_count;
+        if ((now - last_verify_tick) >= 500) {
+            heap_verify();
+            last_verify_tick = now;
+        }
+    }
 
     elf_info_t elf_info;
     uint32_t *elf_pages = NULL;
@@ -97,7 +105,15 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7, &stack_page_count);
     DPRINTF3("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
-    if (debugMode && debugLevel >= 3) heap_verify();
+    if (debugMode && debugLevel >= 3) {
+        static uint32_t last_verify_tick2 = 0;
+        extern volatile uint32_t tick_count;
+        uint32_t now = tick_count;
+        if ((now - last_verify_tick2) >= 500) {
+            heap_verify();
+            last_verify_tick2 = now;
+        }
+    }
 
     uint32_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
     if (setup_initial_stack(new_pd, argv0, &initial_useresp) != 0) {

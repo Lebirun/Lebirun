@@ -286,6 +286,10 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
     if (!fb.font || !fb.font->glyphs) {
         return;
     }
+
+    if (cx >= fb.cols || cy >= fb.rows) {
+        return;
+    }
     
     if (cy < MAX_ROWS && cx < MAX_COLS) {
         screen_buffer[cy][cx] = c;
@@ -299,23 +303,55 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
     
     uint32_t px = cx * fb.font->width;
     uint32_t py = cy * fb.font->height;
-    
+
+    uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
+    if (bytes_per_pixel == 0) return;
+
     uint32_t bytes_per_line = fb.font->bytesperglyph / fb.font->height;
     if (bytes_per_line == 0) bytes_per_line = (fb.font->width + 7) / 8;
-    
+
+    if (fb.bpp == 32 && fb.font->width == 8 && bytes_per_line == 1) {
+        uint8_t *base = (uint8_t *)fb.addr;
+        uint32_t fg = fb.fg_color;
+        uint32_t bg = fb.bg_color;
+        uint8_t *row_ptr = base + py * fb.pitch + px * 4u;
+        for (uint32_t row = 0; row < fb.font->height; row++) {
+            uint8_t bits = glyph[row];
+            uint32_t *p = (uint32_t *)row_ptr;
+            p[0] = (bits & 0x80) ? fg : bg;
+            p[1] = (bits & 0x40) ? fg : bg;
+            p[2] = (bits & 0x20) ? fg : bg;
+            p[3] = (bits & 0x10) ? fg : bg;
+            p[4] = (bits & 0x08) ? fg : bg;
+            p[5] = (bits & 0x04) ? fg : bg;
+            p[6] = (bits & 0x02) ? fg : bg;
+            p[7] = (bits & 0x01) ? fg : bg;
+            row_ptr += fb.pitch;
+        }
+        return;
+    }
+
+    uint8_t *base = (uint8_t *)fb.addr;
     for (uint32_t row = 0; row < fb.font->height; row++) {
-        uint32_t screen_y = py + row;
-        if (screen_y >= fb.height) break;
-        
+        uint8_t *dst = base + (py + row) * fb.pitch + px * bytes_per_pixel;
         for (uint32_t col = 0; col < fb.font->width; col++) {
-            uint32_t screen_x = px + col;
-            if (screen_x >= fb.width) break;
-            
             uint32_t byte_idx = row * bytes_per_line + col / 8;
             uint8_t bit = 7 - (col % 8);
-            uint32_t color = (glyph[byte_idx] & (1 << bit)) ? fb.fg_color : fb.bg_color;
-            
-            fb_putpixel(screen_x, screen_y, color);
+            uint32_t color = (glyph[byte_idx] & (1u << bit)) ? fb.fg_color : fb.bg_color;
+            uint8_t *p = dst + col * bytes_per_pixel;
+            if (fb.bpp == 32) {
+                *(uint32_t *)p = color;
+            } else if (fb.bpp == 24) {
+                p[0] = (uint8_t)(color & 0xFF);
+                p[1] = (uint8_t)((color >> 8) & 0xFF);
+                p[2] = (uint8_t)((color >> 16) & 0xFF);
+            } else if (fb.bpp == 16) {
+                uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+                uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+                uint8_t b = (uint8_t)(color & 0xFF);
+                uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                *(uint16_t *)p = rgb565;
+            }
         }
     }
 }
@@ -335,7 +371,7 @@ void fb_scroll(void) {
 
     uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) return;
-    uint32_t line_bytes = fb.width * bytes_per_pixel;
+    uint32_t line_bytes = fb.pitch;
     
     uint8_t *dst = (uint8_t *)fb.addr;
     uint8_t *src = (uint8_t *)fb.addr + line_height * fb.pitch;
@@ -364,6 +400,10 @@ void fb_scroll(void) {
                 uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
                 *(uint16_t *)p = rgb565;
             }
+        }
+        uint32_t used = fb.width * bytes_per_pixel;
+        if (used < fb.pitch) {
+            memset(row + used, 0, fb.pitch - used);
         }
     }
     

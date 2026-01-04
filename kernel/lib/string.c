@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <limits.h>
 
+#include <kernel/vring.h>
+#include <kernel/console.h>
+
 extern void terminal_putchar(char c);
 
 void* memset(void* bufptr, int value, size_t size) {
@@ -116,11 +119,21 @@ char* strrchr(const char* s, int c) {
 }
 
 static int putchar_kernel(int c) {
-	terminal_putchar((char)c);
+	char ch = (char)c;
+	if (console_is_initialized() && kprint_is_ready()) {
+		kprint_write(0, &ch, 1);
+		return c;
+	}
+	terminal_putchar(ch);
 	return c;
 }
 
 static bool kprint(const char* data, size_t length) {
+	if (!data || length == 0) return true;
+	if (console_is_initialized() && kprint_is_ready()) {
+		kprint_write(0, data, length);
+		return true;
+	}
 	for (size_t i = 0; i < length; i++) {
 		putchar_kernel(data[i]);
 	}

@@ -16,6 +16,7 @@ fi
 
 qemu-system-$(./target-triplet-to-arch.sh $HOST) \
     -m 4G \
+    -smp 4 \
     -cdrom lebirun.iso \
     -s -S \
     -serial stdio \
@@ -25,6 +26,7 @@ qemu-system-$(./target-triplet-to-arch.sh $HOST) \
     -device ide-hd,drive=sata0,bus=ahci0.0 \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+    -accel kvm \
     -boot d
 
 # Add "-d int,cpu_reset" for spammy QEMU built-in debugging output

@@ -104,9 +104,16 @@ int klog_printf(int level, const char *fmt, ...);
 int klog_drain_console0(uint32_t max_items);
 
 int kprint_write(int console_id, const char *buf, size_t len);
+void kprint_serial_async(const char *buf, size_t len);
 
 bool kprint_is_ready(void);
 
 extern kproc_t *current_kproc;
+
+#ifndef KPRINT_DRAIN_IN_IRQ
+#define KPRINT_DRAIN_IN_IRQ 1
+#endif
+
+void kprint_poll(uint32_t max_items);
 
 #endif
