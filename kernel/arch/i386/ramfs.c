@@ -1118,7 +1118,13 @@ static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
             strncpy(ramfs_dirent.name, child->name, VFS_MAX_NAME - 1);
             ramfs_dirent.name[VFS_MAX_NAME - 1] = '\0';
             ramfs_dirent.inode = (uint32_t)(uintptr_t)child;
-            ramfs_dirent.type = (child->type == 1) ? VFS_DIRECTORY : VFS_FILE;
+            if (child->type == RAMFS_NODE_DIR) {
+                ramfs_dirent.type = VFS_DIRECTORY;
+            } else if (child->type == RAMFS_NODE_SYMLINK) {
+                ramfs_dirent.type = VFS_SYMLINK;
+            } else {
+                ramfs_dirent.type = VFS_FILE;
+            }
             
             ramfs_node_unlock(rn);
             ramfs_unlock();
