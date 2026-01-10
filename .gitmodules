@@ -4,3 +4,6 @@
 [submodule "userprog/coreutils"]
 	path = userprog/coreutils
 	url = git@github.com:Lebirun/leb-coreutils.git
+[submodule "libc/leblibc"]
+	path = libc/leblibc
+	url = git@github.com:Lebirun/leblibc.git
