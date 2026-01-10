@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <lebirun.h>
 
 static void clear_screen(void) {
     int cur = console_getcur();

@@ -167,6 +167,9 @@ typedef struct {
     uint32_t load_base;
     uint32_t load_end;
     uint32_t bss_end;
+    uint32_t phdr_vaddr;
+    uint16_t phent;
+    uint16_t phnum;
 } elf_info_t;
 
 #define DL_MAX_HANDLES 16

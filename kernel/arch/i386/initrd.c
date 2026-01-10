@@ -306,7 +306,6 @@ initrd_file_t *initrd_find_path(const char *path) {
 }
 
 int initrd_open(const char *path, int flags) {
-    (void)flags;
     if (!path) return -1;
 
     initrd_file_t *f = initrd_find_path(path);
@@ -315,7 +314,13 @@ int initrd_open(const char *path, int flags) {
     }
     if (!f) return -1;
 
-    if (f->type == INITRD_TYPE_DIR) return -1;
+    int is_dir = (f->type == INITRD_TYPE_DIR);
+    
+    if (flags & 0200000) {
+        if (!is_dir) return -20;
+    } else {
+        if (is_dir) return -21;
+    }
 
     int fd = find_free_fd();
     if (fd < 0) return -1;

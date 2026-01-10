@@ -480,6 +480,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.cs = 0x1B;
         new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x23;
         new_task->user_brk = 0;
+        new_task->mmap_next_addr = 0x10000000;
         
         registers_t* frame = (registers_t*)kesp;
         DPRINTF3("User task frame at 0x%08X:\n", (uint32_t)kesp);

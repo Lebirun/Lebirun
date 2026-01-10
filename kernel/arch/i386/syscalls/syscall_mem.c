@@ -2,6 +2,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define USER_MMAP_BASE 0x10000000u
+#define USER_MMAP_LIMIT 0x40000000u
+
+static uint32_t align_up_u32(uint32_t v, uint32_t align) {
+    if (!align) return v;
+    return (v + align - 1u) & ~(align - 1u);
+}
+
 static int sys_brk(int addr, const char *unused, int unused2) {
     (void)unused; (void)unused2;
     
@@ -62,21 +70,51 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     return (int)newbrk;
 }
 
-static int sys_mmap(int len, const char *unused, int prot) {
-    (void)unused; (void)prot;
-    if (len <= 0 || !current_task) return -1;
-    
-    uint32_t base = 0x00600000;
-    uint32_t size = (len + 0xFFF) & ~0xFFFu;
-    
+static int sys_mmap(int a1, const char *a2, int a3) {
+    (void)a2; (void)a3;
+    if (!current_task) return -EINVAL;
+
+    uint32_t addr = 0;
+    uint32_t length = 0;
+
+    if (current_task->syscall_frame) {
+        registers_t *r = current_task->syscall_frame;
+        addr = r->ebx;
+        length = r->ecx;
+    } else {
+        addr = 0;
+        length = (uint32_t)a1;
+    }
+
+    if (length == 0) return -EINVAL;
+
+    uint32_t size = align_up_u32(length, 0x1000u);
+    if (size == 0) return -EINVAL;
+
+    if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
+        current_task->mmap_next_addr = USER_MMAP_BASE;
+    }
+
+    uint32_t base;
+    if (addr != 0 && (addr & 0xFFFu) == 0) {
+        base = addr;
+    } else {
+        base = align_up_u32(current_task->mmap_next_addr, 0x1000u);
+        if (base < USER_MMAP_BASE) base = USER_MMAP_BASE;
+        if (base + size >= USER_MMAP_LIMIT) {
+            base = USER_MMAP_BASE;
+        }
+        current_task->mmap_next_addr = base + size;
+    }
+
     uint32_t page_count = 0;
     uint32_t *new_pages = vmm_map_range_in_pd_tracked(
         current_task->pd_phys, base, size, 0x7, &page_count);
-    
+
     if (!new_pages && size > 0) {
-        return -1;
+        return -ENOMEM;
     }
-    
+
     if (new_pages && page_count > 0) {
         uint32_t old_count = current_task->user_pages_count;
         uint32_t new_count = old_count + page_count;
@@ -92,11 +130,9 @@ static int sys_mmap(int len, const char *unused, int prot) {
         }
         kfree(new_pages);
     }
-    
+
     return (int)base;
 }
-
-static uint32_t mmap_next_addr = 0x10000000;
 
 static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int64_t pgoffset) {
     (void)prot; (void)flags; (void)fd; (void)pgoffset;
@@ -106,14 +142,19 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     uint32_t size = (length + 0xFFF) & ~0xFFFu;
     uint32_t base;
     
-    if (addr != NULL && ((uint32_t)addr & 0xFFF) == 0) {
+    if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
+        current_task->mmap_next_addr = USER_MMAP_BASE;
+    }
+
+    if (addr != NULL && ((uint32_t)addr & 0xFFFu) == 0) {
         base = (uint32_t)addr;
     } else {
-        base = mmap_next_addr;
-        mmap_next_addr += size;
-        if (mmap_next_addr >= 0x40000000) {
-            mmap_next_addr = 0x10000000;
+        base = align_up_u32(current_task->mmap_next_addr, 0x1000u);
+        if (base < USER_MMAP_BASE) base = USER_MMAP_BASE;
+        if (base + size >= USER_MMAP_LIMIT) {
+            base = USER_MMAP_BASE;
         }
+        current_task->mmap_next_addr = base + size;
     }
     
     uint32_t page_count = 0;
@@ -163,9 +204,9 @@ static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int fl
     if (!current_task) return (void *)(long)-EINVAL;
     if (new_size == 0) return (void *)(long)-EINVAL;
     
-    uint32_t base = mmap_next_addr;
+    uint32_t base = current_task->mmap_next_addr;
     uint32_t size = (new_size + 0xFFF) & ~0xFFFu;
-    mmap_next_addr += size;
+    current_task->mmap_next_addr += size;
     
     uint32_t page_count = 0;
     uint32_t *new_pages = vmm_map_range_in_pd_tracked(

@@ -16,26 +16,12 @@ EXEC_PREFIX?=$(PREFIX)
 INCLUDEDIR?=$(PREFIX)/include
 LIBDIR?=$(EXEC_PREFIX)/lib
 
-LEBIRUN_OBJS = src/syscalls.o src/dirent.o src/setjmp.o
+LIBC_OBJS = src/syscalls.o src/leb_syscalls.o src/dirent.o src/setjmp.o src/stdio.o src/string.o src/malloc.o src/errno.o src/ctype.o src/stdlib.o src/start.o src/stat.o src/resource.o
 
 .PHONY: all clean install install-headers install-libs
 
-all: lib/liblebirun.a
-
-src/syscalls.o: src/syscalls.c
-	$(CC) -c -ffreestanding -nostdinc -isystem include -O2 -o $@ $<
-
-src/dirent.o: src/dirent.c
-	$(CC) -c -ffreestanding -nostdinc -isystem include -O2 -o $@ $<
-
-src/setjmp.o: src/setjmp.S
-	$(CC) -c -o $@ $<
-
-lib/liblebirun.a: $(LEBIRUN_OBJS)
-	$(AR) rcs $@ $(LEBIRUN_OBJS)
-
 clean:
-	rm -f $(LEBIRUN_OBJS) lib/liblebirun.a src/*.o
+	rm -f $(LIBC_OBJS) lib/libc.a src/*.o
 
 install: install-headers install-libs
 
@@ -43,8 +29,7 @@ install-headers:
 	mkdir -p $(DESTDIR)$(INCLUDEDIR)
 	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
 
-install-libs: lib/liblebirun.a
+install-libs: lib/libc.a
 	mkdir -p $(DESTDIR)$(LIBDIR)
 	cp lib/libc.a $(DESTDIR)$(LIBDIR)
 	cp lib/crt*.o $(DESTDIR)$(LIBDIR)
-	cp lib/liblebirun.a $(DESTDIR)$(LIBDIR)

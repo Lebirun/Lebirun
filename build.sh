@@ -7,7 +7,11 @@ export MAKEFLAGS
 
 for PROJECT in $PROJECTS; do
   echo "Building and installing $PROJECT..."
-  (cd "$PROJECT" && DESTDIR="$SYSROOT" $MAKE install)
+  if [ "$PROJECT" = "libc" ]; then
+    (cd "$PROJECT" && DESTDIR="$SYSROOT" ARCH=i386 $MAKE install)
+  else
+    (cd "$PROJECT" && DESTDIR="$SYSROOT" $MAKE install)
+  fi
 done
 
 echo "Building user programs..."

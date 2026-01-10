@@ -60,6 +60,7 @@ typedef struct task {
     uint32_t wake_tick;
     bool is_user;
     uint32_t user_brk;
+    uint32_t mmap_next_addr;
     registers_t *syscall_frame;
     uint32_t pd_phys;
     uint32_t *user_pages;

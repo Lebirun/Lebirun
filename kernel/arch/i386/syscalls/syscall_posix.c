@@ -147,12 +147,12 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
 static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     uint32_t addr = (uint32_t)path_ptr;
-    if (!addr || addr >= 0xC0000000 || addr < 0x1000) return -1;
+    if (!addr || addr >= 0xC0000000 || addr < 0x1000) return -EFAULT;
     const char *path = (const char *)addr;
     vfs_node_t *node = vfs_namei(path);
-    if (!node) return -1;
-    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -1;
-    if (!current_task) return -1;
+    if (!node) return -ENOENT;
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
+    if (!current_task) return -EFAULT;
     char *resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
     if (!resolved) {
         int i = 0;

@@ -16,6 +16,31 @@ build/
 *~
 *.swp
 .DS_Store
+*.log
+*.tmp
+*.bak
+build-*/
+*.elf
+*.map
+*.lst
+*.sym
+*.cmd
+*.gcov
+*.gcda
+*.gcno
+*.ko
+*.mod*
+*.dSYM/
+.cache/
+__pycache__/
+*.pyc
+cscope.out
+tags
+TAGS
+.idea/
+*.iml
+.mypy_cache/
+.pytest_cache/
 
 *.qcow2
 *.img
@@ -25,3 +50,5 @@ build/
 !libc/lib/*
 
 !root/*
+
+libc/lib/

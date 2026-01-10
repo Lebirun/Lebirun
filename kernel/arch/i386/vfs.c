@@ -24,6 +24,7 @@ void vfs_init(void) {
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         mounts[i].in_use = 0;
         mounts[i].path[0] = '\0';
+        mounts[i].device[0] = '\0';
         mounts[i].root = NULL;
         mounts[i].fs_type = NULL;
     }
@@ -133,8 +134,44 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
     mounts[slot].path[cp] = '\0';
     mounts[slot].root = root;
     mounts[slot].fs_type = fs;
+    if (device && device[0] != '\0') {
+        size_t di = 0;
+        while (device[di] && di < VFS_MAX_PATH - 1) {
+            mounts[slot].device[di] = device[di];
+            ++di;
+        }
+        mounts[slot].device[di] = '\0';
+    } else {
+        mounts[slot].device[0] = '\0';
+    }
     
-    if (root) root->parent = vfs_root;
+        if (root) {
+            root->parent = vfs_root;
+
+            /*
+             * Ensure mounted roots have a stable name so vfs_get_path() can
+             * reconstruct paths like /initrd and /disk. Many FS implementations
+             * use "/" for their internal root node name.
+             */
+            if (mountpoint[0] == '/' && !(mountpoint[0] == '/' && mountpoint[1] == '\0')) {
+                const char *end = mountpoint + strlen(mountpoint);
+                while (end > mountpoint + 1 && end[-1] == '/') {
+                    end--;
+                }
+                const char *base = end;
+                while (base > mountpoint && base[-1] != '/') {
+                    base--;
+                }
+                if (base < end) {
+                    size_t n = (size_t)(end - base);
+                    if (n >= VFS_MAX_NAME) {
+                        n = VFS_MAX_NAME - 1;
+                    }
+                    memcpy(root->name, base, n);
+                    root->name[n] = '\0';
+                }
+            }
+        }
     
     printf("[VFS] Mounted %s on %s (type: %s)\n", 
            device ? device : "(none)", mountpoint, fs_type);
@@ -155,6 +192,7 @@ int vfs_unmount(const char *mountpoint) {
             mounts[i].path[0] = '\0';
             mounts[i].root = NULL;
             mounts[i].fs_type = NULL;
+            mounts[i].device[0] = '\0';
             
             printf("[VFS] Unmounted %s\n", mountpoint);
             return 0;
@@ -307,33 +345,33 @@ static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
 
 static void vfs_normalize_path(char *path) {
     if (!path || path[0] != '/') return;
-    
+
     char *src = path;
     char *dst = path;
     char *components[64];
     int count = 0;
-    
+
     while (*src) {
         while (*src == '/') src++;
         if (*src == '\0') break;
-        
+
         char *comp_start = src;
         while (*src && *src != '/') src++;
         size_t comp_len = src - comp_start;
-        
+
         if (comp_len == 1 && comp_start[0] == '.') {
             continue;
         } else if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
             if (count > 0) count--;
             continue;
         }
-        
+
         if (count < 64) {
             components[count++] = comp_start;
             if (*src) *src++ = '\0';
         }
     }
-    
+
     dst = path;
     *dst++ = '/';
     for (int i = 0; i < count; i++) {
@@ -342,7 +380,7 @@ static void vfs_normalize_path(char *path) {
         if (i < count - 1) *dst++ = '/';
     }
     *dst = '\0';
-    
+
     if (path[1] == '\0') return;
 }
 
@@ -404,9 +442,19 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         if (vfs_resolve_path(path, resolved, sizeof(resolved)) < 0) return NULL;
         vfs_normalize_path(resolved);
         path = resolved;
+    } else {
+        size_t i = 0;
+        while (path[i] && i < sizeof(resolved) - 1) {
+            resolved[i] = path[i];
+            i++;
+        }
+        resolved[i] = '\0';
+        vfs_normalize_path(resolved);
+        path = resolved;
     }
 
     if (path[0] != '/') return NULL;
+
     if (path[0] == '/' && path[1] == '\0') return vfs_root;
 
     vfs_mount_t *mount = find_mount_for_path(path);

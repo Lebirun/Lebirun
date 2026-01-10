@@ -289,6 +289,8 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
 }
 
 void syscalls_vfs_init(void) {
+    syscall_table[SYSCALL_OPEN] = sys_vfs_open;
+    syscall_table[SYSCALL_CLOSE] = sys_vfs_close;
     syscall_table[SYSCALL_VFS_OPEN] = sys_vfs_open;
     syscall_table[SYSCALL_VFS_CLOSE] = sys_vfs_close;
     syscall_table[SYSCALL_VFS_READ] = sys_vfs_read;

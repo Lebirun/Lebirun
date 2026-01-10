@@ -767,13 +767,16 @@ int fgetpos(FILE *stream, fpos_t *pos) {
     if (!stream || !pos) return -1;
     long p = ftell(stream);
     if (p < 0) return -1;
-    pos->__lldata = p;
+    memset(pos, 0, sizeof(*pos));
+    memcpy(pos, &p, sizeof(*pos) < sizeof(p) ? sizeof(*pos) : sizeof(p));
     return 0;
 }
 
 int fsetpos(FILE *stream, const fpos_t *pos) {
     if (!stream || !pos) return -1;
-    return fseek(stream, (long)pos->__lldata, SEEK_SET);
+    long p = 0;
+    memcpy(&p, pos, sizeof(*pos) < sizeof(p) ? sizeof(*pos) : sizeof(p));
+    return fseek(stream, p, SEEK_SET);
 }
 
 FILE *tmpfile(void) { return NULL; }

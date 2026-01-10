@@ -7,6 +7,24 @@
 #define AT_EACCESS          0x200
 #define AT_EMPTY_PATH       0x1000
 
+static int task_fd_alloc_from(int start) {
+    if (!current_task) return -ESRCH;
+    if (start < 0) start = 0;
+    for (int i = start; i < TASK_MAX_FDS; i++) {
+        if (!current_task->fds[i].in_use) {
+            current_task->fds[i].in_use = 1;
+            current_task->fds[i].ref_count = 1;
+            current_task->fds[i].type = FD_TYPE_FILE;
+            current_task->fds[i].node = NULL;
+            current_task->fds[i].offset = 0;
+            current_task->fds[i].flags = 0;
+            current_task->fds[i].private_data = NULL;
+            return i;
+        }
+    }
+    return -EMFILE;
+}
+
 static const char *resolve_at_path(int dirfd, const char *pathname, char *resolved, size_t size) {
     if (!pathname) return NULL;
     
@@ -50,8 +68,25 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
     char resolved[256];
     const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
-    
-    return vfs_open_path(path, flags);
+
+    if (!current_task) return -ESRCH;
+
+    vfs_node_t *node = vfs_namei(path);
+    if (!node) return -ENOENT;
+
+    if ((flags & 0200000) && VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
+        return -ENOTDIR;
+    }
+
+    int fd = task_fd_alloc_from(0);
+    if (fd < 0) return fd;
+
+    vfs_open(node, (uint32_t)flags);
+    current_task->fds[fd].type = FD_TYPE_FILE;
+    current_task->fds[fd].node = node;
+    current_task->fds[fd].offset = (flags & VFS_O_APPEND) ? node->length : 0;
+    current_task->fds[fd].flags = (uint32_t)flags;
+    return fd;
 }
 
 static int sys_mkdirat(int dirfd, const char *pathname, int mode) {

@@ -1,3 +1,4 @@
+#include <kernel/mem_map.h>
 #include <kernel/vfs.h>
 #include <kernel/task.h>
 #include <string.h>
@@ -425,19 +426,61 @@ static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 
 static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     (void)node;
-    
-    const char *buf = 
-        "/dev/root / ramfs rw 0 0\n"
-        "devfs /dev devfs rw 0 0\n"
-        "proc /proc proc rw 0 0\n";
-    
-    uint32_t len = 0;
-    while (buf[len]) len++;
-    
-    if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
-    if (size > remaining) size = remaining;
+
+    size_t buf_size = VFS_MAX_MOUNTS * (VFS_MAX_PATH * 2 + 64);
+    char *buf = (char *)kmalloc(buf_size);
+    if (!buf) {
+        return 0;
+    }
+
+    size_t len = 0;
+    int mount_count = vfs_get_mount_count();
+    for (int i = 0; i < mount_count; ++i) {
+        vfs_mount_t *mount = vfs_get_mount(i);
+        if (!mount) {
+            continue;
+        }
+
+        const char *device = mount->device[0] ? mount->device :
+            (mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown");
+        const char *path = mount->path[0] ? mount->path : "/";
+        const char *fsname = mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown";
+        const char *opts = "rw";
+
+        if (len >= buf_size) {
+            break;
+        }
+
+        size_t remaining = buf_size - len;
+        int written = snprintf(buf + len, remaining, "%s %s %s %s 0 0\n",
+            device, path, fsname, opts);
+        if (written <= 0) {
+            continue;
+        }
+        if ((size_t)written >= remaining) {
+            len = buf_size - 1;
+            break;
+        }
+
+        len += (size_t)written;
+    }
+
+    if (len == 0) {
+        kfree(buf);
+        return 0;
+    }
+
+    if (offset >= len) {
+        kfree(buf);
+        return 0;
+    }
+
+    uint32_t available = (uint32_t)(len - offset);
+    if (size > available) {
+        size = available;
+    }
     memcpy(buffer, buf + offset, size);
+    kfree(buf);
     return size;
 }
 

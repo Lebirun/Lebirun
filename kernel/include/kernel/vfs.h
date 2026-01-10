@@ -111,6 +111,7 @@ typedef struct vfs_fs_type {
 
 typedef struct {
     char path[VFS_MAX_PATH];
+    char device[VFS_MAX_PATH];
     vfs_node_t *root;
     vfs_fs_type_t *fs_type;
     int in_use;

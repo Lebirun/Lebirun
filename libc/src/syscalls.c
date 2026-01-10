@@ -7,19 +7,9 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <signal.h>
-
-#define __NEED_ssize_t
-#define __NEED_mode_t
-#define __NEED_off_t
-#define __NEED_pthread_t
-#define __NEED_pthread_attr_t
-#define __NEED_pthread_mutex_t
-#define __NEED_pthread_mutexattr_t
-#define __NEED_pthread_cond_t
-#define __NEED_pthread_condattr_t
-#define __NEED_key_t
-#include <bits/alltypes.h>
-
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <pthread.h>
 #include <errno.h>
 
 #define EPERM   1
@@ -272,109 +262,6 @@ int waitpid(int pid, int *status, int options) {
 
 int wait(int *status) { return waitpid(-1, status, 0); }
 
-unsigned int getticks(void) {
-    return (unsigned int)syscall0(SYS_GETTICKS);
-}
-
-int initrd_count(void) {
-    return syscall0(SYS_INITRD_COUNT);
-}
-
-int initrd_stat(int index, char *name, unsigned int *length) {
-    return syscall3(SYS_INITRD_STAT, index, (int)name, (int)length);
-}
-
-int initrd_read(int index, void *buf, unsigned int maxlen) {
-    return syscall3(SYS_INITRD_READ, index, (int)buf, (int)maxlen);
-}
-
-int vfs_open(const char *path, int flags) {
-    return syscall2(SYS_VFS_OPEN, (int)path, flags);
-}
-
-int vfs_close_fd(int fd) {
-    return syscall1(SYS_VFS_CLOSE, fd);
-}
-
-int vfs_read_fd(int fd, void *buf, unsigned int count) {
-    return syscall3(SYS_VFS_READ, fd, (int)buf, (int)count);
-}
-
-int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index) {
-    return syscall4(SYS_VFS_READDIR, fd, (int)name, (int)type, (int)index);
-}
-
-int vfs_stat(int fd, unsigned int *size, unsigned int *type) {
-    return syscall3(SYS_VFS_STAT, fd, (int)size, (int)type);
-}
-
-int vfs_mounts(void) {
-    return syscall0(SYS_VFS_MOUNTS);
-}
-
-int vfs_write_fd(int fd, const void *buf, unsigned int count) {
-    return syscall3(SYS_VFS_WRITE, fd, (int)buf, (int)count);
-}
-
-int vfs_create(const char *path, unsigned int perms) {
-    return syscall2(SYS_VFS_CREATE, (int)path, (int)perms);
-}
-
-int vfs_mkdir(const char *path, unsigned int perms) {
-    return syscall2(SYS_VFS_MKDIR, (int)path, (int)perms);
-}
-
-int vfs_unlink(const char *path) {
-    return syscall1(SYS_VFS_UNLINK, (int)path);
-}
-
-int read_nb(int fd, void *buf, size_t count) {
-    return syscall3(SYS_READ_NB, fd, (int)buf, (int)count);
-}
-
-int sleep_ms(int ms) {
-    return syscall1(SYS_SLEEP, ms);
-}
-
-int console_switch(int console_num) {
-    return syscall1(SYS_CONSOLE_SWITCH, console_num);
-}
-
-int console_getcur(void) {
-    return syscall0(SYS_CONSOLE_GETCUR);
-}
-
-int console_clear(int console_num) {
-    return syscall1(SYS_CONSOLE_CLEAR, console_num);
-}
-
-int console_setcursor(int x, int y) {
-    return syscall2(SYS_CONSOLE_SETCURSOR, x, y);
-}
-
-int fb_setcolors(unsigned int fg, unsigned int bg) {
-    return syscall2(SYS_FB_SETCOLORS, (int)fg, (int)bg);
-}
-
-int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp, 
-               unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row) {
-    unsigned int info[6];
-    int ret = syscall1(SYS_FB_GETINFO, (int)info);
-    if (ret == 0) {
-        if (width) *width = info[0];
-        if (height) *height = info[1];
-        if (bpp) *bpp = info[2];
-        if (font_height) *font_height = info[3];
-        if (rows) *rows = info[4];
-        if (cursor_row) *cursor_row = info[5];
-    }
-    return ret;
-}
-
-int fb_clear(void) {
-    return syscall0(SYS_FB_CLEAR);
-}
-
 int dup(int oldfd) {
     return syscall1(SYS_DUP, oldfd);
 }
@@ -403,7 +290,9 @@ char *getcwd(char *buf, size_t size) {
 }
 
 int chdir(const char *path) {
-    return syscall1(SYS_CHDIR, (int)path);
+    int ret = syscall1(SYS_CHDIR, (int)path);
+    if (ret < 0) { errno = -ret; return -1; }
+    return 0;
 }
 
 int access(const char *pathname, int mode) {
@@ -452,7 +341,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 }
 
 int sigsuspend(const sigset_t *mask) {
-    int ret = syscall2(124 | LEBIRUN_SYSCALL_FLAG, (int)mask, sizeof(sigset_t));
+    syscall2(124 | LEBIRUN_SYSCALL_FLAG, (int)mask, sizeof(sigset_t));
     errno = EINTR;
     return -1;
 }
@@ -843,21 +732,36 @@ int sigfillset(sigset_t *set) {
 
 int sigaddset(sigset_t *set, int signum) {
     if (set && signum > 0 && signum < 128) {
-        set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] |= (1UL << ((signum - 1) % (sizeof(unsigned long) * 8)));
+        size_t bit = (size_t)(signum - 1);
+        size_t word = bit / (sizeof(unsigned long) * 8);
+        size_t nwords = sizeof(*set) / sizeof(unsigned long);
+        if (word < nwords) {
+            ((unsigned long *)set)[word] |= (1UL << (bit % (sizeof(unsigned long) * 8)));
+        }
     }
     return 0;
 }
 
 int sigdelset(sigset_t *set, int signum) {
     if (set && signum > 0 && signum < 128) {
-        set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] &= ~(1UL << ((signum - 1) % (sizeof(unsigned long) * 8)));
+        size_t bit = (size_t)(signum - 1);
+        size_t word = bit / (sizeof(unsigned long) * 8);
+        size_t nwords = sizeof(*set) / sizeof(unsigned long);
+        if (word < nwords) {
+            ((unsigned long *)set)[word] &= ~(1UL << (bit % (sizeof(unsigned long) * 8)));
+        }
     }
     return 0;
 }
 
 int sigismember(const sigset_t *set, int signum) {
     if (set && signum > 0 && signum < 128) {
-        return (set->__bits[(signum - 1) / (sizeof(unsigned long) * 8)] >> ((signum - 1) % (sizeof(unsigned long) * 8))) & 1;
+        size_t bit = (size_t)(signum - 1);
+        size_t word = bit / (sizeof(unsigned long) * 8);
+        size_t nwords = sizeof(*set) / sizeof(unsigned long);
+        if (word < nwords) {
+            return (((const unsigned long *)set)[word] >> (bit % (sizeof(unsigned long) * 8))) & 1UL;
+        }
     }
     return 0;
 }
@@ -1080,7 +984,7 @@ int get_robust_list(int pid, void **head_ptr, size_t *len_ptr) {
     return syscall3(SYS_GET_ROBUST_LIST, pid, (int)head_ptr, (int)len_ptr);
 }
 
-int clone(int (*fn)(void *), void *stack, int flags, void *arg) {
+int __clone(int (*fn)(void *), void *stack, int flags, void *arg, ...) {
     return syscall4(SYS_CLONE, (int)fn, (int)stack, flags, (int)arg);
 }
 
@@ -1279,6 +1183,9 @@ int pthread_cond_broadcast(pthread_cond_t *cond) {
     return syscall1(SYS_PTHREAD_COND_BROADCAST, (int)cond);
 }
 
+#ifdef pthread_equal
+#undef pthread_equal
+#endif
 int pthread_equal(pthread_t t1, pthread_t t2) {
     return t1 == t2;
 }

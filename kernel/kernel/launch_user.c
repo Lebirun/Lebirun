@@ -13,12 +13,26 @@
 #define USER_STACK_SIZE 0x10000u
 #define USER_STACK_GAP  0x1000u
 
+#define AT_NULL         0
+#define AT_PHDR         3
+#define AT_PHENT        4
+#define AT_PHNUM        5
+#define AT_PAGESZ       6
+#define AT_ENTRY        9
+#define AT_UID          11
+#define AT_EUID         12
+#define AT_GID          13
+#define AT_EGID         14
+#define AT_RANDOM       25
+
 static uint32_t align_down_u32(uint32_t v, uint32_t align) {
     if (align == 0) return v;
     return v & ~(align - 1u);
 }
 
-static int setup_initial_stack(uint32_t pd_phys, const char *argv0, uint32_t *out_useresp) {
+static int setup_initial_stack_with_elf(uint32_t pd_phys, const char *argv0, 
+                                         const elf_info_t *elf_info,
+                                         uint32_t *out_useresp) {
     if (!out_useresp) return -1;
 
     uint32_t sp = USER_STACK_TOP - USER_STACK_GAP;
@@ -34,12 +48,39 @@ static int setup_initial_stack(uint32_t pd_phys, const char *argv0, uint32_t *ou
     uint32_t prog_addr = sp;
     vmm_copy_to_pd(pd_phys, sp, prog_name, (uint32_t)(prog_len + 1));
 
+    uint8_t random_bytes[16] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                                 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    sp -= 16;
+    uint32_t random_addr = sp;
+    vmm_copy_to_pd(pd_phys, sp, random_bytes, 16);
+
     sp = align_down_u32(sp, 16);
 
-    sp -= 4;
-    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
-    sp -= 4;
-    vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
+    #define PUSH_AUXV(type, val) do { \
+        uint32_t _t = (type), _v = (val); \
+        sp -= 4; vmm_copy_to_pd(pd_phys, sp, &_v, sizeof(uint32_t)); \
+        sp -= 4; vmm_copy_to_pd(pd_phys, sp, &_t, sizeof(uint32_t)); \
+    } while(0)
+
+    PUSH_AUXV(AT_NULL, 0);
+
+    PUSH_AUXV(AT_RANDOM, random_addr);
+
+    PUSH_AUXV(AT_EGID, 0);
+    PUSH_AUXV(AT_GID, 0);
+    PUSH_AUXV(AT_EUID, 0);
+    PUSH_AUXV(AT_UID, 0);
+
+    PUSH_AUXV(AT_PAGESZ, 4096);
+
+    if (elf_info) {
+        PUSH_AUXV(AT_ENTRY, elf_info->entry_point);
+        PUSH_AUXV(AT_PHNUM, elf_info->phnum);
+        PUSH_AUXV(AT_PHENT, elf_info->phent);
+        PUSH_AUXV(AT_PHDR, elf_info->phdr_vaddr);
+    }
+
+    #undef PUSH_AUXV
 
     sp -= 4;
     vmm_copy_to_pd(pd_phys, sp, &zero, sizeof(uint32_t));
@@ -116,7 +157,7 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     }
 
     uint32_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
-    if (setup_initial_stack(new_pd, argv0, &initial_useresp) != 0) {
+    if (setup_initial_stack_with_elf(new_pd, argv0, &elf_info, &initial_useresp) != 0) {
         printf("launch_user_binary: failed to setup initial user stack\n");
         if (elf_pages) {
             for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);

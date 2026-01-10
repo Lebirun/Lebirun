@@ -47,3 +47,26 @@ rm -rf lebirun.iso
 rm -f initrd.img
 rm -rf include
 rm -rf rootfs.img
+
+echo "Cleaning remaining .o files..."
+find kernel -type f -name '*.o' -delete 2>/dev/null || true
+find libc -type f -name '*.o' -delete 2>/dev/null || true
+find userprog -type f -name '*.o' -delete 2>/dev/null || true
+
+echo "Cleaning .d dependency files..."
+find kernel -type f -name '*.d' -delete 2>/dev/null || true
+find libc -type f -name '*.d' -delete 2>/dev/null || true
+find userprog -type f -name '*.d' -delete 2>/dev/null || true
+
+echo "Cleaning kernel artifacts..."
+rm -f kernel/lebirun.kernel
+rm -f kernel/arch/i386/user_shell.bin
+rm -f kernel/arch/i386/user_shell_bin.o
+rm -f kernel/arch/i386/unifont_bin.o
+
+echo "Cleaning libc/leblibc build artifacts..."
+rm -rf libc/leblibc/build-i386
+rm -f libc/lib/libc.a
+rm -f libc/lib/crt*.o
+
+echo "Clean complete."

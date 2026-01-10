@@ -131,6 +131,9 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
     info->load_base = 0xFFFFFFFF;
     info->load_end = 0;
     info->bss_end = 0;
+    info->phent = ehdr->e_phentsize;
+    info->phnum = ehdr->e_phnum;
+    info->phdr_vaddr = 0;
 
     uint32_t estimated_pages = count_loadable_pages(data);
     uint32_t *page_list = NULL;
@@ -142,6 +145,13 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
             return -10;
         }
         memset(page_list, 0, estimated_pages * sizeof(uint32_t));
+    }
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_PHDR) {
+            info->phdr_vaddr = phdr[i].p_vaddr;
+            break;
+        }
     }
 
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
@@ -226,6 +236,10 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
     }
     if (out_page_count) {
         *out_page_count = page_index;
+    }
+
+    if (info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFF) {
+        info->phdr_vaddr = info->load_base + ehdr->e_phoff;
     }
 
     DPRINTF2("elf_load: done entry=0x%08X load_base=0x%08X load_end=0x%08X bss_end=0x%08X\n",
