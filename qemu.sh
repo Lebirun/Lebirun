@@ -17,6 +17,7 @@ fi
 qemu-system-$(./target-triplet-to-arch.sh $HOST) \
     -m 4G \
     -smp 4 \
+    -vga "${QEMU_VGA:-std}" \
     -cdrom lebirun.iso \
     -s -S \
     -serial stdio \

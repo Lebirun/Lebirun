@@ -6,12 +6,10 @@
 #include <stdbool.h>
 
 #define NUM_CONSOLES 9
-#define CONSOLE_BUFFER_ROWS 128
-#define CONSOLE_BUFFER_COLS 256
+#define CONSOLE_BUFFER_ROWS 256
+#define CONSOLE_BUFFER_COLS 512
 
 bool console_is_initialized(void);
-#define CONSOLE_BUFFER_ROWS 128
-#define CONSOLE_BUFFER_COLS 256
 
 typedef struct {
     char buffer[CONSOLE_BUFFER_ROWS][CONSOLE_BUFFER_COLS];
@@ -36,5 +34,7 @@ void console_writestring(const char *data);
 void console_clear(int console_num);
 void console_setcursor(int console_num, int x, int y);
 int console_getcursor(int console_num, int *x, int *y);
+void console_redraw_current(void);
+void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
 
 #endif

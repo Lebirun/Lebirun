@@ -28,6 +28,9 @@
 #define SYS_FB_PUTPIXEL     (21u | LEBIRUN_SYSCALL_FLAG)
 #define SYS_FB_GETINFO      (23u | LEBIRUN_SYSCALL_FLAG)
 #define SYS_FB_CLEAR        (24u | LEBIRUN_SYSCALL_FLAG)
+#define SYS_FB_SET_MODE     (259u | LEBIRUN_SYSCALL_FLAG)
+#define SYS_FB_GET_DETAILED_INFO (260u | LEBIRUN_SYSCALL_FLAG)
+#define SYS_FB_GET_CAPS     (261u | LEBIRUN_SYSCALL_FLAG)
 
 #define SYS_READ_NB         (39u | LEBIRUN_SYSCALL_FLAG)
 #define SYS_SLEEP           (5u  | LEBIRUN_SYSCALL_FLAG)
@@ -182,9 +185,10 @@ int fb_putpixel(unsigned int x, unsigned int y, unsigned int color)
 }
 
 int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp,
-    unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row)
+    unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row,
+    unsigned int *font_width, unsigned int *cols)
 {
-    unsigned int info[6];
+    unsigned int info[8];
     int ret = (int)syscall1(SYS_FB_GETINFO, (long)info);
     if (ret == 0) {
         if (width) *width = info[0];
@@ -193,6 +197,8 @@ int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp,
         if (font_height) *font_height = info[3];
         if (rows) *rows = info[4];
         if (cursor_row) *cursor_row = info[5];
+        if (font_width) *font_width = info[6];
+        if (cols) *cols = info[7];
     }
     return ret;
 }
@@ -200,4 +206,27 @@ int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp,
 int fb_clear(void)
 {
     return (int)syscall0(SYS_FB_CLEAR);
+}
+int fb_set_mode(unsigned int width, unsigned int height, unsigned int refresh_rate)
+{
+    return (int)syscall3(SYS_FB_SET_MODE, (long)width, (long)height, (long)refresh_rate);
+}
+
+int fb_getinfo_detailed(unsigned int *width, unsigned int *height, unsigned int *bpp, unsigned int *refresh_rate)
+{
+    unsigned int info[4];
+    int ret = (int)syscall1(SYS_FB_GET_DETAILED_INFO, (long)info);
+    if (ret == 0) {
+        if (width) *width = info[0];
+        if (height) *height = info[1];
+        if (bpp) *bpp = info[2];
+        if (refresh_rate) *refresh_rate = info[3];
+    }
+    return ret;
+}
+
+int fb_getcaps(unsigned int *words, unsigned int count)
+{
+    if (!words) return -1;
+    return (int)syscall2(SYS_FB_GET_CAPS, (long)words, (long)count);
 }

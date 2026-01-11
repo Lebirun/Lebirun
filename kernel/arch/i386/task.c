@@ -959,6 +959,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         serial_print(" task=");
         serial_hex(next->id);
         serial_print("\n");
+
+        task_kill(next, 0xBADF00D);
         if (kernel_cr3 && entry_cr3 != kernel_cr3) {
             __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
         }

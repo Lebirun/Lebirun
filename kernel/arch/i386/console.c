@@ -73,6 +73,52 @@ static void console_redraw(void) {
     fb_update_cursor();
 }
 
+static void console_clamp_cursors_locked(uint32_t max_cols, uint32_t max_rows) {
+    if (max_cols == 0) max_cols = 1;
+    if (max_rows == 0) max_rows = 1;
+    if (max_cols > CONSOLE_BUFFER_COLS) max_cols = CONSOLE_BUFFER_COLS;
+    if (max_rows > CONSOLE_BUFFER_ROWS) max_rows = CONSOLE_BUFFER_ROWS;
+
+    for (int i = 0; i < NUM_CONSOLES; i++) {
+        console_t *con = &consoles[i];
+        if (con->cursor_x >= max_cols) {
+            con->cursor_x = max_cols - 1;
+        }
+        if (con->cursor_y >= max_rows) {
+            con->cursor_y = max_rows - 1;
+        }
+    }
+
+    if (current_console >= 0 && current_console < NUM_CONSOLES) {
+        framebuffer_t *fb = fb_get();
+        if (fb) {
+            if (fb->cursor_x >= max_cols) {
+                fb->cursor_x = max_cols - 1;
+            }
+            if (fb->cursor_y >= max_rows) {
+                fb->cursor_y = max_rows - 1;
+            }
+        }
+    }
+}
+
+void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows) {
+    uint32_t flags = console_irqsave();
+    spin_lock(&console_lock);
+    console_clamp_cursors_locked(max_cols, max_rows);
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+void console_redraw_current(void) {
+    if (!console_initialized) return;
+    uint32_t flags = console_irqsave();
+    spin_lock(&console_lock);
+    console_redraw();
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
 void console_switch(int console_num) {
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
@@ -85,7 +131,12 @@ void console_switch(int console_num) {
         consoles[current_console].cursor_x = fb->cursor_x;
         consoles[current_console].cursor_y = fb->cursor_y;
     }
-    
+    uint32_t rows = fb ? fb->rows : 25;
+    uint32_t cols = fb ? fb->cols : 80;
+    if (rows == 0) rows = 1;
+    if (cols == 0) cols = 1;
+    if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+    if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
     current_console = console_num;
     
     if (fb) {
@@ -93,6 +144,8 @@ void console_switch(int console_num) {
         fb->cursor_y = consoles[current_console].cursor_y;
     }
     
+    console_clamp_cursors_locked(cols, rows);
+
     console_redraw();
 
     spin_unlock(&console_lock);
@@ -140,6 +193,11 @@ static int parse_csi_params(const char *buf, int len, int *params, int max_param
 
 static void console_handle_csi(int console_num, console_t *con, framebuffer_t *fb, uint32_t rows, uint32_t cols, int is_active) {
     if (con->esc_len == 0) return;
+
+    if (rows == 0) rows = 1;
+    if (cols == 0) cols = 1;
+    if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+    if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
 
     char cmd = con->esc_buf[con->esc_len - 1];
     
@@ -465,6 +523,10 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         framebuffer_t *fb = fb_get();
         uint32_t rows = fb ? fb->rows : 25;
         uint32_t cols = fb ? fb->cols : 80;
+        if (rows == 0) rows = 1;
+        if (cols == 0) cols = 1;
+        if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+        if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
         int is_active = (target_console == current_console);
 
         for (size_t i = 0; i < chunk; i++) {

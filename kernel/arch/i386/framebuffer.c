@@ -1,5 +1,7 @@
 #include <kernel/framebuffer.h>
 #include <kernel/mem_map.h>
+#include <kernel/drivers/fb/bga.h>
+#include <kernel/console.h>
 #include <string.h>
 
 static framebuffer_t fb;
@@ -7,9 +9,32 @@ static uint32_t cursor_prev_x = 0;
 static uint32_t cursor_prev_y = 0;
 static int cursor_visible = 1;
 static int cursor_drawn = 0;
+static int is_tty_mode = 0;
+static uint32_t original_fb_width = 0;
+static uint32_t original_fb_height = 0;
+static uint32_t original_fb_pitch = 0;
+static uint32_t original_fb_size = 0;
+static uint32_t hw_width = 0;
+static uint32_t hw_height = 0;
+static uint32_t hw_pitch = 0;
+static uint32_t fb_vram_bytes = 0;
 
-#define MAX_COLS 256
-#define MAX_ROWS 128
+static uint32_t decrease_width_step(uint32_t value, uint32_t step) {
+    if (step == 0 || value <= step) {
+        return 0;
+    }
+    uint32_t delta = value % step;
+    if (delta == 0) {
+        delta = step;
+    }
+    if (delta > value) {
+        return 0;
+    }
+    return value - delta;
+}
+
+#define MAX_COLS 512
+#define MAX_ROWS 256
 static char screen_buffer[MAX_ROWS][MAX_COLS];
 
 static void fb_draw_cursor_block(uint32_t cx, uint32_t cy, uint32_t color) {
@@ -173,6 +198,8 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     fb.pitch = pitch;
     fb.bpp = bpp;
     fb.type = type;
+    fb.phys_addr = addr;
+    fb.refresh_rate = 60;
     
     uint32_t fb_phys = (uint32_t)addr;
     uint32_t fb_size = pitch * height;
@@ -193,6 +220,22 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     fb.cols = width / fb.font->width;
     fb.rows = height / fb.font->height;
     
+    original_fb_width = width;
+    original_fb_height = height;
+    original_fb_pitch = pitch;
+    original_fb_size = pitch * height;
+    fb_vram_bytes = original_fb_size;
+    if (bga_is_available()) {
+        uint32_t vram = bga_get_vram_bytes();
+        if (vram > fb_vram_bytes) fb_vram_bytes = vram;
+    }
+    hw_height = height;
+    hw_pitch = pitch;
+    uint32_t bytes_per_pixel = (uint32_t)(bpp / 8u);
+    hw_width = bytes_per_pixel ? (pitch / bytes_per_pixel) : width;
+    
+    is_tty_mode = (type == 0);
+    
     fb_clear();
     
     return 0;
@@ -201,8 +244,17 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
 void fb_set_font(psf_font_t *font) {
     if (font && font->glyphs) {
         fb.font = font;
-        fb.cols = fb.width / font->width;
-        fb.rows = fb.height / font->height;
+        if (!font->width || !font->height) {
+            fb.cols = 0;
+            fb.rows = 0;
+        } else {
+            fb.cols = fb.width / font->width;
+            fb.rows = fb.height / font->height;
+        }
+        if (fb.cols > MAX_COLS) fb.cols = MAX_COLS;
+        if (fb.rows > MAX_ROWS) fb.rows = MAX_ROWS;
+        if (fb.cursor_x >= fb.cols && fb.cols) fb.cursor_x = fb.cols - 1;
+        if (fb.cursor_y >= fb.rows && fb.rows) fb.cursor_y = fb.rows - 1;
         fb_clear();
         cursor_drawn = 0;
         cursor_prev_x = fb.cursor_x;
@@ -219,9 +271,9 @@ void fb_clear(void) {
     uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) return;
 
-    for (uint32_t y = 0; y < fb.height; y++) {
-        uint8_t *row = (uint8_t *)fb.addr + y * fb.pitch;
-        for (uint32_t x = 0; x < fb.width; x++) {
+    for (uint32_t y = 0; y < hw_height; y++) {
+        uint8_t *row = (uint8_t *)fb.addr + y * hw_pitch;
+        for (uint32_t x = 0; x < hw_width; x++) {
             uint8_t *p = row + x * bytes_per_pixel;
             if (fb.bpp == 32) {
                 *(uint32_t *)p = fb.bg_color;
@@ -253,15 +305,15 @@ void fb_clear(void) {
 }
 
 void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
-    if (x >= fb.width || y >= fb.height) {
+    if (x >= hw_width || y >= hw_height) {
         return;
     }
     uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) {
         return;
     }
-    uint32_t offset = y * fb.pitch + x * bytes_per_pixel;
-    uint32_t fb_size = fb.pitch * fb.height;
+    uint32_t offset = y * hw_pitch + x * bytes_per_pixel;
+    uint32_t fb_size = hw_pitch * hw_height;
     if (offset >= fb_size || fb_size - offset < bytes_per_pixel) {
         return;
     }
@@ -314,7 +366,7 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
         uint8_t *base = (uint8_t *)fb.addr;
         uint32_t fg = fb.fg_color;
         uint32_t bg = fb.bg_color;
-        uint8_t *row_ptr = base + py * fb.pitch + px * 4u;
+        uint8_t *row_ptr = base + py * hw_pitch + px * 4u;
         for (uint32_t row = 0; row < fb.font->height; row++) {
             uint8_t bits = glyph[row];
             uint32_t *p = (uint32_t *)row_ptr;
@@ -326,14 +378,14 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             p[5] = (bits & 0x04) ? fg : bg;
             p[6] = (bits & 0x02) ? fg : bg;
             p[7] = (bits & 0x01) ? fg : bg;
-            row_ptr += fb.pitch;
+            row_ptr += hw_pitch;
         }
         return;
     }
 
     uint8_t *base = (uint8_t *)fb.addr;
     for (uint32_t row = 0; row < fb.font->height; row++) {
-        uint8_t *dst = base + (py + row) * fb.pitch + px * bytes_per_pixel;
+        uint8_t *dst = base + (py + row) * hw_pitch + px * bytes_per_pixel;
         for (uint32_t col = 0; col < fb.font->width; col++) {
             uint32_t byte_idx = row * bytes_per_line + col / 8;
             uint8_t bit = 7 - (col % 8);
@@ -357,6 +409,9 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
 }
 
 void fb_scroll(void) {
+    if (fb.rows == 0 || fb.cols == 0) {
+        return;
+    }
     if (cursor_drawn) {
         char old_char = ' ';
         if (cursor_prev_y < MAX_ROWS && cursor_prev_x < MAX_COLS) {
@@ -371,21 +426,21 @@ void fb_scroll(void) {
 
     uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) return;
-    uint32_t line_bytes = fb.pitch;
+    uint32_t line_bytes = hw_pitch;
     
     uint8_t *dst = (uint8_t *)fb.addr;
-    uint8_t *src = (uint8_t *)fb.addr + line_height * fb.pitch;
+    uint8_t *src = (uint8_t *)fb.addr + line_height * hw_pitch;
     
     for (uint32_t y = 0; y < copy_height; y++) {
         memcpy(dst, src, line_bytes);
-        dst += fb.pitch;
-        src += fb.pitch;
+        dst += hw_pitch;
+        src += hw_pitch;
     }
     
     uint32_t last_row_start = (fb.rows - 1) * line_height;
-    for (uint32_t y = last_row_start; y < fb.height; y++) {
-        uint8_t *row = (uint8_t *)fb.addr + y * fb.pitch;
-        for (uint32_t x = 0; x < fb.width; x++) {
+    for (uint32_t y = last_row_start; y < hw_height; y++) {
+        uint8_t *row = (uint8_t *)fb.addr + y * hw_pitch;
+        for (uint32_t x = 0; x < hw_width; x++) {
             uint8_t *p = row + x * bytes_per_pixel;
             if (fb.bpp == 32) {
                 *(uint32_t *)p = fb.bg_color;
@@ -401,9 +456,9 @@ void fb_scroll(void) {
                 *(uint16_t *)p = rgb565;
             }
         }
-        uint32_t used = fb.width * bytes_per_pixel;
-        if (used < fb.pitch) {
-            memset(row + used, 0, fb.pitch - used);
+        uint32_t used = hw_width * bytes_per_pixel;
+        if (used < hw_pitch) {
+            memset(row + used, 0, hw_pitch - used);
         }
     }
     
@@ -425,6 +480,9 @@ void fb_scroll(void) {
 }
 
 void fb_write_char(char c) {
+    if (fb.rows == 0 || fb.cols == 0) {
+        return;
+    }
     if (c == '\n') {
         fb.cursor_x = 0;
         fb.cursor_y++;
@@ -516,4 +574,215 @@ void fb_tick(void) {
 
 framebuffer_t *fb_get(void) {
     return &fb;
+}
+
+int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
+    if (original_fb_width == 0 || original_fb_height == 0) {
+        return -3;
+    }
+
+    if (width == 0 || height == 0) {
+        return -2;
+    }
+
+    int hw_changed = 0;
+    uint32_t new_pitch = hw_pitch;
+    uint8_t new_bpp = fb.bpp;
+    uint32_t font_width = (fb.font && fb.font->width) ? fb.font->width : 8;
+    if (font_width == 0) font_width = 8;
+    if (bga_is_available()) {
+        uint16_t try_bpps[3] = { 32, 24, 16 };
+        for (int i = 0; i < 3 && !hw_changed; i++) {
+            uint16_t bpp_try = try_bpps[i];
+            uint32_t candidate = width;
+            int attempts = 0;
+            while (candidate > 0 && attempts < 64 && !hw_changed) {
+                if (bga_set_mode((uint16_t)candidate, (uint16_t)height, bpp_try, &new_pitch) == 0) {
+                    hw_changed = 1;
+                    new_bpp = (uint8_t)bpp_try;
+                    width = candidate;
+                    break;
+                }
+                uint32_t next_candidate = decrease_width_step(candidate, font_width);
+                if (next_candidate == 0 || next_candidate == candidate) break;
+                candidate = next_candidate;
+                attempts++;
+            }
+        }
+    }
+
+    if (!hw_changed) {
+        if (width > hw_width || height > hw_height) {
+            return -4;
+        }
+    }
+
+    static char saved_buffer[MAX_ROWS][MAX_COLS];
+    if (!console_is_initialized()) {
+        for (uint32_t row = 0; row < MAX_ROWS; row++) {
+            for (uint32_t col = 0; col < MAX_COLS; col++) {
+                saved_buffer[row][col] = screen_buffer[row][col];
+            }
+        }
+    }
+
+    if (hw_changed) {
+        uint32_t fb_size = new_pitch * height;
+        if (fb_vram_bytes && fb_size > fb_vram_bytes) {
+            return -5;
+        }
+
+        uint32_t bytes_per_pixel = (uint32_t)(new_bpp / 8u);
+        if (bytes_per_pixel == 0) {
+            return -6;
+        }
+        hw_pitch = new_pitch;
+        hw_height = height;
+        hw_width = new_pitch / bytes_per_pixel;
+
+        fb.pitch = new_pitch;
+        fb.bpp = new_bpp;
+        original_fb_width = hw_width;
+        original_fb_height = height;
+        original_fb_pitch = new_pitch;
+        original_fb_size = new_pitch * height;
+
+        uint32_t fb_phys = (uint32_t)fb.phys_addr;
+        uint32_t num_pages = (fb_size + 0xFFF) / 0x1000;
+        for (uint32_t i = 0; i < num_pages; i++) {
+            uint32_t phys = fb_phys + (i * 0x1000);
+            uint32_t virt = 0xE0000000 + (i * 0x1000);
+            vmm_map_page(virt, phys, 0x003);
+        }
+    }
+
+    uint32_t old_cols = fb.cols;
+    uint32_t old_rows = fb.rows;
+
+    if (refresh_rate > 0) {
+        fb.refresh_rate = refresh_rate;
+    }
+
+    uint32_t bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
+    if (bytes_per_pixel == 0 || hw_pitch == 0) {
+        return -6;
+    }
+
+    uint32_t line_pixels = hw_pitch / bytes_per_pixel;
+    if (line_pixels == 0) {
+        return -6;
+    }
+
+    uint32_t effective_width = width;
+    if (effective_width > line_pixels) {
+        effective_width = line_pixels;
+    }
+    if (fb.font && fb.font->width) {
+        effective_width = (effective_width / fb.font->width) * fb.font->width;
+        if (effective_width == 0) {
+            return -2;
+        }
+    }
+
+    fb.width = effective_width;
+    fb.height = height;
+    if (fb.font && fb.font->width && fb.font->height) {
+        fb.cols = effective_width / fb.font->width;
+        fb.rows = height / fb.font->height;
+        if (fb.cols == 0 || fb.rows == 0) {
+            return -2;
+        }
+        if (fb.cols > MAX_COLS) fb.cols = MAX_COLS;
+        if (fb.rows > MAX_ROWS) fb.rows = MAX_ROWS;
+        fb.width = fb.cols * fb.font->width;
+    }
+
+    if (fb.cols == 0 || fb.rows == 0) {
+        return -2;
+    }
+
+    console_clamp_cursors(fb.cols, fb.rows);
+
+    if (fb.cursor_x >= fb.cols) fb.cursor_x = fb.cols - 1;
+    if (fb.cursor_y >= fb.rows) fb.cursor_y = fb.rows - 1;
+
+    if (console_is_initialized()) {
+        console_redraw_current();
+        return 0;
+    }
+
+    fb_clear();
+
+    uint32_t max_row = (old_rows < fb.rows) ? old_rows : fb.rows;
+    uint32_t max_col = (old_cols < fb.cols) ? old_cols : fb.cols;
+
+    for (uint32_t row = 0; row < max_row && row < MAX_ROWS; row++) {
+        for (uint32_t col = 0; col < max_col && col < MAX_COLS; col++) {
+            char c = saved_buffer[row][col];
+            screen_buffer[row][col] = c;
+            if (c != ' ') {
+                fb_putchar(c, col, row);
+            }
+        }
+    }
+
+    fb.cursor_x = 0;
+    fb.cursor_y = 0;
+    cursor_prev_x = 0;
+    cursor_prev_y = 0;
+    cursor_drawn = 0;
+
+    return 0;
+}
+
+int fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp, uint32_t *refresh_rate) {
+    if (!width || !height || !bpp) {
+        return -1; 
+    }
+    
+    *width = fb.width;
+    *height = fb.height;
+    *bpp = fb.bpp;
+    
+    if (refresh_rate) {
+        *refresh_rate = fb.refresh_rate;
+    }
+    
+    return 0; 
+}
+
+int fb_get_caps(uint32_t *out_words, uint32_t words) {
+    if (!out_words || words < 16) {
+        return -1;
+    }
+
+    uint32_t font_w = (fb.font && fb.font->width) ? fb.font->width : 8;
+    uint32_t font_h = (fb.font && fb.font->height) ? fb.font->height : 16;
+    if (font_w == 0) font_w = 8;
+    if (font_h == 0) font_h = 16;
+
+    uint32_t flags = 0;
+    if (bga_is_available()) {
+        flags |= 1u;
+        flags |= 2u;
+    }
+
+    out_words[0] = fb.width;
+    out_words[1] = fb.height;
+    out_words[2] = (uint32_t)fb.bpp;
+    out_words[3] = fb.pitch;
+    out_words[4] = fb.cols;
+    out_words[5] = fb.rows;
+    out_words[6] = font_w;
+    out_words[7] = font_h;
+    out_words[8] = hw_width;
+    out_words[9] = hw_height;
+    out_words[10] = hw_pitch;
+    out_words[11] = fb_vram_bytes;
+    out_words[12] = flags;
+    out_words[13] = fb.refresh_rate;
+    out_words[14] = 0;
+    out_words[15] = 0;
+
+    return 0;
 }
