@@ -33,6 +33,20 @@ static uint32_t decrease_width_step(uint32_t value, uint32_t step) {
     return value - delta;
 }
 
+static uint32_t decrease_step(uint32_t value, uint32_t step) {
+    if (step == 0 || value <= step) {
+        return 0;
+    }
+    uint32_t delta = value % step;
+    if (delta == 0) {
+        delta = step;
+    }
+    if (delta > value) {
+        return 0;
+    }
+    return value - delta;
+}
+
 #define MAX_COLS 512
 #define MAX_ROWS 256
 static char screen_buffer[MAX_ROWS][MAX_COLS];
@@ -585,35 +599,59 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
         return -2;
     }
 
+    uint32_t font_width = (fb.font && fb.font->width) ? fb.font->width : 8;
+    uint32_t font_height = (fb.font && fb.font->height) ? fb.font->height : 16;
+    if (font_width == 0) font_width = 8;
+    if (font_height == 0) font_height = 16;
+
+    uint32_t req_width = width;
+    uint32_t req_height = height;
+
     int hw_changed = 0;
     uint32_t new_pitch = hw_pitch;
     uint8_t new_bpp = fb.bpp;
-    uint32_t font_width = (fb.font && fb.font->width) ? fb.font->width : 8;
-    if (font_width == 0) font_width = 8;
     if (bga_is_available()) {
         uint16_t try_bpps[3] = { 32, 24, 16 };
         for (int i = 0; i < 3 && !hw_changed; i++) {
             uint16_t bpp_try = try_bpps[i];
-            uint32_t candidate = width;
-            int attempts = 0;
-            while (candidate > 0 && attempts < 64 && !hw_changed) {
-                if (bga_set_mode((uint16_t)candidate, (uint16_t)height, bpp_try, &new_pitch) == 0) {
-                    hw_changed = 1;
-                    new_bpp = (uint8_t)bpp_try;
-                    width = candidate;
-                    break;
+            uint32_t candidate_h = req_height;
+            int attempts_h = 0;
+            while (candidate_h > 0 && attempts_h < 64 && !hw_changed) {
+                uint32_t candidate_w = req_width;
+                int attempts_w = 0;
+                while (candidate_w > 0 && attempts_w < 64 && !hw_changed) {
+                    if (bga_set_mode((uint16_t)candidate_w, (uint16_t)candidate_h, bpp_try, &new_pitch) == 0) {
+                        hw_changed = 1;
+                        new_bpp = (uint8_t)bpp_try;
+                        width = candidate_w;
+                        height = candidate_h;
+                        break;
+                    }
+                    uint32_t next_w = decrease_width_step(candidate_w, font_width);
+                    if (next_w == 0 || next_w == candidate_w) break;
+                    candidate_w = next_w;
+                    attempts_w++;
                 }
-                uint32_t next_candidate = decrease_width_step(candidate, font_width);
-                if (next_candidate == 0 || next_candidate == candidate) break;
-                candidate = next_candidate;
-                attempts++;
+                if (hw_changed) break;
+                uint32_t next_h = decrease_step(candidate_h, font_height);
+                if (next_h == 0 || next_h == candidate_h) break;
+                candidate_h = next_h;
+                attempts_h++;
             }
         }
     }
 
     if (!hw_changed) {
-        if (width > hw_width || height > hw_height) {
-            return -4;
+        if (width > hw_width) width = hw_width;
+        if (height > hw_height) height = hw_height;
+        if (font_width) {
+            width = (width / font_width) * font_width;
+        }
+        if (font_height) {
+            height = (height / font_height) * font_height;
+        }
+        if (width == 0 || height == 0) {
+            return -2;
         }
     }
 
@@ -671,6 +709,13 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
     uint32_t line_pixels = hw_pitch / bytes_per_pixel;
     if (line_pixels == 0) {
         return -6;
+    }
+
+    if (fb.font && fb.font->height) {
+        height = (height / fb.font->height) * fb.font->height;
+        if (height == 0) {
+            return -2;
+        }
     }
 
     uint32_t effective_width = width;
