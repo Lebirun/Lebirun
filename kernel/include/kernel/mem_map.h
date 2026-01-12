@@ -105,6 +105,8 @@ typedef struct {
 extern reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
 extern uint32_t num_reserved_regions;
 
+extern multiboot_t *g_multiboot;
+
 void vmm_map_page(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_map_page_early_avail(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags);

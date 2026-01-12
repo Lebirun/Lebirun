@@ -34,6 +34,7 @@ mutex_t print_lock;
 
 extern uint32_t multiboot_magic;
 extern uint32_t multiboot_ptr;
+multiboot_t *g_multiboot = NULL;
 
 extern task_t* current_task;
 extern task_t* ready_queue_head;
@@ -82,6 +83,7 @@ void kernel_main(void) {
     vmm_map_page(mb_page + 0xC0000000, mb_page, 0x003);
     
     multiboot_t *mb = (multiboot_t *)(multiboot_ptr + 0xC0000000);
+    g_multiboot = mb;
 
     if (mb->flags & (1 << 12)) {
         terminal_init_fb(mb->framebuffer_addr, mb->framebuffer_width, 
