@@ -58,11 +58,20 @@ uint32_t bga_get_vram_bytes(void) {
 }
 
 int bga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pitch) {
+    uint16_t got_w;
+    uint16_t got_h;
+    uint16_t got_bpp;
+    uint16_t virt_w;
+    uint32_t bytespp;
+    volatile uint32_t delay;
     if (!bga_is_available()) return -1;
     if (width == 0 || height == 0) return -2;
     if (bpp != 32 && bpp != 24 && bpp != 16) return -2;
 
     bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    for (delay = 0; delay < 100000; delay++) {
+        asm volatile("pause");
+    }
     bga_write(VBE_DISPI_INDEX_XRES, width);
     bga_write(VBE_DISPI_INDEX_YRES, height);
     bga_write(VBE_DISPI_INDEX_BPP, bpp);
@@ -71,18 +80,21 @@ int bga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     bga_write(VBE_DISPI_INDEX_X_OFFSET, 0);
     bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
     bga_write(VBE_DISPI_INDEX_ENABLE, (uint16_t)(VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_NOCLEARMEM));
+    for (delay = 0; delay < 200000; delay++) {
+        asm volatile("pause");
+    }
 
-    uint16_t got_w = bga_read(VBE_DISPI_INDEX_XRES);
-    uint16_t got_h = bga_read(VBE_DISPI_INDEX_YRES);
-    uint16_t got_bpp = bga_read(VBE_DISPI_INDEX_BPP);
-    uint16_t virt_w = bga_read(VBE_DISPI_INDEX_VIRT_WIDTH);
+    got_w = bga_read(VBE_DISPI_INDEX_XRES);
+    got_h = bga_read(VBE_DISPI_INDEX_YRES);
+    got_bpp = bga_read(VBE_DISPI_INDEX_BPP);
+    virt_w = bga_read(VBE_DISPI_INDEX_VIRT_WIDTH);
 
     if (got_w != width || got_h != height || got_bpp != bpp) {
         return -3;
     }
 
     if (out_pitch) {
-        uint32_t bytespp = (uint32_t)(bpp / 8u);
+        bytespp = (uint32_t)(bpp / 8u);
         *out_pitch = (uint32_t)virt_w * bytespp;
     }
 

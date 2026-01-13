@@ -51,20 +51,31 @@ void console_init(void) {
 
 static void console_redraw(void) {
     framebuffer_t *fb = fb_get();
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t row;
+    uint32_t col;
+    console_t *con;
+    char c;
     if (!fb || !fb->font) return;
 
-    uint32_t rows = fb->rows;
-    uint32_t cols = fb->cols;
-    console_t *con = &consoles[current_console];
+    rows = fb->rows;
+    cols = fb->cols;
+    con = &consoles[current_console];
 
     fb_clear();
 
-    for (uint32_t row = 0; row < rows && row < CONSOLE_BUFFER_ROWS; row++) {
-        for (uint32_t col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-            char c = con->buffer[row][col];
+    for (row = 0; row < rows && row < CONSOLE_BUFFER_ROWS; row++) {
+        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
+            c = con->buffer[row][col];
             if (c >= 32) {
                 fb_putchar(c, col, row);
             }
+        }
+        if ((row & 0x07) == 0x07) {
+            spin_unlock(&console_lock);
+            asm volatile("pause; pause; pause");
+            spin_lock(&console_lock);
         }
     }
 
