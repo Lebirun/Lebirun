@@ -20,6 +20,7 @@ static vfs_node_t dev_full;
 static vfs_node_t dev_mem;
 static vfs_node_t dev_kmem;
 static vfs_node_t dev_port;
+static vfs_node_t dev_ttys[9];
 
 static dirent_t dev_dirent;
 
@@ -104,10 +105,25 @@ static uint32_t dev_tty_read(vfs_node_t *node, uint32_t offset, uint32_t size, u
 
 static uint32_t dev_tty_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     (void)node; (void)offset;
-    extern int console_write_to(int id, const char *buf, size_t len);
+    extern void console_write_to(int id, const char *buf, size_t len);
     extern int console_get_current(void);
     int con = console_get_current();
     console_write_to(con, (const char *)buffer, size);
+    return size;
+}
+
+static uint32_t dev_ttyN_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)offset; (void)size; (void)buffer;
+    int tty_num = node->inode;
+    (void)tty_num;
+    return 0;
+}
+
+static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)offset;
+    int tty_num = node->inode;
+    extern void console_write_to(int id, const char *buf, size_t len);
+    console_write_to(tty_num, (const char *)buffer, size);
     return size;
 }
 
@@ -117,7 +133,8 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     static const char *entries[] = {
         "null", "zero", "urandom", "random", "tty", "console",
         "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
-        "mem", "kmem", "port"
+        "mem", "kmem", "port", 
+        "tty0", "tty1", "tty2", "tty3", "tty4", "tty5", "tty6", "tty7", "tty8"
     };
     
     if (index < sizeof(entries)/sizeof(entries[0])) {
@@ -150,6 +167,11 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "mem") == 0) return &dev_mem;
     if (strcmp(name, "kmem") == 0) return &dev_kmem;
     if (strcmp(name, "port") == 0) return &dev_port;
+    
+    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '8' && name[4] == '\0') {
+        int idx = name[3] - '0';
+        return &dev_ttys[idx];
+    }
     
     return NULL;
 }
@@ -303,6 +325,22 @@ void devfs_init(void) {
     
     for (int i = 0; i < 64; i++) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint32_t)i * 0x13579BDF);
+    }
+    
+    for (int i = 0; i < 9; i++) {
+        memset(&dev_ttys[i], 0, sizeof(vfs_node_t));
+        char name[8];
+        name[0] = 't'; name[1] = 't'; name[2] = 'y';
+        name[3] = '0' + i;
+        name[4] = '\0';
+        strcpy(dev_ttys[i].name, name);
+        dev_ttys[i].flags = VFS_CHARDEVICE;
+        dev_ttys[i].mask = 0620;
+        dev_ttys[i].inode = i;
+        dev_ttys[i].read = dev_ttyN_read;
+        dev_ttys[i].write = dev_ttyN_write;
+        dev_ttys[i].parent = &devfs_root;
+        dev_ttys[i].ref_count = 1;
     }
     
     pty_init();

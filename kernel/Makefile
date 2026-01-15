@@ -21,6 +21,8 @@ CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
 
+include lebconfig.mk
+
 ARCHDIR=arch/$(HOSTARCH)
 
 include $(ARCHDIR)/make.config
@@ -118,13 +120,21 @@ clean:
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
 
+install-headers:
+	@if [ -z "$(DESTDIR)" ]; then \
+		echo "DESTDIR not set; skipping install-headers"; \
+		exit 0; \
+	fi; \
+	mkdir -p $(DESTDIR)$(INCLUDEDIR); \
+	cp -R include/. $(DESTDIR)$(INCLUDEDIR)/.
+
 install: install-headers install-kernel
 
-install-headers:
-	mkdir -p $(DESTDIR)$(INCLUDEDIR)
-	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
-
 install-kernel: lebirun.kernel
+	@if [ -z "$(DESTDIR)" ]; then \
+		echo "DESTDIR not set; skipping install-kernel"; \
+		exit 0; \
+	fi
 	mkdir -p $(DESTDIR)$(BOOTDIR)
 	cp lebirun.kernel $(DESTDIR)$(BOOTDIR)
 

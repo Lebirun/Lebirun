@@ -23,20 +23,29 @@
 #include <kernel/fs/ext4/ext4.h>
 #include <kernel/drivers/net/net.h>
 #include <kernel/vring.h>
-#include "launch_user.h" 
+#include "launch_user.h"
 
-bool debugMode = false;
-int debugLevel = 3;
+#ifndef CONFIG_DEBUG_MODE
+#define CONFIG_DEBUG_MODE 0
+#endif
+#ifndef CONFIG_DEBUG_VERBOSITY
+#define CONFIG_DEBUG_VERBOSITY 3
+#endif
+
+bool debugMode = CONFIG_DEBUG_MODE ? true : false;
+int debugLevel = CONFIG_DEBUG_VERBOSITY;
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
-mutex_t print_lock;
-
 extern uint32_t multiboot_magic;
 extern uint32_t multiboot_ptr;
+
+mutex_t print_lock;
+
 multiboot_t *g_multiboot = NULL;
 
 extern task_t* current_task;
+
 extern task_t* ready_queue_head;
 
 void kernel_main(void) {
@@ -156,6 +165,9 @@ void kernel_main(void) {
         extern void devfs_init(void);
         procfs_init();
         devfs_init();
+        
+        vfs_mount(NULL, "/dev", "devfs");
+        vfs_mount(NULL, "/proc", "procfs");
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -187,6 +199,9 @@ void kernel_main(void) {
     kproc_init();
     kproc_print_init();
     printf("VRING: Virtual rings initialized (ring 0.1 = kprint, PID -1)\n");
+    
+    console_writer_init();
+    printf("CONSOLE: Async writer thread started\n");
     
     pit_init(1000);
     calibrate_pit();

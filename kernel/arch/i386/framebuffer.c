@@ -20,30 +20,6 @@ static uint32_t hw_pitch = 0;
 static uint32_t fb_vram_bytes = 0;
 static uint32_t mapped_pages_count = 0;
 
-typedef struct {
-    uint16_t width;
-    uint16_t height;
-} bga_resolution_t;
-
-// Fallback List for now
-static const bga_resolution_t bga_mode_resolutions[] = {
-    {640, 480},
-    {800, 600},
-    {1024, 768},
-    {1280, 1024},
-    {1400, 1050},
-    {1600, 1200},
-    {1680, 1050},
-    {1920, 1080},
-    {1920, 1200},
-    {2048, 1536},
-    {2560, 1440},
-    {2560, 1600},
-    {3840, 2160},
-    {4096, 2304},
-    {5120, 2880}
-};
-
 static uint32_t decrease_width_step(uint32_t value, uint32_t step) {
     uint32_t delta;
     if (step == 0 || value <= step) {
@@ -898,7 +874,6 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
         num_pages = (fb_size + 0xFFF) / 0x1000;
 
         if (num_pages > old_mapped_pages) {
-            pages_to_map = num_pages - old_mapped_pages;
             batch_size = 64;
 
             for (batch_start = old_mapped_pages; batch_start < num_pages; batch_start += batch_size) {
@@ -1055,49 +1030,10 @@ static inline void map_physical_page(uint32_t phys) {
 }
 
 
-static uint32_t collect_vbe_modes(uint32_t *dest, uint32_t capacity, uint32_t *out_max_w, uint32_t *out_max_h) {
-    uint32_t entries;
-    uint32_t count;
-    uint32_t i;
-    uint16_t width;
-    uint16_t height;
-
-    if (!dest || capacity == 0) {
-        return 0;
-    }
-    if (!bga_is_available()) {
-        return 0;
-    }
-    
-    entries = sizeof(bga_mode_resolutions) / sizeof(bga_mode_resolutions[0]);
-    count = 0;
-    
-    for (i = 0; i < entries && count < capacity; i++) {
-        width = bga_mode_resolutions[i].width;
-        height = bga_mode_resolutions[i].height;
-        
-        dest[count * 2] = width;
-        dest[count * 2 + 1] = height;
-        
-        if (out_max_w && width > *out_max_w) {
-            *out_max_w = width;
-        }
-        if (out_max_h && height > *out_max_h) {
-            *out_max_h = height;
-        }
-        count++;
-    }
-    return count;
-}
-
 int fb_get_caps(uint32_t *out_words, uint32_t words) {
     uint32_t font_w;
     uint32_t font_h;
     uint32_t flags;
-    uint32_t mode_capacity;
-    uint32_t max_mode_w;
-    uint32_t max_mode_h;
-    uint32_t mode_count;
 
     if (!out_words || words < 16) {
         return -1;
@@ -1114,18 +1050,6 @@ int fb_get_caps(uint32_t *out_words, uint32_t words) {
         flags |= 2u;
     }
 
-    mode_capacity = (words > 16) ? (words - 16) / 2 : 0;
-    max_mode_w = 0;
-    max_mode_h = 0;
-    mode_count = 0;
-    if (mode_capacity > 0) {
-        mode_count = collect_vbe_modes(out_words + 16, mode_capacity, &max_mode_w, &max_mode_h);
-        if (mode_count > 0) {
-            if (max_mode_w > hw_width) hw_width = max_mode_w;
-            if (max_mode_h > hw_height) hw_height = max_mode_h;
-        }
-    }
-
     out_words[0] = fb.width;
     out_words[1] = fb.height;
     out_words[2] = (uint32_t)fb.bpp;
@@ -1140,7 +1064,7 @@ int fb_get_caps(uint32_t *out_words, uint32_t words) {
     out_words[11] = fb_vram_bytes;
     out_words[12] = flags;
     out_words[13] = fb.refresh_rate;
-    out_words[14] = mode_count;
+    out_words[14] = 0;
     out_words[15] = 0;
 
     return 0;

@@ -7,3 +7,6 @@
 [submodule "libc/leblibc"]
 	path = libc/leblibc
 	url = git@github.com:Lebirun/leblibc.git
+[submodule "lebconfig"]
+	path = lebconfig
+	url = git@github.com:Lebirun/lebconfig.git

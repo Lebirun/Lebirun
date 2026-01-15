@@ -1,0 +1,7 @@
+title "Lebirun"
+desc "Hobby Operating System/Kernel"
+
+subcategory "Debug" {
+    item type=bool name="Debug Mode" default=enable id=debugmode alias="DEBUG_MODE" help="Enables debug mode"
+    item type=int name="Debug Verbosity" default=2 min=0 max=5 id=debugverbosity alias="DEBUG_VERBOSITY" help="Sets the verbosity level of debug mode"
+}

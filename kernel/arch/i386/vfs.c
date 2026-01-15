@@ -148,11 +148,6 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
         if (root) {
             root->parent = vfs_root;
 
-            /*
-             * Ensure mounted roots have a stable name so vfs_get_path() can
-             * reconstruct paths like /initrd and /disk. Many FS implementations
-             * use "/" for their internal root node name.
-             */
             if (mountpoint[0] == '/' && !(mountpoint[0] == '/' && mountpoint[1] == '\0')) {
                 const char *end = mountpoint + strlen(mountpoint);
                 while (end > mountpoint + 1 && end[-1] == '/') {

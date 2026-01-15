@@ -507,23 +507,6 @@ int kproc_recv_msg(int32_t pid, uint32_t *msg) {
 void kproc_yield(void) {
 }
 
-static void enqueue_print_msg(print_msg_t *msg) {
-    if (print_queue_count >= 64) return;
-    
-    print_queue[print_queue_tail] = *msg;
-    print_queue_tail = (print_queue_tail + 1) % 64;
-    print_queue_count++;
-}
-
-static int dequeue_print_msg(print_msg_t *msg) {
-    if (print_queue_count == 0) return -1;
-    
-    *msg = print_queue[print_queue_head];
-    print_queue_head = (print_queue_head + 1) % 64;
-    print_queue_count--;
-    return 0;
-}
-
 void kproc_print_char(char c) {
     char b = c;
     kprint_write(0, &b, 1);
@@ -592,7 +575,6 @@ void kproc_print_init(void) {
     vring_add_region(1, 0xC0000000, 0xC0400000,
                      VRING_PERM_READ | VRING_PERM_EXEC);
     
-    extern uint64_t framebuffer_addr;
     vring_add_region(1, 0xFD000000, 0xFE000000,
                      VRING_PERM_READ | VRING_PERM_WRITE);
     

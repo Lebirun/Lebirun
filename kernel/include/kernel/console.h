@@ -8,6 +8,7 @@
 #define NUM_CONSOLES 9
 #define CONSOLE_BUFFER_ROWS 256
 #define CONSOLE_BUFFER_COLS 512
+#define CONSOLE_WRITE_BUFFER_SIZE 16384
 
 bool console_is_initialized(void);
 
@@ -20,6 +21,11 @@ typedef struct {
     int esc_state;
     char esc_buf[32];
     int esc_len;
+    
+    char write_buffer[CONSOLE_WRITE_BUFFER_SIZE];
+    volatile uint32_t write_head;
+    volatile uint32_t write_tail;
+    volatile uint32_t dirty;
 } console_t;
 
 void console_init(void);
@@ -36,5 +42,7 @@ void console_setcursor(int console_num, int x, int y);
 int console_getcursor(int console_num, int *x, int *y);
 void console_redraw_current(void);
 void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
+void console_writer_init(void);
+void console_writer_flush(void);
 
 #endif
