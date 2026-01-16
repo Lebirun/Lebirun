@@ -59,4 +59,5 @@ TAGS
 .pytest_cache/
 
 .config
+.lebconfig_settings
 !root/

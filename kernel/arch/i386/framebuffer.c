@@ -450,11 +450,9 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
     uint8_t *base;
     uint32_t fg;
     uint32_t bg;
-    uint8_t *row_ptr;
     uint32_t row;
     uint8_t bits;
     uint32_t *p32;
-    uint8_t *dst;
     uint32_t col;
     uint32_t byte_idx;
     uint8_t bit;
@@ -496,10 +494,9 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
         base = (uint8_t *)fb.addr;
         fg = fb.fg_color;
         bg = fb.bg_color;
-        row_ptr = base + py * hw_pitch + px * 4u;
         for (row = 0; row < fb.font->height; row++) {
             bits = glyph[row];
-            p32 = (uint32_t *)row_ptr;
+            p32 = (uint32_t *)(base + (py + row) * hw_pitch + px * 4u);
             p32[0] = (bits & 0x80) ? fg : bg;
             p32[1] = (bits & 0x40) ? fg : bg;
             p32[2] = (bits & 0x20) ? fg : bg;
@@ -508,31 +505,30 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             p32[5] = (bits & 0x04) ? fg : bg;
             p32[6] = (bits & 0x02) ? fg : bg;
             p32[7] = (bits & 0x01) ? fg : bg;
-            row_ptr += hw_pitch;
         }
         return;
     }
 
     base = (uint8_t *)fb.addr;
     for (row = 0; row < fb.font->height; row++) {
-        dst = base + (py + row) * hw_pitch + px * bytes_per_pixel;
+        p = base + (py + row) * hw_pitch + px * bytes_per_pixel;
         for (col = 0; col < fb.font->width; col++) {
             byte_idx = row * bytes_per_line + col / 8;
             bit = 7 - (col % 8);
             color = (glyph[byte_idx] & (1u << bit)) ? fb.fg_color : fb.bg_color;
-            p = dst + col * bytes_per_pixel;
             if (fb.bpp == 32) {
-                *(uint32_t *)p = color;
+                *((uint32_t *)(p + col * bytes_per_pixel)) = color;
             } else if (fb.bpp == 24) {
-                p[0] = (uint8_t)(color & 0xFF);
-                p[1] = (uint8_t)((color >> 8) & 0xFF);
-                p[2] = (uint8_t)((color >> 16) & 0xFF);
+                uint8_t *dst = p + col * bytes_per_pixel;
+                dst[0] = (uint8_t)(color & 0xFF);
+                dst[1] = (uint8_t)((color >> 8) & 0xFF);
+                dst[2] = (uint8_t)((color >> 16) & 0xFF);
             } else if (fb.bpp == 16) {
                 r = (uint8_t)((color >> 16) & 0xFF);
                 g = (uint8_t)((color >> 8) & 0xFF);
                 b = (uint8_t)(color & 0xFF);
                 rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-                *(uint16_t *)p = rgb565;
+                *((uint16_t *)(p + col * bytes_per_pixel)) = rgb565;
             }
         }
     }

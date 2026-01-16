@@ -62,6 +62,7 @@ static void console_redraw(void) {
     uint32_t col;
     console_t *con;
     char c;
+    
     if (!fb || !fb->font) return;
 
     rows = fb->rows;
@@ -69,18 +70,13 @@ static void console_redraw(void) {
     con = &consoles[current_console];
 
     fb_clear();
-
+    
     for (row = 0; row < rows && row < CONSOLE_BUFFER_ROWS; row++) {
         for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
             c = con->buffer[row][col];
             if (c >= 32) {
                 fb_putchar(c, col, row);
             }
-        }
-        if ((row & 0x07) == 0x07) {
-            spin_unlock(&console_lock);
-            asm volatile("pause; pause; pause");
-            spin_lock(&console_lock);
         }
     }
 
@@ -147,25 +143,33 @@ void console_switch(int console_num) {
         consoles[current_console].cursor_x = fb->cursor_x;
         consoles[current_console].cursor_y = fb->cursor_y;
     }
+    
     uint32_t rows = fb ? fb->rows : 25;
     uint32_t cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
     if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+    
+    console_clamp_cursors_locked(cols, rows);
+    
     current_console = console_num;
     
     if (fb) {
-        fb->cursor_x = consoles[current_console].cursor_x;
-        fb->cursor_y = consoles[current_console].cursor_y;
+        uint32_t new_cx = consoles[current_console].cursor_x;
+        uint32_t new_cy = consoles[current_console].cursor_y;
+        if (new_cx >= cols) new_cx = cols - 1;
+        if (new_cy >= rows) new_cy = rows - 1;
+        fb->cursor_x = new_cx;
+        fb->cursor_y = new_cy;
+        consoles[current_console].cursor_x = new_cx;
+        consoles[current_console].cursor_y = new_cy;
     }
     
-    console_clamp_cursors_locked(cols, rows);
-
-    console_redraw();
-
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+
+    console_redraw();
 }
 
 int console_get_current(void) {
