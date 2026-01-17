@@ -154,13 +154,10 @@ void keyboard_handler(registers_t* regs) {
         return;
     }
 
-    if (e0_prefix) {
-        e0_prefix = false;
-        return;
-    }
-
     bool is_release = (scancode & 0x80) != 0;
     uint8_t code = scancode & 0x7F;
+    bool is_extended = e0_prefix;
+    e0_prefix = false;
 
     if (is_release) {
         if (code == SCANCODE_LSHIFT) left_shift_pressed = false;
@@ -188,7 +185,7 @@ void keyboard_handler(registers_t* regs) {
         else if (code == SCANCODE_F8) console_num = 7;
         else if (code == SCANCODE_F9) console_num = 8;
         if (console_num >= 0) {
-            console_switch(console_num);
+            console_switch_via_interrupt(console_num);
             return;
         }
     }

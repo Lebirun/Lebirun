@@ -8,13 +8,41 @@
 #include <string.h>
 #include <stdint.h>
 
+extern void terminal_putchar(char c);
+extern void serial_putchar(char c);
+extern void kprint_serial_async(const char *data, size_t size);
+extern bool kprint_is_ready(void);
+extern framebuffer_t *fb_get(void);
+extern void fb_clear(void);
+extern void fb_putchar(char c, uint32_t x, uint32_t y);
+extern void fb_scroll(void);
+extern void fb_update_cursor(void);
+extern task_t *current_task;
+extern void yield(void);
+extern void sleep_ms(uint32_t ms);
+extern void wake_task(task_t *task);
+
 static console_t consoles[NUM_CONSOLES];
 static int current_console = 0;
 static int console_initialized = 0;
 static int console_batch = 0;
-static spinlock_t console_lock;
-static volatile int writer_thread_running = 0;
+static spinlock_t console_lock = {0};
 static task_t *writer_thread = NULL;
+static volatile int writer_thread_running = 0;
+static volatile int console_switching = 0;
+static volatile int console_switch_in_progress = 0;
+static volatile int pending_console_switch = -1;
+
+static volatile int console_redraw_pending = 0;
+static char console_redraw_buffer[CONSOLE_BUFFER_ROWS][CONSOLE_BUFFER_COLS];
+static uint32_t console_redraw_cursor_x = 0;
+static uint32_t console_redraw_cursor_y = 0;
+static uint32_t console_redraw_rows = 0;
+static uint32_t console_redraw_cols = 0;
+static uint32_t console_redraw_visible_rows = 0;
+static uint32_t console_redraw_visible_cols = 0;
+static uint32_t console_redraw_row = 0;
+static int console_redraw_console = 0;
 
 static inline uint32_t console_irqsave(void) {
     uint32_t flags;
@@ -32,57 +60,163 @@ static inline int console_interrupts_enabled(void) {
     return (flags & (1u << 9)) != 0;
 }
 
-void console_init(void) {
-    spinlock_init(&console_lock);
-    for (int i = 0; i < NUM_CONSOLES; i++) {
-        for (int row = 0; row < CONSOLE_BUFFER_ROWS; row++) {
-            for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-                consoles[i].buffer[row][col] = ' ';
-            }
-        }
-        consoles[i].cursor_x = 0;
-        consoles[i].cursor_y = 0;
-        consoles[i].scroll_offset = 0;
-        consoles[i].esc_state = 0;
-        consoles[i].esc_len = 0;
-        consoles[i].esc_buf[0] = '\0';
-        consoles[i].write_head = 0;
-        consoles[i].write_tail = 0;
-        consoles[i].dirty = 0;
-    }
-    current_console = 0;
-    console_initialized = 1;
-}
-
-static void console_redraw(void) {
+static void console_redraw_prepare(int console_num) {
     framebuffer_t *fb = fb_get();
     uint32_t rows;
     uint32_t cols;
     uint32_t row;
     uint32_t col;
     console_t *con;
-    char c;
-    
-    if (!fb || !fb->font) return;
+    uint32_t flags;
+    uint32_t visible_rows;
+    uint32_t visible_cols;
+
+    if (!fb || !fb->font) {
+        console_redraw_pending = 0;
+        return;
+    }
 
     rows = fb->rows;
     cols = fb->cols;
-    con = &consoles[current_console];
+    if (rows == 0 || cols == 0) {
+        console_redraw_pending = 0;
+        return;
+    }
 
-    fb_clear();
-    
-    for (row = 0; row < rows && row < CONSOLE_BUFFER_ROWS; row++) {
-        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-            c = con->buffer[row][col];
-            if (c >= 32) {
-                fb_putchar(c, col, row);
-            }
+    visible_rows = rows < CONSOLE_BUFFER_ROWS ? rows : CONSOLE_BUFFER_ROWS;
+    visible_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
+
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+
+    if (console_num < 0 || console_num >= NUM_CONSOLES) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        console_redraw_pending = 0;
+        return;
+    }
+
+    if (console_redraw_pending) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
+
+    con = &consoles[console_num];
+    console_redraw_cursor_x = con->cursor_x;
+    console_redraw_cursor_y = con->cursor_y;
+
+    for (row = 0; row < visible_rows; row++) {
+        for (col = 0; col < visible_cols; col++) {
+            console_redraw_buffer[row][col] = con->buffer[row][col];
         }
     }
 
-    fb->cursor_x = con->cursor_x;
-    fb->cursor_y = con->cursor_y;
-    fb_update_cursor();
+    console_redraw_rows = rows;
+    console_redraw_cols = cols;
+    console_redraw_visible_rows = visible_rows;
+    console_redraw_visible_cols = visible_cols;
+    console_redraw_row = 0;
+    console_redraw_console = console_num;
+    console_redraw_pending = 1;
+    console_switch_in_progress = 1;
+
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+static void console_redraw_step(uint32_t max_rows) {
+    framebuffer_t *fb = fb_get();
+    uint32_t row;
+    uint32_t col;
+    char c;
+    uint32_t end_row;
+    uint32_t cols;
+    uint32_t rows_processed;
+    uint32_t yield_counter;
+    uint32_t visible_rows_cached;
+    uint32_t visible_cols_cached;
+    uint32_t current_row_cached;
+
+    if (!console_redraw_pending) return;
+    if (!fb || !fb->font) {
+        console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
+        return;
+    }
+
+    uint32_t flags = console_irqsave();
+    spin_lock(&console_lock);
+    visible_rows_cached = console_redraw_visible_rows;
+    visible_cols_cached = console_redraw_visible_cols;
+    current_row_cached = console_redraw_row;
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+
+    end_row = current_row_cached + max_rows;
+    if (end_row > visible_rows_cached) {
+        end_row = visible_rows_cached;
+    }
+
+    rows_processed = 0;
+    yield_counter = 0;
+    for (row = current_row_cached; row < end_row; row++) {
+        cols = visible_cols_cached;
+        for (col = 0; col < cols; col++) {
+            c = console_redraw_buffer[row][col];
+            if ((unsigned char)c > 32) {
+                fb_putchar(c, col, row);
+            } else if ((unsigned char)c == 32) {
+                fb_putchar(' ', col, row);
+            }
+            yield_counter++;
+            if (yield_counter >= 32 && current_task && console_interrupts_enabled()) {
+                yield();
+                yield_counter = 0;
+            }
+        }
+        rows_processed++;
+    }
+
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    console_redraw_row = end_row;
+    if (console_redraw_row >= visible_rows_cached) {
+        fb->cursor_x = console_redraw_cursor_x;
+        fb->cursor_y = console_redraw_cursor_y;
+        fb_update_cursor();
+        console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+static void console_redraw_sync(int console_num) {
+    uint32_t chunk_rows;
+    console_redraw_prepare(console_num);
+    if (!console_redraw_pending) return;
+    
+    if (console_redraw_visible_rows >= 240) {
+        chunk_rows = 12;
+    } else if (console_redraw_visible_rows >= 200) {
+        chunk_rows = 16;
+    } else if (console_redraw_visible_rows >= 100) {
+        chunk_rows = 32;
+    } else if (console_redraw_visible_rows >= 50) {
+        chunk_rows = 16;
+    } else {
+        chunk_rows = 8;
+    }
+    
+    while (console_redraw_pending) {
+        console_redraw_step(chunk_rows);
+        if (current_task && console_interrupts_enabled()) {
+            yield();
+        }
+    }
 }
 
 static void console_clamp_cursors_locked(uint32_t max_cols, uint32_t max_rows) {
@@ -122,30 +256,84 @@ void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows) {
     console_irqrestore(flags);
 }
 
-void console_redraw_current(void) {
-    if (!console_initialized) return;
-    uint32_t flags = console_irqsave();
-    spin_lock(&console_lock);
-    console_redraw();
-    spin_unlock(&console_lock);
-    console_irqrestore(flags);
+void console_init(void) {
+    if (console_initialized) return;
+    
+    for (int i = 0; i < NUM_CONSOLES; i++) {
+        console_t *con = &consoles[i];
+        for (int row = 0; row < CONSOLE_BUFFER_ROWS; row++) {
+            for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
+                con->buffer[row][col] = ' ';
+            }
+        }
+        con->cursor_x = 0;
+        con->cursor_y = 0;
+        con->scroll_offset = 0;
+        con->esc_state = 0;
+        con->esc_len = 0;
+        con->write_head = 0;
+        con->write_tail = 0;
+        con->dirty = 0;
+    }
+    
+    current_console = 0;
+    console_switching = 0;
+    console_switch_in_progress = 0;
+    pending_console_switch = -1;
+    console_redraw_pending = 0;
+    console_batch = 0;
+    
+    console_initialized = 1;
 }
 
-void console_switch(int console_num) {
+void console_redraw_current(void) {
+    if (!console_initialized) return;
+    if (console_switch_in_progress) return;
+    if (writer_thread_running) {
+        console_redraw_prepare(current_console);
+        return;
+    }
+    console_redraw_sync(current_console);
+}
+
+static void console_switch_internal(int console_num) {
+    framebuffer_t *fb;
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t flags;
+    console_t *old_con;
+    console_t *new_con;
+    
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
+    if (console_num == current_console) return;
 
-    uint32_t flags = console_irqsave();
+    if (console_switching) {
+        pending_console_switch = console_num;
+        return;
+    }
+    console_switching = 1;
+    console_switch_in_progress = 1;
+
+    flags = console_irqsave();
     spin_lock(&console_lock);
     
-    framebuffer_t *fb = fb_get();
+    fb = fb_get();
     if (fb) {
         consoles[current_console].cursor_x = fb->cursor_x;
         consoles[current_console].cursor_y = fb->cursor_y;
     }
     
-    uint32_t rows = fb ? fb->rows : 25;
-    uint32_t cols = fb ? fb->cols : 80;
+    old_con = &consoles[current_console];
+    new_con = &consoles[console_num];
+    
+    old_con->esc_state = 0;
+    old_con->esc_len = 0;
+    new_con->esc_state = 0;
+    new_con->esc_len = 0;
+    
+    rows = fb ? fb->rows : 25;
+    cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
     if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
@@ -169,8 +357,70 @@ void console_switch(int console_num) {
     spin_unlock(&console_lock);
     console_irqrestore(flags);
 
-    console_redraw();
+    console_redraw_prepare(current_console);
+    if (!writer_thread_running) {
+        console_redraw_sync(current_console);
+    }
 }
+
+void console_switch(int console_num) {
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_initialized) return;
+    if (console_num == current_console) return;
+
+    if (!console_interrupts_enabled()) {
+        if (console_switching) {
+            pending_console_switch = console_num;
+            return;
+        }
+        pending_console_switch = console_num;
+        if (writer_thread) {
+            wake_task(writer_thread);
+        }
+        return;
+    }
+    
+    console_switch_internal(console_num);
+}
+
+void console_switch_via_interrupt(int console_num) {
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_initialized) return;
+    if (console_num == current_console) return;
+
+    console_switch_internal(console_num);
+}
+
+void console_process_pending(void) {
+    int pending;
+    uint32_t flags;
+    
+    if (!console_initialized) return;
+    if (!console_interrupts_enabled()) return;
+    
+    static volatile int in_processing = 0;
+    if (in_processing) return;
+    in_processing = 1;
+
+    while (1) {
+        if (console_switching) break;
+        flags = console_irqsave();
+        pending = pending_console_switch;
+        if (pending >= 0 && pending < NUM_CONSOLES) {
+            pending_console_switch = -1;
+        }
+        console_irqrestore(flags);
+
+        if (pending >= 0 && pending < NUM_CONSOLES) {
+            console_switch_internal(pending);
+            continue;
+        }
+        break;
+    }
+
+    in_processing = 0;
+}
+
 
 int console_get_current(void) {
     return current_console;
@@ -809,11 +1059,48 @@ static void console_writer_thread(void) {
     
     while (1) {
         int work_done = 0;
-        
+        int pending_switch_requested = 0;
+
+        if (console_redraw_pending) {
+            uint32_t chunk_rows;
+            uint32_t visible_rows_local;
+            
+            uint32_t flags = console_irqsave();
+            spin_lock(&console_lock);
+            visible_rows_local = console_redraw_visible_rows;
+            spin_unlock(&console_lock);
+            console_irqrestore(flags);
+            
+            if (visible_rows_local >= 240) {
+                chunk_rows = 12;
+            } else if (visible_rows_local >= 200) {
+                chunk_rows = 16;
+            } else if (visible_rows_local >= 100) {
+                chunk_rows = 32;
+            } else if (visible_rows_local >= 50) {
+                chunk_rows = 16;
+            } else {
+                chunk_rows = 8;
+            }
+            console_redraw_step(chunk_rows);
+            if (console_redraw_pending) {
+                yield();
+                continue;
+            }
+        }
+
+        if (pending_console_switch >= 0) {
+            pending_switch_requested = 1;
+            goto handle_pending;
+        }
+
         for (int i = 0; i < NUM_CONSOLES; i++) {
             console_t *con = &consoles[i];
-            
             while (con->write_tail != con->write_head) {
+                if (pending_console_switch >= 0) {
+                    pending_switch_requested = 1;
+                    goto handle_pending;
+                }
                 uint32_t tail = con->write_tail;
                 uint32_t head = con->write_head;
                 uint32_t available = (head >= tail) ? (head - tail) : (CONSOLE_WRITE_BUFFER_SIZE - tail + head);
@@ -883,9 +1170,15 @@ static void console_writer_thread(void) {
                             console_scroll(con);
                             con->cursor_y = rows - 1;
                             if (is_active && fb) {
+                                uint32_t saved_cx = con->cursor_x;
+                                uint32_t saved_cy = con->cursor_y;
+                                spin_unlock(&console_lock);
+                                console_irqrestore(flags);
                                 fb_scroll();
-                                fb->cursor_x = con->cursor_x;
-                                fb->cursor_y = con->cursor_y;
+                                flags = console_irqsave();
+                                spin_lock(&console_lock);
+                                fb->cursor_x = saved_cx;
+                                fb->cursor_y = saved_cy;
                             }
                         }
                         if (is_active && fb) {
@@ -946,7 +1239,13 @@ static void console_writer_thread(void) {
                         if (con->cursor_y >= rows) {
                             console_scroll(con);
                             con->cursor_y = rows - 1;
-                            if (is_active && fb) fb_scroll();
+                            if (is_active && fb) {
+                                spin_unlock(&console_lock);
+                                console_irqrestore(flags);
+                                fb_scroll();
+                                flags = console_irqsave();
+                                spin_lock(&console_lock);
+                            }
                         }
                     }
                     
@@ -968,14 +1267,32 @@ static void console_writer_thread(void) {
                 
                 spin_unlock(&console_lock);
                 console_irqrestore(flags);
-                
+
                 work_done = 1;
+                if (pending_console_switch >= 0) {
+                    pending_switch_requested = 1;
+                    goto handle_pending;
+                }
                 yield();
             }
         }
         
+        if (pending_console_switch >= 0) {
+            pending_switch_requested = 1;
+        }
+
+handle_pending:
+        console_process_pending();
+        if (pending_switch_requested) {
+            continue;
+        }
+        
         if (!work_done) {
-            sleep_ms(5);
+            if (pending_console_switch == -1) {
+                sleep_ms(5);
+            } else {
+                yield();
+            }
         } else {
             yield();
         }

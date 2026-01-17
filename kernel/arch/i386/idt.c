@@ -3,6 +3,7 @@
 #include <kernel/tty.h>
 #include <kernel/debug.h>
 #include <kernel/keyboard.h>
+#include <kernel/console.h>
 #include <kernel/task.h>
 #include <kernel/syscall.h>
 #include <kernel/io.h>
