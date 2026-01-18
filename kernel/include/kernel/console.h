@@ -46,5 +46,6 @@ void console_redraw_current(void);
 void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
 void console_writer_init(void);
 void console_writer_flush(void);
+void console_tick(void);
 
 #endif

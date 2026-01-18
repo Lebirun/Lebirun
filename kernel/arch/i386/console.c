@@ -29,9 +29,8 @@ static int console_batch = 0;
 static spinlock_t console_lock = {0};
 static task_t *writer_thread = NULL;
 static volatile int writer_thread_running = 0;
-static volatile int console_switching = 0;
-static volatile int console_switch_in_progress = 0;
 static volatile int pending_console_switch = -1;
+static volatile int console_switch_in_progress = 0;
 
 static volatile int console_redraw_pending = 0;
 static char console_redraw_buffer[CONSOLE_BUFFER_ROWS][CONSOLE_BUFFER_COLS];
@@ -41,8 +40,10 @@ static uint32_t console_redraw_rows = 0;
 static uint32_t console_redraw_cols = 0;
 static uint32_t console_redraw_visible_rows = 0;
 static uint32_t console_redraw_visible_cols = 0;
+static uint32_t console_redraw_visible_rows_target = 0;
 static uint32_t console_redraw_row = 0;
-static int console_redraw_console = 0;
+static int console_redraw_console = 0; 
+static volatile uint32_t console_redraw_generation = 0;
 
 static inline uint32_t console_irqsave(void) {
     uint32_t flags;
@@ -96,33 +97,37 @@ static void console_redraw_prepare(int console_num) {
         return;
     }
 
-    if (console_redraw_pending) {
-        spin_unlock(&console_lock);
-        console_irqrestore(flags);
-        return;
-    }
+    console_redraw_generation++;
 
     con = &consoles[console_num];
     console_redraw_cursor_x = con->cursor_x;
     console_redraw_cursor_y = con->cursor_y;
 
-    for (row = 0; row < visible_rows; row++) {
-        for (col = 0; col < visible_cols; col++) {
-            console_redraw_buffer[row][col] = con->buffer[row][col];
-        }
+    memset(console_redraw_buffer, ' ', sizeof(console_redraw_buffer));
+    
+    for (row = 0; row < visible_rows && row < CONSOLE_BUFFER_ROWS; row++) {
+        uint32_t copy_size = visible_cols;
+        if (copy_size > CONSOLE_BUFFER_COLS) copy_size = CONSOLE_BUFFER_COLS;
+        memcpy(&console_redraw_buffer[row][0], &con->buffer[row][0], copy_size);
     }
 
     console_redraw_rows = rows;
     console_redraw_cols = cols;
     console_redraw_visible_rows = visible_rows;
     console_redraw_visible_cols = visible_cols;
+    console_redraw_visible_rows_target = visible_rows;
     console_redraw_row = 0;
     console_redraw_console = console_num;
     console_redraw_pending = 1;
     console_switch_in_progress = 1;
 
+    task_t *wake_writer = (writer_thread_running ? writer_thread : NULL);
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+
+    if (wake_writer) {
+        wake_task(wake_writer);
+    }
 }
 
 static void console_redraw_step(uint32_t max_rows) {
@@ -137,41 +142,57 @@ static void console_redraw_step(uint32_t max_rows) {
     uint32_t visible_rows_cached;
     uint32_t visible_cols_cached;
     uint32_t current_row_cached;
+    uint32_t generation_cached;
 
     if (!console_redraw_pending) return;
     if (!fb || !fb->font) {
         console_redraw_pending = 0;
         console_switch_in_progress = 0;
-        console_switching = 0;
         return;
     }
 
     uint32_t flags = console_irqsave();
     spin_lock(&console_lock);
+    if (!console_redraw_pending) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
     visible_rows_cached = console_redraw_visible_rows;
     visible_cols_cached = console_redraw_visible_cols;
     current_row_cached = console_redraw_row;
+    generation_cached = console_redraw_generation;
+    uint32_t visible_rows_target = visible_rows_cached;
     spin_unlock(&console_lock);
     console_irqrestore(flags);
 
     end_row = current_row_cached + max_rows;
-    if (end_row > visible_rows_cached) {
-        end_row = visible_rows_cached;
+    if (end_row > visible_rows_target) {
+        end_row = visible_rows_target;
     }
 
     rows_processed = 0;
     yield_counter = 0;
-    for (row = current_row_cached; row < end_row; row++) {
+    for (row = current_row_cached; row < end_row && row < CONSOLE_BUFFER_ROWS; row++) {
+        if (console_redraw_generation != generation_cached) {
+            return;
+        }
+        if (pending_console_switch >= 0) {
+            return;
+        }
         cols = visible_cols_cached;
         for (col = 0; col < cols; col++) {
             c = console_redraw_buffer[row][col];
-            if ((unsigned char)c > 32) {
+            if ((unsigned char)c >= 32 && (unsigned char)c != 127) {
                 fb_putchar(c, col, row);
-            } else if ((unsigned char)c == 32) {
+            } else {
                 fb_putchar(' ', col, row);
             }
             yield_counter++;
-            if (yield_counter >= 32 && current_task && console_interrupts_enabled()) {
+            if (yield_counter >= 8 && current_task && console_interrupts_enabled()) {
+                if (pending_console_switch >= 0) {
+                    return;
+                }
                 yield();
                 yield_counter = 0;
             }
@@ -181,14 +202,22 @@ static void console_redraw_step(uint32_t max_rows) {
 
     flags = console_irqsave();
     spin_lock(&console_lock);
-    console_redraw_row = end_row;
-    if (console_redraw_row >= visible_rows_cached) {
+    if (console_redraw_generation != generation_cached) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
+    
+    if (end_row > console_redraw_row) {
+        console_redraw_row = end_row;
+    }
+    
+    if (console_redraw_row >= console_redraw_visible_rows_target) {
         fb->cursor_x = console_redraw_cursor_x;
         fb->cursor_y = console_redraw_cursor_y;
         fb_update_cursor();
         console_redraw_pending = 0;
         console_switch_in_progress = 0;
-        console_switching = 0;
     }
     spin_unlock(&console_lock);
     console_irqrestore(flags);
@@ -196,22 +225,37 @@ static void console_redraw_step(uint32_t max_rows) {
 
 static void console_redraw_sync(int console_num) {
     uint32_t chunk_rows;
+    uint32_t visible_rows_local;
+    uint32_t flags;
+    
     console_redraw_prepare(console_num);
     if (!console_redraw_pending) return;
     
-    if (console_redraw_visible_rows >= 240) {
-        chunk_rows = 12;
-    } else if (console_redraw_visible_rows >= 200) {
-        chunk_rows = 16;
-    } else if (console_redraw_visible_rows >= 100) {
-        chunk_rows = 32;
-    } else if (console_redraw_visible_rows >= 50) {
-        chunk_rows = 16;
-    } else {
-        chunk_rows = 8;
-    }
-    
     while (console_redraw_pending) {
+        if (pending_console_switch >= 0 && pending_console_switch != console_num) {
+            console_redraw_pending = 0;
+            console_switch_in_progress = 0;
+            return;
+        }
+        
+        flags = console_irqsave();
+        spin_lock(&console_lock);
+        visible_rows_local = console_redraw_visible_rows;
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        
+        if (visible_rows_local >= 240) {
+            chunk_rows = 4;
+        } else if (visible_rows_local >= 200) {
+            chunk_rows = 8;
+        } else if (visible_rows_local >= 100) {
+            chunk_rows = 12;
+        } else if (visible_rows_local >= 50) {
+            chunk_rows = 16;
+        } else {
+            chunk_rows = 8;
+        }
+        
         console_redraw_step(chunk_rows);
         if (current_task && console_interrupts_enabled()) {
             yield();
@@ -261,11 +305,7 @@ void console_init(void) {
     
     for (int i = 0; i < NUM_CONSOLES; i++) {
         console_t *con = &consoles[i];
-        for (int row = 0; row < CONSOLE_BUFFER_ROWS; row++) {
-            for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-                con->buffer[row][col] = ' ';
-            }
-        }
+        memset(&con->buffer[0][0], ' ', CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
         con->cursor_x = 0;
         con->cursor_y = 0;
         con->scroll_offset = 0;
@@ -277,7 +317,6 @@ void console_init(void) {
     }
     
     current_console = 0;
-    console_switching = 0;
     console_switch_in_progress = 0;
     pending_console_switch = -1;
     console_redraw_pending = 0;
@@ -306,17 +345,19 @@ static void console_switch_internal(int console_num) {
     
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
-    if (console_num == current_console) return;
-
-    if (console_switching) {
-        pending_console_switch = console_num;
-        return;
-    }
-    console_switching = 1;
-    console_switch_in_progress = 1;
 
     flags = console_irqsave();
     spin_lock(&console_lock);
+    
+    if (console_num == current_console) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
+    
+    console_redraw_generation++;
+    console_redraw_pending = 0;
+    console_switch_in_progress = 1;
     
     fb = fb_get();
     if (fb) {
@@ -354,6 +395,8 @@ static void console_switch_internal(int console_num) {
         consoles[current_console].cursor_y = new_cy;
     }
     
+    console_switch_in_progress = 0;
+    
     spin_unlock(&console_lock);
     console_irqrestore(flags);
 
@@ -366,59 +409,53 @@ static void console_switch_internal(int console_num) {
 void console_switch(int console_num) {
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
-    if (console_num == current_console) return;
-
-    if (!console_interrupts_enabled()) {
-        if (console_switching) {
+    
+    if (console_interrupts_enabled()) {
+        console_switch_internal(console_num);
+    } else {
+        uint32_t flags = console_irqsave();
+        if (console_num != current_console) {
             pending_console_switch = console_num;
-            return;
         }
-        pending_console_switch = console_num;
+        console_irqrestore(flags);
         if (writer_thread) {
             wake_task(writer_thread);
         }
-        return;
     }
-    
-    console_switch_internal(console_num);
 }
 
 void console_switch_via_interrupt(int console_num) {
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
-
-    console_switch_internal(console_num);
+    
+    console_redraw_generation++;
+    console_redraw_pending = 0;
+    console_switch_in_progress = 0;
+    
+    pending_console_switch = console_num;
+    if (writer_thread) {
+        wake_task(writer_thread);
+    }
 }
 
 void console_process_pending(void) {
-    int pending;
+    int console_num;
     uint32_t flags;
     
     if (!console_initialized) return;
-    if (!console_interrupts_enabled()) return;
     
-    static volatile int in_processing = 0;
-    if (in_processing) return;
-    in_processing = 1;
-
-    while (1) {
-        if (console_switching) break;
-        flags = console_irqsave();
-        pending = pending_console_switch;
-        if (pending >= 0 && pending < NUM_CONSOLES) {
-            pending_console_switch = -1;
-        }
-        console_irqrestore(flags);
-
-        if (pending >= 0 && pending < NUM_CONSOLES) {
-            console_switch_internal(pending);
-            continue;
-        }
-        break;
+    flags = console_irqsave();
+    console_num = pending_console_switch;
+    if (console_num >= 0) {
+        pending_console_switch = -1;
     }
-
-    in_processing = 0;
+    console_irqrestore(flags);
+    
+    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (console_num == current_console) return;
+    
+    console_switch_internal(console_num);
 }
 
 
@@ -427,11 +464,8 @@ int console_get_current(void) {
 }
 
 static void console_scroll(console_t *con) {
-    for (int row = 0; row < CONSOLE_BUFFER_ROWS - 1; row++) {
-        for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[row][col] = con->buffer[row + 1][col];
-        }
-    }
+    memmove(&con->buffer[0][0], &con->buffer[1][0], 
+            (CONSOLE_BUFFER_ROWS - 1) * CONSOLE_BUFFER_COLS * sizeof(char));
     for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
         con->buffer[CONSOLE_BUFFER_ROWS - 1][col] = ' ';
     }
@@ -594,10 +628,14 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     }
 }
 
-static void console_putchar_to_nolock(int console_num, char c) {
+static int console_putchar_to_nolock_noscroll(int console_num, char c);
+
+static int console_putchar_to_nolock_noscroll(int console_num, char c) {
+    int need_scroll = 0;
+    
     if (!console_initialized) {
         terminal_putchar(c);
-        return;
+        return 0;
     }
     
     if (console_num < 0 || console_num >= NUM_CONSOLES) {
@@ -626,7 +664,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
         } else {
             con->esc_state = 0;
         }
-        if (con->esc_state != 0) return;
+        if (con->esc_state != 0) return 0;
     }
     
     if (con->esc_state == 2) {
@@ -634,7 +672,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
             if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
                 con->esc_buf[con->esc_len++] = c;
             }
-            return;
+            return 0;
         }
         if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
             con->esc_buf[con->esc_len++] = c;
@@ -643,13 +681,13 @@ static void console_putchar_to_nolock(int console_num, char c) {
         console_handle_csi(console_num, con, fb, rows, cols, is_active);
         con->esc_state = 0;
         con->esc_len = 0;
-        return;
+        return 0;
     }
 
     if (c == '\033') {
         con->esc_state = 1;
         con->esc_len = 0;
-        return;
+        return 0;
     }
 
     if (c == '\n') {
@@ -658,18 +696,14 @@ static void console_putchar_to_nolock(int console_num, char c) {
         if (con->cursor_y >= rows) {
             console_scroll(con);
             con->cursor_y = rows - 1;
-            if (is_active && fb) {
-                fb_scroll();
-                fb->cursor_x = con->cursor_x;
-                fb->cursor_y = con->cursor_y;
-            }
+            need_scroll = is_active && fb ? 1 : 0;
         }
         if (is_active && fb) {
             fb->cursor_x = con->cursor_x;
             fb->cursor_y = con->cursor_y;
             if (!console_batch) fb_update_cursor();
         }
-        return;
+        return need_scroll;
     }
 
     if (c == '\r') {
@@ -678,7 +712,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
             fb->cursor_x = 0;
             if (!console_batch) fb_update_cursor();
         }
-        return;
+        return 0;
     }
 
     if (c == '\b') {
@@ -691,15 +725,15 @@ static void console_putchar_to_nolock(int console_num, char c) {
                 if (!console_batch) fb_update_cursor();
             }
         }
-        return;
+        return 0;
     }
 
     if (c == '\t') {
         uint32_t tab_stop = 8 - (con->cursor_x % 8);
         for (uint32_t i = 0; i < tab_stop; i++) {
-            console_putchar_to_nolock(console_num, ' ');
+            need_scroll |= console_putchar_to_nolock_noscroll(console_num, ' ');
         }
-        return;
+        return need_scroll;
     }
 
     if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
@@ -717,9 +751,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
         if (con->cursor_y >= rows) {
             console_scroll(con);
             con->cursor_y = rows - 1;
-            if (is_active && fb) {
-                fb_scroll();
-            }
+            need_scroll = is_active && fb ? 1 : 0;
         }
     }
 
@@ -728,6 +760,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
         fb->cursor_y = con->cursor_y;
         if (!console_batch) fb_update_cursor();
     }
+    return need_scroll;
 }
 
 void console_putchar_to(int console_num, char c) {
@@ -738,9 +771,13 @@ void console_putchar_to(int console_num, char c) {
 
     uint32_t flags = console_irqsave();
     spin_lock(&console_lock);
-    console_putchar_to_nolock(console_num, c);
+    int need_scroll = console_putchar_to_nolock_noscroll(console_num, c);
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+    
+    if (need_scroll) {
+        fb_scroll();
+    }
 }
 
 void console_write(const char *data, size_t size) {
@@ -782,13 +819,21 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             uint32_t next_head = (head + 1) % CONSOLE_WRITE_BUFFER_SIZE;
             
             while (next_head == con->write_tail) {
-                yield();
-                next_head = (con->write_head + 1) % CONSOLE_WRITE_BUFFER_SIZE;
+                if (current_task && console_interrupts_enabled()) {
+                    yield();
+                    head = con->write_head;
+                    next_head = (head + 1) % CONSOLE_WRITE_BUFFER_SIZE;
+                    continue;
+                }
+                return;
             }
             
             con->write_buffer[head] = data[i];
             con->write_head = next_head;
             con->dirty = 1;
+            if (writer_thread) {
+                wake_task(writer_thread);
+            }
         }
         return;
     }
@@ -987,11 +1032,7 @@ void console_clear(int console_num) {
     spin_lock(&console_lock);
     
     console_t *con = &consoles[console_num];
-    for (int row = 0; row < CONSOLE_BUFFER_ROWS; row++) {
-        for (int col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[row][col] = ' ';
-        }
-    }
+    memset(&con->buffer[0][0], ' ', CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
     con->cursor_x = 0;
     con->cursor_y = 0;
     
@@ -1060,36 +1101,66 @@ static void console_writer_thread(void) {
     while (1) {
         int work_done = 0;
         int pending_switch_requested = 0;
+        int local_pending;
+
+        uint32_t flags = console_irqsave();
+        local_pending = pending_console_switch;
+        console_irqrestore(flags);
+
+        if (local_pending >= 0) {
+            pending_switch_requested = 1;
+            goto handle_pending;
+        }
 
         if (console_redraw_pending) {
             uint32_t chunk_rows;
             uint32_t visible_rows_local;
             
-            uint32_t flags = console_irqsave();
+            flags = console_irqsave();
+            local_pending = pending_console_switch;
             spin_lock(&console_lock);
             visible_rows_local = console_redraw_visible_rows;
             spin_unlock(&console_lock);
             console_irqrestore(flags);
             
+            if (local_pending >= 0) {
+                pending_switch_requested = 1;
+                goto handle_pending;
+            }
+            
             if (visible_rows_local >= 240) {
-                chunk_rows = 12;
+                chunk_rows = 4;
             } else if (visible_rows_local >= 200) {
-                chunk_rows = 16;
+                chunk_rows = 8;
             } else if (visible_rows_local >= 100) {
-                chunk_rows = 32;
+                chunk_rows = 12;
             } else if (visible_rows_local >= 50) {
                 chunk_rows = 16;
             } else {
                 chunk_rows = 8;
             }
             console_redraw_step(chunk_rows);
+            
+            flags = console_irqsave();
+            local_pending = pending_console_switch;
+            console_irqrestore(flags);
+            
+            if (local_pending >= 0) {
+                pending_switch_requested = 1;
+                goto handle_pending;
+            }
+            
             if (console_redraw_pending) {
                 yield();
                 continue;
             }
         }
 
-        if (pending_console_switch >= 0) {
+        flags = console_irqsave();
+        local_pending = pending_console_switch;
+        console_irqrestore(flags);
+
+        if (local_pending >= 0) {
             pending_switch_requested = 1;
             goto handle_pending;
         }
@@ -1097,7 +1168,11 @@ static void console_writer_thread(void) {
         for (int i = 0; i < NUM_CONSOLES; i++) {
             console_t *con = &consoles[i];
             while (con->write_tail != con->write_head) {
-                if (pending_console_switch >= 0) {
+                flags = console_irqsave();
+                local_pending = pending_console_switch;
+                console_irqrestore(flags);
+
+                if (local_pending >= 0) {
                     pending_switch_requested = 1;
                     goto handle_pending;
                 }
@@ -1108,13 +1183,13 @@ static void console_writer_thread(void) {
                 if (available == 0) break;
                 
                 char chunk[64];
-                uint32_t chunk_size = (available > 64) ? 64 : available;
+                uint32_t chunk_size = (available > 16) ? 16 : available;
                 
                 for (uint32_t j = 0; j < chunk_size; j++) {
                     chunk[j] = con->write_buffer[(tail + j) % CONSOLE_WRITE_BUFFER_SIZE];
                 }
                 
-                uint32_t flags = console_irqsave();
+                flags = console_irqsave();
                 spin_lock(&console_lock);
                 console_batch++;
                 
@@ -1129,6 +1204,20 @@ static void console_writer_thread(void) {
                 
                 for (uint32_t j = 0; j < chunk_size; j++) {
                     char c = chunk[j];
+                    
+                    if (j > 0 && j % 4 == 0 && pending_console_switch >= 0) {
+                        con->write_tail = (tail + j) % CONSOLE_WRITE_BUFFER_SIZE;
+                        console_batch--;
+                        if (console_batch == 0 && is_active && fb) {
+                            fb->cursor_x = con->cursor_x;
+                            fb->cursor_y = con->cursor_y;
+                            fb_update_cursor();
+                        }
+                        spin_unlock(&console_lock);
+                        console_irqrestore(flags);
+                        pending_switch_requested = 1;
+                        goto handle_pending;
+                    }
                     
                     if (con->esc_state == 1) {
                         if (c == '[') {
@@ -1220,7 +1309,13 @@ static void console_writer_thread(void) {
                                 if (con->cursor_y >= rows) {
                                     console_scroll(con);
                                     con->cursor_y = rows - 1;
-                                    if (is_active && fb) fb_scroll();
+                                    if (is_active && fb) {
+                                        spin_unlock(&console_lock);
+                                        console_irqrestore(flags);
+                                        fb_scroll();
+                                        flags = console_irqsave();
+                                        spin_lock(&console_lock);
+                                    }
                                 }
                             }
                         }
@@ -1269,7 +1364,12 @@ static void console_writer_thread(void) {
                 console_irqrestore(flags);
 
                 work_done = 1;
-                if (pending_console_switch >= 0) {
+
+                flags = console_irqsave();
+                local_pending = pending_console_switch;
+                console_irqrestore(flags);
+
+                if (local_pending >= 0) {
                     pending_switch_requested = 1;
                     goto handle_pending;
                 }
@@ -1277,7 +1377,11 @@ static void console_writer_thread(void) {
             }
         }
         
-        if (pending_console_switch >= 0) {
+        flags = console_irqsave();
+        local_pending = pending_console_switch;
+        console_irqrestore(flags);
+
+        if (local_pending >= 0) {
             pending_switch_requested = 1;
         }
 
@@ -1288,8 +1392,12 @@ handle_pending:
         }
         
         if (!work_done) {
-            if (pending_console_switch == -1) {
-                sleep_ms(5);
+            flags = console_irqsave();
+            local_pending = pending_console_switch;
+            console_irqrestore(flags);
+
+            if (local_pending == -1) {
+                block_current();
             } else {
                 yield();
             }
@@ -1321,5 +1429,16 @@ void console_writer_flush(void) {
         }
         if (all_empty) break;
         yield();
+    }
+}
+
+void console_tick(void) {
+    if (!console_initialized) return;
+    
+    int pending = pending_console_switch;
+    if (pending >= 0 && pending < NUM_CONSOLES) {
+        if (writer_thread) {
+            wake_task(writer_thread);
+        }
     }
 }
