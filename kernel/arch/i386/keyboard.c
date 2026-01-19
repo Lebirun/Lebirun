@@ -30,6 +30,16 @@ static bool e0_prefix = false;
 #define SCANCODE_F8  0x42
 #define SCANCODE_F9  0x43
 
+#define SC2_F1  0x05
+#define SC2_F2  0x06
+#define SC2_F3  0x04
+#define SC2_F4  0x0C
+#define SC2_F5  0x03
+#define SC2_F6  0x0B
+#define SC2_F7  0x83
+#define SC2_F8  0x0A
+#define SC2_F9  0x01
+
 #define SCANCODE_CTRL  0x1D
 #define SCANCODE_ALT   0x38
 #define SCANCODE_CAPS  0x3A
@@ -37,6 +47,13 @@ static bool e0_prefix = false;
 #define SCANCODE_LSHIFT 0x2A
 #define SCANCODE_RSHIFT 0x36
 #define SCANCODE_C      0x2E
+
+#define SC2_LSHIFT     0x12
+#define SC2_RSHIFT     0x59
+#define SC2_CTRL       0x14
+#define SC2_ALT        0x11
+#define SC2_CAPS       0x58
+#define SC2_C  0x21
 
 static const char qwerty_lowercase[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
@@ -60,26 +77,8 @@ static const char qwerty_uppercase[128] = {
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0
 };
 
-static void keyboard_wait_input_empty(void) {
-    while (inb(0x64) & 0x02) {
-        asm volatile("pause");
-    }
-}
-
-static void keyboard_wait_output_full(void) {
-    while (!(inb(0x64) & 0x01)) {
-        asm volatile("pause");
-    }
-}
-
-static void keyboard_send(uint8_t value) {
-    keyboard_wait_input_empty();
-    outb(0x60, value);
-}
-
-static void keyboard_wait_ack(void) {
-    keyboard_wait_output_full();
-    (void)inb(0x60);
+static inline bool shift_is_down(void) {
+    return left_shift_pressed || right_shift_pressed;
 }
 
 static inline bool is_alpha(char c) {
@@ -145,73 +144,62 @@ int getchar(void) {
     return keyboard_getchar_nb();
 }
 
-static inline bool shift_is_down(void) {
-    return left_shift_pressed || right_shift_pressed;
-}
-
 void keyboard_handler(registers_t* regs) {
     (void)regs;
 
-    uint8_t raw_scancode = inb(0x60);
+    uint8_t scancode = inb(0x60);
 
-    if (raw_scancode == 0xE0) {
+    if (scancode == 0xE0) {
         e0_prefix = true;
         return;
     }
 
-    bool is_release = (raw_scancode & 0x80) != 0;
-    uint8_t scancode = raw_scancode & 0x7F;
-
-    if (scancode == 0) {
-        e0_prefix = false;
-        return;
-    }
+    bool is_release = (scancode & 0x80) != 0;
+    uint8_t code = scancode & 0x7F;
+    e0_prefix = false;
 
     if (is_release) {
-        if (scancode == SCANCODE_LSHIFT) left_shift_pressed = false;
-        else if (scancode == SCANCODE_RSHIFT) right_shift_pressed = false;
-        else if (scancode == SCANCODE_CTRL) ctrl_pressed = false;
-        else if (scancode == SCANCODE_ALT) alt_pressed = false;
-        e0_prefix = false;
+        if (code == SCANCODE_LSHIFT) left_shift_pressed = false;
+        else if (code == SCANCODE_RSHIFT) right_shift_pressed = false;
+        else if (code == SCANCODE_CTRL) ctrl_pressed = false;
+        else if (code == SCANCODE_ALT) alt_pressed = false;
         return;
     }
 
-    if (scancode == SCANCODE_LSHIFT) { left_shift_pressed = true; e0_prefix = false; return; }
-    if (scancode == SCANCODE_RSHIFT) { right_shift_pressed = true; e0_prefix = false; return; }
-    if (scancode == SCANCODE_CTRL) { ctrl_pressed = true; e0_prefix = false; return; }
-    if (scancode == SCANCODE_ALT) { alt_pressed = true; e0_prefix = false; return; }
-    if (scancode == SCANCODE_CAPS) { caps_lock = !caps_lock; e0_prefix = false; return; }
+    if (code == SCANCODE_LSHIFT) { left_shift_pressed = true; return; }
+    if (code == SCANCODE_RSHIFT) { right_shift_pressed = true; return; }
+    if (code == SCANCODE_CTRL) { ctrl_pressed = true; return; }
+    if (code == SCANCODE_ALT) { alt_pressed = true; return; }
+    if (code == SCANCODE_CAPS) { caps_lock = !caps_lock; return; }
 
     if (ctrl_pressed && alt_pressed) {
         int console_num = -1;
-        if (scancode == SCANCODE_F1) console_num = 0;
-        else if (scancode == SCANCODE_F2) console_num = 1;
-        else if (scancode == SCANCODE_F3) console_num = 2;
-        else if (scancode == SCANCODE_F4) console_num = 3;
-        else if (scancode == SCANCODE_F5) console_num = 4;
-        else if (scancode == SCANCODE_F6) console_num = 5;
-        else if (scancode == SCANCODE_F7) console_num = 6;
-        else if (scancode == SCANCODE_F8) console_num = 7;
-        else if (scancode == SCANCODE_F9) console_num = 8;
+        if (code == SCANCODE_F1) console_num = 0;
+        else if (code == SCANCODE_F2) console_num = 1;
+        else if (code == SCANCODE_F3) console_num = 2;
+        else if (code == SCANCODE_F4) console_num = 3;
+        else if (code == SCANCODE_F5) console_num = 4;
+        else if (code == SCANCODE_F6) console_num = 5;
+        else if (code == SCANCODE_F7) console_num = 6;
+        else if (code == SCANCODE_F8) console_num = 7;
+        else if (code == SCANCODE_F9) console_num = 8;
         if (console_num >= 0) {
             console_switch_via_interrupt(console_num);
-            e0_prefix = false;
             return;
         }
     }
 
-    if (ctrl_pressed && scancode == SCANCODE_C) {
+    if (ctrl_pressed && code == SCANCODE_C) {
         buffer_put(0x03);
         int cur = console_is_initialized() ? console_get_current() : 0;
         waitq_wake_all(&keyboard_waiters[cur]);
-        e0_prefix = false;
         return;
     }
 
     bool shift = shift_is_down();
-    char c = qwerty_lowercase[scancode];
+    char c = qwerty_lowercase[code];
     if (!is_alpha(c) && shift) {
-        c = qwerty_uppercase[scancode];
+        c = qwerty_uppercase[code];
     }
     c = apply_caps_shift(c, shift);
     if (c != 0) {
@@ -219,7 +207,6 @@ void keyboard_handler(registers_t* regs) {
         int cur = console_is_initialized() ? console_get_current() : 0;
         waitq_wake_all(&keyboard_waiters[cur]);
     }
-    e0_prefix = false;
 }
 
 void keyboard_init(void) {
@@ -234,13 +221,7 @@ void keyboard_init(void) {
     outb(0x64, 0x60);  
     outb(0x60, cmd);
 
-    keyboard_send(0xF0);
-    keyboard_wait_ack();
-    keyboard_send(0x01);
-    keyboard_wait_ack();
-
-    keyboard_send(0xF4);
-    keyboard_wait_ack();
+    outb(0x60, 0xF4);
 
     while (inb(0x64) & 0x01) {
         inb(0x60);

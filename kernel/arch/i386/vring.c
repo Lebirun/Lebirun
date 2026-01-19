@@ -16,7 +16,6 @@ static int32_t next_kproc_pid = KPROC_PID_BASE;
 static volatile int vring_initialized = 0;
 static volatile int kproc_initialized = 0;
 
-static print_msg_t print_queue[64];
 static volatile uint32_t print_queue_head = 0;
 static volatile uint32_t print_queue_tail = 0;
 static volatile uint32_t print_queue_count = 0;

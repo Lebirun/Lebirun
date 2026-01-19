@@ -31,6 +31,7 @@ typedef struct {
 void console_init(void);
 void console_switch(int console_num);
 void console_switch_via_interrupt(int console_num);
+void console_switch_tty(int tty_num);
 void console_process_pending(void);
 int console_get_current(void);
 void console_putchar(char c);
