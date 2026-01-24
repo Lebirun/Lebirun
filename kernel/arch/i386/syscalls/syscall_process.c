@@ -196,34 +196,51 @@ static int sys_kill(int pid, const char *unused, int code) {
 }
 
 static int sys_fork(int unused, const char *unused2, int unused3) {
+    registers_t *regs;
     (void)unused; (void)unused2; (void)unused3;
-    if (!fork_regs_ptr) {
+    regs = current_task->syscall_frame;
+    if (!regs) {
         printf("sys_fork: no registers pointer\n");
         return -EAGAIN;
     }
-    return (int)task_fork(fork_regs_ptr);
+    return (int)task_fork(regs);
 }
 
 static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
+    registers_t *regs;
+    uint32_t bin_addr;
+    uint32_t bin_size;
+    int result;
+
     (void)unused;
-    uint32_t bin_addr = (uint32_t)bin_ptr;
-    uint32_t bin_size = (uint32_t)(uintptr_t)size_ptr;
+    bin_addr = (uint32_t)bin_ptr;
+    bin_size = (uint32_t)(uintptr_t)size_ptr;
 
     if (bin_addr >= 0xC0000000 || bin_addr < 0x1000) {
         syscall_error("sys_exec: invalid binary pointer 0x%08X\n", bin_addr);
         return -EFAULT;
     }
-    if (bin_size == 0 || bin_size > 0x1000000) {
+    if (bin_size == 0) {
         syscall_error("sys_exec: invalid size %u\n", bin_size);
         return -EINVAL;
     }
 
-    if (!fork_regs_ptr) {
+    regs = current_task->syscall_frame;
+    if (!regs) {
         syscall_error("sys_exec: no registers pointer\n");
         return -EAGAIN;
     }
 
-    return task_exec((const uint8_t *)bin_addr, bin_size, fork_regs_ptr);
+    result = task_exec((const uint8_t *)bin_addr, bin_size, regs);
+    
+    if (result == 0) {
+        syscall_set_exec_completed();
+        if (current_task) {
+            current_task->exec_completed = 1;
+        }
+    }
+    
+    return result;
 }
 
 static int sys_vfork(int unused1, const char *unused2, int unused3) {

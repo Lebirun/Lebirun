@@ -1,16 +1,18 @@
 #include <kernel/about.h>
 #include <string.h>
 
-static const char *build_date = __DATE__ " " __TIME__;
+const char *kernel_get_version(void) {
+    return OS_VERSION;
+}
 
-int sys_uname(struct utsname *buf) {
-    if (!buf) return -1;
+const char *kernel_get_name(void) {
+    return OS_NAME;
+}
 
-    strcpy(buf->sysname, SYSNAME);
-    strcpy(buf->nodename, NODENAME);
-    strcpy(buf->release, RELEASE);
-    strcpy(buf->version, VERSION);
-    strcpy(buf->machine, MACHINE);
+const char *kernel_get_build_date(void) {
+    return KERNEL_BUILD_DATE;
+}
 
-    return 0;
+const char *kernel_get_build_time(void) {
+    return KERNEL_BUILD_TIME;
 }

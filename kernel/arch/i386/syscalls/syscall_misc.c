@@ -101,28 +101,53 @@ static void copy_string(char *dest, const char *src, int max) {
 }
 
 static int sys_uname(struct utsname *buf) {
+    char version_str[65];
+    int len;
+    int i;
+    
     if (!buf) return -EFAULT;
     
-    copy_string(buf->sysname, SYSNAME, 65);
+    copy_string(buf->sysname, OS_NAME, 65);
     copy_string(buf->nodename, NODENAME, 65);
-    copy_string(buf->release, RELEASE, 65);
-    copy_string(buf->version, VERSION, 65);
+    copy_string(buf->release, OS_VERSION, 65);
+    
+    len = 0;
+    for (i = 0; KERNEL_BUILD_DATE[i] && len < 50; i++) {
+        version_str[len++] = KERNEL_BUILD_DATE[i];
+    }
+    if (len < 64) version_str[len++] = ' ';
+    for (i = 0; KERNEL_BUILD_TIME[i] && len < 63; i++) {
+        version_str[len++] = KERNEL_BUILD_TIME[i];
+    }
+    if (len < 64) version_str[len++] = ' ';
+    for (i = 0; KERNEL_BUILD_TIMEZONE[i] && len < 63; i++) {
+        version_str[len++] = KERNEL_BUILD_TIMEZONE[i];
+    }
+    version_str[len] = '\0';
+    copy_string(buf->version, version_str, 65);
+    
     copy_string(buf->machine, MACHINE, 65);
     
     return 0;
 }
 
 static int sys_sysinfo(struct sysinfo *info) {
+    uint32_t total_kb;
+    uint32_t free_pages;
+    
     if (!info) return -EFAULT;
     
     memset(info, 0, sizeof(struct sysinfo));
+    
+    total_kb = pfa_get_total_ram_kb();
+    free_pages = pfa_count_free();
     
     info->uptime = tick_count / pit_freq;
     info->loads[0] = 0;
     info->loads[1] = 0;
     info->loads[2] = 0;
-    info->totalram = pfa_count_free() * 4096;
-    info->freeram = pfa_count_free() * 4096;
+    info->totalram = (unsigned long)total_kb * 1024;
+    info->freeram = free_pages * 4096;
     info->sharedram = 0;
     info->bufferram = 0;
     info->totalswap = 0;

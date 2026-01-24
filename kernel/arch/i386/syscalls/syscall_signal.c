@@ -186,7 +186,7 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
         sigs->in_signal = 0;
     }
     
-    if (current_task && fork_regs_ptr) {
+    if (current_task && current_task->syscall_frame) {
         return 0;
     }
     
@@ -397,6 +397,8 @@ void signal_deliver_pending(void) {
                         continue;
                     default:
                         task_exit_deferred(128 + sig);
+                        schedule();
+                        for (;;) asm volatile ("hlt");
                         return;
                 }
             }

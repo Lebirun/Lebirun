@@ -58,7 +58,8 @@ static void init_default_termios(struct termios *t) {
 }
 
 static int alloc_pty(void) {
-    for (int i = 0; i < MAX_PTYS; i++) {
+    int i;
+    for (i = 0; i < MAX_PTYS; i++) {
         if (!ptys[i].in_use) {
             memset(&ptys[i], 0, sizeof(pty_t));
             ptys[i].in_use = 1;
@@ -152,22 +153,28 @@ static size_t buf_free(uint32_t head, uint32_t tail, size_t size) {
 }
 
 ssize_t pty_master_read(int fd, void *buf, size_t count) {
-    pty_t *pty = get_pty_by_master(fd);
+    pty_t *pty;
+    size_t available;
+    size_t to_read;
+    uint8_t *dst;
+    size_t i;
+
+    pty = get_pty_by_master(fd);
     if (!pty) return -1;
     
     mutex_lock(&pty->lock);
     
-    size_t available = buf_used(pty->slave_head, pty->slave_tail);
+    available = buf_used(pty->slave_head, pty->slave_tail);
     if (available == 0) {
         mutex_unlock(&pty->lock);
         if (pty->slave_closed) return 0;
         return -11;
     }
     
-    size_t to_read = (count < available) ? count : available;
-    uint8_t *dst = (uint8_t *)buf;
+    to_read = (count < available) ? count : available;
+    dst = (uint8_t *)buf;
     
-    for (size_t i = 0; i < to_read; i++) {
+    for (i = 0; i < to_read; i++) {
         dst[i] = pty->slave_buf[pty->slave_head % PTY_BUF_SIZE];
         pty->slave_head++;
     }
@@ -177,19 +184,26 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_master_write(int fd, const void *buf, size_t count) {
-    pty_t *pty = get_pty_by_master(fd);
+    pty_t *pty;
+    size_t space;
+    size_t to_write;
+    const uint8_t *src;
+    size_t i;
+    uint8_t c;
+
+    pty = get_pty_by_master(fd);
     if (!pty) return -1;
     
     if (pty->slave_closed) return -32;
     
     mutex_lock(&pty->lock);
     
-    size_t space = buf_free(pty->master_head, pty->master_tail, PTY_BUF_SIZE);
-    size_t to_write = (count < space) ? count : space;
-    const uint8_t *src = (const uint8_t *)buf;
+    space = buf_free(pty->master_head, pty->master_tail, PTY_BUF_SIZE);
+    to_write = (count < space) ? count : space;
+    src = (const uint8_t *)buf;
     
-    for (size_t i = 0; i < to_write; i++) {
-        uint8_t c = src[i];
+    for (i = 0; i < to_write; i++) {
+        c = src[i];
         
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {
@@ -215,28 +229,39 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t pty_slave_read(int fd, void *buf, size_t count) {
-    pty_t *pty = get_pty_by_slave(fd);
+    pty_t *pty;
+    size_t available;
+    uint8_t *dst;
+    size_t read_count;
+    int found_line;
+    size_t line_end;
+    size_t i;
+    uint8_t c;
+    size_t to_read;
+    cc_t vmin;
+
+    pty = get_pty_by_slave(fd);
     if (!pty) return -1;
     
     if (pty->master_closed) return 0;
     
     mutex_lock(&pty->lock);
     
-    size_t available = buf_used(pty->master_head, pty->master_tail);
+    available = buf_used(pty->master_head, pty->master_tail);
     if (available == 0) {
         mutex_unlock(&pty->lock);
         return -11;
     }
     
-    uint8_t *dst = (uint8_t *)buf;
-    size_t read_count = 0;
+    dst = (uint8_t *)buf;
+    read_count = 0;
     
     if (pty->termios.c_lflag & ICANON) {
-        int found_line = 0;
-        size_t line_end = 0;
+        found_line = 0;
+        line_end = 0;
         
-        for (size_t i = 0; i < available && i < PTY_BUF_SIZE; i++) {
-            uint8_t c = pty->master_buf[(pty->master_head + i) % PTY_BUF_SIZE];
+        for (i = 0; i < available && i < PTY_BUF_SIZE; i++) {
+            c = pty->master_buf[(pty->master_head + i) % PTY_BUF_SIZE];
             if (c == '\n' || c == pty->termios.c_cc[VEOF] || c == pty->termios.c_cc[VEOL]) {
                 found_line = 1;
                 line_end = i + 1;
@@ -249,22 +274,22 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
             return -11;
         }
         
-        size_t to_read = (count < line_end) ? count : line_end;
-        for (size_t i = 0; i < to_read; i++) {
+        to_read = (count < line_end) ? count : line_end;
+        for (i = 0; i < to_read; i++) {
             dst[i] = pty->master_buf[pty->master_head % PTY_BUF_SIZE];
             pty->master_head++;
         }
         read_count = to_read;
     } else {
-        cc_t vmin = pty->termios.c_cc[VMIN];
+        vmin = pty->termios.c_cc[VMIN];
         
         if (vmin > 0 && available < vmin) {
             mutex_unlock(&pty->lock);
             return -11;
         }
         
-        size_t to_read = (count < available) ? count : available;
-        for (size_t i = 0; i < to_read; i++) {
+        to_read = (count < available) ? count : available;
+        for (i = 0; i < to_read; i++) {
             dst[i] = pty->master_buf[pty->master_head % PTY_BUF_SIZE];
             pty->master_head++;
         }
@@ -276,19 +301,26 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
-    pty_t *pty = get_pty_by_slave(fd);
+    pty_t *pty;
+    size_t space;
+    size_t written;
+    const uint8_t *src;
+    size_t i;
+    uint8_t c;
+
+    pty = get_pty_by_slave(fd);
     if (!pty) return -1;
     
     if (pty->master_closed) return -32;
     
     mutex_lock(&pty->lock);
     
-    size_t space = buf_free(pty->slave_head, pty->slave_tail, PTY_BUF_SIZE);
-    size_t written = 0;
-    const uint8_t *src = (const uint8_t *)buf;
+    space = buf_free(pty->slave_head, pty->slave_tail, PTY_BUF_SIZE);
+    written = 0;
+    src = (const uint8_t *)buf;
     
-    for (size_t i = 0; i < count && written < space; i++) {
-        uint8_t c = src[i];
+    for (i = 0; i < count && written < space; i++) {
+        c = src[i];
         
         if (pty->termios.c_oflag & OPOST) {
             if (c == '\n' && (pty->termios.c_oflag & ONLCR)) {

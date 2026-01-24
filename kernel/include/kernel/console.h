@@ -44,6 +44,7 @@ void console_clear(int console_num);
 void console_setcursor(int console_num, int x, int y);
 int console_getcursor(int console_num, int *x, int *y);
 void console_redraw_current(void);
+void console_tick_redraw(void);
 void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
 void console_writer_init(void);
 void console_writer_flush(void);

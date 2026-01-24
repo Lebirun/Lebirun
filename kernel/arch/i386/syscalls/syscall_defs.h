@@ -20,6 +20,10 @@
 #include <kernel/drivers/net/net.h>
 #include <kernel/drivers/net/http.h>
 
+void syscall_set_exec_completed(void);
+int syscall_check_exec_completed(void);
+void syscall_clear_exec_completed(void);
+
 #define EPERM    1
 #define ENOENT   2
 #define ESRCH    3
@@ -384,6 +388,9 @@
 #define SYSCALL_FB_GET_DETAILED_INFO 260
 #define SYSCALL_FB_GET_CAPS 261
 
+#define SYSCALL_STATFS 262
+#define SYSCALL_FSTATFS 263
+
 #define NR_SYSCALLS 270
 
 struct kernel_stat {
@@ -474,7 +481,6 @@ extern struct kernel_winsize tty_winsize[NUM_CONSOLES];
 extern int tty_pgrp[NUM_CONSOLES];
 
 extern void *syscall_table[NR_SYSCALLS];
-extern registers_t *fork_regs_ptr;
 
 void syscalls_core_init(void);
 void syscalls_process_init(void);

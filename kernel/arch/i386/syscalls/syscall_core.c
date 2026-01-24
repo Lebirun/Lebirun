@@ -1,7 +1,10 @@
 #include "syscall_defs.h"
 #include <kernel/creds.h>
+#include <kernel/debug.h>
 
 extern mutex_t print_lock;
+extern bool debugMode;
+extern int debugLevel;
 
 #define LINE_BUF_SIZE 1024
 static char line_buffers[NUM_CONSOLES][LINE_BUF_SIZE];
@@ -29,9 +32,11 @@ static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
     asm volatile("cli");
-    printf("sys_exit: user task exiting with code %d\n", code);
+    if (debugMode && debugLevel >= 1) printf("sys_exit: user task exiting with code %d\n", code);
     asm volatile("sti");
     task_exit_deferred((uint32_t)code);
+    schedule();
+    for (;;) asm volatile ("hlt");
     return 0;
 }
 

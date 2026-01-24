@@ -1,11 +1,33 @@
 #include "syscall_defs.h"
 #include <kernel/gdt.h>
 #include <kernel/task.h>
+#include <kernel/debug.h>
+#include <stdio.h>
 
 extern task_t* current_task;
+extern bool debugMode;
+extern int debugLevel;
 
 void *syscall_table[NR_SYSCALLS] = {0};
-registers_t *fork_regs_ptr = NULL;
+
+void syscall_set_exec_completed(void) {
+    if (current_task) {
+        current_task->exec_completed = 1;
+    }
+}
+
+int syscall_check_exec_completed(void) {
+    if (current_task) {
+        return current_task->exec_completed;
+    }
+    return 0;
+}
+
+void syscall_clear_exec_completed(void) {
+    if (current_task) {
+        current_task->exec_completed = 0;
+    }
+}
 
 #define LEBIRUN_SYSCALL_FLAG 0x80000000
 
@@ -246,6 +268,11 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 38:  return SYSCALL_RENAME;
         case 55:  return SYSCALL_FCNTL;
         
+        case 99:  return SYSCALL_STATFS;
+        case 100: return SYSCALL_FSTATFS;
+        case 268: return SYSCALL_STATFS;
+        case 269: return SYSCALL_FSTATFS;
+        
         case 243: return -243;
         
         default:
@@ -254,37 +281,63 @@ static int linux_to_kernel_syscall(int linux_nr) {
 }
 
 void do_syscall(registers_t *regs) {
-    int linux_nr = regs->eax;
+    int linux_nr;
     int num;
-    
+    int result;
+    struct user_desc *u_info;
+
+    syscall_clear_exec_completed();
+    if (current_task) {
+        current_task->exec_completed = 0;
+    }
+
+    linux_nr = regs->eax;
     num = linux_to_kernel_syscall(linux_nr);
     
-    if (num == -243) {
-        struct user_desc *u_info = (struct user_desc *)regs->ebx;
+    if (num == -243 || num == 243) {
+        u_info = (struct user_desc *)regs->ebx;
         regs->eax = do_set_thread_area(u_info);
         return;
     }
     
     if (num < 0) {
+        if (current_task) {
+            printf("[SYSCALL] Task %d: unmapped linux syscall %d (0x%x) - returning ENOSYS\n",
+                   current_task->pid, linux_nr, linux_nr);
+        }
         regs->eax = -ENOSYS;
         return;
     }
 
     set_syscall_frame(regs);
-    fork_regs_ptr = regs;
 
     if (num >= NR_SYSCALLS || !syscall_table[num]) {
+        if (current_task) {
+            printf("[SYSCALL] Task %d: unimplemented syscall %d (linux=%d) - returning ENOSYS\n",
+                   current_task->pid, num, linux_nr);
+        }
         clear_syscall_frame();
-        fork_regs_ptr = NULL;
         regs->eax = -ENOSYS;
         return;
     }
 
     if (num == SYSCALL_VFS_READDIR) {
-        regs->eax = sys_vfs_readdir(regs);
+        result = sys_vfs_readdir(regs);
     } else {
-        regs->eax = ((int (*)(int, const char *, int))syscall_table[num])(
+        result = ((int (*)(int, const char *, int))syscall_table[num])(
             regs->ebx, (const char *)regs->ecx, regs->edx);
+    }
+
+    if (!syscall_check_exec_completed()) {
+        regs->eax = result;
+    } else {
+        __asm__ volatile ("" ::: "memory");
+        if (debugMode && debugLevel >= 3) printf("do_syscall: exec completed, regs=%p eip=0x%08X eax=0x%08X\n", 
+               regs, regs->eip, regs->eax);
+        if (regs->eip < 0x1000 || regs->eip >= 0xC0000000) {
+            if (debugMode && debugLevel >= 1) printf("do_syscall: CRITICAL: regs->eip corrupted after exec! eip=0x%08X\n", regs->eip);
+            __asm__ volatile ("cli; hlt");
+        }
     }
 
     if ((int)regs->eax < 0) {
@@ -293,7 +346,6 @@ void do_syscall(registers_t *regs) {
     }
     
     clear_syscall_frame();
-    fork_regs_ptr = NULL;
 }
 
 void syscall_init(void) {

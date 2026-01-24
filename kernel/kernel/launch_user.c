@@ -186,6 +186,20 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
         return NULL;
     }
 
+    printf("launch_user: entry=0x%08X, verifying code in new_pd:\n", elf_info.entry_point);
+    {
+        uint8_t code_buf[32];
+        vmm_read_from_pd(new_pd, elf_info.entry_point, code_buf, 32);
+        printf("  Code at entry: ");
+        for (int i = 0; i < 32; i++) {
+            printf("%02X ", code_buf[i]);
+        }
+        printf("\n");
+        if (code_buf[0] != 0x31 || code_buf[1] != 0xED) {
+            printf("  WARNING: unexpected start bytes, expected 31 ED!\n");
+        }
+    }
+
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
     t->console_id = console_id;

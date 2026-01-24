@@ -106,6 +106,12 @@ typedef struct task {
     
     uint8_t vring_minor;
     bool is_kernel_task;
+
+    int exec_completed;
+    
+    uint32_t exec_old_pd;
+    uint32_t *exec_old_pages;
+    uint32_t exec_old_pages_count;
 } task_t;
 
 extern task_t* current_task;

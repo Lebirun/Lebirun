@@ -129,22 +129,27 @@ static int putchar_kernel(int c) {
 }
 
 static bool kprint(const char* data, size_t length) {
+	size_t i;
 	if (!data || length == 0) return true;
 	if (console_is_initialized() && kprint_is_ready()) {
 		kprint_write(0, data, length);
 		return true;
 	}
-	for (size_t i = 0; i < length; i++) {
+	for (i = 0; i < length; i++) {
 		putchar_kernel(data[i]);
 	}
 	return true;
 }
 
 static void reverse(char* str, size_t len) {
+	size_t i;
+	size_t j;
+	char tmp;
 	if (len == 0) return;
-	size_t i = 0, j = len - 1;
+	i = 0;
+	j = len - 1;
 	while (i < j) {
-		char tmp = str[i];
+		tmp = str[i];
 		str[i] = str[j];
 		str[j] = tmp;
 		i++; j--;
@@ -179,13 +184,35 @@ static size_t itoa64(int64_t value, char* buf, int base, bool* is_negative) {
 }
 
 int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
-	if (!format) return -1;
-	
-	size_t written = 0;
+	size_t written;
 	char numbuf[68];
+	int left, zero, plus, space, alt;
+	int width;
+	int prec;
+	int length;
+	char spec;
+	int i;
+	size_t si;
+	char c;
+	const char *s;
+	size_t slen;
+	int64_t ival;
+	uint64_t uval;
+	bool neg;
+	size_t len;
+	char prefix[2];
+	int plen;
+	int total;
+	int pad;
+	int upper;
+	void *ptr;
+	const char *nil;
+
+	if (!format) return -1;
+	written = 0;
 	
-	#define PUTC(c) do { \
-		if (buf && size > 0 && written < size - 1) buf[written] = (c); \
+	#define PUTC(ch) do { \
+		if (buf && size > 0 && written < size - 1) buf[written] = (ch); \
 		written++; \
 	} while(0)
 	
@@ -197,21 +224,21 @@ int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
 		format++;
 		if (*format == '%') { PUTC('%'); format++; continue; }
 		
-		bool left = false, zero = false, plus = false, space = false, alt = false;
+		left = 0; zero = 0; plus = 0; space = 0; alt = 0;
 		while (*format) {
-			if (*format == '-') { left = true; format++; }
-			else if (*format == '0') { zero = true; format++; }
-			else if (*format == '+') { plus = true; format++; }
-			else if (*format == ' ') { space = true; format++; }
-			else if (*format == '#') { alt = true; format++; }
+			if (*format == '-') { left = 1; format++; }
+			else if (*format == '0') { zero = 1; format++; }
+			else if (*format == '+') { plus = 1; format++; }
+			else if (*format == ' ') { space = 1; format++; }
+			else if (*format == '#') { alt = 1; format++; }
 			else break;
 		}
 		(void)alt;
 		
-		int width = 0;
+		width = 0;
 		if (*format == '*') {
 			width = va_arg(ap, int);
-			if (width < 0) { left = true; width = -width; }
+			if (width < 0) { left = 1; width = -width; }
 			format++;
 		} else {
 			while (*format >= '0' && *format <= '9') {
@@ -220,7 +247,7 @@ int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
 			}
 		}
 		
-		int prec = -1;
+		prec = -1;
 		if (*format == '.') {
 			format++;
 			prec = 0;
@@ -235,95 +262,87 @@ int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
 			}
 		}
 		
-		int length = 0;
+		length = 0;
 		if (*format == 'l') { format++; length = 1; if (*format == 'l') { format++; length = 2; } }
 		else if (*format == 'h') { format++; length = -1; if (*format == 'h') { format++; length = -2; } }
 		else if (*format == 'z') { format++; length = 3; }
 		
-		char spec = *format++;
+		spec = *format++;
 		if (!spec) break;
 		
 		switch (spec) {
-		case 'c': {
-			char c = (char)va_arg(ap, int);
-			if (!left) for (int i = 1; i < width; i++) PUTC(' ');
+		case 'c':
+			c = (char)va_arg(ap, int);
+			if (!left) { for (i = 1; i < width; i++) PUTC(' '); }
 			PUTC(c);
-			if (left) for (int i = 1; i < width; i++) PUTC(' ');
+			if (left) { for (i = 1; i < width; i++) PUTC(' '); }
 			break;
-		}
-		case 's': {
-			const char* s = va_arg(ap, const char*);
+		case 's':
+			s = va_arg(ap, const char*);
 			if (!s) s = "(null)";
-			size_t slen = strlen(s);
+			slen = strlen(s);
 			if (prec >= 0 && (size_t)prec < slen) slen = (size_t)prec;
-			if (!left) for (size_t i = slen; i < (size_t)width; i++) PUTC(' ');
-			for (size_t i = 0; i < slen; i++) PUTC(s[i]);
-			if (left) for (size_t i = slen; i < (size_t)width; i++) PUTC(' ');
+			if (!left) { for (si = slen; si < (size_t)width; si++) PUTC(' '); }
+			for (si = 0; si < slen; si++) PUTC(s[si]);
+			if (left) { for (si = slen; si < (size_t)width; si++) PUTC(' '); }
 			break;
-		}
-		case 'd': case 'i': {
-			int64_t val;
-			if (length == 2) val = va_arg(ap, long long);
-			else if (length == 1) val = va_arg(ap, long);
-			else if (length == 3) val = (int64_t)va_arg(ap, size_t);
-			else val = va_arg(ap, int);
-			bool neg;
-			size_t len = itoa64(val, numbuf, 10, &neg);
-			char prefix[2] = {0};
-			int plen = 0;
+		case 'd':
+		case 'i':
+			if (length == 2) ival = va_arg(ap, long long);
+			else if (length == 1) ival = va_arg(ap, long);
+			else if (length == 3) ival = (int64_t)va_arg(ap, size_t);
+			else ival = va_arg(ap, int);
+			len = itoa64(ival, numbuf, 10, &neg);
+			prefix[0] = 0; prefix[1] = 0;
+			plen = 0;
 			if (neg) { prefix[0] = '-'; plen = 1; }
 			else if (plus) { prefix[0] = '+'; plen = 1; }
 			else if (space) { prefix[0] = ' '; plen = 1; }
-			int total = plen + (int)len;
-			int pad = (width > total) ? (width - total) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) PUTC(' ');
-			for (int i = 0; i < plen; i++) PUTC(prefix[i]);
-			if (!left && zero) for (int i = 0; i < pad; i++) PUTC('0');
-			for (size_t i = 0; i < len; i++) PUTC(numbuf[i]);
-			if (left) for (int i = 0; i < pad; i++) PUTC(' ');
+			total = plen + (int)len;
+			pad = (width > total) ? (width - total) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) PUTC(' '); }
+			for (i = 0; i < plen; i++) PUTC(prefix[i]);
+			if (!left && zero) { for (i = 0; i < pad; i++) PUTC('0'); }
+			for (si = 0; si < len; si++) PUTC(numbuf[si]);
+			if (left) { for (i = 0; i < pad; i++) PUTC(' '); }
 			break;
-		}
-		case 'u': {
-			uint64_t val;
-			if (length == 2) val = va_arg(ap, unsigned long long);
-			else if (length == 1) val = va_arg(ap, unsigned long);
-			else if (length == 3) val = va_arg(ap, size_t);
-			else val = va_arg(ap, unsigned int);
-			size_t len = utoa64(val, numbuf, 10, false);
-			int pad = (width > (int)len) ? (width - (int)len) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) PUTC(' ');
-			if (!left && zero) for (int i = 0; i < pad; i++) PUTC('0');
-			for (size_t i = 0; i < len; i++) PUTC(numbuf[i]);
-			if (left) for (int i = 0; i < pad; i++) PUTC(' ');
+		case 'u':
+			if (length == 2) uval = va_arg(ap, unsigned long long);
+			else if (length == 1) uval = va_arg(ap, unsigned long);
+			else if (length == 3) uval = va_arg(ap, size_t);
+			else uval = va_arg(ap, unsigned int);
+			len = utoa64(uval, numbuf, 10, 0);
+			pad = (width > (int)len) ? (width - (int)len) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) PUTC(' '); }
+			if (!left && zero) { for (i = 0; i < pad; i++) PUTC('0'); }
+			for (si = 0; si < len; si++) PUTC(numbuf[si]);
+			if (left) { for (i = 0; i < pad; i++) PUTC(' '); }
 			break;
-		}
-		case 'x': case 'X': {
-			bool upper = (spec == 'X');
-			uint64_t val;
-			if (length == 2) val = va_arg(ap, unsigned long long);
-			else if (length == 1) val = va_arg(ap, unsigned long);
-			else if (length == 3) val = va_arg(ap, size_t);
-			else val = va_arg(ap, unsigned int);
-			size_t len = utoa64(val, numbuf, 16, upper);
-			int pad = (width > (int)len) ? (width - (int)len) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) PUTC(' ');
-			if (!left && zero) for (int i = 0; i < pad; i++) PUTC('0');
-			for (size_t i = 0; i < len; i++) PUTC(numbuf[i]);
-			if (left) for (int i = 0; i < pad; i++) PUTC(' ');
+		case 'x':
+		case 'X':
+			upper = (spec == 'X');
+			if (length == 2) uval = va_arg(ap, unsigned long long);
+			else if (length == 1) uval = va_arg(ap, unsigned long);
+			else if (length == 3) uval = va_arg(ap, size_t);
+			else uval = va_arg(ap, unsigned int);
+			len = utoa64(uval, numbuf, 16, upper);
+			pad = (width > (int)len) ? (width - (int)len) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) PUTC(' '); }
+			if (!left && zero) { for (i = 0; i < pad; i++) PUTC('0'); }
+			for (si = 0; si < len; si++) PUTC(numbuf[si]);
+			if (left) { for (i = 0; i < pad; i++) PUTC(' '); }
 			break;
-		}
-		case 'p': {
-			void* ptr = va_arg(ap, void*);
+		case 'p':
+			ptr = va_arg(ap, void*);
 			if (!ptr) {
-				const char* nil = "(nil)";
-				for (int i = 0; nil[i]; i++) PUTC(nil[i]);
+				nil = "(nil)";
+				for (i = 0; nil[i]; i++) PUTC(nil[i]);
 			} else {
 				PUTC('0'); PUTC('x');
-				size_t len = utoa64((uintptr_t)ptr, numbuf, 16, false);
-				for (size_t i = 0; i < len; i++) PUTC(numbuf[i]);
+				len = utoa64((uintptr_t)ptr, numbuf, 16, 0);
+				for (si = 0; si < len; si++) PUTC(numbuf[si]);
 			}
 			break;
-		}
 		default:
 			PUTC(spec);
 			break;
@@ -339,27 +358,50 @@ int vsnprintf(char* buf, size_t size, const char* format, va_list ap) {
 
 int snprintf(char* buf, size_t size, const char* format, ...) {
 	va_list ap;
+	int ret;
 	va_start(ap, format);
-	int ret = vsnprintf(buf, size, format, ap);
+	ret = vsnprintf(buf, size, format, ap);
 	va_end(ap);
 	return ret;
 }
 
 int sprintf(char* buf, const char* format, ...) {
 	va_list ap;
+	int ret;
 	va_start(ap, format);
-	int ret = vsnprintf(buf, (size_t)-1, format, ap);
+	ret = vsnprintf(buf, (size_t)-1, format, ap);
 	va_end(ap);
 	return ret;
 }
 
 int printf(const char* format, ...) {
-	if (!format) return -1;
 	va_list ap;
-	va_start(ap, format);
-	
-	int written = 0;
+	int written;
 	char numbuf[68];
+	int left, zero, plus, space, alt;
+	int width;
+	int prec;
+	int length;
+	char spec;
+	int i;
+	size_t si;
+	char c;
+	const char *s;
+	size_t slen;
+	int64_t ival;
+	uint64_t uval;
+	bool neg;
+	size_t len;
+	char prefix[2];
+	int plen;
+	int total;
+	int pad;
+	int upper;
+	void *ptr;
+
+	if (!format) return -1;
+	va_start(ap, format);
+	written = 0;
 	
 	while (*format) {
 		if (*format != '%') {
@@ -371,21 +413,21 @@ int printf(const char* format, ...) {
 		format++;
 		if (*format == '%') { kprint("%", 1); format++; written++; continue; }
 		
-		bool left = false, zero = false, plus = false, space = false, alt = false;
+		left = 0; zero = 0; plus = 0; space = 0; alt = 0;
 		while (*format) {
-			if (*format == '-') { left = true; format++; }
-			else if (*format == '0') { zero = true; format++; }
-			else if (*format == '+') { plus = true; format++; }
-			else if (*format == ' ') { space = true; format++; }
-			else if (*format == '#') { alt = true; format++; }
+			if (*format == '-') { left = 1; format++; }
+			else if (*format == '0') { zero = 1; format++; }
+			else if (*format == '+') { plus = 1; format++; }
+			else if (*format == ' ') { space = 1; format++; }
+			else if (*format == '#') { alt = 1; format++; }
 			else break;
 		}
 		(void)alt;
 		
-		int width = 0;
+		width = 0;
 		if (*format == '*') {
 			width = va_arg(ap, int);
-			if (width < 0) { left = true; width = -width; }
+			if (width < 0) { left = 1; width = -width; }
 			format++;
 		} else {
 			while (*format >= '0' && *format <= '9') {
@@ -394,7 +436,7 @@ int printf(const char* format, ...) {
 			}
 		}
 		
-		int prec = -1;
+		prec = -1;
 		if (*format == '.') {
 			format++;
 			prec = 0;
@@ -409,108 +451,98 @@ int printf(const char* format, ...) {
 			}
 		}
 		
-		int length = 0;
+		length = 0;
 		if (*format == 'l') { format++; length = 1; if (*format == 'l') { format++; length = 2; } }
 		else if (*format == 'h') { format++; length = -1; if (*format == 'h') { format++; length = -2; } }
 		else if (*format == 'z') { format++; length = 3; }
 		
-		char spec = *format++;
+		spec = *format++;
 		if (!spec) break;
 		
 		switch (spec) {
-		case 'c': {
-			char c = (char)va_arg(ap, int);
-			if (!left) for (int i = 1; i < width; i++) { kprint(" ", 1); written++; }
+		case 'c':
+			c = (char)va_arg(ap, int);
+			if (!left) { for (i = 1; i < width; i++) { kprint(" ", 1); written++; } }
 			kprint(&c, 1); written++;
-			if (left) for (int i = 1; i < width; i++) { kprint(" ", 1); written++; }
+			if (left) { for (i = 1; i < width; i++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 's': {
-			const char* s = va_arg(ap, const char*);
+		case 's':
+			s = va_arg(ap, const char*);
 			if (!s) s = "(null)";
-			size_t slen = strlen(s);
+			slen = strlen(s);
 			if (prec >= 0 && (size_t)prec < slen) slen = (size_t)prec;
-			if (!left) for (size_t i = slen; i < (size_t)width; i++) { kprint(" ", 1); written++; }
+			if (!left) { for (si = slen; si < (size_t)width; si++) { kprint(" ", 1); written++; } }
 			kprint(s, slen); written += (int)slen;
-			if (left) for (size_t i = slen; i < (size_t)width; i++) { kprint(" ", 1); written++; }
+			if (left) { for (si = slen; si < (size_t)width; si++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 'd': case 'i': {
-			int64_t val;
-			if (length == 2) val = va_arg(ap, long long);
-			else if (length == 1) val = va_arg(ap, long);
-			else if (length == 3) val = (int64_t)va_arg(ap, size_t);
-			else val = va_arg(ap, int);
-			bool neg;
-			size_t len = itoa64(val, numbuf, 10, &neg);
-			char prefix[2] = {0};
-			int plen = 0;
+		case 'd':
+		case 'i':
+			if (length == 2) ival = va_arg(ap, long long);
+			else if (length == 1) ival = va_arg(ap, long);
+			else if (length == 3) ival = (int64_t)va_arg(ap, size_t);
+			else ival = va_arg(ap, int);
+			len = itoa64(ival, numbuf, 10, &neg);
+			prefix[0] = 0; prefix[1] = 0;
+			plen = 0;
 			if (neg) { prefix[0] = '-'; plen = 1; }
 			else if (plus) { prefix[0] = '+'; plen = 1; }
 			else if (space) { prefix[0] = ' '; plen = 1; }
-			int total = plen + (int)len;
-			int pad = (width > total) ? (width - total) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
+			total = plen + (int)len;
+			pad = (width > total) ? (width - total) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
 			if (plen) { kprint(prefix, (size_t)plen); written += plen; }
-			if (!left && zero) for (int i = 0; i < pad; i++) { kprint("0", 1); written++; }
+			if (!left && zero) { for (i = 0; i < pad; i++) { kprint("0", 1); written++; } }
 			kprint(numbuf, len); written += (int)len;
-			if (left) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
+			if (left) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 'u': {
-			uint64_t val;
-			if (length == 2) val = va_arg(ap, unsigned long long);
-			else if (length == 1) val = va_arg(ap, unsigned long);
-			else if (length == 3) val = va_arg(ap, size_t);
-			else val = va_arg(ap, unsigned int);
-			size_t len = utoa64(val, numbuf, 10, false);
-			int pad = (width > (int)len) ? (width - (int)len) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
-			if (!left && zero) for (int i = 0; i < pad; i++) { kprint("0", 1); written++; }
+		case 'u':
+			if (length == 2) uval = va_arg(ap, unsigned long long);
+			else if (length == 1) uval = va_arg(ap, unsigned long);
+			else if (length == 3) uval = va_arg(ap, size_t);
+			else uval = va_arg(ap, unsigned int);
+			len = utoa64(uval, numbuf, 10, 0);
+			pad = (width > (int)len) ? (width - (int)len) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
+			if (!left && zero) { for (i = 0; i < pad; i++) { kprint("0", 1); written++; } }
 			kprint(numbuf, len); written += (int)len;
-			if (left) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
+			if (left) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 'x': case 'X': {
-			bool upper = (spec == 'X');
-			uint64_t val;
-			if (length == 2) val = va_arg(ap, unsigned long long);
-			else if (length == 1) val = va_arg(ap, unsigned long);
-			else if (length == 3) val = va_arg(ap, size_t);
-			else val = va_arg(ap, unsigned int);
-			size_t len = utoa64(val, numbuf, 16, upper);
-			int pad = (width > (int)len) ? (width - (int)len) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
-			if (!left && zero) for (int i = 0; i < pad; i++) { kprint("0", 1); written++; }
+		case 'x':
+		case 'X':
+			upper = (spec == 'X');
+			if (length == 2) uval = va_arg(ap, unsigned long long);
+			else if (length == 1) uval = va_arg(ap, unsigned long);
+			else if (length == 3) uval = va_arg(ap, size_t);
+			else uval = va_arg(ap, unsigned int);
+			len = utoa64(uval, numbuf, 16, upper);
+			pad = (width > (int)len) ? (width - (int)len) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
+			if (!left && zero) { for (i = 0; i < pad; i++) { kprint("0", 1); written++; } }
 			kprint(numbuf, len); written += (int)len;
-			if (left) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
+			if (left) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 'o': {
-			uint64_t val;
-			if (length == 2) val = va_arg(ap, unsigned long long);
-			else if (length == 1) val = va_arg(ap, unsigned long);
-			else if (length == 3) val = va_arg(ap, size_t);
-			else val = va_arg(ap, unsigned int);
-			size_t len = utoa64(val, numbuf, 8, false);
-			int pad = (width > (int)len) ? (width - (int)len) : 0;
-			if (!left && !zero) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
-			if (!left && zero) for (int i = 0; i < pad; i++) { kprint("0", 1); written++; }
+		case 'o':
+			if (length == 2) uval = va_arg(ap, unsigned long long);
+			else if (length == 1) uval = va_arg(ap, unsigned long);
+			else if (length == 3) uval = va_arg(ap, size_t);
+			else uval = va_arg(ap, unsigned int);
+			len = utoa64(uval, numbuf, 8, 0);
+			pad = (width > (int)len) ? (width - (int)len) : 0;
+			if (!left && !zero) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
+			if (!left && zero) { for (i = 0; i < pad; i++) { kprint("0", 1); written++; } }
 			kprint(numbuf, len); written += (int)len;
-			if (left) for (int i = 0; i < pad; i++) { kprint(" ", 1); written++; }
+			if (left) { for (i = 0; i < pad; i++) { kprint(" ", 1); written++; } }
 			break;
-		}
-		case 'p': {
-			void* ptr = va_arg(ap, void*);
+		case 'p':
+			ptr = va_arg(ap, void*);
 			if (!ptr) {
 				kprint("(nil)", 5); written += 5;
 			} else {
 				kprint("0x", 2); written += 2;
-				size_t len = utoa64((uintptr_t)ptr, numbuf, 16, false);
+				len = utoa64((uintptr_t)ptr, numbuf, 16, 0);
 				kprint(numbuf, len); written += (int)len;
 			}
 			break;
-		}
 		default:
 			kprint(&spec, 1); written++;
 			break;

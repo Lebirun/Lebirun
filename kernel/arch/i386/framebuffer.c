@@ -300,7 +300,6 @@ static void fb_clear_region(uint32_t start_y, uint32_t end_y) {
 int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp, uint8_t type) {
     uint32_t fb_phys;
     uint32_t fb_size;
-    uint32_t max_vram_size;
     uint32_t num_pages;
     uint32_t i;
     uint32_t phys;
@@ -317,13 +316,7 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     
     fb_phys = (uint32_t)addr;
     fb_size = pitch * height;
-    
-    max_vram_size = pitch * 2048;
-    if (fb_size < max_vram_size) {
-        num_pages = (max_vram_size + 0xFFF) / 0x1000;
-    } else {
-        num_pages = (fb_size + 0xFFF) / 0x1000;
-    }
+    num_pages = (fb_size + 0xFFF) / 0x1000;
     
     for (i = 0; i < num_pages; i++) {
         phys = fb_phys + (i * 0x1000);
@@ -399,8 +392,6 @@ void fb_clear(void) {
     uint32_t chunk_size;
     uint32_t y_start;
     uint32_t y_end;
-    uint32_t row_idx;
-    uint32_t col;
     
     bytes_per_pixel = (uint32_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) return;
@@ -418,21 +409,11 @@ void fb_clear(void) {
     fb.cursor_x = 0;
     fb.cursor_y = 0;
     
-    for (row_idx = 0; row_idx < MAX_ROWS; row_idx++) {
-        for (col = 0; col < MAX_COLS; col++) {
-            screen_buffer[row_idx][col] = ' ';
-        }
-    }
+    memset(&screen_buffer[0][0], ' ', MAX_ROWS * MAX_COLS);
     
     cursor_drawn = 0;
     cursor_prev_x = 0;
     cursor_prev_y = 0;
-    
-    if (fb.rows > 0 && fb.cols > 0) {
-        for (col = 0; col < fb.cols && col < MAX_COLS; col++) {
-            fb_putchar(' ', col, 0);
-        }
-    }
 }
 
 void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
@@ -581,7 +562,6 @@ void fb_scroll(void) {
     uint8_t *row;
     uint8_t *p;
     uint32_t used;
-    uint32_t row_idx;
     uint32_t col;
     uint8_t r;
     uint8_t g;
@@ -616,25 +596,30 @@ void fb_scroll(void) {
         memcpy(dst, src, line_bytes);
         dst += hw_pitch;
         src += hw_pitch;
-        if ((y & 0x0F) == 0x0F) {
-            fb_yield();
-        }
     }
     
     last_row_start = (fb.rows - 1) * line_height;
     clear_end = last_row_start + line_height;
     if (clear_end > hw_height) clear_end = hw_height;
+    if (last_row_start >= hw_height) return;
     
     for (y = last_row_start; y < clear_end; y++) {
         row = (uint8_t *)fb.addr + y * hw_pitch;
-        if (fb.bg_color == 0 && fb.bpp == 32) {
-            memset(row, 0, hw_width * bytes_per_pixel);
+        if (fb.bg_color == 0) {
+            memset(row, 0, hw_pitch);
+        } else if (fb.bpp == 32) {
+            uint32_t *row32 = (uint32_t *)row;
+            uint32_t pixels_to_clear = hw_width;
+            if (pixels_to_clear > (hw_pitch / 4)) {
+                pixels_to_clear = hw_pitch / 4;
+            }
+            for (x = 0; x < pixels_to_clear; x++) {
+                row32[x] = fb.bg_color;
+            }
         } else {
             for (x = 0; x < hw_width; x++) {
                 p = row + x * bytes_per_pixel;
-                if (fb.bpp == 32) {
-                    *(uint32_t *)p = fb.bg_color;
-                } else if (fb.bpp == 24) {
+                if (fb.bpp == 24) {
                     p[0] = (uint8_t)(fb.bg_color & 0xFF);
                     p[1] = (uint8_t)((fb.bg_color >> 8) & 0xFF);
                     p[2] = (uint8_t)((fb.bg_color >> 16) & 0xFF);
@@ -646,22 +631,24 @@ void fb_scroll(void) {
                     *(uint16_t *)p = rgb565;
                 }
             }
-        }
-        used = hw_width * bytes_per_pixel;
-        if (used < hw_pitch) {
-            memset(row + used, 0, hw_pitch - used);
+            used = hw_width * bytes_per_pixel;
+            if (used < hw_pitch) {
+                memset(row + used, 0, hw_pitch - used);
+            }
         }
     }
     
-    for (row_idx = 0; row_idx < fb.rows - 1 && row_idx < MAX_ROWS - 1; row_idx++) {
-        for (col = 0; col < fb.cols && col < MAX_COLS; col++) {
-            screen_buffer[row_idx][col] = screen_buffer[row_idx + 1][col];
-        }
-    }
-
-    if (fb.rows > 0 && fb.rows - 1 < MAX_ROWS) {
-        for (col = 0; col < fb.cols && col < MAX_COLS; col++) {
-            screen_buffer[fb.rows - 1][col] = ' ';
+    uint32_t scroll_rows = (fb.rows > 1 && fb.rows <= MAX_ROWS) ? fb.rows - 1 : 0;
+    uint32_t scroll_cols = (fb.cols <= MAX_COLS) ? fb.cols : MAX_COLS;
+    
+    if (scroll_rows > 0 && scroll_cols > 0 && scroll_rows < MAX_ROWS) {
+        memmove(&screen_buffer[0][0], &screen_buffer[1][0], 
+                scroll_rows * MAX_COLS * sizeof(char));
+        
+        if (fb.rows > 0 && fb.rows - 1 < MAX_ROWS) {
+            for (col = 0; col < scroll_cols; col++) {
+                screen_buffer[fb.rows - 1][col] = ' ';
+            }
         }
     }
     
@@ -750,13 +737,15 @@ void fb_update_cursor(void) {
         }
         cursor_drawn = 0;
     }
-    if (cursor_visible && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
+    if (cursor_visible && !cursor_drawn && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
         fb_draw_cursor_block(fb.cursor_x, fb.cursor_y, fb.fg_color);
         cursor_prev_x = fb.cursor_x;
         cursor_prev_y = fb.cursor_y;
         cursor_drawn = 1;
     }
 }
+
+extern void console_tick_redraw(void);
 
 void fb_tick(void) {
     static int tick_counter = 0;
@@ -766,6 +755,7 @@ void fb_tick(void) {
         cursor_visible = !cursor_visible;
         fb_update_cursor();
     }
+    console_tick_redraw();
 }
 
 framebuffer_t *fb_get(void) {

@@ -38,5 +38,11 @@ menuentry "Lebirun" {
 }
 EOF
 
+# Optimize GRUB with minimal modules for smaller ISO
+# Only include essential modules for multiboot booting
+GRUB_MODULES="multiboot biosdisk part_msdos iso9660"
+
+grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>/dev/null || \
 grub-mkrescue -o lebirun.iso isodir
-echo "ISO image created: lebirun.iso"
+
+echo "ISO image created: lebirun.iso ($(stat -c%s lebirun.iso) bytes)"

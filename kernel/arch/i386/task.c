@@ -19,6 +19,29 @@
 #define KERR_ENOEXEC 8
 #define KERR_ENOMEM  12
 
+#define TASK_STACK_SIZE 8192
+#define SCHED_DEFAULT_TIMESLICE 5
+#define KERNEL_STACK_SIZE 16384
+
+#define USER_STACK_TOP 0x00800000u
+#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_GAP  0x1000u
+#define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
+
+static int scheduler_lock = 0;
+int scheduler_initialized = 0;
+extern volatile uint32_t tick_count;
+
+extern void switch_to_asm(uint32_t* old_esp, uint32_t new_esp);
+
+task_t* current_task = NULL;
+task_t* ready_queue_head = NULL;
+static task_t* sleep_queue_head = NULL;
+static task_t* dead_queue_head = NULL;
+static volatile int schedule_force = 0;
+
+static uint32_t next_task_id = 1;
+
 static void serial_print(const char *s) {
     while (*s) {
         serial_putchar(*s++);
@@ -26,9 +49,12 @@ static void serial_print(const char *s) {
 }
 
 static void serial_hex(uint32_t v) {
+    int i;
+    int d;
+    
     serial_print("0x");
-    for (int i = 28; i >= 0; i -= 4) {
-        int d = (v >> i) & 0xF;
+    for (i = 28; i >= 0; i -= 4) {
+        d = (v >> i) & 0xF;
         serial_putchar(d < 10 ? '0' + d : 'A' + d - 10);
     }
 }
@@ -36,8 +62,10 @@ static void serial_hex(uint32_t v) {
 static void task_error(const char *fmt, ...) {
     char buf[256];
     va_list ap;
+    int n;
+    
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     printf("%s", buf);
     if (current_task && current_task->console_id >= 0 && console_is_initialized()) {
@@ -45,31 +73,11 @@ static void task_error(const char *fmt, ...) {
     }
 }
 
-static int scheduler_lock = 0;
-extern volatile uint32_t tick_count;
-
-extern void switch_to_asm(uint32_t* old_esp, uint32_t new_esp);
-
-task_t* current_task;
-task_t* ready_queue_head;
-static task_t* sleep_queue_head = NULL;
-static task_t* dead_queue_head = NULL;
-static volatile int schedule_force = 0;
-
-#define TASK_STACK_SIZE 16384
-#define SCHED_DEFAULT_TIMESLICE 5
-#define KERNEL_STACK_SIZE 4096
-
-#define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000u
-#define USER_STACK_GAP  0x1000u
-#define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
-
-static uint32_t next_task_id = 1;
-
 static void sleepq_remove(task_t* t) {
+    task_t **ptr;
+
     if (!t || !t->in_sleep_queue) return;
-    task_t** ptr = &sleep_queue_head;
+    ptr = &sleep_queue_head;
     while (*ptr) {
         if (*ptr == t) {
             *ptr = t->sleep_next;
@@ -86,16 +94,21 @@ pid_t getpid(void) {
 }
 
 static int task_ptr_valid(task_t *t) {
+    uint32_t a;
+
     if (!t) return 0;
-    uint32_t a = (uint32_t)t;
+    a = (uint32_t)t;
     if ((a & 0xFFFF0000u) == 0xFEFE0000u) return 0;
     if (a < 0xC0000000) return 0;
     return 1;
 }
 
 task_t* task_find(pid_t pid) {
+    task_t *t;
+    task_t *d;
+
     lock_scheduler();
-    task_t* t = ready_queue_head;
+    t = ready_queue_head;
     if (t) {
         do {
             if (!task_ptr_valid(t)) break;
@@ -107,7 +120,7 @@ task_t* task_find(pid_t pid) {
         } while (t && t != ready_queue_head);
     }
 
-    task_t* d = dead_queue_head;
+    d = dead_queue_head;
     while (d && task_ptr_valid(d)) {
         if (d->pid == pid) {
             unlock_scheduler();
@@ -120,10 +133,13 @@ task_t* task_find(pid_t pid) {
 }
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
+    task_t *t;
+    task_t *d;
     int found = 0;
+
     lock_scheduler();
 
-    task_t *t = ready_queue_head;
+    t = ready_queue_head;
     if (t) {
         do {
             if (!task_ptr_valid(t)) break;
@@ -138,7 +154,7 @@ int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
     }
 
     if (!found) {
-        task_t *d = dead_queue_head;
+        d = dead_queue_head;
         while (d && task_ptr_valid(d)) {
             if (d->ppid == parent_pid) {
                 if (pgid_filter <= 0 || d->pgid == pgid_filter) {
@@ -155,8 +171,10 @@ int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
 }
 
 task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
+    task_t *d;
+    
     lock_scheduler();
-    task_t *d = dead_queue_head;
+    d = dead_queue_head;
     while (d && task_ptr_valid(d)) {
         if (d->ppid == parent_pid) {
             if (pgid_filter <= 0 || d->pgid == pgid_filter) {
@@ -185,8 +203,10 @@ void waitq_add(wait_queue_t* q, task_t* t) {
 }
 
 task_t* waitq_pop(wait_queue_t* q) {
+    task_t *t;
+
     if (!q || !q->head) return NULL;
-    task_t* t = q->head;
+    t = q->head;
     while (t) {
         if (!task_ptr_valid(t)) {
             q->head = NULL;
@@ -208,16 +228,19 @@ task_t* waitq_pop(wait_queue_t* q) {
 }
 
 void waitq_wake_all(wait_queue_t* q) {
+    task_t *t;
+
     if (!q) return;
-    task_t* t;
     while ((t = waitq_pop(q))) {
         if (t->state == TASK_BLOCKED) t->state = TASK_READY;
     }
 }
 
 void waitq_wake_one(wait_queue_t *q) {
+    task_t *t;
+
     if (!q) return;
-    task_t *t = waitq_pop(q);
+    t = waitq_pop(q);
     if (t && t->state == TASK_BLOCKED) t->state = TASK_READY;
 }
 
@@ -229,6 +252,9 @@ void waitq_wait(wait_queue_t *q) {
 }
 
 void waitq_remove(wait_queue_t* q, task_t* t) {
+    task_t *prev;
+    task_t *cur;
+
     if (!q || !t || !q->head) return;
     if (!task_ptr_valid(q->head)) {
         q->head = NULL;
@@ -241,8 +267,8 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
         t->waiting_queue = NULL;
         return;
     }
-    task_t* prev = q->head;
-    task_t* cur = prev->wait_next;
+    prev = q->head;
+    cur = prev->wait_next;
     while (cur) {
         if (!task_ptr_valid(cur)) {
             prev->wait_next = NULL;
@@ -261,12 +287,14 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
 }
 
 void init_tasks(void) {
+    uint8_t *task0_kstack;
+    uint32_t boot_esp = 0;
+
     current_task = (task_t*)kmalloc(sizeof(task_t));
     memset(current_task, 0, sizeof(task_t));
     current_task->id = 0;
     current_task->pid = 0;
     current_task->state = TASK_RUNNING;
-    current_task->regs.cr3 = read_cr3();
     current_task->cr3 = read_cr3();
     current_task->next = current_task;
     current_task->time_slice = SCHED_DEFAULT_TIMESLICE;
@@ -274,7 +302,7 @@ void init_tasks(void) {
     current_task->stack_base = NULL;
     current_task->stack_size = 0;
     
-    uint8_t* task0_kstack = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    task0_kstack = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (task0_kstack) {
         memset(task0_kstack, 0, KERNEL_STACK_SIZE);
         current_task->kernel_stack_base = task0_kstack;
@@ -295,7 +323,6 @@ void init_tasks(void) {
     current_task->join_refs = 0;
     current_task->exit_code = 0;
     current_task->syscall_frame = NULL;
-    uint32_t boot_esp = 0;
     asm volatile ("movl %%esp, %0" : "=r" (boot_esp));
     current_task->regs.esp = boot_esp;
     
@@ -312,25 +339,29 @@ void init_tasks(void) {
     current_task->vring_minor = 0;
     current_task->is_kernel_task = false;
     ready_queue_head = current_task;
+    
+    scheduler_initialized = 1;
 }
 
 void lock_scheduler(void) {
-    asm volatile ("cli");
+    __asm__ __volatile__ ("cli" ::: "memory");
     scheduler_lock++;
 }
 
 void unlock_scheduler(void) {
     if (--scheduler_lock == 0) {
-        asm volatile ("sti");
+        __asm__ __volatile__ ("sti" ::: "memory");
     }
 }
 
 void add_task_to_runqueue(task_t* new_task) {
+    task_t *tail;
+
     if (!ready_queue_head) {
         ready_queue_head = new_task;
         new_task->next = new_task;
     } else {
-        task_t* tail = ready_queue_head;
+        tail = ready_queue_head;
         while (tail->next != ready_queue_head) tail = tail->next;
         tail->next = new_task;
         new_task->next = ready_queue_head;
@@ -338,6 +369,8 @@ void add_task_to_runqueue(task_t* new_task) {
 }
 
 static inline void remove_task_from_runqueue(task_t* task) {
+    task_t *prev;
+
     if (!ready_queue_head || !task) return;
     
     if (task->next == task) {
@@ -347,7 +380,7 @@ static inline void remove_task_from_runqueue(task_t* task) {
         return;
     }
     
-    task_t* prev = ready_queue_head;
+    prev = ready_queue_head;
     while (prev->next != task) {
         prev = prev->next;
         if (prev == ready_queue_head) {
@@ -367,6 +400,14 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_m
 }
 
 task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint32_t cr3) {
+    task_t *new_task;
+    uint8_t *stack_base;
+    uint8_t *kernel_stack_base;
+    uint32_t *kesp;
+    uint32_t *esp;
+    uint32_t user_esp;
+    registers_t *frame;
+
     if (!entry) return NULL;
 
     DPRINTF3("create_task_with_cr3: verify heap before alloc\n");
@@ -374,8 +415,9 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         static uint32_t last_verify_tick = 0;
         static uint32_t last_seen_tick = 0;
         static uint32_t same_tick_calls = 0;
-        extern volatile uint32_t tick_count;
-        uint32_t now = tick_count;
+        uint32_t now;
+        
+        now = tick_count;
         if (now != last_seen_tick) {
             last_seen_tick = now;
             same_tick_calls = 0;
@@ -386,15 +428,16 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         }
     }
 
-    task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
-    uint8_t* stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
-    uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    new_task = (task_t*)kmalloc(sizeof(task_t));
+    stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
+    kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
         if (debugMode && debugLevel >= 3) {
             static uint32_t last_verify_tick_fail = 0;
-            extern volatile uint32_t tick_count;
-            uint32_t now = tick_count;
+            uint32_t now;
+            
+            now = tick_count;
             if ((now - last_verify_tick_fail) >= 50) {
                 heap_verify();
                 last_verify_tick_fail = now;
@@ -420,7 +463,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
 
     new_task->state = initial_state;
     new_task->next = NULL;
-    new_task->regs.cr3 = cr3;
     new_task->cr3 = cr3;
     new_task->console_id = -1; 
     DPRINTF3("create_task_with_cr3: new task id=%u cr3=0x%08X\n", new_task->id, cr3);
@@ -447,9 +489,9 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->is_kernel_task = false;
 
     if (user_mode) {
-        uint32_t* kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
+        kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
         
-        uint32_t user_esp = USER_STACK_INIT_ESP;
+        user_esp = USER_STACK_INIT_ESP;
         
         *--kesp = 0x23;
         *--kesp = user_esp;
@@ -482,13 +524,13 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->user_brk = 0;
         new_task->mmap_next_addr = 0x10000000;
         
-        registers_t* frame = (registers_t*)kesp;
+        frame = (registers_t*)kesp;
         DPRINTF3("User task frame at 0x%08X:\n", (uint32_t)kesp);
         DPRINTF3("  EIP=0x%08X CS=0x%04X EFLAGS=0x%08X\n", frame->eip, frame->cs, frame->eflags);
         DPRINTF3("  useresp=0x%08X SS=0x%04X\n", frame->useresp, frame->ss);
         DPRINTF3("  DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n", frame->ds, frame->es, frame->fs, frame->gs);
     } else {
-        uint32_t* esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
+        esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
         *--esp = 0x202;
         *--esp = 0x08;
         *--esp = (uint32_t)entry;
@@ -510,9 +552,11 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
 }
 
 void sleep_ticks(uint32_t ticks) {
+    uint32_t new_wake;
+
     if (!current_task || ticks == 0) return;
     lock_scheduler();
-    uint32_t new_wake = tick_count + ticks;
+    new_wake = tick_count + ticks;
     if (current_task->in_sleep_queue) {
         current_task->wake_tick = new_wake;
         unlock_scheduler();
@@ -529,16 +573,19 @@ void sleep_ticks(uint32_t ticks) {
 }
 
 void wake_sleeping_tasks(void) {
+    task_t **ptr;
+    task_t *t;
+    int safety = 0;
+
     if (!sleep_queue_head) return;
     lock_scheduler();
-    task_t** ptr = &sleep_queue_head;
-    int safety = 0;
+    ptr = &sleep_queue_head;
     while (*ptr) {
         if (++safety > 10000) {
             *ptr = NULL;
             break;
         }
-        task_t* t = *ptr;
+        t = *ptr;
         if (t->wake_tick <= tick_count) {
             *ptr = t->sleep_next;
             t->sleep_next = NULL;
@@ -558,6 +605,8 @@ void task_exit(uint32_t exit_code) {
 }
 
 void task_exit_deferred(uint32_t exit_code) {
+    task_t *parent;
+
     if (!current_task) return;
     lock_scheduler();
     current_task->exit_code = exit_code;
@@ -577,7 +626,7 @@ void task_exit_deferred(uint32_t exit_code) {
     dead_queue_head = current_task;
 
     if (current_task->ppid > 0) {
-        task_t *parent = task_find((pid_t)current_task->ppid);
+        parent = task_find((pid_t)current_task->ppid);
         if (parent && parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
             parent->state = TASK_READY;
         }
@@ -587,18 +636,22 @@ void task_exit_deferred(uint32_t exit_code) {
 }
 
 void sleep_ms(uint32_t ms) {
-    if (ms == 0) return;
     extern uint32_t pit_freq;
-    uint32_t ticks = (ms * pit_freq + 999) / 1000; 
+    uint32_t ticks;
+
+    if (ms == 0) return;
+    ticks = (ms * pit_freq + 999) / 1000; 
     if (ticks == 0) ticks = 1;
     sleep_ticks(ticks);
 }
 
 void task_free_user_memory(task_t* t) {
+    uint32_t i;
+
     if (!t) return;
 
     if (t->user_pages && t->user_pages_count > 0) {
-        for (uint32_t i = 0; i < t->user_pages_count; i++) {
+        for (i = 0; i < t->user_pages_count; i++) {
             if (t->user_pages[i]) {
                 pfa_free(t->user_pages[i]);
                 t->user_pages[i] = 0;
@@ -616,15 +669,20 @@ void task_free_user_memory(task_t* t) {
 }
 
 void reap_dead_tasks(void) {
+    task_t *t;
+    task_t *keep = NULL;
+    task_t *next;
+    task_t *k;
+    task_t *knext;
+
     if (!dead_queue_head) return;
     lock_scheduler();
-    task_t* t = dead_queue_head;
+    t = dead_queue_head;
     dead_queue_head = NULL;
     unlock_scheduler();
 
-    task_t* keep = NULL;
     while (t && task_ptr_valid(t)) {
-        task_t* next = t->wait_next;
+        next = t->wait_next;
         t->wait_next = NULL;
         if (t->is_user) {
             t->wait_next = keep;
@@ -649,9 +707,9 @@ void reap_dead_tasks(void) {
 
     if (keep) {
         lock_scheduler();
-        task_t* k = keep;
+        k = keep;
         while (k && task_ptr_valid(k)) {
-            task_t* knext = k->wait_next;
+            knext = k->wait_next;
             k->wait_next = dead_queue_head;
             dead_queue_head = k;
             k = knext;
@@ -661,15 +719,18 @@ void reap_dead_tasks(void) {
 }
 
 void switch_to(task_t* next) {
+    task_t *prev;
+    uint32_t esp0;
+
     if (next == current_task) return;
 
-    task_t* prev = current_task;
+    prev = current_task;
     current_task = next;
     prev->state = TASK_READY;
     next->state = TASK_RUNNING;
 
     if (next->kernel_stack_base && next->kernel_stack_size) {
-        uint32_t esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
+        esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
         tss_set_esp0(esp0);
     }
 
@@ -680,11 +741,11 @@ void switch_to(task_t* next) {
         return;
     }
 
-    prev->regs.cr3 = read_cr3();
+    prev->cr3 = read_cr3();
 
     switch_to_asm(&prev->regs.esp, next->regs.esp);
 
-    next->regs.cr3 = read_cr3();
+    next->cr3 = read_cr3();
 }
 
 void schedule(void) {
@@ -737,12 +798,15 @@ void task_kill(task_t* task, uint32_t exit_code) {
 }
 
 static void free_dead_task_resources(task_t* t) {
+    task_t* prev;
+    uint32_t i;
+    
     if (!t || t->state != TASK_DEAD) return;
     
     if (dead_queue_head == t) {
         dead_queue_head = t->wait_next;
     } else {
-        task_t* prev = dead_queue_head;
+        prev = dead_queue_head;
         while (prev && prev->wait_next != t) prev = prev->wait_next;
         if (prev) prev->wait_next = t->wait_next;
     }
@@ -751,7 +815,7 @@ static void free_dead_task_resources(task_t* t) {
     unlock_scheduler();
     
     if (t->user_pages && t->user_pages_count > 0) {
-        for (uint32_t i = 0; i < t->user_pages_count; i++) {
+        for (i = 0; i < t->user_pages_count; i++) {
             if (t->user_pages[i]) {
                 pfa_free(t->user_pages[i]);
                 t->user_pages[i] = 0;
@@ -817,7 +881,7 @@ int task_join(task_t* task, uint32_t* exit_code) {
     return 0;
 }
 
-static inline void save_irq_frame_into_task(task_t* task, const registers_t* regs, uint32_t regs_ptr) {
+static inline void save_irq_frame_into_task(task_t* task, const registers_t* regs, uint32_t regs_ptr, uint32_t entry_cr3) {
     task->regs.gs = regs->gs;
     task->regs.fs = regs->fs;
     task->regs.es = regs->es;
@@ -837,22 +901,43 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
     task->regs.eip = regs->eip;
     task->regs.cs = regs->cs;
     task->regs.eflags = regs->eflags;
-    task->regs.cr3 = read_cr3();
+    task->cr3 = entry_cr3;
 }
 
 registers_t* schedule_from_irq(registers_t* regs) {
+    task_t* prev_task;
+    uint32_t entry_cr3;
+    uint32_t kernel_cr3;
+    int must_switch;
+    bool is_idle;
+    task_t* next;
+    task_t* start;
+    int safety;
+    registers_t* return_frame;
+    uint32_t next_esp;
+    uint32_t gs_val;
+    uint32_t fs_val;
+    uint32_t es_val;
+    uint32_t ds_val;
+    uint32_t cs_val;
+    int valid_gs;
+    int valid_fs;
+    int valid_es;
+    int valid_ds;
+    int valid_cs;
+    uint32_t esp0;
+
     if (!current_task || !ready_queue_head) return regs;
 
-    task_t* prev_task = current_task;
+    prev_task = current_task;
     
-    uint32_t entry_cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));
-    uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+    kernel_cr3 = vmm_get_kernel_cr3();
     if (kernel_cr3 && entry_cr3 != kernel_cr3) {
         __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
     }
     
-    int must_switch = (prev_task->state == TASK_DEAD);
+    must_switch = (prev_task->state == TASK_DEAD);
 
     if (regs->int_no != 48 && prev_task->syscall_frame && !must_switch) {
         if (kernel_cr3 && entry_cr3 != kernel_cr3) {
@@ -862,10 +947,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     if (!must_switch) {
-        save_irq_frame_into_task(prev_task, regs, (uint32_t)regs);
+        save_irq_frame_into_task(prev_task, regs, (uint32_t)regs, entry_cr3);
     }
 
-    bool is_idle = (prev_task->id == 0 && !prev_task->is_user);
+    is_idle = (prev_task->id == 0 && !prev_task->is_user);
     
     if (!schedule_force && !must_switch && !is_idle) {
         if (prev_task->time_slice > 0) prev_task->time_slice--;
@@ -882,9 +967,9 @@ registers_t* schedule_from_irq(registers_t* regs) {
         prev_task->time_slice = prev_task->base_time_slice;
     }
 
-    task_t* next = ready_queue_head;
-    task_t* start = next;
-    int safety = 0;
+    next = ready_queue_head;
+    start = next;
+    safety = 0;
     
     while (next) {
         if ((next->state == TASK_READY || next->state == TASK_RUNNING) && next != prev_task) {
@@ -909,7 +994,6 @@ registers_t* schedule_from_irq(registers_t* regs) {
         return regs;
     }
 
-    registers_t* return_frame;
     if (next->regs.esp == 0) {
         if (must_switch) {
             printf("schedule: next task has null frame, system halted\n");
@@ -921,7 +1005,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         return regs;
     }
 
-    uint32_t next_esp = next->regs.esp;
+    next_esp = next->regs.esp;
     if (!((next_esp >= 0xC0000000u && next_esp < 0xD0000000u) ||
           (next_esp >= HEAP_START && next_esp < (HEAP_START + HEAP_MAX_SIZE)))) {
         if (kernel_cr3 && entry_cr3 != kernel_cr3) {
@@ -931,19 +1015,25 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
     return_frame = (registers_t*)next_esp;
 
-    uint32_t gs_val = return_frame->gs & 0xFFFF;
-    uint32_t fs_val = return_frame->fs & 0xFFFF;
-    uint32_t es_val = return_frame->es & 0xFFFF;
-    uint32_t ds_val = return_frame->ds & 0xFFFF;
-    uint32_t cs_val = return_frame->cs & 0xFFFF;
+    gs_val = return_frame->gs & 0xFFFF;
+    fs_val = return_frame->fs & 0xFFFF;
+    es_val = return_frame->es & 0xFFFF;
+    ds_val = return_frame->ds & 0xFFFF;
+    cs_val = return_frame->cs & 0xFFFF;
 
-    int valid_gs = (gs_val == 0x10 || gs_val == 0x23 || gs_val == 0x33 || gs_val == 0x3B || gs_val == 0);
-    int valid_fs = (fs_val == 0x10 || fs_val == 0x23 || fs_val == 0);
-    int valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
-    int valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
-    int valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
+    valid_gs = (gs_val == 0x10 || gs_val == 0x23 || gs_val == 0x33 || gs_val == 0x3B || gs_val == 0);
+    valid_fs = (fs_val == 0x10 || fs_val == 0x23 || fs_val == 0);
+    valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
+    valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
+    valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
 
     if (!valid_gs || !valid_fs || !valid_es || !valid_ds || !valid_cs) {
+        if (next->id == 0) {
+            if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+            }
+            return regs;
+        }
         serial_print("SCHED: BAD FRAME esp=");
         serial_hex(next->regs.esp);
         serial_print(" gs=");
@@ -983,7 +1073,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     if (next->kernel_stack_base && next->kernel_stack_size) {
-        uint32_t esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
+        esp0 = (uint32_t)next->kernel_stack_base + next->kernel_stack_size;
         tss_set_esp0(esp0);
     }
 
@@ -991,8 +1081,12 @@ registers_t* schedule_from_irq(registers_t* regs) {
         gdt_set_tls(GDT_TLS_ENTRY_1, next->tls_base, next->tls_limit);
     }
 
-    if (next->cr3 && next->cr3 != read_cr3()) {
-        __asm__ volatile ("mov %0, %%cr3" : : "r"(next->cr3) : "memory");
+    {
+        uint32_t target_cr3 = next->cr3;
+        if (next->pd_phys) target_cr3 = next->pd_phys;
+        if (target_cr3 && target_cr3 != read_cr3()) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(target_cr3) : "memory");
+        }
     }
 
     return return_frame;
@@ -1025,8 +1119,10 @@ void task_init_fds(task_t *task) {
 }
 
 int task_fd_alloc(task_t *task) {
+    int i;
+    
     if (!task) return -1;
-    for (int i = 3; i < TASK_MAX_FDS; i++) {
+    for (i = 3; i < TASK_MAX_FDS; i++) {
         if (!task->fds[i].in_use) {
             task->fds[i].in_use = 1;
             task->fds[i].ref_count = 1;
@@ -1054,8 +1150,10 @@ task_fd_t *task_fd_get(task_t *task, int fd) {
 }
 
 void task_fd_close_all(task_t *task) {
+    int i;
+    
     if (!task) return;
-    for (int i = 3; i < TASK_MAX_FDS; i++) {
+    for (i = 3; i < TASK_MAX_FDS; i++) {
         task_fd_free(task, i);
     }
 }
@@ -1063,22 +1161,32 @@ void task_fd_close_all(task_t *task) {
 #define FORK_MIN_FREE_PAGES 64
 
 pid_t task_fork(registers_t *parent_regs) {
+    uint32_t free_pages;
+    uint32_t needed_pages;
+    uint32_t *child_user_pages;
+    uint32_t child_user_pages_count;
+    uint32_t child_pd;
+    task_t* child;
+    uint8_t* kernel_stack_base;
+    uint32_t i;
+    registers_t *child_frame;
+
     if (!current_task || !current_task->is_user) {
         printf("task_fork: can only fork user tasks\n");
         return -1;
     }
 
-    uint32_t free_pages = pfa_count_free();
-    uint32_t needed_pages = current_task->user_pages_count + FORK_MIN_FREE_PAGES;
+    free_pages = pfa_count_free();
+    needed_pages = current_task->user_pages_count + FORK_MIN_FREE_PAGES;
     if (free_pages < needed_pages) {
         printf("task_fork: insufficient memory (free=%u, need~%u)\n", free_pages, needed_pages);
         return -1;
     }
 
-    uint32_t *child_user_pages = NULL;
-    uint32_t child_user_pages_count = 0;
+    child_user_pages = NULL;
+    child_user_pages_count = 0;
 
-    uint32_t child_pd = vmm_clone_page_directory(current_task->pd_phys, &child_user_pages, &child_user_pages_count);
+    child_pd = vmm_clone_page_directory(current_task->pd_phys, &child_user_pages, &child_user_pages_count);
     if (!child_pd) {
         printf("task_fork: failed to clone page directory\n");
         return -1;
@@ -1086,14 +1194,14 @@ pid_t task_fork(registers_t *parent_regs) {
 
     DPRINTF2("task_fork: creating child task with cloned pd=0x%08X\n", child_pd);
 
-    task_t* child = (task_t*)kmalloc(sizeof(task_t));
-    uint8_t* kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    child = (task_t*)kmalloc(sizeof(task_t));
+    kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (!child || !kernel_stack_base) {
         printf("task_fork: allocation failed\n");
         if (child) kfree(child);
         if (kernel_stack_base) kfree(kernel_stack_base);
         if (child_user_pages) {
-            for (uint32_t i = 0; i < child_user_pages_count; i++) {
+            for (i = 0; i < child_user_pages_count; i++) {
                 pfa_free(child_user_pages[i]);
             }
             kfree(child_user_pages);
@@ -1117,7 +1225,6 @@ pid_t task_fork(registers_t *parent_regs) {
     child->state = TASK_READY;
     child->next = NULL;
     child->cr3 = child_pd;
-    child->regs.cr3 = child_pd;
     child->time_slice = SCHED_DEFAULT_TIMESLICE;
     child->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     child->stack_base = NULL;
@@ -1146,7 +1253,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->waiting_for_any_child = 0;
     memcpy(child->cwd, current_task->cwd, sizeof(child->cwd));
     memcpy(child->fds, current_task->fds, sizeof(child->fds));
-    for (int i = 0; i < TASK_MAX_FDS; i++) {
+    for (i = 0; i < TASK_MAX_FDS; i++) {
         if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
             child->fds[i].ref_count++;
         }
@@ -1159,7 +1266,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->envp = NULL;
     child->envc = 0;
 
-    registers_t *child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KERNEL_STACK_SIZE - sizeof(registers_t));
+    child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KERNEL_STACK_SIZE - sizeof(registers_t));
     memcpy(child_frame, parent_regs, sizeof(registers_t));
     child_frame->eax = 0;
     child_frame->int_no = 0;
@@ -1181,6 +1288,33 @@ pid_t task_fork(registers_t *parent_regs) {
 }
 
 int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
+    uint32_t free_pages;
+    uint32_t needed_estimate;
+    uint8_t *kernel_bin;
+    int elf_valid;
+    uint32_t old_pd;
+    uint32_t *old_user_pages;
+    uint32_t old_user_pages_count;
+    uint32_t stack_top;
+    uint32_t stack_size;
+    uint32_t new_pd;
+    elf_info_t elf_info;
+    uint32_t *elf_pages;
+    uint32_t elf_page_count;
+    int load_result;
+    uint32_t stack_page_count;
+    uint32_t *stack_pages;
+    uint32_t total_pages;
+    uint32_t sp;
+    uint32_t zero;
+    const char *prog_name;
+    int prog_len;
+    uint32_t prog_addr;
+    uint8_t random_bytes[16];
+    uint32_t random_addr;
+    uint32_t argc_val;
+    uint32_t i;
+
     if (!current_task || !current_task->is_user) {
         task_error("task_exec: can only exec in user tasks\n");
         return -1;
@@ -1190,21 +1324,21 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         return -1;
     }
 
-    uint32_t free_pages = pfa_count_free();
-    uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    free_pages = pfa_count_free();
+    needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
         task_error("task_exec: insufficient memory (free=%u need=%u)\n", free_pages, needed_estimate);
         return -1;
     }
 
-    uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
+    kernel_bin = (uint8_t *)kmalloc(bin_size);
     if (!kernel_bin) {
         task_error("task_exec: failed to allocate kernel buffer (%u bytes)\n", bin_size);
         return -1;
     }
     memcpy(kernel_bin, bin_start, bin_size);
 
-    int elf_valid = elf_validate(kernel_bin, bin_size);
+    elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
         task_error("task_exec: ELF validation failed (%d)\n", elf_valid);
         kfree(kernel_bin);
@@ -1213,29 +1347,28 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
 
     DPRINTF2("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
 
-    uint32_t old_pd = current_task->pd_phys;
-    uint32_t *old_user_pages = current_task->user_pages;
-    uint32_t old_user_pages_count = current_task->user_pages_count;
+    old_pd = current_task->pd_phys;
+    old_user_pages = current_task->user_pages;
+    old_user_pages_count = current_task->user_pages_count;
 
-    uint32_t stack_top = USER_STACK_TOP;
-    uint32_t stack_size = USER_STACK_SIZE;
+    stack_top = USER_STACK_TOP;
+    stack_size = USER_STACK_SIZE;
 
-    uint32_t new_pd = vmm_create_page_directory();
+    new_pd = vmm_create_page_directory();
     if (!new_pd) {
         task_error("task_exec: failed to create page directory\n");
         kfree(kernel_bin);
         return -1;
     }
 
-    elf_info_t elf_info;
-    uint32_t *elf_pages = NULL;
-    uint32_t elf_page_count = 0;
+    elf_pages = NULL;
+    elf_page_count = 0;
 
-    int load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         task_error("task_exec: ELF loading failed (%d)\n", load_result);
         if (elf_pages) {
-            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
@@ -1245,38 +1378,21 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
 
     kfree(kernel_bin);
 
-    uint32_t stack_page_count = 0;
-    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec: failed to map stack\n");
         if (elf_pages) {
-            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
         return -1;
     }
 
-    current_task->pd_phys = new_pd;
-    current_task->cr3 = new_pd;
-    current_task->regs.cr3 = new_pd;
-    vmm_set_cr3(new_pd);
-
-    if (old_user_pages && old_user_pages_count > 0) {
-        for (uint32_t i = 0; i < old_user_pages_count; i++) {
-            if (old_user_pages[i]) {
-                pfa_free(old_user_pages[i]);
-            }
-        }
-        kfree(old_user_pages);
-    }
-    if (old_pd) {
-        vmm_free_page_directory(old_pd);
-    }
-
     current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
-    uint32_t total_pages = elf_page_count + stack_page_count;
+    total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         task_error("task_exec: suspicious total_pages=%u\n", total_pages);
         kfree(elf_pages);
@@ -1300,22 +1416,68 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
 
-    uint32_t sp = stack_top - USER_STACK_GAP - 16;
-    uint32_t zero = 0;
+    sp = stack_top - USER_STACK_GAP - 16;
+    zero = 0;
     
-    const char *prog_name = "program";
-    int prog_len = 0;
+    prog_name = "program";
+    prog_len = 0;
     while (prog_name[prog_len]) prog_len++;
     sp -= (prog_len + 1 + 3) & ~3;
-    uint32_t prog_addr = sp;
+    prog_addr = sp;
     vmm_copy_to_pd(new_pd, sp, prog_name, prog_len + 1);
+    
+    random_bytes[0] = 0x12; random_bytes[1] = 0x34; random_bytes[2] = 0x56; random_bytes[3] = 0x78;
+    random_bytes[4] = 0x9A; random_bytes[5] = 0xBC; random_bytes[6] = 0xDE; random_bytes[7] = 0xF0;
+    random_bytes[8] = 0x11; random_bytes[9] = 0x22; random_bytes[10] = 0x33; random_bytes[11] = 0x44;
+    random_bytes[12] = 0x55; random_bytes[13] = 0x66; random_bytes[14] = 0x77; random_bytes[15] = 0x88;
+    sp -= 16;
+    random_addr = sp;
+    vmm_copy_to_pd(new_pd, sp, random_bytes, 16);
     
     sp = sp & ~0xF;
     
-    sp -= 4;
-    vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
-    sp -= 4;
-    vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
+#define AT_NULL         0
+#define AT_PHDR         3
+#define AT_PHENT        4
+#define AT_PHNUM        5
+#define AT_PAGESZ       6
+#define AT_ENTRY        9
+#define AT_UID          11
+#define AT_EUID         12
+#define AT_GID          13
+#define AT_EGID         14
+#define AT_RANDOM       25
+
+#define PUSH_AUXV_PD(pd, type, val) do { \
+    uint32_t _t = (type), _v = (val); \
+    sp -= 4; vmm_copy_to_pd(pd, sp, &_v, sizeof(uint32_t)); \
+    sp -= 4; vmm_copy_to_pd(pd, sp, &_t, sizeof(uint32_t)); \
+} while(0)
+
+    PUSH_AUXV_PD(new_pd, AT_NULL, 0);
+    PUSH_AUXV_PD(new_pd, AT_RANDOM, random_addr);
+    PUSH_AUXV_PD(new_pd, AT_EGID, current_task->egid);
+    PUSH_AUXV_PD(new_pd, AT_GID, current_task->gid);
+    PUSH_AUXV_PD(new_pd, AT_EUID, current_task->euid);
+    PUSH_AUXV_PD(new_pd, AT_UID, current_task->uid);
+    PUSH_AUXV_PD(new_pd, AT_PAGESZ, 4096);
+    PUSH_AUXV_PD(new_pd, AT_ENTRY, elf_info.entry_point);
+    PUSH_AUXV_PD(new_pd, AT_PHNUM, elf_info.phnum);
+    PUSH_AUXV_PD(new_pd, AT_PHENT, elf_info.phent);
+    PUSH_AUXV_PD(new_pd, AT_PHDR, elf_info.phdr_vaddr);
+
+#undef PUSH_AUXV_PD
+#undef AT_NULL
+#undef AT_PHDR
+#undef AT_PHENT
+#undef AT_PHNUM
+#undef AT_PAGESZ
+#undef AT_ENTRY
+#undef AT_UID
+#undef AT_EUID
+#undef AT_GID
+#undef AT_EGID
+#undef AT_RANDOM
     
     sp -= 4;
     vmm_copy_to_pd(new_pd, sp, &zero, sizeof(uint32_t));
@@ -1324,29 +1486,117 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     vmm_copy_to_pd(new_pd, sp, &prog_addr, sizeof(uint32_t));
     
     sp -= 4;
-    uint32_t argc_val = 1;
+    argc_val = 1;
     vmm_copy_to_pd(new_pd, sp, &argc_val, sizeof(uint32_t));
 
-    regs->eip = elf_info.entry_point;
-    regs->useresp = sp;
-    regs->ebp = 0;
-    regs->eax = 0;
-    regs->ebx = 0;
-    regs->ecx = 0;
-    regs->edx = 0;
-    regs->esi = 0;
-    regs->edi = 0;
-    regs->cs = 0x1B;
-    regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
-    regs->eflags = 0x202;
+    {
+        uint32_t final_entry;
+        uint32_t final_sp;
+        
+        final_entry = elf_info.entry_point;
+        final_sp = sp;
 
-    DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X\n", elf_info.entry_point, sp);
+        current_task->pd_phys = new_pd;
+        current_task->cr3 = new_pd;
+
+        regs->ds = 0x23;
+        regs->es = 0x23;
+        regs->fs = 0x23;
+        regs->gs = 0x23;
+        regs->ss = 0x23;
+        regs->cs = 0x1B;
+        regs->eax = 0;
+        regs->ebx = 0;
+        regs->ecx = 0;
+        regs->edx = 0;
+        regs->esi = 0;
+        regs->edi = 0;
+        regs->ebp = 0;
+        regs->eflags = 0x202;
+        regs->useresp = final_sp;
+        regs->int_no = 0;
+        regs->err_code = 0;
+        regs->eip = final_entry;
+
+        current_task->regs.eip = final_entry;
+        current_task->regs.useresp = final_sp;
+        current_task->regs.ebp = 0;
+        current_task->regs.eax = 0;
+        current_task->regs.ebx = 0;
+        current_task->regs.ecx = 0;
+        current_task->regs.edx = 0;
+        current_task->regs.esi = 0;
+        current_task->regs.edi = 0;
+        current_task->regs.cs = 0x1B;
+        current_task->regs.ds = 0x23;
+        current_task->regs.es = 0x23;
+        current_task->regs.fs = 0x23;
+        current_task->regs.gs = 0x23;
+        current_task->regs.ss = 0x23;
+        current_task->regs.eflags = 0x202;
+        current_task->regs.int_no = 0;
+        current_task->regs.err_code = 0;
+        current_task->regs.esp = (uint32_t)regs;
+
+        current_task->exec_old_pd = old_pd;
+        current_task->exec_old_pages = old_user_pages;
+        current_task->exec_old_pages_count = old_user_pages_count;
+
+        DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X new_pd=0x%08X (CR3 switch deferred)\n", 
+                 final_entry, final_sp, new_pd);
+    }
 
     return 0;
 }
 
 int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs,
                         int argc, char **argv, int envc, char **envp) {
+    uint32_t free_pages;
+    uint32_t needed_estimate;
+    uint8_t *kernel_bin;
+    char **k_argv;
+    char **k_envp;
+    int i, j, len;
+    int elf_valid;
+    uint32_t old_pd;
+    uint32_t *old_user_pages;
+    uint32_t old_user_pages_count;
+    uint32_t stack_top;
+    uint32_t stack_size;
+    uint32_t new_pd;
+    elf_info_t elf_info;
+    uint32_t *elf_pages;
+    uint32_t elf_page_count;
+    int load_result;
+    uint32_t stack_page_count;
+    uint32_t *stack_pages;
+    uint32_t total_pages;
+    uint32_t sp;
+    uint32_t *envp_ptrs;
+    uint32_t *argv_ptrs;
+    uint8_t random_bytes[16];
+    uint32_t random_addr;
+    uint32_t zero;
+    uint32_t tmp_val;
+    uint32_t entry_to_use;
+    uint32_t stack_ptr;
+    uint32_t check_stack_base;
+    uint32_t check_stack_top;
+    uint32_t final_entry;
+    uint32_t final_sp;
+
+    __asm__ volatile ("mov %%esp, %0" : "=r"(stack_ptr));
+    if (current_task && current_task->kernel_stack_base) {
+        check_stack_base = (uint32_t)current_task->kernel_stack_base;
+        check_stack_top = check_stack_base + current_task->kernel_stack_size;
+        if (stack_ptr < check_stack_base || stack_ptr > check_stack_top) {
+            DPRINTF1("task_exec_with_args: STACK OVERFLOW esp=0x%08X base=0x%08X top=0x%08X\n",
+                     stack_ptr, check_stack_base, check_stack_top);
+        }
+        DPRINTF4("task_exec_with_args: stack esp=0x%08X base=0x%08X top=0x%08X remaining=%d\n",
+                 stack_ptr, check_stack_base, check_stack_top, stack_ptr - check_stack_base);
+    }
+
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
         return -KERR_EPERM;
@@ -1356,148 +1606,194 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         return -KERR_ENOEXEC;
     }
 
-    uint32_t free_pages = pfa_count_free();
-    uint32_t needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    free_pages = pfa_count_free();
+    needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
         task_error("task_exec_with_args: insufficient memory\n");
         return -KERR_ENOMEM;
     }
 
-    uint8_t *kernel_bin = (uint8_t *)kmalloc(bin_size);
+    kernel_bin = (uint8_t *)kmalloc(bin_size);
     if (!kernel_bin) {
         task_error("task_exec_with_args: failed to allocate kernel buffer\n");
         return -KERR_ENOMEM;
     }
     memcpy(kernel_bin, bin_start, bin_size);
 
-    char **k_argv = NULL;
-    char **k_envp = NULL;
-    
+    k_argv = NULL;
+    k_envp = NULL;
+
     if (argc > 0 && argv) {
         k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
-        if (!k_argv) { kfree(kernel_bin); return -KERR_ENOMEM; }
-        for (int i = 0; i < argc; i++) {
-            int len = 0;
-            while (argv[i][len]) len++;
-            k_argv[i] = (char *)kmalloc(len + 1);
-            if (!k_argv[i]) {
-                for (int j = 0; j < i; j++) kfree(k_argv[j]);
-                kfree(k_argv); kfree(kernel_bin);
-                return -KERR_ENOMEM;
-            }
-            for (int j = 0; j <= len; j++) k_argv[i][j] = argv[i][j];
-        }
-        k_argv[argc] = NULL;
-    }
-    
-    if (envc > 0 && envp) {
-        k_envp = (char **)kmalloc((envc + 1) * sizeof(char *));
-        if (!k_envp) {
-            if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
+        if (!k_argv) {
             kfree(kernel_bin);
             return -KERR_ENOMEM;
         }
-        for (int i = 0; i < envc; i++) {
-            int len = 0;
-            while (envp[i][len]) len++;
-            k_envp[i] = (char *)kmalloc(len + 1);
-            if (!k_envp[i]) {
-                for (int j = 0; j < i; j++) kfree(k_envp[j]);
-                kfree(k_envp);
-                if (k_argv) { for (int j = 0; j < argc; j++) kfree(k_argv[j]); kfree(k_argv); }
+        for (i = 0; i < argc; i++) {
+            len = 0;
+            while (argv[i][len]) len++;
+            k_argv[i] = (char *)kmalloc(len + 1);
+            if (!k_argv[i]) {
+                for (j = 0; j < i; j++) kfree(k_argv[j]);
+                kfree(k_argv);
                 kfree(kernel_bin);
                 return -KERR_ENOMEM;
             }
-            for (int j = 0; j <= len; j++) k_envp[i][j] = envp[i][j];
+            for (j = 0; j <= len; j++) k_argv[i][j] = argv[i][j];
+        }
+        k_argv[argc] = NULL;
+    }
+
+    if (envc > 0 && envp) {
+        k_envp = (char **)kmalloc((envc + 1) * sizeof(char *));
+        if (!k_envp) {
+            if (k_argv) {
+                for (i = 0; i < argc; i++) kfree(k_argv[i]);
+                kfree(k_argv);
+            }
+            kfree(kernel_bin);
+            return -KERR_ENOMEM;
+        }
+        for (i = 0; i < envc; i++) {
+            len = 0;
+            while (envp[i][len]) len++;
+            k_envp[i] = (char *)kmalloc(len + 1);
+            if (!k_envp[i]) {
+                for (j = 0; j < i; j++) kfree(k_envp[j]);
+                kfree(k_envp);
+                if (k_argv) {
+                    for (j = 0; j < argc; j++) kfree(k_argv[j]);
+                    kfree(k_argv);
+                }
+                kfree(kernel_bin);
+                return -KERR_ENOMEM;
+            }
+            for (j = 0; j <= len; j++) k_envp[i][j] = envp[i][j];
         }
         k_envp[envc] = NULL;
     }
 
-    int elf_valid = elf_validate(kernel_bin, bin_size);
+    elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
         task_error("task_exec_with_args: ELF validation failed\n");
-        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+        }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
         kfree(kernel_bin);
         return -KERR_ENOEXEC;
     }
 
-    uint32_t old_pd = current_task->pd_phys;
-    uint32_t *old_user_pages = current_task->user_pages;
-    uint32_t old_user_pages_count = current_task->user_pages_count;
+    old_pd = current_task->pd_phys;
+    old_user_pages = current_task->user_pages;
+    old_user_pages_count = current_task->user_pages_count;
 
-    uint32_t stack_top = USER_STACK_TOP;
-    uint32_t stack_size = USER_STACK_SIZE;
+    stack_top = USER_STACK_TOP;
+    stack_size = USER_STACK_SIZE;
 
-    uint32_t new_pd = vmm_create_page_directory();
+    new_pd = vmm_create_page_directory();
     if (!new_pd) {
         task_error("task_exec_with_args: failed to create page directory\n");
-        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+        }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
         kfree(kernel_bin);
         return -KERR_ENOMEM;
     }
 
-    elf_info_t elf_info;
-    uint32_t *elf_pages = NULL;
-    uint32_t elf_page_count = 0;
+    elf_pages = NULL;
+    elf_page_count = 0;
 
-    int load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         task_error("task_exec_with_args: ELF loading failed\n");
         if (elf_pages) {
-            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < (int)elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
-        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+        }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
         kfree(kernel_bin);
         return -KERR_ENOEXEC;
+    }
+
+    {
+        uint32_t entry_phys;
+        uint32_t entry_page_addr;
+
+        entry_page_addr = elf_info.entry_point & ~0xFFFu;
+        entry_phys = vmm_get_phys_in_pd(new_pd, entry_page_addr);
+        DPRINTF4("task_exec_with_args: POST-ELF-LOAD entry=0x%08X entry_page=0x%08X phys=0x%08X\n",
+                 elf_info.entry_point, entry_page_addr, entry_phys);
+        if (entry_phys == 0) {
+            DPRINTF1("task_exec_with_args: ERROR: entry page not mapped after elf_load\n");
+        } else {
+            uint8_t code_buf[16];
+            vmm_read_from_pd(new_pd, elf_info.entry_point, code_buf, 16);
+            DPRINTF4("task_exec_with_args: Code at entry: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                     code_buf[0], code_buf[1], code_buf[2], code_buf[3],
+                     code_buf[4], code_buf[5], code_buf[6], code_buf[7],
+                     code_buf[8], code_buf[9], code_buf[10], code_buf[11],
+                     code_buf[12], code_buf[13], code_buf[14], code_buf[15]);
+            if (code_buf[0] != 0x31 || code_buf[1] != 0xED) {
+                DPRINTF2("task_exec_with_args: WARNING - entry code mismatch\n");
+            }
+        }
     }
 
     kfree(kernel_bin);
 
-    uint32_t stack_page_count = 0;
-    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec_with_args: failed to map stack\n");
         if (elf_pages) {
-            for (uint32_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < (int)elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         vmm_free_page_directory(new_pd);
-        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
-        return -KERR_ENOMEM;
-    }
-
-    current_task->pd_phys = new_pd;
-    current_task->cr3 = new_pd;
-    current_task->regs.cr3 = new_pd;
-    vmm_set_cr3(new_pd);
-
-    if (old_user_pages && old_user_pages_count > 0) {
-        for (uint32_t i = 0; i < old_user_pages_count; i++) {
-            if (old_user_pages[i]) {
-                pfa_free(old_user_pages[i]);
-            }
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
         }
-        kfree(old_user_pages);
-    }
-    if (old_pd) {
-        vmm_free_page_directory(old_pd);
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
+        return -KERR_ENOMEM;
     }
 
     current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
-    uint32_t total_pages = elf_page_count + stack_page_count;
+    total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         task_error("task_exec_with_args: suspicious total_pages=%u\n", total_pages);
         kfree(elf_pages);
         kfree(stack_pages);
-        if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-        if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+        }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
         vmm_free_page_directory(new_pd);
         return -KERR_ENOEXEC;
     }
@@ -1514,98 +1810,232 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     kfree(elf_pages);
     kfree(stack_pages);
 
-    uint32_t sp = stack_top - USER_STACK_GAP - 16;
-    
-    uint32_t *envp_ptrs = NULL;
-    uint32_t *argv_ptrs = NULL;
-    
+    sp = stack_top - USER_STACK_GAP - 16;
+
+    envp_ptrs = NULL;
+    argv_ptrs = NULL;
+
     if (envc > 0 && k_envp) {
         envp_ptrs = (uint32_t *)kmalloc((envc + 1) * sizeof(uint32_t));
-        for (int i = envc - 1; i >= 0; i--) {
-            int len = 0;
+        for (i = envc - 1; i >= 0; i--) {
+            len = 0;
             while (k_envp[i][len]) len++;
             sp -= (len + 1 + 3) & ~3;
-            char *dst = (char *)sp;
-            for (int j = 0; j <= len; j++) dst[j] = k_envp[i][j];
+            vmm_copy_to_pd(new_pd, sp, k_envp[i], len + 1);
             envp_ptrs[i] = sp;
         }
         envp_ptrs[envc] = 0;
     }
-    
+
     if (argc > 0 && k_argv) {
         argv_ptrs = (uint32_t *)kmalloc((argc + 1) * sizeof(uint32_t));
-        for (int i = argc - 1; i >= 0; i--) {
-            int len = 0;
+        for (i = argc - 1; i >= 0; i--) {
+            len = 0;
             while (k_argv[i][len]) len++;
             sp -= (len + 1 + 3) & ~3;
-            char *dst = (char *)sp;
-            for (int j = 0; j <= len; j++) dst[j] = k_argv[i][j];
+            vmm_copy_to_pd(new_pd, sp, k_argv[i], len + 1);
             argv_ptrs[i] = sp;
         }
         argv_ptrs[argc] = 0;
     }
-    
+
+    random_bytes[0] = 0x12; random_bytes[1] = 0x34; random_bytes[2] = 0x56; random_bytes[3] = 0x78;
+    random_bytes[4] = 0x9A; random_bytes[5] = 0xBC; random_bytes[6] = 0xDE; random_bytes[7] = 0xF0;
+    random_bytes[8] = 0x11; random_bytes[9] = 0x22; random_bytes[10] = 0x33; random_bytes[11] = 0x44;
+    random_bytes[12] = 0x55; random_bytes[13] = 0x66; random_bytes[14] = 0x77; random_bytes[15] = 0x88;
+    sp -= 16;
+    random_addr = sp;
+    vmm_copy_to_pd(new_pd, sp, random_bytes, 16);
+
     sp = sp & ~0xF;
-    
-    uint32_t zero = 0;
-    sp -= 4;
-    *(uint32_t *)sp = zero;
-    sp -= 4;
-    *(uint32_t *)sp = zero;
-    
+
+    zero = 0;
+
+#define AT_NULL         0
+#define AT_PHDR         3
+#define AT_PHENT        4
+#define AT_PHNUM        5
+#define AT_PAGESZ       6
+#define AT_ENTRY        9
+#define AT_UID          11
+#define AT_EUID         12
+#define AT_GID          13
+#define AT_EGID         14
+#define AT_RANDOM       25
+
+#define PUSH_AUXV(type, val) do { \
+    tmp_val = (val); \
+    sp -= 4; vmm_copy_to_pd(new_pd, sp, &tmp_val, 4); \
+    tmp_val = (type); \
+    sp -= 4; vmm_copy_to_pd(new_pd, sp, &tmp_val, 4); \
+} while(0)
+
+    PUSH_AUXV(AT_NULL, 0);
+    PUSH_AUXV(AT_RANDOM, random_addr);
+    PUSH_AUXV(AT_EGID, current_task->egid);
+    PUSH_AUXV(AT_GID, current_task->gid);
+    PUSH_AUXV(AT_EUID, current_task->euid);
+    PUSH_AUXV(AT_UID, current_task->uid);
+    PUSH_AUXV(AT_PAGESZ, 4096);
+    PUSH_AUXV(AT_ENTRY, elf_info.entry_point);
+    PUSH_AUXV(AT_PHNUM, elf_info.phnum);
+    PUSH_AUXV(AT_PHENT, elf_info.phent);
+    PUSH_AUXV(AT_PHDR, elf_info.phdr_vaddr);
+
+#undef PUSH_AUXV
+#undef AT_NULL
+#undef AT_PHDR
+#undef AT_PHENT
+#undef AT_PHNUM
+#undef AT_PAGESZ
+#undef AT_ENTRY
+#undef AT_UID
+#undef AT_EUID
+#undef AT_GID
+#undef AT_EGID
+#undef AT_RANDOM
+
     if (envp_ptrs) {
-        for (int i = envc; i >= 0; i--) {
+        for (i = envc; i >= 0; i--) {
             sp -= 4;
-            *(uint32_t *)sp = envp_ptrs[i];
+            vmm_copy_to_pd(new_pd, sp, &envp_ptrs[i], 4);
         }
     } else {
         sp -= 4;
-        *(uint32_t *)sp = zero;
+        vmm_copy_to_pd(new_pd, sp, &zero, 4);
     }
-    
+
     if (argv_ptrs) {
-        for (int i = argc; i >= 0; i--) {
+        for (i = argc; i >= 0; i--) {
             sp -= 4;
-            *(uint32_t *)sp = argv_ptrs[i];
+            vmm_copy_to_pd(new_pd, sp, &argv_ptrs[i], 4);
         }
     } else {
         sp -= 4;
-        *(uint32_t *)sp = zero;
+        vmm_copy_to_pd(new_pd, sp, &zero, 4);
     }
-    
+
+    tmp_val = (uint32_t)argc;
     sp -= 4;
-    *(uint32_t *)sp = (uint32_t)argc;
-    
+    vmm_copy_to_pd(new_pd, sp, &tmp_val, 4);
+
     if (argv_ptrs) kfree(argv_ptrs);
     if (envp_ptrs) kfree(envp_ptrs);
-    if (k_argv) { for (int i = 0; i < argc; i++) kfree(k_argv[i]); kfree(k_argv); }
-    if (k_envp) { for (int i = 0; i < envc; i++) kfree(k_envp[i]); kfree(k_envp); }
+    if (k_argv) {
+        for (i = 0; i < argc; i++) kfree(k_argv[i]);
+        kfree(k_argv);
+    }
+    if (k_envp) {
+        for (i = 0; i < envc; i++) kfree(k_envp[i]);
+        kfree(k_envp);
+    }
 
-    regs->eip = elf_info.entry_point;
-    regs->useresp = sp;
-    regs->ebp = 0;
+    entry_to_use = elf_info.entry_point;
+
+    final_entry = entry_to_use;
+    final_sp = sp;
+
+    regs->ds = 0x23;
+    regs->es = 0x23;
+    regs->fs = 0x23;
+    regs->gs = 0x23;
+    regs->ss = 0x23;
+    regs->cs = 0x1B;
     regs->eax = 0;
     regs->ebx = 0;
     regs->ecx = 0;
     regs->edx = 0;
     regs->esi = 0;
     regs->edi = 0;
-    regs->cs = 0x1B;
-    regs->ds = regs->es = regs->fs = regs->gs = regs->ss = 0x23;
+    regs->ebp = 0;
     regs->eflags = 0x202;
+    regs->useresp = final_sp;
+    regs->int_no = 0;
+    regs->err_code = 0;
+    regs->eip = final_entry;
+
+    current_task->pd_phys = new_pd;
+    current_task->cr3 = new_pd;
+    current_task->regs.eip = final_entry;
+    current_task->regs.useresp = final_sp;
+    current_task->regs.ebp = 0;
+    current_task->regs.eax = 0;
+    current_task->regs.ebx = 0;
+    current_task->regs.ecx = 0;
+    current_task->regs.edx = 0;
+    current_task->regs.esi = 0;
+    current_task->regs.edi = 0;
+    current_task->regs.cs = 0x1B;
+    current_task->regs.ds = 0x23;
+    current_task->regs.es = 0x23;
+    current_task->regs.fs = 0x23;
+    current_task->regs.gs = 0x23;
+    current_task->regs.ss = 0x23;
+    current_task->regs.eflags = 0x202;
+    current_task->regs.int_no = 0;
+    current_task->regs.err_code = 0;
+    current_task->regs.esp = (uint32_t)regs;
+
+    current_task->exec_old_pd = old_pd;
+    current_task->exec_old_pages = old_user_pages;
+    current_task->exec_old_pages_count = old_user_pages_count;
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
+
+    DPRINTF3("task_exec_with_args: entry=0x%08X esp=0x%08X new_pd=0x%08X\n", 
+             final_entry, final_sp, new_pd);
+
+    {
+        uint32_t entry_page;
+        uint32_t phys;
+
+        entry_page = final_entry & ~0xFFFu;
+        phys = vmm_get_phys_in_pd(new_pd, entry_page);
+        
+        DPRINTF4("task_exec_with_args: POST-ELF-LOAD entry=0x%08X entry_page=0x%08X phys=0x%08X new_pd=0x%08X\n",
+                 final_entry, entry_page, phys, new_pd);
+        
+        if (phys == 0) {
+            DPRINTF1("task_exec_with_args: FATAL: entry page not mapped in new_pd\n");
+            if (current_task->user_pages) {
+                for (i = 0; i < (int)current_task->user_pages_count; i++) {
+                    if (current_task->user_pages[i]) {
+                        pfa_free(current_task->user_pages[i]);
+                    }
+                }
+                kfree(current_task->user_pages);
+            }
+            vmm_free_page_directory(new_pd);
+            current_task->user_pages = old_user_pages;
+            current_task->user_pages_count = old_user_pages_count;
+            current_task->pd_phys = old_pd;
+            current_task->cr3 = old_pd;
+            current_task->exec_old_pd = 0;
+            current_task->exec_old_pages = NULL;
+            current_task->exec_old_pages_count = 0;
+            return -KERR_ENOEXEC;
+        }
+    }
 
     return 0;
 }
 
 pid_t task_create_thread(void (*entry)(void)) {
+    task_t *new_task;
+    int i;
+    uint32_t thread_stack_size;
+    uint32_t thread_stack_base;
+    uint32_t thread_stack_top;
+    uint32_t stack_page_count;
+    uint32_t *stack_pages;
+    uint32_t *stack_ptr;
+
     if (!current_task || !current_task->is_user) {
         return -1;
     }
     
-    task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
+    new_task = (task_t *)kmalloc(sizeof(task_t));
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
@@ -1632,16 +2062,16 @@ pid_t task_create_thread(void (*entry)(void)) {
     new_task->user_brk = current_task->user_brk;
     new_task->console_id = current_task->console_id;
     
-    for (int i = 0; i < 256; i++) {
+    for (i = 0; i < 256; i++) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     
-    uint32_t thread_stack_size = 0x4000;
-    uint32_t thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
-    uint32_t thread_stack_top = thread_stack_base + thread_stack_size;
+    thread_stack_size = 0x4000;
+    thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
+    thread_stack_top = thread_stack_base + thread_stack_size;
     
-    uint32_t stack_page_count = 0;
-    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         kfree(new_task->kernel_stack_base);
         kfree(new_task);
@@ -1653,7 +2083,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     current_task->user_brk = thread_stack_top + 0x1000;
     
-    uint32_t *stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
     
     stack_ptr--;
     *stack_ptr = 0x23;
@@ -1699,7 +2129,6 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     new_task->regs.esp = (uint32_t)stack_ptr;
 
-    new_task->regs.cr3 = new_task->cr3;
     new_task->regs.eip = (uint32_t)entry;
     new_task->regs.useresp = thread_stack_top - 16;
     new_task->regs.cs = 0x1B;
@@ -1714,11 +2143,22 @@ pid_t task_create_thread(void (*entry)(void)) {
 }
 
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
+    task_t *new_task;
+    int i;
+    uint32_t thread_stack_size;
+    uint32_t thread_stack_base;
+    uint32_t thread_stack_top;
+    uint32_t stack_page_count;
+    uint32_t *stack_pages;
+    uint32_t zero_val;
+    uint32_t arg_val;
+    uint32_t *stack_ptr;
+
     if (!current_task || !current_task->is_user) {
         return -1;
     }
     
-    task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
+    new_task = (task_t *)kmalloc(sizeof(task_t));
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
@@ -1745,16 +2185,16 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->user_brk = current_task->user_brk;
     new_task->console_id = current_task->console_id;
     
-    for (int i = 0; i < 256; i++) {
+    for (i = 0; i < 256; i++) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     
-    uint32_t thread_stack_size = 0x4000;
-    uint32_t thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
-    uint32_t thread_stack_top = thread_stack_base + thread_stack_size;
+    thread_stack_size = 0x4000;
+    thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
+    thread_stack_top = thread_stack_base + thread_stack_size;
     
-    uint32_t stack_page_count = 0;
-    uint32_t *stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         kfree(new_task->kernel_stack_base);
         kfree(new_task);
@@ -1766,12 +2206,12 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     
     current_task->user_brk = thread_stack_top + 0x1000;
     
-    uint32_t zero_val = 0;
-    uint32_t arg_val = (uint32_t)arg;
+    zero_val = 0;
+    arg_val = (uint32_t)arg;
     vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 16, &zero_val, 4);
     vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 12, &arg_val, 4);
     
-    uint32_t *stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
     
     stack_ptr--;
     *stack_ptr = 0x23;
@@ -1817,7 +2257,6 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     
     new_task->regs.esp = (uint32_t)stack_ptr;
 
-    new_task->regs.cr3 = new_task->cr3;
     new_task->regs.eip = (uint32_t)entry;
     new_task->regs.useresp = thread_stack_top - 16;
     new_task->regs.cs = 0x1B;

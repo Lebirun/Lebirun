@@ -3,10 +3,18 @@
 
 #include <stdint.h>
 
-#define SYSNAME "Lebirun"
+#define OS_NAME "Lebirun"
+#define OS_VERSION "0.1.0"
+#define KERNEL_BUILD_DATE __DATE__
+#define KERNEL_BUILD_TIME __TIME__
+#ifndef KERNEL_BUILD_TZ
+#define KERNEL_BUILD_TZ "UTC"
+#endif
+#define KERNEL_BUILD_TIMEZONE KERNEL_BUILD_TZ
+#define SYSNAME OS_NAME
+#define RELEASE OS_VERSION
+#define VERSION OS_VERSION
 #define NODENAME "lebirun"
-#define RELEASE "0.1.0"
-#define VERSION "0.1.0"
 #define MACHINE "i386"
 
 struct utsname {
@@ -16,5 +24,10 @@ struct utsname {
     char version[65];
     char machine[65];
 };
+
+const char *kernel_get_version(void);
+const char *kernel_get_name(void);
+const char *kernel_get_build_date(void);
+const char *kernel_get_build_time(void);
 
 #endif

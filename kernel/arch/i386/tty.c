@@ -22,6 +22,11 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
+#define EARLY_BOOT_BUFFER_SIZE 16384
+static char early_boot_buffer[EARLY_BOOT_BUFFER_SIZE];
+static size_t early_boot_index = 0;
+static bool early_boot_capture = true;
+
 static void terminal_updatecursor(void) {
     if (use_framebuffer) {
         fb_update_cursor();
@@ -59,6 +64,21 @@ void terminal_init_fb(uint64_t addr, uint32_t width, uint32_t height, uint32_t p
     }
 }
 
+void terminal_replay_early_boot(void) {
+    size_t i;
+    early_boot_capture = false;
+    for (i = 0; i < early_boot_index; i++) {
+        char c;
+        c = early_boot_buffer[i];
+        if (use_framebuffer) {
+            fb_write_char(c);
+        }
+    }
+    if (use_framebuffer) {
+        fb_update_cursor();
+    }
+}
+
 void terminal_setcolor(uint8_t color) {
 	terminal_color = color;
 }
@@ -81,6 +101,10 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
+    if (early_boot_capture && early_boot_index < EARLY_BOOT_BUFFER_SIZE - 1) {
+        early_boot_buffer[early_boot_index++] = c;
+    }
+
     if (use_framebuffer && console_is_initialized()) {
         console_putchar_to(0, c);
         return;
@@ -90,7 +114,6 @@ void terminal_putchar(char c) {
 
     if (use_framebuffer) {
         fb_write_char(c);
-        fb_update_cursor();
         return;
     }
     unsigned char uc = c;

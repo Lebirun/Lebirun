@@ -19,6 +19,14 @@ static uint32_t ramfs_next_inode = 1;
 static ramfs_stats_t ramfs_stats;
 static int ramfs_stats_initialized = 0;
 
+static void ramfs_check_root_children(const char *location) {
+    (void)location;
+}
+
+void ramfs_debug_check_root(const char *location) {
+    (void)location;
+}
+
 static uint32_t ramfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 static void ramfs_vfs_open(vfs_node_t *node, uint32_t flags);
@@ -52,6 +60,9 @@ uint32_t ramfs_get_time(void) {
 }
 
 static inline void ramfs_lock(void) {
+    if (!ramfs_stats_initialized) {
+        ramfs_init_stats();
+    }
     mutex_lock(&ramfs_stats.global_lock);
 }
 
@@ -99,9 +110,9 @@ void ramfs_init(void) {
     
     ramfs_root = ramfs_alloc_node();
     if (!ramfs_root) {
-        printf("RAMFS: Failed to allocate root node\n");
         return;
     }
+    
     strcpy(ramfs_root->name, "/");
     ramfs_root->type = 1;
     ramfs_root->permissions = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
@@ -112,7 +123,6 @@ void ramfs_init(void) {
     ramfs_root->next_sibling = NULL;
     
     ramfs_stats.dir_count = 1;
-    printf("RAMFS: Initialized (max %u KB)\n", RAMFS_MAX_TOTAL_SIZE / 1024);
 }
 
 static ramfs_node_t *ramfs_find_child(ramfs_node_t *parent, const char *name) {
@@ -1141,15 +1151,22 @@ static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
-    if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
+    if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
+        return NULL;
+    }
     
     ramfs_node_t *rn = (ramfs_node_t *)node->private_data;
-    if (!rn || rn->type != 1) return NULL;
+    if (!rn || rn->type != 1) {
+        return NULL;
+    }
     
     ramfs_lock();
     ramfs_node_lock(rn);
     
     ramfs_node_t *child = rn->children;
+    if (child && ((uintptr_t)child < 0xD0000000 || (uintptr_t)child > 0xE0000000)) {
+        child = NULL;
+    }
     while (child) {
         if (strcmp(child->name, name) == 0) {
             vfs_node_t *result = child->vfs_node;
@@ -1158,7 +1175,7 @@ static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
                 result->atime = child->atime;
                 result->mtime = child->mtime;
                 result->ctime = child->ctime;
-                DPRINTF2("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%u\n", 
+                  DPRINTF4("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%u\n", 
                        name, child, result, result->length);
             }
             ramfs_node_unlock(rn);
@@ -1510,15 +1527,14 @@ static vfs_node_t *ramfs_vfs_do_mount(const char *device, const char *mountpoint
     }
     
     if (!ramfs_root) {
-        printf("RAMFS_VFS: No root node\n");
         return NULL;
     }
     
     ramfs_vfs_root = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
     if (!ramfs_vfs_root) {
-        printf("RAMFS_VFS: Failed to allocate VFS root\n");
         return NULL;
     }
+    
     memset(ramfs_vfs_root, 0, sizeof(vfs_node_t));
     
     ramfs_vfs_root->name[0] = '/';
@@ -1539,19 +1555,17 @@ static vfs_node_t *ramfs_vfs_do_mount(const char *device, const char *mountpoint
     
     ramfs_root->vfs_node = ramfs_vfs_root;
     
-    printf("RAMFS_VFS: Mounted at %s\n", mountpoint ? mountpoint : "/ramfs");
     return ramfs_vfs_root;
 }
 
-static vfs_fs_type_t ramfs_fs_type = {
-    .name = "ramfs",
-    .mount = ramfs_vfs_do_mount,
-    .unmount = NULL,
-    .next = NULL
-};
+static vfs_fs_type_t ramfs_fs_type;
 
 void ramfs_vfs_register(void) {
-    ramfs_init();
+    ramfs_fs_type.name = "ramfs";
+    ramfs_fs_type.mount = ramfs_vfs_do_mount;
+    ramfs_fs_type.unmount = NULL;
+    ramfs_fs_type.next = NULL;
+
     vfs_register_fs(&ramfs_fs_type);
     vfs_mount(NULL, "/", "ramfs");
 }

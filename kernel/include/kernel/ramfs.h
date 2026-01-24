@@ -6,7 +6,7 @@
 #include <kernel/vfs.h>
 #include <kernel/mutex.h>
 
-#define RAMFS_MAX_TOTAL_SIZE   (4 * 1024 * 1024)
+#define RAMFS_MAX_TOTAL_SIZE   (2 * 1024 * 1024)
 #define RAMFS_MAX_FILE_SIZE    RAMFS_MAX_TOTAL_SIZE
 #define RAMFS_BLOCK_SIZE       4096
 #define RAMFS_MAX_NAME_LEN     VFS_MAX_NAME
@@ -71,5 +71,7 @@ ramfs_node_t *ramfs_find_node(const char *path);
 int ramfs_get_stats(ramfs_stats_t *stats);
 
 uint32_t ramfs_get_time(void);
+
+void ramfs_debug_check_root(const char *location);
 
 #endif

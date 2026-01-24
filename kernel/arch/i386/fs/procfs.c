@@ -1,6 +1,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/vfs.h>
 #include <kernel/task.h>
+#include <kernel/about.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -41,10 +42,12 @@ extern volatile uint32_t tick_count;
 extern uint32_t pit_freq;
 
 static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)node;
-    
     char buf[2048];
-    int len = 0;
+    int len;
+    uint32_t remaining;
+    
+    (void)node;
+    len = 0;
     
     if (current_task) {
         len = snprintf(buf, sizeof(buf),
@@ -108,35 +111,38 @@ static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_
     }
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)node;
-    
     char buf[2048];
-    int len = 0;
+    int len;
+    int n;
+    uint32_t remaining;
+    
+    (void)node;
+    len = 0;
     
     if (current_task && current_task->user_brk > 0) {
         if (len < (int)sizeof(buf) - 1) {
-            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
                 "00100000-%08x r-xp 00000000 00:00 0 [text]\n",
                 0x00400000);
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
         }
         if (len < (int)sizeof(buf) - 1) {
-            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
                 "00400000-%08x rw-p 00000000 00:00 0 [heap]\n",
                 current_task->user_brk);
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
         }
         if (len < (int)sizeof(buf) - 1) {
-            int n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
                 "007f0000-00800000 rw-p 00000000 00:00 0 [stack]\n");
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
@@ -144,78 +150,101 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
     }
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *cmdline;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *cmdline = "init";
-    uint32_t len = 5;
+    cmdline = "init";
+    len = 5;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, cmdline + offset, size);
     return size;
 }
 
 static uint32_t proc_self_environ_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *env;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *env = "PATH=/bin:/usr/bin\0HOME=/\0TERM=vt100\0";
-    uint32_t len = 38;
+    env = "PATH=/bin:/usr/bin\0HOME=/\0TERM=vt100\0";
+    len = 38;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, env + offset, size);
     return size;
 }
 
 static uint32_t proc_version_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char ver[128];
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *ver = "Lebirun version 0.1.0 (gcc) #1 SMP PREEMPT\n";
-    uint32_t len = 44;
+    len = snprintf(ver, sizeof(ver), "%s version %s (%s %s) #1 SMP PREEMPT\n",
+        SYSNAME, RELEASE, KERNEL_BUILD_DATE, KERNEL_BUILD_TIME);
     
-    if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    if (offset >= (uint32_t)len) return 0;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, ver + offset, size);
     return size;
 }
 
 static uint32_t proc_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[64];
+    uint32_t seconds;
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    char buf[64];
-    uint32_t seconds = tick_count / pit_freq;
-    int len = snprintf(buf, sizeof(buf), "%u.%02u %u.%02u\n", 
+    seconds = tick_count / pit_freq;
+    len = snprintf(buf, sizeof(buf), "%u.%02u %u.%02u\n", 
         seconds, (tick_count % pit_freq) * 100 / pit_freq,
         seconds, 0);
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[512];
+    uint32_t free_pages;
+    uint32_t total_kb;
+    uint32_t free_kb;
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    char buf[512];
-    extern uint32_t pfa_count_free(void);
+    free_pages = pfa_count_free();
+    free_kb = free_pages * 4;
+    total_kb = pfa_get_usable_ram_kb();
+    if (total_kb == 0) {
+        total_kb = free_kb + 4096;
+    }
     
-    uint32_t free_pages = pfa_count_free();
-    uint32_t total_pages = free_pages + 1024;
-    uint32_t used_pages = total_pages - free_pages;
-    
-    int len = snprintf(buf, sizeof(buf),
+    len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8u kB\n"
         "MemFree:       %8u kB\n"
         "MemAvailable:  %8u kB\n"
@@ -223,26 +252,29 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
         "Cached:        %8u kB\n"
         "SwapTotal:     %8u kB\n"
         "SwapFree:      %8u kB\n",
-        total_pages * 4,
-        free_pages * 4,
-        free_pages * 4,
+        total_kb,
+        free_kb,
+        free_kb,
         0,
         0,
         0,
         0);
-    (void)used_pages;
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *info;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *info = 
+    info = 
         "processor\t: 0\n"
         "vendor_id\t: GenuineIntel\n"
         "cpu family\t: 6\n"
@@ -254,35 +286,40 @@ static uint32_t proc_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
         "bogomips\t: 2000.00\n"
         "flags\t\t: fpu vme de pse tsc msr pae mce cx8\n\n";
     
-    uint32_t len = 0;
+    len = 0;
     while (info[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, info + offset, size);
     return size;
 }
 
 static uint32_t proc_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[64];
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "0.00 0.00 0.00 1/1 %d\n",
+    len = snprintf(buf, sizeof(buf), "0.00 0.00 0.00 1/1 %d\n",
         current_task ? current_task->pid : 1);
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)node;
-    
     char buf[512];
-    int len = 0;
+    int len;
+    uint32_t remaining;
+    
+    (void)node;
+    len = 0;
     
     if (current_task) {
         len = snprintf(buf, sizeof(buf),
@@ -299,36 +336,41 @@ static uint32_t proc_self_stat_read(vfs_node_t *node, uint32_t offset, uint32_t 
     }
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_statm_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)node;
-    
     char buf[128];
-    int len = 0;
+    int len;
+    uint32_t pages;
+    uint32_t remaining;
+    
+    (void)node;
+    len = 0;
     
     if (current_task) {
-        uint32_t pages = current_task->user_pages_count;
+        pages = current_task->user_pages_count;
         len = snprintf(buf, sizeof(buf), "%u %u %u 1 0 %u 0\n",
             pages, pages, pages / 2, pages);
     }
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_comm_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)node;
-    
     char buf[32];
-    int len = 0;
+    int len;
+    uint32_t remaining;
+    
+    (void)node;
+    len = 0;
     
     if (current_task) {
         len = snprintf(buf, sizeof(buf), "%s\n",
@@ -336,16 +378,20 @@ static uint32_t proc_self_comm_read(vfs_node_t *node, uint32_t offset, uint32_t 
     }
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_limits_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *buf;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *buf = 
+    buf = 
         "Limit                     Soft Limit           Hard Limit           Units     \n"
         "Max cpu time              unlimited            unlimited            seconds   \n"
         "Max file size             unlimited            unlimited            bytes     \n"
@@ -364,20 +410,24 @@ static uint32_t proc_self_limits_read(vfs_node_t *node, uint32_t offset, uint32_
         "Max realtime priority     0                    0                    \n"
         "Max realtime timeout      unlimited            unlimited            us        \n";
     
-    uint32_t len = 0;
+    len = 0;
     while (buf[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_self_io_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *buf;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *buf = 
+    buf = 
         "rchar: 0\n"
         "wchar: 0\n"
         "syscr: 0\n"
@@ -386,21 +436,24 @@ static uint32_t proc_self_io_read(vfs_node_t *node, uint32_t offset, uint32_t si
         "write_bytes: 0\n"
         "cancelled_write_bytes: 0\n";
     
-    uint32_t len = 0;
+    len = 0;
     while (buf[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[512];
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    char buf[512];
-    int len = snprintf(buf, sizeof(buf),
+    len = snprintf(buf, sizeof(buf),
         "cpu  %u 0 0 %u 0 0 0 0 0 0\n"
         "cpu0 %u 0 0 %u 0 0 0 0 0 0\n"
         "intr %u 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
@@ -418,41 +471,55 @@ static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
         current_task ? current_task->pid : 1);
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    size_t buf_size;
+    char *buf;
+    size_t len;
+    int mount_count;
+    int i;
+    vfs_mount_t *mount;
+    const char *device;
+    const char *path;
+    const char *fsname;
+    const char *opts;
+    size_t remaining;
+    int written;
+    uint32_t available;
+    
     (void)node;
 
-    size_t buf_size = VFS_MAX_MOUNTS * (VFS_MAX_PATH * 2 + 64);
-    char *buf = (char *)kmalloc(buf_size);
+    buf_size = VFS_MAX_MOUNTS * (VFS_MAX_PATH * 2 + 64);
+    buf = (char *)kmalloc(buf_size);
     if (!buf) {
         return 0;
     }
 
-    size_t len = 0;
-    int mount_count = vfs_get_mount_count();
-    for (int i = 0; i < mount_count; ++i) {
-        vfs_mount_t *mount = vfs_get_mount(i);
+    len = 0;
+    mount_count = vfs_get_mount_count();
+    for (i = 0; i < mount_count; ++i) {
+        mount = vfs_get_mount(i);
         if (!mount) {
             continue;
         }
 
-        const char *device = mount->device[0] ? mount->device :
+        device = mount->device[0] ? mount->device :
             (mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown");
-        const char *path = mount->path[0] ? mount->path : "/";
-        const char *fsname = mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown";
-        const char *opts = "rw";
+        path = mount->path[0] ? mount->path : "/";
+        fsname = mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown";
+        opts = "rw";
 
         if (len >= buf_size) {
             break;
         }
 
-        size_t remaining = buf_size - len;
-        int written = snprintf(buf + len, remaining, "%s %s %s %s 0 0\n",
+        remaining = buf_size - len;
+        written = snprintf(buf + len, remaining, "%s %s %s %s 0 0\n",
             device, path, fsname, opts);
         if (written <= 0) {
             continue;
@@ -475,7 +542,7 @@ static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t siz
         return 0;
     }
 
-    uint32_t available = (uint32_t)(len - offset);
+    available = (uint32_t)(len - offset);
     if (size > available) {
         size = available;
     }
@@ -485,44 +552,56 @@ static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t siz
 }
 
 static uint32_t proc_filesystems_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *buf;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *buf = 
-        "nodev\tproc\n"
+    buf = 
+        "nodev\tprocfs\n"
         "nodev\tdevfs\n"
         "nodev\tramfs\n"
         "\text2\n"
         "\text4\n";
     
-    uint32_t len = 0;
+    len = 0;
     while (buf[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *buf;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *buf = "console=tty0 root=/dev/ram0 rw\n";
+    buf = "console=tty0 root=/dev/ram0 rw\n";
     
-    uint32_t len = 0;
+    len = 0;
     while (buf[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_devices_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    const char *buf;
+    uint32_t len;
+    uint32_t remaining;
+    
     (void)node;
     
-    const char *buf = 
+    buf = 
         "Character devices:\n"
         "  1 mem\n"
         "  4 tty\n"
@@ -535,21 +614,24 @@ static uint32_t proc_devices_read(vfs_node_t *node, uint32_t offset, uint32_t si
         "Block devices:\n"
         "  8 sd\n";
     
-    uint32_t len = 0;
+    len = 0;
     while (buf[len]) len++;
     
     if (offset >= len) return 0;
-    uint32_t remaining = len - offset;
+    remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_interrupts_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[512];
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    char buf[512];
-    int len = snprintf(buf, sizeof(buf),
+    len = snprintf(buf, sizeof(buf),
         "           CPU0\n"
         "  0:    %8u   PIT timer\n"
         "  1:    %8u   i8042 keyboard\n"
@@ -561,20 +643,24 @@ static uint32_t proc_interrupts_read(vfs_node_t *node, uint32_t offset, uint32_t
         tick_count, tick_count / 100, 0, 0);
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
 }
 
 static uint32_t proc_vmstat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    extern uint32_t pfa_count_free(void);
+    uint32_t free_pages;
+    char buf[1024];
+    int len;
+    uint32_t remaining;
+    
     (void)node;
     
-    extern uint32_t pfa_count_free(void);
-    uint32_t free_pages = pfa_count_free();
+    free_pages = pfa_count_free();
     
-    char buf[1024];
-    int len = snprintf(buf, sizeof(buf),
+    len = snprintf(buf, sizeof(buf),
         "nr_free_pages %u\n"
         "nr_alloc_batch 0\n"
         "nr_inactive_anon 0\n"
@@ -605,7 +691,7 @@ static uint32_t proc_vmstat_read(vfs_node_t *node, uint32_t offset, uint32_t siz
         free_pages);
     
     if (offset >= (uint32_t)len) return 0;
-    uint32_t remaining = (uint32_t)len - offset;
+    remaining = (uint32_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
     return size;
@@ -709,14 +795,14 @@ static int procfs_unmount(vfs_node_t *node) {
     return 0;
 }
 
-static vfs_fs_type_t procfs_type = {
-    .name = "proc",
-    .mount = procfs_mount,
-    .unmount = procfs_unmount,
-    .next = NULL
-};
+static vfs_fs_type_t procfs_type;
 
 void procfs_init(void) {
+    procfs_type.name = "procfs";
+    procfs_type.mount = procfs_mount;
+    procfs_type.unmount = procfs_unmount;
+    procfs_type.next = NULL;
+
     memset(&procfs_root, 0, sizeof(vfs_node_t));
     strcpy(procfs_root.name, "proc");
     procfs_root.flags = VFS_DIRECTORY;

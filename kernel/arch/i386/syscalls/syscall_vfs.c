@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <kernel/ramfs.h>
 
 static int task_fd_alloc_from(int start) {
     if (!current_task) return -ESRCH;
@@ -288,6 +289,164 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     return vfs_unlink(parent, filename);
 }
 
+struct statfs_kernel {
+    unsigned long f_type;
+    unsigned long f_bsize;
+    unsigned long long f_blocks;
+    unsigned long long f_bfree;
+    unsigned long long f_bavail;
+    unsigned long long f_files;
+    unsigned long long f_ffree;
+    int f_fsid[2];
+    unsigned long f_namelen;
+    unsigned long f_frsize;
+    unsigned long f_flags;
+    unsigned long f_spare[4];
+};
+
+#define RAMFS_MAGIC     0x858458F6
+#define EXT4_MAGIC      0xEF53
+#define PROCFS_MAGIC    0x9FA0
+#define DEVFS_MAGIC     0x1373
+
+static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
+    memset(buf, 0, sizeof(struct statfs_kernel));
+    
+    extern int ramfs_get_stats(ramfs_stats_t *stats);
+    
+    if (path[0] == '/' && (path[1] == '\0' || 
+        (path[1] == 't' && path[2] == 'm' && path[3] == 'p'))) {
+        ramfs_stats_t rs;
+        if (ramfs_get_stats(&rs) == 0) {
+            buf->f_type = RAMFS_MAGIC;
+            buf->f_bsize = 4096;
+            buf->f_frsize = 4096;
+            buf->f_blocks = rs.total_size / 4096;
+            buf->f_bfree = (rs.total_size - rs.used_size) / 4096;
+            buf->f_bavail = buf->f_bfree;
+            buf->f_files = rs.file_count + rs.dir_count + 1000;
+            buf->f_ffree = 1000;
+            buf->f_namelen = 255;
+            return;
+        }
+    }
+    
+    if (path[0] == '/' && path[1] == 'p' && path[2] == 'r' && 
+        path[3] == 'o' && path[4] == 'c') {
+        buf->f_type = PROCFS_MAGIC;
+        buf->f_bsize = 1024;
+        buf->f_frsize = 1024;
+        buf->f_blocks = 1024;
+        buf->f_bfree = 1024;
+        buf->f_bavail = 1024;
+        buf->f_files = 128;
+        buf->f_ffree = 1;
+        buf->f_namelen = 255;
+        return;
+    }
+    
+    if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v') {
+        buf->f_type = DEVFS_MAGIC;
+        buf->f_bsize = 1024;
+        buf->f_frsize = 1024;
+        buf->f_blocks = 512;
+        buf->f_bfree = 512;
+        buf->f_bavail = 512;
+        buf->f_files = 32;
+        buf->f_ffree = 1;
+        buf->f_namelen = 255;
+        return;
+    }
+    
+    buf->f_type = RAMFS_MAGIC;
+    buf->f_bsize = 4096;
+    buf->f_frsize = 4096;
+    buf->f_blocks = 1024;
+    buf->f_bfree = 768;
+    buf->f_bavail = 768;
+    buf->f_files = 256;
+    buf->f_ffree = 200;
+    buf->f_namelen = 255;
+}
+
+static int sys_statfs(int path_ptr, const char *buf_ptr, int size) {
+    uint32_t path_addr = (uint32_t)path_ptr;
+    uint32_t buf_addr = (uint32_t)buf_ptr;
+    
+    if (current_task) {
+        printf("[SYSCALL_STATFS] task=%d path_ptr=0x%08x buf_ptr=0x%08x size=%d\n",
+               current_task->pid, path_ptr, (uint32_t)buf_ptr, size);
+    }
+    
+    if (path_addr >= 0xC0000000 || path_addr < 0x1000) {
+        if (current_task) printf("[SYSCALL_STATFS] EFAULT: path_addr out of range 0x%08x\n", path_addr);
+        return -EFAULT;
+    }
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) {
+        if (current_task) printf("[SYSCALL_STATFS] EFAULT: buf_addr out of range 0x%08x\n", buf_addr);
+        return -EFAULT;
+    }
+    
+    if (size < (int)sizeof(struct statfs_kernel)) {
+        if (current_task) printf("[SYSCALL_STATFS] EINVAL: size=%d < required=%zu\n", size, sizeof(struct statfs_kernel));
+        return -EINVAL;
+    }
+    
+    const char *path = (const char *)path_addr;
+    struct statfs_kernel *buf = (struct statfs_kernel *)buf_addr;
+    
+    printf("[SYSCALL_STATFS] Reading path from 0x%08x: ", path_addr);
+    for (int i = 0; i < 64 && path[i]; i++) printf("%c", path[i]);
+    printf("\n");
+    
+    fill_statfs_for_path(path, buf);
+    
+    printf("[SYSCALL_STATFS] Filled statfs: f_type=0x%lx f_blocks=%llu f_bfree=%llu f_bavail=%llu\n",
+           buf->f_type, buf->f_blocks, buf->f_bfree, buf->f_bavail);
+    printf("[SYSCALL_STATFS] struct size=%zu, offset of f_blocks=%zu, f_bfree=%zu\n",
+           sizeof(struct statfs_kernel), 
+           (size_t)&((struct statfs_kernel*)0)->f_blocks,
+           (size_t)&((struct statfs_kernel*)0)->f_bfree);
+    
+    return 0;
+}
+
+static int sys_fstatfs(int fd, const char *buf_ptr, int size) {
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= TASK_MAX_FDS) {
+        printf("[SYSCALL_FSTATFS] EBADF: fd=%d out of range\n", fd);
+        return -EBADF;
+    }
+    if (!current_task->fds[fd].in_use) {
+        printf("[SYSCALL_FSTATFS] EBADF: fd=%d not in use\n", fd);
+        return -EBADF;
+    }
+    
+    uint32_t buf_addr = (uint32_t)buf_ptr;
+    
+    printf("[SYSCALL_FSTATFS] task=%d fd=%d buf_ptr=0x%08x size=%d\n",
+           current_task->pid, fd, (uint32_t)buf_ptr, size);
+    
+    if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) {
+        printf("[SYSCALL_FSTATFS] EFAULT: buf_addr out of range 0x%08x\n", buf_addr);
+        return -EFAULT;
+    }
+    
+    if (size < (int)sizeof(struct statfs_kernel)) {
+        printf("[SYSCALL_FSTATFS] EINVAL: size=%d < required=%zu\n", size, sizeof(struct statfs_kernel));
+        return -EINVAL;
+    }
+    
+    struct statfs_kernel *buf = (struct statfs_kernel *)buf_addr;
+    
+    fill_statfs_for_path("/", buf);
+    
+    printf("[SYSCALL_FSTATFS] Filled statfs: f_type=0x%lx f_blocks=%llu f_bfree=%llu\n",
+           buf->f_type, buf->f_blocks, buf->f_bfree);
+    
+    return 0;
+}
+
 void syscalls_vfs_init(void) {
     syscall_table[SYSCALL_OPEN] = sys_vfs_open;
     syscall_table[SYSCALL_CLOSE] = sys_vfs_close;
@@ -301,4 +460,6 @@ void syscalls_vfs_init(void) {
     syscall_table[SYSCALL_VFS_CREATE] = sys_vfs_create;
     syscall_table[SYSCALL_VFS_MKDIR] = sys_vfs_mkdir;
     syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
+    syscall_table[SYSCALL_STATFS] = sys_statfs;
+    syscall_table[SYSCALL_FSTATFS] = sys_fstatfs;
 }

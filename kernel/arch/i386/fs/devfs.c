@@ -1,7 +1,9 @@
 #include <kernel/vfs.h>
 #include <kernel/pty.h>
+#include <kernel/mem_map.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static vfs_node_t devfs_root;
 static vfs_node_t dev_null;
@@ -74,14 +76,16 @@ static uint32_t dev_full_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 }
 
 static uint32_t dev_urandom_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    extern volatile uint32_t tick_count;
+    uint32_t i;
+    
     (void)node; (void)offset;
     
-    extern volatile uint32_t tick_count;
     add_entropy(tick_count);
     add_entropy((uint32_t)buffer);
     add_entropy(size);
     
-    for (uint32_t i = 0; i < size; i++) {
+    for (i = 0; i < size; i++) {
         buffer[i] = (uint8_t)(lfsr_rand() & 0xFF);
         if ((i & 15) == 0) {
             add_entropy(tick_count + i);
@@ -91,8 +95,10 @@ static uint32_t dev_urandom_read(vfs_node_t *node, uint32_t offset, uint32_t siz
 }
 
 static uint32_t dev_urandom_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    uint32_t i;
+    
     (void)node; (void)offset;
-    for (uint32_t i = 0; i < size; i++) {
+    for (i = 0; i < size; i++) {
         add_entropy(buffer[i] | (i << 8));
     }
     return size;
@@ -176,174 +182,326 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-static vfs_node_t *devfs_mount(const char *device, const char *mountpoint) {
-    (void)device; (void)mountpoint;
-    return &devfs_root;
+
+
+static void devfs_open(vfs_node_t *node, uint32_t flags) {
+    (void)node;
+    (void)flags;
 }
 
-static int devfs_unmount(vfs_node_t *node) {
+static void devfs_close(vfs_node_t *node) {
+    (void)node;
+}
+
+static int devfs_unmount_impl(vfs_node_t *node) {
     (void)node;
     return 0;
 }
 
-static vfs_fs_type_t devfs_type = {
-    .name = "devfs",
-    .mount = devfs_mount,
-    .unmount = devfs_unmount,
-    .next = NULL
-};
+static vfs_node_t *devfs_mount_impl(const char *device, const char *mountpoint) {
+    (void)device;
+    (void)mountpoint;
+    printf("[DEVFS] devfs_mount_impl called, returning devfs_root at %p\n", (void*)&devfs_root);
+    return &devfs_root;
+}
 
 void devfs_init(void) {
+    int i;
+    char name[8];
+    vfs_fs_type_t *fs_type;
+
     memset(&devfs_root, 0, sizeof(vfs_node_t));
     strcpy(devfs_root.name, "dev");
     devfs_root.flags = VFS_DIRECTORY;
+    devfs_root.mask = VFS_PERM_READ | VFS_PERM_EXEC;
+    devfs_root.uid = 0;
+    devfs_root.gid = 0;
     devfs_root.readdir = devfs_readdir;
     devfs_root.finddir = devfs_finddir;
+    devfs_root.open = devfs_open;
+    devfs_root.close = devfs_close;
     devfs_root.ref_count = 1;
-    
+    devfs_root.parent = NULL;
+    devfs_root.ptr = NULL;
+    devfs_root.private_data = NULL;
+
     memset(&dev_null, 0, sizeof(vfs_node_t));
     strcpy(dev_null.name, "null");
     dev_null.flags = VFS_CHARDEVICE;
     dev_null.mask = 0666;
+    dev_null.uid = 0;
+    dev_null.gid = 0;
     dev_null.read = dev_null_read;
     dev_null.write = dev_null_write;
+    dev_null.open = devfs_open;
+    dev_null.close = devfs_close;
     dev_null.parent = &devfs_root;
     dev_null.ref_count = 1;
-    
+    dev_null.ptr = NULL;
+    dev_null.private_data = NULL;
+
     memset(&dev_zero, 0, sizeof(vfs_node_t));
     strcpy(dev_zero.name, "zero");
     dev_zero.flags = VFS_CHARDEVICE;
     dev_zero.mask = 0666;
+    dev_zero.uid = 0;
+    dev_zero.gid = 0;
     dev_zero.read = dev_zero_read;
     dev_zero.write = dev_zero_write;
+    dev_zero.open = devfs_open;
+    dev_zero.close = devfs_close;
     dev_zero.parent = &devfs_root;
     dev_zero.ref_count = 1;
-    
+    dev_zero.ptr = NULL;
+    dev_zero.private_data = NULL;
+
     memset(&dev_urandom, 0, sizeof(vfs_node_t));
     strcpy(dev_urandom.name, "urandom");
     dev_urandom.flags = VFS_CHARDEVICE;
     dev_urandom.mask = 0666;
+    dev_urandom.uid = 0;
+    dev_urandom.gid = 0;
     dev_urandom.read = dev_urandom_read;
     dev_urandom.write = dev_urandom_write;
+    dev_urandom.open = devfs_open;
+    dev_urandom.close = devfs_close;
     dev_urandom.parent = &devfs_root;
     dev_urandom.ref_count = 1;
-    
+    dev_urandom.ptr = NULL;
+    dev_urandom.private_data = NULL;
+
     memset(&dev_random, 0, sizeof(vfs_node_t));
     strcpy(dev_random.name, "random");
     dev_random.flags = VFS_CHARDEVICE;
     dev_random.mask = 0666;
+    dev_random.uid = 0;
+    dev_random.gid = 0;
     dev_random.read = dev_urandom_read;
     dev_random.write = dev_urandom_write;
+    dev_random.open = devfs_open;
+    dev_random.close = devfs_close;
     dev_random.parent = &devfs_root;
     dev_random.ref_count = 1;
-    
+    dev_random.ptr = NULL;
+    dev_random.private_data = NULL;
+
     memset(&dev_tty, 0, sizeof(vfs_node_t));
     strcpy(dev_tty.name, "tty");
     dev_tty.flags = VFS_CHARDEVICE;
     dev_tty.mask = 0666;
+    dev_tty.uid = 0;
+    dev_tty.gid = 0;
     dev_tty.read = dev_tty_read;
     dev_tty.write = dev_tty_write;
+    dev_tty.open = devfs_open;
+    dev_tty.close = devfs_close;
     dev_tty.parent = &devfs_root;
     dev_tty.ref_count = 1;
-    
+    dev_tty.ptr = NULL;
+    dev_tty.private_data = NULL;
+
     memset(&dev_console, 0, sizeof(vfs_node_t));
     strcpy(dev_console.name, "console");
     dev_console.flags = VFS_CHARDEVICE;
     dev_console.mask = 0600;
+    dev_console.uid = 0;
+    dev_console.gid = 0;
     dev_console.read = dev_tty_read;
     dev_console.write = dev_tty_write;
+    dev_console.open = devfs_open;
+    dev_console.close = devfs_close;
     dev_console.parent = &devfs_root;
     dev_console.ref_count = 1;
-    
+    dev_console.ptr = NULL;
+    dev_console.private_data = NULL;
+
     memset(&dev_stdin, 0, sizeof(vfs_node_t));
     strcpy(dev_stdin.name, "stdin");
     dev_stdin.flags = VFS_SYMLINK;
+    dev_stdin.mask = 0777;
+    dev_stdin.uid = 0;
+    dev_stdin.gid = 0;
     dev_stdin.parent = &devfs_root;
     dev_stdin.ref_count = 1;
-    
+    dev_stdin.ptr = NULL;
+    dev_stdin.private_data = NULL;
+
     memset(&dev_stdout, 0, sizeof(vfs_node_t));
     strcpy(dev_stdout.name, "stdout");
     dev_stdout.flags = VFS_SYMLINK;
+    dev_stdout.mask = 0777;
+    dev_stdout.uid = 0;
+    dev_stdout.gid = 0;
     dev_stdout.parent = &devfs_root;
     dev_stdout.ref_count = 1;
-    
+    dev_stdout.ptr = NULL;
+    dev_stdout.private_data = NULL;
+
     memset(&dev_stderr, 0, sizeof(vfs_node_t));
     strcpy(dev_stderr.name, "stderr");
     dev_stderr.flags = VFS_SYMLINK;
+    dev_stderr.mask = 0777;
+    dev_stderr.uid = 0;
+    dev_stderr.gid = 0;
     dev_stderr.parent = &devfs_root;
     dev_stderr.ref_count = 1;
-    
+    dev_stderr.ptr = NULL;
+    dev_stderr.private_data = NULL;
+
     memset(&dev_fd, 0, sizeof(vfs_node_t));
     strcpy(dev_fd.name, "fd");
     dev_fd.flags = VFS_DIRECTORY;
+    dev_fd.mask = 0755;
+    dev_fd.uid = 0;
+    dev_fd.gid = 0;
     dev_fd.parent = &devfs_root;
     dev_fd.ref_count = 1;
-    
+    dev_fd.ptr = NULL;
+    dev_fd.private_data = NULL;
+
     memset(&dev_ptmx, 0, sizeof(vfs_node_t));
     strcpy(dev_ptmx.name, "ptmx");
     dev_ptmx.flags = VFS_CHARDEVICE;
     dev_ptmx.mask = 0666;
+    dev_ptmx.uid = 0;
+    dev_ptmx.gid = 0;
+    dev_ptmx.open = devfs_open;
+    dev_ptmx.close = devfs_close;
     dev_ptmx.parent = &devfs_root;
     dev_ptmx.ref_count = 1;
-    
+    dev_ptmx.ptr = NULL;
+    dev_ptmx.private_data = NULL;
+
     memset(&dev_pts, 0, sizeof(vfs_node_t));
     strcpy(dev_pts.name, "pts");
     dev_pts.flags = VFS_DIRECTORY;
     dev_pts.mask = 0755;
+    dev_pts.uid = 0;
+    dev_pts.gid = 0;
     dev_pts.parent = &devfs_root;
     dev_pts.ref_count = 1;
-    
+    dev_pts.ptr = NULL;
+    dev_pts.private_data = NULL;
+
     memset(&dev_full, 0, sizeof(vfs_node_t));
     strcpy(dev_full.name, "full");
     dev_full.flags = VFS_CHARDEVICE;
     dev_full.mask = 0666;
+    dev_full.uid = 0;
+    dev_full.gid = 0;
     dev_full.read = dev_full_read;
     dev_full.write = dev_full_write;
+    dev_full.open = devfs_open;
+    dev_full.close = devfs_close;
     dev_full.parent = &devfs_root;
     dev_full.ref_count = 1;
-    
+    dev_full.ptr = NULL;
+    dev_full.private_data = NULL;
+
     memset(&dev_mem, 0, sizeof(vfs_node_t));
     strcpy(dev_mem.name, "mem");
     dev_mem.flags = VFS_CHARDEVICE;
     dev_mem.mask = 0640;
+    dev_mem.uid = 0;
+    dev_mem.gid = 0;
+    dev_mem.open = devfs_open;
+    dev_mem.close = devfs_close;
     dev_mem.parent = &devfs_root;
     dev_mem.ref_count = 1;
-    
+    dev_mem.ptr = NULL;
+    dev_mem.private_data = NULL;
+
     memset(&dev_kmem, 0, sizeof(vfs_node_t));
     strcpy(dev_kmem.name, "kmem");
     dev_kmem.flags = VFS_CHARDEVICE;
     dev_kmem.mask = 0640;
+    dev_kmem.uid = 0;
+    dev_kmem.gid = 0;
+    dev_kmem.open = devfs_open;
+    dev_kmem.close = devfs_close;
     dev_kmem.parent = &devfs_root;
     dev_kmem.ref_count = 1;
-    
+    dev_kmem.ptr = NULL;
+    dev_kmem.private_data = NULL;
+
     memset(&dev_port, 0, sizeof(vfs_node_t));
     strcpy(dev_port.name, "port");
     dev_port.flags = VFS_CHARDEVICE;
     dev_port.mask = 0640;
+    dev_port.uid = 0;
+    dev_port.gid = 0;
+    dev_port.open = devfs_open;
+    dev_port.close = devfs_close;
     dev_port.parent = &devfs_root;
     dev_port.ref_count = 1;
-    
-    for (int i = 0; i < 64; i++) {
+    dev_port.ptr = NULL;
+    dev_port.private_data = NULL;
+
+    for (i = 0; i < 64; i++) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint32_t)i * 0x13579BDF);
     }
-    
-    for (int i = 0; i < 9; i++) {
+
+    for (i = 0; i < 9; i++) {
         memset(&dev_ttys[i], 0, sizeof(vfs_node_t));
-        char name[8];
-        name[0] = 't'; name[1] = 't'; name[2] = 'y';
+        name[0] = 't';
+        name[1] = 't';
+        name[2] = 'y';
         name[3] = '0' + i;
         name[4] = '\0';
         strcpy(dev_ttys[i].name, name);
         dev_ttys[i].flags = VFS_CHARDEVICE;
         dev_ttys[i].mask = 0620;
+        dev_ttys[i].uid = 0;
+        dev_ttys[i].gid = 0;
         dev_ttys[i].inode = i;
         dev_ttys[i].read = dev_ttyN_read;
         dev_ttys[i].write = dev_ttyN_write;
+        dev_ttys[i].open = devfs_open;
+        dev_ttys[i].close = devfs_close;
         dev_ttys[i].parent = &devfs_root;
         dev_ttys[i].ref_count = 1;
+        dev_ttys[i].ptr = NULL;
+        dev_ttys[i].private_data = NULL;
     }
-    
+
     pty_init();
+
+    fs_type = (vfs_fs_type_t *)kmalloc(sizeof(vfs_fs_type_t));
+
+    if (!fs_type) {
+        printf("[DEVFS] ERROR: kmalloc failed for fs_type\n");
+        return;
+    }
+    printf("[DEVFS] kmalloc returned fs_type=%p (size=%u)\n", (void*)fs_type, (unsigned)sizeof(vfs_fs_type_t));
+
+    memset(fs_type, 0, sizeof(vfs_fs_type_t));
+
+    fs_type->name = "devfs";
+    fs_type->mount = devfs_mount_impl;
+    fs_type->unmount = devfs_unmount_impl;
+    fs_type->next = NULL;
     
-    vfs_register_fs(&devfs_type);
+    printf("[DEVFS] fs_type initialized: name=%p mount=%p unmount=%p\n",
+           (void*)fs_type->name, (void*)fs_type->mount, (void*)fs_type->unmount);
+
+    if (!fs_type->name) {
+        return;
+    }
+
+    if (!fs_type->mount) {
+        return;
+    }
+
+    if (!fs_type->unmount) {
+        return;
+    }
+
+    printf("[DEVFS] About to call vfs_register_fs, fs_type=%p mount=%p unmount=%p\n",
+           (void*)fs_type, (void*)fs_type->mount, (void*)fs_type->unmount);
+    printf("[DEVFS] Verifying heap before vfs_register_fs...\n");
+    heap_verify();
+    vfs_register_fs(fs_type);
+    printf("[DEVFS] Verifying heap after vfs_register_fs...\n");
+    heap_verify();
+    printf("[DEVFS] devfs_init complete\n");
 }

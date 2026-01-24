@@ -22,6 +22,7 @@ if [ -d "userprog/lsh" ]; then
 fi
 
 rm -f root/bin/lsh
+rm -f root/bin/sh
 rm -f root/bin/lebcu
 rm -f root/bin/echo
 rm -f root/bin/pwd
@@ -32,6 +33,10 @@ rm -f root/bin/mkdir
 rm -f root/bin/rm
 rm -f root/bin/write
 rm -f root/bin/ticks
+rm -f root/bin/cres
+rm -f root/bin/df
+rm -f root/bin/free
+rm -f root/bin/uname
 rm -f userprog/coreutils/*.bin
 find userprog/coreutils -type f -name '*.o' -delete
 rm -f userprog/lsh/lsh

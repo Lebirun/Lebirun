@@ -23,6 +23,14 @@ static inline void spin_lock(spinlock_t* l) {
     }
 }
 
+static inline int spin_trylock(spinlock_t* l) {
+    if (!l) return 0;
+    if (__sync_lock_test_and_set(&l->locked, 1) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static inline void spin_unlock(spinlock_t* l) {
     if (!l) return;
     __sync_lock_release(&l->locked);

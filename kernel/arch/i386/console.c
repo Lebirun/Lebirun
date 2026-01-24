@@ -10,8 +10,6 @@
 
 extern void terminal_putchar(char c);
 extern void serial_putchar(char c);
-extern void kprint_serial_async(const char *data, size_t size);
-extern bool kprint_is_ready(void);
 extern framebuffer_t *fb_get(void);
 extern void fb_clear(void);
 extern void fb_putchar(char c, uint32_t x, uint32_t y);
@@ -133,7 +131,6 @@ static void console_redraw_step(uint32_t max_rows) {
     uint32_t end_row;
     uint32_t cols;
     uint32_t rows_processed;
-    uint32_t yield_counter;
     uint32_t visible_rows_cached;
     uint32_t visible_cols_cached;
     uint32_t current_row_cached;
@@ -162,7 +159,6 @@ static void console_redraw_step(uint32_t max_rows) {
     }
 
     rows_processed = 0;
-    yield_counter = 0;
     for (row = current_row_cached; row < end_row; row++) {
         cols = (row < visible_rows_cached) ? visible_cols_cached : fb->cols;
         for (col = 0; col < cols; col++) {
@@ -177,13 +173,12 @@ static void console_redraw_step(uint32_t max_rows) {
             } else {
                 fb_putchar(' ', col, row);
             }
-            yield_counter++;
-            if (yield_counter >= 32 && current_task && console_interrupts_enabled()) {
-                yield();
-                yield_counter = 0;
-            }
         }
         rows_processed++;
+        if (rows_processed >= 4 && current_task && console_interrupts_enabled()) {
+            yield();
+            rows_processed = 0;
+        }
     }
 
     flags = console_irqsave();
@@ -199,6 +194,11 @@ static void console_redraw_step(uint32_t max_rows) {
     }
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+}
+
+void console_tick_redraw(void) {
+    if (!console_redraw_pending) return;
+    console_redraw_step(2);
 }
 
 static void console_redraw_sync(int console_num) {
@@ -303,13 +303,14 @@ void console_redraw_current(void) {
     console_redraw_sync(current_console);
 }
 
-static void console_switch_internal(int console_num) {
+static void console_switch_internal_impl(int console_num, int from_interrupt) {
     framebuffer_t *fb;
     uint32_t rows;
     uint32_t cols;
     uint32_t flags;
     console_t *old_con;
     console_t *new_con;
+    int lock_acquired;
     
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
@@ -319,11 +320,17 @@ static void console_switch_internal(int console_num) {
         pending_console_switch = console_num;
         return;
     }
-    console_switching = 1;
-    console_switch_in_progress = 1;
 
     flags = console_irqsave();
-    spin_lock(&console_lock);
+    lock_acquired = spin_trylock(&console_lock);
+    if (!lock_acquired) {
+        console_irqrestore(flags);
+        pending_console_switch = console_num;
+        return;
+    }
+    
+    console_switching = 1;
+    console_switch_in_progress = 1;
     
     fb = fb_get();
     if (fb) {
@@ -365,9 +372,13 @@ static void console_switch_internal(int console_num) {
     console_irqrestore(flags);
 
     console_redraw_prepare(current_console);
-    if (!writer_thread_running) {
+    if (!writer_thread_running && !from_interrupt) {
         console_redraw_sync(current_console);
     }
+}
+
+static void console_switch_internal(int console_num) {
+    console_switch_internal_impl(console_num, 0);
 }
 
 void console_switch(int console_num) {
@@ -395,7 +406,7 @@ void console_switch_via_interrupt(int console_num) {
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
-    console_switch_internal(console_num);
+    console_switch_internal_impl(console_num, 1);
 }
 
 void console_process_pending(void) {
@@ -1310,10 +1321,17 @@ void console_writer_init(void) {
     if (writer_thread_running) return;
     
     extern task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
+    extern void lock_scheduler(void);
+    extern void unlock_scheduler(void);
+    extern void add_task_to_runqueue(task_t* new_task);
+    
     writer_thread = create_task(console_writer_thread, TASK_READY, false);
     if (writer_thread) {
         writer_thread->is_kernel_task = true;
         strcpy(writer_thread->name, "console_writer");
+        lock_scheduler();
+        add_task_to_runqueue(writer_thread);
+        unlock_scheduler();
     }
 }
 

@@ -109,11 +109,7 @@ static void serial_write_async(const char *buf, size_t len) {
 
 static void serial_write(const char *buf, size_t len) {
     if (!buf || len == 0) return;
-    if (interrupts_enabled()) {
-        serial_write_async(buf, len);
-    } else {
-        serial_write_polling(buf, len);
-    }
+    serial_write_async(buf, len);
 }
 
 static void serial_drain(uint32_t max_chars) {
@@ -210,26 +206,32 @@ static int kprint_dequeue(kprint_item_t *out) {
 }
 
 int kprint_write(int console_id, const char *buf, size_t len) {
+    size_t i;
+    int con_id_early;
+    int con_id;
+    size_t off;
+    uint32_t chunk;
+    
     if (!buf || len == 0) return 0;
 
     if (!console_is_initialized()) {
-        for (size_t i = 0; i < len; i++) terminal_putchar(buf[i]);
+        for (i = 0; i < len; i++) terminal_putchar(buf[i]);
         return (int)len;
     }
 
     if (!kprint_ready) {
-        int con_id_early = console_id;
+        con_id_early = console_id;
         if (con_id_early < 0 || con_id_early >= NUM_CONSOLES) con_id_early = 0;
         console_write_to(con_id_early, buf, len);
         return (int)len;
     }
 
-    int con_id = console_id;
+    con_id = console_id;
     if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
-    size_t off = 0;
+    off = 0;
     while (off < len) {
-        uint32_t chunk = (uint32_t)(len - off);
+        chunk = (uint32_t)(len - off);
         if (chunk >= (KPRINT_MAX_LEN - 1)) chunk = (KPRINT_MAX_LEN - 1);
 
         (void)kprint_try_enqueue((uint8_t)con_id, buf + off, chunk);
@@ -546,7 +548,7 @@ static void klog_task_main(void) {
             drained = 0;
             klog_item_t kit;
             while (drained < 4 && klog_dequeue(&kit) == 0) {
-                console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
+                kprint_serial_async(kit.msg, (size_t)kit.len);
                 drained++;
             }
             did += drained;

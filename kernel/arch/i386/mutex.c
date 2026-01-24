@@ -12,6 +12,17 @@ void mutex_init(mutex_t* m) {
 void mutex_lock(mutex_t* m) {
     if (!m) return;
 
+    extern int scheduler_initialized;
+    
+    if (!scheduler_initialized) {
+        while (m->locked) {
+            __asm__ __volatile__ ("pause");
+        }
+        m->locked = 1;
+        m->owner = 0;
+        return;
+    }
+
     while (1) {
         lock_scheduler();
         
@@ -48,6 +59,17 @@ void mutex_lock(mutex_t* m) {
 
 void mutex_unlock(mutex_t* m) {
     if (!m) return;
+
+    extern int scheduler_initialized;
+    
+    if (!scheduler_initialized) {
+        if (m->locked) {
+            m->locked = 0;
+            m->owner = 0;
+        }
+        return;
+    }
+
     lock_scheduler();
     if (!m->locked) {
         unlock_scheduler();

@@ -5,9 +5,9 @@ CC?=gcc
 LD:=$(HOST)-ld
 OBJCOPY:=$(HOST)-objcopy
 
-CFLAGS?=-O2 -g
+CFLAGS?=-Os -ffunction-sections -fdata-sections
 CPPFLAGS?=
-LDFLAGS?=
+LDFLAGS?=-Wl,--gc-sections -Wl,-s
 LIBS?=
 
 DESTDIR?=
@@ -20,6 +20,9 @@ CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra
 CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
+
+BUILD_TZ:=$(shell date +%z)
+CPPFLAGS:=$(CPPFLAGS) -DKERNEL_BUILD_TZ=\"$(BUILD_TZ)\"
 
 include lebconfig.mk
 

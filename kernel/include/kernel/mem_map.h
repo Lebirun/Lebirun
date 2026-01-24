@@ -1,13 +1,26 @@
 #ifndef MEM_MAP_H
 #define MEM_MAP_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 #define PAGE_SIZE 0x1000UL
-#define MAX_PHYSICAL_MEMORY 0x100000000ULL
-#define TOTAL_PAGES (MAX_PHYSICAL_MEMORY / PAGE_SIZE)
-#define BITMAP_BYTES (TOTAL_PAGES / 8)
+
+#define MAX_PHYSICAL_MEMORY_32BIT 0x100000000ULL
+#define MAX_PHYSICAL_MEMORY_PAE   0x10000000000ULL
+
+extern uint32_t pae_enabled;
+
+#define MAX_PHYSICAL_MEMORY (pae_enabled ? MAX_PHYSICAL_MEMORY_PAE : MAX_PHYSICAL_MEMORY_32BIT)
+#define TOTAL_PAGES_32BIT (MAX_PHYSICAL_MEMORY_32BIT / PAGE_SIZE)
+#define TOTAL_PAGES_PAE   0x1000000
+#define TOTAL_PAGES (pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT)
+#define BITMAP_BYTES_32BIT (TOTAL_PAGES_32BIT / 8)
+#define BITMAP_BYTES_PAE   (TOTAL_PAGES_PAE / 8)
+#define BITMAP_BYTES_MAX BITMAP_BYTES_PAE
 
 #define HEAP_START 0xD0000000
-#define HEAP_INITIAL_SIZE 0x100000
+#define HEAP_INITIAL_SIZE 0x40000
 #define HEAP_MAX_SIZE 0x10000000
 #define HEAP_MAGIC 0xDEADBEEF
 #define HEAP_MIN_BLOCK 16
@@ -21,9 +34,6 @@
 #define KMALLOC_ZERO      0x01         
 #define KMALLOC_NO_POISON 0x02       
 #define KMALLOC_SECURE    0x04        
-
-#include <stdint.h>
-#include <stddef.h>
 
 typedef struct {
     uint32_t flags;
@@ -94,7 +104,7 @@ typedef struct {
 
 extern mem_region_t memory_map[MAX_REGIONS];
 extern uint32_t num_regions;
-extern uint8_t pfa_bitmap[BITMAP_BYTES];
+extern uint8_t pfa_bitmap[BITMAP_BYTES_MAX];
 extern heap_t kernel_heap;
 
 #define MAX_RESERVED_REGIONS 8
@@ -126,10 +136,15 @@ void *pmm_alloc_pages(uint32_t num);
 void *pmm_alloc_low_page(void);
 void pfa_init(void);
 uint32_t pfa_alloc(void);
+uint64_t pfa_alloc64(void);
 uint32_t pfa_alloc_contiguous(uint32_t num_frames);
 void pfa_free(uint32_t phys_addr);
+void pfa_free64(uint64_t phys_addr);
 void pfa_free_contiguous(uint32_t phys_addr, uint32_t num_frames);
 uint32_t pfa_count_free(void);
+uint32_t pfa_get_total_ram_kb(void);
+uint32_t pfa_get_usable_ram_kb(void);
+uint32_t pfa_get_kernel_used_kb(void);
 void heap_init(void);
 void *kmalloc(size_t size);
 void *kmalloc_aligned(size_t size, uint32_t alignment);
@@ -161,6 +176,7 @@ void vmm_map_temp(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 void vmm_unmap_temp(uint32_t virt_addr);
 
 void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
+void vmm_map_page_in_pd64(uint32_t pd_phys, uint32_t virt_addr, uint64_t phys_addr, uint32_t flags);
 uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr);
 uint32_t *vmm_map_range_in_pd_tracked(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags, uint32_t *out_count);
 void vmm_map_range_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t size, uint32_t flags);
@@ -168,6 +184,7 @@ void vmm_copy_to_pd(uint32_t pd_phys, uint32_t dest_virt, const void *src, uint3
 void vmm_read_from_pd(uint32_t pd_phys, uint32_t src_virt, void *dest, uint32_t size);
 
 void vmm_temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
+void vmm_temp_map_raw64(uint32_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint32_t temp_virt);
 
 void pmm_zero_page_phys(uint32_t phys_addr);

@@ -49,6 +49,19 @@ static void serial_printf_dec(uint32_t val) {
     serial_puts(&buf[i+1]);
 }
 
+static void initrd_release_module(uint32_t start_phys, uint32_t end_phys) {
+    uint32_t start_page;
+    uint32_t end_page;
+    uint32_t frames;
+
+    start_page = start_phys & ~0xFFFu;
+    end_page = (end_phys + 0xFFFu) & ~0xFFFu;
+    if (end_page <= start_page) return;
+    frames = (end_page - start_page) / PAGE_SIZE;
+    if (frames == 0) return;
+    pfa_free_contiguous(start_page, frames);
+}
+
 
 void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
     if (initrd_should_log()) {
@@ -537,14 +550,14 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
     return initrd_vfs_root;
 }
 
-static vfs_fs_type_t initrd_fs_type = {
-    .name = "initrd",
-    .mount = initrd_vfs_do_mount,
-    .unmount = NULL,
-    .next = NULL
-};
+static vfs_fs_type_t initrd_fs_type;
 
 void initrd_vfs_register(void) {
+    initrd_fs_type.name = "initrd";
+    initrd_fs_type.mount = initrd_vfs_do_mount;
+    initrd_fs_type.unmount = NULL;
+    initrd_fs_type.next = NULL;
+
     vfs_register_fs(&initrd_fs_type);
     vfs_mount(NULL, "/initrd", "initrd");
 }
@@ -909,5 +922,6 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
     }
     
     kfree(rfiles);
+    initrd_release_module(mod_start_phys, mod_end_phys);
     printf("ROOTFS: Copied %u dirs, %u files (%u errors)\n", dirs_created, files_copied, errors);
 }

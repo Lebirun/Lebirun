@@ -8,7 +8,7 @@ INITRD_DIR = ../initrd
 NCURSES_DIR = ncurses
 SYSROOT_LIB = ../root/lib
 
-CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -m32 -O2 -nostdinc
+CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -m32 -Os -fomit-frame-pointer -nostdinc
 CPPFLAGS = -isystem $(LIBC_ABS)/leblibc/include -isystem $(LIBC_ABS)/leblibc/build-i386/obj/include -isystem $(LIBC_ABS)/leblibc/arch/i386 -isystem $(LIBC_ABS)/leblibc/arch/generic -I$(LIBC_ABS)/include -I$(LIBC_ABS)/src -I$(NCURSES_DIR)/include
 
 SO_CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fPIC -m32 -O0 -nostdinc -fvisibility=default
@@ -86,4 +86,5 @@ clean:
 	rm -f $(INITRD_DIR)/pong.bin
 	rm -f $(INITRD_DIR)/stdio_test.bin
 	rm -f $(SYSROOT_BIN)/lsh
+	rm -f $(SYSROOT_BIN)/sh
 	rm -f lsh.bin

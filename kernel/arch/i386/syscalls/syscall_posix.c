@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <kernel/pit.h>
+#include <kernel/debug.h>
 
 #define MAX_FDS TASK_MAX_FDS
 #define fd_table (current_task->fds)
@@ -420,66 +421,155 @@ static int sys_mprotect(int addr, const char *len_ptr, int prot) {
 }
 
 static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
-    uint32_t path_addr = (uint32_t)path_ptr;
-    if (!path_addr || path_addr >= 0xC0000000 || path_addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)path_addr;
+    registers_t *regs;
+    uint8_t *buf;
+    char **argv;
+    char **envp;
+    vfs_node_t *node;
+    uint32_t path_addr;
+    uint32_t argv_addr;
+    uint32_t envp_addr;
+    uint32_t size;
+    uint32_t read_len;
+    int argc;
+    int envc;
+    int result;
+    int i;
+    const char *path;
+
+    path_addr = (uint32_t)path_ptr;
+    if (!path_addr || path_addr >= 0xC0000000 || path_addr < 0x1000) {
+        return -EFAULT;
+    }
+    path = (const char *)path_addr;
     
-    uint32_t argv_addr = (uint32_t)argv_ptr;
-    uint32_t envp_addr = (uint32_t)envp_ptr;
     
-    vfs_node_t *node = vfs_namei(path);
-    if (!node) return -ENOENT;
-    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EACCES;
-    uint32_t size = node->length;
-    if (size == 0 || size > 0x1000000) return -ENOEXEC;
-    uint8_t *buf = (uint8_t *)kmalloc(size);
-    if (!buf) return -ENOMEM;
-    uint32_t read_len = vfs_read(node, 0, size, buf);
-    if (read_len != size) { kfree(buf); return -EIO; }
+    argv_addr = (uint32_t)argv_ptr;
+    envp_addr = (uint32_t)envp_ptr;
     
-    int argc = 0;
-    char **argv = NULL;
+    node = vfs_namei(path);
+    if (!node) {
+        return -ENOENT;
+    }
+    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
+        return -EACCES;
+    }
+    size = node->length;
+    if (size == 0) {
+        return -ENOEXEC;
+    }
+    
+    buf = (uint8_t *)kmalloc(size);
+    if (!buf) {
+        return -ENOMEM;
+    }
+    
+    read_len = vfs_read(node, 0, size, buf);
+    if (read_len != size) {
+        kfree(buf);
+        return -EIO;
+    }
+    
+    argc = 0;
+    argv = NULL;
     if (argv_addr) {
         uint32_t *argv_array = (uint32_t *)argv_addr;
-        while (argv_array[argc] && argc < 256) argc++;
+        while (argv_array[argc] && argc < 256) {
+            argc++;
+        }
         if (argc > 0) {
-            argv = (char **)kmalloc(argc * sizeof(char *));
-            if (!argv) { kfree(buf); return -ENOMEM; }
-            for (int i = 0; i < argc; i++) {
+            argv = (char **)kmalloc((argc + 1) * sizeof(char *));
+            if (!argv) {
+                kfree(buf);
+                return -ENOMEM;
+            }
+            for (i = 0; i < argc; i++) {
                 uint32_t str_addr = argv_array[i];
                 if (!str_addr || str_addr >= 0xC0000000 || str_addr < 0x1000) {
-                    kfree(argv); kfree(buf); return -EFAULT;
+                    kfree(argv);
+                    kfree(buf);
+                    return -EFAULT;
                 }
                 argv[i] = (char *)str_addr;
             }
+            argv[argc] = NULL;
         }
     }
+
+    if (argc == 0) {
+        argv = (char **)kmalloc(2 * sizeof(char *));
+        if (!argv) {
+            kfree(buf);
+            return -ENOMEM;
+        }
+        argv[0] = (char *)path_addr;
+        argv[1] = NULL;
+        argc = 1;
+    }
     
-    int envc = 0;
-    char **envp = NULL;
+    envc = 0;
+    envp = NULL;
     if (envp_addr) {
         uint32_t *envp_array = (uint32_t *)envp_addr;
-        while (envp_array[envc] && envc < 256) envc++;
+        while (envp_array[envc] && envc < 256) {
+            envc++;
+        }
         if (envc > 0) {
-            envp = (char **)kmalloc(envc * sizeof(char *));
-            if (!envp) { if (argv) kfree(argv); kfree(buf); return -ENOMEM; }
-            for (int i = 0; i < envc; i++) {
+            envp = (char **)kmalloc((envc + 1) * sizeof(char *));
+            if (!envp) {
+                if (argv) kfree(argv);
+                kfree(buf);
+                return -ENOMEM;
+            }
+            for (i = 0; i < envc; i++) {
                 uint32_t str_addr = envp_array[i];
                 if (!str_addr || str_addr >= 0xC0000000 || str_addr < 0x1000) {
-                    kfree(envp); if (argv) kfree(argv); kfree(buf); return -EFAULT;
+                    kfree(envp);
+                    if (argv) kfree(argv);
+                    kfree(buf);
+                    return -EFAULT;
                 }
                 envp[i] = (char *)str_addr;
             }
+            envp[envc] = NULL;
         }
     }
     
-    if (!fork_regs_ptr) { if (envp) kfree(envp); if (argv) kfree(argv); kfree(buf); return -EFAULT; }
+    regs = current_task->syscall_frame;
+    if (!regs) {
+        if (envp) kfree(envp);
+        if (argv) kfree(argv);
+        kfree(buf);
+        return -EFAULT;
+    }
     
-    int result = task_exec_with_args(buf, size, fork_regs_ptr, argc, argv, envc, envp);
+    result = task_exec_with_args(buf, size, regs, argc, argv, envc, envp);
     
     kfree(buf);
-    if (envp) kfree(envp);
-    if (argv) kfree(argv);
+    buf = NULL;
+    
+    
+    if (envp) {
+        kfree(envp);
+        envp = NULL;
+    }
+    
+    
+    if (argv) {
+        kfree(argv);
+        argv = NULL;
+    }
+    
+    
+    if (result == 0) {
+        syscall_set_exec_completed();
+        if (current_task) {
+            current_task->exec_completed = 1;
+        }
+        
+        __asm__ volatile ("" ::: "memory");
+    }
+    
     return result;
 }
 

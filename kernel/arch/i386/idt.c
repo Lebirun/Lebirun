@@ -64,9 +64,32 @@ extern void isr48(void);
 extern void isr128(void);
 
 volatile uint32_t tick_count = 0;
+static volatile int in_panic = 0;
 
 #define MAX_IRQ_HANDLERS 16
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS] = {0};
+
+static uint32_t panic_fault_addr = 0;
+static uint32_t panic_cr0_val = 0;
+static uint32_t panic_cr3_val = 0;
+static uint32_t panic_cr4_val = 0;
+
+static void serial_hex(uint32_t v) {
+    int i;
+    char c;
+    for (i = 7; i >= 0; i--) {
+        uint8_t nib = (v >> (i * 4)) & 0xF;
+        c = (nib < 10) ? ('0' + nib) : ('A' + nib - 10);
+        outb(0x3F8, c);
+    }
+}
+
+static void safe_panic_print(const char *s) {
+    while (*s) {
+        outb(0x3F8, *s);
+        s++;
+    }
+}
 
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
     if (irq < MAX_IRQ_HANDLERS) {
@@ -141,14 +164,50 @@ static const char* exception_messages[] = {
     "Triple Fault"
 };
 
+static int is_valid_kernel_ptr(uint32_t addr) {
+    if (addr < 0xC0000000) return 0;
+    if (addr >= 0xFFFF0000) return 0;
+    return 1;
+}
+
+static void serial_dump_memory(uint32_t addr, int count) {
+    int i;
+    uint32_t *ptr;
+    
+    if (!is_valid_kernel_ptr(addr)) return;
+    ptr = (uint32_t *)addr;
+    for (i = 0; i < count; i++) {
+        if (!is_valid_kernel_ptr((uint32_t)&ptr[i])) break;
+        safe_panic_print("  ");
+        serial_hex(addr + i * 4);
+        safe_panic_print(": ");
+        serial_hex(ptr[i]);
+        safe_panic_print("\n");
+    }
+}
+
+static int is_usermode_exception(registers_t *regs) {
+    if ((regs->cs & 0x3) == 3) return 1;
+    if (current_task && current_task->is_user) {
+        if (regs->eip < 0xC0000000) return 1;
+    }
+    return 0;
+}
+
 registers_t* interrupt_handler(registers_t* regs)
 {
+    uint32_t fault_addr;
+    uint32_t orig_cr3;
+    uint32_t kernel_cr3;
+    uint8_t access_type;
+    uint8_t irq;
+    int sig;
+
     if (regs->int_no < 32) {
         if (regs->int_no == 14) {
-            uint32_t fault_addr;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             
-            uint8_t access_type = 0;
+            access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
             else access_type |= VRING_PERM_READ;
             if (regs->err_code & 0x10) access_type |= VRING_PERM_EXEC;
@@ -165,116 +224,58 @@ registers_t* interrupt_handler(registers_t* regs)
                 }
             }
         }
+
+        if (is_usermode_exception(regs) && current_task && current_task->is_user && regs->int_no != 14) {
+            sig = 0;
+            switch (regs->int_no) {
+                case 0:  sig = 8;  break;
+                case 4:  sig = 8;  break;
+                case 5:  sig = 5;  break;
+                case 6:  sig = 4;  break;
+                case 7:  sig = 8;  break;
+                case 8:  sig = 6;  break;
+                case 10: sig = 11; break;
+                case 11: sig = 11; break;
+                case 12: sig = 11; break;
+                case 13: sig = 11; break;
+                case 16: sig = 8;  break;
+                case 19: sig = 8;  break;
+                default: sig = 6;  break;
+            }
+            printf("[KERNEL] User exception %d at EIP=0x%08X sig=%d\n",
+                   regs->int_no, regs->eip, sig);
+            
+            task_exit_deferred(128 + sig);
+            return schedule_from_irq(regs);
+        }
         
         if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
-            uint32_t fault_addr;
+            uint32_t actual_cr3;
+            uint32_t expected_pd;
+            uint32_t entry_phys;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
-            printf("User task %d page fault at 0x%08X (EIP=0x%08X) - killing task\n",
-                   current_task->pid, fault_addr, regs->eip);
-            printf("Regs: ESP=0x%08X EBP=0x%08X EAX=0x%08X EBX=0x%08X ECX=0x%08X EDX=0x%08X\n",
-                   regs->useresp, regs->ebp, regs->eax, regs->ebx, regs->ecx, regs->edx);
-            printf("      ESI=0x%08X EDI=0x%08X\n", regs->esi, regs->edi);
+            __asm__ ("movl %%cr3, %0" : "=r" (actual_cr3));
+            expected_pd = current_task->pd_phys;
+            printf("User PF at 0x%08X EIP=0x%08X err=0x%X\n", fault_addr, regs->eip, regs->err_code);
+            printf("  actual_cr3=0x%08X expected_pd=0x%08X exec_completed=%d\n", 
+                   actual_cr3, expected_pd, current_task->exec_completed);
+            
+            if (actual_cr3 != expected_pd) {
+                printf("  CR3 MISMATCH! Switching CR3 now...\n");
+                __asm__ volatile ("mov %0, %%cr3" : : "r"(expected_pd) : "memory");
+                
+                entry_phys = vmm_get_phys_in_pd(expected_pd, regs->eip & ~0xFFF);
+                printf("  After CR3 switch: entry_phys=0x%08X\n", entry_phys);
+                if (entry_phys) {
 
-            if (current_task && current_task->pd_phys) {
-                uint32_t eip_pd_idx = regs->eip >> 22;
-                uint32_t eip_pt_idx = (regs->eip >> 12) & 0x3FF;
-                uint32_t temp_pd = 0xF7000000;
-                uint32_t temp_pt = 0xF7001000;
-                uint32_t temp_stack = 0xF7002000;
-
-                vmm_temp_map_raw(temp_pd, current_task->pd_phys);
-                uint32_t *user_pd = (uint32_t *)temp_pd;
-                uint32_t pde = user_pd[eip_pd_idx];
-                printf("User EIP PDE[%u]=0x%08X\n", eip_pd_idx, pde);
-                if (pde & 1) {
-                    uint32_t pt_phys = pde & ~0xFFF;
-                    vmm_temp_map_raw(temp_pt, pt_phys);
-                    uint32_t *user_pt = (uint32_t *)temp_pt;
-                    uint32_t pte = user_pt[eip_pt_idx];
-                    printf("User EIP PTE[%u]=0x%08X\n", eip_pt_idx, pte);
-
-                    if (pte & 1) {
-                        uint32_t page_phys = pte & ~0xFFF;
-                        
-                        uint32_t temp_code = 0xF7003000;
-                        vmm_temp_map_raw(temp_code, page_phys);
-                        uint32_t code_offset = regs->eip & 0xFFF;
-                        printf("Instructions at EIP (0x%08X, offset 0x%X in page):\n", regs->eip, code_offset);
-                        for (int i = -8; i < 16; i++) {
-                            uint32_t off = (code_offset + i) & 0xFFF;
-                            if (i == 0) printf("[");
-                            printf("%02X", *((uint8_t*)(temp_code + off)));
-                            if (i == 0) printf("]");
-                            printf(" ");
-                        }
-                        printf("\n");
-                        vmm_temp_unmap_raw(temp_code);
-                        
-                        uint32_t stack_page_phys = 0;
-                        if ((regs->ebp & ~0xFFF) == (regs->eip & ~0xFFF)) {
-                            stack_page_phys = page_phys;
-                        } else {
-                            uint32_t stack_pd_idx = regs->ebp >> 22;
-                            uint32_t stack_pt_idx = (regs->ebp >> 12) & 0x3FF;
-                            uint32_t stack_pde = user_pd[stack_pd_idx];
-                            if (stack_pde & 1) {
-                                uint32_t stack_pt_phys = stack_pde & ~0xFFF;
-                                vmm_temp_map_raw(temp_pt, stack_pt_phys);
-                                uint32_t *stack_pt = (uint32_t *)temp_pt;
-                                uint32_t stack_pte = stack_pt[stack_pt_idx];
-                                if (stack_pte & 1) stack_page_phys = stack_pte & ~0xFFF;
-                                vmm_temp_unmap_raw(temp_pt);
-                            }
-                        }
-
-                        if (stack_page_phys) {
-                            vmm_temp_map_raw(temp_stack, stack_page_phys);
-                            uint32_t off = (regs->ebp + 4) & 0xFFF;
-                            uint32_t caller_ret = *((uint32_t *)(temp_stack + off));
-                            printf("Caller return address = 0x%08X\n", caller_ret);
-                            uint32_t off_fmt = (regs->ebp + 8) & 0xFFF;
-                            uint32_t fmt_arg = *((uint32_t *)(temp_stack + off_fmt));
-                            printf("Printf format arg = 0x%08X\n", fmt_arg);
-
-                            printf("Stack dump around EBP (addr=0x%08X):\n", regs->ebp);
-                            int start_off = -0x20;
-                            for (int i = start_off; i <= 0x20; i += 4) {
-                                uint32_t offw = (regs->ebp + i) & 0xFFF;
-                                uint32_t val = *((uint32_t *)(temp_stack + offw));
-                                printf("  [EBP%+04d] = 0x%08X\n", i, val);
-                            }
-
-                            vmm_temp_unmap_raw(temp_stack);
-                        } else {
-                            printf("Caller return address: stack page not present\n");
-                        }
-                        
-                        uint32_t esp_pd_idx = regs->useresp >> 22;
-                        uint32_t esp_pt_idx = (regs->useresp >> 12) & 0x3FF;
-                        uint32_t esp_pde = user_pd[esp_pd_idx];
-                        if (esp_pde & 1) {
-                            uint32_t esp_pt_phys = esp_pde & ~0xFFF;
-                            vmm_temp_map_raw(temp_pt, esp_pt_phys);
-                            uint32_t *esp_pt = (uint32_t *)temp_pt;
-                            uint32_t esp_pte = esp_pt[esp_pt_idx];
-                            vmm_temp_unmap_raw(temp_pt);
-                            if (esp_pte & 1) {
-                                uint32_t esp_page_phys = esp_pte & ~0xFFF;
-                                vmm_temp_map_raw(temp_stack, esp_page_phys);
-                                printf("Stack dump around ESP (addr=0x%08X):\n", regs->useresp);
-                                for (int i = 0; i <= 0x40; i += 4) {
-                                    uint32_t offw = (regs->useresp + i) & 0xFFF;
-                                    uint32_t val = *((uint32_t *)(temp_stack + offw));
-                                    printf("  [ESP+%04X] = 0x%08X\n", i, val);
-                                }
-                                vmm_temp_unmap_raw(temp_stack);
-                            }
-                        }
-                    }
-
-                    vmm_temp_unmap_raw(temp_pt);
+                    printf("  Retrying faulting instruction...\n");
+                    return regs;
                 }
-                vmm_temp_unmap_raw(temp_pd);
+            }
+            
+            {
+                uint32_t phys = vmm_get_phys_in_pd(current_task->pd_phys, fault_addr & ~0xFFF);
+                printf("  pd=0x%08X page_phys=0x%08X\n", current_task->pd_phys, phys);
             }
 
             task_exit_deferred(139);
@@ -282,82 +283,267 @@ registers_t* interrupt_handler(registers_t* regs)
         }
 
         if (regs->int_no == 14 && !(regs->err_code & 0x4) && current_task && current_task->is_user && current_task->syscall_frame) {
-            uint32_t fault_addr;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             if (fault_addr < 0xC0000000) {
-                printf("User task %d page fault in syscall at 0x%08X (EIP=0x%08X) - killing task\n",
-                       current_task->pid, fault_addr, regs->eip);
+                printf("User syscall PF at 0x%08X\n", fault_addr);
                 task_exit_deferred(139);
                 return schedule_from_irq(regs);
             }
         }
         
-        terminal_writestring(">>> TRAPPED INT 0x");
+        terminal_writestring(">>> INT 0x");
         print_hex(regs->int_no);
-        terminal_writestring(" | EIP=0x");
+        terminal_writestring(" EIP=0x");
         print_hex(regs->eip);
         terminal_writestring(" <<<\n");
     }
 
     if (regs->int_no < 32) {
-        terminal_writestring("\n\n!!! KERNEL PANIC !!!\n");
+        uint32_t *ebp_ptr;
+        int frame_count;
+
+        if (in_panic) {
+            safe_panic_print("\n!!! DOUBLE PANIC !!!");
+            safe_panic_print("\nINT=0x");
+            serial_hex(regs->int_no);
+            safe_panic_print(" EIP=0x");
+            serial_hex(regs->eip);
+            safe_panic_print(" ERR=0x");
+            serial_hex(regs->err_code);
+            if (regs->int_no == 14) {
+                __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+                safe_panic_print(" CR2=0x");
+                serial_hex(fault_addr);
+            }
+            safe_panic_print("\nHalted.\n");
+            for (;;) __asm__ ("cli; hlt");
+        }
+        in_panic = 1;
+
+        safe_panic_print("\n");
+        safe_panic_print("+===============================+\n");
+        safe_panic_print("|       !!! KERNEL PANIC !!!    |\n");
+        safe_panic_print("+===============================+\n");
+        safe_panic_print("| Exception: ");
+        if (regs->int_no < 32) {
+            safe_panic_print(exception_messages[regs->int_no]);
+        }
+        safe_panic_print("\n+-------------------------------+\n");
+        safe_panic_print("| EXCEPTION INFO                |\n");
+        safe_panic_print("+-------------------------------+\n");
+        safe_panic_print("  INT=0x");
+        serial_hex(regs->int_no);
+        safe_panic_print("  ERR=0x");
+        serial_hex(regs->err_code);
+        safe_panic_print("\n  EIP=0x");
+        serial_hex(regs->eip);
+        safe_panic_print("  CS=0x");
+        serial_hex(regs->cs);
+        safe_panic_print("\n");
+        safe_panic_print("+-------------------------------+\n");
+        safe_panic_print("| REGISTERS                     |\n");
+        safe_panic_print("+-------------------------------+\n");
+        safe_panic_print("  EAX=0x");
+        serial_hex(regs->eax);
+        safe_panic_print("  EBX=0x");
+        serial_hex(regs->ebx);
+        safe_panic_print("\n  ECX=0x");
+        serial_hex(regs->ecx);
+        safe_panic_print("  EDX=0x");
+        serial_hex(regs->edx);
+        safe_panic_print("\n  ESI=0x");
+        serial_hex(regs->esi);
+        safe_panic_print("  EDI=0x");
+        serial_hex(regs->edi);
+        safe_panic_print("\n  EBP=0x");
+        serial_hex(regs->ebp);
+        safe_panic_print("  ESP=0x");
+        serial_hex(regs->esp);
+        safe_panic_print("\n+-------------------------------+\n");
+        safe_panic_print("| SEGMENT REGISTERS             |\n");
+        safe_panic_print("+-------------------------------+\n");
+        safe_panic_print("  DS=0x");
+        serial_hex(regs->ds);
+        safe_panic_print("  ES=0x");
+        serial_hex(regs->es);
+        safe_panic_print("\n  FS=0x");
+        serial_hex(regs->fs);
+        safe_panic_print("  GS=0x");
+        serial_hex(regs->gs);
+        safe_panic_print("\n  EFLAGS=0x");
+        serial_hex(regs->eflags);
+        safe_panic_print("\n");
+
+        if (regs->int_no == 14) {
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+            panic_fault_addr = fault_addr;
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(panic_cr3_val));
+            __asm__ volatile ("mov %%cr0, %0" : "=r"(panic_cr0_val));
+            __asm__ volatile ("mov %%cr4, %0" : "=r"(panic_cr4_val));
+            safe_panic_print("+-------------------------------+\n");
+            safe_panic_print("| PAGE FAULT INFO               |\n");
+            safe_panic_print("+-------------------------------+\n");
+            safe_panic_print("  CR2 (fault addr)=0x");
+            serial_hex(fault_addr);
+            safe_panic_print("\n  CR3=0x");
+            serial_hex(panic_cr3_val);
+            safe_panic_print("  CR0=0x");
+            serial_hex(panic_cr0_val);
+            safe_panic_print("\n  CR4=0x");
+            serial_hex(panic_cr4_val);
+            safe_panic_print("\n  Flags: ");
+            if (regs->err_code & 0x1) safe_panic_print("[Present] ");
+            else safe_panic_print("[NotPresent] ");
+            if (regs->err_code & 0x2) safe_panic_print("[Write] ");
+            else safe_panic_print("[Read] ");
+            if (regs->err_code & 0x4) safe_panic_print("[User] ");
+            else safe_panic_print("[Kernel] ");
+            if (regs->err_code & 0x8) safe_panic_print("[RSVD] ");
+            if (regs->err_code & 0x10) safe_panic_print("[InstrFetch] ");
+            safe_panic_print("\n");
+        }
+
+        safe_panic_print("\n+-------------------------------+\n");
+        safe_panic_print("| STACK TRACE (EBP CHAIN)       |\n");
+        safe_panic_print("+-------------------------------+\n");
+        ebp_ptr = (uint32_t *)regs->ebp;
+        frame_count = 0;
+        while (ebp_ptr && frame_count < 10) {
+            if (!is_valid_kernel_ptr((uint32_t)ebp_ptr)) break;
+            if (!is_valid_kernel_ptr((uint32_t)&ebp_ptr[1])) break;
+            safe_panic_print("  #");
+            serial_hex(frame_count);
+            safe_panic_print("  EBP=0x");
+            serial_hex((uint32_t)ebp_ptr);
+            safe_panic_print("  RET=0x");
+            serial_hex(ebp_ptr[1]);
+            safe_panic_print("\n");
+            ebp_ptr = (uint32_t *)ebp_ptr[0];
+            frame_count++;
+        }
+
+        if (is_valid_kernel_ptr(regs->esp)) {
+            safe_panic_print("\n+-------------------------------+\n");
+            safe_panic_print("| STACK DUMP (8 DWORDS @ ESP)   |\n");
+            safe_panic_print("+-------------------------------+\n");
+            serial_dump_memory(regs->esp, 8);
+        }
+
+        if (regs->int_no == 14 && is_valid_kernel_ptr(panic_fault_addr & ~0xFFF)) {
+            safe_panic_print("\n+-------------------------------+\n");
+            safe_panic_print("| MEMORY NEAR FAULT ADDRESS     |\n");
+            safe_panic_print("+-------------------------------+\n");
+            serial_dump_memory(panic_fault_addr & ~0xF, 4);
+        }
+
+        safe_panic_print("\n+===============================+\n");
+        safe_panic_print("|        SYSTEM HALTED          |\n");
+        safe_panic_print("+===============================+\n");
+
+        terminal_writestring("\n====== KERNEL PANIC ======\n");
         terminal_writestring("Exception: ");
         terminal_writestring(exception_messages[regs->int_no]);
-        terminal_writestring(" (vector 0x");
-        print_hex(regs->int_no);
-        terminal_writestring(")\n");
-        terminal_writestring("Error code: 0x");
-        print_hex(regs->err_code);
-        terminal_writestring("\nEIP = 0x");
+        terminal_writestring("\nEIP=0x");
         print_hex(regs->eip);
-        if (regs->int_no == 13) { 
-            terminal_writestring("\nSegment registers: DS=0x");
-            print_hex(regs->ds);
-            terminal_writestring(" ES=0x");
-            print_hex(regs->es);
-            terminal_writestring(" FS=0x");
-            print_hex(regs->fs);
-            terminal_writestring(" GS=0x");
-            print_hex(regs->gs);
-            terminal_writestring("\n");
-        }
+        terminal_writestring(" ERR=0x");
+        print_hex(regs->err_code);
         if (regs->int_no == 14) {
-            uint32_t fault_addr;
-            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
-            terminal_writestring("\nPage fault at address 0x");
-            print_hex(fault_addr);
-            uint32_t cur_cr3;
-            __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
-            terminal_writestring("\nCR3 = 0x"); print_hex(cur_cr3);
-            if (current_task) {
-                terminal_writestring(" current_task PD = 0x"); print_hex(current_task->pd_phys);
-                terminal_writestring(" current_task pid = "); print_hex(current_task->pid);
-            }
-
-            terminal_writestring("\n-- PD/PT dump for fault address (user PD) --\n");
-            if (current_task && current_task->pd_phys) vmm_dump_for_pd(current_task->pd_phys, fault_addr & ~0xFFF);
-            terminal_writestring("\n-- PD/PT dump for fault address (kernel) --\n");
-            vmm_dump_for_pd(vmm_get_kernel_cr3(), fault_addr & ~0xFFF);
-            if (fault_addr >= 0xF7000000 && fault_addr < 0xF7003000) {
-                terminal_writestring("\n-- Temp mapping diagnostics --\n");
-                dump_map_debug();
-                dump_pd_pt_for_virt(fault_addr & ~0xFFF);
-            }
+            terminal_writestring("\nCR2=0x");
+            print_hex(panic_fault_addr);
+            terminal_writestring(" CR3=0x");
+            print_hex(panic_cr3_val);
         }
-        terminal_writestring("\n\nSystem halted.");
-        for (;;) __asm__ ("hlt");
+        terminal_writestring("\nEAX=0x");
+        print_hex(regs->eax);
+        terminal_writestring(" EBX=0x");
+        print_hex(regs->ebx);
+        terminal_writestring(" ECX=0x");
+        print_hex(regs->ecx);
+        terminal_writestring("\n===========================\n");
+
+        for (;;) __asm__ ("cli; hlt");
     } else {
         if (regs->int_no == 48) {
             return schedule_from_irq(regs);
         } else if (regs->int_no == 128) {
+            uint32_t old_cr3;
+            uint32_t new_cr3;
+            uint32_t *old_pages;
+            uint32_t old_pages_count;
+            uint32_t old_pd;
+            int i;
+            
             do_syscall(regs);
+            
+            if (current_task && current_task->exec_completed) {
+                if (debugMode && debugLevel >= 3) printf("IDT: exec completed, preparing to switch CR3\n");
+                if (debugMode && debugLevel >= 3) printf("IDT: exec regs: eip=0x%08X useresp=0x%08X cs=0x%X ss=0x%X\n",
+                       regs->eip, regs->useresp, regs->cs, regs->ss);
+                
+                if (regs->useresp < 0x1000 || regs->useresp >= 0xC0000000) {
+                    if (debugMode && debugLevel >= 1) printf("IDT: CRITICAL: useresp=0x%08X is invalid!\n", regs->useresp);
+                    __asm__ volatile ("cli; hlt");
+                }
+                
+                old_cr3 = 0;
+                __asm__ volatile ("mov %%cr3, %0" : "=r"(old_cr3));
+                new_cr3 = current_task->pd_phys;
+                
+                if (new_cr3 && old_cr3 != new_cr3) {
+                    __asm__ volatile ("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
+                    __asm__ volatile (
+                        "movl %%cr3, %%eax\n\t"
+                        "movl %%eax, %%cr3\n\t"
+                        ::: "eax", "memory"
+                    );
+                    if (debugMode && debugLevel >= 3) printf("IDT: exec completed, switched CR3 from 0x%08X to 0x%08X\n", old_cr3, new_cr3);
+                }
+                if (current_task) {
+                    current_task->cr3 = new_cr3;
+                }
+                
+                old_pages = current_task->exec_old_pages;
+                old_pages_count = current_task->exec_old_pages_count;
+                old_pd = current_task->exec_old_pd;
+                
+                if (old_pages) {
+                    kfree(old_pages);
+                }
+                
+                if (old_pd) {
+                    vmm_free_page_directory(old_pd);
+                }
+                
+                current_task->exec_old_pages = NULL;
+                current_task->exec_old_pages_count = 0;
+                current_task->exec_old_pd = 0;
+                current_task->exec_completed = 0;
+            }
+            
             if (current_task && current_task->state == TASK_DEAD) {
                 return schedule_from_irq(regs);
+            }
+            if ((regs->cs & 0x3) == 0x3) {
+                if (regs->eip < 0x1000 || regs->eip >= 0xC0000000) {
+                    printf("IDT: CRITICAL: syscall return eip=0x%08X is invalid!\n", regs->eip);
+                    printf("IDT: regs=%p cs=0x%X useresp=0x%08X ss=0x%X eflags=0x%08X\n",
+                           regs, regs->cs, regs->useresp, regs->ss, regs->eflags);
+                    printf("IDT: eax=0x%X ebx=0x%X ecx=0x%X edx=0x%X\n",
+                           regs->eax, regs->ebx, regs->ecx, regs->edx);
+                    __asm__ volatile ("cli; hlt");
+                }
+
+                if (regs->useresp < 0x1000 || regs->useresp >= 0xC0000000) {
+                    printf("IDT: CRITICAL: useresp=0x%08X invalid for user return!\n", regs->useresp);
+                    printf("IDT: regs=%p eip=0x%08X cs=0x%X ss=0x%X\n",
+                           regs, regs->eip, regs->cs, regs->ss);
+                    __asm__ volatile ("cli; hlt");
+                }
             }
             return regs;
         }
 
-        uint8_t irq = regs->int_no - 32;
+        irq = regs->int_no - 32;
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
         
@@ -367,9 +553,8 @@ registers_t* interrupt_handler(registers_t* regs)
             wake_sleeping_tasks();
             reap_dead_tasks();
             extern void fb_tick(void);
-            uint32_t orig_cr3;
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            kernel_cr3 = vmm_get_kernel_cr3();
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
             }
@@ -387,9 +572,8 @@ registers_t* interrupt_handler(registers_t* regs)
 
             regs = schedule_from_irq(regs);
         } else if (irq == 1) {
-            uint32_t orig_cr3;
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            kernel_cr3 = vmm_get_kernel_cr3();
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
             }
@@ -398,9 +582,8 @@ registers_t* interrupt_handler(registers_t* regs)
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
             }
         } else if (irq < MAX_IRQ_HANDLERS && irq_handlers[irq]) {
-            uint32_t orig_cr3;
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            uint32_t kernel_cr3 = vmm_get_kernel_cr3();
+            kernel_cr3 = vmm_get_kernel_cr3();
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
             }
@@ -458,11 +641,25 @@ static struct {
 
 void idt_set_gate(uint8_t n, uintptr_t handler)
 {
-    idt[n].base_lo = handler & 0xFFFF;
-    idt[n].base_hi = (handler >> 16) & 0xFFFF;
+    uint16_t lo;
+    uint16_t hi;
+    
+    lo = handler & 0xFFFF;
+    hi = (handler >> 16) & 0xFFFF;
+    
+    idt[n].base_lo = lo;
+    idt[n].base_hi = hi;
     idt[n].sel     = 0x08;
     idt[n].always0 = 0;
     idt[n].flags   = 0x8E;
+    
+    if (idt[n].base_lo != lo || idt[n].base_hi != hi) {
+        outb(0x3F8, 'I');
+        outb(0x3F8, 'D');
+        outb(0x3F8, 'T');
+        outb(0x3F8, 'C');
+        outb(0x3F8, '\n');
+    }
 }
 
 void idt_set_gate_flags(uint8_t n, uintptr_t handler, uint8_t flags)
@@ -476,6 +673,8 @@ void idt_set_gate_flags(uint8_t n, uintptr_t handler, uint8_t flags)
 
 void idt_init(void)
 {
+    uint8_t i;
+    
     idtp.base = (uint32_t)&idt[0];
 
     memset(&idt, 0, sizeof(idt));
@@ -533,6 +732,17 @@ void idt_init(void)
     idt_set_gate(48, (uint32_t)isr48);
 
     idt_set_gate_flags(128, (uint32_t)isr128, 0xEE);
+
+    for (i = 0; i < 49; i++) {
+        if (i == 48) break;
+        if (idt[i].base_lo == 0 && idt[i].base_hi == 0) {
+            outb(0x3F8, 'N');
+            outb(0x3F8, 'U');
+            outb(0x3F8, 'L');
+            outb(0x3F8, 'L');
+            outb(0x3F8, '\n');
+        }
+    }
 
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 

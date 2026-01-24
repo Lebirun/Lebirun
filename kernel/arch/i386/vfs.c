@@ -3,6 +3,8 @@
 #include <kernel/mutex.h>
 #include <kernel/task.h>
 #include <kernel/debug.h>
+#include <kernel/mem_map.h>
+#include <kernel/ramfs.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -19,9 +21,11 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index);
 static vfs_node_t *root_finddir(vfs_node_t *node, const char *name);
 
 void vfs_init(void) {
+    int i;
+    
     mutex_init(&vfs_lock);
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         mounts[i].in_use = 0;
         mounts[i].path[0] = '\0';
         mounts[i].device[0] = '\0';
@@ -29,7 +33,7 @@ void vfs_init(void) {
         mounts[i].fs_type = NULL;
     }
     
-    for (int i = 0; i < VFS_MAX_FDS; i++) {
+    for (i = 0; i < VFS_MAX_FDS; i++) {
         fd_table[i].in_use = 0;
         fd_table[i].node = NULL;
         fd_table[i].offset = 0;
@@ -51,13 +55,27 @@ void vfs_init(void) {
 }
 
 int vfs_register_fs(vfs_fs_type_t *fs) {
-    if (!fs || !fs->name) {
+    vfs_fs_type_t *cur;
+    
+    if (!fs) {
+        printf("[VFS] ERROR: NULL filesystem struct\n");
         return -1;
     }
     
-    vfs_fs_type_t *cur = registered_fs;
+    if (!fs->name) {
+        printf("[VFS] ERROR: Filesystem has NULL name\n");
+        return -1;
+    }
+    
+    if ((uintptr_t)fs->name < 0x1000 || (uintptr_t)fs->name > 0xFFFFFFFF) {
+        printf("[VFS] ERROR: Invalid name pointer: %p\n", (void*)fs->name);
+        return -1;
+    }
+    
+    cur = registered_fs;
     while (cur) {
         if (strcmp(cur->name, fs->name) == 0) {
+            printf("[VFS] WARNING: Filesystem '%s' already registered\n", fs->name);
             return -1;
         }
         cur = cur->next;
@@ -84,9 +102,31 @@ int vfs_unregister_fs(const char *name) {
     return -1;
 }
 
+static int vfs_fs_type_valid(vfs_fs_type_t *fs) {
+    uintptr_t p;
+    uintptr_t n;
+    if (!fs) return 0;
+    p = (uintptr_t)fs;
+    if (p < 0x1000) return 0;
+    n = (uintptr_t)fs->name;
+    if (n < 0x1000) return 0;
+    return 1;
+}
+
 vfs_fs_type_t *vfs_find_fs(const char *name) {
-    vfs_fs_type_t *cur = registered_fs;
+    vfs_fs_type_t *cur;
+    int iterations = 0;
+    if (!name) return NULL;
+    cur = registered_fs;
     while (cur) {
+        if (++iterations > 100) {
+            printf("[VFS] ERROR: vfs_find_fs loop detected after %d iterations!\n", iterations);
+            return NULL;
+        }
+        if (!vfs_fs_type_valid(cur)) {
+            printf("[VFS] ERROR: Invalid fs_type at %p (iter %d)\n", (void*)cur, iterations);
+            return NULL;
+        }
         if (strcmp(cur->name, name) == 0) {
             return cur;
         }
@@ -96,18 +136,38 @@ vfs_fs_type_t *vfs_find_fs(const char *name) {
 }
 
 int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
+    vfs_node_t *existing;
+    int slot;
+    int i;
+    vfs_fs_type_t *fs;
+    vfs_node_t *root;
+    size_t cp;
+    const char *end;
+    const char *base;
+    size_t n;
+    size_t di;
+    
+    ramfs_debug_check_root("vfs_mount entry");
+    
     if (!mountpoint || !fs_type) {
         return -1;
     }
     
-    vfs_fs_type_t *fs = vfs_find_fs(fs_type);
-    if (!fs) {
-        printf("[VFS] Unknown filesystem type: %s\n", fs_type);
+    fs = vfs_find_fs(fs_type);
+    if (!fs || !vfs_fs_type_valid(fs)) {
         return -1;
     }
     
-    int slot = -1;
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    if (!fs->mount) {
+        return -1;
+    }
+    
+    if ((uintptr_t)fs->mount < 0x1000) {
+        return -1;
+    }
+    
+    slot = -1;
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) {
             slot = i;
             break;
@@ -119,23 +179,28 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
         return -1;
     }
     
-    vfs_node_t *root = NULL;
-    if (fs->mount) {
-        root = fs->mount(device, mountpoint);
-        if (!root) {
-            printf("[VFS] Failed to mount %s on %s\n", fs_type, mountpoint);
-            return -1;
-        }
+    root = fs->mount(device, mountpoint);
+    ramfs_debug_check_root("after fs->mount");
+    if (!root) {
+        return -1;
+    }
+    
+    ramfs_debug_check_root("before vfs_namei");
+    existing = vfs_namei(mountpoint);
+    ramfs_debug_check_root("after vfs_namei");
+    if (existing) {
+        root->flags |= VFS_MOUNTPOINT;
+        root->ptr = existing;
     }
 
     mounts[slot].in_use = 1;
-    size_t cp = 0;
+    cp = 0;
     while (mountpoint[cp] && cp < VFS_MAX_PATH - 1) { mounts[slot].path[cp] = mountpoint[cp]; cp++; }
     mounts[slot].path[cp] = '\0';
     mounts[slot].root = root;
     mounts[slot].fs_type = fs;
     if (device && device[0] != '\0') {
-        size_t di = 0;
+        di = 0;
         while (device[di] && di < VFS_MAX_PATH - 1) {
             mounts[slot].device[di] = device[di];
             ++di;
@@ -145,28 +210,32 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
         mounts[slot].device[0] = '\0';
     }
     
-        if (root) {
-            root->parent = vfs_root;
-
-            if (mountpoint[0] == '/' && !(mountpoint[0] == '/' && mountpoint[1] == '\0')) {
-                const char *end = mountpoint + strlen(mountpoint);
-                while (end > mountpoint + 1 && end[-1] == '/') {
-                    end--;
-                }
-                const char *base = end;
-                while (base > mountpoint && base[-1] != '/') {
-                    base--;
-                }
-                if (base < end) {
-                    size_t n = (size_t)(end - base);
-                    if (n >= VFS_MAX_NAME) {
-                        n = VFS_MAX_NAME - 1;
-                    }
-                    memcpy(root->name, base, n);
-                    root->name[n] = '\0';
-                }
+    root->parent = vfs_root;
+    
+    if (mountpoint[0] == '/' && !(mountpoint[0] == '/' && mountpoint[1] == '\0')) {
+        end = mountpoint + strlen(mountpoint);
+        while (end > mountpoint + 1 && end[-1] == '/') {
+            end--;
+        }
+        base = end;
+        while (base > mountpoint && base[-1] != '/') {
+            base--;
+        }
+        if (base < end) {
+            n = (size_t)(end - base);
+            if (n >= VFS_MAX_NAME) {
+                n = VFS_MAX_NAME - 1;
+            }
+            memcpy(root->name, base, n);
+            root->name[n] = '\0';
+            
+            existing = root_finddir(vfs_root, root->name);
+            if (existing) {
+                root->ptr = existing;
+                root->flags |= VFS_MOUNTPOINT;
             }
         }
+    }
     
     printf("[VFS] Mounted %s on %s (type: %s)\n", 
            device ? device : "(none)", mountpoint, fs_type);
@@ -175,9 +244,11 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
 }
 
 int vfs_unmount(const char *mountpoint) {
+    int i;
+    
     if (!mountpoint) return -1;
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             if (mounts[i].fs_type && mounts[i].fs_type->unmount) {
                 mounts[i].fs_type->unmount(mounts[i].root);
@@ -253,7 +324,13 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     if (!node || !name) return NULL;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY && (node->flags & VFS_MOUNTPOINT) == 0) return NULL;
-    if (node->finddir) return node->finddir(node, name);
+    if (node->finddir) {
+        if ((uintptr_t)node->finddir < 0x1000) {
+            return NULL;
+        }
+        vfs_node_t *result = node->finddir(node, name);
+        return result;
+    }
     return NULL;
 }
 
@@ -279,13 +356,18 @@ int vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) {
 }
 
 static vfs_mount_t *find_mount_for_path(const char *path) {
-    vfs_mount_t *best = NULL;
-    size_t best_len = 0;
+    vfs_mount_t *best;
+    size_t best_len;
+    int i;
+    size_t len;
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    best = NULL;
+    best_len = 0;
+    
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) continue;
         
-        size_t len = strlen(mounts[i].path);
+        len = strlen(mounts[i].path);
         if (strncmp(path, mounts[i].path, len) == 0) {
             if (path[len] == '\0' || path[len] == '/' || 
                 (len == 1 && mounts[i].path[0] == '/')) {
@@ -301,28 +383,34 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
 }
 
 static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
+    size_t i;
+    const char *cwd;
+    size_t cwd_len;
+    size_t path_len;
+    size_t pos;
+    
     if (!path || !resolved || size == 0) return -1;
     
     if (path[0] == '/') {
-        size_t i = 0;
+        i = 0;
         while (path[i] && i < size - 1) { resolved[i] = path[i]; i++; }
         resolved[i] = '\0';
         return 0;
     }
     
-    const char *cwd = "/";
+    cwd = "/";
     if (current_task && current_task->cwd[0]) {
         cwd = current_task->cwd;
     }
     
-    size_t cwd_len = 0;
+    cwd_len = 0;
     while (cwd[cwd_len]) cwd_len++;
     
-    size_t path_len = 0;
+    path_len = 0;
     while (path[path_len]) path_len++;
     
-    size_t pos = 0;
-    for (size_t i = 0; i < cwd_len && pos < size - 1; i++) {
+    pos = 0;
+    for (i = 0; i < cwd_len && pos < size - 1; i++) {
         resolved[pos++] = cwd[i];
     }
 
@@ -330,7 +418,7 @@ static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
         resolved[pos++] = '/';
     }
     
-    for (size_t i = 0; i < path_len && pos < size - 1; i++) {
+    for (i = 0; i < path_len && pos < size - 1; i++) {
         resolved[pos++] = path[i];
     }
     resolved[pos] = '\0';
@@ -339,20 +427,28 @@ static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
 }
 
 static void vfs_normalize_path(char *path) {
+    char *src;
+    char *dst;
+    char *components[64];
+    int count;
+    char *comp_start;
+    size_t comp_len;
+    int i;
+    char *comp;
+    
     if (!path || path[0] != '/') return;
 
-    char *src = path;
-    char *dst = path;
-    char *components[64];
-    int count = 0;
+    src = path;
+    dst = path;
+    count = 0;
 
     while (*src) {
         while (*src == '/') src++;
         if (*src == '\0') break;
 
-        char *comp_start = src;
+        comp_start = src;
         while (*src && *src != '/') src++;
-        size_t comp_len = src - comp_start;
+        comp_len = src - comp_start;
 
         if (comp_len == 1 && comp_start[0] == '.') {
             continue;
@@ -369,8 +465,8 @@ static void vfs_normalize_path(char *path) {
 
     dst = path;
     *dst++ = '/';
-    for (int i = 0; i < count; i++) {
-        char *comp = components[i];
+    for (i = 0; i < count; i++) {
+        comp = components[i];
         while (*comp) *dst++ = *comp++;
         if (i < count - 1) *dst++ = '/';
     }
@@ -396,9 +492,12 @@ static int vfs_build_symlink_path(char *out, size_t outsz,
                                   const char *base_dir,
                                   const char *target,
                                   const char *rest_raw) {
+    char tmp[VFS_MAX_PATH];
+    size_t len;
+    size_t i;
+    
     if (!out || outsz == 0 || !base_dir || !target || !rest_raw) return -1;
 
-    char tmp[VFS_MAX_PATH];
     tmp[0] = '\0';
 
     if (target[0] == '/') {
@@ -413,9 +512,9 @@ static int vfs_build_symlink_path(char *out, size_t outsz,
     }
 
     if (rest_raw[0] != '\0') {
-        size_t len = strlen(tmp);
+        len = strlen(tmp);
         if (len + strlen(rest_raw) + 1 >= sizeof(tmp)) return -1;
-        for (size_t i = 0; rest_raw[i] && len + i + 1 < sizeof(tmp); i++) {
+        for (i = 0; rest_raw[i] && len + i + 1 < sizeof(tmp); i++) {
             tmp[len + i] = rest_raw[i];
             tmp[len + i + 1] = '\0';
         }
@@ -512,7 +611,10 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         while (*rest_non_slash == '/') rest_non_slash++;
         int has_more = (*rest_non_slash != '\0');
 
+         DPRINTF4("[VFS] vfs_namei: looking up component '%s' in node=%p (%s)", 
+               component, (void*)node, node->name);
         vfs_node_t *next = vfs_finddir(node, component);
+         DPRINTF4("[VFS] vfs_namei: vfs_finddir returned %p", (void*)next);
         if (!next) return NULL;
 
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
@@ -545,7 +647,8 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 }
 
 vfs_node_t *vfs_namei(const char *path) {
-    return vfs_namei_internal(path, 1, 0);
+    vfs_node_t *result = vfs_namei_internal(path, 1, 0);
+    return result;
 }
 
 vfs_node_t *vfs_namei_nofollow(const char *path) {
@@ -590,34 +693,40 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
 
 static int vfs_split_path(const char *path, char *parent_buf, size_t parent_size, 
                           char *name_buf, size_t name_size) {
+    int len;
+    int last_slash;
+    int i;
+    int j;
+    int k;
+    
     if (!path || !parent_buf || !name_buf) return -1;
     
-    int len = 0;
+    len = 0;
     while (path[len]) len++;
     
-    int last_slash = -1;
-    for (int i = 0; i < len; i++) {
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
         if (path[i] == '/') last_slash = i;
     }
     
     if (last_slash < 0) {
         parent_buf[0] = '/';
         parent_buf[1] = '\0';
-        int j = 0;
+        j = 0;
         while (path[j] && j < (int)name_size - 1) { name_buf[j] = path[j]; j++; }
         name_buf[j] = '\0';
     } else if (last_slash == 0) {
         parent_buf[0] = '/';
         parent_buf[1] = '\0';
-        int j = 0;
-        for (int i = 1; i < len && j < (int)name_size - 1; i++, j++) name_buf[j] = path[i];
+        j = 0;
+        for (i = 1; i < len && j < (int)name_size - 1; i++, j++) name_buf[j] = path[i];
         name_buf[j] = '\0';
     } else {
-        int i = 0;
+        i = 0;
         while (i < last_slash && i < (int)parent_size - 1) { parent_buf[i] = path[i]; i++; }
         parent_buf[i] = '\0';
-        int j = 0;
-        for (int k = last_slash + 1; k < len && j < (int)name_size - 1; k++, j++) name_buf[j] = path[k];
+        j = 0;
+        for (k = last_slash + 1; k < len && j < (int)name_size - 1; k++, j++) name_buf[j] = path[k];
         name_buf[j] = '\0';
     }
     
@@ -627,21 +736,26 @@ static int vfs_split_path(const char *path, char *parent_buf, size_t parent_size
 int vfs_open_path(const char *path, int flags) {
     if (!path) return -1;
     
-    vfs_node_t *node = vfs_namei(path);
+    vfs_node_t *node;
+    char parent_path[VFS_MAX_PATH];
+    char filename[VFS_MAX_NAME];
+    vfs_node_t *parent;
+    int ret;
+    int fd;
+    int i;
+    
+    node = vfs_namei(path);
     
     if (!node && (flags & VFS_O_CREAT)) {
-        char parent_path[VFS_MAX_PATH];
-        char filename[VFS_MAX_NAME];
-        
         if (vfs_split_path(path, parent_path, sizeof(parent_path), 
                            filename, sizeof(filename)) < 0) {
             return -1;
         }
         
-        vfs_node_t *parent = vfs_namei(parent_path);
+        parent = vfs_namei(parent_path);
         if (!parent) return -1;
         
-        int ret = vfs_create(parent, filename, VFS_FILE);
+        ret = vfs_create(parent, filename, VFS_FILE);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
         } else if (ret == 0) {
@@ -659,8 +773,8 @@ int vfs_open_path(const char *path, int flags) {
     
     mutex_lock(&vfs_lock);
     
-    int fd = -1;
-    for (int i = 3; i < VFS_MAX_FDS; i++) {
+    fd = -1;
+    for (i = 3; i < VFS_MAX_FDS; i++) {
         if (!fd_table[i].in_use) {
             fd = i;
             break;
@@ -800,7 +914,9 @@ int vfs_readdir_fd(int fd, dirent_t *entry, uint32_t index) {
 }
 
 vfs_node_t *vfs_get_root(void) {
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    int i;
+    
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0) {
             return mounts[i].root;
         }
@@ -809,16 +925,22 @@ vfs_node_t *vfs_get_root(void) {
 }
 
 int vfs_get_mount_count(void) {
-    int count = 0;
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    int count;
+    int i;
+    
+    count = 0;
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use) count++;
     }
     return count;
 }
 
 vfs_mount_t *vfs_get_mount(int index) {
-    int count = 0;
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    int count;
+    int i;
+    
+    count = 0;
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use) {
             if (count == index) return &mounts[i];
             count++;
@@ -828,8 +950,10 @@ vfs_mount_t *vfs_get_mount(int index) {
 }
 
 void vfs_list_mounts(void) {
+    int i;
+    
     printf("[VFS] Mount table:\n");
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use) {
             printf("  %s -> %s\n", 
                    mounts[i].path,
@@ -839,16 +963,21 @@ void vfs_list_mounts(void) {
 }
 
 static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
+    uint32_t count;
+    int i;
+    int j;
+    const char *path;
+    
     (void)node;
     
-    uint32_t count = 0;
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    count = 0;
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, "/") != 0) {
             if (count == index) {
-                const char *path = mounts[i].path;
+                path = mounts[i].path;
                 if (path[0] == '/') path++;
                 
-                int j = 0;
+                j = 0;
                 while (path[j] && path[j] != '/' && j < VFS_MAX_NAME - 1) {
                     root_dirent.name[j] = path[j];
                     j++;
@@ -863,7 +992,7 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
         }
     }
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
             if (mounts[i].root->readdir) {
                 return mounts[i].root->readdir(mounts[i].root, index - count);
@@ -876,33 +1005,47 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
+    ramfs_debug_check_root("root_finddir entry");
+    char search_path[VFS_MAX_PATH];
+    size_t _ci;
+    int i;
+    size_t len;
+    vfs_node_t *found;
+    
     (void)node;
     
-    char search_path[VFS_MAX_PATH];
     search_path[0] = '/';
-    size_t _ci = 0;
+    _ci = 0;
     while (name[_ci] && _ci < VFS_MAX_PATH - 2) { search_path[1 + _ci] = name[_ci]; _ci++; }
     search_path[1 + _ci] = '\0';
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) continue;
         
         if (strcmp(mounts[i].path, search_path) == 0) {
             return mounts[i].root;
         }
         
-        size_t len = strlen(search_path);
+        len = strlen(search_path);
         if (strncmp(mounts[i].path, search_path, len) == 0 &&
             (mounts[i].path[len] == '/' || mounts[i].path[len] == '\0')) {
             return mounts[i].root;
         }
     }
     
-    for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) continue;
         if (strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
-            if (mounts[i].root->finddir) {
-                vfs_node_t *found = mounts[i].root->finddir(mounts[i].root, name);
+            vfs_node_t *root = mounts[i].root;
+            ramfs_debug_check_root("root_finddir before calling finddir");
+            if ((uintptr_t)root < 0x1000) {
+                return NULL;
+            }
+            if (root->finddir) {
+                if ((uintptr_t)root->finddir < 0x1000) {
+                    return NULL;
+                }
+                found = root->finddir(root, name);
                 if (found) return found;
             }
             break;

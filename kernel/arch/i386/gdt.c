@@ -90,10 +90,18 @@ static void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access,
 extern void gdt_flush(uint32_t);
 
 void gdt_init(void) {
+    int i;
+    uint32_t gdt_addr;
+    uint16_t cs_selector;
+    uint16_t ds_selector;
+    uint16_t tss_selector;
+    
+    gdt_addr = (uint32_t)&gdt;
+    
     gdtp.limit = (sizeof(gdt_entry_t) * 8) - 1;
-    gdtp.base  = (uint32_t)&gdt;
+    gdtp.base  = gdt_addr;
 
-    for (int i = 0; i < 8; i++) {
+    for (i = 0; i < 8; i++) {
         gdt[i].base_low    = 0;
         gdt[i].base_mid    = 0;
         gdt[i].base_high   = 0;
@@ -117,8 +125,24 @@ void gdt_init(void) {
 
     asm volatile ("lgdt %0" : : "m"(gdtp) : "memory");
 
-    gdt_flush(0x10);
+    cs_selector = 0x08;
+    ds_selector = 0x10;
+    gdt_flush(ds_selector);
 
-    uint16_t tss_selector = 0x28;
+    tss_selector = 0x28;
     asm volatile ("ltr %w0" : : "r"(tss_selector) : "memory");
+    
+    uint16_t test_cs;
+    uint16_t test_ds;
+    asm volatile ("mov %%cs, %0" : "=r"(test_cs));
+    asm volatile ("mov %%ds, %0" : "=r"(test_ds));
+    if (test_cs != cs_selector || test_ds != ds_selector) {
+        outb(0x3F8, 'G');
+        outb(0x3F8, 'D');
+        outb(0x3F8, 'T');
+        outb(0x3F8, 'E');
+        outb(0x3F8, 'R');
+        outb(0x3F8, 'R');
+        outb(0x3F8, '\n');
+    }
 }
