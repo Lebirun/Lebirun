@@ -471,7 +471,6 @@ registers_t* interrupt_handler(registers_t* regs)
             uint32_t *old_pages;
             uint32_t old_pages_count;
             uint32_t old_pd;
-            int i;
             
             do_syscall(regs);
             

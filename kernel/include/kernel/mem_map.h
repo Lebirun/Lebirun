@@ -19,6 +19,8 @@ extern uint32_t pae_enabled;
 #define BITMAP_BYTES_PAE   (TOTAL_PAGES_PAE / 8)
 #define BITMAP_BYTES_MAX BITMAP_BYTES_PAE
 
+extern uint32_t total_pages_managed;
+
 #define HEAP_START 0xD0000000
 #define HEAP_INITIAL_SIZE 0x40000
 #define HEAP_MAX_SIZE 0x10000000
