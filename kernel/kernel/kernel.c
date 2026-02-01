@@ -24,6 +24,7 @@
 #include <kernel/drivers/net/net.h>
 #include <kernel/vring.h>
 #include <kernel/about.h>
+#include <kernel/panic.h>
 #include "launch_user.h"
 
 #ifndef CONFIG_DEBUG_MODE

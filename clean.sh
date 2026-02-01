@@ -37,6 +37,7 @@ rm -f root/bin/cres
 rm -f root/bin/df
 rm -f root/bin/free
 rm -f root/bin/uname
+rm -f root/bin/date
 rm -f userprog/coreutils/*.bin
 find userprog/coreutils -type f -name '*.o' -delete
 rm -f userprog/lsh/lsh

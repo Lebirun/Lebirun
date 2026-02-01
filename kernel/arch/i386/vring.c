@@ -5,6 +5,7 @@
 #include <kernel/common.h>
 #include <kernel/task.h>
 #include <kernel/io.h>
+#include <kernel/panic.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -363,52 +364,34 @@ bool vring_check_access(uint8_t minor, uint32_t addr, uint32_t size, uint8_t acc
 }
 
 void vring_panic_forbidden(uint8_t minor, uint32_t addr, uint8_t access_type) {
-    asm volatile("cli");
+    char reason_buf[256];
+    char *p = reason_buf;
+    int i, len;
     
-    terminal_writestring("\n\n!!! VIRTUAL RING VIOLATION - KERNEL PANIC !!!\n");
-    terminal_writestring("Ring 0.");
-    char minor_buf[4];
-    minor_buf[0] = '0' + (minor % 10);
-    minor_buf[1] = '\0';
-    terminal_writestring(minor_buf);
+    p += sprintf(p, "Virtual Ring Violation - Ring 0.");
+    p += sprintf(p, "%d", minor);
     
     if (subrings[minor].name) {
-        terminal_writestring(" (");
-        terminal_writestring(subrings[minor].name);
-        terminal_writestring(")");
+        p += sprintf(p, " (%s)", subrings[minor].name);
     }
     
-    terminal_writestring(" attempted forbidden memory access!\n");
-    terminal_writestring("Address: 0x");
-    print_hex(addr);
-    terminal_writestring("\nAccess type: ");
+    p += sprintf(p, " forbidden access at 0x%08X ", addr);
     
-    if (access_type & VRING_PERM_READ) terminal_writestring("READ ");
-    if (access_type & VRING_PERM_WRITE) terminal_writestring("WRITE ");
-    if (access_type & VRING_PERM_EXEC) terminal_writestring("EXEC ");
+    if (access_type & VRING_PERM_READ) p += sprintf(p, "READ ");
+    if (access_type & VRING_PERM_WRITE) p += sprintf(p, "WRITE ");
+    if (access_type & VRING_PERM_EXEC) p += sprintf(p, "EXEC ");
     
-    terminal_writestring("\n\nAllowed regions for this subring:\n");
     vring_t *ring = vring_get(minor);
     if (ring) {
-        for (uint32_t i = 0; i < ring->region_count; i++) {
-            terminal_writestring("  [");
-            print_hex(ring->allowed_regions[i].start);
-            terminal_writestring(" - ");
-            print_hex(ring->allowed_regions[i].end);
-            terminal_writestring("] perms=");
-            char perm_buf[4] = "---";
-            if (ring->allowed_regions[i].permissions & VRING_PERM_READ) perm_buf[0] = 'R';
-            if (ring->allowed_regions[i].permissions & VRING_PERM_WRITE) perm_buf[1] = 'W';
-            if (ring->allowed_regions[i].permissions & VRING_PERM_EXEC) perm_buf[2] = 'X';
-            terminal_writestring(perm_buf);
-            terminal_writestring("\n");
+        p += sprintf(p, "\nAllowed regions: ");
+        for (uint32_t i = 0; i < ring->region_count && i < 3; i++) {
+            p += sprintf(p, "[0x%08X-0x%08X] ", 
+                ring->allowed_regions[i].start,
+                ring->allowed_regions[i].end);
         }
     }
     
-    terminal_writestring("\nSystem halted.\n");
-    for (;;) {
-        asm volatile("hlt");
-    }
+    kernel_panic(reason_buf, NULL);
 }
 
 void kproc_init(void) {

@@ -383,15 +383,28 @@ static int sys_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
 extern volatile uint32_t tick_count;
 #define pit_ticks tick_count
 
-static uint32_t boot_time = 1735000000;
+static uint32_t boot_time = 0;
+static uint32_t boot_tick_count_posix = 0;
 
 static int sys_clock_gettime(int clock_id, const char *tp_ptr, int unused) {
+    uint32_t tp_addr;
+    struct kernel_timespec *ts;
+    uint32_t ticks;
+    uint32_t elapsed_ticks;
+    uint32_t ms;
+    
     (void)unused;
-    uint32_t tp_addr = (uint32_t)(uintptr_t)tp_ptr;
+    if (boot_time == 0) {
+        extern uint32_t rtc_get_time(void);
+        boot_time = rtc_get_time();
+        boot_tick_count_posix = tick_count;
+    }
+    tp_addr = (uint32_t)(uintptr_t)tp_ptr;
     if (!tp_addr || tp_addr >= 0xC0000000 || tp_addr < 0x1000) return -1;
-    struct kernel_timespec *ts = (struct kernel_timespec *)tp_addr;
-    uint32_t ticks = pit_ticks;
-    uint32_t ms = (ticks * 1000) / pit_freq;
+    ts = (struct kernel_timespec *)tp_addr;
+    ticks = pit_ticks;
+    elapsed_ticks = ticks - boot_tick_count_posix;
+    ms = (elapsed_ticks * 1000) / pit_freq;
     ts->tv_sec = boot_time + ms / 1000;
     ts->tv_nsec = (ms % 1000) * 1000000;
     (void)clock_id;
@@ -399,12 +412,24 @@ static int sys_clock_gettime(int clock_id, const char *tp_ptr, int unused) {
 }
 
 static int sys_gettimeofday(int tv_ptr, const char *tz_ptr, int unused) {
+    uint32_t tv_addr;
+    struct kernel_timeval *tv;
+    uint32_t ticks;
+    uint32_t elapsed_ticks;
+    uint32_t ms;
+    
     (void)tz_ptr; (void)unused;
-    uint32_t tv_addr = (uint32_t)tv_ptr;
+    if (boot_time == 0) {
+        extern uint32_t rtc_get_time(void);
+        boot_time = rtc_get_time();
+        boot_tick_count_posix = tick_count;
+    }
+    tv_addr = (uint32_t)tv_ptr;
     if (!tv_addr || tv_addr >= 0xC0000000 || tv_addr < 0x1000) return -1;
-    struct kernel_timeval *tv = (struct kernel_timeval *)tv_addr;
-    uint32_t ticks = pit_ticks;
-    uint32_t ms = (ticks * 1000) / pit_freq;
+    tv = (struct kernel_timeval *)tv_addr;
+    ticks = pit_ticks;
+    elapsed_ticks = ticks - boot_tick_count_posix;
+    ms = (elapsed_ticks * 1000) / pit_freq;
     tv->tv_sec = boot_time + ms / 1000;
     tv->tv_usec = (ms % 1000) * 1000;
     return 0;
