@@ -2,6 +2,25 @@ title "Lebirun"
 desc "Hobby Operating System/Kernel"
 
 subcategory "Debug" {
-    item type=bool name="Debug Mode" default=enable id=debugmode alias="DEBUG_MODE" help="Enables debug mode"
-    item type=int name="Debug Verbosity" default=2 min=0 max=5 id=debugverbosity alias="DEBUG_VERBOSITY" help="Sets the verbosity level of debug mode"
+    subcategory "Memory" can-toggle=enable {
+        item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
+    }
+    subcategory "Process/Task" can-toggle=enable {
+        item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"
+    }
+    subcategory "Filesystem" can-toggle=enable {
+        item type=bool name="VFS Debug" default=disable id=DEBUG_VFS help="Debug VFS operations"
+        item type=bool name="RAMFS Debug" default=disable id=DEBUG_RAMFS help="Debug RAMFS operations"
+        item type=bool name="InitRD Debug" default=disable id=DEBUG_INITRD help="Debug InitRD operations"
+        item type=bool name="Ext4 Debug" default=disable id=DEBUG_FS_EXT4 help="Debug Ext4 filesystem"
+        item type=bool name="Other FS Debug" default=disable id=DEBUG_FS_OTHER help="Debug other filesystems (procfs, devfs, overlayfs, squashfs)"
+    }
+    subcategory "System" can-toggle=enable {
+        item type=bool name="ELF Debug" default=disable id=DEBUG_ELF help="Debug ELF loading"
+        item type=bool name="Syscall Debug" default=disable id=DEBUG_SYSCALL help="Debug system call handling"
+        item type=bool name="IDT Debug" default=disable id=DEBUG_IDT help="Debug interrupt handling"
+    }
+    subcategory "Drivers" can-toggle=enable {
+        item type=bool name="Driver Debug" default=disable id=DEBUG_DRIVER help="Debug device drivers (AHCI, keyboard, etc.)"
+    }
 }

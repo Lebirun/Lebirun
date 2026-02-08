@@ -50,9 +50,9 @@
 #define SHUT_WR   1
 #define SHUT_RDWR 2
 
-#define MAX_SOCKETS 32
-#define SOCKET_BUF_SIZE 2048
-#define MAX_BACKLOG 8
+#define MAX_SOCKETS 8
+#define SOCKET_BUF_SIZE 512
+#define MAX_BACKLOG 2
 
 typedef unsigned int socklen_t;
 typedef int ssize_t;

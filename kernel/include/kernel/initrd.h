@@ -15,7 +15,7 @@
 #define INITRD_PERM_EXEC  0x01
 
 #define INITRD_MAX_FDS 16
-#define INITRD_MAX_PATH 256
+#define INITRD_MAX_PATH 128
 
 typedef struct {
     uint32_t magic;

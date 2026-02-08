@@ -6,6 +6,32 @@
 heap_t kernel_heap;
 
 #define CANARY_OVERHEAD (sizeof(uint32_t) * 2)
+#define HEAP_USE_DEMAND_PAGING 1
+
+#define EARLY_HEAP_SIZE (4 * 1024)
+static uint8_t early_heap_buffer[EARLY_HEAP_SIZE] __attribute__((aligned(4096)));
+static uint32_t early_heap_offset = 0;
+static int main_heap_initialized = 0;
+
+static void *early_kmalloc(size_t size) {
+    void *ptr;
+
+    size = (size + 15) & ~15;
+    if (early_heap_offset + size > EARLY_HEAP_SIZE) return NULL;
+    ptr = &early_heap_buffer[early_heap_offset];
+    memset(ptr, 0, size);
+    early_heap_offset += size;
+    return ptr;
+}
+
+int is_early_heap_ptr(void *ptr) {
+    uint32_t addr;
+
+    if (!ptr) return 0;
+    addr = (uint32_t)ptr;
+    return (addr >= (uint32_t)early_heap_buffer &&
+            addr < (uint32_t)early_heap_buffer + EARLY_HEAP_SIZE);
+}
 
 static inline uint32_t *get_head_canary(heap_block_t *block) {
     return (uint32_t *)((uint8_t *)block + sizeof(heap_block_t));
@@ -30,9 +56,14 @@ static void set_canaries(heap_block_t *block) {
 }
 
 int heap_check_canaries(void *ptr) {
-    if (!ptr) return -1;
+    heap_block_t *block;
+    uint32_t head;
+    uint32_t tail;
     
-    heap_block_t *block = get_block_from_ptr(ptr);
+    if (!ptr) return -1;
+    if (is_early_heap_ptr(ptr)) return 0;
+    
+    block = get_block_from_ptr(ptr);
     
     if (block->magic != HEAP_MAGIC) {
         printf("heap_check_canaries: bad magic 0x%08X at block 0x%08X\n", 
@@ -40,8 +71,8 @@ int heap_check_canaries(void *ptr) {
         return -1;
     }
     
-    uint32_t head = *get_head_canary(block);
-    uint32_t tail = *get_tail_canary(block);
+    head = *get_head_canary(block);
+    tail = *get_tail_canary(block);
     
     if (head != HEAP_CANARY_HEAD) {
         printf("HEAP CORRUPTION: Head canary corrupted at 0x%08X (expected 0x%08X, got 0x%08X)\n",
@@ -60,11 +91,15 @@ int heap_check_canaries(void *ptr) {
 }
 
 int heap_validate_ptr(void *ptr) {
+    heap_block_t *block;
+    uint32_t block_addr;
+    
     if (!ptr) return -1;
+    if (is_early_heap_ptr(ptr)) return 0;
     
-    heap_block_t *block = get_block_from_ptr(ptr);
+    block = get_block_from_ptr(ptr);
     
-    uint32_t block_addr = (uint32_t)block;
+    block_addr = (uint32_t)block;
     if (block_addr < kernel_heap.start_addr || 
         block_addr >= kernel_heap.end_addr) {
         printf("heap_validate_ptr: block 0x%08X outside heap bounds\n", block_addr);
@@ -89,8 +124,11 @@ static void poison_memory(void *ptr, size_t size, uint8_t pattern) {
 }
 
 static heap_block_t *find_best_fit(size_t size) {
-    heap_block_t *best = NULL;
-    heap_block_t *current = kernel_heap.free_list;
+    heap_block_t *best;
+    heap_block_t *current;
+    
+    best = NULL;
+    current = kernel_heap.free_list;
 
     while (current) {
         if (current->magic != HEAP_MAGIC) {
@@ -113,12 +151,15 @@ static heap_block_t *find_best_fit(size_t size) {
 }
 
 static void split_block(heap_block_t *block, size_t size) {
+    size_t remaining;
+    heap_block_t *new_block;
+    
     if (block->size < size + sizeof(heap_block_t) + HEAP_MIN_BLOCK) return;
 
-    size_t remaining = block->size - size - sizeof(heap_block_t);
+    remaining = block->size - size - sizeof(heap_block_t);
 
     if (remaining >= HEAP_MIN_BLOCK) {
-        heap_block_t *new_block = (heap_block_t *)((uint8_t *)block + sizeof(heap_block_t) + size);
+        new_block = (heap_block_t *)((uint8_t *)block + sizeof(heap_block_t) + size);
         new_block->magic = HEAP_MAGIC;
         new_block->size = remaining;
         new_block->alloc_size = 0;
@@ -136,9 +177,14 @@ static void split_block(heap_block_t *block, size_t size) {
 }
 
 static void coalesce_free_blocks(heap_block_t *block) {
+    heap_block_t *next;
+    heap_block_t *prev;
+    uint32_t block_end;
+    uint32_t prev_end;
+    
     if (block->next && block->next->is_free) {
-        heap_block_t *next = block->next;
-        uint32_t block_end = (uint32_t)block + sizeof(heap_block_t) + block->size;
+        next = block->next;
+        block_end = (uint32_t)block + sizeof(heap_block_t) + block->size;
         if (block_end == (uint32_t)next) {
             block->size += sizeof(heap_block_t) + next->size;
             block->next = next->next;
@@ -147,13 +193,13 @@ static void coalesce_free_blocks(heap_block_t *block) {
             }
             next->magic = 0xDEAD0001;
         } else {
-            DPRINTF3("coalesce: skip non-adjacent next (block_end=0x%08X next=0x%08X)\n", block_end, (uint32_t)next);
+            DEBUG_MEMORY("coalesce: skip non-adjacent next (block_end=0x%08X next=0x%08X)\n", block_end, (uint32_t)next);
         }
     }
 
     if (block->prev && block->prev->is_free) {
-        heap_block_t *prev = block->prev;
-        uint32_t prev_end = (uint32_t)prev + sizeof(heap_block_t) + prev->size;
+        prev = block->prev;
+        prev_end = (uint32_t)prev + sizeof(heap_block_t) + prev->size;
         if (prev_end == (uint32_t)block) {
             prev->size += sizeof(heap_block_t) + block->size;
             prev->next = block->next;
@@ -161,18 +207,45 @@ static void coalesce_free_blocks(heap_block_t *block) {
                 block->next->prev = prev;
             }
             block->magic = 0xDEAD0002;
+            block = prev;
         } else {
-            DPRINTF3("coalesce: skip non-adjacent prev (prev_end=0x%08X block=0x%08X)\n", prev_end, (uint32_t)block);
+            DEBUG_MEMORY("coalesce: skip non-adjacent prev (prev_end=0x%08X block=0x%08X)\n", prev_end, (uint32_t)block);
         }
     }
+
+#if HEAP_USE_DEMAND_PAGING
+    {
+        uint32_t region_start;
+        uint32_t region_end;
+        uint32_t first_page;
+        uint32_t last_page;
+        uint32_t pg;
+
+        region_start = (uint32_t)block + sizeof(heap_block_t);
+        region_end = (uint32_t)block + sizeof(heap_block_t) + block->size;
+
+        first_page = (region_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        last_page = region_end & ~(PAGE_SIZE - 1);
+
+        for (pg = first_page; pg < last_page; pg += PAGE_SIZE) {
+            demand_decommit_page(pg);
+        }
+    }
+#endif
 }
 
 extern int heap_map_page(uint32_t virt_addr);
 
+static int heap_reserve_virtual(uint32_t virt_start, uint32_t size) {
+#if HEAP_USE_DEMAND_PAGING
+    return demand_reserve_range(virt_start, size);
+#else
+    return 0;
+#endif
+}
+
 static int heap_expand(uint32_t new_end) {
-    uint32_t addr;
     
-    DPRINTF4("heap_expand: request new_end=0x"); DEBUG_HEX4(new_end); DPRINTF4("\n");
     if (new_end > kernel_heap.max_addr) {
         new_end = kernel_heap.max_addr;
     }
@@ -181,26 +254,26 @@ static int heap_expand(uint32_t new_end) {
 
     if (new_end <= kernel_heap.end_addr) return 0;
 
+#if HEAP_USE_DEMAND_PAGING
+    if (heap_reserve_virtual(kernel_heap.end_addr, new_end - kernel_heap.end_addr) < 0) {
+        printf("heap_expand: Failed to reserve virtual range\n");
+        return -1;
+    }
+#else
     for (addr = kernel_heap.end_addr; addr < new_end; addr += PAGE_SIZE) {
         if (heap_map_page(addr) < 0) {
             printf("heap_expand: Failed to map page at 0x%08X\n", addr);
             return -1;
         }
     }
+#endif
 
     kernel_heap.end_addr = new_end;
     kernel_heap.total_size = new_end - kernel_heap.start_addr;
-    DPRINTF("heap_expand: new end=0x%08X\n", kernel_heap.end_addr);
     return 0;
 }
 
 void heap_init(void) {
-    uint32_t *pd;
-    uint32_t pd_idx;
-    void *pt_page;
-    uint32_t pt_addr;
-    uint32_t *pt;
-    heap_block_t *initial_block;
     
     kernel_heap.start_addr = HEAP_START;
     kernel_heap.end_addr = HEAP_START;
@@ -209,50 +282,68 @@ void heap_init(void) {
     kernel_heap.total_size = 0;
     kernel_heap.used_size = 0;
 
-    heap_expand(HEAP_START + HEAP_INITIAL_SIZE);
+    demand_paging_init();
 
-    extern uint32_t pae_enabled;
-    if (!pae_enabled) {
-        pd = (uint32_t *)0xFFFFF000;
-        pd_idx = HEAP_START >> 22;
-        if (!(pd[pd_idx] & 1)) {
-            pt_page = pmm_alloc_low_page();
-            if (!pt_page) {
-                pt_page = pmm_alloc_page();
-            }
-            if (!pt_page) {
-                printf("heap_init: Failed to allocate low page for heap PDE!\n");
-            } else {
-                pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
-                pt_addr = 0xFFC00000 + (pd_idx << 12);
-                __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
-                pt = (uint32_t *)pt_addr;
-                memset(pt, 0, PAGE_SIZE);
-                printf("heap_init: PDE[%u] created for heap (PDE=0x%08X)\n", pd_idx, pd[pd_idx]);
+    #if HEAP_USE_DEMAND_PAGING
+        if (heap_reserve_virtual(HEAP_START, HEAP_INITIAL_SIZE) < 0) {
+            printf("heap_init: Failed to reserve initial virtual range\n");
+        }
+        
+        kernel_heap.end_addr = HEAP_START;
+        kernel_heap.total_size = 0;
+        kernel_heap.free_list = NULL;
+    #else
+        heap_expand(HEAP_START + HEAP_INITIAL_SIZE);
+        
+        extern uint32_t pae_enabled;
+        if (!pae_enabled) {
+            pd = (uint32_t *)0xFFFFF000;
+            pd_idx = HEAP_START >> 22;
+            if (!(pd[pd_idx] & 1)) {
+                pt_page = pmm_alloc_low_page();
+                if (!pt_page) {
+                    pt_page = pmm_alloc_page();
+                }
+                if (!pt_page) {
+                    printf("heap_init: Failed to allocate low page for heap PDE!\n");
+                } else {
+                    pd[pd_idx] = ((uint32_t)pt_page & ~0xFFF) | 3;
+                    pt_addr = 0xFFC00000 + (pd_idx << 12);
+                    __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
+                    pt = (uint32_t *)pt_addr;
+                    memset(pt, 0, PAGE_SIZE);
+                    printf("heap_init: PDE[%u] created for heap (PDE=0x%08X)\n", pd_idx, pd[pd_idx]);
+                }
             }
         }
-    }
 
-    initial_block = (heap_block_t *)HEAP_START;
-    initial_block->magic = HEAP_MAGIC;
-    initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
-    initial_block->alloc_size = 0;
-    initial_block->flags = 0;
-    initial_block->is_free = 1;
-    initial_block->next = NULL;
-    initial_block->prev = NULL;
+        initial_block = (heap_block_t *)HEAP_START;
+        initial_block->magic = HEAP_MAGIC;
+        initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
+        initial_block->alloc_size = 0;
+        initial_block->flags = 0;
+        initial_block->is_free = 1;
+        initial_block->next = NULL;
+        initial_block->prev = NULL;
 
-    kernel_heap.free_list = initial_block;
+        kernel_heap.free_list = initial_block;
+    #endif
 
-    printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [with canary protection]\n",
+    slab_init();
+
+    main_heap_initialized = 1;
+
+    printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
            kernel_heap.total_size / 1024);
+    printf("Early heap used: %u / %u bytes\n", early_heap_offset, EARLY_HEAP_SIZE);
 }
 
 void *kmalloc(size_t size) {
     size_t orig_size;
     size_t total_size;
     heap_block_t *block;
+    heap_block_t *initial_block;
     uint32_t old_end;
     uint32_t needed;
     uint32_t new_end;
@@ -265,12 +356,25 @@ void *kmalloc(size_t size) {
     heap_block_t *prev;
     heap_block_t *cur;
     void *ptr;
+    size_t max_slab;
     
     if (size == 0) return NULL;
+
+    if (!main_heap_initialized) {
+        return early_kmalloc(size);
+    }
     
     if (size > SIZE_MAX - CANARY_OVERHEAD - 7) {
         printf("kmalloc: size overflow detected\n");
         return NULL;
+    }
+
+    max_slab = slab_max_size();
+    if (size <= max_slab) {
+        ptr = slab_alloc(size);
+        if (ptr) {
+            return ptr;
+        }
     }
 
     orig_size = size;
@@ -281,10 +385,34 @@ void *kmalloc(size_t size) {
 
     if (!block) {
         old_end = kernel_heap.end_addr;
+        
+        if (!kernel_heap.free_list) {
+            if (old_end == HEAP_START) {
+                if (heap_expand(HEAP_START + HEAP_INITIAL_SIZE) < 0) {
+                    printf("kmalloc: Initial heap_expand failed\n");
+                    return NULL;
+                }
+                old_end = kernel_heap.end_addr;
+                
+                initial_block = (heap_block_t *)HEAP_START;
+                initial_block->magic = HEAP_MAGIC;
+                initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
+                initial_block->alloc_size = 0;
+                initial_block->flags = 0;
+                initial_block->is_free = 1;
+                initial_block->next = NULL;
+                initial_block->prev = NULL;
+                kernel_heap.free_list = initial_block;
+                
+                block = find_best_fit(total_size);
+                if (block) goto alloc_found;
+            }
+        }
+        
         needed = total_size + sizeof(heap_block_t) + PAGE_SIZE;
         new_end = old_end + needed;
 
-        DPRINTF("kmalloc: expanding to new_end=0x%08X\n", new_end);
+        DEBUG_MEMORY("kmalloc: expanding to new_end=0x%08X\n", new_end);
         if (new_end > kernel_heap.max_addr) {
             printf("kmalloc: Heap exhausted\n");
             return NULL;
@@ -320,7 +448,6 @@ void *kmalloc(size_t size) {
 
             new_block = (heap_block_t *)old_end;
             new_block_size = kernel_heap.end_addr - old_end - sizeof(heap_block_t);
-            DPRINTF("kmalloc: new_block at 0x"); if (debugMode) print_hex((uint32_t)new_block); DPRINTF("\n");
             new_block->magic = HEAP_MAGIC;
             new_block->size = new_block_size;
             new_block->alloc_size = 0;
@@ -356,6 +483,8 @@ void *kmalloc(size_t size) {
         }
     }
 
+alloc_found:
+
     split_block(block, total_size);
 
     block->is_free = 0;
@@ -367,9 +496,6 @@ void *kmalloc(size_t size) {
     
     ptr = get_user_ptr(block);
 
-    DPRINTF4("kmalloc: alloc size=%u (total=%u) block=0x%08X ptr=0x%08X\n", 
-             (uint32_t)orig_size, (uint32_t)total_size, (uint32_t)block, (uint32_t)ptr);
-
     if (((uintptr_t)ptr & 0x3) != 0) {
         printf("kmalloc: WARNING - returned pointer not 4-byte aligned: 0x%08X\n", (uint32_t)ptr);
         heap_verify();
@@ -379,6 +505,9 @@ void *kmalloc(size_t size) {
 }
 
 void *ksafe_alloc(size_t size, uint32_t flags) {
+    void *ptr;
+    heap_block_t *block;
+    
     if (size == 0) return NULL;
     
     if (size > SIZE_MAX - CANARY_OVERHEAD - 7) {
@@ -386,10 +515,14 @@ void *ksafe_alloc(size_t size, uint32_t flags) {
         return NULL;
     }
     
-    void *ptr = kmalloc(size);
+    ptr = kmalloc(size);
     if (!ptr) return NULL;
+
+    if (is_early_heap_ptr(ptr)) {
+        return ptr;
+    }
     
-    heap_block_t *block = get_block_from_ptr(ptr);
+    block = get_block_from_ptr(ptr);
     block->flags = flags;
     
     if (flags & KMALLOC_ZERO) {
@@ -404,6 +537,8 @@ void *ksafe_alloc(size_t size, uint32_t flags) {
 }
 
 void *kcalloc(size_t nmemb, size_t size) {
+    size_t total;
+    
     if (nmemb == 0 || size == 0) return NULL;
     
     if (nmemb > SIZE_MAX / size) {
@@ -412,11 +547,16 @@ void *kcalloc(size_t nmemb, size_t size) {
         return NULL;
     }
     
-    size_t total = nmemb * size;
+    total = nmemb * size;
     return ksafe_alloc(total, KMALLOC_ZERO);
 }
 
 void *kmalloc_aligned(size_t size, uint32_t alignment) {
+    size_t alloc_size;
+    void *ptr;
+    uintptr_t addr;
+    uintptr_t aligned;
+    
     if (size == 0) return NULL;
     if (alignment == 0) alignment = 1;
 
@@ -425,12 +565,12 @@ void *kmalloc_aligned(size_t size, uint32_t alignment) {
         return NULL;
     }
 
-    size_t alloc_size = size + alignment + sizeof(void *);
-    void *ptr = kmalloc(alloc_size);
+    alloc_size = size + alignment + sizeof(void *);
+    ptr = kmalloc(alloc_size);
     if (!ptr) return NULL;
 
-    uintptr_t addr = (uintptr_t)ptr + sizeof(void *);
-    uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
+    addr = (uintptr_t)ptr + sizeof(void *);
+    aligned = (addr + alignment - 1) & ~(alignment - 1);
 
     ((void **)aligned)[-1] = ptr;
 
@@ -438,12 +578,18 @@ void *kmalloc_aligned(size_t size, uint32_t alignment) {
 }
 
 void kfree(void *ptr) {
+    heap_block_t *block;
+
     if (!ptr) return;
 
-    heap_block_t *block = get_block_from_ptr(ptr);
+    if (is_early_heap_ptr(ptr)) return;
 
-    DPRINTF5("kfree: ptr=0x%08X block=0x%08X magic=0x%08X size=%u\n",
-             (uint32_t)ptr, (uint32_t)block, block->magic, block->size);
+    if (slab_owns(ptr)) {
+        slab_free(ptr);
+        return;
+    }
+
+    block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         printf("kfree: Invalid pointer 0x%08X (bad magic 0x%08X)\n", (uint32_t)ptr, block->magic);
@@ -478,9 +624,13 @@ void ksafe_free(void *ptr) {
 }
 
 void kfree_secure(void *ptr) {
-    if (!ptr) return;
+    heap_block_t *block;
     
-    heap_block_t *block = get_block_from_ptr(ptr);
+    if (!ptr) return;
+
+    if (is_early_heap_ptr(ptr)) return;
+    
+    block = get_block_from_ptr(ptr);
     
     if (block->magic != HEAP_MAGIC) {
         printf("kfree_secure: Invalid pointer 0x%08X\n", (uint32_t)ptr);
@@ -506,13 +656,21 @@ void kfree_secure(void *ptr) {
 }
 
 void *krealloc(void *ptr, size_t new_size) {
+    heap_block_t *block;
+    void *new_ptr;
+    
     if (!ptr) return kmalloc(new_size);
     if (new_size == 0) {
         kfree(ptr);
         return NULL;
     }
 
-    heap_block_t *block = get_block_from_ptr(ptr);
+    if (is_early_heap_ptr(ptr)) {
+        new_ptr = kmalloc(new_size);
+        return new_ptr;
+    }
+
+    block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         printf("krealloc: Invalid pointer\n");
@@ -530,7 +688,7 @@ void *krealloc(void *ptr, size_t new_size) {
         return ptr;
     }
 
-    void *new_ptr = kmalloc(new_size);
+    new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
 
     memcpy(new_ptr, ptr, block->alloc_size);
@@ -540,6 +698,9 @@ void *krealloc(void *ptr, size_t new_size) {
 }
 
 void heap_dump(void) {
+    heap_block_t *block;
+    uint32_t count;
+    
     printf("=== Heap Dump ===\n");
     printf("Start: 0x%08X  End: 0x%08X  Max: 0x%08X\n",
            kernel_heap.start_addr, kernel_heap.end_addr, kernel_heap.max_addr);
@@ -548,8 +709,8 @@ void heap_dump(void) {
            kernel_heap.used_size / 1024,
            (kernel_heap.total_size - kernel_heap.used_size) / 1024);
 
-    heap_block_t *block = kernel_heap.free_list;
-    uint32_t count = 0;
+    block = kernel_heap.free_list;
+    count = 0;
     while (block && count < 20) {
         printf("Block %u: addr=0x%08X size=%u %s\n",
                count, (uint32_t)block, block->size,
@@ -561,8 +722,11 @@ void heap_dump(void) {
 }
 
 uint32_t heap_free_space(void) {
-    uint32_t free = 0;
-    heap_block_t *block = kernel_heap.free_list;
+    uint32_t free;
+    heap_block_t *block;
+    
+    free = 0;
+    block = kernel_heap.free_list;
     while (block) {
         if (block->is_free) {
             free += block->size;
@@ -573,36 +737,47 @@ uint32_t heap_free_space(void) {
 }
 
 uint32_t heap_block_size_for_ptr(void *ptr) {
+    heap_block_t *block;
+    
     if (!ptr) return 0;
-    heap_block_t *block = get_block_from_ptr(ptr);
+    if (is_early_heap_ptr(ptr)) return 0;
+    block = get_block_from_ptr(ptr);
     if (block->magic != HEAP_MAGIC) return 0;
     return block->alloc_size; 
 }
 
 static void dump_memory_around(uint32_t addr, uint32_t radius) {
-    uint32_t start = (addr >= radius) ? (addr - radius) : 0;
-    uint32_t end = addr + radius;
+    uint32_t start;
+    uint32_t end;
+    uint32_t a;
+    
+    start = (addr >= radius) ? (addr - radius) : 0;
+    end = addr + radius;
     if (start < kernel_heap.start_addr) start = kernel_heap.start_addr;
     if (end > kernel_heap.end_addr) end = kernel_heap.end_addr;
 
     printf(" dump mem around 0x%08X (0x%08X - 0x%08X):\n", addr, start, end);
-    for (uint32_t a = start; a < end; a += 4) {
+    for (a = start; a < end; a += 4) {
         printf("  0x%08X: 0x%08X\n", a, *(volatile uint32_t *)a);
     }
 }
 
 void heap_verify(void) {
-    DPRINTF4("heap_verify: start: free_list=0x%08X\n", (uint32_t)kernel_heap.free_list);
-    heap_block_t *block = kernel_heap.free_list;
-    int i = 0;
-    int corruption_found = 0;
+    heap_block_t *block;
+    int i;
+    int corruption_found;
+    uint32_t baddr;
+    uint32_t block_end;
+    uint32_t naddr;
+    uint32_t *head_canary;
+    uint32_t *tail_canary;
+    
+    block = kernel_heap.free_list;
+    i = 0;
+    corruption_found = 0;
     
     while (block) {
-        DPRINTF4(" heap block %d: addr=0x%08X size=%u alloc_size=%u free=%u magic=0x%08X next=0x%08X prev=0x%08X\n",
-               i, (uint32_t)block, block->size, block->alloc_size, block->is_free, block->magic,
-               (uint32_t)block->next, (uint32_t)block->prev);
-
-        uint32_t baddr = (uint32_t)block;
+        baddr = (uint32_t)block;
         if (baddr < kernel_heap.start_addr || baddr + sizeof(heap_block_t) > kernel_heap.end_addr) {
             printf("heap_verify: ERROR - block header out of heap bounds: 0x%08X\n", baddr);
             dump_memory_around(baddr, 64);
@@ -615,7 +790,7 @@ void heap_verify(void) {
             break;
         }
 
-        uint32_t block_end = baddr + sizeof(heap_block_t) + block->size;
+        block_end = baddr + sizeof(heap_block_t) + block->size;
         if (block_end > kernel_heap.end_addr) {
             printf("heap_verify: ERROR - block extends past heap end: block_end=0x%08X heap_end=0x%08X\n", block_end, kernel_heap.end_addr);
             dump_memory_around(baddr, 64);
@@ -623,8 +798,8 @@ void heap_verify(void) {
         }
         
         if (!block->is_free && block->alloc_size > 0) {
-            uint32_t *head_canary = get_head_canary(block);
-            uint32_t *tail_canary = get_tail_canary(block);
+            head_canary = get_head_canary(block);
+            tail_canary = get_tail_canary(block);
             
             if (*head_canary != HEAP_CANARY_HEAD) {
                 printf("heap_verify: ERROR - head canary corrupted at block 0x%08X (got 0x%08X)\n", 
@@ -639,7 +814,7 @@ void heap_verify(void) {
         }
 
         if (block->next) {
-            uint32_t naddr = (uint32_t)block->next;
+            naddr = (uint32_t)block->next;
             if (naddr <= baddr) {
                 printf("heap_verify: ERROR - next pointer not ascending (0x%08X -> 0x%08X)\n", baddr, naddr);
                 dump_memory_around(baddr, 64);

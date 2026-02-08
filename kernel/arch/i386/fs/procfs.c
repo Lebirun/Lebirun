@@ -229,23 +229,21 @@ static uint32_t proc_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t siz
 
 static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     char buf[512];
-    uint32_t free_pages;
     uint32_t total_kb;
+    uint32_t usable_kb;
     uint32_t free_kb;
     int len;
     uint32_t remaining;
     
     (void)node;
     
-    free_pages = pfa_count_free();
-    free_kb = free_pages * 4;
-    total_kb = pfa_get_usable_ram_kb();
-    if (total_kb == 0) {
-        total_kb = free_kb + 4096;
-    }
+    total_kb = pfa_get_total_ram_kb();
+    usable_kb = pfa_get_usable_ram_kb();
+    free_kb = total_kb - usable_kb + pfa_count_free() * 4;
     
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8u kB\n"
+        "MemUsable:     %8u kB\n"
         "MemFree:       %8u kB\n"
         "MemAvailable:  %8u kB\n"
         "Buffers:       %8u kB\n"
@@ -253,6 +251,7 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
         "SwapTotal:     %8u kB\n"
         "SwapFree:      %8u kB\n",
         total_kb,
+        usable_kb,
         free_kb,
         free_kb,
         0,

@@ -22,6 +22,8 @@ extern uint8_t pae_pdpt_pool_used_get(uint32_t slot);
 extern void pae_pdpt_pool_used_set(uint32_t slot, uint8_t value);
 extern uint64_t *pae_pdpt_pool_get(uint32_t slot);
 extern uint64_t *pae_pd_pool_get(uint32_t slot, uint32_t pdpt_idx);
+extern int pae_pd_pool_alloc_slot(uint32_t slot);
+extern void pae_pd_pool_free_slot(uint32_t slot);
 
 static inline bool clone_should_log_detail(uint32_t index) {
     return index < 2 || (index & 0x3FF) == 0;
@@ -98,9 +100,9 @@ void vmm_free_page_directory(uint32_t pd_phys) {
             pool_phys = (uint32_t)((uintptr_t)pae_pdpt_pool_get(slot) - 0xC0000000);
             if (pool_phys == pd_phys) {
                 if (pae_pdpt_pool_used_get(slot)) {
-                    if (debugMode && debugLevel >= 3) printf("vmm_free_pd: freeing PAE pool slot %u pd=0x%08X\n", slot, pd_phys);
                     for (i = 0; i < 3; i++) {
                         pd64 = pae_pd_pool_get(slot, i);
+                        if (!pd64) continue;
                         for (j = 0; j < 512; j++) {
                             pde = pd64[j];
                             if (!(pde & 1)) continue;
@@ -119,6 +121,7 @@ void vmm_free_page_directory(uint32_t pd_phys) {
                         }
                         memset(pd64, 0, PAGE_SIZE);
                     }
+                    pae_pd_pool_free_slot(slot);
                     pae_pdpt_pool_used_set(slot, 0);
                     return;
                 } else {
@@ -131,7 +134,7 @@ void vmm_free_page_directory(uint32_t pd_phys) {
         printf("vmm_free_pd: PAE pd=0x%08X not in pool, treating as dynamic\n", pd_phys);
         temp_pdpt_virt = 0xF7000000;
         temp_map_raw(temp_pdpt_virt, pd_phys);
-        pdpt = (uint64_t *)temp_pdpt_virt;
+        pdpt = (uint64_t *)(temp_pdpt_virt + (pd_phys & 0xFFF));
 
         for (i = 0; i < 4; i++) {
             pdpte = pdpt[i];
@@ -253,8 +256,17 @@ static uint32_t vmm_clone_pae_structure(uint32_t src_pdpt_phys, uint32_t **out_u
     }
     pae_pdpt_pool_used_set(slot, 1);
 
+    if (pae_pd_pool_alloc_slot(slot) < 0) {
+        pae_pdpt_pool_used_set(slot, 0);
+        kfree(user_pages);
+        if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+            __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+        }
+        if (eflags & (1 << 9)) __asm__ volatile ("sti");
+        return 0;
+    }
+
     new_pdpt_phys = (uint32_t)((uintptr_t)pae_pdpt_pool_get(slot) - 0xC0000000);
-    if (debugMode && debugLevel >= 3) printf("vmm_clone_pae: allocated slot %u pdpt_phys=0x%08X\n", slot, new_pdpt_phys);
     for (i = 0; i < 4; i++) {
         new_pd_phys[i] = (uint32_t)((uintptr_t)pae_pd_pool_get(slot, i) - 0xC0000000);
     }
@@ -271,7 +283,7 @@ static uint32_t vmm_clone_pae_structure(uint32_t src_pdpt_phys, uint32_t **out_u
     temp_new_page = 0xF7007000;
 
     temp_map_raw(temp_src_pdpt, src_pdpt_phys);
-    src_pdpt = (uint64_t *)temp_src_pdpt;
+    src_pdpt = (uint64_t *)(temp_src_pdpt + (src_pdpt_phys & 0xFFF));
 
     for (i = 0; i < 3; i++) {
         src_pdpte = src_pdpt[i];
@@ -376,6 +388,7 @@ cleanup_fail_pae:
 
     for (i = 0; i < 3; i++) {
         cleanup_pd = pae_pd_pool_get(slot, i);
+        if (!cleanup_pd) continue;
         for (j = 0; j < 512; j++) {
             if (cleanup_pd[j] & 1) {
                 cleanup_pt_phys = (uint32_t)(cleanup_pd[j] & ~0xFFFULL);
@@ -383,6 +396,7 @@ cleanup_fail_pae:
             }
         }
     }
+    pae_pd_pool_free_slot(slot);
     pae_pdpt_pool_used_set(slot, 0);
 
     if (kernel_cr3 && orig_cr3 != kernel_cr3) {
@@ -496,10 +510,6 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
                 goto cleanup_fail;
             }
 
-            if (debugMode && debugLevel >= 5 && clone_should_log_detail(clone_log_count)) {
-                DPRINTF3("vmm_clone: copying page pd_idx=%u pt_idx=%u virt=0x%08X src_phys=0x%08X -> new_phys=0x%08X flags=0x%03X\n",
-                         pd_idx, pt_idx, (pd_idx<<22) | (pt_idx<<12), src_page_phys, new_page_phys, pte_flags);
-            }
             clone_log_count++;
 
             temp_map_raw(temp_src_page, src_page_phys);
@@ -507,12 +517,6 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
 
             memcpy((void *)temp_new_page, (void *)temp_src_page, PAGE_SIZE);
 
-            if (debugMode && debugLevel >= 5 && clone_should_log_sample(clone_sample_count)) {
-                uint32_t sample_before = ((uint32_t *)temp_src_page)[0];
-                uint32_t sample_after = ((uint32_t *)temp_new_page)[0];
-                DPRINTF3("vmm_clone: page copy sample: src_phys=0x%08X before=0x%08X new_phys=0x%08X after=0x%08X\n",
-                         src_page_phys, sample_before, new_page_phys, sample_after);
-            }
             clone_sample_count++;
 
             temp_unmap_raw(temp_src_page);
@@ -522,10 +526,6 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
             vpt[pt_idx] = (new_page_phys & ~0xFFF) | pte_flags;
             
             __asm__ volatile ("" ::: "memory");
-            if (debugMode && debugLevel >= 5 && clone_should_log_detail(clone_log_count)) {
-                uint32_t verify_pte = vpt[pt_idx];
-                DPRINTF3("vmm_clone: set new_pt[%u]=0x%08X verify=0x%08X\n", pt_idx, (new_page_phys & ~0xFFF) | pte_flags, verify_pte);
-            }
             clone_log_count++;
 
             if (user_page_count >= user_page_capacity) {
@@ -558,42 +558,6 @@ uint32_t vmm_clone_page_directory(uint32_t src_pd_phys, uint32_t **out_user_page
     if (out_user_pages) *out_user_pages = user_pages;
     else kfree(user_pages);
     if (out_user_pages_count) *out_user_pages_count = user_page_count;
-
-    DPRINTF3("vmm_clone_page_directory: cloned pd 0x%08X -> 0x%08X (%u user pages)\n",
-           src_pd_phys, new_pd_phys, user_page_count);
-
-    if (debugMode && debugLevel >= 4) {
-    for (uint32_t v = 0x00400000; v < 0x00403000; v += PAGE_SIZE) {
-        uint32_t pd_idx = v >> 22;
-        uint32_t pt_idx = (v >> 12) & 0x3FF;
-
-        temp_map_raw(0xF7000000, src_pd_phys);
-        uint32_t src_pde = ((uint32_t *)0xF7000000)[pd_idx];
-        if (src_pde & 1) {
-            uint32_t src_pt_phys = src_pde & ~0xFFF;
-            temp_map_raw(0xF7002000, src_pt_phys);
-            uint32_t src_pte = ((uint32_t *)0xF7002000)[pt_idx];
-            temp_unmap_raw(0xF7002000);
-            DPRINTF2("src: virt=0x%08X pde=0x%08X pte=0x%08X\n", v, src_pde, src_pte);
-        } else {
-            DPRINTF2("src: virt=0x%08X pde=0x%08X (no pt)\n", v, src_pde);
-        }
-        temp_unmap_raw(0xF7000000);
-
-        temp_map_raw(0xF7001000, new_pd_phys);
-        uint32_t new_pde = ((uint32_t *)0xF7001000)[pd_idx];
-        if (new_pde & 1) {
-            uint32_t new_pt_phys = new_pde & ~0xFFF;
-            temp_map_raw(0xF7003000, new_pt_phys);
-            uint32_t new_pte = ((uint32_t *)0xF7003000)[pt_idx];
-            temp_unmap_raw(0xF7003000);
-            DPRINTF2("new: virt=0x%08X pde=0x%08X pte=0x%08X\n", v, new_pde, new_pte);
-        } else {
-            DPRINTF2("new: virt=0x%08X pde=0x%08X (no pt)\n", v, new_pde);
-        }
-        temp_unmap_raw(0xF7001000);
-    }
-    }
 
     if (kernel_cr3 && orig_cr3 != kernel_cr3) {
         __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");

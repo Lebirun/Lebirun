@@ -94,8 +94,8 @@
 #define E1000_TIPG_IPGR1  (10 << 10)
 #define E1000_TIPG_IPGR2  (10 << 20)
 
-#define E1000_NUM_RX_DESC 32
-#define E1000_NUM_TX_DESC 32
+#define E1000_NUM_RX_DESC 4
+#define E1000_NUM_TX_DESC 4
 #define E1000_RX_BUFFER_SIZE 2048
 
 #define E1000_TXD_CMD_EOP  (1 << 0)

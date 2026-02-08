@@ -16,6 +16,8 @@
 #include <kernel/io.h>
 #include <kernel/initrd.h>
 #include <kernel/ramfs.h>
+#include <kernel/squashfs.h>
+#include <kernel/overlayfs.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
 #include <kernel/vfs.h>
@@ -27,15 +29,17 @@
 #include <kernel/panic.h>
 #include "launch_user.h"
 
-#ifndef CONFIG_DEBUG_MODE
-#define CONFIG_DEBUG_MODE 0
-#endif
-#ifndef CONFIG_DEBUG_VERBOSITY
-#define CONFIG_DEBUG_VERBOSITY 3
-#endif
-
-bool debugMode = CONFIG_DEBUG_MODE ? true : false;
-int debugLevel = CONFIG_DEBUG_VERBOSITY;
+bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
+bool debug_task = CONFIG_DEBUG_TASK ? true : false;
+bool debug_vfs = CONFIG_DEBUG_VFS ? true : false;
+bool debug_ramfs = CONFIG_DEBUG_RAMFS ? true : false;
+bool debug_initrd = CONFIG_DEBUG_INITRD ? true : false;
+bool debug_elf = CONFIG_DEBUG_ELF ? true : false;
+bool debug_syscall = CONFIG_DEBUG_SYSCALL ? true : false;
+bool debug_idt = CONFIG_DEBUG_IDT ? true : false;
+bool debug_driver = CONFIG_DEBUG_DRIVER ? true : false;
+bool debug_fs_ext4 = CONFIG_DEBUG_FS_EXT4 ? true : false;
+bool debug_fs_other = CONFIG_DEBUG_FS_OTHER ? true : false;
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
@@ -59,12 +63,20 @@ void kernel_main(void) {
     multiboot_t *mb;
     extern uint8_t unifont_psf_start[] __attribute__((weak));
     extern uint8_t unifont_psf_end[] __attribute__((weak));
+    extern uint32_t boot_page_table1[];
+    extern uint32_t boot_page_table2[];
+    extern uint32_t boot_page_table3[];
+    extern uint32_t boot_page_table4[];
+    extern uint32_t boot_pd_low[];
+    extern uint32_t boot_pd_high[];
+    extern uint32_t boot_pt_0[];
+    extern uint32_t boot_pt_1[];
+    extern uint32_t boot_pt_2[];
+    extern uint32_t boot_pt_3[];
     uintptr_t u_start;
     uintptr_t u_end;
     size_t unifont_size;
     extern void terminal_replay_early_boot(void);
-    uint32_t saved_mods_count;
-    uint32_t saved_mods_addr;
     uint8_t *mbb;
     uint32_t i;
     uint32_t mods_start_page;
@@ -84,7 +96,12 @@ void kernel_main(void) {
     unsigned long cr0;
     unsigned long expected;
     unsigned long *pd;
-    int sl;
+    int mount_ret;
+    int use_squashfs;
+    multiboot_module_t mod1;
+    overlay_context_t *overlay_ctx;
+    vfs_node_t *squashfs_root;
+    vfs_node_t *ramfs_upper;
     uint8_t master_mask;
     uint8_t slave_mask;
     ahci_port_t *port;
@@ -104,6 +121,32 @@ void kernel_main(void) {
 
     pfa_init();
 
+    if (pae_enabled) {
+        pfa_reclaim_kernel_range((uint32_t)boot_page_directory - 0xC0000000,
+                                 (uint32_t)boot_page_directory - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_page_table1 - 0xC0000000,
+                                 (uint32_t)boot_page_table1 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_page_table2 - 0xC0000000,
+                                 (uint32_t)boot_page_table2 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_page_table3 - 0xC0000000,
+                                 (uint32_t)boot_page_table3 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_page_table4 - 0xC0000000,
+                                 (uint32_t)boot_page_table4 - 0xC0000000 + PAGE_SIZE);
+    } else {
+        pfa_reclaim_kernel_range((uint32_t)boot_pd_low - 0xC0000000,
+                                 (uint32_t)boot_pd_low - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_pd_high - 0xC0000000,
+                                 (uint32_t)boot_pd_high - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_pt_0 - 0xC0000000,
+                                 (uint32_t)boot_pt_0 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_pt_1 - 0xC0000000,
+                                 (uint32_t)boot_pt_1 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_pt_2 - 0xC0000000,
+                                 (uint32_t)boot_pt_2 - 0xC0000000 + PAGE_SIZE);
+        pfa_reclaim_kernel_range((uint32_t)boot_pt_3 - 0xC0000000,
+                                 (uint32_t)boot_pt_3 - 0xC0000000 + PAGE_SIZE);
+    }
+
     test_frame = pfa_alloc();
     if (test_frame) {
         printf("PFA Test alloc: Frame at 0x%08X\n", test_frame);
@@ -115,7 +158,12 @@ void kernel_main(void) {
         
         third_frame = pfa_alloc();
         printf("PFA Third (reuse?): 0x%08X\n", third_frame);
-        
+        if (second_frame) {
+            pfa_free(second_frame);
+        }
+        if (third_frame) {
+            pfa_free(third_frame);
+        }
     } else {
         printf("PFA alloc failed - check map!\n");
     }
@@ -150,6 +198,14 @@ void kernel_main(void) {
         if (u_end > u_start) unifont_size = (size_t)(u_end - u_start);
         if (unifont_size > 0) {
             terminal_load_psf_font(unifont_psf_start, unifont_size);
+            terminal_compact_font(256);
+            {
+                uint32_t font_phys_start;
+                uint32_t font_phys_end;
+                font_phys_start = (uint32_t)((uintptr_t)unifont_psf_start) - 0xC0000000;
+                font_phys_end = (uint32_t)((uintptr_t)unifont_psf_end) - 0xC0000000;
+                pfa_reclaim_kernel_range(font_phys_start, font_phys_end);
+            }
         }
 
         console_init();
@@ -163,9 +219,6 @@ void kernel_main(void) {
     }
 
     printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
-
-    saved_mods_count = mb->mods_count;
-    saved_mods_addr = mb->mods_addr;
 
     printf("MB: first 32 bytes: ");
     mbb = (uint8_t *)mb;
@@ -198,7 +251,7 @@ void kernel_main(void) {
             printf("\n");
         }
 
-        initrd_init(mb->mods_count, mb->mods_addr);
+        initrd_init(1, mb->mods_addr);
         initrd_list_files();
         vfs_init();
         printf("[KERNEL] After vfs_init\n");
@@ -206,25 +259,70 @@ void kernel_main(void) {
         printf("[KERNEL] After initrd_vfs_register\n");
         ramfs_vfs_register();
         printf("[KERNEL] After ramfs_vfs_register\n");
-        ramfs_debug_check_root("kernel: after ramfs_vfs_register");
-        ext4_init();
-        printf("[KERNEL] After ext4_init\n");
-        ramfs_debug_check_root("kernel: after ext4_init");
-        ext4_vfs_register();
-        printf("[KERNEL] After ext4_vfs_register\n");
-        ramfs_debug_check_root("kernel: after ext4_vfs_register");
-        
+        squashfs_vfs_register();
+        printf("[KERNEL] After squashfs_vfs_register\n");
+        overlayfs_vfs_register();
+        printf("[KERNEL] After overlayfs_vfs_register\n");
+
+        use_squashfs = 0;
+        squashfs_root = NULL;
+        ramfs_upper = NULL;
+        overlay_ctx = NULL;
+
+        mount_ret = vfs_mount(NULL, "/", "ramfs");
+        if (mount_ret == 0) {
+            printf("[KERNEL] Mounted ramfs as root\n");
+        } else {
+            printf("[KERNEL] Failed to mount ramfs as root\n");
+        }
+
+        if (mb->mods_count >= 2) {
+            mod1 = modarr[1];
+            squashfs_init(mod1.mod_start, mod1.mod_end);
+            mount_ret = vfs_mount(NULL, "/squashfs", "squashfs");
+            if (mount_ret == 0) {
+                squashfs_root = vfs_namei("/squashfs");
+                use_squashfs = 1;
+            } else {
+                printf("[KERNEL] SquashFS mount failed\n");
+            }
+        }
+
+        ramfs_create_dir("/var", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/tmp", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/home", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/root", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/run", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+
+        if (use_squashfs && squashfs_root) {
+            ramfs_upper = vfs_get_root();
+            overlay_ctx = overlayfs_create(squashfs_root, ramfs_upper);
+            if (overlay_ctx && overlay_ctx->merged_root) {
+                vfs_replace_mount_root("/", overlay_ctx->merged_root);
+                printf("[KERNEL] OverlayFS active: squashfs (lower) + ramfs (upper) on /\n");
+            }
+        } else {
+            ramfs_create_symlink("/bin", "/initrd/bin", VFS_PERM_READ | VFS_PERM_EXEC);
+            ramfs_create_symlink("/sbin", "/initrd/sbin", VFS_PERM_READ | VFS_PERM_EXEC);
+            ramfs_create_symlink("/usr", "/initrd/usr", VFS_PERM_READ | VFS_PERM_EXEC);
+            ramfs_create_symlink("/lib", "/initrd/lib", VFS_PERM_READ | VFS_PERM_EXEC);
+            ramfs_create_symlink("/etc", "/initrd/etc", VFS_PERM_READ | VFS_PERM_EXEC);
+        }
+
+        mount_ret = vfs_mount(NULL, "/initrd", "initrd");
+        if (mount_ret == 0) {
+            printf("[KERNEL] Mounted initrd on /initrd\n");
+        }
+
         procfs_init();
-        printf("[KERNEL] After procfs_init\n");
-        ramfs_debug_check_root("kernel: after procfs_init");
         devfs_init();
-        printf("[KERNEL] After devfs_init\n");
-        ramfs_debug_check_root("kernel: after devfs_init");
-        
-        printf("[KERNEL] About to mount /dev...\n");
+
         vfs_mount(NULL, "/dev", "devfs");
-        printf("[KERNEL] After vfs_mount /dev\n");
         vfs_mount(NULL, "/proc", "procfs");
+
+        if (use_squashfs) {
+            vfs_block_squashfs_access();
+        }
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -267,17 +365,6 @@ void kernel_main(void) {
     keyboard_init();
     syscall_init();
 
-    if (saved_mods_count >= 2) {
-        rootfs_init(saved_mods_count, saved_mods_addr);
-    }
-
-    (void)ramfs_create_dir("/bin", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-    (void)ramfs_unlink("/bin/sh");
-    sl = ramfs_create_symlink("/bin/sh", "/bin/lsh", VFS_PERM_READ | VFS_PERM_EXEC);
-    if (sl != 0 && sl != RAMFS_ERR_EXIST) {
-        printf("BOOT: failed to create /bin/sh symlink (%d)\n", sl);
-    }
-
     terminal_writestring("PIC master mask: 0x");
     master_mask = inb(0x21);
     print_hex(master_mask);
@@ -300,6 +387,8 @@ void kernel_main(void) {
                 printf("\n");
             }
 
+            ext4_init();
+            ext4_vfs_register();
             if (vfs_mount(NULL, "/disk", "ext4") == 0) {
                 printf("EXT4 filesystem mounted on /disk\n");
             } else {
@@ -318,6 +407,7 @@ void kernel_main(void) {
 
     printf("heap: verify before launching user\n");
     heap_verify();
+    slab_gc();
 
     shell = launch_user_path("/bin/lsh", 1);
     printf("heap: verify after launch attempt\n");
@@ -338,6 +428,8 @@ void kernel_main(void) {
             } while (t && t != start);
         }
         printf("\n");
+        
+        yield();
     }
 
     while (1) {

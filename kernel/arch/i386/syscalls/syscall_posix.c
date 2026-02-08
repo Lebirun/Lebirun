@@ -150,6 +150,9 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     uint32_t addr = (uint32_t)path_ptr;
     if (!addr || addr >= 0xC0000000 || addr < 0x1000) return -EFAULT;
     const char *path = (const char *)addr;
+    if (strncmp(path, "/ro", 3) == 0 && (path[3] == '\0' || path[3] == '/')) {
+        return -EACCES;
+    }
     vfs_node_t *node = vfs_namei(path);
     if (!node) return -ENOENT;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
@@ -700,49 +703,73 @@ struct linux_dirent {
 };
 
 static int sys_getdents(int fd, const char *dirp_ptr, int count) {
-    uint32_t dirp_addr = (uint32_t)(uintptr_t)dirp_ptr;
+    uint32_t dirp_addr;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    uint8_t *buf;
+    int written;
+    uint32_t dir_offset;
+    dirent_t *entry;
+    dirent_t local_copy;
+    int name_len;
+    int reclen;
+    struct linux_dirent *de;
+    uint32_t flags;
+    int i;
+
+    dirp_addr = (uint32_t)(uintptr_t)dirp_ptr;
     if (!current_task) return -ESRCH;
     if (!dirp_addr || dirp_addr >= 0xC0000000 || dirp_addr < 0x1000) return -EFAULT;
     if (count <= 0) return -EINVAL;
     if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     if (!vfs_node_ptr_sane(node)) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
 
-    uint8_t *buf = (uint8_t *)dirp_addr;
-    int written = 0;
-    uint32_t dir_offset = tfd->offset;
+    buf = (uint8_t *)dirp_addr;
+    written = 0;
+    dir_offset = tfd->offset;
 
     while (written < count) {
-        dirent_t *entry = vfs_readdir(node, dir_offset);
-        if (!entry) break;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+        entry = vfs_readdir(node, dir_offset);
+        if (!entry) {
+            __asm__ volatile("push %0; popf" : : "r"(flags));
+            break;
+        }
+        for (i = 0; i < VFS_MAX_NAME; i++) {
+            local_copy.name[i] = entry->name[i];
+        }
+        local_copy.inode = entry->inode;
+        local_copy.type = entry->type;
+        __asm__ volatile("push %0; popf" : : "r"(flags));
 
-        int name_len = 0;
-        while (entry->name[name_len] && name_len < 63) name_len++;
-        int reclen = (int)sizeof(struct linux_dirent) + name_len + 1;
+        name_len = 0;
+        while (local_copy.name[name_len] && name_len < 63) name_len++;
+        reclen = (int)sizeof(struct linux_dirent) + name_len + 1;
         reclen = (reclen + 3) & ~3;
 
         if (written + reclen > count) break;
 
-        struct linux_dirent *de = (struct linux_dirent *)(buf + written);
-        de->d_ino = entry->inode ? entry->inode : dir_offset + 1;
+        de = (struct linux_dirent *)(buf + written);
+        de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
         de->d_off = dir_offset + 1;
         de->d_reclen = (unsigned short)reclen;
 
-        if (entry->type == VFS_DIRECTORY) de->d_type = 4;
-        else if (entry->type == VFS_FILE) de->d_type = 8;
-        else if (entry->type == VFS_SYMLINK) de->d_type = 10;
-        else if (entry->type == VFS_CHARDEVICE) de->d_type = 2;
-        else if (entry->type == VFS_BLOCKDEVICE) de->d_type = 6;
-        else if (entry->type == VFS_PIPE) de->d_type = 1;
+        if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
+        else if (local_copy.type == VFS_FILE) de->d_type = 8;
+        else if (local_copy.type == VFS_SYMLINK) de->d_type = 10;
+        else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
+        else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
+        else if (local_copy.type == VFS_PIPE) de->d_type = 1;
         else de->d_type = 0;
 
-        for (int i = 0; i < name_len; i++) {
-            de->d_name[i] = entry->name[i];
+        for (i = 0; i < name_len; i++) {
+            de->d_name[i] = local_copy.name[i];
         }
         de->d_name[name_len] = '\0';
 
@@ -1004,49 +1031,73 @@ struct linux_dirent64 {
 };
 
 static int sys_getdents64(int fd, void *dirp, unsigned int count) {
-    uint32_t dirp_addr = (uint32_t)dirp;
+    uint32_t dirp_addr;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    uint8_t *buf;
+    int written;
+    uint32_t dir_offset;
+    dirent_t *entry;
+    dirent_t local_copy;
+    int name_len;
+    int reclen;
+    struct linux_dirent64 *de;
+    uint32_t flags;
+    int i;
+
+    dirp_addr = (uint32_t)dirp;
     if (!current_task) return -ESRCH;
     if (!dirp_addr || dirp_addr >= 0xC0000000 || dirp_addr < 0x1000) return -EFAULT;
     if (count == 0) return -EINVAL;
     if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     if (!vfs_node_ptr_sane(node)) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
 
-    uint8_t *buf = (uint8_t *)dirp;
-    int written = 0;
-    uint32_t dir_offset = tfd->offset;
+    buf = (uint8_t *)dirp;
+    written = 0;
+    dir_offset = tfd->offset;
     
     while ((unsigned int)written < count) {
-        dirent_t *entry = vfs_readdir(node, dir_offset);
-        if (!entry) break;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+        entry = vfs_readdir(node, dir_offset);
+        if (!entry) {
+            __asm__ volatile("push %0; popf" : : "r"(flags));
+            break;
+        }
+        for (i = 0; i < VFS_MAX_NAME; i++) {
+            local_copy.name[i] = entry->name[i];
+        }
+        local_copy.inode = entry->inode;
+        local_copy.type = entry->type;
+        __asm__ volatile("push %0; popf" : : "r"(flags));
         
-        int name_len = 0;
-        while (entry->name[name_len] && name_len < 63) name_len++;
-        int reclen = sizeof(unsigned long long) + sizeof(long long) + sizeof(unsigned short) + sizeof(unsigned char) + name_len + 1;
+        name_len = 0;
+        while (local_copy.name[name_len] && name_len < 63) name_len++;
+        reclen = sizeof(unsigned long long) + sizeof(long long) + sizeof(unsigned short) + sizeof(unsigned char) + name_len + 1;
         reclen = (reclen + 7) & ~7;
         
         if ((unsigned int)(written + reclen) > count) break;
         
-        struct linux_dirent64 *de = (struct linux_dirent64 *)(buf + written);
-        de->d_ino = entry->inode ? entry->inode : dir_offset + 1;
+        de = (struct linux_dirent64 *)(buf + written);
+        de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
         de->d_off = dir_offset + 1;
         de->d_reclen = reclen;
         
-        if (entry->type == VFS_DIRECTORY) de->d_type = 4;
-        else if (entry->type == VFS_FILE) de->d_type = 8;
-        else if (entry->type == VFS_SYMLINK) de->d_type = 10;
-        else if (entry->type == VFS_CHARDEVICE) de->d_type = 2;
-        else if (entry->type == VFS_BLOCKDEVICE) de->d_type = 6;
-        else if (entry->type == VFS_PIPE) de->d_type = 1;
+        if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
+        else if (local_copy.type == VFS_FILE) de->d_type = 8;
+        else if (local_copy.type == VFS_SYMLINK) de->d_type = 10;
+        else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
+        else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
+        else if (local_copy.type == VFS_PIPE) de->d_type = 1;
         else de->d_type = 0;
         
-        for (int i = 0; i < name_len; i++) {
-            de->d_name[i] = entry->name[i];
+        for (i = 0; i < name_len; i++) {
+            de->d_name[i] = local_copy.name[i];
         }
         de->d_name[name_len] = '\0';
         

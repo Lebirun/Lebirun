@@ -6,8 +6,8 @@
 #include <stddef.h>
 #include <string.h>
 
-#define MAX_PTYS 16
-#define PTY_BUF_SIZE 1024
+#define MAX_PTYS 4
+#define PTY_BUF_SIZE 128
 
 typedef struct {
     int in_use;

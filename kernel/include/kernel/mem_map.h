@@ -7,23 +7,23 @@
 #define PAGE_SIZE 0x1000UL
 
 #define MAX_PHYSICAL_MEMORY_32BIT 0x100000000ULL
-#define MAX_PHYSICAL_MEMORY_PAE   0x10000000000ULL
+#define MAX_PHYSICAL_MEMORY_PAE   0x100000000ULL
 
 extern uint32_t pae_enabled;
 
 #define MAX_PHYSICAL_MEMORY (pae_enabled ? MAX_PHYSICAL_MEMORY_PAE : MAX_PHYSICAL_MEMORY_32BIT)
 #define TOTAL_PAGES_32BIT (MAX_PHYSICAL_MEMORY_32BIT / PAGE_SIZE)
-#define TOTAL_PAGES_PAE   0x1000000
+#define TOTAL_PAGES_PAE   (MAX_PHYSICAL_MEMORY_PAE / PAGE_SIZE)
 #define TOTAL_PAGES (pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT)
 #define BITMAP_BYTES_32BIT (TOTAL_PAGES_32BIT / 8)
 #define BITMAP_BYTES_PAE   (TOTAL_PAGES_PAE / 8)
-#define BITMAP_BYTES_MAX BITMAP_BYTES_PAE
+#define BITMAP_BYTES_MAX (BITMAP_BYTES_32BIT > BITMAP_BYTES_PAE ? BITMAP_BYTES_32BIT : BITMAP_BYTES_PAE)
 
 extern uint32_t total_pages_managed;
 
 #define HEAP_START 0xD0000000
-#define HEAP_INITIAL_SIZE 0x40000
-#define HEAP_MAX_SIZE 0x10000000
+#define HEAP_INITIAL_SIZE 0x10000
+#define HEAP_MAX_SIZE 0x01000000
 #define HEAP_MAGIC 0xDEADBEEF
 #define HEAP_MIN_BLOCK 16
 
@@ -142,6 +142,7 @@ uint64_t pfa_alloc64(void);
 uint32_t pfa_alloc_contiguous(uint32_t num_frames);
 void pfa_free(uint32_t phys_addr);
 void pfa_free64(uint64_t phys_addr);
+void pfa_reclaim_kernel_range(uint32_t phys_start, uint32_t phys_end);
 void pfa_free_contiguous(uint32_t phys_addr, uint32_t num_frames);
 uint32_t pfa_count_free(void);
 uint32_t pfa_get_total_ram_kb(void);
@@ -154,6 +155,7 @@ void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
 uint32_t heap_free_space(void);
+int is_early_heap_ptr(void *ptr);
 
 void *ksafe_alloc(size_t size, uint32_t flags);
 void *kcalloc(size_t nmemb, size_t size);      
@@ -172,6 +174,21 @@ int heap_validate_ptr(void *ptr);
 uint32_t heap_block_size_for_ptr(void *ptr);
 void heap_verify(void);
 void vmm_debug_page(uint32_t virt_addr);
+
+void slab_init(void);
+void *slab_alloc(size_t size);
+void slab_free(void *ptr);
+void slab_gc(void);
+int slab_owns(void *ptr);
+size_t slab_max_size(void);
+void slab_stats(void);
+
+int demand_page_fault_handler(uint32_t fault_addr, uint32_t err_code);
+void demand_paging_init(void);
+int demand_reserve_range(uint32_t virt_start, uint32_t size);
+int demand_is_reserved(uint32_t virt_addr);
+int demand_commit_page(uint32_t virt_addr);
+int demand_decommit_page(uint32_t virt_addr);
 
 void vmm_unmap_page(uint32_t virt_addr);
 void vmm_map_temp(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);

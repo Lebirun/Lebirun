@@ -3,10 +3,8 @@
 #include <kernel/debug.h>
 
 extern mutex_t print_lock;
-extern bool debugMode;
-extern int debugLevel;
 
-#define LINE_BUF_SIZE 1024
+#define LINE_BUF_SIZE 128
 static char line_buffers[NUM_CONSOLES][LINE_BUF_SIZE];
 static int line_pos[NUM_CONSOLES];
 static int line_ready[NUM_CONSOLES];
@@ -32,7 +30,7 @@ static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
     asm volatile("cli");
-    if (debugMode && debugLevel >= 1) printf("sys_exit: user task exiting with code %d\n", code);
+    DEBUG_SYSCALL("sys_exit: user task exiting with code %d\n", code);
     asm volatile("sti");
     task_exit_deferred((uint32_t)code);
     schedule();
@@ -93,7 +91,7 @@ static int sys_write(int fd, const char *buf, int len) {
             if (chunk > 64) chunk = 64;
             
             if (fb && fb->font && console_is_initialized()) {
-                kprint_write(con_id, (const char *)(buf_addr + written), (size_t)chunk);
+                console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
             } else {
                 asm volatile("cli");
                 for (int i = 0; i < chunk; i++) {

@@ -59,7 +59,6 @@ $(UNIFONT_OBJ): $(wildcard $(UNIFONT_BIN))
 
 KERNEL_OBJS=\
 $(KERNEL_ARCH_OBJS) \
-$(USER_SHELL_OBJ) \
 $(UNIFONT_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
@@ -86,7 +85,7 @@ $(ARCHDIR)/crtn.o
 
 all: lebirun.kernel
 
-lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld
+lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	grub-file --is-x86-multiboot lebirun.kernel
 
@@ -99,6 +98,8 @@ $(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
 
 .S.o:
 	$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
+
+$(OBJS): $(CONFIG_FILE)
 
 $(USER_SHELL_BIN):
 	$(MAKE) -C ../userprog

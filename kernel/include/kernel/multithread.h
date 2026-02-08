@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define THREAD_STACK_SIZE 4096
-#define MAX_THREADS 256
+#define MAX_THREADS 32
 
 typedef enum {
     THREAD_READY = 0,

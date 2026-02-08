@@ -11,17 +11,27 @@ static uint32_t align_up_u32(uint32_t v, uint32_t align) {
 }
 
 static int sys_brk(int addr, const char *unused, int unused2) {
+    uint32_t requested;
+    uint32_t current_brk;
+    uint32_t newbrk;
+    uint32_t old_page_end;
+    uint32_t page_count;
+    uint32_t *new_pages;
+    uint32_t old_count;
+    uint32_t new_count;
+    uint32_t *expanded;
+
     (void)unused; (void)unused2;
     
     if (!current_task) {
-        DPRINTF1("brk: no current_task!\n");
+        printf("brk: FATAL: no current_task!\n");
         return -1;
     }
     
-    uint32_t requested = (uint32_t)addr;
-    uint32_t current_brk = current_task->user_brk;
+    requested = (uint32_t)addr;
+    current_brk = current_task->user_brk;
     
-    DPRINTF3("brk: req=0x%08X cur=0x%08X\n", requested, current_brk);
+    printf("brk: task=%u req=0x%08X cur=0x%08X\n", current_task->id, requested, current_brk);
     
     if (requested == 0) {
         return (int)current_brk;
@@ -31,28 +41,29 @@ static int sys_brk(int addr, const char *unused, int unused2) {
         return (int)current_brk;
     }
     
-    uint32_t newbrk = (requested + 0xFFF) & ~0xFFFu;
+    newbrk = (requested + 0xFFF) & ~0xFFFu;
     
     if (newbrk >= 0x40000000) {
-        DPRINTF1("brk: requested 0x%08X exceeds limit\n", newbrk);
+        printf("brk: ERROR: task=%u requested 0x%08X exceeds limit 0x40000000\n", current_task->id, newbrk);
         return (int)current_brk;
     }
     
-    uint32_t old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
+    old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
     if (newbrk > old_page_end) {
-        uint32_t page_count = 0;
-        uint32_t *new_pages = vmm_map_range_in_pd_tracked(
+        page_count = 0;
+        new_pages = vmm_map_range_in_pd_tracked(
             current_task->pd_phys, old_page_end, newbrk - old_page_end, 0x7, &page_count);
         
         if (!new_pages && (newbrk > old_page_end)) {
-            DPRINTF1("brk: mapping %u bytes failed (free=%u)\n", newbrk - old_page_end, pfa_count_free());
+            printf("brk: ERROR: task=%u mapping %u bytes at 0x%08X failed (free_pages=%u)\n", 
+                   current_task->id, newbrk - old_page_end, old_page_end, pfa_count_free());
             return (int)current_brk;
         }
         
         if (new_pages && page_count > 0) {
-            uint32_t old_count = current_task->user_pages_count;
-            uint32_t new_count = old_count + page_count;
-            uint32_t *expanded = (uint32_t *)kmalloc(new_count * sizeof(uint32_t));
+            old_count = current_task->user_pages_count;
+            new_count = old_count + page_count;
+            expanded = (uint32_t *)kmalloc(new_count * sizeof(uint32_t));
             if (expanded) {
                 if (current_task->user_pages && old_count > 0) {
                     memcpy(expanded, current_task->user_pages, old_count * sizeof(uint32_t));
@@ -61,9 +72,12 @@ static int sys_brk(int addr, const char *unused, int unused2) {
                 memcpy(expanded + old_count, new_pages, page_count * sizeof(uint32_t));
                 current_task->user_pages = expanded;
                 current_task->user_pages_count = new_count;
+            } else {
+                printf("brk: ERROR: task=%u kmalloc failed for page tracking\n", current_task->id);
             }
             kfree(new_pages);
         }
+        printf("brk: task=%u mapped %u pages at 0x%08X-0x%08X\n", current_task->id, page_count, old_page_end, newbrk);
     }
     
     current_task->user_brk = newbrk;

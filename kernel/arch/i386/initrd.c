@@ -8,10 +8,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-extern bool debugMode;
-extern int debugLevel;
-
-static inline bool initrd_should_log(void) { return debugMode && debugLevel >= 1; }
+static inline bool initrd_should_log(void) { return debug_initrd; }
 
 static initrd_header_t *initrd_header = NULL; 
 static initrd_file_header_t *file_headers = NULL;
@@ -26,6 +23,12 @@ static vfs_node_t *initrd_vfs_nodes = NULL;
 static uint32_t initrd_vfs_node_count = 0;
 static vfs_node_t *initrd_vfs_root = NULL;
 static dirent_t initrd_dirent;
+
+static inline int initrd_is_root_parent(uint16_t parent_index) {
+    if (parent_index == 0xFFFF) return 1;
+    if (initrd_version <= 1 && parent_index == 0) return 1;
+    return 0;
+}
 
 static void serial_printf_hex(uint32_t val) {
     char buf[9];
@@ -451,7 +454,7 @@ static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint32_t index) {
         uint16_t pi = files[i].parent_index;
         int match = 0;
         if (node == initrd_vfs_root) {
-            match = (pi == 0xFFFF || pi == 0);
+            match = initrd_is_root_parent(pi);
         } else {
             match = (pi == parent_idx);
         }
@@ -478,7 +481,7 @@ static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
         uint16_t pi = files[i].parent_index;
         int match = 0;
         if (node == initrd_vfs_root) {
-            match = (pi == 0xFFFF || pi == 0);
+            match = initrd_is_root_parent(pi);
         } else {
             match = (pi == parent_idx);
         }
@@ -559,10 +562,41 @@ void initrd_vfs_register(void) {
     initrd_fs_type.next = NULL;
 
     vfs_register_fs(&initrd_fs_type);
-    vfs_mount(NULL, "/initrd", "initrd");
 }
 
 void initrd_copy_to_root(void) {
+    uint32_t dirs_created;
+    uint32_t files_copied;
+    uint32_t errors;
+    const char *root_dirs[] = {
+        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
+        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
+        NULL
+    };
+    const char *nested_dirs[] = {
+        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
+        "/var/log", "/var/run", "/var/tmp",
+        NULL
+    };
+    const char **p;
+    int r;
+    uint32_t i;
+    initrd_file_t *f;
+    char destpath[INITRD_MAX_PATH];
+    char tmp[INITRD_MAX_PATH];
+    int cur;
+    char namebuf[VFS_MAX_NAME];
+    char newtmp[INITRD_MAX_PATH];
+    int k;
+    bool is_root_level_dir;
+    bool is_standard_root;
+    int dlen;
+    int cp;
+    char sub[INITRD_MAX_PATH];
+    int sublen;
+    int ret;
+    int written;
+
     if (!files || file_count == 0) {
         printf("INITRD: No files to copy to root\n");
         return;
@@ -570,88 +604,70 @@ void initrd_copy_to_root(void) {
     
     printf("INITRD: Copying %u files to /...\n", file_count);
     
-    uint32_t dirs_created = 0;
-    uint32_t files_copied = 0;
-    uint32_t errors = 0;
+    dirs_created = 0;
+    files_copied = 0;
+    errors = 0;
 
-    {
-        const char *root_dirs[] = {
-            "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
-            "/usr", "/var", "/tmp", "/proc", "/run", "/root",
-            NULL
-        };
-        for (const char **p = root_dirs; *p; p++) {
-            int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-            if (r == 0) {
-                printf("INITRD: Created root dir %s\n", *p);
-                dirs_created++;
-            } else {
-                printf("INITRD: Failed to create root dir %s (%d)\n", *p, r);
-                errors++;
-            }
-        }
-        
-        const char *nested_dirs[] = {
-            "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
-            "/var/log", "/var/run", "/var/tmp",
-            NULL
-        };
-        for (const char **p = nested_dirs; *p; p++) {
-            int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-            if (r == 0) {
-                printf("INITRD: Created nested dir %s\n", *p);
-                dirs_created++;
-            } else {
-                printf("INITRD: Failed to create nested dir %s (%d)\n", *p, r);
-                errors++;
-            }
+    for (p = root_dirs; *p; p++) {
+        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        if (r == 0) {
+            printf("INITRD: Created root dir %s\n", *p);
+            dirs_created++;
+        } else {
+            printf("INITRD: Failed to create root dir %s (%d)\n", *p, r);
+            errors++;
         }
     }
     
-    for (uint32_t i = 0; i < file_count; i++) {
-        initrd_file_t *f = &files[i];
+    for (p = nested_dirs; *p; p++) {
+        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        if (r == 0) {
+            printf("INITRD: Created nested dir %s\n", *p);
+            dirs_created++;
+        } else {
+            printf("INITRD: Failed to create nested dir %s (%d)\n", *p, r);
+            errors++;
+        }
+    }
+    
+    for (i = 0; i < file_count; i++) {
+        f = &files[i];
         
         if (!f || f->name[0] == '\0') {
             continue;
         }
         
-        char destpath[INITRD_MAX_PATH];
         destpath[0] = '\0';
-        {
-            char tmp[INITRD_MAX_PATH];
-            tmp[0] = '\0';
-            int cur = (int)i;
-            while (cur >= 0 && cur < (int)file_count) {
-                char namebuf[VFS_MAX_NAME];
-                int k = 0;
-                while (k < VFS_MAX_NAME - 1 && files[cur].name[k]) { 
-                    namebuf[k] = files[cur].name[k]; 
-                    k++; 
-                }
-                namebuf[k] = '\0';
-                char newtmp[INITRD_MAX_PATH];
-                if (tmp[0] == '\0') {
-                    snprintf(newtmp, sizeof(newtmp), "/%s", namebuf);
-                } else {
-                    snprintf(newtmp, sizeof(newtmp), "/%s%s", namebuf, tmp);
-                }
-                strncpy(tmp, newtmp, sizeof(tmp) - 1);
-                tmp[sizeof(tmp) - 1] = '\0';
-                if (files[cur].parent_index == 0xFFFF || files[cur].parent_index >= file_count) {
-                    break;
-                }
-                cur = (int)files[cur].parent_index;
+        tmp[0] = '\0';
+        cur = (int)i;
+        while (cur >= 0 && cur < (int)file_count) {
+            k = 0;
+            while (k < VFS_MAX_NAME - 1 && files[cur].name[k]) { 
+                namebuf[k] = files[cur].name[k]; 
+                k++; 
             }
-            strncpy(destpath, tmp, sizeof(destpath) - 1);
-            destpath[sizeof(destpath) - 1] = '\0';
+            namebuf[k] = '\0';
+            if (tmp[0] == '\0') {
+                snprintf(newtmp, sizeof(newtmp), "/%s", namebuf);
+            } else {
+                snprintf(newtmp, sizeof(newtmp), "/%s%s", namebuf, tmp);
+            }
+            strncpy(tmp, newtmp, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = '\0';
+            if (files[cur].parent_index == 0xFFFF || files[cur].parent_index >= file_count) {
+                break;
+            }
+            cur = (int)files[cur].parent_index;
         }
+        strncpy(destpath, tmp, sizeof(destpath) - 1);
+        destpath[sizeof(destpath) - 1] = '\0';
 
         printf("INITRD_COPY: i=%u name='%s' parent=%u type=%u dest='%s'\n", 
                (unsigned)i, files[i].name, files[i].parent_index, files[i].type, destpath);
 
-        bool is_root_level_dir = (files[i].parent_index == 0xFFFF && files[i].type == INITRD_TYPE_DIR);
+        is_root_level_dir = (files[i].parent_index == 0xFFFF && files[i].type == INITRD_TYPE_DIR);
         if (is_root_level_dir) {
-            bool is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
+            is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
                                      strcmp(destpath, "/etc") == 0 || strcmp(destpath, "/home") == 0 ||
                                      strcmp(destpath, "/lib") == 0 || strcmp(destpath, "/sbin") == 0 ||
                                      strcmp(destpath, "/usr") == 0 || strcmp(destpath, "/var") == 0 ||
@@ -663,22 +679,21 @@ void initrd_copy_to_root(void) {
             }
         }
 
-        int dlen = (int)strlen(destpath);
-        for (int cp = 1; cp < dlen; cp++) {
+        dlen = (int)strlen(destpath);
+        for (cp = 1; cp < dlen; cp++) {
             if (destpath[cp] == '/') {
-                char sub[INITRD_MAX_PATH];
-                int sublen = cp;
+                sublen = cp;
                 memcpy(sub, destpath, sublen);
                 sub[sublen] = '\0';
                 if (sublen > 1) {
-                    int r = ramfs_create_dir(sub, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+                    r = ramfs_create_dir(sub, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
                     (void)r; 
                 }
             }
         }
 
         if (f->type == INITRD_TYPE_DIR) {
-            int ret = ramfs_create_dir(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            ret = ramfs_create_dir(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
             if (ret == 0) {
                 dirs_created++;
             } else if (ret != RAMFS_ERR_EXIST) {
@@ -686,10 +701,10 @@ void initrd_copy_to_root(void) {
                 errors++;
             }
         } else {
-            int ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
-                    int written = ramfs_write(destpath, 0, f->data, f->length);
+                    written = ramfs_write(destpath, 0, f->data, f->length);
                     if (written >= 0) {
                         files_copied++;
                     } else {
@@ -710,24 +725,75 @@ void initrd_copy_to_root(void) {
 }
 
 void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
+    uint32_t mods_start_page;
+    uint32_t mods_end_page;
+    uint32_t phys;
+    uint32_t virt;
+    multiboot_module_t *mods;
+    multiboot_module_t *mod;
+    uint32_t mod_start_phys;
+    uint32_t mod_end_phys;
+    uint32_t mod_size;
+    uint32_t start_page;
+    uint32_t end_page;
+    uint8_t *rootfs_base;
+    initrd_header_t *hdr;
+    uint32_t num_entries;
+    initrd_file_header_t *hdrs;
+    initrd_file_t *rfiles;
+    uint32_t i;
+    uint32_t dirs_created;
+    uint32_t files_copied;
+    uint32_t errors;
+    const char *root_dirs[] = {
+        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
+        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
+        NULL
+    };
+    const char *nested_dirs[] = {
+        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
+        "/var/log", "/var/run", "/var/tmp",
+        NULL
+    };
+    const char **p;
+    int r;
+    initrd_file_t *f;
+    static char destpath[INITRD_MAX_PATH];
+    static char tmp[INITRD_MAX_PATH];
+    static char namebuf[VFS_MAX_NAME];
+    static char newtmp[INITRD_MAX_PATH];
+    int cur;
+    int depth;
+    int k;
+    bool is_root_level_dir;
+    bool is_standard_root;
+    static char sub[INITRD_MAX_PATH];
+    int dlen;
+    int cp;
+    int sublen;
+    uint8_t perms;
+    int ret;
+    uint32_t hdr_off;
+    uint32_t hdr_len;
+
     if (mods_count < 2) {
         printf("ROOTFS: No rootfs module loaded (need at least 2 modules)\n");
         return;
     }
 
-    uint32_t mods_start_page = mods_addr & ~0xFFF;
-    uint32_t mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
-    for (uint32_t phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
-        uint32_t virt = phys + 0xC0000000;
+    mods_start_page = mods_addr & ~0xFFF;
+    mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
+    for (phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
+        virt = phys + 0xC0000000;
         vmm_map_page(virt, phys, 0x003);
     }
 
-    multiboot_module_t *mods = (multiboot_module_t *)(mods_addr + 0xC0000000);
-    multiboot_module_t *mod = &mods[1];
+    mods = (multiboot_module_t *)(mods_addr + 0xC0000000);
+    mod = &mods[1];
     
-    uint32_t mod_start_phys = mod->mod_start;
-    uint32_t mod_end_phys = mod->mod_end;
-    uint32_t mod_size = mod_end_phys - mod_start_phys;
+    mod_start_phys = mod->mod_start;
+    mod_end_phys = mod->mod_end;
+    mod_size = mod_end_phys - mod_start_phys;
     
     printf("ROOTFS: Module at phys 0x%08X - 0x%08X (%u bytes)\n", 
            mod_start_phys, mod_end_phys, mod_size);
@@ -737,15 +803,15 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         return;
     }
 
-    uint32_t start_page = mod_start_phys & ~0xFFF;
-    uint32_t end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
-    for (uint32_t phys = start_page; phys < end_page; phys += 0x1000) {
-        uint32_t virt = phys + 0xC0000000;
+    start_page = mod_start_phys & ~0xFFF;
+    end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
+    for (phys = start_page; phys < end_page; phys += 0x1000) {
+        virt = phys + 0xC0000000;
         vmm_map_page(virt, phys, 0x003);
     }
 
-    uint8_t *rootfs_base = (uint8_t *)(mod_start_phys + 0xC0000000);
-    initrd_header_t *hdr = (initrd_header_t *)rootfs_base;
+    rootfs_base = (uint8_t *)(mod_start_phys + 0xC0000000);
+    hdr = (initrd_header_t *)rootfs_base;
 
     if (hdr->magic != INITRD_MAGIC) {
         printf("ROOTFS: Invalid magic (got 0x%08X, expected 0x%08X)\n", 
@@ -753,7 +819,7 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         return;
     }
 
-    uint32_t num_entries = hdr->num_entries;
+    num_entries = hdr->num_entries;
     printf("ROOTFS: Found %u entries\n", num_entries);
 
     if (num_entries == 0) {
@@ -766,16 +832,16 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         num_entries = 1000;
     }
 
-    initrd_file_header_t *hdrs = (initrd_file_header_t *)(rootfs_base + sizeof(initrd_header_t));
+    hdrs = (initrd_file_header_t *)(rootfs_base + sizeof(initrd_header_t));
 
-    initrd_file_t *rfiles = (initrd_file_t *)kmalloc(num_entries * sizeof(initrd_file_t));
+    rfiles = (initrd_file_t *)kmalloc(num_entries * sizeof(initrd_file_t));
     if (!rfiles) {
         printf("ROOTFS: Failed to allocate file array\n");
         return;
     }
     memset(rfiles, 0, num_entries * sizeof(initrd_file_t));
 
-    for (uint32_t i = 0; i < num_entries; i++) {
+    for (i = 0; i < num_entries; i++) {
         memcpy(rfiles[i].name, hdrs[i].name, 64);
         rfiles[i].length = hdrs[i].length;
         rfiles[i].type = hdrs[i].type;
@@ -785,63 +851,59 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         rfiles[i].gid = hdrs[i].gid;
 
         if (rfiles[i].type == INITRD_TYPE_FILE) {
-            rfiles[i].offset = hdrs[i].offset;
-            rfiles[i].data = rootfs_base + hdrs[i].offset;
-            DPRINTF4("ROOTFS_HDR[%u]: '%s' type=FILE offset=%u length=%u data=%p\n", 
-                   i, rfiles[i].name, rfiles[i].offset, rfiles[i].length, rfiles[i].data);
+            hdr_off = hdrs[i].offset;
+            hdr_len = hdrs[i].length;
+
+            if (hdr_off + hdr_len > mod_size) {
+                printf("ROOTFS: File %u (%s) out-of-bounds\n",
+                       i, rfiles[i].name);
+                rfiles[i].offset = hdr_off;
+                rfiles[i].data = NULL;
+                rfiles[i].length = 0;
+                continue;
+            }
+
+            rfiles[i].offset = hdr_off;
+            rfiles[i].data = rootfs_base + hdr_off;
+            rfiles[i].length = hdr_len;
+            rfiles[i].offset = 0;
+            rfiles[i].length = hdr_len;
         } else {
             rfiles[i].offset = 0;
             rfiles[i].data = NULL;
-            DPRINTF4("ROOTFS_HDR[%u]: '%s' type=DIR parent=%u\n", 
-                   i, rfiles[i].name, rfiles[i].parent_index);
         }
     }
 
     printf("ROOTFS: Copying %u files to /...\n", num_entries);
     
-    uint32_t dirs_created = 0;
-    uint32_t files_copied = 0;
-    uint32_t errors = 0;
+    dirs_created = 0;
+    files_copied = 0;
+    errors = 0;
 
-    const char *root_dirs[] = {
-        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
-        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
-        NULL
-    };
-    for (const char **p = root_dirs; *p; p++) {
-        int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    for (p = root_dirs; *p; p++) {
+        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         if (r == 0) dirs_created++;
     }
     
-    const char *nested_dirs[] = {
-        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
-        "/var/log", "/var/run", "/var/tmp",
-        NULL
-    };
-    for (const char **p = nested_dirs; *p; p++) {
-        int r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    for (p = nested_dirs; *p; p++) {
+        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         if (r == 0) dirs_created++;
     }
 
-    for (uint32_t i = 0; i < num_entries; i++) {
-        initrd_file_t *f = &rfiles[i];
+    for (i = 0; i < num_entries; i++) {
+        f = &rfiles[i];
         
         if (!f || f->name[0] == '\0') continue;
-        
-        static char destpath[INITRD_MAX_PATH];
-        static char tmp[INITRD_MAX_PATH];
-        static char namebuf[VFS_MAX_NAME];
-        static char newtmp[INITRD_MAX_PATH];
         
         destpath[0] = '\0';
         tmp[0] = '\0';
         namebuf[0] = '\0';
         newtmp[0] = '\0';
         
-        int cur = (int)i;
-        int depth = 0;
+        cur = (int)i;
+        depth = 0;
         while (cur >= 0 && cur < (int)num_entries && depth < 16) {
-            int k = 0;
+            k = 0;
             while (k < VFS_MAX_NAME - 1 && rfiles[cur].name[k]) { 
                 namebuf[k] = rfiles[cur].name[k]; 
                 k++; 
@@ -865,9 +927,9 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         
         if (destpath[0] == '\0') continue;
 
-        bool is_root_level_dir = (rfiles[i].parent_index == 0xFFFF && rfiles[i].type == INITRD_TYPE_DIR);
+        is_root_level_dir = (rfiles[i].parent_index == 0xFFFF && rfiles[i].type == INITRD_TYPE_DIR);
         if (is_root_level_dir) {
-            bool is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
+            is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
                                      strcmp(destpath, "/etc") == 0 || strcmp(destpath, "/home") == 0 ||
                                      strcmp(destpath, "/lib") == 0 || strcmp(destpath, "/sbin") == 0 ||
                                      strcmp(destpath, "/usr") == 0 || strcmp(destpath, "/var") == 0 ||
@@ -876,11 +938,10 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
             if (is_standard_root) continue;
         }
 
-        static char sub[INITRD_MAX_PATH];
-        int dlen = (int)strlen(destpath);
-        for (int cp = 1; cp < dlen; cp++) {
+        dlen = (int)strlen(destpath);
+        for (cp = 1; cp < dlen; cp++) {
             if (destpath[cp] == '/') {
-                int sublen = cp;
+                sublen = cp;
                 memcpy(sub, destpath, sublen);
                 sub[sublen] = '\0';
                 if (sublen > 1) {
@@ -889,7 +950,7 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
             }
         }
 
-        uint8_t perms = f->permissions;
+        perms = f->permissions;
         if (!perms) {
             perms = (f->type == INITRD_TYPE_DIR)
                         ? (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC)
@@ -897,31 +958,27 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
         }
 
         if (f->type == INITRD_TYPE_DIR) {
-            int ret = ramfs_create_dir(destpath, perms);
+            ret = ramfs_create_dir(destpath, perms);
             if (ret == 0) dirs_created++;
             else if (ret != RAMFS_ERR_EXIST) errors++;
         } else {
-            DPRINTF4("ROOTFS: Creating file '%s' length=%u data=%p\n", destpath, f->length, f->data);
-            int ret = ramfs_create_file(destpath, perms);
-            DPRINTF4("ROOTFS: ramfs_create_file returned %d\n", ret);
+            ret = ramfs_create_file(destpath, perms);
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
-                    int written = ramfs_write(destpath, 0, f->data, f->length);
-                    DPRINTF4("ROOTFS: ramfs_write returned %d for '%s'\n", written, destpath);
-                    if (written >= 0) files_copied++;
+                    ret = ramfs_set_backing(destpath, f->data, f->length);
+                    if (ret == 0) files_copied;
                     else errors++;
                 } else {
-                    DPRINTF1("ROOTFS: WARNING: no data for '%s' (data=%p length=%u)\n", destpath, f->data, f->length);
+                    DEBUG_INITRD("WARNING: no data for '%s' (data=%p length=%u)\n", destpath, f->data, f->length);
                     files_copied++;
                 }
             } else {
-                DPRINTF1("ROOTFS: ERROR: ramfs_create_file failed for '%s' ret=%d\n", destpath, ret);
+                DEBUG_INITRD("ERROR: ramfs_create_file failed for '%s' ret=%d\n", destpath, ret);
                 errors++;
             }
         }
     }
     
     kfree(rfiles);
-    initrd_release_module(mod_start_phys, mod_end_phys);
-    printf("ROOTFS: Copied %u dirs, %u files (%u errors)\n", dirs_created, files_copied, errors);
+    printf("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n", dirs_created, files_copied, errors);
 }

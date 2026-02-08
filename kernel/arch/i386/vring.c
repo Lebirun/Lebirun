@@ -21,8 +21,8 @@ static volatile uint32_t print_queue_head = 0;
 static volatile uint32_t print_queue_tail = 0;
 static volatile uint32_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 1024
-#define KLOG_MAX_LEN   192
+#define KLOG_MAX_ITEMS 16
+#define KLOG_MAX_LEN   96
 
 typedef struct {
     uint16_t len;
@@ -30,14 +30,14 @@ typedef struct {
     char msg[KLOG_MAX_LEN];
 } klog_item_t;
 
-static klog_item_t klog_ring[KLOG_MAX_ITEMS];
+static klog_item_t *klog_ring;
 static volatile uint32_t klog_head = 0;
 static volatile uint32_t klog_tail = 0;
 static volatile uint32_t klog_count = 0;
 static volatile uint32_t klog_dropped = 0;
 
-#define KPRINT_MAX_ITEMS 2048
-#define KPRINT_MAX_LEN   512
+#define KPRINT_MAX_ITEMS 32
+#define KPRINT_MAX_LEN   128
 
 typedef struct {
     uint16_t len;
@@ -46,7 +46,7 @@ typedef struct {
     char msg[KPRINT_MAX_LEN];
 } kprint_item_t;
 
-static kprint_item_t kprint_ring[KPRINT_MAX_ITEMS];
+static kprint_item_t *kprint_ring;
 static volatile uint32_t kprint_head = 0;
 static volatile uint32_t kprint_tail = 0;
 static volatile uint32_t kprint_count = 0;
@@ -56,8 +56,8 @@ static volatile int kprint_ready = 0;
 
 static wait_queue_t kprint_waitq;
 
-#define SERIAL_RING_SIZE 65536
-static char serial_ring[SERIAL_RING_SIZE];
+#define SERIAL_RING_SIZE 1024
+static char *serial_ring;
 static volatile uint32_t serial_head = 0;
 static volatile uint32_t serial_tail = 0;
 static volatile uint32_t serial_count = 0;
@@ -89,17 +89,15 @@ static inline bool serial_thr_empty(void) {
     return (inb(0x3FD) & 0x20) != 0;
 }
 
-static void serial_write_polling(const char *buf, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        while (!serial_thr_empty()) {
-        }
-        outb(0x3F8, (uint8_t)buf[i]);
-    }
-}
+
 
 static void serial_write_async(const char *buf, size_t len) {
-    uint32_t flags = klog_irqsave();
-    for (size_t i = 0; i < len; i++) {
+    uint32_t flags;
+    size_t i;
+
+    if (!serial_ring) return;
+    flags = klog_irqsave();
+    for (i = 0; i < len; i++) {
         if (serial_count >= SERIAL_RING_SIZE) break;
         serial_ring[serial_tail] = buf[i];
         serial_tail = (serial_tail + 1) % SERIAL_RING_SIZE;
@@ -114,8 +112,12 @@ static void serial_write(const char *buf, size_t len) {
 }
 
 static void serial_drain(uint32_t max_chars) {
-    uint32_t flags = klog_irqsave();
-    uint32_t drained = 0;
+    uint32_t flags;
+    uint32_t drained;
+
+    if (!serial_ring) return;
+    flags = klog_irqsave();
+    drained = 0;
     while (drained < max_chars && serial_count > 0) {
         if (!serial_thr_empty()) break;
         outb(0x3F8, (uint8_t)serial_ring[serial_head]);
@@ -127,18 +129,23 @@ static void serial_drain(uint32_t max_chars) {
 }
 
 static int klog_enqueue(uint8_t level, const char *buf, uint32_t len) {
+    uint32_t flags;
+    klog_item_t *it;
+
     if (!buf || len == 0) return 0;
     if (len >= KLOG_MAX_LEN) len = KLOG_MAX_LEN - 1;
 
     serial_write(buf, len);
 
-    uint32_t flags = klog_irqsave();
+    if (!klog_ring) return (int)len;
+
+    flags = klog_irqsave();
     if (klog_count >= KLOG_MAX_ITEMS) {
         klog_dropped++;
         klog_irqrestore(flags);
         return (int)len;
     }
-    klog_item_t *it = &klog_ring[klog_tail];
+    it = &klog_ring[klog_tail];
     it->level = level;
     it->len = (uint16_t)len;
     memcpy(it->msg, buf, len);
@@ -151,8 +158,11 @@ static int klog_enqueue(uint8_t level, const char *buf, uint32_t len) {
 }
 
 static int klog_dequeue(klog_item_t *out) {
+    uint32_t flags;
+
     if (!out) return -1;
-    uint32_t flags = klog_irqsave();
+    if (!klog_ring) return -1;
+    flags = klog_irqsave();
     if (klog_count == 0) {
         klog_irqrestore(flags);
         return -1;
@@ -165,22 +175,23 @@ static int klog_dequeue(klog_item_t *out) {
 }
 
 static int kprint_try_enqueue(uint8_t con_id, const char *buf, uint32_t len) {
+    uint32_t flags;
+    kprint_item_t *it;
+
     if (!buf || len == 0) return 0;
     if (len >= KPRINT_MAX_LEN) len = KPRINT_MAX_LEN - 1;
 
     if (con_id >= NUM_CONSOLES) con_id = 0;
 
-    if (con_id == 0) {
-        serial_write(buf, len);
-    }
+    if (!kprint_ring) return -1;
 
-    uint32_t flags = klog_irqsave();
+    flags = klog_irqsave();
     if (kprint_count >= KPRINT_MAX_ITEMS) {
         kprint_dropped++;
         klog_irqrestore(flags);
         return -1;
     }
-    kprint_item_t *it = &kprint_ring[kprint_tail];
+    it = &kprint_ring[kprint_tail];
     it->con_id = con_id;
     it->len = (uint16_t)len;
     memcpy(it->msg, buf, len);
@@ -193,8 +204,11 @@ static int kprint_try_enqueue(uint8_t con_id, const char *buf, uint32_t len) {
 }
 
 static int kprint_dequeue(kprint_item_t *out) {
+    uint32_t flags;
+
     if (!out) return -1;
-    uint32_t flags = klog_irqsave();
+    if (!kprint_ring) return -1;
+    flags = klog_irqsave();
     if (kprint_count == 0) {
         klog_irqrestore(flags);
         return -1;
@@ -212,6 +226,7 @@ int kprint_write(int console_id, const char *buf, size_t len) {
     int con_id;
     size_t off;
     uint32_t chunk;
+    int retries;
     
     if (!buf || len == 0) return 0;
 
@@ -235,7 +250,21 @@ int kprint_write(int console_id, const char *buf, size_t len) {
         chunk = (uint32_t)(len - off);
         if (chunk >= (KPRINT_MAX_LEN - 1)) chunk = (KPRINT_MAX_LEN - 1);
 
-        (void)kprint_try_enqueue((uint8_t)con_id, buf + off, chunk);
+        if (con_id == 0) {
+            serial_write(buf + off, chunk);
+        }
+
+        retries = 0;
+        while (kprint_try_enqueue((uint8_t)con_id, buf + off, chunk) < 0) {
+            retries++;
+            if (retries > 64) {
+                console_write_to_fb_only(con_id, buf + off, chunk);
+                break;
+            }
+            if (interrupts_enabled() && current_task) {
+                yield();
+            }
+        }
 
         off += chunk;
     }
@@ -244,32 +273,37 @@ int kprint_write(int console_id, const char *buf, size_t len) {
 }
 
 int klog_printf(int level, const char *fmt, ...) {
-    extern bool debugMode;
-    extern int debugLevel;
-    if (!debugMode || level > debugLevel) return 0;
-    if (!fmt) return 0;
-
     char tmp[KLOG_MAX_LEN];
     va_list ap;
+    int n;
+    uint32_t len;
+    
+    (void)level;
+    if (!fmt) return 0;
+
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n <= 0) return 0;
-    uint32_t len = (uint32_t)n;
+    len = (uint32_t)n;
     if (len >= sizeof(tmp)) len = (uint32_t)sizeof(tmp) - 1;
     return klog_enqueue((uint8_t)level, tmp, len);
 }
 
 int klog_drain_console0(uint32_t max_items) {
+    kproc_t *kp;
+    kproc_t *prev;
+    uint32_t drained;
+    klog_item_t it;
+
     if (max_items == 0) return 0;
     if (!console_is_initialized()) return 0;
 
-    kproc_t *kp = kproc_get(-1);
-    kproc_t *prev = current_kproc;
+    kp = kproc_get(-1);
+    prev = current_kproc;
     if (kp) current_kproc = kp;
 
-    uint32_t drained = 0;
-    klog_item_t it;
+    drained = 0;
     while (drained < max_items && klog_dequeue(&it) == 0) {
         console_write_to_fb_only(0, it.msg, (size_t)it.len);
         drained++;
@@ -285,8 +319,14 @@ void kprint_poll(uint32_t max_items) {
 }
 
 void vring_init(void) {
+    int i;
+
+    klog_ring = (klog_item_t *)kmalloc(KLOG_MAX_ITEMS * sizeof(klog_item_t));
+    kprint_ring = (kprint_item_t *)kmalloc(KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
+    serial_ring = (char *)kmalloc(SERIAL_RING_SIZE);
+
     memset(subrings, 0, sizeof(subrings));
-    for (int i = 0; i < VRING_MAX_SUBRINGS; i++) {
+    for (i = 0; i < VRING_MAX_SUBRINGS; i++) {
         subrings[i].ring_major = 0;
         subrings[i].ring_minor = (uint8_t)i;
         subrings[i].active = false;
@@ -311,11 +351,13 @@ int vring_create(uint8_t minor, const char *name) {
 }
 
 int vring_add_region(uint8_t minor, uint32_t start, uint32_t end, uint8_t perms) {
+    uint32_t idx;
+
     if (minor >= VRING_MAX_SUBRINGS) return -1;
     if (!subrings[minor].active) return -2;
     if (subrings[minor].region_count >= VRING_MAX_REGIONS) return -3;
     
-    uint32_t idx = subrings[minor].region_count;
+    idx = subrings[minor].region_count;
     subrings[minor].allowed_regions[idx].start = start;
     subrings[minor].allowed_regions[idx].end = end;
     subrings[minor].allowed_regions[idx].permissions = perms;
@@ -342,15 +384,19 @@ vring_t *vring_get(uint8_t minor) {
 }
 
 bool vring_check_access(uint8_t minor, uint32_t addr, uint32_t size, uint8_t access_type) {
+    vring_t *ring;
+    uint32_t end_addr;
+    uint32_t i;
+
     if (!vring_initialized) return true;
     if (minor == 0) return true;
     if (minor >= VRING_MAX_SUBRINGS) return false;
     if (!subrings[minor].active) return false;
     
-    vring_t *ring = &subrings[minor];
-    uint32_t end_addr = addr + size;
+    ring = &subrings[minor];
+    end_addr = addr + size;
     
-    for (uint32_t i = 0; i < ring->region_count; i++) {
+    for (i = 0; i < ring->region_count; i++) {
         vring_mem_region_t *region = &ring->allowed_regions[i];
         
         if (addr >= region->start && end_addr <= region->end) {
@@ -366,7 +412,8 @@ bool vring_check_access(uint8_t minor, uint32_t addr, uint32_t size, uint8_t acc
 void vring_panic_forbidden(uint8_t minor, uint32_t addr, uint8_t access_type) {
     char reason_buf[256];
     char *p = reason_buf;
-    int i, len;
+    int i;
+    vring_t *ring;
     
     p += sprintf(p, "Virtual Ring Violation - Ring 0.");
     p += sprintf(p, "%d", minor);
@@ -381,10 +428,10 @@ void vring_panic_forbidden(uint8_t minor, uint32_t addr, uint8_t access_type) {
     if (access_type & VRING_PERM_WRITE) p += sprintf(p, "WRITE ");
     if (access_type & VRING_PERM_EXEC) p += sprintf(p, "EXEC ");
     
-    vring_t *ring = vring_get(minor);
+    ring = vring_get(minor);
     if (ring) {
         p += sprintf(p, "\nAllowed regions: ");
-        for (uint32_t i = 0; i < ring->region_count && i < 3; i++) {
+        for (i = 0; (uint32_t)i < ring->region_count && i < 3; i++) {
             p += sprintf(p, "[0x%08X-0x%08X] ", 
                 ring->allowed_regions[i].start,
                 ring->allowed_regions[i].end);
@@ -395,8 +442,10 @@ void vring_panic_forbidden(uint8_t minor, uint32_t addr, uint8_t access_type) {
 }
 
 void kproc_init(void) {
+    int i;
+
     memset(kernel_procs, 0, sizeof(kernel_procs));
-    for (int i = 0; i < KPROC_MAX; i++) {
+    for (i = 0; i < KPROC_MAX; i++) {
         kernel_procs[i].pid = 0;
         kernel_procs[i].state = KPROC_STATE_NONE;
         kernel_procs[i].vring_minor = 0;
@@ -413,10 +462,14 @@ void kproc_init(void) {
 }
 
 int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry, void *priv) {
+    int slot;
+    int i;
+    int32_t pid;
+
     if (!kproc_initialized) return 0;
     
-    int slot = -1;
-    for (int i = 0; i < KPROC_MAX; i++) {
+    slot = -1;
+    for (i = 0; i < KPROC_MAX; i++) {
         if (kernel_procs[i].state == KPROC_STATE_NONE) {
             slot = i;
             break;
@@ -425,7 +478,7 @@ int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry,
     
     if (slot < 0) return 0;
     
-    int32_t pid = next_kproc_pid;
+    pid = next_kproc_pid;
     next_kproc_pid--;
     
     kernel_procs[slot].pid = pid;
@@ -442,9 +495,11 @@ int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry,
 }
 
 kproc_t *kproc_get(int32_t pid) {
+    int i;
+
     if (pid >= 0) return NULL;
     
-    for (int i = 0; i < KPROC_MAX; i++) {
+    for (i = 0; i < KPROC_MAX; i++) {
         if (kernel_procs[i].pid == pid && kernel_procs[i].state != KPROC_STATE_NONE) {
             return &kernel_procs[i];
         }
@@ -501,10 +556,7 @@ void kproc_print_string(const char *str, size_t len) {
 }
 
 void kproc_debug_log(const char *msg, int level) {
-    extern bool debugMode;
-    extern int debugLevel;
-    
-    if (!debugMode || level > debugLevel) return;
+    (void)level;
     
     if (!msg) return;
     klog_enqueue((uint8_t)level, msg, (uint32_t)klog_strnlen(msg, KLOG_MAX_LEN - 2));
@@ -513,15 +565,21 @@ void kproc_debug_log(const char *msg, int level) {
 
 static void klog_task_main(void) {
     while (1) {
+        uint32_t did;
+        uint32_t drained;
+        kprint_item_t it;
+        klog_item_t kit;
+        int con_id;
+        uint32_t backlog;
+
         waitq_wait(&kprint_waitq);
 
         while (kprint_count > 0 || klog_count > 0) {
-            uint32_t did = 0;
+            did = 0;
 
-            uint32_t drained = 0;
-            kprint_item_t it;
-            while (drained < 8 && kprint_dequeue(&it) == 0) {
-                int con_id = it.con_id;
+            drained = 0;
+            while (drained < 32 && kprint_dequeue(&it) == 0) {
+                con_id = it.con_id;
                 if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
                 console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
                 drained++;
@@ -529,17 +587,16 @@ static void klog_task_main(void) {
             did += drained;
 
             drained = 0;
-            klog_item_t kit;
-            while (drained < 4 && klog_dequeue(&kit) == 0) {
-                kprint_serial_async(kit.msg, (size_t)kit.len);
+            while (drained < 8 && klog_dequeue(&kit) == 0) {
+                console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
                 drained++;
             }
             did += drained;
 
             if (did == 0) break;
 
-            uint32_t backlog = kprint_count + klog_count;
-            if (backlog >= 2048) {
+            backlog = kprint_count + klog_count;
+            if (backlog >= 256) {
                 sleep_ms(1);
             } else {
                 yield();
@@ -549,6 +606,9 @@ static void klog_task_main(void) {
 }
 
 void kproc_print_init(void) {
+    int32_t pid;
+    task_t *t;
+
     vring_create(1, "kprint");
 
     waitq_init(&kprint_waitq);
@@ -565,11 +625,11 @@ void kproc_print_init(void) {
     vring_add_region(1, 0x000B8000, 0x000B9000,
                      VRING_PERM_READ | VRING_PERM_WRITE);
     
-    int32_t pid = kproc_create("kprint", 1, NULL, NULL);
+    pid = kproc_create("kprint", 1, NULL, NULL);
 
     if (pid == -1) {
         kprint_ready = 1;
-        task_t *t = create_task(klog_task_main, TASK_READY, false);
+        t = create_task(klog_task_main, TASK_READY, false);
         if (t) {
             t->is_user = false;
             task_set_vring(t, 1);

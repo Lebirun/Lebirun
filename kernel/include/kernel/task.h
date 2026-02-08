@@ -5,7 +5,7 @@
 #include <kernel/registers.h>
 #include <stdint.h>
 
-#define TASK_MAX_FDS 64
+#define TASK_MAX_FDS 16
 
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
@@ -68,7 +68,7 @@ typedef struct task {
     int console_id;
     uint32_t tls_base;
     uint32_t tls_limit;
-    char cwd[256];
+    char cwd[128];
     char **envp;
     int envc;
     task_fd_t fds[TASK_MAX_FDS];
@@ -81,7 +81,7 @@ typedef struct task {
     uint32_t sgid;
     uint32_t fsuid;
     uint32_t fsgid;
-    uint32_t groups[32];
+    uint32_t groups[16];
     int ngroups;
     
     pid_t pgid;

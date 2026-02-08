@@ -5,15 +5,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define NUM_CONSOLES 9
-#define CONSOLE_BUFFER_ROWS 256
-#define CONSOLE_BUFFER_COLS 512
-#define CONSOLE_WRITE_BUFFER_SIZE 16384
+#define NUM_CONSOLES 2
+#define CONSOLE_BUFFER_ROWS 64
+#define CONSOLE_BUFFER_COLS 160
+#define CONSOLE_WRITE_BUFFER_SIZE 8192
 
 bool console_is_initialized(void);
 
 typedef struct {
-    char buffer[CONSOLE_BUFFER_ROWS][CONSOLE_BUFFER_COLS];
+    char (*buffer)[CONSOLE_BUFFER_COLS];
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t scroll_offset;
@@ -22,10 +22,11 @@ typedef struct {
     char esc_buf[32];
     int esc_len;
     
-    char write_buffer[CONSOLE_WRITE_BUFFER_SIZE];
+    char *write_buffer;
     volatile uint32_t write_head;
     volatile uint32_t write_tail;
     volatile uint32_t dirty;
+    int allocated;
 } console_t;
 
 void console_init(void);

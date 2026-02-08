@@ -33,6 +33,8 @@ typedef struct ramfs_node {
     uint32_t length;
     uint8_t *data;
     uint32_t data_capacity;
+    const uint8_t *backing_data;
+    uint32_t backing_length;
     uint32_t atime;
     uint32_t mtime;
     uint32_t ctime;
@@ -65,6 +67,7 @@ int ramfs_truncate(const char *path, uint32_t length);
 int ramfs_rename(const char *old_path, const char *new_path);
 int ramfs_chmod(const char *path, uint32_t mode);
 int ramfs_chown(const char *path, uint32_t uid, uint32_t gid);
+int ramfs_set_backing(const char *path, const uint8_t *data, uint32_t length);
 
 ramfs_node_t *ramfs_get_root(void);
 ramfs_node_t *ramfs_find_node(const char *path);

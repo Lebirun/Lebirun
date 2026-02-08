@@ -19,12 +19,12 @@
 #define KERR_ENOEXEC 8
 #define KERR_ENOMEM  12
 
-#define TASK_STACK_SIZE 8192
+#define TASK_STACK_SIZE 4096
 #define SCHED_DEFAULT_TIMESLICE 5
-#define KERNEL_STACK_SIZE 16384
+#define KERNEL_STACK_SIZE 8192
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_SIZE 0x4000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 
@@ -229,25 +229,34 @@ task_t* waitq_pop(wait_queue_t* q) {
 
 void waitq_wake_all(wait_queue_t* q) {
     task_t *t;
+    uint32_t flags;
 
     if (!q) return;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     while ((t = waitq_pop(q))) {
         if (t->state == TASK_BLOCKED) t->state = TASK_READY;
     }
+    __asm__ volatile("push %0; popf" : : "r"(flags));
 }
 
 void waitq_wake_one(wait_queue_t *q) {
     task_t *t;
+    uint32_t flags;
 
     if (!q) return;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     t = waitq_pop(q);
     if (t && t->state == TASK_BLOCKED) t->state = TASK_READY;
+    __asm__ volatile("push %0; popf" : : "r"(flags));
 }
 
 void waitq_wait(wait_queue_t *q) {
+    uint32_t flags;
     if (!q || !current_task) return;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     waitq_add(q, current_task);
     current_task->state = TASK_BLOCKED;
+    __asm__ volatile("push %0; popf" : : "r"(flags));
     yield();
 }
 
@@ -406,12 +415,10 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     uint32_t *kesp;
     uint32_t *esp;
     uint32_t user_esp;
-    registers_t *frame;
 
     if (!entry) return NULL;
 
-    DPRINTF3("create_task_with_cr3: verify heap before alloc\n");
-    if (debugMode && debugLevel >= 3) {
+    if (debug_task) {
         static uint32_t last_verify_tick = 0;
         static uint32_t last_seen_tick = 0;
         static uint32_t same_tick_calls = 0;
@@ -433,7 +440,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
-        if (debugMode && debugLevel >= 3) {
+        if (debug_task) {
             static uint32_t last_verify_tick_fail = 0;
             uint32_t now;
             
@@ -465,7 +472,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->next = NULL;
     new_task->cr3 = cr3;
     new_task->console_id = -1; 
-    DPRINTF3("create_task_with_cr3: new task id=%u cr3=0x%08X\n", new_task->id, cr3);
+    DEBUG_TASK("new task id=%u cr3=0x%08X\n", new_task->id, cr3);
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->stack_base = stack_base;
@@ -524,11 +531,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->user_brk = 0;
         new_task->mmap_next_addr = 0x10000000;
         
-        frame = (registers_t*)kesp;
-        DPRINTF3("User task frame at 0x%08X:\n", (uint32_t)kesp);
-        DPRINTF3("  EIP=0x%08X CS=0x%04X EFLAGS=0x%08X\n", frame->eip, frame->cs, frame->eflags);
-        DPRINTF3("  useresp=0x%08X SS=0x%04X\n", frame->useresp, frame->ss);
-        DPRINTF3("  DS=0x%04X ES=0x%04X FS=0x%04X GS=0x%04X\n", frame->ds, frame->es, frame->fs, frame->gs);
     } else {
         esp = (uint32_t*)(stack_base + TASK_STACK_SIZE);
         *--esp = 0x202;
@@ -546,7 +548,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.ds = new_task->regs.es = new_task->regs.fs = new_task->regs.gs = 0x10;
     }
 
-    DPRINTF2("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X ptr=0x%08X%s\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, (uint32_t)new_task, user_mode ? " (USER)" : "");
+    DEBUG_TASK("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X%s\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, user_mode ? " (USER)" : "");
 
     return new_task;
 }
@@ -967,7 +969,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         prev_task->time_slice = prev_task->base_time_slice;
     }
 
-    next = ready_queue_head;
+    next = prev_task->next ? prev_task->next : ready_queue_head;
     start = next;
     safety = 0;
     
@@ -1192,7 +1194,7 @@ pid_t task_fork(registers_t *parent_regs) {
         return -1;
     }
 
-    DPRINTF2("task_fork: creating child task with cloned pd=0x%08X\n", child_pd);
+    DEBUG_TASK("task_fork: creating child task with cloned pd=0x%08X\n", child_pd);
 
     child = (task_t*)kmalloc(sizeof(task_t));
     kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
@@ -1282,7 +1284,7 @@ pid_t task_fork(registers_t *parent_regs) {
     add_task_to_runqueue(child);
     unlock_scheduler();
 
-    DPRINTF2("task_fork: parent pid=%d, child pid=%d\n", current_task->pid, child->pid);
+    DEBUG_TASK("task_fork: parent pid=%d, child pid=%d\n", current_task->pid, child->pid);
 
     return child->pid;
 }
@@ -1345,7 +1347,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         return -1;
     }
 
-    DPRINTF2("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
+    DEBUG_TASK("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
 
     old_pd = current_task->pd_phys;
     old_user_pages = current_task->user_pages;
@@ -1542,7 +1544,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
         current_task->exec_old_pages = old_user_pages;
         current_task->exec_old_pages_count = old_user_pages_count;
 
-        DPRINTF2("task_exec: new ELF entry at 0x%08X, stack at 0x%08X new_pd=0x%08X (CR3 switch deferred)\n", 
+        DEBUG_TASK("task_exec: new ELF entry at 0x%08X, stack at 0x%08X new_pd=0x%08X (CR3 switch deferred)\n", 
                  final_entry, final_sp, new_pd);
     }
 
@@ -1590,11 +1592,9 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         check_stack_base = (uint32_t)current_task->kernel_stack_base;
         check_stack_top = check_stack_base + current_task->kernel_stack_size;
         if (stack_ptr < check_stack_base || stack_ptr > check_stack_top) {
-            DPRINTF1("task_exec_with_args: STACK OVERFLOW esp=0x%08X base=0x%08X top=0x%08X\n",
+            DEBUG_TASK("task_exec_with_args: STACK OVERFLOW esp=0x%08X base=0x%08X top=0x%08X\n",
                      stack_ptr, check_stack_base, check_stack_top);
         }
-        DPRINTF4("task_exec_with_args: stack esp=0x%08X base=0x%08X top=0x%08X remaining=%d\n",
-                 stack_ptr, check_stack_base, check_stack_top, stack_ptr - check_stack_base);
     }
 
     if (!current_task || !current_task->is_user) {
@@ -1739,21 +1739,8 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
 
         entry_page_addr = elf_info.entry_point & ~0xFFFu;
         entry_phys = vmm_get_phys_in_pd(new_pd, entry_page_addr);
-        DPRINTF4("task_exec_with_args: POST-ELF-LOAD entry=0x%08X entry_page=0x%08X phys=0x%08X\n",
-                 elf_info.entry_point, entry_page_addr, entry_phys);
         if (entry_phys == 0) {
-            DPRINTF1("task_exec_with_args: ERROR: entry page not mapped after elf_load\n");
-        } else {
-            uint8_t code_buf[16];
-            vmm_read_from_pd(new_pd, elf_info.entry_point, code_buf, 16);
-            DPRINTF4("task_exec_with_args: Code at entry: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
-                     code_buf[0], code_buf[1], code_buf[2], code_buf[3],
-                     code_buf[4], code_buf[5], code_buf[6], code_buf[7],
-                     code_buf[8], code_buf[9], code_buf[10], code_buf[11],
-                     code_buf[12], code_buf[13], code_buf[14], code_buf[15]);
-            if (code_buf[0] != 0x31 || code_buf[1] != 0xED) {
-                DPRINTF2("task_exec_with_args: WARNING - entry code mismatch\n");
-            }
+            DEBUG_TASK("task_exec_with_args: ERROR: entry page not mapped after elf_load\n");
         }
     }
 
@@ -1983,7 +1970,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
 
-    DPRINTF3("task_exec_with_args: entry=0x%08X esp=0x%08X new_pd=0x%08X\n", 
+    DEBUG_TASK("task_exec_with_args: entry=0x%08X esp=0x%08X new_pd=0x%08X\n", 
              final_entry, final_sp, new_pd);
 
     {
@@ -1993,11 +1980,8 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         entry_page = final_entry & ~0xFFFu;
         phys = vmm_get_phys_in_pd(new_pd, entry_page);
         
-        DPRINTF4("task_exec_with_args: POST-ELF-LOAD entry=0x%08X entry_page=0x%08X phys=0x%08X new_pd=0x%08X\n",
-                 final_entry, entry_page, phys, new_pd);
-        
         if (phys == 0) {
-            DPRINTF1("task_exec_with_args: FATAL: entry page not mapped in new_pd\n");
+            DEBUG_TASK("task_exec_with_args: FATAL: entry page not mapped in new_pd\n");
             if (current_task->user_pages) {
                 for (i = 0; i < (int)current_task->user_pages_count; i++) {
                     if (current_task->user_pages[i]) {
@@ -2062,7 +2046,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     new_task->user_brk = current_task->user_brk;
     new_task->console_id = current_task->console_id;
     
-    for (i = 0; i < 256; i++) {
+    for (i = 0; i < 128; i++) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     
@@ -2185,7 +2169,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->user_brk = current_task->user_brk;
     new_task->console_id = current_task->console_id;
     
-    for (i = 0; i < 256; i++) {
+    for (i = 0; i < 128; i++) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     

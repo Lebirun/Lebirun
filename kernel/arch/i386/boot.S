@@ -24,7 +24,7 @@ multiboot_ptr_low: .long 0
 
 .section .bootstrap_stack, "aw", @nobits
 stack_bottom:
-.skip 16384
+.skip 4096
 stack_top:
 
 .section .bss

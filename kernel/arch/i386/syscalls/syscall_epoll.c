@@ -2,10 +2,10 @@
 #include <kernel/task.h>
 #include <kernel/mutex.h>
 
-#define MAX_EPOLL_INSTANCES 64
-#define MAX_EPOLL_EVENTS 256
-#define MAX_FUTEXES 256
-#define MAX_EVENTFDS 64
+#define MAX_EPOLL_INSTANCES 8
+#define MAX_EPOLL_EVENTS 32
+#define MAX_FUTEXES 32
+#define MAX_EVENTFDS 16
 
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
@@ -70,7 +70,7 @@ typedef struct {
 
 typedef struct {
     uint32_t *addr;
-    pid_t waiters[64];
+    pid_t waiters[16];
     int waiter_count;
     int in_use;
     mutex_t lock;
@@ -288,7 +288,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val) {
                 }
             }
             
-            if (f->waiter_count < 64) {
+            if (f->waiter_count < 16) {
                 f->waiters[f->waiter_count++] = current_task->pid;
             }
             mutex_unlock(&futex_lock);

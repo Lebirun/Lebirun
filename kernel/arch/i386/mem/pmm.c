@@ -50,11 +50,35 @@ bool test_bit(uint32_t bit_idx) {
 }
 
 uint32_t count_free_frames(void) {
-    uint32_t count = 0;
-    uint32_t idx;
-    for (idx = 0; idx < total_pages_managed; idx++) {
-        if (!test_bit(idx)) count++;
+    uint32_t count;
+    uint32_t i;
+    uint32_t bytes;
+    uint32_t word_count;
+    uint32_t *words;
+    uint32_t w;
+    uint32_t b;
+
+    count = 0;
+    bytes = (total_pages_managed + 7) / 8;
+    words = (uint32_t *)pfa_bitmap;
+    word_count = bytes / 4;
+
+    for (i = 0; i < word_count; i++) {
+        w = ~words[i];
+        w = w - ((w >> 1) & 0x55555555);
+        w = (w & 0x33333333) + ((w >> 2) & 0x33333333);
+        w = (w + (w >> 4)) & 0x0F0F0F0F;
+        count += (w * 0x01010101) >> 24;
     }
+
+    for (i = word_count * 4; i < bytes; i++) {
+        b = (uint32_t)(uint8_t)(~pfa_bitmap[i]);
+        b = b - ((b >> 1) & 0x55);
+        b = (b & 0x33) + ((b >> 2) & 0x33);
+        b = (b + (b >> 4)) & 0x0F;
+        count += b;
+    }
+
     return count;
 }
 
@@ -81,32 +105,6 @@ static uint32_t find_free_frames(uint32_t num) {
     }
     pfa_lock_release(eflags);
     return 0;
-}
-
-static uint32_t count_kernel_frames_in_usable(void) {
-    uint32_t count = 0;
-    uint32_t r;
-    uint32_t f;
-    uint64_t max_phys;
-    max_phys = pae_enabled ? MAX_PHYSICAL_MEMORY_PAE : MAX_PHYSICAL_MEMORY_32BIT;
-    for (r = 0; r < num_regions; r++) {
-        uint64_t region_base;
-        uint64_t region_end;
-        uint32_t start_frame;
-        uint32_t end_frame;
-        if (memory_map[r].type != 1) continue;
-        region_base = memory_map[r].base;
-        region_end = region_base + memory_map[r].length;
-        if (region_base >= max_phys) continue;
-        if (region_end > max_phys) region_end = max_phys;
-        start_frame = (uint32_t)(region_base / PAGE_SIZE);
-        end_frame = (uint32_t)((region_end + PAGE_SIZE - 1) / PAGE_SIZE);
-        if (end_frame > total_pages_managed) end_frame = total_pages_managed;
-        for (f = start_frame; f < end_frame && f < kernel_reserved_frames; f++) {
-            count++;
-        }
-    }
-    return count;
 }
 
 uint32_t pfa_alloc(void) {
@@ -193,11 +191,38 @@ void pfa_free(uint32_t phys_addr) {
     if (test_bit(idx)) {
         clear_bit(idx);
         pfa_lock_release(eflags);
-        DPRINTF5("PFA: Freed frame 0x%08X (idx %u)\n", phys_addr, idx);
     } else {
         pfa_lock_release(eflags);
         printf("PFA free: Already free? 0x%08X\n", phys_addr);
     }
+}
+
+void pfa_reclaim_kernel_range(uint32_t phys_start, uint32_t phys_end) {
+    uint32_t eflags;
+    uint32_t start_frame;
+    uint32_t end_frame;
+    uint32_t f;
+    uint32_t count;
+
+    phys_start = (phys_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    phys_end = phys_end & ~(PAGE_SIZE - 1);
+    if (phys_end <= phys_start) return;
+
+    start_frame = phys_start / PAGE_SIZE;
+    end_frame = phys_end / PAGE_SIZE;
+    count = 0;
+
+    pfa_lock_acquire(&eflags);
+    for (f = start_frame; f < end_frame && f < total_pages_managed; f++) {
+        if (test_bit(f)) {
+            clear_bit(f);
+            count++;
+        }
+    }
+    pfa_lock_release(eflags);
+
+    printf("PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
+           count, count * 4, phys_start, phys_end);
 }
 
 uint32_t pfa_alloc_contiguous(uint32_t num_frames) {
@@ -230,6 +255,7 @@ uint32_t pfa_count_free(void) {
 
 static uint32_t system_total_ram_kb = 0;
 static uint32_t system_usable_ram_kb = 0;
+static uint32_t initial_free_frames = 0;
 
 uint32_t pfa_get_total_ram_kb(void) {
     return system_total_ram_kb;
@@ -240,7 +266,15 @@ uint32_t pfa_get_usable_ram_kb(void) {
 }
 
 uint32_t pfa_get_kernel_used_kb(void) {
-    return count_kernel_frames_in_usable() * 4;
+    /* Count actually allocated frames after kernel reservation */
+    uint32_t allocated = 0;
+    uint32_t idx;
+    
+    for (idx = kernel_reserved_frames; idx < total_pages_managed; idx++) {
+        if (test_bit(idx)) allocated++;
+    }
+    
+    return allocated * 4;
 }
 
 void *pmm_alloc_page(void) {
@@ -278,7 +312,6 @@ void *pmm_alloc_page(void) {
             if (idx_alloc < total_pages_managed) {
                 set_bit(idx_alloc);
             }
-            DPRINTF5("pmm_alloc_page: alloc page phys=0x%08X idx=%u\n", (uint32_t)page, idx_alloc);
             return page;
         }
 
@@ -312,7 +345,6 @@ void *pmm_alloc_low_page(void) {
                     low_bump = try + PAGE_SIZE;
                     set_bit(idx_alloc);
                     void *page = (void *)(uint32_t)try;
-                    DPRINTF5("pmm_alloc_low_page: alloc page phys=0x%08X idx=%u\n", (uint32_t)page, idx_alloc);
                     pmm_zero_page_phys((uint32_t)page);
                     return page;
                 } else {
@@ -341,27 +373,40 @@ void *pmm_alloc_low_page(void) {
 }
 
 void pmm_zero_page_phys(uint32_t phys_addr) {
-    uint32_t temp_virt = 0xF7006000;
-    DPRINTF5("pmm_zero_page_phys: zeroing phys=0x%08X\n", phys_addr);
-    
+    uint32_t temp_virt;
     uint32_t eflags;
+    int had_if;
+    volatile uint32_t *w;
+    uint32_t i;
+    extern uint32_t pae_temp_pt_ready_check(void);
+
+    if (phys_addr < 0x00400000) {
+        w = (volatile uint32_t *)(phys_addr + 0xC0000000);
+        for (i = 0; i < PAGE_SIZE / 4; i++) {
+            w[i] = 0;
+        }
+        return;
+    }
+
+    if (pae_enabled && !pae_temp_pt_ready_check()) {
+        return;
+    }
+
+    temp_virt = 0xF7006000;
+
     __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
-    int had_if = (eflags & (1<<9)) != 0;
+    had_if = (eflags & (1<<9)) != 0;
     if (had_if) __asm__ volatile ("cli");
-    
+
     temp_map_raw(temp_virt, phys_addr);
 
-    DPRINTF5("pmm_zero_page_phys: pre-zero first dword=0x%08X\n", *(volatile uint32_t *)temp_virt);
-
-    volatile uint32_t *w = (volatile uint32_t *)temp_virt;
-    for (uint32_t i = 0; i < PAGE_SIZE / 4; i++) {
+    w = (volatile uint32_t *)temp_virt;
+    for (i = 0; i < PAGE_SIZE / 4; i++) {
         w[i] = 0;
     }
 
-    DPRINTF5("pmm_zero_page_phys: post-zero first dword=0x%08X\n", *(volatile uint32_t *)temp_virt);
-
     temp_unmap_raw(temp_virt);
-    
+
     if (had_if) __asm__ volatile ("sti");
 }
 
@@ -371,7 +416,8 @@ void pfa_init_internal_setup(uint32_t bitmap_bytes, uint32_t total_pages, uint32
     kernel_reserved_frames = kernel_frames;
 }
 
-void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb) {
+void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb, uint32_t init_free_frames) {
     system_total_ram_kb = total_kb;
     system_usable_ram_kb = usable_kb;
+    initial_free_frames = init_free_frames;
 }

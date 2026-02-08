@@ -10,17 +10,17 @@ typedef struct {
     uint32_t sgid;
     uint32_t fsuid;
     uint32_t fsgid;
-    uint32_t groups[32];
+    uint32_t groups[16];
     int ngroups;
     uint32_t umask_val;
     pid_t pgid;
     pid_t sid;
 } task_creds_t;
 
-static task_creds_t task_creds[256];
+static task_creds_t task_creds[32];
 
 static inline uint32_t task_creds_index(pid_t pid) {
-    return ((uint32_t)pid) & 255u;
+    return ((uint32_t)pid) & 31u;
 }
 
 static task_creds_t *get_task_creds(void) {
@@ -271,7 +271,7 @@ static int sys_setgroups(int size, const char *list_ptr, int unused) {
     
     if (creds->euid != 0) return -EPERM;
     
-    if (size < 0 || size > 32) return -EINVAL;
+    if (size < 0 || size > 16) return -EINVAL;
     
     if (size > 0) {
         uint32_t addr = (uint32_t)(uintptr_t)list_ptr;

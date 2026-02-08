@@ -148,7 +148,7 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
 
     valid = elf_validate(data, size);
     if (valid != 0) {
-        DPRINTF1("elf_load: validation failed with code %d\n", valid);
+        DEBUG_ELF("elf_load: validation failed with code %d\n", valid);
         return valid;
     }
 
@@ -196,11 +196,11 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
         filesz = phdr[i].p_filesz;
         offset = phdr[i].p_offset;
 
-        DPRINTF2("elf_load: segment %d vaddr=0x%08X memsz=0x%X filesz=0x%X offset=0x%X\n",
+        DEBUG_ELF("elf_load: segment %d vaddr=0x%08X memsz=0x%X filesz=0x%X offset=0x%X\n",
                  i, vaddr, memsz, filesz, offset);
 
         if (offset + filesz > size) {
-            DPRINTF1("elf_load: segment extends beyond file\n");
+            DEBUG_ELF("elf_load: segment extends beyond file\n");
             if (page_list) {
                 for (j = 0; j < page_index; j++) {
                     pfa_free(page_list[j]);
@@ -229,7 +229,7 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
             
             phys = pfa_alloc();
             if (!phys) {
-                DPRINTF1("elf_load: out of physical memory\n");
+                DEBUG_ELF("elf_load: out of physical memory\n");
                 if (page_list) {
                     for (j = 0; j < page_index; j++) {
                         pfa_free(page_list[j]);
@@ -255,12 +255,12 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
                 uint8_t verify_buf[32];
                 if (verify_phys) {
                     vmm_read_from_pd(pd_phys, vaddr, verify_buf, 32);
-                    DPRINTF4("elf_load: verify vaddr=0x%08X phys=0x%08X data[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                    DEBUG_ELF("elf_load: verify vaddr=0x%08X phys=0x%08X data[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
                              vaddr, verify_phys, 
                              verify_buf[0], verify_buf[1], verify_buf[2], verify_buf[3],
                              verify_buf[4], verify_buf[5], verify_buf[6], verify_buf[7]);
                 } else {
-                    DPRINTF2("elf_load: vaddr 0x%08X not mapped after copy\n", vaddr);
+                    DEBUG_ELF("elf_load: vaddr 0x%08X not mapped after copy\n", vaddr);
                 }
             }
         }
@@ -292,21 +292,21 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
         if (entry_page_phys) {
             uint8_t entry_code[16];
             vmm_read_from_pd(pd_phys, info->entry_point, entry_code, 16);
-            DPRINTF4("elf_load: entry=0x%08X phys=0x%08X code: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
+            DEBUG_ELF("elf_load: entry=0x%08X phys=0x%08X code: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
                      info->entry_point, entry_page_phys,
                      entry_code[0], entry_code[1], entry_code[2], entry_code[3],
                      entry_code[4], entry_code[5], entry_code[6], entry_code[7],
                      entry_code[8], entry_code[9], entry_code[10], entry_code[11],
                      entry_code[12], entry_code[13], entry_code[14], entry_code[15]);
             if (entry_code[0] != 0x31 || entry_code[1] != 0xED) {
-                DPRINTF2("elf_load: entry code mismatch\n");
+                DEBUG_ELF("elf_load: entry code mismatch\n");
             }
         } else {
-            DPRINTF1("elf_load: entry point 0x%08X not mapped\n", info->entry_point);
+            DEBUG_ELF("elf_load: entry point 0x%08X not mapped\n", info->entry_point);
         }
     }
 
-    DPRINTF2("elf_load: done entry=0x%08X load_base=0x%08X load_end=0x%08X bss_end=0x%08X\n",
+    DEBUG_ELF("elf_load: done entry=0x%08X load_base=0x%08X load_end=0x%08X bss_end=0x%08X\n",
              info->entry_point, info->load_base, info->load_end, info->bss_end);
 
     return 0;
@@ -362,7 +362,7 @@ int elf_load_so(uint32_t pd_phys, const uint8_t *data, uint32_t size, uint32_t b
 
     valid = elf_validate_so(data, size);
     if (valid != 0) {
-        DPRINTF1("elf_load_so: validation failed with code %d\n", valid);
+        DEBUG_ELF("elf_load_so: validation failed with code %d\n", valid);
         return valid;
     }
 

@@ -1,6 +1,7 @@
 #include <kernel/vfs.h>
 #include <kernel/pty.h>
 #include <kernel/mem_map.h>
+#include <kernel/console.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,24 +23,24 @@ static vfs_node_t dev_full;
 static vfs_node_t dev_mem;
 static vfs_node_t dev_kmem;
 static vfs_node_t dev_port;
-static vfs_node_t dev_ttys[9];
+static vfs_node_t dev_ttys[NUM_CONSOLES];
 
 static dirent_t dev_dirent;
 
 static uint32_t lfsr_state = 0xACE1u;
-static uint32_t entropy_pool[64];
+static uint32_t entropy_pool[16];
 static int entropy_index = 0;
 
 static void add_entropy(uint32_t val) {
     entropy_pool[entropy_index] ^= val;
-    entropy_index = (entropy_index + 1) & 63;
+    entropy_index = (entropy_index + 1) & 15;
     lfsr_state ^= entropy_pool[entropy_index];
 }
 
 static uint32_t lfsr_rand(void) {
     uint32_t bit = ((lfsr_state >> 0) ^ (lfsr_state >> 2) ^ (lfsr_state >> 3) ^ (lfsr_state >> 5)) & 1;
     lfsr_state = (lfsr_state >> 1) | (bit << 31);
-    lfsr_state ^= entropy_pool[(entropy_index + (lfsr_state & 63)) & 63];
+    lfsr_state ^= entropy_pool[(entropy_index + (lfsr_state & 15)) & 15];
     return lfsr_state;
 }
 
@@ -136,18 +137,29 @@ static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     (void)node;
     
-    static const char *entries[] = {
+    static const char *base_entries[] = {
         "null", "zero", "urandom", "random", "tty", "console",
         "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
-        "mem", "kmem", "port", 
-        "tty0", "tty1", "tty2", "tty3", "tty4", "tty5", "tty6", "tty7", "tty8"
+        "mem", "kmem", "port"
     };
     
-    if (index < sizeof(entries)/sizeof(entries[0])) {
-        strcpy(dev_dirent.name, entries[index]);
+    if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
+        strcpy(dev_dirent.name, base_entries[index]);
         dev_dirent.inode = index + 1;
         dev_dirent.type = VFS_CHARDEVICE;
         if (index == 9 || index == 11) dev_dirent.type = VFS_DIRECTORY;
+        return &dev_dirent;
+    }
+    
+    index -= sizeof(base_entries)/sizeof(base_entries[0]);
+    if (index < NUM_CONSOLES) {
+        dev_dirent.name[0] = 't';
+        dev_dirent.name[1] = 't';
+        dev_dirent.name[2] = 'y';
+        dev_dirent.name[3] = '0' + index;
+        dev_dirent.name[4] = '\0';
+        dev_dirent.inode = 16 + index + 1;
+        dev_dirent.type = VFS_CHARDEVICE;
         return &dev_dirent;
     }
     
@@ -174,7 +186,7 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "kmem") == 0) return &dev_kmem;
     if (strcmp(name, "port") == 0) return &dev_port;
     
-    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '8' && name[4] == '\0') {
+    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] < ('0' + NUM_CONSOLES) && name[4] == '\0') {
         int idx = name[3] - '0';
         return &dev_ttys[idx];
     }
@@ -437,11 +449,11 @@ void devfs_init(void) {
     dev_port.ptr = NULL;
     dev_port.private_data = NULL;
 
-    for (i = 0; i < 64; i++) {
+    for (i = 0; i < 16; i++) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint32_t)i * 0x13579BDF);
     }
 
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < NUM_CONSOLES; i++) {
         memset(&dev_ttys[i], 0, sizeof(vfs_node_t));
         name[0] = 't';
         name[1] = 't';

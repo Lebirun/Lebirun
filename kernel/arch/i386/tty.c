@@ -8,6 +8,7 @@
 #include <kernel/console.h>
 #include <kernel/io.h>
 #include <kernel/common.h>
+#include <kernel/mem_map.h>
 
 #include "vga.h"
 
@@ -22,7 +23,7 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
-#define EARLY_BOOT_BUFFER_SIZE 16384
+#define EARLY_BOOT_BUFFER_SIZE 2048
 static char early_boot_buffer[EARLY_BOOT_BUFFER_SIZE];
 static size_t early_boot_index = 0;
 static bool early_boot_capture = true;
@@ -167,4 +168,24 @@ int terminal_load_psf_font(const void *data, size_t size) {
         return 0;
     }
     return -1;
+}
+
+void terminal_compact_font(uint32_t max_glyphs) {
+    uint32_t keep;
+    uint32_t copy_size;
+    uint8_t *compact;
+
+    if (!loaded_font.glyphs || !loaded_font.bytesperglyph) return;
+    keep = loaded_font.numglyph;
+    if (keep <= max_glyphs) return;
+    keep = max_glyphs;
+    copy_size = keep * loaded_font.bytesperglyph;
+    compact = (uint8_t *)kmalloc(copy_size);
+    if (!compact) return;
+    memcpy(compact, loaded_font.glyphs, copy_size);
+    loaded_font.glyphs = compact;
+    loaded_font.numglyph = keep;
+    loaded_font.unicode_table = 0;
+    loaded_font.unicode_table_size = 0;
+    loaded_font.owns_data = 1;
 }

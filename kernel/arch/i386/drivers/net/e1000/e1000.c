@@ -280,23 +280,21 @@ int e1000_poll(netif_t *netif) {
 }
 
 void e1000_irq_handler(void *regs) {
+    e1000_device_t *dev;
+    uint32_t icr;
+    uint32_t status;
+
     (void)regs;
-    e1000_device_t *dev = &g_e1000_dev;
+    dev = &g_e1000_dev;
     if (!dev->initialized) return;
 
-    uint32_t icr = e1000_read(dev, E1000_ICR);
+    icr = e1000_read(dev, E1000_ICR);
 
     if (icr & E1000_ICR_LSC) {
-        uint32_t status = e1000_read(dev, E1000_STATUS);
+        status = e1000_read(dev, E1000_STATUS);
         dev->link_up = (status & E1000_STATUS_LU) ? 1 : 0;
         if (dev->netif) {
             dev->netif->link_up = dev->link_up;
-        }
-    }
-
-    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO)) {
-        if (dev->netif) {
-            e1000_poll(dev->netif);
         }
     }
 }

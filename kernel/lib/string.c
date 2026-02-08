@@ -405,9 +405,11 @@ int printf(const char* format, ...) {
 	
 	while (*format) {
 		if (*format != '%') {
-			kprint(format, 1);
-			format++;
-			written++;
+			s = format;
+			while (*format && *format != '%') format++;
+			len = (size_t)(format - s);
+			kprint(s, len);
+			written += (int)len;
 			continue;
 		}
 		format++;

@@ -5,8 +5,6 @@
 #include <stdio.h>
 
 extern task_t* current_task;
-extern bool debugMode;
-extern int debugLevel;
 
 void *syscall_table[NR_SYSCALLS] = {0};
 
@@ -324,18 +322,19 @@ void do_syscall(registers_t *regs) {
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
     } else {
-        result = ((int (*)(int, const char *, int))syscall_table[num])(
-            regs->ebx, (const char *)regs->ecx, regs->edx);
+        result = ((int (*)(int, int, int, int, int, int))syscall_table[num])(
+            regs->ebx, regs->ecx, regs->edx,
+            regs->esi, regs->edi, regs->ebp);
     }
 
     if (!syscall_check_exec_completed()) {
         regs->eax = result;
     } else {
         __asm__ volatile ("" ::: "memory");
-        if (debugMode && debugLevel >= 3) printf("do_syscall: exec completed, regs=%p eip=0x%08X eax=0x%08X\n", 
+        DEBUG_SYSCALL("do_syscall: exec completed, regs=%p eip=0x%08X eax=0x%08X\n", 
                regs, regs->eip, regs->eax);
         if (regs->eip < 0x1000 || regs->eip >= 0xC0000000) {
-            if (debugMode && debugLevel >= 1) printf("do_syscall: CRITICAL: regs->eip corrupted after exec! eip=0x%08X\n", regs->eip);
+            DEBUG_SYSCALL("do_syscall: CRITICAL: regs->eip corrupted after exec! eip=0x%08X\n", regs->eip);
             __asm__ volatile ("cli; hlt");
         }
     }

@@ -36,8 +36,8 @@
 
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
-#define VFS_MAX_FDS     64
-#define VFS_MAX_MOUNTS  16
+#define VFS_MAX_FDS     32
+#define VFS_MAX_MOUNTS  8
 
 struct vfs_node;
 struct dirent;
@@ -139,6 +139,7 @@ int vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
 
 vfs_node_t *vfs_namei(const char *path);
 vfs_node_t *vfs_namei_nofollow(const char *path);
+void vfs_block_squashfs_access(void);
 vfs_node_t *vfs_lookup(const char *path);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 
@@ -152,6 +153,7 @@ int vfs_stat_fd(int fd, uint32_t *size, uint32_t *flags);
 int vfs_readdir_fd(int fd, dirent_t *entry, uint32_t index);
 
 vfs_node_t *vfs_get_root(void);
+int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root);
 int vfs_get_mount_count(void);
 vfs_mount_t *vfs_get_mount(int index);
 void vfs_list_mounts(void);

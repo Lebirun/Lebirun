@@ -93,38 +93,59 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
 }
 
 int sys_vfs_readdir(registers_t *regs) {
-    int fd = (int)regs->ebx;
-    uint32_t name_addr = regs->ecx;
-    uint32_t type_addr = regs->edx;
-    uint32_t index = regs->esi;
-    
+    int fd;
+    uint32_t name_addr;
+    uint32_t type_addr;
+    uint32_t index;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    dirent_t *result;
+    dirent_t local_copy;
+    uint32_t flags;
+    int i;
+
+    fd = (int)regs->ebx;
+    name_addr = regs->ecx;
+    type_addr = regs->edx;
+    index = regs->esi;
+
     if (name_addr && (name_addr >= 0xC0000000 || name_addr < 0x1000)) return -EFAULT;
     if (type_addr && (type_addr >= 0xC0000000 || type_addr < 0x1000)) return -EFAULT;
-    
+
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
 
-    dirent_t *result = vfs_readdir(node, index);
-    if (!result) return -ENOENT;
-    
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+    result = vfs_readdir(node, index);
+    if (!result) {
+        __asm__ volatile("push %0; popf" : : "r"(flags));
+        return -ENOENT;
+    }
+    for (i = 0; i < VFS_MAX_NAME; i++) {
+        local_copy.name[i] = result->name[i];
+    }
+    local_copy.inode = result->inode;
+    local_copy.type = result->type;
+    __asm__ volatile("push %0; popf" : : "r"(flags));
+
     if (name_addr) {
-        int i = 0;
-        for (; i < 63 && result->name[i]; i++) {
-            ((char*)name_addr)[i] = result->name[i];
+        i = 0;
+        for (; i < 63 && local_copy.name[i]; i++) {
+            ((char*)name_addr)[i] = local_copy.name[i];
         }
         ((char*)name_addr)[i] = '\0';
     }
-    
+
     if (type_addr) {
-        *(uint32_t*)type_addr = result->type;
+        *(uint32_t*)type_addr = local_copy.type;
     }
-    
+
     return 0;
 }
 
@@ -372,78 +393,52 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
 static int sys_statfs(int path_ptr, const char *buf_ptr, int size) {
     uint32_t path_addr = (uint32_t)path_ptr;
     uint32_t buf_addr = (uint32_t)buf_ptr;
-    
-    if (current_task) {
-        printf("[SYSCALL_STATFS] task=%d path_ptr=0x%08x buf_ptr=0x%08x size=%d\n",
-               current_task->pid, path_ptr, (uint32_t)buf_ptr, size);
-    }
-    
+    const char *path;
+    struct statfs_kernel *buf;
+
     if (path_addr >= 0xC0000000 || path_addr < 0x1000) {
-        if (current_task) printf("[SYSCALL_STATFS] EFAULT: path_addr out of range 0x%08x\n", path_addr);
         return -EFAULT;
     }
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) {
-        if (current_task) printf("[SYSCALL_STATFS] EFAULT: buf_addr out of range 0x%08x\n", buf_addr);
         return -EFAULT;
     }
-    
+
     if (size < (int)sizeof(struct statfs_kernel)) {
-        if (current_task) printf("[SYSCALL_STATFS] EINVAL: size=%d < required=%zu\n", size, sizeof(struct statfs_kernel));
         return -EINVAL;
     }
-    
-    const char *path = (const char *)path_addr;
-    struct statfs_kernel *buf = (struct statfs_kernel *)buf_addr;
-    
-    printf("[SYSCALL_STATFS] Reading path from 0x%08x: ", path_addr);
-    for (int i = 0; i < 64 && path[i]; i++) printf("%c", path[i]);
-    printf("\n");
-    
+
+    path = (const char *)path_addr;
+    buf = (struct statfs_kernel *)buf_addr;
+
     fill_statfs_for_path(path, buf);
-    
-    printf("[SYSCALL_STATFS] Filled statfs: f_type=0x%lx f_blocks=%llu f_bfree=%llu f_bavail=%llu\n",
-           buf->f_type, buf->f_blocks, buf->f_bfree, buf->f_bavail);
-    printf("[SYSCALL_STATFS] struct size=%zu, offset of f_blocks=%zu, f_bfree=%zu\n",
-           sizeof(struct statfs_kernel), 
-           (size_t)&((struct statfs_kernel*)0)->f_blocks,
-           (size_t)&((struct statfs_kernel*)0)->f_bfree);
-    
+
     return 0;
 }
 
 static int sys_fstatfs(int fd, const char *buf_ptr, int size) {
+    uint32_t buf_addr = (uint32_t)buf_ptr;
+    struct statfs_kernel *buf;
+
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= TASK_MAX_FDS) {
-        printf("[SYSCALL_FSTATFS] EBADF: fd=%d out of range\n", fd);
         return -EBADF;
     }
     if (!current_task->fds[fd].in_use) {
-        printf("[SYSCALL_FSTATFS] EBADF: fd=%d not in use\n", fd);
         return -EBADF;
     }
-    
-    uint32_t buf_addr = (uint32_t)buf_ptr;
-    
-    printf("[SYSCALL_FSTATFS] task=%d fd=%d buf_ptr=0x%08x size=%d\n",
-           current_task->pid, fd, (uint32_t)buf_ptr, size);
-    
+
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) {
-        printf("[SYSCALL_FSTATFS] EFAULT: buf_addr out of range 0x%08x\n", buf_addr);
         return -EFAULT;
     }
-    
+
     if (size < (int)sizeof(struct statfs_kernel)) {
-        printf("[SYSCALL_FSTATFS] EINVAL: size=%d < required=%zu\n", size, sizeof(struct statfs_kernel));
         return -EINVAL;
     }
-    
-    struct statfs_kernel *buf = (struct statfs_kernel *)buf_addr;
-    
+
+    buf = (struct statfs_kernel *)buf_addr;
+
     fill_statfs_for_path("/", buf);
-    
-    printf("[SYSCALL_FSTATFS] Filled statfs: f_type=0x%lx f_blocks=%llu f_bfree=%llu\n",
-           buf->f_type, buf->f_blocks, buf->f_bfree);
-    
+
     return 0;
 }
 

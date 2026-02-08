@@ -147,7 +147,7 @@ static int sys_sysinfo(struct sysinfo *info) {
     info->loads[1] = 0;
     info->loads[2] = 0;
     info->totalram = (unsigned long)total_kb * 1024;
-    info->freeram = free_pages * 4096;
+    info->freeram = (unsigned long)(total_kb - pfa_get_usable_ram_kb() + free_pages * 4) * 1024;
     info->sharedram = 0;
     info->bufferram = 0;
     info->totalswap = 0;
@@ -413,14 +413,16 @@ struct itimerval_k {
     struct kernel_timeval it_value;
 };
 
-static struct itimerval_k task_itimers[256][3];
-static uint32_t alarm_ticks[256];
+static struct itimerval_k task_itimers[32][3];
+static uint32_t alarm_ticks[32];
 
 static int sys_setitimer(int which, const struct itimerval_k *new_value, struct itimerval_k *old_value) {
+    uint32_t idx;
+    
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
     
-    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
+    idx = ((uint32_t)current_task->pid) & 31u;
     
     if (old_value) {
         memcpy(old_value, &task_itimers[idx][which], sizeof(struct itimerval_k));
@@ -434,22 +436,27 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
 }
 
 static int sys_getitimer(int which, struct itimerval_k *curr_value) {
+    uint32_t idx;
+    
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
     if (!curr_value) return -EFAULT;
     
-    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
+    idx = ((uint32_t)current_task->pid) & 31u;
     memcpy(curr_value, &task_itimers[idx][which], sizeof(struct itimerval_k));
     
     return 0;
 }
 
 static int sys_alarm(int seconds, const char *unused1, int unused2) {
+    uint32_t idx;
+    uint32_t old_alarm;
+    
     (void)unused1; (void)unused2;
     if (!current_task) return 0;
     
-    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
-    uint32_t old_alarm = alarm_ticks[idx];
+    idx = ((uint32_t)current_task->pid) & 31u;
+    old_alarm = alarm_ticks[idx];
     
     if (seconds > 0) {
         alarm_ticks[idx] = tick_count + (seconds * pit_freq);
@@ -514,10 +521,10 @@ static int sys_lchown(const char *pathname, int owner, int group) {
     return sys_chown(pathname, owner, group);
 }
 
-#define MAX_ENV_VARS 128
-#define MAX_ENV_SIZE 256
+#define MAX_ENV_VARS 16
+#define MAX_ENV_SIZE 64
 
-static char env_names[MAX_ENV_VARS][64];
+static char env_names[MAX_ENV_VARS][32];
 static char env_values[MAX_ENV_VARS][MAX_ENV_SIZE];
 static int env_count = 0;
 static char *environ_ptrs[MAX_ENV_VARS + 1];
@@ -525,17 +532,17 @@ static char *environ_ptrs[MAX_ENV_VARS + 1];
 static void init_default_environ(void) {
     if (env_count > 0) return;
     
-    copy_string(env_names[0], "PATH", 64);
+    copy_string(env_names[0], "PATH", 32);
     copy_string(env_values[0], "/bin:/usr/bin:/sbin:/usr/sbin", MAX_ENV_SIZE);
-    copy_string(env_names[1], "HOME", 64);
+    copy_string(env_names[1], "HOME", 32);
     copy_string(env_values[1], "/root", MAX_ENV_SIZE);
-    copy_string(env_names[2], "SHELL", 64);
+    copy_string(env_names[2], "SHELL", 32);
     copy_string(env_values[2], "/bin/sh", MAX_ENV_SIZE);
-    copy_string(env_names[3], "USER", 64);
+    copy_string(env_names[3], "USER", 32);
     copy_string(env_values[3], "root", MAX_ENV_SIZE);
-    copy_string(env_names[4], "TERM", 64);
+    copy_string(env_names[4], "TERM", 32);
     copy_string(env_values[4], "linux", MAX_ENV_SIZE);
-    copy_string(env_names[5], "PWD", 64);
+    copy_string(env_names[5], "PWD", 32);
     copy_string(env_values[5], "/", MAX_ENV_SIZE);
     env_count = 6;
 }

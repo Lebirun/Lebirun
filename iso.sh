@@ -19,11 +19,11 @@ else
     echo "Warning: no initrd.img found; continuing without initrd module"
 fi
 
-if [ -f rootfs.img ]; then
-    cp rootfs.img isodir/boot/rootfs.img
-    echo "Copied rootfs.img to ISO ($(stat -c%s rootfs.img) bytes)"
+if [ -f rootfs.squashfs ]; then
+    cp rootfs.squashfs isodir/boot/rootfs.squashfs
+    echo "Copied rootfs.squashfs to ISO ($(stat -c%s rootfs.squashfs) bytes)"
 else
-    echo "Warning: no rootfs.img found; continuing without rootfs module"
+    echo "Warning: no rootfs.squashfs found; continuing without rootfs module"
 fi
 
 cat > isodir/boot/grub/grub.cfg << EOF
@@ -33,7 +33,7 @@ set default=0
 menuentry "Lebirun" {
 	multiboot /boot/lebirun.kernel
 	module /boot/initrd.img
-	module /boot/rootfs.img
+	module /boot/rootfs.squashfs
 	boot
 }
 EOF

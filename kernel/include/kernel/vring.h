@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define VRING_MAX_SUBRINGS 16
-#define VRING_MAX_REGIONS 32
+#define VRING_MAX_SUBRINGS 8
+#define VRING_MAX_REGIONS 8
 
 #define VRING_PERM_READ   0x01
 #define VRING_PERM_WRITE  0x02

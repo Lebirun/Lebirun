@@ -53,6 +53,7 @@ rm -rf lebirun.iso
 rm -f initrd.img
 rm -rf include
 rm -rf rootfs.img
+rm -rf rootfs.squashfs
 
 echo "Cleaning remaining .o files..."
 find kernel -type f -name '*.o' -delete 2>/dev/null || true

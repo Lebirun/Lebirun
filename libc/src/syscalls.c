@@ -194,7 +194,10 @@ void *sbrk(intptr_t inc) {
     return (void *)old_brk;
 }
 
+extern void __stdio_exit(void);
+
 void _exit(int status) {
+    __stdio_exit();
     syscall1(SYS_EXIT, status);
     __builtin_unreachable();
 }

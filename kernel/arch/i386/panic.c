@@ -4,6 +4,7 @@
 #include <kernel/console.h>
 #include <kernel/io.h>
 #include <stdint.h>
+#include <stdio.h>
 
 static volatile int in_panic = 0;
 
@@ -22,6 +23,21 @@ static void safe_panic_print(const char *s) {
         outb(0x3F8, *s);
         s++;
     }
+}
+
+static void fb_panic_print(const char *s) {
+    terminal_writestring(s);
+}
+
+static void fb_panic_print_hex(uint32_t v) {
+    char buf[9];
+    int i;
+    buf[8] = '\0';
+    for (i = 0; i < 8; ++i) {
+        uint8_t nib = (v >> ((7 - i) * 4)) & 0xF;
+        buf[i] = (nib < 10) ? ('0' + nib) : ('A' + nib - 10);
+    }
+    fb_panic_print(buf);
 }
 
 static int is_valid_kernel_ptr(uint32_t addr) {
@@ -43,6 +59,22 @@ static void serial_dump_memory(uint32_t addr, int count) {
         safe_panic_print(": ");
         serial_hex(ptr[i]);
         safe_panic_print("\n");
+    }
+}
+
+static void fb_panic_dump_memory(uint32_t addr, int count) {
+    int i;
+    uint32_t *ptr;
+    
+    if (!is_valid_kernel_ptr(addr)) return;
+    ptr = (uint32_t *)addr;
+    for (i = 0; i < count; i++) {
+        if (!is_valid_kernel_ptr((uint32_t)&ptr[i])) break;
+        fb_panic_print("  ");
+        fb_panic_print_hex(addr + i * 4);
+        fb_panic_print(": ");
+        fb_panic_print_hex(ptr[i]);
+        fb_panic_print("\n");
     }
 }
 
@@ -93,20 +125,33 @@ void kernel_panic(const char *reason, registers_t *regs) {
 
     if (in_panic) {
         safe_panic_print("\n!!! DOUBLE PANIC !!!");
+        fb_panic_print("\n!!! DOUBLE PANIC !!!");
         if (regs) {
             safe_panic_print("\nINT=0x");
             serial_hex(regs->int_no);
+            fb_panic_print("\nINT=0x");
+            fb_panic_print_hex(regs->int_no);
+            
             safe_panic_print(" EIP=0x");
             serial_hex(regs->eip);
+            fb_panic_print(" EIP=0x");
+            fb_panic_print_hex(regs->eip);
+            
             safe_panic_print(" ERR=0x");
             serial_hex(regs->err_code);
+            fb_panic_print(" ERR=0x");
+            fb_panic_print_hex(regs->err_code);
+            
             if (regs->int_no == 14) {
                 __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
                 safe_panic_print(" CR2=0x");
                 serial_hex(fault_addr);
+                fb_panic_print(" CR2=0x");
+                fb_panic_print_hex(fault_addr);
             }
         }
         safe_panic_print("\nHalted.\n");
+        fb_panic_print("\nHalted.\n");
         for (;;) __asm__ ("cli; hlt");
     }
     in_panic = 1;
@@ -119,11 +164,23 @@ void kernel_panic(const char *reason, registers_t *regs) {
     safe_panic_print(reason);
     safe_panic_print("\n");
 
+    fb_panic_print("\n");
+    fb_panic_print("+===============================+\n");
+    fb_panic_print("|       !!! KERNEL PANIC !!!    |\n");
+    fb_panic_print("+===============================+\n");
+    fb_panic_print("| Reason: ");
+    fb_panic_print(reason);
+    fb_panic_print("\n");
+
     if (regs) {
         if (regs->int_no < 32) {
             safe_panic_print("| Exception: ");
             safe_panic_print(exception_messages[regs->int_no]);
             safe_panic_print("\n");
+            
+            fb_panic_print("| Exception: ");
+            fb_panic_print(exception_messages[regs->int_no]);
+            fb_panic_print("\n");
         }
         safe_panic_print("+-------------------------------+\n");
         safe_panic_print("| EXCEPTION INFO                |\n");
@@ -137,6 +194,20 @@ void kernel_panic(const char *reason, registers_t *regs) {
         safe_panic_print("  CS=0x");
         serial_hex(regs->cs);
         safe_panic_print("\n");
+        
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("| EXCEPTION INFO                |\n");
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("  INT=0x");
+        fb_panic_print_hex(regs->int_no);
+        fb_panic_print("  ERR=0x");
+        fb_panic_print_hex(regs->err_code);
+        fb_panic_print("\n  EIP=0x");
+        fb_panic_print_hex(regs->eip);
+        fb_panic_print("  CS=0x");
+        fb_panic_print_hex(regs->cs);
+        fb_panic_print("\n");
+        
         safe_panic_print("+-------------------------------+\n");
         safe_panic_print("| REGISTERS                     |\n");
         safe_panic_print("+-------------------------------+\n");
@@ -156,7 +227,30 @@ void kernel_panic(const char *reason, registers_t *regs) {
         serial_hex(regs->ebp);
         safe_panic_print("  ESP=0x");
         serial_hex(regs->esp);
-        safe_panic_print("\n+-------------------------------+\n");
+        safe_panic_print("\n");
+        
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("| REGISTERS                     |\n");
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("  EAX=0x");
+        fb_panic_print_hex(regs->eax);
+        fb_panic_print("  EBX=0x");
+        fb_panic_print_hex(regs->ebx);
+        fb_panic_print("\n  ECX=0x");
+        fb_panic_print_hex(regs->ecx);
+        fb_panic_print("  EDX=0x");
+        fb_panic_print_hex(regs->edx);
+        fb_panic_print("\n  ESI=0x");
+        fb_panic_print_hex(regs->esi);
+        fb_panic_print("  EDI=0x");
+        fb_panic_print_hex(regs->edi);
+        fb_panic_print("\n  EBP=0x");
+        fb_panic_print_hex(regs->ebp);
+        fb_panic_print("  ESP=0x");
+        fb_panic_print_hex(regs->esp);
+        fb_panic_print("\n");
+        
+        safe_panic_print("+-------------------------------+\n");
         safe_panic_print("| SEGMENT REGISTERS             |\n");
         safe_panic_print("+-------------------------------+\n");
         safe_panic_print("  DS=0x");
@@ -170,6 +264,21 @@ void kernel_panic(const char *reason, registers_t *regs) {
         safe_panic_print("\n  EFLAGS=0x");
         serial_hex(regs->eflags);
         safe_panic_print("\n");
+        
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("| SEGMENT REGISTERS             |\n");
+        fb_panic_print("+-------------------------------+\n");
+        fb_panic_print("  DS=0x");
+        fb_panic_print_hex(regs->ds);
+        fb_panic_print("  ES=0x");
+        fb_panic_print_hex(regs->es);
+        fb_panic_print("\n  FS=0x");
+        fb_panic_print_hex(regs->fs);
+        fb_panic_print("  GS=0x");
+        fb_panic_print_hex(regs->gs);
+        fb_panic_print("\n  EFLAGS=0x");
+        fb_panic_print_hex(regs->eflags);
+        fb_panic_print("\n");
 
         if (regs->int_no == 14) {
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
@@ -197,6 +306,28 @@ void kernel_panic(const char *reason, registers_t *regs) {
             if (regs->err_code & 0x8) safe_panic_print("[RSVD] ");
             if (regs->err_code & 0x10) safe_panic_print("[InstrFetch] ");
             safe_panic_print("\n");
+            
+            fb_panic_print("+-------------------------------+\n");
+            fb_panic_print("| PAGE FAULT INFO               |\n");
+            fb_panic_print("+-------------------------------+\n");
+            fb_panic_print("  CR2 (fault addr)=0x");
+            fb_panic_print_hex(fault_addr);
+            fb_panic_print("\n  CR3=0x");
+            fb_panic_print_hex(cr3_val);
+            fb_panic_print("  CR0=0x");
+            fb_panic_print_hex(cr0_val);
+            fb_panic_print("\n  CR4=0x");
+            fb_panic_print_hex(cr4_val);
+            fb_panic_print("\n  Flags: ");
+            if (regs->err_code & 0x1) fb_panic_print("[Present] ");
+            else fb_panic_print("[NotPresent] ");
+            if (regs->err_code & 0x2) fb_panic_print("[Write] ");
+            else fb_panic_print("[Read] ");
+            if (regs->err_code & 0x4) fb_panic_print("[User] ");
+            else fb_panic_print("[Kernel] ");
+            if (regs->err_code & 0x8) fb_panic_print("[RSVD] ");
+            if (regs->err_code & 0x10) fb_panic_print("[InstrFetch] ");
+            fb_panic_print("\n");
         }
 
         safe_panic_print("\n+-------------------------------+\n");
@@ -217,12 +348,36 @@ void kernel_panic(const char *reason, registers_t *regs) {
             ebp_ptr = (uint32_t *)ebp_ptr[0];
             frame_count++;
         }
+        
+        fb_panic_print("\n+-------------------------------+\n");
+        fb_panic_print("| STACK TRACE (EBP CHAIN)       |\n");
+        fb_panic_print("+-------------------------------+\n");
+        ebp_ptr = (uint32_t *)regs->ebp;
+        frame_count = 0;
+        while (ebp_ptr && frame_count < 10) {
+            if (!is_valid_kernel_ptr((uint32_t)ebp_ptr)) break;
+            if (!is_valid_kernel_ptr((uint32_t)&ebp_ptr[1])) break;
+            fb_panic_print("  #");
+            fb_panic_print_hex(frame_count);
+            fb_panic_print("  EBP=0x");
+            fb_panic_print_hex((uint32_t)ebp_ptr);
+            fb_panic_print("  RET=0x");
+            fb_panic_print_hex(ebp_ptr[1]);
+            fb_panic_print("\n");
+            ebp_ptr = (uint32_t *)ebp_ptr[0];
+            frame_count++;
+        }
 
         if (is_valid_kernel_ptr(regs->esp)) {
             safe_panic_print("\n+-------------------------------+\n");
             safe_panic_print("| STACK DUMP (8 DWORDS @ ESP)   |\n");
             safe_panic_print("+-------------------------------+\n");
             serial_dump_memory(regs->esp, 8);
+            
+            fb_panic_print("\n+-------------------------------+\n");
+            fb_panic_print("| STACK DUMP (8 DWORDS @ ESP)   |\n");
+            fb_panic_print("+-------------------------------+\n");
+            fb_panic_dump_memory(regs->esp, 8);
         }
 
         if (regs->int_no == 14 && is_valid_kernel_ptr(fault_addr & ~0xFFF)) {
@@ -230,43 +385,21 @@ void kernel_panic(const char *reason, registers_t *regs) {
             safe_panic_print("| MEMORY NEAR FAULT ADDRESS     |\n");
             safe_panic_print("+-------------------------------+\n");
             serial_dump_memory(fault_addr & ~0xF, 4);
+            
+            fb_panic_print("\n+-------------------------------+\n");
+            fb_panic_print("| MEMORY NEAR FAULT ADDRESS     |\n");
+            fb_panic_print("+-------------------------------+\n");
+            fb_panic_dump_memory(fault_addr & ~0xF, 4);
         }
     }
 
     safe_panic_print("\n+===============================+\n");
     safe_panic_print("|        SYSTEM HALTED          |\n");
     safe_panic_print("+===============================+\n");
-
-    terminal_writestring("\n====== KERNEL PANIC ======\n");
-    terminal_writestring(reason);
-    terminal_writestring("\n");
     
-    if (regs) {
-        if (regs->int_no < 32) {
-            terminal_writestring("Exception: ");
-            terminal_writestring(exception_messages[regs->int_no]);
-            terminal_writestring("\n");
-        }
-        terminal_writestring("EIP=0x");
-        print_hex(regs->eip);
-        terminal_writestring(" ERR=0x");
-        print_hex(regs->err_code);
-        if (regs->int_no == 14) {
-            terminal_writestring("\nCR2=0x");
-            print_hex(fault_addr);
-            terminal_writestring(" CR3=0x");
-            print_hex(cr3_val);
-        }
-        terminal_writestring("\nEAX=0x");
-        print_hex(regs->eax);
-        terminal_writestring(" EBX=0x");
-        print_hex(regs->ebx);
-        terminal_writestring(" ECX=0x");
-        print_hex(regs->ecx);
-        terminal_writestring("\n");
-    }
-    
-    terminal_writestring("===========================\n");
+    fb_panic_print("\n+===============================+\n");
+    fb_panic_print("|        SYSTEM HALTED          |\n");
+    fb_panic_print("+===============================+\n");
 
     for (;;) __asm__ ("cli; hlt");
 }

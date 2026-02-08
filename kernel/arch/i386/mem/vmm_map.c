@@ -90,7 +90,7 @@ uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr) {
 
         temp_pdpt_virt = 0xF7000000;
         temp_map_raw(temp_pdpt_virt, pd_phys);
-        pdpt = (uint64_t *)temp_pdpt_virt;
+        pdpt = (uint64_t *)(temp_pdpt_virt + (pd_phys & 0xFFF));
         pdpte = pdpt[pdpt_idx];
         temp_unmap_raw(temp_pdpt_virt);
 
@@ -238,7 +238,7 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
 
         temp_pdpt_virt = 0xF7000000;
         temp_map_raw(temp_pdpt_virt, pd_phys);
-        pdpt = (uint64_t *)temp_pdpt_virt;
+        pdpt = (uint64_t *)(temp_pdpt_virt + (pd_phys & 0xFFF));
         pdpte = pdpt[pdpt_idx];
         temp_unmap_raw(temp_pdpt_virt);
 
@@ -296,16 +296,13 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
     pt_idx = (virt_addr >> 12) & 0x3FF;
 
     temp_pd_virt = 0xF7000000;
-    DPRINTF5("vmm_map_page_in_pd: pd_phys=0x%08X virt=0x%08X phys=0x%08X flags=0x%X\n", pd_phys, virt_addr, phys_addr, flags);
     temp_map_raw(temp_pd_virt, pd_phys);
     foreign_pd = (uint32_t *)temp_pd_virt;
     pd_entry = foreign_pd[pd_idx];
-    DPRINTF5("vmm_map_page_in_pd: foreign_pd[pd_idx]=0x%08X\n", pd_entry);
 
     if (!(pd_entry & 1)) {
             uint32_t pde_32_flags;
 
-            DPRINTF5("vmm_map_page_in_pd: pd entry not present for idx %u - allocating PT\n", pd_idx);
             pt_page = pmm_alloc_low_page();
             if (!pt_page) {
                 pt_page = pmm_alloc_page();
@@ -319,7 +316,6 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
             pmm_zero_page_phys(pt_phys);
             pde_32_flags = (flags & 0x7) | 1;
             foreign_pd[pd_idx] = (pt_phys & ~0xFFF) | pde_32_flags;
-            DPRINTF5("vmm_map_page_in_pd: allocated PT phys=0x%08X\n", pt_phys);
     } else {
             pt_phys = pd_entry & ~0xFFF;
             if ((flags & 0x7) & ~(foreign_pd[pd_idx] & 0x7)) {
@@ -330,15 +326,10 @@ void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr
     temp_unmap_raw(temp_pd_virt);
 
     temp_pt_virt = 0xF7001000;
-    DPRINTF5("vmm_map_page_in_pd: mapping into PT phys=0x%08X pt_idx=%u\n", pt_phys, pt_idx);
     temp_map_raw(temp_pt_virt, pt_phys);
     foreign_pt = (uint32_t *)temp_pt_virt;
 
-    if (!(foreign_pt[pt_idx] & 1)) {
-        DPRINTF5("vmm_map_page_in_pd: PT entry not present - writing entry\n");
-    }
     foreign_pt[pt_idx] = (phys_addr & ~0xFFF) | (flags & 0xFFF);
-    DPRINTF5("vmm_map_page_in_pd: wrote PT entry = 0x%08X\n", foreign_pt[pt_idx]);
 
     temp_unmap_raw(temp_pt_virt);
 
@@ -442,7 +433,7 @@ void vmm_map_page_in_pd64(uint32_t pd_phys, uint32_t virt_addr, uint64_t phys_ad
 
         temp_pdpt_virt = 0xF7000000;
         temp_map_raw(temp_pdpt_virt, pd_phys);
-        pdpt = (uint64_t *)temp_pdpt_virt;
+        pdpt = (uint64_t *)(temp_pdpt_virt + (pd_phys & 0xFFF));
         pdpte = pdpt[pdpt_idx];
         temp_unmap_raw(temp_pdpt_virt);
 

@@ -4,6 +4,7 @@
 #include <kernel/drivers/net/icmp.h>
 #include <kernel/drivers/net/udp.h>
 #include <kernel/drivers/net/tcp.h>
+#include <kernel/drivers/net/dhcp.h>
 #include <kernel/mem_map.h>
 #include <kernel/tty.h>
 #include <string.h>
@@ -35,24 +36,35 @@ uint16_t ipv4_checksum(void *data, uint32_t len) {
 }
 
 int ipv4_is_local(netif_t *netif, ipv4_addr_t ip) {
+    uint32_t local;
+    uint32_t mask;
+    uint32_t target;
+
     if (!netif) return 0;
 
-    uint32_t local = ipv4_to_u32(netif->ipv4);
-    uint32_t mask = ipv4_to_u32(netif->netmask);
-    uint32_t target = ipv4_to_u32(ip);
+    local = ipv4_to_u32(netif->ipv4);
+    mask = ipv4_to_u32(netif->netmask);
+    target = ipv4_to_u32(ip);
 
     return (local & mask) == (target & mask);
 }
 
 int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data, uint32_t len) {
+    uint32_t total_len;
+    uint8_t *packet;
+    ipv4_header_t *ip;
+    mac_addr_t dest_mac;
+    ipv4_addr_t next_hop;
+    int result;
+
     if (!netif) return -1;
     if (len > ETH_MTU - sizeof(ipv4_header_t)) return -1;
 
-    uint32_t total_len = sizeof(ipv4_header_t) + len;
-    uint8_t *packet = (uint8_t *)kmalloc(total_len);
+    total_len = sizeof(ipv4_header_t) + len;
+    packet = (uint8_t *)kmalloc(total_len);
     if (!packet) return -1;
 
-    ipv4_header_t *ip = (ipv4_header_t *)packet;
+    ip = (ipv4_header_t *)packet;
     memset(ip, 0, sizeof(ipv4_header_t));
 
     ip->version_ihl = 0x45;
@@ -70,8 +82,7 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
 
     memcpy(packet + sizeof(ipv4_header_t), data, len);
 
-    mac_addr_t dest_mac;
-    ipv4_addr_t next_hop = dest;
+    next_hop = dest;
 
     if (ipv4_eq(dest, IPV4_BROADCAST)) {
         dest_mac = MAC_BROADCAST;
@@ -86,27 +97,34 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
         }
     }
 
-    int result = eth_send(netif, dest_mac, ETH_TYPE_IPV4, packet, total_len);
+    result = eth_send(netif, dest_mac, ETH_TYPE_IPV4, packet, total_len);
     kfree(packet);
 
     return result;
 }
 
 void ipv4_receive(netif_t *netif, uint8_t *packet, uint32_t len) {
+    ipv4_header_t *ip;
+    uint32_t header_len;
+    uint16_t total_len;
+    uint16_t checksum;
+    uint8_t *payload;
+    uint32_t payload_len;
+
     if (!netif || !packet) return;
     if (len < sizeof(ipv4_header_t)) return;
 
-    ipv4_header_t *ip = (ipv4_header_t *)packet;
+    ip = (ipv4_header_t *)packet;
 
     if ((ip->version_ihl >> 4) != 4) return;
 
-    uint32_t header_len = (ip->version_ihl & 0x0F) * 4;
+    header_len = (ip->version_ihl & 0x0F) * 4;
     if (header_len < 20 || header_len > len) return;
 
-    uint16_t total_len = ntohs(ip->total_length);
+    total_len = ntohs(ip->total_length);
     if (total_len > len) return;
 
-    uint16_t checksum = ip->checksum;
+    checksum = ip->checksum;
     ip->checksum = 0;
     if (ipv4_checksum(ip, header_len) != checksum) {
         return;
@@ -114,12 +132,14 @@ void ipv4_receive(netif_t *netif, uint8_t *packet, uint32_t len) {
     ip->checksum = checksum;
 
     if (!ipv4_eq(ip->dest, netif->ipv4) &&
-        !ipv4_eq(ip->dest, IPV4_BROADCAST)) {
+        !ipv4_eq(ip->dest, IPV4_BROADCAST) &&
+        !(ipv4_eq(netif->ipv4, IPV4_ZERO) && !netif->dhcp_configured) &&
+        !(!netif->dhcp_configured && dhcp_is_negotiating())) {
         return;
     }
 
-    uint8_t *payload = packet + header_len;
-    uint32_t payload_len = total_len - header_len;
+    payload = packet + header_len;
+    payload_len = total_len - header_len;
 
     switch (ip->protocol) {
         case IP_PROTO_ICMP:

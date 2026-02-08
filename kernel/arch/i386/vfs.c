@@ -13,6 +13,7 @@ static vfs_fs_type_t *registered_fs = NULL;
 static vfs_mount_t mounts[VFS_MAX_MOUNTS];
 static vfs_fd_t fd_table[VFS_MAX_FDS];
 static mutex_t vfs_lock;
+static int squashfs_access_blocked = 0;
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -147,7 +148,6 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
     size_t n;
     size_t di;
     
-    ramfs_debug_check_root("vfs_mount entry");
     
     if (!mountpoint || !fs_type) {
         return -1;
@@ -180,14 +180,11 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
     }
     
     root = fs->mount(device, mountpoint);
-    ramfs_debug_check_root("after fs->mount");
     if (!root) {
         return -1;
     }
     
-    ramfs_debug_check_root("before vfs_namei");
     existing = vfs_namei(mountpoint);
-    ramfs_debug_check_root("after vfs_namei");
     if (existing) {
         root->flags |= VFS_MOUNTPOINT;
         root->ptr = existing;
@@ -526,19 +523,36 @@ static int vfs_build_symlink_path(char *out, size_t outsz,
 }
 
 static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int depth) {
+    char resolved[VFS_MAX_PATH];
+    char prefix[VFS_MAX_PATH];
+    char component[VFS_MAX_NAME];
+    char target[VFS_MAX_PATH];
+    char newpath[VFS_MAX_PATH];
+    char new_prefix[VFS_MAX_PATH];
+    const char *path;
+    const char *remaining;
+    const char *rest_raw;
+    const char *rest_non_slash;
+    vfs_mount_t *mount;
+    vfs_node_t *node;
+    vfs_node_t *next;
+    char *last;
+    size_t plen;
+    int i;
+    int has_more;
+
     if (!in_path) return NULL;
     if (depth > VFS_MAX_SYMLINKS) return NULL;
 
-    char resolved[VFS_MAX_PATH];
-    const char *path = in_path;
+    path = in_path;
 
     if (path[0] != '/') {
         if (vfs_resolve_path(path, resolved, sizeof(resolved)) < 0) return NULL;
         vfs_normalize_path(resolved);
         path = resolved;
     } else {
-        size_t i = 0;
-        while (path[i] && i < sizeof(resolved) - 1) {
+        i = 0;
+        while (path[i] && (size_t)i < sizeof(resolved) - 1) {
             resolved[i] = path[i];
             i++;
         }
@@ -549,13 +563,19 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
     if (path[0] != '/') return NULL;
 
-    if (path[0] == '/' && path[1] == '\0') return vfs_root;
+    if (squashfs_access_blocked &&
+        path[0] == '/' && path[1] == 's' && path[2] == 'q' &&
+        path[3] == 'u' && path[4] == 'a' && path[5] == 's' &&
+        path[6] == 'h' && path[7] == 'f' && path[8] == 's' &&
+        (path[9] == '\0' || path[9] == '/')) {
+        return NULL;
+    }
 
-    vfs_mount_t *mount = find_mount_for_path(path);
-    vfs_node_t *node;
-    const char *remaining;
+    if (path[0] == '/' && path[1] == '\0') {
+        return vfs_root;
+    }
 
-    char prefix[VFS_MAX_PATH];
+    mount = find_mount_for_path(path);
     prefix[0] = '\0';
 
     if (mount && mount->root) {
@@ -564,7 +584,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         if (*remaining == '/') remaining++;
         strncpy(prefix, mount->path, sizeof(prefix) - 1);
         prefix[sizeof(prefix) - 1] = '\0';
-        size_t plen = strlen(prefix);
+        plen = strlen(prefix);
         if (plen > 1 && prefix[plen - 1] == '/') prefix[plen - 1] = '\0';
     } else {
         node = vfs_root;
@@ -575,12 +595,11 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
     if (*remaining == '\0') return node;
 
-    char component[VFS_MAX_NAME];
     while (*remaining) {
         while (*remaining == '/') remaining++;
         if (*remaining == '\0') break;
 
-        int i = 0;
+        i = 0;
         while (*remaining && *remaining != '/' && i < VFS_MAX_NAME - 1) {
             component[i++] = *remaining++;
         }
@@ -593,7 +612,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
             if (node->parent) {
                 node = node->parent;
                 if (strcmp(prefix, "/") != 0) {
-                    char *last = strrchr(prefix, '/');
+                    last = strrchr(prefix, '/');
                     if (last) {
                         if (last == prefix) {
                             prefix[1] = '\0';
@@ -606,15 +625,12 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
             continue;
         }
 
-        const char *rest_raw = remaining;
-        const char *rest_non_slash = rest_raw;
+        rest_raw = remaining;
+        rest_non_slash = rest_raw;
         while (*rest_non_slash == '/') rest_non_slash++;
-        int has_more = (*rest_non_slash != '\0');
+        has_more = (*rest_non_slash != '\0');
 
-         DPRINTF4("[VFS] vfs_namei: looking up component '%s' in node=%p (%s)", 
-               component, (void*)node, node->name);
-        vfs_node_t *next = vfs_finddir(node, component);
-         DPRINTF4("[VFS] vfs_namei: vfs_finddir returned %p", (void*)next);
+        next = vfs_finddir(node, component);
         if (!next) return NULL;
 
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
@@ -622,9 +638,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         }
 
         if (VFS_GET_TYPE(next->flags) == VFS_SYMLINK && (has_more || follow_final)) {
-            char target[VFS_MAX_PATH];
             if (vfs_readlink_node(next, target, sizeof(target)) >= 0) {
-                char newpath[VFS_MAX_PATH];
                 if (vfs_build_symlink_path(newpath, sizeof(newpath), prefix, target, rest_raw) < 0) return NULL;
                 vfs_normalize_path(newpath);
                 return vfs_namei_internal(newpath, follow_final, depth + 1);
@@ -633,7 +647,6 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
         node = next;
 
-        char new_prefix[VFS_MAX_PATH];
         if (strcmp(prefix, "/") == 0) {
             snprintf(new_prefix, sizeof(new_prefix), "/%s", component);
         } else {
@@ -647,8 +660,14 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 }
 
 vfs_node_t *vfs_namei(const char *path) {
-    vfs_node_t *result = vfs_namei_internal(path, 1, 0);
+    vfs_node_t *result;
+
+    result = vfs_namei_internal(path, 1, 0);
     return result;
+}
+
+void vfs_block_squashfs_access(void) {
+    squashfs_access_blocked = 1;
 }
 
 vfs_node_t *vfs_namei_nofollow(const char *path) {
@@ -893,20 +912,23 @@ int vfs_stat_fd(int fd, uint32_t *size, uint32_t *flags) {
     if (size) *size = node->length;
     if (flags) *flags = node->flags;
     
-    DPRINTF2("VFS_STAT: fd=%d node=%p name='%s' length=%u flags=0x%X\n", 
+    DEBUG_VFS("VFS_STAT: fd=%d node=%p name='%s' length=%u flags=0x%X\n", 
            fd, node, node->name, node->length, node->flags);
     
     return 0;
 }
 
 int vfs_readdir_fd(int fd, dirent_t *entry, uint32_t index) {
+    vfs_node_t *node;
+    dirent_t *result;
+
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use || !entry) return -1;
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     if (!node) return -1;
     
-    dirent_t *result = vfs_readdir(node, index);
+    result = vfs_readdir(node, index);
     if (!result) return -1;
     
     memcpy(entry, result, sizeof(dirent_t));
@@ -922,6 +944,20 @@ vfs_node_t *vfs_get_root(void) {
         }
     }
     return vfs_root;
+}
+
+int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root) {
+    int i;
+
+    if (!mountpoint || !new_root) return -1;
+
+    for (i = 0; i < VFS_MAX_MOUNTS; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
+            mounts[i].root = new_root;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int vfs_get_mount_count(void) {
@@ -973,6 +1009,12 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
     count = 0;
     for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, "/") != 0) {
+            if (strcmp(mounts[i].path, "/ro") == 0) {
+                continue;
+            }
+            if (strcmp(mounts[i].path, "/squashfs") == 0) {
+                continue;
+            }
             if (count == index) {
                 path = mounts[i].path;
                 if (path[0] == '/') path++;
@@ -995,7 +1037,42 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
     for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
             if (mounts[i].root->readdir) {
-                return mounts[i].root->readdir(mounts[i].root, index - count);
+                uint32_t ramfs_idx;
+                uint32_t ramfs_count;
+                uint32_t target;
+                dirent_t *entry;
+                char mount_path[VFS_MAX_PATH];
+                int is_dup;
+                int k;
+
+                target = index - count;
+                ramfs_count = 0;
+                for (ramfs_idx = 0; ; ramfs_idx++) {
+                    entry = mounts[i].root->readdir(mounts[i].root, ramfs_idx);
+                    if (!entry) return NULL;
+
+                    mount_path[0] = '/';
+                    j = 0;
+                    while (entry->name[j] && j < VFS_MAX_PATH - 2) {
+                        mount_path[1 + j] = entry->name[j];
+                        j++;
+                    }
+                    mount_path[1 + j] = '\0';
+
+                    is_dup = 0;
+                    for (k = 0; k < VFS_MAX_MOUNTS; k++) {
+                        if (mounts[k].in_use && strcmp(mounts[k].path, mount_path) == 0) {
+                            is_dup = 1;
+                            break;
+                        }
+                    }
+                    if (is_dup) continue;
+
+                    if (ramfs_count == target) {
+                        return entry;
+                    }
+                    ramfs_count++;
+                }
             }
             break;
         }
@@ -1005,7 +1082,6 @@ static dirent_t *root_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
-    ramfs_debug_check_root("root_finddir entry");
     char search_path[VFS_MAX_PATH];
     size_t _ci;
     int i;
@@ -1014,13 +1090,34 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
     
     (void)node;
     
+    if (strcmp(name, "ro") == 0) {
+        return NULL;
+    }
+    if (strcmp(name, "squashfs") == 0) {
+        return NULL;
+    }
+    
     search_path[0] = '/';
     _ci = 0;
     while (name[_ci] && _ci < VFS_MAX_PATH - 2) { search_path[1 + _ci] = name[_ci]; _ci++; }
     search_path[1 + _ci] = '\0';
     
+    if (strcmp(search_path, "/ro") == 0) {
+        return NULL;
+    }
+    if (strcmp(search_path, "/squashfs") == 0) {
+        return NULL;
+    }
+    
     for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) continue;
+        
+        if (strcmp(mounts[i].path, "/ro") == 0) {
+            continue;
+        }
+        if (strcmp(mounts[i].path, "/squashfs") == 0) {
+            continue;
+        }
         
         if (strcmp(mounts[i].path, search_path) == 0) {
             return mounts[i].root;
@@ -1037,7 +1134,6 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
         if (!mounts[i].in_use) continue;
         if (strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
             vfs_node_t *root = mounts[i].root;
-            ramfs_debug_check_root("root_finddir before calling finddir");
             if ((uintptr_t)root < 0x1000) {
                 return NULL;
             }

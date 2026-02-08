@@ -128,6 +128,12 @@ registers_t* interrupt_handler(registers_t* regs)
         if (regs->int_no == 14) {
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             
+            if (!(regs->err_code & 0x4)) {
+                if (demand_page_fault_handler(fault_addr, regs->err_code)) {
+                    return regs;
+                }
+            }
+            
             access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
             else access_type |= VRING_PERM_READ;
@@ -228,18 +234,17 @@ registers_t* interrupt_handler(registers_t* regs)
             uint32_t old_cr3;
             uint32_t new_cr3;
             uint32_t *old_pages;
-            uint32_t old_pages_count;
             uint32_t old_pd;
             
             do_syscall(regs);
             
             if (current_task && current_task->exec_completed) {
-                if (debugMode && debugLevel >= 3) printf("IDT: exec completed, preparing to switch CR3\n");
-                if (debugMode && debugLevel >= 3) printf("IDT: exec regs: eip=0x%08X useresp=0x%08X cs=0x%X ss=0x%X\n",
+                DEBUG_IDT("IDT: exec completed, preparing to switch CR3\n");
+                DEBUG_IDT("IDT: exec regs: eip=0x%08X useresp=0x%08X cs=0x%X ss=0x%X\n",
                        regs->eip, regs->useresp, regs->cs, regs->ss);
                 
                 if (regs->useresp < 0x1000 || regs->useresp >= 0xC0000000) {
-                    if (debugMode && debugLevel >= 1) printf("IDT: CRITICAL: useresp=0x%08X is invalid!\n", regs->useresp);
+                    DEBUG_IDT("IDT: CRITICAL: useresp=0x%08X is invalid!\n", regs->useresp);
                     __asm__ volatile ("cli; hlt");
                 }
                 
@@ -254,14 +259,13 @@ registers_t* interrupt_handler(registers_t* regs)
                         "movl %%eax, %%cr3\n\t"
                         ::: "eax", "memory"
                     );
-                    if (debugMode && debugLevel >= 3) printf("IDT: exec completed, switched CR3 from 0x%08X to 0x%08X\n", old_cr3, new_cr3);
+                    DEBUG_IDT("IDT: exec completed, switched CR3 from 0x%08X to 0x%08X\n", old_cr3, new_cr3);
                 }
                 if (current_task) {
                     current_task->cr3 = new_cr3;
                 }
                 
                 old_pages = current_task->exec_old_pages;
-                old_pages_count = current_task->exec_old_pages_count;
                 old_pd = current_task->exec_old_pd;
                 
                 if (old_pages) {
@@ -351,7 +355,7 @@ registers_t* interrupt_handler(registers_t* regs)
             }
         }
 
-        if (debugMode && debugLevel >= 5) {
+        if (0) {
             terminal_writestring("IRQ ");
             print_hex(irq);
             terminal_writestring(" handled\n");

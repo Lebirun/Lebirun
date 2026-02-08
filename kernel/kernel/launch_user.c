@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_SIZE 0x4000u
 #define USER_STACK_GAP  0x1000u
 
 #define AT_NULL         0
@@ -114,8 +114,8 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
         return NULL;
     }
 
-    DPRINTF3("launch_user: created PD=0x%08X for ELF binary\n", new_pd);
-    if (debugMode && debugLevel >= 3) {
+    DEBUG_ELF("launch_user: created PD=0x%08X for ELF binary\n", new_pd);
+    if (debug_elf) {
         static uint32_t last_verify_tick = 0;
         extern volatile uint32_t tick_count;
         uint32_t now = tick_count;
@@ -140,13 +140,13 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
         return NULL;
     }
 
-    DPRINTF3("launch_user: ELF loaded entry=0x%08X base=0x%08X end=0x%08X\n",
+    DEBUG_ELF("launch_user: ELF loaded entry=0x%08X base=0x%08X end=0x%08X\n",
              elf_info.entry_point, elf_info.load_base, elf_info.bss_end);
 
     uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7, &stack_page_count);
-    DPRINTF3("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
-    if (debugMode && debugLevel >= 3) {
+    DEBUG_ELF("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
+    if (debug_elf) {
         static uint32_t last_verify_tick2 = 0;
         extern volatile uint32_t tick_count;
         uint32_t now = tick_count;
@@ -252,11 +252,24 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
 }
 
 task_t* launch_user_path(const char *path, int console_id) {
+    vfs_node_t *node;
+    uint32_t size;
+    uint8_t *buf;
+    uint32_t off;
+    task_t *t;
+
     if (!path || path[0] == '\0') return NULL;
 
-    vfs_node_t *node = vfs_namei(path);
+    printf("launch_user_path: looking up '%s'\n", path);
+    node = vfs_namei(path);
     if (!node) {
-        printf("launch_user_path: '%s' not found\n", path);
+        printf("launch_user_path: '%s' not found (vfs_namei returned NULL)\n", path);
+        vfs_node_t *bin = vfs_namei("/bin");
+        if (bin) {
+            printf("launch_user_path: /bin exists (node=%p)\n", bin);
+        } else {
+            printf("launch_user_path: /bin also not found!\n");
+        }
         return NULL;
     }
 
@@ -265,19 +278,19 @@ task_t* launch_user_path(const char *path, int console_id) {
         return NULL;
     }
 
-    uint32_t size = node->length;
+    size = node->length;
     if (size == 0 || size > (32u * 1024u * 1024u)) {
         printf("launch_user_path: '%s' invalid size %u\n", path, size);
         return NULL;
     }
 
-    uint8_t *buf = (uint8_t *)kmalloc(size);
+    buf = (uint8_t *)kmalloc(size);
     if (!buf) {
         printf("launch_user_path: OOM (%u bytes)\n", size);
         return NULL;
     }
 
-    uint32_t off = 0;
+    off = 0;
     while (off < size) {
         uint32_t chunk = size - off;
         if (chunk > 4096) chunk = 4096;
@@ -292,7 +305,7 @@ task_t* launch_user_path(const char *path, int console_id) {
         return NULL;
     }
 
-    task_t *t = launch_user_binary_common(buf, buf + size, console_id, path);
+    t = launch_user_binary_common(buf, buf + size, console_id, path);
     kfree(buf);
     return t;
 }

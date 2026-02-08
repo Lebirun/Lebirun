@@ -1,7 +1,30 @@
 CONFIG_FILE := $(if $(wildcard ../.config),../.config,../.config.default)
-CONFIG_DEBUG_MODE_VAL := $(shell [ -f "$(CONFIG_FILE)" ] && grep '^DEBUG_MODE=' "$(CONFIG_FILE)" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//;s/"//g' | tr '[:upper:]' '[:lower:]' || echo "")
-CONFIG_DEBUG_MODE := $(if $(filter y yes 1 true enable enabled,$(CONFIG_DEBUG_MODE_VAL)),1,0)
-CONFIG_DEBUG_VERBOSITY_VAL := $(shell [ -f "$(CONFIG_FILE)" ] && grep '^DEBUG_VERBOSITY=' "$(CONFIG_FILE)" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//;s/"//g' || echo "")
-CONFIG_DEBUG_VERBOSITY := $(if $(CONFIG_DEBUG_VERBOSITY_VAL),$(CONFIG_DEBUG_VERBOSITY_VAL),3)
 
-CPPFLAGS:=$(CPPFLAGS) -DCONFIG_DEBUG_MODE=$(CONFIG_DEBUG_MODE) -DCONFIG_DEBUG_VERBOSITY=$(CONFIG_DEBUG_VERBOSITY)
+define read_bool
+$(if $(filter y yes 1 true enable enabled,$(shell [ -f "$(CONFIG_FILE)" ] && grep '^$(1)=' "$(CONFIG_FILE)" 2>/dev/null | cut -d= -f2)),1,0)
+endef
+
+CONFIG_DEBUG_MEMORY := $(call read_bool,DEBUG_MEMORY)
+CONFIG_DEBUG_TASK := $(call read_bool,DEBUG_TASK)
+CONFIG_DEBUG_VFS := $(call read_bool,DEBUG_VFS)
+CONFIG_DEBUG_RAMFS := $(call read_bool,DEBUG_RAMFS)
+CONFIG_DEBUG_INITRD := $(call read_bool,DEBUG_INITRD)
+CONFIG_DEBUG_ELF := $(call read_bool,DEBUG_ELF)
+CONFIG_DEBUG_SYSCALL := $(call read_bool,DEBUG_SYSCALL)
+CONFIG_DEBUG_IDT := $(call read_bool,DEBUG_IDT)
+CONFIG_DEBUG_DRIVER := $(call read_bool,DEBUG_DRIVER)
+CONFIG_DEBUG_FS_EXT4 := $(call read_bool,DEBUG_FS_EXT4)
+CONFIG_DEBUG_FS_OTHER := $(call read_bool,DEBUG_FS_OTHER)
+
+CPPFLAGS:=$(CPPFLAGS) \
+	-DCONFIG_DEBUG_MEMORY=$(CONFIG_DEBUG_MEMORY) \
+	-DCONFIG_DEBUG_TASK=$(CONFIG_DEBUG_TASK) \
+	-DCONFIG_DEBUG_VFS=$(CONFIG_DEBUG_VFS) \
+	-DCONFIG_DEBUG_RAMFS=$(CONFIG_DEBUG_RAMFS) \
+	-DCONFIG_DEBUG_INITRD=$(CONFIG_DEBUG_INITRD) \
+	-DCONFIG_DEBUG_ELF=$(CONFIG_DEBUG_ELF) \
+	-DCONFIG_DEBUG_SYSCALL=$(CONFIG_DEBUG_SYSCALL) \
+	-DCONFIG_DEBUG_IDT=$(CONFIG_DEBUG_IDT) \
+	-DCONFIG_DEBUG_DRIVER=$(CONFIG_DEBUG_DRIVER) \
+	-DCONFIG_DEBUG_FS_EXT4=$(CONFIG_DEBUG_FS_EXT4) \
+	-DCONFIG_DEBUG_FS_OTHER=$(CONFIG_DEBUG_FS_OTHER)

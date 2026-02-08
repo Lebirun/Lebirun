@@ -236,7 +236,7 @@ struct netif {
     netif_t *next;
 };
 
-#define ARP_CACHE_SIZE 64
+#define ARP_CACHE_SIZE 16
 #define ARP_ENTRY_TIMEOUT 300000
 
 typedef struct {

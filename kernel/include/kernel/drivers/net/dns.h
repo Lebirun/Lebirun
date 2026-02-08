@@ -3,7 +3,7 @@
 
 #include <kernel/drivers/net/net_types.h>
 
-#define DNS_MAX_CACHE 32
+#define DNS_MAX_CACHE 8
 #define DNS_CACHE_TTL 300000
 
 typedef struct {

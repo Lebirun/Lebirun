@@ -6,7 +6,7 @@
 #include <kernel/console.h>
 #include <kernel/task.h>
 
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE 64
 static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];
 static unsigned int head[NUM_CONSOLES];
 static unsigned int tail[NUM_CONSOLES];

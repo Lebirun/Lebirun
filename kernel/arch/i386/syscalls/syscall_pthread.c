@@ -3,7 +3,7 @@
 extern task_t *current_task;
 extern void *syscall_table[];
 
-#define MAX_THREADS 64
+#define MAX_THREADS 16
 #define PTHREAD_STACK_SIZE 0x4000
 
 typedef struct {
@@ -41,8 +41,8 @@ typedef struct {
     int signaled;
 } pthread_cond_internal_t;
 
-#define MAX_MUTEXES 128
-#define MAX_CONDS 64
+#define MAX_MUTEXES 32
+#define MAX_CONDS 16
 
 static pthread_mutex_internal_t mutexes[MAX_MUTEXES];
 static pthread_cond_internal_t conds[MAX_CONDS];

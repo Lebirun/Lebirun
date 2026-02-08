@@ -32,7 +32,7 @@
 #define SIGPWR    30
 #define SIGSYS    31
 
-#define NSIG      64
+#define NSIG      33
 #define _NSIG     NSIG
 
 #define SIG_DFL ((void (*)(int))0)
@@ -77,11 +77,11 @@ typedef struct {
     int in_signal;
 } task_signals_t;
 
-static task_signals_t task_signals[256];
+static task_signals_t task_signals[32];
 
 static task_signals_t *get_task_signals(void) {
     if (!current_task) return NULL;
-    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
+    uint32_t idx = ((uint32_t)current_task->pid) & 31u;
     return &task_signals[idx];
 }
 

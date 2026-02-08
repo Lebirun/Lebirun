@@ -23,17 +23,29 @@ static void dhcp_add_option(uint8_t *options, uint32_t *offset, uint8_t code, ui
     }
 }
 
-static int dhcp_parse_options(uint8_t *options, uint32_t len, dhcp_state_t *state) {
-    uint32_t i = 0;
+static uint8_t dhcp_parse_options(uint8_t *options, uint32_t len, dhcp_state_t *state) {
+    uint32_t i;
+    uint8_t code;
+    uint8_t opt_len;
+    uint8_t msg_type;
+    uint32_t lt;
+
+    msg_type = 0;
+    i = 0;
     while (i < len) {
-        uint8_t code = options[i++];
+        code = options[i++];
         if (code == DHCP_OPT_PAD) continue;
         if (code == DHCP_OPT_END) break;
         if (i >= len) break;
-        uint8_t opt_len = options[i++];
+        opt_len = options[i++];
         if (i + opt_len > len) break;
 
         switch (code) {
+            case DHCP_OPT_MSG_TYPE:
+                if (opt_len >= 1) {
+                    msg_type = options[i];
+                }
+                break;
             case DHCP_OPT_SUBNET:
                 if (opt_len >= 4) {
                     memcpy(&state->subnet_mask, &options[i], 4);
@@ -54,7 +66,8 @@ static int dhcp_parse_options(uint8_t *options, uint32_t len, dhcp_state_t *stat
                 break;
             case DHCP_OPT_LEASE_TIME:
                 if (opt_len >= 4) {
-                    state->lease_time = ntohl(*(uint32_t *)&options[i]);
+                    memcpy(&lt, &options[i], 4);
+                    state->lease_time = ntohl(lt);
                 }
                 break;
             case DHCP_OPT_SERVER_ID:
@@ -67,11 +80,15 @@ static int dhcp_parse_options(uint8_t *options, uint32_t len, dhcp_state_t *stat
         }
         i += opt_len;
     }
-    return 0;
+    return msg_type;
 }
 
 static int dhcp_send_discover(netif_t *netif) {
     dhcp_packet_t pkt;
+    uint32_t opt_off;
+    uint8_t msg_type;
+    uint8_t param_list[3];
+
     memset(&pkt, 0, sizeof(pkt));
 
     pkt.op = DHCP_OP_REQUEST;
@@ -84,14 +101,18 @@ static int dhcp_send_discover(netif_t *netif) {
     memcpy(pkt.chaddr, &netif->mac, 6);
     pkt.magic = htonl(DHCP_MAGIC);
 
-    uint32_t opt_off = 0;
-    uint8_t msg_type = DHCP_MSG_DISCOVER;
+    opt_off = 0;
+    msg_type = DHCP_MSG_DISCOVER;
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_MSG_TYPE, 1, &msg_type);
 
-    uint8_t param_list[] = {DHCP_OPT_SUBNET, DHCP_OPT_ROUTER, DHCP_OPT_DNS};
+    param_list[0] = DHCP_OPT_SUBNET;
+    param_list[1] = DHCP_OPT_ROUTER;
+    param_list[2] = DHCP_OPT_DNS;
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_PARAM_LIST, sizeof(param_list), param_list);
 
     pkt.options[opt_off++] = DHCP_OPT_END;
+
+    g_dhcp_state.last_send_time = net_get_ticks();
 
     printf("DHCP: Sending DISCOVER (xid=0x%08X)\n", g_dhcp_state.xid);
 
@@ -102,6 +123,10 @@ static int dhcp_send_discover(netif_t *netif) {
 
 static int dhcp_send_request(netif_t *netif) {
     dhcp_packet_t pkt;
+    uint32_t opt_off;
+    uint8_t msg_type;
+    uint8_t param_list[3];
+
     memset(&pkt, 0, sizeof(pkt));
 
     pkt.op = DHCP_OP_REQUEST;
@@ -114,16 +139,20 @@ static int dhcp_send_request(netif_t *netif) {
     memcpy(pkt.chaddr, &netif->mac, 6);
     pkt.magic = htonl(DHCP_MAGIC);
 
-    uint32_t opt_off = 0;
-    uint8_t msg_type = DHCP_MSG_REQUEST;
+    opt_off = 0;
+    msg_type = DHCP_MSG_REQUEST;
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_MSG_TYPE, 1, &msg_type);
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_REQUESTED_IP, 4, &g_dhcp_state.offered_ip);
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_SERVER_ID, 4, &g_dhcp_state.server_ip);
 
-    uint8_t param_list[] = {DHCP_OPT_SUBNET, DHCP_OPT_ROUTER, DHCP_OPT_DNS};
+    param_list[0] = DHCP_OPT_SUBNET;
+    param_list[1] = DHCP_OPT_ROUTER;
+    param_list[2] = DHCP_OPT_DNS;
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_PARAM_LIST, sizeof(param_list), param_list);
 
     pkt.options[opt_off++] = DHCP_OPT_END;
+
+    g_dhcp_state.last_send_time = net_get_ticks();
 
     printf("DHCP: Sending REQUEST for %u.%u.%u.%u\n",
            g_dhcp_state.offered_ip.octets[0], g_dhcp_state.offered_ip.octets[1],
@@ -146,6 +175,7 @@ void dhcp_start(netif_t *netif) {
     g_dhcp_state.xid = dhcp_rand_xid();
     g_dhcp_state.state = DHCP_STATE_SELECTING;
     g_dhcp_state.netif = netif;
+    g_dhcp_state.retries = 0;
 
     dhcp_send_discover(netif);
 }
@@ -156,33 +186,26 @@ void dhcp_stop(netif_t *netif) {
 }
 
 void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
+    dhcp_packet_t *pkt;
+    dhcp_state_t temp;
+    uint32_t options_len;
+    uint8_t msg_type;
+    uint32_t opt_parse_len;
+
     if (!netif || !data || len < sizeof(dhcp_packet_t) - 308) return;
 
-    dhcp_packet_t *pkt = (dhcp_packet_t *)data;
+    pkt = (dhcp_packet_t *)data;
 
     if (pkt->op != DHCP_OP_REPLY) return;
     if (ntohl(pkt->xid) != g_dhcp_state.xid) return;
     if (ntohl(pkt->magic) != DHCP_MAGIC) return;
 
-    dhcp_state_t temp;
     memset(&temp, 0, sizeof(temp));
     temp.offered_ip = pkt->yiaddr;
 
-    uint32_t options_len = len - (sizeof(dhcp_packet_t) - 308);
-    dhcp_parse_options(pkt->options, options_len > 308 ? 308 : options_len, &temp);
-
-    uint8_t msg_type = 0;
-    uint32_t i = 0;
-    while (i < options_len && i < 308) {
-        if (pkt->options[i] == DHCP_OPT_PAD) { i++; continue; }
-        if (pkt->options[i] == DHCP_OPT_END) break;
-        if (pkt->options[i] == DHCP_OPT_MSG_TYPE && i + 2 < options_len) {
-            msg_type = pkt->options[i + 2];
-            break;
-        }
-        if (i + 1 >= options_len) break;
-        i += 2 + pkt->options[i + 1];
-    }
+    options_len = len - (sizeof(dhcp_packet_t) - 308);
+    opt_parse_len = options_len > 308 ? 308 : options_len;
+    msg_type = dhcp_parse_options(pkt->options, opt_parse_len, &temp);
 
     switch (g_dhcp_state.state) {
         case DHCP_STATE_SELECTING:
@@ -200,6 +223,7 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
                 g_dhcp_state.lease_time = temp.lease_time;
 
                 g_dhcp_state.state = DHCP_STATE_REQUESTING;
+                g_dhcp_state.retries = 0;
                 dhcp_send_request(netif);
             }
             break;
@@ -208,8 +232,29 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
             if (msg_type == DHCP_MSG_ACK) {
                 printf("DHCP: Received ACK\n");
 
+                g_dhcp_state.offered_ip = temp.offered_ip;
+                if (!ipv4_eq(temp.server_ip, IPV4_ZERO)) {
+                    g_dhcp_state.server_ip = temp.server_ip;
+                }
+                if (!ipv4_eq(temp.subnet_mask, IPV4_ZERO)) {
+                    g_dhcp_state.subnet_mask = temp.subnet_mask;
+                }
+                if (!ipv4_eq(temp.gateway, IPV4_ZERO)) {
+                    g_dhcp_state.gateway = temp.gateway;
+                }
+                if (!ipv4_eq(temp.dns1, IPV4_ZERO)) {
+                    g_dhcp_state.dns1 = temp.dns1;
+                }
+                if (!ipv4_eq(temp.dns2, IPV4_ZERO)) {
+                    g_dhcp_state.dns2 = temp.dns2;
+                }
+                if (temp.lease_time != 0) {
+                    g_dhcp_state.lease_time = temp.lease_time;
+                }
+
                 g_dhcp_state.state = DHCP_STATE_BOUND;
                 g_dhcp_state.lease_start = net_get_ticks();
+                g_dhcp_state.retries = 0;
 
                 netif_set_ipv4(netif, g_dhcp_state.offered_ip,
                               g_dhcp_state.subnet_mask,
@@ -247,12 +292,68 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
     }
 }
 
+int dhcp_is_negotiating(void) {
+    return g_dhcp_state.state == DHCP_STATE_SELECTING ||
+           g_dhcp_state.state == DHCP_STATE_REQUESTING;
+}
+
 void dhcp_tick(void) {
+    uint32_t elapsed;
+    uint32_t now;
+    uint32_t retry_interval;
+
+    now = net_get_ticks();
+
+    if (g_dhcp_state.state == DHCP_STATE_SELECTING) {
+        elapsed = now - g_dhcp_state.last_send_time;
+        retry_interval = DHCP_RETRY_INTERVAL * (1u + g_dhcp_state.retries);
+        if (retry_interval > DHCP_RETRY_INTERVAL * 4) {
+            retry_interval = DHCP_RETRY_INTERVAL * 4;
+        }
+        if (elapsed >= retry_interval) {
+            if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
+                printf("DHCP: DISCOVER timed out after %u retries, restarting\n",
+                       (unsigned)g_dhcp_state.retries);
+                g_dhcp_state.retries = 0;
+                g_dhcp_state.xid = dhcp_rand_xid();
+                dhcp_send_discover(g_dhcp_state.netif);
+            } else {
+                g_dhcp_state.retries++;
+                dhcp_send_discover(g_dhcp_state.netif);
+            }
+        }
+        return;
+    }
+
+    if (g_dhcp_state.state == DHCP_STATE_REQUESTING) {
+        elapsed = now - g_dhcp_state.last_send_time;
+        retry_interval = DHCP_RETRY_INTERVAL * (1u + g_dhcp_state.retries);
+        if (retry_interval > DHCP_RETRY_INTERVAL * 4) {
+            retry_interval = DHCP_RETRY_INTERVAL * 4;
+        }
+        if (elapsed >= retry_interval) {
+            if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
+                printf("DHCP: REQUEST timed out after %u retries, restarting\n",
+                       (unsigned)g_dhcp_state.retries);
+                g_dhcp_state.state = DHCP_STATE_SELECTING;
+                g_dhcp_state.retries = 0;
+                g_dhcp_state.xid = dhcp_rand_xid();
+                dhcp_send_discover(g_dhcp_state.netif);
+            } else {
+                g_dhcp_state.retries++;
+                dhcp_send_request(g_dhcp_state.netif);
+            }
+        }
+        return;
+    }
+
     if (g_dhcp_state.state == DHCP_STATE_BOUND && g_dhcp_state.lease_time > 0) {
-        uint32_t elapsed = net_get_ticks() - g_dhcp_state.lease_start;
+        elapsed = now - g_dhcp_state.lease_start;
         if (elapsed > g_dhcp_state.lease_time * 500) {
             printf("DHCP: Lease renewing\n");
             g_dhcp_state.state = DHCP_STATE_SELECTING;
+            g_dhcp_state.retries = 0;
+            g_dhcp_state.xid = dhcp_rand_xid();
             dhcp_send_discover(g_dhcp_state.netif);
         }
     }

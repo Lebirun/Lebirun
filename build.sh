@@ -28,6 +28,24 @@ rebuild_initrd() {
   fi
 }
 
+build_squashfs() {
+  local DIR="$1"
+  local OUT="$2"
+  if [ ! -f "$OUT" ] || [ -n "$(find "$DIR" -newer "$OUT" 2>/dev/null | head -1)" ]; then
+    echo "Building SquashFS image $OUT from $DIR..."
+    if command -v mksquashfs >/dev/null 2>&1; then
+      rm -f "$OUT"
+      mksquashfs "$DIR" "$OUT" -noI -noD -noF -noX -no-xattrs -noappend -no-compression -quiet
+      echo "SquashFS image created: $OUT ($(stat -c%s "$OUT") bytes)"
+    else
+      echo "Warning: mksquashfs not found, falling back to initrd format"
+      ./mkinitrd.sh "$DIR" "$OUT"
+    fi
+  else
+    echo "Skipping $OUT (up to date)"
+  fi
+}
+
 chmod +x mkinitrd.sh
 [ -d "initrd" ] && rebuild_initrd initrd initrd.img
-[ -d "root" ] && rebuild_initrd root rootfs.img
+[ -d "root" ] && build_squashfs root rootfs.squashfs

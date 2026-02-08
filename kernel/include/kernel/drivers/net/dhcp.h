@@ -10,6 +10,9 @@
 #define DHCP_STATE_RENEWING   4
 #define DHCP_STATE_REBINDING  5
 
+#define DHCP_RETRY_INTERVAL   1000
+#define DHCP_MAX_RETRIES      5
+
 typedef struct {
     uint8_t state;
     uint32_t xid;
@@ -23,6 +26,8 @@ typedef struct {
     uint32_t t1_time;
     uint32_t t2_time;
     uint32_t lease_start;
+    uint32_t last_send_time;
+    uint32_t retries;
     netif_t *netif;
 } dhcp_state_t;
 
@@ -32,5 +37,6 @@ void dhcp_stop(netif_t *netif);
 void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len);
 void dhcp_tick(void);
 int dhcp_is_bound(netif_t *netif);
+int dhcp_is_negotiating(void);
 
 #endif

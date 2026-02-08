@@ -639,6 +639,9 @@ void ahci_debug_info(void) {
 }
 
 int ahci_init(void) {
+    if (g_ahci_controller.initialized)
+        return 0;
+
     printf("AHCI: Initializing AHCI driver...\n");
     
     memset(&g_ahci_controller, 0, sizeof(g_ahci_controller));

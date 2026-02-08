@@ -18,11 +18,14 @@ extern uint64_t low_bump;
 reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
 uint32_t num_reserved_regions = 0;
 
+static uint32_t multiboot_physical_ram_kb = 0;
+static uint32_t multiboot_usable_ram_kb = 0;
+
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
 extern void pmm_zero_page_phys(uint32_t phys_addr);
 extern void pfa_init_internal_setup(uint32_t bitmap_bytes, uint32_t total_pages, uint32_t kernel_frames);
-extern void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb);
+extern void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb, uint32_t init_free_frames);
 extern void pae_init_temp_mapping(void);
 extern void temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
 extern void temp_unmap_raw(uint32_t temp_virt);
@@ -34,23 +37,24 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
     }
 
     multiboot_t *mb = (multiboot_t *) (mb_ptr);
-    DPRINTF4("MB flags: 0x"); DEBUG_HEX4(mb->flags); DPRINTF4("\n");
 
     if (!(mb->flags & (1 << 6))) {
         printf("No MEMINFO - skip map.\n");
         return;
     }
 
-    DPRINTF4("Mmap addr: 0x"); DEBUG_HEX4((unsigned long)mb->mmap_addr); DPRINTF4("\n");
-    DPRINTF4("Mmap virt: 0x"); DEBUG_HEX4((unsigned long)(mb->mmap_addr + 0xC0000000)); DPRINTF4("\n");
-    DPRINTF4("  Length: 0x"); DEBUG_HEX4(mb->mmap_length); DPRINTF4("\n");
+    if (mb->flags & (1 << 0)) {
+        uint32_t bios_kb = mb->mem_lower + mb->mem_upper;
+        if (bios_kb > multiboot_physical_ram_kb) {
+            multiboot_physical_ram_kb = bios_kb;
+        }
+    }
 
     multiboot_memory_map_t *entry = (multiboot_memory_map_t *) (mb->mmap_addr);
     uint8_t *mmap_virt_start = (uint8_t *)entry;
     uint8_t *mmap_virt_end = mmap_virt_start + mb->mmap_length;
-
-    DPRINTF5("Raw map dump:\n");
-    DPRINTF5(" mmap_virt_start=0x"); DEBUG_HEX5((unsigned long)mmap_virt_start); DPRINTF5(" mmap_virt_end=0x"); DEBUG_HEX5((unsigned long)mmap_virt_end); DPRINTF5("\n");
+    uint64_t max_phys_memory = 0;
+    uint64_t total_usable_kb = 0;
     uint32_t entry_count = 0;
     while ((uint8_t *)entry < mmap_virt_end) {
         if (entry->size == 0) break;
@@ -58,17 +62,30 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
         uint64_t base = ((uint64_t)entry->base_addr_high << 32) | entry->base_addr_low;
         uint64_t len = ((uint64_t)entry->length_high << 32) | entry->length_low;
 
-        DPRINTF5("Entry %d: Addr 0x", entry_count); DEBUG_HEX5((unsigned long)entry); DPRINTF5(" size=0x"); DEBUG_HEX5(entry->size); DPRINTF5(" Type %d, Base 0x", entry->type); DEBUG_HEX5((unsigned long)base); DPRINTF5("\n");
-        DPRINTF5("  Len 0x"); DEBUG_HEX5((unsigned long)len); DPRINTF5("\n");
-
         if (entry->type == 1 && len > 0) {
-            DPRINTF5("  -> Usable ~%lu KB\n", (unsigned long)(len / 1024));
+            total_usable_kb += len / 1024;
+        }
+
+        if (len > 0 && base + len > max_phys_memory) {
+            max_phys_memory = base + len;
         }
 
             entry = (multiboot_memory_map_t *) ((uint8_t *)entry + entry->size + 4);
         entry_count++;
         if (entry_count > 50) break;
     }
+
+    if (max_phys_memory > 0x100000000ULL) {
+        max_phys_memory = 0x100000000ULL;
+    }
+    if ((uint32_t)(max_phys_memory / 1024) > multiboot_physical_ram_kb) {
+        multiboot_physical_ram_kb = (uint32_t)(max_phys_memory / 1024);
+    }
+    if ((uint32_t)total_usable_kb > multiboot_physical_ram_kb) {
+        multiboot_physical_ram_kb = (uint32_t)total_usable_kb;
+    }
+    multiboot_usable_ram_kb = (uint32_t)total_usable_kb;
+    DEBUG_MEMORY("Physical RAM from mmap: %u KB (%u MB)\n", multiboot_physical_ram_kb, multiboot_physical_ram_kb / 1024);
 
     uint32_t merged_count = 0;
     entry = (multiboot_memory_map_t *) (mb->mmap_addr);
@@ -97,24 +114,13 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
     }
     num_regions = merged_count;
 
-    DPRINTF3("Merged: %d regions\n", num_regions);
-    uint64_t total_mb = 0;
-    for (uint32_t i = 0; i < num_regions; i++) {
-        uint64_t end = memory_map[i].base + memory_map[i].length;
-        DPRINTF4(" [%d] 0x", i); DEBUG_HEX4((unsigned long)memory_map[i].base); DPRINTF4("\n");
-        DPRINTF4("  - 0x"); DEBUG_HEX4((unsigned long)end); DPRINTF4("\n");
-        unsigned long mb = (unsigned long)(memory_map[i].length / 1024 / 1024);
-        unsigned long kb = (unsigned long)(memory_map[i].length / 1024);
-        DPRINTF4("  (%lu MB / %lu KB)\n", mb, kb);
-        total_mb += mb;
-    }
-    DPRINTF3("Total usable: %lu MB\n", total_mb);
+    DEBUG_MEMORY("Merged: %d regions\n", num_regions);
 
     if (num_regions > 0) {
         uint32_t kernel_end_phys = (uint32_t)_kernel_end - 0xC0000000;
         kernel_end_phys = (kernel_end_phys + 0xFFF) & ~0xFFF;
 
-        DPRINTF3("Kernel ends at phys 0x"); DEBUG_HEX3(kernel_end_phys); DPRINTF3("\n");
+        DEBUG_MEMORY("Kernel ends at phys 0x%08X\n", kernel_end_phys);
 
         bump_current = kernel_end_phys;
         active_region = 0;
@@ -143,8 +149,8 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
             }
         }
 
-        DPRINTF3("PMM bump ready: Starting at 0x"); DEBUG_HEX3((unsigned long)bump_current); DPRINTF3("\n");
-        DPRINTF3("PMM low bump starting at 0x"); DEBUG_HEX3((unsigned long)low_bump); DPRINTF3("\n");
+        DEBUG_MEMORY("PMM bump ready: Starting at 0x%08lX\n", (unsigned long)bump_current);
+        DEBUG_MEMORY("PMM low bump starting at 0x%08lX\n", (unsigned long)low_bump);
     }
 
     num_reserved_regions = 0;
@@ -161,8 +167,6 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
             reserved_regions[num_reserved_regions].start_phys = start_page;
             reserved_regions[num_reserved_regions].end_phys = end_page;
             num_reserved_regions++;
-            
-            DPRINTF3("Reserved module %u: phys 0x%08X - 0x%08X\n", i, start_page, end_page);
         }
     }
 }
@@ -184,6 +188,8 @@ void pfa_init(void) {
     uint64_t total_mb;
     uint32_t actual_free;
     uint64_t region_size;
+    uint32_t system_total_ram_kb;
+    uint32_t system_usable_ram_kb;
 
     if (pae_enabled) {
         pfa_init_internal_setup(BITMAP_BYTES_PAE, TOTAL_PAGES_PAE, 0);
@@ -204,8 +210,8 @@ void pfa_init(void) {
 
     printf("PFA: Kernel ends at phys 0x%08X (%u frames reserved)\n", kernel_end_phys, kernel_frames);
     printf("PFA: Managing up to 0x%08X%08X (%u frames, bitmap %u bytes)\n",
-           (uint32_t)(max_phys >> 32), (uint32_t)max_phys, pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT, 
-           pae_enabled ? BITMAP_BYTES_PAE : BITMAP_BYTES_32BIT);
+           (uint32_t)(max_phys >> 32), (uint32_t)max_phys, (uint32_t)(pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT), 
+           (uint32_t)(pae_enabled ? BITMAP_BYTES_PAE : BITMAP_BYTES_32BIT));
 
     total_free_frames = 0;
     for (r = 0; r < num_regions; r++) {
@@ -281,20 +287,35 @@ void pfa_init(void) {
         printf("PFA WARNING: counted %u but bitmap shows %u free\n", (uint32_t)total_free_frames, actual_free);
     }
     
-    uint32_t system_total_ram_kb = 0;
+    if (multiboot_physical_ram_kb > 0) {
+        system_total_ram_kb = multiboot_physical_ram_kb;
+        if (system_total_ram_kb > (uint32_t)(max_phys / 1024)) {
+            system_total_ram_kb = (uint32_t)(max_phys / 1024);
+        }
+    } else {
+        system_total_ram_kb = 0;
+        for (r = 0; r < num_regions; r++) {
+            if (memory_map[r].type != 1) continue;
+            region_size = memory_map[r].length;
+            if (memory_map[r].base + region_size > max_phys) {
+                if (memory_map[r].base >= max_phys) continue;
+                region_size = max_phys - memory_map[r].base;
+            }
+            system_total_ram_kb += (uint32_t)(region_size / 1024);
+        }
+    }
+    system_usable_ram_kb = 0;
     for (r = 0; r < num_regions; r++) {
         if (memory_map[r].type != 1) continue;
-        region_size = memory_map[r].length;
-        if (memory_map[r].base + region_size > max_phys) {
-            if (memory_map[r].base >= max_phys) continue;
-            region_size = max_phys - memory_map[r].base;
-        }
-        system_total_ram_kb += (uint32_t)(region_size / 1024);
+        region_base = memory_map[r].base;
+        region_end = region_base + memory_map[r].length;
+        if (region_base >= max_phys) continue;
+        if (region_end > max_phys) region_end = max_phys;
+        system_usable_ram_kb += (uint32_t)((region_end - region_base) / 1024);
     }
-    uint32_t system_usable_ram_kb = (uint32_t)(total_free_frames * 4);
-    pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb);
-    printf("PFA: Total system RAM: %u KB (~%u MB), Free: %u KB\n", 
-           system_total_ram_kb, system_total_ram_kb / 1024, system_usable_ram_kb);
+    pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, (uint32_t)total_free_frames);
+    printf("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n", 
+           system_total_ram_kb, system_total_ram_kb / 1024, (uint32_t)(total_free_frames * 4));
 
     uint32_t cr3_val;
     uint32_t *pd;

@@ -170,23 +170,13 @@ void vmm_map_range_alloc(uint32_t virt_addr, uint32_t size, uint32_t flags) {
             newval = ((uint32_t)phys_page & ~0xFFF) | (flags & 0xFFF);
             pt[pt_idx] = newval;
             map_debug.v = v; map_debug.pd_idx = pd_idx; map_debug.pt_idx = pt_idx; map_debug.old = old; map_debug.newval = newval; map_debug.pd1023 = ((uint32_t *)0xFFFFF000)[1023]; map_debug.pd_pde = pd[pd_idx]; map_debug.op_count++;
-                 if (debugMode && debugLevel >= 5) {
-                  printf("vmm_map_range_alloc: map v=0x%08X pd_idx=%u pt_idx=%u -> phys=0x%08X old=0x%08X new=0x%08X (pd[1023]=0x%08X pd=%08X)\n",
-                      v, pd_idx, pt_idx, (uint32_t)phys_page, old, newval, map_debug.pd1023, map_debug.pd_pde);
-                 }
             __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
-                 if (debugMode && debugLevel >= 5) heap_verify();
         } else {
             old = pt[pt_idx];
             newval = (old & ~0xFFF) | (flags & 0xFFF);
             pt[pt_idx] = newval;
             map_debug.v = v; map_debug.pd_idx = pd_idx; map_debug.pt_idx = pt_idx; map_debug.old = old; map_debug.newval = newval; map_debug.pd1023 = ((uint32_t *)0xFFFFF000)[1023]; map_debug.pd_pde = pd[pd_idx]; map_debug.op_count++;
-                 if (debugMode && debugLevel >= 5) {
-                  printf("vmm_map_range_alloc: remap v=0x%08X pd_idx=%u pt_idx=%u old=0x%08X new=0x%08X (pd[1023]=0x%08X pd=%08X)\n",
-                      v, pd_idx, pt_idx, old, newval, map_debug.pd1023, map_debug.pd_pde);
-                 }
             __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
-                 if (debugMode && debugLevel >= 5) heap_verify();
         }
     }
 }
@@ -210,8 +200,6 @@ int heap_map_page(uint32_t virt_addr) {
 
     pd = (uint32_t *)0xFFFFF000;
 
-    DPRINTF4("heap_map_page: virt=0x"); DEBUG_HEX4(virt_addr); DPRINTF4(" pd_idx=%u pt_idx=%u\n", pd_idx, pt_idx);
-
     if (!(pd[pd_idx] & 1)) {
         pt_page = pmm_alloc_low_page();
         if (!pt_page) {
@@ -226,12 +214,9 @@ int heap_map_page(uint32_t virt_addr) {
         __asm__ volatile("invlpg (%0)" : : "r"(pt_addr) : "memory");
         pt_new = (uint32_t *)pt_addr;
         memset(pt_new, 0, PAGE_SIZE);
-        DPRINTF4("heap_map_page: Created PD entry for idx %u -> phys 0x", pd_idx); DEBUG_HEX4((uint32_t)pt_page); DPRINTF4("\n");
     }
 
     pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
-
-    DPRINTF4("heap_map_page: PT pointer 0x"); DEBUG_HEX4((uint32_t)pt); DPRINTF4("\n");
 
     if (!(pt[pt_idx] & 1)) {
         phys_page = pmm_alloc_page();
@@ -240,7 +225,6 @@ int heap_map_page(uint32_t virt_addr) {
             return -1;
         }
         pt[pt_idx] = ((uint32_t)phys_page & ~0xFFF) | 3;
-        DPRINTF4("heap_map_page: Mapped phys 0x"); DEBUG_HEX4((uint32_t)phys_page); DPRINTF4(" at virt 0x"); DEBUG_HEX4(virt_addr); DPRINTF4("\n");
 
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }

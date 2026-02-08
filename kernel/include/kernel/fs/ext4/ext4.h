@@ -9,8 +9,8 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       64
-#define EXT4_MAX_OPEN_INODES    256
+#define EXT4_CACHE_BLOCKS       8
+#define EXT4_MAX_OPEN_INODES    16
 
 struct ext4_fs;
 
