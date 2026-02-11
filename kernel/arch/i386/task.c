@@ -194,12 +194,16 @@ void waitq_init(wait_queue_t* q) {
 }
 
 void waitq_add(wait_queue_t* q, task_t* t) {
+    uint32_t flags;
+
     if (!q || !t) return;
     if (t->in_wait_queue || t->waiting_queue) return;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     t->wait_next = q->head;
     q->head = t;
     t->in_wait_queue = 1;
     t->waiting_queue = q;
+    __asm__ volatile("push %0; popf" : : "r"(flags));
 }
 
 task_t* waitq_pop(wait_queue_t* q) {

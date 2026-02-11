@@ -19,10 +19,6 @@ static uint32_t ramfs_next_inode = 1;
 static ramfs_stats_t ramfs_stats;
 static int ramfs_stats_initialized = 0;
 
-static void ramfs_check_root_children(const char *location) {
-    (void)location;
-}
-
 void ramfs_debug_check_root(const char *location) {
     (void)location;
 }

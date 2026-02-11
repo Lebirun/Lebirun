@@ -14,6 +14,7 @@ bool console_is_initialized(void);
 
 typedef struct {
     char (*buffer)[CONSOLE_BUFFER_COLS];
+    uint8_t line_wrapped[CONSOLE_BUFFER_ROWS];
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t scroll_offset;
@@ -47,6 +48,7 @@ int console_getcursor(int console_num, int *x, int *y);
 void console_redraw_current(void);
 void console_tick_redraw(void);
 void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
+void console_rewrap_all(uint32_t old_cols, uint32_t new_cols, uint32_t new_rows);
 void console_writer_init(void);
 void console_writer_flush(void);
 void console_tick(void);

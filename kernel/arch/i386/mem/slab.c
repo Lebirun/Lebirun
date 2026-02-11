@@ -287,6 +287,17 @@ size_t slab_max_size(void) {
     return slab_sizes[SLAB_SIZES_COUNT - 1];
 }
 
+uint32_t slab_get_total_pages(void) {
+    int i;
+    uint32_t total;
+
+    total = 0;
+    for (i = 0; i < SLAB_SIZES_COUNT; i++) {
+        total += slab_caches[i].pages_allocated;
+    }
+    return total;
+}
+
 void slab_stats(void) {
     int i;
     slab_cache_t *cache;

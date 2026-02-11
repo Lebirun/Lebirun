@@ -402,3 +402,7 @@ void pae_pd_pool_free_slot(uint32_t slot) {
 uint32_t pae_pdpt_pool_size(void) {
     return PAE_PDPT_POOL_SIZE;
 }
+
+uint32_t pae_get_heap_pt_count(void) {
+    return pae_heap_pt_count;
+}

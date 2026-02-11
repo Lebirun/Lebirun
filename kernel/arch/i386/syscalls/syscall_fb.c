@@ -73,14 +73,17 @@ static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unuse
 }
 
 static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
-    (void)unused2;
-    uint32_t info_addr = (uint32_t)info_ptr;
-    uint32_t words = (uint32_t)(uintptr_t)words_ptr;
+    uint32_t info_addr;
+    uint32_t words;
     uint32_t *out;
-    uint32_t buffer[1056];
+    uint32_t buffer[16];
     uint32_t i;
     uint32_t copy_count;
     int ret;
+
+    (void)unused2;
+    info_addr = (uint32_t)info_ptr;
+    words = (uint32_t)(uintptr_t)words_ptr;
 
     if (info_addr >= 0xC0000000 || info_addr < 0x1000) {
         return -EFAULT;
@@ -91,8 +94,8 @@ static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
 
     out = (uint32_t *)info_addr;
     copy_count = words;
-    if (copy_count > 1056) {
-        copy_count = 1056;
+    if (copy_count > 16) {
+        copy_count = 16;
     }
 
     ret = fb_get_caps(buffer, copy_count);

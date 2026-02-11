@@ -190,28 +190,134 @@ void pfa_init(void) {
     uint64_t region_size;
     uint32_t system_total_ram_kb;
     uint32_t system_usable_ram_kb;
+    uint64_t detected_max_phys;
+    uint32_t actual_total_pages;
+    uint32_t actual_bitmap_bytes;
+    uint32_t bitmap_pages;
+    uint32_t bitmap_alloc_phys;
+    uint32_t bp;
+    uint64_t rend;
+    uint32_t phys_page;
+    uint32_t virt_page;
+    uint32_t pae_pd_idx;
+    uint32_t boot_mapped_limit;
+    uint64_t *new_pt;
+    uint32_t new_pt_phys;
+    uint32_t last_pd_idx;
+    uint32_t *legacy_pd;
+    uint32_t legacy_pd_idx;
+    uint32_t *legacy_pt;
+    uint32_t legacy_pt_phys;
+    extern uint64_t *pae_vmm_page_tables[];
+    extern uint32_t pae_vmm_pt_count;
 
-    if (pae_enabled) {
-        pfa_init_internal_setup(BITMAP_BYTES_PAE, TOTAL_PAGES_PAE, 0);
-        max_phys = MAX_PHYSICAL_MEMORY_PAE;
-        printf("PFA: PAE enabled, managing up to 64GB physical memory\n");
-    } else {
-        pfa_init_internal_setup(BITMAP_BYTES_32BIT, TOTAL_PAGES_32BIT, 0);
-        max_phys = MAX_PHYSICAL_MEMORY_32BIT;
-        printf("PFA: Legacy 32-bit paging, managing up to 4GB physical memory\n");
+    detected_max_phys = 0;
+    for (r = 0; r < num_regions; r++) {
+        if (memory_map[r].type != 1) continue;
+        rend = memory_map[r].base + memory_map[r].length;
+        if (rend > detected_max_phys) detected_max_phys = rend;
     }
 
-    extern uint8_t pfa_bitmap[];
-    memset(pfa_bitmap, 0xFF, pae_enabled ? BITMAP_BYTES_PAE : BITMAP_BYTES_32BIT);
+    for (r = 0; r < num_reserved_regions; r++) {
+        if (reserved_regions[r].end_phys > (uint32_t)bump_current) {
+            bump_current = (uint64_t)reserved_regions[r].end_phys;
+        }
+    }
+
+    if (pae_enabled) {
+        max_phys = MAX_PHYSICAL_MEMORY_PAE;
+    } else {
+        max_phys = MAX_PHYSICAL_MEMORY_32BIT;
+    }
+    if (detected_max_phys > max_phys) detected_max_phys = max_phys;
+    if (detected_max_phys == 0) detected_max_phys = max_phys;
+
+    actual_total_pages = (uint32_t)((detected_max_phys + PAGE_SIZE - 1) / PAGE_SIZE);
+    actual_bitmap_bytes = (actual_total_pages + 7) / 8;
+    actual_bitmap_bytes = (actual_bitmap_bytes + 3) & ~3u;
+
+    pfa_init_internal_setup(actual_bitmap_bytes, actual_total_pages, 0);
+
+    bitmap_pages = (actual_bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    bitmap_alloc_phys = (uint32_t)((bump_current + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
+    bump_current = bitmap_alloc_phys + (uint64_t)bitmap_pages * PAGE_SIZE;
+
+    boot_mapped_limit = pae_enabled ? 0x00800000 : 0x01000000;
+
+    if (bitmap_alloc_phys + bitmap_pages * PAGE_SIZE > boot_mapped_limit) {
+        if (pae_enabled) {
+            last_pd_idx = 0xFFFFFFFF;
+            for (bp = 0; bp < bitmap_pages; bp++) {
+                phys_page = bitmap_alloc_phys + bp * PAGE_SIZE;
+                virt_page = phys_page + 0xC0000000;
+                pae_pd_idx = (virt_page >> 21) & 0x1FF;
+
+                if (!(boot_pd_high[pae_pd_idx] & 1)) {
+                    if (pae_pd_idx != last_pd_idx) {
+                        new_pt_phys = (uint32_t)((low_bump + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
+                        low_bump = new_pt_phys + PAGE_SIZE;
+                        new_pt = (uint64_t *)(new_pt_phys + 0xC0000000);
+                        memset(new_pt, 0, PAGE_SIZE);
+                        boot_pd_high[pae_pd_idx] = ((uint64_t)new_pt_phys & ~0xFFFULL) | 3;
+                        __asm__ volatile(
+                            "mov %%cr3, %%eax\n\t"
+                            "mov %%eax, %%cr3\n\t"
+                            : : : "eax", "memory"
+                        );
+                        if (pae_vmm_pt_count < 32) {
+                            pae_vmm_page_tables[pae_vmm_pt_count++] = new_pt;
+                        }
+                        last_pd_idx = pae_pd_idx;
+                    }
+                    new_pt = (uint64_t *)((uint32_t)(boot_pd_high[pae_pd_idx] & ~0xFFFULL) + 0xC0000000);
+                }
+
+                vmm_map_page_early_avail(virt_page, phys_page, 0x003);
+            }
+        } else {
+            legacy_pd = (uint32_t *)0xFFFFF000;
+            last_pd_idx = 0xFFFFFFFF;
+            for (bp = 0; bp < bitmap_pages; bp++) {
+                phys_page = bitmap_alloc_phys + bp * PAGE_SIZE;
+                virt_page = phys_page + 0xC0000000;
+                legacy_pd_idx = virt_page >> 22;
+                if (!(legacy_pd[legacy_pd_idx] & 1)) {
+                    if (legacy_pd_idx != last_pd_idx) {
+                        legacy_pt_phys = (uint32_t)((low_bump + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1));
+                        low_bump = legacy_pt_phys + PAGE_SIZE;
+                        legacy_pt = (uint32_t *)(legacy_pt_phys + 0xC0000000);
+                        memset(legacy_pt, 0, PAGE_SIZE);
+                        legacy_pd[legacy_pd_idx] = (legacy_pt_phys & ~0xFFF) | 3;
+                        __asm__ volatile("invlpg (%0)" : : "r"((uint32_t)(0xFFC00000 + (legacy_pd_idx << 12))) : "memory");
+                        last_pd_idx = legacy_pd_idx;
+                    }
+                }
+                vmm_map_page_early_avail(virt_page, phys_page, 0x003);
+            }
+        }
+    }
+
+    extern uint8_t *pfa_bitmap;
+    pfa_bitmap = (uint8_t *)(bitmap_alloc_phys + 0xC0000000);
+    memset(pfa_bitmap, 0xFF, actual_bitmap_bytes);
+
+    printf("PFA: %s, managing %u pages (%u KB bitmap, %u pages)\n",
+           pae_enabled ? "PAE mode" : "Legacy 32-bit",
+           actual_total_pages, actual_bitmap_bytes / 1024, bitmap_pages);
 
     kernel_end_phys = (uint32_t)_kernel_end - 0xC0000000;
     kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (bitmap_alloc_phys + bitmap_pages * PAGE_SIZE > kernel_end_phys) {
+        kernel_end_phys = bitmap_alloc_phys + bitmap_pages * PAGE_SIZE;
+    }
+    for (r = 0; r < num_reserved_regions; r++) {
+        if (reserved_regions[r].end_phys > kernel_end_phys) {
+            kernel_end_phys = reserved_regions[r].end_phys;
+        }
+    }
     kernel_frames = kernel_end_phys / PAGE_SIZE;
 
     printf("PFA: Kernel ends at phys 0x%08X (%u frames reserved)\n", kernel_end_phys, kernel_frames);
-    printf("PFA: Managing up to 0x%08X%08X (%u frames, bitmap %u bytes)\n",
-           (uint32_t)(max_phys >> 32), (uint32_t)max_phys, (uint32_t)(pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT), 
-           (uint32_t)(pae_enabled ? BITMAP_BYTES_PAE : BITMAP_BYTES_32BIT));
 
     total_free_frames = 0;
     for (r = 0; r < num_regions; r++) {
@@ -220,29 +326,21 @@ void pfa_init(void) {
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
 
-        if (region_end <= max_phys) {
+        if (region_end <= detected_max_phys) {
             region_start_capped = region_base;
             region_end_capped = region_end;
-        } else if (region_base >= max_phys) {
-            printf("PFA: Region %u [0x%08X%08X-0x%08X%08X]: skipped (beyond managed range)\n",
-                   r, (uint32_t)(region_base >> 32), (uint32_t)region_base,
-                   (uint32_t)(region_end >> 32), (uint32_t)region_end);
+        } else if (region_base >= detected_max_phys) {
             continue;
         } else {
             region_start_capped = region_base;
-            region_end_capped = max_phys;
-            printf("PFA: Region %u [0x%08X%08X-0x%08X%08X]: capped to 0x%08X%08X\n",
-                   r, (uint32_t)(region_base >> 32), (uint32_t)region_base,
-                   (uint32_t)(region_end >> 32), (uint32_t)region_end,
-                   (uint32_t)(max_phys >> 32), (uint32_t)max_phys);
+            region_end_capped = detected_max_phys;
         }
 
         start_frame = (uint32_t)(region_start_capped / PAGE_SIZE);
         end_frame = (uint32_t)((region_end_capped + PAGE_SIZE - 1) / PAGE_SIZE);
         region_free = 0;
 
-        uint32_t total_pages = pae_enabled ? TOTAL_PAGES_PAE : TOTAL_PAGES_32BIT;
-        if (end_frame > total_pages) end_frame = total_pages;
+        if (end_frame > actual_total_pages) end_frame = actual_total_pages;
 
         extern void clear_bit(uint32_t bit_idx);
         for (f = start_frame; f < end_frame; f++) {
@@ -314,6 +412,21 @@ void pfa_init(void) {
         system_usable_ram_kb += (uint32_t)((region_end - region_base) / 1024);
     }
     pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, (uint32_t)total_free_frames);
+
+    {
+        uint32_t kern_phys_start;
+        uint32_t kern_phys_end_raw;
+        uint32_t kern_bin_kb;
+        uint32_t bmp_kb;
+        extern char _kernel_start[];
+        kern_phys_start = (uint32_t)_kernel_start;
+        kern_phys_end_raw = (uint32_t)_kernel_end - 0xC0000000;
+        kern_phys_end_raw = (kern_phys_end_raw + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        kern_bin_kb = (kern_phys_end_raw - kern_phys_start) / 1024;
+        bmp_kb = (bitmap_pages * PAGE_SIZE) / 1024;
+        pfa_set_reserved_stats(kern_bin_kb, bmp_kb);
+    }
+
     printf("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n", 
            system_total_ram_kb, system_total_ram_kb / 1024, (uint32_t)(total_free_frames * 4));
 

@@ -190,6 +190,10 @@ static int sys_read(int fd, char *buf, int len) {
                     wait_queue_t *wq = keyboard_get_waitq_for(con_id);
                     if (!wq) return -1;
                     waitq_add(wq, current_task);
+                    if (keyboard_has_data_for(con_id)) {
+                        waitq_remove(wq, current_task);
+                        break;
+                    }
                     block_current();
                 }
                 
@@ -257,6 +261,10 @@ static int sys_read(int fd, char *buf, int len) {
                 wait_queue_t *wq = keyboard_get_waitq_for(con_id);
                 if (!wq) return -1;
                 waitq_add(wq, current_task);
+                if (keyboard_has_data_for(con_id)) {
+                    waitq_remove(wq, current_task);
+                    break;
+                }
                 block_current();
             }
 

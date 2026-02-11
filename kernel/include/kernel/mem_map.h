@@ -106,7 +106,7 @@ typedef struct {
 
 extern mem_region_t memory_map[MAX_REGIONS];
 extern uint32_t num_regions;
-extern uint8_t pfa_bitmap[BITMAP_BYTES_MAX];
+extern uint8_t *pfa_bitmap;
 extern heap_t kernel_heap;
 
 #define MAX_RESERVED_REGIONS 8
@@ -148,6 +148,9 @@ uint32_t pfa_count_free(void);
 uint32_t pfa_get_total_ram_kb(void);
 uint32_t pfa_get_usable_ram_kb(void);
 uint32_t pfa_get_kernel_used_kb(void);
+uint32_t pfa_get_kernel_binary_kb(void);
+uint32_t pfa_get_bitmap_kb(void);
+void pfa_set_reserved_stats(uint32_t kern_bin_kb, uint32_t bmp_kb);
 void heap_init(void);
 void *kmalloc(size_t size);
 void *kmalloc_aligned(size_t size, uint32_t alignment);
@@ -182,9 +185,12 @@ void slab_gc(void);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
 void slab_stats(void);
+uint32_t slab_get_total_pages(void);
 
 int demand_page_fault_handler(uint32_t fault_addr, uint32_t err_code);
 void demand_paging_init(void);
+uint32_t demand_get_committed_pages(void);
+uint32_t demand_get_reserved_pages(void);
 int demand_reserve_range(uint32_t virt_start, uint32_t size);
 int demand_is_reserved(uint32_t virt_addr);
 int demand_commit_page(uint32_t virt_addr);

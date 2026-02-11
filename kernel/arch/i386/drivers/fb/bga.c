@@ -11,6 +11,16 @@ static inline uint16_t inw(uint16_t port) {
     return ret;
 }
 
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ __volatile__("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
 enum {
     VBE_DISPI_IOPORT_INDEX = 0x01CE,
     VBE_DISPI_IOPORT_DATA = 0x01CF,
@@ -32,8 +42,76 @@ enum {
     VBE_DISPI_LFB_ENABLED = 0x40,
     VBE_DISPI_NOCLEARMEM = 0x80,
 
-    VBE_DISPI_ID0 = 0xB0C0
+    VBE_DISPI_ID0 = 0xB0C0,
+    VBE_DISPI_ID5 = 0xB0C5,
+
+    PCI_CONFIG_ADDRESS = 0x0CF8,
+    PCI_CONFIG_DATA    = 0x0CFC,
+
+    PCI_VGA_CLASS = 0x0300,
+
+    PCI_VENDOR_BOCHS    = 0x1234,
+    PCI_DEVICE_BGA      = 0x1111,
+    PCI_VENDOR_VBOX     = 0x80EE,
+    PCI_DEVICE_VBOX_VGA = 0xBEEF
 };
+
+static int bga_cached = -1;
+
+static inline uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address;
+    address = (uint32_t)(1u << 31)
+            | ((uint32_t)bus << 16)
+            | ((uint32_t)(slot & 0x1F) << 11)
+            | ((uint32_t)(func & 0x07) << 8)
+            | ((uint32_t)offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    return inl(PCI_CONFIG_DATA);
+}
+
+static int pci_find_vga_is_bga(void) {
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t func;
+    uint32_t id_reg;
+    uint32_t class_reg;
+    uint16_t vendor;
+    uint16_t device;
+    uint16_t class_code;
+    uint32_t hdr;
+
+    for (bus = 0; bus < 255; bus++) {
+        for (slot = 0; slot < 32; slot++) {
+            for (func = 0; func < 8; func++) {
+                id_reg = pci_read32(bus, slot, func, 0x00);
+                vendor = (uint16_t)(id_reg & 0xFFFF);
+                if (vendor == 0xFFFF) {
+                    if (func == 0) break;
+                    continue;
+                }
+                device = (uint16_t)(id_reg >> 16);
+                class_reg = pci_read32(bus, slot, func, 0x08);
+                class_code = (uint16_t)(class_reg >> 16);
+
+                if (class_code != PCI_VGA_CLASS) {
+                    if (func == 0) {
+                        hdr = pci_read32(bus, slot, func, 0x0C);
+                        if (!((hdr >> 16) & 0x80)) break;
+                    }
+                    continue;
+                }
+
+                if (vendor == PCI_VENDOR_BOCHS && device == PCI_DEVICE_BGA)
+                    return 1;
+                if (vendor == PCI_VENDOR_VBOX && device == PCI_DEVICE_VBOX_VGA)
+                    return 1;
+
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
 
 static inline void bga_write(uint16_t index, uint16_t value) {
     outw(VBE_DISPI_IOPORT_INDEX, index);
@@ -46,13 +124,32 @@ static inline uint16_t bga_read(uint16_t index) {
 }
 
 int bga_is_available(void) {
-    uint16_t id = bga_read(VBE_DISPI_INDEX_ID);
-    return id >= VBE_DISPI_ID0;
+    uint16_t id;
+    uint16_t readback;
+
+    if (bga_cached >= 0) return bga_cached;
+
+    id = bga_read(VBE_DISPI_INDEX_ID);
+    if (id < VBE_DISPI_ID0 || id > VBE_DISPI_ID5) {
+        bga_cached = 0;
+        return 0;
+    }
+
+    bga_write(VBE_DISPI_INDEX_ID, VBE_DISPI_ID5);
+    readback = bga_read(VBE_DISPI_INDEX_ID);
+    if (readback < VBE_DISPI_ID0 || readback > VBE_DISPI_ID5) {
+        bga_cached = 0;
+        return 0;
+    }
+
+    bga_cached = 1;
+    return 1;
 }
 
 uint32_t bga_get_vram_bytes(void) {
+    uint16_t blocks64k;
     if (!bga_is_available()) return 0;
-    uint16_t blocks64k = bga_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K);
+    blocks64k = bga_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K);
     if (blocks64k == 0) return 0;
     return (uint32_t)blocks64k * 64u * 1024u;
 }

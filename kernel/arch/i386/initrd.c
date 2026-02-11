@@ -52,19 +52,6 @@ static void serial_printf_dec(uint32_t val) {
     serial_puts(&buf[i+1]);
 }
 
-static void initrd_release_module(uint32_t start_phys, uint32_t end_phys) {
-    uint32_t start_page;
-    uint32_t end_page;
-    uint32_t frames;
-
-    start_page = start_phys & ~0xFFFu;
-    end_page = (end_phys + 0xFFFu) & ~0xFFFu;
-    if (end_page <= start_page) return;
-    frames = (end_page - start_page) / PAGE_SIZE;
-    if (frames == 0) return;
-    pfa_free_contiguous(start_page, frames);
-}
-
 
 void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
     if (initrd_should_log()) {
@@ -966,7 +953,7 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
                     ret = ramfs_set_backing(destpath, f->data, f->length);
-                    if (ret == 0) files_copied;
+                    if (ret == 0) files_copied++;
                     else errors++;
                 } else {
                     DEBUG_INITRD("WARNING: no data for '%s' (data=%p length=%u)\n", destpath, f->data, f->length);

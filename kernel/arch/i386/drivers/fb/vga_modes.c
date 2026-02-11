@@ -1,0 +1,241 @@
+#include <kernel/drivers/fb/vga_modes.h>
+#include <stdint.h>
+
+static inline void outb(uint16_t port, uint8_t value) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ __volatile__("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+enum {
+    VGA_SEQ_INDEX      = 0x3C4,
+    VGA_SEQ_DATA       = 0x3C5,
+    VGA_CRTC_INDEX     = 0x3D4,
+    VGA_CRTC_DATA      = 0x3D5,
+
+    PCI_CONFIG_ADDRESS = 0x0CF8,
+    PCI_CONFIG_DATA    = 0x0CFC,
+
+    PCI_VGA_CLASS      = 0x0300,
+    PCI_VENDOR_CIRRUS  = 0x1013,
+    PCI_DEVICE_5446    = 0x00B8
+};
+
+static int cirrus_cached = -1;
+static uint32_t cirrus_fb_base = 0;
+static uint32_t cirrus_vram = 0;
+
+static inline uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address;
+    address = (uint32_t)(1u << 31)
+            | ((uint32_t)bus << 16)
+            | ((uint32_t)(slot & 0x1F) << 11)
+            | ((uint32_t)(func & 0x07) << 8)
+            | ((uint32_t)offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    return inl(PCI_CONFIG_DATA);
+}
+
+static void vga_seq_write(uint8_t index, uint8_t value) {
+    outb(VGA_SEQ_INDEX, index);
+    outb(VGA_SEQ_DATA, value);
+}
+
+static uint8_t vga_seq_read(uint8_t index) {
+    outb(VGA_SEQ_INDEX, index);
+    return inb(VGA_SEQ_DATA);
+}
+
+static void vga_crtc_write(uint8_t index, uint8_t value) {
+    outb(VGA_CRTC_INDEX, index);
+    outb(VGA_CRTC_DATA, value);
+}
+
+static uint8_t vga_crtc_read(uint8_t index) {
+    outb(VGA_CRTC_INDEX, index);
+    return inb(VGA_CRTC_DATA);
+}
+
+static int pci_find_cirrus(void) {
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t func;
+    uint32_t id_reg;
+    uint32_t class_reg;
+    uint16_t vendor;
+    uint16_t device;
+    uint16_t class_code;
+    uint32_t hdr;
+    uint32_t bar0;
+
+    for (bus = 0; bus < 255; bus++) {
+        for (slot = 0; slot < 32; slot++) {
+            for (func = 0; func < 8; func++) {
+                id_reg = pci_read32(bus, slot, func, 0x00);
+                vendor = (uint16_t)(id_reg & 0xFFFF);
+                if (vendor == 0xFFFF) {
+                    if (func == 0) break;
+                    continue;
+                }
+                device = (uint16_t)(id_reg >> 16);
+                class_reg = pci_read32(bus, slot, func, 0x08);
+                class_code = (uint16_t)(class_reg >> 16);
+
+                if (class_code != PCI_VGA_CLASS) {
+                    if (func == 0) {
+                        hdr = pci_read32(bus, slot, func, 0x0C);
+                        if (!((hdr >> 16) & 0x80)) break;
+                    }
+                    continue;
+                }
+
+                if (vendor == PCI_VENDOR_CIRRUS && device == PCI_DEVICE_5446) {
+                    bar0 = pci_read32(bus, slot, func, 0x10);
+                    cirrus_fb_base = bar0 & 0xFFFFFFF0u;
+                    return 1;
+                }
+
+                if (func == 0) {
+                    hdr = pci_read32(bus, slot, func, 0x0C);
+                    if (!((hdr >> 16) & 0x80)) break;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static uint32_t cirrus_detect_vram(void) {
+    uint8_t sr0f;
+    uint32_t size;
+
+    vga_seq_write(0x06, 0x12);
+
+    sr0f = vga_seq_read(0x0F);
+    size = 0;
+
+    switch ((sr0f >> 2) & 0x03) {
+    case 0: size = 256 * 1024; break;
+    case 1: size = 512 * 1024; break;
+    case 2: size = 1024 * 1024; break;
+    case 3: size = 2048 * 1024; break;
+    }
+
+    if (size < 4 * 1024 * 1024) {
+        size = 4 * 1024 * 1024;
+    }
+
+    return size;
+}
+
+int vga_is_cirrus(void) {
+    if (cirrus_cached >= 0) return cirrus_cached;
+    cirrus_cached = pci_find_cirrus();
+    if (cirrus_cached) {
+        cirrus_vram = cirrus_detect_vram();
+    }
+    return cirrus_cached;
+}
+
+uint32_t vga_get_framebuffer_base(void) {
+    return cirrus_fb_base;
+}
+
+uint32_t vga_get_vram_bytes(void) {
+    return cirrus_vram;
+}
+
+int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pitch) {
+    uint32_t pitch;
+    uint32_t needed;
+    uint8_t sr07_val;
+    uint8_t hidden_dac;
+    uint32_t offset_val;
+    uint8_t cr1b_val;
+    uint8_t crtc11;
+    volatile uint32_t delay;
+
+    if (!vga_is_cirrus()) return -1;
+    if (width == 0 || height == 0) return -2;
+    if (bpp != 32 && bpp != 24 && bpp != 16) return -2;
+
+    pitch = (uint32_t)width * (uint32_t)(bpp / 8);
+    needed = pitch * (uint32_t)height;
+    if (cirrus_vram && needed > cirrus_vram) return -4;
+
+    vga_seq_write(0x06, 0x12);
+
+    sr07_val = vga_seq_read(0x07);
+    sr07_val &= 0xE0;
+
+    if (bpp >= 24) {
+        sr07_val |= 0x09;
+    } else if (bpp == 16) {
+        sr07_val |= 0x07;
+    } else {
+        sr07_val |= 0x01;
+    }
+
+    vga_seq_write(0x07, sr07_val);
+
+    (void)hidden_dac;
+    inb(0x3C6);
+    inb(0x3C6);
+    inb(0x3C6);
+    inb(0x3C6);
+    hidden_dac = inb(0x3C6);
+
+    inb(0x3C6);
+    inb(0x3C6);
+    inb(0x3C6);
+    inb(0x3C6);
+
+    if (bpp == 32) {
+        outb(0x3C6, 0xC5);
+    } else if (bpp == 24) {
+        outb(0x3C6, 0xC5);
+    } else if (bpp == 16) {
+        outb(0x3C6, 0xC1);
+    } else {
+        outb(0x3C6, 0x00);
+    }
+
+    crtc11 = vga_crtc_read(0x11);
+    vga_crtc_write(0x11, crtc11 & 0x7F);
+
+    offset_val = pitch / 8;
+    vga_crtc_write(0x13, (uint8_t)(offset_val & 0xFF));
+
+    cr1b_val = vga_crtc_read(0x1B);
+    cr1b_val &= 0xEF;
+    if (offset_val & 0x100) {
+        cr1b_val |= 0x10;
+    }
+    vga_crtc_write(0x1B, cr1b_val);
+
+    vga_crtc_write(0x11, crtc11 | 0x80);
+
+    for (delay = 0; delay < 50000; delay++) {
+        __asm__ volatile("pause");
+    }
+
+    if (out_pitch) {
+        *out_pitch = pitch;
+    }
+
+    return 0;
+}

@@ -1,6 +1,7 @@
 #include <kernel/framebuffer.h>
 #include <kernel/mem_map.h>
 #include <kernel/drivers/fb/bga.h>
+#include <kernel/drivers/fb/vga_modes.h>
 #include <kernel/console.h>
 #include <string.h>
 
@@ -20,53 +21,9 @@ static uint32_t hw_pitch = 0;
 static uint32_t fb_vram_bytes = 0;
 static uint32_t mapped_pages_count = 0;
 
-static uint8_t *back_buffer = 0;
-static uint32_t back_buffer_size = 0;
 static uint32_t *vram_addr = 0;
-static volatile int fb_dirty = 0;
-static uint32_t dirty_y_min = 0xFFFFFFFF;
-static uint32_t dirty_y_max = 0;
-
-static void fb_mark_dirty(uint32_t y_start, uint32_t y_end) {
-    if (y_start < dirty_y_min) dirty_y_min = y_start;
-    if (y_end > dirty_y_max) dirty_y_max = y_end;
-    fb_dirty = 1;
-}
-
-static void fb_mark_all_dirty(void) {
-    dirty_y_min = 0;
-    dirty_y_max = hw_height;
-    fb_dirty = 1;
-}
 
 void fb_flush(void) {
-    uint32_t y_start;
-    uint32_t y_end;
-    uint32_t byte_offset;
-    uint32_t byte_len;
-
-    if (!fb_dirty || !back_buffer || !vram_addr) return;
-
-    y_start = dirty_y_min;
-    y_end = dirty_y_max;
-    if (y_start >= y_end) {
-        fb_dirty = 0;
-        dirty_y_min = 0xFFFFFFFF;
-        dirty_y_max = 0;
-        return;
-    }
-    if (y_end > hw_height) y_end = hw_height;
-
-    byte_offset = y_start * hw_pitch;
-    byte_len = (y_end - y_start) * hw_pitch;
-    if (byte_offset + byte_len > back_buffer_size)
-        byte_len = back_buffer_size - byte_offset;
-
-    memcpy((uint8_t *)vram_addr + byte_offset, back_buffer + byte_offset, byte_len);
-
-    fb_dirty = 0;
-    dirty_y_min = 0xFFFFFFFF;
-    dirty_y_max = 0;
 }
 
 static uint32_t decrease_width_step(uint32_t value, uint32_t step) {
@@ -364,14 +321,7 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     memory_barrier();
     
     vram_addr = (uint32_t *)0xE0000000;
-
-    back_buffer_size = pitch * height;
-    back_buffer = (uint8_t *)kmalloc(back_buffer_size);
-    if (back_buffer) {
-        fb.addr = (uint32_t *)back_buffer;
-    } else {
-        fb.addr = vram_addr;
-    }
+    fb.addr = vram_addr;
 
     fb.font = &default_font;
     fb.fg_color = 0xFFFFFFFF;
@@ -391,6 +341,10 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     if (bga_is_available()) {
         uint32_t vram;
         vram = bga_get_vram_bytes();
+        if (vram > fb_vram_bytes) fb_vram_bytes = vram;
+    } else if (vga_is_cirrus()) {
+        uint32_t vram;
+        vram = vga_get_vram_bytes();
         if (vram > fb_vram_bytes) fb_vram_bytes = vram;
     }
     hw_height = height;
@@ -447,9 +401,6 @@ void fb_clear(void) {
     if (clear_height == 0) return;
 
     fb_clear_region(0, clear_height);
-
-    fb_mark_dirty(0, clear_height);
-    fb_flush();
     
     fb.cursor_x = 0;
     fb.cursor_y = 0;
@@ -498,7 +449,6 @@ void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
         rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
         *(uint16_t *)p = rgb565;
     }
-    fb_mark_dirty(y, y + 1);
 }
 
 void fb_putchar(char c, uint32_t cx, uint32_t cy) {
@@ -567,7 +517,6 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             p32[6] = (bits & 0x02) ? fg : bg;
             p32[7] = (bits & 0x01) ? fg : bg;
         }
-        fb_mark_dirty(py, py + fb.font->height);
         return;
     }
 
@@ -593,7 +542,6 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             }
         }
     }
-    fb_mark_dirty(py, py + fb.font->height);
 }
 
 void fb_scroll(void) {
@@ -635,8 +583,6 @@ void fb_scroll(void) {
     if (last_row_start < hw_height) {
         fb_clear_region(last_row_start, clear_end);
     }
-
-    fb_mark_all_dirty();
 
     scroll_rows = (fb.rows > 1 && fb.rows <= MAX_ROWS) ? fb.rows - 1 : 0;
     scroll_cols = (fb.cols <= MAX_COLS) ? fb.cols : MAX_COLS;
@@ -858,6 +804,10 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
         }
     }
 
+    if (!hw_changed && vga_is_cirrus()) {
+        hw_changed = 0;
+    }
+
     if (!hw_changed) {
         if (width > hw_width) width = hw_width;
         if (height > hw_height) height = hw_height;
@@ -939,20 +889,7 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
         asm volatile("pause; pause; pause; pause; pause; pause; pause; pause");
 
         vram_addr = (uint32_t *)0xE0000000;
-        if (back_buffer) {
-            kfree(back_buffer);
-            back_buffer = 0;
-        }
-        back_buffer_size = fb_size;
-        back_buffer = (uint8_t *)kmalloc(back_buffer_size);
-        if (back_buffer) {
-            fb.addr = (uint32_t *)back_buffer;
-        } else {
-            fb.addr = vram_addr;
-        }
-        fb_dirty = 0;
-        dirty_y_min = 0xFFFFFFFF;
-        dirty_y_max = 0;
+        fb.addr = vram_addr;
     }
 
     if (refresh_rate > 0) {
@@ -990,13 +927,25 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
     fb.width = effective_width;
     fb.height = height;
     if (fb.font && fb.font->width && fb.font->height) {
-        fb.cols = effective_width / fb.font->width;
-        fb.rows = height / fb.font->height;
-        if (fb.cols == 0 || fb.rows == 0) {
+        uint32_t old_cols;
+        uint32_t new_cols_val;
+        uint32_t new_rows_val;
+
+        old_cols = fb.cols;
+        new_cols_val = effective_width / fb.font->width;
+        new_rows_val = height / fb.font->height;
+        if (new_cols_val == 0 || new_rows_val == 0) {
             return -2;
         }
-        if (fb.cols > MAX_COLS) fb.cols = MAX_COLS;
-        if (fb.rows > MAX_ROWS) fb.rows = MAX_ROWS;
+        if (new_cols_val > MAX_COLS) new_cols_val = MAX_COLS;
+        if (new_rows_val > MAX_ROWS) new_rows_val = MAX_ROWS;
+
+        if (console_is_initialized() && old_cols != new_cols_val) {
+            console_rewrap_all(old_cols, new_cols_val, new_rows_val);
+        }
+
+        fb.cols = new_cols_val;
+        fb.rows = new_rows_val;
         fb.width = fb.cols * fb.font->width;
     }
 
@@ -1014,8 +963,6 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
     cursor_prev_y = 0;
 
     fb_clear_region(0, hw_height);
-    fb_mark_all_dirty();
-    fb_flush();
 
     if (console_is_initialized()) {
         console_redraw_current();
@@ -1072,6 +1019,9 @@ int fb_get_caps(uint32_t *out_words, uint32_t words) {
     if (bga_is_available()) {
         flags |= 1u;
         flags |= 2u;
+    } else if (vga_is_cirrus()) {
+        flags |= 1u;
+        flags |= 4u;
     }
 
     out_words[0] = fb.width;

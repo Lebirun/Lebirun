@@ -7,8 +7,8 @@ extern uint32_t pae_enabled;
 extern uint32_t total_pages_managed;
 extern uint32_t kernel_reserved_frames;
 
-uint8_t pfa_bitmap[BITMAP_BYTES_MAX];
-static uint32_t bitmap_bytes_used = BITMAP_BYTES_32BIT;
+uint8_t *pfa_bitmap = 0;
+static uint32_t bitmap_bytes_used = 0;
 
 static volatile int pfa_lock = 0;
 
@@ -256,6 +256,8 @@ uint32_t pfa_count_free(void) {
 static uint32_t system_total_ram_kb = 0;
 static uint32_t system_usable_ram_kb = 0;
 static uint32_t initial_free_frames = 0;
+static uint32_t kernel_binary_kb = 0;
+static uint32_t bitmap_alloc_kb = 0;
 
 uint32_t pfa_get_total_ram_kb(void) {
     return system_total_ram_kb;
@@ -266,15 +268,28 @@ uint32_t pfa_get_usable_ram_kb(void) {
 }
 
 uint32_t pfa_get_kernel_used_kb(void) {
-    /* Count actually allocated frames after kernel reservation */
-    uint32_t allocated = 0;
+    uint32_t allocated;
     uint32_t idx;
-    
+
+    allocated = 0;
     for (idx = kernel_reserved_frames; idx < total_pages_managed; idx++) {
         if (test_bit(idx)) allocated++;
     }
-    
+
     return allocated * 4;
+}
+
+uint32_t pfa_get_kernel_binary_kb(void) {
+    return kernel_binary_kb;
+}
+
+uint32_t pfa_get_bitmap_kb(void) {
+    return bitmap_alloc_kb;
+}
+
+void pfa_set_reserved_stats(uint32_t kern_bin_kb, uint32_t bmp_kb) {
+    kernel_binary_kb = kern_bin_kb;
+    bitmap_alloc_kb = bmp_kb;
 }
 
 void *pmm_alloc_page(void) {

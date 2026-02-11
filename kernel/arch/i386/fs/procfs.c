@@ -2,6 +2,7 @@
 #include <kernel/vfs.h>
 #include <kernel/task.h>
 #include <kernel/about.h>
+#include <kernel/drivers/net/e1000/e1000.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -34,12 +35,16 @@ static vfs_node_t proc_cmdline;
 static vfs_node_t proc_devices;
 static vfs_node_t proc_interrupts;
 static vfs_node_t proc_vmstat;
+static vfs_node_t proc_memdetail;
 
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 
 extern volatile uint32_t tick_count;
 extern uint32_t pit_freq;
+extern uint32_t pae_vmm_pt_count;
+extern uint32_t pae_enabled;
+extern uint32_t pae_get_heap_pt_count(void);
 
 static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     char buf[2048];
@@ -232,6 +237,11 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
     uint32_t total_kb;
     uint32_t usable_kb;
     uint32_t free_kb;
+    uint32_t all_used_kb;
+    uint32_t used_kb;
+    uint32_t kern_kb;
+    uint32_t bitmap_kb;
+    uint32_t free_pages_kb;
     int len;
     uint32_t remaining;
     
@@ -239,12 +249,28 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
     
     total_kb = pfa_get_total_ram_kb();
     usable_kb = pfa_get_usable_ram_kb();
-    free_kb = total_kb - usable_kb + pfa_count_free() * 4;
+    kern_kb = pfa_get_kernel_binary_kb();
+    bitmap_kb = pfa_get_bitmap_kb();
+    free_pages_kb = pfa_count_free() * 4;
+    all_used_kb = usable_kb - free_pages_kb;
+    if (free_pages_kb > usable_kb) {
+        all_used_kb = 0;
+    }
+    used_kb = all_used_kb - kern_kb - bitmap_kb;
+    if (all_used_kb < kern_kb + bitmap_kb) {
+        used_kb = 0;
+    }
+    free_kb = total_kb - all_used_kb;
+    if (all_used_kb > total_kb) {
+        free_kb = 0;
+    }
     
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8u kB\n"
         "MemUsable:     %8u kB\n"
         "MemFree:       %8u kB\n"
+        "MemUsed:       %8u kB\n"
+        "MemAllUsed:    %8u kB\n"
         "MemAvailable:  %8u kB\n"
         "Buffers:       %8u kB\n"
         "Cached:        %8u kB\n"
@@ -253,6 +279,8 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
         total_kb,
         usable_kb,
         free_kb,
+        used_kb,
+        all_used_kb,
         free_kb,
         0,
         0,
@@ -696,12 +724,138 @@ static uint32_t proc_vmstat_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return size;
 }
 
+static uint32_t proc_memdetail_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    char buf[2048];
+    int len;
+    uint32_t remaining;
+    uint32_t pfa_used_kb;
+    uint32_t kern_kb;
+    uint32_t bitmap_kb;
+    uint32_t heap_committed;
+    uint32_t heap_reserved;
+    uint32_t heap_used;
+    uint32_t heap_total;
+    uint32_t slab_pages;
+    uint32_t e1000_pages;
+    uint32_t ahci_pages;
+    uint32_t pae_pt_pages;
+    uint32_t pae_heap_pt;
+    uint32_t user_elf_pages;
+    uint32_t user_stack_pages;
+    uint32_t user_pd_pages;
+    task_t *t;
+    task_t *start;
+
+    (void)node;
+
+    pfa_used_kb = pfa_get_kernel_used_kb();
+    kern_kb = pfa_get_kernel_binary_kb();
+    bitmap_kb = pfa_get_bitmap_kb();
+
+    heap_committed = demand_get_committed_pages();
+    heap_reserved = demand_get_reserved_pages();
+    heap_used = kernel_heap.used_size;
+    heap_total = kernel_heap.total_size;
+
+    slab_pages = slab_get_total_pages();
+
+    e1000_pages = 2 + E1000_NUM_RX_DESC + E1000_NUM_TX_DESC;
+
+    ahci_pages = 3;
+
+    pae_pt_pages = 0;
+    pae_heap_pt = 0;
+    if (pae_enabled) {
+        pae_pt_pages = pae_vmm_pt_count;
+        pae_heap_pt = pae_get_heap_pt_count();
+    }
+
+    user_elf_pages = 0;
+    user_stack_pages = 0;
+    user_pd_pages = 0;
+
+    start = ready_queue_head;
+    t = start;
+    if (t) {
+        do {
+            if (t->is_user && t->user_pages) {
+                user_elf_pages += t->user_pages_count;
+                user_pd_pages++;
+            }
+            t = t->next;
+        } while (t && t != start);
+    }
+
+    user_stack_pages = user_pd_pages * (0x4000u / PAGE_SIZE);
+    if (user_elf_pages >= user_stack_pages) {
+        user_elf_pages -= user_stack_pages;
+    }
+    user_pd_pages = user_pd_pages * (pae_enabled ? 4 : 1);
+
+    len = snprintf(buf, sizeof(buf),
+        "PFA_AllocatedKB:    %8u\n"
+        "KernelBinaryKB:     %8u\n"
+        "BitmapKB:           %8u\n"
+        "HeapCommitPages:    %8u\n"
+        "HeapCommitKB:       %8u\n"
+        "HeapReservePages:   %8u\n"
+        "HeapUsedBytes:      %8u\n"
+        "HeapTotalBytes:     %8u\n"
+        "SlabPages:          %8u\n"
+        "SlabKB:             %8u\n"
+        "E1000Pages:         %8u\n"
+        "E1000KB:            %8u\n"
+        "AHCIPages:          %8u\n"
+        "AHCIKB:             %8u\n"
+        "PAE_VMMPTPages:     %8u\n"
+        "PAE_VMMPTKB:        %8u\n"
+        "PAE_HeapPTPages:    %8u\n"
+        "PAE_HeapPTKB:       %8u\n"
+        "UserELFPages:       %8u\n"
+        "UserELFKB:          %8u\n"
+        "UserStackPages:     %8u\n"
+        "UserStackKB:        %8u\n"
+        "UserPDPages:        %8u\n"
+        "UserPDKB:           %8u\n",
+        pfa_used_kb,
+        kern_kb,
+        bitmap_kb,
+        heap_committed,
+        heap_committed * 4,
+        heap_reserved,
+        heap_used,
+        heap_total,
+        slab_pages,
+        slab_pages * 4,
+        e1000_pages,
+        e1000_pages * 4,
+        ahci_pages,
+        ahci_pages * 4,
+        pae_pt_pages,
+        pae_pt_pages * 4,
+        pae_heap_pt,
+        pae_heap_pt * 4,
+        user_elf_pages,
+        user_elf_pages * 4,
+        user_stack_pages,
+        user_stack_pages * 4,
+        user_pd_pages,
+        user_pd_pages * 4);
+
+    if (offset >= (uint32_t)len) return 0;
+    remaining = (uint32_t)len - offset;
+    if (size > remaining) size = remaining;
+    memcpy(buffer, buf + offset, size);
+    return size;
+}
+
 static dirent_t *procfs_readdir(vfs_node_t *node, uint32_t index) {
     (void)node;
     
     static const char *entries[] = {
         "self", "version", "uptime", "meminfo", "cpuinfo", "loadavg",
-        "stat", "mounts", "filesystems", "cmdline", "devices", "interrupts", "vmstat"
+        "stat", "mounts", "filesystems", "cmdline", "devices", "interrupts", "vmstat",
+        "memdetail"
     };
     
     if (index < sizeof(entries)/sizeof(entries[0])) {
@@ -730,6 +884,7 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "devices") == 0) return &proc_devices;
     if (strcmp(name, "interrupts") == 0) return &proc_interrupts;
     if (strcmp(name, "vmstat") == 0) return &proc_vmstat;
+    if (strcmp(name, "memdetail") == 0) return &proc_memdetail;
     
     int pid = 0;
     const char *p = name;
@@ -981,6 +1136,13 @@ void procfs_init(void) {
     proc_vmstat.read = proc_vmstat_read;
     proc_vmstat.parent = &procfs_root;
     proc_vmstat.ref_count = 1;
+    
+    memset(&proc_memdetail, 0, sizeof(vfs_node_t));
+    strcpy(proc_memdetail.name, "memdetail");
+    proc_memdetail.flags = VFS_FILE;
+    proc_memdetail.read = proc_memdetail_read;
+    proc_memdetail.parent = &procfs_root;
+    proc_memdetail.ref_count = 1;
     
     vfs_register_fs(&procfs_type);
 }

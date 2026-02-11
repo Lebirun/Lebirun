@@ -8,8 +8,8 @@
 
 #define BUFFER_SIZE 64
 static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];
-static unsigned int head[NUM_CONSOLES];
-static unsigned int tail[NUM_CONSOLES];
+static volatile unsigned int head[NUM_CONSOLES];
+static volatile unsigned int tail[NUM_CONSOLES];
 
 static wait_queue_t keyboard_waiters[NUM_CONSOLES];
 
@@ -100,10 +100,14 @@ static inline char apply_caps_shift(char c, bool shift) {
 }
 
 static void buffer_put(char c) {
-    int cur = console_is_initialized() ? console_get_current() : 0;
+    int cur;
+    unsigned int next;
+
+    cur = console_is_initialized() ? console_get_current() : 0;
+    next = (head[cur] + 1) % BUFFER_SIZE;
+    if (next == tail[cur]) return;
     key_buffers[cur][head[cur]] = c;
-    head[cur] = (head[cur] + 1) % BUFFER_SIZE;
-    if (head[cur] == tail[cur]) tail[cur] = (tail[cur] + 1) % BUFFER_SIZE;
+    head[cur] = next;
 }
 
 int keyboard_has_data(void) {

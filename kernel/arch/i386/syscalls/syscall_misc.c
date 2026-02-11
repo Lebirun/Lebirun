@@ -147,7 +147,7 @@ static int sys_sysinfo(struct sysinfo *info) {
     info->loads[1] = 0;
     info->loads[2] = 0;
     info->totalram = (unsigned long)total_kb * 1024;
-    info->freeram = (unsigned long)(total_kb - pfa_get_usable_ram_kb() + free_pages * 4) * 1024;
+    info->freeram = (unsigned long)(free_pages * 4) * 1024;
     info->sharedram = 0;
     info->bufferram = 0;
     info->totalswap = 0;
@@ -627,7 +627,8 @@ static int sys_unsetenv(const char *name) {
     int idx = find_env(name);
     if (idx < 0) return 0;
     
-    for (int i = idx; i < env_count - 1; i++) {
+    if (idx >= 32) return 0;
+    for (int i = idx; i < env_count - 1 && i < 32; i++) {
         for (int j = 0; j < 64; j++) env_names[i][j] = env_names[i+1][j];
         for (int j = 0; j < MAX_ENV_SIZE; j++) env_values[i][j] = env_values[i+1][j];
     }
