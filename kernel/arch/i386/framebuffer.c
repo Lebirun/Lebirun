@@ -20,6 +20,55 @@ static uint32_t hw_pitch = 0;
 static uint32_t fb_vram_bytes = 0;
 static uint32_t mapped_pages_count = 0;
 
+static uint8_t *back_buffer = 0;
+static uint32_t back_buffer_size = 0;
+static uint32_t *vram_addr = 0;
+static volatile int fb_dirty = 0;
+static uint32_t dirty_y_min = 0xFFFFFFFF;
+static uint32_t dirty_y_max = 0;
+
+static void fb_mark_dirty(uint32_t y_start, uint32_t y_end) {
+    if (y_start < dirty_y_min) dirty_y_min = y_start;
+    if (y_end > dirty_y_max) dirty_y_max = y_end;
+    fb_dirty = 1;
+}
+
+static void fb_mark_all_dirty(void) {
+    dirty_y_min = 0;
+    dirty_y_max = hw_height;
+    fb_dirty = 1;
+}
+
+void fb_flush(void) {
+    uint32_t y_start;
+    uint32_t y_end;
+    uint32_t byte_offset;
+    uint32_t byte_len;
+
+    if (!fb_dirty || !back_buffer || !vram_addr) return;
+
+    y_start = dirty_y_min;
+    y_end = dirty_y_max;
+    if (y_start >= y_end) {
+        fb_dirty = 0;
+        dirty_y_min = 0xFFFFFFFF;
+        dirty_y_max = 0;
+        return;
+    }
+    if (y_end > hw_height) y_end = hw_height;
+
+    byte_offset = y_start * hw_pitch;
+    byte_len = (y_end - y_start) * hw_pitch;
+    if (byte_offset + byte_len > back_buffer_size)
+        byte_len = back_buffer_size - byte_offset;
+
+    memcpy((uint8_t *)vram_addr + byte_offset, back_buffer + byte_offset, byte_len);
+
+    fb_dirty = 0;
+    dirty_y_min = 0xFFFFFFFF;
+    dirty_y_max = 0;
+}
+
 static uint32_t decrease_width_step(uint32_t value, uint32_t step) {
     uint32_t delta;
     if (step == 0 || value <= step) {
@@ -314,7 +363,16 @@ int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint
     tlb_flush_all();
     memory_barrier();
     
-    fb.addr = (uint32_t *)0xE0000000;
+    vram_addr = (uint32_t *)0xE0000000;
+
+    back_buffer_size = pitch * height;
+    back_buffer = (uint8_t *)kmalloc(back_buffer_size);
+    if (back_buffer) {
+        fb.addr = (uint32_t *)back_buffer;
+    } else {
+        fb.addr = vram_addr;
+    }
+
     fb.font = &default_font;
     fb.fg_color = 0xFFFFFFFF;
     fb.bg_color = 0x00000000;
@@ -389,6 +447,9 @@ void fb_clear(void) {
     if (clear_height == 0) return;
 
     fb_clear_region(0, clear_height);
+
+    fb_mark_dirty(0, clear_height);
+    fb_flush();
     
     fb.cursor_x = 0;
     fb.cursor_y = 0;
@@ -437,10 +498,10 @@ void fb_putpixel(uint32_t x, uint32_t y, uint32_t color) {
         rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
         *(uint16_t *)p = rgb565;
     }
+    fb_mark_dirty(y, y + 1);
 }
 
 void fb_putchar(char c, uint32_t cx, uint32_t cy) {
-    uint8_t uc;
     const uint8_t *glyph;
     uint32_t px;
     uint32_t py;
@@ -461,6 +522,7 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
     uint8_t g;
     uint8_t b;
     uint16_t rgb565;
+    uint8_t uc;
 
     if (!fb.font || !fb.font->glyphs) {
         return;
@@ -505,6 +567,7 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             p32[6] = (bits & 0x02) ? fg : bg;
             p32[7] = (bits & 0x01) ? fg : bg;
         }
+        fb_mark_dirty(py, py + fb.font->height);
         return;
     }
 
@@ -530,6 +593,7 @@ void fb_putchar(char c, uint32_t cx, uint32_t cy) {
             }
         }
     }
+    fb_mark_dirty(py, py + fb.font->height);
 }
 
 void fb_scroll(void) {
@@ -571,6 +635,8 @@ void fb_scroll(void) {
     if (last_row_start < hw_height) {
         fb_clear_region(last_row_start, clear_end);
     }
+
+    fb_mark_all_dirty();
 
     scroll_rows = (fb.rows > 1 && fb.rows <= MAX_ROWS) ? fb.rows - 1 : 0;
     scroll_cols = (fb.cols <= MAX_COLS) ? fb.cols : MAX_COLS;
@@ -640,6 +706,7 @@ void fb_write_char(char c) {
             fb.cursor_y = fb.rows - 1;
         }
     }
+    fb_flush();
 }
 
 void fb_write_string(const char *str) {
@@ -677,12 +744,15 @@ void fb_update_cursor(void) {
         cursor_prev_y = fb.cursor_y;
         cursor_drawn = 1;
     }
+    fb_flush();
 }
 
 extern void console_tick_redraw(void);
 
 void fb_tick(void) {
     static int tick_counter = 0;
+    static int flush_counter = 0;
+
     tick_counter++;
     if (tick_counter >= 500) {
         tick_counter = 0;
@@ -690,6 +760,12 @@ void fb_tick(void) {
         fb_update_cursor();
     }
     console_tick_redraw();
+
+    flush_counter++;
+    if (flush_counter >= 16) {
+        flush_counter = 0;
+        fb_flush();
+    }
 }
 
 framebuffer_t *fb_get(void) {
@@ -861,6 +937,22 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
         memory_barrier();
 
         asm volatile("pause; pause; pause; pause; pause; pause; pause; pause");
+
+        vram_addr = (uint32_t *)0xE0000000;
+        if (back_buffer) {
+            kfree(back_buffer);
+            back_buffer = 0;
+        }
+        back_buffer_size = fb_size;
+        back_buffer = (uint8_t *)kmalloc(back_buffer_size);
+        if (back_buffer) {
+            fb.addr = (uint32_t *)back_buffer;
+        } else {
+            fb.addr = vram_addr;
+        }
+        fb_dirty = 0;
+        dirty_y_min = 0xFFFFFFFF;
+        dirty_y_max = 0;
     }
 
     if (refresh_rate > 0) {
@@ -922,6 +1014,8 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
     cursor_prev_y = 0;
 
     fb_clear_region(0, hw_height);
+    fb_mark_all_dirty();
+    fb_flush();
 
     if (console_is_initialized()) {
         console_redraw_current();

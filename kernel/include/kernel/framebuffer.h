@@ -34,6 +34,7 @@ void fb_write_char(char c);
 void fb_write_string(const char *str);
 void fb_update_cursor(void);
 void fb_tick(void);
+void fb_flush(void);
 framebuffer_t *fb_get(void);
 int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate);
 int fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp, uint32_t *refresh_rate);

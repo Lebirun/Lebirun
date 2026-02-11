@@ -10,41 +10,147 @@
 extern void terminal_putchar(char c);
 
 void* memset(void* bufptr, int value, size_t size) {
+	unsigned char *buf;
+	unsigned char byte_val;
+	uint32_t word_val;
+	uint32_t *wp;
+	size_t pre;
+	size_t words;
+	size_t post;
+
 	if (!bufptr) return bufptr;
-	unsigned char* buf = (unsigned char*) bufptr;
-	for (size_t i = 0; i < size; i++)
-		buf[i] = (unsigned char) value;
+	buf = (unsigned char*) bufptr;
+	byte_val = (unsigned char) value;
+
+	pre = (4 - ((uintptr_t)buf & 3)) & 3;
+	if (pre > size) pre = size;
+	size -= pre;
+	while (pre--) *buf++ = byte_val;
+
+	if (size >= 16) {
+		word_val = (uint32_t)byte_val | ((uint32_t)byte_val << 8) |
+		           ((uint32_t)byte_val << 16) | ((uint32_t)byte_val << 24);
+		wp = (uint32_t *)buf;
+		words = size / 4;
+		post = size & 3;
+		while (words >= 8) {
+			wp[0] = word_val; wp[1] = word_val;
+			wp[2] = word_val; wp[3] = word_val;
+			wp[4] = word_val; wp[5] = word_val;
+			wp[6] = word_val; wp[7] = word_val;
+			wp += 8; words -= 8;
+		}
+		while (words--) *wp++ = word_val;
+		buf = (unsigned char *)wp;
+		while (post--) *buf++ = byte_val;
+	} else {
+		while (size--) *buf++ = byte_val;
+	}
 	return bufptr;
 }
 
 void* memcpy(void* __restrict dstptr, const void* __restrict srcptr, size_t size) {
+	unsigned char *dst;
+	const unsigned char *src;
+	uint32_t *dp;
+	const uint32_t *sp;
+	size_t words;
+	size_t tail;
+
 	if (!dstptr || !srcptr) return dstptr;
-	unsigned char* dst = (unsigned char*) dstptr;
-	const unsigned char* src = (const unsigned char*) srcptr;
-	for (size_t i = 0; i < size; i++)
-		dst[i] = src[i];
+	dst = (unsigned char*) dstptr;
+	src = (const unsigned char*) srcptr;
+
+	if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
+		dp = (uint32_t *)dst;
+		sp = (const uint32_t *)src;
+		words = size / 4;
+		tail = size & 3;
+		while (words >= 8) {
+			dp[0] = sp[0]; dp[1] = sp[1];
+			dp[2] = sp[2]; dp[3] = sp[3];
+			dp[4] = sp[4]; dp[5] = sp[5];
+			dp[6] = sp[6]; dp[7] = sp[7];
+			dp += 8; sp += 8; words -= 8;
+		}
+		while (words--) *dp++ = *sp++;
+		dst = (unsigned char *)dp;
+		src = (const unsigned char *)sp;
+		while (tail--) *dst++ = *src++;
+	} else {
+		while (size--) *dst++ = *src++;
+	}
 	return dstptr;
 }
 
 void* memmove(void* dstptr, const void* srcptr, size_t size) {
+	unsigned char *dst;
+	const unsigned char *src;
+	uint32_t *dp;
+	const uint32_t *sp;
+	size_t words;
+	size_t tail;
+
 	if (!dstptr || !srcptr) return dstptr;
-	unsigned char* dst = (unsigned char*) dstptr;
-	const unsigned char* src = (const unsigned char*) srcptr;
-	if (dst < src) {
-		for (size_t i = 0; i < size; i++)
-			dst[i] = src[i];
+	dst = (unsigned char*) dstptr;
+	src = (const unsigned char*) srcptr;
+
+	if (dst < src || dst >= src + size) {
+		if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
+			dp = (uint32_t *)dst;
+			sp = (const uint32_t *)src;
+			words = size / 4;
+			tail = size & 3;
+			while (words >= 8) {
+				dp[0] = sp[0]; dp[1] = sp[1];
+				dp[2] = sp[2]; dp[3] = sp[3];
+				dp[4] = sp[4]; dp[5] = sp[5];
+				dp[6] = sp[6]; dp[7] = sp[7];
+				dp += 8; sp += 8; words -= 8;
+			}
+			while (words--) *dp++ = *sp++;
+			dst = (unsigned char *)dp;
+			src = (const unsigned char *)sp;
+			while (tail--) *dst++ = *src++;
+		} else {
+			while (size--) *dst++ = *src++;
+		}
 	} else {
-		for (size_t i = size; i != 0; i--)
-			dst[i-1] = src[i-1];
+		dst += size;
+		src += size;
+		if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
+			dp = (uint32_t *)dst;
+			sp = (const uint32_t *)src;
+			words = size / 4;
+			tail = size & 3;
+			while (tail--) *--dst = *--src;
+			dp = (uint32_t *)dst;
+			sp = (const uint32_t *)src;
+			while (words >= 8) {
+				dp -= 8; sp -= 8;
+				dp[0] = sp[0]; dp[1] = sp[1];
+				dp[2] = sp[2]; dp[3] = sp[3];
+				dp[4] = sp[4]; dp[5] = sp[5];
+				dp[6] = sp[6]; dp[7] = sp[7];
+				words -= 8;
+			}
+			while (words--) *--dp = *--sp;
+		} else {
+			while (size--) *--dst = *--src;
+		}
 	}
 	return dstptr;
 }
 
 int memcmp(const void* aptr, const void* bptr, size_t size) {
+	const unsigned char* a;
+	const unsigned char* b;
+	size_t i;
+
 	if (!aptr || !bptr) return 0;
-	const unsigned char* a = (const unsigned char*) aptr;
-	const unsigned char* b = (const unsigned char*) bptr;
-	for (size_t i = 0; i < size; i++) {
+	a = (const unsigned char*) aptr;
+	b = (const unsigned char*) bptr;
+	for (i = 0; i < size; i++) {
 		if (a[i] < b[i])
 			return -1;
 		else if (b[i] < a[i])
@@ -54,8 +160,10 @@ int memcmp(const void* aptr, const void* bptr, size_t size) {
 }
 
 size_t strlen(const char* str) {
+	size_t len;
+
 	if (!str) return 0;
-	size_t len = 0;
+	len = 0;
 	while (str[len])
 		len++;
 	return len;
@@ -82,16 +190,19 @@ int strncmp(const char* s1, const char* s2, size_t n) {
 }
 
 char* strcpy(char* dest, const char* src) {
+	char* d;
+
 	if (!dest) return dest;
 	if (!src) { dest[0] = '\0'; return dest; }
-	char* d = dest;
+	d = dest;
 	while ((*d++ = *src++));
 	return dest;
 }
 
 char* strncpy(char* dest, const char* src, size_t n) {
-	if (!dest) return dest;
 	size_t i;
+
+	if (!dest) return dest;
 	for (i = 0; i < n && src && src[i]; i++)
 		dest[i] = src[i];
 	for (; i < n; i++)
@@ -109,8 +220,10 @@ char* strchr(const char* s, int c) {
 }
 
 char* strrchr(const char* s, int c) {
+	const char* last;
+
 	if (!s) return NULL;
-	const char* last = NULL;
+	last = NULL;
 	while (*s) {
 		if (*s == (char)c) last = s;
 		s++;
@@ -157,23 +270,29 @@ static void reverse(char* str, size_t len) {
 }
 
 static size_t utoa64(uint64_t value, char* buf, int base, bool uppercase) {
+	char* p;
+	char a;
+	uint64_t digit;
+	size_t len;
+
 	if (base < 2 || base > 36) { buf[0] = '\0'; return 0; }
-	char* p = buf;
-	char a = uppercase ? 'A' : 'a';
+	p = buf;
+	a = uppercase ? 'A' : 'a';
 	do {
-		uint64_t digit = value % (uint64_t)base;
+		digit = value % (uint64_t)base;
 		*p++ = (digit < 10) ? (char)('0' + digit) : (char)(a + digit - 10);
 		value /= (uint64_t)base;
 	} while (value);
 	*p = '\0';
-	size_t len = (size_t)(p - buf);
+	len = (size_t)(p - buf);
 	reverse(buf, len);
 	return len;
 }
 
 static size_t itoa64(int64_t value, char* buf, int base, bool* is_negative) {
-	*is_negative = false;
 	uint64_t uval;
+
+	*is_negative = false;
 	if (value < 0 && base == 10) {
 		*is_negative = true;
 		uval = (uint64_t)(-(value + 1)) + 1;

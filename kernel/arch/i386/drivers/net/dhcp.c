@@ -143,7 +143,9 @@ static int dhcp_send_request(netif_t *netif) {
     msg_type = DHCP_MSG_REQUEST;
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_MSG_TYPE, 1, &msg_type);
     dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_REQUESTED_IP, 4, &g_dhcp_state.offered_ip);
-    dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_SERVER_ID, 4, &g_dhcp_state.server_ip);
+    if (!ipv4_eq(g_dhcp_state.server_ip, IPV4_ZERO)) {
+        dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_SERVER_ID, 4, &g_dhcp_state.server_ip);
+    }
 
     param_list[0] = DHCP_OPT_SUBNET;
     param_list[1] = DHCP_OPT_ROUTER;
@@ -185,14 +187,66 @@ void dhcp_stop(netif_t *netif) {
     g_dhcp_state.state = DHCP_STATE_INIT;
 }
 
+static void dhcp_apply_config(netif_t *netif, dhcp_state_t *temp) {
+    g_dhcp_state.offered_ip = temp->offered_ip;
+    if (!ipv4_eq(temp->server_ip, IPV4_ZERO)) {
+        g_dhcp_state.server_ip = temp->server_ip;
+    }
+    if (!ipv4_eq(temp->subnet_mask, IPV4_ZERO)) {
+        g_dhcp_state.subnet_mask = temp->subnet_mask;
+    }
+    if (!ipv4_eq(temp->gateway, IPV4_ZERO)) {
+        g_dhcp_state.gateway = temp->gateway;
+    }
+    if (!ipv4_eq(temp->dns1, IPV4_ZERO)) {
+        g_dhcp_state.dns1 = temp->dns1;
+    }
+    if (!ipv4_eq(temp->dns2, IPV4_ZERO)) {
+        g_dhcp_state.dns2 = temp->dns2;
+    }
+    if (temp->lease_time != 0) {
+        g_dhcp_state.lease_time = temp->lease_time;
+    }
+
+    g_dhcp_state.state = DHCP_STATE_BOUND;
+    g_dhcp_state.lease_start = net_get_ticks();
+    g_dhcp_state.retries = 0;
+
+    netif_set_ipv4(netif, g_dhcp_state.offered_ip,
+                  g_dhcp_state.subnet_mask,
+                  g_dhcp_state.gateway);
+    netif_set_dns(netif, g_dhcp_state.dns1, g_dhcp_state.dns2);
+    netif->dhcp_configured = 1;
+
+    dns_set_server(g_dhcp_state.dns1);
+    if (!ipv4_eq(g_dhcp_state.dns2, IPV4_ZERO)) {
+        dns_set_server2(g_dhcp_state.dns2);
+    }
+
+    printf("DHCP: Configured:\n");
+    printf("  IP: %u.%u.%u.%u\n",
+           netif->ipv4.octets[0], netif->ipv4.octets[1],
+           netif->ipv4.octets[2], netif->ipv4.octets[3]);
+    printf("  Netmask: %u.%u.%u.%u\n",
+           netif->netmask.octets[0], netif->netmask.octets[1],
+           netif->netmask.octets[2], netif->netmask.octets[3]);
+    printf("  Gateway: %u.%u.%u.%u\n",
+           netif->gateway.octets[0], netif->gateway.octets[1],
+           netif->gateway.octets[2], netif->gateway.octets[3]);
+    printf("  DNS: %u.%u.%u.%u\n",
+           netif->dns_server.octets[0], netif->dns_server.octets[1],
+           netif->dns_server.octets[2], netif->dns_server.octets[3]);
+}
+
 void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
     dhcp_packet_t *pkt;
     dhcp_state_t temp;
+    uint32_t hdr_size;
     uint32_t options_len;
     uint8_t msg_type;
-    uint32_t opt_parse_len;
 
-    if (!netif || !data || len < sizeof(dhcp_packet_t) - 308) return;
+    hdr_size = sizeof(dhcp_packet_t) - 308;
+    if (!netif || !data || len < hdr_size) return;
 
     pkt = (dhcp_packet_t *)data;
 
@@ -203,9 +257,15 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
     memset(&temp, 0, sizeof(temp));
     temp.offered_ip = pkt->yiaddr;
 
-    options_len = len - (sizeof(dhcp_packet_t) - 308);
-    opt_parse_len = options_len > 308 ? 308 : options_len;
-    msg_type = dhcp_parse_options(pkt->options, opt_parse_len, &temp);
+    options_len = len - hdr_size;
+    if (options_len > 308) {
+        options_len = 308;
+    }
+    msg_type = dhcp_parse_options(pkt->options, options_len, &temp);
+
+    if (ipv4_eq(temp.server_ip, IPV4_ZERO) && !ipv4_eq(pkt->siaddr, IPV4_ZERO)) {
+        temp.server_ip = pkt->siaddr;
+    }
 
     switch (g_dhcp_state.state) {
         case DHCP_STATE_SELECTING:
@@ -231,55 +291,7 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len) {
         case DHCP_STATE_REQUESTING:
             if (msg_type == DHCP_MSG_ACK) {
                 printf("DHCP: Received ACK\n");
-
-                g_dhcp_state.offered_ip = temp.offered_ip;
-                if (!ipv4_eq(temp.server_ip, IPV4_ZERO)) {
-                    g_dhcp_state.server_ip = temp.server_ip;
-                }
-                if (!ipv4_eq(temp.subnet_mask, IPV4_ZERO)) {
-                    g_dhcp_state.subnet_mask = temp.subnet_mask;
-                }
-                if (!ipv4_eq(temp.gateway, IPV4_ZERO)) {
-                    g_dhcp_state.gateway = temp.gateway;
-                }
-                if (!ipv4_eq(temp.dns1, IPV4_ZERO)) {
-                    g_dhcp_state.dns1 = temp.dns1;
-                }
-                if (!ipv4_eq(temp.dns2, IPV4_ZERO)) {
-                    g_dhcp_state.dns2 = temp.dns2;
-                }
-                if (temp.lease_time != 0) {
-                    g_dhcp_state.lease_time = temp.lease_time;
-                }
-
-                g_dhcp_state.state = DHCP_STATE_BOUND;
-                g_dhcp_state.lease_start = net_get_ticks();
-                g_dhcp_state.retries = 0;
-
-                netif_set_ipv4(netif, g_dhcp_state.offered_ip,
-                              g_dhcp_state.subnet_mask,
-                              g_dhcp_state.gateway);
-                netif_set_dns(netif, g_dhcp_state.dns1, g_dhcp_state.dns2);
-                netif->dhcp_configured = 1;
-
-                dns_set_server(g_dhcp_state.dns1);
-                if (!ipv4_eq(g_dhcp_state.dns2, IPV4_ZERO)) {
-                    dns_set_server2(g_dhcp_state.dns2);
-                }
-
-                printf("DHCP: Configured:\n");
-                printf("  IP: %u.%u.%u.%u\n",
-                       netif->ipv4.octets[0], netif->ipv4.octets[1],
-                       netif->ipv4.octets[2], netif->ipv4.octets[3]);
-                printf("  Netmask: %u.%u.%u.%u\n",
-                       netif->netmask.octets[0], netif->netmask.octets[1],
-                       netif->netmask.octets[2], netif->netmask.octets[3]);
-                printf("  Gateway: %u.%u.%u.%u\n",
-                       netif->gateway.octets[0], netif->gateway.octets[1],
-                       netif->gateway.octets[2], netif->gateway.octets[3]);
-                printf("  DNS: %u.%u.%u.%u\n",
-                       netif->dns_server.octets[0], netif->dns_server.octets[1],
-                       netif->dns_server.octets[2], netif->dns_server.octets[3]);
+                dhcp_apply_config(netif, &temp);
             } else if (msg_type == DHCP_MSG_NAK) {
                 printf("DHCP: Received NAK, restarting\n");
                 g_dhcp_state.state = DHCP_STATE_INIT;

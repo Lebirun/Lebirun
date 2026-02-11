@@ -29,12 +29,18 @@ static volatile int dhcp_start_pending = 0;
 
 static void net_worker_thread(void) {
     netif_t *netif;
+    int i;
 
     if (dhcp_start_pending) {
         dhcp_start_pending = 0;
         netif = netif_get_default();
         if (netif) {
             dhcp_start(netif);
+            for (i = 0; i < 50; i++) {
+                sleep_ms(10);
+                netif_poll_all();
+                if (dhcp_is_bound(netif)) break;
+            }
         }
     }
 
