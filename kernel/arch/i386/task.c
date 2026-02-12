@@ -10,6 +10,7 @@
 #include <kernel/console.h>
 #include <kernel/creds.h>
 #include <kernel/vring.h>
+#include <kernel/kstack.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -315,14 +316,17 @@ void init_tasks(void) {
     current_task->stack_base = NULL;
     current_task->stack_size = 0;
     
-    task0_kstack = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    task0_kstack = kstack_alloc();
     if (task0_kstack) {
-        memset(task0_kstack, 0, KERNEL_STACK_SIZE);
         current_task->kernel_stack_base = task0_kstack;
-        current_task->kernel_stack_size = KERNEL_STACK_SIZE;
+        current_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     } else {
-        current_task->kernel_stack_base = NULL;
-        current_task->kernel_stack_size = 0;
+        current_task->kernel_stack_base = kmalloc(KERNEL_STACK_SIZE);
+        if (current_task->kernel_stack_base) {
+            current_task->kernel_stack_size = KERNEL_STACK_SIZE;
+        } else {
+            current_task->kernel_stack_size = 0;
+        }
     }
     
     current_task->wake_tick = 0;
@@ -441,7 +445,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
 
     new_task = (task_t*)kmalloc(sizeof(task_t));
     stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
-    kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    kernel_stack_base = kstack_alloc();
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
         if (debug_task) {
@@ -456,7 +460,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         }
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
-        if (kernel_stack_base) kfree(kernel_stack_base);
+        if (kernel_stack_base) kstack_free(kernel_stack_base);
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
@@ -464,7 +468,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->cwd[1] = '\0';
     task_init_fds(new_task);
     if (stack_base) memset(stack_base, 0, TASK_STACK_SIZE);
-    memset(kernel_stack_base, 0, KERNEL_STACK_SIZE);
 
     new_task->id = next_task_id;
     new_task->pid = next_task_id;
@@ -482,7 +485,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->stack_base = stack_base;
     new_task->stack_size = TASK_STACK_SIZE;
     new_task->kernel_stack_base = kernel_stack_base;
-    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     new_task->wake_tick = 0;
     new_task->sleep_next = NULL;
     new_task->in_sleep_queue = 0;
@@ -500,7 +503,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->is_kernel_task = false;
 
     if (user_mode) {
-        kesp = (uint32_t*)(kernel_stack_base + KERNEL_STACK_SIZE);
+        kesp = (uint32_t*)(kernel_stack_base + KSTACK_USABLE_SIZE);
         
         user_esp = USER_STACK_INIT_ESP;
         
@@ -706,7 +709,7 @@ void reap_dead_tasks(void) {
 
         task_free_user_memory(t);
         if (t->stack_base) kfree(t->stack_base);
-        if (t->kernel_stack_base) kfree(t->kernel_stack_base);
+        if (t->kernel_stack_base) kstack_free(t->kernel_stack_base);
         kfree(t);
         t = next;
     }
@@ -742,7 +745,8 @@ void switch_to(task_t* next) {
 
     if (next->regs.esp != 0 && 
         !((next->regs.esp >= 0xC0000000 && next->regs.esp < 0xD0000000) ||
-          (next->regs.esp >= HEAP_START && next->regs.esp < (HEAP_START + HEAP_MAX_SIZE)))) {
+          (next->regs.esp >= HEAP_START && next->regs.esp < (HEAP_START + HEAP_MAX_SIZE)) ||
+          kstack_is_in_region(next->regs.esp))) {
         printf("Switch guard: bad esp 0x%08X for task %d\n", next->regs.esp, next->id);
         return;
     }
@@ -842,7 +846,7 @@ static void free_dead_task_resources(task_t* t) {
         t->stack_base = NULL;
     }
     if (t->kernel_stack_base) {
-        kfree(t->kernel_stack_base);
+        kstack_free(t->kernel_stack_base);
         t->kernel_stack_base = NULL;
     }
     kfree(t);
@@ -1013,7 +1017,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     next_esp = next->regs.esp;
     if (!((next_esp >= 0xC0000000u && next_esp < 0xD0000000u) ||
-          (next_esp >= HEAP_START && next_esp < (HEAP_START + HEAP_MAX_SIZE)))) {
+          (next_esp >= HEAP_START && next_esp < (HEAP_START + HEAP_MAX_SIZE)) ||
+          kstack_is_in_region(next_esp))) {
         if (kernel_cr3 && entry_cr3 != kernel_cr3) {
             __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
         }
@@ -1201,11 +1206,11 @@ pid_t task_fork(registers_t *parent_regs) {
     DEBUG_TASK("task_fork: creating child task with cloned pd=0x%08X\n", child_pd);
 
     child = (task_t*)kmalloc(sizeof(task_t));
-    kernel_stack_base = (uint8_t*)kmalloc(KERNEL_STACK_SIZE);
+    kernel_stack_base = kstack_alloc();
     if (!child || !kernel_stack_base) {
         printf("task_fork: allocation failed\n");
         if (child) kfree(child);
-        if (kernel_stack_base) kfree(kernel_stack_base);
+        if (kernel_stack_base) kstack_free(kernel_stack_base);
         if (child_user_pages) {
             for (i = 0; i < child_user_pages_count; i++) {
                 pfa_free(child_user_pages[i]);
@@ -1216,7 +1221,6 @@ pid_t task_fork(registers_t *parent_regs) {
         return -1;
     }
     memset(child, 0, sizeof(task_t));
-    memset(kernel_stack_base, 0, KERNEL_STACK_SIZE);
 
     child->id = next_task_id;
     child->pid = next_task_id;
@@ -1236,7 +1240,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->stack_base = NULL;
     child->stack_size = 0;
     child->kernel_stack_base = kernel_stack_base;
-    child->kernel_stack_size = KERNEL_STACK_SIZE;
+    child->kernel_stack_size = KSTACK_USABLE_SIZE;
     child->wake_tick = 0;
     child->sleep_next = NULL;
     child->in_sleep_queue = 0;
@@ -1272,7 +1276,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->envp = NULL;
     child->envc = 0;
 
-    child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KERNEL_STACK_SIZE - sizeof(registers_t));
+    child_frame = (registers_t *)((uint8_t *)kernel_stack_base + KSTACK_USABLE_SIZE - sizeof(registers_t));
     memcpy(child_frame, parent_regs, sizeof(registers_t));
     child_frame->eax = 0;
     child_frame->int_no = 0;
@@ -2028,13 +2032,12 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     memset(new_task, 0, sizeof(task_t));
     
-    new_task->kernel_stack_base = (uint8_t *)kmalloc(KERNEL_STACK_SIZE);
+    new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
         kfree(new_task);
         return -1;
     }
-    memset(new_task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
-    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     
     new_task->id = next_task_id++;
     new_task->pid = new_task->id;
@@ -2061,7 +2064,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     stack_page_count = 0;
     stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
-        kfree(new_task->kernel_stack_base);
+        kstack_free(new_task->kernel_stack_base);
         kfree(new_task);
         return -1;
     }
@@ -2071,7 +2074,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     current_task->user_brk = thread_stack_top + 0x1000;
     
-    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KSTACK_USABLE_SIZE);
     
     stack_ptr--;
     *stack_ptr = 0x23;
@@ -2151,13 +2154,12 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     
     memset(new_task, 0, sizeof(task_t));
     
-    new_task->kernel_stack_base = (uint8_t *)kmalloc(KERNEL_STACK_SIZE);
+    new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
         kfree(new_task);
         return -1;
     }
-    memset(new_task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
-    new_task->kernel_stack_size = KERNEL_STACK_SIZE;
+    new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     
     new_task->id = next_task_id++;
     new_task->pid = new_task->id;
@@ -2184,7 +2186,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     stack_page_count = 0;
     stack_pages = vmm_map_range_in_pd_tracked(current_task->pd_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
-        kfree(new_task->kernel_stack_base);
+        kstack_free(new_task->kernel_stack_base);
         kfree(new_task);
         return -1;
     }
@@ -2199,7 +2201,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 16, &zero_val, 4);
     vmm_copy_to_pd(current_task->pd_phys, thread_stack_top - 12, &arg_val, 4);
     
-    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KERNEL_STACK_SIZE);
+    stack_ptr = (uint32_t *)(new_task->kernel_stack_base + KSTACK_USABLE_SIZE);
     
     stack_ptr--;
     *stack_ptr = 0x23;

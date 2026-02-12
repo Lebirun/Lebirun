@@ -805,7 +805,36 @@ int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {
     }
 
     if (!hw_changed && vga_is_cirrus()) {
-        hw_changed = 0;
+        try_bpps[0] = 32;
+        try_bpps[1] = 24;
+        try_bpps[2] = 16;
+        for (i = 0; i < 3 && !hw_changed; i++) {
+            bpp_try = try_bpps[i];
+            candidate_h = req_height;
+            attempts_h = 0;
+            while (candidate_h > 0 && attempts_h < 64 && !hw_changed) {
+                candidate_w = req_width;
+                attempts_w = 0;
+                while (candidate_w > 0 && attempts_w < 64 && !hw_changed) {
+                    if (vga_set_mode((uint16_t)candidate_w, (uint16_t)candidate_h, bpp_try, &new_pitch) == 0) {
+                        hw_changed = 1;
+                        new_bpp = (uint8_t)bpp_try;
+                        width = candidate_w;
+                        height = candidate_h;
+                        break;
+                    }
+                    next_w = decrease_width_step(candidate_w, font_width);
+                    if (next_w == 0 || next_w == candidate_w) break;
+                    candidate_w = next_w;
+                    attempts_w++;
+                }
+                if (hw_changed) break;
+                next_h = decrease_step(candidate_h, font_height);
+                if (next_h == 0 || next_h == candidate_h) break;
+                candidate_h = next_h;
+                attempts_h++;
+            }
+        }
     }
 
     if (!hw_changed) {

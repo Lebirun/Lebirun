@@ -27,6 +27,7 @@
 #include <kernel/vring.h>
 #include <kernel/about.h>
 #include <kernel/panic.h>
+#include <kernel/kstack.h>
 #include "launch_user.h"
 
 bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
@@ -323,6 +324,9 @@ void kernel_main(void) {
         if (use_squashfs) {
             vfs_block_squashfs_access();
         }
+
+        ramfs_internalize_all();
+        initrd_free_pages();
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -350,6 +354,7 @@ void kernel_main(void) {
         printf("PAE mode: skipping legacy paging check\n");
     }
     pic_remap();
+    kstack_init();
     init_tasks();
     
     vring_init();

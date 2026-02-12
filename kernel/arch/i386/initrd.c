@@ -17,6 +17,11 @@ static initrd_file_t *files = NULL;
 static uint32_t file_count = 0;
 static uint32_t initrd_version = 1;
 
+static uint32_t initrd_mod0_phys_start = 0;
+static uint32_t initrd_mod0_phys_end = 0;
+static uint32_t initrd_mod1_phys_start = 0;
+static uint32_t initrd_mod1_phys_end = 0;
+
 initrd_fd_t fd_table[INITRD_MAX_FDS];
 
 static vfs_node_t *initrd_vfs_nodes = NULL;
@@ -82,6 +87,9 @@ void initrd_init(uint32_t mods_count, uint32_t mods_addr) {
     uint32_t mod_start_phys = mod->mod_start;
     uint32_t mod_end_phys = mod->mod_end;
     uint32_t mod_size = mod_end_phys - mod_start_phys;
+
+    initrd_mod0_phys_start = mod_start_phys;
+    initrd_mod0_phys_end = mod_end_phys;
     
     if (initrd_should_log()) printf("INITRD: Module at phys 0x%08X - 0x%08X (%u bytes) cmdline=0x%08X\n", 
            mod_start_phys, mod_end_phys, mod_size, mod->cmdline);
@@ -781,6 +789,9 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
     mod_start_phys = mod->mod_start;
     mod_end_phys = mod->mod_end;
     mod_size = mod_end_phys - mod_start_phys;
+
+    initrd_mod1_phys_start = mod_start_phys;
+    initrd_mod1_phys_end = mod_end_phys;
     
     printf("ROOTFS: Module at phys 0x%08X - 0x%08X (%u bytes)\n", 
            mod_start_phys, mod_end_phys, mod_size);
@@ -968,4 +979,55 @@ void rootfs_init(uint32_t mods_count, uint32_t mods_addr) {
     
     kfree(rfiles);
     printf("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n", dirs_created, files_copied, errors);
+}
+
+static void initrd_free_region(uint32_t phys_start, uint32_t phys_end) {
+    uint32_t page_start;
+    uint32_t page_end;
+    uint32_t phys;
+    uint32_t freed;
+
+    if (phys_start == 0 || phys_end == 0 || phys_end <= phys_start) return;
+
+    page_start = phys_start & ~0xFFFu;
+    page_end = (phys_end + 0xFFFu) & ~0xFFFu;
+    freed = 0;
+
+    for (phys = page_start; phys < page_end; phys += PAGE_SIZE) {
+        pfa_free(phys);
+        freed++;
+    }
+
+    printf("INITRD: Freed %u pages (phys 0x%08X-0x%08X, %u KB)\n",
+           freed, page_start, page_end, freed * 4);
+}
+
+void initrd_free_pages(void) {
+    if (initrd_mod0_phys_start && initrd_mod0_phys_end) {
+        initrd_free_region(initrd_mod0_phys_start, initrd_mod0_phys_end);
+        initrd_mod0_phys_start = 0;
+        initrd_mod0_phys_end = 0;
+    }
+
+    if (initrd_mod1_phys_start && initrd_mod1_phys_end) {
+        initrd_free_region(initrd_mod1_phys_start, initrd_mod1_phys_end);
+        initrd_mod1_phys_start = 0;
+        initrd_mod1_phys_end = 0;
+    }
+
+    if (files) {
+        kfree(files);
+        files = NULL;
+        file_count = 0;
+    }
+
+    if (initrd_vfs_nodes) {
+        kfree(initrd_vfs_nodes);
+        initrd_vfs_nodes = NULL;
+        initrd_vfs_node_count = 0;
+    }
+
+    initrd_base = NULL;
+    initrd_header = NULL;
+    file_headers = NULL;
 }

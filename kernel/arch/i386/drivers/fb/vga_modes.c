@@ -159,6 +159,102 @@ uint32_t vga_get_vram_bytes(void) {
     return cirrus_vram;
 }
 
+static inline void vga_misc_write(uint8_t value) {
+    outb(0x3C2, value);
+}
+
+static inline void vga_attr_write(uint8_t index, uint8_t value) {
+    inb(0x3DA);
+    outb(0x3C0, index);
+    outb(0x3C0, value);
+}
+
+static inline void vga_gc_write(uint8_t index, uint8_t value) {
+    outb(0x3CE, index);
+    outb(0x3CF, value);
+}
+
+static void vga_set_crtc_timing(uint16_t width, uint16_t height) {
+    uint32_t htotal;
+    uint32_t hdispend;
+    uint32_t hblankstart;
+    uint32_t hblankend;
+    uint32_t hsyncstart;
+    uint32_t hsyncend;
+    uint32_t vtotal;
+    uint32_t vdispend;
+    uint32_t vblankstart;
+    uint32_t vblankend;
+    uint32_t vsyncstart;
+    uint32_t vsyncend;
+    uint8_t overflow;
+    uint8_t max_scanline;
+    uint8_t cr1a_val;
+    uint8_t misc_val;
+
+    hdispend = (uint32_t)width / 8 - 1;
+    hblankstart = hdispend + 1;
+    hsyncstart = hdispend + 2;
+    hsyncend = hsyncstart + 12;
+    hblankend = hsyncend + 2;
+    htotal = hblankend + 2;
+
+    vdispend = (uint32_t)height - 1;
+    vblankstart = vdispend + 1;
+    vsyncstart = vdispend + 3;
+    vsyncend = vsyncstart + 2;
+    vblankend = vsyncend + 2;
+    vtotal = vblankend + 2;
+
+    misc_val = 0x23;
+    if (height >= 400) {
+        misc_val |= 0xC0;
+    } else {
+        misc_val |= 0x40;
+    }
+    vga_misc_write(misc_val);
+
+    vga_crtc_write(0x00, (uint8_t)(htotal & 0xFF));
+    vga_crtc_write(0x01, (uint8_t)(hdispend & 0xFF));
+    vga_crtc_write(0x02, (uint8_t)(hblankstart & 0xFF));
+    vga_crtc_write(0x03, (uint8_t)(0x80 | (hblankend & 0x1F)));
+    vga_crtc_write(0x04, (uint8_t)(hsyncstart & 0xFF));
+    vga_crtc_write(0x05, (uint8_t)(((hblankend & 0x20) << 2) | (hsyncend & 0x1F)));
+    vga_crtc_write(0x06, (uint8_t)(vtotal & 0xFF));
+
+    overflow = 0x00;
+    if (vtotal & 0x100) overflow |= 0x01;
+    if (vdispend & 0x100) overflow |= 0x02;
+    if (vsyncstart & 0x100) overflow |= 0x04;
+    if (vblankstart & 0x100) overflow |= 0x08;
+    if (vtotal & 0x200) overflow |= 0x20;
+    if (vdispend & 0x200) overflow |= 0x40;
+    if (vsyncstart & 0x200) overflow |= 0x80;
+    vga_crtc_write(0x07, overflow);
+
+    vga_crtc_write(0x08, 0x00);
+
+    max_scanline = 0x00;
+    if (vblankstart & 0x200) max_scanline |= 0x20;
+    vga_crtc_write(0x09, max_scanline);
+
+    vga_crtc_write(0x10, (uint8_t)(vsyncstart & 0xFF));
+    vga_crtc_write(0x11, (uint8_t)(vsyncend & 0x0F));
+    vga_crtc_write(0x12, (uint8_t)(vdispend & 0xFF));
+    vga_crtc_write(0x15, (uint8_t)(vblankstart & 0xFF));
+    vga_crtc_write(0x16, (uint8_t)(vblankend & 0xFF));
+
+    cr1a_val = vga_crtc_read(0x1A);
+    cr1a_val &= 0xC0;
+    if (vblankstart & 0x100) cr1a_val |= 0x01;
+    if (vtotal & 0x100) cr1a_val |= 0x02;
+    if (vdispend & 0x100) cr1a_val |= 0x04;
+    if (vsyncstart & 0x100) cr1a_val |= 0x08;
+    vga_crtc_write(0x1A, cr1a_val);
+
+    vga_crtc_write(0x17, 0xC3);
+}
+
 int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pitch) {
     uint32_t pitch;
     uint32_t needed;
@@ -168,6 +264,7 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     uint8_t cr1b_val;
     uint8_t crtc11;
     volatile uint32_t delay;
+    int i;
 
     if (!vga_is_cirrus()) return -1;
     if (width == 0 || height == 0) return -2;
@@ -178,6 +275,13 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     if (cirrus_vram && needed > cirrus_vram) return -4;
 
     vga_seq_write(0x06, 0x12);
+
+    vga_seq_write(0x00, 0x01);
+    for (delay = 0; delay < 10000; delay++) {
+        __asm__ volatile("pause");
+    }
+
+    vga_seq_write(0x01, 0x21);
 
     sr07_val = vga_seq_read(0x07);
     sr07_val &= 0xE0;
@@ -217,6 +321,8 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     crtc11 = vga_crtc_read(0x11);
     vga_crtc_write(0x11, crtc11 & 0x7F);
 
+    vga_set_crtc_timing(width, height);
+
     offset_val = pitch / 8;
     vga_crtc_write(0x13, (uint8_t)(offset_val & 0xFF));
 
@@ -227,7 +333,29 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     }
     vga_crtc_write(0x1B, cr1b_val);
 
-    vga_crtc_write(0x11, crtc11 | 0x80);
+    vga_crtc_write(0x0C, 0x00);
+    vga_crtc_write(0x0D, 0x00);
+
+    vga_crtc_write(0x11, (uint8_t)((vga_crtc_read(0x11) & 0x0F) | 0x80));
+
+    vga_gc_write(0x05, 0x40);
+    vga_gc_write(0x06, 0x05);
+
+    inb(0x3DA);
+    for (i = 0; i < 16; i++) {
+        vga_attr_write((uint8_t)i, (uint8_t)i);
+    }
+    vga_attr_write(0x10, 0x41);
+    vga_attr_write(0x11, 0x00);
+    vga_attr_write(0x12, 0x0F);
+    vga_attr_write(0x13, 0x00);
+    vga_attr_write(0x14, 0x00);
+    inb(0x3DA);
+    outb(0x3C0, 0x20);
+
+    vga_seq_write(0x01, 0x01);
+
+    vga_seq_write(0x00, 0x03);
 
     for (delay = 0; delay < 50000; delay++) {
         __asm__ volatile("pause");

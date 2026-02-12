@@ -76,5 +76,6 @@ int ramfs_get_stats(ramfs_stats_t *stats);
 uint32_t ramfs_get_time(void);
 
 void ramfs_debug_check_root(const char *location);
+void ramfs_internalize_all(void);
 
 #endif

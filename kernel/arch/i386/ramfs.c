@@ -1643,3 +1643,34 @@ void ramfs_vfs_register(void) {
 
     vfs_register_fs(&ramfs_fs_type);
 }
+
+static void ramfs_internalize_node(ramfs_node_t *node) {
+    uint8_t *copy;
+    ramfs_node_t *child;
+
+    if (!node) return;
+
+    if (node->backing_data && node->backing_length > 0 && !node->data) {
+        copy = (uint8_t *)kmalloc(node->backing_length);
+        if (copy) {
+            memcpy(copy, node->backing_data, node->backing_length);
+            node->data = copy;
+            node->data_capacity = node->backing_length;
+            node->backing_data = NULL;
+            node->backing_length = 0;
+        }
+    }
+
+    child = node->children;
+    while (child) {
+        ramfs_internalize_node(child);
+        child = child->next_sibling;
+    }
+}
+
+void ramfs_internalize_all(void) {
+    if (!ramfs_root) return;
+    ramfs_lock();
+    ramfs_internalize_node(ramfs_root);
+    ramfs_unlock();
+}

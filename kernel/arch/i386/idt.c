@@ -133,6 +133,13 @@ registers_t* interrupt_handler(registers_t* regs)
                     return regs;
                 }
             }
+
+            {
+                extern int kstack_page_fault_handler(uint32_t fault_addr);
+                if (kstack_page_fault_handler(fault_addr)) {
+                    return regs;
+                }
+            }
             
             access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
