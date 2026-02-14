@@ -4,6 +4,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/tty.h>
 #include <kernel/pit.h>
+#include <kernel/task.h>
 #include <string.h>
 
 static ipv4_addr_t g_dns_server;
@@ -138,20 +139,31 @@ int dns_resolve(const char *hostname, ipv4_addr_t *out_ipv4) {
 }
 
 int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint32_t timeout_ms) {
+    netif_t *netif;
+    uint8_t *query;
+    dns_header_t *hdr;
+    uint16_t id;
+    int name_len;
+    uint8_t *qtype;
+    uint32_t query_len;
+    uint32_t timeout_ticks;
+    uint32_t start;
+
     if (!hostname || !out_ipv4) return -1;
 
     if (dns_cache_lookup(hostname, out_ipv4) == 0) {
         return 0;
     }
 
-    netif_t *netif = netif_get_default();
+    netif = netif_get_default();
     if (!netif) return -1;
 
-    uint8_t query[512];
-    memset(query, 0, sizeof(query));
+    query = (uint8_t *)kmalloc(512);
+    if (!query) return -1;
+    memset(query, 0, 512);
 
-    dns_header_t *hdr = (dns_header_t *)query;
-    uint16_t id = dns_id_counter++;
+    hdr = (dns_header_t *)query;
+    id = dns_id_counter++;
     hdr->id = htons(id);
     hdr->flags = htons(DNS_FLAG_RD);
     hdr->qdcount = htons(1);
@@ -159,31 +171,32 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint32_t ti
     hdr->nscount = 0;
     hdr->arcount = 0;
 
-    int name_len = dns_encode_name(hostname, query + sizeof(dns_header_t));
-    if (name_len < 0) return -1;
+    name_len = dns_encode_name(hostname, query + sizeof(dns_header_t));
+    if (name_len < 0) { kfree(query); return -1; }
 
-    uint8_t *qtype = query + sizeof(dns_header_t) + name_len;
+    qtype = query + sizeof(dns_header_t) + name_len;
     qtype[0] = 0;
     qtype[1] = DNS_TYPE_A;
     qtype[2] = 0;
     qtype[3] = DNS_CLASS_IN;
 
-    uint32_t query_len = sizeof(dns_header_t) + name_len + 4;
+    query_len = sizeof(dns_header_t) + name_len + 4;
 
     pending_id = id;
     pending_resolved = 0;
 
     udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
+    kfree(query);
 
-    uint32_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-    uint32_t start = pit_get_ticks();
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    start = pit_get_ticks();
     while (!pending_resolved) {
         __asm__ volatile("sti");
         netif_poll_all();
         if (pit_get_ticks() - start > timeout_ticks) {
             return -1;
         }
-        __asm__ volatile("hlt");
+        schedule();
     }
 
     *out_ipv4 = pending_result;

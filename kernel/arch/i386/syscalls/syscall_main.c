@@ -65,8 +65,13 @@ static int do_set_thread_area(struct user_desc *u_info) {
 }
 
 static int linux_to_kernel_syscall(int linux_nr) {
+    int leb_nr;
     if (linux_nr & LEBIRUN_SYSCALL_FLAG) {
-        return linux_nr & ~LEBIRUN_SYSCALL_FLAG;
+        leb_nr = linux_nr & ~LEBIRUN_SYSCALL_FLAG;
+        if (leb_nr < 0 || leb_nr >= NR_SYSCALLS) {
+            return -1;
+        }
+        return leb_nr;
     }
     
     switch (linux_nr) {
@@ -299,7 +304,7 @@ void do_syscall(registers_t *regs) {
     }
     
     if (num < 0) {
-        if (current_task) {
+        if (current_task && !(linux_nr & LEBIRUN_SYSCALL_FLAG)) {
             printf("[SYSCALL] Task %d: unmapped linux syscall %d (0x%x) - returning ENOSYS\n",
                    current_task->pid, linux_nr, linux_nr);
         }
@@ -344,6 +349,8 @@ void do_syscall(registers_t *regs) {
         (void)err;
     }
     
+    signal_deliver_pending(regs);
+
     clear_syscall_frame();
 }
 

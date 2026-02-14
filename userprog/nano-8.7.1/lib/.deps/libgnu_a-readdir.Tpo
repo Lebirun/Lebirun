@@ -1,0 +1,25 @@
+libgnu_a-readdir.o: readdir.c ../config.h dirent.h \
+ /home/opuayt/leb/sysroot/usr/include/dirent.h \
+ /home/opuayt/leb/sysroot/usr/include/features.h \
+ /home/opuayt/leb/sysroot/usr/include/bits/alltypes.h \
+ /home/opuayt/leb/sysroot/usr/include/bits/dirent.h sys/types.h \
+ /home/opuayt/leb/sysroot/usr/include/sys/types.h \
+ /home/opuayt/leb/sysroot/usr/include/endian.h \
+ /home/opuayt/leb/sysroot/usr/include/sys/select.h \
+ /home/opuayt/leb/sysroot/usr/include/errno.h \
+ /home/opuayt/leb/sysroot/usr/include/bits/errno.h stddef.h \
+ /home/opuayt/leb/sysroot/usr/include/stddef.h
+../config.h:
+dirent.h:
+/home/opuayt/leb/sysroot/usr/include/dirent.h:
+/home/opuayt/leb/sysroot/usr/include/features.h:
+/home/opuayt/leb/sysroot/usr/include/bits/alltypes.h:
+/home/opuayt/leb/sysroot/usr/include/bits/dirent.h:
+sys/types.h:
+/home/opuayt/leb/sysroot/usr/include/sys/types.h:
+/home/opuayt/leb/sysroot/usr/include/endian.h:
+/home/opuayt/leb/sysroot/usr/include/sys/select.h:
+/home/opuayt/leb/sysroot/usr/include/errno.h:
+/home/opuayt/leb/sysroot/usr/include/bits/errno.h:
+stddef.h:
+/home/opuayt/leb/sysroot/usr/include/stddef.h:

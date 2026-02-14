@@ -34,27 +34,115 @@ static volatile int pending_console_switch = -1;
 
 static volatile int console_redraw_pending = 0;
 static char (*console_redraw_buffer)[CONSOLE_BUFFER_COLS];
+static uint32_t console_redraw_buffer_rows = 0;
+
+static uint32_t console_calc_rows(void) {
+    framebuffer_t *fb;
+    uint32_t r;
+
+    fb = fb_get();
+    r = fb ? fb->rows : 25;
+    if (r == 0) r = 25;
+    return r;
+}
 
 static int console_ensure_alloc(int n) {
     console_t *con;
+    uint32_t rows;
 
     if (n < 0 || n >= NUM_CONSOLES) return -1;
     con = &consoles[n];
     if (con->allocated) return 0;
-    con->buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
+    rows = console_calc_rows();
+    if (rows == 0) rows = 25;
+    con->buffer_rows = rows;
+    con->buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
     if (!con->buffer) return -1;
-    con->write_buffer = (char *)kmalloc(CONSOLE_WRITE_BUFFER_SIZE);
-    if (!con->write_buffer) {
+    con->line_wrapped = (uint8_t *)kmalloc(rows);
+    if (!con->line_wrapped) {
         kfree(con->buffer);
         con->buffer = NULL;
         return -1;
     }
-    memset(con->buffer, ' ', CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
-    memset(con->line_wrapped, 0, CONSOLE_BUFFER_ROWS);
-    memset(con->write_buffer, 0, CONSOLE_WRITE_BUFFER_SIZE);
+    con->write_buffer_size = CONSOLE_WRITE_BUFFER_INIT;
+    con->write_buffer = (char *)kmalloc(con->write_buffer_size);
+    if (!con->write_buffer) {
+        kfree(con->line_wrapped);
+        kfree(con->buffer);
+        con->buffer = NULL;
+        con->line_wrapped = NULL;
+        return -1;
+    }
+    memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
+    memset(con->line_wrapped, 0, rows);
+    memset(con->write_buffer, 0, con->write_buffer_size);
     con->allocated = 1;
     return 0;
 }
+
+static void console_grow_buffer(console_t *con, uint32_t needed_rows) {
+    char (*new_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t *new_wrapped;
+    uint32_t old_rows;
+    uint32_t copy_rows;
+
+    if (!con->allocated) return;
+    if (needed_rows <= con->buffer_rows) return;
+    old_rows = con->buffer_rows;
+    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
+    if (!new_buf) return;
+    new_wrapped = (uint8_t *)kmalloc(needed_rows);
+    if (!new_wrapped) {
+        kfree(new_buf);
+        return;
+    }
+    memset(new_buf, ' ', needed_rows * CONSOLE_BUFFER_COLS);
+    memset(new_wrapped, 0, needed_rows);
+    copy_rows = old_rows;
+    if (copy_rows > needed_rows) copy_rows = needed_rows;
+    if (con->buffer) {
+        memcpy(new_buf, con->buffer, copy_rows * CONSOLE_BUFFER_COLS);
+        kfree(con->buffer);
+    }
+    if (con->line_wrapped) {
+        memcpy(new_wrapped, con->line_wrapped, copy_rows);
+        kfree(con->line_wrapped);
+    }
+    con->buffer = new_buf;
+    con->line_wrapped = new_wrapped;
+    con->buffer_rows = needed_rows;
+}
+
+static void console_grow_write_buffer(console_t *con) {
+    char *new_wb;
+    uint32_t new_size;
+    uint32_t old_size;
+    uint32_t tail;
+    uint32_t head;
+    uint32_t used;
+    uint32_t i;
+
+    if (!con->allocated || !con->write_buffer) return;
+    old_size = con->write_buffer_size;
+    new_size = old_size * 2;
+    if (new_size > CONSOLE_WRITE_BUFFER_MAX) new_size = CONSOLE_WRITE_BUFFER_MAX;
+    if (new_size <= old_size) return;
+    new_wb = (char *)kmalloc(new_size);
+    if (!new_wb) return;
+    tail = con->write_tail;
+    head = con->write_head;
+    used = (head >= tail) ? (head - tail) : (old_size - tail + head);
+    for (i = 0; i < used; i++) {
+        new_wb[i] = con->write_buffer[(tail + i) % old_size];
+    }
+    memset(new_wb + used, 0, new_size - used);
+    kfree(con->write_buffer);
+    con->write_buffer = new_wb;
+    con->write_buffer_size = new_size;
+    con->write_tail = 0;
+    con->write_head = used;
+}
+
 static uint32_t console_redraw_cursor_x = 0;
 static uint32_t console_redraw_cursor_y = 0;
 static uint32_t console_redraw_rows = 0;
@@ -66,6 +154,45 @@ static int console_redraw_console = 0;
 
 static int batch_scroll_count = 0;
 static int batch_fb_skip = 0;
+
+static uint32_t console_ansi_color(uint8_t idx, int bright) {
+    static const uint32_t normal[8] = {
+        0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
+        0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
+    };
+    static const uint32_t intense[8] = {
+        0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
+        0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
+    };
+    idx &= 7;
+    return bright ? intense[idx] : normal[idx];
+}
+
+static void console_apply_colors(console_t *con, framebuffer_t *fb) {
+    uint8_t fg;
+    uint8_t bg;
+    uint8_t t;
+    int fg_bright;
+    int bg_bright;
+    uint32_t fg_rgb;
+    uint32_t bg_rgb;
+
+    if (!con || !fb) return;
+
+    fg = con->ansi_fg;
+    bg = con->ansi_bg;
+    if (con->ansi_reverse) {
+        t = fg;
+        fg = bg;
+        bg = t;
+    }
+
+    fg_bright = (con->ansi_bold != 0) || (fg >= 8);
+    bg_bright = (bg >= 8);
+    fg_rgb = console_ansi_color(fg, fg_bright);
+    bg_rgb = console_ansi_color(bg, bg_bright);
+    fb_set_colors(fg_rgb, bg_rgb);
+}
 
 static void console_fast_redraw_locked(int console_num) {
     framebuffer_t *fb = fb_get();
@@ -80,7 +207,7 @@ static void console_fast_redraw_locked(int console_num) {
     if (!con->allocated) return;
     rows = fb->rows;
     cols = fb->cols;
-    if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+    if (rows > con->buffer_rows) rows = con->buffer_rows;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
 
     for (row = 0; row < rows; row++) {
@@ -131,14 +258,6 @@ static void console_redraw_prepare(int console_num) {
         return;
     }
 
-    if (!console_redraw_buffer) {
-        console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
-        if (!console_redraw_buffer) {
-            console_redraw_pending = 0;
-            return;
-        }
-    }
-
     rows = fb->rows;
     cols = fb->cols;
     if (rows == 0 || cols == 0) {
@@ -146,7 +265,18 @@ static void console_redraw_prepare(int console_num) {
         return;
     }
 
-    visible_rows = rows < CONSOLE_BUFFER_ROWS ? rows : CONSOLE_BUFFER_ROWS;
+    if (!console_redraw_buffer || console_redraw_buffer_rows < rows) {
+        if (console_redraw_buffer) kfree(console_redraw_buffer);
+        console_redraw_buffer_rows = rows;
+        console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+        if (!console_redraw_buffer) {
+            console_redraw_buffer_rows = 0;
+            console_redraw_pending = 0;
+            return;
+        }
+    }
+
+    visible_rows = rows;
     visible_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
 
     flags = console_irqsave();
@@ -175,6 +305,9 @@ static void console_redraw_prepare(int console_num) {
         console_redraw_pending = 0;
         return;
     }
+
+    if (con->allocated && visible_rows > con->buffer_rows) visible_rows = con->buffer_rows;
+    if (visible_rows > console_redraw_buffer_rows) visible_rows = console_redraw_buffer_rows;
 
     for (row = 0; row < visible_rows; row++) {
         for (col = 0; col < visible_cols; col++) {
@@ -308,10 +441,11 @@ static void console_clamp_cursors_locked(uint32_t max_cols, uint32_t max_rows) {
     if (max_cols == 0) max_cols = 1;
     if (max_rows == 0) max_rows = 1;
     if (max_cols > CONSOLE_BUFFER_COLS) max_cols = CONSOLE_BUFFER_COLS;
-    if (max_rows > CONSOLE_BUFFER_ROWS) max_rows = CONSOLE_BUFFER_ROWS;
 
     for (i = 0; i < NUM_CONSOLES; i++) {
         con = &consoles[i];
+        if (!con->allocated) continue;
+        console_grow_buffer(con, max_rows);
         if (con->cursor_x >= max_cols) {
             con->cursor_x = max_cols - 1;
         }
@@ -348,7 +482,7 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
     uint32_t linebuf_len;
     uint32_t linebuf_cap;
     char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t new_wrapped[CONSOLE_BUFFER_ROWS];
+    uint8_t *new_wrapped;
     uint32_t out_row;
     uint32_t src_row;
     uint32_t row_end;
@@ -360,33 +494,43 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
     int total_chars_before_cursor;
     int chars_counted;
     int new_cursor_chars;
+    uint32_t buf_rows;
 
     if (!con->allocated || !con->buffer) return;
     if (old_cols == 0) old_cols = 1;
     if (new_cols == 0) new_cols = 1;
     if (new_rows == 0) new_rows = 1;
     if (new_cols > CONSOLE_BUFFER_COLS) new_cols = CONSOLE_BUFFER_COLS;
-    if (new_rows > CONSOLE_BUFFER_ROWS) new_rows = CONSOLE_BUFFER_ROWS;
     if (old_cols > CONSOLE_BUFFER_COLS) old_cols = CONSOLE_BUFFER_COLS;
 
-    linebuf_cap = CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS;
+    console_grow_buffer(con, new_rows);
+    buf_rows = con->buffer_rows;
+
+    linebuf_cap = buf_rows * CONSOLE_BUFFER_COLS;
     linebuf = (char *)kmalloc(linebuf_cap);
     if (!linebuf) return;
 
-    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
+    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(buf_rows * CONSOLE_BUFFER_COLS);
     if (!new_buf) {
         kfree(linebuf);
         return;
     }
 
-    memset(new_buf, ' ', CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
-    memset(new_wrapped, 0, CONSOLE_BUFFER_ROWS);
+    new_wrapped = (uint8_t *)kmalloc(buf_rows);
+    if (!new_wrapped) {
+        kfree(new_buf);
+        kfree(linebuf);
+        return;
+    }
+
+    memset(new_buf, ' ', buf_rows * CONSOLE_BUFFER_COLS);
+    memset(new_wrapped, 0, buf_rows);
 
     total_chars_before_cursor = 0;
     cursor_found = 0;
     src_row = 0;
 
-    for (src_row = 0; src_row < CONSOLE_BUFFER_ROWS; src_row++) {
+    for (src_row = 0; src_row < buf_rows; src_row++) {
         if (src_row < con->cursor_y) {
             row_end = old_cols;
             while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
@@ -403,10 +547,10 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
     out_row = 0;
     src_row = 0;
 
-    while (src_row < CONSOLE_BUFFER_ROWS) {
+    while (src_row < buf_rows) {
         linebuf_len = 0;
 
-        while (src_row < CONSOLE_BUFFER_ROWS) {
+        while (src_row < buf_rows) {
             row_end = old_cols;
             while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = old_cols;
@@ -425,18 +569,18 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
         while (linebuf_len > 0 && linebuf[linebuf_len - 1] == ' ') linebuf_len--;
 
         if (linebuf_len == 0) {
-            if (out_row < CONSOLE_BUFFER_ROWS) {
+            if (out_row < buf_rows) {
                 out_row++;
             }
         } else {
             lpos = 0;
             while (lpos < linebuf_len) {
-                if (out_row >= CONSOLE_BUFFER_ROWS) {
-                    memmove(new_buf[0], new_buf[1], (CONSOLE_BUFFER_ROWS - 1) * CONSOLE_BUFFER_COLS);
-                    memmove(new_wrapped, new_wrapped + 1, CONSOLE_BUFFER_ROWS - 1);
-                    memset(new_buf[CONSOLE_BUFFER_ROWS - 1], ' ', CONSOLE_BUFFER_COLS);
-                    new_wrapped[CONSOLE_BUFFER_ROWS - 1] = 0;
-                    out_row = CONSOLE_BUFFER_ROWS - 1;
+                if (out_row >= buf_rows) {
+                    memmove(new_buf[0], new_buf[1], (buf_rows - 1) * CONSOLE_BUFFER_COLS);
+                    memmove(new_wrapped, new_wrapped + 1, buf_rows - 1);
+                    memset(new_buf[buf_rows - 1], ' ', CONSOLE_BUFFER_COLS);
+                    new_wrapped[buf_rows - 1] = 0;
+                    out_row = buf_rows - 1;
                 }
 
                 chars_left = linebuf_len - lpos;
@@ -459,8 +603,8 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
         }
     }
 
-    memcpy(con->buffer, new_buf, CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
-    memcpy(con->line_wrapped, new_wrapped, CONSOLE_BUFFER_ROWS);
+    memcpy(con->buffer, new_buf, buf_rows * CONSOLE_BUFFER_COLS);
+    memcpy(con->line_wrapped, new_wrapped, buf_rows);
 
     if (cursor_found) {
         chars_counted = 0;
@@ -468,7 +612,7 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
         con->cursor_y = 0;
         new_cursor_chars = total_chars_before_cursor;
 
-        for (src_row = 0; src_row < CONSOLE_BUFFER_ROWS; src_row++) {
+        for (src_row = 0; src_row < buf_rows; src_row++) {
             row_end = new_cols;
             while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = new_cols;
@@ -484,7 +628,7 @@ static void console_rewrap_one(console_t *con, uint32_t old_cols, uint32_t new_c
             if (!con->line_wrapped[src_row]) chars_counted++;
         }
 
-        if (src_row >= CONSOLE_BUFFER_ROWS) {
+        if (src_row >= buf_rows) {
             con->cursor_y = (out_row > 0) ? out_row - 1 : 0;
             con->cursor_x = 0;
         }
@@ -526,7 +670,10 @@ void console_init(void) {
     for (i = 0; i < NUM_CONSOLES; i++) {
         con = &consoles[i];
         con->buffer = NULL;
+        con->line_wrapped = NULL;
         con->write_buffer = NULL;
+        con->buffer_rows = 0;
+        con->write_buffer_size = 0;
         con->allocated = 0;
         con->cursor_x = 0;
         con->cursor_y = 0;
@@ -536,11 +683,26 @@ void console_init(void) {
         con->write_head = 0;
         con->write_tail = 0;
         con->dirty = 0;
+        con->ansi_fg = 7;
+        con->ansi_bg = 0;
+        con->ansi_bold = 0;
+        con->ansi_reverse = 0;
+        con->scroll_top = 0;
+        con->scroll_bottom = 0;
+        con->cursor_visible = 1;
+        con->saved_cursor_x = 0;
+        con->saved_cursor_y = 0;
     }
     
     console_ensure_alloc(0);
     
-    console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(CONSOLE_BUFFER_ROWS * CONSOLE_BUFFER_COLS);
+    {
+        uint32_t init_rows;
+        init_rows = console_calc_rows();
+        if (init_rows == 0) init_rows = 25;
+        console_redraw_buffer_rows = init_rows;
+        console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(init_rows * CONSOLE_BUFFER_COLS);
+    }
     
     current_console = 0;
     console_switching = 0;
@@ -637,7 +799,6 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
-    if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
     
     console_clamp_cursors_locked(cols, rows);
@@ -645,6 +806,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     current_console = console_num;
     
     if (fb) {
+        console_apply_colors(new_con, fb);
         new_cx = consoles[current_console].cursor_x;
         new_cy = consoles[current_console].cursor_y;
         if (new_cx >= cols) new_cx = cols - 1;
@@ -734,18 +896,22 @@ int console_get_current(void) {
 static void console_scroll(console_t *con) {
     int row;
     int col;
+    int buf_rows;
 
     if (!con->allocated || !con->buffer) return;
-    for (row = 0; row < CONSOLE_BUFFER_ROWS - 1; row++) {
+    buf_rows = (int)con->buffer_rows;
+    for (row = 0; row < buf_rows - 1; row++) {
         for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
             con->buffer[row][col] = con->buffer[row + 1][col];
         }
         con->line_wrapped[row] = con->line_wrapped[row + 1];
     }
-    for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-        con->buffer[CONSOLE_BUFFER_ROWS - 1][col] = ' ';
+    if (buf_rows > 0) {
+        for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
+            con->buffer[buf_rows - 1][col] = ' ';
+        }
+        con->line_wrapped[buf_rows - 1] = 0;
     }
-    con->line_wrapped[CONSOLE_BUFFER_ROWS - 1] = 0;
 }
 
 void console_putchar(char c) {
@@ -774,6 +940,44 @@ static int parse_csi_params(const char *buf, int len, int *params, int max_param
     return count;
 }
 
+static void console_scroll_region_up(console_t *con, uint32_t top, uint32_t bottom, uint32_t cols) {
+    uint32_t row;
+    uint32_t col;
+
+    if (top >= bottom) return;
+    if (bottom > con->buffer_rows) bottom = con->buffer_rows;
+    for (row = top; row < bottom - 1; row++) {
+        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
+            con->buffer[row][col] = con->buffer[row + 1][col];
+        }
+        con->line_wrapped[row] = con->line_wrapped[row + 1];
+    }
+    if (bottom > 0) {
+        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
+            con->buffer[bottom - 1][col] = ' ';
+        }
+        con->line_wrapped[bottom - 1] = 0;
+    }
+}
+
+static void console_scroll_region_down(console_t *con, uint32_t top, uint32_t bottom, uint32_t cols) {
+    uint32_t row;
+    uint32_t col;
+
+    if (top >= bottom) return;
+    if (bottom > con->buffer_rows) bottom = con->buffer_rows;
+    for (row = bottom - 1; row > top; row--) {
+        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
+            con->buffer[row][col] = con->buffer[row - 1][col];
+        }
+        con->line_wrapped[row] = con->line_wrapped[row - 1];
+    }
+    for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
+        con->buffer[top][col] = ' ';
+    }
+    con->line_wrapped[top] = 0;
+}
+
 static void console_handle_csi(int console_num, console_t *con, framebuffer_t *fb, uint32_t rows, uint32_t cols, int is_active) {
     char cmd;
     int param_start;
@@ -781,17 +985,22 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     int params[8];
     int nparams;
     int n;
+    int p;
     int row;
     int col;
     int mode;
     uint32_t r;
     uint32_t c2;
+    uint32_t top;
+    uint32_t bot;
+    int count;
 
     if (con->esc_len == 0) return;
 
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
-    if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+    console_grow_buffer(con, rows);
+    if (rows > con->buffer_rows) rows = con->buffer_rows;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
 
     cmd = con->esc_buf[con->esc_len - 1];
@@ -807,6 +1016,16 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     nparams = parse_csi_params(con->esc_buf + param_start, con->esc_len - 1 - param_start, params, 8);
 
     if (is_private) {
+        if (cmd == 'h') {
+            if (nparams >= 1 && params[0] == 25) {
+                con->cursor_visible = 1;
+                if (is_active && fb && !console_batch) fb_update_cursor();
+            }
+        } else if (cmd == 'l') {
+            if (nparams >= 1 && params[0] == 25) {
+                con->cursor_visible = 0;
+            }
+        }
         return;
     }
 
@@ -829,7 +1048,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         if (con->cursor_y >= (uint32_t)n) con->cursor_y -= n;
         else con->cursor_y = 0;
-        if (is_active && fb) { fb->cursor_y = con->cursor_y; fb_update_cursor(); }
+        if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
         break;
     case 'B':
         n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
@@ -849,6 +1068,32 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         else con->cursor_x = 0;
         if (is_active && fb) { fb->cursor_x = con->cursor_x; if (!console_batch) fb_update_cursor(); }
         break;
+    case 'E':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        con->cursor_x = 0;
+        con->cursor_y += n;
+        if (con->cursor_y >= rows) con->cursor_y = rows - 1;
+        if (is_active && fb) { fb->cursor_x = 0; fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
+        break;
+    case 'F':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        con->cursor_x = 0;
+        if (con->cursor_y >= (uint32_t)n) con->cursor_y -= n;
+        else con->cursor_y = 0;
+        if (is_active && fb) { fb->cursor_x = 0; fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
+        break;
+    case 'G':
+        col = (nparams >= 1 && params[0] > 0) ? params[0] - 1 : 0;
+        if ((uint32_t)col >= cols) col = cols - 1;
+        con->cursor_x = col;
+        if (is_active && fb) { fb->cursor_x = col; if (!console_batch) fb_update_cursor(); }
+        break;
+    case 'd':
+        row = (nparams >= 1 && params[0] > 0) ? params[0] - 1 : 0;
+        if ((uint32_t)row >= rows) row = rows - 1;
+        con->cursor_y = row;
+        if (is_active && fb) { fb->cursor_y = row; if (!console_batch) fb_update_cursor(); }
+        break;
     case 'J':
         mode = (nparams >= 1) ? params[0] : 0;
         if (mode == 2 || mode == 3) {
@@ -856,7 +1101,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         } else if (mode == 0) {
             for (c2 = con->cursor_x; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++)
                 con->buffer[con->cursor_y][c2] = ' ';
-            for (r = con->cursor_y + 1; r < rows && r < CONSOLE_BUFFER_ROWS; r++)
+            for (r = con->cursor_y + 1; r < rows && r < con->buffer_rows; r++)
                 for (c2 = 0; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++)
                     con->buffer[r][c2] = ' ';
             if (is_active && fb) {
@@ -867,7 +1112,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
                         fb_putchar(' ', c2, r);
             }
         } else if (mode == 1) {
-            for (r = 0; r < con->cursor_y && r < CONSOLE_BUFFER_ROWS; r++)
+            for (r = 0; r < con->cursor_y && r < con->buffer_rows; r++)
                 for (c2 = 0; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++)
                     con->buffer[r][c2] = ' ';
             for (c2 = 0; c2 <= con->cursor_x && c2 < CONSOLE_BUFFER_COLS; c2++)
@@ -900,13 +1145,170 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
             }
         }
         break;
-    case 'm':
+    case 'X':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint32_t)n && c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
+            con->buffer[con->cursor_y][c2] = ' ';
+            if (is_active && fb) fb_putchar(' ', c2, con->cursor_y);
+        }
         break;
-    case 's':
-    case 'u':
+    case '@':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        if ((uint32_t)n > cols - con->cursor_x) n = cols - con->cursor_x;
+        for (c2 = cols - 1; c2 >= con->cursor_x + (uint32_t)n && c2 < CONSOLE_BUFFER_COLS; c2--) {
+            con->buffer[con->cursor_y][c2] = con->buffer[con->cursor_y][c2 - n];
+        }
+        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint32_t)n && c2 < CONSOLE_BUFFER_COLS; c2++) {
+            con->buffer[con->cursor_y][c2] = ' ';
+        }
+        if (is_active && fb) {
+            for (c2 = 0; c2 < cols; c2++) fb_putchar(con->buffer[con->cursor_y][c2], c2, con->cursor_y);
+        }
+        break;
+    case 'P':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        if ((uint32_t)n > cols - con->cursor_x) n = cols - con->cursor_x;
+        for (c2 = con->cursor_x; c2 + (uint32_t)n < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
+            con->buffer[con->cursor_y][c2] = con->buffer[con->cursor_y][c2 + n];
+        }
+        for (c2 = cols - (uint32_t)n; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
+            con->buffer[con->cursor_y][c2] = ' ';
+        }
+        if (is_active && fb) {
+            for (c2 = 0; c2 < cols; c2++) fb_putchar(con->buffer[con->cursor_y][c2], c2, con->cursor_y);
+        }
+        break;
+    case 'L':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        top = con->cursor_y;
+        bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+        if (top >= bot) break;
+        for (count = 0; count < n; count++) {
+            console_scroll_region_down(con, top, bot, cols);
+        }
+        if (is_active && fb) {
+            for (r = top; r < bot; r++)
+                for (c2 = 0; c2 < cols; c2++)
+                    fb_putchar(con->buffer[r][c2], c2, r);
+        }
+        break;
+    case 'M':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        top = con->cursor_y;
+        bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+        if (top >= bot) break;
+        for (count = 0; count < n; count++) {
+            console_scroll_region_up(con, top, bot, cols);
+        }
+        if (is_active && fb) {
+            for (r = top; r < bot; r++)
+                for (c2 = 0; c2 < cols; c2++)
+                    fb_putchar(con->buffer[r][c2], c2, r);
+        }
+        break;
+    case 'S':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        top = (con->scroll_top > 0) ? con->scroll_top : 0;
+        bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+        for (count = 0; count < n; count++) {
+            console_scroll_region_up(con, top, bot, cols);
+        }
+        if (is_active && fb) {
+            for (r = top; r < bot; r++)
+                for (c2 = 0; c2 < cols; c2++)
+                    fb_putchar(con->buffer[r][c2], c2, r);
+        }
+        break;
+    case 'T':
+        n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
+        top = (con->scroll_top > 0) ? con->scroll_top : 0;
+        bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+        for (count = 0; count < n; count++) {
+            console_scroll_region_down(con, top, bot, cols);
+        }
+        if (is_active && fb) {
+            for (r = top; r < bot; r++)
+                for (c2 = 0; c2 < cols; c2++)
+                    fb_putchar(con->buffer[r][c2], c2, r);
+        }
+        break;
+    case 'r':
+        if (nparams == 0) {
+            con->scroll_top = 0;
+            con->scroll_bottom = 0;
+        } else {
+            con->scroll_top = (nparams >= 1 && params[0] > 0) ? (uint32_t)(params[0] - 1) : 0;
+            con->scroll_bottom = (nparams >= 2 && params[1] > 0) ? (uint32_t)params[1] : rows;
+            if (con->scroll_top >= rows) con->scroll_top = 0;
+            if (con->scroll_bottom > rows) con->scroll_bottom = rows;
+            if (con->scroll_top >= con->scroll_bottom) {
+                con->scroll_top = 0;
+                con->scroll_bottom = 0;
+            }
+        }
+        con->cursor_x = 0;
+        con->cursor_y = 0;
+        if (is_active && fb) {
+            fb->cursor_x = 0;
+            fb->cursor_y = 0;
+            if (!console_batch) fb_update_cursor();
+        }
+        break;
+    case 'm':
+        if (nparams == 0) {
+            con->ansi_fg = 7;
+            con->ansi_bg = 0;
+            con->ansi_bold = 0;
+            con->ansi_reverse = 0;
+        } else {
+            for (n = 0; n < nparams; n++) {
+                p = params[n];
+                if (p == 0) {
+                    con->ansi_fg = 7;
+                    con->ansi_bg = 0;
+                    con->ansi_bold = 0;
+                    con->ansi_reverse = 0;
+                } else if (p == 1) {
+                    con->ansi_bold = 1;
+                } else if (p == 2) {
+                    con->ansi_bold = 0;
+                } else if (p == 4 || p == 24) {
+                    ;
+                } else if (p == 5 || p == 25) {
+                    ;
+                } else if (p == 7) {
+                    con->ansi_reverse = 1;
+                } else if (p == 8) {
+                    ;
+                } else if (p == 10 || p == 11 || p == 12) {
+                    ;
+                } else if (p == 22) {
+                    con->ansi_bold = 0;
+                } else if (p == 27) {
+                    con->ansi_reverse = 0;
+                } else if (p >= 30 && p <= 37) {
+                    con->ansi_fg = (uint8_t)(p - 30);
+                } else if (p >= 90 && p <= 97) {
+                    con->ansi_fg = (uint8_t)(8 + (p - 90));
+                } else if (p == 39) {
+                    con->ansi_fg = 7;
+                } else if (p >= 40 && p <= 47) {
+                    con->ansi_bg = (uint8_t)(p - 40);
+                } else if (p >= 100 && p <= 107) {
+                    con->ansi_bg = (uint8_t)(8 + (p - 100));
+                } else if (p == 49) {
+                    con->ansi_bg = 0;
+                }
+            }
+        }
+        if (is_active && fb) {
+            console_apply_colors(con, fb);
+        }
+        break;
     case 'h':
     case 'l':
-    case '?':
+    case 's':
+    case 'u':
     default:
         break;
     }
@@ -920,6 +1322,10 @@ static void console_putchar_to_nolock(int console_num, char c) {
     int is_active;
     uint32_t tab_stop;
     uint32_t i;
+    uint32_t sc_top;
+    uint32_t sc_bot;
+    uint32_t r;
+    uint32_t c2;
 
     if (!console_initialized) {
         terminal_putchar(c);
@@ -954,10 +1360,84 @@ static void console_putchar_to_nolock(int console_num, char c) {
         if (c == '[') {
             con->esc_state = 2;
             con->esc_len = 0;
-        } else {
-            con->esc_state = 0;
+            return;
         }
-        if (con->esc_state != 0) return;
+        if (c == '(' || c == ')') {
+            con->esc_state = 3;
+            return;
+        }
+        if (c == 'M') {
+            sc_top = con->scroll_top;
+            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+            if (con->cursor_y <= sc_top) {
+                console_scroll_region_down(con, sc_top, sc_bot, cols);
+                if (is_active && fb) {
+                    for (r = sc_top; r < sc_bot; r++)
+                        for (c2 = 0; c2 < cols; c2++)
+                            fb_putchar(con->buffer[r][c2], c2, r);
+                }
+            } else {
+                con->cursor_y--;
+                if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
+            }
+            con->esc_state = 0;
+            return;
+        }
+        if (c == 'D') {
+            sc_top = con->scroll_top;
+            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+            if (con->cursor_y + 1 >= sc_bot) {
+                console_scroll_region_up(con, sc_top, sc_bot, cols);
+                if (is_active && fb) {
+                    for (r = sc_top; r < sc_bot; r++)
+                        for (c2 = 0; c2 < cols; c2++)
+                            fb_putchar(con->buffer[r][c2], c2, r);
+                }
+            } else {
+                con->cursor_y++;
+                if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
+            }
+            con->esc_state = 0;
+            return;
+        }
+        if (c == 'c') {
+            con->ansi_fg = 7;
+            con->ansi_bg = 0;
+            con->ansi_bold = 0;
+            con->ansi_reverse = 0;
+            con->scroll_top = 0;
+            con->scroll_bottom = 0;
+            con->cursor_visible = 1;
+            if (is_active && fb) console_apply_colors(con, fb);
+            con->esc_state = 0;
+            return;
+        }
+        if (c == '7') {
+            con->saved_cursor_x = con->cursor_x;
+            con->saved_cursor_y = con->cursor_y;
+            con->esc_state = 0;
+            return;
+        }
+        if (c == '8') {
+            con->cursor_x = con->saved_cursor_x;
+            con->cursor_y = con->saved_cursor_y;
+            if (con->cursor_x >= cols) con->cursor_x = cols - 1;
+            if (con->cursor_y >= rows) con->cursor_y = rows - 1;
+            if (is_active && fb) {
+                fb->cursor_x = con->cursor_x;
+                fb->cursor_y = con->cursor_y;
+                if (!console_batch) fb_update_cursor();
+            }
+            con->esc_state = 0;
+            return;
+        }
+        con->esc_state = 0;
+        return;
+    }
+
+    if (con->esc_state == 3) {
+        con->esc_state = 0;
+        return;
     }
     
     if (con->esc_state == 2) {
@@ -983,14 +1463,22 @@ static void console_putchar_to_nolock(int console_num, char c) {
         return;
     }
 
+    if (c == 0x07 || c == 0x0E || c == 0x0F) {
+        return;
+    }
+
     if (c == '\n') {
         con->cursor_x = 0;
+        sc_top = con->scroll_top;
+        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
         con->cursor_y++;
-        if (con->cursor_y >= rows) {
-            console_scroll(con);
-            con->cursor_y = rows - 1;
+        if (con->cursor_y >= sc_bot) {
+            con->cursor_y = sc_bot - 1;
+            console_scroll_region_up(con, sc_top, sc_bot, cols);
             if (is_active && fb) {
-                fb_scroll();
+                for (r = sc_top; r < sc_bot; r++)
+                    for (c2 = 0; c2 < cols; c2++)
+                        fb_putchar(con->buffer[r][c2], c2, r);
                 fb->cursor_x = con->cursor_x;
                 fb->cursor_y = con->cursor_y;
             }
@@ -1033,7 +1521,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
         return;
     }
 
-    if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
+    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
         con->buffer[con->cursor_y][con->cursor_x] = c;
     }
 
@@ -1045,12 +1533,16 @@ static void console_putchar_to_nolock(int console_num, char c) {
     if (con->cursor_x >= cols) {
         con->line_wrapped[con->cursor_y] = 1;
         con->cursor_x = 0;
+        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+        sc_top = con->scroll_top;
         con->cursor_y++;
-        if (con->cursor_y >= rows) {
-            console_scroll(con);
-            con->cursor_y = rows - 1;
+        if (con->cursor_y >= sc_bot) {
+            con->cursor_y = sc_bot - 1;
+            console_scroll_region_up(con, sc_top, sc_bot, cols);
             if (is_active && fb) {
-                fb_scroll();
+                for (r = sc_top; r < sc_bot; r++)
+                    for (c2 = 0; c2 < cols; c2++)
+                        fb_putchar(con->buffer[r][c2], c2, r);
             }
         }
     }
@@ -1114,6 +1606,10 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     char c;
     uint32_t tab_stop;
     uint32_t t;
+    uint32_t sc_top;
+    uint32_t sc_bot;
+    uint32_t sr;
+    uint32_t sc;
 
     if (!console_initialized) {
         for (i = 0; i < size; i++) terminal_putchar(data[i]);
@@ -1139,11 +1635,15 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     if (writer_thread_running) {
         for (i = 0; i < size; i++) {
             head = con->write_head;
-            next_head = (head + 1) % CONSOLE_WRITE_BUFFER_SIZE;
+            next_head = (head + 1) % con->write_buffer_size;
             
             while (next_head == con->write_tail) {
-                yield();
-                next_head = (con->write_head + 1) % CONSOLE_WRITE_BUFFER_SIZE;
+                console_grow_write_buffer(con);
+                next_head = (con->write_head + 1) % con->write_buffer_size;
+                if (next_head == con->write_tail) {
+                    yield();
+                    next_head = (con->write_head + 1) % con->write_buffer_size;
+                }
             }
             
             con->write_buffer[head] = data[i];
@@ -1176,7 +1676,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         cols = fb ? fb->cols : 80;
         if (rows == 0) rows = 1;
         if (cols == 0) cols = 1;
-        if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+        console_grow_buffer(con, rows);
+        if (rows > con->buffer_rows) rows = con->buffer_rows;
         if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
         is_active = (target_console == current_console);
         fb_ok = is_active && fb && !batch_fb_skip;
@@ -1191,10 +1692,83 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 if (c == '[') {
                     con->esc_state = 2;
                     con->esc_len = 0;
-                } else {
-                    con->esc_state = 0;
+                    continue;
                 }
-                if (con->esc_state != 0) continue;
+                if (c == '(' || c == ')') {
+                    con->esc_state = 3;
+                    continue;
+                }
+                if (c == 'M') {
+                    sc_top = con->scroll_top;
+                    sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+                    if (con->cursor_y <= sc_top) {
+                        console_scroll_region_down(con, sc_top, sc_bot, cols);
+                        if (fb_ok) {
+                            for (sr = sc_top; sr < sc_bot; sr++)
+                                for (sc = 0; sc < cols; sc++)
+                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                        }
+                    } else {
+                        con->cursor_y--;
+                        if (fb_ok) { fb->cursor_y = con->cursor_y; }
+                    }
+                    con->esc_state = 0;
+                    continue;
+                }
+                if (c == 'D') {
+                    sc_top = con->scroll_top;
+                    sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+                    if (con->cursor_y + 1 >= sc_bot) {
+                        console_scroll_region_up(con, sc_top, sc_bot, cols);
+                        if (fb_ok) {
+                            for (sr = sc_top; sr < sc_bot; sr++)
+                                for (sc = 0; sc < cols; sc++)
+                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                        }
+                    } else {
+                        con->cursor_y++;
+                        if (fb_ok) { fb->cursor_y = con->cursor_y; }
+                    }
+                    con->esc_state = 0;
+                    continue;
+                }
+                if (c == 'c') {
+                    con->ansi_fg = 7;
+                    con->ansi_bg = 0;
+                    con->ansi_bold = 0;
+                    con->ansi_reverse = 0;
+                    con->scroll_top = 0;
+                    con->scroll_bottom = 0;
+                    con->cursor_visible = 1;
+                    if (fb_ok) console_apply_colors(con, fb);
+                    con->esc_state = 0;
+                    continue;
+                }
+                if (c == '7') {
+                    con->saved_cursor_x = con->cursor_x;
+                    con->saved_cursor_y = con->cursor_y;
+                    con->esc_state = 0;
+                    continue;
+                }
+                if (c == '8') {
+                    con->cursor_x = con->saved_cursor_x;
+                    con->cursor_y = con->saved_cursor_y;
+                    if (con->cursor_x >= cols) con->cursor_x = cols - 1;
+                    if (con->cursor_y >= rows) con->cursor_y = rows - 1;
+                    if (fb_ok) {
+                        fb->cursor_x = con->cursor_x;
+                        fb->cursor_y = con->cursor_y;
+                    }
+                    con->esc_state = 0;
+                    continue;
+                }
+                con->esc_state = 0;
+                continue;
+            }
+
+            if (con->esc_state == 3) {
+                con->esc_state = 0;
+                continue;
             }
 
             if (con->esc_state == 2) {
@@ -1220,19 +1794,27 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 continue;
             }
 
+            if (c == 0x07 || c == 0x0E || c == 0x0F) {
+                continue;
+            }
+
             if (c == '\n') {
                 con->cursor_x = 0;
+                sc_top = con->scroll_top;
+                sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                 con->cursor_y++;
-                if (con->cursor_y >= rows) {
-                    console_scroll(con);
-                    con->cursor_y = rows - 1;
+                if (con->cursor_y >= sc_bot) {
+                    con->cursor_y = sc_bot - 1;
+                    console_scroll_region_up(con, sc_top, sc_bot, cols);
                     batch_scroll_count++;
                     if (batch_scroll_count > (int)rows) {
                         batch_fb_skip = 1;
                         fb_ok = 0;
                     }
                     if (fb_ok) {
-                        fb_scroll();
+                        for (sr = sc_top; sr < sc_bot; sr++)
+                            for (sc = 0; sc < cols; sc++)
+                                fb_putchar(con->buffer[sr][sc], sc, sr);
                         fb->cursor_x = con->cursor_x;
                         fb->cursor_y = con->cursor_y;
                     }
@@ -1267,7 +1849,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             if (c == '\t') {
                 tab_stop = 8 - (con->cursor_x % 8);
                 for (t = 0; t < tab_stop; t++) {
-                    if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
+                    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
                         con->buffer[con->cursor_y][con->cursor_x] = ' ';
                     }
                     if (fb_ok) {
@@ -1276,17 +1858,21 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                     con->cursor_x++;
                     if (con->cursor_x >= cols) {
                         con->cursor_x = 0;
+                        sc_top = con->scroll_top;
+                        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                         con->cursor_y++;
-                        if (con->cursor_y >= rows) {
-                            console_scroll(con);
-                            con->cursor_y = rows - 1;
+                        if (con->cursor_y >= sc_bot) {
+                            con->cursor_y = sc_bot - 1;
+                            console_scroll_region_up(con, sc_top, sc_bot, cols);
                             batch_scroll_count++;
                             if (batch_scroll_count > (int)rows) {
                                 batch_fb_skip = 1;
                                 fb_ok = 0;
                             }
                             if (fb_ok) {
-                                fb_scroll();
+                                for (sr = sc_top; sr < sc_bot; sr++)
+                                    for (sc = 0; sc < cols; sc++)
+                                        fb_putchar(con->buffer[sr][sc], sc, sr);
                             }
                         }
                     }
@@ -1294,7 +1880,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 continue;
             }
 
-            if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
+            if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
                 con->buffer[con->cursor_y][con->cursor_x] = c;
             }
 
@@ -1305,17 +1891,21 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             con->cursor_x++;
             if (con->cursor_x >= cols) {
                 con->cursor_x = 0;
+                sc_top = con->scroll_top;
+                sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                 con->cursor_y++;
-                if (con->cursor_y >= rows) {
-                    console_scroll(con);
-                    con->cursor_y = rows - 1;
+                if (con->cursor_y >= sc_bot) {
+                    con->cursor_y = sc_bot - 1;
+                    console_scroll_region_up(con, sc_top, sc_bot, cols);
                     batch_scroll_count++;
                     if (batch_scroll_count > (int)rows) {
                         batch_fb_skip = 1;
                         fb_ok = 0;
                     }
                     if (fb_ok) {
-                        fb_scroll();
+                        for (sr = sc_top; sr < sc_bot; sr++)
+                            for (sc = 0; sc < cols; sc++)
+                                fb_putchar(con->buffer[sr][sc], sc, sr);
                     }
                 }
             }
@@ -1379,7 +1969,7 @@ void console_clear(int console_num) {
     
     con = &consoles[console_num];
     if (con->allocated && con->buffer) {
-        for (row = 0; row < CONSOLE_BUFFER_ROWS; row++) {
+        for (row = 0; row < (int)con->buffer_rows; row++) {
             for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
                 con->buffer[row][col] = ' ';
             }
@@ -1481,6 +2071,10 @@ static void console_writer_thread(void) {
     char c;
     uint32_t tab_stop;
     uint32_t wt;
+    uint32_t sc_top;
+    uint32_t sc_bot;
+    uint32_t sr;
+    uint32_t sc;
 
     writer_thread_running = 1;
     
@@ -1531,14 +2125,14 @@ static void console_writer_thread(void) {
                 }
                 tail = con->write_tail;
                 head = con->write_head;
-                available = (head >= tail) ? (head - tail) : (CONSOLE_WRITE_BUFFER_SIZE - tail + head);
+                available = (head >= tail) ? (head - tail) : (con->write_buffer_size - tail + head);
                 
                 if (available == 0) break;
                 
                 chunk_size = (available > 256) ? 256 : available;
                 
                 for (j = 0; j < chunk_size; j++) {
-                    chunk[j] = con->write_buffer[(tail + j) % CONSOLE_WRITE_BUFFER_SIZE];
+                    chunk[j] = con->write_buffer[(tail + j) % con->write_buffer_size];
                 }
                 
                 flags = console_irqsave();
@@ -1550,7 +2144,8 @@ static void console_writer_thread(void) {
                 cols = fb ? fb->cols : 80;
                 if (rows == 0) rows = 1;
                 if (cols == 0) cols = 1;
-                if (rows > CONSOLE_BUFFER_ROWS) rows = CONSOLE_BUFFER_ROWS;
+                console_grow_buffer(con, rows);
+                if (rows > con->buffer_rows) rows = con->buffer_rows;
                 if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
                 is_active = (i == current_console);
                 wt_fb_ok = is_active && fb;
@@ -1562,10 +2157,71 @@ static void console_writer_thread(void) {
                         if (c == '[') {
                             con->esc_state = 2;
                             con->esc_len = 0;
+                        } else if (c == '(' || c == ')') {
+                            con->esc_state = 3;
+                        } else if (c == 'M') {
+                            sc_top = con->scroll_top;
+                            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+                            if (con->cursor_y <= sc_top) {
+                                console_scroll_region_down(con, sc_top, sc_bot, cols);
+                                if (wt_fb_ok) {
+                                    for (sr = sc_top; sr < sc_bot; sr++)
+                                        for (sc = 0; sc < cols; sc++)
+                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                }
+                            } else {
+                                con->cursor_y--;
+                                if (wt_fb_ok) fb->cursor_y = con->cursor_y;
+                            }
+                            con->esc_state = 0;
+                        } else if (c == 'D') {
+                            sc_top = con->scroll_top;
+                            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
+                            if (con->cursor_y + 1 >= sc_bot) {
+                                console_scroll_region_up(con, sc_top, sc_bot, cols);
+                                if (wt_fb_ok) {
+                                    for (sr = sc_top; sr < sc_bot; sr++)
+                                        for (sc = 0; sc < cols; sc++)
+                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                }
+                            } else {
+                                con->cursor_y++;
+                                if (wt_fb_ok) fb->cursor_y = con->cursor_y;
+                            }
+                            con->esc_state = 0;
+                        } else if (c == 'c') {
+                            con->ansi_fg = 7;
+                            con->ansi_bg = 0;
+                            con->ansi_bold = 0;
+                            con->ansi_reverse = 0;
+                            con->scroll_top = 0;
+                            con->scroll_bottom = 0;
+                            con->cursor_visible = 1;
+                            if (wt_fb_ok) console_apply_colors(con, fb);
+                            con->esc_state = 0;
+                        } else if (c == '7') {
+                            con->saved_cursor_x = con->cursor_x;
+                            con->saved_cursor_y = con->cursor_y;
+                            con->esc_state = 0;
+                        } else if (c == '8') {
+                            con->cursor_x = con->saved_cursor_x;
+                            con->cursor_y = con->saved_cursor_y;
+                            if (con->cursor_x >= cols) con->cursor_x = cols - 1;
+                            if (con->cursor_y >= rows) con->cursor_y = rows - 1;
+                            if (wt_fb_ok) {
+                                fb->cursor_x = con->cursor_x;
+                                fb->cursor_y = con->cursor_y;
+                            }
+                            con->esc_state = 0;
                         } else {
                             con->esc_state = 0;
                         }
-                        if (con->esc_state != 0) continue;
+                        continue;
+                    }
+
+                    if (con->esc_state == 3) {
+                        con->esc_state = 0;
+                        continue;
                     }
                     
                     if (con->esc_state == 2) {
@@ -1590,20 +2246,28 @@ static void console_writer_thread(void) {
                         con->esc_len = 0;
                         continue;
                     }
+
+                    if (c == 0x07 || c == 0x0E || c == 0x0F) {
+                        continue;
+                    }
                     
                     if (c == '\n') {
                         con->cursor_x = 0;
+                        sc_top = con->scroll_top;
+                        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                         con->cursor_y++;
-                        if (con->cursor_y >= rows) {
-                            console_scroll(con);
-                            con->cursor_y = rows - 1;
+                        if (con->cursor_y >= sc_bot) {
+                            con->cursor_y = sc_bot - 1;
+                            console_scroll_region_up(con, sc_top, sc_bot, cols);
                             wt_scroll_count++;
                             if (wt_scroll_count > (int)rows) {
                                 wt_fb_skip = 1;
                                 wt_fb_ok = 0;
                             }
                             if (wt_fb_ok) {
-                                fb_scroll();
+                                for (sr = sc_top; sr < sc_bot; sr++)
+                                    for (sc = 0; sc < cols; sc++)
+                                        fb_putchar(con->buffer[sr][sc], sc, sr);
                                 fb->cursor_x = con->cursor_x;
                                 fb->cursor_y = con->cursor_y;
                             }
@@ -1636,30 +2300,36 @@ static void console_writer_thread(void) {
                     if (c == '\t') {
                         tab_stop = 8 - (con->cursor_x % 8);
                         for (wt = 0; wt < tab_stop; wt++) {
-                            if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
+                            if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
                                 con->buffer[con->cursor_y][con->cursor_x] = ' ';
                             }
                             if (wt_fb_ok) fb_putchar(' ', con->cursor_x, con->cursor_y);
                             con->cursor_x++;
                             if (con->cursor_x >= cols) {
                                 con->cursor_x = 0;
+                                sc_top = con->scroll_top;
+                                sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                                 con->cursor_y++;
-                                if (con->cursor_y >= rows) {
-                                    console_scroll(con);
-                                    con->cursor_y = rows - 1;
+                                if (con->cursor_y >= sc_bot) {
+                                    con->cursor_y = sc_bot - 1;
+                                    console_scroll_region_up(con, sc_top, sc_bot, cols);
                                     wt_scroll_count++;
                                     if (wt_scroll_count > (int)rows) {
                                         wt_fb_skip = 1;
                                         wt_fb_ok = 0;
                                     }
-                                    if (wt_fb_ok) fb_scroll();
+                                    if (wt_fb_ok) {
+                                        for (sr = sc_top; sr < sc_bot; sr++)
+                                            for (sc = 0; sc < cols; sc++)
+                                                fb_putchar(con->buffer[sr][sc], sc, sr);
+                                    }
                                 }
                             }
                         }
                         continue;
                     }
                     
-                    if (con->cursor_y < CONSOLE_BUFFER_ROWS && con->cursor_x < CONSOLE_BUFFER_COLS) {
+                    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
                         con->buffer[con->cursor_y][con->cursor_x] = c;
                     }
                     if (wt_fb_ok) fb_putchar(c, con->cursor_x, con->cursor_y);
@@ -1667,17 +2337,21 @@ static void console_writer_thread(void) {
                     con->cursor_x++;
                     if (con->cursor_x >= cols) {
                         con->cursor_x = 0;
+                        sc_top = con->scroll_top;
+                        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
                         con->cursor_y++;
-                        if (con->cursor_y >= rows) {
-                            console_scroll(con);
-                            con->cursor_y = rows - 1;
+                        if (con->cursor_y >= sc_bot) {
+                            con->cursor_y = sc_bot - 1;
+                            console_scroll_region_up(con, sc_top, sc_bot, cols);
                             wt_scroll_count++;
                             if (wt_scroll_count > (int)rows) {
                                 wt_fb_skip = 1;
                                 wt_fb_ok = 0;
                             }
                             if (wt_fb_ok) {
-                                fb_scroll();
+                                for (sr = sc_top; sr < sc_bot; sr++)
+                                    for (sc = 0; sc < cols; sc++)
+                                        fb_putchar(con->buffer[sr][sc], sc, sr);
                             }
                         }
                     }
@@ -1688,7 +2362,7 @@ static void console_writer_thread(void) {
                     }
                 }
                 
-                con->write_tail = (tail + chunk_size) % CONSOLE_WRITE_BUFFER_SIZE;
+                con->write_tail = (tail + chunk_size) % con->write_buffer_size;
                 con->dirty = 0;
                 
                 console_batch--;
@@ -1727,7 +2401,7 @@ handle_pending:
         
         if (!work_done) {
             if (pending_console_switch == -1) {
-                sleep_ms(5);
+                sleep_ms(1);
             } else {
                 yield();
             }

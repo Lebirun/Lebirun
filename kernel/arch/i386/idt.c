@@ -134,6 +134,21 @@ registers_t* interrupt_handler(registers_t* regs)
                 }
             }
 
+            if (!(regs->err_code & 0x4) && !(regs->err_code & 0x1) && fault_addr >= 0xC0000000) {
+                extern uint32_t pae_enabled;
+                extern uint64_t boot_pd_high[];
+                extern void pae_sync_kernel_mappings(void);
+                if (pae_enabled) {
+                    uint32_t pde_idx;
+                    pde_idx = (fault_addr >> 21) & 0x1FF;
+                    if (boot_pd_high[pde_idx] & 1) {
+                        pae_sync_kernel_mappings();
+                        __asm__ volatile("invlpg (%0)" : : "r"(fault_addr) : "memory");
+                        return regs;
+                    }
+                }
+            }
+
             {
                 extern int kstack_page_fault_handler(uint32_t fault_addr);
                 if (kstack_page_fault_handler(fault_addr)) {
@@ -187,6 +202,12 @@ registers_t* interrupt_handler(registers_t* regs)
             uint32_t actual_cr3;
             uint32_t expected_pd;
             uint32_t entry_phys;
+            uint32_t fault_page;
+            uint32_t phys;
+            uint32_t stack_floor;
+            uint32_t new_phys;
+            uint32_t mapped_phys;
+            uint32_t *new_user_pages;
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             __asm__ ("movl %%cr3, %0" : "=r" (actual_cr3));
             expected_pd = current_task->pd_phys;
@@ -208,8 +229,31 @@ registers_t* interrupt_handler(registers_t* regs)
             }
             
             {
-                uint32_t phys = vmm_get_phys_in_pd(current_task->pd_phys, fault_addr & ~0xFFF);
+                fault_page = fault_addr & ~0xFFFu;
+                phys = vmm_get_phys_in_pd(current_task->pd_phys, fault_page);
                 printf("  pd=0x%08X page_phys=0x%08X\n", current_task->pd_phys, phys);
+                if (phys == 0) {
+                    stack_floor = 0x00700000u;
+                    if (fault_addr >= stack_floor && fault_addr < 0x00800000u) {
+                        new_phys = pfa_alloc();
+                        if (new_phys != 0) {
+                            pmm_zero_page_phys(new_phys);
+                            vmm_map_page_in_pd(current_task->pd_phys, fault_page, new_phys, 0x7);
+                            mapped_phys = vmm_get_phys_in_pd(current_task->pd_phys, fault_page);
+                            if (mapped_phys != 0) {
+                                new_user_pages = (uint32_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint32_t));
+                                if (new_user_pages) {
+                                    current_task->user_pages = new_user_pages;
+                                    current_task->user_pages[current_task->user_pages_count] = new_phys;
+                                    current_task->user_pages_count++;
+                                }
+                                printf("  grew user stack: page=0x%08X phys=0x%08X\n", fault_page, new_phys);
+                                return regs;
+                            }
+                            pfa_free(new_phys);
+                        }
+                    }
+                }
             }
 
             task_exit_deferred(139);
@@ -340,6 +384,10 @@ registers_t* interrupt_handler(registers_t* regs)
             }
 
             regs = schedule_from_irq(regs);
+
+            if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
+                signal_deliver_pending(regs);
+            }
         } else if (irq == 1) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
             kernel_cr3 = vmm_get_kernel_cr3();

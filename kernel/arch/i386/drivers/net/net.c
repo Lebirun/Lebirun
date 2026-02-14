@@ -10,7 +10,7 @@ const mac_addr_t MAC_ZERO = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 const ipv6_addr_t IPV6_ZERO = {{0}};
 
 static volatile uint32_t net_ticks = 0;
-static volatile int net_work_pending = 0;
+volatile int net_work_pending = 0;
 
 uint32_t net_get_ticks(void) {
     return net_ticks;
@@ -35,8 +35,13 @@ static void net_worker_thread(void) {
         dhcp_start_pending = 0;
         netif = netif_get_default();
         if (netif) {
+            for (i = 0; i < 10; i++) {
+                sleep_ms(10);
+                netif_poll_all();
+                if (netif->link_up) break;
+            }
             dhcp_start(netif);
-            for (i = 0; i < 50; i++) {
+            for (i = 0; i < 500; i++) {
                 sleep_ms(10);
                 netif_poll_all();
                 if (dhcp_is_bound(netif)) break;

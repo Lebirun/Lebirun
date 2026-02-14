@@ -259,7 +259,7 @@ int e1000_poll(netif_t *netif) {
         uint16_t len = dev->rx_descs[dev->rx_cur].length;
         uint8_t *buf = dev->rx_buffers[dev->rx_cur];
 
-        if (dev->rx_descs[dev->rx_cur].errors) {
+        if (dev->rx_descs[dev->rx_cur].errors & (E1000_RXD_ERR_CE | E1000_RXD_ERR_SE | E1000_RXD_ERR_SEQ | E1000_RXD_ERR_CXE | E1000_RXD_ERR_RXE)) {
             dev->errors_rx++;
         } else {
             dev->packets_rx++;
@@ -296,6 +296,11 @@ void e1000_irq_handler(void *regs) {
         if (dev->netif) {
             dev->netif->link_up = dev->link_up;
         }
+    }
+
+    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO)) {
+        extern volatile int net_work_pending;
+        net_work_pending = 1;
     }
 }
 

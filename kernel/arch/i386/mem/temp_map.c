@@ -8,6 +8,7 @@ extern uint32_t kernel_pd_phys;
 extern uint32_t kernel_pdpt_phys;
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
+extern int pae_ensure_phys_mapped(uint32_t phys_addr);
 
 #define TEMP_MAP_BASE 0xF7000000u
 #define TEMP_MAP_PAGES 8u
@@ -74,6 +75,10 @@ void pae_init_temp_mapping(void) {
         if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
             printf("pae_init_temp_mapping: failed to alloc page table\n");
+            return;
+        }
+        if (pae_ensure_phys_mapped((uint32_t)pt_page) < 0) {
+            printf("pae_init_temp_mapping: failed to map page table\n");
             return;
         }
         pt_slot = pae_vmm_pt_count++;

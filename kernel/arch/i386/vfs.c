@@ -954,6 +954,7 @@ int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root) {
     for (i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             mounts[i].root = new_root;
+            new_root->parent = vfs_root;
             return 0;
         }
     }

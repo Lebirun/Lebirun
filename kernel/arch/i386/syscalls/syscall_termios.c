@@ -274,21 +274,30 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint32_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
             memcpy(&tty_winsize[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_winsize));
+            {
+                int pgrp = tty_pgrp[tty_id];
+                if (pgrp > 0) {
+                    pid_t pids[64];
+                    int npids;
+                    int si;
+
+                    npids = collect_pids_in_pgrp((pid_t)pgrp, pids, 64);
+                    for (si = 0; si < npids; si++) {
+                        task_t *t = task_find(pids[si]);
+                        if (t) deliver_signal_to_task(t, 28);
+                    }
+                }
+            }
             return 0;
             
         case TIOCGPGRP:
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint32_t)arg, sizeof(int))) return -EFAULT;
             {
-                pid_t my_pgrp = creds_get_pgid(0);
-                if (my_pgrp == 0 && current_task) my_pgrp = current_task->pgid;
-                if (my_pgrp == 0 && current_task) my_pgrp = current_task->pid;
-                if (my_pgrp == 0) my_pgrp = 1;
-
                 int pgrp = tty_pgrp[tty_id];
-                if (pgrp == 0 || pgrp != (int)my_pgrp) {
-                    pgrp = (int)my_pgrp;
-                    tty_pgrp[tty_id] = pgrp;
+                if (pgrp == 0 && current_task) {
+                    pgrp = current_task->pgid ? current_task->pgid : current_task->pid;
+                    if (pgrp == 0) pgrp = 1;
                 }
 
                 *(int*)(uintptr_t)arg = pgrp;
@@ -349,21 +358,21 @@ static int sys_tcdrain(int fd, const char *unused1, int unused2) {
 }
 
 static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
+    int tty_id;
+    int pgrp;
+
     (void)unused1; (void)unused2;
     
-    int tty_id = get_tty_id_for_fd(fd);
+    tty_id = get_tty_id_for_fd(fd);
     if (tty_id < 0) return -ENOTTY;
 
-    pid_t my_pgrp = creds_get_pgid(0);
-    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pgid;
-    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pid;
-    if (my_pgrp == 0) my_pgrp = 1;
-
-    if (tty_pgrp[tty_id] == 0 || tty_pgrp[tty_id] != (int)my_pgrp) {
-        tty_pgrp[tty_id] = (int)my_pgrp;
+    pgrp = tty_pgrp[tty_id];
+    if (pgrp == 0 && current_task) {
+        pgrp = current_task->pgid ? current_task->pgid : current_task->pid;
+        if (pgrp == 0) pgrp = 1;
     }
 
-    return tty_pgrp[tty_id];
+    return pgrp;
 }
 
 static int sys_tcsetpgrp(int fd, const char *pgrp_ptr, int unused) {

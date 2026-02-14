@@ -21,8 +21,8 @@ static volatile uint32_t print_queue_head = 0;
 static volatile uint32_t print_queue_tail = 0;
 static volatile uint32_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 16
-#define KLOG_MAX_LEN   96
+#define KLOG_MAX_ITEMS 8
+#define KLOG_MAX_LEN   64
 
 typedef struct {
     uint16_t len;
@@ -36,8 +36,8 @@ static volatile uint32_t klog_tail = 0;
 static volatile uint32_t klog_count = 0;
 static volatile uint32_t klog_dropped = 0;
 
-#define KPRINT_MAX_ITEMS 32
-#define KPRINT_MAX_LEN   128
+#define KPRINT_MAX_ITEMS 16
+#define KPRINT_MAX_LEN   96
 
 typedef struct {
     uint16_t len;
@@ -56,7 +56,7 @@ static volatile int kprint_ready = 0;
 
 static wait_queue_t kprint_waitq;
 
-#define SERIAL_RING_SIZE 1024
+#define SERIAL_RING_SIZE 512
 static char *serial_ring;
 static volatile uint32_t serial_head = 0;
 static volatile uint32_t serial_tail = 0;

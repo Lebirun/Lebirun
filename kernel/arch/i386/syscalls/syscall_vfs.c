@@ -20,16 +20,75 @@ static int task_fd_alloc_from(int start) {
 }
 
 static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
+    uint32_t path_addr;
+    int flags;
+    const char *path;
+    vfs_node_t *node;
+    int fd;
+    char parent_path[256];
+    char filename[64];
+    int len;
+    int last_slash;
+    int i;
+    int j;
+    int ret;
+    vfs_node_t *parent;
+
     (void)unused;
-    uint32_t path_addr = (uint32_t)path_ptr;
+    path_addr = (uint32_t)path_ptr;
     if (path_addr >= 0xC0000000 || path_addr < 0x1000) return -EFAULT;
-    int flags = (int)(uintptr_t)flags_ptr;
+    flags = (int)(uintptr_t)flags_ptr;
     if (!current_task) return -ESRCH;
 
-    vfs_node_t *node = vfs_namei((const char *)path_addr);
+    path = (const char *)path_addr;
+    node = vfs_namei(path);
+
+    if (!node && (flags & VFS_O_CREAT)) {
+        len = 0;
+        while (path[len]) len++;
+
+        last_slash = -1;
+        for (i = 0; i < len; i++) {
+            if (path[i] == '/') last_slash = i;
+        }
+
+        if (last_slash < 0) {
+            parent_path[0] = '/';
+            parent_path[1] = '\0';
+            for (i = 0; i < len && i < 63; i++) filename[i] = path[i];
+            filename[len < 63 ? len : 63] = '\0';
+        } else if (last_slash == 0) {
+            parent_path[0] = '/';
+            parent_path[1] = '\0';
+            j = 0;
+            for (i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+            filename[j] = '\0';
+        } else {
+            for (i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+            parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+            j = 0;
+            for (i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+            filename[j] = '\0';
+        }
+
+        parent = vfs_namei(parent_path);
+        if (!parent) return -ENOENT;
+
+        ret = vfs_create(parent, filename, VFS_FILE);
+        if (ret < 0 && !(flags & VFS_O_EXCL)) {
+            node = vfs_namei(path);
+        } else if (ret == 0) {
+            node = vfs_namei(path);
+        }
+    }
+
     if (!node) return -ENOENT;
 
-    int fd = task_fd_alloc_from(0);
+    if ((flags & VFS_O_TRUNC) && node->truncate) {
+        node->truncate(node, 0);
+    }
+
+    fd = task_fd_alloc_from(0);
     if (fd < 0) return fd;
 
     vfs_open(node, flags);

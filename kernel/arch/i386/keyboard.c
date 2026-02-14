@@ -6,7 +6,7 @@
 #include <kernel/console.h>
 #include <kernel/task.h>
 
-#define BUFFER_SIZE 64
+#define BUFFER_SIZE 128
 static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];
 static volatile unsigned int head[NUM_CONSOLES];
 static volatile unsigned int tail[NUM_CONSOLES];
@@ -57,7 +57,7 @@ static bool e0_prefix = false;
 
 static const char qwerty_lowercase[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
-    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,   'a', 's',
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r', 0,   'a', 's',
     'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'','`', 0,  '\\', 'z', 'x', 'c', 'v',
     'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   '-', 0,   0,   0,   '+', 0,
@@ -68,7 +68,7 @@ static const char qwerty_lowercase[128] = {
 
 static const char qwerty_uppercase[128] = {
     0,   27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
-    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,   'A', 'S',
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r', 0,   'A', 'S',
     'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z', 'X', 'C', 'V',
     'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,   0,
     0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   '-', 0,   0,   0,   '+', 0,
@@ -108,6 +108,13 @@ static void buffer_put(char c) {
     if (next == tail[cur]) return;
     key_buffers[cur][head[cur]] = c;
     head[cur] = next;
+}
+
+static void buffer_put_seq(const char *seq, int len) {
+    int i;
+    for (i = 0; i < len; i++) {
+        buffer_put(seq[i]);
+    }
 }
 
 int keyboard_has_data(void) {
@@ -152,15 +159,36 @@ void keyboard_handler(registers_t* regs) {
     (void)regs;
 
     uint8_t scancode = inb(0x60);
+    int was_e0;
 
     if (scancode == 0xE0) {
         e0_prefix = true;
         return;
     }
 
+    was_e0 = e0_prefix;
+    e0_prefix = false;
+
     bool is_release = (scancode & 0x80) != 0;
     uint8_t code = scancode & 0x7F;
-    e0_prefix = false;
+
+    if (was_e0) {
+        if (is_release) {
+            if (code == SCANCODE_CTRL) ctrl_pressed = false;
+            else if (code == SCANCODE_ALT) alt_pressed = false;
+            return;
+        }
+        if (code == SCANCODE_CTRL) { ctrl_pressed = true; return; }
+        if (code == SCANCODE_ALT) { alt_pressed = true; return; }
+        if (code == 0x48) { buffer_put_seq("\033[A", 3); goto wake; }
+        if (code == 0x50) { buffer_put_seq("\033[B", 3); goto wake; }
+        if (code == 0x4D) { buffer_put_seq("\033[C", 3); goto wake; }
+        if (code == 0x4B) { buffer_put_seq("\033[D", 3); goto wake; }
+        if (code == 0x47) { buffer_put_seq("\033[H", 3); goto wake; }
+        if (code == 0x4F) { buffer_put_seq("\033[F", 3); goto wake; }
+        if (code == 0x53) { buffer_put_seq("\033[3~", 4); goto wake; }
+        return;
+    }
 
     if (is_release) {
         if (code == SCANCODE_LSHIFT) left_shift_pressed = false;
@@ -195,9 +223,15 @@ void keyboard_handler(registers_t* regs) {
 
     if (ctrl_pressed && code == SCANCODE_C) {
         buffer_put(0x03);
-        int cur = console_is_initialized() ? console_get_current() : 0;
-        waitq_wake_all(&keyboard_waiters[cur]);
-        return;
+        goto wake;
+    }
+
+    if (ctrl_pressed) {
+        char cc = qwerty_lowercase[code];
+        if (cc >= 'a' && cc <= 'z') {
+            buffer_put((char)(cc - 'a' + 1));
+            goto wake;
+        }
     }
 
     bool shift = shift_is_down();
@@ -208,6 +242,12 @@ void keyboard_handler(registers_t* regs) {
     c = apply_caps_shift(c, shift);
     if (c != 0) {
         buffer_put(c);
+        goto wake;
+    }
+    return;
+
+wake:
+    {
         int cur = console_is_initialized() ? console_get_current() : 0;
         waitq_wake_all(&keyboard_waiters[cur]);
     }

@@ -50,7 +50,7 @@
 #define SHUT_WR   1
 #define SHUT_RDWR 2
 
-#define MAX_SOCKETS 8
+#define MAX_SOCKETS 4
 #define SOCKET_BUF_SIZE 512
 #define MAX_BACKLOG 2
 

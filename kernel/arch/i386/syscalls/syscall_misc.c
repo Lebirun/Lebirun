@@ -627,9 +627,9 @@ static int sys_unsetenv(const char *name) {
     int idx = find_env(name);
     if (idx < 0) return 0;
     
-    if (idx >= 32) return 0;
-    for (int i = idx; i < env_count - 1 && i < 32; i++) {
-        for (int j = 0; j < 64; j++) env_names[i][j] = env_names[i+1][j];
+    if (idx >= MAX_ENV_VARS) return 0;
+    for (int i = idx; i < env_count - 1 && i < MAX_ENV_VARS - 1; i++) {
+        for (int j = 0; j < 32; j++) env_names[i][j] = env_names[i+1][j];
         for (int j = 0; j < MAX_ENV_SIZE; j++) env_values[i][j] = env_values[i+1][j];
     }
     env_count--;
@@ -648,6 +648,41 @@ char **get_environ(void) {
     }
     environ_ptrs[env_count] = NULL;
     return environ_ptrs;
+}
+
+static int sys_inotify_init(int flags) {
+    (void)flags;
+    return -ENOSYS;
+}
+
+static int sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
+    (void)fd; (void)pathname; (void)mask;
+    return -ENOSYS;
+}
+
+static int sys_inotify_rm_watch(int fd, int wd) {
+    (void)fd; (void)wd;
+    return -ENOSYS;
+}
+
+static int sys_posix_openpt(int flags) {
+    (void)flags;
+    return -ENOSYS;
+}
+
+static int sys_grantpt(int fd) {
+    (void)fd;
+    return 0;
+}
+
+static int sys_unlockpt(int fd) {
+    (void)fd;
+    return 0;
+}
+
+static int sys_ptsname(int fd, char *buf, int buflen) {
+    (void)fd; (void)buf; (void)buflen;
+    return -ENOSYS;
 }
 
 void syscalls_misc_init(void) {
@@ -686,4 +721,12 @@ void syscalls_misc_init(void) {
     syscall_table[SYSCALL_GETENV] = sys_getenv;
     syscall_table[SYSCALL_UNSETENV] = sys_unsetenv;
     syscall_table[SYSCALL_CLEARENV] = sys_clearenv;
+    syscall_table[SYSCALL_INOTIFY_INIT] = sys_inotify_init;
+    syscall_table[SYSCALL_INOTIFY_INIT1] = sys_inotify_init;
+    syscall_table[SYSCALL_INOTIFY_ADD_WATCH] = sys_inotify_add_watch;
+    syscall_table[SYSCALL_INOTIFY_RM_WATCH] = sys_inotify_rm_watch;
+    syscall_table[SYSCALL_POSIX_OPENPT] = sys_posix_openpt;
+    syscall_table[SYSCALL_GRANTPT] = sys_grantpt;
+    syscall_table[SYSCALL_UNLOCKPT] = sys_unlockpt;
+    syscall_table[SYSCALL_PTSNAME] = sys_ptsname;
 }

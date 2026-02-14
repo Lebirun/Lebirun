@@ -69,7 +69,7 @@ static inline uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8
     return inl(PCI_CONFIG_DATA);
 }
 
-static int pci_find_vga_is_bga(void) {
+static __attribute__((unused)) int pci_find_vga_is_bga(void) {
     uint8_t bus;
     uint8_t slot;
     uint8_t func;

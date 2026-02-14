@@ -3,6 +3,7 @@
 #include <kernel/common.h>
 #include <kernel/vfs.h>
 #include <kernel/ramfs.h>
+#include <kernel/squashfs.h>
 #include <kernel/debug.h>
 #include <string.h>
 #include <stdio.h>
@@ -1010,9 +1011,11 @@ void initrd_free_pages(void) {
     }
 
     if (initrd_mod1_phys_start && initrd_mod1_phys_end) {
-        initrd_free_region(initrd_mod1_phys_start, initrd_mod1_phys_end);
-        initrd_mod1_phys_start = 0;
-        initrd_mod1_phys_end = 0;
+        if (!squashfs_get_context()) {
+            initrd_free_region(initrd_mod1_phys_start, initrd_mod1_phys_end);
+            initrd_mod1_phys_start = 0;
+            initrd_mod1_phys_end = 0;
+        }
     }
 
     if (files) {

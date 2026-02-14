@@ -365,7 +365,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint32_t fla
     vfs_get_path(parent, parent_path, sizeof(parent_path));
     snprintf(path, sizeof(path), "%s/%s", parent_path, name);
     
-    ret = ramfs_create_file(path, flags);
+    ret = ramfs_create_file(path, VFS_PERM_READ | VFS_PERM_WRITE);
     return ret;
 }
 
@@ -463,7 +463,7 @@ overlay_context_t *overlayfs_create(vfs_node_t *lower_root, vfs_node_t *upper_ro
     overlay_ctx.upper.root = upper_root;
     overlay_ctx.upper.writable = 1;
     
-    overlay_ctx.merged_root = overlay_wrap_node(lower_root, upper_root, "/");
+    overlay_ctx.merged_root = overlay_wrap_node(lower_root, upper_root, "");
     if (!overlay_ctx.merged_root) {
         printf("OVERLAYFS: Failed to create merged root\n");
         return NULL;

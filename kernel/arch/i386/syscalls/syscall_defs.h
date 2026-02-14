@@ -390,6 +390,7 @@ void syscall_clear_exec_completed(void);
 
 #define SYSCALL_STATFS 262
 #define SYSCALL_FSTATFS 263
+#define SYSCALL_NET_HTTP_POST 264
 
 #define NR_SYSCALLS 270
 

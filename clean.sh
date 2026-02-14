@@ -21,8 +21,31 @@ if [ -d "userprog/lsh" ]; then
   find userprog/lsh -type f -name '*.o' -delete
 fi
 
+if [ -d "userprog/ncurses-6.6" ]; then
+  echo "Cleaning ncurses..."
+  (cd userprog/ncurses-6.6 && $MAKE clean 2>/dev/null || true)
+  rm -rf userprog/ncurses-6.6/config.cache
+fi
+
+if [ -d "userprog/ncurses-6.6" ]; then
+  echo "Cleaning ncurses..."
+  (cd userprog/ncurses-6.6 && $MAKE clean) || true
+  find userprog/ncurses-6.6 -type f -name '*.o' -delete
+fi
+
+if [ -d "userprog/nano-8.7.1" ]; then
+  echo "Cleaning nano..."
+  if [ -f "userprog/nano-8.7.1/Makefile" ]; then
+    (cd userprog/nano-8.7.1 && $MAKE clean || true)
+    (cd userprog/nano-8.7.1 && $MAKE distclean || true)
+  fi
+  rm -f userprog/nano-8.7.1/config.cache
+  find userprog/nano-8.7.1 -type f -name '*.o' -delete
+fi
+
 rm -f root/bin/lsh
 rm -f root/bin/sh
+rm -f root/bin/nano
 rm -f root/bin/lebcu
 rm -f root/bin/echo
 rm -f root/bin/pwd
@@ -38,6 +61,7 @@ rm -f root/bin/df
 rm -f root/bin/free
 rm -f root/bin/uname
 rm -f root/bin/date
+rm -f root/bin/lneturl
 rm -f userprog/coreutils/*.bin
 find userprog/coreutils -type f -name '*.o' -delete
 rm -f userprog/lsh/lsh

@@ -264,6 +264,7 @@
 #define LEB_SYSCALL_SCANF_GETCHAR 256u
 #define LEB_SYSCALL_REGSUB 257u
 #define LEB_SYSCALL_REGEXEC_EX 258u
+#define LEB_SYSCALL_NET_HTTP_POST 264u
 #define LEB_NR_SYSCALLS 270u
 
 static inline long leb_syscall0(unsigned int n) {
@@ -323,7 +324,8 @@ int console_setcursor(int x, int y);
 int fb_setcolors(unsigned int fg, unsigned int bg);
 int fb_putpixel(unsigned int x, unsigned int y, unsigned int color);
 int fb_getinfo(unsigned int *width, unsigned int *height, unsigned int *bpp,
-	unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row);
+	unsigned int *font_height, unsigned int *rows, unsigned int *cursor_row,
+	unsigned int *font_width, unsigned int *cols);
 int fb_clear(void);
 
 #endif

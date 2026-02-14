@@ -38,13 +38,40 @@ static int sys_fb_clear(int unused1, const char *unused2, int unused3) {
 }
 
 static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) {
-    uint32_t height = (uint32_t)(uintptr_t)height_ptr;
-    
+    uint32_t height;
+    int result;
+    framebuffer_t *fb;
+    int ci;
+
+    height = (uint32_t)(uintptr_t)height_ptr;
+
     if (width <= 0 || height <= 0) {
         return -EINVAL;
     }
-    
-    int result = fb_set_mode((uint32_t)width, height, (uint32_t)refresh_rate);
+
+    result = fb_set_mode((uint32_t)width, height, (uint32_t)refresh_rate);
+    if (result == 0) {
+        fb = fb_get();
+        for (ci = 0; ci < NUM_CONSOLES; ci++) {
+            if (fb) {
+                tty_winsize[ci].ws_col = fb->cols;
+                tty_winsize[ci].ws_row = fb->rows;
+                tty_winsize[ci].ws_xpixel = fb->width;
+                tty_winsize[ci].ws_ypixel = fb->height;
+            }
+            if (tty_pgrp[ci] > 0) {
+                pid_t pids[64];
+                int npids;
+                int si;
+
+                npids = collect_pids_in_pgrp(tty_pgrp[ci], pids, 64);
+                for (si = 0; si < npids; si++) {
+                    task_t *t = task_find(pids[si]);
+                    if (t) deliver_signal_to_task(t, 28);
+                }
+            }
+        }
+    }
     return result;
 }
 

@@ -6,6 +6,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/tty.h>
 #include <kernel/pit.h>
+#include <kernel/task.h>
 #include <string.h>
 
 static udp_socket_t *udp_sockets = NULL;
@@ -166,7 +167,7 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint32_t len, ipv4_addr
         if (pit_get_ticks() - start > timeout_ticks) {
             return -1;
         }
-        __asm__ volatile("hlt");
+        schedule();
     }
 
     uint32_t copy_len = sock->recv_len < len ? sock->recv_len : len;

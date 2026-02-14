@@ -4,6 +4,7 @@
 #include <kernel/mem_map.h>
 #include <kernel/tty.h>
 #include <kernel/pit.h>
+#include <kernel/task.h>
 #include <string.h>
 
 static arp_entry_t arp_cache[ARP_CACHE_SIZE];
@@ -55,8 +56,7 @@ int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
     uint32_t timeout_ticks = pit_ms_to_ticks(3000);
     uint32_t start = pit_get_ticks();
     while (pit_get_ticks() - start < timeout_ticks) {
-        __asm__ volatile("sti"); 
-        __asm__ volatile("hlt");
+        __asm__ volatile("sti");
         netif_poll_all();
 
         for (int i = 0; i < ARP_CACHE_SIZE; i++) {
@@ -65,6 +65,7 @@ int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
                 return 0;
             }
         }
+        schedule();
     }
 
     return -1;

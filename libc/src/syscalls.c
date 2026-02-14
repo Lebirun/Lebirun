@@ -1089,7 +1089,28 @@ int cfsetospeed(void *termios_p, int speed) {
 }
 
 void cfmakeraw(void *termios_p) {
+    struct leb_termios {
+        unsigned int c_iflag;
+        unsigned int c_oflag;
+        unsigned int c_cflag;
+        unsigned int c_lflag;
+        unsigned char c_line;
+        unsigned char c_cc[32];
+        unsigned int c_ispeed;
+        unsigned int c_ospeed;
+    };
+    struct leb_termios *t;
+
     if (!termios_p) return;
+    t = (struct leb_termios *)termios_p;
+    t->c_iflag &= ~(0000002u | 0000020u | 0000040u | 0000100u |
+                     0000200u | 0000400u | 0002000u | 0000010u);
+    t->c_oflag &= ~0000001u;
+    t->c_lflag &= ~(0000010u | 0000100u | 0000002u | 0000001u | 0100000u);
+    t->c_cflag &= ~(0000060u | 0000400u);
+    t->c_cflag |= 0000060u;
+    t->c_cc[6] = 1;
+    t->c_cc[5] = 0;
 }
 
 #define SYS_PTHREAD_CREATE (223 | LEBIRUN_SYSCALL_FLAG)
@@ -1434,5 +1455,8 @@ int fscanf(FILE *__restrict stream, const char *__restrict format, ...) {
     return ret;
 }
 
-struct passwd { char *pw_name; char *pw_passwd; unsigned pw_uid; unsigned pw_gid; char *pw_gecos; char *pw_dir; char *pw_shell; };
-struct passwd *getpwnam(const char *name) { (void)name; return (struct passwd *)0; }
+int getgroups_leb(int size, unsigned *list) {
+    if (size == 0) return 0;
+    if (size >= 1 && list) { list[0] = 0; return 1; }
+    return -1;
+}

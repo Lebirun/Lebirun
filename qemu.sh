@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
-. ./iso.sh
+. ./config.sh
+
+if [ "${1:-}" != "--no-build" ]; then
+    ./iso.sh
+fi
 
 if [ -t 0 ]; then
     _OLD_STTY="$(stty -g 2>/dev/null || true)"
@@ -14,10 +18,10 @@ if [ -t 0 ]; then
     trap cleanup_tty EXIT INT TERM HUP
 fi
 
-qemu-system-$(./target-triplet-to-arch.sh $HOST) \
+qemu-system-$(./target-triplet-to-arch.sh "$HOST") \
     -m 4G \
     -smp 4 \
-    -vga cirrus \
+    -vga qxl \
     -cdrom lebirun.iso \
     -s -S \
     -serial stdio \

@@ -47,5 +47,12 @@ build_squashfs() {
 }
 
 chmod +x mkinitrd.sh
+
+if [ -f terminfo/linux.ti ] && command -v tic >/dev/null 2>&1; then
+  echo "Compiling terminfo database..."
+  mkdir -p root/usr/share/terminfo
+  TERMINFO=root/usr/share/terminfo tic -o root/usr/share/terminfo terminfo/linux.ti 2>/dev/null || true
+fi
+
 [ -d "initrd" ] && rebuild_initrd initrd initrd.img
 [ -d "root" ] && build_squashfs root rootfs.squashfs

@@ -4,10 +4,25 @@
 
 extern mutex_t print_lock;
 
-#define LINE_BUF_SIZE 128
+#define LINE_BUF_SIZE 256
 static char line_buffers[NUM_CONSOLES][LINE_BUF_SIZE];
-static int line_pos[NUM_CONSOLES];
+static int line_len[NUM_CONSOLES];
+static int line_cursor[NUM_CONSOLES];
 static int line_ready[NUM_CONSOLES];
+
+#define HISTORY_COUNT 16
+#define HISTORY_LINE_SIZE 128
+static char history[NUM_CONSOLES][HISTORY_COUNT][HISTORY_LINE_SIZE];
+static int history_len[NUM_CONSOLES][HISTORY_COUNT];
+static int history_head[NUM_CONSOLES];
+static int history_count[NUM_CONSOLES];
+static int history_browse[NUM_CONSOLES];
+static char history_saved[NUM_CONSOLES][HISTORY_LINE_SIZE];
+static int history_saved_len[NUM_CONSOLES];
+
+static int esc_state[NUM_CONSOLES];
+static char esc_buf[NUM_CONSOLES][8];
+static int esc_len[NUM_CONSOLES];
 
 static void tty_echo_char(int con_id, char c) {
     framebuffer_t *fb = fb_get();
@@ -16,6 +31,65 @@ static void tty_echo_char(int con_id, char c) {
     } else {
         terminal_putchar(c);
     }
+}
+
+static void tty_echo_str(int con_id, const char *s, int len) {
+    framebuffer_t *fb = fb_get();
+    if (fb && fb->font && console_is_initialized()) {
+        console_write_to(con_id, s, (size_t)len);
+    } else {
+        int i;
+        for (i = 0; i < len; i++) terminal_putchar(s[i]);
+    }
+}
+
+static void line_redraw_from_cursor(int con_id, int echo) {
+    int i;
+    int trailing;
+    if (!echo) return;
+    for (i = line_cursor[con_id]; i < line_len[con_id]; i++) {
+        tty_echo_char(con_id, line_buffers[con_id][i]);
+    }
+    trailing = line_len[con_id] - line_cursor[con_id];
+    tty_echo_char(con_id, ' ');
+    for (i = 0; i <= trailing; i++) {
+        tty_echo_str(con_id, "\033[D", 3);
+    }
+}
+
+static void history_add(int con_id, const char *line, int len) {
+    int slot;
+    int copy_len;
+    if (len <= 0) return;
+    if (len == 1 && line[0] == '\n') return;
+    copy_len = len;
+    if (copy_len > 0 && line[copy_len - 1] == '\n') copy_len--;
+    if (copy_len <= 0) return;
+    if (copy_len >= HISTORY_LINE_SIZE) copy_len = HISTORY_LINE_SIZE - 1;
+    slot = history_head[con_id];
+    memcpy(history[con_id][slot], line, copy_len);
+    history[con_id][slot][copy_len] = '\0';
+    history_len[con_id][slot] = copy_len;
+    history_head[con_id] = (slot + 1) % HISTORY_COUNT;
+    if (history_count[con_id] < HISTORY_COUNT) history_count[con_id]++;
+}
+
+static void history_replace_line(int con_id, const char *new_line, int new_len, int echo) {
+    int i;
+    for (i = line_cursor[con_id]; i > 0; i--) {
+        if (echo) tty_echo_str(con_id, "\033[D", 3);
+    }
+    for (i = 0; i < line_len[con_id]; i++) {
+        if (echo) tty_echo_char(con_id, ' ');
+    }
+    for (i = 0; i < line_len[con_id]; i++) {
+        if (echo) tty_echo_str(con_id, "\033[D", 3);
+    }
+    if (new_len >= LINE_BUF_SIZE) new_len = LINE_BUF_SIZE - 2;
+    memcpy(line_buffers[con_id], new_line, new_len);
+    line_len[con_id] = new_len;
+    line_cursor[con_id] = new_len;
+    if (echo) tty_echo_str(con_id, new_line, new_len);
 }
 
 static pid_t tty_get_my_pgrp(void) {
@@ -156,11 +230,7 @@ static int sys_read(int fd, char *buf, int len) {
         if (fg_pgrp != 0) {
             pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
-                if (current_task) {
-                    current_task->state = TASK_BLOCKED;
-                    schedule();
-                }
-                return -EINTR;
+                tty_pgrp[con_id] = (int)my_pgrp;
             }
         }
         
@@ -170,22 +240,30 @@ static int sys_read(int fd, char *buf, int len) {
         
         if (canonical) {
             if (line_ready[con_id]) {
-                int to_copy = line_pos[con_id];
+                int to_copy = line_len[con_id];
                 if (to_copy > len) to_copy = len;
                 memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
                 
-                if (to_copy < line_pos[con_id]) {
+                if (to_copy < line_len[con_id]) {
                     memmove(line_buffers[con_id], line_buffers[con_id] + to_copy, 
-                            line_pos[con_id] - to_copy);
-                    line_pos[con_id] -= to_copy;
+                            line_len[con_id] - to_copy);
+                    line_len[con_id] -= to_copy;
                 } else {
-                    line_pos[con_id] = 0;
+                    line_len[con_id] = 0;
+                    line_cursor[con_id] = 0;
                     line_ready[con_id] = 0;
                 }
                 return to_copy;
             }
             
+            history_browse[con_id] = -1;
+            
             while (!line_ready[con_id]) {
+                int key;
+                char c;
+                int idx;
+                int i;
+                
                 while (!keyboard_has_data_for(con_id)) {
                     wait_queue_t *wq = keyboard_get_waitq_for(con_id);
                     if (!wq) return -1;
@@ -197,30 +275,135 @@ static int sys_read(int fd, char *buf, int len) {
                     block_current();
                 }
                 
-                int key = keyboard_getchar_nb_for(con_id);
+                key = keyboard_getchar_nb_for(con_id);
                 if (key < 0) continue;
                 
-                char c = (char)key;
+                c = (char)key;
+                
+                if (esc_state[con_id] == 1) {
+                    if (c == '[') {
+                        esc_state[con_id] = 2;
+                        esc_len[con_id] = 0;
+                    } else {
+                        esc_state[con_id] = 0;
+                    }
+                    continue;
+                }
+                
+                if (esc_state[con_id] == 2) {
+                    if (c >= '0' && c <= '9') {
+                        if (esc_len[con_id] < 6) {
+                            esc_buf[con_id][esc_len[con_id]++] = c;
+                        }
+                        continue;
+                    }
+                    esc_state[con_id] = 0;
+                    
+                    if (c == 'A') {
+                        if (history_count[con_id] == 0) continue;
+                        if (history_browse[con_id] < 0) {
+                            history_browse[con_id] = 0;
+                            memcpy(history_saved[con_id], line_buffers[con_id], line_len[con_id]);
+                            history_saved_len[con_id] = line_len[con_id];
+                        } else if (history_browse[con_id] < history_count[con_id] - 1) {
+                            history_browse[con_id]++;
+                        } else {
+                            continue;
+                        }
+                        idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
+                        history_replace_line(con_id, history[con_id][idx], history_len[con_id][idx], echo);
+                        continue;
+                    }
+                    
+                    if (c == 'B') {
+                        if (history_browse[con_id] < 0) continue;
+                        history_browse[con_id]--;
+                        if (history_browse[con_id] < 0) {
+                            history_replace_line(con_id, history_saved[con_id], history_saved_len[con_id], echo);
+                        } else {
+                            idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
+                            history_replace_line(con_id, history[con_id][idx], history_len[con_id][idx], echo);
+                        }
+                        continue;
+                    }
+                    
+                    if (c == 'C') {
+                        if (line_cursor[con_id] < line_len[con_id]) {
+                            line_cursor[con_id]++;
+                            if (echo) tty_echo_str(con_id, "\033[C", 3);
+                        }
+                        continue;
+                    }
+                    
+                    if (c == 'D') {
+                        if (line_cursor[con_id] > 0) {
+                            line_cursor[con_id]--;
+                            if (echo) tty_echo_str(con_id, "\033[D", 3);
+                        }
+                        continue;
+                    }
+                    
+                    if (c == 'H') {
+                        while (line_cursor[con_id] > 0) {
+                            line_cursor[con_id]--;
+                            if (echo) tty_echo_str(con_id, "\033[D", 3);
+                        }
+                        continue;
+                    }
+                    
+                    if (c == 'F') {
+                        while (line_cursor[con_id] < line_len[con_id]) {
+                            line_cursor[con_id]++;
+                            if (echo) tty_echo_str(con_id, "\033[C", 3);
+                        }
+                        continue;
+                    }
+                    
+                    if (c == '~' && esc_len[con_id] == 1 && esc_buf[con_id][0] == '3') {
+                        if (line_cursor[con_id] < line_len[con_id]) {
+                            memmove(&line_buffers[con_id][line_cursor[con_id]],
+                                    &line_buffers[con_id][line_cursor[con_id] + 1],
+                                    line_len[con_id] - line_cursor[con_id] - 1);
+                            line_len[con_id]--;
+                            line_redraw_from_cursor(con_id, echo);
+                        }
+                        continue;
+                    }
+                    
+                    continue;
+                }
+                
+                if (c == '\033') {
+                    esc_state[con_id] = 1;
+                    esc_len[con_id] = 0;
+                    continue;
+                }
                 
                 if (c == '\b' || c == 127) {
-                    if (line_pos[con_id] > 0) {
-                        line_pos[con_id]--;
+                    if (line_cursor[con_id] > 0) {
+                        memmove(&line_buffers[con_id][line_cursor[con_id] - 1],
+                                &line_buffers[con_id][line_cursor[con_id]],
+                                line_len[con_id] - line_cursor[con_id]);
+                        line_cursor[con_id]--;
+                        line_len[con_id]--;
                         if (echo) {
-                            tty_echo_char(con_id, '\b');
-                            tty_echo_char(con_id, ' ');
-                            tty_echo_char(con_id, '\b');
+                            tty_echo_str(con_id, "\033[D", 3);
+                            line_redraw_from_cursor(con_id, echo);
                         }
                     }
                 } else if (c == '\n' || c == '\r') {
-                    if (line_pos[con_id] < LINE_BUF_SIZE) {
-                        line_buffers[con_id][line_pos[con_id]++] = '\n';
+                    history_add(con_id, line_buffers[con_id], line_len[con_id]);
+                    if (line_len[con_id] < LINE_BUF_SIZE) {
+                        line_buffers[con_id][line_len[con_id]++] = '\n';
                     }
+                    line_cursor[con_id] = line_len[con_id];
                     line_ready[con_id] = 1;
                     if (echo) {
                         tty_echo_char(con_id, '\n');
                     }
                 } else if (c == 0x03) {
-                    line_pos[con_id] = 0;
+                    line_len[con_id] = 0;
+                    line_cursor[con_id] = 0;
                     line_ready[con_id] = 0;
                     if (echo) {
                         tty_echo_char(con_id, '^');
@@ -229,52 +412,101 @@ static int sys_read(int fd, char *buf, int len) {
                     }
                     return 0;
                 } else if (c == 4) {
-                    if (line_pos[con_id] == 0) {
+                    if (line_len[con_id] == 0) {
                         return 0;
                     }
                     line_ready[con_id] = 1;
+                } else if (c == 1) {
+                    while (line_cursor[con_id] > 0) {
+                        line_cursor[con_id]--;
+                        if (echo) tty_echo_str(con_id, "\033[D", 3);
+                    }
+                } else if (c == 5) {
+                    while (line_cursor[con_id] < line_len[con_id]) {
+                        line_cursor[con_id]++;
+                        if (echo) tty_echo_str(con_id, "\033[C", 3);
+                    }
+                } else if (c == 21) {
+                    for (i = line_cursor[con_id]; i > 0; i--) {
+                        if (echo) tty_echo_str(con_id, "\033[D", 3);
+                    }
+                    for (i = 0; i < line_len[con_id]; i++) {
+                        if (echo) tty_echo_char(con_id, ' ');
+                    }
+                    for (i = 0; i < line_len[con_id]; i++) {
+                        if (echo) tty_echo_str(con_id, "\033[D", 3);
+                    }
+                    line_len[con_id] = 0;
+                    line_cursor[con_id] = 0;
                 } else if (c >= 32 && c < 127) {
-                    if (line_pos[con_id] < LINE_BUF_SIZE - 1) {
-                        line_buffers[con_id][line_pos[con_id]++] = c;
+                    if (line_len[con_id] < LINE_BUF_SIZE - 2) {
+                        if (line_cursor[con_id] < line_len[con_id]) {
+                            memmove(&line_buffers[con_id][line_cursor[con_id] + 1],
+                                    &line_buffers[con_id][line_cursor[con_id]],
+                                    line_len[con_id] - line_cursor[con_id]);
+                        }
+                        line_buffers[con_id][line_cursor[con_id]] = c;
+                        line_len[con_id]++;
+                        line_cursor[con_id]++;
                         if (echo) {
-                            tty_echo_char(con_id, c);
+                            if (line_cursor[con_id] == line_len[con_id]) {
+                                tty_echo_char(con_id, c);
+                            } else {
+                                tty_echo_char(con_id, c);
+                                line_redraw_from_cursor(con_id, echo);
+                            }
                         }
                     }
                 }
             }
             
-            int to_copy = line_pos[con_id];
-            if (to_copy > len) to_copy = len;
-            memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
-            
-            if (to_copy < line_pos[con_id]) {
-                memmove(line_buffers[con_id], line_buffers[con_id] + to_copy, 
-                        line_pos[con_id] - to_copy);
-                line_pos[con_id] -= to_copy;
-            } else {
-                line_pos[con_id] = 0;
-                line_ready[con_id] = 0;
-            }
-            return to_copy;
-        } else {
-            while (!keyboard_has_data_for(con_id)) {
-                wait_queue_t *wq = keyboard_get_waitq_for(con_id);
-                if (!wq) return -1;
-                waitq_add(wq, current_task);
-                if (keyboard_has_data_for(con_id)) {
-                    waitq_remove(wq, current_task);
-                    break;
+            {
+                int to_copy = line_len[con_id];
+                if (to_copy > len) to_copy = len;
+                memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
+                
+                if (to_copy < line_len[con_id]) {
+                    memmove(line_buffers[con_id], line_buffers[con_id] + to_copy, 
+                            line_len[con_id] - to_copy);
+                    line_len[con_id] -= to_copy;
+                } else {
+                    line_len[con_id] = 0;
+                    line_cursor[con_id] = 0;
+                    line_ready[con_id] = 0;
                 }
-                block_current();
+                return to_copy;
             }
-
-            int key = keyboard_getchar_nb_for(con_id);
-            if (key >= 0) {
-                char c = (char)key;
-                memcpy((void*)buf_addr, &c, 1);
-                return 1;
+        } else {
+            int total = 0;
+            int vmin = t->c_cc[VMIN];
+            if (vmin <= 0) vmin = 1;
+            if (vmin > len) vmin = len;
+            while (total < vmin) {
+                while (!keyboard_has_data_for(con_id)) {
+                    wait_queue_t *wq = keyboard_get_waitq_for(con_id);
+                    if (!wq) return total > 0 ? total : -1;
+                    waitq_add(wq, current_task);
+                    if (keyboard_has_data_for(con_id)) {
+                        waitq_remove(wq, current_task);
+                        break;
+                    }
+                    block_current();
+                }
+                {
+                    int key = keyboard_getchar_nb_for(con_id);
+                    if (key < 0) break;
+                    {
+                        char c = (char)key;
+                        if (t->c_iflag & ISTRIP) c &= 0x7F;
+                        if ((t->c_iflag & IGNCR) && c == '\r') continue;
+                        if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
+                        else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
+                        ((char *)buf_addr)[total] = c;
+                        total++;
+                    }
+                }
             }
-            return 0;
+            return total;
         }
     }
     
@@ -289,6 +521,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
 
     if (current_task && fd >= 0 && fd < TASK_MAX_FDS && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
         int con_id = current_task ? current_task->console_id : console_get_current();
+        struct kernel_termios *t;
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
@@ -296,7 +529,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
         if (fg_pgrp != 0) {
             pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
-                return -EAGAIN;
+                tty_pgrp[con_id] = (int)my_pgrp;
             }
         }
         
@@ -304,11 +537,18 @@ static int sys_read_nb(int fd, char *buf, int len) {
             return 0;
         }
 
-        int key = keyboard_getchar_nb_for(con_id);
-        if (key >= 0) {
-            char c = (char)key;
-            memcpy((void*)buf_addr, &c, 1);
-            return 1;
+        t = &tty_termios[con_id];
+        {
+            int key = keyboard_getchar_nb_for(con_id);
+            if (key >= 0) {
+                char c = (char)key;
+                if (t->c_iflag & ISTRIP) c &= 0x7F;
+                if ((t->c_iflag & IGNCR) && c == '\r') return 0;
+                if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
+                else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
+                memcpy((void*)buf_addr, &c, 1);
+                return 1;
+            }
         }
         return 0;
     }
@@ -398,7 +638,14 @@ void syscalls_core_init(void) {
     syscall_table[SYSCALL_LSEEK] = sys_lseek;
     
     for (int i = 0; i < NUM_CONSOLES; i++) {
-        line_pos[i] = 0;
+        line_len[i] = 0;
+        line_cursor[i] = 0;
         line_ready[i] = 0;
+        history_head[i] = 0;
+        history_count[i] = 0;
+        history_browse[i] = -1;
+        history_saved_len[i] = 0;
+        esc_state[i] = 0;
+        esc_len[i] = 0;
     }
 }

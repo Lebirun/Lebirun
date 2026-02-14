@@ -77,11 +77,11 @@ typedef struct {
     int in_signal;
 } task_signals_t;
 
-static task_signals_t task_signals[32];
+static task_signals_t task_signals[256];
 
 static task_signals_t *get_task_signals(void) {
     if (!current_task) return NULL;
-    uint32_t idx = ((uint32_t)current_task->pid) & 31u;
+    uint32_t idx = ((uint32_t)current_task->pid) & 255u;
     return &task_signals[idx];
 }
 
@@ -180,17 +180,36 @@ static int sys_rt_sigsuspend(int mask_ptr, const char *sigsetsize_ptr, int unuse
 
 static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    
-    task_signals_t *sigs = get_task_signals();
+    task_signals_t *sigs;
+    registers_t *regs;
+    uint32_t frame_addr;
+    uint32_t *frame;
+
+    sigs = get_task_signals();
     if (sigs) {
         sigs->in_signal = 0;
     }
-    
-    if (current_task && current_task->syscall_frame) {
-        return 0;
-    }
-    
-    return 0;
+
+    regs = current_task ? current_task->syscall_frame : NULL;
+    if (!regs) return 0;
+
+    frame_addr = regs->useresp;
+    if (frame_addr < 0x1000 || frame_addr >= 0xC0000000) return 0;
+
+    frame = (uint32_t *)frame_addr;
+
+    regs->eax    = frame[0];
+    regs->ecx    = frame[1];
+    regs->edx    = frame[2];
+    regs->ebx    = frame[3];
+    regs->ebp    = frame[4];
+    regs->esi    = frame[5];
+    regs->edi    = frame[6];
+    regs->eip    = frame[7];
+    regs->eflags = frame[8];
+    regs->useresp = frame[9];
+
+    return (int)regs->eax;
 }
 
 static int sys_sigreturn(int unused1, const char *unused2, int unused3) {
@@ -207,7 +226,7 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, int info_ptr) {
     return 0;
 }
 
-static int deliver_signal_to_task(task_t *target, int sig) {
+int deliver_signal_to_task(task_t *target, int sig) {
     if (!target) return -ESRCH;
 
     if (sig == SIGKILL) {
@@ -237,7 +256,7 @@ static int deliver_signal_to_task(task_t *target, int sig) {
     return 0;
 }
 
-static int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
+int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
     if (!out || out_cap <= 0) return 0;
     if (pgid <= 0) return 0;
 
@@ -360,52 +379,94 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     return 0;
 }
 
-void signal_deliver_pending(void) {
-    if (!current_task) return;
-    
-    task_signals_t *sigs = get_task_signals();
+void signal_deliver_pending(registers_t *regs) {
+    task_signals_t *sigs;
+    int sig;
+    sigaction_k *act;
+    uint32_t sp;
+    uint32_t *frame;
+
+    if (!current_task || !regs) return;
+    if (!current_task->is_user) return;
+
+    sigs = get_task_signals();
     if (!sigs || sigs->in_signal) return;
-    
-    for (int sig = 1; sig < 32; sig++) {
-        if (sigs->pending.sig[0] & (1UL << (sig - 1))) {
-            if (sigs->blocked.sig[0] & (1UL << (sig - 1))) {
-                continue;
+
+    for (sig = 1; sig < 32; sig++) {
+        if (!(sigs->pending.sig[0] & (1UL << (sig - 1)))) continue;
+        if (sigs->blocked.sig[0] & (1UL << (sig - 1))) continue;
+
+        sigs->pending.sig[0] &= ~(1UL << (sig - 1));
+        act = &sigs->actions[sig];
+
+        if (act->sa_handler == SIG_IGN) continue;
+
+        if (act->sa_handler == SIG_DFL) {
+            switch (sig) {
+                case SIGCHLD:
+                case SIGURG:
+                case SIGWINCH:
+                    continue;
+                case SIGSTOP:
+                case SIGTSTP:
+                case SIGTTIN:
+                case SIGTTOU:
+                    current_task->state = TASK_BLOCKED;
+                    schedule();
+                    continue;
+                case SIGCONT:
+                    continue;
+                default:
+                    task_exit_deferred(128 + sig);
+                    schedule();
+                    for (;;) asm volatile ("hlt");
+                    return;
             }
-            
-            sigs->pending.sig[0] &= ~(1UL << (sig - 1));
-            
-            sigaction_k *act = &sigs->actions[sig];
-            
-            if (act->sa_handler == SIG_IGN) {
-                continue;
-            }
-            
-            if (act->sa_handler == SIG_DFL) {
-                switch (sig) {
-                    case SIGCHLD:
-                    case SIGURG:
-                    case SIGWINCH:
-                        continue;
-                    case SIGSTOP:
-                    case SIGTSTP:
-                    case SIGTTIN:
-                    case SIGTTOU:
-                        current_task->state = TASK_BLOCKED;
-                        schedule();
-                        continue;
-                    case SIGCONT:
-                        continue;
-                    default:
-                        task_exit_deferred(128 + sig);
-                        schedule();
-                        for (;;) asm volatile ("hlt");
-                        return;
-                }
-            }
-            
-            sigs->in_signal = 1;
-            break;
         }
+
+        sp = regs->useresp;
+        sp -= 10 * 4;
+        sp &= ~0xFu;
+
+        if (sp < 0x1000 || sp >= 0xC0000000) {
+            task_exit_deferred(128 + sig);
+            schedule();
+            for (;;) asm volatile ("hlt");
+            return;
+        }
+
+        frame = (uint32_t *)sp;
+        frame[0] = regs->eax;
+        frame[1] = regs->ecx;
+        frame[2] = regs->edx;
+        frame[3] = regs->ebx;
+        frame[4] = regs->ebp;
+        frame[5] = regs->esi;
+        frame[6] = regs->edi;
+        frame[7] = regs->eip;
+        frame[8] = regs->eflags;
+        frame[9] = regs->useresp;
+
+        sp -= 4;
+        *(uint32_t *)sp = (uint32_t)sig;
+
+        sp -= 4;
+        if (act->sa_restorer) {
+            *(uint32_t *)sp = (uint32_t)(uintptr_t)act->sa_restorer;
+        } else {
+            *(uint32_t *)sp = 0;
+        }
+
+        regs->eip = (uint32_t)(uintptr_t)act->sa_handler;
+        regs->useresp = sp;
+
+        sigs->in_signal = 1;
+
+        if (act->sa_flags & SA_RESETHAND) {
+            act->sa_handler = SIG_DFL;
+        }
+
+        return;
     }
 }
 

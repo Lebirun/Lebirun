@@ -5,6 +5,7 @@
 #include <kernel/tty.h>
 #include <kernel/pit.h>
 #include <kernel/keyboard.h>
+#include <kernel/task.h>
 #include <string.h>
 
 static ping_state_t g_ping_state;
@@ -139,7 +140,7 @@ int ping(ipv4_addr_t target, uint32_t count, uint32_t timeout_ms) {
                     return -1;
                 }
             }
-            __asm__ volatile("hlt");
+            schedule();
         }
 
         if (g_ping_state.received) {
@@ -208,7 +209,7 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint32_t timeout_ms) {
                 return -2;
             }
         }
-        __asm__ volatile("hlt");
+        schedule();
     }
 
     return (int)g_ping_state.rtt;

@@ -1,0 +1,27 @@
+libgnu_a-fseterr.o: fseterr.c ../config.h fseterr.h stdio.h \
+ /home/opuayt/leb/sysroot/usr/include/stdio.h \
+ /home/opuayt/leb/sysroot/usr/include/features.h \
+ /home/opuayt/leb/sysroot/usr/include/bits/alltypes.h \
+ /home/opuayt/leb/sysroot/usr/include/stdarg.h stddef.h \
+ /home/opuayt/leb/sysroot/usr/include/stddef.h sys/types.h \
+ /home/opuayt/leb/sysroot/usr/include/sys/types.h \
+ /home/opuayt/leb/sysroot/usr/include/endian.h \
+ /home/opuayt/leb/sysroot/usr/include/sys/select.h \
+ /home/opuayt/leb/sysroot/usr/include/errno.h \
+ /home/opuayt/leb/sysroot/usr/include/bits/errno.h stdio-impl.h
+../config.h:
+fseterr.h:
+stdio.h:
+/home/opuayt/leb/sysroot/usr/include/stdio.h:
+/home/opuayt/leb/sysroot/usr/include/features.h:
+/home/opuayt/leb/sysroot/usr/include/bits/alltypes.h:
+/home/opuayt/leb/sysroot/usr/include/stdarg.h:
+stddef.h:
+/home/opuayt/leb/sysroot/usr/include/stddef.h:
+sys/types.h:
+/home/opuayt/leb/sysroot/usr/include/sys/types.h:
+/home/opuayt/leb/sysroot/usr/include/endian.h:
+/home/opuayt/leb/sysroot/usr/include/sys/select.h:
+/home/opuayt/leb/sysroot/usr/include/errno.h:
+/home/opuayt/leb/sysroot/usr/include/bits/errno.h:
+stdio-impl.h:

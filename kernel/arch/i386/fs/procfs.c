@@ -185,7 +185,7 @@ static uint32_t proc_self_environ_read(vfs_node_t *node, uint32_t offset, uint32
     
     (void)node;
     
-    env = "PATH=/bin:/usr/bin\0HOME=/\0TERM=vt100\0";
+    env = "PATH=/bin:/usr/bin\0HOME=/\0TERM=linux\0";
     len = 38;
     
     if (offset >= len) return 0;

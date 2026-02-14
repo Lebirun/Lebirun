@@ -25,7 +25,22 @@ typedef struct {
     uint32_t buffer_size;
     uint32_t *out_size;
     int *status_code;
+    int max_redirects;
+    uint8_t *headers_buf;
+    uint32_t headers_buf_size;
+    uint32_t *out_headers_len;
 } __attribute__((packed)) http_request_user_t;
+
+typedef struct {
+    const char *url;
+    const char *content_type;
+    const uint8_t *post_body;
+    uint32_t post_body_len;
+    uint8_t *buffer;
+    uint32_t buffer_size;
+    uint32_t *out_size;
+    int *status_code;
+} __attribute__((packed)) http_post_request_user_t;
 
 extern int arp_get_cache(uint32_t *ips, uint8_t *macs, int max_entries);
 extern int ping_one(ipv4_addr_t target, uint16_t seq, uint32_t timeout_ms);
@@ -267,36 +282,83 @@ static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unu
 }
 
 static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
+    http_request_user_t req;
+    char *url_buf;
+    uint32_t user_buf_addr;
+    uint32_t max_dl;
+    uint8_t *kbuf;
+    uint8_t *khdr;
+    uint32_t downloaded;
+    int status_code;
+    int ret;
+    int max_redir;
+    uint32_t hdr_len;
+    uint32_t hdr_buf_sz;
+
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
 
-    http_request_user_t req;
     if (copy_from_user(&req, (uint32_t)req_ptr, sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
 
-    char url_buf[512];
-    if (copy_user_string(url_buf, sizeof(url_buf), req.url) != 0) return -1;
+    url_buf = (char *)kmalloc(512);
+    if (!url_buf) return -1;
 
-    uint32_t user_buf_addr = (uint32_t)(uintptr_t)req.buffer;
-    if (!user_range_ok(user_buf_addr, req.buffer_size)) return -1;
+    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); return -1; }
 
-    uint32_t max_dl = req.buffer_size;
+    user_buf_addr = (uint32_t)(uintptr_t)req.buffer;
+    if (!user_range_ok(user_buf_addr, req.buffer_size)) { kfree(url_buf); return -1; }
+
+    max_dl = req.buffer_size;
     if (max_dl > 1024 * 1024) max_dl = 1024 * 1024;
 
-    uint8_t *kbuf = (uint8_t *)kmalloc(max_dl);
-    if (!kbuf) return -1;
+    kbuf = (uint8_t *)kmalloc(max_dl);
+    if (!kbuf) { kfree(url_buf); return -1; }
 
-    uint32_t downloaded = 0;
-    int ret = http_download(url_buf, kbuf, max_dl, &downloaded);
+    max_redir = req.max_redirects;
+    if (max_redir < 0) max_redir = 0;
+    if (max_redir > 20) max_redir = 20;
+
+    khdr = NULL;
+    hdr_buf_sz = 0;
+    if (req.headers_buf && req.headers_buf_size > 0) {
+        hdr_buf_sz = req.headers_buf_size;
+        if (hdr_buf_sz > 8192) hdr_buf_sz = 8192;
+        if (!user_range_ok((uint32_t)(uintptr_t)req.headers_buf, hdr_buf_sz)) {
+            kfree(kbuf); kfree(url_buf);
+            return -1;
+        }
+        khdr = (uint8_t *)kmalloc(hdr_buf_sz);
+        if (!khdr) {
+            kfree(kbuf); kfree(url_buf);
+            return -1;
+        }
+    }
+
+    downloaded = 0;
+    status_code = 0;
+    hdr_len = 0;
+    ret = http_download_ex(url_buf, kbuf, max_dl, &downloaded, &status_code,
+                           max_redir, khdr, hdr_buf_sz, &hdr_len);
 
     if (ret == 0 && downloaded > 0) {
         if (!user_range_mapped(user_buf_addr, downloaded)) {
             kfree(kbuf);
+            if (khdr) kfree(khdr);
+            kfree(url_buf);
             return -1;
         }
         memcpy((void *)user_buf_addr, kbuf, downloaded);
     }
     kfree(kbuf);
+    kfree(url_buf);
+
+    if (khdr && hdr_len > 0) {
+        memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
+        kfree(khdr);
+    } else if (khdr) {
+        kfree(khdr);
+    }
 
     if (req.out_size) {
         uint32_t out_addr = (uint32_t)(uintptr_t)req.out_size;
@@ -308,7 +370,104 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     if (req.status_code) {
         uint32_t status_addr = (uint32_t)(uintptr_t)req.status_code;
         if (user_range_mapped(status_addr, sizeof(int))) {
-            *(req.status_code) = (ret == 0) ? 200 : -1;
+            *(req.status_code) = status_code;
+        }
+    }
+
+    if (req.out_headers_len) {
+        uint32_t hlen_addr = (uint32_t)(uintptr_t)req.out_headers_len;
+        if (user_range_mapped(hlen_addr, sizeof(uint32_t))) {
+            *(req.out_headers_len) = hdr_len;
+        }
+    }
+
+    return ret;
+}
+
+static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
+    http_post_request_user_t req;
+    char *url_buf;
+    char *ct_buf;
+    uint32_t user_buf_addr;
+    uint32_t max_dl;
+    uint8_t *kbuf;
+    uint8_t *kbody;
+    uint32_t downloaded;
+    int status;
+    int ret;
+
+    (void)unused1; (void)unused2;
+    if (!req_ptr) return -1;
+
+    if (copy_from_user(&req, (uint32_t)req_ptr, sizeof(req)) != 0) return -1;
+    if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
+
+    url_buf = (char *)kmalloc(512);
+    if (!url_buf) return -1;
+    ct_buf = (char *)kmalloc(128);
+    if (!ct_buf) { kfree(url_buf); return -1; }
+
+    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); kfree(ct_buf); return -1; }
+
+    ct_buf[0] = '\0';
+    if (req.content_type) {
+        if (copy_user_string(ct_buf, 128, req.content_type) != 0) { kfree(url_buf); kfree(ct_buf); return -1; }
+    }
+
+    user_buf_addr = (uint32_t)(uintptr_t)req.buffer;
+    if (!user_range_ok(user_buf_addr, req.buffer_size)) { kfree(url_buf); kfree(ct_buf); return -1; }
+
+    max_dl = req.buffer_size;
+    if (max_dl > 1024 * 1024) max_dl = 1024 * 1024;
+
+    kbody = NULL;
+    if (req.post_body && req.post_body_len > 0) {
+        if (req.post_body_len > 65536) { kfree(url_buf); kfree(ct_buf); return -1; }
+        if (!user_range_mapped((uint32_t)(uintptr_t)req.post_body, req.post_body_len)) { kfree(url_buf); kfree(ct_buf); return -1; }
+        kbody = (uint8_t *)kmalloc(req.post_body_len);
+        if (!kbody) { kfree(url_buf); kfree(ct_buf); return -1; }
+        memcpy(kbody, (const void *)(uintptr_t)req.post_body, req.post_body_len);
+    }
+
+    kbuf = (uint8_t *)kmalloc(max_dl);
+    if (!kbuf) {
+        if (kbody) kfree(kbody);
+        kfree(url_buf); kfree(ct_buf);
+        return -1;
+    }
+
+    downloaded = 0;
+    status = 0;
+    ret = http_post_download(url_buf,
+                             ct_buf[0] ? ct_buf : NULL,
+                             kbody, kbody ? req.post_body_len : 0,
+                             kbuf, max_dl,
+                             &downloaded, &status);
+
+    if (ret == 0 && downloaded > 0) {
+        if (!user_range_mapped(user_buf_addr, downloaded)) {
+            kfree(kbuf);
+            if (kbody) kfree(kbody);
+            kfree(url_buf); kfree(ct_buf);
+            return -1;
+        }
+        memcpy((void *)user_buf_addr, kbuf, downloaded);
+    }
+    kfree(kbuf);
+    if (kbody) kfree(kbody);
+    kfree(url_buf); kfree(ct_buf);
+
+    if (req.out_size) {
+        uint32_t out_addr = (uint32_t)(uintptr_t)req.out_size;
+        if (user_range_mapped(out_addr, sizeof(uint32_t))) {
+            *(req.out_size) = downloaded;
+        }
+    }
+
+    if (req.status_code) {
+        uint32_t status_addr = (uint32_t)(uintptr_t)req.status_code;
+        if (user_range_mapped(status_addr, sizeof(int))) {
+            *(req.status_code) = status;
         }
     }
 
@@ -326,4 +485,5 @@ void syscalls_net_init(void) {
     syscall_table[SYSCALL_NET_PING_ONE] = sys_net_ping_one;
     syscall_table[SYSCALL_NET_DNS_RESOLVE] = sys_net_dns_resolve;
     syscall_table[SYSCALL_NET_HTTP_GET] = sys_net_http_get;
+    syscall_table[SYSCALL_NET_HTTP_POST] = sys_net_http_post;
 }

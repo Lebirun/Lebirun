@@ -175,4 +175,9 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
 bool task_is_kernel_pid(int32_t pid);
 void task_set_vring(task_t *task, uint8_t vring_minor);
 
+int deliver_signal_to_task(task_t *target, int sig);
+int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap);
+void signal_deliver_pending(registers_t *regs);
+void signals_init_task(pid_t pid);
+
 #endif

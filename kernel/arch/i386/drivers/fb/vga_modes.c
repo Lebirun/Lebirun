@@ -246,10 +246,10 @@ static void vga_set_crtc_timing(uint16_t width, uint16_t height) {
 
     cr1a_val = vga_crtc_read(0x1A);
     cr1a_val &= 0xC0;
-    if (vblankstart & 0x100) cr1a_val |= 0x01;
-    if (vtotal & 0x100) cr1a_val |= 0x02;
-    if (vdispend & 0x100) cr1a_val |= 0x04;
-    if (vsyncstart & 0x100) cr1a_val |= 0x08;
+    if (vblankstart & 0x400) cr1a_val |= 0x01;
+    if (vtotal & 0x400) cr1a_val |= 0x02;
+    if (vdispend & 0x400) cr1a_val |= 0x04;
+    if (vsyncstart & 0x400) cr1a_val |= 0x08;
     vga_crtc_write(0x1A, cr1a_val);
 
     vga_crtc_write(0x17, 0xC3);
@@ -264,6 +264,7 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     uint8_t cr1b_val;
     uint8_t crtc11;
     volatile uint32_t delay;
+    uint32_t vtotal_check;
     int i;
 
     if (!vga_is_cirrus()) return -1;
@@ -271,8 +272,15 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
     if (bpp != 32 && bpp != 24 && bpp != 16) return -2;
 
     pitch = (uint32_t)width * (uint32_t)(bpp / 8);
+    pitch = (pitch + 63) & ~63u;
     needed = pitch * (uint32_t)height;
     if (cirrus_vram && needed > cirrus_vram) return -4;
+
+    offset_val = pitch / 8;
+    if (offset_val > 0x1FF) return -3;
+
+    vtotal_check = (uint32_t)height + 8;
+    if (vtotal_check > 2047) return -3;
 
     vga_seq_write(0x06, 0x12);
 
@@ -323,7 +331,6 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint32_t *out_pi
 
     vga_set_crtc_timing(width, height);
 
-    offset_val = pitch / 8;
     vga_crtc_write(0x13, (uint8_t)(offset_val & 0xFF));
 
     cr1b_val = vga_crtc_read(0x1B);

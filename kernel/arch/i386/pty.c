@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define MAX_PTYS 4
-#define PTY_BUF_SIZE 128
+#define PTY_BUF_SIZE 4096
 
 typedef struct {
     int in_use;
@@ -368,6 +368,17 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             return 0;
         case TIOCSWINSZ:
             if (arg) memcpy(&pty->winsize, arg, sizeof(struct winsize));
+            if (pty->pgrp > 0) {
+                pid_t pids[64];
+                int npids;
+                int si;
+
+                npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
+                for (si = 0; si < npids; si++) {
+                    task_t *t = task_find(pids[si]);
+                    if (t) deliver_signal_to_task(t, 28);
+                }
+            }
             return 0;
         case TIOCGPGRP:
             if (arg) *(pid_t *)arg = pty->pgrp;
