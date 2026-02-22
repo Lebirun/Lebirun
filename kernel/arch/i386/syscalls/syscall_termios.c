@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <kernel/creds.h>
+#include <kernel/pty.h>
 
 static int kernel_ptr_mapped(uint32_t addr) {
     if (addr < 0xC0000000) return 0;
@@ -47,12 +48,12 @@ int tty_pgrp[NUM_CONSOLES];
 
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     if (!current_task) return -ESRCH;
-    if (oldfd < 0 || oldfd >= TASK_MAX_FDS || !current_task->fds[oldfd].in_use) return -EBADF;
+    if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
     if (minfd < 0) minfd = 0;
     if (minfd >= TASK_MAX_FDS) return -EINVAL;
 
     int newfd = -1;
-    for (int i = minfd; i < TASK_MAX_FDS; i++) {
+    for (int i = minfd; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
             newfd = i;
             current_task->fds[i].in_use = 1;
@@ -78,7 +79,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
 
 static int ioctl_fcntl_basic_compat(int fd, int cmd, int arg) {
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS || !current_task->fds[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !current_task->fds[fd].in_use) return -EBADF;
 
     switch (cmd) {
         case 1: 
@@ -142,8 +143,8 @@ static void termios_init_defaults(int tty_id) {
 
 static int get_tty_id_for_fd(int fd) {
     if (fd < 0) return -1;
-    if (fd >= TASK_MAX_FDS) return -1;
     if (!current_task) return (fd >= 0 && fd <= 2) ? console_get_current() : -1;
+    if (fd >= current_task->fds_capacity) return -1;
     if (!current_task->fds[fd].in_use) {
         if (fd >= 0 && fd <= 2) return (current_task->console_id >= 0) ? current_task->console_id : console_get_current();
         return -1;
@@ -195,13 +196,18 @@ static int sys_tcsetattr(int fd, const char *actions_ptr, int termios_ptr) {
 }
 
 static int sys_ioctl(int fd, const char *request_ptr, int arg) {
-    unsigned long request = (unsigned long)(uintptr_t)request_ptr;
+    unsigned long request;
+    int tty_id;
+    int pty_fd;
 
-    if (fd < 0 || fd >= TASK_MAX_FDS) {
+    request = (unsigned long)(uintptr_t)request_ptr;
+
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= current_task->fds_capacity) {
         return -EBADF;
     }
 
-    if (current_task && current_task->fds[fd].in_use) {
+    if (current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         uint32_t node_addr = (uint32_t)tfd->node;
         if (node_addr && ((node_addr & 0xFFFFFF00) == 0xFEFEFE00)) {
@@ -218,7 +224,14 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         return ioctl_fcntl_basic_compat(fd, (int)request, arg);
     }
 
-    int tty_id = get_tty_id_for_fd(fd);
+    if (current_task->fds[fd].in_use && current_task->fds[fd].private_data) {
+        pty_fd = (int)(uintptr_t)current_task->fds[fd].private_data;
+        if (is_pty_master(pty_fd) || is_pty_slave(pty_fd)) {
+            return pty_ioctl(pty_fd, request, (void *)(uintptr_t)arg);
+        }
+    }
+
+    tty_id = get_tty_id_for_fd(fd);
     if (tty_id < 0 || tty_id >= NUM_CONSOLES) tty_id = -1;
     
     switch (request) {

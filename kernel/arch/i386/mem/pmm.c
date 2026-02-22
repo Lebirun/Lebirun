@@ -12,6 +12,15 @@ static uint32_t bitmap_bytes_used = 0;
 
 static volatile int pfa_lock = 0;
 
+static uint32_t last_alloc_hint = 0;
+
+static volatile uint32_t pfa_cached_free = 0;
+
+static uint8_t *pfa_refcounts = NULL;
+static uint32_t pfa_refcount_entries = 0;
+
+static int low_exhausted = 0;
+
 extern mem_region_t memory_map[MAX_REGIONS];
 extern uint32_t num_regions;
 extern uint64_t bump_current;
@@ -82,29 +91,96 @@ uint32_t count_free_frames(void) {
     return count;
 }
 
-static uint32_t find_free_frames(uint32_t num) {
-    uint32_t idx;
+static uint32_t find_free_frames_range(uint32_t from, uint32_t to, uint32_t num) {
+    uint32_t b;
+    uint32_t bit;
+    uint32_t frame_idx;
     uint32_t j;
+    uint32_t run;
+    uint32_t run_start;
+    uint32_t b_start;
+    uint32_t b_end;
+
+    if (num == 1) {
+        b_start = from / 8;
+        b_end = (to + 7) / 8;
+        if (b_end > bitmap_bytes_used) b_end = bitmap_bytes_used;
+        for (b = b_start; b < b_end; b++) {
+            if (pfa_bitmap[b] == 0xFF) continue;
+            for (bit = 0; bit < 8; bit++) {
+                frame_idx = b * 8 + bit;
+                if (frame_idx < from) continue;
+                if (frame_idx >= to) return 0;
+                if (!(pfa_bitmap[b] & (1 << bit))) {
+                    set_bit(frame_idx);
+                    last_alloc_hint = frame_idx + 1;
+                    __sync_fetch_and_sub(&pfa_cached_free, 1);
+                    return frame_idx * PAGE_SIZE;
+                }
+            }
+        }
+        return 0;
+    }
+
+    b_start = from / 8;
+    b_end = (to + 7) / 8;
+    if (b_end > bitmap_bytes_used) b_end = bitmap_bytes_used;
+    run = 0;
+    run_start = from;
+
+    for (b = b_start; b < b_end; b++) {
+        if (pfa_bitmap[b] == 0xFF) {
+            run = 0;
+            run_start = (b + 1) * 8;
+            continue;
+        }
+        for (bit = 0; bit < 8; bit++) {
+            frame_idx = b * 8 + bit;
+            if (frame_idx < from) continue;
+            if (frame_idx >= to) return 0;
+            if (pfa_bitmap[b] & (1 << bit)) {
+                run = 0;
+                run_start = frame_idx + 1;
+            } else {
+                if (run == 0) run_start = frame_idx;
+                run++;
+                if (run >= num) {
+                    for (j = 0; j < num; j++) set_bit(run_start + j);
+                    last_alloc_hint = run_start + num;
+                    __sync_fetch_and_sub(&pfa_cached_free, num);
+                    return run_start * PAGE_SIZE;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static uint32_t find_free_frames(uint32_t num) {
+    uint32_t start;
     uint32_t eflags;
     uint32_t result;
-    bool ok;
+    uint32_t limit;
+
     if (num == 0) return 0;
-    
+
     pfa_lock_acquire(&eflags);
-    
-    for (idx = kernel_reserved_frames; idx + num <= total_pages_managed; idx++) {
-        ok = true;
-        for (j = 0; j < num; j++) {
-            if (test_bit(idx + j)) { ok = false; break; }
-        }
-        if (!ok) continue;
-        for (j = 0; j < num; j++) set_bit(idx + j);
-        result = idx * PAGE_SIZE;
-        pfa_lock_release(eflags);
-        return result;
+
+    limit = total_pages_managed;
+    if (limit > 0x100000)
+        limit = 0x100000;
+
+    start = last_alloc_hint;
+    if (start < kernel_reserved_frames) start = kernel_reserved_frames;
+    if (start >= limit) start = kernel_reserved_frames;
+
+    result = find_free_frames_range(start, limit, num);
+    if (!result && start > kernel_reserved_frames) {
+        result = find_free_frames_range(kernel_reserved_frames, start, num);
     }
+
     pfa_lock_release(eflags);
-    return 0;
+    return result;
 }
 
 uint32_t pfa_alloc(void) {
@@ -139,6 +215,7 @@ uint64_t pfa_alloc64(void) {
                     if (frame_idx < (uint64_t)total_pages_managed) {
                         pfa_bitmap[byte_idx] |= (1 << bit_idx);
                         result = frame_idx * PAGE_SIZE;
+                        __sync_fetch_and_sub(&pfa_cached_free, 1);
                         pfa_lock_release(eflags);
                         return result;
                     }
@@ -166,30 +243,46 @@ void pfa_free64(uint64_t phys_addr) {
     if (idx < kernel_reserved_frames) {
         return;
     }
+
+    if (pfa_refcounts && (uint32_t)idx < pfa_refcount_entries && pfa_refcounts[(uint32_t)idx] > 0) {
+        pfa_refcounts[(uint32_t)idx]--;
+        return;
+    }
+
     byte_idx = (uint32_t)(idx / 8);
     bit_idx = (uint32_t)(idx % 8);
     
     pfa_lock_acquire(&eflags);
-    pfa_bitmap[byte_idx] &= ~(1 << bit_idx);
+    if (pfa_bitmap[byte_idx] & (1 << bit_idx)) {
+        pfa_bitmap[byte_idx] &= ~(1 << bit_idx);
+        __sync_fetch_and_add(&pfa_cached_free, 1);
+    }
     pfa_lock_release(eflags);
 }
 
 void pfa_free(uint32_t phys_addr) {
     uint32_t eflags;
+    uint32_t idx;
     
     if (phys_addr % PAGE_SIZE != 0) {
         printf("PFA free: Invalid addr 0x%08X\n", phys_addr);
         return;
     }
-    uint32_t idx = phys_addr / PAGE_SIZE;
+    idx = phys_addr / PAGE_SIZE;
     if (idx < kernel_reserved_frames) {
         printf("PFA free: Attempt to free kernel frame 0x%08X (idx %u) ignored\n", phys_addr, idx);
+        return;
+    }
+
+    if (pfa_refcounts && idx < pfa_refcount_entries && pfa_refcounts[idx] > 0) {
+        pfa_refcounts[idx]--;
         return;
     }
     
     pfa_lock_acquire(&eflags);
     if (test_bit(idx)) {
         clear_bit(idx);
+        __sync_fetch_and_add(&pfa_cached_free, 1);
         pfa_lock_release(eflags);
     } else {
         pfa_lock_release(eflags);
@@ -219,6 +312,7 @@ void pfa_reclaim_kernel_range(uint32_t phys_start, uint32_t phys_end) {
             count++;
         }
     }
+    __sync_fetch_and_add(&pfa_cached_free, count);
     pfa_lock_release(eflags);
 
     printf("PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
@@ -244,13 +338,20 @@ void pfa_free_contiguous(uint32_t phys_addr, uint32_t num_frames) {
         idx = start_idx + i;
         if (idx >= total_pages_managed) break;
         if (idx < kernel_reserved_frames) continue;
-        if (test_bit(idx)) clear_bit(idx);
+        if (test_bit(idx)) {
+            clear_bit(idx);
+            __sync_fetch_and_add(&pfa_cached_free, 1);
+        }
     }
     pfa_lock_release(eflags);
 }
 
 uint32_t pfa_count_free(void) {
-    return count_free_frames();
+    return pfa_cached_free;
+}
+
+void pfa_sync_free_count(void) {
+    pfa_cached_free = count_free_frames();
 }
 
 static uint32_t system_total_ram_kb = 0;
@@ -293,45 +394,76 @@ void pfa_set_reserved_stats(uint32_t kern_bin_kb, uint32_t bmp_kb) {
 }
 
 void *pmm_alloc_page(void) {
+    uint32_t eflags;
+    uint32_t i;
+    uint64_t region_end;
+    uint64_t alloc_start;
+    uint64_t candidate;
+    uint32_t idx_alloc;
+    void *page;
+    uint32_t byte_idx;
+    uint32_t bit;
+    uint32_t frame_idx;
+    uint32_t scan_start;
+    uint32_t scan_end;
+    uint32_t b;
+
     if (num_regions == 0) return NULL;
 
-    for (uint32_t i = active_region; i < num_regions; i++) {
-        uint64_t region_end = memory_map[i].base + memory_map[i].length;
+    pfa_lock_acquire(&eflags);
+
+    for (i = active_region; i < num_regions; i++) {
+        region_end = memory_map[i].base + memory_map[i].length;
+
+        if (memory_map[i].base >= 0x100000000ULL)
+            continue;
 
         if (bump_current < memory_map[i].base) {
             bump_current = memory_map[i].base + 0x1000;
         }
 
-        bump_current = (bump_current + 0xFFF) & ~0xFFF; 
+        bump_current = (bump_current + 0xFFF) & ~0xFFF;
 
         if (bump_current + 4096 <= region_end) {
             active_region = i;
-            uint64_t alloc_start = bump_current;
-            uint64_t candidate = alloc_start;
-            while (candidate + 4096 <= region_end) {
-                uint32_t idx_alloc = (uint32_t)(candidate / PAGE_SIZE);
-                if (idx_alloc >= total_pages_managed) break;
-                if (!test_bit(idx_alloc)) {
-                    alloc_start = candidate;
-                    break;
+            idx_alloc = (uint32_t)(bump_current / PAGE_SIZE);
+            scan_end = (uint32_t)(region_end / PAGE_SIZE);
+            if (scan_end > total_pages_managed) scan_end = total_pages_managed;
+            if (scan_end > 0x100000) scan_end = 0x100000;
+
+            scan_start = idx_alloc / 8;
+            for (b = scan_start; b < (scan_end + 7) / 8; b++) {
+                if (b >= bitmap_bytes_used) break;
+                if (pfa_bitmap[b] == 0xFF) continue;
+                for (bit = 0; bit < 8; bit++) {
+                    frame_idx = b * 8 + bit;
+                    if (frame_idx < idx_alloc) continue;
+                    if (frame_idx >= scan_end) break;
+                    if (!(pfa_bitmap[b] & (1 << bit))) {
+                        alloc_start = (uint64_t)frame_idx * PAGE_SIZE;
+                        bump_current = alloc_start + 4096;
+                        set_bit(frame_idx);
+                        __sync_fetch_and_sub(&pfa_cached_free, 1);
+                        pfa_lock_release(eflags);
+                        return (void *)(uint32_t)alloc_start;
+                    }
                 }
-                candidate += PAGE_SIZE;
             }
-            if (alloc_start == bump_current && test_bit((uint32_t)(alloc_start / PAGE_SIZE))) {
-                bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
-                continue;
-            }
-            bump_current = alloc_start + 4096;
-            void *page = (void *)(uint32_t)alloc_start;
-            uint32_t idx_alloc = (uint32_t)(alloc_start / PAGE_SIZE);
-            if (idx_alloc < total_pages_managed) {
-                set_bit(idx_alloc);
-            }
-            return page;
+
+            bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
+            continue;
         }
 
         bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
     }
+
+    pfa_lock_release(eflags);
+
+    idx_alloc = find_free_frames(1);
+    if (idx_alloc) {
+        return (void *)idx_alloc;
+    }
+
     return NULL;
 }
 
@@ -343,54 +475,75 @@ void *pmm_alloc_pages(uint32_t num) {
 }
 
 void *pmm_alloc_low_page(void) {
+    uint32_t eflags;
+    uint64_t try_addr;
+    int in_region;
+    uint32_t i;
+    uint64_t rstart;
+    uint64_t rend;
+    uint32_t idx_alloc;
+    void *page;
+    uint64_t next_start;
+
     if (num_regions == 0) return NULL;
     if (low_bump == 0) return NULL;
+    if (low_exhausted) return NULL;
 
-    uint64_t try = (low_bump + 0xFFF) & ~0xFFF;
+    pfa_lock_acquire(&eflags);
 
-    while (try < 0x00400000) {
-        int in_region = 0;
-        for (uint32_t i = 0; i < num_regions; i++) {
-            uint64_t rstart = memory_map[i].base;
-            uint64_t rend = rstart + memory_map[i].length;
-            if (try >= rstart && try + PAGE_SIZE <= rend && try < 0x00400000) {
+    try_addr = (low_bump + 0xFFF) & ~0xFFF;
+
+    while (try_addr < 0x00400000) {
+        in_region = 0;
+        for (i = 0; i < num_regions; i++) {
+            rstart = memory_map[i].base;
+            rend = rstart + memory_map[i].length;
+            if (try_addr >= rstart && try_addr + PAGE_SIZE <= rend && try_addr < 0x00400000) {
                 in_region = 1;
-                uint32_t idx_alloc = (uint32_t)(try / PAGE_SIZE);
+                idx_alloc = (uint32_t)(try_addr / PAGE_SIZE);
                 if (idx_alloc < total_pages_managed && !test_bit(idx_alloc)) {
-                    low_bump = try + PAGE_SIZE;
+                    low_bump = try_addr + PAGE_SIZE;
                     set_bit(idx_alloc);
-                    void *page = (void *)(uint32_t)try;
+                    __sync_fetch_and_sub(&pfa_cached_free, 1);
+                    page = (void *)(uint32_t)try_addr;
+                    pfa_lock_release(eflags);
                     pmm_zero_page_phys((uint32_t)page);
                     return page;
                 } else {
-                    try += PAGE_SIZE;
-                    low_bump = try;
+                    try_addr += PAGE_SIZE;
+                    low_bump = try_addr;
                     break;
                 }
             }
         }
 
         if (!in_region) {
-            uint64_t next_start = 0;
-            for (uint32_t i = 0; i < num_regions; i++) {
-                uint64_t rstart = memory_map[i].base;
-                if (rstart > try && rstart < 0x00400000) {
+            next_start = 0;
+            for (i = 0; i < num_regions; i++) {
+                rstart = memory_map[i].base;
+                if (rstart > try_addr && rstart < 0x00400000) {
                     if (next_start == 0 || rstart < next_start) next_start = rstart;
                 }
             }
-            if (next_start == 0) return NULL;
-            try = next_start;
-            low_bump = try;
+            if (next_start == 0) {
+                low_exhausted = 1;
+                pfa_lock_release(eflags);
+                return NULL;
+            }
+            try_addr = next_start;
+            low_bump = try_addr;
         }
     }
 
+    low_exhausted = 1;
+    pfa_lock_release(eflags);
     return NULL;
 }
 
+static volatile int pmm_zero_lock = 0;
+
 void pmm_zero_page_phys(uint32_t phys_addr) {
     uint32_t temp_virt;
-    uint32_t eflags;
-    int had_if;
     volatile uint32_t *w;
     uint32_t i;
     extern uint32_t pae_temp_pt_ready_check(void);
@@ -409,9 +562,7 @@ void pmm_zero_page_phys(uint32_t phys_addr) {
 
     temp_virt = 0xF7006000;
 
-    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
-    had_if = (eflags & (1<<9)) != 0;
-    if (had_if) __asm__ volatile ("cli");
+    while (__sync_lock_test_and_set(&pmm_zero_lock, 1)) {}
 
     temp_map_raw(temp_virt, phys_addr);
 
@@ -422,7 +573,7 @@ void pmm_zero_page_phys(uint32_t phys_addr) {
 
     temp_unmap_raw(temp_virt);
 
-    if (had_if) __asm__ volatile ("sti");
+    __sync_lock_release(&pmm_zero_lock);
 }
 
 void pfa_init_internal_setup(uint32_t bitmap_bytes, uint32_t total_pages, uint32_t kernel_frames) {
@@ -435,4 +586,80 @@ void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb, uint32_t init_fre
     system_total_ram_kb = total_kb;
     system_usable_ram_kb = usable_kb;
     initial_free_frames = init_free_frames;
+    pfa_cached_free = count_free_frames();
+}
+
+void pfa_ref_init(void) {
+    uint32_t size;
+
+    if (pfa_refcounts) return;
+    pfa_refcount_entries = total_pages_managed;
+    size = pfa_refcount_entries * sizeof(uint8_t);
+    pfa_refcounts = (uint8_t *)kmalloc(size);
+    if (pfa_refcounts) {
+        memset(pfa_refcounts, 0, size);
+    }
+}
+
+void pfa_ref_inc(uint32_t phys_addr) {
+    uint32_t idx;
+
+    if (!pfa_refcounts) pfa_ref_init();
+    if (!pfa_refcounts) return;
+    idx = phys_addr / PAGE_SIZE;
+    if (idx >= pfa_refcount_entries) return;
+    if (pfa_refcounts[idx] < 255) {
+        pfa_refcounts[idx]++;
+    }
+}
+
+int pfa_ref_dec(uint32_t phys_addr) {
+    uint32_t idx;
+
+    if (!pfa_refcounts) return 0;
+    idx = phys_addr / PAGE_SIZE;
+    if (idx >= pfa_refcount_entries) return 0;
+    if (pfa_refcounts[idx] > 0) {
+        pfa_refcounts[idx]--;
+        return (int)pfa_refcounts[idx];
+    }
+    return 0;
+}
+
+uint8_t pfa_ref_get(uint32_t phys_addr) {
+    uint32_t idx;
+
+    if (!pfa_refcounts) return 0;
+    idx = phys_addr / PAGE_SIZE;
+    if (idx >= pfa_refcount_entries) return 0;
+    return pfa_refcounts[idx];
+}
+
+void pfa_cow_release(uint32_t phys_addr) {
+    uint32_t idx;
+    uint8_t ref;
+
+    if (!phys_addr) return;
+    if (!pfa_refcounts) {
+        pfa_free(phys_addr);
+        return;
+    }
+    idx = phys_addr / PAGE_SIZE;
+    if (idx >= pfa_refcount_entries) {
+        pfa_free(phys_addr);
+        return;
+    }
+    ref = pfa_refcounts[idx];
+    if (ref > 1) {
+        pfa_refcounts[idx]--;
+        return;
+    }
+    if (ref == 1) {
+        pfa_refcounts[idx] = 0;
+    }
+    pfa_free(phys_addr);
+}
+
+void pfa_cow_release64(uint64_t phys_addr) {
+    pfa_cow_release((uint32_t)phys_addr);
 }

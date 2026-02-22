@@ -7,6 +7,8 @@ KERNEL_DIR = ../kernel/arch/i386
 INITRD_DIR = ../initrd
 NCURSES_DIR = ncurses-6.6
 NANO_DIR = nano-8.7.1
+HTOP_DIR = htop-3.4.1
+HTOP_BUILD = htop-3.4.1-build
 SYSROOT_LIB = ../root/lib
 
 CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -m32 -Os -fomit-frame-pointer -nostdinc
@@ -36,7 +38,7 @@ LSH_CONFIGURE_ARGS = --host=i686-elf --prefix=/usr
 KERNEL_USER_SHELL = ../kernel/arch/i386/user_shell.bin
 SYSROOT_BIN = ../root/bin
 
-.PHONY: copy-shell copy-pong stage-lsh stage-coreutils ncurses nano
+.PHONY: copy-shell copy-pong stage-lsh stage-coreutils ncurses nano htop
 
 copy-shell: lsh.bin
 	cp lsh.bin $(KERNEL_USER_SHELL)
@@ -56,14 +58,20 @@ stage-coreutils:
 ncurses:
 	@echo "Building ncurses in $(NCURSES_DIR)"
 	@test -d "$(NCURSES_DIR)" || { echo "ERROR: missing $(NCURSES_DIR)"; exit 1; }
+	@if [ ! -f "$(LIBC_ABS)/leblibc/build-i386/lib/crti.o" ]; then \
+		echo "Building leblibc runtime objects..."; \
+		$(MAKE) -C "$(LIBC_ABS)/leblibc" build-i386 || (cat "$(LIBC_ABS)/leblibc/build-i386/config.log" >&2; false); \
+	fi
+	@echo "Installing leblibc headers to sysroot..."
+	@$(MAKE) -C "$(LIBC_ABS)/leblibc" install-headers DESTDIR="$(abspath ..)/sysroot" ARCH=i386 >/dev/null 2>&1 || true
 	@cd $(NCURSES_DIR) && \
 		export LEB_ROOT=$(abspath ..); \
 		export SYSROOT=$$LEB_ROOT/sysroot; \
 		export CC=i686-elf-gcc; \
 		export CPP="$$CC -E"; \
 		export AR=i686-elf-ar; export RANLIB=i686-elf-ranlib; \
-		export CFLAGS="--sysroot=$$SYSROOT -isystem=$$SYSROOT/usr/include -I$$LEB_ROOT/libc/leblibc/include -Os -fno-stack-protector -fno-pic -fno-builtin"; \
-		export CPPFLAGS="-I$$SYSROOT/usr/include -I$$LEB_ROOT/libc/leblibc/include"; \
+		export CFLAGS="--sysroot=$$SYSROOT -isystem=$$SYSROOT/usr/include -I$$LEB_ROOT/libc/leblibc/include -isystem=$$LEB_ROOT/libc/leblibc/build-i386/obj/include -isystem=$$LEB_ROOT/libc/leblibc/arch/i386 -isystem=$$LEB_ROOT/libc/leblibc/arch/generic -Os -fno-stack-protector -fno-pic -fno-builtin"; \
+		export CPPFLAGS="-I$$SYSROOT/usr/include -I$$LEB_ROOT/libc/leblibc/include -isystem=$$LEB_ROOT/libc/leblibc/build-i386/obj/include -isystem=$$LEB_ROOT/libc/leblibc/arch/i386 -isystem=$$LEB_ROOT/libc/leblibc/arch/generic"; \
 		export LDFLAGS="-nostdlib -static -T $$LEB_ROOT/libc/user.ld"; \
 		./configure --host=i686-elf --prefix=/usr \
 			--without-cxx --without-cxx-binding --without-ada \
@@ -118,6 +126,42 @@ nano: ncurses
 		$(MAKE); \
 		cp src/nano $$LEB_ROOT/root/bin/nano
 
+htop: ncurses
+	@echo "Building htop in $(HTOP_DIR)"
+	@test -d "$(HTOP_DIR)" || { echo "ERROR: missing $(HTOP_DIR)"; exit 1; }
+	@if [ ! -f "$(LIBC_ABS)/leblibc/build-i386/lib/crti.o" ]; then \
+		echo "Building leblibc runtime objects..."; \
+		$(MAKE) -C "$(LIBC_ABS)/leblibc" build-i386 || (cat "$(LIBC_ABS)/leblibc/build-i386/config.log" >&2; false); \
+	fi
+	@echo "Installing sysroot headers..."
+	@$(MAKE) -C "$(LIBC_ABS)/leblibc" install-headers DESTDIR="$(abspath ../sysroot)" ARCH=i386 >/dev/null 2>&1
+	@$(MAKE) -C "$(LIBC_ABS)/leblibc" install-libs DESTDIR="$(abspath ../sysroot)" >/dev/null 2>&1
+	@mkdir -p $(HTOP_BUILD)
+	@if [ ! -f "$(HTOP_BUILD)/Makefile" ]; then \
+		echo "Configuring htop..."; \
+		rm -rf $(HTOP_BUILD); \
+		mkdir -p $(HTOP_BUILD); \
+		cd $(HTOP_BUILD) && \
+		export LEB_ROOT=$(abspath ..); \
+		export SYSROOT=$$LEB_ROOT/sysroot; \
+		export CC=i686-elf-gcc; \
+		export CPP="$$CC -E"; \
+		export AR=i686-elf-ar; export RANLIB=i686-elf-ranlib; \
+		rm -f $$SYSROOT/usr/lib/crt0.o; \
+		../$(HTOP_DIR)/configure --host=i686-elf --prefix=/usr \
+			--disable-unicode --disable-hwloc --with-ncurses \
+			CFLAGS="--sysroot=$$SYSROOT -isystem $$SYSROOT/usr/include -Os -fno-stack-protector -fno-pic -nostartfiles" \
+			LDFLAGS="--sysroot=$$SYSROOT -nostartfiles -L$$SYSROOT/usr/lib" \
+			LIBS="$$SYSROOT/usr/lib/crt1.o $$SYSROOT/usr/lib/crti.o $$SYSROOT/usr/lib/crtn.o -lncurses -lm -lc" \
+			ac_cv_func_malloc_0_nonnull=yes ac_cv_func_realloc_0_nonnull=yes \
+			ac_cv_func_calloc_0_nonnull=yes ac_cv_sizeof_long=4 ac_cv_sizeof_int=4 \
+			> configure.log 2>&1 || (cat configure.log >&2; false); \
+	fi
+	@echo "Building htop..."
+	@$(MAKE) -C $(HTOP_BUILD) > /dev/null 2>&1 || ($(MAKE) -C $(HTOP_BUILD) && false)
+	@cp $(HTOP_BUILD)/htop $(SYSROOT_BIN)/htop
+	@echo "htop installed to $(SYSROOT_BIN)/htop"
+
 lsh.bin:
 	@mkdir -p $(LSH_BUILD)
 	@if [ ! -f "$(LSH_OUTDIR)/config.mk" ] || [ "$(LSH_DIR)/configure" -nt "$(LSH_OUTDIR)/config.mk" ]; then \
@@ -134,7 +178,7 @@ lsh.bin:
 
 .PHONY: all clean
 
-all: ncurses nano $(PROGRAMS) copy-shell copy-pong stage-lsh stage-coreutils
+all: ncurses nano htop $(PROGRAMS) copy-shell copy-pong stage-lsh stage-coreutils
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
@@ -153,5 +197,7 @@ clean:
 	rm -f $(SYSROOT_BIN)/sh
 	rm -f lsh.bin
 	rm -f $(SYSROOT_BIN)/nano
+	rm -f $(SYSROOT_BIN)/htop
 	@if [ -d "$(NCURSES_DIR)" ]; then $(MAKE) -C $(NCURSES_DIR) clean; fi
 	@if [ -f "$(NANO_DIR)/Makefile" ]; then $(MAKE) -C $(NANO_DIR) clean || true; fi
+	@if [ -f "$(HTOP_BUILD)/Makefile" ]; then $(MAKE) -C $(HTOP_BUILD) clean || true; fi

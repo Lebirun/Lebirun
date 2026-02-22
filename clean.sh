@@ -43,9 +43,23 @@ if [ -d "userprog/nano-8.7.1" ]; then
   find userprog/nano-8.7.1 -type f -name '*.o' -delete
 fi
 
+if [ -d "userprog/htop-3.4.1" ]; then
+  echo "Cleaning htop..."
+  if [ -f "userprog/htop-3.4.1-build/Makefile" ]; then
+    (cd userprog/htop-3.4.1-build && $MAKE clean || true)
+    (cd userprog/htop-3.4.1-build && $MAKE distclean || true)
+  fi
+  rm -f userprog/htop-3.4.1/config.cache
+  if [ -d "userprog/htop-3.4.1-build" ]; then
+    find userprog/htop-3.4.1-build -type f -name '*.o' -delete
+    rm -rf userprog/htop-3.4.1-build
+  fi
+fi
+
 rm -f root/bin/lsh
 rm -f root/bin/sh
 rm -f root/bin/nano
+rm -f root/bin/htop
 rm -f root/bin/lebcu
 rm -f root/bin/echo
 rm -f root/bin/pwd

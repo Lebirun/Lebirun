@@ -10,6 +10,7 @@ static uint32_t cursor_prev_x = 0;
 static uint32_t cursor_prev_y = 0;
 static int cursor_visible = 1;
 static int cursor_drawn = 0;
+static int cursor_hidden_by_app = 0;
 static int is_tty_mode = 0;
 static uint32_t original_fb_width = 0;
 static uint32_t original_fb_height = 0;
@@ -690,7 +691,7 @@ void fb_update_cursor(void) {
         }
         cursor_drawn = 0;
     }
-    if (cursor_drawn && !cursor_visible) {
+    if (cursor_drawn && (!cursor_visible || cursor_hidden_by_app)) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
             old_char = ' ';
             if (cursor_prev_y < screen_buffer_rows && cursor_prev_x < MAX_COLS && screen_buffer) {
@@ -700,7 +701,7 @@ void fb_update_cursor(void) {
         }
         cursor_drawn = 0;
     }
-    if (cursor_visible && !cursor_drawn && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
+    if (cursor_visible && !cursor_hidden_by_app && !cursor_drawn && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
         fb_draw_cursor_block(fb.cursor_x, fb.cursor_y, fb.fg_color);
         cursor_prev_x = fb.cursor_x;
         cursor_prev_y = fb.cursor_y;
@@ -732,6 +733,11 @@ void fb_tick(void) {
 
 framebuffer_t *fb_get(void) {
     return &fb;
+}
+
+void fb_set_cursor_hidden(int hidden) {
+    cursor_hidden_by_app = hidden;
+    fb_update_cursor();
 }
 
 int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate) {

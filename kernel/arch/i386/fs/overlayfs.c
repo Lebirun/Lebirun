@@ -357,6 +357,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint32_t fla
     char parent_path[VFS_MAX_PATH];
     int ret;
 
+    (void)flags;
     if (!parent || !name) return -1;
     
     onode = (overlay_node_t *)parent->private_data;

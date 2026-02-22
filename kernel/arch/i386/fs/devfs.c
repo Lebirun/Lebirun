@@ -25,7 +25,18 @@ static vfs_node_t dev_kmem;
 static vfs_node_t dev_port;
 static vfs_node_t dev_ttys[NUM_CONSOLES];
 
-static dirent_t dev_dirent;
+#define DEVFS_DIRENT_POOL_SIZE 4
+
+static dirent_t devfs_dirent_pool[DEVFS_DIRENT_POOL_SIZE];
+static volatile uint32_t devfs_dirent_index;
+
+static dirent_t *devfs_alloc_dirent(void) {
+    uint32_t idx;
+
+    idx = devfs_dirent_index;
+    devfs_dirent_index = (idx + 1) % DEVFS_DIRENT_POOL_SIZE;
+    return &devfs_dirent_pool[idx];
+}
 
 static uint32_t lfsr_state = 0xACE1u;
 static uint32_t entropy_pool[16];
@@ -120,21 +131,27 @@ static uint32_t dev_tty_write(vfs_node_t *node, uint32_t offset, uint32_t size, 
 }
 
 static uint32_t dev_ttyN_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    int tty_num;
+
     (void)offset; (void)size; (void)buffer;
-    int tty_num = node->inode;
+    tty_num = node->inode;
     (void)tty_num;
     return 0;
 }
 
 static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    (void)offset;
-    int tty_num = node->inode;
+    int tty_num;
     extern void console_write_to(int id, const char *buf, size_t len);
+
+    (void)offset;
+    tty_num = node->inode;
     console_write_to(tty_num, (const char *)buffer, size);
     return size;
 }
 
 static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
+    dirent_t *d;
+
     (void)node;
     
     static const char *base_entries[] = {
@@ -144,23 +161,25 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     };
     
     if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
-        strcpy(dev_dirent.name, base_entries[index]);
-        dev_dirent.inode = index + 1;
-        dev_dirent.type = VFS_CHARDEVICE;
-        if (index == 9 || index == 11) dev_dirent.type = VFS_DIRECTORY;
-        return &dev_dirent;
+        d = devfs_alloc_dirent();
+        strcpy(d->name, base_entries[index]);
+        d->inode = index + 1;
+        d->type = VFS_CHARDEVICE;
+        if (index == 9 || index == 11) d->type = VFS_DIRECTORY;
+        return d;
     }
     
     index -= sizeof(base_entries)/sizeof(base_entries[0]);
     if (index < NUM_CONSOLES) {
-        dev_dirent.name[0] = 't';
-        dev_dirent.name[1] = 't';
-        dev_dirent.name[2] = 'y';
-        dev_dirent.name[3] = '0' + index;
-        dev_dirent.name[4] = '\0';
-        dev_dirent.inode = 16 + index + 1;
-        dev_dirent.type = VFS_CHARDEVICE;
-        return &dev_dirent;
+        d = devfs_alloc_dirent();
+        d->name[0] = 't';
+        d->name[1] = 't';
+        d->name[2] = 'y';
+        d->name[3] = '0' + index;
+        d->name[4] = '\0';
+        d->inode = 16 + index + 1;
+        d->type = VFS_CHARDEVICE;
+        return d;
     }
     
     return NULL;
@@ -221,6 +240,8 @@ void devfs_init(void) {
     int i;
     char name[8];
     vfs_fs_type_t *fs_type;
+
+    devfs_dirent_index = 0;
 
     memset(&devfs_root, 0, sizeof(vfs_node_t));
     strcpy(devfs_root.name, "dev");

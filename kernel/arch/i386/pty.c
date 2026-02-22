@@ -440,6 +440,30 @@ int is_pty_slave(int fd) {
     return get_pty_by_slave(fd) != NULL;
 }
 
+int pty_has_data_for_master(int fd) {
+    pty_t *pty;
+    size_t available;
+
+    pty = get_pty_by_master(fd);
+    if (!pty) return 0;
+    available = buf_used(pty->slave_head, pty->slave_tail);
+    if (available > 0) return 1;
+    if (pty->slave_closed) return 1;
+    return 0;
+}
+
+int pty_has_data_for_slave(int fd) {
+    pty_t *pty;
+    size_t available;
+
+    pty = get_pty_by_slave(fd);
+    if (!pty) return 0;
+    available = buf_used(pty->master_head, pty->master_tail);
+    if (available > 0) return 1;
+    if (pty->master_closed) return 1;
+    return 0;
+}
+
 void pty_init(void) {
     memset(ptys, 0, sizeof(ptys));
     mutex_init(&pty_lock);

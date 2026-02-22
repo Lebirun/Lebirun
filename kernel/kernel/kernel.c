@@ -28,6 +28,7 @@
 #include <kernel/about.h>
 #include <kernel/panic.h>
 #include <kernel/kstack.h>
+#include <kernel/smp.h>
 #include "launch_user.h"
 
 bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
@@ -92,6 +93,7 @@ void kernel_main(void) {
     uint32_t b;
     extern void procfs_init(void);
     extern void devfs_init(void);
+    extern void sysfs_init(void);
     extern void ramfs_debug_check_root(const char *location);
     unsigned long cr3;
     unsigned long cr0;
@@ -293,6 +295,8 @@ void kernel_main(void) {
         ramfs_create_dir("/tmp", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         ramfs_create_dir("/home", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         ramfs_create_dir("/root", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/root/.config", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/root/.config/htop", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
         ramfs_create_dir("/run", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
 
         if (use_squashfs && squashfs_root) {
@@ -317,9 +321,11 @@ void kernel_main(void) {
 
         procfs_init();
         devfs_init();
+        sysfs_init();
 
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
+        vfs_mount(NULL, "/sys", "sysfs");
 
         if (use_squashfs) {
             vfs_block_squashfs_access();
@@ -356,6 +362,7 @@ void kernel_main(void) {
     pic_remap();
     kstack_init();
     init_tasks();
+    smp_init();
     
     vring_init();
     kproc_init();
@@ -410,6 +417,8 @@ void kernel_main(void) {
     asm volatile ("sti");
     terminal_writestring("STI completed! Interrupts enabled.\n");
 
+    kprint_enable();
+
     printf("heap: verify before launching user\n");
     heap_verify();
     slab_gc();
@@ -438,6 +447,7 @@ void kernel_main(void) {
     }
 
     while (1) {
+        task_deferred_work();
         asm volatile ("hlt");
     }
 }

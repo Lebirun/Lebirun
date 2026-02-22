@@ -1,9 +1,26 @@
 #include <kernel/mem_map.h>
 #include <kernel/common.h>
 #include <kernel/debug.h>
+#include <kernel/spinlock.h>
 #include <string.h>
 
 heap_t kernel_heap;
+static spinlock_t heap_lock = {0};
+static volatile uint32_t heap_saved_eflags = 0;
+
+static inline void heap_lock_acquire(void) {
+    uint32_t eflags;
+    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
+    __asm__ volatile ("cli" ::: "memory");
+    spin_lock(&heap_lock);
+    heap_saved_eflags = eflags;
+}
+
+static inline void heap_lock_release(void) {
+    uint32_t eflags = heap_saved_eflags;
+    spin_unlock(&heap_lock);
+    if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+}
 
 #define CANARY_OVERHEAD (sizeof(uint32_t) * 2)
 #define HEAP_USE_DEMAND_PAGING 1
@@ -339,7 +356,7 @@ void heap_init(void) {
     printf("Early heap used: %u / %u bytes\n", early_heap_offset, EARLY_HEAP_SIZE);
 }
 
-void *kmalloc(size_t size) {
+static void *kmalloc_internal(size_t size) {
     size_t orig_size;
     size_t total_size;
     heap_block_t *block;
@@ -356,26 +373,6 @@ void *kmalloc(size_t size) {
     heap_block_t *prev;
     heap_block_t *cur;
     void *ptr;
-    size_t max_slab;
-    
-    if (size == 0) return NULL;
-
-    if (!main_heap_initialized) {
-        return early_kmalloc(size);
-    }
-    
-    if (size > SIZE_MAX - CANARY_OVERHEAD - 7) {
-        printf("kmalloc: size overflow detected\n");
-        return NULL;
-    }
-
-    max_slab = slab_max_size();
-    if (size <= max_slab) {
-        ptr = slab_alloc(size);
-        if (ptr) {
-            return ptr;
-        }
-    }
 
     orig_size = size;
     total_size = size + CANARY_OVERHEAD;
@@ -504,6 +501,23 @@ alloc_found:
     return ptr;
 }
 
+void *kmalloc(size_t size) {
+    void *result;
+    size_t max_slab;
+    if (size == 0) return NULL;
+    if (!main_heap_initialized) return early_kmalloc(size);
+    if (size > SIZE_MAX - CANARY_OVERHEAD - 7) return NULL;
+    max_slab = slab_max_size();
+    if (size <= max_slab) {
+        result = slab_alloc(size);
+        if (result) return result;
+    }
+    heap_lock_acquire();
+    result = kmalloc_internal(size);
+    heap_lock_release();
+    return result;
+}
+
 void *ksafe_alloc(size_t size, uint32_t flags) {
     void *ptr;
     heap_block_t *block;
@@ -577,17 +591,8 @@ void *kmalloc_aligned(size_t size, uint32_t alignment) {
     return (void *)aligned;
 }
 
-void kfree(void *ptr) {
+static void kfree_internal(void *ptr) {
     heap_block_t *block;
-
-    if (!ptr) return;
-
-    if (is_early_heap_ptr(ptr)) return;
-
-    if (slab_owns(ptr)) {
-        slab_free(ptr);
-        return;
-    }
 
     block = get_block_from_ptr(ptr);
 
@@ -619,6 +624,18 @@ void kfree(void *ptr) {
     coalesce_free_blocks(block);
 }
 
+void kfree(void *ptr) {
+    if (!ptr) return;
+    if (is_early_heap_ptr(ptr)) return;
+    if (slab_owns(ptr)) {
+        slab_free(ptr);
+        return;
+    }
+    heap_lock_acquire();
+    kfree_internal(ptr);
+    heap_lock_release();
+}
+
 void ksafe_free(void *ptr) {
     kfree(ptr); 
 }
@@ -630,20 +647,25 @@ void kfree_secure(void *ptr) {
 
     if (is_early_heap_ptr(ptr)) return;
     
+    heap_lock_acquire();
+
     block = get_block_from_ptr(ptr);
     
     if (block->magic != HEAP_MAGIC) {
         printf("kfree_secure: Invalid pointer 0x%08X\n", (uint32_t)ptr);
+        heap_lock_release();
         return;
     }
     
     if (block->is_free) {
         printf("kfree_secure: Double free detected at 0x%08X\n", (uint32_t)ptr);
+        heap_lock_release();
         return;
     }
     
     if (heap_check_canaries(ptr) != 0) {
         printf("kfree_secure: Memory corruption at 0x%08X\n", (uint32_t)ptr);
+        heap_lock_release();
         return;
     }
     
@@ -653,11 +675,13 @@ void kfree_secure(void *ptr) {
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
     
     coalesce_free_blocks(block);
+    heap_lock_release();
 }
 
 void *krealloc(void *ptr, size_t new_size) {
     heap_block_t *block;
     void *new_ptr;
+    size_t old_size;
     
     if (!ptr) return kmalloc(new_size);
     if (new_size == 0) {
@@ -670,28 +694,36 @@ void *krealloc(void *ptr, size_t new_size) {
         return new_ptr;
     }
 
+    heap_lock_acquire();
+
     block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         printf("krealloc: Invalid pointer\n");
+        heap_lock_release();
         return NULL;
     }
     
     if (heap_check_canaries(ptr) != 0) {
         printf("krealloc: Memory corruption detected, refusing to reallocate\n");
+        heap_lock_release();
         return NULL;
     }
 
     if (block->alloc_size >= new_size) {
         block->alloc_size = new_size;
         set_canaries(block);
+        heap_lock_release();
         return ptr;
     }
+
+    old_size = block->alloc_size;
+    heap_lock_release();
 
     new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
 
-    memcpy(new_ptr, ptr, block->alloc_size);
+    memcpy(new_ptr, ptr, old_size);
     kfree(ptr);
 
     return new_ptr;

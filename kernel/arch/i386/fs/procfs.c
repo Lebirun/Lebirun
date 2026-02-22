@@ -3,6 +3,7 @@
 #include <kernel/task.h>
 #include <kernel/about.h>
 #include <kernel/drivers/net/e1000/e1000.h>
+#include <kernel/rtc.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -40,6 +41,27 @@ static vfs_node_t proc_memdetail;
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 
+#define PROC_PID_POOL_SIZE 32
+#define PROC_PID_SUBFILES 12
+
+static vfs_node_t pid_dir_pool[PROC_PID_POOL_SIZE];
+static vfs_node_t pid_file_pool[PROC_PID_POOL_SIZE][PROC_PID_SUBFILES];
+static dirent_t pid_dirent;
+
+static task_t *procfs_get_task(vfs_node_t *node) {
+    pid_t pid;
+    if (node->parent && VFS_GET_TYPE(node->flags) == VFS_FILE
+        && VFS_GET_TYPE(node->parent->flags) == VFS_DIRECTORY
+        && node->parent->inode > 0) {
+        pid = (pid_t)node->parent->inode;
+    } else {
+        pid = (pid_t)node->inode;
+    }
+    if (pid == 0 && current_task)
+        return current_task;
+    return task_find(pid);
+}
+
 extern volatile uint32_t tick_count;
 extern uint32_t pit_freq;
 extern uint32_t pae_vmm_pt_count;
@@ -50,11 +72,19 @@ static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_
     char buf[2048];
     int len;
     uint32_t remaining;
+    task_t *task;
+    uint32_t ruid, rgid;
     
-    (void)node;
     len = 0;
+    task = procfs_get_task(node);
     
-    if (current_task) {
+    if (task) {
+        ruid = task->uid;
+        rgid = task->gid;
+        if (!task->is_user) {
+            ruid = 999;
+            rgid = 999;
+        }
         len = snprintf(buf, sizeof(buf),
             "Name:\t%.15s\n"
             "Umask:\t0022\n"
@@ -92,27 +122,29 @@ static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_
             "CapEff:\t0000003fffffffff\n"
             "CapBnd:\t0000003fffffffff\n"
             "CapAmb:\t0000000000000000\n"
-            "Seccomp:\t0\n",
-            current_task->name[0] ? current_task->name : "unknown",
-            current_task->state == TASK_RUNNING ? 'R' : 
-            current_task->state == TASK_BLOCKED ? 'S' : 'Z',
-            current_task->state == TASK_RUNNING ? "running" :
-            current_task->state == TASK_BLOCKED ? "sleeping" : "zombie",
-            current_task->pid,
-            current_task->pid,
-            current_task->ppid,
-            current_task->uid, current_task->euid, current_task->suid, current_task->fsuid,
-            current_task->gid, current_task->egid, current_task->sgid, current_task->fsgid,
-            current_task->gid,
-            current_task->user_pages_count * 4,
-            current_task->user_pages_count * 4,
-            current_task->user_pages_count * 4,
-            current_task->user_pages_count * 4,
-            current_task->user_pages_count * 2,
-            current_task->stack_size / 1024,
-            current_task->user_pages_count * 2,
-            current_task->sig_pending,
-            current_task->sig_blocked);
+            "Seccomp:\t0\n"
+            "KernelTask:\t%d\n",
+            task->name[0] ? task->name : "unknown",
+            task->state == TASK_RUNNING ? 'R' : 
+            task->state == TASK_BLOCKED ? 'S' : 'Z',
+            task->state == TASK_RUNNING ? "running" :
+            task->state == TASK_BLOCKED ? "sleeping" : "zombie",
+            task->pid,
+            task->pid,
+            task->ppid,
+            ruid, ruid, ruid, ruid,
+            rgid, rgid, rgid, rgid,
+            rgid,
+            task->user_pages_count * 4,
+            task->user_pages_count * 4,
+            task->user_pages_count * 4,
+            task->user_pages_count * 4,
+            task->user_pages_count * 2,
+            task->stack_size / 1024,
+            task->user_pages_count * 2,
+            task->sig_pending,
+            task->sig_blocked,
+            task->is_kernel_task ? 1 : 0);
     }
     
     if (offset >= (uint32_t)len) return 0;
@@ -127,11 +159,12 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
     int len;
     int n;
     uint32_t remaining;
+    task_t *task;
     
-    (void)node;
     len = 0;
+    task = procfs_get_task(node);
     
-    if (current_task && current_task->user_brk > 0) {
+    if (task && task->user_brk > 0) {
         if (len < (int)sizeof(buf) - 1) {
             n = snprintf(buf + len, sizeof(buf) - (size_t)len,
                 "00100000-%08x r-xp 00000000 00:00 0 [text]\n",
@@ -142,7 +175,7 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
         if (len < (int)sizeof(buf) - 1) {
             n = snprintf(buf + len, sizeof(buf) - (size_t)len,
                 "00400000-%08x rw-p 00000000 00:00 0 [heap]\n",
-                current_task->user_brk);
+                task->user_brk);
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
         }
@@ -162,14 +195,22 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
 }
 
 static uint32_t proc_self_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    const char *cmdline;
+    char cmdline[128];
     uint32_t len;
     uint32_t remaining;
+    task_t *task;
     
-    (void)node;
-    
-    cmdline = "init";
-    len = 5;
+    task = procfs_get_task(node);
+    if (task && task->name[0]) {
+        len = 0;
+        while (task->name[len] && len < 15) len++;
+        memcpy(cmdline, task->name, len);
+        cmdline[len] = '\0';
+        len++;
+    } else {
+        cmdline[0] = 'i'; cmdline[1] = 'n'; cmdline[2] = 'i'; cmdline[3] = 't'; cmdline[4] = '\0';
+        len = 5;
+    }
     
     if (offset >= len) return 0;
     remaining = len - offset;
@@ -235,53 +276,32 @@ static uint32_t proc_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t siz
 static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
     char buf[512];
     uint32_t total_kb;
-    uint32_t usable_kb;
-    uint32_t free_kb;
-    uint32_t all_used_kb;
-    uint32_t used_kb;
-    uint32_t kern_kb;
-    uint32_t bitmap_kb;
     uint32_t free_pages_kb;
     int len;
     uint32_t remaining;
     
     (void)node;
     
-    total_kb = pfa_get_total_ram_kb();
-    usable_kb = pfa_get_usable_ram_kb();
-    kern_kb = pfa_get_kernel_binary_kb();
-    bitmap_kb = pfa_get_bitmap_kb();
+    total_kb = pfa_get_usable_ram_kb();
     free_pages_kb = pfa_count_free() * 4;
-    all_used_kb = usable_kb - free_pages_kb;
-    if (free_pages_kb > usable_kb) {
-        all_used_kb = 0;
-    }
-    used_kb = all_used_kb - kern_kb - bitmap_kb;
-    if (all_used_kb < kern_kb + bitmap_kb) {
-        used_kb = 0;
-    }
-    free_kb = total_kb - all_used_kb;
-    if (all_used_kb > total_kb) {
-        free_kb = 0;
-    }
     
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8u kB\n"
-        "MemUsable:     %8u kB\n"
         "MemFree:       %8u kB\n"
-        "MemUsed:       %8u kB\n"
-        "MemAllUsed:    %8u kB\n"
         "MemAvailable:  %8u kB\n"
         "Buffers:       %8u kB\n"
         "Cached:        %8u kB\n"
+        "SwapCached:    %8u kB\n"
         "SwapTotal:     %8u kB\n"
-        "SwapFree:      %8u kB\n",
+        "SwapFree:      %8u kB\n"
+        "Shmem:         %8u kB\n"
+        "SReclaimable:  %8u kB\n",
         total_kb,
-        usable_kb,
-        free_kb,
-        used_kb,
-        all_used_kb,
-        free_kb,
+        free_pages_kb,
+        free_pages_kb,
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -344,22 +364,40 @@ static uint32_t proc_self_stat_read(vfs_node_t *node, uint32_t offset, uint32_t 
     char buf[512];
     int len;
     uint32_t remaining;
+    task_t *task;
+    uint32_t utime_val;
+    uint32_t stime_val;
+    uint32_t starttime_val;
+    uint32_t vsize_val;
+    uint32_t rss_val;
     
-    (void)node;
     len = 0;
+    task = procfs_get_task(node);
     
-    if (current_task) {
+    if (task) {
+        utime_val = task->utime;
+        stime_val = task->stime;
+        starttime_val = task->start_tick;
+        vsize_val = task->user_pages_count * 4096;
+        rss_val = task->user_pages_count;
+        if (task->is_kernel_task && rss_val == 0) {
+            vsize_val = task->kernel_stack_size;
+            rss_val = task->kernel_stack_size / 4096;
+        }
         len = snprintf(buf, sizeof(buf),
-            "%d (%s) %c %d %d %d 0 -1 0 0 0 0 0 0 0 0 20 0 1 0 %u %u 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-            current_task->pid,
-            current_task->name[0] ? current_task->name : "unknown",
-            current_task->state == TASK_RUNNING ? 'R' : 
-            current_task->state == TASK_BLOCKED ? 'S' : 'Z',
-            current_task->ppid,
-            current_task->pgid,
-            current_task->sid,
-            tick_count,
-            current_task->user_pages_count * 4096);
+            "%d (%s) %c %d %d %d 0 -1 0 0 0 0 0 %u %u 0 0 20 0 1 0 %u %u %u -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            task->pid,
+            task->name[0] ? task->name : "unknown",
+            task->state == TASK_RUNNING ? 'R' : 
+            task->state == TASK_BLOCKED ? 'S' : 'Z',
+            task->ppid,
+            task->pgid,
+            task->sid,
+            utime_val,
+            stime_val,
+            starttime_val,
+            vsize_val,
+            rss_val);
     }
     
     if (offset >= (uint32_t)len) return 0;
@@ -374,12 +412,13 @@ static uint32_t proc_self_statm_read(vfs_node_t *node, uint32_t offset, uint32_t
     int len;
     uint32_t pages;
     uint32_t remaining;
+    task_t *task;
     
-    (void)node;
     len = 0;
+    task = procfs_get_task(node);
     
-    if (current_task) {
-        pages = current_task->user_pages_count;
+    if (task) {
+        pages = task->user_pages_count;
         len = snprintf(buf, sizeof(buf), "%u %u %u 1 0 %u 0\n",
             pages, pages, pages / 2, pages);
     }
@@ -395,13 +434,14 @@ static uint32_t proc_self_comm_read(vfs_node_t *node, uint32_t offset, uint32_t 
     char buf[32];
     int len;
     uint32_t remaining;
+    task_t *task;
     
-    (void)node;
     len = 0;
+    task = procfs_get_task(node);
     
-    if (current_task) {
+    if (task) {
         len = snprintf(buf, sizeof(buf), "%s\n",
-            current_task->name[0] ? current_task->name : "unknown");
+            task->name[0] ? task->name : "unknown");
     }
     
     if (offset >= (uint32_t)len) return 0;
@@ -477,25 +517,57 @@ static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     char buf[512];
     int len;
     uint32_t remaining;
+    static uint32_t cached_btime = 0;
+    uint32_t btime;
+    extern volatile uint32_t cpu_user_ticks;
+    extern volatile uint32_t cpu_system_ticks;
+    extern volatile uint32_t cpu_idle_ticks;
+    uint32_t user_t;
+    uint32_t sys_t;
+    uint32_t idle_t;
+    uint32_t running;
+    task_t *t;
+    task_t *start;
     
     (void)node;
     
+    user_t = cpu_user_ticks;
+    sys_t = cpu_system_ticks;
+    idle_t = cpu_idle_ticks;
+    
+    running = 0;
+    start = ready_queue_head;
+    t = start;
+    if (t) {
+        do {
+            if (t->state == TASK_RUNNING || t->state == TASK_READY)
+                running++;
+            t = t->next;
+        } while (t && t != start);
+    }
+    if (running == 0) running = 1;
+    
+    if (cached_btime == 0)
+        cached_btime = rtc_get_time();
+    btime = cached_btime;
+    
     len = snprintf(buf, sizeof(buf),
-        "cpu  %u 0 0 %u 0 0 0 0 0 0\n"
-        "cpu0 %u 0 0 %u 0 0 0 0 0 0\n"
+        "cpu  %u 0 %u %u 0 0 0 0 0 0\n"
+        "cpu0 %u 0 %u %u 0 0 0 0 0 0\n"
         "intr %u 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
         "ctxt %u\n"
         "btime %u\n"
         "processes %d\n"
-        "procs_running 1\n"
+        "procs_running %u\n"
         "procs_blocked 0\n"
         "softirq 0 0 0 0 0 0 0 0 0 0 0\n",
-        tick_count / 10, tick_count * 9 / 10,
-        tick_count / 10, tick_count * 9 / 10,
+        user_t, sys_t, idle_t,
+        user_t, sys_t, idle_t,
         tick_count,
         tick_count,
-        tick_count / pit_freq,
-        current_task ? current_task->pid : 1);
+        btime,
+        current_task ? current_task->pid : 1,
+        running);
     
     if (offset >= (uint32_t)len) return 0;
     remaining = (uint32_t)len - offset;
@@ -850,6 +922,10 @@ static uint32_t proc_memdetail_read(vfs_node_t *node, uint32_t offset, uint32_t 
 }
 
 static dirent_t *procfs_readdir(vfs_node_t *node, uint32_t index) {
+    task_t *t;
+    uint32_t count;
+    uint32_t pid_index;
+    
     (void)node;
     
     static const char *entries[] = {
@@ -865,7 +941,98 @@ static dirent_t *procfs_readdir(vfs_node_t *node, uint32_t index) {
         return &proc_dirent;
     }
     
+    pid_index = index - (uint32_t)(sizeof(entries)/sizeof(entries[0]));
+    count = 0;
+    t = all_tasks_head;
+    while (t) {
+        if (t->id != 0 || t->is_user) {
+            if (count == pid_index) {
+                snprintf(proc_dirent.name, sizeof(proc_dirent.name), "%d", t->pid);
+                proc_dirent.inode = (uint32_t)t->pid;
+                proc_dirent.type = VFS_DIRECTORY;
+                return &proc_dirent;
+            }
+            count++;
+        }
+        t = t->all_next;
+    }
+    
     return NULL;
+}
+
+static dirent_t *proc_pid_readdir(vfs_node_t *node, uint32_t index) {
+    static const char *entries[] = {
+        "maps", "status", "cmdline", "environ",
+        "stat", "statm", "comm", "limits", "io"
+    };
+    
+    (void)node;
+    
+    if (index < sizeof(entries)/sizeof(entries[0])) {
+        strcpy(pid_dirent.name, entries[index]);
+        pid_dirent.inode = node->inode * 100 + index;
+        pid_dirent.type = VFS_FILE;
+        return &pid_dirent;
+    }
+    
+    return NULL;
+}
+
+static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
+    uint32_t pid_val;
+    uint32_t pool_idx;
+    int file_idx;
+    
+    static const struct {
+        const char *name;
+        read_type_t read;
+    } files[] = {
+        { "maps",    proc_self_maps_read },
+        { "status",  proc_self_status_read },
+        { "cmdline", proc_self_cmdline_read },
+        { "environ", proc_self_environ_read },
+        { "stat",    proc_self_stat_read },
+        { "statm",   proc_self_statm_read },
+        { "comm",    proc_self_comm_read },
+        { "limits",  proc_self_limits_read },
+        { "io",      proc_self_io_read },
+    };
+    
+    pid_val = node->inode;
+    pool_idx = pid_val % PROC_PID_POOL_SIZE;
+    
+    for (file_idx = 0; file_idx < (int)(sizeof(files)/sizeof(files[0])); file_idx++) {
+        if (strcmp(name, files[file_idx].name) == 0) {
+            vfs_node_t *fnode = &pid_file_pool[pool_idx][file_idx];
+            memset(fnode, 0, sizeof(vfs_node_t));
+            strcpy(fnode->name, name);
+            fnode->flags = VFS_FILE;
+            fnode->inode = pid_val * 100 + (uint32_t)file_idx;
+            fnode->read = files[file_idx].read;
+            fnode->parent = node;
+            fnode->ref_count = 1;
+            return fnode;
+        }
+    }
+    
+    return NULL;
+}
+
+static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
+    uint32_t pool_idx;
+    vfs_node_t *dir;
+    
+    pool_idx = (uint32_t)pid % PROC_PID_POOL_SIZE;
+    dir = &pid_dir_pool[pool_idx];
+    memset(dir, 0, sizeof(vfs_node_t));
+    snprintf(dir->name, sizeof(dir->name), "%d", pid);
+    dir->flags = VFS_DIRECTORY;
+    dir->inode = (uint32_t)pid;
+    dir->readdir = proc_pid_readdir;
+    dir->finddir = proc_pid_finddir;
+    dir->parent = &procfs_root;
+    dir->ref_count = 1;
+    return dir;
 }
 
 static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
@@ -886,16 +1053,18 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "vmstat") == 0) return &proc_vmstat;
     if (strcmp(name, "memdetail") == 0) return &proc_memdetail;
     
-    int pid = 0;
-    const char *p = name;
-    while (*p >= '0' && *p <= '9') {
-        pid = pid * 10 + (*p - '0');
-        p++;
-    }
-    if (*p == '\0' && pid > 0) {
-        task_t *t = task_find((pid_t)pid);
-        if (t) {
-            return &proc_self;
+    {
+        int pid = 0;
+        const char *p = name;
+        while (*p >= '0' && *p <= '9') {
+            pid = pid * 10 + (*p - '0');
+            p++;
+        }
+        if (*p == '\0' && pid > 0) {
+            task_t *t = task_find((pid_t)pid);
+            if (t) {
+                return procfs_setup_pid_dir((pid_t)pid);
+            }
         }
     }
     

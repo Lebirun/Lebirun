@@ -43,4 +43,14 @@ static inline __attribute__((unused)) void serial_putchar(char c) {
     outb(0x3F8, (uint8_t)c);
 }
 
+static inline __attribute__((unused)) void serial_puthex(uint32_t v) {
+    int i;
+    unsigned int nib;
+    serial_puts("0x");
+    for (i = 0; i < 8; i++) {
+        nib = (v >> ((7 - i) * 4)) & 0xF;
+        outb(0x3F8, (nib < 10) ? ('0' + nib) : ('A' + (nib - 10)));
+    }
+}
+
 #endif

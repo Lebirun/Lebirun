@@ -5,7 +5,8 @@
 #include <kernel/registers.h>
 #include <stdint.h>
 
-#define TASK_MAX_FDS 16
+#define TASK_INIT_FDS 16
+#define TASK_MAX_FDS 1024
 
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
@@ -18,6 +19,7 @@ typedef enum {
     TASK_READY = 0,
     TASK_RUNNING,
     TASK_BLOCKED,
+    TASK_STOPPED,
     TASK_DEAD
 } task_state_t;
 
@@ -40,6 +42,7 @@ typedef struct task {
     pid_t pid; 
     task_state_t state;
     struct task *next;
+    struct task *all_next;
     struct task *sleep_next;
     int in_sleep_queue;
     int in_wait_queue;
@@ -71,7 +74,8 @@ typedef struct task {
     char cwd[128];
     char **envp;
     int envc;
-    task_fd_t fds[TASK_MAX_FDS];
+    task_fd_t *fds;
+    int fds_capacity;
     
     uint32_t uid;
     uint32_t gid;
@@ -103,6 +107,10 @@ typedef struct task {
     void *robust_list;
     size_t robust_list_len;
     char name[16];
+
+    uint32_t start_tick;
+    uint32_t utime;
+    uint32_t stime;
     
     uint8_t vring_minor;
     bool is_kernel_task;
@@ -116,6 +124,7 @@ typedef struct task {
 
 extern task_t* current_task;
 extern task_t* ready_queue_head;
+extern task_t* all_tasks_head;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
@@ -141,6 +150,9 @@ void task_kill(task_t* task, uint32_t exit_code);
 void sleep_ticks(uint32_t ticks);
 void wake_sleeping_tasks(void);
 void reap_dead_tasks(void);
+void reap_request(void);
+void exec_drain_request(void);
+void task_deferred_work(void);
 void task_exit(uint32_t exit_code);
 void task_exit_deferred(uint32_t exit_code);
 void sleep_ms(uint32_t ms);
@@ -179,5 +191,8 @@ int deliver_signal_to_task(task_t *target, int sig);
 int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap);
 void signal_deliver_pending(registers_t *regs);
 void signals_init_task(pid_t pid);
+
+void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count);
+void exec_cleanup_drain(void);
 
 #endif

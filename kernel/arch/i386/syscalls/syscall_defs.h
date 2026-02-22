@@ -392,7 +392,12 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_FSTATFS 263
 #define SYSCALL_NET_HTTP_POST 264
 
-#define NR_SYSCALLS 270
+#define SYSCALL_PSELECT6 265
+#define SYSCALL_GETPRIORITY 266
+#define SYSCALL_SETPRIORITY 267
+#define SYSCALL_PIVOT_ROOT 268
+
+#define NR_SYSCALLS 280
 
 struct kernel_stat {
     unsigned long long st_dev;

@@ -296,29 +296,23 @@ void do_syscall(registers_t *regs) {
 
     linux_nr = regs->eax;
     num = linux_to_kernel_syscall(linux_nr);
-    
+
+    set_syscall_frame(regs);
+
     if (num == -243 || num == 243) {
         u_info = (struct user_desc *)regs->ebx;
         regs->eax = do_set_thread_area(u_info);
+        clear_syscall_frame();
         return;
     }
     
     if (num < 0) {
-        if (current_task && !(linux_nr & LEBIRUN_SYSCALL_FLAG)) {
-            printf("[SYSCALL] Task %d: unmapped linux syscall %d (0x%x) - returning ENOSYS\n",
-                   current_task->pid, linux_nr, linux_nr);
-        }
+        clear_syscall_frame();
         regs->eax = -ENOSYS;
         return;
     }
 
-    set_syscall_frame(regs);
-
     if (num >= NR_SYSCALLS || !syscall_table[num]) {
-        if (current_task) {
-            printf("[SYSCALL] Task %d: unimplemented syscall %d (linux=%d) - returning ENOSYS\n",
-                   current_task->pid, num, linux_nr);
-        }
         clear_syscall_frame();
         regs->eax = -ENOSYS;
         return;
@@ -348,8 +342,6 @@ void do_syscall(registers_t *regs) {
         int err = -(int)regs->eax;
         (void)err;
     }
-    
-    signal_deliver_pending(regs);
 
     clear_syscall_frame();
 }

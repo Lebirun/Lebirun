@@ -1,8 +1,9 @@
 #include "syscall_defs.h"
 #include <kernel/pit.h>
 #include <kernel/debug.h>
+#include <kernel/pty.h>
+#include <kernel/common.h>
 
-#define MAX_FDS TASK_MAX_FDS
 #define fd_table (current_task->fds)
 
 static int kernel_ptr_mapped(uint32_t addr) {
@@ -52,8 +53,11 @@ static void fd_release_entry(task_fd_t *tfd) {
 }
 
 static int fd_alloc_from(int start) {
+    int capacity;
+
     if (!current_task) return -1;
-    for (int i = start; i < MAX_FDS; i++) {
+    capacity = current_task->fds_capacity;
+    for (int i = start; i < capacity; i++) {
         if (!fd_table[i].in_use) {
             memset(&fd_table[i], 0, sizeof(task_fd_t));
             fd_table[i].in_use = 1;
@@ -71,7 +75,7 @@ static int fd_alloc(void) {
 static int sys_dup(int oldfd, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
-    if (oldfd < 0 || oldfd >= MAX_FDS || !fd_table[oldfd].in_use) return -EBADF;
+    if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     int newfd = fd_alloc();
     if (newfd < 0) return -EMFILE;
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
@@ -88,8 +92,8 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     (void)unused;
     int newfd = (int)(uintptr_t)newfd_ptr;
     if (!current_task) return -ESRCH;
-    if (oldfd < 0 || oldfd >= MAX_FDS || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= MAX_FDS) return -EBADF;
+    if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
+    if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
     if (oldfd == newfd) return newfd;
     if (fd_table[newfd].in_use) {
         fd_release_entry(&fd_table[newfd]);
@@ -248,10 +252,14 @@ static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
 }
 
 static int sys_fstat(int fd, const char *buf_ptr, int unused) {
+    uint32_t buf_addr;
+    struct kernel_stat *st;
+    int pty_fd;
+
     (void)unused;
-    uint32_t buf_addr = (uint32_t)(uintptr_t)buf_ptr;
+    buf_addr = (uint32_t)(uintptr_t)buf_ptr;
     if (!buf_addr || buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
-    struct kernel_stat *st = (struct kernel_stat *)buf_addr;
+    st = (struct kernel_stat *)buf_addr;
     memset(st, 0, sizeof(struct kernel_stat));
     
     if (fd >= 0 && fd <= 2) {
@@ -262,12 +270,23 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
         return 0;
     }
     
-    if (fd >= 0 && fd < MAX_FDS && fd_table[fd].in_use) {
+    if (fd >= 0 && fd < current_task->fds_capacity && fd_table[fd].in_use) {
         if (fd_table[fd].type == FD_TYPE_PIPE_R || fd_table[fd].type == FD_TYPE_PIPE_W) {
             st->st_mode = S_IFIFO | 0600;
             st->st_blksize = 4096;
             st->st_nlink = 1;
             return 0;
+        }
+        
+        if (fd_table[fd].private_data) {
+            pty_fd = (int)(uintptr_t)fd_table[fd].private_data;
+            if (is_pty_master(pty_fd) || is_pty_slave(pty_fd)) {
+                st->st_mode = S_IFCHR | 0620;
+                st->st_rdev = 0x8801;
+                st->st_blksize = 1024;
+                st->st_nlink = 1;
+                return 0;
+            }
         }
         
         vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
@@ -316,7 +335,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
 
 static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
@@ -573,9 +592,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     
     result = task_exec_with_args(buf, size, regs, argc, argv, envc, envp);
     
-    kfree(buf);
     buf = NULL;
-    
     
     if (envp) {
         kfree(envp);
@@ -611,12 +628,12 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
 static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
     int cmd = (int)(uintptr_t)cmd_ptr;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     switch (cmd) {
         case F_DUPFD:
         case F_DUPFD_CLOEXEC: {
             int minfd = (arg < 0) ? 0 : arg;
-            if (minfd >= MAX_FDS) return -EINVAL;
+            if (minfd >= current_task->fds_capacity) return -EINVAL;
             int newfd = fd_alloc_from(minfd);
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
@@ -642,7 +659,6 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             fd_table[fd].flags = (fd_table[fd].flags & 1) | (arg & ~1);
             return 0;
         default:
-            printf("fcntl: unknown cmd %d on fd %d\n", cmd, fd);
             return -EINVAL;
     }
 }
@@ -672,7 +688,7 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     uint32_t length = (uint32_t)(uintptr_t)len_ptr;
     
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
@@ -716,12 +732,13 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     struct linux_dirent *de;
     uint32_t flags;
     int i;
+    int guard;
 
     dirp_addr = (uint32_t)(uintptr_t)dirp_ptr;
     if (!current_task) return -ESRCH;
     if (!dirp_addr || dirp_addr >= 0xC0000000 || dirp_addr < 0x1000) return -EFAULT;
     if (count <= 0) return -EINVAL;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
@@ -733,14 +750,13 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     buf = (uint8_t *)dirp_addr;
     written = 0;
     dir_offset = tfd->offset;
+    guard = 0;
 
-    while (written < count) {
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+    while (written < count && guard < 4096) {
         entry = vfs_readdir(node, dir_offset);
-        if (!entry) {
-            __asm__ volatile("push %0; popf" : : "r"(flags));
-            break;
-        }
+        if (!entry) break;
+
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
         for (i = 0; i < VFS_MAX_NAME; i++) {
             local_copy.name[i] = entry->name[i];
         }
@@ -775,6 +791,7 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
 
         written += reclen;
         dir_offset++;
+        guard++;
     }
 
     tfd->offset = dir_offset;
@@ -883,8 +900,8 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
 static int sys_dup3(int oldfd, int newfd, int flags) {
     (void)flags;
     if (!current_task) return -ESRCH;
-    if (oldfd < 0 || oldfd >= MAX_FDS || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= MAX_FDS) return -EBADF;
+    if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
+    if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
     if (oldfd == newfd) return -EINVAL;
     if (fd_table[newfd].in_use) {
         fd_release_entry(&fd_table[newfd]);
@@ -927,7 +944,7 @@ static int sys_pipe2(int *pipefd, int flags) {
 
 static int sys_fchdir(int fd) {
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
@@ -938,7 +955,7 @@ static int sys_fchdir(int fd) {
 
 static int sys_fchmod(int fd, int mode) {
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (node->chmod) {
@@ -950,7 +967,7 @@ static int sys_fchmod(int fd, int mode) {
 
 static int sys_fchown(int fd, int uid, int gid) {
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (node->chown) {
@@ -962,24 +979,24 @@ static int sys_fchown(int fd, int uid, int gid) {
 }
 
 static int sys_fsync(int fd) {
-    if (fd < 0 || fd >= MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     return 0;
 }
 
 static int sys_fdatasync(int fd) {
-    if (fd < 0 || fd >= MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     return 0;
 }
 
 static int sys_flock(int fd, int operation) {
     (void)operation;
-    if (fd < 0 || fd >= MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     return 0;
 }
 
 static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     if (!buf) return -EFAULT;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
@@ -989,7 +1006,7 @@ static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
 
 static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset) {
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= MAX_FDS || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     if (!buf) return -EFAULT;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
@@ -1003,7 +1020,7 @@ struct iovec {
 };
 
 static int sys_readv(int fd, const struct iovec *iov, int iovcnt) {
-    if (fd < 0 || fd >= MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!iov || iovcnt <= 0) return -EINVAL;
     
     int total = 0;
@@ -1044,12 +1061,13 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     struct linux_dirent64 *de;
     uint32_t flags;
     int i;
+    int guard;
 
     dirp_addr = (uint32_t)dirp;
     if (!current_task) return -ESRCH;
     if (!dirp_addr || dirp_addr >= 0xC0000000 || dirp_addr < 0x1000) return -EFAULT;
     if (count == 0) return -EINVAL;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
@@ -1061,14 +1079,13 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     buf = (uint8_t *)dirp;
     written = 0;
     dir_offset = tfd->offset;
+    guard = 0;
     
-    while ((unsigned int)written < count) {
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+    while ((unsigned int)written < count && guard < 4096) {
         entry = vfs_readdir(node, dir_offset);
-        if (!entry) {
-            __asm__ volatile("push %0; popf" : : "r"(flags));
-            break;
-        }
+        if (!entry) break;
+
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
         for (i = 0; i < VFS_MAX_NAME; i++) {
             local_copy.name[i] = entry->name[i];
         }
@@ -1103,6 +1120,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
         
         written += reclen;
         dir_offset++;
+        guard++;
     }
     
     tfd->offset = dir_offset;

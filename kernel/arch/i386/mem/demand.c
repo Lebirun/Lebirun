@@ -265,6 +265,14 @@ int demand_decommit_page(uint32_t virt_addr) {
     uint32_t pt_idx;
     uint32_t *pt;
     uint32_t phys;
+    uint32_t pae_pd_idx;
+    uint32_t pae_pt_idx;
+    uint64_t pde;
+    uint64_t *pt64;
+    uint32_t pt_phys_val;
+    uint64_t pte;
+    uint32_t pae_phys;
+    extern uint64_t boot_pd_high[] __attribute__((aligned(4096)));
 
     if (!demand_initialized) return -1;
 
@@ -283,8 +291,32 @@ int demand_decommit_page(uint32_t virt_addr) {
     }
 
     if (pae_enabled) {
+        pae_pd_idx = (page_virt >> 21) & 0x1FF;
+        pae_pt_idx = (page_virt >> 12) & 0x1FF;
+
+        pde = boot_pd_high[pae_pd_idx];
+        if (!(pde & 1)) {
+            clear_committed_bit(idx);
+            demand_lock_release(eflags);
+            return 0;
+        }
+
+        pt_phys_val = (uint32_t)(pde & ~0xFFFULL);
+        pt64 = (uint64_t *)(pt_phys_val + 0xC0000000);
+        pte = pt64[pae_pt_idx];
+
+        if (pte & 1) {
+            pae_phys = (uint32_t)(pte & ~0xFFFULL);
+            pt64[pae_pt_idx] = 0;
+            __asm__ volatile("invlpg (%0)" : : "r"(page_virt) : "memory");
+            if (pae_phys >= 0x1000) {
+                pfa_free(pae_phys);
+            }
+        }
+
+        clear_committed_bit(idx);
         demand_lock_release(eflags);
-        return -1;
+        return 0;
     }
 
     pd = (uint32_t *)0xFFFFF000;

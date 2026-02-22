@@ -148,6 +148,135 @@ uint32_t vmm_get_phys_in_pd(uint32_t pd_phys, uint32_t virt_addr) {
     return pt_entry & ~0xFFF;
 }
 
+uint32_t vmm_unmap_page_in_pd(uint32_t pd_phys, uint32_t virt_addr) {
+    uint32_t pdpt_idx;
+    uint32_t pd_idx;
+    uint32_t pt_idx;
+    uint32_t temp_pdpt_virt;
+    uint32_t temp_pd_virt;
+    uint32_t temp_pt_virt;
+    uint64_t *pdpt;
+    uint64_t pdpte;
+    uint64_t *pd64;
+    uint64_t pde;
+    uint64_t *pt64;
+    uint64_t pte;
+    uint32_t phys;
+    uint32_t pool_slot;
+    int use_direct_access;
+    uint32_t *foreign_pd;
+    uint32_t *foreign_pt;
+    uint32_t pd_entry;
+    uint32_t pt_phys;
+    uint32_t pt_entry;
+    uint32_t cur_cr3;
+
+    if (pae_enabled) {
+        pdpt_idx = (virt_addr >> 30) & 0x3;
+        pd_idx = (virt_addr >> 21) & 0x1FF;
+        pt_idx = (virt_addr >> 12) & 0x1FF;
+
+        use_direct_access = 0;
+        pool_slot = 0;
+        for (pool_slot = 0; pool_slot < pae_pdpt_pool_size(); pool_slot++) {
+            uint32_t pool_phys = (uint32_t)((uintptr_t)pae_pdpt_pool_get(pool_slot) - 0xC0000000);
+            if (pool_phys == pd_phys && pae_pdpt_pool_used_get(pool_slot)) {
+                use_direct_access = 1;
+                break;
+            }
+        }
+
+        if (use_direct_access) {
+            pdpt = pae_pdpt_pool_get(pool_slot);
+            pdpte = pdpt[pdpt_idx];
+            if (!(pdpte & 1)) return 0;
+
+            pd64 = pae_pd_pool_get(pool_slot, pdpt_idx);
+            pde = pd64[pd_idx];
+            if (!(pde & 1)) return 0;
+
+            temp_pt_virt = 0xF7002000;
+            temp_map_raw(temp_pt_virt, (uint32_t)(pde & ~0xFFFULL));
+            pt64 = (uint64_t *)temp_pt_virt;
+            pte = pt64[pt_idx];
+            if (!(pte & 1)) {
+                temp_unmap_raw(temp_pt_virt);
+                return 0;
+            }
+            phys = (uint32_t)(pte & ~0xFFFULL);
+            pt64[pt_idx] = 0;
+            temp_unmap_raw(temp_pt_virt);
+
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+            if (cur_cr3 == pd_phys) {
+                __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+            }
+            return phys;
+        }
+
+        temp_pdpt_virt = 0xF7000000;
+        temp_map_raw(temp_pdpt_virt, pd_phys);
+        pdpt = (uint64_t *)(temp_pdpt_virt + (pd_phys & 0xFFF));
+        pdpte = pdpt[pdpt_idx];
+        temp_unmap_raw(temp_pdpt_virt);
+        if (!(pdpte & 1)) return 0;
+
+        temp_pd_virt = 0xF7001000;
+        temp_map_raw(temp_pd_virt, (uint32_t)(pdpte & ~0xFFFULL));
+        pd64 = (uint64_t *)temp_pd_virt;
+        pde = pd64[pd_idx];
+        temp_unmap_raw(temp_pd_virt);
+        if (!(pde & 1)) return 0;
+
+        temp_pt_virt = 0xF7002000;
+        temp_map_raw(temp_pt_virt, (uint32_t)(pde & ~0xFFFULL));
+        pt64 = (uint64_t *)temp_pt_virt;
+        pte = pt64[pt_idx];
+        if (!(pte & 1)) {
+            temp_unmap_raw(temp_pt_virt);
+            return 0;
+        }
+        phys = (uint32_t)(pte & ~0xFFFULL);
+        pt64[pt_idx] = 0;
+        temp_unmap_raw(temp_pt_virt);
+
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+        if (cur_cr3 == pd_phys) {
+            __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+        }
+        return phys;
+    }
+
+    pd_idx = virt_addr >> 22;
+    pt_idx = (virt_addr >> 12) & 0x3FF;
+
+    temp_pd_virt = 0xF7000000;
+    temp_map_raw(temp_pd_virt, pd_phys);
+    foreign_pd = (uint32_t *)temp_pd_virt;
+    pd_entry = foreign_pd[pd_idx];
+    temp_unmap_raw(temp_pd_virt);
+    if (!(pd_entry & 1)) return 0;
+
+    pt_phys = pd_entry & ~0xFFF;
+    temp_pt_virt = 0xF7001000;
+    temp_map_raw(temp_pt_virt, pt_phys);
+    foreign_pt = (uint32_t *)temp_pt_virt;
+    pt_entry = foreign_pt[pt_idx];
+    if (!(pt_entry & 1)) {
+        temp_unmap_raw(temp_pt_virt);
+        return 0;
+    }
+    phys = pt_entry & ~0xFFF;
+    foreign_pt[pt_idx] = 0;
+    temp_unmap_raw(temp_pt_virt);
+
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+    if (cur_cr3 == pd_phys) {
+        __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    }
+    return phys;
+}
+
 void vmm_map_page_in_pd(uint32_t pd_phys, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pd_idx;
     uint32_t pt_idx;

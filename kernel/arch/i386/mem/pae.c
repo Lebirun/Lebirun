@@ -1,29 +1,76 @@
 #include <kernel/mem_map.h>
 #include <kernel/common.h>
 #include <kernel/debug.h>
+#include <kernel/spinlock.h>
 #include <string.h>
 
 extern uint64_t boot_pd_high[] __attribute__((aligned(4096)));
+extern uint64_t boot_pd_low[] __attribute__((aligned(4096)));
+extern uint64_t boot_pdpt[] __attribute__((aligned(32)));
 extern uint32_t pae_enabled;
 
 void pae_sync_kernel_mappings(void);
 
-#define PAE_PDPT_POOL_SIZE 4
+static spinlock_t vmm_pae_lock = {0};
+static volatile uint32_t vmm_pae_saved_eflags = 0;
+
+static inline void vmm_pae_lock_acquire(void) {
+    uint32_t eflags;
+    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
+    __asm__ volatile ("cli" ::: "memory");
+    spin_lock(&vmm_pae_lock);
+    vmm_pae_saved_eflags = eflags;
+}
+
+static inline void vmm_pae_lock_release(void) {
+    uint32_t eflags = vmm_pae_saved_eflags;
+    spin_unlock(&vmm_pae_lock);
+    if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+}
+
+#define PAE_PDPT_POOL_SIZE 128
 
 static uint64_t pae_pdpt_pool[PAE_PDPT_POOL_SIZE][4] __attribute__((aligned(32)));
 static uint64_t *pae_pd_pool[PAE_PDPT_POOL_SIZE][4];
 static uint8_t pae_pdpt_pool_used[PAE_PDPT_POOL_SIZE];
 
+#define PAE_VMM_PT_INIT_SIZE 32
+
 static uint64_t *pae_heap_page_tables[4];
 static uint32_t pae_heap_pt_count = 0;
-uint64_t *pae_vmm_page_tables[32];
+static uint64_t *pae_vmm_pt_static[PAE_VMM_PT_INIT_SIZE];
+uint64_t **pae_vmm_page_tables = pae_vmm_pt_static;
 uint32_t pae_vmm_pt_count = 0;
+uint32_t pae_vmm_pt_capacity = PAE_VMM_PT_INIT_SIZE;
+static int pae_vmm_pt_is_dynamic = 0;
+
+static uint64_t *pae_mid_pd[2];
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
 extern void pmm_zero_page_phys(uint32_t phys_addr);
 extern void temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
 extern void temp_unmap_raw(uint32_t temp_virt);
+
+static int pae_vmm_pt_grow(void) {
+    uint32_t new_cap;
+    uint64_t **new_arr;
+    uint32_t i;
+
+    new_cap = pae_vmm_pt_capacity * 2;
+    new_arr = (uint64_t **)kmalloc(new_cap * sizeof(uint64_t *));
+    if (!new_arr) return -1;
+    for (i = 0; i < pae_vmm_pt_count; i++)
+        new_arr[i] = pae_vmm_page_tables[i];
+    for (i = pae_vmm_pt_count; i < new_cap; i++)
+        new_arr[i] = NULL;
+    if (pae_vmm_pt_is_dynamic)
+        kfree(pae_vmm_page_tables);
+    pae_vmm_page_tables = new_arr;
+    pae_vmm_pt_capacity = new_cap;
+    pae_vmm_pt_is_dynamic = 1;
+    return 0;
+}
 
 #define PAE_TEMP_ZERO_VIRT 0xF7007000u
 
@@ -65,6 +112,7 @@ int pae_ensure_phys_mapped(uint32_t phys_addr) {
     uint32_t pt_phys;
     uint32_t pt_slot;
     uint64_t *pt;
+    int pt_self_mapped;
 
     phys_addr &= ~(PAGE_SIZE - 1);
     virt = phys_addr + 0xC0000000;
@@ -74,16 +122,31 @@ int pae_ensure_phys_mapped(uint32_t phys_addr) {
 
     if (!(pde & 1)) {
         pt_page = pmm_alloc_low_page();
+        if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) return -1;
 
-        if (pae_vmm_pt_count >= 32) return -1;
+        if (pae_vmm_pt_count >= pae_vmm_pt_capacity) {
+            if (pae_vmm_pt_grow() < 0) return -1;
+        }
 
         pt_phys = (uint32_t)pt_page;
-        pt = (uint64_t *)(pt_phys + 0xC0000000);
-        pt_slot = pae_vmm_pt_count++;
-        pae_vmm_page_tables[pt_slot] = pt;
-        memset(pt, 0, PAGE_SIZE);
-        pt[pte_idx] = ((uint64_t)phys_addr) | 3;
+
+        pae_zero_page(pt_phys);
+
+        pae_write_pte_raw(pt_phys, pte_idx, ((uint64_t)phys_addr) | 3);
+
+        pt_self_mapped = 0;
+        {
+            uint32_t pt_pde_idx;
+            pt_pde_idx = ((pt_phys + 0xC0000000) >> 21) & 0x1FF;
+            if (pt_pde_idx == pde_idx) {
+                uint32_t pt_pte_idx;
+                pt_pte_idx = ((pt_phys + 0xC0000000) >> 12) & 0x1FF;
+                pae_write_pte_raw(pt_phys, pt_pte_idx, ((uint64_t)pt_phys) | 3);
+                pt_self_mapped = 1;
+            }
+        }
+
         boot_pd_high[pde_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
         pae_sync_kernel_mappings();
         __asm__ volatile(
@@ -91,6 +154,18 @@ int pae_ensure_phys_mapped(uint32_t phys_addr) {
             "mov %%eax, %%cr3\n\t"
             : : : "eax", "memory"
         );
+
+        if (!pt_self_mapped) {
+            uint32_t pt_pde_idx;
+            pt_pde_idx = ((pt_phys + 0xC0000000) >> 21) & 0x1FF;
+            if (!(boot_pd_high[pt_pde_idx] & 1)) {
+                pae_ensure_phys_mapped(pt_phys);
+            }
+        }
+
+        pt = (uint64_t *)(pt_phys + 0xC0000000);
+        pt_slot = pae_vmm_pt_count++;
+        pae_vmm_page_tables[pt_slot] = pt;
         return 0;
     }
 
@@ -124,6 +199,38 @@ void pae_sync_kernel_mappings(void) {
     }
 }
 
+static uint64_t *pae_get_pd_for_pdpt(uint32_t pdpt_idx) {
+    uint32_t pd_phys;
+    void *page;
+
+    if (pdpt_idx == 3) {
+        return boot_pd_high;
+    }
+    if (pdpt_idx == 0) {
+        return boot_pd_low;
+    }
+    if (pdpt_idx >= 4) {
+        return NULL;
+    }
+    if (pae_mid_pd[pdpt_idx - 1]) {
+        return pae_mid_pd[pdpt_idx - 1];
+    }
+    page = pmm_alloc_low_page();
+    if (!page) page = pmm_alloc_page();
+    if (!page) return NULL;
+    pd_phys = (uint32_t)page;
+    if (pae_ensure_phys_mapped(pd_phys) < 0) return NULL;
+    pae_mid_pd[pdpt_idx - 1] = (uint64_t *)(pd_phys + 0xC0000000);
+    memset(pae_mid_pd[pdpt_idx - 1], 0, PAGE_SIZE);
+    boot_pdpt[pdpt_idx] = ((uint64_t)pd_phys & ~0xFFFULL) | 1;
+    __asm__ volatile(
+        "mov %%cr3, %%eax\n\t"
+        "mov %%eax, %%cr3\n\t"
+        : : : "eax", "memory"
+    );
+    return pae_mid_pd[pdpt_idx - 1];
+}
+
 void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pdpt_idx;
     uint32_t pae_pd_idx;
@@ -134,6 +241,8 @@ void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     uint32_t pt_phys;
     uint32_t pt_slot;
 
+    vmm_pae_lock_acquire();
+
     pdpt_idx = (virt_addr >> 30) & 0x3;
     pae_pd_idx = (virt_addr >> 21) & 0x1FF;
     pae_pt_idx = (virt_addr >> 12) & 0x1FF;
@@ -142,10 +251,10 @@ void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
         flags &= ~0x4;
     }
 
-    if (pdpt_idx == 3) {
-        pd = boot_pd_high;
-    } else {
-        printf("vmm_map_page_pae: Low address mapping not supported yet (virt=0x%08X)\n", virt_addr);
+    pd = pae_get_pd_for_pdpt(pdpt_idx);
+    if (!pd) {
+        vmm_pae_lock_release();
+        printf("vmm_map_page_pae: Failed to get PD for pdpt_idx %u (virt=0x%08X)\n", pdpt_idx, virt_addr);
         return;
     }
 
@@ -154,13 +263,17 @@ void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
         void *pt_page;
         uint32_t id_pde_idx;
         uint32_t id_pte_idx;
-        if (pae_vmm_pt_count >= 32) {
-            printf("vmm_map_page_pae: Out of VMM page tables\n");
-            return;
+        if (pae_vmm_pt_count >= pae_vmm_pt_capacity) {
+            if (pae_vmm_pt_grow() < 0) {
+                vmm_pae_lock_release();
+                printf("vmm_map_page_pae: Out of VMM page tables\n");
+                return;
+            }
         }
         pt_page = pmm_alloc_low_page();
         if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
+            vmm_pae_lock_release();
             printf("vmm_map_page_pae: Failed to alloc page table\n");
             return;
         }
@@ -176,6 +289,7 @@ void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
             pae_write_pte_raw(pt_phys, id_pte_idx, ((uint64_t)pt_phys) | 3);
         } else {
             if (pae_ensure_phys_mapped(pt_phys) < 0) {
+                vmm_pae_lock_release();
                 printf("vmm_map_page_pae: Failed to map page table page\n");
                 return;
             }
@@ -198,6 +312,8 @@ void vmm_map_page_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
 
     pt[pae_pt_idx] = ((uint64_t)phys_addr & ~0xFFFULL) | (flags & 0xFFF);
     __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+
+    vmm_pae_lock_release();
 }
 
 void vmm_map_page_early_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
@@ -217,11 +333,11 @@ void vmm_map_page_early_pae(uint32_t virt_addr, uint32_t phys_addr, uint32_t fla
         flags &= ~0x4;
     }
 
-    if (pdpt_idx != 3) {
+    pd = pae_get_pd_for_pdpt(pdpt_idx);
+    if (!pd) {
         return;
     }
 
-    pd = boot_pd_high;
     pde = pd[pae_pd_idx];
     if (!(pde & 1)) {
         return;
@@ -260,20 +376,21 @@ void vmm_map_range_alloc_pae(uint32_t virt_addr, uint32_t size, uint32_t flags) 
         pae_pd_idx = (v >> 21) & 0x1FF;
         pae_pt_idx = (v >> 12) & 0x1FF;
 
-        if (pdpt_idx != 3) {
-            printf("vmm_map_range_alloc_pae: Low address not supported (v=0x%08X)\n", v);
+        pd = pae_get_pd_for_pdpt(pdpt_idx);
+        if (!pd) {
+            printf("vmm_map_range_alloc_pae: Failed to get PD (v=0x%08X)\n", v);
             return;
         }
-
-        pd = boot_pd_high;
         pde = pd[pae_pd_idx];
         if (!(pde & 1)) {
             void *pt_page;
             uint32_t id_pde_idx;
             uint32_t id_pte_idx;
-            if (pae_vmm_pt_count >= 32) {
-                printf("vmm_map_range_alloc_pae: Out of VMM page tables\n");
-                return;
+            if (pae_vmm_pt_count >= pae_vmm_pt_capacity) {
+                if (pae_vmm_pt_grow() < 0) {
+                    printf("vmm_map_range_alloc_pae: Out of VMM page tables\n");
+                    return;
+                }
             }
             pt_page = pmm_alloc_low_page();
             if (!pt_page) pt_page = pmm_alloc_page();
@@ -410,11 +527,11 @@ void vmm_unmap_page_pae(uint32_t virt_addr) {
     pae_pd_idx = (virt_addr >> 21) & 0x1FF;
     pae_pt_idx = (virt_addr >> 12) & 0x1FF;
 
-    if (pdpt_idx != 3) {
+    pd = pae_get_pd_for_pdpt(pdpt_idx);
+    if (!pd) {
         return;
     }
 
-    pd = boot_pd_high;
     pde = pd[pae_pd_idx];
     if (!(pde & 1)) {
         return;

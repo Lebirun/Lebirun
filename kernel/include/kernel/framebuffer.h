@@ -33,6 +33,7 @@ void fb_scroll(void);
 void fb_write_char(char c);
 void fb_write_string(const char *str);
 void fb_update_cursor(void);
+void fb_set_cursor_hidden(int hidden);
 void fb_tick(void);
 void fb_flush(void);
 framebuffer_t *fb_get(void);

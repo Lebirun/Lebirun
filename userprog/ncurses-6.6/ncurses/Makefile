@@ -101,11 +101,11 @@ ETAGS		=
 
 CC		= i686-elf-gcc
 CPP		= i686-elf-gcc -E
-CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -isystem=/home/opuayt/leb/sysroot/usr/include -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
+CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -isystem=/home/opuayt/leb/sysroot/usr/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
 LIBS		= 
 
 INCDIR		= $(srcdir)/../include
-CPPFLAGS	= -DHAVE_CONFIG_H -DBUILDING_NCURSES -I../ncurses -I. -I../include -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -DNDEBUG
+CPPFLAGS	= -DHAVE_CONFIG_H -DBUILDING_NCURSES -I../ncurses -I. -I../include -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -I/home/opuayt/leb/libc/leblibc/include -DNDEBUG
 
 CCFLAGS		= $(CPPFLAGS) $(CFLAGS)
 

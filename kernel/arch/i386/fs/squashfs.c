@@ -12,12 +12,36 @@ static vfs_node_t *squashfs_vfs_root = NULL;
 static vfs_fs_type_t squashfs_fs_type;
 static dirent_t squashfs_dirent;
 
+#define SQFS_NODE_CACHE_SIZE 64
+static struct {
+    uint64_t inode_ref;
+    vfs_node_t *node;
+} sqfs_node_cache[SQFS_NODE_CACHE_SIZE];
+static uint32_t sqfs_node_cache_count = 0;
+
+static vfs_node_t *sqfs_cache_lookup(uint64_t inode_ref) {
+    uint32_t i;
+    for (i = 0; i < sqfs_node_cache_count; i++) {
+        if (sqfs_node_cache[i].inode_ref == inode_ref)
+            return sqfs_node_cache[i].node;
+    }
+    return NULL;
+}
+
+static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
+    if (sqfs_node_cache_count < SQFS_NODE_CACHE_SIZE) {
+        sqfs_node_cache[sqfs_node_cache_count].inode_ref = inode_ref;
+        sqfs_node_cache[sqfs_node_cache_count].node = node;
+        sqfs_node_cache_count++;
+    }
+}
+
 static uint32_t squashfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
 static void squashfs_vfs_open(vfs_node_t *node, uint32_t flags);
 static void squashfs_vfs_close(vfs_node_t *node);
 static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index);
 static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name);
-static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, uint32_t *out_meta_size, uint32_t *out_offset, squashfs_base_inode_t **out_base);
+static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, uint32_t *out_meta_size, uint32_t *out_offset, squashfs_base_inode_t **out_base, int *out_need_free);
 static int squashfs_read_fragment_entry(uint32_t fragment_index, squashfs_fragment_entry_t *out_entry);
 
 static uint16_t read_u16(uint8_t *p) {
@@ -74,38 +98,44 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint32_t *ou
         return NULL;
     }
     
+    src = base + block_offset + 2;
+    if (!compressed) {
+        if (out_size) *out_size = data_size;
+        result = kmalloc(data_size);
+        if (!result) return NULL;
+        memcpy(result, src, data_size);
+        return result;
+    }
+
     result = kmalloc(8192);
     if (!result) {
         DEBUG_FS_OTHER("kmalloc failed for metadata block\n");
         return NULL;
     }
     
-    src = base + block_offset + 2;
-    if (compressed) {
-        decomp_ret = squashfs_decompress(src, data_size, result, 8192, squashfs_ctx.compression_id);
-        if (decomp_ret < 0) {
-            DEBUG_FS_OTHER("decompression failed\n");
-            kfree(result);
-            return NULL;
-        }
-        if (out_size) *out_size = (uint32_t)decomp_ret;
-    } else {
-        memcpy(result, src, data_size);
-        if (out_size) *out_size = data_size;
+    decomp_ret = squashfs_decompress(src, data_size, result, 8192, squashfs_ctx.compression_id);
+    if (decomp_ret < 0) {
+        DEBUG_FS_OTHER("decompression failed\n");
+        kfree(result);
+        return NULL;
     }
+    if (out_size) *out_size = (uint32_t)decomp_ret;
     
     return result;
 }
 
-static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, uint32_t *out_meta_size, uint32_t *out_offset, squashfs_base_inode_t **out_base) {
+static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, uint32_t *out_meta_size, uint32_t *out_offset, squashfs_base_inode_t **out_base, int *out_need_free) {
     uint32_t block;
     uint16_t offset;
     uint64_t block_offset;
     uint8_t *metadata;
     uint32_t meta_size;
     squashfs_base_inode_t *base;
+    uint16_t meta_header;
+    uint32_t meta_data_size;
+    int need_free;
 
-    if (!out_meta || !out_meta_size || !out_offset || !out_base) {
+    if (!out_meta || !out_meta_size || !out_offset || !out_base || !out_need_free) {
         return -1;
     }
 
@@ -113,13 +143,32 @@ static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, 
     offset = (uint16_t)(inode_ref & 0xFFFF);
     block_offset = squashfs_ctx.inode_table_start + block;
 
-    metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-    if (!metadata) {
-        return -1;
+    need_free = 0;
+    if (block_offset + 2 <= squashfs_ctx.size) {
+        meta_header = read_u16(squashfs_ctx.base + block_offset);
+        if (meta_header & 0x8000) {
+            meta_data_size = meta_header & 0x7FFF;
+            if (block_offset + 2 + meta_data_size <= squashfs_ctx.size) {
+                metadata = squashfs_ctx.base + block_offset + 2;
+                meta_size = meta_data_size;
+            } else {
+                metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+                if (!metadata) return -1;
+                need_free = 1;
+            }
+        } else {
+            metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+            if (!metadata) return -1;
+            need_free = 1;
+        }
+    } else {
+        metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+        if (!metadata) return -1;
+        need_free = 1;
     }
 
     if (offset >= meta_size) {
-        kfree(metadata);
+        if (need_free) kfree(metadata);
         return -1;
     }
 
@@ -128,6 +177,7 @@ static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, 
     *out_meta_size = meta_size;
     *out_offset = offset;
     *out_base = base;
+    *out_need_free = need_free;
     return 0;
 }
 
@@ -140,6 +190,9 @@ static int squashfs_read_fragment_entry(uint32_t fragment_index, squashfs_fragme
     uint8_t *metadata;
     uint32_t meta_size;
     squashfs_fragment_entry_t *entry;
+    uint16_t meta_header;
+    uint32_t meta_data_size;
+    int need_free;
 
     if (!out_entry) {
         return -1;
@@ -162,19 +215,38 @@ static int squashfs_read_fragment_entry(uint32_t fragment_index, squashfs_fragme
         return -1;
     }
 
-    metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-    if (!metadata) {
-        return -1;
+    need_free = 0;
+    if (block_offset + 2 <= squashfs_ctx.size) {
+        meta_header = read_u16(squashfs_ctx.base + block_offset);
+        if (meta_header & 0x8000) {
+            meta_data_size = meta_header & 0x7FFF;
+            if (block_offset + 2 + meta_data_size <= squashfs_ctx.size) {
+                metadata = squashfs_ctx.base + block_offset + 2;
+                meta_size = meta_data_size;
+            } else {
+                metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+                if (!metadata) return -1;
+                need_free = 1;
+            }
+        } else {
+            metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+            if (!metadata) return -1;
+            need_free = 1;
+        }
+    } else {
+        metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+        if (!metadata) return -1;
+        need_free = 1;
     }
 
     if ((entry_index + 1) * sizeof(squashfs_fragment_entry_t) > meta_size) {
-        kfree(metadata);
+        if (need_free) kfree(metadata);
         return -1;
     }
 
     entry = (squashfs_fragment_entry_t *)(metadata + entry_index * sizeof(squashfs_fragment_entry_t));
     memcpy(out_entry, entry, sizeof(squashfs_fragment_entry_t));
-    kfree(metadata);
+    if (need_free) kfree(metadata);
     return 0;
 }
 
@@ -185,8 +257,12 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     uint8_t *metadata;
     uint32_t meta_size;
     squashfs_base_inode_t *base;
+    squashfs_symlink_inode_t *stmp;
     size_t inode_size;
     void *inode_copy;
+    uint16_t meta_header;
+    uint32_t meta_data_size;
+    int need_free;
 
     block = (uint32_t)(inode_ref >> 16);
     offset = (uint16_t)(inode_ref & 0xFFFF);
@@ -194,15 +270,34 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     DEBUG_FS_OTHER("read_inode ref=0x%llX block=%u offset=0x%X\n", (unsigned long long)inode_ref, block, offset);
     
     block_offset = squashfs_ctx.inode_table_start + block;
-    metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-    if (!metadata) {
-        DEBUG_FS_OTHER("squashfs_read_metadata_block failed at offset 0x%llX\n", (unsigned long long)block_offset);
-        return NULL;
+
+    need_free = 0;
+    if (block_offset + 2 <= squashfs_ctx.size) {
+        meta_header = read_u16(squashfs_ctx.base + block_offset);
+        if (meta_header & 0x8000) {
+            meta_data_size = meta_header & 0x7FFF;
+            if (block_offset + 2 + meta_data_size <= squashfs_ctx.size) {
+                metadata = squashfs_ctx.base + block_offset + 2;
+                meta_size = meta_data_size;
+            } else {
+                metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+                if (!metadata) return NULL;
+                need_free = 1;
+            }
+        } else {
+            metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+            if (!metadata) return NULL;
+            need_free = 1;
+        }
+    } else {
+        metadata = squashfs_read_metadata_block(block_offset, &meta_size);
+        if (!metadata) return NULL;
+        need_free = 1;
     }
     
     if (offset >= meta_size) {
         DEBUG_FS_OTHER("inode offset 0x%X >= metadata size 0x%X\n", offset, meta_size);
-        kfree(metadata);
+        if (need_free) kfree(metadata);
         return NULL;
     }
     
@@ -223,19 +318,21 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
             inode_size = sizeof(squashfs_lreg_inode_t);
             break;
         case SQUASHFS_SYMLINK_TYPE:
-            inode_size = sizeof(squashfs_symlink_inode_t);
+            stmp = (squashfs_symlink_inode_t *)(metadata + offset);
+            inode_size = sizeof(squashfs_symlink_inode_t) + stmp->symlink_size;
             break;
         case SQUASHFS_LSYMLINK_TYPE:
-            inode_size = sizeof(squashfs_symlink_inode_t) + 4;
+            stmp = (squashfs_symlink_inode_t *)(metadata + offset);
+            inode_size = sizeof(squashfs_symlink_inode_t) + stmp->symlink_size + 4;
             break;
         default:
             inode_size = sizeof(squashfs_base_inode_t);
             break;
     }
     
-    inode_copy = kmalloc(inode_size + 256);
+    inode_copy = kmalloc(inode_size);
     if (!inode_copy) {
-        kfree(metadata);
+        if (need_free) kfree(metadata);
         return NULL;
     }
     
@@ -244,7 +341,7 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     }
     memcpy(inode_copy, metadata + offset, inode_size);
     
-    kfree(metadata);
+    if (need_free) kfree(metadata);
     return inode_copy;
 }
 
@@ -253,6 +350,10 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
     squashfs_base_inode_t *base;
     squashfs_dir_inode_t *dir;
     squashfs_ldir_inode_t *ldir;
+    vfs_node_t *cached;
+
+    cached = sqfs_cache_lookup(inode_ref);
+    if (cached) return cached;
     squashfs_reg_inode_t *reg;
     squashfs_lreg_inode_t *lreg;
     squashfs_symlink_inode_t *sym;
@@ -344,6 +445,7 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
     snode->vfs.close = squashfs_vfs_close;
     
     kfree(base);
+    sqfs_cache_insert(inode_ref, &snode->vfs);
     return &snode->vfs;
 }
 
@@ -383,16 +485,18 @@ static uint32_t squashfs_read_file_data(uint64_t inode_ref, uint32_t offset, uin
     uint32_t frag_file_offset;
     uint32_t frag_offset_in_file;
     uint32_t frag_copy_len;
+    int meta_need_free;
 
     metadata = NULL;
     meta_size = 0;
     inode_offset = 0;
     base = NULL;
     block_size = squashfs_ctx.block_size;
+    meta_need_free = 0;
 
     DEBUG_FS_OTHER("read_file_data inode_ref=0x%llX off=%u size=%u\n", (unsigned long long)inode_ref, offset, size);
 
-    if (squashfs_load_inode_metadata(inode_ref, &metadata, &meta_size, &inode_offset, &base) != 0) {
+    if (squashfs_load_inode_metadata(inode_ref, &metadata, &meta_size, &inode_offset, &base, &meta_need_free) != 0) {
         DEBUG_FS_OTHER("read_file_data: load_inode_metadata failed\n");
         return 0;
     }
@@ -417,12 +521,12 @@ static uint32_t squashfs_read_file_data(uint64_t inode_ref, uint32_t offset, uin
         DEBUG_FS_OTHER("LREG file_size=%u start_block=0x%X frag=%u frag_off=%u\n", file_size, start_block, fragment, frag_offset);
     } else {
         DEBUG_FS_OTHER("read_file_data: not a regular file (type=%u)\n", base->inode_type);
-        kfree(metadata);
+        if (meta_need_free) kfree(metadata);
         return 0;
     }
 
     if (offset >= file_size) {
-        kfree(metadata);
+        if (meta_need_free) kfree(metadata);
         return 0;
     }
 
@@ -443,7 +547,7 @@ static uint32_t squashfs_read_file_data(uint64_t inode_ref, uint32_t offset, uin
     if (block_count > 0) {
         if (block_list_offset + block_count * 4 > meta_size) {
             DEBUG_FS_OTHER("block_list overflow: offset=%u + count*4=%u > meta_size=%u\n", block_list_offset, block_count * 4, meta_size);
-            kfree(metadata);
+            if (meta_need_free) kfree(metadata);
             return 0;
         }
         block_list = metadata + block_list_offset;
@@ -580,8 +684,7 @@ static uint32_t squashfs_read_file_data(uint64_t inode_ref, uint32_t offset, uin
         printf("SQUASHFS: WARNING: short read %u/%u at offset %u (file_size=%u, EOF not reached)\n", bytes_read, to_read, offset, file_size);
     }
 
-    printf("SQUASHFS: read_file_data off=%u size=%u -> bytes_read=%u\n", offset, size, bytes_read);
-    kfree(metadata);
+    if (meta_need_free) kfree(metadata);
     return bytes_read;
 }
 
@@ -639,6 +742,9 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
     uint16_t copy_name_len;
     uint32_t dir_data_len;
     uint32_t end_pos;
+    int need_free;
+    uint16_t meta_header;
+    uint32_t meta_data_size;
 
     if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     
@@ -649,9 +755,30 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
     dir_data_len = snode->vfs.length - 3;
 
     dir_block_start = squashfs_ctx.directory_table_start + snode->start_block;
-    dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-    
-    if (!dir_data) return NULL;
+
+    need_free = 0;
+    if (dir_block_start + 2 <= squashfs_ctx.size) {
+        meta_header = read_u16(squashfs_ctx.base + dir_block_start);
+        if (meta_header & 0x8000) {
+            meta_data_size = meta_header & 0x7FFF;
+            if (dir_block_start + 2 + meta_data_size <= squashfs_ctx.size) {
+                dir_data = squashfs_ctx.base + dir_block_start + 2;
+                dir_size = meta_data_size;
+            } else {
+                dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+                if (!dir_data) return NULL;
+                need_free = 1;
+            }
+        } else {
+            dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+            if (!dir_data) return NULL;
+            need_free = 1;
+        }
+    } else {
+        dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+        if (!dir_data) return NULL;
+        need_free = 1;
+    }
 
     end_pos = snode->dir_block_offset + dir_data_len;
     if (end_pos > dir_size) end_pos = dir_size;
@@ -690,7 +817,7 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
                         break;
                 }
                 
-                kfree(dir_data);
+                if (need_free) kfree(dir_data);
                 return &squashfs_dirent;
             }
             
@@ -699,7 +826,7 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index) {
         }
     }
     
-    kfree(dir_data);
+    if (need_free) kfree(dir_data);
     return NULL;
 }
 
@@ -719,6 +846,9 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     vfs_node_t *result;
     uint32_t dir_data_len;
     uint32_t end_pos;
+    int need_free;
+    uint16_t meta_header;
+    uint32_t meta_data_size;
 
     if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     
@@ -729,9 +859,31 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     dir_data_len = snode->vfs.length - 3;
 
     dir_block_start = squashfs_ctx.directory_table_start + snode->start_block;
-    dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-    
-    if (!dir_data) return NULL;
+
+    need_free = 0;
+    if (dir_block_start + 2 <= squashfs_ctx.size) {
+        meta_header = read_u16(squashfs_ctx.base + dir_block_start);
+        if (meta_header & 0x8000) {
+            meta_data_size = meta_header & 0x7FFF;
+            if (dir_block_start + 2 + meta_data_size <= squashfs_ctx.size) {
+                dir_data = squashfs_ctx.base + dir_block_start + 2;
+                dir_size = meta_data_size;
+                need_free = 0;
+            } else {
+                dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+                if (!dir_data) return NULL;
+                need_free = 1;
+            }
+        } else {
+            dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+            if (!dir_data) return NULL;
+            need_free = 1;
+        }
+    } else {
+        dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
+        if (!dir_data) return NULL;
+        need_free = 1;
+    }
 
     end_pos = snode->dir_block_offset + dir_data_len;
     if (end_pos > dir_size) end_pos = dir_size;
@@ -759,7 +911,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
                 if (result) {
                     result->parent = node;
                 }
-                kfree(dir_data);
+                if (need_free) kfree(dir_data);
                 return result;
             }
             
@@ -767,7 +919,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
         }
     }
     
-    kfree(dir_data);
+    if (need_free) kfree(dir_data);
     return NULL;
 }
 

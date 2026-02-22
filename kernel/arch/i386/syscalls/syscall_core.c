@@ -118,7 +118,7 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
-    if (current_task && fd >= 0 && fd < TASK_MAX_FDS && current_task->fds[fd].in_use) {
+    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_W) {
             pipe_t *p = (pipe_t *)tfd->private_data;
@@ -158,23 +158,20 @@ static int sys_write(int fd, const char *buf, int len) {
     if (fd == 1 || fd == 2) {
         framebuffer_t *fb = fb_get();
         int con_id = current_task ? current_task->console_id : 0;
-        
-        int written = 0;
-        while (written < len) {
-            int chunk = len - written;
-            if (chunk > 64) chunk = 64;
-            
-            if (fb && fb->font && console_is_initialized()) {
-                console_write_to(con_id, (const char *)(buf_addr + written), (size_t)chunk);
-            } else {
+        if (fb && fb->font && console_is_initialized()) {
+            console_write_to(con_id, (const char *)buf_addr, (size_t)len);
+        } else {
+            int written = 0;
+            while (written < len) {
+                int chunk = len - written;
+                if (chunk > 64) chunk = 64;
                 asm volatile("cli");
                 for (int i = 0; i < chunk; i++) {
                     terminal_putchar(((const char *)buf_addr)[written + i]);
                 }
                 asm volatile("sti");
+                written += chunk;
             }
-            
-            written += chunk;
         }
         return len;
     }
@@ -188,7 +185,7 @@ static int sys_read(int fd, char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
     if (buf_addr + len >= 0xC0000000) return -1;
 
-    if (current_task && fd >= 0 && fd < TASK_MAX_FDS && current_task->fds[fd].in_use) {
+    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_R) {
             pipe_t *p = (pipe_t *)tfd->private_data;
@@ -519,7 +516,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
     if (buf_addr + len >= 0xC0000000) return -1;
 
-    if (current_task && fd >= 0 && fd < TASK_MAX_FDS && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
+    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
         int con_id = current_task ? current_task->console_id : console_get_current();
         struct kernel_termios *t;
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
@@ -566,7 +563,7 @@ static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
 static int sys_isatty(int fd, const char *unused, int unused2) {
     (void)unused; (void)unused2;
     if (!current_task) return 0;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return 0;
+    if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) return 0;
     int t = current_task->fds[fd].type;
     if (t == FD_TYPE_STDIN || t == FD_TYPE_STDOUT || t == FD_TYPE_STDERR) return 1;
@@ -614,7 +611,7 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
 static int sys_lseek(int fd, const char *offset_ptr, int whence) {
     int32_t offset = (int32_t)(uintptr_t)offset_ptr;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS || !current_task->fds[fd].in_use) return -EBADF;
+    if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity || !current_task->fds[fd].in_use) return -EBADF;
     task_fd_t *tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -ESPIPE;
     vfs_node_t *node = (vfs_node_t *)tfd->node;

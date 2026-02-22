@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <kernel/common.h>
 #include <stdarg.h>
 
 #define WNOHANG   1
@@ -191,19 +192,23 @@ static int sys_kill(int pid, const char *unused, int code) {
     
     task_t* t = task_find((pid_t)pid);
     if (!t) return -ESRCH;
+    if (t->is_kernel_task) return -EPERM;
     task_kill(t, (uint32_t)sig);
     return 0;
 }
 
 static int sys_fork(int unused, const char *unused2, int unused3) {
     registers_t *regs;
+    int result;
+
     (void)unused; (void)unused2; (void)unused3;
     regs = current_task->syscall_frame;
     if (!regs) {
         printf("sys_fork: no registers pointer\n");
         return -EAGAIN;
     }
-    return (int)task_fork(regs);
+    result = (int)task_fork(regs);
+    return result;
 }
 
 static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {

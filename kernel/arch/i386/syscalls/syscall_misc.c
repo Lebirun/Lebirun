@@ -134,6 +134,7 @@ static int sys_uname(struct utsname *buf) {
 static int sys_sysinfo(struct sysinfo *info) {
     uint32_t total_kb;
     uint32_t free_pages;
+    int proc_count;
     
     if (!info) return -EFAULT;
     
@@ -141,6 +142,12 @@ static int sys_sysinfo(struct sysinfo *info) {
     
     total_kb = pfa_get_total_ram_kb();
     free_pages = pfa_count_free();
+
+    {
+        extern void task_get_cached_stats(int *, int *, int *, pid_t *);
+        task_get_cached_stats(&proc_count, NULL, NULL, NULL);
+    }
+    if (proc_count < 1) proc_count = 1;
     
     info->uptime = tick_count / pit_freq;
     info->loads[0] = 0;
@@ -152,7 +159,7 @@ static int sys_sysinfo(struct sysinfo *info) {
     info->bufferram = 0;
     info->totalswap = 0;
     info->freeswap = 0;
-    info->procs = 1;
+    info->procs = (unsigned short)proc_count;
     info->totalhigh = 0;
     info->freehigh = 0;
     info->mem_unit = 1;
@@ -470,19 +477,47 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     return 0;
 }
 
-static int sys_nanosleep(const struct kernel_timespec *req, struct kernel_timespec *rem) {
-    if (!req) return -EFAULT;
-    
-    uint32_t ms = req->tv_sec * 1000 + req->tv_nsec / 1000000;
+static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
+    const struct kernel_timespec *req;
+    struct kernel_timespec *rem;
+    struct kernel_timespec ts64;
+    long long *ts_ptr;
+    uint32_t ms;
+    uint32_t a0;
+
+    a0 = (uint32_t)arg0;
+
+    if (a0 < 32) {
+        ts_ptr = (long long *)(uint32_t)arg2;
+        rem = (struct kernel_timespec *)(uint32_t)arg3;
+        if (!ts_ptr) return -EFAULT;
+        if ((uint32_t)ts_ptr < 0x1000 || (uint32_t)ts_ptr >= 0xC0000000)
+            return -EFAULT;
+        ts64.tv_sec = (long)ts_ptr[0];
+        ts64.tv_nsec = (long)ts_ptr[1];
+        req = &ts64;
+    } else {
+        req = (const struct kernel_timespec *)a0;
+        rem = (struct kernel_timespec *)(uint32_t)arg1;
+        if (!req) return -EFAULT;
+        if ((uint32_t)req < 0x1000 || (uint32_t)req >= 0xC0000000)
+            return -EFAULT;
+    }
+
+    ms = req->tv_sec * 1000 + req->tv_nsec / 1000000;
     if (ms > 0) {
         sleep_ms(ms);
+    } else {
+        schedule();
     }
-    
+
     if (rem) {
-        rem->tv_sec = 0;
-        rem->tv_nsec = 0;
+        if ((uint32_t)rem >= 0x1000 && (uint32_t)rem < 0xC0000000) {
+            rem->tv_sec = 0;
+            rem->tv_nsec = 0;
+        }
     }
-    
+
     return 0;
 }
 
@@ -665,6 +700,16 @@ static int sys_inotify_rm_watch(int fd, int wd) {
     return -ENOSYS;
 }
 
+static int sys_getpriority(int which, int who) {
+    (void)which; (void)who;
+    return 20;
+}
+
+static int sys_setpriority(int which, int who, int prio) {
+    (void)which; (void)who; (void)prio;
+    return 0;
+}
+
 static int sys_posix_openpt(int flags) {
     (void)flags;
     return -ENOSYS;
@@ -729,4 +774,6 @@ void syscalls_misc_init(void) {
     syscall_table[SYSCALL_GRANTPT] = sys_grantpt;
     syscall_table[SYSCALL_UNLOCKPT] = sys_unlockpt;
     syscall_table[SYSCALL_PTSNAME] = sys_ptsname;
+    syscall_table[SYSCALL_GETPRIORITY] = sys_getpriority;
+    syscall_table[SYSCALL_SETPRIORITY] = sys_setpriority;
 }

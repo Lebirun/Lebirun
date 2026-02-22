@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_SIZE 0x4000u
 #define USER_STACK_GAP  0x1000u
 
 #define AT_NULL         0
@@ -115,15 +115,6 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     }
 
     DEBUG_ELF("launch_user: created PD=0x%08X for ELF binary\n", new_pd);
-    if (debug_elf) {
-        static uint32_t last_verify_tick = 0;
-        extern volatile uint32_t tick_count;
-        uint32_t now = tick_count;
-        if ((now - last_verify_tick) >= 500) {
-            heap_verify();
-            last_verify_tick = now;
-        }
-    }
 
     elf_info_t elf_info;
     uint32_t *elf_pages = NULL;
@@ -146,15 +137,6 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     uint32_t stack_page_count = 0;
     uint32_t *stack_pages = vmm_map_range_in_pd_tracked(new_pd, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7, &stack_page_count);
     DEBUG_ELF("launch_user: mapped stack at 0x%08X (%u pages)\n", USER_STACK_TOP - USER_STACK_SIZE, stack_page_count);
-    if (debug_elf) {
-        static uint32_t last_verify_tick2 = 0;
-        extern volatile uint32_t tick_count;
-        uint32_t now = tick_count;
-        if ((now - last_verify_tick2) >= 500) {
-            heap_verify();
-            last_verify_tick2 = now;
-        }
-    }
 
     uint32_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
     if (setup_initial_stack_with_elf(new_pd, argv0, &elf_info, &initial_useresp) != 0) {
@@ -186,23 +168,22 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
         return NULL;
     }
 
-    printf("launch_user: entry=0x%08X, verifying code in new_pd:\n", elf_info.entry_point);
-    {
-        uint8_t code_buf[32];
-        vmm_read_from_pd(new_pd, elf_info.entry_point, code_buf, 32);
-        printf("  Code at entry: ");
-        for (int i = 0; i < 32; i++) {
-            printf("%02X ", code_buf[i]);
-        }
-        printf("\n");
-        if (code_buf[0] != 0x31 || code_buf[1] != 0xED) {
-            printf("  WARNING: unexpected start bytes, expected 31 ED!\n");
-        }
-    }
-
     t->pd_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
     t->console_id = console_id;
+
+    {
+        const char *base = argv0;
+        int ni = 0;
+        if (base) {
+            int bi;
+            for (bi = 0; argv0[bi]; bi++) {
+                if (argv0[bi] == '/') base = &argv0[bi + 1];
+            }
+            while (ni < 15 && base[ni]) { t->name[ni] = base[ni]; ni++; }
+        }
+        t->name[ni] = '\0';
+    }
 
     registers_t *frame = (registers_t *)(uintptr_t)t->regs.esp;
     frame->useresp = initial_useresp;
@@ -293,7 +274,7 @@ task_t* launch_user_path(const char *path, int console_id) {
     off = 0;
     while (off < size) {
         uint32_t chunk = size - off;
-        if (chunk > 4096) chunk = 4096;
+        if (chunk > 32768) chunk = 32768;
         uint32_t r = vfs_read(node, off, chunk, buf + off);
         if (r == 0) break;
         off += r;

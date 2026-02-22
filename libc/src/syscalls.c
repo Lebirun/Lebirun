@@ -675,10 +675,33 @@ int sigreturn(void) {
 }
 
 long sysconf(int name) {
+    struct {
+        long uptime;
+        unsigned long loads[3];
+        unsigned long totalram;
+        unsigned long freeram;
+        unsigned long sharedram;
+        unsigned long bufferram;
+        unsigned long totalswap;
+        unsigned long freeswap;
+        unsigned short procs;
+        unsigned long totalhigh;
+        unsigned long freehigh;
+        unsigned int mem_unit;
+    } si;
+
     switch (name) {
         case 30: return 4096;
         case 0: return 4096;
+        case 2: return 100;
         case 4: return 1024;
+        case 83: return 1;
+        case 84: return 1;
+        case 85:
+            if (syscall1(160 | LEBIRUN_SYSCALL_FLAG, (int)&si) == 0) {
+                return (long)(si.totalram / 4096);
+            }
+            return -1;
         default: return -1;
     }
 }
@@ -806,40 +829,40 @@ static inline int syscall6(int num, int arg1, int arg2, int arg3, int arg4, int 
     return ret;
 }
 
-#define SYS_SOCKET (181 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_BIND (182 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_LISTEN (183 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_ACCEPT (184 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_CONNECT (185 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SEND (186 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_RECV (187 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SENDTO (188 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_RECVFROM (189 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SHUTDOWN (190 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SETSOCKOPT (191 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_GETSOCKOPT (192 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_GETPEERNAME (193 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_GETSOCKNAME (194 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SOCKETPAIR (195 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SOCKET (91 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SOCKETPAIR (92 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_BIND (93 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_CONNECT (94 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_LISTEN (95 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_ACCEPT (96 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_ACCEPT4 (97 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GETSOCKOPT (98 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SETSOCKOPT (99 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GETSOCKNAME (100 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GETPEERNAME (101 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SENDTO (102 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SENDMSG (103 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_RECVFROM (104 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_RECVMSG (105 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SHUTDOWN (106 | LEBIRUN_SYSCALL_FLAG)
 
-#define SYS_EPOLL_CREATE (88 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EPOLL_CTL (89 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EPOLL_WAIT (90 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EPOLL_CREATE1 (91 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EPOLL_PWAIT (92 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SELECT (93 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_POLL (94 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_PPOLL (95 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_PSELECT6 (96 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EVENTFD (97 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_EVENTFD2 (98 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SELECT (88 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_POLL (89 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_PPOLL (90 | LEBIRUN_SYSCALL_FLAG)
 
-#define SYS_FUTEX (99 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SET_ROBUST_LIST (100 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_GET_ROBUST_LIST (101 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EVENTFD (181 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EVENTFD2 (182 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EPOLL_CREATE (183 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EPOLL_CREATE1 (184 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EPOLL_CTL (185 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EPOLL_WAIT (186 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_EPOLL_PWAIT (187 | LEBIRUN_SYSCALL_FLAG)
 
-#define SYS_CLONE (102 | LEBIRUN_SYSCALL_FLAG)
-#define SYS_SET_TID_ADDRESS (103 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SET_TID_ADDRESS (188 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_FUTEX (189 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_SET_ROBUST_LIST (190 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_GET_ROBUST_LIST (191 | LEBIRUN_SYSCALL_FLAG)
+#define SYS_CLONE (192 | LEBIRUN_SYSCALL_FLAG)
 
 #define SYS_POSIX_OPENPT (208 | LEBIRUN_SYSCALL_FLAG)
 #define SYS_GRANTPT (209 | LEBIRUN_SYSCALL_FLAG)
@@ -874,11 +897,11 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
-    return syscall4(SYS_SEND, sockfd, (int)buf, (int)len, flags);
+    return syscall6(SYS_SENDTO, sockfd, (int)buf, (int)len, flags, 0, 0);
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
-    return syscall4(SYS_RECV, sockfd, (int)buf, (int)len, flags);
+    return syscall6(SYS_RECVFROM, sockfd, (int)buf, (int)len, flags, 0, 0);
 }
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
@@ -951,7 +974,8 @@ int pselect(int nfds,
             fd_set *__restrict exceptfds,
             const struct timespec *__restrict timeout,
             const sigset_t *__restrict sigmask) {
-    return syscall6(SYS_PSELECT6, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout, (int)sigmask);
+    (void)sigmask;
+    return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout);
 }
 
 struct pollfd;

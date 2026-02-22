@@ -9,6 +9,7 @@ extern volatile uint32_t tick_count;
 typedef void (*irq_handler_t)(registers_t *regs);
 
 void idt_init(void);
+void idt_load(void);
 void pic_remap(void);
 void keyboard_disable(void);
 void irq_register_handler(uint8_t irq, irq_handler_t handler);

@@ -75,8 +75,8 @@ void init_mem_map(uint32_t mb_magic, uint32_t mb_ptr) {
         if (entry_count > 50) break;
     }
 
-    if (max_phys_memory > 0x100000000ULL) {
-        max_phys_memory = 0x100000000ULL;
+    if (max_phys_memory > MAX_PHYSICAL_MEMORY) {
+        max_phys_memory = MAX_PHYSICAL_MEMORY;
     }
     if ((uint32_t)(max_phys_memory / 1024) > multiboot_physical_ram_kb) {
         multiboot_physical_ram_kb = (uint32_t)(max_phys_memory / 1024);
@@ -208,8 +208,9 @@ void pfa_init(void) {
     uint32_t legacy_pd_idx;
     uint32_t *legacy_pt;
     uint32_t legacy_pt_phys;
-    extern uint64_t *pae_vmm_page_tables[];
+    extern uint64_t **pae_vmm_page_tables;
     extern uint32_t pae_vmm_pt_count;
+    extern uint32_t pae_vmm_pt_capacity;
 
     detected_max_phys = 0;
     for (r = 0; r < num_regions; r++) {
@@ -264,7 +265,7 @@ void pfa_init(void) {
                             "mov %%eax, %%cr3\n\t"
                             : : : "eax", "memory"
                         );
-                        if (pae_vmm_pt_count < 32) {
+                        if (pae_vmm_pt_count < pae_vmm_pt_capacity) {
                             pae_vmm_page_tables[pae_vmm_pt_count++] = new_pt;
                         }
                         last_pd_idx = pae_pd_idx;

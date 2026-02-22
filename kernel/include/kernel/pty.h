@@ -24,6 +24,8 @@ int pty_close_slave(int fd);
 
 int is_pty_master(int fd);
 int is_pty_slave(int fd);
+int pty_has_data_for_master(int fd);
+int pty_has_data_for_slave(int fd);
 
 void pty_init(void);
 

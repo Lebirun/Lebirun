@@ -249,20 +249,6 @@ int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_inf
 
         if (filesz > 0) {
             vmm_copy_to_pd(pd_phys, vaddr, data + offset, filesz);
-            
-            {
-                uint32_t verify_phys = vmm_get_phys_in_pd(pd_phys, vaddr & ~0xFFF);
-                uint8_t verify_buf[32];
-                if (verify_phys) {
-                    vmm_read_from_pd(pd_phys, vaddr, verify_buf, 32);
-                    DEBUG_ELF("elf_load: verify vaddr=0x%08X phys=0x%08X data[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                             vaddr, verify_phys, 
-                             verify_buf[0], verify_buf[1], verify_buf[2], verify_buf[3],
-                             verify_buf[4], verify_buf[5], verify_buf[6], verify_buf[7]);
-                } else {
-                    DEBUG_ELF("elf_load: vaddr 0x%08X not mapped after copy\n", vaddr);
-                }
-            }
         }
 
         if (vaddr < info->load_base) {

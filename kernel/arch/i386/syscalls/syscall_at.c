@@ -8,9 +8,13 @@
 #define AT_EMPTY_PATH       0x1000
 
 static int task_fd_alloc_from(int start) {
-    if (!current_task) return -ESRCH;
+    int i;
+    int new_cap;
+    task_fd_t *new_fds;
+
+    if (!current_task || !current_task->fds) return -ESRCH;
     if (start < 0) start = 0;
-    for (int i = start; i < TASK_MAX_FDS; i++) {
+    for (i = start; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
@@ -22,13 +26,42 @@ static int task_fd_alloc_from(int start) {
             return i;
         }
     }
-    return -EMFILE;
+    if (current_task->fds_capacity >= TASK_MAX_FDS) return -EMFILE;
+    new_cap = current_task->fds_capacity * 2;
+    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
+    if (start >= new_cap) new_cap = start + 16;
+    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
+    new_fds = (task_fd_t *)krealloc(current_task->fds, new_cap * sizeof(task_fd_t));
+    if (!new_fds) return -ENOMEM;
+    memset(&new_fds[current_task->fds_capacity], 0, (new_cap - current_task->fds_capacity) * sizeof(task_fd_t));
+    i = current_task->fds_capacity;
+    if (start > i) i = start;
+    current_task->fds = new_fds;
+    current_task->fds_capacity = new_cap;
+    current_task->fds[i].in_use = 1;
+    current_task->fds[i].ref_count = 1;
+    current_task->fds[i].type = FD_TYPE_FILE;
+    current_task->fds[i].node = NULL;
+    current_task->fds[i].offset = 0;
+    current_task->fds[i].flags = 0;
+    current_task->fds[i].private_data = NULL;
+    return i;
 }
 
 static const char *resolve_at_path(int dirfd, const char *pathname, char *resolved, size_t size) {
+    uint32_t path_addr;
+    const char *cwd;
+    size_t cwd_len;
+    size_t path_len;
+    size_t pos;
+    size_t i;
+    task_fd_t *tfd;
+    vfs_node_t *dir_node;
+    char dir_path[256];
+
     if (!pathname) return NULL;
     
-    uint32_t path_addr = (uint32_t)(uintptr_t)pathname;
+    path_addr = (uint32_t)(uintptr_t)pathname;
     if (path_addr >= 0xC0000000 || path_addr < 0x1000) return NULL;
     
     if (pathname[0] == '/') {
@@ -36,32 +69,61 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *resolv
     }
     
     if (dirfd == AT_FDCWD) {
-        const char *cwd = current_task ? current_task->cwd : "/";
+        cwd = current_task ? current_task->cwd : "/";
         if (!cwd[0]) cwd = "/";
         
-        size_t cwd_len = 0;
+        cwd_len = 0;
         while (cwd[cwd_len]) cwd_len++;
         
-        size_t path_len = 0;
+        path_len = 0;
         while (pathname[path_len]) path_len++;
         
         if (cwd_len + 1 + path_len + 1 > size) return NULL;
         
-        size_t pos = 0;
-        for (size_t i = 0; i < cwd_len && pos < size - 1; i++) {
+        pos = 0;
+        for (i = 0; i < cwd_len && pos < size - 1; i++) {
             resolved[pos++] = cwd[i];
         }
         if (pos > 0 && resolved[pos - 1] != '/' && pos < size - 1) {
             resolved[pos++] = '/';
         }
-        for (size_t i = 0; i < path_len && pos < size - 1; i++) {
+        for (i = 0; i < path_len && pos < size - 1; i++) {
             resolved[pos++] = pathname[i];
         }
         resolved[pos] = '\0';
         return resolved;
     }
-    
-    return pathname;
+
+    if (!current_task) return NULL;
+    if (dirfd < 0 || dirfd >= current_task->fds_capacity) return NULL;
+    if (!current_task->fds[dirfd].in_use) return NULL;
+
+    tfd = &current_task->fds[dirfd];
+    if (!tfd->node) return NULL;
+    dir_node = (vfs_node_t *)tfd->node;
+
+    if (vfs_get_path(dir_node, dir_path, sizeof(dir_path)) == NULL) return NULL;
+
+    cwd_len = 0;
+    while (dir_path[cwd_len]) cwd_len++;
+
+    path_len = 0;
+    while (pathname[path_len]) path_len++;
+
+    if (cwd_len + 1 + path_len + 1 > size) return NULL;
+
+    pos = 0;
+    for (i = 0; i < cwd_len && pos < size - 1; i++) {
+        resolved[pos++] = dir_path[i];
+    }
+    if (pos > 0 && resolved[pos - 1] != '/' && pos < size - 1) {
+        resolved[pos++] = '/';
+    }
+    for (i = 0; i < path_len && pos < size - 1; i++) {
+        resolved[pos++] = pathname[i];
+    }
+    resolved[pos] = '\0';
+    return resolved;
 }
 
 static int sys_openat(int dirfd, const char *pathname, int flags) {

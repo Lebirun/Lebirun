@@ -70,7 +70,15 @@ isr_noerr 46
 isr_noerr 47
 isr_noerr 48
 
-isr_noerr 128
+isr_noerr 49
+
+.global isr128
+isr128:
+    pushl $0
+    pushl $128
+    jmp isr_common_stub
+
+isr_noerr 255
 
 isr_common_stub:
     pusha

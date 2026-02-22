@@ -14,9 +14,11 @@ extern void pfa_free(uint32_t phys_addr);
 
 static uint8_t slot_used[KSTACK_MAX_STACKS];
 static uint8_t slot_bottom_mapped[KSTACK_MAX_STACKS];
-static uint32_t slot_top_phys[KSTACK_MAX_STACKS];
-static uint32_t slot_bottom_phys[KSTACK_MAX_STACKS];
+static uint32_t slot_page_phys[KSTACK_MAX_STACKS][KSTACK_USABLE_PAGES];
 static int kstack_initialized = 0;
+
+#define slot_top_phys(s)    slot_page_phys[s][KSTACK_USABLE_PAGES - 1]
+#define slot_bottom_phys(s) slot_page_phys[s][0]
 
 static uint32_t slot_guard_addr(int slot) {
     return KSTACK_REGION_START + (uint32_t)slot * KSTACK_SLOT_SIZE;
@@ -26,8 +28,12 @@ static uint32_t slot_bottom_addr(int slot) {
     return KSTACK_REGION_START + (uint32_t)slot * KSTACK_SLOT_SIZE + PAGE_SIZE;
 }
 
+static uint32_t slot_page_addr(int slot, int page_idx) {
+    return KSTACK_REGION_START + (uint32_t)slot * KSTACK_SLOT_SIZE + (1 + page_idx) * PAGE_SIZE;
+}
+
 static uint32_t slot_top_addr(int slot) {
-    return KSTACK_REGION_START + (uint32_t)slot * KSTACK_SLOT_SIZE + 2 * PAGE_SIZE;
+    return slot_page_addr(slot, KSTACK_USABLE_PAGES - 1);
 }
 
 static int addr_to_slot(uint32_t addr) {
@@ -40,15 +46,15 @@ static int addr_to_slot(uint32_t addr) {
 void kstack_init(void) {
     memset(slot_used, 0, sizeof(slot_used));
     memset(slot_bottom_mapped, 0, sizeof(slot_bottom_mapped));
-    memset(slot_top_phys, 0, sizeof(slot_top_phys));
-    memset(slot_bottom_phys, 0, sizeof(slot_bottom_phys));
+    memset(slot_page_phys, 0, sizeof(slot_page_phys));
     kstack_initialized = 1;
 }
 
 uint8_t *kstack_alloc(void) {
     int i;
+    int p;
     void *phys;
-    uint32_t top_virt;
+    uint32_t page_virt;
     uint32_t base_virt;
 
     if (!kstack_initialized) return NULL;
@@ -58,18 +64,27 @@ uint8_t *kstack_alloc(void) {
     }
     if (i >= KSTACK_MAX_STACKS) return NULL;
 
-    phys = pmm_alloc_low_page();
-    if (!phys) phys = pmm_alloc_page();
-    if (!phys) return NULL;
+    for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
+        phys = pmm_alloc_low_page();
+        if (!phys) phys = pmm_alloc_page();
+        if (!phys) {
+            int k;
+            for (k = 0; k < p; k++) {
+                vmm_unmap_page(slot_page_addr(i, k));
+                pfa_free(slot_page_phys[i][k]);
+                slot_page_phys[i][k] = 0;
+            }
+            return NULL;
+        }
 
-    top_virt = slot_top_addr(i);
-    vmm_map_page(top_virt, (uint32_t)phys, 0x003);
-    memset((void *)top_virt, 0, PAGE_SIZE);
+        page_virt = slot_page_addr(i, p);
+        vmm_map_page(page_virt, (uint32_t)phys, 0x003);
+        memset((void *)page_virt, 0, PAGE_SIZE);
+        slot_page_phys[i][p] = (uint32_t)phys;
+    }
 
     slot_used[i] = 1;
-    slot_bottom_mapped[i] = 0;
-    slot_top_phys[i] = (uint32_t)phys;
-    slot_bottom_phys[i] = 0;
+    slot_bottom_mapped[i] = 1;
 
     base_virt = slot_bottom_addr(i);
     return (uint8_t *)base_virt;
@@ -77,6 +92,7 @@ uint8_t *kstack_alloc(void) {
 
 void kstack_free(uint8_t *base) {
     int slot;
+    int p;
     uint32_t expected_base;
 
     if (!kstack_initialized || !base) return;
@@ -87,16 +103,12 @@ void kstack_free(uint8_t *base) {
     expected_base = slot_bottom_addr(slot);
     if ((uint32_t)base != expected_base) return;
 
-    if (slot_top_phys[slot]) {
-        vmm_unmap_page(slot_top_addr(slot));
-        pfa_free(slot_top_phys[slot]);
-        slot_top_phys[slot] = 0;
-    }
-
-    if (slot_bottom_mapped[slot] && slot_bottom_phys[slot]) {
-        vmm_unmap_page(slot_bottom_addr(slot));
-        pfa_free(slot_bottom_phys[slot]);
-        slot_bottom_phys[slot] = 0;
+    for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
+        if (slot_page_phys[slot][p]) {
+            vmm_unmap_page(slot_page_addr(slot, p));
+            pfa_free(slot_page_phys[slot][p]);
+            slot_page_phys[slot][p] = 0;
+        }
     }
 
     slot_bottom_mapped[slot] = 0;
@@ -107,8 +119,6 @@ int kstack_page_fault_handler(uint32_t fault_addr) {
     int slot;
     uint32_t page_virt;
     uint32_t guard;
-    uint32_t bottom;
-    void *phys;
 
     if (!kstack_initialized) return 0;
     if (fault_addr < KSTACK_REGION_START || fault_addr >= KSTACK_REGION_END) return 0;
@@ -117,28 +127,11 @@ int kstack_page_fault_handler(uint32_t fault_addr) {
     if (slot < 0 || !slot_used[slot]) return 0;
 
     guard = slot_guard_addr(slot);
-    bottom = slot_bottom_addr(slot);
     page_virt = fault_addr & ~(PAGE_SIZE - 1);
 
     if (page_virt == guard) {
-        printf("KERNEL STACK OVERFLOW: task hit guard page at 0x%08X (slot %d)\n", fault_addr, slot);
+        kernel_panic("KERNEL STACK OVERFLOW", NULL);
         return 0;
-    }
-
-    if (page_virt == bottom && !slot_bottom_mapped[slot]) {
-        phys = pmm_alloc_low_page();
-        if (!phys) phys = pmm_alloc_page();
-        if (!phys) {
-            printf("kstack: failed to alloc bottom page for slot %d\n", slot);
-            return 0;
-        }
-
-        vmm_map_page(bottom, (uint32_t)phys, 0x003);
-        memset((void *)bottom, 0, PAGE_SIZE);
-
-        slot_bottom_mapped[slot] = 1;
-        slot_bottom_phys[slot] = (uint32_t)phys;
-        return 1;
     }
 
     return 0;

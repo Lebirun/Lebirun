@@ -221,6 +221,31 @@ void keyboard_handler(registers_t* regs) {
         }
     }
 
+    if (code >= 0x3B && code <= 0x3F && !ctrl_pressed && !alt_pressed) {
+        char seq[4];
+        seq[0] = '\033';
+        seq[1] = '[';
+        seq[2] = '[';
+        seq[3] = 'A' + (code - 0x3B);
+        buffer_put_seq(seq, 4);
+        goto wake;
+    }
+    if (code >= 0x40 && code <= 0x44 && !ctrl_pressed && !alt_pressed) {
+        static const char *f6_seqs[] = {
+            "\033[17~", "\033[18~", "\033[19~", "\033[20~", "\033[21~"
+        };
+        buffer_put_seq(f6_seqs[code - 0x40], 5);
+        goto wake;
+    }
+    if (code == 0x57 && !ctrl_pressed && !alt_pressed) {
+        buffer_put_seq("\033[23~", 5);
+        goto wake;
+    }
+    if (code == 0x58 && !ctrl_pressed && !alt_pressed) {
+        buffer_put_seq("\033[24~", 5);
+        goto wake;
+    }
+
     if (ctrl_pressed && code == SCANCODE_C) {
         buffer_put(0x03);
         goto wake;

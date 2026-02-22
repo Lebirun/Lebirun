@@ -2,9 +2,13 @@
 #include <kernel/ramfs.h>
 
 static int task_fd_alloc_from(int start) {
-    if (!current_task) return -ESRCH;
+    int i;
+    int new_cap;
+    task_fd_t *new_fds;
+
+    if (!current_task || !current_task->fds) return -ESRCH;
     if (start < 0) start = 0;
-    for (int i = start; i < TASK_MAX_FDS; i++) {
+    for (i = start; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
@@ -16,7 +20,26 @@ static int task_fd_alloc_from(int start) {
             return i;
         }
     }
-    return -EMFILE;
+    if (current_task->fds_capacity >= TASK_MAX_FDS) return -EMFILE;
+    new_cap = current_task->fds_capacity * 2;
+    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
+    if (start >= new_cap) new_cap = start + 16;
+    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
+    new_fds = (task_fd_t *)krealloc(current_task->fds, new_cap * sizeof(task_fd_t));
+    if (!new_fds) return -ENOMEM;
+    memset(&new_fds[current_task->fds_capacity], 0, (new_cap - current_task->fds_capacity) * sizeof(task_fd_t));
+    i = current_task->fds_capacity;
+    if (start > i) i = start;
+    current_task->fds = new_fds;
+    current_task->fds_capacity = new_cap;
+    current_task->fds[i].in_use = 1;
+    current_task->fds[i].ref_count = 1;
+    current_task->fds[i].type = FD_TYPE_FILE;
+    current_task->fds[i].node = NULL;
+    current_task->fds[i].offset = 0;
+    current_task->fds[i].flags = 0;
+    current_task->fds[i].private_data = NULL;
+    return i;
 }
 
 static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
@@ -103,7 +126,7 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
 static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
@@ -140,7 +163,7 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
@@ -172,7 +195,7 @@ int sys_vfs_readdir(registers_t *regs) {
     if (type_addr && (type_addr >= 0xC0000000 || type_addr < 0x1000)) return -EFAULT;
 
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
@@ -212,7 +235,7 @@ static int sys_vfs_stat(int fd, const char *size_ptr, int type_ptr) {
     uint32_t size_addr = (uint32_t)size_ptr;
     uint32_t type_addr = (uint32_t)type_ptr;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
@@ -242,7 +265,7 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
@@ -479,7 +502,7 @@ static int sys_fstatfs(int fd, const char *buf_ptr, int size) {
     struct statfs_kernel *buf;
 
     if (!current_task) return -ESRCH;
-    if (fd < 0 || fd >= TASK_MAX_FDS) {
+    if (fd < 0 || fd >= current_task->fds_capacity) {
         return -EBADF;
     }
     if (!current_task->fds[fd].in_use) {

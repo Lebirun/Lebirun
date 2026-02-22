@@ -37,6 +37,8 @@ LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
+CRTBEGIN:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtbegin.o)
+CRTEND:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtend.o)
 
 UNIFONT_BIN=fonts/unifont.psf
 UNIFONT_OBJ=$(ARCHDIR)/unifont_bin.o
@@ -66,18 +68,16 @@ lib/string.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \
-$(ARCHDIR)/crtbegin.o \
 $(KERNEL_OBJS) \
-$(ARCHDIR)/crtend.o \
 $(ARCHDIR)/crtn.o
 
 LINK_LIST=\
 $(LDFLAGS) \
 $(ARCHDIR)/crti.o \
-$(ARCHDIR)/crtbegin.o \
+$(CRTBEGIN) \
 $(KERNEL_OBJS) \
 $(LIBS) \
-$(ARCHDIR)/crtend.o \
+$(CRTEND) \
 $(ARCHDIR)/crtn.o
 
 .PHONY: all clean install install-headers install-kernel
@@ -88,10 +88,6 @@ all: lebirun.kernel
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	grub-file --is-x86-multiboot lebirun.kernel
-
-$(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
-	mkdir -p $(ARCHDIR)
-	OBJ=`$(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=$(@F)` && cp "$$OBJ" $@
 
 .c.o:
 	$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)

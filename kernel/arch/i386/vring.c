@@ -628,12 +628,12 @@ void kproc_print_init(void) {
     pid = kproc_create("kprint", 1, NULL, NULL);
 
     if (pid == -1) {
-        kprint_ready = 1;
         t = create_task(klog_task_main, TASK_READY, false);
         if (t) {
             t->is_user = false;
             task_set_vring(t, 1);
             t->console_id = 0;
+            strcpy(t->name, "klog");
             lock_scheduler();
             add_task_to_runqueue(t);
             unlock_scheduler();
@@ -644,6 +644,10 @@ void kproc_print_init(void) {
 
 bool kprint_is_ready(void) {
     return kprint_ready != 0;
+}
+
+void kprint_enable(void) {
+    kprint_ready = 1;
 }
 
 void kprint_serial_async(const char *buf, size_t len) {

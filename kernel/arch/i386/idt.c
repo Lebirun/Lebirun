@@ -12,6 +12,8 @@
 #include <kernel/idt.h>
 #include <kernel/vring.h>
 #include <kernel/panic.h>
+#include <kernel/smp.h>
+#include <kernel/common.h>
 
 extern void isr0(void);
 extern void isr1(void);
@@ -62,9 +64,14 @@ extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
 extern void isr48(void);
+extern void isr49(void);
 extern void isr128(void);
+extern void isr255(void);
 
 volatile uint32_t tick_count = 0;
+volatile uint32_t cpu_user_ticks = 0;
+volatile uint32_t cpu_system_ticks = 0;
+volatile uint32_t cpu_idle_ticks = 0;
 
 #define MAX_IRQ_HANDLERS 16
 static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS] = {0};
@@ -198,6 +205,15 @@ registers_t* interrupt_handler(registers_t* regs)
             return schedule_from_irq(regs);
         }
         
+        if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
+            int cow_result;
+            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
+            cow_result = cow_handle_fault(fault_addr, current_task->pd_phys);
+            if (cow_result == 1) {
+                return regs;
+            }
+        }
+
         if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
             uint32_t actual_cr3;
             uint32_t expected_pd;
@@ -211,11 +227,11 @@ registers_t* interrupt_handler(registers_t* regs)
             __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
             __asm__ ("movl %%cr3, %0" : "=r" (actual_cr3));
             expected_pd = current_task->pd_phys;
-            printf("User PF at 0x%08X EIP=0x%08X err=0x%X\n", fault_addr, regs->eip, regs->err_code);
-            printf("  actual_cr3=0x%08X expected_pd=0x%08X exec_completed=%d\n", 
-                   actual_cr3, expected_pd, current_task->exec_completed);
             
             if (actual_cr3 != expected_pd) {
+                printf("User PF at 0x%08X EIP=0x%08X err=0x%X\n", fault_addr, regs->eip, regs->err_code);
+                printf("  actual_cr3=0x%08X expected_pd=0x%08X exec_completed=%d\n", 
+                       actual_cr3, expected_pd, current_task->exec_completed);
                 printf("  CR3 MISMATCH! Switching CR3 now...\n");
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(expected_pd) : "memory");
                 
@@ -231,7 +247,6 @@ registers_t* interrupt_handler(registers_t* regs)
             {
                 fault_page = fault_addr & ~0xFFFu;
                 phys = vmm_get_phys_in_pd(current_task->pd_phys, fault_page);
-                printf("  pd=0x%08X page_phys=0x%08X\n", current_task->pd_phys, phys);
                 if (phys == 0) {
                     stack_floor = 0x00700000u;
                     if (fault_addr >= stack_floor && fault_addr < 0x00800000u) {
@@ -247,7 +262,6 @@ registers_t* interrupt_handler(registers_t* regs)
                                     current_task->user_pages[current_task->user_pages_count] = new_phys;
                                     current_task->user_pages_count++;
                                 }
-                                printf("  grew user stack: page=0x%08X phys=0x%08X\n", fault_page, new_phys);
                                 return regs;
                             }
                             pfa_free(new_phys);
@@ -260,10 +274,118 @@ registers_t* interrupt_handler(registers_t* regs)
             return schedule_from_irq(regs);
         }
 
+        if (regs->int_no == 14 && !(regs->err_code & 0x4) && (regs->err_code & 0x3) == 0x3 && current_task && current_task->is_user && current_task->syscall_frame) {
+            int sc_cow_result;
+            uint32_t sc_cow_addr;
+            __asm__ ("movl %%cr2, %0" : "=r" (sc_cow_addr));
+            if (sc_cow_addr < 0xC0000000) {
+                sc_cow_result = cow_handle_fault(sc_cow_addr, current_task->pd_phys);
+                if (sc_cow_result == 1) {
+                    return regs;
+                }
+            }
+        }
+
         if (regs->int_no == 14 && !(regs->err_code & 0x4) && current_task && current_task->is_user && current_task->syscall_frame) {
-            __asm__ ("movl %%cr2, %0" : "=r" (fault_addr));
-            if (fault_addr < 0xC0000000) {
-                printf("User syscall PF at 0x%08X\n", fault_addr);
+            uint32_t sc_fault_addr;
+            uint32_t sc_fault_page;
+            uint32_t sc_phys;
+            uint32_t sc_actual_cr3;
+            uint32_t sc_expected_pd;
+            uint32_t sc_new_phys;
+            uint32_t sc_mapped_phys;
+            uint32_t *sc_new_user_pages;
+
+            __asm__ ("movl %%cr2, %0" : "=r" (sc_fault_addr));
+            if (sc_fault_addr < 0xC0000000) {
+                sc_fault_page = sc_fault_addr & ~0xFFFu;
+                sc_expected_pd = current_task->pd_phys;
+                __asm__ volatile ("mov %%cr3, %0" : "=r"(sc_actual_cr3));
+
+                sc_phys = vmm_get_phys_in_pd(sc_expected_pd, sc_fault_page);
+
+                if (sc_phys != 0) {
+                    if (sc_actual_cr3 != sc_expected_pd) {
+                        __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                    } else {
+                        __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                    }
+                    return regs;
+                }
+
+                if (sc_fault_addr >= 0x00700000u && sc_fault_addr < 0x00800000u) {
+                    sc_new_phys = pfa_alloc();
+                    if (sc_new_phys != 0) {
+                        pmm_zero_page_phys(sc_new_phys);
+                        vmm_map_page_in_pd(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
+                        sc_mapped_phys = vmm_get_phys_in_pd(sc_expected_pd, sc_fault_page);
+                        if (sc_mapped_phys != 0) {
+                            sc_new_user_pages = (uint32_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint32_t));
+                            if (sc_new_user_pages) {
+                                current_task->user_pages = sc_new_user_pages;
+                                current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
+                                current_task->user_pages_count++;
+                            }
+                            if (sc_actual_cr3 != sc_expected_pd) {
+                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                            } else {
+                                __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                            }
+                            return regs;
+                        }
+                        pfa_free(sc_new_phys);
+                    }
+                }
+
+                if (sc_fault_addr >= current_task->user_brk && sc_fault_addr < 0x40000000u) {
+                    sc_new_phys = pfa_alloc();
+                    if (sc_new_phys != 0) {
+                        pmm_zero_page_phys(sc_new_phys);
+                        vmm_map_page_in_pd(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
+                        sc_mapped_phys = vmm_get_phys_in_pd(sc_expected_pd, sc_fault_page);
+                        if (sc_mapped_phys != 0) {
+                            sc_new_user_pages = (uint32_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint32_t));
+                            if (sc_new_user_pages) {
+                                current_task->user_pages = sc_new_user_pages;
+                                current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
+                                current_task->user_pages_count++;
+                            }
+                            if (sc_actual_cr3 != sc_expected_pd) {
+                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                            } else {
+                                __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                            }
+                            return regs;
+                        }
+                        pfa_free(sc_new_phys);
+                    }
+                }
+
+                if (sc_fault_addr >= 0x1000u && sc_fault_addr < current_task->user_brk) {
+                    sc_new_phys = pfa_alloc();
+                    if (sc_new_phys != 0) {
+                        pmm_zero_page_phys(sc_new_phys);
+                        vmm_map_page_in_pd(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
+                        sc_mapped_phys = vmm_get_phys_in_pd(sc_expected_pd, sc_fault_page);
+                        if (sc_mapped_phys != 0) {
+                            sc_new_user_pages = (uint32_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint32_t));
+                            if (sc_new_user_pages) {
+                                current_task->user_pages = sc_new_user_pages;
+                                current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
+                                current_task->user_pages_count++;
+                            }
+                            if (sc_actual_cr3 != sc_expected_pd) {
+                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                            } else {
+                                __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                            }
+                            return regs;
+                        }
+                        pfa_free(sc_new_phys);
+                    }
+                }
+
+                printf("User syscall PF at 0x%08X (unresolvable)\n", sc_fault_addr);
                 task_exit_deferred(139);
                 return schedule_from_irq(regs);
             }
@@ -277,18 +399,46 @@ registers_t* interrupt_handler(registers_t* regs)
     }
 
     if (regs->int_no < 32) {
+        serial_puts("[TRAP] int=");
+        serial_puthex(regs->int_no);
+        serial_puts(" eip=");
+        serial_puthex(regs->eip);
+        serial_puts(" err=");
+        serial_puthex(regs->err_code);
+        serial_puts(" esp=");
+        serial_puthex(regs->esp);
+        serial_putchar('\n');
+        if (regs->int_no == 14) {
+            uint32_t cr2_val;
+            __asm__("movl %%cr2, %0" : "=r"(cr2_val));
+            serial_puts("[TRAP] cr2=");
+            serial_puthex(cr2_val);
+            serial_putchar('\n');
+        }
         kernel_panic("CPU Exception", regs);
     } else {
+        if (regs->int_no == 255) {
+            return regs;
+        }
+        if (regs->int_no == 49) {
+            __asm__ volatile (
+                "movl %%cr3, %%eax\n\t"
+                "movl %%eax, %%cr3\n\t"
+                ::: "eax", "memory"
+            );
+            lapic_eoi();
+            return regs;
+        }
         if (regs->int_no == 48) {
             return schedule_from_irq(regs);
         } else if (regs->int_no == 128) {
             uint32_t old_cr3;
             uint32_t new_cr3;
-            uint32_t *old_pages;
-            uint32_t old_pd;
             
             do_syscall(regs);
-            
+
+            __asm__ volatile ("cli" ::: "memory");
+
             if (current_task && current_task->exec_completed) {
                 DEBUG_IDT("IDT: exec completed, preparing to switch CR3\n");
                 DEBUG_IDT("IDT: exec regs: eip=0x%08X useresp=0x%08X cs=0x%X ss=0x%X\n",
@@ -316,16 +466,9 @@ registers_t* interrupt_handler(registers_t* regs)
                     current_task->cr3 = new_cr3;
                 }
                 
-                old_pages = current_task->exec_old_pages;
-                old_pd = current_task->exec_old_pd;
-                
-                if (old_pages) {
-                    kfree(old_pages);
-                }
-                
-                if (old_pd) {
-                    vmm_free_page_directory(old_pd);
-                }
+                exec_cleanup_enqueue(current_task->exec_old_pd,
+                                     current_task->exec_old_pages,
+                                     current_task->exec_old_pages_count);
                 
                 current_task->exec_old_pages = NULL;
                 current_task->exec_old_pages_count = 0;
@@ -336,35 +479,42 @@ registers_t* interrupt_handler(registers_t* regs)
             if (current_task && current_task->state == TASK_DEAD) {
                 return schedule_from_irq(regs);
             }
-            if ((regs->cs & 0x3) == 0x3) {
-                if (regs->eip < 0x1000 || regs->eip >= 0xC0000000) {
-                    printf("IDT: CRITICAL: syscall return eip=0x%08X is invalid!\n", regs->eip);
-                    printf("IDT: regs=%p cs=0x%X useresp=0x%08X ss=0x%X eflags=0x%08X\n",
-                           regs, regs->cs, regs->useresp, regs->ss, regs->eflags);
-                    printf("IDT: eax=0x%X ebx=0x%X ecx=0x%X edx=0x%X\n",
-                           regs->eax, regs->ebx, regs->ecx, regs->edx);
-                    __asm__ volatile ("cli; hlt");
-                }
-
-                if (regs->useresp < 0x1000 || regs->useresp >= 0xC0000000) {
-                    printf("IDT: CRITICAL: useresp=0x%08X invalid for user return!\n", regs->useresp);
-                    printf("IDT: regs=%p eip=0x%08X cs=0x%X ss=0x%X\n",
-                           regs, regs->eip, regs->cs, regs->ss);
-                    __asm__ volatile ("cli; hlt");
-                }
-            }
             return regs;
         }
 
         irq = regs->int_no - 32;
-        if (irq >= 8) outb(0xA0, 0x20);
-        outb(0x20, 0x20);
+        if (lapic_base) {
+            lapic_eoi();
+        } else {
+            if (irq >= 8) outb(0xA0, 0x20);
+            outb(0x20, 0x20);
+        }
         
         if (irq == 0) {
-            tick_count++;
+            __sync_fetch_and_add(&tick_count, 1);
+
+            if (current_task) {
+                if (current_task->id == 0 && !current_task->is_user) {
+                    __sync_fetch_and_add(&cpu_idle_ticks, 1);
+                } else if (regs->cs & 0x3) {
+                    current_task->utime++;
+                    __sync_fetch_and_add(&cpu_user_ticks, 1);
+                } else {
+                    current_task->stime++;
+                    __sync_fetch_and_add(&cpu_system_ticks, 1);
+                }
+            } else {
+                __sync_fetch_and_add(&cpu_idle_ticks, 1);
+            }
+
+            if ((tick_count & 0x7F) == 0) {
+                extern void task_update_cached_stats(void);
+                task_update_cached_stats();
+            }
 
             wake_sleeping_tasks();
-            reap_dead_tasks();
+            reap_request();
+            exec_drain_request();
             extern void fb_tick(void);
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
             kernel_cr3 = vmm_get_kernel_cr3();
@@ -377,7 +527,7 @@ registers_t* interrupt_handler(registers_t* regs)
             net_tick();
 
             extern void kprint_poll(uint32_t max_items);
-            kprint_poll(128);
+            kprint_poll(16);
 
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
@@ -387,7 +537,11 @@ registers_t* interrupt_handler(registers_t* regs)
 
             if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
                 signal_deliver_pending(regs);
+                if (current_task && (current_task->state == TASK_DEAD || current_task->state == TASK_BLOCKED)) {
+                    regs = schedule_from_irq(regs);
+                }
             }
+
         } else if (irq == 1) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
             kernel_cr3 = vmm_get_kernel_cr3();
@@ -547,8 +701,11 @@ void idt_init(void)
     idt_set_gate(46, (uint32_t)isr46);
     idt_set_gate(47, (uint32_t)isr47);
     idt_set_gate(48, (uint32_t)isr48);
+    idt_set_gate(49, (uint32_t)isr49);
 
-    idt_set_gate_flags(128, (uint32_t)isr128, 0xEE);
+    idt_set_gate_flags(128, (uint32_t)isr128, 0xEF);
+
+    idt_set_gate(255, (uint32_t)isr255);
 
     for (i = 0; i < 49; i++) {
         if (i == 48) break;
@@ -567,4 +724,8 @@ void idt_init(void)
     outb(0x3F8, 'D');
     outb(0x3F8, 'T');
     outb(0x3F8, '\n');
+}
+
+void idt_load(void) {
+    __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 }

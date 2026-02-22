@@ -14,8 +14,14 @@ for PROJECT in $PROJECTS; do
   fi
 done
 
+
+
 echo "Building user programs..."
 (cd userprog && $MAKE all)
+if [ -d "userprog/htop-3.4.1" ]; then
+  echo "Building htop..."
+  (cd userprog && $MAKE htop)
+fi
 
 rebuild_initrd() {
   local DIR="$1"

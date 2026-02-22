@@ -36,8 +36,9 @@ static inline void temp_lock_release(uint32_t eflags) {
 }
 
 extern void pae_sync_kernel_mappings(void);
-extern uint64_t *pae_vmm_page_tables[32];
+extern uint64_t **pae_vmm_page_tables;
 extern uint32_t pae_vmm_pt_count;
+extern uint32_t pae_vmm_pt_capacity;
 extern uint64_t boot_pd_high[];
 
 void pae_init_temp_mapping(void) {
@@ -64,7 +65,7 @@ void pae_init_temp_mapping(void) {
         return;
     }
 
-    if (pae_vmm_pt_count >= 32) {
+    if (pae_vmm_pt_count >= pae_vmm_pt_capacity) {
         printf("pae_init_temp_mapping: out of vmm page tables\n");
         return;
     }

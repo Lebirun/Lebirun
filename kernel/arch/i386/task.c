@@ -11,6 +11,9 @@
 #include <kernel/creds.h>
 #include <kernel/vring.h>
 #include <kernel/kstack.h>
+#include <kernel/spinlock.h>
+#include <kernel/smp.h>
+#include <kernel/vfs.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -21,15 +24,15 @@
 #define KERR_ENOMEM  12
 
 #define TASK_STACK_SIZE 4096
-#define SCHED_DEFAULT_TIMESLICE 5
+#define SCHED_DEFAULT_TIMESLICE 3
 #define KERNEL_STACK_SIZE 8192
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x10000u
+#define USER_STACK_SIZE 0x4000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 
-static int scheduler_lock = 0;
+static spinlock_t sched_lock = {0};
 int scheduler_initialized = 0;
 extern volatile uint32_t tick_count;
 
@@ -37,26 +40,59 @@ extern void switch_to_asm(uint32_t* old_esp, uint32_t new_esp);
 
 task_t* current_task = NULL;
 task_t* ready_queue_head = NULL;
+task_t* all_tasks_head = NULL;
 static task_t* sleep_queue_head = NULL;
 static task_t* dead_queue_head = NULL;
-static volatile int schedule_force = 0;
+
+static volatile int reap_pending = 0;
+static volatile int exec_drain_pending = 0;
 
 static uint32_t next_task_id = 1;
 
-static void serial_print(const char *s) {
-    while (*s) {
-        serial_putchar(*s++);
+#define EXEC_CLEANUP_QUEUE_SIZE 64
+
+typedef struct {
+    uint32_t old_pd;
+    uint32_t *old_pages;
+    uint32_t old_pages_count;
+} exec_cleanup_entry_t;
+
+static exec_cleanup_entry_t exec_cleanup_queue[EXEC_CLEANUP_QUEUE_SIZE];
+static int exec_cleanup_head = 0;
+static int exec_cleanup_tail = 0;
+
+void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count) {
+    int next_tail = (exec_cleanup_tail + 1) % EXEC_CLEANUP_QUEUE_SIZE;
+    if (next_tail == exec_cleanup_head) {
+        if (pages) {
+            kfree(pages);
+        }
+        if (pd) vmm_free_page_directory(pd);
+        return;
     }
+    exec_cleanup_queue[exec_cleanup_tail].old_pd = pd;
+    exec_cleanup_queue[exec_cleanup_tail].old_pages = pages;
+    exec_cleanup_queue[exec_cleanup_tail].old_pages_count = count;
+    exec_cleanup_tail = next_tail;
 }
 
-static void serial_hex(uint32_t v) {
-    int i;
-    int d;
-    
-    serial_print("0x");
-    for (i = 28; i >= 0; i -= 4) {
-        d = (v >> i) & 0xF;
-        serial_putchar(d < 10 ? '0' + d : 'A' + d - 10);
+void exec_cleanup_drain(void) {
+    uint32_t *pages;
+    uint32_t pd;
+
+    while (exec_cleanup_head != exec_cleanup_tail) {
+        pages = exec_cleanup_queue[exec_cleanup_head].old_pages;
+        pd = exec_cleanup_queue[exec_cleanup_head].old_pd;
+
+        if (pages) {
+            kfree(pages);
+        }
+        if (pd) vmm_free_page_directory(pd);
+
+        exec_cleanup_queue[exec_cleanup_head].old_pd = 0;
+        exec_cleanup_queue[exec_cleanup_head].old_pages = NULL;
+        exec_cleanup_queue[exec_cleanup_head].old_pages_count = 0;
+        exec_cleanup_head = (exec_cleanup_head + 1) % EXEC_CLEANUP_QUEUE_SIZE;
     }
 }
 
@@ -106,28 +142,19 @@ static int task_ptr_valid(task_t *t) {
 
 task_t* task_find(pid_t pid) {
     task_t *t;
-    task_t *d;
+    int limit;
 
     lock_scheduler();
-    t = ready_queue_head;
-    if (t) {
-        do {
-            if (!task_ptr_valid(t)) break;
-            if (t->pid == pid) {
-                unlock_scheduler();
-                return t;
-            }
-            t = t->next;
-        } while (t && t != ready_queue_head);
-    }
-
-    d = dead_queue_head;
-    while (d && task_ptr_valid(d)) {
-        if (d->pid == pid) {
+    t = all_tasks_head;
+    limit = 1024;
+    while (t && limit > 0) {
+        if (!task_ptr_valid(t)) break;
+        if (t->pid == pid) {
             unlock_scheduler();
-            return d;
+            return t;
         }
-        d = d->wait_next;
+        t = t->all_next;
+        limit--;
     }
     unlock_scheduler();
     return NULL;
@@ -135,36 +162,23 @@ task_t* task_find(pid_t pid) {
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
     task_t *t;
-    task_t *d;
     int found = 0;
+    int limit;
 
     lock_scheduler();
 
-    t = ready_queue_head;
-    if (t) {
-        do {
-            if (!task_ptr_valid(t)) break;
-            if (t->ppid == parent_pid) {
-                if (pgid_filter <= 0 || t->pgid == pgid_filter) {
-                    found = 1;
-                    break;
-                }
+    t = all_tasks_head;
+    limit = 1024;
+    while (t && limit > 0) {
+        if (!task_ptr_valid(t)) break;
+        if (t->ppid == parent_pid) {
+            if (pgid_filter <= 0 || t->pgid == pgid_filter) {
+                found = 1;
+                break;
             }
-            t = t->next;
-        } while (t && t != ready_queue_head);
-    }
-
-    if (!found) {
-        d = dead_queue_head;
-        while (d && task_ptr_valid(d)) {
-            if (d->ppid == parent_pid) {
-                if (pgid_filter <= 0 || d->pgid == pgid_filter) {
-                    found = 1;
-                    break;
-                }
-            }
-            d = d->wait_next;
         }
+        t = t->all_next;
+        limit--;
     }
 
     unlock_scheduler();
@@ -308,6 +322,7 @@ void init_tasks(void) {
     memset(current_task, 0, sizeof(task_t));
     current_task->id = 0;
     current_task->pid = 0;
+    strcpy(current_task->name, "idle");
     current_task->state = TASK_RUNNING;
     current_task->cr3 = read_cr3();
     current_task->next = current_task;
@@ -356,18 +371,46 @@ void init_tasks(void) {
     current_task->vring_minor = 0;
     current_task->is_kernel_task = false;
     ready_queue_head = current_task;
+    all_tasks_head = current_task;
+    current_task->all_next = NULL;
+
+    {
+        cpu_info_t *bsp;
+        bsp = smp_this_cpu();
+        bsp->current_task = current_task;
+        bsp->scheduler_lock_depth = 0;
+        bsp->sched_saved_eflags = 0;
+        bsp->schedule_force = 0;
+    }
     
     scheduler_initialized = 1;
 }
 
 void lock_scheduler(void) {
-    __asm__ __volatile__ ("cli" ::: "memory");
-    scheduler_lock++;
+    uint32_t eflags;
+    cpu_info_t *cpu;
+
+    __asm__ __volatile__ ("pushfl; popl %0; cli" : "=r"(eflags) :: "memory");
+    cpu = smp_this_cpu();
+    if (cpu->scheduler_lock_depth == 0) {
+        spin_lock(&sched_lock);
+        cpu->sched_saved_eflags = eflags;
+    }
+    cpu->scheduler_lock_depth++;
 }
 
 void unlock_scheduler(void) {
-    if (--scheduler_lock == 0) {
-        __asm__ __volatile__ ("sti" ::: "memory");
+    cpu_info_t *cpu;
+    uint32_t eflags;
+
+    cpu = smp_this_cpu();
+    cpu->scheduler_lock_depth--;
+    if (cpu->scheduler_lock_depth == 0) {
+        eflags = cpu->sched_saved_eflags;
+        spin_unlock(&sched_lock);
+        if (eflags & (1 << 9)) {
+            __asm__ __volatile__ ("sti" ::: "memory");
+        }
     }
 }
 
@@ -426,38 +469,11 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
 
     if (!entry) return NULL;
 
-    if (debug_task) {
-        static uint32_t last_verify_tick = 0;
-        static uint32_t last_seen_tick = 0;
-        static uint32_t same_tick_calls = 0;
-        uint32_t now;
-        
-        now = tick_count;
-        if (now != last_seen_tick) {
-            last_seen_tick = now;
-            same_tick_calls = 0;
-        }
-        if ((now - last_verify_tick) >= 250 || (same_tick_calls++ & 0x3F) == 0) {
-            heap_verify();
-            last_verify_tick = tick_count;
-        }
-    }
-
     new_task = (task_t*)kmalloc(sizeof(task_t));
     stack_base = user_mode ? NULL : (uint8_t*)kmalloc(TASK_STACK_SIZE);
     kernel_stack_base = kstack_alloc();
     if (!new_task || (!user_mode && !stack_base) || !kernel_stack_base) {
         printf("Task alloc fail!\n");
-        if (debug_task) {
-            static uint32_t last_verify_tick_fail = 0;
-            uint32_t now;
-            
-            now = tick_count;
-            if ((now - last_verify_tick_fail) >= 50) {
-                heap_verify();
-                last_verify_tick_fail = now;
-            }
-        }
         if (new_task) kfree(new_task);
         if (stack_base) kfree(stack_base);
         if (kernel_stack_base) kstack_free(kernel_stack_base);
@@ -474,7 +490,9 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     next_task_id++;
 
     creds_init_task(new_task->pid);
+    signals_init_task(new_task->pid);
 
+    new_task->start_tick = tick_count;
     new_task->state = initial_state;
     new_task->next = NULL;
     new_task->cr3 = cr3;
@@ -556,6 +574,11 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     }
 
     DEBUG_TASK("Task created: id=%u pid=%u EIP=0x%08X ESP=0x%08X%s\n", new_task->id, new_task->pid, (uint32_t)entry, new_task->regs.esp, user_mode ? " (USER)" : "");
+
+    lock_scheduler();
+    new_task->all_next = all_tasks_head;
+    all_tasks_head = new_task;
+    unlock_scheduler();
 
     return new_task;
 }
@@ -655,17 +678,9 @@ void sleep_ms(uint32_t ms) {
 }
 
 void task_free_user_memory(task_t* t) {
-    uint32_t i;
-
     if (!t) return;
 
-    if (t->user_pages && t->user_pages_count > 0) {
-        for (i = 0; i < t->user_pages_count; i++) {
-            if (t->user_pages[i]) {
-                pfa_free(t->user_pages[i]);
-                t->user_pages[i] = 0;
-            }
-        }
+    if (t->user_pages) {
         kfree(t->user_pages);
         t->user_pages = NULL;
         t->user_pages_count = 0;
@@ -693,12 +708,6 @@ void reap_dead_tasks(void) {
     while (t && task_ptr_valid(t)) {
         next = t->wait_next;
         t->wait_next = NULL;
-        if (t->is_user) {
-            t->wait_next = keep;
-            keep = t;
-            t = next;
-            continue;
-        }
 
         if (t->join_refs != 0 || t->in_wait_queue) {
             t->wait_next = keep;
@@ -707,7 +716,23 @@ void reap_dead_tasks(void) {
             continue;
         }
 
+        {
+            task_t **pp;
+            lock_scheduler();
+            pp = &all_tasks_head;
+            while (*pp) {
+                if (*pp == t) {
+                    *pp = t->all_next;
+                    break;
+                }
+                pp = &(*pp)->all_next;
+            }
+            unlock_scheduler();
+        }
+
         task_free_user_memory(t);
+        task_fd_close_all(t);
+        if (t->fds) kfree(t->fds);
         if (t->stack_base) kfree(t->stack_base);
         if (t->kernel_stack_base) kstack_free(t->kernel_stack_base);
         kfree(t);
@@ -727,6 +752,25 @@ void reap_dead_tasks(void) {
     }
 }
 
+void reap_request(void) {
+    reap_pending = 1;
+}
+
+void exec_drain_request(void) {
+    exec_drain_pending = 1;
+}
+
+void task_deferred_work(void) {
+    if (reap_pending) {
+        reap_pending = 0;
+        reap_dead_tasks();
+    }
+    if (exec_drain_pending) {
+        exec_drain_pending = 0;
+        exec_cleanup_drain();
+    }
+}
+
 void switch_to(task_t* next) {
     task_t *prev;
     uint32_t esp0;
@@ -735,6 +779,7 @@ void switch_to(task_t* next) {
 
     prev = current_task;
     current_task = next;
+    smp_this_cpu()->current_task = next;
     prev->state = TASK_READY;
     next->state = TASK_RUNNING;
 
@@ -759,11 +804,12 @@ void switch_to(task_t* next) {
 }
 
 void schedule(void) {
-    schedule_force = 1;
+    smp_this_cpu()->schedule_force = 1;
     asm volatile ("int $48");
 }
 
 void yield(void) {
+    task_deferred_work();
     schedule();
 }
 
@@ -771,14 +817,17 @@ void block_current(void) {
     lock_scheduler();
     if (current_task) current_task->state = TASK_BLOCKED;
     unlock_scheduler();
-    schedule_force = 1;
+    smp_this_cpu()->schedule_force = 1;
     schedule();
 }
 
 void wake_task(task_t* task) {
     if (!task) return;
     lock_scheduler();
-    if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+    if (task->state == TASK_BLOCKED) {
+        task->state = TASK_READY;
+        sleepq_remove(task);
+    }
     unlock_scheduler();
 }
 
@@ -807,62 +856,12 @@ void task_kill(task_t* task, uint32_t exit_code) {
     unlock_scheduler();
 }
 
-static void free_dead_task_resources(task_t* t) {
-    task_t* prev;
-    uint32_t i;
-    
-    if (!t || t->state != TASK_DEAD) return;
-    
-    if (dead_queue_head == t) {
-        dead_queue_head = t->wait_next;
-    } else {
-        prev = dead_queue_head;
-        while (prev && prev->wait_next != t) prev = prev->wait_next;
-        if (prev) prev->wait_next = t->wait_next;
-    }
-    t->wait_next = NULL;
-    
-    unlock_scheduler();
-    
-    if (t->user_pages && t->user_pages_count > 0) {
-        for (i = 0; i < t->user_pages_count; i++) {
-            if (t->user_pages[i]) {
-                pfa_free(t->user_pages[i]);
-                t->user_pages[i] = 0;
-            }
-        }
-        kfree(t->user_pages);
-        t->user_pages = NULL;
-        t->user_pages_count = 0;
-    }
-    
-    if (t->pd_phys) {
-        vmm_free_page_directory(t->pd_phys);
-        t->pd_phys = 0;
-    }
-    
-    if (t->stack_base) {
-        kfree(t->stack_base);
-        t->stack_base = NULL;
-    }
-    if (t->kernel_stack_base) {
-        kstack_free(t->kernel_stack_base);
-        t->kernel_stack_base = NULL;
-    }
-    kfree(t);
-    
-    lock_scheduler();
-}
-
 int task_join(task_t* task, uint32_t* exit_code) {
     if (!task || task == current_task) return -1;
 
     lock_scheduler();
     if (task->state == TASK_DEAD) {
         if (exit_code) *exit_code = task->exit_code;
-        if (task->join_refs == 0 && !task->in_wait_queue) {
-            free_dead_task_resources(task);
-        }
         unlock_scheduler();
         return 0;
     }
@@ -883,10 +882,6 @@ int task_join(task_t* task, uint32_t* exit_code) {
     if (exit_code) *exit_code = task->exit_code;
     if (task->join_refs) task->join_refs--;
     current_task->join_target = NULL;
-    
-    if (task->join_refs == 0 && task->state == TASK_DEAD && !task->in_wait_queue) {
-        free_dead_task_resources(task);
-    }
     unlock_scheduler();
     return 0;
 }
@@ -936,9 +931,20 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int valid_ds;
     int valid_cs;
     uint32_t esp0;
+    cpu_info_t *this_cpu;
+    int got_lock;
+    registers_t *result;
 
     if (!current_task || !ready_queue_head) return regs;
 
+    this_cpu = smp_this_cpu();
+
+    if (this_cpu->scheduler_lock_depth > 0) return regs;
+
+    got_lock = spin_trylock(&sched_lock);
+    if (!got_lock) return regs;
+
+    result = regs;
     prev_task = current_task;
     
     __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));
@@ -950,10 +956,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     must_switch = (prev_task->state == TASK_DEAD);
 
     if (regs->int_no != 48 && prev_task->syscall_frame && !must_switch) {
-        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-        }
-        return regs;
+        goto out_restore_cr3;
     }
 
     if (!must_switch) {
@@ -962,16 +965,13 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     is_idle = (prev_task->id == 0 && !prev_task->is_user);
     
-    if (!schedule_force && !must_switch && !is_idle) {
+    if (!this_cpu->schedule_force && !must_switch && !is_idle) {
         if (prev_task->time_slice > 0) prev_task->time_slice--;
         if (prev_task->time_slice != 0) {
-            if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-            }
-            return regs;
+            goto out_restore_cr3;
         }
     }
-    schedule_force = 0;
+    this_cpu->schedule_force = 0;
 
     if (!must_switch) {
         prev_task->time_slice = prev_task->base_time_slice;
@@ -993,36 +993,29 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     if (!next && must_switch) {
+        spin_unlock(&sched_lock);
         printf("schedule: no runnable tasks, system halted\n");
         for (;;) asm volatile ("hlt");
     }
     
     if (!next) {
-        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-        }
-        return regs;
+        goto out_restore_cr3;
     }
 
     if (next->regs.esp == 0) {
         if (must_switch) {
+            spin_unlock(&sched_lock);
             printf("schedule: next task has null frame, system halted\n");
             for (;;) asm volatile ("hlt");
         }
-        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-        }
-        return regs;
+        goto out_restore_cr3;
     }
 
     next_esp = next->regs.esp;
     if (!((next_esp >= 0xC0000000u && next_esp < 0xD0000000u) ||
           (next_esp >= HEAP_START && next_esp < (HEAP_START + HEAP_MAX_SIZE)) ||
           kstack_is_in_region(next_esp))) {
-        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-        }
-        return regs;
+        goto out_restore_cr3;
     }
     return_frame = (registers_t*)next_esp;
 
@@ -1040,37 +1033,16 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     if (!valid_gs || !valid_fs || !valid_es || !valid_ds || !valid_cs) {
         if (next->id == 0) {
-            if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-            }
-            return regs;
+            goto out_restore_cr3;
         }
-        serial_print("SCHED: BAD FRAME esp=");
-        serial_hex(next->regs.esp);
-        serial_print(" gs=");
-        serial_hex(gs_val);
-        serial_print(" fs=");
-        serial_hex(fs_val);
-        serial_print(" es=");
-        serial_hex(es_val);
-        serial_print(" ds=");
-        serial_hex(ds_val);
-        serial_print(" cs=");
-        serial_hex(cs_val);
-        serial_print(" task=");
-        serial_hex(next->id);
-        serial_print("\n");
-
         task_kill(next, 0xBADF00D);
-        if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-        }
-        return regs;
+        goto out_restore_cr3;
     }
 
     if (prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
     next->state = TASK_RUNNING;
     current_task = next;
+    this_cpu->current_task = next;
 
     if (next->is_user && ((return_frame->cs & 0x3) == 0x3)) {
         return_frame->ds = return_frame->es = return_frame->fs = 0x23;
@@ -1100,7 +1072,15 @@ registers_t* schedule_from_irq(registers_t* regs) {
         }
     }
 
+    spin_unlock(&sched_lock);
     return return_frame;
+
+out_restore_cr3:
+    if (kernel_cr3 && entry_cr3 != kernel_cr3) {
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
+    }
+    spin_unlock(&sched_lock);
+    return result;
 }
 
 void set_syscall_frame(registers_t *frame) {
@@ -1117,7 +1097,13 @@ void clear_syscall_frame(void) {
 
 void task_init_fds(task_t *task) {
     if (!task) return;
-    memset(task->fds, 0, sizeof(task->fds));
+    task->fds = (task_fd_t *)kmalloc(TASK_INIT_FDS * sizeof(task_fd_t));
+    if (!task->fds) {
+        task->fds_capacity = 0;
+        return;
+    }
+    task->fds_capacity = TASK_INIT_FDS;
+    memset(task->fds, 0, TASK_INIT_FDS * sizeof(task_fd_t));
     task->fds[0].in_use = 1;
     task->fds[0].type = FD_TYPE_STDIN;
     task->fds[0].ref_count = 1;
@@ -1132,8 +1118,8 @@ void task_init_fds(task_t *task) {
 int task_fd_alloc(task_t *task) {
     int i;
     
-    if (!task) return -1;
-    for (i = 3; i < TASK_MAX_FDS; i++) {
+    if (!task || !task->fds) return -1;
+    for (i = 3; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use) {
             task->fds[i].in_use = 1;
             task->fds[i].ref_count = 1;
@@ -1144,7 +1130,7 @@ int task_fd_alloc(task_t *task) {
 }
 
 void task_fd_free(task_t *task, int fd) {
-    if (!task || fd < 0 || fd >= TASK_MAX_FDS) return;
+    if (!task || !task->fds || fd < 0 || fd >= task->fds_capacity) return;
     if (!task->fds[fd].in_use) return;
     task->fds[fd].in_use = 0;
     task->fds[fd].ref_count = 0;
@@ -1155,17 +1141,40 @@ void task_fd_free(task_t *task, int fd) {
 }
 
 task_fd_t *task_fd_get(task_t *task, int fd) {
-    if (!task || fd < 0 || fd >= TASK_MAX_FDS) return NULL;
+    if (!task || !task->fds || fd < 0 || fd >= task->fds_capacity) return NULL;
     if (!task->fds[fd].in_use) return NULL;
     return &task->fds[fd];
 }
 
 void task_fd_close_all(task_t *task) {
     int i;
+    task_fd_t *tfd;
+    pipe_t *p;
     
-    if (!task) return;
-    for (i = 3; i < TASK_MAX_FDS; i++) {
-        task_fd_free(task, i);
+    if (!task || !task->fds) return;
+    for (i = 3; i < task->fds_capacity; i++) {
+        tfd = &task->fds[i];
+        if (!tfd->in_use) continue;
+        if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+            p = (pipe_t *)tfd->private_data;
+            if (p) {
+                if (tfd->type == FD_TYPE_PIPE_R) p->readers--;
+                else p->writers--;
+                waitq_wake_all(&p->read_waitq);
+                waitq_wake_all(&p->write_waitq);
+                if (p->readers <= 0 && p->writers <= 0) {
+                    kfree(p);
+                }
+            }
+        } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            vfs_close((vfs_node_t *)tfd->node);
+        }
+        tfd->in_use = 0;
+        tfd->ref_count = 0;
+        tfd->node = NULL;
+        tfd->offset = 0;
+        tfd->flags = 0;
+        tfd->private_data = NULL;
     }
 }
 
@@ -1181,6 +1190,7 @@ pid_t task_fork(registers_t *parent_regs) {
     uint8_t* kernel_stack_base;
     uint32_t i;
     registers_t *child_frame;
+    int parent_cap;
 
     if (!current_task || !current_task->is_user) {
         printf("task_fork: can only fork user tasks\n");
@@ -1212,9 +1222,6 @@ pid_t task_fork(registers_t *parent_regs) {
         if (child) kfree(child);
         if (kernel_stack_base) kstack_free(kernel_stack_base);
         if (child_user_pages) {
-            for (i = 0; i < child_user_pages_count; i++) {
-                pfa_free(child_user_pages[i]);
-            }
             kfree(child_user_pages);
         }
         vmm_free_page_directory(child_pd);
@@ -1227,11 +1234,13 @@ pid_t task_fork(registers_t *parent_regs) {
     next_task_id++;
 
     creds_copy_task(current_task->pid, child->pid);
+    signals_init_task(child->pid);
 
     child->ppid = current_task->pid;
     child->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
     child->sid = current_task->sid ? current_task->sid : current_task->pid;
 
+    child->start_tick = tick_count;
     child->state = TASK_READY;
     child->next = NULL;
     child->cr3 = child_pd;
@@ -1262,8 +1271,23 @@ pid_t task_fork(registers_t *parent_regs) {
     child->tls_limit = current_task->tls_limit;
     child->waiting_for_any_child = 0;
     memcpy(child->cwd, current_task->cwd, sizeof(child->cwd));
-    memcpy(child->fds, current_task->fds, sizeof(child->fds));
-    for (i = 0; i < TASK_MAX_FDS; i++) {
+    memcpy(child->name, current_task->name, sizeof(child->name));
+    parent_cap = current_task->fds_capacity;
+    if (parent_cap < TASK_INIT_FDS) parent_cap = TASK_INIT_FDS;
+    child->fds = (task_fd_t *)kmalloc(parent_cap * sizeof(task_fd_t));
+    if (!child->fds) {
+        kfree(child);
+        kstack_free(kernel_stack_base);
+        if (child_user_pages)
+            kfree(child_user_pages);
+        vmm_free_page_directory(child_pd);
+        return -KERR_ENOMEM;
+    }
+    child->fds_capacity = parent_cap;
+    memset(child->fds, 0, parent_cap * sizeof(task_fd_t));
+    if (current_task->fds && current_task->fds_capacity > 0)
+        memcpy(child->fds, current_task->fds, current_task->fds_capacity * sizeof(task_fd_t));
+    for (i = 0; i < (uint32_t)child->fds_capacity; i++) {
         if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
             child->fds[i].ref_count++;
         }
@@ -1289,6 +1313,8 @@ pid_t task_fork(registers_t *parent_regs) {
     child->regs.ds = child->regs.es = child->regs.fs = child->regs.gs = child_frame->ds;
 
     lock_scheduler();
+    child->all_next = all_tasks_head;
+    all_tasks_head = child;
     add_task_to_runqueue(child);
     unlock_scheduler();
 
@@ -1323,7 +1349,6 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     uint8_t random_bytes[16];
     uint32_t random_addr;
     uint32_t argc_val;
-    uint32_t i;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec: can only exec in user tasks\n");
@@ -1377,10 +1402,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         task_error("task_exec: ELF loading failed (%d)\n", load_result);
-        if (elf_pages) {
-            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
-            kfree(elf_pages);
-        }
+        if (elf_pages) kfree(elf_pages);
         vmm_free_page_directory(new_pd);
         kfree(kernel_bin);
         return -1;
@@ -1392,10 +1414,7 @@ int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs) {
     stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec: failed to map stack\n");
-        if (elf_pages) {
-            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
-            kfree(elf_pages);
-        }
+        if (elf_pages) kfree(elf_pages);
         vmm_free_page_directory(new_pd);
         return -1;
     }
@@ -1594,6 +1613,8 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     uint32_t check_stack_top;
     uint32_t final_entry;
     uint32_t final_sp;
+    const char *base;
+    int n;
 
     __asm__ volatile ("mov %%esp, %0" : "=r"(stack_ptr));
     if (current_task && current_task->kernel_stack_base) {
@@ -1607,10 +1628,12 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
+        kfree((void *)bin_start);
         return -KERR_EPERM;
     }
     if (!bin_start || bin_size == 0) {
         task_error("task_exec_with_args: invalid binary\n");
+        if (bin_start) kfree((void *)bin_start);
         return -KERR_ENOEXEC;
     }
 
@@ -1618,68 +1641,62 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (free_pages < needed_estimate) {
         task_error("task_exec_with_args: insufficient memory\n");
+        kfree((void *)bin_start);
         return -KERR_ENOMEM;
     }
 
-    kernel_bin = (uint8_t *)kmalloc(bin_size);
-    if (!kernel_bin) {
-        task_error("task_exec_with_args: failed to allocate kernel buffer\n");
-        return -KERR_ENOMEM;
-    }
-    memcpy(kernel_bin, bin_start, bin_size);
+    kernel_bin = (uint8_t *)bin_start;
 
     k_argv = NULL;
     k_envp = NULL;
 
     if (argc > 0 && argv) {
-        k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
-        if (!k_argv) {
-            kfree(kernel_bin);
-            return -KERR_ENOMEM;
-        }
-        for (i = 0; i < argc; i++) {
-            len = 0;
-            while (argv[i][len]) len++;
-            k_argv[i] = (char *)kmalloc(len + 1);
-            if (!k_argv[i]) {
-                for (j = 0; j < i; j++) kfree(k_argv[j]);
-                kfree(k_argv);
+            k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
+            if (!k_argv) {
                 kfree(kernel_bin);
                 return -KERR_ENOMEM;
             }
-            for (j = 0; j <= len; j++) k_argv[i][j] = argv[i][j];
-        }
-        k_argv[argc] = NULL;
-    }
-
-    if (envc > 0 && envp) {
-        k_envp = (char **)kmalloc((envc + 1) * sizeof(char *));
-        if (!k_envp) {
-            if (k_argv) {
-                for (i = 0; i < argc; i++) kfree(k_argv[i]);
-                kfree(k_argv);
+            for (i = 0; i < argc; i++) {
+                len = strlen(argv[i]);
+                k_argv[i] = (char *)kmalloc(len + 1);
+                if (!k_argv[i]) {
+                    for (j = 0; j < i; j++) kfree(k_argv[j]);
+                    kfree(k_argv);
+                    kfree(kernel_bin);
+                    return -KERR_ENOMEM;
+                }
+                memcpy(k_argv[i], argv[i], len + 1);
             }
-            kfree(kernel_bin);
-            return -KERR_ENOMEM;
+            k_argv[argc] = NULL;
         }
-        for (i = 0; i < envc; i++) {
-            len = 0;
-            while (envp[i][len]) len++;
-            k_envp[i] = (char *)kmalloc(len + 1);
-            if (!k_envp[i]) {
-                for (j = 0; j < i; j++) kfree(k_envp[j]);
-                kfree(k_envp);
+
+        if (envc > 0 && envp) {
+            k_envp = (char **)kmalloc((envc + 1) * sizeof(char *));
+            if (!k_envp) {
                 if (k_argv) {
-                    for (j = 0; j < argc; j++) kfree(k_argv[j]);
+                    for (i = 0; i < argc; i++) kfree(k_argv[i]);
                     kfree(k_argv);
                 }
                 kfree(kernel_bin);
                 return -KERR_ENOMEM;
             }
-            for (j = 0; j <= len; j++) k_envp[i][j] = envp[i][j];
+            for (i = 0; i < envc; i++) {
+                len = strlen(envp[i]);
+                k_envp[i] = (char *)kmalloc(len + 1);
+                if (!k_envp[i]) {
+                    for (j = 0; j < i; j++) kfree(k_envp[j]);
+                    kfree(k_envp);
+                    if (k_argv) {
+                        for (j = 0; j < argc; j++) kfree(k_argv[j]);
+                        kfree(k_argv);
+                    }
+                    kfree(kernel_bin);
+                    return -KERR_ENOMEM;
+                }
+                memcpy(k_envp[i], envp[i], len + 1);
+            }
+            k_envp[envc] = NULL;
         }
-        k_envp[envc] = NULL;
-    }
 
     elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
@@ -1724,10 +1741,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         task_error("task_exec_with_args: ELF loading failed\n");
-        if (elf_pages) {
-            for (i = 0; i < (int)elf_page_count; i++) pfa_free(elf_pages[i]);
-            kfree(elf_pages);
-        }
+        if (elf_pages) kfree(elf_pages);
         vmm_free_page_directory(new_pd);
         if (k_argv) {
             for (i = 0; i < argc; i++) kfree(k_argv[i]);
@@ -1758,10 +1772,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     stack_pages = vmm_map_range_in_pd_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec_with_args: failed to map stack\n");
-        if (elf_pages) {
-            for (i = 0; i < (int)elf_page_count; i++) pfa_free(elf_pages[i]);
-            kfree(elf_pages);
-        }
+        if (elf_pages) kfree(elf_pages);
         vmm_free_page_directory(new_pd);
         if (k_argv) {
             for (i = 0; i < argc; i++) kfree(k_argv[i]);
@@ -1858,26 +1869,57 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
 #define AT_EGID         14
 #define AT_RANDOM       25
 
-#define PUSH_AUXV(type, val) do { \
-    tmp_val = (val); \
-    sp -= 4; vmm_copy_to_pd(new_pd, sp, &tmp_val, 4); \
-    tmp_val = (type); \
-    sp -= 4; vmm_copy_to_pd(new_pd, sp, &tmp_val, 4); \
-} while(0)
+    {
+        uint32_t tbl_buf[512];
+        int tbl_idx;
+        uint32_t tbl_bytes;
 
-    PUSH_AUXV(AT_NULL, 0);
-    PUSH_AUXV(AT_RANDOM, random_addr);
-    PUSH_AUXV(AT_EGID, current_task->egid);
-    PUSH_AUXV(AT_GID, current_task->gid);
-    PUSH_AUXV(AT_EUID, current_task->euid);
-    PUSH_AUXV(AT_UID, current_task->uid);
-    PUSH_AUXV(AT_PAGESZ, 4096);
-    PUSH_AUXV(AT_ENTRY, elf_info.entry_point);
-    PUSH_AUXV(AT_PHNUM, elf_info.phnum);
-    PUSH_AUXV(AT_PHENT, elf_info.phent);
-    PUSH_AUXV(AT_PHDR, elf_info.phdr_vaddr);
+        tbl_idx = 0;
 
-#undef PUSH_AUXV
+        tbl_buf[tbl_idx++] = (uint32_t)argc;
+
+        if (argv_ptrs) {
+            for (i = 0; i <= argc; i++)
+                tbl_buf[tbl_idx++] = argv_ptrs[i];
+        } else {
+            tbl_buf[tbl_idx++] = 0;
+        }
+
+        if (envp_ptrs) {
+            for (i = 0; i <= envc; i++)
+                tbl_buf[tbl_idx++] = envp_ptrs[i];
+        } else {
+            tbl_buf[tbl_idx++] = 0;
+        }
+
+        tbl_buf[tbl_idx++] = AT_PHDR;
+        tbl_buf[tbl_idx++] = elf_info.phdr_vaddr;
+        tbl_buf[tbl_idx++] = AT_PHENT;
+        tbl_buf[tbl_idx++] = elf_info.phent;
+        tbl_buf[tbl_idx++] = AT_PHNUM;
+        tbl_buf[tbl_idx++] = elf_info.phnum;
+        tbl_buf[tbl_idx++] = AT_ENTRY;
+        tbl_buf[tbl_idx++] = elf_info.entry_point;
+        tbl_buf[tbl_idx++] = AT_PAGESZ;
+        tbl_buf[tbl_idx++] = 4096;
+        tbl_buf[tbl_idx++] = AT_UID;
+        tbl_buf[tbl_idx++] = current_task->uid;
+        tbl_buf[tbl_idx++] = AT_EUID;
+        tbl_buf[tbl_idx++] = current_task->euid;
+        tbl_buf[tbl_idx++] = AT_GID;
+        tbl_buf[tbl_idx++] = current_task->gid;
+        tbl_buf[tbl_idx++] = AT_EGID;
+        tbl_buf[tbl_idx++] = current_task->egid;
+        tbl_buf[tbl_idx++] = AT_RANDOM;
+        tbl_buf[tbl_idx++] = random_addr;
+        tbl_buf[tbl_idx++] = AT_NULL;
+        tbl_buf[tbl_idx++] = 0;
+
+        tbl_bytes = (uint32_t)tbl_idx * 4;
+        sp -= tbl_bytes;
+        vmm_copy_to_pd(new_pd, sp, tbl_buf, tbl_bytes);
+    }
+
 #undef AT_NULL
 #undef AT_PHDR
 #undef AT_PHENT
@@ -1890,32 +1932,20 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
 #undef AT_EGID
 #undef AT_RANDOM
 
-    if (envp_ptrs) {
-        for (i = envc; i >= 0; i--) {
-            sp -= 4;
-            vmm_copy_to_pd(new_pd, sp, &envp_ptrs[i], 4);
-        }
-    } else {
-        sp -= 4;
-        vmm_copy_to_pd(new_pd, sp, &zero, 4);
-    }
-
-    if (argv_ptrs) {
-        for (i = argc; i >= 0; i--) {
-            sp -= 4;
-            vmm_copy_to_pd(new_pd, sp, &argv_ptrs[i], 4);
-        }
-    } else {
-        sp -= 4;
-        vmm_copy_to_pd(new_pd, sp, &zero, 4);
-    }
-
-    tmp_val = (uint32_t)argc;
-    sp -= 4;
-    vmm_copy_to_pd(new_pd, sp, &tmp_val, 4);
-
     if (argv_ptrs) kfree(argv_ptrs);
     if (envp_ptrs) kfree(envp_ptrs);
+
+    if (k_argv && k_argv[0]) {
+        base = k_argv[0];
+        for (i = 0; k_argv[0][i]; i++) {
+            if (k_argv[0][i] == '/')
+                base = &k_argv[0][i + 1];
+        }
+        for (n = 0; n < 15 && base[n]; n++)
+            current_task->name[n] = base[n];
+        current_task->name[n] = '\0';
+    }
+
     if (k_argv) {
         for (i = 0; i < argc; i++) kfree(k_argv[i]);
         kfree(k_argv);
@@ -1991,11 +2021,6 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
         if (phys == 0) {
             DEBUG_TASK("task_exec_with_args: FATAL: entry page not mapped in new_pd\n");
             if (current_task->user_pages) {
-                for (i = 0; i < (int)current_task->user_pages_count; i++) {
-                    if (current_task->user_pages[i]) {
-                        pfa_free(current_task->user_pages[i]);
-                    }
-                }
                 kfree(current_task->user_pages);
             }
             vmm_free_page_directory(new_pd);
@@ -2041,6 +2066,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     new_task->id = next_task_id++;
     new_task->pid = new_task->id;
+    signals_init_task(new_task->pid);
     new_task->state = TASK_READY;
     new_task->is_user = true;
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
@@ -2127,6 +2153,8 @@ pid_t task_create_thread(void (*entry)(void)) {
     new_task->regs.eflags = 0x202;
     
     lock_scheduler();
+    new_task->all_next = all_tasks_head;
+    all_tasks_head = new_task;
     add_task_to_runqueue(new_task);
     unlock_scheduler();
     
@@ -2163,6 +2191,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     
     new_task->id = next_task_id++;
     new_task->pid = new_task->id;
+    signals_init_task(new_task->pid);
     new_task->state = TASK_READY;
     new_task->is_user = true;
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
@@ -2254,6 +2283,8 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->regs.eflags = 0x202;
     
     lock_scheduler();
+    new_task->all_next = all_tasks_head;
+    all_tasks_head = new_task;
     add_task_to_runqueue(new_task);
     unlock_scheduler();
     
@@ -2268,4 +2299,30 @@ void task_set_vring(task_t *task, uint8_t vring_minor) {
     if (!task) return;
     task->vring_minor = vring_minor;
     task->is_kernel_task = (vring_minor != 0);
+}
+
+static int cached_proc_count = 1;
+
+void task_update_cached_stats(void) {
+    task_t *t;
+    int count = 0;
+
+    if (!ready_queue_head) {
+        cached_proc_count = 1;
+        return;
+    }
+    t = ready_queue_head;
+    do {
+        count++;
+        t = t->next;
+    } while (t && t != ready_queue_head);
+    if (count < 1) count = 1;
+    cached_proc_count = count;
+}
+
+void task_get_cached_stats(int *proc_count, int *unused1, int *unused2, pid_t *unused3) {
+    if (proc_count) *proc_count = cached_proc_count;
+    (void)unused1;
+    (void)unused2;
+    (void)unused3;
 }

@@ -19,8 +19,7 @@ extern volatile uint32_t tick_count;
 static int check_fd_readable(int fd) {
     int con_id;
 
-    if (fd < 0 || fd >= TASK_MAX_FDS) return 0;
-    if (!current_task) return 0;
+    if (fd < 0 || !current_task || !current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) {
         if (fd == 0) {
             con_id = (current_task->console_id >= 0) ? current_task->console_id : console_get_current();
@@ -48,8 +47,7 @@ static int check_fd_readable(int fd) {
 }
 
 static int check_fd_writable(int fd) {
-    if (fd < 0 || fd >= TASK_MAX_FDS) return 0;
-    if (!current_task) return 0;
+    if (fd < 0 || !current_task || !current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) {
         if (fd == 1 || fd == 2) return 1;
         return 0;
@@ -192,7 +190,7 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
                 continue;
             }
             
-            if (fds[i].fd >= TASK_MAX_FDS) {
+            if (fds[i].fd >= current_task->fds_capacity) {
                 fds[i].revents = POLLNVAL;
                 ready_count++;
                 continue;

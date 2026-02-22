@@ -308,6 +308,7 @@ static int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (pid > 0) {
         task_t *target = task_find((pid_t)pid);
         if (!target) return -ESRCH;
+        if (target->is_kernel_task) return -EPERM;
         return deliver_signal_to_task(target, sig);
     }
 
@@ -412,14 +413,11 @@ void signal_deliver_pending(registers_t *regs) {
                 case SIGTTIN:
                 case SIGTTOU:
                     current_task->state = TASK_BLOCKED;
-                    schedule();
-                    continue;
+                    return;
                 case SIGCONT:
                     continue;
                 default:
                     task_exit_deferred(128 + sig);
-                    schedule();
-                    for (;;) asm volatile ("hlt");
                     return;
             }
         }
@@ -430,8 +428,6 @@ void signal_deliver_pending(registers_t *regs) {
 
         if (sp < 0x1000 || sp >= 0xC0000000) {
             task_exit_deferred(128 + sig);
-            schedule();
-            for (;;) asm volatile ("hlt");
             return;
         }
 

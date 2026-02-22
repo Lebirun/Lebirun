@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+extern void pfa_cow_release(uint32_t phys_addr);
+
 #define USER_MMAP_BASE 0x10000000u
 #define USER_MMAP_LIMIT 0x40000000u
 
@@ -24,14 +26,11 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     (void)unused; (void)unused2;
     
     if (!current_task) {
-        printf("brk: FATAL: no current_task!\n");
         return -1;
     }
     
     requested = (uint32_t)addr;
     current_brk = current_task->user_brk;
-    
-    printf("brk: task=%u req=0x%08X cur=0x%08X\n", current_task->id, requested, current_brk);
     
     if (requested == 0) {
         return (int)current_brk;
@@ -44,7 +43,6 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     newbrk = (requested + 0xFFF) & ~0xFFFu;
     
     if (newbrk >= 0x40000000) {
-        printf("brk: ERROR: task=%u requested 0x%08X exceeds limit 0x40000000\n", current_task->id, newbrk);
         return (int)current_brk;
     }
     
@@ -55,8 +53,6 @@ static int sys_brk(int addr, const char *unused, int unused2) {
             current_task->pd_phys, old_page_end, newbrk - old_page_end, 0x7, &page_count);
         
         if (!new_pages && (newbrk > old_page_end)) {
-            printf("brk: ERROR: task=%u mapping %u bytes at 0x%08X failed (free_pages=%u)\n", 
-                   current_task->id, newbrk - old_page_end, old_page_end, pfa_count_free());
             return (int)current_brk;
         }
         
@@ -72,12 +68,9 @@ static int sys_brk(int addr, const char *unused, int unused2) {
                 memcpy(expanded + old_count, new_pages, page_count * sizeof(uint32_t));
                 current_task->user_pages = expanded;
                 current_task->user_pages_count = new_count;
-            } else {
-                printf("brk: ERROR: task=%u kmalloc failed for page tracking\n", current_task->id);
             }
             kfree(new_pages);
         }
-        printf("brk: task=%u mapped %u pages at 0x%08X-0x%08X\n", current_task->id, page_count, old_page_end, newbrk);
     }
     
     current_task->user_brk = newbrk;
@@ -199,10 +192,46 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
 }
 
 static int sys_munmap(void *addr, size_t length) {
+    uint32_t base;
+    uint32_t size;
+    uint32_t page_addr;
+    uint32_t end;
+    uint32_t phys;
+    uint32_t i;
+    uint32_t dst;
+
     if (!current_task) return -EINVAL;
-    if ((uint32_t)addr & 0xFFF) return -EINVAL;
+    base = (uint32_t)addr;
+    if (base & 0xFFF) return -EINVAL;
     if (length == 0) return 0;
-    
+    if (base >= 0xC0000000) return -EINVAL;
+
+    size = (length + 0xFFF) & ~0xFFFu;
+    end = base + size;
+    if (end < base) return -EINVAL;
+    if (end > 0xC0000000) end = 0xC0000000;
+
+    for (page_addr = base; page_addr < end; page_addr += 0x1000) {
+        phys = vmm_unmap_page_in_pd(current_task->pd_phys, page_addr);
+        if (phys) {
+            pfa_cow_release(phys);
+            for (i = 0; i < current_task->user_pages_count; i++) {
+                if (current_task->user_pages[i] == phys) {
+                    current_task->user_pages[i] = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    dst = 0;
+    for (i = 0; i < current_task->user_pages_count; i++) {
+        if (current_task->user_pages[i] != 0) {
+            current_task->user_pages[dst++] = current_task->user_pages[i];
+        }
+    }
+    current_task->user_pages_count = dst;
+
     return 0;
 }
 
