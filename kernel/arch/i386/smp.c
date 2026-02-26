@@ -505,6 +505,7 @@ void smp_init(void) {
     int i;
     int found;
 
+    printf("[SMP] find_acpi_tables...\n");
     find_acpi_tables();
 
     if (cpu_count == 0) {
@@ -517,6 +518,7 @@ void smp_init(void) {
 
     printf("SMP: Found %d CPU(s)\n", cpu_count);
 
+    printf("[SMP] lapic_init...\n");
     lapic_init();
 
     bsp_apic_id = lapic_get_id();
@@ -539,7 +541,9 @@ void smp_init(void) {
         cpu_count++;
     }
 
+    printf("[SMP] ioapic_init...\n");
     ioapic_init();
+    printf("[SMP] pic_disable...\n");
     pic_disable();
 
     ioapic_route_irq(0, 32, bsp_apic_id);

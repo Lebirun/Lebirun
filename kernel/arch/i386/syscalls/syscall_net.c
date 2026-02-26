@@ -115,12 +115,28 @@ static int copy_user_string(char *dst, uint32_t dst_size, const char *src_user) 
 static void klog(const char *fmt, ...) {
     char buf[256];
     va_list ap;
+    int len;
+
     va_start(ap, fmt);
-    int len = vsnprintf(buf, sizeof(buf), fmt, ap);
+    len = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     if (len <= 0) return;
     if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
     console_write_to(0, buf, (size_t)len);
+    printf("%s", buf);
+}
+
+static void klog_con(int con_id, const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    int len;
+
+    va_start(ap, fmt);
+    len = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (len <= 0) return;
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
+    console_write_to(con_id, buf, (size_t)len);
     printf("%s", buf);
 }
 
@@ -173,24 +189,62 @@ static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
 }
 
 static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
+    int con_id;
+    netif_t *netif;
+    int i;
+
     (void)unused2; (void)unused3;
-    netif_t *netif = netif_get_default();
+    con_id = current_task ? current_task->console_id : 0;
+    netif = netif_get_default();
     if (!netif) {
-        klog("No network interface found\n");
+        klog_con(con_id, "No network interface found\n");
         return -1;
     }
     if (cmd == 0) {
         if (dhcp_is_bound(netif)) {
-            klog("DHCP: Bound\n");
+            klog_con(con_id, "DHCP: Bound\n");
             return 1;
         } else {
-            klog("DHCP: Not bound\n");
+            klog_con(con_id, "DHCP: Not bound\n");
             return 0;
         }
     } else if (cmd == 1) {
-        klog("DHCP: Starting...\n");
+        klog_con(con_id, "DHCP: Starting...\n");
         dhcp_start(netif);
         return 0;
+    } else if (cmd == 2) {
+        if (dhcp_is_bound(netif)) {
+            klog_con(con_id, "DHCP: Already configured (%u.%u.%u.%u)\n",
+                     netif->ipv4.octets[0], netif->ipv4.octets[1],
+                     netif->ipv4.octets[2], netif->ipv4.octets[3]);
+            return 0;
+        }
+        for (i = 0; i < 10; i++) {
+            sleep_ms(10);
+            netif_poll_all();
+            if (netif->link_up) break;
+            if (task_has_pending_signals()) return -EINTR;
+        }
+        if (!netif->link_up) {
+            klog_con(con_id, "DHCP: No link detected\n");
+            return -1;
+        }
+        klog_con(con_id, "DHCP: Link up, starting DHCP...\n");
+        dhcp_start(netif);
+        for (i = 0; i < 500; i++) {
+            sleep_ms(10);
+            netif_poll_all();
+            if (dhcp_is_bound(netif)) break;
+            if (task_has_pending_signals()) return -EINTR;
+        }
+        if (dhcp_is_bound(netif)) {
+            klog_con(con_id, "DHCP: Bound to %u.%u.%u.%u\n",
+                     netif->ipv4.octets[0], netif->ipv4.octets[1],
+                     netif->ipv4.octets[2], netif->ipv4.octets[3]);
+            return 0;
+        }
+        klog_con(con_id, "DHCP: Timed out\n");
+        return -1;
     }
     return -1;
 }

@@ -396,8 +396,10 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_GETPRIORITY 266
 #define SYSCALL_SETPRIORITY 267
 #define SYSCALL_PIVOT_ROOT 268
+#define SYSCALL_REBOOT 269
+#define SYSCALL_CONSOLE_SETID 270
 
-#define NR_SYSCALLS 280
+#define NR_SYSCALLS 281
 
 struct kernel_stat {
     unsigned long long st_dev;
@@ -504,6 +506,7 @@ void syscalls_select_init(void);
 void syscalls_socket_init(void);
 void syscalls_at_init(void);
 void syscalls_signal_init(void);
+int sys_kill_impl(int pid, const char *sig_ptr, int unused);
 void syscalls_ids_init(void);
 void syscalls_misc_init(void);
 void syscalls_epoll_init(void);
@@ -511,6 +514,7 @@ void syscalls_pthread_init(void);
 void syscalls_shm_init(void);
 void syscalls_dl_init(void);
 void syscalls_regex_init(void);
+void syscalls_power_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
 

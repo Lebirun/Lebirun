@@ -232,7 +232,6 @@ static int devfs_unmount_impl(vfs_node_t *node) {
 static vfs_node_t *devfs_mount_impl(const char *device, const char *mountpoint) {
     (void)device;
     (void)mountpoint;
-    printf("[DEVFS] devfs_mount_impl called, returning devfs_root at %p\n", (void*)&devfs_root);
     return &devfs_root;
 }
 
@@ -502,10 +501,8 @@ void devfs_init(void) {
     fs_type = (vfs_fs_type_t *)kmalloc(sizeof(vfs_fs_type_t));
 
     if (!fs_type) {
-        printf("[DEVFS] ERROR: kmalloc failed for fs_type\n");
         return;
     }
-    printf("[DEVFS] kmalloc returned fs_type=%p (size=%u)\n", (void*)fs_type, (unsigned)sizeof(vfs_fs_type_t));
 
     memset(fs_type, 0, sizeof(vfs_fs_type_t));
 
@@ -513,28 +510,6 @@ void devfs_init(void) {
     fs_type->mount = devfs_mount_impl;
     fs_type->unmount = devfs_unmount_impl;
     fs_type->next = NULL;
-    
-    printf("[DEVFS] fs_type initialized: name=%p mount=%p unmount=%p\n",
-           (void*)fs_type->name, (void*)fs_type->mount, (void*)fs_type->unmount);
 
-    if (!fs_type->name) {
-        return;
-    }
-
-    if (!fs_type->mount) {
-        return;
-    }
-
-    if (!fs_type->unmount) {
-        return;
-    }
-
-    printf("[DEVFS] About to call vfs_register_fs, fs_type=%p mount=%p unmount=%p\n",
-           (void*)fs_type, (void*)fs_type->mount, (void*)fs_type->unmount);
-    printf("[DEVFS] Verifying heap before vfs_register_fs...\n");
-    heap_verify();
     vfs_register_fs(fs_type);
-    printf("[DEVFS] Verifying heap after vfs_register_fs...\n");
-    heap_verify();
-    printf("[DEVFS] devfs_init complete\n");
 }

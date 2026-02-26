@@ -548,15 +548,13 @@ void pmm_zero_page_phys(uint32_t phys_addr) {
     uint32_t i;
     extern uint32_t pae_temp_pt_ready_check(void);
 
-    if (phys_addr < 0x00400000) {
-        w = (volatile uint32_t *)(phys_addr + 0xC0000000);
-        for (i = 0; i < PAGE_SIZE / 4; i++) {
-            w[i] = 0;
+    if (!pae_enabled || !pae_temp_pt_ready_check()) {
+        if (phys_addr < 0x00400000) {
+            w = (volatile uint32_t *)(phys_addr + 0xC0000000);
+            for (i = 0; i < PAGE_SIZE / 4; i++) {
+                w[i] = 0;
+            }
         }
-        return;
-    }
-
-    if (pae_enabled && !pae_temp_pt_ready_check()) {
         return;
     }
 

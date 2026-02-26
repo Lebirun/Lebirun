@@ -325,24 +325,6 @@ off_t lseek(int fd, off_t offset, int whence) {
     return syscall3(SYS_LSEEK, fd, (int)offset, whence);
 }
 
-int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
-    int ret = syscall3(SYS_SIGACTION, signum, (int)act, (int)oldact);
-    if (ret < 0) {
-        errno = -ret;
-        return -1;
-    }
-    return 0;
-}
-
-int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    int ret = syscall3(SYS_SIGPROCMASK, how, (int)set, (int)oldset);
-    if (ret < 0) {
-        errno = -ret;
-        return -1;
-    }
-    return 0;
-}
-
 int sigsuspend(const sigset_t *mask) {
     syscall2(124 | LEBIRUN_SYSCALL_FLAG, (int)mask, sizeof(sigset_t));
     errno = EINTR;

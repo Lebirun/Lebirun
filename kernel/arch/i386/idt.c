@@ -527,7 +527,7 @@ registers_t* interrupt_handler(registers_t* regs)
             net_tick();
 
             extern void kprint_poll(uint32_t max_items);
-            kprint_poll(16);
+            kprint_poll(64);
 
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");

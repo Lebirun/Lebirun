@@ -34,9 +34,9 @@ static uint64_t pae_pdpt_pool[PAE_PDPT_POOL_SIZE][4] __attribute__((aligned(32))
 static uint64_t *pae_pd_pool[PAE_PDPT_POOL_SIZE][4];
 static uint8_t pae_pdpt_pool_used[PAE_PDPT_POOL_SIZE];
 
-#define PAE_VMM_PT_INIT_SIZE 32
+#define PAE_VMM_PT_INIT_SIZE 512
 
-static uint64_t *pae_heap_page_tables[4];
+static uint64_t *pae_heap_page_tables[16];
 static uint32_t pae_heap_pt_count = 0;
 static uint64_t *pae_vmm_pt_static[PAE_VMM_PT_INIT_SIZE];
 uint64_t **pae_vmm_page_tables = pae_vmm_pt_static;
@@ -53,23 +53,7 @@ extern void temp_map_raw(uint32_t temp_virt, uint32_t phys_addr);
 extern void temp_unmap_raw(uint32_t temp_virt);
 
 static int pae_vmm_pt_grow(void) {
-    uint32_t new_cap;
-    uint64_t **new_arr;
-    uint32_t i;
-
-    new_cap = pae_vmm_pt_capacity * 2;
-    new_arr = (uint64_t **)kmalloc(new_cap * sizeof(uint64_t *));
-    if (!new_arr) return -1;
-    for (i = 0; i < pae_vmm_pt_count; i++)
-        new_arr[i] = pae_vmm_page_tables[i];
-    for (i = pae_vmm_pt_count; i < new_cap; i++)
-        new_arr[i] = NULL;
-    if (pae_vmm_pt_is_dynamic)
-        kfree(pae_vmm_page_tables);
-    pae_vmm_page_tables = new_arr;
-    pae_vmm_pt_capacity = new_cap;
-    pae_vmm_pt_is_dynamic = 1;
-    return 0;
+    return -1;
 }
 
 #define PAE_TEMP_ZERO_VIRT 0xF7007000u
@@ -462,7 +446,7 @@ int heap_map_page_pae(uint32_t virt_addr) {
         void *pt_page;
         uint32_t id_pde_idx;
         uint32_t id_pte_idx;
-        if (pae_heap_pt_count >= 4) {
+        if (pae_heap_pt_count >= 16) {
             printf("heap_map_page_pae: Out of heap page tables\n");
             return -1;
         }
@@ -526,6 +510,10 @@ void vmm_unmap_page_pae(uint32_t virt_addr) {
     pdpt_idx = (virt_addr >> 30) & 0x3;
     pae_pd_idx = (virt_addr >> 21) & 0x1FF;
     pae_pt_idx = (virt_addr >> 12) & 0x1FF;
+
+    if (pdpt_idx == 3 && pae_pd_idx < 4) {
+        return;
+    }
 
     pd = pae_get_pd_for_pdpt(pdpt_idx);
     if (!pd) {

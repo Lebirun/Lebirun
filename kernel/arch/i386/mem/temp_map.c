@@ -73,20 +73,15 @@ void pae_init_temp_mapping(void) {
     {
         void *pt_page;
         pt_page = pmm_alloc_low_page();
-        if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
             printf("pae_init_temp_mapping: failed to alloc page table\n");
             return;
         }
-        if (pae_ensure_phys_mapped((uint32_t)pt_page) < 0) {
-            printf("pae_init_temp_mapping: failed to map page table\n");
-            return;
-        }
-        pt_slot = pae_vmm_pt_count++;
-        pt = (uint64_t *)((uint32_t)pt_page + 0xC0000000);
-        pae_vmm_page_tables[pt_slot] = pt;
-        memset(pt, 0, PAGE_SIZE);
         pt_phys = (uint32_t)pt_page;
+        pt = (uint64_t *)(pt_phys + 0xC0000000);
+        memset(pt, 0, PAGE_SIZE);
+        pt_slot = pae_vmm_pt_count++;
+        pae_vmm_page_tables[pt_slot] = pt;
     }
     pd[pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
     pae_sync_kernel_mappings();

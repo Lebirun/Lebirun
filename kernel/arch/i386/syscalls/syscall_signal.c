@@ -85,6 +85,36 @@ static task_signals_t *get_task_signals(void) {
     return &task_signals[idx];
 }
 
+void task_reset_signals_on_exec(void) {
+    task_signals_t *sigs;
+    int i;
+
+    sigs = get_task_signals();
+    if (!sigs) return;
+
+    sigs->pending.sig[0] = 0;
+    sigs->blocked.sig[0] = 0;
+    sigs->in_signal = 0;
+
+    for (i = 1; i < NSIG; i++) {
+        if (sigs->actions[i].sa_handler != SIG_IGN)
+            sigs->actions[i].sa_handler = SIG_DFL;
+        sigs->actions[i].sa_flags = 0;
+        sigs->actions[i].sa_restorer = NULL;
+        sigs->actions[i].sa_mask.sig[0] = 0;
+    }
+}
+
+int task_has_pending_signals(void) {
+    task_signals_t *sigs;
+    unsigned long unblocked;
+
+    sigs = get_task_signals();
+    if (!sigs) return 0;
+    unblocked = sigs->pending.sig[0] & ~sigs->blocked.sig[0];
+    return unblocked != 0;
+}
+
 static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     if (signum < 1 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
@@ -107,39 +137,44 @@ static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
 }
 
 static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
-    task_signals_t *sigs = get_task_signals();
+    task_signals_t *sigs;
+    uint32_t set_addr;
+    uint32_t old_addr;
+    sigset_k local_set;
+
+    sigs = get_task_signals();
     if (!sigs) return -ESRCH;
-    
-    uint32_t set_addr = (uint32_t)(uintptr_t)set_ptr;
-    uint32_t old_addr = (uint32_t)oldset_ptr;
-    
+
+    set_addr = (uint32_t)(uintptr_t)set_ptr;
+    old_addr = (uint32_t)oldset_ptr;
+
     if (old_addr && old_addr < 0xC0000000 && old_addr >= 0x1000) {
         memcpy((void *)old_addr, &sigs->blocked, sizeof(sigset_k));
     }
-    
+
     if (set_addr && set_addr < 0xC0000000 && set_addr >= 0x1000) {
-        sigset_k *new_set = (sigset_k *)set_addr;
-        
-        new_set->sig[0] &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
-        
+        memcpy(&local_set, (const void *)set_addr, sizeof(sigset_k));
+
+        local_set.sig[0] &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
+
         switch (how) {
             case SIG_BLOCK:
-                sigs->blocked.sig[0] |= new_set->sig[0];
-                sigs->blocked.sig[1] |= new_set->sig[1];
+                sigs->blocked.sig[0] |= local_set.sig[0];
+                sigs->blocked.sig[1] |= local_set.sig[1];
                 break;
             case SIG_UNBLOCK:
-                sigs->blocked.sig[0] &= ~new_set->sig[0];
-                sigs->blocked.sig[1] &= ~new_set->sig[1];
+                sigs->blocked.sig[0] &= ~local_set.sig[0];
+                sigs->blocked.sig[1] &= ~local_set.sig[1];
                 break;
             case SIG_SETMASK:
-                sigs->blocked.sig[0] = new_set->sig[0];
-                sigs->blocked.sig[1] = new_set->sig[1];
+                sigs->blocked.sig[0] = local_set.sig[0];
+                sigs->blocked.sig[1] = local_set.sig[1];
                 break;
             default:
                 return -EINVAL;
         }
     }
-    
+
     return 0;
 }
 
@@ -227,15 +262,20 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, int info_ptr) {
 }
 
 int deliver_signal_to_task(task_t *target, int sig) {
+    uint32_t idx;
+    sigaction_k *act;
+
     if (!target) return -ESRCH;
+
+    if (target->pid == 1) {
+        idx = ((uint32_t)target->pid) & 255u;
+        act = &task_signals[idx].actions[sig];
+        if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)
+            return 0;
+    }
 
     if (sig == SIGKILL) {
         task_kill(target, 128 + SIGKILL);
-        return 0;
-    }
-
-    if (sig == SIGTERM) {
-        task_kill(target, 128 + SIGTERM);
         return 0;
     }
 
@@ -251,8 +291,13 @@ int deliver_signal_to_task(task_t *target, int sig) {
         return 0;
     }
 
-    uint32_t idx = ((uint32_t)target->pid) & 255u;
-    task_signals[idx].pending.sig[sig / 64] |= (1UL << (sig % 64));
+    idx = ((uint32_t)target->pid) & 255u;
+    task_signals[idx].pending.sig[(sig - 1) / 64] |= (1UL << ((sig - 1) % 64));
+
+    if (target->state == TASK_BLOCKED) {
+        wake_task(target);
+    }
+
     return 0;
 }
 
@@ -286,7 +331,7 @@ int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
     return count;
 }
 
-static int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
+int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     (void)unused;
     int sig = (int)(uintptr_t)sig_ptr;
     
@@ -314,22 +359,49 @@ static int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
 
     if (!current_task) return -ESRCH;
 
-    pid_t pgid = 0;
-    if (pid == 0) {
-        pgid = current_task->pgid ? current_task->pgid : current_task->pid;
-    } else {
-        pgid = (pid_t)(-pid);
-    }
-    if (pgid <= 0) return -EINVAL;
-
-    pid_t pids[256];
-    int n = collect_pids_in_pgrp(pgid, pids, 256);
-    if (n <= 0) return -ESRCH;
-
-    for (int i = 0; i < n; i++) {
-        task_t *t = task_find(pids[i]);
+    if (pid == -1) {
+        int sent = 0;
+        pid_t self_pid = current_task->pid;
+        lock_scheduler();
+        task_t *t = ready_queue_head;
         if (t) {
-            deliver_signal_to_task(t, sig);
+            task_t *start = t;
+            int guard = 0;
+            do {
+                if (!t) break;
+                if (t->is_user && t->pid != self_pid && t->pid != 1) {
+                    deliver_signal_to_task(t, sig);
+                    sent++;
+                }
+                t = t->next;
+                guard++;
+            } while (t && t != start && guard < 4096);
+        }
+        unlock_scheduler();
+        return sent > 0 ? 0 : -ESRCH;
+    }
+
+    {
+        pid_t pgid = 0;
+        pid_t pids[256];
+        int n;
+        int i;
+
+        if (pid == 0) {
+            pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+        } else {
+            pgid = (pid_t)(-pid);
+        }
+        if (pgid <= 0) return -EINVAL;
+
+        n = collect_pids_in_pgrp(pgid, pids, 256);
+        if (n <= 0) return -ESRCH;
+
+        for (i = 0; i < n; i++) {
+            task_t *t = task_find(pids[i]);
+            if (t) {
+                deliver_signal_to_task(t, sig);
+            }
         }
     }
 
@@ -478,7 +550,9 @@ void signals_init_task(pid_t pid) {
 void syscalls_signal_init(void) {
     memset(task_signals, 0, sizeof(task_signals));
     
+    syscall_table[SYSCALL_SIGACTION] = sys_rt_sigaction;
     syscall_table[SYSCALL_RT_SIGACTION] = sys_rt_sigaction;
+    syscall_table[SYSCALL_SIGPROCMASK] = sys_rt_sigprocmask;
     syscall_table[SYSCALL_RT_SIGPROCMASK] = sys_rt_sigprocmask;
     syscall_table[SYSCALL_RT_SIGPENDING] = sys_rt_sigpending;
     syscall_table[SYSCALL_RT_SIGSUSPEND] = sys_rt_sigsuspend;

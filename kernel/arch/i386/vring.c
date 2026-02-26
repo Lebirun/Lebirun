@@ -6,6 +6,7 @@
 #include <kernel/task.h>
 #include <kernel/io.h>
 #include <kernel/panic.h>
+#include <kernel/spinlock.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -56,11 +57,12 @@ static volatile int kprint_ready = 0;
 
 static wait_queue_t kprint_waitq;
 
-#define SERIAL_RING_SIZE 512
+#define SERIAL_RING_SIZE 8192
 static char *serial_ring;
 static volatile uint32_t serial_head = 0;
 static volatile uint32_t serial_tail = 0;
 static volatile uint32_t serial_count = 0;
+static spinlock_t serial_lock = { .locked = 0 };
 
 static size_t klog_strnlen(const char *s, size_t maxlen) {
     size_t n = 0;
@@ -91,18 +93,36 @@ static inline bool serial_thr_empty(void) {
 
 
 
-static void serial_write_async(const char *buf, size_t len) {
-    uint32_t flags;
+static void serial_enqueue_nolock(const char *buf, size_t len) {
     size_t i;
 
-    if (!serial_ring) return;
-    flags = klog_irqsave();
     for (i = 0; i < len; i++) {
-        if (serial_count >= SERIAL_RING_SIZE) break;
+        if (serial_count >= SERIAL_RING_SIZE) {
+            while (!serial_thr_empty()) cpu_relax();
+            outb(0x3F8, (uint8_t)buf[i]);
+            continue;
+        }
         serial_ring[serial_tail] = buf[i];
         serial_tail = (serial_tail + 1) % SERIAL_RING_SIZE;
         serial_count++;
     }
+}
+
+static void serial_write_async(const char *buf, size_t len) {
+    uint32_t flags;
+    size_t i;
+
+    if (!serial_ring) {
+        for (i = 0; i < len; i++) {
+            while (!serial_thr_empty()) cpu_relax();
+            outb(0x3F8, (uint8_t)buf[i]);
+        }
+        return;
+    }
+    flags = klog_irqsave();
+    spin_lock(&serial_lock);
+    serial_enqueue_nolock(buf, len);
+    spin_unlock(&serial_lock);
     klog_irqrestore(flags);
 }
 
@@ -111,12 +131,17 @@ static void serial_write(const char *buf, size_t len) {
     serial_write_async(buf, len);
 }
 
+void serial_write_direct(const char *buf, size_t len) {
+    serial_write(buf, len);
+}
+
 static void serial_drain(uint32_t max_chars) {
     uint32_t flags;
     uint32_t drained;
 
     if (!serial_ring) return;
     flags = klog_irqsave();
+    spin_lock(&serial_lock);
     drained = 0;
     while (drained < max_chars && serial_count > 0) {
         if (!serial_thr_empty()) break;
@@ -125,6 +150,7 @@ static void serial_drain(uint32_t max_chars) {
         serial_count--;
         drained++;
     }
+    spin_unlock(&serial_lock);
     klog_irqrestore(flags);
 }
 
@@ -628,8 +654,9 @@ void kproc_print_init(void) {
     pid = kproc_create("kprint", 1, NULL, NULL);
 
     if (pid == -1) {
-        t = create_task(klog_task_main, TASK_READY, false);
+        t = create_kernel_task(klog_task_main, TASK_READY);
         if (t) {
+            t->pid = pid;
             t->is_user = false;
             task_set_vring(t, 1);
             t->console_id = 0;
@@ -651,8 +678,43 @@ void kprint_enable(void) {
 }
 
 void kprint_serial_async(const char *buf, size_t len) {
+    size_t i;
+    size_t start;
+    int in_esc;
+    uint32_t flags;
+
     if (!buf || len == 0) return;
-    serial_write(buf, len);
+    if (!serial_ring) return;
+
+    flags = klog_irqsave();
+    spin_lock(&serial_lock);
+
+    in_esc = 0;
+    start = 0;
+    for (i = 0; i < len; i++) {
+        if (in_esc) {
+            if ((buf[i] >= 'A' && buf[i] <= 'Z') ||
+                (buf[i] >= 'a' && buf[i] <= 'z')) {
+                in_esc = 0;
+                start = i + 1;
+            }
+            continue;
+        }
+        if (buf[i] == '\033') {
+            if (i > start) {
+                serial_enqueue_nolock(buf + start, i - start);
+            }
+            in_esc = 1;
+            start = i;
+            continue;
+        }
+    }
+    if (!in_esc && i > start) {
+        serial_enqueue_nolock(buf + start, i - start);
+    }
+
+    spin_unlock(&serial_lock);
+    klog_irqrestore(flags);
 }
 
 bool kproc_is_negative_pid(int32_t pid) {

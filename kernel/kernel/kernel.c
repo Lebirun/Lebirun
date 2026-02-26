@@ -29,6 +29,7 @@
 #include <kernel/panic.h>
 #include <kernel/kstack.h>
 #include <kernel/smp.h>
+#include <kernel/power.h>
 #include "launch_user.h"
 
 bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
@@ -110,7 +111,7 @@ void kernel_main(void) {
     ahci_port_t *port;
     uint8_t test_sector[512];
     int j;
-    task_t *shell;
+    task_t *init_task;
     task_t *t;
     task_t *start;
 
@@ -120,9 +121,12 @@ void kernel_main(void) {
     terminal_initialize();
     console_init();
 
+
     init_mem_map(multiboot_magic, multiboot_ptr);
 
+
     pfa_init();
+
 
     if (pae_enabled) {
         pfa_reclaim_kernel_range((uint32_t)boot_page_directory - 0xC0000000,
@@ -150,6 +154,7 @@ void kernel_main(void) {
                                  (uint32_t)boot_pt_3 - 0xC0000000 + PAGE_SIZE);
     }
 
+
     test_frame = pfa_alloc();
     if (test_frame) {
         printf("PFA Test alloc: Frame at 0x%08X\n", test_frame);
@@ -173,6 +178,7 @@ void kernel_main(void) {
 
     heap_init();
 
+
     heap_buf = kmalloc(1024);
     if (heap_buf) {
         strcpy(heap_buf, "Hello heap!");
@@ -183,6 +189,7 @@ void kernel_main(void) {
     }
 
     heap_dump();
+
 
     mb_page = multiboot_ptr & ~0xFFF;
     vmm_map_page(mb_page + 0xC0000000, mb_page, 0x003);
@@ -314,25 +321,35 @@ void kernel_main(void) {
             ramfs_create_symlink("/etc", "/initrd/etc", VFS_PERM_READ | VFS_PERM_EXEC);
         }
 
+        printf("[BOOT] overlay/symlink done, mounting initrd...\n");
         mount_ret = vfs_mount(NULL, "/initrd", "initrd");
+        printf("[BOOT] vfs_mount initrd returned %d\n", mount_ret);
         if (mount_ret == 0) {
             printf("[KERNEL] Mounted initrd on /initrd\n");
         }
 
+        printf("[BOOT] procfs_init...\n");
         procfs_init();
+        printf("[BOOT] devfs_init...\n");
         devfs_init();
+        printf("[BOOT] sysfs_init...\n");
         sysfs_init();
 
+        printf("[BOOT] mounting /dev /proc /sys...\n");
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
         vfs_mount(NULL, "/sys", "sysfs");
 
         if (use_squashfs) {
+            printf("[BOOT] vfs_block_squashfs_access...\n");
             vfs_block_squashfs_access();
         }
 
+        printf("[BOOT] ramfs_internalize_all...\n");
         ramfs_internalize_all();
+        printf("[BOOT] initrd_free_pages...\n");
         initrd_free_pages();
+        printf("[BOOT] initrd_free_pages done\n");
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -359,10 +376,17 @@ void kernel_main(void) {
     } else {
         printf("PAE mode: skipping legacy paging check\n");
     }
+    printf("[BOOT] pic_remap...\n");
     pic_remap();
+    printf("[BOOT] kstack_init...\n");
     kstack_init();
+    printf("[BOOT] init_tasks...\n");
     init_tasks();
+    printf("[BOOT] smp_init...\n");
     smp_init();
+    printf("[BOOT] smp_init done\n");
+    
+    power_init();
     
     vring_init();
     kproc_init();
@@ -419,32 +443,39 @@ void kernel_main(void) {
 
     kprint_enable();
 
-    printf("heap: verify before launching user\n");
+    printf("heap: verify before launching init\n");
     heap_verify();
     slab_gc();
 
-    shell = launch_user_path("/bin/lsh", 1);
+    init_task = launch_user_path("/bin/init", 0);
+    if (!init_task) {
+        printf("init not found, retrying in 5 seconds...\n");
+        sleep_ticks(5000);
+        init_task = launch_user_path("/bin/init", 0);
+    }
     printf("heap: verify after launch attempt\n");
     heap_verify();
-    if (!shell) {
-        printf("Failed to launch user shell\n");
-    } else {
-        printf("Shell launched: task_id=%u is_user=%d state=%d on console 1\n", 
-               shell->id, shell->is_user, shell->state);
-        
-        t = ready_queue_head;
-        printf("Run queue: ");
-        if (t) {
-            start = t;
-            do {
-                printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
-                t = t->next;
-            } while (t && t != start);
-        }
-        printf("\n");
-        
-        yield();
+    if (!init_task) {
+        printf("FATAL: /bin/init not found. System halted.\n");
+        for (;;)
+            asm volatile ("hlt");
     }
+
+    printf("Init launched: task_id=%u is_user=%d state=%d on console 0\n",
+           init_task->id, init_task->is_user, init_task->state);
+
+    t = ready_queue_head;
+    printf("Run queue: ");
+    if (t) {
+        start = t;
+        do {
+            printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
+            t = t->next;
+        } while (t && t != start);
+    }
+    printf("\n");
+
+    yield();
 
     while (1) {
         task_deferred_work();

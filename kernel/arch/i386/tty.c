@@ -23,7 +23,7 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
-#define EARLY_BOOT_BUFFER_SIZE 1024
+#define EARLY_BOOT_BUFFER_SIZE 8192
 static char early_boot_buffer[EARLY_BOOT_BUFFER_SIZE];
 static size_t early_boot_index = 0;
 static bool early_boot_capture = true;
@@ -71,7 +71,9 @@ void terminal_replay_early_boot(void) {
     for (i = 0; i < early_boot_index; i++) {
         char c;
         c = early_boot_buffer[i];
-        if (use_framebuffer) {
+        if (use_framebuffer && console_is_initialized()) {
+            console_putchar_to(0, c);
+        } else if (use_framebuffer) {
             fb_write_char(c);
         }
     }
@@ -150,6 +152,10 @@ void terminal_putchar(char c) {
 }
 
 void terminal_write(const char* data, size_t size) {
+	if (use_framebuffer && console_is_initialized()) {
+		console_write_to(0, data, size);
+		return;
+	}
 	for (size_t i = 0; i < size; i++)
 		terminal_putchar(data[i]);
 }
@@ -164,7 +170,6 @@ int terminal_load_psf_font(const void *data, size_t size) {
     }
     if (psf_load(data, size, &loaded_font) == 0) {
         fb_set_font(&loaded_font);
-        fb_clear();
         return 0;
     }
     return -1;

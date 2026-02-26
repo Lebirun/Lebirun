@@ -511,6 +511,19 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
         schedule();
     }
 
+    {
+        extern int task_has_pending_signals(void);
+        if (task_has_pending_signals()) {
+            if (rem) {
+                if ((uint32_t)rem >= 0x1000 && (uint32_t)rem < 0xC0000000) {
+                    rem->tv_sec = 0;
+                    rem->tv_nsec = 0;
+                }
+            }
+            return -EINTR;
+        }
+    }
+
     if (rem) {
         if ((uint32_t)rem >= 0x1000 && (uint32_t)rem < 0xC0000000) {
             rem->tv_sec = 0;

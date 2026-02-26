@@ -27,7 +27,7 @@ else
 fi
 
 cat > isodir/boot/grub/grub.cfg << EOF
-set timeout=20
+set timeout=10
 set default=0
 
 menuentry "Lebirun" {

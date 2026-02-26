@@ -36,9 +36,11 @@ static int sys_yield(int unused, const char *unused2, int unused3) {
 }
 
 static int sys_sleep(int ms, const char *unused, int unused2) {
+    extern int task_has_pending_signals(void);
     (void)unused; (void)unused2;
     if (ms <= 0) return -EINVAL;
     sleep_ms((uint32_t)ms);
+    if (task_has_pending_signals()) return -EINTR;
     return 0;
 }
 
@@ -63,6 +65,8 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         uint32_t exit_code = 0;
         int r = task_join(t, &exit_code);
         if (r != 0) return -ECHILD;
+
+        t->waited = 1;
 
         if (status_ptr) {
             uint32_t addr = (uint32_t)status_ptr;
@@ -93,6 +97,8 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             uint32_t exit_code = 0;
             int r = task_join(dead, &exit_code);
             if (r != 0) return -ECHILD;
+
+            dead->waited = 1;
 
             if (status_ptr) {
                 uint32_t addr = (uint32_t)status_ptr;
@@ -153,6 +159,8 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
         int r = task_join(t, &exit_code);
         if (r != 0) return -ECHILD;
         
+        t->waited = 1;
+
         if (info_addr && info_addr < 0xC0000000 && info_addr >= 0x1000) {
             struct siginfo_k *info = (struct siginfo_k *)info_addr;
             memset(info, 0, sizeof(struct siginfo_k));
@@ -165,36 +173,9 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
     return -ECHILD;
 }
 
-static int sys_kill(int pid, const char *unused, int code) {
+static int sys_kill(int pid, const char *sig_arg, int unused) {
     (void)unused;
-    int sig = code;
-    
-    if (sig == 0) {
-        if (pid == 0) return 0;
-        if (pid > 0) {
-            task_t *t = task_find((pid_t)pid);
-            return t ? 0 : -ESRCH;
-        }
-        return 0;
-    }
-    
-    if (pid == 0) {
-        return 0;
-    }
-    
-    if (pid == -1) {
-        return 0;
-    }
-    
-    if (pid < -1) {
-        return 0;
-    }
-    
-    task_t* t = task_find((pid_t)pid);
-    if (!t) return -ESRCH;
-    if (t->is_kernel_task) return -EPERM;
-    task_kill(t, (uint32_t)sig);
-    return 0;
+    return sys_kill_impl(pid, sig_arg, 0);
 }
 
 static int sys_fork(int unused, const char *unused2, int unused3) {

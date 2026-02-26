@@ -116,6 +116,7 @@ typedef struct task {
     bool is_kernel_task;
 
     int exec_completed;
+    int waited;
     
     uint32_t exec_old_pd;
     uint32_t *exec_old_pages;
@@ -135,6 +136,7 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
 task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint32_t cr3);
+task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
 void schedule(void);
 registers_t* schedule_from_irq(registers_t* regs);
 extern void save_context(void);
@@ -191,6 +193,7 @@ int deliver_signal_to_task(task_t *target, int sig);
 int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap);
 void signal_deliver_pending(registers_t *regs);
 void signals_init_task(pid_t pid);
+int task_has_pending_signals(void);
 
 void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count);
 void exec_cleanup_drain(void);

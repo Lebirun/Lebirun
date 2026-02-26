@@ -130,6 +130,7 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 178: return SYSCALL_RT_SIGTIMEDWAIT;
         case 179: return SYSCALL_RT_SIGQUEUEINFO;
         case 173: return SYSCALL_RT_SIGRETURN;
+        case 119: return SYSCALL_RT_SIGRETURN;
         case 238: return SYSCALL_TKILL;
         case 270: return SYSCALL_TGKILL;
         case 186: return SYSCALL_SIGALTSTACK;
@@ -271,6 +272,7 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 38:  return SYSCALL_RENAME;
         case 55:  return SYSCALL_FCNTL;
         
+        case 88:  return SYSCALL_REBOOT;
         case 99:  return SYSCALL_STATFS;
         case 100: return SYSCALL_FSTATFS;
         case 268: return SYSCALL_STATFS;
@@ -343,6 +345,16 @@ void do_syscall(registers_t *regs) {
         (void)err;
     }
 
+    if (current_task && current_task->is_user
+        && num != SYSCALL_RT_SIGRETURN
+        && !syscall_check_exec_completed()) {
+        extern int task_has_pending_signals(void);
+        extern void signal_deliver_pending(registers_t *regs);
+        if (task_has_pending_signals()) {
+            signal_deliver_pending(regs);
+        }
+    }
+
     clear_syscall_frame();
 }
 
@@ -370,4 +382,5 @@ void syscall_init(void) {
     syscalls_shm_init();
     syscalls_dl_init();
     syscalls_regex_init();
+    syscalls_power_init();
 }

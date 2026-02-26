@@ -21,43 +21,44 @@ if [ -d "userprog/lsh" ]; then
   find userprog/lsh -type f -name '*.o' -delete
 fi
 
-if [ -d "userprog/ncurses-6.6" ]; then
-  echo "Cleaning ncurses..."
-  (cd userprog/ncurses-6.6 && $MAKE clean 2>/dev/null || true)
-  rm -rf userprog/ncurses-6.6/config.cache
+if [ -d "userprog/LebInit" ]; then
+  echo "Cleaning LebInit..."
+  (cd userprog/LebInit && $MAKE clean 2>/dev/null || true)
 fi
 
-if [ -d "userprog/ncurses-6.6" ]; then
+if [ -d "libc/lib/ncurses-6.6" ]; then
   echo "Cleaning ncurses..."
-  (cd userprog/ncurses-6.6 && $MAKE clean) || true
-  find userprog/ncurses-6.6 -type f -name '*.o' -delete
+  (cd libc/lib/ncurses-6.6 && $MAKE clean 2>/dev/null || true)
+  rm -rf libc/lib/ncurses-6.6/config.cache
+  find libc/lib/ncurses-6.6 -type f -name '*.o' -delete
 fi
 
-if [ -d "userprog/nano-8.7.1" ]; then
+if [ -d "ports/nano-8.7.1" ]; then
   echo "Cleaning nano..."
-  if [ -f "userprog/nano-8.7.1/Makefile" ]; then
-    (cd userprog/nano-8.7.1 && $MAKE clean || true)
-    (cd userprog/nano-8.7.1 && $MAKE distclean || true)
+  if [ -f "ports/nano-8.7.1/Makefile" ]; then
+    (cd ports/nano-8.7.1 && $MAKE clean || true)
+    (cd ports/nano-8.7.1 && $MAKE distclean || true)
   fi
-  rm -f userprog/nano-8.7.1/config.cache
-  find userprog/nano-8.7.1 -type f -name '*.o' -delete
+  rm -f ports/nano-8.7.1/config.cache
+  find ports/nano-8.7.1 -type f -name '*.o' -delete
 fi
 
-if [ -d "userprog/htop-3.4.1" ]; then
+if [ -d "ports/htop-3.4.1" ]; then
   echo "Cleaning htop..."
-  if [ -f "userprog/htop-3.4.1-build/Makefile" ]; then
-    (cd userprog/htop-3.4.1-build && $MAKE clean || true)
-    (cd userprog/htop-3.4.1-build && $MAKE distclean || true)
+  if [ -f "ports/htop-3.4.1-build/Makefile" ]; then
+    (cd ports/htop-3.4.1-build && $MAKE clean || true)
+    (cd ports/htop-3.4.1-build && $MAKE distclean || true)
   fi
-  rm -f userprog/htop-3.4.1/config.cache
-  if [ -d "userprog/htop-3.4.1-build" ]; then
-    find userprog/htop-3.4.1-build -type f -name '*.o' -delete
-    rm -rf userprog/htop-3.4.1-build
+  rm -f ports/htop-3.4.1/config.cache
+  if [ -d "ports/htop-3.4.1-build" ]; then
+    find ports/htop-3.4.1-build -type f -name '*.o' -delete
+    rm -rf ports/htop-3.4.1-build
   fi
 fi
 
 rm -f root/bin/lsh
 rm -f root/bin/sh
+rm -f root/bin/init
 rm -f root/bin/nano
 rm -f root/bin/htop
 rm -f root/bin/lebcu

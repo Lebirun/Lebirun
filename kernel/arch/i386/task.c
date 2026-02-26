@@ -48,6 +48,7 @@ static volatile int reap_pending = 0;
 static volatile int exec_drain_pending = 0;
 
 static uint32_t next_task_id = 1;
+static pid_t next_kernel_pid = -1;
 
 #define EXEC_CLEANUP_QUEUE_SIZE 64
 
@@ -583,6 +584,18 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     return new_task;
 }
 
+task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state) {
+    task_t *t;
+
+    t = create_task(entry, initial_state, false);
+    if (!t) return NULL;
+    next_task_id--;
+    t->pid = next_kernel_pid;
+    next_kernel_pid--;
+    t->is_kernel_task = true;
+    return t;
+}
+
 void sleep_ticks(uint32_t ticks) {
     uint32_t new_wake;
 
@@ -709,7 +722,8 @@ void reap_dead_tasks(void) {
         next = t->wait_next;
         t->wait_next = NULL;
 
-        if (t->join_refs != 0 || t->in_wait_queue) {
+        if (t->join_refs != 0 || t->in_wait_queue ||
+            (t->ppid > 0 && !t->waited && task_find(t->ppid))) {
             t->wait_next = keep;
             keep = t;
             t = next;
@@ -1978,6 +1992,11 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     regs->int_no = 0;
     regs->err_code = 0;
     regs->eip = final_entry;
+
+    {
+        extern void task_reset_signals_on_exec(void);
+        task_reset_signals_on_exec();
+    }
 
     current_task->pd_phys = new_pd;
     current_task->cr3 = new_pd;

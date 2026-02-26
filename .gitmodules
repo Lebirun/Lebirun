@@ -10,3 +10,6 @@
 [submodule "lebconfig"]
 	path = lebconfig
 	url = git@github.com:Lebirun/lebconfig.git
+[submodule "userprog/LebInit"]
+	path = userprog/LebInit
+	url = git@github.com:Lebirun/LebInit.git

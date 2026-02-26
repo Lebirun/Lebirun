@@ -87,12 +87,10 @@ void net_init(void) {
     netif = netif_get_default();
     if (netif) {
         dhcp_init(netif);
-        dhcp_start_pending = 1;
     }
 
-    nt = create_task(net_worker_thread, TASK_READY, false);
+    nt = create_kernel_task(net_worker_thread, TASK_READY);
     if (nt) {
-        nt->is_kernel_task = true;
         strcpy(nt->name, "net_worker");
         lock_scheduler();
         add_task_to_runqueue(nt);

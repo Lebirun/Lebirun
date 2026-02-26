@@ -3,6 +3,13 @@
 #include <kernel/debug.h>
 #include <string.h>
 
+#define SLAB_REGION_START 0xD4000000u
+#define SLAB_REGION_SIZE  0x00400000u
+#define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
+
+extern uint64_t boot_pd_high[];
+extern uint32_t pae_enabled;
+
 #define SLAB_SIZES_COUNT 5
 #define SLAB_SIZE_16    0
 #define SLAB_SIZE_32    1
@@ -41,6 +48,10 @@ typedef struct {
 static slab_cache_t slab_caches[SLAB_SIZES_COUNT];
 static int slab_initialized = 0;
 static volatile int slab_lock = 0;
+
+static uint32_t slab_virt_bump = SLAB_REGION_START;
+static uint32_t slab_virt_freelist[SLAB_REGION_MAX_PAGES];
+static uint32_t slab_virt_free_count = 0;
 
 static inline void slab_lock_acquire(uint32_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
@@ -87,15 +98,58 @@ static void slab_page_init(slab_page_t *page, uint32_t obj_size) {
     }
 }
 
+static uint32_t slab_virt_alloc(void) {
+    if (slab_virt_free_count > 0) {
+        return slab_virt_freelist[--slab_virt_free_count];
+    }
+    if (slab_virt_bump < SLAB_REGION_START + SLAB_REGION_SIZE) {
+        uint32_t v = slab_virt_bump;
+        slab_virt_bump += PAGE_SIZE;
+        return v;
+    }
+    return 0;
+}
+
+static uint32_t slab_virt_to_phys(uint32_t virt) {
+    uint32_t pde_idx;
+    uint32_t pte_idx;
+    uint64_t pde;
+    uint64_t *pt;
+    uint64_t pte;
+
+    if (!pae_enabled) return virt - 0xC0000000;
+    pde_idx = (virt >> 21) & 0x1FF;
+    pte_idx = (virt >> 12) & 0x1FF;
+    pde = boot_pd_high[pde_idx];
+    if (!(pde & 1)) return 0;
+    pt = (uint64_t *)((uint32_t)(pde & ~0xFFFULL) + 0xC0000000);
+    pte = pt[pte_idx];
+    if (!(pte & 1)) return 0;
+    return (uint32_t)(pte & ~0xFFFULL);
+}
+
+static void slab_virt_free(uint32_t virt) {
+    if (slab_virt_free_count < SLAB_REGION_MAX_PAGES) {
+        slab_virt_freelist[slab_virt_free_count++] = virt;
+    }
+}
+
 static slab_page_t *slab_alloc_page(uint32_t obj_size) {
     slab_page_t *page;
     void *phys;
+    uint32_t virt;
     
     phys = pmm_alloc_page();
     if (!phys) return NULL;
     
-    vmm_map_page((uint32_t)phys + 0xC0000000, (uint32_t)phys, 3);
-    page = (slab_page_t *)((uint32_t)phys + 0xC0000000);
+    virt = slab_virt_alloc();
+    if (!virt) {
+        pfa_free((uint32_t)phys);
+        return NULL;
+    }
+
+    vmm_map_page(virt, (uint32_t)phys, 3);
+    page = (slab_page_t *)virt;
     
     memset(page, 0, PAGE_SIZE);
     slab_page_init(page, obj_size);
@@ -108,9 +162,12 @@ static void slab_free_page(slab_page_t *page) {
     uint32_t phys;
     
     virt = (uint32_t)page;
-    phys = virt - 0xC0000000;
+    phys = slab_virt_to_phys(virt);
     vmm_unmap_page(virt);
-    pfa_free(phys);
+    slab_virt_free(virt);
+    if (phys) {
+        pfa_free(phys);
+    }
 }
 
 static void slab_add_to_list(slab_page_t **list, slab_page_t *page) {
@@ -277,7 +334,7 @@ int slab_owns(void *ptr) {
     if (!ptr || !slab_initialized) return 0;
     
     virt = (uint32_t)ptr;
-    if (virt < 0xC0000000) return 0;
+    if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
     
     page = (slab_page_t *)((uint32_t)ptr & ~(PAGE_SIZE - 1));
     return (page->magic == SLAB_MAGIC);

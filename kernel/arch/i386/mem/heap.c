@@ -25,7 +25,7 @@ static inline void heap_lock_release(void) {
 #define CANARY_OVERHEAD (sizeof(uint32_t) * 2)
 #define HEAP_USE_DEMAND_PAGING 1
 
-#define EARLY_HEAP_SIZE (4 * 1024)
+#define EARLY_HEAP_SIZE (32 * 1024)
 static uint8_t early_heap_buffer[EARLY_HEAP_SIZE] __attribute__((aligned(4096)));
 static uint32_t early_heap_offset = 0;
 static int main_heap_initialized = 0;
@@ -262,7 +262,8 @@ static int heap_reserve_virtual(uint32_t virt_start, uint32_t size) {
 }
 
 static int heap_expand(uint32_t new_end) {
-    
+    uint32_t addr;
+
     if (new_end > kernel_heap.max_addr) {
         new_end = kernel_heap.max_addr;
     }
@@ -271,19 +272,12 @@ static int heap_expand(uint32_t new_end) {
 
     if (new_end <= kernel_heap.end_addr) return 0;
 
-#if HEAP_USE_DEMAND_PAGING
-    if (heap_reserve_virtual(kernel_heap.end_addr, new_end - kernel_heap.end_addr) < 0) {
-        printf("heap_expand: Failed to reserve virtual range\n");
-        return -1;
-    }
-#else
     for (addr = kernel_heap.end_addr; addr < new_end; addr += PAGE_SIZE) {
         if (heap_map_page(addr) < 0) {
             printf("heap_expand: Failed to map page at 0x%08X\n", addr);
             return -1;
         }
     }
-#endif
 
     kernel_heap.end_addr = new_end;
     kernel_heap.total_size = new_end - kernel_heap.start_addr;

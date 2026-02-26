@@ -35,6 +35,7 @@
 #define SYS_READ_NB         (39u | LEBIRUN_SYSCALL_FLAG)
 #define SYS_SLEEP           (5u  | LEBIRUN_SYSCALL_FLAG)
 #define SYS_CONSOLE_SETCURSOR (38u | LEBIRUN_SYSCALL_FLAG)
+#define SYS_CONSOLE_SETID   (270u | LEBIRUN_SYSCALL_FLAG)
 
 static long syscall0(unsigned int n)
 {
@@ -172,6 +173,11 @@ int console_clear(int console_num)
 int console_setcursor(int x, int y)
 {
     return (int)syscall2(SYS_CONSOLE_SETCURSOR, x, y);
+}
+
+int console_setid(int console_num)
+{
+    return (int)syscall1(SYS_CONSOLE_SETID, console_num);
 }
 
 int fb_setcolors(unsigned int fg, unsigned int bg)

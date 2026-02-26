@@ -66,5 +66,6 @@ void console_rewrap_all(uint32_t old_cols, uint32_t new_cols, uint32_t new_rows)
 void console_writer_init(void);
 void console_writer_flush(void);
 void console_tick(void);
+int console_alloc(int n);
 
 #endif

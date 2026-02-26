@@ -265,7 +265,9 @@
 #define LEB_SYSCALL_REGSUB 257u
 #define LEB_SYSCALL_REGEXEC_EX 258u
 #define LEB_SYSCALL_NET_HTTP_POST 264u
-#define LEB_NR_SYSCALLS 270u
+#define LEB_SYSCALL_REBOOT 269u
+#define LEB_SYSCALL_CONSOLE_SETID 270u
+#define LEB_NR_SYSCALLS 281u
 
 static inline long leb_syscall0(unsigned int n) {
 	long ret;
@@ -320,6 +322,7 @@ int console_switch(int console_num);
 int console_getcur(void);
 int console_clear(int console_num);
 int console_setcursor(int x, int y);
+int console_setid(int console_num);
 
 int fb_setcolors(unsigned int fg, unsigned int bg);
 int fb_putpixel(unsigned int x, unsigned int y, unsigned int color);
