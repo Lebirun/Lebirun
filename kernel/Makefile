@@ -64,7 +64,10 @@ $(KERNEL_ARCH_OBJS) \
 $(UNIFONT_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
-lib/string.o
+lib/string.o \
+crypto/sha256.o \
+crypto/sha512.o \
+crypto/hmac.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \

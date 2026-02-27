@@ -267,6 +267,7 @@
 #define LEB_SYSCALL_NET_HTTP_POST 264u
 #define LEB_SYSCALL_REBOOT 269u
 #define LEB_SYSCALL_CONSOLE_SETID 270u
+#define LEB_SYSCALL_CRYPTO 271u
 #define LEB_NR_SYSCALLS 281u
 
 static inline long leb_syscall0(unsigned int n) {

@@ -33,17 +33,25 @@ void dns_set_server2(ipv4_addr_t server) {
 }
 
 static int dns_cache_lookup(const char *name, ipv4_addr_t *out_ipv4) {
-    for (int i = 0; i < DNS_MAX_CACHE; i++) {
+    int i;
+    int j;
+    int match;
+    uint32_t age;
+
+    for (i = 0; i < DNS_MAX_CACHE; i++) {
         if (dns_cache[i].has_ipv4) {
-            int match = 1;
-            for (int j = 0; name[j] && j < 255; j++) {
+            match = 1;
+            for (j = 0; name[j] && j < 255; j++) {
                 if (dns_cache[i].name[j] != name[j]) {
                     match = 0;
                     break;
                 }
             }
+            if (match && dns_cache[i].name[j] != '\0') {
+                match = 0;
+            }
             if (match) {
-                uint32_t age = net_get_ticks() - dns_cache[i].timestamp;
+                age = net_get_ticks() - dns_cache[i].timestamp;
                 if (age < dns_cache[i].ttl * 1000 && age < DNS_CACHE_TTL) {
                     *out_ipv4 = dns_cache[i].ipv4;
                     return 0;
@@ -56,10 +64,15 @@ static int dns_cache_lookup(const char *name, ipv4_addr_t *out_ipv4) {
 }
 
 void dns_cache_add(const char *name, ipv4_addr_t ip, uint32_t ttl) {
-    int oldest_idx = 0;
-    uint32_t oldest_time = 0xFFFFFFFF;
+    int oldest_idx;
+    uint32_t oldest_time;
+    int i;
+    int len;
 
-    for (int i = 0; i < DNS_MAX_CACHE; i++) {
+    oldest_idx = 0;
+    oldest_time = 0xFFFFFFFF;
+
+    for (i = 0; i < DNS_MAX_CACHE; i++) {
         if (!dns_cache[i].has_ipv4) {
             oldest_idx = i;
             break;
@@ -70,7 +83,7 @@ void dns_cache_add(const char *name, ipv4_addr_t ip, uint32_t ttl) {
         }
     }
 
-    int len = 0;
+    len = 0;
     while (name[len] && len < 255) {
         dns_cache[oldest_idx].name[len] = name[len];
         len++;
@@ -82,40 +95,55 @@ void dns_cache_add(const char *name, ipv4_addr_t ip, uint32_t ttl) {
     dns_cache[oldest_idx].ttl = ttl;
 }
 
-static int dns_encode_name(const char *name, uint8_t *buffer) {
-    int offset = 0;
-    int label_start = 0;
+static int dns_encode_name(const char *name, uint8_t *buffer, int buffer_size) {
+    int offset;
+    int label_start;
+    int i;
+    int label_len;
+    int j;
 
-    for (int i = 0; ; i++) {
+    offset = 0;
+    label_start = 0;
+
+    for (i = 0; ; i++) {
         if (name[i] == '.' || name[i] == '\0') {
-            int label_len = i - label_start;
+            label_len = i - label_start;
             if (label_len > 63) return -1;
+            if (offset + 1 + label_len >= buffer_size) return -1;
             buffer[offset++] = label_len;
-            for (int j = label_start; j < i; j++) {
+            for (j = label_start; j < i; j++) {
                 buffer[offset++] = name[j];
             }
             label_start = i + 1;
             if (name[i] == '\0') break;
         }
     }
+    if (offset >= buffer_size) return -1;
     buffer[offset++] = 0;
     return offset;
 }
 
 static int dns_decode_name(uint8_t *packet, uint32_t packet_len, uint32_t offset, char *name, int max_len) {
-    int name_offset = 0;
-    int jumped = 0;
-    int jump_count = 0;
+    int name_offset;
+    int jumped;
+    int jump_count;
+    uint8_t len;
+    uint16_t ptr;
+    int i;
+
+    name_offset = 0;
+    jumped = 0;
+    jump_count = 0;
 
     while (offset < packet_len && jump_count < 10) {
-        uint8_t len = packet[offset];
+        len = packet[offset];
         if (len == 0) {
             offset++;
             break;
         }
         if ((len & 0xC0) == 0xC0) {
             if (offset + 1 >= packet_len) return -1;
-            uint16_t ptr = ((len & 0x3F) << 8) | packet[offset + 1];
+            ptr = ((len & 0x3F) << 8) | packet[offset + 1];
             if (!jumped) offset += 2;
             jumped = 1;
             offset = ptr;
@@ -126,7 +154,7 @@ static int dns_decode_name(uint8_t *packet, uint32_t packet_len, uint32_t offset
         if (name_offset > 0 && name_offset < max_len - 1) {
             name[name_offset++] = '.';
         }
-        for (int i = 0; i < len && offset < packet_len && name_offset < max_len - 1; i++) {
+        for (i = 0; i < len && offset < packet_len && name_offset < max_len - 1; i++) {
             name[name_offset++] = packet[offset++];
         }
     }
@@ -171,7 +199,7 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint32_t ti
     hdr->nscount = 0;
     hdr->arcount = 0;
 
-    name_len = dns_encode_name(hostname, query + sizeof(dns_header_t));
+    name_len = dns_encode_name(hostname, query + sizeof(dns_header_t), 512 - (int)sizeof(dns_header_t) - 4);
     if (name_len < 0) { kfree(query); return -1; }
 
     qtype = query + sizeof(dns_header_t) + name_len;
@@ -211,30 +239,44 @@ int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
 }
 
 void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *data, uint32_t len) {
+    dns_header_t *hdr;
+    uint16_t id;
+    uint16_t flags;
+    uint16_t qdcount;
+    uint16_t ancount;
+    uint32_t offset;
+    uint16_t qi;
+    uint16_t ai;
+    uint8_t l;
+    char name[256];
+    int new_offset;
+    uint16_t rtype;
+    uint16_t rdlength;
+
     (void)netif;
     (void)src;
     (void)src_port;
 
     if (len < sizeof(dns_header_t)) return;
 
-    dns_header_t *hdr = (dns_header_t *)data;
-    uint16_t id = ntohs(hdr->id);
-    uint16_t flags = ntohs(hdr->flags);
+    hdr = (dns_header_t *)data;
+    id = ntohs(hdr->id);
+    flags = ntohs(hdr->flags);
 
     if (!(flags & DNS_FLAG_QR)) return;
     if (id != pending_id) return;
     if ((flags & DNS_FLAG_RCODE) != 0) return;
 
-    uint16_t qdcount = ntohs(hdr->qdcount);
-    uint16_t ancount = ntohs(hdr->ancount);
+    qdcount = ntohs(hdr->qdcount);
+    ancount = ntohs(hdr->ancount);
 
     if (ancount == 0) return;
 
-    uint32_t offset = sizeof(dns_header_t);
+    offset = sizeof(dns_header_t);
 
-    for (uint16_t i = 0; i < qdcount; i++) {
+    for (qi = 0; qi < qdcount; qi++) {
         while (offset < len) {
-            uint8_t l = data[offset];
+            l = data[offset];
             if (l == 0) { offset++; break; }
             if ((l & 0xC0) == 0xC0) { offset += 2; break; }
             offset += l + 1;
@@ -242,12 +284,11 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
         offset += 4;
     }
 
-    for (uint16_t i = 0; i < ancount && offset < len; i++) {
-        char name[256];
-        int new_offset = dns_decode_name(data, len, offset, name, sizeof(name));
+    for (ai = 0; ai < ancount && offset < len; ai++) {
+        new_offset = dns_decode_name(data, len, offset, name, sizeof(name));
         if (new_offset < 0) {
             while (offset < len) {
-                uint8_t l = data[offset];
+                l = data[offset];
                 if (l == 0) { offset++; break; }
                 if ((l & 0xC0) == 0xC0) { offset += 2; break; }
                 offset += l + 1;
@@ -257,7 +298,6 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
         }
 
         if (offset + 10 > len) break;
-
         uint16_t rtype = (data[offset] << 8) | data[offset + 1];
         uint16_t rdlength = (data[offset + 8] << 8) | data[offset + 9];
         offset += 10;
@@ -276,8 +316,10 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
 }
 
 void dns_cache_print(void) {
+    int i;
+
     printf("=== DNS Cache ===\n");
-    for (int i = 0; i < DNS_MAX_CACHE; i++) {
+    for (i = 0; i < DNS_MAX_CACHE; i++) {
         if (dns_cache[i].has_ipv4) {
             printf("%s -> %u.%u.%u.%u\n",
                    dns_cache[i].name,

@@ -40,22 +40,28 @@ FILE *const stderr = (FILE *)&_stderr_file;
 static struct _IO_FILE *open_files[MAX_OPEN_FILES];
 
 static struct _IO_FILE *alloc_file(void) {
-    struct _IO_FILE *f = (struct _IO_FILE *)malloc(sizeof(struct _IO_FILE));
+    struct _IO_FILE *f;
+    int i;
+
+    f = (struct _IO_FILE *)malloc(sizeof(struct _IO_FILE));
     if (!f) return NULL;
     memset(f, 0, sizeof(*f));
     f->fd = -1;
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    for (i = 0; i < MAX_OPEN_FILES; i++) {
         if (!open_files[i]) {
             open_files[i] = f;
-            break;
+            return f;
         }
     }
-    return f;
+    free(f);
+    return NULL;
 }
 
 static void free_file(struct _IO_FILE *f) {
+    int i;
+
     if (!f) return;
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+    for (i = 0; i < MAX_OPEN_FILES; i++) {
         if (open_files[i] == f) {
             open_files[i] = NULL;
             break;
@@ -76,17 +82,24 @@ int putchar(int c) {
 }
 
 int fflush(FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream) return 0;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     if (f->fd < 0) return EOF;
     return 0;
 }
 
 FILE *fopen(const char *path, const char *mode) {
+    int flags;
+    int oflags;
+    int fd;
+    struct _IO_FILE *f;
+
     if (!path || !mode) return NULL;
     
-    int flags = 0;
-    int oflags = 0;
+    flags = 0;
+    oflags = 0;
     
     switch (mode[0]) {
         case 'r':
@@ -117,10 +130,10 @@ FILE *fopen(const char *path, const char *mode) {
             return NULL;
     }
     
-    int fd = open(path, oflags);
+    fd = open(path, oflags);
     if (fd < 0) return NULL;
     
-    struct _IO_FILE *f = alloc_file();
+    f = alloc_file();
     if (!f) {
         close(fd);
         return NULL;
@@ -145,9 +158,12 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
 }
 
 FILE *fdopen(int fd, const char *mode) {
+    int flags;
+    struct _IO_FILE *f;
+
     if (fd < 0 || !mode) return NULL;
     
-    int flags = 0;
+    flags = 0;
     switch (mode[0]) {
         case 'r': flags = FILE_FLAG_READ; break;
         case 'w': flags = FILE_FLAG_WRITE; break;
@@ -156,7 +172,7 @@ FILE *fdopen(int fd, const char *mode) {
     }
     if (mode[1] == '+') flags |= (FILE_FLAG_READ | FILE_FLAG_WRITE);
     
-    struct _IO_FILE *f = alloc_file();
+    f = alloc_file();
     if (!f) return NULL;
     
     f->fd = fd;
@@ -165,15 +181,18 @@ FILE *fdopen(int fd, const char *mode) {
 }
 
 int fclose(FILE *stream) {
+    struct _IO_FILE *f;
+    int ret;
+
     if (!stream) return EOF;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     
     if (f == &_stdin_file || f == &_stdout_file || f == &_stderr_file) {
         return 0;
     }
     
     fflush(stream);
-    int ret = 0;
+    ret = 0;
     if (f->fd >= 0) {
         ret = close(f->fd);
     }
@@ -182,39 +201,50 @@ int fclose(FILE *stream) {
 }
 
 int fileno(FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream) return -1;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     return f->fd;
 }
 
 int feof(FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream) return 0;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     return (f->flags & FILE_FLAG_EOF) ? 1 : 0;
 }
 
 int ferror(FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream) return 0;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     return (f->flags & FILE_FLAG_ERROR) ? 1 : 0;
 }
 
 void clearerr(FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream) return;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     f->flags &= ~(FILE_FLAG_EOF | FILE_FLAG_ERROR);
 }
 
 int fseek(FILE *stream, long offset, int whence) {
+    struct _IO_FILE *f;
+    off_t ret;
+
     if (!stream) return -1;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     if (f->fd < 0) return -1;
     
     f->has_ungetc = 0;
     f->buf_pos = 0;
     f->buf_len = 0;
     
-    off_t ret = lseek(f->fd, offset, whence);
+    ret = lseek(f->fd, offset, whence);
     if (ret < 0) {
         f->flags |= FILE_FLAG_ERROR;
         return -1;
@@ -229,11 +259,14 @@ int fseeko(FILE *stream, off_t offset, int whence) {
 }
 
 long ftell(FILE *stream) {
+    struct _IO_FILE *f;
+    off_t pos;
+
     if (!stream) return -1;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     if (f->fd < 0) return -1;
     
-    off_t pos = lseek(f->fd, 0, SEEK_CUR);
+    pos = lseek(f->fd, 0, SEEK_CUR);
     if (pos < 0) return -1;
     
     pos -= f->buf_len - f->buf_pos;
@@ -254,13 +287,22 @@ void rewind(FILE *stream) {
 }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    struct _IO_FILE *f;
+    unsigned char *dest;
+    size_t total;
+    size_t done;
+    size_t avail;
+    size_t tocopy;
+    ssize_t n;
+
     if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    if (nmemb > (size_t)-1 / size) return 0;
+    f = (struct _IO_FILE *)stream;
     if (f->fd < 0 || !(f->flags & FILE_FLAG_READ)) return 0;
     
-    unsigned char *dest = (unsigned char *)ptr;
-    size_t total = size * nmemb;
-    size_t done = 0;
+    dest = (unsigned char *)ptr;
+    total = size * nmemb;
+    done = 0;
     
     if (f->has_ungetc && done < total) {
         *dest++ = (unsigned char)f->ungetc_buf;
@@ -270,8 +312,8 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     
     while (done < total) {
         if (f->buf && f->buf_pos < f->buf_len) {
-            size_t avail = f->buf_len - f->buf_pos;
-            size_t tocopy = (total - done < avail) ? (total - done) : avail;
+            avail = f->buf_len - f->buf_pos;
+            tocopy = (total - done < avail) ? (total - done) : avail;
             memcpy(dest, f->buf + f->buf_pos, tocopy);
             f->buf_pos += tocopy;
             dest += tocopy;
@@ -279,7 +321,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
         } else {
             if (f->buf && f->buf_size > 0) {
 
-                ssize_t n = read(f->fd, f->buf, f->buf_size);
+                n = read(f->fd, f->buf, f->buf_size);
                 if (n <= 0) {
                     if (n == 0) f->flags |= FILE_FLAG_EOF;
                     else f->flags |= FILE_FLAG_ERROR;
@@ -288,7 +330,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
                 f->buf_len = (size_t)n;
                 f->buf_pos = 0;
             } else {
-                ssize_t n = read(f->fd, dest, total - done);
+                n = read(f->fd, dest, total - done);
                 if (n <= 0) {
                     if (n == 0) f->flags |= FILE_FLAG_EOF;
                     else f->flags |= FILE_FLAG_ERROR;
@@ -308,10 +350,15 @@ size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-    if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
-    
+    struct _IO_FILE *f;
     int fd;
+    size_t total;
+    ssize_t w;
+
+    if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
+    if (nmemb > (size_t)-1 / size) return 0;
+    f = (struct _IO_FILE *)stream;
+    
     if (f == &_stdin_file) fd = 0;
     else if (f == &_stdout_file) fd = 1;
     else if (f == &_stderr_file) fd = 2;
@@ -320,8 +367,8 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
         fd = f->fd;
     }
     
-    size_t total = size * nmemb;
-    ssize_t w = write(fd, ptr, total);
+    total = size * nmemb;
+    w = write(fd, ptr, total);
     if (w <= 0) {
         f->flags |= FILE_FLAG_ERROR;
         return 0;
@@ -352,8 +399,10 @@ int getc_unlocked(FILE *stream) {
 }
 
 int ungetc(int c, FILE *stream) {
+    struct _IO_FILE *f;
+
     if (!stream || c == EOF) return EOF;
-    struct _IO_FILE *f = (struct _IO_FILE *)stream;
+    f = (struct _IO_FILE *)stream;
     if (f->has_ungetc) return EOF;
     f->ungetc_buf = c;
     f->has_ungetc = 1;
@@ -362,7 +411,9 @@ int ungetc(int c, FILE *stream) {
 }
 
 int fputc(int c, FILE *stream) {
-    unsigned char ch = (unsigned char)c;
+    unsigned char ch;
+
+    ch = (unsigned char)c;
     if (fwrite(&ch, 1, 1, stream) != 1) return EOF;
     return ch;
 }
@@ -380,11 +431,14 @@ int putc_unlocked(int c, FILE *stream) {
 }
 
 char *fgets(char *s, int n, FILE *stream) {
+    int i;
+    int c;
+
     if (!s || n <= 0 || !stream) return NULL;
     
-    int i = 0;
+    i = 0;
     while (i < n - 1) {
-        int c = fgetc(stream);
+        c = fgetc(stream);
         if (c == EOF) {
             if (i == 0) return NULL;
             break;
@@ -401,8 +455,10 @@ char *fgets_unlocked(char *s, int n, FILE *stream) {
 }
 
 int fputs(const char *s, FILE *stream) {
+    size_t len;
+
     if (!s || !stream) return EOF;
-    size_t len = strlen(s);
+    len = strlen(s);
     if (fwrite(s, 1, len, stream) != len) return EOF;
     return 0;
 }
@@ -448,20 +504,25 @@ int getchar_unlocked(void) { return getchar(); }
 int putchar_unlocked(int c) { return putchar(c); }
 
 int fprintf(FILE *stream, const char *format, ...) {
-    if (!stream || !format) return -1;
     va_list ap;
+    int ret;
+
+    if (!stream || !format) return -1;
     va_start(ap, format);
-    int ret = vfprintf(stream, format, ap);
+    ret = vfprintf(stream, format, ap);
     va_end(ap);
     return ret;
 }
 
 int vfprintf(FILE *stream, const char *format, va_list ap) {
-    if (!stream || !format) return -1;
     char buf[1024];
-    int len = vsnprintf(buf, sizeof(buf), format, ap);
+    int len;
+    size_t w;
+
+    if (!stream || !format) return -1;
+    len = vsnprintf(buf, sizeof(buf), format, ap);
     if (len > 0) {
-        size_t w = fwrite(buf, 1, (size_t)len, stream);
+        w = fwrite(buf, 1, (size_t)len, stream);
         return (int)w;
     }
     return len;
@@ -469,8 +530,10 @@ int vfprintf(FILE *stream, const char *format, va_list ap) {
 
 int printf(const char *format, ...) {
     va_list ap;
+    int ret;
+
     va_start(ap, format);
-    int ret = vfprintf(stdout, format, ap);
+    ret = vfprintf(stdout, format, ap);
     va_end(ap);
     return ret;
 }
@@ -480,32 +543,39 @@ int vprintf(const char *format, va_list ap) {
 }
 
 int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
+    char *out;
+    char *end;
+    const char *p;
+    int width, precision, left_align, zero_pad, long_arg;
+    char tmp[32];
+    int tmplen;
+
     if (!str || size == 0 || !format) return 0;
-    
-    char *out = str;
-    char *end = str + size - 1;
-    const char *p = format;
-    
+
+    out = str;
+    end = str + size - 1;
+    p = format;
+
     while (*p && out < end) {
         if (*p == '%') {
             p++;
-            int width = 0;
-            int precision = -1;
-            int left_align = 0;
-            int zero_pad = 0;
-            int long_arg = 0;
-            
+            width = 0;
+            precision = -1;
+            left_align = 0;
+            zero_pad = 0;
+            long_arg = 0;
+
             while (*p == '-' || *p == '0' || *p == '+' || *p == ' ' || *p == '#') {
                 if (*p == '-') left_align = 1;
                 else if (*p == '0') zero_pad = 1;
                 p++;
             }
-            
+
             while (*p >= '0' && *p <= '9') {
                 width = width * 10 + (*p - '0');
                 p++;
             }
-            
+
             if (*p == '.') {
                 p++;
                 precision = 0;
@@ -514,19 +584,18 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                     p++;
                 }
             }
-            
+
             if (*p == 'l') {
                 long_arg = 1;
                 p++;
-                if (*p == 'l') { p++; } 
+                if (*p == 'l') { p++; }
             } else if (*p == 'z' || *p == 'h') {
                 p++;
             }
-            
-            char tmp[32];
-            int tmplen = 0;
+
+            tmplen = 0;
             (void)left_align; (void)zero_pad; (void)precision;
-            
+
             switch (*p) {
                 case 'd':
                 case 'i': {
@@ -585,17 +654,19 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                     double val = va_arg(ap, double);
                     long ipart = (long)val;
                     int neg = ipart < 0;
+                    double frac;
+                    int i, d;
                     if (neg) ipart = -ipart;
                     if (ipart == 0) tmp[tmplen++] = '0';
                     else while (ipart) { tmp[tmplen++] = '0' + (ipart % 10); ipart /= 10; }
                     if (neg && out < end) *out++ = '-';
                     while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
                     if (out < end) *out++ = '.';
-                    double frac = val - (long)val;
+                    frac = val - (long)val;
                     if (frac < 0) frac = -frac;
-                    for (int i = 0; i < 6 && out < end; i++) {
+                    for (i = 0; i < 6 && out < end; i++) {
                         frac *= 10;
-                        int d = (int)frac;
+                        d = (int)frac;
                         *out++ = '0' + d;
                         frac -= d;
                     }
@@ -617,22 +688,26 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
 
 int snprintf(char *str, size_t size, const char *format, ...) {
     va_list ap;
+    int ret;
+
     va_start(ap, format);
-    int ret = vsnprintf(str, size, format, ap);
+    ret = vsnprintf(str, size, format, ap);
     va_end(ap);
     return ret;
 }
 
 int sprintf(char *str, const char *format, ...) {
     va_list ap;
+    int ret;
+
     va_start(ap, format);
-    int ret = vsnprintf(str, 4096, format, ap);
+    ret = vsnprintf(str, (size_t)-1, format, ap);
     va_end(ap);
     return ret;
 }
 
 int vsprintf(char *str, const char *format, va_list ap) {
-    return vsnprintf(str, 4096, format, ap);
+    return vsnprintf(str, (size_t)-1, format, ap);
 }
 
 static const char *const sys_errlist[] = {
@@ -691,8 +766,11 @@ char *strerror(int errnum) {
 }
 
 int strerror_r(int errnum, char *buf, size_t buflen) {
-    const char *msg = strerror(errnum);
-    size_t len = strlen(msg);
+    const char *msg;
+    size_t len;
+
+    msg = strerror(errnum);
+    len = strlen(msg);
     if (len >= buflen) {
         if (buflen > 0) {
             memcpy(buf, msg, buflen - 1);
@@ -764,8 +842,10 @@ int remove(const char *path) {
 }
 
 int fgetpos(FILE *stream, fpos_t *pos) {
+    long p;
+
     if (!stream || !pos) return -1;
-    long p = ftell(stream);
+    p = ftell(stream);
     if (p < 0) return -1;
     memset(pos, 0, sizeof(*pos));
     memcpy(pos, &p, sizeof(*pos) < sizeof(p) ? sizeof(*pos) : sizeof(p));
@@ -773,8 +853,10 @@ int fgetpos(FILE *stream, fpos_t *pos) {
 }
 
 int fsetpos(FILE *stream, const fpos_t *pos) {
+    long p;
+
     if (!stream || !pos) return -1;
-    long p = 0;
+    p = 0;
     memcpy(&p, pos, sizeof(*pos) < sizeof(p) ? sizeof(*pos) : sizeof(p));
     return fseek(stream, p, SEEK_SET);
 }
@@ -788,6 +870,9 @@ ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
 }
 
 ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
+    size_t pos;
+    int c;
+    
     if (!lineptr || !n || !stream) return -1;
     
     if (!*lineptr || *n == 0) {
@@ -796,12 +881,12 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
         if (!*lineptr) return -1;
     }
     
-    size_t pos = 0;
-    int c;
+    pos = 0;
     while ((c = fgetc(stream)) != EOF) {
         if (pos + 1 >= *n) {
+            char *newbuf;
             *n *= 2;
-            char *newbuf = (char *)realloc(*lineptr, *n);
+            newbuf = (char *)realloc(*lineptr, *n);
             if (!newbuf) return -1;
             *lineptr = newbuf;
         }

@@ -59,12 +59,27 @@ typedef struct {
 } exec_cleanup_entry_t;
 
 static exec_cleanup_entry_t exec_cleanup_queue[EXEC_CLEANUP_QUEUE_SIZE];
-static int exec_cleanup_head = 0;
-static int exec_cleanup_tail = 0;
+static volatile int exec_cleanup_head = 0;
+static volatile int exec_cleanup_tail = 0;
+static volatile int exec_cleanup_lock = 0;
+
+static inline void exec_cleanup_lock_acquire(void) {
+    while (__sync_lock_test_and_set(&exec_cleanup_lock, 1)) {
+        __asm__ volatile ("pause" ::: "memory");
+    }
+}
+
+static inline void exec_cleanup_lock_release(void) {
+    __sync_lock_release(&exec_cleanup_lock);
+}
 
 void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count) {
-    int next_tail = (exec_cleanup_tail + 1) % EXEC_CLEANUP_QUEUE_SIZE;
+    int next_tail;
+
+    exec_cleanup_lock_acquire();
+    next_tail = (exec_cleanup_tail + 1) % EXEC_CLEANUP_QUEUE_SIZE;
     if (next_tail == exec_cleanup_head) {
+        exec_cleanup_lock_release();
         if (pages) {
             kfree(pages);
         }
@@ -75,26 +90,34 @@ void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count) {
     exec_cleanup_queue[exec_cleanup_tail].old_pages = pages;
     exec_cleanup_queue[exec_cleanup_tail].old_pages_count = count;
     exec_cleanup_tail = next_tail;
+    exec_cleanup_lock_release();
 }
 
 void exec_cleanup_drain(void) {
     uint32_t *pages;
     uint32_t pd;
+    int head;
 
+    exec_cleanup_lock_acquire();
     while (exec_cleanup_head != exec_cleanup_tail) {
-        pages = exec_cleanup_queue[exec_cleanup_head].old_pages;
-        pd = exec_cleanup_queue[exec_cleanup_head].old_pd;
+        head = exec_cleanup_head;
+        pages = exec_cleanup_queue[head].old_pages;
+        pd = exec_cleanup_queue[head].old_pd;
+
+        exec_cleanup_queue[head].old_pd = 0;
+        exec_cleanup_queue[head].old_pages = NULL;
+        exec_cleanup_queue[head].old_pages_count = 0;
+        exec_cleanup_head = (head + 1) % EXEC_CLEANUP_QUEUE_SIZE;
+        exec_cleanup_lock_release();
 
         if (pages) {
             kfree(pages);
         }
         if (pd) vmm_free_page_directory(pd);
 
-        exec_cleanup_queue[exec_cleanup_head].old_pd = 0;
-        exec_cleanup_queue[exec_cleanup_head].old_pages = NULL;
-        exec_cleanup_queue[exec_cleanup_head].old_pages_count = 0;
-        exec_cleanup_head = (exec_cleanup_head + 1) % EXEC_CLEANUP_QUEUE_SIZE;
+        exec_cleanup_lock_acquire();
     }
+    exec_cleanup_lock_release();
 }
 
 static void task_error(const char *fmt, ...) {

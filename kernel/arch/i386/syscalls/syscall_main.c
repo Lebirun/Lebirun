@@ -383,4 +383,5 @@ void syscall_init(void) {
     syscalls_dl_init();
     syscalls_regex_init();
     syscalls_power_init();
+    syscalls_crypto_init();
 }

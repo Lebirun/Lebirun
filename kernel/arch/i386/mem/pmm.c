@@ -244,9 +244,14 @@ void pfa_free64(uint64_t phys_addr) {
         return;
     }
 
-    if (pfa_refcounts && (uint32_t)idx < pfa_refcount_entries && pfa_refcounts[(uint32_t)idx] > 0) {
-        pfa_refcounts[(uint32_t)idx]--;
-        return;
+    if (pfa_refcounts && (uint32_t)idx < pfa_refcount_entries) {
+        uint8_t old_ref;
+        for (;;) {
+            old_ref = pfa_refcounts[(uint32_t)idx];
+            if (old_ref == 0) break;
+            if (__sync_bool_compare_and_swap(&pfa_refcounts[(uint32_t)idx], old_ref, old_ref - 1))
+                return;
+        }
     }
 
     byte_idx = (uint32_t)(idx / 8);
@@ -274,9 +279,14 @@ void pfa_free(uint32_t phys_addr) {
         return;
     }
 
-    if (pfa_refcounts && idx < pfa_refcount_entries && pfa_refcounts[idx] > 0) {
-        pfa_refcounts[idx]--;
-        return;
+    if (pfa_refcounts && idx < pfa_refcount_entries) {
+        uint8_t old_ref;
+        for (;;) {
+            old_ref = pfa_refcounts[idx];
+            if (old_ref == 0) break;
+            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_ref, old_ref - 1))
+                return;
+        }
     }
     
     pfa_lock_acquire(&eflags);
@@ -601,27 +611,30 @@ void pfa_ref_init(void) {
 
 void pfa_ref_inc(uint32_t phys_addr) {
     uint32_t idx;
+    uint8_t old_val;
 
     if (!pfa_refcounts) pfa_ref_init();
     if (!pfa_refcounts) return;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= pfa_refcount_entries) return;
-    if (pfa_refcounts[idx] < 255) {
-        pfa_refcounts[idx]++;
-    }
+    do {
+        old_val = pfa_refcounts[idx];
+        if (old_val >= 255) return;
+    } while (!__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val + 1));
 }
 
 int pfa_ref_dec(uint32_t phys_addr) {
     uint32_t idx;
+    uint8_t old_val;
 
     if (!pfa_refcounts) return 0;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= pfa_refcount_entries) return 0;
-    if (pfa_refcounts[idx] > 0) {
-        pfa_refcounts[idx]--;
-        return (int)pfa_refcounts[idx];
-    }
-    return 0;
+    do {
+        old_val = pfa_refcounts[idx];
+        if (old_val == 0) return 0;
+    } while (!__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val - 1));
+    return (int)(old_val - 1);
 }
 
 uint8_t pfa_ref_get(uint32_t phys_addr) {
@@ -630,12 +643,12 @@ uint8_t pfa_ref_get(uint32_t phys_addr) {
     if (!pfa_refcounts) return 0;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= pfa_refcount_entries) return 0;
-    return pfa_refcounts[idx];
+    return __sync_fetch_and_add(&pfa_refcounts[idx], 0);
 }
 
 void pfa_cow_release(uint32_t phys_addr) {
     uint32_t idx;
-    uint8_t ref;
+    uint8_t old_val;
 
     if (!phys_addr) return;
     if (!pfa_refcounts) {
@@ -647,15 +660,23 @@ void pfa_cow_release(uint32_t phys_addr) {
         pfa_free(phys_addr);
         return;
     }
-    ref = pfa_refcounts[idx];
-    if (ref > 1) {
-        pfa_refcounts[idx]--;
+    for (;;) {
+        old_val = pfa_refcounts[idx];
+        if (old_val > 1) {
+            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val - 1))
+                return;
+            continue;
+        }
+        if (old_val == 1) {
+            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], 1, 0)) {
+                pfa_free(phys_addr);
+                return;
+            }
+            continue;
+        }
+        pfa_free(phys_addr);
         return;
     }
-    if (ref == 1) {
-        pfa_refcounts[idx] = 0;
-    }
-    pfa_free(phys_addr);
 }
 
 void pfa_cow_release64(uint64_t phys_addr) {

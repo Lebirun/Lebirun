@@ -398,6 +398,7 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_PIVOT_ROOT 268
 #define SYSCALL_REBOOT 269
 #define SYSCALL_CONSOLE_SETID 270
+#define SYSCALL_CRYPTO 271
 
 #define NR_SYSCALLS 281
 
@@ -515,6 +516,7 @@ void syscalls_shm_init(void);
 void syscalls_dl_init(void);
 void syscalls_regex_init(void);
 void syscalls_power_init(void);
+void syscalls_crypto_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
 

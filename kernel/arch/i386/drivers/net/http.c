@@ -165,15 +165,16 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
     req_len = 0;
 
     method = "GET ";
-    for (i = 0; method[i]; i++) request[req_len++] = method[i];
-    for (i = 0; path[i]; i++) request[req_len++] = path[i];
+    for (i = 0; method[i] && req_len < 511; i++) request[req_len++] = method[i];
+    for (i = 0; path[i] && req_len < 511; i++) request[req_len++] = path[i];
 
     http_ver = " HTTP/1.0\r\nHost: ";
-    for (i = 0; http_ver[i]; i++) request[req_len++] = http_ver[i];
-    for (i = 0; host[i]; i++) request[req_len++] = host[i];
+    for (i = 0; http_ver[i] && req_len < 511; i++) request[req_len++] = http_ver[i];
+    for (i = 0; host[i] && req_len < 511; i++) request[req_len++] = host[i];
 
     headers = "\r\nConnection: close\r\n\r\n";
-    for (i = 0; headers[i]; i++) request[req_len++] = headers[i];
+    for (i = 0; headers[i] && req_len < 511; i++) request[req_len++] = headers[i];
+    request[req_len] = '\0';
 
     if (tcp_send(sock, (uint8_t *)request, req_len) < 0) {
         tcp_disconnect(sock, 1000);
@@ -455,20 +456,20 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
 
     req_len = 0;
 
-    for (i = 0; "POST "[i]; i++) request[req_len++] = "POST "[i];
-    for (i = 0; path[i]; i++) request[req_len++] = path[i];
-    for (i = 0; " HTTP/1.0\r\nHost: "[i]; i++) request[req_len++] = " HTTP/1.0\r\nHost: "[i];
-    for (i = 0; host[i]; i++) request[req_len++] = host[i];
-    for (i = 0; "\r\nContent-Type: "[i]; i++) request[req_len++] = "\r\nContent-Type: "[i];
+    for (i = 0; "POST "[i] && req_len < 511; i++) request[req_len++] = "POST "[i];
+    for (i = 0; path[i] && req_len < 511; i++) request[req_len++] = path[i];
+    for (i = 0; " HTTP/1.0\r\nHost: "[i] && req_len < 511; i++) request[req_len++] = " HTTP/1.0\r\nHost: "[i];
+    for (i = 0; host[i] && req_len < 511; i++) request[req_len++] = host[i];
+    for (i = 0; "\r\nContent-Type: "[i] && req_len < 511; i++) request[req_len++] = "\r\nContent-Type: "[i];
 
     if (content_type) {
-        for (i = 0; content_type[i]; i++) request[req_len++] = content_type[i];
+        for (i = 0; content_type[i] && req_len < 511; i++) request[req_len++] = content_type[i];
     } else {
-        for (i = 0; "application/x-www-form-urlencoded"[i]; i++)
+        for (i = 0; "application/x-www-form-urlencoded"[i] && req_len < 511; i++)
             request[req_len++] = "application/x-www-form-urlencoded"[i];
     }
 
-    for (i = 0; "\r\nContent-Length: "[i]; i++) request[req_len++] = "\r\nContent-Length: "[i];
+    for (i = 0; "\r\nContent-Length: "[i] && req_len < 511; i++) request[req_len++] = "\r\nContent-Length: "[i];
 
     li = 0;
     tmp = body_len;
@@ -486,9 +487,10 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     }
     len_str[li] = '\0';
 
-    for (i = 0; len_str[i]; i++) request[req_len++] = len_str[i];
-    for (i = 0; "\r\nConnection: close\r\n\r\n"[i]; i++)
+    for (i = 0; len_str[i] && req_len < 511; i++) request[req_len++] = len_str[i];
+    for (i = 0; "\r\nConnection: close\r\n\r\n"[i] && req_len < 511; i++)
         request[req_len++] = "\r\nConnection: close\r\n\r\n"[i];
+    request[req_len] = '\0';
 
     if (tcp_send(sock, (uint8_t *)request, req_len) < 0) {
         tcp_disconnect(sock, 1000);
