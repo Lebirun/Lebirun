@@ -2,7 +2,7 @@
 
 static int sys_console_switch(int console_num, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -EINVAL;
+    if (console_num < 0 || console_num >= cmdline_get_consoles()) return -EINVAL;
     console_switch(console_num);
     return 0;
 }
@@ -14,7 +14,7 @@ static int sys_console_getcur(int unused1, const char *unused2, int unused3) {
 
 static int sys_console_clear(int console_num, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -EINVAL;
+    if (console_num < 0 || console_num >= cmdline_get_consoles()) return -EINVAL;
     console_clear(console_num);
     return 0;
 }
@@ -29,7 +29,7 @@ static int sys_console_setcursor(int x, const char *y_ptr, int unused) {
 
 static int sys_console_setid(int console_num, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -EINVAL;
+    if (console_num < 0 || console_num >= cmdline_get_consoles()) return -EINVAL;
     if (!current_task) return -EINVAL;
     if (console_alloc(console_num) < 0) return -ENOMEM;
     current_task->console_id = console_num;

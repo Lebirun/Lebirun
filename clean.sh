@@ -26,6 +26,11 @@ if [ -d "userprog/LebInit" ]; then
   (cd userprog/LebInit && $MAKE clean 2>/dev/null || true)
 fi
 
+if [ -d "userprog/login" ]; then
+  echo "Cleaning login"
+  (cd userprog/login && $MAKE clean 2>/dev/null || true)
+fi
+
 if [ -d "libc/lib/ncurses-6.6" ]; then
   echo "Cleaning ncurses..."
   (cd libc/lib/ncurses-6.6 && $MAKE clean 2>/dev/null || true)
@@ -77,6 +82,10 @@ rm -f root/bin/free
 rm -f root/bin/uname
 rm -f root/bin/date
 rm -f root/bin/lneturl
+rm -f root/bin/login
+rm -f root/bin/dhcp
+rm -f root/sbin/getty
+rm -f root/sbin/lebinit
 rm -f userprog/coreutils/*.bin
 find userprog/coreutils -type f -name '*.o' -delete
 rm -f userprog/lsh/lsh

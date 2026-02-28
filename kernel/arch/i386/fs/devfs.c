@@ -175,8 +175,14 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
         d->name[0] = 't';
         d->name[1] = 't';
         d->name[2] = 'y';
-        d->name[3] = '0' + index;
-        d->name[4] = '\0';
+        if (index >= 10) {
+            d->name[3] = '0' + (index / 10);
+            d->name[4] = '0' + (index % 10);
+            d->name[5] = '\0';
+        } else {
+            d->name[3] = '0' + index;
+            d->name[4] = '\0';
+        }
         d->inode = 16 + index + 1;
         d->type = VFS_CHARDEVICE;
         return d;
@@ -205,9 +211,14 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "kmem") == 0) return &dev_kmem;
     if (strcmp(name, "port") == 0) return &dev_port;
     
-    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] < ('0' + NUM_CONSOLES) && name[4] == '\0') {
+    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '9') {
         int idx = name[3] - '0';
-        return &dev_ttys[idx];
+        if (name[4] >= '0' && name[4] <= '9' && name[5] == '\0')
+            idx = idx * 10 + (name[4] - '0');
+        else if (name[4] != '\0')
+            return NULL;
+        if (idx >= 0 && idx < NUM_CONSOLES)
+            return &dev_ttys[idx];
     }
     
     return NULL;
@@ -478,8 +489,14 @@ void devfs_init(void) {
         name[0] = 't';
         name[1] = 't';
         name[2] = 'y';
-        name[3] = '0' + i;
-        name[4] = '\0';
+        if (i >= 10) {
+            name[3] = '0' + (i / 10);
+            name[4] = '0' + (i % 10);
+            name[5] = '\0';
+        } else {
+            name[3] = '0' + i;
+            name[4] = '\0';
+        }
         strcpy(dev_ttys[i].name, name);
         dev_ttys[i].flags = VFS_CHARDEVICE;
         dev_ttys[i].mask = 0620;

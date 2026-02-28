@@ -30,6 +30,7 @@
 #include <kernel/kstack.h>
 #include <kernel/smp.h>
 #include <kernel/power.h>
+#include <kernel/cmdline.h>
 #include "launch_user.h"
 
 bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
@@ -196,6 +197,8 @@ void kernel_main(void) {
     
     mb = (multiboot_t *)(multiboot_ptr + 0xC0000000);
     g_multiboot = mb;
+
+    cmdline_parse(mb->flags, mb->cmdline);
 
     if (mb->flags & (1 << 12)) {
         terminal_init_fb(mb->framebuffer_addr, mb->framebuffer_width, 
@@ -447,11 +450,11 @@ void kernel_main(void) {
     heap_verify();
     slab_gc();
 
-    init_task = launch_user_path("/bin/init", 0);
+    init_task = launch_user_path(cmdline_get_init(), 0);
     if (!init_task) {
         printf("init not found, retrying in 5 seconds...\n");
         sleep_ticks(5000);
-        init_task = launch_user_path("/bin/init", 0);
+        init_task = launch_user_path(cmdline_get_init(), 0);
     }
     printf("heap: verify after launch attempt\n");
     heap_verify();

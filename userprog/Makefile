@@ -31,7 +31,7 @@ LSH_CONFIGURE_ARGS = --host=i686-elf --prefix=/usr
 
 SYSROOT_BIN = ../root/bin
 
-.PHONY: copy-pong stage-lsh stage-coreutils stage-LebInit
+.PHONY: copy-pong stage-lsh stage-coreutils stage-LebInit stage-login
 
 copy-pong: pong.bin
 	cp pong.bin $(INITRD_DIR)/pong.bin
@@ -46,6 +46,9 @@ stage-coreutils:
 
 stage-LebInit:
 	$(MAKE) -C LebInit stage
+
+stage-login:
+	$(MAKE) -C login stage
 
 lsh.bin:
 	@mkdir -p $(LSH_BUILD)
@@ -63,7 +66,7 @@ lsh.bin:
 
 .PHONY: all clean
 
-all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit
+all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit stage-login
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@

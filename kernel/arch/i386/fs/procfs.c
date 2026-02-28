@@ -2,6 +2,7 @@
 #include <kernel/vfs.h>
 #include <kernel/task.h>
 #include <kernel/about.h>
+#include <kernel/cmdline.h>
 #include <kernel/drivers/net/e1000/e1000.h>
 #include <kernel/rtc.h>
 #include <string.h>
@@ -675,16 +676,18 @@ static uint32_t proc_filesystems_read(vfs_node_t *node, uint32_t offset, uint32_
 }
 
 static uint32_t proc_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
-    const char *buf;
+    const char *raw;
+    char buf[CMDLINE_MAX + 32];
     uint32_t len;
     uint32_t remaining;
     
     (void)node;
     
-    buf = "console=tty0 root=/dev/ram0 rw\n";
-    
-    len = 0;
-    while (buf[len]) len++;
+    raw = cmdline_get();
+    if (raw[0])
+        len = snprintf(buf, sizeof(buf), "%s\n", raw);
+    else
+        len = snprintf(buf, sizeof(buf), "console=tty0 root=/dev/ram0 rw\n");
     
     if (offset >= len) return 0;
     remaining = len - offset;

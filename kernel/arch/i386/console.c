@@ -6,6 +6,7 @@
 #include <kernel/vring.h>
 #include <kernel/task.h>
 #include <kernel/mem_map.h>
+#include <kernel/cmdline.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -943,6 +944,7 @@ static void console_switch_internal(int console_num) {
 
 void console_switch(int console_num) {
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (console_num >= cmdline_get_consoles()) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
@@ -963,6 +965,7 @@ void console_switch(int console_num) {
 
 void console_switch_via_interrupt(int console_num) {
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (console_num >= cmdline_get_consoles()) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 

@@ -4,6 +4,7 @@
 #include <kernel/keyboard.h>
 #include <kernel/task.h>
 #include <kernel/console.h>
+#include <kernel/cmdline.h>
 #include <kernel/task.h>
 
 #define BUFFER_SIZE 128
@@ -29,6 +30,9 @@ static bool e0_prefix = false;
 #define SCANCODE_F7  0x41
 #define SCANCODE_F8  0x42
 #define SCANCODE_F9  0x43
+#define SCANCODE_F10 0x44
+#define SCANCODE_F11 0x57
+#define SCANCODE_F12 0x58
 
 #define SC2_F1  0x05
 #define SC2_F2  0x06
@@ -215,7 +219,10 @@ void keyboard_handler(registers_t* regs) {
         else if (code == SCANCODE_F7) console_num = 6;
         else if (code == SCANCODE_F8) console_num = 7;
         else if (code == SCANCODE_F9) console_num = 8;
-        if (console_num >= 0) {
+        else if (code == SCANCODE_F10) console_num = 9;
+        else if (code == SCANCODE_F11) console_num = 10;
+        else if (code == SCANCODE_F12) console_num = 11;
+        if (console_num >= 0 && console_num < cmdline_get_consoles()) {
             console_switch_via_interrupt(console_num);
             return;
         }

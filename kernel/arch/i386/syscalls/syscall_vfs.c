@@ -161,7 +161,7 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     if (!buf || len <= 0) return -EINVAL;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
-    if (buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
+    if (buf_addr + (uint32_t)len < buf_addr || buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
@@ -263,7 +263,7 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     if (!buf || len <= 0) return -EINVAL;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -EFAULT;
-    if (buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
+    if (buf_addr + (uint32_t)len < buf_addr || buf_addr + (uint32_t)len >= 0xC0000000) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;

@@ -116,7 +116,7 @@ static int sys_write(int fd, const char *buf, int len) {
     if (!buf || len < 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
-    if (buf_addr + (uint32_t)len >= 0xC0000000) return -1;
+    if (buf_addr + (uint32_t)len < buf_addr || buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
@@ -183,7 +183,7 @@ static int sys_read(int fd, char *buf, int len) {
     if (!buf || len <= 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
-    if (buf_addr + len >= 0xC0000000) return -1;
+    if (buf_addr + (uint32_t)len < buf_addr || buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
@@ -514,7 +514,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
     if (!buf || len <= 0) return -1;
     uint32_t buf_addr = (uint32_t)buf;
     if (buf_addr >= 0xC0000000 || buf_addr < 0x1000) return -1;
-    if (buf_addr + len >= 0xC0000000) return -1;
+    if (buf_addr + (uint32_t)len < buf_addr || buf_addr + (uint32_t)len >= 0xC0000000) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
         int con_id = current_task ? current_task->console_id : console_get_current();
@@ -586,22 +586,32 @@ struct iovec {
 };
 
 static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
+    uint32_t iov_addr;
+    uint32_t iov_end;
+    struct iovec *iov;
+    int total;
+    int i;
+
     if (!iov_ptr || iovcnt <= 0) return -1;
+    if (iovcnt > 1024) return -EINVAL;
     
-    uint32_t iov_addr = (uint32_t)iov_ptr;
+    iov_addr = (uint32_t)iov_ptr;
     if (iov_addr >= 0xC0000000 || iov_addr < 0x1000) return -1;
+    iov_end = iov_addr + (uint32_t)iovcnt * sizeof(struct iovec);
+    if (iov_end < iov_addr || iov_end >= 0xC0000000) return -1;
     
-    struct iovec *iov = (struct iovec *)iov_addr;
-    int total = 0;
+    iov = (struct iovec *)iov_addr;
+    total = 0;
     
-    for (int i = 0; i < iovcnt; i++) {
+    for (i = 0; i < iovcnt; i++) {
         uint32_t base = (uint32_t)iov[i].iov_base;
         uint32_t len = iov[i].iov_len;
+        int written;
         
         if (base >= 0xC0000000 || base < 0x1000) continue;
-        if (base + len >= 0xC0000000) continue;
+        if (base + len < base || base + len >= 0xC0000000) continue;
         
-        int written = sys_write(fd, (const char *)base, (int)len);
+        written = sys_write(fd, (const char *)base, (int)len);
         if (written > 0) total += written;
     }
     

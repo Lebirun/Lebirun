@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define NUM_CONSOLES 4
+#define NUM_CONSOLES 12
 #define CONSOLE_BUFFER_COLS 160
 #define CONSOLE_WRITE_BUFFER_INIT 4096
 #define CONSOLE_WRITE_BUFFER_MAX  65536
