@@ -1,5 +1,6 @@
 #include <kernel/drivers/net/http.h>
 #include <kernel/drivers/net/tcp.h>
+#include <kernel/drivers/net/tls.h>
 #include <kernel/drivers/net/dns.h>
 #include <kernel/drivers/net/net.h>
 #include <kernel/mem_map.h>
@@ -7,23 +8,29 @@
 #include <kernel/task.h>
 #include <string.h>
 
-static int http_parse_url(const char *url, char *host, uint16_t *port, char *path) {
+static int http_parse_url(const char *url, char *host, uint16_t *port, char *path, int *is_https) {
     const char *p;
     int host_len;
     int path_len;
+    int https;
 
     p = url;
+    https = 0;
 
     if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
         p += 4;
-        if (*p == 's') p++;
+        if (*p == 's') {
+            https = 1;
+            p++;
+        }
         if (*p == ':' && p[1] == '/' && p[2] == '/') {
             p += 3;
         }
     }
 
     host_len = 0;
-    *port = 80;
+    *port = https ? 443 : 80;
+    if (is_https) *is_https = https;
 
     while (*p && *p != '/' && *p != ':' && host_len < 255) {
         host[host_len++] = *p++;
@@ -133,7 +140,12 @@ static int http_parse_response(uint8_t *data, uint32_t len, http_response_t *res
 }
 
 int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *path, http_response_t *response, uint32_t timeout_ms) {
+    return http_get_ip_tls(ip, port, host, path, response, timeout_ms, 0);
+}
+
+int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char *path, http_response_t *response, uint32_t timeout_ms, int use_tls) {
     tcp_socket_t *sock;
+    tls_conn_t *tls;
     char *request;
     int req_len;
     const char *method;
@@ -153,6 +165,7 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
     request = (char *)kmalloc(512);
     if (!request) return -1;
 
+    tls = NULL;
     sock = tcp_socket_create();
     if (!sock) { kfree(request); return -1; }
 
@@ -160,6 +173,16 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
         tcp_socket_close(sock);
         kfree(request);
         return -1;
+    }
+
+    if (use_tls) {
+        tls = tls_connect(sock, host);
+        if (!tls) {
+            tcp_disconnect(sock, 1000);
+            tcp_socket_close(sock);
+            kfree(request);
+            return -1;
+        }
     }
 
     req_len = 0;
@@ -176,17 +199,28 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
     for (i = 0; headers[i] && req_len < 511; i++) request[req_len++] = headers[i];
     request[req_len] = '\0';
 
-    if (tcp_send(sock, (uint8_t *)request, req_len) < 0) {
-        tcp_disconnect(sock, 1000);
-        tcp_socket_close(sock);
-        kfree(request);
-        return -1;
+    if (use_tls) {
+        if (tls_send(tls, (uint8_t *)request, req_len) < 0) {
+            tls_close(tls);
+            tcp_disconnect(sock, 1000);
+            tcp_socket_close(sock);
+            kfree(request);
+            return -1;
+        }
+    } else {
+        if (tcp_send(sock, (uint8_t *)request, req_len) < 0) {
+            tcp_disconnect(sock, 1000);
+            tcp_socket_close(sock);
+            kfree(request);
+            return -1;
+        }
     }
 
     kfree(request);
 
     recv_buf = (uint8_t *)kmalloc(16384);
     if (!recv_buf) {
+        if (tls) tls_close(tls);
         tcp_disconnect(sock, 1000);
         tcp_socket_close(sock);
         return -1;
@@ -207,7 +241,11 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
             recv_buf = new_buf;
             buf_cap = new_cap;
         }
-        n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000);
+        if (use_tls) {
+            n = tls_recv(tls, recv_buf + total_recv, buf_cap - total_recv, 1000);
+        } else {
+            n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000);
+        }
         if (n > 0) {
             total_recv += n;
             start = net_get_ticks();
@@ -251,6 +289,7 @@ int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pat
         }
     }
 
+    if (tls) tls_close(tls);
     tcp_disconnect(sock, 1000);
     tcp_socket_close(sock);
 
@@ -294,6 +333,16 @@ int http_get(const char *host, uint16_t port, const char *path, http_response_t 
     return http_get_ip(ip, port, host, path, response, timeout_ms);
 }
 
+int http_get_tls(const char *host, uint16_t port, const char *path, http_response_t *response, uint32_t timeout_ms, int use_tls) {
+    ipv4_addr_t ip;
+
+    if (dns_resolve_timeout(host, &ip, timeout_ms) < 0) {
+        return -1;
+    }
+
+    return http_get_ip_tls(ip, port, host, path, response, timeout_ms, use_tls);
+}
+
 void http_response_free(http_response_t *response) {
     if (!response) return;
     if (response->body) {
@@ -331,6 +380,7 @@ int http_download_ex(const char *url, uint8_t *buffer, uint32_t buffer_size,
     int redir;
     uint32_t url_len;
     uint32_t hdr_copy;
+    int is_https;
 
     host = (char *)kmalloc(256);
     if (!host) return -1;
@@ -349,7 +399,8 @@ int http_download_ex(const char *url, uint8_t *buffer, uint32_t buffer_size,
     current_url[url_len] = '\0';
 
     for (redir = 0; redir <= max_redirects; redir++) {
-        if (http_parse_url(current_url, host, &port, path) < 0) {
+        is_https = 0;
+        if (http_parse_url(current_url, host, &port, path, &is_https) < 0) {
             kfree(host); kfree(path); kfree(current_url); kfree(response);
             return -1;
         }
@@ -357,7 +408,7 @@ int http_download_ex(const char *url, uint8_t *buffer, uint32_t buffer_size,
         max_attempts = 2;
         ret = -1;
         for (attempt = 0; attempt < max_attempts; attempt++) {
-            ret = http_get(host, port, path, response, 15000);
+            ret = http_get_tls(host, port, path, response, 15000, is_https);
             if (ret == 0) {
                 break;
             }
@@ -375,7 +426,7 @@ int http_download_ex(const char *url, uint8_t *buffer, uint32_t buffer_size,
             if (response->location[0] == '/') {
                 uint32_t off = 0;
                 uint32_t hi;
-                const char *scheme = "http://";
+                const char *scheme = is_https ? "https://" : "http://";
                 for (hi = 0; scheme[hi]; hi++)
                     current_url[off++] = scheme[hi];
                 for (hi = 0; host[hi] && off < 510; hi++)
@@ -639,7 +690,7 @@ int http_post_download(const char *url, const char *content_type,
     response = (http_response_t *)kmalloc(sizeof(http_response_t));
     if (!response) { kfree(host); kfree(path); return -1; }
 
-    if (http_parse_url(url, host, &port, path) < 0) {
+    if (http_parse_url(url, host, &port, path, NULL) < 0) {
         kfree(host); kfree(path); kfree(response);
         return -1;
     }

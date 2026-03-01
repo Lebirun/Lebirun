@@ -24,6 +24,7 @@
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/fs/ext4/ext4.h>
 #include <kernel/drivers/net/net.h>
+#include <kernel/drivers/net/tls.h>
 #include <kernel/vring.h>
 #include <kernel/about.h>
 #include <kernel/panic.h>
@@ -31,6 +32,7 @@
 #include <kernel/smp.h>
 #include <kernel/power.h>
 #include <kernel/cmdline.h>
+#include <kernel/rng.h>
 #include "launch_user.h"
 
 bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
@@ -401,6 +403,7 @@ void kernel_main(void) {
     
     pit_init(1000);
     calibrate_pit();
+    rng_init();
     keyboard_init();
     syscall_init();
 
@@ -439,6 +442,24 @@ void kernel_main(void) {
     }
 
     net_init();
+
+    tls_init();
+    {
+        vfs_node_t *ca_node;
+        ca_node = vfs_namei("/etc/ssl/certs/ca-certificates.crt");
+        if (ca_node && ca_node->length > 0) {
+            uint8_t *ca_buf;
+            ca_buf = (uint8_t *)kmalloc(ca_node->length);
+            if (ca_buf) {
+                uint32_t rd;
+                rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
+                if (rd > 0) {
+                    tls_load_ca_certs(ca_buf, rd);
+                }
+                kfree(ca_buf);
+            }
+        }
+    }
 
     terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");

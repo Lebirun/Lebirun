@@ -351,11 +351,27 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     return result;
 }
 
+static void overlay_ensure_upper_dirs(const char *path) {
+    char tmp[VFS_MAX_PATH];
+    int i;
+
+    strncpy(tmp, path, VFS_MAX_PATH - 1);
+    tmp[VFS_MAX_PATH - 1] = '\0';
+    for (i = 1; tmp[i]; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            ramfs_create_dir(tmp, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            tmp[i] = '/';
+        }
+    }
+}
+
 static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags) {
     overlay_node_t *onode;
     char path[VFS_MAX_PATH];
     char parent_path[VFS_MAX_PATH];
     int ret;
+    ramfs_node_t *pnode;
 
     (void)flags;
     if (!parent || !name) return -1;
@@ -365,8 +381,14 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint32_t fla
     
     vfs_get_path(parent, parent_path, sizeof(parent_path));
     snprintf(path, sizeof(path), "%s/%s", parent_path, name);
+
+    overlay_ensure_upper_dirs(path);
     
     ret = ramfs_create_file(path, VFS_PERM_READ | VFS_PERM_WRITE);
+    if (ret == 0 && !onode->upper_node) {
+        pnode = ramfs_find_node(parent_path);
+        if (pnode) onode->upper_node = pnode->vfs_node;
+    }
     return ret;
 }
 
@@ -375,6 +397,7 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perm
     char path[VFS_MAX_PATH];
     char parent_path[VFS_MAX_PATH];
     int ret;
+    ramfs_node_t *pnode;
 
     if (!parent || !name) return -1;
     
@@ -383,8 +406,14 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perm
     
     vfs_get_path(parent, parent_path, sizeof(parent_path));
     snprintf(path, sizeof(path), "%s/%s", parent_path, name);
+
+    overlay_ensure_upper_dirs(path);
     
     ret = ramfs_create_dir(path, perms);
+    if (ret == 0 && !onode->upper_node) {
+        pnode = ramfs_find_node(parent_path);
+        if (pnode) onode->upper_node = pnode->vfs_node;
+    }
     return ret;
 }
 

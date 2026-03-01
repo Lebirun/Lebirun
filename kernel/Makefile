@@ -5,6 +5,21 @@ CC?=gcc
 LD:=$(HOST)-ld
 OBJCOPY:=$(HOST)-objcopy
 
+V ?= 0
+ifeq ($(V),0)
+  Q = @
+  MSG_CC    = @printf '  CC      %s\n' $<;
+  MSG_AS    = @printf '  AS      %s\n' $<;
+  MSG_LD    = @printf '  LD      %s\n' $@;
+  MSG_STRIP = @printf '  STRIP   %s\n' $@;
+else
+  Q =
+  MSG_CC =
+  MSG_AS =
+  MSG_LD =
+  MSG_STRIP =
+endif
+
 CFLAGS?=-Os -ffunction-sections -fdata-sections
 CPPFLAGS?=
 LDFLAGS?=-Wl,--gc-sections -Wl,-s
@@ -67,7 +82,8 @@ kernel/launch_user.o \
 lib/string.o \
 crypto/sha256.o \
 crypto/sha512.o \
-crypto/hmac.o
+crypto/hmac.o \
+crypto/rng.o
 
 OBJS=\
 $(ARCHDIR)/crti.o \
@@ -89,14 +105,24 @@ $(ARCHDIR)/crtn.o
 all: lebirun.kernel
 
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
-	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
-	grub-file --is-x86-multiboot lebirun.kernel
+	$(MSG_LD)$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
+	$(Q)grub-file --is-x86-multiboot lebirun.kernel
 
 .c.o:
-	$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
+	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
 
 .S.o:
-	$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
+	$(MSG_AS)$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
+
+$(WOLFSSL_DIR)/%.o: $(WOLFSSL_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
+
+$(ARCHDIR)/drivers/net/tls.o: $(ARCHDIR)/drivers/net/tls.c
+	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
+
+$(ARCHDIR)/wolfssl_glue.o: $(ARCHDIR)/wolfssl_glue.c
+	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
 
 $(OBJS): $(CONFIG_FILE)
 
@@ -122,6 +148,9 @@ clean:
 	rm -f $(UNIFONT_OBJ)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
+	rm -f $(WOLFSSL_DIR)/wolfcrypt/src/*.o $(WOLFSSL_DIR)/wolfcrypt/src/*.d
+	rm -f $(WOLFSSL_DIR)/src/*.o $(WOLFSSL_DIR)/src/*.d
+	$(MAKE) -C crypto clean
 
 install-headers:
 	@if [ -z "$(DESTDIR)" ]; then \

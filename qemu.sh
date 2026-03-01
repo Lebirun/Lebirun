@@ -2,8 +2,34 @@
 set -e
 . ./config.sh
 
-if [ "${1:-}" != "--no-build" ]; then
-    ./iso.sh
+VERBOSE=0
+NO_BUILD=0
+ISO_ARGS=""
+for arg in "$@"; do
+  case "$arg" in
+    -v|--verbose) VERBOSE=1; ISO_ARGS="$ISO_ARGS -v" ;;
+    --no-build) NO_BUILD=1 ;;
+  esac
+done
+
+if [ "$NO_BUILD" -eq 0 ]; then
+    printf "\033[1;34mBuilding ISO before launch...\033[0m\n"
+    ./iso.sh $ISO_ARGS
+fi
+
+printf "\033[1;34mStarting QEMU...\033[0m\n"
+
+QEMU_CMD="qemu-system-$(./target-triplet-to-arch.sh "$HOST")"
+QEMU_ARGS="-m 4G -smp 4 -vga qxl -cdrom lebirun.iso -s -S -serial stdio -no-reboot"
+QEMU_ARGS="$QEMU_ARGS -device ahci,id=ahci0"
+QEMU_ARGS="$QEMU_ARGS -drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2"
+QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=sata0,bus=ahci0.0"
+QEMU_ARGS="$QEMU_ARGS -netdev user,id=net0,hostfwd=tcp::5555-:80"
+QEMU_ARGS="$QEMU_ARGS -device e1000,netdev=net0,mac=52:54:00:12:34:56"
+QEMU_ARGS="$QEMU_ARGS -accel kvm -boot d"
+
+if [ "$VERBOSE" -eq 1 ]; then
+    printf "  -> %s %s\n" "$QEMU_CMD" "$QEMU_ARGS"
 fi
 
 if [ -t 0 ]; then
@@ -18,7 +44,7 @@ if [ -t 0 ]; then
     trap cleanup_tty EXIT INT TERM HUP
 fi
 
-qemu-system-$(./target-triplet-to-arch.sh "$HOST") \
+$QEMU_CMD \
     -m 4G \
     -smp 4 \
     -vga qxl \
@@ -33,5 +59,3 @@ qemu-system-$(./target-triplet-to-arch.sh "$HOST") \
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 \
     -accel kvm \
     -boot d
-
-# Add "-d int,cpu_reset" for spammy QEMU built-in debugging output

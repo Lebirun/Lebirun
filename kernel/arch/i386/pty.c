@@ -207,14 +207,44 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {
+                if (pty->pgrp > 0) {
+                    pid_t pids[64];
+                    int npids;
+                    int si;
+                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
+                    for (si = 0; si < npids; si++) {
+                        task_t *t = task_find(pids[si]);
+                        if (t) deliver_signal_to_task(t, 2);
+                    }
+                }
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VQUIT]) {
+                if (pty->pgrp > 0) {
+                    pid_t pids[64];
+                    int npids;
+                    int si;
+                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
+                    for (si = 0; si < npids; si++) {
+                        task_t *t = task_find(pids[si]);
+                        if (t) deliver_signal_to_task(t, 3);
+                    }
+                }
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VSUSP]) {
+                if (pty->pgrp > 0) {
+                    pid_t pids[64];
+                    int npids;
+                    int si;
+                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
+                    for (si = 0; si < npids; si++) {
+                        task_t *t = task_find(pids[si]);
+                        if (t) deliver_signal_to_task(t, 20);
+                    }
+                }
                 mutex_unlock(&pty->lock);
                 return to_write;
             }

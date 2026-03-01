@@ -204,7 +204,7 @@ void _exit(int status) {
 
 int read(int fd, void *buf, size_t count) {
     int ret = syscall3(SYS_READ, fd, (int)buf, (int)count);
-    if (ret < 0) { errno = EBADF; return -1; }
+    if (ret < 0) { errno = -ret; return -1; }
     return ret;
 }
 

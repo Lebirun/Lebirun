@@ -483,6 +483,16 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     int result;
     int i;
     const char *path;
+    char shebang_interp[256];
+    char shebang_arg[256];
+    int shebang_has_arg;
+    int shebang_line_end;
+    int si;
+    int sj;
+    vfs_node_t *interp_node;
+    uint8_t *interp_buf;
+    uint32_t interp_size;
+    uint32_t interp_read;
 
     path_addr = (uint32_t)path_ptr;
     if (!path_addr || path_addr >= 0xC0000000 || path_addr < 0x1000) {
@@ -515,6 +525,172 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     if (read_len != size) {
         kfree(buf);
         return -EIO;
+    }
+    
+    if (size >= 2 && buf[0] == '#' && buf[1] == '!') {
+        shebang_line_end = 2;
+        while (shebang_line_end < (int)size && shebang_line_end < 256 &&
+               buf[shebang_line_end] != '\n' && buf[shebang_line_end] != '\r') {
+            shebang_line_end++;
+        }
+
+        si = 2;
+        while (si < shebang_line_end && (buf[si] == ' ' || buf[si] == '\t')) si++;
+        sj = 0;
+        while (si < shebang_line_end && buf[si] != ' ' && buf[si] != '\t' &&
+               sj < 255) {
+            shebang_interp[sj++] = buf[si++];
+        }
+        shebang_interp[sj] = '\0';
+        if (sj == 0) {
+            kfree(buf);
+            return -ENOEXEC;
+        }
+
+        shebang_has_arg = 0;
+        while (si < shebang_line_end && (buf[si] == ' ' || buf[si] == '\t')) si++;
+        if (si < shebang_line_end) {
+            sj = 0;
+            while (si < shebang_line_end && sj < 255) {
+                shebang_arg[sj++] = buf[si++];
+            }
+            while (sj > 0 && (shebang_arg[sj - 1] == ' ' || shebang_arg[sj - 1] == '\t')) sj--;
+            shebang_arg[sj] = '\0';
+            if (sj > 0) shebang_has_arg = 1;
+        }
+
+        kfree(buf);
+
+        interp_node = vfs_namei(shebang_interp);
+        if (!interp_node) {
+            return -ENOENT;
+        }
+        interp_size = interp_node->length;
+        if (interp_size == 0) {
+            return -ENOEXEC;
+        }
+        interp_buf = (uint8_t *)kmalloc(interp_size);
+        if (!interp_buf) {
+            return -ENOMEM;
+        }
+        interp_read = vfs_read(interp_node, 0, interp_size, interp_buf);
+        if (interp_read != interp_size) {
+            kfree(interp_buf);
+            return -EIO;
+        }
+
+        buf = interp_buf;
+        size = interp_size;
+
+        argc = 0;
+        if (argv_addr) {
+            uint32_t *argv_array = (uint32_t *)argv_addr;
+            while (argv_array[argc] && argc < 256) {
+                argc++;
+            }
+        }
+
+        {
+            int new_argc;
+            char **new_argv;
+            int na;
+            int kern_args;
+
+            new_argc = 1 + shebang_has_arg + 1 + (argc > 1 ? argc - 1 : 0);
+            new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
+            if (!new_argv) {
+                kfree(buf);
+                return -ENOMEM;
+            }
+
+            na = 0;
+            new_argv[na] = (char *)kmalloc(strlen(shebang_interp) + 1);
+            if (!new_argv[na]) { kfree(new_argv); kfree(buf); return -ENOMEM; }
+            strcpy(new_argv[na], shebang_interp);
+            na++;
+
+            if (shebang_has_arg) {
+                new_argv[na] = (char *)kmalloc(strlen(shebang_arg) + 1);
+                if (!new_argv[na]) {
+                    for (i = 0; i < na; i++) kfree(new_argv[i]);
+                    kfree(new_argv); kfree(buf); return -ENOMEM;
+                }
+                strcpy(new_argv[na], shebang_arg);
+                na++;
+            }
+
+            new_argv[na] = (char *)kmalloc(strlen(path) + 1);
+            if (!new_argv[na]) {
+                for (i = 0; i < na; i++) kfree(new_argv[i]);
+                kfree(new_argv); kfree(buf); return -ENOMEM;
+            }
+            strcpy(new_argv[na], path);
+            na++;
+
+            kern_args = na;
+
+            if (argc > 1 && argv_addr) {
+                uint32_t *argv_array = (uint32_t *)argv_addr;
+                for (i = 1; i < argc; i++) {
+                    uint32_t str_addr = argv_array[i];
+                    if (!str_addr || str_addr >= 0xC0000000 || str_addr < 0x1000) {
+                        for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
+                        kfree(new_argv); kfree(buf); return -EFAULT;
+                    }
+                    new_argv[na] = (char *)str_addr;
+                    na++;
+                }
+            }
+            new_argv[na] = NULL;
+
+            envc = 0;
+            envp = NULL;
+            if (envp_addr) {
+                uint32_t *envp_array = (uint32_t *)envp_addr;
+                while (envp_array[envc] && envc < 256) {
+                    envc++;
+                }
+                if (envc > 0) {
+                    envp = (char **)kmalloc((envc + 1) * sizeof(char *));
+                    if (!envp) {
+                        for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
+                        kfree(new_argv); kfree(buf); return -ENOMEM;
+                    }
+                    for (i = 0; i < envc; i++) {
+                        uint32_t str_addr = envp_array[i];
+                        if (!str_addr || str_addr >= 0xC0000000 || str_addr < 0x1000) {
+                            kfree(envp);
+                            for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
+                            kfree(new_argv); kfree(buf); return -EFAULT;
+                        }
+                        envp[i] = (char *)str_addr;
+                    }
+                    envp[envc] = NULL;
+                }
+            }
+
+            regs = current_task->syscall_frame;
+            if (!regs) {
+                if (envp) kfree(envp);
+                for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
+                kfree(new_argv); kfree(buf); return -EFAULT;
+            }
+
+            result = task_exec_with_args(buf, size, regs, na, new_argv, envc, envp);
+            buf = NULL;
+            if (envp) { kfree(envp); envp = NULL; }
+            for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
+            kfree(new_argv);
+
+            if (result == 0) {
+                syscall_set_exec_completed();
+                if (current_task) {
+                    current_task->exec_completed = 1;
+                }
+                __asm__ volatile ("" ::: "memory");
+            }
+            return result;
+        }
     }
     
     argc = 0;

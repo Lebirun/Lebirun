@@ -25,7 +25,9 @@ typedef struct {
 } http_response_t;
 
 int http_get(const char *host, uint16_t port, const char *path, http_response_t *response, uint32_t timeout_ms);
+int http_get_tls(const char *host, uint16_t port, const char *path, http_response_t *response, uint32_t timeout_ms, int use_tls);
 int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *path, http_response_t *response, uint32_t timeout_ms);
+int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char *path, http_response_t *response, uint32_t timeout_ms, int use_tls);
 int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *path,
                  const char *content_type, const uint8_t *body, uint32_t body_len,
                  http_response_t *response, uint32_t timeout_ms);

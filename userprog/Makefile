@@ -1,6 +1,17 @@
 CC = i686-elf-gcc
 LD = i686-elf-ld
 
+V ?= 0
+ifeq ($(V),0)
+  Q = @
+  MSG_CC    = @printf '  CC      %s\n' $<;
+  MSG_LD    = @printf '  LD      %s\n' $@;
+else
+  Q =
+  MSG_CC =
+  MSG_LD =
+endif
+
 LIBC = ../libc
 LIBC_ABS = $(abspath $(LIBC))
 KERNEL_DIR = ../kernel/arch/i386
@@ -42,13 +53,13 @@ stage-lsh: lsh.bin
 	ln -sf lsh $(SYSROOT_BIN)/sh
 
 stage-coreutils:
-	$(MAKE) -C coreutils stage
+	$(MAKE) -C coreutils V=$(V) stage
 
 stage-LebInit:
-	$(MAKE) -C LebInit stage
+	$(MAKE) -C LebInit V=$(V) stage
 
 stage-login:
-	$(MAKE) -C login stage
+	$(MAKE) -C login V=$(V) stage
 
 lsh.bin:
 	@mkdir -p $(LSH_BUILD)
@@ -69,12 +80,12 @@ lsh.bin:
 all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit stage-login
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 
 
 %.bin: %.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
-	$(CC) -nostdlib -static -Wl,-z,noexecstack -T $(LIBC)/user.ld -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -T $(LIBC)/user.ld -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
 
 clean:
 	rm -f *.o *.bin *.so

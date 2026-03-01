@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <kernel/about.h>
+#include <kernel/rng.h>
 
 extern task_t *current_task;
 extern void *syscall_table[];
@@ -235,28 +236,12 @@ static int sys_prlimit64(int pid, int resource, const struct rlimit *new_limit, 
     return 0;
 }
 
-static uint32_t random_state = 0x12345678;
-
-static uint32_t simple_random(void) {
-    random_state ^= random_state << 13;
-    random_state ^= random_state >> 17;
-    random_state ^= random_state << 5;
-    return random_state;
-}
-
 static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
     (void)flags;
     if (!buf) return -EFAULT;
     if (buflen == 0) return 0;
     
-    random_state ^= tick_count;
-    
-    uint8_t *p = (uint8_t *)buf;
-    size_t i;
-    
-    for (i = 0; i < buflen; i++) {
-        p[i] = simple_random() & 0xFF;
-    }
+    rng_fill(buf, buflen);
     
     return buflen;
 }

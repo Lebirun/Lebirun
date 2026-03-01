@@ -1,6 +1,19 @@
 CC = i686-elf-gcc
 STRIP = i686-elf-strip
 
+V ?= 0
+ifeq ($(V),0)
+  Q = @
+  MSG_CC    = @printf '  CC      %s\n' $<;
+  MSG_LD    = @printf '  LD      %s\n' $@;
+  MSG_STRIP = @printf '  STRIP   %s\n' $@;
+else
+  Q =
+  MSG_CC =
+  MSG_LD =
+  MSG_STRIP =
+endif
+
 LIBC = ../../libc
 LIBC_ABS = $(abspath $(LIBC))
 
@@ -28,21 +41,21 @@ GETTY_OBJS = $(GETTY_SRCS:.c=.o)
 all: login.bin getty.bin
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 login.bin: $(LOGIN_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
-	$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $(LOGIN_OBJS) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $(LOGIN_OBJS) -lc $(CRTN) -lgcc
 
 getty.bin: $(GETTY_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
-	$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $(GETTY_OBJS) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(LIBC)/leblibc/build-i386/lib -o $@ $(CRT1) $(CRTI) $(GETTY_OBJS) -lc $(CRTN) -lgcc
 
 stage: all
-	mkdir -p $(SYSROOT_BIN)
-	cp login.bin $(SYSROOT_BIN)/login
-	$(STRIP) -s $(SYSROOT_BIN)/login
-	mkdir -p $(SYSROOT_SBIN)
-	cp getty.bin $(SYSROOT_SBIN)/getty
-	$(STRIP) -s $(SYSROOT_SBIN)/getty
+	$(Q)mkdir -p $(SYSROOT_BIN)
+	$(Q)cp login.bin $(SYSROOT_BIN)/login
+	$(MSG_STRIP)$(STRIP) -s $(SYSROOT_BIN)/login
+	$(Q)mkdir -p $(SYSROOT_SBIN)
+	$(Q)cp getty.bin $(SYSROOT_SBIN)/getty
+	$(MSG_STRIP)$(STRIP) -s $(SYSROOT_SBIN)/getty
 
 clean:
 	rm -f $(LOGIN_OBJS) $(GETTY_OBJS) login.bin getty.bin

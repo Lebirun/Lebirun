@@ -123,7 +123,6 @@ static void klog(const char *fmt, ...) {
     if (len <= 0) return;
     if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
     console_write_to(0, buf, (size_t)len);
-    printf("%s", buf);
 }
 
 static void klog_con(int con_id, const char *fmt, ...) {
@@ -137,7 +136,6 @@ static void klog_con(int con_id, const char *fmt, ...) {
     if (len <= 0) return;
     if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
     console_write_to(con_id, buf, (size_t)len);
-    printf("%s", buf);
 }
 
 static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {

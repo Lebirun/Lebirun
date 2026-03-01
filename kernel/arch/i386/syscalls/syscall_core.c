@@ -407,7 +407,20 @@ static int sys_read(int fd, char *buf, int len) {
                         tty_echo_char(con_id, 'C');
                         tty_echo_char(con_id, '\n');
                     }
-                    return 0;
+                    if (t->c_lflag & ISIG) {
+                        int fg = tty_pgrp[con_id];
+                        if (fg > 0) {
+                            pid_t pids[64];
+                            int npids;
+                            int si;
+                            npids = collect_pids_in_pgrp((pid_t)fg, pids, 64);
+                            for (si = 0; si < npids; si++) {
+                                task_t *tgt = task_find(pids[si]);
+                                if (tgt) deliver_signal_to_task(tgt, 2);
+                            }
+                        }
+                    }
+                    return -EINTR;
                 } else if (c == 4) {
                     if (line_len[con_id] == 0) {
                         return 0;
@@ -494,6 +507,20 @@ static int sys_read(int fd, char *buf, int len) {
                     if (key < 0) break;
                     {
                         char c = (char)key;
+                        if ((t->c_lflag & ISIG) && c == 0x03) {
+                            int fg = tty_pgrp[con_id];
+                            if (fg > 0) {
+                                pid_t pids[64];
+                                int npids;
+                                int si;
+                                npids = collect_pids_in_pgrp((pid_t)fg, pids, 64);
+                                for (si = 0; si < npids; si++) {
+                                    task_t *tgt = task_find(pids[si]);
+                                    if (tgt) deliver_signal_to_task(tgt, 2);
+                                }
+                            }
+                            return total > 0 ? total : -EINTR;
+                        }
                         if (t->c_iflag & ISTRIP) c &= 0x7F;
                         if ((t->c_iflag & IGNCR) && c == '\r') continue;
                         if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
