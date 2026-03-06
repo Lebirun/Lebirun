@@ -45,5 +45,6 @@ int getchar(void);
 void keyboard_register_observer(keyboard_observer_t observer);
 void keyboard_unregister_observer(void);
 int keyboard_get_modifier_state(void);
+void keyboard_process_sigint(void);
 
 #endif

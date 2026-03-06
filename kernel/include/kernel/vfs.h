@@ -37,7 +37,8 @@
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
 #define VFS_MAX_FDS     128
-#define VFS_MAX_MOUNTS  8
+#define VFS_INITIAL_MOUNTS 16
+#define VFS_MAX_MOUNTS  65535
 
 struct vfs_node;
 struct dirent;
@@ -115,7 +116,11 @@ typedef struct {
     vfs_node_t *root;
     vfs_fs_type_t *fs_type;
     int in_use;
+    uint32_t flags;
 } vfs_mount_t;
+
+#define VFS_MS_RDONLY   1
+#define VFS_MS_REMOUNT  32
 
 void vfs_init(void);
 
@@ -124,6 +129,7 @@ int vfs_unregister_fs(const char *name);
 vfs_fs_type_t *vfs_find_fs(const char *name);
 
 int vfs_mount(const char *device, const char *mountpoint, const char *fs_type);
+int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint32_t flags);
 int vfs_unmount(const char *mountpoint);
 
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);

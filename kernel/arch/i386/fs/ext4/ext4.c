@@ -329,22 +329,41 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) 
 }
 
 static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
-    (void)device;
+    vfs_node_t *dev_node;
+    uint32_t port_idx;
+    ahci_port_t *port;
+    ext4_fs_t *fs;
+    size_t mp_len;
+    vfs_node_t *root;
 
-    ahci_port_t *port = ahci_get_port(0);
+    port_idx = 0;
+    if (device && device[0] != '\0') {
+        dev_node = vfs_namei(device);
+        if (!dev_node) {
+            printf("[EXT4] Device not found: %s\n", device);
+            return NULL;
+        }
+        if ((dev_node->flags & VFS_TYPE_MASK) != VFS_BLOCKDEVICE) {
+            printf("[EXT4] Not a block device: %s\n", device);
+            return NULL;
+        }
+        port_idx = dev_node->inode;
+    }
+
+    port = ahci_get_port(port_idx);
     if (!port) {
         printf("[EXT4] No AHCI port available\n");
         return NULL;
     }
 
-    ext4_fs_t *fs = (ext4_fs_t *)kmalloc(sizeof(ext4_fs_t));
+    fs = (ext4_fs_t *)kmalloc(sizeof(ext4_fs_t));
     if (!fs) {
         printf("[EXT4] Failed to allocate filesystem structure\n");
         return NULL;
     }
 
     memset(fs, 0, sizeof(ext4_fs_t));
-    fs->port_index = 0;
+    fs->port_index = port_idx;
     mutex_init(&fs->lock);
 
     if (ext4_read_superblock(fs) != 0) {
@@ -367,14 +386,14 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
         return NULL;
     }
 
-    size_t mp_len = strlen(mountpoint);
+    mp_len = strlen(mountpoint);
     if (mp_len >= VFS_MAX_PATH) {
         mp_len = VFS_MAX_PATH - 1;
     }
     memcpy(fs->mountpoint, mountpoint, mp_len);
     fs->mountpoint[mp_len] = '\0';
 
-    vfs_node_t *root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
+    root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
         printf("[EXT4] Failed to create root node\n");
         kfree(fs->group_descs);
@@ -432,12 +451,17 @@ void ext4_vfs_register(void) {
 }
 
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
-    ahci_port_t *port = ahci_get_port(port_index);
+    ahci_port_t *port;
+    ext4_fs_t *fs;
+    size_t mp_len;
+    vfs_node_t *root;
+
+    port = ahci_get_port(port_index);
     if (!port) {
         return NULL;
     }
 
-    ext4_fs_t *fs = (ext4_fs_t *)kmalloc(sizeof(ext4_fs_t));
+    fs = (ext4_fs_t *)kmalloc(sizeof(ext4_fs_t));
     if (!fs) {
         return NULL;
     }
@@ -461,14 +485,14 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
         return NULL;
     }
 
-    size_t mp_len = strlen(mountpoint);
+    mp_len = strlen(mountpoint);
     if (mp_len >= VFS_MAX_PATH) {
         mp_len = VFS_MAX_PATH - 1;
     }
     memcpy(fs->mountpoint, mountpoint, mp_len);
     fs->mountpoint[mp_len] = '\0';
 
-    vfs_node_t *root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
+    root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
         kfree(fs->group_descs);
         kfree(fs);

@@ -268,7 +268,13 @@
 #define LEB_SYSCALL_REBOOT 269u
 #define LEB_SYSCALL_CONSOLE_SETID 270u
 #define LEB_SYSCALL_CRYPTO 271u
+#define LEB_SYSCALL_VFS_MOUNT 272u
+#define LEB_SYSCALL_VFS_UMOUNT 273u
+#define LEB_SYSCALL_PANIC 274u
 #define LEB_NR_SYSCALLS 281u
+
+#define LEB_MS_RDONLY   1
+#define LEB_MS_REMOUNT  32
 
 static inline long leb_syscall0(unsigned int n) {
 	long ret;

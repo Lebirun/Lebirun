@@ -78,6 +78,9 @@ void initrd_init_fds(void);
 
 void initrd_vfs_register(void);
 
+uint8_t *initrd_get_base(void);
+uint32_t initrd_get_size(void);
+
 void initrd_copy_to_root(void);
 
 void rootfs_init(uint32_t mods_count, uint32_t mods_addr);

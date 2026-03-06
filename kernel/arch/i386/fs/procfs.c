@@ -594,14 +594,15 @@ static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     
     (void)node;
 
-    buf_size = VFS_MAX_MOUNTS * (VFS_MAX_PATH * 2 + 64);
+    mount_count = vfs_get_mount_count();
+    buf_size = mount_count * (VFS_MAX_PATH * 2 + 64);
+    if (buf_size < 1024) buf_size = 1024;
     buf = (char *)kmalloc(buf_size);
     if (!buf) {
         return 0;
     }
 
     len = 0;
-    mount_count = vfs_get_mount_count();
     for (i = 0; i < mount_count; ++i) {
         mount = vfs_get_mount(i);
         if (!mount) {

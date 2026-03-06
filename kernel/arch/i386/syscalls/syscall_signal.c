@@ -103,6 +103,14 @@ static task_signals_t *get_task_signals(void) {
     return slot;
 }
 
+int task_has_sigint_ignored(void) {
+    task_signals_t *sigs;
+
+    sigs = get_task_signals();
+    if (!sigs) return 0;
+    return sigs->actions[2].sa_handler == SIG_IGN;
+}
+
 void task_reset_signals_on_exec(void) {
     task_signals_t *sigs;
     int i;
@@ -326,6 +334,24 @@ int deliver_signal_to_task(task_t *target, int sig) {
     if (task_signals[idx].owner_pid != target->pid) {
         init_signal_slot(&task_signals[idx], target->pid);
     }
+
+    act = &task_signals[idx].actions[sig];
+    if (act->sa_handler == SIG_DFL) {
+        switch (sig) {
+            case SIGCHLD:
+            case SIGURG:
+            case SIGWINCH:
+                break;
+            default:
+                if (target != current_task) {
+                    task_kill(target, 128 + sig);
+                } else {
+                    task_exit_deferred(128 + sig);
+                }
+                return 0;
+        }
+    }
+
     task_signals[idx].pending.sig[(sig - 1) / 64] |= (1UL << ((sig - 1) % 64));
 
     if (target->state == TASK_BLOCKED) {
@@ -340,26 +366,27 @@ int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
     if (pgid <= 0) return 0;
 
     int count = 0;
+    int guard = 0;
+    task_t *t;
+    uint32_t a;
+    pid_t t_pgid;
+
     lock_scheduler();
-    task_t *t = ready_queue_head;
-    if (t) {
-        int guard = 0;
-        do {
-            if (!t) break;
-            uint32_t a = (uint32_t)t;
-            if (a < 0xC0000000u) break;
-            if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
+    t = all_tasks_head;
+    while (t && guard < 4096) {
+        a = (uint32_t)t;
+        if (a < 0xC0000000u) break;
+        if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
 
-            pid_t t_pgid = t->pgid ? t->pgid : t->pid;
-            if (t_pgid == pgid) {
-                if (count < out_cap) {
-                    out[count++] = t->pid;
-                }
+        t_pgid = t->pgid ? t->pgid : t->pid;
+        if (t_pgid == pgid) {
+            if (count < out_cap) {
+                out[count++] = t->pid;
             }
+        }
 
-            t = t->next;
-            guard++;
-        } while (t && t != ready_queue_head && guard < 4096);
+        t = t->all_next;
+        guard++;
     }
     unlock_scheduler();
     return count;
@@ -388,6 +415,9 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         task_t *target = task_find((pid_t)pid);
         if (!target) return -ESRCH;
         if (target->is_kernel_task) return -EPERM;
+        if (current_task && current_task->uid != 0 &&
+            current_task->uid != target->uid &&
+            current_task->euid != target->uid) return -EPERM;
         return deliver_signal_to_task(target, sig);
     }
 
@@ -396,20 +426,22 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (pid == -1) {
         int sent = 0;
         pid_t self_pid = current_task->pid;
+        uint32_t my_uid = current_task->uid;
+        uint32_t my_euid = current_task->euid;
+        int guard = 0;
         lock_scheduler();
-        task_t *t = ready_queue_head;
-        if (t) {
-            task_t *start = t;
-            int guard = 0;
-            do {
-                if (!t) break;
-                if (t->is_user && t->pid != self_pid && t->pid != 1) {
-                    deliver_signal_to_task(t, sig);
-                    sent++;
-                }
-                t = t->next;
-                guard++;
-            } while (t && t != start && guard < 4096);
+        task_t *t = all_tasks_head;
+        while (t && guard < 4096) {
+            uint32_t a = (uint32_t)t;
+            if (a < 0xC0000000u) break;
+            if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
+            if (t->is_user && t->pid != self_pid && t->pid != 1 &&
+                (my_uid == 0 || my_uid == t->uid || my_euid == t->uid)) {
+                deliver_signal_to_task(t, sig);
+                sent++;
+            }
+            t = t->all_next;
+            guard++;
         }
         unlock_scheduler();
         return sent > 0 ? 0 : -ESRCH;

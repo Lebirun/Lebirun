@@ -1,0 +1,14 @@
+[About]
+Name=getty
+Description=Virtual console login prompt
+StartMsg=Starting login consoles...
+OkMsg=Login consoles ready
+
+[Exec]
+Start=/sbin/getty
+Type=daemon
+Instances=auto
+
+[Health]
+Restart=always
+RestartDelay=1

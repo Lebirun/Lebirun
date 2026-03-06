@@ -9,6 +9,8 @@ for arg in "$@"; do
   esac
 done
 
+CLEAN_START=$(date +%s)
+
 TOTAL_STEPS=0
 for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
   [ -d "$PROJECT" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
@@ -140,12 +142,12 @@ fi
 CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Removing binaries"
 printf "Removing binaries...\n"
-rm -f root/bin/lsh root/bin/sh root/bin/init root/bin/nano root/bin/htop
-rm -f root/bin/lebcu root/bin/echo root/bin/pwd root/bin/ls root/bin/cat
-rm -f root/bin/touch root/bin/mkdir root/bin/rm root/bin/write root/bin/ticks
-rm -f root/bin/cres root/bin/df root/bin/free root/bin/uname root/bin/date
-rm -f root/bin/lneturl root/bin/login root/bin/dhcp root/bin/lebnet root/bin/lebpkg root/bin/syscall
-rm -f root/sbin/getty root/sbin/lebinit
+rm -f root/bin/*
+rm -f root/sbin/*
+rm -f root/usr/bin/*
+rm -f root/usr/sbin/*
+rm -f root/lib/*
+rm -f root/usr/lib/*
 rm -f userprog/coreutils/*.bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin
 rm -f userprog/lsh/liblsh.gnu.sym userprog/lsh/liblsh.darwin.sym
@@ -180,4 +182,6 @@ CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Done"
 
 cleanup_bar
-printf "\033[1;32mClean complete!\033[0m\n"
+CLEAN_END=$(date +%s)
+CLEAN_DUR=$((CLEAN_END - CLEAN_START))
+printf "\033[1;32mClean complete in %ds!\033[0m\n" "$CLEAN_DUR"

@@ -408,10 +408,7 @@ void *pmm_alloc_page(void) {
     uint32_t i;
     uint64_t region_end;
     uint64_t alloc_start;
-    uint64_t candidate;
     uint32_t idx_alloc;
-    void *page;
-    uint32_t byte_idx;
     uint32_t bit;
     uint32_t frame_idx;
     uint32_t scan_start;

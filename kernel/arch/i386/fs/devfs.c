@@ -2,9 +2,26 @@
 #include <kernel/pty.h>
 #include <kernel/mem_map.h>
 #include <kernel/console.h>
+#include <kernel/cmdline.h>
+#include <kernel/initrd.h>
+#include <kernel/drivers/sata/ahci.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#define DEVFS_MAX_BLOCKDEVS 8
+
+typedef struct {
+    vfs_node_t node;
+    int in_use;
+    uint32_t port_index;
+} devfs_blockdev_t;
+
+static devfs_blockdev_t devfs_blockdevs[DEVFS_MAX_BLOCKDEVS];
+static int devfs_blockdev_count;
+
+static vfs_node_t dev_initrd_node;
+static int dev_initrd_registered;
 
 static vfs_node_t devfs_root;
 static vfs_node_t dev_null;
@@ -149,6 +166,108 @@ static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     return size;
 }
 
+static uint32_t dev_blockdev_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    devfs_blockdev_t *bdev;
+    ahci_port_t *port;
+    uint64_t lba;
+    uint32_t sector_count;
+    uint8_t *tmp;
+    uint32_t skip;
+    uint32_t copy_len;
+
+    bdev = (devfs_blockdev_t *)node->private_data;
+    if (!bdev)
+        return 0;
+
+    port = ahci_get_port(bdev->port_index);
+    if (!port)
+        return 0;
+
+    lba = offset / 512;
+    skip = offset % 512;
+    sector_count = (skip + size + 511) / 512;
+
+    tmp = (uint8_t *)kmalloc(sector_count * 512);
+    if (!tmp)
+        return 0;
+
+    if (ahci_read_sectors(port, lba, sector_count, tmp) != 0) {
+        kfree(tmp);
+        return 0;
+    }
+
+    copy_len = size;
+    memcpy(buffer, tmp + skip, copy_len);
+    kfree(tmp);
+    return copy_len;
+}
+
+static uint32_t dev_blockdev_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    devfs_blockdev_t *bdev;
+    ahci_port_t *port;
+    uint64_t lba;
+    uint32_t sector_count;
+    uint8_t *tmp;
+    uint32_t skip;
+
+    bdev = (devfs_blockdev_t *)node->private_data;
+    if (!bdev)
+        return 0;
+
+    port = ahci_get_port(bdev->port_index);
+    if (!port)
+        return 0;
+
+    lba = offset / 512;
+    skip = offset % 512;
+    sector_count = (skip + size + 511) / 512;
+
+    tmp = (uint8_t *)kmalloc(sector_count * 512);
+    if (!tmp)
+        return 0;
+
+    if (skip != 0 || (size % 512) != 0) {
+        if (ahci_read_sectors(port, lba, sector_count, tmp) != 0) {
+            kfree(tmp);
+            return 0;
+        }
+    }
+
+    memcpy(tmp + skip, buffer, size);
+
+    if (ahci_write_sectors(port, lba, sector_count, tmp) != 0) {
+        kfree(tmp);
+        return 0;
+    }
+
+    kfree(tmp);
+    return size;
+}
+
+static uint32_t dev_initrd_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    uint8_t *base;
+    uint32_t total;
+    uint32_t avail;
+
+    (void)node;
+    base = initrd_get_base();
+    total = initrd_get_size();
+    if (!base || offset >= total)
+        return 0;
+
+    avail = total - offset;
+    if (size > avail)
+        size = avail;
+
+    memcpy(buffer, base + offset, size);
+    return size;
+}
+
+static uint32_t dev_initrd_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node; (void)offset; (void)buffer; (void)size;
+    return (uint32_t)-1;
+}
+
 static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     dirent_t *d;
 
@@ -170,7 +289,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     }
     
     index -= sizeof(base_entries)/sizeof(base_entries[0]);
-    if (index < NUM_CONSOLES) {
+    if (index < (uint32_t)cmdline_get_consoles()) {
         d = devfs_alloc_dirent();
         d->name[0] = 't';
         d->name[1] = 't';
@@ -188,10 +307,40 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
         return d;
     }
     
+    index -= (uint32_t)cmdline_get_consoles();
+    if (index < (uint32_t)devfs_blockdev_count) {
+        int count;
+        int i;
+        count = 0;
+        for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+            if (devfs_blockdevs[i].in_use) {
+                if (count == (int)index) {
+                    d = devfs_alloc_dirent();
+                    strcpy(d->name, devfs_blockdevs[i].node.name);
+                    d->inode = 100 + i;
+                    d->type = VFS_BLOCKDEVICE;
+                    return d;
+                }
+                count++;
+            }
+        }
+    }
+
+    index -= (uint32_t)devfs_blockdev_count;
+    if (dev_initrd_registered && index == 0) {
+        d = devfs_alloc_dirent();
+        strcpy(d->name, "initrd");
+        d->inode = 200;
+        d->type = VFS_BLOCKDEVICE;
+        return d;
+    }
+
     return NULL;
 }
 
 static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
+    int i;
+
     (void)node;
     
     if (strcmp(name, "null") == 0) return &dev_null;
@@ -217,10 +366,18 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
             idx = idx * 10 + (name[4] - '0');
         else if (name[4] != '\0')
             return NULL;
-        if (idx >= 0 && idx < NUM_CONSOLES)
+        if (idx >= 0 && idx < cmdline_get_consoles())
             return &dev_ttys[idx];
     }
     
+    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+        if (devfs_blockdevs[i].in_use && strcmp(devfs_blockdevs[i].node.name, name) == 0)
+            return &devfs_blockdevs[i].node;
+    }
+
+    if (dev_initrd_registered && strcmp(name, "initrd") == 0)
+        return &dev_initrd_node;
+
     return NULL;
 }
 
@@ -484,7 +641,7 @@ void devfs_init(void) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint32_t)i * 0x13579BDF);
     }
 
-    for (i = 0; i < NUM_CONSOLES; i++) {
+    for (i = 0; i < cmdline_get_consoles(); i++) {
         memset(&dev_ttys[i], 0, sizeof(vfs_node_t));
         name[0] = 't';
         name[1] = 't';
@@ -529,4 +686,71 @@ void devfs_init(void) {
     fs_type->next = NULL;
 
     vfs_register_fs(fs_type);
+}
+
+int devfs_register_blockdev(const char *name, uint32_t port_index) {
+    int i;
+    int slot;
+    size_t len;
+
+    slot = -1;
+    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+        if (!devfs_blockdevs[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0)
+        return -1;
+
+    memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
+    devfs_blockdevs[slot].in_use = 1;
+    devfs_blockdevs[slot].port_index = port_index;
+
+    len = strlen(name);
+    if (len >= VFS_MAX_NAME)
+        len = VFS_MAX_NAME - 1;
+    memcpy(devfs_blockdevs[slot].node.name, name, len);
+    devfs_blockdevs[slot].node.name[len] = '\0';
+
+    devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
+    devfs_blockdevs[slot].node.mask = 0660;
+    devfs_blockdevs[slot].node.uid = 0;
+    devfs_blockdevs[slot].node.gid = 0;
+    devfs_blockdevs[slot].node.inode = port_index;
+    devfs_blockdevs[slot].node.read = dev_blockdev_read;
+    devfs_blockdevs[slot].node.write = dev_blockdev_write;
+    devfs_blockdevs[slot].node.open = devfs_open;
+    devfs_blockdevs[slot].node.close = devfs_close;
+    devfs_blockdevs[slot].node.parent = &devfs_root;
+    devfs_blockdevs[slot].node.ref_count = 1;
+    devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
+
+    devfs_blockdev_count++;
+    return 0;
+}
+
+void devfs_register_initrd(void) {
+    if (dev_initrd_registered)
+        return;
+
+    if (!initrd_get_base())
+        return;
+
+    memset(&dev_initrd_node, 0, sizeof(vfs_node_t));
+    strcpy(dev_initrd_node.name, "initrd");
+    dev_initrd_node.flags = VFS_BLOCKDEVICE;
+    dev_initrd_node.mask = 0440;
+    dev_initrd_node.uid = 0;
+    dev_initrd_node.gid = 0;
+    dev_initrd_node.length = initrd_get_size();
+    dev_initrd_node.read = dev_initrd_read;
+    dev_initrd_node.write = dev_initrd_write;
+    dev_initrd_node.open = devfs_open;
+    dev_initrd_node.close = devfs_close;
+    dev_initrd_node.parent = &devfs_root;
+    dev_initrd_node.ref_count = 1;
+
+    dev_initrd_registered = 1;
 }

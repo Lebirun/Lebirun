@@ -97,6 +97,8 @@ void kernel_main(void) {
     uint32_t b;
     extern void procfs_init(void);
     extern void devfs_init(void);
+    extern int devfs_register_blockdev(const char *name, uint32_t port_index);
+    extern void devfs_register_initrd(void);
     extern void sysfs_init(void);
     extern void ramfs_debug_check_root(const char *location);
     unsigned long cr3;
@@ -109,11 +111,13 @@ void kernel_main(void) {
     overlay_context_t *overlay_ctx;
     vfs_node_t *squashfs_root;
     vfs_node_t *ramfs_upper;
+    vfs_node_t *initrd_root;
     uint8_t master_mask;
     uint8_t slave_mask;
     ahci_port_t *port;
-    uint8_t test_sector[512];
     int j;
+    uint32_t pi;
+    char devname[8];
     task_t *init_task;
     task_t *t;
     task_t *start;
@@ -319,24 +323,25 @@ void kernel_main(void) {
                 printf("[KERNEL] OverlayFS active: squashfs (lower) + ramfs (upper) on /\n");
             }
         } else {
-            ramfs_create_symlink("/bin", "/initrd/bin", VFS_PERM_READ | VFS_PERM_EXEC);
-            ramfs_create_symlink("/sbin", "/initrd/sbin", VFS_PERM_READ | VFS_PERM_EXEC);
-            ramfs_create_symlink("/usr", "/initrd/usr", VFS_PERM_READ | VFS_PERM_EXEC);
-            ramfs_create_symlink("/lib", "/initrd/lib", VFS_PERM_READ | VFS_PERM_EXEC);
-            ramfs_create_symlink("/etc", "/initrd/etc", VFS_PERM_READ | VFS_PERM_EXEC);
-        }
-
-        printf("[BOOT] overlay/symlink done, mounting initrd...\n");
-        mount_ret = vfs_mount(NULL, "/initrd", "initrd");
-        printf("[BOOT] vfs_mount initrd returned %d\n", mount_ret);
-        if (mount_ret == 0) {
-            printf("[KERNEL] Mounted initrd on /initrd\n");
+            mount_ret = vfs_mount(NULL, "/ro", "initrd");
+            if (mount_ret == 0) {
+                initrd_root = vfs_namei("/ro");
+                if (initrd_root) {
+                    ramfs_upper = vfs_get_root();
+                    overlay_ctx = overlayfs_create(initrd_root, ramfs_upper);
+                    if (overlay_ctx && overlay_ctx->merged_root) {
+                        vfs_replace_mount_root("/", overlay_ctx->merged_root);
+                        printf("[KERNEL] OverlayFS active: initrd (lower) + ramfs (upper) on /\n");
+                    }
+                }
+            }
         }
 
         printf("[BOOT] procfs_init...\n");
         procfs_init();
         printf("[BOOT] devfs_init...\n");
         devfs_init();
+        devfs_register_initrd();
         printf("[BOOT] sysfs_init...\n");
         sysfs_init();
 
@@ -418,23 +423,20 @@ void kernel_main(void) {
     if (ahci_init() == 0) {
         printf("AHCI SATA driver initialized successfully\n");
         
-        port = ahci_get_port(0);
-        if (port) {
-            if (ahci_read_sectors(port, 0, 1, test_sector) == 0) {
-                printf("AHCI: Successfully read sector 0 from drive\n");
-                printf("AHCI: First 16 bytes: ");
-                for (j = 0; j < 16; j++) {
-                    printf("%02X ", test_sector[j]);
-                }
-                printf("\n");
-            }
+        ext4_init();
+        ext4_vfs_register();
 
-            ext4_init();
-            ext4_vfs_register();
-            if (vfs_mount(NULL, "/disk", "ext4") == 0) {
-                printf("EXT4 filesystem mounted on /disk\n");
-            } else {
-                printf("Failed to mount ext4 filesystem (disk may not be formatted)\n");
+        j = 0;
+        for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
+            port = ahci_get_port(pi);
+            if (port) {
+                devname[0] = 's';
+                devname[1] = 'd';
+                devname[2] = (char)('a' + j);
+                devname[3] = '\0';
+                devfs_register_blockdev(devname, pi);
+                printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
+                j++;
             }
         }
     } else {
@@ -467,6 +469,9 @@ void kernel_main(void) {
 
     kprint_enable();
 
+    extern void watchdog_init(void);
+    watchdog_init();
+
     printf("heap: verify before launching init\n");
     heap_verify();
     slab_gc();
@@ -480,7 +485,7 @@ void kernel_main(void) {
     printf("heap: verify after launch attempt\n");
     heap_verify();
     if (!init_task) {
-        printf("FATAL: /bin/init not found. System halted.\n");
+        printf("FATAL: /sbin/init not found. System halted.\n");
         for (;;)
             asm volatile ("hlt");
     }
@@ -501,8 +506,12 @@ void kernel_main(void) {
 
     yield();
 
-    while (1) {
-        task_deferred_work();
-        asm volatile ("hlt");
+    {
+        extern void watchdog_kick(void);
+        while (1) {
+            watchdog_kick();
+            task_deferred_work();
+            asm volatile ("hlt");
+        }
     }
 }

@@ -400,6 +400,9 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_REBOOT 269
 #define SYSCALL_CONSOLE_SETID 270
 #define SYSCALL_CRYPTO 271
+#define SYSCALL_VFS_MOUNT 272
+#define SYSCALL_VFS_UMOUNT 273
+#define SYSCALL_PANIC 274
 
 #define NR_SYSCALLS 281
 
@@ -523,5 +526,7 @@ int sys_vfs_readdir(registers_t *regs);
 
 void procfs_init(void);
 void devfs_init(void);
+int devfs_register_blockdev(const char *name, uint32_t port_index);
+void devfs_register_initrd(void);
 
 #endif

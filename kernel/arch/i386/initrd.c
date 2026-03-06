@@ -1034,3 +1034,13 @@ void initrd_free_pages(void) {
     initrd_header = NULL;
     file_headers = NULL;
 }
+
+uint8_t *initrd_get_base(void) {
+    return initrd_base;
+}
+
+uint32_t initrd_get_size(void) {
+    if (!initrd_base)
+        return 0;
+    return initrd_mod0_phys_end - initrd_mod0_phys_start;
+}

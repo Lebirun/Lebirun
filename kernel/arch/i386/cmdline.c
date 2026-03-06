@@ -53,7 +53,7 @@ void cmdline_parse(uint32_t multiboot_flags, uint32_t cmdline_phys)
     uint32_t page;
     int len;
 
-    strcpy(init_path, "/bin/init");
+    strcpy(init_path, "/sbin/init");
     num_consoles = 4;
     cmdline_buf[0] = '\0';
 

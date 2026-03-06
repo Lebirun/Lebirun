@@ -221,6 +221,9 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint32_t ti
     while (!pending_resolved) {
         __asm__ volatile("sti");
         netif_poll_all();
+        if (task_has_pending_signals()) {
+            return -1;
+        }
         if (pit_get_ticks() - start > timeout_ticks) {
             return -1;
         }

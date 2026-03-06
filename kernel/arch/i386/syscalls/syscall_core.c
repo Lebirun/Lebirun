@@ -3,6 +3,8 @@
 #include <kernel/debug.h>
 
 extern mutex_t print_lock;
+extern void serial_write_direct(const char *buf, size_t len);
+extern int task_has_sigint_ignored(void);
 
 #define LINE_BUF_SIZE 256
 static char line_buffers[NUM_CONSOLES][LINE_BUF_SIZE];
@@ -24,10 +26,38 @@ static int esc_state[NUM_CONSOLES];
 static char esc_buf[NUM_CONSOLES][8];
 static int esc_len[NUM_CONSOLES];
 
+static int in_line_editing[NUM_CONSOLES];
+static int serial_displayed_len[NUM_CONSOLES];
+
+static void serial_write_move_back(int n) {
+    char esc[16];
+    int digits;
+    int temp;
+    int esc_len_local;
+    if (n <= 0) return;
+    esc[0] = '\033';
+    esc[1] = '[';
+    digits = 0;
+    temp = n;
+    do { digits++; temp /= 10; } while (temp > 0);
+    esc_len_local = 2 + digits + 1;
+    temp = n;
+    {
+        int d = 2 + digits - 1;
+        do { esc[d--] = '0' + (temp % 10); temp /= 10; } while (temp > 0);
+    }
+    esc[2 + digits] = 'D';
+    serial_write_direct(esc, (size_t)esc_len_local);
+}
+
 static void tty_echo_char(int con_id, char c) {
     framebuffer_t *fb = fb_get();
     if (fb && fb->font && console_is_initialized()) {
-        console_write_to(con_id, &c, 1);
+        if (con_id == 0 && in_line_editing[0]) {
+            console_write_to_fb_only(con_id, &c, 1);
+        } else {
+            console_write_to(con_id, &c, 1);
+        }
     } else {
         terminal_putchar(c);
     }
@@ -36,10 +66,27 @@ static void tty_echo_char(int con_id, char c) {
 static void tty_echo_str(int con_id, const char *s, int len) {
     framebuffer_t *fb = fb_get();
     if (fb && fb->font && console_is_initialized()) {
-        console_write_to(con_id, s, (size_t)len);
+        if (con_id == 0 && in_line_editing[0]) {
+            console_write_to_fb_only(con_id, s, (size_t)len);
+        } else {
+            console_write_to(con_id, s, (size_t)len);
+        }
     } else {
         int i;
         for (i = 0; i < len; i++) terminal_putchar(s[i]);
+    }
+}
+
+static void serial_redraw_line(int con_id) {
+    if (con_id != 0) return;
+    serial_write_move_back(serial_displayed_len[con_id]);
+    serial_write_direct("\033[K", 3);
+    if (line_len[con_id] > 0) {
+        serial_write_direct(line_buffers[con_id], (size_t)line_len[con_id]);
+    }
+    serial_displayed_len[con_id] = line_len[con_id];
+    if (line_cursor[con_id] < line_len[con_id]) {
+        serial_write_move_back(line_len[con_id] - line_cursor[con_id]);
     }
 }
 
@@ -254,6 +301,8 @@ static int sys_read(int fd, char *buf, int len) {
             }
             
             history_browse[con_id] = -1;
+            in_line_editing[con_id] = 1;
+            serial_displayed_len[con_id] = 0;
             
             while (!line_ready[con_id]) {
                 int key;
@@ -309,6 +358,7 @@ static int sys_read(int fd, char *buf, int len) {
                         }
                         idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
                         history_replace_line(con_id, history[con_id][idx], history_len[con_id][idx], echo);
+                        serial_redraw_line(con_id);
                         continue;
                     }
                     
@@ -321,6 +371,7 @@ static int sys_read(int fd, char *buf, int len) {
                             idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
                             history_replace_line(con_id, history[con_id][idx], history_len[con_id][idx], echo);
                         }
+                        serial_redraw_line(con_id);
                         continue;
                     }
                     
@@ -363,6 +414,7 @@ static int sys_read(int fd, char *buf, int len) {
                                     line_len[con_id] - line_cursor[con_id] - 1);
                             line_len[con_id]--;
                             line_redraw_from_cursor(con_id, echo);
+                            serial_redraw_line(con_id);
                         }
                         continue;
                     }
@@ -386,9 +438,11 @@ static int sys_read(int fd, char *buf, int len) {
                         if (echo) {
                             tty_echo_str(con_id, "\033[D", 3);
                             line_redraw_from_cursor(con_id, echo);
+                            serial_redraw_line(con_id);
                         }
                     }
                 } else if (c == '\n' || c == '\r') {
+                    in_line_editing[con_id] = 0;
                     history_add(con_id, line_buffers[con_id], line_len[con_id]);
                     if (line_len[con_id] < LINE_BUF_SIZE) {
                         line_buffers[con_id][line_len[con_id]++] = '\n';
@@ -396,17 +450,17 @@ static int sys_read(int fd, char *buf, int len) {
                     line_cursor[con_id] = line_len[con_id];
                     line_ready[con_id] = 1;
                     if (echo) {
-                        tty_echo_char(con_id, '\n');
+                        if (con_id == 0) {
+                            serial_write_direct("\n", 1);
+                            console_write_to_fb_only(con_id, "\n", 1);
+                        } else {
+                            tty_echo_char(con_id, '\n');
+                        }
                     }
                 } else if (c == 0x03) {
                     line_len[con_id] = 0;
                     line_cursor[con_id] = 0;
                     line_ready[con_id] = 0;
-                    if (echo) {
-                        tty_echo_char(con_id, '^');
-                        tty_echo_char(con_id, 'C');
-                        tty_echo_char(con_id, '\n');
-                    }
                     if (t->c_lflag & ISIG) {
                         int fg = tty_pgrp[con_id];
                         if (fg > 0) {
@@ -420,8 +474,15 @@ static int sys_read(int fd, char *buf, int len) {
                             }
                         }
                     }
+                    if (task_has_sigint_ignored()) {
+                        in_line_editing[con_id] = 1;
+                        serial_displayed_len[con_id] = 0;
+                        continue;
+                    }
+                    in_line_editing[con_id] = 0;
                     return -EINTR;
                 } else if (c == 4) {
+                    in_line_editing[con_id] = 0;
                     if (line_len[con_id] == 0) {
                         return 0;
                     }
@@ -448,6 +509,7 @@ static int sys_read(int fd, char *buf, int len) {
                     }
                     line_len[con_id] = 0;
                     line_cursor[con_id] = 0;
+                    serial_redraw_line(con_id);
                 } else if (c >= 32 && c < 127) {
                     if (line_len[con_id] < LINE_BUF_SIZE - 2) {
                         if (line_cursor[con_id] < line_len[con_id]) {
@@ -465,6 +527,7 @@ static int sys_read(int fd, char *buf, int len) {
                                 tty_echo_char(con_id, c);
                                 line_redraw_from_cursor(con_id, echo);
                             }
+                            serial_redraw_line(con_id);
                         }
                     }
                 }

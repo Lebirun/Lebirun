@@ -10,16 +10,17 @@
 extern uint64_t boot_pd_high[];
 extern uint32_t pae_enabled;
 
-#define SLAB_SIZES_COUNT 5
+#define SLAB_SIZES_COUNT 6
 #define SLAB_SIZE_16    0
 #define SLAB_SIZE_32    1
 #define SLAB_SIZE_64    2
 #define SLAB_SIZE_128   3
 #define SLAB_SIZE_256   4
+#define SLAB_SIZE_512   5
 
 #define SLAB_MAGIC 0x534C4142
 
-static const uint32_t slab_sizes[SLAB_SIZES_COUNT] = { 16, 32, 64, 128, 256 };
+static const uint32_t slab_sizes[SLAB_SIZES_COUNT] = { 16, 32, 64, 128, 256, 512 };
 
 typedef struct slab_obj {
     struct slab_obj *next;

@@ -13,6 +13,7 @@ static volatile unsigned int head[NUM_CONSOLES];
 static volatile unsigned int tail[NUM_CONSOLES];
 
 static wait_queue_t keyboard_waiters[NUM_CONSOLES];
+static volatile int sigint_pending[NUM_CONSOLES];
 
 static bool left_shift_pressed = false;
 static bool right_shift_pressed = false;
@@ -254,6 +255,13 @@ void keyboard_handler(registers_t* regs) {
     }
 
     if (ctrl_pressed && code == SCANCODE_C) {
+        int cur = console_is_initialized() ? console_get_current() : 0;
+        sigint_pending[cur] = 1;
+        if (cur == 0) {
+            extern void serial_write_direct(const char *buf, size_t len);
+            serial_write_direct("^C\n", 3);
+        }
+        console_write_to_fb_only(cur, "^C\n", 3);
         buffer_put(0x03);
         goto wake;
     }
@@ -313,4 +321,46 @@ void keyboard_init(void) {
     outb(0x21, master_mask);
 
     terminal_writestring("Keyboard initialized.\n");
+}
+
+void keyboard_process_sigint(void)
+{
+    extern struct termios tty_termios[];
+    extern int tty_pgrp[];
+    extern int deliver_signal_to_task(task_t *target, int sig);
+    extern task_t *all_tasks_head;
+    int i;
+    int fg;
+    task_t *t;
+    int guard;
+    pid_t t_pgid;
+
+    for (i = 0; i < NUM_CONSOLES; i++) {
+        if (!sigint_pending[i])
+            continue;
+        sigint_pending[i] = 0;
+
+        if (!(tty_termios[i].c_lflag & ISIG))
+            continue;
+
+        fg = tty_pgrp[i];
+        if (fg <= 0)
+            continue;
+
+        t = all_tasks_head;
+        guard = 0;
+        while (t && guard < 4096) {
+            uint32_t a = (uint32_t)t;
+            if (a < 0xC0000000u)
+                break;
+            if ((a & 0xFFFF0000u) == 0xFEFE0000u)
+                break;
+            t_pgid = t->pgid ? t->pgid : t->pid;
+            if (t_pgid == (pid_t)fg) {
+                deliver_signal_to_task(t, 2);
+            }
+            t = t->all_next;
+            guard++;
+        }
+    }
 }

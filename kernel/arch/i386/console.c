@@ -258,6 +258,7 @@ static void console_apply_attr(uint8_t attr, framebuffer_t *fb) {
     uint8_t bg_idx;
     uint32_t fg_rgb;
     uint32_t bg_rgb;
+    (void)fb;
 
     fg_idx = (attr >> 4) & 0x0F;
     bg_idx = attr & 0x0F;
@@ -1007,29 +1008,6 @@ int console_get_current(void) {
     return current_console;
 }
 
-static void console_scroll(console_t *con) {
-    int row;
-    int col;
-    int buf_rows;
-
-    if (!con->allocated || !con->buffer) return;
-    buf_rows = (int)con->buffer_rows;
-    for (row = 0; row < buf_rows - 1; row++) {
-        for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[row][col] = con->buffer[row + 1][col];
-            if (con->color_buffer) con->color_buffer[row][col] = con->color_buffer[row + 1][col];
-        }
-        con->line_wrapped[row] = con->line_wrapped[row + 1];
-    }
-    if (buf_rows > 0) {
-        for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[buf_rows - 1][col] = ' ';
-            if (con->color_buffer) con->color_buffer[buf_rows - 1][col] = 0x70;
-        }
-        con->line_wrapped[buf_rows - 1] = 0;
-    }
-}
-
 void console_putchar(char c) {
     console_putchar_to(current_console, c);
 }
@@ -1058,43 +1036,41 @@ static int parse_csi_params(const char *buf, int len, int *params, int max_param
 
 static void console_scroll_region_up(console_t *con, uint32_t top, uint32_t bottom, uint32_t cols) {
     uint32_t row;
-    uint32_t col;
+    uint32_t copy_cols;
 
     if (top >= bottom) return;
     if (bottom > con->buffer_rows) bottom = con->buffer_rows;
+    copy_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
     for (row = top; row < bottom - 1; row++) {
-        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[row][col] = con->buffer[row + 1][col];
-            if (con->color_buffer) con->color_buffer[row][col] = con->color_buffer[row + 1][col];
-        }
+        memcpy(con->buffer[row], con->buffer[row + 1], copy_cols);
+        if (con->color_buffer)
+            memcpy(con->color_buffer[row], con->color_buffer[row + 1], copy_cols);
         con->line_wrapped[row] = con->line_wrapped[row + 1];
     }
     if (bottom > 0) {
-        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[bottom - 1][col] = ' ';
-            if (con->color_buffer) con->color_buffer[bottom - 1][col] = 0x70;
-        }
+        memset(con->buffer[bottom - 1], ' ', copy_cols);
+        if (con->color_buffer)
+            memset(con->color_buffer[bottom - 1], 0x70, copy_cols);
         con->line_wrapped[bottom - 1] = 0;
     }
 }
 
 static void console_scroll_region_down(console_t *con, uint32_t top, uint32_t bottom, uint32_t cols) {
     uint32_t row;
-    uint32_t col;
+    uint32_t copy_cols;
 
     if (top >= bottom) return;
     if (bottom > con->buffer_rows) bottom = con->buffer_rows;
+    copy_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
     for (row = bottom - 1; row > top; row--) {
-        for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-            con->buffer[row][col] = con->buffer[row - 1][col];
-            if (con->color_buffer) con->color_buffer[row][col] = con->color_buffer[row - 1][col];
-        }
+        memcpy(con->buffer[row], con->buffer[row - 1], copy_cols);
+        if (con->color_buffer)
+            memcpy(con->color_buffer[row], con->color_buffer[row - 1], copy_cols);
         con->line_wrapped[row] = con->line_wrapped[row - 1];
     }
-    for (col = 0; col < cols && col < CONSOLE_BUFFER_COLS; col++) {
-        con->buffer[top][col] = ' ';
-        if (con->color_buffer) con->color_buffer[top][col] = 0x70;
-    }
+    memset(con->buffer[top], ' ', copy_cols);
+    if (con->color_buffer)
+        memset(con->color_buffer[top], 0x70, copy_cols);
     con->line_wrapped[top] = 0;
 }
 
@@ -1102,6 +1078,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     char cmd;
     int param_start;
     int is_private;
+    (void)console_num;
     int params[8];
     int nparams;
     int n;

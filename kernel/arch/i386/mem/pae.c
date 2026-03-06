@@ -42,7 +42,6 @@ static uint64_t *pae_vmm_pt_static[PAE_VMM_PT_INIT_SIZE];
 uint64_t **pae_vmm_page_tables = pae_vmm_pt_static;
 uint32_t pae_vmm_pt_count = 0;
 uint32_t pae_vmm_pt_capacity = PAE_VMM_PT_INIT_SIZE;
-static int pae_vmm_pt_is_dynamic = 0;
 
 static uint64_t *pae_mid_pd[2];
 

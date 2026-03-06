@@ -296,6 +296,9 @@ int main(int argc, char **argv)
 
         chdir(home);
 
+        memset(password, 0, sizeof(password));
+        memset(stored_hash, 0, sizeof(stored_hash));
+
         strcpy(env_home, "HOME=");
         strcat(env_home, home);
         strcpy(env_user, "USER=");

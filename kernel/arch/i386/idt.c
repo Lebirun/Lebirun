@@ -13,6 +13,7 @@
 #include <kernel/vring.h>
 #include <kernel/panic.h>
 #include <kernel/smp.h>
+#include <kernel/pit.h>
 #include <kernel/common.h>
 
 extern void isr0(void);
@@ -479,6 +480,14 @@ registers_t* interrupt_handler(registers_t* regs)
             if (current_task && current_task->state == TASK_DEAD) {
                 return schedule_from_irq(regs);
             }
+
+            if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
+                signal_deliver_pending(regs);
+                if (current_task && (current_task->state == TASK_DEAD || current_task->state == TASK_BLOCKED)) {
+                    return schedule_from_irq(regs);
+                }
+            }
+
             return regs;
         }
 
@@ -529,11 +538,15 @@ registers_t* interrupt_handler(registers_t* regs)
             extern void kprint_poll(uint32_t max_items);
             kprint_poll(64);
 
+            pit_process_callbacks();
+
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
             }
 
             regs = schedule_from_irq(regs);
+
+            keyboard_process_sigint();
 
             if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
                 signal_deliver_pending(regs);

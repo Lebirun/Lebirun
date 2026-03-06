@@ -13,10 +13,9 @@ void* memset(void* bufptr, int value, size_t size) {
 	unsigned char *buf;
 	unsigned char byte_val;
 	uint32_t word_val;
-	uint32_t *wp;
-	size_t pre;
 	size_t words;
-	size_t post;
+	size_t pre;
+	size_t tail;
 
 	if (!bufptr) return bufptr;
 	buf = (unsigned char*) bufptr;
@@ -30,19 +29,15 @@ void* memset(void* bufptr, int value, size_t size) {
 	if (size >= 16) {
 		word_val = (uint32_t)byte_val | ((uint32_t)byte_val << 8) |
 		           ((uint32_t)byte_val << 16) | ((uint32_t)byte_val << 24);
-		wp = (uint32_t *)buf;
-		words = size / 4;
-		post = size & 3;
-		while (words >= 8) {
-			wp[0] = word_val; wp[1] = word_val;
-			wp[2] = word_val; wp[3] = word_val;
-			wp[4] = word_val; wp[5] = word_val;
-			wp[6] = word_val; wp[7] = word_val;
-			wp += 8; words -= 8;
-		}
-		while (words--) *wp++ = word_val;
-		buf = (unsigned char *)wp;
-		while (post--) *buf++ = byte_val;
+		words = size >> 2;
+		tail = size & 3;
+		__asm__ volatile (
+			"rep stosl"
+			: "=D"(buf), "=c"(words)
+			: "D"(buf), "c"(words), "a"(word_val)
+			: "memory"
+		);
+		while (tail--) *buf++ = byte_val;
 	} else {
 		while (size--) *buf++ = byte_val;
 	}
@@ -52,32 +47,31 @@ void* memset(void* bufptr, int value, size_t size) {
 void* memcpy(void* __restrict dstptr, const void* __restrict srcptr, size_t size) {
 	unsigned char *dst;
 	const unsigned char *src;
-	uint32_t *dp;
-	const uint32_t *sp;
 	size_t words;
 	size_t tail;
 
 	if (!dstptr || !srcptr) return dstptr;
-	dst = (unsigned char*) dstptr;
-	src = (const unsigned char*) srcptr;
 
-	if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
-		dp = (uint32_t *)dst;
-		sp = (const uint32_t *)src;
-		words = size / 4;
+	if (size >= 16 && ((uintptr_t)dstptr & 3) == 0 && ((uintptr_t)srcptr & 3) == 0) {
+		words = size >> 2;
 		tail = size & 3;
-		while (words >= 8) {
-			dp[0] = sp[0]; dp[1] = sp[1];
-			dp[2] = sp[2]; dp[3] = sp[3];
-			dp[4] = sp[4]; dp[5] = sp[5];
-			dp[6] = sp[6]; dp[7] = sp[7];
-			dp += 8; sp += 8; words -= 8;
+		__asm__ volatile (
+			"rep movsl"
+			: "=S"(srcptr), "=D"(dstptr), "=c"(words)
+			: "S"(srcptr), "D"(dstptr), "c"(words)
+			: "memory"
+		);
+		if (tail) {
+			__asm__ volatile (
+				"rep movsb"
+				: "=S"(srcptr), "=D"(dstptr), "=c"(tail)
+				: "S"(srcptr), "D"(dstptr), "c"(tail)
+				: "memory"
+			);
 		}
-		while (words--) *dp++ = *sp++;
-		dst = (unsigned char *)dp;
-		src = (const unsigned char *)sp;
-		while (tail--) *dst++ = *src++;
 	} else {
+		dst = (unsigned char*) dstptr;
+		src = (const unsigned char*) srcptr;
 		while (size--) *dst++ = *src++;
 	}
 	return dstptr;

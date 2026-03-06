@@ -86,16 +86,11 @@ static void acpi_read_phys(uint32_t phys_addr, void *buf, uint32_t len) {
         chunk = 0x1000 - offset;
         if (chunk > len) chunk = len;
 
-        if (page_base < 0x40000000u) {
-            src = (uint8_t *)(phys_addr + 0xC0000000u);
-        } else {
-            temp_map_raw(SMP_TEMP_VIRT, page_base);
-            src = (uint8_t *)(SMP_TEMP_VIRT + offset);
-        }
+        temp_map_raw(SMP_TEMP_VIRT, page_base);
+        src = (uint8_t *)(SMP_TEMP_VIRT + offset);
         memcpy(dst, src, chunk);
-        if (page_base >= 0x40000000u) {
-            temp_unmap_raw(SMP_TEMP_VIRT);
-        }
+        temp_unmap_raw(SMP_TEMP_VIRT);
+
         dst += chunk;
         phys_addr += chunk;
         len -= chunk;

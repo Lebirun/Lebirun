@@ -168,6 +168,10 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint32_t ti
     while (sock->state == TCP_STATE_SYN_SENT) {
         __asm__ volatile("sti");
         netif_poll_all();
+        if (task_has_pending_signals()) {
+            sock->state = TCP_STATE_CLOSED;
+            return -1;
+        }
         if (pit_get_ticks() - start > timeout_ticks) {
             sock->state = TCP_STATE_CLOSED;
             return -1;
@@ -219,6 +223,9 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint32_t len, uint32_t timeout
     while (sock->recv_buffer_head == sock->recv_buffer_tail) {
         __asm__ volatile("sti");
         netif_poll_all();
+        if (task_has_pending_signals()) {
+            return -1;
+        }
         if (pit_get_ticks() - start > timeout_ticks) {
             return 0;
         }
@@ -262,6 +269,10 @@ int tcp_disconnect(tcp_socket_t *sock, uint32_t timeout_ms) {
                sock->state != TCP_STATE_TIME_WAIT) {
             __asm__ volatile("sti");
             netif_poll_all();
+            if (task_has_pending_signals()) {
+                sock->state = TCP_STATE_CLOSED;
+                return -1;
+            }
             if (pit_get_ticks() - start > timeout_ticks) {
                 sock->state = TCP_STATE_CLOSED;
                 return -1;

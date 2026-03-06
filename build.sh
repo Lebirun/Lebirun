@@ -13,6 +13,8 @@ done
 MAKEFLAGS="${MAKEFLAGS:--j$(nproc 2>/dev/null || echo 4)}"
 export MAKEFLAGS
 
+BUILD_START=$(date +%s)
+
 TOTAL_STEPS=0
 for PROJECT in $PROJECTS; do
   TOTAL_STEPS=$((TOTAL_STEPS + 1))
@@ -91,12 +93,21 @@ fi
 run_cmd() {
   _desc="$1"
   shift
+  _step_start=$(date +%s)
   if [ "$VERBOSE" -eq 1 ]; then
     printf "  -> %s\n" "$*"
     "$@"
   else
-    "$@" 2>&1 | grep -E '^\s*(CC|LD|AS|AR|STRIP|OBJCOPY)\s' || true
+    _errfile=$(mktemp)
+    "$@" 2>"$_errfile" | grep -E '^\s*(CC|LD|AS|AR|STRIP|OBJCOPY)\s' || true
+    if [ -s "$_errfile" ]; then
+      cat "$_errfile"
+    fi
+    rm -f "$_errfile"
   fi
+  _step_end=$(date +%s)
+  _step_dur=$((_step_end - _step_start))
+  printf "  done in %ds\n" "$_step_dur"
 }
 
 for PROJECT in $PROJECTS; do
@@ -165,6 +176,14 @@ fi
 case "$0" in
   *build.sh)
     cleanup_bar
-    printf "\033[1;32mBuild complete!\033[0m\n"
+    BUILD_END=$(date +%s)
+    BUILD_DUR=$((BUILD_END - BUILD_START))
+    BUILD_MIN=$((BUILD_DUR / 60))
+    BUILD_SEC=$((BUILD_DUR % 60))
+    if [ "$BUILD_MIN" -gt 0 ]; then
+      printf "\033[1;32mBuild complete in %dm%ds!\033[0m\n" "$BUILD_MIN" "$BUILD_SEC"
+    else
+      printf "\033[1;32mBuild complete in %ds!\033[0m\n" "$BUILD_SEC"
+    fi
     ;;
 esac

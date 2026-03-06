@@ -524,6 +524,50 @@ static int sys_fstatfs(int fd, const char *buf_ptr, int size) {
     return 0;
 }
 
+static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype_ptr, int flags_val) {
+    uint32_t src_addr;
+    uint32_t tgt_addr;
+    uint32_t fs_addr;
+    uint32_t mnt_flags;
+    const char *source;
+    const char *target;
+    const char *fstype;
+
+    src_addr = (uint32_t)source_ptr;
+    tgt_addr = (uint32_t)(uintptr_t)target_ptr;
+    fs_addr = (uint32_t)fstype_ptr;
+    mnt_flags = (uint32_t)flags_val;
+
+    if (tgt_addr >= 0xC0000000 || tgt_addr < 0x1000) return -EFAULT;
+    if (fs_addr >= 0xC0000000 || fs_addr < 0x1000) return -EFAULT;
+
+    if (!current_task) return -ESRCH;
+    if (current_task->uid != 0) return -EPERM;
+
+    source = NULL;
+    if (src_addr != 0 && src_addr < 0xC0000000 && src_addr >= 0x1000)
+        source = (const char *)src_addr;
+    target = (const char *)tgt_addr;
+    fstype = (const char *)fs_addr;
+
+    return vfs_mount_flags(source, target, fstype, mnt_flags);
+}
+
+static int sys_vfs_umount_user(int target_ptr, const char *unused1, int unused2) {
+    uint32_t tgt_addr;
+    const char *target;
+
+    (void)unused1;
+    (void)unused2;
+    tgt_addr = (uint32_t)target_ptr;
+    if (tgt_addr >= 0xC0000000 || tgt_addr < 0x1000) return -EFAULT;
+    if (!current_task) return -ESRCH;
+    if (current_task->uid != 0) return -EPERM;
+
+    target = (const char *)tgt_addr;
+    return vfs_unmount(target);
+}
+
 void syscalls_vfs_init(void) {
     syscall_table[SYSCALL_OPEN] = sys_vfs_open;
     syscall_table[SYSCALL_CLOSE] = sys_vfs_close;
@@ -539,4 +583,6 @@ void syscalls_vfs_init(void) {
     syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
     syscall_table[SYSCALL_STATFS] = sys_statfs;
     syscall_table[SYSCALL_FSTATFS] = sys_fstatfs;
+    syscall_table[SYSCALL_VFS_MOUNT] = sys_vfs_mount_user;
+    syscall_table[SYSCALL_VFS_UMOUNT] = sys_vfs_umount_user;
 }

@@ -26,6 +26,7 @@ static int wolf_recv_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx)
 
     (void)ssl;
     tcp = (tcp_socket_t *)ctx;
+    if (task_has_pending_signals()) return WOLFSSL_CBIO_ERR_GENERAL;
     n = tcp_recv(tcp, (uint8_t *)buf, (uint32_t)sz, 15000);
     if (n < 0) return WOLFSSL_CBIO_ERR_GENERAL;
     if (n == 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;

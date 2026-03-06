@@ -210,6 +210,10 @@ static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
         syscall_error("sys_exec: invalid size %u\n", bin_size);
         return -EINVAL;
     }
+    if (bin_addr + bin_size < bin_addr || bin_addr + bin_size >= 0xC0000000) {
+        syscall_error("sys_exec: binary range overflows into kernel space\n");
+        return -EFAULT;
+    }
 
     regs = current_task->syscall_frame;
     if (!regs) {

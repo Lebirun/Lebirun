@@ -1642,8 +1642,6 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     uint32_t *argv_ptrs;
     uint8_t random_bytes[16];
     uint32_t random_addr;
-    uint32_t zero;
-    uint32_t tmp_val;
     uint32_t entry_to_use;
     uint32_t stack_ptr;
     uint32_t check_stack_base;
@@ -1891,8 +1889,6 @@ int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t
     vmm_copy_to_pd(new_pd, sp, random_bytes, 16);
 
     sp = sp & ~0xF;
-
-    zero = 0;
 
 #define AT_NULL         0
 #define AT_PHDR         3

@@ -32,10 +32,6 @@ static uint32_t slot_page_addr(int slot, int page_idx) {
     return KSTACK_REGION_START + (uint32_t)slot * KSTACK_SLOT_SIZE + (1 + page_idx) * PAGE_SIZE;
 }
 
-static uint32_t slot_top_addr(int slot) {
-    return slot_page_addr(slot, KSTACK_USABLE_PAGES - 1);
-}
-
 static int addr_to_slot(uint32_t addr) {
     uint32_t offset;
     if (addr < KSTACK_REGION_START || addr >= KSTACK_REGION_END) return -1;

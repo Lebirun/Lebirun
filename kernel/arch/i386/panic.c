@@ -5,6 +5,7 @@
 #include <kernel/io.h>
 #include <kernel/mem_map.h>
 #include <kernel/task.h>
+#include <kernel/framebuffer.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,12 +20,47 @@ static void safe_panic_print(const char *s) {
 }
 
 static void fb_panic_print(const char *s) {
-    terminal_writestring(s);
+    fb_write_string(s);
 }
 
 static void panic_print(const char *s) {
     safe_panic_print(s);
     fb_panic_print(s);
+}
+
+#define WRAP_WIDTH 60
+
+static void panic_print_wrapped(const char *prefix, const char *text) {
+    int col;
+    int indent;
+    int i;
+    const char *p;
+    char c[2];
+
+    col = 0;
+    indent = 0;
+    c[1] = '\0';
+    p = prefix;
+    while (*p) {
+        c[0] = *p++;
+        panic_print(c);
+        col++;
+        indent++;
+    }
+    p = text;
+    while (*p) {
+        if (col >= WRAP_WIDTH) {
+            panic_print("\n");
+            for (i = 0; i < indent; i++) {
+                panic_print(" ");
+            }
+            col = indent;
+        }
+        c[0] = *p++;
+        panic_print(c);
+        col++;
+    }
+    panic_print("\n");
 }
 
 static void panic_print_hex(uint32_t v) {
@@ -136,9 +172,7 @@ static const char* exception_messages[] = {
 static void print_task_info(void) {
     if (!current_task) return;
 
-    panic_print("+-------------------------------+\n");
-    panic_print("| TASK INFO                     |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- TASK INFO ---\n");
     panic_print("  PID=");
     panic_print_dec(current_task->pid);
     panic_print("  Name=");
@@ -153,11 +187,9 @@ static void print_task_info(void) {
 }
 
 static void print_selector_error_code(uint32_t err_code, const char *header) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| ");
+    panic_print("\n--- ");
     panic_print(header);
-    panic_print("\n");
-    panic_print("+-------------------------------+\n");
+    panic_print(" ---\n");
     panic_print("  ");
     if (err_code == 0) {
         panic_print("(no selector error code)\n");
@@ -179,9 +211,7 @@ static void print_invalid_opcode_info(uint32_t eip) {
     uint8_t *code;
     int i;
 
-    panic_print("+-------------------------------+\n");
-    panic_print("| INVALID OPCODE INFO           |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- INVALID OPCODE INFO ---\n");
     panic_print("  Faulting EIP=0x");
     panic_print_hex(eip);
     panic_print("\n  Bytes at EIP: ");
@@ -199,17 +229,13 @@ static void print_invalid_opcode_info(uint32_t eip) {
 }
 
 static void print_double_fault_info(void) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| DOUBLE FAULT INFO             |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- DOUBLE FAULT INFO ---\n");
     panic_print("  Error code is always 0\n");
     panic_print("  Caused by nested exception\n");
 }
 
 static void print_alignment_check_info(uint32_t err_code) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| ALIGNMENT CHECK INFO          |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- ALIGNMENT CHECK INFO ---\n");
     panic_print("  Error code=0x");
     panic_print_hex(err_code);
     panic_print("\n");
@@ -219,47 +245,37 @@ static void print_alignment_check_info(uint32_t err_code) {
 }
 
 static void print_fpu_info(uint32_t int_no) {
-    panic_print("+-------------------------------+\n");
     if (int_no == 16) {
-        panic_print("| x87 FPE INFO                  |\n");
+        panic_print("\n--- x87 FPE INFO ---\n");
     } else {
-        panic_print("| SIMD FPE INFO                 |\n");
+        panic_print("\n--- SIMD FPE INFO ---\n");
     }
-    panic_print("+-------------------------------+\n");
     panic_print("  Floating-point exception #");
     panic_print_dec(int_no);
     panic_print("\n");
 }
 
 static void print_divide_info(uint32_t eip) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| DIVIDE ERROR INFO             |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- DIVIDE ERROR INFO ---\n");
     panic_print("  Division by zero at EIP=0x");
     panic_print_hex(eip);
     panic_print("\n");
 }
 
 static void print_bound_range_info(uint32_t eip) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| BOUND RANGE INFO              |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- BOUND RANGE INFO ---\n");
     panic_print("  BOUND instruction failed at EIP=0x");
     panic_print_hex(eip);
     panic_print("\n");
 }
 
 static void print_device_not_avail_info(void) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| DEVICE NOT AVAILABLE INFO     |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- DEVICE NOT AVAILABLE INFO ---\n");
     panic_print("  FPU/SSE not available (CR0.EM or CR0.TS set)\n");
 }
 
 static void print_machine_check_info(void) {
-    panic_print("+-------------------------------+\n");
-    panic_print("| MACHINE CHECK INFO            |\n");
-    panic_print("+-------------------------------+\n");
+    panic_print("\n--- MACHINE CHECK INFO ---\n");
     panic_print("  Hardware error detected\n");
     panic_print("  Check MCi_STATUS MSRs for details\n");
 }
@@ -299,26 +315,17 @@ void kernel_panic(const char *reason, registers_t *regs) {
     }
     in_panic = 1;
 
-    panic_print("\n");
-    panic_print("+===============================+\n");
-    panic_print("|       !!! KERNEL PANIC !!!    |\n");
-    panic_print("+===============================+\n");
-    panic_print("| Reason: ");
-    panic_print(reason);
-    panic_print("\n");
+    panic_print("\n!!! KERNEL PANIC !!!\n");
+    panic_print_wrapped("Reason: ", reason);
 
     print_task_info();
 
     if (regs) {
         if (regs->int_no < 32) {
-            panic_print("| Exception: ");
-            panic_print(exception_messages[regs->int_no]);
-            panic_print("\n");
+            panic_print_wrapped("Exception: ", exception_messages[regs->int_no]);
         }
 
-        panic_print("+-------------------------------+\n");
-        panic_print("| EXCEPTION INFO                |\n");
-        panic_print("+-------------------------------+\n");
+        panic_print("\n--- EXCEPTION INFO ---\n");
         panic_print("  INT=0x");
         panic_print_hex(regs->int_no);
         panic_print("  ERR=0x");
@@ -329,9 +336,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
         panic_print_hex(regs->cs);
         panic_print("\n");
 
-        panic_print("+-------------------------------+\n");
-        panic_print("| REGISTERS                     |\n");
-        panic_print("+-------------------------------+\n");
+        panic_print("\n--- REGISTERS ---\n");
         panic_print("  EAX=0x");
         panic_print_hex(regs->eax);
         panic_print("  EBX=0x");
@@ -350,9 +355,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
         panic_print_hex(regs->esp);
         panic_print("\n");
 
-        panic_print("+-------------------------------+\n");
-        panic_print("| SEGMENT REGISTERS             |\n");
-        panic_print("+-------------------------------+\n");
+        panic_print("\n--- SEGMENT REGISTERS ---\n");
         panic_print("  DS=0x");
         panic_print_hex(regs->ds);
         panic_print("  ES=0x");
@@ -398,9 +401,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
             __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0_val));
             __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4_val));
-            panic_print("+-------------------------------+\n");
-            panic_print("| PAGE FAULT INFO               |\n");
-            panic_print("+-------------------------------+\n");
+            panic_print("\n--- PAGE FAULT INFO ---\n");
             panic_print("  CR2 (fault addr)=0x");
             panic_print_hex(fault_addr);
             panic_print("\n  CR3=0x");
@@ -434,9 +435,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
             break;
         }
 
-        panic_print("\n+-------------------------------+\n");
-        panic_print("| STACK TRACE (EBP CHAIN)       |\n");
-        panic_print("+-------------------------------+\n");
+        panic_print("\n--- STACK TRACE (EBP CHAIN) ---\n");
         ebp_ptr = (uint32_t *)regs->ebp;
         frame_count = 0;
         while (ebp_ptr && frame_count < 10) {
@@ -454,23 +453,36 @@ void kernel_panic(const char *reason, registers_t *regs) {
         }
 
         if (is_valid_kernel_ptr(regs->esp)) {
-            panic_print("\n+-------------------------------+\n");
-            panic_print("| STACK DUMP (8 DWORDS @ ESP)   |\n");
-            panic_print("+-------------------------------+\n");
+            panic_print("\n--- STACK DUMP (8 DWORDS @ ESP) ---\n");
             panic_dump_memory(regs->esp, 8);
         }
 
         if (regs->int_no == 14 && is_valid_kernel_ptr(fault_addr & ~0xFFF)) {
-            panic_print("\n+-------------------------------+\n");
-            panic_print("| MEMORY NEAR FAULT ADDRESS     |\n");
-            panic_print("+-------------------------------+\n");
+            panic_print("\n--- MEMORY NEAR FAULT ADDRESS ---\n");
             panic_dump_memory(fault_addr & ~0xF, 4);
+        }
+    } else {
+        __asm__ volatile ("mov %%ebp, %0" : "=r"(ebp_ptr));
+        if (ebp_ptr) {
+            panic_print("\n--- STACK TRACE (EBP CHAIN) ---\n");
+            frame_count = 0;
+            while (ebp_ptr && frame_count < 10) {
+                if (!is_valid_kernel_ptr((uint32_t)ebp_ptr)) break;
+                if (!is_valid_kernel_ptr((uint32_t)&ebp_ptr[1])) break;
+                panic_print("  #");
+                panic_print_hex(frame_count);
+                panic_print("  EBP=0x");
+                panic_print_hex((uint32_t)ebp_ptr);
+                panic_print("  RET=0x");
+                panic_print_hex(ebp_ptr[1]);
+                panic_print("\n");
+                ebp_ptr = (uint32_t *)ebp_ptr[0];
+                frame_count++;
+            }
         }
     }
 
-    panic_print("\n+===============================+\n");
-    panic_print("|        SYSTEM HALTED          |\n");
-    panic_print("+===============================+\n");
+    panic_print("\n*** SYSTEM HALTED ***\n");
 
     for (;;) __asm__ ("cli; hlt");
 }
