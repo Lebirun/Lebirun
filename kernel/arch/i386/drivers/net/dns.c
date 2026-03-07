@@ -301,8 +301,8 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
         }
 
         if (offset + 10 > len) break;
-        uint16_t rtype = (data[offset] << 8) | data[offset + 1];
-        uint16_t rdlength = (data[offset + 8] << 8) | data[offset + 9];
+        rtype = (data[offset] << 8) | data[offset + 1];
+        rdlength = (data[offset + 8] << 8) | data[offset + 9];
         offset += 10;
 
         if (rtype == DNS_TYPE_A && rdlength == 4 && offset + 4 <= len) {

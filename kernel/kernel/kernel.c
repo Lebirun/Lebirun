@@ -546,9 +546,6 @@ void kernel_main(void) {
             asm volatile ("hlt");
     }
 
-    printf("Init launched: task_id=%u is_user=%d state=%d on console 0\n",
-           init_task->id, init_task->is_user, init_task->state);
-
     if (debug_boot_hw) {
         t = ready_queue_head;
         printf("Run queue: ");

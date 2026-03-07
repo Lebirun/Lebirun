@@ -86,10 +86,23 @@ static int console_ensure_alloc(int n) {
         con->line_wrapped = NULL;
         return -1;
     }
+    con->write_flags = (uint8_t *)kmalloc(con->write_buffer_size);
+    if (!con->write_flags) {
+        kfree(con->write_buffer);
+        kfree(con->line_wrapped);
+        kfree(con->color_buffer);
+        kfree(con->buffer);
+        con->buffer = NULL;
+        con->color_buffer = NULL;
+        con->line_wrapped = NULL;
+        con->write_buffer = NULL;
+        return -1;
+    }
     memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
     memset(con->color_buffer, 0x70, rows * CONSOLE_BUFFER_COLS);
     memset(con->line_wrapped, 0, rows);
     memset(con->write_buffer, 0, con->write_buffer_size);
+    memset(con->write_flags, 0, con->write_buffer_size);
     con->allocated = 1;
     return 0;
 }
@@ -149,7 +162,9 @@ static inline void console_irqrestore(uint32_t flags);
 
 static void console_grow_write_buffer(console_t *con) {
     char *new_wb;
+    uint8_t *new_wf;
     char *old_wb;
+    uint8_t *old_wf;
     uint32_t new_size;
     uint32_t old_size;
     uint32_t tail;
@@ -165,6 +180,8 @@ static void console_grow_write_buffer(console_t *con) {
     if (new_size <= old_size) return;
     new_wb = (char *)kmalloc(new_size);
     if (!new_wb) return;
+    new_wf = (uint8_t *)kmalloc(new_size);
+    if (!new_wf) { kfree(new_wb); return; }
     gflags = console_irqsave();
     spin_lock(&console_lock);
     tail = con->write_tail;
@@ -172,16 +189,21 @@ static void console_grow_write_buffer(console_t *con) {
     used = (head >= tail) ? (head - tail) : (old_size - tail + head);
     for (i = 0; i < used; i++) {
         new_wb[i] = con->write_buffer[(tail + i) % old_size];
+        new_wf[i] = con->write_flags[(tail + i) % old_size];
     }
     memset(new_wb + used, 0, new_size - used);
+    memset(new_wf + used, 0, new_size - used);
     old_wb = con->write_buffer;
+    old_wf = con->write_flags;
     con->write_buffer = new_wb;
+    con->write_flags = new_wf;
     con->write_buffer_size = new_size;
     con->write_tail = 0;
     con->write_head = used;
     spin_unlock(&console_lock);
     console_irqrestore(gflags);
     kfree(old_wb);
+    kfree(old_wf);
 }
 
 static uint32_t console_redraw_cursor_x = 0;
@@ -1807,7 +1829,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         return;
     }
 
-    if (console_num == 0 && !skip_serial_async) {
+    if (console_num == 0 && !skip_serial_async && !writer_thread_running) {
         if (kprint_is_ready()) {
             kprint_serial_async(data, size);
         } else {
@@ -1839,6 +1861,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                     break;
                 }
                 con->write_buffer[head] = data[i];
+                con->write_flags[head] = skip_serial_async ? 1 : 0;
                 con->write_head = next_head;
                 i++;
             }
@@ -2300,6 +2323,7 @@ static void console_writer_thread(void) {
     uint32_t head;
     uint32_t available;
     char chunk[256];
+    uint8_t chunk_flags[256];
     uint32_t chunk_size;
     uint32_t j;
     framebuffer_t *fb;
@@ -2314,6 +2338,8 @@ static void console_writer_thread(void) {
     uint32_t sc_bot;
     uint32_t sr;
     uint32_t sc;
+    uint32_t serial_start;
+    uint32_t serial_len;
 
     writer_thread_running = 1;
     while (1) {
@@ -2375,6 +2401,24 @@ static void console_writer_thread(void) {
                 
                 for (j = 0; j < chunk_size; j++) {
                     chunk[j] = con->write_buffer[(tail + j) % con->write_buffer_size];
+                    chunk_flags[j] = con->write_flags[(tail + j) % con->write_buffer_size];
+                }
+
+                if (i == 0) {
+                    serial_start = 0;
+                    for (j = 0; j <= chunk_size; j++) {
+                        if (j == chunk_size || chunk_flags[j]) {
+                            serial_len = j - serial_start;
+                            if (serial_len > 0) {
+                                if (kprint_is_ready()) {
+                                    kprint_serial_async(chunk + serial_start, serial_len);
+                                } else {
+                                    serial_write_direct(chunk + serial_start, serial_len);
+                                }
+                            }
+                            serial_start = j + 1;
+                        }
+                    }
                 }
                 
                 console_batch++;

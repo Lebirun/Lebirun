@@ -37,6 +37,7 @@ typedef struct {
     uint32_t saved_cursor_y;
 
     char *write_buffer;
+    uint8_t *write_flags;
     uint32_t write_buffer_size;
     volatile uint32_t write_head;
     volatile uint32_t write_tail;
