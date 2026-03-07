@@ -360,12 +360,10 @@ void slab_stats(void) {
     int i;
     slab_cache_t *cache;
     
-    printf("=== Slab Allocator Stats ===\n");
     for (i = 0; i < SLAB_SIZES_COUNT; i++) {
         cache = &slab_caches[i];
         printf("Size %3u: pages=%u allocs=%u frees=%u\n",
                cache->obj_size, cache->pages_allocated,
                cache->alloc_count, cache->free_count);
     }
-    printf("============================\n");
 }

@@ -125,7 +125,6 @@ void arp_receive(netif_t *netif, arp_packet_t *arp) {
 }
 
 void arp_print_cache(void) {
-    printf("=== ARP Cache ===\n");
     for (int i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid) {
             printf("%u.%u.%u.%u -> %02X:%02X:%02X:%02X:%02X:%02X\n",

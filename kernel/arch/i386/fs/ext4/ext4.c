@@ -331,12 +331,16 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) 
 static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     vfs_node_t *dev_node;
     uint32_t port_idx;
+    uint64_t part_start;
     ahci_port_t *port;
     ext4_fs_t *fs;
     size_t mp_len;
     vfs_node_t *root;
 
+    extern uint64_t devfs_get_partition_start(vfs_node_t *node);
+
     port_idx = 0;
+    part_start = 0;
     if (device && device[0] != '\0') {
         dev_node = vfs_namei(device);
         if (!dev_node) {
@@ -348,6 +352,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
             return NULL;
         }
         port_idx = dev_node->inode;
+        part_start = devfs_get_partition_start(dev_node);
     }
 
     port = ahci_get_port(port_idx);
@@ -364,6 +369,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
 
     memset(fs, 0, sizeof(ext4_fs_t));
     fs->port_index = port_idx;
+    fs->partition_start_lba = part_start;
     mutex_init(&fs->lock);
 
     if (ext4_read_superblock(fs) != 0) {

@@ -15,7 +15,7 @@ int ext4_read_superblock(ext4_fs_t *fs) {
         return -1;
     }
 
-    if (ahci_read_sectors(port, 0, 8, buffer) != 0) {
+    if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
         kfree(buffer);
         return -1;
     }
@@ -72,14 +72,14 @@ int ext4_write_superblock(ext4_fs_t *fs) {
     }
 
     memset(buffer, 0, 4096);
-    if (ahci_read_sectors(port, 0, 8, buffer) != 0) {
+    if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
         kfree(buffer);
         return -1;
     }
 
     memcpy(buffer + EXT4_SUPERBLOCK_OFFSET, &fs->sb, sizeof(ext4_superblock_t));
 
-    if (ahci_write_sectors(port, 0, 8, buffer) != 0) {
+    if (ahci_write_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
         kfree(buffer);
         return -1;
     }

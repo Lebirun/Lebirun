@@ -321,7 +321,6 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
 void dns_cache_print(void) {
     int i;
 
-    printf("=== DNS Cache ===\n");
     for (i = 0; i < DNS_MAX_CACHE; i++) {
         if (dns_cache[i].has_ipv4) {
             printf("%s -> %u.%u.%u.%u\n",

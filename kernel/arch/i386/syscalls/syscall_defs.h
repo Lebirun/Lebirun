@@ -403,6 +403,7 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_VFS_MOUNT 272
 #define SYSCALL_VFS_UMOUNT 273
 #define SYSCALL_PANIC 274
+#define SYSCALL_BLOCKDEV_RESCAN 275
 
 #define NR_SYSCALLS 281
 
@@ -527,6 +528,11 @@ int sys_vfs_readdir(registers_t *regs);
 void procfs_init(void);
 void devfs_init(void);
 int devfs_register_blockdev(const char *name, uint32_t port_index);
+int devfs_register_partition(const char *name, uint32_t port_index,
+                             uint64_t start_lba, uint64_t sector_count);
+uint64_t devfs_get_partition_start(vfs_node_t *node);
+int devfs_is_partition(vfs_node_t *node);
+int devfs_rescan_partitions(const char *devname);
 void devfs_register_initrd(void);
 
 #endif

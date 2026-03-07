@@ -598,8 +598,6 @@ ahci_port_t *ahci_get_port(uint32_t index) {
 }
 
 void ahci_debug_info(void) {
-    printf("=== AHCI Controller Info ===\n");
-    
     if (!g_ahci_controller.initialized) {
         printf("AHCI: Controller not initialized\n");
         return;
@@ -614,7 +612,6 @@ void ahci_debug_info(void) {
            g_ahci_controller.num_ports);
     printf("Command Slots: %u\n", g_ahci_controller.num_cmd_slots);
     
-    printf("\n=== Port Status ===\n");
     for (uint32_t i = 0; i < AHCI_MAX_PORTS; i++) {
         ahci_port_t *port = &g_ahci_controller.ports[i];
         if (!port->present)
@@ -1370,7 +1367,6 @@ void ahci_smart_print(smart_data_t *data) {
     if (!data)
         return;
     
-    printf("=== S.M.A.R.T. Data ===\n");
     printf("Version: %u\n", data->version);
     printf("Offline status: 0x%02X\n", data->offline_status);
     printf("Self-test status: 0x%02X\n", data->self_test_status);

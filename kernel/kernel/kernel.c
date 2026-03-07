@@ -23,6 +23,7 @@
 #include <kernel/vfs.h>
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/fs/ext4/ext4.h>
+#include <kernel/partition.h>
 #include <kernel/drivers/net/net.h>
 #include <kernel/drivers/net/tls.h>
 #include <kernel/vring.h>
@@ -46,6 +47,9 @@ bool debug_idt = CONFIG_DEBUG_IDT ? true : false;
 bool debug_driver = CONFIG_DEBUG_DRIVER ? true : false;
 bool debug_fs_ext4 = CONFIG_DEBUG_FS_EXT4 ? true : false;
 bool debug_fs_other = CONFIG_DEBUG_FS_OTHER ? true : false;
+bool debug_boot_vfs = CONFIG_DEBUG_BOOT_VFS ? true : false;
+bool debug_boot_modules = CONFIG_DEBUG_BOOT_MODULES ? true : false;
+bool debug_boot_hw = CONFIG_DEBUG_BOOT_HW ? true : false;
 
 extern uint32_t boot_page_directory[1024] __attribute__((aligned(4096)));
 
@@ -98,6 +102,8 @@ void kernel_main(void) {
     extern void procfs_init(void);
     extern void devfs_init(void);
     extern int devfs_register_blockdev(const char *name, uint32_t port_index);
+    extern int devfs_register_partition(const char *name, uint32_t port_index,
+                                        uint64_t start_lba, uint64_t sector_count);
     extern void devfs_register_initrd(void);
     extern void sysfs_init(void);
     extern void ramfs_debug_check_root(const char *location);
@@ -118,6 +124,9 @@ void kernel_main(void) {
     int j;
     uint32_t pi;
     char devname[8];
+    char partname[16];
+    partition_table_t ptable;
+    int pk;
     task_t *init_task;
     task_t *t;
     task_t *start;
@@ -164,15 +173,15 @@ void kernel_main(void) {
 
     test_frame = pfa_alloc();
     if (test_frame) {
-        printf("PFA Test alloc: Frame at 0x%08X\n", test_frame);
+        if (debug_memory) printf("PFA Test alloc: Frame at 0x%08X\n", test_frame);
         
         second_frame = pfa_alloc();
-        printf("PFA Second alloc: 0x%08X\n", second_frame);
+        if (debug_memory) printf("PFA Second alloc: 0x%08X\n", second_frame);
         pfa_free(test_frame);
-        printf("Freed first frame.\n");
+        if (debug_memory) printf("Freed first frame.\n");
         
         third_frame = pfa_alloc();
-        printf("PFA Third (reuse?): 0x%08X\n", third_frame);
+        if (debug_memory) printf("PFA Third (reuse?): 0x%08X\n", third_frame);
         if (second_frame) {
             pfa_free(second_frame);
         }
@@ -180,7 +189,7 @@ void kernel_main(void) {
             pfa_free(third_frame);
         }
     } else {
-        printf("PFA alloc failed - check map!\n");
+        if (debug_memory) printf("PFA alloc failed - check map!\n");
     }
 
     heap_init();
@@ -189,13 +198,13 @@ void kernel_main(void) {
     heap_buf = kmalloc(1024);
     if (heap_buf) {
         strcpy(heap_buf, "Hello heap!");
-        printf("Heap test: %s\n", heap_buf);
+        if (debug_memory) printf("Heap test: %s\n", heap_buf);
         kfree(heap_buf);
     } else {
-        printf("Heap alloc failed.\n");
+        if (debug_memory) printf("Heap alloc failed.\n");
     }
 
-    heap_dump();
+    if (debug_memory) heap_dump();
 
 
     mb_page = multiboot_ptr & ~0xFFF;
@@ -237,20 +246,22 @@ void kernel_main(void) {
                mb->framebuffer_pitch, mb->framebuffer_bpp, mb->framebuffer_type);
     }
 
-    printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
+    if (debug_boot_modules) printf("MB info: flags=0x%08X mods_count=%u mods_addr=0x%08X\n", mb->flags, mb->mods_count, mb->mods_addr);
 
-    printf("MB: first 32 bytes: ");
-    mbb = (uint8_t *)mb;
-    for (i = 0; i < 32; i++) {
-        printf("%02X", mbb[i]);
-        if (i % 4 == 3) printf(" ");
+    if (debug_boot_modules) {
+        printf("MB: first 32 bytes: ");
+        mbb = (uint8_t *)mb;
+        for (i = 0; i < 32; i++) {
+            printf("%02X", mbb[i]);
+            if (i % 4 == 3) printf(" ");
+        }
+        printf("\n");
     }
-    printf("\n");
 
     if (mb->mods_count > 0 && mb->mods_addr) {
         mods_start_page = mb->mods_addr & ~0xFFF;
         mods_end_page = (mb->mods_addr + mb->mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
-        printf("MB: Mapping modules array phys 0x%08X - 0x%08X\n", mods_start_page, mods_end_page);
+        if (debug_boot_modules) printf("MB: Mapping modules array phys 0x%08X - 0x%08X\n", mods_start_page, mods_end_page);
         for (phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
             vmm_map_page(phys + 0xC0000000, phys, 0x003);
         }
@@ -260,28 +271,30 @@ void kernel_main(void) {
             ms = modarr[i].mod_start;
             me = modarr[i].mod_end;
             msize = me - ms;
-            printf("MB: module[%u]: phys 0x%08X-0x%08X (%u bytes) cmdline=0x%08X\n", i, ms, me, msize, modarr[i].cmdline);
+            if (debug_boot_modules) printf("MB: module[%u]: phys 0x%08X-0x%08X (%u bytes) cmdline=0x%08X\n", i, ms, me, msize, modarr[i].cmdline);
 
             pstart = ms & ~0xFFF;
             vmm_map_page(pstart + 0xC0000000, pstart, 0x003);
-            mstart = (uint8_t *)(ms + 0xC0000000);
-            printf("MB: first 16 bytes of module[%u]: ", i);
-            for (b = 0; b < 16 && b < msize; b++) printf("%02X", mstart[b]);
-            printf("\n");
+            if (debug_boot_modules) {
+                mstart = (uint8_t *)(ms + 0xC0000000);
+                printf("MB: first 16 bytes of module[%u]: ", i);
+                for (b = 0; b < 16 && b < msize; b++) printf("%02X", mstart[b]);
+                printf("\n");
+            }
         }
 
         initrd_init(1, mb->mods_addr);
         initrd_list_files();
         vfs_init();
-        printf("[KERNEL] After vfs_init\n");
+        if (debug_boot_vfs) printf("[KERNEL] After vfs_init\n");
         initrd_vfs_register();
-        printf("[KERNEL] After initrd_vfs_register\n");
+        if (debug_boot_vfs) printf("[KERNEL] After initrd_vfs_register\n");
         ramfs_vfs_register();
-        printf("[KERNEL] After ramfs_vfs_register\n");
+        if (debug_boot_vfs) printf("[KERNEL] After ramfs_vfs_register\n");
         squashfs_vfs_register();
-        printf("[KERNEL] After squashfs_vfs_register\n");
+        if (debug_boot_vfs) printf("[KERNEL] After squashfs_vfs_register\n");
         overlayfs_vfs_register();
-        printf("[KERNEL] After overlayfs_vfs_register\n");
+        if (debug_boot_vfs) printf("[KERNEL] After overlayfs_vfs_register\n");
 
         use_squashfs = 0;
         squashfs_root = NULL;
@@ -290,7 +303,7 @@ void kernel_main(void) {
 
         mount_ret = vfs_mount(NULL, "/", "ramfs");
         if (mount_ret == 0) {
-            printf("[KERNEL] Mounted ramfs as root\n");
+            if (debug_boot_vfs) printf("[KERNEL] Mounted ramfs as root\n");
         } else {
             printf("[KERNEL] Failed to mount ramfs as root\n");
         }
@@ -337,29 +350,29 @@ void kernel_main(void) {
             }
         }
 
-        printf("[BOOT] procfs_init...\n");
+        if (debug_boot_vfs) printf("[BOOT] procfs_init...\n");
         procfs_init();
-        printf("[BOOT] devfs_init...\n");
+        if (debug_boot_vfs) printf("[BOOT] devfs_init...\n");
         devfs_init();
         devfs_register_initrd();
-        printf("[BOOT] sysfs_init...\n");
+        if (debug_boot_vfs) printf("[BOOT] sysfs_init...\n");
         sysfs_init();
 
-        printf("[BOOT] mounting /dev /proc /sys...\n");
+        if (debug_boot_vfs) printf("[BOOT] mounting /dev /proc /sys...\n");
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
         vfs_mount(NULL, "/sys", "sysfs");
 
         if (use_squashfs) {
-            printf("[BOOT] vfs_block_squashfs_access...\n");
+            if (debug_boot_vfs) printf("[BOOT] vfs_block_squashfs_access...\n");
             vfs_block_squashfs_access();
         }
 
-        printf("[BOOT] ramfs_internalize_all...\n");
+        if (debug_boot_vfs) printf("[BOOT] ramfs_internalize_all...\n");
         ramfs_internalize_all();
-        printf("[BOOT] initrd_free_pages...\n");
+        if (debug_boot_vfs) printf("[BOOT] initrd_free_pages...\n");
         initrd_free_pages();
-        printf("[BOOT] initrd_free_pages done\n");
+        if (debug_boot_vfs) printf("[BOOT] initrd_free_pages done\n");
     } else {
         printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
     }
@@ -368,57 +381,74 @@ void kernel_main(void) {
 
     cr3 = read_cr3();
     cr0 = read_cr0();
-    printf("CR3="); print_hex(cr3);
-    printf(" CR0="); print_hex(cr0);
-    printf("\n");
+    if (debug_boot_hw) {
+        printf("CR3="); print_hex(cr3);
+        printf(" CR0="); print_hex(cr0);
+        printf("\n");
+    }
     if (!pae_enabled) {
         expected = (unsigned long)(&boot_page_directory) - 0xC0000000UL;
-        printf("EXP="); print_hex(expected);
-        printf("\n");
+        if (debug_boot_hw) {
+            printf("EXP="); print_hex(expected);
+            printf("\n");
+        }
         if (cr3 == expected) {
-            printf("PAGING OK\n");
+            if (debug_boot_hw) printf("PAGING OK\n");
         } else {
             printf("PAGING MISMATCH\n");
         }
         pd = (unsigned long*)0xFFFFF000UL;
-        printf("PDE0="); print_hex(pd[0]);
-        printf("\n");
+        if (debug_boot_hw) {
+            printf("PDE0="); print_hex(pd[0]);
+            printf("\n");
+        }
     } else {
-        printf("PAE mode: skipping legacy paging check\n");
+        if (debug_boot_hw) printf("PAE mode: skipping legacy paging check\n");
     }
-    printf("[BOOT] pic_remap...\n");
+    if (debug_boot_hw) printf("[BOOT] pic_remap...\n");
     pic_remap();
-    printf("[BOOT] kstack_init...\n");
+    if (debug_boot_hw) printf("[BOOT] kstack_init...\n");
     kstack_init();
-    printf("[BOOT] init_tasks...\n");
+    if (debug_boot_hw) printf("[BOOT] init_tasks...\n");
     init_tasks();
-    printf("[BOOT] smp_init...\n");
+    if (debug_boot_hw) printf("[BOOT] smp_init...\n");
     smp_init();
-    printf("[BOOT] smp_init done\n");
+    if (debug_boot_hw) printf("[BOOT] smp_init done\n");
     
     power_init();
     
     vring_init();
     kproc_init();
     kproc_print_init();
-    printf("VRING: Virtual rings initialized (ring 0.1 = kprint, PID -1)\n");
+    if (debug_boot_hw) printf("VRING: Virtual rings initialized (ring 0.1 = kprint, PID -1)\n");
     
     console_writer_init();
-    printf("CONSOLE: Async writer thread started\n");
+    if (debug_boot_hw) printf("CONSOLE: Async writer thread started\n");
     
     pit_init(1000);
     calibrate_pit();
+
+    if (lapic_base) {
+        lapic_timer_init(1000);
+        ioapic_mask_irq(0);
+        printf("TIMER: LAPIC timer active at 1000 Hz (PIT masked)\n");
+    } else {
+        printf("TIMER: PIT active at 1000 Hz (no LAPIC)\n");
+    }
+
     rng_init();
     keyboard_init();
     syscall_init();
 
-    terminal_writestring("PIC master mask: 0x");
-    master_mask = inb(0x21);
-    print_hex(master_mask);
-    terminal_writestring("\nPIC slave mask: 0x");
-    slave_mask = inb(0xA1);
-    print_hex(slave_mask);
-    terminal_writestring("\n");
+    if (debug_boot_hw) {
+        terminal_writestring("PIC master mask: 0x");
+        master_mask = inb(0x21);
+        print_hex(master_mask);
+        terminal_writestring("\nPIC slave mask: 0x");
+        slave_mask = inb(0xA1);
+        print_hex(slave_mask);
+        terminal_writestring("\n");
+    }
 
     if (ahci_init() == 0) {
         printf("AHCI SATA driver initialized successfully\n");
@@ -436,6 +466,32 @@ void kernel_main(void) {
                 devname[3] = '\0';
                 devfs_register_blockdev(devname, pi);
                 printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
+
+                if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
+                    printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
+                           ptable.count, devname,
+                           ptable.is_gpt ? "GPT" : "MBR");
+                    for (pk = 0; pk < ptable.count; pk++) {
+                        partname[0] = 's';
+                        partname[1] = 'd';
+                        partname[2] = (char)('a' + j);
+                        if (ptable.parts[pk].part_number >= 10) {
+                            partname[3] = '0' + (ptable.parts[pk].part_number / 10);
+                            partname[4] = '0' + (ptable.parts[pk].part_number % 10);
+                            partname[5] = '\0';
+                        } else {
+                            partname[3] = '0' + ptable.parts[pk].part_number;
+                            partname[4] = '\0';
+                        }
+                        devfs_register_partition(partname, pi,
+                                                 ptable.parts[pk].start_lba,
+                                                 ptable.parts[pk].sector_count);
+                        printf("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
+                               partname,
+                               (unsigned long long)ptable.parts[pk].start_lba,
+                               (unsigned long long)ptable.parts[pk].sector_count);
+                    }
+                }
                 j++;
             }
         }
@@ -463,17 +519,17 @@ void kernel_main(void) {
         }
     }
 
-    terminal_writestring("About to execute STI...\n");
+    if (debug_boot_hw) terminal_writestring("About to execute STI...\n");
     asm volatile ("sti");
-    terminal_writestring("STI completed! Interrupts enabled.\n");
+    if (debug_boot_hw) terminal_writestring("STI completed! Interrupts enabled.\n");
 
     kprint_enable();
 
     extern void watchdog_init(void);
     watchdog_init();
 
-    printf("heap: verify before launching init\n");
-    heap_verify();
+    if (debug_memory) printf("heap: verify before launching init\n");
+    if (debug_memory) heap_verify();
     slab_gc();
 
     init_task = launch_user_path(cmdline_get_init(), 0);
@@ -482,8 +538,8 @@ void kernel_main(void) {
         sleep_ticks(5000);
         init_task = launch_user_path(cmdline_get_init(), 0);
     }
-    printf("heap: verify after launch attempt\n");
-    heap_verify();
+    if (debug_memory) printf("heap: verify after launch attempt\n");
+    if (debug_memory) heap_verify();
     if (!init_task) {
         printf("FATAL: /sbin/init not found. System halted.\n");
         for (;;)
@@ -493,16 +549,20 @@ void kernel_main(void) {
     printf("Init launched: task_id=%u is_user=%d state=%d on console 0\n",
            init_task->id, init_task->is_user, init_task->state);
 
-    t = ready_queue_head;
-    printf("Run queue: ");
-    if (t) {
-        start = t;
-        do {
-            printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
-            t = t->next;
-        } while (t && t != start);
+    if (debug_boot_hw) {
+        t = ready_queue_head;
+        printf("Run queue: ");
+        if (t) {
+            start = t;
+            do {
+                printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
+                t = t->next;
+            } while (t && t != start);
+        }
+        printf("\n");
     }
-    printf("\n");
+
+    sleep_ticks(50);
 
     yield();
 

@@ -43,7 +43,7 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
         return -1;
     }
 
-    uint64_t lba = block * fs->sectors_per_block;
+    uint64_t lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
     if (ahci_read_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
@@ -58,7 +58,7 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
         return -1;
     }
 
-    uint64_t lba = block * fs->sectors_per_block;
+    uint64_t lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
     if (ahci_write_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;

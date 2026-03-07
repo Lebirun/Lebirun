@@ -1,2 +1,2 @@
-wolfssl/** linguist-vendored=true
-lib/ncurses-*/** linguist-vendored=true
+kernel/wolfssl/** linguist-vendored=true
+libc/lib/ncurses-*/** linguist-vendored=true

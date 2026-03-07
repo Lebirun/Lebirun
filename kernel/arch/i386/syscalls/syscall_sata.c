@@ -58,9 +58,15 @@ static int sys_sata_irq(int enable, const char *unused2, int unused3) {
     return 0;
 }
 
+static int sys_blockdev_rescan(int devname_ptr, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    return devfs_rescan_partitions((const char *)(uintptr_t)devname_ptr);
+}
+
 void syscalls_sata_init(void) {
     syscall_table[SYSCALL_SATA_TEST] = sys_sata_test;
     syscall_table[SYSCALL_SATA_INFO] = sys_sata_info;
     syscall_table[SYSCALL_SATA_SMART] = sys_sata_smart;
     syscall_table[SYSCALL_SATA_IRQ] = sys_sata_irq;
+    syscall_table[SYSCALL_BLOCKDEV_RESCAN] = sys_blockdev_rescan;
 }

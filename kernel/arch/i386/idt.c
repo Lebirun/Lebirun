@@ -732,11 +732,6 @@ void idt_init(void)
     }
 
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
-
-    outb(0x3F8, 'I');
-    outb(0x3F8, 'D');
-    outb(0x3F8, 'T');
-    outb(0x3F8, '\n');
 }
 
 void idt_load(void) {

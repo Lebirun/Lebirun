@@ -6,6 +6,7 @@
 
 #include <kernel/vring.h>
 #include <kernel/console.h>
+#include <kernel/pit.h>
 
 extern void terminal_putchar(char c);
 
@@ -487,10 +488,17 @@ int sprintf(char* buf, const char* format, ...) {
 	return ret;
 }
 
+static int kprint_at_line_start = 1;
+
 int printf(const char* format, ...) {
 	va_list ap;
 	char buf[1024];
+	char prefix[24];
 	int len;
+	int plen;
+	uint64_t us;
+	uint32_t secs;
+	uint32_t frac;
 
 	if (!format) return -1;
 	va_start(ap, format);
@@ -498,6 +506,20 @@ int printf(const char* format, ...) {
 	va_end(ap);
 	if (len <= 0) return len;
 	if ((size_t)len >= sizeof(buf)) len = (int)sizeof(buf) - 1;
+
+	if (kprint_at_line_start) {
+		us = pit_get_uptime_us();
+		secs = (uint32_t)(us / 1000000);
+		frac = (uint32_t)(us % 1000000);
+		plen = snprintf(prefix, sizeof(prefix), "[%5u.%06u] ", secs, frac);
+		if (plen > 0 && (size_t)(len + plen) < sizeof(buf)) {
+			memmove(buf + plen, buf, (size_t)len);
+			memcpy(buf, prefix, (size_t)plen);
+			len += plen;
+		}
+	}
+
 	kprint(buf, (size_t)len);
+	kprint_at_line_start = (len > 0 && buf[len - 1] == '\n') ? 1 : 0;
 	return len;
 }

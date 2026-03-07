@@ -61,6 +61,7 @@ uint32_t lapic_get_id(void);
 void lapic_send_ipi(uint32_t apic_id, uint32_t vector);
 void ioapic_init(void);
 void ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id);
+void ioapic_mask_irq(uint8_t irq);
 void smp_start_aps(void);
 int smp_processor_id(void);
 void lapic_timer_init(uint32_t freq_hz);

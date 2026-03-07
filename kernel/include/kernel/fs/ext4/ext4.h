@@ -33,6 +33,7 @@ typedef struct {
 
 typedef struct ext4_fs {
     uint32_t port_index;
+    uint64_t partition_start_lba;
     ext4_superblock_t sb;
     uint32_t block_size;
     uint32_t inodes_per_block;

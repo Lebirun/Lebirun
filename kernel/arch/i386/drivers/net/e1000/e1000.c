@@ -358,7 +358,6 @@ e1000_device_t *e1000_get_device(void) {
 }
 
 void e1000_print_status(e1000_device_t *dev) {
-    printf("=== E1000 Status ===\n");
     printf("PCI: %u:%u.%u\n", dev->pci_bus, dev->pci_slot, dev->pci_func);
     printf("Device ID: 0x%04X\n", dev->device_id);
     printf("BAR0: 0x%08X (type %u)\n", dev->bar0, dev->bar_type);

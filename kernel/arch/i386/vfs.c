@@ -5,6 +5,7 @@
 #include <kernel/debug.h>
 #include <kernel/mem_map.h>
 #include <kernel/ramfs.h>
+#include <kernel/drivers/sata/ahci.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -161,6 +162,51 @@ vfs_fs_type_t *vfs_find_fs(const char *name) {
     return NULL;
 }
 
+static const char *vfs_detect_fs(const char *device) {
+    vfs_node_t *dev_node;
+    uint32_t port_idx;
+    uint64_t part_start;
+    ahci_port_t *port;
+    uint8_t *buf;
+    uint16_t ext_magic;
+
+    extern uint64_t devfs_get_partition_start(vfs_node_t *node);
+
+    if (!device || device[0] == '\0')
+        return NULL;
+
+    dev_node = vfs_namei(device);
+    if (!dev_node)
+        return NULL;
+    if ((dev_node->flags & VFS_TYPE_MASK) != VFS_BLOCKDEVICE)
+        return NULL;
+
+    port_idx = dev_node->inode;
+    part_start = devfs_get_partition_start(dev_node);
+
+    port = ahci_get_port(port_idx);
+    if (!port)
+        return NULL;
+
+    buf = (uint8_t *)kmalloc(4096);
+    if (!buf)
+        return NULL;
+
+    if (ahci_read_sectors(port, part_start, 8, buf) != 0) {
+        kfree(buf);
+        return NULL;
+    }
+
+    ext_magic = *(uint16_t *)(buf + 1024 + 56);
+    if (ext_magic == 0xEF53) {
+        kfree(buf);
+        return "ext4";
+    }
+
+    kfree(buf);
+    return NULL;
+}
+
 int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint32_t flags) {
     vfs_node_t *existing;
     vfs_node_t *parent_node;
@@ -174,10 +220,36 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     size_t n;
     size_t di;
     char parent_path[VFS_MAX_PATH];
+    const char *detected_fs;
     
     
     if (!mountpoint || !fs_type) {
         return -1;
+    }
+
+    for (i = 0; i < mounts_capacity; i++) {
+        if (mounts[i].in_use) {
+            if (device && device[0] != '\0' && strcmp(mounts[i].device, device) == 0) {
+                printf("[VFS] %s is already mounted on %s\n", device, mounts[i].path);
+                return -1;
+            }
+            if (strcmp(mounts[i].path, mountpoint) == 0) {
+                printf("[VFS] %s already has a filesystem mounted\n", mountpoint);
+                return -1;
+            }
+        }
+    }
+
+    if (strcmp(fs_type, "auto") == 0) {
+        detected_fs = vfs_detect_fs(device);
+        if (!detected_fs) {
+            printf("[VFS] Auto-detect: no recognized filesystem on %s\n",
+                   device ? device : "(none)");
+            return -1;
+        }
+        printf("[VFS] Auto-detect: detected %s on %s\n", detected_fs,
+               device ? device : "(none)");
+        fs_type = detected_fs;
     }
     
     fs = vfs_find_fs(fs_type);

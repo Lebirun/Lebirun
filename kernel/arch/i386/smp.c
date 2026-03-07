@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
+
+extern bool debug_boot_hw;
 
 #define LAPIC_VIRT_BASE     0xFEE00000u
 #define IOAPIC_VIRT_BASE    0xFEC00000u
@@ -290,6 +293,20 @@ void ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id) {
     ioapic_write(reg, redtbl_lo);
 }
 
+void ioapic_mask_irq(uint8_t irq) {
+    uint32_t reg;
+    uint32_t lo;
+    uint32_t gsi;
+
+    gsi = irq_to_gsi(irq);
+    if (gsi > ioapic_max_redir) return;
+
+    reg = IOAPIC_REG_REDTBL + gsi * 2;
+    lo = ioapic_read(reg);
+    lo |= (1 << 16);
+    ioapic_write(reg, lo);
+}
+
 static void pic_disable(void) {
     outb(0xA1, 0xFF);
     outb(0x21, 0xFF);
@@ -500,7 +517,7 @@ void smp_init(void) {
     int i;
     int found;
 
-    printf("[SMP] find_acpi_tables...\n");
+    if (debug_boot_hw) printf("[SMP] find_acpi_tables...\n");
     find_acpi_tables();
 
     if (cpu_count == 0) {
@@ -513,7 +530,7 @@ void smp_init(void) {
 
     printf("SMP: Found %d CPU(s)\n", cpu_count);
 
-    printf("[SMP] lapic_init...\n");
+    if (debug_boot_hw) printf("[SMP] lapic_init...\n");
     lapic_init();
 
     bsp_apic_id = lapic_get_id();
@@ -524,7 +541,7 @@ void smp_init(void) {
             cpus[i].active = 1;
             found = 1;
         }
-        printf("  CPU %d: LAPIC ID %u%s\n", i, cpus[i].lapic_id,
+        if (debug_boot_hw) printf("  CPU %d: LAPIC ID %u%s\n", i, cpus[i].lapic_id,
                cpus[i].bsp ? " (BSP)" : "");
     }
 
@@ -536,9 +553,9 @@ void smp_init(void) {
         cpu_count++;
     }
 
-    printf("[SMP] ioapic_init...\n");
+    if (debug_boot_hw) printf("[SMP] ioapic_init...\n");
     ioapic_init();
-    printf("[SMP] pic_disable...\n");
+    if (debug_boot_hw) printf("[SMP] pic_disable...\n");
     pic_disable();
 
     ioapic_route_irq(0, 32, bsp_apic_id);

@@ -22,8 +22,8 @@ static volatile uint32_t print_queue_head = 0;
 static volatile uint32_t print_queue_tail = 0;
 static volatile uint32_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 8
-#define KLOG_MAX_LEN   64
+#define KLOG_MAX_ITEMS 32
+#define KLOG_MAX_LEN   128
 
 typedef struct {
     uint16_t len;
@@ -37,8 +37,8 @@ static volatile uint32_t klog_tail = 0;
 static volatile uint32_t klog_count = 0;
 static volatile uint32_t klog_dropped = 0;
 
-#define KPRINT_MAX_ITEMS 16
-#define KPRINT_MAX_LEN   96
+#define KPRINT_MAX_ITEMS 64
+#define KPRINT_MAX_LEN   128
 
 typedef struct {
     uint16_t len;

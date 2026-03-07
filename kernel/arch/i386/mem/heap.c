@@ -727,7 +727,6 @@ void heap_dump(void) {
     heap_block_t *block;
     uint32_t count;
     
-    printf("=== Heap Dump ===\n");
     printf("Start: 0x%08X  End: 0x%08X  Max: 0x%08X\n",
            kernel_heap.start_addr, kernel_heap.end_addr, kernel_heap.max_addr);
     printf("Total: %u KB  Used: %u KB  Free: %u KB\n",
@@ -744,7 +743,6 @@ void heap_dump(void) {
         block = block->next;
         count++;
     }
-    printf("=================\n");
 }
 
 uint32_t heap_free_space(void) {

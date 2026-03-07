@@ -319,8 +319,6 @@ void keyboard_init(void) {
     uint8_t master_mask = inb(0x21);
     master_mask &= ~(1 << 1);
     outb(0x21, master_mask);
-
-    terminal_writestring("Keyboard initialized.\n");
 }
 
 void keyboard_process_sigint(void)

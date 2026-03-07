@@ -23,4 +23,9 @@ subcategory "Debug" {
     subcategory "Drivers" can-toggle=enable {
         item type=bool name="Driver Debug" default=disable id=DEBUG_DRIVER help="Debug device drivers (AHCI, keyboard, etc.)"
     }
+    subcategory "Boot" can-toggle=enable {
+        item type=bool name="Boot VFS Debug" default=disable id=DEBUG_BOOT_VFS help="Show VFS/filesystem init steps during boot"
+        item type=bool name="Boot Modules Debug" default=disable id=DEBUG_BOOT_MODULES help="Show multiboot module info during boot"
+        item type=bool name="Boot Hardware Debug" default=disable id=DEBUG_BOOT_HW help="Show paging/PIC/SMP hardware init during boot"
+    }
 }
