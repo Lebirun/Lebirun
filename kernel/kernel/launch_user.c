@@ -241,16 +241,9 @@ task_t* launch_user_path(const char *path, int console_id) {
 
     if (!path || path[0] == '\0') return NULL;
 
-    printf("launch_user_path: looking up '%s'\n", path);
     node = vfs_namei(path);
     if (!node) {
         printf("launch_user_path: '%s' not found (vfs_namei returned NULL)\n", path);
-        vfs_node_t *bin = vfs_namei("/bin");
-        if (bin) {
-            printf("launch_user_path: /bin exists (node=%p)\n", bin);
-        } else {
-            printf("launch_user_path: /bin also not found!\n");
-        }
         return NULL;
     }
 

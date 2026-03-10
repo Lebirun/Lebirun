@@ -128,8 +128,12 @@ void kernel_main(void) {
     partition_table_t ptable;
     int pk;
     task_t *init_task;
+    squashfs_context_t *sqctx;
     task_t *t;
     task_t *start;
+    const char *root_dev;
+    vfs_node_t *ext4_root;
+    int ahci_done;
 
     gdt_init();
     idt_init();
@@ -258,6 +262,7 @@ void kernel_main(void) {
         printf("\n");
     }
 
+    ahci_done = 0;
     if (mb->mods_count > 0 && mb->mods_addr) {
         mods_start_page = mb->mods_addr & ~0xFFF;
         mods_end_page = (mb->mods_addr + mb->mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
@@ -283,8 +288,6 @@ void kernel_main(void) {
             }
         }
 
-        initrd_init(1, mb->mods_addr);
-        initrd_list_files();
         vfs_init();
         if (debug_boot_vfs) printf("[KERNEL] After vfs_init\n");
         initrd_vfs_register();
@@ -295,6 +298,7 @@ void kernel_main(void) {
         if (debug_boot_vfs) printf("[KERNEL] After squashfs_vfs_register\n");
         overlayfs_vfs_register();
         if (debug_boot_vfs) printf("[KERNEL] After overlayfs_vfs_register\n");
+        tmpfs_vfs_register();
 
         use_squashfs = 0;
         squashfs_root = NULL;
@@ -308,8 +312,8 @@ void kernel_main(void) {
             printf("[KERNEL] Failed to mount ramfs as root\n");
         }
 
-        if (mb->mods_count >= 2) {
-            mod1 = modarr[1];
+        if (mb->mods_count > 0) {
+            mod1 = modarr[0];
             squashfs_init(mod1.mod_start, mod1.mod_end);
             mount_ret = vfs_mount(NULL, "/squashfs", "squashfs");
             if (mount_ret == 0) {
@@ -332,7 +336,7 @@ void kernel_main(void) {
             ramfs_upper = vfs_get_root();
             overlay_ctx = overlayfs_create(squashfs_root, ramfs_upper);
             if (overlay_ctx && overlay_ctx->merged_root) {
-                vfs_replace_mount_root("/", overlay_ctx->merged_root);
+                vfs_replace_mount_root("/", overlay_ctx->merged_root, NULL, NULL);
                 printf("[KERNEL] OverlayFS active: squashfs (lower) + ramfs (upper) on /\n");
             }
         } else {
@@ -343,7 +347,7 @@ void kernel_main(void) {
                     ramfs_upper = vfs_get_root();
                     overlay_ctx = overlayfs_create(initrd_root, ramfs_upper);
                     if (overlay_ctx && overlay_ctx->merged_root) {
-                        vfs_replace_mount_root("/", overlay_ctx->merged_root);
+                        vfs_replace_mount_root("/", overlay_ctx->merged_root, NULL, NULL);
                         printf("[KERNEL] OverlayFS active: initrd (lower) + ramfs (upper) on /\n");
                     }
                 }
@@ -362,6 +366,7 @@ void kernel_main(void) {
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
         vfs_mount(NULL, "/sys", "sysfs");
+        vfs_mount(NULL, "/tmp", "tmpfs");
 
         if (use_squashfs) {
             if (debug_boot_vfs) printf("[BOOT] vfs_block_squashfs_access...\n");
@@ -370,11 +375,113 @@ void kernel_main(void) {
 
         if (debug_boot_vfs) printf("[BOOT] ramfs_internalize_all...\n");
         ramfs_internalize_all();
-        if (debug_boot_vfs) printf("[BOOT] initrd_free_pages...\n");
-        initrd_free_pages();
-        if (debug_boot_vfs) printf("[BOOT] initrd_free_pages done\n");
+
+        sqctx = squashfs_get_context();
+        if (sqctx && sqctx->base && sqctx->size > 0) {
+            ramfs_create_dir("/boot", VFS_PERM_READ | VFS_PERM_EXEC);
+            ramfs_create_file("/boot/rootfs.squashfs", VFS_PERM_READ);
+            ramfs_set_backing("/boot/rootfs.squashfs", sqctx->base, sqctx->size);
+            printf("[BOOT] Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
+        }
+
+        if (debug_boot_vfs) printf("[BOOT] boot file export done\n");
     } else {
-        printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
+        root_dev = cmdline_get_root();
+        if (root_dev) {
+            printf("[BOOT] Installed mode: root=%s\n", root_dev);
+
+            vfs_init();
+            initrd_vfs_register();
+            ramfs_vfs_register();
+            squashfs_vfs_register();
+            overlayfs_vfs_register();
+            tmpfs_vfs_register();
+
+            mount_ret = vfs_mount(NULL, "/", "ramfs");
+            if (mount_ret != 0) {
+                printf("[BOOT] Failed to mount ramfs as root\n");
+            }
+
+            procfs_init();
+            devfs_init();
+            sysfs_init();
+
+            vfs_mount(NULL, "/dev", "devfs");
+
+            ext4_init();
+            ext4_vfs_register();
+
+            ahci_done = 0;
+            if (ahci_init() == 0) {
+                ahci_done = 1;
+                printf("AHCI SATA driver initialized successfully\n");
+
+                j = 0;
+                for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
+                    port = ahci_get_port(pi);
+                    if (port) {
+                        devname[0] = 's';
+                        devname[1] = 'd';
+                        devname[2] = (char)('a' + j);
+                        devname[3] = '\0';
+                        devfs_register_blockdev(devname, pi);
+                        printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
+
+                        if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
+                            printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
+                                   ptable.count, devname,
+                                   ptable.is_gpt ? "GPT" : "MBR");
+                            for (pk = 0; pk < ptable.count; pk++) {
+                                partname[0] = 's';
+                                partname[1] = 'd';
+                                partname[2] = (char)('a' + j);
+                                if (ptable.parts[pk].part_number >= 10) {
+                                    partname[3] = '0' + (ptable.parts[pk].part_number / 10);
+                                    partname[4] = '0' + (ptable.parts[pk].part_number % 10);
+                                    partname[5] = '\0';
+                                } else {
+                                    partname[3] = '0' + ptable.parts[pk].part_number;
+                                    partname[4] = '\0';
+                                }
+                                devfs_register_partition(partname, pi,
+                                                         ptable.parts[pk].start_lba,
+                                                         ptable.parts[pk].sector_count);
+                                printf("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
+                                       partname,
+                                       (unsigned long long)ptable.parts[pk].start_lba,
+                                       (unsigned long long)ptable.parts[pk].sector_count);
+                            }
+                        }
+                        j++;
+                    }
+                }
+            } else {
+                printf("AHCI SATA driver not available\n");
+            }
+
+            ext4_root = NULL;
+            if (ahci_done) {
+                mount_ret = vfs_mount(root_dev, "/mnt", "ext4");
+                if (mount_ret == 0) {
+                    ext4_root = vfs_namei("/mnt");
+                }
+            }
+
+            if (ext4_root) {
+                vfs_replace_mount_root("/", ext4_root, root_dev, "ext4");
+                vfs_remove_mount("/mnt");
+                ext4_root->name[0] = '\0';
+                printf("[BOOT] ext4 root mounted from %s\n", root_dev);
+            } else {
+                printf("[BOOT] FATAL: failed to mount ext4 root %s\n", root_dev);
+            }
+
+            vfs_mount(NULL, "/proc", "procfs");
+            vfs_mount(NULL, "/sys", "sysfs");
+            vfs_mount(NULL, "/tmp", "tmpfs");
+        } else {
+            printf("No multiboot modules present (mods_count=%u)\n", mb->mods_count);
+        }
     }
 
     mutex_init(&print_lock);
@@ -450,7 +557,7 @@ void kernel_main(void) {
         terminal_writestring("\n");
     }
 
-    if (ahci_init() == 0) {
+    if (!ahci_done && ahci_init() == 0) {
         printf("AHCI SATA driver initialized successfully\n");
         
         ext4_init();
@@ -495,7 +602,7 @@ void kernel_main(void) {
                 j++;
             }
         }
-    } else {
+    } else if (!ahci_done) {
         printf("AHCI SATA driver not available (no controller found)\n");
     }
 

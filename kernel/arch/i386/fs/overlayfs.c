@@ -11,8 +11,8 @@ static int overlay_initialized = 0;
 static vfs_fs_type_t overlay_fs_type;
 static dirent_t overlay_dirent;
 
-static uint32_t overlay_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
-static uint32_t overlay_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+static uint64_t overlay_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static void overlay_vfs_open(vfs_node_t *node, uint32_t flags);
 static void overlay_vfs_close(vfs_node_t *node);
 static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint32_t index);
@@ -20,7 +20,7 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name);
 static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags);
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
 static int overlay_vfs_unlink(vfs_node_t *parent, const char *name);
-static int overlay_vfs_truncate(vfs_node_t *node, uint32_t length);
+static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length);
 
 static int overlay_is_whiteout(const char *name) {
     return strncmp(name, OVERLAY_WHITEOUT_PREFIX, 4) == 0;
@@ -168,7 +168,7 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
     return 0;
 }
 
-static uint32_t overlay_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     overlay_node_t *onode;
     vfs_node_t *effective;
 
@@ -183,7 +183,7 @@ static uint32_t overlay_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return vfs_read(effective, offset, size, buffer);
 }
 
-static uint32_t overlay_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t overlay_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     overlay_node_t *onode;
     char path[VFS_MAX_PATH];
 
@@ -230,7 +230,7 @@ static void overlay_vfs_close(vfs_node_t *node) {
     if (effective) vfs_close(effective);
 }
 
-static int overlay_vfs_truncate(vfs_node_t *node, uint32_t length) {
+static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     overlay_node_t *onode;
     char path[VFS_MAX_PATH];
 

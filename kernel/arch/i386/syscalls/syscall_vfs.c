@@ -1,5 +1,7 @@
 #include "syscall_defs.h"
 #include <kernel/ramfs.h>
+#include <kernel/fs/ext4/ext4.h>
+#include <kernel/mem_map.h>
 
 static int task_fd_alloc_from(int start) {
     int i;
@@ -413,12 +415,72 @@ struct statfs_kernel {
 #define DEVFS_MAGIC     0x1373
 
 static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
-    memset(buf, 0, sizeof(struct statfs_kernel));
-    
+    int mount_count;
+    int i;
+    vfs_mount_t *mount;
+    vfs_mount_t *best;
+    size_t best_len;
+    size_t mlen;
+    const char *fsname;
+
     extern int ramfs_get_stats(ramfs_stats_t *stats);
-    
-    if (path[0] == '/' && (path[1] == '\0' || 
-        (path[1] == 't' && path[2] == 'm' && path[3] == 'p'))) {
+
+    memset(buf, 0, sizeof(struct statfs_kernel));
+    buf->f_namelen = 255;
+
+    best = NULL;
+    best_len = 0;
+    mount_count = vfs_get_mount_count();
+    for (i = 0; i < mount_count; i++) {
+        mount = vfs_get_mount(i);
+        if (!mount) continue;
+        mlen = strlen(mount->path);
+        if (strncmp(path, mount->path, mlen) == 0 &&
+            (path[mlen] == '\0' || path[mlen] == '/' ||
+             (mlen == 1 && mount->path[0] == '/'))) {
+            if (mlen > best_len) {
+                best = mount;
+                best_len = mlen;
+            }
+        }
+    }
+
+    fsname = (best && best->fs_type && best->fs_type->name) ? best->fs_type->name : "";
+
+    if (strcmp(fsname, "ext4") == 0) {
+        uint64_t total_blocks, free_blocks;
+        uint32_t bsize;
+        if (ext4_get_stats(&total_blocks, &free_blocks, &bsize) == 0) {
+            buf->f_type = EXT4_MAGIC;
+            buf->f_bsize = bsize;
+            buf->f_frsize = bsize;
+            buf->f_blocks = total_blocks;
+            buf->f_bfree = free_blocks;
+            buf->f_bavail = free_blocks;
+            buf->f_files = 1024;
+            buf->f_ffree = 512;
+            return;
+        }
+    }
+
+    if (strcmp(fsname, "tmpfs") == 0) {
+        uint32_t total_kb;
+        uint32_t free_kb;
+        total_kb = pfa_get_usable_ram_kb() / 2;
+        free_kb = pfa_count_free() * 4;
+        if (free_kb > total_kb) free_kb = total_kb;
+        buf->f_type = RAMFS_MAGIC;
+        buf->f_bsize = 4096;
+        buf->f_frsize = 4096;
+        buf->f_blocks = (uint64_t)total_kb * 1024 / 4096;
+        buf->f_bfree = (uint64_t)free_kb * 1024 / 4096;
+        buf->f_bavail = buf->f_bfree;
+        buf->f_files = 1024;
+        buf->f_ffree = 1024;
+        return;
+    }
+
+    if (strcmp(fsname, "ramfs") == 0 || strcmp(fsname, "overlayfs") == 0) {
         ramfs_stats_t rs;
         if (ramfs_get_stats(&rs) == 0) {
             buf->f_type = RAMFS_MAGIC;
@@ -429,52 +491,52 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
             buf->f_bavail = buf->f_bfree;
             buf->f_files = rs.file_count + rs.dir_count + 1000;
             buf->f_ffree = 1000;
-            buf->f_namelen = 255;
             return;
         }
     }
-    
-    if (path[0] == '/' && path[1] == 'p' && path[2] == 'r' && 
-        path[3] == 'o' && path[4] == 'c') {
+
+    if (strcmp(fsname, "procfs") == 0) {
         buf->f_type = PROCFS_MAGIC;
-        buf->f_bsize = 1024;
-        buf->f_frsize = 1024;
-        buf->f_blocks = 1024;
-        buf->f_bfree = 1024;
-        buf->f_bavail = 1024;
-        buf->f_files = 128;
-        buf->f_ffree = 1;
-        buf->f_namelen = 255;
+        buf->f_bsize = 4096;
+        buf->f_frsize = 4096;
+        buf->f_blocks = 0;
+        buf->f_bfree = 0;
+        buf->f_bavail = 0;
         return;
     }
-    
-    if (path[0] == '/' && path[1] == 'd' && path[2] == 'e' && path[3] == 'v') {
+
+    if (strcmp(fsname, "devfs") == 0) {
         buf->f_type = DEVFS_MAGIC;
-        buf->f_bsize = 1024;
-        buf->f_frsize = 1024;
-        buf->f_blocks = 512;
-        buf->f_bfree = 512;
-        buf->f_bavail = 512;
-        buf->f_files = 32;
-        buf->f_ffree = 1;
-        buf->f_namelen = 255;
+        buf->f_bsize = 4096;
+        buf->f_frsize = 4096;
+        buf->f_blocks = 0;
+        buf->f_bfree = 0;
+        buf->f_bavail = 0;
         return;
     }
-    
-    buf->f_type = RAMFS_MAGIC;
+
+    if (strcmp(fsname, "sysfs") == 0) {
+        buf->f_type = 0x62656572;
+        buf->f_bsize = 4096;
+        buf->f_frsize = 4096;
+        buf->f_blocks = 0;
+        buf->f_bfree = 0;
+        buf->f_bavail = 0;
+        return;
+    }
+
+    buf->f_type = 0;
     buf->f_bsize = 4096;
     buf->f_frsize = 4096;
-    buf->f_blocks = 1024;
-    buf->f_bfree = 768;
-    buf->f_bavail = 768;
-    buf->f_files = 256;
-    buf->f_ffree = 200;
-    buf->f_namelen = 255;
+    buf->f_blocks = 0;
+    buf->f_bfree = 0;
+    buf->f_bavail = 0;
 }
 
-static int sys_statfs(int path_ptr, const char *buf_ptr, int size) {
+static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
     uint32_t path_addr = (uint32_t)path_ptr;
-    uint32_t buf_addr = (uint32_t)buf_ptr;
+    int size = (int)(uintptr_t)size_ptr;
+    uint32_t buf_addr = (uint32_t)buf_ptr_int;
     const char *path;
     struct statfs_kernel *buf;
 
@@ -497,8 +559,9 @@ static int sys_statfs(int path_ptr, const char *buf_ptr, int size) {
     return 0;
 }
 
-static int sys_fstatfs(int fd, const char *buf_ptr, int size) {
-    uint32_t buf_addr = (uint32_t)buf_ptr;
+static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
+    int size = (int)(uintptr_t)size_ptr;
+    uint32_t buf_addr = (uint32_t)buf_ptr_int;
     struct statfs_kernel *buf;
 
     if (!current_task) return -ESRCH;

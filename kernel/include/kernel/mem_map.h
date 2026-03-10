@@ -194,6 +194,7 @@ void slab_free(void *ptr);
 void slab_gc(void);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
+size_t slab_alloc_size(void *ptr);
 void slab_stats(void);
 uint32_t slab_get_total_pages(void);
 

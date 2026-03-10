@@ -6,7 +6,7 @@ mkdir -p "$SYSROOT"
 
 for PROJECT in $SYSTEM_HEADER_PROJECTS; do
   if [ -d "$PROJECT" ]; then
-    echo "Installing headers for $PROJECT..."
+    printf "\033[1;36mInstalling headers for %s...\033[0m\n" "$PROJECT"
     if [ "$PROJECT" = "libc" ]; then
       (cd "$PROJECT" && DESTDIR="$SYSROOT" ARCH=i386 $MAKE install-headers)
     else

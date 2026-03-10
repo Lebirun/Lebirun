@@ -255,6 +255,9 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     uint32_t buf_addr;
     struct kernel_stat *st;
     int pty_fd;
+    uint64_t size;
+    uint32_t flags;
+    int ret;
 
     (void)unused;
     buf_addr = (uint32_t)(uintptr_t)buf_ptr;
@@ -318,8 +321,9 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
         }
     }
     
-    uint32_t size = 0, flags = 0;
-    int ret = vfs_stat_fd(fd, &size, &flags);
+    size = 0;
+    flags = 0;
+    ret = vfs_stat_fd(fd, &size, &flags);
     if (ret < 0) return -EBADF;
     st->st_dev = 1;
     st->st_ino = 1;

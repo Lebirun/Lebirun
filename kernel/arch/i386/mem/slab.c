@@ -345,6 +345,15 @@ size_t slab_max_size(void) {
     return slab_sizes[SLAB_SIZES_COUNT - 1];
 }
 
+size_t slab_alloc_size(void *ptr) {
+    slab_page_t *page;
+
+    if (!ptr || !slab_initialized) return 0;
+    page = (slab_page_t *)((uint32_t)ptr & ~(PAGE_SIZE - 1));
+    if (page->magic != SLAB_MAGIC) return 0;
+    return page->obj_size;
+}
+
 uint32_t slab_get_total_pages(void) {
     int i;
     uint32_t total;

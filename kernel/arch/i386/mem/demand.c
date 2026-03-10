@@ -199,6 +199,25 @@ int demand_commit_page(uint32_t virt_addr) {
     return 0;
 }
 
+void demand_mark_committed(uint32_t virt_addr) {
+    uint32_t page_virt;
+    uint32_t idx;
+    uint32_t eflags;
+
+    if (!demand_initialized) return;
+
+    page_virt = virt_addr & ~(PAGE_SIZE - 1);
+    if (page_virt < demand_base) return;
+    if (page_virt >= demand_base + (demand_max_pages * PAGE_SIZE)) return;
+
+    idx = page_to_index(page_virt);
+
+    demand_lock_acquire(&eflags);
+    set_reserved_bit(idx);
+    set_committed_bit(idx);
+    demand_lock_release(eflags);
+}
+
 int demand_page_fault_handler(uint32_t fault_addr, uint32_t err_code) {
     uint32_t page_virt;
     

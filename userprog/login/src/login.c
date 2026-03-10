@@ -192,6 +192,24 @@ found:
     return 0;
 }
 
+static void show_motd(void)
+{
+    int fd;
+    char buf[512];
+    int r;
+
+    fd = open("/etc/motd", O_RDONLY);
+    if (fd < 0)
+        return;
+    for (;;) {
+        r = read(fd, buf, sizeof(buf));
+        if (r <= 0)
+            break;
+        write(1, buf, r);
+    }
+    close(fd);
+}
+
 static int check_password(const char *password, const char *stored_hash)
 {
     char *result;
@@ -298,6 +316,8 @@ int main(int argc, char **argv)
 
         memset(password, 0, sizeof(password));
         memset(stored_hash, 0, sizeof(stored_hash));
+
+        show_motd();
 
         strcpy(env_home, "HOME=");
         strcat(env_home, home);

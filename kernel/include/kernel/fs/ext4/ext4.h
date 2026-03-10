@@ -97,5 +97,6 @@ int ext4_sync(ext4_fs_t *fs);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);
+int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *block_size);
 
 #endif

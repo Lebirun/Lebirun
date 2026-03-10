@@ -61,27 +61,27 @@ static vfs_node_t sysfs_kernel_mm_hugepages;
 static vfs_node_t sysfs_fs;
 static vfs_node_t sysfs_bus;
 
-static uint32_t sysfs_cpu0_online_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpu0_online_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
 }
 
-static uint32_t sysfs_cpu_online_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpu_online_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
 }
 
-static uint32_t sysfs_cpu_possible_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpu_possible_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
 }
 
-static uint32_t sysfs_cpu_present_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpu_present_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
 }
 
-static uint32_t sysfs_cpu_kernel_max_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpu_kernel_max_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
 }
 
-static uint32_t sysfs_cpufreq_cur_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpufreq_cur_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[32];
     int len;
     uint32_t freq_khz;
@@ -100,7 +100,7 @@ static uint32_t sysfs_cpufreq_cur_read(vfs_node_t *node, uint32_t offset, uint32
     return size;
 }
 
-static uint32_t sysfs_cpufreq_min_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpufreq_min_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[32];
     int len;
     uint32_t freq_khz;
@@ -119,7 +119,7 @@ static uint32_t sysfs_cpufreq_min_read(vfs_node_t *node, uint32_t offset, uint32
     return size;
 }
 
-static uint32_t sysfs_cpufreq_max_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpufreq_max_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[32];
     int len;
     uint32_t freq_khz;
@@ -138,23 +138,23 @@ static uint32_t sysfs_cpufreq_max_read(vfs_node_t *node, uint32_t offset, uint32
     return size;
 }
 
-static uint32_t sysfs_cpufreq_governor_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_cpufreq_governor_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "performance\n", 12);
 }
 
-static uint32_t sysfs_topology_core_id_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_topology_core_id_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
 }
 
-static uint32_t sysfs_topology_phys_pkg_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_topology_phys_pkg_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
 }
 
-static uint32_t sysfs_topology_core_siblings_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_topology_core_siblings_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
 }
 
-static uint32_t sysfs_topology_thread_siblings_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t sysfs_topology_thread_siblings_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
 }
 

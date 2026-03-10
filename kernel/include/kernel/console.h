@@ -43,6 +43,16 @@ typedef struct {
     volatile uint32_t write_tail;
     volatile uint32_t dirty;
     int allocated;
+
+    int alt_screen_active;
+    volatile int alt_screen_pending;
+    char (*alt_saved_buffer)[CONSOLE_BUFFER_COLS];
+    uint8_t (*alt_saved_color)[CONSOLE_BUFFER_COLS];
+    uint8_t *alt_saved_wrapped;
+    uint32_t alt_saved_rows;
+    uint32_t alt_saved_cx;
+    uint32_t alt_saved_cy;
+    uint32_t alt_saved_scroll;
 } console_t;
 
 void console_init(void);
@@ -68,5 +78,6 @@ void console_writer_init(void);
 void console_writer_flush(void);
 void console_tick(void);
 int console_alloc(int n);
+int console_alt_screen_active(int n);
 
 #endif

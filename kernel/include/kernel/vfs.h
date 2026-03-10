@@ -49,8 +49,8 @@ typedef struct dirent {
     uint8_t type;
 } dirent_t;
 
-typedef uint32_t (*read_type_t)(struct vfs_node *, uint32_t offset, uint32_t size, uint8_t *buffer);
-typedef uint32_t (*write_type_t)(struct vfs_node *, uint32_t offset, uint32_t size, uint8_t *buffer);
+typedef uint64_t (*read_type_t)(struct vfs_node *, uint64_t offset, uint64_t size, uint8_t *buffer);
+typedef uint64_t (*write_type_t)(struct vfs_node *, uint64_t offset, uint64_t size, uint8_t *buffer);
 typedef void (*open_type_t)(struct vfs_node *, uint32_t flags);
 typedef void (*close_type_t)(struct vfs_node *);
 typedef struct dirent *(*readdir_type_t)(struct vfs_node *, uint32_t index);
@@ -58,7 +58,7 @@ typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, const char *name);
 typedef int (*create_type_t)(struct vfs_node *parent, const char *name, uint32_t flags);
 typedef int (*unlink_type_t)(struct vfs_node *parent, const char *name);
 typedef int (*mkdir_type_t)(struct vfs_node *parent, const char *name, uint32_t perms);
-typedef int (*truncate_type_t)(struct vfs_node *, uint32_t length);
+typedef int (*truncate_type_t)(struct vfs_node *, uint64_t length);
 typedef int (*rename_type_t)(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint32_t mode);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
@@ -70,7 +70,7 @@ typedef struct vfs_node {
     uint32_t gid;
     uint32_t flags;
     uint32_t inode;
-    uint32_t length;
+    uint64_t length;
     uint32_t impl;
     uint32_t atime;
     uint32_t mtime;
@@ -98,7 +98,7 @@ typedef struct vfs_node {
 
 typedef struct {
     vfs_node_t *node;
-    uint32_t offset;
+    uint64_t offset;
     uint32_t flags;
     int in_use;
 } vfs_fd_t;
@@ -131,9 +131,10 @@ vfs_fs_type_t *vfs_find_fs(const char *name);
 int vfs_mount(const char *device, const char *mountpoint, const char *fs_type);
 int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint32_t flags);
 int vfs_unmount(const char *mountpoint);
+int vfs_remove_mount(const char *mountpoint);
 
-uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
-uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 void vfs_open(vfs_node_t *node, uint32_t flags);
 void vfs_close(vfs_node_t *node);
 
@@ -151,15 +152,15 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 
 int vfs_open_path(const char *path, int flags);
 int vfs_close_fd(int fd);
-int vfs_read_fd(int fd, void *buffer, uint32_t size);
-int vfs_write_fd(int fd, const void *buffer, uint32_t size);
-int vfs_seek(int fd, int32_t offset, int whence);
-int vfs_tell(int fd);
-int vfs_stat_fd(int fd, uint32_t *size, uint32_t *flags);
+int vfs_read_fd(int fd, void *buffer, uint64_t size);
+int vfs_write_fd(int fd, const void *buffer, uint64_t size);
+int64_t vfs_seek(int fd, int64_t offset, int whence);
+int64_t vfs_tell(int fd);
+int vfs_stat_fd(int fd, uint64_t *size, uint32_t *flags);
 int vfs_readdir_fd(int fd, dirent_t *entry, uint32_t index);
 
 vfs_node_t *vfs_get_root(void);
-int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root);
+int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name);
 int vfs_get_mount_count(void);
 vfs_mount_t *vfs_get_mount(int index);
 void vfs_list_mounts(void);

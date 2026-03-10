@@ -22,6 +22,10 @@ static dirent_t root_dirent;
 
 static dirent_t *root_readdir(vfs_node_t *node, uint32_t index);
 static vfs_node_t *root_finddir(vfs_node_t *node, const char *name);
+static int root_create(vfs_node_t *parent, const char *name, uint32_t flags);
+static int root_unlink(vfs_node_t *parent, const char *name);
+static int root_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
+static int root_rename(vfs_node_t *old_parent, const char *old_name, vfs_node_t *new_parent, const char *new_name);
 
 static int vfs_grow_mounts(void) {
     int new_cap;
@@ -70,9 +74,13 @@ void vfs_init(void) {
     memset(&root_node, 0, sizeof(vfs_node_t));
     strcpy(root_node.name, "/");
     root_node.flags = VFS_DIRECTORY;
-    root_node.mask = VFS_PERM_READ | VFS_PERM_EXEC;
+    root_node.mask = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
     root_node.readdir = root_readdir;
     root_node.finddir = root_finddir;
+    root_node.create = root_create;
+    root_node.unlink = root_unlink;
+    root_node.mkdir = root_mkdir;
+    root_node.rename = root_rename;
     root_node.ref_count = 1;
     root_node.parent = NULL;
     
@@ -392,7 +400,26 @@ int vfs_unmount(const char *mountpoint) {
     return -1; 
 }
 
-uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+int vfs_remove_mount(const char *mountpoint) {
+    int i;
+
+    if (!mountpoint) return -1;
+
+    for (i = 0; i < mounts_capacity; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
+            mounts[i].in_use = 0;
+            mounts[i].path[0] = '\0';
+            mounts[i].root = NULL;
+            mounts[i].fs_type = NULL;
+            mounts[i].device[0] = '\0';
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !buffer) return 0;
     
     if (node->read) {
@@ -402,7 +429,7 @@ uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buf
     return 0;
 }
 
-uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !buffer) return 0;
     
     if (node->write) {
@@ -1006,10 +1033,12 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     vfs_node_t *cur = node;
     while (cur && cur != vfs_root) {
         size_t len = strlen(cur->name);
-        pos -= len;
-        if (pos < 1) return NULL;
-        memcpy(&temp[pos], cur->name, len);
-        temp[--pos] = '/';
+        if (len > 0) {
+            pos -= len;
+            if (pos < 1) return NULL;
+            memcpy(&temp[pos], cur->name, len);
+            temp[--pos] = '/';
+        }
         cur = cur->parent;
     }
     
@@ -1150,52 +1179,59 @@ int vfs_close_fd(int fd) {
     return 0;
 }
 
-int vfs_read_fd(int fd, void *buffer, uint32_t size) {
+int vfs_read_fd(int fd, void *buffer, uint64_t size) {
+    uint64_t bytes;
+    vfs_node_t *node;
+
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buffer || size == 0) return -1;
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     if (!node) return -1;
     
-    uint32_t bytes = vfs_read(node, fd_table[fd].offset, size, (uint8_t *)buffer);
+    bytes = vfs_read(node, fd_table[fd].offset, size, (uint8_t *)buffer);
     fd_table[fd].offset += bytes;
     
     return (int)bytes;
 }
 
-int vfs_write_fd(int fd, const void *buffer, uint32_t size) {
+int vfs_write_fd(int fd, const void *buffer, uint64_t size) {
+    uint64_t bytes;
+    vfs_node_t *node;
+
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buffer || size == 0) return -1;
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     if (!node) return -1;
     
-    uint32_t bytes = vfs_write(node, fd_table[fd].offset, size, (uint8_t *)buffer);
+    bytes = vfs_write(node, fd_table[fd].offset, size, (uint8_t *)buffer);
     fd_table[fd].offset += bytes;
     
     return (int)bytes;
 }
 
-int vfs_seek(int fd, int32_t offset, int whence) {
+int64_t vfs_seek(int fd, int64_t offset, int whence) {
+    int64_t new_offset;
+    vfs_node_t *node;
+
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     if (!node) return -1;
-    
-    int32_t new_offset;
     
     switch (whence) {
         case VFS_SEEK_SET:
             new_offset = offset;
             break;
         case VFS_SEEK_CUR:
-            new_offset = (int32_t)fd_table[fd].offset + offset;
+            new_offset = (int64_t)fd_table[fd].offset + offset;
             break;
         case VFS_SEEK_END:
-            new_offset = (int32_t)node->length + offset;
+            new_offset = (int64_t)node->length + offset;
             break;
         default:
             return -1;
@@ -1203,29 +1239,31 @@ int vfs_seek(int fd, int32_t offset, int whence) {
     
     if (new_offset < 0) return -1;
     
-    fd_table[fd].offset = (uint32_t)new_offset;
-    return (int)fd_table[fd].offset;
+    fd_table[fd].offset = (uint64_t)new_offset;
+    return (int64_t)fd_table[fd].offset;
 }
 
-int vfs_tell(int fd) {
+int64_t vfs_tell(int fd) {
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     
-    return (int)fd_table[fd].offset;
+    return (int64_t)fd_table[fd].offset;
 }
 
-int vfs_stat_fd(int fd, uint32_t *size, uint32_t *flags) {
+int vfs_stat_fd(int fd, uint64_t *size, uint32_t *flags) {
+    vfs_node_t *node;
+
     if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     if (!node) return -1;
     
     if (size) *size = node->length;
     if (flags) *flags = node->flags;
     
-    DEBUG_VFS("VFS_STAT: fd=%d node=%p name='%s' length=%u flags=0x%X\n", 
-           fd, node, node->name, node->length, node->flags);
+    DEBUG_VFS("VFS_STAT: fd=%d node=%p name='%s' length=%llu flags=0x%X\n", 
+           fd, node, node->name, (unsigned long long)node->length, node->flags);
     
     return 0;
 }
@@ -1258,7 +1296,7 @@ vfs_node_t *vfs_get_root(void) {
     return vfs_root;
 }
 
-int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root) {
+int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name) {
     int i;
 
     if (!mountpoint || !new_root) return -1;
@@ -1267,6 +1305,12 @@ int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             mounts[i].root = new_root;
             new_root->parent = vfs_root;
+            if (device) {
+                strncpy(mounts[i].device, device, VFS_MAX_PATH - 1);
+                mounts[i].device[VFS_MAX_PATH - 1] = '\0';
+            }
+            if (fs_name)
+                mounts[i].fs_type = vfs_find_fs(fs_name);
             return 0;
         }
     }
@@ -1457,4 +1501,54 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
     }
     
     return NULL;
+}
+
+static vfs_node_t *root_mount_root(void) {
+    int i;
+
+    for (i = 0; i < mounts_capacity; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root)
+            return mounts[i].root;
+    }
+    return NULL;
+}
+
+static int root_create(vfs_node_t *parent, const char *name, uint32_t flags) {
+    vfs_node_t *r;
+
+    (void)parent;
+    r = root_mount_root();
+    if (r && r->create)
+        return r->create(r, name, flags);
+    return -1;
+}
+
+static int root_unlink(vfs_node_t *parent, const char *name) {
+    vfs_node_t *r;
+
+    (void)parent;
+    r = root_mount_root();
+    if (r && r->unlink)
+        return r->unlink(r, name);
+    return -1;
+}
+
+static int root_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) {
+    vfs_node_t *r;
+
+    (void)parent;
+    r = root_mount_root();
+    if (r && r->mkdir)
+        return r->mkdir(r, name, perms);
+    return -1;
+}
+
+static int root_rename(vfs_node_t *old_parent, const char *old_name, vfs_node_t *new_parent, const char *new_name) {
+    vfs_node_t *r;
+
+    (void)old_parent;
+    r = root_mount_root();
+    if (r && r->rename)
+        return r->rename(r, old_name, new_parent, new_name);
+    return -1;
 }

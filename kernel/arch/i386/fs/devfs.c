@@ -76,39 +76,39 @@ static uint32_t lfsr_rand(void) {
     return lfsr_state;
 }
 
-static uint32_t dev_null_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_null_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)size; (void)buffer;
     return 0;
 }
 
-static uint32_t dev_null_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_null_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)buffer;
     return size;
 }
 
-static uint32_t dev_zero_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_zero_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset;
     memset(buffer, 0, size);
     return size;
 }
 
-static uint32_t dev_zero_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_zero_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)buffer;
     return size;
 }
 
-static uint32_t dev_full_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_full_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset;
     memset(buffer, 0, size);
     return size;
 }
 
-static uint32_t dev_full_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_full_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)buffer; (void)size;
     return (uint32_t)-28;
 }
 
-static uint32_t dev_urandom_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     extern volatile uint32_t tick_count;
     uint32_t i;
     
@@ -127,7 +127,7 @@ static uint32_t dev_urandom_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return size;
 }
 
-static uint32_t dev_urandom_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_urandom_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     uint32_t i;
     
     (void)node; (void)offset;
@@ -137,12 +137,12 @@ static uint32_t dev_urandom_write(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t dev_tty_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)size; (void)buffer;
     return 0;
 }
 
-static uint32_t dev_tty_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset;
     extern void console_write_to(int id, const char *buf, size_t len);
     extern int console_get_current(void);
@@ -151,7 +151,7 @@ static uint32_t dev_tty_write(vfs_node_t *node, uint32_t offset, uint32_t size, 
     return size;
 }
 
-static uint32_t dev_ttyN_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_ttyN_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     int tty_num;
 
     (void)offset; (void)size; (void)buffer;
@@ -160,7 +160,7 @@ static uint32_t dev_ttyN_read(vfs_node_t *node, uint32_t offset, uint32_t size, 
     return 0;
 }
 
-static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_ttyN_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     int tty_num;
     extern void console_write_to(int id, const char *buf, size_t len);
 
@@ -170,7 +170,7 @@ static uint32_t dev_ttyN_write(vfs_node_t *node, uint32_t offset, uint32_t size,
     return size;
 }
 
-static uint32_t dev_blockdev_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     devfs_blockdev_t *bdev;
     ahci_port_t *port;
     uint64_t lba;
@@ -215,7 +215,7 @@ static uint32_t dev_blockdev_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return copy_len;
 }
 
-static uint32_t dev_blockdev_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     devfs_blockdev_t *bdev;
     ahci_port_t *port;
     uint64_t lba;
@@ -266,7 +266,7 @@ static uint32_t dev_blockdev_write(vfs_node_t *node, uint32_t offset, uint32_t s
     return size;
 }
 
-static uint32_t dev_initrd_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_initrd_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     uint8_t *base;
     uint32_t total;
     uint32_t avail;
@@ -285,7 +285,7 @@ static uint32_t dev_initrd_read(vfs_node_t *node, uint32_t offset, uint32_t size
     return size;
 }
 
-static uint32_t dev_initrd_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t dev_initrd_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)buffer; (void)size;
     return (uint32_t)-1;
 }

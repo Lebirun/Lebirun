@@ -23,11 +23,11 @@ void ramfs_debug_check_root(const char *location) {
     (void)location;
 }
 
-static uint32_t ramfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
-static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static void ramfs_vfs_open(vfs_node_t *node, uint32_t flags);
 static void ramfs_vfs_close(vfs_node_t *node);
-static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t length);
+static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length);
 static int ramfs_vfs_chmod(vfs_node_t *node, uint32_t mode);
 static int ramfs_vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint32_t index);
@@ -41,8 +41,10 @@ static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn);
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
 
 static void ramfs_init_stats(void) {
+    uint64_t ram_kb;
     if (!ramfs_stats_initialized) {
-        ramfs_stats.total_size = RAMFS_MAX_TOTAL_SIZE;
+        ram_kb = (uint64_t)pfa_get_usable_ram_kb();
+        ramfs_stats.total_size = ram_kb * 1024;
         ramfs_stats.used_size = 0;
         ramfs_stats.file_count = 0;
         ramfs_stats.dir_count = 0;
@@ -196,7 +198,7 @@ static ramfs_node_t *ramfs_find_parent(const char *path, char *out_name, size_t 
     return ramfs_find_node(temp_path);
 }
 
-static int ramfs_check_space(uint32_t size) {
+static int ramfs_check_space(uint64_t size) {
     return (ramfs_stats.used_size + size <= ramfs_stats.total_size);
 }
 
@@ -311,13 +313,8 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
     }
 
     size_t tlen = strlen(target);
-    if (tlen >= RAMFS_MAX_FILE_SIZE) {
-        ramfs_node_unlock(parent);
-        ramfs_unlock();
-        return RAMFS_ERR_NOSPC;
-    }
 
-    if (!ramfs_check_space((uint32_t)tlen)) {
+    if (!ramfs_check_space((uint64_t)tlen)) {
         ramfs_node_unlock(parent);
         ramfs_unlock();
         return RAMFS_ERR_NOSPC;
@@ -339,7 +336,7 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
     node->parent = parent;
     node->children = NULL;
 
-    node->data = (uint8_t *)kmalloc((uint32_t)tlen + 1);
+    node->data = (uint8_t *)kmalloc((uint64_t)tlen + 1);
     if (!node->data) {
         kfree(node);
         ramfs_node_unlock(parent);
@@ -348,8 +345,8 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
     }
     memcpy(node->data, target, tlen);
     node->data[tlen] = '\0';
-    node->data_capacity = (uint32_t)tlen + 1;
-    node->length = (uint32_t)tlen;
+    node->data_capacity = (uint64_t)tlen + 1;
+    node->length = (uint64_t)tlen;
 
     node->next_sibling = parent->children;
     parent->children = node;
@@ -514,9 +511,12 @@ int ramfs_unlink(const char *path) {
     return RAMFS_ERR_OK;
 }
 
-int ramfs_truncate(const char *path, uint32_t length) {
+int ramfs_truncate(const char *path, uint64_t length) {
+    uint64_t extra;
+    uint64_t new_cap;
+    uint8_t *new_data;
+
     if (!path) return RAMFS_ERR_INVAL;
-    if (length > RAMFS_MAX_FILE_SIZE) return RAMFS_ERR_NOSPC;
     
     ramfs_lock();
     ramfs_node_t *node = ramfs_find_node(path);
@@ -544,7 +544,7 @@ int ramfs_truncate(const char *path, uint32_t length) {
         ramfs_stats.used_size -= (node->length - length);
         node->length = length;
     } else if (length > node->length) {
-        uint32_t extra = length - node->length;
+        extra = length - node->length;
         if (!ramfs_check_space(extra)) {
             ramfs_node_unlock(node);
             ramfs_unlock();
@@ -552,10 +552,9 @@ int ramfs_truncate(const char *path, uint32_t length) {
         }
         
         if (length > node->data_capacity) {
-            uint32_t new_cap = (length + RAMFS_BLOCK_SIZE - 1) & ~(RAMFS_BLOCK_SIZE - 1);
-            if (new_cap > RAMFS_MAX_FILE_SIZE) new_cap = RAMFS_MAX_FILE_SIZE;
+            new_cap = (length + RAMFS_BLOCK_SIZE - 1) & ~((uint64_t)(RAMFS_BLOCK_SIZE - 1));
             
-            uint8_t *new_data = (uint8_t *)kmalloc(new_cap);
+            new_data = (uint8_t *)kmalloc(new_cap);
             if (!new_data) {
                 ramfs_node_unlock(node);
                 ramfs_unlock();
@@ -734,7 +733,7 @@ int ramfs_chown(const char *path, uint32_t uid, uint32_t gid) {
     return RAMFS_ERR_OK;
 }
 
-int ramfs_set_backing(const char *path, const uint8_t *data, uint32_t length) {
+int ramfs_set_backing(const char *path, const uint8_t *data, uint64_t length) {
     ramfs_node_t *node;
     
     if (!path) return RAMFS_ERR_INVAL;
@@ -762,7 +761,14 @@ int ramfs_set_backing(const char *path, const uint8_t *data, uint32_t length) {
     return RAMFS_ERR_OK;
 }
 
-int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t size) {
+int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t size) {
+    uint64_t needed;
+    uint64_t old_len;
+    uint64_t new_len;
+    uint64_t extra;
+    uint64_t new_cap;
+    uint8_t *new_data;
+
     if (!path || !data || size == 0) return RAMFS_ERR_INVAL;
     
     ramfs_lock();
@@ -776,16 +782,11 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     
     ramfs_node_lock(node);
     
-    uint32_t needed = offset + size;
-    if (needed > RAMFS_MAX_FILE_SIZE) {
-        ramfs_node_unlock(node);
-        ramfs_unlock();
-        return RAMFS_ERR_NOSPC;
-    }
+    needed = offset + size;
     
-    uint32_t old_len = node->length;
-    uint32_t new_len = (needed > old_len) ? needed : old_len;
-    uint32_t extra = (new_len > old_len) ? (new_len - old_len) : 0;
+    old_len = node->length;
+    new_len = (needed > old_len) ? needed : old_len;
+    extra = (new_len > old_len) ? (new_len - old_len) : 0;
     
     if (extra > 0 && !ramfs_check_space(extra)) {
         ramfs_node_unlock(node);
@@ -794,10 +795,9 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     }
     
     if (needed > node->data_capacity) {
-        uint32_t new_cap = (needed + RAMFS_BLOCK_SIZE - 1) & ~(RAMFS_BLOCK_SIZE - 1);
-        if (new_cap > RAMFS_MAX_FILE_SIZE) new_cap = RAMFS_MAX_FILE_SIZE;
+        new_cap = (needed + RAMFS_BLOCK_SIZE - 1) & ~((uint64_t)(RAMFS_BLOCK_SIZE - 1));
         
-        uint8_t *new_data = (uint8_t *)kmalloc(new_cap);
+        new_data = (uint8_t *)kmalloc(new_cap);
         if (!new_data) {
             ramfs_node_unlock(node);
             ramfs_unlock();
@@ -824,8 +824,8 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     if (node->vfs_node) {
         node->vfs_node->length = node->length;
         node->vfs_node->mtime = node->mtime;
-        DEBUG_RAMFS("RAMFS_WRITE: '%s' ramfs_node->length=%u vfs_node->length=%u vfs_node=%p\n", 
-               node->name, node->length, node->vfs_node->length, node->vfs_node);
+        DEBUG_RAMFS("RAMFS_WRITE: '%s' ramfs_node->length=%llu vfs_node->length=%llu vfs_node=%p\n", 
+               node->name, (unsigned long long)node->length, (unsigned long long)node->vfs_node->length, node->vfs_node);
     } else {
         DEBUG_RAMFS("RAMFS: WARNING: node->vfs_node is NULL for '%s', cannot update vfs length\n", node->name);
     }
@@ -836,7 +836,10 @@ int ramfs_write(const char *path, uint32_t offset, const uint8_t *data, uint32_t
     return (int)size;
 }
 
-int ramfs_read(const char *path, uint32_t offset, uint8_t *buffer, uint32_t size) {
+int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size) {
+    uint64_t avail;
+    uint64_t to_read;
+
     if (!path || !buffer || size == 0) return RAMFS_ERR_INVAL;
     
     ramfs_lock();
@@ -854,8 +857,8 @@ int ramfs_read(const char *path, uint32_t offset, uint8_t *buffer, uint32_t size
         return 0;
     }
     
-    uint32_t avail = node->length - offset;
-    uint32_t to_read = (size < avail) ? size : avail;
+    avail = node->length - offset;
+    to_read = (size < avail) ? size : avail;
     
     if (node->data) {
         memcpy(buffer, node->data + offset, to_read);
@@ -874,7 +877,7 @@ int ramfs_read(const char *path, uint32_t offset, uint8_t *buffer, uint32_t size
     return (int)to_read;
 }
 
-int ramfs_stat(const char *path, uint32_t *size, uint8_t *type, uint8_t *perms) {
+int ramfs_stat(const char *path, uint64_t *size, uint8_t *type, uint8_t *perms) {
     ramfs_lock();
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node) {
@@ -895,11 +898,11 @@ ramfs_node_t *ramfs_get_root(void) {
     return ramfs_root;
 }
 
-static uint32_t ramfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ramfs_node_t *rn;
-    uint32_t actual_len;
-    uint32_t avail;
-    uint32_t to_read;
+    uint64_t actual_len;
+    uint64_t avail;
+    uint64_t to_read;
     
     if (!node || !buffer) return 0;
     
@@ -943,15 +946,15 @@ static uint32_t ramfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     return to_read;
 }
 
-static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ramfs_node_t *rn;
-    uint32_t needed;
-    uint32_t old_len;
-    uint32_t new_len;
-    uint32_t extra;
-    uint32_t new_cap;
+    uint64_t needed;
+    uint64_t old_len;
+    uint64_t new_len;
+    uint64_t extra;
+    uint64_t new_cap;
     uint8_t *new_data;
-    uint32_t backing_to_copy;
+    uint64_t backing_to_copy;
     
     if (!node || !buffer || size == 0) return 0;
     
@@ -985,11 +988,6 @@ static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size
     }
     
     needed = offset + size;
-    if (needed > RAMFS_MAX_FILE_SIZE) {
-        ramfs_node_unlock(rn);
-        ramfs_unlock();
-        return 0;
-    }
     
     old_len = rn->length;
     new_len = (needed > old_len) ? needed : old_len;
@@ -1002,8 +1000,7 @@ static uint32_t ramfs_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size
     }
     
     if (needed > rn->data_capacity) {
-        new_cap = (needed + RAMFS_BLOCK_SIZE - 1) & ~(RAMFS_BLOCK_SIZE - 1);
-        if (new_cap > RAMFS_MAX_FILE_SIZE) new_cap = RAMFS_MAX_FILE_SIZE;
+        new_cap = (needed + RAMFS_BLOCK_SIZE - 1) & ~((uint64_t)(RAMFS_BLOCK_SIZE - 1));
         
         new_data = (uint8_t *)kmalloc(new_cap);
         if (!new_data) {
@@ -1072,13 +1069,16 @@ static void ramfs_vfs_close(vfs_node_t *node) {
     }
 }
 
-static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t length) {
+static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {
+    ramfs_node_t *rn;
+    uint64_t extra;
+    uint64_t new_cap;
+    uint8_t *new_data;
+
     if (!node) return RAMFS_ERR_INVAL;
     
-    ramfs_node_t *rn = (ramfs_node_t *)node->private_data;
+    rn = (ramfs_node_t *)node->private_data;
     if (!rn || rn->type != RAMFS_NODE_FILE) return RAMFS_ERR_ISDIR;
-    
-    if (length > RAMFS_MAX_FILE_SIZE) return RAMFS_ERR_NOSPC;
     
     ramfs_lock();
     ramfs_node_lock(rn);
@@ -1095,7 +1095,7 @@ static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t length) {
         ramfs_stats.used_size -= (rn->length - length);
         rn->length = length;
     } else if (length > rn->length) {
-        uint32_t extra = length - rn->length;
+        extra = length - rn->length;
         if (!ramfs_check_space(extra)) {
             ramfs_node_unlock(rn);
             ramfs_unlock();
@@ -1103,10 +1103,9 @@ static int ramfs_vfs_truncate(vfs_node_t *node, uint32_t length) {
         }
         
         if (length > rn->data_capacity) {
-            uint32_t new_cap = (length + RAMFS_BLOCK_SIZE - 1) & ~(RAMFS_BLOCK_SIZE - 1);
-            if (new_cap > RAMFS_MAX_FILE_SIZE) new_cap = RAMFS_MAX_FILE_SIZE;
+            new_cap = (length + RAMFS_BLOCK_SIZE - 1) & ~((uint64_t)(RAMFS_BLOCK_SIZE - 1));
             
-            uint8_t *new_data = (uint8_t *)kmalloc(new_cap);
+            new_data = (uint8_t *)kmalloc(new_cap);
             if (!new_data) {
                 ramfs_node_unlock(rn);
                 ramfs_unlock();
@@ -1250,8 +1249,8 @@ static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
                 result->atime = child->atime;
                 result->mtime = child->mtime;
                 result->ctime = child->ctime;
-                  DEBUG_RAMFS("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%u\n", 
-                       name, child, result, result->length);
+                  DEBUG_RAMFS("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%llu\n", 
+                       name, child, result, (unsigned long long)result->length);
             }
             ramfs_node_unlock(rn);
             ramfs_unlock();
@@ -1642,6 +1641,67 @@ void ramfs_vfs_register(void) {
     ramfs_fs_type.next = NULL;
 
     vfs_register_fs(&ramfs_fs_type);
+}
+
+static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint) {
+    ramfs_node_t *rn;
+    vfs_node_t *vn;
+
+    (void)device;
+    (void)mountpoint;
+
+    rn = ramfs_alloc_node();
+    if (!rn) return NULL;
+
+    strcpy(rn->name, "tmpfs");
+    rn->type = RAMFS_NODE_DIR;
+    rn->permissions = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    rn->uid = 0;
+    rn->gid = 0;
+    rn->parent = NULL;
+    rn->children = NULL;
+    rn->next_sibling = NULL;
+
+    vn = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!vn) {
+        kfree(rn);
+        return NULL;
+    }
+    memset(vn, 0, sizeof(vfs_node_t));
+
+    strcpy(vn->name, "tmp");
+    vn->flags = VFS_DIRECTORY;
+    vn->inode = ramfs_next_inode++;
+    vn->length = 0;
+    vn->mask = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    vn->uid = 0;
+    vn->gid = 0;
+    vn->atime = rn->atime;
+    vn->mtime = rn->mtime;
+    vn->ctime = rn->ctime;
+
+    ramfs_setup_vfs_dir_callbacks(vn);
+    vn->parent = NULL;
+    vn->private_data = rn;
+
+    rn->vfs_node = vn;
+
+    ramfs_lock();
+    ramfs_stats.dir_count++;
+    ramfs_unlock();
+
+    return vn;
+}
+
+static vfs_fs_type_t tmpfs_fs_type;
+
+void tmpfs_vfs_register(void) {
+    tmpfs_fs_type.name = "tmpfs";
+    tmpfs_fs_type.mount = tmpfs_vfs_do_mount;
+    tmpfs_fs_type.unmount = NULL;
+    tmpfs_fs_type.next = NULL;
+
+    vfs_register_fs(&tmpfs_fs_type);
 }
 
 static void ramfs_internalize_node(ramfs_node_t *node) {

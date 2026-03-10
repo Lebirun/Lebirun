@@ -251,6 +251,90 @@ static void coalesce_free_blocks(heap_block_t *block) {
 #endif
 }
 
+static void heap_trim(void) {
+    heap_block_t *last;
+    heap_block_t *cur;
+    uint32_t block_end;
+    uint32_t trim_start;
+    uint32_t new_end;
+    uint32_t pg;
+    uint32_t *pt;
+    uint32_t phys;
+    uint32_t pae_pd_idx;
+    uint32_t pae_pt_idx;
+    uint64_t pde;
+    uint64_t *pt64;
+    uint64_t pte;
+    uint32_t pae_phys;
+    extern uint32_t pae_enabled;
+    extern uint64_t boot_pd_high[];
+
+    last = NULL;
+    cur = kernel_heap.free_list;
+    while (cur) {
+        last = cur;
+        cur = cur->next;
+    }
+
+    if (!last || !last->is_free) return;
+
+    block_end = (uint32_t)last + sizeof(heap_block_t) + last->size;
+    if (block_end != kernel_heap.end_addr) return;
+
+    trim_start = ((uint32_t)last + sizeof(heap_block_t) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    if (trim_start >= kernel_heap.end_addr) return;
+
+    for (pg = trim_start; pg < kernel_heap.end_addr; pg += PAGE_SIZE) {
+        if (pae_enabled) {
+            pae_pd_idx = (pg >> 21) & 0x1FF;
+            pae_pt_idx = (pg >> 12) & 0x1FF;
+            pde = boot_pd_high[pae_pd_idx];
+            if (pde & 1) {
+                pt64 = (uint64_t *)((uint32_t)(pde & ~0xFFFULL) + 0xC0000000);
+                pte = pt64[pae_pt_idx];
+                if (pte & 1) {
+                    pae_phys = (uint32_t)(pte & ~0xFFFULL);
+                    pt64[pae_pt_idx] = 0;
+                    __asm__ volatile("invlpg (%0)" : : "r"(pg) : "memory");
+                    if (pae_phys >= 0x1000) pfa_free(pae_phys);
+                }
+            }
+        } else {
+            uint32_t *pd;
+            uint32_t pd_idx;
+            uint32_t pt_idx;
+            pd = (uint32_t *)0xFFFFF000;
+            pd_idx = pg >> 22;
+            pt_idx = (pg >> 12) & 0x3FF;
+            if (pd[pd_idx] & 1) {
+                pt = (uint32_t *)(0xFFC00000 + (pd_idx << 12));
+                phys = pt[pt_idx] & ~0xFFF;
+                if (pt[pt_idx] & 1) {
+                    pt[pt_idx] = 0;
+                    __asm__ volatile("invlpg (%0)" : : "r"(pg) : "memory");
+                    if (phys >= 0x1000) pfa_free(phys);
+                }
+            }
+        }
+    }
+
+    new_end = trim_start;
+    last->size = new_end - (uint32_t)last - sizeof(heap_block_t);
+
+    if (last->size == 0) {
+        if (last->prev) {
+            last->prev->next = NULL;
+        } else {
+            kernel_heap.free_list = NULL;
+        }
+        new_end = (uint32_t)last;
+    }
+
+    kernel_heap.end_addr = new_end;
+    kernel_heap.total_size = new_end - kernel_heap.start_addr;
+}
+
 extern int heap_map_page(uint32_t virt_addr);
 
 static int heap_reserve_virtual(uint32_t virt_start, uint32_t size) {
@@ -616,6 +700,7 @@ static void kfree_internal(void *ptr) {
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
 
     coalesce_free_blocks(block);
+    heap_trim();
 }
 
 void kfree(void *ptr) {
@@ -669,6 +754,7 @@ void kfree_secure(void *ptr) {
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
     
     coalesce_free_blocks(block);
+    heap_trim();
     heap_lock_release();
 }
 
@@ -688,12 +774,23 @@ void *krealloc(void *ptr, size_t new_size) {
         return new_ptr;
     }
 
+    if (slab_owns(ptr)) {
+        old_size = slab_alloc_size(ptr);
+        if (new_size <= old_size)
+            return ptr;
+        new_ptr = kmalloc(new_size);
+        if (!new_ptr) return NULL;
+        memcpy(new_ptr, ptr, old_size);
+        slab_free(ptr);
+        return new_ptr;
+    }
+
     heap_lock_acquire();
 
     block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
-        printf("krealloc: Invalid pointer\n");
+        printf("krealloc: Invalid pointer %p\n", ptr);
         heap_lock_release();
         return NULL;
     }

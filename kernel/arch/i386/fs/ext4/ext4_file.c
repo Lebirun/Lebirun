@@ -308,3 +308,40 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
 
     return ext4_dir_remove_entry(fs, parent_ino, name);
 }
+
+int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
+                     uint32_t new_parent_ino, const char *new_name) {
+    uint32_t ino;
+    uint32_t existing_ino;
+    ext4_inode_cache_t *ic;
+    uint8_t file_type;
+
+    if (!old_name || !new_name) {
+        return -1;
+    }
+
+    if (ext4_dir_lookup(fs, old_parent_ino, old_name, &ino) != 0) {
+        return -1;
+    }
+
+    ic = ext4_get_inode(fs, ino);
+    if (!ic) {
+        return -1;
+    }
+    file_type = ext4_mode_to_type(ic->inode.i_mode);
+    ext4_release_inode(ic);
+
+    if (ext4_dir_lookup(fs, new_parent_ino, new_name, &existing_ino) == 0) {
+        ext4_unlink_file(fs, new_parent_ino, new_name);
+    }
+
+    if (ext4_dir_add_entry(fs, new_parent_ino, new_name, ino, file_type) != 0) {
+        return -1;
+    }
+
+    if (ext4_dir_remove_entry(fs, old_parent_ino, old_name) != 0) {
+        return -1;
+    }
+
+    return 0;
+}

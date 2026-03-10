@@ -10,6 +10,8 @@ extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
 extern int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino);
 extern int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint16_t mode);
 extern int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name);
+extern int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
+                            uint32_t new_parent_ino, const char *new_name);
 
 static ext4_fs_t *mounted_fs = NULL;
 static vfs_fs_type_t ext4_fs_type;
@@ -21,8 +23,8 @@ typedef struct {
 
 static dirent_t ext4_dirent;
 
-static uint32_t ext4_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
-static uint32_t ext4_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static uint64_t ext4_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+static uint64_t ext4_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static void ext4_vfs_open(vfs_node_t *node, uint32_t flags);
 static void ext4_vfs_close(vfs_node_t *node);
 static dirent_t *ext4_vfs_readdir(vfs_node_t *node, uint32_t index);
@@ -30,6 +32,8 @@ static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name);
 static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint32_t flags);
 static int ext4_vfs_unlink(vfs_node_t *parent, const char *name);
 static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms);
+static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
+                           vfs_node_t *new_parent, const char *new_name);
 
 static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char *name) {
     ext4_inode_cache_t *ic = ext4_get_inode(fs, ino);
@@ -95,6 +99,7 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     node->create = ext4_vfs_create;
     node->unlink = ext4_vfs_unlink;
     node->mkdir = ext4_vfs_mkdir;
+    node->rename = ext4_vfs_rename;
 
     node->private_data = priv;
     node->ref_count = 0;
@@ -105,7 +110,7 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     return node;
 }
 
-static uint32_t ext4_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t ext4_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !node->private_data || !buffer) {
         return 0;
     }
@@ -114,7 +119,7 @@ static uint32_t ext4_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, 
     return ext4_file_read(priv->fs, priv->ino, offset, size, buffer);
 }
 
-static uint32_t ext4_vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t ext4_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !node->private_data || !buffer) {
         return 0;
     }
@@ -234,6 +239,35 @@ static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
 
     ext4_vfs_private_t *priv = (ext4_vfs_private_t *)parent->private_data;
     return ext4_unlink_file(priv->fs, priv->ino, name);
+}
+
+static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
+                           vfs_node_t *new_parent, const char *new_name) {
+    ext4_vfs_private_t *old_priv;
+    ext4_vfs_private_t *new_priv;
+
+    if (!old_parent || !old_parent->private_data || !old_name) {
+        return -1;
+    }
+    if (!new_parent || !new_parent->private_data || !new_name) {
+        return -1;
+    }
+    if (VFS_GET_TYPE(old_parent->flags) != VFS_DIRECTORY) {
+        return -1;
+    }
+    if (VFS_GET_TYPE(new_parent->flags) != VFS_DIRECTORY) {
+        return -1;
+    }
+
+    old_priv = (ext4_vfs_private_t *)old_parent->private_data;
+    new_priv = (ext4_vfs_private_t *)new_parent->private_data;
+
+    if (old_priv->fs != new_priv->fs) {
+        return -1;
+    }
+
+    return ext4_rename_file(old_priv->fs, old_priv->ino, old_name,
+                            new_priv->ino, new_name);
 }
 
 static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint32_t perms) {
@@ -445,6 +479,14 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
 
 void ext4_init(void) {
     printf("[EXT4] Initializing ext4 filesystem driver\n");
+}
+
+int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *block_size) {
+    if (!mounted_fs) return -1;
+    if (total_blocks) *total_blocks = mounted_fs->total_blocks;
+    if (free_blocks) *free_blocks = mounted_fs->sb.s_free_blocks_count_lo;
+    if (block_size) *block_size = mounted_fs->block_size;
+    return 0;
 }
 
 void ext4_vfs_register(void) {

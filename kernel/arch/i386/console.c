@@ -111,6 +111,119 @@ int console_alloc(int n) {
     return console_ensure_alloc(n);
 }
 
+static inline uint32_t console_irqsave(void);
+static inline void console_irqrestore(uint32_t flags);
+static void console_fast_redraw_locked(int console_num);
+
+int console_alt_screen_active(int n) {
+    if (n < 0 || n >= NUM_CONSOLES) return 0;
+    return consoles[n].alt_screen_active;
+}
+
+static void console_enter_alt_screen(console_t *con) {
+    uint32_t rows;
+    char (*new_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
+    uint8_t *new_wrapped;
+    uint32_t flags;
+
+    if (con->alt_screen_active) return;
+    rows = con->buffer_rows;
+    if (!rows || !con->buffer) return;
+
+    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    new_wrapped = (uint8_t *)kmalloc(rows);
+    if (!new_buf || !new_color || !new_wrapped) {
+        if (new_buf) kfree(new_buf);
+        if (new_color) kfree(new_color);
+        if (new_wrapped) kfree(new_wrapped);
+        return;
+    }
+    memset(new_buf, ' ', rows * CONSOLE_BUFFER_COLS);
+    memset(new_color, 0x70, rows * CONSOLE_BUFFER_COLS);
+    memset(new_wrapped, 0, rows);
+
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+
+    con->alt_saved_buffer = con->buffer;
+    con->alt_saved_color = con->color_buffer;
+    con->alt_saved_wrapped = con->line_wrapped;
+    con->alt_saved_rows = rows;
+    con->alt_saved_cx = con->cursor_x;
+    con->alt_saved_cy = con->cursor_y;
+    con->alt_saved_scroll = con->scroll_offset;
+
+    con->buffer = new_buf;
+    con->color_buffer = new_color;
+    con->line_wrapped = new_wrapped;
+    con->cursor_x = 0;
+    con->cursor_y = 0;
+    con->scroll_offset = 0;
+    con->alt_screen_active = 1;
+
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+static void console_leave_alt_screen(console_t *con) {
+    char (*old_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*old_color)[CONSOLE_BUFFER_COLS];
+    uint8_t *old_wrapped;
+    uint32_t flags;
+
+    if (!con->alt_screen_active) return;
+    if (!con->alt_saved_buffer) return;
+
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+
+    old_buf = con->buffer;
+    old_color = con->color_buffer;
+    old_wrapped = con->line_wrapped;
+
+    con->buffer = con->alt_saved_buffer;
+    con->color_buffer = con->alt_saved_color;
+    con->line_wrapped = con->alt_saved_wrapped;
+    con->buffer_rows = con->alt_saved_rows;
+    con->cursor_x = con->alt_saved_cx;
+    con->cursor_y = con->alt_saved_cy;
+    con->scroll_offset = con->alt_saved_scroll;
+
+    con->alt_saved_buffer = NULL;
+    con->alt_saved_color = NULL;
+    con->alt_saved_wrapped = NULL;
+    con->alt_screen_active = 0;
+
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+
+    kfree(old_buf);
+    kfree(old_color);
+    kfree(old_wrapped);
+}
+
+static void console_process_alt_screen_pending(int console_num) {
+    console_t *con;
+    int pending;
+
+    con = &consoles[console_num];
+    pending = con->alt_screen_pending;
+    if (pending == 0) return;
+    con->alt_screen_pending = 0;
+
+    if (pending == 1) {
+        console_enter_alt_screen(con);
+    } else if (pending == -1) {
+        console_leave_alt_screen(con);
+    }
+
+    if (console_num == current_console) {
+        console_fast_redraw_locked(console_num);
+    }
+}
+
 static void console_grow_buffer(console_t *con, uint32_t needed_rows) {
     char (*new_buf)[CONSOLE_BUFFER_COLS];
     uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
@@ -156,9 +269,6 @@ static void console_grow_buffer(console_t *con, uint32_t needed_rows) {
     con->line_wrapped = new_wrapped;
     con->buffer_rows = needed_rows;
 }
-
-static inline uint32_t console_irqsave(void);
-static inline void console_irqrestore(uint32_t flags);
 
 static void console_grow_write_buffer(console_t *con) {
     char *new_wb;
@@ -825,6 +935,15 @@ void console_init(void) {
         con->cursor_visible = 1;
         con->saved_cursor_x = 0;
         con->saved_cursor_y = 0;
+        con->alt_screen_active = 0;
+        con->alt_screen_pending = 0;
+        con->alt_saved_buffer = NULL;
+        con->alt_saved_color = NULL;
+        con->alt_saved_wrapped = NULL;
+        con->alt_saved_rows = 0;
+        con->alt_saved_cx = 0;
+        con->alt_saved_cy = 0;
+        con->alt_saved_scroll = 0;
     }
     
     alloc_ok = console_ensure_alloc(0);
@@ -1143,12 +1262,20 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
                     if (!console_batch) fb_update_cursor();
                 }
             }
+            if (nparams >= 1 && params[0] == 1049) {
+                con->alt_screen_pending = 1;
+                con->dirty = 1;
+            }
         } else if (cmd == 'l') {
             if (nparams >= 1 && params[0] == 25) {
                 con->cursor_visible = 0;
                 if (is_active && fb) {
                     fb_set_cursor_hidden(1);
                 }
+            }
+            if (nparams >= 1 && params[0] == 1049) {
+                con->alt_screen_pending = -1;
+                con->dirty = 1;
             }
         }
         return;
@@ -1236,7 +1363,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
             if (is_active && fb) {
                 fb->cursor_x = 0;
                 fb->cursor_y = 0;
-                fb_clear();
+                console_fast_redraw_locked(console_num);
             }
         } else if (mode == 0) {
             for (c2 = con->cursor_x; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
@@ -2024,6 +2151,10 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 console_handle_csi(target_console, con, fb, rows, cols, fb_ok);
                 con->esc_state = 0;
                 con->esc_len = 0;
+                if (con->alt_screen_pending) {
+                    chunk = i + 1;
+                    break;
+                }
                 continue;
             }
 
@@ -2181,6 +2312,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
         spin_unlock(&console_lock);
         console_irqrestore(flags);
+
+        if (con->alt_screen_pending)
+            console_process_alt_screen_pending(target_console);
 
         off += chunk;
         if (current_task && console_interrupts_enabled() && (off % 4096) == 0) {
@@ -2531,6 +2665,10 @@ static void console_writer_thread(void) {
                         console_handle_csi(i, con, fb, rows, cols, wt_fb_ok);
                         con->esc_state = 0;
                         con->esc_len = 0;
+                        if (con->alt_screen_pending) {
+                            chunk_size = j + 1;
+                            break;
+                        }
                         continue;
                     }
                     
@@ -2676,6 +2814,9 @@ static void console_writer_thread(void) {
                 
                 spin_unlock(&console_lock);
                 console_irqrestore(flags);
+
+                if (con->alt_screen_pending)
+                    console_process_alt_screen_pending(i);
 
                 fb_flush();
                 work_done = 1;

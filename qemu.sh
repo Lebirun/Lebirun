@@ -4,20 +4,24 @@ set -e
 
 VERBOSE=0
 DO_BUILD=0
+NO_BUILD=0
 ISO_ARGS=""
 for arg in "$@"; do
   case "$arg" in
     -v|--verbose) VERBOSE=1; ISO_ARGS="$ISO_ARGS -v" ;;
     -b|--build) DO_BUILD=1 ;;
+    --no-build) NO_BUILD=1 ;;
   esac
 done
 
-if [ "$DO_BUILD" -eq 1 ]; then
-    printf "\033[1;34mBuilding ISO before launch...\033[0m\n"
-    ./iso.sh $ISO_ARGS
-elif [ ! -f lebirun.iso ]; then
-    printf "\033[1;34mNo ISO found, building...\033[0m\n"
-    ./iso.sh $ISO_ARGS
+if [ "$NO_BUILD" -eq 0 ]; then
+    if [ "$DO_BUILD" -eq 1 ]; then
+        printf "\033[1;34mBuilding ISO before launch...\033[0m\n"
+        ./iso.sh $ISO_ARGS
+    elif [ ! -f lebirun.iso ]; then
+        printf "\033[1;34mNo ISO found, building...\033[0m\n"
+        ./iso.sh $ISO_ARGS
+    fi
 fi
 
 printf "\033[1;34mStarting QEMU...\033[0m\n"
@@ -40,11 +44,16 @@ if [ -t 0 ]; then
     trap cleanup_tty EXIT INT TERM HUP
 fi
 
+CDROM_ARGS=""
+if [ "$NO_BUILD" -eq 0 ]; then
+    CDROM_ARGS="-cdrom lebirun.iso"
+fi
+
 $QEMU_CMD \
     -m 4G \
     -smp 4 \
     -vga qxl \
-    -cdrom lebirun.iso \
+    $CDROM_ARGS \
     -s -S \
     -serial stdio \
     -device ahci,id=ahci0 \

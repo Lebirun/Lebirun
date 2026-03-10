@@ -69,7 +69,7 @@ extern uint32_t pae_vmm_pt_count;
 extern uint32_t pae_enabled;
 extern uint32_t pae_get_heap_pt_count(void);
 
-static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[2048];
     int len;
     uint32_t remaining;
@@ -155,7 +155,7 @@ static uint32_t proc_self_status_read(vfs_node_t *node, uint32_t offset, uint32_
     return size;
 }
 
-static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_maps_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[2048];
     int len;
     int n;
@@ -195,7 +195,7 @@ static uint32_t proc_self_maps_read(vfs_node_t *node, uint32_t offset, uint32_t 
     return size;
 }
 
-static uint32_t proc_self_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_cmdline_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char cmdline[128];
     uint32_t len;
     uint32_t remaining;
@@ -220,7 +220,7 @@ static uint32_t proc_self_cmdline_read(vfs_node_t *node, uint32_t offset, uint32
     return size;
 }
 
-static uint32_t proc_self_environ_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_environ_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *env;
     uint32_t len;
     uint32_t remaining;
@@ -237,7 +237,7 @@ static uint32_t proc_self_environ_read(vfs_node_t *node, uint32_t offset, uint32
     return size;
 }
 
-static uint32_t proc_version_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_version_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char ver[128];
     int len;
     uint32_t remaining;
@@ -254,7 +254,7 @@ static uint32_t proc_version_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_uptime_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[64];
     uint32_t seconds;
     int len;
@@ -274,7 +274,7 @@ static uint32_t proc_uptime_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return size;
 }
 
-static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[512];
     uint32_t total_kb;
     uint32_t free_pages_kb;
@@ -315,7 +315,7 @@ static uint32_t proc_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_cpuinfo_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *info;
     uint32_t len;
     uint32_t remaining;
@@ -344,7 +344,7 @@ static uint32_t proc_cpuinfo_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_loadavg_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[64];
     int len;
     uint32_t remaining;
@@ -361,7 +361,7 @@ static uint32_t proc_loadavg_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_self_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[512];
     int len;
     uint32_t remaining;
@@ -408,7 +408,7 @@ static uint32_t proc_self_stat_read(vfs_node_t *node, uint32_t offset, uint32_t 
     return size;
 }
 
-static uint32_t proc_self_statm_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_statm_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[128];
     int len;
     uint32_t pages;
@@ -431,7 +431,7 @@ static uint32_t proc_self_statm_read(vfs_node_t *node, uint32_t offset, uint32_t
     return size;
 }
 
-static uint32_t proc_self_comm_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_comm_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[32];
     int len;
     uint32_t remaining;
@@ -452,7 +452,7 @@ static uint32_t proc_self_comm_read(vfs_node_t *node, uint32_t offset, uint32_t 
     return size;
 }
 
-static uint32_t proc_self_limits_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_limits_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *buf;
     uint32_t len;
     uint32_t remaining;
@@ -488,7 +488,7 @@ static uint32_t proc_self_limits_read(vfs_node_t *node, uint32_t offset, uint32_
     return size;
 }
 
-static uint32_t proc_self_io_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_self_io_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *buf;
     uint32_t len;
     uint32_t remaining;
@@ -514,7 +514,7 @@ static uint32_t proc_self_io_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[512];
     int len;
     uint32_t remaining;
@@ -577,7 +577,7 @@ static uint32_t proc_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
     return size;
 }
 
-static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_mounts_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     size_t buf_size;
     char *buf;
     size_t len;
@@ -652,7 +652,7 @@ static uint32_t proc_mounts_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return size;
 }
 
-static uint32_t proc_filesystems_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_filesystems_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *buf;
     uint32_t len;
     uint32_t remaining;
@@ -676,7 +676,7 @@ static uint32_t proc_filesystems_read(vfs_node_t *node, uint32_t offset, uint32_
     return size;
 }
 
-static uint32_t proc_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_cmdline_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *raw;
     char buf[CMDLINE_MAX + 32];
     uint32_t len;
@@ -697,7 +697,7 @@ static uint32_t proc_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_devices_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_devices_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *buf;
     uint32_t len;
     uint32_t remaining;
@@ -727,7 +727,7 @@ static uint32_t proc_devices_read(vfs_node_t *node, uint32_t offset, uint32_t si
     return size;
 }
 
-static uint32_t proc_interrupts_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_interrupts_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[512];
     int len;
     uint32_t remaining;
@@ -752,7 +752,7 @@ static uint32_t proc_interrupts_read(vfs_node_t *node, uint32_t offset, uint32_t
     return size;
 }
 
-static uint32_t proc_vmstat_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_vmstat_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     extern uint32_t pfa_count_free(void);
     uint32_t free_pages;
     char buf[1024];
@@ -800,7 +800,7 @@ static uint32_t proc_vmstat_read(vfs_node_t *node, uint32_t offset, uint32_t siz
     return size;
 }
 
-static uint32_t proc_memdetail_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[2048];
     int len;
     uint32_t remaining;

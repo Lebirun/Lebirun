@@ -321,9 +321,12 @@ int klog_drain_console0(uint32_t max_items) {
     kproc_t *prev;
     uint32_t drained;
     klog_item_t it;
+    int suppress;
 
     if (max_items == 0) return 0;
     if (!console_is_initialized()) return 0;
+
+    suppress = console_alt_screen_active(0);
 
     kp = kproc_get(-1);
     prev = current_kproc;
@@ -331,7 +334,8 @@ int klog_drain_console0(uint32_t max_items) {
 
     drained = 0;
     while (drained < max_items && klog_dequeue(&it) == 0) {
-        console_write_to_fb_only(0, it.msg, (size_t)it.len);
+        if (!suppress)
+            console_write_to_fb_only(0, it.msg, (size_t)it.len);
         drained++;
     }
 
@@ -607,14 +611,16 @@ static void klog_task_main(void) {
             while (drained < 32 && kprint_dequeue(&it) == 0) {
                 con_id = it.con_id;
                 if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
-                console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
+                if (!console_alt_screen_active(con_id))
+                    console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
                 drained++;
             }
             did += drained;
 
             drained = 0;
             while (drained < 8 && klog_dequeue(&kit) == 0) {
-                console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
+                if (!console_alt_screen_active(0))
+                    console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
                 drained++;
             }
             did += drained;

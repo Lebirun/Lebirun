@@ -398,7 +398,7 @@ int initrd_stat(const char *path, uint32_t *size, uint8_t *type, uint8_t *perms)
     return 0;
 }
 
-static uint32_t initrd_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t initrd_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !buffer) return 0;
     uint32_t idx = node->inode;
     if (idx >= file_count) return 0;

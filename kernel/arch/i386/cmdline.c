@@ -6,6 +6,7 @@
 
 static char cmdline_buf[CMDLINE_MAX];
 static char init_path[CMDLINE_INIT_PATH_MAX];
+static char root_dev[64];
 static int num_consoles;
 
 static int parse_int(const char *s)
@@ -55,6 +56,7 @@ void cmdline_parse(uint32_t multiboot_flags, uint32_t cmdline_phys)
 
     strcpy(init_path, "/sbin/init");
     num_consoles = 4;
+    root_dev[0] = '\0';
     cmdline_buf[0] = '\0';
 
     if (!(multiboot_flags & (1 << 2)))
@@ -90,7 +92,11 @@ void cmdline_parse(uint32_t multiboot_flags, uint32_t cmdline_phys)
             num_consoles = NUM_CONSOLES;
     }
 
-    printf("CMDLINE: init=%s consoles=%d\n", init_path, num_consoles);
+    val = find_param(cmdline_buf, "root");
+    if (val)
+        extract_value(val, root_dev, sizeof(root_dev));
+
+    printf("CMDLINE: init=%s consoles=%d root=%s\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)");
 }
 
 const char *cmdline_get(void)
@@ -106,4 +112,9 @@ const char *cmdline_get_init(void)
 int cmdline_get_consoles(void)
 {
     return num_consoles;
+}
+
+const char *cmdline_get_root(void)
+{
+    return root_dev[0] ? root_dev : NULL;
 }

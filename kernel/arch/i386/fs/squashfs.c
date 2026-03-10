@@ -36,7 +36,7 @@ static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
     }
 }
 
-static uint32_t squashfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static void squashfs_vfs_open(vfs_node_t *node, uint32_t flags);
 static void squashfs_vfs_close(vfs_node_t *node);
 static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint32_t index);
@@ -688,7 +688,7 @@ static uint32_t squashfs_read_file_data(uint64_t inode_ref, uint32_t offset, uin
     return bytes_read;
 }
 
-static uint32_t squashfs_vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     squashfs_vfs_node_t *snode;
     squashfs_symlink_inode_t *sym;
     char *symlink_target;

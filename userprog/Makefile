@@ -61,6 +61,9 @@ stage-LebInit:
 stage-login:
 	$(MAKE) -C login V=$(V) stage
 
+stage-lebinstaller:
+	$(MAKE) -C lebinstaller V=$(V) stage
+
 lsh.bin:
 	@mkdir -p $(LSH_BUILD)
 	@if [ ! -f "$(LSH_OUTDIR)/config.mk" ] || [ "$(LSH_DIR)/configure" -nt "$(LSH_OUTDIR)/config.mk" ]; then \
@@ -77,7 +80,7 @@ lsh.bin:
 
 .PHONY: all clean
 
-all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit stage-login
+all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit stage-login stage-lebinstaller
 
 %.o: %.c
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@

@@ -19,7 +19,23 @@ static volatile uint32_t pfa_cached_free = 0;
 static uint8_t *pfa_refcounts = NULL;
 static uint32_t pfa_refcount_entries = 0;
 
+#define REFHT_BUCKETS 512
+#define REFHT_POOL_SIZE 1024
+
+typedef struct refht_node {
+    uint32_t page_idx;
+    uint8_t refcount;
+    struct refht_node *next;
+} refht_node_t;
+
+static refht_node_t *refht_buckets[REFHT_BUCKETS];
+static refht_node_t refht_pool[REFHT_POOL_SIZE];
+static refht_node_t *refht_free_list;
+static int refht_initialized = 0;
+static volatile int refht_lock_val = 0;
+
 static int low_exhausted = 0;
+static uint32_t low_page_limit = 0x00400000;
 
 extern mem_region_t memory_map[MAX_REGIONS];
 extern uint32_t num_regions;
@@ -186,7 +202,7 @@ static uint32_t find_free_frames(uint32_t num) {
 uint32_t pfa_alloc(void) {
     uint32_t addr = find_free_frames(1);
     if (addr) {
-        if (addr < 0x00400000) pmm_zero_page_phys(addr);
+        if (addr < low_page_limit) pmm_zero_page_phys(addr);
     }
     return addr;
 }
@@ -245,12 +261,11 @@ void pfa_free64(uint64_t phys_addr) {
     }
 
     if (pfa_refcounts && (uint32_t)idx < pfa_refcount_entries) {
-        uint8_t old_ref;
-        for (;;) {
-            old_ref = pfa_refcounts[(uint32_t)idx];
-            if (old_ref == 0) break;
-            if (__sync_bool_compare_and_swap(&pfa_refcounts[(uint32_t)idx], old_ref, old_ref - 1))
-                return;
+        uint8_t cur_ref;
+        cur_ref = pfa_ref_get((uint32_t)(idx * PAGE_SIZE));
+        if (cur_ref > 0) {
+            pfa_ref_dec((uint32_t)(idx * PAGE_SIZE));
+            return;
         }
     }
 
@@ -280,12 +295,11 @@ void pfa_free(uint32_t phys_addr) {
     }
 
     if (pfa_refcounts && idx < pfa_refcount_entries) {
-        uint8_t old_ref;
-        for (;;) {
-            old_ref = pfa_refcounts[idx];
-            if (old_ref == 0) break;
-            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_ref, old_ref - 1))
-                return;
+        uint8_t cur_ref;
+        cur_ref = pfa_ref_get(phys_addr);
+        if (cur_ref > 0) {
+            pfa_ref_dec(phys_addr);
+            return;
         }
     }
     
@@ -500,12 +514,12 @@ void *pmm_alloc_low_page(void) {
 
     try_addr = (low_bump + 0xFFF) & ~0xFFF;
 
-    while (try_addr < 0x00400000) {
+    while (try_addr < low_page_limit) {
         in_region = 0;
         for (i = 0; i < num_regions; i++) {
             rstart = memory_map[i].base;
             rend = rstart + memory_map[i].length;
-            if (try_addr >= rstart && try_addr + PAGE_SIZE <= rend && try_addr < 0x00400000) {
+            if (try_addr >= rstart && try_addr + PAGE_SIZE <= rend && try_addr < low_page_limit) {
                 in_region = 1;
                 idx_alloc = (uint32_t)(try_addr / PAGE_SIZE);
                 if (idx_alloc < total_pages_managed && !test_bit(idx_alloc)) {
@@ -528,7 +542,7 @@ void *pmm_alloc_low_page(void) {
             next_start = 0;
             for (i = 0; i < num_regions; i++) {
                 rstart = memory_map[i].base;
-                if (rstart > try_addr && rstart < 0x00400000) {
+                if (rstart > try_addr && rstart < low_page_limit) {
                     if (next_start == 0 || rstart < next_start) next_start = rstart;
                 }
             }
@@ -556,7 +570,7 @@ void pmm_zero_page_phys(uint32_t phys_addr) {
     extern uint32_t pae_temp_pt_ready_check(void);
 
     if (!pae_enabled || !pae_temp_pt_ready_check()) {
-        if (phys_addr < 0x00400000) {
+        if (phys_addr < low_page_limit) {
             w = (volatile uint32_t *)(phys_addr + 0xC0000000);
             for (i = 0; i < PAGE_SIZE / 4; i++) {
                 w[i] = 0;
@@ -585,6 +599,7 @@ void pfa_init_internal_setup(uint32_t bitmap_bytes, uint32_t total_pages, uint32
     bitmap_bytes_used = bitmap_bytes;
     total_pages_managed = total_pages;
     kernel_reserved_frames = kernel_frames;
+    low_page_limit = pae_enabled ? 0x00800000 : 0x01000000;
 }
 
 void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb, uint32_t init_free_frames) {
@@ -594,86 +609,170 @@ void pfa_init_ram_stats(uint32_t total_kb, uint32_t usable_kb, uint32_t init_fre
     pfa_cached_free = count_free_frames();
 }
 
-void pfa_ref_init(void) {
-    uint32_t size;
-
-    if (pfa_refcounts) return;
-    pfa_refcount_entries = total_pages_managed;
-    size = pfa_refcount_entries * sizeof(uint8_t);
-    pfa_refcounts = (uint8_t *)kmalloc(size);
-    if (pfa_refcounts) {
-        memset(pfa_refcounts, 0, size);
+static void refht_lock_acquire(uint32_t *eflags_out) {
+    uint32_t ef;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(ef));
+    while (__sync_lock_test_and_set(&refht_lock_val, 1)) {
+        __asm__ volatile("pause");
     }
+    *eflags_out = ef;
+}
+
+static void refht_lock_release(uint32_t eflags) {
+    __sync_lock_release(&refht_lock_val);
+    if (eflags & 0x200)
+        __asm__ volatile("sti");
+}
+
+static void refht_init(void) {
+    uint32_t i;
+
+    if (refht_initialized) return;
+    memset(refht_buckets, 0, sizeof(refht_buckets));
+    refht_free_list = NULL;
+    for (i = 0; i < REFHT_POOL_SIZE; i++) {
+        refht_pool[i].next = refht_free_list;
+        refht_free_list = &refht_pool[i];
+    }
+    refht_initialized = 1;
+}
+
+static refht_node_t *refht_alloc_node(void) {
+    refht_node_t *n;
+
+    n = refht_free_list;
+    if (n) {
+        refht_free_list = n->next;
+        n->next = NULL;
+    }
+    return n;
+}
+
+static void refht_free_node(refht_node_t *n) {
+    n->next = refht_free_list;
+    refht_free_list = n;
+}
+
+static refht_node_t *refht_find(uint32_t page_idx, uint32_t bucket) {
+    refht_node_t *n;
+
+    n = refht_buckets[bucket];
+    while (n) {
+        if (n->page_idx == page_idx) return n;
+        n = n->next;
+    }
+    return NULL;
+}
+
+void pfa_ref_init(void) {
+    refht_init();
+    pfa_refcounts = (uint8_t *)1;
+    pfa_refcount_entries = total_pages_managed;
 }
 
 void pfa_ref_inc(uint32_t phys_addr) {
     uint32_t idx;
-    uint8_t old_val;
+    uint32_t bucket;
+    uint32_t eflags;
+    refht_node_t *n;
 
-    if (!pfa_refcounts) pfa_ref_init();
-    if (!pfa_refcounts) return;
+    if (!refht_initialized) refht_init();
+    if (!refht_initialized) return;
+    pfa_refcounts = (uint8_t *)1;
+    pfa_refcount_entries = total_pages_managed;
     idx = phys_addr / PAGE_SIZE;
-    if (idx >= pfa_refcount_entries) return;
-    do {
-        old_val = pfa_refcounts[idx];
-        if (old_val >= 255) return;
-    } while (!__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val + 1));
+    if (idx >= total_pages_managed) return;
+    bucket = idx % REFHT_BUCKETS;
+    refht_lock_acquire(&eflags);
+    n = refht_find(idx, bucket);
+    if (n) {
+        if (n->refcount < 255) n->refcount++;
+    } else {
+        n = refht_alloc_node();
+        if (n) {
+            n->page_idx = idx;
+            n->refcount = 1;
+            n->next = refht_buckets[bucket];
+            refht_buckets[bucket] = n;
+        }
+    }
+    refht_lock_release(eflags);
 }
 
 int pfa_ref_dec(uint32_t phys_addr) {
     uint32_t idx;
-    uint8_t old_val;
+    uint32_t bucket;
+    uint32_t eflags;
+    refht_node_t *n;
+    refht_node_t *prev;
+    int result;
 
-    if (!pfa_refcounts) return 0;
+    if (!refht_initialized) return 0;
     idx = phys_addr / PAGE_SIZE;
-    if (idx >= pfa_refcount_entries) return 0;
-    do {
-        old_val = pfa_refcounts[idx];
-        if (old_val == 0) return 0;
-    } while (!__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val - 1));
-    return (int)(old_val - 1);
+    if (idx >= total_pages_managed) return 0;
+    bucket = idx % REFHT_BUCKETS;
+    result = 0;
+    refht_lock_acquire(&eflags);
+    prev = NULL;
+    n = refht_buckets[bucket];
+    while (n) {
+        if (n->page_idx == idx) {
+            if (n->refcount > 0) {
+                n->refcount--;
+                result = (int)n->refcount;
+            }
+            if (n->refcount == 0) {
+                if (prev)
+                    prev->next = n->next;
+                else
+                    refht_buckets[bucket] = n->next;
+                refht_free_node(n);
+            }
+            refht_lock_release(eflags);
+            return result;
+        }
+        prev = n;
+        n = n->next;
+    }
+    refht_lock_release(eflags);
+    return 0;
 }
 
 uint8_t pfa_ref_get(uint32_t phys_addr) {
     uint32_t idx;
+    uint32_t bucket;
+    uint32_t eflags;
+    refht_node_t *n;
+    uint8_t result;
 
-    if (!pfa_refcounts) return 0;
+    if (!refht_initialized) return 0;
     idx = phys_addr / PAGE_SIZE;
-    if (idx >= pfa_refcount_entries) return 0;
-    return __sync_fetch_and_add(&pfa_refcounts[idx], 0);
+    if (idx >= total_pages_managed) return 0;
+    bucket = idx % REFHT_BUCKETS;
+    refht_lock_acquire(&eflags);
+    n = refht_find(idx, bucket);
+    result = n ? n->refcount : 0;
+    refht_lock_release(eflags);
+    return result;
 }
 
 void pfa_cow_release(uint32_t phys_addr) {
-    uint32_t idx;
-    uint8_t old_val;
+    int ref;
 
     if (!phys_addr) return;
-    if (!pfa_refcounts) {
+    if (!refht_initialized) {
         pfa_free(phys_addr);
         return;
     }
-    idx = phys_addr / PAGE_SIZE;
-    if (idx >= pfa_refcount_entries) {
-        pfa_free(phys_addr);
+    ref = pfa_ref_get(phys_addr);
+    if (ref > 1) {
+        pfa_ref_dec(phys_addr);
         return;
     }
-    for (;;) {
-        old_val = pfa_refcounts[idx];
-        if (old_val > 1) {
-            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], old_val, old_val - 1))
-                return;
-            continue;
-        }
-        if (old_val == 1) {
-            if (__sync_bool_compare_and_swap(&pfa_refcounts[idx], 1, 0)) {
-                pfa_free(phys_addr);
-                return;
-            }
-            continue;
-        }
-        pfa_free(phys_addr);
-        return;
+    if (ref == 1) {
+        pfa_ref_dec(phys_addr);
     }
+    pfa_free(phys_addr);
 }
 
 void pfa_cow_release64(uint64_t phys_addr) {

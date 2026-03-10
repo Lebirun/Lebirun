@@ -443,7 +443,9 @@ static int sys_read(int fd, char *buf, int len) {
                     }
                 } else if (c == '\n' || c == '\r') {
                     in_line_editing[con_id] = 0;
-                    history_add(con_id, line_buffers[con_id], line_len[con_id]);
+                    if (echo) {
+                        history_add(con_id, line_buffers[con_id], line_len[con_id]);
+                    }
                     if (line_len[con_id] < LINE_BUF_SIZE) {
                         line_buffers[con_id][line_len[con_id]++] = '\n';
                     }
