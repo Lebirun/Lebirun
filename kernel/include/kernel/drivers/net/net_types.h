@@ -112,7 +112,7 @@ typedef struct {
 } __attribute__((packed)) ipv4_header_t;
 
 typedef struct {
-    uint32_t version_tc_flow;
+    uint64_t version_tc_flow;
     uint16_t payload_length;
     uint8_t next_header;
     uint8_t hop_limit;
@@ -144,7 +144,7 @@ typedef struct {
     uint8_t type;
     uint8_t code;
     uint16_t checksum;
-    uint32_t data;
+    uint64_t data;
 } __attribute__((packed)) icmpv6_header_t;
 
 typedef struct {
@@ -157,8 +157,8 @@ typedef struct {
 typedef struct {
     uint16_t src_port;
     uint16_t dest_port;
-    uint32_t seq_num;
-    uint32_t ack_num;
+    uint64_t seq_num;
+    uint64_t ack_num;
     uint8_t data_offset;
     uint8_t flags;
     uint16_t window;
@@ -171,7 +171,7 @@ typedef struct {
     uint8_t htype;
     uint8_t hlen;
     uint8_t hops;
-    uint32_t xid;
+    uint64_t xid;
     uint16_t secs;
     uint16_t flags;
     ipv4_addr_t ciaddr;
@@ -181,7 +181,7 @@ typedef struct {
     uint8_t chaddr[16];
     uint8_t sname[64];
     uint8_t file[128];
-    uint32_t magic;
+    uint64_t magic;
     uint8_t options[308];
 } __attribute__((packed)) dhcp_packet_t;
 
@@ -197,23 +197,23 @@ typedef struct {
 typedef struct {
     uint16_t type;
     uint16_t class;
-    uint32_t ttl;
+    uint64_t ttl;
     uint16_t rdlength;
 } __attribute__((packed)) dns_rr_header_t;
 
 typedef struct net_buffer {
     uint8_t *data;
-    uint32_t len;
-    uint32_t capacity;
-    uint32_t head;
-    uint32_t tail;
+    uint64_t len;
+    uint64_t capacity;
+    uint64_t head;
+    uint64_t tail;
     struct net_buffer *next;
 } net_buffer_t;
 
 struct netif;
 typedef struct netif netif_t;
 
-typedef int (*netif_send_t)(netif_t *netif, uint8_t *data, uint32_t len);
+typedef int (*netif_send_t)(netif_t *netif, uint8_t *data, uint64_t len);
 typedef int (*netif_poll_t)(netif_t *netif);
 
 struct netif {
@@ -227,7 +227,7 @@ struct netif {
     ipv6_addr_t ipv6;
     ipv6_addr_t ipv6_gateway;
     uint8_t ipv6_prefix;
-    uint32_t mtu;
+    uint64_t mtu;
     uint8_t link_up;
     uint8_t dhcp_configured;
     netif_send_t send;
@@ -242,7 +242,7 @@ struct netif {
 typedef struct {
     ipv4_addr_t ip;
     mac_addr_t mac;
-    uint32_t timestamp;
+    uint64_t timestamp;
     uint8_t valid;
 } arp_entry_t;
 
@@ -267,21 +267,21 @@ typedef struct tcp_socket {
     ipv4_addr_t remote_ip;
     uint16_t local_port;
     uint16_t remote_port;
-    uint32_t send_next;
-    uint32_t send_una;
-    uint32_t recv_next;
+    uint64_t send_next;
+    uint64_t send_una;
+    uint64_t recv_next;
     uint16_t send_window;
     uint16_t recv_window;
     uint8_t *recv_buffer;
-    uint32_t recv_buffer_size;
-    uint32_t recv_buffer_head;
-    uint32_t recv_buffer_tail;
+    uint64_t recv_buffer_size;
+    uint64_t recv_buffer_head;
+    uint64_t recv_buffer_tail;
     uint8_t *send_buffer;
-    uint32_t send_buffer_size;
-    uint32_t send_buffer_head;
-    uint32_t send_buffer_tail;
-    uint32_t retransmit_timeout;
-    uint32_t last_ack_time;
+    uint64_t send_buffer_size;
+    uint64_t send_buffer_head;
+    uint64_t send_buffer_tail;
+    uint64_t retransmit_timeout;
+    uint64_t last_ack_time;
     netif_t *netif;
     struct tcp_socket *next;
 } tcp_socket_t;
@@ -290,8 +290,8 @@ typedef struct udp_socket {
     ipv4_addr_t local_ip;
     uint16_t local_port;
     uint8_t *recv_buffer;
-    uint32_t recv_buffer_size;
-    uint32_t recv_len;
+    uint64_t recv_buffer_size;
+    uint64_t recv_len;
     ipv4_addr_t recv_from_ip;
     uint16_t recv_from_port;
     uint8_t has_data;
@@ -307,21 +307,21 @@ static inline uint16_t ntohs(uint16_t x) {
     return htons(x);
 }
 
-static inline uint32_t htonl(uint32_t x) {
+static inline uint64_t htonl(uint64_t x) {
     return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) |
            ((x >> 8) & 0xFF00) | ((x >> 24) & 0xFF);
 }
 
-static inline uint32_t ntohl(uint32_t x) {
+static inline uint64_t ntohl(uint64_t x) {
     return htonl(x);
 }
 
-static inline uint32_t ipv4_to_u32(ipv4_addr_t ip) {
+static inline uint64_t ipv4_to_u32(ipv4_addr_t ip) {
     return (ip.octets[0] << 24) | (ip.octets[1] << 16) |
            (ip.octets[2] << 8) | ip.octets[3];
 }
 
-static inline ipv4_addr_t u32_to_ipv4(uint32_t val) {
+static inline ipv4_addr_t u32_to_ipv4(uint64_t val) {
     ipv4_addr_t ip;
     ip.octets[0] = (val >> 24) & 0xFF;
     ip.octets[1] = (val >> 16) & 0xFF;

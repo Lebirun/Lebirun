@@ -7,10 +7,11 @@
 #define PIPE_BUF_SIZE 4096
 
 typedef struct {
-    uint8_t buffer[PIPE_BUF_SIZE];
-    uint32_t read_pos;
-    uint32_t write_pos;
-    uint32_t count;
+    uint8_t *buffer;
+    uint64_t buf_size;
+    uint64_t read_pos;
+    uint64_t write_pos;
+    uint64_t count;
     int readers;
     int writers;
     wait_queue_t read_waitq;

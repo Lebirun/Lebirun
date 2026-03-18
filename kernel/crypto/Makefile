@@ -1,5 +1,5 @@
-CC := i686-elf-gcc
-AR := i686-elf-ar
+CC := x86_64-elf-gcc
+AR := x86_64-elf-ar
 
 V ?= 0
 ifeq ($(V),0)
@@ -12,7 +12,7 @@ else
   MSG_AR =
 endif
 
-CFLAGS = -Os -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -m32 \
+CFLAGS = -Os -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -mcmodel=large -mno-red-zone \
          -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-implicit-fallthrough \
          -Wno-unused-function -Wno-unused-variable -Wno-missing-field-initializers
 

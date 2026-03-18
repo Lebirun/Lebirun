@@ -18,6 +18,6 @@
 void net_init(void);
 void net_poll(void);
 void net_tick(void);
-uint32_t net_get_ticks(void);
+uint64_t net_get_ticks(void);
 
 #endif

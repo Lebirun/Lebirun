@@ -33,8 +33,8 @@ typedef struct {
     uint8_t  chs_first[3];
     uint8_t  type;
     uint8_t  chs_last[3];
-    uint32_t lba_start;
-    uint32_t sector_count;
+    uint64_t lba_start;
+    uint64_t sector_count;
 } __attribute__((packed)) mbr_partition_entry_t;
 
 typedef struct {
@@ -45,19 +45,19 @@ typedef struct {
 
 typedef struct {
     uint64_t signature;
-    uint32_t revision;
-    uint32_t header_size;
-    uint32_t header_crc32;
-    uint32_t reserved;
+    uint64_t revision;
+    uint64_t header_size;
+    uint64_t header_crc32;
+    uint64_t reserved;
     uint64_t my_lba;
     uint64_t alternate_lba;
     uint64_t first_usable_lba;
     uint64_t last_usable_lba;
     uint8_t  disk_guid[16];
     uint64_t partition_entry_lba;
-    uint32_t num_partition_entries;
-    uint32_t partition_entry_size;
-    uint32_t partition_array_crc32;
+    uint64_t num_partition_entries;
+    uint64_t partition_entry_size;
+    uint64_t partition_array_crc32;
 } __attribute__((packed)) gpt_header_t;
 
 typedef struct {
@@ -91,7 +91,7 @@ static const uint8_t GPT_TYPE_EMPTY[16] = {
 
 typedef struct {
     int      valid;
-    uint32_t port_index;
+    uint64_t port_index;
     int      part_number;
     uint64_t start_lba;
     uint64_t sector_count;
@@ -106,9 +106,9 @@ typedef struct {
     partition_info_t parts[PARTITION_MAX];
 } partition_table_t;
 
-int partition_scan(uint32_t port_index, partition_table_t *table);
-int partition_scan_mbr(uint32_t port_index, partition_table_t *table);
-int partition_scan_gpt(uint32_t port_index, partition_table_t *table);
+int partition_scan(uint64_t port_index, partition_table_t *table);
+int partition_scan_mbr(uint64_t port_index, partition_table_t *table);
+int partition_scan_gpt(uint64_t port_index, partition_table_t *table);
 const char *partition_type_name(uint8_t mbr_type);
 int partition_is_guid_zero(const uint8_t *guid);
 int partition_is_guid_equal(const uint8_t *a, const uint8_t *b);

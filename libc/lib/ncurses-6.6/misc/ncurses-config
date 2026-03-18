@@ -95,7 +95,7 @@ else
 	LIBS="-l${CURSES_LIB} -l${TINFO_LIB} $LIBS"
 fi
 
-CFLAGS=" -DNCURSES_WIDECHAR"
+CFLAGS=""
 if [ "$includesubdir" != "/usr/include" ]; then
 	CFLAGS="$CFLAGS -I${includesubdir}"
 	if [ "$includedir" != "/usr/include" ]; then

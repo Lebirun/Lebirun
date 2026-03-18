@@ -16,19 +16,19 @@ typedef enum {
 } thread_state_t;
 
 typedef struct thread {
-    uint32_t id;
+    uint64_t id;
     thread_state_t state;
     struct thread *next;
     registers_t regs;
-    uint32_t cr3;
+    uint64_t cr3;
     uint8_t *stack_base;
-    uint32_t stack_size;
-    uint32_t wake_tick;
+    uint64_t stack_size;
+    uint64_t wake_tick;
     void (*entry)(void *arg);
     void *arg;
     int exit_code;
-    uint32_t tls_base;
-    uint32_t tls_limit;
+    uint64_t tls_base;
+    uint64_t tls_limit;
 } thread_t;
 
 extern thread_t *current_thread;

@@ -12,23 +12,24 @@ typedef int32_t pid_t;
 #endif
 
 static inline void print_hex(unsigned long v) {
-    char buf[9];
-    buf[8] = '\0';
-    for (int i = 0; i < 8; ++i) {
-        unsigned int nib = (v >> ((7 - i) * 4)) & 0xF;
+    char buf[17];
+    int i;
+    buf[16] = '\0';
+    for (i = 0; i < 16; ++i) {
+        unsigned int nib = (v >> ((15 - i) * 4)) & 0xF;
         buf[i] = (nib < 10) ? ('0' + nib) : ('A' + (nib - 10));
     }
     printf("%s", buf);
 }
 
-static inline uint32_t read_cr3(void) {
-    uint32_t val;
+static inline uint64_t read_cr3(void) {
+    uint64_t val;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(val));
     return val;
 }
 
-static inline uint32_t read_cr0(void) {
-    uint32_t val;
+static inline uint64_t read_cr0(void) {
+    uint64_t val;
     __asm__ volatile ("mov %%cr0, %0" : "=r"(val));
     return val;
 }
@@ -40,15 +41,17 @@ static inline __attribute__((unused)) void serial_puts(const char *str) {
 }
 
 static inline __attribute__((unused)) void serial_putchar(char c) {
+    if (c == '\n')
+        outb(0x3F8, '\r');
     outb(0x3F8, (uint8_t)c);
 }
 
-static inline __attribute__((unused)) void serial_puthex(uint32_t v) {
+static inline __attribute__((unused)) void serial_puthex(uint64_t v) {
     int i;
     unsigned int nib;
     serial_puts("0x");
-    for (i = 0; i < 8; i++) {
-        nib = (v >> ((7 - i) * 4)) & 0xF;
+    for (i = 0; i < 16; i++) {
+        nib = (v >> ((15 - i) * 4)) & 0xF;
         outb(0x3F8, (nib < 10) ? ('0' + nib) : ('A' + (nib - 10)));
     }
 }

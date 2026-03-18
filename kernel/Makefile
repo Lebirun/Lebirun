@@ -22,7 +22,7 @@ endif
 
 CFLAGS?=-Os -ffunction-sections -fdata-sections
 CPPFLAGS?=
-LDFLAGS?=-Wl,--gc-sections -Wl,-s
+LDFLAGS?=-Wl,--gc-sections
 LIBS?=
 
 DESTDIR?=
@@ -61,7 +61,7 @@ UNIFONT_OBJ=$(ARCHDIR)/unifont_bin.o
 $(UNIFONT_OBJ): $(wildcard $(UNIFONT_BIN))
 	@if [ -f "$(UNIFONT_BIN)" ]; then \
 		echo "Embedding font from $(UNIFONT_BIN) -> $@"; \
-		$(OBJCOPY) -I binary -O elf32-i386 -B i386 \
+		$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
 			--rename-section .data=.rodata,alloc,load,readonly,data,contents \
 			--redefine-sym _binary_fonts_unifont_psf_start=unifont_psf_start \
 			--redefine-sym _binary_fonts_unifont_psf_end=unifont_psf_end \
@@ -106,7 +106,9 @@ all: lebirun.kernel
 
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 	$(MSG_LD)$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
-	$(Q)grub-file --is-x86-multiboot lebirun.kernel
+	$(Q)cp $@ lebirun_debug.kernel
+	$(MSG_STRIP)$(OBJCOPY) --strip-all $@
+	$(Q)grub-file --is-x86-multiboot2 lebirun.kernel
 
 .c.o:
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
@@ -134,15 +136,15 @@ $(USER_SHELL_BIN):
 	fi
 
 $(USER_SHELL_OBJ): $(USER_SHELL_BIN)
-	$(OBJCOPY) -I binary -O elf32-i386 -B i386 \
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
-		--redefine-sym _binary_arch_i386_user_shell_bin_start=user_shell_bin_start \
-		--redefine-sym _binary_arch_i386_user_shell_bin_end=user_shell_bin_end \
-		--redefine-sym _binary_arch_i386_user_shell_bin_size=user_shell_bin_size \
+		--redefine-sym _binary_arch_x86_64_user_shell_bin_start=user_shell_bin_start \
+		--redefine-sym _binary_arch_x86_64_user_shell_bin_end=user_shell_bin_end \
+		--redefine-sym _binary_arch_x86_64_user_shell_bin_size=user_shell_bin_size \
 		$< $@
 
 clean:
-	rm -f lebirun.kernel
+	rm -f lebirun.kernel lebirun_debug.kernel
 	rm -f $(USER_SHELL_OBJ)
 	rm -f $(USER_SHELL_BIN)
 	rm -f $(UNIFONT_OBJ)

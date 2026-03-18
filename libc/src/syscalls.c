@@ -101,8 +101,8 @@
 #define SYS_READLINK (86 | LEBIRUN_SYSCALL_FLAG)
 #define SYS_UMASK (87 | LEBIRUN_SYSCALL_FLAG)
 
-static inline int syscall0(int num) {
-    int ret;
+static inline long syscall0(long num) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -112,8 +112,8 @@ static inline int syscall0(int num) {
     return ret;
 }
 
-static inline int syscall1(int num, int arg1) {
-    int ret;
+static inline long syscall1(long num, long arg1) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -123,8 +123,8 @@ static inline int syscall1(int num, int arg1) {
     return ret;
 }
 
-static inline int syscall2(int num, int arg1, int arg2) {
-    int ret;
+static inline long syscall2(long num, long arg1, long arg2) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -134,8 +134,8 @@ static inline int syscall2(int num, int arg1, int arg2) {
     return ret;
 }
 
-static inline int syscall3(int num, int arg1, int arg2, int arg3) {
-    int ret;
+static inline long syscall3(long num, long arg1, long arg2, long arg3) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -145,8 +145,8 @@ static inline int syscall3(int num, int arg1, int arg2, int arg3) {
     return ret;
 }
 
-static inline int syscall4(int num, int arg1, int arg2, int arg3, int arg4) {
-    int ret;
+static inline long syscall4(long num, long arg1, long arg2, long arg3, long arg4) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -159,7 +159,7 @@ static inline int syscall4(int num, int arg1, int arg2, int arg3, int arg4) {
 static uintptr_t __brk_cur = 0;
 
 int brk(void *addr) {
-    uintptr_t result = (uintptr_t)syscall1(SYS_SBRK, (int)(uintptr_t)addr);
+    uintptr_t result = (uintptr_t)syscall1(SYS_SBRK, (long)addr);
     if (result == (uintptr_t)-1) {
         return -1;
     }
@@ -185,7 +185,7 @@ void *sbrk(intptr_t inc) {
     uintptr_t old_brk = __brk_cur;
     uintptr_t new_brk = old_brk + (uintptr_t)inc;
     
-    uintptr_t result = (uintptr_t)syscall1(SYS_SBRK, (int)new_brk);
+    uintptr_t result = (uintptr_t)syscall1(SYS_SBRK, (long)new_brk);
     if (result == (uintptr_t)-1 || result < new_brk) {
         return (void *)-1;
     }
@@ -203,13 +203,13 @@ void _exit(int status) {
 }
 
 int read(int fd, void *buf, size_t count) {
-    int ret = syscall3(SYS_READ, fd, (int)buf, (int)count);
+    int ret = syscall3(SYS_READ, fd, (long)buf, (long)count);
     if (ret < 0) { errno = -ret; return -1; }
     return ret;
 }
 
 int write(int fd, const void *buf, size_t count) {
-    int ret = syscall3(SYS_WRITE, fd, (int)buf, (int)count);
+    int ret = syscall3(SYS_WRITE, fd, (long)buf, (long)count);
     if (ret < 0) { errno = EBADF; return -1; }
     return ret;
 }
@@ -222,7 +222,7 @@ struct iovec {
 #define SYS_WRITEV (62 | LEBIRUN_SYSCALL_FLAG)
 
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
-    return syscall3(SYS_WRITEV, fd, (int)iov, iovcnt);
+    return syscall3(SYS_WRITEV, fd, (long)iov, iovcnt);
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
@@ -242,7 +242,7 @@ int getpid(void) {
 }
 
 int exec(const void *bin, unsigned int size) {
-    return syscall2(SYS_EXEC, (int)bin, (int)size);
+    return syscall2(SYS_EXEC, (long)bin, (long)size);
 }
 
 int fork(void) {
@@ -255,7 +255,7 @@ int fork(void) {
 }
 
 int waitpid(int pid, int *status, int options) {
-    int ret = syscall3(SYS_WAITPID, pid, (int)status, options);
+    int ret = syscall3(SYS_WAITPID, pid, (long)status, options);
     if (ret < 0) {
         errno = -ret;
         return -1;
@@ -274,11 +274,11 @@ int dup2(int oldfd, int newfd) {
 }
 
 int pipe(int pipefd[2]) {
-    return syscall1(SYS_PIPE, (int)pipefd);
+    return syscall1(SYS_PIPE, (long)pipefd);
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
-    int ret = syscall3(SYS_EXECVE, (int)pathname, (int)argv, (int)envp);
+    int ret = syscall3(SYS_EXECVE, (long)pathname, (long)argv, (long)envp);
     if (ret < 0) {
         errno = -ret;
         return -1;
@@ -287,70 +287,70 @@ int execve(const char *pathname, char *const argv[], char *const envp[]) {
 }
 
 char *getcwd(char *buf, size_t size) {
-    int ret = syscall2(SYS_GETCWD, (int)buf, (int)size);
+    int ret = syscall2(SYS_GETCWD, (long)buf, (long)size);
     if (ret < 0) return (void*)0;
     return buf;
 }
 
 int chdir(const char *path) {
-    int ret = syscall1(SYS_CHDIR, (int)path);
+    int ret = syscall1(SYS_CHDIR, (long)path);
     if (ret < 0) { errno = -ret; return -1; }
     return 0;
 }
 
 int access(const char *pathname, int mode) {
-    return syscall2(SYS_ACCESS, (int)pathname, mode);
+    return syscall2(SYS_ACCESS, (long)pathname, mode);
 }
 
 struct stat;
 int stat(const char *pathname, struct stat *statbuf) {
-    int ret = syscall2(SYS_STAT, (int)pathname, (int)statbuf);
+    int ret = syscall2(SYS_STAT, (long)pathname, (long)statbuf);
     if (ret < 0) { errno = ENOENT; return -1; }
     return 0;
 }
 
 int fstat(int fd, struct stat *statbuf) {
-    int ret = syscall2(SYS_FSTAT, fd, (int)statbuf);
+    int ret = syscall2(SYS_FSTAT, fd, (long)statbuf);
     if (ret < 0) { errno = EBADF; return -1; }
     return 0;
 }
 
 int lstat(const char *pathname, struct stat *statbuf) {
-    int ret = syscall2(SYS_STAT, (int)pathname, (int)statbuf);
+    int ret = syscall2(SYS_STAT, (long)pathname, (long)statbuf);
     if (ret < 0) { errno = ENOENT; return -1; }
     return 0;
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    return syscall3(SYS_LSEEK, fd, (int)offset, whence);
+    return syscall3(SYS_LSEEK, fd, (long)offset, whence);
 }
 
 int sigsuspend(const sigset_t *mask) {
-    syscall2(124 | LEBIRUN_SYSCALL_FLAG, (int)mask, sizeof(sigset_t));
+    syscall2(124 | LEBIRUN_SYSCALL_FLAG, (long)mask, sizeof(sigset_t));
     errno = EINTR;
     return -1;
 }
 
 int clock_gettime(int clockid, struct timespec *tp) {
-    return syscall2(SYS_CLOCK_GETTIME, clockid, (int)tp);
+    return syscall2(SYS_CLOCK_GETTIME, clockid, (long)tp);
 }
 
 struct timeval;
 int gettimeofday(struct timeval *__restrict tv, void *__restrict tz) {
-    return syscall2(SYS_GETTIMEOFDAY, (int)tv, (int)tz);
+    return syscall2(SYS_GETTIMEOFDAY, (long)tv, (long)tz);
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     (void)addr; (void)flags; (void)fd; (void)offset;
-    return (void*)syscall2(SYS_MMAP, (int)length, prot);
+    return (void*)syscall2(SYS_MMAP, (long)length, prot);
 }
 
 int munmap(void *addr, size_t length) {
-    return syscall2(SYS_MUNMAP, (int)addr, (int)length);
+    return syscall2(SYS_MUNMAP, (long)addr, (long)length);
 }
 
 int mprotect(void *addr, size_t len, int prot) {
-    return syscall3(SYS_MPROTECT, (int)addr, (int)len, prot);
+    return syscall3(SYS_MPROTECT, (long)addr, (long)len, prot);
 }
 
 int isatty(int fd) {
@@ -364,7 +364,7 @@ int close(int fd) {
 }
 
 int open(const char *pathname, int flags, ...) {
-    int ret = syscall2(SYS_VFS_OPEN, (int)pathname, flags);
+    int ret = syscall2(SYS_VFS_OPEN, (long)pathname, flags);
     if (ret < 0) { errno = ENOENT; return -1; }
     return ret;
 }
@@ -400,27 +400,27 @@ int fcntl(int fd, int cmd, ...) {
 }
 
 int truncate(const char *path, off_t length) {
-    return syscall2(SYS_TRUNCATE, (int)path, (int)length);
+    return syscall2(SYS_TRUNCATE, (long)path, (long)length);
 }
 
 int ftruncate(int fd, off_t length) {
-    return syscall2(SYS_FTRUNCATE, fd, (int)length);
+    return syscall2(SYS_FTRUNCATE, fd, (long)length);
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    return syscall2(SYS_RENAME, (int)oldpath, (int)newpath);
+    return syscall2(SYS_RENAME, (long)oldpath, (long)newpath);
 }
 
 int link(const char *oldpath, const char *newpath) {
-    return syscall2(SYS_LINK, (int)oldpath, (int)newpath);
+    return syscall2(SYS_LINK, (long)oldpath, (long)newpath);
 }
 
 int symlink(const char *target, const char *linkpath) {
-    return syscall2(SYS_SYMLINK, (int)target, (int)linkpath);
+    return syscall2(SYS_SYMLINK, (long)target, (long)linkpath);
 }
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz) {
-    return syscall3(SYS_READLINK, (int)pathname, (int)buf, (int)bufsiz);
+    return syscall3(SYS_READLINK, (long)pathname, (long)buf, (long)bufsiz);
 }
 
 mode_t umask(mode_t mask) {
@@ -428,19 +428,19 @@ mode_t umask(mode_t mask) {
 }
 
 int rmdir(const char *pathname) {
-    return syscall1(SYS_VFS_UNLINK, (int)pathname);
+    return syscall1(SYS_VFS_UNLINK, (long)pathname);
 }
 
 int unlink(const char *pathname) {
-    return syscall1(SYS_VFS_UNLINK, (int)pathname);
+    return syscall1(SYS_VFS_UNLINK, (long)pathname);
 }
 
 int mkdir(const char *pathname, mode_t mode) {
-    return syscall2(SYS_VFS_MKDIR, (int)pathname, mode);
+    return syscall2(SYS_VFS_MKDIR, (long)pathname, mode);
 }
 
 time_t time(time_t *tloc) {
-    return (time_t)syscall1(SYS_TIME, (int)tloc);
+    return (time_t)syscall1(SYS_TIME, (long)tloc);
 }
 
 unsigned int sleep(unsigned int seconds) {
@@ -456,17 +456,17 @@ int usleep(unsigned int usec) {
 
 char *getenv(const char *name) {
     static char env_buf[256];
-    int ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (int)name, (int)env_buf, 256);
+    int ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, (long)env_buf, 256);
     if (ret < 0) return (char *)0;
     return env_buf;
 }
 
 int setenv(const char *name, const char *value, int overwrite) {
-    return syscall3(219 | LEBIRUN_SYSCALL_FLAG, (int)name, (int)value, overwrite);
+    return syscall3(219 | LEBIRUN_SYSCALL_FLAG, (long)name, (long)value, overwrite);
 }
 
 int unsetenv(const char *name) {
-    return syscall1(221 | LEBIRUN_SYSCALL_FLAG, (int)name);
+    return syscall1(221 | LEBIRUN_SYSCALL_FLAG, (long)name);
 }
 
 int clearenv(void) {
@@ -547,7 +547,7 @@ int dup3(int oldfd, int newfd, int flags) {
 }
 
 int pipe2(int pipefd[2], int flags) {
-    return syscall2(180 | LEBIRUN_SYSCALL_FLAG, (int)pipefd, flags);
+    return syscall2(180 | LEBIRUN_SYSCALL_FLAG, (long)pipefd, flags);
 }
 
 int fchdir(int fd) {
@@ -575,11 +575,11 @@ int flock(int fd, int operation) {
 }
 
 ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
-    return syscall4(169 | LEBIRUN_SYSCALL_FLAG, fd, (int)buf, (int)count, (int)offset);
+    return syscall4(169 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
-    return syscall4(170 | LEBIRUN_SYSCALL_FLAG, fd, (int)buf, (int)count, (int)offset);
+    return syscall4(170 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
 }
 
 struct utsname {
@@ -592,11 +592,11 @@ struct utsname {
 };
 
 int uname(struct utsname *buf) {
-    return syscall1(159 | LEBIRUN_SYSCALL_FLAG, (int)buf);
+    return syscall1(159 | LEBIRUN_SYSCALL_FLAG, (long)buf);
 }
 
 ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
-    return syscall3(196 | LEBIRUN_SYSCALL_FLAG, (int)buf, (int)buflen, flags);
+    return syscall3(196 | LEBIRUN_SYSCALL_FLAG, (long)buf, (long)buflen, flags);
 }
 
 int pause(void) {
@@ -608,32 +608,32 @@ unsigned int alarm(unsigned int seconds) {
 }
 
 int setitimer(int which, const struct itimerval *new_value, struct itimerval *old_value) {
-    return syscall3(212 | LEBIRUN_SYSCALL_FLAG, which, (int)new_value, (int)old_value);
+    return syscall3(212 | LEBIRUN_SYSCALL_FLAG, which, (long)new_value, (long)old_value);
 }
 
 int getitimer(int which, struct itimerval *curr_value) {
-    return syscall2(213 | LEBIRUN_SYSCALL_FLAG, which, (int)curr_value);
+    return syscall2(213 | LEBIRUN_SYSCALL_FLAG, which, (long)curr_value);
 }
 
 int chmod(const char *pathname, int mode) {
-    return syscall2(214 | LEBIRUN_SYSCALL_FLAG, (int)pathname, mode);
+    return syscall2(214 | LEBIRUN_SYSCALL_FLAG, (long)pathname, mode);
 }
 
 int chown(const char *pathname, int owner, int group) {
-    return syscall3(215 | LEBIRUN_SYSCALL_FLAG, (int)pathname, owner, group);
+    return syscall3(215 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
 }
 
 int lchown(const char *pathname, int owner, int group) {
-    return syscall3(216 | LEBIRUN_SYSCALL_FLAG, (int)pathname, owner, group);
+    return syscall3(216 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-    return syscall2(217 | LEBIRUN_SYSCALL_FLAG, (int)req, (int)rem);
+    return syscall2(217 | LEBIRUN_SYSCALL_FLAG, (long)req, (long)rem);
 }
 
 int wait4(int pid, int *wstatus, int options, void *rusage) {
     (void)rusage;
-    return syscall3(194 | LEBIRUN_SYSCALL_FLAG, pid, (int)wstatus, options);
+    return syscall3(194 | LEBIRUN_SYSCALL_FLAG, pid, (long)wstatus, options);
 }
 
 int wait3(int *wstatus, int options, void *rusage) {
@@ -641,15 +641,15 @@ int wait3(int *wstatus, int options, void *rusage) {
 }
 
 int waitid(int idtype, int id, void *infop, int options) {
-    return syscall4(195 | LEBIRUN_SYSCALL_FLAG, idtype, id, (int)infop, options);
+    return syscall4(195 | LEBIRUN_SYSCALL_FLAG, idtype, id, (long)infop, options);
 }
 
 int getdents(int fd, void *dirp, unsigned int count) {
-    return syscall3(80 | LEBIRUN_SYSCALL_FLAG, fd, (int)dirp, count);
+    return syscall3(80 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, count);
 }
 
 int getdents64(int fd, void *dirp, unsigned int count) {
-    return syscall3(178 | LEBIRUN_SYSCALL_FLAG, fd, (int)dirp, count);
+    return syscall3(178 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, count);
 }
 
 int sigreturn(void) {
@@ -680,7 +680,7 @@ long sysconf(int name) {
         case 83: return 1;
         case 84: return 1;
         case 85:
-            if (syscall1(160 | LEBIRUN_SYSCALL_FLAG, (int)&si) == 0) {
+            if (syscall1(160 | LEBIRUN_SYSCALL_FLAG, (long)&si) == 0) {
                 return (long)(si.totalram / 4096);
             }
             return -1;
@@ -693,7 +693,7 @@ int ioctl(int fd, unsigned long request, ...) {
     va_start(ap, request);
     uintptr_t argp = (uintptr_t)va_arg(ap, void *);
     va_end(ap);
-    int ret = syscall3(56 | 0x80000000, fd, (int)request, (int)argp);
+    int ret = syscall3(56 | 0x80000000, fd, (long)request, (long)argp);
     if (ret < 0) {
         errno = -ret;
         return -1;
@@ -702,11 +702,11 @@ int ioctl(int fd, unsigned long request, ...) {
 }
 
 int tcgetattr(int fd, void *termios_p) {
-    return syscall2(54 | 0x80000000, fd, (int)termios_p);
+    return syscall2(54 | 0x80000000, fd, (long)termios_p);
 }
 
 int tcsetattr(int fd, int optional_actions, const void *termios_p) {
-    return syscall3(55 | 0x80000000, fd, optional_actions, (int)termios_p);
+    return syscall3(55 | 0x80000000, fd, optional_actions, (long)termios_p);
 }
 
 int tcflush(int fd, int queue_selector) {
@@ -786,8 +786,8 @@ sighandler_t signal(int signum, sighandler_t handler) {
     return oldact.sa_handler;
 }
 
-static inline int syscall5(int num, int arg1, int arg2, int arg3, int arg4, int arg5) {
-    int ret;
+static inline long syscall5(long num, long arg1, long arg2, long arg3, long arg4, long arg5) {
+    long ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
@@ -797,16 +797,16 @@ static inline int syscall5(int num, int arg1, int arg2, int arg3, int arg4, int 
     return ret;
 }
 
-static inline int syscall6(int num, int arg1, int arg2, int arg3, int arg4, int arg5, int arg6) {
-    int ret;
+static inline long syscall6(long num, long arg1, long arg2, long arg3, long arg4, long arg5, long arg6) {
+    long ret;
     __asm__ volatile (
-        "push %%ebp\n\t"
-        "mov %7, %%ebp\n\t"
+        "movq %%rbp, %%r10\n\t"
+        "movq %7, %%rbp\n\t"
         "int $0x80\n\t"
-        "pop %%ebp"
+        "movq %%r10, %%rbp"
         : "=a"(ret)
-        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4), "D"(arg5), "m"(arg6)
-        : "memory"
+        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4), "D"(arg5), "r"(arg6)
+        : "memory", "r10"
     );
     return ret;
 }
@@ -859,7 +859,7 @@ int socket(int domain, int type, int protocol) {
 }
 
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    return syscall3(SYS_BIND, sockfd, (int)addr, addrlen);
+    return syscall3(SYS_BIND, sockfd, (long)addr, addrlen);
 }
 
 int listen(int sockfd, int backlog) {
@@ -867,33 +867,33 @@ int listen(int sockfd, int backlog) {
 }
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_ACCEPT, sockfd, (int)addr, (int)addrlen);
+    return syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)addrlen);
 }
 
 int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
-    return syscall4(SYS_ACCEPT, sockfd, (int)addr, (int)addrlen, flags);
+    return syscall4(SYS_ACCEPT, sockfd, (long)addr, (long)addrlen, flags);
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    return syscall3(SYS_CONNECT, sockfd, (int)addr, addrlen);
+    return syscall3(SYS_CONNECT, sockfd, (long)addr, addrlen);
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
-    return syscall6(SYS_SENDTO, sockfd, (int)buf, (int)len, flags, 0, 0);
+    return syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, 0, 0);
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
-    return syscall6(SYS_RECVFROM, sockfd, (int)buf, (int)len, flags, 0, 0);
+    return syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, 0, 0);
 }
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
                const struct sockaddr *dest_addr, socklen_t addrlen) {
-    return syscall6(SYS_SENDTO, sockfd, (int)buf, (int)len, flags, (int)dest_addr, addrlen);
+    return syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, (long)dest_addr, addrlen);
 }
 
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *src_addr, socklen_t *addrlen) {
-    return syscall6(SYS_RECVFROM, sockfd, (int)buf, (int)len, flags, (int)src_addr, (int)addrlen);
+    return syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, (long)src_addr, (long)addrlen);
 }
 
 int shutdown(int sockfd, int how) {
@@ -901,23 +901,23 @@ int shutdown(int sockfd, int how) {
 }
 
 int setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen) {
-    return syscall5(SYS_SETSOCKOPT, sockfd, level, optname, (int)optval, optlen);
+    return syscall5(SYS_SETSOCKOPT, sockfd, level, optname, (long)optval, optlen);
 }
 
 int getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen) {
-    return syscall5(SYS_GETSOCKOPT, sockfd, level, optname, (int)optval, (int)optlen);
+    return syscall5(SYS_GETSOCKOPT, sockfd, level, optname, (long)optval, (long)optlen);
 }
 
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_GETPEERNAME, sockfd, (int)addr, (int)addrlen);
+    return syscall3(SYS_GETPEERNAME, sockfd, (long)addr, (long)addrlen);
 }
 
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_GETSOCKNAME, sockfd, (int)addr, (int)addrlen);
+    return syscall3(SYS_GETSOCKNAME, sockfd, (long)addr, (long)addrlen);
 }
 
 int socketpair(int domain, int type, int protocol, int sv[2]) {
-    return syscall4(SYS_SOCKETPAIR, domain, type, protocol, (int)sv);
+    return syscall4(SYS_SOCKETPAIR, domain, type, protocol, (long)sv);
 }
 
 struct epoll_event;
@@ -931,15 +931,15 @@ int epoll_create1(int flags) {
 }
 
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
-    return syscall4(SYS_EPOLL_CTL, epfd, op, fd, (int)event);
+    return syscall4(SYS_EPOLL_CTL, epfd, op, fd, (long)event);
 }
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
-    return syscall4(SYS_EPOLL_WAIT, epfd, (int)events, maxevents, timeout);
+    return syscall4(SYS_EPOLL_WAIT, epfd, (long)events, maxevents, timeout);
 }
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout, const sigset_t *sigmask) {
-    return syscall5(SYS_EPOLL_PWAIT, epfd, (int)events, maxevents, timeout, (int)sigmask);
+    return syscall5(SYS_EPOLL_PWAIT, epfd, (long)events, maxevents, timeout, (long)sigmask);
 }
 
 int select(int nfds,
@@ -947,7 +947,7 @@ int select(int nfds,
            fd_set *__restrict writefds,
            fd_set *__restrict exceptfds,
            struct timeval *__restrict timeout) {
-    return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout);
+    return syscall5(SYS_SELECT, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
 }
 
 int pselect(int nfds,
@@ -957,17 +957,17 @@ int pselect(int nfds,
             const struct timespec *__restrict timeout,
             const sigset_t *__restrict sigmask) {
     (void)sigmask;
-    return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds, (int)exceptfds, (int)timeout);
+    return syscall5(SYS_SELECT, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
 }
 
 struct pollfd;
 
 int poll(struct pollfd *fds, unsigned long nfds, int timeout) {
-    return syscall3(SYS_POLL, (int)fds, (int)nfds, timeout);
+    return syscall3(SYS_POLL, (long)fds, (long)nfds, timeout);
 }
 
 int ppoll(struct pollfd *fds, unsigned long nfds, const struct timespec *tmo_p, const sigset_t *sigmask) {
-    return syscall4(SYS_PPOLL, (int)fds, (int)nfds, (int)tmo_p, (int)sigmask);
+    return syscall4(SYS_PPOLL, (long)fds, (long)nfds, (long)tmo_p, (long)sigmask);
 }
 
 int eventfd(unsigned int initval, int flags) {
@@ -982,23 +982,23 @@ int eventfd(unsigned int initval, int flags) {
 #define FUTEX_PRIVATE_FLAG 128
 
 int futex(int *uaddr, int futex_op, int val, const struct timespec *timeout, int *uaddr2, int val3) {
-    return syscall6(SYS_FUTEX, (int)uaddr, futex_op, val, (int)timeout, (int)uaddr2, val3);
+    return syscall6(SYS_FUTEX, (long)uaddr, futex_op, val, (long)timeout, (long)uaddr2, val3);
 }
 
 int set_robust_list(void *head, size_t len) {
-    return syscall2(SYS_SET_ROBUST_LIST, (int)head, (int)len);
+    return syscall2(SYS_SET_ROBUST_LIST, (long)head, (long)len);
 }
 
 int get_robust_list(int pid, void **head_ptr, size_t *len_ptr) {
-    return syscall3(SYS_GET_ROBUST_LIST, pid, (int)head_ptr, (int)len_ptr);
+    return syscall3(SYS_GET_ROBUST_LIST, pid, (long)head_ptr, (long)len_ptr);
 }
 
 int __clone(int (*fn)(void *), void *stack, int flags, void *arg, ...) {
-    return syscall4(SYS_CLONE, (int)fn, (int)stack, flags, (int)arg);
+    return syscall4(SYS_CLONE, (long)fn, (long)stack, flags, (long)arg);
 }
 
 int set_tid_address(int *tidptr) {
-    return syscall1(SYS_SET_TID_ADDRESS, (int)tidptr);
+    return syscall1(SYS_SET_TID_ADDRESS, (long)tidptr);
 }
 
 int posix_openpt(int flags) {
@@ -1015,14 +1015,14 @@ int unlockpt(int fd) {
 
 char *ptsname(int fd) {
     static char pts_name[32];
-    int ret = syscall2(SYS_PTSNAME, fd, (int)pts_name);
+    int ret = syscall2(SYS_PTSNAME, fd, (long)pts_name);
     if (ret < 0) return (void*)0;
     return pts_name;
 }
 
 int ptsname_r(int fd, char *buf, size_t buflen) {
     if (!buf || buflen < 16) return EINVAL;
-    int ret = syscall2(SYS_PTSNAME, fd, (int)buf);
+    int ret = syscall2(SYS_PTSNAME, fd, (long)buf);
     return ret < 0 ? ENOTTY : 0;
 }
 
@@ -1151,20 +1151,20 @@ void cfmakeraw(void *termios_p) {
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
     (void)attr;
-    return syscall3(SYS_PTHREAD_CREATE, (int)thread, (int)start_routine, (int)arg);
+    return syscall3(SYS_PTHREAD_CREATE, (long)thread, (long)start_routine, (long)arg);
 }
 
 void pthread_exit(void *retval) {
-    syscall1(SYS_PTHREAD_EXIT, (int)retval);
+    syscall1(SYS_PTHREAD_EXIT, (long)retval);
     __builtin_unreachable();
 }
 
 int pthread_join(pthread_t thread, void **retval) {
-    return syscall2(SYS_PTHREAD_JOIN, (int)thread, (int)retval);
+    return syscall2(SYS_PTHREAD_JOIN, (long)thread, (long)retval);
 }
 
 int pthread_detach(pthread_t thread) {
-    return syscall1(SYS_PTHREAD_DETACH, (int)thread);
+    return syscall1(SYS_PTHREAD_DETACH, (long)thread);
 }
 
 pthread_t pthread_self(void) {
@@ -1173,44 +1173,44 @@ pthread_t pthread_self(void) {
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
     (void)attr;
-    return syscall1(SYS_PTHREAD_MUTEX_INIT, (int)mutex);
+    return syscall1(SYS_PTHREAD_MUTEX_INIT, (long)mutex);
 }
 
 int pthread_mutex_destroy(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_DESTROY, (int)mutex);
+    return syscall1(SYS_PTHREAD_MUTEX_DESTROY, (long)mutex);
 }
 
 int pthread_mutex_lock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_LOCK, (int)mutex);
+    return syscall1(SYS_PTHREAD_MUTEX_LOCK, (long)mutex);
 }
 
 int pthread_mutex_trylock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_TRYLOCK, (int)mutex);
+    return syscall1(SYS_PTHREAD_MUTEX_TRYLOCK, (long)mutex);
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_UNLOCK, (int)mutex);
+    return syscall1(SYS_PTHREAD_MUTEX_UNLOCK, (long)mutex);
 }
 
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
     (void)attr;
-    return syscall1(SYS_PTHREAD_COND_INIT, (int)cond);
+    return syscall1(SYS_PTHREAD_COND_INIT, (long)cond);
 }
 
 int pthread_cond_destroy(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_DESTROY, (int)cond);
+    return syscall1(SYS_PTHREAD_COND_DESTROY, (long)cond);
 }
 
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
-    return syscall2(SYS_PTHREAD_COND_WAIT, (int)cond, (int)mutex);
+    return syscall2(SYS_PTHREAD_COND_WAIT, (long)cond, (long)mutex);
 }
 
 int pthread_cond_signal(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_SIGNAL, (int)cond);
+    return syscall1(SYS_PTHREAD_COND_SIGNAL, (long)cond);
 }
 
 int pthread_cond_broadcast(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_BROADCAST, (int)cond);
+    return syscall1(SYS_PTHREAD_COND_BROADCAST, (long)cond);
 }
 
 #ifdef pthread_equal
@@ -1271,45 +1271,45 @@ int pthread_condattr_destroy(pthread_condattr_t *attr) {
 #define IPC_PRIVATE 0
 
 int shmget(key_t key, size_t size, int shmflg) {
-    return syscall3(SYS_SHMGET, key, (int)size, shmflg);
+    return syscall3(SYS_SHMGET, key, (long)size, shmflg);
 }
 
 void *shmat(int shmid, const void *shmaddr, int shmflg) {
-    return (void *)syscall3(SYS_SHMAT, shmid, (int)shmaddr, shmflg);
+    return (void *)syscall3(SYS_SHMAT, shmid, (long)shmaddr, shmflg);
 }
 
 int shmdt(const void *shmaddr) {
-    return syscall1(SYS_SHMDT, (int)shmaddr);
+    return syscall1(SYS_SHMDT, (long)shmaddr);
 }
 
 struct shmid_ds;
 int shmctl(int shmid, int cmd, struct shmid_ds *buf) {
-    return syscall3(SYS_SHMCTL, shmid, cmd, (int)buf);
+    return syscall3(SYS_SHMCTL, shmid, cmd, (long)buf);
 }
 
 int shm_open(const char *name, int oflag, mode_t mode) {
-    return syscall3(SYS_SHM_OPEN, (int)name, oflag, mode);
+    return syscall3(SYS_SHM_OPEN, (long)name, oflag, mode);
 }
 
 int shm_unlink(const char *name) {
-    return syscall1(SYS_SHM_UNLINK, (int)name);
+    return syscall1(SYS_SHM_UNLINK, (long)name);
 }
 
 void *dlopen(const char *filename, int flags) {
-    return (void *)syscall2(SYS_DLOPEN, (int)filename, flags);
+    return (void *)syscall2(SYS_DLOPEN, (long)filename, flags);
 }
 
 void *dlsym(void *handle, const char *symbol) {
-    return (void *)syscall2(SYS_DLSYM, (int)handle, (int)symbol);
+    return (void *)syscall2(SYS_DLSYM, (long)handle, (long)symbol);
 }
 
 int dlclose(void *handle) {
-    return syscall1(SYS_DLCLOSE, (int)handle);
+    return syscall1(SYS_DLCLOSE, (long)handle);
 }
 
 char *dlerror(void) {
     static char err_buf[128];
-    int ret = syscall2(SYS_DLERROR, (int)err_buf, 128);
+    int ret = syscall2(SYS_DLERROR, (long)err_buf, 128);
     if (ret <= 0) return (void *)0;
     return err_buf;
 }
@@ -1328,38 +1328,36 @@ char *dlerror(void) {
 #include <glob.h>
 
 int regcomp(regex_t *__restrict preg, const char *__restrict pattern, int cflags) {
-    return syscall3(SYS_REGCOMP, (int)preg, (int)pattern, cflags);
+    return syscall3(SYS_REGCOMP, (long)preg, (long)pattern, cflags);
 }
 
 int regexec(const regex_t *__restrict preg, const char *__restrict string,
             size_t nmatch, regmatch_t *__restrict pmatch, int eflags) {
-    int packed = ((int)nmatch << 16) | ((int)(uintptr_t)pmatch & 0xFFFF);
     (void)eflags;
-    return syscall3(SYS_REGEXEC, (int)preg, (int)string, packed);
+    return syscall4(SYS_REGEXEC, (long)preg, (long)string, (long)nmatch, (long)pmatch);
 }
 
 void regfree(regex_t *preg) {
-    syscall1(SYS_REGFREE, (int)preg);
+    syscall1(SYS_REGFREE, (long)preg);
 }
 
 size_t regerror(int errcode, const regex_t *__restrict preg,
                 char *__restrict errbuf, size_t errbuf_size) {
-    int packed = ((int)(uintptr_t)errbuf << 16) | ((int)errbuf_size & 0xFFFF);
-    return syscall3(SYS_REGERROR, errcode, (int)preg, packed);
+    return syscall4(SYS_REGERROR, errcode, (long)preg, (long)errbuf, (long)errbuf_size);
 }
 
 int fnmatch(const char *pattern, const char *string, int flags) {
-    return syscall3(SYS_FNMATCH, (int)pattern, (int)string, flags);
+    return syscall3(SYS_FNMATCH, (long)pattern, (long)string, flags);
 }
 
 int glob(const char *__restrict pattern, int flags,
          int (*errfunc)(const char *, int), glob_t *__restrict pglob) {
     (void)errfunc;
-    return syscall3(SYS_GLOB, (int)pattern, flags, (int)pglob);
+    return syscall3(SYS_GLOB, (long)pattern, flags, (long)pglob);
 }
 
 void globfree(glob_t *pglob) {
-    syscall1(SYS_GLOBFREE, (int)pglob);
+    syscall1(SYS_GLOBFREE, (long)pglob);
 }
 
 static int internal_getchar(void) {
@@ -1367,7 +1365,7 @@ static int internal_getchar(void) {
 }
 
 int vsscanf(const char *__restrict str, const char *__restrict format, __builtin_va_list ap) {
-    uint32_t args[20];
+    uintptr_t args[20];
     int arg_count = 0;
     const char *f = format;
     
@@ -1384,7 +1382,7 @@ int vsscanf(const char *__restrict str, const char *__restrict format, __builtin
             if (*f == 'd' || *f == 'i' || *f == 'u' || *f == 'x' || *f == 'X' ||
                 *f == 'o' || *f == 's' || *f == 'c' || *f == 'n' || *f == 'p' ||
                 *f == '[' || *f == 'f' || *f == 'e' || *f == 'g') {
-                args[arg_count++] = (uint32_t)__builtin_va_arg(ap, void *);
+                args[arg_count++] = (uintptr_t)__builtin_va_arg(ap, void *);
             }
             if (*f == '[') {
                 while (*f && *f != ']') f++;
@@ -1395,7 +1393,7 @@ int vsscanf(const char *__restrict str, const char *__restrict format, __builtin
         }
     }
     
-    return syscall3(SYS_SSCANF, (int)str, (int)format, (int)args);
+    return syscall3(SYS_SSCANF, (long)str, (long)format, (long)args);
 }
 
 int sscanf(const char *__restrict str, const char *__restrict format, ...) {

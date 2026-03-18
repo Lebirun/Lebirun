@@ -199,7 +199,7 @@ typedef struct {
     uint8_t pmport:4;
     uint8_t reserved0:4;
     uint8_t reserved1[2];
-    uint32_t data[1];
+    uint64_t data[1];
 } __attribute__((packed)) fis_data_t;
 
 typedef struct {
@@ -236,10 +236,10 @@ typedef struct {
     uint8_t a:1;
     uint8_t reserved1[2];
     uint64_t dma_buffer_id;
-    uint32_t reserved2;
-    uint32_t dma_buf_offset;
-    uint32_t transfer_count;
-    uint32_t reserved3;
+    uint64_t reserved2;
+    uint64_t dma_buf_offset;
+    uint64_t transfer_count;
+    uint64_t reserved3;
 } __attribute__((packed)) fis_dma_setup_t;
 
 typedef struct {
@@ -265,19 +265,19 @@ typedef struct {
     uint8_t reserved0:1;
     uint8_t pmp:4;
     uint16_t prdtl;
-    volatile uint32_t prdbc;
-    uint32_t ctba;
-    uint32_t ctbau;
-    uint32_t reserved1[4];
+    volatile uint64_t prdbc;
+    uint64_t ctba;
+    uint64_t ctbau;
+    uint64_t reserved1[4];
 } __attribute__((packed)) hba_cmd_header_t;
 
 typedef struct {
-    uint32_t dba;
-    uint32_t dbau;
-    uint32_t reserved0;
-    uint32_t dbc:22;
-    uint32_t reserved1:9;
-    uint32_t i:1;
+    uint64_t dba;
+    uint64_t dbau;
+    uint64_t reserved0;
+    uint64_t dbc:22;
+    uint64_t reserved1:9;
+    uint64_t i:1;
 } __attribute__((packed)) hba_prdt_entry_t;
 
 typedef struct {
@@ -321,10 +321,10 @@ typedef struct {
     ahci_cmd_state_t state;
     uint8_t command;
     uint64_t lba;
-    uint32_t count;
+    uint64_t count;
     void *buffer;
-    uint32_t buf_phys;
-    uint32_t buf_pages;
+    uint64_t buf_phys;
+    uint64_t buf_pages;
     ahci_callback_t callback;
     void *callback_ctx;
     volatile int result;
@@ -334,41 +334,41 @@ typedef struct {
 typedef struct ahci_port {
     bool present;
     ahci_dev_type_t type;
-    uint32_t port_num;
-    uint32_t hba_base;
-    uint32_t port_base;
+    uint64_t port_num;
+    uint64_t hba_base;
+    uint64_t port_base;
     hba_cmd_header_t *cmd_list;
     hba_fis_t *fis;
     hba_cmd_table_t *cmd_table;
-    uint32_t cmd_list_phys;
-    uint32_t fis_phys;
-    uint32_t cmd_table_phys;
+    uint64_t cmd_list_phys;
+    uint64_t fis_phys;
+    uint64_t cmd_table_phys;
     uint64_t sector_count;
     char model[41];
     char serial[21];
     
-    volatile uint32_t cmd_issued;
-    volatile uint32_t cmd_running;
+    volatile uint64_t cmd_issued;
+    volatile uint64_t cmd_running;
     ahci_cmd_request_t requests[AHCI_CMD_SLOTS];
     
-    volatile uint32_t error_count;
+    volatile uint64_t error_count;
     volatile ahci_error_t last_error;
-    volatile uint32_t last_serr;
-    volatile uint32_t last_tfd;
+    volatile uint64_t last_serr;
+    volatile uint64_t last_tfd;
     bool use_irq;
 } ahci_port_t;
 
 typedef struct {
     bool initialized;
-    uint32_t pci_bus;
-    uint32_t pci_slot;
-    uint32_t pci_func;
-    uint32_t abar;
-    uint32_t abar_virt;
-    uint32_t version;
-    uint32_t ports_impl;
-    uint32_t num_ports;
-    uint32_t num_cmd_slots;
+    uint64_t pci_bus;
+    uint64_t pci_slot;
+    uint64_t pci_func;
+    uint64_t abar;
+    uint64_t abar_virt;
+    uint64_t version;
+    uint64_t ports_impl;
+    uint64_t num_ports;
+    uint64_t num_cmd_slots;
     uint8_t irq;
     bool irq_enabled;
     ahci_port_t ports[AHCI_MAX_PORTS];
@@ -406,18 +406,18 @@ typedef struct {
 int ahci_init(void);
 int ahci_probe(void);
 int ahci_port_init(ahci_port_t *port);
-int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffer);
-int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint32_t count, const void *buffer);
+int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer);
+int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer);
 int ahci_identify(ahci_port_t *port);
 int ahci_flush(ahci_port_t *port);
 ahci_controller_t *ahci_get_controller(void);
-ahci_port_t *ahci_get_port(uint32_t index);
+ahci_port_t *ahci_get_port(uint64_t index);
 void ahci_debug_info(void);
 int ahci_test_rw(void);
 
-int ahci_read_async(ahci_port_t *port, uint64_t lba, uint32_t count, 
+int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count, 
                     void *buffer, ahci_callback_t callback, void *ctx);
-int ahci_write_async(ahci_port_t *port, uint64_t lba, uint32_t count,
+int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
                      const void *buffer, ahci_callback_t callback, void *ctx);
 void ahci_poll_completion(ahci_port_t *port);
 

@@ -6,7 +6,7 @@
 
 typedef struct mutex {
     int locked;
-    uint32_t owner;
+    uint64_t owner;
     wait_queue_t waiters;
 } mutex_t;
 

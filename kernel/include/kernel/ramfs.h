@@ -26,16 +26,16 @@ typedef struct ramfs_node {
     char name[RAMFS_MAX_NAME_LEN];
     uint8_t type;
     uint8_t permissions;
-    uint32_t uid;
-    uint32_t gid;
+    uint64_t uid;
+    uint64_t gid;
     uint64_t length;
     uint8_t *data;
     uint64_t data_capacity;
     const uint8_t *backing_data;
     uint64_t backing_length;
-    uint32_t atime;
-    uint32_t mtime;
-    uint32_t ctime;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
     mutex_t lock;
     struct ramfs_node *parent;
     struct ramfs_node *children;
@@ -64,15 +64,15 @@ int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size
 int ramfs_stat(const char *path, uint64_t *size, uint8_t *type, uint8_t *perms);
 int ramfs_truncate(const char *path, uint64_t length);
 int ramfs_rename(const char *old_path, const char *new_path);
-int ramfs_chmod(const char *path, uint32_t mode);
-int ramfs_chown(const char *path, uint32_t uid, uint32_t gid);
+int ramfs_chmod(const char *path, uint64_t mode);
+int ramfs_chown(const char *path, uint64_t uid, uint64_t gid);
 int ramfs_set_backing(const char *path, const uint8_t *data, uint64_t length);
 
 ramfs_node_t *ramfs_get_root(void);
 ramfs_node_t *ramfs_find_node(const char *path);
 int ramfs_get_stats(ramfs_stats_t *stats);
 
-uint32_t ramfs_get_time(void);
+uint64_t ramfs_get_time(void);
 
 void ramfs_debug_check_root(const char *location);
 void ramfs_internalize_all(void);

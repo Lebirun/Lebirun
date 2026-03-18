@@ -82,12 +82,12 @@ typedef struct {
     uint16_t gid_idx;
     uint32_t mtime;
     uint32_t inode_number;
-    uint32_t start_block;
     uint32_t nlink;
     uint32_t file_size;
+    uint32_t start_block;
     uint16_t offset;
-    uint32_t parent_inode;
     uint32_t xattr;
+    uint32_t parent_inode;
 } __attribute__((packed)) squashfs_ldir_inode_t;
 
 typedef struct {
@@ -112,7 +112,7 @@ typedef struct {
     uint32_t inode_number;
     uint64_t start_block;
     uint64_t file_size;
-    uint32_t sparse;
+    uint64_t sparse;
     uint32_t nlink;
     uint32_t fragment;
     uint32_t offset;
@@ -151,30 +151,30 @@ typedef struct {
 
 typedef struct squashfs_context {
     uint8_t *base;
-    uint32_t size;
+    uint64_t size;
     squashfs_super_t *super;
-    uint32_t block_size;
+    uint64_t block_size;
     uint16_t compression_id;
     uint64_t inode_table_start;
     uint64_t directory_table_start;
     uint64_t fragment_table_start;
     uint64_t id_table_start;
-    uint32_t *id_table;
+    uint64_t *id_table;
     squashfs_fragment_entry_t *fragment_table;
-    uint32_t fragment_count;
+    uint64_t fragment_count;
 } squashfs_context_t;
 
 typedef struct squashfs_vfs_node {
     vfs_node_t vfs;
     uint64_t inode_ref;
-    uint32_t start_block;
-    uint32_t dir_block_offset;
-    uint32_t parent_inode;
+    uint64_t start_block;
+    uint64_t dir_block_offset;
+    uint64_t parent_inode;
 } squashfs_vfs_node_t;
 
-void squashfs_init(uint32_t mod_start, uint32_t mod_end);
+void squashfs_init(uint64_t mod_start, uint64_t mod_end);
 void squashfs_vfs_register(void);
 squashfs_context_t *squashfs_get_context(void);
-int squashfs_decompress(uint8_t *src, uint32_t src_len, uint8_t *dst, uint32_t dst_len, uint16_t comp_id);
+int squashfs_decompress(uint8_t *src, uint64_t src_len, uint8_t *dst, uint64_t dst_len, uint16_t comp_id);
 
 #endif

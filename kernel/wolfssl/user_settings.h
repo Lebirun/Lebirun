@@ -18,7 +18,7 @@
 #define HAVE_SUPPORTED_CURVES
 #define HAVE_SNI
 
-#define SIZEOF_LONG      4
+#define SIZEOF_LONG      8
 #define SIZEOF_LONG_LONG 8
 
 #define USE_FAST_MATH
@@ -33,6 +33,7 @@
 #define HAVE_HKDF
 #define HAVE_FFDHE_2048
 #define WC_RSA_PSS
+#define WC_RSA_BLINDING
 #define WOLFSSL_DH_CONST
 
 #define NO_DSA

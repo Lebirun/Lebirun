@@ -26,7 +26,7 @@ fi
 
 printf "\033[1;34mStarting QEMU...\033[0m\n"
 
-QEMU_CMD="qemu-system-$(./target-triplet-to-arch.sh "$HOST")"
+QEMU_CMD="qemu-system-x86_64"
 
 if [ "$VERBOSE" -eq 1 ]; then
     printf "  -> %s %s\n" "$QEMU_CMD" "(see below)"

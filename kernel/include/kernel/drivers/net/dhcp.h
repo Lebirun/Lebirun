@@ -15,26 +15,26 @@
 
 typedef struct {
     uint8_t state;
-    uint32_t xid;
+    uint64_t xid;
     ipv4_addr_t offered_ip;
     ipv4_addr_t server_ip;
     ipv4_addr_t subnet_mask;
     ipv4_addr_t gateway;
     ipv4_addr_t dns1;
     ipv4_addr_t dns2;
-    uint32_t lease_time;
-    uint32_t t1_time;
-    uint32_t t2_time;
-    uint32_t lease_start;
-    uint32_t last_send_time;
-    uint32_t retries;
+    uint64_t lease_time;
+    uint64_t t1_time;
+    uint64_t t2_time;
+    uint64_t lease_start;
+    uint64_t last_send_time;
+    uint64_t retries;
     netif_t *netif;
 } dhcp_state_t;
 
 void dhcp_init(netif_t *netif);
 void dhcp_start(netif_t *netif);
 void dhcp_stop(netif_t *netif);
-void dhcp_receive(netif_t *netif, uint8_t *data, uint32_t len);
+void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len);
 void dhcp_tick(void);
 int dhcp_is_bound(netif_t *netif);
 int dhcp_is_negotiating(void);

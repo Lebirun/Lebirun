@@ -15,7 +15,7 @@
 #define RELEASE OS_VERSION
 #define VERSION OS_VERSION
 #define NODENAME "lebirun"
-#define MACHINE "i386"
+#define MACHINE "x86_64"
 
 struct utsname {
     char sysname[65];

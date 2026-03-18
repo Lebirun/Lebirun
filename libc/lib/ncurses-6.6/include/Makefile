@@ -59,9 +59,9 @@ INSTALL_DATA	= ${INSTALL} -m 644
 AWK		= mawk
 LN_S		= ln -s -f
 
-CC		= i686-elf-gcc
-CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -isystem=/home/opuayt/leb/sysroot/usr/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
-CPPFLAGS	= -DHAVE_CONFIG_H -I. -I. -I../include -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -I/home/opuayt/leb/libc/leblibc/include -DNDEBUG
+CC		= x86_64-elf-gcc
+CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
+CPPFLAGS	= -DHAVE_CONFIG_H -I. -I. -I../include -D_XOPEN_SOURCE=600 -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -isystem=/home/opuayt/leb/libc/leblibc/build-x86_64/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/x86_64 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -DNDEBUG
 
 CTAGS		= 
 ETAGS		= 

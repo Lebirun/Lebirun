@@ -29,30 +29,32 @@ CURRENT_STEP=0
 COLS=$(tput cols 2>/dev/null || echo 80)
 ROWS=$(tput lines 2>/dev/null || echo 24)
 
-_BAR_SETUP="${_BAR_SETUP:-0}"
-setup_bottom_bar() {
-  if [ "$_BAR_SETUP" -eq 0 ]; then
+_BAR_ACTIVE=0
+setup_bar() {
+  if [ "$_BAR_ACTIVE" -eq 0 ]; then
+    ROWS=$(tput lines 2>/dev/null || echo 24)
+    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
     printf "\033[1;%dr" "$((ROWS - 2))"
-    printf "\033[%d;1H\033[2K" "$((ROWS - 1))"
-    printf "\033[%d;1H\033[2K" "$ROWS"
     printf "\033[%d;1H" "$((ROWS - 2))"
-    _BAR_SETUP=1
+    _BAR_ACTIVE=1
   fi
 }
 
 cleanup_bar() {
-  printf "\033[1;%dr" "$ROWS"
-  printf "\033[%d;1H\033[2K" "$((ROWS - 1))"
-  printf "\033[%d;1H\033[2K" "$ROWS"
-  printf "\033[%d;1H" "$((ROWS - 1))"
+  if [ "$_BAR_ACTIVE" -eq 1 ]; then
+    ROWS=$(tput lines 2>/dev/null || echo 24)
+    printf "\033[1;%dr" "$ROWS"
+    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
+    _BAR_ACTIVE=0
+  fi
 }
-
-trap 'cleanup_bar; exit 1' INT TERM
 
 progress_bar() {
   _step="$1"
   _total="$2"
   _msg="$3"
+  ROWS=$(tput lines 2>/dev/null || echo 24)
+  COLS=$(tput cols 2>/dev/null || echo 80)
   _pct=$((_step * 100 / _total))
   _bar_w=$((COLS - 2))
   if [ "$_bar_w" -lt 10 ]; then
@@ -76,13 +78,10 @@ progress_bar() {
     _i=$((_i + 1))
   done
   _label=$(printf "%3d%%  %s" "$_pct" "$_msg")
-  printf "\033[s"
-  printf "\033[%d;1H\033[2K%s" "$((ROWS - 1))" "$_label"
-  printf "\033[%d;1H\033[2K[%s]" "$ROWS" "$_bar"
-  printf "\033[u"
+  printf "\0337\033[%d;1H\033[2K%s\033[%d;1H\033[2K[%s]\0338" "$((ROWS - 1))" "$_label" "$ROWS" "$_bar"
 }
 
-setup_bottom_bar
+setup_bar
 
 if [ "$VERBOSE" -eq 1 ]; then
   export V=1
@@ -120,6 +119,9 @@ run_cmd() {
   _step_end=$(date +%s)
   _step_dur=$((_step_end - _step_start))
   printf "  \033[0;32mdone in %ds\033[0m\n" "$_step_dur"
+  if [ "$_BAR_ACTIVE" -eq 1 ]; then
+    progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "$_desc"
+  fi
 }
 
 for PROJECT in $PROJECTS; do
@@ -127,7 +129,7 @@ for PROJECT in $PROJECTS; do
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building $PROJECT"
   printf "\033[1;36mBuilding %s...\033[0m\n" "$PROJECT"
   if [ "$PROJECT" = "libc" ]; then
-    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=i386 $MAKE install"
+    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 $MAKE install"
   else
     run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" $MAKE install"
   fi

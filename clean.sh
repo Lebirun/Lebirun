@@ -20,34 +20,38 @@ done
 [ -d "userprog/LebInit" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/login" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "libc/lib/ncurses-6.6" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
-[ -d "ports/nano-8.7.1" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
-[ -d "ports/htop-3.4.1" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 TOTAL_STEPS=$((TOTAL_STEPS + 4))
 CURRENT_STEP=0
 
 COLS=$(tput cols 2>/dev/null || echo 80)
 ROWS=$(tput lines 2>/dev/null || echo 24)
 
-setup_bottom_bar() {
-  printf "\033[1;%dr" "$((ROWS - 2))"
-  printf "\033[%d;1H\033[2K" "$((ROWS - 1))"
-  printf "\033[%d;1H\033[2K" "$ROWS"
-  printf "\033[%d;1H" "$((ROWS - 2))"
+_BAR_ACTIVE=0
+setup_bar() {
+  if [ "$_BAR_ACTIVE" -eq 0 ]; then
+    ROWS=$(tput lines 2>/dev/null || echo 24)
+    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
+    printf "\033[1;%dr" "$((ROWS - 2))"
+    printf "\033[%d;1H" "$((ROWS - 2))"
+    _BAR_ACTIVE=1
+  fi
 }
 
 cleanup_bar() {
-  printf "\033[1;%dr" "$ROWS"
-  printf "\033[%d;1H\033[2K" "$((ROWS - 1))"
-  printf "\033[%d;1H\033[2K" "$ROWS"
-  printf "\033[%d;1H" "$((ROWS - 1))"
+  if [ "$_BAR_ACTIVE" -eq 1 ]; then
+    ROWS=$(tput lines 2>/dev/null || echo 24)
+    printf "\033[1;%dr" "$ROWS"
+    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
+    _BAR_ACTIVE=0
+  fi
 }
-
-trap 'cleanup_bar; exit 1' INT TERM
 
 progress_bar() {
   _step="$1"
   _total="$2"
   _msg="$3"
+  ROWS=$(tput lines 2>/dev/null || echo 24)
+  COLS=$(tput cols 2>/dev/null || echo 80)
   _pct=$((_step * 100 / _total))
   _bar_w=$((COLS - 2))
   if [ "$_bar_w" -lt 10 ]; then
@@ -71,13 +75,10 @@ progress_bar() {
     _i=$((_i + 1))
   done
   _label=$(printf "%3d%%  %s" "$_pct" "$_msg")
-  printf "\033[s"
-  printf "\033[%d;1H\033[2K%s" "$((ROWS - 1))" "$_label"
-  printf "\033[%d;1H\033[2K[%s]" "$ROWS" "$_bar"
-  printf "\033[u"
+  printf "\0337\033[%d;1H\033[2K%s\033[%d;1H\033[2K[%s]\0338" "$((ROWS - 1))" "$_label" "$ROWS" "$_bar"
 }
 
-setup_bottom_bar
+setup_bar
 
 run_clean() {
   _desc="$1"
@@ -88,6 +89,12 @@ run_clean() {
   else
     "$@" > /dev/null 2>&1 || true
   fi
+}
+
+remove_dir_contents() {
+  _dir="$1"
+  [ -d "$_dir" ] || return 0
+  find "$_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 }
 
 for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
@@ -142,12 +149,14 @@ fi
 CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Removing binaries"
 printf "Removing binaries...\n"
-rm -f root/bin/*
-rm -f root/sbin/*
-rm -f root/usr/bin/*
-rm -f root/usr/sbin/*
-rm -f root/lib/*
-rm -f root/usr/lib/*
+remove_dir_contents root/boot
+remove_dir_contents root/bin
+remove_dir_contents root/sbin
+remove_dir_contents root/usr/bin
+remove_dir_contents root/usr/sbin
+remove_dir_contents root/lib
+remove_dir_contents root/usr/lib
+rm -rf root/usr/share/terminfo
 rm -f userprog/coreutils/*.bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin
 rm -f userprog/lsh/liblsh.gnu.sym userprog/lsh/liblsh.darwin.sym
@@ -155,6 +164,7 @@ rm -rf userprog/lsh/.build userprog/lsh/build-cross
 rm -rf sysroot isodir lebirun.iso
 rm -f initrd.img rootfs.img rootfs.squashfs
 rm -rf include
+rm -rf root/init
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning object files"
@@ -171,10 +181,10 @@ CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning kernel & libc artifacts"
 printf "Cleaning kernel & libc artifacts...\n"
 rm -f kernel/lebirun.kernel
-rm -f kernel/arch/i386/user_shell.bin
-rm -f kernel/arch/i386/user_shell_bin.o
-rm -f kernel/arch/i386/unifont_bin.o
-rm -rf libc/leblibc/build-i386
+rm -f kernel/arch/x86_64/user_shell.bin
+rm -f kernel/arch/x86_64/user_shell_bin.o
+rm -f kernel/arch/x86_64/unifont_bin.o
+rm -rf libc/leblibc/build-x86_64
 rm -f libc/lib/libc.a
 rm -f libc/lib/crt*.o
 

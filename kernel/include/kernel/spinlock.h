@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 typedef struct spinlock {
-    volatile uint32_t locked;
+    volatile uint64_t locked;
 } spinlock_t;
 
 static inline void cpu_relax(void) {

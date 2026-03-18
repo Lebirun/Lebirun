@@ -37,6 +37,15 @@
 #ifndef CONFIG_DEBUG_FS_OTHER
 #define CONFIG_DEBUG_FS_OTHER 0
 #endif
+#ifndef CONFIG_DEBUG_BOOT_VFS
+#define CONFIG_DEBUG_BOOT_VFS 0
+#endif
+#ifndef CONFIG_DEBUG_BOOT_MODULES
+#define CONFIG_DEBUG_BOOT_MODULES 0
+#endif
+#ifndef CONFIG_DEBUG_BOOT_HW
+#define CONFIG_DEBUG_BOOT_HW 0
+#endif
 
 extern bool debug_memory;
 extern bool debug_task;

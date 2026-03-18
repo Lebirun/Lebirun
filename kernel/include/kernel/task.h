@@ -31,15 +31,15 @@ typedef struct {
     int in_use;
     int type;
     void *node;
-    uint32_t offset;
-    uint32_t flags;
+    uint64_t offset;
+    uint64_t flags;
     int ref_count;
     void *private_data;
 } task_fd_t;
 
 typedef struct task {
-    uint32_t id;
-    pid_t pid; 
+    uint64_t id;
+    pid_t pid;
     task_state_t state;
     struct task *next;
     struct task *all_next;
@@ -51,76 +51,84 @@ typedef struct task {
     struct task *join_target;
     wait_queue_t join_waiters;
     int join_refs;
-    uint32_t exit_code;
+    uint64_t exit_code;
     registers_t regs;
-    uint32_t cr3;
+    uint64_t cr3;
     int time_slice;
     int base_time_slice;
     uint8_t *stack_base;
-    uint32_t stack_size;
+    uint64_t stack_size;
     uint8_t *kernel_stack_base;
-    uint32_t kernel_stack_size;
-    uint32_t wake_tick;
+    uint64_t kernel_stack_size;
+    uint64_t wake_tick;
     bool is_user;
-    uint32_t user_brk;
-    uint32_t mmap_next_addr;
+    uint64_t user_brk;
+    uint64_t mmap_next_addr;
     registers_t *syscall_frame;
-    uint32_t pd_phys;
-    uint32_t *user_pages;
-    uint32_t user_pages_count;
+    uint64_t pml4_phys;
+    uint64_t *user_pages;
+    uint64_t user_pages_count;
     int console_id;
-    uint32_t tls_base;
-    uint32_t tls_limit;
+    uint64_t tls_base;
+    uint64_t tls_limit;
     char cwd[128];
     char **envp;
     int envc;
     task_fd_t *fds;
     int fds_capacity;
-    
-    uint32_t uid;
-    uint32_t gid;
-    uint32_t euid;
-    uint32_t egid;
-    uint32_t suid;
-    uint32_t sgid;
-    uint32_t fsuid;
-    uint32_t fsgid;
-    uint32_t groups[16];
+
+    uint64_t uid;
+    uint64_t gid;
+    uint64_t euid;
+    uint64_t egid;
+    uint64_t suid;
+    uint64_t sgid;
+    uint64_t fsuid;
+    uint64_t fsgid;
+    uint64_t groups[16];
     int ngroups;
-    
+
     pid_t pgid;
     pid_t sid;
     pid_t ppid;
     int waiting_for_any_child;
-    
-    uint32_t sig_pending;
-    uint32_t sig_blocked;
+
+    uint64_t sig_pending;
+    uint64_t sig_blocked;
     struct {
         void (*handler)(int);
-        uint32_t flags;
-        uint32_t mask;
+        uint64_t flags;
+        uint64_t mask;
     } sigactions[32];
     void *sig_altstack;
     size_t sig_altstack_size;
-    
+    void *signal_data;
+    void *creds_data;
+
     int *clear_child_tid;
     void *robust_list;
     size_t robust_list_len;
     char name[16];
 
-    uint32_t start_tick;
-    uint32_t utime;
-    uint32_t stime;
-    
+    uint64_t start_tick;
+    uint64_t utime;
+    uint64_t stime;
+
     uint8_t vring_minor;
     bool is_kernel_task;
 
     int exec_completed;
     int waited;
-    
-    uint32_t exec_old_pd;
-    uint32_t *exec_old_pages;
-    uint32_t exec_old_pages_count;
+
+    uint64_t exec_old_pml4;
+    uint64_t *exec_old_pages;
+    uint64_t exec_old_pages_count;
+
+    struct {
+        struct { long tv_sec; long tv_usec; } it_interval;
+        struct { long tv_sec; long tv_usec; } it_value;
+    } itimers[3];
+    uint64_t alarm_tick;
 } task_t;
 
 extern task_t* current_task;
@@ -135,7 +143,7 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);
 
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
-task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint32_t cr3);
+task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint64_t cr3);
 task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
 void schedule(void);
 registers_t* schedule_from_irq(registers_t* regs);
@@ -148,17 +156,17 @@ void add_task_to_runqueue(task_t* new_task);
 void yield(void);
 void block_current(void);
 void wake_task(task_t* task);
-void task_kill(task_t* task, uint32_t exit_code);
-void sleep_ticks(uint32_t ticks);
+void task_kill(task_t* task, uint64_t exit_code);
+void sleep_ticks(uint64_t ticks);
 void wake_sleeping_tasks(void);
 void reap_dead_tasks(void);
 void reap_request(void);
 void exec_drain_request(void);
 void task_deferred_work(void);
-void task_exit(uint32_t exit_code);
-void task_exit_deferred(uint32_t exit_code);
-void sleep_ms(uint32_t ms);
-int task_join(task_t* task, uint32_t* exit_code);
+void task_exit(uint64_t exit_code);
+void task_exit_deferred(uint64_t exit_code);
+void sleep_ms(uint64_t ms);
+int task_join(task_t* task, uint64_t* exit_code);
 
 void waitq_init(wait_queue_t* q);
 void waitq_add(wait_queue_t* q, task_t* t);
@@ -180,8 +188,8 @@ task_fd_t *task_fd_get(task_t *task, int fd);
 void task_fd_close_all(task_t *task);
 
 pid_t task_fork(registers_t *parent_regs);
-int task_exec(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs);
-int task_exec_with_args(const uint8_t *bin_start, uint32_t bin_size, registers_t *regs,
+int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs);
+int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
                         int argc, char **argv, int envc, char **envp);
 pid_t task_create_thread(void (*entry)(void));
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
@@ -192,10 +200,10 @@ void task_set_vring(task_t *task, uint8_t vring_minor);
 int deliver_signal_to_task(task_t *target, int sig);
 int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap);
 void signal_deliver_pending(registers_t *regs);
-void signals_init_task(pid_t pid);
+void signals_init_task(struct task *task);
 int task_has_pending_signals(void);
 
-void exec_cleanup_enqueue(uint32_t pd, uint32_t *pages, uint32_t count);
+void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
 
 #endif

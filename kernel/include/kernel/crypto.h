@@ -17,14 +17,14 @@
 
 typedef struct {
     uint8_t data[64];
-    uint32_t datalen;
+    uint64_t datalen;
     uint64_t bitlen;
-    uint32_t state[8];
+    uint64_t state[8];
 } sha256_ctx_t;
 
 typedef struct {
     uint8_t data[128];
-    uint32_t datalen;
+    uint64_t datalen;
     uint64_t bitlen[2];
     uint64_t state[8];
 } sha512_ctx_t;

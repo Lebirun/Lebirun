@@ -122,6 +122,7 @@
 #define GCC_NORETURN __attribute__((noreturn))
 #define HAVE_NC_ALLOC_H 1
 #define TIME_WITH_SYS_TIME 1
+#define HAVE_REGEX_H_FUNCS 1
 #define HAVE_ALLOCA_H 1
 #define HAVE_FCNTL_H 1
 #define HAVE_GETOPT_H 1
@@ -159,6 +160,7 @@
 #define HAVE_SIZECHANGE 1
 #define USE_MY_MEMMOVE 1
 #define HAVE_WORKING_POLL 1
+#define HAVE_CONSISTENT_MB_LEN_MAX 1
 #define HAVE_VA_COPY 1
 #define HAVE_UNISTD_H 1
 #define vfork fork

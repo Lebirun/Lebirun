@@ -1,10 +1,10 @@
-#ifndef ARCH_I386_IDT_H
-#define ARCH_I386_IDT_H
+#ifndef ARCH_X86_64_IDT_H
+#define ARCH_X86_64_IDT_H
 
 #include <stdint.h>
 #include <kernel/registers.h>
 
-extern volatile uint32_t tick_count;
+extern volatile uint64_t tick_count;
 
 typedef void (*irq_handler_t)(registers_t *regs);
 

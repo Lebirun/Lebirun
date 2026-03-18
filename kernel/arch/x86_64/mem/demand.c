@@ -1,0 +1,317 @@
+#include <kernel/mem_map.h>
+#include <kernel/common.h>
+#include <kernel/debug.h>
+#include <string.h>
+
+#define DEMAND_BITMAP_PAGES_CAP ((HEAP_MAX_SIZE_CAP / PAGE_SIZE) / 8)
+
+static uint8_t demand_reserved_bitmap[DEMAND_BITMAP_PAGES_CAP];
+static uint8_t demand_committed_bitmap[DEMAND_BITMAP_PAGES_CAP];
+static uint64_t demand_base = 0;
+static uint64_t demand_max_pages = 0;
+static int demand_initialized = 0;
+static volatile int demand_lock = 0;
+
+extern void *pmm_alloc_page(void);
+extern void pmm_zero_page_phys(uint64_t phys_addr);
+
+static inline void demand_lock_acquire(uint64_t *eflags_out) {
+    __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
+    __asm__ volatile ("cli");
+    while (__sync_lock_test_and_set(&demand_lock, 1)) {
+    }
+}
+
+static inline void demand_lock_release(uint64_t eflags) {
+    __sync_lock_release(&demand_lock);
+    if (eflags & (1 << 9)) __asm__ volatile ("sti");
+}
+
+static inline uint64_t page_to_index(uint64_t virt) {
+    return (virt - demand_base) / PAGE_SIZE;
+}
+
+static inline void set_reserved_bit(uint64_t idx) {
+    demand_reserved_bitmap[idx / 8] |= (1 << (idx % 8));
+}
+
+static inline void clear_reserved_bit(uint64_t idx) {
+    demand_reserved_bitmap[idx / 8] &= ~(1 << (idx % 8));
+}
+
+static inline int test_reserved_bit(uint64_t idx) {
+    return (demand_reserved_bitmap[idx / 8] & (1 << (idx % 8))) != 0;
+}
+
+static inline void set_committed_bit(uint64_t idx) {
+    demand_committed_bitmap[idx / 8] |= (1 << (idx % 8));
+}
+
+static inline void clear_committed_bit(uint64_t idx) {
+    demand_committed_bitmap[idx / 8] &= ~(1 << (idx % 8));
+}
+
+static inline int test_committed_bit(uint64_t idx) {
+    return (demand_committed_bitmap[idx / 8] & (1 << (idx % 8))) != 0;
+}
+
+void demand_paging_init(void) {
+    uint64_t heap_max_size;
+
+    demand_base = HEAP_START;
+    heap_max_size = kernel_heap.max_addr - kernel_heap.start_addr;
+    demand_max_pages = heap_max_size / PAGE_SIZE;
+    
+    memset(demand_reserved_bitmap, 0, sizeof(demand_reserved_bitmap));
+    memset(demand_committed_bitmap, 0, sizeof(demand_committed_bitmap));
+    
+    demand_initialized = 1;
+    printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n", 
+           demand_base, demand_max_pages);
+}
+
+int demand_reserve_range(uint64_t virt_start, uint64_t size) {
+    uint64_t eflags;
+    uint64_t start_page;
+    uint64_t end_page;
+    uint64_t i;
+    
+    if (!demand_initialized) return -1;
+    
+    if (virt_start < demand_base) return -1;
+    if (virt_start + size > demand_base + (demand_max_pages * PAGE_SIZE)) return -1;
+    
+    start_page = (virt_start - demand_base) / PAGE_SIZE;
+    end_page = ((virt_start + size + PAGE_SIZE - 1) - demand_base) / PAGE_SIZE;
+    
+    if (end_page > demand_max_pages) return -1;
+    
+    demand_lock_acquire(&eflags);
+    
+    for (i = start_page; i < end_page; i++) {
+        set_reserved_bit(i);
+    }
+    
+    demand_lock_release(eflags);
+    return 0;
+}
+
+int demand_is_reserved(uint64_t virt_addr) {
+    uint64_t idx;
+    uint64_t eflags;
+    int result;
+    
+    if (!demand_initialized) return 0;
+    
+    if (virt_addr < demand_base) return 0;
+    if (virt_addr >= demand_base + (demand_max_pages * PAGE_SIZE)) return 0;
+    
+    idx = page_to_index(virt_addr & ~(PAGE_SIZE - 1));
+    
+    demand_lock_acquire(&eflags);
+    result = test_reserved_bit(idx);
+    demand_lock_release(eflags);
+    
+    return result;
+}
+
+int demand_commit_page(uint64_t virt_addr) {
+    uint64_t idx;
+    uint64_t eflags;
+    uint64_t page_virt;
+    void *phys_page;
+    
+    if (!demand_initialized) return -1;
+    
+    page_virt = virt_addr & ~(PAGE_SIZE - 1);
+    
+    if (page_virt < demand_base) return -1;
+    if (page_virt >= demand_base + (demand_max_pages * PAGE_SIZE)) return -1;
+    
+    idx = page_to_index(page_virt);
+    
+    demand_lock_acquire(&eflags);
+    
+    if (!test_reserved_bit(idx)) {
+        demand_lock_release(eflags);
+        return -1;
+    }
+    
+    if (test_committed_bit(idx)) {
+        demand_lock_release(eflags);
+        return 0;
+    }
+    
+    phys_page = pmm_alloc_low_page();
+    if (!phys_page) {
+        phys_page = pmm_alloc_page();
+    }
+    if (!phys_page) {
+        demand_lock_release(eflags);
+        printf("demand_commit_page: Failed to allocate physical page\n");
+        return -1;
+    }
+    
+    {
+        extern void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
+        vmm_map_page_pae(page_virt, (uint64_t)phys_page, 3);
+    }
+    
+    memset((void *)page_virt, 0, PAGE_SIZE);
+    
+    set_committed_bit(idx);
+    
+    demand_lock_release(eflags);
+    
+    DEBUG_MEMORY("demand_commit_page: committed 0x%016lX -> phys 0x%016lX\n", 
+                 page_virt, (uint64_t)phys_page);
+    
+    return 0;
+}
+
+void demand_mark_committed(uint64_t virt_addr) {
+    uint64_t page_virt;
+    uint64_t idx;
+    uint64_t eflags;
+
+    if (!demand_initialized) return;
+
+    page_virt = virt_addr & ~(PAGE_SIZE - 1);
+    if (page_virt < demand_base) return;
+    if (page_virt >= demand_base + (demand_max_pages * PAGE_SIZE)) return;
+
+    idx = page_to_index(page_virt);
+
+    demand_lock_acquire(&eflags);
+    set_reserved_bit(idx);
+    set_committed_bit(idx);
+    demand_lock_release(eflags);
+}
+
+int demand_page_fault_handler(uint64_t fault_addr, uint64_t err_code) {
+    uint64_t page_virt;
+    
+    if (!demand_initialized) return 0;
+    
+    if (err_code & 0x1) return 0;
+    
+    page_virt = fault_addr & ~(PAGE_SIZE - 1);
+    
+    if (page_virt < demand_base) return 0;
+    if (page_virt >= demand_base + (demand_max_pages * PAGE_SIZE)) return 0;
+    
+    if (!demand_is_reserved(page_virt)) return 0;
+    
+    if (demand_commit_page(page_virt) == 0) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+uint64_t demand_get_committed_pages(void) {
+    uint64_t eflags;
+    uint64_t count;
+    uint64_t i;
+    
+    if (!demand_initialized) return 0;
+    
+    count = 0;
+    demand_lock_acquire(&eflags);
+    
+    for (i = 0; i < demand_max_pages; i++) {
+        if (test_committed_bit(i)) count++;
+    }
+    
+    demand_lock_release(eflags);
+    return count;
+}
+
+uint64_t demand_get_reserved_pages(void) {
+    uint64_t eflags;
+    uint64_t count;
+    uint64_t i;
+    
+    if (!demand_initialized) return 0;
+    
+    count = 0;
+    demand_lock_acquire(&eflags);
+    
+    for (i = 0; i < demand_max_pages; i++) {
+        if (test_reserved_bit(i)) count++;
+    }
+    
+    demand_lock_release(eflags);
+    return count;
+}
+
+int demand_decommit_page(uint64_t virt_addr) {
+    uint64_t idx;
+    uint64_t eflags;
+    uint64_t page_virt;
+    uint64_t pdpt_idx;
+    uint64_t pdpte;
+    uint64_t *pd;
+    uint64_t pd_idx;
+    uint64_t pt_idx;
+    uint64_t pde;
+    uint64_t *pt64;
+    uint64_t pte;
+    uint64_t phys;
+    extern uint64_t boot_pdpt_high[] __attribute__((aligned(4096)));
+    uint64_t *kv_pdpt;
+
+    if (!demand_initialized) return -1;
+
+    kv_pdpt = (uint64_t *)((uintptr_t)boot_pdpt_high + KERNEL_VMA);
+
+    page_virt = virt_addr & ~(PAGE_SIZE - 1);
+
+    if (page_virt < demand_base) return -1;
+    if (page_virt >= demand_base + (demand_max_pages * PAGE_SIZE)) return -1;
+
+    idx = page_to_index(page_virt);
+
+    demand_lock_acquire(&eflags);
+
+    if (!test_committed_bit(idx)) {
+        demand_lock_release(eflags);
+        return 0;
+    }
+
+    pdpt_idx = (page_virt >> 30) & 0x1FF;
+    pdpte = kv_pdpt[pdpt_idx];
+    if (!(pdpte & 1)) {
+        clear_committed_bit(idx);
+        demand_lock_release(eflags);
+        return 0;
+    }
+    pd = (uint64_t *)((pdpte & ~0xFFFULL) + KERNEL_VMA);
+
+    pd_idx = (page_virt >> 21) & 0x1FF;
+    pt_idx = (page_virt >> 12) & 0x1FF;
+
+    pde = pd[pd_idx];
+    if (!(pde & 1) || (pde & 0x80)) {
+        clear_committed_bit(idx);
+        demand_lock_release(eflags);
+        return 0;
+    }
+
+    pt64 = (uint64_t *)((pde & ~0xFFFULL) + KERNEL_VMA);
+    pte = pt64[pt_idx];
+
+    if (pte & 1) {
+        phys = (pte & ~0xFFFULL);
+        pt64[pt_idx] = 0;
+        __asm__ volatile("invlpg (%0)" : : "r"(page_virt) : "memory");
+        if (phys >= 0x1000) {
+            pfa_free(phys);
+        }
+    }
+
+    clear_committed_bit(idx);
+    demand_lock_release(eflags);
+
+    return 0;
+}

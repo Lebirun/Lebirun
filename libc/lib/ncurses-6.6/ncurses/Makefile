@@ -89,23 +89,23 @@ INSTALL_LIB	= /usr/bin/install -c -m 644 -p
 INSTALL_PROG	= ${INSTALL} 
 INSTALL_DATA	= ${INSTALL} -m 644
 
-AR		= i686-elf-ar
+AR		= x86_64-elf-ar
 ARFLAGS		= -curvU
 AWK		= mawk
-LD		= i686-elf-ld
+LD		= x86_64-elf-ld
 LN_S		= ln -s -f
-NM		= i686-elf-nm
+NM		= x86_64-elf-nm
 
 CTAGS		= 
 ETAGS		= 
 
-CC		= i686-elf-gcc
-CPP		= i686-elf-gcc -E
-CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -isystem=/home/opuayt/leb/sysroot/usr/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
+CC		= x86_64-elf-gcc
+CPP		= x86_64-elf-gcc -E
+CFLAGS		= --sysroot=/home/opuayt/leb/sysroot -Os -fno-stack-protector -fno-pic -fno-builtin --param max-inline-insns-single=1200 
 LIBS		= 
 
 INCDIR		= $(srcdir)/../include
-CPPFLAGS	= -DHAVE_CONFIG_H -DBUILDING_NCURSES -I../ncurses -I. -I../include -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -isystem=/home/opuayt/leb/libc/leblibc/build-i386/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/i386 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -I/home/opuayt/leb/libc/leblibc/include -DNDEBUG
+CPPFLAGS	= -DHAVE_CONFIG_H -DBUILDING_NCURSES -I../ncurses -I. -I../include -D_XOPEN_SOURCE=600 -I/home/opuayt/leb/sysroot/usr/include -I/home/opuayt/leb/libc/leblibc/include -isystem=/home/opuayt/leb/libc/leblibc/build-x86_64/obj/include -isystem=/home/opuayt/leb/libc/leblibc/arch/x86_64 -isystem=/home/opuayt/leb/libc/leblibc/arch/generic -DNDEBUG
 
 CCFLAGS		= $(CPPFLAGS) $(CFLAGS)
 
@@ -147,7 +147,7 @@ NCURSES_MINOR	= 6
 REL_VERSION	= 6.6
 ABI_VERSION	= 6
 
-RANLIB		= i686-elf-ranlib
+RANLIB		= x86_64-elf-ranlib
 
 LIBRARIES	=  ../lib/libncursesw.a ../lib/libncursesw_g.a
 
@@ -821,7 +821,7 @@ lint ::
 #  make_phony:      yes
 #  overwrite:       yes
 #  depend:          ../include/ncurses_cfg.h ./curses.priv.h
-#  host:            i686-pc-elf
+#  host:            x86_64-pc-elf
 #  libtool_version: -version-number
 
 NORMAL_OBJS = \
@@ -1794,7 +1794,7 @@ mostlyclean::
 #  make_phony:      yes
 #  overwrite:       yes
 #  depend:          ../include/ncurses_cfg.h ./curses.priv.h
-#  host:            i686-pc-elf
+#  host:            x86_64-pc-elf
 #  libtool_version: -version-number
 
 DEBUG_OBJS = \

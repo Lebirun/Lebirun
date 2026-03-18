@@ -6,10 +6,11 @@
 #define CMDLINE_MAX 512
 #define CMDLINE_INIT_PATH_MAX 128
 
-void cmdline_parse(uint32_t multiboot_flags, uint32_t cmdline_phys);
+void cmdline_parse(const char *cmdline_str);
 const char *cmdline_get(void);
 const char *cmdline_get_init(void);
 int cmdline_get_consoles(void);
 const char *cmdline_get_root(void);
+int cmdline_get_text_mode(void);
 
 #endif

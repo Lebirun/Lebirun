@@ -16,10 +16,10 @@ typedef struct {
     char (*buffer)[CONSOLE_BUFFER_COLS];
     uint8_t (*color_buffer)[CONSOLE_BUFFER_COLS];
     uint8_t *line_wrapped;
-    uint32_t buffer_rows;
-    uint32_t cursor_x;
-    uint32_t cursor_y;
-    uint32_t scroll_offset;
+    uint64_t buffer_rows;
+    uint64_t cursor_x;
+    uint64_t cursor_y;
+    uint64_t scroll_offset;
 
     int esc_state;
     char esc_buf[32];
@@ -29,19 +29,19 @@ typedef struct {
     uint8_t ansi_bold;
     uint8_t ansi_reverse;
 
-    uint32_t scroll_top;
-    uint32_t scroll_bottom;
+    uint64_t scroll_top;
+    uint64_t scroll_bottom;
     uint8_t cursor_visible;
 
-    uint32_t saved_cursor_x;
-    uint32_t saved_cursor_y;
+    uint64_t saved_cursor_x;
+    uint64_t saved_cursor_y;
 
     char *write_buffer;
     uint8_t *write_flags;
-    uint32_t write_buffer_size;
-    volatile uint32_t write_head;
-    volatile uint32_t write_tail;
-    volatile uint32_t dirty;
+    uint64_t write_buffer_size;
+    volatile uint64_t write_head;
+    volatile uint64_t write_tail;
+    volatile uint64_t dirty;
     int allocated;
 
     int alt_screen_active;
@@ -49,10 +49,10 @@ typedef struct {
     char (*alt_saved_buffer)[CONSOLE_BUFFER_COLS];
     uint8_t (*alt_saved_color)[CONSOLE_BUFFER_COLS];
     uint8_t *alt_saved_wrapped;
-    uint32_t alt_saved_rows;
-    uint32_t alt_saved_cx;
-    uint32_t alt_saved_cy;
-    uint32_t alt_saved_scroll;
+    uint64_t alt_saved_rows;
+    uint64_t alt_saved_cx;
+    uint64_t alt_saved_cy;
+    uint64_t alt_saved_scroll;
 } console_t;
 
 void console_init(void);
@@ -72,8 +72,8 @@ void console_setcursor(int console_num, int x, int y);
 int console_getcursor(int console_num, int *x, int *y);
 void console_redraw_current(void);
 void console_tick_redraw(void);
-void console_clamp_cursors(uint32_t max_cols, uint32_t max_rows);
-void console_rewrap_all(uint32_t old_cols, uint32_t new_cols, uint32_t new_rows);
+void console_clamp_cursors(uint64_t max_cols, uint64_t max_rows);
+void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows);
 void console_writer_init(void);
 void console_writer_flush(void);
 void console_tick(void);

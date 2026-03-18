@@ -35,16 +35,16 @@
 typedef struct task task_t;
 
 typedef struct {
-    uint32_t lapic_id;
-    uint32_t processor_id;
+    uint64_t lapic_id;
+    uint64_t processor_id;
     int active;
     int bsp;
-    uint32_t *gdt;
+    void *gdt;
     void *tss;
     void *kernel_stack;
     task_t *current_task;
     int scheduler_lock_depth;
-    uint32_t sched_saved_eflags;
+    uint64_t sched_saved_rflags;
     volatile int schedule_force;
 } cpu_info_t;
 
@@ -57,14 +57,14 @@ extern volatile int cpus_booted;
 void smp_init(void);
 void lapic_init(void);
 void lapic_eoi(void);
-uint32_t lapic_get_id(void);
-void lapic_send_ipi(uint32_t apic_id, uint32_t vector);
+uint64_t lapic_get_id(void);
+void lapic_send_ipi(uint64_t apic_id, uint64_t vector);
 void ioapic_init(void);
-void ioapic_route_irq(uint8_t irq, uint8_t vector, uint32_t dest_apic_id);
+void ioapic_route_irq(uint8_t irq, uint8_t vector, uint64_t dest_apic_id);
 void ioapic_mask_irq(uint8_t irq);
 void smp_start_aps(void);
 int smp_processor_id(void);
-void lapic_timer_init(uint32_t freq_hz);
+void lapic_timer_init(uint64_t freq_hz);
 cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);
 void smp_tlb_flush_all(void);

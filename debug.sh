@@ -1,9 +1,8 @@
 #!/bin/bash
 
-gdb-multiarch ./kernel/lebirun.kernel \
+gdb-multiarch ./kernel/lebirun_debug.kernel \
   -q \
-  -ex "set architecture i386" \
+  -ex "set architecture i386:x86-64" \
   -ex "target remote localhost:1234" \
-  -ex "break kernel_main" \
   -ex "continue"
 

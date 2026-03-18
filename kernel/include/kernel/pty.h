@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <kernel/tty.h>
 
-typedef int ssize_t;
+typedef long ssize_t;
 
 int pty_open_master(void);
 int pty_open_slave(int master_fd);

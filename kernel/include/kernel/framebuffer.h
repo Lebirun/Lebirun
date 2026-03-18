@@ -6,29 +6,29 @@
 #include <kernel/psf.h>
 
 typedef struct {
-    uint32_t *addr;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pitch;
+    uint64_t *addr;
+    uint64_t width;
+    uint64_t height;
+    uint64_t pitch;
     uint8_t bpp;
     uint8_t type;
     psf_font_t *font;
-    uint32_t fg_color;
-    uint32_t bg_color;
-    uint32_t cursor_x;
-    uint32_t cursor_y;
-    uint32_t cols;
-    uint32_t rows;
+    uint64_t fg_color;
+    uint64_t bg_color;
+    uint64_t cursor_x;
+    uint64_t cursor_y;
+    uint64_t cols;
+    uint64_t rows;
     uint64_t phys_addr;
-    uint32_t refresh_rate;
+    uint64_t refresh_rate;
 } framebuffer_t;
 
-int fb_init(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp, uint8_t type);
+int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type);
 void fb_set_font(psf_font_t *font);
-void fb_set_colors(uint32_t fg, uint32_t bg);
+void fb_set_colors(uint64_t fg, uint64_t bg);
 void fb_clear(void);
-void fb_putpixel(uint32_t x, uint32_t y, uint32_t color);
-void fb_putchar(char c, uint32_t cx, uint32_t cy);
+void fb_putpixel(uint64_t x, uint64_t y, uint64_t color);
+void fb_putchar(char c, uint64_t cx, uint64_t cy);
 void fb_scroll(void);
 void fb_write_char(char c);
 void fb_write_string(const char *str);
@@ -37,8 +37,8 @@ void fb_set_cursor_hidden(int hidden);
 void fb_tick(void);
 void fb_flush(void);
 framebuffer_t *fb_get(void);
-int fb_set_mode(uint32_t width, uint32_t height, uint32_t refresh_rate);
-int fb_get_info(uint32_t *width, uint32_t *height, uint32_t *bpp, uint32_t *refresh_rate);
-int fb_get_caps(uint32_t *out_words, uint32_t words);
+int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate);
+int fb_get_info(uint64_t *width, uint64_t *height, uint64_t *bpp, uint64_t *refresh_rate);
+int fb_get_caps(uint64_t *out_words, uint64_t words);
 
 #endif

@@ -56,13 +56,13 @@ set timeout=10
 set default=0
 
 menuentry "Lebirun" {
-	multiboot /boot/lebirun.kernel
-	module /boot/rootfs.squashfs
+	multiboot2 /boot/lebirun.kernel
+	module2 /boot/rootfs.squashfs
 	boot
 }
 EOF
 
-GRUB_MODULES="multiboot biosdisk part_msdos iso9660"
+GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Creating ISO image"

@@ -11,6 +11,7 @@
 #define ELFMAG3 'F'
 
 #define ELFCLASS32 1
+#define ELFCLASS64 2
 #define ELFDATA2LSB 1
 
 #define ET_NONE 0
@@ -20,6 +21,7 @@
 #define ET_CORE 4
 
 #define EM_386 3
+#define EM_X86_64 62
 
 #define PT_NULL 0
 #define PT_LOAD 1
@@ -68,6 +70,21 @@
 #define ELF32_R_SYM(i)    ((i)>>8)
 #define ELF32_R_TYPE(i)   ((unsigned char)(i))
 #define ELF32_R_INFO(s,t) (((s)<<8)+(unsigned char)(t))
+
+#define R_X86_64_NONE     0
+#define R_X86_64_64       1
+#define R_X86_64_PC32     2
+#define R_X86_64_GLOB_DAT 6
+#define R_X86_64_JUMP_SLOT 7
+#define R_X86_64_RELATIVE 8
+
+#define ELF64_ST_BIND(i)   ((i)>>4)
+#define ELF64_ST_TYPE(i)   ((i)&0xf)
+#define ELF64_ST_INFO(b,t) (((b)<<4)+((t)&0xf))
+
+#define ELF64_R_SYM(i)    ((i)>>32)
+#define ELF64_R_TYPE(i)   ((i)&0xffffffffL)
+#define ELF64_R_INFO(s,t) (((uint64_t)(s)<<32)+((t)&0xffffffffL))
 
 #define DT_NULL    0
 #define DT_NEEDED  1
@@ -162,43 +179,120 @@ typedef struct {
     } d_un;
 } __attribute__((packed)) Elf32_Dyn;
 
+typedef uint64_t Elf64_Addr;
+typedef uint16_t Elf64_Half;
+typedef uint64_t Elf64_Off;
+typedef int32_t Elf64_Sword;
+typedef int64_t Elf64_Sxword;
+typedef uint32_t Elf64_Word;
+typedef uint64_t Elf64_Xword;
+
 typedef struct {
-    uint32_t entry_point;
-    uint32_t load_base;
-    uint32_t load_end;
-    uint32_t bss_end;
-    uint32_t phdr_vaddr;
+    unsigned char e_ident[EI_NIDENT];
+    Elf64_Half e_type;
+    Elf64_Half e_machine;
+    Elf64_Word e_version;
+    Elf64_Addr e_entry;
+    Elf64_Off e_phoff;
+    Elf64_Off e_shoff;
+    Elf64_Word e_flags;
+    Elf64_Half e_ehsize;
+    Elf64_Half e_phentsize;
+    Elf64_Half e_phnum;
+    Elf64_Half e_shentsize;
+    Elf64_Half e_shnum;
+    Elf64_Half e_shstrndx;
+} __attribute__((packed)) Elf64_Ehdr;
+
+typedef struct {
+    Elf64_Word p_type;
+    Elf64_Word p_flags;
+    Elf64_Off p_offset;
+    Elf64_Addr p_vaddr;
+    Elf64_Addr p_paddr;
+    Elf64_Xword p_filesz;
+    Elf64_Xword p_memsz;
+    Elf64_Xword p_align;
+} __attribute__((packed)) Elf64_Phdr;
+
+typedef struct {
+    Elf64_Word sh_name;
+    Elf64_Word sh_type;
+    Elf64_Xword sh_flags;
+    Elf64_Addr sh_addr;
+    Elf64_Off sh_offset;
+    Elf64_Xword sh_size;
+    Elf64_Word sh_link;
+    Elf64_Word sh_info;
+    Elf64_Xword sh_addralign;
+    Elf64_Xword sh_entsize;
+} __attribute__((packed)) Elf64_Shdr;
+
+typedef struct {
+    Elf64_Word st_name;
+    unsigned char st_info;
+    unsigned char st_other;
+    Elf64_Half st_shndx;
+    Elf64_Addr st_value;
+    Elf64_Xword st_size;
+} __attribute__((packed)) Elf64_Sym;
+
+typedef struct {
+    Elf64_Addr r_offset;
+    Elf64_Xword r_info;
+} __attribute__((packed)) Elf64_Rel;
+
+typedef struct {
+    Elf64_Addr r_offset;
+    Elf64_Xword r_info;
+    Elf64_Sxword r_addend;
+} __attribute__((packed)) Elf64_Rela;
+
+typedef struct {
+    Elf64_Sxword d_tag;
+    union {
+        Elf64_Xword d_val;
+        Elf64_Addr d_ptr;
+    } d_un;
+} __attribute__((packed)) Elf64_Dyn;
+
+typedef struct {
+    uint64_t entry_point;
+    uint64_t load_base;
+    uint64_t load_end;
+    uint64_t bss_end;
+    uint64_t phdr_vaddr;
     uint16_t phent;
     uint16_t phnum;
 } elf_info_t;
 
-#define DL_MAX_HANDLES 16
-#define DL_MAX_SYMBOLS 256
+#define DL_MAX_HANDLES 64
+#define DL_MAX_SYMBOLS 1024
 
 typedef struct {
     int in_use;
     char name[64];
-    uint32_t load_base;
-    uint32_t load_size;
+    uint64_t load_base;
+    uint64_t load_size;
     uint8_t *file_data;
-    uint32_t file_size;
-    Elf32_Sym *symtab;
-    uint32_t symtab_count;
+    uint64_t file_size;
+    Elf64_Sym *symtab;
+    uint64_t symtab_count;
     char *strtab;
-    uint32_t strtab_size;
-    Elf32_Sym *symtab2;
-    uint32_t symtab2_count;
+    uint64_t strtab_size;
+    Elf64_Sym *symtab2;
+    uint64_t symtab2_count;
     char *strtab2;
-    uint32_t strtab2_size;
-    uint32_t *pages;
-    uint32_t page_count;
+    uint64_t strtab2_size;
+    uint64_t *pages;
+    uint64_t page_count;
 } dl_handle_t;
 
-int elf_validate(const uint8_t *data, uint32_t size);
-int elf_validate_so(const uint8_t *data, uint32_t size);
-int elf_load_to_pd(uint32_t pd_phys, const uint8_t *data, uint32_t size, elf_info_t *info, uint32_t **out_pages, uint32_t *out_page_count);
-int elf_load_so(uint32_t pd_phys, const uint8_t *data, uint32_t size, uint32_t base_addr, dl_handle_t *handle);
-uint32_t elf_get_entry(const uint8_t *data);
-uint32_t elf_so_find_symbol(dl_handle_t *handle, const char *name);
+int elf_validate(const uint8_t *data, uint64_t size);
+int elf_validate_so(const uint8_t *data, uint64_t size);
+int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count);
+int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t base_addr, dl_handle_t *handle);
+uint64_t elf_get_entry(const uint8_t *data);
+uint64_t elf_so_find_symbol(dl_handle_t *handle, const char *name);
 
 #endif

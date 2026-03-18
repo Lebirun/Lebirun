@@ -35,19 +35,19 @@ typedef struct {
 } __attribute__((packed)) psf2_header_t;
 
 typedef struct {
-    uint32_t version;
-    uint32_t width;
-    uint32_t height;
-    uint32_t bytesperglyph;
-    uint32_t numglyph;
+    uint64_t version;
+    uint64_t width;
+    uint64_t height;
+    uint64_t bytesperglyph;
+    uint64_t numglyph;
     uint8_t *glyphs;
     uint16_t *unicode_table;
-    uint32_t unicode_table_size;
+    uint64_t unicode_table_size;
     uint8_t owns_data;
 } psf_font_t; 
 
 int psf_load(const void *data, size_t size, psf_font_t *font);
-const uint8_t *psf_get_glyph(psf_font_t *font, uint32_t codepoint);
+const uint8_t *psf_get_glyph(psf_font_t *font, uint64_t codepoint);
 void psf_free(psf_font_t *font);
 
 #endif
