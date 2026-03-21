@@ -108,6 +108,7 @@ void kprint_serial_async(const char *buf, size_t len);
 
 bool kprint_is_ready(void);
 void kprint_enable(void);
+void kprint_flush(void);
 
 extern kproc_t *current_kproc;
 

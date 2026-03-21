@@ -568,7 +568,7 @@ void signal_deliver_pending(registers_t *regs) {
         }
 
         sp = regs->rsp;
-        sp -= 10 * 4;
+        sp -= 10 * 8;
         sp &= ~0xFu;
 
         if (sp < 0x1000 || sp >= KERNEL_VMA) {
@@ -588,16 +588,14 @@ void signal_deliver_pending(registers_t *regs) {
         frame[8] = regs->rflags;
         frame[9] = regs->rsp;
 
-        sp -= 4;
-        *(uint64_t *)sp = (uint64_t)sig;
-
-        sp -= 4;
+        sp -= 8;
         if (act->sa_restorer) {
             *(uint64_t *)sp = (uint64_t)(uintptr_t)act->sa_restorer;
         } else {
             *(uint64_t *)sp = 0;
         }
 
+        regs->rdi = (uint64_t)sig;
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
         regs->rsp = sp;
 

@@ -60,6 +60,16 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pd_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { result = 0; goto out; }
+
+    /* Handle 2MB huge page: PS bit (0x80) set in PDE */
+    if (entry & 0x80) {
+        /* Physical base of huge page + page offset within the 2MB region.
+           Add 1 to avoid returning 0 when physical base is 0 and offset is 0. */
+        uint64_t huge_phys = (entry & 0x000FFFFFFFE00000ULL) | (virt_addr & 0x1FFFFFULL);
+        result = huge_phys ? huge_phys : 1;
+        goto out;
+    }
+
     pt_phys = entry & ~0xFFFULL;
 
     temp_virt = TEMP_SLOT(3);

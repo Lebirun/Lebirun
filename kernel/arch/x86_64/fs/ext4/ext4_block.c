@@ -30,8 +30,11 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     }
 
     if (oldest >= 0 && fs->block_cache[oldest].dirty) {
-        ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
-        fs->block_cache[oldest].dirty = false;
+        int ret = ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
+        if (ret == 0) {
+            fs->block_cache[oldest].dirty = false;
+        }
+        /* If write failed, still evict this slot - caller handles the failure */
     }
 
     return oldest;

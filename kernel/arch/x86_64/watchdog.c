@@ -10,6 +10,7 @@ static volatile uint64_t wdt_last_kick = 0;
 static volatile uint64_t wdt_last_sched_tick = 0;
 static volatile uint64_t wdt_prev_tick_count = 0;
 static volatile uint64_t wdt_stall_strikes = 0;
+static volatile int wdt_disabled = 0;
 static int wdt_handle = -1;
 
 extern volatile uint64_t tick_count;
@@ -17,6 +18,10 @@ extern task_t *all_tasks_head;
 
 void watchdog_kick(void) {
     wdt_last_kick = tick_count;
+}
+
+void watchdog_disable(void) {
+    wdt_disabled = 1;
 }
 
 uint64_t watchdog_get_last_kick(void) {
@@ -59,8 +64,9 @@ static void watchdog_dump_tasks(void) {
 static void watchdog_callback(uint64_t ticks) {
     task_t *t;
     uint64_t elapsed;
-    int limit;
     (void)ticks;
+
+    if (wdt_disabled) return;
 
     if (tick_count != wdt_prev_tick_count) {
         wdt_last_sched_tick = tick_count;
@@ -88,17 +94,12 @@ static void watchdog_callback(uint64_t ticks) {
         }
     }
 
-    t = all_tasks_head;
-    limit = 2048;
-    while (t && limit > 0) {
-        if (t->pid == 1) {
-            if (t->state == TASK_DEAD) {
-                kernel_panic_msg("WATCHDOG: init (PID 1) has exited");
-            }
-            return;
+    t = task_find(1);
+    if (t) {
+        if (t->state == TASK_DEAD) {
+            kernel_panic_msg("WATCHDOG: init (PID 1) has exited");
         }
-        t = t->all_next;
-        limit--;
+        return;
     }
 
     if (tick_count > 10000) {

@@ -3,6 +3,7 @@
 #include <kernel/debug.h>
 #include <kernel/pty.h>
 #include <kernel/common.h>
+#include <kernel/ramfs.h>
 
 #define fd_table (current_task->fds)
 
@@ -15,7 +16,7 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
     if (!node) return 0;
     uint64_t a = (uint64_t)node;
     if ((a & 0xFFFFFF00) == 0xFEFEFE00) return 0;
-    if (a < KERNEL_VMA || a >= 0xFFFFFF00) return 0;
+    if (a < KERNEL_VMA || a >= 0xFFFFFFFFFFFFFF00ULL) return 0;
     if (!kernel_ptr_mapped(a)) return 0;
     if (!kernel_ptr_mapped(a + (uint64_t)sizeof(vfs_node_t) - 1)) return 0;
     return 1;
@@ -353,7 +354,6 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
 
     vfs_node_t *node = (vfs_node_t *)tfd->node;
-    if (!vfs_node_ptr_sane(node)) return -EBADF;
 
     int32_t offset = (int32_t)(uintptr_t)offset_ptr;
     int32_t base;
@@ -1048,8 +1048,24 @@ static int sys_link(int oldpath_ptr, const char *newpath_ptr, int unused) {
 }
 
 static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
-    (void)target_ptr; (void)linkpath_ptr; (void)unused;
-    return -1;
+    const char *target;
+    const char *linkpath;
+    int ret;
+
+    (void)unused;
+    target = (const char *)(uintptr_t)target_ptr;
+    linkpath = (const char *)(uintptr_t)linkpath_ptr;
+
+    if (!target || (uint64_t)target < 0x1000 || (uint64_t)target >= KERNEL_VMA) return -EFAULT;
+    if (!linkpath || (uint64_t)linkpath < 0x1000 || (uint64_t)linkpath >= KERNEL_VMA) return -EFAULT;
+
+    ret = ramfs_create_symlink(linkpath, target, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (ret == 0) return 0;
+    if (ret == RAMFS_ERR_EXIST) return -EEXIST;
+    if (ret == RAMFS_ERR_NOENT) return -ENOENT;
+    if (ret == RAMFS_ERR_NOSPC) return -ENOSPC;
+    if (ret == RAMFS_ERR_NOMEM) return -ENOMEM;
+    return -EIO;
 }
 
 static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {

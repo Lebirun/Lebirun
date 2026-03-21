@@ -162,7 +162,6 @@ void kernel_main(void) {
     idt_init();
 
     terminal_initialize();
-    console_init();
 
 
     init_mem_map(multiboot_magic, multiboot_ptr);
@@ -206,7 +205,11 @@ void kernel_main(void) {
 
     cmdline_parse(early_cmdline[0] ? early_cmdline : NULL);
 
-    if (early_fb_valid && !cmdline_get_text_mode()) {
+    if (cmdline_get_text_mode()) {
+        fb_init_textmode(fb_get_default_font_data(), 128, 16);
+        console_reinit();
+        terminal_replay_early_boot();
+    } else if (early_fb_valid) {
         terminal_init_fb(early_fb_addr, early_fb_width,
                         early_fb_height, early_fb_pitch,
                         early_fb_bpp, early_fb_type);
@@ -234,6 +237,10 @@ void kernel_main(void) {
                (unsigned long long)early_fb_addr,
                early_fb_width, early_fb_height,
                early_fb_pitch, early_fb_bpp, early_fb_type);
+    } else {
+        fb_init_textmode(fb_get_default_font_data(), 128, 16);
+        console_reinit();
+        terminal_replay_early_boot();
     }
 
     mod_count = early_mod_count;
@@ -514,6 +521,7 @@ void kernel_main(void) {
     power_init();
     vring_init();
     kproc_init();
+    kproc_print_init();
     vring_boot_enabled = 1;
     
     pit_init(1000);
@@ -522,9 +530,6 @@ void kernel_main(void) {
     if (lapic_base) {
         lapic_timer_init(1000);
         ioapic_mask_irq(0);
-        printf("TIMER: LAPIC timer active at 1000 Hz (PIT masked)\n");
-    } else {
-        printf("TIMER: PIT active at 1000 Hz (no LAPIC)\n");
     }
 
     rng_init();
@@ -591,7 +596,6 @@ void kernel_main(void) {
     }
 
     net_init();
-    printf("BOOT: Drivers ready\n");
 
     tls_init();
     {
@@ -611,11 +615,9 @@ void kernel_main(void) {
         }
     }
 
-    if (debug_boot_hw) terminal_writestring("About to execute STI...\n");
+    if (debug_boot_hw) terminal_writestring("BOOT: About to execute STI...\n");
     asm volatile ("sti");
-    if (debug_boot_hw) terminal_writestring("STI completed! Interrupts enabled.\n");
-    printf("BOOT: Interrupts enabled\n");
-
+    if (debug_boot_hw) terminal_writestring("BOOT: STI completed! Interrupts enabled.\n");
     if (vring_boot_enabled) {
         kprint_enable();
         extern void watchdog_init(void);
@@ -624,11 +626,11 @@ void kernel_main(void) {
         printf("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
 
-    if (debug_memory) printf("heap: verify before launching init\n");
+    if (debug_memory) printf("BOOT: heap: verify before launching init\n");
     if (debug_memory) heap_verify();
-    printf("BOOT: slab_gc...\n");
     slab_gc();
-    printf("BOOT: slab_gc done, launching init...\n");
+    console_writer_flush();
+    kprint_flush();
 
     {
         const char *init_candidates[4];
@@ -644,20 +646,18 @@ void kernel_main(void) {
             if (!init_candidates[ci] || !init_candidates[ci][0]) continue;
             init_task = launch_user_path(init_candidates[ci], 0);
             if (init_task) {
-                printf("BOOT: init launched: %s\n", init_candidates[ci]);
                 break;
             }
         }
     }
-    printf("BOOT: init launch attempted\n");
     if (!init_task) {
-        printf("init not found, retrying in 5 seconds...\n");
+        printf("BOOT: init not found, retrying in 5 seconds...\n");
         sleep_ticks(5000);
         init_task = launch_user_path("/init", 0);
         if (!init_task) init_task = launch_user_path("/sbin/init", 0);
         if (!init_task) init_task = launch_user_path("/bin/init", 0);
     }
-    if (debug_memory) printf("heap: verify after launch attempt\n");
+    if (debug_memory) printf("BOOT: heap: verify after launch attempt\n");
     if (debug_memory) heap_verify();
     if (!init_task) {
         kernel_panic("FATAL: no init executable found (/init, /sbin/init, /bin/init).", NULL);
@@ -665,7 +665,7 @@ void kernel_main(void) {
 
     if (debug_boot_hw) {
         t = ready_queue_head;
-        printf("Run queue: ");
+        printf("BOOT: Run queue: ");
         if (t) {
             start = t;
             do {

@@ -53,7 +53,6 @@ static kprint_item_t kprint_ring_storage[KPRINT_MAX_ITEMS];
 static volatile uint64_t kprint_head = 0;
 static volatile uint64_t kprint_tail = 0;
 static volatile uint64_t kprint_count = 0;
-static volatile uint64_t kprint_dropped = 0;
 
 static volatile int kprint_ready = 0;
 
@@ -221,35 +220,6 @@ static int klog_dequeue(klog_item_t *out) {
     return 0;
 }
 
-static int kprint_try_enqueue(uint8_t con_id, const char *buf, uint64_t len) {
-    uint64_t flags;
-    kprint_item_t *it;
-
-    if (!buf || len == 0) return 0;
-    if (len >= KPRINT_MAX_LEN) len = KPRINT_MAX_LEN - 1;
-
-    if (con_id >= NUM_CONSOLES) con_id = 0;
-
-    if (!kprint_ring) return -1;
-
-    flags = klog_irqsave();
-    if (kprint_count >= KPRINT_MAX_ITEMS) {
-        kprint_dropped++;
-        klog_irqrestore(flags);
-        return -1;
-    }
-    it = &kprint_ring[kprint_tail];
-    it->con_id = con_id;
-    it->len = (uint16_t)len;
-    memcpy(it->msg, buf, len);
-    it->msg[len] = '\0';
-    kprint_tail = (kprint_tail + 1) % KPRINT_MAX_ITEMS;
-    kprint_count++;
-    klog_irqrestore(flags);
-    waitq_wake_one(&kprint_waitq);
-    return (int)len;
-}
-
 static int kprint_dequeue(kprint_item_t *out) {
     uint64_t flags;
 
@@ -273,7 +243,6 @@ int kprint_write(int console_id, const char *buf, size_t len) {
     int con_id;
     size_t off;
     uint64_t chunk;
-    int retries;
     
     if (!buf || len == 0) return 0;
 
@@ -301,17 +270,8 @@ int kprint_write(int console_id, const char *buf, size_t len) {
             serial_write(buf + off, chunk);
         }
 
-        retries = 0;
-        while (kprint_try_enqueue((uint8_t)con_id, buf + off, chunk) < 0) {
-            retries++;
-            if (retries > 64) {
-                console_write_to_fb_only(con_id, buf + off, chunk);
-                break;
-            }
-            if (interrupts_enabled() && current_task) {
-                yield();
-            }
-        }
+        if (!console_alt_screen_active(con_id))
+            console_write_to_fb_only(con_id, buf + off, chunk);
 
         off += chunk;
     }
@@ -386,7 +346,6 @@ void vring_init(void) {
     kprint_head = 0;
     kprint_tail = 0;
     kprint_count = 0;
-    kprint_dropped = 0;
     serial_head = 0;
     serial_tail = 0;
     serial_count = 0;
@@ -717,6 +676,32 @@ bool kprint_is_ready(void) {
 
 void kprint_enable(void) {
     kprint_ready = 1;
+}
+
+void kprint_flush(void) {
+    kprint_item_t it;
+    klog_item_t kit;
+    uint64_t total;
+    uint64_t retries;
+    int con_id;
+
+    retries = 0;
+    do {
+        total = 0;
+        while (kprint_dequeue(&it) == 0) {
+            con_id = it.con_id;
+            if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+            if (!console_alt_screen_active(con_id))
+                console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
+            total++;
+        }
+        while (klog_dequeue(&kit) == 0) {
+            if (!console_alt_screen_active(0))
+                console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
+            total++;
+        }
+        retries++;
+    } while (total > 0 && retries < 1024);
 }
 
 void kprint_serial_async(const char *buf, size_t len) {

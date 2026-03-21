@@ -30,33 +30,27 @@ COLS=$(tput cols 2>/dev/null || echo 80)
 ROWS=$(tput lines 2>/dev/null || echo 24)
 
 _BAR_ACTIVE=0
+_BAR_LAST=""
 setup_bar() {
-  if [ "$_BAR_ACTIVE" -eq 0 ]; then
-    ROWS=$(tput lines 2>/dev/null || echo 24)
-    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
-    printf "\033[1;%dr" "$((ROWS - 2))"
-    printf "\033[%d;1H" "$((ROWS - 2))"
-    _BAR_ACTIVE=1
-  fi
+  _BAR_ACTIVE=1
 }
 
 cleanup_bar() {
   if [ "$_BAR_ACTIVE" -eq 1 ]; then
-    ROWS=$(tput lines 2>/dev/null || echo 24)
-    printf "\033[1;%dr" "$ROWS"
-    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
+    printf "\r\033[2K" >&2
     _BAR_ACTIVE=0
   fi
 }
+
+trap cleanup_bar EXIT INT TERM HUP
 
 progress_bar() {
   _step="$1"
   _total="$2"
   _msg="$3"
-  ROWS=$(tput lines 2>/dev/null || echo 24)
   COLS=$(tput cols 2>/dev/null || echo 80)
   _pct=$((_step * 100 / _total))
-  _bar_w=$((COLS - 2))
+  _bar_w=$((COLS - 8))
   if [ "$_bar_w" -lt 10 ]; then
     _bar_w=10
   fi
@@ -65,20 +59,24 @@ progress_bar() {
   _bar=""
   _i=0
   while [ "$_i" -lt "$_filled" ]; do
-    _bar="${_bar}="
+    _bar="${_bar}#"
     _i=$((_i + 1))
   done
-  if [ "$_filled" -lt "$_bar_w" ]; then
-    _bar="${_bar}>"
-    _empty=$((_empty - 1))
-  fi
   _i=0
   while [ "$_i" -lt "$_empty" ]; do
-    _bar="${_bar} "
+    _bar="${_bar}."
     _i=$((_i + 1))
   done
-  _label=$(printf "%3d%%  %s" "$_pct" "$_msg")
-  printf "\0337\033[%d;1H\033[2K%s\033[%d;1H\033[2K[%s]\0338" "$((ROWS - 1))" "$_label" "$ROWS" "$_bar"
+  _BAR_LAST=$(printf "%3d%% [%s]" "$_pct" "$_bar")
+  printf "\r\033[2K%s" "$_BAR_LAST" >&2
+}
+
+bar_print() {
+  printf "\r\033[2K" >&2
+  printf "%s\n" "$1"
+  if [ -n "$_BAR_LAST" ]; then
+    printf "\r%s" "$_BAR_LAST" >&2
+  fi
 }
 
 setup_bar
@@ -100,25 +98,26 @@ run_cmd() {
     "$@"
   else
     _errfile=$(mktemp)
-    "$@" 2>"$_errfile" | grep -E '^\s*(CC|LD|AS|AR|STRIP|OBJCOPY)\s' | sed \
-      -e "s/^\([[:space:]]*\)\(CC\)\([[:space:]]\)/\1${ESC}[1;32m\2${ESC}[0m\3/" \
-      -e "s/^\([[:space:]]*\)\(LD\)\([[:space:]]\)/\1${ESC}[1;36m\2${ESC}[0m\3/" \
-      -e "s/^\([[:space:]]*\)\(AS\)\([[:space:]]\)/\1${ESC}[1;35m\2${ESC}[0m\3/" \
-      -e "s/^\([[:space:]]*\)\(AR\)\([[:space:]]\)/\1${ESC}[1;33m\2${ESC}[0m\3/" \
-      -e "s/^\([[:space:]]*\)\(STRIP\)\([[:space:]]\)/\1${ESC}[1;34m\2${ESC}[0m\3/" \
-      -e "s/^\([[:space:]]*\)\(OBJCOPY\)\([[:space:]]\)/\1${ESC}[1;34m\2${ESC}[0m\3/" \
-      || true
+    _outfile=$(mktemp)
+    "$@" >"$_outfile" 2>"$_errfile" || true
+    if [ -s "$_outfile" ]; then
+      printf "\r\033[2K" >&2
+      grep -E '^\s*(CC|LD|AR|AS|STRIP|CCLD|HOSTCC)\s' "$_outfile" || true
+      if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
+    fi
     if [ -s "$_errfile" ]; then
+      printf "\r\033[2K" >&2
       sed \
         -e "s/\(error:\)/${ESC}[1;31m\1${ESC}[0m/g" \
         -e "s/\(warning:\)/${ESC}[1;33m\1${ESC}[0m/g" \
         "$_errfile"
+      if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
     fi
-    rm -f "$_errfile"
+    rm -f "$_errfile" "$_outfile"
   fi
   _step_end=$(date +%s)
   _step_dur=$((_step_end - _step_start))
-  printf "  \033[0;32mdone in %ds\033[0m\n" "$_step_dur"
+  bar_print "$(printf "  \033[0;32mdone in %ds\033[0m" "$_step_dur")"
   if [ "$_BAR_ACTIVE" -eq 1 ]; then
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "$_desc"
   fi
@@ -126,8 +125,8 @@ run_cmd() {
 
 for PROJECT in $PROJECTS; do
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "$(printf '\033[1;36mBuilding %s...\033[0m' "$PROJECT")"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building $PROJECT"
-  printf "\033[1;36mBuilding %s...\033[0m\n" "$PROJECT"
   if [ "$PROJECT" = "libc" ]; then
     run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 $MAKE install"
   else
@@ -136,45 +135,54 @@ for PROJECT in $PROJECTS; do
 done
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "$(printf '\033[1;36mBuilding ncurses...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building ncurses"
-printf "\033[1;36mBuilding ncurses...\033[0m\n"
 run_cmd "Building ncurses" sh -c "cd libc/lib && $MAKE ncurses"
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "$(printf '\033[1;36mBuilding user programs...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building user programs"
-printf "\033[1;36mBuilding user programs...\033[0m\n"
 run_cmd "Building user programs" sh -c "cd userprog && $MAKE all"
 
 chmod +x mkinitrd.sh
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 if [ -f terminfo/linux.ti ] && command -v tic >/dev/null 2>&1; then
+  bar_print "$(printf '\033[1;36mCompiling terminfo database...\033[0m')"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Compiling terminfo database"
-  printf "\033[1;36mCompiling terminfo database...\033[0m\n"
   mkdir -p root/usr/share/terminfo
   run_cmd "Compiling terminfo" sh -c "TERMINFO=root/usr/share/terminfo tic -o root/usr/share/terminfo terminfo/linux.ti 2>/dev/null || true"
 else
+  bar_print "$(printf '\033[0;33mSkipping terminfo (not available)\033[0m')"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Skipping terminfo (not available)"
-  printf "\033[0;33mSkipping terminfo (not available)\033[0m\n"
 fi
 
 if [ -d "initrd" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "initrd.img" ] || [ -n "$(find initrd -newer initrd.img 2>/dev/null | head -1)" ]; then
+    bar_print "$(printf '\033[1;36mBuilding initrd image...\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building initrd image"
-    printf "\033[1;36mBuilding initrd image...\033[0m\n"
     run_cmd "Building initrd" ./mkinitrd.sh initrd initrd.img
   else
+    bar_print "$(printf '\033[0;33mSkipping initrd (up to date)\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Skipping initrd (up to date)"
-    printf "\033[0;33mSkipping initrd (up to date)\033[0m\n"
   fi
 fi
 
 if command -v grub-mkimage >/dev/null 2>&1; then
   mkdir -p root/boot/grub/i386-pc
   if [ ! -f root/boot/grub/i386-pc/core.img ]; then
+    GRUB_EARLY_CFG=$(mktemp)
+    cat > "$GRUB_EARLY_CFG" <<'GRUBEOF'
+set root=(hd0,msdos1)
+set prefix=(hd0,msdos1)/boot/grub
+insmod normal
+normal
+GRUBEOF
     grub-mkimage -O i386-pc -o root/boot/grub/i386-pc/core.img \
-      -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot normal configfile
+      -c "$GRUB_EARLY_CFG" \
+      -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile
+    rm -f "$GRUB_EARLY_CFG"
   fi
   if [ -f /usr/lib/grub/i386-pc/boot.img ]; then
     cp /usr/lib/grub/i386-pc/boot.img root/boot/grub/i386-pc/boot.img
@@ -190,17 +198,17 @@ fi
 if [ -d "root" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "rootfs.squashfs" ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
+    bar_print "$(printf '\033[1;36mBuilding SquashFS rootfs...\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building SquashFS rootfs"
-    printf "\033[1;36mBuilding SquashFS rootfs...\033[0m\n"
     if command -v mksquashfs >/dev/null 2>&1; then
       rm -f rootfs.squashfs
-      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -noI -noD -noF -noX -no-xattrs -noappend -no-compression -quiet
+      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -noI -noD -noF -noX -no-xattrs -noappend -no-compression -quiet -no-progress
     else
       run_cmd "Building rootfs (fallback)" ./mkinitrd.sh root rootfs.squashfs
     fi
   else
+    bar_print "$(printf '\033[0;33mSkipping rootfs (up to date)\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Skipping rootfs (up to date)"
-    printf "\033[0;33mSkipping rootfs (up to date)\033[0m\n"
   fi
 fi
 

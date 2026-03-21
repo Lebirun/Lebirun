@@ -17,7 +17,7 @@
 #define CONFIG_DEBUG_RAMFS 0
 #endif
 #ifndef CONFIG_DEBUG_INITRD
-#define CONFIG_DEBUG_INITRD 0
+#define CONFIG_DEBUG_INITRD CONFIG_DEBUG_RAMFS
 #endif
 #ifndef CONFIG_DEBUG_ELF
 #define CONFIG_DEBUG_ELF 0
@@ -37,14 +37,23 @@
 #ifndef CONFIG_DEBUG_FS_OTHER
 #define CONFIG_DEBUG_FS_OTHER 0
 #endif
+#ifndef CONFIG_DEBUG_SIGNAL
+#define CONFIG_DEBUG_SIGNAL 0
+#endif
+#ifndef CONFIG_DEBUG_IPC
+#define CONFIG_DEBUG_IPC 0
+#endif
+#ifndef CONFIG_DEBUG_BOOT_VERBOSE
+#define CONFIG_DEBUG_BOOT_VERBOSE 0
+#endif
 #ifndef CONFIG_DEBUG_BOOT_VFS
-#define CONFIG_DEBUG_BOOT_VFS 0
+#define CONFIG_DEBUG_BOOT_VFS CONFIG_DEBUG_BOOT_VERBOSE
 #endif
 #ifndef CONFIG_DEBUG_BOOT_MODULES
-#define CONFIG_DEBUG_BOOT_MODULES 0
+#define CONFIG_DEBUG_BOOT_MODULES CONFIG_DEBUG_BOOT_VERBOSE
 #endif
 #ifndef CONFIG_DEBUG_BOOT_HW
-#define CONFIG_DEBUG_BOOT_HW 0
+#define CONFIG_DEBUG_BOOT_HW CONFIG_DEBUG_BOOT_VERBOSE
 #endif
 
 extern bool debug_memory;
@@ -58,6 +67,8 @@ extern bool debug_idt;
 extern bool debug_driver;
 extern bool debug_fs_ext4;
 extern bool debug_fs_other;
+extern bool debug_signal;
+extern bool debug_ipc;
 
 #define DEBUG_MEMORY(fmt, ...) do { if (debug_memory) klog_printf(1, "[MEM] " fmt, ##__VA_ARGS__); } while (0)
 #define DEBUG_TASK(fmt, ...) do { if (debug_task) klog_printf(1, "[TASK] " fmt, ##__VA_ARGS__); } while (0)
@@ -70,5 +81,7 @@ extern bool debug_fs_other;
 #define DEBUG_DRIVER(fmt, ...) do { if (debug_driver) klog_printf(1, "[DRIVER] " fmt, ##__VA_ARGS__); } while (0)
 #define DEBUG_FS_EXT4(fmt, ...) do { if (debug_fs_ext4) klog_printf(1, "[EXT4] " fmt, ##__VA_ARGS__); } while (0)
 #define DEBUG_FS_OTHER(fmt, ...) do { if (debug_fs_other) klog_printf(1, "[FS] " fmt, ##__VA_ARGS__); } while (0)
+#define DEBUG_SIGNAL(fmt, ...) do { if (debug_signal) klog_printf(1, "[SIGNAL] " fmt, ##__VA_ARGS__); } while (0)
+#define DEBUG_IPC(fmt, ...) do { if (debug_ipc) klog_printf(1, "[IPC] " fmt, ##__VA_ARGS__); } while (0)
 
 #endif

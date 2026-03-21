@@ -68,19 +68,18 @@ void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t p
 
 void terminal_replay_early_boot(void) {
     size_t i;
+    char c;
+
     early_boot_capture = false;
     for (i = 0; i < early_boot_index; i++) {
-        char c;
         c = early_boot_buffer[i];
-        if (use_framebuffer && console_is_initialized()) {
+        if (console_is_initialized()) {
             console_putchar_to(0, c);
         } else if (use_framebuffer) {
             fb_write_char(c);
         }
     }
-    if (use_framebuffer) {
-        fb_update_cursor();
-    }
+    fb_update_cursor();
 }
 
 void terminal_setcolor(uint8_t color) {
@@ -109,7 +108,7 @@ void terminal_putchar(char c) {
         early_boot_buffer[early_boot_index++] = c;
     }
 
-    if (use_framebuffer && console_is_initialized()) {
+    if (console_is_initialized()) {
         console_putchar_to(0, c);
         return;
     }
@@ -153,7 +152,7 @@ void terminal_putchar(char c) {
 }
 
 void terminal_write(const char* data, size_t size) {
-	if (use_framebuffer && console_is_initialized()) {
+       if (console_is_initialized()) {
 		console_write_to(0, data, size);
 		return;
 	}

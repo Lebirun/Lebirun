@@ -15,19 +15,19 @@ static int sys_fb_setcolors(int fg, const char *bg_ptr, int unused) {
 
 static int sys_fb_getinfo(int info_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = (uint64_t)info_ptr;
+    uint64_t info_addr = (uint64_t)(uint32_t)info_ptr;
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) return -EFAULT;
 
     framebuffer_t *fb = fb_get();
-    uint64_t *info = (uint64_t *)info_addr;
-    info[0] = fb->width;
-    info[1] = fb->height;
-    info[2] = (uint64_t)fb->bpp;
-    info[3] = fb->font ? fb->font->height : 16;
-    info[4] = fb->rows;
-    info[5] = fb->cursor_y;
-    info[6] = fb->font ? fb->font->width : 8;
-    info[7] = fb->cols;
+    uint32_t *info = (uint32_t *)info_addr;
+    info[0] = (uint32_t)fb->width;
+    info[1] = (uint32_t)fb->height;
+    info[2] = (uint32_t)fb->bpp;
+    info[3] = fb->font ? (uint32_t)fb->font->height : 16;
+    info[4] = (uint32_t)fb->rows;
+    info[5] = (uint32_t)fb->cursor_y;
+    info[6] = fb->font ? (uint32_t)fb->font->width : 8;
+    info[7] = (uint32_t)fb->cols;
     return 0;
 }
 
@@ -77,13 +77,13 @@ static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) 
 
 static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = (uint64_t)info_ptr;
+    uint64_t info_addr = (uint64_t)(uint32_t)info_ptr;
     
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {
         return -EFAULT;
     }
     
-    uint64_t *info = (uint64_t *)info_addr;
+    uint32_t *info = (uint32_t *)info_addr;
     uint64_t width, height, bpp, refresh_rate;
     
     int result = fb_get_info(&width, &height, &bpp, &refresh_rate);
@@ -91,10 +91,10 @@ static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unuse
         return result;
     }
     
-    info[0] = width;
-    info[1] = height;
-    info[2] = bpp;
-    info[3] = refresh_rate;
+    info[0] = (uint32_t)width;
+    info[1] = (uint32_t)height;
+    info[2] = (uint32_t)bpp;
+    info[3] = (uint32_t)refresh_rate;
     
     return 0;
 }
@@ -102,14 +102,14 @@ static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unuse
 static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
     uint64_t info_addr;
     uint64_t words;
-    uint64_t *out;
+    uint32_t *out;
     uint64_t buffer[16];
     uint64_t i;
     uint64_t copy_count;
     int ret;
 
     (void)unused2;
-    info_addr = (uint64_t)info_ptr;
+    info_addr = (uint64_t)(uint32_t)info_ptr;
     words = (uint64_t)(uintptr_t)words_ptr;
 
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {
@@ -119,7 +119,7 @@ static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
         return -EINVAL;
     }
 
-    out = (uint64_t *)info_addr;
+    out = (uint32_t *)info_addr;
     copy_count = words;
     if (copy_count > 16) {
         copy_count = 16;
@@ -131,7 +131,7 @@ static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
     }
 
     for (i = 0; i < copy_count; i++) {
-        out[i] = buffer[i];
+        out[i] = (uint32_t)buffer[i];
     }
     return 0;
 }

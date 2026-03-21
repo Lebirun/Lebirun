@@ -897,10 +897,13 @@ static int inst_format_ext4(const char *devpath)
     if (pid < 0) return -1;
 
     if (pid == 0) {
-        int nfd;
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, 1);
+            dup2(null_fd, 2);
+            close(null_fd);
+        }
         char *argv[3];
-        nfd = open("/dev/null", O_WRONLY);
-        if (nfd >= 0) { dup2(nfd, 1); dup2(nfd, 2); close(nfd); }
         argv[0] = "lformat.ext4";
         argv[1] = (char *)devpath;
         argv[2] = NULL;
@@ -920,12 +923,24 @@ static int inst_copy_rootfs(const char *mountpoint)
         "bin", "boot", "dev", "etc", "home", "lib", "proc",
         "root", "sbin", "tmp", "usr", "var", NULL
     };
+    static const char *root_files[] = {
+        "init", NULL
+    };
     char src[MAX_PATH];
     char dst[MAX_PATH];
     int i;
     int errors;
 
     errors = 0;
+
+    /* Copy root-level files (e.g. /init) */
+    for (i = 0; root_files[i]; i++) {
+        snprintf(src, sizeof(src), "/%s", root_files[i]);
+        snprintf(dst, sizeof(dst), "%s/%s", mountpoint, root_files[i]);
+        if (inst_copy_file_vfs(src, dst) < 0) {
+            errors++;
+        }
+    }
 
     for (i = 0; dirs[i]; i++) {
         snprintf(src, sizeof(src), "/%s", dirs[i]);
@@ -1020,7 +1035,7 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
         "set default=0\n"
         "\n"
         "menuentry \"Lebirun\" {\n"
-        "\tmultiboot /boot/lebirun.kernel root=%s\n"
+        "\tmultiboot2 /boot/lebirun.kernel root=%s\n"
         "\tboot\n"
         "}\n", part_dev);
 
@@ -1371,10 +1386,15 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     usleep(50000);
 
     if (do_format) {
+        int fret;
+        char fmsg[128];
         tui_progress("Installing", "Formatting partition...", 0);
-        tui_log("Formatting partition as ext4...");
-        if (inst_format_ext4(p->devpath) != 0) {
-            tui_msgbox("Error", "Failed to format partition.");
+        snprintf(fmsg, sizeof(fmsg), "Formatting %s as ext4...", p->devpath);
+        tui_log(fmsg);
+        fret = inst_format_ext4(p->devpath);
+        if (fret != 0) {
+            snprintf(fmsg, sizeof(fmsg), "Failed to format partition (status=%d, path=%s).", fret, p->devpath);
+            tui_msgbox("Error", fmsg);
             return -1;
         }
         tui_log("Format complete.");

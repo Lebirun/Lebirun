@@ -52,7 +52,7 @@ static void serial_write_move_back(int n) {
 
 static void tty_echo_char(int con_id, char c) {
     framebuffer_t *fb = fb_get();
-    if (fb && fb->font && console_is_initialized()) {
+    if (fb && (fb->font || fb->cols) && console_is_initialized()) {
         if (con_id == 0 && in_line_editing[0]) {
             console_write_to_fb_only(con_id, &c, 1);
         } else {
@@ -65,7 +65,7 @@ static void tty_echo_char(int con_id, char c) {
 
 static void tty_echo_str(int con_id, const char *s, int len) {
     framebuffer_t *fb = fb_get();
-    if (fb && fb->font && console_is_initialized()) {
+    if (fb && (fb->font || fb->cols) && console_is_initialized()) {
         if (con_id == 0 && in_line_editing[0]) {
             console_write_to_fb_only(con_id, s, (size_t)len);
         } else {
@@ -205,7 +205,7 @@ static int sys_write(int fd, const char *buf, int len) {
     if (fd == 1 || fd == 2) {
         framebuffer_t *fb = fb_get();
         int con_id = current_task ? current_task->console_id : 0;
-        if (fb && fb->font && console_is_initialized()) {
+        if (fb && (fb->font || fb->cols) && console_is_initialized()) {
             console_write_to(con_id, (const char *)buf_addr, (size_t)len);
         } else {
             int written = 0;

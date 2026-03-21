@@ -130,6 +130,16 @@ void ext4_release_inode(ext4_inode_cache_t *ic) {
     }
 }
 
+void ext4_sync_inodes(ext4_fs_t *fs) {
+    if (!fs) return;
+    for (int i = 0; i < EXT4_MAX_OPEN_INODES; i++) {
+        if (fs->inode_cache[i].dirty && fs->inode_cache[i].ino != 0) {
+            ext4_write_inode(fs, fs->inode_cache[i].ino, &fs->inode_cache[i].inode);
+            fs->inode_cache[i].dirty = false;
+        }
+    }
+}
+
 void ext4_mark_inode_dirty(ext4_inode_cache_t *ic) {
     if (ic) {
         ic->dirty = true;

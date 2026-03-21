@@ -265,19 +265,19 @@ typedef struct {
     uint8_t reserved0:1;
     uint8_t pmp:4;
     uint16_t prdtl;
-    volatile uint64_t prdbc;
-    uint64_t ctba;
-    uint64_t ctbau;
-    uint64_t reserved1[4];
+    volatile uint32_t prdbc;
+    uint32_t ctba;
+    uint32_t ctbau;
+    uint32_t reserved1[4];
 } __attribute__((packed)) hba_cmd_header_t;
 
 typedef struct {
-    uint64_t dba;
-    uint64_t dbau;
-    uint64_t reserved0;
-    uint64_t dbc:22;
-    uint64_t reserved1:9;
-    uint64_t i:1;
+    uint32_t dba;
+    uint32_t dbau;
+    uint32_t reserved0;
+    uint32_t dbc:22;
+    uint32_t reserved1:9;
+    uint32_t i:1;
 } __attribute__((packed)) hba_prdt_entry_t;
 
 typedef struct {

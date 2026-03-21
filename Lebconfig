@@ -1,31 +1,18 @@
 title "Lebirun"
 desc "Hobby Operating System/Kernel"
 
-subcategory "Debug" {
-    subcategory "Memory" can-toggle=enable {
-        item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
-    }
-    subcategory "Process/Task" can-toggle=enable {
-        item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"
-    }
-    subcategory "Filesystem" can-toggle=enable {
-        item type=bool name="VFS Debug" default=disable id=DEBUG_VFS help="Debug VFS operations"
-        item type=bool name="RAMFS Debug" default=disable id=DEBUG_RAMFS help="Debug RAMFS operations"
-        item type=bool name="InitRD Debug" default=disable id=DEBUG_INITRD help="Debug InitRD operations"
-        item type=bool name="Ext4 Debug" default=disable id=DEBUG_FS_EXT4 help="Debug Ext4 filesystem"
-        item type=bool name="Other FS Debug" default=disable id=DEBUG_FS_OTHER help="Debug other filesystems (procfs, devfs, overlayfs, squashfs)"
-    }
-    subcategory "System" can-toggle=enable {
-        item type=bool name="ELF Debug" default=disable id=DEBUG_ELF help="Debug ELF loading"
-        item type=bool name="Syscall Debug" default=disable id=DEBUG_SYSCALL help="Debug system call handling"
-        item type=bool name="IDT Debug" default=disable id=DEBUG_IDT help="Debug interrupt handling"
-    }
-    subcategory "Drivers" can-toggle=enable {
-        item type=bool name="Driver Debug" default=disable id=DEBUG_DRIVER help="Debug device drivers (AHCI, keyboard, etc.)"
-    }
-    subcategory "Boot" can-toggle=enable {
-        item type=bool name="Boot VFS Debug" default=disable id=DEBUG_BOOT_VFS help="Show VFS/filesystem init steps during boot"
-        item type=bool name="Boot Modules Debug" default=disable id=DEBUG_BOOT_MODULES help="Show multiboot module info during boot"
-        item type=bool name="Boot Hardware Debug" default=disable id=DEBUG_BOOT_HW help="Show paging/PIC/SMP hardware init during boot"
-    }
+subcategory "Debug" can-toggle=enable {
+    item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
+    item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"
+    item type=bool name="Signal Debug" default=disable id=DEBUG_SIGNAL help="Debug signal delivery and handling"
+    item type=bool name="VFS Debug" default=disable id=DEBUG_VFS help="Debug VFS operations"
+    item type=bool name="RAMFS/InitRD Debug" default=disable id=DEBUG_RAMFS help="Debug RAMFS and InitRD operations"
+    item type=bool name="Ext4 Debug" default=disable id=DEBUG_FS_EXT4 help="Debug Ext4 filesystem"
+    item type=bool name="Other FS Debug" default=disable id=DEBUG_FS_OTHER help="Debug other filesystems (procfs, devfs, overlayfs, squashfs)"
+    item type=bool name="ELF Debug" default=disable id=DEBUG_ELF help="Debug ELF loading and execution"
+    item type=bool name="Syscall Debug" default=disable id=DEBUG_SYSCALL help="Debug system call handling"
+    item type=bool name="IDT/IRQ Debug" default=disable id=DEBUG_IDT help="Debug interrupt and exception handling"
+    item type=bool name="Driver Debug" default=disable id=DEBUG_DRIVER help="Debug device drivers (AHCI, keyboard, etc.)"
+    item type=bool name="IPC Debug" default=disable id=DEBUG_IPC help="Debug pipes, sockets, and IPC mechanisms"
+    item type=bool name="Boot Verbose" default=disable id=DEBUG_BOOT_VERBOSE help="Show detailed boot progress (VFS, modules, hardware init)"
 }

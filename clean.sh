@@ -20,6 +20,7 @@ done
 [ -d "userprog/LebInit" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/login" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "libc/lib/ncurses-6.6" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -d "userprog/lebinstaller" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 TOTAL_STEPS=$((TOTAL_STEPS + 4))
 CURRENT_STEP=0
 
@@ -27,33 +28,27 @@ COLS=$(tput cols 2>/dev/null || echo 80)
 ROWS=$(tput lines 2>/dev/null || echo 24)
 
 _BAR_ACTIVE=0
+_BAR_LAST=""
 setup_bar() {
-  if [ "$_BAR_ACTIVE" -eq 0 ]; then
-    ROWS=$(tput lines 2>/dev/null || echo 24)
-    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
-    printf "\033[1;%dr" "$((ROWS - 2))"
-    printf "\033[%d;1H" "$((ROWS - 2))"
-    _BAR_ACTIVE=1
-  fi
+  _BAR_ACTIVE=1
 }
 
 cleanup_bar() {
   if [ "$_BAR_ACTIVE" -eq 1 ]; then
-    ROWS=$(tput lines 2>/dev/null || echo 24)
-    printf "\033[1;%dr" "$ROWS"
-    printf "\033[%d;1H\033[2K\033[%d;1H\033[2K" "$((ROWS - 1))" "$ROWS"
+    printf "\r\033[2K" >&2
     _BAR_ACTIVE=0
   fi
 }
+
+trap cleanup_bar EXIT INT TERM HUP
 
 progress_bar() {
   _step="$1"
   _total="$2"
   _msg="$3"
-  ROWS=$(tput lines 2>/dev/null || echo 24)
   COLS=$(tput cols 2>/dev/null || echo 80)
   _pct=$((_step * 100 / _total))
-  _bar_w=$((COLS - 2))
+  _bar_w=$((COLS - 8))
   if [ "$_bar_w" -lt 10 ]; then
     _bar_w=10
   fi
@@ -62,20 +57,24 @@ progress_bar() {
   _bar=""
   _i=0
   while [ "$_i" -lt "$_filled" ]; do
-    _bar="${_bar}="
+    _bar="${_bar}#"
     _i=$((_i + 1))
   done
-  if [ "$_filled" -lt "$_bar_w" ]; then
-    _bar="${_bar}>"
-    _empty=$((_empty - 1))
-  fi
   _i=0
   while [ "$_i" -lt "$_empty" ]; do
-    _bar="${_bar} "
+    _bar="${_bar}."
     _i=$((_i + 1))
   done
-  _label=$(printf "%3d%%  %s" "$_pct" "$_msg")
-  printf "\0337\033[%d;1H\033[2K%s\033[%d;1H\033[2K[%s]\0338" "$((ROWS - 1))" "$_label" "$ROWS" "$_bar"
+  _BAR_LAST=$(printf "%3d%% [%s]" "$_pct" "$_bar")
+  printf "\r\033[2K%s" "$_BAR_LAST" >&2
+}
+
+bar_print() {
+  printf "\r\033[2K" >&2
+  printf "%s\n" "$1"
+  if [ -n "$_BAR_LAST" ]; then
+    printf "\r%s" "$_BAR_LAST" >&2
+  fi
 }
 
 setup_bar
@@ -100,23 +99,23 @@ remove_dir_contents() {
 for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
   if [ -d "$PROJECT" ]; then
     CURRENT_STEP=$((CURRENT_STEP + 1))
+    bar_print "Cleaning $PROJECT..."
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning $PROJECT"
-    printf "Cleaning %s...\n" "$PROJECT"
     run_clean "Cleaning $PROJECT" sh -c "cd \"$PROJECT\" && $MAKE clean"
   fi
 done
 
 if [ -d "userprog/coreutils" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning coreutils..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning coreutils"
-  printf "Cleaning coreutils...\n"
   run_clean "Cleaning coreutils" sh -c "cd userprog/coreutils && $MAKE clean"
 fi
 
 if [ -d "userprog/lsh" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning lsh..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning lsh"
-  printf "Cleaning lsh...\n"
   if [ -f "userprog/lsh/.build/config.mk" ]; then
     run_clean "Cleaning lsh" sh -c "cd userprog/lsh && $MAKE clean"
   fi
@@ -125,30 +124,38 @@ fi
 
 if [ -d "userprog/LebInit" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning LebInit..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning LebInit"
-  printf "Cleaning LebInit...\n"
   run_clean "Cleaning LebInit" sh -c "cd userprog/LebInit && $MAKE clean"
 fi
 
 if [ -d "userprog/login" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning login..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning login"
-  printf "Cleaning login...\n"
   run_clean "Cleaning login" sh -c "cd userprog/login && $MAKE clean"
 fi
 
 if [ -d "libc/lib/ncurses-6.6" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning ncurses..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning ncurses"
-  printf "Cleaning ncurses...\n"
   run_clean "Cleaning ncurses" sh -c "cd libc/lib/ncurses-6.6 && $MAKE clean"
   rm -rf libc/lib/ncurses-6.6/config.cache 2>/dev/null || true
   find libc/lib/ncurses-6.6 -type f -name '*.o' -delete 2>/dev/null || true
 fi
 
+if [ -d "userprog/lebinstaller" ]; then
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning lebinstaller..."
+  progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning lebinstaller"
+  run_clean "Cleaning lebinstaller" sh -c "cd userprog/lebinstaller && $MAKE clean"
+  rm -f userprog/lebinstaller/lebinstaller.bin
+fi
+
 CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "Removing binaries..."
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Removing binaries"
-printf "Removing binaries...\n"
 remove_dir_contents root/boot
 remove_dir_contents root/bin
 remove_dir_contents root/sbin
@@ -165,10 +172,11 @@ rm -rf sysroot isodir lebirun.iso
 rm -f initrd.img rootfs.img rootfs.squashfs
 rm -rf include
 rm -rf root/init
+rm -f userprog/lebinstaller/lebinstaller.bin
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "Cleaning object files..."
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning object files"
-printf "Cleaning object files...\n"
 find userprog/coreutils -type f -name '*.o' -delete 2>/dev/null || true
 find kernel -type f -name '*.o' -delete 2>/dev/null || true
 find libc -type f -name '*.o' -delete 2>/dev/null || true
@@ -178,8 +186,8 @@ find libc -type f -name '*.d' -delete 2>/dev/null || true
 find userprog -type f -name '*.d' -delete 2>/dev/null || true
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "Cleaning kernel & libc artifacts..."
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning kernel & libc artifacts"
-printf "Cleaning kernel & libc artifacts...\n"
 rm -f kernel/lebirun.kernel
 rm -f kernel/arch/x86_64/user_shell.bin
 rm -f kernel/arch/x86_64/user_shell_bin.o

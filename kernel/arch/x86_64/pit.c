@@ -5,6 +5,7 @@
 #include <kernel/common.h>
 #include <kernel/io.h>
 #include <kernel/pit.h>
+#include <kernel/spinlock.h>
 
 #define PIT_BASE_FREQ       1193182
 #define PIT_CHANNEL0_DATA   0x40
@@ -41,6 +42,8 @@ static uint64_t current_divisor = 0;
 static uint64_t uptime_ticks = 0;
 static uint64_t last_tick = 0;
 static uint64_t us_per_tick = 10000;
+static uint64_t last_uptime_us = 0;
+static spinlock_t uptime_lock = { .locked = 0 };
 
 typedef void (*pit_callback_t)(uint64_t ticks);
 
@@ -129,6 +132,9 @@ void pit_init(uint64_t freq) {
     if (divisor < 1) divisor = 1;
     
     us_per_tick = 1000000 / freq;
+
+    uptime_ticks = 0;
+    last_tick = tick_count;
     
     pit_set_divisor((uint16_t)divisor);
     
@@ -244,21 +250,52 @@ uint64_t pit_get_ticks(void) {
     return tick_count;
 }
 
+uint64_t pit_get_uptime_us(void) {
+    extern volatile uint32_t *lapic_base;
+    extern uint32_t lapic_timer_reload;
+    uint64_t flags = save_flags_cli();
+    spin_lock(&uptime_lock);
+    uint64_t current = tick_count;
+    uint64_t delta = current - last_tick;
+    uptime_ticks += delta;
+    last_tick = current;
+    uint64_t ticks = uptime_ticks;
+    uint32_t ccr = 0;
+    uint32_t reload = lapic_timer_reload;
+    if (lapic_base && reload > 0)
+        ccr = lapic_base[0x390 / 4];
+    uint64_t base_us = (ticks * 1000000ULL) / calibrated_freq;
+    uint64_t result;
+    if (lapic_base && reload > 0) {
+        uint64_t elapsed = (ccr < reload) ? (reload - ccr) : 0;
+        uint64_t subtick_us = (elapsed * (1000000ULL / calibrated_freq)) / reload;
+        result = base_us + subtick_us;
+    } else {
+        spin_unlock(&uptime_lock);
+        result = base_us + pit_get_subtick_us();
+        flags = save_flags_cli();
+        spin_lock(&uptime_lock);
+    }
+    if (result < last_uptime_us)
+        result = last_uptime_us;
+    else
+        last_uptime_us = result;
+    spin_unlock(&uptime_lock);
+    restore_flags(flags);
+    return result;
+}
+
 uint64_t pit_get_ticks64(void) {
     uint64_t flags = save_flags_cli();
+    spin_lock(&uptime_lock);
     uint64_t current = tick_count;
     uint64_t delta = current - last_tick;
     uptime_ticks += delta;
     last_tick = current;
     uint64_t result = uptime_ticks;
+    spin_unlock(&uptime_lock);
     restore_flags(flags);
     return result;
-}
-
-uint64_t pit_get_uptime_us(void) {
-    uint64_t ticks = pit_get_ticks64();
-    uint64_t base_us = (ticks * 1000000ULL) / calibrated_freq;
-    return base_us + pit_get_subtick_us();
 }
 
 uint64_t pit_get_uptime_ms(void) {

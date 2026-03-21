@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <kernel/power.h>
 #include <kernel/panic.h>
+#include <kernel/watchdog.h>
 #include <string.h>
 
 #define PANIC_CMD_CUSTOM  0
@@ -12,6 +13,7 @@ static int sys_reboot(int cmd, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
 
+    watchdog_disable();
     if (cmd == POWER_CMD_SHUTDOWN) {
         power_shutdown();
     } else if (cmd == POWER_CMD_REBOOT) {

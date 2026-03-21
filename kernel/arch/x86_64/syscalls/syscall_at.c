@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <kernel/ramfs.h>
 
 #define AT_FDCWD -100
 #define AT_SYMLINK_NOFOLLOW 0x100
@@ -311,9 +312,74 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     return vfs_unlink(parent, filename);
 }
 
-static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd) {
-    (void)olddirfd; (void)oldpath; (void)newdirfd;
-    return -ENOSYS;
+static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath_arg) {
+    char old_resolved[256];
+    char new_resolved[256];
+    const char *old_path;
+    const char *new_path;
+    vfs_node_t *old_node;
+    vfs_node_t *old_parent;
+    vfs_node_t *new_parent;
+    char new_parent_path[256];
+    char old_name[64];
+    char new_name[64];
+    int len;
+    int last_slash;
+    int k;
+    int i;
+
+    if (!oldpath || !newpath_arg) return -EFAULT;
+
+    old_path = resolve_at_path(olddirfd, oldpath, old_resolved, sizeof(old_resolved));
+    if (!old_path) return -EFAULT;
+
+    new_path = resolve_at_path(newdirfd, newpath_arg, new_resolved, sizeof(new_resolved));
+    if (!new_path) return -EFAULT;
+
+    old_node = vfs_namei(old_path);
+    if (!old_node) return -ENOENT;
+
+    old_parent = old_node->parent;
+    if (!old_parent || !old_parent->rename) {
+        return ramfs_rename(old_path, new_path) ? -ENOENT : 0;
+    }
+
+    len = 0;
+    while (new_path[len]) len++;
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
+        if (new_path[i] == '/') last_slash = i;
+    }
+
+    if (last_slash <= 0) {
+        new_parent_path[0] = '/';
+        new_parent_path[1] = '\0';
+        k = 0;
+        i = (last_slash == 0) ? 1 : 0;
+        while (new_path[i] && k < 63) new_name[k++] = new_path[i++];
+        new_name[k] = '\0';
+    } else {
+        for (i = 0; i < last_slash && i < 255; i++) new_parent_path[i] = new_path[i];
+        new_parent_path[last_slash < 255 ? last_slash : 255] = '\0';
+        k = 0;
+        for (i = last_slash + 1; i < len && k < 63; i++) new_name[k++] = new_path[i];
+        new_name[k] = '\0';
+    }
+
+    new_parent = vfs_namei(new_parent_path);
+    if (!new_parent) return -ENOENT;
+
+    len = 0;
+    while (old_path[len]) len++;
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
+        if (old_path[i] == '/') last_slash = i;
+    }
+    k = 0;
+    for (i = last_slash + 1; i < len && k < 63; i++) old_name[k++] = old_path[i];
+    old_name[k] = '\0';
+
+    return old_parent->rename(old_parent, old_name, new_parent, new_name);
 }
 
 static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
@@ -322,8 +388,28 @@ static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
 }
 
 static int sys_symlinkat(int target_ptr, const char *newdirfd_ptr, int linkpath) {
-    (void)target_ptr; (void)newdirfd_ptr; (void)linkpath;
-    return -ENOSYS;
+    char link_resolved[256];
+    const char *link_path;
+    const char *target;
+    int newdirfd;
+    int ret;
+
+    target = (const char *)(uintptr_t)target_ptr;
+    newdirfd = (int)(uintptr_t)newdirfd_ptr;
+
+    if (!target || (uint64_t)target < 0x1000 || (uint64_t)target >= KERNEL_VMA) return -EFAULT;
+    if (!linkpath || (uint64_t)(uintptr_t)linkpath < 0x1000 || (uint64_t)(uintptr_t)linkpath >= KERNEL_VMA) return -EFAULT;
+
+    link_path = resolve_at_path(newdirfd, (const char *)(uintptr_t)linkpath, link_resolved, sizeof(link_resolved));
+    if (!link_path) return -EFAULT;
+
+    ret = ramfs_create_symlink(link_path, target, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (ret == 0) return 0;
+    if (ret == RAMFS_ERR_EXIST) return -EEXIST;
+    if (ret == RAMFS_ERR_NOENT) return -ENOENT;
+    if (ret == RAMFS_ERR_NOSPC) return -ENOSPC;
+    if (ret == RAMFS_ERR_NOMEM) return -ENOMEM;
+    return -EIO;
 }
 
 static int sys_readlinkat(int dirfd, const char *pathname, int buf_ptr) {
@@ -435,8 +521,8 @@ static int sys_utimensat(int dirfd, const char *pathname, int times_ptr) {
     return 0;
 }
 
-static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd) {
-    return sys_renameat(olddirfd, oldpath, newdirfd);
+static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+    return sys_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
 void syscalls_at_init(void) {

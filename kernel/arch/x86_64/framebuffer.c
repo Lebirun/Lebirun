@@ -3,6 +3,7 @@
 #include <kernel/drivers/fb/bga.h>
 #include <kernel/drivers/fb/vga_modes.h>
 #include <kernel/console.h>
+#include <kernel/io.h>
 #include <string.h>
 
 static framebuffer_t fb;
@@ -23,6 +24,41 @@ static uint64_t fb_vram_bytes = 0;
 static uint64_t mapped_pages_count = 0;
 
 static uint64_t *vram_addr = 0;
+
+static int fb_graphical = 0;
+static uint16_t *vga_text_mem = (uint16_t *)(0xB8000 + KERNEL_VMA);
+static uint8_t vga_cur_attr = 0x07;
+
+static const uint8_t ansi_to_vga[16] = {
+    0, 4, 2, 6, 1, 5, 3, 7,
+    8, 12, 10, 14, 9, 13, 11, 15
+};
+
+static uint8_t rgb_to_vga_index(uint64_t rgb) {
+    int i;
+    static const uint64_t normal[8] = {
+        0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
+        0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
+    };
+    static const uint64_t intense[8] = {
+        0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
+        0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
+    };
+    for (i = 0; i < 8; i++) {
+        if (rgb == normal[i]) return ansi_to_vga[i];
+        if (rgb == intense[i]) return ansi_to_vga[i + 8];
+    }
+    return 7;
+}
+
+static void vga_text_update_cursor(uint64_t x, uint64_t y) {
+    uint16_t pos;
+    pos = (uint16_t)(y * 80 + x);
+    outb(0x3D4, 14);
+    outb(0x3D5, (pos >> 8) & 0xFF);
+    outb(0x3D4, 15);
+    outb(0x3D5, pos & 0xFF);
+}
 
 void fb_flush(void) {
 }
@@ -251,6 +287,10 @@ static psf_font_t default_font = {
     .unicode_table_size = 0
 };
 
+const uint8_t *fb_get_default_font_data(void) {
+    return default_font_data;
+}
+
 static void fb_clear_region(uint64_t start_y, uint64_t end_y) {
     uint64_t bytes_per_pixel;
     uint64_t line_bytes;
@@ -379,7 +419,23 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
 
     fb_clear();
     
+    fb_graphical = 1;
     return 0;
+}
+
+void fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
+    if (font_height == 0) font_height = 16;
+    __asm__ volatile("outw %0, %1" : : "a"((uint16_t)4), "Nd"((uint16_t)0x01CE));
+    __asm__ volatile("outw %0, %1" : : "a"((uint16_t)0), "Nd"((uint16_t)0x01CF));
+    vga_set_text_mode(font_glyphs, num_chars, font_height);
+
+    fb.rows = 25;
+    fb.cols = 80;
+    fb.font = NULL;
+    fb.addr = NULL;
+    fb_graphical = 0;
+    fb.cursor_x = 0;
+    fb.cursor_y = 0;
 }
 
 void fb_set_font(psf_font_t *font) {
@@ -403,13 +459,32 @@ void fb_set_font(psf_font_t *font) {
 }
 
 void fb_set_colors(uint64_t fg, uint64_t bg) {
+    uint8_t vga_fg;
+    uint8_t vga_bg;
+
     fb.fg_color = fg;
     fb.bg_color = bg;
+    if (!fb_graphical) {
+        vga_fg = rgb_to_vga_index(fg);
+        vga_bg = rgb_to_vga_index(bg);
+        vga_cur_attr = (uint8_t)((vga_bg << 4) | (vga_fg & 0x0F));
+    }
 }
 
 void fb_clear(void) {
     uint64_t bytes_per_pixel;
     uint64_t clear_height;
+    uint64_t i;
+
+    if (!fb_graphical) {
+        volatile uint16_t *vga = (volatile uint16_t *)vga_text_mem;
+        for (i = 0; i < 16384; i++) {
+            vga[i] = (uint16_t)(' ' | ((uint16_t)vga_cur_attr << 8));
+        }
+        fb.cursor_x = 0;
+        fb.cursor_y = 0;
+        return;
+    }
 
     bytes_per_pixel = (uint64_t)(fb.bpp / 8u);
     if (bytes_per_pixel == 0) return;
@@ -490,6 +565,13 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
     uint8_t b;
     uint16_t rgb565;
     uint8_t uc;
+
+    if (!fb_graphical) {
+        if (cx < 80 && cy < 25) {
+            vga_text_mem[cy * 80 + cx] = (uint16_t)((uint8_t)c | ((uint16_t)vga_cur_attr << 8));
+        }
+        return;
+    }
 
     if (!fb.font || !fb.font->glyphs) {
         return;
@@ -572,10 +654,20 @@ void fb_scroll(void) {
     uint64_t scroll_cols;
     uint64_t col;
     char old_char;
+    uint64_t x;
 
     if (fb.rows == 0 || fb.cols == 0) {
         return;
     }
+
+    if (!fb_graphical) {
+        memmove(vga_text_mem, vga_text_mem + 80, 80 * 24 * sizeof(uint16_t));
+        for (x = 0; x < 80; x++) {
+            vga_text_mem[24 * 80 + x] = (uint16_t)(' ' | ((uint16_t)vga_cur_attr << 8));
+        }
+        return;
+    }
+
     if (cursor_drawn) {
         old_char = ' ';
         if (cursor_prev_y < screen_buffer_rows && cursor_prev_x < MAX_COLS && screen_buffer) {
@@ -681,6 +773,11 @@ void fb_write_string(const char *str) {
 void fb_update_cursor(void) {
     char old_char;
 
+    if (!fb_graphical) {
+        vga_text_update_cursor(fb.cursor_x, fb.cursor_y);
+        return;
+    }
+
     if (cursor_drawn && (cursor_prev_x != fb.cursor_x || cursor_prev_y != fb.cursor_y)) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
             old_char = ' ';
@@ -774,6 +871,10 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
     uint64_t batch_end;
 
     if (original_fb_width == 0 || original_fb_height == 0) {
+        return -3;
+    }
+
+    if (!fb_graphical) {
         return -3;
     }
 

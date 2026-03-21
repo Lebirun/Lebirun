@@ -58,6 +58,7 @@ typedef struct ext4_fs {
 
 int ext4_read_superblock(ext4_fs_t *fs);
 int ext4_write_superblock(ext4_fs_t *fs);
+void ext4_sync_inodes(ext4_fs_t *fs);
 int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 

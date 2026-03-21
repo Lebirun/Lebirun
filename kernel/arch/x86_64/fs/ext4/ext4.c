@@ -453,6 +453,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
         return -1;
     }
 
+    ext4_sync_inodes(mounted_fs);
     ext4_sync_blocks(mounted_fs);
     ext4_flush_cache(mounted_fs);
 
@@ -558,6 +559,7 @@ int ext4_unmount(ext4_fs_t *fs) {
         return -1;
     }
 
+    ext4_sync_inodes(fs);
     ext4_sync_blocks(fs);
     ext4_flush_cache(fs);
 
@@ -578,6 +580,7 @@ int ext4_sync(ext4_fs_t *fs) {
         return -1;
     }
 
+    ext4_sync_inodes(fs);
     ext4_sync_blocks(fs);
     ext4_write_superblock(fs);
 

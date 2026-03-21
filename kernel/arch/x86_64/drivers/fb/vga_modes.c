@@ -1,5 +1,7 @@
 #include <kernel/drivers/fb/vga_modes.h>
+#include <kernel/mem_map.h>
 #include <stdint.h>
+#include <string.h>
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -370,6 +372,179 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint64_t *out_pi
 
     if (out_pitch) {
         *out_pitch = pitch;
+    }
+
+    return 0;
+}
+
+static void vga_load_font(const uint8_t *font_data, uint16_t num_chars, uint8_t bytes_per_char) {
+    volatile uint8_t *plane2;
+    uint16_t i;
+    uint8_t j;
+
+    plane2 = (volatile uint8_t *)(0xA0000 + KERNEL_VMA);
+
+    vga_seq_write(0x00, 0x01);
+    vga_seq_write(0x02, 0x04);
+    vga_seq_write(0x04, 0x07);
+    vga_seq_write(0x00, 0x03);
+
+    outb(0x3CE, 0x04);
+    outb(0x3CF, 0x02);
+    outb(0x3CE, 0x05);
+    outb(0x3CF, 0x00);
+    outb(0x3CE, 0x06);
+    outb(0x3CF, 0x00);
+
+    for (i = 0; i < num_chars; i++) {
+        for (j = 0; j < bytes_per_char; j++) {
+            plane2[i * 32 + j] = font_data[i * bytes_per_char + j];
+        }
+        for (j = bytes_per_char; j < 32; j++) {
+            plane2[i * 32 + j] = 0;
+        }
+    }
+
+    vga_seq_write(0x00, 0x01);
+    vga_seq_write(0x02, 0x03);
+    vga_seq_write(0x04, 0x03);
+    vga_seq_write(0x00, 0x03);
+
+    outb(0x3CE, 0x04);
+    outb(0x3CF, 0x00);
+    outb(0x3CE, 0x05);
+    outb(0x3CF, 0x10);
+    outb(0x3CE, 0x06);
+    outb(0x3CF, 0x0E);
+}
+
+int vga_set_text_mode(const uint8_t *font_data, uint16_t num_chars, uint8_t font_height) {
+    volatile uint64_t delay;
+    uint8_t misc_val;
+    uint16_t vtotal;
+    uint16_t vdispend;
+    uint16_t vblankstart;
+    uint16_t vsyncstart;
+    uint16_t overflow;
+    uint16_t max_scanline;
+    uint16_t i;
+    volatile uint16_t *vga_text;
+
+    static const uint8_t seq_regs[5] = { 0x03, 0x00, 0x03, 0x00, 0x02 };
+    static const uint8_t attr_regs[21] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+        0x0C, 0x00, 0x0F, 0x08, 0x00
+    };
+
+    inb(0x3DA);
+    outb(0x3C0, 0x00);
+
+    misc_val = 0x67;
+    outb(0x3C2, misc_val);
+
+    vga_seq_write(0x00, 0x01);
+    for (i = 0; i < 5; i++) {
+        vga_seq_write((uint8_t)(i), seq_regs[i]);
+    }
+    vga_seq_write(0x00, 0x03);
+
+    vga_crtc_write(0x11, vga_crtc_read(0x11) & 0x7F);
+
+    vtotal = 449;
+    vdispend = 399;
+    vblankstart = 399;
+    vsyncstart = 412;
+
+    vga_crtc_write(0x00, 0x5F);
+    vga_crtc_write(0x01, 0x4F);
+    vga_crtc_write(0x02, 0x50);
+    vga_crtc_write(0x03, 0x82);
+    vga_crtc_write(0x04, 0x55);
+    vga_crtc_write(0x05, 0x81);
+
+    vga_crtc_write(0x06, (uint8_t)(vtotal & 0xFF));
+
+    overflow = 0;
+    if (vtotal & 0x100) overflow |= 0x01;
+    if (vdispend & 0x100) overflow |= 0x02;
+    if (vsyncstart & 0x100) overflow |= 0x04;
+    if (vblankstart & 0x100) overflow |= 0x08;
+    overflow |= 0x10;  /* SLC bit 8: set so Line Compare (SLC=0x1FF=511) > vdispend, disabling split screen */
+    if (vtotal & 0x200) overflow |= 0x20;
+    if (vdispend & 0x200) overflow |= 0x40;
+    if (vsyncstart & 0x200) overflow |= 0x80;
+    vga_crtc_write(0x07, (uint8_t)overflow);
+
+    vga_crtc_write(0x08, 0x00);
+
+    max_scanline = (uint16_t)(font_height - 1);
+    if (vblankstart & 0x200) max_scanline |= 0x20;
+    max_scanline |= 0x40;  /* SLC bit 9: set so Line Compare (SLC=0x1FF=511) > vdispend, disabling split screen */
+    vga_crtc_write(0x09, (uint8_t)(max_scanline & 0xFF));
+
+    vga_crtc_write(0x0A, (uint8_t)(font_height - 2));
+    vga_crtc_write(0x0B, (uint8_t)(font_height - 1));
+
+    vga_crtc_write(0x0C, 0x00);
+    vga_crtc_write(0x0D, 0x00);
+
+    vga_crtc_write(0x10, (uint8_t)(vsyncstart & 0xFF));
+    vga_crtc_write(0x11, 0x8E);
+    vga_crtc_write(0x12, (uint8_t)(vdispend & 0xFF));
+    vga_crtc_write(0x13, 0x28);
+    vga_crtc_write(0x14, 0x1F);
+    vga_crtc_write(0x15, (uint8_t)(vblankstart & 0xFF));
+    vga_crtc_write(0x16, (uint8_t)((vblankstart + 50) & 0xFF));
+    vga_crtc_write(0x17, 0xA3);
+    vga_crtc_write(0x18, 0xFF);
+
+    outb(0x3CE, 0x00); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x01); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x02); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x03); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x04); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x05); outb(0x3CF, 0x10);
+    outb(0x3CE, 0x06); outb(0x3CF, 0x0E);
+    outb(0x3CE, 0x07); outb(0x3CF, 0x00);
+    outb(0x3CE, 0x08); outb(0x3CF, 0xFF);
+
+    if (font_data && num_chars > 0 && font_height > 0) {
+        vga_load_font(font_data, num_chars, font_height);
+    }
+
+    vga_text = (volatile uint16_t *)(0xB8000 + KERNEL_VMA);
+    for (i = 0; i < 16384; i++) {
+        vga_text[i] = 0x0720;
+    }
+
+    inb(0x3DA);
+    for (i = 0; i < 21; i++) {
+        outb(0x3C0, (uint8_t)i);
+        outb(0x3C0, attr_regs[i]);
+    }
+    outb(0x3C0, 0x20);
+
+    outb(0x3C8, 0);
+    outb(0x3C9, 0x00); outb(0x3C9, 0x00); outb(0x3C9, 0x00);
+    outb(0x3C9, 0x00); outb(0x3C9, 0x00); outb(0x3C9, 0x2A);
+    outb(0x3C9, 0x00); outb(0x3C9, 0x2A); outb(0x3C9, 0x00);
+    outb(0x3C9, 0x00); outb(0x3C9, 0x2A); outb(0x3C9, 0x2A);
+    outb(0x3C9, 0x2A); outb(0x3C9, 0x00); outb(0x3C9, 0x00);
+    outb(0x3C9, 0x2A); outb(0x3C9, 0x00); outb(0x3C9, 0x2A);
+    outb(0x3C9, 0x2A); outb(0x3C9, 0x15); outb(0x3C9, 0x00);
+    outb(0x3C9, 0x2A); outb(0x3C9, 0x2A); outb(0x3C9, 0x2A);
+    outb(0x3C9, 0x15); outb(0x3C9, 0x15); outb(0x3C9, 0x15);
+    outb(0x3C9, 0x15); outb(0x3C9, 0x15); outb(0x3C9, 0x3F);
+    outb(0x3C9, 0x15); outb(0x3C9, 0x3F); outb(0x3C9, 0x15);
+    outb(0x3C9, 0x15); outb(0x3C9, 0x3F); outb(0x3C9, 0x3F);
+    outb(0x3C9, 0x3F); outb(0x3C9, 0x15); outb(0x3C9, 0x15);
+    outb(0x3C9, 0x3F); outb(0x3C9, 0x15); outb(0x3C9, 0x3F);
+    outb(0x3C9, 0x3F); outb(0x3C9, 0x3F); outb(0x3C9, 0x15);
+    outb(0x3C9, 0x3F); outb(0x3C9, 0x3F); outb(0x3C9, 0x3F);
+
+    for (delay = 0; delay < 50000; delay++) {
+        __asm__ volatile("pause");
     }
 
     return 0;

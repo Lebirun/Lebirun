@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <kernel/io.h>
 #include <kernel/power.h>
+#include <kernel/watchdog.h>
 
 static inline void outw(uint16_t port, uint16_t value) {
     __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
@@ -10,6 +11,7 @@ void power_init(void) {
 }
 
 void power_shutdown(void) {
+    watchdog_disable();
     __asm__ __volatile__("cli");
     outw(0x604, 0x2000);
     outw(0xB004, 0x2000);
@@ -21,6 +23,7 @@ void power_shutdown(void) {
 void power_reboot(void) {
     uint8_t good;
 
+    watchdog_disable();
     __asm__ __volatile__("cli");
 
     good = 0x02;

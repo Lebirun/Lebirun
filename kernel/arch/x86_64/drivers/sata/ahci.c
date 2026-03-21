@@ -307,8 +307,8 @@ int ahci_port_init(ahci_port_t *port) {
 
     for (i = 0; i < AHCI_CMD_SLOTS; i++) {
         port->cmd_list[i].prdtl = AHCI_PRDT_ENTRIES;
-        port->cmd_list[i].ctba = cmd_table_phys + (i * sizeof(hba_cmd_table_t));
-        port->cmd_list[i].ctbau = 0;
+        port->cmd_list[i].ctba = (uint32_t)(cmd_table_phys + (i * sizeof(hba_cmd_table_t)));
+        port->cmd_list[i].ctbau = (uint32_t)((cmd_table_phys + (i * sizeof(hba_cmd_table_t))) >> 32);
     }
 
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
@@ -353,8 +353,8 @@ int ahci_identify(ahci_port_t *port) {
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
     cmd_table->prdt[0].dbc = 511;
     cmd_table->prdt[0].i = 1;
     
@@ -453,8 +453,8 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
@@ -530,8 +530,8 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
@@ -970,8 +970,8 @@ int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = req->buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)req->buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(req->buf_phys >> 32);
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
@@ -1045,8 +1045,8 @@ int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = req->buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)req->buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(req->buf_phys >> 32);
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
@@ -1350,8 +1350,8 @@ int ahci_smart_read_data(ahci_port_t *port, smart_data_t *data) {
     hba_cmd_table_t *cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    cmd_table->prdt[0].dba = buf_phys;
-    cmd_table->prdt[0].dbau = 0;
+    cmd_table->prdt[0].dba = (uint32_t)buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
     cmd_table->prdt[0].dbc = 511;
     cmd_table->prdt[0].i = 1;
     

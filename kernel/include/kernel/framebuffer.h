@@ -24,6 +24,8 @@ typedef struct {
 } framebuffer_t;
 
 int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type);
+void fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height);
+const uint8_t *fb_get_default_font_data(void);
 void fb_set_font(psf_font_t *font);
 void fb_set_colors(uint64_t fg, uint64_t bg);
 void fb_clear(void);

@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <kernel/about.h>
 #include <kernel/rng.h>
+#include <kernel/pty.h>
 
 extern task_t *current_task;
 extern void *syscall_table[];
@@ -335,73 +336,6 @@ static int sys_set_tid_address(int *tidptr) {
         return current_task->pid;
     }
     return 1;
-}
-
-#define FUTEX_WAIT           0
-#define FUTEX_WAKE           1
-#define FUTEX_PRIVATE_FLAG   128
-#define FUTEX_WAIT_PRIVATE   (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
-#define FUTEX_WAKE_PRIVATE   (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
-
-static int sys_futex(int *uaddr, int op, int val, const struct kernel_timespec *timeout, int *uaddr2, int val3) {
-    (void)timeout; (void)uaddr2; (void)val3;
-    int cmd = op & ~FUTEX_PRIVATE_FLAG;
-    
-    if (!uaddr) return -EFAULT;
-    
-    switch (cmd) {
-        case FUTEX_WAIT:
-            if (*uaddr != val) return -EAGAIN;
-            return 0;
-            
-        case FUTEX_WAKE:
-            return 0;
-            
-        default:
-            return -ENOSYS;
-    }
-}
-
-static int sys_set_robust_list(void *head, size_t len) {
-    (void)head; (void)len;
-    return 0;
-}
-
-static int sys_get_robust_list(int pid, void **head_ptr, size_t *len_ptr) {
-    (void)pid;
-    if (head_ptr) *head_ptr = NULL;
-    if (len_ptr) *len_ptr = 0;
-    return 0;
-}
-
-static int sys_epoll_create(int size) {
-    (void)size;
-    return -ENOSYS;
-}
-
-static int sys_epoll_create1(int flags) {
-    (void)flags;
-    return -ENOSYS;
-}
-
-static int sys_epoll_ctl(int epfd, int op, int fd, void *event) {
-    (void)epfd; (void)op; (void)fd; (void)event;
-    return -ENOSYS;
-}
-
-static int sys_epoll_wait(int epfd, void *events, int maxevents, int timeout) {
-    (void)epfd; (void)events; (void)maxevents; (void)timeout;
-    return -ENOSYS;
-}
-
-static int sys_epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask) {
-    (void)epfd; (void)events; (void)maxevents; (void)timeout; (void)sigmask;
-    return -ENOSYS;
-}
-
-static int sys_eventfd(unsigned int initval, int flags) {
-    (void)initval; (void)flags;
-    return -ENOSYS;
 }
 
 #define ITIMER_REAL    0
@@ -747,7 +681,7 @@ static int sys_setpriority(int which, int who, int prio) {
 
 static int sys_posix_openpt(int flags) {
     (void)flags;
-    return -ENOSYS;
+    return pty_open_master();
 }
 
 static int sys_grantpt(int fd) {
@@ -761,8 +695,18 @@ static int sys_unlockpt(int fd) {
 }
 
 static int sys_ptsname(int fd, char *buf, int buflen) {
-    (void)fd; (void)buf; (void)buflen;
-    return -ENOSYS;
+    char *name;
+    int i;
+
+    if (!buf || buflen <= 0) return -EINVAL;
+    if ((uint64_t)buf < 0x1000 || (uint64_t)buf >= KERNEL_VMA) return -EFAULT;
+    name = pty_name(fd);
+    if (!name) return -ENOTTY;
+    for (i = 0; name[i] && i < buflen - 1; i++) {
+        buf[i] = name[i];
+    }
+    buf[i] = '\0';
+    return 0;
 }
 
 void syscalls_misc_init(void) {
@@ -778,16 +722,6 @@ void syscalls_misc_init(void) {
     syscall_table[SYSCALL_PRCTL] = sys_prctl;
     syscall_table[SYSCALL_ARCH_PRCTL] = sys_arch_prctl;
     syscall_table[SYSCALL_SET_TID_ADDRESS] = sys_set_tid_address;
-    syscall_table[SYSCALL_FUTEX] = sys_futex;
-    syscall_table[SYSCALL_SET_ROBUST_LIST] = sys_set_robust_list;
-    syscall_table[SYSCALL_GET_ROBUST_LIST] = sys_get_robust_list;
-    syscall_table[SYSCALL_EPOLL_CREATE] = sys_epoll_create;
-    syscall_table[SYSCALL_EPOLL_CREATE1] = sys_epoll_create1;
-    syscall_table[SYSCALL_EPOLL_CTL] = sys_epoll_ctl;
-    syscall_table[SYSCALL_EPOLL_WAIT] = sys_epoll_wait;
-    syscall_table[SYSCALL_EPOLL_PWAIT] = sys_epoll_pwait;
-    syscall_table[SYSCALL_EVENTFD] = sys_eventfd;
-    syscall_table[SYSCALL_EVENTFD2] = sys_eventfd;
     syscall_table[SYSCALL_SETITIMER] = sys_setitimer;
     syscall_table[SYSCALL_GETITIMER] = sys_getitimer;
     syscall_table[SYSCALL_ALARM] = sys_alarm;

@@ -11,7 +11,7 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
     if (!node) return 0;
     uint64_t a = (uint64_t)node;
     if ((a & 0xFFFFFF00) == 0xFEFEFE00) return 0;
-    if (a < KERNEL_VMA || a >= 0xFFFFFF00) return 0;
+    if (a < KERNEL_VMA || a >= 0xFFFFFFFFFFFFFF00ULL) return 0;
     if (!kernel_ptr_mapped(a)) return 0;
     if (!kernel_ptr_mapped(a + (uint64_t)sizeof(vfs_node_t) - 1)) return 0;
     return 1;
@@ -126,7 +126,7 @@ static void termios_init_defaults(int tty_id) {
     t->c_ospeed = 38400;
     
     framebuffer_t *fb = fb_get();
-    if (fb && fb->font) {
+    if (fb && (fb->font || fb->cols)) {
         tty_winsize[tty_id].ws_col = fb->cols;
         tty_winsize[tty_id].ws_row = fb->rows;
         tty_winsize[tty_id].ws_xpixel = fb->width;
@@ -273,7 +273,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
             {
                 framebuffer_t *fb = fb_get();
-                if (fb && fb->font) {
+                if (fb && (fb->font || fb->cols)) {
                     tty_winsize[tty_id].ws_col = fb->cols;
                     tty_winsize[tty_id].ws_row = fb->rows;
                     tty_winsize[tty_id].ws_xpixel = fb->width;

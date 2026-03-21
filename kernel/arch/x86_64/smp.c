@@ -20,6 +20,7 @@ extern bool debug_boot_hw;
 
 volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
+uint32_t lapic_timer_reload = 0;
 
 cpu_info_t cpus[MAX_CPUS];
 int cpu_count = 0;
@@ -513,7 +514,8 @@ void lapic_timer_init(uint64_t freq_hz) {
 
     lapic_write(LAPIC_REG_TIMER,
                 LAPIC_TIMER_PERIODIC | 32);
-    lapic_write(LAPIC_REG_TIMER_ICR, initial * 100 / freq_hz);
+    lapic_timer_reload = (uint32_t)(initial * 100 / freq_hz);
+    lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
 
     (void)freq_hz;
 }
