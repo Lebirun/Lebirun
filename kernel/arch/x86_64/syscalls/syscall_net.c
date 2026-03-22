@@ -42,10 +42,28 @@ typedef struct {
     int *status_code;
 } __attribute__((packed)) http_post_request_user_t;
 
+typedef struct {
+    const char *url;
+    uint64_t *out_buffer;
+    uint64_t *out_size;
+    int *status_code;
+    int max_redirects;
+    uint8_t *headers_buf;
+    uint64_t headers_buf_size;
+    uint64_t *out_headers_len;
+} __attribute__((packed)) http_get_alloc_req_t;
+
 extern int arp_get_cache(uint64_t *ips, uint8_t *macs, int max_entries);
 extern int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms);
 
 #include <stdarg.h>
+
+#define HTTP_ALLOC_MMAP_BASE  0x10000000u
+#define HTTP_ALLOC_MMAP_LIMIT 0x40000000u
+
+static uint64_t net_align_up(uint64_t v, uint64_t align) {
+    return (v + align - 1) & ~(align - 1);
+}
 
 static uint64_t get_user_pd(void) {
     if (!current_task) return 0;
@@ -337,7 +355,6 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     http_request_user_t req;
     char *url_buf;
     uint64_t user_buf_addr;
-    uint64_t max_dl;
     uint8_t *kbuf;
     uint8_t *khdr;
     uint64_t downloaded;
@@ -346,6 +363,7 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     int max_redir;
     uint64_t hdr_len;
     uint64_t hdr_buf_sz;
+    uint64_t copy_len;
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
@@ -361,12 +379,6 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     user_buf_addr = (uint64_t)(uintptr_t)req.buffer;
     if (!user_range_ok(user_buf_addr, req.buffer_size)) { kfree(url_buf); return -1; }
 
-    max_dl = req.buffer_size;
-    if (max_dl > 1024 * 1024) max_dl = 1024 * 1024;
-
-    kbuf = (uint8_t *)kmalloc(max_dl);
-    if (!kbuf) { kfree(url_buf); return -1; }
-
     max_redir = req.max_redirects;
     if (max_redir < 0) max_redir = 0;
     if (max_redir > 20) max_redir = 20;
@@ -377,32 +389,35 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
         hdr_buf_sz = req.headers_buf_size;
         if (hdr_buf_sz > 8192) hdr_buf_sz = 8192;
         if (!user_range_ok((uint64_t)(uintptr_t)req.headers_buf, hdr_buf_sz)) {
-            kfree(kbuf); kfree(url_buf);
+            kfree(url_buf);
             return -1;
         }
         khdr = (uint8_t *)kmalloc(hdr_buf_sz);
         if (!khdr) {
-            kfree(kbuf); kfree(url_buf);
+            kfree(url_buf);
             return -1;
         }
     }
 
+    kbuf = NULL;
     downloaded = 0;
     status_code = 0;
     hdr_len = 0;
-    ret = http_download_ex(url_buf, kbuf, max_dl, &downloaded, &status_code,
-                           max_redir, khdr, hdr_buf_sz, &hdr_len);
+    ret = http_download_alloc(url_buf, &kbuf, &downloaded, &status_code,
+                              max_redir, khdr, hdr_buf_sz, &hdr_len);
 
-    if (ret == 0 && downloaded > 0) {
-        if (!user_range_mapped(user_buf_addr, downloaded)) {
+    if (ret == 0 && kbuf && downloaded > 0) {
+        copy_len = downloaded < req.buffer_size ? downloaded : req.buffer_size;
+        if (!user_range_mapped(user_buf_addr, copy_len)) {
             kfree(kbuf);
             if (khdr) kfree(khdr);
             kfree(url_buf);
             return -1;
         }
-        memcpy((void *)user_buf_addr, kbuf, downloaded);
+        memcpy((void *)user_buf_addr, kbuf, copy_len);
+        downloaded = copy_len;
     }
-    kfree(kbuf);
+    if (kbuf) kfree(kbuf);
     kfree(url_buf);
 
     if (khdr && hdr_len > 0) {
@@ -526,6 +541,165 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
     return ret;
 }
 
+static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2) {
+    http_get_alloc_req_t req;
+    char *url_buf;
+    uint8_t *kbuf;
+    uint8_t *khdr;
+    uint64_t downloaded;
+    int status_code;
+    int ret;
+    int max_redir;
+    uint64_t hdr_len;
+    uint64_t hdr_buf_sz;
+    uint64_t alloc_size;
+    uint64_t base;
+    uint64_t page_count;
+    uint64_t *new_pages;
+    uint64_t old_count;
+    uint64_t new_count;
+    uint64_t *expanded;
+
+    (void)unused1; (void)unused2;
+    if (!req_ptr) return -1;
+    if (!current_task) return -1;
+
+    if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
+    if (!req.url || !req.out_buffer || !req.out_size) return -1;
+
+    url_buf = (char *)kmalloc(512);
+    if (!url_buf) return -1;
+
+    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); return -1; }
+
+    max_redir = req.max_redirects;
+    if (max_redir < 0) max_redir = 0;
+    if (max_redir > 20) max_redir = 20;
+
+    khdr = NULL;
+    hdr_buf_sz = 0;
+    if (req.headers_buf && req.headers_buf_size > 0) {
+        hdr_buf_sz = req.headers_buf_size;
+        if (hdr_buf_sz > 8192) hdr_buf_sz = 8192;
+        if (!user_range_ok((uint64_t)(uintptr_t)req.headers_buf, hdr_buf_sz)) {
+            kfree(url_buf);
+            return -1;
+        }
+        khdr = (uint8_t *)kmalloc(hdr_buf_sz);
+        if (!khdr) {
+            kfree(url_buf);
+            return -1;
+        }
+    }
+
+    kbuf = NULL;
+    downloaded = 0;
+    status_code = 0;
+    hdr_len = 0;
+    ret = http_download_alloc(url_buf, &kbuf, &downloaded, &status_code,
+                              max_redir, khdr, hdr_buf_sz, &hdr_len);
+    kfree(url_buf);
+
+    if (khdr && hdr_len > 0) {
+        memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
+        kfree(khdr);
+    } else if (khdr) {
+        kfree(khdr);
+    }
+
+    if (req.status_code) {
+        uint64_t sa = (uint64_t)(uintptr_t)req.status_code;
+        if (user_range_mapped(sa, sizeof(int)))
+            *(req.status_code) = status_code;
+    }
+
+    if (req.out_headers_len) {
+        uint64_t ha = (uint64_t)(uintptr_t)req.out_headers_len;
+        if (user_range_mapped(ha, sizeof(uint64_t)))
+            *(req.out_headers_len) = hdr_len;
+    }
+
+    if (ret < 0 || !kbuf || downloaded == 0) {
+        if (kbuf) kfree(kbuf);
+        if (req.out_size) {
+            uint64_t oa = (uint64_t)(uintptr_t)req.out_size;
+            if (user_range_mapped(oa, sizeof(uint64_t)))
+                *(req.out_size) = 0;
+        }
+        if (req.out_buffer) {
+            uint64_t ba = (uint64_t)(uintptr_t)req.out_buffer;
+            if (user_range_mapped(ba, sizeof(uint64_t)))
+                *(req.out_buffer) = 0;
+        }
+        return ret;
+    }
+
+    alloc_size = net_align_up(downloaded, 0x1000u);
+    if (alloc_size == 0) alloc_size = 0x1000u;
+
+    if (current_task->mmap_next_addr < HTTP_ALLOC_MMAP_BASE ||
+        current_task->mmap_next_addr >= HTTP_ALLOC_MMAP_LIMIT) {
+        current_task->mmap_next_addr = HTTP_ALLOC_MMAP_BASE;
+    }
+
+    base = net_align_up(current_task->mmap_next_addr, 0x1000u);
+    if (base < HTTP_ALLOC_MMAP_BASE) base = HTTP_ALLOC_MMAP_BASE;
+    if (alloc_size > HTTP_ALLOC_MMAP_LIMIT - HTTP_ALLOC_MMAP_BASE ||
+        base + alloc_size < base ||
+        base + alloc_size >= HTTP_ALLOC_MMAP_LIMIT) {
+        kfree(kbuf);
+        return -1;
+    }
+    current_task->mmap_next_addr = base + alloc_size;
+
+    if (base + alloc_size >= KERNEL_VMA) {
+        kfree(kbuf);
+        return -1;
+    }
+
+    page_count = 0;
+    new_pages = vmm_map_range_in_pml4_tracked(
+        current_task->pml4_phys, base, alloc_size, 0x7, &page_count);
+
+    if (!new_pages) {
+        kfree(kbuf);
+        return -1;
+    }
+
+    if (page_count > 0) {
+        old_count = current_task->user_pages_count;
+        new_count = old_count + page_count;
+        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
+        if (expanded) {
+            if (current_task->user_pages && old_count > 0) {
+                memcpy(expanded, current_task->user_pages, old_count * sizeof(uint64_t));
+                kfree(current_task->user_pages);
+            }
+            memcpy(expanded + old_count, new_pages, page_count * sizeof(uint64_t));
+            current_task->user_pages = expanded;
+            current_task->user_pages_count = new_count;
+        }
+        kfree(new_pages);
+    }
+
+    memcpy((void *)base, kbuf, downloaded);
+    kfree(kbuf);
+
+    if (req.out_buffer) {
+        uint64_t ba = (uint64_t)(uintptr_t)req.out_buffer;
+        if (user_range_mapped(ba, sizeof(uint64_t)))
+            *(req.out_buffer) = base;
+    }
+
+    if (req.out_size) {
+        uint64_t oa = (uint64_t)(uintptr_t)req.out_size;
+        if (user_range_mapped(oa, sizeof(uint64_t)))
+            *(req.out_size) = downloaded;
+    }
+
+    return 0;
+}
+
 void syscalls_net_init(void) {
     syscall_table[SYSCALL_NET_IFCONFIG] = sys_net_ifconfig;
     syscall_table[SYSCALL_NET_PING] = sys_net_ping;
@@ -538,4 +712,5 @@ void syscalls_net_init(void) {
     syscall_table[SYSCALL_NET_DNS_RESOLVE] = sys_net_dns_resolve;
     syscall_table[SYSCALL_NET_HTTP_GET] = sys_net_http_get;
     syscall_table[SYSCALL_NET_HTTP_POST] = sys_net_http_post;
+    syscall_table[SYSCALL_NET_HTTP_GET_ALLOC] = sys_net_http_get_alloc;
 }

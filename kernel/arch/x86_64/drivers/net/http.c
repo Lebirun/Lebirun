@@ -165,6 +165,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     uint8_t *new_buf;
     http_response_t *tmp_resp;
     uint8_t *hdr_copy;
+    int close_wait_retries;
 
     if (!response) return -1;
 
@@ -239,6 +240,8 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     total_recv = 0;
     buf_cap = 16384;
     start = net_get_ticks();
+    expected_total = 0;
+    close_wait_retries = 0;
 
     for (;;) {
         if (task_has_pending_signals()) {
@@ -295,13 +298,16 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
                     }
                 }
             }
-            if (sock->state == TCP_STATE_CLOSE_WAIT ||
-                sock->state == TCP_STATE_CLOSED) {
-                break;
-            }
         } else if (n == 0) {
             if (sock->state == TCP_STATE_CLOSE_WAIT ||
-                sock->state == TCP_STATE_CLOSED) break;
+                sock->state == TCP_STATE_CLOSED) {
+                if (expected_total > 0 && total_recv < expected_total && close_wait_retries < 50) {
+                    close_wait_retries++;
+                    sleep_ms(10);
+                    continue;
+                }
+                break;
+            }
             if (net_get_ticks() - start > timeout_ms) break;
         } else {
             break;
@@ -491,6 +497,113 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
         }
 
         if (out_size) *out_size = copy_len;
+
+        http_response_free(response);
+        kfree(host); kfree(path); kfree(current_url); kfree(response);
+        return 0;
+    }
+
+    kfree(host); kfree(path); kfree(current_url); kfree(response);
+    return -1;
+}
+
+int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
+                        int *out_status, int max_redirects,
+                        uint8_t *headers_buf, uint64_t headers_buf_size, uint64_t *out_headers_len) {
+    char *host;
+    char *path;
+    char *current_url;
+    http_response_t *response;
+    uint16_t port;
+    int attempt;
+    int max_attempts;
+    int ret;
+    int redir;
+    uint64_t url_len;
+    uint64_t hdr_copy;
+    int is_https;
+    int saved_ret;
+    uint64_t off;
+    uint64_t hi;
+    const char *scheme;
+    uint64_t li;
+
+    if (!out_body) return -1;
+    *out_body = NULL;
+
+    host = (char *)kmalloc(256);
+    if (!host) return -1;
+    path = (char *)kmalloc(256);
+    if (!path) { kfree(host); return -1; }
+    current_url = (char *)kmalloc(512);
+    if (!current_url) { kfree(host); kfree(path); return -1; }
+    response = (http_response_t *)kmalloc(sizeof(http_response_t));
+    if (!response) { kfree(host); kfree(path); kfree(current_url); return -1; }
+
+    url_len = 0;
+    while (url[url_len] && url_len < 511) {
+        current_url[url_len] = url[url_len];
+        url_len++;
+    }
+    current_url[url_len] = '\0';
+
+    for (redir = 0; redir <= max_redirects; redir++) {
+        is_https = 0;
+        if (http_parse_url(current_url, host, &port, path, &is_https) < 0) {
+            kfree(host); kfree(path); kfree(current_url); kfree(response);
+            return -1;
+        }
+
+        max_attempts = 2;
+        ret = -1;
+        for (attempt = 0; attempt < max_attempts; attempt++) {
+            ret = http_get_tls(host, port, path, response, 15000, is_https);
+            if (ret == 0 || ret == -4) break;
+            if (attempt + 1 < max_attempts) sleep_ms(500);
+        }
+
+        if (ret < 0) {
+            saved_ret = ret;
+            kfree(host); kfree(path); kfree(current_url); kfree(response);
+            return saved_ret;
+        }
+
+        if (http_is_redirect(response->status_code) && response->location[0] && redir < max_redirects) {
+            if (response->location[0] == '/') {
+                off = 0;
+                scheme = is_https ? "https://" : "http://";
+                for (hi = 0; scheme[hi]; hi++)
+                    current_url[off++] = scheme[hi];
+                for (hi = 0; host[hi] && off < 510; hi++)
+                    current_url[off++] = host[hi];
+                for (hi = 0; response->location[hi] && off < 511; hi++)
+                    current_url[off++] = response->location[hi];
+                current_url[off] = '\0';
+            } else {
+                li = 0;
+                while (response->location[li] && li < 511) {
+                    current_url[li] = response->location[li];
+                    li++;
+                }
+                current_url[li] = '\0';
+            }
+            http_response_free(response);
+            continue;
+        }
+
+        if (out_status) *out_status = response->status_code;
+
+        if (headers_buf && headers_buf_size > 0 && response->raw_headers && response->raw_headers_len > 0) {
+            hdr_copy = response->raw_headers_len < headers_buf_size ? response->raw_headers_len : headers_buf_size;
+            memcpy(headers_buf, response->raw_headers, hdr_copy);
+            if (out_headers_len) *out_headers_len = hdr_copy;
+        } else if (out_headers_len) {
+            *out_headers_len = 0;
+        }
+
+        *out_body = response->body;
+        if (out_size) *out_size = response->body_len;
+        response->body = NULL;
 
         http_response_free(response);
         kfree(host); kfree(path); kfree(current_url); kfree(response);

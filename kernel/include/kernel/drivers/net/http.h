@@ -39,6 +39,9 @@ int http_download(const char *url, uint8_t *buffer, uint64_t buffer_size, uint64
 int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
                      uint64_t *out_size, int *out_status, int max_redirects,
                      uint8_t *headers_buf, uint64_t headers_buf_size, uint64_t *out_headers_len);
+int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
+                        int *out_status, int max_redirects,
+                        uint8_t *headers_buf, uint64_t headers_buf_size, uint64_t *out_headers_len);
 int http_post_download(const char *url, const char *content_type,
                        const uint8_t *post_body, uint64_t post_body_len,
                        uint8_t *buffer, uint64_t buffer_size,

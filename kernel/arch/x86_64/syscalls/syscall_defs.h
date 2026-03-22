@@ -404,6 +404,7 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_VFS_UMOUNT 273
 #define SYSCALL_PANIC 274
 #define SYSCALL_BLOCKDEV_RESCAN 275
+#define SYSCALL_NET_HTTP_GET_ALLOC 276
 
 #define NR_SYSCALLS 281
 
