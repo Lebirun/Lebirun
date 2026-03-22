@@ -112,7 +112,7 @@ typedef struct {
 } __attribute__((packed)) ipv4_header_t;
 
 typedef struct {
-    uint64_t version_tc_flow;
+    uint32_t version_tc_flow;
     uint16_t payload_length;
     uint8_t next_header;
     uint8_t hop_limit;
@@ -144,7 +144,7 @@ typedef struct {
     uint8_t type;
     uint8_t code;
     uint16_t checksum;
-    uint64_t data;
+    uint32_t data;
 } __attribute__((packed)) icmpv6_header_t;
 
 typedef struct {
@@ -157,8 +157,8 @@ typedef struct {
 typedef struct {
     uint16_t src_port;
     uint16_t dest_port;
-    uint64_t seq_num;
-    uint64_t ack_num;
+    uint32_t seq_num;
+    uint32_t ack_num;
     uint8_t data_offset;
     uint8_t flags;
     uint16_t window;
@@ -171,7 +171,7 @@ typedef struct {
     uint8_t htype;
     uint8_t hlen;
     uint8_t hops;
-    uint64_t xid;
+    uint32_t xid;
     uint16_t secs;
     uint16_t flags;
     ipv4_addr_t ciaddr;
@@ -181,7 +181,7 @@ typedef struct {
     uint8_t chaddr[16];
     uint8_t sname[64];
     uint8_t file[128];
-    uint64_t magic;
+    uint32_t magic;
     uint8_t options[308];
 } __attribute__((packed)) dhcp_packet_t;
 
@@ -197,7 +197,7 @@ typedef struct {
 typedef struct {
     uint16_t type;
     uint16_t class;
-    uint64_t ttl;
+    uint32_t ttl;
     uint16_t rdlength;
 } __attribute__((packed)) dns_rr_header_t;
 
@@ -267,9 +267,9 @@ typedef struct tcp_socket {
     ipv4_addr_t remote_ip;
     uint16_t local_port;
     uint16_t remote_port;
-    uint64_t send_next;
-    uint64_t send_una;
-    uint64_t recv_next;
+    uint32_t send_next;
+    uint32_t send_una;
+    uint32_t recv_next;
     uint16_t send_window;
     uint16_t recv_window;
     uint8_t *recv_buffer;
@@ -307,21 +307,21 @@ static inline uint16_t ntohs(uint16_t x) {
     return htons(x);
 }
 
-static inline uint64_t htonl(uint64_t x) {
+static inline uint32_t htonl(uint32_t x) {
     return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) |
            ((x >> 8) & 0xFF00) | ((x >> 24) & 0xFF);
 }
 
-static inline uint64_t ntohl(uint64_t x) {
+static inline uint32_t ntohl(uint32_t x) {
     return htonl(x);
 }
 
-static inline uint64_t ipv4_to_u32(ipv4_addr_t ip) {
-    return (ip.octets[0] << 24) | (ip.octets[1] << 16) |
-           (ip.octets[2] << 8) | ip.octets[3];
+static inline uint32_t ipv4_to_u32(ipv4_addr_t ip) {
+    return ((uint32_t)ip.octets[0] << 24) | ((uint32_t)ip.octets[1] << 16) |
+           ((uint32_t)ip.octets[2] << 8) | ip.octets[3];
 }
 
-static inline ipv4_addr_t u32_to_ipv4(uint64_t val) {
+static inline ipv4_addr_t u32_to_ipv4(uint32_t val) {
     ipv4_addr_t ip;
     ip.octets[0] = (val >> 24) & 0xFF;
     ip.octets[1] = (val >> 16) & 0xFF;

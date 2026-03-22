@@ -40,7 +40,11 @@ void arp_add_entry(ipv4_addr_t ip, mac_addr_t mac) {
 }
 
 int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
-    for (int i = 0; i < ARP_CACHE_SIZE; i++) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+    int i;
+
+    for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
             uint64_t age = net_get_ticks() - arp_cache[i].timestamp;
             if (age < ARP_ENTRY_TIMEOUT) {
@@ -53,13 +57,13 @@ int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
 
     arp_request(netif, ip);
 
-    uint64_t timeout_ticks = pit_ms_to_ticks(3000);
-    uint64_t start = pit_get_ticks();
+    timeout_ticks = pit_ms_to_ticks(3000);
+    start = pit_get_ticks();
     while (pit_get_ticks() - start < timeout_ticks) {
         __asm__ volatile("sti");
         netif_poll_all();
 
-        for (int i = 0; i < ARP_CACHE_SIZE; i++) {
+        for (i = 0; i < ARP_CACHE_SIZE; i++) {
             if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
                 *mac_out = arp_cache[i].mac;
                 return 0;

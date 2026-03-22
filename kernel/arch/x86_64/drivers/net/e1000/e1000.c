@@ -10,23 +10,27 @@
 static e1000_device_t g_e1000_dev;
 
 static void e1000_ensure_mmio_mapped(e1000_device_t *dev) {
+    uint64_t bar0_phys;
+    uint64_t expected_virt;
+    uint64_t off;
+    static int warned = 0;
+
     if (!dev) return;
     if (dev->bar_type != 0) return;
 
-    uint64_t bar0_phys = dev->bar0 & 0xFFFFFFF0;
+    bar0_phys = dev->bar0 & 0xFFFFFFF0;
     if (!bar0_phys) return;
 
-    const uint64_t expected_virt = (KERNEL_VMA + 0x3C000000ULL);
+    expected_virt = (KERNEL_VMA + 0x3C000000ULL);
     if (dev->bar0_virt == expected_virt) return;
 
-    static int warned = 0;
     if (!warned) {
         warned = 1;
         printf("E1000: Warning: bar0_virt=0x%016lX (bar0_phys=0x%016lX), remapping to 0x%016lX\n",
                dev->bar0_virt, bar0_phys, expected_virt);
     }
 
-    for (uint64_t off = 0; off < 0x20000; off += PAGE_SIZE) {
+    for (off = 0; off < 0x20000; off += PAGE_SIZE) {
         vmm_map_page(expected_virt + off, bar0_phys + off, 0x003);
     }
     dev->bar0_virt = expected_virt;
@@ -42,34 +46,34 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
-static uint64_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
+static uint32_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) |
                       (func << 8) | (offset & 0xFC) | 0x80000000);
     outl(0xCF8, address);
     return inl(0xCFC);
 }
 
-static void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint64_t value) {
-    uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
+static void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value) {
+    uint32_t address = (uint32_t)((bus << 16) | (slot << 11) |
                       (func << 8) | (offset & 0xFC) | 0x80000000);
     outl(0xCF8, address);
     outl(0xCFC, value);
 }
 
-static inline uint64_t e1000_read(e1000_device_t *dev, uint64_t reg) {
+static inline uint32_t e1000_read(e1000_device_t *dev, uint32_t reg) {
     if (dev->bar_type == 0) {
         e1000_ensure_mmio_mapped(dev);
-        return *((volatile uint64_t *)(dev->bar0_virt + reg));
+        return *((volatile uint32_t *)(dev->bar0_virt + reg));
     } else {
         outl(dev->io_base, reg);
         return inl(dev->io_base + 4);
     }
 }
 
-static inline void e1000_write(e1000_device_t *dev, uint64_t reg, uint64_t value) {
+static inline void e1000_write(e1000_device_t *dev, uint32_t reg, uint32_t value) {
     if (dev->bar_type == 0) {
         e1000_ensure_mmio_mapped(dev);
-        *((volatile uint64_t *)(dev->bar0_virt + reg)) = value;
+        *((volatile uint32_t *)(dev->bar0_virt + reg)) = value;
     } else {
         outl(dev->io_base, reg);
         outl(dev->io_base + 4, value);
@@ -77,14 +81,16 @@ static inline void e1000_write(e1000_device_t *dev, uint64_t reg, uint64_t value
 }
 
 static uint16_t e1000_read_eeprom(e1000_device_t *dev, uint8_t addr) {
-    uint64_t tmp;
-    e1000_write(dev, E1000_EERD, (1) | ((uint64_t)(addr) << 8));
+    uint32_t tmp;
+    e1000_write(dev, E1000_EERD, (1) | ((uint32_t)(addr) << 8));
     while (!((tmp = e1000_read(dev, E1000_EERD)) & (1 << 4)));
     return (uint16_t)((tmp >> 16) & 0xFFFF);
 }
 
 void e1000_read_mac(e1000_device_t *dev) {
-    uint64_t tmp;
+    uint32_t tmp;
+    uint16_t word;
+
     tmp = e1000_read(dev, E1000_RAL);
     if (tmp != 0 && tmp != 0xFFFFFFFF) {
         dev->mac.addr[0] = tmp & 0xFF;
@@ -97,7 +103,6 @@ void e1000_read_mac(e1000_device_t *dev) {
         return;
     }
 
-    uint16_t word;
     word = e1000_read_eeprom(dev, 0);
     dev->mac.addr[0] = word & 0xFF;
     dev->mac.addr[1] = (word >> 8) & 0xFF;
@@ -110,35 +115,45 @@ void e1000_read_mac(e1000_device_t *dev) {
 }
 
 static void e1000_reset(e1000_device_t *dev) {
-    uint64_t ctrl = e1000_read(dev, E1000_CTRL);
+    uint32_t ctrl;
+    volatile int i;
+
+    ctrl = e1000_read(dev, E1000_CTRL);
     e1000_write(dev, E1000_CTRL, ctrl | E1000_CTRL_RST);
-    for (volatile int i = 0; i < 100000; i++);
+    for (i = 0; i < 100000; i++);
     while (e1000_read(dev, E1000_CTRL) & E1000_CTRL_RST);
 }
 
 static void e1000_linkup(e1000_device_t *dev) {
-    uint64_t ctrl = e1000_read(dev, E1000_CTRL);
+    uint32_t ctrl = e1000_read(dev, E1000_CTRL);
     ctrl |= E1000_CTRL_SLU | E1000_CTRL_ASDE;
     ctrl &= ~(E1000_CTRL_ILOS | E1000_CTRL_PHY_RST);
     e1000_write(dev, E1000_CTRL, ctrl);
 }
 
 static int e1000_init_rx(e1000_device_t *dev) {
-    uint64_t rx_ring_phys = pfa_alloc();
+    uint64_t rx_ring_phys;
+    uint64_t rx_ring_virt;
+    uint64_t buf_phys;
+    uint64_t buf_virt;
+    uint32_t rctl;
+    int i;
+
+    rx_ring_phys = pfa_alloc();
     if (!rx_ring_phys) return -1;
 
-    uint64_t rx_ring_virt = (KERNEL_VMA + 0x3D000000ULL);
+    rx_ring_virt = (KERNEL_VMA + 0x3D000000ULL);
     vmm_map_page(rx_ring_virt, rx_ring_phys, 0x003);
     memset((void *)rx_ring_virt, 0, PAGE_SIZE);
 
     dev->rx_descs = (e1000_rx_desc_t *)rx_ring_virt;
     dev->rx_descs_phys = rx_ring_phys;
 
-    for (int i = 0; i < E1000_NUM_RX_DESC; i++) {
-        uint64_t buf_phys = pfa_alloc();
+    for (i = 0; i < E1000_NUM_RX_DESC; i++) {
+        buf_phys = pfa_alloc();
         if (!buf_phys) return -1;
 
-        uint64_t buf_virt = (KERNEL_VMA + 0x3D100000ULL) + i * PAGE_SIZE;
+        buf_virt = (KERNEL_VMA + 0x3D100000ULL) + i * PAGE_SIZE;
         vmm_map_page(buf_virt, buf_phys, 0x003);
         memset((void *)buf_virt, 0, PAGE_SIZE);
 
@@ -149,7 +164,7 @@ static int e1000_init_rx(e1000_device_t *dev) {
         dev->rx_descs[i].status = 0;
     }
 
-    e1000_write(dev, E1000_RDBAL, rx_ring_phys);
+    e1000_write(dev, E1000_RDBAL, (uint32_t)rx_ring_phys);
     e1000_write(dev, E1000_RDBAH, 0);
     e1000_write(dev, E1000_RDLEN, E1000_NUM_RX_DESC * sizeof(e1000_rx_desc_t));
     e1000_write(dev, E1000_RDH, 0);
@@ -157,31 +172,38 @@ static int e1000_init_rx(e1000_device_t *dev) {
 
     dev->rx_cur = 0;
 
-    uint64_t rctl = E1000_RCTL_EN | E1000_RCTL_SBP | E1000_RCTL_UPE |
-                    E1000_RCTL_MPE | E1000_RCTL_LBM_NONE |
-                    E1000_RCTL_RDMTS_HALF | E1000_RCTL_BAM |
-                    E1000_RCTL_SECRC | E1000_RCTL_BSIZE_2048;
+    rctl = E1000_RCTL_EN | E1000_RCTL_SBP | E1000_RCTL_UPE |
+           E1000_RCTL_MPE | E1000_RCTL_LBM_NONE |
+           E1000_RCTL_RDMTS_HALF | E1000_RCTL_BAM |
+           E1000_RCTL_SECRC | E1000_RCTL_BSIZE_2048;
     e1000_write(dev, E1000_RCTL, rctl);
 
     return 0;
 }
 
 static int e1000_init_tx(e1000_device_t *dev) {
-    uint64_t tx_ring_phys = pfa_alloc();
+    uint64_t tx_ring_phys;
+    uint64_t tx_ring_virt;
+    uint64_t buf_phys;
+    uint64_t buf_virt;
+    uint32_t tctl;
+    int i;
+
+    tx_ring_phys = pfa_alloc();
     if (!tx_ring_phys) return -1;
 
-    uint64_t tx_ring_virt = (KERNEL_VMA + 0x3D200000ULL);
+    tx_ring_virt = (KERNEL_VMA + 0x3D200000ULL);
     vmm_map_page(tx_ring_virt, tx_ring_phys, 0x003);
     memset((void *)tx_ring_virt, 0, PAGE_SIZE);
 
     dev->tx_descs = (e1000_tx_desc_t *)tx_ring_virt;
     dev->tx_descs_phys = tx_ring_phys;
 
-    for (int i = 0; i < E1000_NUM_TX_DESC; i++) {
-        uint64_t buf_phys = pfa_alloc();
+    for (i = 0; i < E1000_NUM_TX_DESC; i++) {
+        buf_phys = pfa_alloc();
         if (!buf_phys) return -1;
 
-        uint64_t buf_virt = (KERNEL_VMA + 0x3D300000ULL) + i * PAGE_SIZE;
+        buf_virt = (KERNEL_VMA + 0x3D300000ULL) + i * PAGE_SIZE;
         vmm_map_page(buf_virt, buf_phys, 0x003);
         memset((void *)buf_virt, 0, PAGE_SIZE);
 
@@ -193,7 +215,7 @@ static int e1000_init_tx(e1000_device_t *dev) {
         dev->tx_descs[i].cmd = 0;
     }
 
-    e1000_write(dev, E1000_TDBAL, tx_ring_phys);
+    e1000_write(dev, E1000_TDBAL, (uint32_t)tx_ring_phys);
     e1000_write(dev, E1000_TDBAH, 0);
     e1000_write(dev, E1000_TDLEN, E1000_NUM_TX_DESC * sizeof(e1000_tx_desc_t));
     e1000_write(dev, E1000_TDH, 0);
@@ -203,10 +225,10 @@ static int e1000_init_tx(e1000_device_t *dev) {
 
     e1000_write(dev, E1000_TIPG, E1000_TIPG_IPGT | E1000_TIPG_IPGR1 | E1000_TIPG_IPGR2);
 
-    uint64_t tctl = E1000_TCTL_EN | E1000_TCTL_PSP |
-                    (15 << E1000_TCTL_CT_SHIFT) |
-                    (64 << E1000_TCTL_COLD_SHIFT) |
-                    E1000_TCTL_RTLC;
+    tctl = E1000_TCTL_EN | E1000_TCTL_PSP |
+           (15 << E1000_TCTL_CT_SHIFT) |
+           (64 << E1000_TCTL_COLD_SHIFT) |
+           E1000_TCTL_RTLC;
     e1000_write(dev, E1000_TCTL, tctl);
 
     return 0;
@@ -224,14 +246,18 @@ void e1000_disable_interrupts(e1000_device_t *dev) {
 }
 
 int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
-    e1000_device_t *dev = (e1000_device_t *)netif->driver_data;
+    e1000_device_t *dev;
+    uint32_t cur;
+    volatile int i;
+
+    dev = (e1000_device_t *)netif->driver_data;
     if (!dev || !dev->initialized) return -1;
     if (len > ETH_FRAME_MAX) return -1;
 
-    uint64_t cur = dev->tx_cur;
+    cur = dev->tx_cur;
 
     while (!(dev->tx_descs[cur].status & E1000_TXD_STAT_DD)) {
-        for (volatile int i = 0; i < 1000; i++);
+        for (i = 0; i < 1000; i++);
     }
 
     memcpy(dev->tx_buffers[cur], data, len);
@@ -250,14 +276,24 @@ int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
 }
 
 int e1000_poll(netif_t *netif) {
-    e1000_device_t *dev = (e1000_device_t *)netif->driver_data;
+    e1000_device_t *dev;
+    int count;
+    uint16_t len;
+    uint8_t *buf;
+    uint32_t old_cur;
+    static volatile int polling = 0;
+
+    dev = (e1000_device_t *)netif->driver_data;
     if (!dev || !dev->initialized) return 0;
 
-    int count = 0;
+    if (polling) return 0;
+    polling = 1;
+
+    count = 0;
 
     while (dev->rx_descs[dev->rx_cur].status & E1000_RXD_STAT_DD) {
-        uint16_t len = dev->rx_descs[dev->rx_cur].length;
-        uint8_t *buf = dev->rx_buffers[dev->rx_cur];
+        len = dev->rx_descs[dev->rx_cur].length;
+        buf = dev->rx_buffers[dev->rx_cur];
 
         if (dev->rx_descs[dev->rx_cur].errors & (E1000_RXD_ERR_CE | E1000_RXD_ERR_SE | E1000_RXD_ERR_SEQ | E1000_RXD_ERR_CXE | E1000_RXD_ERR_RXE)) {
             dev->errors_rx++;
@@ -269,20 +305,21 @@ int e1000_poll(netif_t *netif) {
 
         dev->rx_descs[dev->rx_cur].status = 0;
 
-        uint64_t old_cur = dev->rx_cur;
+        old_cur = dev->rx_cur;
         dev->rx_cur = (dev->rx_cur + 1) % E1000_NUM_RX_DESC;
         e1000_write(dev, E1000_RDT, old_cur);
 
         count++;
     }
 
+    polling = 0;
     return count;
 }
 
 void e1000_irq_handler(void *regs) {
     e1000_device_t *dev;
-    uint64_t icr;
-    uint64_t status;
+    uint32_t icr;
+    uint32_t status;
 
     (void)regs;
     dev = &g_e1000_dev;
@@ -305,14 +342,23 @@ void e1000_irq_handler(void *regs) {
 }
 
 int e1000_probe(void) {
+    uint16_t bus;
+    uint8_t slot;
+    uint8_t func;
+    uint32_t vendor_device;
+    uint16_t vendor;
+    uint16_t device;
+    uint32_t bar0;
+    uint32_t cmd;
+
     printf("E1000: Probing PCI bus...\n");
 
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            for (uint8_t func = 0; func < 8; func++) {
-                uint64_t vendor_device = pci_read_config(bus, slot, func, 0x00);
-                uint16_t vendor = vendor_device & 0xFFFF;
-                uint16_t device = (vendor_device >> 16) & 0xFFFF;
+    for (bus = 0; bus < 256; bus++) {
+        for (slot = 0; slot < 32; slot++) {
+            for (func = 0; func < 8; func++) {
+                vendor_device = pci_read_config(bus, slot, func, 0x00);
+                vendor = vendor_device & 0xFFFF;
+                device = (vendor_device >> 16) & 0xFFFF;
 
                 if (vendor != E1000_VENDOR_ID) continue;
 
@@ -328,7 +374,7 @@ int e1000_probe(void) {
                     g_e1000_dev.pci_func = func;
                     g_e1000_dev.device_id = device;
 
-                    uint64_t bar0 = pci_read_config(bus, slot, func, 0x10);
+                    bar0 = pci_read_config(bus, slot, func, 0x10);
                     g_e1000_dev.bar_type = bar0 & 1;
 
                     if (g_e1000_dev.bar_type == 0) {
@@ -337,7 +383,7 @@ int e1000_probe(void) {
                         g_e1000_dev.io_base = bar0 & 0xFFFFFFFC;
                     }
 
-                    uint64_t cmd = pci_read_config(bus, slot, func, 0x04);
+                    cmd = pci_read_config(bus, slot, func, 0x04);
                     cmd |= (1 << 1) | (1 << 2);
                     pci_write_config(bus, slot, func, 0x04, cmd);
 
@@ -373,6 +419,13 @@ void e1000_print_status(e1000_device_t *dev) {
 }
 
 int e1000_init(void) {
+    uint64_t bar0_phys;
+    uint64_t bar0_virt;
+    uint64_t off;
+    uint32_t status;
+    netif_t *netif;
+    int i;
+
     printf("E1000: Initializing driver...\n");
 
     memset(&g_e1000_dev, 0, sizeof(g_e1000_dev));
@@ -382,10 +435,10 @@ int e1000_init(void) {
     }
 
     if (g_e1000_dev.bar_type == 0) {
-        uint64_t bar0_phys = g_e1000_dev.bar0;
-        uint64_t bar0_virt = (KERNEL_VMA + 0x3C000000ULL);
+        bar0_phys = g_e1000_dev.bar0;
+        bar0_virt = (KERNEL_VMA + 0x3C000000ULL);
 
-        for (uint64_t off = 0; off < 0x20000; off += PAGE_SIZE) {
+        for (off = 0; off < 0x20000; off += PAGE_SIZE) {
             vmm_map_page(bar0_virt + off, bar0_phys + off, 0x003);
         }
 
@@ -394,7 +447,7 @@ int e1000_init(void) {
 
     e1000_reset(&g_e1000_dev);
 
-    for (int i = 0; i < 128; i++) {
+    for (i = 0; i < 128; i++) {
         e1000_write(&g_e1000_dev, E1000_MTA + i * 4, 0);
     }
 
@@ -416,11 +469,11 @@ int e1000_init(void) {
         return -1;
     }
 
-    uint64_t status = e1000_read(&g_e1000_dev, E1000_STATUS);
+    status = e1000_read(&g_e1000_dev, E1000_STATUS);
     g_e1000_dev.link_up = (status & E1000_STATUS_LU) ? 1 : 0;
     printf("E1000: Link is %s\n", g_e1000_dev.link_up ? "UP" : "DOWN");
 
-    netif_t *netif = netif_alloc();
+    netif = netif_alloc();
     if (!netif) {
         printf("E1000: Failed to allocate network interface\n");
         return -1;

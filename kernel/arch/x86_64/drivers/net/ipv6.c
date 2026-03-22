@@ -67,14 +67,20 @@ static void ipv6_mac_from_multicast(ipv6_addr_t *ip, mac_addr_t *mac) {
 }
 
 int ipv6_send(netif_t *netif, ipv6_addr_t dest, uint8_t next_header, uint8_t *data, uint64_t len) {
+    uint64_t total_len;
+    uint8_t *packet;
+    ipv6_header_t *ip6;
+    mac_addr_t dest_mac;
+    int result;
+
     if (!netif) return -1;
     if (len > ETH_MTU - sizeof(ipv6_header_t)) return -1;
 
-    uint64_t total_len = sizeof(ipv6_header_t) + len;
-    uint8_t *packet = (uint8_t *)kmalloc(total_len);
+    total_len = sizeof(ipv6_header_t) + len;
+    packet = (uint8_t *)kmalloc(total_len);
     if (!packet) return -1;
 
-    ipv6_header_t *ip6 = (ipv6_header_t *)packet;
+    ip6 = (ipv6_header_t *)packet;
     memset(ip6, 0, sizeof(ipv6_header_t));
 
     ip6->version_tc_flow = htonl(0x60000000);
@@ -86,33 +92,36 @@ int ipv6_send(netif_t *netif, ipv6_addr_t dest, uint8_t next_header, uint8_t *da
 
     memcpy(packet + sizeof(ipv6_header_t), data, len);
 
-    mac_addr_t dest_mac;
-
     if (dest.octets[0] == 0xFF) {
         ipv6_mac_from_multicast(&dest, &dest_mac);
     } else {
         dest_mac = MAC_BROADCAST;
     }
 
-    int result = eth_send(netif, dest_mac, ETH_TYPE_IPV6, packet, total_len);
+    result = eth_send(netif, dest_mac, ETH_TYPE_IPV6, packet, total_len);
     kfree(packet);
 
     return result;
 }
 
 void ipv6_receive(netif_t *netif, uint8_t *packet, uint64_t len) {
+    ipv6_header_t *ip6;
+    uint32_t version_tc_flow;
+    uint16_t payload_len;
+    uint8_t *payload;
+
     if (!netif || !packet) return;
     if (len < sizeof(ipv6_header_t)) return;
 
-    ipv6_header_t *ip6 = (ipv6_header_t *)packet;
+    ip6 = (ipv6_header_t *)packet;
 
-    uint64_t version_tc_flow = ntohl(ip6->version_tc_flow);
+    version_tc_flow = ntohl(ip6->version_tc_flow);
     if ((version_tc_flow >> 28) != 6) return;
 
-    uint16_t payload_len = ntohs(ip6->payload_length);
+    payload_len = ntohs(ip6->payload_length);
     if (sizeof(ipv6_header_t) + payload_len > len) return;
 
-    uint8_t *payload = packet + sizeof(ipv6_header_t);
+    payload = packet + sizeof(ipv6_header_t);
 
     switch (ip6->next_header) {
         case IP_PROTO_ICMPV6:

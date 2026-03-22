@@ -9,7 +9,7 @@
 
 static tcp_socket_t *tcp_sockets = NULL;
 static uint16_t tcp_ephemeral_port = 49152;
-static uint64_t tcp_isn = 0;
+static uint32_t tcp_isn = 0;
 
 void tcp_init(void) {
     tcp_sockets = NULL;
@@ -26,7 +26,11 @@ static uint16_t tcp_alloc_port(void) {
 }
 
 static uint16_t tcp_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
-    uint64_t sum = 0;
+    uint64_t sum;
+    uint16_t *ptr;
+    uint64_t remaining;
+
+    sum = 0;
 
     sum += (src.octets[0] << 8) | src.octets[1];
     sum += (src.octets[2] << 8) | src.octets[3];
@@ -35,8 +39,8 @@ static uint16_t tcp_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, u
     sum += IP_PROTO_TCP;
     sum += len;
 
-    uint16_t *ptr = (uint16_t *)data;
-    uint64_t remaining = len;
+    ptr = (uint16_t *)data;
+    remaining = len;
     while (remaining > 1) {
         sum += ntohs(*ptr++);
         remaining -= 2;
@@ -53,14 +57,20 @@ static uint16_t tcp_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, u
 }
 
 static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, uint64_t len) {
+    uint64_t header_len;
+    uint64_t tcp_len;
+    uint8_t *packet;
+    tcp_header_t *tcp;
+    int result;
+
     if (!sock || !sock->netif) return -1;
 
-    uint64_t header_len = 20;
-    uint64_t tcp_len = header_len + len;
-    uint8_t *packet = (uint8_t *)kmalloc(tcp_len);
+    header_len = 20;
+    tcp_len = header_len + len;
+    packet = (uint8_t *)kmalloc(tcp_len);
     if (!packet) return -1;
 
-    tcp_header_t *tcp = (tcp_header_t *)packet;
+    tcp = (tcp_header_t *)packet;
     memset(tcp, 0, sizeof(tcp_header_t));
 
     tcp->src_port = htons(sock->local_port);
@@ -79,7 +89,7 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
 
     tcp->checksum = tcp_checksum(sock->local_ip, sock->remote_ip, packet, tcp_len);
 
-    int result = ipv4_send(sock->netif, sock->remote_ip, IP_PROTO_TCP, packet, tcp_len);
+    result = ipv4_send(sock->netif, sock->remote_ip, IP_PROTO_TCP, packet, tcp_len);
     kfree(packet);
 
     if (result == 0 && (flags & (TCP_FLAG_SYN | TCP_FLAG_FIN))) {
@@ -93,7 +103,9 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
 }
 
 tcp_socket_t *tcp_socket_create(void) {
-    tcp_socket_t *sock = (tcp_socket_t *)kmalloc(sizeof(tcp_socket_t));
+    tcp_socket_t *sock;
+
+    sock = (tcp_socket_t *)kmalloc(sizeof(tcp_socket_t));
     if (!sock) return NULL;
 
     memset(sock, 0, sizeof(tcp_socket_t));
@@ -126,9 +138,11 @@ tcp_socket_t *tcp_socket_create(void) {
 }
 
 void tcp_socket_close(tcp_socket_t *sock) {
+    tcp_socket_t **prev;
+
     if (!sock) return;
 
-    tcp_socket_t **prev = &tcp_sockets;
+    prev = &tcp_sockets;
     while (*prev) {
         if (*prev == sock) {
             *prev = sock->next;
@@ -143,6 +157,12 @@ void tcp_socket_close(tcp_socket_t *sock) {
 }
 
 int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t timeout_ms) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+    uint64_t last_syn;
+    uint64_t syn_interval;
+    uint32_t syn_saved;
+
     if (!sock || sock->state != TCP_STATE_CLOSED) return -1;
 
     sock->remote_ip = dest;
@@ -160,11 +180,11 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t ti
         return -1;
     }
 
-    uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-    uint64_t start = pit_get_ticks();
-    uint64_t last_syn = start;
-    uint64_t syn_interval = pit_ms_to_ticks(500);
-    uint64_t syn_saved = sock->send_next - 1;
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    start = pit_get_ticks();
+    last_syn = start;
+    syn_interval = pit_ms_to_ticks(500);
+    syn_saved = sock->send_next - 1;
     while (sock->state == TCP_STATE_SYN_SENT) {
         __asm__ volatile("sti");
         netif_poll_all();
@@ -188,11 +208,14 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t ti
 }
 
 int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
+    uint64_t sent;
+    uint64_t chunk;
+
     if (!sock || sock->state != TCP_STATE_ESTABLISHED) return -1;
 
-    uint64_t sent = 0;
+    sent = 0;
     while (sent < len) {
-        uint64_t chunk = len - sent;
+        chunk = len - sent;
         if (chunk > TCP_MSS) chunk = TCP_MSS;
 
         if (tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data + sent, chunk) < 0) {
@@ -209,6 +232,12 @@ int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
 }
 
 int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+    uint64_t available;
+    uint64_t to_copy;
+    uint64_t copied;
+
     if (!sock) return -1;
     if (sock->state != TCP_STATE_ESTABLISHED &&
         sock->state != TCP_STATE_FIN_WAIT1 &&
@@ -217,8 +246,8 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
         return -1;
     }
 
-    uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-    uint64_t start = pit_get_ticks();
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    start = pit_get_ticks();
 
     while (sock->recv_buffer_head == sock->recv_buffer_tail) {
         __asm__ volatile("sti");
@@ -236,7 +265,7 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
         schedule();
     }
 
-    uint64_t available = 0;
+    available = 0;
     if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
         available = sock->recv_buffer_tail - sock->recv_buffer_head;
     } else {
@@ -245,8 +274,8 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
 
     if (available == 0) return 0;
 
-    uint64_t to_copy = available < len ? available : len;
-    uint64_t copied = 0;
+    to_copy = available < len ? available : len;
+    copied = 0;
 
     while (copied < to_copy) {
         buffer[copied++] = sock->recv_buffer[sock->recv_buffer_head];
@@ -257,14 +286,17 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
 }
 
 int tcp_disconnect(tcp_socket_t *sock, uint64_t timeout_ms) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+
     if (!sock) return -1;
 
     if (sock->state == TCP_STATE_ESTABLISHED) {
         sock->state = TCP_STATE_FIN_WAIT1;
         tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
 
-        uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-        uint64_t start = pit_get_ticks();
+        timeout_ticks = pit_ms_to_ticks(timeout_ms);
+        start = pit_get_ticks();
         while (sock->state != TCP_STATE_CLOSED &&
                sock->state != TCP_STATE_TIME_WAIT) {
             __asm__ volatile("sti");
@@ -317,20 +349,31 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock) {
 }
 
 void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
-    (void)dest;
-    if (!netif || !data || len < sizeof(tcp_header_t)) return;
-
-    {
-    tcp_header_t *tcp = (tcp_header_t *)data;
-    uint16_t src_port = ntohs(tcp->src_port);
-    uint16_t dest_port = ntohs(tcp->dest_port);
-    uint64_t seq = ntohl(tcp->seq_num);
-    uint64_t ack = ntohl(tcp->ack_num);
-    uint8_t flags = tcp->flags;
-    uint64_t header_len = ((tcp->data_offset >> 4) & 0x0F) * 4;
+    tcp_header_t *tcp;
+    uint16_t src_port;
+    uint16_t dest_port;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t flags;
+    uint64_t header_len;
     uint8_t *payload;
     uint64_t payload_len;
     tcp_socket_t *sock;
+    uint64_t avail;
+    uint64_t used;
+    uint64_t i;
+    uint64_t next;
+
+    (void)dest;
+    if (!netif || !data || len < sizeof(tcp_header_t)) return;
+
+    tcp = (tcp_header_t *)data;
+    src_port = ntohs(tcp->src_port);
+    dest_port = ntohs(tcp->dest_port);
+    seq = ntohl(tcp->seq_num);
+    ack = ntohl(tcp->ack_num);
+    flags = tcp->flags;
+    header_len = ((tcp->data_offset >> 4) & 0x0F) * 4;
 
     if (header_len < 20 || header_len > len) return;
 
@@ -368,9 +411,6 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
             } else if (flags & TCP_FLAG_ACK) {
                 if (payload_len > 0) {
-                    uint64_t avail;
-                    uint64_t used;
-                    uint64_t i;
                     if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
                         used = sock->recv_buffer_tail - sock->recv_buffer_head;
                     } else {
@@ -381,7 +421,7 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                         tcp_grow_recv_buffer(sock);
                     }
                     for (i = 0; i < payload_len; i++) {
-                        uint64_t next = (sock->recv_buffer_tail + 1) % sock->recv_buffer_size;
+                        next = (sock->recv_buffer_tail + 1) % sock->recv_buffer_size;
                         if (next != sock->recv_buffer_head) {
                             sock->recv_buffer[sock->recv_buffer_tail] = payload[i];
                             sock->recv_buffer_tail = next;
@@ -426,7 +466,6 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
 
         default:
             break;
-    }
     }
 }
 

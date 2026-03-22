@@ -63,6 +63,8 @@ static int http_parse_url(const char *url, char *host, uint16_t *port, char *pat
 static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *response) {
     uint64_t i;
     uint64_t header_end;
+    uint64_t j;
+    uint64_t loc_len;
 
     if (len < 12) return -1;
 
@@ -97,7 +99,7 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
         if (i + 15 < header_end) {
             if ((data[i] == 'C' || data[i] == 'c') &&
                 (data[i+8] == 'L' || data[i+8] == 'l')) {
-                uint64_t j = i;
+                j = i;
                 while (j < header_end && data[j] != ':') j++;
                 if (j < header_end) {
                     j++;
@@ -119,8 +121,6 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
             (data[i+6] == 'o' || data[i+6] == 'O') &&
             (data[i+7] == 'n' || data[i+7] == 'N') &&
             data[i+8] == ':') {
-            uint64_t j;
-            uint64_t loc_len;
 
             j = i + 9;
             while (j < header_end && data[j] == ' ') j++;
@@ -157,6 +157,14 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     uint64_t start;
     int n;
     int i;
+    int sig_ret;
+    uint64_t header_end_pos;
+    uint64_t expected_total;
+    uint64_t si;
+    uint64_t new_cap;
+    uint8_t *new_buf;
+    http_response_t *tmp_resp;
+    uint8_t *hdr_copy;
 
     if (!response) return -1;
 
@@ -170,7 +178,6 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     if (!sock) { kfree(request); return -1; }
 
     if (tcp_connect(sock, ip, port, timeout_ms) < 0) {
-        int sig_ret;
         sig_ret = task_has_pending_signals() ? -4 : -1;
         tcp_socket_close(sock);
         kfree(request);
@@ -180,7 +187,6 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     if (use_tls) {
         tls = tls_connect(sock, host);
         if (!tls) {
-            int sig_ret;
             sig_ret = task_has_pending_signals() ? -4 : -1;
             tcp_disconnect(sock, 1000);
             tcp_socket_close(sock);
@@ -235,9 +241,6 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     start = net_get_ticks();
 
     for (;;) {
-        uint64_t header_end_pos;
-        uint64_t expected_total;
-
         if (task_has_pending_signals()) {
             kfree(recv_buf);
             if (tls) tls_close(tls);
@@ -247,8 +250,8 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
         }
 
         if (total_recv + 4096 > buf_cap) {
-            uint64_t new_cap = buf_cap * 2;
-            uint8_t *new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
+            new_cap = buf_cap * 2;
+            new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
             if (!new_buf) break;
             recv_buf = new_buf;
             buf_cap = new_cap;
@@ -271,18 +274,14 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
             }
 
             header_end_pos = 0;
-            {
-                uint64_t si;
-                for (si = 0; si + 3 < total_recv; si++) {
-                    if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
-                        recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
-                        header_end_pos = si + 4;
-                        break;
-                    }
+            for (si = 0; si + 3 < total_recv; si++) {
+                if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
+                    recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
+                    header_end_pos = si + 4;
+                    break;
                 }
             }
             if (header_end_pos > 0) {
-                http_response_t *tmp_resp;
                 tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
                 if (tmp_resp) {
                     memset(tmp_resp, 0, sizeof(*tmp_resp));
@@ -335,7 +334,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     }
 
     if (response->raw_headers_len > 0) {
-        uint8_t *hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
+        hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
         if (hdr_copy) {
             memcpy(hdr_copy, response->raw_headers, response->raw_headers_len);
         }
@@ -406,6 +405,11 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
     uint64_t url_len;
     uint64_t hdr_copy;
     int is_https;
+    int saved_ret;
+    uint64_t off;
+    uint64_t hi;
+    const char *scheme;
+    uint64_t li;
 
     host = (char *)kmalloc(256);
     if (!host) return -1;
@@ -443,16 +447,15 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
         }
 
         if (ret < 0) {
-            int saved_ret = ret;
+            saved_ret = ret;
             kfree(host); kfree(path); kfree(current_url); kfree(response);
             return saved_ret;
         }
 
         if (http_is_redirect(response->status_code) && response->location[0] && redir < max_redirects) {
             if (response->location[0] == '/') {
-                uint64_t off = 0;
-                uint64_t hi;
-                const char *scheme = is_https ? "https://" : "http://";
+                off = 0;
+                scheme = is_https ? "https://" : "http://";
                 for (hi = 0; scheme[hi]; hi++)
                     current_url[off++] = scheme[hi];
                 for (hi = 0; host[hi] && off < 510; hi++)
@@ -461,7 +464,7 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
                     current_url[off++] = response->location[hi];
                 current_url[off] = '\0';
             } else {
-                uint64_t li = 0;
+                li = 0;
                 while (response->location[li] && li < 511) {
                     current_url[li] = response->location[li];
                     li++;
@@ -514,6 +517,14 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     uint64_t start;
     int n;
     int i;
+    uint64_t buf_cap;
+    uint64_t header_end_pos;
+    uint64_t expected_total;
+    uint64_t si;
+    uint64_t new_cap;
+    uint8_t *new_buf;
+    http_response_t *tmp_resp;
+    uint8_t *hdr_copy;
 
     if (!response) return -1;
 
@@ -595,18 +606,14 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
 
     total_recv = 0;
     start = net_get_ticks();
-    {
-    uint64_t buf_cap = 16384;
+    buf_cap = 16384;
 
     for (;;) {
-        uint64_t header_end_pos;
-        uint64_t expected_total;
-
         if (task_has_pending_signals()) break;
 
         if (total_recv + 4096 > buf_cap) {
-            uint64_t new_cap = buf_cap * 2;
-            uint8_t *new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
+            new_cap = buf_cap * 2;
+            new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
             if (!new_buf) break;
             recv_buf = new_buf;
             buf_cap = new_cap;
@@ -617,18 +624,14 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
             start = net_get_ticks();
 
             header_end_pos = 0;
-            {
-                uint64_t si;
-                for (si = 0; si + 3 < total_recv; si++) {
-                    if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
-                        recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
-                        header_end_pos = si + 4;
-                        break;
-                    }
+            for (si = 0; si + 3 < total_recv; si++) {
+                if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
+                    recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
+                    header_end_pos = si + 4;
+                    break;
                 }
             }
             if (header_end_pos > 0) {
-                http_response_t *tmp_resp;
                 tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
                 if (tmp_resp) {
                     memset(tmp_resp, 0, sizeof(*tmp_resp));
@@ -654,7 +657,6 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
             break;
         }
     }
-    }
 
     tcp_disconnect(sock, 1000);
     tcp_socket_close(sock);
@@ -676,7 +678,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     }
 
     if (response->raw_headers_len > 0) {
-        uint8_t *hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
+        hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
         if (hdr_copy) {
             memcpy(hdr_copy, response->raw_headers, response->raw_headers_len);
         }

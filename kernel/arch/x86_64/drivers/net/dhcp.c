@@ -8,10 +8,10 @@
 
 static dhcp_state_t g_dhcp_state;
 
-static uint64_t dhcp_rand_xid(void) {
+static uint32_t dhcp_rand_xid(void) {
     static uint64_t seed = 12345;
     seed = seed * 1103515245 + 12345;
-    return seed;
+    return (uint32_t)seed;
 }
 
 static void dhcp_add_option(uint8_t *options, uint64_t *offset, uint8_t code, uint8_t len, void *data) {
@@ -28,7 +28,7 @@ static uint8_t dhcp_parse_options(uint8_t *options, uint64_t len, dhcp_state_t *
     uint8_t code;
     uint8_t opt_len;
     uint8_t msg_type;
-    uint64_t lt;
+    uint32_t lt;
 
     msg_type = 0;
     i = 0;

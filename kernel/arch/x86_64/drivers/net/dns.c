@@ -176,6 +176,7 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
     dns_header_t *hdr;
     uint16_t id;
     int name_len;
+    int send_result;
     uint8_t *qtype;
     uint64_t query_len;
     uint64_t timeout_ticks;
@@ -217,8 +218,9 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
     pending_id = id;
     pending_resolved = 0;
 
-    udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
+    send_result = udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
     kfree(query);
+    if (send_result < 0) return -1;
 
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();

@@ -19,6 +19,8 @@ void udp_init(void) {
 
 static uint16_t udp_pseudo_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
     uint64_t sum = 0;
+    uint16_t *ptr = (uint16_t *)data;
+    uint64_t remaining = len;
 
     sum += (src.octets[0] << 8) | src.octets[1];
     sum += (src.octets[2] << 8) | src.octets[3];
@@ -26,9 +28,6 @@ static uint16_t udp_pseudo_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *
     sum += (dest.octets[2] << 8) | dest.octets[3];
     sum += IP_PROTO_UDP;
     sum += len;
-
-    uint16_t *ptr = (uint16_t *)data;
-    uint64_t remaining = len;
     while (remaining > 1) {
         sum += ntohs(*ptr++);
         remaining -= 2;
@@ -49,13 +48,18 @@ int udp_send(netif_t *netif, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_
 }
 
 int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
+    uint64_t udp_len;
+    uint8_t *packet;
+    udp_header_t *udp;
+    int result;
+
     if (!netif) return -1;
 
-    uint64_t udp_len = sizeof(udp_header_t) + len;
-    uint8_t *packet = (uint8_t *)kmalloc(udp_len);
+    udp_len = sizeof(udp_header_t) + len;
+    packet = (uint8_t *)kmalloc(udp_len);
     if (!packet) return -1;
 
-    udp_header_t *udp = (udp_header_t *)packet;
+    udp = (udp_header_t *)packet;
     udp->src_port = htons(src_port);
     udp->dest_port = htons(dest_port);
     udp->length = htons(udp_len);
@@ -66,25 +70,33 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
     udp->checksum = udp_pseudo_checksum(src, dest, packet, udp_len);
     if (udp->checksum == 0) udp->checksum = 0xFFFF;
 
-    int result = ipv4_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
+    result = ipv4_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
     kfree(packet);
 
     return result;
 }
 
 void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
+    udp_header_t *udp;
+    uint16_t src_port;
+    uint16_t dest_port;
+    uint16_t udp_len;
+    uint8_t *payload;
+    uint64_t payload_len;
+    udp_socket_t *sock;
+
     (void)dest;
     if (!netif || !data || len < sizeof(udp_header_t)) return;
 
-    udp_header_t *udp = (udp_header_t *)data;
-    uint16_t src_port = ntohs(udp->src_port);
-    uint16_t dest_port = ntohs(udp->dest_port);
-    uint16_t udp_len = ntohs(udp->length);
+    udp = (udp_header_t *)data;
+    src_port = ntohs(udp->src_port);
+    dest_port = ntohs(udp->dest_port);
+    udp_len = ntohs(udp->length);
 
     if (udp_len > len) return;
 
-    uint8_t *payload = data + sizeof(udp_header_t);
-    uint64_t payload_len = udp_len - sizeof(udp_header_t);
+    payload = data + sizeof(udp_header_t);
+    payload_len = udp_len - sizeof(udp_header_t);
 
     if (dest_port == DHCP_CLIENT_PORT) {
         dhcp_receive(netif, payload, payload_len);
@@ -95,7 +107,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         dns_receive(netif, src, src_port, payload, payload_len);
     }
 
-    udp_socket_t *sock = udp_sockets;
+    sock = udp_sockets;
     while (sock) {
         if (sock->local_port == dest_port) {
             if (payload_len <= sock->recv_buffer_size) {

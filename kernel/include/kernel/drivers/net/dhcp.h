@@ -15,7 +15,7 @@
 
 typedef struct {
     uint8_t state;
-    uint64_t xid;
+    uint32_t xid;
     ipv4_addr_t offered_ip;
     ipv4_addr_t server_ip;
     ipv4_addr_t subnet_mask;

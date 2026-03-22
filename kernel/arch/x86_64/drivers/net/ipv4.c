@@ -36,9 +36,9 @@ uint16_t ipv4_checksum(void *data, uint64_t len) {
 }
 
 int ipv4_is_local(netif_t *netif, ipv4_addr_t ip) {
-    uint64_t local;
-    uint64_t mask;
-    uint64_t target;
+    uint32_t local;
+    uint32_t mask;
+    uint32_t target;
 
     if (!netif) return 0;
 
@@ -92,8 +92,16 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
         }
 
         if (arp_resolve(netif, next_hop, &dest_mac) < 0) {
-            kfree(packet);
-            return -1;
+            if (ipv4_eq(next_hop, dest) && !ipv4_eq(netif->gateway, IPV4_ZERO)) {
+                next_hop = netif->gateway;
+                if (arp_resolve(netif, next_hop, &dest_mac) < 0) {
+                    kfree(packet);
+                    return -1;
+                }
+            } else {
+                kfree(packet);
+                return -1;
+            }
         }
     }
 
