@@ -34,7 +34,6 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         if (ret == 0) {
             fs->block_cache[oldest].dirty = false;
         }
-        /* If write failed, still evict this slot - caller handles the failure */
     }
 
     return oldest;

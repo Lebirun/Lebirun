@@ -260,54 +260,88 @@ static int sys_mknodat(int dirfd, const char *pathname, int mode) {
 
 static int sys_fchownat(int dirfd, const char *pathname, int owner) {
     char resolved[256];
-    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    const char *path;
+    vfs_node_t *node;
+
+    path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
-    
-    vfs_node_t *node = vfs_namei(path);
+    if (!current_task) return -ESRCH;
+
+    if (current_task->euid != 0)
+        return -EPERM;
+
+    node = vfs_namei(path);
     if (!node) return -ENOENT;
-    
-    (void)owner;
+
+    if (node->chown) {
+        return node->chown(node, (uint64_t)owner, node->gid);
+    }
+    if (owner != -1) node->uid = (uint64_t)owner;
     return 0;
 }
 
 static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     char resolved[256];
-    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
-    if (!path) return -EFAULT;
-    
+    const char *path;
     char parent_path[256];
     char filename[64];
-    
-    int len = 0;
+    int len;
+    int last_slash;
+    int i;
+    int j;
+    vfs_node_t *parent;
+
+    path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    if (!path) return -EFAULT;
+    if (!current_task) return -ESRCH;
+
+    len = 0;
     while (path[len]) len++;
-    
-    int last_slash = -1;
-    for (int i = 0; i < len; i++) {
+
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
         if (path[i] == '/') last_slash = i;
     }
-    
+
     if (last_slash < 0) {
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
+        for (i = 0; i < len && i < 63; i++) filename[i] = path[i];
         filename[len < 63 ? len : 63] = '\0';
     } else if (last_slash == 0) {
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        int j = 0;
-        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        j = 0;
+        for (i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     } else {
-        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
+        for (i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
         parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        int j = 0;
-        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
+        j = 0;
+        for (i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     }
-    
-    vfs_node_t *parent = vfs_namei(parent_path);
+
+    parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
-    
+
+    if (current_task->euid != 0) {
+        uint64_t pmode;
+        int pshift;
+        int pallowed;
+
+        pmode = parent->mask;
+        if (current_task->euid == parent->uid)
+            pshift = 6;
+        else if (current_task->egid == parent->gid)
+            pshift = 3;
+        else
+            pshift = 0;
+        pallowed = (int)((pmode >> pshift) & 7);
+        if (!(pallowed & VFS_PERM_WRITE))
+            return -EACCES;
+    }
+
     (void)flags;
     return vfs_unlink(parent, filename);
 }
@@ -403,7 +437,7 @@ static int sys_symlinkat(int target_ptr, const char *newdirfd_ptr, int linkpath)
     link_path = resolve_at_path(newdirfd, (const char *)(uintptr_t)linkpath, link_resolved, sizeof(link_resolved));
     if (!link_path) return -EFAULT;
 
-    ret = ramfs_create_symlink(link_path, target, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    ret = ramfs_create_symlink(link_path, target, 0777);
     if (ret == 0) return 0;
     if (ret == RAMFS_ERR_EXIST) return -EEXIST;
     if (ret == RAMFS_ERR_NOENT) return -ENOENT;
@@ -437,26 +471,65 @@ static int sys_readlinkat(int dirfd, const char *pathname, int buf_ptr) {
 
 static int sys_fchmodat(int dirfd, const char *pathname, int mode) {
     char resolved[256];
-    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    const char *path;
+    vfs_node_t *node;
+
+    path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
-    
-    vfs_node_t *node = vfs_namei(path);
+    if (!current_task) return -ESRCH;
+
+    node = vfs_namei(path);
     if (!node) return -ENOENT;
-    
-    node->mask = (uint64_t)mode & 0777;
+
+    if (current_task->euid != 0 && current_task->euid != node->uid)
+        return -EPERM;
+
+    if (node->chmod) {
+        return node->chmod(node, (uint64_t)mode & 07777);
+    }
+    node->mask = (uint64_t)mode & 07777;
     return 0;
 }
 
 static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     char resolved[256];
-    const char *path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
+    const char *path;
+    vfs_node_t *node;
+    uint64_t uid;
+    uint64_t gid;
+    uint64_t fmode;
+    int shift;
+    int allowed;
+    int want;
+
+    path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
-    
-    vfs_node_t *node = vfs_namei(path);
+    if (!current_task) return -ESRCH;
+
+    node = vfs_namei(path);
     if (!node) return -ENOENT;
-    
-    (void)mode;
-    return 0;
+
+    if (mode == 0) return 0;
+
+    uid = current_task->euid;
+    gid = current_task->egid;
+    if (uid == 0) return 0;
+
+    fmode = node->mask;
+    if (uid == node->uid)
+        shift = 6;
+    else if (gid == node->gid)
+        shift = 3;
+    else
+        shift = 0;
+
+    allowed = (int)((fmode >> shift) & 7);
+    want = 0;
+    if (mode & 4) want |= VFS_PERM_READ;
+    if (mode & 2) want |= VFS_PERM_WRITE;
+    if (mode & 1) want |= VFS_PERM_EXEC;
+    if ((allowed & want) == want) return 0;
+    return -EACCES;
 }
 
 static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {

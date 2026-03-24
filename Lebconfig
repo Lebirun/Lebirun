@@ -1,6 +1,10 @@
 title "Lebirun"
 desc "Hobby Operating System/Kernel"
 
+subcategory "Virtualization" {
+    item type=bool name="VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
+}
+
 subcategory "Debug" can-toggle=enable {
     item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
     item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"

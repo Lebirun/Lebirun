@@ -6,6 +6,7 @@
 #include "launch_user.h"
 #include <kernel/console.h>
 #include <kernel/vfs.h>
+#include <kernel/rng.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,25 +34,32 @@ static uint64_t align_down_u64(uint64_t v, uint64_t align) {
 static int setup_initial_stack_with_elf(uint64_t pd_phys, const char *argv0, 
                                          const elf_info_t *elf_info,
                                          uint64_t *out_useresp) {
+    uint64_t sp;
+    uint64_t zero;
+    uint64_t argc_val;
+    const char *prog_name;
+    int prog_len;
+    uint64_t prog_addr;
+    uint8_t random_bytes[16];
+    uint64_t random_addr;
+
     if (!out_useresp) return -1;
 
-    uint64_t sp = USER_STACK_TOP - USER_STACK_GAP;
+    sp = USER_STACK_TOP - USER_STACK_GAP;
+    zero = 0;
+    argc_val = 1;
 
-    uint64_t zero = 0;
-    uint64_t argc_val = 1;
-
-    const char *prog_name = (argv0 && argv0[0]) ? argv0 : "program";
-    int prog_len = 0;
+    prog_name = (argv0 && argv0[0]) ? argv0 : "program";
+    prog_len = 0;
     while (prog_name[prog_len]) prog_len++;
 
     sp -= (uint64_t)((prog_len + 1 + 7) & ~7);
-    uint64_t prog_addr = sp;
+    prog_addr = sp;
     vmm_copy_to_pml4(pd_phys, sp, prog_name, (uint64_t)(prog_len + 1));
 
-    uint8_t random_bytes[16] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-                                 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    rng_fill(random_bytes, sizeof(random_bytes));
     sp -= 16;
-    uint64_t random_addr = sp;
+    random_addr = sp;
     vmm_copy_to_pml4(pd_phys, sp, random_bytes, 16);
 
     sp = align_down_u64(sp, 16);

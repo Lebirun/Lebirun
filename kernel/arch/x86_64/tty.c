@@ -67,19 +67,7 @@ void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t p
 }
 
 void terminal_replay_early_boot(void) {
-    size_t i;
-    char c;
-
     early_boot_capture = false;
-    for (i = 0; i < early_boot_index; i++) {
-        c = early_boot_buffer[i];
-        if (console_is_initialized()) {
-            console_putchar_to(0, c);
-        } else if (use_framebuffer) {
-            fb_write_char(c);
-        }
-    }
-    fb_update_cursor();
 }
 
 void terminal_setcolor(uint8_t color) {

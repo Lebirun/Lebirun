@@ -160,26 +160,31 @@ static int sys_exit(int code, const char *unused1, int unused2) {
 }
 
 static int sys_write(int fd, const char *buf, int len) {
+    uint64_t buf_addr;
     if (!buf || len < 0) return -1;
-    uint64_t buf_addr = (uint64_t)buf;
+    buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_W) {
+            int written;
+            const uint8_t *src;
             pipe_t *p = (pipe_t *)tfd->private_data;
             if (!p) return -EBADF;
-            int written = 0;
-            const uint8_t *src = (const uint8_t *)buf_addr;
+            written = 0;
+            src = (const uint8_t *)buf_addr;
             while (written < len) {
+                uint64_t space;
+                uint64_t chunk;
                 if (p->readers <= 0) return -EPIPE;
                 while (p->count == p->buf_size) {
                     waitq_add(&p->write_waitq, current_task);
                     block_current();
                 }
-                uint64_t space = p->buf_size - p->count;
-                uint64_t chunk = (uint64_t)(len - written);
+                space = p->buf_size - p->count;
+                chunk = (uint64_t)(len - written);
                 if (chunk > space) chunk = space;
                 for (uint64_t i = 0; i < chunk; i++) {
                     p->buffer[p->write_pos] = src[written + (int)i];
@@ -192,8 +197,9 @@ static int sys_write(int fd, const char *buf, int len) {
             return written;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            uint64_t bytes;
             vfs_node_t *node = (vfs_node_t *)tfd->node;
-            uint64_t bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+            bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
             tfd->offset += bytes;
             return (int)bytes;
         }
@@ -203,8 +209,9 @@ static int sys_write(int fd, const char *buf, int len) {
     }
 
     if (fd == 1 || fd == 2) {
+        int con_id;
         framebuffer_t *fb = fb_get();
-        int con_id = current_task ? current_task->console_id : 0;
+        con_id = current_task ? current_task->console_id : 0;
         if (fb && (fb->font || fb->cols) && console_is_initialized()) {
             console_write_to(con_id, (const char *)buf_addr, (size_t)len);
         } else {
@@ -227,14 +234,18 @@ static int sys_write(int fd, const char *buf, int len) {
 }
 
 static int sys_read(int fd, char *buf, int len) {
+    uint64_t buf_addr;
     if (!buf || len <= 0) return -1;
-    uint64_t buf_addr = (uint64_t)buf;
+    buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_R) {
+            uint64_t avail;
+            uint64_t to_read;
+            uint8_t *dst;
             pipe_t *p = (pipe_t *)tfd->private_data;
             if (!p) return -EBADF;
             while (p->count == 0) {
@@ -242,10 +253,10 @@ static int sys_read(int fd, char *buf, int len) {
                 waitq_add(&p->read_waitq, current_task);
                 block_current();
             }
-            uint64_t avail = p->count;
-            uint64_t to_read = (uint64_t)len;
+            avail = p->count;
+            to_read = (uint64_t)len;
             if (to_read > avail) to_read = avail;
-            uint8_t *dst = (uint8_t *)buf_addr;
+            dst = (uint8_t *)buf_addr;
             for (uint64_t i = 0; i < to_read; i++) {
                 dst[i] = p->buffer[p->read_pos];
                 p->read_pos = (p->read_pos + 1) % p->buf_size;
@@ -255,8 +266,9 @@ static int sys_read(int fd, char *buf, int len) {
             return (int)to_read;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            uint64_t bytes;
             vfs_node_t *node = (vfs_node_t *)tfd->node;
-            uint64_t bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+            bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
             tfd->offset += bytes;
             return (int)bytes;
         }
@@ -267,10 +279,14 @@ static int sys_read(int fd, char *buf, int len) {
 
     if (fd == 0) {
         int con_id = current_task ? current_task->console_id : console_get_current();
+        int fg_pgrp;
+        struct kernel_termios *t;
+        int canonical;
+        int echo;
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
-        int fg_pgrp = tty_pgrp[con_id];
+        fg_pgrp = tty_pgrp[con_id];
         if (fg_pgrp != 0) {
             pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
@@ -278,9 +294,9 @@ static int sys_read(int fd, char *buf, int len) {
             }
         }
         
-        struct kernel_termios *t = &tty_termios[con_id];
-        int canonical = (t->c_lflag & ICANON) != 0;
-        int echo = (t->c_lflag & ECHO) != 0;
+        t = &tty_termios[con_id];
+        canonical = (t->c_lflag & ICANON) != 0;
+        echo = (t->c_lflag & ECHO) != 0;
         
         if (canonical) {
             if (line_ready[con_id]) {
@@ -603,18 +619,20 @@ static int sys_read(int fd, char *buf, int len) {
 }
 
 static int sys_read_nb(int fd, char *buf, int len) {
+    uint64_t buf_addr;
     if (!buf || len <= 0) return -1;
-    uint64_t buf_addr = (uint64_t)buf;
+    buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
 
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
         int con_id = current_task ? current_task->console_id : console_get_current();
         struct kernel_termios *t;
+        int fg_pgrp;
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
 
-        int fg_pgrp = tty_pgrp[con_id];
+        fg_pgrp = tty_pgrp[con_id];
         if (fg_pgrp != 0) {
             pid_t my_pgrp = tty_get_my_pgrp();
             if (my_pgrp != (pid_t)fg_pgrp) {
@@ -653,15 +671,17 @@ static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
 }
 
 static int sys_isatty(int fd, const char *unused, int unused2) {
+    int t;
     (void)unused; (void)unused2;
     if (!current_task) return 0;
     if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) return 0;
-    int t = current_task->fds[fd].type;
+    t = current_task->fds[fd].type;
     if (t == FD_TYPE_STDIN || t == FD_TYPE_STDOUT || t == FD_TYPE_STDERR) return 1;
     if (t == FD_TYPE_FILE && current_task->fds[fd].node) {
+        uint64_t a;
         vfs_node_t *node = (vfs_node_t *)current_task->fds[fd].node;
-        uint64_t a = (uint64_t)node;
+        a = (uint64_t)node;
         if ((a & 0xFFFF0000u) == 0xFEFE0000u) return 0;
         if (a >= KERNEL_VMA &&
             vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), a) != 0 &&

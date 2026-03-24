@@ -60,6 +60,14 @@ static void serial_printf_dec(uint64_t val) {
 
 
 void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
+    uint64_t mods_start_page;
+    uint64_t mods_end_page;
+    uint64_t mod_start_phys;
+    uint64_t mod_end_phys;
+    uint64_t mod_size;
+    uint64_t start_page;
+    uint64_t end_page;
+    uint64_t total_bytes;
     if (initrd_should_log()) {
         serial_puts("\n=== INITRD INIT ===\n");
         serial_puts("mods_count="); serial_printf_dec(mods_count);
@@ -74,8 +82,8 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    uint64_t mods_start_page = mods_addr & ~0xFFF;
-    uint64_t mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
+    mods_start_page = mods_addr & ~0xFFF;
+    mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
     if (initrd_should_log()) printf("INITRD: Mapping multiboot array phys 0x%016lX - 0x%016lX\n", mods_start_page, mods_end_page);
     for (uint64_t phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
         uint64_t virt = phys + KERNEL_VMA;
@@ -85,9 +93,9 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     multiboot_module_t *mod = (multiboot_module_t *)(mods_addr + KERNEL_VMA);
     if (initrd_should_log()) printf("INITRD: Using module at virtual 0x%016lX (phys 0x%016lX - 0x%016lX)\n", (uint64_t)mod, (uint64_t)mod->mod_start, (uint64_t)mod->mod_end);
     
-    uint64_t mod_start_phys = mod->mod_start;
-    uint64_t mod_end_phys = mod->mod_end;
-    uint64_t mod_size = mod_end_phys - mod_start_phys;
+    mod_start_phys = mod->mod_start;
+    mod_end_phys = mod->mod_end;
+    mod_size = mod_end_phys - mod_start_phys;
 
     initrd_mod0_phys_start = mod_start_phys;
     initrd_mod0_phys_end = mod_end_phys;
@@ -100,8 +108,8 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    uint64_t start_page = mod_start_phys & ~0xFFF;
-    uint64_t end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
+    start_page = mod_start_phys & ~0xFFF;
+    end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
     if (initrd_should_log()) printf("INITRD: Mapping phys 0x%016lX - 0x%016lX into kernel space\n", start_page, end_page);
     for (uint64_t phys = start_page; phys < end_page; phys += 0x1000) {
         uint64_t virt = phys + KERNEL_VMA;
@@ -173,9 +181,11 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    uint64_t total_bytes = 0;
+    total_bytes = 0;
 
     for (uint64_t i = 0; i < file_count; i++) {
+        uint64_t hdr_off;
+        uint64_t len;
         memcpy(files[i].name, file_headers[i].name, 64);
         files[i].length = file_headers[i].length;
         files[i].type = file_headers[i].type;
@@ -184,8 +194,8 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         files[i].uid = file_headers[i].uid;
         files[i].gid = file_headers[i].gid;
 
-        uint64_t hdr_off = file_headers[i].offset;
-        uint64_t len = file_headers[i].length;
+        hdr_off = file_headers[i].offset;
+        len = file_headers[i].length;
 
         if (files[i].type == INITRD_TYPE_FILE) {
             if (hdr_off + len > mod_size) {
@@ -240,12 +250,16 @@ void initrd_list_files(void) {
     }
     for (uint64_t i = 0; i < file_count; i++) {
         char tname[65];
+        char typechar;
+        char rperm;
+        char wperm;
+        char xperm;
         memcpy(tname, files[i].name, 64);
         tname[64] = '\0';
-        char typechar = (files[i].type == INITRD_TYPE_DIR) ? 'd' : '-';
-        char rperm = (files[i].permissions & INITRD_PERM_READ) ? 'r' : '-';
-        char wperm = (files[i].permissions & INITRD_PERM_WRITE) ? 'w' : '-';
-        char xperm = (files[i].permissions & INITRD_PERM_EXEC) ? 'x' : '-';
+        typechar = (files[i].type == INITRD_TYPE_DIR) ? 'd' : '-';
+        rperm = (files[i].permissions & INITRD_PERM_READ) ? 'r' : '-';
+        wperm = (files[i].permissions & INITRD_PERM_WRITE) ? 'w' : '-';
+        xperm = (files[i].permissions & INITRD_PERM_EXEC) ? 'x' : '-';
         printf("  [%u] %c%c%c%c %s (off=%u len=%u) parent=%u\n", i, typechar, rperm, wperm, xperm, tname, files[i].offset, files[i].length, files[i].parent_index);
     }
 }
@@ -267,6 +281,8 @@ static int find_free_fd(void) {
 }
 
 initrd_file_t *initrd_find_path(const char *path) {
+    char component[65];
+    uint16_t current_parent;
     if (!path || !files || file_count == 0) return NULL;
 
     while (*path == '/') path++;
@@ -279,14 +295,14 @@ initrd_file_t *initrd_find_path(const char *path) {
         return NULL;
     }
 
-    char component[65];
-    uint16_t current_parent = 0xFFFF;
+    current_parent = 0xFFFF;
 
     while (*path) {
+        int len;
         while (*path == '/') path++;
         if (*path == '\0') break;
 
-        int len = 0;
+        len = 0;
         while (path[len] && path[len] != '/' && len < 64) {
             component[len] = path[len];
             len++;
@@ -318,6 +334,9 @@ initrd_file_t *initrd_find_path(const char *path) {
 }
 
 int initrd_open(const char *path, int flags) {
+    int is_dir;
+    int fd;
+    uint64_t idx;
     if (!path) return -1;
 
     initrd_file_t *f = initrd_find_path(path);
@@ -326,7 +345,7 @@ int initrd_open(const char *path, int flags) {
     }
     if (!f) return -1;
 
-    int is_dir = (f->type == INITRD_TYPE_DIR);
+    is_dir = (f->type == INITRD_TYPE_DIR);
     
     if (flags & 0200000) {
         if (!is_dir) return -20;
@@ -334,10 +353,10 @@ int initrd_open(const char *path, int flags) {
         if (is_dir) return -21;
     }
 
-    int fd = find_free_fd();
+    fd = find_free_fd();
     if (fd < 0) return -1;
 
-    uint64_t idx = 0;
+    idx = 0;
     for (uint64_t i = 0; i < file_count; i++) {
         if (&files[i] == f) { idx = i; break; }
     }
@@ -351,20 +370,24 @@ int initrd_open(const char *path, int flags) {
 }
 
 int initrd_read(int fd, void *buf, uint64_t count) {
+    uint64_t idx;
+    uint64_t off;
+    uint64_t avail;
+    uint64_t to_read;
     if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buf || count == 0) return 0;
 
-    uint64_t idx = fd_table[fd].file_index;
+    idx = fd_table[fd].file_index;
     if (idx >= file_count) return -1;
 
     initrd_file_t *f = &files[idx];
-    uint64_t off = fd_table[fd].offset;
+    off = fd_table[fd].offset;
 
     if (off >= f->length) return 0;
 
-    uint64_t avail = f->length - off;
-    uint64_t to_read = (count < avail) ? count : avail;
+    avail = f->length - off;
+    to_read = (count < avail) ? count : avail;
 
     memcpy(buf, f->data + off, to_read);
     fd_table[fd].offset += to_read;
@@ -399,14 +422,17 @@ int initrd_stat(const char *path, uint64_t *size, uint8_t *type, uint8_t *perms)
 }
 
 static uint64_t initrd_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    uint64_t idx;
+    uint64_t avail;
+    uint64_t to_read;
     if (!node || !buffer) return 0;
-    uint64_t idx = node->inode;
+    idx = node->inode;
     if (idx >= file_count) return 0;
     initrd_file_t *f = &files[idx];
     if (f->type != INITRD_TYPE_FILE) return 0;
     if (offset >= f->length) return 0;
-    uint64_t avail = f->length - offset;
-    uint64_t to_read = (size < avail) ? size : avail;
+    avail = f->length - offset;
+    to_read = (size < avail) ? size : avail;
 
     if (initrd_should_log()) {
         uint64_t cr3;
@@ -443,9 +469,11 @@ static void initrd_vfs_close(vfs_node_t *node) {
 }
 
 static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint64_t index) {
+    uint64_t parent_idx;
+    uint64_t count;
     if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
-    uint64_t parent_idx = node->inode;
-    uint64_t count = 0;
+    parent_idx = node->inode;
+    count = 0;
     for (uint64_t i = 0; i < file_count; i++) {
         uint16_t pi = files[i].parent_index;
         int match = 0;
@@ -471,8 +499,9 @@ static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
+    uint64_t parent_idx;
     if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
-    uint64_t parent_idx = node->inode;
+    parent_idx = node->inode;
     for (uint64_t i = 0; i < file_count; i++) {
         uint16_t pi = files[i].parent_index;
         int match = 0;
@@ -564,20 +593,9 @@ void initrd_copy_to_root(void) {
     uint64_t dirs_created;
     uint64_t files_copied;
     uint64_t errors;
-    const char *root_dirs[] = {
-        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
-        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
-        NULL
-    };
-    const char *nested_dirs[] = {
-        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
-        "/var/log", "/var/run", "/var/tmp",
-        NULL
-    };
     const char **p;
     int r;
     uint64_t i;
-    initrd_file_t *f;
     char destpath[INITRD_MAX_PATH];
     char tmp[INITRD_MAX_PATH];
     int cur;
@@ -592,6 +610,17 @@ void initrd_copy_to_root(void) {
     int sublen;
     int ret;
     int written;
+    initrd_file_t *f;
+    const char *root_dirs[] = {
+        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
+        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
+        NULL
+    };
+    const char *nested_dirs[] = {
+        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
+        "/var/log", "/var/run", "/var/tmp",
+        NULL
+    };
 
     if (!files || file_count == 0) {
         printf("INITRD: No files to copy to root\n");
@@ -605,7 +634,7 @@ void initrd_copy_to_root(void) {
     errors = 0;
 
     for (p = root_dirs; *p; p++) {
-        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        r = ramfs_create_dir(*p, 0755);
         if (r == 0) {
             printf("INITRD: Created root dir %s\n", *p);
             dirs_created++;
@@ -616,7 +645,7 @@ void initrd_copy_to_root(void) {
     }
     
     for (p = nested_dirs; *p; p++) {
-        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        r = ramfs_create_dir(*p, 0755);
         if (r == 0) {
             printf("INITRD: Created nested dir %s\n", *p);
             dirs_created++;
@@ -682,14 +711,14 @@ void initrd_copy_to_root(void) {
                 memcpy(sub, destpath, sublen);
                 sub[sublen] = '\0';
                 if (sublen > 1) {
-                    r = ramfs_create_dir(sub, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+                    r = ramfs_create_dir(sub, 0755);
                     (void)r; 
                 }
             }
         }
 
         if (f->type == INITRD_TYPE_DIR) {
-            ret = ramfs_create_dir(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            ret = ramfs_create_dir(destpath, 0755);
             if (ret == 0) {
                 dirs_created++;
             } else if (ret != RAMFS_ERR_EXIST) {
@@ -697,7 +726,7 @@ void initrd_copy_to_root(void) {
                 errors++;
             }
         } else {
-            ret = ramfs_create_file(destpath, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            ret = ramfs_create_file(destpath, 0644);
             if (ret == 0 || ret == RAMFS_ERR_EXIST) {
                 if (f->data && f->length > 0) {
                     written = ramfs_write(destpath, 0, f->data, f->length);
@@ -725,35 +754,19 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mods_end_page;
     uint64_t phys;
     uint64_t virt;
-    multiboot_module_t *mods;
-    multiboot_module_t *mod;
     uint64_t mod_start_phys;
     uint64_t mod_end_phys;
     uint64_t mod_size;
     uint64_t start_page;
     uint64_t end_page;
     uint8_t *rootfs_base;
-    initrd_header_t *hdr;
     uint64_t num_entries;
-    initrd_file_header_t *hdrs;
-    initrd_file_t *rfiles;
     uint64_t i;
     uint64_t dirs_created;
     uint64_t files_copied;
     uint64_t errors;
-    const char *root_dirs[] = {
-        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
-        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
-        NULL
-    };
-    const char *nested_dirs[] = {
-        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
-        "/var/log", "/var/run", "/var/tmp",
-        NULL
-    };
     const char **p;
     int r;
-    initrd_file_t *f;
     static char destpath[INITRD_MAX_PATH];
     static char tmp[INITRD_MAX_PATH];
     static char namebuf[VFS_MAX_NAME];
@@ -771,6 +784,22 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     int ret;
     uint64_t hdr_off;
     uint64_t hdr_len;
+    multiboot_module_t *mods;
+    multiboot_module_t *mod;
+    initrd_header_t *hdr;
+    initrd_file_header_t *hdrs;
+    initrd_file_t *rfiles;
+    const char *root_dirs[] = {
+        "/bin", "/dev", "/etc", "/home", "/lib", "/sbin", 
+        "/usr", "/var", "/tmp", "/proc", "/run", "/root",
+        NULL
+    };
+    const char *nested_dirs[] = {
+        "/usr/bin", "/usr/lib", "/usr/sbin", "/usr/share",
+        "/var/log", "/var/run", "/var/tmp",
+        NULL
+    };
+    initrd_file_t *f;
 
     if (mods_count < 2) {
         printf("ROOTFS: No rootfs module loaded (need at least 2 modules)\n");
@@ -880,12 +909,12 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     errors = 0;
 
     for (p = root_dirs; *p; p++) {
-        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        r = ramfs_create_dir(*p, 0755);
         if (r == 0) dirs_created++;
     }
     
     for (p = nested_dirs; *p; p++) {
-        r = ramfs_create_dir(*p, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        r = ramfs_create_dir(*p, 0755);
         if (r == 0) dirs_created++;
     }
 
@@ -944,16 +973,14 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
                 memcpy(sub, destpath, sublen);
                 sub[sublen] = '\0';
                 if (sublen > 1) {
-                    ramfs_create_dir(sub, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+                    ramfs_create_dir(sub, 0755);
                 }
             }
         }
 
         perms = f->permissions;
         if (!perms) {
-            perms = (f->type == INITRD_TYPE_DIR)
-                        ? (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC)
-                        : (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            perms = (f->type == INITRD_TYPE_DIR) ? 0755 : 0644;
         }
 
         if (f->type == INITRD_TYPE_DIR) {

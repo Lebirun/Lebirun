@@ -13,8 +13,9 @@ static int kernel_ptr_mapped(uint64_t addr) {
 }
 
 static int vfs_node_ptr_sane(vfs_node_t *node) {
+    uint64_t a;
     if (!node) return 0;
-    uint64_t a = (uint64_t)node;
+    a = (uint64_t)node;
     if ((a & 0xFFFFFF00) == 0xFEFEFE00) return 0;
     if (a < KERNEL_VMA || a >= 0xFFFFFFFFFFFFFF00ULL) return 0;
     if (!kernel_ptr_mapped(a)) return 0;
@@ -23,11 +24,12 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
 }
 
 static void fd_release_entry(task_fd_t *tfd) {
+    int pipe_type;
     if (!tfd || !tfd->in_use) return;
 
     vfs_node_t *node_to_close = NULL;
     pipe_t *pipe_to_release = NULL;
-    int pipe_type = 0;
+    pipe_type = 0;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         pipe_to_release = (pipe_t *)tfd->private_data;
@@ -75,10 +77,11 @@ static int fd_alloc(void) {
 }
 
 static int sys_dup(int oldfd, const char *unused1, int unused2) {
+    int newfd;
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
-    int newfd = fd_alloc();
+    newfd = fd_alloc();
     if (newfd < 0) return -EMFILE;
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
@@ -91,8 +94,9 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
 }
 
 static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
+    int newfd;
     (void)unused;
-    int newfd = (int)(uintptr_t)newfd_ptr;
+    newfd = (int)(uintptr_t)newfd_ptr;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
@@ -111,11 +115,15 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
 }
 
 static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
+    uint64_t addr;
+    int *pipefd;
+    int rfd;
+    int wfd;
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
-    uint64_t addr = (uint64_t)pipefd_ptr;
+    addr = (uint64_t)pipefd_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    int *pipefd = (int *)addr;
+    pipefd = (int *)addr;
     pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
     memset(p, 0, sizeof(pipe_t));
@@ -127,9 +135,9 @@ static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
     waitq_init(&p->write_waitq);
     p->readers = 1;
     p->writers = 1;
-    int rfd = fd_alloc();
+    rfd = fd_alloc();
     if (rfd < 0) { kfree(p->buffer); kfree(p); return -EMFILE; }
-    int wfd = fd_alloc();
+    wfd = fd_alloc();
     if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p->buffer); kfree(p); return -EMFILE; }
     fd_table[rfd].type = FD_TYPE_PIPE_R;
     fd_table[rfd].private_data = p;
@@ -141,14 +149,18 @@ static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
 }
 
 static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
+    uint64_t buf_addr;
+    uint64_t size;
+    const char *cwd;
+    uint64_t len;
     (void)unused;
-    uint64_t buf_addr = (uint64_t)buf_ptr;
-    uint64_t size = (uint64_t)(uintptr_t)size_ptr;
+    buf_addr = (uint64_t)buf_ptr;
+    size = (uint64_t)(uintptr_t)size_ptr;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (size == 0) return -1;
-    const char *cwd = current_task ? current_task->cwd : "/";
+    cwd = current_task ? current_task->cwd : "/";
     if (!cwd[0]) cwd = "/";
-    uint64_t len = 0;
+    len = 0;
     while (cwd[len]) len++;
     if (len + 1 > size) return -1;
     memcpy((void *)buf_addr, cwd, len + 1);
@@ -156,10 +168,13 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
 }
 
 static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
+    uint64_t addr;
+    const char *path;
+    char *resolved;
     (void)unused1; (void)unused2;
-    uint64_t addr = (uint64_t)path_ptr;
+    addr = (uint64_t)path_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)addr;
+    path = (const char *)addr;
     if (strncmp(path, "/ro", 3) == 0 && (path[3] == '\0' || path[3] == '/')) {
         return -EACCES;
     }
@@ -167,7 +182,7 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     if (!node) return -ENOENT;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
     if (!current_task) return -EFAULT;
-    char *resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
+    resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
     if (!resolved) {
         int i = 0;
         while (path[i] && i < 254) { current_task->cwd[i] = path[i]; i++; }
@@ -177,11 +192,14 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
 }
 
 static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
+    uint64_t addr;
+    int mode;
+    const char *path;
     (void)unused;
-    uint64_t addr = (uint64_t)path_ptr;
-    int mode = (int)(uintptr_t)mode_ptr;
+    addr = (uint64_t)path_ptr;
+    mode = (int)(uintptr_t)mode_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)addr;
+    path = (const char *)addr;
     vfs_node_t *node = vfs_namei(path);
     if (!node) return -ENOENT;
     (void)mode;
@@ -226,15 +244,19 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
 }
 
 static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
+    uint64_t path_addr;
+    uint64_t buf_addr;
+    const char *path;
+    struct kernel_stat *st;
     (void)unused;
-    uint64_t path_addr = (uint64_t)path_ptr;
-    uint64_t buf_addr = (uint64_t)(uintptr_t)buf_ptr;
+    path_addr = (uint64_t)path_ptr;
+    buf_addr = (uint64_t)(uintptr_t)buf_ptr;
     if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)path_addr;
+    path = (const char *)path_addr;
     vfs_node_t *node = vfs_namei(path);
     if (!node) return -ENOENT;
-    struct kernel_stat *st = (struct kernel_stat *)buf_addr;
+    st = (struct kernel_stat *)buf_addr;
     memset(st, 0, sizeof(struct kernel_stat));
     st->st_dev = 1;
     st->st_ino = node->inode ? node->inode : 1;
@@ -381,9 +403,11 @@ static unsigned long sig_mask = 0;
 static struct kernel_sigaction sig_handlers[32];
 
 static int sys_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
+    uint64_t act_addr;
+    uint64_t old_addr;
     if (signum < 1 || signum >= 32) return -1;
-    uint64_t act_addr = (uint64_t)(uintptr_t)act_ptr;
-    uint64_t old_addr = (uint64_t)oldact_ptr;
+    act_addr = (uint64_t)(uintptr_t)act_ptr;
+    old_addr = (uint64_t)oldact_ptr;
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
         memcpy((void *)old_addr, &sig_handlers[signum], sizeof(struct kernel_sigaction));
     }
@@ -477,11 +501,9 @@ static int sys_mprotect(int addr, const char *len_ptr, int prot) {
 }
 
 static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
-    registers_t *regs;
     uint8_t *buf;
     char **argv;
     char **envp;
-    vfs_node_t *node;
     uint64_t path_addr;
     uint64_t argv_addr;
     uint64_t envp_addr;
@@ -498,10 +520,12 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     int shebang_line_end;
     int si;
     int sj;
-    vfs_node_t *interp_node;
     uint8_t *interp_buf;
     uint64_t interp_size;
     uint64_t interp_read;
+    registers_t *regs;
+    vfs_node_t *node;
+    vfs_node_t *interp_node;
 
     path_addr = (uint64_t)path_ptr;
     if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) {
@@ -818,8 +842,9 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
         case F_DUPFD:
         case F_DUPFD_CLOEXEC: {
             int minfd = (arg < 0) ? 0 : arg;
+            int newfd;
             if (minfd >= current_task->fds_capacity) return -EINVAL;
-            int newfd = fd_alloc_from(minfd);
+            newfd = fd_alloc_from(minfd);
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
             fd_table[newfd].ref_count = 1;
@@ -849,13 +874,16 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
 }
 
 static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
+    uint64_t path_addr;
+    uint64_t length;
+    const char *path;
     (void)unused;
-    uint64_t path_addr = (uint64_t)path_ptr;
-    uint64_t length = (uint64_t)(uintptr_t)len_ptr;
+    path_addr = (uint64_t)path_ptr;
+    length = (uint64_t)(uintptr_t)len_ptr;
     
     if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -1;
     
-    const char *path = (const char *)path_addr;
+    path = (const char *)path_addr;
     vfs_node_t *node = vfs_namei(path);
     if (!node) return -1;
 
@@ -869,8 +897,9 @@ static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
 }
 
 static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
+    uint64_t length;
     (void)unused;
-    uint64_t length = (uint64_t)(uintptr_t)len_ptr;
+    length = (uint64_t)(uintptr_t)len_ptr;
     
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
@@ -888,9 +917,11 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
 }
 
 static int sys_umask(int mask, const char *unused1, int unused2) {
+    static int current_mask;
+    int old;
     (void)unused1; (void)unused2;
-    static int current_mask = 022;
-    int old = current_mask;
+    current_mask = 022;
+    old = current_mask;
     current_mask = mask & 0777;
     return old;
 }
@@ -905,19 +936,19 @@ struct linux_dirent {
 
 static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     uint64_t dirp_addr;
-    task_fd_t *tfd;
-    vfs_node_t *node;
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
-    dirent_t *entry;
-    dirent_t local_copy;
     int name_len;
     int reclen;
     struct linux_dirent *de;
     uint64_t flags;
     int i;
     int guard;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    dirent_t *entry;
+    dirent_t local_copy;
 
     dirp_addr = (uint64_t)(uintptr_t)dirp_ptr;
     if (!current_task) return -ESRCH;
@@ -986,13 +1017,23 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
 static int sys_rename(int oldpath_ptr, const char *newpath_ptr, int unused) {
     uint64_t old_addr = (uint64_t)oldpath_ptr;
     uint64_t new_addr = (uint64_t)(uintptr_t)newpath_ptr;
+    const char *oldpath;
+    const char *newpath;
+    char new_parent_path[256];
+    char new_name[64];
+    int len;
+    int last_slash;
+    char old_name[64];
+    int old_len;
+    int old_last_slash;
+    int k;
     (void)unused;
     
     if (!old_addr || old_addr >= KERNEL_VMA || old_addr < 0x1000) return -1;
     if (!new_addr || new_addr >= KERNEL_VMA || new_addr < 0x1000) return -1;
     
-    const char *oldpath = (const char *)old_addr;
-    const char *newpath = (const char *)new_addr;
+    oldpath = (const char *)old_addr;
+    newpath = (const char *)new_addr;
     
     vfs_node_t *old_node = vfs_namei(oldpath);
     if (!old_node) return -1;
@@ -1000,27 +1041,28 @@ static int sys_rename(int oldpath_ptr, const char *newpath_ptr, int unused) {
     vfs_node_t *old_parent = old_node->parent;
     if (!old_parent || !old_parent->rename) return -1;
     
-    char new_parent_path[256];
-    char new_name[64];
-    int len = 0;
+    len = 0;
     while (newpath[len]) len++;
-    int last_slash = -1;
+    last_slash = -1;
     for (int i = 0; i < len; i++) {
         if (newpath[i] == '/') last_slash = i;
     }
     
     vfs_node_t *new_parent;
     if (last_slash <= 0) {
+        int j;
+        int k;
         new_parent_path[0] = '/';
         new_parent_path[1] = '\0';
-        int j = (last_slash == 0) ? 1 : 0;
-        int k = 0;
+        j = (last_slash == 0) ? 1 : 0;
+        k = 0;
         while (newpath[j] && k < 63) new_name[k++] = newpath[j++];
         new_name[k] = '\0';
     } else {
+        int k;
         for (int i = 0; i < last_slash && i < 255; i++) new_parent_path[i] = newpath[i];
         new_parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        int k = 0;
+        k = 0;
         for (int i = last_slash + 1; i < len && k < 63; i++) new_name[k++] = newpath[i];
         new_name[k] = '\0';
     }
@@ -1028,14 +1070,13 @@ static int sys_rename(int oldpath_ptr, const char *newpath_ptr, int unused) {
     new_parent = vfs_namei(new_parent_path);
     if (!new_parent) return -1;
     
-    char old_name[64];
-    int old_len = 0;
+    old_len = 0;
     while (oldpath[old_len]) old_len++;
-    int old_last_slash = -1;
+    old_last_slash = -1;
     for (int i = 0; i < old_len; i++) {
         if (oldpath[i] == '/') old_last_slash = i;
     }
-    int k = 0;
+    k = 0;
     for (int i = old_last_slash + 1; i < old_len && k < 63; i++) old_name[k++] = oldpath[i];
     old_name[k] = '\0';
     
@@ -1059,7 +1100,7 @@ static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
     if (!target || (uint64_t)target < 0x1000 || (uint64_t)target >= KERNEL_VMA) return -EFAULT;
     if (!linkpath || (uint64_t)linkpath < 0x1000 || (uint64_t)linkpath >= KERNEL_VMA) return -EFAULT;
 
-    ret = ramfs_create_symlink(linkpath, target, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+    ret = ramfs_create_symlink(linkpath, target, 0777);
     if (ret == 0) return 0;
     if (ret == RAMFS_ERR_EXIST) return -EEXIST;
     if (ret == RAMFS_ERR_NOENT) return -ENOENT;
@@ -1072,6 +1113,9 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
     uint64_t path_addr = (uint64_t)path_ptr;
     uint64_t buf_addr = (uint64_t)(uintptr_t)buf_ptr;
 
+    char target[VFS_MAX_PATH];
+    uint64_t n;
+    uint64_t copy_len;
     if (!current_task) return -ESRCH;
     if (bufsiz <= 0) return -EINVAL;
 
@@ -1083,12 +1127,11 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
     if (!node) return -ENOENT;
     if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -EINVAL;
 
-    char target[VFS_MAX_PATH];
-    uint64_t n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
+    n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
     if (n >= sizeof(target)) n = sizeof(target) - 1;
     target[n] = '\0';
 
-    uint64_t copy_len = n;
+    copy_len = n;
     if (copy_len > (uint64_t)bufsiz) copy_len = (uint64_t)bufsiz;
 
     for (uint64_t i = 0; i < copy_len; i++) {
@@ -1118,10 +1161,13 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
 }
 
 static int sys_pipe2(int *pipefd, int flags) {
+    uint64_t addr;
+    int rfd;
+    int wfd;
     (void)flags;
     if (!current_task) return -ESRCH;
     if (!pipefd) return -EFAULT;
-    uint64_t addr = (uint64_t)pipefd;
+    addr = (uint64_t)pipefd;
     if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
@@ -1134,9 +1180,9 @@ static int sys_pipe2(int *pipefd, int flags) {
     waitq_init(&p->write_waitq);
     p->readers = 1;
     p->writers = 1;
-    int rfd = fd_alloc();
+    rfd = fd_alloc();
     if (rfd < 0) { kfree(p->buffer); kfree(p); return -EMFILE; }
-    int wfd = fd_alloc();
+    wfd = fd_alloc();
     if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p->buffer); kfree(p); return -EMFILE; }
     fd_table[rfd].type = FD_TYPE_PIPE_R;
     fd_table[rfd].private_data = p;
@@ -1148,21 +1194,28 @@ static int sys_pipe2(int *pipefd, int flags) {
 }
 
 static int sys_fchdir(int fd) {
+    char *resolved;
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
-    char *resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
+    resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
     (void)resolved;
     return 0;
 }
 
 static int sys_fchmod(int fd, int mode) {
+    vfs_node_t *node;
+
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
+
+    if (current_task->euid != 0 && current_task->euid != node->uid)
+        return -EPERM;
+
     if (node->chmod) {
         return node->chmod(node, mode & 07777);
     }
@@ -1171,10 +1224,16 @@ static int sys_fchmod(int fd, int mode) {
 }
 
 static int sys_fchown(int fd, int uid, int gid) {
+    vfs_node_t *node;
+
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
+
+    if (current_task->euid != 0)
+        return -EPERM;
+
     if (node->chown) {
         return node->chown(node, uid, gid);
     }
@@ -1225,15 +1284,17 @@ struct iovec {
 };
 
 static int sys_readv(int fd, const struct iovec *iov, int iovcnt) {
+    int total;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!iov || iovcnt <= 0) return -EINVAL;
     
-    int total = 0;
+    total = 0;
     for (int i = 0; i < iovcnt; i++) {
+        int ret;
         if (iov[i].iov_len == 0) continue;
         if (!iov[i].iov_base) continue;
         
-        int ret = vfs_read_fd(fd, iov[i].iov_base, iov[i].iov_len);
+        ret = vfs_read_fd(fd, iov[i].iov_base, iov[i].iov_len);
         if (ret < 0) {
             if (total > 0) return total;
             return ret;
@@ -1254,19 +1315,19 @@ struct linux_dirent64 {
 
 static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     uint64_t dirp_addr;
-    task_fd_t *tfd;
-    vfs_node_t *node;
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
-    dirent_t *entry;
-    dirent_t local_copy;
     int name_len;
     int reclen;
     struct linux_dirent64 *de;
     uint64_t flags;
     int i;
     int guard;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    dirent_t *entry;
+    dirent_t local_copy;
 
     dirp_addr = (uint64_t)dirp;
     if (!current_task) return -ESRCH;

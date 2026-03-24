@@ -224,6 +224,13 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         return ioctl_fcntl_basic_compat(fd, (int)request, arg);
     }
 
+    if (current_task->fds[fd].in_use && current_task->fds[fd].node) {
+        vfs_node_t *vn = (vfs_node_t *)current_task->fds[fd].node;
+        if (vn->ioctl) {
+            return vn->ioctl(vn, request, (void *)(uintptr_t)arg);
+        }
+    }
+
     if (current_task->fds[fd].in_use && current_task->fds[fd].private_data) {
         pty_fd = (int)(uintptr_t)current_task->fds[fd].private_data;
         if (is_pty_master(pty_fd) || is_pty_slave(pty_fd)) {

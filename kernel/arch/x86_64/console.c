@@ -40,8 +40,8 @@ static uint8_t (*console_redraw_color_buffer)[CONSOLE_BUFFER_COLS];
 static uint64_t console_redraw_buffer_rows = 0;
 
 static uint64_t console_calc_rows(void) {
-    framebuffer_t *fb;
     uint64_t r;
+    framebuffer_t *fb;
 
     fb = fb_get();
     r = fb ? fb->rows : 25;
@@ -50,8 +50,8 @@ static uint64_t console_calc_rows(void) {
 }
 
 static int console_ensure_alloc(int n) {
-    console_t *con;
     uint64_t rows;
+    console_t *con;
 
     if (n < 0 || n >= NUM_CONSOLES) return -1;
     con = &consoles[n];
@@ -122,10 +122,10 @@ int console_alt_screen_active(int n) {
 
 static void console_enter_alt_screen(console_t *con) {
     uint64_t rows;
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
     uint8_t *new_wrapped;
     uint64_t flags;
+    char (*new_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
 
     if (con->alt_screen_active) return;
     rows = con->buffer_rows;
@@ -168,10 +168,10 @@ static void console_enter_alt_screen(console_t *con) {
 }
 
 static void console_leave_alt_screen(console_t *con) {
-    char (*old_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*old_color)[CONSOLE_BUFFER_COLS];
     uint8_t *old_wrapped;
     uint64_t flags;
+    char (*old_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*old_color)[CONSOLE_BUFFER_COLS];
 
     if (!con->alt_screen_active) return;
     if (!con->alt_saved_buffer) return;
@@ -205,8 +205,8 @@ static void console_leave_alt_screen(console_t *con) {
 }
 
 static void console_process_alt_screen_pending(int console_num) {
-    console_t *con;
     int pending;
+    console_t *con;
 
     con = &consoles[console_num];
     pending = con->alt_screen_pending;
@@ -225,11 +225,11 @@ static void console_process_alt_screen_pending(int console_num) {
 }
 
 static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
     uint8_t *new_wrapped;
     uint64_t old_rows;
     uint64_t copy_rows;
+    char (*new_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
 
     if (!con->allocated) return;
     if (needed_rows <= con->buffer_rows) return;
@@ -400,12 +400,12 @@ static void console_apply_attr(uint8_t attr, framebuffer_t *fb) {
 }
 
 static void console_fast_redraw_locked(int console_num) {
-    framebuffer_t *fb = fb_get();
-    console_t *con;
     uint64_t rows, cols, row, col;
     char c;
     uint8_t attr;
     uint8_t prev_attr;
+    framebuffer_t *fb = fb_get();
+    console_t *con;
 
     if (!fb || (fb->rows == 0 && fb->cols == 0)) return;
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
@@ -457,15 +457,15 @@ static inline int console_interrupts_enabled(void) {
 }
 
 static void console_redraw_prepare(int console_num) {
-    framebuffer_t *fb = fb_get();
     uint64_t rows;
     uint64_t cols;
     uint64_t row;
     uint64_t col;
-    console_t *con;
     uint64_t flags;
     uint64_t visible_rows;
     uint64_t visible_cols;
+    framebuffer_t *fb = fb_get();
+    console_t *con;
 
     if (!fb || (fb->rows == 0 && fb->cols == 0)) {
         console_redraw_pending = 0;
@@ -550,7 +550,6 @@ static void console_redraw_prepare(int console_num) {
 }
 
 static void console_redraw_step(uint64_t max_rows) {
-    framebuffer_t *fb = fb_get();
     uint64_t row;
     uint64_t col;
     char c;
@@ -564,6 +563,7 @@ static void console_redraw_step(uint64_t max_rows) {
     uint64_t flags;
     uint8_t attr;
     uint8_t prev_attr;
+    framebuffer_t *fb = fb_get();
 
     if (!console_redraw_pending) return;
     if (!fb || (fb->rows == 0 && fb->cols == 0)) {
@@ -719,8 +719,6 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     uint8_t *colorbuf;
     uint64_t linebuf_len;
     uint64_t linebuf_cap;
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color_buf)[CONSOLE_BUFFER_COLS];
     uint8_t *new_wrapped;
     uint64_t out_row;
     uint64_t src_row;
@@ -735,6 +733,8 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     int new_cursor_chars;
     uint64_t buf_rows;
     int have_colors;
+    char (*new_buf)[CONSOLE_BUFFER_COLS];
+    uint8_t (*new_color_buf)[CONSOLE_BUFFER_COLS];
 
     if (!con->allocated || !con->buffer) return;
     if (old_cols == 0) old_cols = 1;
@@ -945,8 +945,8 @@ void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows)
 
 void console_init(void) {
     int i;
-    console_t *con;
     int alloc_ok;
+    console_t *con;
 
     if (console_initialized) return;
     
@@ -1025,15 +1025,15 @@ void console_redraw_current(void) {
 }
 
 static void console_switch_internal_impl(int console_num, int from_interrupt) {
-    framebuffer_t *fb;
     uint64_t rows;
     uint64_t cols;
     uint64_t flags;
-    console_t *old_con;
-    console_t *new_con;
     int lock_acquired;
     uint64_t new_cx;
     uint64_t new_cy;
+    framebuffer_t *fb;
+    console_t *old_con;
+    console_t *new_con;
     
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
     if (!console_initialized) return;
@@ -1265,7 +1265,6 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     char cmd;
     int param_start;
     int is_private;
-    (void)console_num;
     int params[8];
     int nparams;
     int n;
@@ -1278,6 +1277,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     uint64_t top;
     uint64_t bot;
     int count;
+    (void)console_num;
 
     if (con->esc_len == 0) return;
 
@@ -1672,8 +1672,6 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
 }
 
 static void console_putchar_to_nolock(int console_num, char c) {
-    console_t *con;
-    framebuffer_t *fb;
     uint64_t rows;
     uint64_t cols;
     int is_active;
@@ -1683,6 +1681,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
     uint64_t sc_bot;
     uint64_t r;
     uint64_t c2;
+    console_t *con;
+    framebuffer_t *fb;
 
     if (!console_initialized) {
         terminal_putchar(c);
@@ -1977,7 +1977,6 @@ void console_write_to_fb_only(int console_num, const char *data, size_t size) {
 
 static void console_write_internal(int console_num, const char *data, size_t size, int skip_serial_async) {
     int target_console;
-    console_t *con;
     size_t i;
     uint64_t head;
     uint64_t next_head;
@@ -1986,7 +1985,6 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     size_t off;
     size_t chunk;
     uint64_t flags;
-    framebuffer_t *fb;
     uint64_t rows;
     uint64_t cols;
     int is_active;
@@ -1998,6 +1996,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     uint64_t sc_bot;
     uint64_t sr;
     uint64_t sc;
+    console_t *con;
+    framebuffer_t *fb;
 
     if (!console_initialized) {
         for (i = 0; i < size; i++) terminal_putchar(data[i]);
@@ -2402,10 +2402,10 @@ void console_writestring(const char *data) {
 
 void console_clear(int console_num) {
     uint64_t flags;
-    console_t *con;
-    framebuffer_t *fb;
     int row;
     int col;
+    console_t *con;
+    framebuffer_t *fb;
 
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
 
@@ -2438,10 +2438,10 @@ void console_clear(int console_num) {
 
 void console_setcursor(int console_num, int x, int y) {
     uint64_t flags;
-    console_t *con;
-    framebuffer_t *fb;
     uint64_t cols;
     uint64_t rows;
+    console_t *con;
+    framebuffer_t *fb;
 
     if (console_num < 0 || console_num >= NUM_CONSOLES) return;
 
@@ -2500,7 +2500,6 @@ static void console_writer_thread(void) {
     uint64_t visible_rows_local;
     uint64_t flags;
     int i;
-    console_t *con;
     uint64_t tail;
     uint64_t head;
     uint64_t available;
@@ -2508,7 +2507,6 @@ static void console_writer_thread(void) {
     uint8_t chunk_flags[256];
     uint64_t chunk_size;
     uint64_t j;
-    framebuffer_t *fb;
     uint64_t rows;
     uint64_t cols;
     int is_active;
@@ -2522,6 +2520,8 @@ static void console_writer_thread(void) {
     uint64_t sc;
     uint64_t serial_start;
     uint64_t serial_len;
+    console_t *con;
+    framebuffer_t *fb;
 
     writer_thread_running = 1;
     while (1) {
@@ -2899,12 +2899,12 @@ handle_pending:
 }
 
 void console_writer_init(void) {
-    if (writer_thread_running) return;
-    
-    extern task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
     extern void lock_scheduler(void);
     extern void unlock_scheduler(void);
     extern void add_task_to_runqueue(task_t* new_task);
+    if (writer_thread_running) return;
+    
+    extern task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
     
     writer_thread = create_kernel_task(console_writer_thread, TASK_READY);
     if (writer_thread) {

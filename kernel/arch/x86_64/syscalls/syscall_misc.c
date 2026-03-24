@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <kernel/lke.h>
 #include <kernel/about.h>
 #include <kernel/rng.h>
 #include <kernel/pty.h>
@@ -453,28 +454,44 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
 }
 
 static int sys_chmod(const char *pathname, int mode) {
+    uint64_t addr;
+    vfs_node_t *node;
+    int ret;
+
     if (!pathname) return -EFAULT;
-    uint64_t addr = (uint64_t)pathname;
+    addr = (uint64_t)pathname;
     if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    vfs_node_t *node = vfs_namei(pathname);
+    if (!current_task) return -ESRCH;
+
+    node = vfs_namei(pathname);
     if (!node) return -ENOENT;
-    
+
+    if (current_task->euid != 0 && current_task->euid != node->uid)
+        return -EPERM;
+
     if (node->chmod) {
-        return node->chmod(node, mode & 07777);
+        ret = node->chmod(node, mode & 07777);
+        return ret;
     }
     node->mask = mode & 07777;
     return 0;
 }
 
 static int sys_chown(const char *pathname, int owner, int group) {
+    uint64_t addr;
+    vfs_node_t *node;
+
     if (!pathname) return -EFAULT;
-    uint64_t addr = (uint64_t)pathname;
+    addr = (uint64_t)pathname;
     if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    vfs_node_t *node = vfs_namei(pathname);
+    if (!current_task) return -ESRCH;
+
+    if (current_task->euid != 0)
+        return -EPERM;
+
+    node = vfs_namei(pathname);
     if (!node) return -ENOENT;
-    
+
     if (node->chown) {
         return node->chown(node, owner, group);
     }
@@ -709,6 +726,27 @@ static int sys_ptsname(int fd, char *buf, int buflen) {
     return 0;
 }
 
+static int sys_lke_load(const char *pathname) {
+    if (!pathname) return -EFAULT;
+    if ((uint64_t)pathname >= KERNEL_VMA || (uint64_t)pathname < 0x1000) return -EFAULT;
+    if (!current_task || current_task->uid != 0) return -EPERM;
+    return lke_load(pathname);
+}
+
+static int sys_lke_unload(const char *name) {
+    if (!name) return -EFAULT;
+    if ((uint64_t)name >= KERNEL_VMA || (uint64_t)name < 0x1000) return -EFAULT;
+    if (!current_task || current_task->uid != 0) return -EPERM;
+    return lke_unload(name);
+}
+
+static int sys_lke_list(lke_info_t *buf, int max) {
+    if (!buf) return -EFAULT;
+    if ((uint64_t)buf >= KERNEL_VMA || (uint64_t)buf < 0x1000) return -EFAULT;
+    if (max <= 0) return -EINVAL;
+    return lke_list(buf, max);
+}
+
 void syscalls_misc_init(void) {
     init_default_environ();
     
@@ -743,4 +781,7 @@ void syscalls_misc_init(void) {
     syscall_table[SYSCALL_PTSNAME] = sys_ptsname;
     syscall_table[SYSCALL_GETPRIORITY] = sys_getpriority;
     syscall_table[SYSCALL_SETPRIORITY] = sys_setpriority;
+    syscall_table[SYSCALL_LKE_LOAD] = sys_lke_load;
+    syscall_table[SYSCALL_LKE_UNLOAD] = sys_lke_unload;
+    syscall_table[SYSCALL_LKE_LIST] = sys_lke_list;
 }

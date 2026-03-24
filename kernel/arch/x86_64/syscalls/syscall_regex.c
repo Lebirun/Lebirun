@@ -76,9 +76,9 @@ typedef struct {
 } regex_node_t;
 
 typedef struct {
-    regex_node_t nodes[MAX_NODES];
     int num_nodes;
     int num_groups;
+    regex_node_t nodes[MAX_NODES];
 } compiled_regex_t;
 
 typedef struct {
@@ -210,9 +210,11 @@ static int parse_quantifier(const char **p, regex_node_t *node, int extended) {
         node->min_rep = 0;
         node->max_rep = 1;
     } else if (c == '{' && extended) {
+        int min_val;
+        int max_val;
         (*p)++;
-        int min_val = 0;
-        int max_val = -1;
+        min_val = 0;
+        max_val = -1;
         
         while (is_digit(**p)) {
             min_val = min_val * 10 + (**p - '0');
@@ -285,9 +287,10 @@ static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cf
             parse_quantifier(&p, node, extended);
             node_idx++;
         } else if (*p == '[') {
+            int ci;
             node->type = NODE_CLASS;
             p++;
-            int ci = 0;
+            ci = 0;
             node->class_negate = 0;
             
             if (*p == '^') {
@@ -394,6 +397,7 @@ static int match_class(const char *class_str, int negate, char c, int icase) {
     int match = 0;
     
     while (*p) {
+        char c1;
         if (*p == '[' && p[1] == ':') {
             p += 2;
             if (p[0] == 'a' && p[1] == 'l' && p[2] == 'n' && p[3] == 'u' && p[4] == 'm' && p[5] == ':' && p[6] == ']') {
@@ -424,10 +428,11 @@ static int match_class(const char *class_str, int negate, char c, int icase) {
             continue;
         }
         
-        char c1 = *p++;
+        c1 = *p++;
         if (*p == '-' && p[1]) {
+            char c2;
             p++;
-            char c2 = *p++;
+            c2 = *p++;
             if (icase) {
                 if (char_tolower(c) >= char_tolower(c1) && char_tolower(c) <= char_tolower(c2))
                     match = 1;
@@ -491,6 +496,12 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
     }
     
     while (node_idx < compiled->num_nodes) {
+        int min_rep;
+        int max_rep;
+        int greedy;
+        int matched;
+        const char *positions[256];
+        int pos_count;
         regex_node_t *node = &compiled->nodes[node_idx];
         
         if (node->type == NODE_ANCHOR_START) {
@@ -557,6 +568,7 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             int la_start = node_idx + 1;
             int la_end = la_start;
             
+            const char *dummy;
             while (la_end < compiled->num_nodes && depth > 0) {
                 if (compiled->nodes[la_end].type == NODE_GROUP_START)
                     depth++;
@@ -565,7 +577,6 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
                 la_end++;
             }
             
-            const char *dummy;
             compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
@@ -584,6 +595,7 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             int la_start = node_idx + 1;
             int la_end = la_start;
             
+            const char *dummy;
             while (la_end < compiled->num_nodes && depth > 0) {
                 if (compiled->nodes[la_end].type == NODE_GROUP_START)
                     depth++;
@@ -592,7 +604,6 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
                 la_end++;
             }
             
-            const char *dummy;
             compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
@@ -644,12 +655,11 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             continue;
         }
         
-        int min_rep = node->min_rep;
-        int max_rep = node->max_rep;
-        int greedy = node->greedy;
-        int matched = 0;
-        const char *positions[256];
-        int pos_count = 0;
+        min_rep = node->min_rep;
+        max_rep = node->max_rep;
+        greedy = node->greedy;
+        matched = 0;
+        pos_count = 0;
         
         positions[pos_count++] = pos;
         
@@ -666,9 +676,10 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         
         if (greedy) {
             for (int i = pos_count - 1; i >= 0; i--) {
-                if (i < min_rep) break;
-                const char *try_pos = positions[i];
+                const char *try_pos;
                 const char *next_end;
+                if (i < min_rep) break;
+                try_pos = positions[i];
                 
                 if (node_idx + 1 >= compiled->num_nodes) {
                     pos = try_pos;
@@ -768,17 +779,22 @@ static int regex_exec_internal(compiled_regex_t *compiled, const char *text, con
 }
 
 static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
+    uint64_t preg_addr;
+    uint64_t pat_addr;
+    const char *pattern;
+    int len;
+    int result;
     if (!preg_ptr || !pattern_ptr) return -EINVAL;
     
-    uint64_t preg_addr = (uint64_t)preg_ptr;
-    uint64_t pat_addr = (uint64_t)(uintptr_t)pattern_ptr;
+    preg_addr = (uint64_t)preg_ptr;
+    pat_addr = (uint64_t)(uintptr_t)pattern_ptr;
     
     if (preg_addr >= KERNEL_VMA || pat_addr >= KERNEL_VMA) return -EFAULT;
     
     kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
-    const char *pattern = (const char *)pat_addr;
+    pattern = (const char *)pat_addr;
     
-    int len = 0;
+    len = 0;
     while (pattern[len] && len < MAX_REGEX_SIZE - 1) len++;
     
     for (int i = 0; i < len; i++)
@@ -787,7 +803,7 @@ static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
     preg->cflags = cflags;
     
     compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
-    int result = compile_regex(pattern, compiled, cflags);
+    result = compile_regex(pattern, compiled, cflags);
     
     if (result != REG_OK) {
         preg->compiled = 0;
@@ -801,19 +817,23 @@ static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
 }
 
 static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int pmatch_arg) {
+    uint64_t preg_addr;
+    uint64_t str_addr;
+    const char *string;
+    size_t nmatch;
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
     
-    uint64_t preg_addr = (uint64_t)preg_ptr;
-    uint64_t str_addr = (uint64_t)(uintptr_t)string_ptr;
+    preg_addr = (uint64_t)preg_ptr;
+    str_addr = (uint64_t)(uintptr_t)string_ptr;
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
     kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
-    const char *string = (const char *)str_addr;
+    string = (const char *)str_addr;
     
     if (!preg->compiled) return REG_BADPAT;
     
-    size_t nmatch = (size_t)nmatch_arg;
+    nmatch = (size_t)nmatch_arg;
     kernel_regmatch_t *pmatch = pmatch_arg ? (kernel_regmatch_t *)(uintptr_t)pmatch_arg : NULL;
     
     compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
@@ -843,11 +863,12 @@ static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int
 }
 
 static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
+    uint64_t preg_addr;
     (void)unused1; (void)unused2;
     
     if (!preg_ptr) return 0;
     
-    uint64_t preg_addr = (uint64_t)preg_ptr;
+    preg_addr = (uint64_t)preg_ptr;
     if (preg_addr >= KERNEL_VMA) return -EFAULT;
     
     kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
@@ -859,12 +880,15 @@ static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
 }
 
 static int sys_regerror(int errcode, int preg_arg, int errbuf_arg, int errbuf_size_arg) {
+    char *errbuf;
+    size_t errbuf_size;
+    const char *msg;
+    int len;
     (void)preg_arg;
     
-    char *errbuf = errbuf_arg ? (char *)(uintptr_t)errbuf_arg : NULL;
-    size_t errbuf_size = (size_t)errbuf_size_arg;
+    errbuf = errbuf_arg ? (char *)(uintptr_t)errbuf_arg : NULL;
+    errbuf_size = (size_t)errbuf_size_arg;
     
-    const char *msg;
     switch (errcode) {
         case REG_OK: msg = "Success"; break;
         case REG_NOMATCH: msg = "No match"; break;
@@ -873,7 +897,7 @@ static int sys_regerror(int errcode, int preg_arg, int errbuf_arg, int errbuf_si
         default: msg = "Unknown error"; break;
     }
     
-    int len = 0;
+    len = 0;
     while (msg[len]) len++;
     
     if (errbuf && errbuf_size > 0) {
@@ -928,33 +952,39 @@ static int fnmatch_internal(const char *pattern, const char *string, int flags) 
             }
             
             case '[': {
+                int negate;
+                int match;
                 if (*s == '\0') return FNM_NOMATCH;
                 if (pathname && *s == '/') return FNM_NOMATCH;
                 if (period && *s == '.' && (s == string || (pathname && s[-1] == '/')))
                     return FNM_NOMATCH;
                 
                 p++;
-                int negate = 0;
+                negate = 0;
                 if (*p == '!' || *p == '^') {
                     negate = 1;
                     p++;
                 }
                 
-                int match = 0;
+                match = 0;
                 while (*p && *p != ']') {
                     char c1 = *p++;
                     if (c1 == '\\' && !noescape && *p)
                         c1 = *p++;
                     
                     if (*p == '-' && p[1] && p[1] != ']') {
+                        char c2;
+                        char sc;
+                        char lc1;
+                        char lc2;
                         p++;
-                        char c2 = *p++;
+                        c2 = *p++;
                         if (c2 == '\\' && !noescape && *p)
                             c2 = *p++;
                         
-                        char sc = icase ? char_tolower(*s) : *s;
-                        char lc1 = icase ? char_tolower(c1) : c1;
-                        char lc2 = icase ? char_tolower(c2) : c2;
+                        sc = icase ? char_tolower(*s) : *s;
+                        lc1 = icase ? char_tolower(c1) : c1;
+                        lc2 = icase ? char_tolower(c2) : c2;
                         if (sc >= lc1 && sc <= lc2)
                             match = 1;
                     } else {
@@ -993,15 +1023,19 @@ static int fnmatch_internal(const char *pattern, const char *string, int flags) 
 }
 
 static int sys_fnmatch(int pattern_ptr, const char *string_ptr, int flags) {
+    uint64_t pat_addr;
+    uint64_t str_addr;
+    const char *pattern;
+    const char *string;
     if (!pattern_ptr || !string_ptr) return FNM_NOMATCH;
     
-    uint64_t pat_addr = (uint64_t)pattern_ptr;
-    uint64_t str_addr = (uint64_t)(uintptr_t)string_ptr;
+    pat_addr = (uint64_t)pattern_ptr;
+    str_addr = (uint64_t)(uintptr_t)string_ptr;
     
     if (pat_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return FNM_NOMATCH;
     
-    const char *pattern = (const char *)pat_addr;
-    const char *string = (const char *)str_addr;
+    pattern = (const char *)pat_addr;
+    string = (const char *)str_addr;
     
     return fnmatch_internal(pattern, string, flags);
 }
@@ -1011,33 +1045,45 @@ static int glob_match_pattern(const char *pattern, const char *name) {
 }
 
 static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_ptr) {
+    uint64_t pat_addr;
+    uint64_t glob_addr;
+    const char *pattern;
+    int flags;
+    char dir_path[256] = "/";
+    char file_pattern[256];
+    int last_slash;
+    int i;
+    char **results;
+    size_t count;
+    size_t capacity;
+    uint64_t idx;
+    char **pathv;
     if (!pattern_ptr || !pglob_ptr) return GLOB_NOMATCH;
     
-    uint64_t pat_addr = (uint64_t)pattern_ptr;
-    uint64_t glob_addr = (uint64_t)pglob_ptr;
+    pat_addr = (uint64_t)pattern_ptr;
+    glob_addr = (uint64_t)pglob_ptr;
     
     if (pat_addr >= KERNEL_VMA || glob_addr >= KERNEL_VMA) return GLOB_NOMATCH;
     
-    const char *pattern = (const char *)pat_addr;
+    pattern = (const char *)pat_addr;
     kernel_glob_t *pglob = (kernel_glob_t *)glob_addr;
-    int flags = (int)(uintptr_t)flags_errfunc_ptr;
+    flags = (int)(uintptr_t)flags_errfunc_ptr;
     
     if (!(flags & GLOB_APPEND)) {
         pglob->gl_pathc = 0;
         pglob->gl_pathv = NULL;
     }
     
-    char dir_path[256] = "/";
-    char file_pattern[256];
-    int last_slash = -1;
+    last_slash = -1;
     
-    int i = 0;
+    i = 0;
     while (pattern[i]) {
         if (pattern[i] == '/') last_slash = i;
         i++;
     }
     
     if (last_slash >= 0) {
+        int k;
         for (int j = 0; j < last_slash && j < 255; j++)
             dir_path[j] = pattern[j];
         dir_path[last_slash] = '\0';
@@ -1046,7 +1092,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
             dir_path[1] = '\0';
         }
         
-        int k = 0;
+        k = 0;
         for (int j = last_slash + 1; pattern[j] && k < 255; j++, k++)
             file_pattern[k] = pattern[j];
         file_pattern[k] = '\0';
@@ -1061,10 +1107,12 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     vfs_node_t *dir = vfs_namei(dir_path);
     if (!dir) {
         if (flags & GLOB_NOCHECK) {
+            int plen;
+            char **pathv;
             pglob->gl_pathc = 1;
-            int plen = 0;
+            plen = 0;
             while (pattern[plen]) plen++;
-            char **pathv = (char **)kmalloc(2 * sizeof(char *));
+            pathv = (char **)kmalloc(2 * sizeof(char *));
             if (!pathv) return GLOB_NOSPACE;
             pathv[0] = (char *)kmalloc(plen + 1);
             if (!pathv[0]) {
@@ -1080,17 +1128,23 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
         return GLOB_NOMATCH;
     }
     
-    char **results = NULL;
-    size_t count = 0;
-    size_t capacity = 0;
+    results = NULL;
+    count = 0;
+    capacity = 0;
     
-    uint64_t idx = 0;
+    idx = 0;
     dirent_t *dirent;
     
     while ((dirent = vfs_readdir(dir, idx)) != NULL) {
         if (dirent->name[0] == '\0') break;
         
         if (glob_match_pattern(file_pattern, dirent->name)) {
+            int dlen;
+            int nlen;
+            int need_slash;
+            int total;
+            char *path;
+            int pos;
             if (count >= capacity) {
                 size_t new_cap = capacity ? capacity * 2 : 8;
                 char **new_results = (char **)kmalloc(new_cap * sizeof(char *));
@@ -1107,15 +1161,15 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
                 capacity = new_cap;
             }
             
-            int dlen = 0;
+            dlen = 0;
             while (dir_path[dlen]) dlen++;
-            int nlen = 0;
+            nlen = 0;
             while (dirent->name[nlen]) nlen++;
             
-            int need_slash = (dlen > 0 && dir_path[dlen-1] != '/') ? 1 : 0;
-            int total = dlen + need_slash + nlen + 1;
+            need_slash = (dlen > 0 && dir_path[dlen-1] != '/') ? 1 : 0;
+            total = dlen + need_slash + nlen + 1;
             
-            char *path = (char *)kmalloc(total);
+            path = (char *)kmalloc(total);
             if (!path) {
                 for (size_t j = 0; j < count; j++)
                     kfree(results[j]);
@@ -1123,7 +1177,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
                 return GLOB_NOSPACE;
             }
             
-            int pos = 0;
+            pos = 0;
             for (int j = 0; j < dlen; j++)
                 path[pos++] = dir_path[j];
             if (need_slash)
@@ -1140,10 +1194,12 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     if (count == 0) {
         if (results) kfree(results);
         if (flags & GLOB_NOCHECK) {
+            int plen;
+            char **pathv;
             pglob->gl_pathc = 1;
-            int plen = 0;
+            plen = 0;
             while (pattern[plen]) plen++;
-            char **pathv = (char **)kmalloc(2 * sizeof(char *));
+            pathv = (char **)kmalloc(2 * sizeof(char *));
             if (!pathv) return GLOB_NOSPACE;
             pathv[0] = (char *)kmalloc(plen + 1);
             if (!pathv[0]) {
@@ -1159,7 +1215,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
         return GLOB_NOMATCH;
     }
     
-    char **pathv = (char **)kmalloc((count + 1) * sizeof(char *));
+    pathv = (char **)kmalloc((count + 1) * sizeof(char *));
     if (!pathv) {
         for (size_t j = 0; j < count; j++)
             kfree(results[j]);
@@ -1180,11 +1236,12 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
 }
 
 static int sys_globfree(int pglob_ptr, const char *unused1, int unused2) {
+    uint64_t glob_addr;
     (void)unused1; (void)unused2;
     
     if (!pglob_ptr) return 0;
     
-    uint64_t glob_addr = (uint64_t)pglob_ptr;
+    glob_addr = (uint64_t)pglob_ptr;
     if (glob_addr >= KERNEL_VMA) return -EFAULT;
     
     kernel_glob_t *pglob = (kernel_glob_t *)glob_addr;
@@ -1212,11 +1269,14 @@ static int skip_whitespace(const char **str) {
 }
 
 static int scan_int(const char **str, int *out, int width) {
+    int neg;
+    long val;
+    int chars;
     skip_whitespace(str);
     
     if (!**str) return 0;
     
-    int neg = 0;
+    neg = 0;
     if (**str == '-') {
         neg = 1;
         (*str)++;
@@ -1228,8 +1288,8 @@ static int scan_int(const char **str, int *out, int width) {
     
     if (!is_digit(**str)) return 0;
     
-    long val = 0;
-    int chars = 0;
+    val = 0;
+    chars = 0;
     while (is_digit(**str) && (width <= 0 || chars < width)) {
         val = val * 10 + (**str - '0');
         (*str)++;
@@ -1242,6 +1302,9 @@ static int scan_int(const char **str, int *out, int width) {
 }
 
 static int scan_uint(const char **str, unsigned int *out, int width, int base) {
+    unsigned long val;
+    int chars;
+    int got_digit;
     skip_whitespace(str);
     
     if (!**str) return 0;
@@ -1260,9 +1323,9 @@ static int scan_uint(const char **str, unsigned int *out, int width, int base) {
         }
     }
     
-    unsigned long val = 0;
-    int chars = 0;
-    int got_digit = 0;
+    val = 0;
+    chars = 0;
+    got_digit = 0;
     
     while ((width <= 0 || chars < width) && **str) {
         int digit = -1;
@@ -1287,11 +1350,12 @@ static int scan_uint(const char **str, unsigned int *out, int width, int base) {
 }
 
 static int scan_string(const char **str, char *out, int width) {
+    int chars;
     skip_whitespace(str);
     
     if (!**str) return 0;
     
-    int chars = 0;
+    chars = 0;
     while (**str && !is_space(**str) && (width <= 0 || chars < width)) {
         if (out) *out++ = **str;
         (*str)++;
@@ -1303,9 +1367,10 @@ static int scan_string(const char **str, char *out, int width) {
 }
 
 static int scan_char(const char **str, char *out, int width) {
+    int chars;
     if (width <= 0) width = 1;
     
-    int chars = 0;
+    chars = 0;
     while (chars < width && **str) {
         if (out) *out++ = **str;
         (*str)++;
@@ -1347,6 +1412,10 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
     int arg_idx = 0;
     
     while (*f) {
+        int suppress;
+        int width;
+        int length;
+        char spec;
         if (is_space(*f)) {
             skip_whitespace(&s);
             while (is_space(*f)) f++;
@@ -1369,19 +1438,19 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
             continue;
         }
         
-        int suppress = 0;
+        suppress = 0;
         if (*f == '*') {
             suppress = 1;
             f++;
         }
         
-        int width = 0;
+        width = 0;
         while (is_digit(*f)) {
             width = width * 10 + (*f - '0');
             f++;
         }
         
-        int length = 0;
+        length = 0;
         if (*f == 'h') {
             length = 'h';
             f++;
@@ -1394,7 +1463,7 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
             length = *f++;
         }
         
-        char spec = *f++;
+        spec = *f++;
         
         switch (spec) {
             case 'd':
@@ -1458,6 +1527,7 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
                 int set_idx = 0;
                 int negate = 0;
                 
+                char *out;
                 if (*f == '^') {
                     negate = 1;
                     f++;
@@ -1475,7 +1545,7 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
                 
                 if (*f == ']') f++;
                 
-                char *out = suppress ? NULL : (char *)args[arg_idx++];
+                out = suppress ? NULL : (char *)args[arg_idx++];
                 if (!scan_scanset(&s, out, set, negate, width)) return count;
                 if (!suppress) count++;
                 break;
@@ -1509,17 +1579,23 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
 }
 
 static int sys_sscanf(int str_ptr, const char *format_ptr, int args_ptr) {
+    uint64_t str_addr;
+    uint64_t fmt_addr;
+    uint64_t arg_addr;
+    const char *str;
+    const char *format;
+    uint64_t *args;
     if (!str_ptr || !format_ptr) return -1;
     
-    uint64_t str_addr = (uint64_t)str_ptr;
-    uint64_t fmt_addr = (uint64_t)(uintptr_t)format_ptr;
-    uint64_t arg_addr = (uint64_t)args_ptr;
+    str_addr = (uint64_t)str_ptr;
+    fmt_addr = (uint64_t)(uintptr_t)format_ptr;
+    arg_addr = (uint64_t)args_ptr;
     
     if (str_addr >= KERNEL_VMA || fmt_addr >= KERNEL_VMA) return -1;
     
-    const char *str = (const char *)str_addr;
-    const char *format = (const char *)fmt_addr;
-    uint64_t *args = arg_addr ? (uint64_t *)arg_addr : NULL;
+    str = (const char *)str_addr;
+    format = (const char *)fmt_addr;
+    args = arg_addr ? (uint64_t *)arg_addr : NULL;
     
     if (!args) return -1;
     
@@ -1533,19 +1609,29 @@ static int sys_scanf_getchar(int unused1, const char *unused2, int unused3) {
 }
 
 static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_output) {
+    uint64_t preg_addr;
+    uint64_t str_addr;
+    uint64_t repl_addr;
+    uint64_t out_addr;
+    const char *string;
+    const char *replacement;
+    char *output;
+    int out_idx;
+    const char *s;
+    const char *r;
     if (!preg_ptr || !string_ptr) return -EINVAL;
     
-    uint64_t preg_addr = (uint64_t)preg_ptr;
-    uint64_t str_addr = (uint64_t)(uintptr_t)string_ptr;
-    uint64_t repl_addr = (replacement_output >> 16) ? (replacement_output & 0xFFFF0000) : 0;
-    uint64_t out_addr = replacement_output & 0xFFFF;
+    preg_addr = (uint64_t)preg_ptr;
+    str_addr = (uint64_t)(uintptr_t)string_ptr;
+    repl_addr = (replacement_output >> 16) ? (replacement_output & 0xFFFF0000) : 0;
+    out_addr = replacement_output & 0xFFFF;
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return -EFAULT;
     
     kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
-    const char *string = (const char *)str_addr;
-    const char *replacement = repl_addr ? (const char *)repl_addr : "";
-    char *output = out_addr ? (char *)out_addr : NULL;
+    string = (const char *)str_addr;
+    replacement = repl_addr ? (const char *)repl_addr : "";
+    output = out_addr ? (char *)out_addr : NULL;
     
     if (!preg->compiled) return -EINVAL;
     
@@ -1558,6 +1644,7 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     }
     
     if (!regex_exec_internal(compiled, string, string, captures, preg->cflags, 0)) {
+        int len;
         if (output) {
             int i = 0;
             while (string[i]) {
@@ -1567,13 +1654,13 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
             output[i] = '\0';
             return i;
         }
-        int len = 0;
+        len = 0;
         while (string[len]) len++;
         return len;
     }
     
-    int out_idx = 0;
-    const char *s = string;
+    out_idx = 0;
+    s = string;
     
     while (s < captures[0].start) {
         if (output) output[out_idx] = *s;
@@ -1581,7 +1668,7 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
         s++;
     }
     
-    const char *r = replacement;
+    r = replacement;
     while (*r) {
         if (*r == '\\' && r[1] >= '0' && r[1] <= '9') {
             int grp = r[1] - '0';
@@ -1634,16 +1721,20 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
 }
 
 static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) {
+    uint64_t preg_addr;
+    uint64_t str_addr;
+    uint64_t pm_addr;
+    const char *string;
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
     
-    uint64_t preg_addr = (uint64_t)preg_ptr;
-    uint64_t str_addr = (uint64_t)(uintptr_t)string_ptr;
-    uint64_t pm_addr = (uint64_t)pmatch_ptr;
+    preg_addr = (uint64_t)preg_ptr;
+    str_addr = (uint64_t)(uintptr_t)string_ptr;
+    pm_addr = (uint64_t)pmatch_ptr;
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
     kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
-    const char *string = (const char *)str_addr;
+    string = (const char *)str_addr;
     kernel_regmatch_t *pmatch = pm_addr ? (kernel_regmatch_t *)pm_addr : NULL;
     
     if (!preg->compiled) return REG_BADPAT;

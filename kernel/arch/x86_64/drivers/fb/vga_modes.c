@@ -470,7 +470,7 @@ int vga_set_text_mode(const uint8_t *font_data, uint16_t num_chars, uint8_t font
     if (vdispend & 0x100) overflow |= 0x02;
     if (vsyncstart & 0x100) overflow |= 0x04;
     if (vblankstart & 0x100) overflow |= 0x08;
-    overflow |= 0x10;  /* SLC bit 8: set so Line Compare (SLC=0x1FF=511) > vdispend, disabling split screen */
+    overflow |= 0x10;
     if (vtotal & 0x200) overflow |= 0x20;
     if (vdispend & 0x200) overflow |= 0x40;
     if (vsyncstart & 0x200) overflow |= 0x80;
@@ -480,7 +480,7 @@ int vga_set_text_mode(const uint8_t *font_data, uint16_t num_chars, uint8_t font
 
     max_scanline = (uint16_t)(font_height - 1);
     if (vblankstart & 0x200) max_scanline |= 0x20;
-    max_scanline |= 0x40;  /* SLC bit 9: set so Line Compare (SLC=0x1FF=511) > vdispend, disabling split screen */
+    max_scanline |= 0x40;
     vga_crtc_write(0x09, (uint8_t)(max_scanline & 0xFF));
 
     vga_crtc_write(0x0A, (uint8_t)(font_height - 2));

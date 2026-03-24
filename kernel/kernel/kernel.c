@@ -90,10 +90,6 @@ extern task_t* current_task;
 extern task_t* ready_queue_head;
 
 void kernel_main(void) {
-    uint64_t test_frame;
-    uint64_t second_frame;
-    uint64_t third_frame;
-    char *heap_buf;
     uint64_t mb_phys;
     uint64_t mb_page;
     struct multiboot2_tag *tag;
@@ -132,6 +128,12 @@ void kernel_main(void) {
                                         uint64_t start_lba, uint64_t sector_count);
     extern void devfs_register_initrd(void);
     extern void sysfs_init(void);
+    extern void lke_init(void);
+    extern void lke_autoload(void);
+#if CONFIG_VIRT_VFL
+    extern void vfl_init(void);
+    extern void vfl_register_devfs(void);
+#endif
     extern void ramfs_debug_check_root(const char *location);
     uint64_t cr3;
     uint64_t cr0;
@@ -168,40 +170,7 @@ void kernel_main(void) {
 
     pfa_init();
 
-
-    test_frame = pfa_alloc();
-    if (test_frame) {
-        if (debug_memory) printf("PFA Test alloc: Frame at 0x%016lX\n", test_frame);
-        
-        second_frame = pfa_alloc();
-        if (debug_memory) printf("PFA Second alloc: 0x%016lX\n", second_frame);
-        pfa_free(test_frame);
-        if (debug_memory) printf("Freed first frame.\n");
-        
-        third_frame = pfa_alloc();
-        if (debug_memory) printf("PFA Third (reuse?): 0x%016lX\n", third_frame);
-        if (second_frame) {
-            pfa_free(second_frame);
-        }
-        if (third_frame) {
-            pfa_free(third_frame);
-        }
-    } else {
-        if (debug_memory) printf("PFA alloc failed - check map!\n");
-    }
-
     heap_init();
-
-    heap_buf = kmalloc(1024);
-    if (heap_buf) {
-        strcpy(heap_buf, "Hello heap!");
-        if (debug_memory) printf("Heap test: %s\n", heap_buf);
-        kfree(heap_buf);
-    } else {
-        if (debug_memory) printf("Heap alloc failed.\n");
-    }
-
-    if (debug_memory) heap_dump();
 
     cmdline_parse(early_cmdline[0] ? early_cmdline : NULL);
 
@@ -340,13 +309,13 @@ void kernel_main(void) {
             }
         }
 
-        ramfs_create_dir("/var", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/tmp", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/home", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/root", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/root/.config", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/root/.config/htop", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-        ramfs_create_dir("/run", VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+        ramfs_create_dir("/var", 0755);
+        ramfs_create_dir("/tmp", 0777);
+        ramfs_create_dir("/home", 0755);
+        ramfs_create_dir("/root", 0700);
+        ramfs_create_dir("/root/.config", 0700);
+        ramfs_create_dir("/root/.config/htop", 0700);
+        ramfs_create_dir("/run", 0755);
 
         if (use_squashfs && squashfs_root) {
             ramfs_upper = vfs_get_root();
@@ -375,8 +344,14 @@ void kernel_main(void) {
         if (debug_boot_vfs) printf("BOOT: devfs_init...\n");
         devfs_init();
         devfs_register_initrd();
+#if CONFIG_VIRT_VFL
+        vfl_init();
+        vfl_register_devfs();
+#endif
         if (debug_boot_vfs) printf("BOOT: sysfs_init...\n");
         sysfs_init();
+        if (cmdline_get_lke())
+            lke_init();
 
         if (debug_boot_vfs) printf("BOOT: mounting /dev /proc /sys...\n");
         vfs_mount(NULL, "/dev", "devfs");
@@ -394,13 +369,15 @@ void kernel_main(void) {
 
         sqctx = squashfs_get_context();
         if (sqctx && sqctx->base && sqctx->size > 0) {
-            ramfs_create_dir("/boot", VFS_PERM_READ | VFS_PERM_EXEC);
-            ramfs_create_file("/boot/rootfs.squashfs", VFS_PERM_READ);
+            ramfs_create_dir("/boot", 0755);
+            ramfs_create_file("/boot/rootfs.squashfs", 0444);
             ramfs_set_backing("/boot/rootfs.squashfs", sqctx->base, sqctx->size);
             printf("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
         }
 
         if (debug_boot_vfs) printf("BOOT: boot file export done\n");
+        if (cmdline_get_lke())
+            lke_autoload();
     } else {
         root_dev = cmdline_get_root();
         if (root_dev) {
@@ -420,7 +397,13 @@ void kernel_main(void) {
 
             procfs_init();
             devfs_init();
+#if CONFIG_VIRT_VFL
+            vfl_init();
+            vfl_register_devfs();
+#endif
             sysfs_init();
+            if (cmdline_get_lke())
+                lke_init();
 
             vfs_mount(NULL, "/dev", "devfs");
 
@@ -495,6 +478,8 @@ void kernel_main(void) {
             vfs_mount(NULL, "/proc", "procfs");
             vfs_mount(NULL, "/sys", "sysfs");
             vfs_mount(NULL, "/tmp", "tmpfs");
+            if (cmdline_get_lke())
+                lke_autoload();
         } else {
             printf("No multiboot modules present (mod_count=%u)\n", mod_count);
         }

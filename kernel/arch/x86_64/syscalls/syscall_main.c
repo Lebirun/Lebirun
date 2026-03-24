@@ -44,6 +44,11 @@ struct user_desc {
 static int do_set_thread_area(struct user_desc *u_info) {
     uint64_t base;
 
+    if (!u_info)
+        return -1;
+    if ((uint64_t)(uintptr_t)u_info >= KERNEL_VMA)
+        return -1;
+
     base = (uint64_t)(uintptr_t)u_info;
     __asm__ volatile (
         "wrmsr"

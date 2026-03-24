@@ -220,7 +220,6 @@ void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
     num_reserved_regions = 0;
 
-    /* Reserve the multiboot2 info structure itself */
     {
         uint32_t mb2_total_size = *(uint32_t *)mb_info;
         uint64_t mb_start_page = mb_ptr & ~0xFFFu;

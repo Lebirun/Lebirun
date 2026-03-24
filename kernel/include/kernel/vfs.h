@@ -62,6 +62,7 @@ typedef int (*truncate_type_t)(struct vfs_node *, uint64_t length);
 typedef int (*rename_type_t)(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint64_t mode);
 typedef int (*chown_type_t)(struct vfs_node *, uint64_t uid, uint64_t gid);
+typedef int (*ioctl_type_t)(struct vfs_node *, unsigned long request, void *arg);
 
 typedef struct vfs_node {
     char name[VFS_MAX_NAME];
@@ -89,6 +90,7 @@ typedef struct vfs_node {
     rename_type_t rename;
     chmod_type_t chmod;
     chown_type_t chown;
+    ioctl_type_t ioctl;
     
     struct vfs_node *ptr;
     struct vfs_node *parent;

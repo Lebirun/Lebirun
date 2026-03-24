@@ -28,17 +28,17 @@
 #define KEY_RIGHT   1007
 
 #define CLR_NORMAL  "\033[0m"
-#define CLR_TITLE   "\033[1;37;44m"
+#define CLR_TITLE   "\033[1;33;40m"
 #define CLR_MENU    "\033[0;37;44m"
-#define CLR_SELECT  "\033[1;37;46m"
-#define CLR_BORDER  "\033[0;36;44m"
+#define CLR_SELECT  "\033[0;34;47m"
+#define CLR_BORDER  "\033[1;37;44m"
 #define CLR_INPUT   "\033[0;30;47m"
-#define CLR_BTN     "\033[0;37;44m"
-#define CLR_BTN_SEL "\033[1;37;46m"
-#define CLR_BAR     "\033[1;37;44m"
+#define CLR_BTN     "\033[1;37;44m"
+#define CLR_BTN_SEL "\033[0;30;47m"
+#define CLR_BAR     "\033[0;30;46m"
 #define CLR_PROG    "\033[1;37;42m"
 #define CLR_PROG_BG "\033[0;37;40m"
-#define CLR_ERR     "\033[1;31;44m"
+#define CLR_ERR     "\033[1;31;47m"
 #define CLR_OK      "\033[1;32;44m"
 #define CLR_DIM     "\033[0;36;44m"
 
@@ -47,7 +47,7 @@ int vfs_close_fd(int fd);
 int vfs_read_fd(int fd, void *buf, unsigned int count);
 int vfs_write_fd(int fd, const void *buf, unsigned int count);
 int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index);
-int vfs_stat(int fd, unsigned int *size, unsigned int *type);
+int vfs_stat(int fd, uint64_t *size, uint64_t *type);
 int vfs_create(const char *path, unsigned int perms);
 int vfs_mkdir(const char *path, unsigned int perms);
 int vfs_unlink(const char *path);
@@ -162,26 +162,31 @@ static int tui_read_key(void)
 {
     char c;
     char seq[4];
-    int tries;
+    unsigned int start;
 
     if (read(0, &c, 1) <= 0) return -1;
 
     if (c == '\033') {
-        for (tries = 0; tries < 50000; tries++) {
-            if (read_nb(0, &seq[0], 1) > 0) break;
+        start = getticks();
+        while (getticks() - start < 2) {
+            if (read_nb(0, &seq[0], 1) > 0) goto got_bracket;
         }
-        if (tries >= 50000) return KEY_ESC;
+        return KEY_ESC;
+got_bracket:
         if (seq[0] != '[') return -1;
-        for (tries = 0; tries < 50000; tries++) {
-            if (read_nb(0, &seq[1], 1) > 0) break;
+        start = getticks();
+        while (getticks() - start < 2) {
+            if (read_nb(0, &seq[1], 1) > 0) goto got_code;
         }
-        if (tries >= 50000) return -1;
+        return -1;
+got_code:
         if (seq[1] == 'A') return KEY_UP;
         if (seq[1] == 'B') return KEY_DOWN;
         if (seq[1] == 'C') return KEY_RIGHT;
         if (seq[1] == 'D') return KEY_LEFT;
         if (seq[1] >= '0' && seq[1] <= '9') {
-            for (tries = 0; tries < 50000; tries++) {
+            start = getticks();
+            while (getticks() - start < 2) {
                 if (read_nb(0, &seq[2], 1) > 0) break;
             }
         }
@@ -228,12 +233,20 @@ static void tui_draw_box(int y, int x, int h, int w, const char *title)
         printf("%s", CLR_MENU);
         for (i = 0; i < w - 2; i++) putchar(' ');
         printf("%s|", CLR_BORDER);
+        tui_goto(y + r, x + w);
+        printf("\033[0;30;40m ");
     }
 
     tui_goto(y + h - 1, x);
     printf("%s+", CLR_BORDER);
     for (i = 0; i < w - 2; i++) putchar('-');
     putchar('+');
+    tui_goto(y + h - 1, x + w);
+    printf("\033[0;30;40m ");
+
+    tui_goto(y + h, x + 1);
+    printf("\033[0;30;40m");
+    for (i = 0; i < w; i++) putchar(' ');
 }
 
 static void tui_draw_titlebar(void)
@@ -290,12 +303,17 @@ static int tui_menu(const char *title, const char **items, int count, const char
     int key;
     int maxw;
     int len;
+    int view_h;
+    int scroll;
+    int sb_pos;
+    int sb_h;
 
     sel = 0;
+    scroll = 0;
     maxw = (int)strlen(title) + 4;
     for (i = 0; i < count; i++) {
         len = (int)strlen(items[i]);
-        if (len + 6 > maxw) maxw = len + 6;
+        if (len + 8 > maxw) maxw = len + 8;
     }
     bw = maxw + 4;
     if (bw > term_cols - 4) bw = term_cols - 4;
@@ -304,19 +322,40 @@ static int tui_menu(const char *title, const char **items, int count, const char
     bx = (term_cols - bw) / 2 + 1;
     by = (term_rows - bh) / 2;
     if (by < 3) by = 3;
+    view_h = bh - 4;
 
     tui_draw_screen(title, help);
     tui_draw_box(by, bx, bh, bw, title);
 
     for (;;) {
-        for (i = 0; i < count && i < bh - 4; i++) {
+        if (sel < scroll) scroll = sel;
+        if (sel >= scroll + view_h) scroll = sel - view_h + 1;
+
+        for (i = 0; i < view_h; i++) {
+            int idx = scroll + i;
             tui_goto(by + 2 + i, bx + 2);
-            if (i == sel) {
-                printf("%s", CLR_SELECT);
+            if (idx < count) {
+                if (idx == sel) {
+                    printf("%s", CLR_SELECT);
+                } else {
+                    printf("%s", CLR_MENU);
+                }
+                printf(" %-*.*s ", bw - 8, bw - 8, items[idx]);
             } else {
-                printf("%s", CLR_MENU);
+                printf("%s%-*s", CLR_MENU, bw - 6, "");
             }
-            printf(" %-*.*s ", bw - 6, bw - 6, items[i]);
+        }
+
+        if (count > view_h) {
+            sb_h = view_h;
+            sb_pos = (sel * (sb_h - 1)) / (count - 1);
+            for (i = 0; i < sb_h; i++) {
+                tui_goto(by + 2 + i, bx + bw - 3);
+                if (i == sb_pos)
+                    printf("%s#%s", CLR_SELECT, CLR_BORDER);
+                else
+                    printf("%s:%s", CLR_DIM, CLR_BORDER);
+            }
         }
 
         printf("%s", CLR_NORMAL);
@@ -363,13 +402,12 @@ static int tui_confirm(const char *title, const char *msg)
     tui_center_text(by + 2, bx, bw, CLR_MENU, msg);
 
     for (;;) {
-        tui_goto(by + 5, bx + bw / 2 - 10);
+        tui_goto(by + 5, bx + bw / 2 - 9);
         if (sel == 0)
-            printf("%s  Yes  %s   No  ", CLR_BTN_SEL, CLR_BTN);
+            printf("%s< Yes  >%s  %s[  No  ]%s", CLR_BTN_SEL, CLR_MENU, CLR_BTN, CLR_NORMAL);
         else
-            printf("%s  Yes  %s   No  ", CLR_BTN, CLR_BTN_SEL);
+            printf("%s[ Yes  ]%s  %s<  No  >%s", CLR_BTN, CLR_MENU, CLR_BTN_SEL, CLR_NORMAL);
 
-        printf("%s", CLR_NORMAL);
         fflush(stdout);
 
         key = tui_read_key();
@@ -412,8 +450,7 @@ static void tui_msgbox(const char *title, const char *msg)
     tui_draw_box(by, bx, bh, bw, title);
     tui_center_text(by + 2, bx, bw, CLR_MENU, msg);
     tui_goto(by + 4, bx + bw / 2 - 3);
-    printf("%s  OK  ", CLR_BTN_SEL);
-    printf("%s", CLR_NORMAL);
+    printf("%s< OK >%s", CLR_BTN_SEL, CLR_NORMAL);
     fflush(stdout);
 
     for (;;) {
@@ -457,7 +494,7 @@ static int tui_input(const char *title, const char *prompt, char *buf, int maxle
     printf("%s%s", CLR_MENU, prompt);
 
     tui_goto(by + 6, bx + bw / 2 - 3);
-    printf("%s  OK  ", CLR_BTN);
+    printf("%s< OK >%s", CLR_BTN, CLR_NORMAL);
 
     for (;;) {
         tui_goto(by + 4, bx + 3);
@@ -647,8 +684,6 @@ static void inst_scan_disk(disk_info_t *disk)
     int ret;
     int i;
     int stat_fd;
-    unsigned int dev_size;
-    unsigned int dev_type;
 
     memset(disk->parts, 0, sizeof(disk->parts));
     disk->part_count = 0;
@@ -656,8 +691,12 @@ static void inst_scan_disk(disk_info_t *disk)
 
     stat_fd = vfs_open(disk->devpath, 0);
     if (stat_fd >= 0) {
-        if (vfs_stat(stat_fd, &dev_size, &dev_type) == 0) {
-            disk->disk_sectors = (uint64_t)dev_size / SECTOR_SIZE;
+        uint64_t stat_size;
+        uint64_t stat_type;
+        stat_size = 0;
+        stat_type = 0;
+        if (vfs_stat(stat_fd, &stat_size, &stat_type) == 0) {
+            disk->disk_sectors = stat_size / SECTOR_SIZE;
         }
         vfs_close_fd(stat_fd);
     }
@@ -854,7 +893,7 @@ static int inst_mount_partition(const char *devpath, const char *mountpoint)
         argv[5] = NULL;
         execv("/sbin/mount", argv);
         execv("/bin/mount", argv);
-        execv("/bin/lebcu", argv);
+        execv("/bin/lebu", argv);
         _exit(127);
     }
 
@@ -880,7 +919,7 @@ static int inst_umount_partition(const char *mountpoint)
         argv[2] = NULL;
         execv("/sbin/umount", argv);
         execv("/bin/umount", argv);
-        execv("/bin/lebcu", argv);
+        execv("/bin/lebu", argv);
         _exit(127);
     }
 
@@ -909,7 +948,7 @@ static int inst_format_ext4(const char *devpath)
         argv[2] = NULL;
         execv("/sbin/lformat.ext4", argv);
         execv("/bin/lformat.ext4", argv);
-        execv("/bin/lebcu", argv);
+        execv("/bin/lebu", argv);
         _exit(127);
     }
 
@@ -933,7 +972,6 @@ static int inst_copy_rootfs(const char *mountpoint)
 
     errors = 0;
 
-    /* Copy root-level files (e.g. /init) */
     for (i = 0; root_files[i]; i++) {
         snprintf(src, sizeof(src), "/%s", root_files[i]);
         snprintf(dst, sizeof(dst), "%s/%s", mountpoint, root_files[i]);
@@ -1116,8 +1154,8 @@ static int inst_create_user(const char *mountpoint, const char *username, const 
     if (fd < 0) return -1;
 
     {
-        unsigned int fsize;
-        unsigned int ftype;
+        uint64_t fsize;
+        uint64_t ftype;
         vfs_stat(fd, &fsize, &ftype);
         lseek(fd, (off_t)fsize, SEEK_SET);
     }
@@ -1139,8 +1177,8 @@ static int inst_create_user(const char *mountpoint, const char *username, const 
     }
 
     {
-        unsigned int fsize;
-        unsigned int ftype;
+        uint64_t fsize;
+        uint64_t ftype;
         vfs_stat(fd, &fsize, &ftype);
         lseek(fd, (off_t)fsize, SEEK_SET);
     }
@@ -1194,9 +1232,10 @@ static void cleanup_exit(void)
 #define STEP_PART    1
 #define STEP_FORMAT  2
 #define STEP_USER    3
-#define STEP_TZ      4
-#define STEP_INSTALL 5
-#define STEP_COUNT   6
+#define STEP_ROOTPW  4
+#define STEP_TZ      5
+#define STEP_INSTALL 6
+#define STEP_COUNT   7
 
 #define STEP_NONE    0
 #define STEP_DONE    1
@@ -1281,6 +1320,7 @@ typedef struct {
 
 static user_entry_t users[MAX_USERS];
 static int user_count;
+static char root_password[64];
 
 static int step_user_setup(void)
 {
@@ -1349,6 +1389,32 @@ static int step_user_setup(void)
                 user_count--;
             }
         }
+    }
+}
+
+static int step_rootpw(void)
+{
+    char pw1[64];
+    char pw2[64];
+
+    for (;;) {
+        if (tui_input("Root Password", "Enter root password:", pw1, sizeof(pw1), 1) < 0)
+            return -1;
+        if (pw1[0] == '\0') {
+            tui_msgbox("Error", "Password cannot be empty.");
+            continue;
+        }
+        if (tui_input("Root Password", "Confirm root password:", pw2, sizeof(pw2), 1) < 0)
+            return -1;
+        if (strcmp(pw1, pw2) != 0) {
+            tui_msgbox("Error", "Passwords do not match.");
+            continue;
+        }
+        strncpy(root_password, pw1, sizeof(root_password) - 1);
+        root_password[sizeof(root_password) - 1] = '\0';
+        memset(pw1, 0, sizeof(pw1));
+        memset(pw2, 0, sizeof(pw2));
+        return 0;
     }
 }
 
@@ -1441,6 +1507,67 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
         inst_create_user(mountpoint, users[i].username, users[i].password, 1000 + i);
     }
 
+    if (root_password[0] != '\0') {
+        char shadow_path[MAX_PATH];
+        char line[256];
+        static char shadow_buf[4096];
+        static char new_shadow[4096];
+        const char *hashed;
+        int shadow_fd;
+        int rlen;
+        int wlen;
+        int new_len;
+        int line_start;
+        int line_end;
+        int j;
+
+        tui_progress("Installing", "Setting root password...", 98);
+        hashed = inst_hash_password(root_password);
+        if (hashed) {
+            snprintf(shadow_path, sizeof(shadow_path), "%s/etc/shadow", mountpoint);
+            shadow_fd = vfs_open(shadow_path, 0);
+            if (shadow_fd >= 0) {
+                rlen = vfs_read_fd(shadow_fd, shadow_buf, sizeof(shadow_buf) - 1);
+                vfs_close_fd(shadow_fd);
+                if (rlen > 0) {
+                    shadow_buf[rlen] = '\0';
+                    new_len = 0;
+                    j = 0;
+                    while (j < rlen) {
+                        line_start = j;
+                        while (j < rlen && shadow_buf[j] != '\n') j++;
+                        line_end = j;
+                        if (j < rlen) j++;
+                        if (line_end - line_start < (int)sizeof(line) - 1) {
+                            memcpy(line, shadow_buf + line_start, line_end - line_start);
+                            line[line_end - line_start] = '\0';
+                        } else {
+                            line[0] = '\0';
+                        }
+                        if (strncmp(line, "root:", 5) == 0) {
+                            wlen = snprintf(new_shadow + new_len,
+                                sizeof(new_shadow) - new_len,
+                                "root:%s:0:0:99999:7:::\n", hashed);
+                        } else {
+                            wlen = snprintf(new_shadow + new_len,
+                                sizeof(new_shadow) - new_len,
+                                "%s\n", line);
+                        }
+                        new_len += wlen;
+                        if (new_len >= (int)sizeof(new_shadow) - 2) break;
+                    }
+                    shadow_fd = vfs_open(shadow_path, 2);
+                    if (shadow_fd >= 0) {
+                        vfs_write_fd(shadow_fd, new_shadow, new_len);
+                        vfs_close_fd(shadow_fd);
+                    }
+                }
+            }
+        }
+        memset(root_password, 0, sizeof(root_password));
+        tui_log("Root password updated.");
+    }
+
     tui_progress("Installing", "Setting timezone...", 99);
     snprintf(logbuf, sizeof(logbuf), "Timezone: %s", tz_values[tz_idx]);
     tui_log(logbuf);
@@ -1467,6 +1594,7 @@ int main(int argc, char **argv)
         "Select Partition",
         "Format Partition",
         "User Accounts",
+        "Root Password",
         "Select Timezone",
         "Install"
     };
@@ -1514,6 +1642,7 @@ int main(int argc, char **argv)
     do_format = 0;
     tz_idx = 0;
     user_count = 0;
+    root_password[0] = '\0';
 
     for (;;) {
         for (i = 0; i < STEP_COUNT; i++) {
@@ -1534,10 +1663,12 @@ int main(int argc, char **argv)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], ubuf);
                 } else if (i == STEP_TZ)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], timezones[tz_idx]);
+                else if (i == STEP_ROOTPW)
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (set)", step_names[i]);
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s", step_names[i]);
             } else {
-                if (i == STEP_FORMAT || i == STEP_USER || i == STEP_TZ)
+                if (i == STEP_FORMAT || i == STEP_USER || i == STEP_TZ || i == STEP_ROOTPW)
                     snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (optional)", step_names[i]);
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", step_names[i]);
@@ -1589,6 +1720,12 @@ int main(int argc, char **argv)
                 status[STEP_USER] = STEP_NONE;
             break;
 
+        case STEP_ROOTPW:
+            ret = step_rootpw();
+            if (ret == 0)
+                status[STEP_ROOTPW] = STEP_DONE;
+            break;
+
         case STEP_TZ:
             ret = step_timezone(&tz_idx);
             if (ret == 0)
@@ -1606,6 +1743,7 @@ int main(int argc, char **argv)
             if (ret == 0) {
                 for (i = 0; i < user_count; i++)
                     memset(users[i].password, 0, sizeof(users[i].password));
+                memset(root_password, 0, sizeof(root_password));
                 cleanup_exit();
                 return 0;
             }

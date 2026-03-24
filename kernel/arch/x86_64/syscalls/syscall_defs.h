@@ -405,8 +405,11 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_PANIC 274
 #define SYSCALL_BLOCKDEV_RESCAN 275
 #define SYSCALL_NET_HTTP_GET_ALLOC 276
+#define SYSCALL_LKE_LOAD 277
+#define SYSCALL_LKE_UNLOAD 278
+#define SYSCALL_LKE_LIST 279
 
-#define NR_SYSCALLS 281
+#define NR_SYSCALLS 284
 
 struct kernel_stat {
     unsigned long long st_dev;

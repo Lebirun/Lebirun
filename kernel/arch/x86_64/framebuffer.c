@@ -439,7 +439,18 @@ void fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t fo
 }
 
 void fb_set_font(psf_font_t *font) {
+    uint64_t old_cols;
+    uint64_t old_rows;
+    uint64_t redraw_rows;
+    uint64_t redraw_cols;
+    uint64_t r;
+    uint64_t c;
+    uint64_t clear_height;
+    uint64_t bytes_per_pixel;
+
     if (font && font->glyphs) {
+        old_cols = fb.cols;
+        old_rows = fb.rows;
         fb.font = font;
         if (!font->width || !font->height) {
             fb.cols = 0;
@@ -451,7 +462,37 @@ void fb_set_font(psf_font_t *font) {
         if (fb.cols > MAX_COLS) fb.cols = MAX_COLS;
         if (fb.cursor_x >= fb.cols && fb.cols) fb.cursor_x = fb.cols - 1;
         if (fb.cursor_y >= fb.rows && fb.rows) fb.cursor_y = fb.rows - 1;
-        fb_clear();
+
+        if (console_is_initialized()) {
+            if (old_cols != fb.cols) {
+                console_rewrap_all(old_cols, fb.cols, fb.rows);
+            }
+            console_clamp_cursors(fb.cols, fb.rows);
+            if (fb_graphical) {
+                clear_height = (fb.height < hw_height) ? fb.height : hw_height;
+                if (clear_height > 0) fb_clear_region(0, clear_height);
+            }
+            console_redraw_current();
+        } else if (screen_buffer && screen_buffer_rows > 0 && fb.cols > 0 && fb.rows > 0 && fb_graphical) {
+            bytes_per_pixel = (uint64_t)(fb.bpp / 8u);
+            clear_height = (fb.height < hw_height) ? fb.height : hw_height;
+            if (clear_height > 0 && bytes_per_pixel > 0) fb_clear_region(0, clear_height);
+            redraw_rows = fb.rows;
+            if (redraw_rows > screen_buffer_rows) redraw_rows = screen_buffer_rows;
+            if (redraw_rows > old_rows && old_rows > 0) redraw_rows = old_rows;
+            redraw_cols = fb.cols;
+            if (redraw_cols > old_cols && old_cols > 0) redraw_cols = old_cols;
+            for (r = 0; r < redraw_rows; r++) {
+                for (c = 0; c < redraw_cols; c++) {
+                    if ((unsigned char)screen_buffer[r][c] >= 32) {
+                        fb_putchar(screen_buffer[r][c], c, r);
+                    }
+                }
+            }
+        } else {
+            fb_clear();
+        }
+
         cursor_drawn = 0;
         cursor_prev_x = fb.cursor_x;
         cursor_prev_y = fb.cursor_y;

@@ -1,5 +1,8 @@
 #include <kernel/vfs.h>
 #include <kernel/pty.h>
+#if CONFIG_VIRT_VFL
+#include <kernel/vfl.h>
+#endif
 #include <kernel/mem_map.h>
 #include <kernel/console.h>
 #include <kernel/cmdline.h>
@@ -299,6 +302,9 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         "null", "zero", "urandom", "random", "tty", "console",
         "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
         "mem", "kmem", "port"
+#if CONFIG_VIRT_VFL
+        , "vfl"
+#endif
     };
     
     if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
@@ -381,6 +387,9 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "mem") == 0) return &dev_mem;
     if (strcmp(name, "kmem") == 0) return &dev_kmem;
     if (strcmp(name, "port") == 0) return &dev_port;
+#if CONFIG_VIRT_VFL
+    if (strcmp(name, "vfl") == 0) return vfl_get_devfs_node();
+#endif
     
     if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '9') {
         int idx = name[3] - '0';

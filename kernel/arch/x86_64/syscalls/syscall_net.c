@@ -72,20 +72,24 @@ static uint64_t get_user_pd(void) {
 }
 
 static int user_range_ok(uint64_t addr, uint64_t size) {
+    uint64_t end;
     if (size == 0) return 0;
     if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
-    uint64_t end = addr + size - 1;
+    end = addr + size - 1;
     if (end < addr) return 0;
     if (end >= KERNEL_VMA) return 0;
     return 1;
 }
 
 static int user_range_mapped(uint64_t addr, uint64_t size) {
+    uint64_t pd;
+    uint64_t start;
+    uint64_t end;
     if (!user_range_ok(addr, size)) return 0;
-    uint64_t pd = get_user_pd();
+    pd = get_user_pd();
     if (!pd) return 0;
-    uint64_t start = addr & ~0xFFFu;
-    uint64_t end = (addr + size - 1) & ~0xFFFu;
+    start = addr & ~0xFFFu;
+    end = (addr + size - 1) & ~0xFFFu;
     for (uint64_t p = start;; p += 0x1000) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
         if (p == end) break;
@@ -109,20 +113,24 @@ static int copy_to_user(uint64_t dst_user, const void *src, uint64_t size) {
 }
 
 static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) {
+    uint64_t addr;
+    uint64_t pd;
+    uint64_t i;
     if (!dst || dst_size == 0) return -1;
     dst[0] = '\0';
     if (!src_user) return -1;
-    uint64_t addr = (uint64_t)(uintptr_t)src_user;
+    addr = (uint64_t)(uintptr_t)src_user;
     if (addr < 0x1000 || addr >= KERNEL_VMA) return -1;
-    uint64_t pd = get_user_pd();
+    pd = get_user_pd();
     if (!pd) return -1;
 
-    uint64_t i = 0;
+    i = 0;
     while (i + 1 < dst_size) {
         uint64_t cur = addr + i;
+        char c;
         if (cur >= KERNEL_VMA || cur < addr) return -1;
         if (vmm_get_phys_in_pml4(pd, cur & ~0xFFFu) == 0) return -1;
-        char c = *(const char *)cur;
+        c = *(const char *)cur;
         dst[i++] = c;
         if (c == '\0') return 0;
     }
@@ -132,8 +140,8 @@ static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) 
 
 static void klog(const char *fmt, ...) {
     char buf[256];
-    va_list ap;
     int len;
+    va_list ap;
 
     va_start(ap, fmt);
     len = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -145,8 +153,8 @@ static void klog(const char *fmt, ...) {
 
 static void klog_con(int con_id, const char *fmt, ...) {
     char buf[256];
-    va_list ap;
     int len;
+    va_list ap;
 
     va_start(ap, fmt);
     len = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -185,11 +193,12 @@ static int sys_net_arp(int unused, const char *unused2, int unused3) {
 }
 
 static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
-    (void)unused;
     char hostbuf[256];
+    int ret;
+    (void)unused;
     if (copy_user_string(hostbuf, sizeof(hostbuf), hostname) != 0) return -1;
     ipv4_addr_t resolved;
-    int ret = dns_resolve(hostbuf, &resolved);
+    ret = dns_resolve(hostbuf, &resolved);
     if (ret == 0) {
         klog("DNS: %s -> %u.%u.%u.%u\n", hostbuf,
                resolved.octets[0], resolved.octets[1],
@@ -206,8 +215,8 @@ static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
 
 static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
     int con_id;
-    netif_t *netif;
     int i;
+    netif_t *netif;
 
     (void)unused2; (void)unused3;
     con_id = current_task ? current_task->console_id : 0;
@@ -300,14 +309,15 @@ static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
 }
 
 static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) {
-    if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
-    
     uint64_t ips[16];
     uint8_t macs[16 * 6];
+    int count;
+    if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
+    
     
     if (max_entries > 16) max_entries = 16;
     
-    int count = arp_get_cache(ips, macs, max_entries);
+    count = arp_get_cache(ips, macs, max_entries);
     
     if (count > 0) {
         uint64_t need = (uint64_t)count * (uint64_t)sizeof(arp_user_entry_t);
@@ -329,22 +339,25 @@ static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) 
 }
 
 static int sys_net_ping_one(int ip_packed, const char *seq_ptr, int timeout_ms) {
+    uint16_t seq;
     ipv4_addr_t target = u32_to_ipv4((uint64_t)ip_packed);
-    uint16_t seq = (uint16_t)(int)(size_t)seq_ptr;
+    seq = (uint16_t)(int)(size_t)seq_ptr;
     if (timeout_ms <= 0) timeout_ms = 3000;
     return ping_one(target, seq, (uint64_t)timeout_ms);
 }
 
 static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unused) {
-    (void)unused;
-    const char *hostname = (const char *)(uintptr_t)hostname_ptr;
-    if (!hostname || !result_ptr) return -1;
+    const char *hostname;
     char hostbuf[256];
+    int ret;
+    (void)unused;
+    hostname = (const char *)(uintptr_t)hostname_ptr;
+    if (!hostname || !result_ptr) return -1;
     if (copy_user_string(hostbuf, sizeof(hostbuf), hostname) != 0) return -1;
     if (!user_range_mapped((uint64_t)(uintptr_t)result_ptr, sizeof(uint64_t))) return -1;
     
     ipv4_addr_t resolved;
-    int ret = dns_resolve(hostbuf, &resolved);
+    ret = dns_resolve(hostbuf, &resolved);
     if (ret == 0) {
         *(uint64_t *)result_ptr = ipv4_to_u32(resolved);
     }
@@ -352,7 +365,6 @@ static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unu
 }
 
 static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
-    http_request_user_t req;
     char *url_buf;
     uint64_t user_buf_addr;
     uint8_t *kbuf;
@@ -364,6 +376,7 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     uint64_t hdr_len;
     uint64_t hdr_buf_sz;
     uint64_t copy_len;
+    http_request_user_t req;
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
@@ -452,7 +465,6 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
 }
 
 static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
-    http_post_request_user_t req;
     char *url_buf;
     char *ct_buf;
     uint64_t user_buf_addr;
@@ -462,6 +474,7 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
     uint64_t downloaded;
     int status;
     int ret;
+    http_post_request_user_t req;
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
@@ -542,7 +555,6 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
 }
 
 static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2) {
-    http_get_alloc_req_t req;
     char *url_buf;
     uint8_t *kbuf;
     uint8_t *khdr;
@@ -559,6 +571,7 @@ static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2)
     uint64_t old_count;
     uint64_t new_count;
     uint64_t *expanded;
+    http_get_alloc_req_t req;
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;

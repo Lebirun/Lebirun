@@ -1,9 +1,9 @@
 [submodule "userprog/lsh"]
 	path = userprog/lsh
 	url = git@github.com:Lebirun/lsh.git
-[submodule "userprog/coreutils"]
-	path = userprog/coreutils
-	url = git@github.com:Lebirun/leb-coreutils.git
+[submodule "userprog/lebutils"]
+	path = userprog/lebutils
+	url = git@github.com:Lebirun/lebutils.git
 [submodule "libc/leblibc"]
 	path = libc/leblibc
 	url = git@github.com:Lebirun/leblibc.git

@@ -21,6 +21,8 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
 static int overlay_vfs_unlink(vfs_node_t *parent, const char *name);
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length);
+static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode);
+static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid);
 static void overlay_ensure_upper_dirs(const char *path);
 
 static int overlay_is_whiteout(const char *name) {
@@ -85,6 +87,8 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
     onode->vfs.read = overlay_vfs_read;
     onode->vfs.write = overlay_vfs_write;
     onode->vfs.truncate = overlay_vfs_truncate;
+    onode->vfs.chmod = overlay_vfs_chmod;
+    onode->vfs.chown = overlay_vfs_chown;
     
     if (VFS_GET_TYPE(effective->flags) == VFS_DIRECTORY) {
         onode->vfs.readdir = overlay_vfs_readdir;
@@ -257,6 +261,71 @@ static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     return -1;
 }
 
+static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode) {
+    overlay_node_t *onode;
+    char path[VFS_MAX_PATH];
+    vfs_node_t *target;
+    int ret;
+
+    if (!node) return -1;
+
+    onode = (overlay_node_t *)node->private_data;
+    if (!onode) return -1;
+
+    if (!onode->upper_node && onode->lower_node) {
+        vfs_get_path(node, path, sizeof(path));
+        if (overlay_copy_up(onode, path) != 0) {
+            return -1;
+        }
+    }
+
+    target = onode->upper_node ? onode->upper_node : onode->lower_node;
+    if (!target) return -1;
+
+    if (target->chmod) {
+        ret = target->chmod(target, mode);
+        if (ret == 0) node->mask = mode;
+        return ret;
+    }
+    target->mask = mode;
+    node->mask = mode;
+    return 0;
+}
+
+static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid) {
+    overlay_node_t *onode;
+    char path[VFS_MAX_PATH];
+    vfs_node_t *target;
+    int ret;
+
+    if (!node) return -1;
+
+    onode = (overlay_node_t *)node->private_data;
+    if (!onode) return -1;
+
+    if (!onode->upper_node && onode->lower_node) {
+        vfs_get_path(node, path, sizeof(path));
+        if (overlay_copy_up(onode, path) != 0) {
+            return -1;
+        }
+    }
+
+    target = onode->upper_node ? onode->upper_node : onode->lower_node;
+    if (!target) return -1;
+
+    if (target->chown) {
+        ret = target->chown(target, uid, gid);
+        if (ret == 0) {
+            node->uid = target->uid;
+            node->gid = target->gid;
+        }
+        return ret;
+    }
+    if ((int)uid != -1) { target->uid = uid; node->uid = uid; }
+    if ((int)gid != -1) { target->gid = gid; node->gid = gid; }
+    return 0;
+}
+
 static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
     overlay_node_t *onode;
     dirent_t *entry;
@@ -363,7 +432,7 @@ static void overlay_ensure_upper_dirs(const char *path) {
     for (i = 1; tmp[i]; i++) {
         if (tmp[i] == '/') {
             tmp[i] = '\0';
-            ramfs_create_dir(tmp, VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
+            ramfs_create_dir(tmp, 0755);
             tmp[i] = '/';
         }
     }
@@ -387,7 +456,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
 
     overlay_ensure_upper_dirs(path);
     
-    ret = ramfs_create_file(path, VFS_PERM_READ | VFS_PERM_WRITE);
+    ret = ramfs_create_file(path, 0644);
     if (ret == 0 && !onode->upper_node) {
         pnode = ramfs_find_node(parent_path);
         if (pnode) onode->upper_node = pnode->vfs_node;
@@ -449,7 +518,7 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     if (in_lower) {
         vfs_get_path(parent, parent_path, sizeof(parent_path));
         snprintf(wh_path, sizeof(wh_path), "%s/%s%s", parent_path, OVERLAY_WHITEOUT_PREFIX, name);
-        ramfs_create_file(wh_path, VFS_PERM_READ);
+        ramfs_create_file(wh_path, 0644);
     }
     
     return 0;

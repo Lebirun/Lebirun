@@ -75,12 +75,12 @@ struct iovec {
 
 struct msghdr {
     void *msg_name;
-    socklen_t msg_namelen;
     struct iovec *msg_iov;
     size_t msg_iovlen;
     void *msg_control;
     size_t msg_controllen;
     int msg_flags;
+    socklen_t msg_namelen;
 };
 
 struct timeval {
@@ -110,7 +110,6 @@ typedef struct {
     int domain;
     int type;
     int protocol;
-    sock_state_t state;
     uint64_t local_addr;
     uint16_t local_port;
     uint64_t remote_addr;
@@ -132,11 +131,12 @@ typedef struct {
     int so_rcvbuf;
     struct timeval so_rcvtimeo;
     struct timeval so_sndtimeo;
-    pending_conn_t *backlog;
     int backlog_size;
     int backlog_count;
     int backlog_capacity;
     int peer_socket;
+    sock_state_t state;
+    pending_conn_t *backlog;
 } socket_t;
 
 static socket_t *sockets = NULL;
@@ -146,8 +146,8 @@ static uint64_t next_ephemeral_port = 49152;
 
 static int socket_grow(void) {
     int new_cap;
-    socket_t *new_arr;
     int i;
+    socket_t *new_arr;
 
     new_cap = socket_capacity ? socket_capacity * 2 : SOCKET_INIT_COUNT;
     new_arr = (socket_t *)krealloc(sockets, new_cap * sizeof(socket_t));
@@ -270,6 +270,7 @@ static size_t send_buf_write(socket_t *sock, const void *data, size_t len) {
 static int sys_socket(int domain, const char *type_ptr, int protocol) {
     int type = (int)(uintptr_t)type_ptr;
     int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int idx;
     type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
     
     if (domain != AF_INET && domain != AF_UNIX && domain != AF_INET6) {
@@ -280,7 +281,7 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
         return -ESOCKTNOSUPPORT;
     }
     
-    int idx = alloc_socket();
+    idx = alloc_socket();
     if (idx < 0) return -EMFILE;
     
     sockets[idx].domain = domain;
@@ -296,8 +297,11 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
 static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
     int type = (int)(uintptr_t)type_ptr;
     int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int *sv;
+    int idx1;
+    int idx2;
     type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
-    int *sv = (int *)(uintptr_t)protocol_sv;
+    sv = (int *)(uintptr_t)protocol_sv;
     
     if (domain != AF_UNIX) {
         return -EAFNOSUPPORT;
@@ -307,10 +311,10 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
         return -ESOCKTNOSUPPORT;
     }
     
-    int idx1 = alloc_socket();
+    idx1 = alloc_socket();
     if (idx1 < 0) return -EMFILE;
     
-    int idx2 = alloc_socket();
+    idx2 = alloc_socket();
     if (idx2 < 0) {
         free_socket(idx1);
         return -EMFILE;
@@ -337,6 +341,7 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
 }
 
 static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
+    struct sockaddr_in *addr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -344,7 +349,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         return -EINVAL;
     }
     
-    struct sockaddr_in *addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         return -EINVAL;
     }
@@ -365,6 +370,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
 }
 
 static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
+    struct sockaddr_in *addr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -376,7 +382,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         return -EINVAL;
     }
     
-    struct sockaddr_in *addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         return -EINVAL;
     }
@@ -402,11 +408,12 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
 }
 
 static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
+    int backlog;
     (void)unused;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    int backlog = (int)(uintptr_t)backlog_ptr;
+    backlog = (int)(uintptr_t)backlog_ptr;
     
     if (sock->state != SOCKSTATE_BOUND) {
         return -EINVAL;
@@ -433,6 +440,8 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
 }
 
 static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+    int idx;
+    struct sockaddr_in *addr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -459,7 +468,7 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
         return -EAGAIN;
     }
     
-    int idx = alloc_socket();
+    idx = alloc_socket();
     if (idx < 0) return -EMFILE;
     
     sockets[idx].domain = sock->domain;
@@ -475,7 +484,7 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     conn->valid = 0;
     sock->backlog_count--;
     
-    struct sockaddr_in *addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
@@ -493,10 +502,11 @@ static int sys_accept4(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 }
 
 static int sys_getsockopt(int sockfd, const char *level_ptr, int optname) {
+    int level;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    int level = (int)(uintptr_t)level_ptr;
+    level = (int)(uintptr_t)level_ptr;
     (void)level;
     (void)optname;
     
@@ -504,10 +514,11 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname) {
 }
 
 static int sys_setsockopt(int sockfd, const char *level_ptr, int optname) {
+    int level;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    int level = (int)(uintptr_t)level_ptr;
+    level = (int)(uintptr_t)level_ptr;
     (void)level;
     (void)optname;
     
@@ -515,10 +526,11 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname) {
 }
 
 static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+    struct sockaddr_in *addr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    struct sockaddr_in *addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
@@ -533,6 +545,7 @@ static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 }
 
 static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+    struct sockaddr_in *addr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -540,7 +553,7 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
         return -ENOTCONN;
     }
     
-    struct sockaddr_in *addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
@@ -555,6 +568,7 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 }
 
 static int sys_sendto(int sockfd, const char *buf_ptr, int len) {
+    const void *buf;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -562,7 +576,7 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len) {
         return -ENOTCONN;
     }
     
-    const void *buf = (const void *)(uintptr_t)buf_ptr;
+    buf = (const void *)(uintptr_t)buf_ptr;
     
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         socket_t *peer = &sockets[sock->peer_socket];
@@ -575,15 +589,17 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len) {
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
+    struct msghdr *msg;
+    ssize_t total;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    struct msghdr *msg = (struct msghdr *)(uintptr_t)msg_ptr;
+    msg = (struct msghdr *)(uintptr_t)msg_ptr;
     if (!msg) return -EFAULT;
     
     (void)flags;
     
-    ssize_t total = 0;
+    total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
         ssize_t sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base, 
                                   msg->msg_iov[i].iov_len);
@@ -595,12 +611,14 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
 }
 
 static int sys_recvfrom(int sockfd, const char *buf_ptr, int len) {
+    void *buf;
+    size_t available;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    void *buf = (void *)(uintptr_t)buf_ptr;
+    buf = (void *)(uintptr_t)buf_ptr;
     
-    size_t available = recv_buf_used(sock);
+    available = recv_buf_used(sock);
     if (available == 0) {
         if (sock->nonblocking) {
             return -EAGAIN;
@@ -612,15 +630,17 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len) {
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
+    struct msghdr *msg;
+    ssize_t total;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    struct msghdr *msg = (struct msghdr *)(uintptr_t)msg_ptr;
+    msg = (struct msghdr *)(uintptr_t)msg_ptr;
     if (!msg) return -EFAULT;
     
     (void)flags;
     
-    ssize_t total = 0;
+    total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
         ssize_t recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
                                      msg->msg_iov[i].iov_len);
@@ -633,11 +653,12 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 }
 
 static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
+    int how;
     (void)unused;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
-    int how = (int)(uintptr_t)how_ptr;
+    how = (int)(uintptr_t)how_ptr;
     
     if (sock->state != SOCKSTATE_CONNECTED) {
         return -ENOTCONN;
@@ -661,10 +682,11 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
 }
 
 int socket_poll_events(int fd) {
+    int events;
     socket_t *sock = get_socket(fd);
     if (!sock) return 0;
     
-    int events = 0;
+    events = 0;
     
     if (recv_buf_used(sock) > 0) {
         events |= 0x01;

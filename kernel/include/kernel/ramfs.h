@@ -25,7 +25,7 @@
 typedef struct ramfs_node {
     char name[RAMFS_MAX_NAME_LEN];
     uint8_t type;
-    uint8_t permissions;
+    uint16_t permissions;
     uint64_t uid;
     uint64_t gid;
     uint64_t length;
@@ -55,9 +55,9 @@ void ramfs_init(void);
 void ramfs_vfs_register(void);
 void tmpfs_vfs_register(void);
 
-int ramfs_create_file(const char *path, uint8_t permissions);
-int ramfs_create_dir(const char *path, uint8_t permissions);
-int ramfs_create_symlink(const char *path, const char *target, uint8_t permissions);
+int ramfs_create_file(const char *path, uint16_t permissions);
+int ramfs_create_dir(const char *path, uint16_t permissions);
+int ramfs_create_symlink(const char *path, const char *target, uint16_t permissions);
 int ramfs_unlink(const char *path);
 int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t size);
 int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size);

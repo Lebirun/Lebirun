@@ -3,6 +3,36 @@
 #include <kernel/fs/ext4/ext4.h>
 #include <kernel/mem_map.h>
 
+static int vfs_check_perm(vfs_node_t *node, int want) {
+    uint64_t mode;
+    uint64_t uid;
+    uint64_t gid;
+    int shift;
+    int allowed;
+
+    if (!current_task) return -ESRCH;
+    if (!node) return -ENOENT;
+
+    uid = current_task->euid;
+    gid = current_task->egid;
+
+    if (uid == 0) return 0;
+
+    mode = node->mask;
+
+    if (uid == node->uid) {
+        shift = 6;
+    } else if (gid == node->gid) {
+        shift = 3;
+    } else {
+        shift = 0;
+    }
+
+    allowed = (int)((mode >> shift) & 7);
+    if ((allowed & want) == want) return 0;
+    return -EACCES;
+}
+
 static int task_fd_alloc_from(int start) {
     int i;
     int new_cap;
@@ -48,7 +78,6 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     uint64_t path_addr;
     int flags;
     const char *path;
-    vfs_node_t *node;
     int fd;
     char parent_path[256];
     char filename[64];
@@ -57,6 +86,7 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     int i;
     int j;
     int ret;
+    vfs_node_t *node;
     vfs_node_t *parent;
 
     (void)unused;
@@ -108,6 +138,19 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     }
 
     if (!node) return -ENOENT;
+
+    {
+        int want;
+        int perm_ret;
+
+        want = VFS_PERM_READ;
+        if ((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR))
+            want |= VFS_PERM_WRITE;
+        if (flags & VFS_O_TRUNC)
+            want |= VFS_PERM_WRITE;
+        perm_ret = vfs_check_perm(node, want);
+        if (perm_ret < 0) return perm_ret;
+    }
 
     if ((flags & VFS_O_TRUNC) && node->truncate) {
         node->truncate(node, 0);
@@ -161,8 +204,10 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 }
 
 static int sys_vfs_read(int fd, const char *buf, int len) {
+    uint64_t buf_addr;
+    uint64_t bytes;
     if (!buf || len <= 0) return -EINVAL;
-    uint64_t buf_addr = (uint64_t)buf;
+    buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!current_task) return -ESRCH;
@@ -172,7 +217,7 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     task_fd_t *tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)tfd->node;
-    uint64_t bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+    bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
     tfd->offset += bytes;
     return (int)bytes;
 }
@@ -182,12 +227,12 @@ int sys_vfs_readdir(registers_t *regs) {
     uint64_t name_addr;
     uint64_t type_addr;
     uint64_t index;
+    uint64_t flags;
+    int i;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t *result;
     dirent_t local_copy;
-    uint64_t flags;
-    int i;
 
     fd = (int)regs->rbx;
     name_addr = regs->rcx;
@@ -238,6 +283,8 @@ int sys_vfs_readdir(registers_t *regs) {
 static int sys_vfs_stat(int fd, const char *size_ptr, int type_ptr) {
     uint64_t size_addr = (uint64_t)size_ptr;
     uint64_t type_addr = (uint64_t)type_ptr;
+    uint64_t size;
+    uint64_t flags;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
@@ -245,14 +292,14 @@ static int sys_vfs_stat(int fd, const char *size_ptr, int type_ptr) {
     task_fd_t *tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)tfd->node;
-    uint64_t size = node->length;
-    uint64_t flags = node->flags;
+    size = node->length;
+    flags = node->flags;
     
     if (size_addr && size_addr < KERNEL_VMA && size_addr >= 0x1000) {
-        *(uint32_t*)size_addr = (uint32_t)size;
+        *(uint64_t*)size_addr = size;
     }
     if (type_addr && type_addr < KERNEL_VMA && type_addr >= 0x1000) {
-        *(uint32_t*)type_addr = (uint32_t)flags;
+        *(uint64_t*)type_addr = flags;
     }
     return 0;
 }
@@ -264,8 +311,10 @@ static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
 }
 
 static int sys_vfs_write(int fd, const char *buf, int len) {
+    uint64_t buf_addr;
+    uint64_t bytes;
     if (!buf || len <= 0) return -EINVAL;
-    uint64_t buf_addr = (uint64_t)buf;
+    buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!current_task) return -ESRCH;
@@ -275,23 +324,28 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     task_fd_t *tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     vfs_node_t *node = (vfs_node_t *)tfd->node;
-    uint64_t bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+    bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
     tfd->offset += bytes;
     return (int)bytes;
 }
 
 static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
-    (void)unused;
-    uint64_t path_addr = (uint64_t)path_ptr;
-    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)path_addr;
-    uint64_t perms = (uint64_t)(uintptr_t)perms_ptr;
-    
+    uint64_t path_addr;
+    const char *path;
+    uint64_t perms;
     char parent_path[256];
     char filename[64];
-    int len = 0;
+    int len;
+    int last_slash;
+    (void)unused;
+    path_addr = (uint64_t)path_ptr;
+    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
+    path = (const char *)path_addr;
+    perms = (uint64_t)(uintptr_t)perms_ptr;
+    
+    len = 0;
     while (path[len]) len++;
-    int last_slash = -1;
+    last_slash = -1;
     for (int i = 0; i < len; i++) {
         if (path[i] == '/') last_slash = i;
     }
@@ -301,36 +355,48 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
         for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
         filename[len < 63 ? len : 63] = '\0';
     } else if (last_slash == 0) {
+        int j;
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     } else {
+        int j;
         for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
         parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     }
     
     vfs_node_t *parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    {
+        int perm_ret;
+        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+        if (perm_ret < 0) return perm_ret;
+    }
     return vfs_create(parent, filename, perms);
 }
 
 static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
-    (void)unused;
-    uint64_t path_addr = (uint64_t)path_ptr;
-    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)path_addr;
-    uint64_t perms = (uint64_t)(uintptr_t)perms_ptr;
-    
+    uint64_t path_addr;
+    const char *path;
+    uint64_t perms;
     char parent_path[256];
     char dirname[64];
-    int len = 0;
+    int len;
+    int last_slash;
+    (void)unused;
+    path_addr = (uint64_t)path_ptr;
+    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
+    path = (const char *)path_addr;
+    perms = (uint64_t)(uintptr_t)perms_ptr;
+    
+    len = 0;
     while (path[len]) len++;
-    int last_slash = -1;
+    last_slash = -1;
     for (int i = 0; i < len; i++) {
         if (path[i] == '/') last_slash = i;
     }
@@ -340,35 +406,46 @@ static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
         for (int i = 0; i < len && i < 63; i++) dirname[i] = path[i];
         dirname[len < 63 ? len : 63] = '\0';
     } else if (last_slash == 0) {
+        int j;
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
         dirname[j] = '\0';
     } else {
+        int j;
         for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
         parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = last_slash + 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
         dirname[j] = '\0';
     }
     
     vfs_node_t *parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    {
+        int perm_ret;
+        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+        if (perm_ret < 0) return perm_ret;
+    }
     return vfs_mkdir(parent, dirname, perms);
 }
 
 static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
-    (void)unused1; (void)unused2;
-    uint64_t path_addr = (uint64_t)path_ptr;
-    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    const char *path = (const char *)path_addr;
-    
+    uint64_t path_addr;
+    const char *path;
     char parent_path[256];
     char filename[64];
-    int len = 0;
+    int len;
+    int last_slash;
+    (void)unused1; (void)unused2;
+    path_addr = (uint64_t)path_ptr;
+    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
+    path = (const char *)path_addr;
+    
+    len = 0;
     while (path[len]) len++;
-    int last_slash = -1;
+    last_slash = -1;
     for (int i = 0; i < len; i++) {
         if (path[i] == '/') last_slash = i;
     }
@@ -378,21 +455,28 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
         for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
         filename[len < 63 ? len : 63] = '\0';
     } else if (last_slash == 0) {
+        int j;
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     } else {
+        int j;
         for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
         parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        int j = 0;
+        j = 0;
         for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
         filename[j] = '\0';
     }
     
     vfs_node_t *parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    {
+        int perm_ret;
+        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+        if (perm_ret < 0) return perm_ret;
+    }
     return vfs_unlink(parent, filename);
 }
 
@@ -419,13 +503,13 @@ struct statfs_kernel {
 static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     int mount_count;
     int i;
-    vfs_mount_t *mount;
-    vfs_mount_t *best;
     size_t best_len;
     size_t mlen;
     const char *fsname;
-
     extern int ramfs_get_stats(ramfs_stats_t *stats);
+    vfs_mount_t *mount;
+    vfs_mount_t *best;
+
 
     memset(buf, 0, sizeof(struct statfs_kernel));
     buf->f_namelen = 255;

@@ -74,7 +74,7 @@ void vfs_init(void) {
     memset(&root_node, 0, sizeof(vfs_node_t));
     strcpy(root_node.name, "/");
     root_node.flags = VFS_DIRECTORY;
-    root_node.mask = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    root_node.mask = 0755;
     root_node.readdir = root_readdir;
     root_node.finddir = root_finddir;
     root_node.create = root_create;
@@ -149,8 +149,9 @@ static int vfs_fs_type_valid(vfs_fs_type_t *fs) {
 }
 
 vfs_fs_type_t *vfs_find_fs(const char *name) {
+    int iterations;
     vfs_fs_type_t *cur;
-    int iterations = 0;
+    iterations = 0;
     if (!name) return NULL;
     cur = registered_fs;
     while (cur) {
@@ -171,14 +172,14 @@ vfs_fs_type_t *vfs_find_fs(const char *name) {
 }
 
 static const char *vfs_detect_fs(const char *device) {
-    vfs_node_t *dev_node;
     uint64_t port_idx;
     uint64_t part_start;
-    ahci_port_t *port;
     uint8_t *buf;
     uint16_t ext_magic;
-
     extern uint64_t devfs_get_partition_start(vfs_node_t *node);
+    vfs_node_t *dev_node;
+    ahci_port_t *port;
+
 
     if (!device || device[0] == '\0')
         return NULL;
@@ -216,12 +217,8 @@ static const char *vfs_detect_fs(const char *device) {
 }
 
 int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags) {
-    vfs_node_t *existing;
-    vfs_node_t *parent_node;
     int slot;
     int i;
-    vfs_fs_type_t *fs;
-    vfs_node_t *root;
     size_t cp;
     const char *end;
     const char *base;
@@ -229,6 +226,10 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     size_t di;
     char parent_path[VFS_MAX_PATH];
     const char *detected_fs;
+    vfs_node_t *existing;
+    vfs_node_t *parent_node;
+    vfs_fs_type_t *fs;
+    vfs_node_t *root;
     
     
     if (!mountpoint || !fs_type) {
@@ -463,9 +464,9 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
     int i;
     char temp[VFS_MAX_PATH];
     int pos;
-    vfs_node_t *cur;
     size_t len;
     size_t pathlen;
+    vfs_node_t *cur;
 
     if (!node || !buf || size == 0)
         return -1;
@@ -538,8 +539,8 @@ static dirent_t *vfs_readdir_mount_children(vfs_node_t *node, uint64_t mount_ind
     size_t child_len;
     int k;
     int is_dup;
-    dirent_t *fs_entry;
     uint64_t fi;
+    dirent_t *fs_entry;
 
     if (node == vfs_root)
         return NULL;
@@ -597,8 +598,8 @@ static dirent_t *vfs_readdir_mount_children(vfs_node_t *node, uint64_t mount_ind
 }
 
 dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *result;
     uint64_t fs_count;
+    dirent_t *result;
 
     if (!node) return NULL;
 
@@ -622,12 +623,12 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
-    vfs_node_t *result;
     char dir_path[VFS_MAX_PATH];
     char child_path[VFS_MAX_PATH];
     size_t dir_len;
     size_t name_len;
     int i;
+    vfs_node_t *result;
 
     if (!node || !name) return NULL;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY && (node->flags & VFS_MOUNTPOINT) == 0) return NULL;
@@ -692,10 +693,10 @@ int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
 }
 
 static vfs_mount_t *find_mount_for_path(const char *path) {
-    vfs_mount_t *best;
     size_t best_len;
     int i;
     size_t len;
+    vfs_mount_t *best;
     
     best = NULL;
     best_len = 0;
@@ -814,10 +815,11 @@ static void vfs_normalize_path(char *path) {
 #define VFS_MAX_SYMLINKS 8
 
 static int vfs_readlink_node(vfs_node_t *node, char *buf, size_t size) {
+    uint64_t n;
     if (!node || !buf || size == 0) return -1;
     if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -1;
 
-    uint64_t n = vfs_read(node, 0, (uint64_t)(size - 1), (uint8_t *)buf);
+    n = vfs_read(node, 0, (uint64_t)(size - 1), (uint8_t *)buf);
     if (n >= size) n = (uint64_t)(size - 1);
     buf[n] = '\0';
     if (n == 0) return -1;
@@ -872,13 +874,13 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
     const char *remaining;
     const char *rest_raw;
     const char *rest_non_slash;
-    vfs_mount_t *mount;
-    vfs_node_t *node;
-    vfs_node_t *next;
     char *last;
     size_t plen;
     int i;
     int has_more;
+    vfs_mount_t *mount;
+    vfs_node_t *node;
+    vfs_node_t *next;
 
     if (!in_path) return NULL;
     if (depth > VFS_MAX_SYMLINKS) return NULL;
@@ -1018,6 +1020,9 @@ vfs_node_t *vfs_lookup(const char *path) {
 }
 
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
+    char temp[VFS_MAX_PATH];
+    int pos;
+    size_t pathlen;
     if (!node || !buf || size == 0) return NULL;
     
     if (node == vfs_root) {
@@ -1026,8 +1031,7 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
         return buf;
     }
     
-    char temp[VFS_MAX_PATH];
-    int pos = VFS_MAX_PATH - 1;
+    pos = VFS_MAX_PATH - 1;
     temp[pos] = '\0';
     
     vfs_node_t *cur = node;
@@ -1044,7 +1048,7 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     
     if (pos == VFS_MAX_PATH - 1) temp[--pos] = '/';
     
-    size_t pathlen = VFS_MAX_PATH - pos;
+    pathlen = VFS_MAX_PATH - pos;
     if (pathlen >= size) return NULL;
     
     memcpy(buf, &temp[pos], pathlen);
@@ -1094,15 +1098,15 @@ static int vfs_split_path(const char *path, char *parent_buf, size_t parent_size
 }
 
 int vfs_open_path(const char *path, int flags) {
-    if (!path) return -1;
-    
-    vfs_node_t *node;
     char parent_path[VFS_MAX_PATH];
     char filename[VFS_MAX_NAME];
-    vfs_node_t *parent;
     int ret;
     int fd;
     int i;
+    if (!path) return -1;
+    
+    vfs_node_t *node;
+    vfs_node_t *parent;
     
     node = vfs_namei(path);
     
@@ -1399,10 +1403,10 @@ static dirent_t *root_readdir(vfs_node_t *node, uint64_t index) {
                 uint64_t ramfs_idx;
                 uint64_t ramfs_count;
                 uint64_t target;
-                dirent_t *entry;
                 char mount_path[VFS_MAX_PATH];
                 int is_dup;
                 int k;
+                dirent_t *entry;
 
                 target = index - count;
                 ramfs_count = 0;

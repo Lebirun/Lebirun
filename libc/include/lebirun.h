@@ -273,6 +273,9 @@
 #define LEB_SYSCALL_PANIC 274u
 #define LEB_SYSCALL_BLOCKDEV_RESCAN 275u
 #define LEB_SYSCALL_NET_HTTP_GET_ALLOC 276u
+#define LEB_SYSCALL_LKE_LOAD 277u
+#define LEB_SYSCALL_LKE_UNLOAD 278u
+#define LEB_SYSCALL_LKE_LIST 279u
 #define LEB_NR_SYSCALLS 281u
 
 #define LEB_MS_RDONLY   1
@@ -318,7 +321,7 @@ int vfs_open(const char *path, int flags);
 int vfs_close_fd(int fd);
 int vfs_read_fd(int fd, void *buf, unsigned int count);
 int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index);
-int vfs_stat(int fd, unsigned int *size, unsigned int *type);
+int vfs_stat(int fd, uint64_t *size, uint64_t *type);
 int vfs_mounts(void);
 int vfs_write_fd(int fd, const void *buf, unsigned int count);
 int vfs_create(const char *path, unsigned int perms);

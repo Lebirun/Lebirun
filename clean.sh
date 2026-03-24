@@ -15,7 +15,7 @@ TOTAL_STEPS=0
 for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
   [ -d "$PROJECT" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 done
-[ -d "userprog/coreutils" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -d "userprog/lebutils" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/lsh" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/LebInit" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/login" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
@@ -105,11 +105,11 @@ for PROJECT in $SYSTEM_HEADER_PROJECTS userprog; do
   fi
 done
 
-if [ -d "userprog/coreutils" ]; then
+if [ -d "userprog/lebutils" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
   bar_print "Cleaning coreutils..."
-  progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning coreutils"
-  run_clean "Cleaning coreutils" sh -c "cd userprog/coreutils && $MAKE clean"
+  progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning lebutils"
+  run_clean "Cleaning lebutils" sh -c "cd userprog/lebutils && $MAKE clean"
 fi
 
 if [ -d "userprog/lsh" ]; then
@@ -161,10 +161,10 @@ remove_dir_contents root/bin
 remove_dir_contents root/sbin
 remove_dir_contents root/usr/bin
 remove_dir_contents root/usr/sbin
-remove_dir_contents root/lib
+find root/lib -mindepth 1 -maxdepth 1 ! -name lke -exec rm -rf {} + 2>/dev/null || true
 remove_dir_contents root/usr/lib
 rm -rf root/usr/share/terminfo
-rm -f userprog/coreutils/*.bin
+rm -f userprog/lebutils/*.bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin
 rm -f userprog/lsh/liblsh.gnu.sym userprog/lsh/liblsh.darwin.sym
 rm -rf userprog/lsh/.build userprog/lsh/build-cross
@@ -177,7 +177,7 @@ rm -f userprog/lebinstaller/lebinstaller.bin
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "Cleaning object files..."
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning object files"
-find userprog/coreutils -type f -name '*.o' -delete 2>/dev/null || true
+find userprog/lebutils -type f -name '*.o' -delete 2>/dev/null || true
 find kernel -type f -name '*.o' -delete 2>/dev/null || true
 find libc -type f -name '*.o' -delete 2>/dev/null || true
 find userprog -type f -name '*.o' -delete 2>/dev/null || true

@@ -61,8 +61,8 @@ static void init_default_termios(struct termios *t) {
 
 static int pty_grow(void) {
     int new_cap;
-    pty_t *new_arr;
     int i;
+    pty_t *new_arr;
 
     new_cap = pty_capacity ? pty_capacity * 2 : PTY_INIT_COUNT;
     new_arr = (pty_t *)krealloc(ptys, new_cap * sizeof(pty_t));
@@ -120,13 +120,15 @@ static pty_t *get_pty_by_slave(int fd) {
 }
 
 int pty_open_master(void) {
+    int idx;
+    int fd;
     mutex_lock(&pty_lock);
-    int idx = alloc_pty();
+    idx = alloc_pty();
     if (idx < 0) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    int fd = ptys[idx].master_fd;
+    fd = ptys[idx].master_fd;
     mutex_unlock(&pty_lock);
     return fd;
 }
@@ -150,12 +152,14 @@ int pty_unlock(int master_fd) {
 }
 
 char *pty_name(int master_fd) {
+    static char name[32];
+    int idx;
+    int len;
     pty_t *pty = get_pty_by_master(master_fd);
     if (!pty) return NULL;
-    static char name[32];
-    int idx = master_fd - pty_base_master;
+    idx = master_fd - pty_base_master;
     strcpy(name, "/dev/pts/");
-    int len = 9;
+    len = 9;
     if (idx == 0) {
         name[len++] = '0';
     } else {
@@ -183,11 +187,11 @@ static size_t buf_free(uint64_t head, uint64_t tail, size_t size) {
 }
 
 ssize_t pty_master_read(int fd, void *buf, size_t count) {
-    pty_t *pty;
     size_t available;
     size_t to_read;
     uint8_t *dst;
     size_t i;
+    pty_t *pty;
 
     pty = get_pty_by_master(fd);
     if (!pty) return -1;
@@ -214,12 +218,12 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_master_write(int fd, const void *buf, size_t count) {
-    pty_t *pty;
     size_t space;
     size_t to_write;
     const uint8_t *src;
     size_t i;
     uint8_t c;
+    pty_t *pty;
 
     pty = get_pty_by_master(fd);
     if (!pty) return -1;
@@ -289,7 +293,6 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t pty_slave_read(int fd, void *buf, size_t count) {
-    pty_t *pty;
     size_t available;
     uint8_t *dst;
     size_t read_count;
@@ -298,6 +301,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
     size_t i;
     uint8_t c;
     size_t to_read;
+    pty_t *pty;
     cc_t vmin;
 
     pty = get_pty_by_slave(fd);
@@ -361,12 +365,12 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
-    pty_t *pty;
     size_t space;
     size_t written;
     const uint8_t *src;
     size_t i;
     uint8_t c;
+    pty_t *pty;
 
     pty = get_pty_by_slave(fd);
     if (!pty) return -1;
@@ -509,8 +513,8 @@ int is_pty_slave(int fd) {
 }
 
 int pty_has_data_for_master(int fd) {
-    pty_t *pty;
     size_t available;
+    pty_t *pty;
 
     pty = get_pty_by_master(fd);
     if (!pty) return 0;
@@ -521,8 +525,8 @@ int pty_has_data_for_master(int fd) {
 }
 
 int pty_has_data_for_slave(int fd) {
-    pty_t *pty;
     size_t available;
+    pty_t *pty;
 
     pty = get_pty_by_slave(fd);
     if (!pty) return 0;

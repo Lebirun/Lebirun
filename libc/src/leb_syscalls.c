@@ -115,7 +115,7 @@ int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index)
     return (int)syscall4(SYS_VFS_READDIR, fd, (long)name, (long)type, (long)index);
 }
 
-int vfs_stat(int fd, unsigned int *size, unsigned int *type)
+int vfs_stat(int fd, uint64_t *size, uint64_t *type)
 {
     return (int)syscall3(SYS_VFS_STAT, fd, (long)size, (long)type);
 }

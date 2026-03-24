@@ -9,6 +9,7 @@ static char init_path[CMDLINE_INIT_PATH_MAX];
 static char root_dev[64];
 static int num_consoles;
 static int text_mode;
+static int lke_enabled;
 
 static int parse_int(const char *s)
 {
@@ -58,6 +59,7 @@ void cmdline_parse(const char *cmdline_str)
     root_dev[0] = '\0';
     cmdline_buf[0] = '\0';
     text_mode = 0;
+    lke_enabled = 1;
 
     if (!cmdline_str)
         return;
@@ -91,7 +93,11 @@ void cmdline_parse(const char *cmdline_str)
     if (val)
         text_mode = parse_int(val);
 
-    printf("CMDLINE: init=%s consoles=%d root=%s text=%d\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)", text_mode);
+    val = find_param(cmdline_buf, "lke");
+    if (val)
+        lke_enabled = parse_int(val);
+
+    printf("CMDLINE: init=%s consoles=%d root=%s text=%d lke=%d\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)", text_mode, lke_enabled);
 }
 
 const char *cmdline_get(void)
@@ -107,6 +113,11 @@ const char *cmdline_get_init(void)
 int cmdline_get_consoles(void)
 {
     return num_consoles;
+}
+
+int cmdline_get_lke(void)
+{
+    return lke_enabled;
 }
 
 const char *cmdline_get_root(void)

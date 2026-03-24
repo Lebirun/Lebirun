@@ -125,8 +125,8 @@ void exec_cleanup_drain(void) {
 
 static void task_error(const char *fmt, ...) {
     char buf[256];
-    va_list ap;
     int n;
+    va_list ap;
     
     va_start(ap, fmt);
     n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -168,8 +168,8 @@ static int task_ptr_valid(task_t *t) {
 }
 
 task_t* task_find(pid_t pid) {
-    task_t *t;
     int limit;
+    task_t *t;
 
     lock_scheduler();
     t = all_tasks_head;
@@ -188,9 +188,10 @@ task_t* task_find(pid_t pid) {
 }
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
-    task_t *t;
-    int found = 0;
+    int found;
     int limit;
+    task_t *t;
+    found = 0;
 
     lock_scheduler();
 
@@ -274,8 +275,8 @@ task_t* waitq_pop(wait_queue_t* q) {
 }
 
 void waitq_wake_all(wait_queue_t* q) {
-    task_t *t;
     uint64_t flags;
+    task_t *t;
 
     if (!q) return;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
@@ -286,8 +287,8 @@ void waitq_wake_all(wait_queue_t* q) {
 }
 
 void waitq_wake_one(wait_queue_t *q) {
-    task_t *t;
     uint64_t flags;
+    task_t *t;
 
     if (!q) return;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
@@ -427,8 +428,8 @@ void lock_scheduler(void) {
 }
 
 void unlock_scheduler(void) {
-    cpu_info_t *cpu;
     uint64_t eflags;
+    cpu_info_t *cpu;
 
     cpu = smp_this_cpu();
     cpu->scheduler_lock_depth--;
@@ -487,12 +488,12 @@ task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_m
 }
 
 task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint64_t cr3) {
-    task_t *new_task;
     uint8_t *stack_base;
     uint8_t *kernel_stack_base;
     uint64_t *krsp;
     uint64_t *rsp_ptr;
     uint64_t user_rsp;
+    task_t *new_task;
 
     if (!entry) return NULL;
 
@@ -666,9 +667,10 @@ void sleep_ticks(uint64_t ticks) {
 }
 
 void wake_sleeping_tasks(void) {
+    int safety;
     task_t **ptr;
     task_t *t;
-    int safety = 0;
+    safety = 0;
 
     if (!sleep_queue_head) return;
     lock_scheduler();
@@ -836,8 +838,8 @@ void task_deferred_work(void) {
 }
 
 void switch_to(task_t* next) {
-    task_t *prev;
     uint64_t rsp0;
+    task_t *prev;
 
     if (next == current_task) return;
 
@@ -972,15 +974,11 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
 }
 
 registers_t* schedule_from_irq(registers_t* regs) {
-    task_t* prev_task;
     uint64_t entry_cr3;
     uint64_t kernel_cr3;
     int must_switch;
     bool is_idle;
-    task_t* next;
-    task_t* start;
     int safety;
-    registers_t* return_frame;
     uint64_t next_rsp;
     uint64_t es_val;
     uint64_t ds_val;
@@ -989,8 +987,12 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int valid_ds;
     int valid_cs;
     uint64_t rsp0;
-    cpu_info_t *this_cpu;
     int got_lock;
+    task_t* prev_task;
+    task_t* next;
+    task_t* start;
+    registers_t* return_frame;
+    cpu_info_t *this_cpu;
     registers_t *result;
 
     if (!current_task || !ready_queue_head) return regs;
@@ -1288,11 +1290,11 @@ pid_t task_fork(registers_t *parent_regs) {
     uint64_t *child_user_pages;
     uint64_t child_user_pages_count;
     uint64_t child_pd;
-    task_t* child;
     uint8_t* kernel_stack_base;
     uint64_t i;
-    registers_t *child_frame;
     int parent_cap;
+    task_t* child;
+    registers_t *child_frame;
 
     if (!current_task || !current_task->is_user) {
         printf("task_fork: can only fork user tasks\n");
@@ -1436,7 +1438,6 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     uint64_t stack_top;
     uint64_t stack_size;
     uint64_t new_pd;
-    elf_info_t elf_info;
     uint64_t *elf_pages;
     uint64_t elf_page_count;
     int load_result;
@@ -1451,6 +1452,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     uint8_t random_bytes[16];
     uint64_t random_addr;
     uint64_t argc_val;
+    elf_info_t elf_info;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec: can only exec in user tasks\n");
@@ -1699,7 +1701,6 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
     uint64_t stack_top;
     uint64_t stack_size;
     uint64_t new_pd;
-    elf_info_t elf_info;
     uint64_t *elf_pages;
     uint64_t elf_page_count;
     int load_result;
@@ -1719,6 +1720,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
     uint64_t final_sp;
     const char *base;
     int n;
+    elf_info_t elf_info;
 
     __asm__ volatile ("mov %%rsp, %0" : "=r"(stack_ptr));
     if (current_task && current_task->kernel_stack_base) {
@@ -2150,7 +2152,6 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
 }
 
 pid_t task_create_thread(void (*entry)(void)) {
-    task_t *new_task;
     int i;
     uint64_t thread_stack_size;
     uint64_t thread_stack_base;
@@ -2158,6 +2159,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     uint64_t stack_page_count;
     uint64_t *stack_pages;
     uint64_t *stack_ptr;
+    task_t *new_task;
 
     if (!current_task || !current_task->is_user) {
         return -1;
@@ -2269,7 +2271,6 @@ pid_t task_create_thread(void (*entry)(void)) {
 }
 
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
-    task_t *new_task;
     int i;
     uint64_t thread_stack_size;
     uint64_t thread_stack_base;
@@ -2279,6 +2280,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     uint64_t zero_val;
     uint64_t arg_val;
     uint64_t *stack_ptr;
+    task_t *new_task;
 
     if (!current_task || !current_task->is_user) {
         return -1;
@@ -2407,8 +2409,9 @@ void task_set_vring(task_t *task, uint8_t vring_minor) {
 static int cached_proc_count = 1;
 
 void task_update_cached_stats(void) {
+    int count;
     task_t *t;
-    int count = 0;
+    count = 0;
 
     if (!ready_queue_head) {
         cached_proc_count = 1;

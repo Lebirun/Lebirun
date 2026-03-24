@@ -4,8 +4,11 @@
 #include <kernel/mem_map.h>
 #include <kernel/idt.h>
 #include <kernel/debug.h>
+#include <kernel/task.h>
 #include <string.h>
 #include <stdio.h>
+
+extern task_t *current_task;
 
 #define RAMFS_NODE_FILE    0
 #define RAMFS_NODE_DIR     1
@@ -113,7 +116,7 @@ void ramfs_init(void) {
     
     strcpy(ramfs_root->name, "/");
     ramfs_root->type = 1;
-    ramfs_root->permissions = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    ramfs_root->permissions = 0755;
     ramfs_root->uid = 0;
     ramfs_root->gid = 0;
     ramfs_root->parent = NULL;
@@ -215,7 +218,7 @@ int ramfs_get_stats(ramfs_stats_t *stats) {
     return RAMFS_ERR_OK;
 }
 
-int ramfs_create_file(const char *path, uint8_t permissions) {
+int ramfs_create_file(const char *path, uint16_t permissions) {
     if (!path) return RAMFS_ERR_INVAL;
     
     char name[VFS_MAX_NAME];
@@ -247,9 +250,9 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
     strncpy(node->name, name, VFS_MAX_NAME - 1);
     node->name[VFS_MAX_NAME - 1] = '\0';
     node->type = RAMFS_NODE_FILE;
-    node->permissions = permissions;
-    node->uid = 0;
-    node->gid = 0;
+    node->permissions = permissions ? permissions : 0644;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
     node->parent = parent;
     node->data = NULL;
     node->data_capacity = 0;
@@ -269,9 +272,9 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
         vn->flags = VFS_FILE;
         vn->inode = ramfs_next_inode++;
         vn->length = 0;
-        vn->mask = permissions;
-        vn->uid = 0;
-        vn->gid = 0;
+        vn->mask = node->permissions;
+        vn->uid = node->uid;
+        vn->gid = node->gid;
         vn->atime = node->atime;
         vn->mtime = node->mtime;
         vn->ctime = node->ctime;
@@ -292,7 +295,7 @@ int ramfs_create_file(const char *path, uint8_t permissions) {
     return RAMFS_ERR_OK;
 }
 
-int ramfs_create_symlink(const char *path, const char *target, uint8_t permissions) {
+int ramfs_create_symlink(const char *path, const char *target, uint16_t permissions) {
     if (!path || !target) return RAMFS_ERR_INVAL;
 
     char name[VFS_MAX_NAME];
@@ -330,9 +333,9 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
     strncpy(node->name, name, VFS_MAX_NAME - 1);
     node->name[VFS_MAX_NAME - 1] = '\0';
     node->type = RAMFS_NODE_SYMLINK;
-    node->permissions = permissions ? permissions : (VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC);
-    node->uid = 0;
-    node->gid = 0;
+    node->permissions = permissions ? permissions : 0777;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
     node->parent = parent;
     node->children = NULL;
 
@@ -364,8 +367,8 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
         vn->inode = ramfs_next_inode++;
         vn->length = node->length;
         vn->mask = node->permissions;
-        vn->uid = 0;
-        vn->gid = 0;
+        vn->uid = node->uid;
+        vn->gid = node->gid;
         vn->atime = node->atime;
         vn->mtime = node->mtime;
         vn->ctime = node->ctime;
@@ -387,7 +390,7 @@ int ramfs_create_symlink(const char *path, const char *target, uint8_t permissio
     return RAMFS_ERR_OK;
 }
 
-int ramfs_create_dir(const char *path, uint8_t permissions) {
+int ramfs_create_dir(const char *path, uint16_t permissions) {
     if (!path) return RAMFS_ERR_INVAL;
     
     char name[VFS_MAX_NAME];
@@ -417,9 +420,9 @@ int ramfs_create_dir(const char *path, uint8_t permissions) {
     strncpy(node->name, name, VFS_MAX_NAME - 1);
     node->name[VFS_MAX_NAME - 1] = '\0';
     node->type = RAMFS_NODE_DIR;
-    node->permissions = permissions;
-    node->uid = 0;
-    node->gid = 0;
+    node->permissions = permissions ? permissions : 0755;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
     node->parent = parent;
     node->children = NULL;
     
@@ -437,9 +440,9 @@ int ramfs_create_dir(const char *path, uint8_t permissions) {
         vn->flags = VFS_DIRECTORY;
         vn->inode = ramfs_next_inode++;
         vn->length = 0;
-        vn->mask = permissions;
-        vn->uid = 0;
-        vn->gid = 0;
+        vn->mask = node->permissions;
+        vn->uid = node->uid;
+        vn->gid = node->gid;
         vn->atime = node->atime;
         vn->mtime = node->mtime;
         vn->ctime = node->ctime;
@@ -691,7 +694,7 @@ int ramfs_chmod(const char *path, uint64_t mode) {
     
     ramfs_node_lock(node);
     
-    node->permissions = (uint8_t)(mode & 0xFF);
+    node->permissions = (uint16_t)(mode & 0x1FF);
     node->ctime = ramfs_get_time();
     
     if (node->vfs_node) {
@@ -1310,10 +1313,10 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
     strncpy(node->name, name, VFS_MAX_NAME - 1);
     node->name[VFS_MAX_NAME - 1] = '\0';
     node->type = RAMFS_NODE_FILE;
-    node->permissions = (uint8_t)(flags & 0xFF);
-    if (node->permissions == 0) node->permissions = VFS_PERM_READ | VFS_PERM_WRITE;
-    node->uid = 0;
-    node->gid = 0;
+    node->permissions = (uint16_t)(flags & 0x1FF);
+    if (node->permissions == 0) node->permissions = 0644;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
     node->data = NULL;
     node->data_capacity = 0;
@@ -1452,10 +1455,10 @@ static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms)
     strncpy(node->name, name, VFS_MAX_NAME - 1);
     node->name[VFS_MAX_NAME - 1] = '\0';
     node->type = 1;
-    node->permissions = (uint8_t)(perms & 0xFF);
-    if (node->permissions == 0) node->permissions = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
-    node->uid = 0;
-    node->gid = 0;
+    node->permissions = (uint16_t)(perms & 0x1FF);
+    if (node->permissions == 0) node->permissions = 0755;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
     node->children = NULL;
     
@@ -1616,7 +1619,7 @@ static vfs_node_t *ramfs_vfs_do_mount(const char *device, const char *mountpoint
     ramfs_vfs_root->flags = VFS_DIRECTORY;
     ramfs_vfs_root->inode = ramfs_next_inode++;
     ramfs_vfs_root->length = 0;
-    ramfs_vfs_root->mask = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    ramfs_vfs_root->mask = 0755;
     ramfs_vfs_root->uid = 0;
     ramfs_vfs_root->gid = 0;
     ramfs_vfs_root->atime = ramfs_root->atime;
@@ -1655,7 +1658,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
 
     strcpy(rn->name, "tmpfs");
     rn->type = RAMFS_NODE_DIR;
-    rn->permissions = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    rn->permissions = 0755;
     rn->uid = 0;
     rn->gid = 0;
     rn->parent = NULL;
@@ -1673,7 +1676,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
     vn->flags = VFS_DIRECTORY;
     vn->inode = ramfs_next_inode++;
     vn->length = 0;
-    vn->mask = VFS_PERM_READ | VFS_PERM_WRITE | VFS_PERM_EXEC;
+    vn->mask = 0755;
     vn->uid = 0;
     vn->gid = 0;
     vn->atime = rn->atime;

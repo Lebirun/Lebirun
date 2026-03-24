@@ -43,7 +43,7 @@ LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
 
 SYSROOT_BIN = ../root/bin
 
-.PHONY: copy-pong stage-lsh stage-coreutils stage-LebInit stage-login
+.PHONY: copy-pong stage-lsh stage-lebutils stage-LebInit stage-login
 
 copy-pong: pong.bin
 	cp pong.bin $(INITRD_DIR)/pong.bin
@@ -53,8 +53,8 @@ stage-lsh: lsh.bin
 	cp lsh.bin $(SYSROOT_BIN)/lsh
 	ln -sf lsh $(SYSROOT_BIN)/sh
 
-stage-coreutils:
-	$(MAKE) -C coreutils V=$(V) stage
+stage-lebutils:
+	$(MAKE) -C lebutils V=$(V) stage
 
 stage-LebInit:
 	$(MAKE) -C LebInit V=$(V) stage
@@ -77,7 +77,7 @@ lsh.bin:
 
 .PHONY: all clean
 
-all: $(PROGRAMS) copy-pong stage-lsh stage-coreutils stage-LebInit stage-login stage-lebinstaller
+all: $(PROGRAMS) copy-pong stage-lsh stage-lebutils stage-LebInit stage-login stage-lebinstaller
 
 %.o: %.c
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
