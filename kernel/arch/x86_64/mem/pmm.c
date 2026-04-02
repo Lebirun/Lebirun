@@ -19,7 +19,6 @@ static uint8_t *pfa_refcounts = NULL;
 static uint64_t pfa_refcount_entries = 0;
 
 #define REFHT_BUCKETS 512
-#define REFHT_POOL_SIZE 1024
 
 typedef struct refht_node {
     uint64_t page_idx;
@@ -28,7 +27,6 @@ typedef struct refht_node {
 } refht_node_t;
 
 static refht_node_t *refht_buckets[REFHT_BUCKETS];
-static refht_node_t refht_pool[REFHT_POOL_SIZE];
 static refht_node_t *refht_free_list;
 static int refht_initialized = 0;
 static volatile int refht_lock_val = 0;
@@ -366,15 +364,13 @@ uint64_t pfa_get_usable_ram_kb(void) {
 }
 
 uint64_t pfa_get_kernel_used_kb(void) {
-    uint64_t allocated;
-    uint64_t idx;
+    uint64_t total_managed_kb;
+    uint64_t free_kb;
 
-    allocated = 0;
-    for (idx = kernel_reserved_frames; idx < total_pages_managed; idx++) {
-        if (test_bit(idx)) allocated++;
-    }
-
-    return allocated * 4;
+    total_managed_kb = total_pages_managed * 4;
+    free_kb = pfa_cached_free * 4;
+    if (free_kb > total_managed_kb) return 0;
+    return total_managed_kb - free_kb - kernel_reserved_frames * 4;
 }
 
 uint64_t pfa_get_kernel_binary_kb(void) {
@@ -597,15 +593,9 @@ static void refht_lock_release(uint64_t eflags) {
 }
 
 static void refht_init(void) {
-    uint64_t i;
-
     if (refht_initialized) return;
     memset(refht_buckets, 0, sizeof(refht_buckets));
     refht_free_list = NULL;
-    for (i = 0; i < REFHT_POOL_SIZE; i++) {
-        refht_pool[i].next = refht_free_list;
-        refht_free_list = &refht_pool[i];
-    }
     refht_initialized = 1;
 }
 
@@ -615,6 +605,13 @@ static refht_node_t *refht_alloc_node(void) {
     n = refht_free_list;
     if (n) {
         refht_free_list = n->next;
+        n->next = NULL;
+        return n;
+    }
+    n = (refht_node_t *)kmalloc(sizeof(refht_node_t));
+    if (n) {
+        n->page_idx = 0;
+        n->refcount = 0;
         n->next = NULL;
     }
     return n;

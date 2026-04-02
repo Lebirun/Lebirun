@@ -110,22 +110,65 @@ static inline void memory_barrier(void) {
 #define MAX_COLS 160
 static uint64_t screen_buffer_rows = 0;
 static char (*screen_buffer)[MAX_COLS];
+static uint32_t (*screen_fg_buf)[MAX_COLS];
+static uint32_t (*screen_bg_buf)[MAX_COLS];
 
 static void fb_grow_screen_buffer(uint64_t needed_rows) {
     uint64_t new_rows;
     char (*new_buf)[MAX_COLS];
+    uint32_t (*new_fg)[MAX_COLS];
+    uint32_t (*new_bg)[MAX_COLS];
 
     if (needed_rows <= screen_buffer_rows) return;
     new_rows = needed_rows;
     new_buf = (char (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS);
     if (!new_buf) return;
+    new_fg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
+    if (!new_fg) { kfree(new_buf); return; }
+    new_bg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
+    if (!new_bg) { kfree(new_buf); kfree(new_fg); return; }
     memset(new_buf, ' ', new_rows * MAX_COLS);
+    memset(new_fg, 0xFF, new_rows * MAX_COLS * sizeof(uint32_t));
+    memset(new_bg, 0, new_rows * MAX_COLS * sizeof(uint32_t));
     if (screen_buffer && screen_buffer_rows > 0) {
         memcpy(new_buf, screen_buffer, screen_buffer_rows * MAX_COLS);
         kfree(screen_buffer);
     }
+    if (screen_fg_buf && screen_buffer_rows > 0) {
+        memcpy(new_fg, screen_fg_buf, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+        kfree(screen_fg_buf);
+    }
+    if (screen_bg_buf && screen_buffer_rows > 0) {
+        memcpy(new_bg, screen_bg_buf, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+        kfree(screen_bg_buf);
+    }
     screen_buffer = new_buf;
+    screen_fg_buf = new_fg;
+    screen_bg_buf = new_bg;
     screen_buffer_rows = new_rows;
+}
+
+static void fb_restore_cell(uint64_t cx, uint64_t cy) {
+    uint64_t saved_fg;
+    uint64_t saved_bg;
+    char ch;
+
+    ch = ' ';
+    if (cy < screen_buffer_rows && cx < MAX_COLS && screen_buffer)
+        ch = screen_buffer[cy][cx];
+
+    saved_fg = fb.fg_color;
+    saved_bg = fb.bg_color;
+
+    if (cy < screen_buffer_rows && cx < MAX_COLS && screen_fg_buf && screen_bg_buf) {
+        fb.fg_color = screen_fg_buf[cy][cx];
+        fb.bg_color = screen_bg_buf[cy][cx];
+    }
+
+    fb_putchar(ch, cx, cy);
+
+    fb.fg_color = saved_fg;
+    fb.bg_color = saved_bg;
 }
 
 static void fb_draw_cursor_block(uint64_t cx, uint64_t cy, uint64_t color) {
@@ -539,6 +582,8 @@ void fb_clear(void) {
     fb.cursor_y = 0;
     
     if (screen_buffer && screen_buffer_rows > 0) memset(&screen_buffer[0][0], ' ', screen_buffer_rows * MAX_COLS);
+    if (screen_fg_buf && screen_buffer_rows > 0) memset(&screen_fg_buf[0][0], 0xFF, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+    if (screen_bg_buf && screen_buffer_rows > 0) memset(&screen_bg_buf[0][0], 0, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
     
     cursor_drawn = 0;
     cursor_prev_x = 0;
@@ -624,6 +669,8 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
     
     if (cy < screen_buffer_rows && cx < MAX_COLS && screen_buffer) {
         screen_buffer[cy][cx] = c;
+        if (screen_fg_buf) screen_fg_buf[cy][cx] = (uint32_t)fb.fg_color;
+        if (screen_bg_buf) screen_bg_buf[cy][cx] = (uint32_t)fb.bg_color;
     }
     
     uc = (uint8_t)c;
@@ -694,7 +741,6 @@ void fb_scroll(void) {
     uint64_t scroll_rows;
     uint64_t scroll_cols;
     uint64_t col;
-    char old_char;
     uint64_t x;
 
     if (fb.rows == 0 || fb.cols == 0) {
@@ -710,11 +756,7 @@ void fb_scroll(void) {
     }
 
     if (cursor_drawn) {
-        old_char = ' ';
-        if (cursor_prev_y < screen_buffer_rows && cursor_prev_x < MAX_COLS && screen_buffer) {
-            old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
-        }
-        fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+        fb_restore_cell(cursor_prev_x, cursor_prev_y);
         cursor_drawn = 0;
     }
 
@@ -740,10 +782,18 @@ void fb_scroll(void) {
     if (scroll_rows > 0 && scroll_cols > 0 && scroll_rows < screen_buffer_rows && screen_buffer) {
         memmove(&screen_buffer[0][0], &screen_buffer[1][0],
                 scroll_rows * MAX_COLS * sizeof(char));
+        if (screen_fg_buf)
+            memmove(&screen_fg_buf[0][0], &screen_fg_buf[1][0],
+                    scroll_rows * MAX_COLS * sizeof(uint32_t));
+        if (screen_bg_buf)
+            memmove(&screen_bg_buf[0][0], &screen_bg_buf[1][0],
+                    scroll_rows * MAX_COLS * sizeof(uint32_t));
 
         if (fb.rows > 0 && fb.rows - 1 < screen_buffer_rows) {
             for (col = 0; col < scroll_cols; col++) {
                 screen_buffer[fb.rows - 1][col] = ' ';
+                if (screen_fg_buf) screen_fg_buf[fb.rows - 1][col] = (uint32_t)fb.fg_color;
+                if (screen_bg_buf) screen_bg_buf[fb.rows - 1][col] = (uint32_t)fb.bg_color;
             }
         }
     }
@@ -812,7 +862,6 @@ void fb_write_string(const char *str) {
 }
 
 void fb_update_cursor(void) {
-    char old_char;
 
     if (!fb_graphical) {
         vga_text_update_cursor(fb.cursor_x, fb.cursor_y);
@@ -821,21 +870,13 @@ void fb_update_cursor(void) {
 
     if (cursor_drawn && (cursor_prev_x != fb.cursor_x || cursor_prev_y != fb.cursor_y)) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
-            old_char = ' ';
-            if (cursor_prev_y < screen_buffer_rows && cursor_prev_x < MAX_COLS && screen_buffer) {
-                old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
-            }
-            fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+            fb_restore_cell(cursor_prev_x, cursor_prev_y);
         }
         cursor_drawn = 0;
     }
     if (cursor_drawn && (!cursor_visible || cursor_hidden_by_app)) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
-            old_char = ' ';
-            if (cursor_prev_y < screen_buffer_rows && cursor_prev_x < MAX_COLS && screen_buffer) {
-                old_char = screen_buffer[cursor_prev_y][cursor_prev_x];
-            }
-            fb_putchar(old_char, cursor_prev_x, cursor_prev_y);
+            fb_restore_cell(cursor_prev_x, cursor_prev_y);
         }
         cursor_drawn = 0;
     }

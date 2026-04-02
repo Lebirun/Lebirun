@@ -9,18 +9,21 @@
 extern void *kmalloc(size_t);
 extern void kfree(void *);
 
-static vfl_vm_t vfl_vms[VFL_MAX_VMS];
+static vfl_vm_t *vfl_vms;
+static int vfl_capacity;
 static int vfl_initialized;
 
 void vfl_init(void) {
-    memset(vfl_vms, 0, sizeof(vfl_vms));
+    vfl_capacity = VFL_MAX_VMS;
+    vfl_vms = (vfl_vm_t *)kmalloc(vfl_capacity * sizeof(vfl_vm_t));
+    memset(vfl_vms, 0, vfl_capacity * sizeof(vfl_vm_t));
     vfl_initialized = 1;
 }
 
 int vfl_create_vm(void) {
     int i;
 
-    for (i = 0; i < VFL_MAX_VMS; i++) {
+    for (i = 0; i < vfl_capacity; i++) {
         if (!vfl_vms[i].active) {
             memset(&vfl_vms[i], 0, sizeof(vfl_vm_t));
             vfl_vms[i].active = 1;
@@ -35,7 +38,7 @@ int vfl_destroy_vm(uint32_t vm_id) {
     int i;
     vfl_vm_t *vm;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 
@@ -52,7 +55,7 @@ int vfl_create_vcpu(uint32_t vm_id) {
     vfl_vm_t *vm;
     int idx;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vm->nr_vcpus >= VFL_MAX_VCPUS) return -1;
@@ -77,7 +80,7 @@ int vfl_create_vcpu(uint32_t vm_id) {
 int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -90,7 +93,7 @@ int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
 int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -103,7 +106,7 @@ int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
 int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -116,7 +119,7 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
 int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -131,7 +134,7 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     vfl_mem_slot_t *slot;
     uint8_t *host_buf;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (region->slot >= VFL_MAX_MEM_SLOTS) return -1;
@@ -302,7 +305,7 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
     int steps;
     int max_steps;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -587,7 +590,7 @@ int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info) {
     int i;
     uint64_t total;
 
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_capacity) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 

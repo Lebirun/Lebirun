@@ -123,6 +123,9 @@ $(WOLFSSL_DIR)/%.o: $(WOLFSSL_DIR)/%.c
 $(ARCHDIR)/drivers/net/tls.o: $(ARCHDIR)/drivers/net/tls.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
 
+$(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
+	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
+
 $(ARCHDIR)/wolfssl_glue.o: $(ARCHDIR)/wolfssl_glue.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
 

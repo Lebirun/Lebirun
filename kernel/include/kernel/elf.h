@@ -98,11 +98,18 @@
 #define DT_RELAENT 9
 #define DT_STRSZ   10
 #define DT_SYMENT  11
+#define DT_INIT    12
+#define DT_FINI    13
+#define DT_SONAME  14
 #define DT_REL     17
 #define DT_RELSZ   18
 #define DT_RELENT  19
 #define DT_PLTREL  20
 #define DT_JMPREL  23
+#define DT_INIT_ARRAY   25
+#define DT_FINI_ARRAY   26
+#define DT_INIT_ARRAYSZ 27
+#define DT_FINI_ARRAYSZ 28
 
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -266,8 +273,8 @@ typedef struct {
     uint16_t phnum;
 } elf_info_t;
 
-#define DL_MAX_HANDLES 64
-#define DL_MAX_SYMBOLS 1024
+#define DL_MAX_HANDLES 4096
+#define DL_MAX_SYMBOLS 65536
 
 typedef struct {
     int in_use;
@@ -286,12 +293,21 @@ typedef struct {
     uint64_t strtab2_size;
     uint64_t *pages;
     uint64_t page_count;
+    uint64_t init_array_vaddr;
+    uint64_t init_array_size;
+    uint64_t fini_array_vaddr;
+    uint64_t fini_array_size;
+    uint64_t init_func;
+    uint64_t fini_func;
+    char needed[16][64];
+    int needed_count;
 } dl_handle_t;
 
 int elf_validate(const uint8_t *data, uint64_t size);
 int elf_validate_so(const uint8_t *data, uint64_t size);
 int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count);
 int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t base_addr, dl_handle_t *handle);
+int elf_relocate_so(uint64_t pd_phys, dl_handle_t *handle, dl_handle_t *all_handles, int num_handles);
 uint64_t elf_get_entry(const uint8_t *data);
 uint64_t elf_so_find_symbol(dl_handle_t *handle, const char *name);
 

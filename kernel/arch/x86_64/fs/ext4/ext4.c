@@ -406,6 +406,15 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     fs->partition_start_lba = part_start;
     mutex_init(&fs->lock);
 
+    fs->block_cache_count = EXT4_CACHE_BLOCKS;
+    fs->block_cache = (ext4_block_cache_entry_t *)kmalloc(
+        EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+    if (!fs->block_cache) {
+        kfree(fs);
+        return NULL;
+    }
+    memset(fs->block_cache, 0, EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+
     if (ext4_read_superblock(fs) != 0) {
         printf("EXT4: Failed to read superblock\n");
         kfree(fs);
@@ -459,6 +468,10 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
 
     if (mounted_fs->group_descs) {
         kfree(mounted_fs->group_descs);
+    }
+
+    if (mounted_fs->block_cache) {
+        kfree(mounted_fs->block_cache);
     }
 
     for (int i = 0; i < EXT4_MAX_OPEN_INODES; i++) {
@@ -519,6 +532,15 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     fs->port_index = port_index;
     mutex_init(&fs->lock);
 
+    fs->block_cache_count = EXT4_CACHE_BLOCKS;
+    fs->block_cache = (ext4_block_cache_entry_t *)kmalloc(
+        EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+    if (!fs->block_cache) {
+        kfree(fs);
+        return NULL;
+    }
+    memset(fs->block_cache, 0, EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+
     if (ext4_read_superblock(fs) != 0) {
         kfree(fs);
         return NULL;
@@ -565,6 +587,10 @@ int ext4_unmount(ext4_fs_t *fs) {
 
     if (fs->group_descs) {
         kfree(fs->group_descs);
+    }
+
+    if (fs->block_cache) {
+        kfree(fs->block_cache);
     }
 
     if (fs == mounted_fs) {

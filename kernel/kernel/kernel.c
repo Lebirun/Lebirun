@@ -364,8 +364,10 @@ void kernel_main(void) {
             vfs_block_squashfs_access();
         }
 
-        if (debug_boot_vfs) printf("BOOT: ramfs_internalize_all...\n");
-        ramfs_internalize_all();
+        if (!use_squashfs) {
+            if (debug_boot_vfs) printf("BOOT: ramfs_internalize_all...\n");
+            ramfs_internalize_all();
+        }
 
         sqctx = squashfs_get_context();
         if (sqctx && sqctx->base && sqctx->size > 0) {
@@ -426,6 +428,7 @@ void kernel_main(void) {
                         devfs_register_blockdev(devname, pi);
                         printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
+                        printf("AHCI: Calling partition_scan for port %u...\n", pi);
                         if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
                             printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
                                    ptable.count, devname,

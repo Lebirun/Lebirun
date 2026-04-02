@@ -263,12 +263,24 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
             if (task_has_pending_signals()) return -EINTR;
         }
         if (dhcp_is_bound(netif)) {
-            klog_con(con_id, "DHCP: Bound to %u.%u.%u.%u\n",
+            klog_con(con_id, "DHCP: Configured:\n");
+            klog_con(con_id, "  IP: %u.%u.%u.%u\n",
                      netif->ipv4.octets[0], netif->ipv4.octets[1],
                      netif->ipv4.octets[2], netif->ipv4.octets[3]);
+            klog_con(con_id, "  Netmask: %u.%u.%u.%u\n",
+                     netif->netmask.octets[0], netif->netmask.octets[1],
+                     netif->netmask.octets[2], netif->netmask.octets[3]);
+            klog_con(con_id, "  Gateway: %u.%u.%u.%u\n",
+                     netif->gateway.octets[0], netif->gateway.octets[1],
+                     netif->gateway.octets[2], netif->gateway.octets[3]);
+            klog_con(con_id, "  DNS: %u.%u.%u.%u\n",
+                     netif->dns_server.octets[0], netif->dns_server.octets[1],
+                     netif->dns_server.octets[2], netif->dns_server.octets[3]);
+            console_writer_flush();
             return 0;
         }
         klog_con(con_id, "DHCP: Timed out\n");
+        console_writer_flush();
         return -1;
     }
     return -1;
@@ -434,7 +446,8 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     kfree(url_buf);
 
     if (khdr && hdr_len > 0) {
-        memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
+        if (user_range_mapped((uint64_t)(uintptr_t)req.headers_buf, hdr_len))
+            memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
         kfree(khdr);
     } else if (khdr) {
         kfree(khdr);
@@ -614,7 +627,8 @@ static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2)
     kfree(url_buf);
 
     if (khdr && hdr_len > 0) {
-        memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
+        if (user_range_mapped((uint64_t)(uintptr_t)req.headers_buf, hdr_len))
+            memcpy((void *)(uintptr_t)req.headers_buf, khdr, hdr_len);
         kfree(khdr);
     } else if (khdr) {
         kfree(khdr);

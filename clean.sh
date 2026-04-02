@@ -163,6 +163,7 @@ remove_dir_contents root/usr/bin
 remove_dir_contents root/usr/sbin
 find root/lib -mindepth 1 -maxdepth 1 ! -name lke -exec rm -rf {} + 2>/dev/null || true
 remove_dir_contents root/usr/lib
+remove_dir_contents root/usr/include
 rm -rf root/usr/share/terminfo
 rm -f userprog/lebutils/*.bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin

@@ -295,7 +295,9 @@ int e1000_poll(netif_t *netif) {
         len = dev->rx_descs[dev->rx_cur].length;
         buf = dev->rx_buffers[dev->rx_cur];
 
-        if (dev->rx_descs[dev->rx_cur].errors & (E1000_RXD_ERR_CE | E1000_RXD_ERR_SE | E1000_RXD_ERR_SEQ | E1000_RXD_ERR_CXE | E1000_RXD_ERR_RXE)) {
+        if (len < ETH_HEADER_LEN || len > ETH_FRAME_MAX) {
+            dev->errors_rx++;
+        } else if (dev->rx_descs[dev->rx_cur].errors & (E1000_RXD_ERR_CE | E1000_RXD_ERR_SE | E1000_RXD_ERR_SEQ | E1000_RXD_ERR_CXE | E1000_RXD_ERR_RXE)) {
             dev->errors_rx++;
         } else {
             dev->packets_rx++;

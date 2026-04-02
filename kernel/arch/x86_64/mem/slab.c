@@ -3,7 +3,6 @@
 #include <kernel/debug.h>
 #include <string.h>
 
-
 #define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
 #define SLAB_REGION_SIZE  0x00400000ULL
 #define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
@@ -49,7 +48,7 @@ static int slab_initialized = 0;
 static volatile int slab_lock = 0;
 
 static uint64_t slab_virt_bump = SLAB_REGION_START;
-static uint64_t slab_virt_freelist[SLAB_REGION_MAX_PAGES];
+static uint64_t slab_virt_freelist[512];
 static uint64_t slab_virt_free_count = 0;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
@@ -114,7 +113,7 @@ static uint64_t slab_virt_to_phys(uint64_t virt) {
 }
 
 static void slab_virt_free(uint64_t virt) {
-    if (slab_virt_free_count < SLAB_REGION_MAX_PAGES) {
+    if (slab_virt_free_count < 1024) {
         slab_virt_freelist[slab_virt_free_count++] = virt;
     }
 }
@@ -179,7 +178,7 @@ static void slab_remove_from_list(slab_page_t **list, slab_page_t *page) {
 
 void slab_init(void) {
     int i;
-    
+
     for (i = 0; i < SLAB_SIZES_COUNT; i++) {
         slab_caches[i].obj_size = slab_sizes[i];
         slab_caches[i].partial = NULL;
@@ -284,7 +283,7 @@ void slab_free(void *ptr) {
         slab_free_page(page);
         cache->pages_allocated--;
     }
-    
+
     slab_lock_release(eflags);
 }
 

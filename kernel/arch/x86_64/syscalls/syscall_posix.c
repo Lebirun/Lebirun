@@ -4,6 +4,9 @@
 #include <kernel/pty.h>
 #include <kernel/common.h>
 #include <kernel/ramfs.h>
+#include <kernel/fs/ext4/ext4.h>
+#include <kernel/drivers/sata/ahci.h>
+#include <kernel/fs/ext4/ext4.h>
 
 #define fd_table (current_task->fds)
 
@@ -25,11 +28,13 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
 
 static void fd_release_entry(task_fd_t *tfd) {
     int pipe_type;
+    uint8_t *rbuf;
     if (!tfd || !tfd->in_use) return;
 
     vfs_node_t *node_to_close = NULL;
     pipe_t *pipe_to_release = NULL;
     pipe_type = 0;
+    rbuf = tfd->read_buf;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         pipe_to_release = (pipe_t *)tfd->private_data;
@@ -39,6 +44,8 @@ static void fd_release_entry(task_fd_t *tfd) {
     }
 
     memset(tfd, 0, sizeof(*tfd));
+
+    if (rbuf) kfree(rbuf);
 
     if (pipe_to_release) {
         if (pipe_type == FD_TYPE_PIPE_R) pipe_to_release->readers--;
@@ -191,18 +198,33 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     return 0;
 }
 
+static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
+
 static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
     uint64_t addr;
     int mode;
     const char *path;
+    vfs_node_t *node;
+    uint64_t perms;
     (void)unused;
     addr = (uint64_t)path_ptr;
     mode = (int)(uintptr_t)mode_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     path = (const char *)addr;
-    vfs_node_t *node = vfs_namei(path);
+    node = vfs_namei(path);
     if (!node) return -ENOENT;
-    (void)mode;
+    if (mode == 0) return 0;
+    if (current_task && current_task->uid == 0) return 0;
+    perms = vfs_mask_to_unix_perms(node->mask);
+    if (!perms) {
+        if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY)
+            perms = 0755;
+        else
+            perms = 0644;
+    }
+    if ((mode & 4) && !(perms & 0444)) return -EACCES;
+    if ((mode & 2) && !(perms & 0222)) return -EACCES;
+    if ((mode & 1) && !(perms & 0111)) return -EACCES;
     return 0;
 }
 
@@ -260,7 +282,6 @@ static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
     memset(st, 0, sizeof(struct kernel_stat));
     st->st_dev = 1;
     st->st_ino = node->inode ? node->inode : 1;
-    st->__st_ino_truncated = (long)st->st_ino;
 
     st->st_mode = vfs_node_to_unix_mode(node);
     st->st_nlink = 1;
@@ -270,9 +291,6 @@ static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
     st->st_size = node->length;
     st->st_blksize = 4096;
     st->st_blocks = (node->length + 511) / 512;
-    st->__st_atim32.tv_sec = node->atime;
-    st->__st_mtim32.tv_sec = node->mtime;
-    st->__st_ctim32.tv_sec = node->ctime;
     st->st_atim.tv_sec = node->atime;
     st->st_mtim.tv_sec = node->mtime;
     st->st_ctim.tv_sec = node->ctime;
@@ -330,7 +348,6 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
         if (node) {
             st->st_dev = 1;
             st->st_ino = node->inode ? node->inode : 1;
-            st->__st_ino_truncated = (long)st->st_ino;
 
             st->st_mode = vfs_node_to_unix_mode(node);
             st->st_nlink = 1;
@@ -342,9 +359,6 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             st->st_atim.tv_sec = node->atime;
             st->st_mtim.tv_sec = node->mtime;
             st->st_ctim.tv_sec = node->ctime;
-            st->__st_atim32.tv_sec = node->atime;
-            st->__st_mtim32.tv_sec = node->mtime;
-            st->__st_ctim32.tv_sec = node->ctime;
             return 0;
         }
     }
@@ -355,7 +369,6 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     if (ret < 0) return -EBADF;
     st->st_dev = 1;
     st->st_ino = 1;
-    st->__st_ino_truncated = 1;
     if (VFS_GET_TYPE(flags) == VFS_DIRECTORY) st->st_mode = S_IFDIR | 0755;
     else st->st_mode = S_IFREG | 0644;
     st->st_nlink = 1;
@@ -366,19 +379,23 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
 }
 
 static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
+    int32_t offset;
+    int32_t base;
+    int32_t new_offset;
+    vfs_node_t *node;
+    task_fd_t *tfd;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) return -ESPIPE;
     if (tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT || tfd->type == FD_TYPE_STDERR) return -ESPIPE;
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
 
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
 
-    int32_t offset = (int32_t)(uintptr_t)offset_ptr;
-    int32_t base;
+    offset = (int32_t)(uintptr_t)offset_ptr;
     switch (whence) {
         case VFS_SEEK_SET:
             base = 0;
@@ -393,7 +410,7 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
             return -EINVAL;
     }
 
-    int32_t new_offset = base + offset;
+    new_offset = base + offset;
     if (new_offset < 0) return -EINVAL;
     tfd->offset = (uint64_t)new_offset;
     return (int)new_offset;
@@ -1243,7 +1260,25 @@ static int sys_fchown(int fd, int uid, int gid) {
 }
 
 static int sys_fsync(int fd) {
+    ext4_fs_t *fs;
+    ahci_port_t *port;
+    uint64_t i;
+
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    if (!fd_table[fd].in_use) return -EBADF;
+
+    fs = ext4_get_mounted_fs();
+    if (fs) {
+        ext4_sync(fs);
+    }
+
+    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+        port = ahci_get_port(i);
+        if (port) {
+            ahci_flush(port);
+        }
+    }
+
     return 0;
 }
 

@@ -13,7 +13,7 @@
 int smp_processor_id(void);
 #define TEMP_SLOT(n) (TEMP_MAP_BASE + ((uint64_t)smp_processor_id() * TEMP_MAP_PAGES_PER_CPU + (n)) * PAGE_SIZE)
 
-#define MAX_PHYSICAL_MEMORY 0x100000000ULL
+#define MAX_PHYSICAL_MEMORY 0x10000000000ULL
 #define TOTAL_PAGES (MAX_PHYSICAL_MEMORY / PAGE_SIZE)
 #define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
 

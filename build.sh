@@ -21,7 +21,6 @@ for PROJECT in $PROJECTS; do
 done
 TOTAL_STEPS=$((TOTAL_STEPS + 1))
 TOTAL_STEPS=$((TOTAL_STEPS + 1))
-TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "initrd" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "root" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 CURRENT_STEP=0
@@ -135,11 +134,6 @@ for PROJECT in $PROJECTS; do
 done
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
-bar_print "$(printf '\033[1;36mBuilding ncurses...\033[0m')"
-progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building ncurses"
-run_cmd "Building ncurses" sh -c "cd libc/lib && $MAKE ncurses"
-
-CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mBuilding user programs...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building user programs"
 run_cmd "Building user programs" sh -c "cd userprog && $MAKE all"
@@ -195,6 +189,41 @@ if [ -f "$KERNEL_BIN" ]; then
   cp "$KERNEL_BIN" root/boot/lebirun.kernel
 fi
 
+if [ -d "sysroot/usr/lib" ]; then
+  mkdir -p root/usr/lib
+  for f in crt1.o crti.o crtn.o libc.a libm.a libpthread.a libdl.a librt.a libcrypt.a libresolv.a libutil.a libxnet.a; do
+    [ -f "sysroot/usr/lib/$f" ] && cp "sysroot/usr/lib/$f" "root/usr/lib/$f"
+  done
+
+  CROSS_LIB="/usr/local/cross/x86_64-leb/lib"
+  GCC_LIB="/usr/local/cross/lib/gcc/x86_64-leb/15.2.0"
+  for f in libstdc++.a libsupc++.a; do
+    [ -f "$CROSS_LIB/$f" ] && cp "$CROSS_LIB/$f" "root/usr/lib/$f"
+  done
+  for f in libgcc.a crtbegin.o crtend.o; do
+    [ -f "$GCC_LIB/$f" ] && cp "$GCC_LIB/$f" "root/usr/lib/$f"
+  done
+  for f in root/usr/lib/*.a; do
+    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+  done
+  for f in root/usr/lib/*.o; do
+    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+  done
+fi
+if [ -d "sysroot/usr/include" ]; then
+  mkdir -p root/usr/include
+  cp -R --preserve=timestamps sysroot/usr/include/. root/usr/include/.
+fi
+CXX_INC="/usr/local/cross/x86_64-leb/include/c++/15.2.0"
+if [ -d "$CXX_INC" ]; then
+  mkdir -p root/usr/include/c++/15.2.0
+  cp -R --preserve=timestamps "$CXX_INC/." "root/usr/include/c++/15.2.0/."
+fi
+if [ -f "libc/user.ld" ]; then
+  mkdir -p root/usr/lib
+  cp libc/user.ld root/usr/lib/user.ld
+fi
+
 if [ -d "root" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "rootfs.squashfs" ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
@@ -202,7 +231,8 @@ if [ -d "root" ]; then
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building SquashFS rootfs"
     if command -v mksquashfs >/dev/null 2>&1; then
       rm -f rootfs.squashfs
-      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -noI -noD -noF -noX -no-xattrs -noappend -no-compression -quiet -no-progress
+      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -comp xz -no-xattrs -noappend -quiet -no-progress \
+        -e usr/include/c++ usr/lib/libstdc++.a usr/lib/libsupc++.a usr/lib/libgcc.a
     else
       run_cmd "Building rootfs (fallback)" ./mkinitrd.sh root rootfs.squashfs
     fi

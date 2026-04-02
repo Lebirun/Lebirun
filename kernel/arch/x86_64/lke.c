@@ -9,7 +9,8 @@
 #define R_X86_64_32S   11
 #define R_X86_64_PLT32  4
 
-static lke_module_t modules[LKE_MAX_MODULES];
+static lke_module_t *modules;
+static int lke_capacity = 0;
 static int lke_count = 0;
 
 typedef struct {
@@ -44,21 +45,36 @@ static uint64_t ksym_lookup(const char *name) {
 }
 
 void lke_init(void) {
-    memset(modules, 0, sizeof(modules));
+    modules = NULL;
+    lke_capacity = 0;
     lke_count = 0;
 }
 
 static int lke_find_slot(void) {
     int i;
-    for (i = 0; i < LKE_MAX_MODULES; i++) {
+    int new_cap;
+    lke_module_t *new_arr;
+
+    for (i = 0; i < lke_capacity; i++) {
         if (!modules[i].loaded) return i;
     }
-    return -1;
+    new_cap = lke_capacity == 0 ? 4 : lke_capacity * 2;
+    new_arr = (lke_module_t *)kmalloc(new_cap * sizeof(lke_module_t));
+    if (!new_arr) return -1;
+    memset(new_arr, 0, new_cap * sizeof(lke_module_t));
+    if (modules) {
+        memcpy(new_arr, modules, lke_capacity * sizeof(lke_module_t));
+        kfree(modules);
+    }
+    i = lke_capacity;
+    modules = new_arr;
+    lke_capacity = new_cap;
+    return i;
 }
 
 static int lke_find_by_name(const char *name) {
     int i;
-    for (i = 0; i < LKE_MAX_MODULES; i++) {
+    for (i = 0; i < lke_capacity; i++) {
         if (modules[i].loaded && strcmp(modules[i].name, name) == 0) return i;
     }
     return -1;
@@ -358,7 +374,7 @@ int lke_list(lke_info_t *buf, int max) {
     int i;
 
     count = 0;
-    for (i = 0; i < LKE_MAX_MODULES && count < max; i++) {
+    for (i = 0; i < lke_capacity && count < max; i++) {
         if (modules[i].loaded) {
             memcpy(buf[count].name, modules[i].name, LKE_NAME_MAX);
             buf[count].loaded = 1;

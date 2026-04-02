@@ -25,7 +25,7 @@ static inline void heap_lock_release(void) {
 #define CANARY_OVERHEAD (sizeof(uint64_t) * 2)
 #define HEAP_USE_DEMAND_PAGING 1
 
-#define EARLY_HEAP_SIZE (32 * 1024)
+#define EARLY_HEAP_SIZE (16 * 1024)
 static uint8_t early_heap_buffer[EARLY_HEAP_SIZE] __attribute__((aligned(4096)));
 static uint64_t early_heap_offset = 0;
 static int main_heap_initialized = 0;

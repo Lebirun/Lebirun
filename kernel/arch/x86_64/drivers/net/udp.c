@@ -18,9 +18,13 @@ void udp_init(void) {
 }
 
 static uint16_t udp_pseudo_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
-    uint64_t sum = 0;
-    uint16_t *ptr = (uint16_t *)data;
-    uint64_t remaining = len;
+    uint64_t sum;
+    uint16_t *ptr;
+    uint64_t remaining;
+
+    sum = 0;
+    ptr = (uint16_t *)data;
+    remaining = len;
 
     sum += (src.octets[0] << 8) | src.octets[1];
     sum += (src.octets[2] << 8) | src.octets[3];
@@ -124,7 +128,9 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
 }
 
 udp_socket_t *udp_socket_create(uint16_t port) {
-    udp_socket_t *sock = (udp_socket_t *)kmalloc(sizeof(udp_socket_t));
+    udp_socket_t *sock;
+
+    sock = (udp_socket_t *)kmalloc(sizeof(udp_socket_t));
     if (!sock) return NULL;
 
     memset(sock, 0, sizeof(udp_socket_t));
@@ -145,9 +151,11 @@ udp_socket_t *udp_socket_create(uint16_t port) {
 }
 
 void udp_socket_close(udp_socket_t *sock) {
+    udp_socket_t **prev;
+
     if (!sock) return;
 
-    udp_socket_t **prev = &udp_sockets;
+    prev = &udp_sockets;
     while (*prev) {
         if (*prev == sock) {
             *prev = sock->next;
@@ -168,10 +176,14 @@ int udp_socket_send(udp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint8_t
 }
 
 int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr_t *from_ip, uint16_t *from_port, uint64_t timeout_ms) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+    uint64_t copy_len;
+
     if (!sock) return -1;
 
-    uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-    uint64_t start = pit_get_ticks();
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    start = pit_get_ticks();
 
     while (!sock->has_data) {
         __asm__ volatile("sti");
@@ -182,7 +194,7 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr
         schedule();
     }
 
-    uint64_t copy_len = sock->recv_len < len ? sock->recv_len : len;
+    copy_len = sock->recv_len < len ? sock->recv_len : len;
     memcpy(buffer, sock->recv_buffer, copy_len);
 
     if (from_ip) *from_ip = sock->recv_from_ip;

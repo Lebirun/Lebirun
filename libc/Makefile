@@ -33,3 +33,4 @@ install-libs: lib/libc.a
 	mkdir -p $(DESTDIR)$(LIBDIR)
 	cp lib/libc.a $(DESTDIR)$(LIBDIR)
 	cp lib/crt*.o $(DESTDIR)$(LIBDIR)
+	cp user.ld $(DESTDIR)$(LIBDIR)

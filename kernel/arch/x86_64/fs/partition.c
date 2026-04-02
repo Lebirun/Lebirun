@@ -88,7 +88,7 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
 
         table->parts[count].valid = 1;
         table->parts[count].port_index = port_index;
-        table->parts[count].part_number = count + 1;
+        table->parts[count].part_number = i + 1;
         table->parts[count].start_lba = pe->lba_start;
         table->parts[count].sector_count = pe->sector_count;
         table->parts[count].mbr_type = pe->type;
@@ -202,12 +202,14 @@ int partition_scan(uint64_t port_index, partition_table_t *table) {
     memset(table, 0, sizeof(partition_table_t));
 
     port = ahci_get_port(port_index);
-    if (!port)
+    if (!port) {
         return -1;
+    }
 
     buf = (uint8_t *)kmalloc(512);
-    if (!buf)
+    if (!buf) {
         return -1;
+    }
 
     if (ahci_read_sectors(port, 0, 1, buf) != 0) {
         kfree(buf);
@@ -223,11 +225,9 @@ int partition_scan(uint64_t port_index, partition_table_t *table) {
 
     if (mbr->partitions[0].type == PART_TYPE_GPT_PROTECT) {
         kfree(buf);
-        printf("PART: Detected GPT partition table on port %u\n", port_index);
         return partition_scan_gpt(port_index, table);
     }
 
     kfree(buf);
-    printf("PART: Detected MBR partition table on port %u\n", port_index);
     return partition_scan_mbr(port_index, table);
 }

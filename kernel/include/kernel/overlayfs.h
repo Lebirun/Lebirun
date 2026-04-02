@@ -25,6 +25,7 @@ typedef struct overlay_node {
     vfs_node_t *lower_node;
     vfs_node_t *upper_node;
     overlay_context_t *ctx;
+    int refcount;
 } overlay_node_t;
 
 int overlayfs_init(void);

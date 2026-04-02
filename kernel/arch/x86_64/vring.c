@@ -336,9 +336,9 @@ void vring_init(void) {
     kprint_ring = kprint_ring_storage;
     serial_ring = serial_ring_storage;
 
-    memset(klog_ring, 0, sizeof(klog_ring_storage));
-    memset(kprint_ring, 0, sizeof(kprint_ring_storage));
-    memset(serial_ring, 0, sizeof(serial_ring_storage));
+    memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));
+    memset(kprint_ring, 0, KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
+    memset(serial_ring, 0, SERIAL_RING_SIZE);
     klog_head = 0;
     klog_tail = 0;
     klog_count = 0;

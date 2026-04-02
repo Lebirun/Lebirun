@@ -89,8 +89,7 @@ all: $(PROGRAMS) copy-pong stage-lsh stage-lebutils stage-LebInit stage-login st
 
 clean:
 	rm -f *.o *.bin *.so
-	rm -f $(INITRD_DIR)/pong.bin
-	rm -f $(INITRD_DIR)/stdio_test.bin
+	rm -f $(SYSROOT_BIN)/pong
 	rm -f $(SYSROOT_BIN)/lsh
 	rm -f $(SYSROOT_BIN)/sh
 	rm -f lsh.bin

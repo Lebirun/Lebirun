@@ -263,10 +263,12 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
     uint16_t rdlength;
 
     (void)netif;
-    (void)src;
-    (void)src_port;
 
     if (len < sizeof(dns_header_t)) return;
+
+    if (src_port != DNS_PORT) return;
+
+    if (!ipv4_eq(src, g_dns_server) && !ipv4_eq(src, g_dns_server2)) return;
 
     hdr = (dns_header_t *)data;
     id = ntohs(hdr->id);

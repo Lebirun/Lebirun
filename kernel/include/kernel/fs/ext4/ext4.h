@@ -9,8 +9,8 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       8
-#define EXT4_MAX_OPEN_INODES    64
+#define EXT4_CACHE_BLOCKS       64
+#define EXT4_MAX_OPEN_INODES    1024
 
 struct ext4_fs;
 
@@ -48,7 +48,8 @@ typedef struct ext4_fs {
     bool is_64bit;
     uint32_t desc_size;
     ext4_group_desc_t *group_descs;
-    ext4_block_cache_entry_t block_cache[EXT4_CACHE_BLOCKS];
+    ext4_block_cache_entry_t *block_cache;
+    uint32_t block_cache_count;
     ext4_inode_cache_t inode_cache[EXT4_MAX_OPEN_INODES];
     mutex_t lock;
     uint32_t cache_tick;
@@ -95,6 +96,7 @@ void ext4_vfs_register(void);
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
+ext4_fs_t *ext4_get_mounted_fs(void);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);

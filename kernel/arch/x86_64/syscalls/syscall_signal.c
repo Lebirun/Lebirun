@@ -53,7 +53,7 @@
 #define SIG_SETMASK 2
 
 typedef struct {
-    unsigned long sig[2];
+    unsigned long sig[1];
 } sigset_k;
 
 typedef struct {
@@ -66,7 +66,7 @@ typedef struct {
     void (*sa_handler)(int);
     unsigned long sa_flags;
     void (*sa_restorer)(void);
-    sigset_k sa_mask;
+    unsigned int sa_mask[2];
 } sigaction_k;
 
 typedef struct {
@@ -129,7 +129,8 @@ void task_reset_signals_on_exec(void) {
             sigs->actions[i].sa_handler = SIG_DFL;
         sigs->actions[i].sa_flags = 0;
         sigs->actions[i].sa_restorer = NULL;
-        sigs->actions[i].sa_mask.sig[0] = 0;
+        sigs->actions[i].sa_mask[0] = 0;
+        sigs->actions[i].sa_mask[1] = 0;
     }
 }
 
@@ -192,15 +193,12 @@ static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
         switch (how) {
             case SIG_BLOCK:
                 sigs->blocked.sig[0] |= local_set.sig[0];
-                sigs->blocked.sig[1] |= local_set.sig[1];
                 break;
             case SIG_UNBLOCK:
                 sigs->blocked.sig[0] &= ~local_set.sig[0];
-                sigs->blocked.sig[1] &= ~local_set.sig[1];
                 break;
             case SIG_SETMASK:
                 sigs->blocked.sig[0] = local_set.sig[0];
-                sigs->blocked.sig[1] = local_set.sig[1];
                 break;
             default:
                 return -EINVAL;
@@ -280,7 +278,15 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     regs->rdi    = frame[6];
     regs->rip    = frame[7];
     regs->rflags = frame[8];
-    regs->rsp = frame[9];
+    regs->rsp    = frame[9];
+    regs->r8     = frame[10];
+    regs->r9     = frame[11];
+    regs->r10    = frame[12];
+    regs->r11    = frame[13];
+    regs->r12    = frame[14];
+    regs->r13    = frame[15];
+    regs->r14    = frame[16];
+    regs->r15    = frame[17];
 
     return (int)regs->rax;
 }
@@ -568,7 +574,7 @@ void signal_deliver_pending(registers_t *regs) {
         }
 
         sp = regs->rsp;
-        sp -= 10 * 8;
+        sp -= 18 * 8;
         sp &= ~0xFu;
 
         if (sp < 0x1000 || sp >= KERNEL_VMA) {
@@ -587,6 +593,14 @@ void signal_deliver_pending(registers_t *regs) {
         frame[7] = regs->rip;
         frame[8] = regs->rflags;
         frame[9] = regs->rsp;
+        frame[10] = regs->r8;
+        frame[11] = regs->r9;
+        frame[12] = regs->r10;
+        frame[13] = regs->r11;
+        frame[14] = regs->r12;
+        frame[15] = regs->r13;
+        frame[16] = regs->r14;
+        frame[17] = regs->r15;
 
         sp -= 8;
         if (act->sa_restorer) {

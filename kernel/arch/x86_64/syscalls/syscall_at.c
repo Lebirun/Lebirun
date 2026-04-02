@@ -548,7 +548,6 @@ static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {
     
     st->st_dev = 1;
     st->st_ino = node->inode ? node->inode : 1;
-    st->__st_ino_truncated = (long)st->st_ino;
 
     uint64_t perms = 0;
     if (node->mask) {
@@ -582,9 +581,6 @@ static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {
     st->st_atim.tv_sec = node->atime;
     st->st_mtim.tv_sec = node->mtime;
     st->st_ctim.tv_sec = node->ctime;
-    st->__st_atim32.tv_sec = node->atime;
-    st->__st_mtim32.tv_sec = node->mtime;
-    st->__st_ctim32.tv_sec = node->ctime;
     
     return 0;
 }

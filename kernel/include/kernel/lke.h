@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define LKE_MAGIC       0x4C4B4558
-#define LKE_MAX_MODULES 1024
+#define LKE_MAX_MODULES 65536
 #define LKE_NAME_MAX    128
 #define LKE_DIR         "/lib/lke"
 

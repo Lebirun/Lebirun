@@ -258,8 +258,17 @@ typedef struct {
 #define TCP_STATE_LAST_ACK    9
 #define TCP_STATE_TIME_WAIT   10
 
-#define TCP_WINDOW_SIZE 8192
+#define TCP_WINDOW_SIZE 65535
 #define TCP_MSS 1460
+
+typedef struct tcp_retx_seg {
+    uint8_t *data;
+    uint64_t len;
+    uint32_t seq;
+    uint64_t send_time;
+    uint32_t retries;
+    struct tcp_retx_seg *next;
+} tcp_retx_seg_t;
 
 typedef struct tcp_socket {
     uint8_t state;
@@ -282,6 +291,11 @@ typedef struct tcp_socket {
     uint64_t send_buffer_tail;
     uint64_t retransmit_timeout;
     uint64_t last_ack_time;
+    tcp_retx_seg_t *retx_head;
+    tcp_retx_seg_t *retx_tail;
+    uint32_t retx_count;
+    uint64_t fin_send_time;
+    uint8_t fin_retries;
     netif_t *netif;
     struct tcp_socket *next;
 } tcp_socket_t;

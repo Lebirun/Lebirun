@@ -96,19 +96,28 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
     response->raw_headers_len = header_end;
 
     for (i = 0; i < header_end; i++) {
-        if (i + 15 < header_end) {
-            if ((data[i] == 'C' || data[i] == 'c') &&
-                (data[i+8] == 'L' || data[i+8] == 'l')) {
-                j = i;
-                while (j < header_end && data[j] != ':') j++;
-                if (j < header_end) {
-                    j++;
-                    while (j < header_end && data[j] == ' ') j++;
-                    while (j < header_end && data[j] >= '0' && data[j] <= '9') {
-                        response->content_length = response->content_length * 10 + (data[j] - '0');
-                        j++;
-                    }
-                }
+        if (i + 16 < header_end &&
+            (data[i]    == 'C' || data[i]    == 'c') &&
+            (data[i+1]  == 'o' || data[i+1]  == 'O') &&
+            (data[i+2]  == 'n' || data[i+2]  == 'N') &&
+            (data[i+3]  == 't' || data[i+3]  == 'T') &&
+            (data[i+4]  == 'e' || data[i+4]  == 'E') &&
+            (data[i+5]  == 'n' || data[i+5]  == 'N') &&
+            (data[i+6]  == 't' || data[i+6]  == 'T') &&
+            (data[i+7]  == '-') &&
+            (data[i+8]  == 'L' || data[i+8]  == 'l') &&
+            (data[i+9]  == 'e' || data[i+9]  == 'E') &&
+            (data[i+10] == 'n' || data[i+10] == 'N') &&
+            (data[i+11] == 'g' || data[i+11] == 'G') &&
+            (data[i+12] == 't' || data[i+12] == 'T') &&
+            (data[i+13] == 'h' || data[i+13] == 'H') &&
+            data[i+14] == ':') {
+            j = i + 15;
+            while (j < header_end && data[j] == ' ') j++;
+            response->content_length = 0;
+            while (j < header_end && data[j] >= '0' && data[j] <= '9') {
+                response->content_length = response->content_length * 10 + (data[j] - '0');
+                j++;
             }
         }
         if (i + 9 < header_end &&
@@ -165,7 +174,6 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     uint8_t *new_buf;
     http_response_t *tmp_resp;
     uint8_t *hdr_copy;
-    int close_wait_retries;
 
     if (!response) return -1;
 
@@ -241,7 +249,6 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     buf_cap = 16384;
     start = net_get_ticks();
     expected_total = 0;
-    close_wait_retries = 0;
 
     for (;;) {
         if (task_has_pending_signals()) {
@@ -254,6 +261,8 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
 
         if (total_recv + 4096 > buf_cap) {
             new_cap = buf_cap * 2;
+            if (expected_total > 0 && new_cap < expected_total)
+                new_cap = expected_total + 256;
             new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
             if (!new_buf) break;
             recv_buf = new_buf;
@@ -276,36 +285,39 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
                 return -4;
             }
 
-            header_end_pos = 0;
-            for (si = 0; si + 3 < total_recv; si++) {
-                if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
-                    recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
-                    header_end_pos = si + 4;
-                    break;
+            if (expected_total == 0) {
+                header_end_pos = 0;
+                for (si = 0; si + 3 < total_recv; si++) {
+                    if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
+                        recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
+                        header_end_pos = si + 4;
+                        break;
+                    }
                 }
-            }
-            if (header_end_pos > 0) {
-                tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
-                if (tmp_resp) {
-                    memset(tmp_resp, 0, sizeof(*tmp_resp));
-                    if (http_parse_response(recv_buf, total_recv, tmp_resp) == 0 &&
-                        tmp_resp->content_length > 0) {
-                        expected_total = header_end_pos + tmp_resp->content_length;
-                        kfree(tmp_resp);
-                        if (total_recv >= expected_total) break;
-                    } else {
+                if (header_end_pos > 0) {
+                    tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
+                    if (tmp_resp) {
+                        memset(tmp_resp, 0, sizeof(*tmp_resp));
+                        if (http_parse_response(recv_buf, total_recv, tmp_resp) == 0 &&
+                            tmp_resp->content_length > 0) {
+                            expected_total = header_end_pos + tmp_resp->content_length;
+                            if (expected_total + 256 > buf_cap) {
+                                new_buf = (uint8_t *)krealloc(recv_buf, expected_total + 256);
+                                if (new_buf) {
+                                    recv_buf = new_buf;
+                                    buf_cap = expected_total + 256;
+                                }
+                            }
+                        }
                         kfree(tmp_resp);
                     }
                 }
             }
+
+            if (expected_total > 0 && total_recv >= expected_total) break;
         } else if (n == 0) {
             if (sock->state == TCP_STATE_CLOSE_WAIT ||
                 sock->state == TCP_STATE_CLOSED) {
-                if (expected_total > 0 && total_recv < expected_total && close_wait_retries < 50) {
-                    close_wait_retries++;
-                    sleep_ms(10);
-                    continue;
-                }
                 break;
             }
             if (net_get_ticks() - start > timeout_ms) break;
@@ -443,7 +455,7 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
         max_attempts = 2;
         ret = -1;
         for (attempt = 0; attempt < max_attempts; attempt++) {
-            ret = http_get_tls(host, port, path, response, 15000, is_https);
+            ret = http_get_tls(host, port, path, response, 60000, is_https);
             if (ret == 0 || ret == -4) {
                 break;
             }
@@ -557,7 +569,7 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
         max_attempts = 2;
         ret = -1;
         for (attempt = 0; attempt < max_attempts; attempt++) {
-            ret = http_get_tls(host, port, path, response, 15000, is_https);
+            ret = http_get_tls(host, port, path, response, 60000, is_https);
             if (ret == 0 || ret == -4) break;
             if (attempt + 1 < max_attempts) sleep_ms(500);
         }

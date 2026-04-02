@@ -24,8 +24,9 @@ typedef struct {
     int is_partition;
 } devfs_blockdev_t;
 
-static devfs_blockdev_t devfs_blockdevs[DEVFS_MAX_BLOCKDEVS];
+static devfs_blockdev_t *devfs_blockdevs;
 static int devfs_blockdev_count;
+static int devfs_blockdev_capacity;
 
 static vfs_node_t dev_initrd_node;
 static int dev_initrd_registered;
@@ -226,6 +227,7 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
     uint64_t sector_count;
     uint8_t *tmp;
     uint64_t skip;
+    int wr_ret;
 
     bdev = (devfs_blockdev_t *)node->private_data;
     if (!bdev)
@@ -260,7 +262,8 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
 
     memcpy(tmp + skip, buffer, size);
 
-    if (ahci_write_sectors(port, abs_lba, sector_count, tmp) != 0) {
+    wr_ret = ahci_write_sectors(port, abs_lba, sector_count, tmp);
+    if (wr_ret != 0) {
         kfree(tmp);
         return 0;
     }
@@ -340,7 +343,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         int count;
         int i;
         count = 0;
-        for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+        for (i = 0; i < devfs_blockdev_capacity; i++) {
             if (devfs_blockdevs[i].in_use) {
                 if (count == (int)index) {
                     d = devfs_alloc_dirent();
@@ -401,7 +404,7 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
             return &dev_ttys[idx];
     }
     
-    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (devfs_blockdevs[i].in_use && strcmp(devfs_blockdevs[i].node.name, name) == 0)
             return &devfs_blockdevs[i].node;
     }
@@ -440,6 +443,9 @@ void devfs_init(void) {
     vfs_fs_type_t *fs_type;
 
     devfs_dirent_index = 0;
+    devfs_blockdev_capacity = DEVFS_MAX_BLOCKDEVS;
+    devfs_blockdevs = (devfs_blockdev_t *)kmalloc(devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
+    memset(devfs_blockdevs, 0, devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
 
     memset(&devfs_root, 0, sizeof(vfs_node_t));
     strcpy(devfs_root.name, "dev");
@@ -726,7 +732,7 @@ int devfs_register_blockdev(const char *name, uint64_t port_index) {
     ahci_port_t *port;
 
     slot = -1;
-    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (!devfs_blockdevs[i].in_use) {
             slot = i;
             break;
@@ -780,7 +786,7 @@ int devfs_register_partition(const char *name, uint64_t port_index,
     size_t len;
 
     slot = -1;
-    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (!devfs_blockdevs[i].in_use) {
             slot = i;
             break;
@@ -853,7 +859,7 @@ int devfs_rescan_partitions(const char *devname) {
     found = 0;
     port_index = 0;
     drive_letter = 0;
-    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (devfs_blockdevs[i].in_use && !devfs_blockdevs[i].is_partition &&
             strcmp(devfs_blockdevs[i].node.name, devname) == 0) {
             port_index = devfs_blockdevs[i].port_index;
@@ -866,7 +872,7 @@ int devfs_rescan_partitions(const char *devname) {
     if (!found)
         return -1;
 
-    for (i = 0; i < DEVFS_MAX_BLOCKDEVS; i++) {
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (devfs_blockdevs[i].in_use && devfs_blockdevs[i].is_partition &&
             devfs_blockdevs[i].port_index == port_index) {
             devfs_blockdevs[i].in_use = 0;

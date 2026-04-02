@@ -16,8 +16,11 @@ void ipv4_init(void) {
 }
 
 uint16_t ipv4_checksum(void *data, uint64_t len) {
-    uint64_t sum = 0;
-    uint16_t *ptr = (uint16_t *)data;
+    uint64_t sum;
+    uint16_t *ptr;
+
+    sum = 0;
+    ptr = (uint16_t *)data;
 
     while (len > 1) {
         sum += *ptr++;

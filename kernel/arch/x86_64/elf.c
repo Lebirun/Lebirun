@@ -27,7 +27,7 @@ int elf_validate(const uint8_t *data, uint64_t size) {
         return -4;
     }
 
-    if (ehdr->e_type != ET_EXEC) {
+    if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
         return -5;
     }
 
@@ -141,6 +141,8 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     uint64_t page_vaddr;
     uint64_t existing_phys;
     uint64_t phys;
+    uint64_t pie_base;
+    int is_pie;
 
     if (!pd_phys || !data || !info) {
         return -1;
@@ -155,7 +157,10 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     ehdr = (const Elf64_Ehdr *)data;
     phdr = (const Elf64_Phdr *)(data + ehdr->e_phoff);
 
-    info->entry_point = ehdr->e_entry;
+    is_pie = (ehdr->e_type == ET_DYN) ? 1 : 0;
+    pie_base = is_pie ? 0x400000ULL : 0;
+
+    info->entry_point = ehdr->e_entry + pie_base;
     info->load_base = 0xFFFFFFFFFFFFFFFFULL;
     info->load_end = 0;
     info->bss_end = 0;
@@ -177,7 +182,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
 
     for (i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == PT_PHDR) {
-            info->phdr_vaddr = phdr[i].p_vaddr;
+            info->phdr_vaddr = phdr[i].p_vaddr + pie_base;
             break;
         }
     }
@@ -191,7 +196,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
             continue;
         }
 
-        vaddr = phdr[i].p_vaddr;
+        vaddr = phdr[i].p_vaddr + pie_base;
         memsz = phdr[i].p_memsz;
         filesz = phdr[i].p_filesz;
         offset = phdr[i].p_offset;
@@ -273,6 +278,46 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
         info->phdr_vaddr = info->load_base + ehdr->e_phoff;
     }
 
+    if (is_pie) {
+        const Elf64_Dyn *dyn;
+        uint64_t rela_off = 0;
+        uint64_t rela_sz = 0;
+        const Elf64_Rela *rel;
+        uint64_t rel_cnt;
+        uint64_t ri;
+        uint64_t rtype;
+        uint64_t raddr;
+        uint64_t rval;
+
+        for (i = 0; i < ehdr->e_phnum; i++) {
+            if (phdr[i].p_type == PT_DYNAMIC) {
+                dyn = (const Elf64_Dyn *)(data + phdr[i].p_offset);
+                while (dyn->d_tag != DT_NULL) {
+                    if (dyn->d_tag == DT_RELA) {
+                        rela_off = dyn->d_un.d_ptr;
+                    } else if (dyn->d_tag == DT_RELASZ) {
+                        rela_sz = dyn->d_un.d_val;
+                    }
+                    dyn++;
+                }
+                break;
+            }
+        }
+
+        if (rela_sz > 0 && rela_off < size) {
+            rel = (const Elf64_Rela *)(data + rela_off);
+            rel_cnt = rela_sz / sizeof(Elf64_Rela);
+            for (ri = 0; ri < rel_cnt; ri++) {
+                rtype = ELF64_R_TYPE(rel[ri].r_info);
+                if (rtype == R_X86_64_RELATIVE) {
+                    raddr = pie_base + rel[ri].r_offset;
+                    rval = pie_base + rel[ri].r_addend;
+                    vmm_copy_to_pml4(pd_phys, raddr, &rval, sizeof(uint64_t));
+                }
+            }
+        }
+    }
+
     {
         uint64_t entry_page_phys = vmm_get_phys_in_pml4(pd_phys, info->entry_point & ~0xFFF);
         if (entry_page_phys) {
@@ -341,6 +386,10 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
     uint64_t type;
     uint64_t addr;
     uint64_t value;
+    uint64_t dyn_strtab_offset;
+    uint64_t dyn_strtab_size;
+    uint64_t needed_offsets[16];
+    int needed_count;
 
     if (!pd_phys || !data || !handle) {
         return -1;
@@ -445,6 +494,13 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
     handle->symtab2_count = 0;
     handle->strtab2 = NULL;
     handle->strtab2_size = 0;
+    handle->init_array_vaddr = 0;
+    handle->init_array_size = 0;
+    handle->fini_array_vaddr = 0;
+    handle->fini_array_size = 0;
+    handle->init_func = 0;
+    handle->fini_func = 0;
+    handle->needed_count = 0;
 
     if (ehdr->e_shoff && ehdr->e_shnum) {
         shdr = (const Elf64_Shdr *)(data + ehdr->e_shoff);
@@ -499,12 +555,35 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
             dyn = (const Elf64_Dyn *)(data + phdr[i].p_offset);
             rel_offset = 0;
             rel_size = 0;
+            dyn_strtab_offset = 0;
+            dyn_strtab_size = 0;
+            needed_count = 0;
             
             while (dyn->d_tag != DT_NULL) {
                 if (dyn->d_tag == DT_RELA) {
                     rel_offset = dyn->d_un.d_ptr;
                 } else if (dyn->d_tag == DT_RELASZ) {
                     rel_size = dyn->d_un.d_val;
+                } else if (dyn->d_tag == DT_INIT) {
+                    handle->init_func = base_addr + dyn->d_un.d_ptr;
+                } else if (dyn->d_tag == DT_FINI) {
+                    handle->fini_func = base_addr + dyn->d_un.d_ptr;
+                } else if (dyn->d_tag == DT_INIT_ARRAY) {
+                    handle->init_array_vaddr = base_addr + dyn->d_un.d_ptr;
+                } else if (dyn->d_tag == DT_INIT_ARRAYSZ) {
+                    handle->init_array_size = dyn->d_un.d_val;
+                } else if (dyn->d_tag == DT_FINI_ARRAY) {
+                    handle->fini_array_vaddr = base_addr + dyn->d_un.d_ptr;
+                } else if (dyn->d_tag == DT_FINI_ARRAYSZ) {
+                    handle->fini_array_size = dyn->d_un.d_val;
+                } else if (dyn->d_tag == DT_STRTAB) {
+                    dyn_strtab_offset = dyn->d_un.d_ptr;
+                } else if (dyn->d_tag == DT_STRSZ) {
+                    dyn_strtab_size = dyn->d_un.d_val;
+                } else if (dyn->d_tag == DT_NEEDED) {
+                    if (needed_count < 16) {
+                        needed_offsets[needed_count++] = dyn->d_un.d_val;
+                    }
                 }
                 dyn++;
             }
@@ -522,6 +601,21 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
                     }
                 }
             }
+
+            handle->needed_count = 0;
+            if (dyn_strtab_offset > 0 && dyn_strtab_offset < size && needed_count > 0) {
+                for (r = 0; r < (uint64_t)needed_count; r++) {
+                    if (needed_offsets[r] < dyn_strtab_size &&
+                        dyn_strtab_offset + needed_offsets[r] < size) {
+                        strncpy(handle->needed[handle->needed_count],
+                                (const char *)(data + dyn_strtab_offset + needed_offsets[r]),
+                                63);
+                        handle->needed[handle->needed_count][63] = '\0';
+                        handle->needed_count++;
+                    }
+                }
+            }
+
             break;
         }
     }
@@ -532,6 +626,121 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
         handle->file_size = size;
     } else {
         handle->file_size = 0;
+    }
+
+    return 0;
+}
+
+int elf_relocate_so(uint64_t pd_phys, dl_handle_t *handle, dl_handle_t *all_handles, int num_handles) {
+    const Elf64_Ehdr *ehdr;
+    const Elf64_Phdr *phdr;
+    const Elf64_Dyn *dyn;
+    const Elf64_Rela *rel;
+    const Elf64_Sym *sym;
+    uint64_t rela_offset;
+    uint64_t rela_size;
+    uint64_t jmprel_offset;
+    uint64_t jmprel_size;
+    uint64_t rel_count;
+    uint64_t r;
+    uint64_t type;
+    uint64_t sym_idx;
+    uint64_t addr;
+    uint64_t value;
+    const char *sym_name;
+    uint64_t resolved;
+    int h;
+    uint16_t i;
+    const uint8_t *data;
+    uint64_t size;
+    uint64_t base;
+
+    if (!handle || !handle->file_data || handle->file_size == 0) return -1;
+
+    data = handle->file_data;
+    size = handle->file_size;
+    base = handle->load_base;
+
+    ehdr = (const Elf64_Ehdr *)data;
+    phdr = (const Elf64_Phdr *)(data + ehdr->e_phoff);
+
+    rela_offset = 0;
+    rela_size = 0;
+    jmprel_offset = 0;
+    jmprel_size = 0;
+
+    for (i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_DYNAMIC) {
+            dyn = (const Elf64_Dyn *)(data + phdr[i].p_offset);
+            while (dyn->d_tag != DT_NULL) {
+                if (dyn->d_tag == DT_RELA)
+                    rela_offset = dyn->d_un.d_ptr;
+                else if (dyn->d_tag == DT_RELASZ)
+                    rela_size = dyn->d_un.d_val;
+                else if (dyn->d_tag == DT_JMPREL)
+                    jmprel_offset = dyn->d_un.d_ptr;
+                else if (dyn->d_tag == DT_PLTRELSZ)
+                    jmprel_size = dyn->d_un.d_val;
+                dyn++;
+            }
+            break;
+        }
+    }
+
+    if (rela_size > 0 && rela_offset < size) {
+        rel = (const Elf64_Rela *)(data + rela_offset);
+        rel_count = rela_size / sizeof(Elf64_Rela);
+        for (r = 0; r < rel_count; r++) {
+            type = ELF64_R_TYPE(rel[r].r_info);
+            sym_idx = ELF64_R_SYM(rel[r].r_info);
+            addr = base + rel[r].r_offset;
+            if (type == R_X86_64_RELATIVE) {
+                value = base + rel[r].r_addend;
+                vmm_copy_to_pml4(pd_phys, addr, &value, sizeof(uint64_t));
+            } else if (type == R_X86_64_GLOB_DAT || type == R_X86_64_64 || type == R_X86_64_JUMP_SLOT) {
+                if (handle->symtab && sym_idx < handle->symtab_count && handle->strtab) {
+                    sym = &handle->symtab[sym_idx];
+                    sym_name = handle->strtab + sym->st_name;
+                    resolved = 0;
+                    for (h = 0; h < num_handles && resolved == 0; h++) {
+                        if (all_handles[h].in_use && &all_handles[h] != handle)
+                            resolved = elf_so_find_symbol(&all_handles[h], sym_name);
+                    }
+                    if (resolved == 0 && sym->st_value != 0)
+                        resolved = base + sym->st_value;
+                    if (resolved != 0) {
+                        if (type == R_X86_64_64)
+                            resolved += (uint64_t)rel[r].r_addend;
+                        vmm_copy_to_pml4(pd_phys, addr, &resolved, sizeof(uint64_t));
+                    }
+                }
+            }
+        }
+    }
+
+    if (jmprel_size > 0 && jmprel_offset < size) {
+        rel = (const Elf64_Rela *)(data + jmprel_offset);
+        rel_count = jmprel_size / sizeof(Elf64_Rela);
+        for (r = 0; r < rel_count; r++) {
+            type = ELF64_R_TYPE(rel[r].r_info);
+            sym_idx = ELF64_R_SYM(rel[r].r_info);
+            addr = base + rel[r].r_offset;
+            if (type == R_X86_64_JUMP_SLOT) {
+                if (handle->symtab && sym_idx < handle->symtab_count && handle->strtab) {
+                    sym = &handle->symtab[sym_idx];
+                    sym_name = handle->strtab + sym->st_name;
+                    resolved = 0;
+                    for (h = 0; h < num_handles && resolved == 0; h++) {
+                        if (all_handles[h].in_use && &all_handles[h] != handle)
+                            resolved = elf_so_find_symbol(&all_handles[h], sym_name);
+                    }
+                    if (resolved == 0 && sym->st_value != 0)
+                        resolved = base + sym->st_value;
+                    if (resolved != 0)
+                        vmm_copy_to_pml4(pd_phys, addr, &resolved, sizeof(uint64_t));
+                }
+            }
+        }
     }
 
     return 0;

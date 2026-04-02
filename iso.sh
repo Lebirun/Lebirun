@@ -11,12 +11,13 @@ done
 
 . ./build.sh $BUILD_ARGS
 
-TOTAL_STEPS=5
+TOTAL_STEPS=4
 CURRENT_STEP=0
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mPreparing ISO directory...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Preparing ISO directory"
+rm -f isodir/boot/initrd.img isodir/boot/lebirun.kernel isodir/boot/rootfs.squashfs
 mkdir -p isodir/boot/grub
 
 KERNEL_BIN="sysroot/boot/lebirun.kernel"
@@ -30,16 +31,6 @@ CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mCopying kernel to ISO...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Copying kernel to ISO"
 cp "$KERNEL_BIN" isodir/boot/lebirun.kernel
-
-CURRENT_STEP=$((CURRENT_STEP + 1))
-if [ -f initrd.img ]; then
-    bar_print "$(printf '\033[1;36mCopying initrd to ISO...\033[0m')"
-    progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Copying initrd to ISO"
-    cp initrd.img isodir/boot/initrd.img
-else
-    bar_print "$(printf '\033[0;33mSkipping initrd (not found)\033[0m')"
-    progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Skipping initrd (not found)"
-fi
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 if [ -f rootfs.squashfs ]; then

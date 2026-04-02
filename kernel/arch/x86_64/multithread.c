@@ -7,22 +7,46 @@
 
 thread_t *current_thread = NULL;
 thread_t *thread_ready_head = NULL;
-static thread_t threads[MAX_THREADS];
+static thread_t *threads;
+static int thread_capacity;
 static uint64_t next_thread_id = 1;
 static mutex_t thread_lock;
 
 static void thread_entry_wrapper(void);
 static void do_context_switch(thread_t *from, thread_t *to);
 
+static int thread_grow(void) {
+    int new_cap;
+    thread_t *new_arr;
+
+    new_cap = thread_capacity == 0 ? MAX_THREADS : thread_capacity * 2;
+    new_arr = (thread_t *)kmalloc(new_cap * sizeof(thread_t));
+    if (!new_arr) return -1;
+    memset(new_arr, 0, new_cap * sizeof(thread_t));
+    if (threads && thread_capacity > 0) {
+        memcpy(new_arr, threads, thread_capacity * sizeof(thread_t));
+        kfree(threads);
+    }
+    threads = new_arr;
+    thread_capacity = new_cap;
+    return 0;
+}
+
 static thread_t *thread_alloc(void) {
-    for (int i = 0; i < MAX_THREADS; i++) {
+    int i;
+    int old_cap;
+    for (i = 0; i < thread_capacity; i++) {
         if (threads[i].state == THREAD_DEAD) {
             memset(&threads[i], 0, sizeof(thread_t));
             threads[i].id = next_thread_id++;
             return &threads[i];
         }
     }
-    return NULL;
+    old_cap = thread_capacity;
+    if (thread_grow() < 0) return NULL;
+    memset(&threads[old_cap], 0, sizeof(thread_t));
+    threads[old_cap].id = next_thread_id++;
+    return &threads[old_cap];
 }
 
 static void thread_free(thread_t *thread) {
@@ -47,7 +71,9 @@ void init_threads(void) {
     mutex_init(&thread_lock);
     current_thread = NULL;
     thread_ready_head = NULL;
-    memset(threads, 0, sizeof(threads));
+    threads = NULL;
+    thread_capacity = 0;
+    thread_grow();
 }
 
 thread_t *create_thread(void (*entry)(void *arg), void *arg) {

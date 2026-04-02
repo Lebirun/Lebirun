@@ -114,8 +114,6 @@ static int dhcp_send_discover(netif_t *netif) {
 
     g_dhcp_state.last_send_time = net_get_ticks();
 
-    printf("DHCP: Sending DISCOVER (xid=0x%08lX)\n", g_dhcp_state.xid);
-
     return udp_send_from(netif, IPV4_ZERO, IPV4_BROADCAST,
                          DHCP_CLIENT_PORT, DHCP_SERVER_PORT,
                          (uint8_t *)&pkt, sizeof(pkt));
@@ -155,10 +153,6 @@ static int dhcp_send_request(netif_t *netif) {
     pkt.options[opt_off++] = DHCP_OPT_END;
 
     g_dhcp_state.last_send_time = net_get_ticks();
-
-    printf("DHCP: Sending REQUEST for %u.%u.%u.%u\n",
-           g_dhcp_state.offered_ip.octets[0], g_dhcp_state.offered_ip.octets[1],
-           g_dhcp_state.offered_ip.octets[2], g_dhcp_state.offered_ip.octets[3]);
 
     return udp_send_from(netif, IPV4_ZERO, IPV4_BROADCAST,
                          DHCP_CLIENT_PORT, DHCP_SERVER_PORT,
@@ -222,20 +216,6 @@ static void dhcp_apply_config(netif_t *netif, dhcp_state_t *temp) {
     if (!ipv4_eq(g_dhcp_state.dns2, IPV4_ZERO)) {
         dns_set_server2(g_dhcp_state.dns2);
     }
-
-    printf("DHCP: Configured:\n");
-    printf("  IP: %u.%u.%u.%u\n",
-           netif->ipv4.octets[0], netif->ipv4.octets[1],
-           netif->ipv4.octets[2], netif->ipv4.octets[3]);
-    printf("  Netmask: %u.%u.%u.%u\n",
-           netif->netmask.octets[0], netif->netmask.octets[1],
-           netif->netmask.octets[2], netif->netmask.octets[3]);
-    printf("  Gateway: %u.%u.%u.%u\n",
-           netif->gateway.octets[0], netif->gateway.octets[1],
-           netif->gateway.octets[2], netif->gateway.octets[3]);
-    printf("  DNS: %u.%u.%u.%u\n",
-           netif->dns_server.octets[0], netif->dns_server.octets[1],
-           netif->dns_server.octets[2], netif->dns_server.octets[3]);
 }
 
 void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len) {
@@ -270,10 +250,6 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len) {
     switch (g_dhcp_state.state) {
         case DHCP_STATE_SELECTING:
             if (msg_type == DHCP_MSG_OFFER) {
-                printf("DHCP: Received OFFER: %u.%u.%u.%u\n",
-                       temp.offered_ip.octets[0], temp.offered_ip.octets[1],
-                       temp.offered_ip.octets[2], temp.offered_ip.octets[3]);
-
                 g_dhcp_state.offered_ip = temp.offered_ip;
                 g_dhcp_state.server_ip = temp.server_ip;
                 g_dhcp_state.subnet_mask = temp.subnet_mask;
@@ -290,10 +266,8 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len) {
 
         case DHCP_STATE_REQUESTING:
             if (msg_type == DHCP_MSG_ACK) {
-                printf("DHCP: Received ACK\n");
                 dhcp_apply_config(netif, &temp);
             } else if (msg_type == DHCP_MSG_NAK) {
-                printf("DHCP: Received NAK, restarting\n");
                 g_dhcp_state.state = DHCP_STATE_INIT;
                 dhcp_start(netif);
             }
@@ -324,8 +298,6 @@ void dhcp_tick(void) {
         }
         if (elapsed >= retry_interval) {
             if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
-                printf("DHCP: DISCOVER timed out after %u retries, restarting\n",
-                       (unsigned)g_dhcp_state.retries);
                 g_dhcp_state.retries = 0;
                 g_dhcp_state.xid = dhcp_rand_xid();
                 dhcp_send_discover(g_dhcp_state.netif);
@@ -345,8 +317,6 @@ void dhcp_tick(void) {
         }
         if (elapsed >= retry_interval) {
             if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
-                printf("DHCP: REQUEST timed out after %u retries, restarting\n",
-                       (unsigned)g_dhcp_state.retries);
                 g_dhcp_state.state = DHCP_STATE_SELECTING;
                 g_dhcp_state.retries = 0;
                 g_dhcp_state.xid = dhcp_rand_xid();
@@ -362,7 +332,6 @@ void dhcp_tick(void) {
     if (g_dhcp_state.state == DHCP_STATE_BOUND && g_dhcp_state.lease_time > 0) {
         elapsed = now - g_dhcp_state.lease_start;
         if (elapsed > g_dhcp_state.lease_time * 500) {
-            printf("DHCP: Lease renewing\n");
             g_dhcp_state.state = DHCP_STATE_SELECTING;
             g_dhcp_state.retries = 0;
             g_dhcp_state.xid = dhcp_rand_xid();

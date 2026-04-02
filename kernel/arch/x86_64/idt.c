@@ -257,6 +257,35 @@ registers_t* interrupt_handler(registers_t* regs)
                 }
             }
 
+            printf("SEGV addr=0x%lX rip=0x%lX err=0x%lX\n", fault_addr, regs->rip, regs->err_code);
+            printf("  RAX=0x%lX RBX=0x%lX RCX=0x%lX RDX=0x%lX\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
+            printf("  RSI=0x%lX RDI=0x%lX RSP=0x%lX RBP=0x%lX\n", regs->rsi, regs->rdi, regs->rsp, regs->rbp);
+            printf("  R8=0x%lX R9=0x%lX R10=0x%lX R11=0x%lX\n", regs->r8, regs->r9, regs->r10, regs->r11);
+            printf("  R12=0x%lX R13=0x%lX R14=0x%lX R15=0x%lX\n", regs->r12, regs->r13, regs->r14, regs->r15);
+            if (current_task && regs->rsp >= 0x1000 && regs->rsp < KERNEL_VMA) {
+                extern void temp_map_raw(uint64_t, uint64_t);
+                extern void temp_unmap_raw(uint64_t);
+                uint64_t sp_page;
+                uint64_t sp_phys;
+                sp_page = regs->rsp & ~0xFFFULL;
+                sp_phys = vmm_get_phys_in_pml4(current_task->pml4_phys, sp_page);
+                if (sp_phys) {
+                    uint64_t tv;
+                    uint64_t *kp;
+                    int si;
+                    uint64_t soff;
+                    tv = TEMP_SLOT(1);
+                    temp_map_raw(tv, sp_phys);
+                    soff = regs->rsp - sp_page;
+                    kp = (uint64_t *)(tv + soff);
+                    printf("  Stack:");
+                    for (si = 0; si < 16 && (soff + si * 8) < 4096; si++) {
+                        printf(" 0x%lX", kp[si]);
+                    }
+                    printf("\n");
+                    temp_unmap_raw(tv);
+                }
+            }
             task_exit_deferred(139);
             return schedule_from_irq(regs);
         }
@@ -372,7 +401,7 @@ registers_t* interrupt_handler(registers_t* regs)
                     }
                 }
 
-                printf("User syscall PF at 0x%016lX (unresolvable)\n", sc_fault_addr);
+                printf("SEGV addr=0x%lX rip=0x%lX err=0x%lX\n", sc_fault_addr, regs->rip, regs->err_code);
                 task_exit_deferred(139);
                 return schedule_from_irq(regs);
             }
@@ -405,12 +434,19 @@ registers_t* interrupt_handler(registers_t* regs)
         } else if (regs->int_no == 128) {
             uint64_t old_cr3;
             uint64_t new_cr3;
+            int did_exec;
+
+            did_exec = 0;
 
             do_syscall(regs);
 
             __asm__ volatile ("cli" ::: "memory");
 
             if (current_task && current_task->exec_completed) {
+                did_exec = 1;
+            }
+
+            if (did_exec) {
                 DEBUG_IDT("IDT: exec completed, preparing to switch CR3\n");
                 DEBUG_IDT("IDT: exec regs: rip=0x%016lX rsp=0x%016lX cs=0x%lX ss=0x%lX\n",
                        regs->rip, regs->rsp, regs->cs, regs->ss);

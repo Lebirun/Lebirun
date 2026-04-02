@@ -14,10 +14,14 @@ void arp_init(void) {
 }
 
 void arp_add_entry(ipv4_addr_t ip, mac_addr_t mac) {
-    int oldest_idx = 0;
-    uint64_t oldest_time = 0xFFFFFFFF;
+    int oldest_idx;
+    uint64_t oldest_time;
+    int i;
 
-    for (int i = 0; i < ARP_CACHE_SIZE; i++) {
+    oldest_idx = 0;
+    oldest_time = 0xFFFFFFFF;
+
+    for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
             arp_cache[i].mac = mac;
             arp_cache[i].timestamp = net_get_ticks();
@@ -76,9 +80,10 @@ int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
 }
 
 void arp_request(netif_t *netif, ipv4_addr_t target_ip) {
+    arp_packet_t arp;
+
     if (!netif) return;
 
-    arp_packet_t arp;
     memset(&arp, 0, sizeof(arp));
 
     arp.hw_type = htons(ARP_HW_ETHER);
@@ -96,6 +101,8 @@ void arp_request(netif_t *netif, ipv4_addr_t target_ip) {
 }
 
 void arp_receive(netif_t *netif, arp_packet_t *arp) {
+    uint16_t opcode;
+
     if (!netif || !arp) return;
 
     if (ntohs(arp->hw_type) != ARP_HW_ETHER) return;
@@ -105,7 +112,7 @@ void arp_receive(netif_t *netif, arp_packet_t *arp) {
 
     arp_add_entry(arp->sender_ip, arp->sender_mac);
 
-    uint16_t opcode = ntohs(arp->opcode);
+    opcode = ntohs(arp->opcode);
 
     if (opcode == ARP_OP_REQUEST) {
         if (ipv4_eq(arp->target_ip, netif->ipv4)) {
@@ -129,7 +136,9 @@ void arp_receive(netif_t *netif, arp_packet_t *arp) {
 }
 
 void arp_print_cache(void) {
-    for (int i = 0; i < ARP_CACHE_SIZE; i++) {
+    int i;
+
+    for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid) {
             printf("%u.%u.%u.%u -> %02X:%02X:%02X:%02X:%02X:%02X\n",
                    arp_cache[i].ip.octets[0], arp_cache[i].ip.octets[1],
@@ -142,8 +151,11 @@ void arp_print_cache(void) {
 }
 
 int arp_get_cache(uint64_t *ips, uint8_t *macs, int max_entries) {
-    int count = 0;
-    for (int i = 0; i < ARP_CACHE_SIZE && count < max_entries; i++) {
+    int count;
+    int i;
+
+    count = 0;
+    for (i = 0; i < ARP_CACHE_SIZE && count < max_entries; i++) {
         if (arp_cache[i].valid) {
             ips[count] = (arp_cache[i].ip.octets[0] << 24) |
                         (arp_cache[i].ip.octets[1] << 16) |

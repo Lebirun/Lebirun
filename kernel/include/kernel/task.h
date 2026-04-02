@@ -35,6 +35,9 @@ typedef struct {
     uint64_t flags;
     int ref_count;
     void *private_data;
+    uint8_t *read_buf;
+    uint64_t read_buf_offset;
+    uint32_t read_buf_len;
 } task_fd_t;
 
 typedef struct task {

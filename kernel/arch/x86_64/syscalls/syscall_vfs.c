@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <kernel/ramfs.h>
+#include <kernel/squashfs.h>
 #include <kernel/fs/ext4/ext4.h>
 #include <kernel/mem_map.h>
 
@@ -569,12 +570,18 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
 
     if (strcmp(fsname, "ramfs") == 0 || strcmp(fsname, "overlayfs") == 0) {
         ramfs_stats_t rs;
+        uint64_t used;
+        squashfs_context_t *sqctx;
         if (ramfs_get_stats(&rs) == 0) {
+            used = rs.used_size;
+            sqctx = squashfs_get_context();
+            if (sqctx && sqctx->base)
+                used += sqctx->size;
             buf->f_type = RAMFS_MAGIC;
             buf->f_bsize = 4096;
             buf->f_frsize = 4096;
             buf->f_blocks = rs.total_size / 4096;
-            buf->f_bfree = (rs.total_size - rs.used_size) / 4096;
+            buf->f_bfree = (rs.total_size - used) / 4096;
             buf->f_bavail = buf->f_bfree;
             buf->f_files = rs.file_count + rs.dir_count + 1000;
             buf->f_ffree = 1000;
@@ -583,32 +590,38 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "procfs") == 0) {
+        uint64_t total_kb;
+        total_kb = pfa_get_usable_ram_kb();
         buf->f_type = PROCFS_MAGIC;
         buf->f_bsize = 4096;
         buf->f_frsize = 4096;
-        buf->f_blocks = 0;
-        buf->f_bfree = 0;
-        buf->f_bavail = 0;
+        buf->f_blocks = (uint64_t)total_kb * 1024 / 4096;
+        buf->f_bfree = buf->f_blocks;
+        buf->f_bavail = buf->f_blocks;
         return;
     }
 
     if (strcmp(fsname, "devfs") == 0) {
+        uint64_t total_kb;
+        total_kb = pfa_get_usable_ram_kb();
         buf->f_type = DEVFS_MAGIC;
         buf->f_bsize = 4096;
         buf->f_frsize = 4096;
-        buf->f_blocks = 0;
-        buf->f_bfree = 0;
-        buf->f_bavail = 0;
+        buf->f_blocks = (uint64_t)total_kb * 1024 / 4096;
+        buf->f_bfree = buf->f_blocks;
+        buf->f_bavail = buf->f_blocks;
         return;
     }
 
     if (strcmp(fsname, "sysfs") == 0) {
+        uint64_t total_kb;
+        total_kb = pfa_get_usable_ram_kb();
         buf->f_type = 0x62656572;
         buf->f_bsize = 4096;
         buf->f_frsize = 4096;
-        buf->f_blocks = 0;
-        buf->f_bfree = 0;
-        buf->f_bavail = 0;
+        buf->f_blocks = (uint64_t)total_kb * 1024 / 4096;
+        buf->f_bfree = buf->f_blocks;
+        buf->f_bavail = buf->f_blocks;
         return;
     }
 

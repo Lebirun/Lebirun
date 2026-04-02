@@ -830,6 +830,7 @@ void task_deferred_work(void) {
     if (reap_pending) {
         reap_pending = 0;
         reap_dead_tasks();
+        slab_gc();
     }
     if (exec_drain_pending) {
         exec_drain_pending = 0;
@@ -1806,7 +1807,10 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
 
     elf_valid = elf_validate(kernel_bin, bin_size);
     if (elf_valid != 0) {
-        task_error("task_exec_with_args: ELF validation failed\n");
+        task_error("task_exec_with_args: ELF validation failed code=%d size=%llu magic=%02x%02x%02x%02x type=%04x\n",
+                   elf_valid, (unsigned long long)bin_size,
+                   kernel_bin[0], kernel_bin[1], kernel_bin[2], kernel_bin[3],
+                   (unsigned)((const Elf64_Ehdr *)kernel_bin)->e_type);
         if (k_argv) {
             for (i = 0; i < argc; i++) kfree(k_argv[i]);
             kfree(k_argv);
@@ -1846,7 +1850,7 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
 
     load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
-        task_error("task_exec_with_args: ELF loading failed\n");
+        task_error("task_exec_with_args: ELF loading failed code=%d\n", load_result);
         if (elf_pages) kfree(elf_pages);
         vmm_free_pml4(new_pd);
         if (k_argv) {

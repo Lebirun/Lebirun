@@ -267,7 +267,6 @@ void pfa_init(void) {
     uint64_t max_phys;
     uint64_t total_mb;
     uint64_t actual_free;
-    uint64_t region_size;
     uint64_t system_total_ram_kb;
     uint64_t system_usable_ram_kb;
     uint64_t detected_max_phys;
@@ -408,32 +407,16 @@ void pfa_init(void) {
         }
     }
 
-    if (multiboot_physical_ram_kb > 0) {
-        system_total_ram_kb = multiboot_physical_ram_kb;
-        if (system_total_ram_kb > (uint64_t)(max_phys / 1024)) {
-            system_total_ram_kb = (uint64_t)(max_phys / 1024);
-        }
-    } else {
-        system_total_ram_kb = 0;
-        for (r = 0; r < num_regions; r++) {
-            if (memory_map[r].type != 1) continue;
-            region_size = memory_map[r].length;
-            if (memory_map[r].base + region_size > max_phys) {
-                if (memory_map[r].base >= max_phys) continue;
-                region_size = max_phys - memory_map[r].base;
-            }
-            system_total_ram_kb += (uint64_t)(region_size / 1024);
-        }
-    }
-    system_usable_ram_kb = 0;
+    system_total_ram_kb = 0;
     for (r = 0; r < num_regions; r++) {
         if (memory_map[r].type != 1) continue;
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
-        if (region_base >= max_phys) continue;
-        if (region_end > max_phys) region_end = max_phys;
-        system_usable_ram_kb += (uint64_t)((region_end - region_base) / 1024);
+        if (region_base >= detected_max_phys) continue;
+        if (region_end > detected_max_phys) region_end = detected_max_phys;
+        system_total_ram_kb += (uint64_t)((region_end - region_base) / 1024);
     }
+    system_usable_ram_kb = system_total_ram_kb;
     pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, (uint64_t)total_free_frames);
 
     {

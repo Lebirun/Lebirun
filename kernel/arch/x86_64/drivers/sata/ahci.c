@@ -245,6 +245,10 @@ int ahci_port_init(ahci_port_t *port) {
     uint64_t cmd_list_virt;
     uint64_t fis_virt;
     uint64_t cmd_table_virt;
+    uint64_t dma_phys;
+    uint64_t dma_virt;
+    uint64_t dma_pages;
+    uint64_t j;
     int i;
 
     printf("AHCI: Initializing port %u...\n", port->port_num);
@@ -275,9 +279,9 @@ int ahci_port_init(ahci_port_t *port) {
     printf("AHCI: port %u alloc done (cmd=0x%lX fis=0x%lX tbl=0x%lX)\n",
            port->port_num, cmd_list_phys, fis_phys, cmd_table_phys);
 
-    cmd_list_virt = (KERNEL_VMA + 0x38000000ULL) + (port->port_num * 3 * PAGE_SIZE);
-    fis_virt = cmd_list_virt + PAGE_SIZE;
-    cmd_table_virt = fis_virt + PAGE_SIZE;
+    cmd_list_virt = cmd_list_phys + KERNEL_VMA;
+    fis_virt = fis_phys + KERNEL_VMA;
+    cmd_table_virt = cmd_table_phys + KERNEL_VMA;
 
     vmm_map_page(cmd_list_virt, cmd_list_phys, 0x003);
     printf("AHCI: port %u map cmd_list done\n", port->port_num);
@@ -316,6 +320,18 @@ int ahci_port_init(ahci_port_t *port) {
 
     ahci_start_cmd(port);
 
+    dma_pages = 16;
+    dma_phys = pfa_alloc_contiguous(dma_pages);
+    if (dma_phys) {
+        dma_virt = dma_phys + KERNEL_VMA;
+        for (j = 0; j < dma_pages; j++) {
+            vmm_map_page(dma_virt + j * PAGE_SIZE, dma_phys + j * PAGE_SIZE, 0x003);
+        }
+        port->dma_buf_phys = dma_phys;
+        port->dma_buf_virt = dma_virt;
+        port->dma_buf_pages = dma_pages;
+    }
+
     printf("AHCI: Port %u initialized (CLB=0x%016lX, FB=0x%016lX, CTBA=0x%016lX)\n",
            port->port_num, cmd_list_phys, fis_phys, cmd_table_phys);
 
@@ -339,7 +355,7 @@ int ahci_identify(ahci_port_t *port) {
         return -1;
     }
     
-    uint64_t buf_virt = (KERNEL_VMA + 0x39000000ULL) + (port->port_num * PAGE_SIZE);
+    uint64_t buf_virt = buf_phys + KERNEL_VMA;
     vmm_map_page(buf_virt, buf_phys, 0x003);
     memset((void *)buf_virt, 0, PAGE_SIZE);
     
@@ -415,6 +431,16 @@ int ahci_identify(ahci_port_t *port) {
 }
 
 int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer) {
+    uint64_t buf_pages;
+    uint64_t buf_phys;
+    uint64_t buf_virt;
+    int use_persistent;
+    int slot;
+    int result;
+    hba_cmd_header_t *cmd_header;
+    hba_cmd_table_t *cmd_table;
+    fis_reg_h2d_t *fis;
+
     if (!port->present || port->type != AHCI_DEV_SATA) {
         return -1;
     }
@@ -425,32 +451,38 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
-    int slot = ahci_find_slot(port);
+    slot = ahci_find_slot(port);
     if (slot < 0) {
         printf("AHCI: No free command slot for read\n");
         return -1;
     }
     
-    uint64_t buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint64_t buf_phys = pfa_alloc_contiguous(buf_pages);
-    if (!buf_phys) {
-        printf("AHCI: Failed to allocate DMA buffer\n");
-        return -1;
+    buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
+
+    if (use_persistent) {
+        buf_phys = port->dma_buf_phys;
+        buf_virt = port->dma_buf_virt;
+    } else {
+        buf_phys = pfa_alloc_contiguous(buf_pages);
+        if (!buf_phys) {
+            printf("AHCI: Failed to allocate DMA buffer\n");
+            return -1;
+        }
+        buf_virt = buf_phys + KERNEL_VMA;
+        for (uint64_t i = 0; i < buf_pages; i++) {
+            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
+        }
     }
     
-    uint64_t buf_virt = (KERNEL_VMA + 0x3A000000ULL);
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-    }
-    
-    hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
+    cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
     cmd_header->w = 0;
     cmd_header->p = 0;
     cmd_header->c = 1;
     cmd_header->prdtl = 1;
     
-    hba_cmd_table_t *cmd_table = port->cmd_table + slot;
+    cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
     cmd_table->prdt[0].dba = (uint32_t)buf_phys;
@@ -458,7 +490,7 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
-    fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table->cfis;
+    fis = (fis_reg_h2d_t *)cmd_table->cfis;
     memset(fis, 0, sizeof(fis_reg_h2d_t));
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
@@ -475,21 +507,33 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     
     ahci_port_write(port, AHCI_PxCI, 1 << slot);
     
-    int result = ahci_wait_cmd(port, slot, 5000);
+    result = ahci_wait_cmd(port, slot, 5000);
     
     if (result == 0) {
         memcpy(buffer, (void *)buf_virt, count * AHCI_SECTOR_SIZE);
     }
-    
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+
+    if (!use_persistent) {
+        for (uint64_t i = 0; i < buf_pages; i++) {
+            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+        }
+        pfa_free_contiguous(buf_phys, buf_pages);
     }
-    pfa_free_contiguous(buf_phys, buf_pages);
     
     return result;
 }
 
 int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer) {
+    uint64_t buf_pages;
+    uint64_t buf_phys;
+    uint64_t buf_virt;
+    int use_persistent;
+    int slot;
+    int result;
+    hba_cmd_header_t *cmd_header;
+    hba_cmd_table_t *cmd_table;
+    fis_reg_h2d_t *fis;
+
     if (!port->present || port->type != AHCI_DEV_SATA) {
         return -1;
     }
@@ -500,34 +544,40 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
-    int slot = ahci_find_slot(port);
+    slot = ahci_find_slot(port);
     if (slot < 0) {
         printf("AHCI: No free command slot for write\n");
         return -1;
     }
     
-    uint64_t buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint64_t buf_phys = pfa_alloc_contiguous(buf_pages);
-    if (!buf_phys) {
-        printf("AHCI: Failed to allocate DMA buffer\n");
-        return -1;
-    }
-    
-    uint64_t buf_virt = (KERNEL_VMA + 0x3A000000ULL);
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
+    buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
+    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
+
+    if (use_persistent) {
+        buf_phys = port->dma_buf_phys;
+        buf_virt = port->dma_buf_virt;
+    } else {
+        buf_phys = pfa_alloc_contiguous(buf_pages);
+        if (!buf_phys) {
+            printf("AHCI: Failed to allocate DMA buffer\n");
+            return -1;
+        }
+        buf_virt = buf_phys + KERNEL_VMA;
+        for (uint64_t i = 0; i < buf_pages; i++) {
+            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
+        }
     }
     
     memcpy((void *)buf_virt, buffer, count * AHCI_SECTOR_SIZE);
-    
-    hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
+
+    cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
     cmd_header->w = 1;
     cmd_header->p = 0;
     cmd_header->c = 1;
     cmd_header->prdtl = 1;
     
-    hba_cmd_table_t *cmd_table = port->cmd_table + slot;
+    cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
     cmd_table->prdt[0].dba = (uint32_t)buf_phys;
@@ -535,7 +585,7 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
     cmd_table->prdt[0].i = 1;
     
-    fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table->cfis;
+    fis = (fis_reg_h2d_t *)cmd_table->cfis;
     memset(fis, 0, sizeof(fis_reg_h2d_t));
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
@@ -549,15 +599,17 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     fis->lba5 = (uint8_t)((lba >> 40) & 0xFF);
     fis->countl = count & 0xFF;
     fis->counth = (count >> 8) & 0xFF;
-    
+
     ahci_port_write(port, AHCI_PxCI, 1 << slot);
     
-    int result = ahci_wait_cmd(port, slot, 5000);
+    result = ahci_wait_cmd(port, slot, 5000);
     
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+    if (!use_persistent) {
+        for (uint64_t i = 0; i < buf_pages; i++) {
+            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+        }
+        pfa_free_contiguous(buf_phys, buf_pages);
     }
-    pfa_free_contiguous(buf_phys, buf_pages);
     
     return result;
 }
@@ -955,7 +1007,7 @@ int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     }
     req->buf_pages = buf_pages;
     
-    uint64_t buf_virt = (KERNEL_VMA + 0x3A000000ULL) + (slot * 0x10000);
+    uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
     for (uint64_t i = 0; i < buf_pages; i++) {
         vmm_map_page(buf_virt + i * PAGE_SIZE, req->buf_phys + i * PAGE_SIZE, 0x003);
     }
@@ -1028,7 +1080,7 @@ int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     }
     req->buf_pages = buf_pages;
     
-    uint64_t buf_virt = (KERNEL_VMA + 0x3A000000ULL) + (slot * 0x10000);
+    uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
     for (uint64_t i = 0; i < buf_pages; i++) {
         vmm_map_page(buf_virt + i * PAGE_SIZE, req->buf_phys + i * PAGE_SIZE, 0x003);
     }
@@ -1085,7 +1137,7 @@ void ahci_poll_completion(ahci_port_t *port) {
         if (completed & (1 << i)) {
             ahci_cmd_request_t *req = &port->requests[i];
             if (req->state == AHCI_CMD_STATE_ACTIVE) {
-                uint64_t buf_virt = (KERNEL_VMA + 0x3A000000ULL) + (i * 0x10000);
+                uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
                 
                 if (req->command == ATA_CMD_READ_DMA_EX) {
                     memcpy(req->buffer, (void *)buf_virt, req->count * AHCI_SECTOR_SIZE);
@@ -1336,7 +1388,7 @@ int ahci_smart_read_data(ahci_port_t *port, smart_data_t *data) {
     if (!buf_phys)
         return -1;
     
-    uint64_t buf_virt = (KERNEL_VMA + 0x3B000000ULL);
+    uint64_t buf_virt = buf_phys + KERNEL_VMA;
     vmm_map_page(buf_virt, buf_phys, 0x003);
     memset((void *)buf_virt, 0, PAGE_SIZE);
     

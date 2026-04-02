@@ -3,10 +3,8 @@
 #include <kernel/debug.h>
 #include <string.h>
 
-#define DEMAND_BITMAP_PAGES_CAP ((HEAP_MAX_SIZE_CAP / PAGE_SIZE) / 8)
-
-static uint8_t demand_reserved_bitmap[DEMAND_BITMAP_PAGES_CAP];
-static uint8_t demand_committed_bitmap[DEMAND_BITMAP_PAGES_CAP];
+static uint8_t demand_reserved_bitmap[8192];
+static uint8_t demand_committed_bitmap[8192];
 static uint64_t demand_base = 0;
 static uint64_t demand_max_pages = 0;
 static int demand_initialized = 0;
@@ -61,12 +59,12 @@ void demand_paging_init(void) {
     demand_base = HEAP_START;
     heap_max_size = kernel_heap.max_addr - kernel_heap.start_addr;
     demand_max_pages = heap_max_size / PAGE_SIZE;
-    
+
     memset(demand_reserved_bitmap, 0, sizeof(demand_reserved_bitmap));
     memset(demand_committed_bitmap, 0, sizeof(demand_committed_bitmap));
-    
+
     demand_initialized = 1;
-    printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n", 
+    printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n",
            demand_base, demand_max_pages);
 }
 

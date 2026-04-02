@@ -42,11 +42,11 @@ static vfs_node_t proc_memdetail;
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 
-#define PROC_PID_POOL_SIZE 32
-#define PROC_PID_SUBFILES 12
+#define PROC_PID_POOL_SIZE 16
+#define PROC_PID_SUBFILES 8
 
-static vfs_node_t pid_dir_pool[PROC_PID_POOL_SIZE];
-static vfs_node_t pid_file_pool[PROC_PID_POOL_SIZE][PROC_PID_SUBFILES];
+static vfs_node_t *pid_dir_pool;
+static vfs_node_t (*pid_file_pool)[PROC_PID_SUBFILES];
 static dirent_t pid_dirent;
 
 static task_t *procfs_get_task(vfs_node_t *node) {
@@ -274,38 +274,56 @@ static uint64_t proc_uptime_read(vfs_node_t *node, uint64_t offset, uint64_t siz
 }
 
 static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[512];
+    char buf[768];
     uint64_t total_kb;
     uint64_t free_pages_kb;
+    uint64_t used_kb;
+    uint64_t heap_total_kb;
+    uint64_t heap_used_kb;
+    uint64_t slab_kb;
     int len;
     uint64_t remaining;
     
     (void)node;
     
-    total_kb = pfa_get_usable_ram_kb();
+    total_kb = pfa_get_total_ram_kb();
     free_pages_kb = pfa_count_free() * 4;
+    used_kb = total_kb > free_pages_kb ? total_kb - free_pages_kb : 0;
+    heap_total_kb = kernel_heap.total_size / 1024;
+    heap_used_kb = kernel_heap.used_size / 1024;
+    slab_kb = slab_get_total_pages() * 4;
     
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8lu kB\n"
         "MemFree:       %8lu kB\n"
         "MemAvailable:  %8lu kB\n"
+        "MemUsed:       %8lu kB\n"
+        "MemAllUsed:    %8lu kB\n"
         "Buffers:       %8lu kB\n"
         "Cached:        %8lu kB\n"
         "SwapCached:    %8lu kB\n"
         "SwapTotal:     %8lu kB\n"
         "SwapFree:      %8lu kB\n"
         "Shmem:         %8lu kB\n"
-        "SReclaimable:  %8lu kB\n",
+        "SReclaimable:  %8lu kB\n"
+        "HeapTotal:     %8lu kB\n"
+        "HeapUsed:      %8lu kB\n"
+        "Slab:          %8lu kB\n",
         total_kb,
         free_pages_kb,
         free_pages_kb,
+        used_kb,
+        used_kb,
         0UL,
         0UL,
         0UL,
         0UL,
         0UL,
         0UL,
-        0UL);
+        0UL,
+        heap_total_kb,
+        heap_used_kb,
+        slab_kb);
     
     if (offset >= (uint64_t)len) return 0;
     remaining = (uint64_t)len - offset;
@@ -1122,6 +1140,11 @@ static int procfs_unmount(vfs_node_t *node) {
 static vfs_fs_type_t procfs_type;
 
 void procfs_init(void) {
+    pid_dir_pool = (vfs_node_t *)kmalloc(PROC_PID_POOL_SIZE * sizeof(vfs_node_t));
+    pid_file_pool = (vfs_node_t (*)[PROC_PID_SUBFILES])kmalloc(PROC_PID_POOL_SIZE * PROC_PID_SUBFILES * sizeof(vfs_node_t));
+    if (pid_dir_pool) memset(pid_dir_pool, 0, PROC_PID_POOL_SIZE * sizeof(vfs_node_t));
+    if (pid_file_pool) memset(pid_file_pool, 0, PROC_PID_POOL_SIZE * PROC_PID_SUBFILES * sizeof(vfs_node_t));
+
     procfs_type.name = "procfs";
     procfs_type.mount = procfs_mount;
     procfs_type.unmount = procfs_unmount;

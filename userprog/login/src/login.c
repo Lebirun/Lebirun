@@ -94,8 +94,10 @@ static int lookup_shadow(const char *username, char *hash_out, int hash_max)
 {
     int fd;
     char buf[MAX_LINE];
+    char rbuf[4096];
     int pos;
-    int r;
+    int rlen;
+    int rpos;
     char c;
     char field[MAX_FIELD];
 
@@ -104,21 +106,27 @@ static int lookup_shadow(const char *username, char *hash_out, int hash_max)
         return -1;
 
     pos = 0;
+    rlen = 0;
+    rpos = 0;
     for (;;) {
-        r = read(fd, &c, 1);
-        if (r <= 0) {
-            if (pos > 0) {
-                buf[pos] = '\0';
-                if (parse_field(buf, 0, field, sizeof(field)) == 0) {
-                    if (strcmp(field, username) == 0) {
-                        parse_field(buf, 1, hash_out, hash_max);
-                        close(fd);
-                        return 0;
+        if (rpos >= rlen) {
+            rlen = read(fd, rbuf, sizeof(rbuf));
+            rpos = 0;
+            if (rlen <= 0) {
+                if (pos > 0) {
+                    buf[pos] = '\0';
+                    if (parse_field(buf, 0, field, sizeof(field)) == 0) {
+                        if (strcmp(field, username) == 0) {
+                            parse_field(buf, 1, hash_out, hash_max);
+                            close(fd);
+                            return 0;
+                        }
                     }
                 }
+                break;
             }
-            break;
         }
+        c = rbuf[rpos++];
         if (c == '\n') {
             buf[pos] = '\0';
             pos = 0;
@@ -144,8 +152,10 @@ static int lookup_passwd(const char *username, int *uid, int *gid,
 {
     int fd;
     char buf[MAX_LINE];
+    char rbuf[4096];
     int pos;
-    int r;
+    int rlen;
+    int rpos;
     char c;
     char field[MAX_FIELD];
 
@@ -154,18 +164,24 @@ static int lookup_passwd(const char *username, int *uid, int *gid,
         return -1;
 
     pos = 0;
+    rlen = 0;
+    rpos = 0;
     for (;;) {
-        r = read(fd, &c, 1);
-        if (r <= 0) {
-            if (pos > 0) {
-                buf[pos] = '\0';
-                if (parse_field(buf, 0, field, sizeof(field)) == 0) {
-                    if (strcmp(field, username) == 0)
-                        goto found;
+        if (rpos >= rlen) {
+            rlen = read(fd, rbuf, sizeof(rbuf));
+            rpos = 0;
+            if (rlen <= 0) {
+                if (pos > 0) {
+                    buf[pos] = '\0';
+                    if (parse_field(buf, 0, field, sizeof(field)) == 0) {
+                        if (strcmp(field, username) == 0)
+                            goto found;
+                    }
                 }
+                break;
             }
-            break;
         }
+        c = rbuf[rpos++];
         if (c == '\n') {
             buf[pos] = '\0';
             pos = 0;

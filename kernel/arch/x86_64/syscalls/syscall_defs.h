@@ -413,26 +413,21 @@ void syscall_clear_exec_completed(void);
 
 struct kernel_stat {
     unsigned long long st_dev;
-    int __st_dev_padding;
-    long __st_ino_truncated;
+    unsigned long long st_ino;
+    unsigned long st_nlink;
     unsigned int st_mode;
-    unsigned int st_nlink;
     unsigned int st_uid;
     unsigned int st_gid;
+    unsigned int __pad0;
     unsigned long long st_rdev;
-    int __st_rdev_padding;
     long long st_size;
     long st_blksize;
     long long st_blocks;
     struct {
         long tv_sec;
         long tv_nsec;
-    } __st_atim32, __st_mtim32, __st_ctim32;
-    unsigned long long st_ino;
-    struct {
-        long tv_sec;
-        long tv_nsec;
     } st_atim, st_mtim, st_ctim;
+    long __unused[3];
 };
 
 struct kernel_sigaction {

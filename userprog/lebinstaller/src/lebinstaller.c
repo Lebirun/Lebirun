@@ -292,6 +292,83 @@ static void tui_draw_screen(const char *title, const char *help)
     (void)title;
 }
 
+static int tui_checklist(const char *title, const char **items, int *checked,
+                         int count, const char *help)
+{
+    int sel;
+    int bw;
+    int bh;
+    int bx;
+    int by;
+    int i;
+    int key;
+    int maxw;
+    int len;
+    int view_h;
+    int scroll;
+    char line[80];
+
+    sel = 0;
+    scroll = 0;
+    maxw = (int)strlen(title) + 4;
+    for (i = 0; i < count; i++) {
+        len = (int)strlen(items[i]) + 4;
+        if (len + 8 > maxw) maxw = len + 8;
+    }
+    bw = maxw + 4;
+    if (bw > term_cols - 4) bw = term_cols - 4;
+    bh = count + 4;
+    if (bh > term_rows - 4) bh = term_rows - 4;
+    bx = (term_cols - bw) / 2 + 1;
+    by = (term_rows - bh) / 2;
+    if (by < 3) by = 3;
+    view_h = bh - 4;
+
+    tui_draw_screen(title, help);
+    tui_draw_box(by, bx, bh, bw, title);
+
+    for (;;) {
+        if (sel < scroll) scroll = sel;
+        if (sel >= scroll + view_h) scroll = sel - view_h + 1;
+
+        for (i = 0; i < view_h; i++) {
+            int idx = scroll + i;
+            tui_goto(by + 2 + i, bx + 2);
+            if (idx < count) {
+                if (idx == sel)
+                    printf("%s", CLR_SELECT);
+                else
+                    printf("%s", CLR_MENU);
+                if (checked[idx] == -1)
+                    snprintf(line, sizeof(line), "  *  %s", items[idx]);
+                else
+                    snprintf(line, sizeof(line), " [%c] %s",
+                             checked[idx] ? 'x' : ' ', items[idx]);
+                printf(" %-*.*s ", bw - 8, bw - 8, line);
+            } else {
+                printf("%s%-*s", CLR_MENU, bw - 6, "");
+            }
+        }
+
+        printf("%s", CLR_NORMAL);
+        fflush(stdout);
+
+        key = tui_read_key();
+        if (key == KEY_UP) {
+            if (sel > 0) sel--;
+        } else if (key == KEY_DOWN) {
+            if (sel < count - 1) sel++;
+        } else if (key == ' ') {
+            if (checked[sel] != -1)
+                checked[sel] = !checked[sel];
+        } else if (key == KEY_ENTER) {
+            return 0;
+        } else if (key == KEY_ESC) {
+            return -1;
+        }
+    }
+}
+
 static int tui_menu(const char *title, const char **items, int count, const char *help)
 {
     int sel;
@@ -557,7 +634,9 @@ static void tui_progress(const char *title, const char *msg, int pct)
     prog_by = 3;
     log_by = prog_by + prog_h;
     bar_w = prog_bw - 8;
+    if (bar_w < 1) bar_w = 1;
     mw = prog_bw - 6;
+    if (mw < 1) mw = 1;
 
     if (!prog_drawn) {
         tui_draw_screen(title, " Please wait...");
@@ -602,6 +681,7 @@ static void tui_log(const char *msg)
     if (log_area > LOG_MAX) log_area = LOG_MAX;
     if (log_area < 1) return;
     mw = prog_bw - 6;
+    if (mw < 1) mw = 1;
     if (mw > 63) mw = 63;
 
     if (log_count < log_area) {
@@ -684,6 +764,14 @@ static void inst_scan_disk(disk_info_t *disk)
     int ret;
     int i;
     int stat_fd;
+    int devfd;
+    char name[64];
+    unsigned int dtype;
+    unsigned int didx;
+    int dlen;
+    char partpath[64];
+    uint64_t psize;
+    uint64_t ptype;
 
     memset(disk->parts, 0, sizeof(disk->parts));
     disk->part_count = 0;
@@ -702,24 +790,54 @@ static void inst_scan_disk(disk_info_t *disk)
     }
 
     ret = inst_disk_read(disk->devpath, 0, 1, sector0);
-    if (ret < SECTOR_SIZE) return;
+    if (ret >= SECTOR_SIZE) {
+        mbr = (mbr_t *)sector0;
+        if (mbr->signature == MBR_SIG) {
+            for (i = 0; i < 4; i++) {
+                if (mbr->parts[i].type == 0) continue;
+                if (mbr->parts[i].sector_count == 0) continue;
+                disk->parts[disk->part_count].valid = 1;
+                disk->parts[disk->part_count].number = i + 1;
+                disk->parts[disk->part_count].start_lba = mbr->parts[i].lba_start;
+                disk->parts[disk->part_count].sector_count = mbr->parts[i].sector_count;
+                disk->parts[disk->part_count].mbr_type = mbr->parts[i].type;
+                snprintf(disk->parts[disk->part_count].devpath,
+                         sizeof(disk->parts[disk->part_count].devpath),
+                         "%s%d", disk->devpath, i + 1);
+                disk->part_count++;
+            }
+        }
+    }
 
-    mbr = (mbr_t *)sector0;
-    if (mbr->signature != MBR_SIG) return;
+    if (disk->part_count > 0) return;
 
-    for (i = 0; i < 4; i++) {
-        if (mbr->parts[i].type == 0) continue;
-        if (mbr->parts[i].sector_count == 0) continue;
+    dlen = (int)strlen(disk->devname);
+    devfd = vfs_open("/dev", 0);
+    if (devfd < 0) return;
+
+    for (didx = 0; disk->part_count < MAX_PARTS; didx++) {
+        if (vfs_readdir(devfd, name, &dtype, didx) != 0) break;
+        if (strncmp(name, disk->devname, dlen) != 0) continue;
+        if (name[dlen] < '1' || name[dlen] > '9') continue;
+
+        snprintf(partpath, sizeof(partpath), "/dev/%s", name);
+        stat_fd = vfs_open(partpath, 0);
+        if (stat_fd < 0) continue;
+        psize = 0;
+        ptype = 0;
+        vfs_stat(stat_fd, &psize, &ptype);
+        vfs_close_fd(stat_fd);
+
         disk->parts[disk->part_count].valid = 1;
-        disk->parts[disk->part_count].number = i + 1;
-        disk->parts[disk->part_count].start_lba = mbr->parts[i].lba_start;
-        disk->parts[disk->part_count].sector_count = mbr->parts[i].sector_count;
-        disk->parts[disk->part_count].mbr_type = mbr->parts[i].type;
-        snprintf(disk->parts[disk->part_count].devpath,
-                 sizeof(disk->parts[disk->part_count].devpath),
-                 "%s%d", disk->devpath, i + 1);
+        disk->parts[disk->part_count].number = name[dlen] - '0';
+        disk->parts[disk->part_count].start_lba = 0;
+        disk->parts[disk->part_count].sector_count = psize / SECTOR_SIZE;
+        disk->parts[disk->part_count].mbr_type = 0x83;
+        strncpy(disk->parts[disk->part_count].devpath, partpath,
+                sizeof(disk->parts[disk->part_count].devpath) - 1);
         disk->part_count++;
     }
+    vfs_close_fd(devfd);
 }
 
 static int inst_enumerate_disks(void)
@@ -748,16 +866,80 @@ static int inst_enumerate_disks(void)
     return disk_count;
 }
 
+static uint64_t inst_get_free_mem(void)
+{
+    int fd;
+    char mbuf[512];
+    int n;
+    char *p;
+    uint64_t mem_free;
+
+    mem_free = 0;
+    fd = vfs_open("/proc/meminfo", 0);
+    if (fd < 0) return 0;
+    n = vfs_read_fd(fd, mbuf, sizeof(mbuf) - 1);
+    vfs_close_fd(fd);
+    if (n <= 0) return 0;
+    mbuf[n] = '\0';
+    p = mbuf;
+    while (*p) {
+        if (strncmp(p, "MemFree:", 8) == 0) {
+            p += 8;
+            while (*p == ' ' || *p == '\t') p++;
+            while (*p >= '0' && *p <= '9') {
+                mem_free = mem_free * 10 + (*p - '0');
+                p++;
+            }
+            break;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return mem_free * 1024;
+}
+
+static char *copy_buf = NULL;
+static int copy_buf_size = 0;
+
+static void inst_init_copy_buf(void)
+{
+    uint64_t avail;
+    int want;
+
+    if (copy_buf) return;
+
+    avail = inst_get_free_mem();
+    if (avail > 1024 * 1024)
+        avail -= 512 * 1024;
+    else if (avail > 65536)
+        avail = avail / 2;
+    else
+        avail = BUF_SIZE;
+
+    want = (int)(avail > 4 * 1024 * 1024 ? 4 * 1024 * 1024 : avail);
+    if (want < BUF_SIZE) want = BUF_SIZE;
+
+    while (want >= BUF_SIZE) {
+        copy_buf = (char *)malloc(want);
+        if (copy_buf) break;
+        want /= 2;
+    }
+    copy_buf_size = copy_buf ? want : 0;
+}
+
 static int inst_copy_file_vfs(const char *src, const char *dst)
 {
     int fd_in;
     int fd_out;
-    static char buf[BUF_SIZE];
     int r;
+    int use_posix;
+
+    if (!copy_buf) return -1;
 
     fd_in = vfs_open(src, 0);
     if (fd_in < 0) return -1;
 
+    use_posix = 0;
     vfs_create(dst, 0644);
     fd_out = vfs_open(dst, 2);
     if (fd_out < 0) {
@@ -766,18 +948,56 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
             vfs_close_fd(fd_in);
             return -1;
         }
+        use_posix = 1;
     }
 
-    while ((r = vfs_read_fd(fd_in, buf, BUF_SIZE)) > 0) {
-        if (vfs_write_fd(fd_out, buf, r) != r) {
-            vfs_close_fd(fd_in);
-            vfs_close_fd(fd_out);
-            return -1;
+    while ((r = vfs_read_fd(fd_in, copy_buf, copy_buf_size)) > 0) {
+        if (use_posix) {
+            if (write(fd_out, copy_buf, r) != r) {
+                vfs_close_fd(fd_in);
+                close(fd_out);
+                return -1;
+            }
+        } else {
+            if (vfs_write_fd(fd_out, copy_buf, r) != r) {
+                vfs_close_fd(fd_in);
+                vfs_close_fd(fd_out);
+                return -1;
+            }
         }
     }
 
     vfs_close_fd(fd_in);
-    vfs_close_fd(fd_out);
+    if (use_posix)
+        close(fd_out);
+    else
+        vfs_close_fd(fd_out);
+    return 0;
+}
+
+#define PKG_CORE       0
+#define PKG_C_HDR      1
+#define PKG_CPP_HDR    2
+#define PKG_C_LIB      3
+#define PKG_CPP_LIB    4
+#define PKG_COUNT      5
+
+static int pkg_selected[PKG_COUNT] = { 1, 1, 1, 1, 1 };
+
+static int inst_pkg_skip(const char *path)
+{
+    if (!pkg_selected[PKG_CPP_HDR] && strcmp(path, "/usr/include/c++") == 0)
+        return 1;
+    if (!pkg_selected[PKG_C_HDR] && strcmp(path, "/usr/include") == 0)
+        return 1;
+    if (!pkg_selected[PKG_C_LIB] && strcmp(path, "/usr/lib") == 0)
+        return 1;
+    if (!pkg_selected[PKG_CPP_LIB]) {
+        if (strcmp(path, "/usr/lib/libstdc++.a") == 0)
+            return 1;
+        if (strcmp(path, "/usr/lib/libsupc++.a") == 0)
+            return 1;
+    }
     return 0;
 }
 
@@ -788,6 +1008,7 @@ static int inst_count_dir_entries(const char *path)
     unsigned int type;
     unsigned int idx;
     int count;
+    char sub[MAX_PATH];
 
     count = 0;
     fd = vfs_open(path, 0);
@@ -795,14 +1016,23 @@ static int inst_count_dir_entries(const char *path)
     for (idx = 0; ; idx++) {
         if (vfs_readdir(fd, name, &type, idx) != 0) break;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
-        count++;
+        if (strcmp(name, "lebinstaller") == 0) continue;
+        snprintf(sub, sizeof(sub), "%s/%s", path, name);
+        if (inst_pkg_skip(sub)) continue;
+        if (type == 2) {
+            count += inst_count_dir_entries(sub);
+        } else {
+            count++;
+        }
     }
     vfs_close_fd(fd);
     return count;
 }
 
 static int copy_total;
+
 static int copy_done;
+static int copy_last_pct;
 
 static int inst_copy_dir_recursive(const char *src, const char *dst, const char *skip)
 {
@@ -829,6 +1059,7 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
 
         if (skip && strcmp(src_path, skip) == 0) continue;
         if (strcmp(name, "lebinstaller") == 0) continue;
+        if (inst_pkg_skip(src_path)) continue;
 
         snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
 
@@ -843,8 +1074,11 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
             if (copy_total > 0) {
                 pct = (copy_done * 100) / copy_total;
                 if (pct > 99) pct = 99;
-                tui_progress("Installing", src_path, pct);
-                tui_log(src_path);
+                if (pct != copy_last_pct) {
+                    copy_last_pct = pct;
+                    tui_progress("Installing", src_path, pct);
+                    tui_log(src_path);
+                }
             }
         }
     }
@@ -936,13 +1170,14 @@ static int inst_format_ext4(const char *devpath)
     if (pid < 0) return -1;
 
     if (pid == 0) {
-        int null_fd = open("/dev/null", O_WRONLY);
+        int null_fd;
+        char *argv[3];
+        null_fd = open("/dev/null", O_WRONLY);
         if (null_fd >= 0) {
             dup2(null_fd, 1);
             dup2(null_fd, 2);
             close(null_fd);
         }
-        char *argv[3];
         argv[0] = "lformat.ext4";
         argv[1] = (char *)devpath;
         argv[2] = NULL;
@@ -996,16 +1231,20 @@ static int inst_copy_rootfs(const char *mountpoint)
     return (errors > 0) ? -1 : 0;
 }
 
-static int inst_install_grub_mbr(const char *disk_dev)
+static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
 {
     static uint8_t mbr_buf[SECTOR_SIZE];
     static uint8_t boot_buf[SECTOR_SIZE];
     static uint8_t core_buf[BUF_SIZE];
+    static uint8_t verify_buf[SECTOR_SIZE];
     int fd_disk;
     int fd_boot;
     int fd_core;
     int r;
     int off;
+    int pi;
+    int entry_off;
+    uint32_t core_lba;
 
     fd_disk = vfs_open(disk_dev, 2);
     if (fd_disk < 0) return -1;
@@ -1015,20 +1254,34 @@ static int inst_install_grub_mbr(const char *disk_dev)
         vfs_close_fd(fd_disk);
         return -1;
     }
+    vfs_close_fd(fd_disk);
 
     fd_boot = vfs_open("/boot/grub/i386-pc/boot.img", 0);
-    if (fd_boot < 0) {
-        vfs_close_fd(fd_disk);
-        return -1;
-    }
+    if (fd_boot < 0) return -1;
     vfs_read_fd(fd_boot, boot_buf, SECTOR_SIZE);
     vfs_close_fd(fd_boot);
 
     memcpy(mbr_buf, boot_buf, 440);
+
+    core_lba = 1;
+    mbr_buf[0x5C] = (uint8_t)(core_lba & 0xFF);
+    mbr_buf[0x5D] = (uint8_t)((core_lba >> 8) & 0xFF);
+    mbr_buf[0x5E] = (uint8_t)((core_lba >> 16) & 0xFF);
+    mbr_buf[0x5F] = (uint8_t)((core_lba >> 24) & 0xFF);
+
+    mbr_buf[0x40] = 0xFF;
+
+    for (pi = 0; pi < 4; pi++) {
+        entry_off = 446 + pi * 16;
+        if (pi == boot_part_num - 1)
+            mbr_buf[entry_off] = 0x80;
+        else
+            mbr_buf[entry_off] = 0x00;
+    }
+
     mbr_buf[0x1FE] = 0x55;
     mbr_buf[0x1FF] = 0xAA;
 
-    vfs_close_fd(fd_disk);
     fd_disk = vfs_open(disk_dev, 2);
     if (fd_disk < 0) return -1;
 
@@ -1044,6 +1297,8 @@ static int inst_install_grub_mbr(const char *disk_dev)
         return -1;
     }
 
+    lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+
     off = 0;
     while ((r = vfs_read_fd(fd_core, core_buf, BUF_SIZE)) > 0) {
         if (vfs_write_fd(fd_disk, core_buf, r) != r) {
@@ -1055,15 +1310,31 @@ static int inst_install_grub_mbr(const char *disk_dev)
     }
 
     vfs_close_fd(fd_core);
+
+    lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+    r = vfs_read_fd(fd_disk, verify_buf, SECTOR_SIZE);
+    if (r >= SECTOR_SIZE) {
+        fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
+        if (fd_core >= 0) {
+            vfs_read_fd(fd_core, core_buf, SECTOR_SIZE);
+            vfs_close_fd(fd_core);
+            if (memcmp(verify_buf, core_buf, SECTOR_SIZE) != 0) {
+                lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+                vfs_write_fd(fd_disk, core_buf, SECTOR_SIZE);
+            }
+        }
+    }
+
     vfs_close_fd(fd_disk);
     return 0;
 }
 
-static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev)
+static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
 {
     char boot_dir[MAX_PATH];
     char grub_dir[MAX_PATH];
     char cfg_path[MAX_PATH];
+    char grub_mod_dir[MAX_PATH];
     int fd;
     char grub_cfg[512];
     int written;
@@ -1082,6 +1353,10 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
     snprintf(grub_dir, sizeof(grub_dir), "%s/boot/grub", mountpoint);
     vfs_mkdir(grub_dir, 0755);
 
+    snprintf(grub_mod_dir, sizeof(grub_mod_dir), "%s/boot/grub/i386-pc", mountpoint);
+    vfs_mkdir(grub_mod_dir, 0755);
+    inst_copy_dir_recursive("/boot/grub/i386-pc", grub_mod_dir, NULL);
+
     snprintf(cfg_path, sizeof(cfg_path), "%s/boot/grub/grub.cfg", mountpoint);
     vfs_create(cfg_path, 0644);
     fd = vfs_open(cfg_path, 2);
@@ -1095,7 +1370,7 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
         vfs_close_fd(fd);
     }
 
-    if (inst_install_grub_mbr(disk_dev) < 0) {
+    if (inst_install_grub_mbr(disk_dev, part_num) < 0) {
         return -1;
     }
 
@@ -1166,7 +1441,10 @@ static int inst_create_user(const char *mountpoint, const char *username, const 
     vfs_write_fd(fd, line, wlen);
     vfs_close_fd(fd);
 
-    hashed = inst_hash_password(password);
+    if (password[0] != '\0')
+        hashed = inst_hash_password(password);
+    else
+        hashed = NULL;
 
     snprintf(path, sizeof(path), "%s/etc/shadow", mountpoint);
     fd = vfs_open(path, 2);
@@ -1231,11 +1509,12 @@ static void cleanup_exit(void)
 #define STEP_DISK    0
 #define STEP_PART    1
 #define STEP_FORMAT  2
-#define STEP_USER    3
-#define STEP_ROOTPW  4
-#define STEP_TZ      5
-#define STEP_INSTALL 6
-#define STEP_COUNT   7
+#define STEP_PKGS    3
+#define STEP_USER    4
+#define STEP_ROOTPW  5
+#define STEP_TZ      6
+#define STEP_INSTALL 7
+#define STEP_COUNT   8
 
 #define STEP_NONE    0
 #define STEP_DONE    1
@@ -1322,6 +1601,30 @@ static user_entry_t users[MAX_USERS];
 static int user_count;
 static char root_password[64];
 
+static int step_packages(void)
+{
+    static const char *pkg_names[PKG_COUNT] = {
+        "Core system (required)",
+        "C development headers",
+        "C++ development headers",
+        "C development libraries",
+        "C++ development libraries"
+    };
+    int tmp[PKG_COUNT];
+    int i;
+
+    for (i = 0; i < PKG_COUNT; i++) tmp[i] = pkg_selected[i];
+    tmp[PKG_CORE] = -1;
+
+    if (tui_checklist("Package Selection", pkg_names, tmp, PKG_COUNT,
+                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel") < 0)
+        return -1;
+
+    tmp[PKG_CORE] = 1;
+    for (i = 0; i < PKG_COUNT; i++) pkg_selected[i] = tmp[i];
+    return 0;
+}
+
 static int step_user_setup(void)
 {
     char *menu_items[MAX_USERS + 2];
@@ -1362,13 +1665,13 @@ static int step_user_setup(void)
                 continue;
             }
             for (;;) {
-                if (tui_input("New User", "Enter password:",
+                if (tui_input("New User", "Enter password (empty=none):",
                               users[user_count].password,
                               sizeof(users[user_count].password), 1) < 0)
                     break;
                 if (users[user_count].password[0] == '\0') {
-                    tui_msgbox("Error", "Password cannot be empty.");
-                    continue;
+                    user_count++;
+                    break;
                 }
                 if (tui_input("New User", "Confirm password:",
                               password2, sizeof(password2), 1) < 0)
@@ -1398,11 +1701,11 @@ static int step_rootpw(void)
     char pw2[64];
 
     for (;;) {
-        if (tui_input("Root Password", "Enter root password:", pw1, sizeof(pw1), 1) < 0)
+        if (tui_input("Root Password", "Enter root password (empty=none):", pw1, sizeof(pw1), 1) < 0)
             return -1;
         if (pw1[0] == '\0') {
-            tui_msgbox("Error", "Password cannot be empty.");
-            continue;
+            root_password[0] = '\0';
+            return 0;
         }
         if (tui_input("Root Password", "Confirm root password:", pw2, sizeof(pw2), 1) < 0)
             return -1;
@@ -1442,6 +1745,8 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     char mountpoint[MAX_PATH];
     char donemsg[128];
     char logbuf[64];
+    char fmsg[128];
+    int fret;
     int i;
 
     d = &disks[disk_idx];
@@ -1452,8 +1757,6 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     usleep(50000);
 
     if (do_format) {
-        int fret;
-        char fmsg[128];
         tui_progress("Installing", "Formatting partition...", 0);
         snprintf(fmsg, sizeof(fmsg), "Formatting %s as ext4...", p->devpath);
         tui_log(fmsg);
@@ -1485,8 +1788,10 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     copy_total = inst_count_rootfs();
     if (copy_total < 1) copy_total = 100;
     copy_done = 0;
+    copy_last_pct = -1;
 
     tui_log("Copying rootfs...");
+    inst_init_copy_buf();
     if (inst_copy_rootfs(mountpoint) < 0) {
         tui_log("Warning: some files could not be copied.");
     }
@@ -1494,7 +1799,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
 
     tui_progress("Installing", "Installing bootloader...", 96);
     tui_log("Installing GRUB bootloader...");
-    if (inst_install_boot(mountpoint, d->devpath, p->devpath) < 0) {
+    if (inst_install_boot(mountpoint, d->devpath, p->devpath, p->number) < 0) {
         tui_log("Warning: bootloader had errors.");
     } else {
         tui_log("Bootloader installed.");
@@ -1593,6 +1898,7 @@ int main(int argc, char **argv)
         "Select Disk",
         "Select Partition",
         "Format Partition",
+        "Package Selection",
         "User Accounts",
         "Root Password",
         "Select Timezone",
@@ -1658,7 +1964,12 @@ int main(int argc, char **argv)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], disks[disk_idx].parts[part_idx].devpath);
                 else if (i == STEP_FORMAT)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], do_format ? "ext4" : "No");
-                else if (i == STEP_USER) {
+                else if (i == STEP_PKGS) {
+                    int npkg;
+                    npkg = pkg_selected[PKG_C_HDR] + pkg_selected[PKG_CPP_HDR]
+                         + pkg_selected[PKG_C_LIB] + pkg_selected[PKG_CPP_LIB];
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (core +%d)", step_names[i], npkg);
+                } else if (i == STEP_USER) {
                     snprintf(ubuf, sizeof(ubuf), "%d user(s)", user_count);
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], ubuf);
                 } else if (i == STEP_TZ)
@@ -1668,7 +1979,7 @@ int main(int argc, char **argv)
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s", step_names[i]);
             } else {
-                if (i == STEP_FORMAT || i == STEP_USER || i == STEP_TZ || i == STEP_ROOTPW)
+                if (i == STEP_FORMAT || i == STEP_USER || i == STEP_TZ || i == STEP_ROOTPW || i == STEP_PKGS)
                     snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (optional)", step_names[i]);
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", step_names[i]);
@@ -1710,6 +2021,12 @@ int main(int argc, char **argv)
             ret = step_format(&do_format);
             if (ret == 0)
                 status[STEP_FORMAT] = STEP_DONE;
+            break;
+
+        case STEP_PKGS:
+            ret = step_packages();
+            if (ret == 0)
+                status[STEP_PKGS] = STEP_DONE;
             break;
 
         case STEP_USER:

@@ -356,6 +356,9 @@ typedef struct ahci_port {
     volatile uint64_t last_serr;
     volatile uint64_t last_tfd;
     bool use_irq;
+    uint64_t dma_buf_phys;
+    uint64_t dma_buf_virt;
+    uint64_t dma_buf_pages;
 } ahci_port_t;
 
 typedef struct {

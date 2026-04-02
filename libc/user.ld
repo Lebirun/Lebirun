@@ -46,13 +46,35 @@ SECTIONS
 
     .init_array : {
         __init_array_start = .;
-        *(.init_array)
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array))
         __init_array_end = .;
+    } :data
+
+    .ctors : {
+        __CTOR_LIST__ = .;
+        KEEP(*crtbegin.o(.ctors))
+        KEEP(*crtbegin?.o(.ctors))
+        KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .ctors))
+        KEEP(*(SORT(.ctors.*)))
+        KEEP(*(.ctors))
+        __CTOR_END__ = .;
+    } :data
+
+    .dtors : {
+        __DTOR_LIST__ = .;
+        KEEP(*crtbegin.o(.dtors))
+        KEEP(*crtbegin?.o(.dtors))
+        KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .dtors))
+        KEEP(*(SORT(.dtors.*)))
+        KEEP(*(.dtors))
+        __DTOR_END__ = .;
     } :data
 
     .fini_array : {
         __fini_array_start = .;
-        *(.fini_array)
+        KEEP(*(SORT(.fini_array.*)))
+        KEEP(*(.fini_array))
         __fini_array_end = .;
     } :data
 

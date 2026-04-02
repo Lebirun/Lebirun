@@ -60,11 +60,22 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
 }
 
 static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block, uint64_t phys_block) {
+    uint32_t ptrs_per_block;
+    uint8_t *ind_block;
+    uint32_t *ptrs;
+    int new_block;
+    uint8_t *zero_block;
+    uint8_t *dind_block;
+    uint32_t *dptrs;
+    uint32_t ind_idx;
+    uint32_t ind_off;
+    uint32_t ind_block_num;
+
     if (inode->i_flags & EXT4_INODE_FLAG_EXTENTS) {
         return -1;
     }
 
-    uint32_t ptrs_per_block = fs->block_size / 4;
+    ptrs_per_block = fs->block_size / 4;
 
     if (logical_block < EXT4_NDIR_BLOCKS) {
         inode->i_block[logical_block] = (uint32_t)phys_block;
@@ -75,13 +86,13 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
 
     if (logical_block < ptrs_per_block) {
         if (inode->i_block[EXT4_IND_BLOCK] == 0) {
-            int new_block = ext4_alloc_block(fs, 0);
+            new_block = ext4_alloc_block(fs, 0);
             if (new_block < 0) {
                 return -1;
             }
             inode->i_block[EXT4_IND_BLOCK] = new_block;
             
-            uint8_t *zero_block = (uint8_t *)kmalloc(fs->block_size);
+            zero_block = (uint8_t *)kmalloc(fs->block_size);
             if (zero_block) {
                 memset(zero_block, 0, fs->block_size);
                 ext4_write_block(fs, new_block, zero_block);
@@ -89,15 +100,74 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
             }
         }
 
-        uint8_t *ind_block = ext4_get_block(fs, inode->i_block[EXT4_IND_BLOCK]);
+        ind_block = ext4_get_block(fs, inode->i_block[EXT4_IND_BLOCK]);
         if (!ind_block) {
             return -1;
         }
 
-        uint32_t *ptrs = (uint32_t *)ind_block;
+        ptrs = (uint32_t *)ind_block;
         ptrs[logical_block] = (uint32_t)phys_block;
         ext4_mark_block_dirty(fs, inode->i_block[EXT4_IND_BLOCK]);
         ext4_release_block(fs, inode->i_block[EXT4_IND_BLOCK]);
+        return 0;
+    }
+
+    logical_block -= ptrs_per_block;
+
+    if (logical_block < (uint64_t)ptrs_per_block * ptrs_per_block) {
+        if (inode->i_block[EXT4_DIND_BLOCK] == 0) {
+            new_block = ext4_alloc_block(fs, 0);
+            if (new_block < 0) {
+                return -1;
+            }
+            inode->i_block[EXT4_DIND_BLOCK] = new_block;
+
+            zero_block = (uint8_t *)kmalloc(fs->block_size);
+            if (zero_block) {
+                memset(zero_block, 0, fs->block_size);
+                ext4_write_block(fs, new_block, zero_block);
+                kfree(zero_block);
+            }
+        }
+
+        dind_block = ext4_get_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
+        if (!dind_block) {
+            return -1;
+        }
+
+        dptrs = (uint32_t *)dind_block;
+        ind_idx = logical_block / ptrs_per_block;
+        ind_off = logical_block % ptrs_per_block;
+
+        if (dptrs[ind_idx] == 0) {
+            new_block = ext4_alloc_block(fs, 0);
+            if (new_block < 0) {
+                ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
+                return -1;
+            }
+            dptrs[ind_idx] = new_block;
+            ext4_mark_block_dirty(fs, inode->i_block[EXT4_DIND_BLOCK]);
+
+            zero_block = (uint8_t *)kmalloc(fs->block_size);
+            if (zero_block) {
+                memset(zero_block, 0, fs->block_size);
+                ext4_write_block(fs, new_block, zero_block);
+                kfree(zero_block);
+            }
+        }
+
+        ind_block_num = dptrs[ind_idx];
+        ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
+
+        ind_block = ext4_get_block(fs, ind_block_num);
+        if (!ind_block) {
+            return -1;
+        }
+
+        ptrs = (uint32_t *)ind_block;
+        ptrs[ind_off] = (uint32_t)phys_block;
+        ext4_mark_block_dirty(fs, ind_block_num);
+        ext4_release_block(fs, ind_block_num);
         return 0;
     }
 

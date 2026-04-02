@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <kernel/creds.h>
 #include <kernel/debug.h>
+#include <kernel/mem_map.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -12,14 +13,14 @@ static int line_len[NUM_CONSOLES];
 static int line_cursor[NUM_CONSOLES];
 static int line_ready[NUM_CONSOLES];
 
-#define HISTORY_COUNT 16
+#define HISTORY_COUNT 8
 #define HISTORY_LINE_SIZE 128
-static char history[NUM_CONSOLES][HISTORY_COUNT][HISTORY_LINE_SIZE];
-static int history_len[NUM_CONSOLES][HISTORY_COUNT];
+static char (*history)[HISTORY_COUNT][HISTORY_LINE_SIZE];
+static int (*history_len)[HISTORY_COUNT];
 static int history_head[NUM_CONSOLES];
 static int history_count[NUM_CONSOLES];
 static int history_browse[NUM_CONSOLES];
-static char history_saved[NUM_CONSOLES][HISTORY_LINE_SIZE];
+static char (*history_saved)[HISTORY_LINE_SIZE];
 static int history_saved_len[NUM_CONSOLES];
 
 static int esc_state[NUM_CONSOLES];
@@ -235,7 +236,8 @@ static int sys_write(int fd, const char *buf, int len) {
 
 static int sys_read(int fd, char *buf, int len) {
     uint64_t buf_addr;
-    if (!buf || len <= 0) return -1;
+    if (len == 0) return 0;
+    if (!buf || len < 0) return -1;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
@@ -266,11 +268,44 @@ static int sys_read(int fd, char *buf, int len) {
             return (int)to_read;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
-            uint64_t bytes;
             vfs_node_t *node = (vfs_node_t *)tfd->node;
-            bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
-            tfd->offset += bytes;
-            return (int)bytes;
+            uint64_t file_off = tfd->offset;
+            uint32_t remaining = (uint32_t)len;
+            uint32_t copied = 0;
+            uint32_t buf_sz;
+            uint64_t ram_bytes;
+
+            if (!tfd->read_buf && node->length > 0) {
+                ram_bytes = pfa_get_total_ram_kb() * 1024ULL;
+                buf_sz = node->length < ram_bytes ? (uint32_t)node->length : (uint32_t)ram_bytes;
+                tfd->read_buf = (uint8_t *)kmalloc(buf_sz);
+                if (tfd->read_buf) {
+                    uint64_t bytes = vfs_read(node, 0, buf_sz, tfd->read_buf);
+                    tfd->read_buf_offset = 0;
+                    tfd->read_buf_len = (uint32_t)bytes;
+                }
+            }
+
+            while (remaining > 0) {
+                if (tfd->read_buf && tfd->read_buf_len > 0 &&
+                    file_off >= tfd->read_buf_offset &&
+                    file_off < tfd->read_buf_offset + tfd->read_buf_len) {
+                    uint32_t buf_pos = (uint32_t)(file_off - tfd->read_buf_offset);
+                    uint32_t avail = tfd->read_buf_len - buf_pos;
+                    uint32_t chunk = remaining < avail ? remaining : avail;
+                    memcpy((void *)(buf_addr + copied), tfd->read_buf + buf_pos, chunk);
+                    file_off += chunk;
+                    copied += chunk;
+                    remaining -= chunk;
+                } else {
+                    uint64_t bytes = vfs_read(node, file_off, remaining, (uint8_t *)(buf_addr + copied));
+                    file_off += bytes;
+                    copied += (uint32_t)bytes;
+                    break;
+                }
+            }
+            tfd->offset = file_off;
+            return (int)copied;
         }
         if (tfd->type != FD_TYPE_STDIN) {
             return -EBADF;
@@ -767,4 +802,11 @@ void syscalls_core_init(void) {
         esc_state[i] = 0;
         esc_len[i] = 0;
     }
+
+    history = kmalloc(NUM_CONSOLES * sizeof(*history));
+    memset(history, 0, NUM_CONSOLES * sizeof(*history));
+    history_len = kmalloc(NUM_CONSOLES * sizeof(*history_len));
+    memset(history_len, 0, NUM_CONSOLES * sizeof(*history_len));
+    history_saved = kmalloc(NUM_CONSOLES * sizeof(*history_saved));
+    memset(history_saved, 0, NUM_CONSOLES * sizeof(*history_saved));
 }
