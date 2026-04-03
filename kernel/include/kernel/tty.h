@@ -129,6 +129,40 @@ typedef unsigned int speed_t;
 #define FIONREAD  0x541B
 #define FIONBIO   0x5421
 
+#define VT_OPENQRY      0x5600
+#define VT_GETMODE      0x5601
+#define VT_SETMODE      0x5602
+#define VT_AUTO         0x00
+#define VT_PROCESS      0x01
+#define VT_ACKACQ       0x02
+#define VT_GETSTATE     0x5603
+#define VT_RELDISP      0x5605
+#define VT_ACTIVATE     0x5606
+#define VT_WAITACTIVE   0x5607
+#define VT_DISALLOCATE  0x5608
+
+#define KDSETMODE       0x4B3A
+#define KDGETMODE       0x4B3B
+#define KD_TEXT         0x00
+#define KD_GRAPHICS    0x01
+#define KDMKTONE        0x4B30
+#define KDGKBTYPE       0x4B33
+#define KB_101          0x02
+
+struct vt_mode_s {
+    uint8_t mode;
+    uint8_t waitv;
+    int16_t relsig;
+    int16_t acqsig;
+    int16_t frsig;
+};
+
+struct vt_stat_s {
+    uint16_t v_active;
+    uint16_t v_signal;
+    uint16_t v_state;
+};
+
 struct termios {
     tcflag_t c_iflag;
     tcflag_t c_oflag;

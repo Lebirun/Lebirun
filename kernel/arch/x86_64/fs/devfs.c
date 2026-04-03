@@ -9,6 +9,10 @@
 #include <kernel/initrd.h>
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/partition.h>
+#include <kernel/mouse.h>
+#include <kernel/framebuffer.h>
+#include <kernel/task.h>
+#include <kernel/evdev.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +52,8 @@ static vfs_node_t dev_full;
 static vfs_node_t dev_mem;
 static vfs_node_t dev_kmem;
 static vfs_node_t dev_port;
+static vfs_node_t dev_mice;
+static vfs_node_t dev_fb0;
 static vfs_node_t dev_ttys[NUM_CONSOLES];
 
 #define DEVFS_DIRENT_POOL_SIZE 4
@@ -172,6 +178,180 @@ static uint64_t dev_ttyN_write(vfs_node_t *node, uint64_t offset, uint64_t size,
     tty_num = node->inode;
     console_write_to(tty_num, (const char *)buffer, size);
     return size;
+}
+
+static uint64_t dev_mice_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    int nread;
+    int guard;
+
+    (void)node;
+    (void)offset;
+    guard = 0;
+    while (!mouse_has_data() && guard < 10000) {
+        waitq_add(mouse_get_waitq(), current_task);
+        block_current();
+        guard++;
+    }
+    nread = mouse_read(buffer, (uint32_t)size);
+    return (uint64_t)nread;
+}
+
+static uint64_t dev_mice_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node;
+    (void)offset;
+    (void)buffer;
+    (void)size;
+    return 0;
+}
+
+#define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FBIOGET_FSCREENINFO 0x4602
+#define FBIOGETCMAP         0x4604
+#define FBIOPUTCMAP         0x4605
+
+#define FB_TYPE_PACKED_PIXELS 0
+#define FB_VISUAL_TRUECOLOR   2
+
+struct fb_bitfield {
+    uint32_t offset;
+    uint32_t length;
+    uint32_t msb_right;
+};
+
+struct fb_var_screeninfo {
+    uint32_t xres;
+    uint32_t yres;
+    uint32_t xres_virtual;
+    uint32_t yres_virtual;
+    uint32_t xoffset;
+    uint32_t yoffset;
+    uint32_t bits_per_pixel;
+    uint32_t grayscale;
+    struct fb_bitfield red;
+    struct fb_bitfield green;
+    struct fb_bitfield blue;
+    struct fb_bitfield transp;
+    uint32_t nonstd;
+    uint32_t activate;
+    uint32_t height;
+    uint32_t width;
+    uint32_t accel_flags;
+    uint32_t pixclock;
+    uint32_t left_margin;
+    uint32_t right_margin;
+    uint32_t upper_margin;
+    uint32_t lower_margin;
+    uint32_t hsync_len;
+    uint32_t vsync_len;
+    uint32_t sync;
+    uint32_t vmode;
+    uint32_t rotate;
+    uint32_t colorspace;
+    uint32_t reserved[4];
+};
+
+struct fb_fix_screeninfo {
+    char id[16];
+    uint64_t smem_start;
+    uint32_t smem_len;
+    uint32_t type;
+    uint32_t type_aux;
+    uint32_t visual;
+    uint16_t xpanstep;
+    uint16_t ypanstep;
+    uint16_t ywrapstep;
+    uint32_t line_length;
+    uint64_t mmio_start;
+    uint32_t mmio_len;
+    uint32_t accel;
+    uint16_t capabilities;
+    uint16_t reserved[2];
+};
+
+static uint64_t dev_fb0_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    framebuffer_t *fb;
+    uint64_t fb_size;
+    uint64_t avail;
+
+    (void)node;
+    fb = fb_get();
+    if (!fb || !fb->addr)
+        return 0;
+    fb_size = fb->pitch * fb->height;
+    if (offset >= fb_size)
+        return 0;
+    avail = fb_size - offset;
+    if (size > avail)
+        size = avail;
+    memcpy(buffer, (uint8_t *)fb->addr + offset, size);
+    return size;
+}
+
+static uint64_t dev_fb0_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    framebuffer_t *fb;
+    uint64_t fb_size;
+    uint64_t avail;
+
+    (void)node;
+    fb = fb_get();
+    if (!fb || !fb->addr)
+        return 0;
+    fb_size = fb->pitch * fb->height;
+    if (offset >= fb_size)
+        return 0;
+    avail = fb_size - offset;
+    if (size > avail)
+        size = avail;
+    memcpy((uint8_t *)fb->addr + offset, buffer, size);
+    return size;
+}
+
+static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
+    framebuffer_t *fb;
+    struct fb_var_screeninfo *var;
+    struct fb_fix_screeninfo *fix;
+
+    (void)node;
+    fb = fb_get();
+    if (!fb)
+        return -22;
+
+    switch (request) {
+    case FBIOGET_VSCREENINFO:
+        var = (struct fb_var_screeninfo *)arg;
+        memset(var, 0, sizeof(*var));
+        var->xres = (uint32_t)fb->width;
+        var->yres = (uint32_t)fb->height;
+        var->xres_virtual = (uint32_t)fb->width;
+        var->yres_virtual = (uint32_t)fb->height;
+        var->bits_per_pixel = (uint32_t)fb->bpp;
+        var->red.offset = 16;
+        var->red.length = 8;
+        var->green.offset = 8;
+        var->green.length = 8;
+        var->blue.offset = 0;
+        var->blue.length = 8;
+        var->transp.offset = 24;
+        var->transp.length = 8;
+        return 0;
+    case FBIOGET_FSCREENINFO:
+        fix = (struct fb_fix_screeninfo *)arg;
+        memset(fix, 0, sizeof(*fix));
+        strcpy(fix->id, "lebfb");
+        fix->smem_start = fb->phys_addr;
+        fix->smem_len = (uint32_t)(fb->pitch * fb->height);
+        fix->type = FB_TYPE_PACKED_PIXELS;
+        fix->visual = FB_VISUAL_TRUECOLOR;
+        fix->line_length = (uint32_t)fb->pitch;
+        return 0;
+    case FBIOPUT_VSCREENINFO:
+    case FBIOGETCMAP:
+    case FBIOPUTCMAP:
+        return 0;
+    default:
+        return -22;
+    }
 }
 
 static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -304,7 +484,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     static const char *base_entries[] = {
         "null", "zero", "urandom", "random", "tty", "console",
         "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
-        "mem", "kmem", "port"
+        "mem", "kmem", "port", "mice", "fb0", "input"
 #if CONFIG_VIRT_VFL
         , "vfl"
 #endif
@@ -315,7 +495,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         strcpy(d->name, base_entries[index]);
         d->inode = index + 1;
         d->type = VFS_CHARDEVICE;
-        if (index == 9 || index == 11) d->type = VFS_DIRECTORY;
+        if (index == 9 || index == 11 || index == 18) d->type = VFS_DIRECTORY;
         return d;
     }
     
@@ -390,6 +570,9 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "mem") == 0) return &dev_mem;
     if (strcmp(name, "kmem") == 0) return &dev_kmem;
     if (strcmp(name, "port") == 0) return &dev_port;
+    if (strcmp(name, "mice") == 0) return &dev_mice;
+    if (strcmp(name, "fb0") == 0) return &dev_fb0;
+    if (strcmp(name, "input") == 0) return evdev_get_input_dir();
 #if CONFIG_VIRT_VFL
     if (strcmp(name, "vfl") == 0) return vfl_get_devfs_node();
 #endif
@@ -674,6 +857,41 @@ void devfs_init(void) {
     dev_port.ptr = NULL;
     dev_port.private_data = NULL;
 
+    memset(&dev_mice, 0, sizeof(vfs_node_t));
+    strcpy(dev_mice.name, "mice");
+    dev_mice.flags = VFS_CHARDEVICE;
+    dev_mice.mask = 0666;
+    dev_mice.uid = 0;
+    dev_mice.gid = 0;
+    dev_mice.read = dev_mice_read;
+    dev_mice.write = dev_mice_write;
+    dev_mice.open = devfs_open;
+    dev_mice.close = devfs_close;
+    dev_mice.parent = &devfs_root;
+    dev_mice.ref_count = 1;
+    dev_mice.ptr = NULL;
+    dev_mice.private_data = NULL;
+
+    memset(&dev_fb0, 0, sizeof(vfs_node_t));
+    strcpy(dev_fb0.name, "fb0");
+    dev_fb0.flags = VFS_CHARDEVICE;
+    dev_fb0.mask = 0666;
+    dev_fb0.uid = 0;
+    dev_fb0.gid = 0;
+    dev_fb0.read = dev_fb0_read;
+    dev_fb0.write = dev_fb0_write;
+    dev_fb0.ioctl = dev_fb0_ioctl;
+    dev_fb0.open = devfs_open;
+    dev_fb0.close = devfs_close;
+    dev_fb0.parent = &devfs_root;
+    dev_fb0.ref_count = 1;
+    dev_fb0.ptr = NULL;
+    dev_fb0.private_data = NULL;
+
+    evdev_get_input_dir()->parent = &devfs_root;
+    evdev_get_event_node(0)->parent = evdev_get_input_dir();
+    evdev_get_event_node(1)->parent = evdev_get_input_dir();
+
     for (i = 0; i < 16; i++) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint64_t)i * 0x13579BDF);
     }
@@ -706,6 +924,9 @@ void devfs_init(void) {
         dev_ttys[i].ptr = NULL;
         dev_ttys[i].private_data = NULL;
     }
+
+    evdev_init();
+    evdev_get_input_dir()->parent = &devfs_root;
 
     pty_init();
 

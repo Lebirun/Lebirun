@@ -156,6 +156,11 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     uint64_t to_read;
     uint64_t nread;
     uint8_t *tmpbuf;
+    framebuffer_t *fb_dev;
+    uint64_t fb_phys_base;
+    uint64_t fb_total;
+    uint64_t fb_num_pages;
+    uint64_t pi;
     
     (void)prot;
 
@@ -213,15 +218,32 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
         tfd = task_fd_get(current_task, fd);
         if (tfd && tfd->in_use && tfd->node) {
             fnode = (vfs_node_t *)tfd->node;
-            file_off = (uint64_t)pgoffset * 4096;
-            to_read = length < size ? length : size;
-            tmpbuf = (uint8_t *)kmalloc(to_read);
-            if (tmpbuf) {
-                nread = vfs_read(fnode, file_off, to_read, tmpbuf);
-                if (nread > 0) {
-                    vmm_copy_to_pml4(current_task->pml4_phys, base, tmpbuf, nread);
+            if (strcmp(fnode->name, "fb0") == 0) {
+                fb_dev = fb_get();
+                if (fb_dev && fb_dev->phys_addr) {
+                    fb_phys_base = fb_dev->phys_addr;
+                    fb_total = fb_dev->pitch * fb_dev->height;
+                    fb_num_pages = (fb_total + 0xFFF) / 0x1000;
+                    if (size / 0x1000 < fb_num_pages)
+                        fb_num_pages = size / 0x1000;
+                    for (pi = 0; pi < fb_num_pages; pi++) {
+                        vmm_map_page_in_pml4(current_task->pml4_phys,
+                            base + pi * 0x1000,
+                            fb_phys_base + pi * 0x1000,
+                            0x7);
+                    }
                 }
-                kfree(tmpbuf);
+            } else {
+                file_off = (uint64_t)pgoffset * 4096;
+                to_read = length < size ? length : size;
+                tmpbuf = (uint8_t *)kmalloc(to_read);
+                if (tmpbuf) {
+                    nread = vfs_read(fnode, file_off, to_read, tmpbuf);
+                    if (nread > 0) {
+                        vmm_copy_to_pml4(current_task->pml4_phys, base, tmpbuf, nread);
+                    }
+                    kfree(tmpbuf);
+                }
             }
         }
     }

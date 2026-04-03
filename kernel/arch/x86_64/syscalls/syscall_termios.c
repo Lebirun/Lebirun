@@ -46,6 +46,9 @@ struct kernel_termios tty_termios[NUM_CONSOLES];
 struct kernel_winsize tty_winsize[NUM_CONSOLES];
 int tty_pgrp[NUM_CONSOLES];
 
+static int vt_kd_mode = KD_TEXT;
+static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
+
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
@@ -340,7 +343,96 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             
         case FIONBIO:
             return 0;
-            
+
+        case VT_OPENQRY:
+        {
+            int active;
+            int vi;
+            int found;
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            active = console_get_current();
+            found = -1;
+            for (vi = 0; vi < NUM_CONSOLES; vi++) {
+                if (vi != active) {
+                    found = vi + 1;
+                    break;
+                }
+            }
+            *(int *)(uintptr_t)arg = found;
+            return 0;
+        }
+
+        case VT_GETSTATE:
+        {
+            struct vt_stat_s *vst;
+            int ci;
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_stat_s))) return -EFAULT;
+            vst = (struct vt_stat_s *)(uintptr_t)arg;
+            memset(vst, 0, sizeof(*vst));
+            vst->v_active = (uint16_t)(console_get_current() + 1);
+            vst->v_state = 0;
+            for (ci = 0; ci < NUM_CONSOLES && ci < 16; ci++) {
+                vst->v_state |= (uint16_t)(1 << (ci + 1));
+            }
+            return 0;
+        }
+
+        case VT_ACTIVATE:
+        {
+            int target_vt;
+            target_vt = arg;
+            if (target_vt < 1 || target_vt > NUM_CONSOLES) return -ENXIO;
+            console_switch(target_vt - 1);
+            return 0;
+        }
+
+        case VT_WAITACTIVE:
+        {
+            int target_vt;
+            int guard;
+            target_vt = arg;
+            if (target_vt < 1 || target_vt > NUM_CONSOLES) return -ENXIO;
+            guard = 0;
+            while (console_get_current() != (target_vt - 1) && guard < 50000) {
+                schedule();
+                guard++;
+            }
+            return 0;
+        }
+
+        case VT_GETMODE:
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_mode_s))) return -EFAULT;
+            memcpy((void *)(uintptr_t)arg, &vt_mode, sizeof(struct vt_mode_s));
+            return 0;
+
+        case VT_SETMODE:
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_mode_s))) return -EFAULT;
+            memcpy(&vt_mode, (void *)(uintptr_t)arg, sizeof(struct vt_mode_s));
+            return 0;
+
+        case VT_RELDISP:
+            return 0;
+
+        case VT_DISALLOCATE:
+            return 0;
+
+        case KDSETMODE:
+            vt_kd_mode = arg;
+            return 0;
+
+        case KDGETMODE:
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            *(int *)(uintptr_t)arg = vt_kd_mode;
+            return 0;
+
+        case KDMKTONE:
+            return 0;
+
+        case KDGKBTYPE:
+            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            *(int *)(uintptr_t)arg = KB_101;
+            return 0;
+
         default:
             return -EINVAL;
     }

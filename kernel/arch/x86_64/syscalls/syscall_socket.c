@@ -53,9 +53,15 @@
 #define SOCKET_INIT_COUNT 8
 #define SOCKET_BUF_SIZE 4096
 #define BACKLOG_INIT_SIZE 8
+#define UNIX_PATH_MAX 108
 
 typedef unsigned int socklen_t;
 typedef long ssize_t;
+
+struct sockaddr_un {
+    uint16_t sun_family;
+    char sun_path[UNIX_PATH_MAX];
+};
 
 struct in_addr {
     uint64_t s_addr;
@@ -103,6 +109,7 @@ typedef struct pending_conn {
     uint64_t remote_addr;
     uint16_t remote_port;
     int valid;
+    int peer_idx;
 } pending_conn_t;
 
 typedef struct {
@@ -137,6 +144,7 @@ typedef struct {
     int peer_socket;
     sock_state_t state;
     pending_conn_t *backlog;
+    char *sun_path;
 } socket_t;
 
 static socket_t *sockets = NULL;
@@ -192,9 +200,11 @@ static void free_socket(int idx) {
         kfree(sockets[idx].recv_buf);
         kfree(sockets[idx].send_buf);
         kfree(sockets[idx].backlog);
+        kfree(sockets[idx].sun_path);
         sockets[idx].recv_buf = NULL;
         sockets[idx].send_buf = NULL;
         sockets[idx].backlog = NULL;
+        sockets[idx].sun_path = NULL;
         sockets[idx].in_use = 0;
     }
 }
@@ -340,13 +350,49 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
     return 0;
 }
 
+static int find_unix_listener(const char *path) {
+    int i;
+    for (i = 0; i < socket_capacity; i++) {
+        if (sockets[i].in_use && sockets[i].domain == AF_UNIX &&
+            sockets[i].state == SOCKSTATE_LISTENING &&
+            sockets[i].sun_path && strcmp(sockets[i].sun_path, path) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int socket_set_sun_path(socket_t *sock, const char *path) {
+    if (!sock->sun_path) {
+        sock->sun_path = (char *)kmalloc(UNIX_PATH_MAX);
+        if (!sock->sun_path) return -ENOMEM;
+    }
+    strncpy(sock->sun_path, path, UNIX_PATH_MAX - 1);
+    sock->sun_path[UNIX_PATH_MAX - 1] = '\0';
+    return 0;
+}
+
 static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
+    struct sockaddr_un *uaddr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     if (sock->state != SOCKSTATE_CLOSED) {
         return -EINVAL;
+    }
+    
+    if (sock->domain == AF_UNIX) {
+        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        if (!uaddr || addrlen < 3) {
+            return -EINVAL;
+        }
+        if (uaddr->sun_family != AF_UNIX) {
+            return -EAFNOSUPPORT;
+        }
+        if (socket_set_sun_path(sock, uaddr->sun_path) < 0) return -ENOMEM;
+        sock->state = SOCKSTATE_BOUND;
+        return 0;
     }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
@@ -371,6 +417,10 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
 
 static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
+    struct sockaddr_un *uaddr;
+    int listener_idx;
+    int peer_idx;
+    int i;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -380,6 +430,46 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     
     if (sock->state == SOCKSTATE_LISTENING) {
         return -EINVAL;
+    }
+    
+    if (sock->domain == AF_UNIX) {
+        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        if (!uaddr || addrlen < 3) {
+            return -EINVAL;
+        }
+        
+        listener_idx = find_unix_listener(uaddr->sun_path);
+        if (listener_idx < 0) {
+            return -ECONNREFUSED;
+        }
+        
+        if (sockets[listener_idx].backlog_count >= sockets[listener_idx].backlog_size) {
+            return -ECONNREFUSED;
+        }
+        
+        peer_idx = alloc_socket();
+        if (peer_idx < 0) return -ENOMEM;
+        
+        sockets[peer_idx].domain = AF_UNIX;
+        sockets[peer_idx].type = sockets[listener_idx].type;
+        sockets[peer_idx].state = SOCKSTATE_CONNECTED;
+        sockets[peer_idx].peer_socket = sockfd - socket_base_fd;
+        socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path);
+        
+        for (i = 0; i < sockets[listener_idx].backlog_size; i++) {
+            if (!sockets[listener_idx].backlog[i].valid) {
+                sockets[listener_idx].backlog[i].valid = 1;
+                sockets[listener_idx].backlog[i].peer_idx = peer_idx;
+                sockets[listener_idx].backlog_count++;
+                break;
+            }
+        }
+        
+        sock->peer_socket = peer_idx;
+        sock->state = SOCKSTATE_CONNECTED;
+        socket_set_sun_path(sock, uaddr->sun_path);
+        
+        return 0;
     }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
@@ -441,7 +531,9 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
 
 static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     int idx;
+    int i;
     struct sockaddr_in *addr;
+    struct sockaddr_un *uaddr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
@@ -456,8 +548,33 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
         return -EAGAIN;
     }
     
+    if (sock->domain == AF_UNIX) {
+        pending_conn_t *conn = NULL;
+        for (i = 0; i < sock->backlog_size; i++) {
+            if (sock->backlog[i].valid) {
+                conn = &sock->backlog[i];
+                break;
+            }
+        }
+        if (!conn) return -EAGAIN;
+        
+        idx = conn->peer_idx;
+        conn->valid = 0;
+        sock->backlog_count--;
+        
+        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        if (uaddr && addrlen && *addrlen >= sizeof(struct sockaddr_un)) {
+            uaddr->sun_family = AF_UNIX;
+            memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
+            *addrlen = sizeof(uint16_t);
+        }
+        
+        return socket_base_fd + idx;
+    }
+    
     pending_conn_t *conn = NULL;
-    for (int i = 0; i < sock->backlog_size; i++) {
+    for (i = 0; i < sock->backlog_size; i++) {
         if (sock->backlog[i].valid) {
             conn = &sock->backlog[i];
             break;
@@ -527,8 +644,28 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname) {
 
 static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     struct sockaddr_in *addr;
+    struct sockaddr_un *uaddr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
+    
+    if (sock->domain == AF_UNIX) {
+        const char *path;
+        socklen_t pathlen;
+        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        if (uaddr && addrlen) {
+            path = sock->sun_path ? sock->sun_path : "";
+            pathlen = strlen(path);
+            uaddr->sun_family = AF_UNIX;
+            if (*addrlen > sizeof(uint16_t)) {
+                strncpy(uaddr->sun_path, path,
+                        *addrlen - sizeof(uint16_t));
+            }
+            *addrlen = sizeof(uint16_t) + pathlen + 1;
+            return 0;
+        }
+        return -EINVAL;
+    }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
@@ -546,11 +683,24 @@ static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 
 static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     struct sockaddr_in *addr;
+    struct sockaddr_un *uaddr;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     if (sock->state != SOCKSTATE_CONNECTED) {
         return -ENOTCONN;
+    }
+    
+    if (sock->domain == AF_UNIX) {
+        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        if (uaddr && addrlen) {
+            uaddr->sun_family = AF_UNIX;
+            memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
+            *addrlen = sizeof(uint16_t);
+            return 0;
+        }
+        return -EINVAL;
     }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;

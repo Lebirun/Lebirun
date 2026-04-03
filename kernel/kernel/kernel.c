@@ -7,6 +7,7 @@
 #include <kernel/idt.h>
 #include <kernel/pit.h>
 #include <kernel/keyboard.h>
+#include <kernel/mouse.h>
 #include <kernel/common.h>
 #include <kernel/mem_map.h>
 #include <kernel/debug.h>
@@ -522,6 +523,7 @@ void kernel_main(void) {
 
     rng_init();
     keyboard_init();
+    mouse_init();
     syscall_init();
 
     if (debug_boot_hw) {

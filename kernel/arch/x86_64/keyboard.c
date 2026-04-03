@@ -23,6 +23,24 @@ static bool alt_pressed = false;
 static bool caps_lock = false;
 static bool e0_prefix = false;
 
+static keyboard_observer_t kbd_observer = NULL;
+
+int keyboard_get_modifier_state(void) {
+    int state = 0;
+    if (ctrl_pressed) state |= 1;
+    if (alt_pressed) state |= 2;
+    if (left_shift_pressed || right_shift_pressed) state |= 4;
+    return state;
+}
+
+void keyboard_register_observer(keyboard_observer_t observer) {
+    kbd_observer = observer;
+}
+
+void keyboard_unregister_observer(void) {
+    kbd_observer = NULL;
+}
+
 #define SCANCODE_F1  0x3B
 #define SCANCODE_F2  0x3C
 #define SCANCODE_F3  0x3D
@@ -177,6 +195,16 @@ void keyboard_handler(registers_t* regs) {
 
     bool is_release = (scancode & 0x80) != 0;
     uint8_t code = scancode & 0x7F;
+
+    if (kbd_observer) {
+        struct keyboard_event kev;
+        kev.scancode = code;
+        kev.is_release = is_release ? 1 : 0;
+        kev.ctrl_held = ctrl_pressed ? 1 : 0;
+        kev.alt_held = alt_pressed ? 1 : 0;
+        kev.shift_held = shift_is_down() ? 1 : 0;
+        kbd_observer(kev);
+    }
 
     if (was_e0) {
         if (is_release) {
