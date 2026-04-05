@@ -18,6 +18,7 @@
 #include <kernel/initrd.h>
 #include <kernel/ramfs.h>
 #include <kernel/squashfs.h>
+#include <kernel/iso9660.h>
 #include <kernel/overlayfs.h>
 #include <kernel/framebuffer.h>
 #include <kernel/console.h>
@@ -125,6 +126,7 @@ void kernel_main(void) {
     extern void procfs_init(void);
     extern void devfs_init(void);
     extern int devfs_register_blockdev(const char *name, uint32_t port_index);
+    extern int devfs_register_cdrom(const char *name, uint32_t port_index);
     extern int devfs_register_partition(const char *name, uint32_t port_index,
                                         uint64_t start_lba, uint64_t sector_count);
     extern void devfs_register_initrd(void);
@@ -148,6 +150,7 @@ void kernel_main(void) {
     uint8_t slave_mask;
     ahci_port_t *port;
     int j;
+    int sr_idx;
     uint32_t pi;
     char devname[8];
     char partname[16];
@@ -160,6 +163,7 @@ void kernel_main(void) {
     const char *root_dev;
     vfs_node_t *ext4_root;
     int ahci_done;
+    int devs_registered;
 
     gdt_init();
     idt_init();
@@ -239,6 +243,7 @@ void kernel_main(void) {
     }
 
     ahci_done = 0;
+    devs_registered = 0;
     if (mod_count > 0) {
         i = 0;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
@@ -274,6 +279,8 @@ void kernel_main(void) {
         if (debug_boot_vfs) printf("KERNEL: After ramfs_vfs_register\n");
         squashfs_vfs_register();
         if (debug_boot_vfs) printf("KERNEL: After squashfs_vfs_register\n");
+        iso9660_vfs_register();
+        if (debug_boot_vfs) printf("KERNEL: After iso9660_vfs_register\n");
         overlayfs_vfs_register();
         if (debug_boot_vfs) printf("KERNEL: After overlayfs_vfs_register\n");
         tmpfs_vfs_register();
@@ -291,12 +298,14 @@ void kernel_main(void) {
         }
 
         tag_mod = NULL;
+        i = 0;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
              tag->type != MULTIBOOT2_TAG_END;
              tag = multiboot2_next_tag(tag)) {
             if (tag->type == MULTIBOOT2_TAG_MODULE) {
-                tag_mod = (struct multiboot2_tag_module *)tag;
-                break;
+                if (i == 0)
+                    tag_mod = (struct multiboot2_tag_module *)tag;
+                i++;
             }
         }
         if (tag_mod) {
@@ -309,7 +318,6 @@ void kernel_main(void) {
                 printf("KERNEL: SquashFS mount failed\n");
             }
         }
-
         ramfs_create_dir("/var", 0755);
         ramfs_create_dir("/tmp", 0777);
         ramfs_create_dir("/home", 0755);
@@ -379,6 +387,10 @@ void kernel_main(void) {
         }
 
         if (debug_boot_vfs) printf("BOOT: boot file export done\n");
+
+        if (ahci_init() == 0)
+            ahci_done = 1;
+
         if (cmdline_get_lke())
             lke_autoload();
     } else {
@@ -419,9 +431,10 @@ void kernel_main(void) {
                 printf("AHCI SATA driver initialized successfully\n");
 
                 j = 0;
+                sr_idx = 0;
                 for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
                     port = ahci_get_port(pi);
-                    if (port) {
+                    if (port && port->type == AHCI_DEV_SATA) {
                         devname[0] = 's';
                         devname[1] = 'd';
                         devname[2] = (char)('a' + j);
@@ -456,11 +469,22 @@ void kernel_main(void) {
                             }
                         }
                         j++;
+                    } else if (port && port->type == AHCI_DEV_SATAPI) {
+                        devname[0] = 's';
+                        devname[1] = 'r';
+                        devname[2] = (char)('0' + sr_idx);
+                        devname[3] = '\0';
+                        devfs_register_cdrom(devname, pi);
+                        printf("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
+                        sr_idx++;
                     }
                 }
+                devs_registered = 1;
             } else {
                 printf("AHCI SATA driver not available\n");
             }
+
+            iso9660_vfs_register();
 
             ext4_root = NULL;
             if (ahci_done) {
@@ -537,15 +561,20 @@ void kernel_main(void) {
     }
 
     if (!ahci_done && ahci_init() == 0) {
-        printf("AHCI SATA driver initialized successfully\n");
-        
+        ahci_done = 1;
+    } else if (!ahci_done) {
+        printf("AHCI SATA driver not available (no controller found)\n");
+    }
+
+    if (ahci_done && !devs_registered) {
         ext4_init();
         ext4_vfs_register();
 
         j = 0;
+        sr_idx = 0;
         for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
             port = ahci_get_port(pi);
-            if (port) {
+            if (port && port->type == AHCI_DEV_SATA) {
                 devname[0] = 's';
                 devname[1] = 'd';
                 devname[2] = (char)('a' + j);
@@ -579,10 +608,16 @@ void kernel_main(void) {
                     }
                 }
                 j++;
+            } else if (port && port->type == AHCI_DEV_SATAPI) {
+                devname[0] = 's';
+                devname[1] = 'r';
+                devname[2] = (char)('0' + sr_idx);
+                devname[3] = '\0';
+                devfs_register_cdrom(devname, pi);
+                printf("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
+                sr_idx++;
             }
         }
-    } else if (!ahci_done) {
-        printf("AHCI SATA driver not available (no controller found)\n");
     }
 
     net_init();

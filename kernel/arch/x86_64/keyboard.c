@@ -7,14 +7,20 @@
 #include <kernel/cmdline.h>
 #include <kernel/task.h>
 #include <kernel/mem_map.h>
+#include <string.h>
 
 #define BUFFER_SIZE 128
-static char key_buffers[NUM_CONSOLES][BUFFER_SIZE];
-static volatile unsigned int head[NUM_CONSOLES];
-static volatile unsigned int tail[NUM_CONSOLES];
 
-static wait_queue_t keyboard_waiters[NUM_CONSOLES];
-static volatile int sigint_pending[NUM_CONSOLES];
+typedef struct {
+    char buffer[BUFFER_SIZE];
+    volatile unsigned int head;
+    volatile unsigned int tail;
+    wait_queue_t waitq;
+    volatile int sigint_pending;
+} kbd_console_t;
+
+static kbd_console_t *kbd_consoles;
+static int kbd_num_consoles;
 
 static bool left_shift_pressed = false;
 static bool right_shift_pressed = false;
@@ -127,11 +133,13 @@ static void buffer_put(char c) {
     int cur;
     unsigned int next;
 
+    if (!kbd_consoles) return;
     cur = console_is_initialized() ? console_get_current() : 0;
-    next = (head[cur] + 1) % BUFFER_SIZE;
-    if (next == tail[cur]) return;
-    key_buffers[cur][head[cur]] = c;
-    head[cur] = next;
+    if (cur < 0 || cur >= kbd_num_consoles) return;
+    next = (kbd_consoles[cur].head + 1) % BUFFER_SIZE;
+    if (next == kbd_consoles[cur].tail) return;
+    kbd_consoles[cur].buffer[kbd_consoles[cur].head] = c;
+    kbd_consoles[cur].head = next;
 }
 
 static void buffer_put_seq(const char *seq, int len) {
@@ -152,26 +160,29 @@ int keyboard_getchar_nb(void) {
 }
 
 int keyboard_has_data_for(int console_id) {
-    if (console_id < 0 || console_id >= NUM_CONSOLES) return 0;
-    return head[console_id] != tail[console_id];
+    if (console_id < 0 || console_id >= kbd_num_consoles) return 0;
+    return kbd_consoles[console_id].head != kbd_consoles[console_id].tail;
 }
 
 int keyboard_getchar_nb_for(int console_id) {
-    if (console_id < 0 || console_id >= NUM_CONSOLES) return -1;
-    if (head[console_id] == tail[console_id]) return -1;
-    int c = (unsigned char)key_buffers[console_id][tail[console_id]];
-    tail[console_id] = (tail[console_id] + 1) % BUFFER_SIZE;
+    int c;
+
+    if (console_id < 0 || console_id >= kbd_num_consoles) return -1;
+    if (kbd_consoles[console_id].head == kbd_consoles[console_id].tail) return -1;
+    c = (unsigned char)kbd_consoles[console_id].buffer[kbd_consoles[console_id].tail];
+    kbd_consoles[console_id].tail = (kbd_consoles[console_id].tail + 1) % BUFFER_SIZE;
     return c;
 }
 
 wait_queue_t* keyboard_get_waitq(void) {
     int cur = console_is_initialized() ? console_get_current() : 0;
-    return &keyboard_waiters[cur];
+    if (cur < 0 || cur >= kbd_num_consoles) return NULL;
+    return &kbd_consoles[cur].waitq;
 }
 
 wait_queue_t* keyboard_get_waitq_for(int console_id) {
-    if (console_id < 0 || console_id >= NUM_CONSOLES) return NULL;
-    return &keyboard_waiters[console_id];
+    if (console_id < 0 || console_id >= kbd_num_consoles) return NULL;
+    return &kbd_consoles[console_id].waitq;
 }
 
 int getchar(void) {
@@ -285,7 +296,8 @@ void keyboard_handler(registers_t* regs) {
 
     if (ctrl_pressed && code == SCANCODE_C) {
         int cur = console_is_initialized() ? console_get_current() : 0;
-        sigint_pending[cur] = 1;
+        if (cur >= 0 && cur < kbd_num_consoles)
+            kbd_consoles[cur].sigint_pending = 1;
         if (cur == 0) {
             extern void serial_write_direct(const char *buf, size_t len);
             serial_write_direct("^C\n", 3);
@@ -318,17 +330,22 @@ void keyboard_handler(registers_t* regs) {
 wake:
     {
         int cur = console_is_initialized() ? console_get_current() : 0;
-        waitq_wake_all(&keyboard_waiters[cur]);
+        if (cur >= 0 && cur < kbd_num_consoles)
+            waitq_wake_all(&kbd_consoles[cur].waitq);
     }
 }
 
 void keyboard_init(void) {
+    int i;
+    uint8_t cmd;
+    uint8_t master_mask;
+
     while (inb(0x64) & 0x01) {
         inb(0x60);
     }
 
     outb(0x64, 0x20); 
-    uint8_t cmd = inb(0x60);
+    cmd = inb(0x60);
     cmd |= 0x01;      
     cmd &= ~0x10;      
     outb(0x64, 0x60);  
@@ -340,12 +357,18 @@ void keyboard_init(void) {
         inb(0x60);
     }
 
-    for (int i = 0; i < NUM_CONSOLES; i++) {
-        head[i] = tail[i] = 0;
-        waitq_init(&keyboard_waiters[i]);
+    kbd_num_consoles = cmdline_get_consoles();
+    if (kbd_num_consoles <= 0) kbd_num_consoles = 1;
+    if (kbd_num_consoles > NUM_CONSOLES) kbd_num_consoles = NUM_CONSOLES;
+    kbd_consoles = kmalloc(kbd_num_consoles * sizeof(kbd_console_t));
+    if (kbd_consoles) {
+        memset(kbd_consoles, 0, kbd_num_consoles * sizeof(kbd_console_t));
+        for (i = 0; i < kbd_num_consoles; i++) {
+            waitq_init(&kbd_consoles[i].waitq);
+        }
     }
 
-    uint8_t master_mask = inb(0x21);
+    master_mask = inb(0x21);
     master_mask &= ~(1 << 1);
     outb(0x21, master_mask);
 }
@@ -362,10 +385,12 @@ void keyboard_process_sigint(void)
     int guard;
     pid_t t_pgid;
 
-    for (i = 0; i < NUM_CONSOLES; i++) {
-        if (!sigint_pending[i])
+    if (!kbd_consoles) return;
+
+    for (i = 0; i < kbd_num_consoles; i++) {
+        if (!kbd_consoles[i].sigint_pending)
             continue;
-        sigint_pending[i] = 0;
+        kbd_consoles[i].sigint_pending = 0;
 
         if (!(tty_termios[i].c_lflag & ISIG))
             continue;

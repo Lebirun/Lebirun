@@ -11,8 +11,10 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-vring_t subrings[VRING_MAX_SUBRINGS];
-kproc_t kernel_procs[KPROC_MAX];
+vring_t *subrings;
+static int subrings_count;
+kproc_t *kernel_procs;
+static int kprocs_count;
 kproc_t *current_kproc = NULL;
 static int32_t next_kproc_pid = KPROC_PID_BASE;
 static volatile int vring_initialized = 0;
@@ -32,7 +34,6 @@ typedef struct {
 } klog_item_t;
 
 static klog_item_t *klog_ring;
-static klog_item_t klog_ring_storage[KLOG_MAX_ITEMS];
 static volatile uint64_t klog_head = 0;
 static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
@@ -49,7 +50,6 @@ typedef struct {
 } kprint_item_t;
 
 static kprint_item_t *kprint_ring;
-static kprint_item_t kprint_ring_storage[KPRINT_MAX_ITEMS];
 static volatile uint64_t kprint_head = 0;
 static volatile uint64_t kprint_tail = 0;
 static volatile uint64_t kprint_count = 0;
@@ -60,7 +60,6 @@ static wait_queue_t kprint_waitq;
 
 #define SERIAL_RING_SIZE 8192
 static char *serial_ring;
-static char serial_ring_storage[SERIAL_RING_SIZE];
 static volatile uint64_t serial_head = 0;
 static volatile uint64_t serial_tail = 0;
 static volatile uint64_t serial_count = 0;
@@ -332,13 +331,17 @@ void kprint_poll(uint64_t max_items) {
 void vring_init(void) {
     int i;
 
-    klog_ring = klog_ring_storage;
-    kprint_ring = kprint_ring_storage;
-    serial_ring = serial_ring_storage;
+    klog_ring = kmalloc(KLOG_MAX_ITEMS * sizeof(klog_item_t));
+    kprint_ring = kmalloc(KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
+    serial_ring = kmalloc(SERIAL_RING_SIZE);
 
-    memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));
-    memset(kprint_ring, 0, KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
-    memset(serial_ring, 0, SERIAL_RING_SIZE);
+    if (klog_ring)
+        memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));
+    if (kprint_ring)
+        memset(kprint_ring, 0, KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
+    if (serial_ring)
+        memset(serial_ring, 0, SERIAL_RING_SIZE);
+
     klog_head = 0;
     klog_tail = 0;
     klog_count = 0;
@@ -350,20 +353,24 @@ void vring_init(void) {
     serial_tail = 0;
     serial_count = 0;
 
-    memset(subrings, 0, sizeof(subrings));
-    for (i = 0; i < VRING_MAX_SUBRINGS; i++) {
-        subrings[i].ring_major = 0;
-        subrings[i].ring_minor = (uint8_t)i;
-        subrings[i].active = false;
-        subrings[i].region_count = 0;
-        subrings[i].name = NULL;
+    subrings_count = VRING_MAX_SUBRINGS;
+    subrings = kmalloc(subrings_count * sizeof(vring_t));
+    if (subrings) {
+        memset(subrings, 0, subrings_count * sizeof(vring_t));
+        for (i = 0; i < subrings_count; i++) {
+            subrings[i].ring_major = 0;
+            subrings[i].ring_minor = (uint8_t)i;
+            subrings[i].active = false;
+            subrings[i].region_count = 0;
+            subrings[i].name = NULL;
+        }
     }
     
     vring_initialized = 1;
 }
 
 int vring_create(uint8_t minor, const char *name) {
-    if (minor >= VRING_MAX_SUBRINGS) return -1;
+    if (!subrings || minor >= subrings_count) return -1;
     if (subrings[minor].active) return -2;
     
     subrings[minor].ring_major = 0;
@@ -378,7 +385,7 @@ int vring_create(uint8_t minor, const char *name) {
 int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms) {
     uint64_t idx;
 
-    if (minor >= VRING_MAX_SUBRINGS) return -1;
+    if (!subrings || minor >= subrings_count) return -1;
     if (!subrings[minor].active) return -2;
     if (subrings[minor].region_count >= VRING_MAX_REGIONS) return -3;
     
@@ -392,7 +399,7 @@ int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms)
 }
 
 int vring_remove(uint8_t minor) {
-    if (minor >= VRING_MAX_SUBRINGS) return -1;
+    if (!subrings || minor >= subrings_count) return -1;
     if (!subrings[minor].active) return -2;
     
     subrings[minor].active = false;
@@ -403,7 +410,7 @@ int vring_remove(uint8_t minor) {
 }
 
 vring_t *vring_get(uint8_t minor) {
-    if (minor >= VRING_MAX_SUBRINGS) return NULL;
+    if (!subrings || minor >= subrings_count) return NULL;
     if (!subrings[minor].active) return NULL;
     return &subrings[minor];
 }
@@ -415,7 +422,7 @@ bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t acc
 
     if (!vring_initialized) return true;
     if (minor == 0) return true;
-    if (minor >= VRING_MAX_SUBRINGS) return false;
+    if (!subrings || minor >= subrings_count) return false;
     if (!subrings[minor].active) return false;
     
     ring = &subrings[minor];
@@ -443,7 +450,7 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
     p += sprintf(p, "Virtual Ring Violation - Ring 0.");
     p += sprintf(p, "%d", minor);
     
-    if (subrings[minor].name) {
+    if (subrings && minor < subrings_count && subrings[minor].name) {
         p += sprintf(p, " (%s)", subrings[minor].name);
     }
     
@@ -469,17 +476,21 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
 void kproc_init(void) {
     int i;
 
-    memset(kernel_procs, 0, sizeof(kernel_procs));
-    for (i = 0; i < KPROC_MAX; i++) {
-        kernel_procs[i].pid = 0;
-        kernel_procs[i].state = KPROC_STATE_NONE;
-        kernel_procs[i].vring_minor = 0;
-        kernel_procs[i].name = NULL;
-        kernel_procs[i].entry = NULL;
-        kernel_procs[i].private_data = NULL;
-        kernel_procs[i].msg_head = 0;
-        kernel_procs[i].msg_tail = 0;
-        kernel_procs[i].msg_count = 0;
+    kprocs_count = KPROC_MAX;
+    kernel_procs = kmalloc(kprocs_count * sizeof(kproc_t));
+    if (kernel_procs) {
+        memset(kernel_procs, 0, kprocs_count * sizeof(kproc_t));
+        for (i = 0; i < kprocs_count; i++) {
+            kernel_procs[i].pid = 0;
+            kernel_procs[i].state = KPROC_STATE_NONE;
+            kernel_procs[i].vring_minor = 0;
+            kernel_procs[i].name = NULL;
+            kernel_procs[i].entry = NULL;
+            kernel_procs[i].private_data = NULL;
+            kernel_procs[i].msg_head = 0;
+            kernel_procs[i].msg_tail = 0;
+            kernel_procs[i].msg_count = 0;
+        }
     }
     current_kproc = NULL;
     next_kproc_pid = KPROC_PID_BASE;
@@ -492,9 +503,10 @@ int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry,
     int32_t pid;
 
     if (!kproc_initialized) return 0;
+    if (!kernel_procs) return 0;
     
     slot = -1;
-    for (i = 0; i < KPROC_MAX; i++) {
+    for (i = 0; i < kprocs_count; i++) {
         if (kernel_procs[i].state == KPROC_STATE_NONE) {
             slot = i;
             break;
@@ -523,8 +535,9 @@ kproc_t *kproc_get(int32_t pid) {
     int i;
 
     if (pid >= 0) return NULL;
+    if (!kernel_procs) return NULL;
     
-    for (i = 0; i < KPROC_MAX; i++) {
+    for (i = 0; i < kprocs_count; i++) {
         if (kernel_procs[i].pid == pid && kernel_procs[i].state != KPROC_STATE_NONE) {
             return &kernel_procs[i];
         }

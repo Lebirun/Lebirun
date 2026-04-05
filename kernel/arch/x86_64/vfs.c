@@ -13,9 +13,12 @@ static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
 static vfs_mount_t *mounts = NULL;
 static int mounts_capacity = 0;
-static vfs_fd_t fd_table[VFS_MAX_FDS];
+static vfs_fd_t *fd_table = NULL;
+static int fd_table_capacity = 0;
 static mutex_t vfs_lock;
 static int squashfs_access_blocked = 0;
+
+#define VFS_INITIAL_FDS 32
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -49,6 +52,27 @@ static int vfs_grow_mounts(void) {
     return 0;
 }
 
+static int vfs_grow_fds(void) {
+    int new_cap;
+    int i;
+    vfs_fd_t *new_table;
+
+    new_cap = fd_table_capacity * 2;
+    if (new_cap > VFS_MAX_FDS) new_cap = VFS_MAX_FDS;
+    if (new_cap <= fd_table_capacity) return -1;
+    new_table = (vfs_fd_t *)krealloc(fd_table, new_cap * sizeof(vfs_fd_t));
+    if (!new_table) return -1;
+    for (i = fd_table_capacity; i < new_cap; i++) {
+        new_table[i].in_use = 0;
+        new_table[i].node = NULL;
+        new_table[i].offset = 0;
+        new_table[i].flags = 0;
+    }
+    fd_table = new_table;
+    fd_table_capacity = new_cap;
+    return 0;
+}
+
 void vfs_init(void) {
     int i;
     
@@ -64,7 +88,9 @@ void vfs_init(void) {
         mounts[i].fs_type = NULL;
     }
     
-    for (i = 0; i < VFS_MAX_FDS; i++) {
+    fd_table_capacity = VFS_INITIAL_FDS;
+    fd_table = (vfs_fd_t *)kmalloc(fd_table_capacity * sizeof(vfs_fd_t));
+    for (i = 0; i < fd_table_capacity; i++) {
         fd_table[i].in_use = 0;
         fd_table[i].node = NULL;
         fd_table[i].offset = 0;
@@ -1138,10 +1164,21 @@ int vfs_open_path(const char *path, int flags) {
     mutex_lock(&vfs_lock);
     
     fd = -1;
-    for (i = 3; i < VFS_MAX_FDS; i++) {
+    for (i = 3; i < fd_table_capacity; i++) {
         if (!fd_table[i].in_use) {
             fd = i;
             break;
+        }
+    }
+    
+    if (fd < 0) {
+        if (vfs_grow_fds() == 0) {
+            for (i = 3; i < fd_table_capacity; i++) {
+                if (!fd_table[i].in_use) {
+                    fd = i;
+                    break;
+                }
+            }
         }
     }
     
@@ -1162,7 +1199,7 @@ int vfs_open_path(const char *path, int flags) {
 }
 
 int vfs_close_fd(int fd) {
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     
     mutex_lock(&vfs_lock);
     if (!fd_table[fd].in_use) {
@@ -1187,7 +1224,7 @@ int vfs_read_fd(int fd, void *buffer, uint64_t size) {
     uint64_t bytes;
     vfs_node_t *node;
 
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buffer || size == 0) return -1;
     
@@ -1204,7 +1241,7 @@ int vfs_write_fd(int fd, const void *buffer, uint64_t size) {
     uint64_t bytes;
     vfs_node_t *node;
 
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buffer || size == 0) return -1;
     
@@ -1221,7 +1258,7 @@ int64_t vfs_seek(int fd, int64_t offset, int whence) {
     int64_t new_offset;
     vfs_node_t *node;
 
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use) return -1;
     
     node = fd_table[fd].node;
@@ -1248,7 +1285,7 @@ int64_t vfs_seek(int fd, int64_t offset, int whence) {
 }
 
 int64_t vfs_tell(int fd) {
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use) return -1;
     
     return (int64_t)fd_table[fd].offset;
@@ -1257,7 +1294,7 @@ int64_t vfs_tell(int fd) {
 int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags) {
     vfs_node_t *node;
 
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use) return -1;
     
     node = fd_table[fd].node;
@@ -1276,7 +1313,7 @@ int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index) {
     vfs_node_t *node;
     dirent_t *result;
 
-    if (fd < 0 || fd >= VFS_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use || !entry) return -1;
     
     node = fd_table[fd].node;

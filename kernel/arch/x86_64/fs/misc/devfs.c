@@ -26,6 +26,7 @@ typedef struct {
     uint64_t start_lba;
     uint64_t sector_count;
     int is_partition;
+    int is_cdrom;
 } devfs_blockdev_t;
 
 static devfs_blockdev_t *devfs_blockdevs;
@@ -450,6 +451,50 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
 
     kfree(tmp);
     return size;
+}
+
+static uint64_t dev_cdrom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    devfs_blockdev_t *bdev;
+    ahci_port_t *port;
+    uint64_t lba;
+    uint64_t sector_count;
+    uint8_t *tmp;
+    uint64_t skip;
+    uint64_t copy_len;
+
+    bdev = (devfs_blockdev_t *)node->private_data;
+    if (!bdev)
+        return 0;
+
+    port = ahci_get_port(bdev->port_index);
+    if (!port)
+        return 0;
+
+    lba = offset / ATAPI_SECTOR_SIZE;
+    skip = offset % ATAPI_SECTOR_SIZE;
+    sector_count = (skip + size + ATAPI_SECTOR_SIZE - 1) / ATAPI_SECTOR_SIZE;
+
+    tmp = (uint8_t *)kmalloc(sector_count * ATAPI_SECTOR_SIZE);
+    if (!tmp)
+        return 0;
+
+    if (ahci_atapi_read(port, lba, sector_count, tmp) != 0) {
+        kfree(tmp);
+        return 0;
+    }
+
+    copy_len = size;
+    memcpy(buffer, tmp + skip, copy_len);
+    kfree(tmp);
+    return copy_len;
+}
+
+static uint64_t dev_cdrom_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node;
+    (void)offset;
+    (void)size;
+    (void)buffer;
+    return 0;
 }
 
 static uint64_t dev_initrd_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -990,6 +1035,53 @@ int devfs_register_blockdev(const char *name, uint64_t port_index) {
     devfs_blockdevs[slot].node.inode = port_index;
     devfs_blockdevs[slot].node.read = dev_blockdev_read;
     devfs_blockdevs[slot].node.write = dev_blockdev_write;
+    devfs_blockdevs[slot].node.open = devfs_open;
+    devfs_blockdevs[slot].node.close = devfs_close;
+    devfs_blockdevs[slot].node.parent = &devfs_root;
+    devfs_blockdevs[slot].node.ref_count = 1;
+    devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
+
+    devfs_blockdev_count++;
+    return 0;
+}
+
+int devfs_register_cdrom(const char *name, uint64_t port_index) {
+    int i;
+    int slot;
+    size_t len;
+
+    slot = -1;
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
+        if (!devfs_blockdevs[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0)
+        return -1;
+
+    memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
+    devfs_blockdevs[slot].in_use = 1;
+    devfs_blockdevs[slot].port_index = port_index;
+    devfs_blockdevs[slot].start_lba = 0;
+    devfs_blockdevs[slot].is_partition = 0;
+    devfs_blockdevs[slot].is_cdrom = 1;
+    devfs_blockdevs[slot].sector_count = 0;
+
+    len = strlen(name);
+    if (len >= VFS_MAX_NAME)
+        len = VFS_MAX_NAME - 1;
+    memcpy(devfs_blockdevs[slot].node.name, name, len);
+    devfs_blockdevs[slot].node.name[len] = '\0';
+
+    devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
+    devfs_blockdevs[slot].node.mask = 0440;
+    devfs_blockdevs[slot].node.uid = 0;
+    devfs_blockdevs[slot].node.gid = 0;
+    devfs_blockdevs[slot].node.inode = port_index;
+    devfs_blockdevs[slot].node.read = dev_cdrom_read;
+    devfs_blockdevs[slot].node.write = dev_cdrom_write;
     devfs_blockdevs[slot].node.open = devfs_open;
     devfs_blockdevs[slot].node.close = devfs_close;
     devfs_blockdevs[slot].node.parent = &devfs_root;

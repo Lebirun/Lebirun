@@ -3,8 +3,9 @@
 #include <kernel/debug.h>
 #include <string.h>
 
-static uint8_t demand_reserved_bitmap[8192];
-static uint8_t demand_committed_bitmap[8192];
+static uint8_t *demand_reserved_bitmap = NULL;
+static uint8_t *demand_committed_bitmap = NULL;
+static uint64_t demand_bitmap_bytes = 0;
 static uint64_t demand_base = 0;
 static uint64_t demand_max_pages = 0;
 static int demand_initialized = 0;
@@ -60,12 +61,22 @@ void demand_paging_init(void) {
     heap_max_size = kernel_heap.max_addr - kernel_heap.start_addr;
     demand_max_pages = heap_max_size / PAGE_SIZE;
 
-    memset(demand_reserved_bitmap, 0, sizeof(demand_reserved_bitmap));
-    memset(demand_committed_bitmap, 0, sizeof(demand_committed_bitmap));
+    demand_bitmap_bytes = (demand_max_pages + 7) / 8;
+    if (demand_bitmap_bytes < 64)
+        demand_bitmap_bytes = 64;
+
+    demand_reserved_bitmap = (uint8_t *)kmalloc(demand_bitmap_bytes);
+    demand_committed_bitmap = (uint8_t *)kmalloc(demand_bitmap_bytes);
+    if (!demand_reserved_bitmap || !demand_committed_bitmap) {
+        printf("Demand paging: failed to allocate bitmaps (%lu bytes)\n", demand_bitmap_bytes);
+        return;
+    }
+    memset(demand_reserved_bitmap, 0, demand_bitmap_bytes);
+    memset(demand_committed_bitmap, 0, demand_bitmap_bytes);
 
     demand_initialized = 1;
-    printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n",
-           demand_base, demand_max_pages);
+    printf("Demand paging initialized: base=0x%016lX max_pages=%lu bitmap=%lu bytes\n",
+           demand_base, demand_max_pages, demand_bitmap_bytes);
 }
 
 int demand_reserve_range(uint64_t virt_start, uint64_t size) {

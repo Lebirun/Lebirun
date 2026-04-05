@@ -695,6 +695,7 @@ static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype
     const char *source;
     const char *target;
     const char *fstype;
+    vfs_node_t *mp_check;
 
     src_addr = (uint64_t)source_ptr;
     tgt_addr = (uint64_t)(uintptr_t)target_ptr;
@@ -712,6 +713,10 @@ static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype
         source = (const char *)src_addr;
     target = (const char *)tgt_addr;
     fstype = (const char *)fs_addr;
+
+    mp_check = vfs_namei(target);
+    if (!mp_check)
+        return -ENOENT;
 
     return vfs_mount_flags(source, target, fstype, mnt_flags);
 }

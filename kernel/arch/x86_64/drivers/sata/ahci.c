@@ -614,6 +614,112 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     return result;
 }
 
+int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffer) {
+    uint64_t buf_pages;
+    uint64_t buf_phys;
+    uint64_t buf_virt;
+    uint64_t byte_count;
+    int use_persistent;
+    int slot;
+    int result;
+    hba_cmd_header_t *cmd_header;
+    hba_cmd_table_t *cmd_table;
+    fis_reg_h2d_t *fis;
+    uint8_t *acmd;
+
+    if (!port->present || port->type != AHCI_DEV_SATAPI)
+        return -1;
+
+    if (count == 0 || count > 32)
+        return -1;
+
+    byte_count = (uint64_t)count * ATAPI_SECTOR_SIZE;
+
+    ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
+
+    slot = ahci_find_slot(port);
+    if (slot < 0)
+        return -1;
+
+    buf_pages = (byte_count + PAGE_SIZE - 1) / PAGE_SIZE;
+    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
+
+    if (use_persistent) {
+        buf_phys = port->dma_buf_phys;
+        buf_virt = port->dma_buf_virt;
+    } else {
+        buf_phys = pfa_alloc_contiguous(buf_pages);
+        if (!buf_phys)
+            return -1;
+        buf_virt = buf_phys + KERNEL_VMA;
+        for (uint64_t i = 0; i < buf_pages; i++)
+            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
+    }
+
+    cmd_header = &port->cmd_list[slot];
+    cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
+    cmd_header->w = 0;
+    cmd_header->a = 1;
+    cmd_header->p = 0;
+    cmd_header->c = 1;
+    cmd_header->prdtl = 1;
+
+    cmd_table = port->cmd_table + slot;
+    memset(cmd_table, 0, sizeof(hba_cmd_table_t));
+
+    cmd_table->prdt[0].dba = (uint32_t)buf_phys;
+    cmd_table->prdt[0].dbau = (uint32_t)(buf_phys >> 32);
+    cmd_table->prdt[0].dbc = byte_count - 1;
+    cmd_table->prdt[0].i = 1;
+
+    fis = (fis_reg_h2d_t *)cmd_table->cfis;
+    memset(fis, 0, sizeof(fis_reg_h2d_t));
+    fis->fis_type = FIS_TYPE_REG_H2D;
+    fis->c = 1;
+    fis->command = ATA_CMD_PACKET;
+    fis->featurel = 1;
+    fis->lba1 = (uint8_t)(byte_count & 0xFF);
+    fis->lba2 = (uint8_t)((byte_count >> 8) & 0xFF);
+
+    acmd = cmd_table->acmd;
+    memset(acmd, 0, 16);
+    acmd[0] = SCSI_READ12;
+    acmd[2] = (uint8_t)((lba >> 24) & 0xFF);
+    acmd[3] = (uint8_t)((lba >> 16) & 0xFF);
+    acmd[4] = (uint8_t)((lba >> 8) & 0xFF);
+    acmd[5] = (uint8_t)(lba & 0xFF);
+    acmd[6] = (uint8_t)((count >> 24) & 0xFF);
+    acmd[7] = (uint8_t)((count >> 16) & 0xFF);
+    acmd[8] = (uint8_t)((count >> 8) & 0xFF);
+    acmd[9] = (uint8_t)(count & 0xFF);
+
+    ahci_port_write(port, AHCI_PxCI, 1 << slot);
+
+    result = ahci_wait_cmd(port, slot, 10000);
+
+    if (result == 0)
+        memcpy(buffer, (void *)buf_virt, byte_count);
+
+    if (!use_persistent) {
+        for (uint64_t i = 0; i < buf_pages; i++)
+            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+        pfa_free_contiguous(buf_phys, buf_pages);
+    }
+
+    return result;
+}
+
+ahci_port_t *ahci_find_cdrom(void) {
+    uint64_t i;
+
+    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+        ahci_port_t *port = ahci_get_port(i);
+        if (port && port->present && port->type == AHCI_DEV_SATAPI)
+            return port;
+    }
+    return NULL;
+}
+
 int ahci_flush(ahci_port_t *port) {
     if (!port->present || port->type != AHCI_DEV_SATA) {
         return -1;

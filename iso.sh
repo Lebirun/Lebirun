@@ -11,7 +11,7 @@ done
 
 . ./build.sh $BUILD_ARGS
 
-TOTAL_STEPS=4
+TOTAL_STEPS=5
 CURRENT_STEP=0
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -42,6 +42,9 @@ else
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Skipping rootfs (not found)"
 fi
 
+CURRENT_STEP=$((CURRENT_STEP + 1))
+bar_print "$(printf '\033[1;36mWriting GRUB config...\033[0m')"
+progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Writing GRUB config"
 cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=10
 set default=0

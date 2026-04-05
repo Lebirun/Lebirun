@@ -35,7 +35,7 @@ vring_t *vring_get(uint8_t minor);
 bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t access_type);
 void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type);
 
-extern vring_t subrings[VRING_MAX_SUBRINGS];
+extern vring_t *subrings;
 
 #define KPROC_MAX 16
 #define KPROC_PID_BASE (-1)

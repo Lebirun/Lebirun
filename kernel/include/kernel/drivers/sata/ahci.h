@@ -124,6 +124,13 @@
 #define ATA_CMD_FLUSH           0xE7
 #define ATA_CMD_FLUSH_EXT       0xEA
 #define ATA_CMD_SMART           0xB0
+#define ATA_CMD_PACKET          0xA0
+
+#define ATAPI_SECTOR_SIZE       2048
+
+#define SCSI_READ12             0xA8
+#define SCSI_READ_CAPACITY      0x25
+#define SCSI_TEST_UNIT_READY    0x00
 
 #define ATA_SMART_READ_DATA     0xD0
 #define ATA_SMART_READ_THRESH   0xD1
@@ -411,6 +418,8 @@ int ahci_probe(void);
 int ahci_port_init(ahci_port_t *port);
 int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer);
 int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer);
+int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffer);
+ahci_port_t *ahci_find_cdrom(void);
 int ahci_identify(ahci_port_t *port);
 int ahci_flush(ahci_port_t *port);
 ahci_controller_t *ahci_get_controller(void);

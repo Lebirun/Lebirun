@@ -12,12 +12,36 @@ static vfs_node_t *squashfs_vfs_root = NULL;
 static vfs_fs_type_t squashfs_fs_type;
 static dirent_t squashfs_dirent;
 
-#define SQFS_NODE_CACHE_SIZE 64
+#define SQFS_NODE_CACHE_INIT 16
+#define SQFS_NODE_CACHE_MAX 256
 static struct {
     uint64_t inode_ref;
     vfs_node_t *node;
-} sqfs_node_cache[SQFS_NODE_CACHE_SIZE];
+} *sqfs_node_cache = NULL;
 static uint64_t sqfs_node_cache_count = 0;
+static uint64_t sqfs_node_cache_capacity = 0;
+
+static void sqfs_cache_ensure(void) {
+    if (!sqfs_node_cache) {
+        sqfs_node_cache_capacity = SQFS_NODE_CACHE_INIT;
+        sqfs_node_cache = kmalloc(sqfs_node_cache_capacity * sizeof(*sqfs_node_cache));
+        if (!sqfs_node_cache) sqfs_node_cache_capacity = 0;
+    }
+}
+
+static int sqfs_cache_grow(void) {
+    uint64_t new_cap;
+    void *new_buf;
+
+    new_cap = sqfs_node_cache_capacity * 2;
+    if (new_cap > SQFS_NODE_CACHE_MAX) new_cap = SQFS_NODE_CACHE_MAX;
+    if (new_cap <= sqfs_node_cache_capacity) return -1;
+    new_buf = krealloc(sqfs_node_cache, new_cap * sizeof(*sqfs_node_cache));
+    if (!new_buf) return -1;
+    sqfs_node_cache = new_buf;
+    sqfs_node_cache_capacity = new_cap;
+    return 0;
+}
 
 static vfs_node_t *sqfs_cache_lookup(uint64_t inode_ref) {
     uint64_t i;
@@ -45,7 +69,14 @@ static void sqfs_cache_remove(vfs_node_t *node) {
 static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
     squashfs_vfs_node_t *old_snode;
 
-    if (sqfs_node_cache_count < SQFS_NODE_CACHE_SIZE) {
+    sqfs_cache_ensure();
+    if (!sqfs_node_cache) return;
+
+    if (sqfs_node_cache_count < sqfs_node_cache_capacity) {
+        sqfs_node_cache[sqfs_node_cache_count].inode_ref = inode_ref;
+        sqfs_node_cache[sqfs_node_cache_count].node = node;
+        sqfs_node_cache_count++;
+    } else if (sqfs_cache_grow() == 0) {
         sqfs_node_cache[sqfs_node_cache_count].inode_ref = inode_ref;
         sqfs_node_cache[sqfs_node_cache_count].node = node;
         sqfs_node_cache_count++;
@@ -56,9 +87,9 @@ static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
             old_snode->rd_cached_data = NULL;
         }
         memmove(&sqfs_node_cache[0], &sqfs_node_cache[1],
-                (SQFS_NODE_CACHE_SIZE - 1) * sizeof(sqfs_node_cache[0]));
-        sqfs_node_cache[SQFS_NODE_CACHE_SIZE - 1].inode_ref = inode_ref;
-        sqfs_node_cache[SQFS_NODE_CACHE_SIZE - 1].node = node;
+                (sqfs_node_cache_capacity - 1) * sizeof(sqfs_node_cache[0]));
+        sqfs_node_cache[sqfs_node_cache_capacity - 1].inode_ref = inode_ref;
+        sqfs_node_cache[sqfs_node_cache_capacity - 1].node = node;
     }
 }
 

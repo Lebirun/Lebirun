@@ -18,28 +18,14 @@ typedef struct {
     uint64_t addr;
 } lke_ksym_t;
 
-extern void *kmalloc(size_t);
-extern void kfree(void *);
-extern int printf(const char *, ...);
-extern void terminal_writestring(const char *);
-
-static const lke_ksym_t ksym_table[] = {
-    {"printf",             (uint64_t)&printf},
-    {"kmalloc",            (uint64_t)&kmalloc},
-    {"kfree",              (uint64_t)&kfree},
-    {"terminal_writestring", (uint64_t)&terminal_writestring},
-    {"memcpy",             (uint64_t)&memcpy},
-    {"memset",             (uint64_t)&memset},
-    {"strcmp",             (uint64_t)&strcmp},
-    {"strlen",             (uint64_t)&strlen},
-    {NULL, 0}
-};
+extern const lke_ksym_t ksym_auto_table[];
+extern const int ksym_auto_count;
 
 static uint64_t ksym_lookup(const char *name) {
     int i;
-    for (i = 0; ksym_table[i].name; i++) {
-        if (strcmp(ksym_table[i].name, name) == 0)
-            return ksym_table[i].addr;
+    for (i = 0; i < ksym_auto_count; i++) {
+        if (strcmp(ksym_auto_table[i].name, name) == 0)
+            return ksym_auto_table[i].addr;
     }
     return 0;
 }
