@@ -189,6 +189,7 @@ int task_fd_alloc(task_t *task);
 void task_fd_free(task_t *task, int fd);
 task_fd_t *task_fd_get(task_t *task, int fd);
 void task_fd_close_all(task_t *task);
+void task_fd_close_cloexec(task_t *task);
 
 pid_t task_fork(registers_t *parent_regs);
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs);

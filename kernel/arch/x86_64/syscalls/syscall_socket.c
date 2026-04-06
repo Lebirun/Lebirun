@@ -50,10 +50,13 @@
 #define SHUT_WR   1
 #define SHUT_RDWR 2
 
+#define SCM_RIGHTS 1
+
 #define SOCKET_INIT_COUNT 8
 #define SOCKET_BUF_SIZE 4096
 #define BACKLOG_INIT_SIZE 8
 #define UNIX_PATH_MAX 108
+#define SCM_MAX_FDS 16
 
 typedef unsigned int socklen_t;
 typedef long ssize_t;
@@ -105,6 +108,12 @@ typedef enum {
     SOCKSTATE_SHUTDOWN_RDWR
 } sock_state_t;
 
+struct cmsghdr {
+    uint64_t cmsg_len;
+    int cmsg_level;
+    int cmsg_type;
+};
+
 typedef struct pending_conn {
     uint64_t remote_addr;
     uint16_t remote_port;
@@ -145,6 +154,8 @@ typedef struct {
     sock_state_t state;
     pending_conn_t *backlog;
     char *sun_path;
+    task_fd_t pending_fds[SCM_MAX_FDS];
+    int pending_fd_count;
 } socket_t;
 
 static socket_t *sockets = NULL;
@@ -743,12 +754,48 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     ssize_t total;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
-    
+
     msg = (struct msghdr *)(uintptr_t)msg_ptr;
     if (!msg) return -EFAULT;
-    
+
     (void)flags;
-    
+
+    if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr)) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            int nfds_to_pass = (int)((cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
+            int *fd_arr = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
+            socket_t *peer;
+            int i;
+            int src_fd;
+            task_fd_t *src_tfd;
+            if (nfds_to_pass > SCM_MAX_FDS) nfds_to_pass = SCM_MAX_FDS;
+            if (sock->peer_socket < 0 || sock->peer_socket >= socket_capacity)
+                return -ENOTCONN;
+            peer = &sockets[sock->peer_socket];
+            if (!peer->in_use) return -ENOTCONN;
+            if (peer->pending_fd_count + nfds_to_pass > SCM_MAX_FDS)
+                return -ENOMEM;
+            for (i = 0; i < nfds_to_pass; i++) {
+                src_fd = fd_arr[i];
+                if (!current_task || src_fd < 0 || src_fd >= current_task->fds_capacity)
+                    return -EBADF;
+                src_tfd = &current_task->fds[src_fd];
+                if (!src_tfd->in_use) return -EBADF;
+                memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd, sizeof(task_fd_t));
+                peer->pending_fds[peer->pending_fd_count].read_buf = NULL;
+                peer->pending_fds[peer->pending_fd_count].read_buf_offset = 0;
+                peer->pending_fds[peer->pending_fd_count].read_buf_len = 0;
+                if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
+                    pipe_t *p = (pipe_t *)src_tfd->private_data;
+                    if (src_tfd->type == FD_TYPE_PIPE_R) p->readers++;
+                    else p->writers++;
+                }
+                peer->pending_fd_count++;
+            }
+        }
+    }
+
     total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
         ssize_t sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base, 
@@ -756,7 +803,7 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
         if (sent < 0) return sent;
         total += sent;
     }
-    
+
     return total;
 }
 
@@ -784,12 +831,45 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     ssize_t total;
     socket_t *sock = get_socket(sockfd);
     if (!sock) return -EBADF;
-    
+
     msg = (struct msghdr *)(uintptr_t)msg_ptr;
     if (!msg) return -EFAULT;
-    
+
     (void)flags;
-    
+
+    if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr) && sock->pending_fd_count > 0) {
+        struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+        int nfds = sock->pending_fd_count;
+        uint64_t needed = sizeof(struct cmsghdr) + (uint64_t)nfds * sizeof(int);
+        int *out_fds;
+        int i;
+        int newfd;
+        if (needed <= msg->msg_controllen) {
+            cmsg->cmsg_len = needed;
+            cmsg->cmsg_level = SOL_SOCKET;
+            cmsg->cmsg_type = SCM_RIGHTS;
+            out_fds = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
+            for (i = 0; i < nfds; i++) {
+                newfd = task_fd_alloc(current_task);
+                if (newfd < 0) {
+                    out_fds[i] = -1;
+                    continue;
+                }
+                memcpy(&current_task->fds[newfd], &sock->pending_fds[i], sizeof(task_fd_t));
+                current_task->fds[newfd].in_use = 1;
+                current_task->fds[newfd].ref_count = 1;
+                current_task->fds[newfd].read_buf = NULL;
+                current_task->fds[newfd].read_buf_offset = 0;
+                current_task->fds[newfd].read_buf_len = 0;
+                out_fds[i] = newfd;
+            }
+            msg->msg_controllen = needed;
+            sock->pending_fd_count = 0;
+        }
+    } else if (msg->msg_control) {
+        msg->msg_controllen = 0;
+    }
+
     total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
         ssize_t recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
@@ -798,7 +878,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
         total += recvd;
         if ((size_t)recvd < msg->msg_iov[i].iov_len) break;
     }
-    
+
     return total;
 }
 
@@ -863,6 +943,64 @@ int socket_poll_events(int fd) {
 
 int is_socket_fd(int fd) {
     return get_socket(fd) != NULL;
+}
+
+int socket_write(int fd, const void *buf, int len) {
+    int ret;
+    socket_t *sock = get_socket(fd);
+    if (!sock) return -EBADF;
+    if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED)
+        return -ENOTCONN;
+    if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+        socket_t *peer = &sockets[sock->peer_socket];
+        if (peer->in_use) {
+            ret = recv_buf_write(peer, buf, len);
+            if (ret == 0 && len > 0 && sock->nonblocking)
+                return -EAGAIN;
+            return ret;
+        }
+    }
+    ret = send_buf_write(sock, buf, len);
+    if (ret == 0 && len > 0 && sock->nonblocking)
+        return -EAGAIN;
+    return ret;
+}
+
+int socket_read(int fd, void *buf, int len) {
+    socket_t *sock = get_socket(fd);
+    size_t available;
+    if (!sock) return -EBADF;
+    available = recv_buf_used(sock);
+    if (available == 0) {
+        if (sock->nonblocking) return -EAGAIN;
+        return 0;
+    }
+    return recv_buf_read(sock, buf, len, 0);
+}
+
+#define SOCKET_F_DUPFD       0
+#define SOCKET_F_GETFD       1
+#define SOCKET_F_SETFD       2
+#define SOCKET_F_GETFL       3
+#define SOCKET_F_SETFL       4
+
+int socket_fcntl(int fd, int cmd, int arg) {
+    socket_t *sock = get_socket(fd);
+    if (!sock) return -EBADF;
+    switch (cmd) {
+        case SOCKET_F_GETFD:
+            return sock->cloexec ? 1 : 0;
+        case SOCKET_F_SETFD:
+            sock->cloexec = (arg & 1) ? 1 : 0;
+            return 0;
+        case SOCKET_F_GETFL:
+            return sock->nonblocking ? 0x800 : 0;
+        case SOCKET_F_SETFL:
+            sock->nonblocking = (arg & 0x800) ? 1 : 0;
+            return 0;
+        default:
+            return -EINVAL;
+    }
 }
 
 void syscalls_socket_init(void) {

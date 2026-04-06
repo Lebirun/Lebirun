@@ -170,12 +170,14 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
 }
 
 static int sys_vfs_close(int fd, const char *unused1, int unused2) {
+    uint8_t *rbuf;
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     task_fd_t *tfd = &current_task->fds[fd];
+    rbuf = tfd->read_buf;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         pipe_t *p = (pipe_t *)tfd->private_data;
@@ -190,17 +192,20 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
             }
         }
         memset(tfd, 0, sizeof(*tfd));
+        if (rbuf) kfree(rbuf);
         return 0;
     }
 
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
         vfs_node_t *node = (vfs_node_t *)tfd->node;
         memset(tfd, 0, sizeof(*tfd));
+        if (rbuf) kfree(rbuf);
         vfs_close(node);
         return 0;
     }
 
     memset(tfd, 0, sizeof(*tfd));
+    if (rbuf) kfree(rbuf);
     return 0;
 }
 

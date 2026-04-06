@@ -8,6 +8,9 @@
 #include <kernel/drivers/sata/ahci.h>
 #include <kernel/fs/ext4/ext4.h>
 
+extern int is_socket_fd(int fd);
+extern int socket_fcntl(int fd, int cmd, int arg);
+
 #define fd_table (current_task->fds)
 
 static int kernel_ptr_mapped(uint64_t addr) {
@@ -92,6 +95,10 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     if (newfd < 0) return -EMFILE;
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
+    fd_table[newfd].flags &= ~1;
+    fd_table[newfd].read_buf = NULL;
+    fd_table[newfd].read_buf_offset = 0;
+    fd_table[newfd].read_buf_len = 0;
     if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
         pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
         if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
@@ -113,6 +120,10 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     }
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
+    fd_table[newfd].flags &= ~1;
+    fd_table[newfd].read_buf = NULL;
+    fd_table[newfd].read_buf_offset = 0;
+    fd_table[newfd].read_buf_len = 0;
     if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
         pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
         if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
@@ -854,6 +865,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
 static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
     int cmd = (int)(uintptr_t)cmd_ptr;
     if (!current_task) return -ESRCH;
+    if (is_socket_fd(fd)) return socket_fcntl(fd, cmd, arg);
     if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     switch (cmd) {
         case F_DUPFD:
@@ -865,6 +877,13 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
             fd_table[newfd].ref_count = 1;
+            fd_table[newfd].read_buf = NULL;
+            fd_table[newfd].read_buf_offset = 0;
+            fd_table[newfd].read_buf_len = 0;
+            if (cmd == F_DUPFD_CLOEXEC)
+                fd_table[newfd].flags |= 1;
+            else
+                fd_table[newfd].flags &= ~1;
             if (fd_table[fd].private_data && (fd_table[fd].type == FD_TYPE_PIPE_R || fd_table[fd].type == FD_TYPE_PIPE_W)) {
                 pipe_t *p = (pipe_t *)fd_table[fd].private_data;
                 if (fd_table[fd].type == FD_TYPE_PIPE_R) p->readers++;
@@ -1159,7 +1178,6 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
 }
 
 static int sys_dup3(int oldfd, int newfd, int flags) {
-    (void)flags;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
@@ -1169,6 +1187,13 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     }
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
+    fd_table[newfd].read_buf = NULL;
+    fd_table[newfd].read_buf_offset = 0;
+    fd_table[newfd].read_buf_len = 0;
+    if (flags & 0x80000)
+        fd_table[newfd].flags |= 1;
+    else
+        fd_table[newfd].flags &= ~1;
     if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
         pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
         if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
@@ -1205,6 +1230,10 @@ static int sys_pipe2(int *pipefd, int flags) {
     fd_table[rfd].private_data = p;
     fd_table[wfd].type = FD_TYPE_PIPE_W;
     fd_table[wfd].private_data = p;
+    if (flags & 0x80000) {
+        fd_table[rfd].flags |= 1;
+        fd_table[wfd].flags |= 1;
+    }
     pipefd[0] = rfd;
     pipefd[1] = wfd;
     return 0;

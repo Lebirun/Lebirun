@@ -264,12 +264,11 @@ int ahci_probe(void) {
 }
 
 int ahci_port_init(ahci_port_t *port) {
-    uint64_t cmd_list_phys;
-    uint64_t fis_phys;
-    uint64_t cmd_table_phys;
-    uint64_t cmd_list_virt;
-    uint64_t fis_virt;
-    uint64_t cmd_table_virt;
+    uint64_t page_phys;
+    uint64_t page_virt;
+    uint64_t cmd_list_off;
+    uint64_t fis_off;
+    uint64_t cmd_table_off;
     int i;
 
     printf("AHCI: Initializing port %u...\n", port->port_num);
@@ -277,63 +276,43 @@ int ahci_port_init(ahci_port_t *port) {
     ahci_stop_cmd(port);
     printf("AHCI: port %u stop_cmd done\n", port->port_num);
 
-    cmd_list_phys = pfa_alloc();
-    if (!cmd_list_phys) {
-        printf("AHCI: Failed to allocate command list for port %u\n", port->port_num);
+    page_phys = pfa_alloc();
+    if (!page_phys) {
+        printf("AHCI: Failed to allocate page for port %u\n", port->port_num);
         return -1;
     }
 
-    fis_phys = pfa_alloc();
-    if (!fis_phys) {
-        printf("AHCI: Failed to allocate FIS for port %u\n", port->port_num);
-        pfa_free(cmd_list_phys);
-        return -1;
-    }
+    page_virt = page_phys + KERNEL_VMA;
+    vmm_map_page(page_virt, page_phys, 0x003);
+    memset((void *)page_virt, 0, PAGE_SIZE);
 
-    cmd_table_phys = pfa_alloc();
-    if (!cmd_table_phys) {
-        printf("AHCI: Failed to allocate command table for port %u\n", port->port_num);
-        pfa_free(cmd_list_phys);
-        pfa_free(fis_phys);
-        return -1;
-    }
-    printf("AHCI: port %u alloc done (cmd=0x%lX fis=0x%lX tbl=0x%lX)\n",
-           port->port_num, cmd_list_phys, fis_phys, cmd_table_phys);
+    cmd_list_off = 0;
+    fis_off = AHCI_CMD_SLOTS * sizeof(hba_cmd_header_t);
+    fis_off = (fis_off + 255) & ~255ULL;
+    cmd_table_off = fis_off + sizeof(hba_fis_t);
+    cmd_table_off = (cmd_table_off + 127) & ~127ULL;
 
-    cmd_list_virt = cmd_list_phys + KERNEL_VMA;
-    fis_virt = fis_phys + KERNEL_VMA;
-    cmd_table_virt = cmd_table_phys + KERNEL_VMA;
+    printf("AHCI: port %u layout: cmd_list@0x%lX fis@0x%lX tbl@0x%lX\n",
+           port->port_num, cmd_list_off, fis_off, cmd_table_off);
 
-    vmm_map_page(cmd_list_virt, cmd_list_phys, 0x003);
-    printf("AHCI: port %u map cmd_list done\n", port->port_num);
-    vmm_map_page(fis_virt, fis_phys, 0x003);
-    printf("AHCI: port %u map fis done\n", port->port_num);
-    vmm_map_page(cmd_table_virt, cmd_table_phys, 0x003);
-    printf("AHCI: port %u map cmd_table done\n", port->port_num);
+    port->cmd_list = (hba_cmd_header_t *)(page_virt + cmd_list_off);
+    port->fis = (hba_fis_t *)(page_virt + fis_off);
+    port->cmd_table = (hba_cmd_table_t *)(page_virt + cmd_table_off);
+    port->cmd_list_phys = page_phys + cmd_list_off;
+    port->fis_phys = page_phys + fis_off;
+    port->cmd_table_phys = page_phys + cmd_table_off;
 
-    memset((void *)cmd_list_virt, 0, PAGE_SIZE);
-    memset((void *)fis_virt, 0, PAGE_SIZE);
-    memset((void *)cmd_table_virt, 0, PAGE_SIZE);
-    printf("AHCI: port %u memset done\n", port->port_num);
-
-    port->cmd_list = (hba_cmd_header_t *)cmd_list_virt;
-    port->fis = (hba_fis_t *)fis_virt;
-    port->cmd_table = (hba_cmd_table_t *)cmd_table_virt;
-    port->cmd_list_phys = cmd_list_phys;
-    port->fis_phys = fis_phys;
-    port->cmd_table_phys = cmd_table_phys;
-
-    ahci_port_write(port, AHCI_PxCLB, cmd_list_phys);
+    ahci_port_write(port, AHCI_PxCLB, port->cmd_list_phys);
     ahci_port_write(port, AHCI_PxCLBU, 0);
 
-    ahci_port_write(port, AHCI_PxFB, fis_phys);
+    ahci_port_write(port, AHCI_PxFB, port->fis_phys);
     ahci_port_write(port, AHCI_PxFBU, 0);
     printf("AHCI: port %u port regs written\n", port->port_num);
 
     for (i = 0; i < AHCI_CMD_SLOTS; i++) {
         port->cmd_list[i].prdtl = AHCI_PRDT_ENTRIES;
-        port->cmd_list[i].ctba = (uint32_t)(cmd_table_phys + (i * sizeof(hba_cmd_table_t)));
-        port->cmd_list[i].ctbau = (uint32_t)((cmd_table_phys + (i * sizeof(hba_cmd_table_t))) >> 32);
+        port->cmd_list[i].ctba = (uint32_t)(port->cmd_table_phys + (i * sizeof(hba_cmd_table_t)));
+        port->cmd_list[i].ctbau = (uint32_t)((port->cmd_table_phys + (i * sizeof(hba_cmd_table_t))) >> 32);
     }
 
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
@@ -341,8 +320,8 @@ int ahci_port_init(ahci_port_t *port) {
 
     ahci_start_cmd(port);
 
-    printf("AHCI: Port %u initialized (CLB=0x%016lX, FB=0x%016lX, CTBA=0x%016lX)\n",
-           port->port_num, cmd_list_phys, fis_phys, cmd_table_phys);
+    printf("AHCI: Port %u initialized (single page at 0x%016lX)\n",
+           port->port_num, page_phys);
 
     return 0;
 }
@@ -811,8 +790,11 @@ int ahci_init(void) {
     
     uint64_t abar_phys = g_ahci_controller.abar;
     uint64_t abar_virt = (KERNEL_VMA + 0x37100000ULL);
+    uint64_t abar_size;
     
-    for (uint64_t offset = 0; offset < 0x2000; offset += PAGE_SIZE) {
+    abar_size = AHCI_PORT_BASE + AHCI_MAX_PORTS * AHCI_PORT_SIZE;
+    abar_size = (abar_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    for (uint64_t offset = 0; offset < abar_size; offset += PAGE_SIZE) {
         vmm_map_page(abar_virt + offset, abar_phys + offset, 0x003);
     }
     

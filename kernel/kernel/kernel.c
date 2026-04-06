@@ -164,6 +164,7 @@ void kernel_main(void) {
     vfs_node_t *ext4_root;
     int ahci_done;
     int devs_registered;
+    struct multiboot2_tag_module *tag_mod_initrd;
 
     gdt_init();
     idt_init();
@@ -298,6 +299,7 @@ void kernel_main(void) {
         }
 
         tag_mod = NULL;
+        tag_mod_initrd = NULL;
         i = 0;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
              tag->type != MULTIBOOT2_TAG_END;
@@ -305,6 +307,8 @@ void kernel_main(void) {
             if (tag->type == MULTIBOOT2_TAG_MODULE) {
                 if (i == 0)
                     tag_mod = (struct multiboot2_tag_module *)tag;
+                else if (i == 1)
+                    tag_mod_initrd = (struct multiboot2_tag_module *)tag;
                 i++;
             }
         }
@@ -352,6 +356,14 @@ void kernel_main(void) {
         procfs_init();
         if (debug_boot_vfs) printf("BOOT: devfs_init...\n");
         devfs_init();
+        if (tag_mod_initrd) {
+            multiboot_module_t tmp_mod;
+            tmp_mod.mod_start = tag_mod_initrd->mod_start;
+            tmp_mod.mod_end = tag_mod_initrd->mod_end;
+            tmp_mod.cmdline = 0;
+            tmp_mod.reserved = 0;
+            initrd_init(1, (uint64_t)&tmp_mod - KERNEL_VMA);
+        }
         devfs_register_initrd();
 #if CONFIG_VIRT_VFL
         vfl_init();

@@ -520,6 +520,9 @@ static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
 static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoint) {
     (void)device;
     (void)mountpoint;
+
+    if (initrd_vfs_root)
+        return initrd_vfs_root;
     
     if (!files || file_count == 0) {
         printf("INITRD_VFS: No files to mount\n");
@@ -579,6 +582,14 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
 }
 
 static vfs_fs_type_t initrd_fs_type;
+
+vfs_node_t *initrd_get_vfs_root(void) {
+    if (initrd_vfs_root)
+        return initrd_vfs_root;
+    if (!files || file_count == 0)
+        return NULL;
+    return initrd_vfs_do_mount(NULL, NULL);
+}
 
 void initrd_vfs_register(void) {
     initrd_fs_type.name = "initrd";

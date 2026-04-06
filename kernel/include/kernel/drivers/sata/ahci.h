@@ -152,10 +152,10 @@
 #define AHCI_SECTOR_SIZE    512
 #define AHCI_MAX_PORTS      4
 #define AHCI_CMD_LIST_SIZE  1024
-#define AHCI_CMD_SLOTS      8
+#define AHCI_CMD_SLOTS      2
 #define AHCI_FIS_SIZE       256
 #define AHCI_CMD_TABLE_SIZE 256
-#define AHCI_PRDT_ENTRIES   8
+#define AHCI_PRDT_ENTRIES   4
 #define AHCI_CMD_QUEUE_SIZE 32
 
 typedef struct {

@@ -1256,9 +1256,53 @@ void task_fd_close_all(task_t *task) {
     pipe_t *p;
     
     if (!task || !task->fds) return;
+    for (i = 0; i < task->fds_capacity; i++) {
+        tfd = &task->fds[i];
+        if (!tfd->in_use) continue;
+        if (tfd->read_buf) {
+            kfree(tfd->read_buf);
+            tfd->read_buf = NULL;
+            tfd->read_buf_len = 0;
+        }
+        if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+            p = (pipe_t *)tfd->private_data;
+            if (p) {
+                if (tfd->type == FD_TYPE_PIPE_R) p->readers--;
+                else p->writers--;
+                waitq_wake_all(&p->read_waitq);
+                waitq_wake_all(&p->write_waitq);
+                if (p->readers <= 0 && p->writers <= 0) {
+                    if (p->buffer) kfree(p->buffer);
+                    kfree(p);
+                }
+            }
+        } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            vfs_close((vfs_node_t *)tfd->node);
+        }
+        tfd->in_use = 0;
+        tfd->ref_count = 0;
+        tfd->node = NULL;
+        tfd->offset = 0;
+        tfd->flags = 0;
+        tfd->private_data = NULL;
+    }
+}
+
+void task_fd_close_cloexec(task_t *task) {
+    int i;
+    task_fd_t *tfd;
+    pipe_t *p;
+
+    if (!task || !task->fds) return;
     for (i = 3; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
+        if (!(tfd->flags & 1)) continue;
+        if (tfd->read_buf) {
+            kfree(tfd->read_buf);
+            tfd->read_buf = NULL;
+            tfd->read_buf_len = 0;
+        }
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
@@ -1401,6 +1445,9 @@ pid_t task_fork(registers_t *parent_regs) {
             if (child->fds[i].type == FD_TYPE_PIPE_R) p->readers++;
             else p->writers++;
         }
+        child->fds[i].read_buf = NULL;
+        child->fds[i].read_buf_offset = 0;
+        child->fds[i].read_buf_len = 0;
     }
     child->envp = NULL;
     child->envc = 0;
@@ -1486,6 +1533,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     }
 
     DEBUG_TASK("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
+
+    task_fd_close_cloexec(current_task);
 
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;
@@ -1822,6 +1871,8 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
         kfree(kernel_bin);
         return -KERR_ENOEXEC;
     }
+
+    task_fd_close_cloexec(current_task);
 
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;

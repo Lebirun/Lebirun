@@ -6,6 +6,9 @@
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
 extern int task_has_sigint_ignored(void);
+extern int is_socket_fd(int fd);
+extern int socket_write(int fd, const void *buf, int len);
+extern int socket_read(int fd, void *buf, int len);
 
 #define LINE_BUF_SIZE 256
 static char line_buffers[NUM_CONSOLES][LINE_BUF_SIZE];
@@ -167,6 +170,10 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
 
+    if (is_socket_fd(fd)) {
+        return socket_write(fd, (const void *)buf_addr, len);
+    }
+
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_W) {
@@ -242,6 +249,10 @@ static int sys_read(int fd, char *buf, int len) {
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
 
+    if (is_socket_fd(fd)) {
+        return socket_read(fd, (void *)buf_addr, len);
+    }
+
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         task_fd_t *tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_R) {
@@ -270,42 +281,11 @@ static int sys_read(int fd, char *buf, int len) {
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             vfs_node_t *node = (vfs_node_t *)tfd->node;
             uint64_t file_off = tfd->offset;
-            uint32_t remaining = (uint32_t)len;
-            uint32_t copied = 0;
-            uint32_t buf_sz;
-            uint64_t ram_bytes;
+            uint64_t bytes;
 
-            if (!tfd->read_buf && node->length > 0) {
-                ram_bytes = pfa_get_total_ram_kb() * 1024ULL;
-                buf_sz = node->length < ram_bytes ? (uint32_t)node->length : (uint32_t)ram_bytes;
-                tfd->read_buf = (uint8_t *)kmalloc(buf_sz);
-                if (tfd->read_buf) {
-                    uint64_t bytes = vfs_read(node, 0, buf_sz, tfd->read_buf);
-                    tfd->read_buf_offset = 0;
-                    tfd->read_buf_len = (uint32_t)bytes;
-                }
-            }
-
-            while (remaining > 0) {
-                if (tfd->read_buf && tfd->read_buf_len > 0 &&
-                    file_off >= tfd->read_buf_offset &&
-                    file_off < tfd->read_buf_offset + tfd->read_buf_len) {
-                    uint32_t buf_pos = (uint32_t)(file_off - tfd->read_buf_offset);
-                    uint32_t avail = tfd->read_buf_len - buf_pos;
-                    uint32_t chunk = remaining < avail ? remaining : avail;
-                    memcpy((void *)(buf_addr + copied), tfd->read_buf + buf_pos, chunk);
-                    file_off += chunk;
-                    copied += chunk;
-                    remaining -= chunk;
-                } else {
-                    uint64_t bytes = vfs_read(node, file_off, remaining, (uint8_t *)(buf_addr + copied));
-                    file_off += bytes;
-                    copied += (uint32_t)bytes;
-                    break;
-                }
-            }
-            tfd->offset = file_off;
-            return (int)copied;
+            bytes = vfs_read(node, file_off, (uint64_t)len, (uint8_t *)buf_addr);
+            tfd->offset = file_off + bytes;
+            return (int)bytes;
         }
         if (tfd->type != FD_TYPE_STDIN) {
             return -EBADF;

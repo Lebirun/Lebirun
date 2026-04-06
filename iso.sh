@@ -20,6 +20,10 @@ progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Preparing ISO directory"
 rm -f isodir/boot/initrd.img isodir/boot/lebirun.kernel isodir/boot/rootfs.squashfs
 mkdir -p isodir/boot/grub
 
+if [ -f initrd.img ]; then
+    cp initrd.img isodir/boot/initrd.img
+fi
+
 KERNEL_BIN="sysroot/boot/lebirun.kernel"
 if [ ! -f "$KERNEL_BIN" ]; then
     cleanup_bar
@@ -52,6 +56,8 @@ set default=0
 menuentry "Lebirun" {
 	multiboot2 /boot/lebirun.kernel
 	module2 /boot/rootfs.squashfs
+	# Uncomment to load initrd (browsable at /dev/initrd):
+	# module2 /boot/initrd.img
 	boot
 }
 EOF

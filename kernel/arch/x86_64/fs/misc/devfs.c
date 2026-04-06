@@ -33,7 +33,6 @@ static devfs_blockdev_t *devfs_blockdevs;
 static int devfs_blockdev_count;
 static int devfs_blockdev_capacity;
 
-static vfs_node_t dev_initrd_node;
 static int dev_initrd_registered;
 
 static vfs_node_t devfs_root;
@@ -497,30 +496,6 @@ static uint64_t dev_cdrom_write(vfs_node_t *node, uint64_t offset, uint64_t size
     return 0;
 }
 
-static uint64_t dev_initrd_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    uint8_t *base;
-    uint64_t total;
-    uint64_t avail;
-
-    (void)node;
-    base = initrd_get_base();
-    total = initrd_get_size();
-    if (!base || offset >= total)
-        return 0;
-
-    avail = total - offset;
-    if (size > avail)
-        size = avail;
-
-    memcpy(buffer, base + offset, size);
-    return size;
-}
-
-static uint64_t dev_initrd_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)node; (void)offset; (void)buffer; (void)size;
-    return (uint64_t)-1;
-}
-
 static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     dirent_t *d;
 
@@ -587,7 +562,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         d = devfs_alloc_dirent();
         strcpy(d->name, "initrd");
         d->inode = 200;
-        d->type = VFS_BLOCKDEVICE;
+        d->type = VFS_DIRECTORY;
         return d;
     }
 
@@ -638,7 +613,7 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     }
 
     if (dev_initrd_registered && strcmp(name, "initrd") == 0)
-        return &dev_initrd_node;
+        return initrd_get_vfs_root();
 
     return NULL;
 }
@@ -1217,25 +1192,20 @@ int devfs_rescan_partitions(const char *devname) {
 }
 
 void devfs_register_initrd(void) {
+    vfs_node_t *root;
+
     if (dev_initrd_registered)
         return;
 
     if (!initrd_get_base())
         return;
 
-    memset(&dev_initrd_node, 0, sizeof(vfs_node_t));
-    strcpy(dev_initrd_node.name, "initrd");
-    dev_initrd_node.flags = VFS_BLOCKDEVICE;
-    dev_initrd_node.mask = 0440;
-    dev_initrd_node.uid = 0;
-    dev_initrd_node.gid = 0;
-    dev_initrd_node.length = initrd_get_size();
-    dev_initrd_node.read = dev_initrd_read;
-    dev_initrd_node.write = dev_initrd_write;
-    dev_initrd_node.open = devfs_open;
-    dev_initrd_node.close = devfs_close;
-    dev_initrd_node.parent = &devfs_root;
-    dev_initrd_node.ref_count = 1;
+    root = initrd_get_vfs_root();
+    if (!root)
+        return;
+
+    strcpy(root->name, "initrd");
+    root->parent = &devfs_root;
 
     dev_initrd_registered = 1;
 }

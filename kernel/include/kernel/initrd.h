@@ -77,6 +77,7 @@ int initrd_stat(const char *path, uint64_t *size, uint8_t *type, uint8_t *perms)
 void initrd_init_fds(void);
 
 void initrd_vfs_register(void);
+struct vfs_node *initrd_get_vfs_root(void);
 
 uint8_t *initrd_get_base(void);
 uint64_t initrd_get_size(void);

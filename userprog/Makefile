@@ -32,7 +32,7 @@ CRT1_ABS = $(SYSROOT)/usr/lib/crt1.o
 CRTI_ABS = $(SYSROOT)/usr/lib/crti.o
 CRTN_ABS = $(SYSROOT)/usr/lib/crtn.o
 LIBC_A = $(SYSROOT)/usr/lib/libc.a
-PROGRAMS = bin/pong.bin
+PROGRAMS =
 
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 LSH_DIR := $(MAKEFILE_DIR)lsh
@@ -44,10 +44,7 @@ LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
 SYSROOT_BIN = ../root/bin
 BINDIR = bin
 
-.PHONY: copy-pong stage-lsh stage-lebutils stage-LebInit stage-login
-
-copy-pong: bin/pong.bin
-	cp bin/pong.bin $(INITRD_DIR)/pong.bin
+.PHONY: stage-lsh stage-lebutils stage-LebInit stage-login
 
 stage-lsh: bin/lsh.bin
 	mkdir -p $(SYSROOT_BIN)
@@ -81,7 +78,7 @@ bin/lsh.bin:
 
 .PHONY: all clean
 
-all: $(PROGRAMS) copy-pong stage-lsh stage-lebutils stage-LebInit stage-login stage-lebinstaller
+all: $(PROGRAMS) stage-lsh stage-lebutils stage-LebInit stage-login stage-lebinstaller
 
 build/%.o: %.c
 	$(Q)mkdir -p build
@@ -96,6 +93,5 @@ bin/%.bin: build/%.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
 clean:
 	rm -f *.so
 	rm -rf build $(BINDIR)
-	rm -f $(SYSROOT_BIN)/pong
 	rm -f $(SYSROOT_BIN)/lsh
 	rm -f $(SYSROOT_BIN)/sh
