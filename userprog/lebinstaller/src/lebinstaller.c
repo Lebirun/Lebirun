@@ -977,27 +977,17 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
 
 #define PKG_CORE       0
 #define PKG_C_HDR      1
-#define PKG_CPP_HDR    2
-#define PKG_C_LIB      3
-#define PKG_CPP_LIB    4
-#define PKG_COUNT      5
+#define PKG_C_LIB      2
+#define PKG_COUNT      3
 
-static int pkg_selected[PKG_COUNT] = { 1, 1, 1, 1, 1 };
+static int pkg_selected[PKG_COUNT] = { 1, 1, 1 };
 
 static int inst_pkg_skip(const char *path)
 {
-    if (!pkg_selected[PKG_CPP_HDR] && strcmp(path, "/usr/include/c++") == 0)
-        return 1;
     if (!pkg_selected[PKG_C_HDR] && strcmp(path, "/usr/include") == 0)
         return 1;
     if (!pkg_selected[PKG_C_LIB] && strcmp(path, "/usr/lib") == 0)
         return 1;
-    if (!pkg_selected[PKG_CPP_LIB]) {
-        if (strcmp(path, "/usr/lib/libstdc++.a") == 0)
-            return 1;
-        if (strcmp(path, "/usr/lib/libsupc++.a") == 0)
-            return 1;
-    }
     return 0;
 }
 
@@ -1606,9 +1596,7 @@ static int step_packages(void)
     static const char *pkg_names[PKG_COUNT] = {
         "Core system (required)",
         "C development headers",
-        "C++ development headers",
-        "C development libraries",
-        "C++ development libraries"
+        "C development libraries"
     };
     int tmp[PKG_COUNT];
     int i;
@@ -1966,8 +1954,7 @@ int main(int argc, char **argv)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], do_format ? "ext4" : "No");
                 else if (i == STEP_PKGS) {
                     int npkg;
-                    npkg = pkg_selected[PKG_C_HDR] + pkg_selected[PKG_CPP_HDR]
-                         + pkg_selected[PKG_C_LIB] + pkg_selected[PKG_CPP_LIB];
+                    npkg = pkg_selected[PKG_C_HDR] + pkg_selected[PKG_C_LIB];
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (core +%d)", step_names[i], npkg);
                 } else if (i == STEP_USER) {
                     snprintf(ubuf, sizeof(ubuf), "%d user(s)", user_count);

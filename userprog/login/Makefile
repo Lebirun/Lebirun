@@ -32,31 +32,36 @@ SYSROOT_BIN = ../../root/bin
 SYSROOT_SBIN = ../../root/sbin
 
 LOGIN_SRCS = src/login.c
-LOGIN_OBJS = $(LOGIN_SRCS:.c=.o)
+LOGIN_OBJS = $(patsubst src/%.c,build/%.o,$(LOGIN_SRCS))
 
 GETTY_SRCS = src/getty.c
-GETTY_OBJS = $(GETTY_SRCS:.c=.o)
+GETTY_OBJS = $(patsubst src/%.c,build/%.o,$(GETTY_SRCS))
+
+BINDIR = bin
 
 .PHONY: all clean stage
 
-all: login.bin getty.bin
+all: $(BINDIR)/login.bin $(BINDIR)/getty.bin
 
-%.o: %.c
+build/%.o: src/%.c
+	$(Q)mkdir -p $(dir $@)
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-login.bin: $(LOGIN_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+$(BINDIR)/login.bin: $(LOGIN_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+	$(Q)mkdir -p $(BINDIR)
 	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(LOGIN_OBJS) -lc $(CRTN) -lgcc
 
-getty.bin: $(GETTY_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+$(BINDIR)/getty.bin: $(GETTY_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+	$(Q)mkdir -p $(BINDIR)
 	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(GETTY_OBJS) -lc $(CRTN) -lgcc
 
 stage: all
 	$(Q)mkdir -p $(SYSROOT_BIN)
-	$(Q)cp login.bin $(SYSROOT_BIN)/login
+	$(Q)cp $(BINDIR)/login.bin $(SYSROOT_BIN)/login
 	$(MSG_STRIP)$(STRIP) -s $(SYSROOT_BIN)/login
 	$(Q)mkdir -p $(SYSROOT_SBIN)
-	$(Q)cp getty.bin $(SYSROOT_SBIN)/getty
+	$(Q)cp $(BINDIR)/getty.bin $(SYSROOT_SBIN)/getty
 	$(MSG_STRIP)$(STRIP) -s $(SYSROOT_SBIN)/getty
 
 clean:
-	rm -f $(LOGIN_OBJS) $(GETTY_OBJS) login.bin getty.bin
+	rm -rf build $(BINDIR)

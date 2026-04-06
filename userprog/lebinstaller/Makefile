@@ -31,33 +31,39 @@ LD_SCRIPT = $(LIBC)/user.ld
 SYSROOT_SBIN = ../../root/sbin
 
 SRCS = src/lebinstaller.c
-OBJS = $(SRCS:.c=.o)
+OBJS = $(patsubst src/%.c,build/%.o,$(SRCS))
 
 LEB_SYSCALLS_SRC = $(LIBC)/src/syscalls.c
-LEB_SYSCALLS_OBJ = src/syscalls_vfs.o
+LEB_SYSCALLS_OBJ = build/syscalls_vfs.o
 LEB_LSYSCALLS_SRC = $(LIBC)/src/leb_syscalls.c
-LEB_LSYSCALLS_OBJ = src/leb_syscalls.o
+LEB_LSYSCALLS_OBJ = build/leb_syscalls.o
+
+BINDIR = bin
 
 .PHONY: all clean stage
 
-all: lebinstaller.bin
+all: $(BINDIR)/lebinstaller.bin
 
-%.o: %.c
+build/%.o: src/%.c
+	$(Q)mkdir -p $(dir $@)
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 $(LEB_SYSCALLS_OBJ): $(LEB_SYSCALLS_SRC)
+	$(Q)mkdir -p $(dir $@)
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 $(LEB_LSYSCALLS_OBJ): $(LEB_LSYSCALLS_SRC)
+	$(Q)mkdir -p $(dir $@)
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-lebinstaller.bin: $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+$(BINDIR)/lebinstaller.bin: $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+	$(Q)mkdir -p $(BINDIR)
 	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) -lc $(CRTN) -lgcc
 
 stage: all
 	$(Q)mkdir -p $(SYSROOT_SBIN)
-	$(Q)cp lebinstaller.bin $(SYSROOT_SBIN)/lebinstaller
+	$(Q)cp $(BINDIR)/lebinstaller.bin $(SYSROOT_SBIN)/lebinstaller
 	$(MSG_STRIP)$(STRIP) -s $(SYSROOT_SBIN)/lebinstaller
 
 clean:
-	rm -f $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) lebinstaller.bin
+	rm -rf build $(BINDIR)

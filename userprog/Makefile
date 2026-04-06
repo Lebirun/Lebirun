@@ -32,7 +32,7 @@ CRT1_ABS = $(SYSROOT)/usr/lib/crt1.o
 CRTI_ABS = $(SYSROOT)/usr/lib/crti.o
 CRTN_ABS = $(SYSROOT)/usr/lib/crtn.o
 LIBC_A = $(SYSROOT)/usr/lib/libc.a
-PROGRAMS = pong.bin
+PROGRAMS = bin/pong.bin
 
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 LSH_DIR := $(MAKEFILE_DIR)lsh
@@ -42,15 +42,16 @@ HOSTCC ?= gcc
 LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
 
 SYSROOT_BIN = ../root/bin
+BINDIR = bin
 
 .PHONY: copy-pong stage-lsh stage-lebutils stage-LebInit stage-login
 
-copy-pong: pong.bin
-	cp pong.bin $(INITRD_DIR)/pong.bin
+copy-pong: bin/pong.bin
+	cp bin/pong.bin $(INITRD_DIR)/pong.bin
 
-stage-lsh: lsh.bin
+stage-lsh: bin/lsh.bin
 	mkdir -p $(SYSROOT_BIN)
-	cp lsh.bin $(SYSROOT_BIN)/lsh
+	cp bin/lsh.bin $(SYSROOT_BIN)/lsh
 	ln -sf lsh $(SYSROOT_BIN)/sh
 
 stage-lebutils:
@@ -65,31 +66,36 @@ stage-login:
 stage-lebinstaller:
 	$(MAKE) -C lebinstaller V=$(V) stage
 
-lsh.bin:
+lsh.bin: bin/lsh.bin
+
+bin/lsh.bin:
 	@mkdir -p $(LSH_BUILD)
+	@mkdir -p $(BINDIR)
 	@if [ ! -f "$(LSH_OUTDIR)/config.mk" ] || [ "$(LSH_DIR)/configure" -nt "$(LSH_OUTDIR)/config.mk" ]; then \
 		echo "Configuring lsh..."; \
 		mkdir -p "$(LSH_BUILD)"; \
 		(cd "$(LSH_BUILD)" && sh ../configure $(LSH_CONFIGURE_ARGS) > "$(LSH_BUILD)/configure.log" 2>&1) || (cat "$(LSH_BUILD)/configure.log" >&2; false); \
 	fi
 	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" clean CFLAGS="-Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -O2 -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic" LDFLAGS="-nostdlib -static -Wl,-z,noexecstack -T $(LIBC_ABS)/user.ld" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" lsh
-	@cp "$(LSH_DIR)/lsh" "$(MAKEFILE_DIR)lsh.bin"
+	@cp "$(LSH_DIR)/lsh" "$(MAKEFILE_DIR)bin/lsh.bin"
 
 .PHONY: all clean
 
 all: $(PROGRAMS) copy-pong stage-lsh stage-lebutils stage-LebInit stage-login stage-lebinstaller
 
-%.o: %.c
+build/%.o: %.c
+	$(Q)mkdir -p build
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 
 
-%.bin: %.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+bin/%.bin: build/%.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+	$(Q)mkdir -p $(BINDIR)
 	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -T $(LIBC)/user.ld -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
 
 clean:
-	rm -f *.o *.bin *.so
+	rm -f *.so
+	rm -rf build $(BINDIR)
 	rm -f $(SYSROOT_BIN)/pong
 	rm -f $(SYSROOT_BIN)/lsh
 	rm -f $(SYSROOT_BIN)/sh
-	rm -f lsh.bin

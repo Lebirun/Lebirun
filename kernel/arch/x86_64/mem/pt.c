@@ -643,16 +643,19 @@ int heap_map_page_pae(uint64_t virt_addr) {
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
     }
 
-    if (!(pt[pt_pt_idx] & 1)) {
-        phys_page = pmm_alloc_page();
-        if (!phys_page) {
-            printf("heap_map_page_pae: Failed to alloc phys page\n");
-            vmm_pae_lock_release();
-            return -1;
-        }
-        pt[pt_pt_idx] = ((uint64_t)(uint64_t)phys_page & ~0xFFFULL) | 3;
+    if (pt[pt_pt_idx] & 1) {
+        pt[pt_pt_idx] = 0;
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
+
+    phys_page = pmm_alloc_page();
+    if (!phys_page) {
+        printf("heap_map_page_pae: Failed to alloc phys page\n");
+        vmm_pae_lock_release();
+        return -1;
+    }
+    pt[pt_pt_idx] = ((uint64_t)(uint64_t)phys_page & ~0xFFFULL) | 3;
+    __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
 
     vmm_pae_lock_release();
     return 0;

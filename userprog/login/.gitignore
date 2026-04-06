@@ -12,8 +12,6 @@ build-*/
 *.out
 *.app
 
-bin/
-
 *.a
 *.lo
 *.so
@@ -24,7 +22,7 @@ bin/
 *.sym
 *.dSYM/
 
-.config
+bin/
 
 .vscode/
 .idea/

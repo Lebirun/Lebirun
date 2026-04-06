@@ -150,7 +150,7 @@ if [ -d "userprog/lebinstaller" ]; then
   bar_print "Cleaning lebinstaller..."
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning lebinstaller"
   run_clean "Cleaning lebinstaller" sh -c "cd userprog/lebinstaller && $MAKE clean"
-  rm -f userprog/lebinstaller/lebinstaller.bin
+  rm -rf userprog/lebinstaller/bin
 fi
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -165,15 +165,16 @@ find root/lib -mindepth 1 -maxdepth 1 ! -name lke -exec rm -rf {} + 2>/dev/null 
 remove_dir_contents root/usr/lib
 remove_dir_contents root/usr/include
 rm -rf root/usr/share/terminfo
-rm -f userprog/lebutils/*.bin
+rm -rf userprog/lebutils/bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin
 rm -f userprog/lsh/liblsh.gnu.sym userprog/lsh/liblsh.darwin.sym
 rm -rf userprog/lsh/.build userprog/lsh/build-cross
+rm -rf userprog/bin
 rm -rf sysroot isodir lebirun.iso
 rm -f initrd.img rootfs.img rootfs.squashfs
 rm -rf include
 rm -rf root/init
-rm -f userprog/lebinstaller/lebinstaller.bin
+rm -rf userprog/lebinstaller/bin
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "Cleaning object files..."

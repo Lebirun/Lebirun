@@ -193,47 +193,72 @@ static int ahci_wait_cmd(ahci_port_t *port, int slot, uint64_t timeout_ms) {
 }
 
 int ahci_probe(void) {
+    uint16_t bus;
+    uint8_t slot;
+    uint8_t func;
+    uint8_t max_func;
+    uint64_t vendor_device;
+    uint16_t vendor;
+    uint16_t device_id;
+    uint64_t class_info;
+    uint8_t base_class;
+    uint8_t sub_class;
+    uint8_t prog_if;
+    uint64_t header_type;
+    uint64_t cmd;
+
     printf("AHCI: Probing PCI bus for AHCI controllers...\n");
-    
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            for (uint8_t func = 0; func < 8; func++) {
-                uint64_t vendor_device = pci_read_config(bus, slot, func, 0x00);
-                uint16_t vendor = vendor_device & 0xFFFF;
-                
-                if (vendor == 0xFFFF)
-                    continue;
-                
-                uint64_t class_info = pci_read_config(bus, slot, func, 0x08);
-                uint8_t base_class = (class_info >> 24) & 0xFF;
-                uint8_t sub_class = (class_info >> 16) & 0xFF;
-                uint8_t prog_if = (class_info >> 8) & 0xFF;
-                
-                if (base_class == PCI_CLASS_STORAGE && 
+
+    for (bus = 0; bus < 256; bus++) {
+        for (slot = 0; slot < 32; slot++) {
+            vendor_device = pci_read_config(bus, slot, 0, 0x00);
+            vendor = vendor_device & 0xFFFF;
+
+            if (vendor == 0xFFFF)
+                continue;
+
+            header_type = pci_read_config(bus, slot, 0, 0x0C);
+            max_func = ((header_type >> 16) & 0x80) ? 8 : 1;
+
+            for (func = 0; func < max_func; func++) {
+                if (func > 0) {
+                    vendor_device = pci_read_config(bus, slot, func, 0x00);
+                    vendor = vendor_device & 0xFFFF;
+
+                    if (vendor == 0xFFFF)
+                        continue;
+                }
+
+                class_info = pci_read_config(bus, slot, func, 0x08);
+                base_class = (class_info >> 24) & 0xFF;
+                sub_class = (class_info >> 16) & 0xFF;
+                prog_if = (class_info >> 8) & 0xFF;
+
+                if (base_class == PCI_CLASS_STORAGE &&
                     sub_class == PCI_SUBCLASS_SATA &&
                     prog_if == PCI_PROGIF_AHCI) {
-                    
-                    uint16_t device_id = (vendor_device >> 16) & 0xFFFF;
+
+                    device_id = (vendor_device >> 16) & 0xFFFF;
                     printf("AHCI: Found controller at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
                            bus, slot, func, vendor, device_id);
-                    
+
                     g_ahci_controller.pci_bus = bus;
                     g_ahci_controller.pci_slot = slot;
                     g_ahci_controller.pci_func = func;
-                    
+
                     g_ahci_controller.abar = pci_read_config(bus, slot, func, 0x24) & 0xFFFFFFF0;
                     printf("AHCI: ABAR = 0x%016lX\n", g_ahci_controller.abar);
-                    
-                    uint64_t cmd = pci_read_config(bus, slot, func, 0x04);
+
+                    cmd = pci_read_config(bus, slot, func, 0x04);
                     cmd |= (1 << 1) | (1 << 2);
                     pci_write_config(bus, slot, func, 0x04, cmd);
-                    
+
                     return 0;
                 }
             }
         }
     }
-    
+
     printf("AHCI: No AHCI controller found\n");
     return -1;
 }
@@ -245,10 +270,6 @@ int ahci_port_init(ahci_port_t *port) {
     uint64_t cmd_list_virt;
     uint64_t fis_virt;
     uint64_t cmd_table_virt;
-    uint64_t dma_phys;
-    uint64_t dma_virt;
-    uint64_t dma_pages;
-    uint64_t j;
     int i;
 
     printf("AHCI: Initializing port %u...\n", port->port_num);
@@ -319,18 +340,6 @@ int ahci_port_init(ahci_port_t *port) {
     ahci_port_write(port, AHCI_PxSERR, 0xFFFFFFFF);
 
     ahci_start_cmd(port);
-
-    dma_pages = 16;
-    dma_phys = pfa_alloc_contiguous(dma_pages);
-    if (dma_phys) {
-        dma_virt = dma_phys + KERNEL_VMA;
-        for (j = 0; j < dma_pages; j++) {
-            vmm_map_page(dma_virt + j * PAGE_SIZE, dma_phys + j * PAGE_SIZE, 0x003);
-        }
-        port->dma_buf_phys = dma_phys;
-        port->dma_buf_virt = dma_virt;
-        port->dma_buf_pages = dma_pages;
-    }
 
     printf("AHCI: Port %u initialized (CLB=0x%016lX, FB=0x%016lX, CTBA=0x%016lX)\n",
            port->port_num, cmd_list_phys, fis_phys, cmd_table_phys);
@@ -434,7 +443,7 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
-    int use_persistent;
+    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -458,21 +467,14 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     }
     
     buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
-
-    if (use_persistent) {
-        buf_phys = port->dma_buf_phys;
-        buf_virt = port->dma_buf_virt;
-    } else {
-        buf_phys = pfa_alloc_contiguous(buf_pages);
-        if (!buf_phys) {
-            printf("AHCI: Failed to allocate DMA buffer\n");
-            return -1;
-        }
-        buf_virt = buf_phys + KERNEL_VMA;
-        for (uint64_t i = 0; i < buf_pages; i++) {
-            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-        }
+    buf_phys = pfa_alloc_contiguous(buf_pages);
+    if (!buf_phys) {
+        printf("AHCI: Failed to allocate DMA buffer\n");
+        return -1;
+    }
+    buf_virt = buf_phys + KERNEL_VMA;
+    for (i = 0; i < buf_pages; i++) {
+        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
     }
     
     cmd_header = &port->cmd_list[slot];
@@ -513,12 +515,10 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
         memcpy(buffer, (void *)buf_virt, count * AHCI_SECTOR_SIZE);
     }
 
-    if (!use_persistent) {
-        for (uint64_t i = 0; i < buf_pages; i++) {
-            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
-        }
-        pfa_free_contiguous(buf_phys, buf_pages);
+    for (i = 0; i < buf_pages; i++) {
+        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
     }
+    pfa_free_contiguous(buf_phys, buf_pages);
     
     return result;
 }
@@ -527,7 +527,7 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
-    int use_persistent;
+    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -551,21 +551,14 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     }
     
     buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
-
-    if (use_persistent) {
-        buf_phys = port->dma_buf_phys;
-        buf_virt = port->dma_buf_virt;
-    } else {
-        buf_phys = pfa_alloc_contiguous(buf_pages);
-        if (!buf_phys) {
-            printf("AHCI: Failed to allocate DMA buffer\n");
-            return -1;
-        }
-        buf_virt = buf_phys + KERNEL_VMA;
-        for (uint64_t i = 0; i < buf_pages; i++) {
-            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-        }
+    buf_phys = pfa_alloc_contiguous(buf_pages);
+    if (!buf_phys) {
+        printf("AHCI: Failed to allocate DMA buffer\n");
+        return -1;
+    }
+    buf_virt = buf_phys + KERNEL_VMA;
+    for (i = 0; i < buf_pages; i++) {
+        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
     }
     
     memcpy((void *)buf_virt, buffer, count * AHCI_SECTOR_SIZE);
@@ -604,12 +597,10 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     
     result = ahci_wait_cmd(port, slot, 5000);
     
-    if (!use_persistent) {
-        for (uint64_t i = 0; i < buf_pages; i++) {
-            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
-        }
-        pfa_free_contiguous(buf_phys, buf_pages);
+    for (i = 0; i < buf_pages; i++) {
+        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
     }
+    pfa_free_contiguous(buf_phys, buf_pages);
     
     return result;
 }
@@ -619,7 +610,7 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
     uint64_t buf_phys;
     uint64_t buf_virt;
     uint64_t byte_count;
-    int use_persistent;
+    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -642,19 +633,12 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
         return -1;
 
     buf_pages = (byte_count + PAGE_SIZE - 1) / PAGE_SIZE;
-    use_persistent = (port->dma_buf_phys && buf_pages <= port->dma_buf_pages);
-
-    if (use_persistent) {
-        buf_phys = port->dma_buf_phys;
-        buf_virt = port->dma_buf_virt;
-    } else {
-        buf_phys = pfa_alloc_contiguous(buf_pages);
-        if (!buf_phys)
-            return -1;
-        buf_virt = buf_phys + KERNEL_VMA;
-        for (uint64_t i = 0; i < buf_pages; i++)
-            vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-    }
+    buf_phys = pfa_alloc_contiguous(buf_pages);
+    if (!buf_phys)
+        return -1;
+    buf_virt = buf_phys + KERNEL_VMA;
+    for (i = 0; i < buf_pages; i++)
+        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
 
     cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
@@ -700,11 +684,9 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
     if (result == 0)
         memcpy(buffer, (void *)buf_virt, byte_count);
 
-    if (!use_persistent) {
-        for (uint64_t i = 0; i < buf_pages; i++)
-            vmm_unmap_page(buf_virt + i * PAGE_SIZE);
-        pfa_free_contiguous(buf_phys, buf_pages);
-    }
+    for (i = 0; i < buf_pages; i++)
+        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
+    pfa_free_contiguous(buf_phys, buf_pages);
 
     return result;
 }
@@ -810,8 +792,14 @@ void ahci_debug_info(void) {
 }
 
 int ahci_init(void) {
+    static int probed = 0;
+
     if (g_ahci_controller.initialized)
         return 0;
+
+    if (probed)
+        return -1;
+    probed = 1;
 
     printf("AHCI: Initializing AHCI driver...\n");
     

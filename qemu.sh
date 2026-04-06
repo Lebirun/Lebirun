@@ -60,6 +60,6 @@ $QEMU_CMD \
     -drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 \
     -device ide-hd,drive=sata0,bus=ahci0.0 \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
-    -device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+    -device e1000,netdev=net0 \
     -accel kvm \
     -boot d
