@@ -1,8 +1,8 @@
-#include <kernel/multithread.h>
-#include <kernel/task.h>
-#include <kernel/mem_map.h>
-#include <kernel/debug.h>
-#include <kernel/mutex.h>
+#include <lebirun/multithread.h>
+#include <lebirun/task.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/debug.h>
+#include <lebirun/mutex.h>
 #include <string.h>
 
 thread_t *current_thread = NULL;

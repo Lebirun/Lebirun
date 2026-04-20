@@ -1,7 +1,7 @@
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/debug.h>
-#include <kernel/smp.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/debug.h>
+#include <lebirun/smp.h>
 #include <string.h>
 
 extern uint64_t boot_pdpt_high[] __attribute__((aligned(4096)));

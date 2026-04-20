@@ -1,6 +1,6 @@
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/debug.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/debug.h>
 #include <string.h>
 
 extern uint64_t total_pages_managed;
@@ -199,8 +199,6 @@ static uint64_t find_free_frames(uint64_t num) {
     pfa_lock_acquire(&eflags);
 
     limit = total_pages_managed;
-    if (limit > 0x100000)
-        limit = 0x100000;
 
     start = last_alloc_hint;
     if (start < kernel_reserved_frames) start = kernel_reserved_frames;
@@ -405,8 +403,7 @@ void *pmm_alloc_page(void) {
     for (i = active_region; i < num_regions; i++) {
         region_end = memory_map[i].base + memory_map[i].length;
 
-        if (memory_map[i].base >= 0x100000000ULL)
-            continue;
+
 
         if (bump_current < memory_map[i].base) {
             bump_current = memory_map[i].base + 0x1000;
@@ -419,7 +416,7 @@ void *pmm_alloc_page(void) {
             idx_alloc = (uint64_t)(bump_current / PAGE_SIZE);
             scan_end = (uint64_t)(region_end / PAGE_SIZE);
             if (scan_end > total_pages_managed) scan_end = total_pages_managed;
-            if (scan_end > 0x100000) scan_end = 0x100000;
+
 
             scan_start = idx_alloc / 8;
             for (b = scan_start; b < (scan_end + 7) / 8; b++) {

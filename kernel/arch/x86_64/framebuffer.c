@@ -1,9 +1,9 @@
-#include <kernel/framebuffer.h>
-#include <kernel/mem_map.h>
-#include <kernel/drivers/fb/bga.h>
-#include <kernel/drivers/fb/vga_modes.h>
-#include <kernel/console.h>
-#include <kernel/io.h>
+#include <lebirun/framebuffer.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/drivers/fb/bga.h>
+#include <lebirun/drivers/fb/vga_modes.h>
+#include <lebirun/console.h>
+#include <lebirun/io.h>
 #include <string.h>
 
 static framebuffer_t fb;
@@ -515,7 +515,7 @@ void fb_set_font(psf_font_t *font) {
                 clear_height = (fb.height < hw_height) ? fb.height : hw_height;
                 if (clear_height > 0) fb_clear_region(0, clear_height);
             }
-            console_redraw_current();
+            console_force_redraw();
         } else if (screen_buffer && screen_buffer_rows > 0 && fb.cols > 0 && fb.rows > 0 && fb_graphical) {
             bytes_per_pixel = (uint64_t)(fb.bpp / 8u);
             clear_height = (fb.height < hw_height) ? fb.height : hw_height;
@@ -1200,7 +1200,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
     fb_clear_region(0, hw_height);
 
     if (console_is_initialized()) {
-        console_redraw_current();
+        console_force_redraw();
         return 0;
     }
 

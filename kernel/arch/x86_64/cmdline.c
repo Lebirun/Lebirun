@@ -1,6 +1,6 @@
-#include <kernel/cmdline.h>
-#include <kernel/console.h>
-#include <kernel/mem_map.h>
+#include <lebirun/cmdline.h>
+#include <lebirun/console.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 #include <stdio.h>
 

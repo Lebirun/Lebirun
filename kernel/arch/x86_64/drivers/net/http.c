@@ -1,11 +1,11 @@
-#include <kernel/drivers/net/http.h>
-#include <kernel/drivers/net/tcp.h>
-#include <kernel/drivers/net/tls.h>
-#include <kernel/drivers/net/dns.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/http.h>
+#include <lebirun/drivers/net/tcp.h>
+#include <lebirun/drivers/net/tls.h>
+#include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static int http_parse_url(const char *url, char *host, uint16_t *port, char *path, int *is_https) {

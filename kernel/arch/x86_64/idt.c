@@ -1,21 +1,21 @@
 #include <string.h>
 #include <stdint.h>
-#include <kernel/tty.h>
-#include <kernel/debug.h>
-#include <kernel/keyboard.h>
-#include <kernel/console.h>
-#include <kernel/task.h>
-#include <kernel/syscall.h>
-#include <kernel/io.h>
-#include <kernel/mem_map.h>
-#include <kernel/registers.h>
-#include <kernel/idt.h>
-#include <kernel/vring.h>
-#include <kernel/panic.h>
-#include <kernel/smp.h>
-#include <kernel/pit.h>
-#include <kernel/common.h>
-#include <kernel/kstack.h>
+#include <lebirun/tty.h>
+#include <lebirun/debug.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/console.h>
+#include <lebirun/task.h>
+#include <lebirun/syscall.h>
+#include <lebirun/io.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/registers.h>
+#include <lebirun/idt.h>
+#include <lebirun/vring.h>
+#include <lebirun/panic.h>
+#include <lebirun/smp.h>
+#include <lebirun/pit.h>
+#include <lebirun/common.h>
+#include <lebirun/kstack.h>
 
 extern void isr0(void);
 extern void isr1(void);

@@ -1,9 +1,9 @@
-#include <kernel/drivers/net/dhcp.h>
-#include <kernel/drivers/net/udp.h>
-#include <kernel/drivers/net/dns.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/drivers/net/dhcp.h>
+#include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 static dhcp_state_t g_dhcp_state;

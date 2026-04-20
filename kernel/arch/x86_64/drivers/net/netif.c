@@ -1,6 +1,6 @@
-#include <kernel/drivers/net/netif.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/drivers/net/netif.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 static netif_t *netif_list = NULL;

@@ -1,8 +1,8 @@
-#include <kernel/drivers/net/ethernet.h>
-#include <kernel/drivers/net/arp.h>
-#include <kernel/drivers/net/ipv4.h>
-#include <kernel/drivers/net/ipv6.h>
-#include <kernel/mem_map.h>
+#include <lebirun/drivers/net/ethernet.h>
+#include <lebirun/drivers/net/arp.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/ipv6.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 
 int eth_send(netif_t *netif, mac_addr_t dest, uint16_t ethertype, uint8_t *data, uint64_t len) {

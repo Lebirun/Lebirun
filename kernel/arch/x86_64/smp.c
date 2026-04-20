@@ -1,9 +1,9 @@
-#include <kernel/smp.h>
-#include <kernel/mem_map.h>
-#include <kernel/io.h>
-#include <kernel/common.h>
-#include <kernel/gdt.h>
-#include <kernel/idt.h>
+#include <lebirun/smp.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/io.h>
+#include <lebirun/common.h>
+#include <lebirun/gdt.h>
+#include <lebirun/idt.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>

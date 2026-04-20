@@ -1,12 +1,12 @@
-#include <kernel/mem_map.h>
-#include <kernel/task.h>
-#include <kernel/tty.h>
-#include <kernel/debug.h>
-#include <kernel/elf.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/task.h>
+#include <lebirun/tty.h>
+#include <lebirun/debug.h>
+#include <lebirun/elf.h>
 #include "launch_user.h"
-#include <kernel/console.h>
-#include <kernel/vfs.h>
-#include <kernel/rng.h>
+#include <lebirun/console.h>
+#include <lebirun/vfs.h>
+#include <lebirun/rng.h>
 #include <stdio.h>
 #include <string.h>
 

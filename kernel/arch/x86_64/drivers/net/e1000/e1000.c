@@ -1,10 +1,10 @@
-#include <kernel/drivers/net/e1000/e1000.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/drivers/net/ethernet.h>
-#include <kernel/io.h>
-#include <kernel/mem_map.h>
-#include <kernel/idt.h>
-#include <kernel/tty.h>
+#include <lebirun/drivers/net/e1000/e1000.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/drivers/net/ethernet.h>
+#include <lebirun/io.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/idt.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 static e1000_device_t g_e1000_dev;

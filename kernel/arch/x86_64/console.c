@@ -1,12 +1,12 @@
-#include <kernel/console.h>
-#include <kernel/framebuffer.h>
-#include <kernel/tty.h>
-#include <kernel/common.h>
-#include <kernel/spinlock.h>
-#include <kernel/vring.h>
-#include <kernel/task.h>
-#include <kernel/mem_map.h>
-#include <kernel/cmdline.h>
+#include <lebirun/console.h>
+#include <lebirun/framebuffer.h>
+#include <lebirun/tty.h>
+#include <lebirun/common.h>
+#include <lebirun/spinlock.h>
+#include <lebirun/vring.h>
+#include <lebirun/task.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/cmdline.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -508,9 +508,8 @@ static void console_redraw_prepare(int console_num) {
     }
 
     if (console_redraw_pending) {
-        spin_unlock(&console_lock);
-        console_irqrestore(flags);
-        return;
+        console_redraw_pending = 0;
+        console_switch_in_progress = 0;
     }
 
     con = &consoles[console_num];
@@ -674,6 +673,8 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
     int i;
     console_t *con;
     framebuffer_t *fb;
+    uint64_t shift;
+    uint64_t r;
 
     if (max_cols == 0) max_cols = 1;
     if (max_rows == 0) max_rows = 1;
@@ -687,6 +688,21 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
             con->cursor_x = max_cols - 1;
         }
         if (con->cursor_y >= max_rows) {
+            shift = con->cursor_y - (max_rows - 1);
+            if (shift > 0 && con->buffer && con->buffer_rows > shift) {
+                memmove(con->buffer[0], con->buffer[shift], (con->buffer_rows - shift) * CONSOLE_BUFFER_COLS);
+                if (con->color_buffer)
+                    memmove(con->color_buffer[0], con->color_buffer[shift], (con->buffer_rows - shift) * CONSOLE_BUFFER_COLS);
+                if (con->line_wrapped)
+                    memmove(con->line_wrapped, con->line_wrapped + shift, con->buffer_rows - shift);
+                for (r = con->buffer_rows - shift; r < con->buffer_rows; r++) {
+                    memset(con->buffer[r], ' ', CONSOLE_BUFFER_COLS);
+                    if (con->color_buffer)
+                        memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
+                    if (con->line_wrapped)
+                        con->line_wrapped[r] = 0;
+                }
+            }
             con->cursor_y = max_rows - 1;
         }
     }
@@ -915,7 +931,24 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     }
 
     if (con->cursor_x >= new_cols) con->cursor_x = new_cols - 1;
-    if (con->cursor_y >= new_rows) con->cursor_y = new_rows - 1;
+    if (con->cursor_y >= new_rows) {
+        uint64_t shift;
+        uint64_t r;
+        shift = con->cursor_y - (new_rows - 1);
+        if (shift > buf_rows) shift = buf_rows;
+        memmove(con->buffer, con->buffer + shift,
+                (buf_rows - shift) * CONSOLE_BUFFER_COLS);
+        memmove(con->color_buffer, con->color_buffer + shift,
+                (buf_rows - shift) * CONSOLE_BUFFER_COLS);
+        memmove(con->line_wrapped, con->line_wrapped + shift,
+                (buf_rows - shift) * sizeof(con->line_wrapped[0]));
+        for (r = buf_rows - shift; r < buf_rows; r++) {
+            memset(con->buffer[r], ' ', CONSOLE_BUFFER_COLS);
+            memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
+            con->line_wrapped[r] = 0;
+        }
+        con->cursor_y = new_rows - 1;
+    }
 
     kfree(new_color_buf);
     kfree(new_buf);
@@ -1021,6 +1054,13 @@ void console_redraw_current(void) {
         console_redraw_prepare(current_console);
         return;
     }
+    console_redraw_sync(current_console);
+}
+
+void console_force_redraw(void) {
+    if (!console_initialized) return;
+    console_switch_in_progress = 0;
+    console_redraw_pending = 0;
     console_redraw_sync(current_console);
 }
 

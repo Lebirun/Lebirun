@@ -1,4 +1,4 @@
-#include <kernel/drivers/fb/bga.h>
+#include <lebirun/drivers/fb/bga.h>
 #include <stdint.h>
 
 static inline void outw(uint16_t port, uint16_t value) {

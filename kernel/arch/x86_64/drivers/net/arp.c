@@ -1,10 +1,10 @@
-#include <kernel/drivers/net/arp.h>
-#include <kernel/drivers/net/ethernet.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/pit.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/arp.h>
+#include <lebirun/drivers/net/ethernet.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static arp_entry_t arp_cache[ARP_CACHE_SIZE];

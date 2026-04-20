@@ -1,10 +1,10 @@
-#include <kernel/drivers/net/tcp.h>
-#include <kernel/drivers/net/ipv4.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/pit.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/tcp.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static tcp_socket_t *tcp_sockets = NULL;

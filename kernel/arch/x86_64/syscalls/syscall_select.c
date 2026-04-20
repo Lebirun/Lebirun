@@ -1,5 +1,5 @@
 #include "syscall_defs.h"
-#include <kernel/pit.h>
+#include <lebirun/pit.h>
 
 typedef unsigned long fd_mask;
 #define NFDBITS (sizeof(fd_mask) * 8)

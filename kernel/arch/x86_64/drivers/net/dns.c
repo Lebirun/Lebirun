@@ -1,10 +1,10 @@
-#include <kernel/drivers/net/dns.h>
-#include <kernel/drivers/net/udp.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/pit.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static ipv4_addr_t g_dns_server;

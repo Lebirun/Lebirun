@@ -1,8 +1,8 @@
-#include <kernel/drivers/net/ipv6.h>
-#include <kernel/drivers/net/ethernet.h>
-#include <kernel/drivers/net/icmpv6.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/drivers/net/ipv6.h>
+#include <lebirun/drivers/net/ethernet.h>
+#include <lebirun/drivers/net/icmpv6.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 void ipv6_init(void) {

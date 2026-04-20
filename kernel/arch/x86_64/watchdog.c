@@ -1,8 +1,8 @@
-#include <kernel/watchdog.h>
-#include <kernel/pit.h>
-#include <kernel/task.h>
-#include <kernel/panic.h>
-#include <kernel/common.h>
+#include <lebirun/watchdog.h>
+#include <lebirun/pit.h>
+#include <lebirun/task.h>
+#include <lebirun/panic.h>
+#include <lebirun/common.h>
 #include <stdint.h>
 #include <stdbool.h>
 

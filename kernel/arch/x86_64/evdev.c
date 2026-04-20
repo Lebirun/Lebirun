@@ -1,8 +1,8 @@
-#include <kernel/evdev.h>
-#include <kernel/keyboard.h>
-#include <kernel/mouse.h>
-#include <kernel/pit.h>
-#include <kernel/debug.h>
+#include <lebirun/evdev.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/mouse.h>
+#include <lebirun/pit.h>
+#include <lebirun/debug.h>
 #include <string.h>
 
 static struct evdev_device evdev_kbd;

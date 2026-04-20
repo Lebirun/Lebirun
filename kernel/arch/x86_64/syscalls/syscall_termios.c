@@ -1,6 +1,6 @@
 #include "syscall_defs.h"
-#include <kernel/creds.h>
-#include <kernel/pty.h>
+#include <lebirun/creds.h>
+#include <lebirun/pty.h>
 
 static int kernel_ptr_mapped(uint64_t addr) {
     if (addr < KERNEL_VMA) return 0;

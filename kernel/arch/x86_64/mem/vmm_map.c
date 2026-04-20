@@ -1,6 +1,6 @@
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/debug.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/debug.h>
 #include <string.h>
 
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);

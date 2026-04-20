@@ -1,7 +1,7 @@
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/debug.h>
-#include <kernel/spinlock.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/debug.h>
+#include <lebirun/spinlock.h>
 #include <string.h>
 
 extern uint64_t boot_pml4[] __attribute__((aligned(4096)));

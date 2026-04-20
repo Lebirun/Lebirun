@@ -2,13 +2,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <kernel/tty.h>
-#include <kernel/framebuffer.h>
-#include <kernel/psf.h>
-#include <kernel/console.h>
-#include <kernel/io.h>
-#include <kernel/common.h>
-#include <kernel/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/framebuffer.h>
+#include <lebirun/psf.h>
+#include <lebirun/console.h>
+#include <lebirun/io.h>
+#include <lebirun/common.h>
+#include <lebirun/mem_map.h>
 
 #include "vga.h"
 

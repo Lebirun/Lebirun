@@ -1,7 +1,7 @@
-#include <kernel/mem_map.h>
-#include <kernel/multiboot2.h>
-#include <kernel/common.h>
-#include <kernel/debug.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/multiboot2.h>
+#include <lebirun/common.h>
+#include <lebirun/debug.h>
 #include <string.h>
 
 extern char _kernel_end[];

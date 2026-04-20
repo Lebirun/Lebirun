@@ -1,6 +1,6 @@
-#include <kernel/partition.h>
-#include <kernel/drivers/sata/ahci.h>
-#include <kernel/mem_map.h>
+#include <lebirun/partition.h>
+#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 #include <stdio.h>
 

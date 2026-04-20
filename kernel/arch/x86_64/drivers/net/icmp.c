@@ -1,11 +1,11 @@
-#include <kernel/drivers/net/icmp.h>
-#include <kernel/drivers/net/ipv4.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/pit.h>
-#include <kernel/keyboard.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/icmp.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static ping_state_t g_ping_state;

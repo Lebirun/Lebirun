@@ -1,6 +1,6 @@
 #include "syscall_defs.h"
-#include <kernel/task.h>
-#include <kernel/mutex.h>
+#include <lebirun/task.h>
+#include <lebirun/mutex.h>
 
 #define EPOLL_INIT_COUNT 8
 #define EPOLL_INIT_EVENTS 32

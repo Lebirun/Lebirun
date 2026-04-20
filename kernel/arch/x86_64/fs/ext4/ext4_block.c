@@ -1,7 +1,7 @@
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/drivers/sata/ahci.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 static uint32_t cache_tick_counter = 0;

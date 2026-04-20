@@ -1,7 +1,7 @@
 #include "syscall_defs.h"
-#include <kernel/power.h>
-#include <kernel/panic.h>
-#include <kernel/watchdog.h>
+#include <lebirun/power.h>
+#include <lebirun/panic.h>
+#include <lebirun/watchdog.h>
 #include <string.h>
 
 #define PANIC_CMD_CUSTOM  0

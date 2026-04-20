@@ -1,11 +1,11 @@
 #include <stdint.h>
 #include <stdbool.h>
-#include <kernel/tty.h>
-#include <kernel/idt.h>
-#include <kernel/common.h>
-#include <kernel/io.h>
-#include <kernel/pit.h>
-#include <kernel/spinlock.h>
+#include <lebirun/tty.h>
+#include <lebirun/idt.h>
+#include <lebirun/common.h>
+#include <lebirun/io.h>
+#include <lebirun/pit.h>
+#include <lebirun/spinlock.h>
 
 #define PIT_BASE_FREQ       1193182
 #define PIT_CHANNEL0_DATA   0x40

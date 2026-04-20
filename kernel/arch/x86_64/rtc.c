@@ -1,6 +1,6 @@
 #include <stdint.h>
-#include <kernel/io.h>
-#include <kernel/rtc.h>
+#include <lebirun/io.h>
+#include <lebirun/rtc.h>
 
 #define CMOS_ADDRESS 0x70
 #define CMOS_DATA    0x71

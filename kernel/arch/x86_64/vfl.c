@@ -1,8 +1,8 @@
-#include <kernel/vfl.h>
-#include <kernel/vfs.h>
-#include <kernel/mem_map.h>
-#include <kernel/task.h>
-#include <kernel/tty.h>
+#include <lebirun/vfl.h>
+#include <lebirun/vfs.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/task.h>
+#include <lebirun/tty.h>
 #include <string.h>
 #include <stdio.h>
 

@@ -1,8 +1,8 @@
-#include <kernel/io.h>
-#include <kernel/mouse.h>
-#include <kernel/idt.h>
-#include <kernel/debug.h>
-#include <kernel/task.h>
+#include <lebirun/io.h>
+#include <lebirun/mouse.h>
+#include <lebirun/idt.h>
+#include <lebirun/debug.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 #define PS2_DATA_PORT    0x60

@@ -1,4 +1,4 @@
-#include <kernel/mem_map.h>
+#include <lebirun/mem_map.h>
 #include <stdint.h>
 
 mem_region_t memory_map[MAX_REGIONS];

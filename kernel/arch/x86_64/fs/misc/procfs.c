@@ -1,11 +1,11 @@
-#include <kernel/mem_map.h>
-#include <kernel/vfs.h>
-#include <kernel/task.h>
-#include <kernel/about.h>
-#include <kernel/cmdline.h>
-#include <kernel/drivers/net/e1000/e1000.h>
-#include <kernel/rtc.h>
-#include <kernel/vring.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/vfs.h>
+#include <lebirun/task.h>
+#include <lebirun/about.h>
+#include <lebirun/cmdline.h>
+#include <lebirun/drivers/net/e1000/e1000.h>
+#include <lebirun/rtc.h>
+#include <lebirun/vring.h>
 #include <string.h>
 #include <stdio.h>
 

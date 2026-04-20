@@ -1,7 +1,7 @@
 #include <stddef.h>
-#include <kernel/mutex.h>
-#include <kernel/task.h>
-#include <kernel/common.h>
+#include <lebirun/mutex.h>
+#include <lebirun/task.h>
+#include <lebirun/common.h>
 
 void mutex_init(mutex_t* m) {
     m->locked = 0;

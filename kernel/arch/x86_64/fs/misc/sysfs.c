@@ -1,5 +1,5 @@
-#include <kernel/vfs.h>
-#include <kernel/pit.h>
+#include <lebirun/vfs.h>
+#include <lebirun/pit.h>
 #include <string.h>
 #include <stdio.h>
 

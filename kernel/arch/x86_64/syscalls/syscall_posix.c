@@ -1,12 +1,12 @@
 #include "syscall_defs.h"
-#include <kernel/pit.h>
-#include <kernel/debug.h>
-#include <kernel/pty.h>
-#include <kernel/common.h>
-#include <kernel/ramfs.h>
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/drivers/sata/ahci.h>
-#include <kernel/fs/ext4/ext4.h>
+#include <lebirun/pit.h>
+#include <lebirun/debug.h>
+#include <lebirun/pty.h>
+#include <lebirun/common.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/fs/ext4/ext4.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);

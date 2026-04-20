@@ -1,6 +1,6 @@
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 extern int ext4_load_group_descs(ext4_fs_t *fs);

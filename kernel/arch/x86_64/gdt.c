@@ -1,7 +1,7 @@
-#include <kernel/gdt.h>
-#include <kernel/tty.h>
-#include <kernel/kstack.h>
-#include <kernel/mem_map.h>
+#include <lebirun/gdt.h>
+#include <lebirun/tty.h>
+#include <lebirun/kstack.h>
+#include <lebirun/mem_map.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>

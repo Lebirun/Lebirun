@@ -1,5 +1,5 @@
 #include "syscall_defs.h"
-#include <kernel/creds.h>
+#include <lebirun/creds.h>
 
 typedef struct {
     uint64_t uid;

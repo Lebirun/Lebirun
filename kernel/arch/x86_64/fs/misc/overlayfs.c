@@ -1,8 +1,8 @@
-#include <kernel/overlayfs.h>
-#include <kernel/vfs.h>
-#include <kernel/ramfs.h>
-#include <kernel/mem_map.h>
-#include <kernel/debug.h>
+#include <lebirun/overlayfs.h>
+#include <lebirun/vfs.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 

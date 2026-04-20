@@ -1,10 +1,10 @@
-#include <kernel/initrd.h>
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/vfs.h>
-#include <kernel/ramfs.h>
-#include <kernel/squashfs.h>
-#include <kernel/debug.h>
+#include <lebirun/initrd.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/vfs.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/squashfs.h>
+#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>

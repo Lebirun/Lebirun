@@ -1,8 +1,8 @@
-#include <kernel/pty.h>
-#include <kernel/tty.h>
-#include <kernel/task.h>
-#include <kernel/mutex.h>
-#include <kernel/mem_map.h>
+#include <lebirun/pty.h>
+#include <lebirun/tty.h>
+#include <lebirun/task.h>
+#include <lebirun/mutex.h>
+#include <lebirun/mem_map.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

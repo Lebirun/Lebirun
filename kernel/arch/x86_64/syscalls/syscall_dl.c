@@ -1,6 +1,6 @@
 #include "syscall_defs.h"
-#include <kernel/elf.h>
-#include <kernel/vfs.h>
+#include <lebirun/elf.h>
+#include <lebirun/vfs.h>
 
 extern void *syscall_table[];
 

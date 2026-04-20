@@ -1,4 +1,4 @@
-#include <kernel/about.h>
+#include <lebirun/about.h>
 #include <string.h>
 
 const char *kernel_get_version(void) {

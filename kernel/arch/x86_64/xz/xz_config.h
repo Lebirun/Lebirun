@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <kernel/mem_map.h>
+#include <lebirun/mem_map.h>
 
 #include "xz.h"
 

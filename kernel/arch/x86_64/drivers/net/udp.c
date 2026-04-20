@@ -1,12 +1,12 @@
-#include <kernel/drivers/net/udp.h>
-#include <kernel/drivers/net/ipv4.h>
-#include <kernel/drivers/net/dhcp.h>
-#include <kernel/drivers/net/dns.h>
-#include <kernel/drivers/net/net.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/pit.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/dhcp.h>
+#include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static udp_socket_t *udp_sockets = NULL;

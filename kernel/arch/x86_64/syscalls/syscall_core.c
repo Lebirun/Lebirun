@@ -1,7 +1,7 @@
 #include "syscall_defs.h"
-#include <kernel/creds.h>
-#include <kernel/debug.h>
-#include <kernel/mem_map.h>
+#include <lebirun/creds.h>
+#include <lebirun/debug.h>
+#include <lebirun/mem_map.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);

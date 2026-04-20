@@ -1,11 +1,11 @@
-#include <kernel/vfs.h>
-#include <kernel/tty.h>
-#include <kernel/mutex.h>
-#include <kernel/task.h>
-#include <kernel/debug.h>
-#include <kernel/mem_map.h>
-#include <kernel/ramfs.h>
-#include <kernel/drivers/sata/ahci.h>
+#include <lebirun/vfs.h>
+#include <lebirun/tty.h>
+#include <lebirun/mutex.h>
+#include <lebirun/task.h>
+#include <lebirun/debug.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/drivers/sata/ahci.h>
 #include <string.h>
 #include <stddef.h>
 

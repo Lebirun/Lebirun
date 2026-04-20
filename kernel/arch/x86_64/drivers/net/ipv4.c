@@ -1,12 +1,12 @@
-#include <kernel/drivers/net/ipv4.h>
-#include <kernel/drivers/net/ethernet.h>
-#include <kernel/drivers/net/arp.h>
-#include <kernel/drivers/net/icmp.h>
-#include <kernel/drivers/net/udp.h>
-#include <kernel/drivers/net/tcp.h>
-#include <kernel/drivers/net/dhcp.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/ethernet.h>
+#include <lebirun/drivers/net/arp.h>
+#include <lebirun/drivers/net/icmp.h>
+#include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/tcp.h>
+#include <lebirun/drivers/net/dhcp.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 static uint16_t ip_id_counter = 1;

@@ -1,7 +1,7 @@
-#include <kernel/elf.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/debug.h>
+#include <lebirun/elf.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 

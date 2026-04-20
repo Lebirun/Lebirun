@@ -1,5 +1,5 @@
 #include "syscall_defs.h"
-#include <kernel/crypto.h>
+#include <lebirun/crypto.h>
 
 extern void *syscall_table[];
 

@@ -103,17 +103,11 @@ $(ARCHDIR)/crtn.o
 .SUFFIXES: .o .c .S
 
 NM:=$(HOST)-nm
-KSYM_AUTO_C=$(ARCHDIR)/ksym_auto.c
-KSYM_AUTO_O=$(ARCHDIR)/ksym_auto.o
-KSYM_STUB_O=$(ARCHDIR)/ksym_stub.o
 
 all: lebirun.kernel
 
-lebirun.kernel: $(OBJS) $(KSYM_STUB_O) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
-	$(Q)$(CC) -T $(ARCHDIR)/linker.ld -o lebirun_pass1.elf $(LINK_LIST) $(KSYM_STUB_O)
-	$(Q)./gen_ksyms.sh lebirun_pass1.elf $(KSYM_AUTO_C) $(NM)
-	$(Q)$(CC) -MD -c $(KSYM_AUTO_C) -o $(KSYM_AUTO_O) -std=gnu11 $(CFLAGS) $(CPPFLAGS)
-	$(MSG_LD)$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST) $(KSYM_AUTO_O)
+lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
+	$(MSG_LD)$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	$(Q)cp $@ lebirun_debug.kernel
 	$(MSG_STRIP)$(OBJCOPY) --strip-all $@
 	$(Q)grub-file --is-x86-multiboot2 lebirun.kernel
@@ -155,8 +149,7 @@ $(USER_SHELL_OBJ): $(USER_SHELL_BIN)
 		$< $@
 
 clean:
-	rm -f lebirun.kernel lebirun_debug.kernel lebirun_pass1.elf
-	rm -f $(KSYM_AUTO_C) $(KSYM_AUTO_O) $(KSYM_STUB_O)
+	rm -f lebirun.kernel lebirun_debug.kernel
 	rm -f $(USER_SHELL_OBJ)
 	rm -f $(USER_SHELL_BIN)
 	rm -f $(UNIFONT_OBJ)

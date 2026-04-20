@@ -1,7 +1,7 @@
 #include <stdint.h>
-#include <kernel/io.h>
-#include <kernel/power.h>
-#include <kernel/watchdog.h>
+#include <lebirun/io.h>
+#include <lebirun/power.h>
+#include <lebirun/watchdog.h>
 
 static inline void outw(uint16_t port, uint16_t value) {
     __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));

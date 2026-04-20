@@ -1,8 +1,8 @@
 #include "syscall_defs.h"
-#include <kernel/lke.h>
-#include <kernel/about.h>
-#include <kernel/rng.h>
-#include <kernel/pty.h>
+#include <lebirun/lke.h>
+#include <lebirun/about.h>
+#include <lebirun/rng.h>
+#include <lebirun/pty.h>
 
 extern task_t *current_task;
 extern void *syscall_table[];

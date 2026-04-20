@@ -1,9 +1,9 @@
 #include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/wolfcrypt/types.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
-#include <kernel/mem_map.h>
-#include <kernel/pit.h>
-#include <kernel/rtc.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/pit.h>
+#include <lebirun/rtc.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>

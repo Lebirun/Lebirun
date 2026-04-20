@@ -1,8 +1,8 @@
 #include "syscall_defs.h"
-#include <kernel/ramfs.h>
-#include <kernel/squashfs.h>
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/mem_map.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/squashfs.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/mem_map.h>
 
 static int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t mode;

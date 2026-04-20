@@ -1,7 +1,7 @@
-#include <kernel/kstack.h>
-#include <kernel/mem_map.h>
-#include <kernel/panic.h>
-#include <kernel/common.h>
+#include <lebirun/kstack.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/panic.h>
+#include <lebirun/common.h>
 #include <string.h>
 #include <stdio.h>
 

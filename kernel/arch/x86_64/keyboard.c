@@ -1,12 +1,12 @@
-#include <kernel/io.h>
-#include <kernel/tty.h>
-#include <kernel/debug.h>
-#include <kernel/keyboard.h>
-#include <kernel/task.h>
-#include <kernel/console.h>
-#include <kernel/cmdline.h>
-#include <kernel/task.h>
-#include <kernel/mem_map.h>
+#include <lebirun/io.h>
+#include <lebirun/tty.h>
+#include <lebirun/debug.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/task.h>
+#include <lebirun/console.h>
+#include <lebirun/cmdline.h>
+#include <lebirun/task.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 
 #define BUFFER_SIZE 128

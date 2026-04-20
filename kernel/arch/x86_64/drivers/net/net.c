@@ -1,8 +1,8 @@
-#include <kernel/drivers/net/net.h>
-#include <kernel/drivers/net/e1000/e1000.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
-#include <kernel/task.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/drivers/net/e1000/e1000.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 const mac_addr_t MAC_BROADCAST = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};

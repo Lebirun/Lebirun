@@ -1,6 +1,6 @@
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);

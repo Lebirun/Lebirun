@@ -1,9 +1,9 @@
-#include <kernel/rng.h>
-#include <kernel/crypto.h>
-#include <kernel/spinlock.h>
-#include <kernel/pit.h>
-#include <kernel/rtc.h>
-#include <kernel/io.h>
+#include <lebirun/rng.h>
+#include <lebirun/crypto.h>
+#include <lebirun/spinlock.h>
+#include <lebirun/pit.h>
+#include <lebirun/rtc.h>
+#include <lebirun/io.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

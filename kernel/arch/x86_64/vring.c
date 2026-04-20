@@ -1,12 +1,12 @@
-#include <kernel/vring.h>
-#include <kernel/console.h>
-#include <kernel/tty.h>
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/task.h>
-#include <kernel/io.h>
-#include <kernel/panic.h>
-#include <kernel/spinlock.h>
+#include <lebirun/vring.h>
+#include <lebirun/console.h>
+#include <lebirun/tty.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/task.h>
+#include <lebirun/io.h>
+#include <lebirun/panic.h>
+#include <lebirun/spinlock.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -44,6 +44,11 @@ static char *klog_persist_buf;
 static volatile int klog_persist_pos = 0;
 static int klog_persist_cap = 0;
 
+#define KLOG_EARLY_SZ 4096
+static char klog_early_buf[KLOG_EARLY_SZ];
+static volatile int klog_early_pos = 0;
+static volatile int klog_early_done = 0;
+
 #define KPRINT_MAX_ITEMS 64
 #define KPRINT_MAX_LEN   128
 
@@ -69,6 +74,7 @@ static volatile uint64_t serial_head = 0;
 static volatile uint64_t serial_tail = 0;
 static volatile uint64_t serial_count = 0;
 static spinlock_t serial_lock = { .locked = 0 };
+static spinlock_t klog_persist_lock = { .locked = 0 };
 
 static size_t klog_strnlen(const char *s, size_t maxlen) {
     size_t n = 0;
@@ -183,10 +189,12 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     klog_item_t *it;
     int ppos;
     uint64_t avail;
+    uint64_t ring_len;
 
     if (!buf || len == 0) return 0;
-    if (len >= KLOG_MAX_LEN) len = KLOG_MAX_LEN - 1;
 
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
     if (klog_persist_buf) {
         int need;
         ppos = klog_persist_pos;
@@ -209,7 +217,20 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
             klog_persist_pos = ppos + (int)len;
             klog_persist_buf[klog_persist_pos] = '\0';
         }
+    } else if (!klog_early_done) {
+        int eavail;
+        eavail = KLOG_EARLY_SZ - klog_early_pos - 1;
+        if ((int)len <= eavail && eavail > 0) {
+            memcpy(klog_early_buf + klog_early_pos, buf, len);
+            klog_early_pos += (int)len;
+            klog_early_buf[klog_early_pos] = '\0';
+        }
     }
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
+
+    ring_len = len;
+    if (ring_len >= KLOG_MAX_LEN) ring_len = KLOG_MAX_LEN - 1;
 
     if (!klog_ring) return (int)len;
 
@@ -221,9 +242,9 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     }
     it = &klog_ring[klog_tail];
     it->level = level;
-    it->len = (uint16_t)len;
-    memcpy(it->msg, buf, len);
-    it->msg[len] = '\0';
+    it->len = (uint16_t)ring_len;
+    memcpy(it->msg, buf, ring_len);
+    it->msg[ring_len] = '\0';
     klog_tail = (klog_tail + 1) % KLOG_MAX_ITEMS;
     klog_count++;
     klog_irqrestore(flags);
@@ -399,7 +420,16 @@ void vring_init(void) {
     if (klog_persist_buf) {
         klog_persist_cap = 4096;
         klog_persist_buf[0] = '\0';
+        if (klog_early_pos > 0) {
+            int copy_len;
+            copy_len = klog_early_pos;
+            if (copy_len >= klog_persist_cap) copy_len = klog_persist_cap - 1;
+            memcpy(klog_persist_buf, klog_early_buf, copy_len);
+            klog_persist_pos = copy_len;
+            klog_persist_buf[copy_len] = '\0';
+        }
     }
+    klog_early_done = 1;
 
     if (klog_ring)
         memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));

@@ -1,5 +1,5 @@
-#include <kernel/psf.h>
-#include <kernel/mem_map.h>
+#include <lebirun/psf.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 #include <stdio.h>
 

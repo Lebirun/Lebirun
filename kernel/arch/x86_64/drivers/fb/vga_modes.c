@@ -1,5 +1,5 @@
-#include <kernel/drivers/fb/vga_modes.h>
-#include <kernel/mem_map.h>
+#include <lebirun/drivers/fb/vga_modes.h>
+#include <lebirun/mem_map.h>
 #include <stdint.h>
 #include <string.h>
 

@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
-#include <kernel/mem_map.h>
+#include <lebirun/mem_map.h>
 #include "xz.h"
 
 static int xz_inited;

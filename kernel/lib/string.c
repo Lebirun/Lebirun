@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <limits.h>
 
-#include <kernel/vring.h>
-#include <kernel/console.h>
-#include <kernel/pit.h>
+#include <lebirun/vring.h>
+#include <lebirun/console.h>
+#include <lebirun/pit.h>
 
 extern void terminal_putchar(char c);
 

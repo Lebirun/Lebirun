@@ -1,31 +1,50 @@
-#include <kernel/lke.h>
-#include <kernel/elf.h>
-#include <kernel/vfs.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/lke.h>
+#include <lebirun/elf.h>
+#include <lebirun/vfs.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
+#include <lebirun/pit.h>
 #include <string.h>
 
 #define R_X86_64_32    10
 #define R_X86_64_32S   11
 #define R_X86_64_PLT32  4
 
+#define KSYM_TABLE_INIT 64
+
 static lke_module_t *modules;
 static int lke_capacity = 0;
 static int lke_count = 0;
 
-typedef struct {
-    const char *name;
-    uint64_t addr;
-} lke_ksym_t;
+static lke_ksym_t *ksym_table;
+static int ksym_count = 0;
+static int ksym_capacity = 0;
 
-extern const lke_ksym_t ksym_auto_table[];
-extern const int ksym_auto_count;
+void lke_register_symbol(const char *name, void *addr) {
+    lke_ksym_t *new_tab;
+    int new_cap;
+
+    if (ksym_count >= ksym_capacity) {
+        new_cap = ksym_capacity == 0 ? KSYM_TABLE_INIT : ksym_capacity * 2;
+        new_tab = (lke_ksym_t *)kmalloc(new_cap * sizeof(lke_ksym_t));
+        if (!new_tab) return;
+        if (ksym_table) {
+            memcpy(new_tab, ksym_table, ksym_count * sizeof(lke_ksym_t));
+            kfree(ksym_table);
+        }
+        ksym_table = new_tab;
+        ksym_capacity = new_cap;
+    }
+    ksym_table[ksym_count].name = name;
+    ksym_table[ksym_count].addr = (uint64_t)addr;
+    ksym_count++;
+}
 
 static uint64_t ksym_lookup(const char *name) {
     int i;
-    for (i = 0; i < ksym_auto_count; i++) {
-        if (strcmp(ksym_auto_table[i].name, name) == 0)
-            return ksym_auto_table[i].addr;
+    for (i = 0; i < ksym_count; i++) {
+        if (strcmp(ksym_table[i].name, name) == 0)
+            return ksym_table[i].addr;
     }
     return 0;
 }
@@ -34,6 +53,25 @@ void lke_init(void) {
     modules = NULL;
     lke_capacity = 0;
     lke_count = 0;
+    ksym_table = NULL;
+    ksym_count = 0;
+    ksym_capacity = 0;
+
+    lke_register_symbol("kmalloc", kmalloc);
+    lke_register_symbol("kmalloc_aligned", kmalloc_aligned);
+    lke_register_symbol("kfree", kfree);
+    lke_register_symbol("printf", printf);
+    lke_register_symbol("memcpy", memcpy);
+    lke_register_symbol("memset", memset);
+    lke_register_symbol("strcmp", strcmp);
+    lke_register_symbol("strlen", strlen);
+    lke_register_symbol("strncpy", strncpy);
+    lke_register_symbol("vfs_namei", vfs_namei);
+    lke_register_symbol("vfs_read", vfs_read);
+    lke_register_symbol("vfs_write", vfs_write);
+    lke_register_symbol("vfs_release", vfs_release);
+    lke_register_symbol("pit_get_ticks64", pit_get_ticks64);
+    lke_register_symbol("pit_get_uptime_ms", pit_get_uptime_ms);
 }
 
 static int lke_find_slot(void) {

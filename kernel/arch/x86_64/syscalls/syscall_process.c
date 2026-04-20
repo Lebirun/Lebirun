@@ -1,5 +1,5 @@
 #include "syscall_defs.h"
-#include <kernel/common.h>
+#include <lebirun/common.h>
 #include <stdarg.h>
 
 #define WNOHANG   1

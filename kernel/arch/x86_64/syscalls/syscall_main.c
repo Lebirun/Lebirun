@@ -1,7 +1,7 @@
 #include "syscall_defs.h"
-#include <kernel/gdt.h>
-#include <kernel/task.h>
-#include <kernel/debug.h>
+#include <lebirun/gdt.h>
+#include <lebirun/task.h>
+#include <lebirun/debug.h>
 #include <stdio.h>
 
 extern task_t* current_task;

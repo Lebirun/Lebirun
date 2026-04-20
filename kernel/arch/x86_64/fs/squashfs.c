@@ -1,8 +1,8 @@
-#include <kernel/squashfs.h>
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/vfs.h>
-#include <kernel/debug.h>
+#include <lebirun/squashfs.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/vfs.h>
+#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 

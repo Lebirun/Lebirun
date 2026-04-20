@@ -1,9 +1,9 @@
-#include <kernel/drivers/sata/ahci.h>
-#include <kernel/io.h>
-#include <kernel/mem_map.h>
-#include <kernel/common.h>
-#include <kernel/tty.h>
-#include <kernel/idt.h>
+#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/io.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/common.h>
+#include <lebirun/tty.h>
+#include <lebirun/idt.h>
 #include <string.h>
 #include <stddef.h>
 

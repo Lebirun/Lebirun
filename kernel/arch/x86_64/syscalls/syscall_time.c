@@ -1,5 +1,5 @@
 #include "syscall_defs.h"
-#include <kernel/rtc.h>
+#include <lebirun/rtc.h>
 
 static uint64_t sys_boot_time = 0;
 static uint64_t boot_tick_count = 0;

@@ -1,10 +1,10 @@
-#include <kernel/ramfs.h>
-#include <kernel/vfs.h>
-#include <kernel/common.h>
-#include <kernel/mem_map.h>
-#include <kernel/idt.h>
-#include <kernel/debug.h>
-#include <kernel/task.h>
+#include <lebirun/ramfs.h>
+#include <lebirun/vfs.h>
+#include <lebirun/common.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/idt.h>
+#include <lebirun/debug.h>
+#include <lebirun/task.h>
 #include <string.h>
 #include <stdio.h>
 

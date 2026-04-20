@@ -1,7 +1,7 @@
-#include <kernel/fs/ext4/ext4.h>
-#include <kernel/drivers/sata/ahci.h>
-#include <kernel/mem_map.h>
-#include <kernel/tty.h>
+#include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/tty.h>
 #include <string.h>
 
 int ext4_read_superblock(ext4_fs_t *fs) {
