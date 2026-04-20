@@ -84,15 +84,18 @@ static int read_file_data(const char *path, uint8_t **out_data, uint64_t *out_si
     
     uint64_t size = node->length;
     if (size == 0) {
+        vfs_release(node);
         return -2;
     }
     
     uint8_t *data = (uint8_t *)kmalloc(size);
     if (!data) {
+        vfs_release(node);
         return -3;
     }
     
     uint64_t read = vfs_read(node, 0, size, data);
+    vfs_release(node);
     if (read != size) {
         kfree(data);
         return -4;

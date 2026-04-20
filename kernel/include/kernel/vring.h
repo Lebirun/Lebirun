@@ -101,7 +101,10 @@ bool kproc_is_negative_pid(int32_t pid);
 kproc_t *kproc_find_by_pid(int32_t pid);
 
 int klog_printf(int level, const char *fmt, ...);
+int klog_enqueue_raw(const char *buf, size_t len);
 int klog_drain_console0(uint64_t max_items);
+int klog_snapshot(char *buf, int bufsz);
+int klog_snapshot_range(char *buf, int offset, int count);
 
 int kprint_write(int console_id, const char *buf, size_t len);
 void kprint_serial_async(const char *buf, size_t len);

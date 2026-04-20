@@ -131,6 +131,7 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
         if (!parent) return -ENOENT;
 
         ret = vfs_create(parent, filename, VFS_FILE);
+        vfs_release(parent);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
         } else if (ret == 0) {
@@ -381,9 +382,14 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
     {
         int perm_ret;
         perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) return perm_ret;
+        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     }
-    return vfs_create(parent, filename, perms);
+    {
+        int r;
+        r = vfs_create(parent, filename, perms);
+        vfs_release(parent);
+        return r;
+    }
 }
 
 static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
@@ -432,9 +438,14 @@ static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
     {
         int perm_ret;
         perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) return perm_ret;
+        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     }
-    return vfs_mkdir(parent, dirname, perms);
+    {
+        int r;
+        r = vfs_mkdir(parent, dirname, perms);
+        vfs_release(parent);
+        return r;
+    }
 }
 
 static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
@@ -481,9 +492,14 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     {
         int perm_ret;
         perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) return perm_ret;
+        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     }
-    return vfs_unlink(parent, filename);
+    {
+        int r;
+        r = vfs_unlink(parent, filename);
+        vfs_release(parent);
+        return r;
+    }
 }
 
 struct statfs_kernel {
@@ -722,6 +738,7 @@ static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype
     mp_check = vfs_namei(target);
     if (!mp_check)
         return -ENOENT;
+    vfs_release(mp_check);
 
     return vfs_mount_flags(source, target, fstype, mnt_flags);
 }

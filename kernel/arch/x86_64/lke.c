@@ -132,15 +132,17 @@ int lke_load(const char *path) {
     if (!node) return -3;
 
     data_size = node->length;
-    if (data_size < sizeof(Elf64_Ehdr)) return -4;
+    if (data_size < sizeof(Elf64_Ehdr)) { vfs_release(node); return -4; }
 
     data = (uint8_t *)kmalloc(data_size);
-    if (!data) return -5;
+    if (!data) { vfs_release(node); return -5; }
 
     if ((uint64_t)vfs_read(node, 0, data_size, data) != data_size) {
+        vfs_release(node);
         kfree(data);
         return -6;
     }
+    vfs_release(node);
 
     ehdr = (const Elf64_Ehdr *)data;
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
@@ -381,8 +383,10 @@ void lke_autoload(void) {
     int rc;
 
     node = vfs_namei("/etc/lke.autostart");
-    if (!node || node->length == 0)
+    if (!node || node->length == 0) {
+        vfs_release(node);
         return;
+    }
 
     llen = 0;
     off = 0;
@@ -420,4 +424,5 @@ void lke_autoload(void) {
                 printf("LKE: autoload failed: %s (%d)\n", line, rc);
         }
     }
+    vfs_release(node);
 }

@@ -520,6 +520,7 @@ int printf(const char* format, ...) {
 	}
 
 	kprint(buf, (size_t)len);
+	klog_enqueue_raw(buf, (size_t)len);
 	kprint_at_line_start = (len > 0 && buf[len - 1] == '\n') ? 1 : 0;
 	return len;
 }

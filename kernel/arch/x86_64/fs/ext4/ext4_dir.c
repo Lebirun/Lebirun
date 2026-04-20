@@ -16,7 +16,7 @@ int ext4_dir_lookup(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t 
         return -1;
     }
 
-    if ((ic->inode.i_mode & EXT4_S_IFDIR) != EXT4_S_IFDIR) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFDIR) {
         ext4_release_inode(ic);
         return -1;
     }
@@ -74,7 +74,7 @@ int ext4_dir_iterate(ext4_fs_t *fs, uint32_t dir_ino, int (*callback)(ext4_dir_e
         return -1;
     }
 
-    if ((ic->inode.i_mode & EXT4_S_IFDIR) != EXT4_S_IFDIR) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFDIR) {
         ext4_release_inode(ic);
         return -1;
     }
@@ -175,7 +175,7 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
         return -1;
     }
 
-    if ((ic->inode.i_mode & EXT4_S_IFDIR) != EXT4_S_IFDIR) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFDIR) {
         ext4_release_inode(ic);
         return -1;
     }
@@ -310,7 +310,7 @@ int ext4_dir_remove_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name) {
         return -1;
     }
 
-    if ((ic->inode.i_mode & EXT4_S_IFDIR) != EXT4_S_IFDIR) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFDIR) {
         ext4_release_inode(ic);
         return -1;
     }
@@ -381,7 +381,7 @@ int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino) {
         return 0;
     }
 
-    if ((ic->inode.i_mode & EXT4_S_IFDIR) != EXT4_S_IFDIR) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFDIR) {
         ext4_release_inode(ic);
         return 0;
     }

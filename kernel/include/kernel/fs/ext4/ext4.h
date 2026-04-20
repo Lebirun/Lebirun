@@ -9,8 +9,10 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       64
-#define EXT4_MAX_OPEN_INODES    1024
+#define EXT4_CACHE_BLOCKS       16
+#define EXT4_CACHE_BLOCKS_MAX   128
+#define EXT4_INODE_CACHE_INIT   16
+#define EXT4_INODE_CACHE_MAX    256
 
 struct ext4_fs;
 
@@ -50,7 +52,9 @@ typedef struct ext4_fs {
     ext4_group_desc_t *group_descs;
     ext4_block_cache_entry_t *block_cache;
     uint32_t block_cache_count;
-    ext4_inode_cache_t inode_cache[EXT4_MAX_OPEN_INODES];
+    ext4_inode_cache_t *inode_cache;
+    uint32_t inode_cache_count;
+    uint32_t inode_cache_capacity;
     mutex_t lock;
     uint32_t cache_tick;
     vfs_node_t *root_node;

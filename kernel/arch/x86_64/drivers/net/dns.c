@@ -184,6 +184,8 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
 
     if (!hostname || !out_ipv4) return -1;
 
+    net_ensure_hw();
+
     if (dns_cache_lookup(hostname, out_ipv4) == 0) {
         return 0;
     }

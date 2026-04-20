@@ -243,6 +243,7 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t ti
     uint64_t syn_interval;
     uint32_t syn_saved;
 
+    net_ensure_hw();
     if (!sock || sock->state != TCP_STATE_CLOSED) return -1;
 
     sock->remote_ip = dest;

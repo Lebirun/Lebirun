@@ -9,6 +9,9 @@
 #include <string.h>
 #include <stddef.h>
 
+extern void overlay_flush_cache(void);
+extern void squashfs_flush_cache(void);
+
 static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
 static vfs_mount_t *mounts = NULL;
@@ -420,6 +423,8 @@ int vfs_unmount(const char *mountpoint) {
             mounts[i].device[0] = '\0';
             
             printf("VFS: Unmounted %s\n", mountpoint);
+            overlay_flush_cache();
+            squashfs_flush_cache();
             return 0;
         }
     }
@@ -473,14 +478,22 @@ void vfs_open(vfs_node_t *node, uint64_t flags) {
 }
 
 void vfs_close(vfs_node_t *node) {
+    int is_dynamic;
+
     if (!node) return;
     
     if (node->ref_count > 0) {
         node->ref_count--;
     }
     
+    is_dynamic = (node->flags & VFS_DYNAMIC) && node->ref_count == 0;
+    
     if (node->close) {
         node->close(node);
+    }
+    
+    if (is_dynamic) {
+        kfree(node);
     }
 }
 
@@ -690,8 +703,9 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     for (i = 0; i < mounts_capacity; i++) {
         if (!mounts[i].in_use)
             continue;
-        if (strcmp(mounts[i].path, child_path) == 0)
+        if (strcmp(mounts[i].path, child_path) == 0) {
             return mounts[i].root;
+        }
     }
 
     return NULL;
@@ -998,7 +1012,9 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         has_more = (*rest_non_slash != '\0');
 
         next = vfs_finddir(node, component);
-        if (!next) return NULL;
+        if (!next) {
+            return NULL;
+        }
 
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
             next = next->ptr;
@@ -1043,6 +1059,20 @@ vfs_node_t *vfs_namei_nofollow(const char *path) {
 
 vfs_node_t *vfs_lookup(const char *path) {
     return vfs_namei(path);
+}
+
+void vfs_release(vfs_node_t *node) {
+    int is_dynamic;
+    if (!node) return;
+    if (node->ref_count == 0) {
+        is_dynamic = (node->flags & VFS_DYNAMIC);
+        if (node->close) {
+            node->close(node);
+        }
+        if (is_dynamic) {
+            kfree(node);
+        }
+    }
 }
 
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
@@ -1129,10 +1159,10 @@ int vfs_open_path(const char *path, int flags) {
     int ret;
     int fd;
     int i;
-    if (!path) return -1;
-    
     vfs_node_t *node;
     vfs_node_t *parent;
+
+    if (!path) return -1;
     
     node = vfs_namei(path);
     
@@ -1146,6 +1176,7 @@ int vfs_open_path(const char *path, int flags) {
         if (!parent) return -1;
         
         ret = vfs_create(parent, filename, VFS_FILE);
+        vfs_release(parent);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
         } else if (ret == 0) {
@@ -1184,6 +1215,7 @@ int vfs_open_path(const char *path, int flags) {
     
     if (fd < 0) {
         mutex_unlock(&vfs_lock);
+        vfs_release(node);
         return -1;
     }
     

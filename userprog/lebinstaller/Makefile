@@ -18,13 +18,16 @@ LIBC = ../../libc
 LIBC_ABS = $(abspath $(LIBC))
 SYSROOT = ../../sysroot
 
+LIBLEBUI = ../liblebui
+
 CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -Os -fomit-frame-pointer -nostdinc -ffunction-sections -fdata-sections
-CPPFLAGS = -isystem $(LIBC_ABS)/leblibc/include -isystem $(abspath $(SYSROOT))/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic -I$(LIBC_ABS)/include -I$(LIBC_ABS)/src
+CPPFLAGS = -isystem $(LIBC_ABS)/leblibc/include -isystem $(abspath $(SYSROOT))/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic -I$(LIBC_ABS)/include -I$(LIBC_ABS)/src -I$(LIBLEBUI)/include
 
 CRT1 = $(SYSROOT)/usr/lib/crt1.o
 CRTI = $(SYSROOT)/usr/lib/crti.o
 CRTN = $(SYSROOT)/usr/lib/crtn.o
 LIBC_A = $(SYSROOT)/usr/lib/libc.a
+LEBUI_A = $(LIBLEBUI)/lib/liblebui.a
 
 LD_SCRIPT = $(LIBC)/user.ld
 
@@ -56,9 +59,9 @@ $(LEB_LSYSCALLS_OBJ): $(LEB_LSYSCALLS_SRC)
 	$(Q)mkdir -p $(dir $@)
 	$(MSG_CC)$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-$(BINDIR)/lebinstaller.bin: $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
+$(BINDIR)/lebinstaller.bin: $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A) $(LEBUI_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(LEBUI_A) -lc $(CRTN) -lgcc
 
 stage: all
 	$(Q)mkdir -p $(SYSROOT_SBIN)

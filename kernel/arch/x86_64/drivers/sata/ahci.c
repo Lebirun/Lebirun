@@ -761,12 +761,12 @@ void ahci_debug_info(void) {
             default: break;
         }
         
-        printf("Port %u: %s", i, type_str);
         if (port->type == AHCI_DEV_SATA) {
-            printf(" - %s (%llu MB)", port->model, 
+            printf("Port %llu: %s - %s (%llu MB)\n", (unsigned long long)i, type_str, port->model,
                    (unsigned long long)(port->sector_count * AHCI_SECTOR_SIZE / (1024 * 1024)));
+        } else {
+            printf("Port %llu: %s\n", (unsigned long long)i, type_str);
         }
-        printf("\n");
     }
 }
 

@@ -113,7 +113,7 @@ static uint64_t slab_virt_to_phys(uint64_t virt) {
 }
 
 static void slab_virt_free(uint64_t virt) {
-    if (slab_virt_free_count < 1024) {
+    if (slab_virt_free_count < (sizeof(slab_virt_freelist) / sizeof(slab_virt_freelist[0]))) {
         slab_virt_freelist[slab_virt_free_count++] = virt;
     }
 }

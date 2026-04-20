@@ -13,3 +13,6 @@
 [submodule "userprog/LebInit"]
 	path = userprog/LebInit
 	url = git@github.com:Lebirun/LebInit.git
+[submodule "userprog/liblebui"]
+	path = userprog/liblebui
+	url = git@github.com:Lebirun/liblebui.git

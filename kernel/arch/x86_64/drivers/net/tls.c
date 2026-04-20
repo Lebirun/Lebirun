@@ -4,6 +4,7 @@
 #include <kernel/drivers/net/tcp.h>
 #include <kernel/drivers/net/net.h>
 #include <kernel/mem_map.h>
+#include <kernel/vfs.h>
 #include <kernel/pit.h>
 #include <kernel/rtc.h>
 #include <kernel/task.h>
@@ -18,6 +19,49 @@ struct tls_conn {
 };
 
 static WOLFSSL_CTX *g_ctx;
+static int tls_initialized;
+
+static int wolf_recv_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx);
+static int wolf_send_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx);
+
+static void tls_ensure_init(void)
+{
+    if (tls_initialized) return;
+    tls_initialized = 1;
+
+    wolfSSL_Init();
+
+    g_ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
+    if (!g_ctx) {
+        g_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
+    }
+    if (!g_ctx) {
+        printf("TLS: Failed to create WolfSSL context\n");
+        return;
+    }
+
+    wolfSSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, NULL);
+    wolfSSL_SetIORecv(g_ctx, wolf_recv_cb);
+    wolfSSL_SetIOSend(g_ctx, wolf_send_cb);
+
+    {
+        vfs_node_t *ca_node;
+        ca_node = vfs_namei("/etc/ssl/certs/ca-certificates.crt");
+        if (ca_node && ca_node->length > 0) {
+            uint8_t *ca_buf;
+            ca_buf = (uint8_t *)kmalloc(ca_node->length);
+            if (ca_buf) {
+                uint32_t rd;
+                rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
+                if (rd > 0) {
+                    wolfSSL_CTX_load_verify_buffer(g_ctx, ca_buf, (long)rd,
+                                                   SSL_FILETYPE_PEM);
+                }
+                kfree(ca_buf);
+            }
+        }
+    }
+}
 
 static int wolf_recv_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx)
 {
@@ -50,6 +94,7 @@ int tls_load_ca_certs(const uint8_t *pem, size_t pem_len)
 {
     int ret;
 
+    tls_ensure_init();
     if (!g_ctx) return -1;
 
     ret = wolfSSL_CTX_load_verify_buffer(g_ctx, pem, (long)pem_len,
@@ -65,22 +110,6 @@ int tls_load_ca_certs(const uint8_t *pem, size_t pem_len)
 
 void tls_init(void)
 {
-    wolfSSL_Init();
-
-    g_ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
-    if (!g_ctx) {
-        g_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
-    }
-    if (!g_ctx) {
-        printf("TLS: Failed to create WolfSSL context\n");
-        return;
-    }
-
-    wolfSSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, NULL);
-    wolfSSL_SetIORecv(g_ctx, wolf_recv_cb);
-    wolfSSL_SetIOSend(g_ctx, wolf_send_cb);
-
-    printf("TLS: WolfSSL initialized\n");
 }
 
 tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host)
@@ -88,6 +117,7 @@ tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host)
     tls_conn_t *conn;
     int ret;
 
+    tls_ensure_init();
     if (!g_ctx) {
         printf("TLS: No WolfSSL context\n");
         return NULL;

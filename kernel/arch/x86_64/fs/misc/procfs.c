@@ -5,6 +5,7 @@
 #include <kernel/cmdline.h>
 #include <kernel/drivers/net/e1000/e1000.h>
 #include <kernel/rtc.h>
+#include <kernel/vring.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -38,25 +39,22 @@ static vfs_node_t proc_devices;
 static vfs_node_t proc_interrupts;
 static vfs_node_t proc_vmstat;
 static vfs_node_t proc_memdetail;
+static vfs_node_t proc_kmsg;
 
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 
-#define PROC_PID_POOL_SIZE 16
-#define PROC_PID_SUBFILES 8
-
-static vfs_node_t *pid_dir_pool;
-static vfs_node_t (*pid_file_pool)[PROC_PID_SUBFILES];
-static dirent_t pid_dirent;
+static dirent_t *proc_task_readdir(vfs_node_t *node, uint64_t index);
+static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name);
+static dirent_t *proc_task_thread_readdir(vfs_node_t *node, uint64_t index);
+static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name);
 
 static task_t *procfs_get_task(vfs_node_t *node) {
     pid_t pid;
-    if (node->parent && VFS_GET_TYPE(node->flags) == VFS_FILE
-        && VFS_GET_TYPE(node->parent->flags) == VFS_DIRECTORY
-        && node->parent->inode > 0) {
-        pid = (pid_t)node->parent->inode;
+    if (VFS_GET_TYPE(node->flags) == VFS_FILE && node->inode >= 100) {
+        pid = (pid_t)(int64_t)(node->inode / 100);
     } else {
-        pid = (pid_t)node->inode;
+        pid = (pid_t)(int64_t)node->inode;
     }
     if (pid == 0 && current_task)
         return current_task;
@@ -236,6 +234,21 @@ static uint64_t proc_self_environ_read(vfs_node_t *node, uint64_t offset, uint64
     return size;
 }
 
+static uint64_t proc_kmsg_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    int len;
+    uint64_t remaining;
+
+    (void)node;
+
+    len = klog_snapshot(NULL, 0);
+    if (len <= 0) return 0;
+    if (offset >= (uint64_t)len) return 0;
+    remaining = (uint64_t)len - offset;
+    if (size > remaining) size = remaining;
+    klog_snapshot_range((char *)buffer, (int)offset, (int)size);
+    return size;
+}
+
 static uint64_t proc_version_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char ver[128];
     int len;
@@ -292,7 +305,7 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
     heap_total_kb = kernel_heap.total_size / 1024;
     heap_used_kb = kernel_heap.used_size / 1024;
     slab_kb = slab_get_total_pages() * 4;
-    
+
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8lu kB\n"
         "MemFree:       %8lu kB\n"
@@ -950,7 +963,7 @@ static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
     static const char *entries[] = {
         "self", "version", "uptime", "meminfo", "cpuinfo", "loadavg",
         "stat", "mounts", "filesystems", "cmdline", "devices", "interrupts", "vmstat",
-        "memdetail"
+        "memdetail", "kmsg"
     };
     
     if (index < sizeof(entries)/sizeof(entries[0])) {
@@ -980,6 +993,7 @@ static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 static dirent_t *proc_pid_readdir(vfs_node_t *node, uint64_t index) {
+    static dirent_t pid_dirent;
     static const char *entries[] = {
         "maps", "status", "cmdline", "environ",
         "stat", "statm", "comm", "limits", "io"
@@ -994,13 +1008,21 @@ static dirent_t *proc_pid_readdir(vfs_node_t *node, uint64_t index) {
         return &pid_dirent;
     }
     
+    if (index == sizeof(entries)/sizeof(entries[0])) {
+        strcpy(pid_dirent.name, "task");
+        pid_dirent.inode = node->inode * 100 + 50;
+        pid_dirent.type = VFS_DIRECTORY;
+        return &pid_dirent;
+    }
+    
     return NULL;
 }
 
 static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
     uint64_t pid_val;
-    uint64_t pool_idx;
     int file_idx;
+    vfs_node_t *tdir;
+    vfs_node_t *fnode;
     
     static const struct {
         const char *name;
@@ -1018,39 +1040,148 @@ static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
     };
     
     pid_val = node->inode;
-    pool_idx = pid_val % PROC_PID_POOL_SIZE;
     
     for (file_idx = 0; file_idx < (int)(sizeof(files)/sizeof(files[0])); file_idx++) {
         if (strcmp(name, files[file_idx].name) == 0) {
-            vfs_node_t *fnode = &pid_file_pool[pool_idx][file_idx];
+            fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+            if (!fnode) return NULL;
             memset(fnode, 0, sizeof(vfs_node_t));
             strcpy(fnode->name, name);
-            fnode->flags = VFS_FILE;
+            fnode->flags = VFS_FILE | VFS_DYNAMIC;
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
             fnode->read = files[file_idx].read;
-            fnode->parent = node;
-            fnode->ref_count = 1;
+            fnode->parent = &procfs_root;
             return fnode;
         }
+    }
+    
+    if (strcmp(name, "task") == 0) {
+        tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+        if (!tdir) return NULL;
+        memset(tdir, 0, sizeof(vfs_node_t));
+        strcpy(tdir->name, "task");
+        tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+        tdir->inode = pid_val;
+        tdir->readdir = proc_task_readdir;
+        tdir->finddir = proc_task_finddir;
+        tdir->parent = &procfs_root;
+        return tdir;
     }
     
     return NULL;
 }
 
+static dirent_t *proc_task_readdir(vfs_node_t *node, uint64_t index) {
+    static dirent_t task_dirent;
+    if (index == 0) {
+        snprintf(task_dirent.name, sizeof(task_dirent.name), "%d", (int)node->inode);
+        task_dirent.inode = node->inode;
+        task_dirent.type = VFS_DIRECTORY;
+        return &task_dirent;
+    }
+    return NULL;
+}
+
+static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name) {
+    int pid;
+    const char *p;
+    vfs_node_t *tdir;
+
+    pid = 0;
+    p = name;
+    while (*p >= '0' && *p <= '9') {
+        pid = pid * 10 + (*p - '0');
+        p++;
+    }
+    if (*p != '\0' || pid <= 0)
+        return NULL;
+    if ((uint64_t)pid != node->inode)
+        return NULL;
+
+    tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!tdir) return NULL;
+    memset(tdir, 0, sizeof(vfs_node_t));
+    snprintf(tdir->name, sizeof(tdir->name), "%d", pid);
+    tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+    tdir->inode = (uint64_t)pid;
+    tdir->readdir = proc_task_thread_readdir;
+    tdir->finddir = proc_task_thread_finddir;
+    tdir->parent = &procfs_root;
+    return tdir;
+}
+
+static dirent_t *proc_task_thread_readdir(vfs_node_t *node, uint64_t index) {
+    static dirent_t task_thread_dirent;
+    static const char *entries[] = {
+        "maps", "status", "cmdline", "environ",
+        "stat", "statm", "comm", "limits", "io"
+    };
+
+    (void)node;
+
+    if (index < sizeof(entries)/sizeof(entries[0])) {
+        strcpy(task_thread_dirent.name, entries[index]);
+        task_thread_dirent.inode = node->inode * 100 + index;
+        task_thread_dirent.type = VFS_FILE;
+        return &task_thread_dirent;
+    }
+
+    return NULL;
+}
+
+static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name) {
+    uint64_t pid_val;
+    int file_idx;
+    vfs_node_t *fnode;
+
+    static const struct {
+        const char *name;
+        read_type_t read;
+    } files[] = {
+        { "maps",    proc_self_maps_read },
+        { "status",  proc_self_status_read },
+        { "cmdline", proc_self_cmdline_read },
+        { "environ", proc_self_environ_read },
+        { "stat",    proc_self_stat_read },
+        { "statm",   proc_self_statm_read },
+        { "comm",    proc_self_comm_read },
+        { "limits",  proc_self_limits_read },
+        { "io",      proc_self_io_read },
+    };
+
+    pid_val = node->inode;
+
+    for (file_idx = 0; file_idx < (int)(sizeof(files)/sizeof(files[0])); file_idx++) {
+        if (strcmp(name, files[file_idx].name) == 0) {
+            fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+            if (!fnode) return NULL;
+            memset(fnode, 0, sizeof(vfs_node_t));
+            strcpy(fnode->name, name);
+            fnode->flags = VFS_FILE | VFS_DYNAMIC;
+            fnode->inode = pid_val * 100 + (uint64_t)file_idx;
+            fnode->read = files[file_idx].read;
+            fnode->parent = &procfs_root;
+            return fnode;
+        }
+    }
+
+    return NULL;
+}
+
 static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
-    uint64_t pool_idx;
     vfs_node_t *dir;
-    
-    pool_idx = (uint64_t)pid % PROC_PID_POOL_SIZE;
-    dir = &pid_dir_pool[pool_idx];
+    uint64_t raw_inode;
+
+    raw_inode = (uint64_t)(int64_t)pid;
+    dir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!dir) return NULL;
     memset(dir, 0, sizeof(vfs_node_t));
     snprintf(dir->name, sizeof(dir->name), "%d", pid);
-    dir->flags = VFS_DIRECTORY;
-    dir->inode = (uint64_t)pid;
+    dir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+    dir->inode = raw_inode;
     dir->readdir = proc_pid_readdir;
     dir->finddir = proc_pid_finddir;
     dir->parent = &procfs_root;
-    dir->ref_count = 1;
     return dir;
 }
 
@@ -1071,16 +1202,25 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "interrupts") == 0) return &proc_interrupts;
     if (strcmp(name, "vmstat") == 0) return &proc_vmstat;
     if (strcmp(name, "memdetail") == 0) return &proc_memdetail;
+    if (strcmp(name, "kmsg") == 0) return &proc_kmsg;
     
     {
         int pid = 0;
+        int neg = 0;
         const char *p = name;
+        task_t *t;
+
+        if (*p == '-') {
+            neg = 1;
+            p++;
+        }
         while (*p >= '0' && *p <= '9') {
             pid = pid * 10 + (*p - '0');
             p++;
         }
-        if (*p == '\0' && pid > 0) {
-            task_t *t = task_find((pid_t)pid);
+        if (neg) pid = -pid;
+        if (*p == '\0' && pid != 0) {
+            t = task_find((pid_t)pid);
             if (t) {
                 return procfs_setup_pid_dir((pid_t)pid);
             }
@@ -1140,11 +1280,6 @@ static int procfs_unmount(vfs_node_t *node) {
 static vfs_fs_type_t procfs_type;
 
 void procfs_init(void) {
-    pid_dir_pool = (vfs_node_t *)kmalloc(PROC_PID_POOL_SIZE * sizeof(vfs_node_t));
-    pid_file_pool = (vfs_node_t (*)[PROC_PID_SUBFILES])kmalloc(PROC_PID_POOL_SIZE * PROC_PID_SUBFILES * sizeof(vfs_node_t));
-    if (pid_dir_pool) memset(pid_dir_pool, 0, PROC_PID_POOL_SIZE * sizeof(vfs_node_t));
-    if (pid_file_pool) memset(pid_file_pool, 0, PROC_PID_POOL_SIZE * PROC_PID_SUBFILES * sizeof(vfs_node_t));
-
     procfs_type.name = "procfs";
     procfs_type.mount = procfs_mount;
     procfs_type.unmount = procfs_unmount;
@@ -1336,6 +1471,13 @@ void procfs_init(void) {
     proc_memdetail.read = proc_memdetail_read;
     proc_memdetail.parent = &procfs_root;
     proc_memdetail.ref_count = 1;
+    
+    memset(&proc_kmsg, 0, sizeof(vfs_node_t));
+    strcpy(proc_kmsg.name, "kmsg");
+    proc_kmsg.flags = VFS_FILE;
+    proc_kmsg.read = proc_kmsg_read;
+    proc_kmsg.parent = &procfs_root;
+    proc_kmsg.ref_count = 1;
     
     vfs_register_fs(&procfs_type);
 }

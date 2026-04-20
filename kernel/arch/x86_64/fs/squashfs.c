@@ -29,6 +29,21 @@ static void sqfs_cache_ensure(void) {
     }
 }
 
+void squashfs_flush_cache(void) {
+    uint64_t i;
+    squashfs_vfs_node_t *snode;
+
+    for (i = 0; i < sqfs_node_cache_count; i++) {
+        if (!sqfs_node_cache[i].node) continue;
+        snode = (squashfs_vfs_node_t *)sqfs_node_cache[i].node->private_data;
+        if (snode && snode->rd_cached_data) {
+            kfree(snode->rd_cached_data);
+            snode->rd_cached_data = NULL;
+            snode->rd_cached_size = 0;
+        }
+    }
+}
+
 static int sqfs_cache_grow(void) {
     uint64_t new_cap;
     void *new_buf;
@@ -68,6 +83,8 @@ static void sqfs_cache_remove(vfs_node_t *node) {
 
 static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
     squashfs_vfs_node_t *old_snode;
+    uint64_t evict_idx;
+    uint64_t j;
 
     sqfs_cache_ensure();
     if (!sqfs_node_cache) return;
@@ -81,15 +98,30 @@ static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
         sqfs_node_cache[sqfs_node_cache_count].node = node;
         sqfs_node_cache_count++;
     } else {
-        old_snode = (squashfs_vfs_node_t *)sqfs_node_cache[0].node->private_data;
-        if (old_snode && old_snode->rd_cached_data) {
-            kfree(old_snode->rd_cached_data);
-            old_snode->rd_cached_data = NULL;
+        evict_idx = sqfs_node_cache_capacity;
+        for (j = 0; j < sqfs_node_cache_count; j++) {
+            if (sqfs_node_cache[j].node->ref_count == 0) {
+                evict_idx = j;
+                break;
+            }
         }
-        memmove(&sqfs_node_cache[0], &sqfs_node_cache[1],
-                (sqfs_node_cache_capacity - 1) * sizeof(sqfs_node_cache[0]));
-        sqfs_node_cache[sqfs_node_cache_capacity - 1].inode_ref = inode_ref;
-        sqfs_node_cache[sqfs_node_cache_capacity - 1].node = node;
+        if (evict_idx >= sqfs_node_cache_capacity) return;
+
+        old_snode = (squashfs_vfs_node_t *)sqfs_node_cache[evict_idx].node->private_data;
+        if (old_snode) {
+            if (old_snode->rd_cached_data) {
+                kfree(old_snode->rd_cached_data);
+                old_snode->rd_cached_data = NULL;
+            }
+            sqfs_node_cache[evict_idx].node->private_data = NULL;
+            kfree(old_snode);
+        }
+        if (evict_idx < sqfs_node_cache_count - 1) {
+            memmove(&sqfs_node_cache[evict_idx], &sqfs_node_cache[evict_idx + 1],
+                    (sqfs_node_cache_count - 1 - evict_idx) * sizeof(sqfs_node_cache[0]));
+        }
+        sqfs_node_cache[sqfs_node_cache_count - 1].inode_ref = inode_ref;
+        sqfs_node_cache[sqfs_node_cache_count - 1].node = node;
     }
 }
 
@@ -237,6 +269,59 @@ static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, 
     if (offset >= meta_size) {
         if (need_free) kfree(metadata);
         return -1;
+    }
+
+    if (offset + sizeof(squashfs_reg_inode_t) > meta_size) {
+        uint64_t first_part;
+        uint64_t next_block_offset;
+        uint8_t *next_meta;
+        uint64_t next_meta_size;
+        uint16_t next_hdr;
+        uint64_t on_disk_size;
+        uint64_t combined_size;
+        uint8_t *combined;
+        int next_need_free;
+
+        first_part = meta_size - offset;
+        {
+            uint16_t cur_hdr = read_u16(squashfs_ctx.base + block_offset);
+            on_disk_size = cur_hdr & 0x7FFF;
+        }
+        next_block_offset = block_offset + 2 + on_disk_size;
+
+        next_need_free = 0;
+        next_meta = NULL;
+        next_meta_size = 0;
+        if (next_block_offset + 2 <= squashfs_ctx.size) {
+            next_hdr = read_u16(squashfs_ctx.base + next_block_offset);
+            if (next_hdr & 0x8000) {
+                next_meta_size = next_hdr & 0x7FFF;
+                if (next_block_offset + 2 + next_meta_size <= squashfs_ctx.size) {
+                    next_meta = squashfs_ctx.base + next_block_offset + 2;
+                }
+            } else {
+                next_meta = squashfs_read_metadata_block(next_block_offset, &next_meta_size);
+                if (next_meta) next_need_free = 1;
+            }
+        }
+
+        if (next_meta) {
+            combined_size = first_part + next_meta_size;
+            combined = (uint8_t *)kmalloc(combined_size);
+            if (combined) {
+                memcpy(combined, metadata + offset, first_part);
+                memcpy(combined + first_part, next_meta, next_meta_size);
+                if (need_free) kfree(metadata);
+                if (next_need_free) kfree(next_meta);
+                *out_meta = combined;
+                *out_meta_size = combined_size;
+                *out_offset = 0;
+                *out_base = (squashfs_base_inode_t *)combined;
+                *out_need_free = 1;
+                return 0;
+            }
+        }
+        if (next_need_free) kfree(next_meta);
     }
 
     base = (squashfs_base_inode_t *)(metadata + offset);
@@ -404,9 +489,48 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     }
     
     if (offset + inode_size > meta_size) {
-        inode_size = meta_size - offset;
+        uint64_t first_part;
+        uint64_t next_block_offset;
+        uint8_t *next_metadata;
+        uint64_t next_meta_size;
+        uint16_t next_hdr;
+        uint64_t on_disk_size;
+        int next_need_free;
+
+        first_part = meta_size - offset;
+        memcpy(inode_copy, metadata + offset, first_part);
+
+        {
+            uint16_t cur_hdr = read_u16(squashfs_ctx.base + block_offset);
+            on_disk_size = cur_hdr & 0x7FFF;
+        }
+        next_block_offset = block_offset + 2 + on_disk_size;
+
+        next_need_free = 0;
+        next_metadata = NULL;
+        next_meta_size = 0;
+        if (next_block_offset + 2 <= squashfs_ctx.size) {
+            next_hdr = read_u16(squashfs_ctx.base + next_block_offset);
+            if (next_hdr & 0x8000) {
+                next_meta_size = next_hdr & 0x7FFF;
+                if (next_block_offset + 2 + next_meta_size <= squashfs_ctx.size) {
+                    next_metadata = squashfs_ctx.base + next_block_offset + 2;
+                }
+            } else {
+                next_metadata = squashfs_read_metadata_block(next_block_offset, &next_meta_size);
+                if (next_metadata) next_need_free = 1;
+            }
+        }
+
+        if (next_metadata && inode_size - first_part <= next_meta_size) {
+            memcpy((uint8_t *)inode_copy + first_part, next_metadata, inode_size - first_part);
+        } else {
+            memset((uint8_t *)inode_copy + first_part, 0, inode_size - first_part);
+        }
+        if (next_need_free) kfree(next_metadata);
+    } else {
+        memcpy(inode_copy, metadata + offset, inode_size);
     }
-    memcpy(inode_copy, metadata + offset, inode_size);
     
     if (need_free) kfree(metadata);
     return inode_copy;
@@ -797,6 +921,7 @@ static void squashfs_vfs_close(vfs_node_t *node) {
     if (!node) return;
     snode = (squashfs_vfs_node_t *)node->private_data;
     if (!snode) return;
+    if (node->ref_count > 0) return;
     if (snode->rd_cached_data) {
         kfree(snode->rd_cached_data);
         snode->rd_cached_data = NULL;
@@ -1036,7 +1161,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     if (end_pos > dir_size) end_pos = dir_size;
     
     pos = snode->dir_block_offset;
-    
+
     while (pos + sizeof(squashfs_dir_header_t) <= end_pos) {
         hdr = (squashfs_dir_header_t *)(dir_data + pos);
         pos += sizeof(squashfs_dir_header_t);

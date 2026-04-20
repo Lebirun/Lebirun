@@ -251,18 +251,21 @@ task_t* launch_user_path(const char *path, int console_id) {
 
     if (VFS_GET_TYPE(node->flags) != VFS_FILE) {
         printf("launch_user_path: '%s' is not a regular file\n", path);
+        vfs_release(node);
         return NULL;
     }
 
     size = node->length;
     if (size == 0 || size > (32u * 1024u * 1024u)) {
         printf("launch_user_path: '%s' invalid size %u\n", path, size);
+        vfs_release(node);
         return NULL;
     }
 
     buf = (uint8_t *)kmalloc(size);
     if (!buf) {
         printf("launch_user_path: OOM (%u bytes)\n", size);
+        vfs_release(node);
         return NULL;
     }
 
@@ -274,6 +277,7 @@ task_t* launch_user_path(const char *path, int console_id) {
         if (r == 0) break;
         off += r;
     }
+    vfs_release(node);
 
     if (off != size) {
         printf("launch_user_path: short read (%u/%u) for '%s'\n", off, size, path);

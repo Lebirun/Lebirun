@@ -11,6 +11,7 @@
 #define VFS_PIPE        0x05
 #define VFS_SYMLINK     0x06
 #define VFS_MOUNTPOINT  0x08
+#define VFS_DYNAMIC     0x10
 
 #define VFS_TYPE_MASK   0x07
 #define VFS_GET_TYPE(flags) ((flags) & VFS_TYPE_MASK)
@@ -150,6 +151,7 @@ vfs_node_t *vfs_namei(const char *path);
 vfs_node_t *vfs_namei_nofollow(const char *path);
 void vfs_block_squashfs_access(void);
 vfs_node_t *vfs_lookup(const char *path);
+void vfs_release(vfs_node_t *node);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 
 int vfs_open_path(const char *path, int flags);

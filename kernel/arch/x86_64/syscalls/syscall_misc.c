@@ -466,14 +466,18 @@ static int sys_chmod(const char *pathname, int mode) {
     node = vfs_namei(pathname);
     if (!node) return -ENOENT;
 
-    if (current_task->euid != 0 && current_task->euid != node->uid)
+    if (current_task->euid != 0 && current_task->euid != node->uid) {
+        vfs_release(node);
         return -EPERM;
+    }
 
     if (node->chmod) {
         ret = node->chmod(node, mode & 07777);
+        vfs_release(node);
         return ret;
     }
     node->mask = mode & 07777;
+    vfs_release(node);
     return 0;
 }
 
@@ -493,10 +497,14 @@ static int sys_chown(const char *pathname, int owner, int group) {
     if (!node) return -ENOENT;
 
     if (node->chown) {
-        return node->chown(node, owner, group);
+        int r;
+        r = node->chown(node, owner, group);
+        vfs_release(node);
+        return r;
     }
     if (owner != -1) node->uid = owner;
     if (group != -1) node->gid = group;
+    vfs_release(node);
     return 0;
 }
 

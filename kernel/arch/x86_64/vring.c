@@ -39,6 +39,11 @@ static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
 static volatile uint64_t klog_dropped = 0;
 
+#define KLOG_PERSIST_SZ 32768
+static char *klog_persist_buf;
+static volatile int klog_persist_pos = 0;
+static int klog_persist_cap = 0;
+
 #define KPRINT_MAX_ITEMS 64
 #define KPRINT_MAX_LEN   128
 
@@ -176,11 +181,35 @@ static void serial_drain(uint64_t max_chars) {
 static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     uint64_t flags;
     klog_item_t *it;
+    int ppos;
+    uint64_t avail;
 
     if (!buf || len == 0) return 0;
     if (len >= KLOG_MAX_LEN) len = KLOG_MAX_LEN - 1;
 
-    serial_write(buf, len);
+    if (klog_persist_buf) {
+        int need;
+        ppos = klog_persist_pos;
+        need = ppos + (int)len + 1;
+        if (need > klog_persist_cap) {
+            int newcap;
+            char *nb;
+            newcap = klog_persist_cap ? klog_persist_cap * 2 : 4096;
+            while (newcap < need) newcap *= 2;
+            if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
+            nb = krealloc(klog_persist_buf, newcap);
+            if (nb) {
+                klog_persist_buf = nb;
+                klog_persist_cap = newcap;
+            }
+        }
+        avail = klog_persist_cap - ppos - 1;
+        if ((int)len <= (int)avail && avail > 0) {
+            memcpy(klog_persist_buf + ppos, buf, len);
+            klog_persist_pos = ppos + (int)len;
+            klog_persist_buf[klog_persist_pos] = '\0';
+        }
+    }
 
     if (!klog_ring) return (int)len;
 
@@ -217,6 +246,33 @@ static int klog_dequeue(klog_item_t *out) {
     klog_count--;
     klog_irqrestore(flags);
     return 0;
+}
+
+int klog_snapshot(char *buf, int bufsz) {
+    int len;
+
+    len = klog_persist_pos;
+    if (!buf || bufsz <= 0) return len;
+
+    if (!klog_persist_buf || len <= 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+    if (len >= bufsz) len = bufsz - 1;
+    memcpy(buf, klog_persist_buf, len);
+    buf[len] = '\0';
+    return len;
+}
+
+int klog_snapshot_range(char *buf, int offset, int count) {
+    int len;
+
+    if (!buf || count <= 0 || !klog_persist_buf) return 0;
+    len = klog_persist_pos;
+    if (offset >= len) return 0;
+    if (offset + count > len) count = len - offset;
+    memcpy(buf, klog_persist_buf + offset, count);
+    return count;
 }
 
 static int kprint_dequeue(kprint_item_t *out) {
@@ -296,6 +352,11 @@ int klog_printf(int level, const char *fmt, ...) {
     return klog_enqueue((uint8_t)level, tmp, len);
 }
 
+int klog_enqueue_raw(const char *buf, size_t len) {
+    if (!buf || len == 0) return 0;
+    return klog_enqueue(0, buf, (uint64_t)len);
+}
+
 int klog_drain_console0(uint64_t max_items) {
     kproc_t *kp;
     kproc_t *prev;
@@ -334,6 +395,11 @@ void vring_init(void) {
     klog_ring = kmalloc(KLOG_MAX_ITEMS * sizeof(klog_item_t));
     kprint_ring = kmalloc(KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
     serial_ring = kmalloc(SERIAL_RING_SIZE);
+    klog_persist_buf = kmalloc(4096);
+    if (klog_persist_buf) {
+        klog_persist_cap = 4096;
+        klog_persist_buf[0] = '\0';
+    }
 
     if (klog_ring)
         memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));
@@ -627,8 +693,6 @@ static void klog_task_main(void) {
 
             drained = 0;
             while (drained < 8 && klog_dequeue(&kit) == 0) {
-                if (!console_alt_screen_active(0))
-                    console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
                 drained++;
             }
             did += drained;

@@ -5,10 +5,10 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <sys/wait.h>
-#include <sys/ioctl.h>
-#include <termios.h>
+#include <sys/stat.h>
 #include <crypt.h>
 #include <lebirun.h>
+#include <lebui.h>
 
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
@@ -17,30 +17,6 @@
 #define MAX_PATH     256
 #define MAX_LINE     128
 #define MBR_SIG      0xAA55
-
-#define KEY_UP      1000
-#define KEY_DOWN    1001
-#define KEY_ENTER   1002
-#define KEY_ESC     1003
-#define KEY_TAB     1004
-#define KEY_BKSP    1005
-#define KEY_LEFT    1006
-#define KEY_RIGHT   1007
-
-#define CLR_NORMAL  "\033[0m"
-#define CLR_TITLE   "\033[1;33;40m"
-#define CLR_MENU    "\033[0;37;44m"
-#define CLR_SELECT  "\033[0;34;47m"
-#define CLR_BORDER  "\033[1;37;44m"
-#define CLR_INPUT   "\033[0;30;47m"
-#define CLR_BTN     "\033[1;37;44m"
-#define CLR_BTN_SEL "\033[0;30;47m"
-#define CLR_BAR     "\033[0;30;46m"
-#define CLR_PROG    "\033[1;37;42m"
-#define CLR_PROG_BG "\033[0;37;40m"
-#define CLR_ERR     "\033[1;31;47m"
-#define CLR_OK      "\033[1;32;44m"
-#define CLR_DIM     "\033[0;36;44m"
 
 int vfs_open(const char *path, int flags);
 int vfs_close_fd(int fd);
@@ -88,9 +64,8 @@ typedef struct {
 
 static disk_info_t disks[MAX_DISKS];
 static int disk_count;
-static int term_rows;
-static int term_cols;
-static struct termios orig_termios;
+static lebui_size_t term_sz;
+static lebui_prog_state_t prog_st;
 
 static const char *timezones[] = {
     "GMT-12", "GMT-11", "GMT-10", "GMT-9", "GMT-8", "GMT-7",
@@ -112,597 +87,6 @@ static const char *tz_values[] = {
     NULL
 };
 
-static void tui_get_size(void)
-{
-    struct winsize ws;
-
-    if (ioctl(0, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
-        term_rows = ws.ws_row;
-        term_cols = ws.ws_col;
-    } else {
-        term_rows = 25;
-        term_cols = 80;
-    }
-}
-
-static void tui_raw_mode(void)
-{
-    struct termios raw;
-
-    tcgetattr(0, &orig_termios);
-    raw = orig_termios;
-    raw.c_lflag &= ~(ICANON | ECHO | ISIG);
-    raw.c_iflag &= ~(ICRNL | IXON);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(0, TCSANOW, &raw);
-}
-
-static void tui_restore_mode(void)
-{
-    tcsetattr(0, TCSANOW, &orig_termios);
-}
-
-static void tui_goto(int row, int col)
-{
-    printf("\033[%d;%dH", row, col);
-}
-
-static void tui_hide_cursor(void)
-{
-    printf("\033[?25l");
-}
-
-static void tui_show_cursor(void)
-{
-    printf("\033[?25h");
-}
-
-static int tui_read_key(void)
-{
-    char c;
-    char seq[4];
-    unsigned int start;
-
-    if (read(0, &c, 1) <= 0) return -1;
-
-    if (c == '\033') {
-        start = getticks();
-        while (getticks() - start < 2) {
-            if (read_nb(0, &seq[0], 1) > 0) goto got_bracket;
-        }
-        return KEY_ESC;
-got_bracket:
-        if (seq[0] != '[') return -1;
-        start = getticks();
-        while (getticks() - start < 2) {
-            if (read_nb(0, &seq[1], 1) > 0) goto got_code;
-        }
-        return -1;
-got_code:
-        if (seq[1] == 'A') return KEY_UP;
-        if (seq[1] == 'B') return KEY_DOWN;
-        if (seq[1] == 'C') return KEY_RIGHT;
-        if (seq[1] == 'D') return KEY_LEFT;
-        if (seq[1] >= '0' && seq[1] <= '9') {
-            start = getticks();
-            while (getticks() - start < 2) {
-                if (read_nb(0, &seq[2], 1) > 0) break;
-            }
-        }
-        return -1;
-    }
-    if (c == '\n' || c == '\r') return KEY_ENTER;
-    if (c == '\t') return KEY_TAB;
-    if (c == 127 || c == '\b') return KEY_BKSP;
-    return (int)(unsigned char)c;
-}
-
-static void tui_fill_bg(void)
-{
-    int r;
-
-    printf("%s", CLR_MENU);
-    for (r = 1; r <= term_rows; r++) {
-        tui_goto(r, 1);
-        printf("\033[2K");
-    }
-    fflush(stdout);
-}
-
-static void tui_draw_box(int y, int x, int h, int w, const char *title)
-{
-    int i;
-    int r;
-    int tw;
-
-    tui_goto(y, x);
-    printf("%s+", CLR_BORDER);
-    for (i = 0; i < w - 2; i++) putchar('-');
-    putchar('+');
-
-    if (title) {
-        tw = (int)strlen(title);
-        tui_goto(y, x + (w - tw - 2) / 2);
-        printf("%s %s ", CLR_TITLE, title);
-    }
-
-    for (r = 1; r < h - 1; r++) {
-        tui_goto(y + r, x);
-        printf("%s|", CLR_BORDER);
-        printf("%s", CLR_MENU);
-        for (i = 0; i < w - 2; i++) putchar(' ');
-        printf("%s|", CLR_BORDER);
-        tui_goto(y + r, x + w);
-        printf("\033[0;30;40m ");
-    }
-
-    tui_goto(y + h - 1, x);
-    printf("%s+", CLR_BORDER);
-    for (i = 0; i < w - 2; i++) putchar('-');
-    putchar('+');
-    tui_goto(y + h - 1, x + w);
-    printf("\033[0;30;40m ");
-
-    tui_goto(y + h, x + 1);
-    printf("\033[0;30;40m");
-    for (i = 0; i < w; i++) putchar(' ');
-}
-
-static void tui_draw_titlebar(void)
-{
-    int i;
-    const char *title = " Lebirun OS Installer";
-
-    tui_goto(1, 1);
-    printf("%s", CLR_BAR);
-    printf("%s", title);
-    for (i = (int)strlen(title); i < term_cols; i++) putchar(' ');
-}
-
-static void tui_draw_helpbar(const char *text)
-{
-    int i;
-    int len;
-
-    tui_goto(term_rows, 1);
-    printf("%s", CLR_BAR);
-    len = (int)strlen(text);
-    printf("%s", text);
-    for (i = len; i < term_cols; i++) putchar(' ');
-}
-
-static void tui_center_text(int row, int bx, int bw, const char *color, const char *text)
-{
-    int len;
-    int col;
-
-    len = (int)strlen(text);
-    col = bx + (bw - len) / 2;
-    if (col < bx + 1) col = bx + 1;
-    tui_goto(row, col);
-    printf("%s%s", color, text);
-}
-
-static void tui_draw_screen(const char *title, const char *help)
-{
-    tui_fill_bg();
-    tui_draw_titlebar();
-    tui_draw_helpbar(help);
-    (void)title;
-}
-
-static int tui_checklist(const char *title, const char **items, int *checked,
-                         int count, const char *help)
-{
-    int sel;
-    int bw;
-    int bh;
-    int bx;
-    int by;
-    int i;
-    int key;
-    int maxw;
-    int len;
-    int view_h;
-    int scroll;
-    char line[80];
-
-    sel = 0;
-    scroll = 0;
-    maxw = (int)strlen(title) + 4;
-    for (i = 0; i < count; i++) {
-        len = (int)strlen(items[i]) + 4;
-        if (len + 8 > maxw) maxw = len + 8;
-    }
-    bw = maxw + 4;
-    if (bw > term_cols - 4) bw = term_cols - 4;
-    bh = count + 4;
-    if (bh > term_rows - 4) bh = term_rows - 4;
-    bx = (term_cols - bw) / 2 + 1;
-    by = (term_rows - bh) / 2;
-    if (by < 3) by = 3;
-    view_h = bh - 4;
-
-    tui_draw_screen(title, help);
-    tui_draw_box(by, bx, bh, bw, title);
-
-    for (;;) {
-        if (sel < scroll) scroll = sel;
-        if (sel >= scroll + view_h) scroll = sel - view_h + 1;
-
-        for (i = 0; i < view_h; i++) {
-            int idx = scroll + i;
-            tui_goto(by + 2 + i, bx + 2);
-            if (idx < count) {
-                if (idx == sel)
-                    printf("%s", CLR_SELECT);
-                else
-                    printf("%s", CLR_MENU);
-                if (checked[idx] == -1)
-                    snprintf(line, sizeof(line), "  *  %s", items[idx]);
-                else
-                    snprintf(line, sizeof(line), " [%c] %s",
-                             checked[idx] ? 'x' : ' ', items[idx]);
-                printf(" %-*.*s ", bw - 8, bw - 8, line);
-            } else {
-                printf("%s%-*s", CLR_MENU, bw - 6, "");
-            }
-        }
-
-        printf("%s", CLR_NORMAL);
-        fflush(stdout);
-
-        key = tui_read_key();
-        if (key == KEY_UP) {
-            if (sel > 0) sel--;
-        } else if (key == KEY_DOWN) {
-            if (sel < count - 1) sel++;
-        } else if (key == ' ') {
-            if (checked[sel] != -1)
-                checked[sel] = !checked[sel];
-        } else if (key == KEY_ENTER) {
-            return 0;
-        } else if (key == KEY_ESC) {
-            return -1;
-        }
-    }
-}
-
-static int tui_menu(const char *title, const char **items, int count, const char *help)
-{
-    int sel;
-    int bw;
-    int bh;
-    int bx;
-    int by;
-    int i;
-    int key;
-    int maxw;
-    int len;
-    int view_h;
-    int scroll;
-    int sb_pos;
-    int sb_h;
-
-    sel = 0;
-    scroll = 0;
-    maxw = (int)strlen(title) + 4;
-    for (i = 0; i < count; i++) {
-        len = (int)strlen(items[i]);
-        if (len + 8 > maxw) maxw = len + 8;
-    }
-    bw = maxw + 4;
-    if (bw > term_cols - 4) bw = term_cols - 4;
-    bh = count + 4;
-    if (bh > term_rows - 4) bh = term_rows - 4;
-    bx = (term_cols - bw) / 2 + 1;
-    by = (term_rows - bh) / 2;
-    if (by < 3) by = 3;
-    view_h = bh - 4;
-
-    tui_draw_screen(title, help);
-    tui_draw_box(by, bx, bh, bw, title);
-
-    for (;;) {
-        if (sel < scroll) scroll = sel;
-        if (sel >= scroll + view_h) scroll = sel - view_h + 1;
-
-        for (i = 0; i < view_h; i++) {
-            int idx = scroll + i;
-            tui_goto(by + 2 + i, bx + 2);
-            if (idx < count) {
-                if (idx == sel) {
-                    printf("%s", CLR_SELECT);
-                } else {
-                    printf("%s", CLR_MENU);
-                }
-                printf(" %-*.*s ", bw - 8, bw - 8, items[idx]);
-            } else {
-                printf("%s%-*s", CLR_MENU, bw - 6, "");
-            }
-        }
-
-        if (count > view_h) {
-            sb_h = view_h;
-            sb_pos = (sel * (sb_h - 1)) / (count - 1);
-            for (i = 0; i < sb_h; i++) {
-                tui_goto(by + 2 + i, bx + bw - 3);
-                if (i == sb_pos)
-                    printf("%s#%s", CLR_SELECT, CLR_BORDER);
-                else
-                    printf("%s:%s", CLR_DIM, CLR_BORDER);
-            }
-        }
-
-        printf("%s", CLR_NORMAL);
-        fflush(stdout);
-
-        key = tui_read_key();
-        if (key == KEY_UP) {
-            if (sel > 0) sel--;
-        } else if (key == KEY_DOWN) {
-            if (sel < count - 1) sel++;
-        } else if (key == KEY_ENTER) {
-            return sel;
-        } else if (key == KEY_ESC) {
-            return -1;
-        }
-    }
-}
-
-static int tui_confirm(const char *title, const char *msg)
-{
-    int sel;
-    int bw;
-    int bh;
-    int bx;
-    int by;
-    int key;
-    int mlen;
-    int tlen;
-
-    sel = 0;
-    mlen = (int)strlen(msg);
-    tlen = (int)strlen(title);
-    bw = mlen + 6;
-    if (tlen + 6 > bw) bw = tlen + 6;
-    if (bw < 30) bw = 30;
-    if (bw > term_cols - 4) bw = term_cols - 4;
-    bh = 8;
-    bx = (term_cols - bw) / 2 + 1;
-    by = (term_rows - bh) / 2;
-    if (by < 3) by = 3;
-
-    tui_draw_screen(title, " <Tab> Switch  <Enter> Select");
-    tui_draw_box(by, bx, bh, bw, title);
-    tui_center_text(by + 2, bx, bw, CLR_MENU, msg);
-
-    for (;;) {
-        tui_goto(by + 5, bx + bw / 2 - 9);
-        if (sel == 0)
-            printf("%s< Yes  >%s  %s[  No  ]%s", CLR_BTN_SEL, CLR_MENU, CLR_BTN, CLR_NORMAL);
-        else
-            printf("%s[ Yes  ]%s  %s<  No  >%s", CLR_BTN, CLR_MENU, CLR_BTN_SEL, CLR_NORMAL);
-
-        fflush(stdout);
-
-        key = tui_read_key();
-        if (key == KEY_TAB || key == KEY_LEFT || key == KEY_RIGHT) {
-            sel = !sel;
-        } else if (key == KEY_ENTER) {
-            return (sel == 0) ? 1 : 0;
-        } else if (key == KEY_ESC) {
-            return 0;
-        } else if (key == 'y' || key == 'Y') {
-            return 1;
-        } else if (key == 'n' || key == 'N') {
-            return 0;
-        }
-    }
-}
-
-static void tui_msgbox(const char *title, const char *msg)
-{
-    int bw;
-    int bh;
-    int bx;
-    int by;
-    int key;
-    int mlen;
-    int tlen;
-
-    mlen = (int)strlen(msg);
-    tlen = (int)strlen(title);
-    bw = mlen + 6;
-    if (tlen + 6 > bw) bw = tlen + 6;
-    if (bw < 24) bw = 24;
-    if (bw > term_cols - 4) bw = term_cols - 4;
-    bh = 7;
-    bx = (term_cols - bw) / 2 + 1;
-    by = (term_rows - bh) / 2;
-    if (by < 3) by = 3;
-
-    tui_draw_screen(title, " <Enter> OK");
-    tui_draw_box(by, bx, bh, bw, title);
-    tui_center_text(by + 2, bx, bw, CLR_MENU, msg);
-    tui_goto(by + 4, bx + bw / 2 - 3);
-    printf("%s< OK >%s", CLR_BTN_SEL, CLR_NORMAL);
-    fflush(stdout);
-
-    for (;;) {
-        key = tui_read_key();
-        if (key == KEY_ENTER || key == KEY_ESC) return;
-    }
-}
-
-static int tui_input(const char *title, const char *prompt, char *buf, int maxlen, int hidden)
-{
-    int bw;
-    int bh;
-    int bx;
-    int by;
-    int key;
-    int len;
-    int plen;
-    int tlen;
-    int fw;
-    int i;
-
-    len = 0;
-    buf[0] = '\0';
-    plen = (int)strlen(prompt);
-    tlen = (int)strlen(title);
-    bw = 50;
-    if (plen + 6 > bw) bw = plen + 6;
-    if (tlen + 6 > bw) bw = tlen + 6;
-    if (bw > term_cols - 4) bw = term_cols - 4;
-    bh = 8;
-    bx = (term_cols - bw) / 2 + 1;
-    by = (term_rows - bh) / 2;
-    if (by < 3) by = 3;
-    fw = bw - 6;
-    if (maxlen - 1 < fw) fw = maxlen - 1;
-
-    tui_draw_screen(title, " <Enter> Confirm  <Esc> Cancel");
-    tui_draw_box(by, bx, bh, bw, title);
-
-    tui_goto(by + 2, bx + 2);
-    printf("%s%s", CLR_MENU, prompt);
-
-    tui_goto(by + 6, bx + bw / 2 - 3);
-    printf("%s< OK >%s", CLR_BTN, CLR_NORMAL);
-
-    for (;;) {
-        tui_goto(by + 4, bx + 3);
-        printf("%s", CLR_INPUT);
-        if (hidden) {
-            for (i = 0; i < len && i < fw; i++) putchar('*');
-        } else {
-            for (i = 0; i < len && i < fw; i++) putchar(buf[i]);
-        }
-        for (i = len; i < fw; i++) putchar(' ');
-
-        printf("%s", CLR_NORMAL);
-        tui_goto(by + 4, bx + 3 + len);
-        tui_show_cursor();
-        fflush(stdout);
-
-        key = tui_read_key();
-        tui_hide_cursor();
-
-        if (key == KEY_ENTER) {
-            buf[len] = '\0';
-            return len;
-        } else if (key == KEY_ESC) {
-            buf[0] = '\0';
-            return -1;
-        } else if (key == KEY_BKSP) {
-            if (len > 0) len--;
-        } else if (key >= 32 && key < 127 && len < fw) {
-            buf[len++] = (char)key;
-        }
-        buf[len] = '\0';
-    }
-}
-
-static int prog_drawn;
-static int prog_bx;
-static int prog_by;
-static int prog_bw;
-static int log_by;
-static int log_bh;
-#define LOG_MAX 8
-static char log_lines[LOG_MAX][64];
-static int log_count;
-
-static void tui_progress(const char *title, const char *msg, int pct)
-{
-    int bar_w;
-    int filled;
-    int i;
-    int mw;
-    int prog_h;
-
-    prog_bw = 56;
-    if (prog_bw > term_cols - 4) prog_bw = term_cols - 4;
-    prog_h = 8;
-    log_bh = 10;
-    if (log_bh > term_rows - prog_h - 6) log_bh = term_rows - prog_h - 6;
-    if (log_bh < 4) log_bh = 4;
-    prog_bx = (term_cols - prog_bw) / 2 + 1;
-    prog_by = 3;
-    log_by = prog_by + prog_h;
-    bar_w = prog_bw - 8;
-    if (bar_w < 1) bar_w = 1;
-    mw = prog_bw - 6;
-    if (mw < 1) mw = 1;
-
-    if (!prog_drawn) {
-        tui_draw_screen(title, " Please wait...");
-        tui_draw_box(prog_by, prog_bx, prog_h, prog_bw, "Installing");
-        tui_draw_box(log_by, prog_bx, log_bh, prog_bw, "Log");
-        fflush(stdout);
-        log_count = 0;
-        prog_drawn = 1;
-    }
-
-    tui_goto(prog_by + 2, prog_bx + 3);
-    printf("%s%-*.*s", CLR_MENU, mw, mw, msg);
-
-    filled = (pct * bar_w) / 100;
-    if (filled > bar_w) filled = bar_w;
-
-    tui_goto(prog_by + 4, prog_bx + 4);
-    printf("%s", CLR_PROG);
-    for (i = 0; i < filled; i++) putchar(' ');
-    printf("%s", CLR_PROG_BG);
-    for (i = filled; i < bar_w; i++) putchar(' ');
-
-    tui_goto(prog_by + 5, prog_bx + prog_bw / 2 - 2);
-    printf("%s%3d%%", CLR_MENU, pct);
-
-    printf("%s", CLR_NORMAL);
-    fflush(stdout);
-}
-
-static void tui_progress_reset(void)
-{
-    prog_drawn = 0;
-}
-
-static void tui_log(const char *msg)
-{
-    int log_area;
-    int i;
-    int mw;
-
-    log_area = log_bh - 2;
-    if (log_area > LOG_MAX) log_area = LOG_MAX;
-    if (log_area < 1) return;
-    mw = prog_bw - 6;
-    if (mw < 1) mw = 1;
-    if (mw > 63) mw = 63;
-
-    if (log_count < log_area) {
-        strncpy(log_lines[log_count], msg, mw);
-        log_lines[log_count][mw] = '\0';
-        log_count++;
-    } else {
-        for (i = 0; i < log_area - 1; i++)
-            strcpy(log_lines[i], log_lines[i + 1]);
-        strncpy(log_lines[log_area - 1], msg, mw);
-        log_lines[log_area - 1][mw] = '\0';
-    }
-
-    for (i = 0; i < log_count && i < log_area; i++) {
-        tui_goto(log_by + 1 + i, prog_bx + 3);
-        printf("%s%-*s", CLR_DIM, mw, log_lines[i]);
-    }
-
-    printf("%s", CLR_NORMAL);
-    fflush(stdout);
-}
 
 static int inst_disk_read(const char *devpath, uint32_t lba, uint32_t count, void *buf)
 {
@@ -933,17 +317,23 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     int fd_out;
     int r;
     int use_posix;
+    struct stat src_st;
+    mode_t src_mode;
 
     if (!copy_buf) return -1;
 
     fd_in = vfs_open(src, 0);
     if (fd_in < 0) return -1;
 
+    src_mode = 0644;
+    if (stat(src, &src_st) == 0)
+        src_mode = src_st.st_mode & 07777;
+
     use_posix = 0;
-    vfs_create(dst, 0644);
+    vfs_create(dst, src_mode);
     fd_out = vfs_open(dst, 2);
     if (fd_out < 0) {
-        fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, src_mode);
         if (fd_out < 0) {
             vfs_close_fd(fd_in);
             return -1;
@@ -972,6 +362,9 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         close(fd_out);
     else
         vfs_close_fd(fd_out);
+
+    chmod(dst, src_mode);
+
     return 0;
 }
 
@@ -1011,6 +404,8 @@ static int inst_count_dir_entries(const char *path)
         if (inst_pkg_skip(sub)) continue;
         if (type == 2) {
             count += inst_count_dir_entries(sub);
+        } else if (type == 6) {
+            count++;
         } else {
             count++;
         }
@@ -1056,6 +451,21 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
         if (type == 2) {
             if (inst_copy_dir_recursive(src_path, dst_path, skip) < 0)
                 errors++;
+        } else if (type == 6) {
+            snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+                errors++;
+            chmod(dst_path, 0755);
+            copy_done++;
+            if (copy_total > 0) {
+                pct = (copy_done * 100) / copy_total;
+                if (pct > 99) pct = 99;
+                if (pct != copy_last_pct) {
+                    copy_last_pct = pct;
+                    lebui_progress_update(&prog_st, src_path, pct);
+                    lebui_progress_log(&prog_st, src_path);
+                }
+            }
         } else {
             if (inst_copy_file_vfs(src_path, dst_path) < 0) {
                 errors++;
@@ -1066,8 +476,8 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
                 if (pct > 99) pct = 99;
                 if (pct != copy_last_pct) {
                     copy_last_pct = pct;
-                    tui_progress("Installing", src_path, pct);
-                    tui_log(src_path);
+                    lebui_progress_update(&prog_st, src_path, pct);
+                    lebui_progress_log(&prog_st, src_path);
                 }
             }
         }
@@ -1490,10 +900,10 @@ static int inst_write_timezone(const char *mountpoint, const char *tz)
 
 static void cleanup_exit(void)
 {
-    tui_show_cursor();
+    lebui_show_cursor();
     printf("\033[?1049l");
     fflush(stdout);
-    tui_restore_mode();
+    lebui_raw_disable();
 }
 
 #define STEP_DISK    0
@@ -1525,13 +935,13 @@ static int step_disk(int *disk_idx)
         disk_items[i] = disk_labels[i];
     }
 
-    choice = tui_menu("Select Disk", (const char **)disk_items, disk_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back");
+    choice = lebui_menu_auto("Select Disk", (const char **)disk_items, disk_count,
+                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
     if (choice < 0) return -1;
 
     if (disks[choice].part_count == 0) {
-        tui_msgbox("No Partitions",
-                   "No partitions on this disk. Use ldiskutil first.");
+        lebui_msgbox_auto("No Partitions",
+                   "No partitions on this disk. Use ldiskutil first.", term_sz.rows, term_sz.cols);
         return -1;
     }
 
@@ -1565,9 +975,9 @@ static int step_partition(int disk_idx, int *part_idx)
         part_items[i] = part_labels[i];
     }
 
-    choice = tui_menu("Select Partition", (const char **)part_items,
+    choice = lebui_menu_auto("Select Partition", (const char **)part_items,
                        d->part_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back");
+                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
     if (choice < 0) return -1;
 
     *part_idx = choice;
@@ -1576,7 +986,7 @@ static int step_partition(int disk_idx, int *part_idx)
 
 static int step_format(int *do_format)
 {
-    *do_format = tui_confirm("Format", "Format partition as ext4?");
+    *do_format = lebui_confirm_auto("Format", "Format partition as ext4?", term_sz.rows, term_sz.cols);
     return 0;
 }
 
@@ -1604,8 +1014,8 @@ static int step_packages(void)
     for (i = 0; i < PKG_COUNT; i++) tmp[i] = pkg_selected[i];
     tmp[PKG_CORE] = -1;
 
-    if (tui_checklist("Package Selection", pkg_names, tmp, PKG_COUNT,
-                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel") < 0)
+    if (lebui_checklist_auto("Package Selection", pkg_names, tmp, PKG_COUNT,
+                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel", term_sz.rows, term_sz.cols) < 0)
         return -1;
 
     tmp[PKG_CORE] = 1;
@@ -1635,9 +1045,9 @@ static int step_user_setup(void)
         menu_items[user_count + (user_count < MAX_USERS ? 1 : 0)] =
             menu_labels[user_count + (user_count < MAX_USERS ? 1 : 0)];
 
-        choice = tui_menu("User Accounts", (const char **)menu_items,
+        choice = lebui_menu_auto("User Accounts", (const char **)menu_items,
                            user_count + (user_count < MAX_USERS ? 2 : 1),
-                           " \x18\x19 Move  <Enter> Select  <Esc> Back");
+                           " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
         if (choice < 0) return 0;
 
         if (choice == user_count + (user_count < MAX_USERS ? 1 : 0)) {
@@ -1645,27 +1055,27 @@ static int step_user_setup(void)
         }
 
         if (user_count < MAX_USERS && choice == user_count) {
-            if (tui_input("New User", "Enter username:", users[user_count].username,
-                          sizeof(users[user_count].username), 0) < 0)
+            if (lebui_input_ex("New User", "Enter username:", users[user_count].username,
+                          sizeof(users[user_count].username), 0, term_sz.rows, term_sz.cols) < 0)
                 continue;
             if (users[user_count].username[0] == '\0') {
-                tui_msgbox("Error", "Username cannot be empty.");
+                lebui_msgbox_auto("Error", "Username cannot be empty.", term_sz.rows, term_sz.cols);
                 continue;
             }
             for (;;) {
-                if (tui_input("New User", "Enter password (empty=none):",
+                if (lebui_input_ex("New User", "Enter password (empty=none):",
                               users[user_count].password,
-                              sizeof(users[user_count].password), 1) < 0)
+                              sizeof(users[user_count].password), 1, term_sz.rows, term_sz.cols) < 0)
                     break;
                 if (users[user_count].password[0] == '\0') {
                     user_count++;
                     break;
                 }
-                if (tui_input("New User", "Confirm password:",
-                              password2, sizeof(password2), 1) < 0)
+                if (lebui_input_ex("New User", "Confirm password:",
+                              password2, sizeof(password2), 1, term_sz.rows, term_sz.cols) < 0)
                     break;
                 if (strcmp(users[user_count].password, password2) != 0) {
-                    tui_msgbox("Error", "Passwords do not match.");
+                    lebui_msgbox_auto("Error", "Passwords do not match.", term_sz.rows, term_sz.cols);
                     continue;
                 }
                 memset(password2, 0, sizeof(password2));
@@ -1673,7 +1083,7 @@ static int step_user_setup(void)
                 break;
             }
         } else if (choice < user_count) {
-            if (tui_confirm("Remove User", users[choice].username)) {
+            if (lebui_confirm_auto("Remove User", users[choice].username, term_sz.rows, term_sz.cols)) {
                 memset(users[choice].password, 0, sizeof(users[choice].password));
                 for (i = choice; i < user_count - 1; i++)
                     users[i] = users[i + 1];
@@ -1689,16 +1099,16 @@ static int step_rootpw(void)
     char pw2[64];
 
     for (;;) {
-        if (tui_input("Root Password", "Enter root password (empty=none):", pw1, sizeof(pw1), 1) < 0)
+        if (lebui_input_ex("Root Password", "Enter root password (empty=none):", pw1, sizeof(pw1), 1, term_sz.rows, term_sz.cols) < 0)
             return -1;
         if (pw1[0] == '\0') {
             root_password[0] = '\0';
             return 0;
         }
-        if (tui_input("Root Password", "Confirm root password:", pw2, sizeof(pw2), 1) < 0)
+        if (lebui_input_ex("Root Password", "Confirm root password:", pw2, sizeof(pw2), 1, term_sz.rows, term_sz.cols) < 0)
             return -1;
         if (strcmp(pw1, pw2) != 0) {
-            tui_msgbox("Error", "Passwords do not match.");
+            lebui_msgbox_auto("Error", "Passwords do not match.", term_sz.rows, term_sz.cols);
             continue;
         }
         strncpy(root_password, pw1, sizeof(root_password) - 1);
@@ -1717,8 +1127,8 @@ static int step_timezone(int *tz_idx)
     tz_count = 0;
     while (timezones[tz_count]) tz_count++;
 
-    choice = tui_menu("Select Timezone", timezones, tz_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back");
+    choice = lebui_menu_auto("Select Timezone", timezones, tz_count,
+                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
     if (choice < 0) return -1;
 
     *tz_idx = choice;
@@ -1740,21 +1150,22 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
 
-    tui_progress_reset();
-    tui_progress("Installing", "Preparing...", 0);
+    lebui_progress_reset(&prog_st);
+    lebui_progress_init(&prog_st, "Installing", term_sz.rows, term_sz.cols);
+    lebui_progress_update(&prog_st, "Preparing...", 0);
     usleep(50000);
 
     if (do_format) {
-        tui_progress("Installing", "Formatting partition...", 0);
+        lebui_progress_update(&prog_st, "Formatting partition...", 0);
         snprintf(fmsg, sizeof(fmsg), "Formatting %s as ext4...", p->devpath);
-        tui_log(fmsg);
+        lebui_progress_log(&prog_st, fmsg);
         fret = inst_format_ext4(p->devpath);
         if (fret != 0) {
             snprintf(fmsg, sizeof(fmsg), "Failed to format partition (status=%d, path=%s).", fret, p->devpath);
-            tui_msgbox("Error", fmsg);
+            lebui_msgbox_auto("Error", fmsg, term_sz.rows, term_sz.cols);
             return -1;
         }
-        tui_log("Format complete.");
+        lebui_progress_log(&prog_st, "Format complete.");
     }
 
     snprintf(mountpoint, sizeof(mountpoint), "/tmp/lebinstall");
@@ -1762,41 +1173,45 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     vfs_mkdir(mountpoint, 0755);
     inst_umount_partition(mountpoint);
 
-    tui_progress("Installing", "Mounting partition...", 5);
+    lebui_progress_update(&prog_st, "Mounting partition...", 5);
     snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
-    tui_log(logbuf);
+    lebui_progress_log(&prog_st, logbuf);
     if (inst_mount_partition(p->devpath, mountpoint) != 0) {
-        tui_msgbox("Error", "Failed to mount partition.");
+        lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
         return -1;
     }
-    tui_log("Partition mounted.");
+    lebui_progress_log(&prog_st, "Partition mounted.");
 
-    tui_progress("Installing", "Counting files...", 10);
-    tui_log("Counting files to copy...");
+    lebui_progress_update(&prog_st, "Counting files...", 10);
+    lebui_progress_log(&prog_st, "Counting files to copy...");
     copy_total = inst_count_rootfs();
     if (copy_total < 1) copy_total = 100;
     copy_done = 0;
     copy_last_pct = -1;
 
-    tui_log("Copying rootfs...");
+    lebui_progress_log(&prog_st, "Copying rootfs...");
     inst_init_copy_buf();
     if (inst_copy_rootfs(mountpoint) < 0) {
-        tui_log("Warning: some files could not be copied.");
+        lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
     }
-    tui_log("Rootfs copy complete.");
+    lebui_progress_log(&prog_st, "Rootfs copy complete.");
 
-    tui_progress("Installing", "Installing bootloader...", 96);
-    tui_log("Installing GRUB bootloader...");
+    lebui_progress_update(&prog_st, "Installing bootloader...", 96);
+    lebui_progress_log(&prog_st, "Installing GRUB bootloader...");
     if (inst_install_boot(mountpoint, d->devpath, p->devpath, p->number) < 0) {
-        tui_log("Warning: bootloader had errors.");
+        lebui_progress_log(&prog_st, "Warning: bootloader had errors.");
     } else {
-        tui_log("Bootloader installed.");
+        lebui_progress_log(&prog_st, "Bootloader installed.");
     }
+
+    free(copy_buf);
+    copy_buf = NULL;
+    copy_buf_size = 0;
 
     for (i = 0; i < user_count; i++) {
-        tui_progress("Installing", "Creating user accounts...", 97);
+        lebui_progress_update(&prog_st, "Creating user accounts...", 97);
         snprintf(logbuf, sizeof(logbuf), "Creating user: %s", users[i].username);
-        tui_log(logbuf);
+        lebui_progress_log(&prog_st, logbuf);
         inst_create_user(mountpoint, users[i].username, users[i].password, 1000 + i);
     }
 
@@ -1814,7 +1229,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
         int line_end;
         int j;
 
-        tui_progress("Installing", "Setting root password...", 98);
+        lebui_progress_update(&prog_st, "Setting root password...", 98);
         hashed = inst_hash_password(root_password);
         if (hashed) {
             snprintf(shadow_path, sizeof(shadow_path), "%s/etc/shadow", mountpoint);
@@ -1858,24 +1273,24 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
             }
         }
         memset(root_password, 0, sizeof(root_password));
-        tui_log("Root password updated.");
+        lebui_progress_log(&prog_st, "Root password updated.");
     }
 
-    tui_progress("Installing", "Setting timezone...", 99);
+    lebui_progress_update(&prog_st, "Setting timezone...", 99);
     snprintf(logbuf, sizeof(logbuf), "Timezone: %s", tz_values[tz_idx]);
-    tui_log(logbuf);
+    lebui_progress_log(&prog_st, logbuf);
     inst_write_timezone(mountpoint, tz_values[tz_idx]);
 
-    tui_log("Unmounting...");
+    lebui_progress_log(&prog_st, "Unmounting...");
     inst_umount_partition(mountpoint);
 
-    tui_progress("Installing", "Installation complete!", 100);
-    tui_log("Done!");
+    lebui_progress_update(&prog_st, "Installation complete!", 100);
+    lebui_progress_log(&prog_st, "Done!");
 
     snprintf(donemsg, sizeof(donemsg),
              "Lebirun installed to %s. Reboot to start.",
              p->devpath);
-    tui_msgbox("Complete", donemsg);
+    lebui_msgbox_auto("Complete", donemsg, term_sz.rows, term_sz.cols);
 
     return 0;
 }
@@ -1909,23 +1324,24 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IOFBF, 8192);
 
-    tui_get_size();
-    tui_raw_mode();
+    lebui_get_size(&term_sz);
+    lebui_raw_enable();
     printf("\033[?1049h");
     fflush(stdout);
-    tui_hide_cursor();
+    lebui_hide_cursor();
 
     if (getuid() != 0) {
-        tui_msgbox("Error", "This installer must be run as root.");
+        lebui_msgbox_auto("Error", "This installer must be run as root.", term_sz.rows, term_sz.cols);
         cleanup_exit();
         return 1;
     }
 
-    tui_progress_reset();
-    tui_progress("Scanning", "Scanning for disks...", 0);
+    lebui_progress_reset(&prog_st);
+    lebui_progress_init(&prog_st, "Scanning", term_sz.rows, term_sz.cols);
+    lebui_progress_update(&prog_st, "Scanning for disks...", 0);
 
     if (inst_enumerate_disks() <= 0) {
-        tui_msgbox("Error", "No disks found.");
+        lebui_msgbox_auto("Error", "No disks found.", term_sz.rows, term_sz.cols);
         cleanup_exit();
         return 1;
     }
@@ -1974,10 +1390,10 @@ int main(int argc, char **argv)
             items[i] = labels[i];
         }
 
-        sel = tui_menu("Installation Steps", (const char **)items, STEP_COUNT,
-                        " \x18\x19 Move  <Enter> Select  <Esc> Quit");
+        sel = lebui_menu_auto("Installation Steps", (const char **)items, STEP_COUNT,
+                        " \x18\x19 Move  <Enter> Select  <Esc> Quit", term_sz.rows, term_sz.cols);
         if (sel < 0) {
-            if (tui_confirm("Quit", "Exit the installer?")) {
+            if (lebui_confirm_auto("Quit", "Exit the installer?", term_sz.rows, term_sz.cols)) {
                 cleanup_exit();
                 return 0;
             }
@@ -1996,7 +1412,7 @@ int main(int argc, char **argv)
 
         case STEP_PART:
             if (status[STEP_DISK] != STEP_DONE) {
-                tui_msgbox("Error", "Select a disk first.");
+                lebui_msgbox_auto("Error", "Select a disk first.", term_sz.rows, term_sz.cols);
                 break;
             }
             ret = step_partition(disk_idx, &part_idx);
@@ -2038,10 +1454,10 @@ int main(int argc, char **argv)
 
         case STEP_INSTALL:
             if (status[STEP_DISK] != STEP_DONE || status[STEP_PART] != STEP_DONE) {
-                tui_msgbox("Error", "Select a disk and partition first.");
+                lebui_msgbox_auto("Error", "Select a disk and partition first.", term_sz.rows, term_sz.cols);
                 break;
             }
-            if (!tui_confirm("Confirm", "Proceed with installation?"))
+            if (!lebui_confirm_auto("Confirm", "Proceed with installation?", term_sz.rows, term_sz.cols))
                 break;
             ret = step_do_install(disk_idx, part_idx, do_format, tz_idx);
             if (ret == 0) {

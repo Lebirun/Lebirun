@@ -634,24 +634,6 @@ void kernel_main(void) {
 
     net_init();
 
-    tls_init();
-    {
-        vfs_node_t *ca_node;
-        ca_node = vfs_namei("/etc/ssl/certs/ca-certificates.crt");
-        if (ca_node && ca_node->length > 0) {
-            uint8_t *ca_buf;
-            ca_buf = (uint8_t *)kmalloc(ca_node->length);
-            if (ca_buf) {
-                uint32_t rd;
-                rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
-                if (rd > 0) {
-                    tls_load_ca_certs(ca_buf, rd);
-                }
-                kfree(ca_buf);
-            }
-        }
-    }
-
     if (debug_boot_hw) terminal_writestring("BOOT: About to execute STI...\n");
     asm volatile ("sti");
     if (debug_boot_hw) terminal_writestring("BOOT: STI completed! Interrupts enabled.\n");

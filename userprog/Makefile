@@ -60,7 +60,10 @@ stage-LebInit:
 stage-login:
 	$(MAKE) -C login V=$(V) stage
 
-stage-lebinstaller:
+stage-liblebui:
+	$(MAKE) -C liblebui V=$(V) all
+
+stage-lebinstaller: stage-liblebui
 	$(MAKE) -C lebinstaller V=$(V) stage
 
 lsh.bin: bin/lsh.bin
@@ -95,3 +98,4 @@ clean:
 	rm -rf build $(BINDIR)
 	rm -f $(SYSROOT_BIN)/lsh
 	rm -f $(SYSROOT_BIN)/sh
+	$(MAKE) -C liblebui clean

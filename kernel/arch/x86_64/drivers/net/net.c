@@ -25,30 +25,28 @@ void net_poll(void) {
     netif_poll_all();
 }
 
-static volatile int dhcp_start_pending = 0;
+static int net_hw_initialized;
+static int net_has_interface;
 
-static void net_worker_thread(void) {
+void net_ensure_hw(void) {
     netif_t *netif;
     int i;
 
-    if (dhcp_start_pending) {
-        dhcp_start_pending = 0;
-        netif = netif_get_default();
-        if (netif) {
-            for (i = 0; i < 10; i++) {
-                sleep_ms(10);
-                netif_poll_all();
-                if (netif->link_up) break;
-            }
-            dhcp_start(netif);
-            for (i = 0; i < 500; i++) {
-                sleep_ms(10);
-                netif_poll_all();
-                if (dhcp_is_bound(netif)) break;
-            }
-        }
-    }
+    if (!net_has_interface) return;
+    if (net_hw_initialized) return;
+    net_hw_initialized = 1;
 
+    netif = netif_get_default();
+    if (!netif) return;
+
+    for (i = 0; i < 10; i++) {
+        sleep_ms(10);
+        netif_poll_all();
+        if (netif->link_up) break;
+    }
+}
+
+static void net_worker_thread(void) {
     while (1) {
         if (net_work_pending) {
             net_work_pending = 0;
@@ -66,8 +64,8 @@ static void net_worker_thread(void) {
 }
 
 void net_init(void) {
-    netif_t *netif;
     task_t *nt;
+    netif_t *netif;
 
     printf("NET: Initializing network stack...\n");
 
@@ -81,12 +79,11 @@ void net_init(void) {
 
     if (e1000_init() < 0) {
         printf("NET: No network interface available\n");
-        return;
-    }
-
-    netif = netif_get_default();
-    if (netif) {
-        dhcp_init(netif);
+    } else {
+        net_has_interface = 1;
+        netif = netif_get_default();
+        if (netif)
+            dhcp_init(netif);
     }
 
     nt = create_kernel_task(net_worker_thread, TASK_READY);

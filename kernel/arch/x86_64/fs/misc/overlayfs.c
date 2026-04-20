@@ -19,6 +19,29 @@ static struct {
 } ov_node_cache[OVERLAY_NODE_CACHE_SIZE];
 static uint64_t ov_node_cache_count = 0;
 
+void overlay_flush_cache(void) {
+    uint64_t i;
+    overlay_node_t *onode;
+
+    for (i = 0; i < ov_node_cache_count; i++) {
+        onode = ov_node_cache[i].onode;
+        if (!onode) continue;
+        onode->refcount--;
+        if (onode->refcount <= 0) {
+            if (onode->lower_node) {
+                vfs_close(onode->lower_node);
+                onode->lower_node = NULL;
+            }
+            if (onode->upper_node) {
+                vfs_close(onode->upper_node);
+                onode->upper_node = NULL;
+            }
+            kfree(onode);
+        }
+    }
+    ov_node_cache_count = 0;
+}
+
 static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
     uint64_t i;
     for (i = 0; i < ov_node_cache_count; i++) {
@@ -37,6 +60,20 @@ static int ov_cache_contains(overlay_node_t *onode) {
             return 1;
     }
     return 0;
+}
+
+static void ov_cache_remove(overlay_node_t *onode) {
+    uint64_t i;
+    for (i = 0; i < ov_node_cache_count; i++) {
+        if (ov_node_cache[i].onode == onode) {
+            ov_node_cache_count--;
+            if (i < ov_node_cache_count) {
+                memmove(&ov_node_cache[i], &ov_node_cache[i + 1],
+                        (ov_node_cache_count - i) * sizeof(ov_node_cache[0]));
+            }
+            return;
+        }
+    }
 }
 
 static void ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
@@ -125,6 +162,9 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
     
     onode->lower_node = lower;
     onode->upper_node = upper;
+
+    if (lower) lower->ref_count++;
+    if (upper) upper->ref_count++;
     
     effective = upper ? upper : lower;
     if (!effective) {
@@ -180,7 +220,7 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
     lower = onode->lower_node;
     if (!lower) return -1;
     if (onode->upper_node) return 0;
-    
+
     last_slash = -1;
     for (i = 0; path[i]; i++) {
         if (path[i] == '/') last_slash = i;
@@ -250,7 +290,7 @@ static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t siz
     
     effective = onode->upper_node ? onode->upper_node : onode->lower_node;
     if (!effective) return 0;
-    
+
     return vfs_read(effective, offset, size, buffer);
 }
 
@@ -296,6 +336,7 @@ static void overlay_vfs_open(vfs_node_t *node, uint64_t flags) {
 
 static void overlay_vfs_close(vfs_node_t *node) {
     overlay_node_t *onode;
+    vfs_node_t *effective;
 
     if (!node) return;
     
@@ -304,9 +345,13 @@ static void overlay_vfs_close(vfs_node_t *node) {
 
     if (node == overlay_ctx.merged_root) return;
 
+    effective = onode->upper_node ? onode->upper_node : onode->lower_node;
+    if (effective) vfs_close(effective);
+
     onode->refcount--;
     if (onode->refcount > 0) return;
-    if (ov_cache_contains(onode)) return;
+
+    ov_cache_remove(onode);
 
     if (onode->lower_node)
         vfs_close(onode->lower_node);
@@ -501,7 +546,7 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     if (!upper_result && !lower_result) {
         return NULL;
     }
-    
+
     result = overlay_wrap_node(lower_result, upper_result, name);
     if (result) {
         result->parent = node;

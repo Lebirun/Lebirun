@@ -180,6 +180,7 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
         if (!parent) return -ENOENT;
 
         ret = vfs_create(parent, filename, VFS_FILE);
+        vfs_release(parent);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
         } else if (ret == 0) {
@@ -194,11 +195,12 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
     }
 
     if ((flags & 0200000) && VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
+        vfs_release(node);
         return -ENOTDIR;
     }
 
     fd = task_fd_alloc_from(0);
-    if (fd < 0) return fd;
+    if (fd < 0) { vfs_release(node); return fd; }
 
     vfs_open(node, (uint64_t)flags);
     current_task->fds[fd].type = FD_TYPE_FILE;
@@ -246,7 +248,12 @@ static int sys_mkdirat(int dirfd, const char *pathname, int mode) {
     vfs_node_t *parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
     
-    return vfs_mkdir(parent, dirname, (uint64_t)mode);
+    {
+        int r;
+        r = vfs_mkdir(parent, dirname, (uint64_t)mode);
+        vfs_release(parent);
+        return r;
+    }
 }
 
 static int sys_mknodat(int dirfd, const char *pathname, int mode) {
@@ -274,9 +281,13 @@ static int sys_fchownat(int dirfd, const char *pathname, int owner) {
     if (!node) return -ENOENT;
 
     if (node->chown) {
-        return node->chown(node, (uint64_t)owner, node->gid);
+        int r;
+        r = node->chown(node, (uint64_t)owner, node->gid);
+        vfs_release(node);
+        return r;
     }
     if (owner != -1) node->uid = (uint64_t)owner;
+    vfs_release(node);
     return 0;
 }
 
@@ -338,12 +349,19 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
         else
             pshift = 0;
         pallowed = (int)((pmode >> pshift) & 7);
-        if (!(pallowed & VFS_PERM_WRITE))
+        if (!(pallowed & VFS_PERM_WRITE)) {
+            vfs_release(parent);
             return -EACCES;
+        }
     }
 
     (void)flags;
-    return vfs_unlink(parent, filename);
+    {
+        int r;
+        r = vfs_unlink(parent, filename);
+        vfs_release(parent);
+        return r;
+    }
 }
 
 static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath_arg) {
@@ -375,6 +393,7 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
 
     old_parent = old_node->parent;
     if (!old_parent || !old_parent->rename) {
+        vfs_release(old_node);
         return ramfs_rename(old_path, new_path) ? -ENOENT : 0;
     }
 
@@ -401,7 +420,10 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     }
 
     new_parent = vfs_namei(new_parent_path);
-    if (!new_parent) return -ENOENT;
+    if (!new_parent) {
+        vfs_release(old_node);
+        return -ENOENT;
+    }
 
     len = 0;
     while (old_path[len]) len++;
@@ -413,7 +435,13 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     for (i = last_slash + 1; i < len && k < 63; i++) old_name[k++] = old_path[i];
     old_name[k] = '\0';
 
-    return old_parent->rename(old_parent, old_name, new_parent, new_name);
+    {
+        int r;
+        r = old_parent->rename(old_parent, old_name, new_parent, new_name);
+        vfs_release(old_node);
+        vfs_release(new_parent);
+        return r;
+    }
 }
 
 static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
@@ -456,10 +484,14 @@ static int sys_readlinkat(int dirfd, const char *pathname, int buf_ptr) {
 
     vfs_node_t *node = vfs_namei_nofollow(path);
     if (!node) return -ENOENT;
-    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) return -EINVAL;
+    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) {
+        vfs_release(node);
+        return -EINVAL;
+    }
 
     char target[VFS_MAX_PATH];
     uint64_t n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
+    vfs_release(node);
     if (n >= sizeof(target)) n = sizeof(target) - 1;
     target[n] = '\0';
 
@@ -481,13 +513,19 @@ static int sys_fchmodat(int dirfd, const char *pathname, int mode) {
     node = vfs_namei(path);
     if (!node) return -ENOENT;
 
-    if (current_task->euid != 0 && current_task->euid != node->uid)
+    if (current_task->euid != 0 && current_task->euid != node->uid) {
+        vfs_release(node);
         return -EPERM;
+    }
 
     if (node->chmod) {
-        return node->chmod(node, (uint64_t)mode & 07777);
+        int r;
+        r = node->chmod(node, (uint64_t)mode & 07777);
+        vfs_release(node);
+        return r;
     }
     node->mask = (uint64_t)mode & 07777;
+    vfs_release(node);
     return 0;
 }
 
@@ -509,11 +547,11 @@ static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     node = vfs_namei(path);
     if (!node) return -ENOENT;
 
-    if (mode == 0) return 0;
+    if (mode == 0) { vfs_release(node); return 0; }
 
     uid = current_task->euid;
     gid = current_task->egid;
-    if (uid == 0) return 0;
+    if (uid == 0) { vfs_release(node); return 0; }
 
     fmode = node->mask;
     if (uid == node->uid)
@@ -528,6 +566,7 @@ static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     if (mode & 4) want |= VFS_PERM_READ;
     if (mode & 2) want |= VFS_PERM_WRITE;
     if (mode & 1) want |= VFS_PERM_EXEC;
+    vfs_release(node);
     if ((allowed & want) == want) return 0;
     return -EACCES;
 }
@@ -582,6 +621,7 @@ static int sys_fstatat(int dirfd, const char *pathname, int statbuf) {
     st->st_mtim.tv_sec = node->mtime;
     st->st_ctim.tv_sec = node->ctime;
     
+    vfs_release(node);
     return 0;
 }
 

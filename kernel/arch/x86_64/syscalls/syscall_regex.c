@@ -1152,6 +1152,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
                     for (size_t j = 0; j < count; j++)
                         kfree(results[j]);
                     if (results) kfree(results);
+                    vfs_release(dir);
                     return GLOB_NOSPACE;
                 }
                 for (size_t j = 0; j < count; j++)
@@ -1174,6 +1175,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
                 for (size_t j = 0; j < count; j++)
                     kfree(results[j]);
                 if (results) kfree(results);
+                vfs_release(dir);
                 return GLOB_NOSPACE;
             }
             
@@ -1193,6 +1195,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     
     if (count == 0) {
         if (results) kfree(results);
+        vfs_release(dir);
         if (flags & GLOB_NOCHECK) {
             int plen;
             char **pathv;
@@ -1215,6 +1218,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
         return GLOB_NOMATCH;
     }
     
+    vfs_release(dir);
     pathv = (char **)kmalloc((count + 1) * sizeof(char *));
     if (!pathv) {
         for (size_t j = 0; j < count; j++)

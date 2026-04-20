@@ -166,6 +166,7 @@ static void klog_con(int con_id, const char *fmt, ...) {
 
 static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
     (void)unused; (void)unused2; (void)unused3;
+    net_ensure_hw();
     netif_t *netif = netif_get_default();
     if (!netif) {
         klog("No network interface found\n");
@@ -178,6 +179,7 @@ static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
 
 static int sys_net_ping(int ip_packed, const char *unused2, int count) {
     (void)unused2;
+    net_ensure_hw();
     klog("[DEBUG] sys_net_ping called with ip=0x%08X count=%d\n", ip_packed, count);
     ipv4_addr_t target = u32_to_ipv4((uint64_t)ip_packed);
     if (count <= 0) count = 4;
@@ -187,6 +189,7 @@ static int sys_net_ping(int ip_packed, const char *unused2, int count) {
 
 static int sys_net_arp(int unused, const char *unused2, int unused3) {
     (void)unused; (void)unused2; (void)unused3;
+    net_ensure_hw();
     arp_print_cache();
     klog("arp: cache printed\n");
     return 0;
@@ -196,6 +199,7 @@ static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
     char hostbuf[256];
     int ret;
     (void)unused;
+    net_ensure_hw();
     if (copy_user_string(hostbuf, sizeof(hostbuf), hostname) != 0) return -1;
     ipv4_addr_t resolved;
     ret = dns_resolve(hostbuf, &resolved);
@@ -220,6 +224,7 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
 
     (void)unused2; (void)unused3;
     con_id = current_task ? current_task->console_id : 0;
+    net_ensure_hw();
     netif = netif_get_default();
     if (!netif) {
         klog_con(con_id, "No network interface found\n");
@@ -289,6 +294,7 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
 static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
     (void)unused2; (void)unused3;
     if (!buf_ptr) return -1;
+    net_ensure_hw();
     
     netif_t *netif = netif_get_default();
     if (!netif) return -1;
@@ -325,6 +331,7 @@ static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) 
     uint8_t macs[16 * 6];
     int count;
     if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
+    net_ensure_hw();
     
     
     if (max_entries > 16) max_entries = 16;
@@ -352,6 +359,7 @@ static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) 
 
 static int sys_net_ping_one(int ip_packed, const char *seq_ptr, int timeout_ms) {
     uint16_t seq;
+    net_ensure_hw();
     ipv4_addr_t target = u32_to_ipv4((uint64_t)ip_packed);
     seq = (uint16_t)(int)(size_t)seq_ptr;
     if (timeout_ms <= 0) timeout_ms = 3000;
@@ -365,6 +373,7 @@ static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unu
     (void)unused;
     hostname = (const char *)(uintptr_t)hostname_ptr;
     if (!hostname || !result_ptr) return -1;
+    net_ensure_hw();
     if (copy_user_string(hostbuf, sizeof(hostbuf), hostname) != 0) return -1;
     if (!user_range_mapped((uint64_t)(uintptr_t)result_ptr, sizeof(uint64_t))) return -1;
     
@@ -392,6 +401,7 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
+    net_ensure_hw();
 
     if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
@@ -491,6 +501,7 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
 
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
+    net_ensure_hw();
 
     if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
@@ -589,6 +600,7 @@ static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2)
     (void)unused1; (void)unused2;
     if (!req_ptr) return -1;
     if (!current_task) return -1;
+    net_ensure_hw();
 
     if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
     if (!req.url || !req.out_buffer || !req.out_size) return -1;

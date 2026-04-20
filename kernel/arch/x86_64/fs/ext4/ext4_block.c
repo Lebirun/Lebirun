@@ -7,7 +7,9 @@
 static uint32_t cache_tick_counter = 0;
 
 static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
-    for (int i = 0; i < (int)fs->block_cache_count; i++) {
+    int i;
+
+    for (i = 0; i < (int)fs->block_cache_count; i++) {
         if (fs->block_cache[i].data && fs->block_cache[i].block_num == (uint32_t)block) {
             return i;
         }
@@ -30,9 +32,13 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         }
     }
 
-    if (oldest < 0) {
-        uint32_t new_count = fs->block_cache_count * 2;
+    if (oldest < 0 && fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
+        uint32_t new_count;
         ext4_block_cache_entry_t *new_cache;
+
+        new_count = fs->block_cache_count * 2;
+        if (new_count > EXT4_CACHE_BLOCKS_MAX)
+            new_count = EXT4_CACHE_BLOCKS_MAX;
         new_cache = (ext4_block_cache_entry_t *)kmalloc(new_count * sizeof(ext4_block_cache_entry_t));
         if (new_cache) {
             memcpy(new_cache, fs->block_cache, fs->block_cache_count * sizeof(ext4_block_cache_entry_t));
@@ -46,7 +52,9 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     }
 
     if (oldest >= 0 && fs->block_cache[oldest].dirty) {
-        int ret = ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
+        int ret;
+
+        ret = ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
         if (ret == 0) {
             fs->block_cache[oldest].dirty = false;
         }
@@ -86,8 +94,9 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
 }
 
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
-    int idx = find_cache_entry(fs, block);
+    int idx;
     
+    idx = find_cache_entry(fs, block);
     if (idx >= 0) {
         fs->block_cache[idx].ref_count++;
         fs->block_cache[idx].last_access = ++cache_tick_counter;

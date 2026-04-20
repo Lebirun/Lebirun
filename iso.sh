@@ -56,7 +56,6 @@ set default=0
 menuentry "Lebirun" {
 	multiboot2 /boot/lebirun.kernel
 	module2 /boot/rootfs.squashfs
-	# Uncomment to load initrd (browsable at /dev/initrd):
 	# module2 /boot/initrd.img
 	boot
 }

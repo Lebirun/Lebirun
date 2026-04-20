@@ -7,7 +7,9 @@ extern int ext4_load_group_descs(ext4_fs_t *fs);
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);
 
 static int find_inode_cache(ext4_fs_t *fs, uint32_t ino) {
-    for (int i = 0; i < EXT4_MAX_OPEN_INODES; i++) {
+    int i;
+
+    for (i = 0; i < (int)fs->inode_cache_count; i++) {
         if (fs->inode_cache[i].ino == ino && fs->inode_cache[i].ref_count > 0) {
             return i;
         }
@@ -16,8 +18,45 @@ static int find_inode_cache(ext4_fs_t *fs, uint32_t ino) {
 }
 
 static int find_free_inode_cache(ext4_fs_t *fs) {
-    for (int i = 0; i < EXT4_MAX_OPEN_INODES; i++) {
-        if (fs->inode_cache[i].ref_count == 0) {
+    int i;
+    int best;
+    uint32_t new_cap;
+    ext4_inode_cache_t *new_cache;
+
+    for (i = 0; i < (int)fs->inode_cache_count; i++) {
+        if (fs->inode_cache[i].ref_count == 0 && !fs->inode_cache[i].dirty) {
+            return i;
+        }
+    }
+
+    best = -1;
+    for (i = 0; i < (int)fs->inode_cache_count; i++) {
+        if (fs->inode_cache[i].ref_count == 0 && fs->inode_cache[i].dirty) {
+            ext4_write_inode(fs, fs->inode_cache[i].ino, &fs->inode_cache[i].inode);
+            fs->inode_cache[i].dirty = false;
+            best = i;
+            break;
+        }
+    }
+    if (best >= 0) return best;
+    if (fs->inode_cache_count < fs->inode_cache_capacity) {
+        i = (int)fs->inode_cache_count;
+        fs->inode_cache_count++;
+        return i;
+    }
+    if (fs->inode_cache_capacity < EXT4_INODE_CACHE_MAX) {
+        new_cap = fs->inode_cache_capacity * 2;
+        if (new_cap > EXT4_INODE_CACHE_MAX)
+            new_cap = EXT4_INODE_CACHE_MAX;
+        new_cache = (ext4_inode_cache_t *)kmalloc(new_cap * sizeof(ext4_inode_cache_t));
+        if (new_cache) {
+            memcpy(new_cache, fs->inode_cache, fs->inode_cache_count * sizeof(ext4_inode_cache_t));
+            memset(new_cache + fs->inode_cache_count, 0, (new_cap - fs->inode_cache_count) * sizeof(ext4_inode_cache_t));
+            i = (int)fs->inode_cache_count;
+            kfree(fs->inode_cache);
+            fs->inode_cache = new_cache;
+            fs->inode_cache_capacity = new_cap;
+            fs->inode_cache_count++;
             return i;
         }
     }
@@ -25,12 +64,19 @@ static int find_free_inode_cache(ext4_fs_t *fs) {
 }
 
 int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
+    uint32_t group;
+    uint32_t index;
+    uint64_t inode_table;
+    uint64_t inode_block;
+    uint32_t inode_offset;
+    uint8_t *block;
+
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
     }
 
-    uint32_t group = (ino - 1) / fs->sb.s_inodes_per_group;
-    uint32_t index = (ino - 1) % fs->sb.s_inodes_per_group;
+    group = (ino - 1) / fs->sb.s_inodes_per_group;
+    index = (ino - 1) % fs->sb.s_inodes_per_group;
 
     if (!fs->group_descs) {
         if (ext4_load_group_descs(fs) != 0) {
@@ -38,15 +84,15 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
         }
     }
 
-    uint64_t inode_table = fs->group_descs[group].bg_inode_table_lo;
+    inode_table = fs->group_descs[group].bg_inode_table_lo;
     if (fs->is_64bit) {
         inode_table |= ((uint64_t)fs->group_descs[group].bg_inode_table_hi << 32);
     }
 
-    uint64_t inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
-    uint32_t inode_offset = (index * fs->inode_size) % fs->block_size;
+    inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
+    inode_offset = (index * fs->inode_size) % fs->block_size;
 
-    uint8_t *block = ext4_get_block(fs, inode_block);
+    block = ext4_get_block(fs, inode_block);
     if (!block) {
         return -1;
     }
@@ -58,12 +104,19 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
 }
 
 int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
+    uint32_t group;
+    uint32_t index;
+    uint64_t inode_table;
+    uint64_t inode_block;
+    uint32_t inode_offset;
+    uint8_t *block;
+
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
     }
 
-    uint32_t group = (ino - 1) / fs->sb.s_inodes_per_group;
-    uint32_t index = (ino - 1) % fs->sb.s_inodes_per_group;
+    group = (ino - 1) / fs->sb.s_inodes_per_group;
+    index = (ino - 1) % fs->sb.s_inodes_per_group;
 
     if (!fs->group_descs) {
         if (ext4_load_group_descs(fs) != 0) {
@@ -71,15 +124,15 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
         }
     }
 
-    uint64_t inode_table = fs->group_descs[group].bg_inode_table_lo;
+    inode_table = fs->group_descs[group].bg_inode_table_lo;
     if (fs->is_64bit) {
         inode_table |= ((uint64_t)fs->group_descs[group].bg_inode_table_hi << 32);
     }
 
-    uint64_t inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
-    uint32_t inode_offset = (index * fs->inode_size) % fs->block_size;
+    inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
+    inode_offset = (index * fs->inode_size) % fs->block_size;
 
-    uint8_t *block = ext4_get_block(fs, inode_block);
+    block = ext4_get_block(fs, inode_block);
     if (!block) {
         return -1;
     }
@@ -92,7 +145,9 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
 }
 
 ext4_inode_cache_t *ext4_get_inode(ext4_fs_t *fs, uint32_t ino) {
-    int idx = find_inode_cache(fs, ino);
+    int idx;
+
+    idx = find_inode_cache(fs, ino);
     
     if (idx >= 0) {
         fs->inode_cache[idx].ref_count++;
@@ -131,8 +186,10 @@ void ext4_release_inode(ext4_inode_cache_t *ic) {
 }
 
 void ext4_sync_inodes(ext4_fs_t *fs) {
+    int i;
+
     if (!fs) return;
-    for (int i = 0; i < EXT4_MAX_OPEN_INODES; i++) {
+    for (i = 0; i < (int)fs->inode_cache_count; i++) {
         if (fs->inode_cache[i].dirty && fs->inode_cache[i].ino != 0) {
             ext4_write_inode(fs, fs->inode_cache[i].ino, &fs->inode_cache[i].inode);
             fs->inode_cache[i].dirty = false;
@@ -148,7 +205,7 @@ void ext4_mark_inode_dirty(ext4_inode_cache_t *ic) {
 
 uint64_t ext4_inode_get_size(ext4_inode_t *inode) {
     uint64_t size = inode->i_size_lo;
-    if ((inode->i_mode & EXT4_S_IFREG) == EXT4_S_IFREG) {
+    if ((inode->i_mode & 0xF000) == EXT4_S_IFREG) {
         size |= ((uint64_t)inode->i_size_high << 32);
     }
     return size;
@@ -494,7 +551,7 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino) {
     ext4_release_block(fs, bitmap_block);
 
     desc.bg_free_inodes_count_lo++;
-    if ((inode.i_mode & EXT4_S_IFDIR) == EXT4_S_IFDIR) {
+    if ((inode.i_mode & 0xF000) == EXT4_S_IFDIR) {
         if (desc.bg_used_dirs_count_lo > 0) {
             desc.bg_used_dirs_count_lo--;
         }

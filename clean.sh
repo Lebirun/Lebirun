@@ -21,6 +21,7 @@ done
 [ -d "userprog/login" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "libc/lib/ncurses-6.6" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "userprog/lebinstaller" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -d "userprog/liblebui" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 TOTAL_STEPS=$((TOTAL_STEPS + 4))
 CURRENT_STEP=0
 
@@ -151,6 +152,14 @@ if [ -d "userprog/lebinstaller" ]; then
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning lebinstaller"
   run_clean "Cleaning lebinstaller" sh -c "cd userprog/lebinstaller && $MAKE clean"
   rm -rf userprog/lebinstaller/bin
+fi
+
+if [ -d "userprog/liblebui" ]; then
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "Cleaning liblebui..."
+  progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Cleaning liblebui"
+  run_clean "Cleaning liblebui" sh -c "cd userprog/liblebui && $MAKE clean"
+  rm -rf userprog/liblebui/lib userprog/liblebui/build
 fi
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
