@@ -18,6 +18,7 @@ static int kprocs_count;
 kproc_t *current_kproc = NULL;
 static int32_t next_kproc_pid = KPROC_PID_BASE;
 static volatile int vring_initialized = 0;
+static spinlock_t vring_lock = { .locked = 0 };
 static volatile int kproc_initialized = 0;
 
 static volatile uint64_t print_queue_head = 0;
@@ -467,6 +468,7 @@ void vring_init(void) {
 
 int vring_create(uint8_t minor, const char *name) {
     if (!subrings || minor >= subrings_count) return -1;
+    if (minor == 0) return -1;
     if (subrings[minor].active) return -2;
     
     subrings[minor].ring_major = 0;
@@ -480,16 +482,24 @@ int vring_create(uint8_t minor, const char *name) {
 
 int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms) {
     uint64_t idx;
+    uint64_t flags;
 
     if (!subrings || minor >= subrings_count) return -1;
+    if (minor == 0) return -1;
     if (!subrings[minor].active) return -2;
     if (subrings[minor].region_count >= VRING_MAX_REGIONS) return -3;
-    
+    if (start >= end) return -4;
+    if (perms == 0) return -5;
+
+    flags = klog_irqsave();
+    spin_lock(&vring_lock);
     idx = subrings[minor].region_count;
     subrings[minor].allowed_regions[idx].start = start;
     subrings[minor].allowed_regions[idx].end = end;
     subrings[minor].allowed_regions[idx].permissions = perms;
     subrings[minor].region_count++;
+    spin_unlock(&vring_lock);
+    klog_irqrestore(flags);
     
     return 0;
 }
@@ -515,56 +525,91 @@ bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t acc
     vring_t *ring;
     uint64_t end_addr;
     uint64_t i;
+    uint64_t flags;
+    bool result;
 
-    if (!vring_initialized) return true;
+    if (!vring_initialized) return false;
     if (minor == 0) return true;
     if (!subrings || minor >= subrings_count) return false;
     if (!subrings[minor].active) return false;
+    if (size == 0) return false;
+    if (addr > (uint64_t)(-1) - size) return false;
     
     ring = &subrings[minor];
     end_addr = addr + size;
-    
+
+    flags = klog_irqsave();
+    spin_lock(&vring_lock);
+    result = false;
     for (i = 0; i < ring->region_count; i++) {
         vring_mem_region_t *region = &ring->allowed_regions[i];
         
+        if (region->start >= region->end) continue;
         if (addr >= region->start && end_addr <= region->end) {
             if ((region->permissions & access_type) == access_type) {
-                return true;
+                result = true;
+                break;
             }
         }
     }
+    spin_unlock(&vring_lock);
+    klog_irqrestore(flags);
     
-    return false;
+    return result;
 }
 
 void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
     char reason_buf[256];
-    char *p = reason_buf;
+    int off;
+    int rem;
+    int n;
     int i;
     vring_t *ring;
-    
-    p += sprintf(p, "Virtual Ring Violation - Ring 0.");
-    p += sprintf(p, "%d", minor);
-    
+
+    off = 0;
+    rem = (int)sizeof(reason_buf) - 1;
+
+    n = snprintf(reason_buf + off, (size_t)rem, "Virtual Ring Violation - Ring 0.");
+    if (n > 0 && n < rem) { off += n; rem -= n; }
+
+    n = snprintf(reason_buf + off, (size_t)rem, "%d", minor);
+    if (n > 0 && n < rem) { off += n; rem -= n; }
+
     if (subrings && minor < subrings_count && subrings[minor].name) {
-        p += sprintf(p, " (%s)", subrings[minor].name);
+        n = snprintf(reason_buf + off, (size_t)rem, " (%s)", subrings[minor].name);
+        if (n > 0 && n < rem) { off += n; rem -= n; }
     }
-    
-    p += sprintf(p, " forbidden access at 0x%016lX ", addr);
-    
-    if (access_type & VRING_PERM_READ) p += sprintf(p, "READ ");
-    if (access_type & VRING_PERM_WRITE) p += sprintf(p, "WRITE ");
-    if (access_type & VRING_PERM_EXEC) p += sprintf(p, "EXEC ");
-    
+
+    n = snprintf(reason_buf + off, (size_t)rem,
+                 " forbidden access at 0x%016lX ", addr);
+    if (n > 0 && n < rem) { off += n; rem -= n; }
+
+    if (rem > 8 && (access_type & VRING_PERM_READ)) {
+        n = snprintf(reason_buf + off, (size_t)rem, "READ ");
+        if (n > 0 && n < rem) { off += n; rem -= n; }
+    }
+    if (rem > 8 && (access_type & VRING_PERM_WRITE)) {
+        n = snprintf(reason_buf + off, (size_t)rem, "WRITE ");
+        if (n > 0 && n < rem) { off += n; rem -= n; }
+    }
+    if (rem > 8 && (access_type & VRING_PERM_EXEC)) {
+        n = snprintf(reason_buf + off, (size_t)rem, "EXEC ");
+        if (n > 0 && n < rem) { off += n; rem -= n; }
+    }
+
     ring = vring_get(minor);
-    if (ring) {
-        p += sprintf(p, "\nAllowed regions: ");
-        for (i = 0; (uint64_t)i < ring->region_count && i < 3; i++) {
-            p += sprintf(p, "[0x%016lX-0x%016lX] ", 
+    if (ring && rem > 20) {
+        n = snprintf(reason_buf + off, (size_t)rem, "\nAllowed regions: ");
+        if (n > 0 && n < rem) { off += n; rem -= n; }
+        for (i = 0; (uint64_t)i < ring->region_count && i < 3 && rem > 40; i++) {
+            n = snprintf(reason_buf + off, (size_t)rem,
+                "[0x%016lX-0x%016lX] ",
                 ring->allowed_regions[i].start,
                 ring->allowed_regions[i].end);
+            if (n > 0 && n < rem) { off += n; rem -= n; }
         }
     }
+    reason_buf[sizeof(reason_buf) - 1] = '\0';
     
     kernel_panic(reason_buf, NULL);
 }

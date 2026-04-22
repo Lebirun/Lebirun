@@ -53,15 +53,6 @@ static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
     return NULL;
 }
 
-static int ov_cache_contains(overlay_node_t *onode) {
-    uint64_t i;
-    for (i = 0; i < ov_node_cache_count; i++) {
-        if (ov_node_cache[i].onode == onode)
-            return 1;
-    }
-    return 0;
-}
-
 static void ov_cache_remove(overlay_node_t *onode) {
     uint64_t i;
     for (i = 0; i < ov_node_cache_count; i++) {

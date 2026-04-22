@@ -225,6 +225,14 @@ if [ -f "libc/user.ld" ]; then
 fi
 
 if [ -d "root" ]; then
+  _os_ver=$(grep 'define OS_VERSION' kernel/include/lebirun/about.h 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+  if [ -z "$_os_ver" ]; then _os_ver="0.1.0"; fi
+  mkdir -p root/etc/lebpkg/installed
+  printf 'VERSION:%s\n' "$_os_ver" > root/etc/lebpkg/installed/lebirun-base
+  printf 'VERSION:%s\n' "$_os_ver" > root/etc/lebpkg/installed/lebutils
+fi
+
+if [ -d "root" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "rootfs.squashfs" ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
     bar_print "$(printf '\033[1;36mBuilding SquashFS rootfs...\033[0m')"

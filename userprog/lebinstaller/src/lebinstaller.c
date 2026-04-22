@@ -898,6 +898,66 @@ static int inst_write_timezone(const char *mountpoint, const char *tz)
     return 0;
 }
 
+static void inst_get_os_version(char *ver, int versz)
+{
+    int fd;
+    char buf[128];
+    int n;
+    char *p;
+    char *end;
+
+    ver[0] = '\0';
+    fd = vfs_open("/proc/version", 0);
+    if (fd < 0) {
+        strncpy(ver, "0.1.0", versz - 1);
+        ver[versz - 1] = '\0';
+        return;
+    }
+    n = vfs_read_fd(fd, buf, sizeof(buf) - 1);
+    vfs_close_fd(fd);
+    if (n <= 0) {
+        strncpy(ver, "0.1.0", versz - 1);
+        ver[versz - 1] = '\0';
+        return;
+    }
+    buf[n] = '\0';
+    p = strstr(buf, "version ");
+    if (!p) {
+        strncpy(ver, "0.1.0", versz - 1);
+        ver[versz - 1] = '\0';
+        return;
+    }
+    p += 8;
+    end = p;
+    while (*end && *end != ' ' && *end != '\n' && *end != '\r') end++;
+    n = (int)(end - p);
+    if (n <= 0 || n >= versz) n = versz - 1;
+    memcpy(ver, p, n);
+    ver[n] = '\0';
+}
+
+static void inst_write_pkg_db(const char *mountpoint, const char *pkgname, const char *version)
+{
+    char db_dir[MAX_PATH];
+    char db_path[MAX_PATH];
+    char db_buf[128];
+    int n;
+    int fd;
+
+    snprintf(db_dir, sizeof(db_dir), "%s/etc/lebpkg", mountpoint);
+    vfs_mkdir(db_dir, 0755);
+    snprintf(db_dir, sizeof(db_dir), "%s/etc/lebpkg/installed", mountpoint);
+    vfs_mkdir(db_dir, 0755);
+    snprintf(db_path, sizeof(db_path), "%s/etc/lebpkg/installed/%s", mountpoint, pkgname);
+
+    n = snprintf(db_buf, sizeof(db_buf), "VERSION:%s\n", version);
+    vfs_create(db_path, 0644);
+    fd = vfs_open(db_path, 2);
+    if (fd < 0) return;
+    vfs_write_fd(fd, db_buf, n);
+    vfs_close_fd(fd);
+}
+
 static void cleanup_exit(void)
 {
     lebui_show_cursor();
@@ -1135,6 +1195,8 @@ static int step_timezone(int *tz_idx)
     return 0;
 }
 
+static void draw_tabbar(int active_tab, int cols);
+
 static int step_do_install(int disk_idx, int part_idx, int do_format,
                            int tz_idx)
 {
@@ -1152,6 +1214,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Installing", term_sz.rows, term_sz.cols);
+    draw_tabbar(0, term_sz.cols);
     lebui_progress_update(&prog_st, "Preparing...", 0);
     usleep(50000);
 
@@ -1281,6 +1344,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_log(&prog_st, logbuf);
     inst_write_timezone(mountpoint, tz_values[tz_idx]);
 
+    {
+        char os_ver[32];
+        inst_get_os_version(os_ver, sizeof(os_ver));
+        inst_write_pkg_db(mountpoint, "lebirun-base", os_ver);
+        inst_write_pkg_db(mountpoint, "lebutils", os_ver);
+    }
+
     lebui_progress_log(&prog_st, "Unmounting...");
     inst_umount_partition(mountpoint);
 
@@ -1295,7 +1365,195 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     return 0;
 }
 
-int main(int argc, char **argv)
+#define UPSTEP_DISK    0
+#define UPSTEP_PART    1
+#define UPSTEP_BOOT    2
+#define UPSTEP_DO      3
+#define UPSTEP_COUNT   4
+
+static const char *upd_preserve_paths[] = {
+    "/home",
+    "/root",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/hostname",
+    "/etc/timezone",
+    "/etc/environment",
+    NULL
+};
+
+static int upd_path_is_preserved(const char *dst_path, const char *mountpoint)
+{
+    char full[MAX_PATH];
+    int mlen;
+    int i;
+
+    mlen = (int)strlen(mountpoint);
+    for (i = 0; upd_preserve_paths[i]; i++) {
+        snprintf(full, sizeof(full), "%s%s", mountpoint, upd_preserve_paths[i]);
+        if (strcmp(dst_path, full) == 0) return 1;
+        if (strncmp(dst_path, full, strlen(full)) == 0 &&
+            dst_path[strlen(full)] == '/') return 1;
+    }
+    (void)mlen;
+    return 0;
+}
+
+static int inst_update_dir_recursive(const char *src, const char *dst, const char *mountpoint)
+{
+    int fd;
+    char name[256];
+    unsigned int type;
+    unsigned int idx;
+    char src_path[MAX_PATH];
+    char dst_path[MAX_PATH];
+    int errors;
+    int pct;
+
+    vfs_mkdir(dst, 0755);
+
+    fd = vfs_open(src, 0);
+    if (fd < 0) return -1;
+
+    errors = 0;
+    for (idx = 0; ; idx++) {
+        if (vfs_readdir(fd, name, &type, idx) != 0) break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+        snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
+        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+
+        if (strcmp(name, "lebinstaller") == 0) continue;
+
+        if (upd_path_is_preserved(dst_path, mountpoint)) continue;
+
+        if (type == 2) {
+            if (inst_update_dir_recursive(src_path, dst_path, mountpoint) < 0)
+                errors++;
+        } else if (type == 6) {
+            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+                errors++;
+            chmod(dst_path, 0755);
+            copy_done++;
+            if (copy_total > 0) {
+                pct = (copy_done * 100) / copy_total;
+                if (pct > 99) pct = 99;
+                lebui_progress_update(&prog_st, src_path, pct);
+                if (pct != copy_last_pct) {
+                    copy_last_pct = pct;
+                    lebui_progress_log(&prog_st, src_path);
+                }
+            }
+        } else {
+            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+                errors++;
+            copy_done++;
+            if (copy_total > 0) {
+                pct = (copy_done * 100) / copy_total;
+                if (pct > 99) pct = 99;
+                lebui_progress_update(&prog_st, src_path, pct);
+                if (pct != copy_last_pct) {
+                    copy_last_pct = pct;
+                    lebui_progress_log(&prog_st, src_path);
+                }
+            }
+        }
+    }
+    vfs_close_fd(fd);
+    return (errors > 0) ? -1 : 0;
+}
+
+static int step_do_update(int disk_idx, int part_idx, int update_boot)
+{
+    disk_info_t *d;
+    part_info_t *p;
+    char mountpoint[MAX_PATH];
+    char logbuf[64];
+    char donemsg[128];
+    static const char *update_dirs[] = {
+        "bin", "boot", "lib", "sbin", "usr", NULL
+    };
+    int i;
+
+    d = &disks[disk_idx];
+    p = &d->parts[part_idx];
+
+    lebui_progress_reset(&prog_st);
+    lebui_progress_init(&prog_st, "Updating", term_sz.rows, term_sz.cols);
+    draw_tabbar(1, term_sz.cols);
+    lebui_progress_update(&prog_st, "Preparing...", 0);
+
+    snprintf(mountpoint, sizeof(mountpoint), "/tmp/lebupdate");
+    vfs_mkdir("/tmp", 0755);
+    vfs_mkdir(mountpoint, 0755);
+    inst_umount_partition(mountpoint);
+
+    lebui_progress_update(&prog_st, "Mounting partition...", 5);
+    snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
+    lebui_progress_log(&prog_st, logbuf);
+    if (inst_mount_partition(p->devpath, mountpoint) != 0) {
+        lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
+        return -1;
+    }
+    lebui_progress_log(&prog_st, "Partition mounted.");
+
+    lebui_progress_update(&prog_st, "Counting files...", 10);
+    copy_total = 0;
+    for (i = 0; update_dirs[i]; i++) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "/%s", update_dirs[i]);
+        copy_total += inst_count_dir_entries(path);
+    }
+    if (copy_total < 1) copy_total = 100;
+    copy_done = 0;
+    copy_last_pct = -1;
+
+    lebui_progress_log(&prog_st, "Updating system files...");
+    inst_init_copy_buf();
+
+    for (i = 0; update_dirs[i]; i++) {
+        char src[MAX_PATH];
+        char dst[MAX_PATH];
+        snprintf(src, sizeof(src), "/%s", update_dirs[i]);
+        snprintf(dst, sizeof(dst), "%s/%s", mountpoint, update_dirs[i]);
+        inst_update_dir_recursive(src, dst, mountpoint);
+    }
+
+    lebui_progress_log(&prog_st, "System files updated.");
+
+    if (update_boot) {
+        lebui_progress_update(&prog_st, "Updating bootloader...", 96);
+        lebui_progress_log(&prog_st, "Updating GRUB bootloader...");
+        inst_install_boot(mountpoint, d->devpath, p->devpath, p->number);
+        lebui_progress_log(&prog_st, "Bootloader updated.");
+    }
+
+    free(copy_buf);
+    copy_buf = NULL;
+    copy_buf_size = 0;
+
+    lebui_progress_log(&prog_st, "Unmounting...");
+    inst_umount_partition(mountpoint);
+
+    lebui_progress_update(&prog_st, "Update complete!", 100);
+    lebui_progress_log(&prog_st, "Done!");
+
+    snprintf(donemsg, sizeof(donemsg),
+             "Lebirun updated on %s. Reboot to apply changes.",
+             p->devpath);
+    lebui_msgbox_auto("Complete", donemsg, term_sz.rows, term_sz.cols);
+    return 0;
+}
+
+static void draw_tabbar(int active_tab, int cols)
+{
+    static const char *tab_names[] = { "Install", "Update" };
+    lebui_tabbar_attach(tab_names, 2, active_tab, cols);
+    lebui_draw_tabbar(tab_names, 2, active_tab, cols);
+    lebui_flush();
+}
+
+static int run_install_page(void)
 {
     static const char *step_names[] = {
         "Select Disk",
@@ -1319,33 +1577,6 @@ int main(int argc, char **argv)
     int ret;
     char ubuf[32];
 
-    (void)argc;
-    (void)argv;
-
-    setvbuf(stdout, NULL, _IOFBF, 8192);
-
-    lebui_get_size(&term_sz);
-    lebui_raw_enable();
-    printf("\033[?1049h");
-    fflush(stdout);
-    lebui_hide_cursor();
-
-    if (getuid() != 0) {
-        lebui_msgbox_auto("Error", "This installer must be run as root.", term_sz.rows, term_sz.cols);
-        cleanup_exit();
-        return 1;
-    }
-
-    lebui_progress_reset(&prog_st);
-    lebui_progress_init(&prog_st, "Scanning", term_sz.rows, term_sz.cols);
-    lebui_progress_update(&prog_st, "Scanning for disks...", 0);
-
-    if (inst_enumerate_disks() <= 0) {
-        lebui_msgbox_auto("Error", "No disks found.", term_sz.rows, term_sz.cols);
-        cleanup_exit();
-        return 1;
-    }
-
     for (i = 0; i < STEP_COUNT; i++) status[i] = STEP_NONE;
     disk_idx = -1;
     part_idx = -1;
@@ -1355,6 +1586,8 @@ int main(int argc, char **argv)
     root_password[0] = '\0';
 
     for (;;) {
+        draw_tabbar(0, term_sz.cols);
+
         for (i = 0; i < STEP_COUNT; i++) {
             if (i == STEP_INSTALL) {
                 if (status[STEP_DISK] == STEP_DONE && status[STEP_PART] == STEP_DONE)
@@ -1391,11 +1624,13 @@ int main(int argc, char **argv)
         }
 
         sel = lebui_menu_auto("Installation Steps", (const char **)items, STEP_COUNT,
-                        " \x18\x19 Move  <Enter> Select  <Esc> Quit", term_sz.rows, term_sz.cols);
+                        " \x18\x19 Move  <Enter> Select  <Tab> Switch  <Esc> Quit", term_sz.rows, term_sz.cols);
+
+        if (sel == LEBUI_KEY_TAB) return LEBUI_KEY_TAB;
+
         if (sel < 0) {
             if (lebui_confirm_auto("Quit", "Exit the installer?", term_sz.rows, term_sz.cols)) {
-                cleanup_exit();
-                return 0;
+                return -1;
             }
             continue;
         }
@@ -1464,10 +1699,167 @@ int main(int argc, char **argv)
                 for (i = 0; i < user_count; i++)
                     memset(users[i].password, 0, sizeof(users[i].password));
                 memset(root_password, 0, sizeof(root_password));
-                cleanup_exit();
                 return 0;
             }
             break;
         }
+    }
+}
+
+static int run_update_page(void)
+{
+    static const char *upd_step_names[] = {
+        "Select Disk",
+        "Select Partition",
+        "Update Bootloader",
+        "Update"
+    };
+    int status[UPSTEP_COUNT];
+    char labels[UPSTEP_COUNT][56];
+    char *items[UPSTEP_COUNT];
+    int disk_idx;
+    int part_idx;
+    int update_boot;
+    int sel;
+    int i;
+    int ret;
+
+    for (i = 0; i < UPSTEP_COUNT; i++) status[i] = STEP_NONE;
+    disk_idx = -1;
+    part_idx = -1;
+    update_boot = 0;
+
+    for (;;) {
+        draw_tabbar(1, term_sz.cols);
+
+        for (i = 0; i < UPSTEP_COUNT; i++) {
+            if (i == UPSTEP_DO) {
+                if (status[UPSTEP_DISK] == STEP_DONE && status[UPSTEP_PART] == STEP_DONE)
+                    snprintf(labels[i], sizeof(labels[i]), "  [>] %s", upd_step_names[i]);
+                else
+                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (need disk & partition)", upd_step_names[i]);
+            } else if (status[i] == STEP_DONE) {
+                if (i == UPSTEP_DISK)
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].devpath);
+                else if (i == UPSTEP_PART)
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].parts[part_idx].devpath);
+                else if (i == UPSTEP_BOOT)
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], update_boot ? "Yes" : "No");
+                else
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s", upd_step_names[i]);
+            } else {
+                if (i == UPSTEP_BOOT)
+                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (optional)", upd_step_names[i]);
+                else
+                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", upd_step_names[i]);
+            }
+            items[i] = labels[i];
+        }
+
+        sel = lebui_menu_auto("Update Steps", (const char **)items, UPSTEP_COUNT,
+                        " \x18\x19 Move  <Enter> Select  <Tab> Switch  <Esc> Quit", term_sz.rows, term_sz.cols);
+
+        if (sel == LEBUI_KEY_TAB) return LEBUI_KEY_TAB;
+
+        if (sel < 0) {
+            if (lebui_confirm_auto("Quit", "Exit the installer?", term_sz.rows, term_sz.cols)) {
+                return -1;
+            }
+            continue;
+        }
+
+        switch (sel) {
+        case UPSTEP_DISK:
+            ret = step_disk(&disk_idx);
+            if (ret == 0) {
+                status[UPSTEP_DISK] = STEP_DONE;
+                status[UPSTEP_PART] = STEP_NONE;
+                part_idx = -1;
+            }
+            break;
+
+        case UPSTEP_PART:
+            if (status[UPSTEP_DISK] != STEP_DONE) {
+                lebui_msgbox_auto("Error", "Select a disk first.", term_sz.rows, term_sz.cols);
+                break;
+            }
+            ret = step_partition(disk_idx, &part_idx);
+            if (ret == 0)
+                status[UPSTEP_PART] = STEP_DONE;
+            break;
+
+        case UPSTEP_BOOT:
+            update_boot = lebui_confirm_auto("Bootloader", "Also update the GRUB bootloader?",
+                                             term_sz.rows, term_sz.cols);
+            status[UPSTEP_BOOT] = STEP_DONE;
+            break;
+
+        case UPSTEP_DO:
+            if (status[UPSTEP_DISK] != STEP_DONE || status[UPSTEP_PART] != STEP_DONE) {
+                lebui_msgbox_auto("Error", "Select a disk and partition first.", term_sz.rows, term_sz.cols);
+                break;
+            }
+            if (!lebui_confirm_auto("Confirm",
+                    "Update system files? User data and config will be preserved.",
+                    term_sz.rows, term_sz.cols))
+                break;
+            ret = step_do_update(disk_idx, part_idx, update_boot);
+            if (ret == 0)
+                return 0;
+            break;
+        }
+    }
+}
+
+int main(int argc, char **argv)
+{
+    int active_page;
+    int ret;
+
+    (void)argc;
+    (void)argv;
+
+    setvbuf(stdout, NULL, _IOFBF, 8192);
+
+    lebui_get_size(&term_sz);
+    lebui_raw_enable();
+    printf("\033[?1049h");
+    fflush(stdout);
+    lebui_hide_cursor();
+
+    if (getuid() != 0) {
+        lebui_msgbox_auto("Error", "This installer must be run as root.", term_sz.rows, term_sz.cols);
+        cleanup_exit();
+        return 1;
+    }
+
+    lebui_progress_reset(&prog_st);
+    lebui_progress_init(&prog_st, "Scanning", term_sz.rows, term_sz.cols);
+    lebui_progress_update(&prog_st, "Scanning for disks...", 0);
+
+    if (inst_enumerate_disks() <= 0) {
+        lebui_msgbox_auto("Error", "No disks found.", term_sz.rows, term_sz.cols);
+        cleanup_exit();
+        return 1;
+    }
+
+    active_page = 0;
+
+    for (;;) {
+        lebui_clear();
+        if (active_page == 0) {
+            ret = run_install_page();
+        } else {
+            ret = run_update_page();
+        }
+
+        if (ret == LEBUI_KEY_TAB) {
+            active_page = 1 - active_page;
+            continue;
+        }
+
+        cleanup_exit();
+        lebui_tabbar_detach();
+        return (ret == 0) ? 0 : 0;
     }
 }
