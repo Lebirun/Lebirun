@@ -16,6 +16,7 @@
 #define MAX_PARTS    16
 #define MAX_PATH     256
 #define MAX_LINE     128
+#define LEBPKG_INSTALLED_DIR "/etc/lebpkg/installed"
 #define MBR_SIG      0xAA55
 
 int vfs_open(const char *path, int flags);
@@ -898,64 +899,202 @@ static int inst_write_timezone(const char *mountpoint, const char *tz)
     return 0;
 }
 
-static void inst_get_os_version(char *ver, int versz)
+static int inst_read_pkg_version_file(const char *path, char *ver, int versz)
 {
-    int fd;
     char buf[128];
+    int fd;
     int n;
     char *p;
     char *end;
 
     ver[0] = '\0';
-    fd = vfs_open("/proc/version", 0);
-    if (fd < 0) {
-        strncpy(ver, "0.1.0", versz - 1);
-        ver[versz - 1] = '\0';
-        return;
-    }
+    fd = vfs_open(path, 0);
+    if (fd < 0) return -1;
     n = vfs_read_fd(fd, buf, sizeof(buf) - 1);
     vfs_close_fd(fd);
-    if (n <= 0) {
-        strncpy(ver, "0.1.0", versz - 1);
-        ver[versz - 1] = '\0';
-        return;
-    }
+    if (n <= 0) return -1;
     buf[n] = '\0';
-    p = strstr(buf, "version ");
-    if (!p) {
-        strncpy(ver, "0.1.0", versz - 1);
-        ver[versz - 1] = '\0';
-        return;
+    p = strstr(buf, "Version:");
+    if (p) {
+        p += 8;
+        while (*p == ' ' || *p == '\t') p++;
+    } else {
+        p = strstr(buf, "VERSION:");
+        if (!p) return -1;
+        p += 8;
     }
-    p += 8;
     end = p;
-    while (*end && *end != ' ' && *end != '\n' && *end != '\r') end++;
+    while (*end && *end != '\n' && *end != '\r') end++;
     n = (int)(end - p);
-    if (n <= 0 || n >= versz) n = versz - 1;
+    if (n <= 0 || n >= versz) return -1;
     memcpy(ver, p, n);
     ver[n] = '\0';
+    return 0;
 }
 
-static void inst_write_pkg_db(const char *mountpoint, const char *pkgname, const char *version)
+static void inst_read_pkg_version(const char *mountpoint, const char *pkgname, char *ver, int versz)
 {
-    char db_dir[MAX_PATH];
     char db_path[MAX_PATH];
-    char db_buf[128];
+
+    snprintf(db_path, sizeof(db_path), "%s%s/%s", mountpoint, LEBPKG_INSTALLED_DIR, pkgname);
+    if (inst_read_pkg_version_file(db_path, ver, versz) < 0)
+        ver[0] = '\0';
+}
+
+static int inst_compare_versions(const char *left, const char *right)
+{
+    const char *a;
+    const char *b;
+    unsigned long na;
+    unsigned long nb;
+    int az;
+    int bz;
+    unsigned char ca;
+    unsigned char cb;
+
+    a = left;
+    b = right;
+    while (*a || *b) {
+        if (*a >= '0' && *a <= '9' && *b >= '0' && *b <= '9') {
+            while (*a == '0') a++;
+            while (*b == '0') b++;
+            na = 0;
+            nb = 0;
+            az = 0;
+            bz = 0;
+            while (*a >= '0' && *a <= '9') {
+                az++;
+                if (na < 1000000000UL)
+                    na = na * 10 + (unsigned long)(*a - '0');
+                a++;
+            }
+            while (*b >= '0' && *b <= '9') {
+                bz++;
+                if (nb < 1000000000UL)
+                    nb = nb * 10 + (unsigned long)(*b - '0');
+                b++;
+            }
+            if (az != bz) return (az > bz) ? 1 : -1;
+            if (na != nb) return (na > nb) ? 1 : -1;
+            continue;
+        }
+        ca = (unsigned char)(*a ? *a : 0);
+        cb = (unsigned char)(*b ? *b : 0);
+        if (ca != cb) return (ca > cb) ? 1 : -1;
+        if (*a) a++;
+        if (*b) b++;
+    }
+    return 0;
+}
+
+static int inst_copy_pkg_db_entry(const char *mountpoint, const char *pkgname)
+{
+    char src_path[MAX_PATH];
+    char db_dir[MAX_PATH];
+    char dst_path[MAX_PATH];
+    char buf[512];
+    int src_fd;
+    int dst_fd;
     int n;
-    int fd;
+    int written;
+    int off;
+
+    snprintf(src_path, sizeof(src_path), "%s/%s", LEBPKG_INSTALLED_DIR, pkgname);
+    src_fd = vfs_open(src_path, 0);
+    if (src_fd < 0) return -1;
 
     snprintf(db_dir, sizeof(db_dir), "%s/etc/lebpkg", mountpoint);
     vfs_mkdir(db_dir, 0755);
-    snprintf(db_dir, sizeof(db_dir), "%s/etc/lebpkg/installed", mountpoint);
+    snprintf(db_dir, sizeof(db_dir), "%s%s", mountpoint, LEBPKG_INSTALLED_DIR);
     vfs_mkdir(db_dir, 0755);
-    snprintf(db_path, sizeof(db_path), "%s/etc/lebpkg/installed/%s", mountpoint, pkgname);
+    snprintf(dst_path, sizeof(dst_path), "%s%s/%s", mountpoint, LEBPKG_INSTALLED_DIR, pkgname);
+    vfs_unlink(dst_path);
+    vfs_create(dst_path, 0644);
+    dst_fd = vfs_open(dst_path, 2);
+    if (dst_fd < 0) {
+        vfs_close_fd(src_fd);
+        return -1;
+    }
 
-    n = snprintf(db_buf, sizeof(db_buf), "VERSION:%s\n", version);
-    vfs_create(db_path, 0644);
-    fd = vfs_open(db_path, 2);
-    if (fd < 0) return;
-    vfs_write_fd(fd, db_buf, n);
+    for (;;) {
+        n = vfs_read_fd(src_fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        off = 0;
+        while (off < n) {
+            written = vfs_write_fd(dst_fd, buf + off, n - off);
+            if (written <= 0) {
+                vfs_close_fd(src_fd);
+                vfs_close_fd(dst_fd);
+                return -1;
+            }
+            off += written;
+        }
+    }
+
+    vfs_close_fd(src_fd);
+    vfs_close_fd(dst_fd);
+    return 0;
+}
+
+static int inst_seed_pkg_db_from_iso(const char *mountpoint)
+{
+    int fd;
+    char name[256];
+    unsigned int dtype;
+    unsigned int idx;
+    int copied;
+
+    fd = vfs_open(LEBPKG_INSTALLED_DIR, 0);
+    if (fd < 0) return 0;
+    copied = 0;
+    for (idx = 0; ; idx++) {
+        if (vfs_readdir(fd, name, &dtype, idx) != 0) break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (dtype != 1) continue;
+        if (inst_copy_pkg_db_entry(mountpoint, name) == 0)
+            copied++;
+    }
     vfs_close_fd(fd);
+    return copied;
+}
+
+static int inst_upgrade_pkg_db_from_iso(const char *mountpoint, int *kept)
+{
+    char inst_dir[MAX_PATH];
+    char live_path[MAX_PATH];
+    char target_path[MAX_PATH];
+    char name[256];
+    unsigned int dtype;
+    unsigned int idx;
+    int fd;
+    int upgraded;
+    char installed_ver[32];
+    char live_ver[32];
+
+    *kept = 0;
+    snprintf(inst_dir, sizeof(inst_dir), "%s%s", mountpoint, LEBPKG_INSTALLED_DIR);
+    fd = vfs_open(inst_dir, 0);
+    if (fd < 0) return 0;
+    upgraded = 0;
+    for (idx = 0; ; idx++) {
+        if (vfs_readdir(fd, name, &dtype, idx) != 0) break;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (dtype != 1) continue;
+        snprintf(live_path, sizeof(live_path), "%s/%s", LEBPKG_INSTALLED_DIR, name);
+        snprintf(target_path, sizeof(target_path), "%s%s/%s", mountpoint, LEBPKG_INSTALLED_DIR, name);
+        if (inst_read_pkg_version_file(live_path, live_ver, sizeof(live_ver)) < 0)
+            continue;
+        if (inst_read_pkg_version_file(target_path, installed_ver, sizeof(installed_ver)) < 0)
+            installed_ver[0] = '\0';
+        if (installed_ver[0] == '\0' || inst_compare_versions(live_ver, installed_ver) > 0) {
+            if (inst_copy_pkg_db_entry(mountpoint, name) == 0)
+                upgraded++;
+        } else {
+            (*kept)++;
+        }
+    }
+    vfs_close_fd(fd);
+    return upgraded;
 }
 
 static void cleanup_exit(void)
@@ -1195,7 +1334,7 @@ static int step_timezone(int *tz_idx)
     return 0;
 }
 
-static void draw_tabbar(int active_tab, int cols);
+static void attach_tabbar(int active_tab, int cols);
 
 static int step_do_install(int disk_idx, int part_idx, int do_format,
                            int tz_idx)
@@ -1208,13 +1347,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     char fmsg[128];
     int fret;
     int i;
+    int seeded;
 
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Installing", term_sz.rows, term_sz.cols);
-    draw_tabbar(0, term_sz.cols);
     lebui_progress_update(&prog_st, "Preparing...", 0);
     usleep(50000);
 
@@ -1344,11 +1483,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_log(&prog_st, logbuf);
     inst_write_timezone(mountpoint, tz_values[tz_idx]);
 
-    {
-        char os_ver[32];
-        inst_get_os_version(os_ver, sizeof(os_ver));
-        inst_write_pkg_db(mountpoint, "lebirun-base", os_ver);
-        inst_write_pkg_db(mountpoint, "lebutils", os_ver);
+    lebui_progress_update(&prog_st, "Writing package database...", 99);
+    seeded = inst_seed_pkg_db_from_iso(mountpoint);
+    if (seeded > 0) {
+        snprintf(logbuf, sizeof(logbuf), "Package records copied: %d", seeded);
+        lebui_progress_log(&prog_st, logbuf);
+    } else {
+        lebui_progress_log(&prog_st, "No ISO package records found.");
     }
 
     lebui_progress_log(&prog_st, "Unmounting...");
@@ -1379,6 +1520,7 @@ static const char *upd_preserve_paths[] = {
     "/etc/hostname",
     "/etc/timezone",
     "/etc/environment",
+    "/etc/lebpkg",
     NULL
 };
 
@@ -1469,18 +1611,24 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     part_info_t *p;
     char mountpoint[MAX_PATH];
     char logbuf[64];
-    char donemsg[128];
+    char donemsg[256];
+    char old_ver[32];
+    char new_ver[32];
+    char path[MAX_PATH];
+    char src[MAX_PATH];
+    char dst[MAX_PATH];
     static const char *update_dirs[] = {
-        "bin", "boot", "lib", "sbin", "usr", NULL
+        "bin", "boot", "etc", "lib", "sbin", "usr", NULL
     };
     int i;
+    int upgraded_pkgs;
+    int kept_pkgs;
 
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Updating", term_sz.rows, term_sz.cols);
-    draw_tabbar(1, term_sz.cols);
     lebui_progress_update(&prog_st, "Preparing...", 0);
 
     snprintf(mountpoint, sizeof(mountpoint), "/tmp/lebupdate");
@@ -1497,10 +1645,14 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     }
     lebui_progress_log(&prog_st, "Partition mounted.");
 
+    old_ver[0] = '\0';
+    inst_read_pkg_version(mountpoint, "lebirun-base", old_ver, sizeof(old_ver));
+    new_ver[0] = '\0';
+    inst_read_pkg_version_file(LEBPKG_INSTALLED_DIR "/lebirun-base", new_ver, sizeof(new_ver));
+
     lebui_progress_update(&prog_st, "Counting files...", 10);
     copy_total = 0;
     for (i = 0; update_dirs[i]; i++) {
-        char path[MAX_PATH];
         snprintf(path, sizeof(path), "/%s", update_dirs[i]);
         copy_total += inst_count_dir_entries(path);
     }
@@ -1512,8 +1664,6 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     inst_init_copy_buf();
 
     for (i = 0; update_dirs[i]; i++) {
-        char src[MAX_PATH];
-        char dst[MAX_PATH];
         snprintf(src, sizeof(src), "/%s", update_dirs[i]);
         snprintf(dst, sizeof(dst), "%s/%s", mountpoint, update_dirs[i]);
         inst_update_dir_recursive(src, dst, mountpoint);
@@ -1532,25 +1682,41 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     copy_buf = NULL;
     copy_buf_size = 0;
 
+    lebui_progress_update(&prog_st, "Updating package database...", 98);
+    lebui_progress_log(&prog_st, "Updating package database...");
+    upgraded_pkgs = inst_upgrade_pkg_db_from_iso(mountpoint, &kept_pkgs);
+    snprintf(logbuf, sizeof(logbuf), "Package records upgraded: %d", upgraded_pkgs);
+    lebui_progress_log(&prog_st, logbuf);
+    snprintf(logbuf, sizeof(logbuf), "Package records kept: %d", kept_pkgs);
+    lebui_progress_log(&prog_st, logbuf);
+
     lebui_progress_log(&prog_st, "Unmounting...");
     inst_umount_partition(mountpoint);
 
     lebui_progress_update(&prog_st, "Update complete!", 100);
     lebui_progress_log(&prog_st, "Done!");
 
-    snprintf(donemsg, sizeof(donemsg),
-             "Lebirun updated on %s. Reboot to apply changes.",
-             p->devpath);
+    if (old_ver[0] != '\0' && new_ver[0] != '\0' && strcmp(old_ver, new_ver) != 0)
+        snprintf(donemsg, sizeof(donemsg),
+                 "Lebirun updated on %s from %s to %s. Reboot to apply changes.",
+                 p->devpath, old_ver, new_ver);
+    else if (new_ver[0] != '\0')
+        snprintf(donemsg, sizeof(donemsg),
+                 "Lebirun updated on %s to version %s. Reboot to apply changes.",
+                 p->devpath, new_ver);
+    else
+        snprintf(donemsg, sizeof(donemsg),
+                 "Lebirun updated on %s. Reboot to apply changes.",
+                 p->devpath);
     lebui_msgbox_auto("Complete", donemsg, term_sz.rows, term_sz.cols);
     return 0;
 }
 
-static void draw_tabbar(int active_tab, int cols)
+static const char *g_tab_names[] = { "Install", "Update" };
+
+static void attach_tabbar(int active_tab, int cols)
 {
-    static const char *tab_names[] = { "Install", "Update" };
-    lebui_tabbar_attach(tab_names, 2, active_tab, cols);
-    lebui_draw_tabbar(tab_names, 2, active_tab, cols);
-    lebui_flush();
+    lebui_tabbar_attach(g_tab_names, 2, active_tab, cols);
 }
 
 static int run_install_page(void)
@@ -1586,7 +1752,7 @@ static int run_install_page(void)
     root_password[0] = '\0';
 
     for (;;) {
-        draw_tabbar(0, term_sz.cols);
+        attach_tabbar(0, term_sz.cols);
 
         for (i = 0; i < STEP_COUNT; i++) {
             if (i == STEP_INSTALL) {
@@ -1624,7 +1790,7 @@ static int run_install_page(void)
         }
 
         sel = lebui_menu_auto("Installation Steps", (const char **)items, STEP_COUNT,
-                        " \x18\x19 Move  <Enter> Select  <Tab> Switch  <Esc> Quit", term_sz.rows, term_sz.cols);
+                        " \x18\x19 Move  <Enter> Select  <Esc> Quit", term_sz.rows, term_sz.cols);
 
         if (sel == LEBUI_KEY_TAB) return LEBUI_KEY_TAB;
 
@@ -1730,7 +1896,7 @@ static int run_update_page(void)
     update_boot = 0;
 
     for (;;) {
-        draw_tabbar(1, term_sz.cols);
+        attach_tabbar(1, term_sz.cols);
 
         for (i = 0; i < UPSTEP_COUNT; i++) {
             if (i == UPSTEP_DO) {

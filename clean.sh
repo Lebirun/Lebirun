@@ -174,6 +174,8 @@ find root/lib -mindepth 1 -maxdepth 1 ! -name lke -exec rm -rf {} + 2>/dev/null 
 remove_dir_contents root/usr/lib
 remove_dir_contents root/usr/include
 rm -rf root/usr/share/terminfo
+rm -rf root/etc/lebpkg/index
+rm -rf root/etc/lebpkg/installed
 rm -rf userprog/lebutils/bin
 rm -f userprog/lsh/lsh userprog/lsh/highlight userprog/lsh/lsh.bin
 rm -f userprog/lsh/liblsh.gnu.sym userprog/lsh/liblsh.darwin.sym

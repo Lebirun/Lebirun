@@ -225,11 +225,63 @@ if [ -f "libc/user.ld" ]; then
 fi
 
 if [ -d "root" ]; then
-  _os_ver=$(grep 'define OS_VERSION' kernel/include/lebirun/about.h 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
-  if [ -z "$_os_ver" ]; then _os_ver="0.1.0"; fi
+  get_define_version() {
+    _file="$1"
+    _macro="$2"
+    _fallback="$3"
+    _ver=$(grep "define $_macro" "$_file" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
+    if [ -z "$_ver" ]; then _ver="$_fallback"; fi
+    printf '%s\n' "$_ver"
+  }
+  _os_ver=$(get_define_version kernel/include/lebirun/about.h OS_VERSION 0.1.0)
+  _lebutils_ver=$(get_define_version userprog/lebutils/src/about.h LEBUTILS_VERSION "$_os_ver")
+  _lebinit_ver=$(get_define_version userprog/LebInit/src/about.h LEBINIT_VERSION "$_os_ver")
   mkdir -p root/etc/lebpkg/installed
-  printf 'VERSION:%s\n' "$_os_ver" > root/etc/lebpkg/installed/lebirun-base
-  printf 'VERSION:%s\n' "$_os_ver" > root/etc/lebpkg/installed/lebutils
+  write_pkg_db() {
+    _pkg="$1"
+    _ver="$2"
+    _desc="$3"
+    _depends="$4"
+    _out="root/etc/lebpkg/installed/$_pkg"
+    shift 4
+    {
+      printf 'Package: %s\n' "$_pkg"
+      printf 'Status: install ok installed\n'
+      printf 'Version: %s\n' "$_ver"
+      if [ -n "$_depends" ]; then printf 'Depends: %s\n' "$_depends"; fi
+      printf 'Description: %s\n' "$_desc"
+      printf 'Files:\n'
+      for _f in "$@"; do
+        [ -n "$_f" ] && printf '%s\n' "$_f"
+      done
+    } > "$_out"
+  }
+  _base_files=$(
+    {
+      find root/boot -type f 2>/dev/null
+      find root/usr/include -type f 2>/dev/null
+      [ -f root/etc/lke.autostart ] && printf '%s\n' root/etc/lke.autostart
+      [ -f root/etc/motd ] && printf '%s\n' root/etc/motd
+      [ -f root/etc/other/license.txt ] && printf '%s\n' root/etc/other/license.txt
+      [ -f root/etc/ssl/certs/ca-certificates.crt ] && printf '%s\n' root/etc/ssl/certs/ca-certificates.crt
+    } | sed 's#^root##' | sort
+  )
+  _lebutils_files=$(
+    {
+      [ -f root/bin/lebu ] && printf '%s\n' root/bin/lebu
+      find root/bin root/sbin -maxdepth 1 -type l 2>/dev/null
+    } | sed 's#^root##' | grep -v '^/bin/sh$' | sort
+  )
+  _lebinit_files=$(
+    {
+      [ -f root/init ] && printf '%s\n' root/init
+      [ -f root/sbin/lebinit ] && printf '%s\n' root/sbin/lebinit
+      find root/etc/lebinit/services -type f 2>/dev/null
+    } | sed 's#^root##' | sort
+  )
+  write_pkg_db lebirun-base "$_os_ver" "Lebirun base system, bootloader, kernel and headers" "" $_base_files
+  write_pkg_db lebutils "$_lebutils_ver" "Lebirun core command utilities" "lebirun-base" $_lebutils_files
+  write_pkg_db lebinit "$_lebinit_ver" "Lebirun init system" "lebirun-base" $_lebinit_files
 fi
 
 if [ -d "root" ]; then
