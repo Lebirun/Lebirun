@@ -7,6 +7,8 @@ void udp_init(void);
 void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len);
 int udp_send(netif_t *netif, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len);
 int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len);
+int udp_send6(netif_t *netif, ipv6_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len);
+void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *data, uint64_t len);
 
 udp_socket_t *udp_socket_create(uint16_t port);
 void udp_socket_close(udp_socket_t *sock);

@@ -77,6 +77,18 @@ struct sockaddr_in {
     char sin_zero[8];
 };
 
+struct in6_addr {
+    uint8_t s6_addr[16];
+};
+
+struct sockaddr_in6 {
+    uint16_t sin6_family;
+    uint16_t sin6_port;
+    uint32_t sin6_flowinfo;
+    struct in6_addr sin6_addr;
+    uint32_t sin6_scope_id;
+};
+
 struct iovec {
     void *iov_base;
     size_t iov_len;
@@ -406,6 +418,23 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         return 0;
     }
     
+    if (sock->domain == AF_INET6) {
+        struct sockaddr_in6 *addr6;
+        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
+        if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
+            return -EINVAL;
+        }
+        if (addr6->sin6_family != AF_INET6) {
+            return -EAFNOSUPPORT;
+        }
+        sock->local_port = ntohs(addr6->sin6_port);
+        if (sock->local_port == 0) {
+            sock->local_port = alloc_ephemeral_port();
+        }
+        sock->state = SOCKSTATE_BOUND;
+        return 0;
+    }
+
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         return -EINVAL;
@@ -483,6 +512,27 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         return 0;
     }
     
+    if (sock->domain == AF_INET6) {
+        struct sockaddr_in6 *addr6;
+        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
+        if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
+            return -EINVAL;
+        }
+        if (addr6->sin6_family != AF_INET6) {
+            return -EAFNOSUPPORT;
+        }
+        sock->remote_port = ntohs(addr6->sin6_port);
+        if (sock->state == SOCKSTATE_CLOSED) {
+            sock->local_port = alloc_ephemeral_port();
+        }
+        if (sock->nonblocking) {
+            sock->state = SOCKSTATE_CONNECTING;
+            return -EINPROGRESS;
+        }
+        sock->state = SOCKSTATE_CONNECTED;
+        return 0;
+    }
+
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         return -EINVAL;

@@ -132,6 +132,7 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
     const char *path;
     vfs_node_t *node;
     int fd;
+    uint64_t create_mode;
     char parent_path[256];
     char filename[64];
     int len;
@@ -148,7 +149,15 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
 
     node = vfs_namei(path);
 
+    if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
+        vfs_release(node);
+        return -EEXIST;
+    }
+
     if (!node && (flags & VFS_O_CREAT)) {
+        create_mode = 0644;
+        if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
+
         len = 0;
         while (path[len]) len++;
 
@@ -179,7 +188,7 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
         parent = vfs_namei(parent_path);
         if (!parent) return -ENOENT;
 
-        ret = vfs_create(parent, filename, VFS_FILE);
+        ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);

@@ -75,11 +75,48 @@ static int task_fd_alloc_from(int start) {
     return i;
 }
 
+static const char *resolve_cwd_path(const char *pathname, char *resolved, size_t size) {
+    uint64_t path_addr;
+    const char *cwd;
+    size_t cwd_len;
+    size_t path_len;
+    size_t pos;
+    size_t i;
+
+    if (!pathname || !resolved || size == 0) return NULL;
+
+    path_addr = (uint64_t)(uintptr_t)pathname;
+    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return NULL;
+
+    if (pathname[0] == '/') return pathname;
+
+    cwd = "/";
+    if (current_task && current_task->cwd[0]) cwd = current_task->cwd;
+
+    cwd_len = 0;
+    while (cwd[cwd_len]) cwd_len++;
+
+    path_len = 0;
+    while (pathname[path_len]) path_len++;
+
+    if (cwd_len + 1 + path_len + 1 > size) return NULL;
+
+    pos = 0;
+    for (i = 0; i < cwd_len && pos < size - 1; i++) resolved[pos++] = cwd[i];
+    if (pos > 0 && resolved[pos - 1] != '/' && pos < size - 1) resolved[pos++] = '/';
+    for (i = 0; i < path_len && pos < size - 1; i++) resolved[pos++] = pathname[i];
+    resolved[pos] = '\0';
+    return resolved;
+}
+
 static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     uint64_t path_addr;
     int flags;
+    int mode;
+    uint64_t create_mode;
     const char *path;
     int fd;
+    char resolved_path[256];
     char parent_path[256];
     char filename[64];
     int len;
@@ -90,16 +127,26 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     vfs_node_t *node;
     vfs_node_t *parent;
 
-    (void)unused;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
     flags = (int)(uintptr_t)flags_ptr;
+    mode = unused;
     if (!current_task) return -ESRCH;
 
-    path = (const char *)path_addr;
+    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    if (!path) return -EFAULT;
     node = vfs_namei(path);
 
+    if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
+        vfs_release(node);
+        return -EEXIST;
+    }
+
     if (!node && (flags & VFS_O_CREAT)) {
+        create_mode = (uint64_t)(mode & 0777);
+        if (create_mode == 0) create_mode = 0644;
+        if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
+
         len = 0;
         while (path[len]) len++;
 
@@ -130,7 +177,7 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
         parent = vfs_namei(parent_path);
         if (!parent) return -ENOENT;
 
-        ret = vfs_create(parent, filename, VFS_FILE);
+        ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);

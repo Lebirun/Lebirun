@@ -5,6 +5,21 @@ subcategory "Virtualization" {
     item type=bool name="VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
 }
 
+subcategory "Device Drivers" {
+    subcategory "Storage" {
+        item type=bool name="AHCI SATA" default=enable id=DRIVER_AHCI alias="DRIVER_AHCI" help="Enable the AHCI SATA storage driver"
+    }
+    subcategory "Input" {
+        item type=bool name="PS/2 Keyboard" default=enable id=DRIVER_PS2_KEYBOARD alias="DRIVER_PS2_KEYBOARD" help="Enable the PS/2 keyboard driver"
+        item type=bool name="PS/2 Mouse" default=enable id=DRIVER_PS2_MOUSE alias="DRIVER_PS2_MOUSE" help="Enable the PS/2 mouse driver"
+    }
+    subcategory "Networking" {
+        item type=bool name="Network Stack" default=enable id=DRIVER_NET alias="DRIVER_NET" help="Enable the kernel network stack"
+        item type=bool name="Intel E1000" default=enable id=DRIVER_NET_E1000 alias="DRIVER_NET_E1000" help="Enable the Intel E1000 network driver"
+        item type=bool name="IPv67" default=enable id=DRIVER_NET_IPV67 alias="DRIVER_NET_IPV67" help="Enable the IPv67 kernel network protocol"
+    }
+}
+
 subcategory "Debug" can-toggle=enable {
     item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
     item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"

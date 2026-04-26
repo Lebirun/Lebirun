@@ -56,7 +56,7 @@ void eth_receive(netif_t *netif, uint8_t *frame, uint64_t len) {
             break;
 
         case ETH_TYPE_IPV6:
-            ipv6_receive(netif, payload, payload_len);
+            ipv6_receive(netif, payload, payload_len, &eth->src);
             break;
 
         default:

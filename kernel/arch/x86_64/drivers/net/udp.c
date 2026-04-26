@@ -1,5 +1,9 @@
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/ipv6.h>
+#if CONFIG_DRIVER_NET_IPV67
+#include <lebirun/drivers/net/ipv67.h>
+#endif
 #include <lebirun/drivers/net/dhcp.h>
 #include <lebirun/drivers/net/dns.h>
 #include <lebirun/drivers/net/net.h>
@@ -80,6 +84,74 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
     return result;
 }
 
+static uint16_t udp6_pseudo_checksum(ipv6_addr_t src, ipv6_addr_t dest, uint8_t *data, uint64_t len) {
+    uint64_t sum;
+    uint16_t *ptr;
+    uint64_t remaining;
+    int i;
+
+    sum = 0;
+    ptr = (uint16_t *)src.octets;
+    for (i = 0; i < 8; i++) {
+        sum += ntohs(ptr[i]);
+    }
+
+    ptr = (uint16_t *)dest.octets;
+    for (i = 0; i < 8; i++) {
+        sum += ntohs(ptr[i]);
+    }
+
+    sum += (len >> 16) & 0xFFFF;
+    sum += len & 0xFFFF;
+    sum += IP_PROTO_UDP;
+
+    ptr = (uint16_t *)data;
+    remaining = len;
+    while (remaining > 1) {
+        sum += ntohs(*ptr++);
+        remaining -= 2;
+    }
+
+    if (remaining == 1) {
+        sum += (*((uint8_t *)ptr)) << 8;
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    return htons(~sum);
+}
+
+int udp_send6(netif_t *netif, ipv6_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
+    uint64_t udp_len;
+    uint8_t *packet;
+    udp_header_t *udp;
+    int result;
+
+    if (!netif) return -1;
+
+    udp_len = sizeof(udp_header_t) + len;
+    packet = (uint8_t *)kmalloc(udp_len);
+    if (!packet) return -1;
+
+    udp = (udp_header_t *)packet;
+    udp->src_port = htons(src_port);
+    udp->dest_port = htons(dest_port);
+    udp->length = htons(udp_len);
+    udp->checksum = 0;
+
+    memcpy(packet + sizeof(udp_header_t), data, len);
+
+    udp->checksum = udp6_pseudo_checksum(netif->ipv6, dest, packet, udp_len);
+    if (udp->checksum == 0) udp->checksum = 0xFFFF;
+
+    result = ipv6_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
+    kfree(packet);
+
+    return result;
+}
+
 void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
     udp_header_t *udp;
     uint16_t src_port;
@@ -88,6 +160,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     uint8_t *payload;
     uint64_t payload_len;
     udp_socket_t *sock;
+    uint32_t src_ipv4;
 
     (void)dest;
     if (!netif || !data || len < sizeof(udp_header_t)) return;
@@ -111,6 +184,19 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         dns_receive(netif, src, src_port, payload, payload_len);
     }
 
+#if CONFIG_DRIVER_NET_IPV67
+    if (ipv67_port_active(dest_port)) {
+        src_ipv4 = ((uint32_t)src.octets[0] << 24) |
+                   ((uint32_t)src.octets[1] << 16) |
+                   ((uint32_t)src.octets[2] << 8) |
+                   (uint32_t)src.octets[3];
+        ipv67_receive_on_port(dest_port, src_ipv4, src_port, payload, payload_len);
+        return;
+    }
+#else
+    (void)src_ipv4;
+#endif
+
     sock = udp_sockets;
     while (sock) {
         if (sock->local_port == dest_port) {
@@ -125,6 +211,40 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         }
         sock = sock->next;
     }
+}
+
+void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *data, uint64_t len) {
+    udp_header_t *udp;
+    uint16_t src_port;
+    uint16_t dest_port;
+    uint16_t udp_len;
+    uint8_t *payload;
+    uint64_t payload_len;
+
+    (void)dest;
+    if (!netif || !data || len < sizeof(udp_header_t)) return;
+
+    udp = (udp_header_t *)data;
+    src_port = ntohs(udp->src_port);
+    dest_port = ntohs(udp->dest_port);
+    udp_len = ntohs(udp->length);
+
+    if (udp_len > len) return;
+
+    payload = data + sizeof(udp_header_t);
+    payload_len = udp_len - sizeof(udp_header_t);
+
+#if CONFIG_DRIVER_NET_IPV67
+    if (ipv67_port_active(dest_port)) {
+        ipv67_receive6_on_port(dest_port, &src, src_port, payload, payload_len);
+    }
+#else
+    (void)src;
+    (void)src_port;
+    (void)dest_port;
+    (void)payload;
+    (void)payload_len;
+#endif
 }
 
 udp_socket_t *udp_socket_create(uint16_t port) {

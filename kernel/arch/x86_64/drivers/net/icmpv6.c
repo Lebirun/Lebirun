@@ -4,7 +4,61 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t len) {
+static int icmpv6_is_link_local(ipv6_addr_t ip) {
+    return ip.octets[0] == 0xfe && (ip.octets[1] & 0xc0) == 0x80;
+}
+
+static void icmpv6_make_eui64(ipv6_addr_t *addr, mac_addr_t mac) {
+    addr->octets[8] = mac.addr[0] ^ 0x02;
+    addr->octets[9] = mac.addr[1];
+    addr->octets[10] = mac.addr[2];
+    addr->octets[11] = 0xff;
+    addr->octets[12] = 0xfe;
+    addr->octets[13] = mac.addr[3];
+    addr->octets[14] = mac.addr[4];
+    addr->octets[15] = mac.addr[5];
+}
+
+static void icmpv6_parse_options(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t len, uint64_t offset) {
+    uint8_t opt_type;
+    uint8_t opt_len_units;
+    uint64_t opt_len;
+    ipv6_addr_t new_addr;
+    uint8_t prefix_len;
+    uint8_t flags;
+    mac_addr_t mac;
+
+    while (offset + 2 <= len) {
+        opt_type = data[offset];
+        opt_len_units = data[offset + 1];
+        if (opt_len_units == 0) return;
+        opt_len = (uint64_t)opt_len_units * 8;
+        if (offset + opt_len > len) return;
+
+        if ((opt_type == 1 || opt_type == 2) && opt_len >= 8) {
+            memcpy(&mac, data + offset + 2, 6);
+            if (src) ipv6_neighbor_update(*src, mac);
+        }
+
+        if (opt_type == 3 && opt_len >= 32 && netif) {
+            prefix_len = data[offset + 2];
+            flags = data[offset + 3];
+            if (prefix_len == 64 && (flags & 0x40)) {
+                memset(&new_addr, 0, sizeof(new_addr));
+                memcpy(&new_addr.octets[0], data + offset + 16, 8);
+                icmpv6_make_eui64(&new_addr, netif->mac);
+                if (icmpv6_is_link_local(netif->ipv6)) {
+                    netif->ipv6 = new_addr;
+                    netif->ipv6_prefix = 64;
+                }
+            }
+        }
+
+        offset += opt_len;
+    }
+}
+
+void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t len, mac_addr_t *src_mac) {
     icmpv6_header_t *icmp;
     uint64_t reply_len;
     uint8_t *reply;
@@ -12,8 +66,13 @@ void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t le
     icmpv6_header_t *na;
     ipv6_addr_t *target;
     uint8_t reply_buf[32];
+    uint16_t router_lifetime;
 
     if (!netif || !src || !data || len < sizeof(icmpv6_header_t)) return;
+
+    if (src_mac) {
+        ipv6_neighbor_update(*src, *src_mac);
+    }
 
     icmp = (icmpv6_header_t *)data;
 
@@ -35,6 +94,7 @@ void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t le
 
         case ICMPV6_NEIGHBOR_SOLICITATION:
             if (len < 24) return;
+            icmpv6_parse_options(netif, src, data, len, 24);
             target = (ipv6_addr_t *)(data + 8);
             if (ipv6_eq(*target, netif->ipv6)) {
                 memset(reply_buf, 0, sizeof(reply_buf));
@@ -57,7 +117,19 @@ void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t le
             }
             break;
 
+        case ICMPV6_NEIGHBOR_ADVERTISEMENT:
+            if (len < 24) return;
+            target = (ipv6_addr_t *)(data + 8);
+            icmpv6_parse_options(netif, target, data, len, 24);
+            break;
+
         case ICMPV6_ROUTER_ADVERTISEMENT:
+            if (len < 16) return;
+            router_lifetime = ((uint16_t)data[6] << 8) | data[7];
+            if (router_lifetime != 0) {
+                netif->ipv6_gateway = *src;
+            }
+            icmpv6_parse_options(netif, src, data, len, 16);
             break;
 
         default:
@@ -117,10 +189,10 @@ int icmpv6_send_neighbor_solicitation(netif_t *netif, ipv6_addr_t target) {
     memcpy(packet + 26, &netif->mac, 6);
 
     memset(&dest, 0, sizeof(dest));
-    dest.octets[0] = 0xFF;
+    dest.octets[0] = 0xff;
     dest.octets[1] = 0x02;
     dest.octets[11] = 0x01;
-    dest.octets[12] = 0xFF;
+    dest.octets[12] = 0xff;
     dest.octets[13] = target.octets[13];
     dest.octets[14] = target.octets[14];
     dest.octets[15] = target.octets[15];
@@ -150,7 +222,7 @@ int icmpv6_send_router_solicitation(netif_t *netif) {
     memcpy(packet + 10, &netif->mac, 6);
 
     memset(&all_routers, 0, sizeof(all_routers));
-    all_routers.octets[0] = 0xFF;
+    all_routers.octets[0] = 0xff;
     all_routers.octets[1] = 0x02;
     all_routers.octets[15] = 0x02;
 

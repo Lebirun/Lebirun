@@ -400,8 +400,10 @@ void kernel_main(void) {
 
         if (debug_boot_vfs) printf("BOOT: boot file export done\n");
 
+#if CONFIG_DRIVER_AHCI
         if (ahci_init() == 0)
             ahci_done = 1;
+#endif
 
         if (cmdline_get_lke())
             lke_autoload();
@@ -438,6 +440,7 @@ void kernel_main(void) {
             ext4_vfs_register();
 
             ahci_done = 0;
+#if CONFIG_DRIVER_AHCI
             if (ahci_init() == 0) {
                 ahci_done = 1;
                 printf("AHCI SATA driver initialized successfully\n");
@@ -495,6 +498,9 @@ void kernel_main(void) {
             } else {
                 printf("AHCI SATA driver not available\n");
             }
+#else
+            printf("AHCI SATA driver disabled\n");
+#endif
 
             iso9660_vfs_register();
 
@@ -558,8 +564,12 @@ void kernel_main(void) {
     }
 
     rng_init();
+#if CONFIG_DRIVER_PS2_KEYBOARD
     keyboard_init();
+#endif
+#if CONFIG_DRIVER_PS2_MOUSE
     mouse_init();
+#endif
     syscall_init();
 
     if (debug_boot_hw) {
@@ -572,11 +582,13 @@ void kernel_main(void) {
         terminal_writestring("\n");
     }
 
+#if CONFIG_DRIVER_AHCI
     if (!ahci_done && ahci_init() == 0) {
         ahci_done = 1;
     } else if (!ahci_done) {
         printf("AHCI SATA driver not available (no controller found)\n");
     }
+#endif
 
     if (ahci_done && !devs_registered) {
         ext4_init();
@@ -632,7 +644,11 @@ void kernel_main(void) {
         }
     }
 
+#if CONFIG_DRIVER_NET
     net_init();
+#else
+    printf("NET: Network stack disabled\n");
+#endif
 
     if (debug_boot_hw) terminal_writestring("BOOT: About to execute STI...\n");
     asm volatile ("sti");

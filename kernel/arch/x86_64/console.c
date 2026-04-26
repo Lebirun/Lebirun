@@ -913,10 +913,10 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
             while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = new_cols;
 
-            if (chars_counted + (int)row_end >= new_cursor_chars && !con->line_wrapped[src_row]) {
+            if (chars_counted + (int)row_end >= new_cursor_chars) {
                 con->cursor_y = src_row;
                 con->cursor_x = new_cursor_chars - chars_counted;
-                if (con->cursor_x >= new_cols) con->cursor_x = new_cols - 1;
+                if ((uint64_t)con->cursor_x >= new_cols) con->cursor_x = (int)new_cols - 1;
                 break;
             }
 

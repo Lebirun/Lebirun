@@ -408,6 +408,7 @@ void syscall_clear_exec_completed(void);
 #define SYSCALL_LKE_LOAD 277
 #define SYSCALL_LKE_UNLOAD 278
 #define SYSCALL_LKE_LIST 279
+#define SYSCALL_IPV67 280
 
 #define NR_SYSCALLS 284
 
@@ -521,6 +522,9 @@ void syscalls_dl_init(void);
 void syscalls_regex_init(void);
 void syscalls_power_init(void);
 void syscalls_crypto_init(void);
+#if CONFIG_DRIVER_NET_IPV67
+void syscalls_ipv67_init(void);
+#endif
 
 int sys_vfs_readdir(registers_t *regs);
 

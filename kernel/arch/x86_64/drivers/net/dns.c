@@ -15,8 +15,10 @@ static int dns_cache_capacity = 0;
 static uint16_t dns_id_counter = 1;
 
 static ipv4_addr_t pending_result;
+static ipv6_addr_t pending_result6;
 static uint8_t pending_resolved;
 static uint16_t pending_id;
+static uint16_t pending_qtype;
 
 void dns_init(void) {
     dns_cache_capacity = DNS_CACHE_INIT;
@@ -26,6 +28,7 @@ void dns_init(void) {
     g_dns_server2 = IPV4_ADDR(8, 8, 4, 4);
     dns_id_counter = 1;
     pending_resolved = 0;
+    pending_qtype = DNS_TYPE_A;
 }
 
 void dns_set_server(ipv4_addr_t server) {
@@ -218,6 +221,7 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
     query_len = sizeof(dns_header_t) + name_len + 4;
 
     pending_id = id;
+    pending_qtype = DNS_TYPE_A;
     pending_resolved = 0;
 
     send_result = udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
@@ -244,9 +248,72 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
 }
 
 int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
-    (void)hostname;
-    (void)out_ipv6;
-    return -1;
+    netif_t *netif;
+    uint8_t *query;
+    dns_header_t *hdr;
+    uint16_t id;
+    int name_len;
+    int send_result;
+    uint8_t *qtype;
+    uint64_t query_len;
+    uint64_t timeout_ticks;
+    uint64_t start;
+
+    if (!hostname || !out_ipv6) return -1;
+
+    net_ensure_hw();
+
+    netif = netif_get_default();
+    if (!netif) return -1;
+
+    query = (uint8_t *)kmalloc(512);
+    if (!query) return -1;
+    memset(query, 0, 512);
+
+    hdr = (dns_header_t *)query;
+    id = dns_id_counter++;
+    hdr->id = htons(id);
+    hdr->flags = htons(DNS_FLAG_RD);
+    hdr->qdcount = htons(1);
+    hdr->ancount = 0;
+    hdr->nscount = 0;
+    hdr->arcount = 0;
+
+    name_len = dns_encode_name(hostname, query + sizeof(dns_header_t), 512 - (int)sizeof(dns_header_t) - 4);
+    if (name_len < 0) { kfree(query); return -1; }
+
+    qtype = query + sizeof(dns_header_t) + name_len;
+    qtype[0] = 0;
+    qtype[1] = DNS_TYPE_AAAA;
+    qtype[2] = 0;
+    qtype[3] = DNS_CLASS_IN;
+
+    query_len = sizeof(dns_header_t) + name_len + 4;
+
+    pending_id = id;
+    pending_qtype = DNS_TYPE_AAAA;
+    pending_resolved = 0;
+
+    send_result = udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
+    kfree(query);
+    if (send_result < 0) return -1;
+
+    timeout_ticks = pit_ms_to_ticks(5000);
+    start = pit_get_ticks();
+    while (!pending_resolved) {
+        __asm__ volatile("sti");
+        netif_poll_all();
+        if (task_has_pending_signals()) {
+            return -1;
+        }
+        if (pit_get_ticks() - start > timeout_ticks) {
+            return -1;
+        }
+        schedule();
+    }
+
+    memcpy(out_ipv6, &pending_result6, sizeof(ipv6_addr_t));
+    return 0;
 }
 
 void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *data, uint64_t len) {
@@ -315,11 +382,17 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
         rdlength = (data[offset + 8] << 8) | data[offset + 9];
         offset += 10;
 
-        if (rtype == DNS_TYPE_A && rdlength == 4 && offset + 4 <= len) {
+        if (pending_qtype == DNS_TYPE_A && rtype == DNS_TYPE_A && rdlength == 4 && offset + 4 <= len) {
             pending_result.octets[0] = data[offset];
             pending_result.octets[1] = data[offset + 1];
             pending_result.octets[2] = data[offset + 2];
             pending_result.octets[3] = data[offset + 3];
+            pending_resolved = 1;
+            return;
+        }
+
+        if (pending_qtype == DNS_TYPE_AAAA && rtype == DNS_TYPE_AAAA && rdlength == 16 && offset + 16 <= len) {
+            memcpy(&pending_result6.octets[0], data + offset, 16);
             pending_resolved = 1;
             return;
         }

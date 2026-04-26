@@ -387,4 +387,7 @@ void syscall_init(void) {
     syscalls_regex_init();
     syscalls_power_init();
     syscalls_crypto_init();
+#if CONFIG_DRIVER_NET_IPV67
+    syscalls_ipv67_init();
+#endif
 }

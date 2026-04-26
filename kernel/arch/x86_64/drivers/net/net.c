@@ -1,5 +1,7 @@
 #include <lebirun/drivers/net/net.h>
+#if CONFIG_DRIVER_NET_E1000
 #include <lebirun/drivers/net/e1000/e1000.h>
+#endif
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <lebirun/task.h>
@@ -77,6 +79,7 @@ void net_init(void) {
     tcp_init();
     dns_init();
 
+#if CONFIG_DRIVER_NET_E1000
     if (e1000_init() < 0) {
         printf("NET: No network interface available\n");
     } else {
@@ -85,6 +88,10 @@ void net_init(void) {
         if (netif)
             dhcp_init(netif);
     }
+#else
+    (void)netif;
+    printf("NET: E1000 driver disabled\n");
+#endif
 
     nt = create_kernel_task(net_worker_thread, TASK_READY);
     if (nt) {

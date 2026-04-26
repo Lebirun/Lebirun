@@ -1658,7 +1658,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
 
     strcpy(rn->name, "tmpfs");
     rn->type = RAMFS_NODE_DIR;
-    rn->permissions = 0755;
+    rn->permissions = 0777;
     rn->uid = 0;
     rn->gid = 0;
     rn->parent = NULL;
@@ -1676,7 +1676,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
     vn->flags = VFS_DIRECTORY;
     vn->inode = ramfs_next_inode++;
     vn->length = 0;
-    vn->mask = 0755;
+    vn->mask = 0777;
     vn->uid = 0;
     vn->gid = 0;
     vn->atime = rn->atime;
