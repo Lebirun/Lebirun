@@ -41,6 +41,12 @@ void lke_register_symbol(const char *name, void *addr);
 #else
 #define module_init(fn) int lke_module_init(void) { return fn(); }
 #define module_exit(fn) void lke_module_cleanup(void) { fn(); }
+
+#define LKE_NAME(n)       static const char __lke_meta_name[]    __attribute__((used, section(".lke_info"))) = "name=" n
+#define LKE_DESC(d)       static const char __lke_meta_desc[]    __attribute__((used, section(".lke_info"))) = "description=" d
+#define LKE_LICENSE(l)    static const char __lke_meta_license[] __attribute__((used, section(".lke_info"))) = "license=" l
+#define LKE_AUTHOR(a)     static const char __lke_meta_author[]  __attribute__((used, section(".lke_info"))) = "author=" a
+#define LKE_VERSION_STR(v) static const char __lke_meta_version[] __attribute__((used, section(".lke_info"))) = "version=" v
 #endif
 
 #endif

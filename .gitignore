@@ -39,6 +39,9 @@ build-*/
 *.ko
 *.dSYM/
 
+modules/out/
+*.lke
+
 .vscode/
 .idea/
 *.iml

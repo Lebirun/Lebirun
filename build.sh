@@ -23,6 +23,7 @@ TOTAL_STEPS=$((TOTAL_STEPS + 1))
 TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "initrd" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -d "root" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -d "modules" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 CURRENT_STEP=0
 
 COLS=$(tput cols 2>/dev/null || echo 80)
@@ -97,13 +98,16 @@ run_cmd() {
     "$@"
   else
     _errfile=$(mktemp)
-    _outfile=$(mktemp)
-    "$@" >"$_outfile" 2>"$_errfile" || true
-    if [ -s "$_outfile" ]; then
-      printf "\r\033[2K" >&2
-      grep -E '^\s*(CC|LD|AR|AS|STRIP|CCLD|HOSTCC)\s' "$_outfile" || true
-      if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
-    fi
+    {
+      "$@" 2>"$_errfile"
+    } | while IFS= read -r _line; do
+      case "$_line" in
+        *'  CC '*|*'  LD '*|*'  AR '*|*'  AS '*|*'  STRIP '*|*'  CCLD '*|*'  HOSTCC '*)
+          printf "\r\033[2K%s\n" "$_line"
+          if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
+          ;;
+      esac
+    done
     if [ -s "$_errfile" ]; then
       printf "\r\033[2K" >&2
       sed \
@@ -112,7 +116,7 @@ run_cmd() {
         "$_errfile"
       if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
     fi
-    rm -f "$_errfile" "$_outfile"
+    rm -f "$_errfile"
   fi
   _step_end=$(date +%s)
   _step_dur=$((_step_end - _step_start))
@@ -137,6 +141,13 @@ CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mBuilding user programs...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building user programs"
 run_cmd "Building user programs" sh -c "cd userprog && $MAKE all"
+
+if [ -d "modules" ]; then
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  bar_print "$(printf '\033[1;36mBuilding modules...\033[0m')"
+  progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building modules"
+  run_cmd "Building modules" sh -c "cd modules && $MAKE stage"
+fi
 
 chmod +x mkinitrd.sh
 
