@@ -162,9 +162,11 @@ struct input_absinfo {
 };
 
 #define EVDEV_BUF_EVENTS 256
+#define EVDEV_BUF_INIT_EVENTS 64
 
 struct evdev_device {
-    struct input_event ring[EVDEV_BUF_EVENTS];
+    struct input_event *ring;
+    uint32_t ring_capacity;
     volatile uint32_t head;
     volatile uint32_t tail;
     wait_queue_t waitq;

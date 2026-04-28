@@ -75,6 +75,29 @@ void *pmm_alloc_early_page(void) {
     return NULL;
 }
 
+void *pmm_alloc_early_pages(uint64_t num) {
+    uint64_t addr;
+    uint64_t i;
+    uint64_t rend;
+    uint64_t bytes;
+
+    if (num == 0) return NULL;
+    if (pfa_bitmap) return (void *)pfa_alloc_contiguous(num);
+    bytes = num * PAGE_SIZE;
+    bump_current = (bump_current + 0xFFF) & ~0xFFFULL;
+    for (i = 0; i < num_regions; i++) {
+        if (memory_map[i].type != 1) continue;
+        rend = memory_map[i].base + memory_map[i].length;
+        if (bump_current < memory_map[i].base) bump_current = memory_map[i].base;
+        if (bump_current >= rend) continue;
+        if (bump_current + bytes > rend) continue;
+        addr = bump_current;
+        bump_current += bytes;
+        return (void *)addr;
+    }
+    return NULL;
+}
+
 void set_bit(uint64_t bit_idx) {
     if (bit_idx / 8 < bitmap_bytes_used)
         pfa_bitmap[bit_idx / 8] |= (1 << (bit_idx % 8));

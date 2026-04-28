@@ -286,30 +286,38 @@ static uint64_t inst_get_free_mem(void)
 static char *copy_buf = NULL;
 static int copy_buf_size = 0;
 
-static void inst_init_copy_buf(void)
+static int inst_resize_copy_buf(uint64_t file_size)
 {
     uint64_t avail;
+    uint64_t want64;
+    char *new_buf;
     int want;
 
-    if (copy_buf) return;
-
     avail = inst_get_free_mem();
-    if (avail > 1024 * 1024)
-        avail -= 512 * 1024;
-    else if (avail > 65536)
-        avail = avail / 2;
-    else
-        avail = BUF_SIZE;
+    if (avail == 0) avail = BUF_SIZE;
 
-    want = (int)(avail > 4 * 1024 * 1024 ? 4 * 1024 * 1024 : avail);
-    if (want < BUF_SIZE) want = BUF_SIZE;
+    want64 = avail / 16;
+    if (file_size > 0 && file_size < want64) want64 = file_size;
+    if (want64 < BUF_SIZE) want64 = BUF_SIZE;
+    if (want64 > 0x7fffffffULL) want64 = 0x7fffffffULL;
+
+    want = (int)want64;
+    if (copy_buf && copy_buf_size >= want) return 0;
 
     while (want >= BUF_SIZE) {
-        copy_buf = (char *)malloc(want);
-        if (copy_buf) break;
+        new_buf = (char *)malloc(want);
+        if (new_buf) {
+            if (copy_buf) free(copy_buf);
+            copy_buf = new_buf;
+            copy_buf_size = want;
+            return 0;
+        }
         want /= 2;
     }
-    copy_buf_size = copy_buf ? want : 0;
+
+    if (copy_buf) return 0;
+
+    return -1;
 }
 
 static int inst_copy_file_vfs(const char *src, const char *dst)
@@ -321,14 +329,18 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     struct stat src_st;
     mode_t src_mode;
 
-    if (!copy_buf) return -1;
-
     fd_in = vfs_open(src, 0);
     if (fd_in < 0) return -1;
 
     src_mode = 0644;
+    src_st.st_size = 0;
     if (stat(src, &src_st) == 0)
         src_mode = src_st.st_mode & 07777;
+
+    if (inst_resize_copy_buf((uint64_t)src_st.st_size) < 0) {
+        vfs_close_fd(fd_in);
+        return -1;
+    }
 
     use_posix = 0;
     vfs_create(dst, src_mode);
@@ -430,6 +442,8 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
     char dst_path[MAX_PATH];
     int errors;
     int pct;
+    int slen;
+    int dlen;
 
     vfs_mkdir(dst, 0755);
 
@@ -441,13 +455,21 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
         if (vfs_readdir(fd, name, &type, idx) != 0) break;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
 
-        snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
+        slen = snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
+        if (slen < 0 || slen >= (int)sizeof(src_path)) {
+            errors++;
+            continue;
+        }
 
         if (skip && strcmp(src_path, skip) == 0) continue;
         if (strcmp(name, "lebinstaller") == 0) continue;
         if (inst_pkg_skip(src_path)) continue;
 
-        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+        dlen = snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+        if (dlen < 0 || dlen >= (int)sizeof(dst_path)) {
+            errors++;
+            continue;
+        }
 
         if (type == 2) {
             if (inst_copy_dir_recursive(src_path, dst_path, skip) < 0)
@@ -538,27 +560,9 @@ static int inst_mount_partition(const char *devpath, const char *mountpoint)
 
 static int inst_umount_partition(const char *mountpoint)
 {
-    int pid;
     int ret;
 
-    pid = fork();
-    if (pid < 0) return -1;
-
-    if (pid == 0) {
-        int nfd;
-        char *argv[3];
-        nfd = open("/dev/null", O_WRONLY);
-        if (nfd >= 0) { dup2(nfd, 1); dup2(nfd, 2); close(nfd); }
-        argv[0] = "umount";
-        argv[1] = (char *)mountpoint;
-        argv[2] = NULL;
-        execv("/sbin/umount", argv);
-        execv("/bin/umount", argv);
-        execv("/bin/lebu", argv);
-        _exit(127);
-    }
-
-    waitpid(pid, &ret, 0);
+    ret = (int)leb_syscall1(LEB_SYSCALL_VFS_UMOUNT, (long)mountpoint);
     return ret;
 }
 
@@ -1392,7 +1396,6 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     copy_last_pct = -1;
 
     lebui_progress_log(&prog_st, "Copying rootfs...");
-    inst_init_copy_buf();
     if (inst_copy_rootfs(mountpoint) < 0) {
         lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
     }
@@ -1493,7 +1496,9 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     }
 
     lebui_progress_log(&prog_st, "Unmounting...");
-    inst_umount_partition(mountpoint);
+    if (inst_umount_partition(mountpoint) != 0) {
+        lebui_progress_log(&prog_st, "Warning: unmount failed.");
+    }
 
     lebui_progress_update(&prog_st, "Installation complete!", 100);
     lebui_progress_log(&prog_st, "Done!");
@@ -1551,6 +1556,8 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
     char dst_path[MAX_PATH];
     int errors;
     int pct;
+    int slen;
+    int dlen;
 
     vfs_mkdir(dst, 0755);
 
@@ -1562,8 +1569,16 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
         if (vfs_readdir(fd, name, &type, idx) != 0) break;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
 
-        snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
-        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+        slen = snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
+        if (slen < 0 || slen >= (int)sizeof(src_path)) {
+            errors++;
+            continue;
+        }
+        dlen = snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
+        if (dlen < 0 || dlen >= (int)sizeof(dst_path)) {
+            errors++;
+            continue;
+        }
 
         if (strcmp(name, "lebinstaller") == 0) continue;
 
@@ -1580,9 +1595,9 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
             if (copy_total > 0) {
                 pct = (copy_done * 100) / copy_total;
                 if (pct > 99) pct = 99;
-                lebui_progress_update(&prog_st, src_path, pct);
                 if (pct != copy_last_pct) {
                     copy_last_pct = pct;
+                    lebui_progress_update(&prog_st, src_path, pct);
                     lebui_progress_log(&prog_st, src_path);
                 }
             }
@@ -1593,9 +1608,9 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
             if (copy_total > 0) {
                 pct = (copy_done * 100) / copy_total;
                 if (pct > 99) pct = 99;
-                lebui_progress_update(&prog_st, src_path, pct);
                 if (pct != copy_last_pct) {
                     copy_last_pct = pct;
+                    lebui_progress_update(&prog_st, src_path, pct);
                     lebui_progress_log(&prog_st, src_path);
                 }
             }
@@ -1661,7 +1676,6 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     copy_last_pct = -1;
 
     lebui_progress_log(&prog_st, "Updating system files...");
-    inst_init_copy_buf();
 
     for (i = 0; update_dirs[i]; i++) {
         snprintf(src, sizeof(src), "/%s", update_dirs[i]);
@@ -1691,7 +1705,9 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     lebui_progress_log(&prog_st, logbuf);
 
     lebui_progress_log(&prog_st, "Unmounting...");
-    inst_umount_partition(mountpoint);
+    if (inst_umount_partition(mountpoint) != 0) {
+        lebui_progress_log(&prog_st, "Warning: unmount failed.");
+    }
 
     lebui_progress_update(&prog_st, "Update complete!", 100);
     lebui_progress_log(&prog_st, "Done!");

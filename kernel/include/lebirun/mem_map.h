@@ -93,6 +93,7 @@ void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint64_t num);
 void *pmm_alloc_low_page(void);
+void *pmm_alloc_early_pages(uint64_t num);
 void pfa_init(void);
 uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
@@ -165,6 +166,7 @@ int demand_decommit_page(uint64_t virt_addr);
 void vmm_unmap_page(uint64_t virt_addr);
 void vmm_map_temp(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 void vmm_unmap_temp(uint64_t virt_addr);
+int pt_ensure_phys_mapped(uint64_t phys_addr);
 
 void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);

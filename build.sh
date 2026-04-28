@@ -234,6 +234,9 @@ if [ -f "libc/user.ld" ]; then
   mkdir -p root/usr/lib
   cp libc/user.ld root/usr/lib/user.ld
 fi
+for f in root/bin/* root/sbin/*; do
+  [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+done
 
 if [ -d "root" ]; then
   get_define_version() {

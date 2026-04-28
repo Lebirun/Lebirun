@@ -29,14 +29,32 @@ void net_poll(void) {
 
 static int net_hw_initialized;
 static int net_has_interface;
+static int net_worker_started;
+
+static void net_start_worker(void);
 
 void net_ensure_hw(void) {
     netif_t *netif;
     int i;
 
-    if (!net_has_interface) return;
     if (net_hw_initialized) return;
     net_hw_initialized = 1;
+
+#if CONFIG_DRIVER_NET_E1000
+    if (e1000_init() < 0) {
+        printf("NET: No network interface available\n");
+        return;
+    }
+    net_has_interface = 1;
+    netif = netif_get_default();
+    if (netif)
+        dhcp_init(netif);
+#else
+    printf("NET: E1000 driver disabled\n");
+    return;
+#endif
+
+    net_start_worker();
 
     netif = netif_get_default();
     if (!netif) return;
@@ -65,11 +83,26 @@ static void net_worker_thread(void) {
     }
 }
 
-void net_init(void) {
+static void net_start_worker(void) {
     task_t *nt;
-    netif_t *netif;
 
+    if (net_worker_started) return;
+    net_worker_started = 1;
+    nt = create_kernel_task(net_worker_thread, TASK_READY);
+    if (nt) {
+        strcpy(nt->name, "net_worker");
+        lock_scheduler();
+        add_task_to_runqueue(nt);
+        unlock_scheduler();
+    }
+}
+
+void net_init(void) {
     printf("NET: Initializing network stack...\n");
+
+    net_hw_initialized = 0;
+    net_has_interface = 0;
+    net_worker_started = 0;
 
     netif_init();
     arp_init();
@@ -78,28 +111,6 @@ void net_init(void) {
     udp_init();
     tcp_init();
     dns_init();
-
-#if CONFIG_DRIVER_NET_E1000
-    if (e1000_init() < 0) {
-        printf("NET: No network interface available\n");
-    } else {
-        net_has_interface = 1;
-        netif = netif_get_default();
-        if (netif)
-            dhcp_init(netif);
-    }
-#else
-    (void)netif;
-    printf("NET: E1000 driver disabled\n");
-#endif
-
-    nt = create_kernel_task(net_worker_thread, TASK_READY);
-    if (nt) {
-        strcpy(nt->name, "net_worker");
-        lock_scheduler();
-        add_task_to_runqueue(nt);
-        unlock_scheduler();
-    }
 
     printf("NET: Network stack initialized\n");
 }

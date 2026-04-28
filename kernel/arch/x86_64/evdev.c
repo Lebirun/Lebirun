@@ -3,6 +3,7 @@
 #include <lebirun/mouse.h>
 #include <lebirun/pit.h>
 #include <lebirun/debug.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 
 static struct evdev_device evdev_kbd;
@@ -56,18 +57,54 @@ static const uint16_t scancode_to_evdev[128] = {
 
 static void evdev_ring_put(struct evdev_device *dev, const struct input_event *ev) {
     uint32_t next;
-    next = (dev->head + 1) % EVDEV_BUF_EVENTS;
-    if (next == dev->tail)
+    uint32_t old_capacity;
+    uint32_t new_capacity;
+    uint32_t count;
+    uint32_t i;
+    struct input_event *new_ring;
+
+    if (!dev->ring || dev->ring_capacity == 0)
         return;
+    next = (dev->head + 1) % dev->ring_capacity;
+    if (next == dev->tail) {
+        old_capacity = dev->ring_capacity;
+        if (old_capacity >= EVDEV_BUF_EVENTS)
+            return;
+        new_capacity = old_capacity * 2;
+        if (new_capacity > EVDEV_BUF_EVENTS)
+            new_capacity = EVDEV_BUF_EVENTS;
+        new_ring = (struct input_event *)kmalloc(new_capacity * sizeof(struct input_event));
+        if (!new_ring)
+            return;
+        count = 0;
+        while (dev->tail != dev->head && count < old_capacity - 1) {
+            new_ring[count] = dev->ring[dev->tail];
+            dev->tail = (dev->tail + 1) % old_capacity;
+            count++;
+        }
+        for (i = count; i < new_capacity; i++) {
+            memset(&new_ring[i], 0, sizeof(struct input_event));
+        }
+        kfree(dev->ring);
+        dev->ring = new_ring;
+        dev->ring_capacity = new_capacity;
+        dev->tail = 0;
+        dev->head = count;
+        next = (dev->head + 1) % dev->ring_capacity;
+        if (next == dev->tail)
+            return;
+    }
     dev->ring[dev->head] = *ev;
     dev->head = next;
 }
 
 static int evdev_ring_get(struct evdev_device *dev, struct input_event *ev) {
+    if (!dev->ring || dev->ring_capacity == 0)
+        return 0;
     if (dev->head == dev->tail)
         return 0;
     *ev = dev->ring[dev->tail];
-    dev->tail = (dev->tail + 1) % EVDEV_BUF_EVENTS;
+    dev->tail = (dev->tail + 1) % dev->ring_capacity;
     return 1;
 }
 
@@ -321,8 +358,18 @@ struct evdev_device *evdev_get_mouse(void) {
 
 void evdev_init(void) {
     int i;
+    struct input_event *kbd_ring;
+    struct input_event *mouse_ring;
+
+    kbd_ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
+    mouse_ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
 
     memset(&evdev_kbd, 0, sizeof(evdev_kbd));
+    evdev_kbd.ring = kbd_ring;
+    if (evdev_kbd.ring) {
+        evdev_kbd.ring_capacity = EVDEV_BUF_INIT_EVENTS;
+        memset(evdev_kbd.ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
+    }
     waitq_init(&evdev_kbd.waitq);
     strcpy(evdev_kbd.name, "Lebirun PS/2 Keyboard");
     evdev_kbd.id.bustype = BUS_I8042;
@@ -337,6 +384,11 @@ void evdev_init(void) {
     }
 
     memset(&evdev_mouse, 0, sizeof(evdev_mouse));
+    evdev_mouse.ring = mouse_ring;
+    if (evdev_mouse.ring) {
+        evdev_mouse.ring_capacity = EVDEV_BUF_INIT_EVENTS;
+        memset(evdev_mouse.ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
+    }
     waitq_init(&evdev_mouse.waitq);
     strcpy(evdev_mouse.name, "Lebirun PS/2 Mouse");
     evdev_mouse.id.bustype = BUS_I8042;

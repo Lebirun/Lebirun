@@ -405,6 +405,11 @@ e1000_device_t *e1000_get_device(void) {
     return g_e1000_dev.initialized ? &g_e1000_dev : NULL;
 }
 
+uint64_t e1000_get_allocated_pages(void) {
+    if (!g_e1000_dev.initialized) return 0;
+    return 2 + E1000_NUM_RX_DESC + E1000_NUM_TX_DESC;
+}
+
 void e1000_print_status(e1000_device_t *dev) {
     printf("PCI: %u:%u.%u\n", dev->pci_bus, dev->pci_slot, dev->pci_func);
     printf("Device ID: 0x%04X\n", dev->device_id);

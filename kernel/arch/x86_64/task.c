@@ -31,7 +31,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 #define KERNEL_STACK_SIZE 8192
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x4000u
+#define USER_STACK_SIZE 0x2000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 
@@ -2251,7 +2251,7 @@ pid_t task_create_thread(void (*entry)(void)) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     
-    thread_stack_size = 0x4000;
+    thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
     
@@ -2372,7 +2372,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
         new_task->cwd[i] = current_task->cwd[i];
     }
     
-    thread_stack_size = 0x4000;
+    thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
     

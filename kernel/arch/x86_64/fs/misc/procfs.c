@@ -865,7 +865,7 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
 
     slab_pages = slab_get_total_pages();
 
-    e1000_pages = 2 + E1000_NUM_RX_DESC + E1000_NUM_TX_DESC;
+    e1000_pages = e1000_get_allocated_pages();
 
     ahci_pages = 3;
 
@@ -890,7 +890,7 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         } while (t && t != start);
     }
 
-    user_stack_pages = user_pd_pages * (0x4000u / PAGE_SIZE);
+    user_stack_pages = user_pd_pages * (0x2000u / PAGE_SIZE);
     if (user_elf_pages >= user_stack_pages) {
         user_elf_pages -= user_stack_pages;
     }

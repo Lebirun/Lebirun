@@ -182,5 +182,6 @@ void e1000_irq_handler(void *regs);
 void e1000_read_mac(e1000_device_t *dev);
 void e1000_print_status(e1000_device_t *dev);
 e1000_device_t *e1000_get_device(void);
+uint64_t e1000_get_allocated_pages(void);
 
 #endif

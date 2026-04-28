@@ -25,29 +25,71 @@ static inline void heap_lock_release(void) {
 #define CANARY_OVERHEAD (sizeof(uint64_t) * 2)
 #define HEAP_USE_DEMAND_PAGING 1
 
-#define EARLY_HEAP_SIZE (16 * 1024)
-static uint8_t early_heap_buffer[EARLY_HEAP_SIZE] __attribute__((aligned(4096)));
-static uint64_t early_heap_offset = 0;
+typedef struct early_heap_chunk {
+    struct early_heap_chunk *next;
+    uint64_t size;
+    uint64_t used;
+} early_heap_chunk_t;
+
+static early_heap_chunk_t *early_heap_chunks = NULL;
+static early_heap_chunk_t *early_heap_current = NULL;
+static uint64_t early_heap_used = 0;
+static uint64_t early_heap_total = 0;
 static int main_heap_initialized = 0;
 
 static void *early_kmalloc(size_t size) {
     void *ptr;
+    early_heap_chunk_t *chunk;
+    uint64_t total_size;
+    uint64_t pages;
+    uint64_t phys;
+    uint64_t i;
 
     size = (size + 15) & ~15;
-    if (early_heap_offset + size > EARLY_HEAP_SIZE) return NULL;
-    ptr = &early_heap_buffer[early_heap_offset];
+    if (size == 0) size = 16;
+    if (!early_heap_current || early_heap_current->used + size > early_heap_current->size) {
+        total_size = size + sizeof(early_heap_chunk_t);
+        pages = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        phys = (uint64_t)pmm_alloc_early_pages(pages);
+        if (!phys) return NULL;
+        for (i = 0; i < pages; i++) {
+            if (pt_ensure_phys_mapped(phys + i * PAGE_SIZE) < 0) return NULL;
+        }
+        chunk = (early_heap_chunk_t *)(phys + KERNEL_VMA);
+        chunk->next = NULL;
+        chunk->size = pages * PAGE_SIZE - sizeof(early_heap_chunk_t);
+        chunk->used = 0;
+        if (early_heap_current) {
+            early_heap_current->next = chunk;
+        } else {
+            early_heap_chunks = chunk;
+        }
+        early_heap_current = chunk;
+        early_heap_total += pages * PAGE_SIZE;
+    }
+    ptr = (uint8_t *)early_heap_current + sizeof(early_heap_chunk_t) + early_heap_current->used;
     memset(ptr, 0, size);
-    early_heap_offset += size;
+    early_heap_current->used += size;
+    early_heap_used += size;
     return ptr;
 }
 
 int is_early_heap_ptr(void *ptr) {
     uint64_t addr;
+    uint64_t start;
+    uint64_t end;
+    early_heap_chunk_t *chunk;
 
     if (!ptr) return 0;
     addr = (uint64_t)ptr;
-    return (addr >= (uint64_t)early_heap_buffer &&
-            addr < (uint64_t)early_heap_buffer + EARLY_HEAP_SIZE);
+    chunk = early_heap_chunks;
+    while (chunk) {
+        start = (uint64_t)chunk + sizeof(early_heap_chunk_t);
+        end = start + chunk->size;
+        if (addr >= start && addr < end) return 1;
+        chunk = chunk->next;
+    }
+    return 0;
 }
 
 static inline uint64_t *get_head_canary(heap_block_t *block) {
@@ -405,7 +447,7 @@ void heap_init(void) {
     printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
            kernel_heap.total_size / 1024);
-    printf("Early heap used: %u / %u bytes\n", early_heap_offset, EARLY_HEAP_SIZE);
+    printf("Early heap used: %u / %u bytes\n", early_heap_used, early_heap_total);
 }
 
 static void *kmalloc_internal(size_t size) {

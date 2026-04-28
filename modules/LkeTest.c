@@ -3,7 +3,7 @@
 LKE_NAME("LkeTest");
 LKE_DESC("Sample Lebirun Kernel Extension module");
 LKE_LICENSE("MIT");
-LKE_AUTHOR("Lebirun Developer");
+LKE_AUTHOR("Lebirun");
 LKE_VERSION_STR("1.0");
 
 extern int printf(const char *fmt, ...);
