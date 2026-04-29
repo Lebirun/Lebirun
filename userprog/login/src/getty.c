@@ -53,7 +53,6 @@ int main(int argc, char **argv)
     char *login_envp[2];
     int r;
     struct utsname uts;
-    int first_run;
 
     if (argc < 2) {
         WRITE_LIT(2, "Usage: getty <console_num>\n");
@@ -77,15 +76,11 @@ int main(int argc, char **argv)
         strcpy(uts.nodename, "localhost");
     }
 
-    first_run = 1;
-
     if (console_num != 0)
         WRITE_LIT(1, "\033[2J\033[H");
 
     for (;;) {
-        if (!first_run || console_num != 0)
-            write(1, "\n", 1);
-        first_run = 0;
+        write(1, "\n", 1);
 
         write(1, uts.sysname, strlen(uts.sysname));
         WRITE_LIT(1, " | ");

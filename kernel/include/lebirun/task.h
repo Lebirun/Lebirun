@@ -5,8 +5,11 @@
 #include <lebirun/registers.h>
 #include <stdint.h>
 
+struct vfs_node;
+
 #define TASK_INIT_FDS 16
 #define TASK_MAX_FDS 1024
+#define TASK_MAX_FILE_MAPS 16
 
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
@@ -71,6 +74,15 @@ typedef struct task {
     uint64_t pml4_phys;
     uint64_t *user_pages;
     uint64_t user_pages_count;
+    struct {
+        struct vfs_node *node;
+        uint64_t vaddr;
+        uint64_t memsz;
+        uint64_t filesz;
+        uint64_t offset;
+        uint64_t flags;
+    } file_maps[TASK_MAX_FILE_MAPS];
+    int file_map_count;
     int console_id;
     uint64_t tls_base;
     uint64_t tls_limit;
@@ -180,6 +192,14 @@ void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
 
 void task_free_user_memory(task_t* t);
+int task_add_file_mapping(task_t *task, struct vfs_node *node, uint64_t vaddr,
+                          uint64_t memsz, uint64_t filesz, uint64_t offset,
+                          uint64_t flags);
+int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
+int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
+void exec_page_cache_reclaim(uint64_t target_pages);
+uint64_t exec_page_cache_get_pages(void);
+uint64_t exec_page_cache_get_reclaimable_pages(void);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);
@@ -195,6 +215,8 @@ pid_t task_fork(registers_t *parent_regs);
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs);
 int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
                         int argc, char **argv, int envc, char **envp);
+int task_exec_node_with_args(struct vfs_node *node, registers_t *regs,
+                             int argc, char **argv, int envc, char **envp);
 pid_t task_create_thread(void (*entry)(void));
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
 

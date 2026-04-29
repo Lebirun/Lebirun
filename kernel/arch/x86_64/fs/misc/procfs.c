@@ -291,9 +291,13 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
     uint64_t total_kb;
     uint64_t free_pages_kb;
     uint64_t used_kb;
+    uint64_t mem_used_kb;
     uint64_t heap_total_kb;
     uint64_t heap_used_kb;
     uint64_t slab_kb;
+    uint64_t exec_cache_kb;
+    uint64_t exec_reclaim_kb;
+    uint64_t avail_kb;
     int len;
     uint64_t remaining;
     
@@ -305,6 +309,11 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
     heap_total_kb = kernel_heap.total_size / 1024;
     heap_used_kb = kernel_heap.used_size / 1024;
     slab_kb = slab_get_total_pages() * 4;
+    exec_cache_kb = exec_page_cache_get_pages() * 4;
+    exec_reclaim_kb = exec_page_cache_get_reclaimable_pages() * 4;
+    avail_kb = free_pages_kb + exec_reclaim_kb;
+    if (avail_kb > total_kb) avail_kb = total_kb;
+    mem_used_kb = used_kb > exec_reclaim_kb ? used_kb - exec_reclaim_kb : 0;
 
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8lu kB\n"
@@ -324,16 +333,16 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
         "Slab:          %8lu kB\n",
         total_kb,
         free_pages_kb,
-        free_pages_kb,
+        avail_kb,
+        mem_used_kb,
         used_kb,
-        used_kb,
+        0UL,
+        exec_cache_kb,
         0UL,
         0UL,
         0UL,
         0UL,
-        0UL,
-        0UL,
-        0UL,
+        exec_reclaim_kb,
         heap_total_kb,
         heap_used_kb,
         slab_kb);
@@ -849,6 +858,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t user_elf_pages;
     uint64_t user_stack_pages;
     uint64_t user_pd_pages;
+    uint64_t exec_cache_pages;
+    uint64_t exec_reclaim_pages;
     task_t *t;
     task_t *start;
 
@@ -877,6 +888,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     user_elf_pages = 0;
     user_stack_pages = 0;
     user_pd_pages = 0;
+    exec_cache_pages = exec_page_cache_get_pages();
+    exec_reclaim_pages = exec_page_cache_get_reclaimable_pages();
 
     start = ready_queue_head;
     t = start;
@@ -920,7 +933,11 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "UserStackPages:     %8lu\n"
         "UserStackKB:        %8lu\n"
         "UserPDPages:        %8lu\n"
-        "UserPDKB:           %8lu\n",
+        "UserPDKB:           %8lu\n"
+        "ExecCachePages:     %8lu\n"
+        "ExecCacheKB:        %8lu\n"
+        "ExecReclaimPages:   %8lu\n"
+        "ExecReclaimKB:      %8lu\n",
         pfa_used_kb,
         kern_kb,
         bitmap_kb,
@@ -944,7 +961,11 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         user_stack_pages,
         user_stack_pages * 4,
         user_pd_pages,
-        user_pd_pages * 4);
+        user_pd_pages * 4,
+        exec_cache_pages,
+        exec_cache_pages * 4,
+        exec_reclaim_pages,
+        exec_reclaim_pages * 4);
 
     if (offset >= (uint64_t)len) return 0;
     remaining = (uint64_t)len - offset;

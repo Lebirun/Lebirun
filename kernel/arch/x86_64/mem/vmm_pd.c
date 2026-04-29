@@ -16,6 +16,7 @@ extern void pfa_ref_inc(uint64_t phys_addr);
 extern int pfa_ref_dec(uint64_t phys_addr);
 extern uint8_t pfa_ref_get(uint64_t phys_addr);
 extern void pfa_cow_release64(uint64_t phys_addr);
+extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
 static inline bool clone_should_log_detail(uint64_t index) {
     return index < 2 || (index & 0x3FF) == 0;
@@ -126,6 +127,7 @@ void vmm_free_pml4(uint64_t pml4_phys) {
                 for (l = 0; l < 512; l++) {
                     pte = pt_tbl[l];
                     if (pte & 1) {
+                        exec_page_cache_on_page_release(pte & ~0xFFFULL);
                         pfa_cow_release64(pte & ~0xFFFULL);
                     }
                 }
@@ -414,6 +416,7 @@ cleanup_fail:
                     for (cl = 0; cl < 512; cl++) {
                         c_pte = new_pt_tbl[cl];
                         if (c_pte & 1) {
+                            exec_page_cache_on_page_release(c_pte & ~0xFFFULL);
                             pfa_cow_release64(c_pte & ~0xFFFULL);
                         }
                     }
@@ -466,6 +469,7 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     uint64_t pte_flags;
     uint64_t new_page_phys;
     uint8_t ref;
+    int remaining_ref;
     uint64_t saved_flags;
 
     pml4_idx = (fault_addr >> 39) & 0x1FF;
@@ -545,7 +549,11 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     pt[pt_idx] = (new_page_phys & ~0xFFFULL) | ((pte_flags | 0x2) & ~0x200);
     temp_unmap_raw(temp_virt);
 
-    pfa_ref_dec(old_page_phys);
+    exec_page_cache_on_page_release(old_page_phys);
+    remaining_ref = pfa_ref_dec(old_page_phys);
+    if (remaining_ref == 0) {
+        pfa_free(old_page_phys);
+    }
 
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 

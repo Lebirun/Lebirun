@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+struct vfs_node;
+
 #define EI_NIDENT 16
 
 #define ELFMAG0 0x7F
@@ -306,6 +308,7 @@ typedef struct {
 int elf_validate(const uint8_t *data, uint64_t size);
 int elf_validate_so(const uint8_t *data, uint64_t size);
 int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count);
+int elf_load_node_to_pd(uint64_t pd_phys, struct vfs_node *node, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count);
 int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t base_addr, dl_handle_t *handle);
 int elf_relocate_so(uint64_t pd_phys, dl_handle_t *handle, dl_handle_t *all_handles, int num_handles);
 uint64_t elf_get_entry(const uint8_t *data);

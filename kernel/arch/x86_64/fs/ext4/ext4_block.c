@@ -273,6 +273,30 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     return errors ? -1 : 0;
 }
 
+int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
+    int errors;
+    int written;
+    int i;
+
+    if (!fs || max_blocks == 0) return 0;
+    errors = 0;
+    written = 0;
+
+    for (i = 0; i < (int)fs->block_cache_count; i++) {
+        if (written >= (int)max_blocks) break;
+        if (fs->block_cache[i].data && fs->block_cache[i].dirty && fs->block_cache[i].ref_count == 0) {
+            if (ext4_write_block(fs, fs->block_cache[i].block_num, fs->block_cache[i].data) != 0) {
+                errors++;
+            } else {
+                fs->block_cache[i].dirty = false;
+                written++;
+            }
+        }
+    }
+
+    return errors ? -1 : written;
+}
+
 void ext4_flush_cache(ext4_fs_t *fs) {
     ext4_sync_blocks(fs);
     

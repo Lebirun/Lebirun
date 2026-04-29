@@ -199,6 +199,9 @@ registers_t* interrupt_handler(registers_t* regs)
             if (cow_result == 1) {
                 return regs;
             }
+            if (task_handle_file_write_fault(current_task, fault_addr)) {
+                return regs;
+            }
         }
 
         if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
@@ -235,6 +238,9 @@ registers_t* interrupt_handler(registers_t* regs)
                 fault_page = fault_addr & ~0xFFFu;
                 phys = vmm_get_phys_in_pml4(current_task->pml4_phys, fault_page);
                 if (phys == 0) {
+                    if (task_handle_file_page_fault(current_task, fault_addr)) {
+                        return regs;
+                    }
                     stack_floor = 0x00700000u;
                     if (fault_addr >= stack_floor && fault_addr < 0x00800000u) {
                         new_phys = pfa_alloc();
@@ -321,6 +327,15 @@ registers_t* interrupt_handler(registers_t* regs)
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
 
                 if (sc_phys != 0) {
+                    if (sc_actual_cr3 != sc_expected_pd) {
+                        __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                    } else {
+                        __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                    }
+                    return regs;
+                }
+
+                if (task_handle_file_page_fault(current_task, sc_fault_addr)) {
                     if (sc_actual_cr3 != sc_expected_pd) {
                         __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
                     } else {

@@ -108,6 +108,7 @@ void pfa_ref_init(void);
 void pfa_ref_inc(uint64_t phys_addr);
 int pfa_ref_dec(uint64_t phys_addr);
 uint8_t pfa_ref_get(uint64_t phys_addr);
+void pfa_cow_release64(uint64_t phys_addr);
 
 int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys);
 

@@ -2560,6 +2560,9 @@ static void console_writer_thread(void) {
     uint64_t sc;
     uint64_t serial_start;
     uint64_t serial_len;
+    int burst_fb_skip;
+    int need_redraw;
+    uint64_t burst_budget;
     console_t *con;
     framebuffer_t *fb;
 
@@ -2567,6 +2570,7 @@ static void console_writer_thread(void) {
     while (1) {
         work_done = 0;
         pending_switch_requested = 0;
+        burst_budget = 0;
 
         if (console_redraw_pending) {
             flags = console_irqsave();
@@ -2620,6 +2624,7 @@ static void console_writer_thread(void) {
                 }
                 
                 chunk_size = (available > 256) ? 256 : available;
+                burst_fb_skip = (available > 1024) ? 1 : 0;
                 
                 for (j = 0; j < chunk_size; j++) {
                     chunk[j] = con->write_buffer[(tail + j) % con->write_buffer_size];
@@ -2654,7 +2659,7 @@ static void console_writer_thread(void) {
                 if (rows > con->buffer_rows) rows = con->buffer_rows;
                 if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
                 is_active = (i == current_console && !console_switch_in_progress);
-                wt_fb_ok = is_active && fb;
+                wt_fb_ok = is_active && fb && !burst_fb_skip;
                 for (j = 0; j < chunk_size; j++) {
                     c = chunk[j];
                     
@@ -2891,14 +2896,22 @@ static void console_writer_thread(void) {
                 }
                 
                 con->write_tail = (tail + chunk_size) % con->write_buffer_size;
-                con->dirty = 0;
+                if (burst_fb_skip && is_active) {
+                    con->dirty = 2;
+                } else if (con->write_tail == con->write_head) {
+                    con->dirty = 0;
+                }
                 
                 console_batch--;
                 if (console_batch == 0 && is_active && fb) {
-                    fb->cursor_x = con->cursor_x;
-                    fb->cursor_y = con->cursor_y;
-                    fb_update_cursor();
+                    if (!burst_fb_skip) {
+                        fb->cursor_x = con->cursor_x;
+                        fb->cursor_y = con->cursor_y;
+                        fb_update_cursor();
+                    }
                 }
+
+                need_redraw = (is_active && con->dirty == 2 && con->write_tail == con->write_head) ? 1 : 0;
                 
                 spin_unlock(&console_lock);
                 console_irqrestore(flags);
@@ -2906,13 +2919,34 @@ static void console_writer_thread(void) {
                 if (con->alt_screen_pending)
                     console_process_alt_screen_pending(i);
 
-                fb_flush();
+                if (need_redraw) {
+                    console_redraw_sync(i);
+                    flags = console_irqsave();
+                    spin_lock(&console_lock);
+                    if (con->write_tail == con->write_head && con->dirty == 2) {
+                        con->dirty = 0;
+                    }
+                    spin_unlock(&console_lock);
+                    console_irqrestore(flags);
+                } else if (!burst_fb_skip) {
+                    fb_flush();
+                }
                 work_done = 1;
                 if (pending_console_switch >= 0) {
                     pending_switch_requested = 1;
                     goto handle_pending;
                 }
-                yield();
+                if (burst_fb_skip) {
+                    burst_budget += chunk_size;
+                    if (burst_budget >= 1024) {
+                        burst_budget = 0;
+                        sleep_ms(1);
+                    } else {
+                        yield();
+                    }
+                } else {
+                    yield();
+                }
             }
         }
         

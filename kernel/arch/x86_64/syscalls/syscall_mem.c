@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 extern void pfa_cow_release(uint64_t phys_addr);
+extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
 #define USER_MMAP_BASE 0x10000000u
 #define USER_MMAP_LIMIT 0x40000000u
@@ -274,6 +275,7 @@ static int sys_munmap(void *addr, size_t length) {
     for (page_addr = base; page_addr < end; page_addr += 0x1000) {
         phys = vmm_unmap_page_in_pml4(current_task->pml4_phys, page_addr);
         if (phys) {
+            exec_page_cache_on_page_release(phys);
             pfa_cow_release(phys);
             for (i = 0; i < current_task->user_pages_count; i++) {
                 if (current_task->user_pages[i] == phys) {

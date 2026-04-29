@@ -2,8 +2,12 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <lebirun/debug.h>
+#include <lebirun/vfs.h>
+#include <lebirun/task.h>
 #include <string.h>
 #include <stdio.h>
+
+#define ELF_STREAM_BUF_MIN PAGE_SIZE
 
 int elf_validate(const uint8_t *data, uint64_t size) {
     if (!data || size < sizeof(Elf64_Ehdr)) {
@@ -340,6 +344,388 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     DEBUG_ELF("elf_load: done entry=0x%016lX load_base=0x%016lX load_end=0x%016lX bss_end=0x%016lX\n",
              info->entry_point, info->load_base, info->load_end, info->bss_end);
 
+    return 0;
+}
+
+static uint64_t count_loadable_pages_from_phdr(const Elf64_Phdr *phdr, uint16_t phnum) {
+    uint64_t total_pages;
+    uint16_t i;
+    uint64_t vaddr_start;
+    uint64_t vaddr_end;
+
+    total_pages = 0;
+    for (i = 0; i < phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD && phdr[i].p_memsz > 0) {
+            vaddr_start = phdr[i].p_vaddr & ~0xFFFu;
+            vaddr_end = (phdr[i].p_vaddr + phdr[i].p_memsz + 0xFFF) & ~0xFFFu;
+            total_pages += (vaddr_end - vaddr_start) / PAGE_SIZE;
+        }
+    }
+    return total_pages;
+}
+
+static int elf_read_exact(vfs_node_t *node, uint64_t offset, uint64_t size, void *buffer) {
+    uint64_t read_len;
+
+    read_len = vfs_read(node, offset, size, (uint8_t *)buffer);
+    if (read_len != size) {
+        return -1;
+    }
+    return 0;
+}
+
+static uint8_t *elf_alloc_stream_buffer(uint64_t file_size, uint64_t *out_size) {
+    uint64_t free_bytes;
+    uint64_t free_pages;
+    uint64_t size;
+    uint8_t *buf;
+
+    free_pages = pfa_count_free();
+    free_bytes = free_pages * PAGE_SIZE;
+    size = file_size / 2;
+    if (size > free_bytes / 32) {
+        size = free_bytes / 32;
+    }
+    if (size < ELF_STREAM_BUF_MIN) {
+        size = ELF_STREAM_BUF_MIN;
+    }
+    if (file_size > 0 && size > file_size) {
+        size = file_size;
+    }
+    size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (file_size > 0 && size > file_size && file_size >= ELF_STREAM_BUF_MIN) {
+        size = file_size & ~(PAGE_SIZE - 1);
+    }
+    if (size < ELF_STREAM_BUF_MIN) {
+        size = ELF_STREAM_BUF_MIN;
+    }
+    buf = NULL;
+    while (size >= ELF_STREAM_BUF_MIN) {
+        buf = (uint8_t *)kmalloc(size);
+        if (buf) {
+            *out_size = size;
+            return buf;
+        }
+        size >>= 1;
+    }
+    return NULL;
+}
+
+int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count) {
+    Elf64_Ehdr ehdr;
+    Elf64_Phdr *phdr;
+    uint64_t phdr_size;
+    uint64_t estimated_pages;
+    uint64_t *page_list;
+    uint64_t page_index;
+    uint16_t i;
+    uint64_t j;
+    uint64_t vaddr;
+    uint64_t memsz;
+    uint64_t filesz;
+    uint64_t offset;
+    uint64_t flags;
+    uint64_t vaddr_start;
+    uint64_t vaddr_end;
+    uint64_t segment_pages;
+    uint64_t page;
+    uint64_t page_vaddr;
+    uint64_t existing_phys;
+    uint64_t phys;
+    uint64_t pie_base;
+    uint64_t copied;
+    uint64_t chunk;
+    uint8_t *tmp;
+    int is_pie;
+    int ret;
+    Elf64_Dyn dyn;
+    Elf64_Rela rel;
+    uint64_t rela_off;
+    uint64_t rela_sz;
+    uint64_t rel_cnt;
+    uint64_t ri;
+    uint64_t rtype;
+    uint64_t raddr;
+    uint64_t rval;
+    uint64_t tmp_size;
+
+    if (!pd_phys || !node || !info) {
+        return -1;
+    }
+    if (node->length < sizeof(Elf64_Ehdr)) {
+        return -1;
+    }
+    if (elf_read_exact(node, 0, sizeof(ehdr), &ehdr) != 0) {
+        return -2;
+    }
+    if (ehdr.e_ident[0] != ELFMAG0 ||
+        ehdr.e_ident[1] != ELFMAG1 ||
+        ehdr.e_ident[2] != ELFMAG2 ||
+        ehdr.e_ident[3] != ELFMAG3) {
+        return -2;
+    }
+    if (ehdr.e_ident[4] != ELFCLASS64) {
+        return -3;
+    }
+    if (ehdr.e_ident[5] != ELFDATA2LSB) {
+        return -4;
+    }
+    if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) {
+        return -5;
+    }
+    if (ehdr.e_machine != EM_X86_64) {
+        return -6;
+    }
+    if (ehdr.e_phoff == 0 || ehdr.e_phnum == 0) {
+        return -7;
+    }
+    if (ehdr.e_phentsize != sizeof(Elf64_Phdr)) {
+        return -8;
+    }
+    phdr_size = (uint64_t)ehdr.e_phnum * sizeof(Elf64_Phdr);
+    if (ehdr.e_phoff + phdr_size > node->length) {
+        return -8;
+    }
+    if (ehdr.e_entry < 0x1000) {
+        return -9;
+    }
+
+    phdr = (Elf64_Phdr *)kmalloc(phdr_size);
+    if (!phdr) {
+        return -10;
+    }
+    if (elf_read_exact(node, ehdr.e_phoff, phdr_size, phdr) != 0) {
+        kfree(phdr);
+        return -8;
+    }
+
+    is_pie = (ehdr.e_type == ET_DYN) ? 1 : 0;
+    pie_base = is_pie ? 0x400000ULL : 0;
+
+    info->entry_point = ehdr.e_entry + pie_base;
+    info->load_base = 0xFFFFFFFFFFFFFFFFULL;
+    info->load_end = 0;
+    info->bss_end = 0;
+    info->phent = ehdr.e_phentsize;
+    info->phnum = ehdr.e_phnum;
+    info->phdr_vaddr = 0;
+
+    if (!is_pie) {
+        for (i = 0; i < ehdr.e_phnum; i++) {
+            if (phdr[i].p_type == PT_PHDR) {
+                info->phdr_vaddr = phdr[i].p_vaddr;
+                break;
+            }
+        }
+
+        for (i = 0; i < ehdr.e_phnum; i++) {
+            if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
+                continue;
+            }
+            flags = 0x5;
+            if (phdr[i].p_flags & PF_W) {
+                flags |= 0x2;
+            }
+            if (task_add_file_mapping(current_task, node, phdr[i].p_vaddr,
+                                      phdr[i].p_memsz, phdr[i].p_filesz,
+                                      phdr[i].p_offset, flags) != 0) {
+                kfree(phdr);
+                return -10;
+            }
+            vaddr = phdr[i].p_vaddr;
+            if (vaddr < info->load_base) {
+                info->load_base = vaddr;
+            }
+            if (vaddr + phdr[i].p_filesz > info->load_end) {
+                info->load_end = vaddr + phdr[i].p_filesz;
+            }
+            if (vaddr + phdr[i].p_memsz > info->bss_end) {
+                info->bss_end = vaddr + phdr[i].p_memsz;
+            }
+        }
+
+        if (info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFFFFFFFFFFULL) {
+            info->phdr_vaddr = info->load_base + ehdr.e_phoff;
+        }
+        if (out_pages) {
+            *out_pages = NULL;
+        }
+        if (out_page_count) {
+            *out_page_count = 0;
+        }
+        kfree(phdr);
+        return 0;
+    }
+
+    estimated_pages = count_loadable_pages_from_phdr(phdr, ehdr.e_phnum);
+    page_list = NULL;
+    page_index = 0;
+    tmp = NULL;
+    tmp_size = 0;
+    ret = 0;
+
+    if (out_pages && out_page_count) {
+        page_list = (uint64_t *)kmalloc(estimated_pages * sizeof(uint64_t));
+        if (!page_list) {
+            kfree(phdr);
+            return -10;
+        }
+        memset(page_list, 0, estimated_pages * sizeof(uint64_t));
+    }
+
+    tmp = elf_alloc_stream_buffer(node->length, &tmp_size);
+    if (!tmp) {
+        if (page_list) kfree(page_list);
+        kfree(phdr);
+        return -10;
+    }
+
+    for (i = 0; i < ehdr.e_phnum; i++) {
+        if (phdr[i].p_type == PT_PHDR) {
+            info->phdr_vaddr = phdr[i].p_vaddr + pie_base;
+            break;
+        }
+    }
+
+    for (i = 0; i < ehdr.e_phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
+            continue;
+        }
+
+        vaddr = phdr[i].p_vaddr + pie_base;
+        memsz = phdr[i].p_memsz;
+        filesz = phdr[i].p_filesz;
+        offset = phdr[i].p_offset;
+
+        if (offset + filesz > node->length) {
+            ret = -11;
+            break;
+        }
+
+        flags = 0x5;
+        if (phdr[i].p_flags & PF_W) {
+            flags |= 0x2;
+        }
+
+        vaddr_start = vaddr & ~0xFFFu;
+        vaddr_end = (vaddr + memsz + 0xFFF) & ~0xFFFu;
+        segment_pages = (vaddr_end - vaddr_start) / PAGE_SIZE;
+
+        for (page = 0; page < segment_pages; page++) {
+            page_vaddr = vaddr_start + page * PAGE_SIZE;
+            existing_phys = vmm_get_phys_in_pml4(pd_phys, page_vaddr);
+            if (existing_phys != 0) {
+                continue;
+            }
+            phys = pfa_alloc();
+            if (!phys) {
+                ret = -12;
+                break;
+            }
+            pmm_zero_page_phys(phys);
+            vmm_map_page_in_pml4(pd_phys, page_vaddr, phys, flags);
+            if (page_list && page_index < estimated_pages) {
+                page_list[page_index++] = phys;
+            }
+        }
+        if (ret != 0) {
+            break;
+        }
+
+        copied = 0;
+        while (copied < filesz) {
+            chunk = filesz - copied;
+            if (chunk > tmp_size) {
+                chunk = tmp_size;
+            }
+            if (elf_read_exact(node, offset + copied, chunk, tmp) != 0) {
+                ret = -11;
+                break;
+            }
+            vmm_copy_to_pml4(pd_phys, vaddr + copied, tmp, chunk);
+            copied += chunk;
+        }
+        if (ret != 0) {
+            break;
+        }
+
+        if (vaddr < info->load_base) {
+            info->load_base = vaddr;
+        }
+        if (vaddr + filesz > info->load_end) {
+            info->load_end = vaddr + filesz;
+        }
+        if (vaddr + memsz > info->bss_end) {
+            info->bss_end = vaddr + memsz;
+        }
+    }
+
+    if (ret == 0 && info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFFFFFFFFFFULL) {
+        info->phdr_vaddr = info->load_base + ehdr.e_phoff;
+    }
+
+    if (ret == 0 && is_pie) {
+        rela_off = 0;
+        rela_sz = 0;
+        for (i = 0; i < ehdr.e_phnum; i++) {
+            if (phdr[i].p_type == PT_DYNAMIC) {
+                copied = 0;
+                while (copied + sizeof(Elf64_Dyn) <= phdr[i].p_filesz) {
+                    if (elf_read_exact(node, phdr[i].p_offset + copied, sizeof(dyn), &dyn) != 0) {
+                        ret = -11;
+                        break;
+                    }
+                    if (dyn.d_tag == DT_NULL) {
+                        break;
+                    }
+                    if (dyn.d_tag == DT_RELA) {
+                        rela_off = dyn.d_un.d_ptr;
+                    } else if (dyn.d_tag == DT_RELASZ) {
+                        rela_sz = dyn.d_un.d_val;
+                    }
+                    copied += sizeof(Elf64_Dyn);
+                }
+                break;
+            }
+        }
+        if (ret == 0 && rela_sz > 0 && rela_off < node->length) {
+            rel_cnt = rela_sz / sizeof(Elf64_Rela);
+            for (ri = 0; ri < rel_cnt; ri++) {
+                if (elf_read_exact(node, rela_off + ri * sizeof(Elf64_Rela), sizeof(rel), &rel) != 0) {
+                    ret = -11;
+                    break;
+                }
+                rtype = ELF64_R_TYPE(rel.r_info);
+                if (rtype == R_X86_64_RELATIVE) {
+                    raddr = pie_base + rel.r_offset;
+                    rval = pie_base + rel.r_addend;
+                    vmm_copy_to_pml4(pd_phys, raddr, &rval, sizeof(uint64_t));
+                }
+            }
+        }
+    }
+
+    if (ret != 0) {
+        if (page_list) {
+            for (j = 0; j < page_index; j++) {
+                pfa_free(page_list[j]);
+            }
+            kfree(page_list);
+        }
+        kfree(tmp);
+        kfree(phdr);
+        return ret;
+    }
+
+    if (out_pages) {
+        *out_pages = page_list;
+    }
+    if (out_page_count) {
+        *out_page_count = page_index;
+    }
+
+    kfree(tmp);
+    kfree(phdr);
     return 0;
 }
 

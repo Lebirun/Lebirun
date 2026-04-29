@@ -72,6 +72,7 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);
 void ext4_release_block(ext4_fs_t *fs, uint64_t block);
 int ext4_sync_blocks(ext4_fs_t *fs);
+int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint);
 int ext4_free_block(ext4_fs_t *fs, uint64_t block);
 
@@ -101,6 +102,7 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
 ext4_fs_t *ext4_get_mounted_fs(void);
+void ext4_background_writeback(uint32_t max_blocks);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);

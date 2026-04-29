@@ -11,4 +11,4 @@ Instances=auto
 
 [Health]
 Restart=always
-RestartDelay=1
+RestartDelay=0

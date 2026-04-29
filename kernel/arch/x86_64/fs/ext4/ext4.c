@@ -242,8 +242,6 @@ static void ext4_vfs_close(vfs_node_t *node) {
 
     priv = (ext4_vfs_private_t *)node->private_data;
     mutex_lock(&priv->fs->lock);
-    ext4_sync_inodes(priv->fs);
-    ext4_sync_blocks(priv->fs);
 
     for (i = 0; i < (int)priv->fs->inode_cache_count; i++) {
         if (priv->fs->inode_cache[i].vfs_node == node) {
@@ -837,4 +835,14 @@ int ext4_sync(ext4_fs_t *fs) {
 
 ext4_fs_t *ext4_get_mounted_fs(void) {
     return mounted_fs;
+}
+
+void ext4_background_writeback(uint32_t max_blocks) {
+    if (!mounted_fs || max_blocks == 0) {
+        return;
+    }
+
+    mutex_lock(&mounted_fs->lock);
+    ext4_sync_some_blocks(mounted_fs, max_blocks);
+    mutex_unlock(&mounted_fs->lock);
 }

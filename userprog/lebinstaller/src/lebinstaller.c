@@ -343,6 +343,7 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     }
 
     use_posix = 0;
+    vfs_unlink(dst);
     vfs_create(dst, src_mode);
     fd_out = vfs_open(dst, 2);
     if (fd_out < 0) {

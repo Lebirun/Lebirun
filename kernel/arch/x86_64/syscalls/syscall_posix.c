@@ -532,7 +532,6 @@ static int sys_mprotect(int addr, const char *len_ptr, int prot) {
 }
 
 static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
-    uint8_t *buf;
     char **argv;
     char **envp;
     uint64_t path_addr;
@@ -540,6 +539,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     uint64_t envp_addr;
     uint64_t size;
     uint64_t read_len;
+    uint64_t header_size;
     int argc;
     int envc;
     int result;
@@ -551,12 +551,11 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     int shebang_line_end;
     int si;
     int sj;
-    uint8_t *interp_buf;
     uint64_t interp_size;
-    uint64_t interp_read;
     registers_t *regs;
     vfs_node_t *node;
     vfs_node_t *interp_node;
+    uint8_t header[256];
 
     path_addr = (uint64_t)path_ptr;
     if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) {
@@ -582,52 +581,49 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         return -ENOEXEC;
     }
     
-    buf = (uint8_t *)kmalloc(size);
-    if (!buf) {
-        vfs_release(node);
-        return -ENOMEM;
+    header_size = size;
+    if (header_size > sizeof(header)) {
+        header_size = sizeof(header);
     }
-    
-    read_len = vfs_read(node, 0, size, buf);
-    vfs_release(node);
-    if (read_len != size) {
-        kfree(buf);
+    read_len = vfs_read(node, 0, header_size, header);
+    if (read_len != header_size) {
+        vfs_release(node);
         return -EIO;
     }
     
-    if (size >= 2 && buf[0] == '#' && buf[1] == '!') {
+    if (header_size >= 2 && header[0] == '#' && header[1] == '!') {
         shebang_line_end = 2;
-        while (shebang_line_end < (int)size && shebang_line_end < 256 &&
-               buf[shebang_line_end] != '\n' && buf[shebang_line_end] != '\r') {
+        while (shebang_line_end < (int)header_size && shebang_line_end < 256 &&
+               header[shebang_line_end] != '\n' && header[shebang_line_end] != '\r') {
             shebang_line_end++;
         }
 
         si = 2;
-        while (si < shebang_line_end && (buf[si] == ' ' || buf[si] == '\t')) si++;
+        while (si < shebang_line_end && (header[si] == ' ' || header[si] == '\t')) si++;
         sj = 0;
-        while (si < shebang_line_end && buf[si] != ' ' && buf[si] != '\t' &&
+        while (si < shebang_line_end && header[si] != ' ' && header[si] != '\t' &&
                sj < 255) {
-            shebang_interp[sj++] = buf[si++];
+            shebang_interp[sj++] = header[si++];
         }
         shebang_interp[sj] = '\0';
         if (sj == 0) {
-            kfree(buf);
+            vfs_release(node);
             return -ENOEXEC;
         }
 
         shebang_has_arg = 0;
-        while (si < shebang_line_end && (buf[si] == ' ' || buf[si] == '\t')) si++;
+        while (si < shebang_line_end && (header[si] == ' ' || header[si] == '\t')) si++;
         if (si < shebang_line_end) {
             sj = 0;
             while (si < shebang_line_end && sj < 255) {
-                shebang_arg[sj++] = buf[si++];
+                shebang_arg[sj++] = header[si++];
             }
             while (sj > 0 && (shebang_arg[sj - 1] == ' ' || shebang_arg[sj - 1] == '\t')) sj--;
             shebang_arg[sj] = '\0';
             if (sj > 0) shebang_has_arg = 1;
         }
 
-        kfree(buf);
+        vfs_release(node);
 
         interp_node = vfs_namei(shebang_interp);
         if (!interp_node) {
@@ -638,21 +634,6 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             vfs_release(interp_node);
             return -ENOEXEC;
         }
-        interp_buf = (uint8_t *)kmalloc(interp_size);
-        if (!interp_buf) {
-            vfs_release(interp_node);
-            return -ENOMEM;
-        }
-        interp_read = vfs_read(interp_node, 0, interp_size, interp_buf);
-        vfs_release(interp_node);
-        if (interp_read != interp_size) {
-            kfree(interp_buf);
-            return -EIO;
-        }
-
-        buf = interp_buf;
-        size = interp_size;
-
         argc = 0;
         if (argv_addr) {
             uint64_t *argv_array = (uint64_t *)argv_addr;
@@ -670,13 +651,13 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             new_argc = 1 + shebang_has_arg + 1 + (argc > 1 ? argc - 1 : 0);
             new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
             if (!new_argv) {
-                kfree(buf);
+                vfs_release(interp_node);
                 return -ENOMEM;
             }
 
             na = 0;
             new_argv[na] = (char *)kmalloc(strlen(shebang_interp) + 1);
-            if (!new_argv[na]) { kfree(new_argv); kfree(buf); return -ENOMEM; }
+            if (!new_argv[na]) { kfree(new_argv); vfs_release(interp_node); return -ENOMEM; }
             strcpy(new_argv[na], shebang_interp);
             na++;
 
@@ -684,7 +665,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
                 new_argv[na] = (char *)kmalloc(strlen(shebang_arg) + 1);
                 if (!new_argv[na]) {
                     for (i = 0; i < na; i++) kfree(new_argv[i]);
-                    kfree(new_argv); kfree(buf); return -ENOMEM;
+                    kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
                 }
                 strcpy(new_argv[na], shebang_arg);
                 na++;
@@ -693,7 +674,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             new_argv[na] = (char *)kmalloc(strlen(path) + 1);
             if (!new_argv[na]) {
                 for (i = 0; i < na; i++) kfree(new_argv[i]);
-                kfree(new_argv); kfree(buf); return -ENOMEM;
+                kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
             }
             strcpy(new_argv[na], path);
             na++;
@@ -706,7 +687,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
                     uint64_t str_addr = argv_array[i];
                     if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
                         for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
-                        kfree(new_argv); kfree(buf); return -EFAULT;
+                        kfree(new_argv); vfs_release(interp_node); return -EFAULT;
                     }
                     new_argv[na] = (char *)str_addr;
                     na++;
@@ -725,14 +706,14 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
                     envp = (char **)kmalloc((envc + 1) * sizeof(char *));
                     if (!envp) {
                         for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-                        kfree(new_argv); kfree(buf); return -ENOMEM;
+                        kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
                     }
                     for (i = 0; i < envc; i++) {
                         uint64_t str_addr = envp_array[i];
                         if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
                             kfree(envp);
                             for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
-                            kfree(new_argv); kfree(buf); return -EFAULT;
+                            kfree(new_argv); vfs_release(interp_node); return -EFAULT;
                         }
                         envp[i] = (char *)str_addr;
                     }
@@ -744,11 +725,11 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             if (!regs) {
                 if (envp) kfree(envp);
                 for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-                kfree(new_argv); kfree(buf); return -EFAULT;
+                kfree(new_argv); vfs_release(interp_node); return -EFAULT;
             }
 
-            result = task_exec_with_args(buf, size, regs, na, new_argv, envc, envp);
-            buf = NULL;
+            result = task_exec_node_with_args(interp_node, regs, na, new_argv, envc, envp);
+            vfs_release(interp_node);
             if (envp) { kfree(envp); envp = NULL; }
             for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
             kfree(new_argv);
@@ -774,14 +755,14 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         if (argc > 0) {
             argv = (char **)kmalloc((argc + 1) * sizeof(char *));
             if (!argv) {
-                kfree(buf);
+                vfs_release(node);
                 return -ENOMEM;
             }
             for (i = 0; i < argc; i++) {
                 uint64_t str_addr = argv_array[i];
                 if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
                     kfree(argv);
-                    kfree(buf);
+                    vfs_release(node);
                     return -EFAULT;
                 }
                 argv[i] = (char *)str_addr;
@@ -793,7 +774,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     if (argc == 0) {
         argv = (char **)kmalloc(2 * sizeof(char *));
         if (!argv) {
-            kfree(buf);
+            vfs_release(node);
             return -ENOMEM;
         }
         argv[0] = (char *)path_addr;
@@ -812,7 +793,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             envp = (char **)kmalloc((envc + 1) * sizeof(char *));
             if (!envp) {
                 if (argv) kfree(argv);
-                kfree(buf);
+                vfs_release(node);
                 return -ENOMEM;
             }
             for (i = 0; i < envc; i++) {
@@ -820,7 +801,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
                 if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
                     kfree(envp);
                     if (argv) kfree(argv);
-                    kfree(buf);
+                    vfs_release(node);
                     return -EFAULT;
                 }
                 envp[i] = (char *)str_addr;
@@ -833,13 +814,12 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     if (!regs) {
         if (envp) kfree(envp);
         if (argv) kfree(argv);
-        kfree(buf);
+        vfs_release(node);
         return -EFAULT;
     }
     
-    result = task_exec_with_args(buf, size, regs, argc, argv, envc, envp);
-    
-    buf = NULL;
+    result = task_exec_node_with_args(node, regs, argc, argv, envc, envp);
+    vfs_release(node);
     
     if (envp) {
         kfree(envp);
