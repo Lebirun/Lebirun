@@ -59,6 +59,7 @@ typedef struct task {
     int join_refs;
     uint64_t exit_code;
     registers_t regs;
+    uint8_t *fpu_state;
     uint64_t cr3;
     int time_slice;
     int base_time_slice;
@@ -152,6 +153,7 @@ extern task_t* all_tasks_head;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
+task_t* task_find_by_pml4(uint64_t pml4_phys);
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter);
 task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);

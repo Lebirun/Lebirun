@@ -705,6 +705,12 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
             }
             con->cursor_y = max_rows - 1;
         }
+        if (con->scroll_bottom > max_rows) {
+            con->scroll_bottom = max_rows;
+        }
+        if (con->scroll_top >= max_rows) {
+            con->scroll_top = 0;
+        }
     }
 
     if (current_console >= 0 && current_console < NUM_CONSOLES) {
@@ -948,6 +954,13 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
             con->line_wrapped[r] = 0;
         }
         con->cursor_y = new_rows - 1;
+    }
+
+    if (con->scroll_bottom > new_rows) {
+        con->scroll_bottom = new_rows;
+    }
+    if (con->scroll_top >= new_rows) {
+        con->scroll_top = 0;
     }
 
     kfree(new_color_buf);

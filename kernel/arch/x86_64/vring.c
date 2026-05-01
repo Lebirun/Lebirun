@@ -7,6 +7,7 @@
 #include <lebirun/io.h>
 #include <lebirun/panic.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/kstack.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -68,6 +69,21 @@ static volatile uint64_t kprint_count = 0;
 static volatile int kprint_ready = 0;
 
 static wait_queue_t kprint_waitq;
+
+#define VRING_PTE_NX 0x8000000000000000ULL
+
+extern char _kernel_text_start[];
+extern char _kernel_text_end[];
+extern char _kernel_rodata_end[];
+extern char _kernel_end[];
+
+static volatile int vring_selftest_stage = 0;
+static volatile int vring_selftest_failed = 0;
+static volatile int vring_selftest_violation_seen = 0;
+static volatile int vring_selftest_started = 0;
+static uint64_t vring_selftest_pml4;
+static uint8_t *vring_selftest_buf;
+static task_t *vring_selftest_task_ref;
 
 #define SERIAL_RING_SIZE 8192
 static char *serial_ring;
@@ -460,6 +476,8 @@ void vring_init(void) {
             subrings[i].active = false;
             subrings[i].region_count = 0;
             subrings[i].name = NULL;
+            subrings[i].caps = 0;
+            subrings[i].flags = 0;
         }
     }
     
@@ -476,13 +494,44 @@ int vring_create(uint8_t minor, const char *name) {
     subrings[minor].active = true;
     subrings[minor].region_count = 0;
     subrings[minor].name = name;
+    subrings[minor].caps = 0;
+    subrings[minor].flags = 0;
+    subrings[minor].vring_pml4 = 0;
     
+    return 0;
+}
+
+int vring_create_sandboxed(uint8_t minor, const char *name, uint8_t caps) {
+    int ret;
+    uint64_t pml4;
+
+    ret = vring_create(minor, name);
+    if (ret != 0) return ret;
+    subrings[minor].caps = caps;
+    subrings[minor].flags = VRING_FLAG_SANDBOXED;
+    pml4 = vmm_create_vring_pml4();
+    if (!pml4) {
+        subrings[minor].active = false;
+        subrings[minor].flags = 0;
+        return -3;
+    }
+    subrings[minor].vring_pml4 = pml4;
+    vring_add_region(minor, (uint64_t)_kernel_text_start, (uint64_t)_kernel_text_end,
+                     VRING_PERM_READ | VRING_PERM_EXEC);
+    vring_add_region(minor, (uint64_t)_kernel_text_end, (uint64_t)_kernel_rodata_end,
+                     VRING_PERM_READ);
+    vring_add_region(minor, (uint64_t)_kernel_rodata_end, (uint64_t)_kernel_end,
+                     VRING_PERM_READ | VRING_PERM_WRITE);
     return 0;
 }
 
 int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms) {
     uint64_t idx;
     uint64_t flags;
+    uint64_t pte_flags;
+    uint64_t v;
+    uint64_t phys;
+    uint64_t kernel_cr3;
 
     if (!subrings || minor >= subrings_count) return -1;
     if (minor == 0) return -1;
@@ -498,20 +547,45 @@ int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms)
     subrings[minor].allowed_regions[idx].end = end;
     subrings[minor].allowed_regions[idx].permissions = perms;
     subrings[minor].region_count++;
+
+    if (subrings[minor].vring_pml4) {
+        pte_flags = 0x1;
+        if (perms & VRING_PERM_WRITE) pte_flags |= 0x2;
+        if (!(perms & VRING_PERM_EXEC)) pte_flags |= VRING_PTE_NX;
+        kernel_cr3 = vmm_get_kernel_cr3();
+        for (v = start & ~(PAGE_SIZE - 1); v < end; v += PAGE_SIZE) {
+            phys = vmm_get_phys_in_pml4(read_cr3(), v);
+            if (phys) {
+                if (kernel_cr3 && !vmm_get_phys_in_pml4(kernel_cr3, v)) {
+                    vmm_map_page_in_pml4(kernel_cr3, v, phys, pte_flags);
+                }
+                vmm_map_page_in_pml4(subrings[minor].vring_pml4, v, phys, pte_flags);
+            }
+        }
+    }
+
     spin_unlock(&vring_lock);
     klog_irqrestore(flags);
-    
+
     return 0;
 }
 
 int vring_remove(uint8_t minor) {
+    uint64_t pml4;
+
     if (!subrings || minor >= subrings_count) return -1;
     if (!subrings[minor].active) return -2;
-    
+
+    pml4 = subrings[minor].vring_pml4;
     subrings[minor].active = false;
     subrings[minor].region_count = 0;
     subrings[minor].name = NULL;
-    
+    subrings[minor].vring_pml4 = 0;
+
+    if (pml4) {
+        vmm_free_vring_pml4(pml4);
+    }
+
     return 0;
 }
 
@@ -556,6 +630,49 @@ bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t acc
     klog_irqrestore(flags);
     
     return result;
+}
+
+bool vring_check_cap(uint8_t minor, uint8_t cap) {
+    if (!vring_initialized) return false;
+    if (minor == 0) return true;
+    if (!subrings || minor >= subrings_count) return false;
+    if (!subrings[minor].active) return false;
+    return (subrings[minor].caps & cap) != 0;
+}
+
+void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type) {
+    bool sandboxed;
+    uint64_t flags;
+    int i;
+    kproc_t *proc;
+
+    if (!vring_initialized || !subrings || minor >= subrings_count) {
+        vring_panic_forbidden(minor, addr, access_type);
+        return;
+    }
+
+    flags = klog_irqsave();
+    spin_lock(&vring_lock);
+    sandboxed = subrings[minor].active && (subrings[minor].flags & VRING_FLAG_SANDBOXED);
+    spin_unlock(&vring_lock);
+    klog_irqrestore(flags);
+
+    if (!sandboxed) {
+        vring_panic_forbidden(minor, addr, access_type);
+        return;
+    }
+
+    for (i = 0; i < kprocs_count; i++) {
+        proc = &kernel_procs[i];
+        if (proc->state != KPROC_STATE_NONE && proc->vring_minor == minor) {
+            proc->state = KPROC_STATE_DEAD;
+        }
+    }
+
+    if (current_task && !current_task->is_user && current_task->vring_minor == minor) {
+        if (minor == 7) vring_selftest_violation_seen = 1;
+        task_exit_deferred(1);
+    }
 }
 
 void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
@@ -820,6 +937,134 @@ void kproc_print_init(void) {
         }
         printf("VRING: Kernel print process created (PID %d, ring 0.1)\n", pid);
     }
+}
+
+static void vring_selftest_sandbox_task(void) {
+    volatile uint8_t *allowed;
+    volatile uint8_t *forbidden;
+    uint8_t value;
+
+    allowed = (volatile uint8_t *)vring_selftest_buf;
+    forbidden = (volatile uint8_t *)(vring_selftest_buf + PAGE_SIZE);
+
+    vring_selftest_stage = 1;
+    allowed[0] = 0x5A;
+    value = allowed[0];
+    if (value != 0x5A) {
+        vring_selftest_failed = 1;
+        task_exit(2);
+    }
+    if (read_cr3() != vring_selftest_pml4) {
+        vring_selftest_failed = 2;
+        task_exit(3);
+    }
+    vring_selftest_stage = 2;
+    value = forbidden[0];
+    vring_selftest_failed = 3 + value;
+    task_exit(4);
+}
+
+static void vring_selftest_supervisor(void) {
+    task_t *t;
+    int i;
+    int ret;
+    uint64_t allowed_addr;
+    uint64_t forbidden_addr;
+    uint64_t allowed_phys;
+    uint64_t forbidden_phys;
+    vring_t *ring;
+
+    printf("VRINGTEST: starting sandboxed VRing checks\n");
+    vring_selftest_violation_seen = 0;
+
+    ret = vring_create_sandboxed(7, "selftest", 0);
+    if (ret != 0) {
+        printf("VRINGTEST: FAIL create sandboxed ring ret=%d\n", ret);
+        task_exit(1);
+    }
+
+    vring_selftest_buf = kmalloc_aligned(PAGE_SIZE * 2, PAGE_SIZE);
+    if (!vring_selftest_buf) {
+        printf("VRINGTEST: FAIL allocation\n");
+        task_exit(1);
+    }
+
+    allowed_addr = (uint64_t)vring_selftest_buf;
+    forbidden_addr = allowed_addr + PAGE_SIZE;
+    ret = vring_add_region(7, allowed_addr, allowed_addr + PAGE_SIZE,
+                           VRING_PERM_READ | VRING_PERM_WRITE);
+    if (ret != 0) {
+        printf("VRINGTEST: FAIL add allowed page ret=%d\n", ret);
+        task_exit(1);
+    }
+
+    ring = vring_get(7);
+    if (!ring || !ring->vring_pml4) {
+        printf("VRINGTEST: FAIL missing sandbox PML4\n");
+        task_exit(1);
+    }
+    vring_selftest_pml4 = ring->vring_pml4;
+
+    allowed_phys = vmm_get_phys_in_pml4(ring->vring_pml4, allowed_addr);
+    forbidden_phys = vmm_get_phys_in_pml4(ring->vring_pml4, forbidden_addr);
+    if (!allowed_phys || forbidden_phys) {
+        printf("VRINGTEST: FAIL page map allowed=0x%016lX forbidden=0x%016lX\n",
+               allowed_phys, forbidden_phys);
+        task_exit(1);
+    }
+
+    t = create_kernel_task(vring_selftest_sandbox_task, TASK_READY);
+    if (!t) {
+        printf("VRINGTEST: FAIL create task\n");
+        task_exit(1);
+    }
+    if (current_task && current_task->stack_base && current_task->stack_size) {
+        vring_add_region(7, (uint64_t)current_task->stack_base,
+                         (uint64_t)current_task->stack_base + current_task->stack_size,
+                         VRING_PERM_READ | VRING_PERM_WRITE);
+    }
+    vring_selftest_task_ref = t;
+    task_set_vring(t, 7);
+    strcpy(t->name, "vringtest");
+    lock_scheduler();
+    add_task_to_runqueue(t);
+    unlock_scheduler();
+
+    for (i = 0; i < 200; i++) {
+        if (vring_selftest_violation_seen) break;
+        yield();
+    }
+
+    if (vring_selftest_failed) {
+        printf("VRINGTEST: FAIL sandbox task escaped with code=%d\n", vring_selftest_failed);
+    } else if (vring_selftest_stage != 2) {
+        printf("VRINGTEST: FAIL sandbox task stopped at stage=%d state=%d\n",
+               vring_selftest_stage, vring_selftest_task_ref->state);
+    } else if (!vring_selftest_violation_seen) {
+        printf("VRINGTEST: FAIL forbidden access did not kill task\n");
+    } else {
+        printf("VRINGTEST: PASS allowed access worked and forbidden access killed sandboxed task\n");
+    }
+
+    vring_remove(7);
+    task_exit(0);
+}
+
+void vring_selftest_start(void) {
+    task_t *t;
+
+    if (vring_selftest_started) return;
+    vring_selftest_started = 1;
+
+    t = create_kernel_task(vring_selftest_supervisor, TASK_READY);
+    if (!t) {
+        printf("VRINGTEST: FAIL supervisor create\n");
+        return;
+    }
+    strcpy(t->name, "vringtestd");
+    lock_scheduler();
+    add_task_to_runqueue(t);
+    unlock_scheduler();
 }
 
 bool kprint_is_ready(void) {

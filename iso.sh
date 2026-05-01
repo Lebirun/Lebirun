@@ -3,6 +3,7 @@ set -e
 
 VERBOSE=0
 BUILD_ARGS=""
+KERNEL_CMDLINE="${KERNEL_CMDLINE:-}"
 for arg in "$@"; do
   case "$arg" in
     -v|--verbose) VERBOSE=1; BUILD_ARGS="$BUILD_ARGS -v" ;;
@@ -54,7 +55,7 @@ set timeout=10
 set default=0
 
 menuentry "Lebirun" {
-	multiboot2 /boot/lebirun.kernel
+	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
 	module2 /boot/rootfs.squashfs
 	# module2 /boot/initrd.img
 	boot

@@ -36,10 +36,12 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 #define USER_STACK_SIZE 0x2000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
+#define FPU_STATE_SIZE 512
 
 static spinlock_t sched_lock = {0};
 int scheduler_initialized = 0;
 extern volatile uint64_t tick_count;
+extern uint64_t kernel_irq_cr3;
 
 extern void switch_to_asm(uint64_t* old_rsp, uint64_t new_rsp);
 
@@ -54,6 +56,8 @@ static volatile int exec_drain_pending = 0;
 
 static uint64_t next_task_id = 1;
 static pid_t next_kernel_pid = -1;
+static uint8_t default_fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
+static int fpu_state_ready = 0;
 
 typedef struct exec_page_cache_entry {
     vfs_node_t *node;
@@ -65,6 +69,46 @@ typedef struct exec_page_cache_entry {
 
 static exec_page_cache_entry_t *exec_page_cache_head = NULL;
 static spinlock_t exec_page_cache_lock = {0};
+
+static inline void fpu_save_area(uint8_t *area) {
+    if (!area) return;
+    __asm__ volatile ("fxsave64 %0" : "=m"(*(uint8_t (*)[FPU_STATE_SIZE])area) : : "memory");
+}
+
+static inline void fpu_restore_area(uint8_t *area) {
+    if (!area) return;
+    __asm__ volatile ("fxrstor64 %0" : : "m"(*(uint8_t (*)[FPU_STATE_SIZE])area) : "memory");
+}
+
+static void fpu_init_default_state(void) {
+    if (fpu_state_ready) return;
+    __asm__ volatile ("fninit" ::: "memory");
+    fpu_save_area(default_fpu_state);
+    fpu_state_ready = 1;
+}
+
+static int task_init_fpu_state(task_t *task) {
+    uint8_t *state;
+
+    if (!task) return -1;
+    fpu_init_default_state();
+    state = (uint8_t *)kmalloc_aligned(FPU_STATE_SIZE, 16);
+    if (!state) return -1;
+    memcpy(state, default_fpu_state, FPU_STATE_SIZE);
+    task->fpu_state = state;
+    return 0;
+}
+
+static void task_reset_fpu_state(task_t *task) {
+    if (!task || !task->fpu_state) return;
+    memcpy(task->fpu_state, default_fpu_state, FPU_STATE_SIZE);
+}
+
+static void task_free_fpu_state(task_t *task) {
+    if (!task || !task->fpu_state) return;
+    kfree_aligned(task->fpu_state);
+    task->fpu_state = NULL;
+}
 static uint64_t exec_page_cache_pages = 0;
 static uint64_t exec_page_cache_clock = 0;
 
@@ -199,6 +243,24 @@ task_t* task_find(pid_t pid) {
         limit--;
     }
     unlock_scheduler();
+    return NULL;
+}
+
+task_t* task_find_by_pml4(uint64_t pml4_phys) {
+    task_t *t;
+    int limit;
+
+    if (!pml4_phys) return NULL;
+    t = all_tasks_head;
+    limit = 1024;
+    while (t && limit > 0) {
+        if (!task_ptr_valid(t)) break;
+        if (t->pml4_phys == pml4_phys) {
+            return t;
+        }
+        t = t->all_next;
+        limit--;
+    }
     return NULL;
 }
 
@@ -363,6 +425,10 @@ void init_tasks(void) {
 
     current_task = (task_t*)kmalloc(sizeof(task_t));
     memset(current_task, 0, sizeof(task_t));
+    if (task_init_fpu_state(current_task) != 0) {
+        printf("Task fpu alloc fail!\n");
+        for (;;) asm volatile ("hlt");
+    }
     current_task->id = 0;
     current_task->pid = 0;
     strcpy(current_task->name, "idle");
@@ -523,6 +589,13 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
+    if (task_init_fpu_state(new_task) != 0) {
+        printf("Task fpu alloc fail!\n");
+        kfree(new_task);
+        if (stack_base) kfree(stack_base);
+        if (kernel_stack_base) kstack_free(kernel_stack_base);
+        return NULL;
+    }
     new_task->cwd[0] = '/';
     new_task->cwd[1] = '\0';
     task_init_fds(new_task);
@@ -593,9 +666,12 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         *--krsp = 0;
         *--krsp = 0;
         *--krsp = 0;
+        *--krsp = 0;
         
         *--krsp = 0x23;
         *--krsp = 0x23;
+        *--krsp = cr3;
+        *--krsp = cr3;
 
         new_task->regs.rsp = (uint64_t)krsp;
         new_task->regs.rip = (uint64_t)entry;
@@ -629,8 +705,11 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         *--rsp_ptr = 0;
         *--rsp_ptr = 0;
         *--rsp_ptr = 0;
+        *--rsp_ptr = 0;
         *--rsp_ptr = 0x10;
         *--rsp_ptr = 0x10;
+        *--rsp_ptr = cr3;
+        *--rsp_ptr = cr3;
         new_task->regs.rsp = (uint64_t)rsp_ptr;
         new_task->regs.rip = (uint64_t)entry;
         new_task->regs.rflags = 0x202;
@@ -1264,6 +1343,7 @@ void reap_dead_tasks(void) {
         if (t->fds) kfree(t->fds);
         if (t->signal_data) kfree(t->signal_data);
         if (t->creds_data) kfree(t->creds_data);
+        task_free_fpu_state(t);
         if (t->stack_base) kfree(t->stack_base);
         if (t->kernel_stack_base) kstack_free(t->kernel_stack_base);
         kfree(t);
@@ -1336,6 +1416,8 @@ void switch_to(task_t* next) {
     }
 
     prev->cr3 = read_cr3();
+    fpu_save_area(prev->fpu_state);
+    fpu_restore_area(next->fpu_state);
 
     switch_to_asm(&prev->regs.rsp, next->regs.rsp);
 
@@ -1426,15 +1508,26 @@ int task_join(task_t* task, uint64_t* exit_code) {
 }
 
 static inline void save_irq_frame_into_task(task_t* task, const registers_t* regs, uint64_t regs_ptr, uint64_t entry_cr3) {
+    task->regs.return_cr3 = regs->return_cr3;
+    task->regs.entry_cr3 = regs->entry_cr3;
     task->regs.es = regs->es;
     task->regs.ds = regs->ds;
 
+    task->regs.r15 = regs->r15;
+    task->regs.r14 = regs->r14;
+    task->regs.r13 = regs->r13;
+    task->regs.r12 = regs->r12;
+    task->regs.r11 = regs->r11;
+    task->regs.r10 = regs->r10;
+    task->regs.r9 = regs->r9;
+    task->regs.r8 = regs->r8;
     task->regs.rdi = regs->rdi;
     task->regs.rsi = regs->rsi;
     task->regs.rbp = regs->rbp;
     task->regs.rsp = regs_ptr;
     task->regs.rbx = regs->rbx;
     task->regs.rdx = regs->rdx;
+    task->regs.saved_entry_cr3 = regs->saved_entry_cr3;
     task->regs.rcx = regs->rcx;
     task->regs.rax = regs->rax;
 
@@ -1443,6 +1536,7 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
     task->regs.rip = regs->rip;
     task->regs.cs = regs->cs;
     task->regs.rflags = regs->rflags;
+    task->regs.ss = regs->ss;
     task->cr3 = entry_cr3;
 }
 
@@ -1480,11 +1574,13 @@ registers_t* schedule_from_irq(registers_t* regs) {
     result = regs;
     prev_task = current_task;
     
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));
-    kernel_cr3 = vmm_get_kernel_cr3();
-    if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-        __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+    entry_cr3 = regs->entry_cr3;
+    if (!entry_cr3) {
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));
     }
+    regs->entry_cr3 = entry_cr3;
+    regs->return_cr3 = entry_cr3;
+    kernel_cr3 = vmm_get_kernel_cr3();
     
     must_switch = (prev_task->state == TASK_DEAD);
 
@@ -1510,7 +1606,11 @@ registers_t* schedule_from_irq(registers_t* regs) {
         prev_task->time_slice = prev_task->base_time_slice;
     }
 
-    next = prev_task->next ? prev_task->next : ready_queue_head;
+    if (must_switch) {
+        next = ready_queue_head;
+    } else {
+        next = prev_task->next ? prev_task->next : ready_queue_head;
+    }
     start = next;
     safety = 0;
     
@@ -1568,6 +1668,11 @@ registers_t* schedule_from_irq(registers_t* regs) {
         goto out_restore_cr3;
     }
 
+    if (!must_switch) {
+        fpu_save_area(prev_task->fpu_state);
+    }
+    fpu_restore_area(next->fpu_state);
+
     if (prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
     next->state = TASK_RUNNING;
     current_task = next;
@@ -1598,9 +1703,22 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     {
         uint64_t target_cr3 = next->cr3;
+        int sandboxed_cr3 = 0;
+        vring_t *ring = NULL;
         if (next->pml4_phys) target_cr3 = next->pml4_phys;
+        if (next->vring_minor != 0) {
+            ring = vring_get(next->vring_minor);
+            if (ring && ring->vring_pml4 == target_cr3) sandboxed_cr3 = 1;
+        }
+        if (sandboxed_cr3) {
+            kernel_irq_cr3 = kernel_cr3;
+        } else {
+            kernel_irq_cr3 = 0;
+        }
+        return_frame->entry_cr3 = target_cr3;
+        return_frame->return_cr3 = target_cr3;
         if (target_cr3 && target_cr3 != read_cr3()) {
-            {
+            if (!sandboxed_cr3) {
                 uint64_t check_virt;
                 uint64_t *check_tbl;
                 uint64_t entry511;
@@ -1644,7 +1762,6 @@ registers_t* schedule_from_irq(registers_t* regs) {
                     }
                 }
             }
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(target_cr3) : "memory");
         }
     }
 
@@ -1652,9 +1769,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     return return_frame;
 
 out_restore_cr3:
-    if (kernel_cr3 && entry_cr3 != kernel_cr3) {
-        __asm__ volatile ("mov %0, %%cr3" : : "r"(entry_cr3) : "memory");
-    }
+    regs->return_cr3 = entry_cr3;
     spin_unlock(&sched_lock);
     return result;
 }
@@ -1849,6 +1964,18 @@ pid_t task_fork(registers_t *parent_regs) {
         return -1;
     }
     memset(child, 0, sizeof(task_t));
+    if (task_init_fpu_state(child) != 0) {
+        printf("task_fork: fpu allocation failed\n");
+        kfree(child);
+        kstack_free(kernel_stack_base);
+        if (child_user_pages) {
+            kfree(child_user_pages);
+        }
+        vmm_free_pml4(child_pd);
+        return -1;
+    }
+    fpu_save_area(current_task->fpu_state);
+    memcpy(child->fpu_state, current_task->fpu_state, FPU_STATE_SIZE);
 
     child->id = next_task_id;
     child->pid = next_task_id;
@@ -1904,6 +2031,7 @@ pid_t task_fork(registers_t *parent_regs) {
     if (parent_cap < TASK_INIT_FDS) parent_cap = TASK_INIT_FDS;
     child->fds = (task_fd_t *)kmalloc(parent_cap * sizeof(task_fd_t));
     if (!child->fds) {
+        task_free_fpu_state(child);
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages)
@@ -2078,6 +2206,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
+    task_reset_fpu_state(current_task);
 
     sp = stack_top - USER_STACK_GAP - 16;
     zero = 0;
@@ -2161,6 +2290,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
 
         current_task->pml4_phys = new_pd;
         current_task->cr3 = new_pd;
+        regs->entry_cr3 = new_pd;
+        regs->return_cr3 = new_pd;
 
         regs->ds = 0x23;
         regs->es = 0x23;
@@ -2671,6 +2802,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     current_task->pml4_phys = new_pd;
     current_task->cr3 = new_pd;
+    regs->entry_cr3 = new_pd;
+    regs->return_cr3 = new_pd;
     current_task->regs.rip = final_entry;
     current_task->regs.rsp = final_sp;
     current_task->regs.rbp = 0;
@@ -2754,9 +2887,14 @@ pid_t task_create_thread(void (*entry)(void)) {
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
+    if (task_init_fpu_state(new_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
     
     new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
+        task_free_fpu_state(new_task);
         kfree(new_task);
         return -1;
     }
@@ -2790,6 +2928,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     stack_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         kstack_free(new_task->kernel_stack_base);
+        task_free_fpu_state(new_task);
         kfree(new_task);
         return -1;
     }
@@ -2833,16 +2972,35 @@ pid_t task_create_thread(void (*entry)(void)) {
     *stack_ptr = 0;
     stack_ptr--;
     *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
     
     stack_ptr--;
     *stack_ptr = 0x23;
     stack_ptr--;
     *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = new_task->cr3;
+    stack_ptr--;
+    *stack_ptr = new_task->cr3;
     
     new_task->regs.rsp = (uint64_t)stack_ptr;
 
     new_task->regs.rip = (uint64_t)entry;
-    new_task->regs.rsp = thread_stack_top - 16;
     new_task->regs.cs = 0x1B;
     new_task->regs.ds = new_task->regs.es = new_task->regs.ss = 0x23;
     new_task->regs.rflags = 0x202;
@@ -2876,9 +3034,14 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
+    if (task_init_fpu_state(new_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
     
     new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
+        task_free_fpu_state(new_task);
         kfree(new_task);
         return -1;
     }
@@ -2912,6 +3075,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     stack_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, thread_stack_base, thread_stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         kstack_free(new_task->kernel_stack_base);
+        task_free_fpu_state(new_task);
         kfree(new_task);
         return -1;
     }
@@ -2960,16 +3124,35 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     *stack_ptr = 0;
     stack_ptr--;
     *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
+    stack_ptr--;
+    *stack_ptr = 0;
     
     stack_ptr--;
     *stack_ptr = 0x23;
     stack_ptr--;
     *stack_ptr = 0x23;
+    stack_ptr--;
+    *stack_ptr = new_task->cr3;
+    stack_ptr--;
+    *stack_ptr = new_task->cr3;
     
     new_task->regs.rsp = (uint64_t)stack_ptr;
 
     new_task->regs.rip = (uint64_t)entry;
-    new_task->regs.rsp = thread_stack_top - 16;
     new_task->regs.cs = 0x1B;
     new_task->regs.ds = new_task->regs.es = new_task->regs.ss = 0x23;
     new_task->regs.rflags = 0x202;
@@ -2988,9 +3171,34 @@ bool task_is_kernel_pid(int32_t pid) {
 }
 
 void task_set_vring(task_t *task, uint8_t vring_minor) {
+    uint64_t stack_base;
+    uint64_t stack_end;
+    uint64_t task_stack_base;
+    uint64_t task_stack_end;
+    vring_t *ring;
+
     if (!task) return;
     task->vring_minor = vring_minor;
     task->is_kernel_task = (vring_minor != 0);
+
+    if (vring_minor != 0 && !task->is_user && task->kernel_stack_base && task->kernel_stack_size) {
+        stack_base = (uint64_t)task->kernel_stack_base;
+        stack_end = stack_base + task->kernel_stack_size;
+        vring_add_region(vring_minor, stack_base, stack_end, VRING_PERM_READ | VRING_PERM_WRITE);
+    }
+
+    if (vring_minor != 0 && !task->is_user && task->stack_base && task->stack_size) {
+        task_stack_base = (uint64_t)task->stack_base;
+        task_stack_end = task_stack_base + task->stack_size;
+        vring_add_region(vring_minor, task_stack_base, task_stack_end, VRING_PERM_READ | VRING_PERM_WRITE);
+    }
+
+    if (vring_minor != 0 && !task->is_user) {
+        ring = vring_get(vring_minor);
+        if (ring && ring->vring_pml4) {
+            task->pml4_phys = ring->vring_pml4;
+        }
+    }
 }
 
 static int cached_proc_count = 1;

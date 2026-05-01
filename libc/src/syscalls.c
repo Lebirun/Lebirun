@@ -115,9 +115,12 @@ static inline long syscall0(long num) {
 static inline long syscall1(long num, long arg1) {
     long ret;
     __asm__ volatile (
+        "pushq %%rbx\n\t"
+        "movq %2, %%rbx\n\t"
         "int $0x80"
+        "\n\tpopq %%rbx"
         : "=a"(ret)
-        : "a"(num), "b"(arg1)
+        : "a"(num), "r"(arg1)
         : "memory"
     );
     return ret;
@@ -126,9 +129,12 @@ static inline long syscall1(long num, long arg1) {
 static inline long syscall2(long num, long arg1, long arg2) {
     long ret;
     __asm__ volatile (
+        "pushq %%rbx\n\t"
+        "movq %2, %%rbx\n\t"
         "int $0x80"
+        "\n\tpopq %%rbx"
         : "=a"(ret)
-        : "a"(num), "b"(arg1), "c"(arg2)
+        : "a"(num), "r"(arg1), "c"(arg2)
         : "memory"
     );
     return ret;
@@ -137,9 +143,12 @@ static inline long syscall2(long num, long arg1, long arg2) {
 static inline long syscall3(long num, long arg1, long arg2, long arg3) {
     long ret;
     __asm__ volatile (
+        "pushq %%rbx\n\t"
+        "movq %2, %%rbx\n\t"
         "int $0x80"
+        "\n\tpopq %%rbx"
         : "=a"(ret)
-        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3)
+        : "a"(num), "r"(arg1), "c"(arg2), "d"(arg3)
         : "memory"
     );
     return ret;
@@ -148,9 +157,12 @@ static inline long syscall3(long num, long arg1, long arg2, long arg3) {
 static inline long syscall4(long num, long arg1, long arg2, long arg3, long arg4) {
     long ret;
     __asm__ volatile (
+        "pushq %%rbx\n\t"
+        "movq %2, %%rbx\n\t"
         "int $0x80"
+        "\n\tpopq %%rbx"
         : "=a"(ret)
-        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4)
+        : "a"(num), "r"(arg1), "c"(arg2), "d"(arg3), "S"(arg4)
         : "memory"
     );
     return ret;

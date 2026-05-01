@@ -42,6 +42,7 @@ ap_tramp_pm:
     movl $0xC0000080, %ecx
     rdmsr
     orl $(1 << 8), %eax
+    orl $(1 << 11), %eax
     wrmsr
 
     movl %cr0, %eax

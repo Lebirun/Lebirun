@@ -12,6 +12,13 @@
 #define VRING_PERM_WRITE  0x02
 #define VRING_PERM_EXEC   0x04
 
+#define VRING_CAP_IO_PORTS    0x01
+#define VRING_CAP_MSR_ACCESS  0x02
+#define VRING_CAP_IRQ_CONTROL 0x04
+#define VRING_CAP_KERNEL_PANIC 0x08
+
+#define VRING_FLAG_SANDBOXED  0x01
+
 typedef struct {
     uint64_t start;
     uint64_t end;
@@ -25,15 +32,22 @@ typedef struct {
     vring_mem_region_t allowed_regions[VRING_MAX_REGIONS];
     uint64_t region_count;
     const char *name;
+    uint8_t caps;
+    uint8_t flags;
+    uint64_t vring_pml4;
 } vring_t;
 
 void vring_init(void);
 int vring_create(uint8_t minor, const char *name);
+int vring_create_sandboxed(uint8_t minor, const char *name, uint8_t caps);
 int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms);
 int vring_remove(uint8_t minor);
 vring_t *vring_get(uint8_t minor);
 bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t access_type);
+bool vring_check_cap(uint8_t minor, uint8_t cap);
 void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type);
+void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type);
+void vring_selftest_start(void);
 
 extern vring_t *subrings;
 

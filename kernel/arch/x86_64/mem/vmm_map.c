@@ -9,6 +9,8 @@ extern void *pmm_alloc_page(void);
 extern void pmm_zero_page_phys(uint64_t phys_addr);
 extern uint64_t pfa_alloc(void);
 
+#define VMM_PHYS_MASK 0x000FFFFFFFFFF000ULL
+
 static uint64_t get_page_phys_in_pd(uint64_t pd_phys, uint64_t virt_addr) {
     uint64_t result;
 
@@ -44,7 +46,7 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pml4_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { result = 0; goto out; }
-    pdpt_phys = entry & ~0xFFFULL;
+    pdpt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(1);
     temp_map_raw(temp_virt, pdpt_phys);
@@ -52,7 +54,7 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pdpt_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { result = 0; goto out; }
-    pd_phys = entry & ~0xFFFULL;
+    pd_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(2);
     temp_map_raw(temp_virt, pd_phys);
@@ -67,7 +69,7 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
         goto out;
     }
 
-    pt_phys = entry & ~0xFFFULL;
+    pt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(3);
     temp_map_raw(temp_virt, pt_phys);
@@ -76,7 +78,7 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     temp_unmap_raw(temp_virt);
     if (!(pte & 1)) { result = 0; goto out; }
 
-    result = pte & ~0xFFFULL;
+    result = pte & VMM_PHYS_MASK;
 out:
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
     return result;
@@ -111,7 +113,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pml4_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pdpt_phys = entry & ~0xFFFULL;
+    pdpt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(1);
     temp_map_raw(temp_virt, pdpt_phys);
@@ -119,7 +121,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pdpt_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pd_phys = entry & ~0xFFFULL;
+    pd_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(2);
     temp_map_raw(temp_virt, pd_phys);
@@ -127,7 +129,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     entry = table[pd_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pt_phys = entry & ~0xFFFULL;
+    pt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(3);
     temp_map_raw(temp_virt, pt_phys);
@@ -138,7 +140,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
         if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
         return 0;
     }
-    phys = pte & ~0xFFFULL;
+    phys = pte & VMM_PHYS_MASK;
     table[pt_idx] = 0;
     temp_unmap_raw(temp_virt);
 
@@ -199,9 +201,9 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
         }
         pdpt_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pdpt_phys);
-        pml4[pml4_idx] = (pdpt_phys & ~0xFFFULL) | alloc_flags;
+        pml4[pml4_idx] = (pdpt_phys & VMM_PHYS_MASK) | alloc_flags;
     } else {
-        pdpt_phys = pml4[pml4_idx] & ~0xFFFULL;
+        pdpt_phys = pml4[pml4_idx] & VMM_PHYS_MASK;
         if ((flags & 0x7) & ~(pml4[pml4_idx] & 0x7)) {
             pml4[pml4_idx] |= (flags & 0x7);
         }
@@ -222,9 +224,9 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
         }
         pd_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pd_phys);
-        pdpt[pdpt_idx] = (pd_phys & ~0xFFFULL) | alloc_flags;
+        pdpt[pdpt_idx] = (pd_phys & VMM_PHYS_MASK) | alloc_flags;
     } else {
-        pd_phys = pdpt[pdpt_idx] & ~0xFFFULL;
+        pd_phys = pdpt[pdpt_idx] & VMM_PHYS_MASK;
         if ((flags & 0x7) & ~(pdpt[pdpt_idx] & 0x7)) {
             pdpt[pdpt_idx] |= (flags & 0x7);
         }
@@ -245,9 +247,9 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
         }
         pt_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pt_phys);
-        pd[pd_idx] = (pt_phys & ~0xFFFULL) | alloc_flags;
+        pd[pd_idx] = (pt_phys & VMM_PHYS_MASK) | alloc_flags;
     } else {
-        pt_phys = pd[pd_idx] & ~0xFFFULL;
+        pt_phys = pd[pd_idx] & VMM_PHYS_MASK;
         if ((flags & 0x7) & ~(pd[pd_idx] & 0x7)) {
             pd[pd_idx] |= (flags & 0x7);
         }
@@ -257,7 +259,7 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
     temp_pt_virt = TEMP_SLOT(3);
     temp_map_raw(temp_pt_virt, pt_phys);
     pt = (uint64_t *)temp_pt_virt;
-    pt[pt_idx] = (phys_addr & ~0xFFFULL) | (flags & 0xFFF);
+    pt[pt_idx] = (phys_addr & VMM_PHYS_MASK) | (flags & 0x8000000000000FFFULL);
     temp_unmap_raw(temp_pt_virt);
 
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");

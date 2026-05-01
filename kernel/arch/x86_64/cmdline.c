@@ -10,6 +10,7 @@ static char root_dev[64];
 static int num_consoles;
 static int text_mode;
 static int lke_enabled;
+static int vringtest_enabled;
 
 static int parse_int(const char *s)
 {
@@ -60,6 +61,7 @@ void cmdline_parse(const char *cmdline_str)
     cmdline_buf[0] = '\0';
     text_mode = 0;
     lke_enabled = 1;
+    vringtest_enabled = 0;
 
     if (!cmdline_str)
         return;
@@ -97,7 +99,11 @@ void cmdline_parse(const char *cmdline_str)
     if (val)
         lke_enabled = parse_int(val);
 
-    printf("CMDLINE: init=%s consoles=%d root=%s text=%d lke=%d\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)", text_mode, lke_enabled);
+    val = find_param(cmdline_buf, "vringtest");
+    if (val)
+        vringtest_enabled = parse_int(val);
+
+    printf("CMDLINE: init=%s consoles=%d root=%s text=%d lke=%d vringtest=%d\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)", text_mode, lke_enabled, vringtest_enabled);
 }
 
 const char *cmdline_get(void)
@@ -128,4 +134,9 @@ const char *cmdline_get_root(void)
 int cmdline_get_text_mode(void)
 {
     return text_mode;
+}
+
+int cmdline_get_vringtest(void)
+{
+    return vringtest_enabled;
 }

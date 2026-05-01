@@ -1,6 +1,7 @@
 .section .text
 
 .extern interrupt_handler
+.extern kernel_irq_cr3
 
 .macro isr_noerr num
     .global isr\num
@@ -83,6 +84,17 @@ isr_noerr 255
 isr_common_stub:
     pushq %rax
     pushq %rcx
+
+    movq %cr3, %rax
+    pushq %rax
+    movq kernel_irq_cr3(%rip), %rcx
+    testq %rcx, %rcx
+    jz 1f
+    cmpq %rcx, %rax
+    je 1f
+    movq %rcx, %cr3
+1:
+
     pushq %rdx
     pushq %rbx
     pushq %rbp
@@ -97,9 +109,14 @@ isr_common_stub:
     pushq %r14
     pushq %r15
 
+    xorq %rax, %rax
     movw %ds, %ax
     pushq %rax
+    xorq %rax, %rax
     movw %es, %ax
+    pushq %rax
+    movq 120(%rsp), %rax
+    pushq %rax
     pushq %rax
 
     movw $0x10, %ax
@@ -109,6 +126,12 @@ isr_common_stub:
     movq %rsp, %rdi
     call interrupt_handler
     movq %rax, %rsp
+    movq 0(%rsp), %rax
+    testq %rax, %rax
+    jz 1f
+    movq %rax, %cr3
+1:
+    addq $16, %rsp
 
     popq %rax
     movw %ax, %es
@@ -128,6 +151,7 @@ isr_common_stub:
     popq %rbp
     popq %rbx
     popq %rdx
+    addq $8, %rsp
     popq %rcx
     popq %rax
 

@@ -9,9 +9,11 @@ uint64_t low_bump = 0;
 uint64_t kernel_reserved_frames = 0;
 uint64_t total_pages_managed = TOTAL_PAGES;
 static uint64_t kernel_pml4_phys = 0;
+uint64_t kernel_irq_cr3 = 0;
 
 void vmm_register_kernel_cr3(uint64_t pml4_phys) {
     kernel_pml4_phys = pml4_phys & ~0xFFFUL;
+    kernel_irq_cr3 = 0;
 }
 
 uint64_t vmm_get_kernel_cr3(void) {

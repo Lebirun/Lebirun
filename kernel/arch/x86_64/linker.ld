@@ -33,11 +33,14 @@ SECTIONS
     _kernel_start = .;
 
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA) {
+        _kernel_text_start = .;
         *(.text .text.*)
+        _kernel_text_end = .;
     } :text
 
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA) {
         *(.rodata .rodata.*)
+        _kernel_rodata_end = .;
     } :rodata
 
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VMA) {

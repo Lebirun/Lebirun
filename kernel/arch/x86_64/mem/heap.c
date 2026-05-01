@@ -685,6 +685,14 @@ void *kmalloc_aligned(size_t size, uint64_t alignment) {
     return (void *)aligned;
 }
 
+void kfree_aligned(void *ptr) {
+    void *base;
+
+    if (!ptr) return;
+    base = ((void **)ptr)[-1];
+    kfree(base);
+}
+
 static void kfree_internal(void *ptr) {
     heap_block_t *block;
 

@@ -132,10 +132,32 @@ registers_t* interrupt_handler(registers_t* regs)
     uint8_t access_type;
     uint8_t irq;
     int sig;
+    task_t *fault_task;
 
     if (regs->int_no < 32) {
         if (regs->int_no == 14) {
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
+            access_type = 0;
+            if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
+            else access_type |= VRING_PERM_READ;
+            if (regs->err_code & 0x10) access_type |= VRING_PERM_EXEC;
+
+            if (current_task && current_task->vring_minor != 0 && !current_task->is_user) {
+                if (!vring_check_access(current_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
+                    vring_handle_violation(current_task->vring_minor, fault_addr, access_type);
+                    return schedule_from_irq(regs);
+                }
+            }
+
+            fault_task = task_find_by_pml4(regs->entry_cr3);
+            if (fault_task && fault_task->vring_minor != 0 && !fault_task->is_user) {
+                if (!vring_check_access(fault_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
+                    current_task = fault_task;
+                    smp_this_cpu()->current_task = fault_task;
+                    vring_handle_violation(fault_task->vring_minor, fault_addr, access_type);
+                    return schedule_from_irq(regs);
+                }
+            }
             
             if (!(regs->err_code & 0x4)) {
                 if (demand_page_fault_handler(fault_addr, regs->err_code)) {
@@ -157,13 +179,25 @@ registers_t* interrupt_handler(registers_t* regs)
             
             if (current_kproc && current_kproc->vring_minor != 0) {
                 if (!vring_check_access(current_kproc->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
-                    vring_panic_forbidden(current_kproc->vring_minor, fault_addr, access_type);
+                    vring_handle_violation(current_kproc->vring_minor, fault_addr, access_type);
+                    return schedule_from_irq(regs);
                 }
             }
             
             if (current_task && current_task->vring_minor != 0 && !current_task->is_user) {
                 if (!vring_check_access(current_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
-                    vring_panic_forbidden(current_task->vring_minor, fault_addr, access_type);
+                    vring_handle_violation(current_task->vring_minor, fault_addr, access_type);
+                    return schedule_from_irq(regs);
+                }
+            }
+
+            fault_task = task_find_by_pml4(regs->entry_cr3);
+            if (fault_task && fault_task->vring_minor != 0 && !fault_task->is_user) {
+                if (!vring_check_access(fault_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
+                    current_task = fault_task;
+                    smp_this_cpu()->current_task = fault_task;
+                    vring_handle_violation(fault_task->vring_minor, fault_addr, access_type);
+                    return schedule_from_irq(regs);
                 }
             }
         }
@@ -215,21 +249,14 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t mapped_phys;
             uint64_t *new_user_pages;
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
-            __asm__ ("movq %%cr3, %0" : "=r" (actual_cr3));
+            actual_cr3 = regs->entry_cr3;
+            if (!actual_cr3) __asm__ ("movq %%cr3, %0" : "=r" (actual_cr3));
             expected_pd = current_task->pml4_phys;
             
             if (actual_cr3 != expected_pd) {
-                printf("User PF at 0x%016lX RIP=0x%016lX err=0x%lX\n", fault_addr, regs->rip, regs->err_code);
-                printf("  actual_cr3=0x%016lX expected_pd=0x%016lX exec_completed=%d\n", 
-                       actual_cr3, expected_pd, current_task->exec_completed);
-                printf("  CR3 MISMATCH! Switching CR3 now...\n");
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(expected_pd) : "memory");
-                
+                regs->return_cr3 = expected_pd;
                 entry_phys = vmm_get_phys_in_pml4(expected_pd, regs->rip & ~0xFFF);
-                printf("  After CR3 switch: entry_phys=0x%016lX\n", entry_phys);
                 if (entry_phys) {
-
-                    printf("  Retrying faulting instruction...\n");
                     return regs;
                 }
             }
@@ -322,13 +349,14 @@ registers_t* interrupt_handler(registers_t* regs)
             if (sc_fault_addr < KERNEL_VMA) {
                 sc_fault_page = sc_fault_addr & ~0xFFFu;
                 sc_expected_pd = current_task->pml4_phys;
-                __asm__ volatile ("mov %%cr3, %0" : "=r"(sc_actual_cr3));
+                sc_actual_cr3 = regs->entry_cr3;
+                if (!sc_actual_cr3) __asm__ volatile ("mov %%cr3, %0" : "=r"(sc_actual_cr3));
 
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
 
                 if (sc_phys != 0) {
                     if (sc_actual_cr3 != sc_expected_pd) {
-                        __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                        regs->return_cr3 = sc_expected_pd;
                     } else {
                         __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                     }
@@ -337,7 +365,7 @@ registers_t* interrupt_handler(registers_t* regs)
 
                 if (task_handle_file_page_fault(current_task, sc_fault_addr)) {
                     if (sc_actual_cr3 != sc_expected_pd) {
-                        __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                        regs->return_cr3 = sc_expected_pd;
                     } else {
                         __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                     }
@@ -358,7 +386,7 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages_count++;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
-                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                                regs->return_cr3 = sc_expected_pd;
                             } else {
                                 __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                             }
@@ -382,7 +410,7 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages_count++;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
-                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                                regs->return_cr3 = sc_expected_pd;
                             } else {
                                 __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                             }
@@ -406,7 +434,7 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages_count++;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
-                                __asm__ volatile ("mov %0, %%cr3" : : "r"(sc_expected_pd) : "memory");
+                                regs->return_cr3 = sc_expected_pd;
                             } else {
                                 __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                             }

@@ -81,6 +81,8 @@ void vmm_map_page_early_avail(uint64_t virt_addr, uint64_t phys_addr, uint64_t f
 void vmm_map_range_alloc(uint64_t virt_addr, uint64_t size, uint64_t flags);
 
 uint64_t vmm_create_pml4(void);
+uint64_t vmm_create_vring_pml4(void);
+void vmm_free_vring_pml4(uint64_t pml4_phys);
 uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count);
 void vmm_free_pml4(uint64_t pml4_phys);
 void vmm_set_cr3(uint64_t pml4_phys);
@@ -121,6 +123,7 @@ void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb);
 void heap_init(void);
 void *kmalloc(size_t size);
 void *kmalloc_aligned(size_t size, uint64_t alignment);
+void kfree_aligned(void *ptr);
 void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);

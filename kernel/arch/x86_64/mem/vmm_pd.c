@@ -18,6 +18,8 @@ extern uint8_t pfa_ref_get(uint64_t phys_addr);
 extern void pfa_cow_release64(uint64_t phys_addr);
 extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
+#define VMM_PHYS_MASK 0x000FFFFFFFFFF000ULL
+
 static inline bool clone_should_log_detail(uint64_t index) {
     return index < 2 || (index & 0x3FF) == 0;
 }
@@ -49,12 +51,12 @@ uint64_t vmm_create_pml4(void) {
     temp_virt = TEMP_SLOT(0);
     temp_map_raw(temp_virt, pml4_phys);
     pml4 = (uint64_t *)temp_virt;
-    pml4[511] = (pdpt_high_phys & ~0xFFFULL) | 3;
+    pml4[511] = (pdpt_high_phys & VMM_PHYS_MASK) | 3;
     __asm__ volatile ("" ::: "memory");
     {
         uint64_t verify;
         verify = pml4[511];
-        if ((verify & ~0xFFFULL) != (pdpt_high_phys & ~0xFFFULL)) {
+        if ((verify & VMM_PHYS_MASK) != (pdpt_high_phys & VMM_PHYS_MASK)) {
             printf("vmm_create_pml4: VERIFY FAIL pml4[511]=0x%016lX expected pdpt=0x%016lX\n",
                    verify, pdpt_high_phys);
         }
@@ -66,7 +68,7 @@ uint64_t vmm_create_pml4(void) {
     return pml4_phys;
 }
 
-void vmm_free_pml4(uint64_t pml4_phys) {
+static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int release_leaf_refs) {
     uint64_t temp_pml4;
     uint64_t temp_pdpt;
     uint64_t temp_pd;
@@ -99,10 +101,10 @@ void vmm_free_pml4(uint64_t pml4_phys) {
     temp_map_raw(temp_pml4, pml4_phys);
     pml4 = (uint64_t *)temp_pml4;
 
-    for (i = 0; i < 511; i++) {
+    for (i = 0; i < pml4_entries; i++) {
         pml4e = pml4[i];
         if (!(pml4e & 1)) continue;
-        pdpt_phys = pml4e & ~0xFFFULL;
+        pdpt_phys = pml4e & VMM_PHYS_MASK;
 
         temp_map_raw(temp_pdpt, pdpt_phys);
         pdpt_tbl = (uint64_t *)temp_pdpt;
@@ -110,7 +112,7 @@ void vmm_free_pml4(uint64_t pml4_phys) {
         for (j = 0; j < 512; j++) {
             pdpte = pdpt_tbl[j];
             if (!(pdpte & 1)) continue;
-            pd_phys_val = pdpte & ~0xFFFULL;
+            pd_phys_val = pdpte & VMM_PHYS_MASK;
 
             temp_map_raw(temp_pd, pd_phys_val);
             pd_tbl = (uint64_t *)temp_pd;
@@ -119,16 +121,16 @@ void vmm_free_pml4(uint64_t pml4_phys) {
                 uint64_t l;
                 pde = pd_tbl[k];
                 if (!(pde & 1)) continue;
-                pt_phys_val = pde & ~0xFFFULL;
+                pt_phys_val = pde & VMM_PHYS_MASK;
 
                 temp_map_raw(temp_pt, pt_phys_val);
                 pt_tbl = (uint64_t *)temp_pt;
 
                 for (l = 0; l < 512; l++) {
                     pte = pt_tbl[l];
-                    if (pte & 1) {
-                        exec_page_cache_on_page_release(pte & ~0xFFFULL);
-                        pfa_cow_release64(pte & ~0xFFFULL);
+                    if ((pte & 1) && release_leaf_refs) {
+                        exec_page_cache_on_page_release(pte & VMM_PHYS_MASK);
+                        pfa_cow_release64(pte & VMM_PHYS_MASK);
                     }
                 }
                 temp_unmap_raw(temp_pt);
@@ -146,6 +148,10 @@ void vmm_free_pml4(uint64_t pml4_phys) {
 
     if (saved_flags & (1 << 9))
         __asm__ volatile ("sti" ::: "memory");
+}
+
+void vmm_free_pml4(uint64_t pml4_phys) {
+    vmm_free_pml4_entries(pml4_phys, 511, 1);
 }
 
 static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count) {
@@ -226,12 +232,12 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     temp_map_raw(temp_new_pml4, new_pml4_phys);
     new_pml4 = (uint64_t *)temp_new_pml4;
 
-    new_pml4[511] = (pdpt_high_phys & ~0xFFFULL) | 3;
+    new_pml4[511] = (pdpt_high_phys & VMM_PHYS_MASK) | 3;
     __asm__ volatile ("" ::: "memory");
     {
         uint64_t verify;
         verify = new_pml4[511];
-        if ((verify & ~0xFFFULL) != (pdpt_high_phys & ~0xFFFULL)) {
+        if ((verify & VMM_PHYS_MASK) != (pdpt_high_phys & VMM_PHYS_MASK)) {
             printf("vmm_clone_pml4: VERIFY FAIL pml4[511]=0x%016lX expected=0x%016lX\n",
                    verify, pdpt_high_phys);
         }
@@ -240,14 +246,14 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     for (i = 0; i < 511; i++) {
         pml4e = src_pml4[i];
         if (!(pml4e & 1)) continue;
-        src_pdpt_phys = pml4e & ~0xFFFULL;
+        src_pdpt_phys = pml4e & VMM_PHYS_MASK;
 
         alloc_page = pmm_alloc_page();
         if (!alloc_page) goto cleanup_fail;
         new_pdpt_phys = (uint64_t)alloc_page;
         pmm_zero_page_phys(new_pdpt_phys);
 
-        new_pml4[i] = (new_pdpt_phys & ~0xFFFULL) | (pml4e & 0xFFF);
+        new_pml4[i] = (new_pdpt_phys & VMM_PHYS_MASK) | (pml4e & 0x8000000000000FFFULL);
 
         temp_src_pdpt = TEMP_SLOT(2);
         temp_new_pdpt = TEMP_SLOT(3);
@@ -259,7 +265,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
         for (j = 0; j < 512; j++) {
             pdpte = src_pdpt_tbl[j];
             if (!(pdpte & 1)) continue;
-            src_pd_phys = pdpte & ~0xFFFULL;
+            src_pd_phys = pdpte & VMM_PHYS_MASK;
 
             alloc_page = pmm_alloc_page();
             if (!alloc_page) {
@@ -270,7 +276,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
             new_pd_phys = (uint64_t)alloc_page;
             pmm_zero_page_phys(new_pd_phys);
 
-            new_pdpt_tbl[j] = (new_pd_phys & ~0xFFFULL) | (pdpte & 0xFFF);
+            new_pdpt_tbl[j] = (new_pd_phys & VMM_PHYS_MASK) | (pdpte & 0x8000000000000FFFULL);
 
             temp_src_pd = TEMP_SLOT(4);
             temp_new_pd = TEMP_SLOT(5);
@@ -282,8 +288,8 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
             for (k = 0; k < 512; k++) {
                 pde = src_pd_tbl[k];
                 if (!(pde & 1)) continue;
-                src_pt_phys = pde & ~0xFFFULL;
-                pde_flags = pde & 0xFFF;
+                src_pt_phys = pde & VMM_PHYS_MASK;
+                pde_flags = pde & 0x8000000000000FFFULL;
 
                 alloc_page = pmm_alloc_page();
                 if (!alloc_page) {
@@ -295,7 +301,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                 }
                 new_pt_phys = (uint64_t)alloc_page;
 
-                new_pd_tbl[k] = (new_pt_phys & ~0xFFFULL) | pde_flags;
+                new_pd_tbl[k] = (new_pt_phys & VMM_PHYS_MASK) | pde_flags;
 
                 temp_src_pt = TEMP_SLOT(6);
                 temp_new_pt = TEMP_SLOT(7);
@@ -309,18 +315,18 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                     src_pte = src_pt_tbl[l];
                     if (!(src_pte & 1)) continue;
 
-                    src_page_phys = src_pte & ~0xFFFULL;
-                    pte_flags = src_pte & 0xFFF;
+                    src_page_phys = src_pte & VMM_PHYS_MASK;
+                    pte_flags = src_pte & 0x8000000000000FFFULL;
 
                     if (pte_flags & 0x2) {
                         cow_flags64 = (pte_flags & ~0x2) | 0x200;
-                        src_pt_tbl[l] = (src_page_phys & ~0xFFFULL) | cow_flags64;
-                        new_pt_tbl[l] = (src_page_phys & ~0xFFFULL) | cow_flags64;
+                        src_pt_tbl[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
+                        new_pt_tbl[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
                         if (pfa_ref_get(src_page_phys) == 0)
                             pfa_ref_inc(src_page_phys);
                         pfa_ref_inc(src_page_phys);
                     } else {
-                        new_pt_tbl[l] = (src_page_phys & ~0xFFFULL) | (pte_flags | 0x200);
+                        new_pt_tbl[l] = (src_page_phys & VMM_PHYS_MASK) | (pte_flags | 0x200);
                         if (pfa_ref_get(src_page_phys) == 0)
                             pfa_ref_inc(src_page_phys);
                         pfa_ref_inc(src_page_phys);
@@ -393,7 +399,7 @@ cleanup_fail:
         for (ci = 0; ci < 511; ci++) {
             c_pml4e = new_pml4[ci];
             if (!(c_pml4e & 1)) continue;
-            c_pdpt_phys = c_pml4e & ~0xFFFULL;
+            c_pdpt_phys = c_pml4e & VMM_PHYS_MASK;
 
             temp_map_raw(temp_src_pdpt, c_pdpt_phys);
             new_pdpt_tbl = (uint64_t *)temp_src_pdpt;
@@ -401,7 +407,7 @@ cleanup_fail:
             for (cj = 0; cj < 512; cj++) {
                 c_pdpte = new_pdpt_tbl[cj];
                 if (!(c_pdpte & 1)) continue;
-                c_pd_phys = c_pdpte & ~0xFFFULL;
+                c_pd_phys = c_pdpte & VMM_PHYS_MASK;
 
                 temp_map_raw(temp_src_pd, c_pd_phys);
                 new_pd_tbl = (uint64_t *)temp_src_pd;
@@ -409,15 +415,15 @@ cleanup_fail:
                 for (ck = 0; ck < 512; ck++) {
                     c_pde = new_pd_tbl[ck];
                     if (!(c_pde & 1)) continue;
-                    c_pt_phys = c_pde & ~0xFFFULL;
+                    c_pt_phys = c_pde & VMM_PHYS_MASK;
 
                     temp_map_raw(temp_src_pt, c_pt_phys);
                     new_pt_tbl = (uint64_t *)temp_src_pt;
                     for (cl = 0; cl < 512; cl++) {
                         c_pte = new_pt_tbl[cl];
                         if (c_pte & 1) {
-                            exec_page_cache_on_page_release(c_pte & ~0xFFFULL);
-                            pfa_cow_release64(c_pte & ~0xFFFULL);
+                            exec_page_cache_on_page_release(c_pte & VMM_PHYS_MASK);
+                            pfa_cow_release64(c_pte & VMM_PHYS_MASK);
                         }
                     }
                     temp_unmap_raw(temp_src_pt);
@@ -485,7 +491,7 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     entry = table[pml4_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pdpt_phys = entry & ~0xFFFULL;
+    pdpt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(0);
     temp_map_raw(temp_virt, pdpt_phys);
@@ -493,7 +499,7 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     entry = table[pdpt_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pd_phys_val = entry & ~0xFFFULL;
+    pd_phys_val = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(0);
     temp_map_raw(temp_virt, pd_phys_val);
@@ -501,7 +507,7 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     entry = table[pd_idx];
     temp_unmap_raw(temp_virt);
     if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pt_phys = entry & ~0xFFFULL;
+    pt_phys = entry & VMM_PHYS_MASK;
 
     temp_virt = TEMP_SLOT(1);
     temp_map_raw(temp_virt, pt_phys);
@@ -514,12 +520,12 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
         return 0;
     }
 
-    old_page_phys = pte & ~0xFFFULL;
-    pte_flags = pte & 0xFFF;
+    old_page_phys = pte & VMM_PHYS_MASK;
+    pte_flags = pte & 0x8000000000000FFFULL;
 
     ref = pfa_ref_get(old_page_phys);
     if (ref <= 1) {
-        pt[pt_idx] = (old_page_phys & ~0xFFFULL) | ((pte_flags | 0x2) & ~0x200);
+        pt[pt_idx] = (old_page_phys & VMM_PHYS_MASK) | ((pte_flags | 0x2) & ~0x200);
         temp_unmap_raw(temp_virt);
         if (ref > 0) pfa_ref_dec(old_page_phys);
         if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
@@ -546,7 +552,7 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
         temp_unmap_raw(temp_new);
     }
 
-    pt[pt_idx] = (new_page_phys & ~0xFFFULL) | ((pte_flags | 0x2) & ~0x200);
+    pt[pt_idx] = (new_page_phys & VMM_PHYS_MASK) | ((pte_flags | 0x2) & ~0x200);
     temp_unmap_raw(temp_virt);
 
     exec_page_cache_on_page_release(old_page_phys);
@@ -560,4 +566,23 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     __asm__ volatile ("invlpg (%0)" : : "r"(fault_addr) : "memory");
 
     return 1;
+}
+
+uint64_t vmm_create_vring_pml4(void) {
+    void *page;
+    uint64_t pml4_phys;
+
+    page = pmm_alloc_page();
+    if (!page) {
+        printf("vmm_create_vring_pml4: Failed to allocate PML4 page\n");
+        return 0;
+    }
+    pml4_phys = (uint64_t)page;
+    pmm_zero_page_phys(pml4_phys);
+    return pml4_phys;
+}
+
+void vmm_free_vring_pml4(uint64_t pml4_phys) {
+    if (!pml4_phys) return;
+    vmm_free_pml4_entries(pml4_phys, 512, 0);
 }
