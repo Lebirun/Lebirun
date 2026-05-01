@@ -13,6 +13,5 @@ int cmdline_get_consoles(void);
 const char *cmdline_get_root(void);
 int cmdline_get_text_mode(void);
 int cmdline_get_lke(void);
-int cmdline_get_vringtest(void);
 
 #endif

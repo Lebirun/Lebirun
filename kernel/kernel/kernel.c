@@ -657,9 +657,6 @@ void kernel_main(void) {
         kprint_enable();
         extern void watchdog_init(void);
         watchdog_init();
-        if (cmdline_get_vringtest()) {
-            vring_selftest_start();
-        }
     } else {
         printf("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }

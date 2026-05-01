@@ -10,7 +10,6 @@ static char root_dev[64];
 static int num_consoles;
 static int text_mode;
 static int lke_enabled;
-static int vringtest_enabled;
 
 static int parse_int(const char *s)
 {
@@ -61,49 +60,41 @@ void cmdline_parse(const char *cmdline_str)
     cmdline_buf[0] = '\0';
     text_mode = 0;
     lke_enabled = 1;
-    vringtest_enabled = 0;
 
-    if (!cmdline_str)
-        return;
+    if (cmdline_str) {
+        len = 0;
+        while (cmdline_str[len] && len < CMDLINE_MAX - 1)
+            len++;
+        memcpy(cmdline_buf, cmdline_str, len);
+        cmdline_buf[len] = '\0';
 
-    len = 0;
-    while (cmdline_str[len] && len < CMDLINE_MAX - 1)
-        len++;
-    memcpy(cmdline_buf, cmdline_str, len);
-    cmdline_buf[len] = '\0';
+        val = find_param(cmdline_buf, "init");
+        if (val)
+            extract_value(val, init_path, CMDLINE_INIT_PATH_MAX);
 
-    printf("CMDLINE: \"%s\"\n", cmdline_buf);
+        val = find_param(cmdline_buf, "consoles");
+        if (val) {
+            num_consoles = parse_int(val);
+            if (num_consoles < 1)
+                num_consoles = 1;
+            if (num_consoles > NUM_CONSOLES)
+                num_consoles = NUM_CONSOLES;
+        }
 
-    val = find_param(cmdline_buf, "init");
-    if (val)
-        extract_value(val, init_path, CMDLINE_INIT_PATH_MAX);
+        val = find_param(cmdline_buf, "root");
+        if (val)
+            extract_value(val, root_dev, sizeof(root_dev));
 
-    val = find_param(cmdline_buf, "consoles");
-    if (val) {
-        num_consoles = parse_int(val);
-        if (num_consoles < 1)
-            num_consoles = 1;
-        if (num_consoles > NUM_CONSOLES)
-            num_consoles = NUM_CONSOLES;
+        val = find_param(cmdline_buf, "text");
+        if (val)
+            text_mode = parse_int(val);
+
+        val = find_param(cmdline_buf, "lke");
+        if (val)
+            lke_enabled = parse_int(val);
     }
 
-    val = find_param(cmdline_buf, "root");
-    if (val)
-        extract_value(val, root_dev, sizeof(root_dev));
-
-    val = find_param(cmdline_buf, "text");
-    if (val)
-        text_mode = parse_int(val);
-
-    val = find_param(cmdline_buf, "lke");
-    if (val)
-        lke_enabled = parse_int(val);
-
-    val = find_param(cmdline_buf, "vringtest");
-    if (val)
-        vringtest_enabled = parse_int(val);
-
-    printf("CMDLINE: init=%s consoles=%d root=%s text=%d lke=%d vringtest=%d\n", init_path, num_consoles, root_dev[0] ? root_dev : "(none)", text_mode, lke_enabled, vringtest_enabled);
+    printf("CMDLINE: \"%s\"\n", cmdline_buf);
 }
 
 const char *cmdline_get(void)
@@ -134,9 +125,4 @@ const char *cmdline_get_root(void)
 int cmdline_get_text_mode(void)
 {
     return text_mode;
-}
-
-int cmdline_get_vringtest(void)
-{
-    return vringtest_enabled;
 }
