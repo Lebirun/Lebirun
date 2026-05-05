@@ -3,6 +3,7 @@
 #include <lebirun/drivers/net/e1000/e1000.h>
 #endif
 #include <lebirun/mem_map.h>
+#include <lebirun/spinlock.h>
 #include <lebirun/tty.h>
 #include <lebirun/task.h>
 #include <string.h>
@@ -30,6 +31,7 @@ void net_poll(void) {
 static int net_hw_initialized;
 static int net_has_interface;
 static int net_worker_started;
+static spinlock_t net_hw_lock = {0};
 
 static void net_start_worker(void);
 
@@ -38,11 +40,20 @@ void net_ensure_hw(void) {
     int i;
 
     if (net_hw_initialized) return;
-    net_hw_initialized = 1;
+    while (!spin_trylock(&net_hw_lock)) {
+        __asm__ volatile("sti");
+        schedule();
+    }
+    if (net_hw_initialized) {
+        spin_unlock(&net_hw_lock);
+        return;
+    }
 
 #if CONFIG_DRIVER_NET_E1000
     if (e1000_init() < 0) {
         printf("NET: No network interface available\n");
+        net_hw_initialized = 1;
+        spin_unlock(&net_hw_lock);
         return;
     }
     net_has_interface = 1;
@@ -51,8 +62,13 @@ void net_ensure_hw(void) {
         dhcp_init(netif);
 #else
     printf("NET: E1000 driver disabled\n");
+    net_hw_initialized = 1;
+    spin_unlock(&net_hw_lock);
     return;
 #endif
+
+    net_hw_initialized = 1;
+    spin_unlock(&net_hw_lock);
 
     net_start_worker();
 
@@ -67,12 +83,16 @@ void net_ensure_hw(void) {
 }
 
 static void net_worker_thread(void) {
+    uint64_t last_poll;
+
+    last_poll = 0;
     while (1) {
-        if (net_work_pending) {
+        if (net_work_pending || net_get_ticks() - last_poll >= 10) {
             net_work_pending = 0;
             netif_poll_all();
             tcp_tick();
             dhcp_tick();
+            last_poll = net_get_ticks();
         }
         if (dhcp_is_negotiating()) {
             netif_poll_all();

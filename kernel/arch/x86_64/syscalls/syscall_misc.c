@@ -48,6 +48,27 @@ struct rusage {
     long ru_nivcsw;
 };
 
+static int user_range_mapped_misc(uint64_t addr, uint64_t size) {
+    uint64_t end;
+    uint64_t p;
+    uint64_t pend;
+
+    if (!current_task) return 0;
+    if (size == 0) return 1;
+    end = addr + size - 1;
+    if (end < addr) return 0;
+    if (addr < 0x1000 || end >= KERNEL_VMA) return 0;
+    p = addr & ~0xFFFu;
+    pend = end & ~0xFFFu;
+    for (;;) {
+        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
+        if (p == pend) break;
+        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
+        p += 0x1000u;
+    }
+    return 1;
+}
+
 #define RLIMIT_CPU        0
 #define RLIMIT_FSIZE      1
 #define RLIMIT_DATA       2
@@ -239,12 +260,26 @@ static int sys_prlimit64(int pid, int resource, const struct rlimit *new_limit, 
 }
 
 static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
+    uint8_t tmp[256];
+    uint8_t *dst;
+    size_t done;
+    size_t chunk;
+
     (void)flags;
     if (!buf) return -EFAULT;
     if (buflen == 0) return 0;
-    
-    rng_fill(buf, buflen);
-    
+    if (!user_range_mapped_misc((uint64_t)(uintptr_t)buf, (uint64_t)buflen)) return -EFAULT;
+
+    dst = (uint8_t *)buf;
+    done = 0;
+    while (done < buflen) {
+        chunk = buflen - done;
+        if (chunk > sizeof(tmp)) chunk = sizeof(tmp);
+        rng_fill(tmp, chunk);
+        memcpy(dst + done, tmp, chunk);
+        done += chunk;
+    }
+    memset(tmp, 0, sizeof(tmp));
     return buflen;
 }
 

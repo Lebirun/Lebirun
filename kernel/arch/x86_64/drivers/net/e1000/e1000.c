@@ -8,6 +8,23 @@
 #include <string.h>
 
 static e1000_device_t g_e1000_dev;
+static volatile int e1000_poll_lock = 0;
+static volatile int e1000_tx_lock = 0;
+
+static int e1000_try_lock(volatile int *lock) {
+    if (__sync_lock_test_and_set(lock, 1) == 0) return 1;
+    return 0;
+}
+
+static void e1000_lock(volatile int *lock) {
+    while (__sync_lock_test_and_set(lock, 1)) {
+        __asm__ volatile("pause" ::: "memory");
+    }
+}
+
+static void e1000_unlock(volatile int *lock) {
+    __sync_lock_release(lock);
+}
 
 static void e1000_ensure_mmio_mapped(e1000_device_t *dev) {
     uint64_t bar0_phys;
@@ -249,15 +266,25 @@ int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
     e1000_device_t *dev;
     uint32_t cur;
     volatile int i;
+    int ret;
+    uint64_t wait;
 
     dev = (e1000_device_t *)netif->driver_data;
     if (!dev || !dev->initialized) return -1;
     if (len > ETH_FRAME_MAX) return -1;
 
+    e1000_lock(&e1000_tx_lock);
+    ret = 0;
     cur = dev->tx_cur;
+    wait = 0;
 
     while (!(dev->tx_descs[cur].status & E1000_TXD_STAT_DD)) {
         for (i = 0; i < 1000; i++);
+        wait++;
+        if (wait > 100000) {
+            e1000_unlock(&e1000_tx_lock);
+            return -1;
+        }
     }
 
     memcpy(dev->tx_buffers[cur], data, len);
@@ -272,7 +299,8 @@ int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
     dev->packets_tx++;
     dev->bytes_tx += len;
 
-    return 0;
+    e1000_unlock(&e1000_tx_lock);
+    return ret;
 }
 
 int e1000_poll(netif_t *netif) {
@@ -281,13 +309,11 @@ int e1000_poll(netif_t *netif) {
     uint16_t len;
     uint8_t *buf;
     uint32_t old_cur;
-    static volatile int polling = 0;
 
     dev = (e1000_device_t *)netif->driver_data;
     if (!dev || !dev->initialized) return 0;
 
-    if (polling) return 0;
-    polling = 1;
+    if (!e1000_try_lock(&e1000_poll_lock)) return 0;
 
     count = 0;
 
@@ -314,7 +340,7 @@ int e1000_poll(netif_t *netif) {
         count++;
     }
 
-    polling = 0;
+    e1000_unlock(&e1000_poll_lock);
     return count;
 }
 

@@ -4,6 +4,25 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/mem_map.h>
 
+static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
+    uint64_t end;
+    uint64_t p;
+
+    if (len == 0) return 1;
+    if (!current_task) return 0;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    if (addr + len < addr || addr + len > KERNEL_VMA) return 0;
+
+    end = addr + len - 1;
+    p = addr & ~0xFFFULL;
+    while (p <= end) {
+        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
+        if (p + 0x1000ULL <= p) return 0;
+        p += 0x1000ULL;
+    }
+    return 1;
+}
+
 static int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t mode;
     uint64_t uid;
@@ -281,7 +300,6 @@ int sys_vfs_readdir(registers_t *regs) {
     uint64_t name_addr;
     uint64_t type_addr;
     uint64_t index;
-    uint64_t flags;
     int i;
     task_fd_t *tfd;
     vfs_node_t *node;
@@ -293,8 +311,8 @@ int sys_vfs_readdir(registers_t *regs) {
     type_addr = regs->rdx;
     index = regs->rsi;
 
-    if (name_addr && (name_addr >= KERNEL_VMA || name_addr < 0x1000)) return -EFAULT;
-    if (type_addr && (type_addr >= KERNEL_VMA || type_addr < 0x1000)) return -EFAULT;
+    if (name_addr && !vfs_user_range_mapped(name_addr, 64)) return -EFAULT;
+    if (type_addr && !vfs_user_range_mapped(type_addr, sizeof(uint32_t))) return -EFAULT;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
@@ -305,10 +323,8 @@ int sys_vfs_readdir(registers_t *regs) {
     node = (vfs_node_t *)tfd->node;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
 
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     result = vfs_readdir(node, index);
     if (!result) {
-        __asm__ volatile("push %0; popf" : : "r"(flags));
         return -ENOENT;
     }
 
@@ -317,7 +333,6 @@ int sys_vfs_readdir(registers_t *regs) {
     }
     local_copy.inode = result->inode;
     local_copy.type = result->type;
-    __asm__ volatile("push %0; popf" : : "r"(flags));
 
     if (name_addr) {
         i = 0;

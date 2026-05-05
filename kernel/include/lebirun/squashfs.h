@@ -177,6 +177,7 @@ typedef struct squashfs_vfs_node {
     uint32_t rd_last_inode_number;
     uint8_t *rd_cached_data;
     uint64_t rd_cached_size;
+    dirent_t rd_dirent;
 } squashfs_vfs_node_t;
 
 void squashfs_init(uint64_t mod_start, uint64_t mod_end);

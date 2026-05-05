@@ -170,7 +170,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     dest_port = ntohs(udp->dest_port);
     udp_len = ntohs(udp->length);
 
-    if (udp_len > len) return;
+    if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);
@@ -229,7 +229,7 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
     dest_port = ntohs(udp->dest_port);
     udp_len = ntohs(udp->length);
 
-    if (udp_len > len) return;
+    if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);

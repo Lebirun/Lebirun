@@ -43,27 +43,42 @@ void arp_add_entry(ipv4_addr_t ip, mac_addr_t mac) {
     arp_cache[oldest_idx].valid = 1;
 }
 
-int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
-    uint64_t timeout_ticks;
-    uint64_t start;
+int arp_lookup(ipv4_addr_t ip, mac_addr_t *mac_out) {
+    uint64_t age;
     int i;
 
     for (i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
-            uint64_t age = net_get_ticks() - arp_cache[i].timestamp;
+            age = net_get_ticks() - arp_cache[i].timestamp;
             if (age < ARP_ENTRY_TIMEOUT) {
-                *mac_out = arp_cache[i].mac;
+                if (mac_out) *mac_out = arp_cache[i].mac;
                 return 0;
             }
             arp_cache[i].valid = 0;
+            return -1;
         }
     }
+    return -1;
+}
 
-    arp_request(netif, ip);
+int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
+    uint64_t timeout_ticks;
+    uint64_t retry_ticks;
+    uint64_t start;
+    uint64_t last_request;
+    int i;
+
+    if (arp_lookup(ip, mac_out) == 0) return 0;
 
     timeout_ticks = pit_ms_to_ticks(3000);
+    retry_ticks = pit_ms_to_ticks(250);
     start = pit_get_ticks();
+    last_request = start - retry_ticks;
     while (pit_get_ticks() - start < timeout_ticks) {
+        if (pit_get_ticks() - last_request >= retry_ticks) {
+            arp_request(netif, ip);
+            last_request = pit_get_ticks();
+        }
         __asm__ volatile("sti");
         netif_poll_all();
 

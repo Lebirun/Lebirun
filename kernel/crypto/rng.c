@@ -39,6 +39,19 @@ typedef struct {
 
 static rng_state_t g_rng;
 
+static uint64_t rng_irqsave(void)
+{
+    uint64_t flags;
+
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static void rng_irqrestore(uint64_t flags)
+{
+    if (flags & (1ULL << 9)) __asm__ volatile("sti" ::: "memory");
+}
+
 static inline uint64_t read_tsc(void)
 {
     uint32_t lo, hi;
@@ -394,8 +407,10 @@ void rng_init(void)
 void rng_add_entropy(const void *data, size_t len)
 {
     uint64_t tsc_val;
+    uint64_t flags;
     uint32_t idx;
 
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
 
     tsc_val = read_tsc();
@@ -407,58 +422,79 @@ void rng_add_entropy(const void *data, size_t len)
     g_rng.pool_index++;
 
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
 }
 
 void rng_reseed(void)
 {
+    uint64_t flags;
+
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_do_reseed();
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
 }
 
 uint8_t rng_get_u8(void)
 {
     uint8_t val;
+    uint64_t flags;
 
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_extract(&val, sizeof(val));
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
     return val;
 }
 
 uint16_t rng_get_u16(void)
 {
     uint16_t val;
+    uint64_t flags;
 
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_extract((uint8_t *)&val, sizeof(val));
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
     return val;
 }
 
 uint32_t rng_get_u32(void)
 {
     uint32_t val;
+    uint64_t flags;
 
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_extract((uint8_t *)&val, sizeof(val));
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
     return val;
 }
 
 uint64_t rng_get_u64(void)
 {
     uint64_t val;
+    uint64_t flags;
 
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_extract((uint8_t *)&val, sizeof(val));
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
     return val;
 }
 
 void rng_fill(void *buf, size_t len)
 {
+    uint64_t flags;
+
+    flags = rng_irqsave();
     spin_lock(&g_rng.lock);
     rng_extract((uint8_t *)buf, len);
     spin_unlock(&g_rng.lock);
+    rng_irqrestore(flags);
 }

@@ -69,6 +69,9 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     memcpy(&current_task->fds[newfd], &current_task->fds[oldfd], sizeof(task_fd_t));
     current_task->fds[newfd].ref_count = 1;
 
+    if (current_task->fds[newfd].type == FD_TYPE_FILE && current_task->fds[newfd].node) {
+        vfs_open((vfs_node_t *)current_task->fds[newfd].node, current_task->fds[newfd].flags);
+    }
     if (current_task->fds[oldfd].private_data &&
         (current_task->fds[oldfd].type == FD_TYPE_PIPE_R || current_task->fds[oldfd].type == FD_TYPE_PIPE_W)) {
         pipe_t *p = (pipe_t *)current_task->fds[oldfd].private_data;

@@ -112,6 +112,14 @@ static uint64_t slab_virt_to_phys(uint64_t virt) {
     return vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), virt);
 }
 
+static int slab_page_mapped(slab_page_t *page) {
+    uint64_t virt;
+
+    virt = (uint64_t)page;
+    if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
+    return slab_virt_to_phys(virt) != 0;
+}
+
 static void slab_virt_free(uint64_t virt) {
     if (slab_virt_free_count < (sizeof(slab_virt_freelist) / sizeof(slab_virt_freelist[0]))) {
         slab_virt_freelist[slab_virt_free_count++] = virt;
@@ -256,6 +264,7 @@ void slab_free(void *ptr) {
     
     page = (slab_page_t *)((uint64_t)ptr & ~(PAGE_SIZE - 1));
     
+    if (!slab_page_mapped(page)) return;
     if (page->magic != SLAB_MAGIC) return;
     
     slab_lock_acquire(&eflags);
@@ -321,6 +330,7 @@ int slab_owns(void *ptr) {
     if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
     
     page = (slab_page_t *)((uint64_t)ptr & ~(PAGE_SIZE - 1));
+    if (!slab_page_mapped(page)) return 0;
     return (page->magic == SLAB_MAGIC);
 }
 
@@ -333,6 +343,7 @@ size_t slab_alloc_size(void *ptr) {
 
     if (!ptr || !slab_initialized) return 0;
     page = (slab_page_t *)((uint64_t)ptr & ~(PAGE_SIZE - 1));
+    if (!slab_page_mapped(page)) return 0;
     if (page->magic != SLAB_MAGIC) return 0;
     return page->obj_size;
 }

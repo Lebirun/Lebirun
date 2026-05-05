@@ -22,6 +22,8 @@
 #define IPV67_CMD_PROBE_PEERS  16
 #define IPV67_CMD_GET_ROUTES   17
 #define IPV67_CMD_ROUTE_COUNT  18
+#define IPV67_CMD_SET_AUTH_KEY 19
+#define IPV67_CMD_SET_IDENTITY_KEY 20
 
 extern void *kmalloc(uint64_t size);
 extern void kfree(void *ptr);
@@ -39,6 +41,11 @@ typedef struct {
     ipv6_addr_t ipv6;
     uint16_t port;
     uint8_t family;
+    uint8_t authenticated;
+    uint8_t session_established;
+    uint8_t missed_probes;
+    char alias[IPV67_ALIAS_SIZE];
+    uint8_t public_key[IPV67_IDENTITY_SIZE];
     char     addr_str[IPV67_ADDR_STR_MAX];
 } __attribute__((packed)) ipv67_peer_user_t;
 
@@ -48,6 +55,8 @@ typedef struct {
     uint16_t next_hop_port;
     uint8_t next_hop_family;
     uint8_t hops;
+    uint8_t metric;
+    uint32_t sequence;
     char dest_str[IPV67_ADDR_STR_MAX];
 } __attribute__((packed)) ipv67_route_user_t;
 
@@ -84,7 +93,7 @@ static int user_range_mapped_ipv67(uint64_t addr, uint64_t size) {
     return 1;
 }
 
-static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
+static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
     ipv67_syscall_req_t req;
     ipv67_addr_t addr;
     ipv6_addr_t addr6;
@@ -119,8 +128,7 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
 
     switch (req.cmd) {
     case IPV67_CMD_INIT:
-        ipv67_init();
-        return 0;
+        return ipv67_init();
 
     case IPV67_CMD_SET_ADDR:
         if (!user_range_mapped_ipv67(req.arg1, sizeof(ipv67_addr_t))) return -EFAULT;
@@ -200,17 +208,29 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
         if (req.arg2 == 0) return 0;
         max = (int)req.arg2;
         if ((uint64_t)max != req.arg2 || max < 0) return -EINVAL;
-        if (max > IPV67_MAX_PEERS) max = IPV67_MAX_PEERS;
+        count = ipv67_peer_count();
+        if (max > count) max = count;
+        if (max == 0) return 0;
         if (!user_range_mapped_ipv67(req.arg1, (uint64_t)max * sizeof(ipv67_peer_user_t))) return -EFAULT;
         kernel_peers = (ipv67_peer_t *)kmalloc((uint64_t)max * sizeof(ipv67_peer_t));
         if (!kernel_peers) return -ENOMEM;
         count = ipv67_get_peers(kernel_peers, max);
+        if (count < 0) {
+            kfree(kernel_peers);
+            return count;
+        }
+        if (count > max) count = max;
         for (i = 0; i < count; i++) {
             memset(&user_peer, 0, sizeof(user_peer));
             user_peer.ipv4 = kernel_peers[i].ipv4;
             memcpy(&user_peer.ipv6, &kernel_peers[i].ipv6, sizeof(ipv6_addr_t));
             user_peer.port = kernel_peers[i].port;
             user_peer.family = kernel_peers[i].family;
+            user_peer.authenticated = kernel_peers[i].authenticated;
+            user_peer.session_established = kernel_peers[i].session_established;
+            user_peer.missed_probes = kernel_peers[i].missed_probes;
+            memcpy(user_peer.alias, kernel_peers[i].alias, IPV67_ALIAS_SIZE);
+            memcpy(user_peer.public_key, kernel_peers[i].public_key, IPV67_IDENTITY_SIZE);
             ipv67_addr_format(&kernel_peers[i].addr, user_peer.addr_str, IPV67_ADDR_STR_MAX);
             memcpy((void *)(req.arg1 + (uint64_t)i * sizeof(ipv67_peer_user_t)), &user_peer, sizeof(ipv67_peer_user_t));
         }
@@ -227,11 +247,18 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
         if (req.arg2 == 0) return 0;
         max = (int)req.arg2;
         if ((uint64_t)max != req.arg2 || max < 0) return -EINVAL;
-        if (max > IPV67_MAX_ROUTES) max = IPV67_MAX_ROUTES;
+        count = ipv67_route_count_get();
+        if (max > count) max = count;
+        if (max == 0) return 0;
         if (!user_range_mapped_ipv67(req.arg1, (uint64_t)max * sizeof(ipv67_route_user_t))) return -EFAULT;
         kernel_routes = (ipv67_route_t *)kmalloc((uint64_t)max * sizeof(ipv67_route_t));
         if (!kernel_routes) return -ENOMEM;
         count = ipv67_get_routes(kernel_routes, max);
+        if (count < 0) {
+            kfree(kernel_routes);
+            return count;
+        }
+        if (count > max) count = max;
         for (i = 0; i < count; i++) {
             memset(&user_route, 0, sizeof(user_route));
             user_route.next_hop_ipv4 = kernel_routes[i].next_hop_ipv4;
@@ -239,6 +266,8 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
             user_route.next_hop_port = kernel_routes[i].next_hop_port;
             user_route.next_hop_family = kernel_routes[i].next_hop_family;
             user_route.hops = kernel_routes[i].hops;
+            user_route.metric = kernel_routes[i].metric;
+            user_route.sequence = kernel_routes[i].sequence;
             ipv67_addr_format(&kernel_routes[i].dest, user_route.dest_str, IPV67_ADDR_STR_MAX);
             memcpy((void *)(req.arg1 + (uint64_t)i * sizeof(ipv67_route_user_t)), &user_route, sizeof(ipv67_route_user_t));
         }
@@ -258,6 +287,14 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
 
     case IPV67_CMD_PROBE_PEERS:
         return ipv67_probe_peers();
+
+    case IPV67_CMD_SET_AUTH_KEY:
+        if (!user_range_mapped_ipv67(req.arg1, IPV67_AUTH_KEY_SIZE)) return -EFAULT;
+        return ipv67_set_auth_key((const uint8_t *)req.arg1, req.arg2);
+
+    case IPV67_CMD_SET_IDENTITY_KEY:
+        if (!user_range_mapped_ipv67(req.arg1, IPV67_IDENTITY_SIZE)) return -EFAULT;
+        return ipv67_set_identity_key((const uint8_t *)req.arg1, req.arg2);
 
     case IPV67_CMD_SET_PORT:
         return ipv67_set_port((uint16_t)req.arg1);
@@ -294,6 +331,15 @@ static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
     default:
         return -EINVAL;
     }
+}
+
+static int sys_ipv67(const char *req_ptr, int unused1, int unused2) {
+    int ret;
+
+    ipv67_stack_lock();
+    ret = sys_ipv67_impl(req_ptr, unused1, unused2);
+    ipv67_stack_unlock();
+    return ret;
 }
 
 void syscalls_ipv67_init(void) {

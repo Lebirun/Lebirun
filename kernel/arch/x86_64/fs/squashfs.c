@@ -10,10 +10,10 @@ static squashfs_context_t squashfs_ctx;
 static int squashfs_initialized = 0;
 static vfs_node_t *squashfs_vfs_root = NULL;
 static vfs_fs_type_t squashfs_fs_type;
-static dirent_t squashfs_dirent;
 
 #define SQFS_NODE_CACHE_INIT 16
-#define SQFS_NODE_CACHE_MAX 256
+#define SQFS_NODE_CACHE_MAX 32
+#define SQFS_DECOMP_PAD 4096
 static struct {
     uint64_t inode_ref;
     vfs_node_t *node;
@@ -67,20 +67,6 @@ static vfs_node_t *sqfs_cache_lookup(uint64_t inode_ref) {
     return NULL;
 }
 
-static void sqfs_cache_remove(vfs_node_t *node) {
-    uint64_t i;
-    for (i = 0; i < sqfs_node_cache_count; i++) {
-        if (sqfs_node_cache[i].node == node) {
-            sqfs_node_cache_count--;
-            if (i < sqfs_node_cache_count) {
-                memmove(&sqfs_node_cache[i], &sqfs_node_cache[i + 1],
-                        (sqfs_node_cache_count - i) * sizeof(sqfs_node_cache[0]));
-            }
-            return;
-        }
-    }
-}
-
 static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
     squashfs_vfs_node_t *old_snode;
     uint64_t evict_idx;
@@ -113,8 +99,6 @@ static void sqfs_cache_insert(uint64_t inode_ref, vfs_node_t *node) {
                 kfree(old_snode->rd_cached_data);
                 old_snode->rd_cached_data = NULL;
             }
-            sqfs_node_cache[evict_idx].node->private_data = NULL;
-            kfree(old_snode);
         }
         if (evict_idx < sqfs_node_cache_count - 1) {
             memmove(&sqfs_node_cache[evict_idx], &sqfs_node_cache[evict_idx + 1],
@@ -177,6 +161,7 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     uint64_t data_size;
     int compressed;
     uint8_t *result;
+    uint8_t *scratch;
     uint8_t *src;
     int decomp_ret;
 
@@ -206,18 +191,25 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
         return result;
     }
 
-    result = kmalloc(8192);
-    if (!result) {
+    scratch = kmalloc(8192 + SQFS_DECOMP_PAD);
+    if (!scratch) {
         DEBUG_FS_OTHER("kmalloc failed for metadata block\n");
         return NULL;
     }
     
-    decomp_ret = squashfs_decompress(src, data_size, result, 8192, squashfs_ctx.compression_id);
-    if (decomp_ret < 0) {
+    decomp_ret = squashfs_decompress(src, data_size, scratch, 8192 + SQFS_DECOMP_PAD, squashfs_ctx.compression_id);
+    if (decomp_ret < 0 || decomp_ret > 8192) {
         DEBUG_FS_OTHER("decompression failed\n");
-        kfree(result);
+        kfree(scratch);
         return NULL;
     }
+    result = kmalloc((uint64_t)decomp_ret ? (uint64_t)decomp_ret : 1);
+    if (!result) {
+        kfree(scratch);
+        return NULL;
+    }
+    if (decomp_ret > 0) memcpy(result, scratch, (uint64_t)decomp_ret);
+    kfree(scratch);
     if (out_size) *out_size = (uint64_t)decomp_ret;
     
     return result;
@@ -783,13 +775,13 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
             }
 
             if (compressed) {
-                temp = (uint8_t *)kmalloc(uncompressed_size);
+                temp = (uint8_t *)kmalloc(uncompressed_size + SQFS_DECOMP_PAD);
                 if (!temp) {
                     DEBUG_FS_OTHER("OOM allocating %u bytes for block decompression\n", uncompressed_size);
                     break;
                 }
-                decomp_ret = squashfs_decompress(squashfs_ctx.base + data_pos, stored_size, temp, uncompressed_size, squashfs_ctx.compression_id);
-                if (decomp_ret < 0) {
+                decomp_ret = squashfs_decompress(squashfs_ctx.base + data_pos, stored_size, temp, uncompressed_size + SQFS_DECOMP_PAD, squashfs_ctx.compression_id);
+                if (decomp_ret < 0 || (uint64_t)decomp_ret > uncompressed_size) {
                     printf("SQUASHFS: decompression failed for block[%u] stored=%u uncomp=%u\n", i, stored_size, uncompressed_size);
                     kfree(temp);
                     break;
@@ -841,10 +833,10 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
                 if (frag_size == 0 || frag_size > block_size * 2) {
                     printf("SQUASHFS: invalid fragment size=%u (raw=0x%08X)\n", frag_size, frag_stored_size);
                 } else if (frag_compressed) {
-                    temp = (uint8_t *)kmalloc(block_size);
+                    temp = (uint8_t *)kmalloc(block_size + SQFS_DECOMP_PAD);
                     if (temp) {
-                        decomp_ret = squashfs_decompress(squashfs_ctx.base + (uint64_t)frag_entry.start_block, frag_size, temp, block_size, squashfs_ctx.compression_id);
-                        if (decomp_ret >= 0) {
+                        decomp_ret = squashfs_decompress(squashfs_ctx.base + (uint64_t)frag_entry.start_block, frag_size, temp, block_size + SQFS_DECOMP_PAD, squashfs_ctx.compression_id);
+                        if (decomp_ret >= 0 && (uint64_t)decomp_ret <= block_size) {
                             if ((uint64_t)decomp_ret >= frag_offset + frag_offset_in_file + frag_copy_len) {
                                 memcpy(buffer + bytes_read, temp + frag_offset + frag_offset_in_file, frag_copy_len);
                                 bytes_read += frag_copy_len;
@@ -927,11 +919,6 @@ static void squashfs_vfs_close(vfs_node_t *node) {
         snode->rd_cached_data = NULL;
         snode->rd_cached_size = 0;
     }
-    if (node != squashfs_vfs_root) {
-        sqfs_cache_remove(node);
-        node->private_data = NULL;
-        kfree(snode);
-    }
 }
 
 static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
@@ -953,11 +940,13 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint16_t group_remaining;
     uint32_t cur_inode_number;
     int in_group;
+    dirent_t *dirent;
 
     if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     
     snode = (squashfs_vfs_node_t *)node->private_data;
     if (!snode) return NULL;
+    dirent = &snode->rd_dirent;
 
     if (snode->vfs.length <= 3) return NULL;
     dir_data_len = snode->vfs.length - 3;
@@ -1018,26 +1007,29 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
         while (group_remaining > 0 && pos + sizeof(squashfs_dir_entry_t) <= end_pos) {
             entry = (squashfs_dir_entry_t *)(dir_data + pos);
             actual_name_len = entry->name_size + 1;
+            if (pos + sizeof(squashfs_dir_entry_t) + actual_name_len > end_pos) {
+                break;
+            }
 
             if (entry_count == index) {
                 copy_name_len = actual_name_len;
                 if (copy_name_len >= VFS_MAX_NAME) {
                     copy_name_len = VFS_MAX_NAME - 1;
                 }
-                memcpy(squashfs_dirent.name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
-                squashfs_dirent.name[copy_name_len] = '\0';
-                squashfs_dirent.inode = cur_inode_number + entry->inode_offset;
+                memcpy(dirent->name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
+                dirent->name[copy_name_len] = '\0';
+                dirent->inode = cur_inode_number + entry->inode_offset;
                 switch (entry->type) {
                     case SQUASHFS_DIR_TYPE:
                     case SQUASHFS_LDIR_TYPE:
-                        squashfs_dirent.type = VFS_DIRECTORY;
+                        dirent->type = VFS_DIRECTORY;
                         break;
                     case SQUASHFS_SYMLINK_TYPE:
                     case SQUASHFS_LSYMLINK_TYPE:
-                        squashfs_dirent.type = VFS_SYMLINK;
+                        dirent->type = VFS_SYMLINK;
                         break;
                     default:
-                        squashfs_dirent.type = VFS_FILE;
+                        dirent->type = VFS_FILE;
                         break;
                 }
                 snode->rd_last_index = index;
@@ -1045,7 +1037,7 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
                 snode->rd_last_entry_count = entry_count + 1;
                 snode->rd_last_group_remaining = group_remaining - 1;
                 snode->rd_last_inode_number = cur_inode_number;
-                return &squashfs_dirent;
+                return dirent;
             }
 
             entry_count++;
@@ -1061,27 +1053,30 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
         for (i = 0; i <= hdr->count && pos + sizeof(squashfs_dir_entry_t) <= end_pos; i++) {
             entry = (squashfs_dir_entry_t *)(dir_data + pos);
             actual_name_len = entry->name_size + 1;
+            if (pos + sizeof(squashfs_dir_entry_t) + actual_name_len > end_pos) {
+                break;
+            }
             
             if (entry_count == index) {
                 copy_name_len = actual_name_len;
                 if (copy_name_len >= VFS_MAX_NAME) {
                     copy_name_len = VFS_MAX_NAME - 1;
                 }
-                memcpy(squashfs_dirent.name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
-                squashfs_dirent.name[copy_name_len] = '\0';
-                squashfs_dirent.inode = hdr->inode_number + entry->inode_offset;
+                memcpy(dirent->name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
+                dirent->name[copy_name_len] = '\0';
+                dirent->inode = hdr->inode_number + entry->inode_offset;
                 
                 switch (entry->type) {
                     case SQUASHFS_DIR_TYPE:
                     case SQUASHFS_LDIR_TYPE:
-                        squashfs_dirent.type = VFS_DIRECTORY;
+                        dirent->type = VFS_DIRECTORY;
                         break;
                     case SQUASHFS_SYMLINK_TYPE:
                     case SQUASHFS_LSYMLINK_TYPE:
-                        squashfs_dirent.type = VFS_SYMLINK;
+                        dirent->type = VFS_SYMLINK;
                         break;
                     default:
-                        squashfs_dirent.type = VFS_FILE;
+                        dirent->type = VFS_FILE;
                         break;
                 }
 
@@ -1091,7 +1086,7 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
                 snode->rd_last_group_remaining = hdr->count - i;
                 snode->rd_last_inode_number = hdr->inode_number;
                 
-                return &squashfs_dirent;
+                return dirent;
             }
             
             entry_count++;
@@ -1169,6 +1164,9 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
         for (i = 0; i <= hdr->count && pos + sizeof(squashfs_dir_entry_t) <= end_pos; i++) {
             entry = (squashfs_dir_entry_t *)(dir_data + pos);
             actual_name_len = entry->name_size + 1;
+            if (pos + sizeof(squashfs_dir_entry_t) + actual_name_len > end_pos) {
+                break;
+            }
             copy_name_len = actual_name_len;
             
             if (copy_name_len >= VFS_MAX_NAME) {

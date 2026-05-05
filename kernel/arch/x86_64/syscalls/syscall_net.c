@@ -165,12 +165,40 @@ static void klog_con(int con_id, const char *fmt, ...) {
 }
 
 static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
-    (void)unused; (void)unused2; (void)unused3;
+    int con_id;
+    netif_t *netif;
+    ipv4_addr_t ip;
+    ipv4_addr_t netmask;
+    ipv4_addr_t gateway;
+
+    con_id = current_task ? current_task->console_id : 0;
     net_ensure_hw();
-    netif_t *netif = netif_get_default();
+    netif = netif_get_default();
     if (!netif) {
-        klog("No network interface found\n");
+        klog_con(con_id, "No network interface found\n");
         return -1;
+    }
+    if (unused != 0) {
+        ip = u32_to_ipv4((uint64_t)(uint32_t)unused);
+        netmask = u32_to_ipv4((uint64_t)(uint32_t)(uintptr_t)unused2);
+        gateway = u32_to_ipv4((uint64_t)(uint32_t)unused3);
+        if (ipv4_eq(netif->ipv4, ip) && ipv4_eq(netif->netmask, netmask) && ipv4_eq(netif->gateway, gateway) && !netif->dhcp_configured) {
+            klog_con(con_id, "ifconfig: set %s ip=%u.%u.%u.%u netmask=%u.%u.%u.%u gateway=%u.%u.%u.%u\n",
+                     netif->name,
+                     ip.octets[0], ip.octets[1], ip.octets[2], ip.octets[3],
+                     netmask.octets[0], netmask.octets[1], netmask.octets[2], netmask.octets[3],
+                     gateway.octets[0], gateway.octets[1], gateway.octets[2], gateway.octets[3]);
+            return 0;
+        }
+        dhcp_stop(netif);
+        netif_set_ipv4(netif, ip, netmask, gateway);
+        netif->dhcp_configured = 0;
+        klog_con(con_id, "ifconfig: set %s ip=%u.%u.%u.%u netmask=%u.%u.%u.%u gateway=%u.%u.%u.%u\n",
+                 netif->name,
+                 ip.octets[0], ip.octets[1], ip.octets[2], ip.octets[3],
+                 netmask.octets[0], netmask.octets[1], netmask.octets[2], netmask.octets[3],
+                 gateway.octets[0], gateway.octets[1], gateway.octets[2], gateway.octets[3]);
+        return 0;
     }
     netif_print_info(netif);
     klog("ifconfig: info printed for %s\n", netif->name);

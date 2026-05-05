@@ -33,7 +33,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 #define KERNEL_STACK_SIZE 8192
 
 #define USER_STACK_TOP 0x00800000u
-#define USER_STACK_SIZE 0x2000u
+#define USER_STACK_SIZE 0x10000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 #define FPU_STATE_SIZE 512
@@ -50,6 +50,7 @@ task_t* ready_queue_head = NULL;
 task_t* all_tasks_head = NULL;
 static task_t* sleep_queue_head = NULL;
 static task_t* dead_queue_head = NULL;
+static int task_ptr_valid(task_t *t);
 
 static volatile int reap_pending = 0;
 static volatile int exec_drain_pending = 0;
@@ -198,17 +199,23 @@ static void task_error(const char *fmt, ...) {
 
 static void sleepq_remove(task_t* t) {
     task_t **ptr;
+    task_t *cur;
 
-    if (!t || !t->in_sleep_queue) return;
+    if (!t) return;
     ptr = &sleep_queue_head;
     while (*ptr) {
-        if (*ptr == t) {
+        cur = *ptr;
+        if (!task_ptr_valid(cur)) {
+            *ptr = NULL;
+            return;
+        }
+        if (cur == t) {
             *ptr = t->sleep_next;
             t->sleep_next = NULL;
             t->in_sleep_queue = 0;
             return;
         }
-        ptr = &(*ptr)->sleep_next;
+        ptr = &cur->sleep_next;
     }
 }
 
@@ -745,6 +752,7 @@ void sleep_ticks(uint64_t ticks) {
     if (!current_task || ticks == 0) return;
     lock_scheduler();
     new_wake = tick_count + ticks;
+    sleepq_remove(current_task);
     if (current_task->in_sleep_queue) {
         current_task->wake_tick = new_wake;
         unlock_scheduler();
@@ -764,6 +772,7 @@ void wake_sleeping_tasks(void) {
     int safety;
     task_t **ptr;
     task_t *t;
+    task_t *next;
     safety = 0;
 
     if (!sleep_queue_head) return;
@@ -775,13 +784,22 @@ void wake_sleeping_tasks(void) {
             break;
         }
         t = *ptr;
+        if (!task_ptr_valid(t)) {
+            *ptr = NULL;
+            break;
+        }
         if (t->wake_tick <= tick_count) {
             *ptr = t->sleep_next;
             t->sleep_next = NULL;
             t->in_sleep_queue = 0;
             if (t->state == TASK_BLOCKED) t->state = TASK_READY;
         } else {
-            ptr = &(*ptr)->sleep_next;
+            next = t->sleep_next;
+            if (next && !task_ptr_valid(next)) {
+                t->sleep_next = NULL;
+                break;
+            }
+            ptr = &t->sleep_next;
         }
     }
     unlock_scheduler();
@@ -2047,6 +2065,9 @@ pid_t task_fork(registers_t *parent_regs) {
         if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
             child->fds[i].ref_count++;
         }
+        if (child->fds[i].in_use && child->fds[i].type == FD_TYPE_FILE && child->fds[i].node) {
+            vfs_open((vfs_node_t *)child->fds[i].node, child->fds[i].flags);
+        }
         if (child->fds[i].in_use && (child->fds[i].type == FD_TYPE_PIPE_R || child->fds[i].type == FD_TYPE_PIPE_W) && child->fds[i].private_data) {
             pipe_t *p = (pipe_t *)child->fds[i].private_data;
             if (child->fds[i].type == FD_TYPE_PIPE_R) p->readers++;
@@ -2387,6 +2408,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     int n;
     elf_info_t elf_info;
     int use_node;
+    int held_node;
 
     __asm__ volatile ("mov %%rsp, %0" : "=r"(stack_ptr));
     if (current_task && current_task->kernel_stack_base) {
@@ -2404,6 +2426,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_EPERM;
     }
     use_node = (bin_node != NULL) ? 1 : 0;
+    held_node = 0;
     if (use_node) {
         bin_size = bin_node->length;
     }
@@ -2520,6 +2543,11 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOMEM;
     }
 
+    if (use_node) {
+        vfs_open(bin_node, 0);
+        held_node = 1;
+    }
+
     elf_pages = NULL;
     elf_page_count = 0;
     prefault_pages[0] = 0;
@@ -2530,6 +2558,10 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         load_result = elf_load_node_to_pd(new_pd, bin_node, &elf_info, &elf_pages, &elf_page_count);
     } else {
         load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
+    }
+    if (held_node) {
+        vfs_close(bin_node);
+        held_node = 0;
     }
     if (load_result != 0) {
         task_error("task_exec_with_args: ELF loading failed code=%d\n", load_result);

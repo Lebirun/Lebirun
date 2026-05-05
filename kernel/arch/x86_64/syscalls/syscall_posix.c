@@ -66,6 +66,23 @@ static void fd_release_entry(task_fd_t *tfd) {
     }
 }
 
+static void fd_retain_entry(task_fd_t *tfd) {
+    pipe_t *p;
+    vfs_node_t *node;
+
+    if (!tfd || !tfd->in_use) return;
+    if (tfd->type == FD_TYPE_FILE && tfd->node) {
+        node = (vfs_node_t *)tfd->node;
+        vfs_open(node, tfd->flags);
+        return;
+    }
+    if (tfd->private_data && (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W)) {
+        p = (pipe_t *)tfd->private_data;
+        if (tfd->type == FD_TYPE_PIPE_R) p->readers++;
+        else p->writers++;
+    }
+}
+
 static int fd_alloc_from(int start) {
     int capacity;
 
@@ -99,11 +116,7 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     fd_table[newfd].read_buf = NULL;
     fd_table[newfd].read_buf_offset = 0;
     fd_table[newfd].read_buf_len = 0;
-    if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
-        pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
-        if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
-        else p->writers++;
-    }
+    fd_retain_entry(&fd_table[newfd]);
     return newfd;
 }
 
@@ -124,11 +137,7 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     fd_table[newfd].read_buf = NULL;
     fd_table[newfd].read_buf_offset = 0;
     fd_table[newfd].read_buf_len = 0;
-    if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
-        pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
-        if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
-        else p->writers++;
-    }
+    fd_retain_entry(&fd_table[newfd]);
     return newfd;
 }
 
@@ -874,11 +883,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
                 fd_table[newfd].flags |= 1;
             else
                 fd_table[newfd].flags &= ~1;
-            if (fd_table[fd].private_data && (fd_table[fd].type == FD_TYPE_PIPE_R || fd_table[fd].type == FD_TYPE_PIPE_W)) {
-                pipe_t *p = (pipe_t *)fd_table[fd].private_data;
-                if (fd_table[fd].type == FD_TYPE_PIPE_R) p->readers++;
-                else p->writers++;
-            }
+            fd_retain_entry(&fd_table[newfd]);
             return newfd;
         }
         case F_GETFD:
@@ -1195,11 +1200,7 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
         fd_table[newfd].flags |= 1;
     else
         fd_table[newfd].flags &= ~1;
-    if (fd_table[oldfd].private_data && (fd_table[oldfd].type == FD_TYPE_PIPE_R || fd_table[oldfd].type == FD_TYPE_PIPE_W)) {
-        pipe_t *p = (pipe_t *)fd_table[oldfd].private_data;
-        if (fd_table[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
-        else p->writers++;
-    }
+    fd_retain_entry(&fd_table[newfd]);
     return newfd;
 }
 
