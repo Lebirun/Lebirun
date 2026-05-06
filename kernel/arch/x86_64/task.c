@@ -34,6 +34,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 
 #define USER_STACK_TOP 0x00800000u
 #define USER_STACK_SIZE 0x10000u
+#define USER_STACK_INITIAL_MIN 0x1000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 #define FPU_STATE_SIZE 512
@@ -70,6 +71,57 @@ typedef struct exec_page_cache_entry {
 
 static exec_page_cache_entry_t *exec_page_cache_head = NULL;
 static spinlock_t exec_page_cache_lock = {0};
+
+static uint64_t task_align_up(uint64_t v, uint64_t align) {
+    if (align == 0) return v;
+    return (v + align - 1u) & ~(align - 1u);
+}
+
+static uint64_t task_initial_stack_size(int argc, char **argv, int envc, char **envp, const char *fallback_name, int aux_entries) {
+    uint64_t bytes;
+    uint64_t size;
+    int i;
+    int len;
+    const char *s;
+
+    bytes = 16;
+    bytes += 16;
+    bytes += (uint64_t)aux_entries * 16;
+    bytes += 8;
+    bytes += 8;
+    bytes += ((uint64_t)envc + 1u) * 8u;
+    bytes += ((uint64_t)argc + 1u) * 8u;
+    bytes += 8;
+
+    if (argc > 0 && argv) {
+        for (i = 0; i < argc; i++) {
+            len = 0;
+            if (argv[i]) {
+                while (argv[i][len]) len++;
+            }
+            bytes += task_align_up((uint64_t)len + 1u, 8);
+        }
+    } else {
+        s = fallback_name ? fallback_name : "program";
+        len = 0;
+        while (s[len]) len++;
+        bytes += task_align_up((uint64_t)len + 1u, 8);
+    }
+
+    if (envc > 0 && envp) {
+        for (i = 0; i < envc; i++) {
+            len = 0;
+            if (envp[i]) {
+                while (envp[i][len]) len++;
+            }
+            bytes += task_align_up((uint64_t)len + 1u, 8);
+        }
+    }
+
+    size = task_align_up(bytes, PAGE_SIZE);
+    if (size < USER_STACK_INITIAL_MIN) size = USER_STACK_INITIAL_MIN;
+    return size;
+}
 
 static inline void fpu_save_area(uint8_t *area) {
     if (!area) return;
@@ -2170,7 +2222,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     task_clear_file_mappings(current_task);
 
     stack_top = USER_STACK_TOP;
-    stack_size = USER_STACK_SIZE;
+    stack_size = task_initial_stack_size(0, NULL, 0, NULL, "program", 11);
 
     new_pd = vmm_create_pml4();
     if (!new_pd) {
@@ -2194,7 +2246,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     kfree(kernel_bin);
 
     stack_page_count = 0;
-    stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
+    stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - USER_STACK_GAP - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec: failed to map stack\n");
         if (elf_pages) kfree(elf_pages);
@@ -2227,6 +2279,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
+    current_task->stack_size = stack_size;
     task_reset_fpu_state(current_task);
 
     sp = stack_top - USER_STACK_GAP - 16;
@@ -2518,15 +2571,28 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOEXEC;
     }
 
+    stack_top = USER_STACK_TOP;
+    stack_size = task_initial_stack_size(argc, k_argv, envc, k_envp, "program", 11);
+    if (stack_size > USER_STACK_SIZE) {
+        task_error("task_exec_with_args: initial stack too large\n");
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
+        }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
+        if (kernel_bin) kfree(kernel_bin);
+        return -KERR_ENOMEM;
+    }
+
     task_fd_close_cloexec(current_task);
 
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;
     old_user_pages_count = current_task->user_pages_count;
     task_clear_file_mappings(current_task);
-
-    stack_top = USER_STACK_TOP;
-    stack_size = USER_STACK_SIZE;
 
     new_pd = vmm_create_pml4();
     if (!new_pd) {
@@ -2606,7 +2672,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     if (kernel_bin) kfree(kernel_bin);
 
     stack_page_count = 0;
-    stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - stack_size, stack_size, 0x7, &stack_page_count);
+    stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - USER_STACK_GAP - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec_with_args: failed to map stack\n");
         task_clear_file_mappings(current_task);
@@ -2659,6 +2725,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     kfree(elf_pages);
     kfree(stack_pages);
+    current_task->stack_size = stack_size;
 
     sp = stack_top - USER_STACK_GAP - 16;
 

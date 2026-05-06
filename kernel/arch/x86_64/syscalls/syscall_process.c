@@ -67,6 +67,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         if (r != 0) return -ECHILD;
 
         t->waited = 1;
+        reap_dead_tasks();
 
         if (status_ptr) {
             uint64_t addr = (uint64_t)status_ptr;
@@ -99,6 +100,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             if (r != 0) return -ECHILD;
 
             dead->waited = 1;
+            reap_dead_tasks();
 
             if (status_ptr) {
                 uint64_t addr = (uint64_t)status_ptr;
@@ -160,6 +162,7 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
         if (r != 0) return -ECHILD;
         
         t->waited = 1;
+        reap_dead_tasks();
 
         if (info_addr && info_addr < KERNEL_VMA && info_addr >= 0x1000) {
             struct siginfo_k *info = (struct siginfo_k *)info_addr;

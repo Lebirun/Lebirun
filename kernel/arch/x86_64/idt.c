@@ -281,6 +281,7 @@ registers_t* interrupt_handler(registers_t* regs)
                                     current_task->user_pages = new_user_pages;
                                     current_task->user_pages[current_task->user_pages_count] = new_phys;
                                     current_task->user_pages_count++;
+                                    current_task->stack_size += PAGE_SIZE;
                                 }
                                 return regs;
                             }
@@ -384,6 +385,7 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages = sc_new_user_pages;
                                 current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
                                 current_task->user_pages_count++;
+                                current_task->stack_size += PAGE_SIZE;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
                                 regs->return_cr3 = sc_expected_pd;

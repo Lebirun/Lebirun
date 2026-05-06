@@ -897,13 +897,13 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         do {
             if (t->is_user && t->user_pages) {
                 user_elf_pages += t->user_pages_count;
+                user_stack_pages += (t->stack_size + PAGE_SIZE - 1) / PAGE_SIZE;
                 user_pd_pages++;
             }
             t = t->next;
         } while (t && t != start);
     }
 
-    user_stack_pages = user_pd_pages * (0x2000u / PAGE_SIZE);
     if (user_elf_pages >= user_stack_pages) {
         user_elf_pages -= user_stack_pages;
     }
