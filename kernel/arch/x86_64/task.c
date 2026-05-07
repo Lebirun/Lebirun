@@ -948,8 +948,8 @@ static uint64_t exec_page_cache_target_pages(void) {
     free_pages = pfa_count_free();
     if (free_pages < 512) return 0;
     if (free_pages < 2048) return 8;
-    if (free_pages < 8192) return 32;
-    return 64;
+    if (free_pages < 8192) return 16;
+    return 32;
 }
 
 static int exec_page_cache_reclaim_one(void) {

@@ -2,6 +2,7 @@
 #include <lebirun/creds.h>
 #include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/cmdline.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -32,6 +33,25 @@ static int esc_len[NUM_CONSOLES];
 
 static int in_line_editing[NUM_CONSOLES];
 static int serial_displayed_len[NUM_CONSOLES];
+static int syscall_console_count;
+
+static int syscall_core_console_count(void) {
+    int count;
+
+    count = syscall_console_count;
+    if (count < 1) count = 1;
+    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
+    return count;
+}
+
+static int syscall_core_clamp_console(int con_id) {
+    int count;
+
+    count = syscall_core_console_count();
+    if (con_id < 0 || con_id >= count) con_id = console_get_current();
+    if (con_id < 0 || con_id >= count) con_id = 0;
+    return con_id;
+}
 
 static void serial_write_move_back(int n) {
     char esc[16];
@@ -111,6 +131,8 @@ static void line_redraw_from_cursor(int con_id, int echo) {
 static void history_add(int con_id, const char *line, int len) {
     int slot;
     int copy_len;
+
+    if (!history || !history_len) return;
     if (len <= 0) return;
     if (len == 1 && line[0] == '\n') return;
     copy_len = len;
@@ -298,8 +320,7 @@ static int sys_read(int fd, char *buf, int len) {
         struct kernel_termios *t;
         int canonical;
         int echo;
-        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
-        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+        con_id = syscall_core_clamp_console(con_id);
 
         fg_pgrp = tty_pgrp[con_id];
         if (fg_pgrp != 0) {
@@ -377,6 +398,7 @@ static int sys_read(int fd, char *buf, int len) {
                     esc_state[con_id] = 0;
                     
                     if (c == 'A') {
+                        if (!history || !history_len || !history_saved) continue;
                         if (history_count[con_id] == 0) continue;
                         if (history_browse[con_id] < 0) {
                             history_browse[con_id] = 0;
@@ -394,6 +416,7 @@ static int sys_read(int fd, char *buf, int len) {
                     }
                     
                     if (c == 'B') {
+                        if (!history || !history_len || !history_saved) continue;
                         if (history_browse[con_id] < 0) continue;
                         history_browse[con_id]--;
                         if (history_browse[con_id] < 0) {
@@ -763,6 +786,9 @@ static int sys_lseek(int fd, const char *offset_ptr, int whence) {
 }
 
 void syscalls_core_init(void) {
+    int i;
+    int count;
+
     syscall_table[SYSCALL_EXIT] = sys_exit;
     syscall_table[SYSCALL_WRITE] = sys_write;
     syscall_table[SYSCALL_READ] = sys_read;
@@ -770,8 +796,13 @@ void syscalls_core_init(void) {
     syscall_table[SYSCALL_ISATTY] = sys_isatty;
     syscall_table[SYSCALL_WRITEV] = sys_writev;
     syscall_table[SYSCALL_LSEEK] = sys_lseek;
+
+    count = cmdline_get_consoles();
+    if (count < 1) count = 1;
+    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
+    syscall_console_count = count;
     
-    for (int i = 0; i < NUM_CONSOLES; i++) {
+    for (i = 0; i < NUM_CONSOLES; i++) {
         line_len[i] = 0;
         line_cursor[i] = 0;
         line_ready[i] = 0;
@@ -783,10 +814,10 @@ void syscalls_core_init(void) {
         esc_len[i] = 0;
     }
 
-    history = kmalloc(NUM_CONSOLES * sizeof(*history));
-    memset(history, 0, NUM_CONSOLES * sizeof(*history));
-    history_len = kmalloc(NUM_CONSOLES * sizeof(*history_len));
-    memset(history_len, 0, NUM_CONSOLES * sizeof(*history_len));
-    history_saved = kmalloc(NUM_CONSOLES * sizeof(*history_saved));
-    memset(history_saved, 0, NUM_CONSOLES * sizeof(*history_saved));
+    history = kmalloc((uint64_t)count * sizeof(*history));
+    if (history) memset(history, 0, (uint64_t)count * sizeof(*history));
+    history_len = kmalloc((uint64_t)count * sizeof(*history_len));
+    if (history_len) memset(history_len, 0, (uint64_t)count * sizeof(*history_len));
+    history_saved = kmalloc((uint64_t)count * sizeof(*history_saved));
+    if (history_saved) memset(history_saved, 0, (uint64_t)count * sizeof(*history_saved));
 }

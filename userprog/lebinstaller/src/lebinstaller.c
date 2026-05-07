@@ -12,6 +12,7 @@
 
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
+#define COPY_BUF_MAX 65536
 #define MAX_DISKS    8
 #define MAX_PARTS    16
 #define MAX_PATH     256
@@ -299,6 +300,7 @@ static int inst_resize_copy_buf(uint64_t file_size)
     want64 = avail / 16;
     if (file_size > 0 && file_size < want64) want64 = file_size;
     if (want64 < BUF_SIZE) want64 = BUF_SIZE;
+    if (want64 > COPY_BUF_MAX) want64 = COPY_BUF_MAX;
     if (want64 > 0x7fffffffULL) want64 = 0x7fffffffULL;
 
     want = (int)want64;
@@ -735,14 +737,39 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     return 0;
 }
 
+static int inst_write_grub_config(const char *mountpoint, const char *part_dev);
+
 static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
 {
     char boot_dir[MAX_PATH];
     char grub_dir[MAX_PATH];
-    char cfg_path[MAX_PATH];
     char grub_mod_dir[MAX_PATH];
-    int fd;
+
+    snprintf(boot_dir, sizeof(boot_dir), "%s/boot", mountpoint);
+    vfs_mkdir(boot_dir, 0755);
+    snprintf(grub_dir, sizeof(grub_dir), "%s/boot/grub", mountpoint);
+    vfs_mkdir(grub_dir, 0755);
+
+    snprintf(grub_mod_dir, sizeof(grub_mod_dir), "%s/boot/grub/i386-pc", mountpoint);
+    vfs_mkdir(grub_mod_dir, 0755);
+    inst_copy_dir_recursive("/boot/grub/i386-pc", grub_mod_dir, NULL);
+
+    if (inst_write_grub_config(mountpoint, part_dev) < 0)
+        return -1;
+
+    if (inst_install_grub_mbr(disk_dev, part_num) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int inst_write_grub_config(const char *mountpoint, const char *part_dev)
+{
+    char grub_dir[MAX_PATH];
+    char cfg_path[MAX_PATH];
     char grub_cfg[512];
+    int fd;
     int written;
 
     snprintf(grub_cfg, sizeof(grub_cfg),
@@ -754,14 +781,8 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
         "\tboot\n"
         "}\n", part_dev);
 
-    snprintf(boot_dir, sizeof(boot_dir), "%s/boot", mountpoint);
-    vfs_mkdir(boot_dir, 0755);
     snprintf(grub_dir, sizeof(grub_dir), "%s/boot/grub", mountpoint);
     vfs_mkdir(grub_dir, 0755);
-
-    snprintf(grub_mod_dir, sizeof(grub_mod_dir), "%s/boot/grub/i386-pc", mountpoint);
-    vfs_mkdir(grub_mod_dir, 0755);
-    inst_copy_dir_recursive("/boot/grub/i386-pc", grub_mod_dir, NULL);
 
     snprintf(cfg_path, sizeof(cfg_path), "%s/boot/grub/grub.cfg", mountpoint);
     vfs_create(cfg_path, 0644);
@@ -769,18 +790,13 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
     if (fd < 0) {
         fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     }
-    if (fd >= 0) {
-        written = vfs_write_fd(fd, grub_cfg, strlen(grub_cfg));
-        if (written < 0)
-            write(fd, grub_cfg, strlen(grub_cfg));
-        vfs_close_fd(fd);
-    }
+    if (fd < 0) return -1;
 
-    if (inst_install_grub_mbr(disk_dev, part_num) < 0) {
-        return -1;
-    }
-
-    return 0;
+    written = vfs_write_fd(fd, grub_cfg, strlen(grub_cfg));
+    if (written < 0)
+        written = write(fd, grub_cfg, strlen(grub_cfg));
+    vfs_close_fd(fd);
+    return (written < 0) ? -1 : 0;
 }
 
 #define SALT_LEN 8
@@ -1514,9 +1530,20 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
 
 #define UPSTEP_DISK    0
 #define UPSTEP_PART    1
-#define UPSTEP_BOOT    2
+#define UPSTEP_ITEMS   2
 #define UPSTEP_DO      3
 #define UPSTEP_COUNT   4
+
+#define UPD_CORE       0
+#define UPD_BOOT       1
+#define UPD_USR_INC    2
+#define UPD_TERMINFO   3
+#define UPD_PKGDB      4
+#define UPD_GRUB_CODE  5
+#define UPD_GRUB_CFG   6
+#define UPD_COUNT      7
+
+static int upd_selected[UPD_COUNT] = { 1, 1, 1, 1, 1, 1, 0 };
 
 static const char *upd_preserve_paths[] = {
     "/home",
@@ -1533,17 +1560,34 @@ static const char *upd_preserve_paths[] = {
 static int upd_path_is_preserved(const char *dst_path, const char *mountpoint)
 {
     char full[MAX_PATH];
-    int mlen;
     int i;
 
-    mlen = (int)strlen(mountpoint);
     for (i = 0; upd_preserve_paths[i]; i++) {
         snprintf(full, sizeof(full), "%s%s", mountpoint, upd_preserve_paths[i]);
         if (strcmp(dst_path, full) == 0) return 1;
         if (strncmp(dst_path, full, strlen(full)) == 0 &&
             dst_path[strlen(full)] == '/') return 1;
     }
-    (void)mlen;
+
+    if (!upd_selected[UPD_BOOT]) {
+        snprintf(full, sizeof(full), "%s/boot", mountpoint);
+        if (strcmp(dst_path, full) == 0) return 1;
+        if (strncmp(dst_path, full, strlen(full)) == 0 &&
+            dst_path[strlen(full)] == '/') return 1;
+    }
+
+    if (!upd_selected[UPD_GRUB_CODE]) {
+        snprintf(full, sizeof(full), "%s/boot/grub/i386-pc", mountpoint);
+        if (strcmp(dst_path, full) == 0) return 1;
+        if (strncmp(dst_path, full, strlen(full)) == 0 &&
+            dst_path[strlen(full)] == '/') return 1;
+    }
+
+    if (!upd_selected[UPD_GRUB_CFG]) {
+        snprintf(full, sizeof(full), "%s/boot/grub/grub.cfg", mountpoint);
+        if (strcmp(dst_path, full) == 0) return 1;
+    }
+
     return 0;
 }
 
@@ -1621,7 +1665,29 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
     return (errors > 0) ? -1 : 0;
 }
 
-static int step_do_update(int disk_idx, int part_idx, int update_boot)
+static int step_update_items(void)
+{
+    static const char *upd_names[UPD_COUNT] = {
+        "Core system files (/bin, /lib, /sbin, /init)",
+        "Kernel and boot files (/boot, preserving GRUB config)",
+        "Development headers (/usr/include)",
+        "Terminal database (/usr/share/terminfo)",
+        "Package database records",
+        "GRUB boot code and modules",
+        "GRUB configuration file"
+    };
+    int tmp[UPD_COUNT];
+    int i;
+
+    for (i = 0; i < UPD_COUNT; i++) tmp[i] = upd_selected[i];
+    if (lebui_checklist_auto("Update Selection", upd_names, tmp, UPD_COUNT,
+                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel", term_sz.rows, term_sz.cols) < 0)
+        return -1;
+    for (i = 0; i < UPD_COUNT; i++) upd_selected[i] = tmp[i] ? 1 : 0;
+    return 0;
+}
+
+static int step_do_update(int disk_idx, int part_idx)
 {
     disk_info_t *d;
     part_info_t *p;
@@ -1633,15 +1699,17 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
     char path[MAX_PATH];
     char src[MAX_PATH];
     char dst[MAX_PATH];
-    static const char *update_dirs[] = {
-        "bin", "boot", "etc", "lib", "sbin", "usr", NULL
+    static const char *core_dirs[] = {
+        "bin", "lib", "sbin", NULL
     };
     int i;
     int upgraded_pkgs;
     int kept_pkgs;
+    int did_work;
 
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
+    did_work = 0;
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Updating", term_sz.rows, term_sz.cols);
@@ -1668,42 +1736,103 @@ static int step_do_update(int disk_idx, int part_idx, int update_boot)
 
     lebui_progress_update(&prog_st, "Counting files...", 10);
     copy_total = 0;
-    for (i = 0; update_dirs[i]; i++) {
-        snprintf(path, sizeof(path), "/%s", update_dirs[i]);
-        copy_total += inst_count_dir_entries(path);
+    if (upd_selected[UPD_CORE]) {
+        copy_total++;
+        for (i = 0; core_dirs[i]; i++) {
+            snprintf(path, sizeof(path), "/%s", core_dirs[i]);
+            copy_total += inst_count_dir_entries(path);
+        }
+    }
+    if (upd_selected[UPD_BOOT]) {
+        copy_total += inst_count_dir_entries("/boot");
+    }
+    if (upd_selected[UPD_USR_INC]) {
+        copy_total += inst_count_dir_entries("/usr/include");
+    }
+    if (upd_selected[UPD_TERMINFO]) {
+        copy_total += inst_count_dir_entries("/usr/share/terminfo");
     }
     if (copy_total < 1) copy_total = 100;
     copy_done = 0;
     copy_last_pct = -1;
 
-    lebui_progress_log(&prog_st, "Updating system files...");
-
-    for (i = 0; update_dirs[i]; i++) {
-        snprintf(src, sizeof(src), "/%s", update_dirs[i]);
-        snprintf(dst, sizeof(dst), "%s/%s", mountpoint, update_dirs[i]);
-        inst_update_dir_recursive(src, dst, mountpoint);
+    if (upd_selected[UPD_CORE]) {
+        lebui_progress_log(&prog_st, "Updating core system files...");
+        snprintf(src, sizeof(src), "/init");
+        snprintf(dst, sizeof(dst), "%s/init", mountpoint);
+        if (inst_copy_file_vfs(src, dst) == 0) {
+            copy_done++;
+        }
+        for (i = 0; core_dirs[i]; i++) {
+            snprintf(src, sizeof(src), "/%s", core_dirs[i]);
+            snprintf(dst, sizeof(dst), "%s/%s", mountpoint, core_dirs[i]);
+            inst_update_dir_recursive(src, dst, mountpoint);
+        }
+        did_work = 1;
     }
 
-    lebui_progress_log(&prog_st, "System files updated.");
+    if (upd_selected[UPD_BOOT]) {
+        lebui_progress_log(&prog_st, "Updating boot files...");
+        snprintf(src, sizeof(src), "/boot");
+        snprintf(dst, sizeof(dst), "%s/boot", mountpoint);
+        inst_update_dir_recursive(src, dst, mountpoint);
+        did_work = 1;
+    }
 
-    if (update_boot) {
+    if (upd_selected[UPD_USR_INC]) {
+        lebui_progress_log(&prog_st, "Updating development headers...");
+        snprintf(src, sizeof(src), "/usr/include");
+        snprintf(dst, sizeof(dst), "%s/usr/include", mountpoint);
+        inst_update_dir_recursive(src, dst, mountpoint);
+        did_work = 1;
+    }
+
+    if (upd_selected[UPD_TERMINFO]) {
+        lebui_progress_log(&prog_st, "Updating terminal database...");
+        snprintf(src, sizeof(src), "/usr/share/terminfo");
+        snprintf(dst, sizeof(dst), "%s/usr/share/terminfo", mountpoint);
+        inst_update_dir_recursive(src, dst, mountpoint);
+        did_work = 1;
+    }
+
+    if (did_work) {
+        lebui_progress_log(&prog_st, "Selected files updated.");
+    }
+
+    if (upd_selected[UPD_GRUB_CODE]) {
         lebui_progress_update(&prog_st, "Updating bootloader...", 96);
-        lebui_progress_log(&prog_st, "Updating GRUB bootloader...");
-        inst_install_boot(mountpoint, d->devpath, p->devpath, p->number);
-        lebui_progress_log(&prog_st, "Bootloader updated.");
+        lebui_progress_log(&prog_st, "Updating GRUB boot code and modules...");
+        snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
+        vfs_mkdir(dst, 0755);
+        inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL);
+        if (inst_install_grub_mbr(d->devpath, p->number) < 0)
+            lebui_progress_log(&prog_st, "Warning: GRUB boot code update failed.");
+        else
+            lebui_progress_log(&prog_st, "GRUB boot code updated.");
+    }
+
+    if (upd_selected[UPD_GRUB_CFG]) {
+        lebui_progress_update(&prog_st, "Updating GRUB config...", 97);
+        lebui_progress_log(&prog_st, "Updating GRUB configuration...");
+        if (inst_write_grub_config(mountpoint, p->devpath) < 0)
+            lebui_progress_log(&prog_st, "Warning: GRUB config update failed.");
+        else
+            lebui_progress_log(&prog_st, "GRUB configuration updated.");
     }
 
     free(copy_buf);
     copy_buf = NULL;
     copy_buf_size = 0;
 
-    lebui_progress_update(&prog_st, "Updating package database...", 98);
-    lebui_progress_log(&prog_st, "Updating package database...");
-    upgraded_pkgs = inst_upgrade_pkg_db_from_iso(mountpoint, &kept_pkgs);
-    snprintf(logbuf, sizeof(logbuf), "Package records upgraded: %d", upgraded_pkgs);
-    lebui_progress_log(&prog_st, logbuf);
-    snprintf(logbuf, sizeof(logbuf), "Package records kept: %d", kept_pkgs);
-    lebui_progress_log(&prog_st, logbuf);
+    if (upd_selected[UPD_PKGDB]) {
+        lebui_progress_update(&prog_st, "Updating package database...", 98);
+        lebui_progress_log(&prog_st, "Updating package database...");
+        upgraded_pkgs = inst_upgrade_pkg_db_from_iso(mountpoint, &kept_pkgs);
+        snprintf(logbuf, sizeof(logbuf), "Package records upgraded: %d", upgraded_pkgs);
+        lebui_progress_log(&prog_st, logbuf);
+        snprintf(logbuf, sizeof(logbuf), "Package records kept: %d", kept_pkgs);
+        lebui_progress_log(&prog_st, logbuf);
+    }
 
     lebui_progress_log(&prog_st, "Unmounting...");
     if (inst_umount_partition(mountpoint) != 0) {
@@ -1894,7 +2023,7 @@ static int run_update_page(void)
     static const char *upd_step_names[] = {
         "Select Disk",
         "Select Partition",
-        "Update Bootloader",
+        "Update Selection",
         "Update"
     };
     int status[UPSTEP_COUNT];
@@ -1902,18 +2031,22 @@ static int run_update_page(void)
     char *items[UPSTEP_COUNT];
     int disk_idx;
     int part_idx;
-    int update_boot;
     int sel;
     int i;
     int ret;
+    int selected_count;
 
     for (i = 0; i < UPSTEP_COUNT; i++) status[i] = STEP_NONE;
     disk_idx = -1;
     part_idx = -1;
-    update_boot = 0;
 
     for (;;) {
         attach_tabbar(1, term_sz.cols);
+
+        selected_count = 0;
+        for (i = 0; i < UPD_COUNT; i++) {
+            if (upd_selected[i]) selected_count++;
+        }
 
         for (i = 0; i < UPSTEP_COUNT; i++) {
             if (i == UPSTEP_DO) {
@@ -1926,13 +2059,13 @@ static int run_update_page(void)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].devpath);
                 else if (i == UPSTEP_PART)
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].parts[part_idx].devpath);
-                else if (i == UPSTEP_BOOT)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], update_boot ? "Yes" : "No");
+                else if (i == UPSTEP_ITEMS)
+                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%d item(s))", upd_step_names[i], selected_count);
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [*] %s", upd_step_names[i]);
             } else {
-                if (i == UPSTEP_BOOT)
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (optional)", upd_step_names[i]);
+                if (i == UPSTEP_ITEMS)
+                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (%d default item(s))", upd_step_names[i], selected_count);
                 else
                     snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", upd_step_names[i]);
             }
@@ -1971,10 +2104,10 @@ static int run_update_page(void)
                 status[UPSTEP_PART] = STEP_DONE;
             break;
 
-        case UPSTEP_BOOT:
-            update_boot = lebui_confirm_auto("Bootloader", "Also update the GRUB bootloader?",
-                                             term_sz.rows, term_sz.cols);
-            status[UPSTEP_BOOT] = STEP_DONE;
+        case UPSTEP_ITEMS:
+            ret = step_update_items();
+            if (ret == 0)
+                status[UPSTEP_ITEMS] = STEP_DONE;
             break;
 
         case UPSTEP_DO:
@@ -1982,11 +2115,19 @@ static int run_update_page(void)
                 lebui_msgbox_auto("Error", "Select a disk and partition first.", term_sz.rows, term_sz.cols);
                 break;
             }
+            selected_count = 0;
+            for (i = 0; i < UPD_COUNT; i++) {
+                if (upd_selected[i]) selected_count++;
+            }
+            if (selected_count == 0) {
+                lebui_msgbox_auto("Error", "Select at least one update item.", term_sz.rows, term_sz.cols);
+                break;
+            }
             if (!lebui_confirm_auto("Confirm",
-                    "Update system files? User data and config will be preserved.",
+                    "Update selected items? User data and local config will be preserved.",
                     term_sz.rows, term_sz.cols))
                 break;
-            ret = step_do_update(disk_idx, part_idx, update_boot);
+            ret = step_do_update(disk_idx, part_idx);
             if (ret == 0)
                 return 0;
             break;

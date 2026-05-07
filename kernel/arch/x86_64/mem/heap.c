@@ -629,6 +629,17 @@ void *ksafe_alloc(size_t size, uint64_t flags) {
     if (is_early_heap_ptr(ptr)) {
         return ptr;
     }
+
+    if (slab_owns(ptr)) {
+        if (flags & KMALLOC_ZERO) {
+            memset(ptr, 0, size);
+        } else if (!(flags & KMALLOC_NO_POISON)) {
+            #ifdef DEBUG
+            poison_memory(ptr, size, HEAP_POISON_ALLOC);
+            #endif
+        }
+        return ptr;
+    }
     
     block = get_block_from_ptr(ptr);
     block->flags = flags;
@@ -745,10 +756,20 @@ void ksafe_free(void *ptr) {
 
 void kfree_secure(void *ptr) {
     heap_block_t *block;
+    size_t slab_size;
     
     if (!ptr) return;
 
     if (is_early_heap_ptr(ptr)) return;
+
+    if (slab_owns(ptr)) {
+        slab_size = slab_alloc_size(ptr);
+        if (slab_size) {
+            memset(ptr, 0, slab_size);
+        }
+        slab_free(ptr);
+        return;
+    }
     
     heap_lock_acquire();
 
@@ -886,6 +907,7 @@ uint64_t heap_block_size_for_ptr(void *ptr) {
     
     if (!ptr) return 0;
     if (is_early_heap_ptr(ptr)) return 0;
+    if (slab_owns(ptr)) return slab_alloc_size(ptr);
     block = get_block_from_ptr(ptr);
     if (block->magic != HEAP_MAGIC) return 0;
     return block->alloc_size; 
