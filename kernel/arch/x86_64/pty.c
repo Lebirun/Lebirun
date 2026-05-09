@@ -537,8 +537,7 @@ int pty_has_data_for_slave(int fd) {
 }
 
 void pty_init(void) {
-    pty_capacity = PTY_INIT_COUNT;
-    ptys = (pty_t *)kmalloc(pty_capacity * sizeof(pty_t));
-    if (ptys) memset(ptys, 0, pty_capacity * sizeof(pty_t));
+    pty_capacity = 0;
+    ptys = NULL;
     mutex_init(&pty_lock);
 }

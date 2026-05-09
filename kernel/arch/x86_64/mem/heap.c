@@ -612,6 +612,13 @@ void *kmalloc(size_t size) {
     return result;
 }
 
+void heap_reclaim_unused(void) {
+    if (!main_heap_initialized) return;
+    heap_lock_acquire();
+    heap_trim();
+    heap_lock_release();
+}
+
 void *ksafe_alloc(size_t size, uint64_t flags) {
     void *ptr;
     heap_block_t *block;

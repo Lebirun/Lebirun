@@ -135,6 +135,7 @@ typedef struct task {
 
     int exec_completed;
     int waited;
+    int resources_released;
 
     uint64_t exec_old_pml4;
     uint64_t *exec_old_pages;

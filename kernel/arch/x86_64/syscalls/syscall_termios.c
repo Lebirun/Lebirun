@@ -42,9 +42,14 @@ static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
     return name[n] == '\0';
 }
 
-struct kernel_termios tty_termios[NUM_CONSOLES];
-struct kernel_winsize tty_winsize[NUM_CONSOLES];
-int tty_pgrp[NUM_CONSOLES];
+static struct kernel_termios tty_termios_fallback[1];
+static struct kernel_winsize tty_winsize_fallback[1];
+static int tty_pgrp_fallback[1];
+
+struct kernel_termios *tty_termios;
+struct kernel_winsize *tty_winsize;
+int *tty_pgrp;
+int tty_count;
 
 static int vt_kd_mode = KD_TEXT;
 static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
@@ -104,8 +109,17 @@ static int ioctl_fcntl_basic_compat(int fd, int cmd, int arg) {
     }
 }
 
+static int tty_valid_id(int tty_id) {
+    if (!tty_termios || !tty_winsize || !tty_pgrp) return 0;
+    if (tty_id < 0 || tty_id >= tty_count) return 0;
+    return 1;
+}
+
 static void termios_init_defaults(int tty_id) {
-    struct kernel_termios *t = &tty_termios[tty_id];
+    struct kernel_termios *t;
+    framebuffer_t *fb;
+
+    t = &tty_termios[tty_id];
     
     t->c_iflag = ICRNL | IXON;
     
@@ -131,7 +145,7 @@ static void termios_init_defaults(int tty_id) {
     t->c_ispeed = 38400;
     t->c_ospeed = 38400;
     
-    framebuffer_t *fb = fb_get();
+    fb = fb_get();
     if (fb && (fb->font || fb->cols)) {
         tty_winsize[tty_id].ws_col = fb->cols;
         tty_winsize[tty_id].ws_row = fb->rows;
@@ -175,12 +189,15 @@ static int get_tty_id_for_fd(int fd) {
 }
 
 static int sys_tcgetattr(int fd, const char *termios_ptr, int unused) {
+    int tty_id;
+    uint64_t addr;
+
     (void)unused;
-    
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0 || tty_id >= NUM_CONSOLES) return -ENOTTY;
-    
-    uint64_t addr = (uint64_t)termios_ptr;
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
+
+    addr = (uint64_t)termios_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     
     memcpy((void*)addr, &tty_termios[tty_id], sizeof(struct kernel_termios));
@@ -188,13 +205,17 @@ static int sys_tcgetattr(int fd, const char *termios_ptr, int unused) {
 }
 
 static int sys_tcsetattr(int fd, const char *actions_ptr, int termios_ptr) {
-    int actions = (int)(uintptr_t)actions_ptr;
+    int actions;
+    int tty_id;
+    uint64_t addr;
+
+    actions = (int)(uintptr_t)actions_ptr;
     (void)actions;
-    
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0 || tty_id >= NUM_CONSOLES) return -ENOTTY;
-    
-    uint64_t addr = (uint64_t)termios_ptr;
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
+
+    addr = (uint64_t)termios_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     
     memcpy(&tty_termios[tty_id], (void*)addr, sizeof(struct kernel_termios));
@@ -245,7 +266,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     }
 
     tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0 || tty_id >= NUM_CONSOLES) tty_id = -1;
+    if (!tty_valid_id(tty_id)) tty_id = -1;
     
     switch (request) {
         case TIOCSCTTY:
@@ -355,7 +376,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
             active = console_get_current();
             found = -1;
-            for (vi = 0; vi < NUM_CONSOLES; vi++) {
+            for (vi = 0; vi < tty_count; vi++) {
                 if (vi != active) {
                     found = vi + 1;
                     break;
@@ -374,7 +395,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             memset(vst, 0, sizeof(*vst));
             vst->v_active = (uint16_t)(console_get_current() + 1);
             vst->v_state = 0;
-            for (ci = 0; ci < NUM_CONSOLES && ci < 16; ci++) {
+            for (ci = 0; ci < tty_count && ci < 16; ci++) {
                 vst->v_state |= (uint16_t)(1 << (ci + 1));
             }
             return 0;
@@ -384,7 +405,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         {
             int target_vt;
             target_vt = arg;
-            if (target_vt < 1 || target_vt > NUM_CONSOLES) return -ENXIO;
+            if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
             console_switch(target_vt - 1);
             return 0;
         }
@@ -394,7 +415,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             int target_vt;
             int guard;
             target_vt = arg;
-            if (target_vt < 1 || target_vt > NUM_CONSOLES) return -ENXIO;
+            if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
             guard = 0;
             while (console_get_current() != (target_vt - 1) && guard < 50000) {
                 schedule();
@@ -442,32 +463,40 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
 }
 
 static int sys_tcflush(int fd, const char *queue_ptr, int unused) {
+    int queue;
+    int tty_id;
+
     (void)unused;
-    int queue = (int)(uintptr_t)queue_ptr;
-    
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0) return -ENOTTY;
+    queue = (int)(uintptr_t)queue_ptr;
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
     
     (void)queue;
     return 0;
 }
 
 static int sys_tcflow(int fd, const char *action_ptr, int unused) {
+    int action;
+    int tty_id;
+
     (void)unused;
-    int action = (int)(uintptr_t)action_ptr;
-    
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0) return -ENOTTY;
+    action = (int)(uintptr_t)action_ptr;
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
     
     (void)action;
     return 0;
 }
 
 static int sys_tcdrain(int fd, const char *unused1, int unused2) {
+    int tty_id;
+
     (void)unused1; (void)unused2;
     
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0) return -ENOTTY;
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
     
     return 0;
 }
@@ -479,7 +508,7 @@ static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     
     tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0) return -ENOTTY;
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
 
     pgrp = tty_pgrp[tty_id];
     if (pgrp == 0 && current_task) {
@@ -491,17 +520,23 @@ static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
 }
 
 static int sys_tcsetpgrp(int fd, const char *pgrp_ptr, int unused) {
+    int pgrp;
+    int tty_id;
+
     (void)unused;
-    int pgrp = (int)(uintptr_t)pgrp_ptr;
-    
-    int tty_id = get_tty_id_for_fd(fd);
-    if (tty_id < 0) return -ENOTTY;
+    pgrp = (int)(uintptr_t)pgrp_ptr;
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) return -ENOTTY;
     
     tty_pgrp[tty_id] = pgrp;
     return 0;
 }
 
 void syscalls_termios_init(void) {
+    int i;
+    int count;
+
     syscall_table[SYSCALL_TCGETATTR] = sys_tcgetattr;
     syscall_table[SYSCALL_TCSETATTR] = sys_tcsetattr;
     syscall_table[SYSCALL_IOCTL] = sys_ioctl;
@@ -511,7 +546,30 @@ void syscalls_termios_init(void) {
     syscall_table[SYSCALL_TCGETPGRP] = sys_tcgetpgrp;
     syscall_table[SYSCALL_TCSETPGRP] = sys_tcsetpgrp;
     
-    for (int i = 0; i < NUM_CONSOLES; i++) {
+    count = cmdline_get_consoles();
+    if (count <= 0) count = 1;
+    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
+
+    tty_termios = (struct kernel_termios *)kmalloc(count * sizeof(struct kernel_termios));
+    tty_winsize = (struct kernel_winsize *)kmalloc(count * sizeof(struct kernel_winsize));
+    tty_pgrp = (int *)kmalloc(count * sizeof(int));
+
+    if (!tty_termios || !tty_winsize || !tty_pgrp) {
+        if (tty_termios) kfree(tty_termios);
+        if (tty_winsize) kfree(tty_winsize);
+        if (tty_pgrp) kfree(tty_pgrp);
+        tty_termios = tty_termios_fallback;
+        tty_winsize = tty_winsize_fallback;
+        tty_pgrp = tty_pgrp_fallback;
+        count = 1;
+    }
+
+    tty_count = count;
+    memset(tty_termios, 0, tty_count * sizeof(struct kernel_termios));
+    memset(tty_winsize, 0, tty_count * sizeof(struct kernel_winsize));
+    memset(tty_pgrp, 0, tty_count * sizeof(int));
+
+    for (i = 0; i < tty_count; i++) {
         termios_init_defaults(i);
     }
 }

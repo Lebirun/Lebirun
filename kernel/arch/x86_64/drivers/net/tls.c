@@ -30,6 +30,7 @@ static WOLFSSL_CTX *tls_create_ctx(void)
     vfs_node_t *ca_node;
     uint8_t *ca_buf;
     uint32_t rd;
+    int ret;
 
     ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
     if (!ctx) {
@@ -40,21 +41,38 @@ static WOLFSSL_CTX *tls_create_ctx(void)
         return NULL;
     }
 
-    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     wolfSSL_SetIORecv(ctx, wolf_recv_cb);
     wolfSSL_SetIOSend(ctx, wolf_send_cb);
 
     ca_node = vfs_namei("/etc/ssl/certs/ca-certificates.crt");
-    if (ca_node && ca_node->length > 0) {
-        ca_buf = (uint8_t *)kmalloc(ca_node->length);
-        if (ca_buf) {
-            rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
-            if (rd > 0) {
-                wolfSSL_CTX_load_verify_buffer(ctx, ca_buf, (long)rd,
-                                               SSL_FILETYPE_PEM);
-            }
-            kfree(ca_buf);
-        }
+    if (!ca_node || ca_node->length == 0) {
+        printf("TLS: CA bundle missing\n");
+        wolfSSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    ca_buf = (uint8_t *)kmalloc(ca_node->length);
+    if (!ca_buf) {
+        wolfSSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
+    if (rd == 0) {
+        printf("TLS: Failed to read CA bundle\n");
+        kfree(ca_buf);
+        wolfSSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    ret = wolfSSL_CTX_load_verify_buffer(ctx, ca_buf, (long)rd,
+                                         SSL_FILETYPE_PEM);
+    kfree(ca_buf);
+    if (ret != WOLFSSL_SUCCESS) {
+        printf("TLS: Failed to load CA bundle: %d\n", ret);
+        wolfSSL_CTX_free(ctx);
+        return NULL;
     }
 
     return ctx;
@@ -163,6 +181,14 @@ tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host)
     if (host) {
         wolfSSL_UseSNI(conn->ssl, WOLFSSL_SNI_HOST_NAME,
                        host, (unsigned short)strlen(host));
+        if (wolfSSL_check_domain_name(conn->ssl, host) != WOLFSSL_SUCCESS) {
+            printf("TLS: Failed to set hostname verification\n");
+            wolfSSL_free(conn->ssl);
+            wolfSSL_CTX_free(conn->ctx);
+            kfree(conn);
+            tls_release_global();
+            return NULL;
+        }
     }
 
     ret = wolfSSL_connect(conn->ssl);

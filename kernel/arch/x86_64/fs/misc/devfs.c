@@ -54,7 +54,9 @@ static vfs_node_t dev_kmem;
 static vfs_node_t dev_port;
 static vfs_node_t dev_mice;
 static vfs_node_t dev_fb0;
-static vfs_node_t dev_ttys[NUM_CONSOLES];
+static vfs_node_t *dev_ttys;
+static vfs_node_t dev_ttys_fallback[1];
+static int dev_tty_count;
 
 #define DEVFS_DIRENT_POOL_SIZE 4
 
@@ -571,6 +573,8 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
 
 static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     int i;
+    int idx;
+    vfs_node_t *root;
 
     (void)node;
     
@@ -598,12 +602,12 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
 #endif
     
     if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '9') {
-        int idx = name[3] - '0';
+        idx = name[3] - '0';
         if (name[4] >= '0' && name[4] <= '9' && name[5] == '\0')
             idx = idx * 10 + (name[4] - '0');
         else if (name[4] != '\0')
             return NULL;
-        if (idx >= 0 && idx < cmdline_get_consoles())
+        if (idx >= 0 && idx < dev_tty_count && dev_ttys)
             return &dev_ttys[idx];
     }
     
@@ -612,8 +616,14 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
             return &devfs_blockdevs[i].node;
     }
 
-    if (dev_initrd_registered && strcmp(name, "initrd") == 0)
-        return initrd_get_vfs_root();
+    if (dev_initrd_registered && strcmp(name, "initrd") == 0) {
+        root = initrd_get_vfs_root();
+        if (!root)
+            return NULL;
+        strcpy(root->name, "initrd");
+        root->parent = &devfs_root;
+        return root;
+    }
 
     return NULL;
 }
@@ -642,6 +652,7 @@ static vfs_node_t *devfs_mount_impl(const char *device, const char *mountpoint) 
 
 void devfs_init(void) {
     int i;
+    int tty_count_local;
     char name[8];
     vfs_fs_type_t *fs_type;
 
@@ -916,7 +927,17 @@ void devfs_init(void) {
         entropy_pool[i] = 0x5A5A5A5A ^ ((uint64_t)i * 0x13579BDF);
     }
 
-    for (i = 0; i < cmdline_get_consoles(); i++) {
+    tty_count_local = cmdline_get_consoles();
+    if (tty_count_local <= 0) tty_count_local = 1;
+    if (tty_count_local > NUM_CONSOLES) tty_count_local = NUM_CONSOLES;
+    dev_ttys = (vfs_node_t *)kmalloc(tty_count_local * sizeof(vfs_node_t));
+    if (!dev_ttys) {
+        dev_ttys = dev_ttys_fallback;
+        tty_count_local = 1;
+    }
+    dev_tty_count = tty_count_local;
+
+    for (i = 0; i < dev_tty_count; i++) {
         memset(&dev_ttys[i], 0, sizeof(vfs_node_t));
         name[0] = 't';
         name[1] = 't';
@@ -1192,20 +1213,11 @@ int devfs_rescan_partitions(const char *devname) {
 }
 
 void devfs_register_initrd(void) {
-    vfs_node_t *root;
-
     if (dev_initrd_registered)
         return;
 
     if (!initrd_get_base())
         return;
-
-    root = initrd_get_vfs_root();
-    if (!root)
-        return;
-
-    strcpy(root->name, "initrd");
-    root->parent = &devfs_root;
 
     dev_initrd_registered = 1;
 }

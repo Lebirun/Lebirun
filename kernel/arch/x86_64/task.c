@@ -1151,6 +1151,38 @@ void task_free_user_memory(task_t* t) {
     }
 }
 
+static void task_release_dead_resources(task_t *t) {
+    if (!t || t->resources_released) return;
+
+    task_free_user_memory(t);
+    task_fd_close_all(t);
+    if (t->fds) {
+        kfree(t->fds);
+        t->fds = NULL;
+        t->fds_capacity = 0;
+    }
+    if (t->signal_data) {
+        kfree(t->signal_data);
+        t->signal_data = NULL;
+    }
+    if (t->creds_data) {
+        kfree(t->creds_data);
+        t->creds_data = NULL;
+    }
+    task_free_fpu_state(t);
+    if (t->stack_base) {
+        kfree(t->stack_base);
+        t->stack_base = NULL;
+        t->stack_size = 0;
+    }
+    if (t->kernel_stack_base) {
+        kstack_free(t->kernel_stack_base);
+        t->kernel_stack_base = NULL;
+        t->kernel_stack_size = 0;
+    }
+    t->resources_released = 1;
+}
+
 int task_add_file_mapping(task_t *task, vfs_node_t *node, uint64_t vaddr,
                           uint64_t memsz, uint64_t filesz, uint64_t offset,
                           uint64_t flags) {
@@ -1388,6 +1420,9 @@ void reap_dead_tasks(void) {
 
         if (t->join_refs != 0 || t->in_wait_queue ||
             (t->ppid > 0 && !t->waited && task_find(t->ppid))) {
+            if (t != current_task) {
+                task_release_dead_resources(t);
+            }
             t->wait_next = keep;
             keep = t;
             t = next;
@@ -1408,14 +1443,7 @@ void reap_dead_tasks(void) {
             unlock_scheduler();
         }
 
-        task_free_user_memory(t);
-        task_fd_close_all(t);
-        if (t->fds) kfree(t->fds);
-        if (t->signal_data) kfree(t->signal_data);
-        if (t->creds_data) kfree(t->creds_data);
-        task_free_fpu_state(t);
-        if (t->stack_base) kfree(t->stack_base);
-        if (t->kernel_stack_base) kstack_free(t->kernel_stack_base);
+        task_release_dead_resources(t);
         kfree(t);
         t = next;
     }

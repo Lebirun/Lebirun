@@ -113,6 +113,14 @@ static char (*screen_buffer)[MAX_COLS];
 static uint32_t (*screen_fg_buf)[MAX_COLS];
 static uint32_t (*screen_bg_buf)[MAX_COLS];
 
+static void fb_fill_u32(uint32_t *ptr, uint32_t value, uint64_t count) {
+    uint64_t i;
+
+    for (i = 0; i < count; i++) {
+        ptr[i] = value;
+    }
+}
+
 static void fb_grow_screen_buffer(uint64_t needed_rows) {
     uint64_t new_rows;
     char (*new_buf)[MAX_COLS];
@@ -128,8 +136,8 @@ static void fb_grow_screen_buffer(uint64_t needed_rows) {
     new_bg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
     if (!new_bg) { kfree(new_buf); kfree(new_fg); return; }
     memset(new_buf, ' ', new_rows * MAX_COLS);
-    memset(new_fg, 0xFF, new_rows * MAX_COLS * sizeof(uint32_t));
-    memset(new_bg, 0, new_rows * MAX_COLS * sizeof(uint32_t));
+    fb_fill_u32((uint32_t *)new_fg, 0xFFFFFFFFu, new_rows * MAX_COLS);
+    fb_fill_u32((uint32_t *)new_bg, 0, new_rows * MAX_COLS);
     if (screen_buffer && screen_buffer_rows > 0) {
         memcpy(new_buf, screen_buffer, screen_buffer_rows * MAX_COLS);
         kfree(screen_buffer);
@@ -146,6 +154,9 @@ static void fb_grow_screen_buffer(uint64_t needed_rows) {
     screen_fg_buf = new_fg;
     screen_bg_buf = new_bg;
     screen_buffer_rows = new_rows;
+}
+
+void fb_reclaim_unused(void) {
 }
 
 static void fb_restore_cell(uint64_t cx, uint64_t cy) {

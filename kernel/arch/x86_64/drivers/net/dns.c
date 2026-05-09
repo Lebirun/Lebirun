@@ -20,10 +20,23 @@ static uint8_t pending_resolved;
 static uint16_t pending_id;
 static uint16_t pending_qtype;
 
-void dns_init(void) {
+static int dns_ensure_cache(void) {
+    if (dns_cache)
+        return 0;
+
     dns_cache_capacity = DNS_CACHE_INIT;
     dns_cache = (dns_cache_entry_t *)kmalloc(dns_cache_capacity * sizeof(dns_cache_entry_t));
-    if (dns_cache) memset(dns_cache, 0, dns_cache_capacity * sizeof(dns_cache_entry_t));
+    if (!dns_cache) {
+        dns_cache_capacity = 0;
+        return -1;
+    }
+    memset(dns_cache, 0, dns_cache_capacity * sizeof(dns_cache_entry_t));
+    return 0;
+}
+
+void dns_init(void) {
+    dns_cache = NULL;
+    dns_cache_capacity = 0;
     g_dns_server = IPV4_ADDR(8, 8, 8, 8);
     g_dns_server2 = IPV4_ADDR(8, 8, 4, 4);
     dns_id_counter = 1;
@@ -44,6 +57,9 @@ static int dns_cache_lookup(const char *name, ipv4_addr_t *out_ipv4) {
     int j;
     int match;
     uint64_t age;
+
+    if (!dns_cache)
+        return -1;
 
     for (i = 0; i < dns_cache_capacity; i++) {
         if (dns_cache[i].has_ipv4) {
@@ -75,6 +91,9 @@ void dns_cache_add(const char *name, ipv4_addr_t ip, uint64_t ttl) {
     uint64_t oldest_time;
     int i;
     int len;
+
+    if (dns_ensure_cache() < 0)
+        return;
 
     oldest_idx = 0;
     oldest_time = 0xFFFFFFFF;
@@ -403,6 +422,9 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
 
 void dns_cache_print(void) {
     int i;
+
+    if (!dns_cache)
+        return;
 
     for (i = 0; i < dns_cache_capacity; i++) {
         if (dns_cache[i].has_ipv4) {

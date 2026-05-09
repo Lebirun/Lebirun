@@ -375,8 +375,9 @@ void keyboard_init(void) {
 
 void keyboard_process_sigint(void)
 {
-    extern struct termios tty_termios[];
-    extern int tty_pgrp[];
+    extern struct termios *tty_termios;
+    extern int *tty_pgrp;
+    extern int tty_count;
     extern int deliver_signal_to_task(task_t *target, int sig);
     extern task_t *all_tasks_head;
     int i;
@@ -385,9 +386,11 @@ void keyboard_process_sigint(void)
     int guard;
     pid_t t_pgid;
 
-    if (!kbd_consoles) return;
+    if (!kbd_consoles || !tty_termios || !tty_pgrp) return;
 
     for (i = 0; i < kbd_num_consoles; i++) {
+        if (i >= tty_count)
+            break;
         if (!kbd_consoles[i].sigint_pending)
             continue;
         kbd_consoles[i].sigint_pending = 0;

@@ -320,6 +320,10 @@ void slab_gc(void) {
     slab_lock_release(eflags);
 }
 
+void slab_reclaim_empty(void) {
+    slab_gc();
+}
+
 int slab_owns(void *ptr) {
     slab_page_t *page;
     uint64_t virt;

@@ -81,5 +81,6 @@ void console_writer_flush(void);
 void console_tick(void);
 int console_alloc(int n);
 int console_alt_screen_active(int n);
+void console_reclaim_unused(void);
 
 #endif

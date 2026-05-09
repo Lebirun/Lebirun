@@ -17,6 +17,7 @@
 void kstack_init(void);
 uint8_t *kstack_alloc(void);
 void kstack_free(uint8_t *base);
+void kstack_reclaim_unused(void);
 int kstack_page_fault_handler(uint64_t fault_addr);
 int kstack_is_in_region(uint64_t addr);
 

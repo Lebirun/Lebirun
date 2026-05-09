@@ -23,7 +23,9 @@ extern void yield(void);
 extern void sleep_ms(uint64_t ms);
 extern void wake_task(task_t *task);
 
-static console_t consoles[NUM_CONSOLES];
+static console_t *consoles;
+static console_t console_fallback[1];
+static int console_count = 0;
 static int current_console = 0;
 static int console_initialized = 0;
 static int console_batch = 0;
@@ -49,11 +51,42 @@ static uint64_t console_calc_rows(void) {
     return r;
 }
 
+static int console_runtime_count(void) {
+    int count;
+
+    count = cmdline_get_consoles();
+    if (count <= 0) count = 1;
+    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
+    return count;
+}
+
+static int console_valid_index(int n) {
+    if (!consoles) return 0;
+    if (n < 0 || n >= console_count) return 0;
+    return 1;
+}
+
+static int console_ensure_pool(void) {
+    int count;
+
+    if (consoles) return 0;
+
+    count = console_runtime_count();
+    consoles = (console_t *)kmalloc(count * sizeof(console_t));
+    if (!consoles) {
+        consoles = console_fallback;
+        count = 1;
+    }
+    console_count = count;
+    memset(consoles, 0, console_count * sizeof(console_t));
+    return 0;
+}
+
 static int console_ensure_alloc(int n) {
     uint64_t rows;
     console_t *con;
 
-    if (n < 0 || n >= NUM_CONSOLES) return -1;
+    if (!console_valid_index(n)) return -1;
     con = &consoles[n];
     if (con->allocated) return 0;
     rows = console_calc_rows();
@@ -116,7 +149,7 @@ static inline void console_irqrestore(uint64_t flags);
 static void console_fast_redraw_locked(int console_num);
 
 int console_alt_screen_active(int n) {
-    if (n < 0 || n >= NUM_CONSOLES) return 0;
+    if (!console_valid_index(n)) return 0;
     return consoles[n].alt_screen_active;
 }
 
@@ -316,6 +349,10 @@ static void console_grow_write_buffer(console_t *con) {
     kfree(old_wf);
 }
 
+void console_reclaim_unused(void) {
+    return;
+}
+
 static uint64_t console_redraw_cursor_x = 0;
 static uint64_t console_redraw_cursor_y = 0;
 static uint64_t console_redraw_rows = 0;
@@ -408,7 +445,7 @@ static void console_fast_redraw_locked(int console_num) {
     console_t *con;
 
     if (!fb || (fb->rows == 0 && fb->cols == 0)) return;
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_valid_index(console_num)) return;
 
     con = &consoles[console_num];
     if (!con->allocated) return;
@@ -500,7 +537,7 @@ static void console_redraw_prepare(int console_num) {
     flags = console_irqsave();
     spin_lock(&console_lock);
 
-    if (console_num < 0 || console_num >= NUM_CONSOLES) {
+    if (!console_valid_index(console_num)) {
         spin_unlock(&console_lock);
         console_irqrestore(flags);
         console_redraw_pending = 0;
@@ -620,12 +657,12 @@ static void console_redraw_step(uint64_t max_rows) {
     spin_lock(&console_lock);
     console_redraw_row = end_row;
     if (console_redraw_row >= fb->rows) {
-        if (console_redraw_console >= 0 && console_redraw_console < NUM_CONSOLES) {
+        if (console_valid_index(console_redraw_console)) {
             console_apply_colors(&consoles[console_redraw_console], fb);
         }
         fb->cursor_x = console_redraw_cursor_x;
         fb->cursor_y = console_redraw_cursor_y;
-        if (console_redraw_console >= 0 && console_redraw_console < NUM_CONSOLES) {
+        if (console_valid_index(console_redraw_console)) {
             fb_set_cursor_hidden(!consoles[console_redraw_console].cursor_visible);
         }
         fb_update_cursor();
@@ -680,7 +717,7 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
     if (max_rows == 0) max_rows = 1;
     if (max_cols > CONSOLE_BUFFER_COLS) max_cols = CONSOLE_BUFFER_COLS;
 
-    for (i = 0; i < NUM_CONSOLES; i++) {
+    for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         if (!con->allocated) continue;
         console_grow_buffer(con, max_rows);
@@ -713,7 +750,7 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
         }
     }
 
-    if (current_console >= 0 && current_console < NUM_CONSOLES) {
+    if (console_valid_index(current_console)) {
         fb = fb_get();
         if (fb) {
             if (fb->cursor_x >= max_cols) {
@@ -979,7 +1016,7 @@ void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows)
     flags = console_irqsave();
     spin_lock(&console_lock);
 
-    for (i = 0; i < NUM_CONSOLES; i++) {
+    for (i = 0; i < console_count; i++) {
         if (consoles[i].allocated) {
             console_rewrap_one(&consoles[i], old_cols, new_cols, new_rows);
         }
@@ -995,8 +1032,10 @@ void console_init(void) {
     console_t *con;
 
     if (console_initialized) return;
+    console_ensure_pool();
+    if (!consoles) return;
     
-    for (i = 0; i < NUM_CONSOLES; i++) {
+    for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         con->buffer = NULL;
         con->color_buffer = NULL;
@@ -1088,7 +1127,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     console_t *old_con;
     console_t *new_con;
     
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_valid_index(console_num)) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
@@ -1184,8 +1223,7 @@ static void console_switch_internal(int console_num) {
 }
 
 void console_switch(int console_num) {
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
-    if (console_num >= cmdline_get_consoles()) return;
+    if (!console_valid_index(console_num)) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
@@ -1205,8 +1243,7 @@ void console_switch(int console_num) {
 }
 
 void console_switch_via_interrupt(int console_num) {
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
-    if (console_num >= cmdline_get_consoles()) return;
+    if (!console_valid_index(console_num)) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
@@ -1228,12 +1265,12 @@ void console_process_pending(void) {
         if (console_switching) break;
         flags = console_irqsave();
         pending = pending_console_switch;
-        if (pending >= 0 && pending < NUM_CONSOLES) {
+        if (console_valid_index(pending)) {
             pending_console_switch = -1;
         }
         console_irqrestore(flags);
 
-        if (pending >= 0 && pending < NUM_CONSOLES) {
+        if (console_valid_index(pending)) {
             console_switch_internal(pending);
             continue;
         }
@@ -1742,7 +1779,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
         return;
     }
     
-    if (console_num < 0 || console_num >= NUM_CONSOLES) {
+    if (!console_valid_index(console_num)) {
         console_num = current_console;
     }
     
@@ -2066,7 +2103,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     }
 
     target_console = console_num;
-    if (target_console < 0 || target_console >= NUM_CONSOLES) {
+    if (!console_valid_index(target_console)) {
         target_console = current_console;
     }
 
@@ -2460,7 +2497,7 @@ void console_clear(int console_num) {
     console_t *con;
     framebuffer_t *fb;
 
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_valid_index(console_num)) return;
 
     flags = console_irqsave();
     spin_lock(&console_lock);
@@ -2496,7 +2533,7 @@ void console_setcursor(int console_num, int x, int y) {
     console_t *con;
     framebuffer_t *fb;
 
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return;
+    if (!console_valid_index(console_num)) return;
 
     flags = console_irqsave();
     spin_lock(&console_lock);
@@ -2528,7 +2565,7 @@ int console_getcursor(int console_num, int *x, int *y) {
     uint64_t flags;
     console_t *con;
 
-    if (console_num < 0 || console_num >= NUM_CONSOLES) return -1;
+    if (!console_valid_index(console_num)) return -1;
 
     flags = console_irqsave();
     spin_lock(&console_lock);
@@ -2615,7 +2652,7 @@ static void console_writer_thread(void) {
             goto handle_pending;
         }
 
-        for (i = 0; i < NUM_CONSOLES; i++) {
+        for (i = 0; i < console_count; i++) {
             con = &consoles[i];
             if (!con->allocated) continue;
             while (con->write_tail != con->write_head) {
@@ -3008,7 +3045,7 @@ void console_writer_flush(void) {
 
     while (writer_thread_running) {
         all_empty = 1;
-        for (i = 0; i < NUM_CONSOLES; i++) {
+        for (i = 0; i < console_count; i++) {
             if (!consoles[i].allocated) continue;
             if (consoles[i].write_tail != consoles[i].write_head) {
                 all_empty = 0;

@@ -4,6 +4,9 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/mem_map.h>
 
+extern int is_socket_fd(int fd);
+extern int socket_close_fd(int fd);
+
 static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
     uint64_t p;
@@ -239,6 +242,7 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
 static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     uint8_t *rbuf;
     (void)unused1; (void)unused2;
+    if (is_socket_fd(fd)) return socket_close_fd(fd);
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;

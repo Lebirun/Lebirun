@@ -1,20 +1,23 @@
 #include <lebirun/vfs.h>
 #include <lebirun/pit.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 #include <stdio.h>
 
 extern uint64_t pit_freq;
 
-#define SYSFS_DIRENT_POOL_SIZE 16
-
-static dirent_t sysfs_dirent_pool[SYSFS_DIRENT_POOL_SIZE];
+static dirent_t *sysfs_dirent_pool;
+static dirent_t sysfs_dirent_fallback;
 static volatile uint64_t sysfs_dirent_index;
+static uint64_t sysfs_dirent_capacity;
 
 static dirent_t *sysfs_alloc_dirent(void) {
     uint64_t idx;
 
+    if (!sysfs_dirent_pool || sysfs_dirent_capacity == 0)
+        return &sysfs_dirent_fallback;
     idx = sysfs_dirent_index;
-    sysfs_dirent_index = (idx + 1) % SYSFS_DIRENT_POOL_SIZE;
+    sysfs_dirent_index = (idx + 1) % sysfs_dirent_capacity;
     return &sysfs_dirent_pool[idx];
 }
 
@@ -473,6 +476,10 @@ static vfs_fs_type_t sysfs_type;
 
 void sysfs_init(void) {
     sysfs_dirent_index = 0;
+    sysfs_dirent_capacity = 6;
+    sysfs_dirent_pool = (dirent_t *)kmalloc(sizeof(dirent_t) * sysfs_dirent_capacity);
+    if (!sysfs_dirent_pool)
+        sysfs_dirent_capacity = 0;
 
     sysfs_type.name = "sysfs";
     sysfs_type.mount = sysfs_mount;

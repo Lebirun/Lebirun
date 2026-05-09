@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <lebirun/task.h>
+#include <lebirun/drivers/net/tcp.h>
 
 #define AF_UNSPEC   0
 #define AF_UNIX     1
@@ -67,7 +68,7 @@ struct sockaddr_un {
 };
 
 struct in_addr {
-    uint64_t s_addr;
+    uint32_t s_addr;
 };
 
 struct sockaddr_in {
@@ -163,6 +164,7 @@ typedef struct {
     int backlog_count;
     int backlog_capacity;
     int peer_socket;
+    tcp_socket_t *tcp;
     sock_state_t state;
     pending_conn_t *backlog;
     char *sun_path;
@@ -220,6 +222,10 @@ found:
 
 static void free_socket(int idx) {
     if (idx >= 0 && idx < socket_capacity) {
+        if (sockets[idx].tcp) {
+            tcp_disconnect(sockets[idx].tcp, 1000);
+            tcp_socket_close(sockets[idx].tcp);
+        }
         kfree(sockets[idx].recv_buf);
         kfree(sockets[idx].send_buf);
         kfree(sockets[idx].backlog);
@@ -228,8 +234,19 @@ static void free_socket(int idx) {
         sockets[idx].send_buf = NULL;
         sockets[idx].backlog = NULL;
         sockets[idx].sun_path = NULL;
+        sockets[idx].tcp = NULL;
         sockets[idx].in_use = 0;
     }
+}
+
+static ipv4_addr_t socket_ipv4_from_addr(uint32_t addr)
+{
+    return u32_to_ipv4(ntohl(addr));
+}
+
+static uint32_t socket_addr_from_ipv4(ipv4_addr_t ip)
+{
+    return htonl(ipv4_to_u32(ip));
 }
 
 static socket_t *get_socket(int fd) {
@@ -549,11 +566,26 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         sock->local_port = alloc_ephemeral_port();
     }
     
+    sock->tcp = tcp_socket_create();
+    if (!sock->tcp) {
+        return -ENOMEM;
+    }
+
     if (sock->nonblocking) {
         sock->state = SOCKSTATE_CONNECTING;
         return -EINPROGRESS;
     }
-    
+
+    if (tcp_connect(sock->tcp, socket_ipv4_from_addr(addr->sin_addr.s_addr),
+                    sock->remote_port, 60000) < 0) {
+        tcp_socket_close(sock->tcp);
+        sock->tcp = NULL;
+        sock->state = SOCKSTATE_CLOSED;
+        return -ECONNREFUSED;
+    }
+
+    sock->local_port = sock->tcp->local_port;
+    sock->local_addr = socket_addr_from_ipv4(sock->tcp->local_ip);
     sock->state = SOCKSTATE_CONNECTED;
     return 0;
 }
@@ -679,27 +711,99 @@ static int sys_accept4(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     return sys_accept(sockfd, addr_ptr, addrlen_ptr);
 }
 
-static int sys_getsockopt(int sockfd, const char *level_ptr, int optname) {
+static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
+                          int optval_ptr, int optlen_ptr, int unused) {
     int level;
+    int *optval;
+    socklen_t *optlen;
+    int value;
     socket_t *sock = get_socket(sockfd);
+    (void)unused;
     if (!sock) return -EBADF;
     
     level = (int)(uintptr_t)level_ptr;
-    (void)level;
-    (void)optname;
-    
+    optval = (int *)(uintptr_t)optval_ptr;
+    optlen = (socklen_t *)(uintptr_t)optlen_ptr;
+    if (!optval || !optlen || *optlen < sizeof(int)) return -EINVAL;
+    if (level != SOL_SOCKET) return -ENOPROTOOPT;
+
+    value = 0;
+    switch (optname) {
+        case SO_TYPE:
+            value = sock->type;
+            break;
+        case SO_ERROR:
+            value = sock->error;
+            sock->error = 0;
+            break;
+        case SO_REUSEADDR:
+            value = sock->so_reuseaddr;
+            break;
+        case SO_REUSEPORT:
+            value = sock->so_reuseport;
+            break;
+        case SO_KEEPALIVE:
+            value = sock->so_keepalive;
+            break;
+        case SO_BROADCAST:
+            value = sock->so_broadcast;
+            break;
+        case SO_SNDBUF:
+            value = sock->so_sndbuf;
+            break;
+        case SO_RCVBUF:
+            value = sock->so_rcvbuf;
+            break;
+        default:
+            return -ENOPROTOOPT;
+    }
+
+    *optval = value;
+    *optlen = sizeof(int);
     return 0;
 }
 
-static int sys_setsockopt(int sockfd, const char *level_ptr, int optname) {
+static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
+                          int optval_ptr, int optlen, int unused) {
     int level;
+    int value;
+    int *optval;
     socket_t *sock = get_socket(sockfd);
+    (void)unused;
     if (!sock) return -EBADF;
     
     level = (int)(uintptr_t)level_ptr;
-    (void)level;
-    (void)optname;
-    
+    if (level != SOL_SOCKET) return -ENOPROTOOPT;
+    if (optlen < (int)sizeof(int)) return -EINVAL;
+    optval = (int *)(uintptr_t)optval_ptr;
+    if (!optval) return -EINVAL;
+    value = *optval;
+
+    switch (optname) {
+        case SO_REUSEADDR:
+            sock->so_reuseaddr = value ? 1 : 0;
+            break;
+        case SO_REUSEPORT:
+            sock->so_reuseport = value ? 1 : 0;
+            break;
+        case SO_KEEPALIVE:
+            sock->so_keepalive = value ? 1 : 0;
+            break;
+        case SO_BROADCAST:
+            sock->so_broadcast = value ? 1 : 0;
+            break;
+        case SO_SNDBUF:
+            if (value <= 0) return -EINVAL;
+            sock->so_sndbuf = value;
+            break;
+        case SO_RCVBUF:
+            if (value <= 0) return -EINVAL;
+            sock->so_rcvbuf = value;
+            break;
+        default:
+            return -ENOPROTOOPT;
+    }
+
     return 0;
 }
 
@@ -778,9 +882,14 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     return -EINVAL;
 }
 
-static int sys_sendto(int sockfd, const char *buf_ptr, int len) {
+static int sys_sendto(int sockfd, const char *buf_ptr, int len,
+                      int flags, int dest_addr_ptr, int addrlen) {
     const void *buf;
+    int ret;
     socket_t *sock = get_socket(sockfd);
+    (void)flags;
+    (void)dest_addr_ptr;
+    (void)addrlen;
     if (!sock) return -EBADF;
     
     if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED) {
@@ -788,15 +897,21 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len) {
     }
     
     buf = (const void *)(uintptr_t)buf_ptr;
+
+    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
+        ret = tcp_send(sock->tcp, (uint8_t *)buf, (uint64_t)len);
+        if (ret < 0) return -EIO;
+        return ret;
+    }
     
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         socket_t *peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
-            return recv_buf_write(peer, buf, len);
+            return (int)recv_buf_write(peer, buf, len);
         }
     }
     
-    return send_buf_write(sock, buf, len);
+    return (int)send_buf_write(sock, buf, len);
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -848,8 +963,8 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
 
     total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
-        ssize_t sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base, 
-                                  msg->msg_iov[i].iov_len);
+        ssize_t sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
+                                  msg->msg_iov[i].iov_len, flags, 0, 0);
         if (sent < 0) return sent;
         total += sent;
     }
@@ -857,13 +972,26 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     return total;
 }
 
-static int sys_recvfrom(int sockfd, const char *buf_ptr, int len) {
+static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
+                        int flags, int src_addr_ptr, int addrlen_ptr) {
     void *buf;
     size_t available;
+    uint64_t timeout_ms;
+    int ret;
     socket_t *sock = get_socket(sockfd);
+    (void)src_addr_ptr;
+    (void)addrlen_ptr;
     if (!sock) return -EBADF;
     
     buf = (void *)(uintptr_t)buf_ptr;
+
+    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
+        timeout_ms = (sock->nonblocking || (flags & MSG_DONTWAIT)) ? 0 : 15000;
+        ret = tcp_recv(sock->tcp, (uint8_t *)buf, (uint64_t)len, timeout_ms);
+        if (ret < 0) return -EIO;
+        if (ret == 0 && (sock->nonblocking || (flags & MSG_DONTWAIT))) return -EAGAIN;
+        return ret;
+    }
     
     available = recv_buf_used(sock);
     if (available == 0) {
@@ -873,7 +1001,7 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len) {
         return 0;
     }
     
-    return recv_buf_read(sock, buf, len, 0);
+    return (int)recv_buf_read(sock, buf, len, flags & MSG_PEEK);
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -923,7 +1051,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     total = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++) {
         ssize_t recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
-                                     msg->msg_iov[i].iov_len);
+                                     msg->msg_iov[i].iov_len, flags, 0, 0);
         if (recvd < 0) return recvd;
         total += recvd;
         if ((size_t)recvd < msg->msg_iov[i].iov_len) break;
@@ -957,6 +1085,10 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
         default:
             return -EINVAL;
     }
+
+    if (sock->tcp && (how == SHUT_WR || how == SHUT_RDWR)) {
+        tcp_disconnect(sock->tcp, 1000);
+    }
     
     return 0;
 }
@@ -971,8 +1103,12 @@ int socket_poll_events(int fd) {
     if (recv_buf_used(sock) > 0) {
         events |= 0x01;
     }
+
+    if (sock->tcp && sock->tcp->recv_buffer_head != sock->tcp->recv_buffer_tail) {
+        events |= 0x01;
+    }
     
-    if (send_buf_free(sock) > 0) {
+    if (send_buf_free(sock) > 0 || sock->tcp) {
         events |= 0x04;
     }
     
@@ -1001,6 +1137,11 @@ int socket_write(int fd, const void *buf, int len) {
     if (!sock) return -EBADF;
     if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED)
         return -ENOTCONN;
+    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
+        ret = tcp_send(sock->tcp, (uint8_t *)buf, (uint64_t)len);
+        if (ret < 0) return -EIO;
+        return ret;
+    }
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         socket_t *peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
@@ -1019,13 +1160,31 @@ int socket_write(int fd, const void *buf, int len) {
 int socket_read(int fd, void *buf, int len) {
     socket_t *sock = get_socket(fd);
     size_t available;
+    int ret;
     if (!sock) return -EBADF;
+    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
+        ret = tcp_recv(sock->tcp, (uint8_t *)buf, (uint64_t)len,
+                       sock->nonblocking ? 0 : 15000);
+        if (ret < 0) return -EIO;
+        if (ret == 0 && sock->nonblocking) return -EAGAIN;
+        return ret;
+    }
     available = recv_buf_used(sock);
     if (available == 0) {
         if (sock->nonblocking) return -EAGAIN;
         return 0;
     }
     return recv_buf_read(sock, buf, len, 0);
+}
+
+int socket_close_fd(int fd) {
+    int idx;
+
+    idx = fd - socket_base_fd;
+    if (idx < 0 || idx >= socket_capacity) return -EBADF;
+    if (!sockets[idx].in_use) return -EBADF;
+    free_socket(idx);
+    return 0;
 }
 
 #define SOCKET_F_DUPFD       0

@@ -490,9 +490,10 @@ struct kernel_timeval {
 
 #define kernel_winsize winsize
 
-extern struct kernel_termios tty_termios[NUM_CONSOLES];
-extern struct kernel_winsize tty_winsize[NUM_CONSOLES];
-extern int tty_pgrp[NUM_CONSOLES];
+extern struct kernel_termios *tty_termios;
+extern struct kernel_winsize *tty_winsize;
+extern int *tty_pgrp;
+extern int tty_count;
 
 extern void *syscall_table[NR_SYSCALLS];
 

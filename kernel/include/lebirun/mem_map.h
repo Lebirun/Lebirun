@@ -129,6 +129,7 @@ void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
 uint64_t heap_free_space(void);
 int is_early_heap_ptr(void *ptr);
+void heap_reclaim_unused(void);
 
 void *ksafe_alloc(size_t size, uint64_t flags);
 void *kcalloc(size_t nmemb, size_t size);
@@ -152,6 +153,7 @@ void slab_init(void);
 void *slab_alloc(size_t size);
 void slab_free(void *ptr);
 void slab_gc(void);
+void slab_reclaim_empty(void);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
 size_t slab_alloc_size(void *ptr);

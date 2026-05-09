@@ -45,13 +45,15 @@ static int kstack_grow(int new_cap) {
     uint8_t *new_used;
     uint8_t *new_mapped;
     uint64_t (*new_phys)[KSTACK_USABLE_PAGES];
+    uint64_t alloc_cap;
 
     if (new_cap > KSTACK_MAX_STACKS) new_cap = KSTACK_MAX_STACKS;
     if (new_cap <= kstack_capacity) return 0;
 
-    new_used = (uint8_t *)kmalloc(new_cap * sizeof(uint8_t));
-    new_mapped = (uint8_t *)kmalloc(new_cap * sizeof(uint8_t));
-    new_phys = kmalloc(new_cap * KSTACK_USABLE_PAGES * sizeof(uint64_t));
+    alloc_cap = (uint64_t)new_cap + 1;
+    new_used = (uint8_t *)kmalloc(alloc_cap * sizeof(uint8_t));
+    new_mapped = (uint8_t *)kmalloc(alloc_cap * sizeof(uint8_t));
+    new_phys = kmalloc(alloc_cap * KSTACK_USABLE_PAGES * sizeof(uint64_t));
     if (!new_used || !new_mapped || !new_phys) {
         if (new_used) kfree(new_used);
         if (new_mapped) kfree(new_mapped);
@@ -68,9 +70,9 @@ static int kstack_grow(int new_cap) {
         kfree(slot_page_phys);
     }
 
-    memset(new_used + kstack_capacity, 0, (new_cap - kstack_capacity) * sizeof(uint8_t));
-    memset(new_mapped + kstack_capacity, 0, (new_cap - kstack_capacity) * sizeof(uint8_t));
-    memset(new_phys + kstack_capacity, 0, (new_cap - kstack_capacity) * KSTACK_USABLE_PAGES * sizeof(uint64_t));
+    memset(new_used + kstack_capacity, 0, (alloc_cap - (uint64_t)kstack_capacity) * sizeof(uint8_t));
+    memset(new_mapped + kstack_capacity, 0, (alloc_cap - (uint64_t)kstack_capacity) * sizeof(uint8_t));
+    memset(new_phys + kstack_capacity, 0, (alloc_cap - (uint64_t)kstack_capacity) * KSTACK_USABLE_PAGES * sizeof(uint64_t));
 
     slot_used = new_used;
     slot_bottom_mapped = new_mapped;
@@ -93,6 +95,8 @@ void kstack_init(void) {
 uint8_t *kstack_alloc(void) {
     int i;
     int p;
+    int k;
+    int new_cap;
     void *phys;
     uint64_t page_virt;
     uint64_t base_virt;
@@ -103,7 +107,7 @@ uint8_t *kstack_alloc(void) {
         if (!slot_used[i]) break;
     }
     if (i >= kstack_capacity) {
-        int new_cap = kstack_capacity * 2;
+        new_cap = kstack_capacity * 2;
         if (new_cap > KSTACK_MAX_STACKS) new_cap = KSTACK_MAX_STACKS;
         if (new_cap <= kstack_capacity) return NULL;
         if (kstack_grow(new_cap) < 0) return NULL;
@@ -113,7 +117,6 @@ uint8_t *kstack_alloc(void) {
         phys = pmm_alloc_low_page();
         if (!phys) phys = pmm_alloc_page();
         if (!phys) {
-            int k;
             for (k = 0; k < p; k++) {
                 vmm_unmap_page(slot_page_addr(i, k));
                 pfa_free(slot_page_phys[i][k]);
@@ -158,6 +161,57 @@ void kstack_free(uint8_t *base) {
 
     slot_bottom_mapped[slot] = 0;
     slot_used[slot] = 0;
+}
+
+void kstack_reclaim_unused(void) {
+    uint8_t *new_used;
+    uint8_t *new_mapped;
+    uint64_t (*new_phys)[KSTACK_USABLE_PAGES];
+    uint64_t alloc_cap;
+    int highest;
+    int new_cap;
+    int i;
+
+    if (!kstack_initialized) return;
+    if (kstack_capacity <= KSTACK_INIT_STACKS) return;
+
+    highest = -1;
+    for (i = 0; i < kstack_capacity; i++) {
+        if (slot_used[i]) highest = i;
+    }
+
+    new_cap = KSTACK_INIT_STACKS;
+    while (new_cap <= highest) {
+        new_cap *= 2;
+    }
+    if (new_cap >= kstack_capacity) return;
+
+    alloc_cap = (uint64_t)new_cap + 1;
+    new_used = (uint8_t *)kmalloc(alloc_cap * sizeof(uint8_t));
+    new_mapped = (uint8_t *)kmalloc(alloc_cap * sizeof(uint8_t));
+    new_phys = kmalloc(alloc_cap * KSTACK_USABLE_PAGES * sizeof(uint64_t));
+    if (!new_used || !new_mapped || !new_phys) {
+        if (new_used) kfree(new_used);
+        if (new_mapped) kfree(new_mapped);
+        if (new_phys) kfree(new_phys);
+        return;
+    }
+
+    memcpy(new_used, slot_used, new_cap * sizeof(uint8_t));
+    memcpy(new_mapped, slot_bottom_mapped, new_cap * sizeof(uint8_t));
+    memcpy(new_phys, slot_page_phys, new_cap * KSTACK_USABLE_PAGES * sizeof(uint64_t));
+    memset(new_used + new_cap, 0, sizeof(uint8_t));
+    memset(new_mapped + new_cap, 0, sizeof(uint8_t));
+    memset(new_phys + new_cap, 0, KSTACK_USABLE_PAGES * sizeof(uint64_t));
+
+    kfree(slot_used);
+    kfree(slot_bottom_mapped);
+    kfree(slot_page_phys);
+
+    slot_used = new_used;
+    slot_bottom_mapped = new_mapped;
+    slot_page_phys = new_phys;
+    kstack_capacity = new_cap;
 }
 
 int kstack_page_fault_handler(uint64_t fault_addr) {

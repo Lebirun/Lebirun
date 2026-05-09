@@ -52,7 +52,7 @@ static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) 
     result = fb_set_mode((uint64_t)width, height, (uint64_t)refresh_rate);
     if (result == 0) {
         fb = fb_get();
-        for (ci = 0; ci < NUM_CONSOLES; ci++) {
+        for (ci = 0; ci < tty_count; ci++) {
             if (fb) {
                 tty_winsize[ci].ws_col = fb->cols;
                 tty_winsize[ci].ws_row = fb->rows;

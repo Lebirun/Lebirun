@@ -313,7 +313,7 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
     exec_reclaim_kb = exec_page_cache_get_reclaimable_pages() * 4;
     avail_kb = free_pages_kb + exec_reclaim_kb;
     if (avail_kb > total_kb) avail_kb = total_kb;
-    mem_used_kb = used_kb > exec_reclaim_kb ? used_kb - exec_reclaim_kb : 0;
+    mem_used_kb = used_kb > exec_cache_kb ? used_kb - exec_cache_kb : 0;
 
     len = snprintf(buf, sizeof(buf),
         "MemTotal:      %8lu kB\n"
