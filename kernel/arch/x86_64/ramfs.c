@@ -1062,14 +1062,10 @@ static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags) {
         ramfs_node_unlock(rn);
         ramfs_unlock();
     }
-    
-    node->ref_count++;
 }
 
 static void ramfs_vfs_close(vfs_node_t *node) {
-    if (node && node->ref_count > 0) {
-        node->ref_count--;
-    }
+    (void)node;
 }
 
 static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {

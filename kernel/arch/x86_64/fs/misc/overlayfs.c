@@ -22,6 +22,27 @@ static ov_node_cache_entry_t *ov_node_cache;
 static uint64_t ov_node_cache_count = 0;
 static uint64_t ov_node_cache_capacity = 0;
 
+static void overlay_drop_node_refs(overlay_node_t *onode) {
+    if (!onode) return;
+    if (onode->lower_node) {
+        vfs_close(onode->lower_node);
+        onode->lower_node = NULL;
+    }
+    if (onode->upper_node) {
+        vfs_close(onode->upper_node);
+        onode->upper_node = NULL;
+    }
+}
+
+static void overlay_try_free_node(overlay_node_t *onode) {
+    if (!onode) return;
+    if (onode->refcount > 0) return;
+    if (onode->vfs.ref_count > 0) return;
+    overlay_drop_node_refs(onode);
+    onode->vfs.private_data = NULL;
+    kfree(onode);
+}
+
 static int ov_cache_ensure_space(void) {
     uint64_t new_cap;
     ov_node_cache_entry_t *new_cache;
@@ -50,19 +71,23 @@ void overlay_flush_cache(void) {
         onode = ov_node_cache[i].onode;
         if (!onode) continue;
         onode->refcount--;
-        if (onode->refcount <= 0) {
-            if (onode->lower_node) {
-                vfs_close(onode->lower_node);
-                onode->lower_node = NULL;
-            }
-            if (onode->upper_node) {
-                vfs_close(onode->upper_node);
-                onode->upper_node = NULL;
-            }
-            kfree(onode);
-        }
+        overlay_try_free_node(onode);
     }
     ov_node_cache_count = 0;
+    if (ov_node_cache) {
+        kfree(ov_node_cache);
+        ov_node_cache = NULL;
+        ov_node_cache_capacity = 0;
+    }
+}
+
+void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
+    if (nodes) *nodes = ov_node_cache_count;
+    if (capacity) *capacity = ov_node_cache_capacity;
+    if (bytes) {
+        *bytes = ov_node_cache_capacity * sizeof(ov_node_cache_entry_t) +
+                 ov_node_cache_count * sizeof(overlay_node_t);
+    }
 }
 
 static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
@@ -124,13 +149,7 @@ static void ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t
         ov_node_cache[ov_node_cache_capacity - 1].name[nlen] = '\0';
         ov_node_cache[ov_node_cache_capacity - 1].onode = onode;
         victim->refcount--;
-        if (victim->refcount <= 0) {
-            if (victim->lower_node)
-                vfs_close(victim->lower_node);
-            if (victim->upper_node)
-                vfs_close(victim->upper_node);
-            kfree(victim);
-        }
+        overlay_try_free_node(victim);
     }
 }
 
@@ -200,7 +219,7 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
     memcpy(onode->vfs.name, name, name_len);
     onode->vfs.name[name_len] = '\0';
     
-    onode->vfs.flags = effective->flags;
+    onode->vfs.flags = effective->flags & ~VFS_DYNAMIC;
     onode->vfs.mask = effective->mask;
     onode->vfs.uid = effective->uid;
     onode->vfs.gid = effective->gid;
@@ -375,14 +394,7 @@ static void overlay_vfs_close(vfs_node_t *node) {
     if (onode->refcount > 0) return;
 
     ov_cache_remove(onode);
-
-    if (onode->lower_node)
-        vfs_close(onode->lower_node);
-    if (onode->upper_node)
-        vfs_close(onode->upper_node);
-
-    node->private_data = NULL;
-    kfree(onode);
+    overlay_try_free_node(onode);
 }
 
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {

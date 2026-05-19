@@ -26,7 +26,7 @@ static volatile uint64_t print_queue_head = 0;
 static volatile uint64_t print_queue_tail = 0;
 static volatile uint64_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 32
+#define KLOG_MAX_ITEMS 16
 #define KLOG_MAX_LEN   128
 
 typedef struct {
@@ -51,7 +51,7 @@ static char klog_early_buf[KLOG_EARLY_SZ];
 static volatile int klog_early_pos = 0;
 static volatile int klog_early_done = 0;
 
-#define KPRINT_MAX_ITEMS 64
+#define KPRINT_MAX_ITEMS 32
 #define KPRINT_MAX_LEN   128
 
 typedef struct {
@@ -85,7 +85,7 @@ static uint64_t vring_selftest_pml4;
 static uint8_t *vring_selftest_buf;
 static task_t *vring_selftest_task_ref;
 
-#define SERIAL_RING_SIZE 8192
+#define SERIAL_RING_SIZE 4096
 static char *serial_ring;
 static volatile uint64_t serial_head = 0;
 static volatile uint64_t serial_tail = 0;
@@ -1093,8 +1093,6 @@ void kprint_flush(void) {
             total++;
         }
         while (klog_dequeue(&kit) == 0) {
-            if (!console_alt_screen_active(0))
-                console_write_to_fb_only(0, kit.msg, (size_t)kit.len);
             total++;
         }
         retries++;

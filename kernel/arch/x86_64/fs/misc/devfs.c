@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define DEVFS_INITIAL_BLOCKDEVS 4
 #define DEVFS_MAX_BLOCKDEVS 32
 
 typedef struct {
@@ -57,6 +58,25 @@ static vfs_node_t dev_fb0;
 static vfs_node_t *dev_ttys;
 static vfs_node_t dev_ttys_fallback[1];
 static int dev_tty_count;
+
+static int devfs_grow_blockdevs(void) {
+    int new_cap;
+    int i;
+    devfs_blockdev_t *new_blockdevs;
+
+    new_cap = devfs_blockdev_capacity * 2;
+    if (new_cap <= 0) new_cap = DEVFS_INITIAL_BLOCKDEVS;
+    if (new_cap > DEVFS_MAX_BLOCKDEVS) new_cap = DEVFS_MAX_BLOCKDEVS;
+    if (new_cap <= devfs_blockdev_capacity) return -1;
+    new_blockdevs = (devfs_blockdev_t *)krealloc(devfs_blockdevs, new_cap * sizeof(devfs_blockdev_t));
+    if (!new_blockdevs) return -1;
+    for (i = devfs_blockdev_capacity; i < new_cap; i++) {
+        memset(&new_blockdevs[i], 0, sizeof(devfs_blockdev_t));
+    }
+    devfs_blockdevs = new_blockdevs;
+    devfs_blockdev_capacity = new_cap;
+    return 0;
+}
 
 #define DEVFS_DIRENT_POOL_SIZE 4
 
@@ -386,6 +406,12 @@ static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t si
         abs_lba = lba;
     }
 
+    if (skip == 0 && (size % 512) == 0 && sector_count <= 128) {
+        if (ahci_read_sectors(port, abs_lba, sector_count, buffer) != 0)
+            return 0;
+        return size;
+    }
+
     tmp = (uint8_t *)kmalloc(sector_count * 512);
     if (!tmp)
         return 0;
@@ -429,6 +455,12 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
         abs_lba = bdev->start_lba + lba;
     } else {
         abs_lba = lba;
+    }
+
+    if (skip == 0 && (size % 512) == 0 && sector_count <= 128) {
+        if (ahci_write_sectors(port, abs_lba, sector_count, buffer) != 0)
+            return 0;
+        return size;
     }
 
     tmp = (uint8_t *)kmalloc(sector_count * 512);
@@ -657,7 +689,7 @@ void devfs_init(void) {
     vfs_fs_type_t *fs_type;
 
     devfs_dirent_index = 0;
-    devfs_blockdev_capacity = DEVFS_MAX_BLOCKDEVS;
+    devfs_blockdev_capacity = DEVFS_INITIAL_BLOCKDEVS;
     devfs_blockdevs = (devfs_blockdev_t *)kmalloc(devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
     memset(devfs_blockdevs, 0, devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
 
@@ -1001,8 +1033,18 @@ int devfs_register_blockdev(const char *name, uint64_t port_index) {
         }
     }
 
-    if (slot < 0)
-        return -1;
+    if (slot < 0) {
+        if (devfs_grow_blockdevs() < 0)
+            return -1;
+        for (i = 0; i < devfs_blockdev_capacity; i++) {
+            if (!devfs_blockdevs[i].in_use) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -1;
+    }
 
     memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
     devfs_blockdevs[slot].in_use = 1;
@@ -1054,8 +1096,18 @@ int devfs_register_cdrom(const char *name, uint64_t port_index) {
         }
     }
 
-    if (slot < 0)
-        return -1;
+    if (slot < 0) {
+        if (devfs_grow_blockdevs() < 0)
+            return -1;
+        for (i = 0; i < devfs_blockdev_capacity; i++) {
+            if (!devfs_blockdevs[i].in_use) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -1;
+    }
 
     memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
     devfs_blockdevs[slot].in_use = 1;
@@ -1102,8 +1154,18 @@ int devfs_register_partition(const char *name, uint64_t port_index,
         }
     }
 
-    if (slot < 0)
-        return -1;
+    if (slot < 0) {
+        if (devfs_grow_blockdevs() < 0)
+            return -1;
+        for (i = 0; i < devfs_blockdev_capacity; i++) {
+            if (!devfs_blockdevs[i].in_use) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -1;
+    }
 
     memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
     devfs_blockdevs[slot].in_use = 1;

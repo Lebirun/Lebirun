@@ -118,18 +118,8 @@ lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 .S.o:
 	$(MSG_AS)$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
-$(WOLFSSL_DIR)/%.o: $(WOLFSSL_DIR)/%.c
-	@mkdir -p $(dir $@)
-	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
-
-$(ARCHDIR)/drivers/net/tls.o: $(ARCHDIR)/drivers/net/tls.c
-	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
-
 $(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
-
-$(ARCHDIR)/wolfssl_glue.o: $(ARCHDIR)/wolfssl_glue.c
-	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) $(WOLFSSL_CPPFLAGS)
 
 $(OBJS): $(CONFIG_FILE)
 
@@ -155,8 +145,6 @@ clean:
 	rm -f $(UNIFONT_OBJ)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
-	rm -f $(WOLFSSL_DIR)/wolfcrypt/src/*.o $(WOLFSSL_DIR)/wolfcrypt/src/*.d
-	rm -f $(WOLFSSL_DIR)/src/*.o $(WOLFSSL_DIR)/src/*.d
 	$(MAKE) -C crypto clean
 
 install-headers:

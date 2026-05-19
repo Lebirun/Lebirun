@@ -282,6 +282,10 @@ registers_t* interrupt_handler(registers_t* regs)
                                     current_task->user_pages[current_task->user_pages_count] = new_phys;
                                     current_task->user_pages_count++;
                                     current_task->stack_size += PAGE_SIZE;
+                                } else {
+                                    vmm_unmap_page_in_pml4(current_task->pml4_phys, fault_page);
+                                    pfa_free(new_phys);
+                                    return regs;
                                 }
                                 return regs;
                             }
@@ -386,6 +390,10 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
                                 current_task->user_pages_count++;
                                 current_task->stack_size += PAGE_SIZE;
+                            } else {
+                                vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
+                                pfa_free(sc_new_phys);
+                                return regs;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
                                 regs->return_cr3 = sc_expected_pd;
@@ -410,6 +418,10 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages = sc_new_user_pages;
                                 current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
                                 current_task->user_pages_count++;
+                            } else {
+                                vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
+                                pfa_free(sc_new_phys);
+                                return regs;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
                                 regs->return_cr3 = sc_expected_pd;
@@ -434,6 +446,10 @@ registers_t* interrupt_handler(registers_t* regs)
                                 current_task->user_pages = sc_new_user_pages;
                                 current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
                                 current_task->user_pages_count++;
+                            } else {
+                                vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
+                                pfa_free(sc_new_phys);
+                                return regs;
                             }
                             if (sc_actual_cr3 != sc_expected_pd) {
                                 regs->return_cr3 = sc_expected_pd;
@@ -537,6 +553,8 @@ registers_t* interrupt_handler(registers_t* regs)
                 if (current_task) {
                     current_task->cr3 = new_cr3;
                 }
+                regs->entry_cr3 = new_cr3;
+                regs->return_cr3 = new_cr3;
                 
                 exec_cleanup_enqueue(current_task->exec_old_pml4,
                                      current_task->exec_old_pages,
@@ -546,6 +564,7 @@ registers_t* interrupt_handler(registers_t* regs)
                 current_task->exec_old_pages_count = 0;
                 current_task->exec_old_pml4 = 0;
                 current_task->exec_completed = 0;
+                exec_cleanup_drain();
             }
             
             if (current_task && current_task->state == TASK_DEAD) {
@@ -593,8 +612,6 @@ registers_t* interrupt_handler(registers_t* regs)
             }
 
             wake_sleeping_tasks();
-            reap_request();
-            exec_drain_request();
 
             extern void fb_tick(void);
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));

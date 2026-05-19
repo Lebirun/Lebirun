@@ -153,6 +153,9 @@ static int e1000_init_rx(e1000_device_t *dev) {
     uint64_t rx_ring_virt;
     uint64_t buf_phys;
     uint64_t buf_virt;
+    uint64_t page_phys;
+    uint64_t page_virt;
+    uint64_t offset;
     uint32_t rctl;
     int i;
 
@@ -167,13 +170,22 @@ static int e1000_init_rx(e1000_device_t *dev) {
     dev->rx_descs_phys = rx_ring_phys;
 
     for (i = 0; i < E1000_NUM_RX_DESC; i++) {
-        buf_phys = pfa_alloc();
-        if (!buf_phys) return -1;
+        page_phys = 0;
+        if ((i & 1) == 0) {
+            page_phys = pfa_alloc();
+            if (!page_phys) return -1;
 
-        buf_virt = (KERNEL_VMA + 0x3D100000ULL) + i * PAGE_SIZE;
-        vmm_map_page(buf_virt, buf_phys, 0x003);
-        memset((void *)buf_virt, 0, PAGE_SIZE);
+            page_virt = (KERNEL_VMA + 0x3D100000ULL) + (i / 2) * PAGE_SIZE;
+            vmm_map_page(page_virt, page_phys, 0x003);
+            memset((void *)page_virt, 0, PAGE_SIZE);
+        } else {
+            page_phys = dev->rx_buffers_phys[i - 1] & ~(PAGE_SIZE - 1);
+            page_virt = (uint64_t)dev->rx_buffers[i - 1] & ~(PAGE_SIZE - 1);
+        }
 
+        offset = (uint64_t)(i & 1) * E1000_RX_BUFFER_SIZE;
+        buf_phys = page_phys + offset;
+        buf_virt = page_virt + offset;
         dev->rx_buffers[i] = (uint8_t *)buf_virt;
         dev->rx_buffers_phys[i] = buf_phys;
 
@@ -203,6 +215,11 @@ static int e1000_init_tx(e1000_device_t *dev) {
     uint64_t tx_ring_virt;
     uint64_t buf_phys;
     uint64_t buf_virt;
+    uint64_t page_phys;
+    uint64_t page_virt;
+    uint64_t tx_page_phys;
+    uint64_t tx_page_virt;
+    uint64_t offset;
     uint32_t tctl;
     int i;
 
@@ -217,17 +234,32 @@ static int e1000_init_tx(e1000_device_t *dev) {
     dev->tx_descs_phys = tx_ring_phys;
 
     for (i = 0; i < E1000_NUM_TX_DESC; i++) {
-        buf_phys = pfa_alloc();
-        if (!buf_phys) return -1;
+        page_phys = 0;
+        if (i < E1000_TX_BUFFER_DESC) {
+            if ((i & 1) == 0) {
+                tx_page_phys = pfa_alloc();
+                if (!tx_page_phys) return -1;
+                tx_page_virt = (KERNEL_VMA + 0x3D300000ULL) + (i / 2) * PAGE_SIZE;
+                vmm_map_page(tx_page_virt, tx_page_phys, 0x003);
+                memset((void *)tx_page_virt, 0, PAGE_SIZE);
+            } else {
+                tx_page_phys = dev->tx_buffers_phys[i - 1] & ~(PAGE_SIZE - 1);
+                tx_page_virt = (uint64_t)dev->tx_buffers[i - 1] & ~(PAGE_SIZE - 1);
+            }
+            page_phys = tx_page_phys;
+            page_virt = tx_page_virt;
+            offset = (uint64_t)(i & 1) * E1000_RX_BUFFER_SIZE;
+            buf_phys = page_phys + offset;
+            buf_virt = page_virt + offset;
+            dev->tx_buffers[i] = (uint8_t *)buf_virt;
+            dev->tx_buffers_phys[i] = buf_phys;
+            dev->tx_descs[i].buffer_addr = buf_phys;
+        } else {
+            dev->tx_buffers[i] = dev->tx_buffers[i - E1000_TX_BUFFER_DESC];
+            dev->tx_buffers_phys[i] = dev->tx_buffers_phys[i - E1000_TX_BUFFER_DESC];
+            dev->tx_descs[i].buffer_addr = dev->tx_buffers_phys[i];
+        }
 
-        buf_virt = (KERNEL_VMA + 0x3D300000ULL) + i * PAGE_SIZE;
-        vmm_map_page(buf_virt, buf_phys, 0x003);
-        memset((void *)buf_virt, 0, PAGE_SIZE);
-
-        dev->tx_buffers[i] = (uint8_t *)buf_virt;
-        dev->tx_buffers_phys[i] = buf_phys;
-
-        dev->tx_descs[i].buffer_addr = buf_phys;
         dev->tx_descs[i].status = E1000_TXD_STAT_DD;
         dev->tx_descs[i].cmd = 0;
     }
@@ -265,6 +297,8 @@ void e1000_disable_interrupts(e1000_device_t *dev) {
 int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
     e1000_device_t *dev;
     uint32_t cur;
+    uint32_t shared;
+    uint32_t alias;
     volatile int i;
     int ret;
     uint64_t wait;
@@ -284,6 +318,18 @@ int e1000_send(netif_t *netif, uint8_t *data, uint64_t len) {
         if (wait > 100000) {
             e1000_unlock(&e1000_tx_lock);
             return -1;
+        }
+    }
+
+    for (alias = E1000_TX_BUFFER_DESC; alias < E1000_NUM_TX_DESC; alias += E1000_TX_BUFFER_DESC) {
+        shared = (cur + alias) % E1000_NUM_TX_DESC;
+        while (!(dev->tx_descs[shared].status & E1000_TXD_STAT_DD)) {
+            for (i = 0; i < 1000; i++);
+            wait++;
+            if (wait > 100000) {
+                e1000_unlock(&e1000_tx_lock);
+                return -1;
+            }
         }
     }
 
@@ -432,8 +478,13 @@ e1000_device_t *e1000_get_device(void) {
 }
 
 uint64_t e1000_get_allocated_pages(void) {
+    uint64_t rx_pages;
+    uint64_t tx_pages;
+
     if (!g_e1000_dev.initialized) return 0;
-    return 2 + E1000_NUM_RX_DESC + E1000_NUM_TX_DESC;
+    rx_pages = (E1000_NUM_RX_DESC + 1) / 2;
+    tx_pages = (E1000_TX_BUFFER_DESC + 1) / 2;
+    return 2 + rx_pages + tx_pages;
 }
 
 void e1000_print_status(e1000_device_t *dev) {

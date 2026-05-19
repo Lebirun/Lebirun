@@ -490,7 +490,7 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
                 ext4_write_group_desc_internal(fs, group, &desc);
 
                 fs->sb.s_free_inodes_count--;
-                ext4_write_superblock(fs);
+                fs->super_dirty = true;
 
                 uint32_t ino = group * fs->sb.s_inodes_per_group + bit + 1;
 
@@ -559,7 +559,7 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino) {
     ext4_write_group_desc_internal(fs, group, &desc);
 
     fs->sb.s_free_inodes_count++;
-    ext4_write_superblock(fs);
+    fs->super_dirty = true;
 
     return 0;
 }

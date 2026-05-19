@@ -220,7 +220,10 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
         if (flags & VFS_O_TRUNC)
             want |= VFS_PERM_WRITE;
         perm_ret = vfs_check_perm(node, want);
-        if (perm_ret < 0) return perm_ret;
+        if (perm_ret < 0) {
+            vfs_release(node);
+            return perm_ret;
+        }
     }
 
     if ((flags & VFS_O_TRUNC) && node->truncate) {
@@ -228,7 +231,10 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     }
 
     fd = task_fd_alloc_from(0);
-    if (fd < 0) return fd;
+    if (fd < 0) {
+        vfs_release(node);
+        return fd;
+    }
 
     vfs_open(node, flags);
 
@@ -283,18 +289,23 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 static int sys_vfs_read(int fd, const char *buf, int len) {
     uint64_t buf_addr;
     uint64_t bytes;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
     if (!buf || len <= 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
+    if (!vfs_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+    if (bytes > (uint64_t)len) bytes = (uint64_t)len;
     tfd->offset += bytes;
     return (int)bytes;
 }
@@ -386,18 +397,23 @@ static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
 static int sys_vfs_write(int fd, const char *buf, int len) {
     uint64_t buf_addr;
     uint64_t bytes;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
     if (!buf || len <= 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
+    if (!vfs_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
+    if (bytes > (uint64_t)len) bytes = (uint64_t)len;
     tfd->offset += bytes;
     return (int)bytes;
 }

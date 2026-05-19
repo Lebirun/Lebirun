@@ -177,6 +177,8 @@ typedef struct squashfs_vfs_node {
     uint32_t rd_last_inode_number;
     uint8_t *rd_cached_data;
     uint64_t rd_cached_size;
+    int cached;
+    struct squashfs_vfs_node *next_all;
     dirent_t rd_dirent;
 } squashfs_vfs_node_t;
 
@@ -184,5 +186,9 @@ void squashfs_init(uint64_t mod_start, uint64_t mod_end);
 void squashfs_vfs_register(void);
 squashfs_context_t *squashfs_get_context(void);
 int squashfs_decompress(uint8_t *src, uint64_t src_len, uint8_t *dst, uint64_t dst_len, uint16_t comp_id);
+void squashfs_flush_cache(void);
+void squashfs_set_access_blocked(int blocked);
+void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, uint64_t *data_bytes);
+void squashfs_decomp_stats(uint64_t *failures, uint64_t *oversize, uint64_t *padded);
 
 #endif

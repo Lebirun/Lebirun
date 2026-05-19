@@ -121,6 +121,7 @@ int heap_check_canaries(void *ptr) {
     
     if (!ptr) return -1;
     if (is_early_heap_ptr(ptr)) return 0;
+    if (slab_owns(ptr)) return 0;
     
     block = get_block_from_ptr(ptr);
     
@@ -142,7 +143,7 @@ int heap_check_canaries(void *ptr) {
     if (tail != HEAP_CANARY_TAIL) {
         printf("HEAP CORRUPTION: Tail canary corrupted at 0x%016lX (expected 0x%08lX, got 0x%08lX) - buffer overflow!\n",
                (uint64_t)ptr, (unsigned long)HEAP_CANARY_TAIL, tail);
-        printf("  Block size: %u, alloc_size: %u\n", block->size, block->alloc_size);
+        printf("  Block size: %u, alloc_size: %u caller=0x%016lX\n", block->size, block->alloc_size, block->alloc_caller);
         return -1;
     }
     
@@ -222,6 +223,7 @@ static void split_block(heap_block_t *block, size_t size) {
         new_block->magic = HEAP_MAGIC;
         new_block->size = remaining;
         new_block->alloc_size = 0;
+        new_block->alloc_caller = 0;
         new_block->flags = 0;
         new_block->is_free = 1;
         new_block->next = block->next;
@@ -316,11 +318,17 @@ static void heap_trim(void) {
     last = NULL;
     cur = kernel_heap.free_list;
     while (cur) {
-        last = cur;
+        if (cur->is_free) {
+            block_end = (uint64_t)cur + sizeof(heap_block_t) + cur->size;
+            if (block_end == kernel_heap.end_addr) {
+                last = cur;
+                break;
+            }
+        }
         cur = cur->next;
     }
 
-    if (!last || !last->is_free) return;
+    if (!last) return;
 
     block_end = (uint64_t)last + sizeof(heap_block_t) + last->size;
     if (block_end != kernel_heap.end_addr) return;
@@ -328,6 +336,7 @@ static void heap_trim(void) {
     trim_start = ((uint64_t)last + sizeof(heap_block_t) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     if (trim_start >= kernel_heap.end_addr) return;
+    if (trim_start <= (uint64_t)last + sizeof(heap_block_t)) return;
 
     for (pg = trim_start; pg < kernel_heap.end_addr; pg += PAGE_SIZE) {
         pdpt_idx = (pg >> 30) & 0x1FF;
@@ -351,16 +360,6 @@ static void heap_trim(void) {
 
     new_end = trim_start;
     last->size = new_end - (uint64_t)last - sizeof(heap_block_t);
-
-    if (last->size == 0) {
-        if (last->prev) {
-            last->prev->next = NULL;
-        } else {
-            kernel_heap.free_list = NULL;
-        }
-        new_end = (uint64_t)last;
-    }
-
     kernel_heap.end_addr = new_end;
     kernel_heap.total_size = new_end - kernel_heap.start_addr;
 }
@@ -432,6 +431,7 @@ void heap_init(void) {
         initial_block->magic = HEAP_MAGIC;
         initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
         initial_block->alloc_size = 0;
+        initial_block->alloc_caller = 0;
         initial_block->flags = 0;
         initial_block->is_free = 1;
         initial_block->next = NULL;
@@ -450,7 +450,10 @@ void heap_init(void) {
     printf("Early heap used: %u / %u bytes\n", early_heap_used, early_heap_total);
 }
 
-static void *kmalloc_internal(size_t size) {
+uint64_t heap_get_early_total(void) { return early_heap_total; }
+uint64_t heap_get_early_used(void) { return early_heap_used; }
+
+static void *kmalloc_internal(size_t size, uint64_t caller) {
     size_t orig_size;
     size_t total_size;
     heap_block_t *block;
@@ -489,6 +492,7 @@ static void *kmalloc_internal(size_t size) {
                 initial_block->magic = HEAP_MAGIC;
                 initial_block->size = kernel_heap.total_size - sizeof(heap_block_t);
                 initial_block->alloc_size = 0;
+                initial_block->alloc_caller = 0;
                 initial_block->flags = 0;
                 initial_block->is_free = 1;
                 initial_block->next = NULL;
@@ -542,6 +546,7 @@ static void *kmalloc_internal(size_t size) {
             new_block->magic = HEAP_MAGIC;
             new_block->size = new_block_size;
             new_block->alloc_size = 0;
+            new_block->alloc_caller = 0;
             new_block->flags = 0;
             new_block->is_free = 1;
             new_block->next = NULL;
@@ -580,6 +585,7 @@ alloc_found:
 
     block->is_free = 0;
     block->alloc_size = orig_size;
+    block->alloc_caller = caller;
     block->flags = 0;
     kernel_heap.used_size += block->size + sizeof(heap_block_t);
 
@@ -607,7 +613,7 @@ void *kmalloc(size_t size) {
         if (result) return result;
     }
     heap_lock_acquire();
-    result = kmalloc_internal(size);
+    result = kmalloc_internal(size, (uint64_t)(uintptr_t)__builtin_return_address(0));
     heap_lock_release();
     return result;
 }
@@ -1013,5 +1019,60 @@ void heap_verify(void) {
     
     if (corruption_found > 0) {
         printf("heap_verify: FOUND %d CANARY CORRUPTIONS!\n", corruption_found);
+    }
+}
+
+void heap_profile(char *out, uint64_t out_size) {
+    heap_block_t *block;
+    uint64_t callers[32];
+    uint64_t caller_bytes[32];
+    uint64_t caller_count[32];
+    uint64_t n;
+    uint64_t i;
+    uint64_t j;
+    uint64_t found;
+    uint64_t baddr;
+    uint64_t bend;
+    int written;
+    int r;
+    int skip;
+
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    n = 0;
+    heap_lock_acquire();
+    block = (heap_block_t *)kernel_heap.start_addr;
+    while (block && (uint64_t)block < kernel_heap.end_addr) {
+        baddr = (uint64_t)(uintptr_t)block;
+        bend = baddr + sizeof(heap_block_t) + block->size;
+        skip = ((uint64_t)(uintptr_t)out >= baddr && (uint64_t)(uintptr_t)out < bend) ? 1 : 0;
+        if (!block->is_free && block->alloc_size > 0 && !skip) {
+            found = 0;
+            for (j = 0; j < n; j++) {
+                if (callers[j] == block->alloc_caller) {
+                    caller_bytes[j] += block->alloc_size;
+                    caller_count[j]++;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && n < 32) {
+                callers[n] = block->alloc_caller;
+                caller_bytes[n] = block->alloc_size;
+                caller_count[n] = 1;
+                n++;
+            }
+        }
+        if (!block->next) break;
+        block = block->next;
+    }
+    heap_lock_release();
+    written = 0;
+    for (i = 0; i < n; i++) {
+        r = snprintf(out + written, out_size - written,
+                     "caller=0x%016lX count=%lu bytes=%lu\n",
+                     callers[i], caller_count[i], caller_bytes[i]);
+        if (r <= 0 || (uint64_t)(written + r) >= out_size) break;
+        written += r;
     }
 }

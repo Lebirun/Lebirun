@@ -16,6 +16,8 @@ int smp_processor_id(void);
 #define MAX_PHYSICAL_MEMORY 0x10000000000ULL
 #define TOTAL_PAGES (MAX_PHYSICAL_MEMORY / PAGE_SIZE)
 #define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
+#define VMM_PTE_COW 0x200ULL
+#define VMM_PTE_NOFREE 0x400ULL
 
 extern uint64_t total_pages_managed;
 
@@ -46,6 +48,7 @@ typedef struct heap_block {
     uint64_t magic;
     uint64_t size;
     uint64_t alloc_size;
+    uint64_t alloc_caller;
     uint64_t flags;
     uint8_t is_free;
     struct heap_block *next;
@@ -85,8 +88,12 @@ uint64_t vmm_create_vring_pml4(void);
 void vmm_free_vring_pml4(uint64_t pml4_phys);
 uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count);
 void vmm_free_pml4(uint64_t pml4_phys);
+void vmm_relax_single_cow_pages(uint64_t pml4_phys);
 void vmm_set_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_cr3(void);
+void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size);
+uint64_t vmm_count_user_page_tables(uint64_t pml4_phys);
+uint64_t vmm_count_present_pages_in_range(uint64_t pml4_phys, uint64_t start, uint64_t end);
 
 void vmm_register_kernel_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_kernel_cr3(void);
@@ -111,6 +118,9 @@ void pfa_ref_inc(uint64_t phys_addr);
 int pfa_ref_dec(uint64_t phys_addr);
 uint8_t pfa_ref_get(uint64_t phys_addr);
 void pfa_cow_release64(uint64_t phys_addr);
+void pfa_ref_gc(void);
+uint64_t pfa_ref_active_nodes(void);
+uint64_t pfa_ref_free_nodes(void);
 
 int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys);
 
@@ -127,6 +137,7 @@ void kfree_aligned(void *ptr);
 void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
+void heap_profile(char *out, uint64_t out_size);
 uint64_t heap_free_space(void);
 int is_early_heap_ptr(void *ptr);
 void heap_reclaim_unused(void);
@@ -146,6 +157,8 @@ int heap_validate_ptr(void *ptr);
     (((a) > SIZE_MAX - (b)) ? 0 : (*(result) = (a) + (b), 1))
 
 uint64_t heap_block_size_for_ptr(void *ptr);
+uint64_t heap_get_early_total(void);
+uint64_t heap_get_early_used(void);
 void heap_verify(void);
 void vmm_debug_page(uint64_t virt_addr);
 

@@ -32,5 +32,7 @@ int overlayfs_init(void);
 void overlayfs_vfs_register(void);
 overlay_context_t *overlayfs_create(vfs_node_t *lower_root, vfs_node_t *upper_root);
 vfs_node_t *overlayfs_mount(overlay_context_t *ctx, const char *mountpoint);
+void overlay_flush_cache(void);
+void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes);
 
 #endif

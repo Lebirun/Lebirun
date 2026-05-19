@@ -12,6 +12,7 @@ static uint64_t cursor_prev_y = 0;
 static int cursor_visible = 1;
 static int cursor_drawn = 0;
 static int cursor_hidden_by_app = 0;
+static int cursor_restoring = 0;
 static int is_tty_mode = 0;
 static uint64_t original_fb_width = 0;
 static uint64_t original_fb_height = 0;
@@ -156,17 +157,51 @@ static void fb_grow_screen_buffer(uint64_t needed_rows) {
     screen_buffer_rows = new_rows;
 }
 
+static uint64_t fb_attr_color(uint8_t idx, int bright) {
+    static const uint64_t normal[8] = {
+        0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
+        0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
+    };
+    static const uint64_t intense[8] = {
+        0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
+        0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
+    };
+
+    idx &= 7;
+    return bright ? intense[idx] : normal[idx];
+}
+
 void fb_reclaim_unused(void) {
+    if (!console_is_initialized()) return;
+    if (screen_buffer) {
+        kfree(screen_buffer);
+        screen_buffer = NULL;
+    }
+    if (screen_fg_buf) {
+        kfree(screen_fg_buf);
+        screen_fg_buf = NULL;
+    }
+    if (screen_bg_buf) {
+        kfree(screen_bg_buf);
+        screen_bg_buf = NULL;
+    }
+    screen_buffer_rows = 0;
 }
 
 static void fb_restore_cell(uint64_t cx, uint64_t cy) {
     uint64_t saved_fg;
     uint64_t saved_bg;
+    uint64_t fg;
+    uint64_t bg;
     char ch;
+    uint8_t attr;
 
     ch = ' ';
+    attr = 0x70;
     if (cy < screen_buffer_rows && cx < MAX_COLS && screen_buffer)
         ch = screen_buffer[cy][cx];
+    else if (console_is_initialized())
+        console_get_cell(console_get_current(), cx, cy, &ch, &attr);
 
     saved_fg = fb.fg_color;
     saved_bg = fb.bg_color;
@@ -174,9 +209,16 @@ static void fb_restore_cell(uint64_t cx, uint64_t cy) {
     if (cy < screen_buffer_rows && cx < MAX_COLS && screen_fg_buf && screen_bg_buf) {
         fb.fg_color = screen_fg_buf[cy][cx];
         fb.bg_color = screen_bg_buf[cy][cx];
+    } else if (console_is_initialized()) {
+        fg = attr >> 4;
+        bg = attr & 0x0F;
+        fb.fg_color = fb_attr_color((uint8_t)(fg & 7), fg >= 8);
+        fb.bg_color = fb_attr_color((uint8_t)(bg & 7), bg >= 8);
     }
 
+    cursor_restoring = 1;
     fb_putchar(ch, cx, cy);
+    cursor_restoring = 0;
 
     fb.fg_color = saved_fg;
     fb.bg_color = saved_bg;
@@ -676,6 +718,13 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
 
     if (cx >= fb.cols || cy >= fb.rows) {
         return;
+    }
+
+    if (cursor_drawn && !cursor_restoring) {
+        if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
+            fb_restore_cell(cursor_prev_x, cursor_prev_y);
+        }
+        cursor_drawn = 0;
     }
     
     if (cy < screen_buffer_rows && cx < MAX_COLS && screen_buffer) {

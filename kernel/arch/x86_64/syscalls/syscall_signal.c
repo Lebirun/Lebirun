@@ -108,8 +108,10 @@ static task_signals_t *get_task_signals(void) {
 int task_has_sigint_ignored(void) {
     task_signals_t *sigs;
 
-    sigs = get_task_signals();
+    if (!current_task) return 0;
+    sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return 0;
+    if (sigs->owner_pid != current_task->pid) return 0;
     return sigs->actions[2].sa_handler == SIG_IGN;
 }
 
@@ -117,8 +119,13 @@ void task_reset_signals_on_exec(void) {
     task_signals_t *sigs;
     int i;
 
-    sigs = get_task_signals();
+    if (!current_task) return;
+    sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return;
+    if (sigs->owner_pid != current_task->pid) {
+        init_signal_slot(sigs, current_task->pid);
+        return;
+    }
 
     sigs->pending.sig[0] = 0;
     sigs->blocked.sig[0] = 0;
@@ -138,8 +145,10 @@ int task_has_pending_signals(void) {
     task_signals_t *sigs;
     unsigned long unblocked;
 
-    sigs = get_task_signals();
+    if (!current_task) return 0;
+    sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return 0;
+    if (sigs->owner_pid != current_task->pid) return 0;
     unblocked = sigs->pending.sig[0] & ~sigs->blocked.sig[0];
     return unblocked != 0;
 }
@@ -148,24 +157,41 @@ static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     task_signals_t *sigs;
     uint64_t act_addr;
     uint64_t old_addr;
+    sigaction_k local_act;
+    sigaction_k default_act;
 
     if (signum < 1 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
-    
-    sigs = get_task_signals();
-    if (!sigs) return -ESRCH;
-    
+
     act_addr = (uint64_t)(uintptr_t)act_ptr;
     old_addr = (uint64_t)oldact_ptr;
-    
+
+    memset(&default_act, 0, sizeof(default_act));
+    default_act.sa_handler = SIG_DFL;
+    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        memcpy((void *)old_addr, &sigs->actions[signum], sizeof(sigaction_k));
+        if (sigs && sigs->owner_pid == current_task->pid) {
+            memcpy((void *)old_addr, &sigs->actions[signum], sizeof(sigaction_k));
+        } else {
+            memcpy((void *)old_addr, &default_act, sizeof(sigaction_k));
+        }
     }
-    
+
     if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000) {
-        memcpy(&sigs->actions[signum], (void *)act_addr, sizeof(sigaction_k));
+        memcpy(&local_act, (void *)act_addr, sizeof(sigaction_k));
+        if (local_act.sa_handler == SIG_DFL && local_act.sa_flags == 0 &&
+            local_act.sa_restorer == NULL && local_act.sa_mask[0] == 0 &&
+            local_act.sa_mask[1] == 0 && (!sigs || sigs->owner_pid != current_task->pid)) {
+            return 0;
+        }
+        if (!sigs || sigs->owner_pid != current_task->pid) {
+            sigs = get_task_signals();
+            if (!sigs) return -ESRCH;
+        }
+        memcpy(&sigs->actions[signum], &local_act, sizeof(sigaction_k));
     }
-    
+
     return 0;
 }
 
@@ -174,21 +200,35 @@ static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
     uint64_t set_addr;
     uint64_t old_addr;
     sigset_k local_set;
-
-    sigs = get_task_signals();
-    if (!sigs) return -ESRCH;
+    sigset_k empty_set;
 
     set_addr = (uint64_t)(uintptr_t)set_ptr;
     old_addr = (uint64_t)oldset_ptr;
+    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    memset(&empty_set, 0, sizeof(empty_set));
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        memcpy((void *)old_addr, &sigs->blocked, sizeof(sigset_k));
+        if (sigs && sigs->owner_pid == current_task->pid) {
+            memcpy((void *)old_addr, &sigs->blocked, sizeof(sigset_k));
+        } else {
+            memcpy((void *)old_addr, &empty_set, sizeof(sigset_k));
+        }
     }
 
     if (set_addr && set_addr < KERNEL_VMA && set_addr >= 0x1000) {
         memcpy(&local_set, (const void *)set_addr, sizeof(sigset_k));
 
         local_set.sig[0] &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
+
+        if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) return -EINVAL;
+        if ((!sigs || sigs->owner_pid != current_task->pid) &&
+            (local_set.sig[0] == 0 || how == SIG_UNBLOCK)) {
+            return 0;
+        }
+        if (!sigs || sigs->owner_pid != current_task->pid) {
+            sigs = get_task_signals();
+            if (!sigs) return -ESRCH;
+        }
 
         switch (how) {
             case SIG_BLOCK:
@@ -211,16 +251,19 @@ static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
 static int sys_rt_sigpending(int set_ptr, const char *sigsetsize_ptr, int unused) {
     task_signals_t *sigs;
     uint64_t addr;
+    sigset_k empty_set;
 
     (void)sigsetsize_ptr; (void)unused;
-    
-    sigs = get_task_signals();
-    if (!sigs) return -ESRCH;
-    
+
     addr = (uint64_t)set_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    memcpy((void *)addr, &sigs->pending, sizeof(sigset_k));
+    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    if (sigs && sigs->owner_pid == current_task->pid) {
+        memcpy((void *)addr, &sigs->pending, sizeof(sigset_k));
+    } else {
+        memset(&empty_set, 0, sizeof(empty_set));
+        memcpy((void *)addr, &empty_set, sizeof(sigset_k));
+    }
     return 0;
 }
 
@@ -250,14 +293,15 @@ static int sys_rt_sigsuspend(int mask_ptr, const char *sigsetsize_ptr, int unuse
 }
 
 static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
-    (void)unused1; (void)unused2; (void)unused3;
     task_signals_t *sigs;
     registers_t *regs;
     uint64_t frame_addr;
     uint64_t *frame;
 
-    sigs = get_task_signals();
-    if (sigs) {
+    (void)unused1; (void)unused2; (void)unused3;
+
+    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    if (sigs && sigs->owner_pid == current_task->pid) {
         sigs->in_signal = 0;
     }
 
@@ -308,18 +352,17 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, int info_ptr) {
 int deliver_signal_to_task(task_t *target, int sig) {
     task_signals_t *sigs;
     sigaction_k *act;
+    int has_sigs;
 
     if (!target) return -ESRCH;
+    if (target->state == TASK_DEAD) return 0;
+    if (sig < 1 || sig >= NSIG) return -EINVAL;
 
     sigs = (task_signals_t *)target->signal_data;
-    if (!sigs) {
-        sigs = (task_signals_t *)kmalloc(sizeof(task_signals_t));
-        if (!sigs) return -ENOMEM;
-        init_signal_slot(sigs, target->pid);
-        target->signal_data = sigs;
-    }
+    has_sigs = (sigs && sigs->owner_pid == target->pid);
 
     if (target->pid == 1) {
+        if (!has_sigs) return 0;
         act = &sigs->actions[sig];
         if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)
             return 0;
@@ -342,7 +385,26 @@ int deliver_signal_to_task(task_t *target, int sig) {
         return 0;
     }
 
+    if (!has_sigs) {
+        switch (sig) {
+            case SIGCHLD:
+            case SIGURG:
+            case SIGWINCH:
+                return 0;
+            default:
+                if (target != current_task) {
+                    task_kill(target, 128 + sig);
+                } else {
+                    task_exit_deferred(128 + sig);
+                }
+                return 0;
+        }
+    }
+
     act = &sigs->actions[sig];
+    if (act->sa_handler == SIG_IGN) {
+        return 0;
+    }
     if (act->sa_handler == SIG_DFL) {
         switch (sig) {
             case SIGCHLD:
@@ -497,23 +559,31 @@ static int sys_sigaltstack(int ss_ptr, const char *old_ss_ptr, int unused) {
     task_signals_t *sigs;
     uint64_t old_addr;
     uint64_t new_addr;
+    stack_k empty_stack;
 
     (void)unused;
-    
-    sigs = get_task_signals();
-    if (!sigs) return -ESRCH;
-    
+
     old_addr = (uint64_t)(uintptr_t)old_ss_ptr;
     new_addr = (uint64_t)ss_ptr;
-    
+    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        memcpy((void *)old_addr, &sigs->altstack, sizeof(stack_k));
+        if (sigs && sigs->owner_pid == current_task->pid) {
+            memcpy((void *)old_addr, &sigs->altstack, sizeof(stack_k));
+        } else {
+            memset(&empty_stack, 0, sizeof(empty_stack));
+            memcpy((void *)old_addr, &empty_stack, sizeof(stack_k));
+        }
     }
-    
+
     if (new_addr && new_addr < KERNEL_VMA && new_addr >= 0x1000) {
+        if (!sigs || sigs->owner_pid != current_task->pid) {
+            sigs = get_task_signals();
+            if (!sigs) return -ESRCH;
+        }
         memcpy(&sigs->altstack, (void *)new_addr, sizeof(stack_k));
     }
-    
+
     return 0;
 }
 
@@ -541,8 +611,9 @@ void signal_deliver_pending(registers_t *regs) {
     if (!current_task || !regs) return;
     if (!current_task->is_user) return;
 
-    sigs = get_task_signals();
+    sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs || sigs->in_signal) return;
+    if (sigs->owner_pid != current_task->pid) return;
 
     for (sig = 1; sig < 32; sig++) {
         if (!(sigs->pending.sig[0] & (1UL << (sig - 1)))) continue;
@@ -629,12 +700,10 @@ void signals_init_task(task_t *task) {
     if (!task) return;
     if (task->signal_data) {
         slot = (task_signals_t *)task->signal_data;
+        init_signal_slot(slot, task->pid);
     } else {
-        slot = (task_signals_t *)kmalloc(sizeof(task_signals_t));
-        if (!slot) return;
-        task->signal_data = slot;
+        task->signal_data = NULL;
     }
-    init_signal_slot(slot, task->pid);
 }
 
 void syscalls_signal_init(void) {

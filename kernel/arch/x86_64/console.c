@@ -89,54 +89,58 @@ static int console_ensure_alloc(int n) {
     if (!console_valid_index(n)) return -1;
     con = &consoles[n];
     if (con->allocated) return 0;
-    rows = console_calc_rows();
+    if (n == current_console) {
+        rows = console_calc_rows();
+    } else {
+        rows = CONSOLE_INACTIVE_INITIAL_ROWS;
+    }
     if (rows == 0) rows = 25;
     con->buffer_rows = rows;
     con->buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
     if (!con->buffer) return -1;
-    con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
-    if (!con->color_buffer) {
-        kfree(con->buffer);
-        con->buffer = NULL;
-        return -1;
+    if (n == current_console) {
+        con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+        if (!con->color_buffer) {
+            kfree(con->buffer);
+            con->buffer = NULL;
+            return -1;
+        }
     }
     con->line_wrapped = (uint8_t *)kmalloc(rows);
     if (!con->line_wrapped) {
-        kfree(con->color_buffer);
+        if (con->color_buffer) kfree(con->color_buffer);
         kfree(con->buffer);
         con->buffer = NULL;
         con->color_buffer = NULL;
         return -1;
     }
+    memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
+    if (con->color_buffer) memset(con->color_buffer, 0x70, rows * CONSOLE_BUFFER_COLS);
+    memset(con->line_wrapped, 0, rows);
+    con->allocated = 1;
+    return 0;
+}
+
+static int console_ensure_write_buffer(console_t *con) {
+    if (!con || !con->allocated) return -1;
+    if (con->write_buffer && con->write_flags && con->write_buffer_size > 0) return 0;
     con->write_buffer_size = CONSOLE_WRITE_BUFFER_INIT;
+    con->write_head = 0;
+    con->write_tail = 0;
     con->write_buffer = (char *)kmalloc(con->write_buffer_size);
     if (!con->write_buffer) {
-        kfree(con->line_wrapped);
-        kfree(con->color_buffer);
-        kfree(con->buffer);
-        con->buffer = NULL;
-        con->color_buffer = NULL;
-        con->line_wrapped = NULL;
+        con->write_buffer_size = 0;
         return -1;
     }
     con->write_flags = (uint8_t *)kmalloc(con->write_buffer_size);
     if (!con->write_flags) {
         kfree(con->write_buffer);
-        kfree(con->line_wrapped);
-        kfree(con->color_buffer);
-        kfree(con->buffer);
-        con->buffer = NULL;
-        con->color_buffer = NULL;
-        con->line_wrapped = NULL;
         con->write_buffer = NULL;
+        con->write_buffer_size = 0;
         return -1;
     }
-    memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
-    memset(con->color_buffer, 0x70, rows * CONSOLE_BUFFER_COLS);
-    memset(con->line_wrapped, 0, rows);
     memset(con->write_buffer, 0, con->write_buffer_size);
     memset(con->write_flags, 0, con->write_buffer_size);
-    con->allocated = 1;
     return 0;
 }
 
@@ -269,19 +273,22 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     old_rows = con->buffer_rows;
     new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
     if (!new_buf) return;
-    new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
-    if (!new_color) {
-        kfree(new_buf);
-        return;
+    new_color = NULL;
+    if (con->color_buffer) {
+        new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
+        if (!new_color) {
+            kfree(new_buf);
+            return;
+        }
     }
     new_wrapped = (uint8_t *)kmalloc(needed_rows);
     if (!new_wrapped) {
-        kfree(new_color);
+        if (new_color) kfree(new_color);
         kfree(new_buf);
         return;
     }
     memset(new_buf, ' ', needed_rows * CONSOLE_BUFFER_COLS);
-    memset(new_color, 0x70, needed_rows * CONSOLE_BUFFER_COLS);
+    if (new_color) memset(new_color, 0x70, needed_rows * CONSOLE_BUFFER_COLS);
     memset(new_wrapped, 0, needed_rows);
     copy_rows = old_rows;
     if (copy_rows > needed_rows) copy_rows = needed_rows;
@@ -350,7 +357,59 @@ static void console_grow_write_buffer(console_t *con) {
 }
 
 void console_reclaim_unused(void) {
-    return;
+    uint64_t flags;
+
+    if (!console_initialized) return;
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    if (!console_redraw_pending) {
+        if (console_redraw_buffer) {
+            kfree(console_redraw_buffer);
+            console_redraw_buffer = NULL;
+        }
+        if (console_redraw_color_buffer) {
+            kfree(console_redraw_color_buffer);
+            console_redraw_color_buffer = NULL;
+        }
+        console_redraw_buffer_rows = 0;
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+static void console_drop_redraw_buffers(void) {
+    uint64_t flags;
+
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    if (!console_redraw_pending) {
+        if (console_redraw_buffer) {
+            kfree(console_redraw_buffer);
+            console_redraw_buffer = NULL;
+        }
+        if (console_redraw_color_buffer) {
+            kfree(console_redraw_color_buffer);
+            console_redraw_color_buffer = NULL;
+        }
+        console_redraw_buffer_rows = 0;
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+}
+
+int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t *attr) {
+    console_t *con;
+
+    if (!console_valid_index(console_num)) return -1;
+    con = &consoles[console_num];
+    if (!con->allocated || !con->buffer) return -1;
+    if (x >= CONSOLE_BUFFER_COLS || y >= con->buffer_rows) return -1;
+    if (ch) *ch = con->buffer[y][x];
+    if (attr) {
+        if (con->color_buffer) *attr = con->color_buffer[y][x];
+        else *attr = 0x70;
+    }
+    return 0;
 }
 
 static uint64_t console_redraw_cursor_x = 0;
@@ -704,6 +763,7 @@ static void console_redraw_sync(int console_num) {
             yield();
         }
     }
+    console_drop_redraw_buffers();
 }
 
 static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
@@ -981,13 +1041,15 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         if (shift > buf_rows) shift = buf_rows;
         memmove(con->buffer, con->buffer + shift,
                 (buf_rows - shift) * CONSOLE_BUFFER_COLS);
-        memmove(con->color_buffer, con->color_buffer + shift,
-                (buf_rows - shift) * CONSOLE_BUFFER_COLS);
+        if (con->color_buffer)
+            memmove(con->color_buffer, con->color_buffer + shift,
+                    (buf_rows - shift) * CONSOLE_BUFFER_COLS);
         memmove(con->line_wrapped, con->line_wrapped + shift,
                 (buf_rows - shift) * sizeof(con->line_wrapped[0]));
         for (r = buf_rows - shift; r < buf_rows; r++) {
             memset(con->buffer[r], ' ', CONSOLE_BUFFER_COLS);
-            memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
+            if (con->color_buffer)
+                memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
             con->line_wrapped[r] = 0;
         }
         con->cursor_y = new_rows - 1;
@@ -1074,15 +1136,6 @@ void console_init(void) {
     
     alloc_ok = console_ensure_alloc(0);
     if (alloc_ok != 0) return;
-    
-    {
-        uint64_t init_rows;
-        init_rows = console_calc_rows();
-        if (init_rows == 0) init_rows = 25;
-        console_redraw_buffer_rows = init_rows;
-        console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(init_rows * CONSOLE_BUFFER_COLS);
-        console_redraw_color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(init_rows * CONSOLE_BUFFER_COLS);
-    }
     
     current_console = 0;
     console_switching = 0;
@@ -1192,6 +1245,16 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+    if (from_interrupt && new_con->buffer_rows < rows) {
+        console_switching = 0;
+        console_switch_in_progress = 0;
+        pending_console_switch = console_num;
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        if (writer_thread) wake_task(writer_thread);
+        return;
+    }
+    console_grow_buffer(new_con, rows);
     
     console_clamp_cursors_locked(cols, rows);
     
@@ -1243,11 +1306,18 @@ void console_switch(int console_num) {
 }
 
 void console_switch_via_interrupt(int console_num) {
+    uint64_t flags;
+
     if (!console_valid_index(console_num)) return;
     if (!console_initialized) return;
     if (console_num == current_console) return;
 
-    console_switch_internal_impl(console_num, 1);
+    flags = console_irqsave();
+    pending_console_switch = console_num;
+    console_irqrestore(flags);
+    if (writer_thread) {
+        wake_task(writer_thread);
+    }
 }
 
 void console_process_pending(void) {
@@ -1798,15 +1868,15 @@ static void console_putchar_to_nolock(int console_num, char c) {
     
     con = &consoles[console_num];
     fb = fb_get();
+    is_active = (console_num == current_console && !console_switch_in_progress);
     rows = fb ? fb->rows : 25;
     cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 25;
     if (cols == 0) cols = 80;
+    if (!is_active && con->buffer_rows > 0) rows = con->buffer_rows;
 
     console_grow_buffer(con, rows);
     if (rows > con->buffer_rows) rows = con->buffer_rows;
-
-    is_active = (console_num == current_console && !console_switch_in_progress);
 
     if (con->esc_state == 1) {
         if (c == '[') {
@@ -2088,19 +2158,14 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     uint64_t sc;
     console_t *con;
     framebuffer_t *fb;
+    int use_async_writer;
 
     if (!console_initialized) {
         for (i = 0; i < size; i++) terminal_putchar(data[i]);
         return;
     }
 
-    if (console_num == 0 && !skip_serial_async && !writer_thread_running) {
-        if (kprint_is_ready()) {
-            kprint_serial_async(data, size);
-        } else {
-            serial_write_direct(data, size);
-        }
-    }
+    use_async_writer = writer_thread_running && size > 512;
 
     target_console = console_num;
     if (!console_valid_index(target_console)) {
@@ -2114,7 +2179,19 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
     con = &consoles[target_console];
 
-    if (writer_thread_running) {
+    if (use_async_writer && console_ensure_write_buffer(con) != 0) {
+        use_async_writer = 0;
+    }
+
+    if (console_num == 0 && !skip_serial_async && !use_async_writer) {
+        if (kprint_is_ready()) {
+            kprint_serial_async(data, size);
+        } else {
+            serial_write_direct(data, size);
+        }
+    }
+
+    if (use_async_writer) {
         i = 0;
         while (i < size) {
             flags = console_irqsave();
@@ -2144,6 +2221,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                     yield();
                 }
             }
+            if (pending_console_switch >= 0 && console_interrupts_enabled()) {
+                console_process_pending();
+            }
         }
         if (writer_thread) {
             wake_task(writer_thread);
@@ -2170,14 +2250,15 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
         con = &consoles[target_console];
         fb = fb_get();
+        is_active = (target_console == current_console && !console_switch_in_progress);
         rows = fb ? fb->rows : 25;
         cols = fb ? fb->cols : 80;
         if (rows == 0) rows = 25;
         if (cols == 0) cols = 80;
+        if (!is_active && con->buffer_rows > 0) rows = con->buffer_rows;
         console_grow_buffer(con, rows);
         if (rows > con->buffer_rows) rows = con->buffer_rows;
         if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
-        is_active = (target_console == current_console && !console_switch_in_progress);
         fb_ok = is_active && fb && !batch_fb_skip;
 
         for (i = 0; i < chunk; i++) {
@@ -2455,6 +2536,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             console_process_alt_screen_pending(target_console);
 
         off += chunk;
+        if (pending_console_switch >= 0 && console_interrupts_enabled()) {
+            console_process_pending();
+        }
         if (current_task && console_interrupts_enabled() && (off % 4096) == 0) {
             yield();
         }
@@ -2481,6 +2565,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         spin_unlock(&console_lock);
         console_irqrestore(flags);
         fb_flush();
+    }
+    if (pending_console_switch >= 0 && console_interrupts_enabled()) {
+        console_process_pending();
     }
 }
 

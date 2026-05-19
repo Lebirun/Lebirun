@@ -300,12 +300,12 @@ fi
 
 if [ -d "root" ]; then
   CURRENT_STEP=$((CURRENT_STEP + 1))
-  if [ ! -f "rootfs.squashfs" ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
+  if [ ! -f "rootfs.squashfs" ] || [ build.sh -nt rootfs.squashfs ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
     bar_print "$(printf '\033[1;36mBuilding SquashFS rootfs...\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building SquashFS rootfs"
     if command -v mksquashfs >/dev/null 2>&1; then
       rm -f rootfs.squashfs
-      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -comp xz -no-xattrs -noappend -quiet -no-progress \
+      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -comp xz -b 131072 -no-xattrs -noappend -quiet -no-progress \
         -e usr/include/c++ usr/lib/libstdc++.a usr/lib/libsupc++.a usr/lib/libgcc.a
     else
       run_cmd "Building rootfs (fallback)" ./mkinitrd.sh root rootfs.squashfs

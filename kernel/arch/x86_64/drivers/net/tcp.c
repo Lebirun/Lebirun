@@ -189,20 +189,15 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->recv_window = TCP_WINDOW_SIZE;
     sock->send_window = TCP_WINDOW_SIZE;
 
-    sock->recv_buffer_size = 16384;
+    sock->recv_buffer_size = 8192;
     sock->recv_buffer = (uint8_t *)kmalloc(sock->recv_buffer_size);
     if (!sock->recv_buffer) {
         kfree(sock);
         return NULL;
     }
 
-    sock->send_buffer_size = 8192;
-    sock->send_buffer = (uint8_t *)kmalloc(sock->send_buffer_size);
-    if (!sock->send_buffer) {
-        kfree(sock->recv_buffer);
-        kfree(sock);
-        return NULL;
-    }
+    sock->send_buffer_size = 0;
+    sock->send_buffer = NULL;
 
     sock->netif = netif_get_default();
     sock->retx_head = NULL;
@@ -269,6 +264,7 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t ti
     while (sock->state == TCP_STATE_SYN_SENT) {
         __asm__ volatile("sti");
         netif_poll_all();
+        tcp_tick();
         if (task_has_pending_signals()) {
             sock->state = TCP_STATE_CLOSED;
             return -1;
@@ -309,6 +305,7 @@ int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
 
         __asm__ volatile("sti");
         netif_poll_all();
+        tcp_tick();
         schedule();
     }
 
@@ -337,6 +334,7 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
     while (sock->recv_buffer_head == sock->recv_buffer_tail) {
         __asm__ volatile("sti");
         netif_poll_all();
+        tcp_tick();
         if (task_has_pending_signals()) {
             return -1;
         }
@@ -393,6 +391,7 @@ int tcp_disconnect(tcp_socket_t *sock, uint64_t timeout_ms) {
                sock->state != TCP_STATE_TIME_WAIT) {
             __asm__ volatile("sti");
             netif_poll_all();
+            tcp_tick();
             if (task_has_pending_signals()) {
                 sock->state = TCP_STATE_CLOSED;
                 return -1;

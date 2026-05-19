@@ -21,6 +21,9 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     int oldest = -1;
     uint32_t oldest_tick = 0xFFFFFFFF;
     int i;
+    uint32_t old_count;
+    uint32_t new_count;
+    ext4_block_cache_entry_t *new_cache;
 
     for (i = 0; i < (int)fs->block_cache_count; i++) {
         if (!fs->block_cache[i].data) {
@@ -32,23 +35,28 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         }
     }
 
-    if (oldest < 0 && fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
-        uint32_t new_count;
-        ext4_block_cache_entry_t *new_cache;
-
-        new_count = fs->block_cache_count * 2;
-        if (new_count > EXT4_CACHE_BLOCKS_MAX)
-            new_count = EXT4_CACHE_BLOCKS_MAX;
-        new_cache = (ext4_block_cache_entry_t *)kmalloc(new_count * sizeof(ext4_block_cache_entry_t));
-        if (new_cache) {
-            memcpy(new_cache, fs->block_cache, fs->block_cache_count * sizeof(ext4_block_cache_entry_t));
-            memset(new_cache + fs->block_cache_count, 0, (new_count - fs->block_cache_count) * sizeof(ext4_block_cache_entry_t));
-            oldest = (int)fs->block_cache_count;
-            kfree(fs->block_cache);
+    if (oldest < 0) {
+        if (fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
+            old_count = fs->block_cache_count;
+            new_count = old_count * 2;
+            if (new_count <= old_count) {
+                return -1;
+            }
+            if (new_count > EXT4_CACHE_BLOCKS_MAX) {
+                new_count = EXT4_CACHE_BLOCKS_MAX;
+            }
+            new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
+                new_count * sizeof(ext4_block_cache_entry_t));
+            if (!new_cache) {
+                return -1;
+            }
+            memset(new_cache + old_count, 0,
+                (new_count - old_count) * sizeof(ext4_block_cache_entry_t));
             fs->block_cache = new_cache;
             fs->block_cache_count = new_count;
-            return oldest;
+            return (int)old_count;
         }
+        return -1;
     }
 
     if (oldest >= 0 && fs->block_cache[oldest].dirty) {
@@ -64,12 +72,15 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
 }
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
-    ahci_port_t *port = ahci_get_port(fs->port_index);
+    ahci_port_t *port;
+    uint64_t lba;
+
+    port = ahci_get_port(fs->port_index);
     if (!port) {
         return -1;
     }
 
-    uint64_t lba = fs->partition_start_lba + block * fs->sectors_per_block;
+    lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
     if (ahci_read_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
@@ -79,12 +90,15 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
 }
 
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
-    ahci_port_t *port = ahci_get_port(fs->port_index);
+    ahci_port_t *port;
+    uint64_t lba;
+
+    port = ahci_get_port(fs->port_index);
     if (!port) {
         return -1;
     }
 
-    uint64_t lba = fs->partition_start_lba + block * fs->sectors_per_block;
+    lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
     if (ahci_write_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
@@ -127,11 +141,66 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
     return fs->block_cache[idx].data;
 }
 
+uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block) {
+    int idx;
+
+    idx = find_cache_entry(fs, block);
+    if (idx >= 0) {
+        fs->block_cache[idx].ref_count++;
+        fs->block_cache[idx].last_access = ++cache_tick_counter;
+        return fs->block_cache[idx].data;
+    }
+
+    idx = find_free_cache_entry(fs);
+    if (idx < 0) {
+        return NULL;
+    }
+
+    if (!fs->block_cache[idx].data) {
+        fs->block_cache[idx].data = (uint8_t *)kmalloc(fs->block_size);
+        if (!fs->block_cache[idx].data) {
+            return NULL;
+        }
+    }
+
+    fs->block_cache[idx].block_num = (uint32_t)block;
+    fs->block_cache[idx].ref_count = 1;
+    fs->block_cache[idx].dirty = false;
+    fs->block_cache[idx].last_access = ++cache_tick_counter;
+
+    return fs->block_cache[idx].data;
+}
+
 void ext4_release_block(ext4_fs_t *fs, uint64_t block) {
     int idx = find_cache_entry(fs, block);
     if (idx >= 0 && fs->block_cache[idx].ref_count > 0) {
         fs->block_cache[idx].ref_count--;
     }
+}
+
+int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
+    int reclaimed;
+    int i;
+
+    if (!fs) return 0;
+
+    reclaimed = 0;
+    for (i = 0; i < (int)fs->block_cache_count; i++) {
+        if (max_blocks != 0 && reclaimed >= (int)max_blocks) {
+            break;
+        }
+        if (fs->block_cache[i].data &&
+            fs->block_cache[i].ref_count == 0 &&
+            !fs->block_cache[i].dirty) {
+            kfree(fs->block_cache[i].data);
+            fs->block_cache[i].data = NULL;
+            fs->block_cache[i].block_num = 0;
+            fs->block_cache[i].last_access = 0;
+            reclaimed++;
+        }
+    }
+
+    return reclaimed;
 }
 
 void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block) {
@@ -210,7 +279,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     }
 
     port = ahci_get_port(fs->port_index);
-    max_run = 128 / fs->sectors_per_block;
+    max_run = 1;
 
     i = 0;
     while (i < dirty_count) {
@@ -298,9 +367,11 @@ int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
 }
 
 void ext4_flush_cache(ext4_fs_t *fs) {
+    int i;
+
     ext4_sync_blocks(fs);
     
-    for (int i = 0; i < (int)fs->block_cache_count; i++) {
+    for (i = 0; i < (int)fs->block_cache_count; i++) {
         if (fs->block_cache[i].data) {
             kfree(fs->block_cache[i].data);
             fs->block_cache[i].data = NULL;
@@ -343,14 +414,41 @@ static int ext4_write_group_desc(ext4_fs_t *fs, uint32_t group, ext4_group_desc_
 }
 
 int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
-    uint32_t start_group = 0;
-    if (hint > 0) {
-        start_group = (hint - fs->first_data_block) / fs->sb.s_blocks_per_group;
+    uint32_t start_group;
+    uint32_t start_bit;
+    uint32_t g;
+    uint32_t group;
+    ext4_group_desc_t desc;
+    uint64_t bitmap_block;
+    uint8_t *bitmap;
+    uint32_t blocks_in_group;
+    uint32_t pass;
+    uint32_t bit;
+    uint32_t limit;
+    uint32_t byte_idx;
+    uint32_t bit_idx;
+    uint64_t allocated;
+
+    if (!fs || fs->groups_count == 0) {
+        return -1;
     }
 
-    for (uint32_t g = 0; g < fs->groups_count; g++) {
-        uint32_t group = (start_group + g) % fs->groups_count;
-        ext4_group_desc_t desc;
+    start_group = 0;
+    start_bit = 0;
+    if (hint > fs->first_data_block) {
+        start_group = (hint - fs->first_data_block) / fs->sb.s_blocks_per_group;
+        start_bit = (hint - fs->first_data_block) % fs->sb.s_blocks_per_group;
+        if (start_group >= fs->groups_count) {
+            start_group = 0;
+            start_bit = 0;
+        }
+    } else if (fs->alloc_last_group < fs->groups_count) {
+        start_group = fs->alloc_last_group;
+        start_bit = fs->alloc_last_bit + 1;
+    }
+
+    for (g = 0; g < fs->groups_count; g++) {
+        group = (start_group + g) % fs->groups_count;
 
         if (ext4_read_group_desc(fs, group, &desc) != 0) {
             continue;
@@ -360,42 +458,58 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
             continue;
         }
 
-        uint64_t bitmap_block = desc.bg_block_bitmap_lo;
+        bitmap_block = desc.bg_block_bitmap_lo;
         if (fs->is_64bit) {
             bitmap_block |= ((uint64_t)desc.bg_block_bitmap_hi << 32);
         }
 
-        uint8_t *bitmap = ext4_get_block(fs, bitmap_block);
+        bitmap = ext4_get_block(fs, bitmap_block);
         if (!bitmap) {
             continue;
         }
 
-        uint32_t blocks_in_group = fs->sb.s_blocks_per_group;
+        blocks_in_group = fs->sb.s_blocks_per_group;
         if (group == fs->groups_count - 1) {
             blocks_in_group = (fs->sb.s_blocks_count_lo - fs->first_data_block) % fs->sb.s_blocks_per_group;
             if (blocks_in_group == 0) blocks_in_group = fs->sb.s_blocks_per_group;
         }
 
-        for (uint32_t bit = 0; bit < blocks_in_group; bit++) {
-            uint32_t byte_idx = bit / 8;
-            uint32_t bit_idx = bit % 8;
+        if (group != start_group || start_bit >= blocks_in_group) {
+            start_bit = 0;
+        }
 
-            if (!(bitmap[byte_idx] & (1 << bit_idx))) {
-                bitmap[byte_idx] |= (1 << bit_idx);
-                ext4_mark_block_dirty(fs, bitmap_block);
-                ext4_release_block(fs, bitmap_block);
+        for (pass = 0; pass < 2; pass++) {
+            bit = pass == 0 ? start_bit : 0;
+            limit = pass == 0 ? blocks_in_group : start_bit;
 
-                desc.bg_free_blocks_count_lo--;
-                ext4_write_group_desc(fs, group, &desc);
+            while (bit < limit) {
+                byte_idx = bit / 8;
+                bit_idx = bit % 8;
 
-                fs->sb.s_free_blocks_count_lo--;
-                ext4_write_superblock(fs);
+                if (!(bitmap[byte_idx] & (1 << bit_idx))) {
+                    bitmap[byte_idx] |= (1 << bit_idx);
+                    ext4_mark_block_dirty(fs, bitmap_block);
+                    ext4_release_block(fs, bitmap_block);
 
-                return fs->first_data_block + group * fs->sb.s_blocks_per_group + bit;
+                    desc.bg_free_blocks_count_lo--;
+                    ext4_write_group_desc(fs, group, &desc);
+
+                    fs->sb.s_free_blocks_count_lo--;
+                    fs->super_dirty = true;
+
+                    fs->alloc_last_group = group;
+                    fs->alloc_last_bit = bit;
+
+                    allocated = fs->first_data_block + group * fs->sb.s_blocks_per_group + bit;
+                    return (int)allocated;
+                }
+
+                bit++;
             }
         }
 
         ext4_release_block(fs, bitmap_block);
+        start_bit = 0;
     }
 
     return -1;
@@ -440,7 +554,7 @@ int ext4_free_block(ext4_fs_t *fs, uint64_t block) {
     ext4_write_group_desc(fs, group, &desc);
 
     fs->sb.s_free_blocks_count_lo++;
-    ext4_write_superblock(fs);
+    fs->super_dirty = true;
 
     return 0;
 }

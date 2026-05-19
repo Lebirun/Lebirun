@@ -28,6 +28,8 @@ typedef struct refht_node {
 
 static refht_node_t *refht_buckets[REFHT_BUCKETS];
 static refht_node_t *refht_free_list;
+static uint64_t refht_active_node_count = 0;
+static uint64_t refht_free_node_count = 0;
 static int refht_initialized = 0;
 static volatile int refht_lock_val = 0;
 
@@ -273,6 +275,7 @@ void pfa_free(uint64_t phys_addr) {
     uint64_t byte_idx;
     uint64_t bit_idx;
     uint64_t eflags;
+    uint8_t cur_ref;
 
     if (phys_addr % PAGE_SIZE != 0) {
         return;
@@ -287,11 +290,13 @@ void pfa_free(uint64_t phys_addr) {
     }
 
     if (pfa_refcounts && (uint64_t)idx < pfa_refcount_entries) {
-        uint8_t cur_ref;
         cur_ref = pfa_ref_get((uint64_t)(idx * PAGE_SIZE));
-        if (cur_ref > 0) {
+        if (cur_ref > 1) {
             pfa_ref_dec((uint64_t)(idx * PAGE_SIZE));
             return;
+        }
+        if (cur_ref == 1) {
+            pfa_ref_dec((uint64_t)(idx * PAGE_SIZE));
         }
     }
 
@@ -616,6 +621,8 @@ static void refht_init(void) {
     if (refht_initialized) return;
     memset(refht_buckets, 0, sizeof(refht_buckets));
     refht_free_list = NULL;
+    refht_active_node_count = 0;
+    refht_free_node_count = 0;
     refht_initialized = 1;
 }
 
@@ -625,6 +632,7 @@ static refht_node_t *refht_alloc_node(void) {
     n = refht_free_list;
     if (n) {
         refht_free_list = n->next;
+        if (refht_free_node_count > 0) refht_free_node_count--;
         n->next = NULL;
         return n;
     }
@@ -640,6 +648,50 @@ static refht_node_t *refht_alloc_node(void) {
 static void refht_free_node(refht_node_t *n) {
     n->next = refht_free_list;
     refht_free_list = n;
+    refht_free_node_count++;
+}
+
+void pfa_ref_gc(void) {
+    refht_node_t *list;
+    refht_node_t *next;
+    uint64_t eflags;
+
+    if (!refht_initialized) return;
+    refht_lock_acquire(&eflags);
+    list = refht_free_list;
+    refht_free_list = NULL;
+    refht_free_node_count = 0;
+    refht_lock_release(eflags);
+
+    while (list) {
+        next = list->next;
+        kfree(list);
+        list = next;
+    }
+}
+
+uint64_t pfa_ref_active_nodes(void) {
+    uint64_t result;
+    uint64_t eflags;
+
+    result = 0;
+    if (!refht_initialized) return 0;
+    refht_lock_acquire(&eflags);
+    result = refht_active_node_count;
+    refht_lock_release(eflags);
+    return result;
+}
+
+uint64_t pfa_ref_free_nodes(void) {
+    uint64_t result;
+    uint64_t eflags;
+
+    result = 0;
+    if (!refht_initialized) return 0;
+    refht_lock_acquire(&eflags);
+    result = refht_free_node_count;
+    refht_lock_release(eflags);
+    return result;
 }
 
 static refht_node_t *refht_find(uint64_t page_idx, uint64_t bucket) {
@@ -683,6 +735,7 @@ void pfa_ref_inc(uint64_t phys_addr) {
             n->refcount = 1;
             n->next = refht_buckets[bucket];
             refht_buckets[bucket] = n;
+            refht_active_node_count++;
         }
     }
     refht_lock_release(eflags);
@@ -715,6 +768,7 @@ int pfa_ref_dec(uint64_t phys_addr) {
                     prev->next = n->next;
                 else
                     refht_buckets[bucket] = n->next;
+                if (refht_active_node_count > 0) refht_active_node_count--;
                 refht_free_node(n);
             }
             refht_lock_release(eflags);
@@ -747,6 +801,7 @@ uint8_t pfa_ref_get(uint64_t phys_addr) {
 
 void pfa_cow_release(uint64_t phys_addr) {
     int ref;
+    int remaining;
 
     if (!phys_addr) return;
     if (!refht_initialized) {
@@ -755,7 +810,10 @@ void pfa_cow_release(uint64_t phys_addr) {
     }
     ref = pfa_ref_get(phys_addr);
     if (ref > 1) {
-        pfa_ref_dec(phys_addr);
+        remaining = pfa_ref_dec(phys_addr);
+        if (remaining == 1) {
+            pfa_ref_dec(phys_addr);
+        }
         return;
     }
     if (ref == 1) {

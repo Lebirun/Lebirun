@@ -9,8 +9,8 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       16
-#define EXT4_CACHE_BLOCKS_MAX   128
+#define EXT4_CACHE_BLOCKS       4
+#define EXT4_CACHE_BLOCKS_MAX   32
 #define EXT4_INODE_CACHE_INIT   16
 #define EXT4_INODE_CACHE_MAX    256
 
@@ -57,8 +57,13 @@ typedef struct ext4_fs {
     uint32_t inode_cache_capacity;
     mutex_t lock;
     uint32_t cache_tick;
+    uint32_t alloc_last_group;
+    uint32_t alloc_last_bit;
+    bool super_dirty;
     vfs_node_t *root_node;
+    vfs_node_t *vfs_nodes;
     char mountpoint[VFS_MAX_PATH];
+    struct ext4_fs *next_mount;
 } ext4_fs_t;
 
 int ext4_read_superblock(ext4_fs_t *fs);
@@ -70,7 +75,9 @@ void ext4_print_superblock(ext4_superblock_t *sb);
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);
+uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block);
 void ext4_release_block(ext4_fs_t *fs, uint64_t block);
+int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 int ext4_sync_blocks(ext4_fs_t *fs);
 int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint);
@@ -98,6 +105,7 @@ int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t size);
 
 void ext4_init(void);
 void ext4_vfs_register(void);
+void ext4_drop_vfs_node(ext4_fs_t *fs, vfs_node_t *node);
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);

@@ -379,12 +379,16 @@ void keyboard_process_sigint(void)
     extern int *tty_pgrp;
     extern int tty_count;
     extern int deliver_signal_to_task(task_t *target, int sig);
-    extern task_t *all_tasks_head;
     int i;
     int fg;
     task_t *t;
+    task_t *target;
     int guard;
+    int count;
+    int j;
+    uintptr_t a;
     pid_t t_pgid;
+    pid_t pids[256];
 
     if (!kbd_consoles || !tty_termios || !tty_pgrp) return;
 
@@ -402,20 +406,31 @@ void keyboard_process_sigint(void)
         if (fg <= 0)
             continue;
 
+        count = 0;
+        lock_scheduler();
         t = all_tasks_head;
         guard = 0;
-        while (t && guard < 4096) {
-            uintptr_t a = (uintptr_t)t;
+        while (t && guard < 4096 && count < 256) {
+            a = (uintptr_t)t;
             if (a < KERNEL_VMA)
                 break;
             if ((a & 0xFFFF0000u) == 0xFEFE0000u)
                 break;
             t_pgid = t->pgid ? t->pgid : t->pid;
-            if (t_pgid == (pid_t)fg) {
-                deliver_signal_to_task(t, 2);
+            if (t_pgid == (pid_t)fg && t->is_user && t->state != TASK_DEAD) {
+                pids[count] = t->pid;
+                count++;
             }
             t = t->all_next;
             guard++;
+        }
+        unlock_scheduler();
+
+        for (j = 0; j < count; j++) {
+            target = task_find(pids[j]);
+            if (target && target->is_user && target->state != TASK_DEAD) {
+                deliver_signal_to_task(target, 2);
+            }
         }
     }
 }

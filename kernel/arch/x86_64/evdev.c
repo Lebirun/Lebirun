@@ -55,6 +55,20 @@ static const uint16_t scancode_to_evdev[128] = {
     KEY_RESERVED,  KEY_RESERVED,  KEY_RESERVED,  KEY_RESERVED
 };
 
+static void evdev_ensure_ring(struct evdev_device *dev) {
+    struct input_event *ring;
+
+    if (!dev) return;
+    if (dev->ring && dev->ring_capacity > 0) return;
+    ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
+    if (!ring) return;
+    memset(ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
+    dev->ring = ring;
+    dev->ring_capacity = EVDEV_BUF_INIT_EVENTS;
+    dev->head = 0;
+    dev->tail = 0;
+}
+
 static void evdev_ring_put(struct evdev_device *dev, const struct input_event *ev) {
     uint32_t next;
     uint32_t old_capacity;
@@ -184,6 +198,7 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
     if (!dev)
         return 0;
 
+    evdev_ensure_ring(dev);
     if (dev == &evdev_mouse)
         evdev_process_mouse();
 
@@ -335,7 +350,14 @@ static vfs_node_t *evdev_input_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-static void devfs_open_stub(vfs_node_t *node, uint64_t flags) { (void)node; (void)flags; }
+static void devfs_open_stub(vfs_node_t *node, uint64_t flags) {
+    struct evdev_device *dev;
+
+    (void)flags;
+    if (!node) return;
+    dev = (struct evdev_device *)node->private_data;
+    evdev_ensure_ring(dev);
+}
 static void devfs_close_stub(vfs_node_t *node) { (void)node; }
 
 vfs_node_t *evdev_get_input_dir(void) {
@@ -358,18 +380,8 @@ struct evdev_device *evdev_get_mouse(void) {
 
 void evdev_init(void) {
     int i;
-    struct input_event *kbd_ring;
-    struct input_event *mouse_ring;
-
-    kbd_ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
-    mouse_ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
 
     memset(&evdev_kbd, 0, sizeof(evdev_kbd));
-    evdev_kbd.ring = kbd_ring;
-    if (evdev_kbd.ring) {
-        evdev_kbd.ring_capacity = EVDEV_BUF_INIT_EVENTS;
-        memset(evdev_kbd.ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
-    }
     waitq_init(&evdev_kbd.waitq);
     strcpy(evdev_kbd.name, "Lebirun PS/2 Keyboard");
     evdev_kbd.id.bustype = BUS_I8042;
@@ -384,11 +396,6 @@ void evdev_init(void) {
     }
 
     memset(&evdev_mouse, 0, sizeof(evdev_mouse));
-    evdev_mouse.ring = mouse_ring;
-    if (evdev_mouse.ring) {
-        evdev_mouse.ring_capacity = EVDEV_BUF_INIT_EVENTS;
-        memset(evdev_mouse.ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
-    }
     waitq_init(&evdev_mouse.waitq);
     strcpy(evdev_mouse.name, "Lebirun PS/2 Mouse");
     evdev_mouse.id.bustype = BUS_I8042;

@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define ELF_STREAM_BUF_MIN PAGE_SIZE
+#define ELF_STREAM_CHUNK_SIZE 512
 
 int elf_validate(const uint8_t *data, uint64_t size) {
     if (!data || size < sizeof(Elf64_Ehdr)) {
@@ -374,43 +374,6 @@ static int elf_read_exact(vfs_node_t *node, uint64_t offset, uint64_t size, void
     return 0;
 }
 
-static uint8_t *elf_alloc_stream_buffer(uint64_t file_size, uint64_t *out_size) {
-    uint64_t free_bytes;
-    uint64_t free_pages;
-    uint64_t size;
-    uint8_t *buf;
-
-    free_pages = pfa_count_free();
-    free_bytes = free_pages * PAGE_SIZE;
-    size = file_size / 2;
-    if (size > free_bytes / 32) {
-        size = free_bytes / 32;
-    }
-    if (size < ELF_STREAM_BUF_MIN) {
-        size = ELF_STREAM_BUF_MIN;
-    }
-    if (file_size > 0 && size > file_size) {
-        size = file_size;
-    }
-    size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    if (file_size > 0 && size > file_size && file_size >= ELF_STREAM_BUF_MIN) {
-        size = file_size & ~(PAGE_SIZE - 1);
-    }
-    if (size < ELF_STREAM_BUF_MIN) {
-        size = ELF_STREAM_BUF_MIN;
-    }
-    buf = NULL;
-    while (size >= ELF_STREAM_BUF_MIN) {
-        buf = (uint8_t *)kmalloc(size);
-        if (buf) {
-            *out_size = size;
-            return buf;
-        }
-        size >>= 1;
-    }
-    return NULL;
-}
-
 int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count) {
     Elf64_Ehdr ehdr;
     Elf64_Phdr *phdr;
@@ -435,7 +398,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     uint64_t pie_base;
     uint64_t copied;
     uint64_t chunk;
-    uint8_t *tmp;
+    uint8_t tmp[ELF_STREAM_CHUNK_SIZE];
     int is_pie;
     int ret;
     Elf64_Dyn dyn;
@@ -510,7 +473,10 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     info->phnum = ehdr.e_phnum;
     info->phdr_vaddr = 0;
 
-    if (!is_pie) {
+    if (!is_pie && current_task && current_task->is_user) {
+        /* Demand-paged path for user exec: register file mappings and return.
+         * Skipped during boot (non-user current_task) to avoid adding mappings
+         * to the wrong task; falls through to the upfront-load path instead. */
         for (i = 0; i < ehdr.e_phnum; i++) {
             if (phdr[i].p_type == PT_PHDR) {
                 info->phdr_vaddr = phdr[i].p_vaddr;
@@ -560,8 +526,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     estimated_pages = count_loadable_pages_from_phdr(phdr, ehdr.e_phnum);
     page_list = NULL;
     page_index = 0;
-    tmp = NULL;
-    tmp_size = 0;
+    tmp_size = sizeof(tmp);
     ret = 0;
 
     if (out_pages && out_page_count) {
@@ -571,13 +536,6 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
             return -10;
         }
         memset(page_list, 0, estimated_pages * sizeof(uint64_t));
-    }
-
-    tmp = elf_alloc_stream_buffer(node->length, &tmp_size);
-    if (!tmp) {
-        if (page_list) kfree(page_list);
-        kfree(phdr);
-        return -10;
     }
 
     for (i = 0; i < ehdr.e_phnum; i++) {
@@ -712,7 +670,6 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
             }
             kfree(page_list);
         }
-        kfree(tmp);
         kfree(phdr);
         return ret;
     }
@@ -724,7 +681,6 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
         *out_page_count = page_index;
     }
 
-    kfree(tmp);
     kfree(phdr);
     return 0;
 }

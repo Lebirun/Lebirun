@@ -34,9 +34,11 @@ static task_creds_t *get_task_creds(void) {
         creds->sgid   = current_task->sgid;
         creds->fsuid  = current_task->fsuid;
         creds->fsgid  = current_task->fsgid;
+        memcpy(creds->groups, current_task->groups, sizeof(creds->groups));
+        creds->ngroups = current_task->ngroups;
         creds->umask_val = 022;
-        creds->pgid = current_task->pid;
-        creds->sid = current_task->pid;
+        creds->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+        creds->sid = current_task->sid ? current_task->sid : current_task->pid;
         current_task->creds_data = creds;
     }
     return creds;
@@ -44,26 +46,22 @@ static task_creds_t *get_task_creds(void) {
 
 static int sys_getuid(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    task_creds_t *creds = get_task_creds();
-    return creds ? (int)creds->uid : 0;
+    return current_task ? (int)current_task->uid : 0;
 }
 
 static int sys_getgid(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    task_creds_t *creds = get_task_creds();
-    return creds ? (int)creds->gid : 0;
+    return current_task ? (int)current_task->gid : 0;
 }
 
 static int sys_geteuid(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    task_creds_t *creds = get_task_creds();
-    return creds ? (int)creds->euid : 0;
+    return current_task ? (int)current_task->euid : 0;
 }
 
 static int sys_getegid(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    task_creds_t *creds = get_task_creds();
-    return creds ? (int)creds->egid : 0;
+    return current_task ? (int)current_task->egid : 0;
 }
 
 static void sync_creds_to_task(task_creds_t *creds) {
@@ -76,13 +74,31 @@ static void sync_creds_to_task(task_creds_t *creds) {
     current_task->sgid  = creds->sgid;
     current_task->fsuid = creds->fsuid;
     current_task->fsgid = creds->fsgid;
+    memcpy(current_task->groups, creds->groups, sizeof(current_task->groups));
+    current_task->ngroups = creds->ngroups;
+    current_task->pgid = creds->pgid;
+    current_task->sid = creds->sid;
 }
 
 static int sys_setuid(int uid, const char *unused1, int unused2) {
+    task_creds_t *creds;
+
     (void)unused1; (void)unused2;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
+    if (!current_task) return -ESRCH;
+    creds = (task_creds_t *)current_task->creds_data;
+    if (!creds) {
+        if (current_task->euid == 0) {
+            current_task->uid = (uint64_t)uid;
+            current_task->euid = (uint64_t)uid;
+            current_task->suid = (uint64_t)uid;
+            return 0;
+        }
+        if ((uint64_t)uid == current_task->uid || (uint64_t)uid == current_task->suid) {
+            current_task->euid = (uint64_t)uid;
+            return 0;
+        }
+        return -EPERM;
+    }
     if (creds->euid == 0) {
         creds->uid = (uint64_t)uid;
         creds->euid = (uint64_t)uid;
@@ -97,10 +113,24 @@ static int sys_setuid(int uid, const char *unused1, int unused2) {
 }
 
 static int sys_setgid(int gid, const char *unused1, int unused2) {
+    task_creds_t *creds;
+
     (void)unused1; (void)unused2;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
+    if (!current_task) return -ESRCH;
+    creds = (task_creds_t *)current_task->creds_data;
+    if (!creds) {
+        if (current_task->euid == 0) {
+            current_task->gid = (uint64_t)gid;
+            current_task->egid = (uint64_t)gid;
+            current_task->sgid = (uint64_t)gid;
+            return 0;
+        }
+        if ((uint64_t)gid == current_task->gid || (uint64_t)gid == current_task->sgid) {
+            current_task->egid = (uint64_t)gid;
+            return 0;
+        }
+        return -EPERM;
+    }
     if (creds->euid == 0) {
         creds->gid = (uint64_t)gid;
         creds->egid = (uint64_t)gid;
@@ -115,10 +145,18 @@ static int sys_setgid(int gid, const char *unused1, int unused2) {
 }
 
 static int sys_seteuid(int euid, const char *unused1, int unused2) {
+    task_creds_t *creds;
+
     (void)unused1; (void)unused2;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
+    if (!current_task) return -ESRCH;
+    creds = (task_creds_t *)current_task->creds_data;
+    if (!creds) {
+        if (current_task->euid == 0 || (uint64_t)euid == current_task->uid || (uint64_t)euid == current_task->suid) {
+            current_task->euid = (uint64_t)euid;
+            return 0;
+        }
+        return -EPERM;
+    }
     if (creds->euid == 0 || (uint64_t)euid == creds->uid || (uint64_t)euid == creds->suid) {
         creds->euid = (uint64_t)euid;
         sync_creds_to_task(creds);
@@ -128,10 +166,18 @@ static int sys_seteuid(int euid, const char *unused1, int unused2) {
 }
 
 static int sys_setegid(int egid, const char *unused1, int unused2) {
+    task_creds_t *creds;
+
     (void)unused1; (void)unused2;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
+    if (!current_task) return -ESRCH;
+    creds = (task_creds_t *)current_task->creds_data;
+    if (!creds) {
+        if (current_task->euid == 0 || (uint64_t)egid == current_task->gid || (uint64_t)egid == current_task->sgid) {
+            current_task->egid = (uint64_t)egid;
+            return 0;
+        }
+        return -EPERM;
+    }
     if (creds->euid == 0 || (uint64_t)egid == creds->gid || (uint64_t)egid == creds->sgid) {
         creds->egid = (uint64_t)egid;
         sync_creds_to_task(creds);
@@ -222,31 +268,27 @@ static int sys_setresgid(int rgid, const char *egid_ptr, int sgid) {
 }
 
 static int sys_getresuid(int ruid_ptr, const char *euid_ptr, int suid_ptr) {
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
     uint64_t r_addr = (uint64_t)ruid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)euid_ptr;
     uint64_t s_addr = (uint64_t)suid_ptr;
-    
-    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = creds->uid;
-    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = creds->euid;
-    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = creds->suid;
+
+    if (!current_task) return -ESRCH;
+    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = current_task->uid;
+    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = current_task->euid;
+    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = current_task->suid;
     
     return 0;
 }
 
 static int sys_getresgid(int rgid_ptr, const char *egid_ptr, int sgid_ptr) {
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
     uint64_t r_addr = (uint64_t)rgid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)egid_ptr;
     uint64_t s_addr = (uint64_t)sgid_ptr;
-    
-    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = creds->gid;
-    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = creds->egid;
-    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = creds->sgid;
+
+    if (!current_task) return -ESRCH;
+    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = current_task->gid;
+    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = current_task->egid;
+    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = current_task->sgid;
     
     return 0;
 }
@@ -282,22 +324,21 @@ static int sys_setfsgid(int fsgid, const char *unused1, int unused2) {
 }
 
 static int sys_getgroups(int size, const char *list_ptr, int unused) {
-    (void)unused;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
-    if (size == 0) return creds->ngroups;
-    
+    int count;
     uint64_t addr = (uint64_t)(uintptr_t)list_ptr;
+
+    (void)unused;
+    if (!current_task) return -ESRCH;
+    if (size == 0) return current_task->ngroups;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    int count = (size < creds->ngroups) ? size : creds->ngroups;
-    memcpy((void *)addr, creds->groups, count * sizeof(uint64_t));
+    count = (size < current_task->ngroups) ? size : current_task->ngroups;
+    memcpy((void *)addr, current_task->groups, count * sizeof(uint64_t));
     
     return count;
 }
 
 static int sys_setgroups(int size, const char *list_ptr, int unused) {
+    uint64_t addr;
     (void)unused;
     task_creds_t *creds = get_task_creds();
     if (!creds) return -ESRCH;
@@ -307,12 +348,13 @@ static int sys_setgroups(int size, const char *list_ptr, int unused) {
     if (size < 0 || size > 16) return -EINVAL;
     
     if (size > 0) {
-        uint64_t addr = (uint64_t)(uintptr_t)list_ptr;
+        addr = (uint64_t)(uintptr_t)list_ptr;
         if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
         memcpy(creds->groups, (void *)addr, size * sizeof(uint64_t));
     }
     
     creds->ngroups = size;
+    sync_creds_to_task(creds);
     return 0;
 }
 
@@ -359,19 +401,19 @@ static int sys_getpgrp(int unused1, const char *unused2, int unused3) {
 }
 
 static int sys_setsid(int unused1, const char *unused2, int unused3) {
-    (void)unused1; (void)unused2; (void)unused3;
-    task_creds_t *creds = get_task_creds();
-    if (!creds) return -ESRCH;
-    
-    pid_t pid = current_task ? current_task->pid : 0;
-    
-    creds->sid = pid;
-    creds->pgid = pid;
+    task_creds_t *creds;
+    pid_t pid;
 
-    if (current_task) {
-        current_task->sid = pid;
-        current_task->pgid = pid;
+    (void)unused1; (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    pid = current_task->pid;
+    creds = (task_creds_t *)current_task->creds_data;
+    if (creds) {
+        creds->sid = pid;
+        creds->pgid = pid;
     }
+    current_task->sid = pid;
+    current_task->pgid = pid;
     
     return (int)pid;
 }
@@ -408,21 +450,20 @@ static int sys_gettid(int unused1, const char *unused2, int unused3) {
 }
 
 void creds_init_task(task_t *task) {
-    task_creds_t *creds;
-
     if (!task) return;
-    creds = (task_creds_t *)task->creds_data;
-    if (!creds) {
-        creds = (task_creds_t *)kmalloc(sizeof(task_creds_t));
-        if (!creds) return;
-        task->creds_data = creds;
-    }
-    memset(creds, 0, sizeof(task_creds_t));
-    creds->umask_val = 022;
-    creds->pgid = task->pid;
-    creds->sid = task->pid;
+    task->uid = 0;
+    task->gid = 0;
+    task->euid = 0;
+    task->egid = 0;
+    task->suid = 0;
+    task->sgid = 0;
+    task->fsuid = 0;
+    task->fsgid = 0;
+    memset(task->groups, 0, sizeof(task->groups));
+    task->ngroups = 0;
     task->pgid = task->pid;
     task->sid = task->pid;
+    task->creds_data = NULL;
 }
 
 void creds_copy_task(task_t *parent, task_t *child) {
@@ -432,27 +473,29 @@ void creds_copy_task(task_t *parent, task_t *child) {
     if (!parent || !child) return;
     pcreds = (task_creds_t *)parent->creds_data;
     ccreds = (task_creds_t *)child->creds_data;
+    child->uid   = parent->uid;
+    child->euid  = parent->euid;
+    child->suid  = parent->suid;
+    child->gid   = parent->gid;
+    child->egid  = parent->egid;
+    child->sgid  = parent->sgid;
+    child->fsuid = parent->fsuid;
+    child->fsgid = parent->fsgid;
+    memcpy(child->groups, parent->groups, sizeof(child->groups));
+    child->ngroups = parent->ngroups;
+    child->pgid = parent->pgid ? parent->pgid : child->pid;
+    child->sid = parent->sid ? parent->sid : child->pid;
+    child->ppid = parent->pid;
+    if (!pcreds) {
+        child->creds_data = NULL;
+        return;
+    }
     if (!ccreds) {
         ccreds = (task_creds_t *)kmalloc(sizeof(task_creds_t));
         if (!ccreds) return;
         child->creds_data = ccreds;
     }
-    if (pcreds) {
-        memcpy(ccreds, pcreds, sizeof(task_creds_t));
-    } else {
-        memset(ccreds, 0, sizeof(task_creds_t));
-        ccreds->uid   = parent->uid;
-        ccreds->euid  = parent->euid;
-        ccreds->suid  = parent->suid;
-        ccreds->gid   = parent->gid;
-        ccreds->egid  = parent->egid;
-        ccreds->sgid  = parent->sgid;
-        ccreds->fsuid = parent->fsuid;
-        ccreds->fsgid = parent->fsgid;
-        ccreds->umask_val = 022;
-        ccreds->pgid = child->pid;
-        ccreds->sid = child->pid;
-    }
+    memcpy(ccreds, pcreds, sizeof(task_creds_t));
     child->uid   = ccreds->uid;
     child->euid  = ccreds->euid;
     child->suid  = ccreds->suid;
@@ -461,6 +504,8 @@ void creds_copy_task(task_t *parent, task_t *child) {
     child->sgid  = ccreds->sgid;
     child->fsuid = ccreds->fsuid;
     child->fsgid = ccreds->fsgid;
+    memcpy(child->groups, ccreds->groups, sizeof(child->groups));
+    child->ngroups = ccreds->ngroups;
     child->pgid = ccreds->pgid;
     child->sid = ccreds->sid;
     child->ppid = parent->pid;

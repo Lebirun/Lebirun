@@ -281,7 +281,11 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
             phys_block = new_block;
         }
 
-        block = ext4_get_block(fs, phys_block);
+        if (block_off == 0 && to_write == fs->block_size) {
+            block = ext4_get_block_overwrite(fs, phys_block);
+        } else {
+            block = ext4_get_block(fs, phys_block);
+        }
         if (!block) {
             break;
         }

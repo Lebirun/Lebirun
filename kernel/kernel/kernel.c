@@ -16,7 +16,6 @@
 #include <lebirun/syscall.h>
 #include <lebirun/io.h>
 #include <lebirun/initrd.h>
-#include <lebirun/reclaim.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/squashfs.h>
 #include <lebirun/iso9660.h>
@@ -664,7 +663,11 @@ void kernel_main(void) {
 
     if (debug_memory) printf("BOOT: heap: verify before launching init\n");
     if (debug_memory) heap_verify();
-    kernel_reclaim_once(0);
+    console_reclaim_unused();
+    fb_reclaim_unused();
+    slab_reclaim_empty();
+    kstack_reclaim_unused();
+    heap_reclaim_unused();
     console_writer_flush();
     kprint_flush();
 
@@ -721,6 +724,7 @@ void kernel_main(void) {
         while (1) {
             watchdog_kick();
             task_deferred_work();
+            console_process_pending();
             asm volatile ("hlt");
         }
     }

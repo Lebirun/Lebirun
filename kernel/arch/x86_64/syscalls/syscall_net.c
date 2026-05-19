@@ -280,6 +280,7 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
         for (i = 0; i < 10; i++) {
             sleep_ms(10);
             netif_poll_all();
+            dhcp_tick();
             if (netif->link_up) break;
             if (task_has_pending_signals()) return -EINTR;
         }
@@ -292,6 +293,7 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
         for (i = 0; i < 500; i++) {
             sleep_ms(10);
             netif_poll_all();
+            dhcp_tick();
             if (dhcp_is_bound(netif)) break;
             if (task_has_pending_signals()) return -EINTR;
         }

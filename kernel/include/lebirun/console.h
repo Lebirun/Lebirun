@@ -7,7 +7,8 @@
 
 #define NUM_CONSOLES 12
 #define CONSOLE_BUFFER_COLS 160
-#define CONSOLE_WRITE_BUFFER_INIT 1024
+#define CONSOLE_INACTIVE_INITIAL_ROWS 4
+#define CONSOLE_WRITE_BUFFER_INIT 512
 #define CONSOLE_WRITE_BUFFER_MAX  65536
 
 bool console_is_initialized(void);
@@ -82,5 +83,6 @@ void console_tick(void);
 int console_alloc(int n);
 int console_alt_screen_active(int n);
 void console_reclaim_unused(void);
+int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t *attr);
 
 #endif

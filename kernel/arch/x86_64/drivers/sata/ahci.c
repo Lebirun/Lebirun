@@ -4,6 +4,7 @@
 #include <lebirun/common.h>
 #include <lebirun/tty.h>
 #include <lebirun/idt.h>
+#include <lebirun/pit.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -94,6 +95,14 @@ static void ahci_delay(uint64_t ms) {
     }
 }
 
+static void ahci_wait_delay(void) {
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        __asm__ volatile("pause");
+    }
+}
+
 static ahci_dev_type_t ahci_check_type(ahci_port_t *port) {
     uint64_t ssts = ahci_port_read(port, AHCI_PxSSTS);
     uint8_t ipm = (ssts >> AHCI_PxSSTS_IPM_SHIFT) & 0x0F;
@@ -128,7 +137,7 @@ static void ahci_stop_cmd(ahci_port_t *port) {
         cmd = ahci_port_read(port, AHCI_PxCMD);
         if (!(cmd & AHCI_PxCMD_CR))
             break;
-        ahci_delay(1);
+        ahci_wait_delay();
     }
     
     cmd = ahci_port_read(port, AHCI_PxCMD);
@@ -172,20 +181,42 @@ static int ahci_find_slot(ahci_port_t *port) {
 }
 
 static int ahci_wait_cmd(ahci_port_t *port, int slot, uint64_t timeout_ms) {
-    uint64_t timeout = timeout_ms;
-    
-    while (timeout--) {
-        uint64_t ci = ahci_port_read(port, AHCI_PxCI);
+    uint64_t start_ticks;
+    uint64_t timeout_ticks;
+    uint64_t max_spins;
+    uint64_t spins;
+    uint64_t ci;
+    uint64_t is;
+
+    start_ticks = tick_count;
+    timeout_ticks = 0;
+    if (pit_freq > 0) {
+        timeout_ticks = (timeout_ms * pit_freq + 999) / 1000;
+        if (timeout_ticks == 0) timeout_ticks = 1;
+    }
+    max_spins = timeout_ms * 10000;
+    if (max_spins < 10000) max_spins = 10000;
+    spins = 0;
+
+    for (;;) {
+        ci = ahci_port_read(port, AHCI_PxCI);
         if ((ci & (1 << slot)) == 0)
             return 0;
         
-        uint64_t is = ahci_port_read(port, AHCI_PxIS);
+        is = ahci_port_read(port, AHCI_PxIS);
         if (is & (1 << 30)) { 
             printf("AHCI: Task file error on port %u\n", port->port_num);
             return -1;
         }
+
+        if (timeout_ticks > 0 && tick_count - start_ticks >= timeout_ticks) {
+            break;
+        }
+        if (++spins >= max_spins) {
+            break;
+        }
         
-        ahci_delay(1);
+        ahci_wait_delay();
     }
     
     printf("AHCI: Command timeout on port %u\n", port->port_num);
@@ -344,7 +375,6 @@ int ahci_identify(ahci_port_t *port) {
     }
     
     uint64_t buf_virt = buf_phys + KERNEL_VMA;
-    vmm_map_page(buf_virt, buf_phys, 0x003);
     memset((void *)buf_virt, 0, PAGE_SIZE);
     
     hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
@@ -373,7 +403,6 @@ int ahci_identify(ahci_port_t *port) {
     
     if (ahci_wait_cmd(port, slot, 1000) < 0) {
         pfa_free(buf_phys);
-        vmm_unmap_page(buf_virt);
         return -1;
     }
     
@@ -413,7 +442,6 @@ int ahci_identify(ahci_port_t *port) {
            port->port_num, port->model, port->serial, (unsigned long long)size_mb);
     
     pfa_free(buf_phys);
-    vmm_unmap_page(buf_virt);
     
     return 0;
 }
@@ -422,7 +450,6 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
-    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -436,12 +463,15 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     if (count == 0 || count > 128) {
         return -1;
     }
+
+    mutex_lock(&port->io_lock);
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
     slot = ahci_find_slot(port);
     if (slot < 0) {
         printf("AHCI: No free command slot for read\n");
+        mutex_unlock(&port->io_lock);
         return -1;
     }
     
@@ -449,12 +479,10 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     buf_phys = pfa_alloc_contiguous(buf_pages);
     if (!buf_phys) {
         printf("AHCI: Failed to allocate DMA buffer\n");
+        mutex_unlock(&port->io_lock);
         return -1;
     }
     buf_virt = buf_phys + KERNEL_VMA;
-    for (i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-    }
     
     cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
@@ -494,10 +522,8 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
         memcpy(buffer, (void *)buf_virt, count * AHCI_SECTOR_SIZE);
     }
 
-    for (i = 0; i < buf_pages; i++) {
-        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
-    }
     pfa_free_contiguous(buf_phys, buf_pages);
+    mutex_unlock(&port->io_lock);
     
     return result;
 }
@@ -506,7 +532,6 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
-    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -520,12 +545,15 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     if (count == 0 || count > 128) {
         return -1;
     }
+
+    mutex_lock(&port->io_lock);
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
     slot = ahci_find_slot(port);
     if (slot < 0) {
         printf("AHCI: No free command slot for write\n");
+        mutex_unlock(&port->io_lock);
         return -1;
     }
     
@@ -533,12 +561,10 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     buf_phys = pfa_alloc_contiguous(buf_pages);
     if (!buf_phys) {
         printf("AHCI: Failed to allocate DMA buffer\n");
+        mutex_unlock(&port->io_lock);
         return -1;
     }
     buf_virt = buf_phys + KERNEL_VMA;
-    for (i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
-    }
     
     memcpy((void *)buf_virt, buffer, count * AHCI_SECTOR_SIZE);
 
@@ -576,10 +602,8 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     
     result = ahci_wait_cmd(port, slot, 5000);
     
-    for (i = 0; i < buf_pages; i++) {
-        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
-    }
     pfa_free_contiguous(buf_phys, buf_pages);
+    mutex_unlock(&port->io_lock);
     
     return result;
 }
@@ -589,7 +613,6 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
     uint64_t buf_phys;
     uint64_t buf_virt;
     uint64_t byte_count;
-    uint64_t i;
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
@@ -603,21 +626,25 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
     if (count == 0 || count > 32)
         return -1;
 
+    mutex_lock(&port->io_lock);
+
     byte_count = (uint64_t)count * ATAPI_SECTOR_SIZE;
 
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
 
     slot = ahci_find_slot(port);
-    if (slot < 0)
+    if (slot < 0) {
+        mutex_unlock(&port->io_lock);
         return -1;
+    }
 
     buf_pages = (byte_count + PAGE_SIZE - 1) / PAGE_SIZE;
     buf_phys = pfa_alloc_contiguous(buf_pages);
-    if (!buf_phys)
+    if (!buf_phys) {
+        mutex_unlock(&port->io_lock);
         return -1;
+    }
     buf_virt = buf_phys + KERNEL_VMA;
-    for (i = 0; i < buf_pages; i++)
-        vmm_map_page(buf_virt + i * PAGE_SIZE, buf_phys + i * PAGE_SIZE, 0x003);
 
     cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
@@ -663,9 +690,8 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
     if (result == 0)
         memcpy(buffer, (void *)buf_virt, byte_count);
 
-    for (i = 0; i < buf_pages; i++)
-        vmm_unmap_page(buf_virt + i * PAGE_SIZE);
     pfa_free_contiguous(buf_phys, buf_pages);
+    mutex_unlock(&port->io_lock);
 
     return result;
 }
@@ -682,28 +708,37 @@ ahci_port_t *ahci_find_cdrom(void) {
 }
 
 int ahci_flush(ahci_port_t *port) {
+    int slot;
+    int result;
+    hba_cmd_header_t *cmd_header;
+    hba_cmd_table_t *cmd_table;
+    fis_reg_h2d_t *fis;
+
     if (!port->present || port->type != AHCI_DEV_SATA) {
         return -1;
     }
+
+    mutex_lock(&port->io_lock);
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
-    int slot = ahci_find_slot(port);
+    slot = ahci_find_slot(port);
     if (slot < 0) {
+        mutex_unlock(&port->io_lock);
         return -1;
     }
     
-    hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
+    cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
     cmd_header->w = 0;
     cmd_header->p = 0;
     cmd_header->c = 1;
     cmd_header->prdtl = 0; 
     
-    hba_cmd_table_t *cmd_table = port->cmd_table + slot;
+    cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
     
-    fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table->cfis;
+    fis = (fis_reg_h2d_t *)cmd_table->cfis;
     memset(fis, 0, sizeof(fis_reg_h2d_t));
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
@@ -712,7 +747,9 @@ int ahci_flush(ahci_port_t *port) {
     
     ahci_port_write(port, AHCI_PxCI, 1 << slot);
     
-    return ahci_wait_cmd(port, slot, 30000);
+    result = ahci_wait_cmd(port, slot, 30000);
+    mutex_unlock(&port->io_lock);
+    return result;
 }
 
 ahci_controller_t *ahci_get_controller(void) {
@@ -824,6 +861,7 @@ int ahci_init(void) {
         port->port_num = i;
         port->hba_base = abar_virt;
         port->port_base = abar_virt + AHCI_PORT_BASE + (i * AHCI_PORT_SIZE);
+        mutex_init(&port->io_lock);
         
         port->type = ahci_check_type(port);
         if (port->type == AHCI_DEV_NULL) {
@@ -1083,11 +1121,6 @@ int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     }
     req->buf_pages = buf_pages;
     
-    uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, req->buf_phys + i * PAGE_SIZE, 0x003);
-    }
-    
     hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
     cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
     cmd_header->w = 0;
@@ -1157,9 +1190,6 @@ int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
     req->buf_pages = buf_pages;
     
     uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
-    for (uint64_t i = 0; i < buf_pages; i++) {
-        vmm_map_page(buf_virt + i * PAGE_SIZE, req->buf_phys + i * PAGE_SIZE, 0x003);
-    }
     
     memcpy((void *)buf_virt, buffer, count * AHCI_SECTOR_SIZE);
     
@@ -1219,9 +1249,6 @@ void ahci_poll_completion(ahci_port_t *port) {
                     memcpy(req->buffer, (void *)buf_virt, req->count * AHCI_SECTOR_SIZE);
                 }
                 
-                for (uint64_t j = 0; j < req->buf_pages; j++) {
-                    vmm_unmap_page(buf_virt + j * PAGE_SIZE);
-                }
                 pfa_free_contiguous(req->buf_phys, req->buf_pages);
                 
                 req->state = AHCI_CMD_STATE_COMPLETE;
@@ -1465,7 +1492,6 @@ int ahci_smart_read_data(ahci_port_t *port, smart_data_t *data) {
         return -1;
     
     uint64_t buf_virt = buf_phys + KERNEL_VMA;
-    vmm_map_page(buf_virt, buf_phys, 0x003);
     memset((void *)buf_virt, 0, PAGE_SIZE);
     
     hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
@@ -1501,7 +1527,6 @@ int ahci_smart_read_data(ahci_port_t *port, smart_data_t *data) {
         memcpy(data, (void *)buf_virt, sizeof(smart_data_t));
     }
     
-    vmm_unmap_page(buf_virt);
     pfa_free(buf_phys);
     
     return result;

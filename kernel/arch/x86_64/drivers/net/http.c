@@ -8,6 +8,31 @@
 #include <lebirun/task.h>
 #include <string.h>
 
+__attribute__((weak)) tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host) {
+    (void)tcp;
+    (void)host;
+    return NULL;
+}
+
+__attribute__((weak)) int tls_send(tls_conn_t *conn, const uint8_t *data, uint64_t len) {
+    (void)conn;
+    (void)data;
+    (void)len;
+    return -1;
+}
+
+__attribute__((weak)) int tls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t timeout_ms) {
+    (void)conn;
+    (void)buf;
+    (void)len;
+    (void)timeout_ms;
+    return -1;
+}
+
+__attribute__((weak)) void tls_close(tls_conn_t *conn) {
+    (void)conn;
+}
+
 static int http_parse_url(const char *url, char *host, uint16_t *port, char *path, int *is_https) {
     const char *p;
     int host_len;

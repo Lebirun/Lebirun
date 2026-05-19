@@ -7,7 +7,7 @@
 
 struct vfs_node;
 
-#define TASK_INIT_FDS 16
+#define TASK_INIT_FDS 4
 #define TASK_MAX_FDS 1024
 #define TASK_MAX_FILE_MAPS 16
 
@@ -70,6 +70,7 @@ typedef struct task {
     uint64_t wake_tick;
     bool is_user;
     uint64_t user_brk;
+    uint64_t user_brk_start;
     uint64_t mmap_next_addr;
     registers_t *syscall_frame;
     uint64_t pml4_phys;
@@ -109,15 +110,6 @@ typedef struct task {
     pid_t ppid;
     int waiting_for_any_child;
 
-    uint64_t sig_pending;
-    uint64_t sig_blocked;
-    struct {
-        void (*handler)(int);
-        uint64_t flags;
-        uint64_t mask;
-    } sigactions[32];
-    void *sig_altstack;
-    size_t sig_altstack_size;
     void *signal_data;
     void *creds_data;
 
@@ -148,6 +140,33 @@ typedef struct task {
     uint64_t alarm_tick;
 } task_t;
 
+typedef struct {
+    uint64_t active_user_pages;
+    uint64_t active_heap_pages;
+    uint64_t active_mmap_pages;
+    uint64_t active_file_pages;
+    uint64_t active_stack_pages;
+    uint64_t active_pd_pages;
+    uint64_t active_user_pt_pages;
+    uint64_t current_user_pages;
+    uint64_t current_heap_pages;
+    uint64_t current_mmap_pages;
+    uint64_t current_file_pages;
+    uint64_t current_stack_pages;
+    uint64_t current_pd_pages;
+    uint64_t current_user_pt_pages;
+    uint64_t dead_user_pages;
+    uint64_t dead_stack_pages;
+    uint64_t dead_pd_pages;
+    uint64_t dead_user_pt_pages;
+    uint64_t dead_exec_old_pages;
+    uint64_t exec_cleanup_entries;
+    uint64_t exec_cleanup_user_pages;
+    uint64_t exec_cache_pages;
+    uint64_t exec_reclaim_pages;
+    uint64_t exec_nonreclaim_pages;
+} task_mem_stats_t;
+
 extern task_t* current_task;
 extern task_t* ready_queue_head;
 extern task_t* all_tasks_head;
@@ -158,6 +177,8 @@ task_t* task_find_by_pml4(uint64_t pml4_phys);
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter);
 task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);
+int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter);
+void task_finish_wait_any_child(void);
 
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);
@@ -203,12 +224,16 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
 void exec_page_cache_reclaim(uint64_t target_pages);
 uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);
+void task_memory_collect_for_report(void);
+void task_get_memory_stats(task_mem_stats_t *stats);
+void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);
 
 void task_init_fds(task_t *task);
 int task_fd_alloc(task_t *task);
+int task_fd_ensure_capacity(task_t *task, int min_fd);
 void task_fd_free(task_t *task, int fd);
 task_fd_t *task_fd_get(task_t *task, int fd);
 void task_fd_close_all(task_t *task);
@@ -234,5 +259,6 @@ int task_has_pending_signals(void);
 
 void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
+void task_reclaim_exited_now(void);
 
 #endif

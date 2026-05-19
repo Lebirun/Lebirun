@@ -11,6 +11,11 @@
 
 extern void overlay_flush_cache(void);
 extern void squashfs_flush_cache(void);
+extern void squashfs_set_access_blocked(int blocked);
+extern void slab_reclaim_empty(void);
+extern void kstack_reclaim_unused(void);
+extern void heap_reclaim_unused(void);
+extern void pfa_ref_gc(void);
 
 static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
@@ -21,7 +26,7 @@ static int fd_table_capacity = 0;
 static mutex_t vfs_lock;
 static int squashfs_access_blocked = 0;
 
-#define VFS_INITIAL_FDS 32
+#define VFS_INITIAL_FDS 8
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -74,6 +79,31 @@ static int vfs_grow_fds(void) {
     fd_table = new_table;
     fd_table_capacity = new_cap;
     return 0;
+}
+
+static void vfs_reclaim_fds(void) {
+    int i;
+    vfs_fd_t *new_table;
+
+    mutex_lock(&vfs_lock);
+    if (fd_table_capacity <= VFS_INITIAL_FDS) {
+        mutex_unlock(&vfs_lock);
+        return;
+    }
+    for (i = VFS_INITIAL_FDS; i < fd_table_capacity; i++) {
+        if (fd_table[i].in_use) {
+            mutex_unlock(&vfs_lock);
+            return;
+        }
+    }
+    new_table = (vfs_fd_t *)krealloc(fd_table, VFS_INITIAL_FDS * sizeof(vfs_fd_t));
+    if (!new_table) {
+        mutex_unlock(&vfs_lock);
+        return;
+    }
+    fd_table = new_table;
+    fd_table_capacity = VFS_INITIAL_FDS;
+    mutex_unlock(&vfs_lock);
 }
 
 void vfs_init(void) {
@@ -407,13 +437,22 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
 
 int vfs_unmount(const char *mountpoint) {
     int i;
+    int ret;
     
     if (!mountpoint) return -1;
     
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
+            vfs_reclaim_fds();
+            overlay_flush_cache();
+            squashfs_flush_cache();
+            slab_reclaim_empty();
+            heap_reclaim_unused();
             if (mounts[i].fs_type && mounts[i].fs_type->unmount) {
-                mounts[i].fs_type->unmount(mounts[i].root);
+                ret = mounts[i].fs_type->unmount(mounts[i].root);
+                if (ret != 0) {
+                    return ret;
+                }
             }
             
             mounts[i].in_use = 0;
@@ -425,6 +464,11 @@ int vfs_unmount(const char *mountpoint) {
             printf("VFS: Unmounted %s\n", mountpoint);
             overlay_flush_cache();
             squashfs_flush_cache();
+            vfs_reclaim_fds();
+            slab_reclaim_empty();
+            kstack_reclaim_unused();
+            heap_reclaim_unused();
+            pfa_ref_gc();
             return 0;
         }
     }
@@ -472,13 +516,17 @@ uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *bu
 }
 
 void vfs_open(vfs_node_t *node, uint64_t flags) {
+    uintptr_t open_addr;
+
     if (!node) return;
     node->ref_count++;
-    if (node->open) node->open(node, flags);
+    open_addr = (uintptr_t)node->open;
+    if (node->open && open_addr >= KERNEL_VMA) node->open(node, flags);
 }
 
 void vfs_close(vfs_node_t *node) {
     int is_dynamic;
+    uintptr_t close_addr;
 
     if (!node) return;
     
@@ -486,9 +534,10 @@ void vfs_close(vfs_node_t *node) {
         node->ref_count--;
     }
     
-    is_dynamic = (node->flags & VFS_DYNAMIC) && node->ref_count == 0;
+    is_dynamic = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED) && node->ref_count == 0;
     
-    if (node->close) {
+    close_addr = (uintptr_t)node->close;
+    if (node->close && close_addr >= KERNEL_VMA) {
         node->close(node);
     }
     
@@ -918,9 +967,12 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
     size_t plen;
     int i;
     int has_more;
+    int node_is_transient;
+    int next_ephemeral;
     vfs_mount_t *mount;
     vfs_node_t *node;
     vfs_node_t *next;
+    vfs_node_t *parent;
 
     if (!in_path) return NULL;
     if (depth > VFS_MAX_SYMLINKS) return NULL;
@@ -976,6 +1028,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
     if (*remaining == '\0') return node;
 
+    node_is_transient = 0;
     while (*remaining) {
         while (*remaining == '/') remaining++;
         if (*remaining == '\0') break;
@@ -991,7 +1044,10 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         if (strcmp(component, ".") == 0) continue;
         if (strcmp(component, "..") == 0) {
             if (node->parent) {
-                node = node->parent;
+                parent = node->parent;
+                if (node_is_transient) vfs_release(node);
+                node = parent;
+                node_is_transient = 0;
                 if (strcmp(prefix, "/") != 0) {
                     last = strrchr(prefix, '/');
                     if (last) {
@@ -1013,22 +1069,33 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
         next = vfs_finddir(node, component);
         if (!next) {
+            if (node_is_transient) vfs_release(node);
             return NULL;
         }
 
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
+            if (next->flags & VFS_DYNAMIC) vfs_release(next);
             next = next->ptr;
         }
 
         if (VFS_GET_TYPE(next->flags) == VFS_SYMLINK && (has_more || follow_final)) {
             if (vfs_readlink_node(next, target, sizeof(target)) >= 0) {
-                if (vfs_build_symlink_path(newpath, sizeof(newpath), prefix, target, rest_raw) < 0) return NULL;
+                next_ephemeral = (next->flags & VFS_DYNAMIC);
+                if (vfs_build_symlink_path(newpath, sizeof(newpath), prefix, target, rest_raw) < 0) {
+                    if (node_is_transient) vfs_release(node);
+                    if (next_ephemeral) vfs_release(next);
+                    return NULL;
+                }
                 vfs_normalize_path(newpath);
+                if (node_is_transient) vfs_release(node);
+                if (next_ephemeral) vfs_release(next);
                 return vfs_namei_internal(newpath, follow_final, depth + 1);
             }
         }
 
+        if (node_is_transient) vfs_release(node);
         node = next;
+        node_is_transient = (next->flags & VFS_DYNAMIC);
 
         if (strcmp(prefix, "/") == 0) {
             snprintf(new_prefix, sizeof(new_prefix), "/%s", component);
@@ -1051,6 +1118,7 @@ vfs_node_t *vfs_namei(const char *path) {
 
 void vfs_block_squashfs_access(void) {
     squashfs_access_blocked = 1;
+    squashfs_set_access_blocked(1);
 }
 
 vfs_node_t *vfs_namei_nofollow(const char *path) {
@@ -1063,10 +1131,13 @@ vfs_node_t *vfs_lookup(const char *path) {
 
 void vfs_release(vfs_node_t *node) {
     int is_dynamic;
+    uintptr_t close_addr;
+
     if (!node) return;
     if (node->ref_count == 0) {
-        is_dynamic = (node->flags & VFS_DYNAMIC);
-        if (node->close) {
+        is_dynamic = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
+        close_addr = (uintptr_t)node->close;
+        if (node->close && close_addr >= KERNEL_VMA) {
             node->close(node);
         }
         if (is_dynamic) {

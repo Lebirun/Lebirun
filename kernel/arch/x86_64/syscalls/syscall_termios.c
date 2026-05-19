@@ -55,18 +55,35 @@ static int vt_kd_mode = KD_TEXT;
 static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
 
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
+    pipe_t *p;
+    int newfd;
+    int ret;
+    int i;
+
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
     if (minfd < 0) minfd = 0;
     if (minfd >= TASK_MAX_FDS) return -EINVAL;
 
-    int newfd = -1;
-    for (int i = minfd; i < current_task->fds_capacity; i++) {
+    newfd = -1;
+    for (i = minfd; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
             newfd = i;
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
             break;
+        }
+    }
+    if (newfd < 0) {
+        ret = task_fd_ensure_capacity(current_task, minfd >= current_task->fds_capacity ? minfd : current_task->fds_capacity);
+        if (ret != 0) return -EMFILE;
+        for (i = minfd; i < current_task->fds_capacity; i++) {
+            if (!current_task->fds[i].in_use) {
+                newfd = i;
+                current_task->fds[i].in_use = 1;
+                current_task->fds[i].ref_count = 1;
+                break;
+            }
         }
     }
     if (newfd < 0) return -EMFILE;
@@ -79,7 +96,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     }
     if (current_task->fds[oldfd].private_data &&
         (current_task->fds[oldfd].type == FD_TYPE_PIPE_R || current_task->fds[oldfd].type == FD_TYPE_PIPE_W)) {
-        pipe_t *p = (pipe_t *)current_task->fds[oldfd].private_data;
+        p = (pipe_t *)current_task->fds[oldfd].private_data;
         if (current_task->fds[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
         else p->writers++;
     }

@@ -12,6 +12,7 @@
 #define VFS_SYMLINK     0x06
 #define VFS_MOUNTPOINT  0x08
 #define VFS_DYNAMIC     0x10
+#define VFS_EMBEDDED    0x20
 
 #define VFS_TYPE_MASK   0x07
 #define VFS_GET_TYPE(flags) ((flags) & VFS_TYPE_MASK)
@@ -38,7 +39,7 @@
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
 #define VFS_MAX_FDS     128
-#define VFS_INITIAL_MOUNTS 16
+#define VFS_INITIAL_MOUNTS 8
 #define VFS_MAX_MOUNTS  65535
 
 struct vfs_node;

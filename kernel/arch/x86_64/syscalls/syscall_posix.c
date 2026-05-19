@@ -13,6 +13,151 @@ extern int socket_fcntl(int fd, int cmd, int arg);
 
 #define fd_table (current_task->fds)
 
+#define POSIX_EXEC_MAX_ARGS 256
+#define POSIX_EXEC_MAX_ENVS 256
+#define POSIX_EXEC_PATH_MAX 256
+#define POSIX_EXEC_STRING_MAX 4096
+
+static uint64_t posix_user_pd(void) {
+    if (!current_task) return 0;
+    if (current_task->cr3) return current_task->cr3;
+    return current_task->pml4_phys;
+}
+
+static int posix_user_range_mapped(uint64_t addr, uint64_t size) {
+    uint64_t pd;
+    uint64_t start;
+    uint64_t end;
+    uint64_t p;
+
+    if (size == 0) return 0;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    if (addr + size < addr || addr + size > KERNEL_VMA) return 0;
+    pd = posix_user_pd();
+    if (!pd) return 0;
+    start = addr & ~0xFFFu;
+    end = (addr + size - 1) & ~0xFFFu;
+    p = start;
+    for (;;) {
+        if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        if (p == end) break;
+        if (p > end) return 0;
+        p += 0x1000;
+    }
+    return 1;
+}
+
+static int posix_user_read_u64(uint64_t addr, uint64_t *out) {
+    if (!out) return -EFAULT;
+    if (!posix_user_range_mapped(addr, sizeof(uint64_t))) return -EFAULT;
+    *out = *(uint64_t *)addr;
+    return 0;
+}
+
+static int posix_copy_user_string(char **out, const char *src_user, uint64_t max_len) {
+    char *dst;
+    uint64_t addr;
+    uint64_t cur;
+    uint64_t i;
+    uint64_t j;
+    uint64_t alloc_len;
+    char c;
+
+    if (!out || !src_user || max_len == 0) return -EFAULT;
+    *out = NULL;
+    addr = (uint64_t)src_user;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return -EFAULT;
+    i = 0;
+    while (i < max_len) {
+        cur = addr + i;
+        if (cur < addr || !posix_user_range_mapped(cur, 1)) {
+            return -EFAULT;
+        }
+        c = *(const char *)cur;
+        if (c == '\0') {
+            alloc_len = i + 1;
+            dst = (char *)kmalloc(alloc_len);
+            if (!dst) return -ENOMEM;
+            for (j = 0; j < alloc_len; j++) {
+                dst[j] = *(const char *)(addr + j);
+            }
+            *out = dst;
+            return 0;
+        }
+        i++;
+    }
+    return -ENAMETOOLONG;
+}
+
+static char *posix_kstrdup(const char *src) {
+    char *dst;
+    int len;
+
+    if (!src) return NULL;
+    len = strlen(src);
+    dst = (char *)kmalloc(len + 1);
+    if (!dst) return NULL;
+    memcpy(dst, src, len + 1);
+    return dst;
+}
+
+static void posix_free_string_array(char **arr, int count) {
+    int i;
+
+    if (!arr) return;
+    for (i = 0; i < count; i++) {
+        if (arr[i]) kfree(arr[i]);
+    }
+    kfree(arr);
+}
+
+static int posix_copy_user_string_array(char ***out, int *out_count, uint64_t array_addr, int max_count, uint64_t max_len) {
+    char **arr;
+    uint64_t str_addr;
+    uint64_t slot_addr;
+    int count;
+    int ret;
+
+    if (!out || !out_count) return -EFAULT;
+    *out = NULL;
+    *out_count = 0;
+    if (!array_addr) return 0;
+    arr = (char **)kmalloc((max_count + 1) * sizeof(char *));
+    if (!arr) return -ENOMEM;
+    memset(arr, 0, (max_count + 1) * sizeof(char *));
+    count = 0;
+    while (count < max_count) {
+        slot_addr = array_addr + (uint64_t)count * sizeof(uint64_t);
+        if (slot_addr < array_addr) {
+            posix_free_string_array(arr, count);
+            return -EFAULT;
+        }
+        ret = posix_user_read_u64(slot_addr, &str_addr);
+        if (ret != 0) {
+            posix_free_string_array(arr, count);
+            return ret;
+        }
+        if (!str_addr) break;
+        ret = posix_copy_user_string(&arr[count], (const char *)str_addr, max_len);
+        if (ret != 0) {
+            posix_free_string_array(arr, count);
+            return ret;
+        }
+        count++;
+    }
+    if (count == max_count) {
+        ret = posix_user_read_u64(array_addr + (uint64_t)count * sizeof(uint64_t), &str_addr);
+        if (ret != 0 || str_addr != 0) {
+            posix_free_string_array(arr, count);
+            return -E2BIG;
+        }
+    }
+    arr[count] = NULL;
+    *out = arr;
+    *out_count = count;
+    return 0;
+}
+
 static int kernel_ptr_mapped(uint64_t addr) {
     if (addr < KERNEL_VMA) return 0;
     return vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), addr) != 0;
@@ -85,10 +230,25 @@ static void fd_retain_entry(task_fd_t *tfd) {
 
 static int fd_alloc_from(int start) {
     int capacity;
+    int i;
+    int ret;
 
     if (!current_task) return -1;
+    if (start < 0) start = 0;
+    if (start >= TASK_MAX_FDS) return -1;
     capacity = current_task->fds_capacity;
-    for (int i = start; i < capacity; i++) {
+    for (i = start; i < capacity; i++) {
+        if (!fd_table[i].in_use) {
+            memset(&fd_table[i], 0, sizeof(task_fd_t));
+            fd_table[i].in_use = 1;
+            fd_table[i].ref_count = 1;
+            return i;
+        }
+    }
+    ret = task_fd_ensure_capacity(current_task, start >= capacity ? start : capacity);
+    if (ret != 0) return -1;
+    capacity = current_task->fds_capacity;
+    for (i = start; i < capacity; i++) {
         if (!fd_table[i].in_use) {
             memset(&fd_table[i], 0, sizeof(task_fd_t));
             fd_table[i].in_use = 1;
@@ -122,11 +282,17 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
 
 static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     int newfd;
+    int ret;
+
     (void)unused;
     newfd = (int)(uintptr_t)newfd_ptr;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
+    if (newfd < 0 || newfd >= TASK_MAX_FDS) return -EBADF;
+    if (newfd >= current_task->fds_capacity) {
+        ret = task_fd_ensure_capacity(current_task, newfd);
+        if (ret != 0) return -EMFILE;
+    }
     if (oldfd == newfd) return newfd;
     if (fd_table[newfd].in_use) {
         fd_release_entry(&fd_table[newfd]);
@@ -530,66 +696,105 @@ static int sys_gettimeofday(int tv_ptr, const char *tz_ptr, int unused) {
     return 0;
 }
 
-static int sys_munmap(int addr, const char *len_ptr, int unused) {
-    (void)addr; (void)len_ptr; (void)unused;
-    return 0;
-}
-
-static int sys_mprotect(int addr, const char *len_ptr, int prot) {
-    (void)addr; (void)len_ptr; (void)prot;
-    return 0;
-}
-
 static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     char **argv;
     char **envp;
+    char **new_argv;
+    char *path;
     uint64_t path_addr;
     uint64_t argv_addr;
     uint64_t envp_addr;
     uint64_t size;
     uint64_t read_len;
     uint64_t header_size;
+    uint64_t interp_size;
     int argc;
     int envc;
     int result;
+    int ret;
     int i;
-    const char *path;
+    int new_argc;
+    int na;
+    int kern_args;
     char shebang_interp[256];
     char shebang_arg[256];
     int shebang_has_arg;
     int shebang_line_end;
     int si;
     int sj;
-    uint64_t interp_size;
     registers_t *regs;
     vfs_node_t *node;
     vfs_node_t *interp_node;
     uint8_t header[256];
 
+    argv = NULL;
+    envp = NULL;
+    new_argv = NULL;
+    path = NULL;
+    node = NULL;
+    interp_node = NULL;
+    argc = 0;
+    envc = 0;
+
     path_addr = (uint64_t)path_ptr;
-    if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) {
-        return -EFAULT;
-    }
-    path = (const char *)path_addr;
-    
-    
     argv_addr = (uint64_t)argv_ptr;
     envp_addr = (uint64_t)envp_ptr;
-    
+
+    ret = posix_copy_user_string(&path, (const char *)path_addr, POSIX_EXEC_PATH_MAX);
+    if (ret != 0) return ret;
+
+    ret = posix_copy_user_string_array(&argv, &argc, argv_addr, POSIX_EXEC_MAX_ARGS, POSIX_EXEC_STRING_MAX);
+    if (ret != 0) {
+        kfree(path);
+        return ret;
+    }
+
+    if (argc == 0) {
+        argv = (char **)kmalloc(2 * sizeof(char *));
+        if (!argv) {
+            kfree(path);
+            return -ENOMEM;
+        }
+        argv[0] = posix_kstrdup(path);
+        if (!argv[0]) {
+            kfree(argv);
+            kfree(path);
+            return -ENOMEM;
+        }
+        argv[1] = NULL;
+        argc = 1;
+    }
+
+    ret = posix_copy_user_string_array(&envp, &envc, envp_addr, POSIX_EXEC_MAX_ENVS, POSIX_EXEC_STRING_MAX);
+    if (ret != 0) {
+        posix_free_string_array(argv, argc);
+        kfree(path);
+        return ret;
+    }
+
     node = vfs_namei(path);
     if (!node) {
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
         return -ENOENT;
     }
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
         vfs_release(node);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
         return -EACCES;
     }
     size = node->length;
     if (size == 0) {
         vfs_release(node);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
         return -ENOEXEC;
     }
-    
+
     header_size = size;
     if (header_size > sizeof(header)) {
         header_size = sizeof(header);
@@ -597,9 +802,12 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     read_len = vfs_read(node, 0, header_size, header);
     if (read_len != header_size) {
         vfs_release(node);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
         return -EIO;
     }
-    
+
     if (header_size >= 2 && header[0] == '#' && header[1] == '!') {
         shebang_line_end = 2;
         while (shebang_line_end < (int)header_size && shebang_line_end < 256 &&
@@ -617,6 +825,9 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         shebang_interp[sj] = '\0';
         if (sj == 0) {
             vfs_release(node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
             return -ENOEXEC;
         }
 
@@ -633,224 +844,132 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         }
 
         vfs_release(node);
+        node = NULL;
 
         interp_node = vfs_namei(shebang_interp);
         if (!interp_node) {
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
             return -ENOENT;
         }
         interp_size = interp_node->length;
         if (interp_size == 0) {
             vfs_release(interp_node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
             return -ENOEXEC;
         }
-        argc = 0;
-        if (argv_addr) {
-            uint64_t *argv_array = (uint64_t *)argv_addr;
-            while (argv_array[argc] && argc < 256) {
-                argc++;
-            }
-        }
 
-        {
-            int new_argc;
-            char **new_argv;
-            int na;
-            int kern_args;
-
-            new_argc = 1 + shebang_has_arg + 1 + (argc > 1 ? argc - 1 : 0);
-            new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
-            if (!new_argv) {
-                vfs_release(interp_node);
-                return -ENOMEM;
-            }
-
-            na = 0;
-            new_argv[na] = (char *)kmalloc(strlen(shebang_interp) + 1);
-            if (!new_argv[na]) { kfree(new_argv); vfs_release(interp_node); return -ENOMEM; }
-            strcpy(new_argv[na], shebang_interp);
-            na++;
-
-            if (shebang_has_arg) {
-                new_argv[na] = (char *)kmalloc(strlen(shebang_arg) + 1);
-                if (!new_argv[na]) {
-                    for (i = 0; i < na; i++) kfree(new_argv[i]);
-                    kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
-                }
-                strcpy(new_argv[na], shebang_arg);
-                na++;
-            }
-
-            new_argv[na] = (char *)kmalloc(strlen(path) + 1);
-            if (!new_argv[na]) {
-                for (i = 0; i < na; i++) kfree(new_argv[i]);
-                kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
-            }
-            strcpy(new_argv[na], path);
-            na++;
-
-            kern_args = na;
-
-            if (argc > 1 && argv_addr) {
-                uint64_t *argv_array = (uint64_t *)argv_addr;
-                for (i = 1; i < argc; i++) {
-                    uint64_t str_addr = argv_array[i];
-                    if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
-                        for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
-                        kfree(new_argv); vfs_release(interp_node); return -EFAULT;
-                    }
-                    new_argv[na] = (char *)str_addr;
-                    na++;
-                }
-            }
-            new_argv[na] = NULL;
-
-            envc = 0;
-            envp = NULL;
-            if (envp_addr) {
-                uint64_t *envp_array = (uint64_t *)envp_addr;
-                while (envp_array[envc] && envc < 256) {
-                    envc++;
-                }
-                if (envc > 0) {
-                    envp = (char **)kmalloc((envc + 1) * sizeof(char *));
-                    if (!envp) {
-                        for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-                        kfree(new_argv); vfs_release(interp_node); return -ENOMEM;
-                    }
-                    for (i = 0; i < envc; i++) {
-                        uint64_t str_addr = envp_array[i];
-                        if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
-                            kfree(envp);
-                            for (sj = 0; sj < kern_args; sj++) kfree(new_argv[sj]);
-                            kfree(new_argv); vfs_release(interp_node); return -EFAULT;
-                        }
-                        envp[i] = (char *)str_addr;
-                    }
-                    envp[envc] = NULL;
-                }
-            }
-
-            regs = current_task->syscall_frame;
-            if (!regs) {
-                if (envp) kfree(envp);
-                for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-                kfree(new_argv); vfs_release(interp_node); return -EFAULT;
-            }
-
-            result = task_exec_node_with_args(interp_node, regs, na, new_argv, envc, envp);
+        new_argc = 1 + shebang_has_arg + 1 + (argc > 1 ? argc - 1 : 0);
+        new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
+        if (!new_argv) {
             vfs_release(interp_node);
-            if (envp) { kfree(envp); envp = NULL; }
-            for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-            kfree(new_argv);
-
-            if (result == 0) {
-                syscall_set_exec_completed();
-                if (current_task) {
-                    current_task->exec_completed = 1;
-                }
-                __asm__ volatile ("" ::: "memory");
-            }
-            return result;
-        }
-    }
-    
-    argc = 0;
-    argv = NULL;
-    if (argv_addr) {
-        uint64_t *argv_array = (uint64_t *)argv_addr;
-        while (argv_array[argc] && argc < 256) {
-            argc++;
-        }
-        if (argc > 0) {
-            argv = (char **)kmalloc((argc + 1) * sizeof(char *));
-            if (!argv) {
-                vfs_release(node);
-                return -ENOMEM;
-            }
-            for (i = 0; i < argc; i++) {
-                uint64_t str_addr = argv_array[i];
-                if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
-                    kfree(argv);
-                    vfs_release(node);
-                    return -EFAULT;
-                }
-                argv[i] = (char *)str_addr;
-            }
-            argv[argc] = NULL;
-        }
-    }
-
-    if (argc == 0) {
-        argv = (char **)kmalloc(2 * sizeof(char *));
-        if (!argv) {
-            vfs_release(node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
             return -ENOMEM;
         }
-        argv[0] = (char *)path_addr;
-        argv[1] = NULL;
-        argc = 1;
-    }
-    
-    envc = 0;
-    envp = NULL;
-    if (envp_addr) {
-        uint64_t *envp_array = (uint64_t *)envp_addr;
-        while (envp_array[envc] && envc < 256) {
-            envc++;
+        memset(new_argv, 0, (new_argc + 1) * sizeof(char *));
+
+        na = 0;
+        new_argv[na] = posix_kstrdup(shebang_interp);
+        if (!new_argv[na]) {
+            kfree(new_argv);
+            vfs_release(interp_node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
+            return -ENOMEM;
         }
-        if (envc > 0) {
-            envp = (char **)kmalloc((envc + 1) * sizeof(char *));
-            if (!envp) {
-                if (argv) kfree(argv);
-                vfs_release(node);
+        na++;
+
+        if (shebang_has_arg) {
+            new_argv[na] = posix_kstrdup(shebang_arg);
+            if (!new_argv[na]) {
+                for (i = 0; i < na; i++) kfree(new_argv[i]);
+                kfree(new_argv);
+                vfs_release(interp_node);
+                posix_free_string_array(envp, envc);
+                posix_free_string_array(argv, argc);
+                kfree(path);
                 return -ENOMEM;
             }
-            for (i = 0; i < envc; i++) {
-                uint64_t str_addr = envp_array[i];
-                if (!str_addr || str_addr >= KERNEL_VMA || str_addr < 0x1000) {
-                    kfree(envp);
-                    if (argv) kfree(argv);
-                    vfs_release(node);
-                    return -EFAULT;
-                }
-                envp[i] = (char *)str_addr;
-            }
-            envp[envc] = NULL;
+            na++;
         }
+
+        new_argv[na] = posix_kstrdup(path);
+        if (!new_argv[na]) {
+            for (i = 0; i < na; i++) kfree(new_argv[i]);
+            kfree(new_argv);
+            vfs_release(interp_node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
+            return -ENOMEM;
+        }
+        na++;
+        kern_args = na;
+
+        for (i = 1; i < argc; i++) {
+            new_argv[na] = argv[i];
+            na++;
+        }
+        new_argv[na] = NULL;
+
+        regs = current_task->syscall_frame;
+        if (!regs) {
+            for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
+            kfree(new_argv);
+            vfs_release(interp_node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
+            return -EFAULT;
+        }
+
+        result = task_exec_node_with_args(interp_node, regs, na, new_argv, envc, envp);
+        vfs_release(interp_node);
+        for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
+        kfree(new_argv);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
+
+        if (result == 0) {
+            syscall_set_exec_completed();
+            if (current_task) {
+                current_task->exec_completed = 1;
+            }
+            __asm__ volatile ("" ::: "memory");
+        }
+        return result;
     }
-    
+
     regs = current_task->syscall_frame;
     if (!regs) {
-        if (envp) kfree(envp);
-        if (argv) kfree(argv);
         vfs_release(node);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
         return -EFAULT;
     }
-    
+
     result = task_exec_node_with_args(node, regs, argc, argv, envc, envp);
     vfs_release(node);
-    
-    if (envp) {
-        kfree(envp);
-        envp = NULL;
-    }
-    
-    
-    if (argv) {
-        kfree(argv);
-        argv = NULL;
-    }
-    
-    
+    posix_free_string_array(envp, envc);
+    posix_free_string_array(argv, argc);
+    kfree(path);
+
     if (result == 0) {
         syscall_set_exec_completed();
         if (current_task) {
             current_task->exec_completed = 1;
         }
-        
         __asm__ volatile ("" ::: "memory");
     }
-    
+
     return result;
 }
 
@@ -1184,9 +1303,15 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
 }
 
 static int sys_dup3(int oldfd, int newfd, int flags) {
+    int ret;
+
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= current_task->fds_capacity) return -EBADF;
+    if (newfd < 0 || newfd >= TASK_MAX_FDS) return -EBADF;
+    if (newfd >= current_task->fds_capacity) {
+        ret = task_fd_ensure_capacity(current_task, newfd);
+        if (ret != 0) return -EMFILE;
+    }
     if (oldfd == newfd) return -EINVAL;
     if (fd_table[newfd].in_use) {
         fd_release_entry(&fd_table[newfd]);
@@ -1476,8 +1601,6 @@ void syscalls_posix_init(void) {
     syscall_table[SYSCALL_ACCESS] = sys_access;
     syscall_table[SYSCALL_CLOCK_GETTIME] = sys_clock_gettime;
     syscall_table[SYSCALL_GETTIMEOFDAY] = sys_gettimeofday;
-    syscall_table[SYSCALL_MUNMAP] = sys_munmap;
-    syscall_table[SYSCALL_MPROTECT] = sys_mprotect;
     syscall_table[SYSCALL_EXECVE] = sys_execve;
     syscall_table[SYSCALL_LSEEK] = sys_lseek_new;
     syscall_table[SYSCALL_FCNTL] = sys_fcntl;

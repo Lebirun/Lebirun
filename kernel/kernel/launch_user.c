@@ -172,6 +172,7 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
 
     t->pml4_phys = new_pd;
     t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    t->user_brk_start = t->user_brk;
     t->console_id = console_id;
     t->stack_size = USER_STACK_SIZE;
 
@@ -237,56 +238,147 @@ task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int
 
 task_t* launch_user_path(const char *path, int console_id) {
     vfs_node_t *node;
-    uint64_t size;
-    uint8_t *buf;
-    uint64_t off;
+    uint64_t new_pd;
+    elf_info_t elf_info;
+    uint64_t *elf_pages;
+    uint64_t elf_page_count;
+    uint64_t *stack_pages;
+    uint64_t stack_page_count;
+    uint64_t initial_useresp;
+    uint64_t total_pages;
     task_t *t;
+    int load_result;
+    int ni;
+    const char *base;
+    int bi;
+    registers_t *frame;
+    uint64_t i;
+    uint64_t *user_pages;
 
     if (!path || path[0] == '\0') return NULL;
 
     node = vfs_namei(path);
     if (!node) {
-        printf("launch_user_path: '%s' not found (vfs_namei returned NULL)\n", path);
+        printf("launch_user_path: '%s' not found\n", path);
         return NULL;
     }
 
     if (VFS_GET_TYPE(node->flags) != VFS_FILE) {
-        printf("launch_user_path: '%s' is not a regular file\n", path);
+        printf("launch_user_path: '%s' is not a file\n", path);
         vfs_release(node);
         return NULL;
     }
 
-    size = node->length;
-    if (size == 0 || size > (32u * 1024u * 1024u)) {
-        printf("launch_user_path: '%s' invalid size %u\n", path, size);
+    if (node->length == 0 || node->length > (32u * 1024u * 1024u)) {
+        printf("launch_user_path: '%s' invalid size %u\n", path, node->length);
         vfs_release(node);
         return NULL;
     }
 
-    buf = (uint8_t *)kmalloc(size);
-    if (!buf) {
-        printf("launch_user_path: OOM (%u bytes)\n", size);
+    new_pd = vmm_create_pml4();
+    if (!new_pd) {
+        printf("launch_user_path: failed to create PML4\n");
         vfs_release(node);
         return NULL;
     }
 
-    off = 0;
-    while (off < size) {
-        uint64_t chunk = size - off;
-        if (chunk > 32768) chunk = 32768;
-        uint64_t r = vfs_read(node, off, chunk, buf + off);
-        if (r == 0) break;
-        off += r;
-    }
+    elf_pages = NULL;
+    elf_page_count = 0;
+    load_result = elf_load_node_to_pd(new_pd, node, &elf_info, &elf_pages, &elf_page_count);
     vfs_release(node);
 
-    if (off != size) {
-        printf("launch_user_path: short read (%u/%u) for '%s'\n", off, size, path);
-        kfree(buf);
+    if (load_result != 0) {
+        printf("launch_user_path: ELF load failed (%d) for '%s'\n", load_result, path);
+        if (elf_pages) {
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        vmm_free_pml4(new_pd);
         return NULL;
     }
 
-    t = launch_user_binary_common(buf, buf + size, console_id, path);
-    kfree(buf);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pml4_tracked(new_pd,
+        USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7,
+        &stack_page_count);
+    if (!stack_pages || stack_page_count == 0) {
+        printf("launch_user_path: stack mapping failed for '%s'\n", path);
+        if (elf_pages) {
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            kfree(elf_pages);
+        }
+        if (stack_pages) kfree(stack_pages);
+        vmm_free_pml4(new_pd);
+        return NULL;
+    }
+
+    initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
+    if (setup_initial_stack_with_elf(new_pd, path, &elf_info, &initial_useresp) != 0) {
+        printf("launch_user_path: stack setup failed for '%s'\n", path);
+        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
+        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+        vmm_free_pml4(new_pd);
+        return NULL;
+    }
+
+    total_pages = elf_page_count + stack_page_count;
+    if (total_pages == 0 || total_pages > 65536) {
+        printf("launch_user_path: suspicious total_pages=%u for '%s'\n", total_pages, path);
+        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
+        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+        vmm_free_pml4(new_pd);
+        return NULL;
+    }
+
+    user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
+    if (!user_pages) {
+        printf("launch_user_path: page tracking allocation failed for '%s'\n", path);
+        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
+        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+        vmm_free_pml4(new_pd);
+        return NULL;
+    }
+    if (elf_pages) memcpy(user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
+    if (stack_pages) memcpy(user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
+
+    t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
+    if (!t) {
+        printf("launch_user_path: create_task failed for '%s'\n", path);
+        kfree(user_pages);
+        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
+        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+        vmm_free_pml4(new_pd);
+        return NULL;
+    }
+
+    t->pml4_phys = new_pd;
+    t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    t->user_brk_start = t->user_brk;
+    t->console_id = console_id;
+    t->stack_size = USER_STACK_SIZE;
+
+    base = path;
+    for (bi = 0; path[bi]; bi++)
+        if (path[bi] == '/') base = &path[bi + 1];
+    for (ni = 0; ni < 15 && base[ni]; ni++)
+        t->name[ni] = base[ni];
+    t->name[ni] = '\0';
+
+    frame = (registers_t *)(uintptr_t)t->regs.rsp;
+    frame->rsp = initial_useresp;
+
+    t->user_pages = user_pages;
+    t->user_pages_count = total_pages;
+
+    if (elf_pages) kfree(elf_pages);
+    if (stack_pages) kfree(stack_pages);
+
+    heap_reclaim_unused();
+
+    t->state = TASK_READY;
+    lock_scheduler();
+    add_task_to_runqueue(t);
+    unlock_scheduler();
+
     return t;
 }

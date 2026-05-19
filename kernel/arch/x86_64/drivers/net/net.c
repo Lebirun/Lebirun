@@ -30,10 +30,7 @@ void net_poll(void) {
 
 static int net_hw_initialized;
 static int net_has_interface;
-static int net_worker_started;
 static spinlock_t net_hw_lock = {0};
-
-static void net_start_worker(void);
 
 void net_ensure_hw(void) {
     netif_t *netif;
@@ -70,8 +67,6 @@ void net_ensure_hw(void) {
     net_hw_initialized = 1;
     spin_unlock(&net_hw_lock);
 
-    net_start_worker();
-
     netif = netif_get_default();
     if (!netif) return;
 
@@ -82,47 +77,11 @@ void net_ensure_hw(void) {
     }
 }
 
-static void net_worker_thread(void) {
-    uint64_t last_poll;
-
-    last_poll = 0;
-    while (1) {
-        if (net_work_pending || net_get_ticks() - last_poll >= 10) {
-            net_work_pending = 0;
-            netif_poll_all();
-            tcp_tick();
-            dhcp_tick();
-            last_poll = net_get_ticks();
-        }
-        if (dhcp_is_negotiating()) {
-            netif_poll_all();
-            yield();
-        } else {
-            sleep_ms(1);
-        }
-    }
-}
-
-static void net_start_worker(void) {
-    task_t *nt;
-
-    if (net_worker_started) return;
-    net_worker_started = 1;
-    nt = create_kernel_task(net_worker_thread, TASK_READY);
-    if (nt) {
-        strcpy(nt->name, "net_worker");
-        lock_scheduler();
-        add_task_to_runqueue(nt);
-        unlock_scheduler();
-    }
-}
-
 void net_init(void) {
     printf("NET: Initializing network stack...\n");
 
     net_hw_initialized = 0;
     net_has_interface = 0;
-    net_worker_started = 0;
 
     netif_init();
     arp_init();

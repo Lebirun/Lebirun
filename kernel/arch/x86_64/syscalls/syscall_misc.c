@@ -547,7 +547,7 @@ static int sys_lchown(const char *pathname, int owner, int group) {
     return sys_chown(pathname, owner, group);
 }
 
-#define ENV_INIT_COUNT 16
+#define ENV_INIT_COUNT 8
 #define ENV_NAME_SIZE 64
 #define ENV_VALUE_SIZE 256
 

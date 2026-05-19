@@ -17,8 +17,10 @@ static int *line_len;
 static int *line_cursor;
 static int *line_ready;
 
-#define HISTORY_COUNT 8
+#define HISTORY_COUNT 4
 #define HISTORY_LINE_SIZE 128
+#define SYS_RW_STACK_BUF 512
+#define SYS_RW_HEAP_LIMIT 16384
 static char (*history)[HISTORY_COUNT][HISTORY_LINE_SIZE];
 static int (*history_len)[HISTORY_COUNT];
 static int *history_head;
@@ -69,6 +71,28 @@ static int syscall_core_clamp_console(int con_id) {
 
 static int syscall_core_valid_console(int con_id) {
     return con_id >= 0 && con_id < syscall_core_console_count();
+}
+
+static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
+    uint64_t end;
+    uint64_t p;
+    uint64_t pd;
+
+    if (len == 0) return 1;
+    if (!current_task) return 0;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    if (addr + len < addr || addr + len > KERNEL_VMA) return 0;
+    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
+    if (!pd) return 0;
+
+    end = addr + len - 1;
+    p = addr & ~0xFFFULL;
+    while (p <= end) {
+        if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        if (p + 0x1000ULL <= p) return 0;
+        p += 0x1000ULL;
+    }
+    return 1;
 }
 
 static void serial_write_move_back(int n) {
@@ -209,132 +233,272 @@ static int sys_exit(int code, const char *unused1, int unused2) {
 
 static int sys_write(int fd, const char *buf, int len) {
     uint64_t buf_addr;
-    if (!buf || len < 0) return -1;
-    buf_addr = (uint64_t)buf;
-    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
-    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    uint64_t work_size;
+    uint64_t remaining;
+    uint64_t total;
+    uint64_t chunk;
+    uint64_t done;
+    uint64_t space;
+    uint64_t i;
+    uint64_t bytes;
+    uint8_t stack_buf[SYS_RW_STACK_BUF];
+    uint8_t *kbuf;
+    int heap_buf;
+    int result;
+    int con_id;
+    int term_chunk;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    pipe_t *p;
+    framebuffer_t *fb;
 
-    if (is_socket_fd(fd)) {
-        return socket_write(fd, (const void *)buf_addr, len);
-    }
-
-    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
-        task_fd_t *tfd = &current_task->fds[fd];
-        if (tfd->type == FD_TYPE_PIPE_W) {
-            int written;
-            const uint8_t *src;
-            pipe_t *p = (pipe_t *)tfd->private_data;
-            if (!p) return -EBADF;
-            written = 0;
-            src = (const uint8_t *)buf_addr;
-            while (written < len) {
-                uint64_t space;
-                uint64_t chunk;
-                if (p->readers <= 0) return -EPIPE;
-                while (p->count == p->buf_size) {
-                    waitq_add(&p->write_waitq, current_task);
-                    block_current();
-                }
-                space = p->buf_size - p->count;
-                chunk = (uint64_t)(len - written);
-                if (chunk > space) chunk = space;
-                for (uint64_t i = 0; i < chunk; i++) {
-                    p->buffer[p->write_pos] = src[written + (int)i];
-                    p->write_pos = (p->write_pos + 1) % p->buf_size;
-                }
-                p->count += chunk;
-                written += (int)chunk;
-                waitq_wake_all(&p->read_waitq);
-            }
-            return written;
-        }
-        if (tfd->type == FD_TYPE_FILE && tfd->node) {
-            uint64_t bytes;
-            vfs_node_t *node = (vfs_node_t *)tfd->node;
-            bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
-            tfd->offset += bytes;
-            return (int)bytes;
-        }
-        if (tfd->type != FD_TYPE_STDOUT && tfd->type != FD_TYPE_STDERR) {
-            return -EBADF;
-        }
-    }
-
-    if (fd == 1 || fd == 2) {
-        int con_id;
-        framebuffer_t *fb = fb_get();
-        con_id = current_task ? current_task->console_id : 0;
-        if (fb && (fb->font || fb->cols) && console_is_initialized()) {
-            console_write_to(con_id, (const char *)buf_addr, (size_t)len);
-        } else {
-            int written = 0;
-            while (written < len) {
-                int chunk = len - written;
-                if (chunk > 64) chunk = 64;
-                asm volatile("cli");
-                for (int i = 0; i < chunk; i++) {
-                    terminal_putchar(((const char *)buf_addr)[written + i]);
-                }
-                asm volatile("sti");
-                written += chunk;
-            }
-        }
-        return len;
-    }
-    
-    return -EBADF;
-}
-
-static int sys_read(int fd, char *buf, int len) {
-    uint64_t buf_addr;
     if (len == 0) return 0;
     if (!buf || len < 0) return -1;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
 
-    if (is_socket_fd(fd)) {
-        return socket_read(fd, (void *)buf_addr, len);
+    work_size = (uint64_t)len;
+    if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
+    heap_buf = 0;
+    if (work_size <= SYS_RW_STACK_BUF) {
+        kbuf = stack_buf;
+    } else {
+        kbuf = (uint8_t *)kmalloc(work_size);
+        if (!kbuf) return -ENOMEM;
+        heap_buf = 1;
     }
 
+    total = 0;
+    remaining = (uint64_t)len;
+
+    if (is_socket_fd(fd)) {
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > work_size) chunk = work_size;
+            memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+            result = socket_write(fd, kbuf, (int)chunk);
+            if (result <= 0) {
+                if (heap_buf) kfree(kbuf);
+                if (total > 0) return (int)total;
+                return result;
+            }
+            total += (uint64_t)result;
+            remaining -= (uint64_t)result;
+            if ((uint64_t)result < chunk) break;
+        }
+        if (heap_buf) kfree(kbuf);
+        return (int)total;
+    }
+
+    tfd = NULL;
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
-        task_fd_t *tfd = &current_task->fds[fd];
+        tfd = &current_task->fds[fd];
+        if (tfd->type == FD_TYPE_PIPE_W) {
+            p = (pipe_t *)tfd->private_data;
+            if (!p) {
+                if (heap_buf) kfree(kbuf);
+                return -EBADF;
+            }
+            while (remaining > 0) {
+                chunk = remaining;
+                if (chunk > work_size) chunk = work_size;
+                memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+                done = 0;
+                while (done < chunk) {
+                    if (p->readers <= 0) {
+                        if (heap_buf) kfree(kbuf);
+                        if (total > 0) return (int)total;
+                        return -EPIPE;
+                    }
+                    while (p->count == p->buf_size) {
+                        waitq_add(&p->write_waitq, current_task);
+                        block_current();
+                    }
+                    space = p->buf_size - p->count;
+                    bytes = chunk - done;
+                    if (bytes > space) bytes = space;
+                    for (i = 0; i < bytes; i++) {
+                        p->buffer[p->write_pos] = kbuf[done + i];
+                        p->write_pos = (p->write_pos + 1) % p->buf_size;
+                    }
+                    p->count += bytes;
+                    done += bytes;
+                    waitq_wake_all(&p->read_waitq);
+                }
+                total += chunk;
+                remaining -= chunk;
+            }
+            if (heap_buf) kfree(kbuf);
+            return (int)total;
+        }
+        if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            node = (vfs_node_t *)tfd->node;
+            while (remaining > 0) {
+                chunk = remaining;
+                if (chunk > work_size) chunk = work_size;
+                memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+                bytes = vfs_write(node, tfd->offset + total, chunk, kbuf);
+                total += bytes;
+                remaining -= bytes;
+                if (bytes < chunk) break;
+            }
+            tfd->offset += total;
+            if (heap_buf) kfree(kbuf);
+            return (int)total;
+        }
+        if (tfd->type != FD_TYPE_STDOUT && tfd->type != FD_TYPE_STDERR) {
+            if (heap_buf) kfree(kbuf);
+            return -EBADF;
+        }
+    }
+
+    if (fd == 1 || fd == 2) {
+        con_id = current_task ? current_task->console_id : 0;
+        fb = fb_get();
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > work_size) chunk = work_size;
+            memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+            if (fb && (fb->font || fb->cols) && console_is_initialized()) {
+                console_write_to(con_id, (const char *)kbuf, (size_t)chunk);
+            } else {
+                done = 0;
+                while (done < chunk) {
+                    term_chunk = (int)(chunk - done);
+                    if (term_chunk > 64) term_chunk = 64;
+                    asm volatile("cli");
+                    for (i = 0; i < (uint64_t)term_chunk; i++) {
+                        terminal_putchar((char)kbuf[done + i]);
+                    }
+                    asm volatile("sti");
+                    done += (uint64_t)term_chunk;
+                }
+            }
+            total += chunk;
+            remaining -= chunk;
+        }
+        if (heap_buf) kfree(kbuf);
+        return len;
+    }
+
+    if (heap_buf) kfree(kbuf);
+    return -EBADF;
+}
+
+static int sys_read(int fd, char *buf, int len) {
+    uint64_t buf_addr;
+    uint64_t work_size;
+    uint64_t remaining;
+    uint64_t total;
+    uint64_t chunk;
+    uint64_t avail;
+    uint64_t to_read;
+    uint64_t i;
+    uint64_t bytes;
+    uint8_t stack_buf[SYS_RW_STACK_BUF];
+    uint8_t *kbuf;
+    int heap_buf;
+    int result;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    pipe_t *p;
+
+    if (len == 0) return 0;
+    if (!buf || len < 0) return -1;
+    buf_addr = (uint64_t)buf;
+    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
+    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+
+    work_size = (uint64_t)len;
+    if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
+    heap_buf = 0;
+    if (work_size <= SYS_RW_STACK_BUF) {
+        kbuf = stack_buf;
+    } else {
+        kbuf = (uint8_t *)kmalloc(work_size);
+        if (!kbuf) return -ENOMEM;
+        heap_buf = 1;
+    }
+    total = 0;
+    remaining = (uint64_t)len;
+
+    if (is_socket_fd(fd)) {
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > work_size) chunk = work_size;
+            result = socket_read(fd, kbuf, (int)chunk);
+            if (result <= 0) {
+                if (heap_buf) kfree(kbuf);
+                if (total > 0) return (int)total;
+                return result;
+            }
+            memcpy((void *)(buf_addr + total), kbuf, (uint64_t)result);
+            total += (uint64_t)result;
+            remaining -= (uint64_t)result;
+            if ((uint64_t)result < chunk) break;
+        }
+        if (heap_buf) kfree(kbuf);
+        return (int)total;
+    }
+
+    tfd = NULL;
+    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
+        tfd = &current_task->fds[fd];
         if (tfd->type == FD_TYPE_PIPE_R) {
-            uint64_t avail;
-            uint64_t to_read;
-            uint8_t *dst;
-            pipe_t *p = (pipe_t *)tfd->private_data;
-            if (!p) return -EBADF;
+            p = (pipe_t *)tfd->private_data;
+            if (!p) {
+                if (heap_buf) kfree(kbuf);
+                return -EBADF;
+            }
             while (p->count == 0) {
-                if (p->writers <= 0) return 0;
+                if (p->writers <= 0) {
+                    if (heap_buf) kfree(kbuf);
+                    return 0;
+                }
                 waitq_add(&p->read_waitq, current_task);
                 block_current();
             }
             avail = p->count;
             to_read = (uint64_t)len;
             if (to_read > avail) to_read = avail;
-            dst = (uint8_t *)buf_addr;
-            for (uint64_t i = 0; i < to_read; i++) {
-                dst[i] = p->buffer[p->read_pos];
+            if (to_read > work_size) to_read = work_size;
+            for (i = 0; i < to_read; i++) {
+                kbuf[i] = p->buffer[p->read_pos];
                 p->read_pos = (p->read_pos + 1) % p->buf_size;
             }
             p->count -= to_read;
             waitq_wake_all(&p->write_waitq);
+            memcpy((void *)buf_addr, kbuf, to_read);
+            if (heap_buf) kfree(kbuf);
             return (int)to_read;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
-            vfs_node_t *node = (vfs_node_t *)tfd->node;
-            uint64_t file_off = tfd->offset;
-            uint64_t bytes;
-
-            bytes = vfs_read(node, file_off, (uint64_t)len, (uint8_t *)buf_addr);
-            tfd->offset = file_off + bytes;
-            return (int)bytes;
+            node = (vfs_node_t *)tfd->node;
+            while (remaining > 0) {
+                chunk = remaining;
+                if (chunk > work_size) chunk = work_size;
+                bytes = vfs_read(node, tfd->offset + total, chunk, kbuf);
+                if (bytes > chunk) bytes = chunk;
+                if (bytes == 0) break;
+                memcpy((void *)(buf_addr + total), kbuf, bytes);
+                total += bytes;
+                remaining -= bytes;
+                if (bytes < chunk) break;
+            }
+            tfd->offset += total;
+            if (heap_buf) kfree(kbuf);
+            return (int)total;
         }
         if (tfd->type != FD_TYPE_STDIN) {
+            if (heap_buf) kfree(kbuf);
             return -EBADF;
         }
     }
+
+    if (heap_buf) kfree(kbuf);
 
     if (fd == 0) {
         int con_id = current_task ? current_task->console_id : console_get_current();

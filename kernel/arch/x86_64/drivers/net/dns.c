@@ -11,7 +11,7 @@ static ipv4_addr_t g_dns_server;
 static ipv4_addr_t g_dns_server2;
 static dns_cache_entry_t *dns_cache = NULL;
 static int dns_cache_capacity = 0;
-#define DNS_CACHE_INIT 16
+#define DNS_CACHE_INIT 1
 static uint16_t dns_id_counter = 1;
 
 static ipv4_addr_t pending_result;

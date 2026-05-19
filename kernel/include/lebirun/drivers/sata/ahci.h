@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <lebirun/mutex.h>
 
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
@@ -356,6 +357,7 @@ typedef struct ahci_port {
     
     volatile uint64_t cmd_issued;
     volatile uint64_t cmd_running;
+    mutex_t io_lock;
     ahci_cmd_request_t requests[AHCI_CMD_SLOTS];
     
     volatile uint64_t error_count;

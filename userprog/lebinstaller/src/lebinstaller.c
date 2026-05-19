@@ -294,6 +294,9 @@ static int inst_resize_copy_buf(uint64_t file_size)
     char *new_buf;
     int want;
 
+    if (copy_buf && copy_buf_size >= COPY_BUF_MAX) return 0;
+    if (copy_buf && file_size > 0 && file_size <= (uint64_t)copy_buf_size) return 0;
+
     avail = inst_get_free_mem();
     if (avail == 0) avail = BUF_SIZE;
 
