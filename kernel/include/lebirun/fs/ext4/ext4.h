@@ -109,7 +109,7 @@ void ext4_drop_vfs_node(ext4_fs_t *fs, vfs_node_t *node);
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
-ext4_fs_t *ext4_get_mounted_fs(void);
+int ext4_sync_mounted(void);
 void ext4_background_writeback(uint32_t max_blocks);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);

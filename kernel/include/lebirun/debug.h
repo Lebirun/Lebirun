@@ -70,18 +70,82 @@ extern bool debug_fs_other;
 extern bool debug_signal;
 extern bool debug_ipc;
 
+#if CONFIG_DEBUG_MEMORY
 #define DEBUG_MEMORY(fmt, ...) do { if (debug_memory) klog_printf(1, "[MEM] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_MEMORY(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_TASK
 #define DEBUG_TASK(fmt, ...) do { if (debug_task) klog_printf(1, "[TASK] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_TASK(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_VFS
 #define DEBUG_VFS(fmt, ...) do { if (debug_vfs) klog_printf(1, "[VFS] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_VFS(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_RAMFS
 #define DEBUG_RAMFS(fmt, ...) do { if (debug_ramfs) klog_printf(1, "[RAMFS] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_RAMFS(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_INITRD
 #define DEBUG_INITRD(fmt, ...) do { if (debug_initrd) klog_printf(1, "[INITRD] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_INITRD(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_ELF
 #define DEBUG_ELF(fmt, ...) do { if (debug_elf) klog_printf(1, "[ELF] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_ELF(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_SYSCALL
 #define DEBUG_SYSCALL(fmt, ...) do { if (debug_syscall) klog_printf(1, "[SYSCALL] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_SYSCALL(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_IDT
 #define DEBUG_IDT(fmt, ...) do { if (debug_idt) klog_printf(1, "[IDT] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_IDT(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_DRIVER
 #define DEBUG_DRIVER(fmt, ...) do { if (debug_driver) klog_printf(1, "[DRIVER] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_DRIVER(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_FS_EXT4
 #define DEBUG_FS_EXT4(fmt, ...) do { if (debug_fs_ext4) klog_printf(1, "[EXT4] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_FS_EXT4(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_FS_OTHER
 #define DEBUG_FS_OTHER(fmt, ...) do { if (debug_fs_other) klog_printf(1, "[FS] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_FS_OTHER(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_SIGNAL
 #define DEBUG_SIGNAL(fmt, ...) do { if (debug_signal) klog_printf(1, "[SIGNAL] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_SIGNAL(fmt, ...) do { } while (0)
+#endif
+
+#if CONFIG_DEBUG_IPC
 #define DEBUG_IPC(fmt, ...) do { if (debug_ipc) klog_printf(1, "[IPC] " fmt, ##__VA_ARGS__); } while (0)
+#else
+#define DEBUG_IPC(fmt, ...) do { } while (0)
+#endif
 
 #endif

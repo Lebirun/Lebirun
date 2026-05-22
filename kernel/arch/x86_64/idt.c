@@ -124,6 +124,11 @@ static int is_usermode_exception(registers_t *regs) {
     return 0;
 }
 
+static int task_state_requires_schedule(task_t *task) {
+    if (!task) return 0;
+    return task->state == TASK_DEAD || task->state == TASK_BLOCKED || task->state == TASK_STOPPED;
+}
+
 registers_t* interrupt_handler(registers_t* regs)
 {
     uint64_t fault_addr;
@@ -229,11 +234,11 @@ registers_t* interrupt_handler(registers_t* regs)
         if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
             int cow_result;
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
-            cow_result = cow_handle_fault(fault_addr, current_task->pml4_phys);
-            if (cow_result == 1) {
+            if (task_handle_file_write_fault(current_task, fault_addr)) {
                 return regs;
             }
-            if (task_handle_file_write_fault(current_task, fault_addr)) {
+            cow_result = cow_handle_fault(fault_addr, current_task->pml4_phys);
+            if (cow_result == 1) {
                 return regs;
             }
         }
@@ -333,6 +338,9 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t sc_cow_addr;
             __asm__ ("movq %%cr2, %0" : "=r" (sc_cow_addr));
             if (sc_cow_addr < KERNEL_VMA) {
+                if (task_handle_file_write_fault(current_task, sc_cow_addr)) {
+                    return regs;
+                }
                 sc_cow_result = cow_handle_fault(sc_cow_addr, current_task->pml4_phys);
                 if (sc_cow_result == 1) {
                     return regs;
@@ -567,13 +575,13 @@ registers_t* interrupt_handler(registers_t* regs)
                 exec_cleanup_drain();
             }
             
-            if (current_task && current_task->state == TASK_DEAD) {
+            if (task_state_requires_schedule(current_task)) {
                 return schedule_from_irq(regs);
             }
 
             if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
                 signal_deliver_pending(regs);
-                if (current_task && (current_task->state == TASK_DEAD || current_task->state == TASK_BLOCKED)) {
+                if (task_state_requires_schedule(current_task)) {
                     return schedule_from_irq(regs);
                 }
             }
@@ -636,10 +644,13 @@ registers_t* interrupt_handler(registers_t* regs)
             regs = schedule_from_irq(regs);
 
             keyboard_process_sigint();
+            if (task_state_requires_schedule(current_task)) {
+                regs = schedule_from_irq(regs);
+            }
 
             if (current_task && current_task->is_user && (regs->cs & 0x3) == 0x3) {
                 signal_deliver_pending(regs);
-                if (current_task && (current_task->state == TASK_DEAD || current_task->state == TASK_BLOCKED)) {
+                if (task_state_requires_schedule(current_task)) {
                     regs = schedule_from_irq(regs);
                 }
             }
@@ -653,6 +664,10 @@ registers_t* interrupt_handler(registers_t* regs)
             keyboard_handler(regs);
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+            }
+            keyboard_process_sigint();
+            if (task_state_requires_schedule(current_task)) {
+                regs = schedule_from_irq(regs);
             }
         } else if (irq < MAX_IRQ_HANDLERS && irq_handlers[irq]) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));

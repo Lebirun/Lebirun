@@ -35,6 +35,24 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         }
     }
 
+    if (oldest >= 0 && fs->block_cache[oldest].dirty &&
+        fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
+        old_count = fs->block_cache_count;
+        new_count = old_count * 2;
+        if (new_count > EXT4_CACHE_BLOCKS_MAX) {
+            new_count = EXT4_CACHE_BLOCKS_MAX;
+        }
+        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
+            new_count * sizeof(ext4_block_cache_entry_t));
+        if (new_cache) {
+            memset(new_cache + old_count, 0,
+                (new_count - old_count) * sizeof(ext4_block_cache_entry_t));
+            fs->block_cache = new_cache;
+            fs->block_cache_count = new_count;
+            return (int)old_count;
+        }
+    }
+
     if (oldest < 0) {
         if (fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
             old_count = fs->block_cache_count;
@@ -279,7 +297,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     }
 
     port = ahci_get_port(fs->port_index);
-    max_run = 1;
+    max_run = 16;
 
     i = 0;
     while (i < dirty_count) {
@@ -368,6 +386,7 @@ int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
 
 void ext4_flush_cache(ext4_fs_t *fs) {
     int i;
+    ext4_block_cache_entry_t *new_cache;
 
     ext4_sync_blocks(fs);
     
@@ -378,6 +397,15 @@ void ext4_flush_cache(ext4_fs_t *fs) {
             fs->block_cache[i].block_num = 0;
             fs->block_cache[i].ref_count = 0;
             fs->block_cache[i].dirty = false;
+        }
+    }
+
+    if (fs->block_cache_count > EXT4_CACHE_BLOCKS) {
+        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
+            EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+        if (new_cache) {
+            fs->block_cache = new_cache;
+            fs->block_cache_count = EXT4_CACHE_BLOCKS;
         }
     }
 }

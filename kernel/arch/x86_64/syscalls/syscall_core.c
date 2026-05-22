@@ -1,12 +1,11 @@
 #include "syscall_defs.h"
-#include <lebirun/creds.h>
 #include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/cmdline.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
-extern int task_has_sigint_ignored(void);
+extern int task_has_pending_signals(void);
 extern int is_socket_fd(int fd);
 extern int socket_write(int fd, const void *buf, int len);
 extern int socket_read(int fd, void *buf, int len);
@@ -32,6 +31,10 @@ static int *history_saved_len;
 static int *esc_state;
 static char (*esc_buf)[8];
 static int *esc_len;
+
+static int syscall_core_interrupted(void) {
+    return task_has_pending_signals();
+}
 
 static int *in_line_editing;
 static int *serial_displayed_len;
@@ -77,6 +80,8 @@ static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
     uint64_t p;
     uint64_t pd;
+    uint64_t phys;
+    uint64_t *new_user_pages;
 
     if (len == 0) return 1;
     if (!current_task) return 0;
@@ -88,7 +93,34 @@ static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
     end = addr + len - 1;
     p = addr & ~0xFFFULL;
     while (p <= end) {
-        if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        if (vmm_get_phys_in_pml4(pd, p) == 0) {
+            if (!task_handle_file_page_fault(current_task, p)) {
+                if ((p >= 0x00700000u && p < 0x00800000u) ||
+                        (p >= current_task->user_brk && p < 0x40000000u) ||
+                        (p >= 0x1000u && p < current_task->user_brk)) {
+                    phys = pfa_alloc();
+                    if (!phys) return 0;
+                    pmm_zero_page_phys(phys);
+                    vmm_map_page_in_pml4(pd, p, phys, 0x7);
+                    if (vmm_get_phys_in_pml4(pd, p) == 0) {
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
+                    if (!new_user_pages) {
+                        vmm_unmap_page_in_pml4(pd, p);
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    current_task->user_pages = new_user_pages;
+                    current_task->user_pages[current_task->user_pages_count] = phys;
+                    current_task->user_pages_count++;
+                } else {
+                    return 0;
+                }
+            }
+            if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        }
         if (p + 0x1000ULL <= p) return 0;
         p += 0x1000ULL;
     }
@@ -194,6 +226,7 @@ static void history_add(int con_id, const char *line, int len) {
 
 static void history_replace_line(int con_id, const char *new_line, int new_len, int echo) {
     int i;
+
     if (!syscall_core_valid_console(con_id)) return;
     for (i = line_cursor[con_id]; i > 0; i--) {
         if (echo) tty_echo_str(con_id, "\033[D", 3);
@@ -211,12 +244,60 @@ static void history_replace_line(int con_id, const char *new_line, int new_len, 
     if (echo) tty_echo_str(con_id, new_line, new_len);
 }
 
-static pid_t tty_get_my_pgrp(void) {
-    pid_t my_pgrp = creds_get_pgid(0);
-    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pgid;
-    if (my_pgrp == 0 && current_task) my_pgrp = current_task->pid;
-    if (my_pgrp == 0) my_pgrp = 1;
-    return my_pgrp;
+static int history_saved_ready(void) {
+    uint64_t count;
+
+    if (history_saved) return 1;
+    count = (uint64_t)syscall_core_console_count();
+    history_saved = (char (*)[HISTORY_LINE_SIZE])kmalloc(count * sizeof(*history_saved));
+    if (!history_saved) return 0;
+    memset(history_saved, 0, count * sizeof(*history_saved));
+    return 1;
+}
+
+static int syscall_core_vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
+    size_t n;
+
+    n = strlen(lit);
+    if (n >= VFS_MAX_NAME) return 0;
+    if (memcmp(name, lit, n) != 0) return 0;
+    return name[n] == '\0';
+}
+
+static int syscall_core_vfs_name_is_tty(const char name[VFS_MAX_NAME]) {
+    int i;
+
+    if (syscall_core_vfs_name_is(name, "tty")) return 1;
+    if (name[0] != 't' || name[1] != 't' || name[2] != 'y') return 0;
+    i = 3;
+    if (name[i] < '0' || name[i] > '9') return 0;
+    while (name[i] >= '0' && name[i] <= '9') i++;
+    return name[i] == '\0';
+}
+
+static int syscall_core_vfs_name_is_stdio_alias(const char name[VFS_MAX_NAME]) {
+    if (syscall_core_vfs_name_is(name, "stdout")) return 1;
+    if (syscall_core_vfs_name_is(name, "stderr")) return 1;
+    return 0;
+}
+
+static int syscall_core_fd_is_console_output(int fd, task_fd_t *tfd) {
+    vfs_node_t *node;
+    uint64_t type;
+
+    if (fd != 1 && fd != 2) return 0;
+    if (!tfd) return 1;
+    if (tfd->type == FD_TYPE_STDOUT || tfd->type == FD_TYPE_STDERR) return 1;
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) return 0;
+    node = (vfs_node_t *)tfd->node;
+    type = VFS_GET_TYPE(node->flags);
+    if (type == VFS_CHARDEVICE &&
+            (syscall_core_vfs_name_is_tty(node->name) ||
+             syscall_core_vfs_name_is(node->name, "console"))) {
+        return 1;
+    }
+    if (type == VFS_SYMLINK && syscall_core_vfs_name_is_stdio_alias(node->name)) return 1;
+    return 0;
 }
 
 static int sys_exit(int code, const char *unused1, int unused2) {
@@ -229,6 +310,49 @@ static int sys_exit(int code, const char *unused1, int unused2) {
     schedule();
     for (;;) asm volatile ("hlt");
     return 0;
+}
+
+static int syscall_core_console_write_user(const char *buf, int len) {
+    uint64_t buf_addr;
+    uint64_t remaining;
+    uint64_t total;
+    uint64_t chunk;
+    uint64_t done;
+    uint64_t i;
+    uint8_t stack_buf[SYS_RW_STACK_BUF];
+    int con_id;
+    int term_chunk;
+    framebuffer_t *fb;
+
+    buf_addr = (uint64_t)buf;
+    remaining = (uint64_t)len;
+    total = 0;
+    con_id = current_task ? current_task->console_id : 0;
+    con_id = syscall_core_clamp_console(con_id);
+    fb = fb_get();
+    while (remaining > 0) {
+        chunk = remaining;
+        if (chunk > SYS_RW_STACK_BUF) chunk = SYS_RW_STACK_BUF;
+        memcpy(stack_buf, (const void *)(buf_addr + total), chunk);
+        if (fb && (fb->font || fb->cols) && console_is_initialized()) {
+            console_write_to(con_id, (const char *)stack_buf, (size_t)chunk);
+        } else {
+            done = 0;
+            while (done < chunk) {
+                term_chunk = (int)(chunk - done);
+                if (term_chunk > 64) term_chunk = 64;
+                asm volatile("cli");
+                for (i = 0; i < (uint64_t)term_chunk; i++) {
+                    terminal_putchar((char)stack_buf[done + i]);
+                }
+                asm volatile("sti");
+                done += (uint64_t)term_chunk;
+            }
+        }
+        total += chunk;
+        remaining -= chunk;
+    }
+    return len;
 }
 
 static int sys_write(int fd, const char *buf, int len) {
@@ -245,12 +369,10 @@ static int sys_write(int fd, const char *buf, int len) {
     uint8_t *kbuf;
     int heap_buf;
     int result;
-    int con_id;
-    int term_chunk;
+    int console_output;
     task_fd_t *tfd;
     vfs_node_t *node;
     pipe_t *p;
-    framebuffer_t *fb;
 
     if (len == 0) return 0;
     if (!buf || len < 0) return -1;
@@ -258,6 +380,16 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
     if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+
+    tfd = NULL;
+    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
+        tfd = &current_task->fds[fd];
+    }
+    console_output = syscall_core_fd_is_console_output(fd, tfd);
+
+    if (console_output) {
+        return syscall_core_console_write_user(buf, len);
+    }
 
     work_size = (uint64_t)len;
     if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
@@ -282,6 +414,7 @@ static int sys_write(int fd, const char *buf, int len) {
             if (result <= 0) {
                 if (heap_buf) kfree(kbuf);
                 if (total > 0) return (int)total;
+                if (result == 0) return -EIO;
                 return result;
             }
             total += (uint64_t)result;
@@ -292,9 +425,7 @@ static int sys_write(int fd, const char *buf, int len) {
         return (int)total;
     }
 
-    tfd = NULL;
-    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
-        tfd = &current_task->fds[fd];
+    if (tfd) {
         if (tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {
@@ -315,6 +446,11 @@ static int sys_write(int fd, const char *buf, int len) {
                     while (p->count == p->buf_size) {
                         waitq_add(&p->write_waitq, current_task);
                         block_current();
+                        if (syscall_core_interrupted()) {
+                            if (heap_buf) kfree(kbuf);
+                            if (total > 0) return (int)total;
+                            return -EINTR;
+                        }
                     }
                     space = p->buf_size - p->count;
                     bytes = chunk - done;
@@ -340,6 +476,11 @@ static int sys_write(int fd, const char *buf, int len) {
                 if (chunk > work_size) chunk = work_size;
                 memcpy(kbuf, (const void *)(buf_addr + total), chunk);
                 bytes = vfs_write(node, tfd->offset + total, chunk, kbuf);
+                if (bytes == 0) {
+                    if (heap_buf) kfree(kbuf);
+                    if (total > 0) return (int)total;
+                    return -EIO;
+                }
                 total += bytes;
                 remaining -= bytes;
                 if (bytes < chunk) break;
@@ -352,35 +493,6 @@ static int sys_write(int fd, const char *buf, int len) {
             if (heap_buf) kfree(kbuf);
             return -EBADF;
         }
-    }
-
-    if (fd == 1 || fd == 2) {
-        con_id = current_task ? current_task->console_id : 0;
-        fb = fb_get();
-        while (remaining > 0) {
-            chunk = remaining;
-            if (chunk > work_size) chunk = work_size;
-            memcpy(kbuf, (const void *)(buf_addr + total), chunk);
-            if (fb && (fb->font || fb->cols) && console_is_initialized()) {
-                console_write_to(con_id, (const char *)kbuf, (size_t)chunk);
-            } else {
-                done = 0;
-                while (done < chunk) {
-                    term_chunk = (int)(chunk - done);
-                    if (term_chunk > 64) term_chunk = 64;
-                    asm volatile("cli");
-                    for (i = 0; i < (uint64_t)term_chunk; i++) {
-                        terminal_putchar((char)kbuf[done + i]);
-                    }
-                    asm volatile("sti");
-                    done += (uint64_t)term_chunk;
-                }
-            }
-            total += chunk;
-            remaining -= chunk;
-        }
-        if (heap_buf) kfree(kbuf);
-        return len;
     }
 
     if (heap_buf) kfree(kbuf);
@@ -460,6 +572,10 @@ static int sys_read(int fd, char *buf, int len) {
                 }
                 waitq_add(&p->read_waitq, current_task);
                 block_current();
+                if (syscall_core_interrupted()) {
+                    if (heap_buf) kfree(kbuf);
+                    return -EINTR;
+                }
             }
             avail = p->count;
             to_read = (uint64_t)len;
@@ -502,19 +618,10 @@ static int sys_read(int fd, char *buf, int len) {
 
     if (fd == 0) {
         int con_id = current_task ? current_task->console_id : console_get_current();
-        int fg_pgrp;
         struct kernel_termios *t;
         int canonical;
         int echo;
         con_id = syscall_core_clamp_console(con_id);
-
-        fg_pgrp = tty_pgrp[con_id];
-        if (fg_pgrp != 0) {
-            pid_t my_pgrp = tty_get_my_pgrp();
-            if (my_pgrp != (pid_t)fg_pgrp) {
-                tty_pgrp[con_id] = (int)my_pgrp;
-            }
-        }
         
         t = &tty_termios[con_id];
         canonical = (t->c_lflag & ICANON) != 0;
@@ -557,6 +664,10 @@ static int sys_read(int fd, char *buf, int len) {
                         break;
                     }
                     block_current();
+                    if (syscall_core_interrupted()) {
+                        if (heap_buf) kfree(kbuf);
+                        return -EINTR;
+                    }
                 }
                 
                 key = keyboard_getchar_nb_for(con_id);
@@ -584,9 +695,10 @@ static int sys_read(int fd, char *buf, int len) {
                     esc_state[con_id] = 0;
                     
                     if (c == 'A') {
-                        if (!history || !history_len || !history_saved) continue;
+                        if (!history || !history_len) continue;
                         if (history_count[con_id] == 0) continue;
                         if (history_browse[con_id] < 0) {
+                            if (!history_saved_ready()) continue;
                             history_browse[con_id] = 0;
                             memcpy(history_saved[con_id], line_buffers[con_id], line_len[con_id]);
                             history_saved_len[con_id] = line_len[con_id];
@@ -716,11 +828,6 @@ static int sys_read(int fd, char *buf, int len) {
                             }
                         }
                     }
-                    if (task_has_sigint_ignored()) {
-                        in_line_editing[con_id] = 1;
-                        serial_displayed_len[con_id] = 0;
-                        continue;
-                    }
                     in_line_editing[con_id] = 0;
                     return -EINTR;
                 } else if (c == 4) {
@@ -806,6 +913,10 @@ static int sys_read(int fd, char *buf, int len) {
                         break;
                     }
                     block_current();
+                    if (syscall_core_interrupted()) {
+                        if (heap_buf) kfree(kbuf);
+                        return total > 0 ? total : -EINTR;
+                    }
                 }
                 {
                     int key = keyboard_getchar_nb_for(con_id);
@@ -842,6 +953,10 @@ static int sys_read(int fd, char *buf, int len) {
     return initrd_read(fd, (void *)buf_addr, (uint64_t)len);
 }
 
+int syscall_core_read_for_readv(int fd, char *buf, int len) {
+    return sys_read(fd, buf, len);
+}
+
 static int sys_read_nb(int fd, char *buf, int len) {
     uint64_t buf_addr;
     if (!buf || len <= 0) return -1;
@@ -852,17 +967,8 @@ static int sys_read_nb(int fd, char *buf, int len) {
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
         int con_id = current_task ? current_task->console_id : console_get_current();
         struct kernel_termios *t;
-        int fg_pgrp;
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
-
-        fg_pgrp = tty_pgrp[con_id];
-        if (fg_pgrp != 0) {
-            pid_t my_pgrp = tty_get_my_pgrp();
-            if (my_pgrp != (pid_t)fg_pgrp) {
-                tty_pgrp[con_id] = (int)my_pgrp;
-            }
-        }
         
         if (!keyboard_has_data_for(con_id)) {
             return 0;
@@ -888,10 +994,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
 }
 
 static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
-    size_t n = strlen(lit);
-    if (n >= VFS_MAX_NAME) return 0;
-    if (memcmp(name, lit, n) != 0) return 0;
-    return name[n] == '\0';
+    return syscall_core_vfs_name_is(name, lit);
 }
 
 static int sys_isatty(int fd, const char *unused, int unused2) {
@@ -910,7 +1013,7 @@ static int sys_isatty(int fd, const char *unused, int unused2) {
         if (a >= KERNEL_VMA &&
             vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), a) != 0 &&
             vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), a + (uint64_t)sizeof(vfs_node_t) - 1) != 0) {
-            if ((node->flags & VFS_CHARDEVICE) && (vfs_name_is(node->name, "tty") || vfs_name_is(node->name, "console"))) return 1;
+            if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE && (syscall_core_vfs_name_is_tty(node->name) || vfs_name_is(node->name, "console"))) return 1;
         }
     }
     return 0;
@@ -925,32 +1028,74 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
     uint64_t iov_addr;
     uint64_t iov_end;
     struct iovec *iov;
+    struct iovec stack_iov[16];
+    uint64_t base;
+    uint64_t len;
     int total;
+    int written;
     int i;
+    int heap_iov;
 
-    if (!iov_ptr || iovcnt <= 0) return -1;
+    if (!iov_ptr || iovcnt <= 0) return -EINVAL;
     if (iovcnt > 1024) return -EINVAL;
     
     iov_addr = (uint64_t)iov_ptr;
-    if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -1;
+    if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -EFAULT;
     iov_end = iov_addr + (uint64_t)iovcnt * sizeof(struct iovec);
-    if (iov_end < iov_addr || iov_end >= KERNEL_VMA) return -1;
-    
-    iov = (struct iovec *)iov_addr;
+    if (iov_end < iov_addr || iov_end >= KERNEL_VMA) return -EFAULT;
+    if (!syscall_core_user_range_mapped(iov_addr, (uint64_t)iovcnt * sizeof(struct iovec))) return -EFAULT;
+
+    heap_iov = 0;
+    if (iovcnt <= 16) {
+        iov = stack_iov;
+    } else {
+        iov = (struct iovec *)kmalloc((uint64_t)iovcnt * sizeof(struct iovec));
+        if (!iov) return -ENOMEM;
+        heap_iov = 1;
+    }
+    memcpy(iov, (const void *)iov_addr, (uint64_t)iovcnt * sizeof(struct iovec));
+
     total = 0;
     
     for (i = 0; i < iovcnt; i++) {
-        uint64_t base = (uint64_t)iov[i].iov_base;
-        uint64_t len = iov[i].iov_len;
-        int written;
-        
-        if (base >= KERNEL_VMA || base < 0x1000) continue;
-        if (base + len < base || base + len >= KERNEL_VMA) continue;
+        base = (uint64_t)iov[i].iov_base;
+        len = iov[i].iov_len;
+
+        if (len == 0) continue;
+        if (len > 0x7FFFFFFFULL) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : -EINVAL;
+        }
+        if (base >= KERNEL_VMA || base < 0x1000) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : -EFAULT;
+        }
+        if (base + len < base || base + len >= KERNEL_VMA) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : -EFAULT;
+        }
+        if (!syscall_core_user_range_mapped(base, len)) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : -EFAULT;
+        }
         
         written = sys_write(fd, (const char *)base, (int)len);
-        if (written > 0) total += written;
+        if (written < 0) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : written;
+        }
+        if (written == 0) {
+            if (heap_iov) kfree(iov);
+            return total > 0 ? total : -EIO;
+        }
+        total += written;
+        if ((uint64_t)written < len) {
+            if (heap_iov) kfree(iov);
+            return total;
+        }
     }
     
+    if (heap_iov) kfree(iov);
     return total;
 }
 
@@ -976,6 +1121,9 @@ void syscalls_core_init(void) {
     int count;
     uint64_t count_bytes;
     uint64_t history_slots;
+    uint64_t state_bytes;
+    uint64_t off;
+    uint8_t *state;
 
     syscall_table[SYSCALL_EXIT] = sys_exit;
     syscall_table[SYSCALL_WRITE] = sys_write;
@@ -991,39 +1139,62 @@ void syscalls_core_init(void) {
     syscall_console_count = count;
 
     count_bytes = (uint64_t)count * sizeof(int);
-    history_slots = (uint64_t)count + 1;
+    history_slots = (uint64_t)count;
+    state_bytes = (uint64_t)count * sizeof(*line_buffers) +
+                  count_bytes * 11 +
+                  (uint64_t)count * sizeof(*esc_buf) +
+                  history_slots * sizeof(*history) +
+                  history_slots * sizeof(*history_len);
+    state = (uint8_t *)kmalloc(state_bytes);
 
-    line_buffers = kmalloc((uint64_t)count * sizeof(*line_buffers));
-    line_len = kmalloc(count_bytes);
-    line_cursor = kmalloc(count_bytes);
-    line_ready = kmalloc(count_bytes);
-    history_head = kmalloc(count_bytes);
-    history_count = kmalloc(count_bytes);
-    history_browse = kmalloc(count_bytes);
-    history_saved_len = kmalloc(count_bytes);
-    esc_state = kmalloc(count_bytes);
-    esc_buf = kmalloc((uint64_t)count * sizeof(*esc_buf));
-    esc_len = kmalloc(count_bytes);
-    in_line_editing = kmalloc(count_bytes);
-    serial_displayed_len = kmalloc(count_bytes);
-
-    if (!line_buffers || !line_len || !line_cursor || !line_ready ||
-        !history_head || !history_count || !history_browse ||
-        !history_saved_len || !esc_state || !esc_buf || !esc_len ||
-        !in_line_editing || !serial_displayed_len) {
-        if (line_buffers) kfree(line_buffers);
-        if (line_len) kfree(line_len);
-        if (line_cursor) kfree(line_cursor);
-        if (line_ready) kfree(line_ready);
-        if (history_head) kfree(history_head);
-        if (history_count) kfree(history_count);
-        if (history_browse) kfree(history_browse);
-        if (history_saved_len) kfree(history_saved_len);
-        if (esc_state) kfree(esc_state);
-        if (esc_buf) kfree(esc_buf);
-        if (esc_len) kfree(esc_len);
-        if (in_line_editing) kfree(in_line_editing);
-        if (serial_displayed_len) kfree(serial_displayed_len);
+    if (state) {
+        off = 0;
+        line_buffers = (void *)(state + off);
+        off += (uint64_t)count * sizeof(*line_buffers);
+        off = (off + 7ULL) & ~7ULL;
+        line_len = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        line_cursor = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        line_ready = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        history_head = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        history_count = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        history_browse = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        history_saved_len = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        esc_state = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        esc_buf = (void *)(state + off);
+        off += (uint64_t)count * sizeof(*esc_buf);
+        off = (off + 7ULL) & ~7ULL;
+        esc_len = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        in_line_editing = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        serial_displayed_len = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        history = (void *)(state + off);
+        off += history_slots * sizeof(*history);
+        off = (off + 7ULL) & ~7ULL;
+        history_len = (void *)(state + off);
+        off += history_slots * sizeof(*history_len);
+        history_saved = NULL;
+    } else {
         line_buffers = line_buffers_fallback;
         line_len = line_len_fallback;
         line_cursor = line_cursor_fallback;
@@ -1040,6 +1211,10 @@ void syscalls_core_init(void) {
         syscall_console_count = 1;
         count = 1;
         count_bytes = sizeof(int);
+        history = NULL;
+        history_len = NULL;
+        history_saved = NULL;
+        history_slots = 0;
     }
     
     memset(line_buffers, 0, (uint64_t)count * sizeof(*line_buffers));
@@ -1068,10 +1243,6 @@ void syscalls_core_init(void) {
         esc_len[i] = 0;
     }
 
-    history = kmalloc(history_slots * sizeof(*history));
     if (history) memset(history, 0, history_slots * sizeof(*history));
-    history_len = kmalloc(history_slots * sizeof(*history_len));
     if (history_len) memset(history_len, 0, history_slots * sizeof(*history_len));
-    history_saved = kmalloc(history_slots * sizeof(*history_saved));
-    if (history_saved) memset(history_saved, 0, history_slots * sizeof(*history_saved));
 }

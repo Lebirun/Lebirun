@@ -15,6 +15,7 @@ extern int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *
 
 static ext4_fs_t *mounted_fs = NULL;
 static ext4_fs_t *ext4_mounts_head = NULL;
+static mutex_t ext4_mounts_lock;
 static vfs_fs_type_t ext4_fs_type;
 
 typedef struct {
@@ -32,14 +33,14 @@ static struct {
 } ext4_vfs_cache[EXT4_VFS_CACHE_MAX];
 static int ext4_vfs_cache_count = 0;
 
-static void ext4_mount_list_add(ext4_fs_t *fs) {
+static void ext4_mount_list_add_locked(ext4_fs_t *fs) {
     if (!fs) return;
     fs->next_mount = ext4_mounts_head;
     ext4_mounts_head = fs;
     mounted_fs = fs;
 }
 
-static void ext4_mount_list_remove(ext4_fs_t *fs) {
+static void ext4_mount_list_remove_locked(ext4_fs_t *fs) {
     ext4_fs_t *prev;
     ext4_fs_t *cur;
 
@@ -64,6 +65,12 @@ static void ext4_mount_list_remove(ext4_fs_t *fs) {
     if (mounted_fs == fs) {
         mounted_fs = ext4_mounts_head;
     }
+}
+
+static void ext4_mount_list_add(ext4_fs_t *fs) {
+    mutex_lock(&ext4_mounts_lock);
+    ext4_mount_list_add_locked(fs);
+    mutex_unlock(&ext4_mounts_lock);
 }
 
 static vfs_node_t *ext4_vfs_cache_lookup(ext4_fs_t *fs, uint32_t ino) {
@@ -771,6 +778,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     ext4_fs_t *cur;
 
     fs = NULL;
+    mutex_lock(&ext4_mounts_lock);
     if (mountpoint && mountpoint->private_data) {
         priv = (ext4_vfs_private_t *)mountpoint->private_data;
         fs = priv->fs;
@@ -789,8 +797,12 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
         fs = mounted_fs;
     }
     if (!fs) {
+        mutex_unlock(&ext4_mounts_lock);
         return -1;
     }
+
+    ext4_mount_list_remove_locked(fs);
+    mutex_lock(&fs->lock);
 
     ext4_sync_inodes(fs);
     ext4_sync_blocks(fs);
@@ -816,21 +828,31 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
         kfree(fs->inode_cache);
     }
 
-    ext4_mount_list_remove(fs);
+    mutex_unlock(&fs->lock);
+    mutex_unlock(&ext4_mounts_lock);
     kfree(fs);
 
     return 0;
 }
 
 void ext4_init(void) {
+    mutex_init(&ext4_mounts_lock);
     printf("EXT4: Initializing ext4 filesystem driver\n");
 }
 
 int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *block_size) {
-    if (!mounted_fs) return -1;
-    if (total_blocks) *total_blocks = mounted_fs->total_blocks;
-    if (free_blocks) *free_blocks = mounted_fs->sb.s_free_blocks_count_lo;
-    if (block_size) *block_size = mounted_fs->block_size;
+    ext4_fs_t *fs;
+
+    mutex_lock(&ext4_mounts_lock);
+    fs = mounted_fs;
+    if (!fs) {
+        mutex_unlock(&ext4_mounts_lock);
+        return -1;
+    }
+    if (total_blocks) *total_blocks = fs->total_blocks;
+    if (free_blocks) *free_blocks = fs->sb.s_free_blocks_count_lo;
+    if (block_size) *block_size = fs->block_size;
+    mutex_unlock(&ext4_mounts_lock);
     return 0;
 }
 
@@ -932,6 +954,10 @@ int ext4_unmount(ext4_fs_t *fs) {
         return -1;
     }
 
+    mutex_lock(&ext4_mounts_lock);
+    ext4_mount_list_remove_locked(fs);
+    mutex_lock(&fs->lock);
+
     ext4_sync_inodes(fs);
     ext4_sync_blocks(fs);
     if (fs->super_dirty) {
@@ -955,8 +981,8 @@ int ext4_unmount(ext4_fs_t *fs) {
         kfree(fs->inode_cache);
     }
 
-    ext4_mount_list_remove(fs);
-
+    mutex_unlock(&fs->lock);
+    mutex_unlock(&ext4_mounts_lock);
     kfree(fs);
     return 0;
 }
@@ -981,8 +1007,20 @@ int ext4_sync(ext4_fs_t *fs) {
     return 0;
 }
 
-ext4_fs_t *ext4_get_mounted_fs(void) {
-    return mounted_fs;
+int ext4_sync_mounted(void) {
+    ext4_fs_t *fs;
+    int ret;
+
+    ret = -1;
+    mutex_lock(&ext4_mounts_lock);
+    fs = mounted_fs;
+    if (fs) {
+        mutex_lock(&fs->lock);
+        ret = ext4_sync(fs);
+        mutex_unlock(&fs->lock);
+    }
+    mutex_unlock(&ext4_mounts_lock);
+    return ret;
 }
 
 void ext4_background_writeback(uint32_t max_blocks) {
@@ -992,6 +1030,7 @@ void ext4_background_writeback(uint32_t max_blocks) {
         return;
     }
 
+    mutex_lock(&ext4_mounts_lock);
     fs = ext4_mounts_head;
     while (fs) {
         mutex_lock(&fs->lock);
@@ -999,4 +1038,5 @@ void ext4_background_writeback(uint32_t max_blocks) {
         mutex_unlock(&fs->lock);
         fs = fs->next_mount;
     }
+    mutex_unlock(&ext4_mounts_lock);
 }

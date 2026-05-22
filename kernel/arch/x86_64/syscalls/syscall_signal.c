@@ -105,16 +105,6 @@ static task_signals_t *get_task_signals(void) {
     return slot;
 }
 
-int task_has_sigint_ignored(void) {
-    task_signals_t *sigs;
-
-    if (!current_task) return 0;
-    sigs = (task_signals_t *)current_task->signal_data;
-    if (!sigs) return 0;
-    if (sigs->owner_pid != current_task->pid) return 0;
-    return sigs->actions[2].sa_handler == SIG_IGN;
-}
-
 void task_reset_signals_on_exec(void) {
     task_signals_t *sigs;
     int i;
@@ -132,7 +122,9 @@ void task_reset_signals_on_exec(void) {
     sigs->in_signal = 0;
 
     for (i = 1; i < NSIG; i++) {
-        if (sigs->actions[i].sa_handler != SIG_IGN)
+        if (sigs->actions[i].sa_handler != SIG_IGN ||
+                i == SIGINT || i == SIGQUIT || i == SIGTSTP ||
+                i == SIGTTIN || i == SIGTTOU)
             sigs->actions[i].sa_handler = SIG_DFL;
         sigs->actions[i].sa_flags = 0;
         sigs->actions[i].sa_restorer = NULL;
@@ -373,13 +365,8 @@ int deliver_signal_to_task(task_t *target, int sig) {
         return 0;
     }
 
-    if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
-        target->state = TASK_BLOCKED;
-        return 0;
-    }
-
     if (sig == SIGCONT) {
-        if (target->state == TASK_BLOCKED) {
+        if (target->state == TASK_STOPPED || target->state == TASK_BLOCKED) {
             target->state = TASK_READY;
         }
         return 0;
@@ -431,14 +418,14 @@ int deliver_signal_to_task(task_t *target, int sig) {
 }
 
 int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
-    if (!out || out_cap <= 0) return 0;
-    if (pgid <= 0) return 0;
-
     int count = 0;
     int guard = 0;
     task_t *t;
     uint64_t a;
     pid_t t_pgid;
+
+    if (!out || out_cap <= 0) return 0;
+    if (pgid <= 0) return 0;
 
     lock_scheduler();
     t = all_tasks_head;
@@ -462,26 +449,33 @@ int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
 }
 
 int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
+    int sig;
+
     (void)unused;
-    int sig = (int)(uintptr_t)sig_ptr;
+    sig = (int)(uintptr_t)sig_ptr;
     
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     
     if (sig == 0) {
+        task_t *t;
+        pid_t pgid;
+        pid_t tmp[1];
+
         if (pid > 0) {
-            task_t *t = task_find((pid_t)pid);
+            t = task_find((pid_t)pid);
             return t ? 0 : -ESRCH;
         }
         if (!current_task) return -ESRCH;
-        pid_t pgid = 0;
+        pgid = 0;
         if (pid == 0) pgid = current_task->pgid ? current_task->pgid : current_task->pid;
         else pgid = (pid_t)(-pid);
-        pid_t tmp[1];
         return collect_pids_in_pgrp(pgid, tmp, 1) > 0 ? 0 : -ESRCH;
     }
 
     if (pid > 0) {
-        task_t *target = task_find((pid_t)pid);
+        task_t *target;
+
+        target = task_find((pid_t)pid);
         if (!target) return -ESRCH;
         if (target->is_kernel_task) return -EPERM;
         if (current_task && current_task->uid != 0 &&
@@ -497,22 +491,37 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         pid_t self_pid = current_task->pid;
         uint64_t my_uid = current_task->uid;
         uint64_t my_euid = current_task->euid;
+        pid_t pids[256];
         int guard = 0;
+        int count = 0;
+        int i;
+        uint64_t a;
+        task_t *t;
+
         lock_scheduler();
-        task_t *t = all_tasks_head;
+        t = all_tasks_head;
         while (t && guard < 4096) {
-            uint64_t a = (uint64_t)t;
+            a = (uint64_t)t;
             if (a < KERNEL_VMA) break;
             if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
             if (t->is_user && t->pid != self_pid && t->pid != 1 &&
                 (my_uid == 0 || my_uid == t->uid || my_euid == t->uid)) {
-                deliver_signal_to_task(t, sig);
-                sent++;
+                if (count < 256) {
+                    pids[count] = t->pid;
+                    count++;
+                }
             }
             t = t->all_next;
             guard++;
         }
         unlock_scheduler();
+        for (i = 0; i < count; i++) {
+            t = task_find(pids[i]);
+            if (t) {
+                deliver_signal_to_task(t, sig);
+                sent++;
+            }
+        }
         return sent > 0 ? 0 : -ESRCH;
     }
 
@@ -630,12 +639,6 @@ void signal_deliver_pending(registers_t *regs) {
                 case SIGURG:
                 case SIGWINCH:
                     continue;
-                case SIGSTOP:
-                case SIGTSTP:
-                case SIGTTIN:
-                case SIGTTOU:
-                    current_task->state = TASK_BLOCKED;
-                    return;
                 case SIGCONT:
                     continue;
                 default:

@@ -178,11 +178,6 @@ void ext4_release_inode(ext4_inode_cache_t *ic) {
     if (ic->ref_count > 0) {
         ic->ref_count--;
     }
-
-    if (ic->ref_count == 0 && ic->dirty) {
-        ext4_write_inode(ic->fs, ic->ino, &ic->inode);
-        ic->dirty = false;
-    }
 }
 
 void ext4_sync_inodes(ext4_fs_t *fs) {

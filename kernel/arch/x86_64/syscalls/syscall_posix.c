@@ -10,6 +10,7 @@
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
+extern int syscall_core_read_for_readv(int fd, char *buf, int len);
 
 #define fd_table (current_task->fds)
 
@@ -1416,17 +1417,13 @@ static int sys_fchown(int fd, int uid, int gid) {
 }
 
 static int sys_fsync(int fd) {
-    ext4_fs_t *fs;
     ahci_port_t *port;
     uint64_t i;
 
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!fd_table[fd].in_use) return -EBADF;
 
-    fs = ext4_get_mounted_fs();
-    if (fs) {
-        ext4_sync(fs);
-    }
+    ext4_sync_mounted();
 
     for (i = 0; i < AHCI_MAX_PORTS; i++) {
         port = ahci_get_port(i);
@@ -1475,24 +1472,70 @@ struct iovec {
 };
 
 static int sys_readv(int fd, const struct iovec *iov, int iovcnt) {
+    uint64_t iov_addr;
+    uint64_t iov_len;
+    uint64_t base;
+    uint64_t len;
+    struct iovec *kiov;
+    struct iovec stack_iov[16];
     int total;
+    int ret;
+    int i;
+    int heap_iov;
+
+    if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!iov || iovcnt <= 0) return -EINVAL;
+    if (iovcnt > 1024) return -EINVAL;
+    iov_addr = (uint64_t)iov;
+    iov_len = (uint64_t)iovcnt * sizeof(struct iovec);
+    if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -EFAULT;
+    if (iov_addr + iov_len < iov_addr || iov_addr + iov_len >= KERNEL_VMA) return -EFAULT;
+    if (!posix_user_range_mapped(iov_addr, iov_len)) return -EFAULT;
+
+    heap_iov = 0;
+    if (iovcnt <= 16) {
+        kiov = stack_iov;
+    } else {
+        kiov = (struct iovec *)kmalloc(iov_len);
+        if (!kiov) return -ENOMEM;
+        heap_iov = 1;
+    }
+    memcpy(kiov, (const void *)iov_addr, iov_len);
     
     total = 0;
-    for (int i = 0; i < iovcnt; i++) {
-        int ret;
-        if (iov[i].iov_len == 0) continue;
-        if (!iov[i].iov_base) continue;
-        
-        ret = vfs_read_fd(fd, iov[i].iov_base, iov[i].iov_len);
+    for (i = 0; i < iovcnt; i++) {
+        if (kiov[i].iov_len == 0) continue;
+        base = (uint64_t)kiov[i].iov_base;
+        len = (uint64_t)kiov[i].iov_len;
+        if (len > 0x7FFFFFFFULL) {
+            if (heap_iov) kfree(kiov);
+            return total > 0 ? total : -EINVAL;
+        }
+        if (!base || base >= KERNEL_VMA || base < 0x1000) {
+            if (heap_iov) kfree(kiov);
+            return total > 0 ? total : -EFAULT;
+        }
+        if (base + len < base || base + len >= KERNEL_VMA) {
+            if (heap_iov) kfree(kiov);
+            return total > 0 ? total : -EFAULT;
+        }
+        if (!posix_user_range_mapped(base, len)) {
+            if (heap_iov) kfree(kiov);
+            return total > 0 ? total : -EFAULT;
+        }
+
+        ret = syscall_core_read_for_readv(fd, kiov[i].iov_base, (int)len);
         if (ret < 0) {
+            if (heap_iov) kfree(kiov);
             if (total > 0) return total;
             return ret;
         }
+        if (ret == 0) break;
         total += ret;
-        if ((size_t)ret < iov[i].iov_len) break;
+        if ((size_t)ret < kiov[i].iov_len) break;
     }
+    if (heap_iov) kfree(kiov);
     return total;
 }
 

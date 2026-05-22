@@ -70,3 +70,5 @@ ports/
 
 AGENTS.md
 .codex
+.agents
+.claude

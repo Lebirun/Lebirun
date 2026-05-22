@@ -279,7 +279,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     }
 
     if (info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFFFFFFFFFFULL) {
-        info->phdr_vaddr = info->load_base + ehdr->e_phoff;
+        info->phnum = 0;
     }
 
     if (is_pie) {
@@ -474,9 +474,6 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     info->phdr_vaddr = 0;
 
     if (!is_pie && current_task && current_task->is_user) {
-        /* Demand-paged path for user exec: register file mappings and return.
-         * Skipped during boot (non-user current_task) to avoid adding mappings
-         * to the wrong task; falls through to the upfront-load path instead. */
         for (i = 0; i < ehdr.e_phnum; i++) {
             if (phdr[i].p_type == PT_PHDR) {
                 info->phdr_vaddr = phdr[i].p_vaddr;
@@ -511,7 +508,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
         }
 
         if (info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFFFFFFFFFFULL) {
-            info->phdr_vaddr = info->load_base + ehdr.e_phoff;
+            info->phnum = 0;
         }
         if (out_pages) {
             *out_pages = NULL;
@@ -619,7 +616,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     }
 
     if (ret == 0 && info->phdr_vaddr == 0 && info->load_base != 0xFFFFFFFFFFFFFFFFULL) {
-        info->phdr_vaddr = info->load_base + ehdr.e_phoff;
+        info->phnum = 0;
     }
 
     if (ret == 0 && is_pie) {

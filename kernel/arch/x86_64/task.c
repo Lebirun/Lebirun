@@ -26,6 +26,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 #define KERR_EPERM   1
 #define KERR_EIO     5
 #define KERR_ENOEXEC 8
+#define KERR_EINTR   4
 #define KERR_ENOMEM  12
 
 #define TASK_STACK_SIZE 4096
@@ -165,6 +166,17 @@ static void task_free_fpu_state(task_t *task) {
     if (!task || !task->fpu_state) return;
     kfree_aligned(task->fpu_state);
     task->fpu_state = NULL;
+}
+
+static void task_write_fs_base(uint64_t base) {
+    __asm__ volatile (
+        "wrmsr"
+        :
+        : "c"(0xC0000100u),
+          "a"((uint32_t)(base & 0xFFFFFFFF)),
+          "d"((uint32_t)(base >> 32))
+        : "memory"
+    );
 }
 static uint64_t exec_page_cache_pages = 0;
 static uint64_t exec_page_cache_clock = 0;
@@ -506,6 +518,31 @@ task_t* task_find_by_pml4(uint64_t pml4_phys) {
     return NULL;
 }
 
+static void task_wake_parent_waiter_locked(task_t *task) {
+    task_t *parent;
+    int limit;
+
+    if (!task || task->ppid <= 0) return;
+    parent = all_tasks_head;
+    limit = 4096;
+    while (parent && limit > 0) {
+        if (!task_ptr_valid(parent)) break;
+        if (parent->pid == task->ppid) {
+            if (parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
+                parent->state = TASK_READY;
+            }
+            return;
+        }
+        parent = parent->all_next;
+        limit--;
+    }
+}
+
+static void task_finish_death_locked(task_t *task) {
+    waitq_wake_all(&task->join_waiters);
+    task_wake_parent_waiter_locked(task);
+}
+
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
     int found;
     int limit;
@@ -586,10 +623,12 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
     }
 
     if (!found) {
+        current_task->join_target = NULL;
         unlock_scheduler();
         return -1;
     }
 
+    current_task->join_target = t;
     current_task->waiting_for_any_child = 1;
     current_task->state = TASK_BLOCKED;
     unlock_scheduler();
@@ -600,6 +639,7 @@ void task_finish_wait_any_child(void) {
     lock_scheduler();
     if (current_task) {
         current_task->waiting_for_any_child = 0;
+        current_task->join_target = NULL;
     }
     unlock_scheduler();
 }
@@ -860,6 +900,36 @@ static inline void remove_task_from_runqueue(task_t* task) {
     }
 }
 
+static int task_in_runqueue_locked(task_t *task) {
+    task_t *t;
+    int limit;
+
+    if (!task || !ready_queue_head) return 0;
+    t = ready_queue_head;
+    limit = 0;
+    do {
+        if (t == task) return 1;
+        t = t->next;
+        limit++;
+    } while (t && t != ready_queue_head && limit < 10000);
+    return 0;
+}
+
+static task_t *task_find_idle_locked(void) {
+    task_t *t;
+    int limit;
+
+    t = all_tasks_head;
+    limit = 0;
+    while (t && limit < 4096) {
+        if (!task_ptr_valid(t)) break;
+        if (t->id == 0 && !t->is_user && !t->resources_released) return t;
+        t = t->all_next;
+        limit++;
+    }
+    return NULL;
+}
+
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode) {
     return create_task_with_cr3(entry, initial_state, user_mode, read_cr3());
 }
@@ -1102,8 +1172,6 @@ void task_exit(uint64_t exit_code) {
 }
 
 void task_exit_deferred(uint64_t exit_code) {
-    task_t *parent;
-
     if (!current_task) return;
     lock_scheduler();
     if (current_task->state == TASK_DEAD) {
@@ -1115,29 +1183,18 @@ void task_exit_deferred(uint64_t exit_code) {
     if (current_task->waiting_queue) {
         waitq_remove(current_task->waiting_queue, current_task);
     }
-    if (current_task->join_target) {
+    if (current_task->join_target && !current_task->waiting_for_any_child) {
         if (current_task->join_target->join_refs) current_task->join_target->join_refs--;
         waitq_remove(&current_task->join_target->join_waiters, current_task);
-        current_task->join_target = NULL;
     }
+    current_task->join_target = NULL;
+    current_task->waiting_for_any_child = 0;
     current_task->state = TASK_DEAD;
     remove_task_from_runqueue(current_task);
     current_task->wait_next = dead_queue_head;
     dead_queue_head = current_task;
+    task_finish_death_locked(current_task);
     unlock_scheduler();
-
-    lock_scheduler();
-    waitq_wake_all(&current_task->join_waiters);
-    unlock_scheduler();
-
-    if (current_task->ppid > 0) {
-        parent = task_find((pid_t)current_task->ppid);
-        lock_scheduler();
-        if (parent && parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
-            parent->state = TASK_READY;
-        }
-        unlock_scheduler();
-    }
     reap_request();
 }
 
@@ -1592,58 +1649,6 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     return 1;
 }
 
-static uint64_t task_prefault_file_page_to_pd(task_t *task, uint64_t pml4_phys, uint64_t fault_addr) {
-    uint64_t page;
-    uint64_t phys;
-    uint64_t read_start;
-    uint64_t read_end;
-    uint64_t read_off;
-    uint64_t read_len;
-    uint64_t map_flags;
-    int match;
-    int i;
-
-    if (!task || !task->is_user || !pml4_phys) return 0;
-    page = fault_addr & ~(PAGE_SIZE - 1);
-    if (vmm_get_phys_in_pml4(pml4_phys, page) != 0) return 0;
-
-    match = -1;
-    for (i = 0; i < task->file_map_count; i++) {
-        if (!task->file_maps[i].node) continue;
-        if (page < task->file_maps[i].vaddr) continue;
-        if (page >= task->file_maps[i].vaddr + task->file_maps[i].memsz) continue;
-        match = i;
-        if (task->file_maps[i].flags & 0x2) break;
-    }
-    if (match < 0) return 0;
-
-    read_start = page;
-    read_end = page + PAGE_SIZE;
-    if (read_start < task->file_maps[match].vaddr) read_start = task->file_maps[match].vaddr;
-    if (read_end > task->file_maps[match].vaddr + task->file_maps[match].filesz) {
-        read_end = task->file_maps[match].vaddr + task->file_maps[match].filesz;
-    }
-    if (read_end <= read_start) return 0;
-
-    read_off = task->file_maps[match].offset + (read_start - task->file_maps[match].vaddr);
-    read_len = read_end - read_start;
-    if (read_start != page) return 0;
-    if (exec_page_cache_get(task->file_maps[match].node, read_off, read_len, &phys) != 0) return 0;
-
-    map_flags = task->file_maps[match].flags;
-    if (task->file_maps[match].flags & 0x2) {
-        map_flags = (task->file_maps[match].flags & ~0x2ULL) | VMM_PTE_COW;
-    }
-    vmm_map_page_in_pml4(pml4_phys, page, phys, map_flags);
-    if (vmm_get_phys_in_pml4(pml4_phys, page) != phys) {
-        if (pfa_ref_dec(phys) == 0) {
-            exec_page_cache_reclaim(exec_page_cache_target_pages());
-        }
-        return 0;
-    }
-    return phys;
-}
-
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     uint64_t page;
     uint64_t old_phys;
@@ -2043,6 +2048,9 @@ void wake_task(task_t* task) {
     if (!task) return;
     lock_scheduler();
     if (task->state == TASK_BLOCKED) {
+        if (task->waiting_queue) {
+            waitq_remove(task->waiting_queue, task);
+        }
         task->state = TASK_READY;
         sleepq_remove(task);
     }
@@ -2050,8 +2058,6 @@ void wake_task(task_t* task) {
 }
 
 void task_kill(task_t* task, uint64_t exit_code) {
-    task_t *parent;
-
     if (!task) return;
     if (task == current_task) {
         task_exit(exit_code);
@@ -2067,33 +2073,24 @@ void task_kill(task_t* task, uint64_t exit_code) {
     if (task->waiting_queue) {
         waitq_remove(task->waiting_queue, task);
     }
-    if (task->join_target) {
+    if (task->join_target && !task->waiting_for_any_child) {
         if (task->join_target->join_refs) task->join_target->join_refs--;
         waitq_remove(&task->join_target->join_waiters, task);
-        task->join_target = NULL;
     }
+    task->join_target = NULL;
+    task->waiting_for_any_child = 0;
     task->state = TASK_DEAD;
     remove_task_from_runqueue(task);
     task->wait_next = dead_queue_head;
     dead_queue_head = task;
+    task_finish_death_locked(task);
     unlock_scheduler();
-
-    lock_scheduler();
-    waitq_wake_all(&task->join_waiters);
-    unlock_scheduler();
-
-    if (task->ppid > 0) {
-        parent = task_find((pid_t)task->ppid);
-        lock_scheduler();
-        if (parent && parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
-            parent->state = TASK_READY;
-        }
-        unlock_scheduler();
-    }
     reap_request();
 }
 
 int task_join(task_t* task, uint64_t* exit_code) {
+    extern int task_has_pending_signals(void);
+
     if (!task || task == current_task) return -1;
 
     lock_scheduler();
@@ -2113,10 +2110,33 @@ int task_join(task_t* task, uint64_t* exit_code) {
     current_task->state = TASK_BLOCKED;
     unlock_scheduler();
 
-    schedule();
+    for (;;) {
+        schedule();
 
-    lock_scheduler();
+        lock_scheduler();
+        if (task->state == TASK_DEAD) {
+            break;
+        }
+        if (task_has_pending_signals()) {
+            waitq_remove(&task->join_waiters, current_task);
+            if (task->join_refs) task->join_refs--;
+            current_task->join_target = NULL;
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        if (!current_task->waiting_queue) {
+            if (task->join_refs) task->join_refs--;
+            current_task->join_target = NULL;
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        current_task->state = TASK_BLOCKED;
+        unlock_scheduler();
+    }
     if (exit_code) *exit_code = task->exit_code;
+    if (current_task->waiting_queue) {
+        waitq_remove(current_task->waiting_queue, current_task);
+    }
     if (task->join_refs) task->join_refs--;
     current_task->join_target = NULL;
     unlock_scheduler();
@@ -2156,19 +2176,44 @@ static inline void save_irq_frame_into_task(task_t* task, const registers_t* reg
     task->cr3 = entry_cr3;
 }
 
-registers_t* schedule_from_irq(registers_t* regs) {
-    uint64_t entry_cr3;
-    uint64_t kernel_cr3;
-    int must_switch;
-    bool is_idle;
-    int safety;
-    uint64_t next_rsp;
+static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
+    registers_t *frame;
+    uint64_t rsp;
     uint64_t es_val;
     uint64_t ds_val;
     uint64_t cs_val;
     int valid_es;
     int valid_ds;
     int valid_cs;
+
+    if (frame_out) *frame_out = NULL;
+    if (!task) return 0;
+    rsp = task->regs.rsp;
+    if (rsp == 0) return 0;
+    if (!((rsp >= KERNEL_VMA && rsp < HEAP_START) ||
+          (rsp >= HEAP_START && rsp < kernel_heap.max_addr) ||
+          kstack_is_in_region(rsp))) {
+        return 0;
+    }
+    frame = (registers_t*)rsp;
+    es_val = frame->es & 0xFFFF;
+    ds_val = frame->ds & 0xFFFF;
+    cs_val = frame->cs & 0xFFFF;
+    valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
+    valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
+    valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
+    if (!valid_es || !valid_ds || !valid_cs) return 0;
+    if (frame_out) *frame_out = frame;
+    return 1;
+}
+
+registers_t* schedule_from_irq(registers_t* regs) {
+    uint64_t entry_cr3;
+    uint64_t kernel_cr3;
+    int must_switch;
+    int dead_switch;
+    bool is_idle;
+    int safety;
     uint64_t rsp0;
     int got_lock;
     int run_deferred;
@@ -2178,16 +2223,25 @@ registers_t* schedule_from_irq(registers_t* regs) {
     registers_t* return_frame;
     cpu_info_t *this_cpu;
     registers_t *result;
+    int selectable;
+    int forced_state_switch;
+    task_t *idle_task;
 
     if (!current_task || !ready_queue_head) return regs;
 
     this_cpu = smp_this_cpu();
     run_deferred = 0;
+    forced_state_switch = current_task->state == TASK_DEAD ||
+                          current_task->state == TASK_BLOCKED ||
+                          current_task->state == TASK_STOPPED;
 
     if (this_cpu->scheduler_lock_depth > 0) return regs;
 
     got_lock = spin_trylock(&sched_lock);
-    if (!got_lock) return regs;
+    if (!got_lock) {
+        if (!forced_state_switch) return regs;
+        spin_lock(&sched_lock);
+    }
 
     result = regs;
     prev_task = current_task;
@@ -2200,13 +2254,14 @@ registers_t* schedule_from_irq(registers_t* regs) {
     regs->return_cr3 = entry_cr3;
     kernel_cr3 = vmm_get_kernel_cr3();
     
-    must_switch = (prev_task->state == TASK_DEAD);
+    dead_switch = (prev_task->state == TASK_DEAD);
+    must_switch = dead_switch || prev_task->state == TASK_BLOCKED || prev_task->state == TASK_STOPPED;
 
     if (regs->int_no != 48 && prev_task->syscall_frame && !must_switch) {
         goto out_restore_cr3;
     }
 
-    if (!must_switch) {
+    if (!dead_switch) {
         save_irq_frame_into_task(prev_task, regs, (uint64_t)regs, entry_cr3);
     }
 
@@ -2231,15 +2286,36 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
     start = next;
     safety = 0;
+    return_frame = NULL;
     
     while (next) {
         if ((next->state == TASK_READY || next->state == TASK_RUNNING) && next != prev_task && !next->resources_released) {
-            break;
+            selectable = 0;
+            if (task_irq_return_frame(next, &return_frame)) selectable = 1;
+            if (selectable) {
+                break;
+            }
         }
         next = next->next;
         if (next == start || ++safety > 10000) {
             next = NULL;
             break;
+        }
+    }
+
+    if (!next && must_switch) {
+        idle_task = task_find_idle_locked();
+        if (idle_task &&
+                ((idle_task == prev_task && is_idle) ||
+                 (idle_task != prev_task && !task_is_current_on_any_cpu(idle_task))) &&
+                task_irq_return_frame(idle_task, &return_frame)) {
+            sleepq_remove(idle_task);
+            idle_task->wake_tick = 0;
+            idle_task->state = TASK_READY;
+            if (!task_in_runqueue_locked(idle_task)) {
+                add_task_to_runqueue(idle_task);
+            }
+            next = idle_task;
         }
     }
 
@@ -2253,40 +2329,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         goto out_restore_cr3;
     }
 
-    if (next->regs.rsp == 0) {
-        if (must_switch) {
-            spin_unlock(&sched_lock);
-            printf("schedule: next task has null frame, system halted\n");
-            for (;;) asm volatile ("hlt");
-        }
-        goto out_restore_cr3;
-    }
-
-    next_rsp = next->regs.rsp;
-    if (!((next_rsp >= KERNEL_VMA && next_rsp < HEAP_START) ||
-          (next_rsp >= HEAP_START && next_rsp < kernel_heap.max_addr) ||
-          kstack_is_in_region(next_rsp))) {
-        goto out_restore_cr3;
-    }
-    return_frame = (registers_t*)next_rsp;
-
-    es_val = return_frame->es & 0xFFFF;
-    ds_val = return_frame->ds & 0xFFFF;
-    cs_val = return_frame->cs & 0xFFFF;
-
-    valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
-    valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
-    valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
-
-    if (!valid_es || !valid_ds || !valid_cs) {
-        if (next->id == 0) {
-            goto out_restore_cr3;
-        }
-        task_kill(next, 0xBADF00D);
-        goto out_restore_cr3;
-    }
-
-    if (!must_switch) {
+    if (!dead_switch) {
         fpu_save_area(prev_task->fpu_state);
     }
     fpu_restore_area(next->fpu_state);
@@ -2307,16 +2350,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         tss_set_rsp0(rsp0);
     }
 
-    if (next->tls_base) {
-        uint64_t tls = next->tls_base;
-        __asm__ volatile (
-            "wrmsr"
-            :
-            : "c"(0xC0000100u),
-              "a"((uint32_t)(tls & 0xFFFFFFFF)),
-              "d"((uint32_t)(tls >> 32))
-            : "memory"
-        );
+    if (next->is_user) {
+        task_write_fs_base(next->tls_base);
     }
 
     {
@@ -2877,6 +2912,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
+    task_write_fs_base(0);
     current_task->stack_size = stack_size;
     task_reset_fpu_state(current_task);
 
@@ -3044,10 +3080,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t stack_page_count;
     uint64_t *stack_pages;
     uint64_t total_pages;
-    uint64_t prefault_pages[2];
-    uint64_t prefault_count;
-    uint64_t prefault_page_addr;
-    uint64_t prefault_phys;
     uint64_t sp;
     uint64_t *envp_ptrs;
     uint64_t *argv_ptrs;
@@ -3224,10 +3256,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     elf_pages = NULL;
     elf_page_count = 0;
-    prefault_pages[0] = 0;
-    prefault_pages[1] = 0;
-    prefault_count = 0;
-
     if (use_node) {
         load_result = elf_load_node_to_pd(new_pd, bin_node, &elf_info, &elf_pages, &elf_page_count);
     } else {
@@ -3264,19 +3292,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
             DEBUG_TASK("task_exec_with_args: ERROR: entry page not mapped after elf_load\n");
         }
     }
-    if (use_node) {
-        prefault_page_addr = elf_info.entry_point & ~0xFFFULL;
-        prefault_phys = task_prefault_file_page_to_pd(current_task, new_pd, prefault_page_addr);
-        if (prefault_phys) {
-            prefault_pages[prefault_count++] = prefault_phys;
-        }
-        prefault_page_addr += PAGE_SIZE;
-        prefault_phys = task_prefault_file_page_to_pd(current_task, new_pd, prefault_page_addr);
-        if (prefault_phys) {
-            prefault_pages[prefault_count++] = prefault_phys;
-        }
-    }
-
     if (kernel_bin) kfree(kernel_bin);
 
     stack_page_count = 0;
@@ -3300,7 +3315,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
     current_task->user_brk_start = current_task->user_brk;
 
-    total_pages = elf_page_count + stack_page_count + prefault_count;
+    total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         task_error("task_exec_with_args: suspicious total_pages=%u\n", total_pages);
         task_clear_file_mappings(current_task);
@@ -3323,10 +3338,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         if (elf_page_count > 0 && elf_pages) {
             memcpy(current_task->user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
         }
-        if (prefault_count > 0) {
-            memcpy(current_task->user_pages + elf_page_count, prefault_pages, prefault_count * sizeof(uint64_t));
-        }
-        memcpy(current_task->user_pages + elf_page_count + prefault_count, stack_pages, stack_page_count * sizeof(uint64_t));
+        memcpy(current_task->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
         current_task->user_pages_count = total_pages;
     } else {
         current_task->user_pages_count = 0;
@@ -3472,8 +3484,10 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         tbl_buf[tbl_idx++] = 0;
     }
 
-    tbl_buf[tbl_idx++] = AT_PHDR;
-    tbl_buf[tbl_idx++] = elf_info.phdr_vaddr;
+    if (elf_info.phdr_vaddr != 0 && elf_info.phnum != 0) {
+        tbl_buf[tbl_idx++] = AT_PHDR;
+        tbl_buf[tbl_idx++] = elf_info.phdr_vaddr;
+    }
     tbl_buf[tbl_idx++] = AT_PHENT;
     tbl_buf[tbl_idx++] = elf_info.phent;
     tbl_buf[tbl_idx++] = AT_PHNUM;
@@ -3602,6 +3616,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;
+    task_write_fs_base(0);
 
     DEBUG_TASK("task_exec_with_args: entry=0x%016lX rsp=0x%016lX new_pd=0x%016lX\n", 
              final_entry, final_sp, new_pd);

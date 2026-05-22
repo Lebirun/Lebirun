@@ -70,15 +70,6 @@ typedef struct {
 } epoll_instance_t;
 
 typedef struct {
-    uint64_t *addr;
-    pid_t *waiters;
-    int waiter_count;
-    int waiter_capacity;
-    int in_use;
-    mutex_t lock;
-} futex_t;
-
-typedef struct {
     int in_use;
     uint64_t counter;
     int flags;
@@ -89,10 +80,6 @@ static epoll_instance_t *epoll_instances = NULL;
 static int epoll_capacity = 0;
 static int epoll_base_fd = 400;
 static mutex_t epoll_lock;
-
-static futex_t *futexes = NULL;
-static int futex_capacity = 0;
-static mutex_t futex_lock;
 
 static eventfd_instance_t *eventfds = NULL;
 static int eventfd_capacity = 0;
@@ -112,22 +99,6 @@ static int epoll_grow(void) {
     }
     epoll_instances = new_arr;
     epoll_capacity = new_cap;
-    return 0;
-}
-
-static int futex_grow(void) {
-    int new_cap;
-    futex_t *new_arr;
-    int i;
-
-    new_cap = futex_capacity ? futex_capacity * 2 : FUTEX_INIT_COUNT;
-    new_arr = (futex_t *)krealloc(futexes, new_cap * sizeof(futex_t));
-    if (!new_arr) return -1;
-    for (i = futex_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(futex_t));
-    }
-    futexes = new_arr;
-    futex_capacity = new_cap;
     return 0;
 }
 
@@ -173,45 +144,13 @@ static epoll_instance_t *get_epoll(int fd) {
     return &epoll_instances[idx];
 }
 
-static futex_t *find_futex(uint64_t *addr) {
-    int i;
-
-    for (i = 0; i < futex_capacity; i++) {
-        if (futexes[i].in_use && futexes[i].addr == addr) {
-            return &futexes[i];
-        }
-    }
-    return NULL;
-}
-
-static futex_t *alloc_futex(uint64_t *addr) {
-    int i;
-
-    for (i = 0; i < futex_capacity; i++) {
-        if (!futexes[i].in_use) goto found;
-    }
-    if (futex_grow() < 0) return NULL;
-    i = futex_capacity / 2;
-found:
-    memset(&futexes[i], 0, sizeof(futex_t));
-    futexes[i].in_use = 1;
-    futexes[i].addr = addr;
-    futexes[i].waiter_capacity = 16;
-    futexes[i].waiters = (pid_t *)kmalloc(16 * sizeof(pid_t));
-    if (!futexes[i].waiters) {
-        futexes[i].in_use = 0;
-        return NULL;
-    }
-    memset(futexes[i].waiters, 0, 16 * sizeof(pid_t));
-    mutex_init(&futexes[i].lock);
-    return &futexes[i];
-}
-
 static int sys_epoll_create(int size) {
+    int idx;
+
     (void)size;
     
     mutex_lock(&epoll_lock);
-    int idx = alloc_epoll();
+    idx = alloc_epoll();
     if (idx < 0) {
         mutex_unlock(&epoll_lock);
         return -EMFILE;
@@ -222,8 +161,10 @@ static int sys_epoll_create(int size) {
 }
 
 static int sys_epoll_create1(int flags) {
+    int idx;
+
     mutex_lock(&epoll_lock);
-    int idx = alloc_epoll();
+    idx = alloc_epoll();
     if (idx < 0) {
         mutex_unlock(&epoll_lock);
         return -EMFILE;
@@ -235,15 +176,21 @@ static int sys_epoll_create1(int flags) {
 }
 
 static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
-    int op = (int)(uintptr_t)op_ptr;
-    
-    epoll_instance_t *ep = get_epoll(epfd);
+    int op;
+    epoll_instance_t *ep;
+    int found;
+    int i;
+    int new_cap;
+    epoll_fd_entry_t *new_fds;
+
+    op = (int)(uintptr_t)op_ptr;
+    ep = get_epoll(epfd);
     if (!ep) return -EBADF;
     
     mutex_lock(&ep->lock);
     
-    int found = -1;
-    for (int i = 0; i < ep->fd_count; i++) {
+    found = -1;
+    for (i = 0; i < ep->fd_count; i++) {
         if (ep->fds[i].fd == fd && ep->fds[i].active) {
             found = i;
             break;
@@ -257,8 +204,8 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 return -EEXIST;
             }
             if (ep->fd_count >= ep->fd_capacity) {
-                int new_cap = ep->fd_capacity * 2;
-                epoll_fd_entry_t *new_fds = (epoll_fd_entry_t *)krealloc(ep->fds, new_cap * sizeof(epoll_fd_entry_t));
+                new_cap = ep->fd_capacity * 2;
+                new_fds = (epoll_fd_entry_t *)krealloc(ep->fds, new_cap * sizeof(epoll_fd_entry_t));
                 if (!new_fds) {
                     mutex_unlock(&ep->lock);
                     return -ENOMEM;
@@ -301,24 +248,33 @@ extern int socket_poll_events(int fd);
 extern int is_socket_fd(int fd);
 
 static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
-    epoll_instance_t *ep = get_epoll(epfd);
+    epoll_instance_t *ep;
+    epoll_event_t *events;
+    int count;
+    int i;
+    uint64_t revents;
+    int fd;
+    uint64_t wanted;
+    int sock_events;
+
+    ep = get_epoll(epfd);
     if (!ep) return -EBADF;
     
-    epoll_event_t *events = (epoll_event_t *)(uintptr_t)events_ptr;
+    events = (epoll_event_t *)(uintptr_t)events_ptr;
     if (!events || maxevents <= 0) return -EINVAL;
     
     mutex_lock(&ep->lock);
     
-    int count = 0;
-    for (int i = 0; i < ep->fd_count && count < maxevents; i++) {
+    count = 0;
+    for (i = 0; i < ep->fd_count && count < maxevents; i++) {
         if (!ep->fds[i].active) continue;
         
-        uint64_t revents = 0;
-        int fd = ep->fds[i].fd;
-        uint64_t wanted = ep->fds[i].events;
+        revents = 0;
+        fd = ep->fds[i].fd;
+        wanted = ep->fds[i].events;
         
         if (is_socket_fd(fd)) {
-            int sock_events = socket_poll_events(fd);
+            sock_events = socket_poll_events(fd);
             if ((wanted & EPOLLIN) && (sock_events & 0x01)) revents |= EPOLLIN;
             if ((wanted & EPOLLOUT) && (sock_events & 0x04)) revents |= EPOLLOUT;
             if (sock_events & 0x08) revents |= EPOLLERR;
@@ -348,61 +304,21 @@ static int sys_epoll_pwait(int epfd, const char *events_ptr, int maxevents) {
 }
 
 static int sys_futex(int *uaddr, const char *op_ptr, int val) {
-    int op = (int)(uintptr_t)op_ptr;
-    int cmd = op & 127;
+    int op;
+    int cmd;
+
+    op = (int)(uintptr_t)op_ptr;
+    cmd = op & 127;
     
     switch (cmd) {
-        case FUTEX_WAIT: {
+        case FUTEX_WAIT:
             if (*uaddr != val) {
                 return -EAGAIN;
             }
-            
-            mutex_lock(&futex_lock);
-            futex_t *f = find_futex((uint64_t *)uaddr);
-            if (!f) {
-                f = alloc_futex((uint64_t *)uaddr);
-                if (!f) {
-                    mutex_unlock(&futex_lock);
-                    return -ENOMEM;
-                }
-            }
-            
-            if (f->waiter_count < f->waiter_capacity) {
-                f->waiters[f->waiter_count++] = current_task->pid;
-            }
-            mutex_unlock(&futex_lock);
-            
             return 0;
-        }
         
-        case FUTEX_WAKE: {
-            mutex_lock(&futex_lock);
-            futex_t *f = find_futex((uint64_t *)uaddr);
-            if (!f) {
-                mutex_unlock(&futex_lock);
-                return 0;
-            }
-            
-            int woken = 0;
-            int to_wake = (val > f->waiter_count) ? f->waiter_count : val;
-            
-            for (int i = 0; i < to_wake; i++) {
-                f->waiters[i] = 0;
-                woken++;
-            }
-            
-            for (int i = to_wake; i < f->waiter_count; i++) {
-                f->waiters[i - to_wake] = f->waiters[i];
-            }
-            f->waiter_count -= woken;
-            
-            if (f->waiter_count == 0) {
-                f->in_use = 0;
-            }
-            
-            mutex_unlock(&futex_lock);
-            return woken;
-        }
+        case FUTEX_WAKE:
+            return 0;
         
         case FUTEX_REQUEUE:
         case FUTEX_CMP_REQUEUE:
@@ -426,12 +342,15 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val) {
 }
 
 static int sys_eventfd(unsigned int initval, const char *flags_ptr, int unused) {
+    int idx;
+    int i;
+
     (void)flags_ptr;
     (void)unused;
     
     mutex_lock(&eventfd_lock);
-    int idx = -1;
-    for (int i = 0; i < eventfd_capacity; i++) {
+    idx = -1;
+    for (i = 0; i < eventfd_capacity; i++) {
         if (!eventfds[i].in_use) {
             idx = i;
             break;
@@ -457,12 +376,16 @@ static int sys_eventfd(unsigned int initval, const char *flags_ptr, int unused) 
 }
 
 static int sys_eventfd2(unsigned int initval, const char *flags_ptr, int unused) {
-    int flags = (int)(uintptr_t)flags_ptr;
+    int flags;
+    int idx;
+    int i;
+
+    flags = (int)(uintptr_t)flags_ptr;
     (void)unused;
     
     mutex_lock(&eventfd_lock);
-    int idx = -1;
-    for (int i = 0; i < eventfd_capacity; i++) {
+    idx = -1;
+    for (i = 0; i < eventfd_capacity; i++) {
         if (!eventfds[i].in_use) {
             idx = i;
             break;
@@ -536,11 +459,11 @@ static int sys_signalfd4(int fd, const char *mask_ptr, int flags) {
 }
 
 void syscalls_epoll_init(void) {
-    memset(epoll_instances, 0, sizeof(epoll_instances));
-    memset(futexes, 0, sizeof(futexes));
-    memset(eventfds, 0, sizeof(eventfds));
+    epoll_instances = NULL;
+    epoll_capacity = 0;
+    eventfds = NULL;
+    eventfd_capacity = 0;
     mutex_init(&epoll_lock);
-    mutex_init(&futex_lock);
     mutex_init(&eventfd_lock);
     
     syscall_table[SYSCALL_EPOLL_CREATE] = sys_epoll_create;

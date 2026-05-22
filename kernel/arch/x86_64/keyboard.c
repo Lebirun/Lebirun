@@ -386,8 +386,11 @@ void keyboard_process_sigint(void)
     int guard;
     int count;
     int j;
+    int k;
+    int seen;
     uintptr_t a;
     pid_t t_pgid;
+    pid_t target_pid;
     pid_t pids[256];
 
     if (!kbd_consoles || !tty_termios || !tty_pgrp) return;
@@ -420,6 +423,22 @@ void keyboard_process_sigint(void)
             if (t_pgid == (pid_t)fg && t->is_user && t->state != TASK_DEAD) {
                 pids[count] = t->pid;
                 count++;
+            }
+            if (t->is_user && t->state == TASK_BLOCKED &&
+                    (t->waiting_for_any_child || t->join_target) &&
+                    t->join_target && t->console_id == i) {
+                target_pid = t->join_target->pid;
+                seen = 0;
+                for (k = 0; k < count; k++) {
+                    if (pids[k] == target_pid) {
+                        seen = 1;
+                        break;
+                    }
+                }
+                if (!seen && count < 256) {
+                    pids[count] = target_pid;
+                    count++;
+                }
             }
             t = t->all_next;
             guard++;

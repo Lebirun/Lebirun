@@ -13,8 +13,10 @@
 static void syscall_error(const char *fmt, ...) {
     char buf[256];
     va_list ap;
+    int n;
+
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     printf("%s", buf);
     if (current_task && current_task->console_id >= 0 && console_is_initialized()) {
@@ -44,7 +46,15 @@ static int sys_sleep(int ms, const char *unused, int unused2) {
     return 0;
 }
 
+static int wait_status_from_exit_code(uint64_t exit_code) {
+    if (exit_code >= 128 && exit_code < 192) {
+        return (int)(exit_code - 128);
+    }
+    return (int)((exit_code & 0xFF) << 8);
+}
+
 static int sys_waitpid(int pid, const char *status_ptr, int options) {
+    extern int task_has_pending_signals(void);
     pid_t pgid_filter;
     task_t* t;
     task_t *dead;
@@ -74,6 +84,11 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
 
         exit_code = 0;
         r = task_join(t, &exit_code);
+        if (r == -EINTR && t->state != TASK_DEAD) return -EINTR;
+        if (r == -EINTR) {
+            exit_code = t->exit_code;
+            r = 0;
+        }
         if (r != 0) return -ECHILD;
 
         t->waited = 1;
@@ -83,7 +98,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         if (status_ptr) {
             addr = (uint64_t)status_ptr;
             if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-            status = (exit_code & 0xFF) << 8;
+            status = wait_status_from_exit_code(exit_code);
             memcpy((void*)addr, &status, sizeof(int));
         }
         return (int)pid;
@@ -116,7 +131,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             if (status_ptr) {
                 addr = (uint64_t)status_ptr;
                 if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-                status = (exit_code & 0xFF) << 8;
+                status = wait_status_from_exit_code(exit_code);
                 memcpy((void*)addr, &status, sizeof(int));
             }
             return (int)dead_pid;
@@ -135,6 +150,13 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         }
         schedule();
         task_finish_wait_any_child();
+        if (task_has_pending_signals()) {
+            dead = task_find_dead_child_of(current_task->pid, pgid_filter);
+            if (dead) {
+                continue;
+            }
+            return -EINTR;
+        }
     }
 }
 
@@ -150,10 +172,17 @@ struct siginfo_k {
 };
 
 static int sys_waitid(int idtype, const char *id_ptr, int infop) {
-    int id = (int)(uintptr_t)id_ptr;
-    uint64_t info_addr = (uint64_t)infop;
-    
-    pid_t target_pid = -1;
+    int id;
+    uint64_t info_addr;
+    pid_t target_pid;
+    task_t *t;
+    uint64_t exit_code;
+    int r;
+    struct siginfo_k *info;
+
+    id = (int)(uintptr_t)id_ptr;
+    info_addr = (uint64_t)infop;
+    target_pid = -1;
     
     if (idtype == P_PID) {
         target_pid = (pid_t)id;
@@ -166,11 +195,12 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
     }
     
     if (target_pid > 0) {
-        task_t *t = task_find(target_pid);
+        t = task_find(target_pid);
         if (!t) return -ECHILD;
         
-        uint64_t exit_code = 0;
-        int r = task_join(t, &exit_code);
+        exit_code = 0;
+        r = task_join(t, &exit_code);
+        if (r == -EINTR) return -EINTR;
         if (r != 0) return -ECHILD;
         
         t->waited = 1;
@@ -178,7 +208,7 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
         task_reclaim_exited_now();
 
         if (info_addr && info_addr < KERNEL_VMA && info_addr >= 0x1000) {
-            struct siginfo_k *info = (struct siginfo_k *)info_addr;
+            info = (struct siginfo_k *)info_addr;
             memset(info, 0, sizeof(struct siginfo_k));
             info->si_signo = 17;
             info->si_code = 1;

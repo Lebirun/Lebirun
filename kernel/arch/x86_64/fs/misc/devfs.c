@@ -530,6 +530,21 @@ static uint64_t dev_cdrom_write(vfs_node_t *node, uint64_t offset, uint64_t size
     return 0;
 }
 
+static uint64_t dev_stdio_link_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    const char *target;
+    uint64_t len;
+    uint64_t copy_len;
+
+    (void)node;
+    target = "/dev/tty";
+    len = 8;
+    if (offset >= len) return 0;
+    copy_len = len - offset;
+    if (copy_len > size) copy_len = size;
+    memcpy(buffer, target + offset, copy_len);
+    return copy_len;
+}
+
 static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     dirent_t *d;
 
@@ -549,6 +564,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         strcpy(d->name, base_entries[index]);
         d->inode = index + 1;
         d->type = VFS_CHARDEVICE;
+        if (index == 6 || index == 7 || index == 8) d->type = VFS_SYMLINK;
         if (index == 9 || index == 11 || index == 18) d->type = VFS_DIRECTORY;
         return d;
     }
@@ -804,6 +820,7 @@ void devfs_init(void) {
     dev_stdin.mask = 0777;
     dev_stdin.uid = 0;
     dev_stdin.gid = 0;
+    dev_stdin.read = dev_stdio_link_read;
     dev_stdin.parent = &devfs_root;
     dev_stdin.ref_count = 1;
     dev_stdin.ptr = NULL;
@@ -815,6 +832,7 @@ void devfs_init(void) {
     dev_stdout.mask = 0777;
     dev_stdout.uid = 0;
     dev_stdout.gid = 0;
+    dev_stdout.read = dev_stdio_link_read;
     dev_stdout.parent = &devfs_root;
     dev_stdout.ref_count = 1;
     dev_stdout.ptr = NULL;
@@ -826,6 +844,7 @@ void devfs_init(void) {
     dev_stderr.mask = 0777;
     dev_stderr.uid = 0;
     dev_stderr.gid = 0;
+    dev_stderr.read = dev_stdio_link_read;
     dev_stderr.parent = &devfs_root;
     dev_stderr.ref_count = 1;
     dev_stderr.ptr = NULL;

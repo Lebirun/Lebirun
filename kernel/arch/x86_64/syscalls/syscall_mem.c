@@ -81,6 +81,10 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     if (requested == 0) {
         return (int)current_brk;
     }
+
+    if (requested < current_task->user_brk_start) {
+        return (int)current_brk;
+    }
     
     if (requested < current_brk) {
         old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
@@ -125,8 +129,8 @@ static int sys_brk(int addr, const char *unused, int unused2) {
         }
     }
     
-    current_task->user_brk = newbrk;
-    return (int)newbrk;
+    current_task->user_brk = requested;
+    return (int)requested;
 }
 
 static int sys_mmap(int a1, const char *a2, int a3) {

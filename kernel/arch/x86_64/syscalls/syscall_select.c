@@ -12,6 +12,11 @@ typedef unsigned long fd_mask;
 extern volatile uint64_t tick_count;
 extern int is_socket_fd(int fd);
 extern int socket_poll_events(int fd);
+extern int task_has_pending_signals(void);
+
+static int select_interrupted(void) {
+    return task_has_pending_signals();
+}
 
 static int check_fd_readable(int fd) {
     int con_id;
@@ -166,7 +171,15 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
             break;
         }
 
+        if (select_interrupted()) {
+            kfree(in_read);
+            return -EINTR;
+        }
         schedule();
+        if (select_interrupted()) {
+            kfree(in_read);
+            return -EINTR;
+        }
 
     } while (timeout_ms < 0 || (tick_count - start_tick) < timeout_ticks);
 
@@ -267,7 +280,13 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
             break;
         }
 
+        if (select_interrupted()) {
+            return -EINTR;
+        }
         schedule();
+        if (select_interrupted()) {
+            return -EINTR;
+        }
 
     } while (timeout < 0 || (tick_count - start_tick) < timeout_ticks);
 

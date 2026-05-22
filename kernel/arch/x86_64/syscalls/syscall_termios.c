@@ -42,6 +42,17 @@ static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
     return name[n] == '\0';
 }
 
+static int vfs_name_is_tty(const char name[VFS_MAX_NAME]) {
+    int i;
+
+    if (vfs_name_is(name, "tty")) return 1;
+    if (name[0] != 't' || name[1] != 't' || name[2] != 'y') return 0;
+    i = 3;
+    if (name[i] < '0' || name[i] > '9') return 0;
+    while (name[i] >= '0' && name[i] <= '9') i++;
+    return name[i] == '\0';
+}
+
 static struct kernel_termios tty_termios_fallback[1];
 static struct kernel_winsize tty_winsize_fallback[1];
 static int tty_pgrp_fallback[1];
@@ -197,7 +208,7 @@ static int get_tty_id_for_fd(int fd) {
             return -1;
         }
         if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE &&
-            (vfs_name_is(node->name, "tty") || vfs_name_is(node->name, "console"))) {
+            (vfs_name_is_tty(node->name) || vfs_name_is(node->name, "console"))) {
             if (current_task->console_id >= 0) return current_task->console_id;
             return console_get_current();
         }
