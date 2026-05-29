@@ -13,11 +13,22 @@ const uint8_t ipv67_bootstrap_key[IPV67_AUTH_KEY_SIZE] = {
 };
 
 static spinlock_t ipv67_rx_lock = {0};
-static ipv67_pending_rx_t ipv67_rx_slots[IPV67_RX_PENDING_MAX];
+static ipv67_pending_rx_t *ipv67_rx_slots;
 static int ipv67_rx_head = -1;
 static int ipv67_rx_tail = -1;
 static int ipv67_rx_count;
 static int ipv67_rx_draining;
+
+static int ipv67_rx_ensure_slots(void) {
+    ipv67_pending_rx_t *slots;
+
+    if (ipv67_rx_slots) return 1;
+    slots = (ipv67_pending_rx_t *)kmalloc(IPV67_RX_PENDING_MAX * sizeof(ipv67_pending_rx_t));
+    if (!slots) return 0;
+    memset(slots, 0, IPV67_RX_PENDING_MAX * sizeof(ipv67_pending_rx_t));
+    ipv67_rx_slots = slots;
+    return 1;
+}
 
 void ipv67_stack_lock(void) {
     int spins;
@@ -50,6 +61,11 @@ int ipv67_rx_enqueue(uint8_t family, uint16_t local_port, uint32_t src_ipv4, con
     if (!copy) return 0;
     memcpy(copy, packet, len);
     if (!spin_trylock(&ipv67_rx_lock)) {
+        kfree(copy);
+        return 0;
+    }
+    if (!ipv67_rx_ensure_slots()) {
+        spin_unlock(&ipv67_rx_lock);
         kfree(copy);
         return 0;
     }
@@ -124,6 +140,10 @@ void ipv67_rx_flush_port(uint16_t port) {
     memset(packets, 0, sizeof(packets));
     if (port == 0) port = IPV67_PORT_DEFAULT;
     spin_lock(&ipv67_rx_lock);
+    if (!ipv67_rx_slots) {
+        spin_unlock(&ipv67_rx_lock);
+        return;
+    }
     for (i = 0; i < IPV67_RX_PENDING_MAX; i++) {
         if (ipv67_rx_slots[i].state == 1 && ipv67_rx_slots[i].local_port == port) {
             packets[i] = ipv67_rx_slots[i].packet;

@@ -621,16 +621,18 @@ alloc_found:
 void *kmalloc(size_t size) {
     void *result;
     size_t max_slab;
+    void *caller;
     if (size == 0) return NULL;
     if (!main_heap_initialized) return early_kmalloc(size);
     if (size > SIZE_MAX - CANARY_OVERHEAD - 7) return NULL;
+    caller = __builtin_return_address(0);
     max_slab = slab_max_size();
     if (size <= max_slab) {
-        result = slab_alloc(size);
+        result = slab_alloc(size, caller);
         if (result) return result;
     }
     heap_lock_acquire();
-    result = kmalloc_internal(size, (uint64_t)(uintptr_t)__builtin_return_address(0));
+    result = kmalloc_internal(size, (uint64_t)(uintptr_t)caller);
     heap_lock_release();
     return result;
 }
@@ -772,7 +774,7 @@ void kfree(void *ptr) {
     if (!ptr) return;
     if (is_early_heap_ptr(ptr)) return;
     if (slab_owns(ptr)) {
-        slab_free(ptr);
+        slab_free(ptr, __builtin_return_address(0));
         return;
     }
     heap_lock_acquire();
@@ -797,7 +799,7 @@ void kfree_secure(void *ptr) {
         if (slab_size) {
             memset(ptr, 0, slab_size);
         }
-        slab_free(ptr);
+        slab_free(ptr, __builtin_return_address(0));
         return;
     }
     
@@ -856,7 +858,7 @@ void *krealloc(void *ptr, size_t new_size) {
         new_ptr = kmalloc(new_size);
         if (!new_ptr) return NULL;
         memcpy(new_ptr, ptr, old_size);
-        slab_free(ptr);
+        slab_free(ptr, __builtin_return_address(0));
         return new_ptr;
     }
 

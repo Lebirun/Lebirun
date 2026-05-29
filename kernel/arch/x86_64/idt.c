@@ -76,16 +76,29 @@ volatile uint64_t cpu_system_ticks = 0;
 volatile uint64_t cpu_idle_ticks = 0;
 
 #define MAX_IRQ_HANDLERS 16
-static irq_handler_t irq_handlers[MAX_IRQ_HANDLERS] = {0};
+static irq_handler_t *irq_handlers = NULL;
+static int irq_handler_capacity = 0;
+
+static int irq_ensure_handlers(void) {
+    irq_handler_t *new_handlers;
+
+    if (irq_handler_capacity >= MAX_IRQ_HANDLERS) return 0;
+    new_handlers = (irq_handler_t *)kmalloc(MAX_IRQ_HANDLERS * sizeof(irq_handler_t));
+    if (!new_handlers) return -1;
+    memset(new_handlers, 0, MAX_IRQ_HANDLERS * sizeof(irq_handler_t));
+    irq_handlers = new_handlers;
+    irq_handler_capacity = MAX_IRQ_HANDLERS;
+    return 0;
+}
 
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
-    if (irq < MAX_IRQ_HANDLERS) {
+    if (irq < MAX_IRQ_HANDLERS && irq_ensure_handlers() == 0) {
         irq_handlers[irq] = handler;
     }
 }
 
 void irq_unregister_handler(uint8_t irq) {
-    if (irq < MAX_IRQ_HANDLERS) {
+    if (irq < irq_handler_capacity && irq_handlers) {
         irq_handlers[irq] = NULL;
     }
 }
@@ -669,7 +682,7 @@ registers_t* interrupt_handler(registers_t* regs)
             if (task_state_requires_schedule(current_task)) {
                 regs = schedule_from_irq(regs);
             }
-        } else if (irq < MAX_IRQ_HANDLERS && irq_handlers[irq]) {
+        } else if (irq_handlers && irq < irq_handler_capacity && irq_handlers[irq]) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
             kernel_cr3 = vmm_get_kernel_cr3();
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {

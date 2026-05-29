@@ -828,16 +828,23 @@ int ahci_init(void) {
     uint64_t abar_phys = g_ahci_controller.abar;
     uint64_t abar_virt = (KERNEL_VMA + 0x37100000ULL);
     uint64_t abar_size;
+    uint64_t cap;
+    uint64_t ghc;
+    uint64_t ports_impl;
+    uint64_t offset;
+    uint64_t i;
+    ahci_port_t *port;
+    const char *type_str;
     
     abar_size = AHCI_PORT_BASE + AHCI_MAX_PORTS * AHCI_PORT_SIZE;
     abar_size = (abar_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    for (uint64_t offset = 0; offset < abar_size; offset += PAGE_SIZE) {
+    for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
         vmm_map_page(abar_virt + offset, abar_phys + offset, 0x003);
     }
     
     g_ahci_controller.abar_virt = abar_virt;
     
-    uint64_t cap = ahci_hba_read(abar_virt, AHCI_CAP);
+    cap = ahci_hba_read(abar_virt, AHCI_CAP);
     g_ahci_controller.num_cmd_slots = ((cap >> 8) & 0x1F) + 1;
     g_ahci_controller.ports_impl = ahci_hba_read(abar_virt, AHCI_PI);
     g_ahci_controller.version = ahci_hba_read(abar_virt, AHCI_VS);
@@ -848,16 +855,16 @@ int ahci_init(void) {
            g_ahci_controller.version & 0xFFFF,
            g_ahci_controller.num_cmd_slots);
     
-    uint64_t ghc = ahci_hba_read(abar_virt, AHCI_GHC);
+    ghc = ahci_hba_read(abar_virt, AHCI_GHC);
     ghc |= AHCI_GHC_AE;
     ahci_hba_write(abar_virt, AHCI_GHC, ghc);
     
-    uint64_t ports_impl = g_ahci_controller.ports_impl;
-    for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
+    ports_impl = g_ahci_controller.ports_impl;
+    for (i = 0; i < AHCI_MAX_PORTS; i++) {
         if (!(ports_impl & (1 << i)))
             continue;
         
-        ahci_port_t *port = &g_ahci_controller.ports[i];
+        port = &g_ahci_controller.ports[i];
         port->port_num = i;
         port->hba_base = abar_virt;
         port->port_base = abar_virt + AHCI_PORT_BASE + (i * AHCI_PORT_SIZE);
@@ -871,7 +878,7 @@ int ahci_init(void) {
         port->present = true;
         g_ahci_controller.num_ports++;
         
-        const char *type_str = "Unknown";
+        type_str = "Unknown";
         switch (port->type) {
             case AHCI_DEV_SATA: type_str = "SATA drive"; break;
             case AHCI_DEV_SATAPI: type_str = "SATAPI drive"; break;

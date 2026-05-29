@@ -7,35 +7,84 @@
 #include <lebirun/task.h>
 #include <string.h>
 
-static arp_entry_t arp_cache[ARP_CACHE_SIZE];
+static arp_entry_t *arp_cache;
+static int arp_cache_capacity;
 
 void arp_init(void) {
-    memset(arp_cache, 0, sizeof(arp_cache));
+    arp_cache = NULL;
+    arp_cache_capacity = 0;
+}
+
+static int arp_ensure_cache(void) {
+    arp_entry_t *new_cache;
+    int new_capacity;
+
+    if (arp_cache) return 0;
+
+    new_capacity = 4;
+    new_cache = (arp_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(arp_entry_t));
+    if (!new_cache) return -1;
+
+    memset(new_cache, 0, (uint64_t)new_capacity * sizeof(arp_entry_t));
+    arp_cache = new_cache;
+    arp_cache_capacity = new_capacity;
+    return 0;
+}
+
+static int arp_grow_cache(void) {
+    arp_entry_t *new_cache;
+    int new_capacity;
+
+    if (arp_cache_capacity >= ARP_CACHE_SIZE) return 0;
+
+    new_capacity = arp_cache_capacity * 2;
+    if (new_capacity < 4) new_capacity = 4;
+    if (new_capacity > ARP_CACHE_SIZE) new_capacity = ARP_CACHE_SIZE;
+
+    new_cache = (arp_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(arp_entry_t));
+    if (!new_cache) return -1;
+
+    memset(new_cache, 0, (uint64_t)new_capacity * sizeof(arp_entry_t));
+    if (arp_cache && arp_cache_capacity > 0) {
+        memcpy(new_cache, arp_cache, (uint64_t)arp_cache_capacity * sizeof(arp_entry_t));
+        kfree(arp_cache);
+    }
+
+    arp_cache = new_cache;
+    arp_cache_capacity = new_capacity;
+    return 0;
 }
 
 void arp_add_entry(ipv4_addr_t ip, mac_addr_t mac) {
     int oldest_idx;
     uint64_t oldest_time;
     int i;
+    int free_idx;
 
+    if (arp_ensure_cache() < 0) return;
     oldest_idx = 0;
     oldest_time = 0xFFFFFFFF;
+    free_idx = -1;
 
-    for (i = 0; i < ARP_CACHE_SIZE; i++) {
+    for (i = 0; i < arp_cache_capacity; i++) {
         if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
             arp_cache[i].mac = mac;
             arp_cache[i].timestamp = net_get_ticks();
             return;
         }
 
-        if (!arp_cache[i].valid) {
-            oldest_idx = i;
-            oldest_time = 0;
+        if (!arp_cache[i].valid && free_idx < 0) {
+            free_idx = i;
         } else if (arp_cache[i].timestamp < oldest_time) {
             oldest_time = arp_cache[i].timestamp;
             oldest_idx = i;
         }
     }
+
+    if (free_idx < 0 && arp_cache_capacity < ARP_CACHE_SIZE) {
+        if (arp_grow_cache() == 0) free_idx = arp_cache_capacity / 2;
+    }
+    if (free_idx >= 0) oldest_idx = free_idx;
 
     arp_cache[oldest_idx].ip = ip;
     arp_cache[oldest_idx].mac = mac;
@@ -47,7 +96,9 @@ int arp_lookup(ipv4_addr_t ip, mac_addr_t *mac_out) {
     uint64_t age;
     int i;
 
-    for (i = 0; i < ARP_CACHE_SIZE; i++) {
+    if (!arp_cache) return -1;
+
+    for (i = 0; i < arp_cache_capacity; i++) {
         if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
             age = net_get_ticks() - arp_cache[i].timestamp;
             if (age < ARP_ENTRY_TIMEOUT) {
@@ -82,7 +133,12 @@ int arp_resolve(netif_t *netif, ipv4_addr_t ip, mac_addr_t *mac_out) {
         __asm__ volatile("sti");
         netif_poll_all();
 
-        for (i = 0; i < ARP_CACHE_SIZE; i++) {
+        if (!arp_cache) {
+            schedule();
+            continue;
+        }
+
+        for (i = 0; i < arp_cache_capacity; i++) {
             if (arp_cache[i].valid && ipv4_eq(arp_cache[i].ip, ip)) {
                 *mac_out = arp_cache[i].mac;
                 return 0;
@@ -153,7 +209,9 @@ void arp_receive(netif_t *netif, arp_packet_t *arp) {
 void arp_print_cache(void) {
     int i;
 
-    for (i = 0; i < ARP_CACHE_SIZE; i++) {
+    if (!arp_cache) return;
+
+    for (i = 0; i < arp_cache_capacity; i++) {
         if (arp_cache[i].valid) {
             printf("%u.%u.%u.%u -> %02X:%02X:%02X:%02X:%02X:%02X\n",
                    arp_cache[i].ip.octets[0], arp_cache[i].ip.octets[1],
@@ -170,7 +228,9 @@ int arp_get_cache(uint64_t *ips, uint8_t *macs, int max_entries) {
     int i;
 
     count = 0;
-    for (i = 0; i < ARP_CACHE_SIZE && count < max_entries; i++) {
+    if (!arp_cache) return 0;
+
+    for (i = 0; i < arp_cache_capacity && count < max_entries; i++) {
         if (arp_cache[i].valid) {
             ips[count] = (arp_cache[i].ip.octets[0] << 24) |
                         (arp_cache[i].ip.octets[1] << 16) |

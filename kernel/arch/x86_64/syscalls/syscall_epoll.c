@@ -2,10 +2,10 @@
 #include <lebirun/task.h>
 #include <lebirun/mutex.h>
 
-#define EPOLL_INIT_COUNT 8
-#define EPOLL_INIT_EVENTS 32
+#define EPOLL_INIT_COUNT 1
+#define EPOLL_INIT_EVENTS 4
 #define FUTEX_INIT_COUNT 32
-#define EVENTFD_INIT_COUNT 16
+#define EVENTFD_INIT_COUNT 1
 
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2

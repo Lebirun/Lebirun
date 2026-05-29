@@ -45,12 +45,17 @@ static int find_free_inode_cache(ext4_fs_t *fs) {
         return i;
     }
     if (fs->inode_cache_capacity < EXT4_INODE_CACHE_MAX) {
-        new_cap = fs->inode_cache_capacity * 2;
+        if (fs->inode_cache_capacity == 0) {
+            new_cap = 1;
+        } else {
+            new_cap = fs->inode_cache_capacity * 2;
+        }
         if (new_cap > EXT4_INODE_CACHE_MAX)
             new_cap = EXT4_INODE_CACHE_MAX;
         new_cache = (ext4_inode_cache_t *)kmalloc(new_cap * sizeof(ext4_inode_cache_t));
         if (new_cache) {
-            memcpy(new_cache, fs->inode_cache, fs->inode_cache_count * sizeof(ext4_inode_cache_t));
+            if (fs->inode_cache_count > 0)
+                memcpy(new_cache, fs->inode_cache, fs->inode_cache_count * sizeof(ext4_inode_cache_t));
             memset(new_cache + fs->inode_cache_count, 0, (new_cap - fs->inode_cache_count) * sizeof(ext4_inode_cache_t));
             i = (int)fs->inode_cache_count;
             kfree(fs->inode_cache);

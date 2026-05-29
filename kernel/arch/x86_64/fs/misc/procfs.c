@@ -17,33 +17,33 @@ extern task_t *current_task;
 extern task_t *ready_queue_head;
 
 static vfs_node_t procfs_root;
-static vfs_node_t proc_self;
-static vfs_node_t proc_self_exe;
-static vfs_node_t proc_self_cwd;
-static vfs_node_t proc_self_fd;
-static vfs_node_t proc_self_maps;
-static vfs_node_t proc_self_status;
-static vfs_node_t proc_self_cmdline;
-static vfs_node_t proc_self_environ;
-static vfs_node_t proc_self_stat;
-static vfs_node_t proc_self_statm;
-static vfs_node_t proc_self_comm;
-static vfs_node_t proc_self_limits;
-static vfs_node_t proc_self_io;
-static vfs_node_t proc_version;
-static vfs_node_t proc_uptime;
-static vfs_node_t proc_meminfo;
-static vfs_node_t proc_cpuinfo;
-static vfs_node_t proc_loadavg;
-static vfs_node_t proc_stat;
-static vfs_node_t proc_mounts;
-static vfs_node_t proc_filesystems;
-static vfs_node_t proc_cmdline;
-static vfs_node_t proc_devices;
-static vfs_node_t proc_interrupts;
-static vfs_node_t proc_vmstat;
-static vfs_node_t proc_memdetail;
-static vfs_node_t proc_kmsg;
+static vfs_node_t *proc_self;
+static vfs_node_t *proc_self_exe;
+static vfs_node_t *proc_self_cwd;
+static vfs_node_t *proc_self_fd;
+static vfs_node_t *proc_self_maps;
+static vfs_node_t *proc_self_status;
+static vfs_node_t *proc_self_cmdline;
+static vfs_node_t *proc_self_environ;
+static vfs_node_t *proc_self_stat;
+static vfs_node_t *proc_self_statm;
+static vfs_node_t *proc_self_comm;
+static vfs_node_t *proc_self_limits;
+static vfs_node_t *proc_self_io;
+static vfs_node_t *proc_version;
+static vfs_node_t *proc_uptime;
+static vfs_node_t *proc_meminfo;
+static vfs_node_t *proc_cpuinfo;
+static vfs_node_t *proc_loadavg;
+static vfs_node_t *proc_stat;
+static vfs_node_t *proc_mounts;
+static vfs_node_t *proc_filesystems;
+static vfs_node_t *proc_cmdline;
+static vfs_node_t *proc_devices;
+static vfs_node_t *proc_interrupts;
+static vfs_node_t *proc_vmstat;
+static vfs_node_t *proc_memdetail;
+static vfs_node_t *proc_kmsg;
 
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
@@ -55,13 +55,68 @@ static dirent_t *proc_task_readdir(vfs_node_t *node, uint64_t index);
 static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name);
 static dirent_t *proc_task_thread_readdir(vfs_node_t *node, uint64_t index);
 static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name);
+static vfs_node_t *procfs_get_self(void);
+static vfs_node_t *procfs_get_self_exe(void);
+static vfs_node_t *procfs_get_self_cwd(void);
+static vfs_node_t *procfs_get_self_fd(void);
+static vfs_node_t *procfs_get_self_maps(void);
+static vfs_node_t *procfs_get_self_status(void);
+static vfs_node_t *procfs_get_self_cmdline(void);
+static vfs_node_t *procfs_get_self_environ(void);
+static vfs_node_t *procfs_get_self_stat(void);
+static vfs_node_t *procfs_get_self_statm(void);
+static vfs_node_t *procfs_get_self_comm(void);
+static vfs_node_t *procfs_get_self_limits(void);
+static vfs_node_t *procfs_get_self_io(void);
+static vfs_node_t *procfs_get_version(void);
+static vfs_node_t *procfs_get_uptime(void);
+static vfs_node_t *procfs_get_meminfo(void);
+static vfs_node_t *procfs_get_cpuinfo(void);
+static vfs_node_t *procfs_get_loadavg(void);
+static vfs_node_t *procfs_get_stat(void);
+static vfs_node_t *procfs_get_mounts(void);
+static vfs_node_t *procfs_get_filesystems(void);
+static vfs_node_t *procfs_get_cmdline(void);
+static vfs_node_t *procfs_get_devices(void);
+static vfs_node_t *procfs_get_interrupts(void);
+static vfs_node_t *procfs_get_vmstat(void);
+static vfs_node_t *procfs_get_memdetail(void);
+static vfs_node_t *procfs_get_kmsg(void);
+
+static void procfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vfs_node_t *parent) {
+    memset(n, 0, sizeof(vfs_node_t));
+    strcpy(n->name, name);
+    n->flags = flags;
+    n->parent = parent;
+    n->ref_count = 1;
+}
+
+static vfs_node_t *procfs_lazy_node(vfs_node_t **slot, const char *name, uint64_t flags, vfs_node_t *parent, read_type_t read, readdir_type_t readdir, finddir_type_t finddir) {
+    vfs_node_t *n;
+
+    if (*slot) return *slot;
+    if (!parent) return NULL;
+    n = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!n) return NULL;
+    procfs_init_node(n, name, flags, parent);
+    n->read = read;
+    n->readdir = readdir;
+    n->finddir = finddir;
+    *slot = n;
+    return n;
+}
 
 static task_t *procfs_get_task(vfs_node_t *node) {
     pid_t pid;
-    if (VFS_GET_TYPE(node->flags) == VFS_FILE && node->inode >= 100) {
-        pid = (pid_t)(int64_t)(node->inode / 100);
+    int64_t inode;
+
+    inode = (int64_t)node->inode;
+    if (VFS_GET_TYPE(node->flags) == VFS_FILE && inode >= 100) {
+        pid = (pid_t)(inode / 100);
+    } else if (VFS_GET_TYPE(node->flags) == VFS_FILE && inode < 0) {
+        pid = (pid_t)((inode - 99) / 100);
     } else {
-        pid = (pid_t)(int64_t)node->inode;
+        pid = (pid_t)inode;
     }
     if (pid == 0 && current_task)
         return current_task;
@@ -74,6 +129,7 @@ extern uint64_t pt_vmm_pt_count;
 extern uint64_t pt_get_heap_pt_count(void);
 extern void fb_reclaim_unused(void);
 extern void console_reclaim_unused(void);
+extern void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 extern void slab_reclaim_empty(void);
 extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
@@ -910,6 +966,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t ref_free_nodes;
     uint64_t early_heap_total_kb;
     uint64_t early_heap_used_kb;
+    uint64_t console_buffers;
+    uint64_t console_bytes;
     int add;
     task_mem_stats_t task_stats;
 
@@ -922,6 +980,7 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     overlay_cache_stats(&overlay_nodes, &overlay_capacity, &overlay_bytes);
     squashfs_cache_stats(&sqfs_nodes, &sqfs_capacity, &sqfs_bytes, &sqfs_data_bytes);
     squashfs_decomp_stats(&sqfs_decomp_failures, &sqfs_decomp_oversize, &sqfs_decomp_padded);
+    console_memory_stats(&console_buffers, &console_bytes);
     ref_active_nodes = pfa_ref_active_nodes();
     ref_free_nodes = pfa_ref_free_nodes();
 
@@ -1044,6 +1103,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "SquashDecompFail:   %8lu\n"
         "SquashDecompOver:   %8lu\n"
         "SquashDecompPadded: %8lu\n"
+        "ConsoleBuffers:     %8lu\n"
+        "ConsoleBytes:       %8lu\n"
         "PFARefActiveNodes:  %8lu\n"
         "PFARefFreeNodes:    %8lu\n",
         pfa_used_kb,
@@ -1123,6 +1184,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         sqfs_decomp_failures,
         sqfs_decomp_oversize,
         sqfs_decomp_padded,
+        console_buffers,
+        console_bytes,
         ref_active_nodes,
         ref_free_nodes);
 
@@ -1386,21 +1449,21 @@ static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
 static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
     (void)node;
     
-    if (strcmp(name, "self") == 0) return &proc_self;
-    if (strcmp(name, "version") == 0) return &proc_version;
-    if (strcmp(name, "uptime") == 0) return &proc_uptime;
-    if (strcmp(name, "meminfo") == 0) return &proc_meminfo;
-    if (strcmp(name, "cpuinfo") == 0) return &proc_cpuinfo;
-    if (strcmp(name, "loadavg") == 0) return &proc_loadavg;
-    if (strcmp(name, "stat") == 0) return &proc_stat;
-    if (strcmp(name, "mounts") == 0) return &proc_mounts;
-    if (strcmp(name, "filesystems") == 0) return &proc_filesystems;
-    if (strcmp(name, "cmdline") == 0) return &proc_cmdline;
-    if (strcmp(name, "devices") == 0) return &proc_devices;
-    if (strcmp(name, "interrupts") == 0) return &proc_interrupts;
-    if (strcmp(name, "vmstat") == 0) return &proc_vmstat;
-    if (strcmp(name, "memdetail") == 0) return &proc_memdetail;
-    if (strcmp(name, "kmsg") == 0) return &proc_kmsg;
+    if (strcmp(name, "self") == 0) return procfs_get_self();
+    if (strcmp(name, "version") == 0) return procfs_get_version();
+    if (strcmp(name, "uptime") == 0) return procfs_get_uptime();
+    if (strcmp(name, "meminfo") == 0) return procfs_get_meminfo();
+    if (strcmp(name, "cpuinfo") == 0) return procfs_get_cpuinfo();
+    if (strcmp(name, "loadavg") == 0) return procfs_get_loadavg();
+    if (strcmp(name, "stat") == 0) return procfs_get_stat();
+    if (strcmp(name, "mounts") == 0) return procfs_get_mounts();
+    if (strcmp(name, "filesystems") == 0) return procfs_get_filesystems();
+    if (strcmp(name, "cmdline") == 0) return procfs_get_cmdline();
+    if (strcmp(name, "devices") == 0) return procfs_get_devices();
+    if (strcmp(name, "interrupts") == 0) return procfs_get_interrupts();
+    if (strcmp(name, "vmstat") == 0) return procfs_get_vmstat();
+    if (strcmp(name, "memdetail") == 0) return procfs_get_memdetail();
+    if (strcmp(name, "kmsg") == 0) return procfs_get_kmsg();
     
     {
         int pid = 0;
@@ -1449,20 +1512,128 @@ static dirent_t *proc_self_readdir(vfs_node_t *node, uint64_t index) {
 static vfs_node_t *proc_self_finddir(vfs_node_t *node, const char *name) {
     (void)node;
     
-    if (strcmp(name, "exe") == 0) return &proc_self_exe;
-    if (strcmp(name, "cwd") == 0) return &proc_self_cwd;
-    if (strcmp(name, "fd") == 0) return &proc_self_fd;
-    if (strcmp(name, "maps") == 0) return &proc_self_maps;
-    if (strcmp(name, "status") == 0) return &proc_self_status;
-    if (strcmp(name, "cmdline") == 0) return &proc_self_cmdline;
-    if (strcmp(name, "environ") == 0) return &proc_self_environ;
-    if (strcmp(name, "stat") == 0) return &proc_self_stat;
-    if (strcmp(name, "statm") == 0) return &proc_self_statm;
-    if (strcmp(name, "comm") == 0) return &proc_self_comm;
-    if (strcmp(name, "limits") == 0) return &proc_self_limits;
-    if (strcmp(name, "io") == 0) return &proc_self_io;
+    if (strcmp(name, "exe") == 0) return procfs_get_self_exe();
+    if (strcmp(name, "cwd") == 0) return procfs_get_self_cwd();
+    if (strcmp(name, "fd") == 0) return procfs_get_self_fd();
+    if (strcmp(name, "maps") == 0) return procfs_get_self_maps();
+    if (strcmp(name, "status") == 0) return procfs_get_self_status();
+    if (strcmp(name, "cmdline") == 0) return procfs_get_self_cmdline();
+    if (strcmp(name, "environ") == 0) return procfs_get_self_environ();
+    if (strcmp(name, "stat") == 0) return procfs_get_self_stat();
+    if (strcmp(name, "statm") == 0) return procfs_get_self_statm();
+    if (strcmp(name, "comm") == 0) return procfs_get_self_comm();
+    if (strcmp(name, "limits") == 0) return procfs_get_self_limits();
+    if (strcmp(name, "io") == 0) return procfs_get_self_io();
     
     return NULL;
+}
+
+static vfs_node_t *procfs_get_self(void) {
+    return procfs_lazy_node(&proc_self, "self", VFS_DIRECTORY, &procfs_root, NULL, proc_self_readdir, proc_self_finddir);
+}
+
+static vfs_node_t *procfs_get_self_exe(void) {
+    return procfs_lazy_node(&proc_self_exe, "exe", VFS_SYMLINK, procfs_get_self(), NULL, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_cwd(void) {
+    return procfs_lazy_node(&proc_self_cwd, "cwd", VFS_SYMLINK, procfs_get_self(), NULL, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_fd(void) {
+    return procfs_lazy_node(&proc_self_fd, "fd", VFS_DIRECTORY, procfs_get_self(), NULL, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_maps(void) {
+    return procfs_lazy_node(&proc_self_maps, "maps", VFS_FILE, procfs_get_self(), proc_self_maps_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_status(void) {
+    return procfs_lazy_node(&proc_self_status, "status", VFS_FILE, procfs_get_self(), proc_self_status_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_cmdline(void) {
+    return procfs_lazy_node(&proc_self_cmdline, "cmdline", VFS_FILE, procfs_get_self(), proc_self_cmdline_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_environ(void) {
+    return procfs_lazy_node(&proc_self_environ, "environ", VFS_FILE, procfs_get_self(), proc_self_environ_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_stat(void) {
+    return procfs_lazy_node(&proc_self_stat, "stat", VFS_FILE, procfs_get_self(), proc_self_stat_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_statm(void) {
+    return procfs_lazy_node(&proc_self_statm, "statm", VFS_FILE, procfs_get_self(), proc_self_statm_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_comm(void) {
+    return procfs_lazy_node(&proc_self_comm, "comm", VFS_FILE, procfs_get_self(), proc_self_comm_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_limits(void) {
+    return procfs_lazy_node(&proc_self_limits, "limits", VFS_FILE, procfs_get_self(), proc_self_limits_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_self_io(void) {
+    return procfs_lazy_node(&proc_self_io, "io", VFS_FILE, procfs_get_self(), proc_self_io_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_version(void) {
+    return procfs_lazy_node(&proc_version, "version", VFS_FILE, &procfs_root, proc_version_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_uptime(void) {
+    return procfs_lazy_node(&proc_uptime, "uptime", VFS_FILE, &procfs_root, proc_uptime_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_meminfo(void) {
+    return procfs_lazy_node(&proc_meminfo, "meminfo", VFS_FILE, &procfs_root, proc_meminfo_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_cpuinfo(void) {
+    return procfs_lazy_node(&proc_cpuinfo, "cpuinfo", VFS_FILE, &procfs_root, proc_cpuinfo_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_loadavg(void) {
+    return procfs_lazy_node(&proc_loadavg, "loadavg", VFS_FILE, &procfs_root, proc_loadavg_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_stat(void) {
+    return procfs_lazy_node(&proc_stat, "stat", VFS_FILE, &procfs_root, proc_stat_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_mounts(void) {
+    return procfs_lazy_node(&proc_mounts, "mounts", VFS_FILE, &procfs_root, proc_mounts_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_filesystems(void) {
+    return procfs_lazy_node(&proc_filesystems, "filesystems", VFS_FILE, &procfs_root, proc_filesystems_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_cmdline(void) {
+    return procfs_lazy_node(&proc_cmdline, "cmdline", VFS_FILE, &procfs_root, proc_cmdline_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_devices(void) {
+    return procfs_lazy_node(&proc_devices, "devices", VFS_FILE, &procfs_root, proc_devices_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_interrupts(void) {
+    return procfs_lazy_node(&proc_interrupts, "interrupts", VFS_FILE, &procfs_root, proc_interrupts_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_vmstat(void) {
+    return procfs_lazy_node(&proc_vmstat, "vmstat", VFS_FILE, &procfs_root, proc_vmstat_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_memdetail(void) {
+    return procfs_lazy_node(&proc_memdetail, "memdetail", VFS_FILE, &procfs_root, proc_memdetail_read, NULL, NULL);
+}
+
+static vfs_node_t *procfs_get_kmsg(void) {
+    return procfs_lazy_node(&proc_kmsg, "kmsg", VFS_FILE, &procfs_root, proc_kmsg_read, NULL, NULL);
 }
 
 static vfs_node_t *procfs_mount(const char *device, const char *mountpoint) {
@@ -1489,193 +1660,6 @@ void procfs_init(void) {
     procfs_root.readdir = procfs_readdir;
     procfs_root.finddir = procfs_finddir;
     procfs_root.ref_count = 1;
-    
-    memset(&proc_self, 0, sizeof(vfs_node_t));
-    strcpy(proc_self.name, "self");
-    proc_self.flags = VFS_DIRECTORY;
-    proc_self.readdir = proc_self_readdir;
-    proc_self.finddir = proc_self_finddir;
-    proc_self.parent = &procfs_root;
-    proc_self.ref_count = 1;
-    
-    memset(&proc_self_exe, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_exe.name, "exe");
-    proc_self_exe.flags = VFS_SYMLINK;
-    proc_self_exe.parent = &proc_self;
-    proc_self_exe.ref_count = 1;
-    
-    memset(&proc_self_cwd, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_cwd.name, "cwd");
-    proc_self_cwd.flags = VFS_SYMLINK;
-    proc_self_cwd.parent = &proc_self;
-    proc_self_cwd.ref_count = 1;
-    
-    memset(&proc_self_fd, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_fd.name, "fd");
-    proc_self_fd.flags = VFS_DIRECTORY;
-    proc_self_fd.parent = &proc_self;
-    proc_self_fd.ref_count = 1;
-    
-    memset(&proc_self_maps, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_maps.name, "maps");
-    proc_self_maps.flags = VFS_FILE;
-    proc_self_maps.read = proc_self_maps_read;
-    proc_self_maps.parent = &proc_self;
-    proc_self_maps.ref_count = 1;
-    
-    memset(&proc_self_status, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_status.name, "status");
-    proc_self_status.flags = VFS_FILE;
-    proc_self_status.read = proc_self_status_read;
-    proc_self_status.parent = &proc_self;
-    proc_self_status.ref_count = 1;
-    
-    memset(&proc_self_cmdline, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_cmdline.name, "cmdline");
-    proc_self_cmdline.flags = VFS_FILE;
-    proc_self_cmdline.read = proc_self_cmdline_read;
-    proc_self_cmdline.parent = &proc_self;
-    proc_self_cmdline.ref_count = 1;
-    
-    memset(&proc_self_environ, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_environ.name, "environ");
-    proc_self_environ.flags = VFS_FILE;
-    proc_self_environ.read = proc_self_environ_read;
-    proc_self_environ.parent = &proc_self;
-    proc_self_environ.ref_count = 1;
-    
-    memset(&proc_version, 0, sizeof(vfs_node_t));
-    strcpy(proc_version.name, "version");
-    proc_version.flags = VFS_FILE;
-    proc_version.read = proc_version_read;
-    proc_version.parent = &procfs_root;
-    proc_version.ref_count = 1;
-    
-    memset(&proc_uptime, 0, sizeof(vfs_node_t));
-    strcpy(proc_uptime.name, "uptime");
-    proc_uptime.flags = VFS_FILE;
-    proc_uptime.read = proc_uptime_read;
-    proc_uptime.parent = &procfs_root;
-    proc_uptime.ref_count = 1;
-    
-    memset(&proc_meminfo, 0, sizeof(vfs_node_t));
-    strcpy(proc_meminfo.name, "meminfo");
-    proc_meminfo.flags = VFS_FILE;
-    proc_meminfo.read = proc_meminfo_read;
-    proc_meminfo.parent = &procfs_root;
-    proc_meminfo.ref_count = 1;
-    
-    memset(&proc_cpuinfo, 0, sizeof(vfs_node_t));
-    strcpy(proc_cpuinfo.name, "cpuinfo");
-    proc_cpuinfo.flags = VFS_FILE;
-    proc_cpuinfo.read = proc_cpuinfo_read;
-    proc_cpuinfo.parent = &procfs_root;
-    proc_cpuinfo.ref_count = 1;
-    
-    memset(&proc_loadavg, 0, sizeof(vfs_node_t));
-    strcpy(proc_loadavg.name, "loadavg");
-    proc_loadavg.flags = VFS_FILE;
-    proc_loadavg.read = proc_loadavg_read;
-    proc_loadavg.parent = &procfs_root;
-    proc_loadavg.ref_count = 1;
-    
-    memset(&proc_self_stat, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_stat.name, "stat");
-    proc_self_stat.flags = VFS_FILE;
-    proc_self_stat.read = proc_self_stat_read;
-    proc_self_stat.parent = &proc_self;
-    proc_self_stat.ref_count = 1;
-    
-    memset(&proc_self_statm, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_statm.name, "statm");
-    proc_self_statm.flags = VFS_FILE;
-    proc_self_statm.read = proc_self_statm_read;
-    proc_self_statm.parent = &proc_self;
-    proc_self_statm.ref_count = 1;
-    
-    memset(&proc_self_comm, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_comm.name, "comm");
-    proc_self_comm.flags = VFS_FILE;
-    proc_self_comm.read = proc_self_comm_read;
-    proc_self_comm.parent = &proc_self;
-    proc_self_comm.ref_count = 1;
-    
-    memset(&proc_self_limits, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_limits.name, "limits");
-    proc_self_limits.flags = VFS_FILE;
-    proc_self_limits.read = proc_self_limits_read;
-    proc_self_limits.parent = &proc_self;
-    proc_self_limits.ref_count = 1;
-    
-    memset(&proc_self_io, 0, sizeof(vfs_node_t));
-    strcpy(proc_self_io.name, "io");
-    proc_self_io.flags = VFS_FILE;
-    proc_self_io.read = proc_self_io_read;
-    proc_self_io.parent = &proc_self;
-    proc_self_io.ref_count = 1;
-    
-    memset(&proc_stat, 0, sizeof(vfs_node_t));
-    strcpy(proc_stat.name, "stat");
-    proc_stat.flags = VFS_FILE;
-    proc_stat.read = proc_stat_read;
-    proc_stat.parent = &procfs_root;
-    proc_stat.ref_count = 1;
-    
-    memset(&proc_mounts, 0, sizeof(vfs_node_t));
-    strcpy(proc_mounts.name, "mounts");
-    proc_mounts.flags = VFS_FILE;
-    proc_mounts.read = proc_mounts_read;
-    proc_mounts.parent = &procfs_root;
-    proc_mounts.ref_count = 1;
-    
-    memset(&proc_filesystems, 0, sizeof(vfs_node_t));
-    strcpy(proc_filesystems.name, "filesystems");
-    proc_filesystems.flags = VFS_FILE;
-    proc_filesystems.read = proc_filesystems_read;
-    proc_filesystems.parent = &procfs_root;
-    proc_filesystems.ref_count = 1;
-    
-    memset(&proc_cmdline, 0, sizeof(vfs_node_t));
-    strcpy(proc_cmdline.name, "cmdline");
-    proc_cmdline.flags = VFS_FILE;
-    proc_cmdline.read = proc_cmdline_read;
-    proc_cmdline.parent = &procfs_root;
-    proc_cmdline.ref_count = 1;
-    
-    memset(&proc_devices, 0, sizeof(vfs_node_t));
-    strcpy(proc_devices.name, "devices");
-    proc_devices.flags = VFS_FILE;
-    proc_devices.read = proc_devices_read;
-    proc_devices.parent = &procfs_root;
-    proc_devices.ref_count = 1;
-    
-    memset(&proc_interrupts, 0, sizeof(vfs_node_t));
-    strcpy(proc_interrupts.name, "interrupts");
-    proc_interrupts.flags = VFS_FILE;
-    proc_interrupts.read = proc_interrupts_read;
-    proc_interrupts.parent = &procfs_root;
-    proc_interrupts.ref_count = 1;
-    
-    memset(&proc_vmstat, 0, sizeof(vfs_node_t));
-    strcpy(proc_vmstat.name, "vmstat");
-    proc_vmstat.flags = VFS_FILE;
-    proc_vmstat.read = proc_vmstat_read;
-    proc_vmstat.parent = &procfs_root;
-    proc_vmstat.ref_count = 1;
-    
-    memset(&proc_memdetail, 0, sizeof(vfs_node_t));
-    strcpy(proc_memdetail.name, "memdetail");
-    proc_memdetail.flags = VFS_FILE;
-    proc_memdetail.read = proc_memdetail_read;
-    proc_memdetail.parent = &procfs_root;
-    proc_memdetail.ref_count = 1;
-
-    memset(&proc_kmsg, 0, sizeof(vfs_node_t));
-    strcpy(proc_kmsg.name, "kmsg");
-    proc_kmsg.flags = VFS_FILE;
-    proc_kmsg.read = proc_kmsg_read;
-    proc_kmsg.parent = &procfs_root;
-    proc_kmsg.ref_count = 1;
 
     vfs_register_fs(&procfs_type);
 }

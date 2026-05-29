@@ -18,7 +18,8 @@ typedef struct {
 
 extern uint64_t net_get_ticks(void);
 
-static ipv6_neighbor_entry_t ipv6_neighbors[IPV6_NEIGHBOR_CACHE_SIZE];
+static ipv6_neighbor_entry_t *ipv6_neighbors;
+static int ipv6_neighbor_capacity;
 
 static int ipv6_is_zero_addr(ipv6_addr_t ip) {
     int i;
@@ -77,7 +78,48 @@ static ipv6_addr_t ipv6_next_hop(netif_t *netif, ipv6_addr_t dest) {
 }
 
 void ipv6_init(void) {
-    memset(ipv6_neighbors, 0, sizeof(ipv6_neighbors));
+    ipv6_neighbors = NULL;
+    ipv6_neighbor_capacity = 0;
+}
+
+static int ipv6_neighbor_ensure_cache(void) {
+    ipv6_neighbor_entry_t *new_neighbors;
+    int new_capacity;
+
+    if (ipv6_neighbors) return 0;
+
+    new_capacity = 4;
+    new_neighbors = (ipv6_neighbor_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
+    if (!new_neighbors) return -1;
+
+    memset(new_neighbors, 0, (uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
+    ipv6_neighbors = new_neighbors;
+    ipv6_neighbor_capacity = new_capacity;
+    return 0;
+}
+
+static int ipv6_neighbor_grow_cache(void) {
+    ipv6_neighbor_entry_t *new_neighbors;
+    int new_capacity;
+
+    if (ipv6_neighbor_capacity >= IPV6_NEIGHBOR_CACHE_SIZE) return 0;
+
+    new_capacity = ipv6_neighbor_capacity * 2;
+    if (new_capacity < 4) new_capacity = 4;
+    if (new_capacity > IPV6_NEIGHBOR_CACHE_SIZE) new_capacity = IPV6_NEIGHBOR_CACHE_SIZE;
+
+    new_neighbors = (ipv6_neighbor_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
+    if (!new_neighbors) return -1;
+
+    memset(new_neighbors, 0, (uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
+    if (ipv6_neighbors && ipv6_neighbor_capacity > 0) {
+        memcpy(new_neighbors, ipv6_neighbors, (uint64_t)ipv6_neighbor_capacity * sizeof(ipv6_neighbor_entry_t));
+        kfree(ipv6_neighbors);
+    }
+
+    ipv6_neighbors = new_neighbors;
+    ipv6_neighbor_capacity = new_capacity;
+    return 0;
 }
 
 void ipv6_neighbor_update(ipv6_addr_t ip, mac_addr_t mac) {
@@ -88,12 +130,13 @@ void ipv6_neighbor_update(ipv6_addr_t ip, mac_addr_t mac) {
     uint64_t age;
 
     if (ipv6_is_multicast(ip) || ipv6_is_zero_addr(ip)) return;
+    if (ipv6_neighbor_ensure_cache() < 0) return;
 
     free_idx = -1;
     oldest_idx = 0;
     oldest_age = 0;
 
-    for (i = 0; i < IPV6_NEIGHBOR_CACHE_SIZE; i++) {
+    for (i = 0; i < ipv6_neighbor_capacity; i++) {
         if (ipv6_neighbors[i].valid && ipv6_eq(ipv6_neighbors[i].ip, ip)) {
             ipv6_neighbors[i].mac = mac;
             ipv6_neighbors[i].timestamp = net_get_ticks();
@@ -111,6 +154,9 @@ void ipv6_neighbor_update(ipv6_addr_t ip, mac_addr_t mac) {
         }
     }
 
+    if (free_idx < 0 && ipv6_neighbor_capacity < IPV6_NEIGHBOR_CACHE_SIZE) {
+        if (ipv6_neighbor_grow_cache() == 0) free_idx = ipv6_neighbor_capacity / 2;
+    }
     if (free_idx < 0) free_idx = oldest_idx;
     ipv6_neighbors[free_idx].ip = ip;
     ipv6_neighbors[free_idx].mac = mac;
@@ -123,8 +169,9 @@ int ipv6_neighbor_lookup(ipv6_addr_t ip, mac_addr_t *mac) {
     uint64_t age;
 
     if (!mac) return -1;
+    if (!ipv6_neighbors) return -1;
 
-    for (i = 0; i < IPV6_NEIGHBOR_CACHE_SIZE; i++) {
+    for (i = 0; i < ipv6_neighbor_capacity; i++) {
         if (ipv6_neighbors[i].valid && ipv6_eq(ipv6_neighbors[i].ip, ip)) {
             age = net_get_ticks() - ipv6_neighbors[i].timestamp;
             if (age > IPV6_NEIGHBOR_TTL) {

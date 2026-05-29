@@ -7,8 +7,9 @@
 
 struct vfs_node;
 
-#define TASK_INIT_FDS 4
+#define TASK_INIT_FDS 3
 #define TASK_MAX_FDS 1024
+#define TASK_INIT_FILE_MAPS 4
 #define TASK_MAX_FILE_MAPS 16
 
 #define FD_TYPE_FILE   0
@@ -43,6 +44,15 @@ typedef struct {
     uint32_t read_buf_len;
 } task_fd_t;
 
+typedef struct {
+    struct vfs_node *node;
+    uint64_t vaddr;
+    uint64_t memsz;
+    uint64_t filesz;
+    uint64_t offset;
+    uint64_t flags;
+} task_file_map_t;
+
 typedef struct task {
     uint64_t id;
     pid_t pid;
@@ -76,15 +86,9 @@ typedef struct task {
     uint64_t pml4_phys;
     uint64_t *user_pages;
     uint64_t user_pages_count;
-    struct {
-        struct vfs_node *node;
-        uint64_t vaddr;
-        uint64_t memsz;
-        uint64_t filesz;
-        uint64_t offset;
-        uint64_t flags;
-    } file_maps[TASK_MAX_FILE_MAPS];
+    task_file_map_t *file_maps;
     int file_map_count;
+    int file_map_capacity;
     int console_id;
     uint64_t tls_base;
     uint64_t tls_limit;
@@ -216,6 +220,7 @@ void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
 
 void task_free_user_memory(task_t* t);
+int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys);
 int task_add_file_mapping(task_t *task, struct vfs_node *node, uint64_t vaddr,
                           uint64_t memsz, uint64_t filesz, uint64_t offset,
                           uint64_t flags);
@@ -234,6 +239,7 @@ void clear_syscall_frame(void);
 void task_init_fds(task_t *task);
 int task_fd_alloc(task_t *task);
 int task_fd_ensure_capacity(task_t *task, int min_fd);
+void task_fd_reclaim_unused(task_t *task);
 void task_fd_free(task_t *task, int fd);
 task_fd_t *task_fd_get(task_t *task, int fd);
 void task_fd_close_all(task_t *task);

@@ -18,7 +18,7 @@ static volatile uint64_t pfa_cached_free = 0;
 static uint8_t *pfa_refcounts = NULL;
 static uint64_t pfa_refcount_entries = 0;
 
-#define REFHT_BUCKETS 512
+#define REFHT_BUCKETS 128
 
 typedef struct refht_node {
     uint64_t page_idx;
@@ -26,7 +26,7 @@ typedef struct refht_node {
     struct refht_node *next;
 } refht_node_t;
 
-static refht_node_t *refht_buckets[REFHT_BUCKETS];
+static refht_node_t **refht_buckets;
 static refht_node_t *refht_free_list;
 static uint64_t refht_active_node_count = 0;
 static uint64_t refht_free_node_count = 0;
@@ -624,8 +624,13 @@ static void refht_lock_release(uint64_t eflags) {
 }
 
 static void refht_init(void) {
+    refht_node_t **buckets;
+
     if (refht_initialized) return;
-    memset(refht_buckets, 0, sizeof(refht_buckets));
+    buckets = (refht_node_t **)kmalloc(REFHT_BUCKETS * sizeof(refht_node_t *));
+    if (!buckets) return;
+    memset(buckets, 0, REFHT_BUCKETS * sizeof(refht_node_t *));
+    refht_buckets = buckets;
     refht_free_list = NULL;
     refht_active_node_count = 0;
     refht_free_node_count = 0;

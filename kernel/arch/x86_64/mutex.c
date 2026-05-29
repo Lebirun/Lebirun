@@ -10,10 +10,10 @@ void mutex_init(mutex_t* m) {
 }
 
 void mutex_lock(mutex_t* m) {
-    if (!m) return;
-
     extern int scheduler_initialized;
     extern uint64_t tick_count;
+
+    if (!m) return;
     
     if (!scheduler_initialized) {
         while (m->locked) {

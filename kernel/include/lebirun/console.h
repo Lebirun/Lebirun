@@ -83,6 +83,7 @@ void console_tick(void);
 int console_alloc(int n);
 int console_alt_screen_active(int n);
 void console_reclaim_unused(void);
+void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t *attr);
 
 #endif

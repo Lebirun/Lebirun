@@ -13,8 +13,6 @@
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
 #define COPY_BUF_MAX 16384
-#define MAX_DISKS    8
-#define MAX_PARTS    16
 #define MAX_PATH     256
 #define MAX_LINE     128
 #define LEBPKG_INSTALLED_DIR "/etc/lebpkg/installed"
@@ -61,11 +59,13 @@ typedef struct {
     char     devpath[32];
     uint64_t disk_sectors;
     int      part_count;
-    part_info_t parts[MAX_PARTS];
+    int      part_capacity;
+    part_info_t *parts;
 } disk_info_t;
 
-static disk_info_t disks[MAX_DISKS];
+static disk_info_t *disks;
 static int disk_count;
+static int disk_capacity;
 static lebui_size_t term_sz;
 static lebui_prog_state_t prog_st;
 
@@ -143,10 +143,65 @@ static int inst_is_whole_disk(const char *name)
     return 1;
 }
 
+static int inst_reserve_disks(int need)
+{
+    disk_info_t *new_disks;
+    int new_cap;
+    int i;
+
+    if (disk_capacity >= need) return 0;
+
+    new_cap = disk_capacity ? disk_capacity * 2 : 4;
+    while (new_cap < need) new_cap *= 2;
+
+    new_disks = (disk_info_t *)realloc(disks, (size_t)new_cap * sizeof(disk_info_t));
+    if (!new_disks) return -1;
+
+    disks = new_disks;
+    for (i = disk_capacity; i < new_cap; i++)
+        memset(&disks[i], 0, sizeof(disks[i]));
+    disk_capacity = new_cap;
+    return 0;
+}
+
+static int inst_reserve_parts(disk_info_t *disk, int need)
+{
+    part_info_t *new_parts;
+    int new_cap;
+    int i;
+
+    if (disk->part_capacity >= need) return 0;
+
+    new_cap = disk->part_capacity ? disk->part_capacity * 2 : 4;
+    while (new_cap < need) new_cap *= 2;
+
+    new_parts = (part_info_t *)realloc(disk->parts, (size_t)new_cap * sizeof(part_info_t));
+    if (!new_parts) return -1;
+
+    disk->parts = new_parts;
+    for (i = disk->part_capacity; i < new_cap; i++)
+        memset(&disk->parts[i], 0, sizeof(disk->parts[i]));
+    disk->part_capacity = new_cap;
+    return 0;
+}
+
+static part_info_t *inst_add_part(disk_info_t *disk)
+{
+    part_info_t *part;
+
+    if (inst_reserve_parts(disk, disk->part_count + 1) < 0) return NULL;
+
+    part = &disk->parts[disk->part_count];
+    memset(part, 0, sizeof(*part));
+    disk->part_count++;
+    return part;
+}
+
 static void inst_scan_disk(disk_info_t *disk)
 {
-    static uint8_t sector0[SECTOR_SIZE];
+    uint8_t sector0[SECTOR_SIZE];
     mbr_t *mbr;
+    part_info_t *part;
     int ret;
     int i;
     int stat_fd;
@@ -159,7 +214,6 @@ static void inst_scan_disk(disk_info_t *disk)
     uint64_t psize;
     uint64_t ptype;
 
-    memset(disk->parts, 0, sizeof(disk->parts));
     disk->part_count = 0;
     disk->disk_sectors = 0;
 
@@ -182,15 +236,14 @@ static void inst_scan_disk(disk_info_t *disk)
             for (i = 0; i < 4; i++) {
                 if (mbr->parts[i].type == 0) continue;
                 if (mbr->parts[i].sector_count == 0) continue;
-                disk->parts[disk->part_count].valid = 1;
-                disk->parts[disk->part_count].number = i + 1;
-                disk->parts[disk->part_count].start_lba = mbr->parts[i].lba_start;
-                disk->parts[disk->part_count].sector_count = mbr->parts[i].sector_count;
-                disk->parts[disk->part_count].mbr_type = mbr->parts[i].type;
-                snprintf(disk->parts[disk->part_count].devpath,
-                         sizeof(disk->parts[disk->part_count].devpath),
-                         "%s%d", disk->devpath, i + 1);
-                disk->part_count++;
+                part = inst_add_part(disk);
+                if (!part) return;
+                part->valid = 1;
+                part->number = i + 1;
+                part->start_lba = mbr->parts[i].lba_start;
+                part->sector_count = mbr->parts[i].sector_count;
+                part->mbr_type = mbr->parts[i].type;
+                snprintf(part->devpath, sizeof(part->devpath), "%s%d", disk->devpath, i + 1);
             }
         }
     }
@@ -201,7 +254,7 @@ static void inst_scan_disk(disk_info_t *disk)
     devfd = vfs_open("/dev", 0);
     if (devfd < 0) return;
 
-    for (didx = 0; disk->part_count < MAX_PARTS; didx++) {
+    for (didx = 0; ; didx++) {
         if (vfs_readdir(devfd, name, &dtype, didx) != 0) break;
         if (strncmp(name, disk->devname, dlen) != 0) continue;
         if (name[dlen] < '1' || name[dlen] > '9') continue;
@@ -214,14 +267,14 @@ static void inst_scan_disk(disk_info_t *disk)
         vfs_stat(stat_fd, &psize, &ptype);
         vfs_close_fd(stat_fd);
 
-        disk->parts[disk->part_count].valid = 1;
-        disk->parts[disk->part_count].number = name[dlen] - '0';
-        disk->parts[disk->part_count].start_lba = 0;
-        disk->parts[disk->part_count].sector_count = psize / SECTOR_SIZE;
-        disk->parts[disk->part_count].mbr_type = 0x83;
-        strncpy(disk->parts[disk->part_count].devpath, partpath,
-                sizeof(disk->parts[disk->part_count].devpath) - 1);
-        disk->part_count++;
+        part = inst_add_part(disk);
+        if (!part) break;
+        part->valid = 1;
+        part->number = name[dlen] - '0';
+        part->start_lba = 0;
+        part->sector_count = psize / SECTOR_SIZE;
+        part->mbr_type = 0x83;
+        strncpy(part->devpath, partpath, sizeof(part->devpath) - 1);
     }
     vfs_close_fd(devfd);
 }
@@ -232,20 +285,28 @@ static int inst_enumerate_disks(void)
     char name[64];
     unsigned int type;
     unsigned int idx;
+    disk_info_t *disk;
 
     disk_count = 0;
 
     fd = vfs_open("/dev", 0);
     if (fd < 0) return -1;
 
-    for (idx = 0; disk_count < MAX_DISKS; idx++) {
+    for (idx = 0; ; idx++) {
         if (vfs_readdir(fd, name, &type, idx) != 0) break;
         if (!inst_is_whole_disk(name)) continue;
 
-        strncpy(disks[disk_count].devname, name, sizeof(disks[disk_count].devname) - 1);
-        snprintf(disks[disk_count].devpath, sizeof(disks[disk_count].devpath),
-                 "/dev/%s", name);
-        inst_scan_disk(&disks[disk_count]);
+        if (inst_reserve_disks(disk_count + 1) < 0) {
+            vfs_close_fd(fd);
+            return -1;
+        }
+
+        disk = &disks[disk_count];
+        memset(disk->devname, 0, sizeof(disk->devname));
+        memset(disk->devpath, 0, sizeof(disk->devpath));
+        strncpy(disk->devname, name, sizeof(disk->devname) - 1);
+        snprintf(disk->devpath, sizeof(disk->devpath), "/dev/%s", name);
+        inst_scan_disk(disk);
         disk_count++;
     }
     vfs_close_fd(fd);
@@ -333,10 +394,12 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     int r;
     struct stat src_st;
     mode_t src_mode;
+    int created_with_mode;
 
     fd_in = vfs_open(src, 0);
     if (fd_in < 0) return -1;
 
+    created_with_mode = 0;
     src_mode = 0644;
     src_st.st_size = 0;
     if (fstat(fd_in, &src_st) == 0)
@@ -353,7 +416,8 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
                                    src_mode);
     } else {
         vfs_unlink(dst);
-        vfs_create(dst, src_mode);
+        if (vfs_create(dst, src_mode) == 0)
+            created_with_mode = 1;
         fd_out = vfs_open(dst, 2);
     }
     if (fd_out < 0) {
@@ -375,7 +439,8 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     close(fd_in);
     close(fd_out);
 
-    chmod(dst, src_mode);
+    if (!created_with_mode)
+        chmod(dst, src_mode);
 
     return 0;
 }
@@ -416,8 +481,6 @@ static int inst_count_dir_entries(const char *path)
         if (inst_pkg_skip(sub)) continue;
         if (type == 2) {
             count += inst_count_dir_entries(sub);
-        } else if (type == 6) {
-            count++;
         } else {
             count++;
         }
@@ -439,8 +502,8 @@ static void inst_copy_progress(const char *path)
         return;
     }
 
-    pct = (copy_done * 100) / copy_total;
-    if (pct > 99) pct = 99;
+    pct = 10 + (copy_done * 85) / copy_total;
+    if (pct > 95) pct = 95;
     if (pct != copy_last_pct) {
         copy_last_pct = pct;
         lebui_progress_update(&prog_st, path, pct);
@@ -456,8 +519,8 @@ static void inst_copy_current(const char *path)
         return;
     }
 
-    pct = (copy_done * 100) / copy_total;
-    if (pct > 99) pct = 99;
+    pct = 10 + (copy_done * 85) / copy_total;
+    if (pct > 95) pct = 95;
     lebui_progress_update(&prog_st, path, pct);
 }
 
@@ -502,7 +565,6 @@ static int inst_copy_symlink_vfs(const char *src, const char *dst)
 static int inst_copy_dir_recursive(const char *src, const char *dst, const char *skip)
 {
     int fd;
-    int dst_fd;
     char name[256];
     unsigned int type;
     unsigned int idx;
@@ -514,14 +576,8 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
 
     vfs_mkdir(dst, 0755);
 
-    dst_fd = vfs_open(dst, 0);
     fd = vfs_open(src, 0);
-    if (fd < 0) {
-        if (dst_fd >= 0) {
-            vfs_close_fd(dst_fd);
-        }
-        return -1;
-    }
+    if (fd < 0) return -1;
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -563,30 +619,7 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
         }
     }
     vfs_close_fd(fd);
-    if (dst_fd >= 0) {
-        vfs_close_fd(dst_fd);
-    }
     return (errors > 0) ? -1 : 0;
-}
-
-static int inst_count_rootfs(void)
-{
-    static const char *dirs[] = {
-        "bin", "boot", "dev", "etc", "home", "lib", "proc",
-        "root", "sbin", "tmp", "usr", "var", NULL
-    };
-    int total;
-    int i;
-    char path[MAX_PATH];
-
-    total = 1;
-    for (i = 0; dirs[i]; i++) {
-        if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0)
-            continue;
-        snprintf(path, sizeof(path), "/%s", dirs[i]);
-        total += inst_count_dir_entries(path);
-    }
-    return total;
 }
 
 static int inst_mount_partition(const char *devpath, const char *mountpoint)
@@ -699,12 +732,32 @@ static int inst_copy_rootfs(const char *mountpoint)
     return (errors > 0) ? -1 : 0;
 }
 
+static int inst_count_rootfs(void)
+{
+    static const char *dirs[] = {
+        "bin", "boot", "dev", "etc", "home", "lib", "proc",
+        "root", "sbin", "tmp", "usr", "var", NULL
+    };
+    int total;
+    int i;
+    char path[MAX_PATH];
+
+    total = 1;
+    for (i = 0; dirs[i]; i++) {
+        if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0)
+            continue;
+        snprintf(path, sizeof(path), "/%s", dirs[i]);
+        total += inst_count_dir_entries(path);
+    }
+    return total;
+}
+
 static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
 {
-    static uint8_t mbr_buf[SECTOR_SIZE];
-    static uint8_t boot_buf[SECTOR_SIZE];
-    static uint8_t core_buf[BUF_SIZE];
-    static uint8_t verify_buf[SECTOR_SIZE];
+    uint8_t *mbr_buf;
+    uint8_t *boot_buf;
+    uint8_t *core_buf;
+    uint8_t *verify_buf;
     int fd_disk;
     int fd_boot;
     int fd_core;
@@ -713,21 +766,37 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     int pi;
     int entry_off;
     uint32_t core_lba;
+    int result;
+
+    mbr_buf = NULL;
+    boot_buf = NULL;
+    core_buf = NULL;
+    verify_buf = NULL;
+    fd_disk = -1;
+    fd_boot = -1;
+    fd_core = -1;
+    result = -1;
+
+    mbr_buf = (uint8_t *)malloc(SECTOR_SIZE);
+    boot_buf = (uint8_t *)malloc(SECTOR_SIZE);
+    core_buf = (uint8_t *)malloc(BUF_SIZE);
+    verify_buf = (uint8_t *)malloc(SECTOR_SIZE);
+    if (!mbr_buf || !boot_buf || !core_buf || !verify_buf)
+        goto out;
 
     fd_disk = vfs_open(disk_dev, 2);
-    if (fd_disk < 0) return -1;
+    if (fd_disk < 0) goto out;
 
     r = vfs_read_fd(fd_disk, mbr_buf, SECTOR_SIZE);
-    if (r < SECTOR_SIZE) {
-        vfs_close_fd(fd_disk);
-        return -1;
-    }
+    if (r < SECTOR_SIZE) goto out;
     vfs_close_fd(fd_disk);
+    fd_disk = -1;
 
     fd_boot = vfs_open("/boot/grub/i386-pc/boot.img", 0);
-    if (fd_boot < 0) return -1;
+    if (fd_boot < 0) goto out;
     vfs_read_fd(fd_boot, boot_buf, SECTOR_SIZE);
     vfs_close_fd(fd_boot);
+    fd_boot = -1;
 
     memcpy(mbr_buf, boot_buf, 440);
 
@@ -751,33 +820,24 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     mbr_buf[0x1FF] = 0xAA;
 
     fd_disk = vfs_open(disk_dev, 2);
-    if (fd_disk < 0) return -1;
+    if (fd_disk < 0) goto out;
 
     r = vfs_write_fd(fd_disk, mbr_buf, SECTOR_SIZE);
-    if (r < SECTOR_SIZE) {
-        vfs_close_fd(fd_disk);
-        return -1;
-    }
+    if (r < SECTOR_SIZE) goto out;
 
     fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
-    if (fd_core < 0) {
-        vfs_close_fd(fd_disk);
-        return -1;
-    }
+    if (fd_core < 0) goto out;
 
     lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
 
     off = 0;
     while ((r = vfs_read_fd(fd_core, core_buf, BUF_SIZE)) > 0) {
-        if (vfs_write_fd(fd_disk, core_buf, r) != r) {
-            vfs_close_fd(fd_core);
-            vfs_close_fd(fd_disk);
-            return -1;
-        }
+        if (vfs_write_fd(fd_disk, core_buf, r) != r) goto out;
         off += r;
     }
 
     vfs_close_fd(fd_core);
+    fd_core = -1;
 
     lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
     r = vfs_read_fd(fd_disk, verify_buf, SECTOR_SIZE);
@@ -793,8 +853,17 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
         }
     }
 
-    vfs_close_fd(fd_disk);
-    return 0;
+    result = 0;
+
+out:
+    if (fd_core >= 0) vfs_close_fd(fd_core);
+    if (fd_boot >= 0) vfs_close_fd(fd_boot);
+    if (fd_disk >= 0) vfs_close_fd(fd_disk);
+    free(mbr_buf);
+    free(boot_buf);
+    free(core_buf);
+    free(verify_buf);
+    return result;
 }
 
 static int inst_write_grub_config(const char *mountpoint, const char *part_dev);
@@ -883,7 +952,7 @@ static void inst_generate_salt(char *salt, int len)
 
 static const char *inst_hash_password(const char *password)
 {
-    static char salt[3 + SALT_LEN + 2];
+    char salt[3 + SALT_LEN + 2];
     const char *hashed;
 
     memcpy(salt, "$5$", 3);
@@ -1201,11 +1270,19 @@ static void cleanup_exit(void)
 
 static int step_disk(int *disk_idx)
 {
-    char *disk_items[MAX_DISKS];
-    char disk_labels[MAX_DISKS][64];
+    char **disk_items;
+    char (*disk_labels)[64];
     char sizebuf[32];
     int i;
     int choice;
+
+    disk_items = (char **)malloc((size_t)disk_count * sizeof(char *));
+    disk_labels = (char (*)[64])malloc((size_t)disk_count * sizeof(*disk_labels));
+    if (!disk_items || !disk_labels) {
+        free(disk_items);
+        free(disk_labels);
+        return -1;
+    }
 
     for (i = 0; i < disk_count; i++) {
         inst_format_size(disks[i].disk_sectors, sizebuf, sizeof(sizebuf));
@@ -1217,6 +1294,8 @@ static int step_disk(int *disk_idx)
 
     choice = lebui_menu_auto("Select Disk", (const char **)disk_items, disk_count,
                        " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
+    free(disk_items);
+    free(disk_labels);
     if (choice < 0) return -1;
 
     if (disks[choice].part_count == 0) {
@@ -1232,14 +1311,22 @@ static int step_disk(int *disk_idx)
 static int step_partition(int disk_idx, int *part_idx)
 {
     disk_info_t *d;
-    char *part_items[MAX_PARTS];
-    char part_labels[MAX_PARTS][64];
+    char **part_items;
+    char (*part_labels)[64];
     char sizebuf[32];
     int i;
     int choice;
     const char *type_name;
 
     d = &disks[disk_idx];
+    part_items = (char **)malloc((size_t)d->part_count * sizeof(char *));
+    part_labels = (char (*)[64])malloc((size_t)d->part_count * sizeof(*part_labels));
+    if (!part_items || !part_labels) {
+        free(part_items);
+        free(part_labels);
+        return -1;
+    }
+
     for (i = 0; i < d->part_count; i++) {
         inst_format_size(d->parts[i].sector_count, sizebuf, sizeof(sizebuf));
         switch (d->parts[i].mbr_type) {
@@ -1258,6 +1345,8 @@ static int step_partition(int disk_idx, int *part_idx)
     choice = lebui_menu_auto("Select Partition", (const char **)part_items,
                        d->part_count,
                        " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
+    free(part_items);
+    free(part_labels);
     if (choice < 0) return -1;
 
     *part_idx = choice;
@@ -1270,16 +1359,36 @@ static int step_format(int *do_format)
     return 0;
 }
 
-#define MAX_USERS 8
-
 typedef struct {
     char username[64];
     char password[64];
 } user_entry_t;
 
-static user_entry_t users[MAX_USERS];
+static user_entry_t *users;
 static int user_count;
+static int user_capacity;
 static char root_password[64];
+
+static int inst_reserve_users(int need)
+{
+    user_entry_t *new_users;
+    int new_cap;
+    int i;
+
+    if (user_capacity >= need) return 0;
+
+    new_cap = user_capacity ? user_capacity * 2 : 4;
+    while (new_cap < need) new_cap *= 2;
+
+    new_users = (user_entry_t *)realloc(users, (size_t)new_cap * sizeof(user_entry_t));
+    if (!new_users) return -1;
+
+    users = new_users;
+    for (i = user_capacity; i < new_cap; i++)
+        memset(&users[i], 0, sizeof(users[i]));
+    user_capacity = new_cap;
+    return 0;
+}
 
 static int step_packages(void)
 {
@@ -1305,36 +1414,52 @@ static int step_packages(void)
 
 static int step_user_setup(void)
 {
-    char *menu_items[MAX_USERS + 2];
-    char menu_labels[MAX_USERS + 2][48];
+    char **menu_items;
+    char (*menu_labels)[48];
     int choice;
     int i;
     char password2[64];
+    int menu_count;
+    int done_idx;
 
     for (;;) {
+        menu_count = user_count + 2;
+        menu_items = (char **)malloc((size_t)menu_count * sizeof(char *));
+        menu_labels = (char (*)[48])malloc((size_t)menu_count * sizeof(*menu_labels));
+        if (!menu_items || !menu_labels) {
+            free(menu_items);
+            free(menu_labels);
+            return -1;
+        }
+
         for (i = 0; i < user_count; i++) {
             snprintf(menu_labels[i], sizeof(menu_labels[i]), "  %s", users[i].username);
             menu_items[i] = menu_labels[i];
         }
-        if (user_count < MAX_USERS) {
-            snprintf(menu_labels[user_count], sizeof(menu_labels[user_count]), "  Add new user...");
-            menu_items[user_count] = menu_labels[user_count];
-        }
-        snprintf(menu_labels[user_count + (user_count < MAX_USERS ? 1 : 0)],
-                 sizeof(menu_labels[0]), "  Done");
-        menu_items[user_count + (user_count < MAX_USERS ? 1 : 0)] =
-            menu_labels[user_count + (user_count < MAX_USERS ? 1 : 0)];
+        snprintf(menu_labels[user_count], sizeof(menu_labels[user_count]), "  Add new user...");
+        menu_items[user_count] = menu_labels[user_count];
+        done_idx = user_count + 1;
+        snprintf(menu_labels[done_idx], sizeof(menu_labels[0]), "  Done");
+        menu_items[done_idx] = menu_labels[done_idx];
 
         choice = lebui_menu_auto("User Accounts", (const char **)menu_items,
-                           user_count + (user_count < MAX_USERS ? 2 : 1),
+                           menu_count,
                            " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
+        free(menu_items);
+        free(menu_labels);
         if (choice < 0) return 0;
 
-        if (choice == user_count + (user_count < MAX_USERS ? 1 : 0)) {
+        if (choice == done_idx) {
             return 0;
         }
 
-        if (user_count < MAX_USERS && choice == user_count) {
+        if (choice == user_count) {
+            if (inst_reserve_users(user_count + 1) < 0) {
+                lebui_msgbox_auto("Error", "Could not allocate user entry.", term_sz.rows, term_sz.cols);
+                continue;
+            }
+            users[user_count].username[0] = '\0';
+            users[user_count].password[0] = '\0';
             if (lebui_input_ex("New User", "Enter username:", users[user_count].username,
                           sizeof(users[user_count].username), 0, term_sz.rows, term_sz.cols) < 0)
                 continue;
@@ -1417,6 +1542,110 @@ static int step_timezone(int *tz_idx)
 
 static void attach_tabbar(int active_tab, int cols);
 
+static int inst_set_root_password(const char *mountpoint, const char *password)
+{
+    char shadow_path[MAX_PATH];
+    char *shadow_buf;
+    char *new_shadow;
+    const char *hashed;
+    int shadow_fd;
+    int rlen;
+    int wlen;
+    int new_len;
+    int line_start;
+    int line_end;
+    int j;
+    int found_root;
+    uint64_t fsize;
+    uint64_t ftype;
+    size_t new_cap;
+
+    hashed = inst_hash_password(password);
+    if (!hashed) return -1;
+
+    snprintf(shadow_path, sizeof(shadow_path), "%s/etc/shadow", mountpoint);
+    shadow_fd = vfs_open(shadow_path, 0);
+    if (shadow_fd < 0) return -1;
+
+    fsize = 0;
+    ftype = 0;
+    if (vfs_stat(shadow_fd, &fsize, &ftype) < 0)
+        fsize = 4096;
+    if (fsize > 1024 * 1024) fsize = 1024 * 1024;
+
+    shadow_buf = (char *)malloc((size_t)fsize + 1);
+    if (!shadow_buf) {
+        vfs_close_fd(shadow_fd);
+        return -1;
+    }
+
+    rlen = vfs_read_fd(shadow_fd, shadow_buf, (unsigned int)fsize);
+    vfs_close_fd(shadow_fd);
+    if (rlen < 0) {
+        free(shadow_buf);
+        return -1;
+    }
+    shadow_buf[rlen] = '\0';
+
+    new_cap = (size_t)rlen + strlen(hashed) + 128;
+    new_shadow = (char *)malloc(new_cap);
+    if (!new_shadow) {
+        free(shadow_buf);
+        return -1;
+    }
+
+    new_len = 0;
+    j = 0;
+    found_root = 0;
+    while (j < rlen) {
+        line_start = j;
+        while (j < rlen && shadow_buf[j] != '\n') j++;
+        line_end = j;
+        if (j < rlen) j++;
+        if (line_end - line_start >= 5 &&
+            memcmp(shadow_buf + line_start, "root:", 5) == 0) {
+            wlen = snprintf(new_shadow + new_len, new_cap - (size_t)new_len,
+                            "root:%s:0:0:99999:7:::\n", hashed);
+            found_root = 1;
+        } else {
+            wlen = snprintf(new_shadow + new_len, new_cap - (size_t)new_len,
+                            "%.*s\n", line_end - line_start, shadow_buf + line_start);
+        }
+        if (wlen < 0 || (size_t)(new_len + wlen) >= new_cap) {
+            free(shadow_buf);
+            free(new_shadow);
+            return -1;
+        }
+        new_len += wlen;
+    }
+
+    if (!found_root) {
+        wlen = snprintf(new_shadow + new_len, new_cap - (size_t)new_len,
+                        "root:%s:0:0:99999:7:::\n", hashed);
+        if (wlen < 0 || (size_t)(new_len + wlen) >= new_cap) {
+            free(shadow_buf);
+            free(new_shadow);
+            return -1;
+        }
+        new_len += wlen;
+    }
+
+    vfs_unlink(shadow_path);
+    vfs_create(shadow_path, 0600);
+    shadow_fd = vfs_open(shadow_path, 2);
+    if (shadow_fd < 0) {
+        free(shadow_buf);
+        free(new_shadow);
+        return -1;
+    }
+
+    wlen = vfs_write_fd(shadow_fd, new_shadow, new_len);
+    vfs_close_fd(shadow_fd);
+    free(shadow_buf);
+    free(new_shadow);
+    return (wlen == new_len) ? 0 : -1;
+}
+
 static int step_do_install(int disk_idx, int part_idx, int do_format,
                            int tz_idx)
 {
@@ -1468,11 +1697,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_update(&prog_st, "Counting files...", 10);
     lebui_progress_log(&prog_st, "Counting files to copy...");
     copy_total = inst_count_rootfs();
-    if (copy_total < 1) copy_total = 100;
+    if (copy_total < 1) copy_total = 1;
     copy_done = 0;
     copy_last_pct = -1;
     copy_overwrite_existing = 0;
+    inst_resize_copy_buf(COPY_BUF_MAX);
 
+    lebui_progress_update(&prog_st, "Copying files...", 10);
     lebui_progress_log(&prog_st, "Copying rootfs...");
     if (inst_copy_rootfs(mountpoint) < 0) {
         lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
@@ -1500,62 +1731,8 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     }
 
     if (root_password[0] != '\0') {
-        char shadow_path[MAX_PATH];
-        char line[256];
-        static char shadow_buf[4096];
-        static char new_shadow[4096];
-        const char *hashed;
-        int shadow_fd;
-        int rlen;
-        int wlen;
-        int new_len;
-        int line_start;
-        int line_end;
-        int j;
-
         lebui_progress_update(&prog_st, "Setting root password...", 98);
-        hashed = inst_hash_password(root_password);
-        if (hashed) {
-            snprintf(shadow_path, sizeof(shadow_path), "%s/etc/shadow", mountpoint);
-            shadow_fd = vfs_open(shadow_path, 0);
-            if (shadow_fd >= 0) {
-                rlen = vfs_read_fd(shadow_fd, shadow_buf, sizeof(shadow_buf) - 1);
-                vfs_close_fd(shadow_fd);
-                if (rlen > 0) {
-                    shadow_buf[rlen] = '\0';
-                    new_len = 0;
-                    j = 0;
-                    while (j < rlen) {
-                        line_start = j;
-                        while (j < rlen && shadow_buf[j] != '\n') j++;
-                        line_end = j;
-                        if (j < rlen) j++;
-                        if (line_end - line_start < (int)sizeof(line) - 1) {
-                            memcpy(line, shadow_buf + line_start, line_end - line_start);
-                            line[line_end - line_start] = '\0';
-                        } else {
-                            line[0] = '\0';
-                        }
-                        if (strncmp(line, "root:", 5) == 0) {
-                            wlen = snprintf(new_shadow + new_len,
-                                sizeof(new_shadow) - new_len,
-                                "root:%s:0:0:99999:7:::\n", hashed);
-                        } else {
-                            wlen = snprintf(new_shadow + new_len,
-                                sizeof(new_shadow) - new_len,
-                                "%s\n", line);
-                        }
-                        new_len += wlen;
-                        if (new_len >= (int)sizeof(new_shadow) - 2) break;
-                    }
-                    shadow_fd = vfs_open(shadow_path, 2);
-                    if (shadow_fd >= 0) {
-                        vfs_write_fd(shadow_fd, new_shadow, new_len);
-                        vfs_close_fd(shadow_fd);
-                    }
-                }
-            }
-        }
+        inst_set_root_password(mountpoint, root_password);
         memset(root_password, 0, sizeof(root_password));
         lebui_progress_log(&prog_st, "Root password updated.");
     }
@@ -1656,7 +1833,6 @@ static int upd_path_is_preserved(const char *dst_path, const char *mountpoint)
 static int inst_update_dir_recursive(const char *src, const char *dst, const char *mountpoint)
 {
     int fd;
-    int dst_fd;
     char name[256];
     unsigned int type;
     unsigned int idx;
@@ -1668,14 +1844,8 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
 
     vfs_mkdir(dst, 0755);
 
-    dst_fd = vfs_open(dst, 0);
     fd = vfs_open(src, 0);
-    if (fd < 0) {
-        if (dst_fd >= 0) {
-            vfs_close_fd(dst_fd);
-        }
-        return -1;
-    }
+    if (fd < 0) return -1;
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -1715,9 +1885,6 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
         }
     }
     vfs_close_fd(fd);
-    if (dst_fd >= 0) {
-        vfs_close_fd(dst_fd);
-    }
     return (errors > 0) ? -1 : 0;
 }
 
@@ -1808,16 +1975,19 @@ static int step_do_update(int disk_idx, int part_idx)
     if (upd_selected[UPD_TERMINFO]) {
         copy_total += inst_count_dir_entries("/usr/share/terminfo");
     }
-    if (copy_total < 1) copy_total = 100;
+    if (copy_total < 1) copy_total = 1;
     copy_done = 0;
     copy_last_pct = -1;
+    inst_resize_copy_buf(COPY_BUF_MAX);
 
+    lebui_progress_update(&prog_st, "Copying files...", 10);
     if (upd_selected[UPD_CORE]) {
         lebui_progress_log(&prog_st, "Updating core system files...");
         snprintf(src, sizeof(src), "/init");
         snprintf(dst, sizeof(dst), "%s/init", mountpoint);
         if (inst_copy_file_vfs(src, dst) == 0) {
             copy_done++;
+            inst_copy_progress(src);
         }
         for (i = 0; core_dirs[i]; i++) {
             snprintf(src, sizeof(src), "/%s", core_dirs[i]);

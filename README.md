@@ -1,6 +1,6 @@
 # Lebirun2
 
-This is a small project that i made since im really interested in doing OSDev. This is the successor to Lebirun C (Lebirun but made in C, rather than being made in a C# Library called Cosmos). This is just a different take on it. Note that this is still called Lebirun in the code, and should generally NOT be changed to Lebirun2.
+A hobby operating system that is the successor to Lebirun C (Lebirun but made in C, rather than being made in a C# Library called Cosmos). This is just a different take on it.
 
 ### How to Compile
 First of all, you need x86_64-elf-gcc (feel free to get it either pre-built from somewhere OR built by yourself, it doesn't matter that much i guess).

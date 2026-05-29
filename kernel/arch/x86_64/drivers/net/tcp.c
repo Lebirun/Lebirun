@@ -13,6 +13,7 @@ static uint32_t tcp_isn = 0;
 
 #define TCP_RETX_TIMEOUT_MS 500
 #define TCP_RETX_MAX_RETRIES 8
+#define TCP_RECV_BUF_INIT 2048
 
 static void tcp_retx_queue_add(tcp_socket_t *sock, uint8_t *data, uint64_t len, uint32_t seq) {
     tcp_retx_seg_t *seg;
@@ -189,7 +190,7 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->recv_window = TCP_WINDOW_SIZE;
     sock->send_window = TCP_WINDOW_SIZE;
 
-    sock->recv_buffer_size = 8192;
+    sock->recv_buffer_size = TCP_RECV_BUF_INIT;
     sock->recv_buffer = (uint8_t *)kmalloc(sock->recv_buffer_size);
     if (!sock->recv_buffer) {
         kfree(sock);

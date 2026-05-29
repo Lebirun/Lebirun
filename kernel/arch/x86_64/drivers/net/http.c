@@ -8,6 +8,8 @@
 #include <lebirun/task.h>
 #include <string.h>
 
+#define HTTP_RECV_BUF_INIT 4096
+
 __attribute__((weak)) tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host) {
     (void)tcp;
     (void)host;
@@ -262,7 +264,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
 
     kfree(request);
 
-    recv_buf = (uint8_t *)kmalloc(16384);
+    recv_buf = (uint8_t *)kmalloc(HTTP_RECV_BUF_INIT);
     if (!recv_buf) {
         if (tls) tls_close(tls);
         tcp_disconnect(sock, 1000);
@@ -271,7 +273,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     }
 
     total_recv = 0;
-    buf_cap = 16384;
+    buf_cap = HTTP_RECV_BUF_INIT;
     start = net_get_ticks();
     expected_total = 0;
 
@@ -747,7 +749,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
         }
     }
 
-    recv_buf = (uint8_t *)kmalloc(16384);
+    recv_buf = (uint8_t *)kmalloc(HTTP_RECV_BUF_INIT);
     if (!recv_buf) {
         tcp_disconnect(sock, 1000);
         tcp_socket_close(sock);
@@ -756,7 +758,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
 
     total_recv = 0;
     start = net_get_ticks();
-    buf_cap = 16384;
+    buf_cap = HTTP_RECV_BUF_INIT;
 
     for (;;) {
         if (task_has_pending_signals()) break;

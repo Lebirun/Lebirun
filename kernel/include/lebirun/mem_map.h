@@ -163,8 +163,8 @@ void heap_verify(void);
 void vmm_debug_page(uint64_t virt_addr);
 
 void slab_init(void);
-void *slab_alloc(size_t size);
-void slab_free(void *ptr);
+void *slab_alloc(size_t size, void *caller);
+void slab_free(void *ptr, void *caller);
 void slab_gc(void);
 void slab_reclaim_empty(void);
 int slab_owns(void *ptr);

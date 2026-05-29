@@ -77,6 +77,94 @@ static void ext4_mount_list_add(ext4_fs_t *fs) {
     mutex_unlock(&ext4_mounts_lock);
 }
 
+static int ext4_fs_is_mounted(ext4_fs_t *fs) {
+    ext4_fs_t *cur;
+    int found;
+
+    found = 0;
+    mutex_lock(&ext4_mounts_lock);
+    cur = ext4_mounts_head;
+    while (cur) {
+        if (cur == fs) {
+            found = 1;
+            break;
+        }
+        cur = cur->next_mount;
+    }
+    mutex_unlock(&ext4_mounts_lock);
+    return found;
+}
+
+static ext4_fs_t *ext4_find_node_mount(vfs_node_t *node) {
+    ext4_fs_t *cur;
+    ext4_fs_t *found;
+    vfs_node_t *n;
+
+    found = NULL;
+    mutex_lock(&ext4_mounts_lock);
+    cur = ext4_mounts_head;
+    while (cur) {
+        if (cur->root_node == node) {
+            found = cur;
+            break;
+        }
+        n = cur->vfs_nodes;
+        while (n) {
+            if (n == node) {
+                found = cur;
+                break;
+            }
+            n = (vfs_node_t *)(uintptr_t)n->impl;
+        }
+        if (found) {
+            break;
+        }
+        cur = cur->next_mount;
+    }
+    mutex_unlock(&ext4_mounts_lock);
+    return found;
+}
+
+static ext4_vfs_private_t *ext4_reset_private(vfs_node_t *node, ext4_fs_t *fs) {
+    ext4_vfs_private_t *priv;
+
+    if (!node || !fs) {
+        return NULL;
+    }
+
+    priv = (ext4_vfs_private_t *)node->private_data;
+    if (!priv) {
+        return NULL;
+    }
+
+    priv->fs = fs;
+    priv->ino = node == fs->root_node ? EXT4_ROOT_INO : (uint32_t)node->inode;
+    priv->parent_pinned = 0;
+    priv->child_refs = 0;
+    priv->readdir_offset = 0;
+    priv->readdir_index = 0;
+    return priv;
+}
+
+int ext4_prepare_root_node(vfs_node_t *node) {
+    ext4_fs_t *fs;
+    ext4_vfs_private_t *priv;
+
+    fs = ext4_find_node_mount(node);
+    priv = ext4_reset_private(node, fs);
+    if (!priv) {
+        return -1;
+    }
+
+    fs->root_node = node;
+    node->inode = EXT4_ROOT_INO;
+    node->flags &= ~VFS_DYNAMIC;
+    node->flags |= VFS_DIRECTORY | VFS_MOUNTPOINT;
+    node->name[0] = '\0';
+    node->ref_count = 1;
+    return 0;
+}
+
 static vfs_node_t *ext4_vfs_cache_lookup(ext4_fs_t *fs, uint32_t ino) {
     int i;
     for (i = 0; i < ext4_vfs_cache_count; i++) {
@@ -178,9 +266,12 @@ static void ext4_vfs_cache_insert(ext4_fs_t *fs, uint32_t ino, vfs_node_t *node)
     } else {
         for (i = 0; i < ext4_vfs_cache_count; i++) {
             old_node = ext4_vfs_cache[i].node;
+            old_fs = ext4_vfs_cache[i].fs;
             old_priv = (ext4_vfs_private_t *)old_node->private_data;
-            if (old_node->ref_count == 0 && (!old_priv || old_priv->child_refs == 0)) {
-                old_fs = ext4_vfs_cache[i].fs;
+            if (old_fs &&
+                old_node != old_fs->root_node &&
+                old_node->ref_count == 0 &&
+                (!old_priv || old_priv->child_refs == 0)) {
                 ext4_vfs_cache[i].fs = fs;
                 ext4_vfs_cache[i].ino = ino;
                 ext4_vfs_cache[i].node = node;
@@ -561,6 +652,7 @@ static dirent_t *ext4_vfs_readdir(vfs_node_t *node, uint64_t index) {
 
 static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name) {
     ext4_vfs_private_t *priv;
+    ext4_fs_t *fs;
     uint32_t ino;
     vfs_node_t *child;
 
@@ -573,15 +665,23 @@ static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name) {
     }
 
     priv = (ext4_vfs_private_t *)node->private_data;
+    fs = priv->fs;
+    if (!ext4_fs_is_mounted(fs)) {
+        fs = ext4_find_node_mount(node);
+        priv = ext4_reset_private(node, fs);
+        if (!priv) {
+            return NULL;
+        }
+    }
 
-    mutex_lock(&priv->fs->lock);
-    if (ext4_dir_lookup(priv->fs, priv->ino, name, &ino) != 0) {
-        mutex_unlock(&priv->fs->lock);
+    mutex_lock(&fs->lock);
+    if (ext4_dir_lookup(fs, priv->ino, name, &ino) != 0) {
+        mutex_unlock(&fs->lock);
         return NULL;
     }
-    mutex_unlock(&priv->fs->lock);
+    mutex_unlock(&fs->lock);
 
-    child = ext4_create_vfs_node(priv->fs, ino, name);
+    child = ext4_create_vfs_node(fs, ino, name);
     if (child) {
         ext4_set_parent(child, node);
     }
@@ -902,25 +1002,12 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     fs->partition_start_lba = part_start;
     mutex_init(&fs->lock);
 
-    fs->inode_cache_capacity = EXT4_INODE_CACHE_INIT;
+    fs->inode_cache_capacity = 0;
     fs->inode_cache_count = 0;
-    fs->inode_cache = (ext4_inode_cache_t *)kmalloc(
-        EXT4_INODE_CACHE_INIT * sizeof(ext4_inode_cache_t));
-    if (!fs->inode_cache) {
-        kfree(fs);
-        return NULL;
-    }
-    memset(fs->inode_cache, 0, EXT4_INODE_CACHE_INIT * sizeof(ext4_inode_cache_t));
+    fs->inode_cache = NULL;
 
-    fs->block_cache_count = EXT4_CACHE_BLOCKS;
-    fs->block_cache = (ext4_block_cache_entry_t *)kmalloc(
-        EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
-    if (!fs->block_cache) {
-        kfree(fs->inode_cache);
-        kfree(fs);
-        return NULL;
-    }
-    memset(fs->block_cache, 0, EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+    fs->block_cache_count = 0;
+    fs->block_cache = NULL;
 
     if (ext4_read_superblock(fs) != 0) {
         printf("EXT4: Failed to read superblock\n");
@@ -965,6 +1052,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
         return NULL;
     }
     root->flags &= ~VFS_DYNAMIC;
+    root->ref_count = 1;
 
     fs->root_node = root;
     ext4_mount_list_add(fs);
@@ -1081,25 +1169,12 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     fs->port_index = port_index;
     mutex_init(&fs->lock);
 
-    fs->inode_cache_capacity = EXT4_INODE_CACHE_INIT;
+    fs->inode_cache_capacity = 0;
     fs->inode_cache_count = 0;
-    fs->inode_cache = (ext4_inode_cache_t *)kmalloc(
-        EXT4_INODE_CACHE_INIT * sizeof(ext4_inode_cache_t));
-    if (!fs->inode_cache) {
-        kfree(fs);
-        return NULL;
-    }
-    memset(fs->inode_cache, 0, EXT4_INODE_CACHE_INIT * sizeof(ext4_inode_cache_t));
+    fs->inode_cache = NULL;
 
-    fs->block_cache_count = EXT4_CACHE_BLOCKS;
-    fs->block_cache = (ext4_block_cache_entry_t *)kmalloc(
-        EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
-    if (!fs->block_cache) {
-        kfree(fs->inode_cache);
-        kfree(fs);
-        return NULL;
-    }
-    memset(fs->block_cache, 0, EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
+    fs->block_cache_count = 0;
+    fs->block_cache = NULL;
 
     if (ext4_read_superblock(fs) != 0) {
         kfree(fs->block_cache);
@@ -1138,6 +1213,7 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
         return NULL;
     }
     root->flags &= ~VFS_DYNAMIC;
+    root->ref_count = 1;
 
     fs->root_node = root;
     ext4_mount_list_add(fs);

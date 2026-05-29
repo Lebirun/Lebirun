@@ -778,16 +778,18 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t errors;
     const char **p;
     int r;
-    static char destpath[INITRD_MAX_PATH];
-    static char tmp[INITRD_MAX_PATH];
-    static char namebuf[VFS_MAX_NAME];
-    static char newtmp[INITRD_MAX_PATH];
+    char *destpath;
+    char *tmp;
+    char *namebuf;
+    char *newtmp;
     int cur;
     int depth;
     int k;
     bool is_root_level_dir;
     bool is_standard_root;
-    static char sub[INITRD_MAX_PATH];
+    char *sub;
+    char *scratch;
+    uint64_t scratch_size;
     int dlen;
     int cp;
     int sublen;
@@ -880,6 +882,20 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     }
     memset(rfiles, 0, num_entries * sizeof(initrd_file_t));
 
+    scratch_size = (uint64_t)INITRD_MAX_PATH * 4 + VFS_MAX_NAME;
+    scratch = (char *)kmalloc(scratch_size);
+    if (!scratch) {
+        printf("ROOTFS: Failed to allocate path scratch\n");
+        kfree(rfiles);
+        return;
+    }
+    memset(scratch, 0, scratch_size);
+    destpath = scratch;
+    tmp = destpath + INITRD_MAX_PATH;
+    newtmp = tmp + INITRD_MAX_PATH;
+    sub = newtmp + INITRD_MAX_PATH;
+    namebuf = sub + INITRD_MAX_PATH;
+
     for (i = 0; i < num_entries; i++) {
         memcpy(rfiles[i].name, hdrs[i].name, 64);
         rfiles[i].length = hdrs[i].length;
@@ -949,20 +965,20 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             }
             namebuf[k] = '\0';
             if (tmp[0] == '\0') {
-                snprintf(newtmp, sizeof(newtmp), "/%s", namebuf);
+                snprintf(newtmp, INITRD_MAX_PATH, "/%s", namebuf);
             } else {
-                snprintf(newtmp, sizeof(newtmp), "/%s%s", namebuf, tmp);
+                snprintf(newtmp, INITRD_MAX_PATH, "/%s%s", namebuf, tmp);
             }
-            strncpy(tmp, newtmp, sizeof(tmp) - 1);
-            tmp[sizeof(tmp) - 1] = '\0';
+            strncpy(tmp, newtmp, INITRD_MAX_PATH - 1);
+            tmp[INITRD_MAX_PATH - 1] = '\0';
             if (rfiles[cur].parent_index == 0xFFFF || rfiles[cur].parent_index >= num_entries) {
                 break;
             }
             cur = (int)rfiles[cur].parent_index;
             depth++;
         }
-        strncpy(destpath, tmp, sizeof(destpath) - 1);
-        destpath[sizeof(destpath) - 1] = '\0';
+        strncpy(destpath, tmp, INITRD_MAX_PATH - 1);
+        destpath[INITRD_MAX_PATH - 1] = '\0';
         
         if (destpath[0] == '\0') continue;
 
@@ -1016,6 +1032,7 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         }
     }
     
+    kfree(scratch);
     kfree(rfiles);
     printf("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n", dirs_created, files_copied, errors);
 }

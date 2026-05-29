@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#define PTY_INIT_COUNT 8
+#define PTY_INIT_COUNT 1
 #define PTY_BUF_SIZE 4096
 
 typedef struct {

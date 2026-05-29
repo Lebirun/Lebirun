@@ -3,7 +3,7 @@
 extern task_t *current_task;
 extern void *syscall_table[];
 
-#define THREAD_INIT_COUNT 16
+#define THREAD_INIT_COUNT 1
 #define PTHREAD_STACK_SIZE 0x4000
 
 typedef struct {
@@ -42,8 +42,8 @@ typedef struct {
     int signaled;
 } pthread_cond_internal_t;
 
-#define MUTEX_INIT_COUNT 32
-#define COND_INIT_COUNT 16
+#define MUTEX_INIT_COUNT 1
+#define COND_INIT_COUNT 1
 
 static pthread_mutex_internal_t *mutexes = NULL;
 static int mutex_capacity = 0;
@@ -103,9 +103,6 @@ static int cond_grow(void) {
 static void init_pthread(void) {
     if (pthread_initialized) return;
     pthread_initialized = 1;
-    thread_grow();
-    mutex_grow();
-    cond_grow();
 }
 
 static int sys_pthread_create(int thread_ptr, const char *start_routine_ptr, int arg_ptr) {
@@ -464,7 +461,13 @@ static int sys_pthread_cond_broadcast(int cond_ptr, const char *unused1, int unu
 #define SYSCALL_PTHREAD_COND_BROADCAST 237
 
 void syscalls_pthread_init(void) {
-    init_pthread();
+    pthread_initialized = 0;
+    threads = NULL;
+    thread_capacity = 0;
+    mutexes = NULL;
+    mutex_capacity = 0;
+    conds = NULL;
+    cond_capacity = 0;
     syscall_table[SYSCALL_PTHREAD_CREATE] = sys_pthread_create;
     syscall_table[SYSCALL_PTHREAD_EXIT] = sys_pthread_exit;
     syscall_table[SYSCALL_PTHREAD_JOIN] = sys_pthread_join;

@@ -39,7 +39,7 @@ typedef struct {
     uint16_t flags;
 } irq_override_t;
 
-static irq_override_t irq_overrides[MAX_IRQ_OVERRIDES];
+static irq_override_t *irq_overrides;
 static int irq_override_count = 0;
 
 extern uint8_t ap_tramp_start[];
@@ -48,6 +48,18 @@ extern volatile uint64_t ap_boot_cr3;
 extern volatile uint64_t ap_boot_stack;
 extern volatile uint32_t ap_boot_flag;
 extern volatile uint64_t ap_boot_entry;
+
+static int irq_overrides_ensure(void) {
+    irq_override_t *overrides;
+
+    if (irq_overrides) return 1;
+    overrides = (irq_override_t *)kmalloc(MAX_IRQ_OVERRIDES * sizeof(irq_override_t));
+    if (!overrides) return 0;
+    memset(overrides, 0, MAX_IRQ_OVERRIDES * sizeof(irq_override_t));
+    irq_overrides = overrides;
+    irq_override_count = 0;
+    return 1;
+}
 
 static void lapic_write(uint32_t reg, uint32_t val) {
     lapic_base[reg / 4] = val;
@@ -167,7 +179,7 @@ static void parse_madt_phys(uint64_t madt_phys) {
             gsi_base32 = *(uint32_t *)(entry_buf + 8);
             ioapic_phys = (uint64_t)ioapic_addr32;
             ioapic_gsi_base = (uint64_t)gsi_base32;
-        } else if (type == 2 && entry_len >= 10 && irq_override_count < MAX_IRQ_OVERRIDES) {
+        } else if (type == 2 && entry_len >= 10 && irq_override_count < MAX_IRQ_OVERRIDES && irq_overrides_ensure()) {
             uint32_t gsi32;
             acpi_read_phys(madt_phys + offset, entry_buf, 10);
             irq_overrides[irq_override_count].source = entry_buf[3];
@@ -281,6 +293,7 @@ void ioapic_init(void) {
 static uint64_t irq_to_gsi(uint8_t irq) {
     int i;
 
+    if (!irq_overrides) return (uint64_t)irq;
     for (i = 0; i < irq_override_count; i++) {
         if (irq_overrides[i].source == irq) {
             return irq_overrides[i].gsi;

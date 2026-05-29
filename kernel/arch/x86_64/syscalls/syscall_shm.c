@@ -3,7 +3,7 @@
 extern task_t *current_task;
 extern void *syscall_table[];
 
-#define SHM_INIT_COUNT 32
+#define SHM_INIT_COUNT 1
 #define SHM_RDONLY 010000
 #define SHM_RND    020000
 
@@ -41,7 +41,6 @@ static int shm_grow(void) {
 static void init_shm(void) {
     if (shm_initialized) return;
     shm_initialized = 1;
-    shm_grow();
 }
 
 static int sys_shmget(int key, const char *size_ptr, int shmflg) {

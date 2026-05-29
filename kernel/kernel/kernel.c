@@ -515,6 +515,7 @@ void kernel_main(void) {
             if (ext4_root) {
                 mount_ret = vfs_replace_mount_root("/", ext4_root, root_dev, "ext4");
                 if (mount_ret == 0) {
+                    ext4_prepare_root_node(ext4_root);
                     vfs_remove_mount("/mnt");
                     printf("BOOT: ext4 root mounted from %s\n", root_dev);
                 } else {

@@ -34,7 +34,7 @@ static inline void vmm_pae_lock_release(void) {
     if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-#define PT_VMM_PT_INIT_SIZE 512
+#define PT_VMM_PT_INIT_SIZE 256
 
 static uint64_t *pt_heap_page_tables[16];
 static uint64_t pt_heap_pt_count = 0;

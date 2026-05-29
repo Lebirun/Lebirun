@@ -6,6 +6,7 @@
 #define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
 #define SLAB_REGION_SIZE  0x00400000ULL
 #define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
+#define SLAB_VIRT_FREELIST_SIZE 128
 
 #define SLAB_SIZES_COUNT 4
 #define SLAB_SIZE_16    0
@@ -17,18 +18,14 @@
 
 static const uint64_t slab_sizes[SLAB_SIZES_COUNT] = { 16, 32, 64, 128 };
 
-typedef struct slab_obj {
-    struct slab_obj *next;
-} slab_obj_t;
-
 typedef struct slab_page {
     uint64_t magic;
     uint64_t obj_size;
     uint64_t obj_count;
     uint64_t free_count;
-    slab_obj_t *free_list;
     struct slab_page *next;
     struct slab_page *prev;
+    uint64_t free_bitmap[4];
 } slab_page_t;
 
 typedef struct {
@@ -46,7 +43,7 @@ static int slab_initialized = 0;
 static volatile int slab_lock = 0;
 
 static uint64_t slab_virt_bump = SLAB_REGION_START;
-static uint64_t slab_virt_freelist[512];
+static uint64_t slab_virt_freelist[SLAB_VIRT_FREELIST_SIZE];
 static uint64_t slab_virt_free_count = 0;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
@@ -69,12 +66,66 @@ static int slab_size_index(size_t size) {
     return -1;
 }
 
+static int slab_bitmap_test(slab_page_t *page, uint64_t idx) {
+    uint64_t word;
+    uint64_t bit;
+
+    word = idx >> 6;
+    bit = idx & 63;
+    if (word >= 4) return 0;
+    return (page->free_bitmap[word] & (1ULL << bit)) != 0;
+}
+
+static void slab_bitmap_set(slab_page_t *page, uint64_t idx) {
+    uint64_t word;
+    uint64_t bit;
+
+    word = idx >> 6;
+    bit = idx & 63;
+    if (word >= 4) return;
+    page->free_bitmap[word] |= (1ULL << bit);
+}
+
+static void slab_bitmap_clear(slab_page_t *page, uint64_t idx) {
+    uint64_t word;
+    uint64_t bit;
+
+    word = idx >> 6;
+    bit = idx & 63;
+    if (word >= 4) return;
+    page->free_bitmap[word] &= ~(1ULL << bit);
+}
+
+static uint64_t slab_obj_index(slab_page_t *page, void *ptr) {
+    uint64_t addr;
+    uint64_t first;
+
+    addr = (uint64_t)ptr;
+    first = (uint64_t)page + sizeof(slab_page_t);
+    return (addr - first) / page->obj_size;
+}
+
+static void *slab_obj_at(slab_page_t *page, uint64_t idx) {
+    return (void *)((uint8_t *)page + sizeof(slab_page_t) + idx * page->obj_size);
+}
+
+static int slab_find_free_index(slab_page_t *page, uint64_t *out_idx) {
+    uint64_t i;
+
+    if (!page || !out_idx) return 0;
+    for (i = 0; i < page->obj_count; i++) {
+        if (slab_bitmap_test(page, i)) {
+            *out_idx = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
     uint64_t usable_size;
     uint64_t num_objs;
-    uint8_t *obj_start;
     uint64_t i;
-    slab_obj_t *obj;
     
     page->magic = SLAB_MAGIC;
     page->obj_size = obj_size;
@@ -84,22 +135,23 @@ static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
     page->free_count = num_objs;
     page->next = NULL;
     page->prev = NULL;
-    page->free_list = NULL;
+    for (i = 0; i < 4; i++) {
+        page->free_bitmap[i] = 0;
+    }
     
-    obj_start = (uint8_t *)page + sizeof(slab_page_t);
     for (i = 0; i < num_objs; i++) {
-        obj = (slab_obj_t *)(obj_start + i * obj_size);
-        obj->next = page->free_list;
-        page->free_list = obj;
+        slab_bitmap_set(page, i);
     }
 }
 
 static uint64_t slab_virt_alloc(void) {
+    uint64_t v;
+
     if (slab_virt_free_count > 0) {
         return slab_virt_freelist[--slab_virt_free_count];
     }
     if (slab_virt_bump < SLAB_REGION_START + SLAB_REGION_SIZE) {
-        uint64_t v = slab_virt_bump;
+        v = slab_virt_bump;
         slab_virt_bump += PAGE_SIZE;
         return v;
     }
@@ -116,6 +168,24 @@ static int slab_page_mapped(slab_page_t *page) {
     virt = (uint64_t)page;
     if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
     return slab_virt_to_phys(virt) != 0;
+}
+
+static int slab_obj_valid(slab_page_t *page, void *ptr) {
+    uint64_t addr;
+    uint64_t first;
+    uint64_t last;
+    uint64_t off;
+
+    if (!page || !ptr) return 0;
+    addr = (uint64_t)ptr;
+    first = (uint64_t)page + sizeof(slab_page_t);
+    last = (uint64_t)page + PAGE_SIZE;
+    if (addr < first || addr >= last) return 0;
+    off = addr - first;
+    if (page->obj_size == 0) return 0;
+    if ((off % page->obj_size) != 0) return 0;
+    if ((off / page->obj_size) >= page->obj_count) return 0;
+    return 1;
 }
 
 static void slab_virt_free(uint64_t virt) {
@@ -198,13 +268,14 @@ void slab_init(void) {
     printf("Slab allocator initialized (sizes: 16, 32, 64, 128)\n");
 }
 
-void *slab_alloc(size_t size) {
+void *slab_alloc(size_t size, void *caller) {
     int idx;
     slab_cache_t *cache;
     slab_page_t *page;
-    slab_obj_t *obj;
     uint64_t eflags;
     void *result;
+    uint64_t obj_idx;
+    int retried;
     
     if (!slab_initialized) return NULL;
     
@@ -214,6 +285,9 @@ void *slab_alloc(size_t size) {
     slab_lock_acquire(&eflags);
     
     cache = &slab_caches[idx];
+    retried = 0;
+
+retry:
     page = cache->partial;
     
     if (!page) {
@@ -234,8 +308,20 @@ void *slab_alloc(size_t size) {
         slab_add_to_list(&cache->partial, page);
     }
     
-    obj = page->free_list;
-    page->free_list = obj->next;
+    if (!slab_find_free_index(page, &obj_idx)) {
+        printf("slab_alloc: corrupt bitmap page=%p size=%u caller=%p\n",
+               page, cache->obj_size, caller);
+        page->free_count = 0;
+        slab_remove_from_list(&cache->partial, page);
+        slab_add_to_list(&cache->full, page);
+        if (!retried) {
+            retried = 1;
+            goto retry;
+        }
+        slab_lock_release(eflags);
+        return NULL;
+    }
+    slab_bitmap_clear(page, obj_idx);
     page->free_count--;
     cache->alloc_count++;
     
@@ -244,19 +330,19 @@ void *slab_alloc(size_t size) {
         slab_add_to_list(&cache->full, page);
     }
     
-    result = (void *)obj;
+    result = slab_obj_at(page, obj_idx);
     slab_lock_release(eflags);
     
     return result;
 }
 
-void slab_free(void *ptr) {
+void slab_free(void *ptr, void *caller) {
     slab_page_t *page;
     slab_cache_t *cache;
-    slab_obj_t *obj;
     int idx;
     int was_full;
     uint64_t eflags;
+    uint64_t obj_idx;
     
     if (!ptr || !slab_initialized) return;
     
@@ -276,9 +362,20 @@ void slab_free(void *ptr) {
     cache = &slab_caches[idx];
     was_full = (page->free_count == 0);
     
-    obj = (slab_obj_t *)ptr;
-    obj->next = page->free_list;
-    page->free_list = obj;
+    if (!slab_obj_valid(page, ptr)) {
+        printf("slab_free: invalid object ptr=%p page=%p size=%u caller=%p\n",
+               ptr, page, page->obj_size, caller);
+        slab_lock_release(eflags);
+        return;
+    }
+    obj_idx = slab_obj_index(page, ptr);
+    if (slab_bitmap_test(page, obj_idx)) {
+        printf("slab_free: double free ptr=%p page=%p size=%u caller=%p\n",
+               ptr, page, page->obj_size, caller);
+        slab_lock_release(eflags);
+        return;
+    }
+    slab_bitmap_set(page, obj_idx);
     page->free_count++;
     cache->free_count++;
     

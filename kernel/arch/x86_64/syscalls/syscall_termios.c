@@ -53,10 +53,6 @@ static int vfs_name_is_tty(const char name[VFS_MAX_NAME]) {
     return name[i] == '\0';
 }
 
-static struct kernel_termios tty_termios_fallback[1];
-static struct kernel_winsize tty_winsize_fallback[1];
-static int tty_pgrp_fallback[1];
-
 struct kernel_termios *tty_termios;
 struct kernel_winsize *tty_winsize;
 int *tty_pgrp;
@@ -592,10 +588,10 @@ void syscalls_termios_init(void) {
         if (tty_termios) kfree(tty_termios);
         if (tty_winsize) kfree(tty_winsize);
         if (tty_pgrp) kfree(tty_pgrp);
-        tty_termios = tty_termios_fallback;
-        tty_winsize = tty_winsize_fallback;
-        tty_pgrp = tty_pgrp_fallback;
-        count = 1;
+        tty_termios = NULL;
+        tty_winsize = NULL;
+        tty_pgrp = NULL;
+        count = 0;
     }
 
     tty_count = count;

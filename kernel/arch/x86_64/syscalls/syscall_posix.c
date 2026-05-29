@@ -113,20 +113,37 @@ static void posix_free_string_array(char **arr, int count) {
 
 static int posix_copy_user_string_array(char ***out, int *out_count, uint64_t array_addr, int max_count, uint64_t max_len) {
     char **arr;
+    char **new_arr;
     uint64_t str_addr;
     uint64_t slot_addr;
     int count;
+    int cap;
+    int new_cap;
     int ret;
 
     if (!out || !out_count) return -EFAULT;
     *out = NULL;
     *out_count = 0;
     if (!array_addr) return 0;
-    arr = (char **)kmalloc((max_count + 1) * sizeof(char *));
+    cap = 8;
+    if (cap > max_count + 1) cap = max_count + 1;
+    arr = (char **)kmalloc(cap * sizeof(char *));
     if (!arr) return -ENOMEM;
-    memset(arr, 0, (max_count + 1) * sizeof(char *));
+    memset(arr, 0, cap * sizeof(char *));
     count = 0;
     while (count < max_count) {
+        if (count + 1 >= cap) {
+            new_cap = cap * 2;
+            if (new_cap > max_count + 1) new_cap = max_count + 1;
+            new_arr = (char **)krealloc(arr, new_cap * sizeof(char *));
+            if (!new_arr) {
+                posix_free_string_array(arr, count);
+                return -ENOMEM;
+            }
+            memset(new_arr + cap, 0, (new_cap - cap) * sizeof(char *));
+            arr = new_arr;
+            cap = new_cap;
+        }
         slot_addr = array_addr + (uint64_t)count * sizeof(uint64_t);
         if (slot_addr < array_addr) {
             posix_free_string_array(arr, count);
@@ -616,42 +633,6 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
     if (new_offset < 0) return -EINVAL;
     tfd->offset = (uint64_t)new_offset;
     return (int)new_offset;
-}
-
-static unsigned long sig_mask = 0;
-static struct kernel_sigaction sig_handlers[32];
-
-static int sys_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
-    uint64_t act_addr;
-    uint64_t old_addr;
-    if (signum < 1 || signum >= 32) return -1;
-    act_addr = (uint64_t)(uintptr_t)act_ptr;
-    old_addr = (uint64_t)oldact_ptr;
-    if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        memcpy((void *)old_addr, &sig_handlers[signum], sizeof(struct kernel_sigaction));
-    }
-    if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000) {
-        memcpy(&sig_handlers[signum], (void *)act_addr, sizeof(struct kernel_sigaction));
-    }
-    return 0;
-}
-
-static int sys_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
-    uint64_t set_addr = (uint64_t)(uintptr_t)set_ptr;
-    uint64_t old_addr = (uint64_t)oldset_ptr;
-    if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        *(unsigned long *)old_addr = sig_mask;
-    }
-    if (set_addr && set_addr < KERNEL_VMA && set_addr >= 0x1000) {
-        unsigned long new_mask = *(unsigned long *)set_addr;
-        switch (how) {
-            case 0: sig_mask |= new_mask; break;
-            case 1: sig_mask &= ~new_mask; break;
-            case 2: sig_mask = new_mask; break;
-            default: return -1;
-        }
-    }
-    return 0;
 }
 
 extern volatile uint64_t tick_count;
@@ -1667,14 +1648,11 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
 }
 
 void syscalls_posix_init(void) {
-    memset(sig_handlers, 0, sizeof(sig_handlers));
     syscall_table[SYSCALL_DUP] = sys_dup;
     syscall_table[SYSCALL_DUP2] = sys_dup2;
     syscall_table[SYSCALL_DUP3] = sys_dup3;
     syscall_table[SYSCALL_PIPE] = sys_pipe;
     syscall_table[SYSCALL_PIPE2] = sys_pipe2;
-    syscall_table[SYSCALL_SIGACTION] = sys_sigaction;
-    syscall_table[SYSCALL_SIGPROCMASK] = sys_sigprocmask;
     syscall_table[SYSCALL_STAT] = sys_stat;
     syscall_table[SYSCALL_FSTAT] = sys_fstat;
     syscall_table[SYSCALL_GETCWD] = sys_getcwd;

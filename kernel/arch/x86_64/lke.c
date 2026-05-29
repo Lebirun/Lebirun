@@ -10,7 +10,7 @@
 #define R_X86_64_32S   11
 #define R_X86_64_PLT32  4
 
-#define KSYM_TABLE_INIT 64
+#define KSYM_TABLE_INIT 16
 
 static lke_module_t *modules;
 static int lke_capacity = 0;

@@ -162,7 +162,7 @@ struct input_absinfo {
 };
 
 #define EVDEV_BUF_EVENTS 256
-#define EVDEV_BUF_INIT_EVENTS 64
+#define EVDEV_BUF_INIT_EVENTS 8
 
 struct evdev_device {
     struct input_event *ring;

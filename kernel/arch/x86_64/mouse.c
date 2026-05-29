@@ -3,6 +3,7 @@
 #include <lebirun/idt.h>
 #include <lebirun/debug.h>
 #include <lebirun/task.h>
+#include <lebirun/mem_map.h>
 #include <string.h>
 
 #define PS2_DATA_PORT    0x60
@@ -13,7 +14,8 @@
 
 static uint8_t mouse_cycle = 0;
 static int8_t mouse_bytes[3];
-static uint8_t ring_buffer[MOUSE_BUF_SIZE];
+static uint8_t *ring_buffer;
+static uint32_t ring_capacity;
 static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
 static wait_queue_t mouse_waitq;
@@ -48,7 +50,9 @@ static uint8_t ps2_mouse_read(void) {
 
 static void ring_put(uint8_t byte) {
     uint32_t next;
-    next = (ring_head + 1) % MOUSE_BUF_SIZE;
+    if (!ring_buffer || ring_capacity == 0)
+        return;
+    next = (ring_head + 1) % ring_capacity;
     if (next == ring_tail)
         return;
     ring_buffer[ring_head] = byte;
@@ -110,9 +114,11 @@ int mouse_has_data(void) {
 int mouse_read(uint8_t *buf, uint32_t count) {
     uint32_t i;
     i = 0;
+    if (!ring_buffer || ring_capacity == 0)
+        return 0;
     while (i < count && ring_head != ring_tail) {
         buf[i] = ring_buffer[ring_tail];
-        ring_tail = (ring_tail + 1) % MOUSE_BUF_SIZE;
+        ring_tail = (ring_tail + 1) % ring_capacity;
         i++;
     }
     return (int)i;
@@ -128,8 +134,11 @@ void mouse_init(void) {
 
     ring_head = 0;
     ring_tail = 0;
+    ring_capacity = MOUSE_BUF_SIZE;
+    ring_buffer = (uint8_t *)kmalloc(ring_capacity);
+    if (ring_buffer)
+        memset(ring_buffer, 0, ring_capacity);
     mouse_cycle = 0;
-    memset(ring_buffer, 0, sizeof(ring_buffer));
     waitq_init(&mouse_waitq);
 
     ps2_wait_input();

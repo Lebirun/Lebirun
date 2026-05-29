@@ -358,10 +358,25 @@ static void console_grow_write_buffer(console_t *con) {
 
 void console_reclaim_unused(void) {
     uint64_t flags;
+    int i;
+    console_t *con;
 
     if (!console_initialized) return;
     flags = console_irqsave();
     spin_lock(&console_lock);
+    for (i = 0; i < console_count; i++) {
+        con = &consoles[i];
+        if (!con->allocated) continue;
+        if (con->write_buffer && con->write_flags && con->write_head == con->write_tail) {
+            kfree(con->write_buffer);
+            kfree(con->write_flags);
+            con->write_buffer = NULL;
+            con->write_flags = NULL;
+            con->write_buffer_size = 0;
+            con->write_head = 0;
+            con->write_tail = 0;
+        }
+    }
     if (!console_redraw_pending) {
         if (console_redraw_buffer) {
             kfree(console_redraw_buffer);
@@ -375,6 +390,45 @@ void console_reclaim_unused(void) {
     }
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+}
+
+void console_memory_stats(uint64_t *buffers, uint64_t *bytes) {
+    uint64_t b;
+    uint64_t sz;
+    uint64_t flags;
+    int i;
+    console_t *con;
+
+    b = 0;
+    sz = 0;
+    if (console_initialized) {
+        flags = console_irqsave();
+        spin_lock(&console_lock);
+        for (i = 0; i < console_count; i++) {
+            con = &consoles[i];
+            if (!con->allocated) continue;
+            if (con->write_buffer) {
+                b++;
+                sz += con->write_buffer_size;
+            }
+            if (con->write_flags) {
+                b++;
+                sz += con->write_buffer_size;
+            }
+        }
+        if (console_redraw_buffer) {
+            b++;
+            sz += console_redraw_buffer_rows * CONSOLE_BUFFER_COLS;
+        }
+        if (console_redraw_color_buffer) {
+            b++;
+            sz += console_redraw_buffer_rows * CONSOLE_BUFFER_COLS;
+        }
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+    }
+    if (buffers) *buffers = b;
+    if (bytes) *bytes = sz;
 }
 
 static void console_drop_redraw_buffers(void) {

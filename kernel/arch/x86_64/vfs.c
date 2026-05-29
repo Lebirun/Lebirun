@@ -26,7 +26,7 @@ static int fd_table_capacity = 0;
 static mutex_t vfs_lock;
 static int squashfs_access_blocked = 0;
 
-#define VFS_INITIAL_FDS 8
+#define VFS_INITIAL_FDS 4
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -43,7 +43,7 @@ static int vfs_grow_mounts(void) {
     int i;
     vfs_mount_t *new_mounts;
 
-    new_cap = mounts_capacity * 2;
+    new_cap = mounts_capacity + 1;
     if (new_cap > VFS_MAX_MOUNTS) new_cap = VFS_MAX_MOUNTS;
     if (new_cap <= mounts_capacity) return -1;
     new_mounts = (vfs_mount_t *)krealloc(mounts, new_cap * sizeof(vfs_mount_t));
@@ -65,7 +65,7 @@ static int vfs_grow_fds(void) {
     int i;
     vfs_fd_t *new_table;
 
-    new_cap = fd_table_capacity * 2;
+    new_cap = fd_table_capacity ? fd_table_capacity * 2 : VFS_INITIAL_FDS;
     if (new_cap > VFS_MAX_FDS) new_cap = VFS_MAX_FDS;
     if (new_cap <= fd_table_capacity) return -1;
     new_table = (vfs_fd_t *)krealloc(fd_table, new_cap * sizeof(vfs_fd_t));
@@ -83,9 +83,24 @@ static int vfs_grow_fds(void) {
 
 static void vfs_reclaim_fds(void) {
     int i;
+    int active;
     vfs_fd_t *new_table;
 
     mutex_lock(&vfs_lock);
+    active = 0;
+    for (i = 0; i < fd_table_capacity; i++) {
+        if (fd_table[i].in_use) {
+            active = 1;
+            break;
+        }
+    }
+    if (!active) {
+        if (fd_table) kfree(fd_table);
+        fd_table = NULL;
+        fd_table_capacity = 0;
+        mutex_unlock(&vfs_lock);
+        return;
+    }
     if (fd_table_capacity <= VFS_INITIAL_FDS) {
         mutex_unlock(&vfs_lock);
         return;
@@ -107,28 +122,13 @@ static void vfs_reclaim_fds(void) {
 }
 
 void vfs_init(void) {
-    int i;
-    
     mutex_init(&vfs_lock);
 
-    mounts_capacity = VFS_INITIAL_MOUNTS;
-    mounts = (vfs_mount_t *)kmalloc(mounts_capacity * sizeof(vfs_mount_t));
-    for (i = 0; i < mounts_capacity; i++) {
-        mounts[i].in_use = 0;
-        mounts[i].path[0] = '\0';
-        mounts[i].device[0] = '\0';
-        mounts[i].root = NULL;
-        mounts[i].fs_type = NULL;
-    }
+    mounts_capacity = 0;
+    mounts = NULL;
     
-    fd_table_capacity = VFS_INITIAL_FDS;
-    fd_table = (vfs_fd_t *)kmalloc(fd_table_capacity * sizeof(vfs_fd_t));
-    for (i = 0; i < fd_table_capacity; i++) {
-        fd_table[i].in_use = 0;
-        fd_table[i].node = NULL;
-        fd_table[i].offset = 0;
-        fd_table[i].flags = 0;
-    }
+    fd_table_capacity = 0;
+    fd_table = NULL;
     
     memset(&root_node, 0, sizeof(vfs_node_t));
     strcpy(root_node.name, "/");
@@ -1330,6 +1330,8 @@ int vfs_open_path(const char *path, int flags) {
 }
 
 int vfs_close_fd(int fd) {
+    vfs_node_t *node;
+
     if (fd < 0 || fd >= fd_table_capacity) return -1;
     
     mutex_lock(&vfs_lock);
@@ -1338,7 +1340,7 @@ int vfs_close_fd(int fd) {
         return -1;
     }
     
-    vfs_node_t *node = fd_table[fd].node;
+    node = fd_table[fd].node;
     
     fd_table[fd].in_use = 0;
     fd_table[fd].node = NULL;
@@ -1347,6 +1349,7 @@ int vfs_close_fd(int fd) {
     mutex_unlock(&vfs_lock);
     
     if (node) vfs_close(node);
+    vfs_reclaim_fds();
     
     return 0;
 }

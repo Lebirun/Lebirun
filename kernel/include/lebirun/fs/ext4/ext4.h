@@ -9,9 +9,9 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       4
+#define EXT4_CACHE_BLOCKS       2
 #define EXT4_CACHE_BLOCKS_MAX   4
-#define EXT4_INODE_CACHE_INIT   16
+#define EXT4_INODE_CACHE_INIT   4
 #define EXT4_INODE_CACHE_MAX    256
 
 struct ext4_fs;
@@ -106,6 +106,7 @@ int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t size);
 void ext4_init(void);
 void ext4_vfs_register(void);
 void ext4_drop_vfs_node(ext4_fs_t *fs, vfs_node_t *node);
+int ext4_prepare_root_node(vfs_node_t *node);
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);

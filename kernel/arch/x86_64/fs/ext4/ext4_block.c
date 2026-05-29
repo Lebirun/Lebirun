@@ -56,7 +56,11 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     if (oldest < 0) {
         if (fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
             old_count = fs->block_cache_count;
-            new_count = old_count * 2;
+            if (old_count == 0) {
+                new_count = 1;
+            } else {
+                new_count = old_count * 2;
+            }
             if (new_count <= old_count) {
                 return -1;
             }
@@ -395,7 +399,6 @@ int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
 
 void ext4_flush_cache(ext4_fs_t *fs) {
     int i;
-    ext4_block_cache_entry_t *new_cache;
 
     ext4_sync_blocks(fs);
     
@@ -409,13 +412,10 @@ void ext4_flush_cache(ext4_fs_t *fs) {
         }
     }
 
-    if (fs->block_cache_count > EXT4_CACHE_BLOCKS) {
-        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
-            EXT4_CACHE_BLOCKS * sizeof(ext4_block_cache_entry_t));
-        if (new_cache) {
-            fs->block_cache = new_cache;
-            fs->block_cache_count = EXT4_CACHE_BLOCKS;
-        }
+    if (fs->block_cache) {
+        kfree(fs->block_cache);
+        fs->block_cache = NULL;
+        fs->block_cache_count = 0;
     }
 }
 

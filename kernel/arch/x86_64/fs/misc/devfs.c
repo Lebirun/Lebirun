@@ -13,11 +13,12 @@
 #include <lebirun/framebuffer.h>
 #include <lebirun/task.h>
 #include <lebirun/evdev.h>
+#include <lebirun/rng.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#define DEVFS_INITIAL_BLOCKDEVS 4
+#define DEVFS_INITIAL_BLOCKDEVS 1
 #define DEVFS_MAX_BLOCKDEVS 32
 
 typedef struct {
@@ -56,7 +57,6 @@ static vfs_node_t dev_port;
 static vfs_node_t dev_mice;
 static vfs_node_t dev_fb0;
 static vfs_node_t *dev_ttys;
-static vfs_node_t dev_ttys_fallback[1];
 static int dev_tty_count;
 
 static int devfs_grow_blockdevs(void) {
@@ -80,32 +80,17 @@ static int devfs_grow_blockdevs(void) {
 
 #define DEVFS_DIRENT_POOL_SIZE 4
 
-static dirent_t devfs_dirent_pool[DEVFS_DIRENT_POOL_SIZE];
+static dirent_t *devfs_dirent_pool;
 static volatile uint64_t devfs_dirent_index;
 
 static dirent_t *devfs_alloc_dirent(void) {
     uint64_t idx;
 
+    if (!devfs_dirent_pool)
+        return NULL;
     idx = devfs_dirent_index;
     devfs_dirent_index = (idx + 1) % DEVFS_DIRENT_POOL_SIZE;
     return &devfs_dirent_pool[idx];
-}
-
-static uint64_t lfsr_state = 0xACE1u;
-static uint64_t entropy_pool[16];
-static int entropy_index = 0;
-
-static void add_entropy(uint64_t val) {
-    entropy_pool[entropy_index] ^= val;
-    entropy_index = (entropy_index + 1) & 15;
-    lfsr_state ^= entropy_pool[entropy_index];
-}
-
-static uint64_t lfsr_rand(void) {
-    uint64_t bit = ((lfsr_state >> 0) ^ (lfsr_state >> 2) ^ (lfsr_state >> 3) ^ (lfsr_state >> 5)) & 1;
-    lfsr_state = (lfsr_state >> 1) | (bit << 31);
-    lfsr_state ^= entropy_pool[(entropy_index + (lfsr_state & 15)) & 15];
-    return lfsr_state;
 }
 
 static uint64_t dev_null_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -141,31 +126,14 @@ static uint64_t dev_full_write(vfs_node_t *node, uint64_t offset, uint64_t size,
 }
 
 static uint64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    extern volatile uint64_t tick_count;
-    uint64_t i;
-    
     (void)node; (void)offset;
-    
-    add_entropy(tick_count);
-    add_entropy((uint64_t)buffer);
-    add_entropy(size);
-    
-    for (i = 0; i < size; i++) {
-        buffer[i] = (uint8_t)(lfsr_rand() & 0xFF);
-        if ((i & 15) == 0) {
-            add_entropy(tick_count + i);
-        }
-    }
+    rng_fill(buffer, size);
     return size;
 }
 
 static uint64_t dev_urandom_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    uint64_t i;
-    
     (void)node; (void)offset;
-    for (i = 0; i < size; i++) {
-        add_entropy(buffer[i] | (i << 8));
-    }
+    rng_add_entropy(buffer, size);
     return size;
 }
 
@@ -561,6 +529,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     
     if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
         d = devfs_alloc_dirent();
+        if (!d) return NULL;
         strcpy(d->name, base_entries[index]);
         d->inode = index + 1;
         d->type = VFS_CHARDEVICE;
@@ -570,8 +539,9 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     }
     
     index -= sizeof(base_entries)/sizeof(base_entries[0]);
-    if (index < (uint64_t)cmdline_get_consoles()) {
+    if (index < (uint64_t)dev_tty_count) {
         d = devfs_alloc_dirent();
+        if (!d) return NULL;
         d->name[0] = 't';
         d->name[1] = 't';
         d->name[2] = 'y';
@@ -588,7 +558,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         return d;
     }
     
-    index -= (uint64_t)cmdline_get_consoles();
+    index -= (uint64_t)dev_tty_count;
     if (index < (uint64_t)devfs_blockdev_count) {
         int count;
         int i;
@@ -597,6 +567,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
             if (devfs_blockdevs[i].in_use) {
                 if (count == (int)index) {
                     d = devfs_alloc_dirent();
+                    if (!d) return NULL;
                     strcpy(d->name, devfs_blockdevs[i].node.name);
                     d->inode = 100 + i;
                     d->type = VFS_BLOCKDEVICE;
@@ -610,6 +581,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     index -= (uint64_t)devfs_blockdev_count;
     if (dev_initrd_registered && index == 0) {
         d = devfs_alloc_dirent();
+        if (!d) return NULL;
         strcpy(d->name, "initrd");
         d->inode = 200;
         d->type = VFS_DIRECTORY;
@@ -705,9 +677,11 @@ void devfs_init(void) {
     vfs_fs_type_t *fs_type;
 
     devfs_dirent_index = 0;
-    devfs_blockdev_capacity = DEVFS_INITIAL_BLOCKDEVS;
-    devfs_blockdevs = (devfs_blockdev_t *)kmalloc(devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
-    memset(devfs_blockdevs, 0, devfs_blockdev_capacity * sizeof(devfs_blockdev_t));
+    devfs_dirent_pool = (dirent_t *)kmalloc(DEVFS_DIRENT_POOL_SIZE * sizeof(dirent_t));
+    if (devfs_dirent_pool)
+        memset(devfs_dirent_pool, 0, DEVFS_DIRENT_POOL_SIZE * sizeof(dirent_t));
+    devfs_blockdev_capacity = 0;
+    devfs_blockdevs = NULL;
 
     memset(&devfs_root, 0, sizeof(vfs_node_t));
     strcpy(devfs_root.name, "dev");
@@ -974,17 +948,12 @@ void devfs_init(void) {
     evdev_get_event_node(0)->parent = evdev_get_input_dir();
     evdev_get_event_node(1)->parent = evdev_get_input_dir();
 
-    for (i = 0; i < 16; i++) {
-        entropy_pool[i] = 0x5A5A5A5A ^ ((uint64_t)i * 0x13579BDF);
-    }
-
     tty_count_local = cmdline_get_consoles();
     if (tty_count_local <= 0) tty_count_local = 1;
     if (tty_count_local > NUM_CONSOLES) tty_count_local = NUM_CONSOLES;
     dev_ttys = (vfs_node_t *)kmalloc(tty_count_local * sizeof(vfs_node_t));
     if (!dev_ttys) {
-        dev_ttys = dev_ttys_fallback;
-        tty_count_local = 1;
+        tty_count_local = 0;
     }
     dev_tty_count = tty_count_local;
 

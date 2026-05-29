@@ -15,16 +15,50 @@ extern void *syscall_table[];
 
 static dl_handle_t *dl_handles;
 static int dl_capacity = 0;
-static char dl_error_msg[128] = "";
+static char *dl_error_msg;
 static int dl_initialized = 0;
 static uint64_t dl_next_base = DL_BASE_ADDR;
+
+#define DL_ERROR_SIZE 128
+
+static int dl_ensure_error(void) {
+    char *msg;
+
+    if (dl_error_msg) return 1;
+    msg = (char *)kmalloc(DL_ERROR_SIZE);
+    if (!msg) return 0;
+    msg[0] = '\0';
+    dl_error_msg = msg;
+    return 1;
+}
+
+static void dl_set_error(const char *msg) {
+    uint64_t i;
+
+    if (!dl_ensure_error()) return;
+    i = 0;
+    while (msg[i] && i < DL_ERROR_SIZE - 1) {
+        dl_error_msg[i] = msg[i];
+        i++;
+    }
+    dl_error_msg[i] = '\0';
+}
+
+static void dl_set_error_invalid_so(int code) {
+    if (!dl_ensure_error()) return;
+    snprintf(dl_error_msg, DL_ERROR_SIZE, "dlopen: invalid shared object (code=%d)", code);
+}
+
+static void dl_clear_error(void) {
+    if (dl_error_msg) dl_error_msg[0] = '\0';
+}
 
 static void init_dl(void) {
     if (dl_initialized) return;
     dl_initialized = 1;
     dl_handles = NULL;
     dl_capacity = 0;
-    dl_error_msg[0] = '\0';
+    dl_error_msg = NULL;
     dl_next_base = DL_BASE_ADDR;
 }
 
@@ -242,13 +276,13 @@ static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
     (void)flags;
     
     if (!filename_ptr) {
-        strcpy(dl_error_msg, "dlopen: NULL filename not supported");
+        dl_set_error("dlopen: NULL filename not supported");
         return 0;
     }
     
     uint64_t name_addr = (uint64_t)filename_ptr;
     if (name_addr >= KERNEL_VMA || name_addr < 0x1000) {
-        strcpy(dl_error_msg, "dlopen: invalid filename pointer");
+        dl_set_error("dlopen: invalid filename pointer");
         return 0;
     }
     
@@ -266,7 +300,7 @@ static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
         int new_cap = dl_capacity == 0 ? 4 : dl_capacity * 2;
         dl_handle_t *new_arr = (dl_handle_t *)kmalloc(new_cap * sizeof(dl_handle_t));
         if (!new_arr) {
-            strcpy(dl_error_msg, "dlopen: out of memory");
+            dl_set_error("dlopen: out of memory");
             return 0;
         }
         memset(new_arr, 0, new_cap * sizeof(dl_handle_t));
@@ -334,14 +368,14 @@ static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
         ret = read_file_data(full_path, &file_data, &file_size);
     }
     if (ret != 0) {
-        strcpy(dl_error_msg, "dlopen: failed to read file");
+        dl_set_error("dlopen: failed to read file");
         return 0;
     }
     
     int valid = elf_validate_so(file_data, file_size);
     if (valid != 0) {
         kfree(file_data);
-        snprintf(dl_error_msg, sizeof(dl_error_msg), "dlopen: invalid shared object (code=%d)", valid);
+        dl_set_error_invalid_so(valid);
         return 0;
     }
     
@@ -354,7 +388,7 @@ static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
     kfree(file_data);
     
     if (ret != 0) {
-        strcpy(dl_error_msg, "dlopen: failed to load shared object");
+        dl_set_error("dlopen: failed to load shared object");
         return 0;
     }
 
@@ -374,7 +408,7 @@ static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
 
     dl_call_init(&dl_handles[slot]);
     
-    dl_error_msg[0] = '\0';
+    dl_clear_error();
     
     return (int)(slot + 1);
 }
@@ -384,24 +418,24 @@ static int sys_dlsym(int handle, const char *symbol_ptr, int unused) {
     init_dl();
     
     if (handle <= 0 || handle > dl_capacity) {
-        strcpy(dl_error_msg, "dlsym: invalid handle");
+        dl_set_error("dlsym: invalid handle");
         return 0;
     }
     
     int slot = handle - 1;
     if (!dl_handles[slot].in_use) {
-        strcpy(dl_error_msg, "dlsym: handle not open");
+        dl_set_error("dlsym: handle not open");
         return 0;
     }
     
     if (!symbol_ptr) {
-        strcpy(dl_error_msg, "dlsym: NULL symbol");
+        dl_set_error("dlsym: NULL symbol");
         return 0;
     }
     
     uint64_t sym_addr = (uint64_t)(uintptr_t)symbol_ptr;
     if (sym_addr >= KERNEL_VMA || sym_addr < 0x1000) {
-        strcpy(dl_error_msg, "dlsym: invalid symbol pointer");
+        dl_set_error("dlsym: invalid symbol pointer");
         return 0;
     }
     
@@ -409,11 +443,11 @@ static int sys_dlsym(int handle, const char *symbol_ptr, int unused) {
     
     uint64_t addr = elf_so_find_symbol(&dl_handles[slot], symbol);
     if (addr == 0) {
-        strcpy(dl_error_msg, "dlsym: symbol not found");
+        dl_set_error("dlsym: symbol not found");
         return 0;
     }
     
-    dl_error_msg[0] = '\0';
+    dl_clear_error();
     return (int)addr;
 }
 
@@ -422,13 +456,13 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
     init_dl();
     
     if (handle <= 0 || handle > dl_capacity) {
-        strcpy(dl_error_msg, "dlclose: invalid handle");
+        dl_set_error("dlclose: invalid handle");
         return -1;
     }
     
     int slot = handle - 1;
     if (!dl_handles[slot].in_use) {
-        strcpy(dl_error_msg, "dlclose: handle not open");
+        dl_set_error("dlclose: handle not open");
         return -1;
     }
 
@@ -481,7 +515,7 @@ static int sys_dlerror(int buf_ptr, const char *size_ptr, int unused) {
         return 0;
     }
     
-    if (dl_error_msg[0] == '\0') {
+    if (!dl_error_msg || dl_error_msg[0] == '\0') {
         return 0;
     }
     
@@ -493,7 +527,7 @@ static int sys_dlerror(int buf_ptr, const char *size_ptr, int unused) {
     }
     buf[len] = '\0';
     
-    dl_error_msg[0] = '\0';
+    dl_clear_error();
     
     return len;
 }

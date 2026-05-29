@@ -37,33 +37,63 @@ FILE *const stdin  = (FILE *)&_stdin_file;
 FILE *const stdout = (FILE *)&_stdout_file;
 FILE *const stderr = (FILE *)&_stderr_file;
 
-static struct _IO_FILE *open_files[MAX_OPEN_FILES];
+static struct _IO_FILE **open_files;
+static int open_files_count;
+static int open_files_capacity;
+
+static int reserve_open_file_slot(void) {
+    struct _IO_FILE **new_files;
+    int new_capacity;
+    int i;
+
+    if (open_files_count < open_files_capacity) return 0;
+    if (open_files_capacity >= MAX_OPEN_FILES) return -1;
+
+    new_capacity = open_files_capacity ? open_files_capacity * 2 : 4;
+    if (new_capacity > MAX_OPEN_FILES) new_capacity = MAX_OPEN_FILES;
+
+    new_files = (struct _IO_FILE **)realloc(open_files, (size_t)new_capacity * sizeof(struct _IO_FILE *));
+    if (!new_files) return -1;
+
+    open_files = new_files;
+    for (i = open_files_capacity; i < new_capacity; i++)
+        open_files[i] = NULL;
+    open_files_capacity = new_capacity;
+    return 0;
+}
 
 static struct _IO_FILE *alloc_file(void) {
     struct _IO_FILE *f;
-    int i;
 
     f = (struct _IO_FILE *)malloc(sizeof(struct _IO_FILE));
     if (!f) return NULL;
+    if (reserve_open_file_slot() < 0) {
+        free(f);
+        return NULL;
+    }
     memset(f, 0, sizeof(*f));
     f->fd = -1;
-    for (i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!open_files[i]) {
-            open_files[i] = f;
-            return f;
-        }
-    }
-    free(f);
-    return NULL;
+    open_files[open_files_count++] = f;
+    return f;
 }
 
 static void free_file(struct _IO_FILE *f) {
     int i;
+    int j;
 
     if (!f) return;
-    for (i = 0; i < MAX_OPEN_FILES; i++) {
+    for (i = 0; i < open_files_count; i++) {
         if (open_files[i] == f) {
-            open_files[i] = NULL;
+            for (j = i; j < open_files_count - 1; j++)
+                open_files[j] = open_files[j + 1];
+            open_files_count--;
+            if (open_files_count == 0) {
+                free(open_files);
+                open_files = NULL;
+                open_files_capacity = 0;
+            } else {
+                open_files[open_files_count] = NULL;
+            }
             break;
         }
     }
@@ -757,11 +787,16 @@ static const char *const sys_errlist[] = {
 #define SYS_NERR (sizeof(sys_errlist) / sizeof(sys_errlist[0]))
 
 char *strerror(int errnum) {
-    static char buf[64];
+    static char *buf;
+
     if (errnum >= 0 && (size_t)errnum < SYS_NERR && sys_errlist[errnum]) {
         return (char *)sys_errlist[errnum];
     }
-    snprintf(buf, sizeof(buf), "Unknown error %d", errnum);
+    if (!buf) {
+        buf = (char *)malloc(64);
+        if (!buf) return (char *)"Unknown error";
+    }
+    snprintf(buf, 64, "Unknown error %d", errnum);
     return buf;
 }
 
@@ -829,11 +864,16 @@ static const char *const sys_siglist[] = {
 #define SYS_NSIG (sizeof(sys_siglist) / sizeof(sys_siglist[0]))
 
 char *strsignal(int signum) {
-    static char buf[64];
+    static char *buf;
+
     if (signum >= 0 && (size_t)signum < SYS_NSIG && sys_siglist[signum]) {
         return (char *)sys_siglist[signum];
     }
-    snprintf(buf, sizeof(buf), "Unknown signal %d", signum);
+    if (!buf) {
+        buf = (char *)malloc(64);
+        if (!buf) return (char *)"Unknown signal";
+    }
+    snprintf(buf, 64, "Unknown signal %d", signum);
     return buf;
 }
 

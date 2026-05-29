@@ -60,17 +60,31 @@ static int user_range_free_mem(uint64_t addr, uint64_t size, uint64_t allow_base
 }
 
 static void compact_user_pages(void) {
+    uint64_t *new_pages;
+    uint64_t old_count;
     uint64_t i;
     uint64_t dst;
 
     if (!current_task || !current_task->user_pages) return;
+    old_count = current_task->user_pages_count;
     dst = 0;
-    for (i = 0; i < current_task->user_pages_count; i++) {
+    for (i = 0; i < old_count; i++) {
         if (current_task->user_pages[i] != 0) {
             current_task->user_pages[dst++] = current_task->user_pages[i];
         }
     }
     current_task->user_pages_count = dst;
+    if (dst == old_count) return;
+    if (dst == 0) {
+        kfree(current_task->user_pages);
+        current_task->user_pages = NULL;
+        return;
+    }
+    new_pages = (uint64_t *)kmalloc(dst * sizeof(uint64_t));
+    if (!new_pages) return;
+    memcpy(new_pages, current_task->user_pages, dst * sizeof(uint64_t));
+    kfree(current_task->user_pages);
+    current_task->user_pages = new_pages;
 }
 
 static int remove_user_page_phys(uint64_t phys) {
