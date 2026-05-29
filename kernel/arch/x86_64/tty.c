@@ -23,7 +23,7 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
-#define EARLY_BOOT_BUFFER_SIZE 8192
+#define EARLY_BOOT_BUFFER_SIZE 2048
 static char early_boot_buffer[EARLY_BOOT_BUFFER_SIZE];
 static size_t early_boot_index = 0;
 static bool early_boot_capture = true;

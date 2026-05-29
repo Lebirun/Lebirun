@@ -174,6 +174,13 @@ int keyboard_getchar_nb_for(int console_id) {
     return c;
 }
 
+void keyboard_flush_for(int console_id) {
+    if (console_id < 0 || console_id >= kbd_num_consoles) return;
+    kbd_consoles[console_id].head = 0;
+    kbd_consoles[console_id].tail = 0;
+    kbd_consoles[console_id].sigint_pending = 0;
+}
+
 wait_queue_t* keyboard_get_waitq(void) {
     int cur = console_is_initialized() ? console_get_current() : 0;
     if (cur < 0 || cur >= kbd_num_consoles) return NULL;

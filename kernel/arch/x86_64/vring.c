@@ -26,7 +26,7 @@ static volatile uint64_t print_queue_head = 0;
 static volatile uint64_t print_queue_tail = 0;
 static volatile uint64_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 16
+#define KLOG_MAX_ITEMS 8
 #define KLOG_MAX_LEN   128
 
 typedef struct {
@@ -46,7 +46,7 @@ static char *klog_persist_buf;
 static volatile int klog_persist_pos = 0;
 static int klog_persist_cap = 0;
 
-#define KLOG_EARLY_SZ 4096
+#define KLOG_EARLY_SZ 512
 static char klog_early_buf[KLOG_EARLY_SZ];
 static volatile int klog_early_pos = 0;
 static volatile int klog_early_done = 0;
@@ -433,9 +433,9 @@ void vring_init(void) {
     klog_ring = kmalloc(KLOG_MAX_ITEMS * sizeof(klog_item_t));
     kprint_ring = kmalloc(KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
     serial_ring = kmalloc(SERIAL_RING_SIZE);
-    klog_persist_buf = kmalloc(4096);
+    klog_persist_buf = kmalloc(2048);
     if (klog_persist_buf) {
-        klog_persist_cap = 4096;
+        klog_persist_cap = 2048;
         klog_persist_buf[0] = '\0';
         if (klog_early_pos > 0) {
             int copy_len;

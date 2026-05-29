@@ -13,6 +13,52 @@ static uint64_t align_up_u64(uint64_t v, uint64_t align) {
     return (v + align - 1u) & ~(align - 1u);
 }
 
+static int user_range_mapped_mem(uint64_t addr, uint64_t size) {
+    uint64_t end;
+    uint64_t p;
+    uint64_t pend;
+
+    if (!current_task) return 0;
+    if (size == 0) return 1;
+    end = addr + size - 1;
+    if (end < addr) return 0;
+    if (addr < 0x1000 || end >= KERNEL_VMA) return 0;
+    p = addr & ~0xFFFu;
+    pend = end & ~0xFFFu;
+    for (;;) {
+        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
+        if (p == pend) break;
+        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
+        p += 0x1000u;
+    }
+    return 1;
+}
+
+static int user_range_free_mem(uint64_t addr, uint64_t size, uint64_t allow_base, uint64_t allow_size) {
+    uint64_t end;
+    uint64_t p;
+    uint64_t pend;
+    uint64_t allow_end;
+
+    if (!current_task) return 0;
+    if (size == 0) return 1;
+    end = addr + size - 1;
+    if (end < addr) return 0;
+    if (addr < USER_MMAP_BASE || end >= USER_MMAP_LIMIT) return 0;
+    allow_end = allow_base + allow_size;
+    p = addr & ~0xFFFu;
+    pend = end & ~0xFFFu;
+    for (;;) {
+        if (vmm_get_phys_in_pml4(current_task->cr3, p) != 0) {
+            if (!(allow_size != 0 && p >= allow_base && p < allow_end)) return 0;
+        }
+        if (p == pend) break;
+        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
+        p += 0x1000u;
+    }
+    return 1;
+}
+
 static void compact_user_pages(void) {
     uint64_t i;
     uint64_t dst;
@@ -134,14 +180,25 @@ static int sys_brk(int addr, const char *unused, int unused2) {
 }
 
 static int sys_mmap(int a1, const char *a2, int a3) {
+    uint64_t addr;
+    uint64_t length;
+    uint64_t size;
+    uint64_t base;
+    uint64_t page_count;
+    uint64_t *new_pages;
+    uint64_t old_count;
+    uint64_t new_count;
+    uint64_t *expanded;
+    registers_t *r;
+
     (void)a2; (void)a3;
     if (!current_task) return -EINVAL;
 
-    uint64_t addr = 0;
-    uint64_t length = 0;
+    addr = 0;
+    length = 0;
 
     if (current_task->syscall_frame) {
-        registers_t *r = current_task->syscall_frame;
+        r = current_task->syscall_frame;
         addr = r->rbx;
         length = r->rcx;
     } else {
@@ -151,14 +208,13 @@ static int sys_mmap(int a1, const char *a2, int a3) {
 
     if (length == 0) return -EINVAL;
 
-    uint64_t size = align_up_u64(length, 0x1000u);
+    size = align_up_u64(length, 0x1000u);
     if (size == 0) return -EINVAL;
 
     if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
         current_task->mmap_next_addr = USER_MMAP_BASE;
     }
 
-    uint64_t base;
     if (addr != 0 && (addr & 0xFFFu) == 0) {
         base = addr;
     } else {
@@ -171,19 +227,19 @@ static int sys_mmap(int a1, const char *a2, int a3) {
     }
 
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
+    if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
 
-    uint64_t page_count = 0;
-    uint64_t *new_pages = vmm_map_range_in_pml4_tracked(
-        current_task->pml4_phys, base, size, 0x7, &page_count);
+    page_count = 0;
+    new_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, base, size, 0x7, &page_count);
 
     if (!new_pages && size > 0) {
         return -ENOMEM;
     }
 
     if (new_pages && page_count > 0) {
-        uint64_t old_count = current_task->user_pages_count;
-        uint64_t new_count = old_count + page_count;
-        uint64_t *expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
+        old_count = current_task->user_pages_count;
+        new_count = old_count + page_count;
+        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
         if (expanded) {
             if (current_task->user_pages && old_count > 0) {
                 memcpy(expanded, current_task->user_pages, old_count * sizeof(uint64_t));
@@ -245,6 +301,7 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     }
 
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
+    if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
 
     if ((flags & 0x10) && base < KERNEL_VMA) {
         release_user_leaf_range(base, base + size);
@@ -402,6 +459,7 @@ static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int fl
     }
 
     if (base + size < base || base + size >= KERNEL_VMA) return (void *)(long)-ENOMEM;
+    if (!user_range_free_mem(base, size, old_base, old_len)) return (void *)(long)-ENOMEM;
 
     page_count = 0;
     new_pages = vmm_map_range_in_pml4_tracked(
@@ -441,11 +499,15 @@ static int sys_madvise(void *addr, size_t length, int advice) {
 }
 
 static int sys_mincore(void *addr, size_t length, unsigned char *vec) {
+    size_t pages;
+    size_t i;
+
     (void)addr;
     if (!vec) return -EFAULT;
     
-    size_t pages = (length + 0xFFF) / 0x1000;
-    for (size_t i = 0; i < pages; i++) {
+    pages = (length + 0xFFF) / 0x1000;
+    if (!user_range_mapped_mem((uint64_t)(uintptr_t)vec, pages)) return -EFAULT;
+    for (i = 0; i < pages; i++) {
         vec[i] = 1;
     }
     return 0;

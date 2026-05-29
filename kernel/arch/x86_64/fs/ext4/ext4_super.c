@@ -109,28 +109,5 @@ int ext4_validate_superblock(ext4_superblock_t *sb) {
 }
 
 void ext4_print_superblock(ext4_superblock_t *sb) {
-    uint32_t block_size = 1024 << sb->s_log_block_size;
-
-    printf("EXT4: Superblock info:\n");
-    printf("  Magic: 0x%04X\n", sb->s_magic);
-    printf("  Block size: %u bytes\n", block_size);
-    printf("  Inode size: %u bytes\n", sb->s_inode_size ? sb->s_inode_size : 128);
-    printf("  Total inodes: %u\n", sb->s_inodes_count);
-    printf("  Total blocks: %u\n", sb->s_blocks_count_lo);
-    printf("  Free blocks: %u\n", sb->s_free_blocks_count_lo);
-    printf("  Free inodes: %u\n", sb->s_free_inodes_count);
-    printf("  Blocks per group: %u\n", sb->s_blocks_per_group);
-    printf("  Inodes per group: %u\n", sb->s_inodes_per_group);
-    printf("  First data block: %u\n", sb->s_first_data_block);
-    printf("  Volume name: %.16s\n", sb->s_volume_name);
-    printf("  Features compat: 0x%08X\n", sb->s_feature_compat);
-    printf("  Features incompat: 0x%08X\n", sb->s_feature_incompat);
-    printf("  Features ro_compat: 0x%08X\n", sb->s_feature_ro_compat);
-
-    if (sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
-        printf("  Using extents: yes\n");
-    }
-    if (sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) {
-        printf("  64-bit mode: yes\n");
-    }
+    (void)sb;
 }

@@ -207,6 +207,16 @@ static int vfs_fs_type_valid(vfs_fs_type_t *fs) {
     return 1;
 }
 
+static size_t vfs_bounded_strlen(const char *s, size_t max) {
+    size_t i;
+
+    if (!s) return 0;
+    for (i = 0; i < max; i++) {
+        if (s[i] == '\0') return i;
+    }
+    return max;
+}
+
 vfs_fs_type_t *vfs_find_fs(const char *name) {
     int iterations;
     vfs_fs_type_t *cur;
@@ -525,7 +535,7 @@ void vfs_open(vfs_node_t *node, uint64_t flags) {
 }
 
 void vfs_close(vfs_node_t *node) {
-    int is_dynamic;
+    int generic_owned;
     uintptr_t close_addr;
 
     if (!node) return;
@@ -534,14 +544,14 @@ void vfs_close(vfs_node_t *node) {
         node->ref_count--;
     }
     
-    is_dynamic = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED) && node->ref_count == 0;
+    generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
     
     close_addr = (uintptr_t)node->close;
     if (node->close && close_addr >= KERNEL_VMA) {
         node->close(node);
     }
     
-    if (is_dynamic) {
+    if (generic_owned && node->ref_count == 0 && node->private_data == NULL) {
         kfree(node);
     }
 }
@@ -555,6 +565,7 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
     size_t len;
     size_t pathlen;
     vfs_node_t *cur;
+    int depth;
 
     if (!node || !buf || size == 0)
         return -1;
@@ -567,7 +578,9 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
 
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && mounts[i].root == node) {
-            len = strlen(mounts[i].path);
+            len = vfs_bounded_strlen(mounts[i].path, VFS_MAX_PATH);
+            if (len == VFS_MAX_PATH)
+                return -1;
             if (len >= size)
                 return -1;
             memcpy(buf, mounts[i].path, len + 1);
@@ -579,10 +592,15 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
     temp[pos] = '\0';
 
     cur = node;
+    depth = 0;
     while (cur && cur != vfs_root) {
+        if (depth++ >= VFS_MAX_PATH)
+            return -1;
         for (i = 0; i < mounts_capacity; i++) {
             if (mounts[i].in_use && mounts[i].root == cur) {
-                len = strlen(mounts[i].path);
+                len = vfs_bounded_strlen(mounts[i].path, VFS_MAX_PATH);
+                if (len == VFS_MAX_PATH)
+                    return -1;
                 pathlen = (VFS_MAX_PATH - 1) - pos;
                 if (len > 1 && len + pathlen >= size)
                     return -1;
@@ -599,7 +617,9 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
                 return 0;
             }
         }
-        len = strlen(cur->name);
+        len = vfs_bounded_strlen(cur->name, VFS_MAX_NAME);
+        if (len == VFS_MAX_NAME)
+            return -1;
         pos -= (int)len;
         if (pos < 1)
             return -1;
@@ -793,7 +813,8 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
     for (i = 0; i < mounts_capacity; i++) {
         if (!mounts[i].in_use) continue;
         
-        len = strlen(mounts[i].path);
+        len = vfs_bounded_strlen(mounts[i].path, VFS_MAX_PATH);
+        if (len == VFS_MAX_PATH) continue;
         if (strncmp(path, mounts[i].path, len) == 0) {
             if (path[len] == '\0' || path[len] == '/' || 
                 (len == 1 && mounts[i].path[0] == '/')) {
@@ -1013,7 +1034,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
     if (mount && mount->root) {
         node = mount->root;
-        remaining = path + strlen(mount->path);
+        remaining = path + vfs_bounded_strlen(mount->path, VFS_MAX_PATH);
         if (*remaining == '/') remaining++;
         strncpy(prefix, mount->path, sizeof(prefix) - 1);
         prefix[sizeof(prefix) - 1] = '\0';
@@ -1130,17 +1151,17 @@ vfs_node_t *vfs_lookup(const char *path) {
 }
 
 void vfs_release(vfs_node_t *node) {
-    int is_dynamic;
+    int generic_owned;
     uintptr_t close_addr;
 
     if (!node) return;
     if (node->ref_count == 0) {
-        is_dynamic = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
+        generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
         close_addr = (uintptr_t)node->close;
         if (node->close && close_addr >= KERNEL_VMA) {
             node->close(node);
         }
-        if (is_dynamic) {
+        if (generic_owned && node->private_data == NULL) {
             kfree(node);
         }
     }
@@ -1150,6 +1171,10 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     char temp[VFS_MAX_PATH];
     int pos;
     size_t pathlen;
+    vfs_node_t *cur;
+    size_t len;
+    int depth;
+
     if (!node || !buf || size == 0) return NULL;
     
     if (node == vfs_root) {
@@ -1161,9 +1186,12 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     pos = VFS_MAX_PATH - 1;
     temp[pos] = '\0';
     
-    vfs_node_t *cur = node;
+    cur = node;
+    depth = 0;
     while (cur && cur != vfs_root) {
-        size_t len = strlen(cur->name);
+        if (depth++ >= VFS_MAX_PATH) return NULL;
+        len = vfs_bounded_strlen(cur->name, VFS_MAX_NAME);
+        if (len == VFS_MAX_NAME) return NULL;
         if (len > 0) {
             pos -= len;
             if (pos < 1) return NULL;
@@ -1442,19 +1470,26 @@ vfs_node_t *vfs_get_root(void) {
 
 int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name) {
     int i;
+    vfs_fs_type_t *fs;
 
     if (!mountpoint || !new_root) return -1;
+
+    fs = fs_name ? vfs_find_fs(fs_name) : NULL;
 
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             mounts[i].root = new_root;
             new_root->parent = vfs_root;
+            if (strcmp(mountpoint, "/") == 0) {
+                new_root->name[0] = '\0';
+            }
+            new_root->flags |= VFS_MOUNTPOINT;
             if (device) {
                 strncpy(mounts[i].device, device, VFS_MAX_PATH - 1);
                 mounts[i].device[VFS_MAX_PATH - 1] = '\0';
             }
-            if (fs_name)
-                mounts[i].fs_type = vfs_find_fs(fs_name);
+            if (fs)
+                mounts[i].fs_type = fs;
             return 0;
         }
     }

@@ -350,9 +350,11 @@ void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {
     uint64_t i;
     uint64_t idx;
     uint64_t start_idx;
+    uint64_t freed;
     
     if (phys_addr % PAGE_SIZE != 0 || num_frames == 0) return;
     start_idx = phys_addr / PAGE_SIZE;
+    freed = 0;
     
     pfa_lock_acquire(&eflags);
     for (i = 0; i < num_frames; i++) {
@@ -362,7 +364,11 @@ void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {
         if (test_bit(idx)) {
             clear_bit(idx);
             __sync_fetch_and_add(&pfa_cached_free, 1);
+            freed++;
         }
+    }
+    if (freed != 0 && start_idx < last_alloc_hint) {
+        last_alloc_hint = start_idx;
     }
     pfa_lock_release(eflags);
 }

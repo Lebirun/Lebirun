@@ -10,7 +10,7 @@
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
 #define EXT4_CACHE_BLOCKS       4
-#define EXT4_CACHE_BLOCKS_MAX   32
+#define EXT4_CACHE_BLOCKS_MAX   4
 #define EXT4_INODE_CACHE_INIT   16
 #define EXT4_INODE_CACHE_MAX    256
 
@@ -115,5 +115,6 @@ void ext4_background_writeback(uint32_t max_blocks);
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);
 int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *block_size);
+int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t flags);
 
 #endif

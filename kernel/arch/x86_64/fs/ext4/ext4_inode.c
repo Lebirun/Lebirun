@@ -10,7 +10,7 @@ static int find_inode_cache(ext4_fs_t *fs, uint32_t ino) {
     int i;
 
     for (i = 0; i < (int)fs->inode_cache_count; i++) {
-        if (fs->inode_cache[i].ino == ino && fs->inode_cache[i].ref_count > 0) {
+        if (fs->inode_cache[i].ino == ino) {
             return i;
         }
     }

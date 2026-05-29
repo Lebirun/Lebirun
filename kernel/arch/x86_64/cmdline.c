@@ -55,7 +55,7 @@ void cmdline_parse(const char *cmdline_str)
     int len;
 
     strcpy(init_path, "/init");
-    num_consoles = 4;
+    num_consoles = 2;
     root_dev[0] = '\0';
     cmdline_buf[0] = '\0';
     text_mode = 0;

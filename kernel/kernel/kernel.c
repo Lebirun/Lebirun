@@ -513,10 +513,13 @@ void kernel_main(void) {
             }
 
             if (ext4_root) {
-                vfs_replace_mount_root("/", ext4_root, root_dev, "ext4");
-                vfs_remove_mount("/mnt");
-                ext4_root->name[0] = '\0';
-                printf("BOOT: ext4 root mounted from %s\n", root_dev);
+                mount_ret = vfs_replace_mount_root("/", ext4_root, root_dev, "ext4");
+                if (mount_ret == 0) {
+                    vfs_remove_mount("/mnt");
+                    printf("BOOT: ext4 root mounted from %s\n", root_dev);
+                } else {
+                    printf("BOOT: FATAL: failed to replace root mount with %s\n", root_dev);
+                }
             } else {
                 printf("BOOT: FATAL: failed to mount ext4 root %s\n", root_dev);
             }

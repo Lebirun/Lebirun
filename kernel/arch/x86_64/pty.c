@@ -24,6 +24,7 @@ typedef struct {
     struct winsize winsize;
     pid_t session;
     pid_t pgrp;
+    int input_cr_pending;
     int master_closed;
     int slave_closed;
     mutex_t lock;
@@ -224,6 +225,8 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     size_t i;
     uint8_t c;
     pty_t *pty;
+    int raw_cr;
+    int cr_newline;
 
     pty = get_pty_by_master(fd);
     if (!pty) return -1;
@@ -238,6 +241,23 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     
     for (i = 0; i < to_write; i++) {
         c = src[i];
+        if (pty->termios.c_iflag & ISTRIP) c &= 0x7F;
+        raw_cr = (c == '\r');
+        if ((pty->termios.c_iflag & IGNCR) && c == '\r') {
+            pty->input_cr_pending = 0;
+            continue;
+        }
+        if ((pty->termios.c_iflag & ICRNL) && c == '\r') {
+            c = '\n';
+        } else if ((pty->termios.c_iflag & INLCR) && c == '\n') {
+            c = '\r';
+        }
+        if (pty->input_cr_pending && !raw_cr && c == '\n') {
+            pty->input_cr_pending = 0;
+            continue;
+        }
+        cr_newline = raw_cr && c == '\n';
+        pty->input_cr_pending = cr_newline;
         
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {

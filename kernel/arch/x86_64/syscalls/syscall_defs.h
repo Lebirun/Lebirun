@@ -24,6 +24,7 @@
 void syscall_set_exec_completed(void);
 int syscall_check_exec_completed(void);
 void syscall_clear_exec_completed(void);
+void syscall_core_flush_tty_input(int con_id);
 
 #define EPERM    1
 #define ENOENT   2

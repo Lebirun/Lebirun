@@ -14,7 +14,7 @@
 #define INITRD_PERM_WRITE 0x02
 #define INITRD_PERM_EXEC  0x01
 
-#define INITRD_MAX_FDS 64
+#define INITRD_MAX_FDS 8
 #define INITRD_MAX_PATH 256
 
 typedef struct {

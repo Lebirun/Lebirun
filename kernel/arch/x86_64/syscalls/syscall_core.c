@@ -15,6 +15,7 @@ static char (*line_buffers)[LINE_BUF_SIZE];
 static int *line_len;
 static int *line_cursor;
 static int *line_ready;
+static int *line_last_cr;
 
 #define HISTORY_COUNT 4
 #define HISTORY_LINE_SIZE 128
@@ -44,6 +45,7 @@ static char line_buffers_fallback[1][LINE_BUF_SIZE];
 static int line_len_fallback[1];
 static int line_cursor_fallback[1];
 static int line_ready_fallback[1];
+static int line_last_cr_fallback[1];
 static int history_head_fallback[1];
 static int history_count_fallback[1];
 static int history_browse_fallback[1];
@@ -74,6 +76,20 @@ static int syscall_core_clamp_console(int con_id) {
 
 static int syscall_core_valid_console(int con_id) {
     return con_id >= 0 && con_id < syscall_core_console_count();
+}
+
+void syscall_core_flush_tty_input(int con_id) {
+    if (!syscall_core_valid_console(con_id)) return;
+    if (!line_buffers || !line_len || !line_cursor || !line_ready) return;
+    line_len[con_id] = 0;
+    line_cursor[con_id] = 0;
+    line_ready[con_id] = 0;
+    if (line_last_cr) line_last_cr[con_id] = 0;
+    if (esc_state) esc_state[con_id] = 0;
+    if (esc_len) esc_len[con_id] = 0;
+    if (in_line_editing) in_line_editing[con_id] = 0;
+    if (serial_displayed_len) serial_displayed_len[con_id] = 0;
+    memset(line_buffers[con_id], 0, LINE_BUF_SIZE);
 }
 
 static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
@@ -654,6 +670,7 @@ static int sys_read(int fd, char *buf, int len) {
                 char c;
                 int idx;
                 int i;
+                int raw_cr;
                 
                 while (!keyboard_has_data_for(con_id)) {
                     wait_queue_t *wq = keyboard_get_waitq_for(con_id);
@@ -674,6 +691,22 @@ static int sys_read(int fd, char *buf, int len) {
                 if (key < 0) continue;
                 
                 c = (char)key;
+                if (t->c_iflag & ISTRIP) c &= 0x7F;
+                raw_cr = (c == '\r');
+                if ((t->c_iflag & IGNCR) && c == '\r') {
+                    line_last_cr[con_id] = 0;
+                    continue;
+                }
+                if ((t->c_iflag & ICRNL) && c == '\r') {
+                    c = '\n';
+                } else if ((t->c_iflag & INLCR) && c == '\n') {
+                    c = '\r';
+                }
+                if (line_last_cr[con_id] && !raw_cr && c == '\n') {
+                    line_last_cr[con_id] = 0;
+                    continue;
+                }
+                line_last_cr[con_id] = raw_cr && c == '\n';
                 
                 if (esc_state[con_id] == 1) {
                     if (c == '[') {
@@ -1141,7 +1174,7 @@ void syscalls_core_init(void) {
     count_bytes = (uint64_t)count * sizeof(int);
     history_slots = (uint64_t)count;
     state_bytes = (uint64_t)count * sizeof(*line_buffers) +
-                  count_bytes * 11 +
+                  count_bytes * 12 +
                   (uint64_t)count * sizeof(*esc_buf) +
                   history_slots * sizeof(*history) +
                   history_slots * sizeof(*history_len);
@@ -1159,6 +1192,9 @@ void syscalls_core_init(void) {
         off += count_bytes;
         off = (off + 7ULL) & ~7ULL;
         line_ready = (void *)(state + off);
+        off += count_bytes;
+        off = (off + 7ULL) & ~7ULL;
+        line_last_cr = (void *)(state + off);
         off += count_bytes;
         off = (off + 7ULL) & ~7ULL;
         history_head = (void *)(state + off);
@@ -1199,6 +1235,7 @@ void syscalls_core_init(void) {
         line_len = line_len_fallback;
         line_cursor = line_cursor_fallback;
         line_ready = line_ready_fallback;
+        line_last_cr = line_last_cr_fallback;
         history_head = history_head_fallback;
         history_count = history_count_fallback;
         history_browse = history_browse_fallback;
@@ -1221,6 +1258,7 @@ void syscalls_core_init(void) {
     memset(line_len, 0, count_bytes);
     memset(line_cursor, 0, count_bytes);
     memset(line_ready, 0, count_bytes);
+    memset(line_last_cr, 0, count_bytes);
     memset(history_head, 0, count_bytes);
     memset(history_count, 0, count_bytes);
     memset(history_browse, 0, count_bytes);
@@ -1235,6 +1273,7 @@ void syscalls_core_init(void) {
         line_len[i] = 0;
         line_cursor[i] = 0;
         line_ready[i] = 0;
+        line_last_cr[i] = 0;
         history_head[i] = 0;
         history_count[i] = 0;
         history_browse[i] = -1;

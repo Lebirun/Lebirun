@@ -110,6 +110,7 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
     ahci_port_t *port;
     uint64_t lba;
+    int idx;
 
     port = ahci_get_port(fs->port_index);
     if (!port) {
@@ -120,6 +121,14 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
     
     if (ahci_write_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
+    }
+
+    idx = find_cache_entry(fs, block);
+    if (idx >= 0 && fs->block_cache[idx].data &&
+        fs->block_cache[idx].data != (const uint8_t *)buffer) {
+        memcpy(fs->block_cache[idx].data, buffer, fs->block_size);
+        fs->block_cache[idx].dirty = false;
+        fs->block_cache[idx].last_access = ++cache_tick_counter;
     }
 
     return 0;

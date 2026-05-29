@@ -12,7 +12,7 @@
 
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
-#define COPY_BUF_MAX 65536
+#define COPY_BUF_MAX 16384
 #define MAX_DISKS    8
 #define MAX_PARTS    16
 #define MAX_PATH     256
@@ -286,6 +286,7 @@ static uint64_t inst_get_free_mem(void)
 
 static char *copy_buf = NULL;
 static int copy_buf_size = 0;
+static int copy_overwrite_existing = 1;
 
 static int inst_resize_copy_buf(uint64_t file_size)
 {
@@ -330,7 +331,6 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     int fd_in;
     int fd_out;
     int r;
-    int use_posix;
     struct stat src_st;
     mode_t src_mode;
 
@@ -339,7 +339,7 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
 
     src_mode = 0644;
     src_st.st_size = 0;
-    if (stat(src, &src_st) == 0)
+    if (fstat(fd_in, &src_st) == 0)
         src_mode = src_st.st_mode & 07777;
 
     if (inst_resize_copy_buf((uint64_t)src_st.st_size) < 0) {
@@ -347,40 +347,33 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         return -1;
     }
 
-    use_posix = 0;
-    vfs_unlink(dst);
-    vfs_create(dst, src_mode);
-    fd_out = vfs_open(dst, 2);
+    if (!copy_overwrite_existing) {
+        fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
+                                   O_WRONLY | O_CREAT | O_TRUNC,
+                                   src_mode);
+    } else {
+        vfs_unlink(dst);
+        vfs_create(dst, src_mode);
+        fd_out = vfs_open(dst, 2);
+    }
     if (fd_out < 0) {
         fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, src_mode);
         if (fd_out < 0) {
-            vfs_close_fd(fd_in);
+            close(fd_in);
             return -1;
         }
-        use_posix = 1;
     }
 
-    while ((r = vfs_read_fd(fd_in, copy_buf, copy_buf_size)) > 0) {
-        if (use_posix) {
-            if (write(fd_out, copy_buf, r) != r) {
-                vfs_close_fd(fd_in);
-                close(fd_out);
-                return -1;
-            }
-        } else {
-            if (vfs_write_fd(fd_out, copy_buf, r) != r) {
-                vfs_close_fd(fd_in);
-                vfs_close_fd(fd_out);
-                return -1;
-            }
+    while ((r = read(fd_in, copy_buf, copy_buf_size)) > 0) {
+        if (write(fd_out, copy_buf, r) != r) {
+            close(fd_in);
+            close(fd_out);
+            return -1;
         }
     }
 
-    vfs_close_fd(fd_in);
-    if (use_posix)
-        close(fd_out);
-    else
-        vfs_close_fd(fd_out);
+    close(fd_in);
+    close(fd_out);
 
     chmod(dst, src_mode);
 
@@ -438,23 +431,97 @@ static int copy_total;
 static int copy_done;
 static int copy_last_pct;
 
+static void inst_copy_progress(const char *path)
+{
+    int pct;
+
+    if (copy_total <= 0) {
+        return;
+    }
+
+    pct = (copy_done * 100) / copy_total;
+    if (pct > 99) pct = 99;
+    if (pct != copy_last_pct) {
+        copy_last_pct = pct;
+        lebui_progress_update(&prog_st, path, pct);
+        lebui_progress_log(&prog_st, path);
+    }
+}
+
+static void inst_copy_current(const char *path)
+{
+    int pct;
+
+    if (copy_total <= 0) {
+        return;
+    }
+
+    pct = (copy_done * 100) / copy_total;
+    if (pct > 99) pct = 99;
+    lebui_progress_update(&prog_st, path, pct);
+}
+
+static int inst_copy_symlink_vfs(const char *src, const char *dst)
+{
+    char link_target[MAX_PATH];
+    const char *fast_target;
+    int link_len;
+
+    fast_target = NULL;
+    if (strncmp(src, "/bin/", 5) == 0) {
+        if (strcmp(src + 5, "sh") == 0) {
+            fast_target = "lsh";
+        } else {
+            fast_target = "lebu";
+        }
+    } else if (strncmp(src, "/sbin/", 6) == 0) {
+        fast_target = "../bin/lebu";
+    }
+
+    if (fast_target) {
+        strncpy(link_target, fast_target, sizeof(link_target) - 1);
+        link_target[sizeof(link_target) - 1] = '\0';
+    } else {
+        link_len = (int)readlink(src, link_target, sizeof(link_target) - 1);
+        if (link_len <= 0) {
+            return -1;
+        }
+        link_target[link_len] = '\0';
+    }
+
+    if (copy_overwrite_existing) {
+        vfs_unlink(dst);
+    }
+
+    if (symlink(link_target, dst) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int inst_copy_dir_recursive(const char *src, const char *dst, const char *skip)
 {
     int fd;
+    int dst_fd;
     char name[256];
     unsigned int type;
     unsigned int idx;
     char src_path[MAX_PATH];
     char dst_path[MAX_PATH];
     int errors;
-    int pct;
     int slen;
     int dlen;
 
     vfs_mkdir(dst, 0755);
 
+    dst_fd = vfs_open(dst, 0);
     fd = vfs_open(src, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        if (dst_fd >= 0) {
+            vfs_close_fd(dst_fd);
+        }
+        return -1;
+    }
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -481,37 +548,24 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
             if (inst_copy_dir_recursive(src_path, dst_path, skip) < 0)
                 errors++;
         } else if (type == 6) {
-            snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
-            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+            inst_copy_current(src_path);
+            if (inst_copy_symlink_vfs(src_path, dst_path) < 0)
                 errors++;
-            chmod(dst_path, 0755);
             copy_done++;
-            if (copy_total > 0) {
-                pct = (copy_done * 100) / copy_total;
-                if (pct > 99) pct = 99;
-                if (pct != copy_last_pct) {
-                    copy_last_pct = pct;
-                    lebui_progress_update(&prog_st, src_path, pct);
-                    lebui_progress_log(&prog_st, src_path);
-                }
-            }
+            inst_copy_progress(src_path);
         } else {
+            inst_copy_current(src_path);
             if (inst_copy_file_vfs(src_path, dst_path) < 0) {
                 errors++;
             }
             copy_done++;
-            if (copy_total > 0) {
-                pct = (copy_done * 100) / copy_total;
-                if (pct > 99) pct = 99;
-                if (pct != copy_last_pct) {
-                    copy_last_pct = pct;
-                    lebui_progress_update(&prog_st, src_path, pct);
-                    lebui_progress_log(&prog_st, src_path);
-                }
-            }
+            inst_copy_progress(src_path);
         }
     }
     vfs_close_fd(fd);
+    if (dst_fd >= 0) {
+        vfs_close_fd(dst_fd);
+    }
     return (errors > 0) ? -1 : 0;
 }
 
@@ -525,7 +579,7 @@ static int inst_count_rootfs(void)
     int i;
     char path[MAX_PATH];
 
-    total = 0;
+    total = 1;
     for (i = 0; dirs[i]; i++) {
         if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0)
             continue;
@@ -621,9 +675,12 @@ static int inst_copy_rootfs(const char *mountpoint)
     for (i = 0; root_files[i]; i++) {
         snprintf(src, sizeof(src), "/%s", root_files[i]);
         snprintf(dst, sizeof(dst), "%s/%s", mountpoint, root_files[i]);
+        inst_copy_current(src);
         if (inst_copy_file_vfs(src, dst) < 0) {
             errors++;
         }
+        copy_done++;
+        inst_copy_progress(src);
     }
 
     for (i = 0; dirs[i]; i++) {
@@ -1414,11 +1471,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     if (copy_total < 1) copy_total = 100;
     copy_done = 0;
     copy_last_pct = -1;
+    copy_overwrite_existing = 0;
 
     lebui_progress_log(&prog_st, "Copying rootfs...");
     if (inst_copy_rootfs(mountpoint) < 0) {
         lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
     }
+    copy_overwrite_existing = 1;
     lebui_progress_log(&prog_st, "Rootfs copy complete.");
 
     lebui_progress_update(&prog_st, "Installing bootloader...", 96);
@@ -1597,20 +1656,26 @@ static int upd_path_is_preserved(const char *dst_path, const char *mountpoint)
 static int inst_update_dir_recursive(const char *src, const char *dst, const char *mountpoint)
 {
     int fd;
+    int dst_fd;
     char name[256];
     unsigned int type;
     unsigned int idx;
     char src_path[MAX_PATH];
     char dst_path[MAX_PATH];
     int errors;
-    int pct;
     int slen;
     int dlen;
 
     vfs_mkdir(dst, 0755);
 
+    dst_fd = vfs_open(dst, 0);
     fd = vfs_open(src, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        if (dst_fd >= 0) {
+            vfs_close_fd(dst_fd);
+        }
+        return -1;
+    }
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -1636,35 +1701,23 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
             if (inst_update_dir_recursive(src_path, dst_path, mountpoint) < 0)
                 errors++;
         } else if (type == 6) {
-            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+            inst_copy_current(src_path);
+            if (inst_copy_symlink_vfs(src_path, dst_path) < 0)
                 errors++;
-            chmod(dst_path, 0755);
             copy_done++;
-            if (copy_total > 0) {
-                pct = (copy_done * 100) / copy_total;
-                if (pct > 99) pct = 99;
-                if (pct != copy_last_pct) {
-                    copy_last_pct = pct;
-                    lebui_progress_update(&prog_st, src_path, pct);
-                    lebui_progress_log(&prog_st, src_path);
-                }
-            }
+            inst_copy_progress(src_path);
         } else {
+            inst_copy_current(src_path);
             if (inst_copy_file_vfs(src_path, dst_path) < 0)
                 errors++;
             copy_done++;
-            if (copy_total > 0) {
-                pct = (copy_done * 100) / copy_total;
-                if (pct > 99) pct = 99;
-                if (pct != copy_last_pct) {
-                    copy_last_pct = pct;
-                    lebui_progress_update(&prog_st, src_path, pct);
-                    lebui_progress_log(&prog_st, src_path);
-                }
-            }
+            inst_copy_progress(src_path);
         }
     }
     vfs_close_fd(fd);
+    if (dst_fd >= 0) {
+        vfs_close_fd(dst_fd);
+    }
     return (errors > 0) ? -1 : 0;
 }
 

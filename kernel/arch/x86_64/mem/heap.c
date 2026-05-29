@@ -237,6 +237,31 @@ static void split_block(heap_block_t *block, size_t size) {
     }
 }
 
+static int heap_commit_span(uint64_t start, uint64_t end) {
+    uint64_t pg;
+
+    start &= ~(PAGE_SIZE - 1);
+    end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    for (pg = start; pg < end; pg += PAGE_SIZE) {
+        if (demand_commit_page(pg) < 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int heap_commit_block(heap_block_t *block) {
+    uint64_t start;
+    uint64_t end;
+
+    start = (uint64_t)block;
+    end = (uint64_t)block + sizeof(heap_block_t) + block->size;
+
+    return heap_commit_span(start, end);
+}
+
 static void coalesce_free_blocks(heap_block_t *block) {
     heap_block_t *next;
     heap_block_t *prev;
@@ -302,19 +327,7 @@ static void heap_trim(void) {
     uint64_t trim_start;
     uint64_t new_end;
     uint64_t pg;
-    uint64_t pd_idx;
-    uint64_t pt_idx;
-    uint64_t pde;
-    uint64_t *pt64;
-    uint64_t pte;
-    uint64_t phys;
-    uint64_t pdpt_idx;
-    uint64_t pdpte;
-    uint64_t *pd;
-    extern uint64_t boot_pdpt_high[];
-    uint64_t *kv_pdpt;
 
-    kv_pdpt = (uint64_t *)((uintptr_t)boot_pdpt_high + KERNEL_VMA);
     last = NULL;
     cur = kernel_heap.free_list;
     while (cur) {
@@ -339,23 +352,7 @@ static void heap_trim(void) {
     if (trim_start <= (uint64_t)last + sizeof(heap_block_t)) return;
 
     for (pg = trim_start; pg < kernel_heap.end_addr; pg += PAGE_SIZE) {
-        pdpt_idx = (pg >> 30) & 0x1FF;
-        pdpte = kv_pdpt[pdpt_idx];
-        if (!(pdpte & 1)) continue;
-        pd = (uint64_t *)((pdpte & ~0xFFFULL) + KERNEL_VMA);
-        pd_idx = (pg >> 21) & 0x1FF;
-        pt_idx = (pg >> 12) & 0x1FF;
-        pde = pd[pd_idx];
-        if (!(pde & 1)) continue;
-        if (pde & 0x80) continue;
-        pt64 = (uint64_t *)((pde & ~0xFFFULL) + KERNEL_VMA);
-        pte = pt64[pt_idx];
-        if (pte & 1) {
-            phys = (pte & ~0xFFFULL);
-            pt64[pt_idx] = 0;
-            __asm__ volatile("invlpg (%0)" : : "r"(pg) : "memory");
-            if (phys >= 0x1000) pfa_free(phys);
-        }
+        demand_decommit_page(pg);
     }
 
     new_end = trim_start;
@@ -363,8 +360,6 @@ static void heap_trim(void) {
     kernel_heap.end_addr = new_end;
     kernel_heap.total_size = new_end - kernel_heap.start_addr;
 }
-
-extern int heap_map_page(uint64_t virt_addr);
 
 static int heap_reserve_virtual(uint64_t virt_start, uint64_t size) {
 #if HEAP_USE_DEMAND_PAGING
@@ -376,6 +371,7 @@ static int heap_reserve_virtual(uint64_t virt_start, uint64_t size) {
 
 static int heap_expand(uint64_t new_end) {
     uint64_t addr;
+    uint64_t old_end;
 
     if (new_end > kernel_heap.max_addr) {
         new_end = kernel_heap.max_addr;
@@ -385,8 +381,14 @@ static int heap_expand(uint64_t new_end) {
 
     if (new_end <= kernel_heap.end_addr) return 0;
 
-    for (addr = kernel_heap.end_addr; addr < new_end; addr += PAGE_SIZE) {
-        if (heap_map_page(addr) < 0) {
+    old_end = kernel_heap.end_addr;
+    if (heap_reserve_virtual(old_end, new_end - old_end) < 0) {
+        printf("heap_expand: Failed to reserve range 0x%08X-0x%08X\n", old_end, new_end);
+        return -1;
+    }
+
+    for (addr = old_end; addr < new_end; addr += PAGE_SIZE) {
+        if (demand_commit_page(addr) < 0) {
             printf("heap_expand: Failed to map page at 0x%08X\n", addr);
             return -1;
         }
@@ -470,6 +472,7 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
     heap_block_t *prev;
     heap_block_t *cur;
     void *ptr;
+    uint64_t commit_end;
 
     orig_size = size;
     total_size = size + CANARY_OVERHEAD;
@@ -581,7 +584,21 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
 
 alloc_found:
 
+    commit_end = (uint64_t)block + sizeof(heap_block_t) + total_size;
+    if (block->size >= total_size + sizeof(heap_block_t) + HEAP_MIN_BLOCK) {
+        commit_end += sizeof(heap_block_t);
+    }
+    if (heap_commit_span((uint64_t)block, commit_end) < 0) {
+        printf("kmalloc: Failed to commit split span at 0x%08X\n", (uint64_t)block);
+        return NULL;
+    }
+
     split_block(block, total_size);
+
+    if (heap_commit_block(block) < 0) {
+        printf("kmalloc: Failed to commit block at 0x%08X\n", (uint64_t)block);
+        return NULL;
+    }
 
     block->is_free = 0;
     block->alloc_size = orig_size;

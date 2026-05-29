@@ -15,6 +15,7 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
     uint32_t to_read;
     uint64_t phys_block;
     uint8_t *block;
+    uint8_t *inline_data;
 
     if (!buffer || size == 0) {
         return 0;
@@ -37,6 +38,15 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
     }
 
     bytes_read = 0;
+
+    if ((ic->inode.i_mode & 0xF000) == EXT4_S_IFLNK &&
+        file_size <= sizeof(ic->inode.i_block) &&
+        ic->inode.i_blocks_lo == 0) {
+        inline_data = (uint8_t *)ic->inode.i_block;
+        memcpy(buffer, inline_data + offset, size);
+        ext4_release_inode(ic);
+        return size;
+    }
 
     while (bytes_read < size) {
         block_num = (offset + bytes_read) / fs->block_size;
@@ -187,10 +197,6 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     ext4_inode_cache_t *ic;
     uint64_t file_size;
     uint64_t new_size;
-    uint64_t current_blocks;
-    uint64_t needed_blocks;
-    uint64_t i;
-    uint64_t existing;
     int new_block;
     uint32_t bytes_written;
     uint64_t block_num;
@@ -198,7 +204,8 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     uint32_t to_write;
     uint64_t phys_block;
     uint8_t *block;
-    int cache_idx;
+    int allocated_now;
+    uint8_t *inline_data;
 
     if (!buffer || size == 0) {
         return 0;
@@ -209,48 +216,32 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
         return 0;
     }
 
-    cache_idx = -1;
-    for (i = 0; i < fs->inode_cache_count; i++) {
-        if (&fs->inode_cache[i] == ic) {
-            cache_idx = (int)i;
-            break;
-        }
-    }
-
-    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFREG) {
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFREG &&
+        (ic->inode.i_mode & 0xF000) != EXT4_S_IFLNK) {
         ext4_release_inode(ic);
         return 0;
     }
 
     file_size = ext4_inode_get_size(&ic->inode);
     new_size = offset + size;
+    if (new_size < offset) {
+        ext4_release_inode(ic);
+        return 0;
+    }
 
-    if (new_size > file_size) {
-        current_blocks = (file_size + fs->block_size - 1) / fs->block_size;
-        needed_blocks = (new_size + fs->block_size - 1) / fs->block_size;
-
-        for (i = current_blocks; i < needed_blocks; i++) {
-            existing = ext4_inode_get_block(fs, &ic->inode, i);
-            if (existing == 0) {
-                new_block = ext4_alloc_block(fs, 0);
-                if (new_block < 0) {
-                    ext4_release_inode(ic);
-                    return 0;
-                }
-
-                if (ext4_inode_set_block(fs, &ic->inode, i, new_block) != 0) {
-                    ext4_free_block(fs, new_block);
-                    ext4_release_inode(ic);
-                    return 0;
-                }
-
-                ic->inode.i_blocks_lo += fs->sectors_per_block;
-            }
+    if ((ic->inode.i_mode & 0xF000) == EXT4_S_IFLNK &&
+        new_size <= sizeof(ic->inode.i_block) &&
+        file_size <= sizeof(ic->inode.i_block) &&
+        ic->inode.i_blocks_lo == 0) {
+        inline_data = (uint8_t *)ic->inode.i_block;
+        memset(inline_data, 0, sizeof(ic->inode.i_block));
+        memcpy(inline_data + offset, buffer, size);
+        if (new_size > file_size) {
+            ext4_inode_set_size(&ic->inode, new_size);
         }
-
-        if (cache_idx >= 0 && &fs->inode_cache[cache_idx] != ic) {
-            ic = &fs->inode_cache[cache_idx];
-        }
+        ext4_mark_inode_dirty(ic);
+        ext4_release_inode(ic);
+        return size;
     }
 
     bytes_written = 0;
@@ -265,6 +256,7 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
         }
 
         phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
+        allocated_now = 0;
 
         if (phys_block == 0) {
             new_block = ext4_alloc_block(fs, 0);
@@ -279,10 +271,22 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
 
             ic->inode.i_blocks_lo += fs->sectors_per_block;
             phys_block = new_block;
+            allocated_now = 1;
         }
 
-        if (block_off == 0 && to_write == fs->block_size) {
+        if (allocated_now && block_off == 0 && to_write == fs->block_size) {
+            if (ext4_write_block(fs, phys_block, buffer + bytes_written) != 0) {
+                break;
+            }
+            bytes_written += to_write;
+            continue;
+        }
+
+        if (allocated_now) {
             block = ext4_get_block_overwrite(fs, phys_block);
+            if (block) {
+                memset(block, 0, fs->block_size);
+            }
         } else {
             block = ext4_get_block(fs, phys_block);
         }
@@ -394,6 +398,7 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
     uint64_t blocks;
     uint64_t i;
     uint64_t phys_block;
+    int inline_symlink;
 
     if (!name) {
         return -1;
@@ -417,12 +422,17 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
 
     if (ic->inode.i_links_count == 0) {
         file_size = ext4_inode_get_size(&ic->inode);
-        blocks = (file_size + fs->block_size - 1) / fs->block_size;
+        inline_symlink = ((ic->inode.i_mode & 0xF000) == EXT4_S_IFLNK &&
+                          file_size <= sizeof(ic->inode.i_block) &&
+                          ic->inode.i_blocks_lo == 0);
+        if (!inline_symlink) {
+            blocks = (file_size + fs->block_size - 1) / fs->block_size;
 
-        for (i = 0; i < blocks; i++) {
-            phys_block = ext4_inode_get_block(fs, &ic->inode, i);
-            if (phys_block != 0) {
-                ext4_free_block(fs, phys_block);
+            for (i = 0; i < blocks; i++) {
+                phys_block = ext4_inode_get_block(fs, &ic->inode, i);
+                if (phys_block != 0) {
+                    ext4_free_block(fs, phys_block);
+                }
             }
         }
 

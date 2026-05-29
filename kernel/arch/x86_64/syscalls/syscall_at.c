@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <lebirun/ramfs.h>
+#include <lebirun/fs/ext4/ext4.h>
 
 #define AT_FDCWD -100
 #define AT_SYMLINK_NOFOLLOW 0x100
@@ -49,6 +50,72 @@ static int task_fd_alloc_from(int start) {
     return i;
 }
 
+static int at_user_range_mapped(uint64_t addr, uint64_t size) {
+    uint64_t pd;
+    uint64_t start;
+    uint64_t end;
+    uint64_t p;
+    uint64_t phys;
+    uint64_t *new_user_pages;
+
+    if (!current_task) return 0;
+    if (size == 0) return 0;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    if (addr + size < addr || addr + size > KERNEL_VMA) return 0;
+    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
+    if (!pd) return 0;
+    start = addr & ~0xFFFu;
+    end = (addr + size - 1) & ~0xFFFu;
+    p = start;
+    for (;;) {
+        if (vmm_get_phys_in_pml4(pd, p) == 0) {
+            if (!task_handle_file_page_fault(current_task, p)) {
+                if ((p >= 0x00700000u && p < 0x00800000u) ||
+                        (p >= current_task->user_brk && p < 0x40000000u) ||
+                        (p >= 0x1000u && p < current_task->user_brk)) {
+                    phys = pfa_alloc();
+                    if (!phys) return 0;
+                    pmm_zero_page_phys(phys);
+                    vmm_map_page_in_pml4(pd, p, phys, 0x7);
+                    if (vmm_get_phys_in_pml4(pd, p) == 0) {
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
+                    if (!new_user_pages) {
+                        vmm_unmap_page_in_pml4(pd, p);
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    current_task->user_pages = new_user_pages;
+                    current_task->user_pages[current_task->user_pages_count] = phys;
+                    current_task->user_pages_count++;
+                } else {
+                    return 0;
+                }
+            }
+            if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        }
+        if (p == end) break;
+        if (p > end) return 0;
+        p += 0x1000;
+    }
+    return 1;
+}
+
+static int at_user_string_mapped(const char *s, size_t max) {
+    uint64_t addr;
+    size_t i;
+
+    if (!s || max == 0) return 0;
+    addr = (uint64_t)(uintptr_t)s;
+    for (i = 0; i < max; i++) {
+        if (!at_user_range_mapped(addr + i, 1)) return 0;
+        if (s[i] == '\0') return 1;
+    }
+    return 0;
+}
+
 static const char *resolve_at_path(int dirfd, const char *pathname, char *resolved, size_t size) {
     uint64_t path_addr;
     const char *cwd;
@@ -64,6 +131,7 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *resolv
     
     path_addr = (uint64_t)(uintptr_t)pathname;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return NULL;
+    if (!at_user_string_mapped(pathname, size)) return NULL;
     
     if (pathname[0] == '/') {
         return pathname;
@@ -470,9 +538,13 @@ static int sys_symlinkat(int target_ptr, const char *newdirfd_ptr, int linkpath)
 
     if (!target || (uint64_t)target < 0x1000 || (uint64_t)target >= KERNEL_VMA) return -EFAULT;
     if (!linkpath || (uint64_t)(uintptr_t)linkpath < 0x1000 || (uint64_t)(uintptr_t)linkpath >= KERNEL_VMA) return -EFAULT;
+    if (!at_user_string_mapped(target, VFS_MAX_PATH)) return -EFAULT;
 
     link_path = resolve_at_path(newdirfd, (const char *)(uintptr_t)linkpath, link_resolved, sizeof(link_resolved));
     if (!link_path) return -EFAULT;
+
+    ret = ext4_vfs_symlink_node(target, link_path, 0);
+    if (ret == 0) return 0;
 
     ret = ramfs_create_symlink(link_path, target, 0777);
     if (ret == 0) return 0;

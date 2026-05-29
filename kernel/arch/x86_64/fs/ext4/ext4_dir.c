@@ -134,10 +134,14 @@ typedef struct {
 
 static int dir_get_entry_callback(ext4_dir_entry_t *entry, void *ctx) {
     dir_get_entry_ctx_t *gctx = (dir_get_entry_ctx_t *)ctx;
+    uint8_t name_len;
 
     if (gctx->current_index == gctx->target_index) {
-        memcpy(gctx->out_entry, entry, sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN + entry->name_len);
-        gctx->out_entry->name[entry->name_len] = '\0';
+        name_len = entry->name_len;
+        memcpy(gctx->out_entry, entry, sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN + name_len);
+        if (name_len < EXT4_NAME_LEN) {
+            gctx->out_entry->name[name_len] = '\0';
+        }
         gctx->found = 1;
         return 1;
     }

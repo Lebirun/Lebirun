@@ -10,20 +10,75 @@ extern int socket_close_fd(int fd);
 static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
     uint64_t p;
+    uint64_t pd;
+    uint64_t phys;
+    uint64_t *new_user_pages;
 
     if (len == 0) return 1;
     if (!current_task) return 0;
     if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
     if (addr + len < addr || addr + len > KERNEL_VMA) return 0;
+    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
+    if (!pd) return 0;
 
     end = addr + len - 1;
     p = addr & ~0xFFFULL;
     while (p <= end) {
-        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
+        if (vmm_get_phys_in_pml4(pd, p) == 0) {
+            if (!task_handle_file_page_fault(current_task, p)) {
+                if ((p >= 0x00700000u && p < 0x00800000u) ||
+                        (p >= current_task->user_brk && p < 0x40000000u) ||
+                        (p >= 0x1000u && p < current_task->user_brk)) {
+                    phys = pfa_alloc();
+                    if (!phys) return 0;
+                    pmm_zero_page_phys(phys);
+                    vmm_map_page_in_pml4(pd, p, phys, 0x7);
+                    if (vmm_get_phys_in_pml4(pd, p) == 0) {
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
+                    if (!new_user_pages) {
+                        vmm_unmap_page_in_pml4(pd, p);
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    current_task->user_pages = new_user_pages;
+                    current_task->user_pages[current_task->user_pages_count] = phys;
+                    current_task->user_pages_count++;
+                } else {
+                    return 0;
+                }
+            }
+            if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
+        }
         if (p + 0x1000ULL <= p) return 0;
         p += 0x1000ULL;
     }
     return 1;
+}
+
+static int vfs_user_string_mapped(const char *s, size_t max) {
+    uint64_t addr;
+    size_t i;
+
+    if (!s || max == 0) return 0;
+    addr = (uint64_t)(uintptr_t)s;
+    for (i = 0; i < max; i++) {
+        if (!vfs_user_range_mapped(addr + i, 1)) return 0;
+        if (s[i] == '\0') return 1;
+    }
+    return 0;
+}
+
+static size_t vfs_bounded_strlen(const char *s, size_t max) {
+    size_t i;
+
+    if (!s) return 0;
+    for (i = 0; i < max; i++) {
+        if (s[i] == '\0') return i;
+    }
+    return max;
 }
 
 static int vfs_check_perm(vfs_node_t *node, int want) {
@@ -109,6 +164,7 @@ static const char *resolve_cwd_path(const char *pathname, char *resolved, size_t
 
     path_addr = (uint64_t)(uintptr_t)pathname;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return NULL;
+    if (!vfs_user_string_mapped(pathname, size)) return NULL;
 
     if (pathname[0] == '/') return pathname;
 
@@ -129,6 +185,45 @@ static const char *resolve_cwd_path(const char *pathname, char *resolved, size_t
     for (i = 0; i < path_len && pos < size - 1; i++) resolved[pos++] = pathname[i];
     resolved[pos] = '\0';
     return resolved;
+}
+
+static int split_parent_child_path(const char *path, char *parent_path, size_t parent_size, char *child, size_t child_size) {
+    int len;
+    int last_slash;
+    int i;
+    int j;
+
+    if (!path || !parent_path || !child || parent_size == 0 || child_size == 0) return -EFAULT;
+
+    len = 0;
+    while (path[len]) len++;
+
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
+        if (path[i] == '/') last_slash = i;
+    }
+
+    if (last_slash < 0) {
+        parent_path[0] = '/';
+        if (parent_size > 1) parent_path[1] = '\0';
+        for (i = 0; i < len && (size_t)i < child_size - 1; i++) child[i] = path[i];
+        child[i] = '\0';
+    } else if (last_slash == 0) {
+        parent_path[0] = '/';
+        if (parent_size > 1) parent_path[1] = '\0';
+        j = 0;
+        for (i = 1; i < len && (size_t)j < child_size - 1; i++, j++) child[j] = path[i];
+        child[j] = '\0';
+    } else {
+        for (i = 0; i < last_slash && (size_t)i < parent_size - 1; i++) parent_path[i] = path[i];
+        parent_path[i] = '\0';
+        j = 0;
+        for (i = last_slash + 1; i < len && (size_t)j < child_size - 1; i++, j++) child[j] = path[i];
+        child[j] = '\0';
+    }
+
+    if (child[0] == '\0') return -EINVAL;
+    return 0;
 }
 
 static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
@@ -208,7 +303,9 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
         }
     }
 
-    if (!node) return -ENOENT;
+    if (!node) {
+        return -ENOENT;
+    }
 
     {
         int want;
@@ -422,166 +519,91 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
     uint64_t path_addr;
     const char *path;
     uint64_t perms;
+    char resolved_path[256];
     char parent_path[256];
     char filename[64];
-    int len;
-    int last_slash;
+    int ret;
+    vfs_node_t *parent;
+    int perm_ret;
+    int r;
+
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = (const char *)path_addr;
+    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
-    
-    len = 0;
-    while (path[len]) len++;
-    last_slash = -1;
-    for (int i = 0; i < len; i++) {
-        if (path[i] == '/') last_slash = i;
-    }
-    if (last_slash < 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
-        filename[len < 63 ? len : 63] = '\0';
-    } else if (last_slash == 0) {
-        int j;
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        j = 0;
-        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-        filename[j] = '\0';
-    } else {
-        int j;
-        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
-        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        j = 0;
-        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-        filename[j] = '\0';
-    }
-    
-    vfs_node_t *parent = vfs_namei(parent_path);
+
+    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), filename, sizeof(filename));
+    if (ret < 0) return ret;
+
+    parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
-    {
-        int perm_ret;
-        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
-    }
-    {
-        int r;
-        r = vfs_create(parent, filename, perms);
-        vfs_release(parent);
-        return r;
-    }
+    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    r = vfs_create(parent, filename, perms);
+    vfs_release(parent);
+    return r;
 }
 
 static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
     uint64_t path_addr;
     const char *path;
     uint64_t perms;
+    char resolved_path[256];
     char parent_path[256];
     char dirname[64];
-    int len;
-    int last_slash;
+    int ret;
+    vfs_node_t *parent;
+    int perm_ret;
+    int r;
+
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = (const char *)path_addr;
+    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
-    
-    len = 0;
-    while (path[len]) len++;
-    last_slash = -1;
-    for (int i = 0; i < len; i++) {
-        if (path[i] == '/') last_slash = i;
-    }
-    if (last_slash < 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        for (int i = 0; i < len && i < 63; i++) dirname[i] = path[i];
-        dirname[len < 63 ? len : 63] = '\0';
-    } else if (last_slash == 0) {
-        int j;
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        j = 0;
-        for (int i = 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
-        dirname[j] = '\0';
-    } else {
-        int j;
-        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
-        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        j = 0;
-        for (int i = last_slash + 1; i < len && j < 63; i++, j++) dirname[j] = path[i];
-        dirname[j] = '\0';
-    }
-    
-    vfs_node_t *parent = vfs_namei(parent_path);
+
+    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), dirname, sizeof(dirname));
+    if (ret < 0) return ret;
+
+    parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
-    {
-        int perm_ret;
-        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
-    }
-    {
-        int r;
-        r = vfs_mkdir(parent, dirname, perms);
-        vfs_release(parent);
-        return r;
-    }
+    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    r = vfs_mkdir(parent, dirname, perms);
+    vfs_release(parent);
+    return r;
 }
 
 static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     uint64_t path_addr;
     const char *path;
+    char resolved_path[256];
     char parent_path[256];
     char filename[64];
-    int len;
-    int last_slash;
+    int ret;
+    vfs_node_t *parent;
+    int perm_ret;
+    int r;
+
     (void)unused1; (void)unused2;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = (const char *)path_addr;
-    
-    len = 0;
-    while (path[len]) len++;
-    last_slash = -1;
-    for (int i = 0; i < len; i++) {
-        if (path[i] == '/') last_slash = i;
-    }
-    if (last_slash < 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        for (int i = 0; i < len && i < 63; i++) filename[i] = path[i];
-        filename[len < 63 ? len : 63] = '\0';
-    } else if (last_slash == 0) {
-        int j;
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        j = 0;
-        for (int i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-        filename[j] = '\0';
-    } else {
-        int j;
-        for (int i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
-        parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        j = 0;
-        for (int i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-        filename[j] = '\0';
-    }
-    
-    vfs_node_t *parent = vfs_namei(parent_path);
+    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    if (!path) return -EFAULT;
+
+    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), filename, sizeof(filename));
+    if (ret < 0) return ret;
+
+    parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
-    {
-        int perm_ret;
-        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-        if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
-    }
-    {
-        int r;
-        r = vfs_unlink(parent, filename);
-        vfs_release(parent);
-        return r;
-    }
+    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    r = vfs_unlink(parent, filename);
+    vfs_release(parent);
+    return r;
 }
 
 struct statfs_kernel {
@@ -613,6 +635,7 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     extern int ramfs_get_stats(ramfs_stats_t *stats);
     vfs_mount_t *mount;
     vfs_mount_t *best;
+    vfs_node_t *root;
 
 
     memset(buf, 0, sizeof(struct statfs_kernel));
@@ -624,7 +647,8 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     for (i = 0; i < mount_count; i++) {
         mount = vfs_get_mount(i);
         if (!mount) continue;
-        mlen = strlen(mount->path);
+        mlen = vfs_bounded_strlen(mount->path, VFS_MAX_PATH);
+        if (mlen == VFS_MAX_PATH) continue;
         if (strncmp(path, mount->path, mlen) == 0 &&
             (path[mlen] == '\0' || path[mlen] == '/' ||
              (mlen == 1 && mount->path[0] == '/'))) {
@@ -636,6 +660,13 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     fsname = (best && best->fs_type && best->fs_type->name) ? best->fs_type->name : "";
+
+    if (!fsname[0] && path && path[0] == '/') {
+        root = vfs_get_root();
+        if (root && root->private_data && ext4_get_stats(NULL, NULL, NULL) == 0) {
+            fsname = "ext4";
+        }
+    }
 
     if (strcmp(fsname, "ext4") == 0) {
         uint64_t total_blocks, free_blocks;
@@ -737,12 +768,23 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
 }
 
 static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
-    uint64_t path_addr = (uint64_t)path_ptr;
-    int size = (int)(uintptr_t)size_ptr;
-    uint64_t buf_addr = (uint64_t)buf_ptr_int;
-    const char *path;
+    uint64_t path_addr;
+    int size;
+    uint64_t buf_addr;
+    uint64_t arg2_addr;
+    char path[VFS_MAX_PATH];
     struct statfs_kernel *buf;
+    size_t i;
 
+    path_addr = (uint64_t)path_ptr;
+    size = (int)(uintptr_t)size_ptr;
+    buf_addr = (uint64_t)buf_ptr_int;
+    arg2_addr = (uint64_t)(uintptr_t)size_ptr;
+    if ((buf_addr < 0x1000 || buf_addr >= KERNEL_VMA) &&
+        arg2_addr >= 0x1000 && arg2_addr < KERNEL_VMA) {
+        buf_addr = arg2_addr;
+        size = (int)sizeof(struct statfs_kernel);
+    }
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) {
         return -EFAULT;
     }
@@ -754,7 +796,14 @@ static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
         return -EINVAL;
     }
 
-    path = (const char *)path_addr;
+    if (!vfs_user_string_mapped((const char *)path_addr, sizeof(path))) {
+        return -EFAULT;
+    }
+    for (i = 0; i < sizeof(path); i++) {
+        path[i] = ((const char *)path_addr)[i];
+        if (path[i] == '\0') break;
+    }
+    path[sizeof(path) - 1] = '\0';
     buf = (struct statfs_kernel *)buf_addr;
 
     fill_statfs_for_path(path, buf);
@@ -765,7 +814,15 @@ static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
 static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
     int size = (int)(uintptr_t)size_ptr;
     uint64_t buf_addr = (uint64_t)buf_ptr_int;
+    uint64_t arg2_addr;
     struct statfs_kernel *buf;
+
+    arg2_addr = (uint64_t)(uintptr_t)size_ptr;
+    if ((buf_addr < 0x1000 || buf_addr >= KERNEL_VMA) &&
+        arg2_addr >= 0x1000 && arg2_addr < KERNEL_VMA) {
+        buf_addr = arg2_addr;
+        size = (int)sizeof(struct statfs_kernel);
+    }
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) {

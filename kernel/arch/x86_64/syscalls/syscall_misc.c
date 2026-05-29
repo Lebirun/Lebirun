@@ -130,6 +130,7 @@ static int sys_uname(struct utsname *buf) {
     int i;
     
     if (!buf) return -EFAULT;
+    if (!user_range_mapped_misc((uint64_t)(uintptr_t)buf, sizeof(struct utsname))) return -EFAULT;
     
     copy_string(buf->sysname, OS_NAME, 65);
     copy_string(buf->nodename, NODENAME, 65);
@@ -161,6 +162,7 @@ static int sys_sysinfo(struct sysinfo *info) {
     int proc_count;
     
     if (!info) return -EFAULT;
+    if (!user_range_mapped_misc((uint64_t)(uintptr_t)info, sizeof(struct sysinfo))) return -EFAULT;
     
     memset(info, 0, sizeof(struct sysinfo));
     

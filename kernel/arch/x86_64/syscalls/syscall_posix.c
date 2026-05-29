@@ -6,7 +6,6 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/drivers/sata/ahci.h>
-#include <lebirun/fs/ext4/ext4.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
@@ -363,26 +362,32 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
 
 static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     uint64_t addr;
-    const char *path;
+    char *path;
     char *resolved;
+    vfs_node_t *node;
+    int ret;
+    int i;
+
     (void)unused1; (void)unused2;
     addr = (uint64_t)path_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    path = (const char *)addr;
+    ret = posix_copy_user_string(&path, (const char *)addr, 256);
+    if (ret < 0) return ret;
     if (strncmp(path, "/ro", 3) == 0 && (path[3] == '\0' || path[3] == '/')) {
+        kfree(path);
         return -EACCES;
     }
-    vfs_node_t *node = vfs_namei(path);
-    if (!node) return -ENOENT;
-    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) { vfs_release(node); return -ENOTDIR; }
-    if (!current_task) { vfs_release(node); return -EFAULT; }
+    node = vfs_namei(path);
+    if (!node) { kfree(path); return -ENOENT; }
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) { vfs_release(node); kfree(path); return -ENOTDIR; }
+    if (!current_task) { vfs_release(node); kfree(path); return -EFAULT; }
     resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
     if (!resolved) {
-        int i = 0;
+        i = 0;
         while (path[i] && i < 254) { current_task->cwd[i] = path[i]; i++; }
         current_task->cwd[i] = '\0';
     }
     vfs_release(node);
+    kfree(path);
     return 0;
 }
 
@@ -391,15 +396,18 @@ static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
 static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
     uint64_t addr;
     int mode;
-    const char *path;
+    char *path;
     vfs_node_t *node;
     uint64_t perms;
+    int ret;
+
     (void)unused;
     addr = (uint64_t)path_ptr;
     mode = (int)(uintptr_t)mode_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    path = (const char *)addr;
+    ret = posix_copy_user_string(&path, (const char *)addr, 256);
+    if (ret < 0) return ret;
     node = vfs_namei(path);
+    kfree(path);
     if (!node) return -ENOENT;
     if (mode == 0) { vfs_release(node); return 0; }
     if (current_task && current_task->uid == 0) { vfs_release(node); return 0; }
@@ -457,15 +465,19 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
 static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
     uint64_t path_addr;
     uint64_t buf_addr;
-    const char *path;
+    char *path;
     struct kernel_stat *st;
+    vfs_node_t *node;
+    int ret;
+
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     buf_addr = (uint64_t)(uintptr_t)buf_ptr;
-    if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    path = (const char *)path_addr;
-    vfs_node_t *node = vfs_namei(path);
+    ret = posix_copy_user_string(&path, (const char *)path_addr, 256);
+    if (ret < 0) return ret;
+    node = vfs_namei(path);
+    kfree(path);
     if (!node) return -ENOENT;
     st = (struct kernel_stat *)buf_addr;
     memset(st, 0, sizeof(struct kernel_stat));
@@ -1249,24 +1261,51 @@ static int sys_link(int oldpath_ptr, const char *newpath_ptr, int unused) {
     return -1;
 }
 
+static int posix_vfs_symlink(const char *target, const char *linkpath, uint64_t flags) {
+    if (ext4_vfs_symlink_node(target, linkpath, flags) == 0) {
+        return 0;
+    }
+    return -ENOSYS;
+}
+
 static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
     const char *target;
     const char *linkpath;
+    char *target_copy;
+    char *link_copy;
     int ret;
 
     (void)unused;
     target = (const char *)(uintptr_t)target_ptr;
     linkpath = (const char *)(uintptr_t)linkpath_ptr;
 
-    if (!target || (uint64_t)target < 0x1000 || (uint64_t)target >= KERNEL_VMA) return -EFAULT;
-    if (!linkpath || (uint64_t)linkpath < 0x1000 || (uint64_t)linkpath >= KERNEL_VMA) return -EFAULT;
+    ret = posix_copy_user_string(&target_copy, target, VFS_MAX_PATH);
+    if (ret < 0) return ret;
+    ret = posix_copy_user_string(&link_copy, linkpath, VFS_MAX_PATH);
+    if (ret < 0) {
+        kfree(target_copy);
+        return ret;
+    }
 
-    ret = ramfs_create_symlink(linkpath, target, 0777);
+    ret = posix_vfs_symlink(target_copy, link_copy, (uint64_t)unused);
+    if (ret == -ENOSYS) {
+        ret = ramfs_create_symlink(link_copy, target_copy, 0777);
+        if (ret == 0) {
+            kfree(target_copy);
+            kfree(link_copy);
+            return 0;
+        }
+        if (ret == RAMFS_ERR_EXIST) ret = -EEXIST;
+        else if (ret == RAMFS_ERR_NOENT) ret = -ENOENT;
+        else if (ret == RAMFS_ERR_NOSPC) ret = -ENOSPC;
+        else if (ret == RAMFS_ERR_NOMEM) ret = -ENOMEM;
+        else ret = -EIO;
+    }
+
+    kfree(target_copy);
+    kfree(link_copy);
     if (ret == 0) return 0;
-    if (ret == RAMFS_ERR_EXIST) return -EEXIST;
-    if (ret == RAMFS_ERR_NOENT) return -ENOENT;
-    if (ret == RAMFS_ERR_NOSPC) return -ENOSPC;
-    if (ret == RAMFS_ERR_NOMEM) return -ENOMEM;
+    if (ret == -EEXIST || ret == -ENOENT || ret == -ENOSPC || ret == -ENOMEM || ret == -EINVAL || ret == -ENOTDIR) return ret;
     return -EIO;
 }
 

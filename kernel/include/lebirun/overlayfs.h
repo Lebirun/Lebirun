@@ -25,6 +25,13 @@ typedef struct overlay_node {
     vfs_node_t *lower_node;
     vfs_node_t *upper_node;
     overlay_context_t *ctx;
+    uint64_t rd_last_index;
+    uint64_t rd_upper_count;
+    uint64_t rd_lower_index;
+    uint64_t rd_visible_count;
+    int rd_phase;
+    int open_count;
+    int parent_pinned;
     int refcount;
 } overlay_node_t;
 

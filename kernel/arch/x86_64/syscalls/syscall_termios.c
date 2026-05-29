@@ -500,8 +500,14 @@ static int sys_tcflush(int fd, const char *queue_ptr, int unused) {
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
     
-    (void)queue;
-    return 0;
+    if (queue == TCIFLUSH || queue == TCIOFLUSH) {
+        keyboard_flush_for(tty_id);
+        syscall_core_flush_tty_input(tty_id);
+        return 0;
+    }
+    if (queue == TCOFLUSH)
+        return 0;
+    return -EINVAL;
 }
 
 static int sys_tcflow(int fd, const char *action_ptr, int unused) {
