@@ -7,6 +7,9 @@
 extern int is_socket_fd(int fd);
 extern int socket_close_fd(int fd);
 
+#define VFS_RW_STACK_BUF 512
+#define VFS_RW_HEAP_LIMIT 16384
+
 static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
     uint64_t p;
@@ -120,13 +123,10 @@ static int task_fd_alloc_from(int start) {
     if (start < 0) start = 0;
     for (i = start; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
+            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
             current_task->fds[i].type = FD_TYPE_FILE;
-            current_task->fds[i].node = NULL;
-            current_task->fds[i].offset = 0;
-            current_task->fds[i].flags = 0;
-            current_task->fds[i].private_data = NULL;
             return i;
         }
     }
@@ -142,13 +142,10 @@ static int task_fd_alloc_from(int start) {
     if (start > i) i = start;
     current_task->fds = new_fds;
     current_task->fds_capacity = new_cap;
+    memset(&current_task->fds[i], 0, sizeof(task_fd_t));
     current_task->fds[i].in_use = 1;
     current_task->fds[i].ref_count = 1;
     current_task->fds[i].type = FD_TYPE_FILE;
-    current_task->fds[i].node = NULL;
-    current_task->fds[i].offset = 0;
-    current_task->fds[i].flags = 0;
-    current_task->fds[i].private_data = NULL;
     return i;
 }
 
@@ -343,7 +340,6 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
 }
 
 static int sys_vfs_close(int fd, const char *unused1, int unused2) {
-    uint8_t *rbuf;
     task_fd_t *tfd;
     pipe_t *p;
     vfs_node_t *node;
@@ -355,7 +351,6 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
-    rbuf = tfd->read_buf;
     p = NULL;
     node = NULL;
 
@@ -372,7 +367,6 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
             }
         }
         memset(tfd, 0, sizeof(*tfd));
-        if (rbuf) kfree(rbuf);
         task_fd_reclaim_unused(current_task);
         return 0;
     }
@@ -380,21 +374,26 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node = (vfs_node_t *)tfd->node;
         memset(tfd, 0, sizeof(*tfd));
-        if (rbuf) kfree(rbuf);
         vfs_close(node);
         task_fd_reclaim_unused(current_task);
         return 0;
     }
 
     memset(tfd, 0, sizeof(*tfd));
-    if (rbuf) kfree(rbuf);
     task_fd_reclaim_unused(current_task);
     return 0;
 }
 
 static int sys_vfs_read(int fd, const char *buf, int len) {
     uint64_t buf_addr;
+    uint64_t work_size;
+    uint64_t remaining;
+    uint64_t total;
+    uint64_t chunk;
     uint64_t bytes;
+    uint8_t stack_buf[VFS_RW_STACK_BUF];
+    uint8_t *kbuf;
+    int heap_buf;
     task_fd_t *tfd;
     vfs_node_t *node;
 
@@ -407,13 +406,39 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
+    work_size = (uint64_t)len;
+    if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
+    heap_buf = 0;
+    if (work_size <= VFS_RW_STACK_BUF) {
+        kbuf = stack_buf;
+    } else {
+        kbuf = (uint8_t *)kmalloc(work_size);
+        if (!kbuf) return -ENOMEM;
+        heap_buf = 1;
+    }
+
     tfd = &current_task->fds[fd];
-    if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) {
+        if (heap_buf) kfree(kbuf);
+        return -EBADF;
+    }
     node = (vfs_node_t *)tfd->node;
-    bytes = vfs_read(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
-    if (bytes > (uint64_t)len) bytes = (uint64_t)len;
-    tfd->offset += bytes;
-    return (int)bytes;
+    total = 0;
+    remaining = (uint64_t)len;
+    while (remaining > 0) {
+        chunk = remaining;
+        if (chunk > work_size) chunk = work_size;
+        bytes = vfs_read(node, tfd->offset + total, chunk, kbuf);
+        if (bytes > chunk) bytes = chunk;
+        if (bytes == 0) break;
+        memcpy((void *)(buf_addr + total), kbuf, bytes);
+        total += bytes;
+        remaining -= bytes;
+        if (bytes < chunk) break;
+    }
+    tfd->offset += total;
+    if (heap_buf) kfree(kbuf);
+    return (int)total;
 }
 
 int sys_vfs_readdir(registers_t *regs) {

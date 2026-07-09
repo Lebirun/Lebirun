@@ -10,6 +10,24 @@
 
 static ahci_controller_t g_ahci_controller;
 
+static uint64_t ahci_required_port_capacity(uint64_t ports_impl) {
+    uint64_t i;
+    uint64_t capacity;
+
+    capacity = 0;
+    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+        if (ports_impl & (1 << i)) capacity = i + 1;
+    }
+    if (capacity == 0) capacity = 1;
+    return capacity;
+}
+
+static ahci_port_t *ahci_port_slot(uint64_t index) {
+    if (!g_ahci_controller.ports) return NULL;
+    if (index >= g_ahci_controller.ports_capacity) return NULL;
+    return &g_ahci_controller.ports[index];
+}
+
 static inline uint64_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
                       (func << 8) | (offset & 0xFC) | 0x80000000);
@@ -757,11 +775,10 @@ ahci_controller_t *ahci_get_controller(void) {
 }
 
 ahci_port_t *ahci_get_port(uint64_t index) {
-    if (index >= AHCI_MAX_PORTS) {
-        return NULL;
-    }
-    
-    ahci_port_t *port = &g_ahci_controller.ports[index];
+    ahci_port_t *port;
+
+    port = ahci_port_slot(index);
+    if (!port) return NULL;
     if (!port->present) {
         return NULL;
     }
@@ -785,7 +802,9 @@ void ahci_debug_info(void) {
     printf("Command Slots: %u\n", g_ahci_controller.num_cmd_slots);
     
     for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
-        ahci_port_t *port = &g_ahci_controller.ports[i];
+        ahci_port_t *port = ahci_port_slot(i);
+        if (!port)
+            continue;
         if (!port->present)
             continue;
         
@@ -831,6 +850,7 @@ int ahci_init(void) {
     uint64_t cap;
     uint64_t ghc;
     uint64_t ports_impl;
+    uint64_t ports_capacity;
     uint64_t offset;
     uint64_t i;
     ahci_port_t *port;
@@ -848,6 +868,14 @@ int ahci_init(void) {
     g_ahci_controller.num_cmd_slots = ((cap >> 8) & 0x1F) + 1;
     g_ahci_controller.ports_impl = ahci_hba_read(abar_virt, AHCI_PI);
     g_ahci_controller.version = ahci_hba_read(abar_virt, AHCI_VS);
+    ports_capacity = ahci_required_port_capacity(g_ahci_controller.ports_impl);
+    g_ahci_controller.ports = (ahci_port_t *)kmalloc(ports_capacity * sizeof(ahci_port_t));
+    if (!g_ahci_controller.ports) {
+        printf("AHCI: Failed to allocate port table\n");
+        return -1;
+    }
+    memset(g_ahci_controller.ports, 0, ports_capacity * sizeof(ahci_port_t));
+    g_ahci_controller.ports_capacity = ports_capacity;
     
     printf("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n", cap, g_ahci_controller.ports_impl, g_ahci_controller.version);
     printf("AHCI: Version %u.%u, %u command slots\n",
@@ -864,7 +892,9 @@ int ahci_init(void) {
         if (!(ports_impl & (1 << i)))
             continue;
         
-        port = &g_ahci_controller.ports[i];
+        port = ahci_port_slot(i);
+        if (!port)
+            continue;
         port->port_num = i;
         port->hba_base = abar_virt;
         port->port_base = abar_virt + AHCI_PORT_BASE + (i * AHCI_PORT_SIZE);
@@ -1298,8 +1328,8 @@ void ahci_irq_handler(void *regs) {
     
     for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
         if (is & (1 << i)) {
-            ahci_port_t *port = &g_ahci_controller.ports[i];
-            if (port->present) {
+            ahci_port_t *port = ahci_port_slot(i);
+            if (port && port->present) {
                 ahci_port_irq_handler(port);
             }
         }
@@ -1331,7 +1361,9 @@ void ahci_enable_interrupts(void) {
     ahci_hba_write(g_ahci_controller.abar_virt, AHCI_GHC, ghc);
     
     for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
-        ahci_port_t *port = &g_ahci_controller.ports[i];
+        ahci_port_t *port = ahci_port_slot(i);
+        if (!port)
+            continue;
         if (port->present) {
             uint64_t ie = AHCI_PxIS_DHRS | AHCI_PxIS_PSS | AHCI_PxIS_DSS |
                           AHCI_PxIS_SDBS | AHCI_PxIS_FATAL;
@@ -1353,7 +1385,9 @@ void ahci_disable_interrupts(void) {
     ahci_hba_write(g_ahci_controller.abar_virt, AHCI_GHC, ghc);
     
     for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
-        ahci_port_t *port = &g_ahci_controller.ports[i];
+        ahci_port_t *port = ahci_port_slot(i);
+        if (!port)
+            continue;
         if (port->present) {
             ahci_port_write(port, AHCI_PxIE, 0);
             port->use_irq = false;

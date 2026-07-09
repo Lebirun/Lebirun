@@ -5,6 +5,7 @@ set -e
 VERBOSE=0
 DO_BUILD=0
 NO_BUILD=0
+ISO_ARGS=""
 MEMORY=1G
 SMP=2
 LAN_ADDR=230.0.0.1
@@ -12,7 +13,7 @@ LAN_PORT=12345
 
 for arg in "$@"; do
   case "$arg" in
-    -v|--verbose) VERBOSE=1 ;;
+    -v|--verbose) VERBOSE=1; ISO_ARGS="$ISO_ARGS -v" ;;
     -b|--build) DO_BUILD=1 ;;
     --no-build) NO_BUILD=1 ;;
     --lan=*) LAN_ADDR="${arg#--lan=}" ;;
@@ -28,9 +29,14 @@ done
 
 if [ "$NO_BUILD" -eq 0 ]; then
     if [ "$DO_BUILD" -eq 1 ] || [ ! -f lebirun.iso ]; then
-        printf "\033[1;34mBuilding before launch...\033[0m\n"
-        ./build.sh
+        printf "\033[1;34mBuilding ISO before launch...\033[0m\n"
+        ./iso.sh $ISO_ARGS
     fi
+fi
+
+if [ ! -f lebirun.iso ]; then
+    printf "\033[1;31mError: lebirun.iso not found. Run ./iso.sh or omit --no-build.\033[0m\n"
+    exit 1
 fi
 
 MAC_SEED=$$
@@ -59,16 +65,11 @@ if [ -t 0 ]; then
     trap cleanup_tty EXIT INT TERM HUP
 fi
 
-CDROM_ARGS=""
-if [ -f lebirun.iso ]; then
-    CDROM_ARGS="-cdrom lebirun.iso"
-fi
-
 $QEMU_CMD \
     -m "$MEMORY" \
     -smp "$SMP" \
     -vga qxl \
-    $CDROM_ARGS \
+    -cdrom lebirun.iso \
     -serial stdio \
     -netdev socket,id=net0,mcast="$LAN_ADDR:$LAN_PORT" \
     -device e1000,netdev=net0,mac="$MAC" \

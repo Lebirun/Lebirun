@@ -2,7 +2,7 @@
 #include <lebirun/elf.h>
 #include <lebirun/vfs.h>
 
-extern void *syscall_table[];
+extern void **syscall_table;
 
 #define RTLD_LAZY    0x00001
 #define RTLD_NOW     0x00002

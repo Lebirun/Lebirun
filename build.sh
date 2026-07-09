@@ -178,15 +178,21 @@ if command -v grub-mkimage >/dev/null 2>&1; then
   mkdir -p root/boot/grub/i386-pc
   if [ ! -f root/boot/grub/i386-pc/core.img ]; then
     GRUB_EARLY_CFG=$(mktemp)
+    GRUB_CORE_TMP=root/boot/grub/i386-pc/core.img.tmp
     cat > "$GRUB_EARLY_CFG" <<'GRUBEOF'
 set root=(hd0,msdos1)
 set prefix=(hd0,msdos1)/boot/grub
 insmod normal
 normal
 GRUBEOF
-    grub-mkimage -O i386-pc -o root/boot/grub/i386-pc/core.img \
+    if grub-mkimage -O i386-pc -o "$GRUB_CORE_TMP" \
       -c "$GRUB_EARLY_CFG" \
-      -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile
+      -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile; then
+      mv "$GRUB_CORE_TMP" root/boot/grub/i386-pc/core.img
+    else
+      rm -f "$GRUB_CORE_TMP"
+      printf "\033[0;33mWarning: skipping installed-system GRUB core image; install grub-pc-bin if needed.\033[0m\n"
+    fi
     rm -f "$GRUB_EARLY_CFG"
   fi
   if [ -f /usr/lib/grub/i386-pc/boot.img ]; then
@@ -215,10 +221,10 @@ if [ -d "sysroot/usr/lib" ]; then
     [ -f "$GCC_LIB/$f" ] && cp "$GCC_LIB/$f" "root/usr/lib/$f"
   done
   for f in root/usr/lib/*.a; do
-    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
   done
   for f in root/usr/lib/*.o; do
-    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
   done
 fi
 if [ -d "sysroot/usr/include" ]; then
@@ -235,7 +241,7 @@ if [ -f "libc/user.ld" ]; then
   cp libc/user.ld root/usr/lib/user.ld
 fi
 for f in root/bin/* root/sbin/*; do
-  [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null
+  [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
 done
 
 if [ -d "root" ]; then
@@ -308,7 +314,9 @@ if [ -d "root" ]; then
       run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -comp xz -b 131072 -no-xattrs -noappend -quiet -no-progress \
         -e usr/include/c++ usr/lib/libstdc++.a usr/lib/libsupc++.a usr/lib/libgcc.a
     else
-      run_cmd "Building rootfs (fallback)" ./mkinitrd.sh root rootfs.squashfs
+      cleanup_bar
+      printf "\033[1;31mError: mksquashfs not found; install squashfs-tools.\033[0m\n"
+      exit 1
     fi
   else
     bar_print "$(printf '\033[0;33mSkipping rootfs (up to date)\033[0m')"

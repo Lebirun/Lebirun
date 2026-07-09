@@ -5,6 +5,8 @@
 #include <lebirun/mutex.h>
 #include <string.h>
 
+#define THREAD_INITIAL_CAPACITY 4
+
 thread_t *current_thread = NULL;
 thread_t *thread_ready_head = NULL;
 static thread_t *threads;
@@ -19,7 +21,9 @@ static int thread_grow(void) {
     int new_cap;
     thread_t *new_arr;
 
-    new_cap = thread_capacity == 0 ? MAX_THREADS : thread_capacity * 2;
+    if (thread_capacity >= MAX_THREADS) return -1;
+    new_cap = thread_capacity == 0 ? THREAD_INITIAL_CAPACITY : thread_capacity * 2;
+    if (new_cap > MAX_THREADS) new_cap = MAX_THREADS;
     new_arr = (thread_t *)kmalloc(new_cap * sizeof(thread_t));
     if (!new_arr) return -1;
     memset(new_arr, 0, new_cap * sizeof(thread_t));
@@ -35,6 +39,7 @@ static int thread_grow(void) {
 static thread_t *thread_alloc(void) {
     int i;
     int old_cap;
+
     for (i = 0; i < thread_capacity; i++) {
         if (threads[i].state == THREAD_DEAD) {
             memset(&threads[i], 0, sizeof(thread_t));
@@ -60,8 +65,10 @@ static void thread_add_to_ready(thread_t *thread) {
 }
 
 static thread_t *thread_remove_from_ready(void) {
+    thread_t *thread;
+
     if (!thread_ready_head) return NULL;
-    thread_t *thread = thread_ready_head;
+    thread = thread_ready_head;
     thread_ready_head = thread->next;
     thread->next = NULL;
     return thread;
@@ -77,9 +84,11 @@ void init_threads(void) {
 }
 
 thread_t *create_thread(void (*entry)(void *arg), void *arg) {
+    thread_t *thread;
+
     mutex_lock(&thread_lock);
     
-    thread_t *thread = thread_alloc();
+    thread = thread_alloc();
     if (!thread) {
         mutex_unlock(&thread_lock);
         return NULL;
@@ -115,6 +124,9 @@ static void thread_entry_wrapper(void) {
 }
 
 void schedule_thread(void) {
+    thread_t *next;
+    thread_t *prev;
+
     if (!current_thread) {
         current_thread = thread_remove_from_ready();
         if (current_thread) {
@@ -128,9 +140,9 @@ void schedule_thread(void) {
         current_thread->state = THREAD_READY;
     }
     
-    thread_t *next = thread_remove_from_ready();
+    next = thread_remove_from_ready();
     if (next) {
-        thread_t *prev = current_thread;
+        prev = current_thread;
         current_thread = next;
         current_thread->state = THREAD_RUNNING;
         if (prev != current_thread) {

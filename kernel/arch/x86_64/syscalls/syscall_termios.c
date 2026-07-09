@@ -76,6 +76,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     for (i = minfd; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
             newfd = i;
+            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
             break;
@@ -87,6 +88,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
         for (i = minfd; i < current_task->fds_capacity; i++) {
             if (!current_task->fds[i].in_use) {
                 newfd = i;
+                memset(&current_task->fds[i], 0, sizeof(task_fd_t));
                 current_task->fds[i].in_use = 1;
                 current_task->fds[i].ref_count = 1;
                 break;

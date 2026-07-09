@@ -1,6 +1,6 @@
 #include "syscall_defs.h"
 
-extern void *syscall_table[];
+extern void **syscall_table;
 
 #define REG_EXTENDED    1
 #define REG_ICASE       2

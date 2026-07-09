@@ -23,7 +23,7 @@
 #define RAMFS_ERR_BUSY         -11
 
 typedef struct ramfs_node {
-    char name[RAMFS_MAX_NAME_LEN];
+    char *name;
     uint8_t type;
     uint16_t permissions;
     uint64_t uid;

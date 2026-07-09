@@ -736,13 +736,20 @@ void kfree_aligned(void *ptr) {
     kfree(base);
 }
 
-static void kfree_internal(void *ptr) {
+static void kfree_internal(void *ptr, void *caller) {
     heap_block_t *block;
+    uint64_t block_addr;
 
     block = get_block_from_ptr(ptr);
+    block_addr = (uint64_t)block;
+
+    if (block_addr < kernel_heap.start_addr || block_addr >= kernel_heap.end_addr) {
+        printf("kfree: Invalid pointer 0x%08X outside heap caller=0x%016lX\n", (uint64_t)ptr, (uint64_t)caller);
+        return;
+    }
 
     if (block->magic != HEAP_MAGIC) {
-        printf("kfree: Invalid pointer 0x%08X (bad magic 0x%08X)\n", (uint64_t)ptr, block->magic);
+        printf("kfree: Invalid pointer 0x%08X (bad magic 0x%08X) caller=0x%016lX\n", (uint64_t)ptr, block->magic, (uint64_t)caller);
         heap_verify();
         return;
     }
@@ -771,14 +778,17 @@ static void kfree_internal(void *ptr) {
 }
 
 void kfree(void *ptr) {
+    void *caller;
+
     if (!ptr) return;
     if (is_early_heap_ptr(ptr)) return;
+    caller = __builtin_return_address(0);
     if (slab_owns(ptr)) {
-        slab_free(ptr, __builtin_return_address(0));
+        slab_free(ptr, caller);
         return;
     }
     heap_lock_acquire();
-    kfree_internal(ptr);
+    kfree_internal(ptr, caller);
     heap_lock_release();
 }
 

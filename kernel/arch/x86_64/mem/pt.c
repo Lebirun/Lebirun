@@ -34,14 +34,15 @@ static inline void vmm_pae_lock_release(void) {
     if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-#define PT_VMM_PT_INIT_SIZE 256
+#define PT_VMM_PT_BOOT_SIZE 32
+#define PT_VMM_PT_MIN_GROW_SIZE 256
 
 static uint64_t *pt_heap_page_tables[16];
 static uint64_t pt_heap_pt_count = 0;
-static uint64_t *pt_vmm_pt_static[PT_VMM_PT_INIT_SIZE];
-uint64_t **pt_vmm_page_tables = pt_vmm_pt_static;
+static uint64_t *pt_vmm_pt_boot[PT_VMM_PT_BOOT_SIZE];
+uint64_t **pt_vmm_page_tables = pt_vmm_pt_boot;
 uint64_t pt_vmm_pt_count = 0;
-uint64_t pt_vmm_pt_capacity = PT_VMM_PT_INIT_SIZE;
+uint64_t pt_vmm_pt_capacity = PT_VMM_PT_BOOT_SIZE;
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
@@ -56,8 +57,38 @@ static void *pt_alloc_pt_page(void) {
     return pmm_alloc_low_page();
 }
 
-static int pt_vmm_pt_grow(void) {
-    return -1;
+int pt_vmm_pt_grow(void) {
+    uint64_t new_capacity;
+    uint64_t bytes;
+    uint64_t **new_tables;
+    uint64_t **old_tables;
+
+    if (!pfa_bitmap) return -1;
+
+    new_capacity = pt_vmm_pt_capacity * 2;
+    if (new_capacity < PT_VMM_PT_MIN_GROW_SIZE) {
+        new_capacity = PT_VMM_PT_MIN_GROW_SIZE;
+    }
+    if (new_capacity <= pt_vmm_pt_capacity) return -1;
+
+    bytes = new_capacity * sizeof(uint64_t *);
+    new_tables = (uint64_t **)kmalloc(bytes);
+    if (!new_tables) return -1;
+
+    memset(new_tables, 0, bytes);
+    if (pt_vmm_pt_count) {
+        memcpy(new_tables, pt_vmm_page_tables, pt_vmm_pt_count * sizeof(uint64_t *));
+    }
+
+    old_tables = pt_vmm_page_tables;
+    pt_vmm_page_tables = new_tables;
+    pt_vmm_pt_capacity = new_capacity;
+
+    if (old_tables != pt_vmm_pt_boot) {
+        kfree(old_tables);
+    }
+
+    return 0;
 }
 
 #define PT_TEMP_ZERO_VIRT TEMP_SLOT(7)

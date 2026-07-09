@@ -151,7 +151,9 @@ static void proc_collect_memory_report(void) {
 }
 
 static void proc_collect_memory_detail(void) {
-    proc_collect_memory_report();
+    task_memory_collect_for_report();
+    console_reclaim_unused();
+    pfa_ref_gc();
 }
 
 static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {

@@ -1,9 +1,6 @@
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/drivers/net/ipv4.h>
 #include <lebirun/drivers/net/ipv6.h>
-#if CONFIG_DRIVER_NET_IPV67
-#include <lebirun/drivers/net/ipv67.h>
-#endif
 #include <lebirun/drivers/net/dhcp.h>
 #include <lebirun/drivers/net/dns.h>
 #include <lebirun/drivers/net/net.h>
@@ -15,10 +12,23 @@
 
 static udp_socket_t *udp_sockets = NULL;
 static uint16_t udp_ephemeral_port = 49152;
+static const udp_port_hook_t *udp_port_hook;
 
 void udp_init(void) {
     udp_sockets = NULL;
     udp_ephemeral_port = 49152;
+    udp_port_hook = NULL;
+}
+
+int udp_register_port_hook(const udp_port_hook_t *hook) {
+    if (!hook) return -1;
+    if (udp_port_hook && udp_port_hook != hook) return -2;
+    udp_port_hook = hook;
+    return 0;
+}
+
+void udp_unregister_port_hook(const udp_port_hook_t *hook) {
+    if (udp_port_hook == hook) udp_port_hook = NULL;
 }
 
 static uint16_t udp_pseudo_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
@@ -184,18 +194,14 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         dns_receive(netif, src, src_port, payload, payload_len);
     }
 
-#if CONFIG_DRIVER_NET_IPV67
-    if (ipv67_port_active(dest_port)) {
+    if (udp_port_hook && udp_port_hook->port_active && udp_port_hook->receive4 && udp_port_hook->port_active(dest_port)) {
         src_ipv4 = ((uint32_t)src.octets[0] << 24) |
                    ((uint32_t)src.octets[1] << 16) |
                    ((uint32_t)src.octets[2] << 8) |
                    (uint32_t)src.octets[3];
-        ipv67_receive_on_port(dest_port, src_ipv4, src_port, payload, payload_len);
+        udp_port_hook->receive4(dest_port, src_ipv4, src_port, payload, payload_len);
         return;
     }
-#else
-    (void)src_ipv4;
-#endif
 
     sock = udp_sockets;
     while (sock) {
@@ -234,17 +240,16 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);
 
-#if CONFIG_DRIVER_NET_IPV67
-    if (ipv67_port_active(dest_port)) {
-        ipv67_receive6_on_port(dest_port, &src, src_port, payload, payload_len);
+    if (udp_port_hook && udp_port_hook->port_active && udp_port_hook->receive6 && udp_port_hook->port_active(dest_port)) {
+        udp_port_hook->receive6(dest_port, &src, src_port, payload, payload_len);
+        return;
     }
-#else
+
     (void)src;
     (void)src_port;
     (void)dest_port;
     (void)payload;
     (void)payload_len;
-#endif
 }
 
 udp_socket_t *udp_socket_create(uint16_t port) {

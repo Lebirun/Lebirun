@@ -127,34 +127,60 @@ static void fb_grow_screen_buffer(uint64_t needed_rows) {
     char (*new_buf)[MAX_COLS];
     uint32_t (*new_fg)[MAX_COLS];
     uint32_t (*new_bg)[MAX_COLS];
+    uint64_t old_rows;
 
     if (needed_rows <= screen_buffer_rows) return;
     new_rows = needed_rows;
+    old_rows = screen_buffer_rows;
     new_buf = (char (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS);
     if (!new_buf) return;
-    new_fg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
-    if (!new_fg) { kfree(new_buf); return; }
-    new_bg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
-    if (!new_bg) { kfree(new_buf); kfree(new_fg); return; }
+    new_fg = NULL;
+    new_bg = NULL;
+    if (screen_fg_buf || screen_bg_buf) {
+        new_fg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
+        if (!new_fg) { kfree(new_buf); return; }
+        new_bg = (uint32_t (*)[MAX_COLS])kmalloc(new_rows * MAX_COLS * sizeof(uint32_t));
+        if (!new_bg) { kfree(new_buf); kfree(new_fg); return; }
+        fb_fill_u32((uint32_t *)new_fg, 0xFFFFFFFFu, new_rows * MAX_COLS);
+        fb_fill_u32((uint32_t *)new_bg, 0, new_rows * MAX_COLS);
+    }
     memset(new_buf, ' ', new_rows * MAX_COLS);
-    fb_fill_u32((uint32_t *)new_fg, 0xFFFFFFFFu, new_rows * MAX_COLS);
-    fb_fill_u32((uint32_t *)new_bg, 0, new_rows * MAX_COLS);
-    if (screen_buffer && screen_buffer_rows > 0) {
-        memcpy(new_buf, screen_buffer, screen_buffer_rows * MAX_COLS);
+    if (screen_buffer && old_rows > 0) {
+        memcpy(new_buf, screen_buffer, old_rows * MAX_COLS);
         kfree(screen_buffer);
     }
-    if (screen_fg_buf && screen_buffer_rows > 0) {
-        memcpy(new_fg, screen_fg_buf, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+    if (screen_fg_buf && old_rows > 0 && new_fg) {
+        memcpy(new_fg, screen_fg_buf, old_rows * MAX_COLS * sizeof(uint32_t));
         kfree(screen_fg_buf);
     }
-    if (screen_bg_buf && screen_buffer_rows > 0) {
-        memcpy(new_bg, screen_bg_buf, screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+    if (screen_bg_buf && old_rows > 0 && new_bg) {
+        memcpy(new_bg, screen_bg_buf, old_rows * MAX_COLS * sizeof(uint32_t));
         kfree(screen_bg_buf);
     }
     screen_buffer = new_buf;
     screen_fg_buf = new_fg;
     screen_bg_buf = new_bg;
     screen_buffer_rows = new_rows;
+}
+
+static int fb_ensure_color_buffers(void) {
+    uint32_t (*new_fg)[MAX_COLS];
+    uint32_t (*new_bg)[MAX_COLS];
+
+    if (screen_fg_buf && screen_bg_buf) return 1;
+    if (screen_buffer_rows == 0) return 0;
+    new_fg = (uint32_t (*)[MAX_COLS])kmalloc(screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+    if (!new_fg) return 0;
+    new_bg = (uint32_t (*)[MAX_COLS])kmalloc(screen_buffer_rows * MAX_COLS * sizeof(uint32_t));
+    if (!new_bg) {
+        kfree(new_fg);
+        return 0;
+    }
+    fb_fill_u32((uint32_t *)new_fg, 0xFFFFFFFFu, screen_buffer_rows * MAX_COLS);
+    fb_fill_u32((uint32_t *)new_bg, 0, screen_buffer_rows * MAX_COLS);
+    screen_fg_buf = new_fg;
+    screen_bg_buf = new_bg;
+    return 1;
 }
 
 static uint64_t fb_attr_color(uint8_t idx, int bright) {
@@ -729,6 +755,10 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
     
     if (cy < screen_buffer_rows && cx < MAX_COLS && screen_buffer) {
         screen_buffer[cy][cx] = c;
+        if ((!screen_fg_buf || !screen_bg_buf) &&
+            (fb.fg_color != 0xFFFFFFFFu || fb.bg_color != 0)) {
+            fb_ensure_color_buffers();
+        }
         if (screen_fg_buf) screen_fg_buf[cy][cx] = (uint32_t)fb.fg_color;
         if (screen_bg_buf) screen_bg_buf[cy][cx] = (uint32_t)fb.bg_color;
     }

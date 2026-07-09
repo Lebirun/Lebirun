@@ -39,9 +39,6 @@ typedef struct {
     uint64_t flags;
     int ref_count;
     void *private_data;
-    uint8_t *read_buf;
-    uint64_t read_buf_offset;
-    uint32_t read_buf_len;
 } task_fd_t;
 
 typedef struct {
@@ -262,6 +259,7 @@ int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap);
 void signal_deliver_pending(registers_t *regs);
 void signals_init_task(struct task *task);
 int task_has_pending_signals(void);
+void task_free_signal_data(task_t *task);
 
 void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);

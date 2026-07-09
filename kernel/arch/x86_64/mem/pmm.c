@@ -665,13 +665,20 @@ static void refht_free_node(refht_node_t *n) {
 void pfa_ref_gc(void) {
     refht_node_t *list;
     refht_node_t *next;
+    refht_node_t **buckets;
     uint64_t eflags;
 
     if (!refht_initialized) return;
+    buckets = NULL;
     refht_lock_acquire(&eflags);
     list = refht_free_list;
     refht_free_list = NULL;
     refht_free_node_count = 0;
+    if (refht_active_node_count == 0) {
+        buckets = refht_buckets;
+        refht_buckets = NULL;
+        refht_initialized = 0;
+    }
     refht_lock_release(eflags);
 
     while (list) {
@@ -679,6 +686,7 @@ void pfa_ref_gc(void) {
         kfree(list);
         list = next;
     }
+    if (buckets) kfree(buckets);
 }
 
 uint64_t pfa_ref_active_nodes(void) {
@@ -717,7 +725,6 @@ static refht_node_t *refht_find(uint64_t page_idx, uint64_t bucket) {
 }
 
 void pfa_ref_init(void) {
-    refht_init();
     pfa_refcounts = (uint8_t *)1;
     pfa_refcount_entries = total_pages_managed;
 }

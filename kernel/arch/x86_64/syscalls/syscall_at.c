@@ -18,13 +18,10 @@ static int task_fd_alloc_from(int start) {
     if (start < 0) start = 0;
     for (i = start; i < current_task->fds_capacity; i++) {
         if (!current_task->fds[i].in_use) {
+            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
             current_task->fds[i].in_use = 1;
             current_task->fds[i].ref_count = 1;
             current_task->fds[i].type = FD_TYPE_FILE;
-            current_task->fds[i].node = NULL;
-            current_task->fds[i].offset = 0;
-            current_task->fds[i].flags = 0;
-            current_task->fds[i].private_data = NULL;
             return i;
         }
     }
@@ -40,13 +37,10 @@ static int task_fd_alloc_from(int start) {
     if (start > i) i = start;
     current_task->fds = new_fds;
     current_task->fds_capacity = new_cap;
+    memset(&current_task->fds[i], 0, sizeof(task_fd_t));
     current_task->fds[i].in_use = 1;
     current_task->fds[i].ref_count = 1;
     current_task->fds[i].type = FD_TYPE_FILE;
-    current_task->fds[i].node = NULL;
-    current_task->fds[i].offset = 0;
-    current_task->fds[i].flags = 0;
-    current_task->fds[i].private_data = NULL;
     return i;
 }
 

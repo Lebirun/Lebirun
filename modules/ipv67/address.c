@@ -149,9 +149,15 @@ void ipv67_self_addr(ipv67_addr_t *out) {
 }
 
 int ipv67_set_self_addr(const ipv67_addr_t *addr) {
+    int owned;
+
     if (!addr) return IPV67_ERR_INVAL;
+    if (ipv67_identity_key_set) {
+        owned = 0;
+        if (ipv67_asn_claim_allows_key_addr(ipv67_identity_public, addr)) owned = 1;
+        if (!owned) return IPV67_ERR_INVAL;
+    }
     memcpy(&ipv67_self, addr, sizeof(ipv67_addr_t));
     ipv67_self_set = 1;
     return IPV67_ERR_OK;
 }
-

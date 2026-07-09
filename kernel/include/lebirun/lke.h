@@ -18,6 +18,7 @@ typedef struct lke_module {
     void (*cleanup)(void);
     void *text_base;
     uint64_t text_size;
+    uint64_t text_pages;
     int loaded;
 } lke_module_t;
 
@@ -38,7 +39,12 @@ int lke_unload(const char *name);
 int lke_list(lke_info_t *buf, int max);
 void lke_autoload(void);
 void lke_register_symbol(const char *name, void *addr);
+int lke_register_syscall(int num, void *fn);
+void lke_unregister_syscall(int num, void *fn);
 #else
+int lke_register_syscall(int num, void *fn);
+void lke_unregister_syscall(int num, void *fn);
+
 #define module_init(fn) int lke_module_init(void) { return fn(); }
 #define module_exit(fn) void lke_module_cleanup(void) { fn(); }
 

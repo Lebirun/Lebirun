@@ -193,13 +193,14 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
 
 static void fd_release_entry(task_fd_t *tfd) {
     int pipe_type;
-    uint8_t *rbuf;
+    vfs_node_t *node_to_close;
+    pipe_t *pipe_to_release;
+
     if (!tfd || !tfd->in_use) return;
 
-    vfs_node_t *node_to_close = NULL;
-    pipe_t *pipe_to_release = NULL;
+    node_to_close = NULL;
+    pipe_to_release = NULL;
     pipe_type = 0;
-    rbuf = tfd->read_buf;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         pipe_to_release = (pipe_t *)tfd->private_data;
@@ -209,8 +210,6 @@ static void fd_release_entry(task_fd_t *tfd) {
     }
 
     memset(tfd, 0, sizeof(*tfd));
-
-    if (rbuf) kfree(rbuf);
 
     if (pipe_to_release) {
         if (pipe_type == FD_TYPE_PIPE_R) pipe_to_release->readers--;
@@ -290,9 +289,6 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
     fd_table[newfd].flags &= ~1;
-    fd_table[newfd].read_buf = NULL;
-    fd_table[newfd].read_buf_offset = 0;
-    fd_table[newfd].read_buf_len = 0;
     fd_retain_entry(&fd_table[newfd]);
     return newfd;
 }
@@ -317,9 +313,6 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
     fd_table[newfd].flags &= ~1;
-    fd_table[newfd].read_buf = NULL;
-    fd_table[newfd].read_buf_offset = 0;
-    fd_table[newfd].read_buf_len = 0;
     fd_retain_entry(&fd_table[newfd]);
     return newfd;
 }
@@ -989,9 +982,6 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
             fd_table[newfd].ref_count = 1;
-            fd_table[newfd].read_buf = NULL;
-            fd_table[newfd].read_buf_offset = 0;
-            fd_table[newfd].read_buf_len = 0;
             if (cmd == F_DUPFD_CLOEXEC)
                 fd_table[newfd].flags |= 1;
             else
@@ -1339,9 +1329,6 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     }
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
-    fd_table[newfd].read_buf = NULL;
-    fd_table[newfd].read_buf_offset = 0;
-    fd_table[newfd].read_buf_len = 0;
     if (flags & 0x80000)
         fd_table[newfd].flags |= 1;
     else

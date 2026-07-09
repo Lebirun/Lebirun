@@ -23,11 +23,6 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
-#define EARLY_BOOT_BUFFER_SIZE 2048
-static char early_boot_buffer[EARLY_BOOT_BUFFER_SIZE];
-static size_t early_boot_index = 0;
-static bool early_boot_capture = true;
-
 static void terminal_updatecursor(void) {
     if (use_framebuffer) {
         fb_update_cursor();
@@ -61,13 +56,11 @@ void terminal_initialize(void) {
 void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type) {
     if (fb_init(addr, width, height, pitch, bpp, type) == 0) {
         use_framebuffer = true;
-        early_boot_capture = false;
         fb_set_colors(0xFFAAAAAA, 0xFF000000);
     }
 }
 
 void terminal_replay_early_boot(void) {
-    early_boot_capture = false;
 }
 
 void terminal_setcolor(uint8_t color) {
@@ -92,10 +85,6 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
-    if (early_boot_capture && early_boot_index < EARLY_BOOT_BUFFER_SIZE - 1) {
-        early_boot_buffer[early_boot_index++] = c;
-    }
-
     if (console_is_initialized()) {
         console_putchar_to(0, c);
         return;

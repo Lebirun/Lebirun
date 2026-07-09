@@ -1,7 +1,7 @@
 #include "syscall_defs.h"
 
 extern task_t *current_task;
-extern void *syscall_table[];
+extern void **syscall_table;
 
 #define THREAD_INIT_COUNT 1
 #define PTHREAD_STACK_SIZE 0x4000

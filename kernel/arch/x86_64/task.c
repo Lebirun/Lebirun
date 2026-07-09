@@ -14,6 +14,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/smp.h>
 #include <lebirun/vfs.h>
+#include <lebirun/rng.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -134,8 +135,10 @@ static inline void fpu_save_area(uint8_t *area) {
 }
 
 static inline void fpu_restore_area(uint8_t *area) {
-    if (!area) return;
-    __asm__ volatile ("fxrstor64 %0" : : "m"(*(uint8_t (*)[FPU_STATE_SIZE])area) : "memory");
+    uint8_t *state;
+
+    state = area ? area : default_fpu_state;
+    __asm__ volatile ("fxrstor64 %0" : : "m"(*(uint8_t (*)[FPU_STATE_SIZE])state) : "memory");
 }
 
 static void fpu_init_default_state(void) {
@@ -157,8 +160,14 @@ static int task_init_fpu_state(task_t *task) {
     return 0;
 }
 
+static int task_ensure_fpu_state(task_t *task) {
+    if (!task) return -1;
+    if (task->fpu_state) return 0;
+    return task_init_fpu_state(task);
+}
+
 static void task_reset_fpu_state(task_t *task) {
-    if (!task || !task->fpu_state) return;
+    if (task_ensure_fpu_state(task) != 0) return;
     memcpy(task->fpu_state, default_fpu_state, FPU_STATE_SIZE);
 }
 
@@ -849,10 +858,7 @@ void init_tasks(void) {
 
     current_task = (task_t*)kmalloc(sizeof(task_t));
     memset(current_task, 0, sizeof(task_t));
-    if (task_init_fpu_state(current_task) != 0) {
-        printf("Task fpu alloc fail!\n");
-        for (;;) asm volatile ("hlt");
-    }
+    fpu_init_default_state();
     current_task->id = 0;
     current_task->pid = 0;
     strcpy(current_task->name, "idle");
@@ -1043,7 +1049,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
-    if (task_init_fpu_state(new_task) != 0) {
+    if (user_mode && task_init_fpu_state(new_task) != 0) {
         printf("Task fpu alloc fail!\n");
         kfree(new_task);
         if (stack_base) kfree(stack_base);
@@ -1630,10 +1636,7 @@ static void task_release_exit_resources(task_t *t) {
         t->fds = NULL;
         t->fds_capacity = 0;
     }
-    if (t->signal_data) {
-        kfree(t->signal_data);
-        t->signal_data = NULL;
-    }
+    task_free_signal_data(t);
     if (t->creds_data) {
         kfree(t->creds_data);
         t->creds_data = NULL;
@@ -2614,6 +2617,7 @@ int task_fd_alloc(task_t *task) {
     if (!task || !task->fds) return -1;
     for (i = 3; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use) {
+            memset(&task->fds[i], 0, sizeof(task_fd_t));
             task->fds[i].in_use = 1;
             task->fds[i].ref_count = 1;
             return i;
@@ -2623,6 +2627,7 @@ int task_fd_alloc(task_t *task) {
     if (ret != 0) return -1;
     for (i = 3; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use) {
+            memset(&task->fds[i], 0, sizeof(task_fd_t));
             task->fds[i].in_use = 1;
             task->fds[i].ref_count = 1;
             return i;
@@ -2682,12 +2687,7 @@ void task_fd_reclaim_unused(task_t *task) {
 void task_fd_free(task_t *task, int fd) {
     if (!task || !task->fds || fd < 0 || fd >= task->fds_capacity) return;
     if (!task->fds[fd].in_use) return;
-    task->fds[fd].in_use = 0;
-    task->fds[fd].ref_count = 0;
-    task->fds[fd].node = NULL;
-    task->fds[fd].offset = 0;
-    task->fds[fd].flags = 0;
-    task->fds[fd].private_data = NULL;
+    memset(&task->fds[fd], 0, sizeof(task_fd_t));
     task_fd_reclaim_unused(task);
 }
 
@@ -2706,11 +2706,6 @@ void task_fd_close_all(task_t *task) {
     for (i = 0; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
-        if (tfd->read_buf) {
-            kfree(tfd->read_buf);
-            tfd->read_buf = NULL;
-            tfd->read_buf_len = 0;
-        }
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
@@ -2746,11 +2741,6 @@ void task_fd_close_cloexec(task_t *task) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
         if (!(tfd->flags & 1)) continue;
-        if (tfd->read_buf) {
-            kfree(tfd->read_buf);
-            tfd->read_buf = NULL;
-            tfd->read_buf_len = 0;
-        }
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
@@ -2932,9 +2922,6 @@ pid_t task_fork(registers_t *parent_regs) {
             if (child->fds[i].type == FD_TYPE_PIPE_R) p->readers++;
             else p->writers++;
         }
-        child->fds[i].read_buf = NULL;
-        child->fds[i].read_buf_offset = 0;
-        child->fds[i].read_buf_len = 0;
     }
     child->envp = NULL;
     child->envc = 0;
@@ -3101,10 +3088,7 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     prog_addr = sp;
     vmm_copy_to_pml4(new_pd, sp, prog_name, prog_len + 1);
     
-    random_bytes[0] = 0x12; random_bytes[1] = 0x34; random_bytes[2] = 0x56; random_bytes[3] = 0x78;
-    random_bytes[4] = 0x9A; random_bytes[5] = 0xBC; random_bytes[6] = 0xDE; random_bytes[7] = 0xF0;
-    random_bytes[8] = 0x11; random_bytes[9] = 0x22; random_bytes[10] = 0x33; random_bytes[11] = 0x44;
-    random_bytes[12] = 0x55; random_bytes[13] = 0x66; random_bytes[14] = 0x77; random_bytes[15] = 0x88;
+    rng_fill(random_bytes, sizeof(random_bytes));
     sp -= 16;
     random_addr = sp;
     vmm_copy_to_pml4(new_pd, sp, random_bytes, 16);
@@ -3595,10 +3579,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         argv_ptrs[argc] = 0;
     }
 
-    random_bytes[0] = 0x12; random_bytes[1] = 0x34; random_bytes[2] = 0x56; random_bytes[3] = 0x78;
-    random_bytes[4] = 0x9A; random_bytes[5] = 0xBC; random_bytes[6] = 0xDE; random_bytes[7] = 0xF0;
-    random_bytes[8] = 0x11; random_bytes[9] = 0x22; random_bytes[10] = 0x33; random_bytes[11] = 0x44;
-    random_bytes[12] = 0x55; random_bytes[13] = 0x66; random_bytes[14] = 0x77; random_bytes[15] = 0x88;
+    rng_fill(random_bytes, sizeof(random_bytes));
     sp -= 16;
     random_addr = sp;
     vmm_copy_to_pml4(new_pd, sp, random_bytes, 16);

@@ -496,7 +496,7 @@ extern struct kernel_winsize *tty_winsize;
 extern int *tty_pgrp;
 extern int tty_count;
 
-extern void *syscall_table[NR_SYSCALLS];
+extern void **syscall_table;
 
 void syscalls_core_init(void);
 void syscalls_process_init(void);
@@ -524,9 +524,6 @@ void syscalls_dl_init(void);
 void syscalls_regex_init(void);
 void syscalls_power_init(void);
 void syscalls_crypto_init(void);
-#if CONFIG_DRIVER_NET_IPV67
-void syscalls_ipv67_init(void);
-#endif
 
 int sys_vfs_readdir(registers_t *regs);
 

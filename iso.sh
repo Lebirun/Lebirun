@@ -10,7 +10,19 @@ for arg in "$@"; do
   esac
 done
 
-. ./build.sh $BUILD_ARGS
+bar_print() {
+    printf "%s\n" "$1"
+}
+
+progress_bar() {
+    return 0
+}
+
+cleanup_bar() {
+    return 0
+}
+
+./build.sh $BUILD_ARGS
 
 TOTAL_STEPS=5
 CURRENT_STEP=0
@@ -39,6 +51,11 @@ cp "$KERNEL_BIN" isodir/boot/lebirun.kernel
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 if [ -f rootfs.squashfs ]; then
+    ROOTFS_MAGIC="$(dd if=rootfs.squashfs bs=4 count=1 2>/dev/null | od -An -tx4 | tr -d ' \n')"
+    if [ "$ROOTFS_MAGIC" != "73717368" ]; then
+        printf "\033[1;31mError: rootfs.squashfs is not SquashFS; remove it and install squashfs-tools.\033[0m\n"
+        exit 1
+    fi
     bar_print "$(printf '\033[1;36mCopying rootfs to ISO...\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Copying rootfs to ISO"
     cp rootfs.squashfs isodir/boot/rootfs.squashfs
@@ -57,7 +74,6 @@ set default=0
 menuentry "Lebirun" {
 	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
 	module2 /boot/rootfs.squashfs
-	# module2 /boot/initrd.img
 	boot
 }
 EOF
@@ -71,8 +87,8 @@ if [ "$VERBOSE" -eq 1 ]; then
     grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
     grub-mkrescue -o lebirun.iso isodir
 else
-    grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>/dev/null || \
-    grub-mkrescue -o lebirun.iso isodir 2>/dev/null
+    grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
+    grub-mkrescue -o lebirun.iso isodir
 fi
 
 cleanup_bar

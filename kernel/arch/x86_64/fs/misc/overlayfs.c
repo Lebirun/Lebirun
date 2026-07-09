@@ -310,30 +310,11 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
     uint64_t size;
     uint64_t read_bytes;
     int ret;
-    char parent_path[VFS_MAX_PATH];
-    char name[VFS_MAX_NAME];
-    int last_slash;
-    int i;
     ramfs_node_t *new_node;
 
     lower = onode->lower_node;
     if (!lower) return -1;
     if (onode->upper_node) return 0;
-
-    last_slash = -1;
-    for (i = 0; path[i]; i++) {
-        if (path[i] == '/') last_slash = i;
-    }
-    
-    if (last_slash <= 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        strcpy(name, path + 1);
-    } else {
-        memcpy(parent_path, path, last_slash);
-        parent_path[last_slash] = '\0';
-        strcpy(name, path + last_slash + 1);
-    }
     
     overlay_ensure_upper_dirs(path);
 

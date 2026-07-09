@@ -1,7 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/crypto.h>
 
-extern void *syscall_table[];
+extern void **syscall_table;
 
 static int sys_crypto(int req_ptr, int unused1, int unused2, int unused3, int unused4, int unused5)
 {

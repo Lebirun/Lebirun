@@ -2,11 +2,13 @@
 #include <lebirun/gdt.h>
 #include <lebirun/task.h>
 #include <lebirun/debug.h>
+#include <lebirun/mem_map.h>
 #include <stdio.h>
+#include <string.h>
 
 extern task_t* current_task;
 
-void *syscall_table[NR_SYSCALLS] = {0};
+void **syscall_table;
 
 void syscall_set_exec_completed(void) {
     if (current_task) {
@@ -317,7 +319,7 @@ void do_syscall(registers_t *regs) {
         return;
     }
 
-    if (num >= NR_SYSCALLS || !syscall_table[num]) {
+    if (num >= NR_SYSCALLS || !syscall_table || !syscall_table[num]) {
         clear_syscall_frame();
         regs->rax = -ENOSYS;
         return;
@@ -362,6 +364,13 @@ void do_syscall(registers_t *regs) {
 }
 
 void syscall_init(void) {
+    syscall_table = (void **)kmalloc(NR_SYSCALLS * sizeof(void *));
+    if (!syscall_table) {
+        printf("syscall_init: failed to allocate syscall table\n");
+        return;
+    }
+    memset(syscall_table, 0, NR_SYSCALLS * sizeof(void *));
+
     syscalls_core_init();
     syscalls_process_init();
     syscalls_mem_init();
@@ -387,7 +396,4 @@ void syscall_init(void) {
     syscalls_regex_init();
     syscalls_power_init();
     syscalls_crypto_init();
-#if CONFIG_DRIVER_NET_IPV67
-    syscalls_ipv67_init();
-#endif
 }

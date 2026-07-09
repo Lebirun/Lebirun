@@ -36,6 +36,7 @@ typedef struct {
 } klog_item_t;
 
 static klog_item_t *klog_ring;
+static uint64_t klog_capacity;
 static volatile uint64_t klog_head = 0;
 static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
@@ -62,6 +63,7 @@ typedef struct {
 } kprint_item_t;
 
 static kprint_item_t *kprint_ring;
+static uint64_t kprint_capacity;
 static volatile uint64_t kprint_head = 0;
 static volatile uint64_t kprint_tail = 0;
 static volatile uint64_t kprint_count = 0;
@@ -87,6 +89,7 @@ static task_t *vring_selftest_task_ref;
 
 #define SERIAL_RING_SIZE 4096
 static char *serial_ring;
+static uint64_t serial_ring_capacity = 0;
 static volatile uint64_t serial_head = 0;
 static volatile uint64_t serial_tail = 0;
 static volatile uint64_t serial_count = 0;
@@ -120,7 +123,36 @@ static inline bool serial_thr_empty(void) {
     return (inb(0x3FD) & 0x20) != 0;
 }
 
+static int serial_reserve_nolock(uint64_t extra) {
+    uint64_t new_capacity;
+    uint64_t i;
+    char *new_ring;
+    char *old_ring;
+    uint64_t old_capacity;
 
+    if (extra > SERIAL_RING_SIZE) return 0;
+    if (serial_count + extra <= serial_ring_capacity) return 1;
+    new_capacity = serial_ring_capacity;
+    if (new_capacity == 0) new_capacity = extra;
+    while (new_capacity < SERIAL_RING_SIZE && serial_count + extra > new_capacity) {
+        new_capacity *= 2;
+    }
+    if (new_capacity > SERIAL_RING_SIZE) new_capacity = SERIAL_RING_SIZE;
+    if (serial_count + extra > new_capacity) return 0;
+    new_ring = (char *)kmalloc(new_capacity);
+    if (!new_ring) return 0;
+    old_ring = serial_ring;
+    old_capacity = serial_ring_capacity;
+    for (i = 0; i < serial_count; i++) {
+        new_ring[i] = old_ring[(serial_head + i) % old_capacity];
+    }
+    if (old_ring) kfree(old_ring);
+    serial_ring = new_ring;
+    serial_ring_capacity = new_capacity;
+    serial_head = 0;
+    serial_tail = serial_count % serial_ring_capacity;
+    return 1;
+}
 
 static void serial_enqueue_nolock(const char *buf, size_t len) {
     size_t i;
@@ -129,22 +161,22 @@ static void serial_enqueue_nolock(const char *buf, size_t len) {
     for (i = 0; i < len; i++) {
         ch = (uint8_t)buf[i];
         if (ch == '\n') {
-            if (serial_count >= SERIAL_RING_SIZE) {
+            if (!serial_reserve_nolock(1)) {
                 while (!serial_thr_empty()) cpu_relax();
                 outb(0x3F8, '\r');
             } else {
                 serial_ring[serial_tail] = '\r';
-                serial_tail = (serial_tail + 1) % SERIAL_RING_SIZE;
+                serial_tail = (serial_tail + 1) % serial_ring_capacity;
                 serial_count++;
             }
         }
-        if (serial_count >= SERIAL_RING_SIZE) {
+        if (!serial_reserve_nolock(1)) {
             while (!serial_thr_empty()) cpu_relax();
             outb(0x3F8, ch);
             continue;
         }
         serial_ring[serial_tail] = ch;
-        serial_tail = (serial_tail + 1) % SERIAL_RING_SIZE;
+        serial_tail = (serial_tail + 1) % serial_ring_capacity;
         serial_count++;
     }
 }
@@ -154,7 +186,7 @@ static void serial_write_async(const char *buf, size_t len) {
     size_t i;
     uint8_t ch;
 
-    if (!serial_ring) {
+    if (!vring_initialized && !serial_ring) {
         for (i = 0; i < len; i++) {
             ch = (uint8_t)buf[i];
             if (ch == '\n') {
@@ -193,7 +225,7 @@ static void serial_drain(uint64_t max_chars) {
     while (drained < max_chars && serial_count > 0) {
         if (!serial_thr_empty()) break;
         outb(0x3F8, (uint8_t)serial_ring[serial_head]);
-        serial_head = (serial_head + 1) % SERIAL_RING_SIZE;
+        serial_head = (serial_head + 1) % serial_ring_capacity;
         serial_count--;
         drained++;
     }
@@ -204,22 +236,27 @@ static void serial_drain(uint64_t max_chars) {
 static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     uint64_t flags;
     klog_item_t *it;
+    klog_item_t *new_ring;
+    klog_item_t *old_ring;
     int ppos;
+    int need;
+    int newcap;
+    int eavail;
+    char *nb;
     uint64_t avail;
     uint64_t ring_len;
+    uint64_t new_capacity;
+    uint64_t i;
 
     if (!buf || len == 0) return 0;
 
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
     if (klog_persist_buf) {
-        int need;
         ppos = klog_persist_pos;
         need = ppos + (int)len + 1;
         if (need > klog_persist_cap) {
-            int newcap;
-            char *nb;
-            newcap = klog_persist_cap ? klog_persist_cap * 2 : 4096;
+            newcap = klog_persist_cap ? klog_persist_cap * 2 : need;
             while (newcap < need) newcap *= 2;
             if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
             nb = krealloc(klog_persist_buf, newcap);
@@ -235,12 +272,31 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
             klog_persist_buf[klog_persist_pos] = '\0';
         }
     } else if (!klog_early_done) {
-        int eavail;
         eavail = KLOG_EARLY_SZ - klog_early_pos - 1;
         if ((int)len <= eavail && eavail > 0) {
             memcpy(klog_early_buf + klog_early_pos, buf, len);
             klog_early_pos += (int)len;
             klog_early_buf[klog_early_pos] = '\0';
+        }
+    } else {
+        ppos = klog_early_pos;
+        if (ppos >= KLOG_PERSIST_SZ) ppos = KLOG_PERSIST_SZ - 1;
+        need = ppos + (int)len + 1;
+        if (need > KLOG_PERSIST_SZ) need = KLOG_PERSIST_SZ;
+        newcap = need;
+        nb = (char *)kmalloc(newcap);
+        if (nb) {
+            klog_persist_buf = nb;
+            klog_persist_cap = newcap;
+            klog_persist_pos = ppos;
+            if (ppos > 0) memcpy(klog_persist_buf, klog_early_buf, ppos);
+            klog_persist_buf[klog_persist_pos] = '\0';
+            avail = klog_persist_cap - ppos - 1;
+            if ((int)len <= (int)avail && avail > 0) {
+                memcpy(klog_persist_buf + ppos, buf, len);
+                klog_persist_pos = ppos + (int)len;
+                klog_persist_buf[klog_persist_pos] = '\0';
+            }
         }
     }
     spin_unlock(&klog_persist_lock);
@@ -249,10 +305,28 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     ring_len = len;
     if (ring_len >= KLOG_MAX_LEN) ring_len = KLOG_MAX_LEN - 1;
 
-    if (!klog_ring) return (int)len;
-
     flags = klog_irqsave();
-    if (klog_count >= KLOG_MAX_ITEMS) {
+    if (!klog_ring || klog_count >= klog_capacity) {
+        if (klog_capacity < KLOG_MAX_ITEMS) {
+            new_capacity = klog_capacity ? klog_capacity * 2 : 2;
+            if (new_capacity > KLOG_MAX_ITEMS) new_capacity = KLOG_MAX_ITEMS;
+            new_ring = (klog_item_t *)kmalloc(new_capacity * sizeof(klog_item_t));
+            if (new_ring) {
+                old_ring = klog_ring;
+                for (i = 0; i < klog_count; i++) {
+                    if (old_ring) {
+                        new_ring[i] = old_ring[(klog_head + i) % klog_capacity];
+                    }
+                }
+                if (old_ring) kfree(old_ring);
+                klog_ring = new_ring;
+                klog_capacity = new_capacity;
+                klog_head = 0;
+                klog_tail = klog_count % klog_capacity;
+            }
+        }
+    }
+    if (!klog_ring || klog_count >= klog_capacity) {
         klog_dropped++;
         klog_irqrestore(flags);
         return (int)len;
@@ -262,7 +336,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     it->len = (uint16_t)ring_len;
     memcpy(it->msg, buf, ring_len);
     it->msg[ring_len] = '\0';
-    klog_tail = (klog_tail + 1) % KLOG_MAX_ITEMS;
+    klog_tail = (klog_tail + 1) % klog_capacity;
     klog_count++;
     klog_irqrestore(flags);
     waitq_wake_one(&kprint_waitq);
@@ -273,14 +347,14 @@ static int klog_dequeue(klog_item_t *out) {
     uint64_t flags;
 
     if (!out) return -1;
-    if (!klog_ring) return -1;
+    if (!klog_ring || klog_capacity == 0) return -1;
     flags = klog_irqsave();
     if (klog_count == 0) {
         klog_irqrestore(flags);
         return -1;
     }
     *out = klog_ring[klog_head];
-    klog_head = (klog_head + 1) % KLOG_MAX_ITEMS;
+    klog_head = (klog_head + 1) % klog_capacity;
     klog_count--;
     klog_irqrestore(flags);
     return 0;
@@ -288,28 +362,41 @@ static int klog_dequeue(klog_item_t *out) {
 
 int klog_snapshot(char *buf, int bufsz) {
     int len;
+    const char *src;
 
+    src = klog_persist_buf;
     len = klog_persist_pos;
+    if (!src && klog_early_pos > 0) {
+        src = klog_early_buf;
+        len = klog_early_pos;
+    }
     if (!buf || bufsz <= 0) return len;
 
-    if (!klog_persist_buf || len <= 0) {
+    if (!src || len <= 0) {
         buf[0] = '\0';
         return 0;
     }
     if (len >= bufsz) len = bufsz - 1;
-    memcpy(buf, klog_persist_buf, len);
+    memcpy(buf, src, len);
     buf[len] = '\0';
     return len;
 }
 
 int klog_snapshot_range(char *buf, int offset, int count) {
     int len;
+    const char *src;
 
-    if (!buf || count <= 0 || !klog_persist_buf) return 0;
+    if (!buf || count <= 0) return 0;
+    src = klog_persist_buf;
     len = klog_persist_pos;
+    if (!src && klog_early_pos > 0) {
+        src = klog_early_buf;
+        len = klog_early_pos;
+    }
+    if (!src) return 0;
     if (offset >= len) return 0;
     if (offset + count > len) count = len - offset;
-    memcpy(buf, klog_persist_buf + offset, count);
+    memcpy(buf, src + offset, count);
     return count;
 }
 
@@ -317,14 +404,14 @@ static int kprint_dequeue(kprint_item_t *out) {
     uint64_t flags;
 
     if (!out) return -1;
-    if (!kprint_ring) return -1;
+    if (!kprint_ring || kprint_capacity == 0) return -1;
     flags = klog_irqsave();
     if (kprint_count == 0) {
         klog_irqrestore(flags);
         return -1;
     }
     *out = kprint_ring[kprint_head];
-    kprint_head = (kprint_head + 1) % KPRINT_MAX_ITEMS;
+    kprint_head = (kprint_head + 1) % kprint_capacity;
     kprint_count--;
     klog_irqrestore(flags);
     return 0;
@@ -430,30 +517,11 @@ void kprint_poll(uint64_t max_items) {
 void vring_init(void) {
     int i;
 
-    klog_ring = kmalloc(KLOG_MAX_ITEMS * sizeof(klog_item_t));
-    kprint_ring = kmalloc(KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
-    serial_ring = kmalloc(SERIAL_RING_SIZE);
-    klog_persist_buf = kmalloc(2048);
-    if (klog_persist_buf) {
-        klog_persist_cap = 2048;
-        klog_persist_buf[0] = '\0';
-        if (klog_early_pos > 0) {
-            int copy_len;
-            copy_len = klog_early_pos;
-            if (copy_len >= klog_persist_cap) copy_len = klog_persist_cap - 1;
-            memcpy(klog_persist_buf, klog_early_buf, copy_len);
-            klog_persist_pos = copy_len;
-            klog_persist_buf[copy_len] = '\0';
-        }
-    }
+    klog_ring = NULL;
+    klog_capacity = 0;
+    kprint_ring = NULL;
+    kprint_capacity = 0;
     klog_early_done = 1;
-
-    if (klog_ring)
-        memset(klog_ring, 0, KLOG_MAX_ITEMS * sizeof(klog_item_t));
-    if (kprint_ring)
-        memset(kprint_ring, 0, KPRINT_MAX_ITEMS * sizeof(kprint_item_t));
-    if (serial_ring)
-        memset(serial_ring, 0, SERIAL_RING_SIZE);
 
     klog_head = 0;
     klog_tail = 0;

@@ -22,7 +22,9 @@ volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
 uint32_t lapic_timer_reload = 0;
 
-cpu_info_t cpus[MAX_CPUS];
+static cpu_info_t cpu_bootstrap[1];
+cpu_info_t *cpus = cpu_bootstrap;
+static int cpu_capacity = 1;
 int cpu_count = 0;
 volatile int cpus_booted = 0;
 
@@ -48,6 +50,31 @@ extern volatile uint64_t ap_boot_cr3;
 extern volatile uint64_t ap_boot_stack;
 extern volatile uint32_t ap_boot_flag;
 extern volatile uint64_t ap_boot_entry;
+
+static int smp_ensure_cpu_capacity(int needed) {
+    cpu_info_t *new_cpus;
+    int new_capacity;
+
+    if (needed <= cpu_capacity) return 1;
+    if (needed > MAX_CPUS) return 0;
+
+    new_capacity = cpu_capacity;
+    while (new_capacity < needed) {
+        new_capacity *= 2;
+        if (new_capacity > MAX_CPUS) new_capacity = MAX_CPUS;
+    }
+
+    new_cpus = (cpu_info_t *)kmalloc((uint64_t)new_capacity * sizeof(cpu_info_t));
+    if (!new_cpus) return 0;
+    memset(new_cpus, 0, (uint64_t)new_capacity * sizeof(cpu_info_t));
+    if (cpus && cpu_count > 0) {
+        memcpy(new_cpus, cpus, (uint64_t)cpu_count * sizeof(cpu_info_t));
+    }
+    if (cpus != cpu_bootstrap) kfree(cpus);
+    cpus = new_cpus;
+    cpu_capacity = new_capacity;
+    return 1;
+}
 
 static int irq_overrides_ensure(void) {
     irq_override_t *overrides;
@@ -160,7 +187,7 @@ static void parse_madt_phys(uint64_t madt_phys) {
         if (entry_len < 2) break;
         if (offset + entry_len > end_offset) break;
 
-        if (type == 0 && entry_len >= 8 && cpu_count < MAX_CPUS) {
+        if (type == 0 && entry_len >= 8 && cpu_count < MAX_CPUS && smp_ensure_cpu_capacity(cpu_count + 1)) {
             uint32_t lapic_flags;
             acpi_read_phys(madt_phys + offset, entry_buf, 8);
             lapic_flags = *(uint32_t *)(entry_buf + 4);
@@ -566,7 +593,7 @@ void smp_init(void) {
                cpus[i].bsp ? " (BSP)" : "");
     }
 
-    if (!found && cpu_count < MAX_CPUS) {
+    if (!found && cpu_count < MAX_CPUS && smp_ensure_cpu_capacity(cpu_count + 1)) {
         cpus[cpu_count].lapic_id = bsp_apic_id;
         cpus[cpu_count].processor_id = 0;
         cpus[cpu_count].bsp = 1;

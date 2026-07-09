@@ -1,10 +1,18 @@
-# Lebirun2
+<p align="center">
+  <img src="./images/Lebirun-full.png" alt="The full Lebirun2 logo" width="300" />
+</p>
 
-A hobby operating system that is the successor to Lebirun C (Lebirun but made in C, rather than being made in a C# Library called Cosmos). This is just a different take on it.
+# Lebirun
 
-### How to Compile
-First of all, you need x86_64-elf-gcc (feel free to get it either pre-built from somewhere OR built by yourself, it doesn't matter that much i guess).
-If you have x86_64-elf-gcc now, just execute `./build.sh` (or `./qemu.sh` if you want for Lebirun to build AND QEMU to launch).
+A hobby operating system that is the successor to Lebirun C, which is a successor to the original Lebirun which is made in C# using the Cosmos library.
 
-### How to Configure
-Just run "./lebconfig.sh", and then just do things there. After that, just save the file.
+### Build
+To compile Lebirun, you will need x86_64-leb-gcc (a cross-compiler for x86_64). To start building the kernel, type in `./build.sh`. If you need to launch QEMU (either before or after building), type in `./qemu.sh`.
+
+### Configuration
+The configuration of Lebirun is powered by Lebconfig, an alternative to Linux's Menuconfig made from the ground up. In order to enter the configuration user interface, simply type in "./lebconfig.sh" while being in the cloned Lebirun directory.
+
+### License
+
+This project is licensed under the GNU General Public License v3. 
+Effective 9 July 2026 (before official release), this project has officially transitioned from GPLv2 to GPLv3. We (The Lebirun Project), as the copyright holders of the code within this repository's history, hereby license all historical commits, modifications, and past releases under the GNU General Public License v3.0 or later.

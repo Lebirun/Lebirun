@@ -24,6 +24,11 @@ if [ "$NO_BUILD" -eq 0 ]; then
     fi
 fi
 
+if [ "$NO_BUILD" -eq 0 ] && [ ! -f lebirun.iso ]; then
+    printf "\033[1;31mError: lebirun.iso was not created.\033[0m\n"
+    exit 1
+fi
+
 printf "\033[1;34mStarting QEMU...\033[0m\n"
 
 QEMU_CMD="qemu-system-x86_64"

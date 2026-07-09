@@ -66,9 +66,9 @@ TAGS
 .lebconfig_settings
 !root/
 
-ports/
-
 AGENTS.md
 .codex
 .agents
 .claude
+
+modules/out/

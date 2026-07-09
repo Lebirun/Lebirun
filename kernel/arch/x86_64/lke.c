@@ -4,6 +4,14 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <lebirun/pit.h>
+#include <lebirun/rng.h>
+#include <lebirun/crypto.h>
+#include <lebirun/task.h>
+#include <lebirun/drivers/net/net.h>
+#include <lebirun/drivers/net/netif.h>
+#include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/udp.h>
 #include <string.h>
 
 #define R_X86_64_32    10
@@ -11,6 +19,7 @@
 #define R_X86_64_PLT32  4
 
 #define KSYM_TABLE_INIT 16
+#define LKE_NR_SYSCALLS 284
 
 static lke_module_t *modules;
 static int lke_capacity = 0;
@@ -19,6 +28,22 @@ static int lke_count = 0;
 static lke_ksym_t *ksym_table;
 static int ksym_count = 0;
 static int ksym_capacity = 0;
+
+extern void **syscall_table;
+
+int lke_register_syscall(int num, void *fn) {
+    if (num < 0 || num >= LKE_NR_SYSCALLS || !fn) return -1;
+    if (!syscall_table) return -1;
+    if (syscall_table[num] && syscall_table[num] != fn) return -2;
+    syscall_table[num] = fn;
+    return 0;
+}
+
+void lke_unregister_syscall(int num, void *fn) {
+    if (num < 0 || num >= LKE_NR_SYSCALLS) return;
+    if (!syscall_table) return;
+    if (syscall_table[num] == fn) syscall_table[num] = NULL;
+}
 
 void lke_register_symbol(const char *name, void *addr) {
     lke_ksym_t *new_tab;
@@ -63,15 +88,38 @@ void lke_init(void) {
     lke_register_symbol("printf", printf);
     lke_register_symbol("memcpy", memcpy);
     lke_register_symbol("memset", memset);
+    lke_register_symbol("memcmp", memcmp);
     lke_register_symbol("strcmp", strcmp);
     lke_register_symbol("strlen", strlen);
     lke_register_symbol("strncpy", strncpy);
+    lke_register_symbol("snprintf", snprintf);
     lke_register_symbol("vfs_namei", vfs_namei);
     lke_register_symbol("vfs_read", vfs_read);
     lke_register_symbol("vfs_write", vfs_write);
     lke_register_symbol("vfs_release", vfs_release);
     lke_register_symbol("pit_get_ticks64", pit_get_ticks64);
     lke_register_symbol("pit_get_uptime_ms", pit_get_uptime_ms);
+    lke_register_symbol("pit_get_ticks", pit_get_ticks);
+    lke_register_symbol("pit_ms_to_ticks", pit_ms_to_ticks);
+    lke_register_symbol("rng_get_u64", rng_get_u64);
+    lke_register_symbol("sha256_hash", sha256_hash);
+    lke_register_symbol("hmac_sha256", hmac_sha256);
+    lke_register_symbol("crypto_constant_compare", crypto_constant_compare);
+    lke_register_symbol("netif_get_default", netif_get_default);
+    lke_register_symbol("netif_poll_all", netif_poll_all);
+    lke_register_symbol("ipv4_is_local", ipv4_is_local);
+    lke_register_symbol("udp_send", udp_send);
+    lke_register_symbol("udp_send6", udp_send6);
+    lke_register_symbol("udp_register_port_hook", udp_register_port_hook);
+    lke_register_symbol("udp_unregister_port_hook", udp_unregister_port_hook);
+    lke_register_symbol("dns_resolve_timeout", dns_resolve_timeout);
+    lke_register_symbol("dns_resolve6", dns_resolve6);
+    lke_register_symbol("vmm_get_phys_in_pml4", vmm_get_phys_in_pml4);
+    lke_register_symbol("current_task", &current_task);
+    lke_register_symbol("schedule", schedule);
+    lke_register_symbol("net_get_ticks", net_get_ticks);
+    lke_register_symbol("lke_register_syscall", lke_register_syscall);
+    lke_register_symbol("lke_unregister_syscall", lke_unregister_syscall);
 }
 
 static int lke_find_slot(void) {
@@ -102,6 +150,29 @@ static int lke_find_by_name(const char *name) {
         if (modules[i].loaded && strcmp(modules[i].name, name) == 0) return i;
     }
     return -1;
+}
+
+static void *lke_alloc_pages(uint64_t size, uint64_t *out_pages) {
+    uint64_t pages;
+    uint64_t phys;
+    void *ptr;
+
+    pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) pages = 1;
+    phys = pfa_alloc_contiguous(pages);
+    if (!phys) return NULL;
+    ptr = (void *)(phys + KERNEL_VMA);
+    memset(ptr, 0, pages * PAGE_SIZE);
+    if (out_pages) *out_pages = pages;
+    return ptr;
+}
+
+static void lke_free_pages(void *ptr, uint64_t pages) {
+    uint64_t phys;
+
+    if (!ptr || pages == 0) return;
+    phys = (uint64_t)(uintptr_t)ptr - KERNEL_VMA;
+    pfa_free_contiguous(phys, pages);
 }
 
 static const char *basename_of(const char *path) {
@@ -160,8 +231,15 @@ int lke_load(const char *path) {
     uint64_t strtab_idx;
     const char *sym_name;
     int found_init;
+    char mod_name[LKE_NAME_MAX];
+    uint64_t data_pages;
+    uint64_t mem_pages;
 
     if (!path) return -1;
+
+    bname = basename_of(path);
+    strip_ext(mod_name, bname, LKE_NAME_MAX);
+    if (lke_find_by_name(mod_name) >= 0) return -17;
 
     slot = lke_find_slot();
     if (slot < 0) return -2;
@@ -172,12 +250,14 @@ int lke_load(const char *path) {
     data_size = node->length;
     if (data_size < sizeof(Elf64_Ehdr)) { vfs_release(node); return -4; }
 
-    data = (uint8_t *)kmalloc(data_size);
+    data_pages = 0;
+    mem_pages = 0;
+    data = (uint8_t *)lke_alloc_pages(data_size, &data_pages);
     if (!data) { vfs_release(node); return -5; }
 
     if ((uint64_t)vfs_read(node, 0, data_size, data) != data_size) {
         vfs_release(node);
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -6;
     }
     vfs_release(node);
@@ -185,20 +265,20 @@ int lke_load(const char *path) {
     ehdr = (const Elf64_Ehdr *)data;
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -7;
     }
     if (ehdr->e_type != ET_REL) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -8;
     }
     if (ehdr->e_machine != EM_X86_64) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -9;
     }
 
     if (ehdr->e_shoff + (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > data_size) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -7;
     }
 
@@ -216,21 +296,20 @@ int lke_load(const char *path) {
     }
 
     if (total_alloc == 0) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -10;
     }
 
-    mem = (uint8_t *)kmalloc(total_alloc);
+    mem = (uint8_t *)lke_alloc_pages(total_alloc, &mem_pages);
     if (!mem) {
-        kfree(data);
+        lke_free_pages(data, data_pages);
         return -11;
     }
-    memset(mem, 0, total_alloc);
 
     sec_offsets = (uint64_t *)kmalloc(ehdr->e_shnum * sizeof(uint64_t));
     if (!sec_offsets) {
-        kfree(mem);
-        kfree(data);
+        lke_free_pages(mem, mem_pages);
+        lke_free_pages(data, data_pages);
         return -12;
     }
     memset(sec_offsets, 0, ehdr->e_shnum * sizeof(uint64_t));
@@ -262,8 +341,8 @@ int lke_load(const char *path) {
 
     if (symtab_idx == 0) {
         kfree(sec_offsets);
-        kfree(mem);
-        kfree(data);
+        lke_free_pages(mem, mem_pages);
+        lke_free_pages(data, data_pages);
         return -13;
     }
 
@@ -291,8 +370,8 @@ int lke_load(const char *path) {
                 if (S == 0) {
                     printf("LKE: unresolved symbol: %s\n", sym_name);
                     kfree(sec_offsets);
-                    kfree(mem);
-                    kfree(data);
+                    lke_free_pages(mem, mem_pages);
+                    lke_free_pages(data, data_pages);
                     return -14;
                 }
             } else if (sym->st_shndx != 0 && sym->st_shndx < ehdr->e_shnum) {
@@ -313,8 +392,8 @@ int lke_load(const char *path) {
                 *(int32_t *)target = (int32_t)(S + A);
             } else {
                 kfree(sec_offsets);
-                kfree(mem);
-                kfree(data);
+                lke_free_pages(mem, mem_pages);
+                lke_free_pages(data, data_pages);
                 return -15;
             }
         }
@@ -323,13 +402,14 @@ int lke_load(const char *path) {
     mod = &modules[slot];
     memset(mod, 0, sizeof(lke_module_t));
 
-    bname = basename_of(path);
-    strip_ext(mod->name, bname, LKE_NAME_MAX);
+    strncpy(mod->name, mod_name, LKE_NAME_MAX - 1);
+    mod->name[LKE_NAME_MAX - 1] = '\0';
 
     mod->magic = LKE_MAGIC;
     mod->version = LKE_VERSION;
     mod->text_base = mem;
     mod->text_size = total_alloc;
+    mod->text_pages = mem_pages;
     mod->init = NULL;
     mod->cleanup = NULL;
 
@@ -349,10 +429,10 @@ int lke_load(const char *path) {
     }
 
     kfree(sec_offsets);
-    kfree(data);
+    lke_free_pages(data, data_pages);
 
     if (!found_init) {
-        kfree(mem);
+        lke_free_pages(mem, mem_pages);
         return -16;
     }
 
@@ -363,7 +443,8 @@ int lke_load(const char *path) {
     if (init_fn() != 0) {
         mod->loaded = 0;
         lke_count--;
-        kfree(mem);
+        lke_free_pages(mem, mem_pages);
+        memset(mod, 0, sizeof(lke_module_t));
         return -17;
     }
 
@@ -386,7 +467,7 @@ int lke_unload(const char *name) {
     }
 
     if (mod->text_base) {
-        kfree(mod->text_base);
+        lke_free_pages(mod->text_base, mod->text_pages);
     }
 
     printf("LKE: unloaded '%s'\n", mod->name);

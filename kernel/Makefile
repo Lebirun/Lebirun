@@ -1,7 +1,7 @@
 DEFAULT_HOST!=../default-host.sh
 HOST?=$(DEFAULT_HOST)
 HOSTARCH!=../target-triplet-to-arch.sh $(HOST)
-CC?=gcc
+CC=$(HOST)-gcc
 LD:=$(HOST)-ld
 OBJCOPY:=$(HOST)-objcopy
 
@@ -32,7 +32,7 @@ BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
 CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra -fdiagnostics-color=always
-CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
+CPPFLAGS:=$(CPPFLAGS) -nostdinc -D__is_kernel -Iinclude -isystem ../sysroot/usr/include
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
 

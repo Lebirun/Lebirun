@@ -73,6 +73,7 @@ int initrd_open(const char *path, int flags);
 int initrd_read(int fd, void *buf, uint64_t count);
 int initrd_close(int fd);
 int initrd_stat(const char *path, uint64_t *size, uint8_t *type, uint8_t *perms);
+int initrd_fstat_fd(int fd, uint64_t *size, uint8_t *type);
 
 void initrd_init_fds(void);
 

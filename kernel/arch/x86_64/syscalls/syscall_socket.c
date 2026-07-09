@@ -203,16 +203,6 @@ static int alloc_socket(void) {
     i = socket_capacity / 2;
 found:
     memset(&sockets[i], 0, sizeof(socket_t));
-    sockets[i].recv_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
-    if (!sockets[i].recv_buf) return -1;
-    sockets[i].send_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
-    if (!sockets[i].send_buf) {
-        kfree(sockets[i].recv_buf);
-        sockets[i].recv_buf = NULL;
-        return -1;
-    }
-    memset(sockets[i].recv_buf, 0, SOCKET_BUF_SIZE);
-    memset(sockets[i].send_buf, 0, SOCKET_BUF_SIZE);
     sockets[i].in_use = 1;
     sockets[i].so_sndbuf = SOCKET_BUF_SIZE;
     sockets[i].so_rcvbuf = SOCKET_BUF_SIZE;
@@ -280,23 +270,51 @@ static size_t send_buf_free(socket_t *sock) {
     return SOCKET_BUF_SIZE - send_buf_used(sock);
 }
 
-static size_t recv_buf_write(socket_t *sock, const void *data, size_t len) {
-    size_t free = recv_buf_free(sock);
-    size_t to_write = (len < free) ? len : free;
-    const uint8_t *src = (const uint8_t *)data;
-    for (size_t i = 0; i < to_write; i++) {
+static int socket_ensure_recv_buf(socket_t *sock) {
+    if (sock->recv_buf) return 0;
+    sock->recv_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
+    if (!sock->recv_buf) return -ENOMEM;
+    memset(sock->recv_buf, 0, SOCKET_BUF_SIZE);
+    return 0;
+}
+
+static int socket_ensure_send_buf(socket_t *sock) {
+    if (sock->send_buf) return 0;
+    sock->send_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
+    if (!sock->send_buf) return -ENOMEM;
+    memset(sock->send_buf, 0, SOCKET_BUF_SIZE);
+    return 0;
+}
+
+static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
+    size_t free;
+    size_t to_write;
+    const uint8_t *src;
+    size_t i;
+
+    free = recv_buf_free(sock);
+    to_write = (len < free) ? len : free;
+    if (to_write > 0 && socket_ensure_recv_buf(sock) < 0) return -ENOMEM;
+    src = (const uint8_t *)data;
+    for (i = 0; i < to_write; i++) {
         sock->recv_buf[sock->recv_tail % SOCKET_BUF_SIZE] = src[i];
         sock->recv_tail++;
     }
-    return to_write;
+    return (int)to_write;
 }
 
 static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
-    size_t used = recv_buf_used(sock);
-    size_t to_read = (len < used) ? len : used;
-    uint8_t *dst = (uint8_t *)data;
-    uint64_t head = sock->recv_head;
-    for (size_t i = 0; i < to_read; i++) {
+    size_t used;
+    size_t to_read;
+    uint8_t *dst;
+    uint64_t head;
+    size_t i;
+
+    used = recv_buf_used(sock);
+    to_read = (len < used) ? len : used;
+    dst = (uint8_t *)data;
+    head = sock->recv_head;
+    for (i = 0; i < to_read; i++) {
         dst[i] = sock->recv_buf[head % SOCKET_BUF_SIZE];
         head++;
     }
@@ -306,15 +324,21 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     return to_read;
 }
 
-static size_t send_buf_write(socket_t *sock, const void *data, size_t len) {
-    size_t free = send_buf_free(sock);
-    size_t to_write = (len < free) ? len : free;
-    const uint8_t *src = (const uint8_t *)data;
-    for (size_t i = 0; i < to_write; i++) {
+static int send_buf_write(socket_t *sock, const void *data, size_t len) {
+    size_t free;
+    size_t to_write;
+    const uint8_t *src;
+    size_t i;
+
+    free = send_buf_free(sock);
+    to_write = (len < free) ? len : free;
+    if (to_write > 0 && socket_ensure_send_buf(sock) < 0) return -ENOMEM;
+    src = (const uint8_t *)data;
+    for (i = 0; i < to_write; i++) {
         sock->send_buf[sock->send_tail % SOCKET_BUF_SIZE] = src[i];
         sock->send_tail++;
     }
-    return to_write;
+    return (int)to_write;
 }
 
 static int sys_socket(int domain, const char *type_ptr, int protocol) {
@@ -907,11 +931,11 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         socket_t *peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
-            return (int)recv_buf_write(peer, buf, len);
+            return recv_buf_write(peer, buf, len);
         }
     }
     
-    return (int)send_buf_write(sock, buf, len);
+    return send_buf_write(sock, buf, len);
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -948,9 +972,6 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                 src_tfd = &current_task->fds[src_fd];
                 if (!src_tfd->in_use) return -EBADF;
                 memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd, sizeof(task_fd_t));
-                peer->pending_fds[peer->pending_fd_count].read_buf = NULL;
-                peer->pending_fds[peer->pending_fd_count].read_buf_offset = 0;
-                peer->pending_fds[peer->pending_fd_count].read_buf_len = 0;
                 if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
                     pipe_t *p = (pipe_t *)src_tfd->private_data;
                     if (src_tfd->type == FD_TYPE_PIPE_R) p->readers++;
@@ -1036,9 +1057,6 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
                 memcpy(&current_task->fds[newfd], &sock->pending_fds[i], sizeof(task_fd_t));
                 current_task->fds[newfd].in_use = 1;
                 current_task->fds[newfd].ref_count = 1;
-                current_task->fds[newfd].read_buf = NULL;
-                current_task->fds[newfd].read_buf_offset = 0;
-                current_task->fds[newfd].read_buf_len = 0;
                 out_fds[i] = newfd;
             }
             msg->msg_controllen = needed;
@@ -1213,7 +1231,8 @@ int socket_fcntl(int fd, int cmd, int arg) {
 }
 
 void syscalls_socket_init(void) {
-    memset(sockets, 0, sizeof(sockets));
+    sockets = NULL;
+    socket_capacity = 0;
     
     syscall_table[SYSCALL_SOCKET] = sys_socket;
     syscall_table[SYSCALL_SOCKETPAIR] = sys_socketpair;

@@ -26,6 +26,7 @@ extern void pt_sync_kernel_mappings(void);
 extern uint64_t **pt_vmm_page_tables;
 extern uint64_t pt_vmm_pt_count;
 extern uint64_t pt_vmm_pt_capacity;
+extern int pt_vmm_pt_grow(void);
 extern uint64_t boot_pd_high[];
 
 #define kv_pd_high ((uint64_t *)((uintptr_t)boot_pd_high + KERNEL_VMA))
@@ -54,8 +55,10 @@ void pt_init_temp_mapping(void) {
     }
 
     if (pt_vmm_pt_count >= pt_vmm_pt_capacity) {
-        printf("pt_init_temp_mapping: out of vmm page tables\n");
-        return;
+        if (pt_vmm_pt_grow() < 0) {
+            printf("pt_init_temp_mapping: out of vmm page tables\n");
+            return;
+        }
     }
 
     {

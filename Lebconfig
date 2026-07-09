@@ -2,7 +2,7 @@ title "Lebirun"
 desc "Hobby Operating System/Kernel"
 
 subcategory "Virtualization" {
-    item type=bool name="VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
+    item type=bool name="[EXPERIMENTAL] VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
 }
 
 subcategory "Device Drivers" {
@@ -16,22 +16,9 @@ subcategory "Device Drivers" {
     subcategory "Networking" {
         item type=bool name="Network Stack" default=enable id=DRIVER_NET alias="DRIVER_NET" help="Enable the kernel network stack"
         item type=bool name="Intel E1000" default=enable id=DRIVER_NET_E1000 alias="DRIVER_NET_E1000" help="Enable the Intel E1000 network driver"
-        item type=bool name="IPv67" default=enable id=DRIVER_NET_IPV67 alias="DRIVER_NET_IPV67" help="Enable the IPv67 kernel network protocol"
     }
 }
 
-subcategory "Debug" can-toggle=enable {
-    item type=bool name="Memory Debug" default=disable id=DEBUG_MEMORY help="Debug memory management (PMM, VMM, paging, heap)"
-    item type=bool name="Task Debug" default=disable id=DEBUG_TASK help="Debug task creation, scheduling, fork, exec"
-    item type=bool name="Signal Debug" default=disable id=DEBUG_SIGNAL help="Debug signal delivery and handling"
-    item type=bool name="VFS Debug" default=disable id=DEBUG_VFS help="Debug VFS operations"
-    item type=bool name="RAMFS/InitRD Debug" default=disable id=DEBUG_RAMFS help="Debug RAMFS and InitRD operations"
-    item type=bool name="Ext4 Debug" default=disable id=DEBUG_FS_EXT4 help="Debug Ext4 filesystem"
-    item type=bool name="Other FS Debug" default=disable id=DEBUG_FS_OTHER help="Debug other filesystems (procfs, devfs, overlayfs, squashfs)"
-    item type=bool name="ELF Debug" default=disable id=DEBUG_ELF help="Debug ELF loading and execution"
-    item type=bool name="Syscall Debug" default=disable id=DEBUG_SYSCALL help="Debug system call handling"
-    item type=bool name="IDT/IRQ Debug" default=disable id=DEBUG_IDT help="Debug interrupt and exception handling"
-    item type=bool name="Driver Debug" default=disable id=DEBUG_DRIVER help="Debug device drivers (AHCI, keyboard, etc.)"
-    item type=bool name="IPC Debug" default=disable id=DEBUG_IPC help="Debug pipes, sockets, and IPC mechanisms"
-    item type=bool name="Boot Verbose" default=disable id=DEBUG_BOOT_VERBOSE help="Show detailed boot progress (VFS, modules, hardware init)"
+subcategory "Modules" {
+    item type=bool name="[EXPERIMENTAL] IPv67" default=disable id=MODULE_IPV67 alias="MODULE_IPV67" help="IPv67 module"
 }

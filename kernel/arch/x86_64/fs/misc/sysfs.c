@@ -13,8 +13,16 @@ static uint64_t sysfs_dirent_capacity;
 static dirent_t *sysfs_alloc_dirent(void) {
     uint64_t idx;
 
-    if (!sysfs_dirent_pool || sysfs_dirent_capacity == 0)
-        return NULL;
+    if (!sysfs_dirent_pool || sysfs_dirent_capacity == 0) {
+        sysfs_dirent_capacity = 6;
+        sysfs_dirent_pool = (dirent_t *)kmalloc(sizeof(dirent_t) * sysfs_dirent_capacity);
+        if (!sysfs_dirent_pool) {
+            sysfs_dirent_capacity = 0;
+            return NULL;
+        }
+        memset(sysfs_dirent_pool, 0, sizeof(dirent_t) * sysfs_dirent_capacity);
+        sysfs_dirent_index = 0;
+    }
     idx = sysfs_dirent_index;
     sysfs_dirent_index = (idx + 1) % sysfs_dirent_capacity;
     return &sysfs_dirent_pool[idx];
@@ -62,6 +70,38 @@ static vfs_node_t *sysfs_kernel_mm;
 static vfs_node_t *sysfs_kernel_mm_hugepages;
 static vfs_node_t *sysfs_fs;
 static vfs_node_t *sysfs_bus;
+
+static vfs_node_t **sysfs_reclaim_slots[] = {
+    &sysfs_cpu0_cpufreq_scaling_cur_freq,
+    &sysfs_cpu0_cpufreq_scaling_min_freq,
+    &sysfs_cpu0_cpufreq_scaling_max_freq,
+    &sysfs_cpu0_cpufreq_cpuinfo_min_freq,
+    &sysfs_cpu0_cpufreq_cpuinfo_max_freq,
+    &sysfs_cpu0_cpufreq_scaling_governor,
+    &sysfs_cpu0_topology_core_id,
+    &sysfs_cpu0_topology_physical_package_id,
+    &sysfs_cpu0_topology_core_siblings,
+    &sysfs_cpu0_topology_thread_siblings,
+    &sysfs_cpu0_online,
+    &sysfs_cpu_online,
+    &sysfs_cpu_possible,
+    &sysfs_cpu_present,
+    &sysfs_cpu_kernel_max,
+    &sysfs_cpu0_cpufreq,
+    &sysfs_cpu0_topology,
+    &sysfs_devices_system_cpu_cpu0,
+    &sysfs_devices_system_cpu,
+    &sysfs_devices_system,
+    &sysfs_devices,
+    &sysfs_class_power_supply,
+    &sysfs_class,
+    &sysfs_block,
+    &sysfs_kernel_mm_hugepages,
+    &sysfs_kernel_mm,
+    &sysfs_kernel,
+    &sysfs_fs,
+    &sysfs_bus
+};
 
 static uint64_t sysfs_cpu0_online_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
@@ -181,6 +221,58 @@ static vfs_node_t *sysfs_lazy_node(vfs_node_t **slot, const char *name, uint64_t
     n->finddir = finddir;
     *slot = n;
     return n;
+}
+
+static int sysfs_node_in_chain(vfs_node_t *node, vfs_node_t *active) {
+    vfs_node_t *cur;
+
+    cur = active;
+    while (cur) {
+        if (cur == node) return 1;
+        cur = cur->parent;
+    }
+    return 0;
+}
+
+static int sysfs_node_has_busy_descendant(vfs_node_t *node) {
+    vfs_node_t *cur;
+    vfs_node_t *candidate;
+    uint64_t i;
+    uint64_t count;
+
+    count = sizeof(sysfs_reclaim_slots) / sizeof(sysfs_reclaim_slots[0]);
+    for (i = 0; i < count; i++) {
+        candidate = *sysfs_reclaim_slots[i];
+        if (!candidate || candidate->ref_count <= 1) continue;
+        cur = candidate->parent;
+        while (cur) {
+            if (cur == node) return 1;
+            cur = cur->parent;
+        }
+    }
+    return 0;
+}
+
+static void sysfs_reclaim_lazy_node(vfs_node_t **slot, vfs_node_t *active) {
+    vfs_node_t *node;
+
+    node = *slot;
+    if (!node) return;
+    if (sysfs_node_in_chain(node, active)) return;
+    if (node->ref_count > 1) return;
+    if (sysfs_node_has_busy_descendant(node)) return;
+    *slot = NULL;
+    kfree(node);
+}
+
+void sysfs_reclaim_unused(void) {
+    uint64_t i;
+    uint64_t count;
+
+    count = sizeof(sysfs_reclaim_slots) / sizeof(sysfs_reclaim_slots[0]);
+    for (i = 0; i < count; i++) {
+        sysfs_reclaim_lazy_node(sysfs_reclaim_slots[i], NULL);
+    }
 }
 
 static dirent_t *sysfs_cpufreq_readdir(vfs_node_t *node, uint64_t index);
@@ -667,10 +759,8 @@ static vfs_fs_type_t sysfs_type;
 
 void sysfs_init(void) {
     sysfs_dirent_index = 0;
-    sysfs_dirent_capacity = 6;
-    sysfs_dirent_pool = (dirent_t *)kmalloc(sizeof(dirent_t) * sysfs_dirent_capacity);
-    if (!sysfs_dirent_pool)
-        sysfs_dirent_capacity = 0;
+    sysfs_dirent_capacity = 0;
+    sysfs_dirent_pool = NULL;
 
     sysfs_type.name = "sysfs";
     sysfs_type.mount = sysfs_mount;

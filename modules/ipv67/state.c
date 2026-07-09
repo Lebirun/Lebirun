@@ -170,6 +170,33 @@ void ipv67_rx_flush_port(uint16_t port) {
     }
 }
 
+void ipv67_rx_release_empty_storage(void) {
+    ipv67_pending_rx_t *slots;
+    int i;
+    int busy;
+
+    slots = NULL;
+    busy = 0;
+    spin_lock(&ipv67_rx_lock);
+    if (!ipv67_rx_slots || ipv67_rx_count > 0 || ipv67_rx_draining) {
+        spin_unlock(&ipv67_rx_lock);
+        return;
+    }
+    for (i = 0; i < IPV67_RX_PENDING_MAX; i++) {
+        if (ipv67_rx_slots[i].state || ipv67_rx_slots[i].packet) busy = 1;
+    }
+    if (busy) {
+        spin_unlock(&ipv67_rx_lock);
+        return;
+    }
+    slots = ipv67_rx_slots;
+    ipv67_rx_slots = NULL;
+    ipv67_rx_head = -1;
+    ipv67_rx_tail = -1;
+    spin_unlock(&ipv67_rx_lock);
+    if (slots) kfree(slots);
+}
+
 void ipv67_drain_pending_locked(void) {
     ipv67_pending_rx_t *rx;
     int limit;
@@ -181,6 +208,7 @@ void ipv67_drain_pending_locked(void) {
         rx = ipv67_rx_dequeue();
         if (!rx) {
             ipv67_rx_draining = 0;
+            ipv67_rx_release_empty_storage();
             return;
         }
         if (rx->family == IPV67_PEER_IPV6) ipv67_receive6_on_port_locked(rx->local_port, &rx->src_ipv6, rx->src_port, rx->packet, rx->len);
@@ -188,4 +216,5 @@ void ipv67_drain_pending_locked(void) {
         ipv67_rx_release(rx);
     }
     ipv67_rx_draining = 0;
+    ipv67_rx_release_empty_storage();
 }

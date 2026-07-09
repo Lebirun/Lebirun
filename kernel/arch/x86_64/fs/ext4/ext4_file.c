@@ -206,6 +206,11 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     uint8_t *block;
     int allocated_now;
     uint8_t *inline_data;
+    uint32_t max_run_blocks;
+    uint32_t run_blocks;
+    uint32_t run_bytes;
+    uint64_t next_phys_block;
+    int next_new_block;
 
     if (!buffer || size == 0) {
         return 0;
@@ -274,11 +279,35 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
             allocated_now = 1;
         }
 
-        if (allocated_now && block_off == 0 && to_write == fs->block_size) {
-            if (ext4_write_block(fs, phys_block, buffer + bytes_written) != 0) {
+        if (block_off == 0 && to_write == fs->block_size) {
+            max_run_blocks = 128 / fs->sectors_per_block;
+            if (max_run_blocks == 0) max_run_blocks = 1;
+            run_blocks = 1;
+            while (run_blocks < max_run_blocks &&
+                   bytes_written + (run_blocks + 1) * fs->block_size <= size) {
+                next_phys_block = ext4_inode_get_block(fs, &ic->inode, block_num + run_blocks);
+                if (next_phys_block == 0) {
+                    next_new_block = ext4_alloc_block(fs, (uint32_t)(phys_block + run_blocks - 1));
+                    if (next_new_block < 0) {
+                        break;
+                    }
+                    if (ext4_inode_set_block(fs, &ic->inode, block_num + run_blocks, next_new_block) != 0) {
+                        ext4_free_block(fs, next_new_block);
+                        break;
+                    }
+                    ic->inode.i_blocks_lo += fs->sectors_per_block;
+                    next_phys_block = (uint64_t)next_new_block;
+                }
+                if (next_phys_block != phys_block + run_blocks) {
+                    break;
+                }
+                run_blocks++;
+            }
+            run_bytes = run_blocks * fs->block_size;
+            if (ext4_write_blocks(fs, phys_block, run_blocks, buffer + bytes_written) != 0) {
                 break;
             }
-            bytes_written += to_write;
+            bytes_written += run_bytes;
             continue;
         }
 

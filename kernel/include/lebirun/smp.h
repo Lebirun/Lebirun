@@ -50,7 +50,7 @@ typedef struct {
 
 extern volatile uint32_t *lapic_base;
 extern volatile uint32_t *ioapic_base;
-extern cpu_info_t cpus[MAX_CPUS];
+extern cpu_info_t *cpus;
 extern int cpu_count;
 extern volatile int cpus_booted;
 

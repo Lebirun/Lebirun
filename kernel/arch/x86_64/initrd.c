@@ -23,7 +23,7 @@ static uint64_t initrd_mod0_phys_end = 0;
 static uint64_t initrd_mod1_phys_start = 0;
 static uint64_t initrd_mod1_phys_end = 0;
 
-initrd_fd_t fd_table[INITRD_MAX_FDS];
+static initrd_fd_t *fd_table = NULL;
 
 static vfs_node_t *initrd_vfs_nodes = NULL;
 static uint64_t initrd_vfs_node_count = 0;
@@ -67,7 +67,6 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mod_size;
     uint64_t start_page;
     uint64_t end_page;
-    uint64_t total_bytes;
     if (initrd_should_log()) {
         serial_puts("\n=== INITRD INIT ===\n");
         serial_puts("mods_count="); serial_printf_dec(mods_count);
@@ -181,8 +180,6 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    total_bytes = 0;
-
     for (uint64_t i = 0; i < file_count; i++) {
         uint64_t hdr_off;
         uint64_t len;
@@ -209,14 +206,11 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
             files[i].offset = hdr_off;
             files[i].data = initrd_base + hdr_off;
 
-            total_bytes += len;
         } else {
             files[i].offset = 0;
             files[i].data = NULL;
         }
     }
-
-    initrd_init_fds();
 
     if (initrd_should_log()) {
         serial_puts("INITRD: Initialized successfully!\n");
@@ -265,7 +259,13 @@ void initrd_list_files(void) {
 }
 
 void initrd_init_fds(void) {
-    for (int i = 0; i < INITRD_MAX_FDS; i++) {
+    int i;
+
+    if (!fd_table) {
+        fd_table = (initrd_fd_t *)kmalloc(INITRD_MAX_FDS * sizeof(initrd_fd_t));
+        if (!fd_table) return;
+    }
+    for (i = 0; i < INITRD_MAX_FDS; i++) {
         fd_table[i].in_use = 0;
         fd_table[i].file_index = 0;
         fd_table[i].offset = 0;
@@ -274,7 +274,11 @@ void initrd_init_fds(void) {
 }
 
 static int find_free_fd(void) {
-    for (int i = 3; i < INITRD_MAX_FDS; i++) {
+    int i;
+
+    if (!fd_table) initrd_init_fds();
+    if (!fd_table) return -1;
+    for (i = 3; i < INITRD_MAX_FDS; i++) {
         if (!fd_table[i].in_use) return i;
     }
     return -1;
@@ -283,11 +287,15 @@ static int find_free_fd(void) {
 initrd_file_t *initrd_find_path(const char *path) {
     char component[65];
     uint16_t current_parent;
+    uint64_t i;
+    int len;
+    initrd_file_t *found;
+
     if (!path || !files || file_count == 0) return NULL;
 
     while (*path == '/') path++;
     if (*path == '\0') {
-        for (uint64_t i = 0; i < file_count; i++) {
+        for (i = 0; i < file_count; i++) {
             if (files[i].type == INITRD_TYPE_DIR && files[i].parent_index == 0xFFFF) {
                 return &files[i];
             }
@@ -298,7 +306,6 @@ initrd_file_t *initrd_find_path(const char *path) {
     current_parent = 0xFFFF;
 
     while (*path) {
-        int len;
         while (*path == '/') path++;
         if (*path == '\0') break;
 
@@ -310,8 +317,8 @@ initrd_file_t *initrd_find_path(const char *path) {
         component[len] = '\0';
         path += len;
 
-        initrd_file_t *found = NULL;
-        for (uint64_t i = 0; i < file_count; i++) {
+        found = NULL;
+        for (i = 0; i < file_count; i++) {
             if (files[i].parent_index == current_parent && strcmp(files[i].name, component) == 0) {
                 found = &files[i];
                 current_parent = (uint16_t)i;
@@ -337,9 +344,11 @@ int initrd_open(const char *path, int flags) {
     int is_dir;
     int fd;
     uint64_t idx;
-    if (!path) return -1;
+    uint64_t i;
+    initrd_file_t *f;
 
-    initrd_file_t *f = initrd_find_path(path);
+    if (!path) return -1;
+    f = initrd_find_path(path);
     if (!f) {
         f = initrd_find_file(path);
     }
@@ -357,7 +366,7 @@ int initrd_open(const char *path, int flags) {
     if (fd < 0) return -1;
 
     idx = 0;
-    for (uint64_t i = 0; i < file_count; i++) {
+    for (i = 0; i < file_count; i++) {
         if (&files[i] == f) { idx = i; break; }
     }
 
@@ -374,14 +383,17 @@ int initrd_read(int fd, void *buf, uint64_t count) {
     uint64_t off;
     uint64_t avail;
     uint64_t to_read;
+    initrd_file_t *f;
+
     if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (!fd_table) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buf || count == 0) return 0;
 
     idx = fd_table[fd].file_index;
     if (idx >= file_count) return -1;
 
-    initrd_file_t *f = &files[idx];
+    f = &files[idx];
     off = fd_table[fd].offset;
 
     if (off >= f->length) return 0;
@@ -397,6 +409,7 @@ int initrd_read(int fd, void *buf, uint64_t count) {
 
 int initrd_close(int fd) {
     if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (!fd_table) return -1;
     if (!fd_table[fd].in_use) return -1;
 
     fd_table[fd].in_use = 0;
@@ -404,6 +417,21 @@ int initrd_close(int fd) {
     fd_table[fd].offset = 0;
     fd_table[fd].flags = 0;
 
+    return 0;
+}
+
+int initrd_fstat_fd(int fd, uint64_t *size, uint8_t *type) {
+    uint64_t idx;
+    initrd_file_t *f;
+
+    if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (!fd_table) return -1;
+    if (!fd_table[fd].in_use) return -1;
+    idx = fd_table[fd].file_index;
+    if (idx >= file_count) return -1;
+    f = &files[idx];
+    if (size) *size = f->length;
+    if (type) *type = f->type;
     return 0;
 }
 

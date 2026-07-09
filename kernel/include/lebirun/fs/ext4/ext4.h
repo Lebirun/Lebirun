@@ -10,7 +10,7 @@
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
 #define EXT4_CACHE_BLOCKS       2
-#define EXT4_CACHE_BLOCKS_MAX   4
+#define EXT4_CACHE_BLOCKS_MAX   8
 #define EXT4_INODE_CACHE_INIT   4
 #define EXT4_INODE_CACHE_MAX    256
 
@@ -74,6 +74,7 @@ void ext4_print_superblock(ext4_superblock_t *sb);
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
+int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);
 uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block);
 void ext4_release_block(ext4_fs_t *fs, uint64_t block);

@@ -12,7 +12,7 @@
 
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
-#define COPY_BUF_MAX 16384
+#define COPY_BUF_MAX 65536
 #define MAX_PATH     256
 #define MAX_LINE     128
 #define LEBPKG_INSTALLED_DIR "/etc/lebpkg/installed"
@@ -68,6 +68,7 @@ static int disk_count;
 static int disk_capacity;
 static lebui_size_t term_sz;
 static lebui_prog_state_t prog_st;
+static char boot_error[128];
 
 static const char *timezones[] = {
     "GMT-12", "GMT-11", "GMT-10", "GMT-9", "GMT-8", "GMT-7",
@@ -414,6 +415,8 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
                                    O_WRONLY | O_CREAT | O_TRUNC,
                                    src_mode);
+        if (fd_out >= 0)
+            created_with_mode = 1;
     } else {
         vfs_unlink(dst);
         if (vfs_create(dst, src_mode) == 0)
@@ -521,6 +524,9 @@ static void inst_copy_current(const char *path)
 
     pct = 10 + (copy_done * 85) / copy_total;
     if (pct > 95) pct = 95;
+    if (pct == copy_last_pct) {
+        return;
+    }
     lebui_progress_update(&prog_st, path, pct);
 }
 
@@ -762,11 +768,11 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     int fd_boot;
     int fd_core;
     int r;
-    int off;
     int pi;
     int entry_off;
     uint32_t core_lba;
     int result;
+    off_t seek_ret;
 
     mbr_buf = NULL;
     boot_buf = NULL;
@@ -776,25 +782,41 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     fd_boot = -1;
     fd_core = -1;
     result = -1;
+    boot_error[0] = '\0';
 
     mbr_buf = (uint8_t *)malloc(SECTOR_SIZE);
     boot_buf = (uint8_t *)malloc(SECTOR_SIZE);
     core_buf = (uint8_t *)malloc(BUF_SIZE);
     verify_buf = (uint8_t *)malloc(SECTOR_SIZE);
-    if (!mbr_buf || !boot_buf || !core_buf || !verify_buf)
+    if (!mbr_buf || !boot_buf || !core_buf || !verify_buf) {
+        snprintf(boot_error, sizeof(boot_error), "boot: allocation failed");
         goto out;
+    }
 
     fd_disk = vfs_open(disk_dev, 2);
-    if (fd_disk < 0) goto out;
+    if (fd_disk < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: open %s failed", disk_dev);
+        goto out;
+    }
 
     r = vfs_read_fd(fd_disk, mbr_buf, SECTOR_SIZE);
-    if (r < SECTOR_SIZE) goto out;
+    if (r < SECTOR_SIZE) {
+        snprintf(boot_error, sizeof(boot_error), "boot: read MBR failed");
+        goto out;
+    }
     vfs_close_fd(fd_disk);
     fd_disk = -1;
 
     fd_boot = vfs_open("/boot/grub/i386-pc/boot.img", 0);
-    if (fd_boot < 0) goto out;
-    vfs_read_fd(fd_boot, boot_buf, SECTOR_SIZE);
+    if (fd_boot < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: open boot.img failed");
+        goto out;
+    }
+    r = vfs_read_fd(fd_boot, boot_buf, SECTOR_SIZE);
+    if (r < SECTOR_SIZE) {
+        snprintf(boot_error, sizeof(boot_error), "boot: read boot.img failed");
+        goto out;
+    }
     vfs_close_fd(fd_boot);
     fd_boot = -1;
 
@@ -820,26 +842,48 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     mbr_buf[0x1FF] = 0xAA;
 
     fd_disk = vfs_open(disk_dev, 2);
-    if (fd_disk < 0) goto out;
+    if (fd_disk < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: reopen %s failed", disk_dev);
+        goto out;
+    }
 
     r = vfs_write_fd(fd_disk, mbr_buf, SECTOR_SIZE);
-    if (r < SECTOR_SIZE) goto out;
+    if (r < SECTOR_SIZE) {
+        snprintf(boot_error, sizeof(boot_error), "boot: write MBR failed");
+        goto out;
+    }
 
     fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
-    if (fd_core < 0) goto out;
+    if (fd_core < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: open core.img failed");
+        goto out;
+    }
 
-    lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+    seek_ret = lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+    if (seek_ret != (off_t)SECTOR_SIZE) {
+        snprintf(boot_error, sizeof(boot_error), "boot: seek core area failed");
+        goto out;
+    }
 
-    off = 0;
     while ((r = vfs_read_fd(fd_core, core_buf, BUF_SIZE)) > 0) {
-        if (vfs_write_fd(fd_disk, core_buf, r) != r) goto out;
-        off += r;
+        if (vfs_write_fd(fd_disk, core_buf, r) != r) {
+            snprintf(boot_error, sizeof(boot_error), "boot: write core.img failed");
+            goto out;
+        }
+    }
+    if (r < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: read core.img failed");
+        goto out;
     }
 
     vfs_close_fd(fd_core);
     fd_core = -1;
 
-    lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+    seek_ret = lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
+    if (seek_ret != (off_t)SECTOR_SIZE) {
+        snprintf(boot_error, sizeof(boot_error), "boot: seek verify failed");
+        goto out;
+    }
     r = vfs_read_fd(fd_disk, verify_buf, SECTOR_SIZE);
     if (r >= SECTOR_SIZE) {
         fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
@@ -854,6 +898,7 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     }
 
     result = 0;
+    boot_error[0] = '\0';
 
 out:
     if (fd_core >= 0) vfs_close_fd(fd_core);
@@ -883,8 +928,10 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
     vfs_mkdir(grub_mod_dir, 0755);
     inst_copy_dir_recursive("/boot/grub/i386-pc", grub_mod_dir, NULL);
 
-    if (inst_write_grub_config(mountpoint, part_dev) < 0)
+    if (inst_write_grub_config(mountpoint, part_dev) < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: write grub.cfg failed");
         return -1;
+    }
 
     if (inst_install_grub_mbr(disk_dev, part_num) < 0) {
         return -1;
@@ -1715,6 +1762,9 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_log(&prog_st, "Installing GRUB bootloader...");
     if (inst_install_boot(mountpoint, d->devpath, p->devpath, p->number) < 0) {
         lebui_progress_log(&prog_st, "Warning: bootloader had errors.");
+        if (boot_error[0] != '\0') {
+            lebui_progress_log(&prog_st, boot_error);
+        }
     } else {
         lebui_progress_log(&prog_st, "Bootloader installed.");
     }
@@ -2031,10 +2081,14 @@ static int step_do_update(int disk_idx, int part_idx)
         snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
         vfs_mkdir(dst, 0755);
         inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL);
-        if (inst_install_grub_mbr(d->devpath, p->number) < 0)
+        if (inst_install_grub_mbr(d->devpath, p->number) < 0) {
             lebui_progress_log(&prog_st, "Warning: GRUB boot code update failed.");
-        else
+            if (boot_error[0] != '\0') {
+                lebui_progress_log(&prog_st, boot_error);
+            }
+        } else {
             lebui_progress_log(&prog_st, "GRUB boot code updated.");
+        }
     }
 
     if (upd_selected[UPD_GRUB_CFG]) {

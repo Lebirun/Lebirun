@@ -274,20 +274,19 @@ void pfa_init(void) {
     uint64_t actual_bitmap_bytes;
     uint64_t bitmap_pages;
     uint64_t bitmap_alloc_phys;
+    uint64_t bitmap_alloc_end;
+    uint64_t candidate;
+    uint64_t rr;
     uint64_t rend;
     uint64_t cr3_val;
+    int found_bitmap_space;
+    int overlaps_reserved;
 
     detected_max_phys = 0;
     for (r = 0; r < num_regions; r++) {
         if (memory_map[r].type != 1) continue;
         rend = memory_map[r].base + memory_map[r].length;
         if (rend > detected_max_phys) detected_max_phys = rend;
-    }
-
-    for (r = 0; r < num_reserved_regions; r++) {
-        if (reserved_regions[r].end_phys > (uint64_t)bump_current) {
-            bump_current = (uint64_t)reserved_regions[r].end_phys;
-        }
     }
 
     max_phys = MAX_PHYSICAL_MEMORY;
@@ -300,9 +299,44 @@ void pfa_init(void) {
 
     pfa_init_internal_setup(actual_bitmap_bytes, actual_total_pages, 0);
 
+    kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
+    kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     bitmap_pages = (actual_bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-    bitmap_alloc_phys = (bump_current + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    bump_current = bitmap_alloc_phys + (uint64_t)bitmap_pages * PAGE_SIZE;
+    bitmap_alloc_end = (uint64_t)bitmap_pages * PAGE_SIZE;
+    bitmap_alloc_phys = 0;
+    found_bitmap_space = 0;
+    for (r = 0; r < num_regions && !found_bitmap_space; r++) {
+        if (memory_map[r].type != 1) continue;
+        region_base = memory_map[r].base;
+        region_end = region_base + memory_map[r].length;
+        if (region_base >= detected_max_phys) continue;
+        if (region_end > detected_max_phys) region_end = detected_max_phys;
+        candidate = (region_base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        if (candidate < kernel_end_phys) candidate = kernel_end_phys;
+        while (candidate + bitmap_alloc_end <= region_end) {
+            overlaps_reserved = 0;
+            for (rr = 0; rr < num_reserved_regions; rr++) {
+                if (candidate + bitmap_alloc_end <= reserved_regions[rr].start_phys ||
+                    candidate >= reserved_regions[rr].end_phys) {
+                    continue;
+                }
+                candidate = (reserved_regions[rr].end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+                overlaps_reserved = 1;
+                break;
+            }
+            if (!overlaps_reserved) {
+                bitmap_alloc_phys = candidate;
+                found_bitmap_space = 1;
+                break;
+            }
+        }
+    }
+    if (!found_bitmap_space) {
+        bitmap_alloc_phys = (bump_current + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    }
+    if (bump_current < bitmap_alloc_phys + bitmap_alloc_end) {
+        bump_current = bitmap_alloc_phys + bitmap_alloc_end;
+    }
 
     {
         extern uint8_t *pfa_bitmap;
@@ -313,15 +347,8 @@ void pfa_init(void) {
     printf("PFA: 64-bit mode, managing %u pages (%u KB bitmap, %u pages)\n",
            actual_total_pages, actual_bitmap_bytes / 1024, bitmap_pages);
 
-    kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
-    kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (bitmap_alloc_phys + bitmap_pages * PAGE_SIZE > kernel_end_phys) {
-        kernel_end_phys = bitmap_alloc_phys + bitmap_pages * PAGE_SIZE;
-    }
-    for (r = 0; r < num_reserved_regions; r++) {
-        if (reserved_regions[r].end_phys > kernel_end_phys) {
-            kernel_end_phys = reserved_regions[r].end_phys;
-        }
+    if (bitmap_alloc_phys + bitmap_alloc_end > kernel_end_phys) {
+        kernel_end_phys = bitmap_alloc_phys + bitmap_alloc_end;
     }
     kernel_frames = (uint64_t)(kernel_end_phys / PAGE_SIZE);
 

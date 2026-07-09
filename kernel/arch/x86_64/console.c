@@ -98,27 +98,38 @@ static int console_ensure_alloc(int n) {
     con->buffer_rows = rows;
     con->buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
     if (!con->buffer) return -1;
-    if (n == current_console) {
-        con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
-        if (!con->color_buffer) {
-            kfree(con->buffer);
-            con->buffer = NULL;
-            return -1;
-        }
-    }
     con->line_wrapped = (uint8_t *)kmalloc(rows);
     if (!con->line_wrapped) {
-        if (con->color_buffer) kfree(con->color_buffer);
         kfree(con->buffer);
         con->buffer = NULL;
-        con->color_buffer = NULL;
         return -1;
     }
     memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
-    if (con->color_buffer) memset(con->color_buffer, 0x70, rows * CONSOLE_BUFFER_COLS);
     memset(con->line_wrapped, 0, rows);
     con->allocated = 1;
     return 0;
+}
+
+static uint8_t console_current_attr(console_t *con);
+
+static int console_ensure_color_buffer(console_t *con) {
+    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
+
+    if (!con || !con->allocated) return -1;
+    if (con->color_buffer) return 0;
+    if (con->buffer_rows == 0) return -1;
+    new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(con->buffer_rows * CONSOLE_BUFFER_COLS);
+    if (!new_color) return -1;
+    memset(new_color, 0x70, con->buffer_rows * CONSOLE_BUFFER_COLS);
+    con->color_buffer = new_color;
+    return 0;
+}
+
+static void console_ensure_nondefault_color(console_t *con) {
+    if (!con) return;
+    if (console_current_attr(con) != 0x70) {
+        console_ensure_color_buffer(con);
+    }
 }
 
 static int console_ensure_write_buffer(console_t *con) {
@@ -169,16 +180,19 @@ static void console_enter_alt_screen(console_t *con) {
     if (!rows || !con->buffer) return;
 
     new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
-    new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    new_color = NULL;
+    if (con->color_buffer) {
+        new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    }
     new_wrapped = (uint8_t *)kmalloc(rows);
-    if (!new_buf || !new_color || !new_wrapped) {
+    if (!new_buf || (con->color_buffer && !new_color) || !new_wrapped) {
         if (new_buf) kfree(new_buf);
         if (new_color) kfree(new_color);
         if (new_wrapped) kfree(new_wrapped);
         return;
     }
     memset(new_buf, ' ', rows * CONSOLE_BUFFER_COLS);
-    memset(new_color, 0x70, rows * CONSOLE_BUFFER_COLS);
+    if (new_color) memset(new_color, 0x70, rows * CONSOLE_BUFFER_COLS);
     memset(new_wrapped, 0, rows);
 
     flags = console_irqsave();
@@ -356,6 +370,24 @@ static void console_grow_write_buffer(console_t *con) {
     kfree(old_wf);
 }
 
+static void console_reclaim_default_color(console_t *con) {
+    uint64_t rows;
+    uint64_t cols;
+    uint64_t r;
+    uint64_t c;
+
+    if (!con || !con->color_buffer) return;
+    rows = con->buffer_rows;
+    cols = CONSOLE_BUFFER_COLS;
+    for (r = 0; r < rows; r++) {
+        for (c = 0; c < cols; c++) {
+            if (con->color_buffer[r][c] != 0x70) return;
+        }
+    }
+    kfree(con->color_buffer);
+    con->color_buffer = NULL;
+}
+
 void console_reclaim_unused(void) {
     uint64_t flags;
     int i;
@@ -367,6 +399,7 @@ void console_reclaim_unused(void) {
     for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         if (!con->allocated) continue;
+        console_reclaim_default_color(con);
         if (con->write_buffer && con->write_flags && con->write_head == con->write_tail) {
             kfree(con->write_buffer);
             kfree(con->write_flags);
@@ -407,6 +440,18 @@ void console_memory_stats(uint64_t *buffers, uint64_t *bytes) {
         for (i = 0; i < console_count; i++) {
             con = &consoles[i];
             if (!con->allocated) continue;
+            if (con->buffer) {
+                b++;
+                sz += con->buffer_rows * CONSOLE_BUFFER_COLS;
+            }
+            if (con->color_buffer) {
+                b++;
+                sz += con->buffer_rows * CONSOLE_BUFFER_COLS;
+            }
+            if (con->line_wrapped) {
+                b++;
+                sz += con->buffer_rows;
+            }
             if (con->write_buffer) {
                 b++;
                 sz += con->write_buffer_size;
@@ -616,6 +661,7 @@ static void console_redraw_prepare(int console_num) {
     uint64_t visible_cols;
     framebuffer_t *fb = fb_get();
     console_t *con;
+    int need_color;
 
     if (!fb || (fb->rows == 0 && fb->cols == 0)) {
         console_redraw_pending = 0;
@@ -629,16 +675,32 @@ static void console_redraw_prepare(int console_num) {
         return;
     }
 
+    need_color = 0;
+    if (console_valid_index(console_num)) {
+        con = &consoles[console_num];
+        if (con->allocated && con->color_buffer) need_color = 1;
+    }
+
     if (!console_redraw_buffer || console_redraw_buffer_rows < rows) {
         if (console_redraw_buffer) kfree(console_redraw_buffer);
         if (console_redraw_color_buffer) kfree(console_redraw_color_buffer);
         console_redraw_buffer_rows = rows;
         console_redraw_buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
-        console_redraw_color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
-        if (!console_redraw_buffer || !console_redraw_color_buffer) {
+        console_redraw_color_buffer = NULL;
+        if (!console_redraw_buffer) {
             if (console_redraw_buffer) { kfree(console_redraw_buffer); console_redraw_buffer = NULL; }
-            if (console_redraw_color_buffer) { kfree(console_redraw_color_buffer); console_redraw_color_buffer = NULL; }
             console_redraw_buffer_rows = 0;
+            console_redraw_pending = 0;
+            return;
+        }
+    }
+    if (!need_color && console_redraw_color_buffer) {
+        kfree(console_redraw_color_buffer);
+        console_redraw_color_buffer = NULL;
+    }
+    if (need_color && !console_redraw_color_buffer) {
+        console_redraw_color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(console_redraw_buffer_rows * CONSOLE_BUFFER_COLS);
+        if (!console_redraw_color_buffer) {
             console_redraw_pending = 0;
             return;
         }
@@ -715,6 +777,12 @@ static void console_redraw_step(uint64_t max_rows) {
     framebuffer_t *fb = fb_get();
 
     if (!console_redraw_pending) return;
+    if (!console_redraw_buffer) {
+        console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
+        return;
+    }
     if (!fb || (fb->rows == 0 && fb->cols == 0)) {
         console_redraw_pending = 0;
         console_switch_in_progress = 0;
@@ -826,6 +894,7 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
     framebuffer_t *fb;
     uint64_t shift;
     uint64_t r;
+    uint64_t row_limit;
 
     if (max_cols == 0) max_cols = 1;
     if (max_rows == 0) max_rows = 1;
@@ -834,12 +903,18 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
     for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         if (!con->allocated) continue;
-        console_grow_buffer(con, max_rows);
+        if (i == current_console) {
+            console_grow_buffer(con, max_rows);
+            row_limit = max_rows;
+        } else {
+            row_limit = con->buffer_rows;
+            if (row_limit == 0) row_limit = 1;
+        }
         if (con->cursor_x >= max_cols) {
             con->cursor_x = max_cols - 1;
         }
-        if (con->cursor_y >= max_rows) {
-            shift = con->cursor_y - (max_rows - 1);
+        if (con->cursor_y >= row_limit) {
+            shift = con->cursor_y - (row_limit - 1);
             if (shift > 0 && con->buffer && con->buffer_rows > shift) {
                 memmove(con->buffer[0], con->buffer[shift], (con->buffer_rows - shift) * CONSOLE_BUFFER_COLS);
                 if (con->color_buffer)
@@ -854,12 +929,12 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
                         con->line_wrapped[r] = 0;
                 }
             }
-            con->cursor_y = max_rows - 1;
+            con->cursor_y = row_limit - 1;
         }
-        if (con->scroll_bottom > max_rows) {
-            con->scroll_bottom = max_rows;
+        if (con->scroll_bottom > row_limit) {
+            con->scroll_bottom = row_limit;
         }
-        if (con->scroll_top >= max_rows) {
+        if (con->scroll_top >= row_limit) {
             con->scroll_top = 0;
         }
     }
@@ -1500,6 +1575,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     console_grow_buffer(con, rows);
     if (rows > con->buffer_rows) rows = con->buffer_rows;
     if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+    console_ensure_nondefault_color(con);
 
     cmd = con->esc_buf[con->esc_len - 1];
     
@@ -2052,6 +2128,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
     if (c == 0x07 || c == 0x0E || c == 0x0F) {
         return;
     }
+
+    console_ensure_nondefault_color(con);
 
     if (c == '\n') {
         con->cursor_x = 0;

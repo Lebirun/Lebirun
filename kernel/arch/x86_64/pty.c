@@ -86,16 +86,6 @@ static int alloc_pty(void) {
     i = pty_capacity / 2;
 found:
     memset(&ptys[i], 0, sizeof(pty_t));
-    ptys[i].master_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
-    if (!ptys[i].master_buf) return -1;
-    ptys[i].slave_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
-    if (!ptys[i].slave_buf) {
-        kfree(ptys[i].master_buf);
-        ptys[i].master_buf = NULL;
-        return -1;
-    }
-    memset(ptys[i].master_buf, 0, PTY_BUF_SIZE);
-    memset(ptys[i].slave_buf, 0, PTY_BUF_SIZE);
     ptys[i].in_use = 1;
     ptys[i].master_fd = pty_base_master + i;
     ptys[i].slave_fd = pty_base_slave + i;
@@ -104,6 +94,22 @@ found:
     ptys[i].winsize.ws_col = 80;
     mutex_init(&ptys[i].lock);
     return i;
+}
+
+static int pty_ensure_master_buf(pty_t *pty) {
+    if (pty->master_buf) return 0;
+    pty->master_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
+    if (!pty->master_buf) return -12;
+    memset(pty->master_buf, 0, PTY_BUF_SIZE);
+    return 0;
+}
+
+static int pty_ensure_slave_buf(pty_t *pty) {
+    if (pty->slave_buf) return 0;
+    pty->slave_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
+    if (!pty->slave_buf) return -12;
+    memset(pty->slave_buf, 0, PTY_BUF_SIZE);
+    return 0;
 }
 
 static pty_t *get_pty_by_master(int fd) {
@@ -237,6 +243,10 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     
     space = buf_free(pty->master_head, pty->master_tail, PTY_BUF_SIZE);
     to_write = (count < space) ? count : space;
+    if (to_write > 0 && pty_ensure_master_buf(pty) < 0) {
+        mutex_unlock(&pty->lock);
+        return -12;
+    }
     src = (const uint8_t *)buf;
     
     for (i = 0; i < to_write; i++) {
@@ -401,6 +411,10 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
     
     space = buf_free(pty->slave_head, pty->slave_tail, PTY_BUF_SIZE);
     written = 0;
+    if (count > 0 && space > 0 && pty_ensure_slave_buf(pty) < 0) {
+        mutex_unlock(&pty->lock);
+        return -12;
+    }
     src = (const uint8_t *)buf;
     
     for (i = 0; i < count && written < space; i++) {

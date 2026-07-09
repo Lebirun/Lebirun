@@ -380,10 +380,11 @@ typedef struct {
     uint64_t version;
     uint64_t ports_impl;
     uint64_t num_ports;
+    uint64_t ports_capacity;
     uint64_t num_cmd_slots;
     uint8_t irq;
     bool irq_enabled;
-    ahci_port_t ports[AHCI_MAX_PORTS];
+    ahci_port_t *ports;
 } ahci_controller_t;
 
 typedef struct {

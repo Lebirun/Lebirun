@@ -5,7 +5,7 @@
 #include <lebirun/pty.h>
 
 extern task_t *current_task;
-extern void *syscall_table[];
+extern void **syscall_table;
 
 struct sysinfo {
     long uptime;

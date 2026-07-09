@@ -30,12 +30,15 @@ typedef struct {
 static dirent_t ext4_dirent;
 
 #define EXT4_VFS_CACHE_MAX 32
-static struct {
+typedef struct {
     ext4_fs_t *fs;
     uint32_t ino;
     vfs_node_t *node;
-} ext4_vfs_cache[EXT4_VFS_CACHE_MAX];
+} ext4_vfs_cache_entry_t;
+
+static ext4_vfs_cache_entry_t *ext4_vfs_cache;
 static int ext4_vfs_cache_count = 0;
+static int ext4_vfs_cache_capacity = 0;
 
 static void ext4_mount_list_add_locked(ext4_fs_t *fs) {
     if (!fs) return;
@@ -174,6 +177,37 @@ static vfs_node_t *ext4_vfs_cache_lookup(ext4_fs_t *fs, uint32_t ino) {
     return NULL;
 }
 
+static int ext4_vfs_cache_grow(void) {
+    int new_capacity;
+    int i;
+    ext4_vfs_cache_entry_t *new_cache;
+
+    if (ext4_vfs_cache_capacity >= EXT4_VFS_CACHE_MAX) return -1;
+
+    new_capacity = ext4_vfs_cache_capacity * 2;
+    if (new_capacity < 4) new_capacity = 4;
+    if (new_capacity > EXT4_VFS_CACHE_MAX) new_capacity = EXT4_VFS_CACHE_MAX;
+
+    new_cache = (ext4_vfs_cache_entry_t *)krealloc(ext4_vfs_cache, new_capacity * sizeof(ext4_vfs_cache_entry_t));
+    if (!new_cache) return -1;
+
+    for (i = ext4_vfs_cache_capacity; i < new_capacity; i++) {
+        memset(&new_cache[i], 0, sizeof(ext4_vfs_cache_entry_t));
+    }
+
+    ext4_vfs_cache = new_cache;
+    ext4_vfs_cache_capacity = new_capacity;
+    return 0;
+}
+
+static void ext4_vfs_cache_release_empty(void) {
+    if (ext4_vfs_cache_count != 0) return;
+    if (!ext4_vfs_cache) return;
+    kfree(ext4_vfs_cache);
+    ext4_vfs_cache = NULL;
+    ext4_vfs_cache_capacity = 0;
+}
+
 static void ext4_vfs_node_link(ext4_fs_t *fs, vfs_node_t *node) {
     if (!fs || !node) return;
     node->impl = (uint64_t)(uintptr_t)fs->vfs_nodes;
@@ -258,7 +292,13 @@ static void ext4_vfs_cache_insert(ext4_fs_t *fs, uint32_t ino, vfs_node_t *node)
     int i;
     int k;
 
-    if (ext4_vfs_cache_count < EXT4_VFS_CACHE_MAX) {
+    if (ext4_vfs_cache_count >= ext4_vfs_cache_capacity &&
+        ext4_vfs_cache_grow() < 0 &&
+        ext4_vfs_cache_capacity == 0) {
+        return;
+    }
+
+    if (ext4_vfs_cache_count < ext4_vfs_cache_capacity) {
         ext4_vfs_cache[ext4_vfs_cache_count].fs = fs;
         ext4_vfs_cache[ext4_vfs_cache_count].ino = ino;
         ext4_vfs_cache[ext4_vfs_cache_count].node = node;
@@ -301,6 +341,7 @@ static void ext4_vfs_cache_remove(vfs_node_t *node) {
                 memmove(&ext4_vfs_cache[i], &ext4_vfs_cache[i + 1],
                         (ext4_vfs_cache_count - i) * sizeof(ext4_vfs_cache[0]));
             }
+            ext4_vfs_cache_release_empty();
             return;
         }
     }
@@ -321,6 +362,7 @@ static void ext4_vfs_cache_remove_fs(ext4_fs_t *fs) {
                     (ext4_vfs_cache_count - i) * sizeof(ext4_vfs_cache[0]));
         }
     }
+    ext4_vfs_cache_release_empty();
 }
 
 static void ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {

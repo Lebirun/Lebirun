@@ -43,7 +43,8 @@ static int slab_initialized = 0;
 static volatile int slab_lock = 0;
 
 static uint64_t slab_virt_bump = SLAB_REGION_START;
-static uint64_t slab_virt_freelist[SLAB_VIRT_FREELIST_SIZE];
+static uint64_t *slab_virt_freelist = NULL;
+static uint64_t slab_virt_free_capacity = 0;
 static uint64_t slab_virt_free_count = 0;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
@@ -147,7 +148,7 @@ static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
 static uint64_t slab_virt_alloc(void) {
     uint64_t v;
 
-    if (slab_virt_free_count > 0) {
+    if (slab_virt_freelist && slab_virt_free_count > 0) {
         return slab_virt_freelist[--slab_virt_free_count];
     }
     if (slab_virt_bump < SLAB_REGION_START + SLAB_REGION_SIZE) {
@@ -189,7 +190,13 @@ static int slab_obj_valid(slab_page_t *page, void *ptr) {
 }
 
 static void slab_virt_free(uint64_t virt) {
-    if (slab_virt_free_count < (sizeof(slab_virt_freelist) / sizeof(slab_virt_freelist[0]))) {
+    if (!slab_virt_freelist) {
+        slab_virt_freelist = (uint64_t *)kmalloc(SLAB_VIRT_FREELIST_SIZE * sizeof(uint64_t));
+        if (slab_virt_freelist) {
+            slab_virt_free_capacity = SLAB_VIRT_FREELIST_SIZE;
+        }
+    }
+    if (slab_virt_freelist && slab_virt_free_count < slab_virt_free_capacity) {
         slab_virt_freelist[slab_virt_free_count++] = virt;
     }
 }
