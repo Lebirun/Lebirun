@@ -5,12 +5,14 @@ set -e
 VERBOSE=0
 DO_BUILD=0
 NO_BUILD=0
+DISK=0
 ISO_ARGS=""
 for arg in "$@"; do
   case "$arg" in
     -v|--verbose) VERBOSE=1; ISO_ARGS="$ISO_ARGS -v" ;;
     -b|--build) DO_BUILD=1 ;;
     --no-build) NO_BUILD=1 ;;
+    --disk) DISK=1 ;;
   esac
 done
 
@@ -54,6 +56,11 @@ if [ "$NO_BUILD" -eq 0 ]; then
     CDROM_ARGS="-cdrom lebirun.iso"
 fi
 
+DISK_ARGS=""
+if [ "$DISK" -eq 1 ]; then
+    DISK_ARGS="-drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 -device ide-hd,drive=sata0,bus=ahci0.0"
+fi
+
 $QEMU_CMD \
     -m 4G \
     -smp 4 \
@@ -62,8 +69,7 @@ $QEMU_CMD \
     -s -S \
     -serial stdio \
     -device ahci,id=ahci0 \
-    -drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 \
-    -device ide-hd,drive=sata0,bus=ahci0.0 \
+    $DISK_ARGS \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
     -device e1000,netdev=net0 \
     -accel kvm \

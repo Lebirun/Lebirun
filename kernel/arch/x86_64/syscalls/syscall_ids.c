@@ -34,7 +34,8 @@ static task_creds_t *get_task_creds(void) {
         creds->sgid   = current_task->sgid;
         creds->fsuid  = current_task->fsuid;
         creds->fsgid  = current_task->fsgid;
-        memcpy(creds->groups, current_task->groups, sizeof(creds->groups));
+        if (current_task->groups && current_task->ngroups > 0)
+            memcpy(creds->groups, current_task->groups, current_task->ngroups * sizeof(uint64_t));
         creds->ngroups = current_task->ngroups;
         creds->umask_val = 022;
         creds->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
@@ -74,7 +75,7 @@ static void sync_creds_to_task(task_creds_t *creds) {
     current_task->sgid  = creds->sgid;
     current_task->fsuid = creds->fsuid;
     current_task->fsgid = creds->fsgid;
-    memcpy(current_task->groups, creds->groups, sizeof(current_task->groups));
+    current_task->groups = creds->groups;
     current_task->ngroups = creds->ngroups;
     current_task->pgid = creds->pgid;
     current_task->sid = creds->sid;
@@ -459,18 +460,18 @@ void creds_init_task(task_t *task) {
     task->sgid = 0;
     task->fsuid = 0;
     task->fsgid = 0;
-    memset(task->groups, 0, sizeof(task->groups));
+    task->groups = NULL;
     task->ngroups = 0;
     task->pgid = task->pid;
     task->sid = task->pid;
     task->creds_data = NULL;
 }
 
-void creds_copy_task(task_t *parent, task_t *child) {
+int creds_copy_task(task_t *parent, task_t *child) {
     task_creds_t *pcreds;
     task_creds_t *ccreds;
 
-    if (!parent || !child) return;
+    if (!parent || !child) return -1;
     pcreds = (task_creds_t *)parent->creds_data;
     ccreds = (task_creds_t *)child->creds_data;
     child->uid   = parent->uid;
@@ -481,21 +482,22 @@ void creds_copy_task(task_t *parent, task_t *child) {
     child->sgid  = parent->sgid;
     child->fsuid = parent->fsuid;
     child->fsgid = parent->fsgid;
-    memcpy(child->groups, parent->groups, sizeof(child->groups));
+    child->groups = NULL;
     child->ngroups = parent->ngroups;
     child->pgid = parent->pgid ? parent->pgid : child->pid;
     child->sid = parent->sid ? parent->sid : child->pid;
     child->ppid = parent->pid;
     if (!pcreds) {
         child->creds_data = NULL;
-        return;
+        return 0;
     }
     if (!ccreds) {
         ccreds = (task_creds_t *)kmalloc(sizeof(task_creds_t));
-        if (!ccreds) return;
+        if (!ccreds) return -1;
         child->creds_data = ccreds;
     }
     memcpy(ccreds, pcreds, sizeof(task_creds_t));
+    child->groups = ccreds->groups;
     child->uid   = ccreds->uid;
     child->euid  = ccreds->euid;
     child->suid  = ccreds->suid;
@@ -504,11 +506,11 @@ void creds_copy_task(task_t *parent, task_t *child) {
     child->sgid  = ccreds->sgid;
     child->fsuid = ccreds->fsuid;
     child->fsgid = ccreds->fsgid;
-    memcpy(child->groups, ccreds->groups, sizeof(child->groups));
     child->ngroups = ccreds->ngroups;
     child->pgid = ccreds->pgid;
     child->sid = ccreds->sid;
     child->ppid = parent->pid;
+    return 0;
 }
 
 pid_t creds_get_pgid(pid_t pid) {

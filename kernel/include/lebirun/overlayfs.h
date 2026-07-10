@@ -41,5 +41,6 @@ overlay_context_t *overlayfs_create(vfs_node_t *lower_root, vfs_node_t *upper_ro
 vfs_node_t *overlayfs_mount(overlay_context_t *ctx, const char *mountpoint);
 void overlay_flush_cache(void);
 void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes);
+int overlay_same_file(vfs_node_t *first, vfs_node_t *second);
 
 #endif

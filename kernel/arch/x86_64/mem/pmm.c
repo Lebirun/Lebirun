@@ -396,13 +396,11 @@ uint64_t pfa_get_usable_ram_kb(void) {
 }
 
 uint64_t pfa_get_kernel_used_kb(void) {
-    uint64_t total_managed_kb;
-    uint64_t free_kb;
+    uint64_t free_frames;
 
-    total_managed_kb = total_pages_managed * 4;
-    free_kb = pfa_cached_free * 4;
-    if (free_kb > total_managed_kb) return 0;
-    return total_managed_kb - free_kb - kernel_reserved_frames * 4;
+    free_frames = pfa_cached_free;
+    if (free_frames >= initial_free_frames) return 0;
+    return (initial_free_frames - free_frames) * 4;
 }
 
 uint64_t pfa_get_kernel_binary_kb(void) {

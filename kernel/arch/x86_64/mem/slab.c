@@ -6,8 +6,6 @@
 #define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
 #define SLAB_REGION_SIZE  0x00400000ULL
 #define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
-#define SLAB_VIRT_FREELIST_SIZE 128
-
 #define SLAB_SIZES_COUNT 4
 #define SLAB_SIZE_16    0
 #define SLAB_SIZE_32    1
@@ -43,9 +41,7 @@ static int slab_initialized = 0;
 static volatile int slab_lock = 0;
 
 static uint64_t slab_virt_bump = SLAB_REGION_START;
-static uint64_t *slab_virt_freelist = NULL;
-static uint64_t slab_virt_free_capacity = 0;
-static uint64_t slab_virt_free_count = 0;
+static uint64_t slab_virt_scan = SLAB_REGION_START;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
@@ -147,14 +143,20 @@ static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
 
 static uint64_t slab_virt_alloc(void) {
     uint64_t v;
+    uint64_t i;
 
-    if (slab_virt_freelist && slab_virt_free_count > 0) {
-        return slab_virt_freelist[--slab_virt_free_count];
-    }
     if (slab_virt_bump < SLAB_REGION_START + SLAB_REGION_SIZE) {
         v = slab_virt_bump;
         slab_virt_bump += PAGE_SIZE;
         return v;
+    }
+    for (i = 0; i < SLAB_REGION_MAX_PAGES; i++) {
+        v = slab_virt_scan;
+        slab_virt_scan += PAGE_SIZE;
+        if (slab_virt_scan >= SLAB_REGION_START + SLAB_REGION_SIZE) {
+            slab_virt_scan = SLAB_REGION_START;
+        }
+        if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), v)) return v;
     }
     return 0;
 }
@@ -189,18 +191,6 @@ static int slab_obj_valid(slab_page_t *page, void *ptr) {
     return 1;
 }
 
-static void slab_virt_free(uint64_t virt) {
-    if (!slab_virt_freelist) {
-        slab_virt_freelist = (uint64_t *)kmalloc(SLAB_VIRT_FREELIST_SIZE * sizeof(uint64_t));
-        if (slab_virt_freelist) {
-            slab_virt_free_capacity = SLAB_VIRT_FREELIST_SIZE;
-        }
-    }
-    if (slab_virt_freelist && slab_virt_free_count < slab_virt_free_capacity) {
-        slab_virt_freelist[slab_virt_free_count++] = virt;
-    }
-}
-
 static slab_page_t *slab_alloc_page(uint64_t obj_size) {
     slab_page_t *page;
     void *phys;
@@ -231,7 +221,6 @@ static void slab_free_page(slab_page_t *page) {
     virt = (uint64_t)page;
     phys = slab_virt_to_phys(virt);
     vmm_unmap_page(virt);
-    slab_virt_free(virt);
     if (phys) {
         pfa_free(phys);
     }

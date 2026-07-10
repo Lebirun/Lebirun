@@ -846,7 +846,7 @@ static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
     }
     
     cwd = "/";
-    if (current_task && current_task->cwd[0]) {
+    if (current_task && current_task->cwd && current_task->cwd[0]) {
         cwd = current_task->cwd;
     }
     

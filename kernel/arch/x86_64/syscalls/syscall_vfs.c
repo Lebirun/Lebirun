@@ -166,7 +166,7 @@ static const char *resolve_cwd_path(const char *pathname, char *resolved, size_t
     if (pathname[0] == '/') return pathname;
 
     cwd = "/";
-    if (current_task && current_task->cwd[0]) cwd = current_task->cwd;
+    if (current_task && current_task->cwd && current_task->cwd[0]) cwd = current_task->cwd;
 
     cwd_len = 0;
     while (cwd[cwd_len]) cwd_len++;

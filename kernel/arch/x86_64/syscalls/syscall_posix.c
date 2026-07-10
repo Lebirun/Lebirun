@@ -361,7 +361,7 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
     size = (uint64_t)(uintptr_t)size_ptr;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (size == 0) return -1;
-    cwd = current_task ? current_task->cwd : "/";
+    cwd = current_task && current_task->cwd ? current_task->cwd : "/";
     if (!cwd[0]) cwd = "/";
     len = 0;
     while (cwd[len]) len++;
@@ -374,9 +374,9 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     uint64_t addr;
     char *path;
     char *resolved;
+    char resolved_path[VFS_MAX_PATH];
     vfs_node_t *node;
     int ret;
-    int i;
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)path_ptr;
@@ -390,15 +390,11 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     if (!node) { kfree(path); return -ENOENT; }
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) { vfs_release(node); kfree(path); return -ENOTDIR; }
     if (!current_task) { vfs_release(node); kfree(path); return -EFAULT; }
-    resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
-    if (!resolved) {
-        i = 0;
-        while (path[i] && i < 254) { current_task->cwd[i] = path[i]; i++; }
-        current_task->cwd[i] = '\0';
-    }
+    resolved = vfs_get_path(node, resolved_path, sizeof(resolved_path));
+    ret = task_set_cwd(current_task, resolved ? resolved : path);
     vfs_release(node);
     kfree(path);
-    return 0;
+    return ret == 0 ? 0 : -ENOMEM;
 }
 
 static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
@@ -1376,14 +1372,17 @@ static int sys_pipe2(int *pipefd, int flags) {
 
 static int sys_fchdir(int fd) {
     char *resolved;
+    char resolved_path[VFS_MAX_PATH];
+    vfs_node_t *node;
+
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
-    resolved = vfs_get_path(node, current_task->cwd, sizeof(current_task->cwd));
-    (void)resolved;
-    return 0;
+    resolved = vfs_get_path(node, resolved_path, sizeof(resolved_path));
+    if (!resolved) return -ENOENT;
+    return task_set_cwd(current_task, resolved) == 0 ? 0 : -ENOMEM;
 }
 
 static int sys_fchmod(int fd, int mode) {

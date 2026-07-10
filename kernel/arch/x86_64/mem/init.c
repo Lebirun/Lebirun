@@ -444,7 +444,7 @@ void pfa_init(void) {
         system_total_ram_kb += (uint64_t)((region_end - region_base) / 1024);
     }
     system_usable_ram_kb = system_total_ram_kb;
-    pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, (uint64_t)total_free_frames);
+    pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, actual_free);
 
     {
         uint64_t kern_phys_start;

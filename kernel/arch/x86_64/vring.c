@@ -1032,6 +1032,16 @@ static void vring_selftest_sandbox_task(void) {
     task_exit(4);
 }
 
+static void vring_selftest_cleanup(void) {
+    vring_remove(7);
+    if (vring_selftest_buf) {
+        kfree_aligned(vring_selftest_buf);
+        vring_selftest_buf = NULL;
+    }
+    vring_selftest_pml4 = 0;
+    vring_selftest_task_ref = NULL;
+}
+
 static void vring_selftest_supervisor(void) {
     task_t *t;
     int i;
@@ -1049,12 +1059,15 @@ static void vring_selftest_supervisor(void) {
     if (ret != 0) {
         printf("VRINGTEST: FAIL create sandboxed ring ret=%d\n", ret);
         task_exit(1);
+        return;
     }
 
     vring_selftest_buf = kmalloc_aligned(PAGE_SIZE * 2, PAGE_SIZE);
     if (!vring_selftest_buf) {
         printf("VRINGTEST: FAIL allocation\n");
+        vring_selftest_cleanup();
         task_exit(1);
+        return;
     }
 
     allowed_addr = (uint64_t)vring_selftest_buf;
@@ -1063,13 +1076,17 @@ static void vring_selftest_supervisor(void) {
                            VRING_PERM_READ | VRING_PERM_WRITE);
     if (ret != 0) {
         printf("VRINGTEST: FAIL add allowed page ret=%d\n", ret);
+        vring_selftest_cleanup();
         task_exit(1);
+        return;
     }
 
     ring = vring_get(7);
     if (!ring || !ring->vring_pml4) {
         printf("VRINGTEST: FAIL missing sandbox PML4\n");
+        vring_selftest_cleanup();
         task_exit(1);
+        return;
     }
     vring_selftest_pml4 = ring->vring_pml4;
 
@@ -1078,13 +1095,17 @@ static void vring_selftest_supervisor(void) {
     if (!allowed_phys || forbidden_phys) {
         printf("VRINGTEST: FAIL page map allowed=0x%016lX forbidden=0x%016lX\n",
                allowed_phys, forbidden_phys);
+        vring_selftest_cleanup();
         task_exit(1);
+        return;
     }
 
     t = create_kernel_task(vring_selftest_sandbox_task, TASK_READY);
     if (!t) {
         printf("VRINGTEST: FAIL create task\n");
+        vring_selftest_cleanup();
         task_exit(1);
+        return;
     }
     if (current_task && current_task->stack_base && current_task->stack_size) {
         vring_add_region(7, (uint64_t)current_task->stack_base,
@@ -1114,7 +1135,9 @@ static void vring_selftest_supervisor(void) {
         printf("VRINGTEST: PASS allowed access worked and forbidden access killed sandboxed task\n");
     }
 
-    vring_remove(7);
+    if (vring_selftest_task_ref && vring_selftest_task_ref->state != TASK_DEAD)
+        task_kill(vring_selftest_task_ref, 1);
+    vring_selftest_cleanup();
     task_exit(0);
 }
 

@@ -23,6 +23,32 @@ static uint64_t ov_node_cache_count = 0;
 static uint64_t ov_node_cache_capacity = 0;
 
 static void overlay_try_free_node(overlay_node_t *onode);
+static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+
+static vfs_node_t *overlay_backing_node(vfs_node_t *node) {
+    overlay_node_t *onode;
+
+    if (!node) return NULL;
+    if (node->read != overlay_vfs_read) return NULL;
+    onode = (overlay_node_t *)node->private_data;
+    if (!onode || &onode->vfs != node || onode->ctx != &overlay_ctx) return NULL;
+    return onode->upper_node ? onode->upper_node : onode->lower_node;
+}
+
+int overlay_same_file(vfs_node_t *first, vfs_node_t *second) {
+    vfs_node_t *first_backing;
+    vfs_node_t *second_backing;
+
+    if (first == second) return 1;
+    first_backing = overlay_backing_node(first);
+    second_backing = overlay_backing_node(second);
+    if (!first_backing || !second_backing) return 0;
+    if (first_backing == second_backing) return 1;
+    return first_backing->read == second_backing->read &&
+           first_backing->inode == second_backing->inode &&
+           first_backing->length == second_backing->length &&
+           VFS_GET_TYPE(first_backing->flags) == VFS_GET_TYPE(second_backing->flags);
+}
 
 static void overlay_drop_node_refs(overlay_node_t *onode) {
     if (!onode) return;
@@ -153,12 +179,27 @@ static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
 
 static void ov_cache_remove(overlay_node_t *onode) {
     uint64_t i;
+    ov_node_cache_entry_t *new_cache;
+
     for (i = 0; i < ov_node_cache_count; i++) {
         if (ov_node_cache[i].onode == onode) {
             ov_node_cache_count--;
             if (i < ov_node_cache_count) {
                 memmove(&ov_node_cache[i], &ov_node_cache[i + 1],
                         (ov_node_cache_count - i) * sizeof(ov_node_cache[0]));
+            }
+            if (ov_node_cache_count == 0) {
+                kfree(ov_node_cache);
+                ov_node_cache = NULL;
+                ov_node_cache_capacity = 0;
+            } else if (ov_node_cache_capacity > ov_node_cache_count * 2) {
+                new_cache = (ov_node_cache_entry_t *)krealloc(
+                    ov_node_cache,
+                    ov_node_cache_count * sizeof(ov_node_cache_entry_t));
+                if (new_cache) {
+                    ov_node_cache = new_cache;
+                    ov_node_cache_capacity = ov_node_cache_count;
+                }
             }
             return;
         }

@@ -557,9 +557,6 @@ cleanup_fail:
     }
     pfa_free(new_pml4_phys);
 
-    for (i = 0; i < user_page_count; i++) {
-        pfa_cow_release64(user_pages[i]);
-    }
     kfree(new_pt_copy);
     kfree(src_pt_copy);
     kfree(user_pages);

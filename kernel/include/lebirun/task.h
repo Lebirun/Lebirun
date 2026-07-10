@@ -89,7 +89,7 @@ typedef struct task {
     int console_id;
     uint64_t tls_base;
     uint64_t tls_limit;
-    char cwd[128];
+    char *cwd;
     char **envp;
     int envc;
     task_fd_t *fds;
@@ -103,7 +103,7 @@ typedef struct task {
     uint64_t sgid;
     uint64_t fsuid;
     uint64_t fsgid;
-    uint64_t groups[16];
+    uint64_t *groups;
     int ngroups;
 
     pid_t pgid;
@@ -241,6 +241,8 @@ void task_fd_free(task_t *task, int fd);
 task_fd_t *task_fd_get(task_t *task, int fd);
 void task_fd_close_all(task_t *task);
 void task_fd_close_cloexec(task_t *task);
+int task_set_cwd(task_t *task, const char *cwd);
+int task_copy_cwd(task_t *task, const task_t *source);
 
 pid_t task_fork(registers_t *parent_regs);
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs);

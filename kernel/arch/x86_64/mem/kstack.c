@@ -95,7 +95,6 @@ void kstack_init(void) {
 uint8_t *kstack_alloc(void) {
     int i;
     int p;
-    int k;
     int new_cap;
     void *phys;
     uint64_t page_virt;
@@ -113,26 +112,18 @@ uint8_t *kstack_alloc(void) {
         if (kstack_grow(new_cap) < 0) return NULL;
     }
 
-    for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
-        phys = pmm_alloc_low_page();
-        if (!phys) phys = pmm_alloc_page();
-        if (!phys) {
-            for (k = 0; k < p; k++) {
-                vmm_unmap_page(slot_page_addr(i, k));
-                pfa_free(slot_page_phys[i][k]);
-                slot_page_phys[i][k] = 0;
-            }
-            return NULL;
-        }
+    p = KSTACK_USABLE_PAGES - 1;
+    phys = pmm_alloc_low_page();
+    if (!phys) phys = pmm_alloc_page();
+    if (!phys) return NULL;
 
-        page_virt = slot_page_addr(i, p);
-        vmm_map_page(page_virt, (uint64_t)phys, 0x003);
-        memset((void *)page_virt, 0, PAGE_SIZE);
-        slot_page_phys[i][p] = (uint64_t)phys;
-    }
+    page_virt = slot_page_addr(i, p);
+    vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+    memset((void *)page_virt, 0, PAGE_SIZE);
+    slot_page_phys[i][p] = (uint64_t)phys;
 
     slot_used[i] = 1;
-    slot_bottom_mapped[i] = 1;
+    slot_bottom_mapped[i] = 0;
 
     base_virt = slot_bottom_addr(i);
     return (uint8_t *)base_virt;
@@ -216,7 +207,10 @@ void kstack_reclaim_unused(void) {
 
 int kstack_page_fault_handler(uint64_t fault_addr) {
     int slot;
+    int page_idx;
+    void *phys;
     uint64_t page_virt;
+    uint64_t bottom;
     uint64_t guard;
 
     if (!kstack_initialized) return 0;
@@ -233,7 +227,21 @@ int kstack_page_fault_handler(uint64_t fault_addr) {
         return 0;
     }
 
-    return 0;
+    bottom = slot_bottom_addr(slot);
+    if (page_virt < bottom || page_virt >= bottom + KSTACK_USABLE_SIZE) return 0;
+    page_idx = (int)((page_virt - bottom) / PAGE_SIZE);
+    if (slot_page_phys[slot][page_idx]) return 0;
+
+    phys = pmm_alloc_low_page();
+    if (!phys) phys = pmm_alloc_page();
+    if (!phys) return 0;
+
+    vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+    memset((void *)page_virt, 0, PAGE_SIZE);
+    slot_page_phys[slot][page_idx] = (uint64_t)phys;
+    if (page_idx == 0) slot_bottom_mapped[slot] = 1;
+
+    return 1;
 }
 
 int kstack_is_in_region(uint64_t addr) {

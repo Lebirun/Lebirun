@@ -4,6 +4,7 @@
 #include <lebirun/common.h>
 #include <lebirun/gdt.h>
 #include <lebirun/idt.h>
+#include <lebirun/kstack.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -494,7 +495,7 @@ void smp_start_aps(void) {
             continue;
         }
 
-        cpus[i].kernel_stack = kmalloc_aligned(8192, 16);
+        cpus[i].kernel_stack = kstack_alloc();
         if (!cpus[i].kernel_stack) {
             printf("SMP: failed to allocate stack for CPU %u\n", cpus[i].lapic_id);
             continue;
@@ -504,10 +505,16 @@ void smp_start_aps(void) {
         cpus[i].tss = kmalloc_aligned(104, 8);
         if (!cpus[i].gdt || !cpus[i].tss) {
             printf("SMP: failed to allocate GDT/TSS for CPU %u\n", cpus[i].lapic_id);
+            if (cpus[i].gdt) kfree_aligned(cpus[i].gdt);
+            if (cpus[i].tss) kfree_aligned(cpus[i].tss);
+            kstack_free(cpus[i].kernel_stack);
+            cpus[i].gdt = NULL;
+            cpus[i].tss = NULL;
+            cpus[i].kernel_stack = NULL;
             continue;
         }
 
-        *tramp_stack = (uint64_t)cpus[i].kernel_stack + 8192;
+        *tramp_stack = (uint64_t)cpus[i].kernel_stack + KSTACK_USABLE_SIZE;
         *tramp_cr3 = read_cr3();
         *tramp_flag = 0;
 

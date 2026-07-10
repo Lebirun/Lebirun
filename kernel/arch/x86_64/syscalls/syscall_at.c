@@ -132,7 +132,7 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *resolv
     }
     
     if (dirfd == AT_FDCWD) {
-        cwd = current_task ? current_task->cwd : "/";
+        cwd = current_task && current_task->cwd ? current_task->cwd : "/";
         if (!cwd[0]) cwd = "/";
         
         cwd_len = 0;

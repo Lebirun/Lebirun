@@ -14,6 +14,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/smp.h>
 #include <lebirun/vfs.h>
+#include <lebirun/overlayfs.h>
 #include <lebirun/rng.h>
 #include <string.h>
 #include <stdio.h>
@@ -58,6 +59,32 @@ static task_t* dead_queue_head = NULL;
 static int task_ptr_valid(task_t *t);
 static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
+
+int task_set_cwd(task_t *task, const char *cwd) {
+    char *copy;
+    size_t len;
+
+    if (!task || !cwd) return -1;
+    len = strlen(cwd);
+    if (len >= VFS_MAX_PATH) return -1;
+    copy = (char *)kmalloc(len + 1);
+    if (!copy) return -1;
+    memcpy(copy, cwd, len + 1);
+    if (task->cwd) kfree(task->cwd);
+    task->cwd = copy;
+    return 0;
+}
+
+int task_copy_cwd(task_t *task, const task_t *source) {
+    if (!source || !source->cwd) return task_set_cwd(task, "/");
+    return task_set_cwd(task, source->cwd);
+}
+
+static void task_free_cwd(task_t *task) {
+    if (!task || !task->cwd) return;
+    kfree(task->cwd);
+    task->cwd = NULL;
+}
 
 static volatile int reap_pending = 0;
 static volatile int exec_drain_pending = 0;
@@ -1049,15 +1076,20 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         return NULL;
     }
     memset(new_task, 0, sizeof(task_t));
+    if (user_mode && task_set_cwd(new_task, "/") != 0) {
+        kfree(new_task);
+        if (stack_base) kfree(stack_base);
+        kstack_free(kernel_stack_base);
+        return NULL;
+    }
     if (user_mode && task_init_fpu_state(new_task) != 0) {
         printf("Task fpu alloc fail!\n");
+        task_free_cwd(new_task);
         kfree(new_task);
         if (stack_base) kfree(stack_base);
         if (kernel_stack_base) kstack_free(kernel_stack_base);
         return NULL;
     }
-    new_task->cwd[0] = '/';
-    new_task->cwd[1] = '\0';
     task_init_fds(new_task);
     if (stack_base) memset(stack_base, 0, TASK_STACK_SIZE);
 
@@ -1463,6 +1495,53 @@ uint64_t exec_page_cache_get_reclaimable_pages(void) {
     return pages;
 }
 
+static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
+    task_t *task;
+    uint64_t vaddr;
+    uint64_t phys;
+    uint8_t old_ref;
+    int added_existing_ref;
+    int i;
+
+    if (!node) return 0;
+    phys = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task)) {
+        if (task != current_task && task->is_user && task->state != TASK_DEAD && task->pml4_phys) {
+            for (i = 0; i < task->file_map_count; i++) {
+                if (!overlay_same_file(task->file_maps[i].node, node)) continue;
+                if (offset < task->file_maps[i].offset) continue;
+                if (offset >= task->file_maps[i].offset + task->file_maps[i].filesz) continue;
+                vaddr = task->file_maps[i].vaddr + (offset - task->file_maps[i].offset);
+                phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
+                if (phys) break;
+            }
+        }
+        if (phys) break;
+        task = task->all_next;
+    }
+    if (phys) {
+        added_existing_ref = 0;
+        old_ref = pfa_ref_get(phys);
+        if (old_ref == 0) {
+            pfa_ref_inc(phys);
+            if (pfa_ref_get(phys) == 0) phys = 0;
+            else added_existing_ref = 1;
+        }
+        if (phys) {
+            old_ref = pfa_ref_get(phys);
+            pfa_ref_inc(phys);
+            if (pfa_ref_get(phys) <= old_ref) {
+                if (added_existing_ref) pfa_ref_dec(phys);
+                phys = 0;
+            }
+        }
+    }
+    unlock_scheduler();
+    return phys;
+}
+
 static int exec_page_cache_get(vfs_node_t *node, uint64_t offset, uint64_t read_len, uint64_t *out_phys) {
     exec_page_cache_entry_t *entry;
     exec_page_cache_entry_t *existing;
@@ -1473,8 +1552,12 @@ static int exec_page_cache_get(vfs_node_t *node, uint64_t offset, uint64_t read_
     if (!node || !out_phys) return -1;
     *out_phys = 0;
     offset &= ~(PAGE_SIZE - 1);
-    if (exec_page_cache_target_pages() == 0) return -1;
-
+    if (exec_page_cache_target_pages() == 0) {
+        phys = exec_page_find_active(node, offset);
+        if (!phys) return -1;
+        *out_phys = phys;
+        return 0;
+    }
     spin_lock(&exec_page_cache_lock);
     entry = exec_page_cache_find_locked(node, offset);
     if (entry) {
@@ -1641,6 +1724,7 @@ static void task_release_exit_resources(task_t *t) {
         kfree(t->creds_data);
         t->creds_data = NULL;
     }
+    task_free_cwd(t);
     t->resources_released = 1;
 }
 
@@ -2816,8 +2900,16 @@ pid_t task_fork(registers_t *parent_regs) {
         return -1;
     }
     memset(child, 0, sizeof(task_t));
+    if (task_copy_cwd(child, current_task) != 0) {
+        kfree(child);
+        kstack_free(kernel_stack_base);
+        if (child_user_pages) kfree(child_user_pages);
+        vmm_free_pml4(child_pd);
+        return -KERR_ENOMEM;
+    }
     if (task_init_fpu_state(child) != 0) {
         printf("task_fork: fpu allocation failed\n");
+        task_free_cwd(child);
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages) {
@@ -2833,7 +2925,15 @@ pid_t task_fork(registers_t *parent_regs) {
     child->pid = next_task_id;
     next_task_id++;
 
-    creds_copy_task(current_task, child);
+    if (creds_copy_task(current_task, child) != 0) {
+        task_free_fpu_state(child);
+        task_free_cwd(child);
+        kfree(child);
+        kstack_free(kernel_stack_base);
+        if (child_user_pages) kfree(child_user_pages);
+        vmm_free_pml4(child_pd);
+        return -KERR_ENOMEM;
+    }
     signals_init_task(child);
 
     child->ppid = current_task->pid;
@@ -2871,6 +2971,7 @@ pid_t task_fork(registers_t *parent_regs) {
     if (child->file_map_count > 0) {
         if (task_ensure_file_map_capacity(child, child->file_map_count) != 0) {
             task_free_fpu_state(child);
+            task_free_cwd(child);
             kfree(child);
             kstack_free(kernel_stack_base);
             if (child_user_pages)
@@ -2891,7 +2992,6 @@ pid_t task_fork(registers_t *parent_regs) {
     child->tls_base = current_task->tls_base;
     child->tls_limit = current_task->tls_limit;
     child->waiting_for_any_child = 0;
-    memcpy(child->cwd, current_task->cwd, sizeof(child->cwd));
     memcpy(child->name, current_task->name, sizeof(child->name));
     parent_cap = current_task->fds_capacity;
     if (parent_cap < TASK_INIT_FDS) parent_cap = TASK_INIT_FDS;
@@ -2899,6 +2999,7 @@ pid_t task_fork(registers_t *parent_regs) {
     if (!child->fds) {
         task_clear_file_mappings(child);
         task_free_fpu_state(child);
+        task_free_cwd(child);
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages)
@@ -3823,7 +3924,6 @@ int task_exec_node_with_args(vfs_node_t *node, registers_t *regs,
 }
 
 pid_t task_create_thread(void (*entry)(void)) {
-    int i;
     uint64_t thread_stack_size;
     uint64_t thread_stack_base;
     uint64_t thread_stack_top;
@@ -3840,7 +3940,12 @@ pid_t task_create_thread(void (*entry)(void)) {
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
+    if (task_copy_cwd(new_task, current_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
     if (task_init_fpu_state(new_task) != 0) {
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -3848,6 +3953,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
         task_free_fpu_state(new_task);
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -3870,10 +3976,6 @@ pid_t task_create_thread(void (*entry)(void)) {
     new_task->user_brk_start = current_task->user_brk_start;
     new_task->console_id = current_task->console_id;
     
-    for (i = 0; i < 128; i++) {
-        new_task->cwd[i] = current_task->cwd[i];
-    }
-    
     thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
@@ -3883,6 +3985,7 @@ pid_t task_create_thread(void (*entry)(void)) {
     if (!stack_pages) {
         kstack_free(new_task->kernel_stack_base);
         task_free_fpu_state(new_task);
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -3969,7 +4072,6 @@ pid_t task_create_thread(void (*entry)(void)) {
 }
 
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
-    int i;
     uint64_t thread_stack_size;
     uint64_t thread_stack_base;
     uint64_t thread_stack_top;
@@ -3988,7 +4090,12 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     if (!new_task) return -1;
     
     memset(new_task, 0, sizeof(task_t));
+    if (task_copy_cwd(new_task, current_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
     if (task_init_fpu_state(new_task) != 0) {
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -3996,6 +4103,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->kernel_stack_base = kstack_alloc();
     if (!new_task->kernel_stack_base) {
         task_free_fpu_state(new_task);
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -4018,10 +4126,6 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->user_brk_start = current_task->user_brk_start;
     new_task->console_id = current_task->console_id;
     
-    for (i = 0; i < 128; i++) {
-        new_task->cwd[i] = current_task->cwd[i];
-    }
-    
     thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
@@ -4031,6 +4135,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     if (!stack_pages) {
         kstack_free(new_task->kernel_stack_base);
         task_free_fpu_state(new_task);
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
