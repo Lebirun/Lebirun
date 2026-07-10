@@ -1329,8 +1329,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     uint64_t i;
     squashfs_dir_entry_t *entry;
     uint16_t actual_name_len;
-    uint16_t copy_name_len;
-    char entry_name[VFS_MAX_NAME];
+    size_t requested_name_len;
     uint64_t inode_ref;
     vfs_node_t *result;
     uint64_t dir_data_len;
@@ -1340,6 +1339,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     uint64_t meta_data_size;
 
     if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
+    requested_name_len = strlen(name);
     
     snode = (squashfs_vfs_node_t *)node->private_data;
     if (!snode) return NULL;
@@ -1389,15 +1389,9 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
             if (pos + sizeof(squashfs_dir_entry_t) + actual_name_len > end_pos) {
                 break;
             }
-            copy_name_len = actual_name_len;
-            
-            if (copy_name_len >= VFS_MAX_NAME) {
-                copy_name_len = VFS_MAX_NAME - 1;
-            }
-            memcpy(entry_name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
-            entry_name[copy_name_len] = '\0';
-            
-            if (strcmp(entry_name, name) == 0) {
+            if ((size_t)actual_name_len == requested_name_len &&
+                memcmp(dir_data + pos + sizeof(squashfs_dir_entry_t),
+                       name, requested_name_len) == 0) {
                 inode_ref = ((uint64_t)hdr->start_block << 16) | entry->offset;
                 result = squashfs_create_vfs_node(inode_ref, name);
                 if (result) {

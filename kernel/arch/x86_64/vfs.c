@@ -731,8 +731,7 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
-    char dir_path[VFS_MAX_PATH];
-    char child_path[VFS_MAX_PATH];
+    char path[VFS_MAX_PATH];
     size_t dir_len;
     size_t name_len;
     int i;
@@ -752,27 +751,26 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     if (node == vfs_root)
         return NULL;
 
-    if (vfs_node_to_path(node, dir_path, sizeof(dir_path)) < 0)
+    if (vfs_node_to_path(node, path, sizeof(path)) < 0)
         return NULL;
 
-    dir_len = strlen(dir_path);
-    if (dir_len > 1 && dir_path[dir_len - 1] == '/') {
-        dir_path[--dir_len] = '\0';
+    dir_len = strlen(path);
+    if (dir_len > 1 && path[dir_len - 1] == '/') {
+        path[--dir_len] = '\0';
     }
 
     name_len = strlen(name);
     if (dir_len + 1 + name_len >= VFS_MAX_PATH)
         return NULL;
 
-    memcpy(child_path, dir_path, dir_len);
-    child_path[dir_len] = '/';
-    memcpy(child_path + dir_len + 1, name, name_len);
-    child_path[dir_len + 1 + name_len] = '\0';
+    path[dir_len] = '/';
+    memcpy(path + dir_len + 1, name, name_len);
+    path[dir_len + 1 + name_len] = '\0';
 
     for (i = 0; i < mounts_capacity; i++) {
         if (!mounts[i].in_use)
             continue;
-        if (strcmp(mounts[i].path, child_path) == 0) {
+        if (strcmp(mounts[i].path, path) == 0) {
             return mounts[i].root;
         }
     }
@@ -979,7 +977,6 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
     char component[VFS_MAX_NAME];
     char target[VFS_MAX_PATH];
     char newpath[VFS_MAX_PATH];
-    char new_prefix[VFS_MAX_PATH];
     const char *path;
     const char *remaining;
     const char *rest_raw;
@@ -1118,13 +1115,19 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         node = next;
         node_is_transient = (next->flags & VFS_DYNAMIC);
 
-        if (strcmp(prefix, "/") == 0) {
-            snprintf(new_prefix, sizeof(new_prefix), "/%s", component);
-        } else {
-            snprintf(new_prefix, sizeof(new_prefix), "%s/%s", prefix, component);
+        plen = strlen(prefix);
+        if (plen > 1) {
+            if (plen + 1 >= sizeof(prefix)) {
+                if (node_is_transient) vfs_release(node);
+                return NULL;
+            }
+            prefix[plen++] = '/';
         }
-        strncpy(prefix, new_prefix, sizeof(prefix) - 1);
-        prefix[sizeof(prefix) - 1] = '\0';
+        if (plen + (size_t)i >= sizeof(prefix)) {
+            if (node_is_transient) vfs_release(node);
+            return NULL;
+        }
+        memcpy(prefix + plen, component, (size_t)i + 1);
     }
 
     return node;

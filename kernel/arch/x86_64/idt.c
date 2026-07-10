@@ -17,6 +17,8 @@
 #include <lebirun/common.h>
 #include <lebirun/kstack.h>
 
+#define IDT_ENOMEM 12
+
 extern void isr0(void);
 extern void isr1(void);
 extern void isr2(void);
@@ -371,6 +373,10 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t sc_mapped_phys;
             uint64_t *sc_new_user_pages;
 
+            if (regs->rip < KERNEL_VMA) {
+                kernel_panic("Kernel control-flow fault during syscall", regs);
+            }
+
             __asm__ ("movq %%cr2, %0" : "=r" (sc_fault_addr));
             if (sc_fault_addr < KERNEL_VMA) {
                 sc_fault_page = sc_fault_addr & ~0xFFFu;
@@ -520,7 +526,12 @@ registers_t* interrupt_handler(registers_t* regs)
 
             did_exec = 0;
 
-            do_syscall(regs);
+            if (kstack_prepare_syscall() == 0) {
+                do_syscall(regs);
+                kstack_finish_syscall();
+            } else {
+                regs->rax = -IDT_ENOMEM;
+            }
 
             __asm__ volatile ("cli" ::: "memory");
 

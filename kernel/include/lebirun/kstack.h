@@ -20,5 +20,7 @@ void kstack_free(uint8_t *base);
 void kstack_reclaim_unused(void);
 int kstack_page_fault_handler(uint64_t fault_addr);
 int kstack_is_in_region(uint64_t addr);
+int kstack_prepare_syscall(void);
+void kstack_finish_syscall(void);
 
 #endif

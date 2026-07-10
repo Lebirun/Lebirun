@@ -110,7 +110,6 @@ static int is_valid_kernel_ptr(uint64_t addr) {
     uint64_t cr3;
 
     if (addr < KERNEL_VMA) return 0;
-    if (addr >= 0xFFFF0000) return 0;
 
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     if (vmm_get_phys_in_pml4(cr3, addr) == 0) return 0;

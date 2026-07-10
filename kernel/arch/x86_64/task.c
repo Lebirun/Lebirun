@@ -1542,7 +1542,8 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     return phys;
 }
 
-static int exec_page_cache_get(vfs_node_t *node, uint64_t offset, uint64_t read_len, uint64_t *out_phys) {
+static int exec_page_cache_get(vfs_node_t *node, uint64_t offset, uint64_t read_len,
+                               uint64_t *out_phys) {
     exec_page_cache_entry_t *entry;
     exec_page_cache_entry_t *existing;
     uint64_t phys;
@@ -1821,14 +1822,12 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     if (read_end > read_start) {
         read_off = task->file_maps[match].offset + (read_start - task->file_maps[match].vaddr);
         read_len = read_end - read_start;
-        if (read_start == page) {
-            if (exec_page_cache_get(task->file_maps[match].node, read_off, read_len, &phys) != 0) {
+        if (read_start == page && !(task->file_maps[match].flags & 0x2)) {
+            if (exec_page_cache_get(task->file_maps[match].node, read_off, read_len,
+                                    &phys) != 0) {
                 phys = 0;
             } else {
                 cached_page = 1;
-                if (task->file_maps[match].flags & 0x2) {
-                    map_flags = (task->file_maps[match].flags & ~0x2ULL) | VMM_PTE_COW;
-                }
             }
         }
         if (!phys) {
@@ -2404,9 +2403,11 @@ static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
     uint64_t es_val;
     uint64_t ds_val;
     uint64_t cs_val;
+    uint64_t rip_val;
     int valid_es;
     int valid_ds;
     int valid_cs;
+    int valid_rip;
 
     if (frame_out) *frame_out = NULL;
     if (!task) return 0;
@@ -2421,10 +2422,13 @@ static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
     es_val = frame->es & 0xFFFF;
     ds_val = frame->ds & 0xFFFF;
     cs_val = frame->cs & 0xFFFF;
+    rip_val = frame->rip;
     valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
     valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
     valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
-    if (!valid_es || !valid_ds || !valid_cs) return 0;
+    valid_rip = (cs_val == 0x08 && rip_val >= KERNEL_VMA) ||
+                (cs_val == 0x1B && rip_val >= 0x1000 && rip_val < KERNEL_VMA);
+    if (!valid_es || !valid_ds || !valid_cs || !valid_rip) return 0;
     if (frame_out) *frame_out = frame;
     return 1;
 }

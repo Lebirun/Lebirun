@@ -40,6 +40,8 @@ LSH_BUILD := $(LSH_DIR)/build-cross
 LSH_OUTDIR := $(LSH_BUILD)/.build
 HOSTCC ?= gcc
 LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
+LSH_CFLAGS = -Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -Os -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic
+LSH_LDFLAGS = -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC_ABS)/user.ld
 
 SYSROOT_BIN = ../root/bin
 BINDIR = bin
@@ -78,8 +80,8 @@ bin/lsh.bin: $(LSH_SOURCE_FILES)
 		mkdir -p "$(LSH_BUILD)"; \
 		(cd "$(LSH_BUILD)" && sh ../configure $(LSH_CONFIGURE_ARGS) > "$(LSH_BUILD)/configure.log" 2>&1) || (cat "$(LSH_BUILD)/configure.log" >&2; false); \
 	fi
-	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="-Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -O2 -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic" LDFLAGS="-nostdlib -static -Wl,-z,noexecstack -T $(LIBC_ABS)/user.ld" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" clean
-	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="-Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -O2 -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic" LDFLAGS="-nostdlib -static -Wl,-z,noexecstack -T $(LIBC_ABS)/user.ld" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" lsh
+	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" clean
+	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" lsh
 	@cp "$(LSH_DIR)/lsh" "$(MAKEFILE_DIR)bin/lsh.bin"
 
 .PHONY: all clean

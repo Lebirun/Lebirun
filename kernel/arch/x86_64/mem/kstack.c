@@ -247,3 +247,64 @@ int kstack_page_fault_handler(uint64_t fault_addr) {
 int kstack_is_in_region(uint64_t addr) {
     return (addr >= KSTACK_REGION_START && addr < KSTACK_REGION_END);
 }
+
+int kstack_prepare_syscall(void) {
+    uint64_t flags;
+    uint64_t rsp;
+    uint64_t page_virt;
+    void *phys;
+    int current_slot;
+    int i;
+
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    __asm__ volatile ("movq %%rsp, %0" : "=r"(rsp));
+    current_slot = addr_to_slot(rsp);
+    if (current_slot < 0 || current_slot >= kstack_capacity ||
+        !slot_used[current_slot]) {
+        __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+        return -1;
+    }
+
+    for (i = 0; i < kstack_capacity; i++) {
+        if (i == current_slot || !slot_used[i] || slot_bottom_mapped[i] != 2) continue;
+        if (slot_page_phys[i][0]) {
+            vmm_unmap_page(slot_page_addr(i, 0));
+            pfa_free(slot_page_phys[i][0]);
+            slot_page_phys[i][0] = 0;
+        }
+        slot_bottom_mapped[i] = 0;
+    }
+
+    if (slot_bottom_mapped[current_slot] == 2) slot_bottom_mapped[current_slot] = 1;
+    if (!slot_page_phys[current_slot][0]) {
+        phys = pmm_alloc_low_page();
+        if (!phys) phys = pmm_alloc_page();
+        if (!phys) {
+            __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+            return -1;
+        }
+        page_virt = slot_page_addr(current_slot, 0);
+        vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+        memset((void *)page_virt, 0, PAGE_SIZE);
+        slot_page_phys[current_slot][0] = (uint64_t)phys;
+        slot_bottom_mapped[current_slot] = 1;
+    }
+
+    __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+    return 0;
+}
+
+void kstack_finish_syscall(void) {
+    uint64_t flags;
+    uint64_t rsp;
+    int slot;
+
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    __asm__ volatile ("movq %%rsp, %0" : "=r"(rsp));
+    slot = addr_to_slot(rsp);
+    if (slot >= 0 && slot < kstack_capacity && slot_used[slot] &&
+        slot_page_phys[slot][0]) {
+        slot_bottom_mapped[slot] = 2;
+    }
+    __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+}
