@@ -97,17 +97,21 @@ run_cmd() {
     printf "  -> %s\n" "$*"
     "$@"
   else
+    _outfile=$(mktemp)
     _errfile=$(mktemp)
-    {
-      "$@" 2>"$_errfile"
-    } | while IFS= read -r _line; do
+    if "$@" >"$_outfile" 2>"$_errfile"; then
+      _status=0
+    else
+      _status=$?
+    fi
+    while IFS= read -r _line; do
       case "$_line" in
         *'  CC '*|*'  LD '*|*'  AR '*|*'  AS '*|*'  STRIP '*|*'  CCLD '*|*'  HOSTCC '*)
           printf "\r\033[2K%s\n" "$_line"
           if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
           ;;
       esac
-    done
+    done <"$_outfile"
     if [ -s "$_errfile" ]; then
       printf "\r\033[2K" >&2
       sed \
@@ -116,7 +120,10 @@ run_cmd() {
         "$_errfile"
       if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
     fi
-    rm -f "$_errfile"
+    rm -f "$_outfile" "$_errfile"
+    if [ "$_status" -ne 0 ]; then
+      return "$_status"
+    fi
   fi
   _step_end=$(date +%s)
   _step_dur=$((_step_end - _step_start))
@@ -131,7 +138,7 @@ for PROJECT in $PROJECTS; do
   bar_print "$(printf '\033[1;36mBuilding %s...\033[0m' "$PROJECT")"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building $PROJECT"
   if [ "$PROJECT" = "libc/leblibc" ]; then
-    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 prefix=/usr includedir=/usr/include libdir=/usr/lib $MAKE install"
+    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && STAGING_DIR=\"$SYSROOT\" $MAKE install-x86_64"
   else
     run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" $MAKE install"
   fi
