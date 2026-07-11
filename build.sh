@@ -160,6 +160,13 @@ if [ -d "modules" ]; then
   run_cmd "Building modules" sh -c "cd modules && $MAKE stage"
 fi
 
+for _required in root/init; do
+  if [ ! -f "$_required" ]; then
+    cleanup_bar
+    printf "\033[1;31mError: required rootfs file missing: %s\033[0m\n" "$_required"
+    exit 1
+  fi
+done
 chmod +x mkinitrd.sh
 
 CURRENT_STEP=$((CURRENT_STEP + 1))

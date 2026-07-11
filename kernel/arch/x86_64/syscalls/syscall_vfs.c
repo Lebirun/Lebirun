@@ -223,7 +223,7 @@ static int split_parent_child_path(const char *path, char *parent_path, size_t p
     return 0;
 }
 
-static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
+static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg) {
     uint64_t path_addr;
     int flags;
     int mode;
@@ -241,10 +241,10 @@ static int sys_vfs_open(int path_ptr, const char *flags_ptr, int unused) {
     vfs_node_t *node;
     vfs_node_t *parent;
 
-    path_addr = (uint64_t)path_ptr;
+    path_addr = path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    flags = (int)(uintptr_t)flags_ptr;
-    mode = unused;
+    flags = (int)flags_arg;
+    mode = (int)mode_arg;
     if (!current_task) return -ESRCH;
 
     path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));

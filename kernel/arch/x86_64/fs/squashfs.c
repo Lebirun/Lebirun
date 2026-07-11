@@ -1153,9 +1153,55 @@ static void squashfs_vfs_close(vfs_node_t *node) {
     }
 }
 
+static uint8_t *squashfs_read_directory_data(squashfs_vfs_node_t *snode, uint64_t *out_size) {
+    uint64_t required;
+    uint64_t block_offset;
+    uint64_t written;
+    uint64_t block_size;
+    uint64_t copy_size;
+    uint64_t on_disk_size;
+    uint8_t *combined;
+    uint8_t *block_data;
+    uint16_t header;
+
+    if (!snode || !out_size || snode->vfs.length <= 3) return NULL;
+    required = snode->dir_block_offset + snode->vfs.length - 3;
+    if (required == 0 || required > squashfs_ctx.size) return NULL;
+    combined = (uint8_t *)kmalloc(required);
+    if (!combined) return NULL;
+
+    block_offset = squashfs_ctx.directory_table_start + snode->start_block;
+    written = 0;
+    while (written < required) {
+        if (block_offset + 2 > squashfs_ctx.size) {
+            kfree(combined);
+            return NULL;
+        }
+        header = read_u16(squashfs_ctx.base + block_offset);
+        on_disk_size = header & 0x7FFF;
+        if (on_disk_size == 0 || block_offset + 2 + on_disk_size > squashfs_ctx.size) {
+            kfree(combined);
+            return NULL;
+        }
+        block_data = squashfs_read_metadata_block(block_offset, &block_size);
+        if (!block_data) {
+            kfree(combined);
+            return NULL;
+        }
+        copy_size = block_size;
+        if (copy_size > required - written) copy_size = required - written;
+        memcpy(combined + written, block_data, copy_size);
+        written += copy_size;
+        kfree(block_data);
+        block_offset += 2 + on_disk_size;
+    }
+
+    *out_size = written;
+    return combined;
+}
+
 static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     squashfs_vfs_node_t *snode;
-    uint64_t dir_block_start;
     uint8_t *dir_data;
     uint64_t dir_size;
     uint64_t pos;
@@ -1167,8 +1213,6 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint16_t copy_name_len;
     uint64_t dir_data_len;
     uint64_t end_pos;
-    uint16_t meta_header;
-    uint64_t meta_data_size;
     uint16_t group_remaining;
     uint32_t cur_inode_number;
     int in_group;
@@ -1183,37 +1227,14 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     if (snode->vfs.length <= 3) return NULL;
     dir_data_len = snode->vfs.length - 3;
 
-    dir_block_start = squashfs_ctx.directory_table_start + snode->start_block;
-
     if (snode->rd_cached_data) {
         dir_data = snode->rd_cached_data;
         dir_size = snode->rd_cached_size;
     } else {
-        if (dir_block_start + 2 <= squashfs_ctx.size) {
-            meta_header = read_u16(squashfs_ctx.base + dir_block_start);
-            if (meta_header & 0x8000) {
-                meta_data_size = meta_header & 0x7FFF;
-                if (dir_block_start + 2 + meta_data_size <= squashfs_ctx.size) {
-                    dir_data = squashfs_ctx.base + dir_block_start + 2;
-                    dir_size = meta_data_size;
-                } else {
-                    dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-                    if (!dir_data) return NULL;
-                    snode->rd_cached_data = dir_data;
-                    snode->rd_cached_size = dir_size;
-                }
-            } else {
-                dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-                if (!dir_data) return NULL;
-                snode->rd_cached_data = dir_data;
-                snode->rd_cached_size = dir_size;
-            }
-        } else {
-            dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-            if (!dir_data) return NULL;
-            snode->rd_cached_data = dir_data;
-            snode->rd_cached_size = dir_size;
-        }
+        dir_data = squashfs_read_directory_data(snode, &dir_size);
+        if (!dir_data) return NULL;
+        snode->rd_cached_data = dir_data;
+        snode->rd_cached_size = dir_size;
     }
 
     end_pos = snode->dir_block_offset + dir_data_len;
@@ -1331,7 +1352,6 @@ static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
 
 static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     squashfs_vfs_node_t *snode;
-    uint64_t dir_block_start;
     uint8_t *dir_data;
     uint64_t dir_size;
     uint64_t pos;
@@ -1344,9 +1364,6 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     vfs_node_t *result;
     uint64_t dir_data_len;
     uint64_t end_pos;
-    int need_free;
-    uint16_t meta_header;
-    uint64_t meta_data_size;
 
     if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     requested_name_len = strlen(name);
@@ -1357,32 +1374,8 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     if (snode->vfs.length <= 3) return NULL;
     dir_data_len = snode->vfs.length - 3;
 
-    dir_block_start = squashfs_ctx.directory_table_start + snode->start_block;
-
-    need_free = 0;
-    if (dir_block_start + 2 <= squashfs_ctx.size) {
-        meta_header = read_u16(squashfs_ctx.base + dir_block_start);
-        if (meta_header & 0x8000) {
-            meta_data_size = meta_header & 0x7FFF;
-            if (dir_block_start + 2 + meta_data_size <= squashfs_ctx.size) {
-                dir_data = squashfs_ctx.base + dir_block_start + 2;
-                dir_size = meta_data_size;
-                need_free = 0;
-            } else {
-                dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-                if (!dir_data) return NULL;
-                need_free = 1;
-            }
-        } else {
-            dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-            if (!dir_data) return NULL;
-            need_free = 1;
-        }
-    } else {
-        dir_data = squashfs_read_metadata_block(dir_block_start, &dir_size);
-        if (!dir_data) return NULL;
-        need_free = 1;
-    }
+    dir_data = squashfs_read_directory_data(snode, &dir_size);
+    if (!dir_data) return NULL;
 
     end_pos = snode->dir_block_offset + dir_data_len;
     if (end_pos > dir_size) end_pos = dir_size;
@@ -1407,7 +1400,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
                 if (result) {
                     result->parent = node;
                 }
-                if (need_free) kfree(dir_data);
+                kfree(dir_data);
                 return result;
             }
             
@@ -1415,7 +1408,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
         }
     }
     
-    if (need_free) kfree(dir_data);
+    kfree(dir_data);
     return NULL;
 }
 

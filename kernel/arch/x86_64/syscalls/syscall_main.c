@@ -328,7 +328,7 @@ void do_syscall(registers_t *regs) {
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
     } else {
-        result = ((int (*)(int, int, int, int, int, int))syscall_table[num])(
+        result = ((int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))syscall_table[num])(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);
     }
