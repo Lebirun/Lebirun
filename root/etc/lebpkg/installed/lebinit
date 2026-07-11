@@ -1,0 +1,9 @@
+Package: lebinit
+Status: install ok installed
+Version: 0.1.0
+Depends: lebirun-base
+Description: Lebirun init system
+Files:
+/etc/lebinit/services/getty.lservice
+/init
+/sbin/lebinit
