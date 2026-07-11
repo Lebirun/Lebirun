@@ -130,8 +130,8 @@ for PROJECT in $PROJECTS; do
   CURRENT_STEP=$((CURRENT_STEP + 1))
   bar_print "$(printf '\033[1;36mBuilding %s...\033[0m' "$PROJECT")"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building $PROJECT"
-  if [ "$PROJECT" = "libc" ]; then
-    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 $MAKE install"
+  if [ "$PROJECT" = "libc/leblibc" ]; then
+    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 prefix=/usr includedir=/usr/include libdir=/usr/lib $MAKE install"
   else
     run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" $MAKE install"
   fi
