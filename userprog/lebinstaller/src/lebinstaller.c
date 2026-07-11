@@ -375,6 +375,7 @@ static int inst_resize_copy_buf(uint64_t file_size)
     while (want >= BUF_SIZE) {
         new_buf = (char *)malloc(want);
         if (new_buf) {
+            memset(new_buf, 0, want);
             if (copy_buf) free(copy_buf);
             copy_buf = new_buf;
             copy_buf_size = want;
@@ -439,6 +440,12 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         }
     }
 
+    if (r < 0) {
+        close(fd_in);
+        close(fd_out);
+        return -1;
+    }
+
     close(fd_in);
     close(fd_out);
 
@@ -496,6 +503,13 @@ static int copy_total;
 
 static int copy_done;
 static int copy_last_pct;
+static char copy_error[192];
+
+static void inst_set_copy_error(const char *kind, const char *path)
+{
+    if (copy_error[0] != '\0') return;
+    snprintf(copy_error, sizeof(copy_error), "%s: %s", kind, path);
+}
 
 static void inst_copy_progress(const char *path)
 {
@@ -510,7 +524,6 @@ static void inst_copy_progress(const char *path)
     if (pct != copy_last_pct) {
         copy_last_pct = pct;
         lebui_progress_update(&prog_st, path, pct);
-        lebui_progress_log(&prog_st, path);
     }
 }
 
@@ -524,9 +537,6 @@ static void inst_copy_current(const char *path)
 
     pct = 10 + (copy_done * 85) / copy_total;
     if (pct > 95) pct = 95;
-    if (pct == copy_last_pct) {
-        return;
-    }
     lebui_progress_update(&prog_st, path, pct);
 }
 
@@ -583,7 +593,11 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
     vfs_mkdir(dst, 0755);
 
     fd = vfs_open(src, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        if (copy_error[0] == '\0')
+            snprintf(copy_error, sizeof(copy_error), "Directory open failed (%d): %s", fd, src);
+        return -1;
+    }
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -611,13 +625,16 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
                 errors++;
         } else if (type == 6) {
             inst_copy_current(src_path);
-            if (inst_copy_symlink_vfs(src_path, dst_path) < 0)
+            if (inst_copy_symlink_vfs(src_path, dst_path) < 0) {
+                inst_set_copy_error("Symlink failed", src_path);
                 errors++;
+            }
             copy_done++;
             inst_copy_progress(src_path);
         } else {
             inst_copy_current(src_path);
             if (inst_copy_file_vfs(src_path, dst_path) < 0) {
+                inst_set_copy_error("File failed", src_path);
                 errors++;
             }
             copy_done++;
@@ -716,6 +733,7 @@ static int inst_copy_rootfs(const char *mountpoint)
         snprintf(dst, sizeof(dst), "%s/%s", mountpoint, root_files[i]);
         inst_copy_current(src);
         if (inst_copy_file_vfs(src, dst) < 0) {
+            inst_set_copy_error("File failed", src);
             errors++;
         }
         copy_done++;
@@ -792,6 +810,11 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
         snprintf(boot_error, sizeof(boot_error), "boot: allocation failed");
         goto out;
     }
+
+    memset(mbr_buf, 0, SECTOR_SIZE);
+    memset(boot_buf, 0, SECTOR_SIZE);
+    memset(core_buf, 0, BUF_SIZE);
+    memset(verify_buf, 0, SECTOR_SIZE);
 
     fd_disk = vfs_open(disk_dev, 2);
     if (fd_disk < 0) {
@@ -1748,12 +1771,12 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     copy_done = 0;
     copy_last_pct = -1;
     copy_overwrite_existing = 0;
-    inst_resize_copy_buf(COPY_BUF_MAX);
-
+    copy_error[0] = '\0';
     lebui_progress_update(&prog_st, "Copying files...", 10);
     lebui_progress_log(&prog_st, "Copying rootfs...");
     if (inst_copy_rootfs(mountpoint) < 0) {
         lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
+        if (copy_error[0] != '\0') lebui_progress_log(&prog_st, copy_error);
     }
     copy_overwrite_existing = 1;
     lebui_progress_log(&prog_st, "Rootfs copy complete.");
@@ -2028,7 +2051,6 @@ static int step_do_update(int disk_idx, int part_idx)
     if (copy_total < 1) copy_total = 1;
     copy_done = 0;
     copy_last_pct = -1;
-    inst_resize_copy_buf(COPY_BUF_MAX);
 
     lebui_progress_update(&prog_st, "Copying files...", 10);
     if (upd_selected[UPD_CORE]) {

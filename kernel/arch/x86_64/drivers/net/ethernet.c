@@ -11,7 +11,7 @@ int eth_send(netif_t *netif, mac_addr_t dest, uint16_t ethertype, uint8_t *data,
     eth_header_t *eth;
     int result;
 
-    if (!netif || !netif->send) return -1;
+    if (!netif || !netif->send || (!data && len != 0)) return -1;
     if (len > ETH_MTU) return -1;
 
     frame_len = ETH_HEADER_LEN + len;

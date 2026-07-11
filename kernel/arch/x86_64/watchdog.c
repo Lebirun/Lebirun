@@ -11,6 +11,7 @@ static volatile uint64_t wdt_last_sched_tick = 0;
 static volatile uint64_t wdt_prev_tick_count = 0;
 static volatile uint64_t wdt_stall_strikes = 0;
 static volatile int wdt_disabled = 0;
+static volatile int wdt_init_pid = 0;
 static int wdt_handle = -1;
 
 extern volatile uint64_t tick_count;
@@ -22,6 +23,10 @@ void watchdog_kick(void) {
 
 void watchdog_disable(void) {
     wdt_disabled = 1;
+}
+
+void watchdog_set_init_pid(int pid) {
+    wdt_init_pid = pid;
 }
 
 uint64_t watchdog_get_last_kick(void) {
@@ -94,7 +99,9 @@ static void watchdog_callback(uint64_t ticks) {
         }
     }
 
-    t = task_find(1);
+    if (wdt_init_pid <= 0) return;
+
+    t = task_find((pid_t)wdt_init_pid);
     if (t) {
         if (t->state == TASK_DEAD) {
             kernel_panic_msg("WATCHDOG: init (PID 1) has exited");
@@ -102,9 +109,7 @@ static void watchdog_callback(uint64_t ticks) {
         return;
     }
 
-    if (tick_count > 10000) {
-        kernel_panic_msg("WATCHDOG: init (PID 1) not found");
-    }
+    kernel_panic_msg("WATCHDOG: init (PID %d) not found", wdt_init_pid);
 }
 
 void watchdog_init(void) {
@@ -114,6 +119,7 @@ void watchdog_init(void) {
     wdt_last_sched_tick = tick_count;
     wdt_prev_tick_count = tick_count;
     wdt_stall_strikes = 0;
+    wdt_init_pid = 0;
 
     interval_ticks = pit_ms_to_ticks(WATCHDOG_INTERVAL_MS);
     if (interval_ticks == 0)

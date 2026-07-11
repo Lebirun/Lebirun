@@ -60,7 +60,7 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
     ipv4_addr_t next_hop;
     int result;
 
-    if (!netif) return -1;
+    if (!netif || (!data && len != 0)) return -1;
     if (len > ETH_MTU - sizeof(ipv4_header_t)) return -1;
 
     total_len = sizeof(ipv4_header_t) + len;
@@ -133,11 +133,14 @@ void ipv4_receive(netif_t *netif, uint8_t *packet, uint64_t len) {
     if (header_len < 20 || header_len > len) return;
 
     total_len = ntohs(ip->total_length);
-    if (total_len > len) return;
+    if (total_len < header_len || total_len > len) return;
+
+    if ((ntohs(ip->flags_fragment) & 0x3FFF) != 0) return;
 
     checksum = ip->checksum;
     ip->checksum = 0;
     if (ipv4_checksum(ip, header_len) != checksum) {
+        ip->checksum = checksum;
         return;
     }
     ip->checksum = checksum;

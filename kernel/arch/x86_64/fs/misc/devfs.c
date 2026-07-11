@@ -90,6 +90,10 @@ static int devfs_grow_blockdevs(void) {
     if (new_cap <= devfs_blockdev_capacity) return -1;
     new_blockdevs = (devfs_blockdev_t *)krealloc(devfs_blockdevs, new_cap * sizeof(devfs_blockdev_t));
     if (!new_blockdevs) return -1;
+    for (i = 0; i < devfs_blockdev_capacity; i++) {
+        if (new_blockdevs[i].in_use)
+            new_blockdevs[i].node.private_data = &new_blockdevs[i];
+    }
     for (i = devfs_blockdev_capacity; i < new_cap; i++) {
         memset(&new_blockdevs[i], 0, sizeof(devfs_blockdev_t));
     }

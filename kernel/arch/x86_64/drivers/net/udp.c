@@ -71,7 +71,8 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
     udp_header_t *udp;
     int result;
 
-    if (!netif) return -1;
+    if (!netif || (!data && len != 0)) return -1;
+    if (len > UINT16_MAX - sizeof(udp_header_t)) return -1;
 
     udp_len = sizeof(udp_header_t) + len;
     packet = (uint8_t *)kmalloc(udp_len);
@@ -139,7 +140,8 @@ int udp_send6(netif_t *netif, ipv6_addr_t dest, uint16_t src_port, uint16_t dest
     udp_header_t *udp;
     int result;
 
-    if (!netif) return -1;
+    if (!netif || (!data && len != 0)) return -1;
+    if (len > UINT16_MAX - sizeof(udp_header_t)) return -1;
 
     udp_len = sizeof(udp_header_t) + len;
     packet = (uint8_t *)kmalloc(udp_len);
@@ -181,6 +183,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     udp_len = ntohs(udp->length);
 
     if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
+    if (udp->checksum != 0 && udp_pseudo_checksum(src, dest, data, udp_len) != 0) return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);
@@ -236,6 +239,7 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
     udp_len = ntohs(udp->length);
 
     if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
+    if (udp->checksum == 0 || udp6_pseudo_checksum(src, dest, data, udp_len) != 0) return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);

@@ -1093,9 +1093,18 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     task_init_fds(new_task);
     if (stack_base) memset(stack_base, 0, TASK_STACK_SIZE);
 
-    new_task->id = next_task_id;
-    new_task->pid = next_task_id;
-    next_task_id++;
+    lock_scheduler();
+    if (user_mode) {
+        new_task->id = next_task_id;
+        new_task->pid = next_task_id;
+        next_task_id++;
+    } else {
+        new_task->id = 0x8000000000000000ULL |
+                       (uint64_t)(-(int64_t)next_kernel_pid);
+        new_task->pid = next_kernel_pid;
+        next_kernel_pid--;
+    }
+    unlock_scheduler();
 
     creds_init_task(new_task);
     signals_init_task(new_task);
@@ -1225,9 +1234,6 @@ task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state) {
 
     t = create_task(entry, initial_state, false);
     if (!t) return NULL;
-    next_task_id--;
-    t->pid = next_kernel_pid;
-    next_kernel_pid--;
     t->is_kernel_task = true;
     return t;
 }
@@ -1298,28 +1304,33 @@ void task_exit(uint64_t exit_code) {
 }
 
 void task_exit_deferred(uint64_t exit_code) {
-    if (!current_task) return;
+    cpu_info_t *cpu;
+    task_t *task;
+
+    cpu = smp_this_cpu();
+    task = cpu ? cpu->current_task : current_task;
+    if (!task) return;
     lock_scheduler();
-    if (current_task->state == TASK_DEAD) {
+    if (task->state == TASK_DEAD) {
         unlock_scheduler();
         return;
     }
-    current_task->exit_code = exit_code;
-    sleepq_remove(current_task);
-    if (current_task->waiting_queue) {
-        waitq_remove(current_task->waiting_queue, current_task);
+    task->exit_code = exit_code;
+    sleepq_remove(task);
+    if (task->waiting_queue) {
+        waitq_remove(task->waiting_queue, task);
     }
-    if (current_task->join_target && !current_task->waiting_for_any_child) {
-        if (current_task->join_target->join_refs) current_task->join_target->join_refs--;
-        waitq_remove(&current_task->join_target->join_waiters, current_task);
+    if (task->join_target && !task->waiting_for_any_child) {
+        if (task->join_target->join_refs) task->join_target->join_refs--;
+        waitq_remove(&task->join_target->join_waiters, task);
     }
-    current_task->join_target = NULL;
-    current_task->waiting_for_any_child = 0;
-    current_task->state = TASK_DEAD;
-    remove_task_from_runqueue(current_task);
-    current_task->wait_next = dead_queue_head;
-    dead_queue_head = current_task;
-    task_finish_death_locked(current_task);
+    task->join_target = NULL;
+    task->waiting_for_any_child = 0;
+    task->state = TASK_DEAD;
+    remove_task_from_runqueue(task);
+    task->wait_next = dead_queue_head;
+    dead_queue_head = task;
+    task_finish_death_locked(task);
     unlock_scheduler();
     reap_request();
 }
@@ -2206,7 +2217,8 @@ void task_deferred_work(void) {
         exec_cleanup_drain();
         pfa_ref_gc();
     }
-    if (!current_task || !current_task->is_user) {
+    if ((!current_task || !current_task->is_user) &&
+        smp_processor_id() == 0 && tick_count >= 10000) {
         extern void ext4_background_writeback(uint32_t max_blocks);
         ext4_background_writeback(4);
         exec_page_cache_reclaim(exec_page_cache_target_pages());
@@ -2453,13 +2465,14 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int forced_state_switch;
     task_t *idle_task;
 
-    if (!current_task || !ready_queue_head) return regs;
-
     this_cpu = smp_this_cpu();
+    if (!this_cpu || !this_cpu->current_task || !ready_queue_head) return regs;
+
+    prev_task = this_cpu->current_task;
     run_deferred = 0;
-    forced_state_switch = current_task->state == TASK_DEAD ||
-                          current_task->state == TASK_BLOCKED ||
-                          current_task->state == TASK_STOPPED;
+    forced_state_switch = prev_task->state == TASK_DEAD ||
+                          prev_task->state == TASK_BLOCKED ||
+                          prev_task->state == TASK_STOPPED;
 
     if (this_cpu->scheduler_lock_depth > 0) return regs;
 
@@ -2470,8 +2483,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
 
     result = regs;
-    prev_task = current_task;
-    
+
     entry_cr3 = regs->entry_cr3;
     if (!entry_cr3) {
         __asm__ volatile ("mov %%cr3, %0" : "=r"(entry_cr3));

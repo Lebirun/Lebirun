@@ -571,6 +571,7 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     void *inode_copy;
     uint16_t meta_header;
     uint64_t meta_data_size;
+    uint64_t loaded_offset;
     int need_free;
 
     block = (uint64_t)(inode_ref >> 16);
@@ -581,6 +582,7 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     block_offset = squashfs_ctx.inode_table_start + block;
 
     need_free = 0;
+    base = NULL;
     if (block_offset + 2 <= squashfs_ctx.size) {
         meta_header = read_u16(squashfs_ctx.base + block_offset);
         if (meta_header & 0x8000) {
@@ -612,10 +614,18 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
 
     if (offset + sizeof(squashfs_base_inode_t) > meta_size) {
         if (need_free) kfree(metadata);
-        return NULL;
+        metadata = NULL;
+        base = NULL;
+        loaded_offset = 0;
+        if (squashfs_load_inode_metadata(inode_ref, &metadata, &meta_size,
+                                         &loaded_offset, &base,
+                                         &need_free) < 0) {
+            return NULL;
+        }
+        offset = (uint16_t)loaded_offset;
     }
-    
-    base = (squashfs_base_inode_t *)(metadata + offset);
+
+    if (!base) base = (squashfs_base_inode_t *)(metadata + offset);
     DEBUG_FS_OTHER("inode at offset 0x%X: type=%u mode=0x%X\n", offset, base->inode_type, base->mode);
     
     switch (base->inode_type) {

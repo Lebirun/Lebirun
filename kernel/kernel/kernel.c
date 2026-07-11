@@ -36,6 +36,7 @@
 #include <lebirun/power.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/rng.h>
+#include <lebirun/watchdog.h>
 #include <lebirun/multiboot2.h>
 #include "launch_user.h"
 
@@ -705,6 +706,7 @@ void kernel_main(void) {
     if (!init_task) {
         kernel_panic("FATAL: no init executable found (/init, /sbin/init, /bin/init).", NULL);
     }
+    watchdog_set_init_pid((int)init_task->pid);
 
     if (debug_boot_hw) {
         t = ready_queue_head;

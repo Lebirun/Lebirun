@@ -8,6 +8,7 @@
 #define WATCHDOG_MAX_STRIKES    3
 
 void watchdog_init(void);
+void watchdog_set_init_pid(int pid);
 void watchdog_kick(void);
 void watchdog_disable(void);
 uint64_t watchdog_get_last_kick(void);

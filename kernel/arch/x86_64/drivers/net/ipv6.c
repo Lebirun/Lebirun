@@ -247,7 +247,7 @@ int ipv6_send(netif_t *netif, ipv6_addr_t dest, uint8_t next_header, uint8_t *da
     ipv6_addr_t lookup_ip;
     int result;
 
-    if (!netif) return -1;
+    if (!netif || (!data && len != 0)) return -1;
     if (len > ETH_MTU - sizeof(ipv6_header_t)) return -1;
 
     if (ipv6_is_multicast(dest)) {

@@ -6,18 +6,17 @@
 
 heap_t kernel_heap;
 static spinlock_t heap_lock = {0};
-static volatile uint64_t heap_saved_eflags = 0;
 
-static inline void heap_lock_acquire(void) {
+static inline uint64_t heap_lock_acquire(void) {
     uint64_t eflags;
+
     __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
     __asm__ volatile ("cli" ::: "memory");
     spin_lock(&heap_lock);
-    heap_saved_eflags = eflags;
+    return eflags;
 }
 
-static inline void heap_lock_release(void) {
-    uint64_t eflags = heap_saved_eflags;
+static inline void heap_lock_release(uint64_t eflags) {
     spin_unlock(&heap_lock);
     if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
@@ -622,6 +621,8 @@ void *kmalloc(size_t size) {
     void *result;
     size_t max_slab;
     void *caller;
+    uint64_t eflags;
+
     if (size == 0) return NULL;
     if (!main_heap_initialized) return early_kmalloc(size);
     if (size > SIZE_MAX - CANARY_OVERHEAD - 7) return NULL;
@@ -631,17 +632,19 @@ void *kmalloc(size_t size) {
         result = slab_alloc(size, caller);
         if (result) return result;
     }
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
     result = kmalloc_internal(size, (uint64_t)(uintptr_t)caller);
-    heap_lock_release();
+    heap_lock_release(eflags);
     return result;
 }
 
 void heap_reclaim_unused(void) {
+    uint64_t eflags;
+
     if (!main_heap_initialized) return;
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
     heap_trim();
-    heap_lock_release();
+    heap_lock_release(eflags);
 }
 
 void *ksafe_alloc(size_t size, uint64_t flags) {
@@ -779,6 +782,7 @@ static void kfree_internal(void *ptr, void *caller) {
 
 void kfree(void *ptr) {
     void *caller;
+    uint64_t eflags;
 
     if (!ptr) return;
     if (is_early_heap_ptr(ptr)) return;
@@ -787,9 +791,9 @@ void kfree(void *ptr) {
         slab_free(ptr, caller);
         return;
     }
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
     kfree_internal(ptr, caller);
-    heap_lock_release();
+    heap_lock_release(eflags);
 }
 
 void ksafe_free(void *ptr) {
@@ -799,6 +803,7 @@ void ksafe_free(void *ptr) {
 void kfree_secure(void *ptr) {
     heap_block_t *block;
     size_t slab_size;
+    uint64_t eflags;
     
     if (!ptr) return;
 
@@ -813,25 +818,25 @@ void kfree_secure(void *ptr) {
         return;
     }
     
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
 
     block = get_block_from_ptr(ptr);
     
     if (block->magic != HEAP_MAGIC) {
         printf("kfree_secure: Invalid pointer 0x%08X\n", (uint64_t)ptr);
-        heap_lock_release();
+        heap_lock_release(eflags);
         return;
     }
     
     if (block->is_free) {
         printf("kfree_secure: Double free detected at 0x%08X\n", (uint64_t)ptr);
-        heap_lock_release();
+        heap_lock_release(eflags);
         return;
     }
     
     if (heap_check_canaries(ptr) != 0) {
         printf("kfree_secure: Memory corruption at 0x%08X\n", (uint64_t)ptr);
-        heap_lock_release();
+        heap_lock_release(eflags);
         return;
     }
     
@@ -842,13 +847,14 @@ void kfree_secure(void *ptr) {
     
     coalesce_free_blocks(block);
     heap_trim();
-    heap_lock_release();
+    heap_lock_release(eflags);
 }
 
 void *krealloc(void *ptr, size_t new_size) {
     heap_block_t *block;
     void *new_ptr;
     size_t old_size;
+    uint64_t eflags;
     
     if (!ptr) return kmalloc(new_size);
     if (new_size == 0) {
@@ -872,31 +878,31 @@ void *krealloc(void *ptr, size_t new_size) {
         return new_ptr;
     }
 
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
 
     block = get_block_from_ptr(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         printf("krealloc: Invalid pointer %p\n", ptr);
-        heap_lock_release();
+        heap_lock_release(eflags);
         return NULL;
     }
     
     if (heap_check_canaries(ptr) != 0) {
         printf("krealloc: Memory corruption detected, refusing to reallocate\n");
-        heap_lock_release();
+        heap_lock_release(eflags);
         return NULL;
     }
 
     if (block->alloc_size >= new_size) {
         block->alloc_size = new_size;
         set_canaries(block);
-        heap_lock_release();
+        heap_lock_release(eflags);
         return ptr;
     }
 
     old_size = block->alloc_size;
-    heap_lock_release();
+    heap_lock_release(eflags);
 
     new_ptr = kmalloc(new_size);
     if (!new_ptr) return NULL;
@@ -1065,11 +1071,12 @@ void heap_profile(char *out, uint64_t out_size) {
     int written;
     int r;
     int skip;
+    uint64_t eflags;
 
     if (!out || out_size == 0) return;
     out[0] = '\0';
     n = 0;
-    heap_lock_acquire();
+    eflags = heap_lock_acquire();
     block = (heap_block_t *)kernel_heap.start_addr;
     while (block && (uint64_t)block < kernel_heap.end_addr) {
         baddr = (uint64_t)(uintptr_t)block;
@@ -1095,7 +1102,7 @@ void heap_profile(char *out, uint64_t out_size) {
         if (!block->next) break;
         block = block->next;
     }
-    heap_lock_release();
+    heap_lock_release(eflags);
     written = 0;
     for (i = 0; i < n; i++) {
         r = snprintf(out + written, out_size - written,
