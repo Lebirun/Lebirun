@@ -138,7 +138,7 @@ for PROJECT in $PROJECTS; do
   bar_print "$(printf '\033[1;36mBuilding %s...\033[0m' "$PROJECT")"
   progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building $PROJECT"
   if [ "$PROJECT" = "libc/leblibc" ]; then
-    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && STAGING_DIR=\"$SYSROOT\" $MAKE install-x86_64"
+    run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" ARCH=x86_64 CROSS_COMPILE=x86_64-elf- CC=x86_64-elf-gcc prefix=/usr includedir=/usr/include libdir=/usr/lib $MAKE install-libs install-headers"
   else
     run_cmd "Building $PROJECT" sh -c "cd \"$PROJECT\" && DESTDIR=\"$SYSROOT\" $MAKE install"
   fi
