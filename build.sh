@@ -97,13 +97,10 @@ run_cmd() {
     printf "  -> %s\n" "$*"
     "$@"
   else
-    _outfile=$(mktemp)
+    _outpipe=$(mktemp)
+    rm -f "$_outpipe"
+    mkfifo "$_outpipe"
     _errfile=$(mktemp)
-    if "$@" >"$_outfile" 2>"$_errfile"; then
-      _status=0
-    else
-      _status=$?
-    fi
     while IFS= read -r _line; do
       case "$_line" in
         *'  CC '*|*'  LD '*|*'  AR '*|*'  AS '*|*'  STRIP '*|*'  CCLD '*|*'  HOSTCC '*)
@@ -111,7 +108,14 @@ run_cmd() {
           if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
           ;;
       esac
-    done <"$_outfile"
+    done <"$_outpipe" &
+    _filter_pid=$!
+    if "$@" >"$_outpipe" 2>"$_errfile"; then
+      _status=0
+    else
+      _status=$?
+    fi
+    wait "$_filter_pid"
     if [ -s "$_errfile" ]; then
       printf "\r\033[2K" >&2
       sed \
@@ -120,7 +124,7 @@ run_cmd() {
         "$_errfile"
       if [ -n "$_BAR_LAST" ]; then printf "\r%s" "$_BAR_LAST" >&2; fi
     fi
-    rm -f "$_outfile" "$_errfile"
+    rm -f "$_outpipe" "$_errfile"
     if [ "$_status" -ne 0 ]; then
       return "$_status"
     fi
@@ -225,7 +229,10 @@ if [ -d "sysroot/usr/lib" ]; then
 
   for f in libgcc.a crtbegin.o crtend.o; do
     _src=$("$TOOLCHAIN_CC" -print-file-name="$f")
-    [ "$_src" != "$f" ] && [ -f "$_src" ] && cp "$_src" "root/usr/lib/$f"
+    if [ "$_src" != "$f" ] && [ -f "$_src" ]; then
+      rm -f "root/usr/lib/$f"
+      cp "$_src" "root/usr/lib/$f"
+    fi
   done
   for f in root/usr/lib/*.a; do
     [ -f "$f" ] && "$TOOLCHAIN_STRIP" --strip-debug "$f" 2>/dev/null || true
