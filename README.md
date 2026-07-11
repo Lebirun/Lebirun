@@ -12,7 +12,7 @@ On Debian or Debian-based, install the required host tools with:
 sudo apt install build-essential grub-common grub-pc-bin xorriso squashfs-tools qemu-system-x86 libncurses-dev
 ```
 
-To compile Lebirun, you will also need x86_64-leb-gcc (a cross-compiler for x86_64). To start building the kernel, type in `./build.sh`. If you need to launch QEMU (either before or after building), type in `./qemu.sh`.
+To compile Lebirun, you will also need x86_64-elf-gcc (a cross-compiler for x86_64). To start building the kernel, type in `./build.sh`. If you need to launch QEMU (either before or after building), type in `./qemu.sh`.
 
 ### Configuration
 The configuration of Lebirun is powered by Lebconfig, an alternative to Linux's Menuconfig made from the ground up. In order to enter the configuration user interface, simply type in "./lebconfig.sh" while being in the cloned Lebirun directory.

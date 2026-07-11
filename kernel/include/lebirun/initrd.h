@@ -18,22 +18,22 @@
 #define INITRD_MAX_PATH 256
 
 typedef struct {
-    uint64_t magic;
-    uint64_t version;
-    uint64_t num_entries;
-    uint64_t reserved;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t num_entries;
+    uint32_t reserved;
 } __attribute__((packed)) initrd_header_t;
 
 typedef struct {
     char name[64];
-    uint64_t offset;
-    uint64_t length;
+    uint32_t offset;
+    uint32_t length;
     uint8_t type;
     uint8_t permissions;
     uint16_t parent_index;
-    uint64_t uid;
-    uint64_t gid;
-    uint64_t reserved;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t reserved;
 } __attribute__((packed)) initrd_file_header_t;
 
 typedef struct {

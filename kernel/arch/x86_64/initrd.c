@@ -139,8 +139,8 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     if (initrd_header->magic != INITRD_MAGIC) {
         serial_puts("INITRD: Invalid magic! got=0x"); serial_printf_hex(initrd_header->magic);
         serial_puts(" expected=0x"); serial_printf_hex(INITRD_MAGIC); serial_puts("\n");
-        printf("INITRD: Invalid magic (got 0x%08lX, expected 0x%08lX)\n", 
-               initrd_header->magic, INITRD_MAGIC);
+        printf("INITRD: Invalid magic (got 0x%08X, expected 0x%08X)\n",
+               (unsigned int)initrd_header->magic, (unsigned int)INITRD_MAGIC);
         return;
     }
     if (initrd_should_log()) serial_puts("INITRD: Magic OK\n");
@@ -883,8 +883,8 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     hdr = (initrd_header_t *)rootfs_base;
 
     if (hdr->magic != INITRD_MAGIC) {
-        printf("ROOTFS: Invalid magic (got 0x%08lX, expected 0x%08lX)\n", 
-               hdr->magic, INITRD_MAGIC);
+        printf("ROOTFS: Invalid magic (got 0x%08X, expected 0x%08X)\n",
+               (unsigned int)hdr->magic, (unsigned int)INITRD_MAGIC);
         return;
     }
 

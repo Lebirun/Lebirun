@@ -38,6 +38,7 @@ extern void *pmm_alloc_low_page(void);
 extern void pmm_zero_page_phys(uint64_t phys_addr);
 extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t total_pages, uint64_t kernel_frames);
 extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
+extern uint64_t count_free_frames(void);
 
 void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     struct multiboot2_tag *tag;
@@ -376,16 +377,18 @@ void pfa_init(void) {
             region_end_capped = detected_max_phys;
         }
 
-        start_frame = (uint64_t)(region_start_capped / PAGE_SIZE);
-        end_frame = (uint64_t)((region_end_capped + PAGE_SIZE - 1) / PAGE_SIZE);
+        start_frame = (uint64_t)((region_start_capped + PAGE_SIZE - 1) / PAGE_SIZE);
+        end_frame = (uint64_t)(region_end_capped / PAGE_SIZE);
         region_free = 0;
 
         if (end_frame > actual_total_pages) end_frame = actual_total_pages;
 
         {
             extern void clear_bit(uint64_t bit_idx);
+            extern bool test_bit(uint64_t bit_idx);
             for (f = start_frame; f < end_frame; f++) {
                 if (f < kernel_frames) continue;
+                if (!test_bit(f)) continue;
                 clear_bit(f);
                 total_free_frames++;
                 region_free++;
@@ -421,18 +424,14 @@ void pfa_init(void) {
         }
     }
 
+    {
+        actual_free = count_free_frames();
+        total_free_frames = actual_free;
+    }
+
     total_mb = (total_free_frames + 255ULL) / 256ULL;
     printf("PFA ready: %llu total free frames (~%llu MB)\n",
            (unsigned long long)total_free_frames, (unsigned long long)total_mb);
-
-    {
-        extern uint64_t count_free_frames(void);
-        actual_free = count_free_frames();
-        if (actual_free != (uint64_t)total_free_frames) {
-            printf("PFA WARNING: counted %llu but bitmap shows %u free\n",
-                   (unsigned long long)total_free_frames, actual_free);
-        }
-    }
 
     system_total_ram_kb = 0;
     for (r = 0; r < num_regions; r++) {
@@ -444,6 +443,7 @@ void pfa_init(void) {
         system_total_ram_kb += (uint64_t)((region_end - region_base) / 1024);
     }
     system_usable_ram_kb = system_total_ram_kb;
+    actual_free = count_free_frames();
     pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, actual_free);
 
     {
@@ -461,7 +461,7 @@ void pfa_init(void) {
     }
 
     printf("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n",
-           system_total_ram_kb, system_total_ram_kb / 1024, (uint64_t)(total_free_frames * 4));
+           system_total_ram_kb, system_total_ram_kb / 1024, (uint64_t)(actual_free * 4));
 
     __asm__ volatile ("movq %%cr3, %0" : "=r"(cr3_val));
     vmm_register_kernel_cr3(cr3_val);

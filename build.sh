@@ -206,42 +206,37 @@ if [ -f "$KERNEL_BIN" ]; then
   cp "$KERNEL_BIN" root/boot/lebirun.kernel
 fi
 
+TOOLCHAIN_HOST="${TOOLCHAIN_HOST:-$(./default-host.sh)}"
+TOOLCHAIN_CC="${TOOLCHAIN_CC:-$TOOLCHAIN_HOST-gcc}"
+TOOLCHAIN_STRIP="${TOOLCHAIN_STRIP:-$TOOLCHAIN_HOST-strip}"
+
 if [ -d "sysroot/usr/lib" ]; then
   mkdir -p root/usr/lib
   for f in crt1.o crti.o crtn.o libc.a libm.a libpthread.a libdl.a librt.a libcrypt.a libresolv.a libutil.a libxnet.a; do
     [ -f "sysroot/usr/lib/$f" ] && cp "sysroot/usr/lib/$f" "root/usr/lib/$f"
   done
 
-  CROSS_LIB="/usr/local/cross/x86_64-leb/lib"
-  GCC_LIB="/usr/local/cross/lib/gcc/x86_64-leb/15.2.0"
-  for f in libstdc++.a libsupc++.a; do
-    [ -f "$CROSS_LIB/$f" ] && cp "$CROSS_LIB/$f" "root/usr/lib/$f"
-  done
   for f in libgcc.a crtbegin.o crtend.o; do
-    [ -f "$GCC_LIB/$f" ] && cp "$GCC_LIB/$f" "root/usr/lib/$f"
+    _src=$("$TOOLCHAIN_CC" -print-file-name="$f")
+    [ "$_src" != "$f" ] && [ -f "$_src" ] && cp "$_src" "root/usr/lib/$f"
   done
   for f in root/usr/lib/*.a; do
-    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
+    [ -f "$f" ] && "$TOOLCHAIN_STRIP" --strip-debug "$f" 2>/dev/null || true
   done
   for f in root/usr/lib/*.o; do
-    [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
+    [ -f "$f" ] && "$TOOLCHAIN_STRIP" --strip-debug "$f" 2>/dev/null || true
   done
 fi
 if [ -d "sysroot/usr/include" ]; then
   mkdir -p root/usr/include
   cp -R --preserve=timestamps sysroot/usr/include/. root/usr/include/.
 fi
-CXX_INC="/usr/local/cross/x86_64-leb/include/c++/15.2.0"
-if [ -d "$CXX_INC" ]; then
-  mkdir -p root/usr/include/c++/15.2.0
-  cp -R --preserve=timestamps "$CXX_INC/." "root/usr/include/c++/15.2.0/."
-fi
 if [ -f "libc/user.ld" ]; then
   mkdir -p root/usr/lib
   cp libc/user.ld root/usr/lib/user.ld
 fi
 for f in root/bin/* root/sbin/*; do
-  [ -f "$f" ] && x86_64-leb-strip --strip-debug "$f" 2>/dev/null || true
+  [ -f "$f" ] && "$TOOLCHAIN_STRIP" --strip-debug "$f" 2>/dev/null || true
 done
 
 if [ -d "root" ]; then

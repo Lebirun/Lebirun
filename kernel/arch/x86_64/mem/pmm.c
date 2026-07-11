@@ -119,30 +119,16 @@ uint64_t count_free_frames(void) {
     uint64_t count;
     uint64_t i;
     uint64_t bytes;
-    uint64_t word_count;
-    uint32_t *words;
-    uint32_t w;
-    uint64_t b;
+    uint8_t free_bits;
 
     count = 0;
     bytes = (total_pages_managed + 7) / 8;
-    words = (uint32_t *)pfa_bitmap;
-    word_count = bytes / 4;
-
-    for (i = 0; i < word_count; i++) {
-        w = ~words[i];
-        w = w - ((w >> 1) & 0x55555555);
-        w = (w & 0x33333333) + ((w >> 2) & 0x33333333);
-        w = (w + (w >> 4)) & 0x0F0F0F0F;
-        count += (w * 0x01010101) >> 24;
-    }
-
-    for (i = word_count * 4; i < bytes; i++) {
-        b = (uint64_t)(uint8_t)(~pfa_bitmap[i]);
-        b = b - ((b >> 1) & 0x55);
-        b = (b & 0x33) + ((b >> 2) & 0x33);
-        b = (b + (b >> 4)) & 0x0F;
-        count += b;
+    for (i = 0; i < bytes; i++) {
+        free_bits = (uint8_t)~pfa_bitmap[i];
+        while (free_bits != 0) {
+            free_bits &= (uint8_t)(free_bits - 1);
+            count++;
+        }
     }
 
     return count;
