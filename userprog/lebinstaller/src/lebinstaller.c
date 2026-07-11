@@ -726,6 +726,9 @@ static int inst_copy_rootfs(const char *mountpoint)
     int i;
     int errors;
 
+    if (inst_resize_copy_buf(0) < 0)
+        return -1;
+
     errors = 0;
 
     for (i = 0; root_files[i]; i++) {
