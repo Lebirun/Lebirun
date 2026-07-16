@@ -115,7 +115,7 @@ void lke_init(void) {
     lke_register_symbol("dns_resolve_timeout", dns_resolve_timeout);
     lke_register_symbol("dns_resolve6", dns_resolve6);
     lke_register_symbol("vmm_get_phys_in_pml4", vmm_get_phys_in_pml4);
-    lke_register_symbol("current_task", &current_task);
+    lke_register_symbol("task_current", task_current);
     lke_register_symbol("schedule", schedule);
     lke_register_symbol("net_get_ticks", net_get_ticks);
     lke_register_symbol("lke_register_syscall", lke_register_syscall);

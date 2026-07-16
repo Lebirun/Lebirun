@@ -11,6 +11,7 @@
 #include <sys/uio.h>
 #include <pthread.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #define EPERM   1
 #define ENOENT  2
@@ -376,14 +377,23 @@ int close(int fd) {
 }
 
 int open(const char *pathname, int flags, ...) {
-    int ret = syscall2(SYS_VFS_OPEN, (long)pathname, flags);
+    va_list ap;
+    int mode;
+    int ret;
+
+    mode = 0;
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_start(ap, flags);
+        mode = va_arg(ap, int);
+        va_end(ap);
+    }
+    ret = syscall3(SYS_VFS_OPEN, (long)pathname, flags, mode);
     if (ret < 0) { errno = ENOENT; return -1; }
     return ret;
 }
 
 int creat(const char *pathname, mode_t mode) {
-    (void)mode;
-    return open(pathname, 0x241);
+    return open(pathname, 0x241, mode);
 }
 
 int kill(int pid, int sig) {

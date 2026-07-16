@@ -58,6 +58,8 @@ static int posix_copy_user_string(char **out, const char *src_user, uint64_t max
     char *dst;
     uint64_t addr;
     uint64_t cur;
+    uint64_t chunk;
+    uint64_t page_remaining;
     uint64_t i;
     uint64_t j;
     uint64_t alloc_len;
@@ -70,21 +72,25 @@ static int posix_copy_user_string(char **out, const char *src_user, uint64_t max
     i = 0;
     while (i < max_len) {
         cur = addr + i;
-        if (cur < addr || !posix_user_range_mapped(cur, 1)) {
+        if (cur < addr) {
             return -EFAULT;
         }
-        c = *(const char *)cur;
-        if (c == '\0') {
-            alloc_len = i + 1;
-            dst = (char *)kmalloc(alloc_len);
-            if (!dst) return -ENOMEM;
-            for (j = 0; j < alloc_len; j++) {
-                dst[j] = *(const char *)(addr + j);
+        page_remaining = 0x1000 - (cur & 0xFFF);
+        chunk = max_len - i;
+        if (chunk > page_remaining) chunk = page_remaining;
+        if (!posix_user_range_mapped(cur, chunk)) return -EFAULT;
+        for (j = 0; j < chunk; j++) {
+            c = *(const char *)(cur + j);
+            if (c == '\0') {
+                alloc_len = i + j + 1;
+                dst = (char *)kmalloc(alloc_len);
+                if (!dst) return -ENOMEM;
+                memcpy(dst, (const void *)addr, alloc_len);
+                *out = dst;
+                return 0;
             }
-            *out = dst;
-            return 0;
         }
-        i++;
+        i += chunk;
     }
     return -ENAMETOOLONG;
 }
@@ -234,7 +240,7 @@ static void fd_retain_entry(task_fd_t *tfd) {
     if (!tfd || !tfd->in_use) return;
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node = (vfs_node_t *)tfd->node;
-        vfs_open(node, tfd->flags);
+        vfs_open(node, 0);
         return;
     }
     if (tfd->private_data && (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W)) {
@@ -290,6 +296,7 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     fd_table[newfd].ref_count = 1;
     fd_table[newfd].flags &= ~1;
     fd_retain_entry(&fd_table[newfd]);
+    task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
 }
 
@@ -314,6 +321,7 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     fd_table[newfd].ref_count = 1;
     fd_table[newfd].flags &= ~1;
     fd_retain_entry(&fd_table[newfd]);
+    task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
 }
 
@@ -609,7 +617,7 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
             base = 0;
             break;
         case VFS_SEEK_CUR:
-            base = (int32_t)tfd->offset;
+            base = (int32_t)task_fd_position_get(tfd);
             break;
         case VFS_SEEK_END:
             base = (int32_t)node->length;
@@ -620,7 +628,7 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
 
     new_offset = base + offset;
     if (new_offset < 0) return -EINVAL;
-    tfd->offset = (uint64_t)new_offset;
+    task_fd_position_set(tfd, (uint64_t)new_offset);
     return (int)new_offset;
 }
 
@@ -762,8 +770,9 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         kfree(path);
         return -ENOENT;
     }
+    vfs_open(node, 0);
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
-        vfs_release(node);
+        vfs_close(node);
         posix_free_string_array(envp, envc);
         posix_free_string_array(argv, argc);
         kfree(path);
@@ -771,7 +780,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     }
     size = node->length;
     if (size == 0) {
-        vfs_release(node);
+        vfs_close(node);
         posix_free_string_array(envp, envc);
         posix_free_string_array(argv, argc);
         kfree(path);
@@ -784,7 +793,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     }
     read_len = vfs_read(node, 0, header_size, header);
     if (read_len != header_size) {
-        vfs_release(node);
+        vfs_close(node);
         posix_free_string_array(envp, envc);
         posix_free_string_array(argv, argc);
         kfree(path);
@@ -807,7 +816,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         }
         shebang_interp[sj] = '\0';
         if (sj == 0) {
-            vfs_release(node);
+            vfs_close(node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -826,7 +835,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             if (sj > 0) shebang_has_arg = 1;
         }
 
-        vfs_release(node);
+        vfs_close(node);
         node = NULL;
 
         interp_node = vfs_namei(shebang_interp);
@@ -836,9 +845,10 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             kfree(path);
             return -ENOENT;
         }
+        vfs_open(interp_node, 0);
         interp_size = interp_node->length;
         if (interp_size == 0) {
-            vfs_release(interp_node);
+            vfs_close(interp_node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -848,7 +858,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         new_argc = 1 + shebang_has_arg + 1 + (argc > 1 ? argc - 1 : 0);
         new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
         if (!new_argv) {
-            vfs_release(interp_node);
+            vfs_close(interp_node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -860,7 +870,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         new_argv[na] = posix_kstrdup(shebang_interp);
         if (!new_argv[na]) {
             kfree(new_argv);
-            vfs_release(interp_node);
+            vfs_close(interp_node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -873,7 +883,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             if (!new_argv[na]) {
                 for (i = 0; i < na; i++) kfree(new_argv[i]);
                 kfree(new_argv);
-                vfs_release(interp_node);
+                vfs_close(interp_node);
                 posix_free_string_array(envp, envc);
                 posix_free_string_array(argv, argc);
                 kfree(path);
@@ -886,7 +896,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         if (!new_argv[na]) {
             for (i = 0; i < na; i++) kfree(new_argv[i]);
             kfree(new_argv);
-            vfs_release(interp_node);
+            vfs_close(interp_node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -905,7 +915,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         if (!regs) {
             for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
             kfree(new_argv);
-            vfs_release(interp_node);
+            vfs_close(interp_node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -913,7 +923,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         }
 
         result = task_exec_node_with_args(interp_node, regs, na, new_argv, envc, envp);
-        vfs_release(interp_node);
+        vfs_close(interp_node);
         for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
         kfree(new_argv);
         posix_free_string_array(envp, envc);
@@ -932,7 +942,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
 
     regs = current_task->syscall_frame;
     if (!regs) {
-        vfs_release(node);
+        vfs_close(node);
         posix_free_string_array(envp, envc);
         posix_free_string_array(argv, argc);
         kfree(path);
@@ -940,7 +950,7 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     }
 
     result = task_exec_node_with_args(node, regs, argc, argv, envc, envp);
-    vfs_release(node);
+    vfs_close(node);
     posix_free_string_array(envp, envc);
     posix_free_string_array(argv, argc);
     kfree(path);
@@ -971,9 +981,9 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
     switch (cmd) {
         case F_DUPFD:
         case F_DUPFD_CLOEXEC: {
-            int minfd = (arg < 0) ? 0 : arg;
+            int minfd = arg;
             int newfd;
-            if (minfd >= current_task->fds_capacity) return -EINVAL;
+            if (minfd < 0 || minfd >= TASK_MAX_FDS) return -EINVAL;
             newfd = fd_alloc_from(minfd);
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
@@ -983,6 +993,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             else
                 fd_table[newfd].flags &= ~1;
             fd_retain_entry(&fd_table[newfd]);
+            task_fd_position_share(&fd_table[fd], &fd_table[newfd]);
             return newfd;
         }
         case F_GETFD:
@@ -1051,12 +1062,12 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
 }
 
 static int sys_umask(int mask, const char *unused1, int unused2) {
-    static int current_mask;
     int old;
+
     (void)unused1; (void)unused2;
-    current_mask = 022;
-    old = current_mask;
-    current_mask = mask & 0777;
+    if (!current_task) return -ESRCH;
+    old = (int)current_task->creation_mask;
+    current_task->creation_mask = (uint64_t)(mask & 0777);
     return old;
 }
 
@@ -1076,12 +1087,10 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     int name_len;
     int reclen;
     struct linux_dirent *de;
-    uint64_t flags;
     int i;
     int guard;
     task_fd_t *tfd;
     vfs_node_t *node;
-    dirent_t *entry;
     dirent_t local_copy;
 
     dirp_addr = (uint64_t)(uintptr_t)dirp_ptr;
@@ -1099,20 +1108,11 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
 
     buf = (uint8_t *)dirp_addr;
     written = 0;
-    dir_offset = tfd->offset;
+    dir_offset = task_fd_position_get(tfd);
     guard = 0;
 
     while (written < count && guard < 4096) {
-        entry = vfs_readdir(node, dir_offset);
-        if (!entry) break;
-
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
-        for (i = 0; i < VFS_MAX_NAME; i++) {
-            local_copy.name[i] = entry->name[i];
-        }
-        local_copy.inode = entry->inode;
-        local_copy.type = entry->type;
-        __asm__ volatile("push %0; popf" : : "r"(flags));
+        if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
 
         name_len = 0;
         while (local_copy.name[name_len] && name_len < 63) name_len++;
@@ -1144,7 +1144,7 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
         guard++;
     }
 
-    tfd->offset = dir_offset;
+    task_fd_position_set(tfd, dir_offset);
     return written;
 }
 
@@ -1330,6 +1330,7 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     else
         fd_table[newfd].flags &= ~1;
     fd_retain_entry(&fd_table[newfd]);
+    task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
 }
 
@@ -1561,12 +1562,10 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     int name_len;
     int reclen;
     struct linux_dirent64 *de;
-    uint64_t flags;
     int i;
     int guard;
     task_fd_t *tfd;
     vfs_node_t *node;
-    dirent_t *entry;
     dirent_t local_copy;
 
     dirp_addr = (uint64_t)dirp;
@@ -1584,20 +1583,11 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
 
     buf = (uint8_t *)dirp;
     written = 0;
-    dir_offset = tfd->offset;
+    dir_offset = task_fd_position_get(tfd);
     guard = 0;
     
     while ((unsigned int)written < count && guard < 4096) {
-        entry = vfs_readdir(node, dir_offset);
-        if (!entry) break;
-
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
-        for (i = 0; i < VFS_MAX_NAME; i++) {
-            local_copy.name[i] = entry->name[i];
-        }
-        local_copy.inode = entry->inode;
-        local_copy.type = entry->type;
-        __asm__ volatile("push %0; popf" : : "r"(flags));
+        if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
         
         name_len = 0;
         while (local_copy.name[name_len] && name_len < 63) name_len++;
@@ -1629,7 +1619,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
         guard++;
     }
     
-    tfd->offset = dir_offset;
+    task_fd_position_set(tfd, dir_offset);
     return written;
 }
 

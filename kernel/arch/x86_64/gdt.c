@@ -2,6 +2,7 @@
 #include <lebirun/tty.h>
 #include <lebirun/kstack.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/smp.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -45,6 +46,8 @@ typedef struct {
 } __attribute__((packed)) tss64_t;
 
 #define GDT_ENTRIES 10
+_Static_assert(sizeof(gdt_entry_t) * GDT_ENTRIES == GDT_CPU_BYTES, "gdt size");
+_Static_assert(sizeof(tss64_t) == TSS_CPU_BYTES, "tss size");
 static gdt_entry_t gdt[GDT_ENTRIES] __attribute__((aligned(16)));
 static gdt_ptr_t gdtp __attribute__((aligned(16)));
 static tss64_t tss __attribute__((aligned(16)));
@@ -74,16 +77,28 @@ static void gdt_set_tss(int num, uint64_t base, uint64_t limit) {
 }
 
 void tss_set_rsp0(uint64_t rsp0) {
+    cpu_info_t *cpu;
+
     if (rsp0 != 0 && !kstack_is_in_region(rsp0) && !kstack_is_in_region(rsp0 - 1)) {
         if (rsp0 < KERNEL_VMA) {
             printf("TSS: BAD rsp0=0x%016lX (below KERNEL_VMA)\n", rsp0);
             __asm__ volatile ("cli; hlt");
         }
     }
+    cpu = smp_this_cpu();
+    if (cpu && !cpu->bsp && cpu->tss) {
+        ((tss64_t *)cpu->tss)->rsp0 = rsp0;
+        return;
+    }
     tss.rsp0 = rsp0;
 }
 
 uint64_t tss_get_rsp0(void) {
+    cpu_info_t *cpu;
+
+    cpu = smp_this_cpu();
+    if (cpu && !cpu->bsp && cpu->tss)
+        return ((tss64_t *)cpu->tss)->rsp0;
     return tss.rsp0;
 }
 
@@ -142,7 +157,7 @@ void gdt_init(void) {
     asm volatile ("ltr %w0" : : "r"(tss_selector) : "memory");
 }
 
-void gdt_init_ap(void *gdt_buf, void *tss_buf) {
+void gdt_init_ap(void *gdt_buf, void *tss_buf, void *kernel_stack) {
     gdt_entry_t *ap_gdt;
     tss64_t *ap_tss;
     gdt_ptr_t ap_gdtp;
@@ -171,6 +186,10 @@ void gdt_init_ap(void *gdt_buf, void *tss_buf) {
 
     memset(ap_tss, 0, sizeof(tss64_t));
     ap_tss->iomap_base = sizeof(tss64_t);
+    ap_tss->rsp0 = (uint64_t)kernel_stack + KSTACK_RUNTIME_SIZE;
+    ap_tss->ist1 = (uint64_t)kernel_stack + KSTACK_RUNTIME_SIZE;
+    ap_tss->ist2 = (uint64_t)kernel_stack + KSTACK_RUNTIME_SIZE;
+    ap_tss->ist3 = (uint64_t)kernel_stack + KSTACK_RUNTIME_SIZE;
 
     tss_base = (uint64_t)ap_tss;
     {

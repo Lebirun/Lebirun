@@ -549,7 +549,7 @@ static int sys_lchown(const char *pathname, int owner, int group) {
     return sys_chown(pathname, owner, group);
 }
 
-#define ENV_INIT_COUNT 1
+#define ENV_INIT_COUNT 6
 #define ENV_NAME_SIZE 64
 #define ENV_VALUE_SIZE 256
 
@@ -594,7 +594,8 @@ static int env_grow(void) {
 static void init_default_environ(void) {
     if (env_count > 0) return;
     
-    if (!env_names) env_grow();
+    if (!env_names && env_grow() < 0) return;
+    if (!env_names || !env_values || env_capacity < ENV_INIT_COUNT) return;
     
     copy_string(env_names[0], "PATH", ENV_NAME_SIZE);
     copy_string(env_values[0], "/bin:/usr/bin:/sbin:/usr/sbin", ENV_VALUE_SIZE);

@@ -27,6 +27,7 @@ build-*/
 *.bak
 *.tmp
 *.log
+include/lebirun/version.h
 
 .cache/
 __pycache__/

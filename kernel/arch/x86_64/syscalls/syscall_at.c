@@ -99,13 +99,26 @@ static int at_user_range_mapped(uint64_t addr, uint64_t size) {
 
 static int at_user_string_mapped(const char *s, size_t max) {
     uint64_t addr;
+    uint64_t current;
+    size_t chunk;
+    size_t page_remaining;
     size_t i;
+    size_t j;
 
     if (!s || max == 0) return 0;
     addr = (uint64_t)(uintptr_t)s;
-    for (i = 0; i < max; i++) {
-        if (!at_user_range_mapped(addr + i, 1)) return 0;
-        if (s[i] == '\0') return 1;
+    i = 0;
+    while (i < max) {
+        current = addr + i;
+        if (current < addr) return 0;
+        page_remaining = 0x1000 - (size_t)(current & 0xFFF);
+        chunk = max - i;
+        if (chunk > page_remaining) chunk = page_remaining;
+        if (!at_user_range_mapped(current, chunk)) return 0;
+        for (j = 0; j < chunk; j++) {
+            if (s[i + j] == '\0') return 1;
+        }
+        i += chunk;
     }
     return 0;
 }
@@ -189,7 +202,7 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *resolv
     return resolved;
 }
 
-static int sys_openat(int dirfd, const char *pathname, int flags) {
+static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
     char resolved[256];
     const char *path;
     vfs_node_t *node;
@@ -217,7 +230,8 @@ static int sys_openat(int dirfd, const char *pathname, int flags) {
     }
 
     if (!node && (flags & VFS_O_CREAT)) {
-        create_mode = 0644;
+        create_mode = (uint64_t)(mode & 0777);
+        create_mode &= ~current_task->creation_mask;
         if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
 
         len = 0;
@@ -321,7 +335,7 @@ static int sys_mkdirat(int dirfd, const char *pathname, int mode) {
     
     {
         int r;
-        r = vfs_mkdir(parent, dirname, (uint64_t)mode);
+        r = vfs_mkdir(parent, dirname, (uint64_t)mode & ~current_task->creation_mask);
         vfs_release(parent);
         return r;
     }

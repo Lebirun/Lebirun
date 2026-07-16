@@ -84,11 +84,21 @@ static vfs_node_t *procfs_get_memdetail(void);
 static vfs_node_t *procfs_get_kmsg(void);
 
 static void procfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vfs_node_t *parent) {
+    uint64_t type;
+
     memset(n, 0, sizeof(vfs_node_t));
     strcpy(n->name, name);
     n->flags = flags;
     n->parent = parent;
     n->ref_count = 1;
+    type = VFS_GET_TYPE(flags);
+    if (type == VFS_DIRECTORY) {
+        n->mask = 0555;
+    } else if (type == VFS_SYMLINK) {
+        n->mask = 0777;
+    } else {
+        n->mask = 0444;
+    }
 }
 
 static vfs_node_t *procfs_lazy_node(vfs_node_t **slot, const char *name, uint64_t flags, vfs_node_t *parent, read_type_t read, readdir_type_t readdir, finddir_type_t finddir) {
@@ -162,7 +172,7 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
     uint64_t remaining;
     task_t *task;
     uint64_t ruid, rgid;
-    
+
     len = 0;
     task = procfs_get_task(node);
     
@@ -1217,18 +1227,17 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
 }
 
 static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
-    task_t *t;
-    uint64_t count;
-    uint64_t pid_index;
-    
-    (void)node;
-    
     static const char *entries[] = {
         "self", "version", "uptime", "meminfo", "cpuinfo", "loadavg",
         "stat", "mounts", "filesystems", "cmdline", "devices", "interrupts", "vmstat",
         "memdetail", "kmsg"
     };
-    
+    task_t *t;
+    uint64_t count;
+    uint64_t pid_index;
+
+    (void)node;
+
     if (index < sizeof(entries)/sizeof(entries[0])) {
         strcpy(proc_dirent.name, entries[index]);
         proc_dirent.inode = index + 1;
@@ -1238,21 +1247,43 @@ static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
     
     pid_index = index - (uint64_t)(sizeof(entries)/sizeof(entries[0]));
     count = 0;
+    lock_scheduler();
     t = all_tasks_head;
     while (t) {
-        if (t->id != 0 || t->is_user) {
+        if ((t->id != 0 || t->is_user) &&
+            !(t->state == TASK_DEAD && t->waited)) {
             if (count == pid_index) {
                 snprintf(proc_dirent.name, sizeof(proc_dirent.name), "%d", t->pid);
                 proc_dirent.inode = (uint64_t)t->pid;
                 proc_dirent.type = VFS_DIRECTORY;
+                unlock_scheduler();
                 return &proc_dirent;
             }
             count++;
         }
         t = t->all_next;
     }
+    unlock_scheduler();
     
     return NULL;
+}
+
+static int procfs_pid_visible(pid_t pid) {
+    task_t *task;
+    int visible;
+
+    visible = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task) {
+        if (task->pid == pid) {
+            visible = !(task->state == TASK_DEAD && task->waited);
+            break;
+        }
+        task = task->all_next;
+    }
+    unlock_scheduler();
+    return visible;
 }
 
 static dirent_t *proc_pid_readdir(vfs_node_t *node, uint64_t index) {
@@ -1314,6 +1345,7 @@ static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
             fnode->read = files[file_idx].read;
             fnode->parent = &procfs_root;
+            fnode->mask = 0444;
             return fnode;
         }
     }
@@ -1328,6 +1360,7 @@ static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
         tdir->readdir = proc_task_readdir;
         tdir->finddir = proc_task_finddir;
         tdir->parent = &procfs_root;
+        tdir->mask = 0555;
         return tdir;
     }
     
@@ -1370,6 +1403,7 @@ static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name) {
     tdir->readdir = proc_task_thread_readdir;
     tdir->finddir = proc_task_thread_finddir;
     tdir->parent = &procfs_root;
+    tdir->mask = 0555;
     return tdir;
 }
 
@@ -1424,6 +1458,7 @@ static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name) 
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
             fnode->read = files[file_idx].read;
             fnode->parent = &procfs_root;
+            fnode->mask = 0444;
             return fnode;
         }
     }
@@ -1445,6 +1480,7 @@ static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
     dir->readdir = proc_pid_readdir;
     dir->finddir = proc_pid_finddir;
     dir->parent = &procfs_root;
+    dir->mask = 0555;
     return dir;
 }
 
@@ -1471,7 +1507,6 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
         int pid = 0;
         int neg = 0;
         const char *p = name;
-        task_t *t;
 
         if (*p == '-') {
             neg = 1;
@@ -1483,8 +1518,7 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
         }
         if (neg) pid = -pid;
         if (*p == '\0' && pid != 0) {
-            t = task_find((pid_t)pid);
-            if (t) {
+            if (procfs_pid_visible((pid_t)pid)) {
                 return procfs_setup_pid_dir((pid_t)pid);
             }
         }
@@ -1635,7 +1669,11 @@ static vfs_node_t *procfs_get_memdetail(void) {
 }
 
 static vfs_node_t *procfs_get_kmsg(void) {
-    return procfs_lazy_node(&proc_kmsg, "kmsg", VFS_FILE, &procfs_root, proc_kmsg_read, NULL, NULL);
+    vfs_node_t *node;
+
+    node = procfs_lazy_node(&proc_kmsg, "kmsg", VFS_FILE, &procfs_root, proc_kmsg_read, NULL, NULL);
+    if (node) node->mask = 0400;
+    return node;
 }
 
 static vfs_node_t *procfs_mount(const char *device, const char *mountpoint) {
@@ -1659,6 +1697,7 @@ void procfs_init(void) {
     memset(&procfs_root, 0, sizeof(vfs_node_t));
     strcpy(procfs_root.name, "proc");
     procfs_root.flags = VFS_DIRECTORY;
+    procfs_root.mask = 0555;
     procfs_root.readdir = procfs_readdir;
     procfs_root.finddir = procfs_finddir;
     procfs_root.ref_count = 1;

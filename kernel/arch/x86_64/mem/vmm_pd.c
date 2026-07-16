@@ -38,10 +38,7 @@ uint64_t vmm_create_pml4(void) {
     uint64_t saved_flags;
 
     page = pmm_alloc_page();
-    if (!page) {
-        printf("vmm_create_pml4: Failed to allocate PML4 page\n");
-        return 0;
-    }
+    if (!page) return 0;
     pml4_phys = (uint64_t)page;
     pmm_zero_page_phys(pml4_phys);
 
@@ -54,14 +51,6 @@ uint64_t vmm_create_pml4(void) {
     pml4 = (uint64_t *)temp_virt;
     pml4[511] = (pdpt_high_phys & VMM_PHYS_MASK) | 3;
     __asm__ volatile ("" ::: "memory");
-    {
-        uint64_t verify;
-        verify = pml4[511];
-        if ((verify & VMM_PHYS_MASK) != (pdpt_high_phys & VMM_PHYS_MASK)) {
-            printf("vmm_create_pml4: VERIFY FAIL pml4[511]=0x%016lX expected pdpt=0x%016lX\n",
-                   verify, pdpt_high_phys);
-        }
-    }
     temp_unmap_raw(temp_virt);
 
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
@@ -155,99 +144,6 @@ void vmm_free_pml4(uint64_t pml4_phys) {
     vmm_free_pml4_entries(pml4_phys, 511, 1);
 }
 
-void vmm_relax_single_cow_pages(uint64_t pml4_phys) {
-    uint64_t temp_pml4;
-    uint64_t temp_pdpt;
-    uint64_t temp_pd;
-    uint64_t temp_pt;
-    uint64_t *pml4;
-    uint64_t *pdpt_tbl;
-    uint64_t *pd_tbl;
-    uint64_t *pt_tbl;
-    uint64_t i;
-    uint64_t j;
-    uint64_t k;
-    uint64_t l;
-    uint64_t pml4e;
-    uint64_t pdpte;
-    uint64_t pde;
-    uint64_t pte;
-    uint64_t pdpt_phys;
-    uint64_t pd_phys;
-    uint64_t pt_phys;
-    uint64_t page_phys;
-    uint64_t pte_flags;
-    uint8_t ref;
-    uint64_t saved_flags;
-    int changed;
-
-    if (!pml4_phys) return;
-
-    changed = 0;
-    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
-
-    temp_pml4 = TEMP_SLOT(0);
-    temp_pdpt = TEMP_SLOT(1);
-    temp_pd = TEMP_SLOT(2);
-    temp_pt = TEMP_SLOT(3);
-
-    temp_map_raw(temp_pml4, pml4_phys);
-    pml4 = (uint64_t *)temp_pml4;
-
-    for (i = 0; i < 511; i++) {
-        pml4e = pml4[i];
-        if (!(pml4e & 1)) continue;
-        pdpt_phys = pml4e & VMM_PHYS_MASK;
-
-        temp_map_raw(temp_pdpt, pdpt_phys);
-        pdpt_tbl = (uint64_t *)temp_pdpt;
-
-        for (j = 0; j < 512; j++) {
-            pdpte = pdpt_tbl[j];
-            if (!(pdpte & 1)) continue;
-            pd_phys = pdpte & VMM_PHYS_MASK;
-
-            temp_map_raw(temp_pd, pd_phys);
-            pd_tbl = (uint64_t *)temp_pd;
-
-            for (k = 0; k < 512; k++) {
-                pde = pd_tbl[k];
-                if (!(pde & 1)) continue;
-                pt_phys = pde & VMM_PHYS_MASK;
-
-                temp_map_raw(temp_pt, pt_phys);
-                pt_tbl = (uint64_t *)temp_pt;
-
-                for (l = 0; l < 512; l++) {
-                    pte = pt_tbl[l];
-                    if (!(pte & 1)) continue;
-                    if (!(pte & VMM_PTE_COW)) continue;
-                    if (pte & VMM_PTE_NOFREE) continue;
-                    page_phys = pte & VMM_PHYS_MASK;
-                    ref = pfa_ref_get(page_phys);
-                    if (ref <= 1) {
-                        pte_flags = pte & 0x8000000000000FFFULL;
-                        pt_tbl[l] = (page_phys & VMM_PHYS_MASK) | ((pte_flags | 0x2) & ~VMM_PTE_COW);
-                        if (ref == 1) pfa_ref_dec(page_phys);
-                        changed = 1;
-                    }
-                }
-
-                temp_unmap_raw(temp_pt);
-            }
-
-            temp_unmap_raw(temp_pd);
-        }
-
-        temp_unmap_raw(temp_pdpt);
-    }
-
-    temp_unmap_raw(temp_pml4);
-
-    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
-    if (changed) smp_tlb_flush_all();
-}
-
 static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count) {
     uint64_t user_page_capacity;
     uint64_t user_page_count;
@@ -296,8 +192,10 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     uint64_t saved_flags;
     uint64_t new_cap;
     uint64_t *new_arr;
+    uint64_t undo;
+    int shared_ref_failed;
 
-    user_page_capacity = 512;
+    user_page_capacity = 32;
     user_page_count = 0;
 
     user_pages = (uint64_t *)kmalloc(user_page_capacity * sizeof(uint64_t));
@@ -346,14 +244,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
     new_pml4[511] = (pdpt_high_phys & VMM_PHYS_MASK) | 3;
     __asm__ volatile ("" ::: "memory");
-    {
-        uint64_t verify;
-        verify = new_pml4[511];
-        if ((verify & VMM_PHYS_MASK) != (pdpt_high_phys & VMM_PHYS_MASK)) {
-            printf("vmm_clone_pml4: VERIFY FAIL pml4[511]=0x%016lX expected=0x%016lX\n",
-                   verify, pdpt_high_phys);
-        }
-    }
 
     for (i = 0; i < 511; i++) {
         pml4e = src_pml4[i];
@@ -422,6 +312,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                 memcpy(src_pt_copy, src_pt_tbl, PAGE_SIZE);
                 temp_unmap_raw(temp_src_pt);
                 memset(new_pt_copy, 0, PAGE_SIZE);
+                shared_ref_failed = 0;
 
                 for (l = 0; l < 512; l++) {
                     src_pte = src_pt_copy[l];
@@ -430,38 +321,50 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                     src_page_phys = src_pte & VMM_PHYS_MASK;
                     pte_flags = src_pte & 0x8000000000000FFFULL;
 
+                    if (user_page_count >= user_page_capacity) {
+                        new_cap = user_page_capacity * 2;
+                        new_arr = (uint64_t *)krealloc(
+                            user_pages, new_cap * sizeof(uint64_t));
+                        if (!new_arr) {
+                            shared_ref_failed = 1;
+                            break;
+                        }
+                        user_pages = new_arr;
+                        user_page_capacity = new_cap;
+                    }
+
                     if (pte_flags & VMM_PTE_NOFREE) {
                         new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
                     } else if (pte_flags & 0x2) {
                         cow_flags64 = (pte_flags & ~0x2) | VMM_PTE_COW;
                         src_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
                         new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
-                        if (pfa_ref_get(src_page_phys) == 0)
-                            pfa_ref_inc(src_page_phys);
-                        pfa_ref_inc(src_page_phys);
+                        if (pfa_ref_share(src_page_phys) != 0) {
+                            shared_ref_failed = 1;
+                            break;
+                        }
                     } else {
                         new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
-                        if (pfa_ref_get(src_page_phys) == 0)
-                            pfa_ref_inc(src_page_phys);
-                        pfa_ref_inc(src_page_phys);
+                        if (pfa_ref_share(src_page_phys) != 0) {
+                            shared_ref_failed = 1;
+                            break;
+                        }
                     }
 
-                    if (user_page_count >= user_page_capacity) {
-                        new_cap = user_page_capacity * 2;
-                        new_arr = (uint64_t *)kmalloc(new_cap * sizeof(uint64_t));
-                        if (!new_arr) {
-                            temp_unmap_raw(temp_new_pd);
-                            temp_unmap_raw(temp_src_pd);
-                            temp_unmap_raw(temp_new_pdpt);
-                            temp_unmap_raw(temp_src_pdpt);
-                            goto cleanup_fail;
-                        }
-                        memcpy(new_arr, user_pages, user_page_count * sizeof(uint64_t));
-                        kfree(user_pages);
-                        user_pages = new_arr;
-                        user_page_capacity = new_cap;
-                    }
                     user_pages[user_page_count++] = src_page_phys;
+                }
+                if (shared_ref_failed) {
+                    for (undo = 0; undo < l; undo++) {
+                        src_pte = new_pt_copy[undo];
+                        if (!(src_pte & 1)) continue;
+                        if (src_pte & VMM_PTE_NOFREE) continue;
+                        pfa_cow_release64(src_pte & VMM_PHYS_MASK);
+                    }
+                    temp_unmap_raw(temp_new_pd);
+                    temp_unmap_raw(temp_src_pd);
+                    temp_unmap_raw(temp_new_pdpt);
+                    temp_unmap_raw(temp_src_pdpt);
+                    goto cleanup_fail;
                 }
                 temp_map_raw(temp_src_pt, src_pt_phys);
                 src_pt_tbl = (uint64_t *)temp_src_pt;
@@ -706,10 +609,7 @@ uint64_t vmm_create_vring_pml4(void) {
     uint64_t pml4_phys;
 
     page = pmm_alloc_page();
-    if (!page) {
-        printf("vmm_create_vring_pml4: Failed to allocate PML4 page\n");
-        return 0;
-    }
+    if (!page) return 0;
     pml4_phys = (uint64_t)page;
     pmm_zero_page_phys(pml4_phys);
     return pml4_phys;

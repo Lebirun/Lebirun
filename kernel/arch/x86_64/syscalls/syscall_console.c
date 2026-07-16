@@ -20,9 +20,12 @@ static int sys_console_clear(int console_num, const char *unused1, int unused2) 
 }
 
 static int sys_console_setcursor(int x, const char *y_ptr, int unused) {
+    int y;
+    int con_id;
+
     (void)unused;
-    int y = (int)(uintptr_t)y_ptr;
-    int con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
+    y = (int)(uintptr_t)y_ptr;
+    con_id = (current_task && current_task->console_id >= 0) ? current_task->console_id : console_get_current();
     console_setcursor(con_id, x, y);
     return 0;
 }

@@ -4,8 +4,6 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-static uint32_t cache_tick_counter = 0;
-
 static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
     int i;
 
@@ -24,6 +22,7 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     uint32_t old_count;
     uint32_t new_count;
     ext4_block_cache_entry_t *new_cache;
+    int ret;
 
     for (i = 0; i < (int)fs->block_cache_count; i++) {
         if (!fs->block_cache[i].data) {
@@ -63,9 +62,22 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         return -1;
     }
 
-    if (oldest >= 0 && fs->block_cache[oldest].dirty) {
-        int ret;
+    if (fs->block_cache[oldest].dirty &&
+        fs->block_cache_count < EXT4_CACHE_BLOCKS) {
+        old_count = fs->block_cache_count;
+        new_count = old_count + 1;
+        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
+            new_count * sizeof(ext4_block_cache_entry_t));
+        if (new_cache) {
+            memset(new_cache + old_count, 0,
+                sizeof(ext4_block_cache_entry_t));
+            fs->block_cache = new_cache;
+            fs->block_cache_count = new_count;
+            return (int)old_count;
+        }
+    }
 
+    if (oldest >= 0 && fs->block_cache[oldest].dirty) {
         ret = ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
         if (ret == 0) {
             fs->block_cache[oldest].dirty = false;
@@ -114,7 +126,7 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
         fs->block_cache[idx].data != (const uint8_t *)buffer) {
         memcpy(fs->block_cache[idx].data, buffer, fs->block_size);
         fs->block_cache[idx].dirty = false;
-        fs->block_cache[idx].last_access = ++cache_tick_counter;
+        fs->block_cache[idx].last_access = ++fs->cache_tick;
     }
 
     return 0;
@@ -155,7 +167,7 @@ int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void 
         if (idx >= 0 && fs->block_cache[idx].data) {
             memcpy(fs->block_cache[idx].data, (const uint8_t *)buffer + i * fs->block_size, fs->block_size);
             fs->block_cache[idx].dirty = false;
-            fs->block_cache[idx].last_access = ++cache_tick_counter;
+            fs->block_cache[idx].last_access = ++fs->cache_tick;
         }
     }
 
@@ -168,7 +180,7 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
     idx = find_cache_entry(fs, block);
     if (idx >= 0) {
         fs->block_cache[idx].ref_count++;
-        fs->block_cache[idx].last_access = ++cache_tick_counter;
+        fs->block_cache[idx].last_access = ++fs->cache_tick;
         return fs->block_cache[idx].data;
     }
 
@@ -191,7 +203,7 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
     fs->block_cache[idx].block_num = (uint32_t)block;
     fs->block_cache[idx].ref_count = 1;
     fs->block_cache[idx].dirty = false;
-    fs->block_cache[idx].last_access = ++cache_tick_counter;
+    fs->block_cache[idx].last_access = ++fs->cache_tick;
 
     return fs->block_cache[idx].data;
 }
@@ -202,7 +214,7 @@ uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block) {
     idx = find_cache_entry(fs, block);
     if (idx >= 0) {
         fs->block_cache[idx].ref_count++;
-        fs->block_cache[idx].last_access = ++cache_tick_counter;
+        fs->block_cache[idx].last_access = ++fs->cache_tick;
         return fs->block_cache[idx].data;
     }
 
@@ -221,7 +233,7 @@ uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block) {
     fs->block_cache[idx].block_num = (uint32_t)block;
     fs->block_cache[idx].ref_count = 1;
     fs->block_cache[idx].dirty = false;
-    fs->block_cache[idx].last_access = ++cache_tick_counter;
+    fs->block_cache[idx].last_access = ++fs->cache_tick;
 
     return fs->block_cache[idx].data;
 }

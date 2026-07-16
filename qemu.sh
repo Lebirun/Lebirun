@@ -64,6 +64,7 @@ fi
 $QEMU_CMD \
     -m 4G \
     -smp 4 \
+    -cpu host \
     -vga qxl \
     $CDROM_ARGS \
     -s -S \

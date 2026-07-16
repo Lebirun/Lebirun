@@ -88,7 +88,6 @@ uint64_t vmm_create_vring_pml4(void);
 void vmm_free_vring_pml4(uint64_t pml4_phys);
 uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count);
 void vmm_free_pml4(uint64_t pml4_phys);
-void vmm_relax_single_cow_pages(uint64_t pml4_phys);
 void vmm_set_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_cr3(void);
 void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size);
@@ -115,6 +114,7 @@ uint64_t pfa_get_total_ram_kb(void);
 
 void pfa_ref_init(void);
 void pfa_ref_inc(uint64_t phys_addr);
+int pfa_ref_share(uint64_t phys_addr);
 int pfa_ref_dec(uint64_t phys_addr);
 uint8_t pfa_ref_get(uint64_t phys_addr);
 void pfa_cow_release64(uint64_t phys_addr);
@@ -181,6 +181,7 @@ int demand_reserve_range(uint64_t virt_start, uint64_t size);
 int demand_is_reserved(uint64_t virt_addr);
 int demand_commit_page(uint64_t virt_addr);
 int demand_decommit_page(uint64_t virt_addr);
+int demand_decommit_range(uint64_t virt_start, uint64_t virt_end);
 
 void vmm_unmap_page(uint64_t virt_addr);
 void vmm_map_temp(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);

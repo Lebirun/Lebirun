@@ -5,12 +5,10 @@
 #include <lebirun/gdt.h>
 #include <lebirun/idt.h>
 #include <lebirun/kstack.h>
+#include <lebirun/task.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdbool.h>
-
-extern bool debug_boot_hw;
 
 #define LAPIC_VIRT_BASE     (KERNEL_VMA + 0x3EE00000ULL)
 #define IOAPIC_VIRT_BASE    (KERNEL_VMA + 0x3EC00000ULL)
@@ -25,9 +23,15 @@ uint32_t lapic_timer_reload = 0;
 
 static cpu_info_t cpu_bootstrap[1];
 cpu_info_t *cpus = cpu_bootstrap;
-static int cpu_capacity = 1;
 int cpu_count = 0;
 volatile int cpus_booted = 0;
+volatile int smp_percpu_irq_ready = 0;
+static volatile int smp_scheduler_ready = 0;
+static volatile int smp_gs_ready = 0;
+static volatile int smp_tlb_flush_lock = 0;
+static volatile int smp_tlb_flush_acks = 0;
+
+_Static_assert(__builtin_offsetof(cpu_info_t, irq_cr3) == 72, "irq cr3 offset");
 
 static uint64_t lapic_phys = 0xFEE00000u;
 static uint64_t ioapic_phys = 0xFEC00000u;
@@ -54,38 +58,20 @@ extern volatile uint64_t ap_boot_entry;
 
 static int smp_ensure_cpu_capacity(int needed) {
     cpu_info_t *new_cpus;
-    int new_capacity;
 
-    if (needed <= cpu_capacity) return 1;
-    if (needed > MAX_CPUS) return 0;
-
-    new_capacity = cpu_capacity;
-    while (new_capacity < needed) {
-        new_capacity *= 2;
-        if (new_capacity > MAX_CPUS) new_capacity = MAX_CPUS;
+    if (needed <= 1) return 1;
+    if (cpus == cpu_bootstrap) {
+        new_cpus = (cpu_info_t *)kmalloc(
+            (uint64_t)needed * sizeof(cpu_info_t));
+        if (new_cpus)
+            memcpy(new_cpus, cpu_bootstrap, sizeof(cpu_bootstrap));
+    } else {
+        new_cpus = (cpu_info_t *)krealloc(
+            cpus, (uint64_t)needed * sizeof(cpu_info_t));
     }
-
-    new_cpus = (cpu_info_t *)kmalloc((uint64_t)new_capacity * sizeof(cpu_info_t));
     if (!new_cpus) return 0;
-    memset(new_cpus, 0, (uint64_t)new_capacity * sizeof(cpu_info_t));
-    if (cpus && cpu_count > 0) {
-        memcpy(new_cpus, cpus, (uint64_t)cpu_count * sizeof(cpu_info_t));
-    }
-    if (cpus != cpu_bootstrap) kfree(cpus);
+    memset(&new_cpus[needed - 1], 0, sizeof(cpu_info_t));
     cpus = new_cpus;
-    cpu_capacity = new_capacity;
-    return 1;
-}
-
-static int irq_overrides_ensure(void) {
-    irq_override_t *overrides;
-
-    if (irq_overrides) return 1;
-    overrides = (irq_override_t *)kmalloc(MAX_IRQ_OVERRIDES * sizeof(irq_override_t));
-    if (!overrides) return 0;
-    memset(overrides, 0, MAX_IRQ_OVERRIDES * sizeof(irq_override_t));
-    irq_overrides = overrides;
-    irq_override_count = 0;
     return 1;
 }
 
@@ -174,6 +160,11 @@ static void parse_madt_phys(uint64_t madt_phys) {
     uint8_t entry_buf[12];
     uint8_t type;
     uint8_t entry_len;
+    uint32_t lapic_flags;
+    uint32_t ioapic_addr32;
+    uint32_t gsi_base32;
+    uint32_t gsi32;
+    irq_override_t *new_overrides;
 
     length = acpi_read32(madt_phys + 4);
     lapic_phys = acpi_read32(madt_phys + 36);
@@ -188,11 +179,11 @@ static void parse_madt_phys(uint64_t madt_phys) {
         if (entry_len < 2) break;
         if (offset + entry_len > end_offset) break;
 
-        if (type == 0 && entry_len >= 8 && cpu_count < MAX_CPUS && smp_ensure_cpu_capacity(cpu_count + 1)) {
-            uint32_t lapic_flags;
+        if (type == 0 && entry_len >= 8 && cpu_count < MAX_CPUS) {
             acpi_read_phys(madt_phys + offset, entry_buf, 8);
             lapic_flags = *(uint32_t *)(entry_buf + 4);
-            if (lapic_flags & 0x3) {
+            if ((lapic_flags & 0x3) &&
+                smp_ensure_cpu_capacity(cpu_count + 1)) {
                 cpus[cpu_count].lapic_id = entry_buf[3];
                 cpus[cpu_count].processor_id = entry_buf[2];
                 cpus[cpu_count].active = 0;
@@ -200,21 +191,27 @@ static void parse_madt_phys(uint64_t madt_phys) {
                 cpu_count++;
             }
         } else if (type == 1 && entry_len >= 12) {
-            uint32_t ioapic_addr32;
-            uint32_t gsi_base32;
             acpi_read_phys(madt_phys + offset, entry_buf, 12);
             ioapic_addr32 = *(uint32_t *)(entry_buf + 4);
             gsi_base32 = *(uint32_t *)(entry_buf + 8);
             ioapic_phys = (uint64_t)ioapic_addr32;
             ioapic_gsi_base = (uint64_t)gsi_base32;
-        } else if (type == 2 && entry_len >= 10 && irq_override_count < MAX_IRQ_OVERRIDES && irq_overrides_ensure()) {
-            uint32_t gsi32;
-            acpi_read_phys(madt_phys + offset, entry_buf, 10);
-            irq_overrides[irq_override_count].source = entry_buf[3];
-            gsi32 = *(uint32_t *)(entry_buf + 4);
-            irq_overrides[irq_override_count].gsi = (uint64_t)gsi32;
-            irq_overrides[irq_override_count].flags = *(uint16_t *)(entry_buf + 8);
-            irq_override_count++;
+        } else if (type == 2 && entry_len >= 10 &&
+                   irq_override_count < MAX_IRQ_OVERRIDES) {
+            new_overrides = (irq_override_t *)krealloc(
+                irq_overrides,
+                (uint64_t)(irq_override_count + 1) *
+                    sizeof(irq_override_t));
+            if (new_overrides) {
+                irq_overrides = new_overrides;
+                acpi_read_phys(madt_phys + offset, entry_buf, 10);
+                irq_overrides[irq_override_count].source = entry_buf[3];
+                gsi32 = *(uint32_t *)(entry_buf + 4);
+                irq_overrides[irq_override_count].gsi = (uint64_t)gsi32;
+                irq_overrides[irq_override_count].flags =
+                    *(uint16_t *)(entry_buf + 8);
+                irq_override_count++;
+            }
         }
 
         offset += entry_len;
@@ -388,10 +385,45 @@ int smp_processor_id(void) {
 }
 
 cpu_info_t *smp_this_cpu(void) {
+    cpu_info_t *cpu;
     int idx;
 
+    if (smp_gs_ready) {
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(cpu));
+        return cpu;
+    }
     idx = smp_processor_id();
     return &cpus[idx];
+}
+
+task_t *smp_current_task_safe(void) {
+    uint64_t id;
+    int i;
+
+    if (!cpus || cpu_count <= 0)
+        return NULL;
+    if (!lapic_base)
+        return cpus[0].running_task;
+    id = lapic_get_id();
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == id)
+            return cpus[i].running_task;
+    }
+    return NULL;
+}
+
+static void smp_set_cpu_base(cpu_info_t *cpu) {
+    uint64_t base;
+
+    base = (uint64_t)(uintptr_t)cpu;
+    __asm__ volatile (
+        "wrmsr"
+        :
+        : "c"(0xC0000101u),
+          "a"((uint32_t)(base & 0xFFFFFFFFu)),
+          "d"((uint32_t)(base >> 32))
+        : "memory"
+    );
 }
 
 int smp_is_bsp(void) {
@@ -411,8 +443,53 @@ void smp_tlb_flush_all(void) {
     for (i = 0; i < cpu_count; i++) {
         if (cpus[i].lapic_id == my_id) continue;
         if (!cpus[i].active) continue;
-        if (!cpus[i].current_task) continue;
         lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
+    }
+}
+
+void smp_tlb_flush_ack(void) {
+    __sync_fetch_and_add(&smp_tlb_flush_acks, 1);
+}
+
+int smp_tlb_flush_all_sync(void) {
+    uint64_t my_id;
+    uint64_t wait;
+    int i;
+    int result;
+    int targets;
+
+    if (!lapic_base || cpu_count <= 1) return 0;
+    if (__sync_lock_test_and_set(&smp_tlb_flush_lock, 1))
+        return -1;
+    my_id = lapic_get_id();
+    targets = 0;
+    smp_tlb_flush_acks = 0;
+    __sync_synchronize();
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == my_id) continue;
+        if (!cpus[i].active) continue;
+        targets++;
+        lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
+    }
+    wait = 10000000;
+    while (smp_tlb_flush_acks < targets && wait > 0) {
+        __asm__ volatile ("pause" ::: "memory");
+        wait--;
+    }
+    result = smp_tlb_flush_acks == targets ? 0 : -1;
+    __sync_lock_release(&smp_tlb_flush_lock);
+    return result;
+}
+
+void smp_stop_other_cpus(void) {
+    uint64_t my_id;
+    int i;
+
+    if (!lapic_base || cpu_count <= 1) return;
+    my_id = lapic_get_id();
+    for (i = 0; i < cpu_count; i++) {
+        if (!cpus[i].active || cpus[i].lapic_id == my_id) continue;
+        lapic_send_ipi(cpus[i].lapic_id, 255);
     }
 }
 
@@ -434,16 +511,27 @@ void ap_main(void) {
     }
 
     if (cpu_idx >= 0 && cpus[cpu_idx].gdt && cpus[cpu_idx].tss) {
-        gdt_init_ap(cpus[cpu_idx].gdt, cpus[cpu_idx].tss);
+        gdt_init_ap(cpus[cpu_idx].gdt, cpus[cpu_idx].tss,
+                    cpus[cpu_idx].kernel_stack);
     }
 
+    if (cpu_idx >= 0)
+        smp_set_cpu_base(&cpus[cpu_idx]);
+
     idt_load();
-    lapic_init();
+    lapic_write(LAPIC_REG_SVR,
+                ((lapic_read(LAPIC_REG_SVR) | LAPIC_SVR_ENABLE) & ~0xFFu) | 0xFFu);
+    lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_MASKED);
+    lapic_write(0x350, 0x10000);
+    lapic_write(0x360, 0x10000);
+    lapic_write(0x370, 0x10000);
+    lapic_write(LAPIC_REG_ESR, 0);
+    lapic_write(LAPIC_REG_ESR, 0);
+    lapic_write(LAPIC_REG_EOI, 0);
     lapic_write(LAPIC_REG_TPR, 0xFF);
 
     if (cpu_idx >= 0) {
         cpus[cpu_idx].active = 1;
-        cpus[cpu_idx].current_task = NULL;
         cpus[cpu_idx].scheduler_lock_depth = 0;
         cpus[cpu_idx].sched_saved_rflags = 0;
         cpus[cpu_idx].schedule_force = 0;
@@ -451,8 +539,17 @@ void ap_main(void) {
 
     __sync_fetch_and_add(&cpus_booted, 1);
 
+    while (!smp_scheduler_ready)
+        __asm__ volatile ("pause" ::: "memory");
+
+    lapic_write(LAPIC_REG_TIMER_DCR, 0x03);
+    lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_PERIODIC | 32);
+    lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
+    lapic_write(LAPIC_REG_TPR, 0);
+    __asm__ volatile ("sti" ::: "memory");
+
     for (;;) {
-        __asm__ volatile ("cli; hlt");
+        __asm__ volatile ("hlt");
     }
 }
 
@@ -501,20 +598,10 @@ void smp_start_aps(void) {
             continue;
         }
 
-        cpus[i].gdt = (uint64_t *)kmalloc_aligned(64, 8);
-        cpus[i].tss = kmalloc_aligned(104, 8);
-        if (!cpus[i].gdt || !cpus[i].tss) {
-            printf("SMP: failed to allocate GDT/TSS for CPU %u\n", cpus[i].lapic_id);
-            if (cpus[i].gdt) kfree_aligned(cpus[i].gdt);
-            if (cpus[i].tss) kfree_aligned(cpus[i].tss);
-            kstack_free(cpus[i].kernel_stack);
-            cpus[i].gdt = NULL;
-            cpus[i].tss = NULL;
-            cpus[i].kernel_stack = NULL;
-            continue;
-        }
-
-        *tramp_stack = (uint64_t)cpus[i].kernel_stack + KSTACK_USABLE_SIZE;
+        cpus[i].gdt = (uint8_t *)cpus[i].kernel_stack + KSTACK_GDT_OFFSET;
+        cpus[i].tss = (uint8_t *)cpus[i].kernel_stack + KSTACK_TSS_OFFSET;
+        task_prepare_cpu_idle(&cpus[i]);
+        *tramp_stack = (uint64_t)cpus[i].kernel_stack + KSTACK_RUNTIME_SIZE;
         *tramp_cr3 = read_cr3();
         *tramp_flag = 0;
 
@@ -567,12 +654,20 @@ void lapic_timer_init(uint64_t freq_hz) {
     (void)freq_hz;
 }
 
+void smp_enable_scheduling(void) {
+    __sync_synchronize();
+    smp_scheduler_ready = 1;
+}
+
+int smp_scheduling_enabled(void) {
+    return smp_scheduler_ready != 0;
+}
+
 void smp_init(void) {
     uint64_t bsp_apic_id;
     int i;
     int found;
 
-    if (debug_boot_hw) printf("SMP: find_acpi_tables...\n");
     find_acpi_tables();
 
     if (cpu_count == 0) {
@@ -585,7 +680,6 @@ void smp_init(void) {
 
     printf("SMP: Found %d CPU(s)\n", cpu_count);
 
-    if (debug_boot_hw) printf("SMP: lapic_init...\n");
     lapic_init();
 
     bsp_apic_id = lapic_get_id();
@@ -596,11 +690,10 @@ void smp_init(void) {
             cpus[i].active = 1;
             found = 1;
         }
-        if (debug_boot_hw) printf("  CPU %d: LAPIC ID %u%s\n", i, cpus[i].lapic_id,
-               cpus[i].bsp ? " (BSP)" : "");
     }
 
-    if (!found && cpu_count < MAX_CPUS && smp_ensure_cpu_capacity(cpu_count + 1)) {
+    if (!found && cpu_count < MAX_CPUS &&
+        smp_ensure_cpu_capacity(cpu_count + 1)) {
         cpus[cpu_count].lapic_id = bsp_apic_id;
         cpus[cpu_count].processor_id = 0;
         cpus[cpu_count].bsp = 1;
@@ -608,9 +701,12 @@ void smp_init(void) {
         cpu_count++;
     }
 
-    if (debug_boot_hw) printf("SMP: ioapic_init...\n");
+    for (i = 0; i < cpu_count; i++)
+        cpus[i].self = &cpus[i];
+    smp_set_cpu_base(smp_this_cpu());
+    smp_gs_ready = 1;
+
     ioapic_init();
-    if (debug_boot_hw) printf("SMP: pic_disable...\n");
     pic_disable();
 
     ioapic_route_irq(0, 32, bsp_apic_id);
@@ -637,15 +733,15 @@ void smp_init(void) {
 
             expected_aps = cpu_count - 1;
             ap_timeout = 1000000;
-            while (cpus_booted < expected_aps && --ap_timeout > 0) {
+            while (cpus_booted < expected_aps && --ap_timeout > 0)
                 __asm__ volatile ("pause");
-            }
             if (cpus_booted < expected_aps) {
                 printf("SMP: Warning: only %d of %d APs finished init\n",
                        cpus_booted, expected_aps);
             }
         }
     }
-
+    __sync_synchronize();
+    smp_percpu_irq_ready = 1;
     printf("SMP: %d CPU(s) active\n", cpus_booted + 1);
 }

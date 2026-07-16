@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 struct vfs_node;
+struct cpu_info;
 
 #define TASK_INIT_FDS 3
 #define TASK_MAX_FDS 1024
@@ -70,7 +71,6 @@ typedef struct task {
     uint64_t cr3;
     int time_slice;
     int base_time_slice;
-    uint8_t *stack_base;
     uint64_t stack_size;
     uint8_t *kernel_stack_base;
     uint64_t kernel_stack_size;
@@ -87,6 +87,7 @@ typedef struct task {
     int file_map_count;
     int file_map_capacity;
     int console_id;
+    int running_cpu;
     uint64_t tls_base;
     uint64_t tls_limit;
     char *cwd;
@@ -103,6 +104,7 @@ typedef struct task {
     uint64_t sgid;
     uint64_t fsuid;
     uint64_t fsgid;
+    uint64_t creation_mask;
     uint64_t *groups;
     int ngroups;
 
@@ -133,6 +135,7 @@ typedef struct task {
     uint64_t exec_old_pml4;
     uint64_t *exec_old_pages;
     uint64_t exec_old_pages_count;
+    struct vfs_node *vfs_lookup_node;
 
     struct {
         struct { long tv_sec; long tv_usec; } it_interval;
@@ -168,7 +171,10 @@ typedef struct {
     uint64_t exec_nonreclaim_pages;
 } task_mem_stats_t;
 
-extern task_t* current_task;
+task_t *task_current(void);
+void task_set_current(task_t *task);
+void task_prepare_cpu_idle(struct cpu_info *cpu);
+#define current_task task_current()
 extern task_t* ready_queue_head;
 extern task_t* all_tasks_head;
 
@@ -239,6 +245,10 @@ int task_fd_ensure_capacity(task_t *task, int min_fd);
 void task_fd_reclaim_unused(task_t *task);
 void task_fd_free(task_t *task, int fd);
 task_fd_t *task_fd_get(task_t *task, int fd);
+void task_fd_position_share(task_fd_t *source, task_fd_t *copy);
+uint64_t task_fd_position_get(task_fd_t *fd);
+void task_fd_position_set(task_fd_t *fd, uint64_t value);
+void task_fd_position_add(task_fd_t *fd, uint64_t value);
 void task_fd_close_all(task_t *task);
 void task_fd_close_cloexec(task_t *task);
 int task_set_cwd(task_t *task, const char *cwd);

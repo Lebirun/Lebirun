@@ -93,7 +93,6 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
 
         t->waited = 1;
         reap_dead_tasks();
-        task_reclaim_exited_now();
 
         if (status_ptr) {
             addr = (uint64_t)status_ptr;
@@ -126,7 +125,6 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
 
             dead->waited = 1;
             reap_dead_tasks();
-            task_reclaim_exited_now();
 
             if (status_ptr) {
                 addr = (uint64_t)status_ptr;
@@ -205,7 +203,6 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
         
         t->waited = 1;
         reap_dead_tasks();
-        task_reclaim_exited_now();
 
         if (info_addr && info_addr < KERNEL_VMA && info_addr >= 0x1000) {
             info = (struct siginfo_k *)info_addr;

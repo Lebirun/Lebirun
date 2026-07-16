@@ -529,31 +529,88 @@ void vfs_open(vfs_node_t *node, uint64_t flags) {
     uintptr_t open_addr;
 
     if (!node) return;
-    node->ref_count++;
+    __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    vfs_lookup_hazard_clear(node);
     open_addr = (uintptr_t)node->open;
     if (node->open && open_addr >= KERNEL_VMA) node->open(node, flags);
 }
 
 void vfs_close(vfs_node_t *node) {
     int generic_owned;
+    int callback_owns_node;
     uintptr_t close_addr;
+    uint64_t refs;
+    int decremented;
 
     if (!node) return;
-    
-    if (node->ref_count > 0) {
-        node->ref_count--;
+    vfs_lookup_hazard_clear(node);
+
+    decremented = 0;
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    while (refs > 0) {
+        if (__atomic_compare_exchange_n(&node->ref_count, &refs, refs - 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            refs--;
+            decremented = 1;
+            break;
+        }
     }
-    
+    if (!decremented) return;
+
     generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
-    
+    callback_owns_node = (node->flags & VFS_EMBEDDED) != 0;
+
     close_addr = (uintptr_t)node->close;
     if (node->close && close_addr >= KERNEL_VMA) {
         node->close(node);
+        if (callback_owns_node) return;
     }
-    
-    if (generic_owned && node->ref_count == 0 && node->private_data == NULL) {
+
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    if (generic_owned && refs == 0 && node->private_data == NULL) {
         kfree(node);
     }
+}
+
+void vfs_lookup_hazard_set(vfs_node_t *node) {
+    task_t *task;
+
+    task = current_task;
+    if (!task) return;
+    __atomic_store_n(&task->vfs_lookup_node, node, __ATOMIC_RELEASE);
+}
+
+void vfs_lookup_hazard_clear(vfs_node_t *node) {
+    task_t *task;
+    void *expected;
+
+    task = current_task;
+    if (!task) return;
+    expected = node;
+    __atomic_compare_exchange_n(&task->vfs_lookup_node, &expected, NULL, 0,
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+int vfs_lookup_hazard_contains(vfs_node_t *node) {
+    task_t *task;
+    int found;
+    int limit;
+
+    if (!node) return 0;
+    found = 0;
+    limit = 4096;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && limit > 0) {
+        if (__atomic_load_n(&task->vfs_lookup_node, __ATOMIC_ACQUIRE) == node) {
+            found = 1;
+            break;
+        }
+        task = task->all_next;
+        limit--;
+    }
+    unlock_scheduler();
+    return found;
 }
 
 static dirent_t mount_child_dirent;
@@ -705,6 +762,33 @@ static dirent_t *vfs_readdir_mount_children(vfs_node_t *node, uint64_t mount_ind
     return NULL;
 }
 
+static int vfs_has_mount_children(vfs_node_t *node) {
+    char dir_path[VFS_MAX_PATH];
+    size_t dir_len;
+    const char *child_name;
+    int i;
+
+    if (node == vfs_root)
+        return 0;
+    if (vfs_node_to_path(node, dir_path, sizeof(dir_path)) < 0)
+        return 0;
+    dir_len = strlen(dir_path);
+    if (dir_len > 1 && dir_path[dir_len - 1] == '/')
+        dir_path[--dir_len] = '\0';
+    for (i = 0; i < mounts_capacity; i++) {
+        if (!mounts[i].in_use)
+            continue;
+        if (strncmp(mounts[i].path, dir_path, dir_len) != 0)
+            continue;
+        if (mounts[i].path[dir_len] != '/')
+            continue;
+        child_name = mounts[i].path + dir_len + 1;
+        if (*child_name != '\0' && strchr(child_name, '/') == NULL)
+            return 1;
+    }
+    return 0;
+}
+
 dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint64_t fs_count;
     dirent_t *result;
@@ -720,6 +804,8 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
         result = node->readdir(node, index);
         if (result)
             return result;
+        if (!vfs_has_mount_children(node))
+            return NULL;
         for (fs_count = 0; fs_count < index; fs_count++) {
             if (!node->readdir(node, fs_count))
                 break;
@@ -728,6 +814,18 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
     }
     
     return vfs_readdir_mount_children(node, index);
+}
+
+int vfs_readdir_copy(vfs_node_t *node, uint64_t index, dirent_t *entry) {
+    dirent_t *result;
+
+    if (!node || !entry) return -1;
+    mutex_lock(&vfs_lock);
+    result = vfs_readdir(node, index);
+    if (result)
+        memcpy(entry, result, sizeof(dirent_t));
+    mutex_unlock(&vfs_lock);
+    return result ? 0 : -1;
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
@@ -1090,10 +1188,12 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
             if (node_is_transient) vfs_release(node);
             return NULL;
         }
+        vfs_lookup_hazard_set(next);
 
         if ((next->flags & VFS_MOUNTPOINT) && next->ptr) {
             if (next->flags & VFS_DYNAMIC) vfs_release(next);
             next = next->ptr;
+            vfs_lookup_hazard_set(next);
         }
 
         if (VFS_GET_TYPE(next->flags) == VFS_SYMLINK && (has_more || follow_final)) {
@@ -1155,14 +1255,20 @@ vfs_node_t *vfs_lookup(const char *path) {
 
 void vfs_release(vfs_node_t *node) {
     int generic_owned;
+    int callback_owns_node;
     uintptr_t close_addr;
+    uint64_t refs;
 
     if (!node) return;
-    if (node->ref_count == 0) {
+    vfs_lookup_hazard_clear(node);
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    if (refs == 0) {
         generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
+        callback_owns_node = (node->flags & VFS_EMBEDDED) != 0;
         close_addr = (uintptr_t)node->close;
         if (node->close && close_addr >= KERNEL_VMA) {
             node->close(node);
+            if (callback_owns_node) return;
         }
         if (generic_owned && node->private_data == NULL) {
             kfree(node);
@@ -1448,19 +1554,14 @@ int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags) {
 
 int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index) {
     vfs_node_t *node;
-    dirent_t *result;
 
     if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table[fd].in_use || !entry) return -1;
     
     node = fd_table[fd].node;
     if (!node) return -1;
-    
-    result = vfs_readdir(node, index);
-    if (!result) return -1;
-    
-    memcpy(entry, result, sizeof(dirent_t));
-    return 0;
+
+    return vfs_readdir_copy(node, index, entry);
 }
 
 vfs_node_t *vfs_get_root(void) {

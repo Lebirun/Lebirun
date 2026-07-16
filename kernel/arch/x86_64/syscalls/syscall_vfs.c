@@ -8,7 +8,8 @@ extern int is_socket_fd(int fd);
 extern int socket_close_fd(int fd);
 
 #define VFS_RW_STACK_BUF 512
-#define VFS_RW_HEAP_LIMIT 16384
+#define VFS_RW_HEAP_LIMIT 4096
+#define VFS_BLOCK_IO_CHUNK 65536
 
 static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
@@ -63,13 +64,26 @@ static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
 
 static int vfs_user_string_mapped(const char *s, size_t max) {
     uint64_t addr;
+    uint64_t current;
+    size_t chunk;
+    size_t page_remaining;
     size_t i;
+    size_t j;
 
     if (!s || max == 0) return 0;
     addr = (uint64_t)(uintptr_t)s;
-    for (i = 0; i < max; i++) {
-        if (!vfs_user_range_mapped(addr + i, 1)) return 0;
-        if (s[i] == '\0') return 1;
+    i = 0;
+    while (i < max) {
+        current = addr + i;
+        if (current < addr) return 0;
+        page_remaining = 0x1000 - (size_t)(current & 0xFFF);
+        chunk = max - i;
+        if (chunk > page_remaining) chunk = page_remaining;
+        if (!vfs_user_range_mapped(current, chunk)) return 0;
+        for (j = 0; j < chunk; j++) {
+            if (s[i + j] == '\0') return 1;
+        }
+        i += chunk;
     }
     return 0;
 }
@@ -258,7 +272,7 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
 
     if (!node && (flags & VFS_O_CREAT)) {
         create_mode = (uint64_t)(mode & 0777);
-        if (create_mode == 0) create_mode = 0644;
+        create_mode &= ~current_task->creation_mask;
         if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
 
         len = 0;
@@ -406,6 +420,26 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
+    tfd = &current_task->fds[fd];
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
+    node = (vfs_node_t *)tfd->node;
+    if (VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) {
+        total = 0;
+        remaining = (uint64_t)len;
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > VFS_BLOCK_IO_CHUNK) chunk = VFS_BLOCK_IO_CHUNK;
+            bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk,
+                             (uint8_t *)(buf_addr + total));
+            if (bytes > chunk) bytes = chunk;
+            if (bytes == 0) break;
+            total += bytes;
+            remaining -= bytes;
+            if (bytes < chunk) break;
+        }
+        task_fd_position_add(tfd, total);
+        return (int)total;
+    }
     work_size = (uint64_t)len;
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;
@@ -416,19 +450,12 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
         if (!kbuf) return -ENOMEM;
         heap_buf = 1;
     }
-
-    tfd = &current_task->fds[fd];
-    if (tfd->type != FD_TYPE_FILE || !tfd->node) {
-        if (heap_buf) kfree(kbuf);
-        return -EBADF;
-    }
-    node = (vfs_node_t *)tfd->node;
     total = 0;
     remaining = (uint64_t)len;
     while (remaining > 0) {
         chunk = remaining;
         if (chunk > work_size) chunk = work_size;
-        bytes = vfs_read(node, tfd->offset + total, chunk, kbuf);
+        bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
         if (bytes > chunk) bytes = chunk;
         if (bytes == 0) break;
         memcpy((void *)(buf_addr + total), kbuf, bytes);
@@ -436,7 +463,7 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
         remaining -= bytes;
         if (bytes < chunk) break;
     }
-    tfd->offset += total;
+    task_fd_position_add(tfd, total);
     if (heap_buf) kfree(kbuf);
     return (int)total;
 }
@@ -449,7 +476,6 @@ int sys_vfs_readdir(registers_t *regs) {
     int i;
     task_fd_t *tfd;
     vfs_node_t *node;
-    dirent_t *result;
     dirent_t local_copy;
 
     fd = (int)regs->rbx;
@@ -469,16 +495,9 @@ int sys_vfs_readdir(registers_t *regs) {
     node = (vfs_node_t *)tfd->node;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
 
-    result = vfs_readdir(node, index);
-    if (!result) {
+    if (vfs_readdir_copy(node, index, &local_copy) != 0) {
         return -ENOENT;
     }
-
-    for (i = 0; i < VFS_MAX_NAME; i++) {
-        local_copy.name[i] = result->name[i];
-    }
-    local_copy.inode = result->inode;
-    local_copy.type = result->type;
 
     if (name_addr) {
         i = 0;
@@ -527,7 +546,14 @@ static int sys_vfs_mounts(int unused1, const char *unused2, int unused3) {
 
 static int sys_vfs_write(int fd, const char *buf, int len) {
     uint64_t buf_addr;
+    uint64_t work_size;
+    uint64_t remaining;
+    uint64_t total;
+    uint64_t chunk;
     uint64_t bytes;
+    uint8_t stack_buf[VFS_RW_STACK_BUF];
+    uint8_t *kbuf;
+    int heap_buf;
     task_fd_t *tfd;
     vfs_node_t *node;
 
@@ -543,10 +569,49 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
-    bytes = vfs_write(node, tfd->offset, (uint64_t)len, (uint8_t *)buf_addr);
-    if (bytes > (uint64_t)len) bytes = (uint64_t)len;
-    tfd->offset += bytes;
-    return (int)bytes;
+    if (VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) {
+        total = 0;
+        remaining = (uint64_t)len;
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > VFS_BLOCK_IO_CHUNK) chunk = VFS_BLOCK_IO_CHUNK;
+            bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk,
+                              (uint8_t *)(buf_addr + total));
+            if (bytes > chunk) bytes = chunk;
+            if (bytes == 0) break;
+            total += bytes;
+            remaining -= bytes;
+            if (bytes < chunk) break;
+        }
+        task_fd_position_add(tfd, total);
+        return (int)total;
+    }
+    work_size = (uint64_t)len;
+    if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
+    heap_buf = 0;
+    if (work_size <= VFS_RW_STACK_BUF) {
+        kbuf = stack_buf;
+    } else {
+        kbuf = (uint8_t *)kmalloc(work_size);
+        if (!kbuf) return -ENOMEM;
+        heap_buf = 1;
+    }
+    total = 0;
+    remaining = (uint64_t)len;
+    while (remaining > 0) {
+        chunk = remaining;
+        if (chunk > work_size) chunk = work_size;
+        memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+        bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
+        if (bytes > chunk) bytes = chunk;
+        if (bytes == 0) break;
+        total += bytes;
+        remaining -= bytes;
+        if (bytes < chunk) break;
+    }
+    task_fd_position_add(tfd, total);
+    if (heap_buf) kfree(kbuf);
+    return (int)total;
 }
 
 static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
@@ -567,6 +632,7 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
     path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
     if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
+    if (current_task) perms &= ~current_task->creation_mask;
 
     ret = split_parent_child_path(path, parent_path, sizeof(parent_path), filename, sizeof(filename));
     if (ret < 0) return ret;
@@ -598,6 +664,7 @@ static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
     path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
     if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
+    if (current_task) perms &= ~current_task->creation_mask;
 
     ret = split_parent_child_path(path, parent_path, sizeof(parent_path), dirname, sizeof(dirname));
     if (ret < 0) return ret;

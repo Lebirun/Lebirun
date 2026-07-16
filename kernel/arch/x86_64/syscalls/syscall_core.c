@@ -2,6 +2,7 @@
 #include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/cmdline.h>
+#include <lebirun/panic.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -379,6 +380,8 @@ static int sys_exit(int code, const char *unused1, int unused2) {
 
 static int syscall_core_console_write_user(const char *buf, int len) {
     uint64_t buf_addr;
+    uint64_t active_cr3;
+    uint64_t expected_cr3;
     uint64_t remaining;
     uint64_t total;
     uint64_t chunk;
@@ -390,6 +393,13 @@ static int syscall_core_console_write_user(const char *buf, int len) {
     framebuffer_t *fb;
 
     buf_addr = (uint64_t)buf;
+    active_cr3 = read_cr3() & ~0xFFFULL;
+    expected_cr3 = current_task ? current_task->pml4_phys & ~0xFFFULL : 0;
+    if (expected_cr3 && active_cr3 != expected_cr3) {
+        kernel_panic_custom("SYSCALL ADDRESS SPACE",
+                            "pid=%d active=0x%lX expected=0x%lX",
+                            current_task->pid, active_cr3, expected_cr3);
+    }
     remaining = (uint64_t)len;
     total = 0;
     con_id = current_task ? current_task->console_id : 0;
@@ -540,7 +550,7 @@ static int sys_write(int fd, const char *buf, int len) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
                 memcpy(kbuf, (const void *)(buf_addr + total), chunk);
-                bytes = vfs_write(node, tfd->offset + total, chunk, kbuf);
+                bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if (bytes == 0) {
                     if (heap_buf) kfree(kbuf);
                     if (total > 0) return (int)total;
@@ -550,7 +560,7 @@ static int sys_write(int fd, const char *buf, int len) {
                 remaining -= bytes;
                 if (bytes < chunk) break;
             }
-            tfd->offset += total;
+            task_fd_position_add(tfd, total);
             if (heap_buf) kfree(kbuf);
             return (int)total;
         }
@@ -661,7 +671,7 @@ static int sys_read(int fd, char *buf, int len) {
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
-                bytes = vfs_read(node, tfd->offset + total, chunk, kbuf);
+                bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if (bytes > chunk) bytes = chunk;
                 if (bytes == 0) break;
                 memcpy((void *)(buf_addr + total), kbuf, bytes);
@@ -669,7 +679,7 @@ static int sys_read(int fd, char *buf, int len) {
                 remaining -= bytes;
                 if (bytes < chunk) break;
             }
-            tfd->offset += total;
+            task_fd_position_add(tfd, total);
             if (heap_buf) kfree(kbuf);
             return (int)total;
         }
@@ -1192,12 +1202,12 @@ static int sys_lseek(int fd, const char *offset_ptr, int whence) {
     vfs_node_t *node = (vfs_node_t *)tfd->node;
     int32_t new_off;
     if (whence == VFS_SEEK_SET) new_off = offset;
-    else if (whence == VFS_SEEK_CUR) new_off = (int32_t)tfd->offset + offset;
+    else if (whence == VFS_SEEK_CUR) new_off = (int32_t)task_fd_position_get(tfd) + offset;
     else if (whence == VFS_SEEK_END) new_off = (int32_t)node->length + offset;
     else return -EINVAL;
     if (new_off < 0) return -EINVAL;
-    tfd->offset = (uint64_t)new_off;
-    return (int)tfd->offset;
+    task_fd_position_set(tfd, (uint64_t)new_off);
+    return (int)task_fd_position_get(tfd);
 }
 
 void syscalls_core_init(void) {

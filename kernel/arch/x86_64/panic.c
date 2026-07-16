@@ -6,11 +6,16 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/task.h>
 #include <lebirun/framebuffer.h>
+#include <lebirun/smp.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 
 static volatile int in_panic = 0;
+
+int kernel_panic_active(void) {
+    return in_panic != 0;
+}
 
 static void safe_panic_print(const char *s) {
     while (*s) {
@@ -169,19 +174,22 @@ static const char* exception_messages[] = {
 };
 
 static void print_task_info(void) {
-    if (!current_task) return;
+    task_t *task;
+
+    task = smp_current_task_safe();
+    if (!task) return;
 
     panic_print("\n--- TASK INFO ---\n");
     panic_print("  PID=");
-    panic_print_dec(current_task->pid);
+    panic_print_dec(task->pid);
     panic_print("  Name=");
-    panic_print(current_task->name[0] ? current_task->name : "(none)");
+    panic_print(task->name[0] ? task->name : "(none)");
     panic_print("\n  Console=");
-    panic_print_dec(current_task->console_id);
+    panic_print_dec(task->console_id);
     panic_print("  is_user=");
-    panic_print_dec(current_task->is_user);
+    panic_print_dec(task->is_user);
     panic_print("  state=");
-    panic_print_dec(current_task->state);
+    panic_print_dec(task->state);
     panic_print("\n");
 }
 
@@ -294,25 +302,11 @@ void kernel_panic(const char *reason, registers_t *regs) {
 
     asm volatile("cli");
 
-    if (in_panic) {
-        panic_print("\n!!! DOUBLE PANIC !!!");
-        if (regs) {
-            panic_print("\nINT=0x");
-            panic_print_hex(regs->int_no);
-            panic_print(" EIP=0x");
-            panic_print_hex(regs->rip);
-            panic_print(" ERR=0x");
-            panic_print_hex(regs->err_code);
-            if (regs->int_no == 14) {
-                __asm__ ("mov %%cr2, %0" : "=r" (fault_addr));
-                panic_print(" CR2=0x");
-                panic_print_hex(fault_addr);
-            }
-        }
-        panic_print("\nHalted.\n");
+    if (__sync_lock_test_and_set(&in_panic, 1)) {
         for (;;) __asm__ ("cli; hlt");
     }
-    in_panic = 1;
+
+    smp_stop_other_cpus();
 
     panic_print("\n!!! KERNEL PANIC !!!\n");
     panic_print_wrapped("Reason: ", reason);

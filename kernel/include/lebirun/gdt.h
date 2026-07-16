@@ -3,8 +3,11 @@
 
 #include <stdint.h>
 
+#define GDT_CPU_BYTES 80
+#define TSS_CPU_BYTES 104
+
 void gdt_init(void);
-void gdt_init_ap(void *gdt_buf, void *tss_buf);
+void gdt_init_ap(void *gdt_buf, void *tss_buf, void *kernel_stack);
 void tss_set_rsp0(uint64_t rsp0);
 void gdt_set_tls(int entry, uint64_t base, uint64_t limit);
 uint16_t gdt_get_tls_selector(int entry);

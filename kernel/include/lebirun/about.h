@@ -2,9 +2,9 @@
 #define ABOUT_H
 
 #include <stdint.h>
+#include <lebirun/version.h>
 
 #define OS_NAME "Lebirun"
-#define OS_VERSION "0.1.0"
 #define KERNEL_BUILD_DATE __DATE__
 #define KERNEL_BUILD_TIME __TIME__
 #ifndef KERNEL_BUILD_TZ

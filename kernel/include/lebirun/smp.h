@@ -2,6 +2,7 @@
 #define KERNEL_SMP_H
 
 #include <stdint.h>
+#include <lebirun/registers.h>
 
 #define MAX_CPUS 16
 
@@ -34,7 +35,8 @@
 
 typedef struct task task_t;
 
-typedef struct {
+typedef struct cpu_info {
+    struct cpu_info *self;
     uint64_t lapic_id;
     uint64_t processor_id;
     int active;
@@ -42,7 +44,9 @@ typedef struct {
     void *gdt;
     void *tss;
     void *kernel_stack;
-    task_t *current_task;
+    task_t *running_task;
+    registers_t *idle_frame;
+    uint64_t irq_cr3;
     int scheduler_lock_depth;
     uint64_t sched_saved_rflags;
     volatile int schedule_force;
@@ -53,6 +57,7 @@ extern volatile uint32_t *ioapic_base;
 extern cpu_info_t *cpus;
 extern int cpu_count;
 extern volatile int cpus_booted;
+extern volatile int smp_percpu_irq_ready;
 
 void smp_init(void);
 void lapic_init(void);
@@ -68,6 +73,12 @@ void lapic_timer_init(uint64_t freq_hz);
 cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);
 void smp_tlb_flush_all(void);
+int smp_tlb_flush_all_sync(void);
+void smp_tlb_flush_ack(void);
+void smp_enable_scheduling(void);
+int smp_scheduling_enabled(void);
+task_t *smp_current_task_safe(void);
+void smp_stop_other_cpus(void);
 
 #define IPI_TLB_FLUSH_VECTOR 49
 

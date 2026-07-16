@@ -3,6 +3,7 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/debug.h>
+#include <lebirun/mutex.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -21,6 +22,7 @@ typedef struct {
 static ov_node_cache_entry_t *ov_node_cache;
 static uint64_t ov_node_cache_count = 0;
 static uint64_t ov_node_cache_capacity = 0;
+static mutex_t overlay_node_lock;
 
 static void overlay_try_free_node(overlay_node_t *onode);
 static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
@@ -84,6 +86,7 @@ static void overlay_try_free_node(overlay_node_t *onode) {
     if (onode->refcount > 0) return;
     if (onode->vfs.ref_count > 0) return;
     if (onode->open_count > 0) return;
+    if (vfs_lookup_hazard_contains(&onode->vfs)) return;
     overlay_release_parent_pin(onode);
     overlay_drop_node_refs(onode);
     onode->vfs.private_data = NULL;
@@ -139,6 +142,7 @@ void overlay_flush_cache(void) {
     uint64_t i;
     overlay_node_t *onode;
 
+    mutex_lock(&overlay_node_lock);
     for (i = 0; i < ov_node_cache_count; i++) {
         onode = ov_node_cache[i].onode;
         if (!onode) continue;
@@ -151,15 +155,18 @@ void overlay_flush_cache(void) {
         ov_node_cache = NULL;
         ov_node_cache_capacity = 0;
     }
+    mutex_unlock(&overlay_node_lock);
 }
 
 void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
+    mutex_lock(&overlay_node_lock);
     if (nodes) *nodes = ov_node_cache_count;
     if (capacity) *capacity = ov_node_cache_capacity;
     if (bytes) {
         *bytes = ov_node_cache_capacity * sizeof(ov_node_cache_entry_t) +
                  ov_node_cache_count * sizeof(overlay_node_t);
     }
+    mutex_unlock(&overlay_node_lock);
 }
 
 static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
@@ -206,14 +213,11 @@ static void ov_cache_remove(overlay_node_t *onode) {
     }
 }
 
-static void ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
+static int ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
     size_t nlen;
-    overlay_node_t *victim;
-
-    victim = NULL;
 
     if (ov_cache_ensure_space() < 0)
-        return;
+        return 0;
 
     if (ov_node_cache_count < ov_node_cache_capacity) {
         onode->refcount++;
@@ -224,20 +228,10 @@ static void ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t
         ov_node_cache[ov_node_cache_count].name[nlen] = '\0';
         ov_node_cache[ov_node_cache_count].onode = onode;
         ov_node_cache_count++;
-    } else {
-        victim = ov_node_cache[0].onode;
-        memmove(&ov_node_cache[0], &ov_node_cache[1],
-                (ov_node_cache_capacity - 1) * sizeof(ov_node_cache[0]));
-        onode->refcount++;
-        ov_node_cache[ov_node_cache_capacity - 1].parent = parent;
-        nlen = strlen(name);
-        if (nlen >= 64) nlen = 63;
-        memcpy(ov_node_cache[ov_node_cache_capacity - 1].name, name, nlen);
-        ov_node_cache[ov_node_cache_capacity - 1].name[nlen] = '\0';
-        ov_node_cache[ov_node_cache_capacity - 1].onode = onode;
-        victim->refcount--;
-        overlay_try_free_node(victim);
+        return 1;
     }
+
+    return 0;
 }
 
 static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
@@ -303,8 +297,8 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
     onode->lower_node = lower;
     onode->upper_node = upper;
 
-    if (lower) lower->ref_count++;
-    if (upper) upper->ref_count++;
+    if (lower) __atomic_add_fetch(&lower->ref_count, 1, __ATOMIC_ACQ_REL);
+    if (upper) __atomic_add_fetch(&upper->ref_count, 1, __ATOMIC_ACQ_REL);
     
     effective = upper ? upper : lower;
     if (!effective) {
@@ -445,15 +439,20 @@ static void overlay_vfs_open(vfs_node_t *node, uint64_t flags) {
     vfs_node_t *effective;
 
     if (!node) return;
-    
+
+    mutex_lock(&overlay_node_lock);
     onode = (overlay_node_t *)node->private_data;
-    if (!onode) return;
-    
+    if (!onode) {
+        mutex_unlock(&overlay_node_lock);
+        return;
+    }
+
     onode->open_count++;
     onode->refcount++;
-    
+
     effective = onode->upper_node ? onode->upper_node : onode->lower_node;
     if (effective) vfs_open(effective, flags);
+    mutex_unlock(&overlay_node_lock);
 }
 
 static void overlay_vfs_close(vfs_node_t *node) {
@@ -461,11 +460,18 @@ static void overlay_vfs_close(vfs_node_t *node) {
     vfs_node_t *effective;
 
     if (!node) return;
-    
-    onode = (overlay_node_t *)node->private_data;
-    if (!onode) return;
 
-    if (node == overlay_ctx.merged_root) return;
+    mutex_lock(&overlay_node_lock);
+    onode = (overlay_node_t *)node->private_data;
+    if (!onode) {
+        mutex_unlock(&overlay_node_lock);
+        return;
+    }
+
+    if (node == overlay_ctx.merged_root) {
+        mutex_unlock(&overlay_node_lock);
+        return;
+    }
 
     if (onode->open_count > 0) {
         effective = onode->upper_node ? onode->upper_node : onode->lower_node;
@@ -476,10 +482,14 @@ static void overlay_vfs_close(vfs_node_t *node) {
         }
     }
 
-    if (onode->refcount > 0) return;
+    if (onode->refcount > 0) {
+        mutex_unlock(&overlay_node_lock);
+        return;
+    }
 
     ov_cache_remove(onode);
     overlay_try_free_node(onode);
+    mutex_unlock(&overlay_node_lock);
 }
 
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
@@ -709,43 +719,67 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     vfs_node_t *result;
 
     if (!node || !name) return NULL;
-    
+
+    mutex_lock(&overlay_node_lock);
     onode = (overlay_node_t *)node->private_data;
-    if (!onode) return NULL;
+    if (!onode) {
+        mutex_unlock(&overlay_node_lock);
+        return NULL;
+    }
 
     cached = ov_cache_lookup(node, name);
-    if (cached) return &cached->vfs;
-    
+    if (cached) {
+        result = &cached->vfs;
+        vfs_lookup_hazard_set(result);
+        mutex_unlock(&overlay_node_lock);
+        return result;
+    }
+
     upper_dir = onode->upper_node;
     lower_dir = onode->lower_node;
     upper_result = NULL;
     lower_result = NULL;
-    
+
     if (upper_dir && overlay_check_whiteout(upper_dir, name)) {
+        mutex_unlock(&overlay_node_lock);
         return NULL;
     }
-    
+
     if (upper_dir) {
         upper_result = vfs_finddir(upper_dir, name);
+        if (upper_result)
+            vfs_open(upper_result, 0);
     }
-    
+
     if (lower_dir) {
         lower_result = vfs_finddir(lower_dir, name);
+        if (lower_result)
+            vfs_open(lower_result, 0);
     }
-    
+
     if (!upper_result && !lower_result) {
+        mutex_unlock(&overlay_node_lock);
         return NULL;
     }
 
     result = overlay_wrap_node(lower_result, upper_result, name);
     if (result) {
+        if (upper_result)
+            vfs_close(upper_result);
+        if (lower_result)
+            vfs_close(lower_result);
         overlay_set_parent(result, node);
-        ov_cache_insert(node, name, (overlay_node_t *)result->private_data);
+        vfs_lookup_hazard_set(result);
+        if (!ov_cache_insert(node, name,
+                             (overlay_node_t *)result->private_data)) {
+            result->flags |= VFS_DYNAMIC | VFS_EMBEDDED;
+        }
     } else {
-        if (upper_result) vfs_release(upper_result);
-        if (lower_result) vfs_release(lower_result);
+        if (upper_result) vfs_close(upper_result);
+        if (lower_result) vfs_close(lower_result);
     }
-    
+
+    mutex_unlock(&overlay_node_lock);
     return result;
 }
 
@@ -873,6 +907,7 @@ static vfs_node_t *overlay_vfs_do_mount(const char *device, const char *mountpoi
 }
 
 int overlayfs_init(void) {
+    mutex_init(&overlay_node_lock);
     memset(&overlay_ctx, 0, sizeof(overlay_ctx));
     overlay_initialized = 0;
     return 0;

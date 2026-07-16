@@ -1,6 +1,19 @@
 #!/bin/sh
 set -e
 
+if [ ! -r ./VERSION ]; then
+  printf 'Error: VERSION is missing\n' >&2
+  exit 1
+fi
+
+OS_VERSION=$(sed -n '1{s/[[:space:]]//g;p;}' ./VERSION)
+case "$OS_VERSION" in
+  ""|*[!0-9A-Za-z._+-]*)
+    printf 'Error: invalid VERSION value: %s\n' "$OS_VERSION" >&2
+    exit 1
+    ;;
+esac
+
 VERBOSE="${VERBOSE:-0}"
 for arg in "$@"; do
   case "$arg" in
@@ -269,9 +282,8 @@ if [ -d "root" ]; then
     if [ -z "$_ver" ]; then _ver="$_fallback"; fi
     printf '%s\n' "$_ver"
   }
-  _os_ver=$(get_define_version kernel/include/lebirun/about.h OS_VERSION 0.1.0)
-  _lebutils_ver=$(get_define_version userprog/lebutils/src/about.h LEBUTILS_VERSION "$_os_ver")
-  _lebinit_ver=$(get_define_version userprog/LebInit/src/about.h LEBINIT_VERSION "$_os_ver")
+  _lebutils_ver=$(get_define_version userprog/lebutils/src/about.h LEBUTILS_VERSION "$OS_VERSION")
+  _lebinit_ver=$(get_define_version userprog/LebInit/src/about.h LEBINIT_VERSION "$OS_VERSION")
   mkdir -p root/etc/lebpkg/installed
   write_pkg_db() {
     _pkg="$1"
@@ -315,7 +327,7 @@ if [ -d "root" ]; then
       find root/etc/lebinit/services -type f 2>/dev/null
     } | sed 's#^root##' | sort
   )
-  write_pkg_db lebirun-base "$_os_ver" "Lebirun base system, bootloader, kernel and headers" "" $_base_files
+  write_pkg_db lebirun-base "$OS_VERSION" "Lebirun base system, bootloader, kernel and headers" "" $_base_files
   write_pkg_db lebutils "$_lebutils_ver" "Lebirun core command utilities" "lebirun-base" $_lebutils_files
   write_pkg_db lebinit "$_lebinit_ver" "Lebirun init system" "lebirun-base" $_lebinit_files
 fi

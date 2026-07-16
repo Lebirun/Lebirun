@@ -2,6 +2,7 @@
 
 .extern interrupt_handler
 .extern kernel_irq_cr3
+.extern smp_percpu_irq_ready
 
 .macro isr_noerr num
     .global isr\num
@@ -75,6 +76,7 @@ isr_noerr 49
 
 .global isr128
 isr128:
+    cli
     pushq $0
     pushq $128
     jmp isr_common_stub
@@ -88,6 +90,10 @@ isr_common_stub:
     movq %cr3, %rax
     pushq %rax
     movq kernel_irq_cr3(%rip), %rcx
+    cmpl $0, smp_percpu_irq_ready(%rip)
+    je 2f
+    movq %gs:72, %rcx
+2:
     testq %rcx, %rcx
     jz 1f
     cmpq %rcx, %rax

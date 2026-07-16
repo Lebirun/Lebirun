@@ -656,6 +656,7 @@ void kernel_main(void) {
 #endif
 
     if (debug_boot_hw) terminal_writestring("BOOT: About to execute STI...\n");
+    smp_enable_scheduling();
     asm volatile ("sti");
     if (debug_boot_hw) terminal_writestring("BOOT: STI completed! Interrupts enabled.\n");
     if (vring_boot_enabled) {
@@ -696,7 +697,7 @@ void kernel_main(void) {
     }
     if (!init_task) {
         printf("BOOT: init not found, retrying in 5 seconds...\n");
-        sleep_ticks(5000);
+        sleep_ms(5000);
         init_task = launch_user_path("/init", 0);
         if (!init_task) init_task = launch_user_path("/sbin/init", 0);
         if (!init_task) init_task = launch_user_path("/bin/init", 0);

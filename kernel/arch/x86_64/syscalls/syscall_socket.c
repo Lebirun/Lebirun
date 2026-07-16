@@ -210,8 +210,34 @@ found:
     return i;
 }
 
+static void socket_release_pending_fd(task_fd_t *fd) {
+    pipe_t *pipe;
+
+    if (!fd || !fd->in_use) return;
+    if (fd->type == FD_TYPE_FILE && fd->node) {
+        vfs_close((vfs_node_t *)fd->node);
+    } else if ((fd->type == FD_TYPE_PIPE_R || fd->type == FD_TYPE_PIPE_W) && fd->private_data) {
+        pipe = (pipe_t *)fd->private_data;
+        if (fd->type == FD_TYPE_PIPE_R) pipe->readers--;
+        else pipe->writers--;
+        waitq_wake_all(&pipe->read_waitq);
+        waitq_wake_all(&pipe->write_waitq);
+        if (pipe->readers <= 0 && pipe->writers <= 0) {
+            if (pipe->buffer) kfree(pipe->buffer);
+            kfree(pipe);
+        }
+    }
+    memset(fd, 0, sizeof(task_fd_t));
+}
+
 static void free_socket(int idx) {
+    int i;
+
     if (idx >= 0 && idx < socket_capacity) {
+        for (i = 0; i < sockets[idx].pending_fd_count; i++) {
+            socket_release_pending_fd(&sockets[idx].pending_fds[i]);
+        }
+        sockets[idx].pending_fd_count = 0;
         if (sockets[idx].tcp) {
             tcp_disconnect(sockets[idx].tcp, 1000);
             tcp_socket_close(sockets[idx].tcp);
@@ -972,6 +998,10 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                 src_tfd = &current_task->fds[src_fd];
                 if (!src_tfd->in_use) return -EBADF;
                 memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd, sizeof(task_fd_t));
+                if (src_tfd->type == FD_TYPE_FILE && src_tfd->node) {
+                    vfs_open((vfs_node_t *)src_tfd->node, 0);
+                    task_fd_position_share(src_tfd, &peer->pending_fds[peer->pending_fd_count]);
+                }
                 if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
                     pipe_t *p = (pipe_t *)src_tfd->private_data;
                     if (src_tfd->type == FD_TYPE_PIPE_R) p->readers++;
@@ -1052,11 +1082,13 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
                 newfd = task_fd_alloc(current_task);
                 if (newfd < 0) {
                     out_fds[i] = -1;
+                    socket_release_pending_fd(&sock->pending_fds[i]);
                     continue;
                 }
                 memcpy(&current_task->fds[newfd], &sock->pending_fds[i], sizeof(task_fd_t));
                 current_task->fds[newfd].in_use = 1;
                 current_task->fds[newfd].ref_count = 1;
+                memset(&sock->pending_fds[i], 0, sizeof(task_fd_t));
                 out_fds[i] = newfd;
             }
             msg->msg_controllen = needed;

@@ -87,12 +87,6 @@ static uint64_t vring_selftest_pml4;
 static uint8_t *vring_selftest_buf;
 static task_t *vring_selftest_task_ref;
 
-#define SERIAL_RING_SIZE 4096
-static char *serial_ring;
-static uint64_t serial_ring_capacity = 0;
-static volatile uint64_t serial_head = 0;
-static volatile uint64_t serial_tail = 0;
-static volatile uint64_t serial_count = 0;
 static spinlock_t serial_lock = { .locked = 0 };
 static spinlock_t klog_persist_lock = { .locked = 0 };
 
@@ -123,84 +117,27 @@ static inline bool serial_thr_empty(void) {
     return (inb(0x3FD) & 0x20) != 0;
 }
 
-static int serial_reserve_nolock(uint64_t extra) {
-    uint64_t new_capacity;
-    uint64_t i;
-    char *new_ring;
-    char *old_ring;
-    uint64_t old_capacity;
-
-    if (extra > SERIAL_RING_SIZE) return 0;
-    if (serial_count + extra <= serial_ring_capacity) return 1;
-    new_capacity = serial_ring_capacity;
-    if (new_capacity == 0) new_capacity = extra;
-    while (new_capacity < SERIAL_RING_SIZE && serial_count + extra > new_capacity) {
-        new_capacity *= 2;
-    }
-    if (new_capacity > SERIAL_RING_SIZE) new_capacity = SERIAL_RING_SIZE;
-    if (serial_count + extra > new_capacity) return 0;
-    new_ring = (char *)kmalloc(new_capacity);
-    if (!new_ring) return 0;
-    old_ring = serial_ring;
-    old_capacity = serial_ring_capacity;
-    for (i = 0; i < serial_count; i++) {
-        new_ring[i] = old_ring[(serial_head + i) % old_capacity];
-    }
-    if (old_ring) kfree(old_ring);
-    serial_ring = new_ring;
-    serial_ring_capacity = new_capacity;
-    serial_head = 0;
-    serial_tail = serial_count % serial_ring_capacity;
-    return 1;
-}
-
-static void serial_enqueue_nolock(const char *buf, size_t len) {
+static void serial_write_nolock(const char *buf, size_t len) {
     size_t i;
     uint8_t ch;
 
     for (i = 0; i < len; i++) {
         ch = (uint8_t)buf[i];
         if (ch == '\n') {
-            if (!serial_reserve_nolock(1)) {
-                while (!serial_thr_empty()) cpu_relax();
-                outb(0x3F8, '\r');
-            } else {
-                serial_ring[serial_tail] = '\r';
-                serial_tail = (serial_tail + 1) % serial_ring_capacity;
-                serial_count++;
-            }
-        }
-        if (!serial_reserve_nolock(1)) {
             while (!serial_thr_empty()) cpu_relax();
-            outb(0x3F8, ch);
-            continue;
+            outb(0x3F8, '\r');
         }
-        serial_ring[serial_tail] = ch;
-        serial_tail = (serial_tail + 1) % serial_ring_capacity;
-        serial_count++;
+        while (!serial_thr_empty()) cpu_relax();
+        outb(0x3F8, ch);
     }
 }
 
 static void serial_write_async(const char *buf, size_t len) {
     uint64_t flags;
-    size_t i;
-    uint8_t ch;
 
-    if (!vring_initialized && !serial_ring) {
-        for (i = 0; i < len; i++) {
-            ch = (uint8_t)buf[i];
-            if (ch == '\n') {
-                while (!serial_thr_empty()) cpu_relax();
-                outb(0x3F8, '\r');
-            }
-            while (!serial_thr_empty()) cpu_relax();
-            outb(0x3F8, ch);
-        }
-        return;
-    }
     flags = klog_irqsave();
     spin_lock(&serial_lock);
-    serial_enqueue_nolock(buf, len);
+    serial_write_nolock(buf, len);
     spin_unlock(&serial_lock);
     klog_irqrestore(flags);
 }
@@ -215,22 +152,7 @@ void serial_write_direct(const char *buf, size_t len) {
 }
 
 static void serial_drain(uint64_t max_chars) {
-    uint64_t flags;
-    uint64_t drained;
-
-    if (!serial_ring) return;
-    flags = klog_irqsave();
-    spin_lock(&serial_lock);
-    drained = 0;
-    while (drained < max_chars && serial_count > 0) {
-        if (!serial_thr_empty()) break;
-        outb(0x3F8, (uint8_t)serial_ring[serial_head]);
-        serial_head = (serial_head + 1) % serial_ring_capacity;
-        serial_count--;
-        drained++;
-    }
-    spin_unlock(&serial_lock);
-    klog_irqrestore(flags);
+    (void)max_chars;
 }
 
 static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
@@ -530,9 +452,6 @@ void vring_init(void) {
     kprint_head = 0;
     kprint_tail = 0;
     kprint_count = 0;
-    serial_head = 0;
-    serial_tail = 0;
-    serial_count = 0;
 
     subrings_count = VRING_MAX_SUBRINGS;
     subrings = kmalloc(subrings_count * sizeof(vring_t));
@@ -1107,11 +1026,6 @@ static void vring_selftest_supervisor(void) {
         task_exit(1);
         return;
     }
-    if (current_task && current_task->stack_base && current_task->stack_size) {
-        vring_add_region(7, (uint64_t)current_task->stack_base,
-                         (uint64_t)current_task->stack_base + current_task->stack_size,
-                         VRING_PERM_READ | VRING_PERM_WRITE);
-    }
     vring_selftest_task_ref = t;
     task_set_vring(t, 7);
     strcpy(t->name, "vringtest");
@@ -1197,8 +1111,6 @@ void kprint_serial_async(const char *buf, size_t len) {
     uint64_t flags;
 
     if (!buf || len == 0) return;
-    if (!serial_ring) return;
-
     flags = klog_irqsave();
     spin_lock(&serial_lock);
 
@@ -1215,7 +1127,7 @@ void kprint_serial_async(const char *buf, size_t len) {
         }
         if (buf[i] == '\033') {
             if (i > start) {
-                serial_enqueue_nolock(buf + start, i - start);
+                serial_write_nolock(buf + start, i - start);
             }
             in_esc = 1;
             start = i;
@@ -1223,7 +1135,7 @@ void kprint_serial_async(const char *buf, size_t len) {
         }
     }
     if (!in_esc && i > start) {
-        serial_enqueue_nolock(buf + start, i - start);
+        serial_write_nolock(buf + start, i - start);
     }
 
     spin_unlock(&serial_lock);

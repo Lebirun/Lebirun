@@ -1,5 +1,6 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/idt.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <string.h>
@@ -311,6 +312,7 @@ static void ext4_vfs_cache_insert(ext4_fs_t *fs, uint32_t ino, vfs_node_t *node)
             if (old_fs &&
                 old_node != old_fs->root_node &&
                 old_node->ref_count == 0 &&
+                !vfs_lookup_hazard_contains(old_node) &&
                 (!old_priv || old_priv->child_refs == 0)) {
                 ext4_vfs_cache[i].fs = fs;
                 ext4_vfs_cache[i].ino = ino;
@@ -372,6 +374,7 @@ static void ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     if (!fs || !node) return;
     if (node == fs->root_node) return;
     if (node->ref_count != 0) return;
+    if (vfs_lookup_hazard_contains(node)) return;
 
     priv = (ext4_vfs_private_t *)node->private_data;
     if (priv && priv->fs != fs) return;
@@ -588,8 +591,11 @@ static void ext4_vfs_close(vfs_node_t *node) {
     priv = (ext4_vfs_private_t *)node->private_data;
     if (!priv) return;
     fs = priv->fs;
+    ext4_release_parent_pin(node);
+    mutex_lock(&fs->lock);
     ext4_reclaim_clean_blocks(fs, 0);
     ext4_detach_vfs_node(fs, node);
+    mutex_unlock(&fs->lock);
 }
 
 static dirent_t *ext4_vfs_readdir(vfs_node_t *node, uint64_t index) {
@@ -721,12 +727,12 @@ static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name) {
         mutex_unlock(&fs->lock);
         return NULL;
     }
-    mutex_unlock(&fs->lock);
-
     child = ext4_create_vfs_node(fs, ino, name);
     if (child) {
         ext4_set_parent(child, node);
+        vfs_lookup_hazard_set(child);
     }
+    mutex_unlock(&fs->lock);
 
     return child;
 }
@@ -1328,29 +1334,37 @@ int ext4_sync_mounted(void) {
     ret = -1;
     mutex_lock(&ext4_mounts_lock);
     fs = mounted_fs;
-    if (fs) {
+    if (fs)
         mutex_lock(&fs->lock);
+    mutex_unlock(&ext4_mounts_lock);
+    if (fs) {
         ret = ext4_sync(fs);
         mutex_unlock(&fs->lock);
     }
-    mutex_unlock(&ext4_mounts_lock);
     return ret;
 }
 
 void ext4_background_writeback(uint32_t max_blocks) {
     ext4_fs_t *fs;
+    uint8_t epoch;
 
     if (max_blocks == 0) {
         return;
     }
 
+    epoch = (uint8_t)(tick_count / 100);
     mutex_lock(&ext4_mounts_lock);
     fs = ext4_mounts_head;
-    while (fs) {
+    if (fs)
         mutex_lock(&fs->lock);
+    mutex_unlock(&ext4_mounts_lock);
+    if (fs) {
+        if (fs->writeback_epoch == epoch) {
+            mutex_unlock(&fs->lock);
+            return;
+        }
+        fs->writeback_epoch = epoch;
         ext4_sync_some_blocks(fs, max_blocks);
         mutex_unlock(&fs->lock);
-        fs = fs->next_mount;
     }
-    mutex_unlock(&ext4_mounts_lock);
 }

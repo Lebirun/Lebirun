@@ -1,6 +1,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/debug.h>
+#include <lebirun/smp.h>
 #include <string.h>
 
 #define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
@@ -43,9 +44,16 @@ static uint64_t slab_virt_bump = SLAB_REGION_START;
 static uint64_t slab_virt_scan = SLAB_REGION_START;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
-    __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
-    __asm__ volatile ("cli");
-    while (__sync_lock_test_and_set(&slab_lock, 1)) {
+    uint64_t eflags;
+
+    for (;;) {
+        __asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags) :: "memory");
+        if (__sync_lock_test_and_set(&slab_lock, 1) == 0) {
+            *eflags_out = eflags;
+            return;
+        }
+        if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        __asm__ volatile ("pause" ::: "memory");
     }
 }
 
@@ -155,7 +163,12 @@ static uint64_t slab_virt_alloc(void) {
         if (slab_virt_scan >= SLAB_REGION_START + SLAB_REGION_SIZE) {
             slab_virt_scan = SLAB_REGION_START;
         }
-        if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), v)) return v;
+        if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), v)) {
+            if (smp_tlb_flush_all_sync() == 0 &&
+                !vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), v)) {
+                return v;
+            }
+        }
     }
     return 0;
 }
@@ -336,6 +349,7 @@ void slab_free(void *ptr, void *caller) {
     slab_cache_t *cache;
     int idx;
     int was_full;
+    int release_page;
     uint64_t eflags;
     uint64_t obj_idx;
     
@@ -356,6 +370,7 @@ void slab_free(void *ptr, void *caller) {
     
     cache = &slab_caches[idx];
     was_full = (page->free_count == 0);
+    release_page = 0;
     
     if (!slab_obj_valid(page, ptr)) {
         printf("slab_free: invalid object ptr=%p page=%p size=%u caller=%p\n",
@@ -379,10 +394,15 @@ void slab_free(void *ptr, void *caller) {
         slab_add_to_list(&cache->partial, page);
     } else if (page->free_count == page->obj_count) {
         slab_remove_from_list(&cache->partial, page);
-        slab_free_page(page);
-        cache->pages_allocated--;
+        release_page = 1;
     }
 
+    slab_lock_release(eflags);
+    if (!release_page) return;
+
+    slab_free_page(page);
+    slab_lock_acquire(&eflags);
+    cache->pages_allocated--;
     slab_lock_release(eflags);
 }
 
@@ -390,24 +410,28 @@ void slab_gc(void) {
     int i;
     slab_cache_t *cache;
     slab_page_t *page;
-    slab_page_t *next;
     uint64_t eflags;
 
     if (!slab_initialized) return;
 
-    slab_lock_acquire(&eflags);
     for (i = 0; i < SLAB_SIZES_COUNT; i++) {
-        cache = &slab_caches[i];
-        page = cache->empty;
-        while (page) {
-            next = page->next;
+        for (;;) {
+            slab_lock_acquire(&eflags);
+            cache = &slab_caches[i];
+            page = cache->empty;
+            if (!page) {
+                slab_lock_release(eflags);
+                break;
+            }
             slab_remove_from_list(&cache->empty, page);
+            slab_lock_release(eflags);
+
             slab_free_page(page);
+            slab_lock_acquire(&eflags);
             cache->pages_allocated--;
-            page = next;
+            slab_lock_release(eflags);
         }
     }
-    slab_lock_release(eflags);
 }
 
 void slab_reclaim_empty(void) {

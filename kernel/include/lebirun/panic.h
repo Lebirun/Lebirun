@@ -6,6 +6,7 @@
 void kernel_panic(const char *reason, registers_t *regs);
 void kernel_panic_msg(const char *fmt, ...);
 void kernel_panic_custom(const char *category, const char *fmt, ...);
+int kernel_panic_active(void);
 
 #define KERNEL_ASSERT(cond) \
     do { if (!(cond)) kernel_panic_msg("ASSERT FAILED: %s at %s:%d", #cond, __FILE__, __LINE__); } while(0)

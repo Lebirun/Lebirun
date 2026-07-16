@@ -60,6 +60,7 @@ typedef struct ext4_fs {
     uint32_t alloc_last_group;
     uint32_t alloc_last_bit;
     bool super_dirty;
+    uint8_t writeback_epoch;
     vfs_node_t *root_node;
     vfs_node_t *vfs_nodes;
     char mountpoint[VFS_MAX_PATH];

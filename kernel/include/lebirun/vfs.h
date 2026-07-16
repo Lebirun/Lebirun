@@ -140,8 +140,12 @@ uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buf
 uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 void vfs_open(vfs_node_t *node, uint64_t flags);
 void vfs_close(vfs_node_t *node);
+void vfs_lookup_hazard_set(vfs_node_t *node);
+void vfs_lookup_hazard_clear(vfs_node_t *node);
+int vfs_lookup_hazard_contains(vfs_node_t *node);
 
 dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index);
+int vfs_readdir_copy(vfs_node_t *node, uint64_t index, dirent_t *entry);
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name);
 int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 int vfs_unlink(vfs_node_t *parent, const char *name);

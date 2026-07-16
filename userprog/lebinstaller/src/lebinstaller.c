@@ -412,18 +412,11 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         return -1;
     }
 
-    if (!copy_overwrite_existing) {
-        fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
-                                   O_WRONLY | O_CREAT | O_TRUNC,
-                                   src_mode);
-        if (fd_out >= 0)
-            created_with_mode = 1;
-    } else {
-        vfs_unlink(dst);
-        if (vfs_create(dst, src_mode) == 0)
-            created_with_mode = 1;
-        fd_out = vfs_open(dst, 2);
-    }
+    fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
+                               O_WRONLY | O_CREAT | O_TRUNC,
+                               src_mode);
+    if (fd_out >= 0)
+        created_with_mode = 1;
     if (fd_out < 0) {
         fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, src_mode);
         if (fd_out < 0) {
@@ -432,7 +425,9 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
         }
     }
 
-    while ((r = read(fd_in, copy_buf, copy_buf_size)) > 0) {
+    for (;;) {
+        r = read(fd_in, copy_buf, copy_buf_size);
+        if (r <= 0) break;
         if (write(fd_out, copy_buf, r) != r) {
             close(fd_in);
             close(fd_out);
@@ -449,8 +444,9 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     close(fd_in);
     close(fd_out);
 
-    if (!created_with_mode)
+    if (!created_with_mode) {
         chmod(dst, src_mode);
+    }
 
     return 0;
 }
@@ -471,7 +467,7 @@ static int inst_pkg_skip(const char *path)
     return 0;
 }
 
-static int inst_count_dir_entries(const char *path)
+static int inst_count_dir_entries(const char *path, const char *skip)
 {
     int fd;
     char name[256];
@@ -488,9 +484,10 @@ static int inst_count_dir_entries(const char *path)
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
         if (strcmp(name, "lebinstaller") == 0) continue;
         snprintf(sub, sizeof(sub), "%s/%s", path, name);
+        if (skip && strcmp(sub, skip) == 0) continue;
         if (inst_pkg_skip(sub)) continue;
         if (type == 2) {
-            count += inst_count_dir_entries(sub);
+            count += inst_count_dir_entries(sub, skip);
         } else {
             count++;
         }
@@ -657,7 +654,11 @@ static int inst_mount_partition(const char *devpath, const char *mountpoint)
         int nfd;
         char *argv[6];
         nfd = open("/dev/null", O_WRONLY);
-        if (nfd >= 0) { dup2(nfd, 1); dup2(nfd, 2); close(nfd); }
+        if (nfd >= 0) {
+            dup2(nfd, 1);
+            dup2(nfd, 2);
+            close(nfd);
+        }
         argv[0] = "mount";
         argv[1] = "-t";
         argv[2] = "ext4";
@@ -759,7 +760,7 @@ static int inst_copy_rootfs(const char *mountpoint)
     return (errors > 0) ? -1 : 0;
 }
 
-static int inst_count_rootfs(void)
+static int inst_count_rootfs(const char *skip)
 {
     static const char *dirs[] = {
         "bin", "boot", "dev", "etc", "home", "lib", "proc",
@@ -774,7 +775,7 @@ static int inst_count_rootfs(void)
         if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0)
             continue;
         snprintf(path, sizeof(path), "/%s", dirs[i]);
-        total += inst_count_dir_entries(path);
+        total += inst_count_dir_entries(path, skip);
     }
     return total;
 }
@@ -1769,7 +1770,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
 
     lebui_progress_update(&prog_st, "Counting files...", 10);
     lebui_progress_log(&prog_st, "Counting files to copy...");
-    copy_total = inst_count_rootfs();
+    copy_total = inst_count_rootfs(mountpoint);
     if (copy_total < 1) copy_total = 1;
     copy_done = 0;
     copy_last_pct = -1;
@@ -2039,17 +2040,17 @@ static int step_do_update(int disk_idx, int part_idx)
         copy_total++;
         for (i = 0; core_dirs[i]; i++) {
             snprintf(path, sizeof(path), "/%s", core_dirs[i]);
-            copy_total += inst_count_dir_entries(path);
+            copy_total += inst_count_dir_entries(path, mountpoint);
         }
     }
     if (upd_selected[UPD_BOOT]) {
-        copy_total += inst_count_dir_entries("/boot");
+        copy_total += inst_count_dir_entries("/boot", mountpoint);
     }
     if (upd_selected[UPD_USR_INC]) {
-        copy_total += inst_count_dir_entries("/usr/include");
+        copy_total += inst_count_dir_entries("/usr/include", mountpoint);
     }
     if (upd_selected[UPD_TERMINFO]) {
-        copy_total += inst_count_dir_entries("/usr/share/terminfo");
+        copy_total += inst_count_dir_entries("/usr/share/terminfo", mountpoint);
     }
     if (copy_total < 1) copy_total = 1;
     copy_done = 0;

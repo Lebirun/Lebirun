@@ -5,7 +5,7 @@
 
 .set KERNEL_VMA_LOW, 0x80000000
 
-.section .multiboot.data, "aw"
+.section .multiboot.data, "a"
 .align 8
 mb2_header:
     .long MB2_MAGIC
@@ -170,8 +170,6 @@ fill_pd_1:
     orl $0x80010001, %eax
     movl %eax, %cr0
 
-    movl $(early_gdt), %eax
-    movl %eax, (early_gdt_ptr_val)
     lgdt (early_gdt_ptr)
     ljmp $0x08, $(long_mode_entry)
 
@@ -215,4 +213,4 @@ early_gdt_end:
 early_gdt_ptr:
     .word early_gdt_end - early_gdt - 1
 early_gdt_ptr_val:
-    .long 0
+    .long early_gdt

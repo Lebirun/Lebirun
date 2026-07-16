@@ -448,6 +448,13 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
         abs_lba = lba;
     }
 
+    if (skip == 0 && (size % 512) == 0 && sector_count <= 128) {
+        wr_ret = ahci_write_sectors(port, abs_lba, sector_count, buffer);
+        if (wr_ret != 0)
+            return 0;
+        return size;
+    }
+
     tmp = (uint8_t *)kmalloc(sector_count * 512);
     if (!tmp)
         return 0;

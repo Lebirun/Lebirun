@@ -5,7 +5,8 @@ KERNEL_VMA = 0xFFFFFFFF80000000;
 
 PHDRS
 {
-    boot PT_LOAD FLAGS(7);
+    boot_text PT_LOAD FLAGS(5);
+    boot_bss PT_LOAD FLAGS(6);
     text PT_LOAD FLAGS(5);
     rodata PT_LOAD FLAGS(4);
     data PT_LOAD FLAGS(6);
@@ -18,15 +19,12 @@ SECTIONS
 
     .multiboot.data : {
         KEEP(*(.multiboot.data))
-    } :boot
-
-    .multiboot.text : {
         KEEP(*(.multiboot.text))
-    } :boot
+    } :boot_text
 
     .multiboot.bss ALIGN(4K) : {
         *(.multiboot.bss)
-    } :boot
+    } :boot_bss
 
     . += KERNEL_VMA;
 

@@ -190,8 +190,14 @@ static void ahci_start_cmd(ahci_port_t *port) {
 }
 
 static int ahci_find_slot(ahci_port_t *port) {
-    uint64_t slots = ahci_port_read(port, AHCI_PxSACT) | ahci_port_read(port, AHCI_PxCI);
-    for (uint64_t i = 0; i < g_ahci_controller.num_cmd_slots; i++) {
+    uint64_t slots;
+    uint64_t slot_count;
+    uint64_t i;
+
+    slots = ahci_port_read(port, AHCI_PxSACT) | ahci_port_read(port, AHCI_PxCI);
+    slot_count = g_ahci_controller.num_cmd_slots;
+    if (slot_count > AHCI_CMD_SLOTS) slot_count = AHCI_CMD_SLOTS;
+    for (i = 0; i < slot_count; i++) {
         if ((slots & (1 << i)) == 0)
             return i;
     }
@@ -233,7 +239,6 @@ static int ahci_wait_cmd(ahci_port_t *port, int slot, uint64_t timeout_ms) {
         if (++spins >= max_spins) {
             break;
         }
-        
         ahci_wait_delay();
     }
     
@@ -336,10 +341,13 @@ int ahci_port_init(ahci_port_t *port) {
     memset((void *)page_virt, 0, PAGE_SIZE);
 
     cmd_list_off = 0;
-    fis_off = AHCI_CMD_SLOTS * sizeof(hba_cmd_header_t);
-    fis_off = (fis_off + 255) & ~255ULL;
+    fis_off = AHCI_CMD_LIST_SIZE;
     cmd_table_off = fis_off + sizeof(hba_fis_t);
     cmd_table_off = (cmd_table_off + 127) & ~127ULL;
+    if (cmd_table_off + AHCI_CMD_SLOTS * sizeof(hba_cmd_table_t) > PAGE_SIZE) {
+        pfa_free(page_phys);
+        return -1;
+    }
 
     printf("AHCI: port %u layout: cmd_list@0x%lX fis@0x%lX tbl@0x%lX\n",
            port->port_num, cmd_list_off, fis_off, cmd_table_off);
@@ -1118,9 +1126,15 @@ static int ahci_check_port_error(ahci_port_t *port) {
 }
 
 static int ahci_find_free_slot(ahci_port_t *port) {
-    uint64_t slots = port->cmd_issued | ahci_port_read(port, AHCI_PxCI) | 
-                     ahci_port_read(port, AHCI_PxSACT);
-    for (uint64_t i = 0; i < g_ahci_controller.num_cmd_slots; i++) {
+    uint64_t slots;
+    uint64_t slot_count;
+    uint64_t i;
+
+    slots = port->cmd_issued | ahci_port_read(port, AHCI_PxCI) |
+            ahci_port_read(port, AHCI_PxSACT);
+    slot_count = g_ahci_controller.num_cmd_slots;
+    if (slot_count > AHCI_CMD_SLOTS) slot_count = AHCI_CMD_SLOTS;
+    for (i = 0; i < slot_count; i++) {
         if ((slots & (1 << i)) == 0 && port->requests[i].state == AHCI_CMD_STATE_FREE)
             return i;
     }

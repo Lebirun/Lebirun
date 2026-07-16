@@ -10,10 +10,12 @@ static spinlock_t heap_lock = {0};
 static inline uint64_t heap_lock_acquire(void) {
     uint64_t eflags;
 
-    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
-    __asm__ volatile ("cli" ::: "memory");
-    spin_lock(&heap_lock);
-    return eflags;
+    for (;;) {
+        __asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags) :: "memory");
+        if (spin_trylock(&heap_lock)) return eflags;
+        if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        __asm__ volatile ("pause" ::: "memory");
+    }
 }
 
 static inline void heap_lock_release(uint64_t eflags) {
@@ -298,25 +300,6 @@ static void coalesce_free_blocks(heap_block_t *block) {
         }
     }
 
-#if HEAP_USE_DEMAND_PAGING
-    {
-        uint64_t region_start;
-        uint64_t region_end;
-        uint64_t first_page;
-        uint64_t last_page;
-        uint64_t pg;
-
-        region_start = (uint64_t)block + sizeof(heap_block_t);
-        region_end = (uint64_t)block + sizeof(heap_block_t) + block->size;
-
-        first_page = (region_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        last_page = region_end & ~(PAGE_SIZE - 1);
-
-        for (pg = first_page; pg < last_page; pg += PAGE_SIZE) {
-            demand_decommit_page(pg);
-        }
-    }
-#endif
 }
 
 static void heap_trim(void) {
@@ -325,7 +308,6 @@ static void heap_trim(void) {
     uint64_t block_end;
     uint64_t trim_start;
     uint64_t new_end;
-    uint64_t pg;
 
     last = NULL;
     cur = kernel_heap.free_list;
@@ -350,9 +332,7 @@ static void heap_trim(void) {
     if (trim_start >= kernel_heap.end_addr) return;
     if (trim_start <= (uint64_t)last + sizeof(heap_block_t)) return;
 
-    for (pg = trim_start; pg < kernel_heap.end_addr; pg += PAGE_SIZE) {
-        demand_decommit_page(pg);
-    }
+    demand_decommit_range(trim_start, kernel_heap.end_addr);
 
     new_end = trim_start;
     last->size = new_end - (uint64_t)last - sizeof(heap_block_t);
@@ -640,9 +620,25 @@ void *kmalloc(size_t size) {
 
 void heap_reclaim_unused(void) {
     uint64_t eflags;
+    uint64_t region_start;
+    uint64_t region_end;
+    uint64_t first_page;
+    uint64_t last_page;
+    heap_block_t *block;
 
     if (!main_heap_initialized) return;
     eflags = heap_lock_acquire();
+    block = kernel_heap.free_list;
+    while (block) {
+        if (block->is_free) {
+            region_start = (uint64_t)block + sizeof(heap_block_t);
+            region_end = region_start + block->size;
+            first_page = (region_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            last_page = region_end & ~(PAGE_SIZE - 1);
+            demand_decommit_range(first_page, last_page);
+        }
+        block = block->next;
+    }
     heap_trim();
     heap_lock_release(eflags);
 }
@@ -777,7 +773,6 @@ static void kfree_internal(void *ptr, void *caller) {
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
 
     coalesce_free_blocks(block);
-    heap_trim();
 }
 
 void kfree(void *ptr) {
@@ -846,7 +841,6 @@ void kfree_secure(void *ptr) {
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);
     
     coalesce_free_blocks(block);
-    heap_trim();
     heap_lock_release(eflags);
 }
 

@@ -132,8 +132,11 @@ void irq_mask(uint8_t irq) {
 }
 
 static int is_usermode_exception(registers_t *regs) {
+    task_t *task;
+
     if ((regs->cs & 0x3) == 3) return 1;
-    if (current_task && current_task->is_user) {
+    task = smp_current_task_safe();
+    if (task && task->is_user) {
         if (regs->rip < KERNEL_VMA) return 1;
     }
     return 0;
@@ -172,8 +175,7 @@ registers_t* interrupt_handler(registers_t* regs)
             fault_task = task_find_by_pml4(regs->entry_cr3);
             if (fault_task && fault_task->vring_minor != 0 && !fault_task->is_user) {
                 if (!vring_check_access(fault_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
-                    current_task = fault_task;
-                    smp_this_cpu()->current_task = fault_task;
+                    task_set_current(fault_task);
                     vring_handle_violation(fault_task->vring_minor, fault_addr, access_type);
                     return schedule_from_irq(regs);
                 }
@@ -214,8 +216,7 @@ registers_t* interrupt_handler(registers_t* regs)
             fault_task = task_find_by_pml4(regs->entry_cr3);
             if (fault_task && fault_task->vring_minor != 0 && !fault_task->is_user) {
                 if (!vring_check_access(fault_task->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
-                    current_task = fault_task;
-                    smp_this_cpu()->current_task = fault_task;
+                    task_set_current(fault_task);
                     vring_handle_violation(fault_task->vring_minor, fault_addr, access_type);
                     return schedule_from_irq(regs);
                 }
@@ -249,11 +250,11 @@ registers_t* interrupt_handler(registers_t* regs)
         if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
             int cow_result;
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
-            if (task_handle_file_write_fault(current_task, fault_addr)) {
-                return regs;
-            }
             cow_result = cow_handle_fault(fault_addr, current_task->pml4_phys);
             if (cow_result == 1) {
+                return regs;
+            }
+            if (task_handle_file_write_fault(current_task, fault_addr)) {
                 return regs;
             }
         }
@@ -315,7 +316,11 @@ registers_t* interrupt_handler(registers_t* regs)
                 }
             }
 
-            printf("SEGV addr=0x%lX rip=0x%lX err=0x%lX\n", fault_addr, regs->rip, regs->err_code);
+            printf("SEGV pid=%d cpu=%d task=%s maps=%d addr=0x%lX rip=0x%lX err=0x%lX entry_cr3=0x%lX task_cr3=0x%lX\n",
+                   current_task->pid, smp_processor_id(), current_task->name,
+                   current_task->file_map_count, fault_addr, regs->rip,
+                   regs->err_code, regs->entry_cr3,
+                   current_task->pml4_phys);
             printf("  RAX=0x%lX RBX=0x%lX RCX=0x%lX RDX=0x%lX\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
             printf("  RSI=0x%lX RDI=0x%lX RSP=0x%lX RBP=0x%lX\n", regs->rsi, regs->rdi, regs->rsp, regs->rbp);
             printf("  R8=0x%lX R9=0x%lX R10=0x%lX R11=0x%lX\n", regs->r8, regs->r9, regs->r10, regs->r11);
@@ -353,11 +358,11 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t sc_cow_addr;
             __asm__ ("movq %%cr2, %0" : "=r" (sc_cow_addr));
             if (sc_cow_addr < KERNEL_VMA) {
-                if (task_handle_file_write_fault(current_task, sc_cow_addr)) {
-                    return regs;
-                }
                 sc_cow_result = cow_handle_fault(sc_cow_addr, current_task->pml4_phys);
                 if (sc_cow_result == 1) {
+                    return regs;
+                }
+                if (task_handle_file_write_fault(current_task, sc_cow_addr)) {
                     return regs;
                 }
             }
@@ -506,6 +511,10 @@ registers_t* interrupt_handler(registers_t* regs)
         kernel_panic("CPU Exception", regs);
     } else {
         if (regs->int_no == 255) {
+            if (kernel_panic_active()) {
+                for (;;) __asm__ volatile ("cli; hlt");
+            }
+            lapic_eoi();
             return regs;
         }
         if (regs->int_no == 49) {
@@ -514,6 +523,7 @@ registers_t* interrupt_handler(registers_t* regs)
                 "movq %%rax, %%cr3\n\t"
                 ::: "rax", "memory"
             );
+            smp_tlb_flush_ack();
             lapic_eoi();
             return regs;
         }
@@ -523,11 +533,17 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t old_cr3;
             uint64_t new_cr3;
             int did_exec;
+            int syscall_interrupts;
 
             did_exec = 0;
+            syscall_interrupts = (regs->rflags & (1 << 9)) != 0;
 
             if (kstack_prepare_syscall() == 0) {
+                if (syscall_interrupts) {
+                    __asm__ volatile ("sti" ::: "memory");
+                }
                 do_syscall(regs);
+                __asm__ volatile ("cli" ::: "memory");
                 kstack_finish_syscall();
             } else {
                 regs->rax = -IDT_ENOMEM;
@@ -622,8 +638,6 @@ registers_t* interrupt_handler(registers_t* regs)
         }
         
         if (irq == 0) {
-            __sync_fetch_and_add(&tick_count, 1);
-
             if (current_task) {
                 if (current_task->id == 0 && !current_task->is_user) {
                     __sync_fetch_and_add(&cpu_idle_ticks, 1);
@@ -638,36 +652,41 @@ registers_t* interrupt_handler(registers_t* regs)
                 __sync_fetch_and_add(&cpu_idle_ticks, 1);
             }
 
-            if ((tick_count & 0x7F) == 0) {
-                extern void task_update_cached_stats(void);
-                task_update_cached_stats();
-            }
+            if (smp_is_bsp()) {
+                __sync_fetch_and_add(&tick_count, 1);
 
-            wake_sleeping_tasks();
+                if ((tick_count & 0x7F) == 0) {
+                    extern void task_update_cached_stats(void);
+                    task_update_cached_stats();
+                }
 
-            extern void fb_tick(void);
-            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            kernel_cr3 = vmm_get_kernel_cr3();
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
-            }
+                wake_sleeping_tasks();
 
-            fb_tick();
-            extern void net_tick(void);
-            net_tick();
+                extern void fb_tick(void);
+                __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
+                kernel_cr3 = vmm_get_kernel_cr3();
+                if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                    __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
+                }
 
-            extern void kprint_poll(uint64_t max_items);
-            kprint_poll(64);
+                fb_tick();
+                extern void net_tick(void);
+                net_tick();
 
-            pit_process_callbacks();
+                extern void kprint_poll(uint64_t max_items);
+                kprint_poll(64);
 
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+                pit_process_callbacks();
+
+                if (kernel_cr3 && orig_cr3 != kernel_cr3) {
+                    __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
+                }
             }
 
             regs = schedule_from_irq(regs);
 
-            keyboard_process_sigint();
+            if (smp_is_bsp())
+                keyboard_process_sigint();
             if (task_state_requires_schedule(current_task)) {
                 regs = schedule_from_irq(regs);
             }
@@ -849,7 +868,7 @@ void idt_init(void)
     idt_set_gate(48, (uintptr_t)isr48);
     idt_set_gate(49, (uintptr_t)isr49);
 
-    idt_set_gate_flags(128, (uintptr_t)isr128, 0xEF);
+    idt_set_gate_flags(128, (uintptr_t)isr128, 0xEE);
 
     idt_set_gate(255, (uintptr_t)isr255);
 

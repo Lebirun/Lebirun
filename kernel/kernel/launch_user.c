@@ -373,8 +373,6 @@ task_t* launch_user_path(const char *path, int console_id) {
     if (elf_pages) kfree(elf_pages);
     if (stack_pages) kfree(stack_pages);
 
-    heap_reclaim_unused();
-
     t->state = TASK_READY;
     lock_scheduler();
     add_task_to_runqueue(t);

@@ -5,6 +5,13 @@ CC=$(HOST)-gcc
 LD:=$(HOST)-ld
 OBJCOPY:=$(HOST)-objcopy
 
+VERSION_FILE:=../VERSION
+VERSION_HEADER:=include/lebirun/version.h
+OS_VERSION:=$(strip $(shell sed -n '1{s/[[:space:]]//g;p;}' $(VERSION_FILE) 2>/dev/null))
+ifeq ($(OS_VERSION),)
+$(error VERSION is missing or empty)
+endif
+
 V ?= 0
 ifeq ($(V),0)
   Q = @
@@ -106,6 +113,10 @@ NM:=$(HOST)-nm
 
 all: lebirun.kernel
 
+$(VERSION_HEADER): $(VERSION_FILE)
+	$(Q)printf '#ifndef LEBIRUN_VERSION_H\n#define LEBIRUN_VERSION_H\n\n#define OS_VERSION "%s"\n\n#endif\n' "$(OS_VERSION)" > $@.tmp
+	$(Q)if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
 lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 	$(MSG_LD)$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(LINK_LIST)
 	$(Q)cp $@ lebirun_debug.kernel
@@ -121,7 +132,7 @@ lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 $(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
 
-$(OBJS): $(CONFIG_FILE)
+$(OBJS): $(CONFIG_FILE) $(VERSION_HEADER)
 
 $(USER_SHELL_BIN):
 	$(MAKE) -C ../userprog
@@ -143,11 +154,12 @@ clean:
 	rm -f $(USER_SHELL_OBJ)
 	rm -f $(USER_SHELL_BIN)
 	rm -f $(UNIFONT_OBJ)
+	rm -f $(VERSION_HEADER)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
 	$(MAKE) -C crypto clean
 
-install-headers:
+install-headers: $(VERSION_HEADER)
 	@if [ -z "$(DESTDIR)" ]; then \
 		echo "DESTDIR not set; skipping install-headers"; \
 		exit 0; \

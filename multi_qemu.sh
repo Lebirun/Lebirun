@@ -68,6 +68,7 @@ fi
 $QEMU_CMD \
     -m "$MEMORY" \
     -smp "$SMP" \
+    -cpu host \
     -vga qxl \
     -cdrom lebirun.iso \
     -serial stdio \
