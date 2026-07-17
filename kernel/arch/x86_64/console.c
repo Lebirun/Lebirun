@@ -1306,7 +1306,6 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     uint64_t new_cx;
     uint64_t new_cy;
     framebuffer_t *fb;
-    console_t *old_con;
     console_t *new_con;
     
     if (!console_valid_index(console_num)) return;
@@ -1361,13 +1360,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         consoles[current_console].cursor_y = fb->cursor_y;
     }
     
-    old_con = &consoles[current_console];
     new_con = &consoles[console_num];
-    
-    old_con->esc_state = 0;
-    old_con->esc_len = 0;
-    new_con->esc_state = 0;
-    new_con->esc_len = 0;
     
     rows = fb ? fb->rows : 25;
     cols = fb ? fb->cols : 80;
@@ -1526,7 +1519,7 @@ static void console_scroll_region_up(console_t *con, uint64_t top, uint64_t bott
     if (bottom > 0) {
         memset(con->buffer[bottom - 1], ' ', copy_cols);
         if (con->color_buffer)
-            memset(con->color_buffer[bottom - 1], 0x70, copy_cols);
+            memset(con->color_buffer[bottom - 1], console_current_attr(con), copy_cols);
         con->line_wrapped[bottom - 1] = 0;
     }
 }
@@ -1546,7 +1539,7 @@ static void console_scroll_region_down(console_t *con, uint64_t top, uint64_t bo
     }
     memset(con->buffer[top], ' ', copy_cols);
     if (con->color_buffer)
-        memset(con->color_buffer[top], 0x70, copy_cols);
+        memset(con->color_buffer[top], console_current_attr(con), copy_cols);
     con->line_wrapped[top] = 0;
 }
 
@@ -1948,6 +1941,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
                 }
             }
         }
+        console_ensure_nondefault_color(con);
         if (is_active && fb) {
             console_apply_colors(con, fb);
         }
