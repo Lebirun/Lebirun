@@ -22,6 +22,10 @@ Lebconfig will need ncurses. Install it on Debian/Debian-based with:
 sudo apt install libncurses-dev
 ```
 
+### Cloning
+
+Whenever you clone this repository, please add --recurse-submodules to the git clone command. Otherwise, the operating system will refuse to build.
+
 ### License
 
 This project is licensed under the GNU General Public License v3. 
