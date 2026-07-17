@@ -82,17 +82,18 @@ $INITRD_MODULE
 }
 EOF
 
+GRUB_DIRECTORY="${GRUB_DIRECTORY:-/usr/lib/grub/i386-pc}"
 GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mCreating ISO image...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Creating ISO image"
 if [ "$VERBOSE" -eq 1 ]; then
-    grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
-    grub-mkrescue -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
+    grub-mkrescue -d "$GRUB_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
 else
-    grub-mkrescue --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
-    grub-mkrescue -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
+    grub-mkrescue -d "$GRUB_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
 fi
 
 cleanup_bar

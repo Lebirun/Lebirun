@@ -1,7 +1,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/vring.h>
 #include <string.h>
 
 heap_t kernel_heap;
@@ -279,8 +279,6 @@ static void coalesce_free_blocks(heap_block_t *block) {
                 block->next->prev = block;
             }
             next->magic = 0xDEAD0001;
-        } else {
-            DEBUG_MEMORY("coalesce: skip non-adjacent next (block_end=0x%08X next=0x%08X)\n", block_end, (uint64_t)next);
         }
     }
 
@@ -295,8 +293,6 @@ static void coalesce_free_blocks(heap_block_t *block) {
             }
             block->magic = 0xDEAD0002;
             block = prev;
-        } else {
-            DEBUG_MEMORY("coalesce: skip non-adjacent prev (prev_end=0x%08X block=0x%08X)\n", prev_end, (uint64_t)block);
         }
     }
 
@@ -421,9 +417,9 @@ void heap_init(void) {
         kernel_heap.free_list = initial_block;
     #endif
 
-    slab_init();
-
     main_heap_initialized = 1;
+    klog_persist_enable();
+    slab_init();
 
     printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
@@ -489,7 +485,6 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
         needed = total_size + sizeof(heap_block_t) + PAGE_SIZE;
         new_end = old_end + needed;
 
-        DEBUG_MEMORY("kmalloc: expanding to new_end=0x%08X\n", new_end);
         if (new_end > kernel_heap.max_addr) {
             printf("kmalloc: Heap exhausted\n");
             return NULL;

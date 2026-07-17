@@ -1,4 +1,4 @@
-SYSTEM_HEADER_PROJECTS="libc/leblibc kernel"
+SYSTEM_HEADER_PROJECTS="libc/leblibc libc kernel"
 PROJECTS="libc/leblibc kernel"
 
 export MAKE=${MAKE:-make}

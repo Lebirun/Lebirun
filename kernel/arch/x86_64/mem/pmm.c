@@ -1,6 +1,5 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <string.h>
 
 extern uint64_t total_pages_managed;

@@ -10,10 +10,9 @@
 #include <lebirun/mouse.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
-#include <lebirun/debug.h>
 #include <lebirun/task.h>
 #include <lebirun/mutex.h>
-#include <lebirun/syscall.h>
+#include <lebirun/kernel_syscall.h>
 #include <lebirun/io.h>
 #include <lebirun/initrd.h>
 #include <lebirun/ramfs.h>
@@ -40,43 +39,6 @@
 #include <lebirun/multiboot2.h>
 #include "launch_user.h"
 
-#ifndef CONFIG_DEBUG_BOOT_VFS
-#define CONFIG_DEBUG_BOOT_VFS 0
-#endif
-#ifndef CONFIG_DEBUG_BOOT_MODULES
-#define CONFIG_DEBUG_BOOT_MODULES 0
-#endif
-#ifndef CONFIG_DEBUG_BOOT_HW
-#define CONFIG_DEBUG_BOOT_HW 0
-#endif
-
-bool debug_memory = CONFIG_DEBUG_MEMORY ? true : false;
-bool debug_task = CONFIG_DEBUG_TASK ? true : false;
-bool debug_vfs = CONFIG_DEBUG_VFS ? true : false;
-bool debug_ramfs = CONFIG_DEBUG_RAMFS ? true : false;
-bool debug_initrd = CONFIG_DEBUG_INITRD ? true : false;
-bool debug_elf = CONFIG_DEBUG_ELF ? true : false;
-bool debug_syscall = CONFIG_DEBUG_SYSCALL ? true : false;
-bool debug_idt = CONFIG_DEBUG_IDT ? true : false;
-bool debug_driver = CONFIG_DEBUG_DRIVER ? true : false;
-bool debug_fs_ext4 = CONFIG_DEBUG_FS_EXT4 ? true : false;
-bool debug_fs_other = CONFIG_DEBUG_FS_OTHER ? true : false;
-#if defined(CONFIG_DEBUG_BOOT_VFS)
-bool debug_boot_vfs = CONFIG_DEBUG_BOOT_VFS ? true : false;
-#else
-bool debug_boot_vfs = false;
-#endif
-#if defined(CONFIG_DEBUG_BOOT_MODULES)
-bool debug_boot_modules = CONFIG_DEBUG_BOOT_MODULES ? true : false;
-#else
-bool debug_boot_modules = false;
-#endif
-#if defined(CONFIG_DEBUG_BOOT_HW)
-bool debug_boot_hw = CONFIG_DEBUG_BOOT_HW ? true : false;
-#else
-bool debug_boot_hw = false;
-#endif
-
 extern uint64_t boot_pml4[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_low[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_high[512] __attribute__((aligned(4096)));
@@ -89,8 +51,6 @@ extern uint64_t multiboot_ptr;
 mutex_t print_lock;
 
 extern task_t* current_task;
-
-extern task_t* ready_queue_head;
 
 void kernel_main(void) {
     uint64_t mb_phys;
@@ -147,8 +107,6 @@ void kernel_main(void) {
     vfs_node_t *squashfs_root;
     vfs_node_t *ramfs_upper;
     vfs_node_t *initrd_root;
-    uint8_t master_mask;
-    uint8_t slave_mask;
     ahci_port_t *port;
     int j;
     int sr_idx;
@@ -159,8 +117,6 @@ void kernel_main(void) {
     int pk;
     task_t *init_task;
     squashfs_context_t *sqctx;
-    task_t *t;
-    task_t *start;
     const char *root_dev;
     vfs_node_t *ext4_root;
     int ahci_done;
@@ -232,9 +188,9 @@ void kernel_main(void) {
     for (pg = mb_page; pg < mb_end_page; pg += 0x1000)
         vmm_map_page(pg + KERNEL_VMA, pg, 0x003);
 
-    if (debug_boot_modules) printf("MB2 info: total_size=%u mod_count=%u\n", mb2_total_size, mod_count);
+    printf("MB2 info: total_size=%u mod_count=%u\n", mb2_total_size, mod_count);
 
-    if (debug_boot_modules) {
+    {
         printf("MB2: first 32 bytes: ");
         mbb = (uint8_t *)(mb_phys + KERNEL_VMA);
         for (i = 0; i < 32; i++) {
@@ -257,14 +213,13 @@ void kernel_main(void) {
             mod_start = tag_mod->mod_start;
             mod_end = tag_mod->mod_end;
             mod_size = mod_end - mod_start;
-            if (debug_boot_modules)
-                printf("MB2: module[%u]: phys 0x%016lX-0x%016lX (%lu bytes) cmdline=\"%s\"\n",
-                       i, mod_start, mod_end, mod_size, tag_mod->cmdline);
+            printf("MB2: module[%u]: phys 0x%016lX-0x%016lX (%lu bytes) cmdline=\"%s\"\n",
+                   i, mod_start, mod_end, mod_size, tag_mod->cmdline);
 
             pstart = mod_start & ~0xFFFULL;
             for (pg = pstart; pg < mod_end; pg += 0x1000)
                 vmm_map_page(pg + KERNEL_VMA, pg, 0x003);
-            if (debug_boot_modules) {
+            {
                 mstart = (uint8_t *)(mod_start + KERNEL_VMA);
                 printf("MB2: first 16 bytes of module[%u]: ", i);
                 for (b = 0; b < 16 && b < mod_size; b++) printf("%02X", mstart[b]);
@@ -274,17 +229,17 @@ void kernel_main(void) {
         }
 
         vfs_init();
-        if (debug_boot_vfs) printf("KERNEL: After vfs_init\n");
+        printf("KERNEL: After vfs_init\n");
         initrd_vfs_register();
-        if (debug_boot_vfs) printf("KERNEL: After initrd_vfs_register\n");
+        printf("KERNEL: After initrd_vfs_register\n");
         ramfs_vfs_register();
-        if (debug_boot_vfs) printf("KERNEL: After ramfs_vfs_register\n");
+        printf("KERNEL: After ramfs_vfs_register\n");
         squashfs_vfs_register();
-        if (debug_boot_vfs) printf("KERNEL: After squashfs_vfs_register\n");
+        printf("KERNEL: After squashfs_vfs_register\n");
         iso9660_vfs_register();
-        if (debug_boot_vfs) printf("KERNEL: After iso9660_vfs_register\n");
+        printf("KERNEL: After iso9660_vfs_register\n");
         overlayfs_vfs_register();
-        if (debug_boot_vfs) printf("KERNEL: After overlayfs_vfs_register\n");
+        printf("KERNEL: After overlayfs_vfs_register\n");
         tmpfs_vfs_register();
 
         use_squashfs = 0;
@@ -294,7 +249,7 @@ void kernel_main(void) {
 
         mount_ret = vfs_mount(NULL, "/", "ramfs");
         if (mount_ret == 0) {
-            if (debug_boot_vfs) printf("KERNEL: Mounted ramfs as root\n");
+            printf("KERNEL: Mounted ramfs as root\n");
         } else {
             printf("KERNEL: Failed to mount ramfs as root\n");
         }
@@ -353,9 +308,9 @@ void kernel_main(void) {
             }
         }
 
-        if (debug_boot_vfs) printf("BOOT: procfs_init...\n");
+        printf("BOOT: procfs_init...\n");
         procfs_init();
-        if (debug_boot_vfs) printf("BOOT: devfs_init...\n");
+        printf("BOOT: devfs_init...\n");
         devfs_init();
         if (tag_mod_initrd) {
             multiboot_module_t tmp_mod;
@@ -370,24 +325,24 @@ void kernel_main(void) {
         vfl_init();
         vfl_register_devfs();
 #endif
-        if (debug_boot_vfs) printf("BOOT: sysfs_init...\n");
+        printf("BOOT: sysfs_init...\n");
         sysfs_init();
         if (cmdline_get_lke())
             lke_init();
 
-        if (debug_boot_vfs) printf("BOOT: mounting /dev /proc /sys...\n");
+        printf("BOOT: mounting /dev /proc /sys...\n");
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
         vfs_mount(NULL, "/sys", "sysfs");
         vfs_mount(NULL, "/tmp", "tmpfs");
 
         if (use_squashfs) {
-            if (debug_boot_vfs) printf("BOOT: vfs_block_squashfs_access...\n");
+            printf("BOOT: vfs_block_squashfs_access...\n");
             vfs_block_squashfs_access();
         }
 
         if (!use_squashfs) {
-            if (debug_boot_vfs) printf("BOOT: ramfs_internalize_all...\n");
+            printf("BOOT: ramfs_internalize_all...\n");
             ramfs_internalize_all();
         }
 
@@ -399,7 +354,7 @@ void kernel_main(void) {
             printf("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
         }
 
-        if (debug_boot_vfs) printf("BOOT: boot file export done\n");
+        printf("BOOT: boot file export done\n");
 
 #if CONFIG_DRIVER_AHCI
         if (ahci_init() == 0)
@@ -540,18 +495,18 @@ void kernel_main(void) {
 
     cr3 = read_cr3();
     cr0 = read_cr0();
-    if (debug_boot_hw) {
+    {
         printf("CR3="); print_hex(cr3);
         printf(" CR0="); print_hex(cr0);
         printf("\n");
     }
-    if (debug_boot_hw) printf("BOOT: pic_remap...\n");
+    printf("BOOT: pic_remap...\n");
     pic_remap();
-    if (debug_boot_hw) printf("BOOT: kstack_init...\n");
+    printf("BOOT: kstack_init...\n");
     kstack_init();
-    if (debug_boot_hw) printf("BOOT: init_tasks...\n");
+    printf("BOOT: init_tasks...\n");
     init_tasks();
-    if (debug_boot_hw) printf("BOOT: smp_init...\n");
+    printf("BOOT: smp_init...\n");
     smp_init();
 
     power_init();
@@ -576,16 +531,6 @@ void kernel_main(void) {
     mouse_init();
 #endif
     syscall_init();
-
-    if (debug_boot_hw) {
-        terminal_writestring("PIC master mask: 0x");
-        master_mask = inb(0x21);
-        print_hex(master_mask);
-        terminal_writestring("\nPIC slave mask: 0x");
-        slave_mask = inb(0xA1);
-        print_hex(slave_mask);
-        terminal_writestring("\n");
-    }
 
 #if CONFIG_DRIVER_AHCI
     if (!ahci_done && ahci_init() == 0) {
@@ -655,10 +600,8 @@ void kernel_main(void) {
     printf("NET: Network stack disabled\n");
 #endif
 
-    if (debug_boot_hw) terminal_writestring("BOOT: About to execute STI...\n");
     smp_enable_scheduling();
     asm volatile ("sti");
-    if (debug_boot_hw) terminal_writestring("BOOT: STI completed! Interrupts enabled.\n");
     if (vring_boot_enabled) {
         kprint_enable();
         extern void watchdog_init(void);
@@ -667,8 +610,6 @@ void kernel_main(void) {
         printf("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
 
-    if (debug_memory) printf("BOOT: heap: verify before launching init\n");
-    if (debug_memory) heap_verify();
     console_reclaim_unused();
     fb_reclaim_unused();
     slab_reclaim_empty();
@@ -702,25 +643,10 @@ void kernel_main(void) {
         if (!init_task) init_task = launch_user_path("/sbin/init", 0);
         if (!init_task) init_task = launch_user_path("/bin/init", 0);
     }
-    if (debug_memory) printf("BOOT: heap: verify after launch attempt\n");
-    if (debug_memory) heap_verify();
     if (!init_task) {
         kernel_panic("FATAL: no init executable found (/init, /sbin/init, /bin/init).", NULL);
     }
     watchdog_set_init_pid((int)init_task->pid);
-
-    if (debug_boot_hw) {
-        t = ready_queue_head;
-        printf("BOOT: Run queue: ");
-        if (t) {
-            start = t;
-            do {
-                printf("[%u s=%d u=%d] ", t->id, t->state, t->is_user);
-                t = t->next;
-            } while (t && t != start);
-        }
-        printf("\n");
-    }
 
     sleep_ticks(50);
 

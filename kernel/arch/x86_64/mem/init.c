@@ -1,7 +1,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/multiboot2.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <string.h>
 
 extern char _kernel_end[];
@@ -174,13 +173,11 @@ void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     }
     num_regions = merged_count;
 
-    DEBUG_MEMORY("Merged: %d regions\n", num_regions);
 
     if (num_regions > 0) {
         kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
         kernel_end_phys = (kernel_end_phys + 0xFFF) & ~0xFFFUL;
 
-        DEBUG_MEMORY("Kernel ends at phys 0x%016lX\n", (unsigned long)kernel_end_phys);
 
         bump_current = kernel_end_phys;
         active_region = 0;
@@ -215,8 +212,6 @@ void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
             }
         }
 
-        DEBUG_MEMORY("PMM bump ready: Starting at 0x%08lX\n", (unsigned long)bump_current);
-        DEBUG_MEMORY("PMM low bump starting at 0x%08lX\n", (unsigned long)low_bump);
     }
 
     num_reserved_regions = 0;

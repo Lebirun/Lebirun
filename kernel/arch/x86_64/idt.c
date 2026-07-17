@@ -1,11 +1,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <lebirun/tty.h>
-#include <lebirun/debug.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/console.h>
 #include <lebirun/task.h>
-#include <lebirun/syscall.h>
+#include <lebirun/kernel_syscall.h>
 #include <lebirun/io.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/registers.h>
@@ -556,12 +555,8 @@ registers_t* interrupt_handler(registers_t* regs)
             }
 
             if (did_exec) {
-                DEBUG_IDT("IDT: exec completed, preparing to switch CR3\n");
-                DEBUG_IDT("IDT: exec regs: rip=0x%016lX rsp=0x%016lX cs=0x%lX ss=0x%lX\n",
-                       regs->rip, regs->rsp, regs->cs, regs->ss);
                 
                 if (regs->rsp < 0x1000 || regs->rsp >= KERNEL_VMA) {
-                    DEBUG_IDT("IDT: CRITICAL: rsp=0x%016lX is invalid!\n", regs->rsp);
                     __asm__ volatile ("cli; hlt");
                 }
                 
@@ -596,7 +591,6 @@ registers_t* interrupt_handler(registers_t* regs)
                         "movq %%rax, %%cr3\n\t"
                         ::: "rax", "memory"
                     );
-                    DEBUG_IDT("IDT: exec completed, switched CR3 from 0x%016lX to 0x%016lX\n", old_cr3, new_cr3);
                 }
                 if (current_task) {
                     current_task->cr3 = new_cr3;

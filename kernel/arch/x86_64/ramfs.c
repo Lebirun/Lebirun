@@ -3,7 +3,6 @@
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/idt.h>
-#include <lebirun/debug.h>
 #include <lebirun/task.h>
 #include <string.h>
 #include <stdio.h>
@@ -321,7 +320,6 @@ int ramfs_create_file(const char *path, uint16_t permissions) {
     ramfs_lock();
     ramfs_node_t *parent = ramfs_find_parent(path, name, sizeof(name));
     if (!parent || parent->type != RAMFS_NODE_DIR) {
-        DEBUG_RAMFS("RAMFS_CREATE_FILE: Failed to find parent for '%s' (parent=%p)\n", path, parent);
         ramfs_unlock();
         return RAMFS_ERR_NOENT;
     }
@@ -329,7 +327,6 @@ int ramfs_create_file(const char *path, uint16_t permissions) {
     ramfs_node_lock(parent);
     
     if (ramfs_find_child(parent, name)) {
-        DEBUG_RAMFS("RAMFS_CREATE_FILE: File '%s' already exists in parent\n", name);
         ramfs_node_unlock(parent);
         ramfs_unlock();
         return RAMFS_ERR_EXIST;
@@ -827,8 +824,6 @@ int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t
     ramfs_lock();
     ramfs_node_t *node = ramfs_find_node(path);
     if (!node || node->type != RAMFS_NODE_FILE) {
-        DEBUG_RAMFS("RAMFS_WRITE: Failed to find node for '%s' (node=%p type=%d)\n", 
-                 path, node, node ? node->type : -1);
         ramfs_unlock();
         return RAMFS_ERR_NOENT;
     }
@@ -877,10 +872,6 @@ int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t
     if (node->vfs_node) {
         node->vfs_node->length = node->length;
         node->vfs_node->mtime = node->mtime;
-        DEBUG_RAMFS("RAMFS_WRITE: '%s' ramfs_node->length=%llu vfs_node->length=%llu vfs_node=%p\n", 
-               node->name, (unsigned long long)node->length, (unsigned long long)node->vfs_node->length, node->vfs_node);
-    } else {
-        DEBUG_RAMFS("RAMFS: WARNING: node->vfs_node is NULL for '%s', cannot update vfs length\n", node->name);
     }
     
     ramfs_node_unlock(node);
@@ -1302,8 +1293,6 @@ static vfs_node_t *ramfs_vfs_finddir(vfs_node_t *node, const char *name) {
                 result->atime = child->atime;
                 result->mtime = child->mtime;
                 result->ctime = child->ctime;
-                DEBUG_RAMFS("RAMFS_FINDDIR: '%s' -> ramfs_node=%p vfs_node=%p length=%llu\n",
-                       name, child, result, (unsigned long long)result->length);
             }
             ramfs_node_unlock(rn);
             ramfs_unlock();

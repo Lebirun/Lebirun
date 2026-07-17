@@ -1,5 +1,4 @@
 #include "syscall_defs.h"
-#include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/panic.h>
@@ -370,7 +369,6 @@ static int sys_exit(int code, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
     asm volatile("cli");
-    DEBUG_SYSCALL("sys_exit: user task exiting with code %d\n", code);
     asm volatile("sti");
     task_exit_deferred((uint64_t)code);
     schedule();

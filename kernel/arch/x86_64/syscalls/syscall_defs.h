@@ -2,9 +2,8 @@
 #define _SYSCALL_DEFS_H
 
 #include <lebirun/registers.h>
-#include <lebirun/syscall.h>
+#include <lebirun/kernel_syscall.h>
 #include <lebirun/tty.h>
-#include <lebirun/debug.h>
 #include <string.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/mutex.h>

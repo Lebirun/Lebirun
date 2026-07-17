@@ -1,6 +1,5 @@
 #include "syscall_defs.h"
 #include <lebirun/pit.h>
-#include <lebirun/debug.h>
 #include <lebirun/pty.h>
 #include <lebirun/common.h>
 #include <lebirun/ramfs.h>

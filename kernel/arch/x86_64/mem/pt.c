@@ -1,6 +1,5 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <lebirun/spinlock.h>
 #include <string.h>
 

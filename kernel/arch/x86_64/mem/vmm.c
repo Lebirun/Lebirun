@@ -1,6 +1,5 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <string.h>
 
 extern void pmm_zero_page_phys(uint64_t phys_addr);

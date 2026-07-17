@@ -1,7 +1,6 @@
 #include "syscall_defs.h"
 #include <lebirun/gdt.h>
 #include <lebirun/task.h>
-#include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <stdio.h>
 #include <string.h>
@@ -337,10 +336,7 @@ void do_syscall(registers_t *regs) {
         regs->rax = result;
     } else {
         __asm__ volatile ("" ::: "memory");
-        DEBUG_SYSCALL("do_syscall: exec completed, regs=%p eip=0x%016lX eax=0x%016lX\n", 
-               regs, regs->rip, regs->rax);
         if (regs->rip < 0x1000 || regs->rip >= KERNEL_VMA) {
-            DEBUG_SYSCALL("do_syscall: CRITICAL: regs->rip corrupted after exec! eip=0x%016lX\n", regs->rip);
             __asm__ volatile ("cli; hlt");
         }
     }

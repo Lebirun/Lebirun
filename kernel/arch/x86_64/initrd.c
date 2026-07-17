@@ -4,12 +4,9 @@
 #include <lebirun/vfs.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/squashfs.h>
-#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
-
-static inline bool initrd_should_log(void) { return debug_initrd; }
 
 static initrd_header_t *initrd_header = NULL; 
 static initrd_file_header_t *file_headers = NULL;
@@ -67,7 +64,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mod_size;
     uint64_t start_page;
     uint64_t end_page;
-    if (initrd_should_log()) {
+    {
         serial_puts("\n=== INITRD INIT ===\n");
         serial_puts("mods_count="); serial_printf_dec(mods_count);
         serial_puts(" mods_addr=0x"); serial_printf_hex(mods_addr); serial_puts("\n");
@@ -83,14 +80,14 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
 
     mods_start_page = mods_addr & ~0xFFF;
     mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
-    if (initrd_should_log()) printf("INITRD: Mapping multiboot array phys 0x%016lX - 0x%016lX\n", mods_start_page, mods_end_page);
+    printf("INITRD: Mapping multiboot array phys 0x%016lX - 0x%016lX\n", mods_start_page, mods_end_page);
     for (uint64_t phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
         uint64_t virt = phys + KERNEL_VMA;
         vmm_map_page(virt, phys, 0x003);
     }
 
     multiboot_module_t *mod = (multiboot_module_t *)(mods_addr + KERNEL_VMA);
-    if (initrd_should_log()) printf("INITRD: Using module at virtual 0x%016lX (phys 0x%016lX - 0x%016lX)\n", (uint64_t)mod, (uint64_t)mod->mod_start, (uint64_t)mod->mod_end);
+    printf("INITRD: Using module at virtual 0x%016lX (phys 0x%016lX - 0x%016lX)\n", (uint64_t)mod, (uint64_t)mod->mod_start, (uint64_t)mod->mod_end);
     
     mod_start_phys = mod->mod_start;
     mod_end_phys = mod->mod_end;
@@ -99,7 +96,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     initrd_mod0_phys_start = mod_start_phys;
     initrd_mod0_phys_end = mod_end_phys;
     
-    if (initrd_should_log()) printf("INITRD: Module at phys 0x%016lX - 0x%016lX (%lu bytes) cmdline=0x%016lX\n", 
+    printf("INITRD: Module at phys 0x%016lX - 0x%016lX (%lu bytes) cmdline=0x%016lX\n",
            mod_start_phys, mod_end_phys, mod_size, mod->cmdline);
 
     if (mod_size < sizeof(initrd_header_t)) {
@@ -109,7 +106,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
 
     start_page = mod_start_phys & ~0xFFF;
     end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
-    if (initrd_should_log()) printf("INITRD: Mapping phys 0x%016lX - 0x%016lX into kernel space\n", start_page, end_page);
+    printf("INITRD: Mapping phys 0x%016lX - 0x%016lX into kernel space\n", start_page, end_page);
     for (uint64_t phys = start_page; phys < end_page; phys += 0x1000) {
         uint64_t virt = phys + KERNEL_VMA;
         vmm_map_page(virt, phys, 0x003);
@@ -117,7 +114,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
 
     initrd_base = (uint8_t *)(mod_start_phys + KERNEL_VMA);
 
-    if (initrd_should_log()) {
+    {
         serial_puts("INITRD: First 64 bytes: ");
         printf("INITRD: First 64 bytes of module: ");
         for (uint64_t i = 0; i < 64 && i < mod_size; i++) {
@@ -143,13 +140,13 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
                (unsigned int)initrd_header->magic, (unsigned int)INITRD_MAGIC);
         return;
     }
-    if (initrd_should_log()) serial_puts("INITRD: Magic OK\n");
+    serial_puts("INITRD: Magic OK\n");
 
     initrd_version = initrd_header->version;
     if (initrd_version == 0) initrd_version = 1;
 
     file_count = initrd_header->num_entries;
-    if (initrd_should_log()) {
+    {
         serial_puts("INITRD: Found "); serial_printf_dec(file_count); serial_puts(" files (version ");
         serial_printf_dec(initrd_version); serial_puts(")\n");
         printf("INITRD: Found %u files (version %u)\n", file_count, initrd_version);
@@ -162,7 +159,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    if (initrd_should_log()) {
+    {
         printf("INITRD: Headers OK - listing headers:\n");
         for (uint64_t i = 0; i < file_count; i++) {
             char tmpname[65];
@@ -212,7 +209,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         }
     }
 
-    if (initrd_should_log()) {
+    {
         serial_puts("INITRD: Initialized successfully!\n");
         printf("INITRD: Initialized successfully\n");
     }
@@ -462,7 +459,7 @@ static uint64_t initrd_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size
     avail = f->length - offset;
     to_read = (size < avail) ? size : avail;
 
-    if (initrd_should_log()) {
+    {
         uint64_t cr3;
         __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
         printf("INITRD: read dest=0x%016lX src=0x%016lX offset=%u to_read=%lu cr3=0x%016lX\n",
@@ -477,7 +474,7 @@ static uint64_t initrd_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size
 
     memcpy(buffer, f->data + offset, to_read);
 
-    if (initrd_should_log()) {
+    {
         if (to_read >= 4) {
             printf("INITRD: dest-after first4: %02X %02X %02X %02X\n",
                    ((uint8_t*)buffer)[0], ((uint8_t*)buffer)[1], ((uint8_t*)buffer)[2], ((uint8_t*)buffer)[3]);
@@ -1050,11 +1047,9 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
                     if (ret == 0) files_copied++;
                     else errors++;
                 } else {
-                    DEBUG_INITRD("WARNING: no data for '%s' (data=%p length=%u)\n", destpath, f->data, f->length);
                     files_copied++;
                 }
             } else {
-                DEBUG_INITRD("ERROR: ramfs_create_file failed for '%s' ret=%d\n", destpath, ret);
                 errors++;
             }
         }

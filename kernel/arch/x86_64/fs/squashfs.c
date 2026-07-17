@@ -2,7 +2,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/vfs.h>
-#include <lebirun/debug.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -311,7 +310,6 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
 
     base = squashfs_ctx.base;
     if (block_offset + 2 > squashfs_ctx.size) {
-        DEBUG_FS_OTHER("block_offset 0x%llX + 2 > size 0x%X\n", (unsigned long long)block_offset, squashfs_ctx.size);
         return NULL;
     }
     
@@ -319,10 +317,8 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     compressed = !(header & 0x8000);
     data_size = header & 0x7FFF;
     
-    DEBUG_FS_OTHER("metadata header=0x%04X compressed=%d data_size=%u\n", header, compressed, data_size);
     
     if (block_offset + 2 + data_size > squashfs_ctx.size) {
-        DEBUG_FS_OTHER("block data exceeds image size\n");
         return NULL;
     }
     
@@ -344,20 +340,17 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     scratch_pages = 0;
     scratch = sqfs_temp_alloc(scratch_size, &scratch_phys, &scratch_pages);
     if (!scratch) {
-        DEBUG_FS_OTHER("scratch alloc failed for metadata block\n");
         return NULL;
     }
     
     decomp_ret = squashfs_decompress(src, data_size, scratch, scratch_size, squashfs_ctx.compression_id);
     if (decomp_ret < 0) {
         sqfs_decomp_failures++;
-        DEBUG_FS_OTHER("decompression failed\n");
         sqfs_temp_free(scratch_phys, scratch_pages);
         return NULL;
     }
     if (decomp_ret > 8192) {
         sqfs_decomp_oversize++;
-        DEBUG_FS_OTHER("decompression failed\n");
         sqfs_temp_free(scratch_phys, scratch_pages);
         return NULL;
     }
@@ -577,7 +570,6 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     block = (uint64_t)(inode_ref >> 16);
     offset = (uint16_t)(inode_ref & 0xFFFF);
     
-    DEBUG_FS_OTHER("read_inode ref=0x%llX block=%u offset=0x%X\n", (unsigned long long)inode_ref, block, offset);
     
     block_offset = squashfs_ctx.inode_table_start + block;
 
@@ -607,7 +599,6 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     }
     
     if (offset >= meta_size) {
-        DEBUG_FS_OTHER("inode offset 0x%X >= metadata size 0x%X\n", offset, meta_size);
         if (need_free) kfree(metadata);
         return NULL;
     }
@@ -626,7 +617,6 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     }
 
     if (!base) base = (squashfs_base_inode_t *)(metadata + offset);
-    DEBUG_FS_OTHER("inode at offset 0x%X: type=%u mode=0x%X\n", offset, base->inode_type, base->mode);
     
     switch (base->inode_type) {
         case SQUASHFS_DIR_TYPE:
@@ -749,7 +739,6 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
     
     base = (squashfs_base_inode_t *)squashfs_read_inode(inode_ref);
     if (!base) {
-        DEBUG_FS_OTHER("Failed to read inode 0x%llX for '%s'\n", (unsigned long long)inode_ref, name);
         sqfs_free_node(snode);
         return NULL;
     }
@@ -883,14 +872,11 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     temp_phys = 0;
     temp_pages = 0;
 
-    DEBUG_FS_OTHER("read_file_data inode_ref=0x%llX off=%u size=%u\n", (unsigned long long)inode_ref, offset, size);
 
     if (squashfs_load_inode_metadata(inode_ref, &metadata, &meta_size, &inode_offset, &base, &meta_need_free) != 0) {
-        DEBUG_FS_OTHER("read_file_data: load_inode_metadata failed\n");
         return 0;
     }
 
-    DEBUG_FS_OTHER("read_file_data: inode_type=%u meta_size=%u inode_offset=%u\n", base->inode_type, meta_size, inode_offset);
 
     if (base->inode_type == SQUASHFS_REG_TYPE) {
         reg = (squashfs_reg_inode_t *)base;
@@ -899,7 +885,6 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
         fragment = reg->fragment;
         frag_offset = reg->offset;
         block_list_offset = inode_offset + sizeof(squashfs_reg_inode_t);
-        DEBUG_FS_OTHER("REG file_size=%u start_block=0x%X frag=%u frag_off=%u\n", file_size, start_block, fragment, frag_offset);
     } else if (base->inode_type == SQUASHFS_LREG_TYPE) {
         lreg = (squashfs_lreg_inode_t *)base;
         file_size = (uint64_t)lreg->file_size;
@@ -907,9 +892,7 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
         fragment = lreg->fragment;
         frag_offset = lreg->offset;
         block_list_offset = inode_offset + sizeof(squashfs_lreg_inode_t);
-        DEBUG_FS_OTHER("LREG file_size=%u start_block=0x%X frag=%u frag_off=%u\n", file_size, start_block, fragment, frag_offset);
     } else {
-        DEBUG_FS_OTHER("read_file_data: not a regular file (type=%u)\n", base->inode_type);
         if (meta_need_free) kfree(metadata);
         return 0;
     }
@@ -931,11 +914,9 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     }
     tail_size = file_size % block_size;
 
-    DEBUG_FS_OTHER("block_count=%u tail_size=%u block_size=%u block_list_offset=%u\n", block_count, tail_size, block_size, block_list_offset);
 
     if (block_count > 0) {
         if (block_list_offset + block_count * 4 > meta_size) {
-            DEBUG_FS_OTHER("block_list overflow: offset=%u + count*4=%u > meta_size=%u\n", block_list_offset, block_count * 4, meta_size);
             if (meta_need_free) kfree(metadata);
             return 0;
         }
@@ -955,12 +936,10 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
         uncompressed_size = block_size;
 
         if (stored_size == 0 || stored_size > block_size * 2) {
-            DEBUG_FS_OTHER("invalid block[%u] stored_size=%u (entry=0x%08X)\n", i, stored_size, entry_size);
             break;
         }
 
         if (data_pos + stored_size > squashfs_ctx.size) {
-            DEBUG_FS_OTHER("block[%u] exceeds image: pos=0x%X + size=%u > 0x%X\n", i, data_pos, stored_size, squashfs_ctx.size);
             break;
         }
 
@@ -985,7 +964,6 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
                 if (temp_size == 0) temp_size = 1;
                 temp = sqfs_temp_alloc(temp_size, &temp_phys, &temp_pages);
                 if (!temp) {
-                    DEBUG_FS_OTHER("OOM allocating %u bytes for block decompression\n", uncompressed_size);
                     break;
                 }
                 decomp_ret = squashfs_decompress(squashfs_ctx.base + data_pos, stored_size, temp, temp_size, squashfs_ctx.compression_id);

@@ -155,17 +155,73 @@ static void serial_drain(uint64_t max_chars) {
     (void)max_chars;
 }
 
+static void klog_persist_append_locked(const char *buf, uint64_t len) {
+    int ppos;
+    int need;
+    int newcap;
+    int discard;
+    int remaining;
+    char *nb;
+    uint64_t avail;
+
+    if (!klog_persist_buf || !buf || len == 0) return;
+    if (len >= KLOG_PERSIST_SZ) {
+        buf += len - (KLOG_PERSIST_SZ - 1);
+        len = KLOG_PERSIST_SZ - 1;
+    }
+
+    ppos = klog_persist_pos;
+    need = ppos + (int)len + 1;
+    if (need > klog_persist_cap && klog_persist_cap < KLOG_PERSIST_SZ) {
+        newcap = klog_persist_cap ? klog_persist_cap * 2 : need;
+        while (newcap < need && newcap < KLOG_PERSIST_SZ) newcap *= 2;
+        if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
+        nb = krealloc(klog_persist_buf, newcap);
+        if (nb) {
+            klog_persist_buf = nb;
+            klog_persist_cap = newcap;
+        }
+    }
+
+    avail = (uint64_t)(klog_persist_cap - ppos - 1);
+    if (len > avail && klog_persist_cap == KLOG_PERSIST_SZ) {
+        discard = (int)(len - avail);
+        while (discard < ppos && klog_persist_buf[discard - 1] != '\n') discard++;
+        remaining = ppos - discard;
+        if (remaining > 0) {
+            memmove(klog_persist_buf, klog_persist_buf + discard, (size_t)remaining);
+        }
+        ppos = remaining;
+        klog_persist_pos = ppos;
+        avail = (uint64_t)(klog_persist_cap - ppos - 1);
+    }
+
+    if (len <= avail) {
+        memcpy(klog_persist_buf + ppos, buf, (size_t)len);
+        klog_persist_pos = ppos + (int)len;
+        klog_persist_buf[klog_persist_pos] = '\0';
+    }
+}
+
+void klog_persist_enable(void) {
+    uint64_t flags;
+
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
+    klog_early_done = 1;
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
+}
+
 static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     uint64_t flags;
     klog_item_t *it;
     klog_item_t *new_ring;
     klog_item_t *old_ring;
     int ppos;
-    int need;
     int newcap;
     int eavail;
     char *nb;
-    uint64_t avail;
     uint64_t ring_len;
     uint64_t new_capacity;
     uint64_t i;
@@ -175,24 +231,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
     if (klog_persist_buf) {
-        ppos = klog_persist_pos;
-        need = ppos + (int)len + 1;
-        if (need > klog_persist_cap) {
-            newcap = klog_persist_cap ? klog_persist_cap * 2 : need;
-            while (newcap < need) newcap *= 2;
-            if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
-            nb = krealloc(klog_persist_buf, newcap);
-            if (nb) {
-                klog_persist_buf = nb;
-                klog_persist_cap = newcap;
-            }
-        }
-        avail = klog_persist_cap - ppos - 1;
-        if ((int)len <= (int)avail && avail > 0) {
-            memcpy(klog_persist_buf + ppos, buf, len);
-            klog_persist_pos = ppos + (int)len;
-            klog_persist_buf[klog_persist_pos] = '\0';
-        }
+        klog_persist_append_locked(buf, len);
     } else if (!klog_early_done) {
         eavail = KLOG_EARLY_SZ - klog_early_pos - 1;
         if ((int)len <= eavail && eavail > 0) {
@@ -203,9 +242,8 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     } else {
         ppos = klog_early_pos;
         if (ppos >= KLOG_PERSIST_SZ) ppos = KLOG_PERSIST_SZ - 1;
-        need = ppos + (int)len + 1;
-        if (need > KLOG_PERSIST_SZ) need = KLOG_PERSIST_SZ;
-        newcap = need;
+        newcap = ppos + (int)len + 1;
+        if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
         nb = (char *)kmalloc(newcap);
         if (nb) {
             klog_persist_buf = nb;
@@ -213,12 +251,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
             klog_persist_pos = ppos;
             if (ppos > 0) memcpy(klog_persist_buf, klog_early_buf, ppos);
             klog_persist_buf[klog_persist_pos] = '\0';
-            avail = klog_persist_cap - ppos - 1;
-            if ((int)len <= (int)avail && avail > 0) {
-                memcpy(klog_persist_buf + ppos, buf, len);
-                klog_persist_pos = ppos + (int)len;
-                klog_persist_buf[klog_persist_pos] = '\0';
-            }
+            klog_persist_append_locked(buf, len);
         }
     }
     spin_unlock(&klog_persist_lock);
@@ -285,40 +318,59 @@ static int klog_dequeue(klog_item_t *out) {
 int klog_snapshot(char *buf, int bufsz) {
     int len;
     const char *src;
+    uint64_t flags;
 
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
     src = klog_persist_buf;
     len = klog_persist_pos;
     if (!src && klog_early_pos > 0) {
         src = klog_early_buf;
         len = klog_early_pos;
     }
-    if (!buf || bufsz <= 0) return len;
+    if (!buf || bufsz <= 0) {
+        spin_unlock(&klog_persist_lock);
+        klog_irqrestore(flags);
+        return len;
+    }
 
     if (!src || len <= 0) {
         buf[0] = '\0';
+        spin_unlock(&klog_persist_lock);
+        klog_irqrestore(flags);
         return 0;
     }
     if (len >= bufsz) len = bufsz - 1;
     memcpy(buf, src, len);
     buf[len] = '\0';
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
     return len;
 }
 
 int klog_snapshot_range(char *buf, int offset, int count) {
     int len;
     const char *src;
+    uint64_t flags;
 
     if (!buf || count <= 0) return 0;
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
     src = klog_persist_buf;
     len = klog_persist_pos;
     if (!src && klog_early_pos > 0) {
         src = klog_early_buf;
         len = klog_early_pos;
     }
-    if (!src) return 0;
-    if (offset >= len) return 0;
+    if (!src || offset >= len) {
+        spin_unlock(&klog_persist_lock);
+        klog_irqrestore(flags);
+        return 0;
+    }
     if (offset + count > len) count = len - offset;
     memcpy(buf, src + offset, count);
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
     return count;
 }
 

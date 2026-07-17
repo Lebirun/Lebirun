@@ -1,7 +1,6 @@
 #include <lebirun/elf.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
-#include <lebirun/debug.h>
 #include <lebirun/vfs.h>
 #include <lebirun/task.h>
 #include <string.h>
@@ -154,7 +153,6 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
 
     valid = elf_validate(data, size);
     if (valid != 0) {
-        DEBUG_ELF("elf_load: validation failed with code %d\n", valid);
         return valid;
     }
 
@@ -205,11 +203,8 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
         filesz = phdr[i].p_filesz;
         offset = phdr[i].p_offset;
 
-        DEBUG_ELF("elf_load: segment %d vaddr=0x%016lX memsz=0x%lX filesz=0x%lX offset=0x%lX\n",
-                 i, vaddr, memsz, filesz, offset);
 
         if (offset + filesz > size) {
-            DEBUG_ELF("elf_load: segment extends beyond file\n");
             if (page_list) {
                 for (j = 0; j < page_index; j++) {
                     pfa_free(page_list[j]);
@@ -238,7 +233,6 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
             
             phys = pfa_alloc();
             if (!phys) {
-                DEBUG_ELF("elf_load: out of physical memory\n");
                 if (page_list) {
                     for (j = 0; j < page_index; j++) {
                         pfa_free(page_list[j]);
@@ -321,28 +315,6 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
             }
         }
     }
-
-    {
-        uint64_t entry_page_phys = vmm_get_phys_in_pml4(pd_phys, info->entry_point & ~0xFFF);
-        if (entry_page_phys) {
-            uint8_t entry_code[16];
-            vmm_read_from_pml4(pd_phys, info->entry_point, entry_code, 16);
-            DEBUG_ELF("elf_load: entry=0x%016lX phys=0x%016lX code: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
-                     info->entry_point, entry_page_phys,
-                     entry_code[0], entry_code[1], entry_code[2], entry_code[3],
-                     entry_code[4], entry_code[5], entry_code[6], entry_code[7],
-                     entry_code[8], entry_code[9], entry_code[10], entry_code[11],
-                     entry_code[12], entry_code[13], entry_code[14], entry_code[15]);
-            if (entry_code[0] != 0x48 || entry_code[1] != 0x31 || entry_code[2] != 0xED) {
-                DEBUG_ELF("elf_load: entry code mismatch\n");
-            }
-        } else {
-            DEBUG_ELF("elf_load: entry point 0x%016lX not mapped\n", info->entry_point);
-        }
-    }
-
-    DEBUG_ELF("elf_load: done entry=0x%016lX load_base=0x%016lX load_end=0x%016lX bss_end=0x%016lX\n",
-             info->entry_point, info->load_base, info->load_end, info->bss_end);
 
     return 0;
 }
@@ -736,7 +708,6 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
 
     valid = elf_validate_so(data, size);
     if (valid != 0) {
-        DEBUG_ELF("elf_load_so: validation failed with code %d\n", valid);
         return valid;
     }
 

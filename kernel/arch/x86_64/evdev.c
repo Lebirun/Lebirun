@@ -2,7 +2,6 @@
 #include <lebirun/keyboard.h>
 #include <lebirun/mouse.h>
 #include <lebirun/pit.h>
-#include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <string.h>
 

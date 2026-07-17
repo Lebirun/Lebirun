@@ -1,6 +1,5 @@
 #include <lebirun/task.h>
 #include <lebirun/pipe.h>
-#include <lebirun/debug.h>
 #include <lebirun/registers.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
@@ -1190,7 +1189,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     new_task->cr3 = cr3;
     new_task->console_id = -1; 
     new_task->running_cpu = -1;
-    DEBUG_TASK("new task id=%u cr3=0x%016lX\n", new_task->id, cr3);
     new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     new_task->stack_size = 0;
@@ -1278,7 +1276,6 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.ds = new_task->regs.es = 0x10;
     }
 
-    DEBUG_TASK("Task created: id=%u pid=%u RIP=0x%016lX RSP=0x%016lX%s\n", new_task->id, new_task->pid, (uint64_t)entry, new_task->regs.rsp, user_mode ? " (USER)" : "");
 
     lock_scheduler();
     new_task->all_next = all_tasks_head;
@@ -3118,7 +3115,6 @@ pid_t task_fork(registers_t *parent_regs) {
         return -1;
     }
 
-    DEBUG_TASK("task_fork: creating child task with cloned pd=0x%016lX\n", child_pd);
 
     child = (task_t*)kmalloc(sizeof(task_t));
     kernel_stack_base = kstack_alloc();
@@ -3286,7 +3282,6 @@ pid_t task_fork(registers_t *parent_regs) {
     add_task_to_runqueue(child);
     unlock_scheduler();
 
-    DEBUG_TASK("task_fork: parent pid=%d, child pid=%d\n", parent->pid, child->pid);
 
     return child->pid;
 }
@@ -3348,7 +3343,6 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
         return -1;
     }
 
-    DEBUG_TASK("task_exec: replacing task %d with ELF binary (%u bytes)\n", current_task->pid, bin_size);
 
     task_fd_close_cloexec(current_task);
 
@@ -3559,8 +3553,6 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
         current_task->exec_old_pages = old_user_pages;
         current_task->exec_old_pages_count = old_user_pages_count;
 
-        DEBUG_TASK("task_exec: new ELF entry at 0x%016lX, stack at 0x%016lX new_pd=0x%016lX (CR3 switch deferred)\n", 
-                 final_entry, final_sp, new_pd);
     }
 
     return 0;
@@ -3593,9 +3585,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint8_t random_bytes[16];
     uint64_t random_addr;
     uint64_t entry_to_use;
-    uint64_t stack_ptr;
-    uint64_t check_stack_base;
-    uint64_t check_stack_top;
     uint64_t final_entry;
     uint64_t final_sp;
     const char *base;
@@ -3609,16 +3598,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t tbl_bytes;
     int tbl_cap;
     int tbl_heap;
-
-    __asm__ volatile ("mov %%rsp, %0" : "=r"(stack_ptr));
-    if (current_task && current_task->kernel_stack_base) {
-        check_stack_base = (uint64_t)current_task->kernel_stack_base;
-        check_stack_top = check_stack_base + current_task->kernel_stack_size;
-        if (stack_ptr < check_stack_base || stack_ptr > check_stack_top) {
-            DEBUG_TASK("task_exec_with_args: STACK OVERFLOW rsp=0x%016lX base=0x%016lX top=0x%016lX\n",
-                     stack_ptr, check_stack_base, check_stack_top);
-        }
-    }
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
@@ -3792,16 +3771,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOEXEC;
     }
 
-    if (!use_node) {
-        uint64_t entry_phys;
-        uint64_t entry_page_addr;
-
-        entry_page_addr = elf_info.entry_point & ~0xFFFu;
-        entry_phys = vmm_get_phys_in_pml4(new_pd, entry_page_addr);
-        if (entry_phys == 0) {
-            DEBUG_TASK("task_exec_with_args: ERROR: entry page not mapped after elf_load\n");
-        }
-    }
     if (kernel_bin) kfree(kernel_bin);
 
     stack_page_count = 0;
@@ -4131,8 +4100,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     current_task->tls_limit = 0;
     task_write_fs_base(0);
 
-    DEBUG_TASK("task_exec_with_args: entry=0x%016lX rsp=0x%016lX new_pd=0x%016lX\n", 
-             final_entry, final_sp, new_pd);
 
     if (!use_node) {
         uint64_t entry_page;
@@ -4142,7 +4109,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         phys = vmm_get_phys_in_pml4(new_pd, entry_page);
         
         if (phys == 0) {
-            DEBUG_TASK("task_exec_with_args: FATAL: entry page not mapped in new_pd\n");
             if (current_task->user_pages) {
                 kfree(current_task->user_pages);
             }

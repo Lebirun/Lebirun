@@ -1,6 +1,5 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
-#include <lebirun/debug.h>
 #include <lebirun/smp.h>
 #include <string.h>
 
@@ -180,8 +179,6 @@ int demand_commit_page(uint64_t virt_addr) {
     
     demand_lock_release(eflags);
     
-    DEBUG_MEMORY("demand_commit_page: committed 0x%016lX -> phys 0x%016lX\n", 
-                 page_virt, (uint64_t)phys_page);
     
     return 0;
 }

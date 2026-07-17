@@ -1,6 +1,5 @@
 #include <lebirun/io.h>
 #include <lebirun/tty.h>
-#include <lebirun/debug.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/task.h>
 #include <lebirun/console.h>

@@ -2,7 +2,6 @@
 #include <lebirun/tty.h>
 #include <lebirun/mutex.h>
 #include <lebirun/task.h>
-#include <lebirun/debug.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/drivers/sata/ahci.h>
@@ -1546,8 +1545,6 @@ int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags) {
     if (size) *size = node->length;
     if (flags) *flags = node->flags;
     
-    DEBUG_VFS("VFS_STAT: fd=%d node=%p name='%s' length=%llu flags=0x%X\n", 
-           fd, node, node->name, (unsigned long long)node->length, node->flags);
     
     return 0;
 }

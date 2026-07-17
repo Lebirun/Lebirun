@@ -1,5 +1,5 @@
-#ifndef SYSCALL_H
-#define SYSCALL_H
+#ifndef KERNEL_SYSCALL_H
+#define KERNEL_SYSCALL_H
 
 #include <lebirun/registers.h>
 #include <lebirun/common.h>

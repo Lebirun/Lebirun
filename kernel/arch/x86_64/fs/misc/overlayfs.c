@@ -2,7 +2,6 @@
 #include <lebirun/vfs.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/mem_map.h>
-#include <lebirun/debug.h>
 #include <lebirun/mutex.h>
 #include <string.h>
 #include <stdio.h>

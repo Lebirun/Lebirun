@@ -89,7 +89,6 @@ void kproc_yield(void);
 
 #define KPROC_MSG_PRINT_CHAR   0x0001
 #define KPROC_MSG_PRINT_STRING 0x0002
-#define KPROC_MSG_DEBUG_LOG    0x0003
 
 typedef struct {
     uint64_t type;
@@ -116,6 +115,7 @@ kproc_t *kproc_find_by_pid(int32_t pid);
 
 int klog_printf(int level, const char *fmt, ...);
 int klog_enqueue_raw(const char *buf, size_t len);
+void klog_persist_enable(void);
 int klog_drain_console0(uint64_t max_items);
 int klog_snapshot(char *buf, int bufsz);
 int klog_snapshot_range(char *buf, int offset, int count);

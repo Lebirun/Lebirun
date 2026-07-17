@@ -2,7 +2,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/vfs.h>
-#include <lebirun/debug.h>
 #include <string.h>
 
 static iso9660_context_t iso_ctx;

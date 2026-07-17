@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <crypt.h>
 #include <lebirun.h>
+#include <lebirun/syscall.h>
 #include <lebui.h>
 
 #define SECTOR_SIZE  512
@@ -17,18 +18,6 @@
 #define MAX_LINE     128
 #define LEBPKG_INSTALLED_DIR "/etc/lebpkg/installed"
 #define MBR_SIG      0xAA55
-
-int vfs_open(const char *path, int flags);
-int vfs_close_fd(int fd);
-int vfs_read_fd(int fd, void *buf, unsigned int count);
-int vfs_write_fd(int fd, const void *buf, unsigned int count);
-int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index);
-int vfs_stat(int fd, uint64_t *size, uint64_t *type);
-int vfs_create(const char *path, unsigned int perms);
-int vfs_mkdir(const char *path, unsigned int perms);
-int vfs_unlink(const char *path);
-int vfs_mounts(void);
-unsigned int getticks(void);
 
 typedef struct {
     uint8_t  status;
