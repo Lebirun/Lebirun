@@ -6,6 +6,7 @@
 #include <lebirun/idt.h>
 #include <lebirun/kstack.h>
 #include <lebirun/task.h>
+#include <lebirun/pit.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -637,21 +638,44 @@ void smp_start_aps(void) {
 
 void lapic_timer_init(uint64_t freq_hz) {
     uint64_t initial;
+    uint64_t reload;
+    uint64_t start_ticks;
+    uint64_t elapsed_ticks;
+    uint64_t timer_frequency;
+    uint64_t flags;
 
+    if (freq_hz == 0) freq_hz = 1000;
     lapic_write(LAPIC_REG_TIMER_DCR, 0x03);
 
     lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_MASKED | 32);
     lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
 
-    delay_ms(10);
+    __asm__ volatile ("pushfq; popq %0" : "=r"(flags) :: "memory");
+    __asm__ volatile ("sti" ::: "memory");
+    start_ticks = pit_get_ticks();
+    do {
+        __asm__ volatile ("hlt" ::: "memory");
+        elapsed_ticks = pit_get_ticks() - start_ticks;
+    } while (elapsed_ticks < 10);
+    __asm__ volatile ("cli" ::: "memory");
+
     initial = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
+    timer_frequency = pit_get_frequency();
+    if (timer_frequency == 0) timer_frequency = pit_freq;
+    if (timer_frequency == 0) timer_frequency = 1000;
+
+    reload = initial * timer_frequency;
+    reload /= elapsed_ticks * freq_hz;
+    if (reload == 0) reload = 1;
+    if (reload > 0xFFFFFFFFu) reload = 0xFFFFFFFFu;
 
     lapic_write(LAPIC_REG_TIMER,
                 LAPIC_TIMER_PERIODIC | 32);
-    lapic_timer_reload = (uint32_t)(initial * 100 / freq_hz);
+    lapic_timer_reload = (uint32_t)reload;
     lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
 
-    (void)freq_hz;
+    if (flags & (1u << 9))
+        __asm__ volatile ("sti" ::: "memory");
 }
 
 void smp_enable_scheduling(void) {
