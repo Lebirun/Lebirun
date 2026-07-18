@@ -448,10 +448,11 @@ static int sys_write(int fd, const char *buf, int len) {
     pipe_t *p;
 
     if (len == 0) return 0;
-    if (!buf || len < 0) return -1;
+    if (!buf) return -EFAULT;
+    if (len < 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
-    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
-    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
+    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
 
     tfd = NULL;
@@ -517,6 +518,11 @@ static int sys_write(int fd, const char *buf, int len) {
                         return -EPIPE;
                     }
                     while (p->count == p->buf_size) {
+                        if (tfd->flags & VFS_O_NONBLOCK) {
+                            if (heap_buf) kfree(kbuf);
+                            if (total > 0 || done > 0) return (int)(total + done);
+                            return -EAGAIN;
+                        }
                         waitq_add(&p->write_waitq, current_task);
                         block_current();
                         if (syscall_core_interrupted()) {
@@ -544,6 +550,9 @@ static int sys_write(int fd, const char *buf, int len) {
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
+            if (tfd->flags & VFS_O_APPEND) {
+                task_fd_position_set(tfd, node->length);
+            }
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
@@ -591,10 +600,11 @@ static int sys_read(int fd, char *buf, int len) {
     pipe_t *p;
 
     if (len == 0) return 0;
-    if (!buf || len < 0) return -1;
+    if (!buf) return -EFAULT;
+    if (len < 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
-    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
-    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
+    if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
 
     work_size = (uint64_t)len;
@@ -642,6 +652,10 @@ static int sys_read(int fd, char *buf, int len) {
                 if (p->writers <= 0) {
                     if (heap_buf) kfree(kbuf);
                     return 0;
+                }
+                if (tfd->flags & VFS_O_NONBLOCK) {
+                    if (heap_buf) kfree(kbuf);
+                    return -EAGAIN;
                 }
                 waitq_add(&p->read_waitq, current_task);
                 block_current();

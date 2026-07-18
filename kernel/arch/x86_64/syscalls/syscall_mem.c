@@ -399,7 +399,7 @@ static int sys_munmap(void *addr, size_t length) {
     if (!current_task) return -EINVAL;
     base = (uint64_t)addr;
     if (base & 0xFFF) return -EINVAL;
-    if (length == 0) return 0;
+    if (length == 0) return -EINVAL;
     if (base >= KERNEL_VMA) return -EINVAL;
 
     size = (length + 0xFFF) & ~0xFFFu;
@@ -420,8 +420,18 @@ static int sys_munmap(void *addr, size_t length) {
 }
 
 static int sys_mprotect(void *addr, size_t length, int prot) {
-    (void)addr; (void)length; (void)prot;
+    uint64_t base;
+    uint64_t size;
+
     if (!current_task) return -EINVAL;
+    base = (uint64_t)(uintptr_t)addr;
+    if (base & 0xFFFu) return -EINVAL;
+    if (prot & ~7) return -EINVAL;
+    if (length == 0) return 0;
+    size = (length + 0xFFFu) & ~0xFFFu;
+    if (size < length || base >= KERNEL_VMA || base + size < base ||
+            base + size > KERNEL_VMA) return -EINVAL;
+    if (!user_range_mapped_mem(base, size)) return -ENOMEM;
     return 0;
 }
 
@@ -508,20 +518,36 @@ static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int fl
 }
 
 static int sys_madvise(void *addr, size_t length, int advice) {
-    (void)addr; (void)length; (void)advice;
-    return 0;
+    uint64_t base;
+
+    base = (uint64_t)(uintptr_t)addr;
+    if (base & 0xFFFu) return -EINVAL;
+    if (length > 0 && (base >= KERNEL_VMA || base + length < base ||
+            base + length > KERNEL_VMA)) return -ENOMEM;
+
+    if ((advice >= 0 && advice <= 4) ||
+            (advice >= 8 && advice <= 21) ||
+            (advice >= 100 && advice <= 101)) return 0;
+    return -EINVAL;
 }
 
 static int sys_mincore(void *addr, size_t length, unsigned char *vec) {
+    uint64_t base;
     size_t pages;
     size_t i;
 
-    (void)addr;
+    if (!current_task) return -ESRCH;
     if (!vec) return -EFAULT;
-    
+    base = (uint64_t)(uintptr_t)addr;
+    if (base & 0xFFFu) return -EINVAL;
+    if (length == 0) return -EINVAL;
+    if (base >= KERNEL_VMA || base + length < base ||
+            base + length > KERNEL_VMA) return -ENOMEM;
     pages = (length + 0xFFF) / 0x1000;
     if (!user_range_mapped_mem((uint64_t)(uintptr_t)vec, pages)) return -EFAULT;
     for (i = 0; i < pages; i++) {
+        if (!vmm_get_phys_in_pml4(current_task->pml4_phys,
+                base + i * 0x1000)) return -ENOMEM;
         vec[i] = 1;
     }
     return 0;

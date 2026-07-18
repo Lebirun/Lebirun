@@ -109,6 +109,37 @@ static void ramfs_free_node_name(ramfs_node_t *node) {
     }
 }
 
+static void ramfs_dispose_removed_node_locked(ramfs_node_t *node) {
+    vfs_node_t *vn;
+    uint64_t refs;
+
+    if (!node) return;
+    vn = node->vfs_node;
+    if (node->type == RAMFS_NODE_FILE) {
+        ramfs_stats.file_count--;
+    } else {
+        ramfs_stats.dir_count--;
+    }
+    refs = vn ? __atomic_load_n(&vn->ref_count, __ATOMIC_ACQUIRE) : 0;
+    if (refs > 0) {
+        node->parent = NULL;
+        node->next_sibling = NULL;
+        vn->parent = NULL;
+        vn->flags |= VFS_EMBEDDED;
+        return;
+    }
+    if (node->type == RAMFS_NODE_FILE && node->length > 0) {
+        ramfs_stats.used_size -= node->length;
+    }
+    if (vn) {
+        vn->private_data = NULL;
+        kfree(vn);
+    }
+    if (node->data) kfree(node->data);
+    ramfs_free_node_name(node);
+    kfree(node);
+}
+
 static ramfs_node_t *ramfs_alloc_node(void) {
     ramfs_node_t *node;
     uint64_t now;
@@ -1106,7 +1137,29 @@ static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags) {
 }
 
 static void ramfs_vfs_close(vfs_node_t *node) {
-    (void)node;
+    ramfs_node_t *rn;
+    uint64_t refs;
+
+    if (!node) return;
+    rn = (ramfs_node_t *)node->private_data;
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    if (!rn || !(node->flags & VFS_EMBEDDED) || refs != 0) return;
+    ramfs_lock();
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    if (!(node->flags & VFS_EMBEDDED) || refs != 0) {
+        ramfs_unlock();
+        return;
+    }
+    if (rn->type == RAMFS_NODE_FILE && rn->length > 0) {
+        ramfs_stats.used_size -= rn->length;
+    }
+    if (rn->data) kfree(rn->data);
+    ramfs_free_node_name(rn);
+    rn->vfs_node = NULL;
+    node->private_data = NULL;
+    kfree(rn);
+    kfree(node);
+    ramfs_unlock();
 }
 
 static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {
@@ -1378,38 +1431,34 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
 }
 
 static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name) {
-    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
-    
-    ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
-    if (!prn || prn->type != 1) return RAMFS_ERR_NOTDIR;
-    
+    ramfs_node_t *prn;
+    ramfs_node_t *node;
+    ramfs_node_t **pp;
+
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -22;
+    prn = (ramfs_node_t *)parent->private_data;
+    if (!prn || prn->type != 1) return -20;
+
     ramfs_lock();
     ramfs_node_lock(prn);
-    
-    ramfs_node_t *node = ramfs_find_child(prn, name);
+
+    node = ramfs_find_child(prn, name);
     if (!node) {
         ramfs_node_unlock(prn);
         ramfs_unlock();
-        return RAMFS_ERR_NOENT;
+        return -2;
     }
-    
+
     ramfs_node_lock(node);
-    
+
     if (node->type == 1 && node->children) {
         ramfs_node_unlock(node);
         ramfs_node_unlock(prn);
         ramfs_unlock();
-        return RAMFS_ERR_NOTEMPTY;
+        return -39;
     }
-    
-    if (node->vfs_node && node->vfs_node->ref_count > 0) {
-        ramfs_node_unlock(node);
-        ramfs_node_unlock(prn);
-        ramfs_unlock();
-        return RAMFS_ERR_BUSY;
-    }
-    
-    ramfs_node_t **pp = &prn->children;
+
+    pp = &prn->children;
     while (*pp) {
         if (*pp == node) {
             *pp = node->next_sibling;
@@ -1418,31 +1467,13 @@ static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name) {
         pp = &(*pp)->next_sibling;
     }
     prn->mtime = ramfs_get_time();
-    
-    if (node->type == 0) {
-        ramfs_stats.file_count--;
-        if (node->length > 0) {
-            ramfs_stats.used_size -= node->length;
-        }
-    } else {
-        ramfs_stats.dir_count--;
-    }
-    
+
     ramfs_node_unlock(node);
     ramfs_node_unlock(prn);
-    
-    if (node->vfs_node) {
-        kfree(node->vfs_node);
-    }
-    if (node->data) {
-        kfree(node->data);
-    }
-    ramfs_free_node_name(node);
-    kfree(node);
-    
+    ramfs_dispose_removed_node_locked(node);
     ramfs_unlock();
-    
-    return RAMFS_ERR_OK;
+
+    return 0;
 }
 
 static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
@@ -1527,6 +1558,11 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     }
 
     existing = ramfs_find_child(new_prn, new_name);
+    if (existing == node) {
+        kfree(new_name_copy);
+        ramfs_unlock();
+        return RAMFS_ERR_OK;
+    }
     if (existing) {
         if (existing->type == 1 && existing->children) {
             kfree(new_name_copy);
@@ -1543,17 +1579,7 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
             pp = &(*pp)->next_sibling;
         }
 
-        if (existing->type == 0) {
-            ramfs_stats.file_count--;
-            ramfs_stats.used_size -= existing->length;
-        } else {
-            ramfs_stats.dir_count--;
-        }
-
-        if (existing->vfs_node) kfree(existing->vfs_node);
-        if (existing->data) kfree(existing->data);
-        ramfs_free_node_name(existing);
-        kfree(existing);
+        ramfs_dispose_removed_node_locked(existing);
     }
 
     pp = &old_prn->children;

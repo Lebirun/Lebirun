@@ -889,6 +889,20 @@ int vfs_unlink(vfs_node_t *parent, const char *name) {
     return -1;
 }
 
+int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_directory) {
+    vfs_node_t *target;
+    int is_directory;
+
+    if (!parent || !name) return -2;
+    target = vfs_finddir(parent, name);
+    if (!target) return -2;
+    is_directory = VFS_GET_TYPE(target->flags) == VFS_DIRECTORY;
+    vfs_release(target);
+    if (remove_directory && !is_directory) return -20;
+    if (!remove_directory && is_directory) return -21;
+    return vfs_unlink(parent, name);
+}
+
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;

@@ -441,6 +441,9 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
         return (int)total;
     }
     work_size = (uint64_t)len;
+    if (tfd->flags & VFS_O_APPEND) {
+        task_fd_position_set(tfd, node->length);
+    }
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;
     if (work_size <= VFS_RW_STACK_BUF) {
@@ -702,7 +705,7 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     if (!parent) return -ENOENT;
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
     if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
-    r = vfs_unlink(parent, filename);
+    r = vfs_unlink_checked(parent, filename, 0);
     vfs_release(parent);
     return r;
 }

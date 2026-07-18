@@ -133,6 +133,18 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
     if (readfds) memcpy(in_read, readfds, set_bytes);
     if (writefds) memcpy(in_write, writefds, set_bytes);
 
+    for (fd = 0; fd < nfds; fd++) {
+        if ((!readfds || !FD_ISSET_DYN(fd, in_read)) &&
+                (!writefds || !FD_ISSET_DYN(fd, in_write))) continue;
+        if (is_socket_fd(fd)) continue;
+        if (!current_task || !current_task->fds ||
+                fd >= current_task->fds_capacity ||
+                !current_task->fds[fd].in_use) {
+            kfree(in_read);
+            return -EBADF;
+        }
+    }
+
     timeout_ms = -1;
     if (timeout_addr && timeout_addr < KERNEL_VMA && timeout_addr >= 0x1000) {
         struct kernel_timeval *tv = (struct kernel_timeval *)timeout_addr;
@@ -218,6 +230,7 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
     int curfd;
     int sevents;
 
+    if (!current_task) return -ESRCH;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     if (nfds < 0) return -EINVAL;
 
@@ -251,7 +264,8 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
                 continue;
             }
 
-            if (curfd >= current_task->fds_capacity) {
+            if (!current_task->fds || curfd >= current_task->fds_capacity ||
+                    !current_task->fds[curfd].in_use) {
                 fds[i].revents = POLLNVAL;
                 ready_count++;
                 continue;

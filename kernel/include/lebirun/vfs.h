@@ -149,6 +149,7 @@ int vfs_readdir_copy(vfs_node_t *node, uint64_t index, dirent_t *entry);
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name);
 int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 int vfs_unlink(vfs_node_t *parent, const char *name);
+int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_directory);
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
 
 vfs_node_t *vfs_namei(const char *path);

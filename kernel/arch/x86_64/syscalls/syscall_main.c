@@ -292,7 +292,8 @@ static int linux_to_kernel_syscall(int linux_nr) {
 void do_syscall(registers_t *regs) {
     int linux_nr;
     int num;
-    int result;
+    int err;
+    int64_t result;
     struct user_desc *u_info;
 
     syscall_clear_exec_completed();
@@ -326,6 +327,10 @@ void do_syscall(registers_t *regs) {
 
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
+    } else if (num == SYSCALL_LSEEK) {
+        result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))syscall_table[num])(
+            regs->rbx, regs->rcx, regs->rdx,
+            regs->rsi, regs->rdi, regs->rbp);
     } else {
         result = ((int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))syscall_table[num])(
             regs->rbx, regs->rcx, regs->rdx,
@@ -342,7 +347,7 @@ void do_syscall(registers_t *regs) {
     }
 
     if ((int)regs->rax < 0) {
-        int err = -(int)regs->rax;
+        err = -(int)regs->rax;
         (void)err;
     }
 

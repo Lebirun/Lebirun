@@ -366,13 +366,14 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
     (void)unused;
     buf_addr = (uint64_t)buf_ptr;
     size = (uint64_t)(uintptr_t)size_ptr;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
-    if (size == 0) return -1;
+    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
+    if (size == 0) return -EINVAL;
     cwd = current_task && current_task->cwd ? current_task->cwd : "/";
     if (!cwd[0]) cwd = "/";
     len = 0;
     while (cwd[len]) len++;
-    if (len + 1 > size) return -1;
+    if (len + 1 > size) return -ERANGE;
+    if (!posix_user_range_mapped(buf_addr, len + 1)) return -EFAULT;
     memcpy((void *)buf_addr, cwd, len + 1);
     return buf_ptr;
 }
@@ -417,6 +418,7 @@ static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
     (void)unused;
     addr = (uint64_t)path_ptr;
     mode = (int)(uintptr_t)mode_ptr;
+    if (mode & ~7) return -EINVAL;
     ret = posix_copy_user_string(&path, (const char *)addr, 256);
     if (ret < 0) return ret;
     node = vfs_namei(path);
@@ -521,6 +523,8 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     int ret;
 
     (void)unused;
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     buf_addr = (uint64_t)(uintptr_t)buf_ptr;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     st = (struct kernel_stat *)buf_addr;
@@ -593,10 +597,10 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     return 0;
 }
 
-static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
-    int32_t offset;
-    int32_t base;
-    int32_t new_offset;
+static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {
+    int64_t offset;
+    int64_t base;
+    int64_t new_offset;
     vfs_node_t *node;
     task_fd_t *tfd;
     if (!current_task) return -ESRCH;
@@ -610,25 +614,28 @@ static int sys_lseek_new(int fd, const char *offset_ptr, int whence) {
 
     node = (vfs_node_t *)tfd->node;
 
-    offset = (int32_t)(uintptr_t)offset_ptr;
+    offset = (int64_t)(intptr_t)offset_ptr;
     switch (whence) {
         case VFS_SEEK_SET:
             base = 0;
             break;
         case VFS_SEEK_CUR:
-            base = (int32_t)task_fd_position_get(tfd);
+            if (task_fd_position_get(tfd) > INT64_MAX) return -EOVERFLOW;
+            base = (int64_t)task_fd_position_get(tfd);
             break;
         case VFS_SEEK_END:
-            base = (int32_t)node->length;
+            if (node->length > INT64_MAX) return -EOVERFLOW;
+            base = (int64_t)node->length;
             break;
         default:
             return -EINVAL;
     }
 
+    if (offset < -base) return -EINVAL;
+    if (offset > INT64_MAX - base) return -EOVERFLOW;
     new_offset = base + offset;
-    if (new_offset < 0) return -EINVAL;
     task_fd_position_set(tfd, (uint64_t)new_offset);
-    return (int)new_offset;
+    return new_offset;
 }
 
 extern volatile uint64_t tick_count;
@@ -1312,6 +1319,7 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     int ret;
 
     if (!current_task) return -ESRCH;
+    if (flags & ~VFS_O_CLOEXEC) return -EINVAL;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     if (newfd < 0 || newfd >= TASK_MAX_FDS) return -EBADF;
     if (newfd >= current_task->fds_capacity) {
@@ -1324,7 +1332,7 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     }
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
-    if (flags & 0x80000)
+    if (flags & VFS_O_CLOEXEC)
         fd_table[newfd].flags |= 1;
     else
         fd_table[newfd].flags &= ~1;
@@ -1337,12 +1345,14 @@ static int sys_pipe2(int *pipefd, int flags) {
     uint64_t addr;
     int rfd;
     int wfd;
-    (void)flags;
+    pipe_t *p;
+
     if (!current_task) return -ESRCH;
+    if (flags & ~(VFS_O_CLOEXEC | VFS_O_NONBLOCK)) return -EINVAL;
     if (!pipefd) return -EFAULT;
     addr = (uint64_t)pipefd;
     if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
+    p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
     memset(p, 0, sizeof(pipe_t));
     p->buffer = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
@@ -1361,9 +1371,13 @@ static int sys_pipe2(int *pipefd, int flags) {
     fd_table[rfd].private_data = p;
     fd_table[wfd].type = FD_TYPE_PIPE_W;
     fd_table[wfd].private_data = p;
-    if (flags & 0x80000) {
+    if (flags & VFS_O_CLOEXEC) {
         fd_table[rfd].flags |= 1;
         fd_table[wfd].flags |= 1;
+    }
+    if (flags & VFS_O_NONBLOCK) {
+        fd_table[rfd].flags |= VFS_O_NONBLOCK;
+        fd_table[wfd].flags |= VFS_O_NONBLOCK;
     }
     pipefd[0] = rfd;
     pipefd[1] = wfd;
@@ -1424,10 +1438,14 @@ static int sys_fchown(int fd, int uid, int gid) {
 
 static int sys_fsync(int fd) {
     ahci_port_t *port;
+    task_fd_t *tfd;
     uint64_t i;
 
+    if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!fd_table[fd].in_use) return -EBADF;
+    tfd = &fd_table[fd];
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EINVAL;
 
     ext4_sync_mounted();
 
@@ -1442,21 +1460,36 @@ static int sys_fsync(int fd) {
 }
 
 static int sys_fdatasync(int fd) {
+    task_fd_t *tfd;
+
+    if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    if (!fd_table[fd].in_use) return -EBADF;
+    tfd = &fd_table[fd];
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EINVAL;
     return 0;
 }
 
 static int sys_flock(int fd, int operation) {
-    (void)operation;
+    int mode;
+
+    if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    if (!fd_table[fd].in_use) return -EBADF;
+    if (operation & ~(1 | 2 | 4 | 8)) return -EINVAL;
+    mode = operation & ~4;
+    if (mode != 1 && mode != 2 && mode != 8) return -EINVAL;
     return 0;
 }
 
 static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
+    vfs_node_t *node;
+
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     if (!buf) return -EFAULT;
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    if (offset < 0) return -EINVAL;
+    node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     return vfs_read(node, (uint64_t)offset, count, buf);

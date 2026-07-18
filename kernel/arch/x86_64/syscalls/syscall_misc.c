@@ -733,12 +733,15 @@ static int sys_inotify_rm_watch(int fd, int wd) {
 }
 
 static int sys_getpriority(int which, int who) {
-    (void)which; (void)who;
+    (void)who;
+    if (which < 0 || which > 2) return -EINVAL;
     return 20;
 }
 
 static int sys_setpriority(int which, int who, int prio) {
-    (void)which; (void)who; (void)prio;
+    (void)who;
+    (void)prio;
+    if (which < 0 || which > 2) return -EINVAL;
     return 0;
 }
 
@@ -748,13 +751,11 @@ static int sys_posix_openpt(int flags) {
 }
 
 static int sys_grantpt(int fd) {
-    (void)fd;
-    return 0;
+    return pty_grant(fd) == 0 ? 0 : -EBADF;
 }
 
 static int sys_unlockpt(int fd) {
-    (void)fd;
-    return 0;
+    return pty_unlock(fd) == 0 ? 0 : -EBADF;
 }
 
 static int sys_ptsname(int fd, char *buf, int buflen) {

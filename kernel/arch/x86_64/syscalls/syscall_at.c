@@ -8,6 +8,7 @@
 #define AT_SYMLINK_FOLLOW   0x400
 #define AT_EACCESS          0x200
 #define AT_EMPTY_PATH       0x1000
+#define RENAME_NOREPLACE    1
 
 static int task_fd_alloc_from(int start) {
     int i;
@@ -385,8 +386,13 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     int last_slash;
     int i;
     int j;
+    int r;
+    uint64_t pmode;
+    int pshift;
+    int pallowed;
     vfs_node_t *parent;
 
+    if (flags & ~AT_REMOVEDIR) return -EINVAL;
     path = resolve_at_path(dirfd, pathname, resolved, sizeof(resolved));
     if (!path) return -EFAULT;
     if (!current_task) return -ESRCH;
@@ -422,10 +428,6 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     if (!parent) return -ENOENT;
 
     if (current_task->euid != 0) {
-        uint64_t pmode;
-        int pshift;
-        int pallowed;
-
         pmode = parent->mask;
         if (current_task->euid == parent->uid)
             pshift = 6;
@@ -440,13 +442,9 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
         }
     }
 
-    (void)flags;
-    {
-        int r;
-        r = vfs_unlink(parent, filename);
-        vfs_release(parent);
-        return r;
-    }
+    r = vfs_unlink_checked(parent, filename, (flags & AT_REMOVEDIR) != 0);
+    vfs_release(parent);
+    return r;
 }
 
 static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath_arg) {
@@ -464,6 +462,7 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     int last_slash;
     int k;
     int i;
+    int r;
 
     if (!oldpath || !newpath_arg) return -EFAULT;
 
@@ -472,6 +471,7 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
 
     new_path = resolve_at_path(newdirfd, newpath_arg, new_resolved, sizeof(new_resolved));
     if (!new_path) return -EFAULT;
+    if (strcmp(old_path, new_path) == 0) return 0;
 
     old_node = vfs_namei(old_path);
     if (!old_node) return -ENOENT;
@@ -520,13 +520,10 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     for (i = last_slash + 1; i < len && k < 63; i++) old_name[k++] = old_path[i];
     old_name[k] = '\0';
 
-    {
-        int r;
-        r = old_parent->rename(old_parent, old_name, new_parent, new_name);
-        vfs_release(old_node);
-        vfs_release(new_parent);
-        return r;
-    }
+    r = old_parent->rename(old_parent, old_name, new_parent, new_name);
+    vfs_release(old_node);
+    vfs_release(new_parent);
+    return r;
 }
 
 static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
@@ -719,7 +716,22 @@ static int sys_utimensat(int dirfd, const char *pathname, int times_ptr) {
     return 0;
 }
 
-static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd,
+                         const char *newpath, int flags) {
+    char resolved[256];
+    const char *path;
+    vfs_node_t *target;
+
+    if (flags & ~RENAME_NOREPLACE) return -EINVAL;
+    if (flags & RENAME_NOREPLACE) {
+        path = resolve_at_path(newdirfd, newpath, resolved, sizeof(resolved));
+        if (!path) return -EFAULT;
+        target = vfs_namei(path);
+        if (target) {
+            vfs_release(target);
+            return -EEXIST;
+        }
+    }
     return sys_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
