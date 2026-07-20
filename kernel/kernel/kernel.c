@@ -133,7 +133,6 @@ void kernel_main(void) {
     if (cmdline_get_text_mode()) {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
-        terminal_replay_early_boot();
     } else if (early_fb_valid) {
         terminal_init_fb(early_fb_addr, early_fb_width,
                         early_fb_height, early_fb_pitch,
@@ -156,7 +155,6 @@ void kernel_main(void) {
         }
 
         console_init();
-        terminal_replay_early_boot();
 
         printf("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
                (unsigned long long)early_fb_addr,
@@ -165,7 +163,6 @@ void kernel_main(void) {
     } else {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
-        terminal_replay_early_boot();
     }
 
     mod_count = early_mod_count;

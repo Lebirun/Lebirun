@@ -60,9 +60,6 @@ void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t p
     }
 }
 
-void terminal_replay_early_boot(void) {
-}
-
 void terminal_setcolor(uint8_t color) {
 	terminal_color = color;
 }
@@ -85,18 +82,20 @@ void terminal_scroll(void) {
 }
 
 void terminal_putchar(char c) {
+    unsigned char uc;
+
     if (console_is_initialized()) {
         console_putchar_to(0, c);
         return;
     }
 
-    serial_putchar(c);
-
     if (use_framebuffer) {
         fb_write_char(c);
+        serial_putchar(c);
         return;
     }
-    unsigned char uc = c;
+
+    uc = (unsigned char)c;
 
     if (c == '\n') {
         terminal_column = 0;
@@ -105,6 +104,7 @@ void terminal_putchar(char c) {
             terminal_row = VGA_HEIGHT - 1;
         }
         terminal_updatecursor();
+        serial_putchar(c);
         return;
     }
 
@@ -114,6 +114,7 @@ void terminal_putchar(char c) {
             terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
         }
         terminal_updatecursor();
+        serial_putchar(c);
         return;
     }
 
@@ -126,6 +127,7 @@ void terminal_putchar(char c) {
         }
     }
     terminal_updatecursor();
+    serial_putchar(c);
 }
 
 void terminal_write(const char* data, size_t size) {

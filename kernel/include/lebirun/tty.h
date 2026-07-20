@@ -183,7 +183,6 @@ struct winsize {
 
 void terminal_initialize(void);
 void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type);
-void terminal_replay_early_boot(void);
 void terminal_putchar(char c);
 void terminal_write(const char* data, size_t size);
 void terminal_writestring(const char* data);
