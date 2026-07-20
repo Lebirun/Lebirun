@@ -22,10 +22,7 @@ uint64_t pt_temp_pt_ready_check(void) {
 }
 
 extern void pt_sync_kernel_mappings(void);
-extern uint64_t **pt_vmm_page_tables;
 extern uint64_t pt_vmm_pt_count;
-extern uint64_t pt_vmm_pt_capacity;
-extern int pt_vmm_pt_grow(void);
 extern uint64_t boot_pd_high[];
 
 #define kv_pd_high ((uint64_t *)((uintptr_t)boot_pd_high + KERNEL_VMA))
@@ -36,7 +33,6 @@ void pt_init_temp_mapping(void) {
     uint64_t *pd;
     uint64_t *pt;
     uint64_t pt_phys;
-    uint64_t pt_slot;
 
     if (pt_temp_pt_ready) return;
 
@@ -53,13 +49,6 @@ void pt_init_temp_mapping(void) {
         return;
     }
 
-    if (pt_vmm_pt_count >= pt_vmm_pt_capacity) {
-        if (pt_vmm_pt_grow() < 0) {
-            printf("pt_init_temp_mapping: out of vmm page tables\n");
-            return;
-        }
-    }
-
     {
         void *pt_page;
         if (pfa_bitmap)
@@ -73,8 +62,7 @@ void pt_init_temp_mapping(void) {
         pt_phys = (uint64_t)pt_page;
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
         memset(pt, 0, PAGE_SIZE);
-        pt_slot = pt_vmm_pt_count++;
-        pt_vmm_page_tables[pt_slot] = pt;
+        pt_vmm_pt_count++;
     }
     pd[pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
     pt_sync_kernel_mappings();

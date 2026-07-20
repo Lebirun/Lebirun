@@ -35,7 +35,9 @@ uint32_t early_mod_count;
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
 extern void pmm_zero_page_phys(uint64_t phys_addr);
-extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t total_pages, uint64_t kernel_frames);
+extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
+                                    uint64_t total_pages, uint64_t kernel_frames,
+                                    uint64_t hole_start, uint64_t hole_end);
 extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
 extern uint64_t count_free_frames(void);
 
@@ -267,7 +269,13 @@ void pfa_init(void) {
     uint64_t system_usable_ram_kb;
     uint64_t detected_max_phys;
     uint64_t actual_total_pages;
+    uint64_t bitmap_entries;
     uint64_t actual_bitmap_bytes;
+    uint64_t bitmap_hole_start;
+    uint64_t bitmap_hole_end;
+    uint64_t largest_hole_pages;
+    uint64_t previous_end_frame;
+    uint64_t next_start_frame;
     uint64_t bitmap_pages;
     uint64_t bitmap_alloc_phys;
     uint64_t bitmap_alloc_end;
@@ -290,13 +298,38 @@ void pfa_init(void) {
     if (detected_max_phys == 0) detected_max_phys = max_phys;
 
     actual_total_pages = (uint64_t)((detected_max_phys + PAGE_SIZE - 1) / PAGE_SIZE);
-    actual_bitmap_bytes = (actual_total_pages + 7) / 8;
-    actual_bitmap_bytes = (actual_bitmap_bytes + 3) & ~3u;
-
-    pfa_init_internal_setup(actual_bitmap_bytes, actual_total_pages, 0);
-
     kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
     kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+
+    bitmap_hole_start = 0;
+    bitmap_hole_end = 0;
+    largest_hole_pages = 0;
+    previous_end_frame = 0;
+    for (r = 0; r < num_regions; r++) {
+        if (memory_map[r].type != 1) continue;
+        region_base = memory_map[r].base;
+        region_end = region_base + memory_map[r].length;
+        if (region_base >= detected_max_phys) continue;
+        if (region_end > detected_max_phys) region_end = detected_max_phys;
+        next_start_frame = (region_base + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (previous_end_frame != 0 && next_start_frame > previous_end_frame &&
+            previous_end_frame * PAGE_SIZE >= kernel_end_phys &&
+            next_start_frame - previous_end_frame > largest_hole_pages) {
+            bitmap_hole_start = previous_end_frame;
+            bitmap_hole_end = next_start_frame;
+            largest_hole_pages = next_start_frame - previous_end_frame;
+        }
+        previous_end_frame = region_end / PAGE_SIZE;
+    }
+
+    bitmap_entries = actual_total_pages - largest_hole_pages;
+    actual_bitmap_bytes = (bitmap_entries + 7) / 8;
+    actual_bitmap_bytes = (actual_bitmap_bytes + 3) & ~3u;
+
+    pfa_init_internal_setup(actual_bitmap_bytes, bitmap_entries,
+                            actual_total_pages, 0,
+                            bitmap_hole_start, bitmap_hole_end);
+
     bitmap_pages = (actual_bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     bitmap_alloc_end = (uint64_t)bitmap_pages * PAGE_SIZE;
     bitmap_alloc_phys = 0;
@@ -342,6 +375,11 @@ void pfa_init(void) {
 
     printf("PFA: 64-bit mode, managing %u pages (%u KB bitmap, %u pages)\n",
            actual_total_pages, actual_bitmap_bytes / 1024, bitmap_pages);
+    if (largest_hole_pages > 0) {
+        printf("PFA: Bitmap omitted physical hole 0x%016lX-0x%016lX (%u pages)\n",
+               bitmap_hole_start * PAGE_SIZE, bitmap_hole_end * PAGE_SIZE,
+               largest_hole_pages);
+    }
 
     if (bitmap_alloc_phys + bitmap_alloc_end > kernel_end_phys) {
         kernel_end_phys = bitmap_alloc_phys + bitmap_alloc_end;

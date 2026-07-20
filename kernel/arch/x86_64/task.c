@@ -34,7 +34,6 @@ extern char _kernel_text_end[];
 #define KERR_ENOMEM  12
 
 #define SCHED_DEFAULT_TIMESLICE 3
-#define KERNEL_STACK_SIZE 8192
 
 #define USER_STACK_TOP 0x00800000u
 #define USER_STACK_SIZE 0x10000u
@@ -133,6 +132,11 @@ int task_set_cwd(task_t *task, const char *cwd) {
     size_t len;
 
     if (!task || !cwd) return -1;
+    if (cwd[0] == '/' && cwd[1] == '\0') {
+        if (task->cwd) kfree(task->cwd);
+        task->cwd = NULL;
+        return 0;
+    }
     len = strlen(cwd);
     if (len >= VFS_MAX_PATH) return -1;
     copy = (char *)kmalloc(len + 1);
@@ -179,6 +183,7 @@ typedef struct exec_page_cache_entry {
 
 static exec_page_cache_entry_t *exec_page_cache_head = NULL;
 static spinlock_t exec_page_cache_lock = {0};
+static uint64_t exec_zero_page_phys = 0;
 
 static uint64_t task_align_up(uint64_t v, uint64_t align) {
     if (align == 0) return v;
@@ -292,19 +297,15 @@ static void task_write_fs_base(uint64_t base) {
 static uint64_t exec_page_cache_pages = 0;
 static uint64_t exec_page_cache_clock = 0;
 
-#define EXEC_CLEANUP_QUEUE_INIT 4
-#define EXEC_CLEANUP_QUEUE_MAX 64
-
-typedef struct {
+typedef struct exec_cleanup_entry {
     uint64_t old_pd;
     uint64_t *old_pages;
     uint64_t old_pages_count;
+    struct exec_cleanup_entry *next;
 } exec_cleanup_entry_t;
 
-static exec_cleanup_entry_t *exec_cleanup_queue;
-static int exec_cleanup_capacity = 0;
-static volatile int exec_cleanup_head = 0;
-static volatile int exec_cleanup_tail = 0;
+static exec_cleanup_entry_t *exec_cleanup_head;
+static exec_cleanup_entry_t *exec_cleanup_tail;
 static volatile int exec_cleanup_lock = 0;
 
 static inline void exec_cleanup_lock_acquire(void) {
@@ -315,80 +316,6 @@ static inline void exec_cleanup_lock_acquire(void) {
 
 static inline void exec_cleanup_lock_release(void) {
     __sync_lock_release(&exec_cleanup_lock);
-}
-
-static int exec_cleanup_ensure_queue(void) {
-    exec_cleanup_entry_t *queue;
-    int ok;
-
-    if (exec_cleanup_queue) return 1;
-    queue = (exec_cleanup_entry_t *)kmalloc(EXEC_CLEANUP_QUEUE_INIT * sizeof(exec_cleanup_entry_t));
-    if (!queue) return 0;
-    memset(queue, 0, EXEC_CLEANUP_QUEUE_INIT * sizeof(exec_cleanup_entry_t));
-    ok = 1;
-    exec_cleanup_lock_acquire();
-    if (!exec_cleanup_queue) {
-        exec_cleanup_queue = queue;
-        exec_cleanup_capacity = EXEC_CLEANUP_QUEUE_INIT;
-        exec_cleanup_head = 0;
-        exec_cleanup_tail = 0;
-        queue = NULL;
-    }
-    exec_cleanup_lock_release();
-    if (queue) kfree(queue);
-    return ok;
-}
-
-static int exec_cleanup_grow_queue(void) {
-    exec_cleanup_entry_t *new_queue;
-    exec_cleanup_entry_t *old_queue;
-    int old_capacity;
-    int new_capacity;
-    int count;
-    int idx;
-    int i;
-
-    if (!exec_cleanup_queue) return exec_cleanup_ensure_queue();
-
-    exec_cleanup_lock_acquire();
-    old_capacity = exec_cleanup_capacity;
-    if (old_capacity >= EXEC_CLEANUP_QUEUE_MAX) {
-        exec_cleanup_lock_release();
-        return 0;
-    }
-    exec_cleanup_lock_release();
-
-    new_capacity = old_capacity * 2;
-    if (new_capacity > EXEC_CLEANUP_QUEUE_MAX) new_capacity = EXEC_CLEANUP_QUEUE_MAX;
-    new_queue = (exec_cleanup_entry_t *)kmalloc(new_capacity * sizeof(exec_cleanup_entry_t));
-    if (!new_queue) return 0;
-    memset(new_queue, 0, new_capacity * sizeof(exec_cleanup_entry_t));
-
-    exec_cleanup_lock_acquire();
-    if (exec_cleanup_capacity >= new_capacity) {
-        exec_cleanup_lock_release();
-        kfree(new_queue);
-        return 1;
-    }
-    count = 0;
-    idx = exec_cleanup_head;
-    while (idx != exec_cleanup_tail && count < new_capacity - 1) {
-        new_queue[count] = exec_cleanup_queue[idx];
-        idx = (idx + 1) % exec_cleanup_capacity;
-        count++;
-    }
-    old_queue = exec_cleanup_queue;
-    exec_cleanup_queue = new_queue;
-    exec_cleanup_capacity = new_capacity;
-    exec_cleanup_head = 0;
-    exec_cleanup_tail = count;
-    for (i = count; i < new_capacity; i++) {
-        memset(&exec_cleanup_queue[i], 0, sizeof(exec_cleanup_entry_t));
-    }
-    exec_cleanup_lock_release();
-
-    kfree(old_queue);
-    return 1;
 }
 
 static int task_is_current_on_any_cpu(task_t *task) {
@@ -425,7 +352,6 @@ static int task_refs_pml4(task_t *t, uint64_t pd_page, int include_exec_old) {
 static int task_pml4_has_owner(task_t *owner, uint64_t pd, int check_owner, int include_owner_exec_old) {
     task_t *t;
     uint64_t pd_page;
-    int limit;
     int found;
 
     if (!pd) return 0;
@@ -433,8 +359,7 @@ static int task_pml4_has_owner(task_t *owner, uint64_t pd, int check_owner, int 
     found = 0;
     lock_scheduler();
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t == owner) {
             if (check_owner && task_refs_pml4(t, pd_page, include_owner_exec_old)) {
@@ -448,7 +373,6 @@ static int task_pml4_has_owner(task_t *owner, uint64_t pd, int check_owner, int 
             }
         }
         t = t->all_next;
-        limit--;
     }
     unlock_scheduler();
     return found;
@@ -477,71 +401,64 @@ static int task_free_exec_old_pml4_if_unowned(task_t *owner, uint64_t pd) {
 }
 
 void exec_cleanup_enqueue(uint64_t pd, uint64_t *pages, uint64_t count) {
-    int next_tail;
-    int inserted;
+    exec_cleanup_entry_t *entry;
 
-    if (!exec_cleanup_ensure_queue()) {
+    entry = (exec_cleanup_entry_t *)kmalloc(sizeof(exec_cleanup_entry_t));
+    if (!entry) {
         if (pages) {
             kfree(pages);
         }
         task_free_pml4_if_unowned(NULL, pd);
         return;
     }
+    entry->old_pd = pd;
+    entry->old_pages = pages;
+    entry->old_pages_count = count;
+    entry->next = NULL;
 
-    inserted = 0;
-    while (!inserted) {
-        exec_cleanup_lock_acquire();
-        next_tail = (exec_cleanup_tail + 1) % exec_cleanup_capacity;
-        if (next_tail != exec_cleanup_head) {
-            exec_cleanup_queue[exec_cleanup_tail].old_pd = pd;
-            exec_cleanup_queue[exec_cleanup_tail].old_pages = pages;
-            exec_cleanup_queue[exec_cleanup_tail].old_pages_count = count;
-            exec_cleanup_tail = next_tail;
-            inserted = 1;
-        }
-        exec_cleanup_lock_release();
-        if (!inserted && !exec_cleanup_grow_queue()) {
-            if (pages) {
-                kfree(pages);
-            }
-            task_free_pml4_if_unowned(NULL, pd);
-            return;
-        }
-    }
+    exec_cleanup_lock_acquire();
+    if (exec_cleanup_tail) exec_cleanup_tail->next = entry;
+    else exec_cleanup_head = entry;
+    exec_cleanup_tail = entry;
+    exec_cleanup_lock_release();
 }
 
 void exec_cleanup_drain(void) {
     uint64_t *pages;
     uint64_t pd;
-    int head;
     int freed;
+    exec_cleanup_entry_t *entry;
 
-    if (!exec_cleanup_queue) return;
-
-    exec_cleanup_lock_acquire();
-    while (exec_cleanup_head != exec_cleanup_tail) {
-        head = exec_cleanup_head;
-        pages = exec_cleanup_queue[head].old_pages;
-        pd = exec_cleanup_queue[head].old_pd;
-
-        exec_cleanup_queue[head].old_pd = 0;
-        exec_cleanup_queue[head].old_pages = NULL;
-        exec_cleanup_queue[head].old_pages_count = 0;
-        exec_cleanup_head = (head + 1) % exec_cleanup_capacity;
+    while (1) {
+        exec_cleanup_lock_acquire();
+        entry = exec_cleanup_head;
+        if (!entry) {
+            exec_cleanup_lock_release();
+            return;
+        }
+        exec_cleanup_head = entry->next;
+        if (!exec_cleanup_head) exec_cleanup_tail = NULL;
         exec_cleanup_lock_release();
 
+        pages = entry->old_pages;
+        pd = entry->old_pd;
         if (pages) {
             kfree(pages);
         }
         freed = task_free_pml4_if_unowned(NULL, pd);
         if (!freed) {
-            exec_cleanup_enqueue(pd, NULL, 0);
+            entry->old_pages = NULL;
+            entry->old_pages_count = 0;
+            entry->next = NULL;
+            exec_cleanup_lock_acquire();
+            if (exec_cleanup_tail) exec_cleanup_tail->next = entry;
+            else exec_cleanup_head = entry;
+            exec_cleanup_tail = entry;
+            exec_cleanup_lock_release();
             return;
         }
-
-        exec_cleanup_lock_acquire();
+        kfree(entry);
     }
-    exec_cleanup_lock_release();
 }
 
 static void task_discard_exec_old(task_t *t) {
@@ -606,23 +523,18 @@ static uint64_t task_mmap_pages(task_t *task) {
 }
 
 static void exec_cleanup_stats(uint64_t *entries, uint64_t *pages) {
-    int head;
+    exec_cleanup_entry_t *entry;
     uint64_t e;
     uint64_t p;
 
     e = 0;
     p = 0;
-    if (!exec_cleanup_queue) {
-        if (entries) *entries = 0;
-        if (pages) *pages = 0;
-        return;
-    }
     exec_cleanup_lock_acquire();
-    head = exec_cleanup_head;
-    while (head != exec_cleanup_tail) {
+    entry = exec_cleanup_head;
+    while (entry) {
         e++;
-        p += exec_cleanup_queue[head].old_pages_count;
-        head = (head + 1) % exec_cleanup_capacity;
+        p += entry->old_pages_count;
+        entry = entry->next;
     }
     exec_cleanup_lock_release();
     if (entries) *entries = e;
@@ -955,7 +867,6 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
 }
 
 void init_tasks(void) {
-    uint8_t *task0_kstack;
     uint64_t boot_rsp = 0;
     task_t *initial_task;
 
@@ -975,19 +886,9 @@ void init_tasks(void) {
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->stack_size = 0;
     
-    task0_kstack = kstack_alloc();
-    if (task0_kstack) {
-        current_task->kernel_stack_base = task0_kstack;
-        current_task->kernel_stack_size = KSTACK_USABLE_SIZE;
-    } else {
-        current_task->kernel_stack_base = kmalloc(KERNEL_STACK_SIZE);
-        if (current_task->kernel_stack_base) {
-            current_task->kernel_stack_size = KERNEL_STACK_SIZE;
-        } else {
-            current_task->kernel_stack_size = 0;
-        }
-    }
-    
+    current_task->kernel_stack_base = NULL;
+    current_task->kernel_stack_size = 0;
+
     current_task->wake_tick = 0;
     current_task->sleep_next = NULL;
     current_task->in_sleep_queue = 0;
@@ -1002,11 +903,7 @@ void init_tasks(void) {
     asm volatile ("mov %%rsp, %0" : "=r" (boot_rsp));
     current_task->regs.rsp = boot_rsp;
     
-    if (current_task->kernel_stack_base) {
-        tss_set_rsp0((uint64_t)current_task->kernel_stack_base + current_task->kernel_stack_size);
-    } else {
-        tss_set_rsp0(boot_rsp);
-    }
+    tss_set_rsp0(boot_rsp);
 
     current_task->regs.rip = 0;
     current_task->regs.rflags = 0x202;
@@ -1449,26 +1346,14 @@ int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys) {
 
 static int task_ensure_file_map_capacity(task_t *task, int needed) {
     task_file_map_t *new_maps;
-    int new_cap;
 
-    if (!task || needed < 0 || needed > TASK_MAX_FILE_MAPS) return -1;
+    if (!task || needed < 0) return -1;
     if (needed <= task->file_map_capacity) return 0;
-    new_cap = task->file_map_capacity;
-    if (new_cap < TASK_INIT_FILE_MAPS) new_cap = TASK_INIT_FILE_MAPS;
-    while (new_cap < needed) {
-        new_cap *= 2;
-        if (new_cap > TASK_MAX_FILE_MAPS) new_cap = TASK_MAX_FILE_MAPS;
-    }
-    if (new_cap < needed) return -1;
-    new_maps = (task_file_map_t *)kmalloc(new_cap * sizeof(task_file_map_t));
+    new_maps = (task_file_map_t *)krealloc(
+        task->file_maps, needed * sizeof(task_file_map_t));
     if (!new_maps) return -1;
-    memset(new_maps, 0, new_cap * sizeof(task_file_map_t));
-    if (task->file_maps && task->file_map_count > 0) {
-        memcpy(new_maps, task->file_maps, task->file_map_count * sizeof(task_file_map_t));
-        kfree(task->file_maps);
-    }
     task->file_maps = new_maps;
-    task->file_map_capacity = new_cap;
+    task->file_map_capacity = needed;
     return 0;
 }
 
@@ -1487,6 +1372,31 @@ static exec_page_cache_entry_t *exec_page_cache_find_locked(vfs_node_t *node, ui
 
 static uint64_t exec_page_cache_target_pages(void) {
     return 0;
+}
+
+static uint64_t exec_zero_page_get(void) {
+    uint64_t phys;
+    uint64_t existing;
+
+    spin_lock(&exec_page_cache_lock);
+    existing = exec_zero_page_phys;
+    spin_unlock(&exec_page_cache_lock);
+    if (existing) return existing;
+
+    phys = pfa_alloc();
+    if (!phys) return 0;
+    pmm_zero_page_phys(phys);
+
+    spin_lock(&exec_page_cache_lock);
+    existing = exec_zero_page_phys;
+    if (!existing) {
+        exec_zero_page_phys = phys;
+        existing = phys;
+        phys = 0;
+    }
+    spin_unlock(&exec_page_cache_lock);
+    if (phys) pfa_free(phys);
+    return existing;
 }
 
 static int exec_page_cache_reclaim_one(void) {
@@ -1790,6 +1700,10 @@ static void task_release_exit_resources(task_t *t) {
         t->fds_capacity = 0;
     }
     task_free_signal_data(t);
+    if (t->timer_data) {
+        kfree(t->timer_data);
+        t->timer_data = NULL;
+    }
     if (t->creds_data) {
         kfree(t->creds_data);
         t->creds_data = NULL;
@@ -1820,7 +1734,6 @@ int task_add_file_mapping(task_t *task, vfs_node_t *node, uint64_t vaddr,
     int idx;
 
     if (!task || !node || memsz == 0) return -1;
-    if (task->file_map_count >= TASK_MAX_FILE_MAPS) return -1;
     start = vaddr & ~(PAGE_SIZE - 1);
     delta = vaddr - start;
     if (offset < delta) return -1;
@@ -1911,25 +1824,26 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
             temp_unmap_raw(TASK_FILE_FAULT_TEMP);
         }
     } else {
-        phys = pfa_alloc();
+        phys = exec_zero_page_get();
         if (!phys) return 0;
-        pmm_zero_page_phys(phys);
+        map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
+        cached_page = 2;
     }
     vmm_map_page_in_pml4(task->pml4_phys, page, phys, map_flags);
     mapped_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
     if (mapped_phys == 0) {
-        if (cached_page) {
+        if (cached_page == 1) {
             pfa_ref_dec(phys);
-        } else {
+        } else if (!cached_page) {
             pfa_free(phys);
         }
         return 0;
     }
     if (task_track_user_page(task, phys) != 0) {
         vmm_unmap_page_in_pml4(task->pml4_phys, page);
-        if (cached_page) {
+        if (cached_page == 1) {
             pfa_ref_dec(phys);
-        } else {
+        } else if (!cached_page) {
             pfa_free(phys);
         }
         return 0;
@@ -1986,8 +1900,10 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
         pfa_free(new_phys);
         return 0;
     }
-    exec_page_cache_on_page_release(old_phys);
-    pfa_cow_release64(old_phys);
+    if (old_phys != exec_zero_page_phys) {
+        exec_page_cache_on_page_release(old_phys);
+        pfa_cow_release64(old_phys);
+    }
     return 1;
 }
 
@@ -2154,6 +2070,8 @@ void task_reclaim_exited_now(void) {
 
 void task_memory_collect_for_report(void) {
     task_reclaim_exited_now();
+    klog_reclaim_unused();
+    heap_reclaim_unused();
 }
 
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4) {

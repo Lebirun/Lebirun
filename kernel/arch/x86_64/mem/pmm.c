@@ -7,6 +7,9 @@ extern uint64_t kernel_reserved_frames;
 
 uint8_t *pfa_bitmap = 0;
 static uint64_t bitmap_bytes_used = 0;
+static uint64_t bitmap_entries_used = 0;
+static uint64_t bitmap_hole_start = 0;
+static uint64_t bitmap_hole_end = 0;
 
 static volatile int pfa_lock = 0;
 
@@ -16,18 +19,16 @@ static volatile uint64_t pfa_cached_free = 0;
 
 static uint64_t pfa_refcount_entries = 0;
 
-#define REFHT_BUCKETS 128
-
 typedef struct refht_node {
     uint64_t page_idx;
     uint8_t refcount;
     struct refht_node *next;
 } refht_node_t;
 
-static refht_node_t **refht_buckets;
-static refht_node_t *refht_free_list;
+static refht_node_t *refht_head;
+static refht_node_t *refht_deferred_free;
 static uint64_t refht_active_node_count = 0;
-static uint64_t refht_free_node_count = 0;
+static uint64_t refht_deferred_free_count = 0;
 static int refht_initialized = 0;
 static volatile int refht_lock_val = 0;
 
@@ -98,18 +99,37 @@ void *pmm_alloc_early_pages(uint64_t num) {
     return NULL;
 }
 
-void set_bit(uint64_t bit_idx) {
-    if (bit_idx / 8 < bitmap_bytes_used)
-        pfa_bitmap[bit_idx / 8] |= (1 << (bit_idx % 8));
+static int frame_to_bitmap_index(uint64_t frame_idx, uint64_t *bitmap_idx) {
+    if (frame_idx >= total_pages_managed) return 0;
+    if (bitmap_hole_end > bitmap_hole_start) {
+        if (frame_idx >= bitmap_hole_start && frame_idx < bitmap_hole_end)
+            return 0;
+        if (frame_idx >= bitmap_hole_end)
+            frame_idx -= bitmap_hole_end - bitmap_hole_start;
+    }
+    if (frame_idx >= bitmap_entries_used) return 0;
+    *bitmap_idx = frame_idx;
+    return 1;
 }
 
-void clear_bit(uint64_t bit_idx) {
-    if (bit_idx / 8 < bitmap_bytes_used)
-        pfa_bitmap[bit_idx / 8] &= ~(1 << (bit_idx % 8));
+void set_bit(uint64_t frame_idx) {
+    uint64_t bit_idx;
+
+    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return;
+    pfa_bitmap[bit_idx / 8] |= (1 << (bit_idx % 8));
 }
 
-bool test_bit(uint64_t bit_idx) {
-    if (bit_idx / 8 >= bitmap_bytes_used) return true;
+void clear_bit(uint64_t frame_idx) {
+    uint64_t bit_idx;
+
+    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return;
+    pfa_bitmap[bit_idx / 8] &= ~(1 << (bit_idx % 8));
+}
+
+bool test_bit(uint64_t frame_idx) {
+    uint64_t bit_idx;
+
+    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return true;
     return pfa_bitmap[bit_idx / 8] & (1 << (bit_idx % 8));
 }
 
@@ -121,11 +141,11 @@ uint64_t count_free_frames(void) {
     uint8_t free_bits;
 
     count = 0;
-    bytes = (total_pages_managed + 7) / 8;
+    bytes = (bitmap_entries_used + 7) / 8;
     for (i = 0; i < bytes; i++) {
         free_bits = (uint8_t)~pfa_bitmap[i];
         if (i + 1 == bytes) {
-            valid_bits = total_pages_managed & 7;
+            valid_bits = bitmap_entries_used & 7;
             if (valid_bits != 0) {
                 free_bits &= (uint8_t)((1u << valid_bits) - 1u);
             }
@@ -139,7 +159,8 @@ uint64_t count_free_frames(void) {
     return count;
 }
 
-static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num) {
+static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
+                                        uint64_t num, uint64_t phys_offset) {
     uint64_t b;
     uint64_t bit;
     uint64_t frame_idx;
@@ -160,10 +181,10 @@ static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num)
                 if (frame_idx < from) continue;
                 if (frame_idx >= to) return 0;
                 if (!(pfa_bitmap[b] & (1 << bit))) {
-                    set_bit(frame_idx);
-                    last_alloc_hint = frame_idx + 1;
+                    set_bit(frame_idx + phys_offset);
+                    last_alloc_hint = frame_idx + phys_offset + 1;
                     __sync_fetch_and_sub(&pfa_cached_free, 1);
-                    return frame_idx * PAGE_SIZE;
+                    return (frame_idx + phys_offset) * PAGE_SIZE;
                 }
             }
         }
@@ -193,15 +214,41 @@ static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num)
                 if (run == 0) run_start = frame_idx;
                 run++;
                 if (run >= num) {
-                    for (j = 0; j < num; j++) set_bit(run_start + j);
-                    last_alloc_hint = run_start + num;
+                    for (j = 0; j < num; j++)
+                        set_bit(run_start + phys_offset + j);
+                    last_alloc_hint = run_start + phys_offset + num;
                     __sync_fetch_and_sub(&pfa_cached_free, num);
-                    return run_start * PAGE_SIZE;
+                    return (run_start + phys_offset) * PAGE_SIZE;
                 }
             }
         }
     }
     return 0;
+}
+
+static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num) {
+    uint64_t result;
+    uint64_t gap;
+    uint64_t low_to;
+    uint64_t high_from;
+
+    if (to <= from || num == 0) return 0;
+    if (bitmap_hole_end <= bitmap_hole_start) {
+        return find_free_frames_bitmap(from, to, num, 0);
+    }
+
+    low_to = to;
+    if (low_to > bitmap_hole_start) low_to = bitmap_hole_start;
+    if (from < low_to) {
+        result = find_free_frames_bitmap(from, low_to, num, 0);
+        if (result) return result;
+    }
+
+    high_from = from;
+    if (high_from < bitmap_hole_end) high_from = bitmap_hole_end;
+    if (high_from >= to) return 0;
+    gap = bitmap_hole_end - bitmap_hole_start;
+    return find_free_frames_bitmap(high_from - gap, to - gap, num, gap);
 }
 
 static uint64_t find_free_frames(uint64_t num) {
@@ -235,6 +282,7 @@ uint64_t pfa_alloc(void) {
 
 void pfa_free(uint64_t phys_addr) {
     uint64_t idx;
+    uint64_t bitmap_idx;
     uint64_t byte_idx;
     uint64_t bit_idx;
     uint64_t eflags;
@@ -251,6 +299,7 @@ void pfa_free(uint64_t phys_addr) {
     if (idx < kernel_reserved_frames) {
         return;
     }
+    if (!frame_to_bitmap_index(idx, &bitmap_idx)) return;
 
     if ((uint64_t)idx < pfa_refcount_entries) {
         cur_ref = pfa_ref_get((uint64_t)(idx * PAGE_SIZE));
@@ -263,8 +312,8 @@ void pfa_free(uint64_t phys_addr) {
         }
     }
 
-    byte_idx = (uint64_t)(idx / 8);
-    bit_idx = (uint64_t)(idx % 8);
+    byte_idx = bitmap_idx / 8;
+    bit_idx = bitmap_idx % 8;
     
     pfa_lock_acquire(&eflags);
     if (pfa_bitmap[byte_idx] & (1 << bit_idx)) {
@@ -386,11 +435,7 @@ void *pmm_alloc_page(void) {
     uint64_t region_end;
     uint64_t alloc_start;
     uint64_t idx_alloc;
-    uint64_t bit;
-    uint64_t frame_idx;
-    uint64_t scan_start;
     uint64_t scan_end;
-    uint64_t b;
 
     if (num_regions == 0) return NULL;
 
@@ -414,23 +459,11 @@ void *pmm_alloc_page(void) {
             if (scan_end > total_pages_managed) scan_end = total_pages_managed;
 
 
-            scan_start = idx_alloc / 8;
-            for (b = scan_start; b < (scan_end + 7) / 8; b++) {
-                if (b >= bitmap_bytes_used) break;
-                if (pfa_bitmap[b] == 0xFF) continue;
-                for (bit = 0; bit < 8; bit++) {
-                    frame_idx = b * 8 + bit;
-                    if (frame_idx < idx_alloc) continue;
-                    if (frame_idx >= scan_end) break;
-                    if (!(pfa_bitmap[b] & (1 << bit))) {
-                        alloc_start = (uint64_t)frame_idx * PAGE_SIZE;
-                        bump_current = alloc_start + 4096;
-                        set_bit(frame_idx);
-                        __sync_fetch_and_sub(&pfa_cached_free, 1);
-                        pfa_lock_release(eflags);
-                        return (void *)(uint64_t)alloc_start;
-                    }
-                }
+            alloc_start = find_free_frames_range(idx_alloc, scan_end, 1);
+            if (alloc_start) {
+                bump_current = alloc_start + PAGE_SIZE;
+                pfa_lock_release(eflags);
+                return (void *)(uint64_t)alloc_start;
             }
 
             bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
@@ -548,8 +581,13 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t total_pages, uint64_t kernel_frames) {
+void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
+                             uint64_t total_pages, uint64_t kernel_frames,
+                             uint64_t hole_start, uint64_t hole_end) {
     bitmap_bytes_used = bitmap_bytes;
+    bitmap_entries_used = bitmap_entries;
+    bitmap_hole_start = hole_start;
+    bitmap_hole_end = hole_end;
     total_pages_managed = total_pages;
     kernel_reserved_frames = kernel_frames;
     low_page_limit = 0x00800000;
@@ -578,29 +616,17 @@ static void refht_lock_release(uint64_t eflags) {
 }
 
 static void refht_init(void) {
-    refht_node_t **buckets;
-
     if (refht_initialized) return;
-    buckets = (refht_node_t **)kmalloc(REFHT_BUCKETS * sizeof(refht_node_t *));
-    if (!buckets) return;
-    memset(buckets, 0, REFHT_BUCKETS * sizeof(refht_node_t *));
-    refht_buckets = buckets;
-    refht_free_list = NULL;
+    refht_head = NULL;
+    refht_deferred_free = NULL;
     refht_active_node_count = 0;
-    refht_free_node_count = 0;
+    refht_deferred_free_count = 0;
     refht_initialized = 1;
 }
 
 static refht_node_t *refht_alloc_node(void) {
     refht_node_t *n;
 
-    n = refht_free_list;
-    if (n) {
-        refht_free_list = n->next;
-        if (refht_free_node_count > 0) refht_free_node_count--;
-        n->next = NULL;
-        return n;
-    }
     n = (refht_node_t *)kmalloc(sizeof(refht_node_t));
     if (n) {
         n->page_idx = 0;
@@ -610,37 +636,22 @@ static refht_node_t *refht_alloc_node(void) {
     return n;
 }
 
-static void refht_free_node(refht_node_t *n) {
-    n->next = refht_free_list;
-    refht_free_list = n;
-    refht_free_node_count++;
-}
-
 void pfa_ref_gc(void) {
     refht_node_t *list;
     refht_node_t *next;
-    refht_node_t **buckets;
     uint64_t eflags;
 
     if (!refht_initialized) return;
-    buckets = NULL;
     refht_lock_acquire(&eflags);
-    list = refht_free_list;
-    refht_free_list = NULL;
-    refht_free_node_count = 0;
-    if (refht_active_node_count == 0) {
-        buckets = refht_buckets;
-        refht_buckets = NULL;
-        refht_initialized = 0;
-    }
+    list = refht_deferred_free;
+    refht_deferred_free = NULL;
+    refht_deferred_free_count = 0;
     refht_lock_release(eflags);
-
     while (list) {
         next = list->next;
         kfree(list);
         list = next;
     }
-    if (buckets) kfree(buckets);
 }
 
 uint64_t pfa_ref_active_nodes(void) {
@@ -662,15 +673,15 @@ uint64_t pfa_ref_free_nodes(void) {
     result = 0;
     if (!refht_initialized) return 0;
     refht_lock_acquire(&eflags);
-    result = refht_free_node_count;
+    result = refht_deferred_free_count;
     refht_lock_release(eflags);
     return result;
 }
 
-static refht_node_t *refht_find(uint64_t page_idx, uint64_t bucket) {
+static refht_node_t *refht_find(uint64_t page_idx) {
     refht_node_t *n;
 
-    n = refht_buckets[bucket];
+    n = refht_head;
     while (n) {
         if (n->page_idx == page_idx) return n;
         n = n->next;
@@ -680,7 +691,6 @@ static refht_node_t *refht_find(uint64_t page_idx, uint64_t bucket) {
 
 static int refht_add(uint64_t phys_addr, uint8_t initial) {
     uint64_t idx;
-    uint64_t bucket;
     uint64_t eflags;
     refht_node_t *n;
     int result;
@@ -690,10 +700,9 @@ static int refht_add(uint64_t phys_addr, uint8_t initial) {
     pfa_refcount_entries = total_pages_managed;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= total_pages_managed) return -1;
-    bucket = idx % REFHT_BUCKETS;
     result = -1;
     refht_lock_acquire(&eflags);
-    n = refht_find(idx, bucket);
+    n = refht_find(idx);
     if (n) {
         if (n->refcount < 255) {
             n->refcount++;
@@ -704,8 +713,8 @@ static int refht_add(uint64_t phys_addr, uint8_t initial) {
         if (n) {
             n->page_idx = idx;
             n->refcount = initial;
-            n->next = refht_buckets[bucket];
-            refht_buckets[bucket] = n;
+            n->next = refht_head;
+            refht_head = n;
             refht_active_node_count++;
             result = 0;
         }
@@ -716,7 +725,6 @@ static int refht_add(uint64_t phys_addr, uint8_t initial) {
 
 static int refht_release(uint64_t phys_addr, int cow, int *free_page) {
     uint64_t idx;
-    uint64_t bucket;
     uint64_t eflags;
     refht_node_t *n;
     refht_node_t *prev;
@@ -730,11 +738,10 @@ static int refht_release(uint64_t phys_addr, int cow, int *free_page) {
     }
     idx = phys_addr / PAGE_SIZE;
     if (idx >= total_pages_managed) return 0;
-    bucket = idx % REFHT_BUCKETS;
     result = 0;
     refht_lock_acquire(&eflags);
     prev = NULL;
-    n = refht_buckets[bucket];
+    n = refht_head;
     while (n && n->page_idx != idx) {
         prev = n;
         n = n->next;
@@ -762,9 +769,11 @@ static int refht_release(uint64_t phys_addr, int cow, int *free_page) {
         if (prev)
             prev->next = n->next;
         else
-            refht_buckets[bucket] = n->next;
+            refht_head = n->next;
         if (refht_active_node_count > 0) refht_active_node_count--;
-        refht_free_node(n);
+        n->next = refht_deferred_free;
+        refht_deferred_free = n;
+        refht_deferred_free_count++;
     }
     refht_lock_release(eflags);
     return result;
@@ -772,6 +781,7 @@ static int refht_release(uint64_t phys_addr, int cow, int *free_page) {
 
 void pfa_ref_init(void) {
     pfa_refcount_entries = total_pages_managed;
+    refht_init();
 }
 
 void pfa_ref_inc(uint64_t phys_addr) {
@@ -788,7 +798,6 @@ int pfa_ref_dec(uint64_t phys_addr) {
 
 uint8_t pfa_ref_get(uint64_t phys_addr) {
     uint64_t idx;
-    uint64_t bucket;
     uint64_t eflags;
     refht_node_t *n;
     uint8_t result;
@@ -796,9 +805,8 @@ uint8_t pfa_ref_get(uint64_t phys_addr) {
     if (!refht_initialized) return 0;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= total_pages_managed) return 0;
-    bucket = idx % REFHT_BUCKETS;
     refht_lock_acquire(&eflags);
-    n = refht_find(idx, bucket);
+    n = refht_find(idx);
     result = n ? n->refcount : 0;
     refht_lock_release(eflags);
     return result;

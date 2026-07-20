@@ -19,6 +19,21 @@ static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
 static wait_queue_t mouse_waitq;
 
+static int mouse_ensure_ring(void) {
+    uint8_t *new_ring;
+
+    if (ring_buffer && ring_capacity != 0) return 1;
+    new_ring = (uint8_t *)kmalloc(MOUSE_BUF_SIZE);
+    if (!new_ring) return 0;
+    memset(new_ring, 0, MOUSE_BUF_SIZE);
+    if (__sync_bool_compare_and_swap(&ring_buffer, NULL, new_ring)) {
+        ring_capacity = MOUSE_BUF_SIZE;
+        new_ring = NULL;
+    }
+    if (new_ring) kfree(new_ring);
+    return ring_buffer && ring_capacity != 0;
+}
+
 static void ps2_wait_input(void) {
     int timeout = 100000;
     while (timeout--) {
@@ -107,12 +122,14 @@ void mouse_handler(registers_t *regs) {
 }
 
 int mouse_has_data(void) {
+    mouse_ensure_ring();
     return ring_head != ring_tail;
 }
 
 int mouse_read(uint8_t *buf, uint32_t count) {
     uint32_t i;
     i = 0;
+    mouse_ensure_ring();
     if (!ring_buffer || ring_capacity == 0)
         return 0;
     while (i < count && ring_head != ring_tail) {
@@ -124,6 +141,7 @@ int mouse_read(uint8_t *buf, uint32_t count) {
 }
 
 wait_queue_t *mouse_get_waitq(void) {
+    mouse_ensure_ring();
     return &mouse_waitq;
 }
 
@@ -133,10 +151,8 @@ void mouse_init(void) {
 
     ring_head = 0;
     ring_tail = 0;
-    ring_capacity = MOUSE_BUF_SIZE;
-    ring_buffer = (uint8_t *)kmalloc(ring_capacity);
-    if (ring_buffer)
-        memset(ring_buffer, 0, ring_capacity);
+    ring_capacity = 0;
+    ring_buffer = NULL;
     mouse_cycle = 0;
     waitq_init(&mouse_waitq);
 

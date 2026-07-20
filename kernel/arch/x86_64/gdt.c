@@ -55,7 +55,6 @@ static tss64_t tss __attribute__((aligned(16)));
 #define IST_STACK_SIZE 4096
 static uint8_t ist1_stack[IST_STACK_SIZE] __attribute__((aligned(16)));
 static uint8_t ist2_stack[IST_STACK_SIZE] __attribute__((aligned(16)));
-static uint8_t ist3_stack[IST_STACK_SIZE] __attribute__((aligned(16)));
 
 static void gdt_set_gate(int num, uint64_t base, uint64_t limit, uint8_t access, uint8_t gran) {
     gdt[num].base_low    = (base & 0xFFFF);
@@ -141,7 +140,6 @@ void gdt_init(void) {
     tss.iomap_base = sizeof(tss64_t);
     tss.ist1 = (uint64_t)(ist1_stack + IST_STACK_SIZE);
     tss.ist2 = (uint64_t)(ist2_stack + IST_STACK_SIZE);
-    tss.ist3 = (uint64_t)(ist3_stack + IST_STACK_SIZE);
     tss_base = (uint64_t)&tss;
     gdt_set_tss(5, tss_base, sizeof(tss64_t) - 1);
 

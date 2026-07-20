@@ -11,7 +11,6 @@ static int overlay_initialized = 0;
 static vfs_fs_type_t overlay_fs_type;
 static dirent_t overlay_dirent;
 
-#define OVERLAY_NODE_CACHE_SIZE 64
 typedef struct {
     vfs_node_t *parent;
     char name[64];
@@ -118,22 +117,15 @@ static void overlay_set_parent(vfs_node_t *child, vfs_node_t *parent) {
 }
 
 static int ov_cache_ensure_space(void) {
-    uint64_t new_cap;
     ov_node_cache_entry_t *new_cache;
 
-    if (ov_node_cache_count < ov_node_cache_capacity)
-        return 0;
-    if (ov_node_cache_capacity >= OVERLAY_NODE_CACHE_SIZE)
-        return 0;
-
-    new_cap = ov_node_cache_capacity ? ov_node_cache_capacity * 2 : 8;
-    if (new_cap > OVERLAY_NODE_CACHE_SIZE)
-        new_cap = OVERLAY_NODE_CACHE_SIZE;
-    new_cache = (ov_node_cache_entry_t *)krealloc(ov_node_cache, new_cap * sizeof(ov_node_cache_entry_t));
+    new_cache = (ov_node_cache_entry_t *)krealloc(
+        ov_node_cache,
+        (ov_node_cache_count + 1) * sizeof(ov_node_cache_entry_t));
     if (!new_cache)
         return -1;
     ov_node_cache = new_cache;
-    ov_node_cache_capacity = new_cap;
+    ov_node_cache_capacity = ov_node_cache_count + 1;
     return 0;
 }
 
@@ -198,7 +190,7 @@ static void ov_cache_remove(overlay_node_t *onode) {
                 kfree(ov_node_cache);
                 ov_node_cache = NULL;
                 ov_node_cache_capacity = 0;
-            } else if (ov_node_cache_capacity > ov_node_cache_count * 2) {
+            } else {
                 new_cache = (ov_node_cache_entry_t *)krealloc(
                     ov_node_cache,
                     ov_node_cache_count * sizeof(ov_node_cache_entry_t));

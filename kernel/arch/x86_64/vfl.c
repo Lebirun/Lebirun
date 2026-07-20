@@ -10,21 +10,71 @@ extern void *kmalloc(size_t);
 extern void kfree(void *);
 
 static vfl_vm_t *vfl_vms;
+static int vfl_vm_extent;
 
-static int vfl_ensure_initialized(void) {
-    if (vfl_vms) return 0;
-    vfl_vms = (vfl_vm_t *)kmalloc(VFL_MAX_VMS * sizeof(vfl_vm_t));
-    if (!vfl_vms) return -1;
-    memset(vfl_vms, 0, VFL_MAX_VMS * sizeof(vfl_vm_t));
+static int vfl_resize_vms(int new_extent) {
+    vfl_vm_t *new_vms;
+
+    if (new_extent <= vfl_vm_extent) return 0;
+    new_vms = (vfl_vm_t *)krealloc(vfl_vms, new_extent * sizeof(vfl_vm_t));
+    if (!new_vms) return -1;
+    memset(&new_vms[vfl_vm_extent], 0,
+           (new_extent - vfl_vm_extent) * sizeof(vfl_vm_t));
+    vfl_vms = new_vms;
+    vfl_vm_extent = new_extent;
     return 0;
+}
+
+static int vfl_add_vcpu(vfl_vm_t *vm) {
+    vfl_vcpu_t *new_vcpus;
+
+    new_vcpus = (vfl_vcpu_t *)krealloc(vm->vcpus,
+        (vm->nr_vcpus + 1) * sizeof(vfl_vcpu_t));
+    if (!new_vcpus) return -1;
+    vm->vcpus = new_vcpus;
+    return 0;
+}
+
+static int vfl_resize_mem_slots(vfl_vm_t *vm, int new_extent) {
+    vfl_mem_slot_t *new_slots;
+
+    if (new_extent <= vm->mem_slot_extent) return 0;
+    new_slots = (vfl_mem_slot_t *)krealloc(
+        vm->mem_slots, new_extent * sizeof(vfl_mem_slot_t));
+    if (!new_slots) return -1;
+    memset(&new_slots[vm->mem_slot_extent], 0,
+           (new_extent - vm->mem_slot_extent) * sizeof(vfl_mem_slot_t));
+    vm->mem_slots = new_slots;
+    vm->mem_slot_extent = new_extent;
+    return 0;
+}
+
+static void vfl_shrink_mem_slots(vfl_vm_t *vm) {
+    int new_extent;
+    vfl_mem_slot_t *new_slots;
+
+    new_extent = vm->mem_slot_extent;
+    while (new_extent > 0 && !vm->mem_slots[new_extent - 1].in_use) {
+        new_extent--;
+    }
+    if (new_extent == vm->mem_slot_extent) return;
+    if (new_extent == 0) {
+        kfree(vm->mem_slots);
+        vm->mem_slots = NULL;
+        vm->mem_slot_extent = 0;
+        return;
+    }
+    new_slots = (vfl_mem_slot_t *)krealloc(
+        vm->mem_slots, new_extent * sizeof(vfl_mem_slot_t));
+    if (!new_slots) return;
+    vm->mem_slots = new_slots;
+    vm->mem_slot_extent = new_extent;
 }
 
 int vfl_create_vm(void) {
     int i;
 
-    if (vfl_ensure_initialized() < 0) return -1;
-
-    for (i = 0; i < VFL_MAX_VMS; i++) {
+    for (i = 0; i < vfl_vm_extent; i++) {
         if (!vfl_vms[i].active) {
             memset(&vfl_vms[i], 0, sizeof(vfl_vm_t));
             vfl_vms[i].active = 1;
@@ -32,24 +82,46 @@ int vfl_create_vm(void) {
             return i;
         }
     }
-    return -1;
+    i = vfl_vm_extent;
+    if (vfl_resize_vms(vfl_vm_extent + 1) < 0) return -1;
+    vfl_vms[i].active = 1;
+    vfl_vms[i].id = (uint32_t)i;
+    return i;
 }
 
 int vfl_destroy_vm(uint32_t vm_id) {
     int i;
+    int new_extent;
     vfl_vm_t *vm;
+    vfl_vm_t *new_vms;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 
-    for (i = 0; i < VFL_MAX_MEM_SLOTS; i++) {
+    for (i = 0; i < vm->mem_slot_extent; i++) {
         if (vm->mem_slots[i].in_use && vm->mem_slots[i].host_mem) {
             kfree(vm->mem_slots[i].host_mem);
         }
     }
+    kfree(vm->vcpus);
+    kfree(vm->mem_slots);
     memset(vm, 0, sizeof(vfl_vm_t));
+    new_extent = vfl_vm_extent;
+    while (new_extent > 0 && !vfl_vms[new_extent - 1].active) new_extent--;
+    if (new_extent == 0) {
+        kfree(vfl_vms);
+        vfl_vms = NULL;
+        vfl_vm_extent = 0;
+    } else if (new_extent < vfl_vm_extent) {
+        new_vms = (vfl_vm_t *)krealloc(
+            vfl_vms, new_extent * sizeof(vfl_vm_t));
+        if (new_vms) {
+            vfl_vms = new_vms;
+            vfl_vm_extent = new_extent;
+        }
+    }
     return 0;
 }
 
@@ -58,10 +130,10 @@ int vfl_create_vcpu(uint32_t vm_id) {
     int idx;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
-    if (vm->nr_vcpus >= VFL_MAX_VCPUS) return -1;
+    if (vfl_add_vcpu(vm) < 0) return -1;
 
     idx = vm->nr_vcpus;
     memset(&vm->vcpus[idx], 0, sizeof(vfl_vcpu_t));
@@ -84,7 +156,7 @@ int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -98,7 +170,7 @@ int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -112,7 +184,7 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -126,7 +198,7 @@ int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -142,18 +214,23 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     uint8_t *host_buf;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
-    if (region->slot >= VFL_MAX_MEM_SLOTS) return -1;
+    if (region->slot >= (uint32_t)INT32_MAX) return -1;
 
-    slot = &vm->mem_slots[region->slot];
-    if (slot->in_use && slot->host_mem) {
-        kfree(slot->host_mem);
+    if (region->slot >= (uint32_t)vm->mem_slot_extent) {
+        if (region->size == 0) return 0;
+        if (vfl_resize_mem_slots(vm, (int)region->slot + 1) < 0) return -1;
     }
 
+    slot = &vm->mem_slots[region->slot];
+
     if (region->size == 0) {
+        kfree(slot->host_mem);
+        if (slot->in_use && vm->nr_mem_slots > 0) vm->nr_mem_slots--;
         memset(slot, 0, sizeof(vfl_mem_slot_t));
+        vfl_shrink_mem_slots(vm);
         return 0;
     }
 
@@ -165,6 +242,8 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
         memcpy(host_buf, (void *)region->host_virt, region->size);
     }
 
+    kfree(slot->host_mem);
+    if (!slot->in_use) vm->nr_mem_slots++;
     slot->in_use = 1;
     slot->guest_phys = region->guest_phys;
     slot->size = region->size;
@@ -173,7 +252,6 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     if (slot->flags == 0)
         slot->flags = VFL_MEM_FLAG_RWX;
 
-    vm->nr_mem_slots++;
     return 0;
 }
 
@@ -181,7 +259,7 @@ static uint8_t *vfl_guest_to_host(vfl_vm_t *vm, uint64_t guest_addr, uint64_t le
     int i;
     vfl_mem_slot_t *slot;
 
-    for (i = 0; i < VFL_MAX_MEM_SLOTS; i++) {
+    for (i = 0; i < vm->mem_slot_extent; i++) {
         slot = &vm->mem_slots[i];
         if (!slot->in_use) continue;
         if (guest_addr >= slot->guest_phys &&
@@ -267,7 +345,7 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
     int max_steps;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -535,12 +613,12 @@ int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info) {
     uint64_t total;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= VFL_MAX_VMS) return -1;
+    if (vm_id >= (uint32_t)vfl_vm_extent) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 
     total = 0;
-    for (i = 0; i < VFL_MAX_MEM_SLOTS; i++) {
+    for (i = 0; i < vm->mem_slot_extent; i++) {
         if (vm->mem_slots[i].in_use)
             total += vm->mem_slots[i].size;
     }

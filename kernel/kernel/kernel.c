@@ -556,6 +556,8 @@ void kernel_main(void) {
     heap_reclaim_unused();
     console_writer_flush();
     kprint_flush();
+    klog_reclaim_unused();
+    heap_reclaim_unused();
 
     {
         const char *init_candidates[4];

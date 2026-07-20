@@ -29,3 +29,11 @@ Whenever you clone this repository, please add --recurse-submodules to the git c
 ### License
 
 This project is licensed under the GNU General Public License v3. 
+
+### Donate
+
+If you would like to support this project, please consider making a donation.
+
+- **BTC:** `bc1qz0aaxg4a4h40r6xq2c597v5zt6lq8z9fv58yjw`
+- **ETH:** `0x29ad4604b4fc39037d973f65ffb34cbda65916c1`
+- **SOL:** `5HKmrrJg65jjFum8a8iJDkcwS1mwrfzet5MwN8pGks4B`

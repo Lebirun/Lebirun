@@ -63,6 +63,7 @@ static inline int test_committed_bit(uint64_t idx) {
 
 void demand_paging_init(void) {
     uint64_t heap_max_size;
+    uint8_t *bitmap_storage;
 
     demand_base = HEAP_START;
     heap_max_size = kernel_heap.max_addr - kernel_heap.start_addr;
@@ -72,12 +73,13 @@ void demand_paging_init(void) {
     if (demand_bitmap_bytes < 64)
         demand_bitmap_bytes = 64;
 
-    demand_reserved_bitmap = (uint8_t *)kmalloc(demand_bitmap_bytes);
-    demand_committed_bitmap = (uint8_t *)kmalloc(demand_bitmap_bytes);
-    if (!demand_reserved_bitmap || !demand_committed_bitmap) {
+    bitmap_storage = (uint8_t *)kmalloc(demand_bitmap_bytes * 2);
+    if (!bitmap_storage) {
         printf("Demand paging: failed to allocate bitmaps (%lu bytes)\n", demand_bitmap_bytes);
         return;
     }
+    demand_reserved_bitmap = bitmap_storage;
+    demand_committed_bitmap = bitmap_storage + demand_bitmap_bytes;
     memset(demand_reserved_bitmap, 0, demand_bitmap_bytes);
     memset(demand_committed_bitmap, 0, demand_bitmap_bytes);
 

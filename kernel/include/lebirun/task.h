@@ -10,8 +10,6 @@ struct cpu_info;
 
 #define TASK_INIT_FDS 3
 #define TASK_MAX_FDS 1024
-#define TASK_INIT_FILE_MAPS 4
-#define TASK_MAX_FILE_MAPS 16
 
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
@@ -137,10 +135,7 @@ typedef struct task {
     uint64_t exec_old_pages_count;
     struct vfs_node *vfs_lookup_node;
 
-    struct {
-        struct { long tv_sec; long tv_usec; } it_interval;
-        struct { long tv_sec; long tv_usec; } it_value;
-    } itimers[3];
+    void *timer_data;
     uint64_t alarm_tick;
 } task_t;
 

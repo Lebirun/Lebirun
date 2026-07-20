@@ -4,57 +4,42 @@
 #include <lebirun/mutex.h>
 #include <string.h>
 
-#define THREAD_INITIAL_CAPACITY 4
-
 thread_t *current_thread = NULL;
 thread_t *thread_ready_head = NULL;
 static thread_t *threads;
-static int thread_capacity;
 static uint64_t next_thread_id = 1;
 static mutex_t thread_lock;
 
 static void thread_entry_wrapper(void);
 static void do_context_switch(thread_t *from, thread_t *to);
 
-static int thread_grow(void) {
-    int new_cap;
-    thread_t *new_arr;
-
-    if (thread_capacity >= MAX_THREADS) return -1;
-    new_cap = thread_capacity == 0 ? THREAD_INITIAL_CAPACITY : thread_capacity * 2;
-    if (new_cap > MAX_THREADS) new_cap = MAX_THREADS;
-    new_arr = (thread_t *)kmalloc(new_cap * sizeof(thread_t));
-    if (!new_arr) return -1;
-    memset(new_arr, 0, new_cap * sizeof(thread_t));
-    if (threads && thread_capacity > 0) {
-        memcpy(new_arr, threads, thread_capacity * sizeof(thread_t));
-        kfree(threads);
-    }
-    threads = new_arr;
-    thread_capacity = new_cap;
-    return 0;
-}
-
 static thread_t *thread_alloc(void) {
-    int i;
-    int old_cap;
+    thread_t *thread;
 
-    for (i = 0; i < thread_capacity; i++) {
-        if (threads[i].state == THREAD_DEAD) {
-            memset(&threads[i], 0, sizeof(thread_t));
-            threads[i].id = next_thread_id++;
-            return &threads[i];
-        }
-    }
-    old_cap = thread_capacity;
-    if (thread_grow() < 0) return NULL;
-    memset(&threads[old_cap], 0, sizeof(thread_t));
-    threads[old_cap].id = next_thread_id++;
-    return &threads[old_cap];
+    thread = (thread_t *)kmalloc(sizeof(thread_t));
+    if (!thread) return NULL;
+    memset(thread, 0, sizeof(thread_t));
+    thread->id = next_thread_id++;
+    thread->all_next = threads;
+    threads = thread;
+    return thread;
 }
 
 static void thread_free(thread_t *thread) {
-    thread->state = THREAD_DEAD;
+    thread_t *entry;
+    thread_t *previous;
+
+    if (!thread) return;
+    previous = NULL;
+    entry = threads;
+    while (entry && entry != thread) {
+        previous = entry;
+        entry = entry->all_next;
+    }
+    if (!entry) return;
+    if (previous) previous->all_next = entry->all_next;
+    else threads = entry->all_next;
+    kfree(entry);
 }
 
 static void thread_add_to_ready(thread_t *thread) {
@@ -78,8 +63,6 @@ void init_threads(void) {
     current_thread = NULL;
     thread_ready_head = NULL;
     threads = NULL;
-    thread_capacity = 0;
-    thread_grow();
 }
 
 thread_t *create_thread(void (*entry)(void *arg), void *arg) {
@@ -187,6 +170,7 @@ void thread_exit(int code) {
         current_thread->state = THREAD_DEAD;
         if (current_thread->stack_base) {
             kfree(current_thread->stack_base);
+            current_thread->stack_base = NULL;
         }
         schedule_thread();
     }
@@ -199,7 +183,9 @@ int thread_join(thread_t *thread, int *exit_code) {
     if (exit_code) {
         *exit_code = thread->exit_code;
     }
+    mutex_lock(&thread_lock);
     thread_free(thread);
+    mutex_unlock(&thread_lock);
     return 0;
 }
 

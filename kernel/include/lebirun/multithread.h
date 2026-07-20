@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #define THREAD_STACK_SIZE 4096
-#define MAX_THREADS 32
 
 typedef enum {
     THREAD_READY = 0,
@@ -19,6 +18,7 @@ typedef struct thread {
     uint64_t id;
     thread_state_t state;
     struct thread *next;
+    struct thread *all_next;
     registers_t regs;
     uint64_t cr3;
     uint8_t *stack_base;

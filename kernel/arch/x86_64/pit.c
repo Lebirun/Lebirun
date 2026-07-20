@@ -6,6 +6,7 @@
 #include <lebirun/io.h>
 #include <lebirun/pit.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/mem_map.h>
 
 #define PIT_BASE_FREQ       1193182
 #define PIT_CHANNEL0_DATA   0x40
@@ -31,8 +32,6 @@
 #define SPEAKER_PORT        0x61
 #define SPEAKER_ENABLE      0x03
 
-#define MAX_TIMER_CALLBACKS 16
-
 extern volatile uint64_t tick_count;
 
 uint64_t pit_freq = 100;
@@ -47,15 +46,18 @@ static spinlock_t uptime_lock = { .locked = 0 };
 
 typedef void (*pit_callback_t)(uint64_t ticks);
 
-static struct {
+typedef struct pit_callback_entry {
     pit_callback_t callback;
     uint64_t interval;
     uint64_t remaining;
     bool active;
     bool oneshot;
-} timer_callbacks[MAX_TIMER_CALLBACKS];
+    int handle;
+    struct pit_callback_entry *next;
+} pit_callback_entry_t;
 
-static uint8_t num_callbacks = 0;
+static pit_callback_entry_t *timer_callbacks;
+static int next_callback_handle = 1;
 
 static inline void io_wait(void) {
     outb(0x80, 0);
@@ -114,11 +116,12 @@ static uint64_t pit_get_subtick_us(void) {
 }
 
 void pit_init(uint64_t freq) {
-    for (int i = 0; i < MAX_TIMER_CALLBACKS; i++) {
-        timer_callbacks[i].callback = 0;
-        timer_callbacks[i].active = false;
-    }
-    num_callbacks = 0;
+    uint64_t divisor;
+    uint64_t actual_freq;
+    uint64_t error_ppm;
+
+    timer_callbacks = NULL;
+    next_callback_handle = 1;
     
     if (freq == 0) freq = 100;
     if (freq > PIT_BASE_FREQ) freq = PIT_BASE_FREQ;
@@ -127,7 +130,7 @@ void pit_init(uint64_t freq) {
     pit_freq = freq;
     calibrated_freq = freq;
     
-    uint64_t divisor = PIT_BASE_FREQ / freq;
+    divisor = PIT_BASE_FREQ / freq;
     if (divisor > 65535) divisor = 65535;
     if (divisor < 1) divisor = 1;
     
@@ -138,8 +141,8 @@ void pit_init(uint64_t freq) {
     
     pit_set_divisor((uint16_t)divisor);
     
-    uint64_t actual_freq = PIT_BASE_FREQ / divisor;
-    uint64_t error_ppm = 0;
+    actual_freq = PIT_BASE_FREQ / divisor;
+    error_ppm = 0;
     if (actual_freq > freq) {
         error_ppm = ((actual_freq - freq) * 1000000) / freq;
     } else {
@@ -327,60 +330,78 @@ uint64_t pit_us_to_ticks(uint64_t us) {
 }
 
 int pit_register_callback(pit_callback_t callback, uint64_t interval_ticks, bool oneshot) {
-    uint64_t flags = save_flags_cli();
-    
-    int slot = -1;
-    for (int i = 0; i < MAX_TIMER_CALLBACKS; i++) {
-        if (!timer_callbacks[i].active) {
-            slot = i;
-            break;
-        }
-    }
-    
-    if (slot < 0) {
-        restore_flags(flags);
-        return -1;
-    }
-    
-    timer_callbacks[slot].callback = callback;
-    timer_callbacks[slot].interval = interval_ticks;
-    timer_callbacks[slot].remaining = interval_ticks;
-    timer_callbacks[slot].active = true;
-    timer_callbacks[slot].oneshot = oneshot;
-    num_callbacks++;
-    
+    uint64_t flags;
+    pit_callback_entry_t *entry;
+    int handle;
+
+    if (!callback || interval_ticks == 0) return -1;
+    entry = (pit_callback_entry_t *)kmalloc(sizeof(pit_callback_entry_t));
+    if (!entry) return -1;
+
+    flags = save_flags_cli();
+    handle = next_callback_handle;
+    if (next_callback_handle == 0x7FFFFFFF) next_callback_handle = 1;
+    else next_callback_handle++;
+    entry->callback = callback;
+    entry->interval = interval_ticks;
+    entry->remaining = interval_ticks;
+    entry->active = true;
+    entry->oneshot = oneshot;
+    entry->handle = handle;
+    entry->next = timer_callbacks;
+    timer_callbacks = entry;
     restore_flags(flags);
-    return slot;
+    return handle;
 }
 
 void pit_unregister_callback(int handle) {
-    if (handle < 0 || handle >= MAX_TIMER_CALLBACKS) return;
-    
-    uint64_t flags = save_flags_cli();
-    if (timer_callbacks[handle].active) {
-        timer_callbacks[handle].active = false;
-        timer_callbacks[handle].callback = 0;
-        num_callbacks--;
+    uint64_t flags;
+    pit_callback_entry_t *entry;
+
+    if (handle <= 0) return;
+    flags = save_flags_cli();
+    entry = timer_callbacks;
+    while (entry) {
+        if (entry->handle == handle) {
+            entry->active = false;
+            entry->callback = NULL;
+            break;
+        }
+        entry = entry->next;
     }
     restore_flags(flags);
 }
 
 void pit_process_callbacks(void) {
-    for (int i = 0; i < MAX_TIMER_CALLBACKS; i++) {
-        if (timer_callbacks[i].active) {
-            timer_callbacks[i].remaining--;
-            if (timer_callbacks[i].remaining == 0) {
-                if (timer_callbacks[i].callback) {
-                    timer_callbacks[i].callback(tick_count);
+    pit_callback_entry_t *entry;
+    pit_callback_entry_t *previous;
+    pit_callback_entry_t *next;
+
+    previous = NULL;
+    entry = timer_callbacks;
+    while (entry) {
+        next = entry->next;
+        if (entry->active) {
+            entry->remaining--;
+            if (entry->remaining == 0) {
+                if (entry->callback) {
+                    entry->callback(tick_count);
                 }
-                if (timer_callbacks[i].oneshot) {
-                    timer_callbacks[i].active = false;
-                    num_callbacks--;
+                if (entry->oneshot) {
+                    entry->active = false;
                 } else {
-                    timer_callbacks[i].remaining = timer_callbacks[i].interval;
+                    entry->remaining = entry->interval;
                 }
             }
         }
+        if (!entry->active) {
+            if (previous) previous->next = next;
+            else timer_callbacks = next;
+            kfree(entry);
+        } else {
+            previous = entry;
+        }
+        entry = next;
     }
 }
 

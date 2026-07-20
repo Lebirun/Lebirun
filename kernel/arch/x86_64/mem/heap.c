@@ -38,6 +38,33 @@ static uint64_t early_heap_used = 0;
 static uint64_t early_heap_total = 0;
 static int main_heap_initialized = 0;
 
+static void early_heap_reclaim_unused(void) {
+    early_heap_chunk_t *chunk;
+    uint64_t chunk_start;
+    uint64_t chunk_end;
+    uint64_t used_end;
+    uint64_t reclaim_start;
+    uint64_t reclaimed;
+
+    reclaimed = 0;
+    chunk = early_heap_chunks;
+    while (chunk) {
+        chunk_start = (uint64_t)chunk;
+        chunk_end = chunk_start + sizeof(early_heap_chunk_t) + chunk->size;
+        used_end = chunk_start + sizeof(early_heap_chunk_t) + chunk->used;
+        reclaim_start = (used_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (reclaim_start < chunk_end) {
+            pfa_reclaim_kernel_range(reclaim_start - KERNEL_VMA,
+                                     chunk_end - KERNEL_VMA);
+            reclaimed += chunk_end - reclaim_start;
+            chunk->size = reclaim_start - chunk_start -
+                          sizeof(early_heap_chunk_t);
+        }
+        chunk = chunk->next;
+    }
+    if (reclaimed <= early_heap_total) early_heap_total -= reclaimed;
+}
+
 static void *early_kmalloc(size_t size) {
     void *ptr;
     early_heap_chunk_t *chunk;
@@ -405,6 +432,7 @@ void heap_init(void) {
     #endif
 
     main_heap_initialized = 1;
+    early_heap_reclaim_unused();
     klog_persist_enable();
     slab_init();
 

@@ -823,7 +823,7 @@ void idt_init(void)
     idt_set_gate(11, (uintptr_t)isr11);
     idt_set_gate(12, (uintptr_t)isr12);
     idt_set_gate(13, (uintptr_t)isr13);
-    idt_set_gate_ist(14, (uintptr_t)isr14, 3);
+    idt_set_gate(14, (uintptr_t)isr14);
     idt_set_gate(15, (uintptr_t)isr15);
     idt_set_gate(16, (uintptr_t)isr16);
     idt_set_gate(17, (uintptr_t)isr17);

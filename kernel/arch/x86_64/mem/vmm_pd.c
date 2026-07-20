@@ -141,6 +141,7 @@ static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int
 
 void vmm_free_pml4(uint64_t pml4_phys) {
     vmm_free_pml4_entries(pml4_phys, 511, 1);
+    pfa_ref_gc();
 }
 
 static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count) {

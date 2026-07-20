@@ -18,10 +18,6 @@
 #define VFL_IOCTL_GET_SREGS         0xAE0A
 #define VFL_IOCTL_VM_INFO           0xAE0B
 
-#define VFL_MAX_VMS         4
-#define VFL_MAX_VCPUS       4
-#define VFL_MAX_MEM_SLOTS   16
-
 #define VFL_EXIT_HLT        0
 #define VFL_EXIT_IO          1
 #define VFL_EXIT_MMIO        2
@@ -121,10 +117,11 @@ typedef struct vfl_vcpu {
 typedef struct vfl_vm {
     int active;
     uint32_t id;
-    vfl_vcpu_t vcpus[VFL_MAX_VCPUS];
+    vfl_vcpu_t *vcpus;
     int nr_vcpus;
-    vfl_mem_slot_t mem_slots[VFL_MAX_MEM_SLOTS];
+    vfl_mem_slot_t *mem_slots;
     int nr_mem_slots;
+    int mem_slot_extent;
 } vfl_vm_t;
 
 int vfl_create_vm(void);

@@ -12,15 +12,14 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-vring_t *subrings;
-static int subrings_count;
-kproc_t *kernel_procs;
-static int kprocs_count;
+static vring_t *subrings;
+static kproc_t *kernel_procs;
 kproc_t *current_kproc = NULL;
 static int32_t next_kproc_pid = KPROC_PID_BASE;
 static volatile int vring_initialized = 0;
 static spinlock_t vring_lock = { .locked = 0 };
 static volatile int kproc_initialized = 0;
+static spinlock_t kproc_lock = { .locked = 0 };
 
 static volatile uint64_t print_queue_head = 0;
 static volatile uint64_t print_queue_tail = 0;
@@ -37,6 +36,7 @@ typedef struct {
 
 static klog_item_t *klog_ring;
 static uint64_t klog_capacity;
+static spinlock_t klog_ring_lock = { .locked = 0 };
 static volatile uint64_t klog_head = 0;
 static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
@@ -89,6 +89,22 @@ static task_t *vring_selftest_task_ref;
 
 static spinlock_t serial_lock = { .locked = 0 };
 static spinlock_t klog_persist_lock = { .locked = 0 };
+
+typedef struct kproc_msg {
+    uint64_t value;
+    struct kproc_msg *next;
+} kproc_msg_t;
+
+static vring_t *vring_find(uint8_t minor) {
+    vring_t *ring;
+
+    ring = subrings;
+    while (ring) {
+        if (ring->ring_minor == minor && ring->active) return ring;
+        ring = ring->next;
+    }
+    return NULL;
+}
 
 static size_t klog_strnlen(const char *s, size_t maxlen) {
     size_t n = 0;
@@ -173,8 +189,7 @@ static void klog_persist_append_locked(const char *buf, uint64_t len) {
     ppos = klog_persist_pos;
     need = ppos + (int)len + 1;
     if (need > klog_persist_cap && klog_persist_cap < KLOG_PERSIST_SZ) {
-        newcap = klog_persist_cap ? klog_persist_cap * 2 : need;
-        while (newcap < need && newcap < KLOG_PERSIST_SZ) newcap *= 2;
+        newcap = (need + 4095) & ~4095;
         if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
         nb = krealloc(klog_persist_buf, newcap);
         if (nb) {
@@ -211,6 +226,40 @@ void klog_persist_enable(void) {
     klog_early_done = 1;
     spin_unlock(&klog_persist_lock);
     klog_irqrestore(flags);
+}
+
+void klog_reclaim_unused(void) {
+    uint64_t flags;
+    char *new_buf;
+    klog_item_t *old_ring;
+    int needed;
+
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
+    needed = klog_persist_pos + 1;
+    if (klog_persist_buf && needed > 0 && needed < klog_persist_cap) {
+        new_buf = (char *)krealloc(klog_persist_buf, (size_t)needed);
+        if (new_buf) {
+            klog_persist_buf = new_buf;
+            klog_persist_cap = needed;
+        }
+    }
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
+
+    old_ring = NULL;
+    flags = klog_irqsave();
+    spin_lock(&klog_ring_lock);
+    if (klog_count == 0 && klog_ring) {
+        old_ring = klog_ring;
+        klog_ring = NULL;
+        klog_capacity = 0;
+        klog_head = 0;
+        klog_tail = 0;
+    }
+    spin_unlock(&klog_ring_lock);
+    klog_irqrestore(flags);
+    if (old_ring) kfree(old_ring);
 }
 
 static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
@@ -261,6 +310,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     if (ring_len >= KLOG_MAX_LEN) ring_len = KLOG_MAX_LEN - 1;
 
     flags = klog_irqsave();
+    spin_lock(&klog_ring_lock);
     if (!klog_ring || klog_count >= klog_capacity) {
         if (klog_capacity < KLOG_MAX_ITEMS) {
             new_capacity = klog_capacity ? klog_capacity * 2 : 2;
@@ -283,6 +333,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     }
     if (!klog_ring || klog_count >= klog_capacity) {
         klog_dropped++;
+        spin_unlock(&klog_ring_lock);
         klog_irqrestore(flags);
         return (int)len;
     }
@@ -293,6 +344,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     it->msg[ring_len] = '\0';
     klog_tail = (klog_tail + 1) % klog_capacity;
     klog_count++;
+    spin_unlock(&klog_ring_lock);
     klog_irqrestore(flags);
     waitq_wake_one(&kprint_waitq);
     return (int)len;
@@ -302,15 +354,17 @@ static int klog_dequeue(klog_item_t *out) {
     uint64_t flags;
 
     if (!out) return -1;
-    if (!klog_ring || klog_capacity == 0) return -1;
     flags = klog_irqsave();
-    if (klog_count == 0) {
+    spin_lock(&klog_ring_lock);
+    if (!klog_ring || klog_capacity == 0 || klog_count == 0) {
+        spin_unlock(&klog_ring_lock);
         klog_irqrestore(flags);
         return -1;
     }
     *out = klog_ring[klog_head];
     klog_head = (klog_head + 1) % klog_capacity;
     klog_count--;
+    spin_unlock(&klog_ring_lock);
     klog_irqrestore(flags);
     return 0;
 }
@@ -489,8 +543,6 @@ void kprint_poll(uint64_t max_items) {
 }
 
 void vring_init(void) {
-    int i;
-
     klog_ring = NULL;
     klog_capacity = 0;
     kprint_ring = NULL;
@@ -505,56 +557,56 @@ void vring_init(void) {
     kprint_tail = 0;
     kprint_count = 0;
 
-    subrings_count = VRING_MAX_SUBRINGS;
-    subrings = kmalloc(subrings_count * sizeof(vring_t));
-    if (subrings) {
-        memset(subrings, 0, subrings_count * sizeof(vring_t));
-        for (i = 0; i < subrings_count; i++) {
-            subrings[i].ring_major = 0;
-            subrings[i].ring_minor = (uint8_t)i;
-            subrings[i].active = false;
-            subrings[i].region_count = 0;
-            subrings[i].name = NULL;
-            subrings[i].caps = 0;
-            subrings[i].flags = 0;
-        }
-    }
+    subrings = NULL;
     
     vring_initialized = 1;
 }
 
 int vring_create(uint8_t minor, const char *name) {
-    if (!subrings || minor >= subrings_count) return -1;
+    vring_t *ring;
+    uint64_t irq_flags;
+
     if (minor == 0) return -1;
-    if (subrings[minor].active) return -2;
-    
-    subrings[minor].ring_major = 0;
-    subrings[minor].ring_minor = minor;
-    subrings[minor].active = true;
-    subrings[minor].region_count = 0;
-    subrings[minor].name = name;
-    subrings[minor].caps = 0;
-    subrings[minor].flags = 0;
-    subrings[minor].vring_pml4 = 0;
-    
+    ring = (vring_t *)kmalloc(sizeof(vring_t));
+    if (!ring) return -1;
+    memset(ring, 0, sizeof(vring_t));
+    ring->ring_minor = minor;
+    ring->active = true;
+    ring->name = name;
+
+    irq_flags = klog_irqsave();
+    spin_lock(&vring_lock);
+    if (vring_find(minor)) {
+        spin_unlock(&vring_lock);
+        klog_irqrestore(irq_flags);
+        kfree(ring);
+        return -2;
+    }
+    ring->next = subrings;
+    subrings = ring;
+    spin_unlock(&vring_lock);
+    klog_irqrestore(irq_flags);
+
     return 0;
 }
 
 int vring_create_sandboxed(uint8_t minor, const char *name, uint8_t caps) {
     int ret;
     uint64_t pml4;
+    vring_t *ring;
 
     ret = vring_create(minor, name);
     if (ret != 0) return ret;
-    subrings[minor].caps = caps;
-    subrings[minor].flags = VRING_FLAG_SANDBOXED;
+    ring = vring_get(minor);
+    if (!ring) return -2;
+    ring->caps = caps;
+    ring->flags = VRING_FLAG_SANDBOXED;
     pml4 = vmm_create_vring_pml4();
     if (!pml4) {
-        subrings[minor].active = false;
-        subrings[minor].flags = 0;
+        vring_remove(minor);
         return -3;
     }
-    subrings[minor].vring_pml4 = pml4;
+    ring->vring_pml4 = pml4;
     vring_add_region(minor, (uint64_t)_kernel_text_start, (uint64_t)_kernel_text_end,
                      VRING_PERM_READ | VRING_PERM_EXEC);
     vring_add_region(minor, (uint64_t)_kernel_text_end, (uint64_t)_kernel_rodata_end,
@@ -565,29 +617,39 @@ int vring_create_sandboxed(uint8_t minor, const char *name, uint8_t caps) {
 }
 
 int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms) {
-    uint64_t idx;
     uint64_t flags;
     uint64_t pte_flags;
     uint64_t v;
     uint64_t phys;
     uint64_t kernel_cr3;
+    vring_t *ring;
+    vring_mem_region_t *region;
 
-    if (!subrings || minor >= subrings_count) return -1;
     if (minor == 0) return -1;
-    if (!subrings[minor].active) return -2;
-    if (subrings[minor].region_count >= VRING_MAX_REGIONS) return -3;
     if (start >= end) return -4;
     if (perms == 0) return -5;
+    region = (vring_mem_region_t *)kmalloc(sizeof(vring_mem_region_t));
+    if (!region) return -3;
+    region->start = start;
+    region->end = end;
+    region->permissions = perms;
+    region->next = NULL;
 
     flags = klog_irqsave();
     spin_lock(&vring_lock);
-    idx = subrings[minor].region_count;
-    subrings[minor].allowed_regions[idx].start = start;
-    subrings[minor].allowed_regions[idx].end = end;
-    subrings[minor].allowed_regions[idx].permissions = perms;
-    subrings[minor].region_count++;
+    ring = vring_find(minor);
+    if (!ring) {
+        spin_unlock(&vring_lock);
+        klog_irqrestore(flags);
+        kfree(region);
+        return -2;
+    }
+    if (ring->regions_tail) ring->regions_tail->next = region;
+    else ring->allowed_regions = region;
+    ring->regions_tail = region;
+    ring->region_count++;
 
-    if (subrings[minor].vring_pml4) {
+    if (ring->vring_pml4) {
         pte_flags = 0x1;
         if (perms & VRING_PERM_WRITE) pte_flags |= 0x2;
         if (!(perms & VRING_PERM_EXEC)) pte_flags |= VRING_PTE_NX;
@@ -598,7 +660,7 @@ int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms)
                 if (kernel_cr3 && !vmm_get_phys_in_pml4(kernel_cr3, v)) {
                     vmm_map_page_in_pml4(kernel_cr3, v, phys, pte_flags);
                 }
-                vmm_map_page_in_pml4(subrings[minor].vring_pml4, v, phys, pte_flags);
+                vmm_map_page_in_pml4(ring->vring_pml4, v, phys, pte_flags);
             }
         }
     }
@@ -611,59 +673,79 @@ int vring_add_region(uint8_t minor, uint64_t start, uint64_t end, uint8_t perms)
 
 int vring_remove(uint8_t minor) {
     uint64_t pml4;
+    uint64_t flags;
+    vring_t *ring;
+    vring_t *previous;
+    vring_mem_region_t *region;
+    vring_mem_region_t *next_region;
 
-    if (!subrings || minor >= subrings_count) return -1;
-    if (!subrings[minor].active) return -2;
+    if (minor == 0) return -1;
+    flags = klog_irqsave();
+    spin_lock(&vring_lock);
+    previous = NULL;
+    ring = subrings;
+    while (ring && ring->ring_minor != minor) {
+        previous = ring;
+        ring = ring->next;
+    }
+    if (!ring) {
+        spin_unlock(&vring_lock);
+        klog_irqrestore(flags);
+        return -2;
+    }
+    if (previous) previous->next = ring->next;
+    else subrings = ring->next;
+    ring->active = false;
+    spin_unlock(&vring_lock);
+    klog_irqrestore(flags);
 
-    pml4 = subrings[minor].vring_pml4;
-    subrings[minor].active = false;
-    subrings[minor].region_count = 0;
-    subrings[minor].name = NULL;
-    subrings[minor].vring_pml4 = 0;
-
+    pml4 = ring->vring_pml4;
     if (pml4) {
         vmm_free_vring_pml4(pml4);
     }
+    region = ring->allowed_regions;
+    while (region) {
+        next_region = region->next;
+        kfree(region);
+        region = next_region;
+    }
+    kfree(ring);
 
     return 0;
 }
 
 vring_t *vring_get(uint8_t minor) {
-    if (!subrings || minor >= subrings_count) return NULL;
-    if (!subrings[minor].active) return NULL;
-    return &subrings[minor];
+    if (minor == 0) return NULL;
+    return vring_find(minor);
 }
 
 bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t access_type) {
     vring_t *ring;
+    vring_mem_region_t *region;
     uint64_t end_addr;
-    uint64_t i;
     uint64_t flags;
     bool result;
 
     if (!vring_initialized) return false;
     if (minor == 0) return true;
-    if (!subrings || minor >= subrings_count) return false;
-    if (!subrings[minor].active) return false;
     if (size == 0) return false;
     if (addr > (uint64_t)(-1) - size) return false;
-    
-    ring = &subrings[minor];
     end_addr = addr + size;
 
     flags = klog_irqsave();
     spin_lock(&vring_lock);
+    ring = vring_find(minor);
     result = false;
-    for (i = 0; i < ring->region_count; i++) {
-        vring_mem_region_t *region = &ring->allowed_regions[i];
-        
-        if (region->start >= region->end) continue;
-        if (addr >= region->start && end_addr <= region->end) {
+    region = ring ? ring->allowed_regions : NULL;
+    while (region) {
+        if (region->start < region->end &&
+            addr >= region->start && end_addr <= region->end) {
             if ((region->permissions & access_type) == access_type) {
                 result = true;
                 break;
             }
         }
+        region = region->next;
     }
     spin_unlock(&vring_lock);
     klog_irqrestore(flags);
@@ -672,27 +754,30 @@ bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t acc
 }
 
 bool vring_check_cap(uint8_t minor, uint8_t cap) {
+    vring_t *ring;
+
     if (!vring_initialized) return false;
     if (minor == 0) return true;
-    if (!subrings || minor >= subrings_count) return false;
-    if (!subrings[minor].active) return false;
-    return (subrings[minor].caps & cap) != 0;
+    ring = vring_get(minor);
+    if (!ring) return false;
+    return (ring->caps & cap) != 0;
 }
 
 void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type) {
     bool sandboxed;
     uint64_t flags;
-    int i;
     kproc_t *proc;
+    vring_t *ring;
 
-    if (!vring_initialized || !subrings || minor >= subrings_count) {
+    if (!vring_initialized) {
         vring_panic_forbidden(minor, addr, access_type);
         return;
     }
 
     flags = klog_irqsave();
     spin_lock(&vring_lock);
-    sandboxed = subrings[minor].active && (subrings[minor].flags & VRING_FLAG_SANDBOXED);
+    ring = vring_find(minor);
+    sandboxed = ring && (ring->flags & VRING_FLAG_SANDBOXED);
     spin_unlock(&vring_lock);
     klog_irqrestore(flags);
 
@@ -701,11 +786,12 @@ void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type) {
         return;
     }
 
-    for (i = 0; i < kprocs_count; i++) {
-        proc = &kernel_procs[i];
+    proc = kernel_procs;
+    while (proc) {
         if (proc->state != KPROC_STATE_NONE && proc->vring_minor == minor) {
             proc->state = KPROC_STATE_DEAD;
         }
+        proc = proc->next;
     }
 
     if (current_task && !current_task->is_user && current_task->vring_minor == minor) {
@@ -719,8 +805,9 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
     int off;
     int rem;
     int n;
-    int i;
     vring_t *ring;
+    vring_mem_region_t *region;
+    int displayed;
 
     off = 0;
     rem = (int)sizeof(reason_buf) - 1;
@@ -731,8 +818,9 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
     n = snprintf(reason_buf + off, (size_t)rem, "%d", minor);
     if (n > 0 && n < rem) { off += n; rem -= n; }
 
-    if (subrings && minor < subrings_count && subrings[minor].name) {
-        n = snprintf(reason_buf + off, (size_t)rem, " (%s)", subrings[minor].name);
+    ring = vring_get(minor);
+    if (ring && ring->name) {
+        n = snprintf(reason_buf + off, (size_t)rem, " (%s)", ring->name);
         if (n > 0 && n < rem) { off += n; rem -= n; }
     }
 
@@ -753,16 +841,18 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
         if (n > 0 && n < rem) { off += n; rem -= n; }
     }
 
-    ring = vring_get(minor);
     if (ring && rem > 20) {
         n = snprintf(reason_buf + off, (size_t)rem, "\nAllowed regions: ");
         if (n > 0 && n < rem) { off += n; rem -= n; }
-        for (i = 0; (uint64_t)i < ring->region_count && i < 3 && rem > 40; i++) {
+        region = ring->allowed_regions;
+        displayed = 0;
+        while (region && displayed < 3 && rem > 40) {
             n = snprintf(reason_buf + off, (size_t)rem,
                 "[0x%016lX-0x%016lX] ",
-                ring->allowed_regions[i].start,
-                ring->allowed_regions[i].end);
+                region->start, region->end);
             if (n > 0 && n < rem) { off += n; rem -= n; }
+            region = region->next;
+            displayed++;
         }
     }
     reason_buf[sizeof(reason_buf) - 1] = '\0';
@@ -771,73 +861,48 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
 }
 
 void kproc_init(void) {
-    int i;
-
-    kprocs_count = KPROC_MAX;
-    kernel_procs = kmalloc(kprocs_count * sizeof(kproc_t));
-    if (kernel_procs) {
-        memset(kernel_procs, 0, kprocs_count * sizeof(kproc_t));
-        for (i = 0; i < kprocs_count; i++) {
-            kernel_procs[i].pid = 0;
-            kernel_procs[i].state = KPROC_STATE_NONE;
-            kernel_procs[i].vring_minor = 0;
-            kernel_procs[i].name = NULL;
-            kernel_procs[i].entry = NULL;
-            kernel_procs[i].private_data = NULL;
-            kernel_procs[i].msg_head = 0;
-            kernel_procs[i].msg_tail = 0;
-            kernel_procs[i].msg_count = 0;
-        }
-    }
+    kernel_procs = NULL;
     current_kproc = NULL;
     next_kproc_pid = KPROC_PID_BASE;
     kproc_initialized = 1;
 }
 
 int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry, void *priv) {
-    int slot;
-    int i;
     int32_t pid;
+    uint64_t flags;
+    kproc_t *proc;
 
     if (!kproc_initialized) return 0;
-    if (!kernel_procs) return 0;
-    
-    slot = -1;
-    for (i = 0; i < kprocs_count; i++) {
-        if (kernel_procs[i].state == KPROC_STATE_NONE) {
-            slot = i;
-            break;
-        }
-    }
-    
-    if (slot < 0) return 0;
-    
+    proc = (kproc_t *)kmalloc(sizeof(kproc_t));
+    if (!proc) return 0;
+    memset(proc, 0, sizeof(kproc_t));
+
+    flags = klog_irqsave();
+    spin_lock(&kproc_lock);
     pid = next_kproc_pid;
     next_kproc_pid--;
-    
-    kernel_procs[slot].pid = pid;
-    kernel_procs[slot].state = KPROC_STATE_RUNNING;
-    kernel_procs[slot].vring_minor = vring_minor;
-    kernel_procs[slot].name = name;
-    kernel_procs[slot].entry = entry;
-    kernel_procs[slot].private_data = priv;
-    kernel_procs[slot].msg_head = 0;
-    kernel_procs[slot].msg_tail = 0;
-    kernel_procs[slot].msg_count = 0;
+    proc->pid = pid;
+    proc->state = KPROC_STATE_RUNNING;
+    proc->vring_minor = vring_minor;
+    proc->name = name;
+    proc->entry = entry;
+    proc->private_data = priv;
+    proc->next = kernel_procs;
+    kernel_procs = proc;
+    spin_unlock(&kproc_lock);
+    klog_irqrestore(flags);
     
     return pid;
 }
 
 kproc_t *kproc_get(int32_t pid) {
-    int i;
+    kproc_t *proc;
 
     if (pid >= 0) return NULL;
-    if (!kernel_procs) return NULL;
-    
-    for (i = 0; i < kprocs_count; i++) {
-        if (kernel_procs[i].pid == pid && kernel_procs[i].state != KPROC_STATE_NONE) {
-            return &kernel_procs[i];
-        }
+    proc = kernel_procs;
+    while (proc) {
+        if (proc->pid == pid && proc->state != KPROC_STATE_NONE) return proc;
+        proc = proc->next;
     }
     return NULL;
 }
@@ -855,26 +920,54 @@ void kproc_set_current(int32_t pid) {
 }
 
 int kproc_send_msg(int32_t pid, uint64_t msg) {
-    kproc_t *proc = kproc_get(pid);
+    kproc_t *proc;
+    kproc_msg_t *item;
+    uint64_t flags;
+
+    proc = kproc_get(pid);
     if (!proc) return -1;
-    if (proc->msg_count >= 16) return -2;
-    
-    proc->msg_queue[proc->msg_tail] = msg;
-    proc->msg_tail = (proc->msg_tail + 1) % 16;
+    item = (kproc_msg_t *)kmalloc(sizeof(kproc_msg_t));
+    if (!item) return -2;
+    item->value = msg;
+    item->next = NULL;
+
+    flags = klog_irqsave();
+    spin_lock(&kproc_lock);
+    if (proc->msg_tail) proc->msg_tail->next = item;
+    else proc->msg_head = item;
+    proc->msg_tail = item;
     proc->msg_count++;
-    
+    spin_unlock(&kproc_lock);
+    klog_irqrestore(flags);
+
     return 0;
 }
 
 int kproc_recv_msg(int32_t pid, uint64_t *msg) {
-    kproc_t *proc = kproc_get(pid);
+    kproc_t *proc;
+    kproc_msg_t *item;
+    uint64_t flags;
+
+    proc = kproc_get(pid);
     if (!proc) return -1;
-    if (proc->msg_count == 0) return -2;
-    
-    *msg = proc->msg_queue[proc->msg_head];
-    proc->msg_head = (proc->msg_head + 1) % 16;
+    if (!msg) return -1;
+
+    flags = klog_irqsave();
+    spin_lock(&kproc_lock);
+    item = proc->msg_head;
+    if (!item) {
+        spin_unlock(&kproc_lock);
+        klog_irqrestore(flags);
+        return -2;
+    }
+    proc->msg_head = item->next;
+    if (!proc->msg_head) proc->msg_tail = NULL;
     proc->msg_count--;
-    
+    spin_unlock(&kproc_lock);
+    klog_irqrestore(flags);
+
+    *msg = item->value;
+    kfree(item);
     return 0;
 }
 

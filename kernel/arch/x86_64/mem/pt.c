@@ -33,15 +33,8 @@ static inline void vmm_pae_lock_release(void) {
     if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-#define PT_VMM_PT_BOOT_SIZE 32
-#define PT_VMM_PT_MIN_GROW_SIZE 256
-
-static uint64_t *pt_heap_page_tables[16];
 static uint64_t pt_heap_pt_count = 0;
-static uint64_t *pt_vmm_pt_boot[PT_VMM_PT_BOOT_SIZE];
-uint64_t **pt_vmm_page_tables = pt_vmm_pt_boot;
 uint64_t pt_vmm_pt_count = 0;
-uint64_t pt_vmm_pt_capacity = PT_VMM_PT_BOOT_SIZE;
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
@@ -54,40 +47,6 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 static void *pt_alloc_pt_page(void) {
     if (!pfa_bitmap) return pmm_alloc_early_page();
     return pmm_alloc_low_page();
-}
-
-int pt_vmm_pt_grow(void) {
-    uint64_t new_capacity;
-    uint64_t bytes;
-    uint64_t **new_tables;
-    uint64_t **old_tables;
-
-    if (!pfa_bitmap) return -1;
-
-    new_capacity = pt_vmm_pt_capacity * 2;
-    if (new_capacity < PT_VMM_PT_MIN_GROW_SIZE) {
-        new_capacity = PT_VMM_PT_MIN_GROW_SIZE;
-    }
-    if (new_capacity <= pt_vmm_pt_capacity) return -1;
-
-    bytes = new_capacity * sizeof(uint64_t *);
-    new_tables = (uint64_t **)kmalloc(bytes);
-    if (!new_tables) return -1;
-
-    memset(new_tables, 0, bytes);
-    if (pt_vmm_pt_count) {
-        memcpy(new_tables, pt_vmm_page_tables, pt_vmm_pt_count * sizeof(uint64_t *));
-    }
-
-    old_tables = pt_vmm_page_tables;
-    pt_vmm_page_tables = new_tables;
-    pt_vmm_pt_capacity = new_capacity;
-
-    if (old_tables != pt_vmm_pt_boot) {
-        kfree(old_tables);
-    }
-
-    return 0;
 }
 
 #define PT_TEMP_ZERO_VIRT TEMP_SLOT(7)
@@ -161,8 +120,6 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
     uint64_t pde;
     uint64_t huge_phys;
     uint64_t pt_phys;
-    uint64_t pt_slot;
-    uint64_t *pt;
     uint64_t i;
     void *pt_page;
     uint64_t flags;
@@ -204,11 +161,7 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
 
     if (pt_ensure_phys_mapped(pt_phys) < 0) return -1;
 
-    if (pt_vmm_pt_count < pt_vmm_pt_capacity) {
-        pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        pt_slot = pt_vmm_pt_count++;
-        pt_vmm_page_tables[pt_slot] = pt;
-    }
+    pt_vmm_pt_count++;
 
     return 0;
 }
@@ -220,7 +173,6 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
     uint64_t pde;
     void *pt_page;
     uint64_t pt_phys;
-    uint64_t pt_slot;
     uint64_t *pt;
     uint64_t *pd;
     int pt_self_mapped;
@@ -242,10 +194,6 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
         pt_page = pt_alloc_pt_page();
         if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) return -1;
-
-        if (pt_vmm_pt_count >= pt_vmm_pt_capacity) {
-            if (pt_vmm_pt_grow() < 0) return -1;
-        }
 
         pt_phys = (uint64_t)pt_page;
 
@@ -284,8 +232,7 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
         }
 
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        pt_slot = pt_vmm_pt_count++;
-        pt_vmm_page_tables[pt_slot] = pt;
+        pt_vmm_pt_count++;
         return 0;
     }
 
@@ -329,7 +276,6 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     uint64_t *pd;
     uint64_t *pt;
     uint64_t pt_phys;
-    uint64_t pt_slot;
     uint64_t new_pte;
 
     vmm_pae_lock_acquire();
@@ -364,13 +310,6 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
         void *pt_page;
         uint64_t id_pde_idx;
         uint64_t id_pte_idx;
-        if (pt_vmm_pt_count >= pt_vmm_pt_capacity) {
-            if (pt_vmm_pt_grow() < 0) {
-                vmm_pae_lock_release();
-                printf("vmm_map_page_pae: Out of VMM page tables\n");
-                return;
-            }
-        }
         pt_page = pt_alloc_pt_page();
         if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
@@ -401,8 +340,7 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
             : : : "rax", "memory"
         );
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        pt_slot = pt_vmm_pt_count++;
-        pt_vmm_page_tables[pt_slot] = pt;
+        pt_vmm_pt_count++;
     } else {
         pt_phys = (uint64_t)(pde & ~0xFFFULL);
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
@@ -476,7 +414,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
     uint64_t *pd;
     uint64_t *pt;
     uint64_t pt_phys;
-    uint64_t pt_slot;
     void *phys_page;
 
     if (size == 0) return;
@@ -514,13 +451,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
             void *pt_page;
             uint64_t id_pde_idx;
             uint64_t id_pte_idx;
-            if (pt_vmm_pt_count >= pt_vmm_pt_capacity) {
-                if (pt_vmm_pt_grow() < 0) {
-                    printf("vmm_map_range_alloc_pae: Out of VMM page tables\n");
-                    vmm_pae_lock_release();
-                    return;
-                }
-            }
             pt_page = pt_alloc_pt_page();
             if (!pt_page) pt_page = pmm_alloc_page();
             if (!pt_page) {
@@ -551,8 +481,7 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
                 : : : "rax", "memory"
             );
             pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-            pt_slot = pt_vmm_pt_count++;
-            pt_vmm_page_tables[pt_slot] = pt;
+            pt_vmm_pt_count++;
         } else {
             pt_phys = (uint64_t)(pde & ~0xFFFULL);
             pt = (uint64_t *)(pt_phys + KERNEL_VMA);
@@ -582,7 +511,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
 int heap_map_page_pae(uint64_t virt_addr) {
     uint64_t pt_pd_idx;
     uint64_t pt_pt_idx;
-    uint64_t pt_slot;
     uint64_t pde;
     uint64_t *pd;
     uint64_t *pt;
@@ -625,11 +553,6 @@ int heap_map_page_pae(uint64_t virt_addr) {
         void *pt_page;
         uint64_t id_pde_idx;
         uint64_t id_pte_idx;
-        if (pt_heap_pt_count >= 16) {
-            printf("heap_map_page_pae: Out of heap page tables\n");
-            vmm_pae_lock_release();
-            return -1;
-        }
         pt_page = pt_alloc_pt_page();
         if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
@@ -660,8 +583,7 @@ int heap_map_page_pae(uint64_t virt_addr) {
             : : : "rax", "memory"
         );
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        pt_slot = pt_heap_pt_count++;
-        pt_heap_page_tables[pt_slot] = pt;
+        pt_heap_pt_count++;
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     } else {
         pt_phys = (uint64_t)(pde & ~0xFFFULL);

@@ -385,31 +385,97 @@ struct itimerval_k {
     struct kernel_timeval it_value;
 };
 
+typedef struct {
+    struct itimerval_k values[3];
+} task_timer_data_t;
+
+static task_timer_data_t *get_task_timer_data(int create) {
+    task_timer_data_t *timers;
+
+    if (!current_task) return NULL;
+    timers = (task_timer_data_t *)current_task->timer_data;
+    if (!timers && create) {
+        timers = (task_timer_data_t *)kmalloc(sizeof(task_timer_data_t));
+        if (!timers) return NULL;
+        memset(timers, 0, sizeof(task_timer_data_t));
+        current_task->timer_data = timers;
+    }
+    return timers;
+}
+
+static int timer_value_is_zero(const struct itimerval_k *value) {
+    if (!value) return 1;
+    return value->it_interval.tv_sec == 0 &&
+           value->it_interval.tv_usec == 0 &&
+           value->it_value.tv_sec == 0 &&
+           value->it_value.tv_usec == 0;
+}
+
+static int timer_data_is_empty(const task_timer_data_t *timers) {
+    int i;
+
+    if (!timers) return 1;
+    for (i = 0; i < 3; i++) {
+        if (!timer_value_is_zero(&timers->values[i])) return 0;
+    }
+    return 1;
+}
+
 static int sys_setitimer(int which, const struct itimerval_k *new_value, struct itimerval_k *old_value) {
+    task_timer_data_t *timers;
+    struct itimerval_k value;
+
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
-    
+    if (old_value &&
+        ((uint64_t)old_value < 0x1000 || (uint64_t)old_value >= KERNEL_VMA))
+        return -EFAULT;
+    if (new_value &&
+        ((uint64_t)new_value < 0x1000 || (uint64_t)new_value >= KERNEL_VMA))
+        return -EFAULT;
+
+    timers = get_task_timer_data(0);
     if (old_value) {
-        if ((uint64_t)old_value < 0x1000 || (uint64_t)old_value >= KERNEL_VMA) return -EFAULT;
-        memcpy(old_value, &current_task->itimers[which], sizeof(struct itimerval_k));
+        if (timers) {
+            memcpy(old_value, &timers->values[which], sizeof(struct itimerval_k));
+        } else {
+            memset(old_value, 0, sizeof(struct itimerval_k));
+        }
     }
-    
+
     if (new_value) {
-        if ((uint64_t)new_value < 0x1000 || (uint64_t)new_value >= KERNEL_VMA) return -EFAULT;
-        memcpy(&current_task->itimers[which], new_value, sizeof(struct itimerval_k));
+        memcpy(&value, new_value, sizeof(struct itimerval_k));
+        if (!timers && !timer_value_is_zero(&value)) {
+            timers = get_task_timer_data(1);
+            if (!timers) return -ENOMEM;
+        }
+        if (timers) {
+            memcpy(&timers->values[which], &value, sizeof(struct itimerval_k));
+            if (timer_data_is_empty(timers)) {
+                kfree(timers);
+                current_task->timer_data = NULL;
+            }
+        }
     }
-    
+
     return 0;
 }
 
 static int sys_getitimer(int which, struct itimerval_k *curr_value) {
+    task_timer_data_t *timers;
+
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
     if (!curr_value) return -EFAULT;
     if ((uint64_t)curr_value < 0x1000 || (uint64_t)curr_value >= KERNEL_VMA) return -EFAULT;
-    
-    memcpy(curr_value, &current_task->itimers[which], sizeof(struct itimerval_k));
-    
+
+    timers = get_task_timer_data(0);
+    if (timers) {
+        memcpy(curr_value, &timers->values[which], sizeof(struct itimerval_k));
+    } else {
+        memset(curr_value, 0, sizeof(struct itimerval_k));
+    }
+
     return 0;
 }
 
@@ -829,11 +895,11 @@ static int sys_lke_unload(const char *name) {
     return lke_unload(name);
 }
 
-static int sys_lke_list(lke_info_t *buf, int max) {
-    if (!buf) return -EFAULT;
+static int sys_lke_list(char *buf, int size) {
+    if (size < 0) return -EINVAL;
+    if (!buf) return size == 0 ? lke_list(NULL, 0) : -EFAULT;
     if ((uint64_t)buf >= KERNEL_VMA || (uint64_t)buf < 0x1000) return -EFAULT;
-    if (max <= 0) return -EINVAL;
-    return lke_list(buf, max);
+    return lke_list(buf, size);
 }
 
 void syscalls_misc_init(void) {

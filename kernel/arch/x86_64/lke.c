@@ -18,16 +18,13 @@
 #define R_X86_64_32S   11
 #define R_X86_64_PLT32  4
 
-#define KSYM_TABLE_INIT 64
 #define LKE_NR_SYSCALLS 284
 
 static lke_module_t *modules;
-static int lke_capacity = 0;
-static int lke_count = 0;
+static size_t lke_count;
 
 static lke_ksym_t *ksym_table;
 static int ksym_count = 0;
-static int ksym_capacity = 0;
 
 extern void **syscall_table;
 
@@ -47,19 +44,12 @@ void lke_unregister_syscall(int num, void *fn) {
 
 void lke_register_symbol(const char *name, void *addr) {
     lke_ksym_t *new_tab;
-    int new_cap;
 
-    if (ksym_count >= ksym_capacity) {
-        new_cap = ksym_capacity == 0 ? KSYM_TABLE_INIT : ksym_capacity * 2;
-        new_tab = (lke_ksym_t *)kmalloc(new_cap * sizeof(lke_ksym_t));
-        if (!new_tab) return;
-        if (ksym_table) {
-            memcpy(new_tab, ksym_table, ksym_count * sizeof(lke_ksym_t));
-            kfree(ksym_table);
-        }
-        ksym_table = new_tab;
-        ksym_capacity = new_cap;
-    }
+    if (ksym_count == INT32_MAX) return;
+    new_tab = (lke_ksym_t *)krealloc(
+        ksym_table, ((size_t)ksym_count + 1) * sizeof(lke_ksym_t));
+    if (!new_tab) return;
+    ksym_table = new_tab;
     ksym_table[ksym_count].name = name;
     ksym_table[ksym_count].addr = (uint64_t)addr;
     ksym_count++;
@@ -76,11 +66,9 @@ static uint64_t ksym_lookup(const char *name) {
 
 void lke_init(void) {
     modules = NULL;
-    lke_capacity = 0;
     lke_count = 0;
     ksym_table = NULL;
     ksym_count = 0;
-    ksym_capacity = 0;
 
     lke_register_symbol("kmalloc", kmalloc);
     lke_register_symbol("kmalloc_aligned", kmalloc_aligned);
@@ -122,34 +110,39 @@ void lke_init(void) {
     lke_register_symbol("lke_unregister_syscall", lke_unregister_syscall);
 }
 
-static int lke_find_slot(void) {
-    int i;
-    int new_cap;
+static lke_module_t *lke_new_slot(void) {
     lke_module_t *new_arr;
 
-    for (i = 0; i < lke_capacity; i++) {
-        if (!modules[i].loaded) return i;
-    }
-    new_cap = lke_capacity == 0 ? 4 : lke_capacity * 2;
-    new_arr = (lke_module_t *)kmalloc(new_cap * sizeof(lke_module_t));
-    if (!new_arr) return -1;
-    memset(new_arr, 0, new_cap * sizeof(lke_module_t));
-    if (modules) {
-        memcpy(new_arr, modules, lke_capacity * sizeof(lke_module_t));
-        kfree(modules);
-    }
-    i = lke_capacity;
+    if (lke_count >= SIZE_MAX / sizeof(lke_module_t)) return NULL;
+    new_arr = (lke_module_t *)krealloc(
+        modules, (lke_count + 1) * sizeof(lke_module_t));
+    if (!new_arr) return NULL;
     modules = new_arr;
-    lke_capacity = new_cap;
-    return i;
+    memset(&modules[lke_count], 0, sizeof(lke_module_t));
+    return &modules[lke_count];
 }
 
-static int lke_find_by_name(const char *name) {
-    int i;
-    for (i = 0; i < lke_capacity; i++) {
-        if (modules[i].loaded && strcmp(modules[i].name, name) == 0) return i;
+static void lke_shrink_registry(void) {
+    lke_module_t *new_modules;
+
+    if (lke_count == 0) {
+        kfree(modules);
+        modules = NULL;
+        return;
     }
-    return -1;
+    new_modules = (lke_module_t *)krealloc(
+        modules, lke_count * sizeof(lke_module_t));
+    if (!new_modules) return;
+    modules = new_modules;
+}
+
+static lke_module_t *lke_find_by_name(const char *name) {
+    size_t i;
+
+    for (i = 0; i < lke_count; i++) {
+        if (strcmp(modules[i].name, name) == 0) return &modules[i];
+    }
+    return NULL;
 }
 
 static void *lke_alloc_pages(uint64_t size, uint64_t *out_pages) {
@@ -185,17 +178,35 @@ static const char *basename_of(const char *path) {
     return last;
 }
 
-static void strip_ext(char *dst, const char *src, uint64_t max) {
+static size_t lke_name_length(const char *src) {
     const char *dot;
-    uint64_t len;
+    size_t len;
+
     dot = NULL;
     for (len = 0; src[len]; len++) {
         if (src[len] == '.') dot = &src[len];
     }
-    if (dot) len = (uint64_t)(dot - src);
-    if (len >= max) len = max - 1;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
+    if (dot) len = (size_t)(dot - src);
+    return len;
+}
+
+static int lke_name_matches(const char *name, const char *candidate,
+                            size_t candidate_len) {
+    size_t name_len;
+
+    name_len = strlen(name);
+    if (name_len != candidate_len) return 0;
+    return memcmp(name, candidate, candidate_len) == 0;
+}
+
+static lke_module_t *lke_find_by_name_slice(const char *name, size_t name_len) {
+    size_t i;
+
+    for (i = 0; i < lke_count; i++) {
+        if (lke_name_matches(modules[i].name, name, name_len))
+            return &modules[i];
+    }
+    return NULL;
 }
 
 int lke_load(const char *path) {
@@ -222,27 +233,25 @@ int lke_load(const char *path) {
     uint64_t A;
     uint64_t P;
     uint8_t *target;
-    int slot;
     lke_module_t *mod;
     const char *bname;
+    char *mod_name;
+    size_t mod_name_len;
     int (*init_fn)(void);
+    void (*cleanup_fn)(void);
     const Elf64_Shdr *strtab_sh;
     uint64_t symtab_idx;
     uint64_t strtab_idx;
     const char *sym_name;
     int found_init;
-    char mod_name[LKE_NAME_MAX];
     uint64_t data_pages;
     uint64_t mem_pages;
 
     if (!path) return -1;
 
     bname = basename_of(path);
-    strip_ext(mod_name, bname, LKE_NAME_MAX);
-    if (lke_find_by_name(mod_name) >= 0) return -17;
-
-    slot = lke_find_slot();
-    if (slot < 0) return -2;
+    mod_name_len = lke_name_length(bname);
+    if (lke_find_by_name_slice(bname, mod_name_len)) return -17;
 
     node = vfs_namei(path);
     if (!node) return -3;
@@ -399,21 +408,9 @@ int lke_load(const char *path) {
         }
     }
 
-    mod = &modules[slot];
-    memset(mod, 0, sizeof(lke_module_t));
-
-    strncpy(mod->name, mod_name, LKE_NAME_MAX - 1);
-    mod->name[LKE_NAME_MAX - 1] = '\0';
-
-    mod->magic = LKE_MAGIC;
-    mod->version = LKE_VERSION;
-    mod->text_base = mem;
-    mod->text_size = total_alloc;
-    mod->text_pages = mem_pages;
-    mod->init = NULL;
-    mod->cleanup = NULL;
-
     found_init = 0;
+    init_fn = NULL;
+    cleanup_fn = NULL;
     for (i = 0; i < symtab_sh->sh_size / sizeof(Elf64_Sym); i++) {
         sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset + i * sizeof(Elf64_Sym));
         if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL) continue;
@@ -421,10 +418,12 @@ int lke_load(const char *path) {
         if (sym->st_shndx == 0 || sym->st_shndx >= ehdr->e_shnum) continue;
         sym_name = strtab + sym->st_name;
         if (strcmp(sym_name, "lke_module_init") == 0) {
-            mod->init = (int (*)(void))(sec_offsets[sym->st_shndx] + sym->st_value);
+            init_fn = (int (*)(void))(
+                sec_offsets[sym->st_shndx] + sym->st_value);
             found_init = 1;
         } else if (strcmp(sym_name, "lke_module_cleanup") == 0) {
-            mod->cleanup = (void (*)(void))(sec_offsets[sym->st_shndx] + sym->st_value);
+            cleanup_fn = (void (*)(void))(
+                sec_offsets[sym->st_shndx] + sym->st_value);
         }
     }
 
@@ -436,15 +435,33 @@ int lke_load(const char *path) {
         return -16;
     }
 
-    mod->loaded = 1;
-    lke_count++;
+    mod_name = (char *)kmalloc(mod_name_len + 1);
+    if (!mod_name) {
+        lke_free_pages(mem, mem_pages);
+        return -2;
+    }
+    memcpy(mod_name, bname, mod_name_len);
+    mod_name[mod_name_len] = '\0';
 
-    init_fn = mod->init;
+    mod = lke_new_slot();
+    if (!mod) {
+        kfree(mod_name);
+        lke_free_pages(mem, mem_pages);
+        return -2;
+    }
+    memset(mod, 0, sizeof(lke_module_t));
+    mod->name = mod_name;
+    mod->text_base = mem;
+    mod->text_pages = mem_pages;
+    mod->cleanup = cleanup_fn;
+
+    lke_count++;
     if (init_fn() != 0) {
-        mod->loaded = 0;
         lke_count--;
+        kfree(mod->name);
         lke_free_pages(mem, mem_pages);
         memset(mod, 0, sizeof(lke_module_t));
+        lke_shrink_registry();
         return -17;
     }
 
@@ -453,15 +470,14 @@ int lke_load(const char *path) {
 }
 
 int lke_unload(const char *name) {
-    int idx;
+    size_t idx;
     lke_module_t *mod;
 
     if (!name) return -1;
 
-    idx = lke_find_by_name(name);
-    if (idx < 0) return -2;
-
-    mod = &modules[idx];
+    mod = lke_find_by_name(name);
+    if (!mod) return -2;
+    idx = (size_t)(mod - modules);
     if (mod->cleanup) {
         mod->cleanup();
     }
@@ -471,24 +487,48 @@ int lke_unload(const char *name) {
     }
 
     printf("LKE: unloaded '%s'\n", mod->name);
-    memset(mod, 0, sizeof(lke_module_t));
+    kfree(mod->name);
     lke_count--;
+    if (idx != lke_count) modules[idx] = modules[lke_count];
+    memset(&modules[lke_count], 0, sizeof(lke_module_t));
+    lke_shrink_registry();
     return 0;
 }
 
-int lke_list(lke_info_t *buf, int max) {
-    int count;
-    int i;
+int lke_list(char *buf, int size) {
+    size_t i;
+    size_t len;
+    size_t required;
+    size_t offset;
 
-    count = 0;
-    for (i = 0; i < lke_capacity && count < max; i++) {
-        if (modules[i].loaded) {
-            memcpy(buf[count].name, modules[i].name, LKE_NAME_MAX);
-            buf[count].loaded = 1;
-            count++;
-        }
+    required = 0;
+    for (i = 0; i < lke_count; i++) {
+        len = strlen(modules[i].name) + 1;
+        if (len > (size_t)INT32_MAX) return -1;
+        if (required > (size_t)INT32_MAX - len) return -1;
+        required += len;
     }
-    return count;
+    if (!buf || size < (int)required) return (int)required;
+    offset = 0;
+    for (i = 0; i < lke_count; i++) {
+        len = strlen(modules[i].name) + 1;
+        memcpy(buf + offset, modules[i].name, len);
+        offset += len;
+    }
+    return (int)required;
+}
+
+static void lke_autoload_entry(char *line, size_t length) {
+    int rc;
+
+    while (length > 0 &&
+           (line[length - 1] == ' ' || line[length - 1] == '\t')) {
+        length--;
+    }
+    line[length] = '\0';
+    if (length == 0 || line[0] == '#') return;
+    rc = lke_load(line);
+    if (rc < 0) printf("LKE: autoload failed: %s (%d)\n", line, rc);
 }
 
 void lke_autoload(void) {
@@ -497,9 +537,12 @@ void lke_autoload(void) {
     uint32_t rd;
     uint32_t off;
     uint32_t i;
-    char line[128];
-    int llen;
-    int rc;
+    char *line;
+    char *new_line;
+    size_t line_len;
+    size_t line_capacity;
+    size_t new_capacity;
+    int out_of_memory;
 
     node = vfs_namei("/etc/lke.autostart");
     if (!node || node->length == 0) {
@@ -507,7 +550,10 @@ void lke_autoload(void) {
         return;
     }
 
-    llen = 0;
+    line = NULL;
+    line_len = 0;
+    line_capacity = 0;
+    out_of_memory = 0;
     off = 0;
     while (off < node->length) {
         rd = node->length - off;
@@ -516,32 +562,37 @@ void lke_autoload(void) {
         if (rd == 0) break;
         for (i = 0; i < rd; i++) {
             if (buf[i] == '\n' || buf[i] == '\r') {
-                while (llen > 0 && (line[llen-1] == ' ' || line[llen-1] == '\t'))
-                    llen--;
-                line[llen] = '\0';
-                if (llen > 0 && line[0] != '#') {
-                    rc = lke_load(line);
-                    if (rc < 0)
-                        printf("LKE: autoload failed: %s (%d)\n", line, rc);
-                }
-                llen = 0;
+                if (line) lke_autoload_entry(line, line_len);
+                line_len = 0;
             } else {
-                if (llen < (int)sizeof(line) - 1)
-                    line[llen++] = buf[i];
+                if (line_len == SIZE_MAX - 1) {
+                    out_of_memory = 1;
+                    break;
+                }
+                if (line_len + 1 >= line_capacity) {
+                    new_capacity = line_capacity ? line_capacity * 2 : 64;
+                    if (new_capacity <= line_capacity) {
+                        out_of_memory = 1;
+                        break;
+                    }
+                    new_line = (char *)krealloc(line, new_capacity);
+                    if (!new_line) {
+                        out_of_memory = 1;
+                        break;
+                    }
+                    line = new_line;
+                    line_capacity = new_capacity;
+                }
+                line[line_len++] = (char)buf[i];
             }
         }
+        if (out_of_memory) break;
         off += rd;
     }
 
-    if (llen > 0) {
-        while (llen > 0 && (line[llen-1] == ' ' || line[llen-1] == '\t'))
-            llen--;
-        line[llen] = '\0';
-        if (llen > 0 && line[0] != '#') {
-            rc = lke_load(line);
-            if (rc < 0)
-                printf("LKE: autoload failed: %s (%d)\n", line, rc);
-        }
-    }
+    if (!out_of_memory && line && line_len > 0)
+        lke_autoload_entry(line, line_len);
+    if (out_of_memory) printf("LKE: autoload stopped: out of memory\n");
+    kfree(line);
     vfs_release(node);
 }

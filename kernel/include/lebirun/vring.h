@@ -5,9 +5,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define VRING_MAX_SUBRINGS 8
-#define VRING_MAX_REGIONS 8
-
 #define VRING_PERM_READ   0x01
 #define VRING_PERM_WRITE  0x02
 #define VRING_PERM_EXEC   0x04
@@ -19,22 +16,25 @@
 
 #define VRING_FLAG_SANDBOXED  0x01
 
-typedef struct {
+typedef struct vring_mem_region {
     uint64_t start;
     uint64_t end;
     uint8_t permissions;
+    struct vring_mem_region *next;
 } vring_mem_region_t;
 
-typedef struct {
+typedef struct vring {
     uint8_t ring_major;
     uint8_t ring_minor;
     bool active;
-    vring_mem_region_t allowed_regions[VRING_MAX_REGIONS];
+    vring_mem_region_t *allowed_regions;
+    vring_mem_region_t *regions_tail;
     uint64_t region_count;
     const char *name;
     uint8_t caps;
     uint8_t flags;
     uint64_t vring_pml4;
+    struct vring *next;
 } vring_t;
 
 void vring_init(void);
@@ -49,9 +49,6 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type);
 void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type);
 void vring_selftest_start(void);
 
-extern vring_t *subrings;
-
-#define KPROC_MAX 16
 #define KPROC_PID_BASE (-1)
 
 typedef enum {
@@ -62,6 +59,7 @@ typedef enum {
 } kproc_state_t;
 
 struct kproc;
+struct kproc_msg;
 
 typedef void (*kproc_entry_t)(struct kproc *self);
 
@@ -72,10 +70,10 @@ typedef struct kproc {
     const char *name;
     kproc_entry_t entry;
     void *private_data;
-    uint64_t msg_queue[16];
-    uint64_t msg_head;
-    uint64_t msg_tail;
+    struct kproc_msg *msg_head;
+    struct kproc_msg *msg_tail;
     uint64_t msg_count;
+    struct kproc *next;
 } kproc_t;
 
 void kproc_init(void);
@@ -116,6 +114,7 @@ kproc_t *kproc_find_by_pid(int32_t pid);
 int klog_printf(int level, const char *fmt, ...);
 int klog_enqueue_raw(const char *buf, size_t len);
 void klog_persist_enable(void);
+void klog_reclaim_unused(void);
 int klog_drain_console0(uint64_t max_items);
 int klog_snapshot(char *buf, int bufsz);
 int klog_snapshot_range(char *buf, int offset, int count);

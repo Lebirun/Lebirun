@@ -70,10 +70,17 @@ typedef struct {
 } sigaction_k;
 
 typedef struct {
+    int signum;
+    sigaction_k action;
+} signal_action_entry_t;
+
+typedef struct {
     pid_t owner_pid;
+    uint8_t action_count;
+    uint8_t action_capacity;
     sigset_k pending;
     sigset_k blocked;
-    sigaction_k **actions;
+    signal_action_entry_t *actions;
     stack_k altstack;
     int in_signal;
 } task_signals_t;
@@ -86,34 +93,41 @@ static void init_signal_slot(task_signals_t *slot, pid_t pid) {
 }
 
 static void free_signal_actions(task_signals_t *slot) {
-    int i;
-
     if (!slot || !slot->actions) return;
-    for (i = 0; i < NSIG; i++) {
-        if (slot->actions[i]) {
-            kfree(slot->actions[i]);
-            slot->actions[i] = NULL;
-        }
-    }
     kfree(slot->actions);
     slot->actions = NULL;
+    slot->action_count = 0;
+    slot->action_capacity = 0;
 }
 
-static int signal_actions_empty(task_signals_t *slot) {
+static int find_signal_action(task_signals_t *slot, int signum) {
     int i;
 
-    if (!slot || !slot->actions) return 1;
-    for (i = 0; i < NSIG; i++) {
-        if (slot->actions[i]) return 0;
+    if (!slot || !slot->actions) return -1;
+    for (i = 0; i < slot->action_count; i++) {
+        if (slot->actions[i].signum == signum) return i;
     }
-    return 1;
+    return -1;
 }
 
-static void release_empty_signal_actions(task_signals_t *slot) {
+static void shrink_signal_actions(task_signals_t *slot) {
+    int new_capacity;
+    signal_action_entry_t *new_actions;
+
     if (!slot || !slot->actions) return;
-    if (!signal_actions_empty(slot)) return;
-    kfree(slot->actions);
-    slot->actions = NULL;
+    if (slot->action_count == 0) {
+        free_signal_actions(slot);
+        return;
+    }
+    if (slot->action_capacity <= 1 ||
+        slot->action_count > slot->action_capacity / 4) return;
+    new_capacity = slot->action_capacity / 2;
+    if (new_capacity < 1) new_capacity = 1;
+    new_actions = (signal_action_entry_t *)krealloc(
+        slot->actions, new_capacity * sizeof(signal_action_entry_t));
+    if (!new_actions) return;
+    slot->actions = new_actions;
+    slot->action_capacity = new_capacity;
 }
 
 static int signal_action_is_default(sigaction_k *act) {
@@ -124,39 +138,54 @@ static int signal_action_is_default(sigaction_k *act) {
 }
 
 static sigaction_k *ensure_signal_action(task_signals_t *slot, int signum) {
-    sigaction_k **actions;
-    sigaction_k *action;
+    int idx;
+    int new_capacity;
+    signal_action_entry_t *new_actions;
 
     if (!slot) return NULL;
-    if (!slot->actions) {
-        actions = (sigaction_k **)kmalloc(NSIG * sizeof(sigaction_k *));
-        if (!actions) return NULL;
-        memset(actions, 0, NSIG * sizeof(sigaction_k *));
-        slot->actions = actions;
+    idx = find_signal_action(slot, signum);
+    if (idx >= 0) return &slot->actions[idx].action;
+    if (slot->action_count >= slot->action_capacity) {
+        new_capacity = slot->action_capacity ? slot->action_capacity * 2 : 1;
+        if (new_capacity > NSIG - 1) new_capacity = NSIG - 1;
+        if (new_capacity <= slot->action_capacity) return NULL;
+        new_actions = (signal_action_entry_t *)krealloc(
+            slot->actions, new_capacity * sizeof(signal_action_entry_t));
+        if (!new_actions) return NULL;
+        slot->actions = new_actions;
+        slot->action_capacity = new_capacity;
     }
-    if (slot->actions[signum]) return slot->actions[signum];
-    action = (sigaction_k *)kmalloc(sizeof(sigaction_k));
-    if (!action) return NULL;
-    default_signal_action(action);
-    slot->actions[signum] = action;
-    return action;
+    idx = slot->action_count;
+    slot->actions[idx].signum = signum;
+    default_signal_action(&slot->actions[idx].action);
+    slot->action_count++;
+    return &slot->actions[idx].action;
 }
 
 static sigaction_k *get_signal_action(task_signals_t *slot, int signum, sigaction_k *default_act) {
-    if (slot && slot->actions && slot->actions[signum]) return slot->actions[signum];
+    int idx;
+
+    idx = find_signal_action(slot, signum);
+    if (idx >= 0) return &slot->actions[idx].action;
     default_signal_action(default_act);
     return default_act;
 }
 
 static int set_signal_action(task_signals_t *slot, int signum, sigaction_k *act) {
+    int idx;
     sigaction_k *action;
 
     if (!slot || !act) return -1;
     if (signal_action_is_default(act)) {
-        if (slot->actions && slot->actions[signum]) {
-            kfree(slot->actions[signum]);
-            slot->actions[signum] = NULL;
-            release_empty_signal_actions(slot);
+        idx = find_signal_action(slot, signum);
+        if (idx >= 0) {
+            if (idx + 1 < slot->action_count) {
+                memmove(&slot->actions[idx], &slot->actions[idx + 1],
+                        (slot->action_count - idx - 1) *
+                        sizeof(signal_action_entry_t));
+            }
+            slot->action_count--;
+            shrink_signal_actions(slot);
         }
         return 0;
     }
@@ -183,6 +212,7 @@ static task_signals_t *get_task_signals(void) {
         current_task->signal_data = slot;
     }
     if (slot->owner_pid != current_task->pid) {
+        free_signal_actions(slot);
         init_signal_slot(slot, current_task->pid);
     }
     return slot;
@@ -200,12 +230,16 @@ void task_free_signal_data(task_t *task) {
 
 void task_reset_signals_on_exec(void) {
     task_signals_t *sigs;
+    sigaction_k default_act;
+    signal_action_entry_t *entry;
     int i;
+    int signum;
 
     if (!current_task) return;
     sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return;
     if (sigs->owner_pid != current_task->pid) {
+        free_signal_actions(sigs);
         init_signal_slot(sigs, current_task->pid);
         return;
     }
@@ -214,21 +248,27 @@ void task_reset_signals_on_exec(void) {
     sigs->blocked.sig[0] = 0;
     sigs->in_signal = 0;
 
-    for (i = 1; i < NSIG; i++) {
-        if (!sigs->actions || !sigs->actions[i]) continue;
-        if (sigs->actions[i]->sa_handler != SIG_IGN ||
-                i == SIGINT || i == SIGQUIT || i == SIGTSTP ||
-                i == SIGTTIN || i == SIGTTOU) {
-            kfree(sigs->actions[i]);
-            sigs->actions[i] = NULL;
+    default_signal_action(&default_act);
+    for (i = sigs->action_count - 1; i >= 0; i--) {
+        entry = &sigs->actions[i];
+        signum = entry->signum;
+        if (entry->action.sa_handler != SIG_IGN ||
+                signum == SIGINT || signum == SIGQUIT ||
+                signum == SIGTSTP || signum == SIGTTIN ||
+                signum == SIGTTOU) {
+            set_signal_action(sigs, signum, &default_act);
             continue;
         }
-        sigs->actions[i]->sa_flags = 0;
-        sigs->actions[i]->sa_restorer = NULL;
-        sigs->actions[i]->sa_mask[0] = 0;
-        sigs->actions[i]->sa_mask[1] = 0;
+        entry->action.sa_flags = 0;
+        entry->action.sa_restorer = NULL;
+        entry->action.sa_mask[0] = 0;
+        entry->action.sa_mask[1] = 0;
     }
-    release_empty_signal_actions(sigs);
+    if (sigs->action_count == 0 && sigs->altstack.ss_sp == NULL &&
+        sigs->altstack.ss_flags == 0 && sigs->altstack.ss_size == 0) {
+        kfree(sigs);
+        current_task->signal_data = NULL;
+    }
 }
 
 int task_has_pending_signals(void) {
@@ -249,6 +289,7 @@ static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     uint64_t old_addr;
     sigaction_k local_act;
     sigaction_k default_act;
+    sigaction_k *old_action;
 
     if (signum < 1 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
@@ -260,12 +301,10 @@ static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        if (sigs && sigs->owner_pid == current_task->pid &&
-                sigs->actions && sigs->actions[signum]) {
-            memcpy((void *)old_addr, sigs->actions[signum], sizeof(sigaction_k));
-        } else {
-            memcpy((void *)old_addr, &default_act, sizeof(sigaction_k));
-        }
+        old_action = &default_act;
+        if (sigs && sigs->owner_pid == current_task->pid)
+            old_action = get_signal_action(sigs, signum, &default_act);
+        memcpy((void *)old_addr, old_action, sizeof(sigaction_k));
     }
 
     if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000) {
@@ -790,7 +829,8 @@ void signal_deliver_pending(registers_t *regs) {
         sigs->in_signal = 1;
 
         if (act->sa_flags & SA_RESETHAND) {
-            act->sa_handler = SIG_DFL;
+            default_signal_action(&default_act);
+            set_signal_action(sigs, sig, &default_act);
         }
 
         return;
@@ -803,6 +843,7 @@ void signals_init_task(task_t *task) {
     if (!task) return;
     if (task->signal_data) {
         slot = (task_signals_t *)task->signal_data;
+        free_signal_actions(slot);
         init_signal_slot(slot, task->pid);
     } else {
         task->signal_data = NULL;
