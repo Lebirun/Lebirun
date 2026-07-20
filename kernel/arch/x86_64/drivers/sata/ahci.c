@@ -325,10 +325,7 @@ int ahci_port_init(ahci_port_t *port) {
     uint64_t cmd_table_off;
     int i;
 
-    printf("AHCI: Initializing port %u...\n", port->port_num);
-
     ahci_stop_cmd(port);
-    printf("AHCI: port %u stop_cmd done\n", port->port_num);
 
     page_phys = pfa_alloc();
     if (!page_phys) {
@@ -345,12 +342,10 @@ int ahci_port_init(ahci_port_t *port) {
     cmd_table_off = fis_off + sizeof(hba_fis_t);
     cmd_table_off = (cmd_table_off + 127) & ~127ULL;
     if (cmd_table_off + AHCI_CMD_SLOTS * sizeof(hba_cmd_table_t) > PAGE_SIZE) {
+        vmm_unmap_page(page_virt);
         pfa_free(page_phys);
         return -1;
     }
-
-    printf("AHCI: port %u layout: cmd_list@0x%lX fis@0x%lX tbl@0x%lX\n",
-           port->port_num, cmd_list_off, fis_off, cmd_table_off);
 
     port->cmd_list = (hba_cmd_header_t *)(page_virt + cmd_list_off);
     port->fis = (hba_fis_t *)(page_virt + fis_off);
@@ -364,8 +359,6 @@ int ahci_port_init(ahci_port_t *port) {
 
     ahci_port_write(port, AHCI_PxFB, port->fis_phys);
     ahci_port_write(port, AHCI_PxFBU, 0);
-    printf("AHCI: port %u port regs written\n", port->port_num);
-
     for (i = 0; i < AHCI_CMD_SLOTS; i++) {
         port->cmd_list[i].prdtl = AHCI_PRDT_ENTRIES;
         port->cmd_list[i].ctba = (uint32_t)(port->cmd_table_phys + (i * sizeof(hba_cmd_table_t)));
@@ -836,6 +829,17 @@ void ahci_debug_info(void) {
 
 int ahci_init(void) {
     static int probed = 0;
+    uint64_t abar_phys;
+    uint64_t abar_virt;
+    uint64_t abar_size;
+    uint64_t cap;
+    uint64_t ghc;
+    uint64_t ports_impl;
+    uint64_t ports_capacity;
+    uint64_t offset;
+    uint64_t i;
+    ahci_port_t *port;
+    const char *type_str;
 
     if (g_ahci_controller.initialized)
         return 0;
@@ -852,17 +856,8 @@ int ahci_init(void) {
         return -1;
     }
     
-    uint64_t abar_phys = g_ahci_controller.abar;
-    uint64_t abar_virt = (KERNEL_VMA + 0x37100000ULL);
-    uint64_t abar_size;
-    uint64_t cap;
-    uint64_t ghc;
-    uint64_t ports_impl;
-    uint64_t ports_capacity;
-    uint64_t offset;
-    uint64_t i;
-    ahci_port_t *port;
-    const char *type_str;
+    abar_phys = g_ahci_controller.abar;
+    abar_virt = KERNEL_VMA + 0x37100000ULL;
     
     abar_size = AHCI_PORT_BASE + AHCI_MAX_PORTS * AHCI_PORT_SIZE;
     abar_size = (abar_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -880,6 +875,11 @@ int ahci_init(void) {
     g_ahci_controller.ports = (ahci_port_t *)kmalloc(ports_capacity * sizeof(ahci_port_t));
     if (!g_ahci_controller.ports) {
         printf("AHCI: Failed to allocate port table\n");
+        for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
+            vmm_unmap_page(abar_virt + offset);
+        }
+        g_ahci_controller.abar_virt = 0;
+        probed = 0;
         return -1;
     }
     memset(g_ahci_controller.ports, 0, ports_capacity * sizeof(ahci_port_t));
@@ -913,9 +913,6 @@ int ahci_init(void) {
             continue;
         }
         
-        port->present = true;
-        g_ahci_controller.num_ports++;
-        
         type_str = "Unknown";
         switch (port->type) {
             case AHCI_DEV_SATA: type_str = "SATA drive"; break;
@@ -926,18 +923,27 @@ int ahci_init(void) {
         }
         printf("AHCI: Port %u: %s detected\n", i, type_str);
         
-        if (ahci_port_init(port) == 0) {
-            if (port->type == AHCI_DEV_SATA) {
-                ahci_identify(port);
-            }
+        if (ahci_port_init(port) < 0) {
+            port->type = AHCI_DEV_NULL;
+            continue;
         }
+
+        port->present = true;
+        g_ahci_controller.num_ports++;
+        if (port->type == AHCI_DEV_SATA) {
+            ahci_identify(port);
+        }
+    }
+
+    if (g_ahci_controller.num_ports == 0) {
+        kfree(g_ahci_controller.ports);
+        g_ahci_controller.ports = NULL;
+        g_ahci_controller.ports_capacity = 0;
     }
     
     g_ahci_controller.initialized = true;
     
     printf("AHCI: Initialization complete. %u ports active.\n", g_ahci_controller.num_ports);
-    
-    ahci_debug_info();
     
     return 0;
 }

@@ -114,11 +114,16 @@ static void *slab_obj_at(slab_page_t *page, uint64_t idx) {
 
 static int slab_find_free_index(slab_page_t *page, uint64_t *out_idx) {
     uint64_t i;
+    uint64_t bits;
+    uint64_t idx;
 
     if (!page || !out_idx) return 0;
-    for (i = 0; i < page->obj_count; i++) {
-        if (slab_bitmap_test(page, i)) {
-            *out_idx = i;
+    for (i = 0; i < 4; i++) {
+        bits = page->free_bitmap[i];
+        if (bits != 0) {
+            idx = (i << 6) + (uint64_t)__builtin_ctzll(bits);
+            if (idx >= page->obj_count) return 0;
+            *out_idx = idx;
             return 1;
         }
     }

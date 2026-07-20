@@ -90,12 +90,16 @@ int demand_reserve_range(uint64_t virt_start, uint64_t size) {
     uint64_t eflags;
     uint64_t start_page;
     uint64_t end_page;
+    uint64_t limit;
     uint64_t i;
     
     if (!demand_initialized) return -1;
     
-    if (virt_start < demand_base) return -1;
-    if (virt_start + size > demand_base + (demand_max_pages * PAGE_SIZE)) return -1;
+    if (size == 0) return 0;
+    limit = demand_base + demand_max_pages * PAGE_SIZE;
+    if (virt_start < demand_base || virt_start >= limit) return -1;
+    if (size > limit - virt_start) return -1;
+    if (size > UINT64_MAX - virt_start - (PAGE_SIZE - 1)) return -1;
     
     start_page = (virt_start - demand_base) / PAGE_SIZE;
     end_page = ((virt_start + size + PAGE_SIZE - 1) - demand_base) / PAGE_SIZE;

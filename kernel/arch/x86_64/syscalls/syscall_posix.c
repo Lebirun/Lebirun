@@ -329,26 +329,24 @@ static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
     int *pipefd;
     int rfd;
     int wfd;
+    pipe_t *p;
+
     (void)unused1; (void)unused2;
     if (!current_task) return -ESRCH;
     addr = (uint64_t)pipefd_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     pipefd = (int *)addr;
-    pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
+    p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
     memset(p, 0, sizeof(pipe_t));
-    p->buffer = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
-    if (!p->buffer) { kfree(p); return -ENOMEM; }
-    memset(p->buffer, 0, PIPE_BUF_SIZE);
-    p->buf_size = PIPE_BUF_SIZE;
     waitq_init(&p->read_waitq);
     waitq_init(&p->write_waitq);
     p->readers = 1;
     p->writers = 1;
     rfd = fd_alloc();
-    if (rfd < 0) { kfree(p->buffer); kfree(p); return -EMFILE; }
+    if (rfd < 0) { kfree(p); return -EMFILE; }
     wfd = fd_alloc();
-    if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p->buffer); kfree(p); return -EMFILE; }
+    if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p); return -EMFILE; }
     fd_table[rfd].type = FD_TYPE_PIPE_R;
     fd_table[rfd].private_data = p;
     fd_table[wfd].type = FD_TYPE_PIPE_W;
@@ -1355,18 +1353,14 @@ static int sys_pipe2(int *pipefd, int flags) {
     p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
     memset(p, 0, sizeof(pipe_t));
-    p->buffer = (uint8_t *)kmalloc(PIPE_BUF_SIZE);
-    if (!p->buffer) { kfree(p); return -ENOMEM; }
-    memset(p->buffer, 0, PIPE_BUF_SIZE);
-    p->buf_size = PIPE_BUF_SIZE;
     waitq_init(&p->read_waitq);
     waitq_init(&p->write_waitq);
     p->readers = 1;
     p->writers = 1;
     rfd = fd_alloc();
-    if (rfd < 0) { kfree(p->buffer); kfree(p); return -EMFILE; }
+    if (rfd < 0) { kfree(p); return -EMFILE; }
     wfd = fd_alloc();
-    if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p->buffer); kfree(p); return -EMFILE; }
+    if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p); return -EMFILE; }
     fd_table[rfd].type = FD_TYPE_PIPE_R;
     fd_table[rfd].private_data = p;
     fd_table[wfd].type = FD_TYPE_PIPE_W;

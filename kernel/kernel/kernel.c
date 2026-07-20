@@ -74,15 +74,11 @@ void kernel_main(void) {
     extern uint8_t early_fb_type;
     extern char early_cmdline[];
     extern uint32_t early_mod_count;
-    uint8_t *mbb;
     uint32_t i;
     uint64_t mod_start;
     uint64_t mod_end;
-    uint64_t mod_size;
     uint64_t pstart;
     int vring_boot_enabled;
-    uint8_t *mstart;
-    uint32_t b;
     uint32_t mod_count;
     extern void procfs_init(void);
     extern void devfs_init(void);
@@ -95,12 +91,9 @@ void kernel_main(void) {
     extern void lke_init(void);
     extern void lke_autoload(void);
 #if CONFIG_VIRT_VFL
-    extern void vfl_init(void);
     extern void vfl_register_devfs(void);
 #endif
     extern void ramfs_debug_check_root(const char *location);
-    uint64_t cr3;
-    uint64_t cr0;
     int mount_ret;
     int use_squashfs;
     overlay_context_t *overlay_ctx;
@@ -188,22 +181,9 @@ void kernel_main(void) {
     for (pg = mb_page; pg < mb_end_page; pg += 0x1000)
         vmm_map_page(pg + KERNEL_VMA, pg, 0x003);
 
-    printf("MB2 info: total_size=%u mod_count=%u\n", mb2_total_size, mod_count);
-
-    {
-        printf("MB2: first 32 bytes: ");
-        mbb = (uint8_t *)(mb_phys + KERNEL_VMA);
-        for (i = 0; i < 32; i++) {
-            printf("%02X", mbb[i]);
-            if (i % 4 == 3) printf(" ");
-        }
-        printf("\n");
-    }
-
     ahci_done = 0;
     devs_registered = 0;
     if (mod_count > 0) {
-        i = 0;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
              tag->type != MULTIBOOT2_TAG_END;
              tag = multiboot2_next_tag(tag)) {
@@ -212,34 +192,18 @@ void kernel_main(void) {
             tag_mod = (struct multiboot2_tag_module *)tag;
             mod_start = tag_mod->mod_start;
             mod_end = tag_mod->mod_end;
-            mod_size = mod_end - mod_start;
-            printf("MB2: module[%u]: phys 0x%016lX-0x%016lX (%lu bytes) cmdline=\"%s\"\n",
-                   i, mod_start, mod_end, mod_size, tag_mod->cmdline);
 
             pstart = mod_start & ~0xFFFULL;
             for (pg = pstart; pg < mod_end; pg += 0x1000)
                 vmm_map_page(pg + KERNEL_VMA, pg, 0x003);
-            {
-                mstart = (uint8_t *)(mod_start + KERNEL_VMA);
-                printf("MB2: first 16 bytes of module[%u]: ", i);
-                for (b = 0; b < 16 && b < mod_size; b++) printf("%02X", mstart[b]);
-                printf("\n");
-            }
-            i++;
         }
 
         vfs_init();
-        printf("KERNEL: After vfs_init\n");
         initrd_vfs_register();
-        printf("KERNEL: After initrd_vfs_register\n");
         ramfs_vfs_register();
-        printf("KERNEL: After ramfs_vfs_register\n");
         squashfs_vfs_register();
-        printf("KERNEL: After squashfs_vfs_register\n");
         iso9660_vfs_register();
-        printf("KERNEL: After iso9660_vfs_register\n");
         overlayfs_vfs_register();
-        printf("KERNEL: After overlayfs_vfs_register\n");
         tmpfs_vfs_register();
 
         use_squashfs = 0;
@@ -308,9 +272,7 @@ void kernel_main(void) {
             }
         }
 
-        printf("BOOT: procfs_init...\n");
         procfs_init();
-        printf("BOOT: devfs_init...\n");
         devfs_init();
         if (tag_mod_initrd) {
             multiboot_module_t tmp_mod;
@@ -322,27 +284,22 @@ void kernel_main(void) {
         }
         devfs_register_initrd();
 #if CONFIG_VIRT_VFL
-        vfl_init();
         vfl_register_devfs();
 #endif
-        printf("BOOT: sysfs_init...\n");
         sysfs_init();
         if (cmdline_get_lke())
             lke_init();
 
-        printf("BOOT: mounting /dev /proc /sys...\n");
         vfs_mount(NULL, "/dev", "devfs");
         vfs_mount(NULL, "/proc", "procfs");
         vfs_mount(NULL, "/sys", "sysfs");
         vfs_mount(NULL, "/tmp", "tmpfs");
 
         if (use_squashfs) {
-            printf("BOOT: vfs_block_squashfs_access...\n");
             vfs_block_squashfs_access();
         }
 
         if (!use_squashfs) {
-            printf("BOOT: ramfs_internalize_all...\n");
             ramfs_internalize_all();
         }
 
@@ -353,8 +310,6 @@ void kernel_main(void) {
             ramfs_set_backing("/boot/rootfs.squashfs", sqctx->base, sqctx->size);
             printf("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
         }
-
-        printf("BOOT: boot file export done\n");
 
 #if CONFIG_DRIVER_AHCI
         if (ahci_init() == 0)
@@ -383,7 +338,6 @@ void kernel_main(void) {
             procfs_init();
             devfs_init();
 #if CONFIG_VIRT_VFL
-            vfl_init();
             vfl_register_devfs();
 #endif
             sysfs_init();
@@ -413,7 +367,6 @@ void kernel_main(void) {
                         devfs_register_blockdev(devname, pi);
                         printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
-                        printf("AHCI: Calling partition_scan for port %u...\n", pi);
                         if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
                             printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
                                    ptable.count, devname,
@@ -493,20 +446,9 @@ void kernel_main(void) {
 
     mutex_init(&print_lock);
 
-    cr3 = read_cr3();
-    cr0 = read_cr0();
-    {
-        printf("CR3="); print_hex(cr3);
-        printf(" CR0="); print_hex(cr0);
-        printf("\n");
-    }
-    printf("BOOT: pic_remap...\n");
     pic_remap();
-    printf("BOOT: kstack_init...\n");
     kstack_init();
-    printf("BOOT: init_tasks...\n");
     init_tasks();
-    printf("BOOT: smp_init...\n");
     smp_init();
 
     power_init();

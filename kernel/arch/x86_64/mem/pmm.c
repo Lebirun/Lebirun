@@ -117,12 +117,19 @@ uint64_t count_free_frames(void) {
     uint64_t count;
     uint64_t i;
     uint64_t bytes;
+    uint64_t valid_bits;
     uint8_t free_bits;
 
     count = 0;
     bytes = (total_pages_managed + 7) / 8;
     for (i = 0; i < bytes; i++) {
         free_bits = (uint8_t)~pfa_bitmap[i];
+        if (i + 1 == bytes) {
+            valid_bits = total_pages_managed & 7;
+            if (valid_bits != 0) {
+                free_bits &= (uint8_t)((1u << valid_bits) - 1u);
+            }
+        }
         while (free_bits != 0) {
             free_bits &= (uint8_t)(free_bits - 1);
             count++;
@@ -223,35 +230,7 @@ static uint64_t find_free_frames(uint64_t num) {
 }
 
 uint64_t pfa_alloc(void) {
-    uint64_t i;
-    uint64_t byte_idx;
-    uint64_t bit_idx;
-    uint64_t max_bytes;
-    uint64_t eflags;
-    uint64_t result;
-
-    pfa_lock_acquire(&eflags);
-    
-    max_bytes = bitmap_bytes_used;
-    for (i = kernel_reserved_frames / 8; i < max_bytes; i++) {
-        if (pfa_bitmap[i] != 0xFF) {
-            byte_idx = i;
-            for (bit_idx = 0; bit_idx < 8; bit_idx++) {
-                if (!(pfa_bitmap[byte_idx] & (1 << bit_idx))) {
-                    uint64_t frame_idx = (uint64_t)byte_idx * 8 + bit_idx;
-                    if (frame_idx < (uint64_t)total_pages_managed) {
-                        pfa_bitmap[byte_idx] |= (1 << bit_idx);
-                        result = frame_idx * PAGE_SIZE;
-                        __sync_fetch_and_sub(&pfa_cached_free, 1);
-                        pfa_lock_release(eflags);
-                        return result;
-                    }
-                }
-            }
-        }
-    }
-    pfa_lock_release(eflags);
-    return 0;
+    return find_free_frames(1);
 }
 
 void pfa_free(uint64_t phys_addr) {
@@ -290,6 +269,7 @@ void pfa_free(uint64_t phys_addr) {
     pfa_lock_acquire(&eflags);
     if (pfa_bitmap[byte_idx] & (1 << bit_idx)) {
         pfa_bitmap[byte_idx] &= ~(1 << bit_idx);
+        if (idx < last_alloc_hint) last_alloc_hint = idx;
         __sync_fetch_and_add(&pfa_cached_free, 1);
     }
     pfa_lock_release(eflags);
@@ -471,8 +451,10 @@ void *pmm_alloc_page(void) {
 }
 
 void *pmm_alloc_pages(uint64_t num) {
+    uint64_t addr;
+
     if (num == 0) return NULL;
-    uint64_t addr = find_free_frames(num);
+    addr = find_free_frames(num);
     if (!addr) return NULL;
     return (void *)(uint64_t)addr;
 }
@@ -545,17 +527,12 @@ void *pmm_alloc_low_page(void) {
 
 void pmm_zero_page_phys(uint64_t phys_addr) {
     uint64_t temp_virt;
-    volatile uint64_t *w;
-    uint64_t i;
     uint64_t saved_flags;
     extern uint64_t pt_temp_pt_ready_check(void);
 
     if (!pt_temp_pt_ready_check()) {
         if (phys_addr < low_page_limit) {
-            w = (volatile uint64_t *)(phys_addr + KERNEL_VMA);
-            for (i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
-                w[i] = 0;
-            }
+            memset((void *)(phys_addr + KERNEL_VMA), 0, PAGE_SIZE);
         }
         return;
     }
@@ -565,12 +542,7 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
     temp_virt = TEMP_SLOT(6);
 
     temp_map_raw(temp_virt, phys_addr);
-
-    w = (volatile uint64_t *)temp_virt;
-    for (i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
-        w[i] = 0;
-    }
-
+    memset((void *)temp_virt, 0, PAGE_SIZE);
     temp_unmap_raw(temp_virt);
 
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");

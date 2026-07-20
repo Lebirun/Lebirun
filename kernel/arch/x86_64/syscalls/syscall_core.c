@@ -428,6 +428,34 @@ static int syscall_core_console_write_user(const char *buf, int len) {
     return len;
 }
 
+static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
+    uint8_t *new_buffer;
+    uint64_t i;
+
+    if (!pipe) return -ENOMEM;
+    if (required > PIPE_BUF_SIZE) required = PIPE_BUF_SIZE;
+    if (required == pipe->buf_size) return 0;
+    if (required == 0) {
+        kfree(pipe->buffer);
+        pipe->buffer = NULL;
+        pipe->buf_size = 0;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+        return 0;
+    }
+    new_buffer = (uint8_t *)kmalloc(required);
+    if (!new_buffer) return -ENOMEM;
+    for (i = 0; i < pipe->count; i++) {
+        new_buffer[i] = pipe->buffer[(pipe->read_pos + i) % pipe->buf_size];
+    }
+    kfree(pipe->buffer);
+    pipe->buffer = new_buffer;
+    pipe->buf_size = required;
+    pipe->read_pos = 0;
+    pipe->write_pos = pipe->count;
+    return 0;
+}
+
 static int sys_write(int fd, const char *buf, int len) {
     uint64_t buf_addr;
     uint64_t work_size;
@@ -516,6 +544,14 @@ static int sys_write(int fd, const char *buf, int len) {
                         if (heap_buf) kfree(kbuf);
                         if (total > 0) return (int)total;
                         return -EPIPE;
+                    }
+                    bytes = p->count + chunk - done;
+                    if (bytes > PIPE_BUF_SIZE) bytes = PIPE_BUF_SIZE;
+                    if (bytes > p->buf_size &&
+                        pipe_resize_buffer(p, bytes) < 0 && p->buf_size == 0) {
+                        if (heap_buf) kfree(kbuf);
+                        if (total > 0 || done > 0) return (int)(total + done);
+                        return -ENOMEM;
                     }
                     while (p->count == p->buf_size) {
                         if (tfd->flags & VFS_O_NONBLOCK) {
@@ -673,6 +709,7 @@ static int sys_read(int fd, char *buf, int len) {
                 p->read_pos = (p->read_pos + 1) % p->buf_size;
             }
             p->count -= to_read;
+            pipe_resize_buffer(p, p->count);
             waitq_wake_all(&p->write_waitq);
             memcpy((void *)buf_addr, kbuf, to_read);
             if (heap_buf) kfree(kbuf);

@@ -3,7 +3,6 @@
 #include <lebirun/mutex.h>
 
 #define EPOLL_INIT_COUNT 1
-#define EPOLL_INIT_EVENTS 4
 #define FUTEX_INIT_COUNT 32
 #define EVENTFD_INIT_COUNT 1
 
@@ -128,10 +127,6 @@ static int alloc_epoll(void) {
     i = epoll_capacity / 2;
 found:
     memset(&epoll_instances[i], 0, sizeof(epoll_instance_t));
-    epoll_instances[i].fd_capacity = EPOLL_INIT_EVENTS;
-    epoll_instances[i].fds = (epoll_fd_entry_t *)kmalloc(EPOLL_INIT_EVENTS * sizeof(epoll_fd_entry_t));
-    if (!epoll_instances[i].fds) return -1;
-    memset(epoll_instances[i].fds, 0, EPOLL_INIT_EVENTS * sizeof(epoll_fd_entry_t));
     epoll_instances[i].in_use = 1;
     mutex_init(&epoll_instances[i].lock);
     return i;
@@ -179,6 +174,7 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
     int op;
     epoll_instance_t *ep;
     int found;
+    int vacant;
     int i;
     int new_cap;
     epoll_fd_entry_t *new_fds;
@@ -190,11 +186,13 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
     mutex_lock(&ep->lock);
     
     found = -1;
+    vacant = -1;
     for (i = 0; i < ep->fd_count; i++) {
         if (ep->fds[i].fd == fd && ep->fds[i].active) {
             found = i;
             break;
         }
+        if (!ep->fds[i].active && vacant < 0) vacant = i;
     }
     
     switch (op) {
@@ -203,21 +201,22 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 mutex_unlock(&ep->lock);
                 return -EEXIST;
             }
-            if (ep->fd_count >= ep->fd_capacity) {
-                new_cap = ep->fd_capacity * 2;
+            if (vacant < 0) {
+                new_cap = ep->fd_count + 1;
                 new_fds = (epoll_fd_entry_t *)krealloc(ep->fds, new_cap * sizeof(epoll_fd_entry_t));
                 if (!new_fds) {
                     mutex_unlock(&ep->lock);
                     return -ENOMEM;
                 }
-                memset(&new_fds[ep->fd_capacity], 0, (new_cap - ep->fd_capacity) * sizeof(epoll_fd_entry_t));
                 ep->fds = new_fds;
                 ep->fd_capacity = new_cap;
+                vacant = ep->fd_count;
+                ep->fd_count++;
             }
-            ep->fds[ep->fd_count].fd = fd;
-            ep->fds[ep->fd_count].events = EPOLLIN | EPOLLOUT;
-            ep->fds[ep->fd_count].active = 1;
-            ep->fd_count++;
+            memset(&ep->fds[vacant], 0, sizeof(epoll_fd_entry_t));
+            ep->fds[vacant].fd = fd;
+            ep->fds[vacant].events = EPOLLIN | EPOLLOUT;
+            ep->fds[vacant].active = 1;
             break;
             
         case EPOLL_CTL_DEL:
@@ -225,7 +224,24 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 mutex_unlock(&ep->lock);
                 return -ENOENT;
             }
-            ep->fds[found].active = 0;
+            if (found + 1 < ep->fd_count) {
+                memmove(&ep->fds[found], &ep->fds[found + 1],
+                        (ep->fd_count - found - 1) * sizeof(epoll_fd_entry_t));
+            }
+            ep->fd_count--;
+            if (ep->fd_count == 0) {
+                kfree(ep->fds);
+                ep->fds = NULL;
+                ep->fd_capacity = 0;
+            } else {
+                new_cap = ep->fd_count;
+                new_fds = (epoll_fd_entry_t *)krealloc(
+                    ep->fds, new_cap * sizeof(epoll_fd_entry_t));
+                if (new_fds) {
+                    ep->fds = new_fds;
+                    ep->fd_capacity = new_cap;
+                }
+            }
             break;
             
         case EPOLL_CTL_MOD:
@@ -456,6 +472,80 @@ static int sys_signalfd4(int fd, const char *mask_ptr, int flags) {
     (void)mask_ptr;
     (void)flags;
     return -ENOSYS;
+}
+
+int is_epoll_special_fd(int fd) {
+    int idx;
+
+    idx = fd - epoll_base_fd;
+    if (idx >= 0 && idx < epoll_capacity && epoll_instances[idx].in_use)
+        return 1;
+    idx = fd - eventfd_base_fd;
+    if (idx >= 0 && idx < eventfd_capacity && eventfds[idx].in_use)
+        return 1;
+    return 0;
+}
+
+int epoll_close_fd(int fd) {
+    int idx;
+    int i;
+    int any_in_use;
+    epoll_instance_t *ep;
+
+    idx = fd - epoll_base_fd;
+    if (idx >= 0 && idx < epoll_capacity) {
+        mutex_lock(&epoll_lock);
+        if (!epoll_instances[idx].in_use) {
+            mutex_unlock(&epoll_lock);
+            return -EBADF;
+        }
+        ep = &epoll_instances[idx];
+        mutex_lock(&ep->lock);
+        kfree(ep->fds);
+        ep->fds = NULL;
+        ep->fd_count = 0;
+        ep->fd_capacity = 0;
+        ep->in_use = 0;
+        mutex_unlock(&ep->lock);
+        any_in_use = 0;
+        for (i = 0; i < epoll_capacity; i++) {
+            if (epoll_instances[i].in_use) {
+                any_in_use = 1;
+                break;
+            }
+        }
+        if (!any_in_use) {
+            kfree(epoll_instances);
+            epoll_instances = NULL;
+            epoll_capacity = 0;
+        }
+        mutex_unlock(&epoll_lock);
+        return 0;
+    }
+    idx = fd - eventfd_base_fd;
+    if (idx >= 0 && idx < eventfd_capacity) {
+        mutex_lock(&eventfd_lock);
+        if (!eventfds[idx].in_use) {
+            mutex_unlock(&eventfd_lock);
+            return -EBADF;
+        }
+        memset(&eventfds[idx], 0, sizeof(eventfd_instance_t));
+        any_in_use = 0;
+        for (i = 0; i < eventfd_capacity; i++) {
+            if (eventfds[i].in_use) {
+                any_in_use = 1;
+                break;
+            }
+        }
+        if (!any_in_use) {
+            kfree(eventfds);
+            eventfds = NULL;
+            eventfd_capacity = 0;
+        }
+        mutex_unlock(&eventfd_lock);
+        return 0;
+    }
+    return -EBADF;
 }
 
 void syscalls_epoll_init(void) {

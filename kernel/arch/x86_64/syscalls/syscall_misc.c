@@ -549,171 +549,213 @@ static int sys_lchown(const char *pathname, int owner, int group) {
     return sys_chown(pathname, owner, group);
 }
 
-#define ENV_INIT_COUNT 6
 #define ENV_NAME_SIZE 64
 #define ENV_VALUE_SIZE 256
 
-static char (*env_names)[ENV_NAME_SIZE] = NULL;
-static char (*env_values)[ENV_VALUE_SIZE] = NULL;
+typedef struct {
+    char *name;
+    char *value;
+} env_entry_t;
+
+static env_entry_t *env_entries = NULL;
 static int env_count = 0;
-static int env_capacity = 0;
 static char **environ_ptrs = NULL;
+static int env_initialized = 0;
+static int environ_dirty = 1;
 
-static int env_grow(void) {
-    int new_cap;
-    char (*new_names)[ENV_NAME_SIZE];
-    char (*new_values)[ENV_VALUE_SIZE];
-    char **new_ptrs;
-    int i;
+static void env_invalidate_environ(void) {
+    kfree(environ_ptrs);
+    environ_ptrs = NULL;
+    environ_dirty = 1;
+}
 
-    new_cap = env_capacity ? env_capacity * 2 : ENV_INIT_COUNT;
-    new_names = kmalloc(new_cap * ENV_NAME_SIZE);
-    if (!new_names) return -1;
-    new_values = kmalloc(new_cap * ENV_VALUE_SIZE);
-    if (!new_values) { kfree(new_names); return -1; }
-    new_ptrs = kmalloc((new_cap + 1) * sizeof(char *));
-    if (!new_ptrs) { kfree(new_names); kfree(new_values); return -1; }
-    if (env_names) {
-        memcpy(new_names, env_names, env_capacity * ENV_NAME_SIZE);
-        memcpy(new_values, env_values, env_capacity * ENV_VALUE_SIZE);
-        kfree(env_names);
-        kfree(env_values);
-        kfree(environ_ptrs);
+static char *env_duplicate(const char *source, size_t limit) {
+    size_t length;
+    char *copy;
+
+    length = 0;
+    while (source[length] && length + 1 < limit) length++;
+    copy = (char *)kmalloc(length + 1);
+    if (!copy) return NULL;
+    memcpy(copy, source, length);
+    copy[length] = '\0';
+    return copy;
+}
+
+static int env_add(const char *name, const char *value) {
+    char *new_name;
+    char *new_value;
+    env_entry_t *new_entries;
+
+    new_name = env_duplicate(name, ENV_NAME_SIZE);
+    if (!new_name) return -1;
+    new_value = env_duplicate(value, ENV_VALUE_SIZE);
+    if (!new_value) {
+        kfree(new_name);
+        return -1;
     }
-    for (i = env_capacity; i < new_cap; i++) {
-        new_names[i][0] = '\0';
-        new_values[i][0] = '\0';
+    new_entries = (env_entry_t *)krealloc(
+        env_entries, (env_count + 1) * sizeof(env_entry_t));
+    if (!new_entries) {
+        kfree(new_name);
+        kfree(new_value);
+        return -1;
     }
-    env_names = new_names;
-    env_values = new_values;
-    environ_ptrs = new_ptrs;
-    env_capacity = new_cap;
+    env_entries = new_entries;
+    env_entries[env_count].name = new_name;
+    env_entries[env_count].value = new_value;
+    env_count++;
+    env_invalidate_environ();
     return 0;
 }
 
 static void init_default_environ(void) {
-    if (env_count > 0) return;
-    
-    if (!env_names && env_grow() < 0) return;
-    if (!env_names || !env_values || env_capacity < ENV_INIT_COUNT) return;
-    
-    copy_string(env_names[0], "PATH", ENV_NAME_SIZE);
-    copy_string(env_values[0], "/bin:/usr/bin:/sbin:/usr/sbin", ENV_VALUE_SIZE);
-    copy_string(env_names[1], "HOME", ENV_NAME_SIZE);
-    copy_string(env_values[1], "/root", ENV_VALUE_SIZE);
-    copy_string(env_names[2], "SHELL", ENV_NAME_SIZE);
-    copy_string(env_values[2], "/bin/sh", ENV_VALUE_SIZE);
-    copy_string(env_names[3], "USER", ENV_NAME_SIZE);
-    copy_string(env_values[3], "root", ENV_VALUE_SIZE);
-    copy_string(env_names[4], "TERM", ENV_NAME_SIZE);
-    copy_string(env_values[4], "linux", ENV_VALUE_SIZE);
-    copy_string(env_names[5], "PWD", ENV_NAME_SIZE);
-    copy_string(env_values[5], "/", ENV_VALUE_SIZE);
-    env_count = 6;
+    int i;
+
+    if (env_initialized) return;
+    if (env_add("PATH", "/bin:/usr/bin:/sbin:/usr/sbin") < 0) goto failed;
+    if (env_add("HOME", "/root") < 0) goto failed;
+    if (env_add("SHELL", "/bin/sh") < 0) goto failed;
+    if (env_add("USER", "root") < 0) goto failed;
+    if (env_add("TERM", "linux") < 0) goto failed;
+    if (env_add("PWD", "/") < 0) goto failed;
+    env_initialized = 1;
+    return;
+
+failed:
+    for (i = 0; i < env_count; i++) {
+        kfree(env_entries[i].name);
+        kfree(env_entries[i].value);
+    }
+    kfree(env_entries);
+    env_entries = NULL;
+    env_count = 0;
+    env_invalidate_environ();
 }
 
 static int find_env(const char *name) {
-    for (int i = 0; i < env_count; i++) {
-        int j = 0;
-        while (name[j] && env_names[i][j] && name[j] == env_names[i][j]) j++;
-        if (name[j] == '\0' && env_names[i][j] == '\0') return i;
+    int i;
+
+    for (i = 0; i < env_count; i++) {
+        if (strcmp(name, env_entries[i].name) == 0) return i;
     }
     return -1;
 }
 
 static int sys_getenv(const char *name, char *buf, int bufsize) {
+    uint64_t name_addr;
+    uint64_t buf_addr;
+    int idx;
+    int len;
+    int i;
+
     if (!name || !buf) return -EFAULT;
-    uint64_t name_addr = (uint64_t)name;
-    uint64_t buf_addr = (uint64_t)buf;
+    name_addr = (uint64_t)name;
+    buf_addr = (uint64_t)buf;
     if (name_addr >= KERNEL_VMA || name_addr < 0x1000) return -EFAULT;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     
     init_default_environ();
     
-    int idx = find_env(name);
+    idx = find_env(name);
     if (idx < 0) return -ENOENT;
-    
-    int len = 0;
-    while (env_values[idx][len]) len++;
+
+    len = 0;
+    while (env_entries[idx].value[len]) len++;
     if (len + 1 > bufsize) return -ERANGE;
-    
-    for (int i = 0; i <= len; i++) {
-        buf[i] = env_values[idx][i];
+
+    for (i = 0; i <= len; i++) {
+        buf[i] = env_entries[idx].value[i];
     }
     return len;
 }
 
 static int sys_setenv(const char *name, const char *value, int overwrite) {
+    uint64_t name_addr;
+    uint64_t value_addr;
+    int idx;
+    char *new_value;
+
     if (!name || !value) return -EFAULT;
-    uint64_t name_addr = (uint64_t)name;
-    uint64_t value_addr = (uint64_t)value;
+    name_addr = (uint64_t)name;
+    value_addr = (uint64_t)value;
     if (name_addr >= KERNEL_VMA || name_addr < 0x1000) return -EFAULT;
     if (value_addr >= KERNEL_VMA || value_addr < 0x1000) return -EFAULT;
     
     init_default_environ();
     
-    int idx = find_env(name);
+    idx = find_env(name);
     if (idx >= 0) {
         if (!overwrite) return 0;
-        int i = 0;
-        while (value[i] && i < ENV_VALUE_SIZE - 1) {
-            env_values[idx][i] = value[i];
-            i++;
-        }
-        env_values[idx][i] = '\0';
+        new_value = env_duplicate(value, ENV_VALUE_SIZE);
+        if (!new_value) return -ENOMEM;
+        kfree(env_entries[idx].value);
+        env_entries[idx].value = new_value;
+        env_invalidate_environ();
         return 0;
     }
-    
-    if (env_count >= env_capacity) {
-        if (env_grow() < 0) return -ENOMEM;
-    }
-    
-    int i = 0;
-    while (name[i] && i < ENV_NAME_SIZE - 1) {
-        env_names[env_count][i] = name[i];
-        i++;
-    }
-    env_names[env_count][i] = '\0';
-    
-    i = 0;
-    while (value[i] && i < ENV_VALUE_SIZE - 1) {
-        env_values[env_count][i] = value[i];
-        i++;
-    }
-    env_values[env_count][i] = '\0';
-    
-    env_count++;
-    return 0;
+
+    return env_add(name, value) < 0 ? -ENOMEM : 0;
 }
 
 static int sys_unsetenv(const char *name) {
+    uint64_t addr;
+    int idx;
+    env_entry_t *new_entries;
+
     if (!name) return -EFAULT;
-    uint64_t addr = (uint64_t)name;
+    addr = (uint64_t)name;
     if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    int idx = find_env(name);
+
+    idx = find_env(name);
     if (idx < 0) return 0;
-    
-    if (idx >= env_capacity) return 0;
-    for (int i = idx; i < env_count - 1 && i < env_capacity - 1; i++) {
-        memcpy(env_names[i], env_names[i+1], ENV_NAME_SIZE);
-        memcpy(env_values[i], env_values[i+1], ENV_VALUE_SIZE);
+
+    kfree(env_entries[idx].name);
+    kfree(env_entries[idx].value);
+    if (idx + 1 < env_count) {
+        memmove(&env_entries[idx], &env_entries[idx + 1],
+                (env_count - idx - 1) * sizeof(env_entry_t));
     }
     env_count--;
+    if (env_count == 0) {
+        kfree(env_entries);
+        env_entries = NULL;
+    } else {
+        new_entries = (env_entry_t *)krealloc(
+            env_entries, env_count * sizeof(env_entry_t));
+        if (new_entries) env_entries = new_entries;
+    }
+    env_invalidate_environ();
     return 0;
 }
 
 static int sys_clearenv(void) {
+    int i;
+
+    for (i = 0; i < env_count; i++) {
+        kfree(env_entries[i].name);
+        kfree(env_entries[i].value);
+    }
+    kfree(env_entries);
+    env_entries = NULL;
     env_count = 0;
+    env_initialized = 1;
+    env_invalidate_environ();
     return 0;
 }
 
 char **get_environ(void) {
+    int i;
+
     init_default_environ();
-    for (int i = 0; i < env_count; i++) {
-        environ_ptrs[i] = env_values[i];
+    if (!environ_dirty) return environ_ptrs;
+    environ_ptrs = (char **)kmalloc((env_count + 1) * sizeof(char *));
+    if (!environ_ptrs) return NULL;
+    for (i = 0; i < env_count; i++) {
+        environ_ptrs[i] = env_entries[i].value;
     }
     environ_ptrs[env_count] = NULL;
+    environ_dirty = 0;
     return environ_ptrs;
 }
 

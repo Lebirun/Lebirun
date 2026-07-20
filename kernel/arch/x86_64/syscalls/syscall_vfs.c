@@ -6,6 +6,8 @@
 
 extern int is_socket_fd(int fd);
 extern int socket_close_fd(int fd);
+extern int is_epoll_special_fd(int fd);
+extern int epoll_close_fd(int fd);
 
 #define VFS_RW_STACK_BUF 512
 #define VFS_RW_HEAP_LIMIT 4096
@@ -360,6 +362,7 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 
     (void)unused1; (void)unused2;
     if (is_socket_fd(fd)) return socket_close_fd(fd);
+    if (is_epoll_special_fd(fd)) return epoll_close_fd(fd);
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;

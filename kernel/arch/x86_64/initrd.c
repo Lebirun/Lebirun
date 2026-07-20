@@ -33,29 +33,6 @@ static inline int initrd_is_root_parent(uint16_t parent_index) {
     return 0;
 }
 
-static void serial_printf_hex(uint64_t val) {
-    char buf[9];
-    for (int i = 7; i >= 0; i--) {
-        int nib = (val >> (i * 4)) & 0xF;
-        buf[7-i] = (nib < 10) ? ('0' + nib) : ('A' + nib - 10);
-    }
-    buf[8] = '\0';
-    serial_puts(buf);
-}
-
-static void serial_printf_dec(uint64_t val) {
-    char buf[12];
-    int i = 10;
-    buf[11] = '\0';
-    if (val == 0) { serial_putchar('0'); return; }
-    while (val && i >= 0) {
-        buf[i--] = '0' + (val % 10);
-        val /= 10;
-    }
-    serial_puts(&buf[i+1]);
-}
-
-
 void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mods_start_page;
     uint64_t mods_end_page;
@@ -64,111 +41,107 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mod_size;
     uint64_t start_page;
     uint64_t end_page;
-    {
-        serial_puts("\n=== INITRD INIT ===\n");
-        serial_puts("mods_count="); serial_printf_dec(mods_count);
-        serial_puts(" mods_addr=0x"); serial_printf_hex(mods_addr); serial_puts("\n");
-        printf("\n=== INITRD INIT ===\nmods_count=%lu mods_addr=0x%016lX\n", mods_count, mods_addr);
-        printf("INITRD: initrd_init called mods_count=%lu mods_addr=0x%016lX\n", mods_count, mods_addr);
-    }
+    uint64_t module_array_size;
+    uint64_t module_array_end;
+    uint64_t headers_size;
+    uint64_t phys;
+    uint64_t virt;
+    uint64_t i;
+    uint64_t hdr_off;
+    uint64_t len;
+    multiboot_module_t *mod;
 
     if (mods_count == 0) {
-        serial_puts("INITRD: No modules loaded!\n");
         printf("INITRD: No modules loaded\n");
         return;
     }
 
+    if (mods_count > UINT64_MAX / sizeof(multiboot_module_t)) {
+        printf("INITRD: Invalid module count\n");
+        return;
+    }
+    module_array_size = mods_count * sizeof(multiboot_module_t);
+    if (module_array_size > UINT64_MAX - mods_addr) {
+        printf("INITRD: Invalid module array range\n");
+        return;
+    }
+    module_array_end = mods_addr + module_array_size;
+    if (module_array_end > UINT64_MAX - 0xFFF) {
+        printf("INITRD: Invalid module array range\n");
+        return;
+    }
+
     mods_start_page = mods_addr & ~0xFFF;
-    mods_end_page = (mods_addr + mods_count * sizeof(multiboot_module_t) + 0xFFF) & ~0xFFF;
-    printf("INITRD: Mapping multiboot array phys 0x%016lX - 0x%016lX\n", mods_start_page, mods_end_page);
-    for (uint64_t phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
-        uint64_t virt = phys + KERNEL_VMA;
+    mods_end_page = (module_array_end + 0xFFF) & ~0xFFF;
+    for (phys = mods_start_page; phys < mods_end_page; phys += 0x1000) {
+        virt = phys + KERNEL_VMA;
         vmm_map_page(virt, phys, 0x003);
     }
 
-    multiboot_module_t *mod = (multiboot_module_t *)(mods_addr + KERNEL_VMA);
-    printf("INITRD: Using module at virtual 0x%016lX (phys 0x%016lX - 0x%016lX)\n", (uint64_t)mod, (uint64_t)mod->mod_start, (uint64_t)mod->mod_end);
+    mod = (multiboot_module_t *)(mods_addr + KERNEL_VMA);
     
     mod_start_phys = mod->mod_start;
     mod_end_phys = mod->mod_end;
+    if (mod_end_phys < mod_start_phys) {
+        printf("INITRD: Invalid module range\n");
+        return;
+    }
     mod_size = mod_end_phys - mod_start_phys;
 
     initrd_mod0_phys_start = mod_start_phys;
     initrd_mod0_phys_end = mod_end_phys;
     
-    printf("INITRD: Module at phys 0x%016lX - 0x%016lX (%lu bytes) cmdline=0x%016lX\n",
-           mod_start_phys, mod_end_phys, mod_size, mod->cmdline);
-
     if (mod_size < sizeof(initrd_header_t)) {
         printf("INITRD: Module too small to contain header (%u bytes)\n", mod_size);
         return;
     }
 
     start_page = mod_start_phys & ~0xFFF;
+    if (mod_end_phys > UINT64_MAX - 0xFFF) {
+        printf("INITRD: Invalid module end\n");
+        return;
+    }
     end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
-    printf("INITRD: Mapping phys 0x%016lX - 0x%016lX into kernel space\n", start_page, end_page);
-    for (uint64_t phys = start_page; phys < end_page; phys += 0x1000) {
-        uint64_t virt = phys + KERNEL_VMA;
+    for (phys = start_page; phys < end_page; phys += 0x1000) {
+        virt = phys + KERNEL_VMA;
         vmm_map_page(virt, phys, 0x003);
     }
 
     initrd_base = (uint8_t *)(mod_start_phys + KERNEL_VMA);
 
-    {
-        serial_puts("INITRD: First 64 bytes: ");
-        printf("INITRD: First 64 bytes of module: ");
-        for (uint64_t i = 0; i < 64 && i < mod_size; i++) {
-            char hex[3];
-            uint8_t b = initrd_base[i];
-            hex[0] = (b >> 4) < 10 ? '0' + (b >> 4) : 'A' + (b >> 4) - 10;
-            hex[1] = (b & 0xF) < 10 ? '0' + (b & 0xF) : 'A' + (b & 0xF) - 10;
-            hex[2] = '\0';
-            serial_puts(hex);
-            printf("%02X", initrd_base[i]);
-            if (i % 4 == 3) { serial_putchar(' '); printf(" "); }
-        }
-        serial_puts("\n");
-        printf("\n");
-    }
-
     initrd_header = (initrd_header_t *)initrd_base;
 
     if (initrd_header->magic != INITRD_MAGIC) {
-        serial_puts("INITRD: Invalid magic! got=0x"); serial_printf_hex(initrd_header->magic);
-        serial_puts(" expected=0x"); serial_printf_hex(INITRD_MAGIC); serial_puts("\n");
         printf("INITRD: Invalid magic (got 0x%08X, expected 0x%08X)\n",
                (unsigned int)initrd_header->magic, (unsigned int)INITRD_MAGIC);
         return;
     }
-    serial_puts("INITRD: Magic OK\n");
-
     initrd_version = initrd_header->version;
     if (initrd_version == 0) initrd_version = 1;
 
     file_count = initrd_header->num_entries;
-    {
-        serial_puts("INITRD: Found "); serial_printf_dec(file_count); serial_puts(" files (version ");
-        serial_printf_dec(initrd_version); serial_puts(")\n");
-        printf("INITRD: Found %u files (version %u)\n", file_count, initrd_version);
-    }
 
     file_headers = (initrd_file_header_t *)(initrd_base + sizeof(initrd_header_t));
 
-    if ((uint8_t*)file_headers + file_count * sizeof(initrd_file_header_t) > initrd_base + mod_size) {
+    if (file_count > UINT64_MAX / sizeof(initrd_file_header_t)) {
+        printf("INITRD: Invalid file count\n");
+        return;
+    }
+    headers_size = file_count * sizeof(initrd_file_header_t);
+    if (headers_size > mod_size - sizeof(initrd_header_t)) {
         printf("INITRD: File header array overruns module (headers end beyond module)\n");
         return;
     }
 
-    {
-        printf("INITRD: Headers OK - listing headers:\n");
-        for (uint64_t i = 0; i < file_count; i++) {
-            char tmpname[65];
-            memcpy(tmpname, file_headers[i].name, 64);
-            tmpname[64] = '\0';
-            printf("  header[%u]: name='%s' off=%u len=%u type=%u perm=0x%02X parent=%u\n", 
-                   i, tmpname, file_headers[i].offset, file_headers[i].length,
-                   file_headers[i].type, file_headers[i].permissions, file_headers[i].parent_index);
-        }
+    if (file_count > SIZE_MAX / sizeof(initrd_file_t)) {
+        printf("INITRD: File array is too large\n");
+        return;
+    }
+
+    if (file_count == 0) {
+        files = NULL;
+        printf("INITRD: Initialized 0 files (version %u)\n", initrd_version);
+        return;
     }
 
     files = (initrd_file_t *)kmalloc(file_count * sizeof(initrd_file_t));
@@ -177,10 +150,9 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    for (uint64_t i = 0; i < file_count; i++) {
-        uint64_t hdr_off;
-        uint64_t len;
+    for (i = 0; i < file_count; i++) {
         memcpy(files[i].name, file_headers[i].name, 64);
+        files[i].name[63] = '\0';
         files[i].length = file_headers[i].length;
         files[i].type = file_headers[i].type;
         files[i].permissions = file_headers[i].permissions;
@@ -191,9 +163,20 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         hdr_off = file_headers[i].offset;
         len = file_headers[i].length;
 
+        if (files[i].type != INITRD_TYPE_FILE &&
+            files[i].type != INITRD_TYPE_DIR) {
+            printf("INITRD: File %u (%s) has invalid type %u\n",
+                   i, files[i].name, files[i].type);
+            kfree(files);
+            files = NULL;
+            file_count = 0;
+            return;
+        }
+
         if (files[i].type == INITRD_TYPE_FILE) {
-            if (hdr_off + len > mod_size) {
-                printf("INITRD: File %u (%s) has out-of-bounds offset/length (off=%u len=%u mod_size=%u)\n", i, file_headers[i].name, hdr_off, len, mod_size);
+            if (hdr_off > mod_size || len > mod_size - hdr_off) {
+                printf("INITRD: File %u (%s) has out-of-bounds offset/length (off=%u len=%u mod_size=%u)\n",
+                       i, files[i].name, hdr_off, len, mod_size);
                 kfree(files);
                 files = NULL;
                 file_count = 0;
@@ -209,10 +192,7 @@ void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         }
     }
 
-    {
-        serial_puts("INITRD: Initialized successfully!\n");
-        printf("INITRD: Initialized successfully\n");
-    }
+    printf("INITRD: Initialized %u files (version %u)\n", file_count, initrd_version);
 }
 
 uint64_t initrd_get_file_count(void) {
@@ -450,36 +430,18 @@ static uint64_t initrd_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size
     uint64_t idx;
     uint64_t avail;
     uint64_t to_read;
+    initrd_file_t *f;
+
     if (!node || !buffer) return 0;
     idx = node->inode;
     if (idx >= file_count) return 0;
-    initrd_file_t *f = &files[idx];
+    f = &files[idx];
     if (f->type != INITRD_TYPE_FILE) return 0;
     if (offset >= f->length) return 0;
     avail = f->length - offset;
     to_read = (size < avail) ? size : avail;
 
-    {
-        uint64_t cr3;
-        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-        printf("INITRD: read dest=0x%016lX src=0x%016lX offset=%u to_read=%lu cr3=0x%016lX\n",
-               (uint64_t)buffer, (uint64_t)(f->data + offset), offset, to_read, cr3);
-        if (to_read >= 4) {
-            printf("INITRD: src first4: %02X %02X %02X %02X\n",
-                   f->data[offset], f->data[offset+1], f->data[offset+2], f->data[offset+3]);
-            printf("INITRD: dest-before first4: %02X %02X %02X %02X\n",
-                   ((uint8_t*)buffer)[0], ((uint8_t*)buffer)[1], ((uint8_t*)buffer)[2], ((uint8_t*)buffer)[3]);
-        }
-    }
-
     memcpy(buffer, f->data + offset, to_read);
-
-    {
-        if (to_read >= 4) {
-            printf("INITRD: dest-after first4: %02X %02X %02X %02X\n",
-                   ((uint8_t*)buffer)[0], ((uint8_t*)buffer)[1], ((uint8_t*)buffer)[2], ((uint8_t*)buffer)[3]);
-        }
-    }
 
     return to_read;
 }
@@ -602,7 +564,6 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
         }
     }
     
-    printf("INITRD_VFS: Mounted %u files\n", file_count);
     return initrd_vfs_root;
 }
 
@@ -672,7 +633,6 @@ void initrd_copy_to_root(void) {
     for (p = root_dirs; *p; p++) {
         r = ramfs_create_dir(*p, 0755);
         if (r == 0) {
-            printf("INITRD: Created root dir %s\n", *p);
             dirs_created++;
         } else {
             printf("INITRD: Failed to create root dir %s (%d)\n", *p, r);
@@ -683,7 +643,6 @@ void initrd_copy_to_root(void) {
     for (p = nested_dirs; *p; p++) {
         r = ramfs_create_dir(*p, 0755);
         if (r == 0) {
-            printf("INITRD: Created nested dir %s\n", *p);
             dirs_created++;
         } else {
             printf("INITRD: Failed to create nested dir %s (%d)\n", *p, r);
@@ -723,9 +682,6 @@ void initrd_copy_to_root(void) {
         strncpy(destpath, tmp, sizeof(destpath) - 1);
         destpath[sizeof(destpath) - 1] = '\0';
 
-        printf("INITRD_COPY: i=%u name='%s' parent=%u type=%u dest='%s'\n", 
-               (unsigned)i, files[i].name, files[i].parent_index, files[i].type, destpath);
-
         is_root_level_dir = (files[i].parent_index == 0xFFFF && files[i].type == INITRD_TYPE_DIR);
         if (is_root_level_dir) {
             is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
@@ -735,7 +691,6 @@ void initrd_copy_to_root(void) {
                                      strcmp(destpath, "/tmp") == 0 || strcmp(destpath, "/proc") == 0 ||
                                      strcmp(destpath, "/run") == 0 || strcmp(destpath, "/root") == 0);
             if (is_standard_root) {
-                printf("INITRD: Skipping root-level dir %s (already created independently)\n", destpath);
                 continue;
             }
         }

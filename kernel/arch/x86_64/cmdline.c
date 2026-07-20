@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static char cmdline_buf[CMDLINE_MAX];
+static const char *cmdline_buf = "";
 static char init_path[CMDLINE_INIT_PATH_MAX];
 static char root_dev[64];
 static int num_consoles;
@@ -52,22 +52,15 @@ static void extract_value(const char *start, char *out, int out_max)
 void cmdline_parse(const char *cmdline_str)
 {
     const char *val;
-    int len;
 
     strcpy(init_path, "/init");
     num_consoles = 2;
     root_dev[0] = '\0';
-    cmdline_buf[0] = '\0';
+    cmdline_buf = cmdline_str ? cmdline_str : "";
     text_mode = 0;
     lke_enabled = 1;
 
     if (cmdline_str) {
-        len = 0;
-        while (cmdline_str[len] && len < CMDLINE_MAX - 1)
-            len++;
-        memcpy(cmdline_buf, cmdline_str, len);
-        cmdline_buf[len] = '\0';
-
         val = find_param(cmdline_buf, "init");
         if (val)
             extract_value(val, init_path, CMDLINE_INIT_PATH_MAX);
@@ -94,7 +87,7 @@ void cmdline_parse(const char *cmdline_str)
             lke_enabled = parse_int(val);
     }
 
-    printf("CMDLINE: \"%s\"\n", cmdline_buf);
+    if (cmdline_buf[0]) printf("CMDLINE: \"%s\"\n", cmdline_buf);
 }
 
 const char *cmdline_get(void)

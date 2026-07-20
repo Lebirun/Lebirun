@@ -10,23 +10,12 @@ extern void *kmalloc(size_t);
 extern void kfree(void *);
 
 static vfl_vm_t *vfl_vms;
-static int vfl_capacity;
-static int vfl_initialized;
-
-void vfl_init(void) {
-    vfl_initialized = 1;
-}
 
 static int vfl_ensure_initialized(void) {
     if (vfl_vms) return 0;
-    vfl_capacity = VFL_MAX_VMS;
-    vfl_vms = (vfl_vm_t *)kmalloc(vfl_capacity * sizeof(vfl_vm_t));
-    if (!vfl_vms) {
-        vfl_capacity = 0;
-        return -1;
-    }
-    memset(vfl_vms, 0, vfl_capacity * sizeof(vfl_vm_t));
-    vfl_initialized = 1;
+    vfl_vms = (vfl_vm_t *)kmalloc(VFL_MAX_VMS * sizeof(vfl_vm_t));
+    if (!vfl_vms) return -1;
+    memset(vfl_vms, 0, VFL_MAX_VMS * sizeof(vfl_vm_t));
     return 0;
 }
 
@@ -35,7 +24,7 @@ int vfl_create_vm(void) {
 
     if (vfl_ensure_initialized() < 0) return -1;
 
-    for (i = 0; i < vfl_capacity; i++) {
+    for (i = 0; i < VFL_MAX_VMS; i++) {
         if (!vfl_vms[i].active) {
             memset(&vfl_vms[i], 0, sizeof(vfl_vm_t));
             vfl_vms[i].active = 1;
@@ -51,7 +40,7 @@ int vfl_destroy_vm(uint32_t vm_id) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 
@@ -69,7 +58,7 @@ int vfl_create_vcpu(uint32_t vm_id) {
     int idx;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vm->nr_vcpus >= VFL_MAX_VCPUS) return -1;
@@ -95,7 +84,7 @@ int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -109,7 +98,7 @@ int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -123,7 +112,7 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -137,7 +126,7 @@ int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs) {
     vfl_vm_t *vm;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -153,7 +142,7 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     uint8_t *host_buf;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (region->slot >= VFL_MAX_MEM_SLOTS) return -1;
@@ -203,45 +192,6 @@ static uint8_t *vfl_guest_to_host(vfl_vm_t *vm, uint64_t guest_addr, uint64_t le
     return NULL;
 }
 
-static __attribute__((unused)) uint8_t vfl_read8(vfl_vm_t *vm, uint64_t addr) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 1);
-    if (!p) return 0xFF;
-    return *p;
-}
-
-static __attribute__((unused)) uint16_t vfl_read16(vfl_vm_t *vm, uint64_t addr) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 2);
-    if (!p) return 0xFFFF;
-    return *(uint16_t *)p;
-}
-
-static __attribute__((unused)) uint32_t vfl_read32(vfl_vm_t *vm, uint64_t addr) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 4);
-    if (!p) return 0xFFFFFFFF;
-    return *(uint32_t *)p;
-}
-
-static __attribute__((unused)) void vfl_write8(vfl_vm_t *vm, uint64_t addr, uint8_t val) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 1);
-    if (p) *p = val;
-}
-
-static __attribute__((unused)) void vfl_write16(vfl_vm_t *vm, uint64_t addr, uint16_t val) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 2);
-    if (p) *(uint16_t *)p = val;
-}
-
-static __attribute__((unused)) void vfl_write32(vfl_vm_t *vm, uint64_t addr, uint32_t val) {
-    uint8_t *p;
-    p = vfl_guest_to_host(vm, addr, 4);
-    if (p) *(uint32_t *)p = val;
-}
-
 static uint64_t vfl_seg_addr(vfl_vcpu_t *vcpu, int seg_id, uint64_t offset) {
     vfl_segment_t *seg;
 
@@ -260,26 +210,21 @@ static uint64_t vfl_seg_addr(vfl_vcpu_t *vcpu, int seg_id, uint64_t offset) {
     return (seg->selector << 4) + offset;
 }
 
-static int vfl_handle_io_out(vfl_vcpu_t *vcpu, vfl_run_t *run,
-                              uint16_t port, uint8_t size, uint32_t data) {
+static void vfl_handle_io_out(vfl_run_t *run, uint16_t port,
+                              uint8_t size, uint32_t data) {
     run->exit_reason = VFL_EXIT_IO;
     run->io.port = port;
     run->io.size = size;
     run->io.direction = 1;
     run->io.data = data;
-    (void)vcpu;
-    return 1;
 }
 
-static int vfl_handle_io_in(vfl_vcpu_t *vcpu, vfl_run_t *run,
-                             uint16_t port, uint8_t size) {
+static void vfl_handle_io_in(vfl_run_t *run, uint16_t port, uint8_t size) {
     run->exit_reason = VFL_EXIT_IO;
     run->io.port = port;
     run->io.size = size;
     run->io.direction = 0;
     run->io.data = 0;
-    (void)vcpu;
-    return 1;
 }
 
 static int vfl_handle_paravirt(vfl_vcpu_t *vcpu, vfl_run_t *run) {
@@ -318,14 +263,11 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
     uint8_t op;
     uint8_t modrm;
     int prefix_66;
-    int prefix_67;
-    int seg_override;
-    uint64_t addr;
     int steps;
     int max_steps;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
     if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -1;
@@ -349,28 +291,15 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
         }
 
         prefix_66 = 0;
-        prefix_67 = 0;
-        seg_override = -1;
         op = *code++;
 
         while (op == 0x66 || op == 0x67 ||
                op == 0x26 || op == 0x2E || op == 0x36 || op == 0x3E ||
                op == 0x64 || op == 0x65 || op == 0xF0 || op == 0xF2 || op == 0xF3) {
             if (op == 0x66) prefix_66 = 1;
-            else if (op == 0x67) prefix_67 = 1;
-            else if (op == 0x26) seg_override = 0;
-            else if (op == 0x2E) seg_override = 1;
-            else if (op == 0x36) seg_override = 2;
-            else if (op == 0x3E) seg_override = 3;
-            else if (op == 0x64) seg_override = 4;
-            else if (op == 0x65) seg_override = 5;
             op = *code++;
             vcpu->regs.rip++;
         }
-
-        (void)prefix_67;
-        (void)addr;
-        (void)modrm;
 
         switch (op) {
             case 0xF4:
@@ -401,76 +330,72 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
                 break;
 
             case 0xE6:
-                if (vfl_handle_io_out(vcpu, run, *code, 1,
-                    (uint32_t)(vcpu->regs.rax & 0xFF)))
-                    { vcpu->regs.rip += 2; return 0; }
-                break;
+                vfl_handle_io_out(run, *code, 1,
+                                  (uint32_t)(vcpu->regs.rax & 0xFF));
+                vcpu->regs.rip += 2;
+                return 0;
 
             case 0xE7:
                 if (prefix_66) {
-                    if (vfl_handle_io_out(vcpu, run, *code, 2,
-                        (uint32_t)(vcpu->regs.rax & 0xFFFF)))
-                        { vcpu->regs.rip += 2; return 0; }
+                    vfl_handle_io_out(run, *code, 2,
+                                      (uint32_t)(vcpu->regs.rax & 0xFFFF));
                 } else {
-                    if (vfl_handle_io_out(vcpu, run, *code, 4,
-                        (uint32_t)(vcpu->regs.rax & 0xFFFFFFFF)))
-                        { vcpu->regs.rip += 2; return 0; }
+                    vfl_handle_io_out(run, *code, 4,
+                                      (uint32_t)(vcpu->regs.rax & 0xFFFFFFFF));
                 }
-                break;
+                vcpu->regs.rip += 2;
+                return 0;
 
             case 0xEE:
-                if (vfl_handle_io_out(vcpu, run,
-                    (uint16_t)(vcpu->regs.rdx & 0xFFFF), 1,
-                    (uint32_t)(vcpu->regs.rax & 0xFF)))
-                    { vcpu->regs.rip += 1; return 0; }
-                break;
+                vfl_handle_io_out(run,
+                                  (uint16_t)(vcpu->regs.rdx & 0xFFFF), 1,
+                                  (uint32_t)(vcpu->regs.rax & 0xFF));
+                vcpu->regs.rip++;
+                return 0;
 
             case 0xEF:
                 if (prefix_66) {
-                    if (vfl_handle_io_out(vcpu, run,
-                        (uint16_t)(vcpu->regs.rdx & 0xFFFF), 2,
-                        (uint32_t)(vcpu->regs.rax & 0xFFFF)))
-                        { vcpu->regs.rip += 1; return 0; }
+                    vfl_handle_io_out(run,
+                                      (uint16_t)(vcpu->regs.rdx & 0xFFFF), 2,
+                                      (uint32_t)(vcpu->regs.rax & 0xFFFF));
                 } else {
-                    if (vfl_handle_io_out(vcpu, run,
-                        (uint16_t)(vcpu->regs.rdx & 0xFFFF), 4,
-                        (uint32_t)(vcpu->regs.rax & 0xFFFFFFFF)))
-                        { vcpu->regs.rip += 1; return 0; }
+                    vfl_handle_io_out(run,
+                                      (uint16_t)(vcpu->regs.rdx & 0xFFFF), 4,
+                                      (uint32_t)(vcpu->regs.rax & 0xFFFFFFFF));
                 }
-                break;
+                vcpu->regs.rip++;
+                return 0;
 
             case 0xE4:
-                if (vfl_handle_io_in(vcpu, run, *code, 1))
-                    { vcpu->regs.rip += 2; return 0; }
-                break;
+                vfl_handle_io_in(run, *code, 1);
+                vcpu->regs.rip += 2;
+                return 0;
 
             case 0xE5:
                 if (prefix_66) {
-                    if (vfl_handle_io_in(vcpu, run, *code, 2))
-                        { vcpu->regs.rip += 2; return 0; }
+                    vfl_handle_io_in(run, *code, 2);
                 } else {
-                    if (vfl_handle_io_in(vcpu, run, *code, 4))
-                        { vcpu->regs.rip += 2; return 0; }
+                    vfl_handle_io_in(run, *code, 4);
                 }
-                break;
+                vcpu->regs.rip += 2;
+                return 0;
 
             case 0xEC:
-                if (vfl_handle_io_in(vcpu, run,
-                    (uint16_t)(vcpu->regs.rdx & 0xFFFF), 1))
-                    { vcpu->regs.rip += 1; return 0; }
-                break;
+                vfl_handle_io_in(run,
+                                 (uint16_t)(vcpu->regs.rdx & 0xFFFF), 1);
+                vcpu->regs.rip++;
+                return 0;
 
             case 0xED:
                 if (prefix_66) {
-                    if (vfl_handle_io_in(vcpu, run,
-                        (uint16_t)(vcpu->regs.rdx & 0xFFFF), 2))
-                        { vcpu->regs.rip += 1; return 0; }
+                    vfl_handle_io_in(run,
+                                     (uint16_t)(vcpu->regs.rdx & 0xFFFF), 2);
                 } else {
-                    if (vfl_handle_io_in(vcpu, run,
-                        (uint16_t)(vcpu->regs.rdx & 0xFFFF), 4))
-                        { vcpu->regs.rip += 1; return 0; }
+                    vfl_handle_io_in(run,
+                                     (uint16_t)(vcpu->regs.rdx & 0xFFFF), 4);
                 }
-                break;
+                vcpu->regs.rip++;
+                return 0;
 
             case 0xCD:
                 if (*code == 0xFF) {
@@ -598,7 +523,6 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
                 return -1;
         }
 
-        (void)seg_override;
     }
 
     run->exit_reason = VFL_EXIT_INTERNAL;
@@ -611,7 +535,7 @@ int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info) {
     uint64_t total;
 
     if (!vfl_vms) return -1;
-    if (vm_id >= (uint32_t)vfl_capacity) return -1;
+    if (vm_id >= VFL_MAX_VMS) return -1;
     vm = &vfl_vms[vm_id];
     if (!vm->active) return -1;
 

@@ -12,8 +12,8 @@
 
 typedef struct {
     int in_use;
-    int master_fd;
-    int slave_fd;
+    uint16_t master_capacity;
+    uint16_t slave_capacity;
     uint8_t *master_buf;
     uint64_t master_head;
     uint64_t master_tail;
@@ -87,8 +87,6 @@ static int alloc_pty(void) {
 found:
     memset(&ptys[i], 0, sizeof(pty_t));
     ptys[i].in_use = 1;
-    ptys[i].master_fd = pty_base_master + i;
-    ptys[i].slave_fd = pty_base_slave + i;
     init_default_termios(&ptys[i].termios);
     ptys[i].winsize.ws_row = 24;
     ptys[i].winsize.ws_col = 80;
@@ -96,20 +94,72 @@ found:
     return i;
 }
 
-static int pty_ensure_master_buf(pty_t *pty) {
-    if (pty->master_buf) return 0;
-    pty->master_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
-    if (!pty->master_buf) return -12;
-    memset(pty->master_buf, 0, PTY_BUF_SIZE);
+static int pty_reserve_buffer(uint8_t **buffer, uint16_t *capacity,
+                              uint64_t *head, uint64_t *tail,
+                              size_t additional) {
+    uint64_t used;
+    uint64_t required;
+    uint16_t new_capacity;
+    uint8_t *new_buffer;
+    uint64_t i;
+
+    used = *tail - *head;
+    if (used > PTY_BUF_SIZE) return -12;
+    if (additional > PTY_BUF_SIZE - used) return -12;
+    required = used + additional;
+    if (required <= *capacity) return 0;
+    new_capacity = (uint16_t)required;
+    new_buffer = (uint8_t *)kmalloc(new_capacity);
+    if (!new_buffer) return -12;
+    for (i = 0; i < used; i++) {
+        new_buffer[i] = (*buffer)[(*head + i) % *capacity];
+    }
+    kfree(*buffer);
+    *buffer = new_buffer;
+    *capacity = new_capacity;
+    *head = 0;
+    *tail = used;
     return 0;
 }
 
-static int pty_ensure_slave_buf(pty_t *pty) {
-    if (pty->slave_buf) return 0;
-    pty->slave_buf = (uint8_t *)kmalloc(PTY_BUF_SIZE);
-    if (!pty->slave_buf) return -12;
-    memset(pty->slave_buf, 0, PTY_BUF_SIZE);
-    return 0;
+static void pty_compact_buffer(uint8_t **buffer, uint16_t *capacity,
+                               uint64_t *head, uint64_t *tail) {
+    uint64_t used;
+    uint8_t *new_buffer;
+    uint64_t i;
+
+    used = *tail - *head;
+    if (used == *capacity) return;
+    if (used == 0) {
+        kfree(*buffer);
+        *buffer = NULL;
+        *capacity = 0;
+        *head = 0;
+        *tail = 0;
+        return;
+    }
+    new_buffer = (uint8_t *)kmalloc(used);
+    if (!new_buffer) return;
+    for (i = 0; i < used; i++) {
+        new_buffer[i] = (*buffer)[(*head + i) % *capacity];
+    }
+    kfree(*buffer);
+    *buffer = new_buffer;
+    *capacity = (uint16_t)used;
+    *head = 0;
+    *tail = used;
+}
+
+static int pty_ensure_master_buf(pty_t *pty, size_t additional) {
+    return pty_reserve_buffer(&pty->master_buf, &pty->master_capacity,
+                              &pty->master_head, &pty->master_tail,
+                              additional);
+}
+
+static int pty_ensure_slave_buf(pty_t *pty, size_t additional) {
+    return pty_reserve_buffer(&pty->slave_buf, &pty->slave_capacity,
+                              &pty->slave_head, &pty->slave_tail,
+                              additional);
 }
 
 static pty_t *get_pty_by_master(int fd) {
@@ -135,7 +185,7 @@ int pty_open_master(void) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    fd = ptys[idx].master_fd;
+    fd = pty_base_master + idx;
     mutex_unlock(&pty_lock);
     return fd;
 }
@@ -143,7 +193,7 @@ int pty_open_master(void) {
 int pty_open_slave(int master_fd) {
     pty_t *pty = get_pty_by_master(master_fd);
     if (!pty) return -1;
-    return pty->slave_fd;
+    return pty_base_slave + (int)(pty - ptys);
 }
 
 int pty_grant(int master_fd) {
@@ -216,9 +266,11 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
     dst = (uint8_t *)buf;
     
     for (i = 0; i < to_read; i++) {
-        dst[i] = pty->slave_buf[pty->slave_head % PTY_BUF_SIZE];
+        dst[i] = pty->slave_buf[pty->slave_head % pty->slave_capacity];
         pty->slave_head++;
     }
+    pty_compact_buffer(&pty->slave_buf, &pty->slave_capacity,
+                       &pty->slave_head, &pty->slave_tail);
     
     mutex_unlock(&pty->lock);
     return to_read;
@@ -233,6 +285,10 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     pty_t *pty;
     int raw_cr;
     int cr_newline;
+    pid_t pids[64];
+    task_t *signal_task;
+    int npids;
+    int si;
 
     pty = get_pty_by_master(fd);
     if (!pty) return -1;
@@ -243,7 +299,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     
     space = buf_free(pty->master_head, pty->master_tail, PTY_BUF_SIZE);
     to_write = (count < space) ? count : space;
-    if (to_write > 0 && pty_ensure_master_buf(pty) < 0) {
+    if (to_write > 0 && pty_ensure_master_buf(pty, to_write) < 0) {
         mutex_unlock(&pty->lock);
         return -12;
     }
@@ -272,51 +328,50 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {
                 if (pty->pgrp > 0) {
-                    pid_t pids[64];
-                    int npids;
-                    int si;
                     npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
                     for (si = 0; si < npids; si++) {
-                        task_t *t = task_find(pids[si]);
-                        if (t) deliver_signal_to_task(t, 2);
+                        signal_task = task_find(pids[si]);
+                        if (signal_task) deliver_signal_to_task(signal_task, 2);
                     }
                 }
+                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
+                                   &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VQUIT]) {
                 if (pty->pgrp > 0) {
-                    pid_t pids[64];
-                    int npids;
-                    int si;
                     npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
                     for (si = 0; si < npids; si++) {
-                        task_t *t = task_find(pids[si]);
-                        if (t) deliver_signal_to_task(t, 3);
+                        signal_task = task_find(pids[si]);
+                        if (signal_task) deliver_signal_to_task(signal_task, 3);
                     }
                 }
+                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
+                                   &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VSUSP]) {
                 if (pty->pgrp > 0) {
-                    pid_t pids[64];
-                    int npids;
-                    int si;
                     npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
                     for (si = 0; si < npids; si++) {
-                        task_t *t = task_find(pids[si]);
-                        if (t) deliver_signal_to_task(t, 20);
+                        signal_task = task_find(pids[si]);
+                        if (signal_task) deliver_signal_to_task(signal_task, 20);
                     }
                 }
+                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
+                                   &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
         }
         
-        pty->master_buf[pty->master_tail % PTY_BUF_SIZE] = c;
+        pty->master_buf[pty->master_tail % pty->master_capacity] = c;
         pty->master_tail++;
     }
+    pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
+                       &pty->master_head, &pty->master_tail);
     
     mutex_unlock(&pty->lock);
     return to_write;
@@ -355,7 +410,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         line_end = 0;
         
         for (i = 0; i < available && i < PTY_BUF_SIZE; i++) {
-            c = pty->master_buf[(pty->master_head + i) % PTY_BUF_SIZE];
+            c = pty->master_buf[(pty->master_head + i) % pty->master_capacity];
             if (c == '\n' || c == pty->termios.c_cc[VEOF] || c == pty->termios.c_cc[VEOL]) {
                 found_line = 1;
                 line_end = i + 1;
@@ -370,7 +425,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         
         to_read = (count < line_end) ? count : line_end;
         for (i = 0; i < to_read; i++) {
-            dst[i] = pty->master_buf[pty->master_head % PTY_BUF_SIZE];
+            dst[i] = pty->master_buf[pty->master_head % pty->master_capacity];
             pty->master_head++;
         }
         read_count = to_read;
@@ -384,11 +439,13 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         
         to_read = (count < available) ? count : available;
         for (i = 0; i < to_read; i++) {
-            dst[i] = pty->master_buf[pty->master_head % PTY_BUF_SIZE];
+            dst[i] = pty->master_buf[pty->master_head % pty->master_capacity];
             pty->master_head++;
         }
         read_count = to_read;
     }
+    pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
+                       &pty->master_head, &pty->master_tail);
     
     mutex_unlock(&pty->lock);
     return read_count;
@@ -396,7 +453,9 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
 
 ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
     size_t space;
-    size_t written;
+    size_t consumed;
+    size_t output_size;
+    size_t character_size;
     const uint8_t *src;
     size_t i;
     uint8_t c;
@@ -410,41 +469,38 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
     mutex_lock(&pty->lock);
     
     space = buf_free(pty->slave_head, pty->slave_tail, PTY_BUF_SIZE);
-    written = 0;
-    if (count > 0 && space > 0 && pty_ensure_slave_buf(pty) < 0) {
+    consumed = 0;
+    output_size = 0;
+    src = (const uint8_t *)buf;
+
+    for (i = 0; i < count; i++) {
+        c = src[i];
+        character_size = (pty->termios.c_oflag & OPOST) &&
+                         c == '\n' && (pty->termios.c_oflag & ONLCR) ? 2 : 1;
+        if (character_size > space - output_size) break;
+        output_size += character_size;
+        consumed++;
+    }
+    if (output_size > 0 && pty_ensure_slave_buf(pty, output_size) < 0) {
         mutex_unlock(&pty->lock);
         return -12;
     }
-    src = (const uint8_t *)buf;
-    
-    for (i = 0; i < count && written < space; i++) {
+    for (i = 0; i < consumed; i++) {
         c = src[i];
-        
-        if (pty->termios.c_oflag & OPOST) {
-            if (c == '\n' && (pty->termios.c_oflag & ONLCR)) {
-                if (space - written >= 2) {
-                    pty->slave_buf[pty->slave_tail % PTY_BUF_SIZE] = '\r';
-                    pty->slave_tail++;
-                    pty->slave_buf[pty->slave_tail % PTY_BUF_SIZE] = '\n';
-                    pty->slave_tail++;
-                    written += 2;
-                } else {
-                    break;
-                }
-            } else {
-                pty->slave_buf[pty->slave_tail % PTY_BUF_SIZE] = c;
-                pty->slave_tail++;
-                written++;
-            }
-        } else {
-            pty->slave_buf[pty->slave_tail % PTY_BUF_SIZE] = c;
+        if ((pty->termios.c_oflag & OPOST) && c == '\n' &&
+            (pty->termios.c_oflag & ONLCR)) {
+            pty->slave_buf[pty->slave_tail % pty->slave_capacity] = '\r';
             pty->slave_tail++;
-            written++;
+            pty->slave_buf[pty->slave_tail % pty->slave_capacity] = '\n';
+            pty->slave_tail++;
+        } else {
+            pty->slave_buf[pty->slave_tail % pty->slave_capacity] = c;
+            pty->slave_tail++;
         }
     }
-    
+
     mutex_unlock(&pty->lock);
-    return count;
+    return consumed;
 }
 
 int pty_ioctl(int fd, unsigned long request, void *arg) {
@@ -513,6 +569,8 @@ int pty_close_master(int fd) {
         kfree(pty->slave_buf);
         pty->master_buf = NULL;
         pty->slave_buf = NULL;
+        pty->master_capacity = 0;
+        pty->slave_capacity = 0;
     }
     
     mutex_unlock(&pty->lock);
@@ -532,6 +590,8 @@ int pty_close_slave(int fd) {
         kfree(pty->slave_buf);
         pty->master_buf = NULL;
         pty->slave_buf = NULL;
+        pty->master_capacity = 0;
+        pty->slave_capacity = 0;
     }
     
     mutex_unlock(&pty->lock);

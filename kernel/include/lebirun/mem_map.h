@@ -188,7 +188,7 @@ void vmm_map_temp(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 void vmm_unmap_temp(uint64_t virt_addr);
 int pt_ensure_phys_mapped(uint64_t phys_addr);
 
-void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
+int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
 uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
 uint64_t *vmm_map_range_in_pml4_tracked(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags, uint64_t *out_count);

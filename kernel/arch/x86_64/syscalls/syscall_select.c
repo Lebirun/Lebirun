@@ -78,7 +78,7 @@ static int check_fd_writable(int fd) {
         pipe_t *p = (pipe_t *)current_task->fds[fd].private_data;
         if (!p) return 0;
         if (p->readers <= 0) return 1;
-        if (p->count < p->buf_size) return 1;
+        if (p->count < PIPE_BUF_SIZE) return 1;
         return 0;
     }
     if (current_task->fds[fd].type == FD_TYPE_FILE) {

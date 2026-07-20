@@ -144,11 +144,9 @@ typedef struct {
     uint64_t remote_addr;
     uint16_t remote_port;
     uint8_t *recv_buf;
+    uint32_t recv_capacity;
     uint64_t recv_head;
     uint64_t recv_tail;
-    uint8_t *send_buf;
-    uint64_t send_head;
-    uint64_t send_tail;
     int nonblocking;
     int cloexec;
     int error;
@@ -168,8 +166,9 @@ typedef struct {
     sock_state_t state;
     pending_conn_t *backlog;
     char *sun_path;
-    task_fd_t pending_fds[SCM_MAX_FDS];
+    task_fd_t *pending_fds;
     int pending_fd_count;
+    int pending_fd_capacity;
 } socket_t;
 
 static socket_t *sockets = NULL;
@@ -230,6 +229,26 @@ static void socket_release_pending_fd(task_fd_t *fd) {
     memset(fd, 0, sizeof(task_fd_t));
 }
 
+static int socket_ensure_pending_fd_capacity(socket_t *sock, int needed) {
+    task_fd_t *new_fds;
+    int new_capacity;
+
+    if (!sock || needed < 0 || needed > SCM_MAX_FDS) return -ENOMEM;
+    if (needed <= sock->pending_fd_capacity) return 0;
+    new_capacity = needed;
+    new_fds = (task_fd_t *)kmalloc((size_t)new_capacity * sizeof(task_fd_t));
+    if (!new_fds) return -ENOMEM;
+    memset(new_fds, 0, (size_t)new_capacity * sizeof(task_fd_t));
+    if (sock->pending_fds && sock->pending_fd_count > 0) {
+        memcpy(new_fds, sock->pending_fds,
+               (size_t)sock->pending_fd_count * sizeof(task_fd_t));
+    }
+    kfree(sock->pending_fds);
+    sock->pending_fds = new_fds;
+    sock->pending_fd_capacity = new_capacity;
+    return 0;
+}
+
 static void free_socket(int idx) {
     int i;
 
@@ -243,13 +262,14 @@ static void free_socket(int idx) {
             tcp_socket_close(sockets[idx].tcp);
         }
         kfree(sockets[idx].recv_buf);
-        kfree(sockets[idx].send_buf);
         kfree(sockets[idx].backlog);
         kfree(sockets[idx].sun_path);
+        kfree(sockets[idx].pending_fds);
         sockets[idx].recv_buf = NULL;
-        sockets[idx].send_buf = NULL;
         sockets[idx].backlog = NULL;
         sockets[idx].sun_path = NULL;
+        sockets[idx].pending_fds = NULL;
+        sockets[idx].pending_fd_capacity = 0;
         sockets[idx].tcp = NULL;
         sockets[idx].in_use = 0;
     }
@@ -285,31 +305,73 @@ static size_t recv_buf_used(socket_t *sock) {
 }
 
 static size_t recv_buf_free(socket_t *sock) {
-    return SOCKET_BUF_SIZE - recv_buf_used(sock);
+    size_t used;
+
+    used = recv_buf_used(sock);
+    if (used >= (size_t)sock->so_rcvbuf) return 0;
+    return (size_t)sock->so_rcvbuf - used;
 }
 
-static size_t send_buf_used(socket_t *sock) {
-    return sock->send_tail - sock->send_head;
-}
+static int socket_reserve_buffer(uint8_t **buffer, uint32_t *capacity,
+                                 uint64_t *head, uint64_t *tail,
+                                 size_t additional, uint32_t limit) {
+    uint64_t used;
+    uint64_t required;
+    uint32_t new_capacity;
+    uint8_t *new_buffer;
+    uint64_t i;
 
-static size_t send_buf_free(socket_t *sock) {
-    return SOCKET_BUF_SIZE - send_buf_used(sock);
-}
-
-static int socket_ensure_recv_buf(socket_t *sock) {
-    if (sock->recv_buf) return 0;
-    sock->recv_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
-    if (!sock->recv_buf) return -ENOMEM;
-    memset(sock->recv_buf, 0, SOCKET_BUF_SIZE);
+    used = *tail - *head;
+    if (used > limit) return -ENOMEM;
+    if (additional > limit - used) return -ENOMEM;
+    required = used + additional;
+    if (required <= *capacity) return 0;
+    new_capacity = (uint32_t)required;
+    new_buffer = (uint8_t *)kmalloc(new_capacity);
+    if (!new_buffer) return -ENOMEM;
+    for (i = 0; i < used; i++) {
+        new_buffer[i] = (*buffer)[(*head + i) % *capacity];
+    }
+    kfree(*buffer);
+    *buffer = new_buffer;
+    *capacity = new_capacity;
+    *head = 0;
+    *tail = used;
     return 0;
 }
 
-static int socket_ensure_send_buf(socket_t *sock) {
-    if (sock->send_buf) return 0;
-    sock->send_buf = (uint8_t *)kmalloc(SOCKET_BUF_SIZE);
-    if (!sock->send_buf) return -ENOMEM;
-    memset(sock->send_buf, 0, SOCKET_BUF_SIZE);
-    return 0;
+static int socket_ensure_recv_buf(socket_t *sock, size_t additional) {
+    return socket_reserve_buffer(&sock->recv_buf, &sock->recv_capacity,
+                                 &sock->recv_head, &sock->recv_tail,
+                                 additional, (uint32_t)sock->so_rcvbuf);
+}
+
+static void socket_compact_recv_buffer(socket_t *sock) {
+    uint64_t used;
+    uint8_t *new_buffer;
+    uint64_t i;
+
+    if (!sock) return;
+    used = sock->recv_tail - sock->recv_head;
+    if (used == sock->recv_capacity) return;
+    if (used == 0) {
+        kfree(sock->recv_buf);
+        sock->recv_buf = NULL;
+        sock->recv_capacity = 0;
+        sock->recv_head = 0;
+        sock->recv_tail = 0;
+        return;
+    }
+    new_buffer = (uint8_t *)kmalloc(used);
+    if (!new_buffer) return;
+    for (i = 0; i < used; i++) {
+        new_buffer[i] = sock->recv_buf[(sock->recv_head + i) % sock->recv_capacity];
+    }
+    kfree(sock->recv_buf);
+    sock->recv_buf = new_buffer;
+    sock->recv_capacity = (uint32_t)used;
+    sock->recv_head = 0;
+    sock->recv_tail = used;
 }
 
 static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
@@ -320,10 +382,10 @@ static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
 
     free = recv_buf_free(sock);
     to_write = (len < free) ? len : free;
-    if (to_write > 0 && socket_ensure_recv_buf(sock) < 0) return -ENOMEM;
+    if (to_write > 0 && socket_ensure_recv_buf(sock, to_write) < 0) return -ENOMEM;
     src = (const uint8_t *)data;
     for (i = 0; i < to_write; i++) {
-        sock->recv_buf[sock->recv_tail % SOCKET_BUF_SIZE] = src[i];
+        sock->recv_buf[sock->recv_tail % sock->recv_capacity] = src[i];
         sock->recv_tail++;
     }
     return (int)to_write;
@@ -341,30 +403,14 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     dst = (uint8_t *)data;
     head = sock->recv_head;
     for (i = 0; i < to_read; i++) {
-        dst[i] = sock->recv_buf[head % SOCKET_BUF_SIZE];
+        dst[i] = sock->recv_buf[head % sock->recv_capacity];
         head++;
     }
     if (!peek) {
         sock->recv_head = head;
+        socket_compact_recv_buffer(sock);
     }
     return to_read;
-}
-
-static int send_buf_write(socket_t *sock, const void *data, size_t len) {
-    size_t free;
-    size_t to_write;
-    const uint8_t *src;
-    size_t i;
-
-    free = send_buf_free(sock);
-    to_write = (len < free) ? len : free;
-    if (to_write > 0 && socket_ensure_send_buf(sock) < 0) return -ENOMEM;
-    src = (const uint8_t *)data;
-    for (i = 0; i < to_write; i++) {
-        sock->send_buf[sock->send_tail % SOCKET_BUF_SIZE] = src[i];
-        sock->send_tail++;
-    }
-    return (int)to_write;
 }
 
 static int sys_socket(int domain, const char *type_ptr, int protocol) {
@@ -453,19 +499,27 @@ static int find_unix_listener(const char *path) {
 }
 
 static int socket_set_sun_path(socket_t *sock, const char *path) {
-    if (!sock->sun_path) {
-        sock->sun_path = (char *)kmalloc(UNIX_PATH_MAX);
-        if (!sock->sun_path) return -ENOMEM;
-    }
-    strncpy(sock->sun_path, path, UNIX_PATH_MAX - 1);
-    sock->sun_path[UNIX_PATH_MAX - 1] = '\0';
+    size_t length;
+    char *new_path;
+
+    length = 0;
+    while (path[length] && length < UNIX_PATH_MAX - 1) length++;
+    new_path = (char *)kmalloc(length + 1);
+    if (!new_path) return -ENOMEM;
+    memcpy(new_path, path, length);
+    new_path[length] = '\0';
+    kfree(sock->sun_path);
+    sock->sun_path = new_path;
     return 0;
 }
 
 static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
+    struct sockaddr_in6 *addr6;
     struct sockaddr_un *uaddr;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     if (sock->state != SOCKSTATE_CLOSED) {
@@ -486,7 +540,6 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     }
     
     if (sock->domain == AF_INET6) {
-        struct sockaddr_in6 *addr6;
         addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
             return -EINVAL;
@@ -524,12 +577,17 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
 
 static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
+    struct sockaddr_in6 *addr6;
     struct sockaddr_un *uaddr;
     int listener_idx;
     int peer_idx;
+    int socket_idx;
     int i;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
+    socket_idx = sockfd - socket_base_fd;
     
     if (sock->state == SOCKSTATE_CONNECTED) {
         return -EISCONN;
@@ -556,12 +614,20 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         
         peer_idx = alloc_socket();
         if (peer_idx < 0) return -ENOMEM;
+        sock = &sockets[socket_idx];
         
         sockets[peer_idx].domain = AF_UNIX;
         sockets[peer_idx].type = sockets[listener_idx].type;
         sockets[peer_idx].state = SOCKSTATE_CONNECTED;
         sockets[peer_idx].peer_socket = sockfd - socket_base_fd;
-        socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path);
+        if (socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path) < 0) {
+            free_socket(peer_idx);
+            return -ENOMEM;
+        }
+        if (socket_set_sun_path(sock, uaddr->sun_path) < 0) {
+            free_socket(peer_idx);
+            return -ENOMEM;
+        }
         
         for (i = 0; i < sockets[listener_idx].backlog_size; i++) {
             if (!sockets[listener_idx].backlog[i].valid) {
@@ -574,13 +640,11 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         
         sock->peer_socket = peer_idx;
         sock->state = SOCKSTATE_CONNECTED;
-        socket_set_sun_path(sock, uaddr->sun_path);
         
         return 0;
     }
     
     if (sock->domain == AF_INET6) {
-        struct sockaddr_in6 *addr6;
         addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
             return -EINVAL;
@@ -642,8 +706,11 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
 
 static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     int backlog;
+    socket_t *sock;
+    pending_conn_t *new_backlog;
+
     (void)unused;
-    socket_t *sock = get_socket(sockfd);
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     backlog = (int)(uintptr_t)backlog_ptr;
@@ -659,10 +726,11 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     if (backlog < 1) backlog = 1;
     if (backlog > 128) backlog = 128;
 
-    if (sock->backlog) kfree(sock->backlog);
-    sock->backlog = (pending_conn_t *)kmalloc(backlog * sizeof(pending_conn_t));
-    if (!sock->backlog) return -ENOMEM;
-    memset(sock->backlog, 0, backlog * sizeof(pending_conn_t));
+    new_backlog = (pending_conn_t *)kmalloc(backlog * sizeof(pending_conn_t));
+    if (!new_backlog) return -ENOMEM;
+    memset(new_backlog, 0, backlog * sizeof(pending_conn_t));
+    kfree(sock->backlog);
+    sock->backlog = new_backlog;
     sock->backlog_capacity = backlog;
     
     sock->backlog_size = backlog;
@@ -675,10 +743,17 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
 static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     int idx;
     int i;
+    int listener_idx;
+    int conn_idx;
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
-    socket_t *sock = get_socket(sockfd);
+    socklen_t *user_addrlen;
+    pending_conn_t *conn;
+    socket_t *sock;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
+    listener_idx = sockfd - socket_base_fd;
     
     if (sock->state != SOCKSTATE_LISTENING) {
         return -EINVAL;
@@ -692,7 +767,7 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     }
     
     if (sock->domain == AF_UNIX) {
-        pending_conn_t *conn = NULL;
+        conn = NULL;
         for (i = 0; i < sock->backlog_size; i++) {
             if (sock->backlog[i].valid) {
                 conn = &sock->backlog[i];
@@ -706,20 +781,22 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
         sock->backlog_count--;
         
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (uaddr && addrlen && *addrlen >= sizeof(struct sockaddr_un)) {
+        user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        if (uaddr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_un)) {
             uaddr->sun_family = AF_UNIX;
             memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
-            *addrlen = sizeof(uint16_t);
+            *user_addrlen = sizeof(uint16_t);
         }
         
         return socket_base_fd + idx;
     }
     
-    pending_conn_t *conn = NULL;
+    conn = NULL;
+    conn_idx = -1;
     for (i = 0; i < sock->backlog_size; i++) {
         if (sock->backlog[i].valid) {
             conn = &sock->backlog[i];
+            conn_idx = i;
             break;
         }
     }
@@ -730,7 +807,9 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     
     idx = alloc_socket();
     if (idx < 0) return -EMFILE;
-    
+    sock = &sockets[listener_idx];
+    conn = &sock->backlog[conn_idx];
+
     sockets[idx].domain = sock->domain;
     sockets[idx].type = sock->type;
     sockets[idx].protocol = sock->protocol;
@@ -745,13 +824,13 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     sock->backlog_count--;
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+    user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
-    if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
+    if (addr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_in)) {
         addr->sin_family = AF_INET;
         addr->sin_port = htons(sockets[idx].remote_port);
         addr->sin_addr.s_addr = sockets[idx].remote_addr;
-        *addrlen = sizeof(struct sockaddr_in);
+        *user_addrlen = sizeof(struct sockaddr_in);
     }
     
     return socket_base_fd + idx;
@@ -844,10 +923,12 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
             break;
         case SO_SNDBUF:
             if (value <= 0) return -EINVAL;
+            if (value > SOCKET_BUF_SIZE) value = SOCKET_BUF_SIZE;
             sock->so_sndbuf = value;
             break;
         case SO_RCVBUF:
             if (value <= 0) return -EINVAL;
+            if (value > SOCKET_BUF_SIZE) value = SOCKET_BUF_SIZE;
             sock->so_rcvbuf = value;
             break;
         default:
@@ -860,14 +941,17 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
 static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
+    const char *path;
+    socklen_t pathlen;
+    socklen_t *addrlen;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     if (sock->domain == AF_UNIX) {
-        const char *path;
-        socklen_t pathlen;
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
         if (uaddr && addrlen) {
             path = sock->sun_path ? sock->sun_path : "";
             pathlen = strlen(path);
@@ -883,7 +967,7 @@ static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+    addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
         addr->sin_family = AF_INET;
@@ -899,7 +983,10 @@ static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
+    socklen_t *addrlen;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     if (sock->state != SOCKSTATE_CONNECTED) {
@@ -908,7 +995,7 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     
     if (sock->domain == AF_UNIX) {
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
         if (uaddr && addrlen) {
             uaddr->sun_family = AF_UNIX;
             memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
@@ -919,7 +1006,7 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     }
     
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    socklen_t *addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+    addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
         addr->sin_family = AF_INET;
@@ -936,7 +1023,10 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
                       int flags, int dest_addr_ptr, int addrlen) {
     const void *buf;
     int ret;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
+    socket_t *peer;
+
+    sock = get_socket(sockfd);
     (void)flags;
     (void)dest_addr_ptr;
     (void)addrlen;
@@ -955,19 +1045,31 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
     }
     
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
-        socket_t *peer = &sockets[sock->peer_socket];
+        peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
             return recv_buf_write(peer, buf, len);
         }
     }
     
-    return send_buf_write(sock, buf, len);
+    return -EOPNOTSUPP;
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     struct msghdr *msg;
+    struct cmsghdr *cmsg;
     ssize_t total;
-    socket_t *sock = get_socket(sockfd);
+    ssize_t sent;
+    socket_t *sock;
+    socket_t *peer;
+    task_fd_t *src_tfd;
+    pipe_t *passed_pipe;
+    int nfds_to_pass;
+    int *fd_arr;
+    int i;
+    int src_fd;
+    size_t iov_index;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
 
     msg = (struct msghdr *)(uintptr_t)msg_ptr;
@@ -976,14 +1078,13 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     (void)flags;
 
     if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr)) {
-        struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
+        cmsg = (struct cmsghdr *)msg->msg_control;
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            int nfds_to_pass = (int)((cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
-            int *fd_arr = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
-            socket_t *peer;
-            int i;
-            int src_fd;
-            task_fd_t *src_tfd;
+            if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
+                cmsg->cmsg_len > msg->msg_controllen)
+                return -EINVAL;
+            nfds_to_pass = (int)((cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
+            fd_arr = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
             if (nfds_to_pass > SCM_MAX_FDS) nfds_to_pass = SCM_MAX_FDS;
             if (sock->peer_socket < 0 || sock->peer_socket >= socket_capacity)
                 return -ENOTCONN;
@@ -995,17 +1096,23 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                 src_fd = fd_arr[i];
                 if (!current_task || src_fd < 0 || src_fd >= current_task->fds_capacity)
                     return -EBADF;
+                if (!current_task->fds[src_fd].in_use) return -EBADF;
+            }
+            if (socket_ensure_pending_fd_capacity(
+                    peer, peer->pending_fd_count + nfds_to_pass) < 0)
+                return -ENOMEM;
+            for (i = 0; i < nfds_to_pass; i++) {
+                src_fd = fd_arr[i];
                 src_tfd = &current_task->fds[src_fd];
-                if (!src_tfd->in_use) return -EBADF;
                 memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd, sizeof(task_fd_t));
                 if (src_tfd->type == FD_TYPE_FILE && src_tfd->node) {
                     vfs_open((vfs_node_t *)src_tfd->node, 0);
                     task_fd_position_share(src_tfd, &peer->pending_fds[peer->pending_fd_count]);
                 }
                 if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
-                    pipe_t *p = (pipe_t *)src_tfd->private_data;
-                    if (src_tfd->type == FD_TYPE_PIPE_R) p->readers++;
-                    else p->writers++;
+                    passed_pipe = (pipe_t *)src_tfd->private_data;
+                    if (src_tfd->type == FD_TYPE_PIPE_R) passed_pipe->readers++;
+                    else passed_pipe->writers++;
                 }
                 peer->pending_fd_count++;
             }
@@ -1013,9 +1120,9 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     }
 
     total = 0;
-    for (size_t i = 0; i < msg->msg_iovlen; i++) {
-        ssize_t sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
-                                  msg->msg_iov[i].iov_len, flags, 0, 0);
+    for (iov_index = 0; iov_index < msg->msg_iovlen; iov_index++) {
+        sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[iov_index].iov_base,
+                          msg->msg_iov[iov_index].iov_len, flags, 0, 0);
         if (sent < 0) return sent;
         total += sent;
     }
@@ -1057,8 +1164,18 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     struct msghdr *msg;
+    struct cmsghdr *cmsg;
     ssize_t total;
-    socket_t *sock = get_socket(sockfd);
+    ssize_t recvd;
+    socket_t *sock;
+    int nfds;
+    uint64_t needed;
+    int *out_fds;
+    int i;
+    int newfd;
+    size_t iov_index;
+
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
 
     msg = (struct msghdr *)(uintptr_t)msg_ptr;
@@ -1067,12 +1184,9 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     (void)flags;
 
     if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr) && sock->pending_fd_count > 0) {
-        struct cmsghdr *cmsg = (struct cmsghdr *)msg->msg_control;
-        int nfds = sock->pending_fd_count;
-        uint64_t needed = sizeof(struct cmsghdr) + (uint64_t)nfds * sizeof(int);
-        int *out_fds;
-        int i;
-        int newfd;
+        cmsg = (struct cmsghdr *)msg->msg_control;
+        nfds = sock->pending_fd_count;
+        needed = sizeof(struct cmsghdr) + (uint64_t)nfds * sizeof(int);
         if (needed <= msg->msg_controllen) {
             cmsg->cmsg_len = needed;
             cmsg->cmsg_level = SOL_SOCKET;
@@ -1093,18 +1207,21 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
             }
             msg->msg_controllen = needed;
             sock->pending_fd_count = 0;
+            kfree(sock->pending_fds);
+            sock->pending_fds = NULL;
+            sock->pending_fd_capacity = 0;
         }
     } else if (msg->msg_control) {
         msg->msg_controllen = 0;
     }
 
     total = 0;
-    for (size_t i = 0; i < msg->msg_iovlen; i++) {
-        ssize_t recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[i].iov_base,
-                                     msg->msg_iov[i].iov_len, flags, 0, 0);
+    for (iov_index = 0; iov_index < msg->msg_iovlen; iov_index++) {
+        recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[iov_index].iov_base,
+                             msg->msg_iov[iov_index].iov_len, flags, 0, 0);
         if (recvd < 0) return recvd;
         total += recvd;
-        if ((size_t)recvd < msg->msg_iov[i].iov_len) break;
+        if ((size_t)recvd < msg->msg_iov[iov_index].iov_len) break;
     }
 
     return total;
@@ -1112,8 +1229,10 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 
 static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
     int how;
+    socket_t *sock;
+
     (void)unused;
-    socket_t *sock = get_socket(sockfd);
+    sock = get_socket(sockfd);
     if (!sock) return -EBADF;
     
     how = (int)(uintptr_t)how_ptr;
@@ -1145,7 +1264,10 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
 
 int socket_poll_events(int fd) {
     int events;
-    socket_t *sock = get_socket(fd);
+    socket_t *sock;
+    socket_t *peer;
+
+    sock = get_socket(fd);
     if (!sock) return 0;
     
     events = 0;
@@ -1158,8 +1280,11 @@ int socket_poll_events(int fd) {
         events |= 0x01;
     }
     
-    if (send_buf_free(sock) > 0 || sock->tcp) {
+    if (sock->tcp) {
         events |= 0x04;
+    } else if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+        peer = &sockets[sock->peer_socket];
+        if (peer->in_use && recv_buf_free(peer) > 0) events |= 0x04;
     }
     
     if (sock->state == SOCKSTATE_LISTENING && sock->backlog_count > 0) {
@@ -1183,7 +1308,10 @@ int is_socket_fd(int fd) {
 
 int socket_write(int fd, const void *buf, int len) {
     int ret;
-    socket_t *sock = get_socket(fd);
+    socket_t *sock;
+    socket_t *peer;
+
+    sock = get_socket(fd);
     if (!sock) return -EBADF;
     if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED)
         return -ENOTCONN;
@@ -1193,7 +1321,7 @@ int socket_write(int fd, const void *buf, int len) {
         return ret;
     }
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
-        socket_t *peer = &sockets[sock->peer_socket];
+        peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
             ret = recv_buf_write(peer, buf, len);
             if (ret == 0 && len > 0 && sock->nonblocking)
@@ -1201,10 +1329,7 @@ int socket_write(int fd, const void *buf, int len) {
             return ret;
         }
     }
-    ret = send_buf_write(sock, buf, len);
-    if (ret == 0 && len > 0 && sock->nonblocking)
-        return -EAGAIN;
-    return ret;
+    return -EOPNOTSUPP;
 }
 
 int socket_read(int fd, void *buf, int len) {

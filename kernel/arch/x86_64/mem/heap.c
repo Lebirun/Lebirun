@@ -253,16 +253,6 @@ static int heap_commit_span(uint64_t start, uint64_t end) {
     return 0;
 }
 
-static int heap_commit_block(heap_block_t *block) {
-    uint64_t start;
-    uint64_t end;
-
-    start = (uint64_t)block;
-    end = (uint64_t)block + sizeof(heap_block_t) + block->size;
-
-    return heap_commit_span(start, end);
-}
-
 static void coalesce_free_blocks(heap_block_t *block) {
     heap_block_t *next;
     heap_block_t *prev;
@@ -345,7 +335,6 @@ static int heap_reserve_virtual(uint64_t virt_start, uint64_t size) {
 }
 
 static int heap_expand(uint64_t new_end) {
-    uint64_t addr;
     uint64_t old_end;
 
     if (new_end > kernel_heap.max_addr) {
@@ -362,11 +351,9 @@ static int heap_expand(uint64_t new_end) {
         return -1;
     }
 
-    for (addr = old_end; addr < new_end; addr += PAGE_SIZE) {
-        if (demand_commit_page(addr) < 0) {
-            printf("heap_expand: Failed to map page at 0x%08X\n", addr);
-            return -1;
-        }
+    if (demand_commit_page(old_end) < 0) {
+        printf("heap_expand: Failed to map page at 0x%08X\n", old_end);
+        return -1;
     }
 
     kernel_heap.end_addr = new_end;
@@ -568,11 +555,6 @@ alloc_found:
     }
 
     split_block(block, total_size);
-
-    if (heap_commit_block(block) < 0) {
-        printf("kmalloc: Failed to commit block at 0x%08X\n", (uint64_t)block);
-        return NULL;
-    }
 
     block->is_free = 0;
     block->alloc_size = orig_size;

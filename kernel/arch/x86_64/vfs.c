@@ -924,13 +924,12 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
         
         len = vfs_bounded_strlen(mounts[i].path, VFS_MAX_PATH);
         if (len == VFS_MAX_PATH) continue;
+        if (len <= best_len) continue;
         if (strncmp(path, mounts[i].path, len) == 0) {
             if (path[len] == '\0' || path[len] == '/' || 
                 (len == 1 && mounts[i].path[0] == '/')) {
-                if (len > best_len) {
-                    best = &mounts[i];
-                    best_len = len;
-                }
+                best = &mounts[i];
+                best_len = len;
             }
         }
     }
@@ -985,18 +984,14 @@ static int vfs_resolve_path(const char *path, char *resolved, size_t size) {
 static void vfs_normalize_path(char *path) {
     char *src;
     char *dst;
-    char *components[64];
-    int count;
     char *comp_start;
     size_t comp_len;
-    int i;
-    char *comp;
     
     if (!path || path[0] != '/') return;
 
     src = path;
     dst = path;
-    count = 0;
+    *dst++ = '/';
 
     while (*src) {
         while (*src == '/') src++;
@@ -1009,26 +1004,18 @@ static void vfs_normalize_path(char *path) {
         if (comp_len == 1 && comp_start[0] == '.') {
             continue;
         } else if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
-            if (count > 0) count--;
+            if (dst > path + 1) {
+                while (dst > path + 1 && dst[-1] != '/') dst--;
+                if (dst > path + 1) dst--;
+            }
             continue;
         }
 
-        if (count < 64) {
-            components[count++] = comp_start;
-            if (*src) *src++ = '\0';
-        }
+        if (dst > path + 1) *dst++ = '/';
+        while (comp_len--) *dst++ = *comp_start++;
     }
 
-    dst = path;
-    *dst++ = '/';
-    for (i = 0; i < count; i++) {
-        comp = components[i];
-        while (*comp) *dst++ = *comp++;
-        if (i < count - 1) *dst++ = '/';
-    }
     *dst = '\0';
-
-    if (path[1] == '\0') return;
 }
 
 #define VFS_MAX_SYMLINKS 8
@@ -1142,17 +1129,17 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
 
     if (mount && mount->root) {
         node = mount->root;
-        remaining = path + vfs_bounded_strlen(mount->path, VFS_MAX_PATH);
+        plen = vfs_bounded_strlen(mount->path, VFS_MAX_PATH);
+        remaining = path + plen;
         if (*remaining == '/') remaining++;
-        strncpy(prefix, mount->path, sizeof(prefix) - 1);
-        prefix[sizeof(prefix) - 1] = '\0';
-        plen = strlen(prefix);
-        if (plen > 1 && prefix[plen - 1] == '/') prefix[plen - 1] = '\0';
+        memcpy(prefix, mount->path, plen + 1);
+        if (plen > 1 && prefix[plen - 1] == '/') prefix[--plen] = '\0';
     } else {
         node = vfs_root;
         remaining = path + 1;
-        strncpy(prefix, "/", sizeof(prefix) - 1);
-        prefix[sizeof(prefix) - 1] = '\0';
+        prefix[0] = '/';
+        prefix[1] = '\0';
+        plen = 1;
     }
 
     if (*remaining == '\0') return node;
@@ -1182,8 +1169,10 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
                     if (last) {
                         if (last == prefix) {
                             prefix[1] = '\0';
+                            plen = 1;
                         } else {
                             *last = '\0';
+                            plen = (size_t)(last - prefix);
                         }
                     }
                 }
@@ -1228,7 +1217,6 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         node = next;
         node_is_transient = (next->flags & VFS_DYNAMIC);
 
-        plen = strlen(prefix);
         if (plen > 1) {
             if (plen + 1 >= sizeof(prefix)) {
                 if (node_is_transient) vfs_release(node);
@@ -1241,6 +1229,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
             return NULL;
         }
         memcpy(prefix + plen, component, (size_t)i + 1);
+        plen += (size_t)i;
     }
 
     return node;

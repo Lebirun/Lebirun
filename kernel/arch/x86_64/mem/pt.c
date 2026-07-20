@@ -94,16 +94,11 @@ int pt_vmm_pt_grow(void) {
 
 static void pt_zero_page(uint64_t phys_addr) {
     uint64_t eflags;
-    volatile uint64_t *w;
-    uint64_t i;
 
     __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
     __asm__ volatile ("cli");
     temp_map_raw(PT_TEMP_ZERO_VIRT, phys_addr);
-    w = (volatile uint64_t *)PT_TEMP_ZERO_VIRT;
-    for (i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
-        w[i] = 0;
-    }
+    memset((void *)PT_TEMP_ZERO_VIRT, 0, PAGE_SIZE);
     temp_unmap_raw(PT_TEMP_ZERO_VIRT);
     if (eflags & (1 << 9)) __asm__ volatile ("sti");
 }

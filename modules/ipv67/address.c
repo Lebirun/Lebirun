@@ -4,35 +4,10 @@ static int is_hex_char(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-static int is_valid_zone(const char *s) {
-    int i;
-    int len;
-    len = 0;
-    for (i = 0; s[i]; i++) {
-        if (!is_hex_char(s[i])) return 0;
-        len++;
-    }
-    return len > 0 && len <= IPV67_ZONE_MAX;
-}
-
-static int is_valid_domain(const char *s) {
-    char c;
-    int i;
-    int len;
-
-    len = 0;
-    for (i = 0; s[i]; i++) {
-        c = s[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '-' || c == '_')) return 0;
-        len++;
-    }
-    return len > 0 && len <= IPV67_DOMAIN_MAX;
-}
-
 int ipv67_addr_parse(const char *str, ipv67_addr_t *out) {
     const char *p;
     const char *dot;
+    char c;
     int part;
     int i;
     int len;
@@ -69,6 +44,14 @@ int ipv67_addr_parse(const char *str, ipv67_addr_t *out) {
             break;
         case 2:
             if (len > IPV67_DOMAIN_MAX) return IPV67_ERR_TOOLONG;
+            for (i = 0; i < len; i++) {
+                c = p[i];
+                if (!((c >= 'a' && c <= 'z') ||
+                      (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+                    return IPV67_ERR_INVAL;
+                }
+            }
             memcpy(out->domain, p, len);
             out->domain[len] = '\0';
             break;
@@ -100,12 +83,6 @@ int ipv67_addr_parse(const char *str, ipv67_addr_t *out) {
     }
 
     if (*p != '\0') return IPV67_ERR_INVAL;
-
-    if (!is_valid_zone(out->zone1)) return IPV67_ERR_INVAL;
-    if (!is_valid_zone(out->zone2)) return IPV67_ERR_INVAL;
-    if (!is_valid_domain(out->domain)) return IPV67_ERR_INVAL;
-    if (!is_valid_zone(out->node1)) return IPV67_ERR_INVAL;
-    if (!is_valid_zone(out->node2)) return IPV67_ERR_INVAL;
 
     return IPV67_ERR_OK;
 }

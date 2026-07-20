@@ -415,7 +415,7 @@ uint64_t vmm_count_present_pages_in_range(uint64_t pml4_phys, uint64_t start, ui
     return count;
 }
 
-void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
+int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     uint64_t pml4_idx;
     uint64_t pdpt_idx;
     uint64_t pd_idx;
@@ -459,7 +459,7 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
             temp_unmap_raw(temp_pml4_virt);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
             printf("vmm_map_page_in_pml4: Failed to alloc PDPT\n");
-            return;
+            return -1;
         }
         pdpt_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pdpt_phys);
@@ -481,8 +481,9 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
         if (!new_page) {
             temp_unmap_raw(temp_pdpt_virt);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+            vmm_prune_user_range(pml4_phys, virt_addr, PAGE_SIZE);
             printf("vmm_map_page_in_pml4: Failed to alloc PD\n");
-            return;
+            return -1;
         }
         pd_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pd_phys);
@@ -504,8 +505,9 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
         if (!new_page) {
             temp_unmap_raw(temp_pd_virt);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+            vmm_prune_user_range(pml4_phys, virt_addr, PAGE_SIZE);
             printf("vmm_map_page_in_pml4: Failed to alloc PT\n");
-            return;
+            return -1;
         }
         pt_phys = (uint64_t)new_page;
         pmm_zero_page_phys(pt_phys);
@@ -530,18 +532,23 @@ void vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_
     if (cur_cr3 == pml4_phys) {
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
+    return 0;
 }
 
 void vmm_map_range_in_pml4(uint64_t pd_phys, uint64_t virt_addr, uint64_t size, uint64_t flags) {
     uint64_t start;
     uint64_t end;
     uint64_t v;
+    uint64_t mapped;
     uint64_t phys_page;
 
     if (size == 0) return;
+    if (size > UINT64_MAX - virt_addr) return;
+    mapped = virt_addr + size;
+    if (mapped > UINT64_MAX - (PAGE_SIZE - 1)) return;
 
     start = virt_addr & ~(PAGE_SIZE - 1);
-    end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    end = (mapped + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     if (start >= KERNEL_VMA) {
         flags &= ~0x4;
@@ -551,10 +558,25 @@ void vmm_map_range_in_pml4(uint64_t pd_phys, uint64_t virt_addr, uint64_t size, 
         phys_page = pfa_alloc();
         if (!phys_page) {
             printf("vmm_map_range_in_pml4: Failed to alloc phys page\n");
+            while (v > start) {
+                v -= PAGE_SIZE;
+                phys_page = vmm_unmap_page_in_pml4(pd_phys, v);
+                if (phys_page) pfa_free(phys_page);
+            }
+            vmm_prune_user_range(pd_phys, start, end - start);
             return;
         }
         pmm_zero_page_phys(phys_page);
-        vmm_map_page_in_pml4(pd_phys, v, phys_page, flags);
+        if (vmm_map_page_in_pml4(pd_phys, v, phys_page, flags) < 0) {
+            pfa_free(phys_page);
+            while (v > start) {
+                v -= PAGE_SIZE;
+                phys_page = vmm_unmap_page_in_pml4(pd_phys, v);
+                if (phys_page) pfa_free(phys_page);
+            }
+            vmm_prune_user_range(pd_phys, start, end - start);
+            return;
+        }
     }
 }
 
@@ -566,15 +588,25 @@ uint64_t* vmm_map_range_in_pml4_tracked(uint64_t pd_phys, uint64_t virt_addr, ui
     uint64_t idx;
     uint64_t v;
     uint64_t phys_page;
+    uint64_t mapped;
     uint64_t i;
 
     if (size == 0) {
         if (out_count) *out_count = 0;
         return NULL;
     }
+    if (size > UINT64_MAX - virt_addr) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    mapped = virt_addr + size;
+    if (mapped > UINT64_MAX - (PAGE_SIZE - 1)) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
 
     start = virt_addr & ~(PAGE_SIZE - 1);
-    end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    end = (mapped + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     num_pages = (end - start) / PAGE_SIZE;
 
     if (start >= KERNEL_VMA) {
@@ -583,7 +615,8 @@ uint64_t* vmm_map_range_in_pml4_tracked(uint64_t pd_phys, uint64_t virt_addr, ui
     
     pages = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
     if (!pages) {
-        printf("vmm_map_range_in_pml4_tracked: kmalloc failed for %u pages (%u bytes)\n", num_pages, num_pages * 4);
+        printf("vmm_map_range_in_pml4_tracked: kmalloc failed for %u pages (%u bytes)\n",
+               num_pages, num_pages * sizeof(uint64_t));
         if (out_count) *out_count = 0;
         return NULL;
     }
@@ -594,15 +627,27 @@ uint64_t* vmm_map_range_in_pml4_tracked(uint64_t pd_phys, uint64_t virt_addr, ui
         if (!phys_page) {
             printf("vmm_map_range_in_pml4_tracked: Failed to alloc phys page %u/%u (free=%u)\n", idx, num_pages, pfa_count_free());
             for (i = 0; i < idx; i++) {
+                vmm_unmap_page_in_pml4(pd_phys, start + i * PAGE_SIZE);
                 pfa_free(pages[i]);
             }
+            vmm_prune_user_range(pd_phys, start, idx * PAGE_SIZE);
             kfree(pages);
             if (out_count) *out_count = 0;
             return NULL;
         }
         pmm_zero_page_phys(phys_page);
+        if (vmm_map_page_in_pml4(pd_phys, v, phys_page, flags) < 0) {
+            pfa_free(phys_page);
+            for (i = 0; i < idx; i++) {
+                vmm_unmap_page_in_pml4(pd_phys, start + i * PAGE_SIZE);
+                pfa_free(pages[i]);
+            }
+            vmm_prune_user_range(pd_phys, start, (idx + 1) * PAGE_SIZE);
+            kfree(pages);
+            if (out_count) *out_count = 0;
+            return NULL;
+        }
         pages[idx++] = phys_page;
-        vmm_map_page_in_pml4(pd_phys, v, phys_page, flags);
     }
     
     if (out_count) *out_count = num_pages;

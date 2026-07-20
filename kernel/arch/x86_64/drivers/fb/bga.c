@@ -11,16 +11,6 @@ static inline uint16_t inw(uint16_t port) {
     return ret;
 }
 
-static inline void outl(uint16_t port, uint32_t value) {
-    __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline uint32_t inl(uint16_t port) {
-    uint32_t ret;
-    __asm__ __volatile__("inl %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
 enum {
     VBE_DISPI_IOPORT_INDEX = 0x01CE,
     VBE_DISPI_IOPORT_DATA = 0x01CF,
@@ -43,75 +33,10 @@ enum {
     VBE_DISPI_NOCLEARMEM = 0x80,
 
     VBE_DISPI_ID0 = 0xB0C0,
-    VBE_DISPI_ID5 = 0xB0C5,
-
-    PCI_CONFIG_ADDRESS = 0x0CF8,
-    PCI_CONFIG_DATA    = 0x0CFC,
-
-    PCI_VGA_CLASS = 0x0300,
-
-    PCI_VENDOR_BOCHS    = 0x1234,
-    PCI_DEVICE_BGA      = 0x1111,
-    PCI_VENDOR_VBOX     = 0x80EE,
-    PCI_DEVICE_VBOX_VGA = 0xBEEF
+    VBE_DISPI_ID5 = 0xB0C5
 };
 
 static int bga_cached = -1;
-
-static inline uint64_t pci_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint64_t address;
-    address = (uint64_t)(1u << 31)
-            | ((uint64_t)bus << 16)
-            | ((uint64_t)(slot & 0x1F) << 11)
-            | ((uint64_t)(func & 0x07) << 8)
-            | ((uint64_t)offset & 0xFC);
-    outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
-}
-
-static __attribute__((unused)) int pci_find_vga_is_bga(void) {
-    uint8_t bus;
-    uint8_t slot;
-    uint8_t func;
-    uint64_t id_reg;
-    uint64_t class_reg;
-    uint16_t vendor;
-    uint16_t device;
-    uint16_t class_code;
-    uint64_t hdr;
-
-    for (bus = 0; bus < 255; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (func = 0; func < 8; func++) {
-                id_reg = pci_read32(bus, slot, func, 0x00);
-                vendor = (uint16_t)(id_reg & 0xFFFF);
-                if (vendor == 0xFFFF) {
-                    if (func == 0) break;
-                    continue;
-                }
-                device = (uint16_t)(id_reg >> 16);
-                class_reg = pci_read32(bus, slot, func, 0x08);
-                class_code = (uint16_t)(class_reg >> 16);
-
-                if (class_code != PCI_VGA_CLASS) {
-                    if (func == 0) {
-                        hdr = pci_read32(bus, slot, func, 0x0C);
-                        if (!((hdr >> 16) & 0x80)) break;
-                    }
-                    continue;
-                }
-
-                if (vendor == PCI_VENDOR_BOCHS && device == PCI_DEVICE_BGA)
-                    return 1;
-                if (vendor == PCI_VENDOR_VBOX && device == PCI_DEVICE_VBOX_VGA)
-                    return 1;
-
-                return 0;
-            }
-        }
-    }
-    return 0;
-}
 
 static inline void bga_write(uint16_t index, uint16_t value) {
     outw(VBE_DISPI_IOPORT_INDEX, index);

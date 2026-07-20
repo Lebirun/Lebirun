@@ -127,7 +127,6 @@ typedef struct vfl_vm {
     int nr_mem_slots;
 } vfl_vm_t;
 
-void vfl_init(void);
 int vfl_create_vm(void);
 int vfl_destroy_vm(uint32_t vm_id);
 int vfl_create_vcpu(uint32_t vm_id);
