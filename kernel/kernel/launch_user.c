@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define USER_STACK_TOP 0x00800000u
 #define USER_STACK_SIZE 0x1000u
 #define USER_STACK_GAP  0x1000u
 

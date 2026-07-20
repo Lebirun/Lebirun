@@ -30,7 +30,7 @@ mb2_header_end:
 
 .section .bootstrap_stack, "aw", @nobits
 stack_bottom:
-.skip 16384
+.skip 8192
 stack_top:
 
 .section .multiboot.bss, "aw", @nobits

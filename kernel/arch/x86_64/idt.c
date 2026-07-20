@@ -288,8 +288,8 @@ registers_t* interrupt_handler(registers_t* regs)
                     if (task_handle_file_page_fault(current_task, fault_addr)) {
                         return regs;
                     }
-                    stack_floor = 0x00700000u;
-                    if (fault_addr >= stack_floor && fault_addr < 0x00800000u) {
+                    stack_floor = USER_STACK_FLOOR;
+                    if (fault_addr >= stack_floor && fault_addr < USER_STACK_TOP) {
                         new_phys = pfa_alloc();
                         if (new_phys != 0) {
                             pmm_zero_page_phys(new_phys);
@@ -408,7 +408,7 @@ registers_t* interrupt_handler(registers_t* regs)
                     return regs;
                 }
 
-                if (sc_fault_addr >= 0x00700000u && sc_fault_addr < 0x00800000u) {
+                if (sc_fault_addr >= USER_STACK_FLOOR && sc_fault_addr < USER_STACK_TOP) {
                     sc_new_phys = pfa_alloc();
                     if (sc_new_phys != 0) {
                         pmm_zero_page_phys(sc_new_phys);

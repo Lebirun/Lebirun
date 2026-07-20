@@ -851,8 +851,11 @@ void kfree_secure(void *ptr) {
 
 void *krealloc(void *ptr, size_t new_size) {
     heap_block_t *block;
+    heap_block_t *remainder;
     void *new_ptr;
     size_t old_size;
+    size_t old_block_size;
+    size_t new_block_size;
     uint64_t eflags;
     
     if (!ptr) return kmalloc(new_size);
@@ -894,6 +897,18 @@ void *krealloc(void *ptr, size_t new_size) {
     }
 
     if (block->alloc_size >= new_size) {
+        old_block_size = block->size;
+        new_block_size = new_size + CANARY_OVERHEAD;
+        new_block_size = (new_block_size + 7) & ~7;
+        if (old_block_size >= new_block_size + sizeof(heap_block_t) +
+                HEAP_MIN_BLOCK) {
+            split_block(block, new_block_size);
+            kernel_heap.used_size -= old_block_size - block->size;
+            remainder = block->next;
+            if (remainder && remainder->is_free) {
+                coalesce_free_blocks(remainder);
+            }
+        }
         block->alloc_size = new_size;
         set_canaries(block);
         heap_lock_release(eflags);

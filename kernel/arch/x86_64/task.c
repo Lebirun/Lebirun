@@ -35,13 +35,10 @@ extern char _kernel_text_end[];
 
 #define SCHED_DEFAULT_TIMESLICE 3
 
-#define USER_STACK_TOP 0x00800000u
 #define USER_STACK_SIZE 0x10000u
 #define USER_STACK_INITIAL_MIN 0x1000u
 #define USER_STACK_GAP  0x1000u
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
-#define USER_MMAP_BASE 0x10000000u
-#define USER_MMAP_LIMIT 0x40000000u
 #define FPU_STATE_SIZE 512
 
 static spinlock_t sched_lock = {0};
@@ -508,12 +505,17 @@ static uint64_t task_mmap_pages(task_t *task) {
     int i;
 
     if (!task || !task->pml4_phys) return 0;
-    pages = vmm_count_present_pages_in_range(task->pml4_phys, USER_MMAP_BASE, USER_MMAP_LIMIT);
+    pages = vmm_count_present_pages_in_range(
+        task->pml4_phys, USER_MMAP_LOW_BASE, USER_MMAP_LOW_LIMIT);
+    pages += vmm_count_present_pages_in_range(
+        task->pml4_phys, USER_MMAP_HIGH_BASE, USER_MMAP_HIGH_LIMIT);
     file_mmap_pages = 0;
     for (i = 0; i < task->file_map_count; i++) {
         if (!task->file_maps[i].node) continue;
-        if (task->file_maps[i].vaddr < USER_MMAP_BASE) continue;
-        if (task->file_maps[i].vaddr >= USER_MMAP_LIMIT) continue;
+        if (!((task->file_maps[i].vaddr >= USER_MMAP_LOW_BASE &&
+               task->file_maps[i].vaddr < USER_MMAP_LOW_LIMIT) ||
+              (task->file_maps[i].vaddr >= USER_MMAP_HIGH_BASE &&
+               task->file_maps[i].vaddr < USER_MMAP_HIGH_LIMIT))) continue;
         file_mmap_pages += vmm_count_present_pages_in_range(task->pml4_phys,
                                                             task->file_maps[i].vaddr,
                                                             task->file_maps[i].vaddr + task->file_maps[i].memsz);
@@ -1151,7 +1153,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.ds = new_task->regs.es = 0x23;
         new_task->user_brk = 0;
         new_task->user_brk_start = 0;
-        new_task->mmap_next_addr = 0x10000000;
+        new_task->mmap_next_addr = USER_MMAP_LOW_BASE;
         
     } else {
         frame = (registers_t *)(kernel_stack_base + KSTACK_USABLE_SIZE - sizeof(registers_t));

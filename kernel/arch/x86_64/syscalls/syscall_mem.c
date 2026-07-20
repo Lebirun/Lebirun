@@ -5,12 +5,32 @@
 extern void pfa_cow_release(uint64_t phys_addr);
 extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
-#define USER_MMAP_BASE 0x10000000u
-#define USER_MMAP_LIMIT 0x40000000u
-
 static uint64_t align_up_u64(uint64_t v, uint64_t align) {
     if (!align) return v;
     return (v + align - 1u) & ~(align - 1u);
+}
+
+static int user_mmap_range_valid(uint64_t addr, uint64_t end) {
+    if (addr >= USER_MMAP_LOW_BASE && end < USER_MMAP_LOW_LIMIT) return 1;
+    if (addr >= USER_MMAP_HIGH_BASE && end < USER_MMAP_HIGH_LIMIT) return 1;
+    return 0;
+}
+
+static uint64_t user_mmap_auto_base(uint64_t next, uint64_t size) {
+    uint64_t base;
+
+    if (next >= USER_MMAP_LOW_BASE && next < USER_MMAP_LOW_LIMIT) {
+        base = align_up_u64(next, PAGE_SIZE);
+        if (base < USER_MMAP_LOW_LIMIT &&
+            size <= USER_MMAP_LOW_LIMIT - base) return base;
+    }
+    if (next < USER_MMAP_HIGH_BASE || next >= USER_MMAP_HIGH_LIMIT) {
+        next = USER_MMAP_HIGH_BASE;
+    }
+    base = align_up_u64(next, PAGE_SIZE);
+    if (base >= USER_MMAP_HIGH_LIMIT ||
+        size > USER_MMAP_HIGH_LIMIT - base) return 0;
+    return base;
 }
 
 static int user_range_mapped_mem(uint64_t addr, uint64_t size) {
@@ -44,7 +64,7 @@ static int user_range_free_mem(uint64_t addr, uint64_t size, uint64_t allow_base
     if (size == 0) return 1;
     end = addr + size - 1;
     if (end < addr) return 0;
-    if (addr < USER_MMAP_BASE || end >= USER_MMAP_LIMIT) return 0;
+    if (!user_mmap_range_valid(addr, end)) return 0;
     allow_end = allow_base + allow_size;
     p = addr & ~0xFFFu;
     pend = end & ~0xFFFu;
@@ -158,7 +178,7 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     
     newbrk = (requested + 0xFFF) & ~0xFFFu;
     
-    if (newbrk >= 0x40000000) {
+    if (newbrk >= USER_MMAP_LOW_BASE) {
         return (int)current_brk;
     }
     
@@ -194,7 +214,6 @@ static int sys_brk(int addr, const char *unused, int unused2) {
 }
 
 static int sys_mmap(int a1, const char *a2, int a3) {
-    uint64_t addr;
     uint64_t length;
     uint64_t size;
     uint64_t base;
@@ -208,15 +227,12 @@ static int sys_mmap(int a1, const char *a2, int a3) {
     (void)a2; (void)a3;
     if (!current_task) return -EINVAL;
 
-    addr = 0;
     length = 0;
 
     if (current_task->syscall_frame) {
         r = current_task->syscall_frame;
-        addr = r->rbx;
         length = r->rcx;
     } else {
-        addr = 0;
         length = (uint64_t)a1;
     }
 
@@ -225,20 +241,9 @@ static int sys_mmap(int a1, const char *a2, int a3) {
     size = align_up_u64(length, 0x1000u);
     if (size == 0) return -EINVAL;
 
-    if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
-        current_task->mmap_next_addr = USER_MMAP_BASE;
-    }
-
-    if (addr != 0 && (addr & 0xFFFu) == 0) {
-        base = addr;
-    } else {
-        base = align_up_u64(current_task->mmap_next_addr, 0x1000u);
-        if (base < USER_MMAP_BASE) base = USER_MMAP_BASE;
-        if (size > USER_MMAP_LIMIT - USER_MMAP_BASE || base + size < base || base + size >= USER_MMAP_LIMIT) {
-            base = USER_MMAP_BASE;
-        }
-        current_task->mmap_next_addr = base + size;
-    }
+    base = user_mmap_auto_base(current_task->mmap_next_addr, size);
+    if (!base) return -ENOMEM;
+    current_task->mmap_next_addr = base + size;
 
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
     if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
@@ -297,20 +302,11 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
 
     if (size == 0 || size < length) return -EINVAL;
 
-    if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
-        current_task->mmap_next_addr = USER_MMAP_BASE;
-    }
-
     if (addr != NULL && ((uint64_t)addr & 0xFFFu) == 0 && (flags & 0x10)) {
         base = (uint64_t)addr;
-    } else if (addr != NULL && ((uint64_t)addr & 0xFFFu) == 0) {
-        base = (uint64_t)addr;
     } else {
-        base = align_up_u64(current_task->mmap_next_addr, 0x1000u);
-        if (base < USER_MMAP_BASE) base = USER_MMAP_BASE;
-        if (size > USER_MMAP_LIMIT - USER_MMAP_BASE || base + size < base || base + size >= USER_MMAP_LIMIT) {
-            base = USER_MMAP_BASE;
-        }
+        base = user_mmap_auto_base(current_task->mmap_next_addr, size);
+        if (!base) return -ENOMEM;
         current_task->mmap_next_addr = base + size;
     }
 
@@ -411,8 +407,8 @@ static int sys_munmap(void *addr, size_t length) {
         release_user_leaf_range(base, end);
     }
 
-    if (end == current_task->mmap_next_addr && base >= USER_MMAP_BASE &&
-            base < USER_MMAP_LIMIT) {
+    if (end == current_task->mmap_next_addr &&
+            user_mmap_range_valid(base, end - 1)) {
         current_task->mmap_next_addr = base;
     }
 
@@ -472,14 +468,8 @@ static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int fl
     if (new_addr && ((uint64_t)new_addr & 0xFFFu) == 0) {
         base = (uint64_t)new_addr;
     } else {
-        if (current_task->mmap_next_addr < USER_MMAP_BASE || current_task->mmap_next_addr >= USER_MMAP_LIMIT) {
-            current_task->mmap_next_addr = USER_MMAP_BASE;
-        }
-        base = align_up_u64(current_task->mmap_next_addr, 0x1000u);
-        if (base < USER_MMAP_BASE) base = USER_MMAP_BASE;
-        if (size > USER_MMAP_LIMIT - USER_MMAP_BASE || base + size < base || base + size >= USER_MMAP_LIMIT) {
-            base = USER_MMAP_BASE;
-        }
+        base = user_mmap_auto_base(current_task->mmap_next_addr, size);
+        if (!base) return (void *)(long)-ENOMEM;
     }
 
     if (base + size < base || base + size >= KERNEL_VMA) return (void *)(long)-ENOMEM;

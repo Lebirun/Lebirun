@@ -83,17 +83,21 @@ $INITRD_MODULE
 EOF
 
 GRUB_DIRECTORY="${GRUB_DIRECTORY:-/usr/lib/grub/i386-pc}"
+GRUB_ISO_DIRECTORY="$(mktemp -d)"
 GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
+trap 'rm -rf -- "$GRUB_ISO_DIRECTORY"' EXIT HUP INT TERM
+cp -a "$GRUB_DIRECTORY/." "$GRUB_ISO_DIRECTORY/"
+printf '%s\n' part_msdos > "$GRUB_ISO_DIRECTORY/partmap.lst"
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mCreating ISO image...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Creating ISO image"
 if [ "$VERBOSE" -eq 1 ]; then
-    grub-mkrescue -d "$GRUB_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
-    grub-mkrescue -d "$GRUB_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
 else
-    grub-mkrescue -d "$GRUB_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
-    grub-mkrescue -d "$GRUB_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
 fi
 
 cleanup_bar

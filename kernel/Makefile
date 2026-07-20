@@ -38,7 +38,7 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
-CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra -fdiagnostics-color=always
+CFLAGS:=$(CFLAGS) -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
 CPPFLAGS:=$(CPPFLAGS) -nostdinc -D__is_kernel -Iinclude -isystem ../sysroot/usr/include
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
@@ -56,6 +56,13 @@ CFLAGS:=$(CFLAGS) $(KERNEL_ARCH_CFLAGS)
 CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
+
+KERNEL_SIZE_CFLAGS=-Os -ffunction-sections -fdata-sections
+
+$(ARCHDIR)/fs/misc/procfs.o \
+$(ARCHDIR)/fs/misc/sysfs.o \
+$(ARCHDIR)/syscalls/syscall_misc.o \
+$(ARCHDIR)/syscalls/syscall_regex.o: CFLAGS += $(KERNEL_SIZE_CFLAGS)
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
@@ -132,7 +139,7 @@ lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 $(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
 
-$(OBJS): $(CONFIG_FILE) $(VERSION_HEADER)
+$(OBJS): Makefile $(CONFIG_FILE) $(VERSION_HEADER)
 
 $(USER_SHELL_BIN):
 	$(MAKE) -C ../userprog

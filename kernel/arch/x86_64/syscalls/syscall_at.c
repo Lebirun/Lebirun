@@ -65,7 +65,7 @@ static int at_user_range_mapped(uint64_t addr, uint64_t size) {
     for (;;) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) {
             if (!task_handle_file_page_fault(current_task, p)) {
-                if ((p >= 0x00700000u && p < 0x00800000u) ||
+                if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
                         (p >= current_task->user_brk && p < 0x40000000u) ||
                         (p >= 0x1000u && p < current_task->user_brk)) {
                     phys = pfa_alloc();

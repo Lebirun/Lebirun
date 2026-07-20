@@ -43,6 +43,7 @@ static volatile uint64_t klog_count = 0;
 static volatile uint64_t klog_dropped = 0;
 
 #define KLOG_PERSIST_SZ 32768
+#define KLOG_RECLAIM_RETAIN 4096
 static char *klog_persist_buf;
 static volatile int klog_persist_pos = 0;
 static int klog_persist_cap = 0;
@@ -232,10 +233,25 @@ void klog_reclaim_unused(void) {
     uint64_t flags;
     char *new_buf;
     klog_item_t *old_ring;
+    int discard;
+    int raw_discard;
     int needed;
 
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
+    if (klog_persist_buf && klog_persist_pos >= KLOG_RECLAIM_RETAIN) {
+        raw_discard = klog_persist_pos - KLOG_RECLAIM_RETAIN + 1;
+        discard = raw_discard;
+        while (discard < klog_persist_pos &&
+               klog_persist_buf[discard - 1] != '\n') discard++;
+        if (discard >= klog_persist_pos) discard = raw_discard;
+        klog_persist_pos -= discard;
+        if (klog_persist_pos > 0) {
+            memmove(klog_persist_buf, klog_persist_buf + discard,
+                    (size_t)klog_persist_pos);
+        }
+        klog_persist_buf[klog_persist_pos] = '\0';
+    }
     needed = klog_persist_pos + 1;
     if (klog_persist_buf && needed > 0 && needed < klog_persist_cap) {
         new_buf = (char *)krealloc(klog_persist_buf, (size_t)needed);
