@@ -613,6 +613,28 @@ task_t* task_find(pid_t pid) {
     return NULL;
 }
 
+int task_find_from_irq(pid_t pid, task_t **result) {
+    int limit;
+    task_t *t;
+
+    if (!result) return 0;
+    *result = NULL;
+    if (!spin_trylock(&sched_lock)) return 0;
+    t = all_tasks_head;
+    limit = 1024;
+    while (t && limit > 0) {
+        if (!task_ptr_valid(t)) break;
+        if (t->pid == pid) {
+            *result = t;
+            break;
+        }
+        t = t->all_next;
+        limit--;
+    }
+    spin_unlock(&sched_lock);
+    return 1;
+}
+
 task_t* task_find_by_pml4(uint64_t pml4_phys) {
     task_t *t;
     int limit;
@@ -1215,15 +1237,13 @@ void sleep_ticks(uint64_t ticks) {
     schedule();
 }
 
-void wake_sleeping_tasks(void) {
+static void wake_sleeping_tasks_locked(void) {
     int safety;
     task_t **ptr;
     task_t *t;
     task_t *next;
-    safety = 0;
 
-    if (!sleep_queue_head) return;
-    lock_scheduler();
+    safety = 0;
     ptr = &sleep_queue_head;
     while (*ptr) {
         if (++safety > 10000) {
@@ -1249,7 +1269,21 @@ void wake_sleeping_tasks(void) {
             ptr = &t->sleep_next;
         }
     }
+}
+
+void wake_sleeping_tasks(void) {
+    if (!sleep_queue_head) return;
+    lock_scheduler();
+    wake_sleeping_tasks_locked();
     unlock_scheduler();
+}
+
+int wake_sleeping_tasks_from_irq(void) {
+    if (!sleep_queue_head) return 1;
+    if (!spin_trylock(&sched_lock)) return 0;
+    wake_sleeping_tasks_locked();
+    spin_unlock(&sched_lock);
+    return 1;
 }
 
 void task_exit(uint64_t exit_code) {
@@ -1319,6 +1353,36 @@ static void task_clear_file_mappings(task_t *t) {
     t->file_maps = NULL;
     t->file_map_count = 0;
     t->file_map_capacity = 0;
+}
+
+static void task_release_file_mappings(task_file_map_t *maps, int count) {
+    int i;
+
+    if (!maps) return;
+    for (i = 0; i < count; i++) {
+        if (maps[i].node) {
+            vfs_close(maps[i].node);
+        }
+    }
+    kfree(maps);
+}
+
+static void task_restore_file_mappings(task_t *t, task_file_map_t *maps,
+                                       int count, int capacity) {
+    task_clear_file_mappings(t);
+    t->file_maps = maps;
+    t->file_map_count = count;
+    t->file_map_capacity = capacity;
+}
+
+static void task_abort_file_mappings(task_t *t, int restore,
+                                     task_file_map_t *maps, int count,
+                                     int capacity) {
+    if (restore) {
+        task_restore_file_mappings(t, maps, count, capacity);
+    } else {
+        task_clear_file_mappings(t);
+    }
 }
 
 static int task_track_user_page(task_t *task, uint64_t phys) {
@@ -2992,11 +3056,7 @@ void task_fd_close_cloexec(task_t *task) {
     task_fd_reclaim_unused(task);
 }
 
-#define FORK_MIN_FREE_PAGES 64
-
 pid_t task_fork(registers_t *parent_regs) {
-    uint64_t free_pages;
-    uint64_t needed_pages;
     uint64_t *child_user_pages;
     uint64_t child_user_pages_count;
     uint64_t child_pd;
@@ -3016,13 +3076,6 @@ pid_t task_fork(registers_t *parent_regs) {
     memcpy(&parent_frame, parent_regs, sizeof(parent_frame));
     if ((parent_frame.cs & 0x3) != 0x3 ||
         parent_frame.rip < 0x1000 || parent_frame.rip >= KERNEL_VMA) {
-        return -1;
-    }
-
-    free_pages = pfa_count_free();
-    needed_pages = parent->user_pages_count + FORK_MIN_FREE_PAGES;
-    if (free_pages < needed_pages) {
-        printf("task_fork: insufficient memory (free=%u, need~%u)\n", free_pages, needed_pages);
         return -1;
     }
 
@@ -3207,8 +3260,6 @@ pid_t task_fork(registers_t *parent_regs) {
 }
 
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
-    uint64_t free_pages;
-    uint64_t needed_estimate;
     uint8_t *kernel_bin;
     int elf_valid;
     uint64_t old_pd;
@@ -3232,6 +3283,9 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     uint64_t random_addr;
     uint64_t argc_val;
     elf_info_t elf_info;
+    task_file_map_t *old_file_maps;
+    int old_file_map_count;
+    int old_file_map_capacity;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec: can only exec in user tasks\n");
@@ -3239,13 +3293,6 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     }
     if (!bin_start || bin_size == 0) {
         task_error("task_exec: invalid binary\n");
-        return -1;
-    }
-
-    free_pages = pfa_count_free();
-    needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (free_pages < needed_estimate) {
-        task_error("task_exec: insufficient memory (free=%u need=%u)\n", free_pages, needed_estimate);
         return -1;
     }
 
@@ -3263,14 +3310,16 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
         return -1;
     }
 
-
-    task_fd_close_cloexec(current_task);
-
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;
     old_user_pages_count = current_task->user_pages_count;
     task_set_exec_state(current_task, 2);
-    task_clear_file_mappings(current_task);
+    old_file_maps = current_task->file_maps;
+    old_file_map_count = current_task->file_map_count;
+    old_file_map_capacity = current_task->file_map_capacity;
+    current_task->file_maps = NULL;
+    current_task->file_map_count = 0;
+    current_task->file_map_capacity = 0;
 
     stack_top = USER_STACK_TOP;
     stack_size = task_initial_stack_size(0, NULL, 0, NULL, "program", 11);
@@ -3279,6 +3328,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     if (!new_pd) {
         task_error("task_exec: failed to create page directory\n");
         kfree(kernel_bin);
+        task_restore_file_mappings(current_task, old_file_maps,
+                                   old_file_map_count, old_file_map_capacity);
         task_set_exec_state(current_task, 0);
         return -1;
     }
@@ -3289,6 +3340,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     if (load_result != 0) {
         task_error("task_exec: ELF loading failed (%d)\n", load_result);
+        task_restore_file_mappings(current_task, old_file_maps,
+                                   old_file_map_count, old_file_map_capacity);
         if (elf_pages) kfree(elf_pages);
         vmm_free_pml4(new_pd);
         kfree(kernel_bin);
@@ -3302,6 +3355,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - USER_STACK_GAP - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec: failed to map stack\n");
+        task_restore_file_mappings(current_task, old_file_maps,
+                                   old_file_map_count, old_file_map_capacity);
         if (elf_pages) kfree(elf_pages);
         vmm_free_pml4(new_pd);
         task_set_exec_state(current_task, 0);
@@ -3314,6 +3369,8 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         task_error("task_exec: suspicious total_pages=%u\n", total_pages);
+        task_restore_file_mappings(current_task, old_file_maps,
+                                   old_file_map_count, old_file_map_capacity);
         kfree(elf_pages);
         kfree(stack_pages);
         vmm_free_pml4(new_pd);
@@ -3416,6 +3473,9 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
         final_entry = elf_info.entry_point;
         final_sp = sp;
 
+        task_fd_close_cloexec(current_task);
+        task_release_file_mappings(old_file_maps, old_file_map_count);
+
         current_task->pml4_phys = new_pd;
         current_task->cr3 = new_pd;
         regs->entry_cr3 = new_pd;
@@ -3480,8 +3540,6 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
 
 static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
                                       int argc, char **argv, int envc, char **envp) {
-    uint64_t free_pages;
-    uint64_t needed_estimate;
     uint8_t *kernel_bin;
     char **k_argv;
     char **k_envp;
@@ -3518,6 +3576,12 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t tbl_bytes;
     int tbl_cap;
     int tbl_heap;
+    task_file_map_t *old_file_maps;
+    int old_file_map_count;
+    int old_file_map_capacity;
+    int load_errno;
+    uint64_t *new_user_pages;
+    uint64_t new_user_brk;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
@@ -3533,14 +3597,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         task_error("task_exec_with_args: invalid binary\n");
         if (bin_start) kfree((void *)bin_start);
         return -KERR_ENOEXEC;
-    }
-
-    free_pages = pfa_count_free();
-    needed_estimate = 20 + (bin_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (free_pages < needed_estimate) {
-        task_error("task_exec_with_args: insufficient memory\n");
-        kfree((void *)bin_start);
-        return -KERR_ENOMEM;
     }
 
     kernel_bin = (uint8_t *)bin_start;
@@ -3633,13 +3689,23 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOMEM;
     }
 
-    task_fd_close_cloexec(current_task);
-
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;
     old_user_pages_count = current_task->user_pages_count;
     task_set_exec_state(current_task, 2);
-    task_clear_file_mappings(current_task);
+    old_file_maps = NULL;
+    old_file_map_count = 0;
+    old_file_map_capacity = 0;
+    if (use_node) {
+        old_file_maps = current_task->file_maps;
+        old_file_map_count = current_task->file_map_count;
+        old_file_map_capacity = current_task->file_map_capacity;
+        current_task->file_maps = NULL;
+        current_task->file_map_count = 0;
+        current_task->file_map_capacity = 0;
+    } else {
+        task_clear_file_mappings(current_task);
+    }
 
     new_pd = vmm_create_pml4();
     if (!new_pd) {
@@ -3653,6 +3719,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
             kfree(k_envp);
         }
         if (kernel_bin) kfree(kernel_bin);
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
         task_set_exec_state(current_task, 0);
         return -KERR_ENOMEM;
     }
@@ -3674,8 +3742,11 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         held_node = 0;
     }
     if (load_result != 0) {
+        load_errno = (load_result == -10 || load_result == -12) ?
+                     KERR_ENOMEM : KERR_ENOEXEC;
         task_error("task_exec_with_args: ELF loading failed code=%d\n", load_result);
-        task_clear_file_mappings(current_task);
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
         if (elf_pages) kfree(elf_pages);
         vmm_free_pml4(new_pd);
         if (k_argv) {
@@ -3688,7 +3759,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         }
         if (kernel_bin) kfree(kernel_bin);
         task_set_exec_state(current_task, 0);
-        return -KERR_ENOEXEC;
+        return -load_errno;
     }
 
     if (kernel_bin) kfree(kernel_bin);
@@ -3697,7 +3768,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     stack_pages = vmm_map_range_in_pml4_tracked(new_pd, stack_top - USER_STACK_GAP - stack_size, stack_size, 0x7, &stack_page_count);
     if (!stack_pages) {
         task_error("task_exec_with_args: failed to map stack\n");
-        task_clear_file_mappings(current_task);
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
         if (elf_pages) kfree(elf_pages);
         vmm_free_pml4(new_pd);
         if (k_argv) {
@@ -3712,13 +3784,13 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOMEM;
     }
 
-    current_task->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
-    current_task->user_brk_start = current_task->user_brk;
+    new_user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
     total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         task_error("task_exec_with_args: suspicious total_pages=%u\n", total_pages);
-        task_clear_file_mappings(current_task);
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
         kfree(elf_pages);
         kfree(stack_pages);
         if (k_argv) {
@@ -3734,20 +3806,32 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOEXEC;
     }
 
-    current_task->user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
-    if (current_task->user_pages) {
-        if (elf_page_count > 0 && elf_pages) {
-            memcpy(current_task->user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
+    new_user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
+    if (!new_user_pages) {
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
+        kfree(elf_pages);
+        kfree(stack_pages);
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
         }
-        memcpy(current_task->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
-        current_task->user_pages_count = total_pages;
-    } else {
-        current_task->user_pages_count = 0;
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
+        vmm_free_pml4(new_pd);
+        task_set_exec_state(current_task, 0);
+        return -KERR_ENOMEM;
     }
+    if (elf_page_count > 0 && elf_pages) {
+        memcpy(new_user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
+    }
+    memcpy(new_user_pages + elf_page_count, stack_pages,
+           stack_page_count * sizeof(uint64_t));
 
     kfree(elf_pages);
     kfree(stack_pages);
-    current_task->stack_size = stack_size;
 
     sp = stack_top - USER_STACK_GAP - 16;
 
@@ -3762,12 +3846,9 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     if (envc > 0 && k_envp) {
         envp_ptrs = (uint64_t *)kmalloc((envc + 1) * sizeof(uint64_t));
         if (!envp_ptrs) {
-            task_clear_file_mappings(current_task);
-            if (current_task->user_pages) {
-                kfree(current_task->user_pages);
-            }
-            current_task->user_pages = old_user_pages;
-            current_task->user_pages_count = old_user_pages_count;
+            task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                     old_file_map_count, old_file_map_capacity);
+            kfree(new_user_pages);
             vmm_free_pml4(new_pd);
             if (k_argv) {
                 for (i = 0; i < argc; i++) kfree(k_argv[i]);
@@ -3793,12 +3874,9 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     if (argc > 0 && k_argv) {
         argv_ptrs = (uint64_t *)kmalloc((argc + 1) * sizeof(uint64_t));
         if (!argv_ptrs) {
-            task_clear_file_mappings(current_task);
-            if (current_task->user_pages) {
-                kfree(current_task->user_pages);
-            }
-            current_task->user_pages = old_user_pages;
-            current_task->user_pages_count = old_user_pages_count;
+            task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                     old_file_map_count, old_file_map_capacity);
+            kfree(new_user_pages);
             if (envp_ptrs) kfree(envp_ptrs);
             vmm_free_pml4(new_pd);
             if (k_argv) {
@@ -3848,12 +3926,9 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         tbl_heap = 1;
     }
     if (!tbl_buf) {
-        task_clear_file_mappings(current_task);
-        if (current_task->user_pages) {
-            kfree(current_task->user_pages);
-        }
-        current_task->user_pages = old_user_pages;
-        current_task->user_pages_count = old_user_pages_count;
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
+        kfree(new_user_pages);
         if (argv_ptrs) kfree(argv_ptrs);
         if (envp_ptrs) kfree(envp_ptrs);
         vmm_free_pml4(new_pd);
@@ -3980,11 +4055,21 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     regs->err_code = 0;
     regs->rip = final_entry;
 
+    task_fd_close_cloexec(current_task);
+    if (use_node) {
+        task_release_file_mappings(old_file_maps, old_file_map_count);
+    }
+
     {
         extern void task_reset_signals_on_exec(void);
         task_reset_signals_on_exec();
     }
 
+    current_task->user_pages = new_user_pages;
+    current_task->user_pages_count = total_pages;
+    current_task->user_brk = new_user_brk;
+    current_task->user_brk_start = new_user_brk;
+    current_task->stack_size = stack_size;
     current_task->pml4_phys = new_pd;
     current_task->cr3 = new_pd;
     regs->entry_cr3 = new_pd;

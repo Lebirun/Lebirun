@@ -134,6 +134,18 @@ static inline bool serial_thr_empty(void) {
     return (inb(0x3FD) & 0x20) != 0;
 }
 
+static int serial_wait_thr_empty(void) {
+    uint64_t attempts;
+
+    attempts = 0;
+    while (!serial_thr_empty()) {
+        attempts++;
+        if (attempts >= 0x100000ULL) return 0;
+        cpu_relax();
+    }
+    return 1;
+}
+
 static void serial_write_nolock(const char *buf, size_t len) {
     size_t i;
     uint8_t ch;
@@ -141,10 +153,10 @@ static void serial_write_nolock(const char *buf, size_t len) {
     for (i = 0; i < len; i++) {
         ch = (uint8_t)buf[i];
         if (ch == '\n') {
-            while (!serial_thr_empty()) cpu_relax();
+            if (!serial_wait_thr_empty()) return;
             outb(0x3F8, '\r');
         }
-        while (!serial_thr_empty()) cpu_relax();
+        if (!serial_wait_thr_empty()) return;
         outb(0x3F8, ch);
     }
 }

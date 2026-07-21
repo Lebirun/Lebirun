@@ -3,7 +3,30 @@
 #include <lebirun/mem_map.h>
 #include "xz.h"
 
-static int xz_inited;
+static volatile int xz_init_state;
+
+static void xz_initialize(void)
+{
+	uint64_t eflags;
+
+	__asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags) :: "memory");
+	if (__atomic_load_n(&xz_init_state, __ATOMIC_ACQUIRE) == 2) {
+		if (eflags & (1ULL << 9))
+			__asm__ volatile ("sti" ::: "memory");
+		return;
+	}
+	if (__sync_bool_compare_and_swap(&xz_init_state, 0, 1)) {
+		xz_crc32_init();
+		__atomic_store_n(&xz_init_state, 2, __ATOMIC_RELEASE);
+		if (eflags & (1ULL << 9))
+			__asm__ volatile ("sti" ::: "memory");
+		return;
+	}
+	if (eflags & (1ULL << 9))
+		__asm__ volatile ("sti" ::: "memory");
+	while (__atomic_load_n(&xz_init_state, __ATOMIC_ACQUIRE) != 2)
+		__asm__ volatile ("pause" ::: "memory");
+}
 
 void *xz_kmalloc_wrapper(unsigned long size)
 {
@@ -22,10 +45,7 @@ int xz_decompress_xz(const uint8_t *src, uint64_t src_len,
 	struct xz_buf buf;
 	enum xz_ret ret;
 
-	if (!xz_inited) {
-		xz_crc32_init();
-		xz_inited = 1;
-	}
+	xz_initialize();
 
 	dec = xz_dec_init(XZ_SINGLE, 0);
 	if (!dec)

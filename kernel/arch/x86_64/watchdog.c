@@ -69,6 +69,7 @@ static void watchdog_dump_tasks(void) {
 static void watchdog_callback(uint64_t ticks) {
     task_t *t;
     uint64_t elapsed;
+    int lookup_complete;
     (void)ticks;
 
     if (wdt_disabled) return;
@@ -101,7 +102,8 @@ static void watchdog_callback(uint64_t ticks) {
 
     if (wdt_init_pid <= 0) return;
 
-    t = task_find((pid_t)wdt_init_pid);
+    lookup_complete = task_find_from_irq((pid_t)wdt_init_pid, &t);
+    if (!lookup_complete) return;
     if (t) {
         if (t->state == TASK_DEAD) {
             kernel_panic_msg("WATCHDOG: init (PID 1) has exited");
@@ -120,7 +122,6 @@ void watchdog_init(void) {
     wdt_prev_tick_count = tick_count;
     wdt_stall_strikes = 0;
     wdt_init_pid = 0;
-
     interval_ticks = pit_ms_to_ticks(WATCHDOG_INTERVAL_MS);
     if (interval_ticks == 0)
         interval_ticks = 5000;

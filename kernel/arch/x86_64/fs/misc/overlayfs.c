@@ -703,11 +703,13 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
 static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     overlay_node_t *onode;
     overlay_node_t *cached;
+    overlay_node_t *discarded;
     vfs_node_t *upper_dir;
     vfs_node_t *lower_dir;
     vfs_node_t *upper_result;
     vfs_node_t *lower_result;
     vfs_node_t *result;
+    vfs_node_t *cached_result;
 
     if (!node || !name) return NULL;
 
@@ -730,9 +732,9 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     lower_dir = onode->lower_node;
     upper_result = NULL;
     lower_result = NULL;
+    mutex_unlock(&overlay_node_lock);
 
     if (upper_dir && overlay_check_whiteout(upper_dir, name)) {
-        mutex_unlock(&overlay_node_lock);
         return NULL;
     }
 
@@ -749,27 +751,33 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
     }
 
     if (!upper_result && !lower_result) {
-        mutex_unlock(&overlay_node_lock);
         return NULL;
     }
 
     result = overlay_wrap_node(lower_result, upper_result, name);
-    if (result) {
-        if (upper_result)
-            vfs_close(upper_result);
-        if (lower_result)
-            vfs_close(lower_result);
-        overlay_set_parent(result, node);
-        vfs_lookup_hazard_set(result);
-        if (!ov_cache_insert(node, name,
-                             (overlay_node_t *)result->private_data)) {
-            result->flags |= VFS_DYNAMIC | VFS_EMBEDDED;
-        }
-    } else {
-        if (upper_result) vfs_close(upper_result);
-        if (lower_result) vfs_close(lower_result);
+    if (upper_result) vfs_close(upper_result);
+    if (lower_result) vfs_close(lower_result);
+    if (!result) return NULL;
+
+    mutex_lock(&overlay_node_lock);
+    cached = ov_cache_lookup(node, name);
+    if (cached) {
+        cached_result = &cached->vfs;
+        vfs_lookup_hazard_set(cached_result);
+        mutex_unlock(&overlay_node_lock);
+        discarded = (overlay_node_t *)result->private_data;
+        overlay_drop_node_refs(discarded);
+        discarded->vfs.private_data = NULL;
+        kfree(discarded);
+        return cached_result;
     }
 
+    overlay_set_parent(result, node);
+    vfs_lookup_hazard_set(result);
+    if (!ov_cache_insert(node, name,
+                         (overlay_node_t *)result->private_data)) {
+        result->flags |= VFS_DYNAMIC | VFS_EMBEDDED;
+    }
     mutex_unlock(&overlay_node_lock);
     return result;
 }

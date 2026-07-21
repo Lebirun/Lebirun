@@ -61,7 +61,56 @@ KERNEL_SIZE_CFLAGS=-Os -ffunction-sections -fdata-sections
 
 $(ARCHDIR)/fs/misc/procfs.o \
 $(ARCHDIR)/fs/misc/sysfs.o \
+$(ARCHDIR)/fs/misc/devfs.o \
+$(ARCHDIR)/fs/misc/overlayfs.o \
+$(ARCHDIR)/fs/squashfs.o \
+$(ARCHDIR)/fs/iso9660.o \
+$(ARCHDIR)/fs/partition.o \
+$(ARCHDIR)/fs/ext4/ext4.o \
+$(ARCHDIR)/fs/ext4/ext4_super.o \
+$(ARCHDIR)/fs/ext4/ext4_block.o \
+$(ARCHDIR)/fs/ext4/ext4_inode.o \
+$(ARCHDIR)/fs/ext4/ext4_dir.o \
+$(ARCHDIR)/fs/ext4/ext4_file.o \
+$(ARCHDIR)/initrd.o \
+$(ARCHDIR)/ramfs.o \
+$(ARCHDIR)/vfs.o \
+$(ARCHDIR)/elf.o \
+$(ARCHDIR)/evdev.o \
+$(ARCHDIR)/pty.o \
+$(ARCHDIR)/framebuffer.o \
+$(ARCHDIR)/psf.o \
+$(ARCHDIR)/panic.o \
+$(ARCHDIR)/vring.o \
+$(ARCHDIR)/lke.o \
+$(ARCHDIR)/vfl.o \
+$(ARCHDIR)/xz/xz.o \
+$(ARCHDIR)/xz/xz_crc32.o \
+$(ARCHDIR)/xz/xz_dec_lzma2.o \
+$(ARCHDIR)/xz/xz_dec_stream.o \
+$(ARCHDIR)/drivers/sata/ahci.o \
+$(ARCHDIR)/drivers/fb/bga.o \
+$(ARCHDIR)/drivers/fb/vga_modes.o \
+$(ARCHDIR)/syscalls/syscall_process.o \
+$(ARCHDIR)/syscalls/syscall_time.o \
+$(ARCHDIR)/syscalls/syscall_initrd.o \
+$(ARCHDIR)/syscalls/syscall_fb.o \
+$(ARCHDIR)/syscalls/syscall_console.o \
+$(ARCHDIR)/syscalls/syscall_sata.o \
+$(ARCHDIR)/syscalls/syscall_termios.o \
+$(ARCHDIR)/syscalls/syscall_posix.o \
+$(ARCHDIR)/syscalls/syscall_select.o \
+$(ARCHDIR)/syscalls/syscall_vfs.o \
+$(ARCHDIR)/syscalls/syscall_at.o \
+$(ARCHDIR)/syscalls/syscall_signal.o \
+$(ARCHDIR)/syscalls/syscall_ids.o \
 $(ARCHDIR)/syscalls/syscall_misc.o \
+$(ARCHDIR)/syscalls/syscall_epoll.o \
+$(ARCHDIR)/syscalls/syscall_pthread.o \
+$(ARCHDIR)/syscalls/syscall_shm.o \
+$(ARCHDIR)/syscalls/syscall_dl.o \
+$(ARCHDIR)/syscalls/syscall_power.o \
+$(ARCHDIR)/syscalls/syscall_crypto.o \
 $(ARCHDIR)/syscalls/syscall_regex.o: CFLAGS += $(KERNEL_SIZE_CFLAGS)
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin

@@ -2,6 +2,7 @@
 #include <lebirun/gdt.h>
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/kstack.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -289,6 +290,26 @@ static int linux_to_kernel_syscall(int linux_nr) {
     }
 }
 
+static int syscall_needs_expanded_stack(int num) {
+    if (num == SYSCALL_SBRK || num == SYSCALL_MMAP ||
+        num == SYSCALL_FORK || num == SYSCALL_EXEC) return 1;
+    if (num >= SYSCALL_INITRD_STAT && num <= SYSCALL_VFS_UNLINK &&
+        num != SYSCALL_VFS_READ) return 1;
+    if (num >= SYSCALL_SATA_TEST && num <= SYSCALL_NET_HTTP_GET) return 1;
+    if (num == SYSCALL_EXECVE) return 1;
+    if (num >= SYSCALL_STAT && num <= SYSCALL_READLINK) return 1;
+    if (num >= SYSCALL_OPENAT && num <= SYSCALL_RENAMEAT2) return 1;
+    if (num >= SYSCALL_MMAP2 && num <= SYSCALL_MINCORE) return 1;
+    if (num >= SYSCALL_FCHDIR && num <= SYSCALL_GETDENTS64) return 1;
+    if (num == SYSCALL_CLONE || num == SYSCALL_VFORK) return 1;
+    if (num >= SYSCALL_POSIX_OPENPT && num <= SYSCALL_LCHOWN) return 1;
+    if (num >= SYSCALL_SHM_OPEN && num <= SYSCALL_REGEXEC_EX) return 1;
+    if (num >= SYSCALL_STATFS && num <= SYSCALL_NET_HTTP_POST) return 1;
+    if (num == SYSCALL_PIVOT_ROOT ||
+        (num >= SYSCALL_VFS_MOUNT && num <= SYSCALL_LKE_LIST)) return 1;
+    return 0;
+}
+
 void do_syscall(registers_t *regs) {
     int linux_nr;
     int num;
@@ -325,6 +346,12 @@ void do_syscall(registers_t *regs) {
         return;
     }
 
+    if (syscall_needs_expanded_stack(num) && kstack_expand_syscall() != 0) {
+        clear_syscall_frame();
+        regs->rax = -ENOMEM;
+        return;
+    }
+
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
     } else if (num == SYSCALL_LSEEK) {
@@ -357,7 +384,9 @@ void do_syscall(registers_t *regs) {
         extern int task_has_pending_signals(void);
         extern void signal_deliver_pending(registers_t *regs);
         if (task_has_pending_signals()) {
-            signal_deliver_pending(regs);
+            if (kstack_expand_syscall() == 0) {
+                signal_deliver_pending(regs);
+            }
         }
     }
 

@@ -19,7 +19,9 @@ static inline void spinlock_init(spinlock_t* l) {
 static inline void spin_lock(spinlock_t* l) {
     if (!l) return;
     while (__sync_lock_test_and_set(&l->locked, 1)) {
-        while (l->locked) cpu_relax();
+        while (l->locked) {
+            cpu_relax();
+        }
     }
 }
 

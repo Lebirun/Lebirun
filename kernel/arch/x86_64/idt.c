@@ -654,7 +654,7 @@ registers_t* interrupt_handler(registers_t* regs)
                     task_update_cached_stats();
                 }
 
-                wake_sleeping_tasks();
+                wake_sleeping_tasks_from_irq();
 
                 extern void fb_tick(void);
                 __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
@@ -691,7 +691,6 @@ registers_t* interrupt_handler(registers_t* regs)
                     regs = schedule_from_irq(regs);
                 }
             }
-
         } else if (irq == 1) {
             __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
             kernel_cr3 = vmm_get_kernel_cr3();
@@ -823,7 +822,7 @@ void idt_init(void)
     idt_set_gate(11, (uintptr_t)isr11);
     idt_set_gate(12, (uintptr_t)isr12);
     idt_set_gate(13, (uintptr_t)isr13);
-    idt_set_gate(14, (uintptr_t)isr14);
+    idt_set_gate_ist(14, (uintptr_t)isr14, 1);
     idt_set_gate(15, (uintptr_t)isr15);
     idt_set_gate(16, (uintptr_t)isr16);
     idt_set_gate(17, (uintptr_t)isr17);

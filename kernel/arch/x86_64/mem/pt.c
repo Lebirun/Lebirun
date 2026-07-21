@@ -21,9 +21,12 @@ static volatile uint64_t vmm_pae_saved_eflags = 0;
 
 static inline void vmm_pae_lock_acquire(void) {
     uint64_t eflags;
+
     __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
     __asm__ volatile ("cli" ::: "memory");
-    spin_lock(&vmm_pae_lock);
+    while (!spin_trylock(&vmm_pae_lock)) {
+        cpu_relax();
+    }
     vmm_pae_saved_eflags = eflags;
 }
 

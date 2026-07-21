@@ -49,8 +49,8 @@ static int vfs_grow_mounts(void) {
     if (!new_mounts) return -1;
     for (i = mounts_capacity; i < new_cap; i++) {
         new_mounts[i].in_use = 0;
-        new_mounts[i].path[0] = '\0';
-        new_mounts[i].device[0] = '\0';
+        new_mounts[i].path = NULL;
+        new_mounts[i].device = NULL;
         new_mounts[i].root = NULL;
         new_mounts[i].fs_type = NULL;
     }
@@ -216,6 +216,33 @@ static size_t vfs_bounded_strlen(const char *s, size_t max) {
     return max;
 }
 
+static int vfs_mount_set_strings(vfs_mount_t *mount, const char *path, const char *device) {
+    size_t path_len;
+    size_t device_len;
+    char *strings;
+
+    if (!mount || !path) return -1;
+    path_len = vfs_bounded_strlen(path, VFS_MAX_PATH);
+    if (path_len >= VFS_MAX_PATH) return -1;
+    device_len = vfs_bounded_strlen(device, VFS_MAX_PATH);
+    if (device_len >= VFS_MAX_PATH) return -1;
+    strings = (char *)kmalloc(path_len + device_len + 2);
+    if (!strings) return -1;
+    memcpy(strings, path, path_len + 1);
+    memcpy(strings + path_len + 1, device ? device : "", device_len + 1);
+    if (mount->path) kfree(mount->path);
+    mount->path = strings;
+    mount->device = strings + path_len + 1;
+    return 0;
+}
+
+static void vfs_mount_clear_strings(vfs_mount_t *mount) {
+    if (!mount) return;
+    if (mount->path) kfree(mount->path);
+    mount->path = NULL;
+    mount->device = NULL;
+}
+
 vfs_fs_type_t *vfs_find_fs(const char *name) {
     int iterations;
     vfs_fs_type_t *cur;
@@ -287,11 +314,9 @@ static const char *vfs_detect_fs(const char *device) {
 int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags) {
     int slot;
     int i;
-    size_t cp;
     const char *end;
     const char *base;
     size_t n;
-    size_t di;
     char parent_path[VFS_MAX_PATH];
     const char *detected_fs;
     vfs_node_t *existing;
@@ -365,9 +390,14 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
         printf("VFS: Mount table full\n");
         return -1;
     }
+
+    if (vfs_mount_set_strings(&mounts[slot], mountpoint, device) != 0) {
+        return -1;
+    }
     
     root = fs->mount(device, mountpoint);
     if (!root) {
+        vfs_mount_clear_strings(&mounts[slot]);
         return -1;
     }
     
@@ -379,21 +409,8 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
 
     mounts[slot].in_use = 1;
     mounts[slot].flags = flags;
-    cp = 0;
-    while (mountpoint[cp] && cp < VFS_MAX_PATH - 1) { mounts[slot].path[cp] = mountpoint[cp]; cp++; }
-    mounts[slot].path[cp] = '\0';
     mounts[slot].root = root;
     mounts[slot].fs_type = fs;
-    if (device && device[0] != '\0') {
-        di = 0;
-        while (device[di] && di < VFS_MAX_PATH - 1) {
-            mounts[slot].device[di] = device[di];
-            ++di;
-        }
-        mounts[slot].device[di] = '\0';
-    } else {
-        mounts[slot].device[0] = '\0';
-    }
     
     root->parent = vfs_root;
     
@@ -465,10 +482,9 @@ int vfs_unmount(const char *mountpoint) {
             }
             
             mounts[i].in_use = 0;
-            mounts[i].path[0] = '\0';
+            vfs_mount_clear_strings(&mounts[i]);
             mounts[i].root = NULL;
             mounts[i].fs_type = NULL;
-            mounts[i].device[0] = '\0';
             
             printf("VFS: Unmounted %s\n", mountpoint);
             overlay_flush_cache();
@@ -493,10 +509,9 @@ int vfs_remove_mount(const char *mountpoint) {
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             mounts[i].in_use = 0;
-            mounts[i].path[0] = '\0';
+            vfs_mount_clear_strings(&mounts[i]);
             mounts[i].root = NULL;
             mounts[i].fs_type = NULL;
-            mounts[i].device[0] = '\0';
             return 0;
         }
     }
@@ -918,7 +933,6 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
     
     best = NULL;
     best_len = 0;
-    
     for (i = 0; i < mounts_capacity; i++) {
         if (!mounts[i].in_use) continue;
         
@@ -933,7 +947,6 @@ static vfs_mount_t *find_mount_for_path(const char *path) {
             }
         }
     }
-    
     return best;
 }
 
@@ -1585,16 +1598,14 @@ int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const c
 
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
+            if (device && vfs_mount_set_strings(&mounts[i], mounts[i].path, device) != 0)
+                return -1;
             mounts[i].root = new_root;
             new_root->parent = vfs_root;
             if (strcmp(mountpoint, "/") == 0) {
                 new_root->name[0] = '\0';
             }
             new_root->flags |= VFS_MOUNTPOINT;
-            if (device) {
-                strncpy(mounts[i].device, device, VFS_MAX_PATH - 1);
-                mounts[i].device[VFS_MAX_PATH - 1] = '\0';
-            }
             if (fs)
                 mounts[i].fs_type = fs;
             return 0;

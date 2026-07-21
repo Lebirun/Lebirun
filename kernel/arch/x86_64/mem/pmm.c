@@ -48,7 +48,7 @@ static inline void pfa_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
     __asm__ volatile ("cli");
     while (__sync_lock_test_and_set(&pfa_lock, 1)) {
-
+        __asm__ volatile ("pause" ::: "memory");
     }
 }
 
@@ -602,6 +602,7 @@ void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_fre
 
 static void refht_lock_acquire(uint64_t *eflags_out) {
     uint64_t ef;
+
     __asm__ volatile("pushf; pop %0; cli" : "=r"(ef));
     while (__sync_lock_test_and_set(&refht_lock_val, 1)) {
         __asm__ volatile("pause");

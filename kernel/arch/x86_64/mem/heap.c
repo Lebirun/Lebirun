@@ -863,6 +863,7 @@ void *krealloc(void *ptr, size_t new_size) {
         kfree(ptr);
         return NULL;
     }
+    if (new_size > SIZE_MAX - CANARY_OVERHEAD - 7) return NULL;
 
     if (is_early_heap_ptr(ptr)) {
         new_ptr = kmalloc(new_size);
@@ -896,10 +897,11 @@ void *krealloc(void *ptr, size_t new_size) {
         return NULL;
     }
 
+    new_block_size = new_size + CANARY_OVERHEAD;
+    new_block_size = (new_block_size + 7) & ~7;
+
     if (block->alloc_size >= new_size) {
         old_block_size = block->size;
-        new_block_size = new_size + CANARY_OVERHEAD;
-        new_block_size = (new_block_size + 7) & ~7;
         if (old_block_size >= new_block_size + sizeof(heap_block_t) +
                 HEAP_MIN_BLOCK) {
             split_block(block, new_block_size);

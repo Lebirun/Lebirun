@@ -6,14 +6,12 @@
 #define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
 #define SLAB_REGION_SIZE  0x00400000ULL
 #define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
-#define SLAB_SIZES_COUNT 3
-#define SLAB_SIZE_32    0
-#define SLAB_SIZE_64    1
-#define SLAB_SIZE_128   2
+#define SLAB_SIZES_COUNT 2
+#define SLAB_BITMAP_WORDS 2
 
 #define SLAB_MAGIC 0x534C4142
 
-static const uint64_t slab_sizes[SLAB_SIZES_COUNT] = { 32, 64, 128 };
+static const uint64_t slab_sizes[SLAB_SIZES_COUNT] = { 32, 128 };
 
 typedef struct slab_page {
     uint64_t magic;
@@ -22,7 +20,7 @@ typedef struct slab_page {
     uint64_t free_count;
     struct slab_page *next;
     struct slab_page *prev;
-    uint64_t free_bitmap[4];
+    uint64_t free_bitmap[SLAB_BITMAP_WORDS];
 } slab_page_t;
 
 typedef struct {
@@ -75,7 +73,7 @@ static int slab_bitmap_test(slab_page_t *page, uint64_t idx) {
 
     word = idx >> 6;
     bit = idx & 63;
-    if (word >= 4) return 0;
+    if (word >= SLAB_BITMAP_WORDS) return 0;
     return (page->free_bitmap[word] & (1ULL << bit)) != 0;
 }
 
@@ -85,7 +83,7 @@ static void slab_bitmap_set(slab_page_t *page, uint64_t idx) {
 
     word = idx >> 6;
     bit = idx & 63;
-    if (word >= 4) return;
+    if (word >= SLAB_BITMAP_WORDS) return;
     page->free_bitmap[word] |= (1ULL << bit);
 }
 
@@ -95,7 +93,7 @@ static void slab_bitmap_clear(slab_page_t *page, uint64_t idx) {
 
     word = idx >> 6;
     bit = idx & 63;
-    if (word >= 4) return;
+    if (word >= SLAB_BITMAP_WORDS) return;
     page->free_bitmap[word] &= ~(1ULL << bit);
 }
 
@@ -118,7 +116,7 @@ static int slab_find_free_index(slab_page_t *page, uint64_t *out_idx) {
     uint64_t idx;
 
     if (!page || !out_idx) return 0;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < SLAB_BITMAP_WORDS; i++) {
         bits = page->free_bitmap[i];
         if (bits != 0) {
             idx = (i << 6) + (uint64_t)__builtin_ctzll(bits);
@@ -143,7 +141,7 @@ static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
     page->free_count = num_objs;
     page->next = NULL;
     page->prev = NULL;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < SLAB_BITMAP_WORDS; i++) {
         page->free_bitmap[i] = 0;
     }
     
@@ -277,7 +275,7 @@ void slab_init(void) {
         slab_caches[i].free_count = 0;
     }
     slab_initialized = 1;
-    printf("Slab allocator initialized (sizes: 32, 64, 128)\n");
+    printf("Slab allocator initialized (sizes: 32, 128)\n");
 }
 
 void *slab_alloc(size_t size, void *caller) {

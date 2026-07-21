@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/utsname.h>
+#include <errno.h>
 #include <lebirun.h>
 
 #define WRITE_LIT(fd, s) write((fd), (s), sizeof(s) - 1)
@@ -52,6 +53,7 @@ int main(int argc, char **argv)
     char *login_argv[3];
     char *login_envp[2];
     int r;
+    int exec_attempts;
     struct utsname uts;
 
     if (argc < 2) {
@@ -101,7 +103,12 @@ int main(int argc, char **argv)
         login_envp[0] = "TERM=linux";
         login_envp[1] = (char *)0;
 
-        execve("/bin/login", login_argv, login_envp);
+        for (exec_attempts = 0; exec_attempts < 5; exec_attempts++) {
+            execve("/bin/login", login_argv, login_envp);
+            if (errno != ENOMEM)
+                break;
+            sleep(1);
+        }
 
         WRITE_LIT(2, "getty: failed to exec login\n");
         return 1;

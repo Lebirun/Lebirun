@@ -35,9 +35,6 @@ mkdir -p isodir/boot/grub
 
 if [ -f initrd.img ]; then
     cp initrd.img isodir/boot/initrd.img
-    INITRD_MODULE="# module2 /boot/initrd.img initrd"
-else
-    INITRD_MODULE=""
 fi
 
 KERNEL_BIN="sysroot/boot/lebirun.kernel"
@@ -77,7 +74,6 @@ set default=0
 menuentry "Lebirun" {
 	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
 	module2 /boot/rootfs.squashfs
-$INITRD_MODULE
 	boot
 }
 EOF

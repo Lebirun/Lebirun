@@ -20,7 +20,6 @@ void mutex_lock(mutex_t* m) {
 
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : current_task;
-    
     if (!scheduler_initialized) {
         while (m->locked) {
             __asm__ __volatile__ ("pause");

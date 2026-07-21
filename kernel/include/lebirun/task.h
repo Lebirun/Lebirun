@@ -181,6 +181,7 @@ extern task_t* all_tasks_head;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
+int task_find_from_irq(pid_t pid, task_t **result);
 task_t* task_find_by_pml4(uint64_t pml4_phys);
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter);
@@ -206,6 +207,7 @@ void wake_task(task_t* task);
 void task_kill(task_t* task, uint64_t exit_code);
 void sleep_ticks(uint64_t ticks);
 void wake_sleeping_tasks(void);
+int wake_sleeping_tasks_from_irq(void);
 void reap_dead_tasks(void);
 void reap_request(void);
 void exec_drain_request(void);

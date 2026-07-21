@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <errno.h>
 
 #define WRITE_LIT(fd, s) write((fd), (s), sizeof(s) - 1)
 
@@ -262,6 +263,7 @@ int main(int argc, char **argv)
     char env_home[MAX_FIELD + 8];
     char env_user[MAX_USERNAME + 8];
     char env_path[32];
+    int exec_attempts;
 
     if (argc >= 2) {
         strncpy(username, argv[1], MAX_USERNAME - 1);
@@ -348,7 +350,12 @@ int main(int argc, char **argv)
         shell_envp[2] = env_path;
         shell_envp[3] = (char *)0;
 
-        execve(shell, shell_argv, shell_envp);
+        for (exec_attempts = 0; exec_attempts < 5; exec_attempts++) {
+            execve(shell, shell_argv, shell_envp);
+            if (errno != ENOMEM)
+                break;
+            sleep(1);
+        }
 
         WRITE_LIT(2, "login: failed to exec shell\n");
         return 1;
