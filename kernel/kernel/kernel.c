@@ -23,6 +23,9 @@
 #include <lebirun/console.h>
 #include <lebirun/vfs.h>
 #include <lebirun/drivers/sata/ahci.h>
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+#include <lebirun/drivers/fb/virtio_gpu.h>
+#endif
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/partition.h>
 #include <lebirun/drivers/net/net.h>
@@ -65,6 +68,9 @@ void kernel_main(void) {
     uintptr_t u_start;
     uintptr_t u_end;
     size_t unifont_size;
+    uint64_t font_phys_start;
+    uint64_t font_phys_end;
+    int font_loaded;
     extern int early_fb_valid;
     extern uint64_t early_fb_addr;
     extern uint32_t early_fb_width;
@@ -133,26 +139,10 @@ void kernel_main(void) {
     if (cmdline_get_text_mode()) {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
-    } else if (early_fb_valid) {
+    } else if (early_fb_valid && CONFIG_DRIVER_VGA) {
         terminal_init_fb(early_fb_addr, early_fb_width,
                         early_fb_height, early_fb_pitch,
                         early_fb_bpp, early_fb_type);
-
-        u_start = (uintptr_t)unifont_psf_start;
-        u_end = (uintptr_t)unifont_psf_end;
-        unifont_size = 0;
-        if (u_end > u_start) unifont_size = (size_t)(u_end - u_start);
-        if (unifont_size > 0) {
-            terminal_load_psf_font(unifont_psf_start, unifont_size);
-            terminal_compact_font(256);
-            {
-                uint64_t font_phys_start;
-                uint64_t font_phys_end;
-                font_phys_start = (uintptr_t)unifont_psf_start - KERNEL_VMA;
-                font_phys_end = (uintptr_t)unifont_psf_end - KERNEL_VMA;
-                pfa_reclaim_kernel_range(font_phys_start, font_phys_end);
-            }
-        }
 
         console_init();
 
@@ -163,6 +153,31 @@ void kernel_main(void) {
     } else {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
+    }
+
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    if (!cmdline_get_text_mode()) {
+        virtio_gpu_init(early_fb_valid ? early_fb_width : 0,
+                        early_fb_valid ? early_fb_height : 0);
+    }
+#endif
+
+    u_start = (uintptr_t)unifont_psf_start;
+    u_end = (uintptr_t)unifont_psf_end;
+    unifont_size = 0;
+    font_loaded = 0;
+    if (u_end > u_start) unifont_size = (size_t)(u_end - u_start);
+    if (!cmdline_get_text_mode() && fb_get()->addr && unifont_size > 0) {
+        font_loaded = terminal_load_psf_font(unifont_psf_start, unifont_size) == 0;
+        if (font_loaded) {
+            terminal_compact_font(256);
+            font_phys_start = (uintptr_t)unifont_psf_start - KERNEL_VMA;
+            font_phys_end = (uintptr_t)unifont_psf_end - KERNEL_VMA;
+            pfa_reclaim_kernel_range(font_phys_start, font_phys_end);
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+            if (virtio_gpu_is_available()) virtio_gpu_flush();
+#endif
+        }
     }
 
     mod_count = early_mod_count;

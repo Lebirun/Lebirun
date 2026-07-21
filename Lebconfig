@@ -9,6 +9,11 @@ subcategory "Device Drivers" {
     subcategory "Storage" {
         item type=bool name="AHCI SATA" default=enable id=DRIVER_AHCI alias="DRIVER_AHCI" help="Enable the AHCI SATA storage driver"
     }
+    subcategory "Graphics" {
+        item type=bool name="Virtio VGA" default=enable id=DRIVER_VIRTIO_VGA alias="DRIVER_VIRTIO_VGA" help="Enable the VGA-compatible virtio GPU PCI frontend"
+        item type=bool name="Virtio GPU PCI" default=enable id=DRIVER_VIRTIO_GPU_PCI alias="DRIVER_VIRTIO_GPU_PCI" help="Enable the non-VGA virtio GPU PCI frontend"
+        item type=bool name="Standard and legacy VGA" default=enable id=DRIVER_VGA alias="DRIVER_VGA" help="Enable boot framebuffer, QXL/Bochs VGA, standard VGA and Cirrus VGA support"
+    }
     subcategory "Input" {
         item type=bool name="PS/2 Keyboard" default=enable id=DRIVER_PS2_KEYBOARD alias="DRIVER_PS2_KEYBOARD" help="Enable the PS/2 keyboard driver"
         item type=bool name="PS/2 Mouse" default=enable id=DRIVER_PS2_MOUSE alias="DRIVER_PS2_MOUSE" help="Enable the PS/2 mouse driver"

@@ -2,6 +2,9 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/drivers/fb/bga.h>
 #include <lebirun/drivers/fb/vga_modes.h>
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+#include <lebirun/drivers/fb/virtio_gpu.h>
+#endif
 #include <lebirun/console.h>
 #include <lebirun/io.h>
 #include <string.h>
@@ -64,6 +67,7 @@ static void vga_text_update_cursor(uint64_t x, uint64_t y) {
 void fb_flush(void) {
 }
 
+#if CONFIG_DRIVER_VGA
 static uint64_t decrease_width_step(uint64_t value, uint64_t step) {
     uint64_t delta;
     if (step == 0 || value <= step) {
@@ -93,6 +97,7 @@ static uint64_t decrease_step(uint64_t value, uint64_t step) {
     }
     return value - delta;
 }
+#endif
 
 static inline void tlb_flush_page(uint64_t addr) {
     asm volatile("invlpg (%0)" : : "r"(addr) : "memory");
@@ -467,6 +472,9 @@ static void fb_clear_region(uint64_t start_y, uint64_t end_y) {
             }
         }
     }
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    virtio_gpu_mark_dirty(0, start_y, hw_width, end_y - start_y);
+#endif
 }
 
 int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type) {
@@ -503,7 +511,7 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     vram_addr = (uint64_t *)(KERNEL_VMA + 0x20000000ULL);
     fb.addr = vram_addr;
 
-    fb.font = &default_font;
+    if (!fb.font || !fb.font->glyphs) fb.font = &default_font;
     fb.fg_color = 0xFFFFFFFF;
     fb.bg_color = 0x00000000;
     fb.cursor_x = 0;
@@ -517,6 +525,7 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     original_fb_pitch = pitch;
     original_fb_size = pitch * height;
     fb_vram_bytes = original_fb_size;
+#if CONFIG_DRIVER_VGA
     if (bga_is_available()) {
         uint64_t vram;
         vram = bga_get_vram_bytes();
@@ -526,6 +535,7 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
         vram = vga_get_vram_bytes();
         if (vram > fb_vram_bytes) fb_vram_bytes = vram;
     }
+#endif
     hw_height = height;
     hw_pitch = pitch;
     bytes_per_pixel = (uint64_t)(bpp / 8u);
@@ -547,9 +557,14 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
 
 void fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
     if (font_height == 0) font_height = 16;
+#if CONFIG_DRIVER_VGA
     __asm__ volatile("outw %0, %1" : : "a"((uint16_t)4), "Nd"((uint16_t)0x01CE));
     __asm__ volatile("outw %0, %1" : : "a"((uint16_t)0), "Nd"((uint16_t)0x01CF));
     vga_set_text_mode(font_glyphs, num_chars, font_height);
+#else
+    (void)font_glyphs;
+    (void)num_chars;
+#endif
 
     fb.rows = 25;
     fb.cols = 80;
@@ -706,6 +721,9 @@ void fb_putpixel(uint64_t x, uint64_t y, uint64_t color) {
         rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
         *(uint16_t *)p = rgb565;
     }
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    virtio_gpu_mark_dirty(x, y, 1, 1);
+#endif
 }
 
 void fb_putchar(char c, uint64_t cx, uint64_t cy) {
@@ -794,6 +812,9 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
             p32[6] = (bits & 0x02) ? fg : bg;
             p32[7] = (bits & 0x01) ? fg : bg;
         }
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+        virtio_gpu_mark_dirty(px, py, fb.font->width, fb.font->height);
+#endif
         return;
     }
 
@@ -819,6 +840,9 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
             }
         }
     }
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    virtio_gpu_mark_dirty(px, py, fb.font->width, fb.font->height);
+#endif
 }
 
 void fb_scroll(void) {
@@ -858,6 +882,9 @@ void fb_scroll(void) {
 
     copy_bytes = copy_height * hw_pitch;
     memmove((uint8_t *)fb.addr, (uint8_t *)fb.addr + line_height * hw_pitch, copy_bytes);
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    virtio_gpu_mark_dirty(0, 0, hw_width, copy_height);
+#endif
 
     last_row_start = (fb.rows - 1) * line_height;
     clear_end = last_row_start + line_height;
@@ -996,7 +1023,11 @@ void fb_tick(void) {
     flush_counter++;
     if (flush_counter >= 16) {
         flush_counter = 0;
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+        virtio_gpu_flush();
+#else
         fb_flush();
+#endif
     }
 }
 
@@ -1012,11 +1043,14 @@ void fb_set_cursor_hidden(int hidden) {
 int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
     uint64_t font_width;
     uint64_t font_height;
+#if CONFIG_DRIVER_VGA
     uint64_t req_width;
     uint64_t req_height;
+#endif
     int hw_changed;
     uint64_t new_pitch;
     uint8_t new_bpp;
+#if CONFIG_DRIVER_VGA
     uint16_t try_bpps[3];
     int i;
     uint16_t bpp_try;
@@ -1026,6 +1060,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
     int attempts_w;
     uint64_t next_w;
     uint64_t next_h;
+#endif
     uint64_t row;
     uint64_t col;
     uint64_t fb_size;
@@ -1041,6 +1076,10 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
     uint64_t batch_size;
     uint64_t batch_start;
     uint64_t batch_end;
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    uint64_t virtio_fb_phys;
+    uint64_t old_cols;
+#endif
 
     if (original_fb_width == 0 || original_fb_height == 0) {
         return -3;
@@ -1054,18 +1093,38 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
         return -2;
     }
 
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    if (virtio_gpu_is_available()) {
+        old_cols = fb.cols;
+        if (virtio_gpu_set_mode(width, height, &virtio_fb_phys) < 0) return -5;
+        if (fb_init(virtio_fb_phys, width, height, width * 4, 32, 1) < 0) return -6;
+        if (refresh_rate > 0) fb.refresh_rate = refresh_rate;
+        if (console_is_initialized()) {
+            if (old_cols != fb.cols) console_rewrap_all(old_cols, fb.cols, fb.rows);
+            console_clamp_cursors(fb.cols, fb.rows);
+            console_force_redraw();
+            fb_reclaim_unused();
+        }
+        virtio_gpu_flush();
+        return 0;
+    }
+#endif
+
     font_width = (fb.font && fb.font->width) ? fb.font->width : 8;
     font_height = (fb.font && fb.font->height) ? fb.font->height : 16;
     if (font_width == 0) font_width = 8;
     if (font_height == 0) font_height = 16;
 
+#if CONFIG_DRIVER_VGA
     req_width = width;
     req_height = height;
+#endif
 
     hw_changed = 0;
     new_pitch = hw_pitch;
     new_bpp = fb.bpp;
 
+#if CONFIG_DRIVER_VGA
     if (bga_is_available()) {
         try_bpps[0] = 32;
         try_bpps[1] = 24;
@@ -1131,6 +1190,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
             }
         }
     }
+#endif
 
     if (!hw_changed) {
         if (width > hw_width) width = hw_width;
@@ -1341,6 +1401,7 @@ int fb_get_caps(uint64_t *out_words, uint64_t words) {
     if (font_h == 0) font_h = 16;
 
     flags = 0;
+#if CONFIG_DRIVER_VGA
     if (bga_is_available()) {
         flags |= 1u;
         flags |= 2u;
@@ -1348,6 +1409,7 @@ int fb_get_caps(uint64_t *out_words, uint64_t words) {
         flags |= 1u;
         flags |= 4u;
     }
+#endif
 
     out_words[0] = fb.width;
     out_words[1] = fb.height;
