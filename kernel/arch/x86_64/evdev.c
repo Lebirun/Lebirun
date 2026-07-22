@@ -16,6 +16,8 @@ static dirent_t evdev_dirent;
 
 static uint8_t prev_mouse_buttons = 0;
 
+static void evdev_process_mouse(void);
+
 extern volatile uint64_t tick_count;
 extern uint64_t pit_freq;
 
@@ -125,6 +127,17 @@ int evdev_has_data(struct evdev_device *dev) {
     return dev->head != dev->tail;
 }
 
+int evdev_node_has_data(vfs_node_t *node) {
+    struct evdev_device *dev;
+
+    if (!node) return 0;
+    dev = (struct evdev_device *)node->private_data;
+    if (!dev) return 0;
+    evdev_ensure_ring(dev);
+    if (dev == &evdev_mouse) evdev_process_mouse();
+    return evdev_has_data(dev);
+}
+
 void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, int32_t value) {
     struct input_event ev;
     uint64_t ticks;
@@ -185,11 +198,30 @@ static void evdev_process_mouse(void) {
     }
 }
 
-uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer) {
     struct evdev_device *dev;
     struct input_event ev;
     uint64_t written;
     uint64_t ev_size;
+
+    if (!node || !buffer) return 0;
+    dev = (struct evdev_device *)node->private_data;
+    if (!dev) return 0;
+    evdev_ensure_ring(dev);
+    if (dev == &evdev_mouse) evdev_process_mouse();
+    ev_size = sizeof(struct input_event);
+    written = 0;
+    while (written + ev_size <= size) {
+        if (!evdev_ring_get(dev, &ev)) break;
+        memcpy(buffer + written, &ev, ev_size);
+        written += ev_size;
+    }
+    return written;
+}
+
+uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    struct evdev_device *dev;
+    uint64_t written;
     int guard;
 
     (void)offset;
@@ -214,14 +246,7 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
         guard++;
     }
 
-    ev_size = sizeof(struct input_event);
-    written = 0;
-    while (written + ev_size <= size) {
-        if (!evdev_ring_get(dev, &ev))
-            break;
-        memcpy(buffer + written, &ev, ev_size);
-        written += ev_size;
-    }
+    written = evdev_read_nonblocking(node, size, buffer);
     return written;
 }
 

@@ -2,6 +2,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/panic.h>
+#include <lebirun/evdev.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -435,14 +436,7 @@ static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     if (!pipe) return -ENOMEM;
     if (required > PIPE_BUF_SIZE) required = PIPE_BUF_SIZE;
     if (required == pipe->buf_size) return 0;
-    if (required == 0) {
-        kfree(pipe->buffer);
-        pipe->buffer = NULL;
-        pipe->buf_size = 0;
-        pipe->read_pos = 0;
-        pipe->write_pos = 0;
-        return 0;
-    }
+    if (required == 0) return 0;
     new_buffer = (uint8_t *)kmalloc(required);
     if (!new_buffer) return -ENOMEM;
     for (i = 0; i < pipe->count; i++) {
@@ -471,6 +465,7 @@ static int sys_write(int fd, const char *buf, int len) {
     int heap_buf;
     int result;
     int console_output;
+    uint64_t pipe_flags;
     task_fd_t *tfd;
     vfs_node_t *node;
     pipe_t *p;
@@ -540,7 +535,9 @@ static int sys_write(int fd, const char *buf, int len) {
                 memcpy(kbuf, (const void *)(buf_addr + total), chunk);
                 done = 0;
                 while (done < chunk) {
+                    pipe_flags = pipe_lock_irqsave(p);
                     if (p->readers <= 0) {
+                        pipe_unlock_irqrestore(p, pipe_flags);
                         if (heap_buf) kfree(kbuf);
                         if (total > 0) return (int)total;
                         return -EPIPE;
@@ -549,11 +546,19 @@ static int sys_write(int fd, const char *buf, int len) {
                     if (bytes > PIPE_BUF_SIZE) bytes = PIPE_BUF_SIZE;
                     if (bytes > p->buf_size &&
                         pipe_resize_buffer(p, bytes) < 0 && p->buf_size == 0) {
+                        pipe_unlock_irqrestore(p, pipe_flags);
                         if (heap_buf) kfree(kbuf);
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -ENOMEM;
                     }
+                    if (!p->buffer || p->buf_size == 0) {
+                        pipe_unlock_irqrestore(p, pipe_flags);
+                        if (heap_buf) kfree(kbuf);
+                        if (total > 0 || done > 0) return (int)(total + done);
+                        return -EIO;
+                    }
                     while (p->count == p->buf_size) {
+                        pipe_unlock_irqrestore(p, pipe_flags);
                         if (tfd->flags & VFS_O_NONBLOCK) {
                             if (heap_buf) kfree(kbuf);
                             if (total > 0 || done > 0) return (int)(total + done);
@@ -566,6 +571,13 @@ static int sys_write(int fd, const char *buf, int len) {
                             if (total > 0) return (int)total;
                             return -EINTR;
                         }
+                        pipe_flags = pipe_lock_irqsave(p);
+                        if (p->readers <= 0) {
+                            pipe_unlock_irqrestore(p, pipe_flags);
+                            if (heap_buf) kfree(kbuf);
+                            if (total > 0 || done > 0) return (int)(total + done);
+                            return -EPIPE;
+                        }
                     }
                     space = p->buf_size - p->count;
                     bytes = chunk - done;
@@ -576,6 +588,7 @@ static int sys_write(int fd, const char *buf, int len) {
                     }
                     p->count += bytes;
                     done += bytes;
+                    pipe_unlock_irqrestore(p, pipe_flags);
                     waitq_wake_all(&p->read_waitq);
                 }
                 total += chunk;
@@ -634,6 +647,7 @@ static int sys_read(int fd, char *buf, int len) {
     task_fd_t *tfd;
     vfs_node_t *node;
     pipe_t *p;
+    uint64_t pipe_flags;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -684,21 +698,34 @@ static int sys_read(int fd, char *buf, int len) {
                 if (heap_buf) kfree(kbuf);
                 return -EBADF;
             }
+            pipe_flags = pipe_lock_irqsave(p);
             while (p->count == 0) {
                 if (p->writers <= 0) {
+                    pipe_unlock_irqrestore(p, pipe_flags);
                     if (heap_buf) kfree(kbuf);
                     return 0;
                 }
                 if (tfd->flags & VFS_O_NONBLOCK) {
+                    pipe_unlock_irqrestore(p, pipe_flags);
                     if (heap_buf) kfree(kbuf);
                     return -EAGAIN;
                 }
+                pipe_unlock_irqrestore(p, pipe_flags);
                 waitq_add(&p->read_waitq, current_task);
                 block_current();
                 if (syscall_core_interrupted()) {
                     if (heap_buf) kfree(kbuf);
                     return -EINTR;
                 }
+                pipe_flags = pipe_lock_irqsave(p);
+            }
+            if (!p->buffer || p->buf_size == 0) {
+                p->count = 0;
+                p->read_pos = 0;
+                p->write_pos = 0;
+                pipe_unlock_irqrestore(p, pipe_flags);
+                if (heap_buf) kfree(kbuf);
+                return -EIO;
             }
             avail = p->count;
             to_read = (uint64_t)len;
@@ -709,7 +736,7 @@ static int sys_read(int fd, char *buf, int len) {
                 p->read_pos = (p->read_pos + 1) % p->buf_size;
             }
             p->count -= to_read;
-            pipe_resize_buffer(p, p->count);
+            pipe_unlock_irqrestore(p, pipe_flags);
             waitq_wake_all(&p->write_waitq);
             memcpy((void *)buf_addr, kbuf, to_read);
             if (heap_buf) kfree(kbuf);
@@ -1102,14 +1129,38 @@ int syscall_core_read_for_readv(int fd, char *buf, int len) {
 
 static int sys_read_nb(int fd, char *buf, int len) {
     uint64_t buf_addr;
+    uint64_t bytes;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    struct kernel_termios *t;
+    uint8_t stack_buf[SYS_RW_STACK_BUF];
+    int con_id;
+    int key;
+    char c;
+
     if (!buf || len <= 0) return -1;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
+    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
 
-    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use && current_task->fds[fd].type == FD_TYPE_STDIN) {
-        int con_id = current_task ? current_task->console_id : console_get_current();
-        struct kernel_termios *t;
+    tfd = NULL;
+    if (current_task && current_task->fds && fd >= 0 &&
+        fd < current_task->fds_capacity && current_task->fds[fd].in_use)
+        tfd = &current_task->fds[fd];
+    if (tfd && tfd->type == FD_TYPE_FILE && tfd->node) {
+        node = (vfs_node_t *)tfd->node;
+        if (strcmp(node->name, "event0") == 0 ||
+            strcmp(node->name, "event1") == 0) {
+            if (len > SYS_RW_STACK_BUF) len = SYS_RW_STACK_BUF;
+            bytes = evdev_read_nonblocking(node, (uint64_t)len, stack_buf);
+            if (bytes > 0) memcpy((void *)buf_addr, stack_buf, bytes);
+            return (int)bytes;
+        }
+    }
+
+    if (tfd && tfd->type == FD_TYPE_STDIN) {
+        con_id = current_task ? current_task->console_id : console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
         
@@ -1118,17 +1169,15 @@ static int sys_read_nb(int fd, char *buf, int len) {
         }
 
         t = &tty_termios[con_id];
-        {
-            int key = keyboard_getchar_nb_for(con_id);
-            if (key >= 0) {
-                char c = (char)key;
-                if (t->c_iflag & ISTRIP) c &= 0x7F;
-                if ((t->c_iflag & IGNCR) && c == '\r') return 0;
-                if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
-                else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
-                memcpy((void*)buf_addr, &c, 1);
-                return 1;
-            }
+        key = keyboard_getchar_nb_for(con_id);
+        if (key >= 0) {
+            c = (char)key;
+            if (t->c_iflag & ISTRIP) c &= 0x7F;
+            if ((t->c_iflag & IGNCR) && c == '\r') return 0;
+            if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
+            else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
+            memcpy((void*)buf_addr, &c, 1);
+            return 1;
         }
         return 0;
     }

@@ -217,11 +217,7 @@ static void fd_release_entry(task_fd_t *tfd) {
     memset(tfd, 0, sizeof(*tfd));
 
     if (pipe_to_release) {
-        if (pipe_type == FD_TYPE_PIPE_R) pipe_to_release->readers--;
-        else pipe_to_release->writers--;
-        waitq_wake_all(&pipe_to_release->read_waitq);
-        waitq_wake_all(&pipe_to_release->write_waitq);
-        if (pipe_to_release->readers <= 0 && pipe_to_release->writers <= 0) {
+        if (pipe_release_reference(pipe_to_release, pipe_type)) {
             if (pipe_to_release->buffer) kfree(pipe_to_release->buffer);
             kfree(pipe_to_release);
         }
@@ -244,8 +240,7 @@ static void fd_retain_entry(task_fd_t *tfd) {
     }
     if (tfd->private_data && (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W)) {
         p = (pipe_t *)tfd->private_data;
-        if (tfd->type == FD_TYPE_PIPE_R) p->readers++;
-        else p->writers++;
+        pipe_retain_reference(p, tfd->type);
     }
 }
 
@@ -341,6 +336,7 @@ static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
     memset(p, 0, sizeof(pipe_t));
     waitq_init(&p->read_waitq);
     waitq_init(&p->write_waitq);
+    spinlock_init(&p->lock);
     p->readers = 1;
     p->writers = 1;
     rfd = fd_alloc();
@@ -1355,6 +1351,7 @@ static int sys_pipe2(int *pipefd, int flags) {
     memset(p, 0, sizeof(pipe_t));
     waitq_init(&p->read_waitq);
     waitq_init(&p->write_waitq);
+    spinlock_init(&p->lock);
     p->readers = 1;
     p->writers = 1;
     rfd = fd_alloc();

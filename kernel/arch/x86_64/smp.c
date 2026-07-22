@@ -29,6 +29,7 @@ volatile int cpus_booted = 0;
 volatile int smp_percpu_irq_ready = 0;
 static volatile int smp_scheduler_ready = 0;
 static volatile int smp_gs_ready = 0;
+static void smp_set_cpu_base(cpu_info_t *cpu);
 static volatile int smp_tlb_flush_lock = 0;
 static volatile int smp_tlb_flush_acks = 0;
 
@@ -388,10 +389,21 @@ int smp_processor_id(void) {
 cpu_info_t *smp_this_cpu(void) {
     cpu_info_t *cpu;
     int idx;
+    int i;
 
     if (smp_gs_ready) {
         __asm__ volatile ("movq %%gs:0, %0" : "=r"(cpu));
-        return cpu;
+        if (cpus && cpu_count > 0) {
+            for (i = 0; i < cpu_count; i++) {
+                if (cpu == &cpus[i]) return cpu;
+            }
+            idx = smp_processor_id();
+            if (idx < 0 || idx >= cpu_count) idx = 0;
+            cpu = &cpus[idx];
+            cpu->self = cpu;
+            smp_set_cpu_base(cpu);
+            return cpu;
+        }
     }
     idx = smp_processor_id();
     return &cpus[idx];

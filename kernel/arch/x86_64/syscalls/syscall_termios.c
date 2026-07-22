@@ -58,7 +58,6 @@ struct kernel_winsize *tty_winsize;
 int *tty_pgrp;
 int tty_count;
 
-static int vt_kd_mode = KD_TEXT;
 static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
 
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
@@ -107,8 +106,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     if (current_task->fds[oldfd].private_data &&
         (current_task->fds[oldfd].type == FD_TYPE_PIPE_R || current_task->fds[oldfd].type == FD_TYPE_PIPE_W)) {
         p = (pipe_t *)current_task->fds[oldfd].private_data;
-        if (current_task->fds[oldfd].type == FD_TYPE_PIPE_R) p->readers++;
-        else p->writers++;
+        pipe_retain_reference(p, current_task->fds[oldfd].type);
     }
 
     (void)cmd;
@@ -252,7 +250,11 @@ static int sys_tcsetattr(int fd, const char *actions_ptr, int termios_ptr) {
 static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     unsigned long request;
     int tty_id;
+    int graphics_result;
     int pty_fd;
+    task_fd_t *tfd;
+    uint64_t node_addr;
+    vfs_node_t *vn;
 
     request = (unsigned long)(uintptr_t)request_ptr;
 
@@ -262,8 +264,8 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     }
 
     if (current_task->fds[fd].in_use) {
-        task_fd_t *tfd = &current_task->fds[fd];
-        uint64_t node_addr = (uint64_t)tfd->node;
+        tfd = &current_task->fds[fd];
+        node_addr = (uint64_t)tfd->node;
         if (node_addr && ((node_addr & 0xFFFFFF00) == 0xFEFEFE00)) {
             tfd->node = NULL;
         }
@@ -279,7 +281,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     }
 
     if (current_task->fds[fd].in_use && current_task->fds[fd].node) {
-        vfs_node_t *vn = (vfs_node_t *)current_task->fds[fd].node;
+        vn = (vfs_node_t *)current_task->fds[fd].node;
         if (vn->ioctl) {
             return vn->ioctl(vn, request, (void *)(uintptr_t)arg);
         }
@@ -468,12 +470,20 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             return 0;
 
         case KDSETMODE:
-            vt_kd_mode = arg;
+            if (arg != KD_TEXT && arg != KD_GRAPHICS) return -EINVAL;
+            if (!tty_valid_id(tty_id)) return -ENOTTY;
+            graphics_result = console_set_graphics_mode(
+                tty_id, arg == KD_GRAPHICS,
+                current_task ? current_task->pid : 0);
+            if (graphics_result == -2) return -EBUSY;
+            if (graphics_result != 0) return -ENODEV;
             return 0;
 
         case KDGETMODE:
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
-            *(int *)(uintptr_t)arg = vt_kd_mode;
+            if (!tty_valid_id(tty_id)) return -ENOTTY;
+            *(int *)(uintptr_t)arg = console_get_graphics_mode(tty_id) ?
+                                     KD_GRAPHICS : KD_TEXT;
             return 0;
 
         case KDMKTONE:

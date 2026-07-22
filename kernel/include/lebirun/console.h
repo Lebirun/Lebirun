@@ -54,6 +54,9 @@ typedef struct {
     uint64_t alt_saved_cx;
     uint64_t alt_saved_cy;
     uint64_t alt_saved_scroll;
+
+    int graphics_mode;
+    int graphics_owner_pid;
 } console_t;
 
 void console_init(void);
@@ -85,5 +88,8 @@ int console_alt_screen_active(int n);
 void console_reclaim_unused(void);
 void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t *attr);
+int console_set_graphics_mode(int console_num, int enabled, int owner_pid);
+int console_get_graphics_mode(int console_num);
+void console_release_graphics_owner(int owner_pid);
 
 #endif

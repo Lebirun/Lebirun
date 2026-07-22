@@ -374,11 +374,7 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         p = (pipe_t *)tfd->private_data;
         if (p) {
-            if (tfd->type == FD_TYPE_PIPE_R) p->readers--;
-            else p->writers--;
-            waitq_wake_all(&p->read_waitq);
-            waitq_wake_all(&p->write_waitq);
-            if (p->readers <= 0 && p->writers <= 0) {
+            if (pipe_release_reference(p, tfd->type)) {
                 if (p->buffer) kfree(p->buffer);
                 kfree(p);
             }

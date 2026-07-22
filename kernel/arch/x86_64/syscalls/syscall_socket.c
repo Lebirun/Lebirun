@@ -217,11 +217,7 @@ static void socket_release_pending_fd(task_fd_t *fd) {
         vfs_close((vfs_node_t *)fd->node);
     } else if ((fd->type == FD_TYPE_PIPE_R || fd->type == FD_TYPE_PIPE_W) && fd->private_data) {
         pipe = (pipe_t *)fd->private_data;
-        if (fd->type == FD_TYPE_PIPE_R) pipe->readers--;
-        else pipe->writers--;
-        waitq_wake_all(&pipe->read_waitq);
-        waitq_wake_all(&pipe->write_waitq);
-        if (pipe->readers <= 0 && pipe->writers <= 0) {
+        if (pipe_release_reference(pipe, fd->type)) {
             if (pipe->buffer) kfree(pipe->buffer);
             kfree(pipe);
         }
@@ -1111,8 +1107,7 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                 }
                 if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
                     passed_pipe = (pipe_t *)src_tfd->private_data;
-                    if (src_tfd->type == FD_TYPE_PIPE_R) passed_pipe->readers++;
-                    else passed_pipe->writers++;
+                    pipe_retain_reference(passed_pipe, src_tfd->type);
                 }
                 peer->pending_fd_count++;
             }

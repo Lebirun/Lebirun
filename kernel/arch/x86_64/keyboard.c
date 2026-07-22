@@ -30,6 +30,8 @@ static bool e0_prefix = false;
 
 static keyboard_observer_t kbd_observer = NULL;
 
+extern void serial_write_direct(const char *buf, size_t len);
+
 int keyboard_get_modifier_state(void) {
     int state = 0;
     if (ctrl_pressed) state |= 1;
@@ -197,10 +199,23 @@ int getchar(void) {
 }
 
 void keyboard_handler(registers_t* regs) {
-    (void)regs;
-
-    uint8_t scancode = inb(0x60);
+    static const char *f6_seqs[] = {
+        "\033[17~", "\033[18~", "\033[19~", "\033[20~", "\033[21~"
+    };
+    struct keyboard_event kev;
+    uint8_t scancode;
+    uint8_t code;
     int was_e0;
+    int console_num;
+    int cur;
+    bool is_release;
+    bool shift;
+    char seq[4];
+    char cc;
+    char c;
+
+    (void)regs;
+    scancode = inb(0x60);
 
     if (scancode == 0xE0) {
         e0_prefix = true;
@@ -210,11 +225,10 @@ void keyboard_handler(registers_t* regs) {
     was_e0 = e0_prefix;
     e0_prefix = false;
 
-    bool is_release = (scancode & 0x80) != 0;
-    uint8_t code = scancode & 0x7F;
+    is_release = (scancode & 0x80) != 0;
+    code = scancode & 0x7F;
 
     if (kbd_observer) {
-        struct keyboard_event kev;
         kev.scancode = code;
         kev.is_release = is_release ? 1 : 0;
         kev.ctrl_held = ctrl_pressed ? 1 : 0;
@@ -231,6 +245,8 @@ void keyboard_handler(registers_t* regs) {
         }
         if (code == SCANCODE_CTRL) { ctrl_pressed = true; return; }
         if (code == SCANCODE_ALT) { alt_pressed = true; return; }
+        if (console_is_initialized() &&
+            console_get_graphics_mode(console_get_current())) return;
         if (code == 0x48) { buffer_put_seq("\033[A", 3); goto wake; }
         if (code == 0x50) { buffer_put_seq("\033[B", 3); goto wake; }
         if (code == 0x4D) { buffer_put_seq("\033[C", 3); goto wake; }
@@ -256,7 +272,7 @@ void keyboard_handler(registers_t* regs) {
     if (code == SCANCODE_CAPS) { caps_lock = !caps_lock; return; }
 
     if (ctrl_pressed && alt_pressed) {
-        int console_num = -1;
+        console_num = -1;
         if (code == SCANCODE_F1) console_num = 0;
         else if (code == SCANCODE_F2) console_num = 1;
         else if (code == SCANCODE_F3) console_num = 2;
@@ -275,8 +291,10 @@ void keyboard_handler(registers_t* regs) {
         }
     }
 
+    if (console_is_initialized() &&
+        console_get_graphics_mode(console_get_current())) return;
+
     if (code >= 0x3B && code <= 0x3F && !ctrl_pressed && !alt_pressed) {
-        char seq[4];
         seq[0] = '\033';
         seq[1] = '[';
         seq[2] = '[';
@@ -285,9 +303,6 @@ void keyboard_handler(registers_t* regs) {
         goto wake;
     }
     if (code >= 0x40 && code <= 0x44 && !ctrl_pressed && !alt_pressed) {
-        static const char *f6_seqs[] = {
-            "\033[17~", "\033[18~", "\033[19~", "\033[20~", "\033[21~"
-        };
         buffer_put_seq(f6_seqs[code - 0x40], 5);
         goto wake;
     }
@@ -301,11 +316,10 @@ void keyboard_handler(registers_t* regs) {
     }
 
     if (ctrl_pressed && code == SCANCODE_C) {
-        int cur = console_is_initialized() ? console_get_current() : 0;
+        cur = console_is_initialized() ? console_get_current() : 0;
         if (cur >= 0 && cur < kbd_num_consoles)
             kbd_consoles[cur].sigint_pending = 1;
         if (cur == 0) {
-            extern void serial_write_direct(const char *buf, size_t len);
             serial_write_direct("^C\n", 3);
         }
         console_write_to_fb_only(cur, "^C\n", 3);
@@ -314,15 +328,15 @@ void keyboard_handler(registers_t* regs) {
     }
 
     if (ctrl_pressed) {
-        char cc = qwerty_lowercase[code];
+        cc = qwerty_lowercase[code];
         if (cc >= 'a' && cc <= 'z') {
             buffer_put((char)(cc - 'a' + 1));
             goto wake;
         }
     }
 
-    bool shift = shift_is_down();
-    char c = qwerty_lowercase[code];
+    shift = shift_is_down();
+    c = qwerty_lowercase[code];
     if (!is_alpha(c) && shift) {
         c = qwerty_uppercase[code];
     }
@@ -334,11 +348,9 @@ void keyboard_handler(registers_t* regs) {
     return;
 
 wake:
-    {
-        int cur = console_is_initialized() ? console_get_current() : 0;
-        if (cur >= 0 && cur < kbd_num_consoles)
-            waitq_wake_all(&kbd_consoles[cur].waitq);
-    }
+    cur = console_is_initialized() ? console_get_current() : 0;
+    if (cur >= 0 && cur < kbd_num_consoles)
+        waitq_wake_all(&kbd_consoles[cur].waitq);
 }
 
 void keyboard_init(void) {

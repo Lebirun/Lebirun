@@ -1,5 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/pit.h>
+#include <lebirun/mouse.h>
+#include <lebirun/evdev.h>
 
 typedef unsigned long fd_mask;
 #define NFDBITS (sizeof(fd_mask) * 8)
@@ -21,6 +23,10 @@ static int select_interrupted(void) {
 static int check_fd_readable(int fd) {
     int con_id;
     int sevents;
+    vfs_node_t *node;
+    uint64_t pipe_flags;
+    pipe_t *pipe;
+    int readable;
 
     if (fd < 0 || !current_task) return 0;
 
@@ -44,13 +50,20 @@ static int check_fd_readable(int fd) {
         return keyboard_has_data_for(con_id) ? 1 : 0;
     }
     if (current_task->fds[fd].type == FD_TYPE_PIPE_R) {
-        pipe_t *p = (pipe_t *)current_task->fds[fd].private_data;
-        if (!p) return 0;
-        if (p->count > 0) return 1;
-        if (p->writers <= 0) return 1;
-        return 0;
+        pipe = (pipe_t *)current_task->fds[fd].private_data;
+        if (!pipe) return 0;
+        pipe_flags = pipe_lock_irqsave(pipe);
+        readable = pipe->count > 0 || pipe->writers <= 0;
+        pipe_unlock_irqrestore(pipe, pipe_flags);
+        return readable;
     }
     if (current_task->fds[fd].type == FD_TYPE_FILE) {
+        node = (vfs_node_t *)current_task->fds[fd].node;
+        if (node && strcmp(node->name, "mice") == 0)
+            return mouse_has_data() ? 1 : 0;
+        if (node && (strcmp(node->name, "event0") == 0 ||
+                     strcmp(node->name, "event1") == 0))
+            return evdev_node_has_data(node);
         return 1;
     }
     return 0;
@@ -58,6 +71,9 @@ static int check_fd_readable(int fd) {
 
 static int check_fd_writable(int fd) {
     int sevents;
+    uint64_t pipe_flags;
+    pipe_t *pipe;
+    int writable;
 
     if (fd < 0 || !current_task) return 0;
 
@@ -75,11 +91,12 @@ static int check_fd_writable(int fd) {
         return 1;
     }
     if (current_task->fds[fd].type == FD_TYPE_PIPE_W) {
-        pipe_t *p = (pipe_t *)current_task->fds[fd].private_data;
-        if (!p) return 0;
-        if (p->readers <= 0) return 1;
-        if (p->count < PIPE_BUF_SIZE) return 1;
-        return 0;
+        pipe = (pipe_t *)current_task->fds[fd].private_data;
+        if (!pipe) return 0;
+        pipe_flags = pipe_lock_irqsave(pipe);
+        writable = pipe->readers <= 0 || pipe->count < PIPE_BUF_SIZE;
+        pipe_unlock_irqrestore(pipe, pipe_flags);
+        return writable;
     }
     if (current_task->fds[fd].type == FD_TYPE_FILE) {
         return 1;
@@ -105,6 +122,7 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
     uint64_t timeout_ticks;
     int count;
     int fd;
+    struct kernel_timeval *tv;
 
     (void)exceptfds_ptr;
     (void)unused;
@@ -147,13 +165,15 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
 
     timeout_ms = -1;
     if (timeout_addr && timeout_addr < KERNEL_VMA && timeout_addr >= 0x1000) {
-        struct kernel_timeval *tv = (struct kernel_timeval *)timeout_addr;
+        tv = (struct kernel_timeval *)timeout_addr;
         timeout_ms = (int)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
         if (timeout_ms < 0) timeout_ms = 0;
     }
 
     start_tick = tick_count;
-    timeout_ticks = (timeout_ms > 0) ? ((uint64_t)timeout_ms * pit_freq / 1000) : 0;
+    timeout_ticks = (timeout_ms > 0) ?
+                    (((uint64_t)timeout_ms * pit_freq + 999) / 1000) : 0;
+    if (timeout_ms > 0 && timeout_ticks == 0) timeout_ticks = 1;
 
     do {
         memset(result_read, 0, set_bytes);
@@ -187,7 +207,7 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
             kfree(in_read);
             return -EINTR;
         }
-        schedule();
+        sleep_ticks(1);
         if (select_interrupted()) {
             kfree(in_read);
             return -EINTR;
@@ -236,7 +256,9 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
 
     fds = (struct pollfd_k *)addr;
     start_tick = tick_count;
-    timeout_ticks = (timeout > 0) ? ((uint64_t)timeout * pit_freq / 1000) : 0;
+    timeout_ticks = (timeout > 0) ?
+                    (((uint64_t)timeout * pit_freq + 999) / 1000) : 0;
+    if (timeout > 0 && timeout_ticks == 0) timeout_ticks = 1;
     ready_count = 0;
 
     do {
@@ -297,7 +319,7 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
         if (select_interrupted()) {
             return -EINTR;
         }
-        schedule();
+        sleep_ticks(1);
         if (select_interrupted()) {
             return -EINTR;
         }

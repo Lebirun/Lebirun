@@ -183,6 +183,7 @@ void evdev_init(void);
 void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, int32_t value);
 void evdev_push_sync(struct evdev_device *dev);
 int evdev_has_data(struct evdev_device *dev);
+int evdev_node_has_data(vfs_node_t *node);
 
 struct evdev_device *evdev_get_kbd(void);
 struct evdev_device *evdev_get_mouse(void);
@@ -191,6 +192,7 @@ vfs_node_t *evdev_get_input_dir(void);
 vfs_node_t *evdev_get_event_node(int index);
 
 uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer);
 uint64_t evdev_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg);
 

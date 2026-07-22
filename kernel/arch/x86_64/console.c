@@ -41,6 +41,10 @@ static char (*console_redraw_buffer)[CONSOLE_BUFFER_COLS];
 static uint8_t (*console_redraw_color_buffer)[CONSOLE_BUFFER_COLS];
 static uint64_t console_redraw_buffer_rows = 0;
 
+static inline uint64_t console_irqsave(void);
+static inline void console_irqrestore(uint64_t flags);
+static void console_fast_redraw_locked(int console_num);
+
 static uint64_t console_calc_rows(void) {
     uint64_t r;
     framebuffer_t *fb;
@@ -64,6 +68,84 @@ static int console_valid_index(int n) {
     if (!consoles) return 0;
     if (n < 0 || n >= console_count) return 0;
     return 1;
+}
+
+int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
+    console_t *con;
+    framebuffer_t *fb;
+    uint64_t flags;
+    int redraw;
+
+    if (!console_valid_index(console_num)) return -1;
+    con = &consoles[console_num];
+    fb = fb_get();
+    redraw = 0;
+    if (enabled && (!fb || !fb->addr)) return -1;
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    if (enabled) {
+        if (con->graphics_mode && con->graphics_owner_pid != owner_pid) {
+            spin_unlock(&console_lock);
+            console_irqrestore(flags);
+            return -2;
+        }
+        con->graphics_mode = 1;
+        con->graphics_owner_pid = owner_pid;
+        if (console_num == current_console) {
+            console_redraw_pending = 0;
+            console_switch_in_progress = 0;
+            console_switching = 0;
+        }
+    } else {
+        if (con->graphics_mode && con->graphics_owner_pid > 0 &&
+            con->graphics_owner_pid != owner_pid) {
+            spin_unlock(&console_lock);
+            console_irqrestore(flags);
+            return -2;
+        }
+        con->graphics_mode = 0;
+        con->graphics_owner_pid = 0;
+        redraw = console_num == current_console;
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+    if (enabled && console_num == current_console)
+        fb_set_cursor_hidden(1);
+    if (redraw) {
+        fb_set_cursor_hidden(!con->cursor_visible);
+        console_force_redraw();
+    }
+    return 0;
+}
+
+int console_get_graphics_mode(int console_num) {
+    if (!console_valid_index(console_num)) return 0;
+    return consoles[console_num].graphics_mode;
+}
+
+void console_release_graphics_owner(int owner_pid) {
+    int console_num;
+    int redraw;
+    uint64_t flags;
+
+    if (owner_pid <= 0) return;
+    redraw = 0;
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    for (console_num = 0; console_num < console_count; console_num++) {
+        if (consoles[console_num].graphics_mode &&
+            consoles[console_num].graphics_owner_pid == owner_pid) {
+            consoles[console_num].graphics_mode = 0;
+            consoles[console_num].graphics_owner_pid = 0;
+            if (console_num == current_console) redraw = 1;
+        }
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
+    if (redraw) {
+        fb_set_cursor_hidden(0);
+        console_force_redraw();
+    }
 }
 
 static int console_ensure_pool(void) {
@@ -158,10 +240,6 @@ static int console_ensure_write_buffer(console_t *con) {
 int console_alloc(int n) {
     return console_ensure_alloc(n);
 }
-
-static inline uint64_t console_irqsave(void);
-static inline void console_irqrestore(uint64_t flags);
-static void console_fast_redraw_locked(int console_num);
 
 int console_alt_screen_active(int n) {
     if (!console_valid_index(n)) return 0;
@@ -270,7 +348,7 @@ static void console_process_alt_screen_pending(int console_num) {
         console_leave_alt_screen(con);
     }
 
-    if (console_num == current_console) {
+    if (console_num == current_console && !con->graphics_mode) {
         console_fast_redraw_locked(console_num);
     }
 }
@@ -858,7 +936,21 @@ static void console_redraw_step(uint64_t max_rows) {
 }
 
 void console_tick_redraw(void) {
+    uint64_t flags;
+
     if (!console_redraw_pending) return;
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    if (consoles[current_console].graphics_mode) {
+        console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
     console_redraw_step(8);
 }
 
@@ -1261,6 +1353,8 @@ void console_init(void) {
         con->alt_saved_cx = 0;
         con->alt_saved_cy = 0;
         con->alt_saved_scroll = 0;
+        con->graphics_mode = 0;
+        con->graphics_owner_pid = 0;
     }
     
     alloc_ok = console_ensure_alloc(0);
@@ -1284,6 +1378,7 @@ void console_reinit(void) {
 void console_redraw_current(void) {
     if (!console_initialized) return;
     if (console_switch_in_progress) return;
+    if (console_get_graphics_mode(current_console)) return;
     if (writer_thread_running) {
         console_redraw_prepare(current_console);
         return;
@@ -1293,6 +1388,7 @@ void console_redraw_current(void) {
 
 void console_force_redraw(void) {
     if (!console_initialized) return;
+    if (console_get_graphics_mode(current_console)) return;
     console_switch_in_progress = 0;
     console_redraw_pending = 0;
     console_redraw_sync(current_console);
@@ -1396,6 +1492,17 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     
     spin_unlock(&console_lock);
     console_irqrestore(flags);
+
+    if (new_con->graphics_mode) {
+        fb_set_cursor_hidden(1);
+        flags = console_irqsave();
+        spin_lock(&console_lock);
+        console_switching = 0;
+        console_switch_in_progress = 0;
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
 
     console_redraw_prepare(current_console);
     if (!writer_thread_running && !from_interrupt) {
@@ -1992,7 +2099,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
     
     con = &consoles[console_num];
     fb = fb_get();
-    is_active = (console_num == current_console && !console_switch_in_progress);
+    is_active = (console_num == current_console && !console_switch_in_progress &&
+                 !con->graphics_mode);
     rows = fb ? fb->rows : 25;
     cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 25;
@@ -2376,7 +2484,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
         con = &consoles[target_console];
         fb = fb_get();
-        is_active = (target_console == current_console && !console_switch_in_progress);
+        is_active = (target_console == current_console && !console_switch_in_progress &&
+                     !con->graphics_mode);
         rows = fb ? fb->rows : 25;
         cols = fb ? fb->cols : 80;
         if (rows == 0) rows = 25;
@@ -2676,7 +2785,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         console_batch--;
         if (console_batch == 0 && console_initialized) {
             fb = fb_get();
-            if (fb && (fb->font || fb->rows > 0) && target_console == current_console) {
+            if (fb && (fb->font || fb->rows > 0) && target_console == current_console &&
+                !consoles[target_console].graphics_mode) {
                 if (batch_fb_skip) {
                     console_fast_redraw_locked(target_console);
                 } else {
@@ -2728,7 +2838,7 @@ void console_clear(int console_num) {
     con->cursor_x = 0;
     con->cursor_y = 0;
     
-    if (console_num == current_console) {
+    if (console_num == current_console && !con->graphics_mode) {
         fb = fb_get();
         if (fb) {
             fb_clear();
@@ -2764,7 +2874,7 @@ void console_setcursor(int console_num, int x, int y) {
     con->cursor_x = (uint64_t)x;
     con->cursor_y = (uint64_t)y;
     
-    if (console_num == current_console && fb) {
+    if (console_num == current_console && fb && !con->graphics_mode) {
         fb->cursor_x = con->cursor_x;
         fb->cursor_y = con->cursor_y;
         fb_update_cursor();
@@ -2921,7 +3031,8 @@ static void console_writer_thread(void) {
                 console_grow_buffer(con, rows);
                 if (rows > con->buffer_rows) rows = con->buffer_rows;
                 if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
-                is_active = (i == current_console && !console_switch_in_progress);
+                is_active = (i == current_console && !console_switch_in_progress &&
+                             !con->graphics_mode);
                 wt_fb_ok = is_active && fb && !burst_fb_skip;
                 for (j = 0; j < chunk_size; j++) {
                     c = chunk[j];

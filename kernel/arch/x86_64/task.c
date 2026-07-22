@@ -1299,6 +1299,7 @@ void task_exit_deferred(uint64_t exit_code) {
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : current_task;
     if (!task) return;
+    console_release_graphics_owner(task->pid);
     lock_scheduler();
     if (task->state == TASK_DEAD) {
         unlock_scheduler();
@@ -2461,10 +2462,11 @@ static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
     valid_es = (es_val == 0x10 || es_val == 0x23 || es_val == 0);
     valid_ds = (ds_val == 0x10 || ds_val == 0x23 || ds_val == 0);
     valid_cs = (cs_val == 0x08 || cs_val == 0x1B);
-    valid_rip = (cs_val == 0x08 && task->is_user && rip_val >= KERNEL_VMA) ||
-                (cs_val == 0x08 && !task->is_user &&
-                 rip_val >= (uint64_t)_kernel_text_start && rip_val < (uint64_t)_kernel_text_end) ||
-                (cs_val == 0x1B && rip_val >= 0x1000 && rip_val < KERNEL_VMA);
+    valid_rip = (cs_val == 0x08 &&
+                 rip_val >= (uint64_t)_kernel_text_start &&
+                 rip_val < (uint64_t)_kernel_text_end) ||
+                (cs_val == 0x1B && task->is_user &&
+                 rip_val >= 0x1000 && rip_val < KERNEL_VMA);
     if (!valid_es || !valid_ds || !valid_cs || !valid_rip) return 0;
     if (frame_out) *frame_out = frame;
     return 1;
@@ -2540,10 +2542,11 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     idle_task = NULL;
     switch_to_cpu_idle = 0;
-    this_cpu = smp_this_cpu();
-    if (!this_cpu || !ready_queue_head) return regs;
-    if (!smp_scheduling_enabled()) return regs;
     cpu_id = smp_processor_id();
+    if (!cpus || cpu_id < 0 || cpu_id >= cpu_count) return regs;
+    this_cpu = &cpus[cpu_id];
+    if (!ready_queue_head) return regs;
+    if (!smp_scheduling_enabled()) return regs;
 
     prev_task = this_cpu->running_task;
     run_deferred = 0;
@@ -3000,11 +3003,7 @@ void task_fd_close_all(task_t *task) {
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
-                if (tfd->type == FD_TYPE_PIPE_R) p->readers--;
-                else p->writers--;
-                waitq_wake_all(&p->read_waitq);
-                waitq_wake_all(&p->write_waitq);
-                if (p->readers <= 0 && p->writers <= 0) {
+                if (pipe_release_reference(p, tfd->type)) {
                     if (p->buffer) kfree(p->buffer);
                     kfree(p);
                 }
@@ -3034,11 +3033,7 @@ void task_fd_close_cloexec(task_t *task) {
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
-                if (tfd->type == FD_TYPE_PIPE_R) p->readers--;
-                else p->writers--;
-                waitq_wake_all(&p->read_waitq);
-                waitq_wake_all(&p->write_waitq);
-                if (p->readers <= 0 && p->writers <= 0) {
+                if (pipe_release_reference(p, tfd->type)) {
                     if (p->buffer) kfree(p->buffer);
                     kfree(p);
                 }
@@ -3067,6 +3062,7 @@ pid_t task_fork(registers_t *parent_regs) {
     task_t* parent;
     registers_t *child_frame;
     registers_t parent_frame;
+    pipe_t *child_pipe;
 
     parent = current_task;
     if (!parent || !parent->is_user || !parent_regs) {
@@ -3223,9 +3219,8 @@ pid_t task_fork(registers_t *parent_regs) {
             vfs_open((vfs_node_t *)child->fds[i].node, 0);
         }
         if (child->fds[i].in_use && (child->fds[i].type == FD_TYPE_PIPE_R || child->fds[i].type == FD_TYPE_PIPE_W) && child->fds[i].private_data) {
-            pipe_t *p = (pipe_t *)child->fds[i].private_data;
-            if (child->fds[i].type == FD_TYPE_PIPE_R) p->readers++;
-            else p->writers++;
+            child_pipe = (pipe_t *)child->fds[i].private_data;
+            pipe_retain_reference(child_pipe, child->fds[i].type);
         }
     }
     child->envp = NULL;
