@@ -61,7 +61,7 @@ static inline int test_committed_bit(uint64_t idx) {
     return (demand_committed_bitmap[idx / 8] & (1 << (idx % 8))) != 0;
 }
 
-void demand_paging_init(void) {
+void KERNEL_EARLY_INIT demand_paging_init(void) {
     uint64_t heap_max_size;
     uint8_t *bitmap_storage;
 

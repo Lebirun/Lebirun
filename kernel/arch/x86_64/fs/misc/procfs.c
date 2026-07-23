@@ -8,6 +8,7 @@
 #include <lebirun/vring.h>
 #include <lebirun/overlayfs.h>
 #include <lebirun/squashfs.h>
+#include <lebirun/kstack.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
 #include <string.h>
@@ -157,12 +158,6 @@ static void proc_collect_memory_report(void) {
     squashfs_flush_cache();
     slab_reclaim_empty();
     heap_reclaim_unused();
-    pfa_ref_gc();
-}
-
-static void proc_collect_memory_detail(void) {
-    task_memory_collect_for_report();
-    console_reclaim_unused();
     pfa_ref_gc();
 }
 
@@ -980,12 +975,14 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t early_heap_used_kb;
     uint64_t console_buffers;
     uint64_t console_bytes;
+    uint64_t kstack_slots;
+    uint64_t kstack_pages;
     int add;
     task_mem_stats_t task_stats;
 
     (void)node;
 
-    if (offset == 0) proc_collect_memory_detail();
+    if (offset == 0) proc_collect_memory_report();
 
     spin_lock(&proc_mem_report_lock);
     task_get_memory_stats(&task_stats);
@@ -993,6 +990,7 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     squashfs_cache_stats(&sqfs_nodes, &sqfs_capacity, &sqfs_bytes, &sqfs_data_bytes);
     squashfs_decomp_stats(&sqfs_decomp_failures, &sqfs_decomp_oversize, &sqfs_decomp_padded);
     console_memory_stats(&console_buffers, &console_bytes);
+    kstack_memory_stats(&kstack_slots, &kstack_pages);
     ref_active_nodes = pfa_ref_active_nodes();
     ref_free_nodes = pfa_ref_free_nodes();
 
@@ -1048,6 +1046,15 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "HeapReservePages:   %8lu\n"
         "HeapUsedBytes:      %8lu\n"
         "HeapTotalBytes:     %8lu\n"
+        "TaskCount:          %8lu\n"
+        "TaskStructBytes:    %8lu\n"
+        "TaskFPUBytes:       %8lu\n"
+        "TaskFDBytes:        %8lu\n"
+        "TaskPageArrayBytes: %8lu\n"
+        "TaskFileMapBytes:   %8lu\n"
+        "KernelStackSlots:   %8lu\n"
+        "KernelStackPages:   %8lu\n"
+        "KernelStackKB:      %8lu\n"
         "SlabPages:          %8lu\n"
         "SlabKB:             %8lu\n"
         "E1000Pages:         %8lu\n"
@@ -1077,7 +1084,6 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "CurrentUserPTPages: %8lu\n"
         "CurrentUserPTKB:    %8lu\n"
         "CurrentELFPages:    %8lu\n"
-        "CurrentELFKB:       %8lu\n"
         "CurrentHeapPages:   %8lu\n"
         "CurrentHeapKB:      %8lu\n"
         "CurrentMmapPages:   %8lu\n"
@@ -1129,6 +1135,15 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         heap_reserved,
         heap_used,
         heap_total,
+        task_stats.task_count,
+        task_stats.task_struct_bytes,
+        task_stats.task_fpu_bytes,
+        task_stats.task_fd_bytes,
+        task_stats.task_page_array_bytes,
+        task_stats.task_file_map_bytes,
+        kstack_slots,
+        kstack_pages,
+        kstack_pages * 4,
         slab_pages,
         slab_pages * 4,
         e1000_pages,
@@ -1158,7 +1173,6 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         task_stats.current_user_pt_pages,
         task_stats.current_user_pt_pages * 4,
         current_elf_pages,
-        current_elf_pages * 4,
         task_stats.current_heap_pages,
         task_stats.current_heap_pages * 4,
         task_stats.current_mmap_pages,
@@ -1688,7 +1702,7 @@ static int procfs_unmount(vfs_node_t *node) {
 
 static vfs_fs_type_t procfs_type;
 
-void procfs_init(void) {
+void KERNEL_INIT procfs_init(void) {
     procfs_type.name = "procfs";
     procfs_type.mount = procfs_mount;
     procfs_type.unmount = procfs_unmount;

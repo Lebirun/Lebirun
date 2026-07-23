@@ -8,6 +8,8 @@ extern int is_socket_fd(int fd);
 extern int socket_close_fd(int fd);
 extern int is_epoll_special_fd(int fd);
 extern int epoll_close_fd(int fd);
+extern int event_descriptor_read(int fd, void *buffer, int length);
+extern int event_descriptor_write(int fd, const void *buffer, int length);
 
 #define VFS_RW_STACK_BUF 512
 #define VFS_RW_HEAP_LIMIT 4096
@@ -106,6 +108,7 @@ static int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t gid;
     int shift;
     int allowed;
+    int i;
 
     if (!current_task) return -ESRCH;
     if (!node) return -ENOENT;
@@ -119,10 +122,12 @@ static int vfs_check_perm(vfs_node_t *node, int want) {
 
     if (uid == node->uid) {
         shift = 6;
-    } else if (gid == node->gid) {
-        shift = 3;
     } else {
-        shift = 0;
+        shift = gid == node->gid ? 3 : 0;
+        for (i = 0; current_task->groups && shift == 0 &&
+             i < current_task->ngroups; i++) {
+            if (current_task->groups[i] == node->gid) shift = 3;
+        }
     }
 
     allowed = (int)((mode >> shift) & 7);
@@ -410,6 +415,8 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     task_fd_t *tfd;
     vfs_node_t *node;
 
+    if (is_epoll_special_fd(fd))
+        return event_descriptor_read(fd, (void *)buf, len);
     if (!buf || len <= 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
@@ -422,23 +429,6 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
-    if (VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) {
-        total = 0;
-        remaining = (uint64_t)len;
-        while (remaining > 0) {
-            chunk = remaining;
-            if (chunk > VFS_BLOCK_IO_CHUNK) chunk = VFS_BLOCK_IO_CHUNK;
-            bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk,
-                             (uint8_t *)(buf_addr + total));
-            if (bytes > chunk) bytes = chunk;
-            if (bytes == 0) break;
-            total += bytes;
-            remaining -= bytes;
-            if (bytes < chunk) break;
-        }
-        task_fd_position_add(tfd, total);
-        return (int)total;
-    }
     work_size = (uint64_t)len;
     if (tfd->flags & VFS_O_APPEND) {
         task_fd_position_set(tfd, node->length);
@@ -460,7 +450,11 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
         bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
         if (bytes > chunk) bytes = chunk;
         if (bytes == 0) break;
-        memcpy((void *)(buf_addr + total), kbuf, bytes);
+        if (copy_to_user((void *)(uintptr_t)(buf_addr + total), kbuf,
+                         bytes) < 0) {
+            if (heap_buf) kfree(kbuf);
+            return -EFAULT;
+        }
         total += bytes;
         remaining -= bytes;
         if (bytes < chunk) break;
@@ -559,6 +553,8 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     task_fd_t *tfd;
     vfs_node_t *node;
 
+    if (is_epoll_special_fd(fd))
+        return event_descriptor_write(fd, buf, len);
     if (!buf || len <= 0) return -EINVAL;
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
@@ -571,23 +567,6 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
-    if (VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) {
-        total = 0;
-        remaining = (uint64_t)len;
-        while (remaining > 0) {
-            chunk = remaining;
-            if (chunk > VFS_BLOCK_IO_CHUNK) chunk = VFS_BLOCK_IO_CHUNK;
-            bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk,
-                              (uint8_t *)(buf_addr + total));
-            if (bytes > chunk) bytes = chunk;
-            if (bytes == 0) break;
-            total += bytes;
-            remaining -= bytes;
-            if (bytes < chunk) break;
-        }
-        task_fd_position_add(tfd, total);
-        return (int)total;
-    }
     work_size = (uint64_t)len;
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;
@@ -603,7 +582,11 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     while (remaining > 0) {
         chunk = remaining;
         if (chunk > work_size) chunk = work_size;
-        memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+        if (copy_from_user(kbuf, (const void *)(uintptr_t)(buf_addr + total),
+                           chunk) < 0) {
+            if (heap_buf) kfree(kbuf);
+            return -EFAULT;
+        }
         bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
         if (bytes > chunk) bytes = chunk;
         if (bytes == 0) break;

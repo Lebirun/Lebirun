@@ -65,6 +65,11 @@ TAGS
 .config
 .lebconfig_settings
 !root/
+/root/bin/
+/root/sbin/
+/root/init
+/root/usr/
+/root/etc/lebpkg/installed/
 
 AGENTS.md
 .codex

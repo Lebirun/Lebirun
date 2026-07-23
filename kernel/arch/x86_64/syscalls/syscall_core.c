@@ -10,6 +10,9 @@ extern int task_has_pending_signals(void);
 extern int is_socket_fd(int fd);
 extern int socket_write(int fd, const void *buf, int len);
 extern int socket_read(int fd, void *buf, int len);
+extern int is_epoll_special_fd(int fd);
+extern int event_descriptor_write(int fd, const void *buffer, int length);
+extern int event_descriptor_read(int fd, void *buffer, int length);
 
 #define LINE_BUF_SIZE 256
 static char **line_buffers;
@@ -477,6 +480,8 @@ static int sys_write(int fd, const char *buf, int len) {
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (is_epoll_special_fd(fd))
+        return event_descriptor_write(fd, buf, len);
 
     tfd = NULL;
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
@@ -656,6 +661,8 @@ static int sys_read(int fd, char *buf, int len) {
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
     if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (is_epoll_special_fd(fd))
+        return event_descriptor_read(fd, buf, len);
 
     work_size = (uint64_t)len;
     if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;

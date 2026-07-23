@@ -98,20 +98,6 @@ static int user_range_mapped(uint64_t addr, uint64_t size) {
     return 1;
 }
 
-static int copy_from_user(void *dst, uint64_t src_user, uint64_t size) {
-    if (!dst || size == 0) return -1;
-    if (!user_range_mapped(src_user, size)) return -1;
-    memcpy(dst, (const void *)src_user, size);
-    return 0;
-}
-
-static int copy_to_user(uint64_t dst_user, const void *src, uint64_t size) {
-    if (!src || size == 0) return -1;
-    if (!user_range_mapped(dst_user, size)) return -1;
-    memcpy((void *)dst_user, src, size);
-    return 0;
-}
-
 static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) {
     uint64_t addr;
     uint64_t pd;
@@ -237,7 +223,8 @@ static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
                resolved.octets[2], resolved.octets[3]);
         if (result_ptr) {
             uint64_t out = ipv4_to_u32(resolved);
-            if (copy_to_user((uint64_t)result_ptr, &out, sizeof(out)) != 0) return -1;
+            if (copy_to_user((void *)(uintptr_t)result_ptr, &out,
+                             sizeof(out)) != 0) return -1;
         }
     } else {
         klog("DNS: Failed to resolve %s\n", hostbuf);
@@ -349,7 +336,8 @@ static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
     info.link_up = netif->link_up;
     info.dhcp_configured = netif->dhcp_configured;
 
-    if (copy_to_user((uint64_t)buf_ptr, &info, sizeof(info)) != 0) return -1;
+    if (copy_to_user((void *)(uintptr_t)buf_ptr, &info,
+                     sizeof(info)) != 0) return -1;
     
     klog("netinfo: %s ip=%u.%u.%u.%u\n", netif->name, netif->ipv4.octets[0], netif->ipv4.octets[1], netif->ipv4.octets[2], netif->ipv4.octets[3]);
 
@@ -433,7 +421,8 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     if (!req_ptr) return -1;
     net_ensure_hw();
 
-    if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
+    if (copy_from_user(&req, (const void *)(uintptr_t)req_ptr,
+                       sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
 
     url_buf = (char *)kmalloc(512);
@@ -533,7 +522,8 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
     if (!req_ptr) return -1;
     net_ensure_hw();
 
-    if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
+    if (copy_from_user(&req, (const void *)(uintptr_t)req_ptr,
+                       sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
 
     url_buf = (char *)kmalloc(512);
@@ -632,7 +622,8 @@ static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2)
     if (!current_task) return -1;
     net_ensure_hw();
 
-    if (copy_from_user(&req, (uint64_t)req_ptr, sizeof(req)) != 0) return -1;
+    if (copy_from_user(&req, (const void *)(uintptr_t)req_ptr,
+                       sizeof(req)) != 0) return -1;
     if (!req.url || !req.out_buffer || !req.out_size) return -1;
 
     url_buf = (char *)kmalloc(512);

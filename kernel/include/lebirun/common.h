@@ -6,6 +6,9 @@
 #include <stdbool.h>
 #include <lebirun/io.h>
 
+#define KERNEL_EARLY_INIT __attribute__((section(".init.early.text")))
+#define KERNEL_INIT __attribute__((section(".init.text")))
+
 #ifndef __pid_t_defined
 typedef int32_t pid_t;
 #define __pid_t_defined

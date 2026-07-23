@@ -6,7 +6,7 @@
 static netif_t *netif_list = NULL;
 static netif_t *netif_default = NULL;
 
-void netif_init(void) {
+void KERNEL_INIT netif_init(void) {
     netif_list = NULL;
     netif_default = NULL;
 }

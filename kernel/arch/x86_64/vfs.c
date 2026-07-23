@@ -5,6 +5,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/inotify.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -120,7 +121,7 @@ static void vfs_reclaim_fds(void) {
     mutex_unlock(&vfs_lock);
 }
 
-void vfs_init(void) {
+void KERNEL_INIT vfs_init(void) {
     mutex_init(&vfs_lock);
 
     mounts_capacity = 0;
@@ -530,12 +531,14 @@ uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buf
 }
 
 uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    uint64_t written;
+
     if (!node || !buffer) return 0;
-    
     if (node->write) {
-        return node->write(node, offset, size, buffer);
+        written = node->write(node, offset, size, buffer);
+        if (written) inotify_notify(node, 0x00000002U, NULL);
+        return written;
     }
-    
     return 0;
 }
 
@@ -891,16 +894,28 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
+    int result;
+
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->create) return parent->create(parent, name, flags);
+    if (parent->create) {
+        result = parent->create(parent, name, flags);
+        if (result == 0) inotify_notify(parent, 0x00000100U, name);
+        return result;
+    }
     return -1;
 }
 
 int vfs_unlink(vfs_node_t *parent, const char *name) {
+    int result;
+
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->unlink) return parent->unlink(parent, name);
+    if (parent->unlink) {
+        result = parent->unlink(parent, name);
+        if (result == 0) inotify_notify(parent, 0x00000200U, name);
+        return result;
+    }
     return -1;
 }
 
@@ -919,9 +934,16 @@ int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_director
 }
 
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
+    int result;
+
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->mkdir) return parent->mkdir(parent, name, perms);
+    if (parent->mkdir) {
+        result = parent->mkdir(parent, name, perms);
+        if (result == 0)
+            inotify_notify(parent, 0x40000100U, name);
+        return result;
+    }
     return -1;
 }
 

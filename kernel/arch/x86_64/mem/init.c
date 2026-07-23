@@ -41,7 +41,7 @@ extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entri
 extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
 extern uint64_t count_free_frames(void);
 
-void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
+void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     struct multiboot2_tag *tag;
     struct multiboot2_tag_basic_meminfo *meminfo;
     struct multiboot2_tag_mmap *mmap_tag;
@@ -249,7 +249,7 @@ void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     }
 }
 
-void pfa_init(void) {
+void KERNEL_EARLY_INIT pfa_init(void) {
     uint64_t kernel_end_phys;
     uint64_t kernel_frames;
     uint64_t total_free_frames;

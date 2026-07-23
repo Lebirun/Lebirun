@@ -145,7 +145,7 @@ wait_queue_t *mouse_get_waitq(void) {
     return &mouse_waitq;
 }
 
-void mouse_init(void) {
+void KERNEL_INIT mouse_init(void) {
     uint8_t ack;
     uint8_t config;
 

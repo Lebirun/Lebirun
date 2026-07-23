@@ -1,4 +1,5 @@
 #include <lebirun/vfs.h>
+#include <lebirun/common.h>
 #include <lebirun/pit.h>
 #include <lebirun/mem_map.h>
 #include <string.h>
@@ -757,7 +758,7 @@ static int sysfs_unmount(vfs_node_t *node) {
 
 static vfs_fs_type_t sysfs_type;
 
-void sysfs_init(void) {
+void KERNEL_INIT sysfs_init(void) {
     sysfs_dirent_index = 0;
     sysfs_dirent_capacity = 0;
     sysfs_dirent_pool = NULL;

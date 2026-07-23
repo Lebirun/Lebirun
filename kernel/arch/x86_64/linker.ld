@@ -30,8 +30,22 @@ SECTIONS
 
     _kernel_start = .;
 
-    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA) {
+    .init.early.text ALIGN(4K) : AT(ADDR(.init.early.text) - KERNEL_VMA) {
         _kernel_text_start = .;
+        _kernel_early_init_start = .;
+        *(.init.early.text .init.early.text.*)
+        . = ALIGN(4K);
+        _kernel_early_init_end = .;
+    } :text
+
+    .init.text ALIGN(4K) : AT(ADDR(.init.text) - KERNEL_VMA) {
+        _kernel_init_start = .;
+        *(.init.text .init.text.*)
+        . = ALIGN(4K);
+        _kernel_init_end = .;
+    } :text
+
+    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA) {
         *(.text .text.*)
         _kernel_text_end = .;
     } :text

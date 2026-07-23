@@ -11,7 +11,7 @@
 
 static uint16_t ip_id_counter = 1;
 
-void ipv4_init(void) {
+void KERNEL_INIT ipv4_init(void) {
     ip_id_counter = 1;
 }
 

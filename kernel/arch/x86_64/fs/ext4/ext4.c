@@ -17,6 +17,83 @@ extern int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *
 static ext4_fs_t *mounted_fs = NULL;
 static ext4_fs_t *ext4_mounts_head = NULL;
 static mutex_t ext4_mounts_lock;
+
+static int ext4_flush_device(ext4_fs_t *fs) {
+    ahci_port_t *port;
+
+    port = ahci_get_port(fs->port_index);
+    if (!port) return -1;
+    return ahci_flush(port);
+}
+
+static int ext4_recover_orphans(ext4_fs_t *fs) {
+    ext4_inode_t inode;
+    uint32_t ino;
+    uint32_t next;
+    uint64_t remaining;
+    int result;
+
+    ino = fs->sb.s_last_orphan;
+    remaining = fs->total_inodes;
+    while (ino != 0 && remaining != 0) {
+        if (ino > fs->total_inodes) return -1;
+        if (ext4_read_inode(fs, ino, &inode) != 0) return -1;
+        next = inode.i_dtime;
+        if (next == ino || next > fs->total_inodes) return -1;
+        if (inode.i_links_count == 0) {
+            result = ext4_file_truncate(fs, ino, 0);
+            if (result != 0) return result;
+            result = ext4_free_inode(fs, ino);
+            if (result != 0) return result;
+        } else {
+            inode.i_dtime = 0;
+            if (ext4_write_inode(fs, ino, &inode) != 0) return -1;
+        }
+        fs->sb.s_last_orphan = next;
+        fs->super_dirty = true;
+        ext4_sync_inodes(fs);
+        if (ext4_sync_blocks(fs) != 0) return -1;
+        if (ext4_write_superblock(fs) != 0) return -1;
+        fs->super_dirty = false;
+        if (ext4_flush_device(fs) != 0) return -1;
+        ino = next;
+        remaining--;
+    }
+    return ino == 0 ? 0 : -1;
+}
+
+static int ext4_prepare_rw_mount(ext4_fs_t *fs) {
+    int needs_recovery;
+
+    needs_recovery = !(fs->sb.s_state & EXT4_VALID_FS);
+    if (fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
+        printf("EXT4: journal replay is required but unsupported\n");
+        return -1;
+    }
+    if (needs_recovery || fs->sb.s_last_orphan != 0) {
+        if (ext4_recover_orphans(fs) != 0) {
+            fs->sb.s_state |= EXT4_ERROR_FS;
+            ext4_write_superblock(fs);
+            ext4_flush_device(fs);
+            return -1;
+        }
+    }
+    fs->sb.s_state &= (uint16_t)~EXT4_VALID_FS;
+    fs->super_dirty = true;
+    if (ext4_write_superblock(fs) != 0) return -1;
+    fs->super_dirty = false;
+    return ext4_flush_device(fs);
+}
+
+static int ext4_mark_clean(ext4_fs_t *fs) {
+    fs->sb.s_state |= EXT4_VALID_FS;
+    fs->sb.s_state &= (uint16_t)~EXT4_ERROR_FS;
+    fs->sb.s_feature_incompat &= ~EXT4_FEATURE_INCOMPAT_RECOVER;
+    fs->super_dirty = true;
+    if (ext4_write_superblock(fs) != 0) return -1;
+    fs->super_dirty = false;
+    return ext4_flush_device(fs);
+}
 static vfs_fs_type_t ext4_fs_type;
 
 typedef struct {
@@ -499,7 +576,7 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     node->ctime = ic->inode.i_ctime;
 
     mode = ic->inode.i_mode;
-    node->mask = mode & 0777;
+    node->mask = mode & 07777;
 
     if ((mode & 0xF000) == EXT4_S_IFDIR) {
         node->flags = VFS_DIRECTORY | VFS_DYNAMIC;
@@ -1083,6 +1160,15 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
         return NULL;
     }
 
+    if (ext4_prepare_rw_mount(fs) != 0) {
+        printf("EXT4: Filesystem recovery failed\n");
+        kfree(fs->group_descs);
+        kfree(fs->block_cache);
+        kfree(fs->inode_cache);
+        kfree(fs);
+        return NULL;
+    }
+
     mp_len = strlen(mountpoint);
     if (mp_len >= VFS_MAX_PATH) {
         mp_len = VFS_MAX_PATH - 1;
@@ -1147,8 +1233,14 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
             fs->super_dirty = false;
         }
     }
-
     ext4_flush_cache(fs);
+
+    if (ext4_mark_clean(fs) != 0) {
+        ext4_mount_list_add_locked(fs);
+        mutex_unlock(&fs->lock);
+        mutex_unlock(&ext4_mounts_lock);
+        return -1;
+    }
 
     ext4_free_vfs_nodes(fs);
 
@@ -1171,7 +1263,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     return 0;
 }
 
-void ext4_init(void) {
+void KERNEL_INIT ext4_init(void) {
     mutex_init(&ext4_mounts_lock);
 }
 
@@ -1245,6 +1337,14 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
         return NULL;
     }
 
+    if (ext4_prepare_rw_mount(fs) != 0) {
+        kfree(fs->group_descs);
+        kfree(fs->block_cache);
+        kfree(fs->inode_cache);
+        kfree(fs);
+        return NULL;
+    }
+
     mp_len = strlen(mountpoint);
     if (mp_len >= VFS_MAX_PATH) {
         mp_len = VFS_MAX_PATH - 1;
@@ -1286,6 +1386,13 @@ int ext4_unmount(ext4_fs_t *fs) {
         }
     }
     ext4_flush_cache(fs);
+
+    if (ext4_mark_clean(fs) != 0) {
+        ext4_mount_list_add_locked(fs);
+        mutex_unlock(&fs->lock);
+        mutex_unlock(&ext4_mounts_lock);
+        return -1;
+    }
 
     ext4_free_vfs_nodes(fs);
 

@@ -66,7 +66,7 @@ static kstack_slot_t *kstack_find_slot_locked(int slot) {
     return NULL;
 }
 
-void kstack_init(void) {
+void KERNEL_INIT kstack_init(void) {
     kstack_slots = NULL;
     spinlock_init(&kstack_lock);
     kstack_initialized = 1;
@@ -185,6 +185,29 @@ void kstack_free(uint8_t *base) {
 }
 
 void kstack_reclaim_unused(void) {
+}
+
+void kstack_memory_stats(uint64_t *slots, uint64_t *pages) {
+    kstack_slot_t *entry;
+    uint64_t slot_count;
+    uint64_t page_count;
+    uint64_t flags;
+    int i;
+
+    slot_count = 0;
+    page_count = 0;
+    kstack_lock_acquire(&flags);
+    entry = kstack_slots;
+    while (entry) {
+        slot_count++;
+        for (i = 0; i < KSTACK_USABLE_PAGES; i++) {
+            if (entry->page_phys[i]) page_count++;
+        }
+        entry = entry->next;
+    }
+    kstack_lock_release(flags);
+    if (slots) *slots = slot_count;
+    if (pages) *pages = page_count;
 }
 
 int kstack_page_fault_handler(uint64_t fault_addr) {

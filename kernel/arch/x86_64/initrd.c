@@ -33,7 +33,7 @@ static inline int initrd_is_root_parent(uint16_t parent_index) {
     return 0;
 }
 
-void initrd_init(uint64_t mods_count, uint64_t mods_addr) {
+void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mods_start_page;
     uint64_t mods_end_page;
     uint64_t mod_start_phys;
@@ -577,7 +577,7 @@ vfs_node_t *initrd_get_vfs_root(void) {
     return initrd_vfs_do_mount(NULL, NULL);
 }
 
-void initrd_vfs_register(void) {
+void KERNEL_INIT initrd_vfs_register(void) {
     initrd_fs_type.name = "initrd";
     initrd_fs_type.mount = initrd_vfs_do_mount;
     initrd_fs_type.unmount = NULL;

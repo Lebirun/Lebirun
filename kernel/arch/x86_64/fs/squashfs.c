@@ -776,7 +776,7 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
     memcpy(snode->vfs.name, name, name_len);
     snode->vfs.name[name_len] = '\0';
     
-    snode->vfs.mask = base->mode & 0777;
+    snode->vfs.mask = base->mode & 07777;
     snode->vfs.uid = base->uid_idx;
     snode->vfs.gid = base->gid_idx;
     snode->vfs.mtime = base->mtime;

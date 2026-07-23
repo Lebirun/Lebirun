@@ -786,7 +786,7 @@ static vfs_node_t *devfs_mount_impl(const char *device, const char *mountpoint) 
     return &devfs_root;
 }
 
-void devfs_init(void) {
+void KERNEL_INIT devfs_init(void) {
     int i;
     int tty_count_local;
     vfs_fs_type_t *fs_type;
@@ -1106,7 +1106,7 @@ int devfs_rescan_partitions(const char *devname) {
     return ptable.count;
 }
 
-void devfs_register_initrd(void) {
+void KERNEL_INIT devfs_register_initrd(void) {
     if (dev_initrd_registered)
         return;
 

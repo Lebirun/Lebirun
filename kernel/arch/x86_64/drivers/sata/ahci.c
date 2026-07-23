@@ -246,7 +246,7 @@ static int ahci_wait_cmd(ahci_port_t *port, int slot, uint64_t timeout_ms) {
     return -1;
 }
 
-int ahci_probe(void) {
+int KERNEL_INIT ahci_probe(void) {
     uint16_t bus;
     uint8_t slot;
     uint8_t func;
@@ -317,7 +317,7 @@ int ahci_probe(void) {
     return -1;
 }
 
-int ahci_port_init(ahci_port_t *port) {
+int KERNEL_INIT ahci_port_init(ahci_port_t *port) {
     uint64_t page_phys;
     uint64_t page_virt;
     uint64_t cmd_list_off;
@@ -376,7 +376,7 @@ int ahci_port_init(ahci_port_t *port) {
     return 0;
 }
 
-int ahci_identify(ahci_port_t *port) {
+int KERNEL_INIT ahci_identify(ahci_port_t *port) {
     printf("AHCI: Identifying device on port %u...\n", port->port_num);
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
@@ -827,7 +827,7 @@ void ahci_debug_info(void) {
     }
 }
 
-int ahci_init(void) {
+int KERNEL_INIT ahci_init(void) {
     static int probed = 0;
     uint64_t abar_phys;
     uint64_t abar_virt;

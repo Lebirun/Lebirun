@@ -2,12 +2,13 @@
 #include <lebirun/io.h>
 #include <lebirun/power.h>
 #include <lebirun/watchdog.h>
+#include <lebirun/common.h>
 
 static inline void outw(uint16_t port, uint16_t value) {
     __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
 }
 
-void power_init(void) {
+void KERNEL_INIT power_init(void) {
 }
 
 void power_shutdown(void) {

@@ -64,7 +64,7 @@ static uint64_t ksym_lookup(const char *name) {
     return 0;
 }
 
-void lke_init(void) {
+void KERNEL_INIT lke_init(void) {
     modules = NULL;
     lke_count = 0;
     ksym_table = NULL;
@@ -531,7 +531,7 @@ static void lke_autoload_entry(char *line, size_t length) {
     if (rc < 0) printf("LKE: autoload failed: %s (%d)\n", line, rc);
 }
 
-void lke_autoload(void) {
+void KERNEL_INIT lke_autoload(void) {
     vfs_node_t *node;
     uint8_t buf[512];
     uint32_t rd;

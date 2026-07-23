@@ -39,7 +39,7 @@ static void terminal_updatecursor(void) {
     outb(0x3D5, (inb(0x3D5) & 0xE0) | 15);
 }
 
-void terminal_initialize(void) {
+void KERNEL_EARLY_INIT terminal_initialize(void) {
 	terminal_row = 0;
 	terminal_column = 0;
 	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -53,7 +53,7 @@ void terminal_initialize(void) {
 	terminal_updatecursor();
 }
 
-void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type) {
+void KERNEL_EARLY_INIT terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type) {
     if (fb_init(addr, width, height, pitch, bpp, type) == 0) {
         use_framebuffer = true;
         fb_set_colors(0xFFAAAAAA, 0xFF000000);
@@ -143,7 +143,7 @@ void terminal_writestring(const char* data) {
 	terminal_write(data, strlen(data));
 }
 
-int terminal_load_psf_font(const void *data, size_t size) {
+int KERNEL_EARLY_INIT terminal_load_psf_font(const void *data, size_t size) {
     if (!use_framebuffer) {
         return -1;
     }
@@ -154,7 +154,7 @@ int terminal_load_psf_font(const void *data, size_t size) {
     return -1;
 }
 
-void terminal_compact_font(uint64_t max_glyphs) {
+void KERNEL_EARLY_INIT terminal_compact_font(uint64_t max_glyphs) {
     uint64_t keep;
     uint64_t copy_size;
     uint8_t *compact;

@@ -218,6 +218,9 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
         if (phdr[i].p_flags & PF_W) {
             flags |= 0x2;
         }
+        if (!(phdr[i].p_flags & PF_X) || (phdr[i].p_flags & PF_W)) {
+            flags |= VMM_PTE_NX;
+        }
 
         vaddr_start = vaddr & ~0xFFFu;
         vaddr_end = (vaddr + memsz + 0xFFF) & ~0xFFFu;
@@ -533,6 +536,9 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
         if (phdr[i].p_flags & PF_W) {
             flags |= 0x2;
         }
+        if (!(phdr[i].p_flags & PF_X) || (phdr[i].p_flags & PF_W)) {
+            flags |= VMM_PTE_NX;
+        }
 
         vaddr_start = vaddr & ~0xFFFu;
         vaddr_end = (vaddr + memsz + 0xFFF) & ~0xFFFu;
@@ -756,6 +762,9 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
         flags = 0x5;
         if (phdr[i].p_flags & PF_W) {
             flags |= 0x2;
+        }
+        if (!(phdr[i].p_flags & PF_X) || (phdr[i].p_flags & PF_W)) {
+            flags |= VMM_PTE_NX;
         }
 
         if (offset + filesz > size) {

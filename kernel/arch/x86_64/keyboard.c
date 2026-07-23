@@ -353,7 +353,7 @@ wake:
         waitq_wake_all(&kbd_consoles[cur].waitq);
 }
 
-void keyboard_init(void) {
+void KERNEL_INIT keyboard_init(void) {
     int i;
     uint8_t cmd;
     uint8_t master_mask;

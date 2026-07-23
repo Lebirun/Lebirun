@@ -1,4 +1,5 @@
 #include <lebirun/cmdline.h>
+#include <lebirun/common.h>
 #include <lebirun/console.h>
 #include <lebirun/mem_map.h>
 #include <string.h>
@@ -49,7 +50,7 @@ static void extract_value(const char *start, char *out, int out_max)
     out[i] = '\0';
 }
 
-void cmdline_parse(const char *cmdline_str)
+void KERNEL_EARLY_INIT cmdline_parse(const char *cmdline_str)
 {
     const char *val;
 

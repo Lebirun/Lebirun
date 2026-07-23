@@ -112,7 +112,7 @@ uint16_t gdt_get_tls_selector(int entry) {
 
 extern void gdt_flush(uint16_t);
 
-void gdt_init(void) {
+void KERNEL_EARLY_INIT gdt_init(void) {
     int i;
     uint64_t tss_base;
     uint16_t ds_selector;
@@ -155,7 +155,7 @@ void gdt_init(void) {
     asm volatile ("ltr %w0" : : "r"(tss_selector) : "memory");
 }
 
-void gdt_init_ap(void *gdt_buf, void *tss_buf, void *kernel_stack) {
+void KERNEL_INIT gdt_init_ap(void *gdt_buf, void *tss_buf, void *kernel_stack) {
     gdt_entry_t *ap_gdt;
     tss64_t *ap_tss;
     gdt_ptr_t ap_gdtp;

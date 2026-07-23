@@ -1,4 +1,5 @@
 #include <lebirun/framebuffer.h>
+#include <lebirun/common.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/drivers/fb/bga.h>
 #include <lebirun/drivers/fb/vga_modes.h>
@@ -555,7 +556,7 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     return 0;
 }
 
-void fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
+void KERNEL_EARLY_INIT fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
     if (font_height == 0) font_height = 16;
 #if CONFIG_DRIVER_VGA
     __asm__ volatile("outw %0, %1" : : "a"((uint16_t)4), "Nd"((uint16_t)0x01CE));

@@ -77,7 +77,7 @@ static ipv6_addr_t ipv6_next_hop(netif_t *netif, ipv6_addr_t dest) {
     return dest;
 }
 
-void ipv6_init(void) {
+void KERNEL_INIT ipv6_init(void) {
     ipv6_neighbors = NULL;
     ipv6_neighbor_capacity = 0;
 }

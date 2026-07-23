@@ -402,7 +402,7 @@ struct evdev_device *evdev_get_mouse(void) {
     return &evdev_mouse;
 }
 
-void evdev_init(void) {
+void KERNEL_INIT evdev_init(void) {
     int i;
 
     memset(&evdev_kbd, 0, sizeof(evdev_kbd));

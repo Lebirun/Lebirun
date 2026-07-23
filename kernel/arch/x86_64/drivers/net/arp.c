@@ -10,7 +10,7 @@
 static arp_entry_t *arp_cache;
 static int arp_cache_capacity;
 
-void arp_init(void) {
+void KERNEL_INIT arp_init(void) {
     arp_cache = NULL;
     arp_cache_capacity = 0;
 }

@@ -77,7 +77,7 @@ void net_ensure_hw(void) {
     }
 }
 
-void net_init(void) {
+void KERNEL_INIT net_init(void) {
     printf("NET: Initializing network stack...\n");
 
     net_hw_initialized = 0;

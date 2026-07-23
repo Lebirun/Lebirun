@@ -1,9 +1,10 @@
 #include <lebirun/psf.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/common.h>
 #include <string.h>
 #include <stdio.h>
 
-static int psf1_load(const void *data, size_t size, psf_font_t *font) {
+static int KERNEL_EARLY_INIT psf1_load(const void *data, size_t size, psf_font_t *font) {
     const psf1_header_t *hdr = (const psf1_header_t *)data;
     
     if (size < sizeof(psf1_header_t)) {
@@ -39,7 +40,7 @@ static int psf1_load(const void *data, size_t size, psf_font_t *font) {
     return 0;
 }
 
-static int psf2_load(const void *data, size_t size, psf_font_t *font) {
+static int KERNEL_EARLY_INIT psf2_load(const void *data, size_t size, psf_font_t *font) {
     const psf2_header_t *hdr = (const psf2_header_t *)data;
     
     if (size < sizeof(psf2_header_t)) {
@@ -77,7 +78,7 @@ static int psf2_load(const void *data, size_t size, psf_font_t *font) {
     return 0; 
 }
 
-int psf_load(const void *data, size_t size, psf_font_t *font) {
+int KERNEL_EARLY_INIT psf_load(const void *data, size_t size, psf_font_t *font) {
     if (!data || size < 4 || !font) {
         return -1;
     }

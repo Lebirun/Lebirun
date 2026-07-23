@@ -107,6 +107,179 @@ out:
     return result;
 }
 
+uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+    uint64_t pml4_idx;
+    uint64_t pdpt_idx;
+    uint64_t pd_idx;
+    uint64_t pt_idx;
+    uint64_t temp_virt;
+    uint64_t *table;
+    uint64_t entry;
+    uint64_t table_phys;
+    uint64_t saved_flags;
+    uint64_t result;
+    uint64_t effective;
+
+    pml4_idx = (virt_addr >> 39) & 0x1FF;
+    pdpt_idx = (virt_addr >> 30) & 0x1FF;
+    pd_idx = (virt_addr >> 21) & 0x1FF;
+    pt_idx = (virt_addr >> 12) & 0x1FF;
+    result = 0;
+    effective = VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_USER;
+
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, pml4_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pml4_idx];
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(1);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pdpt_idx];
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(2);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pd_idx];
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+    if (entry & 0x80) {
+        result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE));
+        goto out;
+    }
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(3);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pt_idx];
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+    result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE));
+
+out:
+    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    return result;
+}
+
+int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                             uint64_t flags) {
+    uint64_t pml4_idx;
+    uint64_t pdpt_idx;
+    uint64_t pd_idx;
+    uint64_t pt_idx;
+    uint64_t temp_virt;
+    uint64_t *table;
+    uint64_t entry;
+    uint64_t table_phys;
+    uint64_t saved_flags;
+    uint64_t current_cr3;
+    uint64_t preserved;
+    int result;
+
+    if (!pml4_phys || virt_addr >= KERNEL_VMA) return -1;
+    pml4_idx = (virt_addr >> 39) & 0x1FF;
+    pdpt_idx = (virt_addr >> 30) & 0x1FF;
+    pd_idx = (virt_addr >> 21) & 0x1FF;
+    pt_idx = (virt_addr >> 12) & 0x1FF;
+    result = -1;
+
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, pml4_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pml4_idx];
+    if (entry & VMM_PTE_PRESENT)
+        table[pml4_idx] |= flags & (VMM_PTE_WRITE | VMM_PTE_USER);
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(1);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pdpt_idx];
+    if (entry & VMM_PTE_PRESENT)
+        table[pdpt_idx] |= flags & (VMM_PTE_WRITE | VMM_PTE_USER);
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT)) goto out;
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(2);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pd_idx];
+    if (entry & VMM_PTE_PRESENT)
+        table[pd_idx] |= flags & (VMM_PTE_WRITE | VMM_PTE_USER);
+    temp_unmap_raw(temp_virt);
+    if (!(entry & VMM_PTE_PRESENT) || (entry & 0x80)) goto out;
+    table_phys = entry & VMM_PHYS_MASK;
+
+    temp_virt = TEMP_SLOT(3);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[pt_idx];
+    if (!(entry & VMM_PTE_PRESENT)) {
+        temp_unmap_raw(temp_virt);
+        goto out;
+    }
+    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_COW | VMM_PTE_NOFREE);
+    table[pt_idx] = preserved | (flags & (VMM_PTE_PRESENT | VMM_PTE_WRITE |
+                                          VMM_PTE_USER | VMM_PTE_NX));
+    temp_unmap_raw(temp_virt);
+    result = 0;
+
+out:
+    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    if (result == 0) {
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(current_cr3));
+        if (current_cr3 == pml4_phys) {
+            __asm__ volatile ("invlpg (%0)" : : "r"(virt_addr) : "memory");
+        }
+    }
+    return result;
+}
+
+int vmm_protect_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                              uint64_t size, uint64_t flags) {
+    uint64_t start;
+    uint64_t end;
+    uint64_t page;
+
+    if (size == 0) return 0;
+    if (virt_addr >= KERNEL_VMA || size > KERNEL_VMA - virt_addr) return -1;
+    start = virt_addr & ~(PAGE_SIZE - 1);
+    end = virt_addr + size;
+    if (end & (PAGE_SIZE - 1)) {
+        if (end > KERNEL_VMA - PAGE_SIZE) return -1;
+        end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+    if (end < start || end > KERNEL_VMA) return -1;
+    for (page = start; page < end; page += PAGE_SIZE) {
+        if (vmm_protect_page_in_pml4(pml4_phys, page, flags) < 0) return -1;
+    }
+    return 0;
+}
+
 uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     uint64_t pml4_idx;
     uint64_t pdpt_idx;

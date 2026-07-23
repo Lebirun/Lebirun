@@ -81,6 +81,26 @@ static void sync_creds_to_task(task_creds_t *creds) {
     current_task->sid = creds->sid;
 }
 
+void creds_apply_exec_ids(struct task *task, uint64_t euid, uint64_t egid) {
+    task_creds_t *creds;
+
+    if (!task) return;
+    task->euid = euid;
+    task->suid = euid;
+    task->fsuid = euid;
+    task->egid = egid;
+    task->sgid = egid;
+    task->fsgid = egid;
+    creds = (task_creds_t *)task->creds_data;
+    if (!creds) return;
+    creds->euid = euid;
+    creds->suid = euid;
+    creds->fsuid = euid;
+    creds->egid = egid;
+    creds->sgid = egid;
+    creds->fsgid = egid;
+}
+
 static int sys_setuid(int uid, const char *unused1, int unused2) {
     task_creds_t *creds;
 

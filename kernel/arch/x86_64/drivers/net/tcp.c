@@ -73,7 +73,7 @@ static void tcp_retx_queue_free(tcp_socket_t *sock) {
     sock->retx_count = 0;
 }
 
-void tcp_init(void) {
+void KERNEL_INIT tcp_init(void) {
     tcp_sockets = NULL;
     tcp_ephemeral_port = 49152;
     tcp_isn = pit_get_ticks() * 2654435761u;

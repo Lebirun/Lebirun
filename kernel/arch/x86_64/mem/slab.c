@@ -262,7 +262,7 @@ static void slab_remove_from_list(slab_page_t **list, slab_page_t *page) {
     page->next = NULL;
 }
 
-void slab_init(void) {
+void KERNEL_EARLY_INIT slab_init(void) {
     int i;
 
     for (i = 0; i < SLAB_SIZES_COUNT; i++) {

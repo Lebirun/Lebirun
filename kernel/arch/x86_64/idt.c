@@ -290,10 +290,13 @@ registers_t* interrupt_handler(registers_t* regs)
                     }
                     stack_floor = USER_STACK_FLOOR;
                     if (fault_addr >= stack_floor && fault_addr < USER_STACK_TOP) {
-                        new_phys = pfa_alloc();
+                        new_phys = task_memory_allows(current_task, PAGE_SIZE) &&
+                                   task_stack_allows(current_task, PAGE_SIZE) ?
+                                   pfa_alloc() : 0;
                         if (new_phys != 0) {
                             pmm_zero_page_phys(new_phys);
-                            vmm_map_page_in_pml4(current_task->pml4_phys, fault_page, new_phys, 0x7);
+                            vmm_map_page_in_pml4(current_task->pml4_phys,
+                                fault_page, new_phys, 0x7 | VMM_PTE_NX);
                             mapped_phys = vmm_get_phys_in_pml4(current_task->pml4_phys, fault_page);
                             if (mapped_phys != 0) {
                                 new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
@@ -305,9 +308,9 @@ registers_t* interrupt_handler(registers_t* regs)
                                 } else {
                                     vmm_unmap_page_in_pml4(current_task->pml4_phys, fault_page);
                                     pfa_free(new_phys);
-                                    return regs;
+                                    new_phys = 0;
                                 }
-                                return regs;
+                                if (new_user_pages) return regs;
                             }
                             pfa_free(new_phys);
                         }
@@ -409,10 +412,12 @@ registers_t* interrupt_handler(registers_t* regs)
                 }
 
                 if (sc_fault_addr >= USER_STACK_FLOOR && sc_fault_addr < USER_STACK_TOP) {
-                    sc_new_phys = pfa_alloc();
+                    sc_new_phys = task_memory_allows(current_task, PAGE_SIZE) &&
+                                  task_stack_allows(current_task, PAGE_SIZE) ?
+                                  pfa_alloc() : 0;
                     if (sc_new_phys != 0) {
                         pmm_zero_page_phys(sc_new_phys);
-                        vmm_map_page_in_pml4(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
+                        vmm_map_page_in_pml4(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7 | VMM_PTE_NX);
                         sc_mapped_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
                         if (sc_mapped_phys != 0) {
                             sc_new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
@@ -424,70 +429,14 @@ registers_t* interrupt_handler(registers_t* regs)
                             } else {
                                 vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
                                 pfa_free(sc_new_phys);
-                                return regs;
+                                sc_new_phys = 0;
                             }
-                            if (sc_actual_cr3 != sc_expected_pd) {
+                            if (sc_new_user_pages && sc_actual_cr3 != sc_expected_pd) {
                                 regs->return_cr3 = sc_expected_pd;
-                            } else {
+                            } else if (sc_new_user_pages) {
                                 __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
                             }
-                            return regs;
-                        }
-                        pfa_free(sc_new_phys);
-                    }
-                }
-
-                if (sc_fault_addr >= current_task->user_brk && sc_fault_addr < 0x40000000u) {
-                    sc_new_phys = pfa_alloc();
-                    if (sc_new_phys != 0) {
-                        pmm_zero_page_phys(sc_new_phys);
-                        vmm_map_page_in_pml4(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
-                        sc_mapped_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
-                        if (sc_mapped_phys != 0) {
-                            sc_new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
-                            if (sc_new_user_pages) {
-                                current_task->user_pages = sc_new_user_pages;
-                                current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
-                                current_task->user_pages_count++;
-                            } else {
-                                vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
-                                pfa_free(sc_new_phys);
-                                return regs;
-                            }
-                            if (sc_actual_cr3 != sc_expected_pd) {
-                                regs->return_cr3 = sc_expected_pd;
-                            } else {
-                                __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
-                            }
-                            return regs;
-                        }
-                        pfa_free(sc_new_phys);
-                    }
-                }
-
-                if (sc_fault_addr >= 0x1000u && sc_fault_addr < current_task->user_brk) {
-                    sc_new_phys = pfa_alloc();
-                    if (sc_new_phys != 0) {
-                        pmm_zero_page_phys(sc_new_phys);
-                        vmm_map_page_in_pml4(sc_expected_pd, sc_fault_page, sc_new_phys, 0x7);
-                        sc_mapped_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
-                        if (sc_mapped_phys != 0) {
-                            sc_new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
-                            if (sc_new_user_pages) {
-                                current_task->user_pages = sc_new_user_pages;
-                                current_task->user_pages[current_task->user_pages_count] = sc_new_phys;
-                                current_task->user_pages_count++;
-                            } else {
-                                vmm_unmap_page_in_pml4(sc_expected_pd, sc_fault_page);
-                                pfa_free(sc_new_phys);
-                                return regs;
-                            }
-                            if (sc_actual_cr3 != sc_expected_pd) {
-                                regs->return_cr3 = sc_expected_pd;
-                            } else {
-                                __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
-                            }
-                            return regs;
+                            if (sc_new_user_pages) return regs;
                         }
                         pfa_free(sc_new_phys);
                     }
@@ -800,7 +749,7 @@ static void idt_set_gate_ist(uint8_t n, uintptr_t handler, uint8_t ist_index)
     idt[n].reserved   = 0;
 }
 
-void idt_init(void)
+void KERNEL_EARLY_INIT idt_init(void)
 {
     uint8_t i;
     

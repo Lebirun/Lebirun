@@ -8,7 +8,8 @@
 
 extern task_t* current_task;
 
-void **syscall_table;
+static void *syscall_table_storage[NR_SYSCALLS];
+void **syscall_table = syscall_table_storage;
 
 void syscall_set_exec_completed(void) {
     if (current_task) {
@@ -393,12 +394,7 @@ void do_syscall(registers_t *regs) {
     clear_syscall_frame();
 }
 
-void syscall_init(void) {
-    syscall_table = (void **)kmalloc(NR_SYSCALLS * sizeof(void *));
-    if (!syscall_table) {
-        printf("syscall_init: failed to allocate syscall table\n");
-        return;
-    }
+void KERNEL_INIT syscall_init(void) {
     memset(syscall_table, 0, NR_SYSCALLS * sizeof(void *));
 
     syscalls_core_init();
@@ -419,6 +415,7 @@ void syscall_init(void) {
     syscalls_signal_init();
     syscalls_ids_init();
     syscalls_misc_init();
+    syscalls_inotify_init();
     syscalls_epoll_init();
     syscalls_pthread_init();
     syscalls_shm_init();

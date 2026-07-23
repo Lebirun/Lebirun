@@ -40,6 +40,7 @@
 #include <lebirun/rng.h>
 #include <lebirun/watchdog.h>
 #include <lebirun/multiboot2.h>
+#include <lebirun/security.h>
 #include "launch_user.h"
 
 extern uint64_t boot_pml4[512] __attribute__((aligned(4096)));
@@ -54,6 +55,42 @@ extern uint64_t multiboot_ptr;
 mutex_t print_lock;
 
 extern task_t* current_task;
+
+static void kernel_reclaim_memory(uint8_t *section_start, uint8_t *section_end,
+                                  int flush_cpus, int report) {
+    uint64_t start;
+    uint64_t end;
+    uint64_t address;
+
+    start = (uint64_t)(uintptr_t)section_start - KERNEL_VMA;
+    end = (uint64_t)(uintptr_t)section_end - KERNEL_VMA;
+    for (address = (uint64_t)(uintptr_t)section_start;
+         address < (uint64_t)(uintptr_t)section_end;
+         address += PAGE_SIZE) {
+        vmm_unmap_page(address);
+    }
+    if (flush_cpus && smp_tlb_flush_all_sync() < 0) return;
+    if (report) {
+        pfa_reclaim_kernel_range(start, end);
+    } else {
+        pfa_reclaim_kernel_range_quiet(start, end);
+    }
+}
+
+static void kernel_reclaim_early_init_memory(void) {
+    extern uint8_t _kernel_early_init_start[];
+    extern uint8_t _kernel_early_init_end[];
+
+    kernel_reclaim_memory(_kernel_early_init_start,
+                          _kernel_early_init_end, 0, 0);
+}
+
+static void kernel_reclaim_init_memory(void) {
+    extern uint8_t _kernel_init_start[];
+    extern uint8_t _kernel_init_end[];
+
+    kernel_reclaim_memory(_kernel_init_start, _kernel_init_end, 1, 1);
+}
 
 void kernel_main(void) {
     uint64_t mb_phys;
@@ -124,6 +161,7 @@ void kernel_main(void) {
 
     gdt_init();
     idt_init();
+    x86_security_enable();
 
     terminal_initialize();
 
@@ -179,6 +217,8 @@ void kernel_main(void) {
 #endif
         }
     }
+
+    kernel_reclaim_early_init_memory();
 
     mod_count = early_mod_count;
 
@@ -558,7 +598,6 @@ void kernel_main(void) {
     asm volatile ("sti");
     if (vring_boot_enabled) {
         kprint_enable();
-        extern void watchdog_init(void);
         watchdog_init();
     } else {
         printf("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
@@ -572,6 +611,7 @@ void kernel_main(void) {
     console_writer_flush();
     kprint_flush();
     klog_reclaim_unused();
+    kernel_reclaim_init_memory();
     heap_reclaim_unused();
 
     {

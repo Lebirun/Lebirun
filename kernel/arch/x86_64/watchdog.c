@@ -114,7 +114,7 @@ static void watchdog_callback(uint64_t ticks) {
     kernel_panic_msg("WATCHDOG: init (PID %d) not found", wdt_init_pid);
 }
 
-void watchdog_init(void) {
+void KERNEL_INIT watchdog_init(void) {
     uint64_t interval_ticks;
 
     wdt_last_kick = tick_count;

@@ -283,6 +283,31 @@ int task_has_pending_signals(void) {
     return unblocked != 0;
 }
 
+uint64_t signal_pending_mask(task_t *task) {
+    task_signals_t *sigs;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = (task_signals_t *)task->signal_data;
+    if (sigs->owner_pid != task->pid) return 0;
+    return sigs->pending.sig[0];
+}
+
+int signal_take_pending(task_t *task, uint64_t mask) {
+    task_signals_t *sigs;
+    int signal_number;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = (task_signals_t *)task->signal_data;
+    if (sigs->owner_pid != task->pid) return 0;
+    for (signal_number = 1; signal_number < 64; signal_number++) {
+        if (!(mask & (1ULL << (signal_number - 1)))) continue;
+        if (!(sigs->pending.sig[0] & (1ULL << (signal_number - 1)))) continue;
+        sigs->pending.sig[0] &= ~(1ULL << (signal_number - 1));
+        return signal_number;
+    }
+    return 0;
+}
+
 static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     task_signals_t *sigs;
     uint64_t act_addr;

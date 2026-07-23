@@ -14,7 +14,7 @@ static udp_socket_t *udp_sockets = NULL;
 static uint16_t udp_ephemeral_port = 49152;
 static const udp_port_hook_t *udp_port_hook;
 
-void udp_init(void) {
+void KERNEL_INIT udp_init(void) {
     udp_sockets = NULL;
     udp_ephemeral_port = 49152;
     udp_port_hook = NULL;

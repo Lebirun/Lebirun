@@ -115,7 +115,7 @@ static uint64_t pit_get_subtick_us(void) {
     return (elapsed * 1000000UL) / PIT_BASE_FREQ;
 }
 
-void pit_init(uint64_t freq) {
+void KERNEL_INIT pit_init(uint64_t freq) {
     uint64_t divisor;
     uint64_t actual_freq;
     uint64_t error_ppm;
@@ -441,7 +441,7 @@ void speaker_beep(uint64_t freq, uint64_t duration_ms) {
     speaker_stop();
 }
 
-void calibrate_pit(void) {
+void KERNEL_INIT calibrate_pit(void) {
     uint64_t entry_flags;
     uint64_t sync_start;
     uint64_t start_ticks;

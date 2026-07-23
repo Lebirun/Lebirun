@@ -4,6 +4,8 @@
 
 extern uint64_t total_pages_managed;
 extern uint64_t kernel_reserved_frames;
+extern int scheduler_initialized;
+extern void task_memory_pressure_request(void);
 
 uint8_t *pfa_bitmap = 0;
 static uint64_t bitmap_bytes_used = 0;
@@ -277,7 +279,11 @@ static uint64_t find_free_frames(uint64_t num) {
 }
 
 uint64_t pfa_alloc(void) {
-    return find_free_frames(1);
+    uint64_t result;
+
+    result = find_free_frames(1);
+    if (!result && scheduler_initialized) task_memory_pressure_request();
+    return result;
 }
 
 void pfa_free(uint64_t phys_addr) {
@@ -324,7 +330,9 @@ void pfa_free(uint64_t phys_addr) {
     pfa_lock_release(eflags);
 }
 
-void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end) {
+static void pfa_reclaim_kernel_range_internal(uint64_t phys_start,
+                                              uint64_t phys_end,
+                                              int report) {
     uint64_t eflags;
     uint64_t start_frame;
     uint64_t end_frame;
@@ -349,13 +357,27 @@ void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end) {
     __sync_fetch_and_add(&pfa_cached_free, count);
     pfa_lock_release(eflags);
 
-    printf("PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
-           count, count * 4, phys_start, phys_end);
+    if (report) {
+        printf("PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
+               count, count * 4, phys_start, phys_end);
+    }
+}
+
+void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end) {
+    pfa_reclaim_kernel_range_internal(phys_start, phys_end, 1);
+}
+
+void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end) {
+    pfa_reclaim_kernel_range_internal(phys_start, phys_end, 0);
 }
 
 uint64_t pfa_alloc_contiguous(uint64_t num_frames) {
+    uint64_t result;
+
     if (num_frames == 0) return 0;
-    return find_free_frames(num_frames);
+    result = find_free_frames(num_frames);
+    if (!result && scheduler_initialized) task_memory_pressure_request();
+    return result;
 }
 
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {

@@ -75,6 +75,9 @@ typedef struct task {
     uint64_t cr3;
     int time_slice;
     int base_time_slice;
+    int8_t nice_value;
+    uint8_t sched_policy;
+    uint8_t sched_priority;
     uint64_t stack_size;
     uint8_t *kernel_stack_base;
     uint64_t kernel_stack_size;
@@ -142,10 +145,17 @@ typedef struct task {
     struct vfs_node *vfs_lookup_node;
 
     void *timer_data;
+    void *limits_data;
     uint64_t alarm_tick;
 } task_t;
 
 typedef struct {
+    uint64_t task_count;
+    uint64_t task_struct_bytes;
+    uint64_t task_fpu_bytes;
+    uint64_t task_fd_bytes;
+    uint64_t task_page_array_bytes;
+    uint64_t task_file_map_bytes;
     uint64_t active_user_pages;
     uint64_t active_heap_pages;
     uint64_t active_mmap_pages;
@@ -236,8 +246,25 @@ void exec_page_cache_reclaim(uint64_t target_pages);
 uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);
 void task_memory_collect_for_report(void);
+void task_memory_pressure_request(void);
 void task_get_memory_stats(task_mem_stats_t *stats);
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4);
+uint64_t task_user_memory_bytes(task_t *task);
+int task_memory_allows(task_t *task, uint64_t additional_bytes);
+int task_memory_total_allows(task_t *task, uint64_t total_bytes);
+int task_data_allows(task_t *task, uint64_t new_brk);
+int task_stack_allows(task_t *task, uint64_t additional_bytes);
+unsigned long task_rlimit_get(task_t *task, int resource, int maximum);
+int task_rlimit_set(task_t *task, int resource, unsigned long current,
+                    unsigned long maximum);
+int task_rlimit_copy(task_t *dest, task_t *src);
+void task_rlimit_free(task_t *task);
+int task_get_nice(task_t *task);
+int task_set_nice(task_t *task, int nice_value);
+int task_set_scheduler(task_t *task, int policy, int priority);
+int task_get_scheduler(task_t *task, int *priority);
+uint64_t signal_pending_mask(task_t *task);
+int signal_take_pending(task_t *task, uint64_t mask);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);

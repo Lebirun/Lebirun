@@ -317,6 +317,7 @@ if [ -d "root" ]; then
   _lebutils_files=$(
     {
       [ -f root/bin/lebu ] && printf '%s\n' root/bin/lebu
+      [ -f root/bin/sudo ] && printf '%s\n' root/bin/sudo
       find root/bin root/sbin -maxdepth 1 -type l 2>/dev/null
     } | sed 's#^root##' | grep -v '^/bin/sh$' | sort
   )
@@ -333,13 +334,21 @@ if [ -d "root" ]; then
 fi
 
 if [ -d "root" ]; then
+  find root -type d -exec chmod 0755 {} +
+  find root -type f ! -perm -111 -exec chmod 0644 {} +
+  find root -type f -perm -111 -exec chmod 0755 {} +
+  [ ! -d root/root ] || chmod 0700 root/root
+  [ ! -d root/tmp ] || chmod 1777 root/tmp
+  [ ! -d root/var/tmp ] || chmod 1777 root/var/tmp
+  [ ! -f root/etc/shadow ] || chmod 0600 root/etc/shadow
+  [ ! -f root/bin/sudo ] || chmod 4755 root/bin/sudo
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "rootfs.squashfs" ] || [ build.sh -nt rootfs.squashfs ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
     bar_print "$(printf '\033[1;36mBuilding SquashFS rootfs...\033[0m')"
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building SquashFS rootfs"
     if command -v mksquashfs >/dev/null 2>&1; then
       rm -f rootfs.squashfs
-      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -comp xz -b 131072 -no-xattrs -noappend -quiet -no-progress \
+      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -all-root -comp xz -b 131072 -no-xattrs -noappend -quiet -no-progress \
         -e usr/include/c++ usr/lib/libstdc++.a usr/lib/libsupc++.a usr/lib/libgcc.a
     else
       cleanup_bar

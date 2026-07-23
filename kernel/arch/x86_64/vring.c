@@ -570,7 +570,7 @@ void kprint_poll(uint64_t max_items) {
     if (klog_count > 0 || kprint_count > 0) waitq_wake_one(&kprint_waitq);
 }
 
-void vring_init(void) {
+void KERNEL_INIT vring_init(void) {
     klog_ring = NULL;
     klog_capacity = 0;
     kprint_ring = NULL;
@@ -888,7 +888,7 @@ void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type) {
     kernel_panic(reason_buf, NULL);
 }
 
-void kproc_init(void) {
+void KERNEL_INIT kproc_init(void) {
     kernel_procs = NULL;
     current_kproc = NULL;
     next_kproc_pid = KPROC_PID_BASE;
@@ -1061,7 +1061,7 @@ static void klog_task_main(void) {
     }
 }
 
-void kproc_print_init(void) {
+void KERNEL_INIT kproc_print_init(void) {
     int32_t pid;
     task_t *t;
 

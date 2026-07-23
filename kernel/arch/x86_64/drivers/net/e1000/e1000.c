@@ -97,14 +97,14 @@ static inline void e1000_write(e1000_device_t *dev, uint32_t reg, uint32_t value
     }
 }
 
-static uint16_t e1000_read_eeprom(e1000_device_t *dev, uint8_t addr) {
+static uint16_t KERNEL_INIT e1000_read_eeprom(e1000_device_t *dev, uint8_t addr) {
     uint32_t tmp;
     e1000_write(dev, E1000_EERD, (1) | ((uint32_t)(addr) << 8));
     while (!((tmp = e1000_read(dev, E1000_EERD)) & (1 << 4)));
     return (uint16_t)((tmp >> 16) & 0xFFFF);
 }
 
-void e1000_read_mac(e1000_device_t *dev) {
+void KERNEL_INIT e1000_read_mac(e1000_device_t *dev) {
     uint32_t tmp;
     uint16_t word;
 
@@ -415,7 +415,7 @@ void e1000_irq_handler(void *regs) {
     }
 }
 
-int e1000_probe(void) {
+int KERNEL_INIT e1000_probe(void) {
     uint16_t bus;
     uint8_t slot;
     uint8_t func;
@@ -502,7 +502,7 @@ void e1000_print_status(e1000_device_t *dev) {
            dev->packets_tx, dev->bytes_tx, dev->errors_tx);
 }
 
-int e1000_init(void) {
+int KERNEL_INIT e1000_init(void) {
     uint64_t bar0_phys;
     uint64_t bar0_virt;
     uint64_t off;

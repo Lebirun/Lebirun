@@ -159,7 +159,7 @@ static int dhcp_send_request(netif_t *netif) {
                          (uint8_t *)&pkt, sizeof(pkt));
 }
 
-void dhcp_init(netif_t *netif) {
+void KERNEL_INIT dhcp_init(netif_t *netif) {
     memset(&g_dhcp_state, 0, sizeof(g_dhcp_state));
     g_dhcp_state.state = DHCP_STATE_INIT;
     g_dhcp_state.netif = netif;

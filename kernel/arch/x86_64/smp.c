@@ -7,6 +7,7 @@
 #include <lebirun/kstack.h>
 #include <lebirun/task.h>
 #include <lebirun/pit.h>
+#include <lebirun/security.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -264,7 +265,7 @@ static void find_acpi_tables(void) {
     cpu_count = 1;
 }
 
-void lapic_init(void) {
+void KERNEL_INIT lapic_init(void) {
     uint64_t svr;
 
     vmm_map_page(LAPIC_VIRT_BASE, lapic_phys, 0x013);
@@ -304,7 +305,7 @@ void lapic_send_ipi(uint64_t apic_id, uint64_t vector) {
         __asm__ volatile ("pause");
 }
 
-void ioapic_init(void) {
+void KERNEL_INIT ioapic_init(void) {
     uint64_t ver;
 
     vmm_map_page(IOAPIC_VIRT_BASE, ioapic_phys, 0x013);
@@ -527,6 +528,7 @@ void ap_main(void) {
         gdt_init_ap(cpus[cpu_idx].gdt, cpus[cpu_idx].tss,
                     cpus[cpu_idx].kernel_stack);
     }
+    x86_security_enable();
 
     if (cpu_idx >= 0)
         smp_set_cpu_base(&cpus[cpu_idx]);
@@ -566,7 +568,7 @@ void ap_main(void) {
     }
 }
 
-void smp_start_aps(void) {
+void KERNEL_INIT smp_start_aps(void) {
     uint64_t tramp_size;
     uint64_t bsp_id;
     int i;
@@ -648,7 +650,7 @@ void smp_start_aps(void) {
     }
 }
 
-void lapic_timer_init(uint64_t freq_hz) {
+void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     uint64_t initial;
     uint64_t reload;
     uint64_t start_ticks;
@@ -699,7 +701,7 @@ int smp_scheduling_enabled(void) {
     return smp_scheduler_ready != 0;
 }
 
-void smp_init(void) {
+void KERNEL_INIT smp_init(void) {
     uint64_t bsp_apic_id;
     int i;
     int found;

@@ -23,8 +23,10 @@ static inline void heap_lock_release(uint64_t eflags) {
     if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-#define CANARY_OVERHEAD (sizeof(uint64_t) * 2)
+#define CANARY_OVERHEAD (sizeof(uint64_t) + sizeof(uint32_t))
 #define HEAP_USE_DEMAND_PAGING 1
+
+_Static_assert(sizeof(heap_block_t) == 48, "heap block ABI");
 
 typedef struct early_heap_chunk {
     struct early_heap_chunk *next;
@@ -120,12 +122,12 @@ int is_early_heap_ptr(void *ptr) {
     return 0;
 }
 
-static inline uint64_t *get_head_canary(heap_block_t *block) {
-    return (uint64_t *)((uint8_t *)block + sizeof(heap_block_t));
+static inline uint32_t *get_head_canary(heap_block_t *block) {
+    return (uint32_t *)((uint8_t *)block + sizeof(heap_block_t));
 }
 
-static inline uint64_t *get_tail_canary(heap_block_t *block) {
-    return (uint64_t *)((uint8_t *)block + sizeof(heap_block_t) + 
+static inline uint32_t *get_tail_canary(heap_block_t *block) {
+    return (uint32_t *)((uint8_t *)block + sizeof(heap_block_t) +
                         sizeof(uint64_t) + block->alloc_size);
 }
 
@@ -144,8 +146,8 @@ static void set_canaries(heap_block_t *block) {
 
 int heap_check_canaries(void *ptr) {
     heap_block_t *block;
-    uint64_t head;
-    uint64_t tail;
+    uint32_t head;
+    uint32_t tail;
     
     if (!ptr) return -1;
     if (is_early_heap_ptr(ptr)) return 0;
@@ -164,13 +166,15 @@ int heap_check_canaries(void *ptr) {
     
     if (head != HEAP_CANARY_HEAD) {
         printf("HEAP CORRUPTION: Head canary corrupted at 0x%016lX (expected 0x%08lX, got 0x%08lX)\n",
-               (uint64_t)ptr, (unsigned long)HEAP_CANARY_HEAD, head);
+               (uint64_t)ptr, (unsigned long)HEAP_CANARY_HEAD,
+               (unsigned long)head);
         return -1;
     }
     
     if (tail != HEAP_CANARY_TAIL) {
         printf("HEAP CORRUPTION: Tail canary corrupted at 0x%016lX (expected 0x%08lX, got 0x%08lX) - buffer overflow!\n",
-               (uint64_t)ptr, (unsigned long)HEAP_CANARY_TAIL, tail);
+               (uint64_t)ptr, (unsigned long)HEAP_CANARY_TAIL,
+               (unsigned long)tail);
         printf("  Block size: %u, alloc_size: %u caller=0x%016lX\n", block->size, block->alloc_size, block->alloc_caller);
         return -1;
     }
@@ -388,7 +392,7 @@ static int heap_expand(uint64_t new_end) {
     return 0;
 }
 
-void heap_init(void) {
+void KERNEL_EARLY_INIT heap_init(void) {
     uint64_t total_kb;
     uint64_t heap_max;
     
@@ -1000,8 +1004,8 @@ void heap_verify(void) {
     uint64_t baddr;
     uint64_t block_end;
     uint64_t naddr;
-    uint64_t *head_canary;
-    uint64_t *tail_canary;
+    uint32_t *head_canary;
+    uint32_t *tail_canary;
     
     block = kernel_heap.free_list;
     i = 0;

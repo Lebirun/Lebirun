@@ -136,7 +136,7 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     }
 
     uint64_t stack_page_count = 0;
-    uint64_t *stack_pages = vmm_map_range_in_pml4_tracked(new_pd, USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7, &stack_page_count);
+    uint64_t *stack_pages = vmm_map_range_in_pml4_tracked(new_pd, USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7 | VMM_PTE_NX, &stack_page_count);
 
     uint64_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
     if (setup_initial_stack_with_elf(new_pd, argv0, &elf_info, &initial_useresp) != 0) {
@@ -297,7 +297,8 @@ task_t* launch_user_path(const char *path, int console_id) {
 
     stack_page_count = 0;
     stack_pages = vmm_map_range_in_pml4_tracked(new_pd,
-        USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7,
+        USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE,
+        0x7 | VMM_PTE_NX,
         &stack_page_count);
     if (!stack_pages || stack_page_count == 0) {
         printf("launch_user_path: stack mapping failed for '%s'\n", path);

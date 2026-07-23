@@ -18,6 +18,10 @@ int smp_processor_id(void);
 #define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
 #define VMM_PTE_COW 0x200ULL
 #define VMM_PTE_NOFREE 0x400ULL
+#define VMM_PTE_PRESENT 0x001ULL
+#define VMM_PTE_WRITE 0x002ULL
+#define VMM_PTE_USER 0x004ULL
+#define VMM_PTE_NX 0x8000000000000000ULL
 
 extern uint64_t total_pages_managed;
 
@@ -45,14 +49,14 @@ typedef struct {
 } mem_region_t;
 
 typedef struct heap_block {
-    uint64_t magic;
     uint64_t size;
     uint64_t alloc_size;
     uint64_t alloc_caller;
-    uint64_t flags;
-    uint8_t is_free;
     struct heap_block *next;
     struct heap_block *prev;
+    uint32_t magic;
+    uint8_t flags;
+    uint8_t is_free;
 } heap_block_t;
 
 typedef struct {
@@ -107,6 +111,7 @@ uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
 void pfa_free(uint64_t phys_addr);
 void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end);
+void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end);
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames);
 uint64_t pfa_count_free(void);
 void pfa_sync_free_count(void);
@@ -190,6 +195,11 @@ int pt_ensure_phys_mapped(uint64_t phys_addr);
 
 int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
+uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
+int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                             uint64_t flags);
+int vmm_protect_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                              uint64_t size, uint64_t flags);
 uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
 uint64_t *vmm_map_range_in_pml4_tracked(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags, uint64_t *out_count);
 void vmm_map_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags);

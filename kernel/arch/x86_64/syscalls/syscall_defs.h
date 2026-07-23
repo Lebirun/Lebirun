@@ -9,6 +9,7 @@
 #include <lebirun/mutex.h>
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/uaccess.h>
 #include <lebirun/initrd.h>
 #include <lebirun/framebuffer.h>
 #include <lebirun/console.h>
@@ -409,8 +410,15 @@ void syscall_core_flush_tty_input(int con_id);
 #define SYSCALL_LKE_UNLOAD 278
 #define SYSCALL_LKE_LIST 279
 #define SYSCALL_IPV67 280
+#define SYSCALL_SCHED_SETPARAM 281
+#define SYSCALL_SCHED_GETPARAM 282
+#define SYSCALL_SCHED_SETSCHEDULER 283
+#define SYSCALL_SCHED_GETSCHEDULER 284
+#define SYSCALL_SCHED_GET_PRIORITY_MAX 285
+#define SYSCALL_SCHED_GET_PRIORITY_MIN 286
+#define SYSCALL_SCHED_RR_GET_INTERVAL 287
 
-#define NR_SYSCALLS 284
+#define NR_SYSCALLS 288
 
 struct kernel_stat {
     unsigned long long st_dev;
@@ -497,32 +505,33 @@ extern int tty_count;
 
 extern void **syscall_table;
 
-void syscalls_core_init(void);
-void syscalls_process_init(void);
-void syscalls_mem_init(void);
-void syscalls_time_init(void);
-void syscalls_initrd_init(void);
-void syscalls_fb_init(void);
-void syscalls_console_init(void);
-void syscalls_vfs_init(void);
-void syscalls_sata_init(void);
-void syscalls_net_init(void);
-void syscalls_termios_init(void);
-void syscalls_posix_init(void);
-void syscalls_select_init(void);
-void syscalls_socket_init(void);
-void syscalls_at_init(void);
-void syscalls_signal_init(void);
+void KERNEL_INIT syscalls_core_init(void);
+void KERNEL_INIT syscalls_process_init(void);
+void KERNEL_INIT syscalls_mem_init(void);
+void KERNEL_INIT syscalls_time_init(void);
+void KERNEL_INIT syscalls_initrd_init(void);
+void KERNEL_INIT syscalls_fb_init(void);
+void KERNEL_INIT syscalls_console_init(void);
+void KERNEL_INIT syscalls_vfs_init(void);
+void KERNEL_INIT syscalls_sata_init(void);
+void KERNEL_INIT syscalls_net_init(void);
+void KERNEL_INIT syscalls_termios_init(void);
+void KERNEL_INIT syscalls_posix_init(void);
+void KERNEL_INIT syscalls_select_init(void);
+void KERNEL_INIT syscalls_socket_init(void);
+void KERNEL_INIT syscalls_at_init(void);
+void KERNEL_INIT syscalls_signal_init(void);
 int sys_kill_impl(int pid, const char *sig_ptr, int unused);
-void syscalls_ids_init(void);
-void syscalls_misc_init(void);
-void syscalls_epoll_init(void);
-void syscalls_pthread_init(void);
-void syscalls_shm_init(void);
-void syscalls_dl_init(void);
-void syscalls_regex_init(void);
-void syscalls_power_init(void);
-void syscalls_crypto_init(void);
+void KERNEL_INIT syscalls_ids_init(void);
+void KERNEL_INIT syscalls_misc_init(void);
+void KERNEL_INIT syscalls_inotify_init(void);
+void KERNEL_INIT syscalls_epoll_init(void);
+void KERNEL_INIT syscalls_pthread_init(void);
+void KERNEL_INIT syscalls_shm_init(void);
+void KERNEL_INIT syscalls_dl_init(void);
+void KERNEL_INIT syscalls_regex_init(void);
+void KERNEL_INIT syscalls_power_init(void);
+void KERNEL_INIT syscalls_crypto_init(void);
 
 int sys_vfs_readdir(registers_t *regs);
 

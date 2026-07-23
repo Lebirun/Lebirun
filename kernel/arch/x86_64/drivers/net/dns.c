@@ -34,7 +34,7 @@ static int dns_ensure_cache(void) {
     return 0;
 }
 
-void dns_init(void) {
+void KERNEL_INIT dns_init(void) {
     dns_cache = NULL;
     dns_cache_capacity = 0;
     g_dns_server = IPV4_ADDR(8, 8, 8, 8);

@@ -1309,7 +1309,7 @@ void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows)
     console_irqrestore(flags);
 }
 
-void console_init(void) {
+void KERNEL_EARLY_INIT console_init(void) {
     int i;
     int alloc_ok;
     console_t *con;
@@ -1370,7 +1370,7 @@ void console_init(void) {
     console_initialized = 1;
 }
 
-void console_reinit(void) {
+void KERNEL_EARLY_INIT console_reinit(void) {
     console_initialized = 0;
     console_init();
 }
@@ -3346,7 +3346,7 @@ handle_pending:
     }
 }
 
-void console_writer_init(void) {
+void KERNEL_INIT console_writer_init(void) {
     extern void lock_scheduler(void);
     extern void unlock_scheduler(void);
     extern void add_task_to_runqueue(task_t* new_task);

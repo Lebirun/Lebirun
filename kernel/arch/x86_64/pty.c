@@ -630,7 +630,7 @@ int pty_has_data_for_slave(int fd) {
     return 0;
 }
 
-void pty_init(void) {
+void KERNEL_INIT pty_init(void) {
     pty_capacity = 0;
     ptys = NULL;
     mutex_init(&pty_lock);
