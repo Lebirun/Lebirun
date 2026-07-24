@@ -204,6 +204,19 @@ static void ov_cache_remove(overlay_node_t *onode) {
     }
 }
 
+static void ov_cache_invalidate(vfs_node_t *parent, const char *name) {
+    overlay_node_t *cached;
+
+    mutex_lock(&overlay_node_lock);
+    cached = ov_cache_lookup(parent, name);
+    if (cached) {
+        ov_cache_remove(cached);
+        if (cached->refcount > 0) cached->refcount--;
+        overlay_try_free_node(cached);
+    }
+    mutex_unlock(&overlay_node_lock);
+}
+
 static int ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
     size_t nlen;
 
@@ -234,6 +247,8 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name);
 static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
 static int overlay_vfs_unlink(vfs_node_t *parent, const char *name);
+static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
+                              vfs_node_t *new_parent, const char *new_name);
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length);
 static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode);
 static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid);
@@ -325,6 +340,7 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
         onode->vfs.create = overlay_vfs_create;
         onode->vfs.mkdir = overlay_vfs_mkdir;
         onode->vfs.unlink = overlay_vfs_unlink;
+        onode->vfs.rename = overlay_vfs_rename;
     }
     
     return &onode->vfs;
@@ -883,12 +899,86 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     if (in_lower) {
         vfs_get_path(parent, parent_path, sizeof(parent_path));
         snprintf(wh_path, sizeof(wh_path), "%s/%s%s", parent_path, OVERLAY_WHITEOUT_PREFIX, name);
-        ramfs_create_file(wh_path, 0644);
+        ret = ramfs_create_file(wh_path, 0644);
+        if (ret != 0 && ret != RAMFS_ERR_EXIST) {
+            if (in_upper) vfs_release(in_upper);
+            vfs_release(in_lower);
+            return ret;
+        }
     }
 
     if (in_upper) vfs_release(in_upper);
     if (in_lower) vfs_release(in_lower);
+    ov_cache_invalidate(parent, name);
     overlay_reset_readdir(onode);
+    return 0;
+}
+
+static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
+                              vfs_node_t *new_parent, const char *new_name) {
+    overlay_node_t *old_parent_node;
+    overlay_node_t *new_parent_node;
+    overlay_node_t *source_node;
+    vfs_node_t *source;
+    char old_parent_path[VFS_MAX_PATH];
+    char new_parent_path[VFS_MAX_PATH];
+    char old_path[VFS_MAX_PATH];
+    char new_path[VFS_MAX_PATH];
+    char whiteout_path[VFS_MAX_PATH];
+    int has_lower;
+    int whiteout_created;
+    int ret;
+
+    if (!old_parent || !old_name || !new_parent || !new_name) return -1;
+    old_parent_node = (overlay_node_t *)old_parent->private_data;
+    new_parent_node = (overlay_node_t *)new_parent->private_data;
+    if (!old_parent_node || !new_parent_node) return -1;
+
+    source = vfs_finddir(old_parent, old_name);
+    if (!source) return -2;
+    source_node = (overlay_node_t *)source->private_data;
+    if (!source_node) {
+        vfs_release(source);
+        return -1;
+    }
+
+    vfs_get_path(old_parent, old_parent_path, sizeof(old_parent_path));
+    vfs_get_path(new_parent, new_parent_path, sizeof(new_parent_path));
+    snprintf(old_path, sizeof(old_path), "%s/%s", old_parent_path, old_name);
+    snprintf(new_path, sizeof(new_path), "%s/%s", new_parent_path, new_name);
+    snprintf(whiteout_path, sizeof(whiteout_path), "%s/%s%s",
+             old_parent_path, OVERLAY_WHITEOUT_PREFIX, old_name);
+    has_lower = source_node->lower_node != NULL;
+
+    if (!source_node->upper_node &&
+        overlay_copy_up(source_node, old_path) != 0) {
+        vfs_release(source);
+        return -1;
+    }
+    overlay_ensure_upper_dirs(new_path);
+    whiteout_created = 0;
+    if (has_lower) {
+        ret = ramfs_create_file(whiteout_path, 0644);
+        if (ret != 0 && ret != RAMFS_ERR_EXIST) {
+            vfs_release(source);
+            return ret;
+        }
+        whiteout_created = ret == 0;
+    }
+
+    ret = ramfs_rename(old_path, new_path);
+    if (ret != 0) {
+        if (whiteout_created) ramfs_unlink(whiteout_path);
+        vfs_release(source);
+        return ret;
+    }
+    vfs_release(source);
+
+    ov_cache_invalidate(old_parent, old_name);
+    ov_cache_invalidate(new_parent, new_name);
+    overlay_reset_readdir(old_parent_node);
+    if (new_parent_node != old_parent_node)
+        overlay_reset_readdir(new_parent_node);
     return 0;
 }
 

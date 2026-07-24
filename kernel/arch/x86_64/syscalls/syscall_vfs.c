@@ -10,6 +10,8 @@ extern int is_epoll_special_fd(int fd);
 extern int epoll_close_fd(int fd);
 extern int event_descriptor_read(int fd, void *buffer, int length);
 extern int event_descriptor_write(int fd, const void *buffer, int length);
+extern void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
+                                            int release_flock);
 
 #define VFS_RW_STACK_BUF 512
 #define VFS_RW_HEAP_LIMIT 4096
@@ -364,6 +366,9 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     task_fd_t *tfd;
     pipe_t *p;
     vfs_node_t *node;
+    int release_flock;
+    int i;
+    int lock_group;
 
     (void)unused1; (void)unused2;
     if (is_socket_fd(fd)) return socket_close_fd(fd);
@@ -375,6 +380,7 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     tfd = &current_task->fds[fd];
     p = NULL;
     node = NULL;
+    release_flock = 1;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         p = (pipe_t *)tfd->private_data;
@@ -391,6 +397,20 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node = (vfs_node_t *)tfd->node;
+        lock_group = tfd->ref_count;
+        if (lock_group > 1) {
+            for (i = 0; i < current_task->fds_capacity; i++) {
+                if (i == fd || !current_task->fds[i].in_use) continue;
+                if (current_task->fds[i].type == FD_TYPE_FILE &&
+                    current_task->fds[i].node == node &&
+                    current_task->fds[i].ref_count == lock_group) {
+                    release_flock = 0;
+                    break;
+                }
+            }
+        }
+        file_locks_release_process_node(current_task->pid, node,
+                                        release_flock);
         memset(tfd, 0, sizeof(*tfd));
         vfs_close(node);
         task_fd_reclaim_unused(current_task);

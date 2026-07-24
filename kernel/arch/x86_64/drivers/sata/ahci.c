@@ -726,24 +726,17 @@ ahci_port_t *ahci_find_cdrom(void) {
     return NULL;
 }
 
-int ahci_flush(ahci_port_t *port) {
+static int ahci_flush_command(ahci_port_t *port, uint8_t command) {
     int slot;
     int result;
     hba_cmd_header_t *cmd_header;
     hba_cmd_table_t *cmd_table;
     fis_reg_h2d_t *fis;
 
-    if (!port->present || port->type != AHCI_DEV_SATA) {
-        return -1;
-    }
-
-    mutex_lock(&port->io_lock);
-    
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
     slot = ahci_find_slot(port);
     if (slot < 0) {
-        mutex_unlock(&port->io_lock);
         return -1;
     }
     
@@ -752,7 +745,8 @@ int ahci_flush(ahci_port_t *port) {
     cmd_header->w = 0;
     cmd_header->p = 0;
     cmd_header->c = 1;
-    cmd_header->prdtl = 0; 
+    cmd_header->prdtl = 0;
+    cmd_header->prdbc = 0;
     
     cmd_table = port->cmd_table + slot;
     memset(cmd_table, 0, sizeof(hba_cmd_table_t));
@@ -761,12 +755,28 @@ int ahci_flush(ahci_port_t *port) {
     memset(fis, 0, sizeof(fis_reg_h2d_t));
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
-    fis->command = ATA_CMD_FLUSH_EXT;
+    fis->command = command;
     fis->device = 0;
     
     ahci_port_write(port, AHCI_PxCI, 1 << slot);
-    
     result = ahci_wait_cmd(port, slot, 30000);
+    return result;
+}
+
+int ahci_flush(ahci_port_t *port) {
+    int result;
+
+    if (!port || !port->present || port->type != AHCI_DEV_SATA) {
+        return -1;
+    }
+
+    mutex_lock(&port->io_lock);
+    result = ahci_flush_command(port, ATA_CMD_FLUSH_EXT);
+    if (result != 0) {
+        ahci_port_write(port, AHCI_PxSERR, 0xFFFFFFFF);
+        ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
+        result = ahci_flush_command(port, ATA_CMD_FLUSH);
+    }
     mutex_unlock(&port->io_lock);
     return result;
 }

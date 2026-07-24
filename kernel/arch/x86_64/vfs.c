@@ -922,15 +922,26 @@ int vfs_unlink(vfs_node_t *parent, const char *name) {
 int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_directory) {
     vfs_node_t *target;
     int is_directory;
+    int result;
 
     if (!parent || !name) return -2;
+    __atomic_add_fetch(&parent->ref_count, 1, __ATOMIC_ACQ_REL);
     target = vfs_finddir(parent, name);
-    if (!target) return -2;
-    is_directory = VFS_GET_TYPE(target->flags) == VFS_DIRECTORY;
-    vfs_release(target);
-    if (remove_directory && !is_directory) return -20;
-    if (!remove_directory && is_directory) return -21;
-    return vfs_unlink(parent, name);
+    if (!target) {
+        result = -2;
+    } else {
+        is_directory = VFS_GET_TYPE(target->flags) == VFS_DIRECTORY;
+        vfs_release(target);
+        if (remove_directory && !is_directory)
+            result = -20;
+        else if (!remove_directory && is_directory)
+            result = -21;
+        else
+            result = vfs_unlink(parent, name);
+    }
+    vfs_lookup_hazard_set(parent);
+    __atomic_sub_fetch(&parent->ref_count, 1, __ATOMIC_ACQ_REL);
+    return result;
 }
 
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
@@ -1597,6 +1608,45 @@ int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index) {
     if (!node) return -1;
 
     return vfs_readdir_copy(node, index, entry);
+}
+
+static vfs_mount_t *vfs_find_mount_for_node(vfs_node_t *node) {
+    vfs_node_t *ancestor;
+    int i;
+
+    ancestor = node;
+    while (ancestor) {
+        for (i = 0; i < mounts_capacity; i++) {
+            if (mounts[i].in_use && mounts[i].root == ancestor)
+                return &mounts[i];
+        }
+        ancestor = ancestor->parent;
+    }
+    return NULL;
+}
+
+int vfs_sync_node(vfs_node_t *node, int data_only) {
+    vfs_mount_t *mount;
+
+    if (!node) return -1;
+    mount = vfs_find_mount_for_node(node);
+    if (!mount || !mount->fs_type || !mount->fs_type->sync) return 0;
+    return mount->fs_type->sync(node, data_only != 0);
+}
+
+int vfs_sync_all(int data_only) {
+    int i;
+    int result;
+
+    result = 0;
+    for (i = 0; i < mounts_capacity; i++) {
+        if (!mounts[i].in_use || !mounts[i].fs_type ||
+            !mounts[i].fs_type->sync)
+            continue;
+        if (mounts[i].fs_type->sync(mounts[i].root, data_only != 0) != 0)
+            result = -1;
+    }
+    return result;
 }
 
 vfs_node_t *vfs_get_root(void) {

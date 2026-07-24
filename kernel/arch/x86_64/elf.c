@@ -3,10 +3,37 @@
 #include <lebirun/tty.h>
 #include <lebirun/vfs.h>
 #include <lebirun/task.h>
+#include <lebirun/rng.h>
 #include <string.h>
 #include <stdio.h>
 
 #define ELF_STREAM_CHUNK_SIZE 512
+
+static uint64_t elf_random_pie_base(void) {
+    uint64_t slot;
+
+    slot = rng_get_u64() & 0x3FULL;
+    return 0x01000000ULL + slot * 0x200000ULL;
+}
+
+static int elf_vaddr_file_offset(const Elf64_Phdr *phdr, uint16_t phnum,
+                                 uint64_t vaddr, uint64_t length,
+                                 uint64_t *file_offset) {
+    uint16_t i;
+    uint64_t segment_end;
+
+    if (!phdr || !file_offset) return -1;
+    for (i = 0; i < phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD) continue;
+        segment_end = phdr[i].p_vaddr + phdr[i].p_filesz;
+        if (segment_end < phdr[i].p_vaddr) continue;
+        if (vaddr < phdr[i].p_vaddr || vaddr > segment_end) continue;
+        if (length > segment_end - vaddr) continue;
+        *file_offset = phdr[i].p_offset + vaddr - phdr[i].p_vaddr;
+        return 0;
+    }
+    return -1;
+}
 
 int elf_validate(const uint8_t *data, uint64_t size) {
     if (!data || size < sizeof(Elf64_Ehdr)) {
@@ -160,7 +187,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     phdr = (const Elf64_Phdr *)(data + ehdr->e_phoff);
 
     is_pie = (ehdr->e_type == ET_DYN) ? 1 : 0;
-    pie_base = is_pie ? 0x400000ULL : 0;
+    pie_base = is_pie ? elf_random_pie_base() : 0;
 
     info->entry_point = ehdr->e_entry + pie_base;
     info->load_base = 0xFFFFFFFFFFFFFFFFULL;
@@ -282,6 +309,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     if (is_pie) {
         const Elf64_Dyn *dyn;
         uint64_t rela_off = 0;
+        uint64_t rela_file_off = 0;
         uint64_t rela_sz = 0;
         const Elf64_Rela *rel;
         uint64_t rel_cnt;
@@ -305,8 +333,11 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
             }
         }
 
-        if (rela_sz > 0 && rela_off < size) {
-            rel = (const Elf64_Rela *)(data + rela_off);
+        if (rela_sz > 0 &&
+            elf_vaddr_file_offset(phdr, ehdr->e_phnum, rela_off, rela_sz,
+                                  &rela_file_off) == 0 &&
+            rela_file_off <= size && rela_sz <= size - rela_file_off) {
+            rel = (const Elf64_Rela *)(data + rela_file_off);
             rel_cnt = rela_sz / sizeof(Elf64_Rela);
             for (ri = 0; ri < rel_cnt; ri++) {
                 rtype = ELF64_R_TYPE(rel[ri].r_info);
@@ -379,6 +410,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     Elf64_Dyn dyn;
     Elf64_Rela rel;
     uint64_t rela_off;
+    uint64_t rela_file_off;
     uint64_t rela_sz;
     uint64_t rel_cnt;
     uint64_t ri;
@@ -438,7 +470,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     }
 
     is_pie = (ehdr.e_type == ET_DYN) ? 1 : 0;
-    pie_base = is_pie ? 0x400000ULL : 0;
+    pie_base = is_pie ? elf_random_pie_base() : 0;
 
     info->entry_point = ehdr.e_entry + pie_base;
     info->load_base = 0xFFFFFFFFFFFFFFFFULL;
@@ -621,10 +653,17 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
                 break;
             }
         }
-        if (ret == 0 && rela_sz > 0 && rela_off < node->length) {
+        rela_file_off = 0;
+        if (ret == 0 && rela_sz > 0 &&
+            elf_vaddr_file_offset(phdr, ehdr.e_phnum, rela_off, rela_sz,
+                                  &rela_file_off) == 0 &&
+            rela_file_off <= node->length &&
+            rela_sz <= node->length - rela_file_off) {
             rel_cnt = rela_sz / sizeof(Elf64_Rela);
             for (ri = 0; ri < rel_cnt; ri++) {
-                if (elf_read_exact(node, rela_off + ri * sizeof(Elf64_Rela), sizeof(rel), &rel) != 0) {
+                if (elf_read_exact(node,
+                                   rela_file_off + ri * sizeof(Elf64_Rela),
+                                   sizeof(rel), &rel) != 0) {
                     ret = -11;
                     break;
                 }

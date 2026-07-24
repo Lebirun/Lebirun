@@ -247,6 +247,7 @@ uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);
 void task_memory_collect_for_report(void);
 void task_memory_pressure_request(void);
+void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4);
 uint64_t task_user_memory_bytes(task_t *task);
@@ -265,6 +266,9 @@ int task_set_scheduler(task_t *task, int policy, int priority);
 int task_get_scheduler(task_t *task, int *priority);
 uint64_t signal_pending_mask(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
+int task_futex_wait(uint64_t key, const int *uaddr, int expected,
+                    uint64_t timeout_ticks);
+int task_futex_wake(uint64_t key, int count);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);

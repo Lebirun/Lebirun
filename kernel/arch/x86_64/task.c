@@ -15,6 +15,7 @@
 #include <lebirun/vfs.h>
 #include <lebirun/overlayfs.h>
 #include <lebirun/squashfs.h>
+#include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/rng.h>
 #include <lebirun/panic.h>
 #include <lebirun/uaccess.h>
@@ -28,6 +29,9 @@ extern char _kernel_text_start[];
 extern char _kernel_text_end[];
 extern void sysfs_reclaim_unused(void);
 extern void event_descriptors_close_task(pid_t pid);
+extern void file_locks_release_process(pid_t pid);
+extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
+                                            int release_flock);
 
 #define TASK_FILE_FAULT_TEMP TEMP_SLOT(5)
 
@@ -35,7 +39,16 @@ extern void event_descriptors_close_task(pid_t pid);
 #define KERR_EIO     5
 #define KERR_ENOEXEC 8
 #define KERR_EINTR   4
+#define KERR_EAGAIN  11
+#define KERR_EFAULT  14
 #define KERR_ENOMEM  12
+#define KERR_EINVAL  22
+#define KERR_ETIMEDOUT 110
+
+#define TASK_WAIT_QUEUE_NORMAL 1
+#define TASK_WAIT_QUEUE_FUTEX  2
+#define MEMORY_PRESSURE_REQUESTED 1
+#define MEMORY_PRESSURE_BOOT_RECLAIM 2
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
@@ -110,6 +123,20 @@ int task_get_scheduler(task_t *task, int *priority) {
 #define USER_STACK_INIT_ESP (USER_STACK_TOP - USER_STACK_GAP - 16u)
 #define FPU_STATE_SIZE 512
 
+static uint64_t task_random_stack_top(void) {
+    uint64_t pages;
+
+    pages = rng_get_u32() & 0xFULL;
+    return USER_STACK_TOP - pages * PAGE_SIZE;
+}
+
+static uint64_t task_random_mmap_base(void) {
+    uint64_t pages;
+
+    pages = rng_get_u32() & 0x3FFFULL;
+    return USER_MMAP_HIGH_BASE + pages * PAGE_SIZE;
+}
+
 static spinlock_t sched_lock = {0};
 int scheduler_initialized = 0;
 extern volatile uint64_t tick_count;
@@ -124,7 +151,7 @@ static task_t* dead_queue_head = NULL;
 static int task_ptr_valid(task_t *t);
 static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
-static volatile int memory_pressure_pending;
+static volatile int memory_pressure_pending = MEMORY_PRESSURE_BOOT_RECLAIM;
 static uint64_t memory_pressure_last_tick;
 
 _Static_assert(KSTACK_RUNTIME_SIZE == 0x1E00, "idle stack layout");
@@ -650,6 +677,18 @@ static void sleepq_remove(task_t* t) {
     }
 }
 
+static void task_remove_wait_locked(task_t *task) {
+    if (!task) return;
+    if (task->in_wait_queue == TASK_WAIT_QUEUE_NORMAL &&
+        task->waiting_queue) {
+        waitq_remove(task->waiting_queue, task);
+    } else if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX) {
+        task->in_wait_queue = 0;
+        task->waiting_queue = NULL;
+        task->wait_next = NULL;
+    }
+}
+
 pid_t getpid(void) {
     return current_task ? (pid_t)current_task->pid : 0;
 }
@@ -863,7 +902,7 @@ void waitq_add(wait_queue_t* q, task_t* t) {
     __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     t->wait_next = q->head;
     q->head = t;
-    t->in_wait_queue = 1;
+    t->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
     t->waiting_queue = q;
     __asm__ volatile("push %0; popf" : : "r"(flags));
 }
@@ -1252,7 +1291,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         new_task->regs.ds = new_task->regs.es = 0x23;
         new_task->user_brk = 0;
         new_task->user_brk_start = 0;
-        new_task->mmap_next_addr = USER_MMAP_LOW_BASE;
+        new_task->mmap_next_addr = task_random_mmap_base();
         
     } else {
         frame = (registers_t *)(kernel_stack_base + KSTACK_USABLE_SIZE - sizeof(registers_t));
@@ -1384,9 +1423,7 @@ void task_exit_deferred(uint64_t exit_code) {
     }
     task->exit_code = exit_code;
     sleepq_remove(task);
-    if (task->waiting_queue) {
-        waitq_remove(task->waiting_queue, task);
-    }
+    task_remove_wait_locked(task);
     if (task->join_target && !task->waiting_for_any_child) {
         if (task->join_target->join_refs) task->join_target->join_refs--;
         waitq_remove(&task->join_target->join_waiters, task);
@@ -1838,6 +1875,7 @@ static void task_release_exit_resources(task_t *t) {
         t->syscall_frame->saved_entry_cr3 = 0;
     }
     event_descriptors_close_task(t->pid);
+    file_locks_release_process(t->pid);
     task_fd_close_all(t);
     if (t->fds) {
         kfree(t->fds);
@@ -2222,18 +2260,27 @@ void task_memory_collect_for_report(void) {
 }
 
 void task_memory_pressure_request(void) {
-    memory_pressure_pending = 1;
+    memory_pressure_pending |= MEMORY_PRESSURE_REQUESTED;
 }
 
 static void task_memory_pressure_reclaim(void) {
     task_reclaim_exited_now();
+    ext4_reclaim_mounted_caches(64);
     overlay_flush_cache();
     squashfs_flush_cache();
     sysfs_reclaim_unused();
+    console_reclaim_unused();
+    klog_reclaim_unused();
     slab_reclaim_empty();
     kstack_reclaim_unused();
     heap_reclaim_unused();
     pfa_ref_gc();
+}
+
+void task_memory_pressure_reclaim_now(void) {
+    memory_pressure_pending = 0;
+    memory_pressure_last_tick = tick_count;
+    task_memory_pressure_reclaim();
 }
 
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4) {
@@ -2346,11 +2393,15 @@ void task_deferred_work(void) {
         low_watermark = usable_pages / 64;
         if (low_watermark < 64) low_watermark = 64;
         if (low_watermark > 4096) low_watermark = 4096;
-        if ((memory_pressure_pending || free_pages < low_watermark) &&
+        if ((memory_pressure_pending & MEMORY_PRESSURE_BOOT_RECLAIM) &&
+            tick_count >= 100) {
+            task_memory_pressure_reclaim_now();
+        } else if (((memory_pressure_pending & MEMORY_PRESSURE_REQUESTED) ||
+                    free_pages < low_watermark) &&
             tick_count - memory_pressure_last_tick >= 25) {
             memory_pressure_pending = 0;
             memory_pressure_last_tick = tick_count;
-            task_memory_pressure_reclaim();
+            task_memory_pressure_reclaim_now();
         }
     }
     if ((!current_task || !current_task->is_user) &&
@@ -2414,13 +2465,86 @@ void wake_task(task_t* task) {
     if (!task) return;
     lock_scheduler();
     if (task->state == TASK_BLOCKED) {
-        if (task->waiting_queue) {
-            waitq_remove(task->waiting_queue, task);
-        }
+        task_remove_wait_locked(task);
         task->state = TASK_READY;
         sleepq_remove(task);
     }
     unlock_scheduler();
+}
+
+int task_futex_wait(uint64_t key, const int *uaddr, int expected,
+                    uint64_t timeout_ticks) {
+    int value;
+    int timed_out;
+    uint64_t wake_tick;
+
+    if (!current_task || !uaddr || key == 0) return -KERR_EFAULT;
+    lock_scheduler();
+    if (copy_from_user(&value, uaddr, sizeof(value)) < 0) {
+        unlock_scheduler();
+        return -KERR_EFAULT;
+    }
+    if (value != expected) {
+        unlock_scheduler();
+        return -KERR_EAGAIN;
+    }
+    if (timeout_ticks == 0) {
+        unlock_scheduler();
+        return -KERR_ETIMEDOUT;
+    }
+    if (current_task->in_wait_queue || current_task->waiting_queue) {
+        unlock_scheduler();
+        return -KERR_EAGAIN;
+    }
+    current_task->waiting_queue = (wait_queue_t *)(uintptr_t)key;
+    current_task->in_wait_queue = TASK_WAIT_QUEUE_FUTEX;
+    current_task->state = TASK_BLOCKED;
+    if (timeout_ticks != UINT64_MAX) {
+        wake_tick = tick_count + timeout_ticks;
+        if (wake_tick < tick_count) wake_tick = UINT64_MAX;
+        current_task->wake_tick = wake_tick;
+        current_task->in_sleep_queue = 1;
+        current_task->sleep_next = sleep_queue_head;
+        sleep_queue_head = current_task;
+    }
+    unlock_scheduler();
+    schedule();
+
+    lock_scheduler();
+    timed_out = current_task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX;
+    task_remove_wait_locked(current_task);
+    sleepq_remove(current_task);
+    unlock_scheduler();
+    if (signal_pending_mask(current_task)) return -KERR_EINTR;
+    if (timed_out) return -KERR_ETIMEDOUT;
+    return 0;
+}
+
+int task_futex_wake(uint64_t key, int count) {
+    task_t *task;
+    int woken;
+    int safety;
+
+    if (key == 0) return -KERR_EFAULT;
+    if (count < 0) return -KERR_EINVAL;
+    if (count == 0) return 0;
+    woken = 0;
+    safety = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && safety < 10000 && woken < count) {
+        if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
+            (uint64_t)(uintptr_t)task->waiting_queue == key) {
+            task_remove_wait_locked(task);
+            sleepq_remove(task);
+            if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+            woken++;
+        }
+        task = task->all_next;
+        safety++;
+    }
+    unlock_scheduler();
+    return woken;
 }
 
 void task_kill(task_t* task, uint64_t exit_code) {
@@ -2436,9 +2560,7 @@ void task_kill(task_t* task, uint64_t exit_code) {
     }
     task->exit_code = exit_code;
     sleepq_remove(task);
-    if (task->waiting_queue) {
-        waitq_remove(task->waiting_queue, task);
-    }
+    task_remove_wait_locked(task);
     if (task->join_target && !task->waiting_for_any_child) {
         if (task->join_target->join_refs) task->join_target->join_refs--;
         waitq_remove(&task->join_target->join_waiters, task);
@@ -3169,6 +3291,8 @@ void task_fd_close_all(task_t *task) {
 
 void task_fd_close_cloexec(task_t *task) {
     int i;
+    int j;
+    int release_flock;
     task_fd_t *tfd;
     pipe_t *p;
 
@@ -3186,6 +3310,22 @@ void task_fd_close_cloexec(task_t *task) {
                 }
             }
         } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            release_flock = 1;
+            if (tfd->ref_count > 1) {
+                for (j = 0; j < task->fds_capacity; j++) {
+                    if (j == i || !task->fds[j].in_use) continue;
+                    if (task->fds[j].type == FD_TYPE_FILE &&
+                        task->fds[j].node == tfd->node &&
+                        task->fds[j].ref_count == tfd->ref_count &&
+                        !(task->fds[j].flags & 1)) {
+                        release_flock = 0;
+                        break;
+                    }
+                }
+            }
+            file_locks_release_process_node(task->pid,
+                                            (vfs_node_t *)tfd->node,
+                                            release_flock);
             vfs_close((vfs_node_t *)tfd->node);
         }
         tfd->in_use = 0;
@@ -3308,7 +3448,7 @@ pid_t task_fork(registers_t *parent_regs) {
     child->sched_priority = parent->sched_priority;
     child->time_slice = task_timeslice_for_nice(child->nice_value);
     child->base_time_slice = child->time_slice;
-    child->stack_size = 0;
+    child->stack_size = parent->stack_size;
     child->kernel_stack_base = kernel_stack_base;
     child->kernel_stack_size = KSTACK_USABLE_SIZE;
     child->wake_tick = 0;
@@ -3349,6 +3489,7 @@ pid_t task_fork(registers_t *parent_regs) {
     }
     child->user_brk = parent->user_brk;
     child->user_brk_start = parent->user_brk_start;
+    child->mmap_next_addr = parent->mmap_next_addr;
     child->console_id = parent->console_id;
     child->running_cpu = -1;
     child->tls_base = parent->tls_base;
@@ -3480,7 +3621,7 @@ static __attribute__((unused)) int task_exec_legacy(
     current_task->file_map_count = 0;
     current_task->file_map_capacity = 0;
 
-    stack_top = USER_STACK_TOP;
+    stack_top = task_random_stack_top();
     stack_size = task_initial_stack_size(0, NULL, 0, NULL, "program", 11);
 
     new_pd = vmm_create_pml4();
@@ -3838,7 +3979,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOEXEC;
     }
 
-    stack_top = USER_STACK_TOP;
+    stack_top = task_random_stack_top();
     stack_size = task_initial_stack_size(argc, k_argv, envc, k_envp, "program", 11);
     if (stack_size > USER_STACK_SIZE) {
         task_error("task_exec_with_args: initial stack too large\n");
@@ -4253,6 +4394,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     current_task->user_pages_count = total_pages;
     current_task->user_brk = new_user_brk;
     current_task->user_brk_start = new_user_brk;
+    current_task->mmap_next_addr = task_random_mmap_base();
     current_task->stack_size = stack_size;
     current_task->pml4_phys = new_pd;
     current_task->cr3 = new_pd;

@@ -369,6 +369,17 @@ int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t new_size) {
         new_blocks = (new_size + fs->block_size - 1) / fs->block_size;
         old_blocks = (old_size + fs->block_size - 1) / fs->block_size;
 
+        ext4_inode_set_size(&ic->inode, new_size);
+        ext4_mark_inode_dirty(ic);
+        if (ext4_sync(fs) != 0) {
+            ext4_release_inode(ic);
+            return -1;
+        }
+        if (ic->inode.i_blocks_lo == 0) {
+            ext4_release_inode(ic);
+            return 0;
+        }
+
         for (i = new_blocks; i < old_blocks; i++) {
             phys_block = ext4_inode_get_block(fs, &ic->inode, i);
             if (phys_block != 0) {
@@ -383,6 +394,9 @@ int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t new_size) {
                 }
             }
         }
+        ext4_mark_inode_dirty(ic);
+        ext4_release_inode(ic);
+        return ext4_sync(fs);
     }
 
     ext4_inode_set_size(&ic->inode, new_size);
@@ -427,7 +441,9 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
     uint64_t blocks;
     uint64_t i;
     uint64_t phys_block;
+    uint32_t old_orphan;
     int inline_symlink;
+    int orphaned;
 
     if (!name) {
         return -1;
@@ -447,14 +463,55 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
         return -1;
     }
 
+    if (ic->inode.i_links_count == 0) {
+        ext4_release_inode(ic);
+        return -1;
+    }
+
+    orphaned = ic->inode.i_links_count == 1;
+    old_orphan = 0;
+    if (orphaned) {
+        old_orphan = fs->sb.s_last_orphan;
+        ic->inode.i_dtime = old_orphan;
+        ext4_mark_inode_dirty(ic);
+        fs->sb.s_last_orphan = ino;
+        fs->super_dirty = true;
+        if (ext4_sync(fs) != 0) {
+            ext4_release_inode(ic);
+            return -1;
+        }
+    }
+
+    if (ext4_dir_remove_entry(fs, parent_ino, name) != 0) {
+        if (orphaned) {
+            ic->inode.i_dtime = 0;
+            ext4_mark_inode_dirty(ic);
+            fs->sb.s_last_orphan = old_orphan;
+            fs->super_dirty = true;
+            ext4_sync(fs);
+        }
+        ext4_release_inode(ic);
+        return -1;
+    }
+
     ic->inode.i_links_count--;
+    ext4_mark_inode_dirty(ic);
+    if (ext4_sync(fs) != 0) {
+        ext4_release_inode(ic);
+        return -1;
+    }
 
     if (ic->inode.i_links_count == 0) {
         file_size = ext4_inode_get_size(&ic->inode);
         inline_symlink = ((ic->inode.i_mode & 0xF000) == EXT4_S_IFLNK &&
                           file_size <= sizeof(ic->inode.i_block) &&
                           ic->inode.i_blocks_lo == 0);
-        if (!inline_symlink) {
+        if ((ic->inode.i_mode & 0xF000) == EXT4_S_IFREG) {
+            if (ext4_file_truncate(fs, ino, 0) != 0) {
+                ext4_release_inode(ic);
+                return -1;
+            }
+        } else if (!inline_symlink) {
             blocks = (file_size + fs->block_size - 1) / fs->block_size;
 
             for (i = 0; i < blocks; i++) {
@@ -466,13 +523,15 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
         }
 
         ext4_release_inode(ic);
-        ext4_free_inode(fs, ino);
+        if (ext4_free_inode(fs, ino) != 0) return -1;
+        fs->sb.s_last_orphan = old_orphan;
+        fs->super_dirty = true;
+        return ext4_sync(fs);
     } else {
-        ext4_mark_inode_dirty(ic);
         ext4_release_inode(ic);
     }
 
-    return ext4_dir_remove_entry(fs, parent_ino, name);
+    return 0;
 }
 
 int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
@@ -486,6 +545,10 @@ int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_nam
         return -1;
     }
 
+    if (old_parent_ino == new_parent_ino &&
+        strcmp(old_name, new_name) == 0)
+        return 0;
+
     if (ext4_dir_lookup(fs, old_parent_ino, old_name, &ino) != 0) {
         return -1;
     }
@@ -498,7 +561,8 @@ int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_nam
     ext4_release_inode(ic);
 
     if (ext4_dir_lookup(fs, new_parent_ino, new_name, &existing_ino) == 0) {
-        ext4_unlink_file(fs, new_parent_ino, new_name);
+        if (ext4_unlink_file(fs, new_parent_ino, new_name) != 0)
+            return -1;
     }
 
     if (ext4_dir_add_entry(fs, new_parent_ino, new_name, ino, file_type) != 0) {

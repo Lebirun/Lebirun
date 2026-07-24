@@ -58,6 +58,7 @@ LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
 KERNEL_SIZE_CFLAGS=-Os -ffunction-sections -fdata-sections
+KERNEL_TINY_CFLAGS=-Oz -ffunction-sections -fdata-sections
 
 $(ARCHDIR)/fs/misc/procfs.o \
 $(ARCHDIR)/fs/misc/sysfs.o \
@@ -112,6 +113,12 @@ $(ARCHDIR)/syscalls/syscall_dl.o \
 $(ARCHDIR)/syscalls/syscall_power.o \
 $(ARCHDIR)/syscalls/syscall_crypto.o \
 $(ARCHDIR)/syscalls/syscall_regex.o: CFLAGS += $(KERNEL_SIZE_CFLAGS)
+
+$(ARCHDIR)/elf.o \
+$(ARCHDIR)/security.o \
+$(ARCHDIR)/syscalls/syscall_epoll.o \
+$(ARCHDIR)/syscalls/syscall_posix.o \
+$(ARCHDIR)/syscalls/syscall_signal.o: CFLAGS += $(KERNEL_TINY_CFLAGS)
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o

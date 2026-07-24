@@ -9,6 +9,7 @@ void x86_security_enable(void) {
     uint32_t max_basic;
     uint64_t cr0;
     uint64_t cr4;
+    uint64_t new_cr4;
 
     __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
     cr0 |= 1ULL << 16;
@@ -23,8 +24,10 @@ void x86_security_enable(void) {
     ecx = 0;
     __asm__ volatile ("cpuid"
                       : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
-    if (!(ebx & (1U << 7))) return;
     __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= 1ULL << 20;
-    __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    new_cr4 = cr4;
+    if (ebx & (1U << 7)) new_cr4 |= 1ULL << 20;
+    if (ecx & (1U << 2)) new_cr4 |= 1ULL << 11;
+    if (new_cr4 != cr4)
+        __asm__ volatile ("mov %0, %%cr4" : : "r"(new_cr4) : "memory");
 }

@@ -69,7 +69,7 @@ typedef struct ext4_fs {
 
 int ext4_read_superblock(ext4_fs_t *fs);
 int ext4_write_superblock(ext4_fs_t *fs);
-void ext4_sync_inodes(ext4_fs_t *fs);
+int ext4_sync_inodes(ext4_fs_t *fs);
 int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 
@@ -113,7 +113,9 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
 int ext4_sync_mounted(void);
+int ext4_sync_node(vfs_node_t *node);
 void ext4_background_writeback(uint32_t max_blocks);
+void ext4_reclaim_mounted_caches(uint32_t max_blocks);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);

@@ -2,9 +2,10 @@
 #include <lebirun/task.h>
 #include <lebirun/mutex.h>
 #include <lebirun/inotify.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/rtc.h>
 
 #define EPOLL_INIT_COUNT 1
-#define FUTEX_INIT_COUNT 32
 #define EVENTFD_INIT_COUNT 1
 #define TIMERFD_INIT_COUNT 1
 #define SIGNALFD_INIT_COUNT 1
@@ -46,6 +47,7 @@
 #define FUTEX_WAKE_BITSET   10
 #define FUTEX_PRIVATE_FLAG  128
 #define FUTEX_CLOCK_REALTIME 256
+#define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
 
 #define EFD_SEMAPHORE 1
 #define EFD_CLOEXEC   0x80000
@@ -558,43 +560,102 @@ static int sys_epoll_pwait(int epfd, const char *events_ptr, int maxevents) {
     return sys_epoll_wait(epfd, events_ptr, maxevents);
 }
 
-static int sys_futex(int *uaddr, const char *op_ptr, int val) {
+static int futex_get_key(int *uaddr, uint64_t *key) {
+    uint64_t address;
+    uint64_t pml4;
+    uint64_t physical;
+
+    if (!current_task || !uaddr || !key) return -EFAULT;
+    address = (uint64_t)(uintptr_t)uaddr;
+    if (address < 0x1000 || address >= KERNEL_VMA ||
+        (address & (sizeof(int) - 1)) != 0) return -EINVAL;
+    pml4 = current_task->pml4_phys ? current_task->pml4_phys :
+            current_task->cr3;
+    physical = vmm_get_phys_in_pml4(pml4, address);
+    if (physical == 0) return -EFAULT;
+    *key = physical + (address & (PAGE_SIZE - 1));
+    return 0;
+}
+
+static int futex_timeout_ticks(const event_timespec_t *user_timeout,
+                               int absolute, int realtime,
+                               uint64_t *timeout_ticks) {
+    event_timespec_t timeout;
+    uint64_t deadline;
+    uint64_t now;
+
+    if (!timeout_ticks) return -EINVAL;
+    if (!user_timeout) {
+        *timeout_ticks = UINT64_MAX;
+        return 0;
+    }
+    if (copy_from_user(&timeout, user_timeout, sizeof(timeout)) < 0)
+        return -EFAULT;
+    deadline = timespec_to_ticks(&timeout);
+    if (deadline == UINT64_MAX) return -EINVAL;
+    if (!absolute) {
+        *timeout_ticks = deadline;
+        return 0;
+    }
+    if (realtime) {
+        now = rtc_get_time();
+        if (now > UINT64_MAX / pit_freq) return -EINVAL;
+        now *= pit_freq;
+        now += tick_count % pit_freq;
+    } else {
+        now = tick_count;
+    }
+    *timeout_ticks = deadline > now ? deadline - now : 0;
+    return 0;
+}
+
+static int sys_futex(int *uaddr, const char *op_ptr, int val,
+                     const event_timespec_t *timeout, int *uaddr2,
+                     unsigned int val3) {
     int op;
     int cmd;
-    int current_value;
+    int ret;
+    int realtime;
+    uint64_t key;
+    uint64_t timeout_ticks;
 
     op = (int)(uintptr_t)op_ptr;
     cmd = op & 127;
-    if ((cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) &&
-        copy_from_user(&current_value, uaddr, sizeof(current_value)) < 0)
-        return -EFAULT;
-    
+    if (op & ~(127 | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
+        return -EINVAL;
+    realtime = (op & FUTEX_CLOCK_REALTIME) != 0;
+    (void)uaddr2;
+    ret = futex_get_key(uaddr, &key);
+    if (ret < 0) return ret;
+
     switch (cmd) {
         case FUTEX_WAIT:
-            if (current_value != val) {
-                return -EAGAIN;
-            }
-            return 0;
-        
+            if (realtime) return -ENOSYS;
+            ret = futex_timeout_ticks(timeout, 0, 0, &timeout_ticks);
+            if (ret < 0) return ret;
+            return task_futex_wait(key, uaddr, val, timeout_ticks);
+
         case FUTEX_WAKE:
-            return 0;
-        
+            if (realtime) return -EINVAL;
+            return task_futex_wake(key, val);
+
         case FUTEX_REQUEUE:
         case FUTEX_CMP_REQUEUE:
-            return 0;
-            
         case FUTEX_WAKE_OP:
-            return 0;
-            
+            return -ENOSYS;
+
         case FUTEX_WAIT_BITSET:
-            if (current_value != val) {
-                return -EAGAIN;
-            }
-            return 0;
-            
+            if (val3 != FUTEX_BITSET_MATCH_ANY) return -ENOSYS;
+            ret = futex_timeout_ticks(timeout, 1, realtime,
+                                      &timeout_ticks);
+            if (ret < 0) return ret;
+            return task_futex_wait(key, uaddr, val, timeout_ticks);
+
         case FUTEX_WAKE_BITSET:
-            return 0;
-            
+            if (realtime) return -EINVAL;
+            if (val3 == 0) return -EINVAL;
+            return task_futex_wake(key, val);
+
         default:
             return -ENOSYS;
     }

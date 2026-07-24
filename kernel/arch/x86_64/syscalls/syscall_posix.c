@@ -3,12 +3,14 @@
 #include <lebirun/pty.h>
 #include <lebirun/common.h>
 #include <lebirun/ramfs.h>
+#include <lebirun/spinlock.h>
 #include <lebirun/fs/ext4/ext4.h>
-#include <lebirun/drivers/sata/ahci.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
 extern int syscall_core_read_for_readv(int fd, char *buf, int len);
+void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
+                                     int release_flock);
 
 #define fd_table (current_task->fds)
 
@@ -200,18 +202,37 @@ static void fd_release_entry(task_fd_t *tfd) {
     int pipe_type;
     vfs_node_t *node_to_close;
     pipe_t *pipe_to_release;
+    int release_flock;
+    int i;
 
     if (!tfd || !tfd->in_use) return;
 
     node_to_close = NULL;
     pipe_to_release = NULL;
     pipe_type = 0;
+    release_flock = 1;
 
     if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
         pipe_to_release = (pipe_t *)tfd->private_data;
         pipe_type = tfd->type;
     } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node_to_close = (vfs_node_t *)tfd->node;
+        if (current_task && tfd->ref_count > 1) {
+            for (i = 0; i < current_task->fds_capacity; i++) {
+                if (&current_task->fds[i] == tfd ||
+                    !current_task->fds[i].in_use)
+                    continue;
+                if (current_task->fds[i].type == FD_TYPE_FILE &&
+                    current_task->fds[i].node == node_to_close &&
+                    current_task->fds[i].ref_count == tfd->ref_count) {
+                    release_flock = 0;
+                    break;
+                }
+            }
+        }
+        if (current_task)
+            file_locks_release_process_node(current_task->pid, node_to_close,
+                                            release_flock);
     }
 
     memset(tfd, 0, sizeof(*tfd));
@@ -971,18 +992,236 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
 #define F_SETFD  2
 #define F_GETFL  3
 #define F_SETFL  4
+#define F_GETLK  5
+#define F_SETLK  6
+#define F_SETLKW 7
 #define F_DUPFD_CLOEXEC 1030
 
+#define F_RDLCK 0
+#define F_WRLCK 1
+#define F_UNLCK 2
+
+#define FILE_LOCK_POSIX 0
+#define FILE_LOCK_FLOCK 1
+
+typedef struct kernel_flock {
+    int16_t l_type;
+    int16_t l_whence;
+    int64_t l_start;
+    int64_t l_len;
+    pid_t l_pid;
+} kernel_flock_t;
+
+typedef struct file_lock_record {
+    vfs_node_t *node;
+    pid_t owner;
+    uint64_t start;
+    uint64_t end;
+    int type;
+    int kind;
+    struct file_lock_record *next;
+} file_lock_record_t;
+
+static file_lock_record_t *file_locks;
+static spinlock_t file_locks_lock = {0};
+
+static int file_lock_overlaps(file_lock_record_t *lock, uint64_t start,
+                              uint64_t end) {
+    return lock->start < end && start < lock->end;
+}
+
+static file_lock_record_t *file_lock_conflict(vfs_node_t *node, pid_t owner,
+                                               uint64_t start, uint64_t end,
+                                               int type, int kind) {
+    file_lock_record_t *lock;
+
+    lock = file_locks;
+    while (lock) {
+        if (lock->node == node && lock->owner != owner && lock->kind == kind &&
+            file_lock_overlaps(lock, start, end) &&
+            (type == F_WRLCK || lock->type == F_WRLCK))
+            return lock;
+        lock = lock->next;
+    }
+    return NULL;
+}
+
+static file_lock_record_t *file_lock_detach_owned(vfs_node_t *node,
+                                                   pid_t owner,
+                                                   uint64_t start,
+                                                   uint64_t end, int kind) {
+    file_lock_record_t **link;
+    file_lock_record_t *lock;
+    file_lock_record_t *removed;
+
+    removed = NULL;
+    link = &file_locks;
+    while (*link) {
+        lock = *link;
+        if (lock->node == node && lock->owner == owner &&
+            (kind < 0 || lock->kind == kind) &&
+            file_lock_overlaps(lock, start, end)) {
+            *link = lock->next;
+            lock->next = removed;
+            removed = lock;
+        } else {
+            link = &lock->next;
+        }
+    }
+    return removed;
+}
+
+static void file_lock_free_records(file_lock_record_t *records) {
+    file_lock_record_t *next;
+
+    while (records) {
+        next = records->next;
+        kfree(records);
+        records = next;
+    }
+}
+
+void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
+                                     int release_flock) {
+    file_lock_record_t *removed;
+    file_lock_record_t *flock_removed;
+
+    if (!node) return;
+    spin_lock(&file_locks_lock);
+    removed = file_lock_detach_owned(node, owner, 0, UINT64_MAX,
+                                     FILE_LOCK_POSIX);
+    flock_removed = NULL;
+    if (release_flock)
+        flock_removed = file_lock_detach_owned(node, owner, 0, UINT64_MAX,
+                                               FILE_LOCK_FLOCK);
+    spin_unlock(&file_locks_lock);
+    file_lock_free_records(removed);
+    file_lock_free_records(flock_removed);
+}
+
+void file_locks_release_process(pid_t owner) {
+    file_lock_record_t **link;
+    file_lock_record_t *lock;
+    file_lock_record_t *removed;
+
+    removed = NULL;
+    spin_lock(&file_locks_lock);
+    link = &file_locks;
+    while (*link) {
+        lock = *link;
+        if (lock->owner == owner) {
+            *link = lock->next;
+            lock->next = removed;
+            removed = lock;
+        } else {
+            link = &lock->next;
+        }
+    }
+    spin_unlock(&file_locks_lock);
+    file_lock_free_records(removed);
+}
+
+static int file_lock_set(vfs_node_t *node, pid_t owner, uint64_t start,
+                         uint64_t end, int type, int kind, int wait) {
+    file_lock_record_t *record;
+    file_lock_record_t *removed;
+    file_lock_record_t *conflict;
+
+    record = NULL;
+    if (type != F_UNLCK) {
+        record = (file_lock_record_t *)kmalloc(sizeof(file_lock_record_t));
+        if (!record) return -ENOMEM;
+        record->node = node;
+        record->owner = owner;
+        record->start = start;
+        record->end = end;
+        record->type = type;
+        record->kind = kind;
+        record->next = NULL;
+    }
+
+    for (;;) {
+        removed = NULL;
+        spin_lock(&file_locks_lock);
+        conflict = type == F_UNLCK ? NULL :
+            file_lock_conflict(node, owner, start, end, type, kind);
+        if (!conflict) {
+            removed = file_lock_detach_owned(node, owner, start, end, kind);
+            if (record) {
+                record->next = file_locks;
+                file_locks = record;
+                record = NULL;
+            }
+        }
+        spin_unlock(&file_locks_lock);
+        file_lock_free_records(removed);
+        if (!conflict) return 0;
+        if (!wait) {
+            if (record) kfree(record);
+            return -EAGAIN;
+        }
+        if (signal_pending_mask(current_task)) {
+            if (record) kfree(record);
+            return -EINTR;
+        }
+        sleep_ticks(1);
+    }
+}
+
+static int file_lock_range(vfs_node_t *node, task_fd_t *tfd,
+                           kernel_flock_t *flock, uint64_t *start,
+                           uint64_t *end) {
+    int64_t base;
+    int64_t first;
+    int64_t last;
+
+    if (flock->l_whence == VFS_SEEK_SET) base = 0;
+    else if (flock->l_whence == VFS_SEEK_CUR)
+        base = (int64_t)task_fd_position_get(tfd);
+    else if (flock->l_whence == VFS_SEEK_END)
+        base = (int64_t)node->length;
+    else return -EINVAL;
+    if (__builtin_add_overflow(base, flock->l_start, &first) || first < 0)
+        return -EINVAL;
+    if (flock->l_len == 0) {
+        *start = (uint64_t)first;
+        *end = UINT64_MAX;
+        return 0;
+    }
+    if (flock->l_len > 0) {
+        if (__builtin_add_overflow(first, flock->l_len, &last) || last <= first)
+            return -EINVAL;
+        *start = (uint64_t)first;
+        *end = (uint64_t)last;
+        return 0;
+    }
+    if (__builtin_add_overflow(first, flock->l_len, &last) || last < 0)
+        return -EINVAL;
+    *start = (uint64_t)last;
+    *end = (uint64_t)first;
+    return *start < *end ? 0 : -EINVAL;
+}
+
 static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
-    int cmd = (int)(uintptr_t)cmd_ptr;
+    int cmd;
+    int minfd;
+    int newfd;
+    uint64_t user_addr;
+    uint64_t start;
+    uint64_t end;
+    kernel_flock_t flock;
+    file_lock_record_t *conflict;
+    vfs_node_t *node;
+    int result;
+
+    cmd = (int)(uintptr_t)cmd_ptr;
     if (!current_task) return -ESRCH;
     if (is_socket_fd(fd)) return socket_fcntl(fd, cmd, arg);
     if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     switch (cmd) {
         case F_DUPFD:
-        case F_DUPFD_CLOEXEC: {
-            int minfd = arg;
-            int newfd;
+        case F_DUPFD_CLOEXEC:
+            minfd = arg;
             if (minfd < 0 || minfd >= TASK_MAX_FDS) return -EINVAL;
             newfd = fd_alloc_from(minfd);
             if (newfd < 0) return -EMFILE;
@@ -995,7 +1234,6 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             fd_retain_entry(&fd_table[newfd]);
             task_fd_position_share(&fd_table[fd], &fd_table[newfd]);
             return newfd;
-        }
         case F_GETFD:
             return (fd_table[fd].flags & 1) ? 1 : 0;
         case F_SETFD:
@@ -1009,6 +1247,44 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
         case F_SETFL:
             fd_table[fd].flags = (fd_table[fd].flags & 1) | (arg & ~1);
             return 0;
+        case F_GETLK:
+        case F_SETLK:
+        case F_SETLKW:
+            if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
+                return -EBADF;
+            user_addr = (uint64_t)(uint32_t)arg;
+            if (!posix_user_range_mapped(user_addr, sizeof(flock)))
+                return -EFAULT;
+            memcpy(&flock, (void *)user_addr, sizeof(flock));
+            if (flock.l_type != F_RDLCK && flock.l_type != F_WRLCK &&
+                flock.l_type != F_UNLCK)
+                return -EINVAL;
+            node = (vfs_node_t *)fd_table[fd].node;
+            result = file_lock_range(node, &fd_table[fd], &flock,
+                                     &start, &end);
+            if (result != 0) return result;
+            if (cmd == F_GETLK) {
+                spin_lock(&file_locks_lock);
+                conflict = file_lock_conflict(node, current_task->pid, start,
+                                              end, flock.l_type,
+                                              FILE_LOCK_POSIX);
+                if (conflict) {
+                    flock.l_type = (int16_t)conflict->type;
+                    flock.l_whence = VFS_SEEK_SET;
+                    flock.l_start = (int64_t)conflict->start;
+                    flock.l_len = conflict->end == UINT64_MAX ? 0 :
+                        (int64_t)(conflict->end - conflict->start);
+                    flock.l_pid = conflict->owner;
+                } else {
+                    flock.l_type = F_UNLCK;
+                }
+                spin_unlock(&file_locks_lock);
+                memcpy((void *)user_addr, &flock, sizeof(flock));
+                return 0;
+            }
+            return file_lock_set(node, current_task->pid, start, end,
+                                 flock.l_type, FILE_LOCK_POSIX,
+                                 cmd == F_SETLKW);
         default:
             return -EINVAL;
     }
@@ -1018,6 +1294,9 @@ static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
     uint64_t path_addr;
     uint64_t length;
     const char *path;
+    vfs_node_t *node;
+    int result;
+
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     length = (uint64_t)(uintptr_t)len_ptr;
@@ -1025,16 +1304,15 @@ static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
     if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -1;
     
     path = (const char *)path_addr;
-    vfs_node_t *node = vfs_namei(path);
+    node = vfs_namei(path);
     if (!node) return -1;
 
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) { vfs_release(node); return -1; }
     
     if (node->truncate) {
-        int r;
-        r = node->truncate(node, length);
+        result = node->truncate(node, length);
         vfs_release(node);
-        return r;
+        return result;
     }
     
     vfs_release(node);
@@ -1043,13 +1321,15 @@ static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
 
 static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     uint64_t length;
+    vfs_node_t *node;
+
     (void)unused;
     length = (uint64_t)(uintptr_t)len_ptr;
     
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
 
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
@@ -1428,49 +1708,48 @@ static int sys_fchown(int fd, int uid, int gid) {
 }
 
 static int sys_fsync(int fd) {
-    ahci_port_t *port;
     task_fd_t *tfd;
-    uint64_t i;
+    vfs_node_t *node;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!fd_table[fd].in_use) return -EBADF;
     tfd = &fd_table[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EINVAL;
-
-    ext4_sync_mounted();
-
-    for (i = 0; i < AHCI_MAX_PORTS; i++) {
-        port = ahci_get_port(i);
-        if (port) {
-            ahci_flush(port);
-        }
-    }
-
-    return 0;
+    node = (vfs_node_t *)tfd->node;
+    return vfs_sync_node(node, 0) == 0 ? 0 : -EIO;
 }
 
 static int sys_fdatasync(int fd) {
     task_fd_t *tfd;
+    vfs_node_t *node;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!fd_table[fd].in_use) return -EBADF;
     tfd = &fd_table[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EINVAL;
-    return 0;
+    node = (vfs_node_t *)tfd->node;
+    return vfs_sync_node(node, 1) == 0 ? 0 : -EIO;
 }
 
 static int sys_flock(int fd, int operation) {
     int mode;
+    int type;
+    vfs_node_t *node;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!fd_table[fd].in_use) return -EBADF;
+    if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
+        return -EBADF;
     if (operation & ~(1 | 2 | 4 | 8)) return -EINVAL;
     mode = operation & ~4;
     if (mode != 1 && mode != 2 && mode != 8) return -EINVAL;
-    return 0;
+    type = mode == 1 ? F_RDLCK : mode == 2 ? F_WRLCK : F_UNLCK;
+    node = (vfs_node_t *)fd_table[fd].node;
+    return file_lock_set(node, current_task->pid, 0, UINT64_MAX, type,
+                         FILE_LOCK_FLOCK, !(operation & 4));
 }
 
 static int sys_pread64(int fd, void *buf, size_t count, long long offset) {

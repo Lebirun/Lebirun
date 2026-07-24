@@ -341,7 +341,8 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     if (size == 0 || size < length) return -EINVAL;
     if (!task_memory_allows(current_task, size)) return -ENOMEM;
 
-    if (addr != NULL && ((uint64_t)addr & 0xFFFu) == 0 && (flags & 0x10)) {
+    if (flags & 0x10) {
+        if ((uint64_t)addr & 0xFFFu) return -EINVAL;
         base = (uint64_t)addr;
     } else {
         base = user_mmap_auto_base(current_task->mmap_next_addr, size);
@@ -349,6 +350,7 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
         current_task->mmap_next_addr = base + size;
     }
 
+    if (base < 0x1000) return -EPERM;
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
     if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
 
@@ -385,7 +387,10 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
         current_task->pml4_phys, base, size, pte_flags, &page_count);
 
     if (!new_pages && size > 0) {
-        return -ENOMEM;
+        task_memory_pressure_reclaim_now();
+        new_pages = vmm_map_range_in_pml4_tracked(
+            current_task->pml4_phys, base, size, pte_flags, &page_count);
+        if (!new_pages) return -ENOMEM;
     }
 
     if (new_pages && page_count > 0) {

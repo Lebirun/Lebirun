@@ -389,7 +389,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
         __asm__ volatile ("mov %0, %%cr3" : : "r"(src_pml4_phys) : "memory");
     }
 
-    smp_tlb_flush_all();
+    smp_tlb_flush_all_sync();
 
     if (out_user_pages) *out_user_pages = user_pages;
     else kfree(user_pages);

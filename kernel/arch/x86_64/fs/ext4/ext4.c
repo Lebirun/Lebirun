@@ -51,7 +51,7 @@ static int ext4_recover_orphans(ext4_fs_t *fs) {
         }
         fs->sb.s_last_orphan = next;
         fs->super_dirty = true;
-        ext4_sync_inodes(fs);
+        if (ext4_sync_inodes(fs) != 0) return -1;
         if (ext4_sync_blocks(fs) != 0) return -1;
         if (ext4_write_superblock(fs) != 0) return -1;
         fs->super_dirty = false;
@@ -515,6 +515,8 @@ static vfs_node_t *ext4_vfs_finddir(vfs_node_t *node, const char *name);
 static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 static int ext4_vfs_unlink(vfs_node_t *parent, const char *name);
 static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
+static int ext4_vfs_truncate(vfs_node_t *node, uint64_t length);
+static int ext4_vfs_sync(vfs_node_t *node, int data_only);
 static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                            vfs_node_t *new_parent, const char *new_name);
 
@@ -601,6 +603,7 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     node->create = ext4_vfs_create;
     node->unlink = ext4_vfs_unlink;
     node->mkdir = ext4_vfs_mkdir;
+    node->truncate = ext4_vfs_truncate;
     node->rename = ext4_vfs_rename;
 
     node->private_data = priv;
@@ -921,6 +924,8 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
 
 static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
     ext4_vfs_private_t *priv;
+    vfs_node_t *victim;
+    uint32_t ino;
     int ret;
 
     if (!parent || !parent->private_data || !name) {
@@ -933,7 +938,26 @@ static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
 
     priv = (ext4_vfs_private_t *)parent->private_data;
     mutex_lock(&priv->fs->lock);
+    victim = NULL;
+    if (ext4_dir_lookup(priv->fs, priv->ino, name, &ino) == 0)
+        victim = ext4_vfs_cache_lookup(priv->fs, ino);
     ret = ext4_unlink_file(priv->fs, priv->ino, name);
+    if (ret == 0 && victim)
+        ext4_drop_vfs_node(priv->fs, victim);
+    mutex_unlock(&priv->fs->lock);
+    return ret;
+}
+
+static int ext4_vfs_truncate(vfs_node_t *node, uint64_t length) {
+    ext4_vfs_private_t *priv;
+    int ret;
+
+    if (!node || !node->private_data) return -1;
+    if (VFS_GET_TYPE(node->flags) != VFS_FILE) return -1;
+    priv = (ext4_vfs_private_t *)node->private_data;
+    mutex_lock(&priv->fs->lock);
+    ret = ext4_file_truncate(priv->fs, priv->ino, length);
+    if (ret == 0) node->length = length;
     mutex_unlock(&priv->fs->lock);
     return ret;
 }
@@ -1226,12 +1250,11 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     ext4_mount_list_remove_locked(fs);
     mutex_lock(&fs->lock);
 
-    ext4_sync_inodes(fs);
-    ext4_sync_blocks(fs);
-    if (fs->super_dirty) {
-        if (ext4_write_superblock(fs) == 0) {
-            fs->super_dirty = false;
-        }
+    if (ext4_sync(fs) != 0) {
+        ext4_mount_list_add_locked(fs);
+        mutex_unlock(&fs->lock);
+        mutex_unlock(&ext4_mounts_lock);
+        return -1;
     }
     ext4_flush_cache(fs);
 
@@ -1284,9 +1307,15 @@ void ext4_vfs_register(void) {
     ext4_fs_type.name = "ext4";
     ext4_fs_type.mount = ext4_do_mount;
     ext4_fs_type.unmount = ext4_do_unmount;
+    ext4_fs_type.sync = ext4_vfs_sync;
     ext4_fs_type.next = NULL;
 
     vfs_register_fs(&ext4_fs_type);
+}
+
+static int ext4_vfs_sync(vfs_node_t *node, int data_only) {
+    (void)data_only;
+    return ext4_sync_node(node);
 }
 
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
@@ -1378,12 +1407,11 @@ int ext4_unmount(ext4_fs_t *fs) {
     ext4_mount_list_remove_locked(fs);
     mutex_lock(&fs->lock);
 
-    ext4_sync_inodes(fs);
-    ext4_sync_blocks(fs);
-    if (fs->super_dirty) {
-        if (ext4_write_superblock(fs) == 0) {
-            fs->super_dirty = false;
-        }
+    if (ext4_sync(fs) != 0) {
+        ext4_mount_list_add_locked(fs);
+        mutex_unlock(&fs->lock);
+        mutex_unlock(&ext4_mounts_lock);
+        return -1;
     }
     ext4_flush_cache(fs);
 
@@ -1421,17 +1449,20 @@ int ext4_sync(ext4_fs_t *fs) {
         return -1;
     }
 
-    ext4_sync_inodes(fs);
-    ext4_sync_blocks(fs);
+    ret = ext4_sync_inodes(fs);
+    if (ret != 0) return ret;
+    ret = ext4_sync_blocks(fs);
+    if (ret != 0) return ret;
     if (fs->super_dirty) {
+        ret = ext4_flush_device(fs);
+        if (ret != 0) return ret;
         ret = ext4_write_superblock(fs);
         if (ret != 0) {
             return ret;
         }
         fs->super_dirty = false;
     }
-
-    return 0;
+    return ext4_flush_device(fs);
 }
 
 int ext4_sync_mounted(void) {
@@ -1448,6 +1479,19 @@ int ext4_sync_mounted(void) {
         ret = ext4_sync(fs);
         mutex_unlock(&fs->lock);
     }
+    return ret;
+}
+
+int ext4_sync_node(vfs_node_t *node) {
+    ext4_fs_t *fs;
+    int ret;
+
+    if (!node) return -1;
+    fs = ext4_find_node_mount(node);
+    if (!fs) return 0;
+    mutex_lock(&fs->lock);
+    ret = ext4_sync(fs);
+    mutex_unlock(&fs->lock);
     return ret;
 }
 
@@ -1474,4 +1518,18 @@ void ext4_background_writeback(uint32_t max_blocks) {
         ext4_sync_some_blocks(fs, max_blocks);
         mutex_unlock(&fs->lock);
     }
+}
+
+void ext4_reclaim_mounted_caches(uint32_t max_blocks) {
+    ext4_fs_t *fs;
+
+    mutex_lock(&ext4_mounts_lock);
+    fs = ext4_mounts_head;
+    while (fs) {
+        mutex_lock(&fs->lock);
+        ext4_reclaim_clean_blocks(fs, max_blocks);
+        mutex_unlock(&fs->lock);
+        fs = fs->next_mount;
+    }
+    mutex_unlock(&ext4_mounts_lock);
 }

@@ -17,6 +17,17 @@ static int find_inode_cache(ext4_fs_t *fs, uint32_t ino) {
     return -1;
 }
 
+static void ext4_invalidate_inode_cache(ext4_fs_t *fs, uint32_t ino) {
+    int idx;
+
+    idx = find_inode_cache(fs, ino);
+    if (idx < 0) return;
+    fs->inode_cache[idx].ino = 0;
+    fs->inode_cache[idx].ref_count = 0;
+    fs->inode_cache[idx].dirty = false;
+    fs->inode_cache[idx].vfs_node = NULL;
+}
+
 static int find_free_inode_cache(ext4_fs_t *fs) {
     int i;
     int best;
@@ -32,7 +43,10 @@ static int find_free_inode_cache(ext4_fs_t *fs) {
     best = -1;
     for (i = 0; i < (int)fs->inode_cache_count; i++) {
         if (fs->inode_cache[i].ref_count == 0 && fs->inode_cache[i].dirty) {
-            ext4_write_inode(fs, fs->inode_cache[i].ino, &fs->inode_cache[i].inode);
+            if (ext4_write_inode(fs, fs->inode_cache[i].ino,
+                                 &fs->inode_cache[i].inode) != 0) {
+                continue;
+            }
             fs->inode_cache[i].dirty = false;
             best = i;
             break;
@@ -185,16 +199,20 @@ void ext4_release_inode(ext4_inode_cache_t *ic) {
     }
 }
 
-void ext4_sync_inodes(ext4_fs_t *fs) {
+int ext4_sync_inodes(ext4_fs_t *fs) {
     int i;
 
-    if (!fs) return;
+    if (!fs) return -1;
     for (i = 0; i < (int)fs->inode_cache_count; i++) {
         if (fs->inode_cache[i].dirty && fs->inode_cache[i].ino != 0) {
-            ext4_write_inode(fs, fs->inode_cache[i].ino, &fs->inode_cache[i].inode);
+            if (ext4_write_inode(fs, fs->inode_cache[i].ino,
+                                 &fs->inode_cache[i].inode) != 0) {
+                return -1;
+            }
             fs->inode_cache[i].dirty = false;
         }
     }
+    return 0;
 }
 
 void ext4_mark_inode_dirty(ext4_inode_cache_t *ic) {
@@ -453,9 +471,17 @@ static int ext4_write_group_desc_internal(ext4_fs_t *fs, uint32_t group, ext4_gr
 }
 
 int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
-    for (uint32_t group = 0; group < fs->groups_count; group++) {
-        ext4_group_desc_t desc;
+    uint32_t group;
+    uint32_t bit;
+    uint32_t byte_idx;
+    uint32_t bit_idx;
+    uint32_t ino;
+    uint64_t bitmap_block;
+    uint8_t *bitmap;
+    ext4_group_desc_t desc;
+    ext4_inode_t new_inode;
 
+    for (group = 0; group < fs->groups_count; group++) {
         if (ext4_read_group_desc_internal(fs, group, &desc) != 0) {
             continue;
         }
@@ -464,19 +490,19 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
             continue;
         }
 
-        uint64_t bitmap_block = desc.bg_inode_bitmap_lo;
+        bitmap_block = desc.bg_inode_bitmap_lo;
         if (fs->is_64bit) {
             bitmap_block |= ((uint64_t)desc.bg_inode_bitmap_hi << 32);
         }
 
-        uint8_t *bitmap = ext4_get_block(fs, bitmap_block);
+        bitmap = ext4_get_block(fs, bitmap_block);
         if (!bitmap) {
             continue;
         }
 
-        for (uint32_t bit = 0; bit < fs->sb.s_inodes_per_group; bit++) {
-            uint32_t byte_idx = bit / 8;
-            uint32_t bit_idx = bit % 8;
+        for (bit = 0; bit < fs->sb.s_inodes_per_group; bit++) {
+            byte_idx = bit / 8;
+            bit_idx = bit % 8;
 
             if (!(bitmap[byte_idx] & (1 << bit_idx))) {
                 bitmap[byte_idx] |= (1 << bit_idx);
@@ -492,15 +518,14 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
                 fs->sb.s_free_inodes_count--;
                 fs->super_dirty = true;
 
-                uint32_t ino = group * fs->sb.s_inodes_per_group + bit + 1;
-
-                ext4_inode_t new_inode;
+                ino = group * fs->sb.s_inodes_per_group + bit + 1;
                 memset(&new_inode, 0, sizeof(ext4_inode_t));
                 new_inode.i_mode = mode;
                 new_inode.i_links_count = 1;
-                ext4_write_inode(fs, ino, &new_inode);
+                ext4_invalidate_inode_cache(fs, ino);
+                if (ext4_write_inode(fs, ino, &new_inode) != 0) return -1;
 
-                return ino;
+                return (int)ino;
             }
         }
 
@@ -511,35 +536,42 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
 }
 
 int ext4_free_inode(ext4_fs_t *fs, uint32_t ino) {
+    ext4_inode_t inode;
+    uint32_t group;
+    uint32_t bit;
+    uint32_t byte_idx;
+    uint32_t bit_idx;
+    uint64_t bitmap_block;
+    uint8_t *bitmap;
+    ext4_group_desc_t desc;
+
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
     }
 
-    ext4_inode_t inode;
     if (ext4_read_inode(fs, ino, &inode) != 0) {
         return -1;
     }
 
-    uint32_t group = (ino - 1) / fs->sb.s_inodes_per_group;
-    uint32_t bit = (ino - 1) % fs->sb.s_inodes_per_group;
+    group = (ino - 1) / fs->sb.s_inodes_per_group;
+    bit = (ino - 1) % fs->sb.s_inodes_per_group;
 
-    ext4_group_desc_t desc;
     if (ext4_read_group_desc_internal(fs, group, &desc) != 0) {
         return -1;
     }
 
-    uint64_t bitmap_block = desc.bg_inode_bitmap_lo;
+    bitmap_block = desc.bg_inode_bitmap_lo;
     if (fs->is_64bit) {
         bitmap_block |= ((uint64_t)desc.bg_inode_bitmap_hi << 32);
     }
 
-    uint8_t *bitmap = ext4_get_block(fs, bitmap_block);
+    bitmap = ext4_get_block(fs, bitmap_block);
     if (!bitmap) {
         return -1;
     }
 
-    uint32_t byte_idx = bit / 8;
-    uint32_t bit_idx = bit % 8;
+    byte_idx = bit / 8;
+    bit_idx = bit % 8;
 
     if (!(bitmap[byte_idx] & (1 << bit_idx))) {
         ext4_release_block(fs, bitmap_block);
@@ -560,6 +592,7 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino) {
 
     fs->sb.s_free_inodes_count++;
     fs->super_dirty = true;
+    ext4_invalidate_inode_cache(fs, ino);
 
     return 0;
 }

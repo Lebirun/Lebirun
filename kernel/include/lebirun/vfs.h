@@ -110,6 +110,7 @@ typedef struct vfs_fs_type {
     const char *name;
     vfs_node_t *(*mount)(const char *device, const char *mountpoint);
     int (*unmount)(vfs_node_t *mountpoint);
+    int (*sync)(vfs_node_t *node, int data_only);
     struct vfs_fs_type *next;
 } vfs_fs_type_t;
 
@@ -167,6 +168,8 @@ int64_t vfs_seek(int fd, int64_t offset, int whence);
 int64_t vfs_tell(int fd);
 int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags);
 int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index);
+int vfs_sync_node(vfs_node_t *node, int data_only);
+int vfs_sync_all(int data_only);
 
 vfs_node_t *vfs_get_root(void);
 int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name);

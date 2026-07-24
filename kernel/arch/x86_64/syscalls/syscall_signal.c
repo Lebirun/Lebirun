@@ -23,6 +23,28 @@
 #define SIGTTIN   21
 #define SIGTTOU   22
 #define SIGURG    23
+
+static int signal_user_range_mapped(uint64_t addr, uint64_t size) {
+    uint64_t end;
+    uint64_t page;
+    uint64_t last;
+    uint64_t pd;
+
+    if (!current_task || size == 0) return 0;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    end = addr + size - 1;
+    if (end < addr || end >= KERNEL_VMA) return 0;
+    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
+    if (!pd) return 0;
+    page = addr & ~0xFFFULL;
+    last = end & ~0xFFFULL;
+    for (;;) {
+        if (!vmm_get_phys_in_pml4(pd, page)) return 0;
+        if (page == last) break;
+        page += PAGE_SIZE;
+    }
+    return 1;
+}
 #define SIGXCPU   24
 #define SIGXFSZ   25
 #define SIGVTALRM 26
@@ -451,6 +473,9 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     registers_t *regs;
     uint64_t frame_addr;
     uint64_t *frame;
+    uint64_t saved_rip;
+    uint64_t saved_rsp;
+    uint64_t saved_rflags;
 
     (void)unused1; (void)unused2; (void)unused3;
 
@@ -463,9 +488,16 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     if (!regs) return 0;
 
     frame_addr = regs->rsp;
-    if (frame_addr < 0x1000 || frame_addr >= KERNEL_VMA) return 0;
+    if (!signal_user_range_mapped(frame_addr, 18 * sizeof(uint64_t)))
+        return -EFAULT;
 
     frame = (uint64_t *)frame_addr;
+    saved_rip = frame[7];
+    saved_rsp = frame[9];
+    if (saved_rip < 0x1000 || saved_rip >= KERNEL_VMA ||
+        saved_rsp < 0x1000 || saved_rsp >= KERNEL_VMA)
+        return -EFAULT;
+    saved_rflags = (frame[8] & 0x0000000000254FD5ULL) | 0x202ULL;
 
     regs->rax    = frame[0];
     regs->rcx    = frame[1];
@@ -474,9 +506,9 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     regs->rbp    = frame[4];
     regs->rsi    = frame[5];
     regs->rdi    = frame[6];
-    regs->rip    = frame[7];
-    regs->rflags = frame[8];
-    regs->rsp    = frame[9];
+    regs->rip    = saved_rip;
+    regs->rflags = saved_rflags;
+    regs->rsp    = saved_rsp;
     regs->r8     = frame[10];
     regs->r9     = frame[11];
     regs->r10    = frame[12];
