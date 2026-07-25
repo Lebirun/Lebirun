@@ -188,6 +188,5 @@ void terminal_write(const char* data, size_t size);
 void terminal_writestring(const char* data);
 void terminal_setcursor(uint16_t pos);
 int terminal_load_psf_font(const void *data, size_t size);
-void terminal_compact_font(uint64_t max_glyphs);
 
 #endif

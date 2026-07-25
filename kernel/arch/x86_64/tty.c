@@ -153,23 +153,3 @@ int KERNEL_EARLY_INIT terminal_load_psf_font(const void *data, size_t size) {
     }
     return -1;
 }
-
-void KERNEL_EARLY_INIT terminal_compact_font(uint64_t max_glyphs) {
-    uint64_t keep;
-    uint64_t copy_size;
-    uint8_t *compact;
-
-    if (!loaded_font.glyphs || !loaded_font.bytesperglyph) return;
-    keep = loaded_font.numglyph;
-    if (keep <= max_glyphs) return;
-    keep = max_glyphs;
-    copy_size = keep * loaded_font.bytesperglyph;
-    compact = (uint8_t *)kmalloc(copy_size);
-    if (!compact) return;
-    memcpy(compact, loaded_font.glyphs, copy_size);
-    loaded_font.glyphs = compact;
-    loaded_font.numglyph = keep;
-    loaded_font.unicode_table = 0;
-    loaded_font.unicode_table_size = 0;
-    loaded_font.owns_data = 1;
-}

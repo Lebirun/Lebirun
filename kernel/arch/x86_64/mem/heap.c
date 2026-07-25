@@ -70,6 +70,7 @@ static void early_heap_reclaim_unused(void) {
 static void *early_kmalloc(size_t size) {
     void *ptr;
     early_heap_chunk_t *chunk;
+    early_heap_chunk_t *target;
     uint64_t total_size;
     uint64_t pages;
     uint64_t phys;
@@ -77,7 +78,11 @@ static void *early_kmalloc(size_t size) {
 
     size = (size + 15) & ~15;
     if (size == 0) size = 16;
-    if (!early_heap_current || early_heap_current->used + size > early_heap_current->size) {
+    target = early_heap_chunks;
+    while (target && target->used + size > target->size) {
+        target = target->next;
+    }
+    if (!target) {
         total_size = size + sizeof(early_heap_chunk_t);
         pages = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
         phys = (uint64_t)pmm_alloc_early_pages(pages);
@@ -96,10 +101,11 @@ static void *early_kmalloc(size_t size) {
         }
         early_heap_current = chunk;
         early_heap_total += pages * PAGE_SIZE;
+        target = chunk;
     }
-    ptr = (uint8_t *)early_heap_current + sizeof(early_heap_chunk_t) + early_heap_current->used;
+    ptr = (uint8_t *)target + sizeof(early_heap_chunk_t) + target->used;
     memset(ptr, 0, size);
-    early_heap_current->used += size;
+    target->used += size;
     early_heap_used += size;
     return ptr;
 }

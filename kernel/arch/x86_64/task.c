@@ -1198,7 +1198,7 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
         kstack_free(kernel_stack_base);
         return NULL;
     }
-    task_init_fds(new_task);
+    if (user_mode) task_init_fds(new_task);
 
     lock_scheduler();
     if (user_mode) {
