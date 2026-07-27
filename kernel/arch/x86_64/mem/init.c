@@ -4,6 +4,7 @@
 #include <string.h>
 
 extern char _kernel_end[];
+extern char _kernel_start[];
 extern uint64_t kernel_reserved_frames;
 extern uint64_t total_pages_managed;
 
@@ -40,6 +41,8 @@ extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entri
                                     uint64_t hole_start, uint64_t hole_end);
 extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
 extern uint64_t count_free_frames(void);
+extern void set_bit(uint64_t bit_idx);
+extern bool test_bit(uint64_t bit_idx);
 
 void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     struct multiboot2_tag *tag;
@@ -271,11 +274,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     uint64_t actual_total_pages;
     uint64_t bitmap_entries;
     uint64_t actual_bitmap_bytes;
-    uint64_t bitmap_hole_start;
-    uint64_t bitmap_hole_end;
-    uint64_t largest_hole_pages;
-    uint64_t previous_end_frame;
-    uint64_t next_start_frame;
     uint64_t bitmap_pages;
     uint64_t bitmap_alloc_phys;
     uint64_t bitmap_alloc_end;
@@ -283,6 +281,13 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     uint64_t rr;
     uint64_t rend;
     uint64_t cr3_val;
+    uint64_t res_start_frame;
+    uint64_t res_end_frame;
+    uint64_t reserved_count;
+    uint64_t kern_phys_start;
+    uint64_t kern_phys_end_raw;
+    uint64_t kern_bin_kb;
+    uint64_t bmp_kb;
     int found_bitmap_space;
     int overlaps_reserved;
 
@@ -301,34 +306,14 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
     kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
-    bitmap_hole_start = 0;
-    bitmap_hole_end = 0;
-    largest_hole_pages = 0;
-    previous_end_frame = 0;
-    for (r = 0; r < num_regions; r++) {
-        if (memory_map[r].type != 1) continue;
-        region_base = memory_map[r].base;
-        region_end = region_base + memory_map[r].length;
-        if (region_base >= detected_max_phys) continue;
-        if (region_end > detected_max_phys) region_end = detected_max_phys;
-        next_start_frame = (region_base + PAGE_SIZE - 1) / PAGE_SIZE;
-        if (previous_end_frame != 0 && next_start_frame > previous_end_frame &&
-            previous_end_frame * PAGE_SIZE >= kernel_end_phys &&
-            next_start_frame - previous_end_frame > largest_hole_pages) {
-            bitmap_hole_start = previous_end_frame;
-            bitmap_hole_end = next_start_frame;
-            largest_hole_pages = next_start_frame - previous_end_frame;
-        }
-        previous_end_frame = region_end / PAGE_SIZE;
-    }
-
-    bitmap_entries = actual_total_pages - largest_hole_pages;
-    actual_bitmap_bytes = (bitmap_entries + 7) / 8;
-    actual_bitmap_bytes = (actual_bitmap_bytes + 3) & ~3u;
+    bitmap_entries = actual_total_pages;
+    actual_bitmap_bytes =
+        ((bitmap_entries + PFA_SPARSE_CHUNK_FRAMES - 1) /
+         PFA_SPARSE_CHUNK_FRAMES) * sizeof(uint8_t *);
+    actual_bitmap_bytes = (actual_bitmap_bytes + 7) & ~7u;
 
     pfa_init_internal_setup(actual_bitmap_bytes, bitmap_entries,
-                            actual_total_pages, 0,
-                            bitmap_hole_start, bitmap_hole_end);
+                            actual_total_pages, 0, 0, 0);
 
     bitmap_pages = (actual_bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     bitmap_alloc_end = (uint64_t)bitmap_pages * PAGE_SIZE;
@@ -367,29 +352,19 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         bump_current = bitmap_alloc_phys + bitmap_alloc_end;
     }
 
-    {
-        extern uint8_t *pfa_bitmap;
-        pfa_bitmap = (uint8_t *)(bitmap_alloc_phys + KERNEL_VMA);
-        memset(pfa_bitmap, 0xFF, actual_bitmap_bytes);
-    }
+    pfa_bitmap = (uint8_t *)(bitmap_alloc_phys + KERNEL_VMA);
+    memset(pfa_bitmap, 0, actual_bitmap_bytes);
 
-    printf("PFA: 64-bit mode, managing %u pages (%u KB bitmap, %u pages)\n",
-           actual_total_pages, actual_bitmap_bytes / 1024, bitmap_pages);
-    if (largest_hole_pages > 0) {
-        printf("PFA: Bitmap omitted physical hole 0x%016lX-0x%016lX (%u pages)\n",
-               bitmap_hole_start * PAGE_SIZE, bitmap_hole_end * PAGE_SIZE,
-               largest_hole_pages);
-    }
-
+    printf("PFA: 64-bit mode, managing %u pages (%u KB bitmap directory, %u pages)\n",
+           actual_total_pages, bitmap_pages * (PAGE_SIZE / 1024),
+           bitmap_pages);
     if (bitmap_alloc_phys + bitmap_alloc_end > kernel_end_phys) {
         kernel_end_phys = bitmap_alloc_phys + bitmap_alloc_end;
     }
     kernel_frames = (uint64_t)(kernel_end_phys / PAGE_SIZE);
 
-    {
-        extern uint64_t kernel_reserved_frames;
-        kernel_reserved_frames = kernel_frames;
-    }
+    kernel_reserved_frames = kernel_frames;
+    for (f = 0; f < kernel_frames; f++) set_bit(f);
 
     printf("PFA: Kernel ends at phys 0x%016lX (%u frames reserved)\n", (unsigned long)kernel_end_phys, kernel_frames);
 
@@ -416,16 +391,10 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
         if (end_frame > actual_total_pages) end_frame = actual_total_pages;
 
-        {
-            extern void clear_bit(uint64_t bit_idx);
-            extern bool test_bit(uint64_t bit_idx);
-            for (f = start_frame; f < end_frame; f++) {
-                if (f < kernel_frames) continue;
-                if (!test_bit(f)) continue;
-                clear_bit(f);
-                total_free_frames++;
-                region_free++;
-            }
+        for (f = start_frame; f < end_frame; f++) {
+            if (f < kernel_frames) continue;
+            total_free_frames++;
+            region_free++;
         }
         if (region_free > 0) {
             printf("PFA: Region %u [0x%08lX-0x%08lX]: %u free frames\n", r,
@@ -435,32 +404,23 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         }
     }
 
-    {
-        extern void set_bit(uint64_t bit_idx);
-        extern bool test_bit(uint64_t bit_idx);
-        uint64_t res_start_frame;
-        uint64_t res_end_frame;
-        uint64_t reserved_count;
-        for (r = 0; r < num_reserved_regions; r++) {
-            res_start_frame = reserved_regions[r].start_phys / PAGE_SIZE;
-            res_end_frame = reserved_regions[r].end_phys / PAGE_SIZE;
-            reserved_count = 0;
-            for (f = res_start_frame; f < res_end_frame && f < total_pages_managed; f++) {
-                if (!test_bit(f)) {
-                    set_bit(f);
-                    total_free_frames--;
-                    reserved_count++;
-                }
+    for (r = 0; r < num_reserved_regions; r++) {
+        res_start_frame = reserved_regions[r].start_phys / PAGE_SIZE;
+        res_end_frame = reserved_regions[r].end_phys / PAGE_SIZE;
+        reserved_count = 0;
+        for (f = res_start_frame; f < res_end_frame && f < total_pages_managed; f++) {
+            if (!test_bit(f)) {
+                set_bit(f);
+                total_free_frames--;
+                reserved_count++;
             }
-            printf("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
-                   r, reserved_regions[r].start_phys, reserved_regions[r].end_phys, reserved_count);
         }
+        printf("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
+               r, reserved_regions[r].start_phys, reserved_regions[r].end_phys, reserved_count);
     }
 
-    {
-        actual_free = count_free_frames();
-        total_free_frames = actual_free;
-    }
+    actual_free = count_free_frames();
+    total_free_frames = actual_free;
 
     total_mb = (total_free_frames + 255ULL) / 256ULL;
     printf("PFA ready: %llu total free frames (~%llu MB)\n",
@@ -479,19 +439,12 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     actual_free = count_free_frames();
     pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, actual_free);
 
-    {
-        uint64_t kern_phys_start;
-        uint64_t kern_phys_end_raw;
-        uint64_t kern_bin_kb;
-        uint64_t bmp_kb;
-        extern char _kernel_start[];
-        kern_phys_start = (uint64_t)(uintptr_t)_kernel_start - KERNEL_VMA;
-        kern_phys_end_raw = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
-        kern_phys_end_raw = (kern_phys_end_raw + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-        kern_bin_kb = (uint64_t)((kern_phys_end_raw - kern_phys_start) / 1024);
-        bmp_kb = (bitmap_pages * PAGE_SIZE) / 1024;
-        pfa_set_reserved_stats(kern_bin_kb, bmp_kb);
-    }
+    kern_phys_start = (uint64_t)(uintptr_t)_kernel_start - KERNEL_VMA;
+    kern_phys_end_raw = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
+    kern_phys_end_raw = (kern_phys_end_raw + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    kern_bin_kb = (uint64_t)((kern_phys_end_raw - kern_phys_start) / 1024);
+    bmp_kb = (bitmap_pages * PAGE_SIZE) / 1024;
+    pfa_set_reserved_stats(kern_bin_kb, bmp_kb);
 
     printf("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n",
            system_total_ram_kb, system_total_ram_kb / 1024, (uint64_t)(actual_free * 4));

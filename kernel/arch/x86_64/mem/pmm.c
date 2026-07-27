@@ -10,8 +10,7 @@ extern void task_memory_pressure_request(void);
 uint8_t *pfa_bitmap = 0;
 static uint64_t bitmap_bytes_used = 0;
 static uint64_t bitmap_entries_used = 0;
-static uint64_t bitmap_hole_start = 0;
-static uint64_t bitmap_hole_end = 0;
+static uint64_t bitmap_leaf_pages = 0;
 
 static volatile int pfa_lock = 0;
 
@@ -45,6 +44,8 @@ extern uint64_t low_bump;
 
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 extern void temp_unmap_raw(uint64_t temp_virt);
+
+bool test_bit(uint64_t frame_idx);
 
 static inline void pfa_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
@@ -101,127 +102,202 @@ void *pmm_alloc_early_pages(uint64_t num) {
     return NULL;
 }
 
-static int frame_to_bitmap_index(uint64_t frame_idx, uint64_t *bitmap_idx) {
-    if (frame_idx >= total_pages_managed) return 0;
-    if (bitmap_hole_end > bitmap_hole_start) {
-        if (frame_idx >= bitmap_hole_start && frame_idx < bitmap_hole_end)
-            return 0;
-        if (frame_idx >= bitmap_hole_end)
-            frame_idx -= bitmap_hole_end - bitmap_hole_start;
+static int frame_is_usable(uint64_t frame_idx) {
+    uint64_t phys;
+    uint64_t region_start;
+    uint64_t region_end;
+    uint64_t i;
+
+    phys = frame_idx * PAGE_SIZE;
+    for (i = 0; i < num_regions; i++) {
+        if (memory_map[i].type != 1) continue;
+        region_start = memory_map[i].base;
+        region_end = region_start + memory_map[i].length;
+        if (phys >= region_start && phys + PAGE_SIZE <= region_end) return 1;
     }
-    if (frame_idx >= bitmap_entries_used) return 0;
-    *bitmap_idx = frame_idx;
-    return 1;
+    return 0;
+}
+
+static int frame_is_reserved(uint64_t frame_idx) {
+    uint64_t phys;
+    uint64_t i;
+
+    phys = frame_idx * PAGE_SIZE;
+    for (i = 0; i < num_reserved_regions; i++) {
+        if (phys >= reserved_regions[i].start_phys &&
+            phys < reserved_regions[i].end_phys) return 1;
+    }
+    return 0;
+}
+
+static uint8_t **bitmap_directory(void) {
+    return (uint8_t **)(void *)pfa_bitmap;
+}
+
+static uint8_t *bitmap_get_leaf(uint64_t frame_idx) {
+    uint64_t chunk;
+    uint64_t chunks;
+    uint8_t **directory;
+
+    if (!pfa_bitmap || frame_idx >= bitmap_entries_used) return NULL;
+    chunk = frame_idx / PFA_SPARSE_CHUNK_FRAMES;
+    chunks = bitmap_bytes_used / sizeof(uint8_t *);
+    if (chunk >= chunks) return NULL;
+    directory = bitmap_directory();
+    return directory[chunk];
+}
+
+static bool bitmap_test_raw(uint64_t frame_idx) {
+    uint64_t bit_idx;
+    uint8_t *leaf;
+
+    leaf = bitmap_get_leaf(frame_idx);
+    if (!leaf) return false;
+    bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
+    return (leaf[bit_idx / 8] & (1u << (bit_idx % 8))) != 0;
+}
+
+static int bitmap_leaf_candidate(uint64_t exclude_start,
+                                 uint64_t exclude_end, uint64_t *frame_out) {
+    uint64_t start;
+    uint64_t end;
+    uint64_t frame;
+
+    start = kernel_reserved_frames;
+    end = 0x80000000ULL / PAGE_SIZE;
+    if (end > bitmap_entries_used) end = bitmap_entries_used;
+    for (frame = start; frame < end; frame++) {
+        if (frame >= exclude_start && frame < exclude_end) continue;
+        if (!frame_is_usable(frame) || frame_is_reserved(frame)) continue;
+        if (bitmap_test_raw(frame)) continue;
+        *frame_out = frame;
+        return 0;
+    }
+    return -1;
+}
+
+static int bitmap_ensure_leaf(uint64_t frame_idx, uint64_t exclude_start,
+                              uint64_t exclude_end) {
+    uint64_t chunk;
+    uint64_t leaf_frame;
+    uint64_t leaf_phys;
+    uint64_t leaf_bit;
+    uint8_t *storage_leaf;
+    uint8_t *leaf;
+    uint8_t **directory;
+
+    if (!pfa_bitmap || frame_idx >= bitmap_entries_used) return -1;
+    chunk = frame_idx / PFA_SPARSE_CHUNK_FRAMES;
+    directory = bitmap_directory();
+    if (directory[chunk]) return 0;
+    if (bitmap_leaf_candidate(exclude_start, exclude_end, &leaf_frame) != 0)
+        return -1;
+    leaf_phys = leaf_frame * PAGE_SIZE;
+    leaf = (uint8_t *)(leaf_phys + KERNEL_VMA);
+    memset(leaf, 0, PAGE_SIZE);
+    directory[chunk] = leaf;
+    leaf_bit = leaf_frame % PFA_SPARSE_CHUNK_FRAMES;
+    storage_leaf = bitmap_get_leaf(leaf_frame);
+    if (!storage_leaf) {
+        directory[chunk] = NULL;
+        return -1;
+    }
+    storage_leaf[leaf_bit / 8] |= (uint8_t)(1u << (leaf_bit % 8));
+    bitmap_leaf_pages++;
+    if (pfa_cached_free != 0) __sync_fetch_and_sub(&pfa_cached_free, 1);
+    return 0;
+}
+
+static int bitmap_prepare_range(uint64_t start, uint64_t count) {
+    uint64_t frame;
+    uint64_t end;
+    uint64_t chunk_end;
+
+    if (count == 0 || start > UINT64_MAX - count) return -1;
+    end = start + count;
+    frame = start;
+    while (frame < end) {
+        if (bitmap_ensure_leaf(frame, start, end) != 0) return -1;
+        chunk_end = ((frame / PFA_SPARSE_CHUNK_FRAMES) + 1) *
+                    PFA_SPARSE_CHUNK_FRAMES;
+        frame = chunk_end < end ? chunk_end : end;
+    }
+    return 0;
 }
 
 void set_bit(uint64_t frame_idx) {
     uint64_t bit_idx;
+    uint8_t *leaf;
 
-    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return;
-    pfa_bitmap[bit_idx / 8] |= (1 << (bit_idx % 8));
+    if (frame_idx >= bitmap_entries_used) return;
+    if (bitmap_ensure_leaf(frame_idx, frame_idx, frame_idx + 1) != 0) return;
+    leaf = bitmap_get_leaf(frame_idx);
+    if (!leaf) return;
+    bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
+    leaf[bit_idx / 8] |= (uint8_t)(1u << (bit_idx % 8));
 }
 
 void clear_bit(uint64_t frame_idx) {
     uint64_t bit_idx;
+    uint8_t *leaf;
 
-    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return;
-    pfa_bitmap[bit_idx / 8] &= ~(1 << (bit_idx % 8));
+    leaf = bitmap_get_leaf(frame_idx);
+    if (!leaf) return;
+    bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
+    leaf[bit_idx / 8] &= (uint8_t)~(1u << (bit_idx % 8));
 }
 
 bool test_bit(uint64_t frame_idx) {
-    uint64_t bit_idx;
-
-    if (!frame_to_bitmap_index(frame_idx, &bit_idx)) return true;
-    return pfa_bitmap[bit_idx / 8] & (1 << (bit_idx % 8));
+    if (frame_idx >= bitmap_entries_used) return true;
+    if (!frame_is_usable(frame_idx)) return true;
+    return bitmap_test_raw(frame_idx);
 }
 
 uint64_t count_free_frames(void) {
     uint64_t count;
+    uint64_t region_start;
+    uint64_t region_end;
+    uint64_t frame;
     uint64_t i;
-    uint64_t bytes;
-    uint64_t valid_bits;
-    uint8_t free_bits;
 
     count = 0;
-    bytes = (bitmap_entries_used + 7) / 8;
-    for (i = 0; i < bytes; i++) {
-        free_bits = (uint8_t)~pfa_bitmap[i];
-        if (i + 1 == bytes) {
-            valid_bits = bitmap_entries_used & 7;
-            if (valid_bits != 0) {
-                free_bits &= (uint8_t)((1u << valid_bits) - 1u);
-            }
-        }
-        while (free_bits != 0) {
-            free_bits &= (uint8_t)(free_bits - 1);
-            count++;
+    for (i = 0; i < num_regions; i++) {
+        if (memory_map[i].type != 1) continue;
+        region_start = (memory_map[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
+        region_end = (memory_map[i].base + memory_map[i].length) / PAGE_SIZE;
+        if (region_start >= bitmap_entries_used) continue;
+        if (region_end > bitmap_entries_used) region_end = bitmap_entries_used;
+        for (frame = region_start; frame < region_end; frame++) {
+            if (!bitmap_test_raw(frame)) count++;
         }
     }
-
     return count;
 }
 
 static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
                                         uint64_t num, uint64_t phys_offset) {
-    uint64_t b;
-    uint64_t bit;
     uint64_t frame_idx;
     uint64_t j;
     uint64_t run;
     uint64_t run_start;
-    uint64_t b_start;
-    uint64_t b_end;
-
-    if (num == 1) {
-        b_start = from / 8;
-        b_end = (to + 7) / 8;
-        if (b_end > bitmap_bytes_used) b_end = bitmap_bytes_used;
-        for (b = b_start; b < b_end; b++) {
-            if (pfa_bitmap[b] == 0xFF) continue;
-            for (bit = 0; bit < 8; bit++) {
-                frame_idx = b * 8 + bit;
-                if (frame_idx < from) continue;
-                if (frame_idx >= to) return 0;
-                if (!(pfa_bitmap[b] & (1 << bit))) {
-                    set_bit(frame_idx + phys_offset);
-                    last_alloc_hint = frame_idx + phys_offset + 1;
-                    __sync_fetch_and_sub(&pfa_cached_free, 1);
-                    return (frame_idx + phys_offset) * PAGE_SIZE;
-                }
-            }
-        }
-        return 0;
-    }
-
-    b_start = from / 8;
-    b_end = (to + 7) / 8;
-    if (b_end > bitmap_bytes_used) b_end = bitmap_bytes_used;
     run = 0;
     run_start = from;
-
-    for (b = b_start; b < b_end; b++) {
-        if (pfa_bitmap[b] == 0xFF) {
+    for (frame_idx = from; frame_idx < to; frame_idx++) {
+        if (test_bit(frame_idx + phys_offset)) {
             run = 0;
-            run_start = (b + 1) * 8;
-            continue;
-        }
-        for (bit = 0; bit < 8; bit++) {
-            frame_idx = b * 8 + bit;
-            if (frame_idx < from) continue;
-            if (frame_idx >= to) return 0;
-            if (pfa_bitmap[b] & (1 << bit)) {
-                run = 0;
-                run_start = frame_idx + 1;
-            } else {
-                if (run == 0) run_start = frame_idx;
-                run++;
-                if (run >= num) {
-                    for (j = 0; j < num; j++)
-                        set_bit(run_start + phys_offset + j);
-                    last_alloc_hint = run_start + phys_offset + num;
-                    __sync_fetch_and_sub(&pfa_cached_free, num);
-                    return (run_start + phys_offset) * PAGE_SIZE;
+            run_start = frame_idx + 1;
+        } else {
+            if (run == 0) run_start = frame_idx;
+            run++;
+            if (run >= num) {
+                if (bitmap_prepare_range(run_start + phys_offset, num) != 0)
+                    return 0;
+                for (j = 0; j < num; j++) {
+                    set_bit(run_start + phys_offset + j);
                 }
+                last_alloc_hint = run_start + phys_offset + num;
+                __sync_fetch_and_sub(&pfa_cached_free, num);
+                return (run_start + phys_offset) * PAGE_SIZE;
             }
         }
     }
@@ -229,28 +305,8 @@ static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
 }
 
 static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num) {
-    uint64_t result;
-    uint64_t gap;
-    uint64_t low_to;
-    uint64_t high_from;
-
     if (to <= from || num == 0) return 0;
-    if (bitmap_hole_end <= bitmap_hole_start) {
-        return find_free_frames_bitmap(from, to, num, 0);
-    }
-
-    low_to = to;
-    if (low_to > bitmap_hole_start) low_to = bitmap_hole_start;
-    if (from < low_to) {
-        result = find_free_frames_bitmap(from, low_to, num, 0);
-        if (result) return result;
-    }
-
-    high_from = from;
-    if (high_from < bitmap_hole_end) high_from = bitmap_hole_end;
-    if (high_from >= to) return 0;
-    gap = bitmap_hole_end - bitmap_hole_start;
-    return find_free_frames_bitmap(high_from - gap, to - gap, num, gap);
+    return find_free_frames_bitmap(from, to, num, 0);
 }
 
 static uint64_t find_free_frames(uint64_t num) {
@@ -288,9 +344,6 @@ uint64_t pfa_alloc(void) {
 
 void pfa_free(uint64_t phys_addr) {
     uint64_t idx;
-    uint64_t bitmap_idx;
-    uint64_t byte_idx;
-    uint64_t bit_idx;
     uint64_t eflags;
     uint8_t cur_ref;
 
@@ -305,8 +358,7 @@ void pfa_free(uint64_t phys_addr) {
     if (idx < kernel_reserved_frames) {
         return;
     }
-    if (!frame_to_bitmap_index(idx, &bitmap_idx)) return;
-
+    if (!frame_is_usable(idx) || frame_is_reserved(idx)) return;
     if ((uint64_t)idx < pfa_refcount_entries) {
         cur_ref = pfa_ref_get((uint64_t)(idx * PAGE_SIZE));
         if (cur_ref > 1) {
@@ -318,12 +370,9 @@ void pfa_free(uint64_t phys_addr) {
         }
     }
 
-    byte_idx = bitmap_idx / 8;
-    bit_idx = bitmap_idx % 8;
-    
     pfa_lock_acquire(&eflags);
-    if (pfa_bitmap[byte_idx] & (1 << bit_idx)) {
-        pfa_bitmap[byte_idx] &= ~(1 << bit_idx);
+    if (test_bit(idx)) {
+        clear_bit(idx);
         if (idx < last_alloc_hint) last_alloc_hint = idx;
         __sync_fetch_and_add(&pfa_cached_free, 1);
     }
@@ -396,6 +445,7 @@ void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {
         idx = start_idx + i;
         if (idx >= total_pages_managed) break;
         if (idx < kernel_reserved_frames) continue;
+        if (!frame_is_usable(idx) || frame_is_reserved(idx)) continue;
         if (test_bit(idx)) {
             clear_bit(idx);
             __sync_fetch_and_add(&pfa_cached_free, 1);
@@ -443,7 +493,7 @@ uint64_t pfa_get_kernel_binary_kb(void) {
 }
 
 uint64_t pfa_get_bitmap_kb(void) {
-    return bitmap_alloc_kb;
+    return bitmap_alloc_kb + bitmap_leaf_pages * (PAGE_SIZE / 1024);
 }
 
 void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb) {
@@ -606,10 +656,11 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
 void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
                              uint64_t total_pages, uint64_t kernel_frames,
                              uint64_t hole_start, uint64_t hole_end) {
+    (void)hole_start;
+    (void)hole_end;
     bitmap_bytes_used = bitmap_bytes;
     bitmap_entries_used = bitmap_entries;
-    bitmap_hole_start = hole_start;
-    bitmap_hole_end = hole_end;
+    bitmap_leaf_pages = 0;
     total_pages_managed = total_pages;
     kernel_reserved_frames = kernel_frames;
     low_page_limit = 0x00800000;

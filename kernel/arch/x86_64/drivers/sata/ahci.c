@@ -9,6 +9,7 @@
 #include <stddef.h>
 
 static ahci_controller_t g_ahci_controller;
+static uint8_t ahci_port_map[AHCI_MAX_PORTS];
 
 static uint64_t ahci_required_port_capacity(uint64_t ports_impl) {
     uint64_t i;
@@ -16,16 +17,20 @@ static uint64_t ahci_required_port_capacity(uint64_t ports_impl) {
 
     capacity = 0;
     for (i = 0; i < AHCI_MAX_PORTS; i++) {
-        if (ports_impl & (1 << i)) capacity = i + 1;
+        if (ports_impl & (1ULL << i)) capacity++;
     }
     if (capacity == 0) capacity = 1;
     return capacity;
 }
 
 static ahci_port_t *ahci_port_slot(uint64_t index) {
+    uint64_t slot;
+
     if (!g_ahci_controller.ports) return NULL;
-    if (index >= g_ahci_controller.ports_capacity) return NULL;
-    return &g_ahci_controller.ports[index];
+    if (index >= AHCI_MAX_PORTS) return NULL;
+    slot = ahci_port_map[index];
+    if (slot == 0xFF || slot >= g_ahci_controller.ports_capacity) return NULL;
+    return &g_ahci_controller.ports[slot];
 }
 
 static inline uint64_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
@@ -848,6 +853,7 @@ int KERNEL_INIT ahci_init(void) {
     uint64_t ports_capacity;
     uint64_t offset;
     uint64_t i;
+    uint64_t port_slot_idx;
     ahci_port_t *port;
     const char *type_str;
 
@@ -893,6 +899,7 @@ int KERNEL_INIT ahci_init(void) {
         return -1;
     }
     memset(g_ahci_controller.ports, 0, ports_capacity * sizeof(ahci_port_t));
+    memset(ahci_port_map, 0xFF, sizeof(ahci_port_map));
     g_ahci_controller.ports_capacity = ports_capacity;
     
     printf("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n", cap, g_ahci_controller.ports_impl, g_ahci_controller.version);
@@ -906,10 +913,13 @@ int KERNEL_INIT ahci_init(void) {
     ahci_hba_write(abar_virt, AHCI_GHC, ghc);
     
     ports_impl = g_ahci_controller.ports_impl;
+    port_slot_idx = 0;
     for (i = 0; i < AHCI_MAX_PORTS; i++) {
-        if (!(ports_impl & (1 << i)))
+        if (!(ports_impl & (1ULL << i)))
             continue;
-        
+
+        ahci_port_map[i] = (uint8_t)port_slot_idx;
+        port_slot_idx++;
         port = ahci_port_slot(i);
         if (!port)
             continue;

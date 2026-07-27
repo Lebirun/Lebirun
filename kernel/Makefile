@@ -57,7 +57,7 @@ CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
-KERNEL_SIZE_CFLAGS=-Os -ffunction-sections -fdata-sections
+KERNEL_SIZE_CFLAGS=-Oz -ffunction-sections -fdata-sections
 KERNEL_TINY_CFLAGS=-Oz -ffunction-sections -fdata-sections
 
 $(ARCHDIR)/fs/misc/procfs.o \
@@ -73,6 +73,7 @@ $(ARCHDIR)/fs/ext4/ext4_block.o \
 $(ARCHDIR)/fs/ext4/ext4_inode.o \
 $(ARCHDIR)/fs/ext4/ext4_dir.o \
 $(ARCHDIR)/fs/ext4/ext4_file.o \
+$(ARCHDIR)/fs/ext4/ext4_journal.o \
 $(ARCHDIR)/initrd.o \
 $(ARCHDIR)/ramfs.o \
 $(ARCHDIR)/vfs.o \
