@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/creds.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/squashfs.h>
 #include <lebirun/fs/ext4/ext4.h>
@@ -972,7 +973,7 @@ static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype
     if (fs_addr >= KERNEL_VMA || fs_addr < 0x1000) return -EFAULT;
 
     if (!current_task) return -ESRCH;
-    if (current_task->uid != 0) return -EPERM;
+    if (!creds_has_capability(current_task, 21)) return -EPERM;
 
     source = NULL;
     if (src_addr != 0 && src_addr < KERNEL_VMA && src_addr >= 0x1000)
@@ -997,7 +998,7 @@ static int sys_vfs_umount_user(int target_ptr, const char *unused1, int unused2)
     tgt_addr = (uint64_t)target_ptr;
     if (tgt_addr >= KERNEL_VMA || tgt_addr < 0x1000) return -EFAULT;
     if (!current_task) return -ESRCH;
-    if (current_task->uid != 0) return -EPERM;
+    if (!creds_has_capability(current_task, 21)) return -EPERM;
 
     target = (const char *)tgt_addr;
     return vfs_unmount(target);

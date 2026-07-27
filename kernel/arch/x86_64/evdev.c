@@ -153,6 +153,7 @@ void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, in
 void evdev_push_sync(struct evdev_device *dev) {
     evdev_push_event(dev, EV_SYN, SYN_REPORT, 0);
     waitq_wake_all(&dev->waitq);
+    descriptor_ready_notify();
 }
 
 static void evdev_kbd_observer(struct keyboard_event event) {

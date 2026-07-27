@@ -288,6 +288,9 @@ registers_t* interrupt_handler(registers_t* regs)
                     if (task_handle_file_page_fault(current_task, fault_addr)) {
                         return regs;
                     }
+                    if (task_handle_anon_page_fault(current_task, fault_addr)) {
+                        return regs;
+                    }
                     stack_floor = USER_STACK_FLOOR;
                     if (fault_addr >= stack_floor && fault_addr < USER_STACK_TOP) {
                         new_phys = task_memory_allows(current_task, PAGE_SIZE) &&
@@ -407,6 +410,16 @@ registers_t* interrupt_handler(registers_t* regs)
                         regs->return_cr3 = sc_expected_pd;
                     } else {
                         __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
+                    }
+                    return regs;
+                }
+                if (task_handle_anon_page_fault(current_task,
+                                                sc_fault_addr)) {
+                    if (sc_actual_cr3 != sc_expected_pd) {
+                        regs->return_cr3 = sc_expected_pd;
+                    } else {
+                        __asm__ volatile ("invlpg (%0)" : :
+                                          "r"(sc_fault_page) : "memory");
                     }
                     return regs;
                 }

@@ -121,5 +121,7 @@ uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);
 int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *block_size);
 int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t flags);
+int ext4_vfs_link_node(const char *oldpath, const char *newpath);
+int ext4_journal_replay(ext4_fs_t *fs);
 
 #endif

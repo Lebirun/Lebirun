@@ -595,6 +595,7 @@ static int sys_write(int fd, const char *buf, int len) {
                     done += bytes;
                     pipe_unlock_irqrestore(p, pipe_flags);
                     waitq_wake_all(&p->read_waitq);
+                    descriptor_ready_notify();
                 }
                 total += chunk;
                 remaining -= chunk;
@@ -745,6 +746,7 @@ static int sys_read(int fd, char *buf, int len) {
             p->count -= to_read;
             pipe_unlock_irqrestore(p, pipe_flags);
             waitq_wake_all(&p->write_waitq);
+            descriptor_ready_notify();
             memcpy((void *)buf_addr, kbuf, to_read);
             if (heap_buf) kfree(kbuf);
             return (int)to_read;

@@ -304,6 +304,13 @@ static int sys_mmap(int a1, const char *a2, int a3) {
         kfree(new_pages);
     }
 
+    if (task_add_vm_area(current_task, NULL, base, size, 0, 0,
+                         0x7 | VMM_PTE_NX,
+                         TASK_VMA_PRIVATE | TASK_VMA_ANONYMOUS) != 0) {
+        release_user_leaf_range(base, base + size);
+        return -ENOMEM;
+    }
+
     return (int)base;
 }
 
@@ -329,12 +336,31 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     uint64_t pte_flags;
     uint64_t read_done;
     uint64_t read_chunk;
+    uint32_t vma_map_flags;
+    vfs_node_t *vma_node;
+    uint64_t vma_file_size;
+    uint64_t vma_offset;
     
     if (length == 0 || !current_task) return -EINVAL;
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
     if ((prot & (PROT_WRITE | PROT_EXEC)) ==
         (PROT_WRITE | PROT_EXEC)) return -EACCES;
     pte_flags = mmap_pte_flags(prot);
+    if ((flags & 0x3) != 0x1 && (flags & 0x3) != 0x2) return -EINVAL;
+    if (!(flags & 0x20) && fd < 0) return -EBADF;
+    if (!(flags & 0x20) && pgoffset < 0) return -EINVAL;
+    vma_map_flags = (flags & 0x1) ? TASK_VMA_SHARED : TASK_VMA_PRIVATE;
+    if (flags & 0x1) pte_flags |= VMM_PTE_SHARED;
+    if (fd < 0 || (flags & 0x20)) vma_map_flags |= TASK_VMA_ANONYMOUS;
+    else vma_map_flags |= TASK_VMA_FILE;
+    vma_node = NULL;
+    vma_file_size = 0;
+    vma_offset = 0;
+    tfd = NULL;
+    if (!(flags & 0x20)) {
+        tfd = task_fd_get(current_task, fd);
+        if (!tfd || !tfd->in_use || !tfd->node) return -EBADF;
+    }
 
     size = (length + 0xFFF) & ~0xFFFu;
 
@@ -352,14 +378,15 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
 
     if (base < 0x1000) return -EPERM;
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
-    if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
-
     if ((flags & 0x10) && base < KERNEL_VMA) {
+        if (task_unmap_vm_areas(current_task, base, size) != 0)
+            return -ENOMEM;
         release_user_leaf_range(base, base + size);
+    } else if (!user_range_free_mem(base, size, 0, 0)) {
+        return -EINVAL;
     }
 
     if (fd >= 0) {
-        tfd = task_fd_get(current_task, fd);
         if (tfd && tfd->in_use && tfd->node) {
             fnode = (vfs_node_t *)tfd->node;
             if (strcmp(fnode->name, "fb0") == 0) {
@@ -376,6 +403,13 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
                         base + pi * 0x1000,
                         fb_phys_base + pi * 0x1000,
                         pte_flags | VMM_PTE_NOFREE);
+                }
+                if (task_add_vm_area(current_task, fnode, base, size,
+                                     fb_total, 0,
+                                     pte_flags | VMM_PTE_NOFREE,
+                                     TASK_VMA_SHARED | TASK_VMA_DEVICE) != 0) {
+                    release_user_leaf_range(base, base + size);
+                    return -ENOMEM;
                 }
                 return (int)base;
             }
@@ -415,11 +449,13 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     }
 
     if (fd >= 0) {
-        tfd = task_fd_get(current_task, fd);
         if (tfd && tfd->in_use && tfd->node) {
             fnode = (vfs_node_t *)tfd->node;
             if (strcmp(fnode->name, "fb0") != 0) {
                 file_off = (uint64_t)pgoffset * 4096;
+                vma_node = fnode;
+                vma_file_size = length;
+                vma_offset = file_off;
                 to_read = length < size ? length : size;
                 tmpbuf = (uint8_t *)kmalloc(PAGE_SIZE);
                 if (tmpbuf) {
@@ -441,6 +477,13 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
         }
     }
 
+    if (task_add_vm_area(current_task, vma_node, base, size,
+                         vma_file_size, vma_offset, pte_flags,
+                         vma_map_flags) != 0) {
+        release_user_leaf_range(base, base + size);
+        return -ENOMEM;
+    }
+
     return (int)base;
 }
 
@@ -459,6 +502,11 @@ static int sys_munmap(void *addr, size_t length) {
     end = base + size;
     if (end < base) return -EINVAL;
     if (end > KERNEL_VMA) end = KERNEL_VMA;
+
+    if (end > base && task_unmap_vm_areas(current_task, base,
+                                           end - base) != 0) {
+        return -ENOMEM;
+    }
 
     if (end > base) {
         release_user_leaf_range(base, end);
@@ -489,6 +537,7 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     if (!user_range_mapped_mem(base, size)) return -ENOMEM;
     if (vmm_protect_range_in_pml4(current_task->pml4_phys, base, size,
                                   mmap_pte_flags(prot)) < 0) return -ENOMEM;
+    task_protect_vm_areas(current_task, base, size, mmap_pte_flags(prot));
     return 0;
 }
 

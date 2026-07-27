@@ -433,8 +433,10 @@ void inotify_notify(vfs_node_t *node, uint32_t mask, const char *name) {
     inotify_watch_t *watch;
     int i;
     int j;
+    int queued;
 
     if (!node) return;
+    queued = 0;
     mutex_lock(&inotify_lock);
     for (i = 0; i < inotify_capacity; i++) {
         instance = &inotify_instances[i];
@@ -443,10 +445,12 @@ void inotify_notify(vfs_node_t *node, uint32_t mask, const char *name) {
             watch = &instance->watches[j];
             if (watch->node == node && (watch->mask & mask)) {
                 inotify_queue(instance, watch->wd, mask, name);
+                queued = 1;
             }
         }
     }
     mutex_unlock(&inotify_lock);
+    if (queued) descriptor_ready_notify();
 }
 
 void syscalls_inotify_init(void) {

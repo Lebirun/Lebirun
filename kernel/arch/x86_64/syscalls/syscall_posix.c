@@ -5,6 +5,7 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/timekeeping.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
@@ -656,55 +657,39 @@ static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {
 extern volatile uint64_t tick_count;
 #define pit_ticks tick_count
 
-static uint64_t boot_time = 0;
-static uint64_t boot_tick_count_posix = 0;
-
 static int sys_clock_gettime(int clock_id, const char *tp_ptr, int unused) {
     uint64_t tp_addr;
     struct kernel_timespec *ts;
-    uint64_t ticks;
-    uint64_t elapsed_ticks;
-    uint64_t ms;
+    uint64_t nanoseconds;
+    struct kernel_timespec value;
     
     (void)unused;
-    if (boot_time == 0) {
-        extern uint64_t rtc_get_time(void);
-        boot_time = rtc_get_time();
-        boot_tick_count_posix = tick_count;
-    }
     tp_addr = (uint64_t)(uintptr_t)tp_ptr;
-    if (!tp_addr || tp_addr >= KERNEL_VMA || tp_addr < 0x1000) return -1;
+    if (!tp_addr || tp_addr >= KERNEL_VMA || tp_addr < 0x1000)
+        return -EFAULT;
+    if (timekeeping_get_ns(clock_id, &nanoseconds) != 0) return -EINVAL;
     ts = (struct kernel_timespec *)tp_addr;
-    ticks = pit_ticks;
-    elapsed_ticks = ticks - boot_tick_count_posix;
-    ms = (elapsed_ticks * 1000) / pit_freq;
-    ts->tv_sec = boot_time + ms / 1000;
-    ts->tv_nsec = (ms % 1000) * 1000000;
-    (void)clock_id;
+    value.tv_sec = (long)(nanoseconds / 1000000000ULL);
+    value.tv_nsec = (long)(nanoseconds % 1000000000ULL);
+    if (copy_to_user(ts, &value, sizeof(value)) != 0) return -EFAULT;
     return 0;
 }
 
 static int sys_gettimeofday(int tv_ptr, const char *tz_ptr, int unused) {
     uint64_t tv_addr;
     struct kernel_timeval *tv;
-    uint64_t ticks;
-    uint64_t elapsed_ticks;
-    uint64_t ms;
+    uint64_t nanoseconds;
+    struct kernel_timeval value;
     
     (void)tz_ptr; (void)unused;
-    if (boot_time == 0) {
-        extern uint64_t rtc_get_time(void);
-        boot_time = rtc_get_time();
-        boot_tick_count_posix = tick_count;
-    }
     tv_addr = (uint64_t)tv_ptr;
-    if (!tv_addr || tv_addr >= KERNEL_VMA || tv_addr < 0x1000) return -1;
+    if (!tv_addr || tv_addr >= KERNEL_VMA || tv_addr < 0x1000)
+        return -EFAULT;
     tv = (struct kernel_timeval *)tv_addr;
-    ticks = pit_ticks;
-    elapsed_ticks = ticks - boot_tick_count_posix;
-    ms = (elapsed_ticks * 1000) / pit_freq;
-    tv->tv_sec = boot_time + ms / 1000;
-    tv->tv_usec = (ms % 1000) * 1000;
+    nanoseconds = timekeeping_realtime_ns();
+    value.tv_sec = (long)(nanoseconds / 1000000000ULL);
+    value.tv_usec = (long)((nanoseconds % 1000000000ULL) / 1000);
+    if (copy_to_user(tv, &value, sizeof(value)) != 0) return -EFAULT;
     return 0;
 }
 
@@ -1504,8 +1489,24 @@ static int sys_rename(int oldpath_ptr, const char *newpath_ptr, int unused) {
 }
 
 static int sys_link(int oldpath_ptr, const char *newpath_ptr, int unused) {
-    (void)oldpath_ptr; (void)newpath_ptr; (void)unused;
-    return -1;
+    char *oldpath;
+    char *newpath;
+    int result;
+
+    (void)unused;
+    result = posix_copy_user_string(&oldpath,
+                                    (const char *)(uintptr_t)oldpath_ptr,
+                                    VFS_MAX_PATH);
+    if (result < 0) return result;
+    result = posix_copy_user_string(&newpath, newpath_ptr, VFS_MAX_PATH);
+    if (result < 0) {
+        kfree(oldpath);
+        return result;
+    }
+    result = ext4_vfs_link_node(oldpath, newpath);
+    kfree(newpath);
+    kfree(oldpath);
+    return result == 0 ? 0 : -EIO;
 }
 
 static int posix_vfs_symlink(const char *target, const char *linkpath, uint64_t flags) {

@@ -351,6 +351,7 @@ wake:
     cur = console_is_initialized() ? console_get_current() : 0;
     if (cur >= 0 && cur < kbd_num_consoles)
         waitq_wake_all(&kbd_consoles[cur].waitq);
+    descriptor_ready_notify();
 }
 
 void KERNEL_INIT keyboard_init(void) {

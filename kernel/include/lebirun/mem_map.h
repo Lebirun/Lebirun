@@ -18,6 +18,7 @@ int smp_processor_id(void);
 #define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
 #define VMM_PTE_COW 0x200ULL
 #define VMM_PTE_NOFREE 0x400ULL
+#define VMM_PTE_SHARED 0x800ULL
 #define VMM_PTE_PRESENT 0x001ULL
 #define VMM_PTE_WRITE 0x002ULL
 #define VMM_PTE_USER 0x004ULL

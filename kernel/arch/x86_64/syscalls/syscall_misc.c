@@ -3,6 +3,8 @@
 #include <lebirun/about.h>
 #include <lebirun/rng.h>
 #include <lebirun/pty.h>
+#include <lebirun/creds.h>
+#include <lebirun/timekeeping.h>
 
 extern task_t *current_task;
 extern void **syscall_table;
@@ -302,6 +304,7 @@ static int sys_sysinfo(struct sysinfo *info) {
     struct sysinfo value;
     uint64_t total_kb;
     uint64_t free_pages;
+    uint64_t frequency;
     int proc_count;
     
     if (!info) return -EFAULT;
@@ -316,7 +319,8 @@ static int sys_sysinfo(struct sysinfo *info) {
     }
     if (proc_count < 1) proc_count = 1;
     
-    value.uptime = tick_count / pit_freq;
+    frequency = pit_freq ? pit_freq : 1;
+    value.uptime = tick_count / frequency;
     value.totalram = (unsigned long)total_kb * 1024;
     value.freeram = (unsigned long)(free_pages * 4) * 1024;
     value.procs = (unsigned short)proc_count;
@@ -423,12 +427,17 @@ static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
 #define PR_GET_DUMPABLE 3
 #define PR_SET_SECCOMP  22
 #define PR_GET_SECCOMP  21
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+#define PR_SET_SYSCALL_MASK 0x4C420001
 
 static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     char name[16];
     size_t length;
+    uint64_t syscall_mask[(NR_SYSCALLS + 63) / 64];
+    size_t syscall_words;
 
-    (void)arg3; (void)arg4; (void)arg5;
+    (void)arg4; (void)arg5;
     switch (option) {
         case PR_SET_NAME:
             if (current_task && arg2) {
@@ -457,9 +466,31 @@ static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigne
         case PR_GET_DUMPABLE:
             return 1;
             
+        case PR_SET_NO_NEW_PRIVS:
+            if (arg2 != 1) return -EINVAL;
+            return creds_set_no_new_privs(current_task);
+
+        case PR_GET_NO_NEW_PRIVS:
+            return creds_get_no_new_privs(current_task);
+
         case PR_SET_SECCOMP:
+            if (arg2 != 1) return -EINVAL;
+            if (!creds_get_no_new_privs(current_task) &&
+                !creds_has_capability(current_task, 21)) return -EPERM;
+            return creds_set_strict_syscalls(current_task);
+
         case PR_GET_SECCOMP:
-            return -EINVAL;
+            return creds_get_syscall_filter_mode(current_task);
+
+        case PR_SET_SYSCALL_MASK:
+            syscall_words = (NR_SYSCALLS + 63) / 64;
+            if (!arg2 || arg3 != syscall_words) return -EINVAL;
+            if (!creds_get_no_new_privs(current_task) &&
+                !creds_has_capability(current_task, 21)) return -EPERM;
+            if (copy_from_user(syscall_mask, (const void *)arg2,
+                               sizeof(syscall_mask)) != 0) return -EFAULT;
+            return creds_set_syscall_mask(current_task, syscall_mask,
+                                           syscall_words);
             
         default:
             return -EINVAL;
@@ -639,9 +670,15 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
     const struct kernel_timespec *req;
     struct kernel_timespec *rem;
     struct kernel_timespec ts64;
+    struct kernel_timespec remaining;
     long long *ts_ptr;
-    uint64_t ms;
     uint64_t a0;
+    uint64_t requested_ns;
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
+    uint64_t remaining_ns;
+    uint64_t sleep_ticks_count;
+    extern int task_has_pending_signals(void);
 
     a0 = (uint64_t)arg0;
 
@@ -662,30 +699,45 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
             return -EFAULT;
     }
 
-    ms = req->tv_sec * 1000 + req->tv_nsec / 1000000;
-    if (ms > 0) {
-        sleep_ms(ms);
-    } else {
-        schedule();
+    if (req->tv_sec < 0 || req->tv_nsec < 0 ||
+        req->tv_nsec >= 1000000000L) return -EINVAL;
+    if ((uint64_t)req->tv_sec >
+        (UINT64_MAX - (uint64_t)req->tv_nsec) / 1000000000ULL)
+        return -EINVAL;
+    requested_ns = (uint64_t)req->tv_sec * 1000000000ULL +
+                   (uint64_t)req->tv_nsec;
+    start_ns = timekeeping_monotonic_ns();
+    if (requested_ns != 0) {
+        if (pit_freq == 0) return -EINVAL;
+        if (requested_ns >
+            (UINT64_MAX - 999999999ULL) / pit_freq)
+            sleep_ticks_count = UINT64_MAX;
+        else
+            sleep_ticks_count =
+                (requested_ns * pit_freq + 999999999ULL) / 1000000000ULL;
+        if (sleep_ticks_count == 0) sleep_ticks_count = 1;
+        sleep_ticks(sleep_ticks_count);
     }
 
-    {
-        extern int task_has_pending_signals(void);
-        if (task_has_pending_signals()) {
-            if (rem) {
-                if ((uint64_t)rem >= 0x1000 && (uint64_t)rem < KERNEL_VMA) {
-                    rem->tv_sec = 0;
-                    rem->tv_nsec = 0;
-                }
-            }
-            return -EINTR;
+    if (task_has_pending_signals()) {
+        if (rem && (uint64_t)rem >= 0x1000 &&
+            (uint64_t)rem < KERNEL_VMA) {
+            elapsed_ns = timekeeping_monotonic_ns() - start_ns;
+            remaining_ns = elapsed_ns < requested_ns ?
+                           requested_ns - elapsed_ns : 0;
+            remaining.tv_sec = (long)(remaining_ns / 1000000000ULL);
+            remaining.tv_nsec = (long)(remaining_ns % 1000000000ULL);
+            if (copy_to_user(rem, &remaining, sizeof(remaining)) != 0)
+                return -EFAULT;
         }
+        return -EINTR;
     }
 
     if (rem) {
         if ((uint64_t)rem >= 0x1000 && (uint64_t)rem < KERNEL_VMA) {
-            rem->tv_sec = 0;
-            rem->tv_nsec = 0;
+            memset(&remaining, 0, sizeof(remaining));
+            if (copy_to_user(rem, &remaining, sizeof(remaining)) != 0)
+                return -EFAULT;
         }
     }
 

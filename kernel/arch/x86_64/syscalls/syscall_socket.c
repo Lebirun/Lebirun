@@ -384,6 +384,7 @@ static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
         sock->recv_buf[sock->recv_tail % sock->recv_capacity] = src[i];
         sock->recv_tail++;
     }
+    if (to_write != 0) descriptor_ready_notify();
     return (int)to_write;
 }
 
@@ -405,6 +406,7 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     if (!peek) {
         sock->recv_head = head;
         socket_compact_recv_buffer(sock);
+        if (to_read != 0) descriptor_ready_notify();
     }
     return to_read;
 }
@@ -630,6 +632,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
                 sockets[listener_idx].backlog[i].valid = 1;
                 sockets[listener_idx].backlog[i].peer_idx = peer_idx;
                 sockets[listener_idx].backlog_count++;
+                descriptor_ready_notify();
                 break;
             }
         }
@@ -1249,6 +1252,8 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
         default:
             return -EINVAL;
     }
+
+    descriptor_ready_notify();
 
     if (sock->tcp && (how == SHUT_WR || how == SHUT_RDWR)) {
         tcp_disconnect(sock->tcp, 1000);

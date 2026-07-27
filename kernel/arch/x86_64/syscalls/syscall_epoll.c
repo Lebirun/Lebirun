@@ -285,6 +285,25 @@ static uint64_t timerfd_expirations(timerfd_instance_t *timer, int consume) {
     return expirations;
 }
 
+uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks) {
+    uint64_t timer_ticks;
+    int i;
+
+    if (!current_task) return timeout_ticks;
+    mutex_lock(&timerfd_lock);
+    for (i = 0; i < timerfd_capacity; i++) {
+        if (!timerfds[i].in_use ||
+            timerfds[i].owner_pid != current_task->pid ||
+            timerfds[i].next_tick == 0) continue;
+        timer_ticks = timerfds[i].next_tick > tick_count ?
+                      timerfds[i].next_tick - tick_count : 1;
+        if (timeout_ticks == UINT64_MAX || timer_ticks < timeout_ticks)
+            timeout_ticks = timer_ticks;
+    }
+    mutex_unlock(&timerfd_lock);
+    return timeout_ticks;
+}
+
 static int alloc_epoll(void) {
     int i;
 
@@ -489,6 +508,9 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
     int timeout;
     uint64_t timeout_ticks;
     uint64_t start_tick;
+    uint64_t ready_generation;
+    uint64_t elapsed_ticks;
+    uint64_t wait_ticks;
 
     events = (epoll_event_t *)(uintptr_t)events_ptr;
     if (!events || maxevents <= 0) return -EINVAL;
@@ -501,6 +523,7 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
     start_tick = tick_count;
 
     for (;;) {
+        ready_generation = descriptor_ready_generation();
         mutex_lock(&epoll_lock);
         ep = get_epoll(epfd);
         if (!ep) {
@@ -552,7 +575,14 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
         if (timeout > 0 && tick_count - start_tick >= timeout_ticks)
             return 0;
         if (signal_pending_mask(current_task)) return -EINTR;
-        sleep_ticks(1);
+        wait_ticks = UINT64_MAX;
+        if (timeout > 0) {
+            elapsed_ticks = tick_count - start_tick;
+            if (elapsed_ticks >= timeout_ticks) return 0;
+            wait_ticks = timeout_ticks - elapsed_ticks;
+        }
+        wait_ticks = event_descriptor_wait_timeout(wait_ticks);
+        descriptor_ready_wait(ready_generation, wait_ticks);
     }
 }
 
@@ -816,6 +846,7 @@ static int sys_timerfd_settime(int fd, const char *flags_ptr, int new_value) {
         timerfds[index].next_tick = tick_count + initial_ticks;
     }
     mutex_unlock(&timerfd_lock);
+    descriptor_ready_notify();
     if (old_value && copy_to_user(old_value, &previous, sizeof(previous)) < 0)
         return -EFAULT;
     return 0;
@@ -976,6 +1007,7 @@ retry_read:
             eventfds[index].counter = 0;
         }
         mutex_unlock(&eventfd_lock);
+        descriptor_ready_notify();
         if (copy_to_user(buffer, &value, sizeof(value)) < 0) return -EFAULT;
         return sizeof(value);
     }
@@ -1066,6 +1098,7 @@ retry_write:
     }
     eventfds[index].counter += value;
     mutex_unlock(&eventfd_lock);
+    descriptor_ready_notify();
     return sizeof(value);
 }
 
@@ -1105,6 +1138,40 @@ int is_epoll_special_fd(int fd) {
     return result;
 }
 
+static void epoll_remove_closed_target(pid_t pid, int fd) {
+    epoll_instance_t *ep;
+    int source;
+    int target;
+    int i;
+    int removed;
+
+    removed = 0;
+    mutex_lock(&epoll_lock);
+    for (i = 0; i < epoll_capacity; i++) {
+        ep = &epoll_instances[i];
+        if (!ep->in_use || ep->owner_pid != pid) continue;
+        mutex_lock(&ep->lock);
+        target = 0;
+        for (source = 0; source < ep->fd_count; source++) {
+            if (ep->fds[source].fd == fd) {
+                removed = 1;
+                continue;
+            }
+            if (target != source) ep->fds[target] = ep->fds[source];
+            target++;
+        }
+        ep->fd_count = target;
+        if (target == 0) {
+            kfree(ep->fds);
+            ep->fds = NULL;
+            ep->fd_capacity = 0;
+        }
+        mutex_unlock(&ep->lock);
+    }
+    mutex_unlock(&epoll_lock);
+    if (removed) descriptor_ready_notify();
+}
+
 int epoll_close_fd(int fd) {
     int idx;
     int i;
@@ -1112,6 +1179,7 @@ int epoll_close_fd(int fd) {
     epoll_instance_t *ep;
 
     if (inotify_is_fd(fd)) return inotify_close_fd(fd);
+    if (current_task) epoll_remove_closed_target(current_task->pid, fd);
     idx = fd - EPOLL_BASE_FD;
     if (idx >= 0 && idx < epoll_capacity) {
         mutex_lock(&epoll_lock);

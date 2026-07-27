@@ -11,6 +11,8 @@ extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
 extern int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino);
 extern int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint16_t mode);
 extern int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name);
+extern int ext4_link_file(ext4_fs_t *fs, uint32_t ino, uint32_t parent_ino,
+                          const char *name);
 extern int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
                             uint32_t new_parent_ino, const char *new_name);
 
@@ -67,8 +69,9 @@ static int ext4_prepare_rw_mount(ext4_fs_t *fs) {
 
     needs_recovery = !(fs->sb.s_state & EXT4_VALID_FS);
     if (fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
-        printf("EXT4: journal replay is required but unsupported\n");
-        return -1;
+        if (ext4_journal_replay(fs) != 0) return -1;
+        if (ext4_sync_blocks(fs) != 0) return -1;
+        if (ext4_flush_device(fs) != 0) return -1;
     }
     if (needs_recovery || fs->sb.s_last_orphan != 0) {
         if (ext4_recover_orphans(fs) != 0) {
@@ -922,6 +925,80 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
     return ret;
 }
 
+int ext4_vfs_link_node(const char *oldpath, const char *newpath) {
+    char parent_path[VFS_MAX_PATH];
+    char name[VFS_MAX_NAME];
+    int len;
+    int last_slash;
+    int i;
+    int j;
+    vfs_node_t *source;
+    vfs_node_t *parent;
+    ext4_vfs_private_t *source_priv;
+    ext4_vfs_private_t *parent_priv;
+    int result;
+
+    if (!oldpath || !newpath) return -1;
+    source = vfs_namei(oldpath);
+    if (!source || !source->private_data ||
+        VFS_GET_TYPE(source->flags) == VFS_DIRECTORY) {
+        if (source) vfs_release(source);
+        return -1;
+    }
+    len = 0;
+    while (newpath[len]) {
+        if (len >= VFS_MAX_PATH - 1) {
+            vfs_release(source);
+            return -1;
+        }
+        len++;
+    }
+    last_slash = -1;
+    for (i = 0; i < len; i++) {
+        if (newpath[i] == '/') last_slash = i;
+    }
+    if (last_slash <= 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        i = last_slash == 0 ? 1 : 0;
+        j = 0;
+        while (i < len && j < VFS_MAX_NAME - 1) name[j++] = newpath[i++];
+        name[j] = '\0';
+    } else {
+        for (i = 0; i < last_slash; i++) parent_path[i] = newpath[i];
+        parent_path[i] = '\0';
+        j = 0;
+        for (i = last_slash + 1;
+             i < len && j < VFS_MAX_NAME - 1; i++) name[j++] = newpath[i];
+        name[j] = '\0';
+    }
+    if (name[0] == '\0') {
+        vfs_release(source);
+        return -1;
+    }
+    parent = vfs_namei(parent_path);
+    if (!parent || !parent->private_data ||
+        VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) {
+        if (parent) vfs_release(parent);
+        vfs_release(source);
+        return -1;
+    }
+    source_priv = (ext4_vfs_private_t *)source->private_data;
+    parent_priv = (ext4_vfs_private_t *)parent->private_data;
+    if (source_priv->fs != parent_priv->fs) {
+        vfs_release(parent);
+        vfs_release(source);
+        return -1;
+    }
+    mutex_lock(&source_priv->fs->lock);
+    result = ext4_link_file(source_priv->fs, source_priv->ino,
+                            parent_priv->ino, name);
+    mutex_unlock(&source_priv->fs->lock);
+    vfs_release(parent);
+    vfs_release(source);
+    return result;
+}
+
 static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
     ext4_vfs_private_t *priv;
     vfs_node_t *victim;
@@ -1449,6 +1526,10 @@ int ext4_sync(ext4_fs_t *fs) {
         return -1;
     }
 
+    ret = ext4_sync_blocks(fs);
+    if (ret != 0) return ret;
+    ret = ext4_flush_device(fs);
+    if (ret != 0) return ret;
     ret = ext4_sync_inodes(fs);
     if (ret != 0) return ret;
     ret = ext4_sync_blocks(fs);

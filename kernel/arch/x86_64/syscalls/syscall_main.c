@@ -3,6 +3,7 @@
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/kstack.h>
+#include <lebirun/creds.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -92,7 +93,7 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 11:  return SYSCALL_EXECVE;
         case 20:  return SYSCALL_GETPID;
         case 37:  return SYSCALL_KILL;
-        case 114: return SYSCALL_WAITPID;
+        case 114: return SYSCALL_WAIT4;
         case 252: return SYSCALL_EXIT;
         
         case 45:  return SYSCALL_SBRK;
@@ -245,6 +246,8 @@ static int linux_to_kernel_syscall(int linux_nr) {
         
         case 355: return SYSCALL_GETRANDOM;
         case 172: return SYSCALL_PRCTL;
+        case 184: return SYSCALL_CAPGET;
+        case 185: return SYSCALL_CAPSET;
         
         case 254: return SYSCALL_EPOLL_CREATE;
         case 329: return SYSCALL_EPOLL_CREATE1;
@@ -261,7 +264,6 @@ static int linux_to_kernel_syscall(int linux_nr) {
         
         case 120: return SYSCALL_CLONE;
         case 190: return SYSCALL_VFORK;
-        case 114 + 1: return SYSCALL_WAIT4;
         case 284: return SYSCALL_WAITID;
         
         case 92:  return SYSCALL_TRUNCATE;
@@ -344,6 +346,12 @@ void do_syscall(registers_t *regs) {
     if (num >= NR_SYSCALLS || !syscall_table || !syscall_table[num]) {
         clear_syscall_frame();
         regs->rax = -ENOSYS;
+        return;
+    }
+
+    if (current_task && !creds_syscall_allowed(current_task, num)) {
+        clear_syscall_frame();
+        regs->rax = -EPERM;
         return;
     }
 

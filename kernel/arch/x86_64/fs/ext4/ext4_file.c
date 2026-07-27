@@ -424,10 +424,22 @@ int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint1
         return -1;
     }
 
+    if (ext4_sync(fs) != 0) {
+        ext4_free_inode(fs, new_ino);
+        return -1;
+    }
+
     file_type = ext4_mode_to_type(mode);
 
     if (ext4_dir_add_entry(fs, parent_ino, name, new_ino, file_type) != 0) {
         ext4_free_inode(fs, new_ino);
+        return -1;
+    }
+
+    if (ext4_sync(fs) != 0) {
+        ext4_dir_remove_entry(fs, parent_ino, name);
+        ext4_free_inode(fs, new_ino);
+        ext4_sync(fs);
         return -1;
     }
 
@@ -534,6 +546,49 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
     return 0;
 }
 
+int ext4_link_file(ext4_fs_t *fs, uint32_t ino, uint32_t parent_ino,
+                   const char *name) {
+    uint32_t existing;
+    ext4_inode_cache_t *ic;
+    uint8_t file_type;
+
+    if (!fs || !name) return -1;
+    if (ext4_dir_lookup(fs, parent_ino, name, &existing) == 0) return -1;
+    ic = ext4_get_inode(fs, ino);
+    if (!ic) return -1;
+    if ((ic->inode.i_mode & 0xF000) == EXT4_S_IFDIR ||
+        ic->inode.i_links_count == UINT16_MAX) {
+        ext4_release_inode(ic);
+        return -1;
+    }
+    file_type = ext4_mode_to_type(ic->inode.i_mode);
+    ic->inode.i_links_count++;
+    ext4_mark_inode_dirty(ic);
+    if (ext4_sync(fs) != 0) {
+        ic->inode.i_links_count--;
+        ext4_mark_inode_dirty(ic);
+        ext4_release_inode(ic);
+        return -1;
+    }
+    if (ext4_dir_add_entry(fs, parent_ino, name, ino, file_type) != 0) {
+        ic->inode.i_links_count--;
+        ext4_mark_inode_dirty(ic);
+        ext4_sync(fs);
+        ext4_release_inode(ic);
+        return -1;
+    }
+    if (ext4_sync(fs) != 0) {
+        ext4_dir_remove_entry(fs, parent_ino, name);
+        ic->inode.i_links_count--;
+        ext4_mark_inode_dirty(ic);
+        ext4_sync(fs);
+        ext4_release_inode(ic);
+        return -1;
+    }
+    ext4_release_inode(ic);
+    return 0;
+}
+
 int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
                      uint32_t new_parent_ino, const char *new_name) {
     uint32_t ino;
@@ -569,9 +624,16 @@ int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_nam
         return -1;
     }
 
-    if (ext4_dir_remove_entry(fs, old_parent_ino, old_name) != 0) {
+    if (ext4_sync(fs) != 0) {
+        ext4_dir_remove_entry(fs, new_parent_ino, new_name);
+        ext4_sync(fs);
         return -1;
     }
 
-    return 0;
+    if (ext4_dir_remove_entry(fs, old_parent_ino, old_name) != 0) {
+        ext4_dir_remove_entry(fs, new_parent_ino, new_name);
+        ext4_sync(fs);
+        return -1;
+    }
+    return ext4_sync(fs);
 }

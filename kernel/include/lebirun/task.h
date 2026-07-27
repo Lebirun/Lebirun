@@ -53,7 +53,14 @@ typedef struct {
     uint64_t filesz;
     uint64_t offset;
     uint64_t flags;
+    uint32_t map_flags;
 } task_file_map_t;
+
+#define TASK_VMA_PRIVATE   0x0001u
+#define TASK_VMA_SHARED    0x0002u
+#define TASK_VMA_ANONYMOUS 0x0004u
+#define TASK_VMA_FILE      0x0008u
+#define TASK_VMA_DEVICE    0x0010u
 
 typedef struct task {
     uint64_t id;
@@ -234,14 +241,28 @@ void waitq_wake_all(wait_queue_t* q);
 void waitq_wake_one(wait_queue_t* q);
 void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
+uint64_t descriptor_ready_generation(void);
+void descriptor_ready_notify(void);
+int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks);
+uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
 void task_free_user_memory(task_t* t);
 int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys);
 int task_add_file_mapping(task_t *task, struct vfs_node *node, uint64_t vaddr,
                           uint64_t memsz, uint64_t filesz, uint64_t offset,
                           uint64_t flags);
+int task_add_vm_area(task_t *task, struct vfs_node *node, uint64_t vaddr,
+                     uint64_t size, uint64_t file_size, uint64_t offset,
+                     uint64_t flags, uint32_t map_flags);
+int task_unmap_vm_areas(task_t *task, uint64_t vaddr, uint64_t size);
+int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
+                          uint64_t flags);
 int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
+int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr);
+uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages);
+int task_track_user_page(task_t *task, uint64_t physical);
+void task_untrack_user_page(task_t *task, uint64_t physical);
 void exec_page_cache_reclaim(uint64_t target_pages);
 uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);

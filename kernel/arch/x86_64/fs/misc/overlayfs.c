@@ -254,6 +254,23 @@ static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode);
 static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid);
 static void overlay_ensure_upper_dirs(const char *path);
 
+static int overlay_ramfs_result(int result) {
+    switch (result) {
+        case RAMFS_ERR_NOMEM: return -12;
+        case RAMFS_ERR_NOENT: return -2;
+        case RAMFS_ERR_EXIST: return -17;
+        case RAMFS_ERR_NOTDIR: return -20;
+        case RAMFS_ERR_ISDIR: return -21;
+        case RAMFS_ERR_NOTEMPTY: return -39;
+        case RAMFS_ERR_NOSPC: return -28;
+        case RAMFS_ERR_INVAL: return -22;
+        case RAMFS_ERR_NAMETOOLONG: return -36;
+        case RAMFS_ERR_PERM: return -1;
+        case RAMFS_ERR_BUSY: return -16;
+        default: return result;
+    }
+}
+
 static int overlay_is_whiteout(const char *name) {
     return strncmp(name, OVERLAY_WHITEOUT_PREFIX, 4) == 0;
 }
@@ -837,7 +854,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
         if (pnode) onode->upper_node = pnode->vfs_node;
     }
     if (ret == 0) overlay_reset_readdir(onode);
-    return ret;
+    return overlay_ramfs_result(ret);
 }
 
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
@@ -863,7 +880,7 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
         if (pnode) onode->upper_node = pnode->vfs_node;
     }
     if (ret == 0) overlay_reset_readdir(onode);
-    return ret;
+    return overlay_ramfs_result(ret);
 }
 
 static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
@@ -892,7 +909,7 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
         if (ret != 0) {
             vfs_release(in_upper);
             if (in_lower) vfs_release(in_lower);
-            return ret;
+            return overlay_ramfs_result(ret);
         }
     }
     
@@ -903,7 +920,7 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
         if (ret != 0 && ret != RAMFS_ERR_EXIST) {
             if (in_upper) vfs_release(in_upper);
             vfs_release(in_lower);
-            return ret;
+            return overlay_ramfs_result(ret);
         }
     }
 
@@ -970,7 +987,7 @@ static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     if (ret != 0) {
         if (whiteout_created) ramfs_unlink(whiteout_path);
         vfs_release(source);
-        return ret;
+        return overlay_ramfs_result(ret);
     }
     vfs_release(source);
 

@@ -15,7 +15,27 @@ typedef struct {
     uint64_t umask_val;
     pid_t pgid;
     pid_t sid;
+    uint64_t cap_effective;
+    uint64_t cap_permitted;
+    uint64_t cap_inheritable;
+    uint64_t *syscall_mask;
+    int no_new_privs;
+    int syscall_filter_mode;
 } task_creds_t;
+
+#define CAP_FULL_SET 0x0000003FFFFFFFFFULL
+#define CAP_VERSION_3 0x20080522u
+
+typedef struct {
+    uint32_t version;
+    int pid;
+} cap_header_t;
+
+typedef struct {
+    uint32_t effective;
+    uint32_t permitted;
+    uint32_t inheritable;
+} cap_data_t;
 
 static task_creds_t *get_task_creds(void) {
     task_creds_t *creds;
@@ -40,6 +60,10 @@ static task_creds_t *get_task_creds(void) {
         creds->umask_val = 022;
         creds->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
         creds->sid = current_task->sid ? current_task->sid : current_task->pid;
+        if (current_task->euid == 0) {
+            creds->cap_effective = CAP_FULL_SET;
+            creds->cap_permitted = CAP_FULL_SET;
+        }
         current_task->creds_data = creds;
     }
     return creds;
@@ -66,7 +90,18 @@ static int sys_getegid(int unused1, const char *unused2, int unused3) {
 }
 
 static void sync_creds_to_task(task_creds_t *creds) {
+    uint64_t old_euid;
+
     if (!current_task || !creds) return;
+    old_euid = current_task->euid;
+    if (old_euid == 0 && creds->euid != 0)
+        creds->cap_effective = 0;
+    else if (old_euid != 0 && creds->euid == 0)
+        creds->cap_effective = creds->cap_permitted;
+    if (creds->uid != 0 && creds->euid != 0 && creds->suid != 0) {
+        creds->cap_effective = 0;
+        creds->cap_permitted = 0;
+    }
     current_task->uid   = creds->uid;
     current_task->euid  = creds->euid;
     current_task->suid  = creds->suid;
@@ -85,13 +120,17 @@ void creds_apply_exec_ids(struct task *task, uint64_t euid, uint64_t egid) {
     task_creds_t *creds;
 
     if (!task) return;
+    creds = (task_creds_t *)task->creds_data;
+    if (creds && creds->no_new_privs) {
+        euid = task->euid;
+        egid = task->egid;
+    }
     task->euid = euid;
     task->suid = euid;
     task->fsuid = euid;
     task->egid = egid;
     task->sgid = egid;
     task->fsgid = egid;
-    creds = (task_creds_t *)task->creds_data;
     if (!creds) return;
     creds->euid = euid;
     creds->suid = euid;
@@ -99,6 +138,14 @@ void creds_apply_exec_ids(struct task *task, uint64_t euid, uint64_t egid) {
     creds->egid = egid;
     creds->sgid = egid;
     creds->fsgid = egid;
+    if (euid == 0) {
+        creds->cap_effective = CAP_FULL_SET;
+        creds->cap_permitted = CAP_FULL_SET;
+    } else {
+        creds->cap_effective = 0;
+        if (task->uid != 0 && task->suid != 0)
+            creds->cap_permitted = 0;
+    }
 }
 
 static int sys_setuid(int uid, const char *unused1, int unused2) {
@@ -487,9 +534,112 @@ void creds_init_task(task_t *task) {
     task->creds_data = NULL;
 }
 
+void creds_release_task(task_t *task) {
+    task_creds_t *creds;
+
+    if (!task || !task->creds_data) return;
+    creds = (task_creds_t *)task->creds_data;
+    if (creds->syscall_mask) kfree(creds->syscall_mask);
+    kfree(creds);
+    task->creds_data = NULL;
+}
+
+int creds_syscall_allowed(task_t *task, int syscall_number) {
+    task_creds_t *creds;
+    int word;
+    int bit;
+
+    if (!task || syscall_number < 0 || syscall_number >= NR_SYSCALLS)
+        return 0;
+    creds = (task_creds_t *)task->creds_data;
+    if (!creds || !creds->syscall_mask) return 1;
+    word = syscall_number / 64;
+    bit = syscall_number % 64;
+    return (creds->syscall_mask[word] & (1ULL << bit)) != 0;
+}
+
+int creds_set_syscall_mask(task_t *task, const uint64_t *mask,
+                           size_t word_count) {
+    task_creds_t *creds;
+    uint64_t *new_mask;
+    size_t required_words;
+    size_t i;
+
+    if (!task || !mask) return -EINVAL;
+    required_words = (NR_SYSCALLS + 63) / 64;
+    if (word_count != required_words) return -EINVAL;
+    creds = get_task_creds();
+    if (!creds) return -ENOMEM;
+    new_mask = (uint64_t *)kmalloc(required_words * sizeof(uint64_t));
+    if (!new_mask) return -ENOMEM;
+    memcpy(new_mask, mask, required_words * sizeof(uint64_t));
+    if (creds->syscall_mask) {
+        for (i = 0; i < required_words; i++)
+            new_mask[i] &= creds->syscall_mask[i];
+        kfree(creds->syscall_mask);
+    }
+    creds->syscall_mask = new_mask;
+    creds->syscall_filter_mode = 2;
+    return 0;
+}
+
+int creds_set_strict_syscalls(task_t *task) {
+    uint64_t mask[(NR_SYSCALLS + 63) / 64];
+    int result;
+
+    if (!task) return -EINVAL;
+    memset(mask, 0, sizeof(mask));
+    mask[SYSCALL_EXIT / 64] |= 1ULL << (SYSCALL_EXIT % 64);
+    mask[SYSCALL_READ / 64] |= 1ULL << (SYSCALL_READ % 64);
+    mask[SYSCALL_WRITE / 64] |= 1ULL << (SYSCALL_WRITE % 64);
+    mask[SYSCALL_SIGRETURN / 64] |= 1ULL << (SYSCALL_SIGRETURN % 64);
+    mask[SYSCALL_RT_SIGRETURN / 64] |= 1ULL << (SYSCALL_RT_SIGRETURN % 64);
+    result = creds_set_syscall_mask(task, mask, (NR_SYSCALLS + 63) / 64);
+    if (result == 0)
+        ((task_creds_t *)task->creds_data)->syscall_filter_mode = 1;
+    return result;
+}
+
+int creds_set_no_new_privs(task_t *task) {
+    task_creds_t *creds;
+
+    if (!task) return -EINVAL;
+    creds = get_task_creds();
+    if (!creds) return -ENOMEM;
+    creds->no_new_privs = 1;
+    return 0;
+}
+
+int creds_get_no_new_privs(task_t *task) {
+    task_creds_t *creds;
+
+    if (!task) return 0;
+    creds = (task_creds_t *)task->creds_data;
+    return creds ? creds->no_new_privs : 0;
+}
+
+int creds_get_syscall_filter_mode(task_t *task) {
+    task_creds_t *creds;
+
+    if (!task) return 0;
+    creds = (task_creds_t *)task->creds_data;
+    return creds ? creds->syscall_filter_mode : 0;
+}
+
+int creds_has_capability(task_t *task, int capability) {
+    task_creds_t *creds;
+
+    if (!task || capability < 0 || capability >= 38) return 0;
+    creds = (task_creds_t *)task->creds_data;
+    if (!creds) return task->euid == 0;
+    return (creds->cap_effective & (1ULL << capability)) != 0;
+}
+
 int creds_copy_task(task_t *parent, task_t *child) {
     task_creds_t *pcreds;
     task_creds_t *ccreds;
+    uint64_t *copied_mask;
+    size_t mask_bytes;
 
     if (!parent || !child) return -1;
     pcreds = (task_creds_t *)parent->creds_data;
@@ -514,9 +664,18 @@ int creds_copy_task(task_t *parent, task_t *child) {
     if (!ccreds) {
         ccreds = (task_creds_t *)kmalloc(sizeof(task_creds_t));
         if (!ccreds) return -1;
+        memset(ccreds, 0, sizeof(task_creds_t));
         child->creds_data = ccreds;
     }
+    copied_mask = NULL;
+    mask_bytes = ((NR_SYSCALLS + 63) / 64) * sizeof(uint64_t);
+    if (pcreds->syscall_mask) {
+        copied_mask = (uint64_t *)kmalloc(mask_bytes);
+        if (!copied_mask) return -1;
+        memcpy(copied_mask, pcreds->syscall_mask, mask_bytes);
+    }
     memcpy(ccreds, pcreds, sizeof(task_creds_t));
+    ccreds->syscall_mask = copied_mask;
     child->groups = ccreds->groups;
     child->uid   = ccreds->uid;
     child->euid  = ccreds->euid;
@@ -530,6 +689,73 @@ int creds_copy_task(task_t *parent, task_t *child) {
     child->pgid = ccreds->pgid;
     child->sid = ccreds->sid;
     child->ppid = parent->pid;
+    return 0;
+}
+
+static int sys_capget(cap_header_t *header, cap_data_t *data) {
+    cap_header_t local_header;
+    cap_data_t local_data[2];
+    task_creds_t *creds;
+    uint64_t effective;
+    uint64_t permitted;
+    uint64_t inheritable;
+
+    if (!header || !data || !current_task) return -EFAULT;
+    if (copy_from_user(&local_header, header, sizeof(local_header)) != 0)
+        return -EFAULT;
+    if (local_header.version != CAP_VERSION_3) return -EINVAL;
+    if (local_header.pid != 0 && local_header.pid != current_task->pid)
+        return -EPERM;
+    creds = (task_creds_t *)current_task->creds_data;
+    effective = creds ? creds->cap_effective :
+                (current_task->euid == 0 ? CAP_FULL_SET : 0);
+    permitted = creds ? creds->cap_permitted :
+                (current_task->euid == 0 ? CAP_FULL_SET : 0);
+    inheritable = creds ? creds->cap_inheritable : 0;
+    memset(local_data, 0, sizeof(local_data));
+    local_data[0].effective = (uint32_t)effective;
+    local_data[0].permitted = (uint32_t)permitted;
+    local_data[0].inheritable = (uint32_t)inheritable;
+    local_data[1].effective = (uint32_t)(effective >> 32);
+    local_data[1].permitted = (uint32_t)(permitted >> 32);
+    local_data[1].inheritable = (uint32_t)(inheritable >> 32);
+    if (copy_to_user(data, local_data, sizeof(local_data)) != 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int sys_capset(cap_header_t *header, const cap_data_t *data) {
+    cap_header_t local_header;
+    cap_data_t local_data[2];
+    task_creds_t *creds;
+    uint64_t effective;
+    uint64_t permitted;
+    uint64_t inheritable;
+    uint64_t old_permitted;
+
+    if (!header || !data || !current_task) return -EFAULT;
+    if (copy_from_user(&local_header, header, sizeof(local_header)) != 0 ||
+        copy_from_user(local_data, data, sizeof(local_data)) != 0)
+        return -EFAULT;
+    if (local_header.version != CAP_VERSION_3) return -EINVAL;
+    if (local_header.pid != 0 && local_header.pid != current_task->pid)
+        return -EPERM;
+    effective = local_data[0].effective |
+                ((uint64_t)local_data[1].effective << 32);
+    permitted = local_data[0].permitted |
+                ((uint64_t)local_data[1].permitted << 32);
+    inheritable = local_data[0].inheritable |
+                  ((uint64_t)local_data[1].inheritable << 32);
+    if ((effective & ~permitted) != 0 ||
+        ((effective | permitted | inheritable) & ~CAP_FULL_SET) != 0)
+        return -EPERM;
+    creds = get_task_creds();
+    if (!creds) return -ENOMEM;
+    old_permitted = creds->cap_permitted;
+    if ((permitted & ~old_permitted) != 0) return -EPERM;
+    creds->cap_effective = effective;
+    creds->cap_permitted = permitted;
+    creds->cap_inheritable = inheritable;
     return 0;
 }
 
@@ -586,4 +812,6 @@ void syscalls_ids_init(void) {
     syscall_table[SYSCALL_GETPPID] = sys_getppid;
     syscall_table[SYSCALL_GETPID2] = sys_getpid_impl;
     syscall_table[SYSCALL_GETTID] = sys_gettid;
+    syscall_table[SYSCALL_CAPGET] = sys_capget;
+    syscall_table[SYSCALL_CAPSET] = sys_capset;
 }

@@ -417,8 +417,10 @@ void syscall_core_flush_tty_input(int con_id);
 #define SYSCALL_SCHED_GET_PRIORITY_MAX 285
 #define SYSCALL_SCHED_GET_PRIORITY_MIN 286
 #define SYSCALL_SCHED_RR_GET_INTERVAL 287
+#define SYSCALL_CAPGET 288
+#define SYSCALL_CAPSET 289
 
-#define NR_SYSCALLS 288
+#define NR_SYSCALLS 290
 
 struct kernel_stat {
     unsigned long long st_dev;

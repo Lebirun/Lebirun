@@ -1481,10 +1481,12 @@ static int ramfs_vfs_unlink(vfs_node_t *parent, const char *name) {
 }
 
 static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
-    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
-    
-    ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
-    if (!prn || prn->type != 1) return RAMFS_ERR_NOTDIR;
+    ramfs_node_t *prn;
+    ramfs_node_t *node;
+
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -22;
+    prn = (ramfs_node_t *)parent->private_data;
+    if (!prn || prn->type != 1) return -20;
     
     ramfs_lock();
     ramfs_node_lock(prn);
@@ -1492,21 +1494,21 @@ static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms)
     if (ramfs_find_child(prn, name)) {
         ramfs_node_unlock(prn);
         ramfs_unlock();
-        return RAMFS_ERR_EXIST;
+        return -17;
     }
     
-    ramfs_node_t *node = ramfs_alloc_node();
+    node = ramfs_alloc_node();
     if (!node) {
         ramfs_node_unlock(prn);
         ramfs_unlock();
-        return RAMFS_ERR_NOMEM;
+        return -12;
     }
     
     if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
         kfree(node);
         ramfs_node_unlock(prn);
         ramfs_unlock();
-        return RAMFS_ERR_NOMEM;
+        return -12;
     }
     node->type = 1;
     node->permissions = (uint16_t)(perms & 07777);

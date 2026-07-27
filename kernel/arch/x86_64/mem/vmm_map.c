@@ -160,7 +160,8 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
     if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
     if (entry & 0x80) {
-        result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE));
+        result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE |
+                                        VMM_PTE_SHARED));
         goto out;
     }
     table_phys = entry & VMM_PHYS_MASK;
@@ -174,7 +175,8 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
     if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
     if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
-    result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE));
+    result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE |
+                                    VMM_PTE_SHARED));
 
 out:
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
@@ -242,7 +244,8 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
         temp_unmap_raw(temp_virt);
         goto out;
     }
-    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_COW | VMM_PTE_NOFREE);
+    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_COW | VMM_PTE_NOFREE |
+                         VMM_PTE_SHARED);
     table[pt_idx] = preserved | (flags & (VMM_PTE_PRESENT | VMM_PTE_WRITE |
                                           VMM_PTE_USER | VMM_PTE_NX));
     temp_unmap_raw(temp_virt);

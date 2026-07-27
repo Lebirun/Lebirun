@@ -113,11 +113,10 @@ static int check_fd_writable(int fd) {
     return 0;
 }
 
-static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
-                      int exceptfds_ptr, int timeout_ptr, int unused) {
+static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
+                         int timeout_ms) {
     uint64_t read_addr = (uint64_t)readfds_ptr;
     uint64_t write_addr = (uint64_t)writefds_ptr;
-    uint64_t timeout_addr = (uint64_t)timeout_ptr;
     fd_mask *readfds = NULL;
     fd_mask *writefds = NULL;
     fd_mask *in_read = NULL;
@@ -127,16 +126,14 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
     uint64_t words;
     uint64_t set_bytes;
     uint64_t allocation_bytes;
-    int timeout_ms;
     uint64_t start_tick;
     uint64_t timeout_ticks;
     int count;
     int fd;
     int descriptor_events;
-    struct kernel_timeval timeout_value;
-
-    (void)exceptfds_ptr;
-    (void)unused;
+    uint64_t ready_generation;
+    uint64_t elapsed_ticks;
+    uint64_t wait_ticks;
 
     if (nfds < 0) return -EINVAL;
     if (nfds > 4096) nfds = 4096;
@@ -186,29 +183,13 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
         }
     }
 
-    timeout_ms = -1;
-    if (timeout_addr) {
-        if (copy_from_user(&timeout_value, (const void *)timeout_addr,
-                           sizeof(timeout_value)) < 0) {
-            kfree(in_read);
-            return -EFAULT;
-        }
-        if (timeout_value.tv_sec < 0 || timeout_value.tv_usec < 0 ||
-            timeout_value.tv_usec >= 1000000) {
-            kfree(in_read);
-            return -EINVAL;
-        }
-        timeout_ms = (int)(timeout_value.tv_sec * 1000 +
-                           timeout_value.tv_usec / 1000);
-        if (timeout_ms < 0) timeout_ms = 0;
-    }
-
     start_tick = tick_count;
     timeout_ticks = (timeout_ms > 0) ?
                     (((uint64_t)timeout_ms * pit_freq + 999) / 1000) : 0;
     if (timeout_ms > 0 && timeout_ticks == 0) timeout_ticks = 1;
 
     do {
+        ready_generation = descriptor_ready_generation();
         memset(result_read, 0, set_bytes);
         memset(result_write, 0, set_bytes);
         count = 0;
@@ -240,7 +221,14 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
             kfree(in_read);
             return -EINTR;
         }
-        sleep_ticks(1);
+        wait_ticks = UINT64_MAX;
+        if (timeout_ms > 0) {
+            elapsed_ticks = tick_count - start_tick;
+            if (elapsed_ticks >= timeout_ticks) break;
+            wait_ticks = timeout_ticks - elapsed_ticks;
+        }
+        wait_ticks = event_descriptor_wait_timeout(wait_ticks);
+        descriptor_ready_wait(ready_generation, wait_ticks);
         if (select_interrupted()) {
             kfree(in_read);
             return -EINTR;
@@ -259,6 +247,51 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
 
     kfree(in_read);
     return count;
+}
+
+static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
+                      int exceptfds_ptr, int timeout_ptr, int unused) {
+    struct kernel_timeval timeout_value;
+    int timeout_ms;
+
+    (void)exceptfds_ptr;
+    (void)unused;
+    timeout_ms = -1;
+    if (timeout_ptr) {
+        if (copy_from_user(&timeout_value,
+                           (const void *)(uintptr_t)(uint32_t)timeout_ptr,
+                           sizeof(timeout_value)) < 0) return -EFAULT;
+        if (timeout_value.tv_sec < 0 || timeout_value.tv_usec < 0 ||
+            timeout_value.tv_usec >= 1000000) return -EINVAL;
+        timeout_ms = (int)(timeout_value.tv_sec * 1000 +
+                           timeout_value.tv_usec / 1000);
+        if (timeout_ms < 0) timeout_ms = 0;
+    }
+    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+}
+
+static int sys_pselect6(int nfds, int readfds_ptr, int writefds_ptr,
+                        int exceptfds_ptr, int timeout_ptr, int sigmask_ptr) {
+    struct kernel_timespec timeout_value;
+    uint64_t milliseconds;
+    int timeout_ms;
+
+    (void)exceptfds_ptr;
+    (void)sigmask_ptr;
+    timeout_ms = -1;
+    if (timeout_ptr) {
+        if (copy_from_user(&timeout_value,
+                           (const void *)(uintptr_t)(uint32_t)timeout_ptr,
+                           sizeof(timeout_value)) < 0) return -EFAULT;
+        if (timeout_value.tv_sec < 0 || timeout_value.tv_nsec < 0 ||
+            timeout_value.tv_nsec >= 1000000000) return -EINVAL;
+        milliseconds = (uint64_t)timeout_value.tv_sec * 1000;
+        milliseconds += ((uint64_t)timeout_value.tv_nsec + 999999) /
+                        1000000;
+        timeout_ms = milliseconds > 0x7FFFFFFFULL ? 0x7FFFFFFF :
+                     (int)milliseconds;
+    }
+    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
 }
 
 struct pollfd_k {
@@ -290,6 +323,9 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
     int curfd;
     int sevents;
     int descriptor_events;
+    uint64_t ready_generation;
+    uint64_t elapsed_ticks;
+    uint64_t wait_ticks;
 
     addr = (uint64_t)fds_ptr;
     nfds = (int)(uintptr_t)nfds_ptr;
@@ -309,6 +345,7 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
     ready_count = 0;
 
     do {
+        ready_generation = descriptor_ready_generation();
         ready_count = 0;
 
         for (i = 0; i < nfds; i++) {
@@ -391,7 +428,14 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
         if (select_interrupted()) {
             return -EINTR;
         }
-        sleep_ticks(1);
+        wait_ticks = UINT64_MAX;
+        if (timeout > 0) {
+            elapsed_ticks = tick_count - start_tick;
+            if (elapsed_ticks >= timeout_ticks) break;
+            wait_ticks = timeout_ticks - elapsed_ticks;
+        }
+        wait_ticks = event_descriptor_wait_timeout(wait_ticks);
+        descriptor_ready_wait(ready_generation, wait_ticks);
         if (select_interrupted()) {
             return -EINTR;
         }
@@ -422,6 +466,7 @@ static int sys_ppoll(int fds_ptr, const char *nfds_ptr, int timeout_ptr) {
 
 void syscalls_select_init(void) {
     syscall_table[SYSCALL_SELECT] = sys_select;
+    syscall_table[SYSCALL_PSELECT6] = sys_pselect6;
     syscall_table[SYSCALL_POLL] = sys_poll;
     syscall_table[SYSCALL_PPOLL] = sys_ppoll;
 }

@@ -117,6 +117,7 @@ void mouse_handler(registers_t *regs) {
         ring_put((uint8_t)dy);
 
         waitq_wake_all(&mouse_waitq);
+        descriptor_ready_notify();
         break;
     }
 }

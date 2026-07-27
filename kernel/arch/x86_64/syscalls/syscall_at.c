@@ -526,9 +526,23 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     return r;
 }
 
-static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd) {
-    (void)olddirfd; (void)oldpath; (void)newdirfd;
-    return -ENOSYS;
+static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                      const char *newpath, int flags) {
+    char old_resolved[256];
+    char new_resolved[256];
+    const char *old_path;
+    const char *new_path;
+
+    if (!oldpath || !newpath) return -EFAULT;
+    if (flags & ~AT_SYMLINK_FOLLOW) return -EINVAL;
+    old_path = resolve_at_path(olddirfd, oldpath, old_resolved,
+                               sizeof(old_resolved));
+    if (!old_path) return -EFAULT;
+    new_path = resolve_at_path(newdirfd, newpath, new_resolved,
+                               sizeof(new_resolved));
+    if (!new_path) return -EFAULT;
+    if (ext4_vfs_link_node(old_path, new_path) != 0) return -EIO;
+    return 0;
 }
 
 static int sys_symlinkat(int target_ptr, const char *newdirfd_ptr, int linkpath) {

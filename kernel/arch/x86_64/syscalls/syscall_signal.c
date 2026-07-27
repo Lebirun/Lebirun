@@ -607,6 +607,7 @@ int deliver_signal_to_task(task_t *target, int sig) {
 
     if (target->state == TASK_BLOCKED) {
         wake_task(target);
+        descriptor_ready_notify();
     }
 
     return 0;

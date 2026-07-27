@@ -53,6 +53,7 @@ static inline int pipe_release_reference(pipe_t *pipe, int type) {
     else pipe->writers--;
     waitq_wake_all(&pipe->read_waitq);
     waitq_wake_all(&pipe->write_waitq);
+    descriptor_ready_notify();
     release = pipe->readers <= 0 && pipe->writers <= 0;
     pipe_unlock_irqrestore(pipe, flags);
     return release;

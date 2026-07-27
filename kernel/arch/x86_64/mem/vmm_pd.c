@@ -335,6 +335,13 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
                     if (pte_flags & VMM_PTE_NOFREE) {
                         new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
+                    } else if (pte_flags & VMM_PTE_SHARED) {
+                        new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) |
+                                         pte_flags;
+                        if (pfa_ref_share(src_page_phys) != 0) {
+                            shared_ref_failed = 1;
+                            break;
+                        }
                     } else if (pte_flags & 0x2) {
                         cow_flags64 = (pte_flags & ~0x2) | VMM_PTE_COW;
                         src_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
