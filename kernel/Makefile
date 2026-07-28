@@ -27,7 +27,7 @@ else
   MSG_STRIP =
 endif
 
-CFLAGS?=-Os -ffunction-sections -fdata-sections
+CFLAGS?=-Oz
 CPPFLAGS?=
 LDFLAGS?=-Wl,--gc-sections
 LIBS?=
@@ -38,7 +38,7 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
-CFLAGS:=$(CFLAGS) -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
+CFLAGS:=$(CFLAGS) -ffunction-sections -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
 CPPFLAGS:=$(CPPFLAGS) -nostdinc -D__is_kernel -Iinclude -isystem ../sysroot/usr/include
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
@@ -57,69 +57,57 @@ CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
 LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
 LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
-KERNEL_SIZE_CFLAGS=-Oz -ffunction-sections -fdata-sections
-KERNEL_TINY_CFLAGS=-Oz -ffunction-sections -fdata-sections
+KERNEL_SENSITIVE_OBJS=\
+$(ARCHDIR)/tty.o \
+$(ARCHDIR)/idt.o \
+$(ARCHDIR)/gdt.o \
+$(ARCHDIR)/pit.o \
+$(ARCHDIR)/rtc.o \
+$(ARCHDIR)/timekeeping.o \
+$(ARCHDIR)/mutex.o \
+$(ARCHDIR)/keyboard.o \
+$(ARCHDIR)/mouse.o \
+$(ARCHDIR)/mem/init.o \
+$(ARCHDIR)/mem/pmm.o \
+$(ARCHDIR)/mem/vmm.o \
+$(ARCHDIR)/mem/pt.o \
+$(ARCHDIR)/mem/vmm_map.o \
+$(ARCHDIR)/mem/vmm_pd.o \
+$(ARCHDIR)/mem/heap.o \
+$(ARCHDIR)/mem/slab.o \
+$(ARCHDIR)/mem/demand.o \
+$(ARCHDIR)/mem/kstack.o \
+$(ARCHDIR)/mem/temp_map.o \
+$(ARCHDIR)/uaccess.o \
+$(ARCHDIR)/task.o \
+$(ARCHDIR)/smp.o \
+$(ARCHDIR)/multithread.o \
+$(ARCHDIR)/syscalls/syscall_main.o \
+$(ARCHDIR)/syscalls/syscall_core.o \
+$(ARCHDIR)/syscalls/syscall_mem.o \
+$(ARCHDIR)/syscalls/syscall_net.o \
+$(ARCHDIR)/syscalls/syscall_socket.o \
+$(ARCHDIR)/console.o \
+$(ARCHDIR)/drivers/net/net.o \
+$(ARCHDIR)/drivers/net/netif.o \
+$(ARCHDIR)/drivers/net/ethernet.o \
+$(ARCHDIR)/drivers/net/arp.o \
+$(ARCHDIR)/drivers/net/ipv4.o \
+$(ARCHDIR)/drivers/net/ipv6.o \
+$(ARCHDIR)/drivers/net/icmp.o \
+$(ARCHDIR)/drivers/net/icmpv6.o \
+$(ARCHDIR)/drivers/net/udp.o \
+$(ARCHDIR)/drivers/net/tcp.o \
+$(ARCHDIR)/drivers/net/dhcp.o \
+$(ARCHDIR)/drivers/net/dns.o \
+$(ARCHDIR)/drivers/net/http.o \
+$(ARCHDIR)/drivers/net/e1000/e1000.o \
+$(ARCHDIR)/watchdog.o \
+kernel/kernel.o \
+kernel/launch_user.o \
+lib/string.o
 
-$(ARCHDIR)/fs/misc/procfs.o \
-$(ARCHDIR)/fs/misc/sysfs.o \
-$(ARCHDIR)/fs/misc/devfs.o \
-$(ARCHDIR)/fs/misc/overlayfs.o \
-$(ARCHDIR)/fs/squashfs.o \
-$(ARCHDIR)/fs/iso9660.o \
-$(ARCHDIR)/fs/partition.o \
-$(ARCHDIR)/fs/ext4/ext4.o \
-$(ARCHDIR)/fs/ext4/ext4_super.o \
-$(ARCHDIR)/fs/ext4/ext4_block.o \
-$(ARCHDIR)/fs/ext4/ext4_inode.o \
-$(ARCHDIR)/fs/ext4/ext4_dir.o \
-$(ARCHDIR)/fs/ext4/ext4_file.o \
-$(ARCHDIR)/fs/ext4/ext4_journal.o \
-$(ARCHDIR)/initrd.o \
-$(ARCHDIR)/ramfs.o \
-$(ARCHDIR)/vfs.o \
-$(ARCHDIR)/elf.o \
-$(ARCHDIR)/evdev.o \
-$(ARCHDIR)/pty.o \
-$(ARCHDIR)/framebuffer.o \
-$(ARCHDIR)/psf.o \
-$(ARCHDIR)/panic.o \
-$(ARCHDIR)/vring.o \
-$(ARCHDIR)/lke.o \
-$(ARCHDIR)/vfl.o \
-$(ARCHDIR)/xz/xz.o \
-$(ARCHDIR)/xz/xz_crc32.o \
-$(ARCHDIR)/xz/xz_dec_lzma2.o \
-$(ARCHDIR)/xz/xz_dec_stream.o \
-$(ARCHDIR)/drivers/sata/ahci.o \
-$(ARCHDIR)/drivers/fb/bga.o \
-$(ARCHDIR)/drivers/fb/vga_modes.o \
-$(ARCHDIR)/syscalls/syscall_process.o \
-$(ARCHDIR)/syscalls/syscall_time.o \
-$(ARCHDIR)/syscalls/syscall_initrd.o \
-$(ARCHDIR)/syscalls/syscall_fb.o \
-$(ARCHDIR)/syscalls/syscall_console.o \
-$(ARCHDIR)/syscalls/syscall_sata.o \
-$(ARCHDIR)/syscalls/syscall_termios.o \
-$(ARCHDIR)/syscalls/syscall_posix.o \
-$(ARCHDIR)/syscalls/syscall_select.o \
-$(ARCHDIR)/syscalls/syscall_vfs.o \
-$(ARCHDIR)/syscalls/syscall_at.o \
-$(ARCHDIR)/syscalls/syscall_signal.o \
-$(ARCHDIR)/syscalls/syscall_ids.o \
-$(ARCHDIR)/syscalls/syscall_misc.o \
-$(ARCHDIR)/syscalls/syscall_epoll.o \
-$(ARCHDIR)/syscalls/syscall_pthread.o \
-$(ARCHDIR)/syscalls/syscall_shm.o \
-$(ARCHDIR)/syscalls/syscall_dl.o \
-$(ARCHDIR)/syscalls/syscall_power.o \
-$(ARCHDIR)/syscalls/syscall_crypto.o \
-$(ARCHDIR)/syscalls/syscall_regex.o: CFLAGS += $(KERNEL_SIZE_CFLAGS)
-
-$(ARCHDIR)/elf.o \
-$(ARCHDIR)/security.o \
-$(ARCHDIR)/syscalls/syscall_epoll.o \
-$(ARCHDIR)/syscalls/syscall_posix.o \
-$(ARCHDIR)/syscalls/syscall_signal.o: CFLAGS += $(KERNEL_TINY_CFLAGS)
+$(KERNEL_SENSITIVE_OBJS): CFLAGS += -Os
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o

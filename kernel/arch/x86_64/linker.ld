@@ -23,7 +23,7 @@ SECTIONS
     } :boot_text
 
     .multiboot.bss ALIGN(4K) : {
-        *(.multiboot.bss)
+        KEEP(*(.multiboot.bss))
     } :boot_bss
 
     . += KERNEL_VMA;
@@ -33,14 +33,14 @@ SECTIONS
     .init.early.text ALIGN(4K) : AT(ADDR(.init.early.text) - KERNEL_VMA) {
         _kernel_text_start = .;
         _kernel_early_init_start = .;
-        *(.init.early.text .init.early.text.*)
+        KEEP(*(.init.early.text .init.early.text.*))
         . = ALIGN(4K);
         _kernel_early_init_end = .;
     } :text
 
     .init.text ALIGN(4K) : AT(ADDR(.init.text) - KERNEL_VMA) {
         _kernel_init_start = .;
-        *(.init.text .init.text.*)
+        KEEP(*(.init.text .init.text.*))
         . = ALIGN(4K);
         _kernel_init_end = .;
     } :text
@@ -51,6 +51,7 @@ SECTIONS
     } :text
 
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA) {
+        KEEP(*(.lke_info))
         *(.rodata .rodata.*)
         _kernel_rodata_end = .;
     } :rodata
@@ -62,7 +63,7 @@ SECTIONS
     .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VMA) {
         *(COMMON)
         *(.bss .bss.*)
-        *(.bootstrap_stack)
+        KEEP(*(.bootstrap_stack))
         _memory_map_start = .;
     } :data
 

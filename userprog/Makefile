@@ -19,7 +19,7 @@ KERNEL_DIR = ../kernel/arch/x86_64
 INITRD_DIR = ../initrd
 SYSROOT_LIB = ../root/lib
 
-CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -Os -fomit-frame-pointer -nostdinc -fdiagnostics-color=always
+CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -Oz -fomit-frame-pointer -nostdinc -fdiagnostics-color=always
 CPPFLAGS = -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic -I$(LIBC_ABS)/include -I$(LIBC_ABS)/src
 
 SO_CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fPIC -O0 -nostdinc -fvisibility=default
@@ -40,7 +40,7 @@ LSH_BUILD := $(LSH_DIR)/build-cross
 LSH_OUTDIR := $(LSH_BUILD)/.build
 HOSTCC ?= gcc
 LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
-LSH_CFLAGS = -Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -Os -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic
+LSH_CFLAGS = -Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -Oz -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic
 LSH_LDFLAGS = -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC_ABS)/user.ld
 
 SYSROOT_BIN = ../root/bin
@@ -70,7 +70,7 @@ stage-lebinstaller: stage-liblebui
 
 lsh.bin: bin/lsh.bin
 
-LSH_SOURCE_FILES := $(shell find $(LSH_DIR) -type f \( -name '*.c' -o -name '*.h' -o -name configure \))
+LSH_SOURCE_FILES := $(shell find $(LSH_DIR) -type f \( -name '*.c' -o -name '*.h' -o -name configure \)) $(lastword $(MAKEFILE_LIST))
 
 bin/lsh.bin: $(LSH_SOURCE_FILES)
 	@mkdir -p $(LSH_BUILD)
