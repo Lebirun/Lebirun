@@ -27,6 +27,7 @@ static volatile uint64_t print_queue_count = 0;
 
 #define KLOG_MAX_ITEMS 8
 #define KLOG_MAX_LEN   128
+#define KLOG_CONSOLE   0x80
 
 typedef struct {
     uint16_t len;
@@ -363,7 +364,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
         klog_dropped++;
         spin_unlock(&klog_ring_lock);
         klog_irqrestore(flags);
-        return (int)len;
+        return -1;
     }
     it = &klog_ring[klog_tail];
     it->level = level;
@@ -534,8 +535,14 @@ int klog_printf(int level, const char *fmt, ...) {
 }
 
 int klog_enqueue_raw(const char *buf, size_t len) {
-    if (!buf || len == 0) return 0;
-    return klog_enqueue(0, buf, (uint64_t)len);
+    int display;
+    int result;
+
+    display = kprint_ready && len < KLOG_MAX_LEN;
+    result = klog_enqueue(display ? KLOG_CONSOLE : 0,
+                          buf, (uint64_t)len);
+    if (kprint_ready && !display) return -1;
+    return result;
 }
 
 int klog_drain_console0(uint64_t max_items) {
@@ -556,7 +563,7 @@ int klog_drain_console0(uint64_t max_items) {
 
     drained = 0;
     while (drained < max_items && klog_dequeue(&it) == 0) {
-        if (!suppress)
+        if (!suppress && (it.level & KLOG_CONSOLE))
             console_write_to_fb_only(0, it.msg, (size_t)it.len);
         drained++;
     }
@@ -1045,6 +1052,8 @@ static void klog_task_main(void) {
 
             drained = 0;
             while (drained < 8 && klog_dequeue(&kit) == 0) {
+                if (kit.level & KLOG_CONSOLE)
+                    kprint_write(0, kit.msg, (size_t)kit.len);
                 drained++;
             }
             did += drained;
@@ -1253,7 +1262,7 @@ void kprint_enable(void) {
     kprint_ready = 1;
 }
 
-void kprint_flush(void) {
+void KERNEL_INIT kprint_flush(void) {
     kprint_item_t it;
     klog_item_t kit;
     uint64_t total;
@@ -1271,6 +1280,8 @@ void kprint_flush(void) {
             total++;
         }
         while (klog_dequeue(&kit) == 0) {
+            if (kit.level & KLOG_CONSOLE)
+                kprint_write(0, kit.msg, (size_t)kit.len);
             total++;
         }
         retries++;

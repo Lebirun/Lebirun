@@ -131,7 +131,7 @@ void KERNEL_INIT e1000_read_mac(e1000_device_t *dev) {
     dev->mac.addr[5] = (word >> 8) & 0xFF;
 }
 
-static void e1000_reset(e1000_device_t *dev) {
+static void KERNEL_INIT e1000_reset(e1000_device_t *dev) {
     uint32_t ctrl;
     volatile int i;
 
@@ -141,14 +141,14 @@ static void e1000_reset(e1000_device_t *dev) {
     while (e1000_read(dev, E1000_CTRL) & E1000_CTRL_RST);
 }
 
-static void e1000_linkup(e1000_device_t *dev) {
+static void KERNEL_INIT e1000_linkup(e1000_device_t *dev) {
     uint32_t ctrl = e1000_read(dev, E1000_CTRL);
     ctrl |= E1000_CTRL_SLU | E1000_CTRL_ASDE;
     ctrl &= ~(E1000_CTRL_ILOS | E1000_CTRL_PHY_RST);
     e1000_write(dev, E1000_CTRL, ctrl);
 }
 
-static int e1000_init_rx(e1000_device_t *dev) {
+static int KERNEL_INIT e1000_init_rx(e1000_device_t *dev) {
     uint64_t rx_ring_phys;
     uint64_t rx_ring_virt;
     uint64_t buf_phys;
@@ -161,6 +161,7 @@ static int e1000_init_rx(e1000_device_t *dev) {
 
     rx_ring_phys = pfa_alloc();
     if (!rx_ring_phys) return -1;
+    dev->allocated_pages++;
 
     rx_ring_virt = (KERNEL_VMA + 0x3D000000ULL);
     vmm_map_page(rx_ring_virt, rx_ring_phys, 0x003);
@@ -174,6 +175,7 @@ static int e1000_init_rx(e1000_device_t *dev) {
         if ((i & 1) == 0) {
             page_phys = pfa_alloc();
             if (!page_phys) return -1;
+            dev->allocated_pages++;
 
             page_virt = (KERNEL_VMA + 0x3D100000ULL) + (i / 2) * PAGE_SIZE;
             vmm_map_page(page_virt, page_phys, 0x003);
@@ -210,7 +212,7 @@ static int e1000_init_rx(e1000_device_t *dev) {
     return 0;
 }
 
-static int e1000_init_tx(e1000_device_t *dev) {
+static int KERNEL_INIT e1000_init_tx(e1000_device_t *dev) {
     uint64_t tx_ring_phys;
     uint64_t tx_ring_virt;
     uint64_t buf_phys;
@@ -225,6 +227,7 @@ static int e1000_init_tx(e1000_device_t *dev) {
 
     tx_ring_phys = pfa_alloc();
     if (!tx_ring_phys) return -1;
+    dev->allocated_pages++;
 
     tx_ring_virt = (KERNEL_VMA + 0x3D200000ULL);
     vmm_map_page(tx_ring_virt, tx_ring_phys, 0x003);
@@ -239,6 +242,7 @@ static int e1000_init_tx(e1000_device_t *dev) {
             if ((i & 1) == 0) {
                 tx_page_phys = pfa_alloc();
                 if (!tx_page_phys) return -1;
+                dev->allocated_pages++;
                 tx_page_virt = (KERNEL_VMA + 0x3D300000ULL) + (i / 2) * PAGE_SIZE;
                 vmm_map_page(tx_page_virt, tx_page_phys, 0x003);
                 memset((void *)tx_page_virt, 0, PAGE_SIZE);
@@ -478,13 +482,7 @@ e1000_device_t *e1000_get_device(void) {
 }
 
 uint64_t e1000_get_allocated_pages(void) {
-    uint64_t rx_pages;
-    uint64_t tx_pages;
-
-    if (!g_e1000_dev.initialized) return 0;
-    rx_pages = (E1000_NUM_RX_DESC + 1) / 2;
-    tx_pages = (E1000_TX_BUFFER_DESC + 1) / 2;
-    return 2 + rx_pages + tx_pages;
+    return g_e1000_dev.allocated_pages;
 }
 
 void e1000_print_status(e1000_device_t *dev) {

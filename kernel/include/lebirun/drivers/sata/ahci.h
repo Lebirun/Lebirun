@@ -427,6 +427,7 @@ int ahci_identify(ahci_port_t *port);
 int ahci_flush(ahci_port_t *port);
 ahci_controller_t *ahci_get_controller(void);
 ahci_port_t *ahci_get_port(uint64_t index);
+uint64_t ahci_get_allocated_pages(void);
 void ahci_debug_info(void);
 int ahci_test_rw(void);
 

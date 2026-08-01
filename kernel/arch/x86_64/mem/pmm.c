@@ -1,5 +1,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/pit.h>
+#include <lebirun/vring.h>
 #include <string.h>
 
 extern uint64_t total_pages_managed;
@@ -17,6 +19,7 @@ static volatile int pfa_lock = 0;
 static uint64_t last_alloc_hint = 0;
 
 static volatile uint64_t pfa_cached_free = 0;
+static uint64_t kernel_reclaimed_pages = 0;
 
 static uint64_t pfa_refcount_entries = 0;
 
@@ -387,6 +390,9 @@ static void pfa_reclaim_kernel_range_internal(uint64_t phys_start,
     uint64_t end_frame;
     uint64_t f;
     uint64_t count;
+    uint64_t us;
+    uint32_t secs;
+    uint32_t frac;
 
     phys_start = (phys_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     phys_end = phys_end & ~(PAGE_SIZE - 1);
@@ -404,11 +410,16 @@ static void pfa_reclaim_kernel_range_internal(uint64_t phys_start,
         }
     }
     __sync_fetch_and_add(&pfa_cached_free, count);
+    kernel_reclaimed_pages += count;
     pfa_lock_release(eflags);
 
     if (report) {
-        printf("PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
-               count, count * 4, phys_start, phys_end);
+        us = pit_get_uptime_us();
+        secs = (uint32_t)(us / 1000000);
+        frac = (uint32_t)(us % 1000000);
+        klog_printf(0,
+                    "[%5u.%06u] PFA: Reclaimed %u kernel pages (%u KB) from 0x%08X-0x%08X\n",
+                    secs, frac, count, count * 4, phys_start, phys_end);
     }
 }
 
@@ -494,6 +505,10 @@ uint64_t pfa_get_kernel_binary_kb(void) {
 
 uint64_t pfa_get_bitmap_kb(void) {
     return bitmap_alloc_kb + bitmap_leaf_pages * (PAGE_SIZE / 1024);
+}
+
+uint64_t pfa_get_kernel_reclaimed_pages(void) {
+    return kernel_reclaimed_pages;
 }
 
 void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb) {

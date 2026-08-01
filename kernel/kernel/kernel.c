@@ -47,7 +47,6 @@ extern uint64_t boot_pml4[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_low[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_high[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pd_0[512] __attribute__((aligned(4096)));
-extern uint64_t boot_pd_1[512] __attribute__((aligned(4096)));
 
 extern uint32_t multiboot_magic;
 extern uint64_t multiboot_ptr;
@@ -92,7 +91,15 @@ static void kernel_reclaim_init_memory(void) {
     kernel_reclaim_memory(_kernel_init_start, _kernel_init_end, 1, 1);
 }
 
-void kernel_main(void) {
+static void kernel_reclaim_boot_stack_memory(void) {
+    extern uint8_t _kernel_boot_stack_start[];
+    extern uint8_t _kernel_boot_stack_end[];
+
+    kernel_reclaim_memory(_kernel_boot_stack_start,
+                          _kernel_boot_stack_end, 1, 0);
+}
+
+static void KERNEL_INIT kernel_boot(void) {
     uint64_t mb_phys;
     uint64_t mb_page;
     struct multiboot2_tag *tag;
@@ -100,8 +107,8 @@ void kernel_main(void) {
     uint32_t mb2_total_size;
     uint64_t mb_end_page;
     uint64_t pg;
-    extern uint8_t unifont_psf_start[] __attribute__((weak));
-    extern uint8_t unifont_psf_end[] __attribute__((weak));
+    extern uint8_t unifont_glyphs_start[] __attribute__((weak));
+    extern uint8_t unifont_glyphs_end[] __attribute__((weak));
     uintptr_t u_start;
     uintptr_t u_end;
     size_t unifont_size;
@@ -198,13 +205,14 @@ void kernel_main(void) {
     }
 #endif
 
-    u_start = (uintptr_t)unifont_psf_start;
-    u_end = (uintptr_t)unifont_psf_end;
+    u_start = (uintptr_t)unifont_glyphs_start;
+    u_end = (uintptr_t)unifont_glyphs_end;
     unifont_size = 0;
     font_loaded = 0;
     if (u_end > u_start) unifont_size = (size_t)(u_end - u_start);
     if (!cmdline_get_text_mode() && fb_get()->addr && unifont_size > 0) {
-        font_loaded = terminal_load_psf_font(unifont_psf_start, unifont_size) == 0;
+        font_loaded = terminal_load_embedded_font(unifont_glyphs_start,
+                                                  unifont_size) == 0;
         if (font_loaded) {
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
             if (virtio_gpu_is_available()) virtio_gpu_flush();
@@ -590,6 +598,7 @@ void kernel_main(void) {
 
     smp_enable_scheduling();
     asm volatile ("sti");
+    pt_reclaim_low_identity();
     if (vring_boot_enabled) {
         kprint_enable();
         watchdog_init();
@@ -605,9 +614,6 @@ void kernel_main(void) {
     console_writer_flush();
     kprint_flush();
     klog_reclaim_unused();
-    kernel_reclaim_init_memory();
-    heap_reclaim_unused();
-
     {
         const char *init_candidates[4];
         int ci;
@@ -638,17 +644,51 @@ void kernel_main(void) {
     }
     watchdog_set_init_pid((int)init_task->pid);
 
+}
+
+static void kernel_idle_loop(void) {
+    extern void watchdog_kick(void);
+
+    while (1) {
+        watchdog_kick();
+        task_deferred_work();
+        console_process_pending();
+        asm volatile ("hlt");
+    }
+}
+
+static void kernel_runtime(void) {
+    asm volatile ("sti");
+    kernel_reclaim_init_memory();
+    kernel_reclaim_boot_stack_memory();
+    heap_reclaim_unused();
+
     sleep_ticks(50);
 
     yield();
 
-    {
-        extern void watchdog_kick(void);
-        while (1) {
-            watchdog_kick();
-            task_deferred_work();
-            console_process_pending();
-            asm volatile ("hlt");
-        }
+    kernel_idle_loop();
+}
+
+void kernel_main(void) {
+    uint8_t *runtime_stack;
+    extern void kernel_switch_stack(uint64_t stack_top, void (*entry)(void));
+
+    kernel_boot();
+    runtime_stack = kstack_alloc();
+    if (!runtime_stack) {
+        kernel_reclaim_init_memory();
+        heap_reclaim_unused();
+        sleep_ticks(50);
+        yield();
+        kernel_idle_loop();
     }
+    current_task->kernel_stack_base = runtime_stack;
+    current_task->kernel_stack_size = KSTACK_USABLE_SIZE;
+    current_task->regs.rsp = (uint64_t)runtime_stack + KSTACK_RUNTIME_SIZE;
+    tss_set_rsp0((uint64_t)runtime_stack + KSTACK_RUNTIME_SIZE);
+    kernel_switch_stack((uint64_t)runtime_stack + KSTACK_RUNTIME_SIZE,
+                        kernel_runtime);
+
+    kernel_idle_loop();
 }

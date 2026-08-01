@@ -41,6 +41,9 @@ SECTIONS
     .init.text ALIGN(4K) : AT(ADDR(.init.text) - KERNEL_VMA) {
         _kernel_init_start = .;
         KEEP(*(.init.text .init.text.*))
+        KEEP(kernel/launch_user.o(.text .text.* .rodata .rodata.*))
+        KEEP(kernel/kernel.o(.rodata.str1.1))
+        KEEP(*(.rodata.kernel_boot .rodata.kernel_boot.*))
         . = ALIGN(4K);
         _kernel_init_end = .;
     } :text
@@ -52,6 +55,7 @@ SECTIONS
 
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA) {
         KEEP(*(.lke_info))
+        KEEP(*(.rodata.font))
         *(.rodata .rodata.*)
         _kernel_rodata_end = .;
     } :rodata
@@ -63,7 +67,13 @@ SECTIONS
     .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VMA) {
         *(COMMON)
         *(.bss .bss.*)
+    } :data
+
+    .bootstrap_stack ALIGN(4K) : AT(ADDR(.bootstrap_stack) - KERNEL_VMA) {
+        _kernel_boot_stack_start = .;
         KEEP(*(.bootstrap_stack))
+        . = ALIGN(4K);
+        _kernel_boot_stack_end = .;
         _memory_map_start = .;
     } :data
 
@@ -76,5 +86,7 @@ SECTIONS
         *(.note.*)
         *(.eh_frame)
         *(.eh_frame_hdr)
+        *(.init)
+        *(.fini)
     }
 }

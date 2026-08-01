@@ -178,6 +178,9 @@ typedef struct {
     uint64_t current_pd_pages;
     uint64_t current_user_pt_pages;
     uint64_t dead_user_pages;
+    uint64_t dead_heap_pages;
+    uint64_t dead_mmap_pages;
+    uint64_t dead_file_pages;
     uint64_t dead_stack_pages;
     uint64_t dead_pd_pages;
     uint64_t dead_user_pt_pages;

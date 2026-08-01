@@ -3,9 +3,10 @@
 #include <lebirun/smp.h>
 #include <string.h>
 
-#define SLAB_REGION_START 0xFFFFFFFFD4000000ULL
-#define SLAB_REGION_SIZE  0x00400000ULL
-#define SLAB_REGION_MAX_PAGES (SLAB_REGION_SIZE / PAGE_SIZE)
+#define SLAB_PRIMARY_START  0xFFFFFFFFD8000000ULL
+#define SLAB_PRIMARY_SIZE   0x00100000ULL
+#define SLAB_OVERFLOW_START 0xFFFFFFFFD4000000ULL
+#define SLAB_OVERFLOW_SIZE  0x00400000ULL
 #define SLAB_SIZES_COUNT 2
 #define SLAB_BITMAP_WORDS 2
 
@@ -37,8 +38,10 @@ static slab_cache_t slab_caches[SLAB_SIZES_COUNT];
 static int slab_initialized = 0;
 static volatile int slab_lock = 0;
 
-static uint64_t slab_virt_bump = SLAB_REGION_START;
-static uint64_t slab_virt_scan = SLAB_REGION_START;
+static uint64_t slab_primary_bump = SLAB_PRIMARY_START;
+static uint64_t slab_primary_scan = SLAB_PRIMARY_START;
+static uint64_t slab_overflow_bump = SLAB_OVERFLOW_START;
+static uint64_t slab_overflow_scan = SLAB_OVERFLOW_START;
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
     uint64_t eflags;
@@ -150,20 +153,20 @@ static void slab_page_init(slab_page_t *page, uint64_t obj_size) {
     }
 }
 
-static uint64_t slab_virt_alloc(void) {
+static int slab_region_contains(uint64_t virt, uint64_t start, uint64_t size) {
+    return virt >= start && virt < start + size;
+}
+
+static uint64_t slab_scan_region(uint64_t start, uint64_t size,
+                                 uint64_t *scan) {
     uint64_t v;
     uint64_t i;
 
-    if (slab_virt_bump < SLAB_REGION_START + SLAB_REGION_SIZE) {
-        v = slab_virt_bump;
-        slab_virt_bump += PAGE_SIZE;
-        return v;
-    }
-    for (i = 0; i < SLAB_REGION_MAX_PAGES; i++) {
-        v = slab_virt_scan;
-        slab_virt_scan += PAGE_SIZE;
-        if (slab_virt_scan >= SLAB_REGION_START + SLAB_REGION_SIZE) {
-            slab_virt_scan = SLAB_REGION_START;
+    for (i = 0; i < size / PAGE_SIZE; i++) {
+        v = *scan;
+        *scan += PAGE_SIZE;
+        if (*scan >= start + size) {
+            *scan = start;
         }
         if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), v)) {
             if (smp_tlb_flush_all_sync() == 0 &&
@@ -175,6 +178,26 @@ static uint64_t slab_virt_alloc(void) {
     return 0;
 }
 
+static uint64_t slab_virt_alloc(void) {
+    uint64_t v;
+
+    if (slab_primary_bump < SLAB_PRIMARY_START + SLAB_PRIMARY_SIZE) {
+        v = slab_primary_bump;
+        slab_primary_bump += PAGE_SIZE;
+        return v;
+    }
+    if (slab_overflow_bump < SLAB_OVERFLOW_START + SLAB_OVERFLOW_SIZE) {
+        v = slab_overflow_bump;
+        slab_overflow_bump += PAGE_SIZE;
+        return v;
+    }
+    v = slab_scan_region(SLAB_PRIMARY_START, SLAB_PRIMARY_SIZE,
+                         &slab_primary_scan);
+    if (v) return v;
+    return slab_scan_region(SLAB_OVERFLOW_START, SLAB_OVERFLOW_SIZE,
+                            &slab_overflow_scan);
+}
+
 static uint64_t slab_virt_to_phys(uint64_t virt) {
     return vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), virt);
 }
@@ -183,7 +206,8 @@ static int slab_page_mapped(slab_page_t *page) {
     uint64_t virt;
 
     virt = (uint64_t)page;
-    if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
+    if (!slab_region_contains(virt, SLAB_PRIMARY_START, SLAB_PRIMARY_SIZE) &&
+        !slab_region_contains(virt, SLAB_OVERFLOW_START, SLAB_OVERFLOW_SIZE)) return 0;
     return slab_virt_to_phys(virt) != 0;
 }
 
@@ -447,7 +471,8 @@ int slab_owns(void *ptr) {
     if (!ptr || !slab_initialized) return 0;
     
     virt = (uint64_t)ptr;
-    if (virt < SLAB_REGION_START || virt >= SLAB_REGION_START + SLAB_REGION_SIZE) return 0;
+    if (!slab_region_contains(virt, SLAB_PRIMARY_START, SLAB_PRIMARY_SIZE) &&
+        !slab_region_contains(virt, SLAB_OVERFLOW_START, SLAB_OVERFLOW_SIZE)) return 0;
     
     page = (slab_page_t *)((uint64_t)ptr & ~(PAGE_SIZE - 1));
     if (!slab_page_mapped(page)) return 0;

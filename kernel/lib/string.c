@@ -499,6 +499,7 @@ int printf(const char* format, ...) {
 	uint64_t us;
 	uint32_t secs;
 	uint32_t frac;
+	int queued;
 
 	if (!format) return -1;
 	va_start(ap, format);
@@ -519,8 +520,9 @@ int printf(const char* format, ...) {
 		}
 	}
 
-	kprint(buf, (size_t)len);
-	klog_enqueue_raw(buf, (size_t)len);
+	queued = klog_enqueue_raw(buf, (size_t)len);
+	if (!kprint_is_ready() || queued < 0)
+		kprint(buf, (size_t)len);
 	kprint_at_line_start = (len > 0 && buf[len - 1] == '\n') ? 1 : 0;
 	return len;
 }

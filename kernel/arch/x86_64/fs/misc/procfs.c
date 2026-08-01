@@ -4,6 +4,7 @@
 #include <lebirun/about.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/drivers/net/e1000/e1000.h>
+#include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/rtc.h>
 #include <lebirun/vring.h>
 #include <lebirun/overlayfs.h>
@@ -943,6 +944,11 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t pfa_used_kb;
     uint64_t kern_kb;
     uint64_t bitmap_kb;
+    uint64_t mem_all_used_kb;
+    uint64_t free_pages_kb;
+    uint64_t kernel_reclaimed_pages;
+    uint64_t demand_bitmap_bytes;
+    uint64_t demand_bitmap_extension_pages;
     uint64_t heap_committed;
     uint64_t heap_reserved;
     uint64_t heap_used;
@@ -969,6 +975,7 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t sqfs_decomp_failures;
     uint64_t sqfs_decomp_oversize;
     uint64_t sqfs_decomp_padded;
+    uint64_t sqfs_module_pages;
     uint64_t ref_active_nodes;
     uint64_t ref_free_nodes;
     uint64_t early_heap_total_kb;
@@ -997,11 +1004,19 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     pfa_used_kb = pfa_get_kernel_used_kb();
     kern_kb = pfa_get_kernel_binary_kb();
     bitmap_kb = pfa_get_bitmap_kb();
+    free_pages_kb = pfa_count_free() * 4;
+    if (pfa_get_total_ram_kb() > free_pages_kb)
+        mem_all_used_kb = pfa_get_total_ram_kb() - free_pages_kb;
+    else
+        mem_all_used_kb = 0;
+    kernel_reclaimed_pages = pfa_get_kernel_reclaimed_pages();
     early_heap_total_kb = heap_get_early_total() / 1024;
     early_heap_used_kb = heap_get_early_used() / 1024;
 
     heap_committed = demand_get_committed_pages();
     heap_reserved = demand_get_reserved_pages();
+    demand_bitmap_bytes = demand_get_bitmap_bytes();
+    demand_bitmap_extension_pages = demand_get_bitmap_extension_pages();
     heap_used = kernel_heap.used_size;
     heap_total = kernel_heap.total_size;
 
@@ -1009,7 +1024,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
 
     e1000_pages = e1000_get_allocated_pages();
 
-    ahci_pages = 3;
+    ahci_pages = ahci_get_allocated_pages();
+    sqfs_module_pages = squashfs_get_module_pages();
 
     pt_pt_pages = 0;
     pt_heap_pt = 0;
@@ -1025,27 +1041,31 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     user_pd_pages = task_stats.active_pd_pages;
     active_elf_pages = 0;
     current_elf_pages = 0;
-    dead_elf_pages = 0;
+    dead_elf_pages = task_stats.dead_file_pages;
     active_elf_pages = task_stats.active_file_pages;
     current_elf_pages = task_stats.current_file_pages;
-    if (task_stats.dead_user_pages >= task_stats.dead_stack_pages)
-        dead_elf_pages = task_stats.dead_user_pages - task_stats.dead_stack_pages;
     spin_unlock(&proc_mem_report_lock);
 
     buf = (char *)kmalloc(PROC_MEMDETAIL_BUF_SIZE);
     if (!buf) return 0;
 
     len = snprintf(buf, PROC_MEMDETAIL_BUF_SIZE,
-        "PFA_AllocatedKB:    %8lu\n"
-        "KernelBinaryKB:     %8lu\n"
+        "MemAllUsedKB:       %8lu\n"
+        "PFANetAllocatedKB:  %8lu\n"
+        "KernelImageKB:      %8lu\n"
+        "KernelReclaimedPages:%7lu\n"
+        "KernelReclaimedKB:  %8lu\n"
         "BitmapKB:           %8lu\n"
+        "DemandBitmapBytes:  %8lu\n"
+        "DemandBitmapExtPages:%6lu\n"
+        "DemandBitmapExtKB:  %8lu\n"
         "EarlyHeapTotalKB:   %8lu\n"
         "EarlyHeapUsedKB:    %8lu\n"
         "HeapCommitPages:    %8lu\n"
         "HeapCommitKB:       %8lu\n"
         "HeapReservePages:   %8lu\n"
-        "HeapUsedBytes:      %8lu\n"
-        "HeapTotalBytes:     %8lu\n"
+        "HeapAllocatedBytes: %8lu\n"
+        "HeapVirtualSpanBytes:%7lu\n"
         "TaskCount:          %8lu\n"
         "TaskStructBytes:    %8lu\n"
         "TaskFPUBytes:       %8lu\n"
@@ -1094,6 +1114,10 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "DeadUserKB:         %8lu\n"
         "DeadELFPages:       %8lu\n"
         "DeadELFKB:          %8lu\n"
+        "DeadHeapPages:      %8lu\n"
+        "DeadHeapKB:         %8lu\n"
+        "DeadMmapPages:      %8lu\n"
+        "DeadMmapKB:         %8lu\n"
         "DeadStackPages:     %8lu\n"
         "DeadStackKB:        %8lu\n"
         "DeadPDPages:        %8lu\n"
@@ -1118,6 +1142,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "SquashCacheCap:     %8lu\n"
         "SquashCacheBytes:   %8lu\n"
         "SquashCacheData:    %8lu\n"
+        "SquashModulePages:  %8lu\n"
+        "SquashModuleKB:     %8lu\n"
         "SquashDecompFail:   %8lu\n"
         "SquashDecompOver:   %8lu\n"
         "SquashDecompPadded: %8lu\n"
@@ -1125,9 +1151,15 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         "ConsoleBytes:       %8lu\n"
         "PFARefActiveNodes:  %8lu\n"
         "PFARefFreeNodes:    %8lu\n",
+        mem_all_used_kb,
         pfa_used_kb,
         kern_kb,
+        kernel_reclaimed_pages,
+        kernel_reclaimed_pages * 4,
         bitmap_kb,
+        demand_bitmap_bytes,
+        demand_bitmap_extension_pages,
+        demand_bitmap_extension_pages * 4,
         early_heap_total_kb,
         early_heap_used_kb,
         heap_committed,
@@ -1183,6 +1215,10 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         task_stats.dead_user_pages * 4,
         dead_elf_pages,
         dead_elf_pages * 4,
+        task_stats.dead_heap_pages,
+        task_stats.dead_heap_pages * 4,
+        task_stats.dead_mmap_pages,
+        task_stats.dead_mmap_pages * 4,
         task_stats.dead_stack_pages,
         task_stats.dead_stack_pages * 4,
         task_stats.dead_pd_pages,
@@ -1207,6 +1243,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
         sqfs_capacity,
         sqfs_bytes,
         sqfs_data_bytes,
+        sqfs_module_pages,
+        sqfs_module_pages * 4,
         sqfs_decomp_failures,
         sqfs_decomp_oversize,
         sqfs_decomp_padded,

@@ -462,7 +462,7 @@ static int iso_unmount(vfs_node_t *mountpoint) {
     return 0;
 }
 
-void iso9660_vfs_register(void) {
+void KERNEL_INIT iso9660_vfs_register(void) {
     iso_fs_type.name = "iso9660";
     iso_fs_type.mount = iso_mount;
     iso_fs_type.unmount = iso_unmount;

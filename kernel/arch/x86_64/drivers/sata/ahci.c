@@ -11,7 +11,7 @@
 static ahci_controller_t g_ahci_controller;
 static uint8_t ahci_port_map[AHCI_MAX_PORTS];
 
-static uint64_t ahci_required_port_capacity(uint64_t ports_impl) {
+static uint64_t KERNEL_INIT ahci_required_port_capacity(uint64_t ports_impl) {
     uint64_t i;
     uint64_t capacity;
 
@@ -126,7 +126,7 @@ static void ahci_wait_delay(void) {
     }
 }
 
-static ahci_dev_type_t ahci_check_type(ahci_port_t *port) {
+static ahci_dev_type_t KERNEL_INIT ahci_check_type(ahci_port_t *port) {
     uint64_t ssts = ahci_port_read(port, AHCI_PxSSTS);
     uint8_t ipm = (ssts >> AHCI_PxSSTS_IPM_SHIFT) & 0x0F;
     uint8_t det = ssts & AHCI_PxSSTS_DET_MASK;
@@ -788,6 +788,10 @@ int ahci_flush(ahci_port_t *port) {
 
 ahci_controller_t *ahci_get_controller(void) {
     return &g_ahci_controller;
+}
+
+uint64_t ahci_get_allocated_pages(void) {
+    return g_ahci_controller.num_ports;
 }
 
 ahci_port_t *ahci_get_port(uint64_t index) {

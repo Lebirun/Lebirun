@@ -348,7 +348,7 @@ if [ -d "root" ]; then
     progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Building SquashFS rootfs"
     if command -v mksquashfs >/dev/null 2>&1; then
       rm -f rootfs.squashfs
-      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -all-root -comp xz -b 65536 -no-xattrs -noappend -quiet -no-progress \
+      run_cmd "Building SquashFS" mksquashfs root rootfs.squashfs -all-root -comp xz -b 131072 -Xbcj x86 -no-xattrs -no-exports -noappend -quiet -no-progress \
         -e usr/include/c++ usr/lib/libstdc++.a usr/lib/libsupc++.a usr/lib/libgcc.a
     else
       cleanup_bar

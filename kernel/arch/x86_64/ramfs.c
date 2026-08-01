@@ -1675,7 +1675,7 @@ static vfs_node_t *ramfs_vfs_do_mount(const char *device, const char *mountpoint
 
 static vfs_fs_type_t ramfs_fs_type;
 
-void ramfs_vfs_register(void) {
+void KERNEL_INIT ramfs_vfs_register(void) {
     ramfs_fs_type.name = "ramfs";
     ramfs_fs_type.mount = ramfs_vfs_do_mount;
     ramfs_fs_type.unmount = NULL;
@@ -1740,7 +1740,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
 
 static vfs_fs_type_t tmpfs_fs_type;
 
-void tmpfs_vfs_register(void) {
+void KERNEL_INIT tmpfs_vfs_register(void) {
     tmpfs_fs_type.name = "tmpfs";
     tmpfs_fs_type.mount = tmpfs_vfs_do_mount;
     tmpfs_fs_type.unmount = NULL;

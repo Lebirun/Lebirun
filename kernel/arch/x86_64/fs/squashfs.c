@@ -9,6 +9,7 @@
 #include <stdio.h>
 
 static squashfs_context_t squashfs_ctx;
+static uint64_t squashfs_module_pages;
 static int squashfs_initialized = 0;
 static vfs_node_t *squashfs_vfs_root = NULL;
 static vfs_fs_type_t squashfs_fs_type;
@@ -1499,7 +1500,7 @@ static vfs_node_t *squashfs_vfs_do_mount(const char *device, const char *mountpo
     return squashfs_vfs_root;
 }
 
-void squashfs_init(uint64_t mod_start, uint64_t mod_end) {
+void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     uint64_t mod_size;
     uint64_t start_page;
     uint64_t end_page;
@@ -1510,6 +1511,9 @@ void squashfs_init(uint64_t mod_start, uint64_t mod_end) {
 
     mutex_init(&squashfs_lock);
     mod_size = mod_end - mod_start;
+    start_page = mod_start & ~0xFFF;
+    end_page = (mod_end + 0xFFF) & ~0xFFF;
+    squashfs_module_pages = (end_page - start_page) / PAGE_SIZE;
     printf("SQUASHFS: Initializing from phys 0x%016lX - 0x%016lX (%lu bytes)\n", 
            mod_start, mod_end, mod_size);
     
@@ -1518,8 +1522,6 @@ void squashfs_init(uint64_t mod_start, uint64_t mod_end) {
         return;
     }
     
-    start_page = mod_start & ~0xFFF;
-    end_page = (mod_end + 0xFFF) & ~0xFFF;
     for (phys = start_page; phys < end_page; phys += 0x1000) {
         virt = phys + KERNEL_VMA;
         vmm_map_page(virt, phys, 0x003);
@@ -1568,7 +1570,11 @@ void squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     printf("SQUASHFS: Initialized successfully\n");
 }
 
-void squashfs_vfs_register(void) {
+uint64_t squashfs_get_module_pages(void) {
+    return squashfs_module_pages;
+}
+
+void KERNEL_INIT squashfs_vfs_register(void) {
     squashfs_fs_type.name = "squashfs";
     squashfs_fs_type.mount = squashfs_vfs_do_mount;
     squashfs_fs_type.unmount = NULL;

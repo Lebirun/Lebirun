@@ -170,6 +170,7 @@ typedef struct {
     uint32_t bytes_tx;
     uint32_t errors_rx;
     uint32_t errors_tx;
+    uint64_t allocated_pages;
     netif_t *netif;
 } e1000_device_t;
 

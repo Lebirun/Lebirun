@@ -3,6 +3,7 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/mutex.h>
+#include <lebirun/common.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -1019,7 +1020,7 @@ int overlayfs_init(void) {
     return 0;
 }
 
-void overlayfs_vfs_register(void) {
+void KERNEL_INIT overlayfs_vfs_register(void) {
     overlay_fs_type.name = "overlay";
     overlay_fs_type.mount = overlay_vfs_do_mount;
     overlay_fs_type.unmount = NULL;

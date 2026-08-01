@@ -6,7 +6,14 @@
 static uint64_t demand_base = 0;
 static uint64_t demand_max_pages = 0;
 static uint64_t demand_reserved_end = 0;
-static uint8_t demand_committed_bitmap[HEAP_MAX_SIZE_CAP / PAGE_SIZE / 8];
+#define DEMAND_INLINE_HEAP_SIZE 0x00200000
+#define DEMAND_INLINE_PAGES (DEMAND_INLINE_HEAP_SIZE / PAGE_SIZE)
+static uint8_t demand_committed_bitmap[DEMAND_INLINE_PAGES / 8];
+#define DEMAND_EXTENSION_BITS (PAGE_SIZE * 8)
+#define DEMAND_EXTENSION_COUNT \
+    (((HEAP_MAX_SIZE_CAP / PAGE_SIZE) - DEMAND_INLINE_PAGES + \
+      DEMAND_EXTENSION_BITS - 1) / DEMAND_EXTENSION_BITS)
+static uint8_t *demand_committed_extensions[DEMAND_EXTENSION_COUNT];
 static int demand_initialized = 0;
 static volatile int demand_lock = 0;
 
@@ -41,30 +48,80 @@ static uint64_t demand_page_index(uint64_t page_virt) {
     return (page_virt - demand_base) / PAGE_SIZE;
 }
 
+static uint8_t *demand_bitmap_byte(uint64_t page_idx) {
+    uint64_t extension_idx;
+    uint64_t extension_bit;
+
+    if (page_idx < DEMAND_INLINE_PAGES)
+        return &demand_committed_bitmap[page_idx / 8];
+    page_idx -= DEMAND_INLINE_PAGES;
+    extension_idx = page_idx / DEMAND_EXTENSION_BITS;
+    extension_bit = page_idx % DEMAND_EXTENSION_BITS;
+    if (extension_idx >= DEMAND_EXTENSION_COUNT) return NULL;
+    if (!demand_committed_extensions[extension_idx]) return NULL;
+    return &demand_committed_extensions[extension_idx][extension_bit / 8];
+}
+
+static int demand_ensure_bitmap_capacity(uint64_t page_count) {
+    uint64_t extension_count;
+    uint64_t extension_idx;
+    uint64_t phys;
+
+    if (page_count <= DEMAND_INLINE_PAGES) return 0;
+    extension_count = (page_count - DEMAND_INLINE_PAGES +
+                       DEMAND_EXTENSION_BITS - 1) /
+                      DEMAND_EXTENSION_BITS;
+    if (extension_count > DEMAND_EXTENSION_COUNT) return -1;
+    for (extension_idx = 0; extension_idx < extension_count;
+         extension_idx++) {
+        if (demand_committed_extensions[extension_idx]) continue;
+        phys = (uint64_t)pmm_alloc_low_page();
+        if (!phys) phys = (uint64_t)pmm_alloc_page();
+        if (!phys) return -1;
+        if (pt_ensure_phys_mapped(phys) < 0) {
+            pfa_free(phys);
+            return -1;
+        }
+        pmm_zero_page_phys(phys);
+        demand_committed_extensions[extension_idx] =
+            (uint8_t *)(phys + KERNEL_VMA);
+    }
+    return 0;
+}
+
 static int demand_test_committed(uint64_t page_idx) {
-    return (demand_committed_bitmap[page_idx / 8] &
-            (1u << (page_idx % 8))) != 0;
+    uint8_t *bitmap_byte;
+
+    bitmap_byte = demand_bitmap_byte(page_idx);
+    if (!bitmap_byte) return 0;
+    return (*bitmap_byte & (1u << (page_idx % 8))) != 0;
 }
 
 static void demand_set_committed(uint64_t page_idx) {
-    demand_committed_bitmap[page_idx / 8] |=
-        (uint8_t)(1u << (page_idx % 8));
+    uint8_t *bitmap_byte;
+
+    bitmap_byte = demand_bitmap_byte(page_idx);
+    if (!bitmap_byte) return;
+    *bitmap_byte |= (uint8_t)(1u << (page_idx % 8));
 }
 
 static void demand_clear_committed(uint64_t page_idx) {
-    demand_committed_bitmap[page_idx / 8] &=
-        (uint8_t)~(1u << (page_idx % 8));
+    uint8_t *bitmap_byte;
+
+    bitmap_byte = demand_bitmap_byte(page_idx);
+    if (!bitmap_byte) return;
+    *bitmap_byte &= (uint8_t)~(1u << (page_idx % 8));
 }
 
 void KERNEL_EARLY_INIT demand_paging_init(void) {
     uint64_t heap_max_size;
-    uint64_t bitmap_bytes;
 
     demand_base = HEAP_START;
     heap_max_size = kernel_heap.max_addr - kernel_heap.start_addr;
     demand_max_pages = heap_max_size / PAGE_SIZE;
-    bitmap_bytes = (demand_max_pages + 7) / 8;
-    memset(demand_committed_bitmap, 0, bitmap_bytes);
+    memset(demand_committed_bitmap, 0, sizeof(demand_committed_bitmap));
+    memset(demand_committed_extensions, 0,
+           sizeof(demand_committed_extensions));
     demand_reserved_end = demand_base;
     demand_initialized = 1;
     printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n",
@@ -75,6 +132,7 @@ int demand_reserve_range(uint64_t virt_start, uint64_t size) {
     uint64_t eflags;
     uint64_t end;
     uint64_t limit;
+    uint64_t page_count;
     
     if (!demand_initialized) return -1;
     
@@ -88,6 +146,11 @@ int demand_reserve_range(uint64_t virt_start, uint64_t size) {
     if (end > limit) return -1;
     demand_lock_acquire(&eflags);
     if (virt_start > demand_reserved_end) {
+        demand_lock_release(eflags);
+        return -1;
+    }
+    page_count = (end - demand_base) / PAGE_SIZE;
+    if (demand_ensure_bitmap_capacity(page_count) < 0) {
         demand_lock_release(eflags);
         return -1;
     }
@@ -166,6 +229,10 @@ void demand_mark_committed(uint64_t virt_addr) {
     if (page_virt >= demand_base + demand_max_pages * PAGE_SIZE) return;
     page_idx = demand_page_index(page_virt);
     demand_lock_acquire(&eflags);
+    if (demand_ensure_bitmap_capacity(page_idx + 1) < 0) {
+        demand_lock_release(eflags);
+        return;
+    }
     if (page_virt + PAGE_SIZE > demand_reserved_end)
         demand_reserved_end = page_virt + PAGE_SIZE;
     demand_set_committed(page_idx);
@@ -295,7 +362,10 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
             continue;
         }
         pte = *pte_ptr;
-        if (!(pte & ~0xFFFULL)) continue;
+        if (!(pte & ~0xFFFULL)) {
+            demand_clear_committed(page_idx);
+            continue;
+        }
         if (flush_result < 0) {
             if (!(pte & 1) && (pte & ~0xFFFULL)) *pte_ptr = pte | 1ULL;
             continue;
@@ -309,6 +379,30 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
         demand_reserved_end = start;
     demand_lock_release(eflags);
     return flush_result;
+}
+
+uint64_t demand_get_bitmap_bytes(void) {
+    uint64_t bytes;
+    uint64_t extension_idx;
+
+    bytes = sizeof(demand_committed_bitmap);
+    for (extension_idx = 0; extension_idx < DEMAND_EXTENSION_COUNT;
+         extension_idx++) {
+        if (demand_committed_extensions[extension_idx]) bytes += PAGE_SIZE;
+    }
+    return bytes;
+}
+
+uint64_t demand_get_bitmap_extension_pages(void) {
+    uint64_t pages;
+    uint64_t extension_idx;
+
+    pages = 0;
+    for (extension_idx = 0; extension_idx < DEMAND_EXTENSION_COUNT;
+         extension_idx++) {
+        if (demand_committed_extensions[extension_idx]) pages++;
+    }
+    return pages;
 }
 
 int demand_decommit_page(uint64_t virt_addr) {

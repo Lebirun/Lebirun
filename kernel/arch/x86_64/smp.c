@@ -12,7 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#define LAPIC_VIRT_BASE     (KERNEL_VMA + 0x3EE00000ULL)
+#define LAPIC_VIRT_BASE     (KERNEL_VMA + 0x3EC01000ULL)
 #define IOAPIC_VIRT_BASE    (KERNEL_VMA + 0x3EC00000ULL)
 
 #define AP_TRAMPOLINE_PHYS  0x8000u
@@ -59,7 +59,7 @@ extern volatile uint64_t ap_boot_stack;
 extern volatile uint32_t ap_boot_flag;
 extern volatile uint64_t ap_boot_entry;
 
-static int smp_ensure_cpu_capacity(int needed) {
+static int KERNEL_INIT smp_ensure_cpu_capacity(int needed) {
     cpu_info_t *new_cpus;
 
     if (needed <= 1) return 1;
@@ -102,7 +102,7 @@ static uint32_t ioapic_read(uint32_t reg) {
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 extern void temp_unmap_raw(uint64_t temp_virt);
 
-static void acpi_read_phys(uint64_t phys_addr, void *buf, uint64_t len) {
+static void KERNEL_INIT acpi_read_phys(uint64_t phys_addr, void *buf, uint64_t len) {
     uint64_t page_base;
     uint64_t offset;
     uint64_t chunk;
@@ -132,7 +132,7 @@ static void acpi_read_phys(uint64_t phys_addr, void *buf, uint64_t len) {
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-static uint64_t acpi_read32(uint64_t phys_addr) {
+static uint64_t KERNEL_INIT acpi_read32(uint64_t phys_addr) {
     uint64_t val;
 
     val = 0;
@@ -140,7 +140,7 @@ static uint64_t acpi_read32(uint64_t phys_addr) {
     return val;
 }
 
-static uint8_t *find_rsdp(void) {
+static uint8_t *KERNEL_INIT find_rsdp(void) {
     uint8_t *p;
     uint8_t sum;
     int i;
@@ -155,7 +155,7 @@ static uint8_t *find_rsdp(void) {
     return NULL;
 }
 
-static void parse_madt_phys(uint64_t madt_phys) {
+static void KERNEL_INIT parse_madt_phys(uint64_t madt_phys) {
     uint64_t length;
     uint64_t offset;
     uint64_t end_offset;
@@ -221,7 +221,7 @@ static void parse_madt_phys(uint64_t madt_phys) {
     }
 }
 
-static void find_acpi_tables(void) {
+static void KERNEL_INIT find_acpi_tables(void) {
     uint8_t *rsdp;
     uint64_t rsdt_phys;
     uint64_t rsdt_len;
@@ -360,12 +360,12 @@ void ioapic_mask_irq(uint8_t irq) {
     ioapic_write(reg, lo);
 }
 
-static void pic_disable(void) {
+static void KERNEL_INIT pic_disable(void) {
     outb(0xA1, 0xFF);
     outb(0x21, 0xFF);
 }
 
-static void delay_ms(uint64_t ms) {
+static void KERNEL_INIT delay_ms(uint64_t ms) {
     uint64_t i;
     uint64_t j;
     for (i = 0; i < ms; i++) {

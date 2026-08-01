@@ -53,9 +53,6 @@ boot_pd_0:
 boot_pd_high:
 boot_pd_low:
 .skip 4096
-.global boot_pd_1
-boot_pd_1:
-.skip 4096
 
 .global multiboot_magic
 .global multiboot_ptr
@@ -108,37 +105,17 @@ fill_pd_0:
     addl $8, %eax
     loop fill_pd_0
 
-    movl $(boot_pd_1), %eax
-    movl $512, %ecx
-    movl $0x40000083, %edx
-fill_pd_1:
-    movl %edx, (%eax)
-    movl $0, 4(%eax)
-    addl $0x00200000, %edx
-    addl $8, %eax
-    loop fill_pd_1
-
     movl $(boot_pdpt_low), %eax
     movl $(boot_pd_0), %edx
     orl $0x003, %edx
     movl %edx, 0*8(%eax)
     movl $0,   0*8+4(%eax)
 
-    movl $(boot_pd_1), %edx
-    orl $0x003, %edx
-    movl %edx, 1*8(%eax)
-    movl $0,   1*8+4(%eax)
-
     movl $(boot_pdpt_high), %eax
     movl $(boot_pd_0), %edx
     orl $0x003, %edx
     movl %edx, 510*8(%eax)
     movl $0,   510*8+4(%eax)
-
-    movl $(boot_pd_1), %edx
-    orl $0x003, %edx
-    movl %edx, 511*8(%eax)
-    movl $0,   511*8+4(%eax)
 
     movl $(boot_pml4), %eax
     movl $(boot_pdpt_low), %edx
@@ -200,6 +177,18 @@ higher_half:
 hang:
     hlt
     jmp hang
+
+.global kernel_switch_stack
+kernel_switch_stack:
+    cli
+    movq %rdi, %rsp
+    andq $-16, %rsp
+    xorl %ebp, %ebp
+    call *%rsi
+    cli
+switch_stack_hang:
+    hlt
+    jmp switch_stack_hang
 
 .section .multiboot.data
 .align 16

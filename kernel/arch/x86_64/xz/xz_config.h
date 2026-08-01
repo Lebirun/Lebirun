@@ -10,6 +10,7 @@
 #include "xz.h"
 
 #define XZ_DEC_SINGLE
+#define XZ_DEC_X86
 
 #define GFP_KERNEL 0
 
@@ -48,6 +49,14 @@ static inline uint32_t get_unaligned_be32(const uint8_t *buf)
 		| ((uint32_t)buf[1] << 16)
 		| ((uint32_t)buf[2] << 8)
 		| (uint32_t)buf[3];
+}
+
+static inline void put_unaligned_le32(uint32_t value, uint8_t *buf)
+{
+	buf[0] = (uint8_t)value;
+	buf[1] = (uint8_t)(value >> 8);
+	buf[2] = (uint8_t)(value >> 16);
+	buf[3] = (uint8_t)(value >> 24);
 }
 
 #define get_le32 get_unaligned_le32

@@ -1,5 +1,6 @@
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
+STRIP = x86_64-elf-strip
 
 V ?= 0
 ifeq ($(V),0)
@@ -51,6 +52,7 @@ BINDIR = bin
 stage-lsh: bin/lsh.bin
 	mkdir -p $(SYSROOT_BIN)
 	cp bin/lsh.bin $(SYSROOT_BIN)/lsh
+	$(STRIP) --strip-all $(SYSROOT_BIN)/lsh
 	ln -sf lsh $(SYSROOT_BIN)/sh
 
 stage-lebutils:

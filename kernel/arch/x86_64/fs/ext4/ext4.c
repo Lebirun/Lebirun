@@ -1380,7 +1380,7 @@ int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *bloc
     return 0;
 }
 
-void ext4_vfs_register(void) {
+void KERNEL_INIT ext4_vfs_register(void) {
     ext4_fs_type.name = "ext4";
     ext4_fs_type.mount = ext4_do_mount;
     ext4_fs_type.unmount = ext4_do_unmount;

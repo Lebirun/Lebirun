@@ -16,6 +16,9 @@ bool console_is_initialized(void);
 typedef struct {
     char (*buffer)[CONSOLE_BUFFER_COLS];
     uint8_t (*color_buffer)[CONSOLE_BUFFER_COLS];
+    uint8_t color_palette[4];
+    uint8_t color_palette_count;
+    uint8_t color_packed;
     uint8_t *line_wrapped;
     uint64_t buffer_rows;
     uint64_t cursor_x;

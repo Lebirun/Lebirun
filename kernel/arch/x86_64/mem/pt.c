@@ -1,5 +1,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/smp.h>
 #include <lebirun/spinlock.h>
 #include <string.h>
 
@@ -8,8 +9,8 @@ extern uint64_t boot_pdpt_high[] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_low[] __attribute__((aligned(4096)));
 extern uint64_t boot_pd_high[] __attribute__((aligned(4096)));
 extern uint64_t boot_pd_low[] __attribute__((aligned(4096)));
-extern uint64_t boot_pd_1[] __attribute__((aligned(4096)));
 
+#define kv_pml4 ((uint64_t *)((uintptr_t)boot_pml4 + KERNEL_VMA))
 #define kv_pdpt_high ((uint64_t *)((uintptr_t)boot_pdpt_high + KERNEL_VMA))
 #define kv_pdpt_low  ((uint64_t *)((uintptr_t)boot_pdpt_low + KERNEL_VMA))
 
@@ -38,6 +39,7 @@ static inline void vmm_pae_lock_release(void) {
 
 static uint64_t pt_heap_pt_count = 0;
 uint64_t pt_vmm_pt_count = 0;
+static int low_identity_active = 1;
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
@@ -90,6 +92,22 @@ static uint64_t *pt_get_kernel_pd(uint64_t virt_addr) {
     }
     pd_phys = pdpte & ~0xFFFULL;
     return (uint64_t *)(pd_phys + KERNEL_VMA);
+}
+
+static int pt_huge_mapping_matches(uint64_t pde, uint64_t virt_addr,
+                                   uint64_t phys_addr, uint64_t flags) {
+    uint64_t mapped_phys;
+    uint64_t page_offset;
+
+    if (!(pde & 1) || !(pde & 0x80)) return 0;
+    if ((flags & (0xFFFULL | (1ULL << 63))) != 3) return 0;
+    if ((pde & (0x1EULL | 0x100ULL | 0x1000ULL | (1ULL << 63))) != 2)
+        return 0;
+    page_offset = virt_addr & (0x200000ULL - 1);
+    mapped_phys = (pde & 0x000FFFFFFFE00000ULL) + page_offset;
+    if ((mapped_phys & ~(PAGE_SIZE - 1)) !=
+        (phys_addr & ~(PAGE_SIZE - 1))) return 0;
+    return 1;
 }
 
 static uint64_t *pt_ensure_kernel_pd(uint64_t virt_addr) {
@@ -189,6 +207,7 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
     pde = pd[pde_idx];
 
     if (pde & 0x80) {
+        if (pt_huge_mapping_matches(pde, virt, phys_addr, 3)) return 0;
         if (pt_split_huge_page(pd, pde_idx) < 0) return -1;
         pde = pd[pde_idx];
     }
@@ -253,15 +272,16 @@ void pt_sync_kernel_mappings(void) {
 
 static uint64_t *pt_get_pd_for_pdpt(uint64_t virt_addr) {
     uint64_t pml4_idx;
+    uint64_t pdpt_idx;
+    uint64_t pdpte;
+    uint64_t pd_phys;
 
     pml4_idx = (virt_addr >> 39) & 0x1FF;
     if (pml4_idx == 511) {
         return pt_ensure_kernel_pd(virt_addr);
     }
     if (pml4_idx == 0) {
-        uint64_t pdpt_idx;
-        uint64_t pdpte;
-        uint64_t pd_phys;
+        if (!low_identity_active) return NULL;
         pdpt_idx = (virt_addr >> 30) & 0x1FF;
         pdpte = kv_pdpt_low[pdpt_idx];
         if (pdpte & 1) {
@@ -270,6 +290,27 @@ static uint64_t *pt_get_pd_for_pdpt(uint64_t virt_addr) {
         }
     }
     return NULL;
+}
+
+int KERNEL_INIT pt_reclaim_low_identity(void) {
+    uint64_t eflags;
+    uint64_t start;
+    int flush_result;
+
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(eflags) :: "memory");
+    kv_pml4[0] = 0;
+    low_identity_active = 0;
+    __asm__ volatile (
+        "mov %%cr3, %%rax\n\t"
+        "mov %%rax, %%cr3\n\t"
+        : : : "rax", "memory"
+    );
+    if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    flush_result = smp_tlb_flush_all_sync();
+    if (flush_result < 0) return -1;
+    start = (uint64_t)(uintptr_t)boot_pdpt_low;
+    pfa_reclaim_kernel_range(start, start + PAGE_SIZE);
+    return 0;
 }
 
 void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
@@ -301,6 +342,10 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     pde = pd[pt_pd_idx];
 
     if (pde & 0x80) {
+        if (pt_huge_mapping_matches(pde, virt_addr, phys_addr, flags)) {
+            vmm_pae_lock_release();
+            return;
+        }
         if (pt_split_huge_page(pd, pt_pd_idx) < 0) {
             vmm_pae_lock_release();
             printf("vmm_map_page_pae: Failed to split huge page\n");
@@ -631,6 +676,13 @@ void vmm_unmap_page_pae(uint64_t virt_addr) {
     }
 
     pde = pd[pt_pd_idx];
+    if (pde & 0x80) {
+        if (pt_split_huge_page(pd, pt_pd_idx) < 0) {
+            vmm_pae_lock_release();
+            return;
+        }
+        pde = pd[pt_pd_idx];
+    }
     if (!(pde & 1)) {
         vmm_pae_lock_release();
         return;

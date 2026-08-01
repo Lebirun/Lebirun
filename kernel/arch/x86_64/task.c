@@ -136,7 +136,7 @@ static uint64_t task_random_stack_top(void) {
 static uint64_t task_random_mmap_base(void) {
     uint64_t pages;
 
-    pages = rng_get_u32() & 0x3FFFULL;
+    pages = rng_get_u32() & 0x3FF0ULL;
     return USER_MMAP_HIGH_BASE + pages * PAGE_SIZE;
 }
 
@@ -2631,6 +2631,9 @@ void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pm
     while (d && task_ptr_valid(d)) {
         if (d->is_user && !d->resources_released) {
             stats->dead_user_pages += d->user_pages_count;
+            stats->dead_heap_pages += task_heap_pages(d);
+            stats->dead_mmap_pages += task_mmap_pages(d);
+            stats->dead_file_pages += task_file_pages(d);
             stats->dead_stack_pages += task_stack_pages(d);
             if (d->pml4_phys) {
                 stats->dead_pd_pages++;
@@ -2954,7 +2957,9 @@ static int task_owns_irq_frame(task_t *task, uint64_t rsp) {
     uint64_t top;
 
     if (!task) return 0;
-    if (task == bootstrap_task)
+    if (task == bootstrap_task &&
+        (!task->kernel_stack_base ||
+         task->kernel_stack_size < sizeof(registers_t)))
         return rsp >= KERNEL_VMA && rsp < HEAP_START;
     if (!task->kernel_stack_base || task->kernel_stack_size < sizeof(registers_t)) return 0;
     base = (uint64_t)task->kernel_stack_base;

@@ -38,7 +38,7 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
-CFLAGS:=$(CFLAGS) -ffunction-sections -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
+CFLAGS:=$(CFLAGS) -ffunction-sections -fdata-sections -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
 CPPFLAGS:=$(CPPFLAGS) -nostdinc -D__is_kernel -Iinclude -isystem ../sysroot/usr/include
 LDFLAGS:=$(LDFLAGS)
 LIBS:=$(LIBS) -nostdlib -lgcc
@@ -115,20 +115,31 @@ CRTBEGIN:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtbegin.o)
 CRTEND:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtend.o)
 
 UNIFONT_BIN=fonts/unifont.psf
+UNIFONT_GLYPHS=$(ARCHDIR)/unifont_glyphs.bin
 UNIFONT_OBJ=$(ARCHDIR)/unifont_bin.o
 
-$(UNIFONT_OBJ): $(wildcard $(UNIFONT_BIN))
+$(UNIFONT_GLYPHS): $(wildcard $(UNIFONT_BIN))
 	@if [ -f "$(UNIFONT_BIN)" ]; then \
-		echo "Embedding font from $(UNIFONT_BIN) -> $@"; \
+		set -- $$(od -An -tu1 -N4 "$(UNIFONT_BIN)"); \
+		test "$$1" = 54 -a "$$2" = 4 -a $$(( $$3 & 1 )) = 1 -a "$$4" = 16; \
+		dd if="$(UNIFONT_BIN)" of="$@" bs=1 skip=4 count=8192 status=none; \
+		test "$$(wc -c < "$@")" = 8192; \
+	else \
+		printf '\0' > "$@"; \
+	fi
+
+$(UNIFONT_OBJ): $(UNIFONT_GLYPHS)
+	@if [ -f "$(UNIFONT_BIN)" ]; then \
+		echo "Embedding font glyphs from $(UNIFONT_BIN) -> $@"; \
 		$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
-			--rename-section .data=.rodata,alloc,load,readonly,data,contents \
-			--redefine-sym _binary_fonts_unifont_psf_start=unifont_psf_start \
-			--redefine-sym _binary_fonts_unifont_psf_end=unifont_psf_end \
-			--redefine-sym _binary_fonts_unifont_psf_size=unifont_psf_size \
-			$(UNIFONT_BIN) $@; \
+			--rename-section .data=.rodata.font,alloc,load,readonly,data,contents \
+			--redefine-sym _binary_arch_x86_64_unifont_glyphs_bin_start=unifont_glyphs_start \
+			--redefine-sym _binary_arch_x86_64_unifont_glyphs_bin_end=unifont_glyphs_end \
+			--redefine-sym _binary_arch_x86_64_unifont_glyphs_bin_size=unifont_glyphs_size \
+			$(UNIFONT_GLYPHS) $@; \
 	else \
 		echo "Creating stub $@ (no font present)"; \
-		printf '.section .rodata\n.global unifont_psf_start\nunifont_psf_start:\n.byte 0\n.global unifont_psf_end\nunifont_psf_end:\n' > $(ARCHDIR)/unifont_stub.S; \
+		printf '.section .rodata.font,"a"\n.global unifont_glyphs_start\nunifont_glyphs_start:\n.byte 0\n.global unifont_glyphs_end\nunifont_glyphs_end:\n' > $(ARCHDIR)/unifont_stub.S; \
 		$(CC) -c $(ARCHDIR)/unifont_stub.S -o $@; \
 		rm -f $(ARCHDIR)/unifont_stub.S; \
 	fi
@@ -181,7 +192,7 @@ lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 .S.o:
 	$(MSG_AS)$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
-$(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
+$(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_bcj.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
 	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
 
 $(OBJS): Makefile $(CONFIG_FILE) $(VERSION_HEADER)
@@ -206,6 +217,7 @@ clean:
 	rm -f $(USER_SHELL_OBJ)
 	rm -f $(USER_SHELL_BIN)
 	rm -f $(UNIFONT_OBJ)
+	rm -f $(UNIFONT_GLYPHS)
 	rm -f $(VERSION_HEADER)
 	rm -f $(OBJS) *.o */*.o */*/*.o
 	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d

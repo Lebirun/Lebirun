@@ -190,5 +190,6 @@ void squashfs_flush_cache(void);
 void squashfs_set_access_blocked(int blocked);
 void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, uint64_t *data_bytes);
 void squashfs_decomp_stats(uint64_t *failures, uint64_t *oversize, uint64_t *padded);
+uint64_t squashfs_get_module_pages(void);
 
 #endif
