@@ -145,9 +145,19 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 27:  return SYSCALL_ALARM;
         
         case 13:  return SYSCALL_TIME;
+        case 36:  return SYSCALL_SYNC;
+        case 61:  return SYSCALL_CHROOT;
         case 78:  return SYSCALL_GETTIMEOFDAY;
+        case 79:  return SYSCALL_SETTIMEOFDAY;
+        case 144: return SYSCALL_MSYNC;
+        case 264: return SYSCALL_CLOCK_SETTIME;
         case 265: return SYSCALL_CLOCK_GETTIME;
+        case 266: return SYSCALL_CLOCK_GETRES;
+        case 267: return SYSCALL_CLOCK_NANOSLEEP;
         case 403: return SYSCALL_CLOCK_GETTIME;
+        case 404: return SYSCALL_CLOCK_SETTIME;
+        case 406: return SYSCALL_CLOCK_GETRES;
+        case 407: return SYSCALL_CLOCK_NANOSLEEP;
         case 162: return SYSCALL_SLEEP;
         
         case 12:  return SYSCALL_CHDIR;
@@ -195,6 +205,7 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 300: return SYSCALL_FSTATAT;
         case 320: return SYSCALL_UTIMENSAT;
         case 353: return SYSCALL_RENAMEAT2;
+        case 344: return SYSCALL_SYNCFS;
         
         case 24:  return SYSCALL_GETUID;
         case 199: return SYSCALL_GETUID;

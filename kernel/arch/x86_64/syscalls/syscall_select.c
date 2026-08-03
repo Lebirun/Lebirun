@@ -54,7 +54,8 @@ static int check_fd_readable(int fd) {
         if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
         return keyboard_has_data_for(con_id) ? 1 : 0;
     }
-    if (current_task->fds[fd].type == FD_TYPE_PIPE_R) {
+    if (current_task->fds[fd].type == FD_TYPE_PIPE_R ||
+        current_task->fds[fd].type == FD_TYPE_PIPE_RW) {
         pipe = (pipe_t *)current_task->fds[fd].private_data;
         if (!pipe) return 0;
         pipe_flags = pipe_lock_irqsave(pipe);
@@ -99,7 +100,8 @@ static int check_fd_writable(int fd) {
     if (current_task->fds[fd].type == FD_TYPE_STDOUT || current_task->fds[fd].type == FD_TYPE_STDERR) {
         return 1;
     }
-    if (current_task->fds[fd].type == FD_TYPE_PIPE_W) {
+    if (current_task->fds[fd].type == FD_TYPE_PIPE_W ||
+        current_task->fds[fd].type == FD_TYPE_PIPE_RW) {
         pipe = (pipe_t *)current_task->fds[fd].private_data;
         if (!pipe) return 0;
         pipe_flags = pipe_lock_irqsave(pipe);

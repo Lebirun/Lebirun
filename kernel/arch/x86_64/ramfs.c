@@ -12,6 +12,7 @@ extern task_t *current_task;
 #define RAMFS_NODE_FILE    0
 #define RAMFS_NODE_DIR     1
 #define RAMFS_NODE_SYMLINK 2
+#define RAMFS_NODE_FIFO    3
 
 static ramfs_node_t *ramfs_root = NULL;
 static vfs_node_t *ramfs_vfs_root = NULL;
@@ -180,6 +181,8 @@ static vfs_node_t *ramfs_get_vfs_node(ramfs_node_t *rn, vfs_node_t *parent_vn) {
         vn->flags = VFS_DIRECTORY;
     } else if (rn->type == RAMFS_NODE_SYMLINK) {
         vn->flags = VFS_SYMLINK;
+    } else if (rn->type == RAMFS_NODE_FIFO) {
+        vn->flags = VFS_PIPE;
     } else {
         vn->flags = VFS_FILE;
     }
@@ -206,7 +209,7 @@ static vfs_node_t *ramfs_get_vfs_node(ramfs_node_t *rn, vfs_node_t *parent_vn) {
         vn->close = ramfs_vfs_close;
         vn->chmod = ramfs_vfs_chmod;
         vn->chown = ramfs_vfs_chown;
-    } else {
+    } else if (rn->type == RAMFS_NODE_FILE) {
         ramfs_setup_vfs_file_callbacks(vn);
     }
 
@@ -505,6 +508,131 @@ int ramfs_create_symlink(const char *path, const char *target, uint16_t permissi
     ramfs_node_unlock(parent);
     ramfs_unlock();
 
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
+                              const char *target, uint16_t permissions) {
+    ramfs_node_t *prn;
+    ramfs_node_t *node;
+    size_t target_length;
+
+    if (!parent || !name || !target ||
+        parent->create != ramfs_vfs_create) return RAMFS_ERR_INVAL;
+    prn = (ramfs_node_t *)parent->private_data;
+    if (!prn || prn->type != RAMFS_NODE_DIR) return RAMFS_ERR_NOTDIR;
+    target_length = strlen(target);
+    ramfs_lock();
+    if (ramfs_find_child(prn, name)) {
+        ramfs_unlock();
+        return RAMFS_ERR_EXIST;
+    }
+    if (!ramfs_check_space((uint64_t)target_length)) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
+    node = ramfs_alloc_node();
+    if (!node) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
+        kfree(node);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    node->data = (uint8_t *)kmalloc((uint64_t)target_length + 1);
+    if (!node->data) {
+        ramfs_free_node_name(node);
+        kfree(node);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    memcpy(node->data, target, target_length + 1);
+    node->type = RAMFS_NODE_SYMLINK;
+    node->permissions = permissions ? permissions : 0777;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
+    node->parent = prn;
+    node->data_capacity = (uint64_t)target_length + 1;
+    node->length = (uint64_t)target_length;
+    node->next_sibling = prn->children;
+    prn->children = node;
+    prn->mtime = ramfs_get_time();
+    ramfs_stats.used_size += node->length;
+    ramfs_stats.file_count++;
+    ramfs_unlock();
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
+                    const char *name) {
+    ramfs_node_t *source_node;
+    ramfs_node_t *parent_node;
+    ramfs_node_t *node;
+    uint64_t stored;
+
+    if (!source || !parent || !name || source->read != ramfs_vfs_read ||
+        parent->create != ramfs_vfs_create) return RAMFS_ERR_INVAL;
+    source_node = (ramfs_node_t *)source->private_data;
+    parent_node = (ramfs_node_t *)parent->private_data;
+    if (!source_node || !parent_node ||
+        source_node->type != RAMFS_NODE_FILE ||
+        parent_node->type != RAMFS_NODE_DIR) return RAMFS_ERR_INVAL;
+    ramfs_lock();
+    if (ramfs_find_child(parent_node, name)) {
+        ramfs_unlock();
+        return RAMFS_ERR_EXIST;
+    }
+    if (!ramfs_check_space(source_node->length)) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
+    node = ramfs_alloc_node();
+    if (!node) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
+        kfree(node);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    if (source_node->length != 0) {
+        node->data = (uint8_t *)kmalloc(source_node->length);
+        if (!node->data) {
+            ramfs_free_node_name(node);
+            kfree(node);
+            ramfs_unlock();
+            return RAMFS_ERR_NOMEM;
+        }
+        memset(node->data, 0, source_node->length);
+        stored = source_node->data_capacity;
+        if (stored > source_node->length) stored = source_node->length;
+        if (source_node->data && stored != 0)
+            memcpy(node->data, source_node->data, stored);
+        else if (source_node->backing_data) {
+            stored = source_node->backing_length;
+            if (stored > source_node->length) stored = source_node->length;
+            memcpy(node->data, source_node->backing_data, stored);
+        }
+    }
+    node->type = RAMFS_NODE_FILE;
+    node->permissions = source_node->permissions;
+    node->uid = source_node->uid;
+    node->gid = source_node->gid;
+    node->parent = parent_node;
+    node->length = source_node->length;
+    node->data_capacity = source_node->length;
+    node->atime = source_node->atime;
+    node->mtime = source_node->mtime;
+    node->ctime = ramfs_get_time();
+    node->next_sibling = parent_node->children;
+    parent_node->children = node;
+    parent_node->mtime = node->ctime;
+    ramfs_stats.used_size += node->data_capacity;
+    ramfs_stats.file_count++;
+    ramfs_unlock();
     return RAMFS_ERR_OK;
 }
 
@@ -1278,6 +1406,128 @@ static int ramfs_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid) {
     return RAMFS_ERR_OK;
 }
 
+int ramfs_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                         uint64_t ctime) {
+    ramfs_node_t *rn;
+
+    if (!node) return RAMFS_ERR_INVAL;
+    rn = (ramfs_node_t *)node->private_data;
+    if (!rn) return RAMFS_ERR_INVAL;
+    ramfs_lock();
+    ramfs_node_lock(rn);
+    rn->atime = atime;
+    rn->mtime = mtime;
+    rn->ctime = ctime;
+    node->atime = atime;
+    node->mtime = mtime;
+    node->ctime = ctime;
+    ramfs_node_unlock(rn);
+    ramfs_unlock();
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
+    ramfs_node_t *prn;
+    ramfs_node_t *node;
+
+    if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY)
+        return RAMFS_ERR_INVAL;
+    prn = (ramfs_node_t *)parent->private_data;
+    if (!prn || prn->type != RAMFS_NODE_DIR) return RAMFS_ERR_NOTDIR;
+    ramfs_lock();
+    if (ramfs_find_child(prn, name)) {
+        ramfs_unlock();
+        return RAMFS_ERR_EXIST;
+    }
+    node = ramfs_alloc_node();
+    if (!node) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
+        kfree(node);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    node->type = RAMFS_NODE_FIFO;
+    node->permissions = (uint16_t)(mode & 07777);
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
+    node->parent = prn;
+    node->atime = ramfs_get_time();
+    node->mtime = node->atime;
+    node->ctime = node->atime;
+    node->next_sibling = prn->children;
+    prn->children = node;
+    prn->mtime = node->mtime;
+    ramfs_stats.file_count++;
+    ramfs_unlock();
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
+                         vfs_node_t *new_parent, const char *new_name) {
+    ramfs_node_t *old_prn;
+    ramfs_node_t *new_prn;
+    ramfs_node_t *old_node;
+    ramfs_node_t *new_node;
+    ramfs_node_t **old_link;
+    ramfs_node_t **new_link;
+    char *name;
+    uint64_t now;
+
+    if (!old_parent || !new_parent || !old_name || !new_name)
+        return RAMFS_ERR_INVAL;
+    old_prn = (ramfs_node_t *)old_parent->private_data;
+    new_prn = (ramfs_node_t *)new_parent->private_data;
+    if (!old_prn || !new_prn || old_prn->type != RAMFS_NODE_DIR ||
+        new_prn->type != RAMFS_NODE_DIR) return RAMFS_ERR_NOTDIR;
+    ramfs_lock();
+    old_node = ramfs_find_child(old_prn, old_name);
+    new_node = ramfs_find_child(new_prn, new_name);
+    if (!old_node || !new_node || old_node == new_node) {
+        ramfs_unlock();
+        return old_node == new_node && old_node ? RAMFS_ERR_OK :
+               RAMFS_ERR_NOENT;
+    }
+    name = old_node->name;
+    old_node->name = new_node->name;
+    new_node->name = name;
+    if (old_prn != new_prn) {
+        old_link = &old_prn->children;
+        while (*old_link && *old_link != old_node)
+            old_link = &(*old_link)->next_sibling;
+        new_link = &new_prn->children;
+        while (*new_link && *new_link != new_node)
+            new_link = &(*new_link)->next_sibling;
+        *old_link = old_node->next_sibling;
+        *new_link = new_node->next_sibling;
+        old_node->next_sibling = new_prn->children;
+        new_prn->children = old_node;
+        new_node->next_sibling = old_prn->children;
+        old_prn->children = new_node;
+        old_node->parent = new_prn;
+        new_node->parent = old_prn;
+    }
+    if (old_node->vfs_node) {
+        strncpy(old_node->vfs_node->name, old_node->name, VFS_MAX_NAME - 1);
+        old_node->vfs_node->name[VFS_MAX_NAME - 1] = '\0';
+        old_node->vfs_node->parent = new_parent;
+    }
+    if (new_node->vfs_node) {
+        strncpy(new_node->vfs_node->name, new_node->name, VFS_MAX_NAME - 1);
+        new_node->vfs_node->name[VFS_MAX_NAME - 1] = '\0';
+        new_node->vfs_node->parent = old_parent;
+    }
+    now = ramfs_get_time();
+    old_prn->mtime = now;
+    new_prn->mtime = now;
+    old_node->ctime = now;
+    new_node->ctime = now;
+    ramfs_unlock();
+    return RAMFS_ERR_OK;
+}
+
 static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint64_t adjusted_index;
     ramfs_node_t *rn;
@@ -1306,6 +1556,8 @@ static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
                 ramfs_dirent.type = VFS_DIRECTORY;
             } else if (child->type == RAMFS_NODE_SYMLINK) {
                 ramfs_dirent.type = VFS_SYMLINK;
+            } else if (child->type == RAMFS_NODE_FIFO) {
+                ramfs_dirent.type = VFS_PIPE;
             } else {
                 ramfs_dirent.type = VFS_FILE;
             }

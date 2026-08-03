@@ -2,6 +2,7 @@
 #include <lebirun/common.h>
 #include <lebirun/pit.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/smp.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -10,6 +11,9 @@ extern uint64_t pit_freq;
 static dirent_t *sysfs_dirent_pool;
 static volatile uint64_t sysfs_dirent_index;
 static uint64_t sysfs_dirent_capacity;
+static vfs_node_t **sysfs_cpu_dynamic_nodes;
+static vfs_node_t **sysfs_cpu_dynamic_online;
+static int sysfs_cpu_dynamic_capacity;
 
 static dirent_t *sysfs_alloc_dirent(void) {
     uint64_t idx;
@@ -105,23 +109,73 @@ static vfs_node_t **sysfs_reclaim_slots[] = {
 };
 
 static uint64_t sysfs_cpu0_online_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
+    char value[3];
+    int cpu;
+
+    cpu = node ? (int)node->inode : 0;
+    value[0] = cpus && cpu >= 0 && cpu < cpu_count && cpus[cpu].active ?
+               '1' : '0';
+    value[1] = '\n';
+    value[2] = '\0';
+    return sysfs_read_static(node, offset, size, buffer, value, 2);
 }
 
 static uint64_t sysfs_cpu_online_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
+    char value[128];
+    int start;
+    int end;
+    int cpu;
+    int len;
+    int written;
+
+    (void)node;
+    len = 0;
+    cpu = 0;
+    while (cpu < cpu_count && len < (int)sizeof(value) - 2) {
+        while (cpu < cpu_count && (!cpus || !cpus[cpu].active)) cpu++;
+        if (cpu >= cpu_count) break;
+        start = cpu;
+        end = cpu;
+        while (end + 1 < cpu_count && cpus && cpus[end + 1].active) end++;
+        written = snprintf(value + len, sizeof(value) - (size_t)len,
+                           len ? ",%d" : "%d", start);
+        if (written < 0 || written >= (int)sizeof(value) - len) break;
+        len += written;
+        if (end != start) {
+            written = snprintf(value + len, sizeof(value) - (size_t)len,
+                               "-%d", end);
+            if (written < 0 || written >= (int)sizeof(value) - len) break;
+            len += written;
+        }
+        cpu = end + 1;
+    }
+    if (len < (int)sizeof(value) - 1) value[len++] = '\n';
+    return sysfs_read_static(node, offset, size, buffer, value, (uint64_t)len);
 }
 
 static uint64_t sysfs_cpu_possible_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
+    char value[32];
+    int last;
+    int len;
+
+    last = cpu_count > 0 ? cpu_count - 1 : 0;
+    len = snprintf(value, sizeof(value), "0-%d\n", last);
+    return sysfs_read_static(node, offset, size, buffer, value,
+                             (uint64_t)len);
 }
 
 static uint64_t sysfs_cpu_present_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0-0\n", 4);
+    return sysfs_cpu_possible_read(node, offset, size, buffer);
 }
 
 static uint64_t sysfs_cpu_kernel_max_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
+    char value[32];
+    int last;
+    int len;
+
+    last = MAX_CPUS - 1;
+    len = snprintf(value, sizeof(value), "%d\n", last);
+    return sysfs_read_static(node, offset, size, buffer, value, (uint64_t)len);
 }
 
 static uint64_t sysfs_cpufreq_cur_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -269,10 +323,35 @@ static void sysfs_reclaim_lazy_node(vfs_node_t **slot, vfs_node_t *active) {
 void sysfs_reclaim_unused(void) {
     uint64_t i;
     uint64_t count;
+    int busy;
 
     count = sizeof(sysfs_reclaim_slots) / sizeof(sysfs_reclaim_slots[0]);
     for (i = 0; i < count; i++) {
         sysfs_reclaim_lazy_node(sysfs_reclaim_slots[i], NULL);
+    }
+    busy = 0;
+    for (i = 1; i < (uint64_t)sysfs_cpu_dynamic_capacity; i++) {
+        if (sysfs_cpu_dynamic_online && sysfs_cpu_dynamic_online[i] &&
+            sysfs_cpu_dynamic_online[i]->ref_count <= 1) {
+            kfree(sysfs_cpu_dynamic_online[i]);
+            sysfs_cpu_dynamic_online[i] = NULL;
+        }
+        if (sysfs_cpu_dynamic_nodes && sysfs_cpu_dynamic_nodes[i] &&
+            (!sysfs_cpu_dynamic_online || !sysfs_cpu_dynamic_online[i]) &&
+            sysfs_cpu_dynamic_nodes[i]->ref_count <= 1) {
+            kfree(sysfs_cpu_dynamic_nodes[i]);
+            sysfs_cpu_dynamic_nodes[i] = NULL;
+        }
+        if ((sysfs_cpu_dynamic_nodes && sysfs_cpu_dynamic_nodes[i]) ||
+            (sysfs_cpu_dynamic_online && sysfs_cpu_dynamic_online[i]))
+            busy = 1;
+    }
+    if (!busy && sysfs_cpu_dynamic_capacity > 0) {
+        kfree(sysfs_cpu_dynamic_nodes);
+        kfree(sysfs_cpu_dynamic_online);
+        sysfs_cpu_dynamic_nodes = NULL;
+        sysfs_cpu_dynamic_online = NULL;
+        sysfs_cpu_dynamic_capacity = 0;
     }
 }
 
@@ -347,7 +426,7 @@ static vfs_node_t *sysfs_get_cpu0_online(void) {
     return sysfs_lazy_node(&sysfs_cpu0_online, "online", VFS_FILE, sysfs_get_devices_system_cpu_cpu0(), sysfs_cpu0_online_read, NULL, NULL);
 }
 
-static vfs_node_t *sysfs_get_cpu0_cpufreq(void) {
+static __attribute__((unused)) vfs_node_t *sysfs_get_cpu0_cpufreq(void) {
     return sysfs_lazy_node(&sysfs_cpu0_cpufreq, "cpufreq", VFS_DIRECTORY, sysfs_get_devices_system_cpu_cpu0(), NULL, sysfs_cpufreq_readdir, sysfs_cpufreq_finddir);
 }
 
@@ -375,7 +454,7 @@ static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_governor(void) {
     return sysfs_lazy_node(&sysfs_cpu0_cpufreq_scaling_governor, "scaling_governor", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_governor_read, NULL, NULL);
 }
 
-static vfs_node_t *sysfs_get_cpu0_topology(void) {
+static __attribute__((unused)) vfs_node_t *sysfs_get_cpu0_topology(void) {
     return sysfs_lazy_node(&sysfs_cpu0_topology, "topology", VFS_DIRECTORY, sysfs_get_devices_system_cpu_cpu0(), NULL, sysfs_topology_readdir, sysfs_topology_finddir);
 }
 
@@ -507,24 +586,11 @@ static dirent_t *sysfs_cpu0_readdir(vfs_node_t *node, uint64_t index) {
 
     d = sysfs_alloc_dirent();
     if (!d) return NULL;
-    switch (index) {
-    case 0:
+    if (index == 0) {
         strcpy(d->name, "online");
         d->inode = 50;
         d->type = VFS_FILE;
         return d;
-    case 1:
-        strcpy(d->name, "cpufreq");
-        d->inode = 51;
-        d->type = VFS_DIRECTORY;
-        return d;
-    case 2:
-        strcpy(d->name, "topology");
-        d->inode = 52;
-        d->type = VFS_DIRECTORY;
-        return d;
-    default:
-        break;
     }
     return NULL;
 }
@@ -533,9 +599,99 @@ static vfs_node_t *sysfs_cpu0_finddir(vfs_node_t *node, const char *name) {
     (void)node;
 
     if (strcmp(name, "online") == 0) return sysfs_get_cpu0_online();
-    if (strcmp(name, "cpufreq") == 0) return sysfs_get_cpu0_cpufreq();
-    if (strcmp(name, "topology") == 0) return sysfs_get_cpu0_topology();
     return NULL;
+}
+
+static dirent_t *sysfs_dynamic_cpu_readdir(vfs_node_t *node,
+                                            uint64_t index) {
+    dirent_t *entry;
+
+    (void)node;
+    if (index != 0) return NULL;
+    entry = sysfs_alloc_dirent();
+    if (!entry) return NULL;
+    strcpy(entry->name, "online");
+    entry->inode = 1;
+    entry->type = VFS_FILE;
+    return entry;
+}
+
+static vfs_node_t *sysfs_get_dynamic_cpu_online(int cpu) {
+    vfs_node_t *node;
+
+    if (!sysfs_cpu_dynamic_online || cpu <= 0 ||
+        cpu >= sysfs_cpu_dynamic_capacity) return NULL;
+    node = sysfs_cpu_dynamic_online[cpu];
+    if (node) return node;
+    node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!node) return NULL;
+    sysfs_init_node(node, "online", VFS_FILE,
+                    sysfs_cpu_dynamic_nodes[cpu]);
+    node->inode = (uint64_t)cpu;
+    node->read = sysfs_cpu0_online_read;
+    sysfs_cpu_dynamic_online[cpu] = node;
+    return node;
+}
+
+static vfs_node_t *sysfs_dynamic_cpu_finddir(vfs_node_t *node,
+                                              const char *name) {
+    int cpu;
+
+    if (!node || strcmp(name, "online") != 0) return NULL;
+    cpu = (int)node->inode;
+    return sysfs_get_dynamic_cpu_online(cpu);
+}
+
+static int sysfs_ensure_dynamic_cpus(void) {
+    vfs_node_t **new_nodes;
+    vfs_node_t **new_online;
+    size_t bytes;
+    size_t old_bytes;
+
+    if (sysfs_cpu_dynamic_capacity >= cpu_count) return 0;
+    bytes = (size_t)cpu_count * sizeof(vfs_node_t *);
+    new_nodes = (vfs_node_t **)kmalloc(bytes);
+    if (!new_nodes) return -1;
+    new_online = (vfs_node_t **)kmalloc(bytes);
+    if (!new_online) {
+        kfree(new_nodes);
+        return -1;
+    }
+    memset(new_nodes, 0, bytes);
+    memset(new_online, 0, bytes);
+    if (sysfs_cpu_dynamic_capacity > 0) {
+        old_bytes = (size_t)sysfs_cpu_dynamic_capacity *
+                    sizeof(vfs_node_t *);
+        memcpy(new_nodes, sysfs_cpu_dynamic_nodes, old_bytes);
+        memcpy(new_online, sysfs_cpu_dynamic_online, old_bytes);
+    }
+    kfree(sysfs_cpu_dynamic_nodes);
+    kfree(sysfs_cpu_dynamic_online);
+    sysfs_cpu_dynamic_nodes = new_nodes;
+    sysfs_cpu_dynamic_online = new_online;
+    sysfs_cpu_dynamic_capacity = cpu_count;
+    return 0;
+}
+
+static vfs_node_t *sysfs_get_dynamic_cpu(int cpu) {
+    char name[16];
+    vfs_node_t *node;
+
+    if (cpu == 0) return sysfs_get_devices_system_cpu_cpu0();
+    if (cpu < 0 || cpu >= cpu_count || sysfs_ensure_dynamic_cpus() != 0)
+        return NULL;
+    node = sysfs_cpu_dynamic_nodes[cpu];
+    if (node) return node;
+    snprintf(name, sizeof(name), "cpu%d", cpu);
+    node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!node) return NULL;
+    sysfs_init_node(node, name, VFS_DIRECTORY,
+                    sysfs_get_devices_system_cpu());
+    node->inode = (uint64_t)cpu;
+    node->readdir = sysfs_dynamic_cpu_readdir;
+    node->finddir = sysfs_dynamic_cpu_finddir;
+    sysfs_cpu_dynamic_nodes[cpu] = node;
+    return node;
 }
 
 static dirent_t *sysfs_cpu_readdir(vfs_node_t *node, uint64_t index) {
@@ -545,28 +701,29 @@ static dirent_t *sysfs_cpu_readdir(vfs_node_t *node, uint64_t index) {
 
     d = sysfs_alloc_dirent();
     if (!d) return NULL;
-    switch (index) {
-    case 0:
-        strcpy(d->name, "cpu0");
-        d->inode = 40;
+    if (index < (uint64_t)cpu_count) {
+        snprintf(d->name, sizeof(d->name), "cpu%lu", index);
+        d->inode = 40 + index;
         d->type = VFS_DIRECTORY;
         return d;
-    case 1:
+    }
+    switch (index - (uint64_t)cpu_count) {
+    case 0:
         strcpy(d->name, "online");
         d->inode = 41;
         d->type = VFS_FILE;
         return d;
-    case 2:
+    case 1:
         strcpy(d->name, "possible");
         d->inode = 42;
         d->type = VFS_FILE;
         return d;
-    case 3:
+    case 2:
         strcpy(d->name, "present");
         d->inode = 43;
         d->type = VFS_FILE;
         return d;
-    case 4:
+    case 3:
         strcpy(d->name, "kernel_max");
         d->inode = 44;
         d->type = VFS_FILE;
@@ -578,9 +735,22 @@ static dirent_t *sysfs_cpu_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 static vfs_node_t *sysfs_cpu_finddir(vfs_node_t *node, const char *name) {
+    int cpu;
+    int position;
+
     (void)node;
 
-    if (strcmp(name, "cpu0") == 0) return sysfs_get_devices_system_cpu_cpu0();
+    if (name[0] == 'c' && name[1] == 'p' && name[2] == 'u') {
+        cpu = 0;
+        position = 3;
+        if (name[position] < '0' || name[position] > '9') return NULL;
+        while (name[position] >= '0' && name[position] <= '9') {
+            cpu = cpu * 10 + name[position] - '0';
+            position++;
+        }
+        if (name[position] != '\0') return NULL;
+        return sysfs_get_dynamic_cpu(cpu);
+    }
     if (strcmp(name, "online") == 0) return sysfs_get_cpu_online();
     if (strcmp(name, "possible") == 0) return sysfs_get_cpu_possible();
     if (strcmp(name, "present") == 0) return sysfs_get_cpu_present();

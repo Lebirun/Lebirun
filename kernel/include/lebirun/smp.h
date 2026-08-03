@@ -50,6 +50,9 @@ typedef struct cpu_info {
     int scheduler_lock_depth;
     uint64_t sched_saved_rflags;
     volatile int schedule_force;
+    uint64_t user_ticks;
+    uint64_t system_ticks;
+    uint64_t idle_ticks;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;

@@ -7,7 +7,7 @@
 
 #define PIPE_BUF_SIZE 4096
 
-typedef struct {
+typedef struct pipe {
     uint8_t *buffer;
     uint64_t buf_size;
     uint64_t read_pos;
@@ -18,6 +18,8 @@ typedef struct {
     wait_queue_t read_waitq;
     wait_queue_t write_waitq;
     spinlock_t lock;
+    struct vfs_node *named_node;
+    struct pipe *named_next;
 } pipe_t;
 
 static inline uint64_t pipe_lock_irqsave(pipe_t *pipe) {
@@ -38,8 +40,8 @@ static inline void pipe_retain_reference(pipe_t *pipe, int type) {
 
     if (!pipe) return;
     flags = pipe_lock_irqsave(pipe);
-    if (type == FD_TYPE_PIPE_R) pipe->readers++;
-    else pipe->writers++;
+    if (type == FD_TYPE_PIPE_R || type == FD_TYPE_PIPE_RW) pipe->readers++;
+    if (type == FD_TYPE_PIPE_W || type == FD_TYPE_PIPE_RW) pipe->writers++;
     pipe_unlock_irqrestore(pipe, flags);
 }
 
@@ -49,8 +51,8 @@ static inline int pipe_release_reference(pipe_t *pipe, int type) {
 
     if (!pipe) return 0;
     flags = pipe_lock_irqsave(pipe);
-    if (type == FD_TYPE_PIPE_R) pipe->readers--;
-    else pipe->writers--;
+    if (type == FD_TYPE_PIPE_R || type == FD_TYPE_PIPE_RW) pipe->readers--;
+    if (type == FD_TYPE_PIPE_W || type == FD_TYPE_PIPE_RW) pipe->writers--;
     waitq_wake_all(&pipe->read_waitq);
     waitq_wake_all(&pipe->write_waitq);
     descriptor_ready_notify();
@@ -58,5 +60,8 @@ static inline int pipe_release_reference(pipe_t *pipe, int type) {
     pipe_unlock_irqrestore(pipe, flags);
     return release;
 }
+
+pipe_t *pipe_named_open(struct vfs_node *node, int type);
+void pipe_destroy_if_unused(pipe_t *pipe);
 
 #endif

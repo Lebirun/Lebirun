@@ -6,6 +6,7 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/inotify.h>
+#include <lebirun/fs/ext4/ext4.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -1064,6 +1065,31 @@ static void vfs_normalize_path(char *path) {
     *dst = '\0';
 }
 
+static int vfs_apply_task_root(char *path, size_t size, int depth) {
+    char rooted[VFS_MAX_PATH];
+    const char *root;
+    size_t root_len;
+    size_t path_len;
+    size_t position;
+
+    if (!current_task || !current_task->is_user || !current_task->root)
+        return 0;
+    root = current_task->root;
+    root_len = strlen(root);
+    if (depth > 0 && strncmp(path, root, root_len) == 0 &&
+        (path[root_len] == '\0' || path[root_len] == '/')) return 0;
+    path_len = strlen(path);
+    if (root_len + path_len + 1 >= sizeof(rooted)) return -1;
+    memcpy(rooted, root, root_len);
+    position = root_len;
+    if (position > 1 && rooted[position - 1] == '/') position--;
+    memcpy(rooted + position, path, path_len + 1);
+    vfs_normalize_path(rooted);
+    if (strlen(rooted) + 1 > size) return -1;
+    strcpy(path, rooted);
+    return 0;
+}
+
 #define VFS_MAX_SYMLINKS 8
 
 static int vfs_readlink_node(vfs_node_t *node, char *buf, size_t size) {
@@ -1155,6 +1181,10 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         vfs_normalize_path(resolved);
         path = resolved;
     }
+
+    if (vfs_apply_task_root(resolved, sizeof(resolved), depth) != 0)
+        return NULL;
+    path = resolved;
 
     if (path[0] != '/') return NULL;
 
@@ -1610,7 +1640,7 @@ int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index) {
     return vfs_readdir_copy(node, index, entry);
 }
 
-static vfs_mount_t *vfs_find_mount_for_node(vfs_node_t *node) {
+vfs_mount_t *vfs_get_mount_for_node(vfs_node_t *node) {
     vfs_node_t *ancestor;
     int i;
 
@@ -1625,11 +1655,18 @@ static vfs_mount_t *vfs_find_mount_for_node(vfs_node_t *node) {
     return NULL;
 }
 
+uint64_t vfs_get_mount_flags_for_node(vfs_node_t *node) {
+    vfs_mount_t *mount;
+
+    mount = vfs_get_mount_for_node(node);
+    return mount ? mount->flags : 0;
+}
+
 int vfs_sync_node(vfs_node_t *node, int data_only) {
     vfs_mount_t *mount;
 
     if (!node) return -1;
-    mount = vfs_find_mount_for_node(node);
+    mount = vfs_get_mount_for_node(node);
     if (!mount || !mount->fs_type || !mount->fs_type->sync) return 0;
     return mount->fs_type->sync(node, data_only != 0);
 }
@@ -1646,6 +1683,92 @@ int vfs_sync_all(int data_only) {
         if (mounts[i].fs_type->sync(mounts[i].root, data_only != 0) != 0)
             result = -1;
     }
+    return result;
+}
+
+int vfs_set_times(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                  uint64_t ctime) {
+    vfs_mount_t *mount;
+
+    if (!node) return -1;
+    mount = vfs_get_mount_for_node(node);
+    if (!mount || !mount->fs_type || !mount->fs_type->name) return -1;
+    if (strcmp(mount->fs_type->name, "ramfs") == 0 ||
+        strcmp(mount->fs_type->name, "tmpfs") == 0)
+        return ramfs_set_times_node(node, atime, mtime, ctime);
+    if (strcmp(mount->fs_type->name, "ext4") == 0)
+        return ext4_set_times_node(node, atime, mtime, ctime);
+    return -1;
+}
+
+int vfs_mknod(vfs_node_t *parent, const char *name, uint64_t mode) {
+    vfs_mount_t *mount;
+
+    if (!parent || !name) return -1;
+    mount = vfs_get_mount_for_node(parent);
+    if (!mount || !mount->fs_type || !mount->fs_type->name) return -1;
+    if (mount->flags & VFS_MS_RDONLY) return -1;
+    if (strcmp(mount->fs_type->name, "ramfs") == 0 ||
+        strcmp(mount->fs_type->name, "tmpfs") == 0)
+        return ramfs_mknod_node(parent, name, mode);
+    if (strcmp(mount->fs_type->name, "ext4") == 0)
+        return ext4_mknod_node(parent, name, mode);
+    return -1;
+}
+
+int vfs_exchange(vfs_node_t *old_parent, const char *old_name,
+                 vfs_node_t *new_parent, const char *new_name) {
+    vfs_mount_t *old_mount;
+    vfs_mount_t *new_mount;
+    vfs_node_t *old_node;
+    vfs_node_t *new_node;
+    vfs_node_t *ancestor;
+    int result;
+
+    old_mount = vfs_get_mount_for_node(old_parent);
+    new_mount = vfs_get_mount_for_node(new_parent);
+    if (!old_mount || old_mount != new_mount || !old_mount->fs_type ||
+        !old_mount->fs_type->name || (old_mount->flags & VFS_MS_RDONLY))
+        return -1;
+    old_node = vfs_finddir(old_parent, old_name);
+    new_node = vfs_finddir(new_parent, new_name);
+    if (!old_node || !new_node) {
+        if (old_node) vfs_release(old_node);
+        if (new_node) vfs_release(new_node);
+        return -2;
+    }
+    if (VFS_GET_TYPE(old_node->flags) == VFS_DIRECTORY) {
+        ancestor = new_parent;
+        while (ancestor) {
+            if (ancestor == old_node) {
+                vfs_release(old_node);
+                vfs_release(new_node);
+                return -2;
+            }
+            ancestor = ancestor->parent;
+        }
+    }
+    if (VFS_GET_TYPE(new_node->flags) == VFS_DIRECTORY) {
+        ancestor = old_parent;
+        while (ancestor) {
+            if (ancestor == new_node) {
+                vfs_release(old_node);
+                vfs_release(new_node);
+                return -2;
+            }
+            ancestor = ancestor->parent;
+        }
+    }
+    vfs_release(old_node);
+    vfs_release(new_node);
+    result = -1;
+    if (strcmp(old_mount->fs_type->name, "ramfs") == 0 ||
+        strcmp(old_mount->fs_type->name, "tmpfs") == 0)
+        result = ramfs_exchange_nodes(old_parent, old_name, new_parent,
+                                      new_name);
+    else if (strcmp(old_mount->fs_type->name, "ext4") == 0)
+        result = ext4_exchange_nodes(old_parent, old_name, new_parent,
+                                     new_name);
     return result;
 }
 

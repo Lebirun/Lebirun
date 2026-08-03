@@ -408,6 +408,11 @@ static int syscall_core_console_write_user(const char *buf, int len) {
     con_id = syscall_core_clamp_console(con_id);
     fb = fb_get();
     while (remaining > 0) {
+        while (tty_output_is_stopped(con_id)) {
+            sleep_ticks(1);
+            if (task_has_pending_signals())
+                return total ? (int)total : -EINTR;
+        }
         chunk = remaining;
         if (chunk > SYS_RW_STACK_BUF) chunk = SYS_RW_STACK_BUF;
         memcpy(stack_buf, (const void *)(buf_addr + total), chunk);
@@ -453,7 +458,7 @@ static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     return 0;
 }
 
-static int sys_write(int fd, const char *buf, int len) {
+static int sys_write_impl(int fd, const char *buf, int len) {
     uint64_t buf_addr;
     uint64_t work_size;
     uint64_t remaining;
@@ -528,7 +533,7 @@ static int sys_write(int fd, const char *buf, int len) {
     }
 
     if (tfd) {
-        if (tfd->type == FD_TYPE_PIPE_W) {
+        if (tfd->type == FD_TYPE_PIPE_W || tfd->type == FD_TYPE_PIPE_RW) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {
                 if (heap_buf) kfree(kbuf);
@@ -636,7 +641,22 @@ static int sys_write(int fd, const char *buf, int len) {
     return -EBADF;
 }
 
-static int sys_read(int fd, char *buf, int len) {
+static int sys_write(int fd, const char *buf, int len) {
+    task_fd_t *descriptor;
+    int result;
+
+    result = sys_write_impl(fd, buf, len);
+    if (!current_task) return result;
+    current_task->write_calls++;
+    if (result <= 0) return result;
+    current_task->written_characters += (uint64_t)result;
+    descriptor = task_fd_get(current_task, fd);
+    if (descriptor && descriptor->type == FD_TYPE_FILE)
+        current_task->file_write_bytes += (uint64_t)result;
+    return result;
+}
+
+static int sys_read_impl(int fd, char *buf, int len) {
     uint64_t buf_addr;
     uint64_t work_size;
     uint64_t remaining;
@@ -700,7 +720,7 @@ static int sys_read(int fd, char *buf, int len) {
     tfd = NULL;
     if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         tfd = &current_task->fds[fd];
-        if (tfd->type == FD_TYPE_PIPE_R) {
+        if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_RW) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {
                 if (heap_buf) kfree(kbuf);
@@ -995,7 +1015,7 @@ static int sys_read(int fd, char *buf, int len) {
                     line_cursor[con_id] = 0;
                     line_ready[con_id] = 0;
                     if (t->c_lflag & ISIG) {
-                        int fg = tty_pgrp[con_id];
+                        int fg = tty_get_foreground_pgrp(con_id);
                         if (fg > 0) {
                             pid_t pids[64];
                             int npids;
@@ -1103,7 +1123,7 @@ static int sys_read(int fd, char *buf, int len) {
                     {
                         char c = (char)key;
                         if ((t->c_lflag & ISIG) && c == 0x03) {
-                            int fg = tty_pgrp[con_id];
+                            int fg = tty_get_foreground_pgrp(con_id);
                             if (fg > 0) {
                                 pid_t pids[64];
                                 int npids;
@@ -1130,6 +1150,21 @@ static int sys_read(int fd, char *buf, int len) {
     }
     
     return initrd_read(fd, (void *)buf_addr, (uint64_t)len);
+}
+
+static int sys_read(int fd, char *buf, int len) {
+    task_fd_t *descriptor;
+    int result;
+
+    result = sys_read_impl(fd, buf, len);
+    if (!current_task) return result;
+    current_task->read_calls++;
+    if (result <= 0) return result;
+    current_task->read_characters += (uint64_t)result;
+    descriptor = task_fd_get(current_task, fd);
+    if (descriptor && descriptor->type == FD_TYPE_FILE)
+        current_task->file_read_bytes += (uint64_t)result;
+    return result;
 }
 
 int syscall_core_read_for_readv(int fd, char *buf, int len) {

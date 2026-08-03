@@ -668,9 +668,10 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
-                             uint64_t total_pages, uint64_t kernel_frames,
-                             uint64_t hole_start, uint64_t hole_end) {
+void KERNEL_EARLY_INIT pfa_init_internal_setup(
+        uint64_t bitmap_bytes, uint64_t bitmap_entries,
+        uint64_t total_pages, uint64_t kernel_frames,
+        uint64_t hole_start, uint64_t hole_end) {
     (void)hole_start;
     (void)hole_end;
     bitmap_bytes_used = bitmap_bytes;
@@ -681,7 +682,9 @@ void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
     low_page_limit = 0x00800000;
 }
 
-void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames) {
+void KERNEL_EARLY_INIT pfa_init_ram_stats(uint64_t total_kb,
+                                           uint64_t usable_kb,
+                                           uint64_t init_free_frames) {
     system_total_ram_kb = total_kb;
     system_usable_ram_kb = usable_kb;
     initial_free_frames = init_free_frames;

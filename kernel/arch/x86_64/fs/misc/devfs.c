@@ -851,7 +851,8 @@ void KERNEL_INIT devfs_init(void) {
     vfs_register_fs(fs_type);
 }
 
-int devfs_register_blockdev(const char *name, uint64_t port_index) {
+int KERNEL_INIT devfs_register_blockdev(const char *name,
+                                        uint64_t port_index) {
     int i;
     int slot;
     size_t len;
@@ -915,7 +916,8 @@ int devfs_register_blockdev(const char *name, uint64_t port_index) {
     return 0;
 }
 
-int devfs_register_cdrom(const char *name, uint64_t port_index) {
+int KERNEL_INIT devfs_register_cdrom(const char *name,
+                                     uint64_t port_index) {
     int i;
     int slot;
     size_t len;

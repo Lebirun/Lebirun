@@ -14,6 +14,8 @@ int creds_set_strict_syscalls(struct task *task);
 int creds_set_no_new_privs(struct task *task);
 int creds_get_no_new_privs(struct task *task);
 int creds_get_syscall_filter_mode(struct task *task);
+int creds_set_dumpable(struct task *task, int dumpable);
+int creds_get_dumpable(struct task *task);
 int creds_has_capability(struct task *task, int capability);
 
 pid_t creds_get_pgid(pid_t pid);

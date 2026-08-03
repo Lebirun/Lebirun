@@ -21,6 +21,7 @@ typedef struct {
     uint64_t *syscall_mask;
     int no_new_privs;
     int syscall_filter_mode;
+    int dumpable;
 } task_creds_t;
 
 #define CAP_FULL_SET 0x0000003FFFFFFFFFULL
@@ -64,6 +65,7 @@ static task_creds_t *get_task_creds(void) {
             creds->cap_effective = CAP_FULL_SET;
             creds->cap_permitted = CAP_FULL_SET;
         }
+        creds->dumpable = 1;
         current_task->creds_data = creds;
     }
     return creds;
@@ -624,6 +626,24 @@ int creds_get_syscall_filter_mode(task_t *task) {
     if (!task) return 0;
     creds = (task_creds_t *)task->creds_data;
     return creds ? creds->syscall_filter_mode : 0;
+}
+
+int creds_set_dumpable(task_t *task, int dumpable) {
+    task_creds_t *creds;
+
+    if (!task || (dumpable != 0 && dumpable != 1)) return -EINVAL;
+    creds = get_task_creds();
+    if (!creds) return -ENOMEM;
+    creds->dumpable = dumpable;
+    return 0;
+}
+
+int creds_get_dumpable(task_t *task) {
+    task_creds_t *creds;
+
+    if (!task) return 0;
+    creds = (task_creds_t *)task->creds_data;
+    return creds ? creds->dumpable : 1;
 }
 
 int creds_has_capability(task_t *task, int capability) {

@@ -12,6 +12,8 @@
 #include <lebirun/kstack.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
+#include <lebirun/smp.h>
+#include <lebirun/creds.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -145,6 +147,7 @@ extern void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 extern void slab_reclaim_empty(void);
 extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
+
 static void proc_collect_memory_report(void) {
     task_memory_collect_for_report();
     fb_reclaim_unused();
@@ -162,12 +165,29 @@ static void proc_collect_memory_report(void) {
     pfa_ref_gc();
 }
 
+static void proc_format_octal4(char *output, uint64_t value) {
+    int index;
+
+    for (index = 3; index >= 0; index--) {
+        output[index] = (char)('0' + (value & 7));
+        value >>= 3;
+    }
+    output[4] = '\0';
+}
+
 static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[2048];
+    char umask_text[5];
     int len;
     uint64_t remaining;
     task_t *task;
     uint64_t ruid, rgid;
+    uint64_t vm_kb;
+    uint64_t data_kb;
+    uint64_t rss_kb;
+    uint64_t pending;
+    uint64_t blocked;
+    unsigned long signal_limit;
 
     len = 0;
     task = procfs_get_task(node);
@@ -179,9 +199,17 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             ruid = 999;
             rgid = 999;
         }
+        vm_kb = task_user_memory_bytes(task) / 1024;
+        rss_kb = task->user_pages_count * 4;
+        data_kb = task->user_brk > task->user_brk_start ?
+                  (task->user_brk - task->user_brk_start) / 1024 : 0;
+        pending = signal_pending_mask(task);
+        blocked = signal_blocked_mask(task);
+        signal_limit = task_rlimit_get(task, 11, 0);
+        proc_format_octal4(umask_text, task->creation_mask);
         len = snprintf(buf, sizeof(buf),
             "Name:\t%.15s\n"
-            "Umask:\t0022\n"
+            "Umask:\t%s\n"
             "State:\t%c (%s)\n"
             "Tgid:\t%d\n"
             "Ngid:\t0\n"
@@ -190,35 +218,22 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             "TracerPid:\t0\n"
             "Uid:\t%lu\t%lu\t%lu\t%lu\n"
             "Gid:\t%lu\t%lu\t%lu\t%lu\n"
-            "FDSize:\t64\n"
+            "FDSize:\t%d\n"
             "Groups:\t%lu\n"
             "VmPeak:\t%lu kB\n"
             "VmSize:\t%lu kB\n"
-            "VmLck:\t0 kB\n"
-            "VmPin:\t0 kB\n"
             "VmHWM:\t%lu kB\n"
             "VmRSS:\t%lu kB\n"
             "VmData:\t%lu kB\n"
             "VmStk:\t%lu kB\n"
-            "VmExe:\t%lu kB\n"
-            "VmLib:\t0 kB\n"
-            "VmPTE:\t4 kB\n"
-            "VmSwap:\t0 kB\n"
             "Threads:\t1\n"
-            "SigQ:\t0/256\n"
+            "SigQ:\t%u/%lu\n"
             "SigPnd:\t%016lx\n"
-            "ShdPnd:\t00000000\n"
             "SigBlk:\t%016lx\n"
-            "SigIgn:\t00000000\n"
-            "SigCgt:\t00000000\n"
-            "CapInh:\t0000000000000000\n"
-            "CapPrm:\t0000003fffffffff\n"
-            "CapEff:\t0000003fffffffff\n"
-            "CapBnd:\t0000003fffffffff\n"
-            "CapAmb:\t0000000000000000\n"
-            "Seccomp:\t0\n"
+            "Seccomp:\t%d\n"
             "KernelTask:\t%d\n",
             task->name[0] ? task->name : "unknown",
+            umask_text,
             task->state == TASK_RUNNING ? 'R' : 
             task->state == TASK_BLOCKED ? 'S' : 'Z',
             task->state == TASK_RUNNING ? "running" :
@@ -226,18 +241,21 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             task->pid,
             task->pid,
             task->ppid,
-            ruid, ruid, ruid, ruid,
-            rgid, rgid, rgid, rgid,
+            ruid, task->euid, task->suid, task->fsuid,
+            rgid, task->egid, task->sgid, task->fsgid,
+            task->fds_capacity,
             rgid,
-            task->user_pages_count * 4,
-            task->user_pages_count * 4,
-            task->user_pages_count * 4,
-            task->user_pages_count * 4,
-            task->user_pages_count * 2,
+            vm_kb,
+            vm_kb,
+            task->maxrss_kb,
+            rss_kb,
+            data_kb,
             task->stack_size / 1024,
-            task->user_pages_count * 2,
-            0UL,
-            0UL,
+            signal_queue_count(task),
+            signal_limit,
+            pending,
+            blocked,
+            creds_get_syscall_filter_mode(task),
             task->is_kernel_task ? 1 : 0);
     }
     
@@ -250,32 +268,62 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
 
 static uint64_t proc_self_maps_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char buf[2048];
+    char path[VFS_MAX_PATH];
+    const char *display;
     int len;
     int n;
+    int i;
     uint64_t remaining;
+    uint64_t end;
     task_t *task;
     
     len = 0;
     task = procfs_get_task(node);
     
-    if (task && task->user_brk > 0) {
+    if (task) {
+        for (i = 0; i < task->file_map_count &&
+             len < (int)sizeof(buf) - 1; i++) {
+            end = task->file_maps[i].vaddr + task->file_maps[i].memsz;
+            display = "";
+            if (task->file_maps[i].node &&
+                vfs_get_path(task->file_maps[i].node, path,
+                             sizeof(path)))
+                display = path;
+            else if (task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS)
+                display = "[anon]";
+            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
+                "%016lx-%016lx %c%c%c%c %08lx 00:00 %lu%s%s\n",
+                task->file_maps[i].vaddr, end,
+                task->file_maps[i].flags & 1 ? 'r' : '-',
+                task->file_maps[i].flags & 2 ? 'w' : '-',
+                task->file_maps[i].flags & 4 ? 'x' : '-',
+                task->file_maps[i].map_flags & TASK_VMA_SHARED ? 's' : 'p',
+                task->file_maps[i].offset,
+                task->file_maps[i].node ? task->file_maps[i].node->inode : 0,
+                display[0] ? " " : "", display);
+            if (n < 0) break;
+            if (n >= (int)sizeof(buf) - len) {
+                len = (int)sizeof(buf) - 1;
+                break;
+            }
+            len += n;
+        }
+    }
+    if (task && task->user_brk > task->user_brk_start) {
         if (len < (int)sizeof(buf) - 1) {
             n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "00100000-%016lx r-xp 00000000 00:00 0 [text]\n",
-                (uint64_t)0x00400000);
+                "%016lx-%016lx rw-p 00000000 00:00 0 [heap]\n",
+                task->user_brk_start, task->user_brk);
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
         }
+    }
+    if (task && task->stack_size > 0) {
         if (len < (int)sizeof(buf) - 1) {
             n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "00400000-%016lx rw-p 00000000 00:00 0 [heap]\n",
-                task->user_brk);
-            if (n > 0) len += n;
-            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
-        }
-        if (len < (int)sizeof(buf) - 1) {
-            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "007f0000-00800000 rw-p 00000000 00:00 0 [stack]\n");
+                "%016lx-%016lx rw-p 00000000 00:00 0 [stack]\n",
+                USER_STACK_TOP - task->stack_size,
+                (uint64_t)USER_STACK_TOP);
             if (n > 0) len += n;
             if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
         }
@@ -453,31 +501,64 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
 }
 
 static uint64_t proc_cpuinfo_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    const char *info;
+    char *info;
+    char vendor[13];
+    size_t capacity;
     uint64_t len;
     uint64_t remaining;
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t family;
+    uint32_t model;
+    int written;
+    int i;
     
     (void)node;
     
-    info = 
-        "processor\t: 0\n"
-        "vendor_id\t: GenuineIntel\n"
-        "cpu family\t: 6\n"
-        "model\t\t: 0\n"
-        "model name\t: Intel(R) Processor\n"
-        "stepping\t: 0\n"
-        "cpu MHz\t\t: 1000.000\n"
-        "cache size\t: 256 KB\n"
-        "bogomips\t: 2000.00\n"
-        "flags\t\t: fpu vme de pse tsc msr pae mce cx8\n\n";
-    
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx),
+                     "=d"(edx) : "a"(0));
+    memcpy(vendor, &ebx, 4);
+    memcpy(vendor + 4, &edx, 4);
+    memcpy(vendor + 8, &ecx, 4);
+    vendor[12] = '\0';
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx),
+                     "=d"(edx) : "a"(1));
+    family = (eax >> 8) & 0xF;
+    if (family == 0xF) family += (eax >> 20) & 0xFF;
+    model = (eax >> 4) & 0xF;
+    if (family == 6 || family == 15) model |= ((eax >> 16) & 0xF) << 4;
+    capacity = (size_t)(cpu_count > 0 ? cpu_count : 1) * 160;
+    info = (char *)kmalloc(capacity);
+    if (!info) return 0;
     len = 0;
-    while (info[len]) len++;
+    for (i = 0; i < (cpu_count > 0 ? cpu_count : 1); i++) {
+        written = snprintf(info + len, capacity - len,
+            "processor\t: %d\n"
+            "vendor_id\t: %s\n"
+            "cpu family\t: %u\n"
+            "model\t\t: %u\n"
+            "stepping\t: %u\n"
+            "apicid\t\t: %lu\n\n",
+            i, vendor, family, model, eax & 0xF,
+            cpus && i < cpu_count ? cpus[i].lapic_id : 0);
+        if (written < 0) break;
+        len += (uint64_t)written;
+        if (len >= capacity) {
+            len = capacity;
+            break;
+        }
+    }
     
-    if (offset >= len) return 0;
+    if (offset >= len) {
+        kfree(info);
+        return 0;
+    }
     remaining = len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, info + offset, size);
+    kfree(info);
     return size;
 }
 
@@ -590,33 +671,57 @@ static uint64_t proc_self_comm_read(vfs_node_t *node, uint64_t offset, uint64_t 
 }
 
 static uint64_t proc_self_limits_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    const char *buf;
+    static const char *names[] = {
+        "Max cpu time", "Max file size", "Max data size",
+        "Max stack size", "Max core file size", "Max resident set",
+        "Max processes", "Max open files", "Max locked memory",
+        "Max address space", "Max file locks", "Max pending signals",
+        "Max msgqueue size", "Max nice priority",
+        "Max realtime priority", "Max realtime timeout"
+    };
+    static const char *units[] = {
+        "seconds", "bytes", "bytes", "bytes", "bytes", "bytes",
+        "processes", "files", "bytes", "bytes", "locks", "signals",
+        "bytes", "", "", "us"
+    };
+    char buf[2048];
+    char soft_text[32];
+    char hard_text[32];
     uint64_t len;
     uint64_t remaining;
-    
-    (void)node;
-    
-    buf = 
-        "Limit                     Soft Limit           Hard Limit           Units     \n"
-        "Max cpu time              unlimited            unlimited            seconds   \n"
-        "Max file size             unlimited            unlimited            bytes     \n"
-        "Max data size             unlimited            unlimited            bytes     \n"
-        "Max stack size            8388608              unlimited            bytes     \n"
-        "Max core file size        0                    unlimited            bytes     \n"
-        "Max resident set          unlimited            unlimited            bytes     \n"
-        "Max processes             256                  256                  processes \n"
-        "Max open files            64                   64                   files     \n"
-        "Max locked memory         65536                65536                bytes     \n"
-        "Max address space         unlimited            unlimited            bytes     \n"
-        "Max file locks            unlimited            unlimited            locks     \n"
-        "Max pending signals       256                  256                  signals   \n"
-        "Max msgqueue size         819200               819200               bytes     \n"
-        "Max nice priority         0                    0                    \n"
-        "Max realtime priority     0                    0                    \n"
-        "Max realtime timeout      unlimited            unlimited            us        \n";
-    
-    len = 0;
-    while (buf[len]) len++;
+    unsigned long soft;
+    unsigned long hard;
+    task_t *task;
+    int written;
+    int resource;
+
+    task = procfs_get_task(node);
+    if (!task) return 0;
+    written = snprintf(buf, sizeof(buf),
+        "Limit                     Soft Limit           Hard Limit           Units     \n");
+    if (written < 0) return 0;
+    len = (uint64_t)written;
+    for (resource = 0; resource < 16 && len < sizeof(buf); resource++) {
+        soft = task_rlimit_get(task, resource, 0);
+        hard = task_rlimit_get(task, resource, 1);
+        if (soft == (unsigned long)-1)
+            strcpy(soft_text, "unlimited");
+        else
+            snprintf(soft_text, sizeof(soft_text), "%lu", soft);
+        if (hard == (unsigned long)-1)
+            strcpy(hard_text, "unlimited");
+        else
+            snprintf(hard_text, sizeof(hard_text), "%lu", hard);
+        written = snprintf(buf + len, sizeof(buf) - len,
+            "%-25s %-20s %-20s %s\n", names[resource], soft_text,
+            hard_text, units[resource]);
+        if (written < 0) break;
+        if ((uint64_t)written >= sizeof(buf) - len) {
+            len = sizeof(buf) - 1;
+            break;
+        }
+        len += (uint64_t)written;
+    }
     
     if (offset >= len) return 0;
     remaining = len - offset;
@@ -626,23 +731,27 @@ static uint64_t proc_self_limits_read(vfs_node_t *node, uint64_t offset, uint64_
 }
 
 static uint64_t proc_self_io_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    const char *buf;
+    char buf[256];
     uint64_t len;
     uint64_t remaining;
+    task_t *task;
+    int written;
     
-    (void)node;
-    
-    buf = 
-        "rchar: 0\n"
-        "wchar: 0\n"
-        "syscr: 0\n"
-        "syscw: 0\n"
-        "read_bytes: 0\n"
-        "write_bytes: 0\n"
-        "cancelled_write_bytes: 0\n";
-    
-    len = 0;
-    while (buf[len]) len++;
+    task = procfs_get_task(node);
+    if (!task) return 0;
+    written = snprintf(buf, sizeof(buf),
+        "rchar: %lu\n"
+        "wchar: %lu\n"
+        "syscr: %lu\n"
+        "syscw: %lu\n"
+        "read_bytes: %lu\n"
+        "write_bytes: %lu\n"
+        "cancelled_write_bytes: 0\n",
+        task->read_characters, task->written_characters,
+        task->read_calls, task->write_calls,
+        task->file_read_bytes, task->file_write_bytes);
+    if (written < 0) return 0;
+    len = (uint64_t)written;
     
     if (offset >= len) return 0;
     remaining = len - offset;
@@ -652,8 +761,13 @@ static uint64_t proc_self_io_read(vfs_node_t *node, uint64_t offset, uint64_t si
 }
 
 static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[512];
+    char *buf;
+    size_t capacity;
     int len;
+    int written;
+    int i;
+    int process_count;
+    int blocked;
     uint64_t remaining;
     static uint64_t cached_btime = 0;
     uint64_t btime;
@@ -666,6 +780,7 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     uint64_t running;
     task_t *t;
     task_t *start;
+    extern volatile uint64_t task_context_switches;
     
     (void)node;
     
@@ -674,12 +789,14 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     idle_t = cpu_idle_ticks;
     
     running = 0;
+    blocked = 0;
     start = ready_queue_head;
     t = start;
     if (t) {
         do {
             if (t->state == TASK_RUNNING || t->state == TASK_READY)
                 running++;
+            if (t->state == TASK_BLOCKED) blocked++;
             t = t->next;
         } while (t && t != start);
     }
@@ -689,28 +806,50 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
         cached_btime = rtc_get_time();
     btime = cached_btime;
     
-    len = snprintf(buf, sizeof(buf),
-        "cpu  %lu 0 %lu %lu 0 0 0 0 0 0\n"
-        "cpu0 %lu 0 %lu %lu 0 0 0 0 0 0\n"
+    process_count = 0;
+    task_get_cached_stats(&process_count, NULL, NULL, NULL);
+    capacity = (size_t)(cpu_count + 10) * 96;
+    buf = (char *)kmalloc(capacity);
+    if (!buf) return 0;
+    len = snprintf(buf, capacity,
+        "cpu  %lu 0 %lu %lu 0 0 0 0 0 0\n",
+        user_t, sys_t, idle_t);
+    for (i = 0; i < cpu_count && len < (int)capacity; i++) {
+        written = snprintf(buf + len, capacity - (size_t)len,
+            "cpu%d %lu 0 %lu %lu 0 0 0 0 0 0\n", i,
+            cpus ? cpus[i].user_ticks : 0,
+            cpus ? cpus[i].system_ticks : 0,
+            cpus ? cpus[i].idle_ticks : 0);
+        if (written < 0) break;
+        len += written;
+    }
+    if (len < (int)capacity) {
+        written = snprintf(buf + len, capacity - (size_t)len,
         "intr %lu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
         "ctxt %lu\n"
         "btime %lu\n"
         "processes %d\n"
         "procs_running %lu\n"
-        "procs_blocked 0\n"
+        "procs_blocked %d\n"
         "softirq 0 0 0 0 0 0 0 0 0 0 0\n",
-        user_t, sys_t, idle_t,
-        user_t, sys_t, idle_t,
         tick_count,
-        tick_count,
+        task_context_switches,
         btime,
-        current_task ? current_task->pid : 1,
-        running);
+        process_count,
+        running,
+        blocked);
+        if (written > 0) len += written;
+    }
+    if (len > (int)capacity) len = (int)capacity;
     
-    if (offset >= (uint64_t)len) return 0;
+    if (offset >= (uint64_t)len) {
+        kfree(buf);
+        return 0;
+    }
     remaining = (uint64_t)len - offset;
     if (size > remaining) size = remaining;
     memcpy(buffer, buf + offset, size);
+    kfree(buf);
     return size;
 }
 

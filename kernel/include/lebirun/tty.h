@@ -181,6 +181,9 @@ struct winsize {
     unsigned short ws_ypixel;
 };
 
+int tty_get_foreground_pgrp(int tty_id);
+int tty_output_is_stopped(int tty_id);
+
 void terminal_initialize(void);
 void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type);
 void terminal_putchar(char c);

@@ -1,7 +1,8 @@
 #include <lebirun/security.h>
+#include <lebirun/common.h>
 #include <stdint.h>
 
-void x86_security_enable(void) {
+void KERNEL_INIT x86_security_enable(void) {
     uint32_t eax;
     uint32_t ebx;
     uint32_t ecx;

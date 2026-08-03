@@ -124,6 +124,9 @@ typedef struct {
 } vfs_mount_t;
 
 #define VFS_MS_RDONLY   1
+#define VFS_MS_NOSUID   2
+#define VFS_MS_NODEV    4
+#define VFS_MS_NOEXEC   8
 #define VFS_MS_REMOUNT  32
 
 void vfs_init(void);
@@ -170,11 +173,18 @@ int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags);
 int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index);
 int vfs_sync_node(vfs_node_t *node, int data_only);
 int vfs_sync_all(int data_only);
+int vfs_set_times(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                  uint64_t ctime);
+int vfs_mknod(vfs_node_t *parent, const char *name, uint64_t mode);
+int vfs_exchange(vfs_node_t *old_parent, const char *old_name,
+                 vfs_node_t *new_parent, const char *new_name);
 
 vfs_node_t *vfs_get_root(void);
 int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name);
 int vfs_get_mount_count(void);
 vfs_mount_t *vfs_get_mount(int index);
+vfs_mount_t *vfs_get_mount_for_node(vfs_node_t *node);
+uint64_t vfs_get_mount_flags_for_node(vfs_node_t *node);
 void vfs_list_mounts(void);
 
 #endif

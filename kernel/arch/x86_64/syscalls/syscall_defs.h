@@ -25,6 +25,7 @@ void syscall_set_exec_completed(void);
 int syscall_check_exec_completed(void);
 void syscall_clear_exec_completed(void);
 void syscall_core_flush_tty_input(int con_id);
+int vfs_check_perm(vfs_node_t *node, int want);
 
 #define EPERM    1
 #define ENOENT   2
@@ -420,7 +421,16 @@ void syscall_core_flush_tty_input(int con_id);
 #define SYSCALL_CAPGET 288
 #define SYSCALL_CAPSET 289
 
-#define NR_SYSCALLS 290
+#define SYSCALL_CHROOT 290
+#define SYSCALL_CLOCK_SETTIME 291
+#define SYSCALL_SETTIMEOFDAY 292
+#define SYSCALL_CLOCK_GETRES 293
+#define SYSCALL_CLOCK_NANOSLEEP 294
+#define SYSCALL_SYNC 295
+#define SYSCALL_SYNCFS 296
+#define SYSCALL_MSYNC 297
+
+#define NR_SYSCALLS 298
 
 struct kernel_stat {
     unsigned long long st_dev;

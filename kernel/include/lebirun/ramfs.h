@@ -58,6 +58,10 @@ void tmpfs_vfs_register(void);
 int ramfs_create_file(const char *path, uint16_t permissions);
 int ramfs_create_dir(const char *path, uint16_t permissions);
 int ramfs_create_symlink(const char *path, const char *target, uint16_t permissions);
+int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
+                              const char *target, uint16_t permissions);
+int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
+                    const char *name);
 int ramfs_unlink(const char *path);
 int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t size);
 int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size);
@@ -66,6 +70,11 @@ int ramfs_truncate(const char *path, uint64_t length);
 int ramfs_rename(const char *old_path, const char *new_path);
 int ramfs_chmod(const char *path, uint64_t mode);
 int ramfs_chown(const char *path, uint64_t uid, uint64_t gid);
+int ramfs_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                         uint64_t ctime);
+int ramfs_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode);
+int ramfs_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
+                         vfs_node_t *new_parent, const char *new_name);
 int ramfs_set_backing(const char *path, const uint8_t *data, uint64_t length);
 
 ramfs_node_t *ramfs_get_root(void);

@@ -48,6 +48,15 @@
 #define FUTEX_PRIVATE_FLAG  128
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_BITSET_MATCH_ANY 0xFFFFFFFFU
+#define FUTEX_WAITERS          0x80000000U
+#define FUTEX_OWNER_DIED       0x40000000U
+#define FUTEX_TID_MASK         0x3FFFFFFFU
+#define FUTEX_OP_SET           0
+#define FUTEX_OP_ADD           1
+#define FUTEX_OP_OR            2
+#define FUTEX_OP_ANDN          3
+#define FUTEX_OP_XOR           4
+#define FUTEX_OP_ARG_SHIFT     8
 
 #define EFD_SEMAPHORE 1
 #define EFD_CLOEXEC   0x80000
@@ -412,7 +421,7 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
     found = -1;
     vacant = -1;
     for (i = 0; i < ep->fd_count; i++) {
-        if (ep->fds[i].fd == fd && ep->fds[i].active) {
+        if (ep->fds[i].fd == fd) {
             found = i;
             break;
         }
@@ -647,14 +656,23 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     int ret;
     int realtime;
     uint64_t key;
+    uint64_t key2;
     uint64_t timeout_ticks;
+    int value;
+    int compare_value;
+    int operation;
+    int comparison;
+    int operation_argument;
+    int comparison_argument;
+    int new_value;
+    int expected_value;
+    int result;
 
     op = (int)(uintptr_t)op_ptr;
     cmd = op & 127;
     if (op & ~(127 | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
         return -EINVAL;
     realtime = (op & FUTEX_CLOCK_REALTIME) != 0;
-    (void)uaddr2;
     ret = futex_get_key(uaddr, &key);
     if (ret < 0) return ret;
 
@@ -663,28 +681,90 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
             if (realtime) return -ENOSYS;
             ret = futex_timeout_ticks(timeout, 0, 0, &timeout_ticks);
             if (ret < 0) return ret;
-            return task_futex_wait(key, uaddr, val, timeout_ticks);
+            return task_futex_wait(key, uaddr, val, timeout_ticks,
+                                   FUTEX_BITSET_MATCH_ANY);
 
         case FUTEX_WAKE:
             if (realtime) return -EINVAL;
             return task_futex_wake(key, val);
 
         case FUTEX_REQUEUE:
+            ret = futex_get_key(uaddr2, &key2);
+            if (ret < 0) return ret;
+            return task_futex_requeue(key, key2, val,
+                                      (int)(uintptr_t)timeout);
+
         case FUTEX_CMP_REQUEUE:
+            ret = futex_get_key(uaddr2, &key2);
+            if (ret < 0) return ret;
+            if (copy_from_user(&value, uaddr, sizeof(value)) < 0)
+                return -EFAULT;
+            if (value != (int)val3) return -EAGAIN;
+            return task_futex_requeue(key, key2, val,
+                                      (int)(uintptr_t)timeout);
+
         case FUTEX_WAKE_OP:
-            return -ENOSYS;
+            ret = futex_get_key(uaddr2, &key2);
+            if (ret < 0) return ret;
+            if (copy_from_user(&value, uaddr2, sizeof(value)) < 0)
+                return -EFAULT;
+            operation = (int)((val3 >> 28) & 0xF);
+            comparison = (int)((val3 >> 24) & 0xF);
+            operation_argument = (int)((val3 >> 12) & 0xFFF);
+            comparison_argument = (int)(val3 & 0xFFF);
+            if (operation_argument & 0x800) operation_argument |= ~0xFFF;
+            if (comparison_argument & 0x800)
+                comparison_argument |= ~0xFFF;
+            if (operation & FUTEX_OP_ARG_SHIFT) {
+                operation &= ~FUTEX_OP_ARG_SHIFT;
+                if (operation_argument >= 31) return -EINVAL;
+                operation_argument = 1 << operation_argument;
+            }
+            new_value = value;
+            if (operation == FUTEX_OP_SET) new_value = operation_argument;
+            else if (operation == FUTEX_OP_ADD) new_value += operation_argument;
+            else if (operation == FUTEX_OP_OR) new_value |= operation_argument;
+            else if (operation == FUTEX_OP_ANDN) new_value &= ~operation_argument;
+            else if (operation == FUTEX_OP_XOR) new_value ^= operation_argument;
+            else return -ENOSYS;
+            expected_value = value;
+            while (!__atomic_compare_exchange_n(uaddr2, &expected_value,
+                    new_value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                value = expected_value;
+                new_value = value;
+                if (operation == FUTEX_OP_SET)
+                    new_value = operation_argument;
+                else if (operation == FUTEX_OP_ADD)
+                    new_value += operation_argument;
+                else if (operation == FUTEX_OP_OR)
+                    new_value |= operation_argument;
+                else if (operation == FUTEX_OP_ANDN)
+                    new_value &= ~operation_argument;
+                else
+                    new_value ^= operation_argument;
+            }
+            result = task_futex_wake(key, val);
+            compare_value = comparison_argument;
+            if ((comparison == 0 && value == compare_value) ||
+                (comparison == 1 && value != compare_value) ||
+                (comparison == 2 && value < compare_value) ||
+                (comparison == 3 && value <= compare_value) ||
+                (comparison == 4 && value > compare_value) ||
+                (comparison == 5 && value >= compare_value))
+                result += task_futex_wake(key2, (int)(uintptr_t)timeout);
+            return result;
 
         case FUTEX_WAIT_BITSET:
-            if (val3 != FUTEX_BITSET_MATCH_ANY) return -ENOSYS;
+            if (val3 == 0) return -EINVAL;
             ret = futex_timeout_ticks(timeout, 1, realtime,
                                       &timeout_ticks);
             if (ret < 0) return ret;
-            return task_futex_wait(key, uaddr, val, timeout_ticks);
+            return task_futex_wait(key, uaddr, val, timeout_ticks, val3);
 
         case FUTEX_WAKE_BITSET:
             if (realtime) return -EINVAL;
             if (val3 == 0) return -EINVAL;
-            return task_futex_wake(key, val);
+            return task_futex_wake_bitset(key, val, val3);
 
         default:
             return -ENOSYS;
@@ -764,17 +844,129 @@ static int sys_eventfd2(unsigned int initval, const char *flags_ptr, int unused)
     return EVENTFD_BASE_FD + idx;
 }
 
-static int sys_set_robust_list(int head, const char *len_ptr, int unused) {
-    (void)head; (void)len_ptr; (void)unused;
-    if (current_task) {
-        current_task->robust_list = (void *)(uintptr_t)head;
-    }
+static int sys_set_robust_list(void *head, size_t length, int unused) {
+    (void)unused;
+    if (!current_task) return -ESRCH;
+    if (length != 3 * sizeof(long)) return -EINVAL;
+    current_task->robust_list = head;
+    current_task->robust_list_len = length;
     return 0;
 }
 
-static int sys_get_robust_list(int pid, const char *head_ptr_ptr, int len_ptr) {
-    (void)pid; (void)head_ptr_ptr; (void)len_ptr;
+static int sys_get_robust_list(int pid, void **head_ptr, size_t *length_ptr) {
+    task_t *task;
+    void *head;
+    size_t length;
+
+    if (!head_ptr || !length_ptr) return -EFAULT;
+    if (pid == 0) {
+        task = current_task;
+    } else {
+        task = task_find((pid_t)pid);
+    }
+    if (!task) return -ESRCH;
+    if (task != current_task && current_task && current_task->euid != 0 &&
+        current_task->euid != task->euid) return -EPERM;
+    head = task->robust_list;
+    length = task->robust_list_len;
+    if (copy_to_user(head_ptr, &head, sizeof(head)) < 0) return -EFAULT;
+    if (copy_to_user(length_ptr, &length, sizeof(length)) < 0) return -EFAULT;
     return 0;
+}
+
+typedef struct robust_list_head {
+    struct robust_list_head *next;
+    long futex_offset;
+    struct robust_list_head *pending;
+} robust_list_head_t;
+
+static int robust_task_range_mapped(task_t *task, const void *address,
+                                    size_t size) {
+    uint64_t start;
+    uint64_t end;
+    uint64_t page;
+
+    if (!task || !address || size == 0 || !task->pml4_phys) return 0;
+    start = (uint64_t)(uintptr_t)address;
+    end = start + size - 1;
+    if (start < 0x1000 || end < start || end >= KERNEL_VMA) return 0;
+    page = start & ~(PAGE_SIZE - 1);
+    while (page <= end) {
+        if (!vmm_get_phys_in_pml4(task->pml4_phys, page)) return 0;
+        if (page > UINT64_MAX - PAGE_SIZE) return 0;
+        page += PAGE_SIZE;
+    }
+    return 1;
+}
+
+static int robust_task_read(task_t *task, const void *address, void *value,
+                            size_t size) {
+    if (!robust_task_range_mapped(task, address, size)) return -1;
+    if (task == current_task)
+        return copy_from_user(value, address, size);
+    vmm_read_from_pml4(task->pml4_phys, (uint64_t)(uintptr_t)address,
+                       value, size);
+    return 0;
+}
+
+static int robust_task_write(task_t *task, void *address, const void *value,
+                             size_t size) {
+    if (!robust_task_range_mapped(task, address, size)) return -1;
+    if (task == current_task)
+        return copy_to_user(address, value, size);
+    vmm_copy_to_pml4(task->pml4_phys, (uint64_t)(uintptr_t)address,
+                     value, size);
+    return 0;
+}
+
+static void robust_mark_owner_dead(task_t *task, void *entry, long offset,
+                                   pid_t pid) {
+    int *futex_word;
+    int value;
+    int replacement;
+    uint64_t key;
+    uint64_t address;
+    uint64_t physical;
+
+    if (!entry) return;
+    futex_word = (int *)((uint8_t *)entry + offset);
+    if (robust_task_read(task, futex_word, &value, sizeof(value)) < 0) return;
+    if (((uint32_t)value & FUTEX_TID_MASK) != ((uint32_t)pid & FUTEX_TID_MASK))
+        return;
+    replacement = (int)(((uint32_t)value & FUTEX_WAITERS) | FUTEX_OWNER_DIED);
+    if (robust_task_write(task, futex_word, &replacement,
+                          sizeof(replacement)) < 0)
+        return;
+    address = (uint64_t)(uintptr_t)futex_word;
+    physical = vmm_get_phys_in_pml4(task->pml4_phys, address);
+    if (physical) {
+        key = physical + (address & (PAGE_SIZE - 1));
+        task_futex_wake(key, 1);
+    }
+}
+
+void syscall_robust_list_exit(task_t *task) {
+    robust_list_head_t head;
+    robust_list_head_t *entry;
+    robust_list_head_t *next;
+    int count;
+
+    if (!task || !task->robust_list) return;
+    if (robust_task_read(task, task->robust_list, &head,
+                         sizeof(head)) < 0) return;
+    entry = head.next;
+    count = 0;
+    while (entry && entry != task->robust_list && count < 2048) {
+        if (robust_task_read(task, entry, &next, sizeof(next)) < 0) break;
+        if (entry != head.pending)
+            robust_mark_owner_dead(task, entry, head.futex_offset,
+                                   task->pid);
+        entry = next;
+        count++;
+    }
+    robust_mark_owner_dead(task, head.pending, head.futex_offset, task->pid);
+    task->robust_list = NULL;
+    task->robust_list_len = 0;
 }
 
 static int sys_timerfd_create(int clockid, const char *flags_ptr, int unused) {

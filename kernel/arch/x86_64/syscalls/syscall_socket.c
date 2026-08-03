@@ -58,6 +58,7 @@
 #define BACKLOG_INIT_SIZE 8
 #define UNIX_PATH_MAX 108
 #define SCM_MAX_FDS 16
+#define SOCKET_IOV_MAX 1024
 
 typedef unsigned int socklen_t;
 typedef long ssize_t;
@@ -97,12 +98,14 @@ struct iovec {
 
 struct msghdr {
     void *msg_name;
-    struct iovec *msg_iov;
-    size_t msg_iovlen;
-    void *msg_control;
-    size_t msg_controllen;
-    int msg_flags;
     socklen_t msg_namelen;
+    struct iovec *msg_iov;
+    int msg_iovlen;
+    int msg_iov_padding;
+    void *msg_control;
+    socklen_t msg_controllen;
+    int msg_control_padding;
+    int msg_flags;
 };
 
 struct timeval {
@@ -122,7 +125,8 @@ typedef enum {
 } sock_state_t;
 
 struct cmsghdr {
-    uint64_t cmsg_len;
+    socklen_t cmsg_len;
+    int cmsg_padding;
     int cmsg_level;
     int cmsg_type;
 };
@@ -215,11 +219,10 @@ static void socket_release_pending_fd(task_fd_t *fd) {
     if (!fd || !fd->in_use) return;
     if (fd->type == FD_TYPE_FILE && fd->node) {
         vfs_close((vfs_node_t *)fd->node);
-    } else if ((fd->type == FD_TYPE_PIPE_R || fd->type == FD_TYPE_PIPE_W) && fd->private_data) {
+    } else if (FD_TYPE_IS_PIPE(fd->type) && fd->private_data) {
         pipe = (pipe_t *)fd->private_data;
         if (pipe_release_reference(pipe, fd->type)) {
-            if (pipe->buffer) kfree(pipe->buffer);
-            kfree(pipe);
+            pipe_destroy_if_unused(pipe);
         }
     }
     memset(fd, 0, sizeof(task_fd_t));
@@ -438,15 +441,20 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
     return socket_base_fd + idx;
 }
 
-static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
-    int type = (int)(uintptr_t)type_ptr;
-    int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
-    int *sv;
+static int sys_socketpair(int domain, const char *type_ptr, int protocol,
+                          int *sv) {
+    int type;
+    int flags;
+    int sv_values[2];
     int idx1;
     int idx2;
+
+    (void)protocol;
+    type = (int)(uintptr_t)type_ptr;
+    flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
     type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
-    sv = (int *)(uintptr_t)protocol_sv;
-    
+    if (!sv) return -EFAULT;
+
     if (domain != AF_UNIX) {
         return -EAFNOSUPPORT;
     }
@@ -478,9 +486,14 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol_sv) {
     sockets[idx2].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
     sockets[idx2].peer_socket = idx1;
     
-    sv[0] = socket_base_fd + idx1;
-    sv[1] = socket_base_fd + idx2;
-    
+    sv_values[0] = socket_base_fd + idx1;
+    sv_values[1] = socket_base_fd + idx2;
+    if (copy_to_user(sv, sv_values, sizeof(sv_values)) < 0) {
+        free_socket(idx1);
+        free_socket(idx2);
+        return -EFAULT;
+    }
+
     return 0;
 }
 
@@ -1054,8 +1067,9 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
-    struct msghdr *msg;
-    struct cmsghdr *cmsg;
+    struct msghdr msg;
+    struct cmsghdr cmsg;
+    struct iovec iov;
     ssize_t total;
     ssize_t sent;
     socket_t *sock;
@@ -1063,28 +1077,38 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     task_fd_t *src_tfd;
     pipe_t *passed_pipe;
     int nfds_to_pass;
-    int *fd_arr;
+    int fd_arr[SCM_MAX_FDS];
     int i;
     int src_fd;
-    size_t iov_index;
+    int iov_index;
+    size_t fd_bytes;
+    const uint8_t *control_data;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
-
-    msg = (struct msghdr *)(uintptr_t)msg_ptr;
-    if (!msg) return -EFAULT;
+    if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
+        return -EFAULT;
+    if (msg.msg_iovlen < 0 || msg.msg_iovlen > SOCKET_IOV_MAX)
+        return -EINVAL;
+    if (msg.msg_iovlen != 0 && !msg.msg_iov) return -EFAULT;
 
     (void)flags;
 
-    if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr)) {
-        cmsg = (struct cmsghdr *)msg->msg_control;
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
-                cmsg->cmsg_len > msg->msg_controllen)
+    if (msg.msg_control && msg.msg_controllen >= sizeof(struct cmsghdr)) {
+        if (copy_from_user(&cmsg, msg.msg_control, sizeof(cmsg)) < 0)
+            return -EFAULT;
+        if (cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS) {
+            if (cmsg.cmsg_len < sizeof(struct cmsghdr) ||
+                cmsg.cmsg_len > msg.msg_controllen)
                 return -EINVAL;
-            nfds_to_pass = (int)((cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
-            fd_arr = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
+            fd_bytes = cmsg.cmsg_len - sizeof(struct cmsghdr);
+            if (fd_bytes % sizeof(int) != 0) return -EINVAL;
+            nfds_to_pass = (int)(fd_bytes / sizeof(int));
             if (nfds_to_pass > SCM_MAX_FDS) nfds_to_pass = SCM_MAX_FDS;
+            control_data = (const uint8_t *)msg.msg_control + sizeof(struct cmsghdr);
+            if (copy_from_user(fd_arr, control_data,
+                               (size_t)nfds_to_pass * sizeof(int)) < 0)
+                return -EFAULT;
             if (sock->peer_socket < 0 || sock->peer_socket >= socket_capacity)
                 return -ENOTCONN;
             peer = &sockets[sock->peer_socket];
@@ -1108,7 +1132,7 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                     vfs_open((vfs_node_t *)src_tfd->node, 0);
                     task_fd_position_share(src_tfd, &peer->pending_fds[peer->pending_fd_count]);
                 }
-                if (src_tfd->private_data && (src_tfd->type == FD_TYPE_PIPE_R || src_tfd->type == FD_TYPE_PIPE_W)) {
+                if (src_tfd->private_data && FD_TYPE_IS_PIPE(src_tfd->type)) {
                     passed_pipe = (pipe_t *)src_tfd->private_data;
                     pipe_retain_reference(passed_pipe, src_tfd->type);
                 }
@@ -1118,9 +1142,14 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     }
 
     total = 0;
-    for (iov_index = 0; iov_index < msg->msg_iovlen; iov_index++) {
-        sent = sys_sendto(sockfd, (const char *)(uintptr_t)msg->msg_iov[iov_index].iov_base,
-                          msg->msg_iov[iov_index].iov_len, flags, 0, 0);
+    for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
+            return -EFAULT;
+        if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
+        if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_READ))
+            return -EFAULT;
+        sent = sys_sendto(sockfd, (const char *)(uintptr_t)iov.iov_base,
+                          (int)iov.iov_len, flags, 0, 0);
         if (sent < 0) return sent;
         total += sent;
     }
@@ -1161,35 +1190,42 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
-    struct msghdr *msg;
-    struct cmsghdr *cmsg;
+    struct msghdr msg;
+    struct cmsghdr cmsg;
+    struct iovec iov;
     ssize_t total;
     ssize_t recvd;
     socket_t *sock;
     int nfds;
-    uint64_t needed;
-    int *out_fds;
+    socklen_t needed;
+    int out_fds[SCM_MAX_FDS];
     int i;
     int newfd;
-    size_t iov_index;
+    int iov_index;
+    uint8_t *control_data;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
-
-    msg = (struct msghdr *)(uintptr_t)msg_ptr;
-    if (!msg) return -EFAULT;
+    if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
+        return -EFAULT;
+    if (msg.msg_iovlen < 0 || msg.msg_iovlen > SOCKET_IOV_MAX)
+        return -EINVAL;
+    if (msg.msg_iovlen != 0 && !msg.msg_iov) return -EFAULT;
 
     (void)flags;
+    msg.msg_flags = 0;
 
-    if (msg->msg_control && msg->msg_controllen >= sizeof(struct cmsghdr) && sock->pending_fd_count > 0) {
-        cmsg = (struct cmsghdr *)msg->msg_control;
+    if (sock->pending_fd_count > 0) {
         nfds = sock->pending_fd_count;
-        needed = sizeof(struct cmsghdr) + (uint64_t)nfds * sizeof(int);
-        if (needed <= msg->msg_controllen) {
-            cmsg->cmsg_len = needed;
-            cmsg->cmsg_level = SOL_SOCKET;
-            cmsg->cmsg_type = SCM_RIGHTS;
-            out_fds = (int *)((uint8_t *)cmsg + sizeof(struct cmsghdr));
+        needed = (socklen_t)(sizeof(struct cmsghdr) +
+                             (size_t)nfds * sizeof(int));
+        if (msg.msg_control && needed <= msg.msg_controllen) {
+            if (!user_access_ok(msg.msg_control, needed, UACCESS_WRITE))
+                return -EFAULT;
+            memset(&cmsg, 0, sizeof(cmsg));
+            cmsg.cmsg_len = needed;
+            cmsg.cmsg_level = SOL_SOCKET;
+            cmsg.cmsg_type = SCM_RIGHTS;
             for (i = 0; i < nfds; i++) {
                 newfd = task_fd_alloc(current_task);
                 if (newfd < 0) {
@@ -1203,24 +1239,47 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
                 memset(&sock->pending_fds[i], 0, sizeof(task_fd_t));
                 out_fds[i] = newfd;
             }
-            msg->msg_controllen = needed;
+            control_data = (uint8_t *)msg.msg_control + sizeof(struct cmsghdr);
+            if (copy_to_user(msg.msg_control, &cmsg, sizeof(cmsg)) < 0 ||
+                copy_to_user(control_data, out_fds,
+                             (size_t)nfds * sizeof(int)) < 0)
+                return -EFAULT;
+            msg.msg_controllen = needed;
             sock->pending_fd_count = 0;
             kfree(sock->pending_fds);
             sock->pending_fds = NULL;
             sock->pending_fd_capacity = 0;
+        } else {
+            for (i = 0; i < nfds; i++) {
+                socket_release_pending_fd(&sock->pending_fds[i]);
+            }
+            sock->pending_fd_count = 0;
+            kfree(sock->pending_fds);
+            sock->pending_fds = NULL;
+            sock->pending_fd_capacity = 0;
+            msg.msg_flags |= MSG_CTRUNC;
+            msg.msg_controllen = 0;
         }
-    } else if (msg->msg_control) {
-        msg->msg_controllen = 0;
+    } else {
+        msg.msg_controllen = 0;
     }
 
     total = 0;
-    for (iov_index = 0; iov_index < msg->msg_iovlen; iov_index++) {
-        recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)msg->msg_iov[iov_index].iov_base,
-                             msg->msg_iov[iov_index].iov_len, flags, 0, 0);
+    for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
+            return -EFAULT;
+        if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
+        if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_WRITE))
+            return -EFAULT;
+        recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)iov.iov_base,
+                             (int)iov.iov_len, flags, 0, 0);
         if (recvd < 0) return recvd;
         total += recvd;
-        if ((size_t)recvd < msg->msg_iov[iov_index].iov_len) break;
+        if ((size_t)recvd < iov.iov_len) break;
     }
+
+    if (copy_to_user((void *)(uintptr_t)msg_ptr, &msg, sizeof(msg)) < 0)
+        return -EFAULT;
 
     return total;
 }

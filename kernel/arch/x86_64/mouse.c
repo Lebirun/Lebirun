@@ -34,7 +34,7 @@ static int mouse_ensure_ring(void) {
     return ring_buffer && ring_capacity != 0;
 }
 
-static void ps2_wait_input(void) {
+static void KERNEL_INIT ps2_wait_input(void) {
     int timeout = 100000;
     while (timeout--) {
         if ((inb(PS2_STATUS_PORT) & 0x02) == 0)
@@ -42,7 +42,7 @@ static void ps2_wait_input(void) {
     }
 }
 
-static void ps2_wait_output(void) {
+static void KERNEL_INIT ps2_wait_output(void) {
     int timeout = 100000;
     while (timeout--) {
         if (inb(PS2_STATUS_PORT) & 0x01)
@@ -50,14 +50,14 @@ static void ps2_wait_output(void) {
     }
 }
 
-static void ps2_mouse_write(uint8_t data) {
+static void KERNEL_INIT ps2_mouse_write(uint8_t data) {
     ps2_wait_input();
     outb(PS2_CMD_PORT, 0xD4);
     ps2_wait_input();
     outb(PS2_DATA_PORT, data);
 }
 
-static uint8_t ps2_mouse_read(void) {
+static uint8_t KERNEL_INIT ps2_mouse_read(void) {
     ps2_wait_output();
     return inb(PS2_DATA_PORT);
 }

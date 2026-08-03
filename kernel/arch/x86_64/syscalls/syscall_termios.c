@@ -58,6 +58,28 @@ struct kernel_winsize *tty_winsize;
 int *tty_pgrp;
 int tty_count;
 
+#define TTY_OUTPUT_STOPPED 0x80000000U
+#define TCXONC 0x540A
+
+static int sys_tcflow(int fd, const char *action_ptr, int unused);
+
+int tty_get_foreground_pgrp(int tty_id) {
+    if (!tty_pgrp || tty_id < 0 || tty_id >= tty_count) return 0;
+    return (int)((uint32_t)tty_pgrp[tty_id] & ~TTY_OUTPUT_STOPPED);
+}
+
+int tty_output_is_stopped(int tty_id) {
+    if (!tty_pgrp || tty_id < 0 || tty_id >= tty_count) return 0;
+    return ((uint32_t)tty_pgrp[tty_id] & TTY_OUTPUT_STOPPED) != 0;
+}
+
+static void tty_set_foreground_pgrp(int tty_id, int pgrp) {
+    uint32_t state;
+
+    state = (uint32_t)tty_pgrp[tty_id] & TTY_OUTPUT_STOPPED;
+    tty_pgrp[tty_id] = (int)(state | ((uint32_t)pgrp & ~TTY_OUTPUT_STOPPED));
+}
+
 static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
 
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
@@ -104,7 +126,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
         task_fd_position_share(&current_task->fds[oldfd], &current_task->fds[newfd]);
     }
     if (current_task->fds[oldfd].private_data &&
-        (current_task->fds[oldfd].type == FD_TYPE_PIPE_R || current_task->fds[oldfd].type == FD_TYPE_PIPE_W)) {
+        FD_TYPE_IS_PIPE(current_task->fds[oldfd].type)) {
         p = (pipe_t *)current_task->fds[oldfd].private_data;
         pipe_retain_reference(p, current_task->fds[oldfd].type);
     }
@@ -300,15 +322,23 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     switch (request) {
         case TIOCSCTTY:
             if (tty_id < 0) return -ENOTTY;
-            if (current_task && tty_pgrp[tty_id] == 0) {
-                tty_pgrp[tty_id] = current_task->pid;
+            if (current_task && tty_get_foreground_pgrp(tty_id) == 0) {
+                tty_set_foreground_pgrp(tty_id, current_task->pid);
             }
             return 0;
 
         case TIOCNOTTY:
             if (tty_id < 0) return -ENOTTY;
+            if (current_task) {
+                if (creds_get_sid(0) == current_task->pid)
+                    tty_set_foreground_pgrp(tty_id, 0);
+                current_task->console_id = -1;
+            }
             (void)arg;
             return 0;
+
+        case TCXONC:
+            return sys_tcflow(fd, (const char *)(uintptr_t)arg, 0);
 
         case TIOCGSID:
 
@@ -351,7 +381,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
             memcpy(&tty_winsize[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_winsize));
             {
-                int pgrp = tty_pgrp[tty_id];
+                int pgrp = tty_get_foreground_pgrp(tty_id);
                 if (pgrp > 0) {
                     pid_t pids[64];
                     int npids;
@@ -370,7 +400,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
             {
-                int pgrp = tty_pgrp[tty_id];
+                int pgrp = tty_get_foreground_pgrp(tty_id);
                 if (pgrp == 0 && current_task) {
                     pgrp = current_task->pgid ? current_task->pgid : current_task->pid;
                     if (pgrp == 0) pgrp = 1;
@@ -383,7 +413,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         case TIOCSPGRP:
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
-            tty_pgrp[tty_id] = *(int *)(uintptr_t)arg;
+            tty_set_foreground_pgrp(tty_id, *(int *)(uintptr_t)arg);
             return 0;
             
         case FIONREAD:
@@ -529,8 +559,19 @@ static int sys_tcflow(int fd, const char *action_ptr, int unused) {
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
     
-    (void)action;
-    return 0;
+    if (action == TCOOFF) {
+        tty_pgrp[tty_id] = (int)((uint32_t)tty_pgrp[tty_id] |
+                                 TTY_OUTPUT_STOPPED);
+        return 0;
+    }
+    if (action == TCOON) {
+        tty_pgrp[tty_id] = (int)((uint32_t)tty_pgrp[tty_id] &
+                                 ~TTY_OUTPUT_STOPPED);
+        descriptor_ready_notify();
+        return 0;
+    }
+    if (action == TCIOFF || action == TCION) return 0;
+    return -EINVAL;
 }
 
 static int sys_tcdrain(int fd, const char *unused1, int unused2) {
@@ -553,7 +594,7 @@ static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
 
-    pgrp = tty_pgrp[tty_id];
+    pgrp = tty_get_foreground_pgrp(tty_id);
     if (pgrp == 0 && current_task) {
         pgrp = current_task->pgid ? current_task->pgid : current_task->pid;
         if (pgrp == 0) pgrp = 1;
@@ -572,7 +613,7 @@ static int sys_tcsetpgrp(int fd, const char *pgrp_ptr, int unused) {
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
     
-    tty_pgrp[tty_id] = pgrp;
+    tty_set_foreground_pgrp(tty_id, pgrp);
     return 0;
 }
 

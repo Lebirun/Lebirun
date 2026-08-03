@@ -231,7 +231,7 @@ static int sys_fork(int unused, const char *unused2, int unused3) {
         printf("sys_fork: no registers pointer\n");
         return -EAGAIN;
     }
-    result = (int)task_fork(regs);
+    result = (int)task_fork(regs, 0, 0, 0, NULL, NULL);
     return result;
 }
 
@@ -281,9 +281,21 @@ static int sys_vfork(int unused1, const char *unused2, int unused3) {
     return sys_fork(0, NULL, 0);
 }
 
-static int sys_clone(int flags, const char *child_stack, int ptid) {
-    (void)flags; (void)child_stack; (void)ptid;
-    return sys_fork(0, NULL, 0);
+static int sys_clone(int flags, const char *child_stack, int ptid,
+                     uint64_t tls_base, int *child_tid, int unused) {
+    registers_t *regs;
+    int share_address_space;
+
+    (void)unused;
+    regs = current_task ? current_task->syscall_frame : NULL;
+    if (!regs) return -EAGAIN;
+    share_address_space = (flags & 0x00000100) != 0;
+    if (share_address_space &&
+        (!child_stack || (uint64_t)(uintptr_t)child_stack < 0x1000 ||
+         (uint64_t)(uintptr_t)child_stack >= KERNEL_VMA)) return -EFAULT;
+    return (int)task_fork(regs, share_address_space,
+                          (uint64_t)(uintptr_t)child_stack, tls_base,
+                          (int *)(uintptr_t)ptid, child_tid);
 }
 
 void syscalls_process_init(void) {

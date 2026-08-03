@@ -1,4 +1,5 @@
 #include <lebirun/mem_map.h>
+#include <lebirun/common.h>
 #include <stdint.h>
 
 mem_region_t memory_map[MAX_REGIONS];
@@ -11,7 +12,7 @@ uint64_t total_pages_managed = TOTAL_PAGES;
 static uint64_t kernel_pml4_phys = 0;
 uint64_t kernel_irq_cr3 = 0;
 
-void vmm_register_kernel_cr3(uint64_t pml4_phys) {
+void KERNEL_EARLY_INIT vmm_register_kernel_cr3(uint64_t pml4_phys) {
     kernel_pml4_phys = pml4_phys & ~0xFFFUL;
     kernel_irq_cr3 = 0;
 }

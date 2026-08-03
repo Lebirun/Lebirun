@@ -54,7 +54,7 @@ static int signal_user_range_mapped(uint64_t addr, uint64_t size) {
 #define SIGPWR    30
 #define SIGSYS    31
 
-#define NSIG      33
+#define NSIG      65
 #define _NSIG     NSIG
 
 #define SIG_DFL ((void (*)(int))0)
@@ -96,6 +96,12 @@ typedef struct {
     sigaction_k action;
 } signal_action_entry_t;
 
+typedef struct queued_signal {
+    int signum;
+    uint8_t info[128];
+    struct queued_signal *next;
+} queued_signal_t;
+
 typedef struct {
     pid_t owner_pid;
     uint8_t action_count;
@@ -105,9 +111,14 @@ typedef struct {
     signal_action_entry_t *actions;
     stack_k altstack;
     int in_signal;
+    queued_signal_t *queue_head;
+    queued_signal_t *queue_tail;
+    uint32_t queue_count;
 } task_signals_t;
 
 static void default_signal_action(sigaction_k *act);
+int deliver_signal_to_task(task_t *target, int sig);
+extern uint64_t pit_freq;
 
 static void init_signal_slot(task_signals_t *slot, pid_t pid) {
     memset(slot, 0, sizeof(task_signals_t));
@@ -120,6 +131,22 @@ static void free_signal_actions(task_signals_t *slot) {
     slot->actions = NULL;
     slot->action_count = 0;
     slot->action_capacity = 0;
+}
+
+static void free_signal_queue(task_signals_t *slot) {
+    queued_signal_t *entry;
+    queued_signal_t *next;
+
+    if (!slot) return;
+    entry = slot->queue_head;
+    while (entry) {
+        next = entry->next;
+        kfree(entry);
+        entry = next;
+    }
+    slot->queue_head = NULL;
+    slot->queue_tail = NULL;
+    slot->queue_count = 0;
 }
 
 static int find_signal_action(task_signals_t *slot, int signum) {
@@ -235,9 +262,66 @@ static task_signals_t *get_task_signals(void) {
     }
     if (slot->owner_pid != current_task->pid) {
         free_signal_actions(slot);
+        free_signal_queue(slot);
         init_signal_slot(slot, current_task->pid);
     }
     return slot;
+}
+
+static task_signals_t *ensure_task_signals(task_t *task) {
+    task_signals_t *slot;
+
+    if (!task) return NULL;
+    if (task == current_task) return get_task_signals();
+    slot = (task_signals_t *)task->signal_data;
+    if (slot && slot->owner_pid == task->pid) return slot;
+    if (slot) return NULL;
+    slot = (task_signals_t *)kmalloc(sizeof(task_signals_t));
+    if (!slot) return NULL;
+    init_signal_slot(slot, task->pid);
+    task->signal_data = slot;
+    return slot;
+}
+
+static int dequeue_queued_signal(task_signals_t *sigs, uint64_t mask,
+                                 uint8_t *info) {
+    queued_signal_t **link;
+    queued_signal_t *entry;
+    queued_signal_t *scan;
+    int still_pending;
+
+    if (!sigs) return 0;
+    link = &sigs->queue_head;
+    while (*link) {
+        entry = *link;
+        if (mask & (1ULL << (entry->signum - 1))) {
+            *link = entry->next;
+            if (sigs->queue_tail == entry) {
+                sigs->queue_tail = NULL;
+                scan = sigs->queue_head;
+                while (scan && scan->next) scan = scan->next;
+                sigs->queue_tail = scan;
+            }
+            if (sigs->queue_count) sigs->queue_count--;
+            still_pending = 0;
+            scan = sigs->queue_head;
+            while (scan) {
+                if (scan->signum == entry->signum) {
+                    still_pending = 1;
+                    break;
+                }
+                scan = scan->next;
+            }
+            if (!still_pending)
+                sigs->pending.sig[0] &= ~(1ULL << (entry->signum - 1));
+            if (info) memcpy(info, entry->info, sizeof(entry->info));
+            still_pending = entry->signum;
+            kfree(entry);
+            return still_pending;
+        }
+        link = &entry->next;
+    }
+    return 0;
 }
 
 void task_free_signal_data(task_t *task) {
@@ -246,6 +330,7 @@ void task_free_signal_data(task_t *task) {
     if (!task || !task->signal_data) return;
     sigs = (task_signals_t *)task->signal_data;
     free_signal_actions(sigs);
+    free_signal_queue(sigs);
     kfree(sigs);
     task->signal_data = NULL;
 }
@@ -262,6 +347,7 @@ void task_reset_signals_on_exec(void) {
     if (!sigs) return;
     if (sigs->owner_pid != current_task->pid) {
         free_signal_actions(sigs);
+        free_signal_queue(sigs);
         init_signal_slot(sigs, current_task->pid);
         return;
     }
@@ -269,6 +355,7 @@ void task_reset_signals_on_exec(void) {
     sigs->pending.sig[0] = 0;
     sigs->blocked.sig[0] = 0;
     sigs->in_signal = 0;
+    free_signal_queue(sigs);
 
     default_signal_action(&default_act);
     for (i = sigs->action_count - 1; i >= 0; i--) {
@@ -312,6 +399,24 @@ uint64_t signal_pending_mask(task_t *task) {
     sigs = (task_signals_t *)task->signal_data;
     if (sigs->owner_pid != task->pid) return 0;
     return sigs->pending.sig[0];
+}
+
+uint64_t signal_blocked_mask(task_t *task) {
+    task_signals_t *sigs;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = (task_signals_t *)task->signal_data;
+    if (sigs->owner_pid != task->pid) return 0;
+    return sigs->blocked.sig[0];
+}
+
+uint32_t signal_queue_count(task_t *task) {
+    task_signals_t *sigs;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = (task_signals_t *)task->signal_data;
+    if (sigs->owner_pid != task->pid) return 0;
+    return sigs->queue_count;
 }
 
 int signal_take_pending(task_t *task, uint64_t mask) {
@@ -525,13 +630,101 @@ static int sys_sigreturn(int unused1, const char *unused2, int unused3) {
     return sys_rt_sigreturn(unused1, unused2, unused3);
 }
 
-static int sys_rt_sigtimedwait(int set_ptr, const char *info_ptr, int timeout_ptr) {
-    (void)set_ptr; (void)info_ptr; (void)timeout_ptr;
-    return -EAGAIN;
+static int sys_rt_sigtimedwait(const sigset_k *set_ptr, void *info_ptr,
+                               const struct kernel_timespec *timeout_ptr,
+                               size_t sigset_size) {
+    sigset_k set;
+    struct kernel_timespec timeout;
+    task_signals_t *sigs;
+    uint8_t info[128];
+    uint64_t timeout_ticks;
+    uint64_t seconds;
+    uint64_t pending;
+    uint64_t frequency;
+    int signum;
+
+    if (!set_ptr) return -EFAULT;
+    if (sigset_size != sizeof(sigset_k)) return -EINVAL;
+    if (copy_from_user(&set, set_ptr, sizeof(set)) < 0) return -EFAULT;
+    timeout_ticks = UINT64_MAX;
+    if (timeout_ptr) {
+        if (copy_from_user(&timeout, timeout_ptr, sizeof(timeout)) < 0)
+            return -EFAULT;
+        if (timeout.tv_sec < 0 || timeout.tv_nsec < 0 ||
+            timeout.tv_nsec >= 1000000000L) return -EINVAL;
+        frequency = pit_freq ? pit_freq : 1000;
+        seconds = (uint64_t)timeout.tv_sec;
+        if (seconds > UINT64_MAX / frequency) return -EINVAL;
+        timeout_ticks = seconds * frequency;
+        timeout_ticks += ((uint64_t)timeout.tv_nsec * frequency +
+                          999999999ULL) / 1000000000ULL;
+    }
+    sigs = ensure_task_signals(current_task);
+    if (!sigs) return -ENOMEM;
+    memset(info, 0, sizeof(info));
+    signum = dequeue_queued_signal(sigs, set.sig[0], info);
+    if (!signum) {
+        pending = sigs->pending.sig[0] & set.sig[0];
+        signum = signal_take_pending(current_task, pending);
+        if (signum) memcpy(info, &signum, sizeof(signum));
+    }
+    if (!signum && timeout_ticks != 0) {
+        if (timeout_ptr)
+            sleep_ticks(timeout_ticks);
+        else
+            block_current();
+        signum = dequeue_queued_signal(sigs, set.sig[0], info);
+        if (!signum) {
+            pending = sigs->pending.sig[0] & set.sig[0];
+            signum = signal_take_pending(current_task, pending);
+            if (signum) memcpy(info, &signum, sizeof(signum));
+        }
+    }
+    if (!signum) return -EAGAIN;
+    if (info_ptr && copy_to_user(info_ptr, info, sizeof(info)) < 0)
+        return -EFAULT;
+    return signum;
 }
 
-static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, int info_ptr) {
-    (void)pid; (void)sig_ptr; (void)info_ptr;
+static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
+    task_t *target;
+    task_signals_t *sigs;
+    queued_signal_t *entry;
+    unsigned long limit;
+    int sig;
+    int result;
+
+    sig = (int)(uintptr_t)sig_ptr;
+    if (sig < 1 || sig >= NSIG) return -EINVAL;
+    if (!info_ptr) return -EFAULT;
+    target = task_find((pid_t)pid);
+    if (!target) return -ESRCH;
+    if (current_task && current_task->euid != 0 &&
+        current_task->euid != target->uid &&
+        current_task->uid != target->uid) return -EPERM;
+    sigs = ensure_task_signals(target);
+    if (!sigs) return -ENOMEM;
+    limit = task_rlimit_get(target, 11, 0);
+    if (limit > 256) limit = 256;
+    if (sigs->queue_count >= limit) return -EAGAIN;
+    entry = (queued_signal_t *)kmalloc(sizeof(queued_signal_t));
+    if (!entry) return -ENOMEM;
+    memset(entry, 0, sizeof(*entry));
+    if (copy_from_user(entry->info, info_ptr, sizeof(entry->info)) < 0) {
+        kfree(entry);
+        return -EFAULT;
+    }
+    entry->signum = sig;
+    memcpy(entry->info, &sig, sizeof(sig));
+    if (sigs->queue_tail) sigs->queue_tail->next = entry;
+    else sigs->queue_head = entry;
+    sigs->queue_tail = entry;
+    sigs->queue_count++;
+    result = deliver_signal_to_task(target, sig);
+    if (result != 0) {
+        dequeue_queued_signal(sigs, 1ULL << (sig - 1), NULL);
+        return result;
+    }
     return 0;
 }
 
@@ -586,21 +779,6 @@ int deliver_signal_to_task(task_t *target, int sig) {
     act = get_signal_action(sigs, sig, &default_act);
     if (act->sa_handler == SIG_IGN) {
         return 0;
-    }
-    if (act->sa_handler == SIG_DFL) {
-        switch (sig) {
-            case SIGCHLD:
-            case SIGURG:
-            case SIGWINCH:
-                break;
-            default:
-                if (target != current_task) {
-                    task_kill(target, 128 + sig);
-                } else {
-                    task_exit_deferred(128 + sig);
-                }
-                return 0;
-        }
     }
 
     sigs->pending.sig[(sig - 1) / 64] |= (1UL << ((sig - 1) % 64));
@@ -813,6 +991,9 @@ void signal_deliver_pending(registers_t *regs) {
     sigaction_k default_act;
     uint64_t sp;
     uint64_t *frame;
+    uint64_t info_address;
+    uint8_t signal_info[128];
+    int queued;
 
     if (!current_task || !regs) return;
     if (!current_task->is_user) return;
@@ -821,11 +1002,16 @@ void signal_deliver_pending(registers_t *regs) {
     if (!sigs || sigs->in_signal) return;
     if (sigs->owner_pid != current_task->pid) return;
 
-    for (sig = 1; sig < 32; sig++) {
+    for (sig = 1; sig < NSIG; sig++) {
         if (!(sigs->pending.sig[0] & (1UL << (sig - 1)))) continue;
         if (sigs->blocked.sig[0] & (1UL << (sig - 1))) continue;
 
-        sigs->pending.sig[0] &= ~(1UL << (sig - 1));
+        memset(signal_info, 0, sizeof(signal_info));
+        memcpy(signal_info, &sig, sizeof(sig));
+        queued = dequeue_queued_signal(sigs, 1ULL << (sig - 1),
+                                       signal_info);
+        if (!queued)
+            sigs->pending.sig[0] &= ~(1UL << (sig - 1));
         act = get_signal_action(sigs, sig, &default_act);
 
         if (act->sa_handler == SIG_IGN) continue;
@@ -845,13 +1031,24 @@ void signal_deliver_pending(registers_t *regs) {
         }
 
         sp = regs->rsp;
+        info_address = 0;
+        if (act->sa_flags & SA_SIGINFO) {
+            sp -= sizeof(signal_info);
+            info_address = sp;
+        }
         sp -= 18 * 8;
         sp &= ~0xFu;
 
-        if (sp < 0x1000 || sp >= KERNEL_VMA) {
+        if (sp < 0x1000 || sp >= KERNEL_VMA ||
+            !signal_user_range_mapped(sp,
+                regs->rsp - sp)) {
             task_exit_deferred(128 + sig);
             return;
         }
+
+        if (info_address)
+            memcpy((void *)(uintptr_t)info_address, signal_info,
+                   sizeof(signal_info));
 
         frame = (uint64_t *)sp;
         frame[0] = regs->rax;
@@ -881,6 +1078,10 @@ void signal_deliver_pending(registers_t *regs) {
         }
 
         regs->rdi = (uint64_t)sig;
+        if (act->sa_flags & SA_SIGINFO) {
+            regs->rsi = info_address;
+            regs->rdx = 0;
+        }
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
         regs->rsp = sp;
 
@@ -902,6 +1103,7 @@ void signals_init_task(task_t *task) {
     if (task->signal_data) {
         slot = (task_signals_t *)task->signal_data;
         free_signal_actions(slot);
+        free_signal_queue(slot);
         init_signal_slot(slot, task->pid);
     } else {
         task->signal_data = NULL;

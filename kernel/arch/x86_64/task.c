@@ -34,6 +34,7 @@ extern int shm_fork_task(pid_t parent_pid, pid_t child_pid);
 extern void file_locks_release_process(pid_t pid);
 extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
                                             int release_flock);
+extern void syscall_robust_list_exit(task_t *task);
 
 #define TASK_FILE_FAULT_TEMP TEMP_SLOT(5)
 #define TASK_ANON_RECLAIM_TEMP TEMP_SLOT(6)
@@ -227,33 +228,70 @@ void task_set_current(task_t *task) {
 
 int task_set_cwd(task_t *task, const char *cwd) {
     char *copy;
+    const char *visible;
     size_t len;
+    size_t root_len;
 
     if (!task || !cwd) return -1;
-    if (cwd[0] == '/' && cwd[1] == '\0') {
+    visible = cwd;
+    if (task->root) {
+        root_len = strlen(task->root);
+        if (strncmp(cwd, task->root, root_len) == 0 &&
+            (cwd[root_len] == '\0' || cwd[root_len] == '/')) {
+            visible = cwd + root_len;
+            if (visible[0] == '\0') visible = "/";
+        }
+    }
+    if (visible[0] == '/' && visible[1] == '\0') {
         if (task->cwd) kfree(task->cwd);
         task->cwd = NULL;
         return 0;
     }
-    len = strlen(cwd);
+    len = strlen(visible);
     if (len >= VFS_MAX_PATH) return -1;
     copy = (char *)kmalloc(len + 1);
     if (!copy) return -1;
-    memcpy(copy, cwd, len + 1);
+    memcpy(copy, visible, len + 1);
     if (task->cwd) kfree(task->cwd);
     task->cwd = copy;
     return 0;
 }
 
+int task_set_root(task_t *task, const char *root) {
+    char *copy;
+    size_t len;
+
+    if (!task || !root || root[0] != '/') return -1;
+    if (root[1] == '\0') {
+        if (task->root) kfree(task->root);
+        task->root = NULL;
+        return 0;
+    }
+    len = strlen(root);
+    if (len >= VFS_MAX_PATH) return -1;
+    copy = (char *)kmalloc(len + 1);
+    if (!copy) return -1;
+    memcpy(copy, root, len + 1);
+    if (task->root) kfree(task->root);
+    task->root = copy;
+    return 0;
+}
+
 int task_copy_cwd(task_t *task, const task_t *source) {
-    if (!source || !source->cwd) return task_set_cwd(task, "/");
-    return task_set_cwd(task, source->cwd);
+    int result;
+
+    if (!source) return task_set_cwd(task, "/");
+    result = task_set_cwd(task, source->cwd ? source->cwd : "/");
+    if (result != 0) return result;
+    return task_set_root(task, source->root ? source->root : "/");
 }
 
 static void task_free_cwd(task_t *task) {
-    if (!task || !task->cwd) return;
-    kfree(task->cwd);
+    if (!task) return;
+    if (task->cwd) kfree(task->cwd);
+    if (task->root) kfree(task->root);
     task->cwd = NULL;
+    task->root = NULL;
 }
 
 static void task_set_exec_state(task_t *task, int state) {
@@ -265,6 +303,7 @@ static void task_set_exec_state(task_t *task, int state) {
 
 static volatile int reap_pending = 0;
 static volatile int exec_drain_pending = 0;
+volatile uint64_t task_context_switches = 0;
 
 static uint64_t next_task_id = 1;
 static pid_t next_kernel_pid = -1;
@@ -281,7 +320,7 @@ typedef struct exec_page_cache_entry {
 
 static exec_page_cache_entry_t *exec_page_cache_head = NULL;
 static spinlock_t exec_page_cache_lock = {0};
-static uint64_t exec_zero_page_phys = 0;
+static uint64_t user_zero_page_phys = 0;
 
 static uint64_t task_align_up(uint64_t v, uint64_t align) {
     if (align == 0) return v;
@@ -392,6 +431,7 @@ static void task_write_fs_base(uint64_t base) {
         : "memory"
     );
 }
+
 static uint64_t exec_page_cache_pages = 0;
 static uint64_t exec_page_cache_clock = 0;
 
@@ -425,6 +465,20 @@ static int task_is_current_on_any_cpu(task_t *task) {
         if (cpus[i].running_task == task) return 1;
     }
     if (current_task == task) return 1;
+    return 0;
+}
+
+static int task_pml4_is_current_on_any_cpu(uint64_t pml4_phys) {
+    task_t *running;
+    int i;
+
+    if (!pml4_phys) return 0;
+    for (i = 0; i < cpu_count && i < MAX_CPUS; i++) {
+        if (!cpus[i].active) continue;
+        running = cpus[i].running_task;
+        if (running && running->pml4_phys == pml4_phys) return 1;
+    }
+    if (current_task && current_task->pml4_phys == pml4_phys) return 1;
     return 0;
 }
 
@@ -787,6 +841,25 @@ static void task_wake_parent_waiter_locked(task_t *task) {
 }
 
 static void task_finish_death_locked(task_t *task) {
+    task_t *parent;
+    int limit;
+
+    parent = all_tasks_head;
+    limit = 4096;
+    while (parent && limit > 0) {
+        if (!task_ptr_valid(parent)) break;
+        if (parent->pid == task->ppid) {
+            parent->child_utime += task->utime + task->child_utime;
+            parent->child_stime += task->stime + task->child_stime;
+            if (parent->child_maxrss_kb < task->maxrss_kb)
+                parent->child_maxrss_kb = task->maxrss_kb;
+            if (parent->child_maxrss_kb < task->child_maxrss_kb)
+                parent->child_maxrss_kb = task->child_maxrss_kb;
+            break;
+        }
+        parent = parent->all_next;
+        limit--;
+    }
     waitq_wake_all(&task->join_waiters);
     task_wake_parent_waiter_locked(task);
 }
@@ -1466,10 +1539,28 @@ void task_exit(uint64_t exit_code) {
 void task_exit_deferred(uint64_t exit_code) {
     cpu_info_t *cpu;
     task_t *task;
+    uint64_t clear_address;
+    uint64_t clear_physical;
+    uint64_t clear_key;
+    int clear_value;
 
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : current_task;
     if (!task) return;
+    if (task->clear_child_tid) {
+        clear_address = (uint64_t)(uintptr_t)task->clear_child_tid;
+        clear_physical = vmm_get_phys_in_pml4(task->pml4_phys,
+                                              clear_address);
+        clear_value = 0;
+        copy_to_user(task->clear_child_tid, &clear_value,
+                     sizeof(clear_value));
+        task->clear_child_tid = NULL;
+        if (clear_physical) {
+            clear_key = clear_physical + (clear_address & (PAGE_SIZE - 1));
+            task_futex_wake(clear_key, 1);
+        }
+    }
+    syscall_robust_list_exit(task);
     console_release_graphics_owner(task->pid);
     lock_scheduler();
     if (task->state == TASK_DEAD) {
@@ -1505,6 +1596,12 @@ void sleep_ms(uint64_t ms) {
 }
 
 static void task_clear_file_mappings(task_t *t) {
+    uint8_t *buffer;
+    uint64_t position;
+    uint64_t end;
+    uint64_t chunk;
+    uint64_t file_position;
+    uint64_t written;
     int i;
 
     if (!t) return;
@@ -1513,12 +1610,37 @@ static void task_clear_file_mappings(task_t *t) {
         t->file_map_capacity = 0;
         return;
     }
+    buffer = NULL;
+    if (t->pml4_phys) buffer = (uint8_t *)kmalloc(PAGE_SIZE);
     for (i = 0; i < t->file_map_count; i++) {
+        if (buffer && t->file_maps[i].node &&
+            (t->file_maps[i].map_flags & TASK_VMA_SHARED) &&
+            (t->file_maps[i].map_flags & TASK_VMA_FILE)) {
+            position = t->file_maps[i].vaddr;
+            end = position + t->file_maps[i].filesz;
+            while (position < end) {
+                chunk = end - position;
+                if (chunk > PAGE_SIZE) chunk = PAGE_SIZE;
+                if (!vmm_get_phys_in_pml4(t->pml4_phys, position)) {
+                    position += chunk;
+                    continue;
+                }
+                vmm_read_from_pml4(t->pml4_phys, position, buffer, chunk);
+                file_position = t->file_maps[i].offset + position -
+                                t->file_maps[i].vaddr;
+                written = vfs_write(t->file_maps[i].node, file_position,
+                                    chunk, buffer);
+                if (written != chunk) break;
+                position += chunk;
+            }
+            vfs_sync_node(t->file_maps[i].node, 0);
+        }
         if (t->file_maps[i].node) {
             vfs_close(t->file_maps[i].node);
             t->file_maps[i].node = NULL;
         }
     }
+    if (buffer) kfree(buffer);
     kfree(t->file_maps);
     t->file_maps = NULL;
     t->file_map_count = 0;
@@ -1564,6 +1686,8 @@ int task_track_user_page(task_t *task, uint64_t phys) {
     task->user_pages = new_user_pages;
     task->user_pages[task->user_pages_count] = phys;
     task->user_pages_count++;
+    if (task->maxrss_kb < task->user_pages_count * 4ULL)
+        task->maxrss_kb = task->user_pages_count * 4ULL;
     return 0;
 }
 
@@ -1610,12 +1734,12 @@ static uint64_t exec_page_cache_target_pages(void) {
     return 0;
 }
 
-static uint64_t exec_zero_page_get(void) {
+static uint64_t user_zero_page_get(void) {
     uint64_t phys;
     uint64_t existing;
 
     spin_lock(&exec_page_cache_lock);
-    existing = exec_zero_page_phys;
+    existing = user_zero_page_phys;
     spin_unlock(&exec_page_cache_lock);
     if (existing) return existing;
 
@@ -1624,9 +1748,9 @@ static uint64_t exec_zero_page_get(void) {
     pmm_zero_page_phys(phys);
 
     spin_lock(&exec_page_cache_lock);
-    existing = exec_zero_page_phys;
+    existing = user_zero_page_phys;
     if (!existing) {
-        exec_zero_page_phys = phys;
+        user_zero_page_phys = phys;
         existing = phys;
         phys = 0;
     }
@@ -1877,6 +2001,15 @@ void task_free_user_memory(task_t* t) {
     int freed;
 
     if (!t) return;
+
+    if (t->shares_address_space) {
+        task_clear_file_mappings(t);
+        if (t->user_pages) kfree(t->user_pages);
+        t->user_pages = NULL;
+        t->user_pages_count = 0;
+        t->pml4_phys = 0;
+        return;
+    }
 
     task_clear_file_mappings(t);
 
@@ -2182,7 +2315,9 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     if (read_end > read_start) {
         read_off = task->file_maps[match].offset + (read_start - task->file_maps[match].vaddr);
         read_len = read_end - read_start;
-        if (read_start == page && !(task->file_maps[match].flags & 0x2)) {
+        if (read_start == page &&
+            (!(task->file_maps[match].flags & 0x2) ||
+             (task->file_maps[match].map_flags & TASK_VMA_SHARED))) {
             if (exec_page_cache_get(task->file_maps[match].node, read_off, read_len,
                                     &phys) != 0) {
                 phys = 0;
@@ -2206,7 +2341,7 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
             temp_unmap_raw(TASK_FILE_FAULT_TEMP);
         }
     } else {
-        phys = exec_zero_page_get();
+        phys = user_zero_page_get();
         if (!phys) return 0;
         map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
         cached_page = 2;
@@ -2230,13 +2365,19 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
         }
         return 0;
     }
+    if (cached_page == 1 || cached_page == 2)
+        task->minor_faults++;
+    else
+        task->major_faults++;
     return 1;
 }
 
-int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr) {
+int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
+                                int write_fault) {
     task_file_map_t *area;
     uint64_t page;
     uint64_t physical;
+    uint64_t map_flags;
     int i;
 
     if (!task || fault_addr >= KERNEL_VMA) return 0;
@@ -2246,16 +2387,24 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr) {
         if (!(area->map_flags & TASK_VMA_ANONYMOUS) ||
             (area->map_flags & TASK_VMA_SHARED)) continue;
         if (page < area->vaddr || page >= area->vaddr + area->memsz) continue;
-        physical = pfa_alloc();
-        if (!physical) return 0;
-        pmm_zero_page_phys(physical);
+        map_flags = area->flags;
+        if (write_fault) {
+            physical = pfa_alloc();
+            if (!physical) return 0;
+            pmm_zero_page_phys(physical);
+        } else {
+            physical = user_zero_page_get();
+            if (!physical) return 0;
+            map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
+        }
         if (vmm_map_page_in_pml4(task->pml4_phys, page, physical,
-                                 area->flags) != 0 ||
+                                 map_flags) != 0 ||
             task_track_user_page(task, physical) != 0) {
             vmm_unmap_page_in_pml4(task->pml4_phys, page);
-            pfa_free(physical);
+            if (write_fault) pfa_free(physical);
             return 0;
         }
+        task->minor_faults++;
         return 1;
     }
     return 0;
@@ -2273,6 +2422,104 @@ void task_untrack_user_page(task_t *task, uint64_t physical) {
     }
 }
 
+static int task_pml4_has_multiple_users(task_t *owner) {
+    task_t *task;
+
+    if (!owner || !owner->pml4_phys) return 1;
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task)) {
+        if (task != owner && !task->resources_released &&
+            task->pml4_phys == owner->pml4_phys)
+            return 1;
+        task = task->all_next;
+    }
+    return 0;
+}
+
+static uint64_t task_reclaim_file_exec_pages(task_t *task,
+                                             uint64_t max_pages) {
+    task_file_map_t *area;
+    uint64_t address;
+    uint64_t area_end;
+    uint64_t file_end;
+    uint64_t removed;
+    uint64_t flags;
+    uint64_t reclaimed;
+    uint64_t area_reclaimed;
+    int i;
+
+    if (!task || !task->is_user || !task->pml4_phys || max_pages == 0)
+        return 0;
+    reclaimed = 0;
+    for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
+        area = &task->file_maps[i];
+        if (!area->node ||
+            (area->map_flags & (TASK_VMA_FILE | TASK_VMA_PRIVATE)) !=
+            (TASK_VMA_FILE | TASK_VMA_PRIVATE) ||
+            (area->map_flags & (TASK_VMA_SHARED | TASK_VMA_ANONYMOUS)) ||
+            !(area->flags & VMM_PTE_USER) ||
+            (area->flags & VMM_PTE_WRITE) ||
+            (area->flags & VMM_PTE_NX))
+            continue;
+        area_end = area->vaddr + area->memsz;
+        file_end = area->vaddr + area->filesz;
+        if (area_end < area->vaddr || file_end < area->vaddr)
+            continue;
+        if (file_end > area_end) file_end = area_end;
+        area_reclaimed = 0;
+        for (address = area->vaddr;
+             address < area_end && reclaimed < max_pages;
+             address += PAGE_SIZE) {
+            if (address > file_end || file_end - address < PAGE_SIZE)
+                continue;
+            flags = vmm_get_flags_in_pml4(task->pml4_phys, address);
+            if (!(flags & VMM_PTE_PRESENT) ||
+                (flags & (VMM_PTE_WRITE | VMM_PTE_NX | VMM_PTE_COW |
+                          VMM_PTE_NOFREE | VMM_PTE_SHARED)))
+                continue;
+            removed = vmm_unmap_page_in_pml4(task->pml4_phys, address);
+            if (!removed) continue;
+            task_untrack_user_page(task, removed);
+            exec_page_cache_on_page_release(removed);
+            pfa_cow_release64(removed);
+            reclaimed++;
+            area_reclaimed++;
+        }
+        if (area_reclaimed)
+            vmm_prune_user_range(task->pml4_phys, area->vaddr,
+                                 area->memsz);
+    }
+    return reclaimed;
+}
+
+static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages) {
+    task_t *task;
+    uint64_t reclaimed;
+    uint64_t remaining;
+    int visited;
+
+    if (max_pages == 0) return 0;
+    reclaimed = 0;
+    visited = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task) && reclaimed < max_pages &&
+           visited < 32) {
+        visited++;
+        if (task->state == TASK_BLOCKED && task->is_user &&
+            !task->resources_released && task->exec_completed == 0 &&
+            task->pml4_phys &&
+            !task_pml4_has_multiple_users(task) &&
+            !task_pml4_is_current_on_any_cpu(task->pml4_phys)) {
+            remaining = max_pages - reclaimed;
+            reclaimed += task_reclaim_file_exec_pages(task, remaining);
+        }
+        task = task->all_next;
+    }
+    unlock_scheduler();
+    return reclaimed;
+}
+
 uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
     task_file_map_t *area;
     uint64_t address;
@@ -2281,18 +2528,30 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
     uint64_t *words;
     uint64_t word;
     uint64_t reclaimed;
+    uint64_t scanned;
+    uint64_t scan_limit;
+    uint64_t shared_zero;
+    uint64_t replacement_flags;
     int zero;
     int i;
 
     if (!task || !task->is_user || max_pages == 0) return 0;
     reclaimed = 0;
+    scanned = 0;
+    shared_zero = 0;
+    if (max_pages > 128)
+        scan_limit = 512;
+    else
+        scan_limit = max_pages * 4;
     for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
         area = &task->file_maps[i];
         if (!(area->map_flags & TASK_VMA_ANONYMOUS) ||
             (area->map_flags & TASK_VMA_SHARED)) continue;
         for (address = area->vaddr;
-             address < area->vaddr + area->memsz && reclaimed < max_pages;
+             address < area->vaddr + area->memsz && reclaimed < max_pages &&
+             scanned < scan_limit;
              address += PAGE_SIZE) {
+            scanned++;
             physical = vmm_get_phys_in_pml4(task->pml4_phys, address);
             flags = vmm_get_flags_in_pml4(task->pml4_phys, address);
             if (!physical ||
@@ -2310,13 +2569,53 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
             }
             temp_unmap_raw(TASK_ANON_RECLAIM_TEMP);
             if (!zero) continue;
-            if (vmm_unmap_page_in_pml4(task->pml4_phys, address) != physical)
+            if (!shared_zero) shared_zero = user_zero_page_get();
+            if (!shared_zero) break;
+            replacement_flags = (flags & ~VMM_PTE_WRITE) | VMM_PTE_NOFREE;
+            if (vmm_map_page_in_pml4(task->pml4_phys, address, shared_zero,
+                                     replacement_flags) != 0)
                 continue;
-            task_untrack_user_page(task, physical);
+            if (vmm_get_phys_in_pml4(task->pml4_phys, address) != shared_zero) {
+                vmm_map_page_in_pml4(task->pml4_phys, address, physical,
+                                     flags);
+                continue;
+            }
+            if (task_replace_user_page(task, physical, shared_zero) != 0) {
+                vmm_map_page_in_pml4(task->pml4_phys, address, physical,
+                                     flags);
+                continue;
+            }
             pfa_free(physical);
             reclaimed++;
         }
+        if (scanned >= scan_limit) break;
     }
+    return reclaimed;
+}
+
+uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages) {
+    task_t *task;
+    uint64_t reclaimed;
+    uint64_t remaining;
+    int visited;
+
+    if (max_pages == 0) return 0;
+    reclaimed = 0;
+    visited = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task) && reclaimed < max_pages &&
+           visited < 16) {
+        visited++;
+        if (task->is_user && task->state != TASK_DEAD &&
+            !task->resources_released && task->pml4_phys &&
+            !task_pml4_is_current_on_any_cpu(task->pml4_phys)) {
+            remaining = max_pages - reclaimed;
+            reclaimed += task_reclaim_zero_anon(task, remaining);
+        }
+        task = task->all_next;
+    }
+    unlock_scheduler();
     return reclaimed;
 }
 
@@ -2334,8 +2633,10 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     page = fault_addr & ~(PAGE_SIZE - 1);
     match = -1;
     for (i = 0; i < task->file_map_count; i++) {
-        if (!task->file_maps[i].node) continue;
         if (!(task->file_maps[i].flags & 0x2)) continue;
+        if (!task->file_maps[i].node &&
+            (!(task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS) ||
+             (task->file_maps[i].map_flags & TASK_VMA_SHARED))) continue;
         if (page < task->file_maps[i].vaddr) continue;
         if (page >= task->file_maps[i].vaddr + task->file_maps[i].memsz) continue;
         match = i;
@@ -2369,7 +2670,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
         pfa_free(new_phys);
         return 0;
     }
-    if (old_phys != exec_zero_page_phys) {
+    if (old_phys != user_zero_page_phys) {
         exec_page_cache_on_page_release(old_phys);
         pfa_cow_release64(old_phys);
     }
@@ -2539,6 +2840,8 @@ void task_reclaim_exited_now(void) {
 
 void task_memory_collect_for_report(void) {
     task_reclaim_exited_now();
+    task_reclaim_blocked_file_exec(32);
+    task_reclaim_inactive_zero_anon(128);
     klog_reclaim_unused();
     heap_reclaim_unused();
 }
@@ -2548,6 +2851,8 @@ void task_memory_pressure_request(void) {
 }
 
 static void task_memory_pressure_reclaim(void) {
+    uint64_t reclaimed;
+
     task_reclaim_exited_now();
     ext4_reclaim_mounted_caches(64);
     overlay_flush_cache();
@@ -2559,7 +2864,10 @@ static void task_memory_pressure_reclaim(void) {
     kstack_reclaim_unused();
     heap_reclaim_unused();
     pfa_ref_gc();
-    task_reclaim_zero_anon(current_task, 128);
+    task_reclaim_blocked_file_exec(64);
+    reclaimed = task_reclaim_inactive_zero_anon(128);
+    if (reclaimed < 128)
+        task_reclaim_zero_anon(current_task, 128 - reclaimed);
 }
 
 void task_memory_pressure_reclaim_now(void) {
@@ -2761,12 +3069,13 @@ void wake_task(task_t* task) {
 }
 
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
-                    uint64_t timeout_ticks) {
+                    uint64_t timeout_ticks, uint32_t bitset) {
     int value;
     int timed_out;
     uint64_t wake_tick;
 
     if (!current_task || !uaddr || key == 0) return -KERR_EFAULT;
+    if (bitset == 0) return -KERR_EINVAL;
     lock_scheduler();
     if (copy_from_user(&value, uaddr, sizeof(value)) < 0) {
         unlock_scheduler();
@@ -2786,6 +3095,7 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
     }
     current_task->waiting_queue = (wait_queue_t *)(uintptr_t)key;
     current_task->in_wait_queue = TASK_WAIT_QUEUE_FUTEX;
+    current_task->futex_bitset = bitset;
     current_task->state = TASK_BLOCKED;
     if (timeout_ticks != UINT64_MAX) {
         wake_tick = tick_count + timeout_ticks;
@@ -2801,19 +3111,25 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
     lock_scheduler();
     timed_out = current_task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX;
     task_remove_wait_locked(current_task);
+    current_task->futex_bitset = 0;
     sleepq_remove(current_task);
     unlock_scheduler();
-    if (signal_pending_mask(current_task)) return -KERR_EINTR;
+    if (task_has_pending_signals()) return -KERR_EINTR;
     if (timed_out) return -KERR_ETIMEDOUT;
     return 0;
 }
 
 int task_futex_wake(uint64_t key, int count) {
+    return task_futex_wake_bitset(key, count, 0xFFFFFFFFU);
+}
+
+int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset) {
     task_t *task;
     int woken;
     int safety;
 
     if (key == 0) return -KERR_EFAULT;
+    if (bitset == 0) return -KERR_EINVAL;
     if (count < 0) return -KERR_EINVAL;
     if (count == 0) return 0;
     woken = 0;
@@ -2822,7 +3138,8 @@ int task_futex_wake(uint64_t key, int count) {
     task = all_tasks_head;
     while (task && safety < 10000 && woken < count) {
         if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
-            (uint64_t)(uintptr_t)task->waiting_queue == key) {
+            (uint64_t)(uintptr_t)task->waiting_queue == key &&
+            (task->futex_bitset & bitset) != 0) {
             task_remove_wait_locked(task);
             sleepq_remove(task);
             if (task->state == TASK_BLOCKED) task->state = TASK_READY;
@@ -2835,12 +3152,47 @@ int task_futex_wake(uint64_t key, int count) {
     return woken;
 }
 
+int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
+                       int requeue_count) {
+    task_t *task;
+    int woken;
+    int requeued;
+    int safety;
+
+    if (!old_key || !new_key) return -KERR_EFAULT;
+    if (wake_count < 0 || requeue_count < 0) return -KERR_EINVAL;
+    woken = 0;
+    requeued = 0;
+    safety = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && safety < 10000) {
+        if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
+            (uint64_t)(uintptr_t)task->waiting_queue == old_key) {
+            if (woken < wake_count) {
+                task_remove_wait_locked(task);
+                sleepq_remove(task);
+                if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+                woken++;
+            } else if (requeued < requeue_count) {
+                task->waiting_queue = (wait_queue_t *)(uintptr_t)new_key;
+                requeued++;
+            }
+        }
+        task = task->all_next;
+        safety++;
+    }
+    unlock_scheduler();
+    return woken + requeued;
+}
+
 void task_kill(task_t* task, uint64_t exit_code) {
     if (!task) return;
     if (task == current_task) {
         task_exit(exit_code);
         return;
     }
+    syscall_robust_list_exit(task);
     lock_scheduler();
     if (task->state == TASK_DEAD) {
         unlock_scheduler();
@@ -3249,6 +3601,16 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
     fpu_restore_area(next->fpu_state);
 
+    if (next != prev_task) {
+        task_context_switches++;
+        if (prev_task && prev_task->is_user) {
+            if (must_switch && prev_task->state == TASK_BLOCKED)
+                prev_task->voluntary_context_switches++;
+            else
+                prev_task->involuntary_context_switches++;
+        }
+    }
+
     if (prev_task && prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
     next->state = TASK_RUNNING;
@@ -3559,12 +3921,11 @@ void task_fd_close_all(task_t *task) {
     for (i = 0; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
-        if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+        if (FD_TYPE_IS_PIPE(tfd->type)) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
                 if (pipe_release_reference(p, tfd->type)) {
-                    if (p->buffer) kfree(p->buffer);
-                    kfree(p);
+                    pipe_destroy_if_unused(p);
                 }
             }
         } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
@@ -3591,12 +3952,11 @@ void task_fd_close_cloexec(task_t *task) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
         if (!(tfd->flags & 1)) continue;
-        if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+        if (FD_TYPE_IS_PIPE(tfd->type)) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
                 if (pipe_release_reference(p, tfd->type)) {
-                    if (p->buffer) kfree(p->buffer);
-                    kfree(p);
+                    pipe_destroy_if_unused(p);
                 }
             }
         } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
@@ -3628,7 +3988,9 @@ void task_fd_close_cloexec(task_t *task) {
     task_fd_reclaim_unused(task);
 }
 
-pid_t task_fork(registers_t *parent_regs) {
+pid_t task_fork(registers_t *parent_regs, int share_address_space,
+                uint64_t child_stack, uint64_t tls_base,
+                int *parent_tid, int *child_tid) {
     uint64_t *child_user_pages;
     uint64_t child_user_pages_count;
     uint64_t child_pd;
@@ -3640,6 +4002,7 @@ pid_t task_fork(registers_t *parent_regs) {
     registers_t *child_frame;
     registers_t parent_frame;
     pipe_t *child_pipe;
+    int owns_child_pd;
 
     parent = current_task;
     if (!parent || !parent->is_user || !parent_regs) {
@@ -3653,11 +4016,16 @@ pid_t task_fork(registers_t *parent_regs) {
     }
     child_user_pages = NULL;
     child_user_pages_count = 0;
-
-    child_pd = vmm_clone_pml4(parent->pml4_phys, &child_user_pages, &child_user_pages_count);
-    if (!child_pd) {
-        printf("task_fork: failed to clone page directory\n");
-        return -1;
+    owns_child_pd = !share_address_space;
+    if (share_address_space) {
+        child_pd = parent->pml4_phys;
+    } else {
+        child_pd = vmm_clone_pml4(parent->pml4_phys, &child_user_pages,
+                                  &child_user_pages_count);
+        if (!child_pd) {
+            printf("task_fork: failed to clone page directory\n");
+            return -1;
+        }
     }
 
 
@@ -3670,7 +4038,7 @@ pid_t task_fork(registers_t *parent_regs) {
         if (child_user_pages) {
             kfree(child_user_pages);
         }
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -1;
     }
     memset(child, 0, sizeof(task_t));
@@ -3678,7 +4046,7 @@ pid_t task_fork(registers_t *parent_regs) {
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages) kfree(child_user_pages);
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
     if (task_init_fpu_state(child) != 0) {
@@ -3689,7 +4057,7 @@ pid_t task_fork(registers_t *parent_regs) {
         if (child_user_pages) {
             kfree(child_user_pages);
         }
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -1;
     }
     fpu_save_area(parent->fpu_state);
@@ -3705,7 +4073,7 @@ pid_t task_fork(registers_t *parent_regs) {
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages) kfree(child_user_pages);
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
     signals_init_task(child);
@@ -3717,7 +4085,7 @@ pid_t task_fork(registers_t *parent_regs) {
         kfree(child);
         kstack_free(kernel_stack_base);
         if (child_user_pages) kfree(child_user_pages);
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
 
@@ -3751,11 +4119,13 @@ pid_t task_fork(registers_t *parent_regs) {
     child->join_refs = 0;
     child->exit_code = 0;
     child->is_user = true;
+    child->shares_address_space = false;
     child->syscall_frame = NULL;
     child->pml4_phys = child_pd;
     child->user_pages = child_user_pages;
     child->user_pages_count = child_user_pages_count;
-    child->file_map_count = parent->file_map_count;
+    child->maxrss_kb = child_user_pages_count * 4ULL;
+    child->file_map_count = share_address_space ? 0 : parent->file_map_count;
     child->file_map_capacity = 0;
     child->file_maps = NULL;
     if (child->file_map_count > 0) {
@@ -3766,7 +4136,7 @@ pid_t task_fork(registers_t *parent_regs) {
             kstack_free(kernel_stack_base);
             if (child_user_pages)
                 kfree(child_user_pages);
-            vmm_free_pml4(child_pd);
+            if (owns_child_pd) vmm_free_pml4(child_pd);
             return -KERR_ENOMEM;
         }
     }
@@ -3796,7 +4166,7 @@ pid_t task_fork(registers_t *parent_regs) {
         kstack_free(kernel_stack_base);
         if (child_user_pages)
             kfree(child_user_pages);
-        vmm_free_pml4(child_pd);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
     child->fds_capacity = parent_cap;
@@ -3811,7 +4181,7 @@ pid_t task_fork(registers_t *parent_regs) {
             task_fd_position_share(&parent->fds[i], &child->fds[i]);
             vfs_open((vfs_node_t *)child->fds[i].node, 0);
         }
-        if (child->fds[i].in_use && (child->fds[i].type == FD_TYPE_PIPE_R || child->fds[i].type == FD_TYPE_PIPE_W) && child->fds[i].private_data) {
+        if (child->fds[i].in_use && FD_TYPE_IS_PIPE(child->fds[i].type) && child->fds[i].private_data) {
             child_pipe = (pipe_t *)child->fds[i].private_data;
             pipe_retain_reference(child_pipe, child->fds[i].type);
         }
@@ -3836,6 +4206,27 @@ pid_t task_fork(registers_t *parent_regs) {
     child->regs.entry_cr3 = child_pd;
     child->regs.return_cr3 = child_pd;
     child->regs.saved_entry_cr3 = child_pd;
+
+    if (share_address_space) {
+        child->pml4_phys = parent->pml4_phys;
+        child->cr3 = parent->cr3;
+        child->shares_address_space = true;
+        child->tls_base = tls_base;
+        child->clear_child_tid = child_tid;
+        child_frame->rsp = child_stack;
+        child_frame->entry_cr3 = parent->pml4_phys;
+        child_frame->return_cr3 = parent->pml4_phys;
+        child_frame->saved_entry_cr3 = parent->pml4_phys;
+        child->regs.entry_cr3 = parent->pml4_phys;
+        child->regs.return_cr3 = parent->pml4_phys;
+        child->regs.saved_entry_cr3 = parent->pml4_phys;
+        if (parent_tid && copy_to_user(parent_tid, &child->pid,
+                                       sizeof(child->pid)) < 0) {
+            task_release_dead_resources(child);
+            kfree(child);
+            return -KERR_EFAULT;
+        }
+    }
 
     if (shm_fork_task(parent->pid, child->pid) != 0) {
         task_release_dead_resources(child);
@@ -4191,8 +4582,10 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     held_node = 0;
     if (use_node) {
         bin_size = bin_node->length;
-        if (bin_node->mask & 04000) exec_euid = bin_node->uid;
-        if (bin_node->mask & 02000) exec_egid = bin_node->gid;
+        if (!(vfs_get_mount_flags_for_node(bin_node) & VFS_MS_NOSUID)) {
+            if (bin_node->mask & 04000) exec_euid = bin_node->uid;
+            if (bin_node->mask & 02000) exec_egid = bin_node->gid;
+        }
     }
     if ((!use_node && !bin_start) || bin_size == 0) {
         task_error("task_exec_with_args: invalid binary\n");

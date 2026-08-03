@@ -18,6 +18,85 @@ extern void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
 #define VFS_RW_HEAP_LIMIT 4096
 #define VFS_BLOCK_IO_CHUNK 65536
 
+static pipe_t *named_pipe_head;
+static spinlock_t named_pipe_lock;
+
+pipe_t *pipe_named_open(vfs_node_t *node, int type) {
+    pipe_t *pipe;
+    pipe_t *created;
+
+    if (!node || VFS_GET_TYPE(node->flags) != VFS_PIPE) return NULL;
+    spin_lock(&named_pipe_lock);
+    pipe = named_pipe_head;
+    while (pipe) {
+        if (pipe->named_node == node) {
+            pipe_retain_reference(pipe, type);
+            waitq_wake_all(&pipe->read_waitq);
+            waitq_wake_all(&pipe->write_waitq);
+            spin_unlock(&named_pipe_lock);
+            return pipe;
+        }
+        pipe = pipe->named_next;
+    }
+    spin_unlock(&named_pipe_lock);
+    created = (pipe_t *)kmalloc(sizeof(pipe_t));
+    if (!created) return NULL;
+    memset(created, 0, sizeof(*created));
+    waitq_init(&created->read_waitq);
+    waitq_init(&created->write_waitq);
+    spinlock_init(&created->lock);
+    created->named_node = node;
+    vfs_open(node, 0);
+    spin_lock(&named_pipe_lock);
+    pipe = named_pipe_head;
+    while (pipe) {
+        if (pipe->named_node == node) {
+            pipe_retain_reference(pipe, type);
+            waitq_wake_all(&pipe->read_waitq);
+            waitq_wake_all(&pipe->write_waitq);
+            spin_unlock(&named_pipe_lock);
+            vfs_close(node);
+            kfree(created);
+            return pipe;
+        }
+        pipe = pipe->named_next;
+    }
+    created->named_next = named_pipe_head;
+    named_pipe_head = created;
+    pipe_retain_reference(created, type);
+    waitq_wake_all(&created->read_waitq);
+    waitq_wake_all(&created->write_waitq);
+    spin_unlock(&named_pipe_lock);
+    return created;
+}
+
+void pipe_destroy_if_unused(pipe_t *pipe) {
+    pipe_t **link;
+    vfs_node_t *node;
+    uint64_t flags;
+    int unused;
+
+    if (!pipe) return;
+    spin_lock(&named_pipe_lock);
+    flags = pipe_lock_irqsave(pipe);
+    unused = pipe->readers <= 0 && pipe->writers <= 0;
+    pipe_unlock_irqrestore(pipe, flags);
+    if (!unused) {
+        spin_unlock(&named_pipe_lock);
+        return;
+    }
+    node = pipe->named_node;
+    if (node) {
+        link = &named_pipe_head;
+        while (*link && *link != pipe) link = &(*link)->named_next;
+        if (*link == pipe) *link = pipe->named_next;
+    }
+    spin_unlock(&named_pipe_lock);
+    if (pipe->buffer) kfree(pipe->buffer);
+    if (node) vfs_close(node);
+    kfree(pipe);
+}
+
 static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     uint64_t end;
     uint64_t p;
@@ -105,7 +184,7 @@ static size_t vfs_bounded_strlen(const char *s, size_t max) {
     return max;
 }
 
-static int vfs_check_perm(vfs_node_t *node, int want) {
+int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t mode;
     uint64_t uid;
     uint64_t gid;
@@ -264,6 +343,10 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
     int ret;
     vfs_node_t *node;
     vfs_node_t *parent;
+    pipe_t *pipe;
+    int pipe_type;
+    uint64_t pipe_flags;
+    uint64_t mount_flags;
 
     path_addr = path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
@@ -314,6 +397,10 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
 
         parent = vfs_namei(parent_path);
         if (!parent) return -ENOENT;
+        if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+            vfs_release(parent);
+            return -EROFS;
+        }
 
         ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
@@ -326,6 +413,20 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
 
     if (!node) {
         return -ENOENT;
+    }
+
+    mount_flags = vfs_get_mount_flags_for_node(node);
+    if (((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR) ||
+         (flags & VFS_O_TRUNC)) &&
+        (mount_flags & VFS_MS_RDONLY)) {
+        vfs_release(node);
+        return -EROFS;
+    }
+    if ((VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE ||
+         VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) &&
+        (mount_flags & VFS_MS_NODEV)) {
+        vfs_release(node);
+        return -EACCES;
     }
 
     {
@@ -346,6 +447,57 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
 
     if ((flags & VFS_O_TRUNC) && node->truncate) {
         node->truncate(node, 0);
+    }
+
+    if (VFS_GET_TYPE(node->flags) == VFS_PIPE) {
+        if ((flags & 0x3) == VFS_O_WRONLY) pipe_type = FD_TYPE_PIPE_W;
+        else if ((flags & 0x3) == VFS_O_RDWR) pipe_type = FD_TYPE_PIPE_RW;
+        else pipe_type = FD_TYPE_PIPE_R;
+        pipe = pipe_named_open(node, pipe_type);
+        if (!pipe) {
+            vfs_release(node);
+            return -ENOMEM;
+        }
+        pipe_flags = pipe_lock_irqsave(pipe);
+        if (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0 &&
+            (flags & VFS_O_NONBLOCK)) {
+            pipe_unlock_irqrestore(pipe, pipe_flags);
+            pipe_release_reference(pipe, pipe_type);
+            pipe_destroy_if_unused(pipe);
+            vfs_release(node);
+            return -ENXIO;
+        }
+        while (!(flags & VFS_O_NONBLOCK) &&
+               ((pipe_type == FD_TYPE_PIPE_R && pipe->writers == 0) ||
+                (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0))) {
+            pipe_unlock_irqrestore(pipe, pipe_flags);
+            if (pipe_type == FD_TYPE_PIPE_R)
+                waitq_add(&pipe->read_waitq, current_task);
+            else
+                waitq_add(&pipe->write_waitq, current_task);
+            block_current();
+            if (task_has_pending_signals()) {
+                pipe_release_reference(pipe, pipe_type);
+                pipe_destroy_if_unused(pipe);
+                vfs_release(node);
+                return -EINTR;
+            }
+            pipe_flags = pipe_lock_irqsave(pipe);
+        }
+        pipe_unlock_irqrestore(pipe, pipe_flags);
+        fd = task_fd_alloc_from(0);
+        if (fd < 0) {
+            pipe_release_reference(pipe, pipe_type);
+            pipe_destroy_if_unused(pipe);
+            vfs_release(node);
+            return fd;
+        }
+        current_task->fds[fd].type = pipe_type;
+        current_task->fds[fd].node = node;
+        current_task->fds[fd].private_data = pipe;
+        current_task->fds[fd].flags = (uint64_t)flags;
+        vfs_release(node);
+        return fd;
     }
 
     fd = task_fd_alloc_from(0);
@@ -383,12 +535,11 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     node = NULL;
     release_flock = 1;
 
-    if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+    if (FD_TYPE_IS_PIPE(tfd->type)) {
         p = (pipe_t *)tfd->private_data;
         if (p) {
             if (pipe_release_reference(p, tfd->type)) {
-                if (p->buffer) kfree(p->buffer);
-                kfree(p);
+                pipe_destroy_if_unused(p);
             }
         }
         memset(tfd, 0, sizeof(*tfd));
@@ -588,6 +739,7 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
     work_size = (uint64_t)len;
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;
@@ -645,6 +797,10 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
 
     parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+        vfs_release(parent);
+        return -EROFS;
+    }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
     if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     r = vfs_create(parent, filename, perms);
@@ -677,6 +833,10 @@ static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
 
     parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+        vfs_release(parent);
+        return -EROFS;
+    }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
     if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     r = vfs_mkdir(parent, dirname, perms);
@@ -706,6 +866,10 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
 
     parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+        vfs_release(parent);
+        return -EROFS;
+    }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
     if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
     r = vfs_unlink_checked(parent, filename, 0);
@@ -919,10 +1083,16 @@ static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
 }
 
 static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
-    int size = (int)(uintptr_t)size_ptr;
-    uint64_t buf_addr = (uint64_t)buf_ptr_int;
+    int size;
+    uint64_t buf_addr;
     uint64_t arg2_addr;
     struct statfs_kernel *buf;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    vfs_mount_t *mount;
+
+    size = (int)(uintptr_t)size_ptr;
+    buf_addr = (uint64_t)buf_ptr_int;
 
     arg2_addr = (uint64_t)(uintptr_t)size_ptr;
     if ((buf_addr < 0x1000 || buf_addr >= KERNEL_VMA) &&
@@ -947,9 +1117,14 @@ static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
         return -EINVAL;
     }
 
+    tfd = &current_task->fds[fd];
+    if ((tfd->type != FD_TYPE_FILE && !FD_TYPE_IS_PIPE(tfd->type)) ||
+        !tfd->node) return -EBADF;
+    node = (vfs_node_t *)tfd->node;
+    mount = vfs_get_mount_for_node(node);
+    if (!mount || !mount->path) return -EINVAL;
     buf = (struct statfs_kernel *)buf_addr;
-
-    fill_statfs_for_path("/", buf);
+    fill_statfs_for_path(mount->path, buf);
 
     return 0;
 }

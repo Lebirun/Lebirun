@@ -114,6 +114,11 @@ int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
 int ext4_sync_mounted(void);
 int ext4_sync_node(vfs_node_t *node);
+int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                        uint64_t ctime);
+int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode);
+int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
+                        vfs_node_t *new_parent, const char *new_name);
 void ext4_background_writeback(uint32_t max_blocks);
 void ext4_reclaim_mounted_caches(uint32_t max_blocks);
 

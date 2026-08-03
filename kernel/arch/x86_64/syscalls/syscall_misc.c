@@ -357,6 +357,9 @@ static int sys_setrlimit(int resource, const struct rlimit *rlim) {
 
 static int sys_getrusage(int who, struct rusage *usage) {
     struct rusage value;
+    uint64_t frequency;
+    uint64_t user_ticks;
+    uint64_t system_ticks;
 
     if (!usage) return -EFAULT;
     if (who != RUSAGE_SELF && who != RUSAGE_THREAD &&
@@ -364,6 +367,28 @@ static int sys_getrusage(int who, struct rusage *usage) {
         return -EINVAL;
     }
     memset(&value, 0, sizeof(value));
+    if (current_task) {
+        frequency = pit_freq ? pit_freq : 1000;
+        if (who == RUSAGE_CHILDREN) {
+            user_ticks = current_task->child_utime;
+            system_ticks = current_task->child_stime;
+            value.ru_maxrss = (long)current_task->child_maxrss_kb;
+        } else {
+            user_ticks = current_task->utime;
+            system_ticks = current_task->stime;
+            value.ru_maxrss = (long)current_task->maxrss_kb;
+            value.ru_minflt = (long)current_task->minor_faults;
+            value.ru_majflt = (long)current_task->major_faults;
+            value.ru_nvcsw =
+                (long)current_task->voluntary_context_switches;
+            value.ru_nivcsw =
+                (long)current_task->involuntary_context_switches;
+        }
+        value.ru_utime.tv_sec = (long)(user_ticks / frequency);
+        value.ru_utime.tv_usec = (long)((user_ticks % frequency) * 1000000ULL / frequency);
+        value.ru_stime.tv_sec = (long)(system_ticks / frequency);
+        value.ru_stime.tv_usec = (long)((system_ticks % frequency) * 1000000ULL / frequency);
+    }
     if (copy_to_user(usage, &value, sizeof(value)) < 0) return -EFAULT;
     return 0;
 }
@@ -461,10 +486,10 @@ static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigne
             return 0;
             
         case PR_SET_DUMPABLE:
-            return 0;
+            return creds_set_dumpable(current_task, (int)arg2);
             
         case PR_GET_DUMPABLE:
-            return 1;
+            return creds_get_dumpable(current_task);
             
         case PR_SET_NO_NEW_PRIVS:
             if (arg2 != 1) return -EINVAL;
@@ -527,7 +552,14 @@ static int sys_arch_prctl(int code, unsigned long addr) {
             return 0;
             
         case ARCH_SET_GS:
+            return -EINVAL;
+
         case ARCH_GET_GS:
+            if (addr && current_task) {
+                if (copy_to_user((void *)addr, &current_task->tls_limit,
+                                 sizeof(current_task->tls_limit)) < 0)
+                    return -EFAULT;
+            }
             return 0;
             
         default:

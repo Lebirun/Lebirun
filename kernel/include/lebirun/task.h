@@ -23,6 +23,11 @@ struct cpu_info;
 #define FD_TYPE_STDIN  3
 #define FD_TYPE_STDOUT 4
 #define FD_TYPE_STDERR 5
+#define FD_TYPE_PIPE_RW 6
+
+#define FD_TYPE_IS_PIPE(type) ((type) == FD_TYPE_PIPE_R || \
+                               (type) == FD_TYPE_PIPE_W || \
+                               (type) == FD_TYPE_PIPE_RW)
 
 typedef enum {
     TASK_READY = 0,
@@ -90,6 +95,7 @@ typedef struct task {
     uint64_t kernel_stack_size;
     uint64_t wake_tick;
     bool is_user;
+    bool shares_address_space;
     uint64_t user_brk;
     uint64_t user_brk_start;
     uint64_t mmap_next_addr;
@@ -105,6 +111,7 @@ typedef struct task {
     uint64_t tls_base;
     uint64_t tls_limit;
     char *cwd;
+    char *root;
     char **envp;
     int envc;
     task_fd_t *fds;
@@ -133,11 +140,26 @@ typedef struct task {
     int *clear_child_tid;
     void *robust_list;
     size_t robust_list_len;
+    uint32_t futex_bitset;
     char name[16];
 
     uint64_t start_tick;
     uint64_t utime;
     uint64_t stime;
+    uint64_t child_utime;
+    uint64_t child_stime;
+    uint64_t maxrss_kb;
+    uint64_t child_maxrss_kb;
+    uint64_t voluntary_context_switches;
+    uint64_t involuntary_context_switches;
+    uint64_t minor_faults;
+    uint64_t major_faults;
+    uint64_t read_characters;
+    uint64_t written_characters;
+    uint64_t read_calls;
+    uint64_t write_calls;
+    uint64_t file_read_bytes;
+    uint64_t file_write_bytes;
 
     uint8_t vring_minor;
     bool is_kernel_task;
@@ -262,8 +284,10 @@ int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
                           uint64_t flags);
 int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
-int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr);
+int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
+                                int write_fault);
 uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages);
+uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages);
 int task_track_user_page(task_t *task, uint64_t physical);
 void task_untrack_user_page(task_t *task, uint64_t physical);
 void exec_page_cache_reclaim(uint64_t target_pages);
@@ -274,6 +298,8 @@ void task_memory_pressure_request(void);
 void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4);
+void task_get_cached_stats(int *proc_count, int *unused1, int *unused2,
+                           pid_t *unused3);
 uint64_t task_user_memory_bytes(task_t *task);
 int task_memory_allows(task_t *task, uint64_t additional_bytes);
 int task_memory_total_allows(task_t *task, uint64_t total_bytes);
@@ -289,10 +315,15 @@ int task_set_nice(task_t *task, int nice_value);
 int task_set_scheduler(task_t *task, int policy, int priority);
 int task_get_scheduler(task_t *task, int *priority);
 uint64_t signal_pending_mask(task_t *task);
+uint64_t signal_blocked_mask(task_t *task);
+uint32_t signal_queue_count(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
-                    uint64_t timeout_ticks);
+                    uint64_t timeout_ticks, uint32_t bitset);
 int task_futex_wake(uint64_t key, int count);
+int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset);
+int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
+                       int requeue_count);
 
 void set_syscall_frame(registers_t *frame);
 void clear_syscall_frame(void);
@@ -311,8 +342,11 @@ void task_fd_close_all(task_t *task);
 void task_fd_close_cloexec(task_t *task);
 int task_set_cwd(task_t *task, const char *cwd);
 int task_copy_cwd(task_t *task, const task_t *source);
+int task_set_root(task_t *task, const char *root);
 
-pid_t task_fork(registers_t *parent_regs);
+pid_t task_fork(registers_t *parent_regs, int share_address_space,
+                uint64_t child_stack, uint64_t tls_base,
+                int *parent_tid, int *child_tid);
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs);
 int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
                         int argc, char **argv, int envc, char **envp);

@@ -6,6 +6,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/creds.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
@@ -213,7 +214,7 @@ static void fd_release_entry(task_fd_t *tfd) {
     pipe_type = 0;
     release_flock = 1;
 
-    if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) {
+    if (FD_TYPE_IS_PIPE(tfd->type)) {
         pipe_to_release = (pipe_t *)tfd->private_data;
         pipe_type = tfd->type;
     } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
@@ -240,8 +241,7 @@ static void fd_release_entry(task_fd_t *tfd) {
 
     if (pipe_to_release) {
         if (pipe_release_reference(pipe_to_release, pipe_type)) {
-            if (pipe_to_release->buffer) kfree(pipe_to_release->buffer);
-            kfree(pipe_to_release);
+            pipe_destroy_if_unused(pipe_to_release);
         }
     }
 
@@ -260,7 +260,7 @@ static void fd_retain_entry(task_fd_t *tfd) {
         vfs_open(node, 0);
         return;
     }
-    if (tfd->private_data && (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W)) {
+    if (tfd->private_data && FD_TYPE_IS_PIPE(tfd->type)) {
         p = (pipe_t *)tfd->private_data;
         pipe_retain_reference(p, tfd->type);
     }
@@ -421,6 +421,103 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     return ret == 0 ? 0 : -ENOMEM;
 }
 
+static int sys_chroot(const char *path_arg, int unused1, int unused2) {
+    char *path;
+    char resolved[VFS_MAX_PATH];
+    char *canonical;
+    vfs_node_t *node;
+    int result;
+
+    (void)unused1;
+    (void)unused2;
+    if (!current_task) return -ESRCH;
+    if (!creds_has_capability(current_task, 18)) return -EPERM;
+    result = posix_copy_user_string(&path, path_arg, VFS_MAX_PATH);
+    if (result < 0) return result;
+    node = vfs_namei(path);
+    kfree(path);
+    if (!node) return -ENOENT;
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
+        vfs_release(node);
+        return -ENOTDIR;
+    }
+    canonical = vfs_get_path(node, resolved, sizeof(resolved));
+    if (!canonical) {
+        vfs_release(node);
+        return -EINVAL;
+    }
+    result = task_set_root(current_task, canonical);
+    if (result == 0) result = task_set_cwd(current_task, "/");
+    vfs_release(node);
+    return result == 0 ? 0 : -ENOMEM;
+}
+
+static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
+                          int unused) {
+    char *new_root;
+    char *put_old;
+    char new_path[VFS_MAX_PATH];
+    char old_path[VFS_MAX_PATH];
+    char *new_canonical;
+    char *old_canonical;
+    vfs_node_t *new_node;
+    vfs_node_t *old_node;
+    vfs_mount_t *new_mount;
+    size_t new_length;
+    int result;
+
+    (void)unused;
+    if (!current_task) return -ESRCH;
+    if (!creds_has_capability(current_task, 21)) return -EPERM;
+    result = posix_copy_user_string(&new_root, new_root_arg, VFS_MAX_PATH);
+    if (result < 0) return result;
+    result = posix_copy_user_string(&put_old, put_old_arg, VFS_MAX_PATH);
+    if (result < 0) {
+        kfree(new_root);
+        return result;
+    }
+    new_node = vfs_namei(new_root);
+    old_node = vfs_namei(put_old);
+    kfree(new_root);
+    kfree(put_old);
+    if (!new_node || !old_node) {
+        if (new_node) vfs_release(new_node);
+        if (old_node) vfs_release(old_node);
+        return -ENOENT;
+    }
+    if (VFS_GET_TYPE(new_node->flags) != VFS_DIRECTORY ||
+        VFS_GET_TYPE(old_node->flags) != VFS_DIRECTORY) {
+        vfs_release(new_node);
+        vfs_release(old_node);
+        return -ENOTDIR;
+    }
+    new_mount = vfs_get_mount_for_node(new_node);
+    if (!new_mount || new_mount->root != new_node || new_node == old_node) {
+        vfs_release(new_node);
+        vfs_release(old_node);
+        return -EINVAL;
+    }
+    new_canonical = vfs_get_path(new_node, new_path, sizeof(new_path));
+    old_canonical = vfs_get_path(old_node, old_path, sizeof(old_path));
+    if (!new_canonical || !old_canonical) {
+        vfs_release(new_node);
+        vfs_release(old_node);
+        return -EINVAL;
+    }
+    new_length = strlen(new_canonical);
+    if (strncmp(old_canonical, new_canonical, new_length) != 0 ||
+        old_canonical[new_length] != '/') {
+        vfs_release(new_node);
+        vfs_release(old_node);
+        return -EINVAL;
+    }
+    result = task_set_root(current_task, new_canonical);
+    if (result == 0) result = task_set_cwd(current_task, "/");
+    vfs_release(new_node);
+    vfs_release(old_node);
+    return result == 0 ? 0 : -ENOMEM;
+}
+
 static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
 
 static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
@@ -536,6 +633,8 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     int pty_fd;
     uint64_t size;
     uint64_t flags;
+    vfs_node_t *node;
+    uint64_t node_address;
     int ret;
 
     (void)unused;
@@ -555,8 +654,20 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     }
     
     if (fd >= 0 && fd < current_task->fds_capacity && fd_table[fd].in_use) {
-        if (fd_table[fd].type == FD_TYPE_PIPE_R || fd_table[fd].type == FD_TYPE_PIPE_W) {
-            st->st_mode = S_IFIFO | 0600;
+        if (FD_TYPE_IS_PIPE(fd_table[fd].type)) {
+            node = (vfs_node_t *)fd_table[fd].node;
+            if (node && VFS_GET_TYPE(node->flags) == VFS_PIPE) {
+                st->st_dev = 1;
+                st->st_ino = node->inode ? node->inode : 1;
+                st->st_mode = vfs_node_to_unix_mode(node);
+                st->st_uid = node->uid;
+                st->st_gid = node->gid;
+                st->st_atim.tv_sec = node->atime;
+                st->st_mtim.tv_sec = node->mtime;
+                st->st_ctim.tv_sec = node->ctime;
+            } else {
+                st->st_mode = S_IFIFO | 0600;
+            }
             st->st_blksize = 4096;
             st->st_nlink = 1;
             return 0;
@@ -573,10 +684,10 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             }
         }
         
-        vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+        node = (vfs_node_t *)fd_table[fd].node;
         if (node) {
-            uint64_t na = (uint64_t)node;
-            if ((na & 0xFFFF0000u) == 0xFEFE0000u) {
+            node_address = (uint64_t)node;
+            if ((node_address & 0xFFFF0000u) == 0xFEFE0000u) {
                 node = NULL;
             }
         }
@@ -624,7 +735,7 @@ static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
-    if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_W) return -ESPIPE;
+    if (FD_TYPE_IS_PIPE(tfd->type)) return -ESPIPE;
     if (tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT || tfd->type == FD_TYPE_STDERR) return -ESPIPE;
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
 
@@ -691,6 +802,124 @@ static int sys_gettimeofday(int tv_ptr, const char *tz_ptr, int unused) {
     value.tv_usec = (long)((nanoseconds % 1000000000ULL) / 1000);
     if (copy_to_user(tv, &value, sizeof(value)) != 0) return -EFAULT;
     return 0;
+}
+
+static int timespec_to_ns(const struct kernel_timespec *value,
+                          uint64_t *nanoseconds) {
+    uint64_t seconds;
+
+    if (!value || !nanoseconds) return -EFAULT;
+    if (value->tv_sec < 0 || value->tv_nsec < 0 ||
+        value->tv_nsec >= 1000000000L) return -EINVAL;
+    seconds = (uint64_t)value->tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t)value->tv_nsec) /
+        1000000000ULL) return -EOVERFLOW;
+    *nanoseconds = seconds * 1000000000ULL +
+                   (uint64_t)value->tv_nsec;
+    return 0;
+}
+
+static int sys_clock_settime(int clock_id, const char *tp_ptr, int unused) {
+    struct kernel_timespec value;
+    uint64_t nanoseconds;
+    int result;
+
+    (void)unused;
+    if (clock_id != TIMEKEEPING_CLOCK_REALTIME) return -EINVAL;
+    if (!current_task || !creds_has_capability(current_task, 25))
+        return -EPERM;
+    if (!tp_ptr) return -EFAULT;
+    if (copy_from_user(&value, tp_ptr, sizeof(value)) != 0)
+        return -EFAULT;
+    result = timespec_to_ns(&value, &nanoseconds);
+    if (result != 0) return result;
+    if (timekeeping_set_realtime_ns(nanoseconds) != 0) return -EINVAL;
+    return 0;
+}
+
+static int sys_settimeofday(int tv_ptr, const char *tz_ptr, int unused) {
+    struct kernel_timeval value;
+    uint64_t seconds;
+    uint64_t nanoseconds;
+
+    (void)unused;
+    if (!current_task || !creds_has_capability(current_task, 25))
+        return -EPERM;
+    if (tz_ptr) return -EINVAL;
+    if (!tv_ptr) return -EFAULT;
+    if (copy_from_user(&value, (const void *)(uintptr_t)tv_ptr,
+                       sizeof(value)) != 0) return -EFAULT;
+    if (value.tv_sec < 0 || value.tv_usec < 0 || value.tv_usec >= 1000000L)
+        return -EINVAL;
+    seconds = (uint64_t)value.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t)value.tv_usec * 1000ULL) /
+        1000000000ULL) return -EOVERFLOW;
+    nanoseconds = seconds * 1000000000ULL +
+                  (uint64_t)value.tv_usec * 1000ULL;
+    if (timekeeping_set_realtime_ns(nanoseconds) != 0) return -EINVAL;
+    return 0;
+}
+
+static int sys_clock_getres(int clock_id, const char *tp_ptr, int unused) {
+    struct kernel_timespec value;
+    uint64_t resolution;
+
+    (void)unused;
+    if (timekeeping_get_ns(clock_id, &resolution) != 0) return -EINVAL;
+    if (!tp_ptr) return 0;
+    resolution = pit_freq ? (1000000000ULL + pit_freq - 1) / pit_freq :
+                 1000000ULL;
+    value.tv_sec = (long)(resolution / 1000000000ULL);
+    value.tv_nsec = (long)(resolution % 1000000000ULL);
+    if (copy_to_user((void *)tp_ptr, &value, sizeof(value)) != 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int sys_clock_nanosleep(int clock_id, const char *flags_ptr,
+                               int request_ptr, int remain_ptr) {
+    struct kernel_timespec request;
+    struct kernel_timespec remain;
+    uint64_t requested_ns;
+    uint64_t now_ns;
+    uint64_t sleep_ns;
+    uint64_t frequency;
+    uint64_t ticks;
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
+    int flags;
+    int result;
+    extern int task_has_pending_signals(void);
+
+    flags = (int)(uintptr_t)flags_ptr;
+    if (flags & ~1) return -EINVAL;
+    if (timekeeping_get_ns(clock_id, &now_ns) != 0) return -EINVAL;
+    if (!request_ptr) return -EFAULT;
+    if (copy_from_user(&request, (const void *)(uintptr_t)request_ptr,
+                       sizeof(request)) != 0) return -EFAULT;
+    result = timespec_to_ns(&request, &requested_ns);
+    if (result != 0) return result;
+    if (flags & 1) {
+        sleep_ns = requested_ns > now_ns ? requested_ns - now_ns : 0;
+    } else {
+        sleep_ns = requested_ns;
+    }
+    frequency = pit_freq ? pit_freq : 1000;
+    if (sleep_ns > UINT64_MAX / frequency) return -EOVERFLOW;
+    ticks = (sleep_ns * frequency + 999999999ULL) / 1000000000ULL;
+    start_ns = timekeeping_monotonic_ns();
+    if (ticks > 0) sleep_ticks(ticks);
+    if (!task_has_pending_signals()) return 0;
+    if (!(flags & 1) && remain_ptr) {
+        now_ns = timekeeping_monotonic_ns();
+        elapsed_ns = now_ns >= start_ns ? now_ns - start_ns : 0;
+        sleep_ns = elapsed_ns < sleep_ns ? sleep_ns - elapsed_ns : 0;
+        remain.tv_sec = (long)(sleep_ns / 1000000000ULL);
+        remain.tv_nsec = (long)(sleep_ns % 1000000000ULL);
+        if (copy_to_user((void *)(uintptr_t)remain_ptr, &remain,
+                         sizeof(remain)) != 0) return -EFAULT;
+    }
+    return -EINTR;
 }
 
 static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
@@ -776,6 +1005,13 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         kfree(path);
         return -ENOENT;
     }
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_NOEXEC) {
+        vfs_release(node);
+        posix_free_string_array(envp, envc);
+        posix_free_string_array(argv, argc);
+        kfree(path);
+        return -EACCES;
+    }
     vfs_open(node, 0);
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
         vfs_close(node);
@@ -850,6 +1086,14 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             posix_free_string_array(argv, argc);
             kfree(path);
             return -ENOENT;
+        }
+        if (vfs_get_mount_flags_for_node(interp_node) & VFS_MS_NOEXEC) {
+            vfs_release(interp_node);
+            vfs_close(node);
+            posix_free_string_array(envp, envc);
+            posix_free_string_array(argv, argc);
+            kfree(path);
+            return -EACCES;
         }
         vfs_open(interp_node, 0);
         interp_size = interp_node->length;
@@ -1293,6 +1537,10 @@ static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
     if (!node) return -1;
 
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) { vfs_release(node); return -1; }
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) {
+        vfs_release(node);
+        return -EROFS;
+    }
     
     if (node->truncate) {
         result = node->truncate(node, length);
@@ -1318,6 +1566,7 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     if (!node) return -EBADF;
 
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
     
     if (node->truncate) {
         return node->truncate(node, length);
@@ -1681,6 +1930,7 @@ static int sys_fchmod(int fd, int mode) {
 
     if (current_task->euid != 0 && current_task->euid != node->uid)
         return -EPERM;
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
 
     if (node->chmod) {
         return node->chmod(node, mode & 07777);
@@ -1699,6 +1949,7 @@ static int sys_fchown(int fd, int uid, int gid) {
 
     if (current_task->euid != 0)
         return -EPERM;
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
 
     if (node->chown) {
         return node->chown(node, uid, gid);
@@ -1732,6 +1983,32 @@ static int sys_fdatasync(int fd) {
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EINVAL;
     node = (vfs_node_t *)tfd->node;
     return vfs_sync_node(node, 1) == 0 ? 0 : -EIO;
+}
+
+static int sys_sync(int unused1, const char *unused2, int unused3) {
+    int result;
+
+    (void)unused1;
+    (void)unused2;
+    (void)unused3;
+    result = vfs_sync_all(0);
+    return result == 0 ? 0 : -EIO;
+}
+
+static int sys_syncfs(int fd, const char *unused1, int unused2) {
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
+    (void)unused1;
+    (void)unused2;
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    if (!fd_table[fd].in_use) return -EBADF;
+    tfd = &fd_table[fd];
+    if ((tfd->type != FD_TYPE_FILE && !FD_TYPE_IS_PIPE(tfd->type)) ||
+        !tfd->node) return -EINVAL;
+    node = (vfs_node_t *)tfd->node;
+    return vfs_sync_node(node, 0) == 0 ? 0 : -EIO;
 }
 
 static int sys_flock(int fd, int operation) {
@@ -1936,9 +2213,15 @@ void syscalls_posix_init(void) {
     syscall_table[SYSCALL_FSTAT] = sys_fstat;
     syscall_table[SYSCALL_GETCWD] = sys_getcwd;
     syscall_table[SYSCALL_CHDIR] = sys_chdir;
+    syscall_table[SYSCALL_CHROOT] = sys_chroot;
+    syscall_table[SYSCALL_PIVOT_ROOT] = sys_pivot_root;
     syscall_table[SYSCALL_FCHDIR] = sys_fchdir;
     syscall_table[SYSCALL_ACCESS] = sys_access;
     syscall_table[SYSCALL_CLOCK_GETTIME] = sys_clock_gettime;
+    syscall_table[SYSCALL_CLOCK_SETTIME] = sys_clock_settime;
+    syscall_table[SYSCALL_SETTIMEOFDAY] = sys_settimeofday;
+    syscall_table[SYSCALL_CLOCK_GETRES] = sys_clock_getres;
+    syscall_table[SYSCALL_CLOCK_NANOSLEEP] = sys_clock_nanosleep;
     syscall_table[SYSCALL_GETTIMEOFDAY] = sys_gettimeofday;
     syscall_table[SYSCALL_EXECVE] = sys_execve;
     syscall_table[SYSCALL_LSEEK] = sys_lseek_new;
@@ -1956,6 +2239,8 @@ void syscalls_posix_init(void) {
     syscall_table[SYSCALL_FCHOWN] = sys_fchown;
     syscall_table[SYSCALL_FSYNC] = sys_fsync;
     syscall_table[SYSCALL_FDATASYNC] = sys_fdatasync;
+    syscall_table[SYSCALL_SYNC] = sys_sync;
+    syscall_table[SYSCALL_SYNCFS] = sys_syncfs;
     syscall_table[SYSCALL_FLOCK] = sys_flock;
     syscall_table[SYSCALL_PREAD64] = sys_pread64;
     syscall_table[SYSCALL_PWRITE64] = sys_pwrite64;

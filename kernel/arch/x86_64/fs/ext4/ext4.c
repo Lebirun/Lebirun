@@ -593,6 +593,8 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
         node->flags = VFS_CHARDEVICE | VFS_DYNAMIC;
     } else if ((mode & 0xF000) == EXT4_S_IFBLK) {
         node->flags = VFS_BLOCKDEVICE | VFS_DYNAMIC;
+    } else if ((mode & 0xF000) == EXT4_S_IFIFO) {
+        node->flags = VFS_PIPE | VFS_DYNAMIC;
     } else {
         node->flags = VFS_FILE | VFS_DYNAMIC;
     }
@@ -1574,6 +1576,97 @@ int ext4_sync_node(vfs_node_t *node) {
     ret = ext4_sync(fs);
     mutex_unlock(&fs->lock);
     return ret;
+}
+
+int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
+                        uint64_t ctime) {
+    ext4_vfs_private_t *priv;
+    ext4_inode_cache_t *ic;
+
+    if (!node || !node->private_data) return -1;
+    priv = (ext4_vfs_private_t *)node->private_data;
+    mutex_lock(&priv->fs->lock);
+    ic = ext4_get_inode(priv->fs, priv->ino);
+    if (!ic) {
+        mutex_unlock(&priv->fs->lock);
+        return -1;
+    }
+    ic->inode.i_atime = (uint32_t)atime;
+    ic->inode.i_mtime = (uint32_t)mtime;
+    ic->inode.i_ctime = (uint32_t)ctime;
+    ext4_mark_inode_dirty(ic);
+    ext4_release_inode(ic);
+    node->atime = atime;
+    node->mtime = mtime;
+    node->ctime = ctime;
+    mutex_unlock(&priv->fs->lock);
+    return 0;
+}
+
+int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
+    ext4_vfs_private_t *priv;
+    int result;
+
+    if (!parent || !parent->private_data || !name) return -1;
+    if ((mode & 0xF000) != EXT4_S_IFIFO) return -1;
+    priv = (ext4_vfs_private_t *)parent->private_data;
+    mutex_lock(&priv->fs->lock);
+    result = ext4_create_file(priv->fs, priv->ino, name,
+                              (uint16_t)(EXT4_S_IFIFO | (mode & 07777)));
+    mutex_unlock(&priv->fs->lock);
+    return result;
+}
+
+int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
+                        vfs_node_t *new_parent, const char *new_name) {
+    ext4_vfs_private_t *old_priv;
+    ext4_vfs_private_t *new_priv;
+    char temporary[VFS_MAX_NAME];
+    uint32_t existing;
+    unsigned int attempt;
+    int result;
+    int stage;
+
+    if (!old_parent || !new_parent || !old_name || !new_name ||
+        !old_parent->private_data || !new_parent->private_data) return -1;
+    old_priv = (ext4_vfs_private_t *)old_parent->private_data;
+    new_priv = (ext4_vfs_private_t *)new_parent->private_data;
+    if (old_priv->fs != new_priv->fs) return -1;
+    mutex_lock(&old_priv->fs->lock);
+    attempt = 0;
+    do {
+        snprintf(temporary, sizeof(temporary), ".lebex-%u-%u-%u",
+                 old_priv->ino, new_priv->ino, attempt++);
+        result = ext4_dir_lookup(old_priv->fs, old_priv->ino, temporary,
+                                 &existing);
+    } while (result == 0 && attempt < 64);
+    if (result == 0) {
+        mutex_unlock(&old_priv->fs->lock);
+        return -1;
+    }
+    stage = 0;
+    result = ext4_rename_file(old_priv->fs, old_priv->ino, old_name,
+                              old_priv->ino, temporary);
+    if (result == 0) {
+        stage = 1;
+        result = ext4_rename_file(old_priv->fs, new_priv->ino, new_name,
+                                  old_priv->ino, old_name);
+    }
+    if (result == 0) {
+        stage = 2;
+        result = ext4_rename_file(old_priv->fs, old_priv->ino, temporary,
+                                  new_priv->ino, new_name);
+    }
+    if (result != 0) {
+        if (stage >= 2)
+            ext4_rename_file(old_priv->fs, old_priv->ino, old_name,
+                             new_priv->ino, new_name);
+        if (stage >= 1)
+            ext4_rename_file(old_priv->fs, old_priv->ino, temporary,
+                             old_priv->ino, old_name);
+    }
+    mutex_unlock(&old_priv->fs->lock);
+    return result;
 }
 
 void ext4_background_writeback(uint32_t max_blocks) {

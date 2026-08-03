@@ -155,6 +155,7 @@ registers_t* interrupt_handler(registers_t* regs)
     uint8_t irq;
     int sig;
     task_t *fault_task;
+    cpu_info_t *cpu_info;
 
     if (regs->int_no < 32) {
         if (regs->int_no == 14) {
@@ -288,7 +289,8 @@ registers_t* interrupt_handler(registers_t* regs)
                     if (task_handle_file_page_fault(current_task, fault_addr)) {
                         return regs;
                     }
-                    if (task_handle_anon_page_fault(current_task, fault_addr)) {
+                    if (task_handle_anon_page_fault(current_task, fault_addr,
+                                                    (regs->err_code & 0x2) != 0)) {
                         return regs;
                     }
                     stack_floor = USER_STACK_FLOOR;
@@ -414,7 +416,8 @@ registers_t* interrupt_handler(registers_t* regs)
                     return regs;
                 }
                 if (task_handle_anon_page_fault(current_task,
-                                                sc_fault_addr)) {
+                                                sc_fault_addr,
+                                                (regs->err_code & 0x2) != 0)) {
                     if (sc_actual_cr3 != sc_expected_pd) {
                         regs->return_cr3 = sc_expected_pd;
                     } else {
@@ -594,18 +597,23 @@ registers_t* interrupt_handler(registers_t* regs)
         }
         
         if (irq == 0) {
+            cpu_info = smp_this_cpu();
             if (current_task) {
                 if (current_task->id == 0 && !current_task->is_user) {
                     __sync_fetch_and_add(&cpu_idle_ticks, 1);
+                    if (cpu_info) cpu_info->idle_ticks++;
                 } else if (regs->cs & 0x3) {
                     current_task->utime++;
                     __sync_fetch_and_add(&cpu_user_ticks, 1);
+                    if (cpu_info) cpu_info->user_ticks++;
                 } else {
                     current_task->stime++;
                     __sync_fetch_and_add(&cpu_system_ticks, 1);
+                    if (cpu_info) cpu_info->system_ticks++;
                 }
             } else {
                 __sync_fetch_and_add(&cpu_idle_ticks, 1);
+                if (cpu_info) cpu_info->idle_ticks++;
             }
 
             if (smp_is_bsp()) {
@@ -700,7 +708,7 @@ void keyboard_disable(void) {
     terminal_writestring("Keyboard IRQ disabled.\n");
 }
 
-void pic_remap(void)
+void KERNEL_INIT pic_remap(void)
 {
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
@@ -729,7 +737,7 @@ static struct {
     uint64_t base;
 } __attribute__((packed)) idtp = { sizeof(idt)-1, 0 };
 
-void idt_set_gate(uint8_t n, uintptr_t handler)
+void KERNEL_EARLY_INIT idt_set_gate(uint8_t n, uintptr_t handler)
 {
     idt[n].offset_lo  = handler & 0xFFFF;
     idt[n].offset_mid = (handler >> 16) & 0xFFFF;
@@ -740,7 +748,8 @@ void idt_set_gate(uint8_t n, uintptr_t handler)
     idt[n].reserved   = 0;
 }
 
-void idt_set_gate_flags(uint8_t n, uintptr_t handler, uint8_t flags)
+void KERNEL_EARLY_INIT idt_set_gate_flags(uint8_t n, uintptr_t handler,
+                                          uint8_t flags)
 {
     idt[n].offset_lo  = handler & 0xFFFF;
     idt[n].offset_mid = (handler >> 16) & 0xFFFF;
@@ -751,7 +760,9 @@ void idt_set_gate_flags(uint8_t n, uintptr_t handler, uint8_t flags)
     idt[n].reserved   = 0;
 }
 
-static void idt_set_gate_ist(uint8_t n, uintptr_t handler, uint8_t ist_index)
+static void KERNEL_EARLY_INIT idt_set_gate_ist(uint8_t n,
+                                               uintptr_t handler,
+                                               uint8_t ist_index)
 {
     idt[n].offset_lo  = handler & 0xFFFF;
     idt[n].offset_mid = (handler >> 16) & 0xFFFF;
@@ -840,6 +851,6 @@ void KERNEL_EARLY_INIT idt_init(void)
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 }
 
-void idt_load(void) {
+void KERNEL_INIT idt_load(void) {
     __asm__ volatile ("lidt %0" : : "m"(idtp) : "memory");
 }

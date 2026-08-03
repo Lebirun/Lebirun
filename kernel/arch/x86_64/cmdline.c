@@ -12,7 +12,7 @@ static int num_consoles;
 static int text_mode;
 static int lke_enabled;
 
-static int parse_int(const char *s)
+static int KERNEL_EARLY_INIT parse_int(const char *s)
 {
     int val;
     int i;
@@ -23,7 +23,8 @@ static int parse_int(const char *s)
     return val;
 }
 
-static const char *find_param(const char *cmdline, const char *key)
+static const char *KERNEL_EARLY_INIT find_param(const char *cmdline,
+                                                const char *key)
 {
     const char *p;
     int klen;
@@ -41,7 +42,8 @@ static const char *find_param(const char *cmdline, const char *key)
     return NULL;
 }
 
-static void extract_value(const char *start, char *out, int out_max)
+static void KERNEL_EARLY_INIT extract_value(const char *start, char *out,
+                                            int out_max)
 {
     int i;
 
@@ -96,7 +98,7 @@ const char *cmdline_get(void)
     return cmdline_buf;
 }
 
-const char *cmdline_get_init(void)
+const char *KERNEL_INIT cmdline_get_init(void)
 {
     return init_path;
 }
@@ -106,17 +108,17 @@ int cmdline_get_consoles(void)
     return num_consoles;
 }
 
-int cmdline_get_lke(void)
+int KERNEL_INIT cmdline_get_lke(void)
 {
     return lke_enabled;
 }
 
-const char *cmdline_get_root(void)
+const char *KERNEL_INIT cmdline_get_root(void)
 {
     return root_dev[0] ? root_dev : NULL;
 }
 
-int cmdline_get_text_mode(void)
+int KERNEL_INIT cmdline_get_text_mode(void)
 {
     return text_mode;
 }
