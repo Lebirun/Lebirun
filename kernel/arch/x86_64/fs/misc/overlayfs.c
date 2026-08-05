@@ -1029,7 +1029,8 @@ void KERNEL_INIT overlayfs_vfs_register(void) {
     vfs_register_fs(&overlay_fs_type);
 }
 
-overlay_context_t *overlayfs_create(vfs_node_t *lower_root, vfs_node_t *upper_root) {
+overlay_context_t *KERNEL_INIT overlayfs_create(vfs_node_t *lower_root,
+                                                vfs_node_t *upper_root) {
     if (!lower_root) {
         printf("OVERLAYFS: Lower layer required\n");
         return NULL;

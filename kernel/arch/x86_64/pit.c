@@ -149,7 +149,7 @@ void KERNEL_INIT pit_init(uint64_t freq) {
         error_ppm = ((freq - actual_freq) * 1000000) / freq;
     }
     
-    printf("PIT: %u Hz (req %u Hz, div %u, err %u ppm)\n", 
+    KERNEL_INIT_LOG("PIT: %u Hz (req %u Hz, div %u, err %u ppm)\n",
            actual_freq, freq, divisor, error_ppm);
 }
 
@@ -452,7 +452,7 @@ void KERNEL_INIT calibrate_pit(void) {
     uint64_t spin_limit;
     uint64_t expected_freq;
 
-    printf("PIT: Calibrating...\n");
+    KERNEL_INIT_LOG("PIT: Calibrating...\n");
 
     old_freq = pit_freq;
     cal_divisor = PIT_BASE_FREQ / 1000;
@@ -474,7 +474,7 @@ void KERNEL_INIT calibrate_pit(void) {
             pit_set_divisor((uint16_t)divisor);
             pit_freq = old_freq;
             restore_flags(entry_flags);
-            printf("PIT: Calibration skipped (no timer IRQs yet)\n");
+            KERNEL_INIT_LOG("PIT: Calibration skipped (no timer IRQs yet)\n");
             return;
         }
         __asm__ volatile("pause");
@@ -492,7 +492,7 @@ void KERNEL_INIT calibrate_pit(void) {
             pit_set_divisor((uint16_t)divisor);
             pit_freq = old_freq;
             restore_flags(entry_flags);
-            printf("PIT: Calibration timeout, using base frequency\n");
+            KERNEL_INIT_LOG("PIT: Calibration timeout, using base frequency\n");
             return;
         }
         __asm__ volatile("pause");
@@ -505,7 +505,7 @@ void KERNEL_INIT calibrate_pit(void) {
     if (expected_freq >= 800 && expected_freq <= 1200) {
         calibrated_freq = (old_freq * expected_freq) / 1000;
     } else {
-        printf("PIT: Calibration out of range (%u Hz)\n", expected_freq);
+        KERNEL_INIT_LOG("PIT: Calibration out of range (%u Hz)\n", expected_freq);
         calibrated_freq = old_freq;
     }
     
@@ -519,5 +519,5 @@ void KERNEL_INIT calibrate_pit(void) {
 
     restore_flags(entry_flags);
 
-    printf("PIT: Calibrated to %u Hz\n", calibrated_freq);
+    KERNEL_INIT_LOG("PIT: Calibrated to %u Hz\n", calibrated_freq);
 }

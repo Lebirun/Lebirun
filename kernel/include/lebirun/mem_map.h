@@ -17,6 +17,7 @@ int smp_processor_id(void);
 #define TOTAL_PAGES (MAX_PHYSICAL_MEMORY / PAGE_SIZE)
 #define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
 #define PFA_SPARSE_CHUNK_FRAMES (PAGE_SIZE * 8)
+#define PFA_INLINE_DIRECTORY_ENTRIES 32
 #define VMM_PTE_COW 0x200ULL
 #define VMM_PTE_NOFREE 0x400ULL
 #define VMM_PTE_SHARED 0x800ULL
@@ -78,9 +79,12 @@ extern uint8_t *pfa_bitmap;
 extern heap_t kernel_heap;
 
 #define MAX_RESERVED_REGIONS 8
+#define RESERVED_REGION_MULTIBOOT_INFO 1
+#define RESERVED_REGION_MODULE 2
 typedef struct {
     uint64_t start_phys;
     uint64_t end_phys;
+    uint32_t kind;
 } reserved_region_t;
 extern reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
 extern uint64_t num_reserved_regions;
@@ -112,11 +116,11 @@ void pfa_init(void);
 uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
 void pfa_free(uint64_t phys_addr);
+uint64_t pfa_release_multiboot_range(uint64_t phys_start, uint64_t phys_end);
 void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end);
 void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end);
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames);
 uint64_t pfa_count_free(void);
-void pfa_sync_free_count(void);
 uint64_t pfa_get_total_ram_kb(void);
 
 void pfa_ref_init(void);

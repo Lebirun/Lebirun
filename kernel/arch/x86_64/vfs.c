@@ -1,4 +1,5 @@
 #include <lebirun/vfs.h>
+#include <lebirun/common.h>
 #include <lebirun/tty.h>
 #include <lebirun/mutex.h>
 #include <lebirun/task.h>
@@ -1783,7 +1784,10 @@ vfs_node_t *vfs_get_root(void) {
     return vfs_root;
 }
 
-int vfs_replace_mount_root(const char *mountpoint, vfs_node_t *new_root, const char *device, const char *fs_name) {
+int KERNEL_INIT vfs_replace_mount_root(const char *mountpoint,
+                                       vfs_node_t *new_root,
+                                       const char *device,
+                                       const char *fs_name) {
     int i;
     vfs_fs_type_t *fs;
 

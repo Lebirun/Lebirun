@@ -57,7 +57,7 @@ boot_pd_low:
 .global multiboot_magic
 .global multiboot_ptr
 
-.section .bss
+.section .init.bss, "aw", @nobits
 .align 8
 multiboot_magic: .skip 4
 multiboot_ptr: .skip 8

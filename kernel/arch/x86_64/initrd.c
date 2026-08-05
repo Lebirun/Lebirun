@@ -52,22 +52,22 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     multiboot_module_t *mod;
 
     if (mods_count == 0) {
-        printf("INITRD: No modules loaded\n");
+        KERNEL_INIT_LOG("INITRD: No modules loaded\n");
         return;
     }
 
     if (mods_count > UINT64_MAX / sizeof(multiboot_module_t)) {
-        printf("INITRD: Invalid module count\n");
+        KERNEL_INIT_LOG("INITRD: Invalid module count\n");
         return;
     }
     module_array_size = mods_count * sizeof(multiboot_module_t);
     if (module_array_size > UINT64_MAX - mods_addr) {
-        printf("INITRD: Invalid module array range\n");
+        KERNEL_INIT_LOG("INITRD: Invalid module array range\n");
         return;
     }
     module_array_end = mods_addr + module_array_size;
     if (module_array_end > UINT64_MAX - 0xFFF) {
-        printf("INITRD: Invalid module array range\n");
+        KERNEL_INIT_LOG("INITRD: Invalid module array range\n");
         return;
     }
 
@@ -83,7 +83,7 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     mod_start_phys = mod->mod_start;
     mod_end_phys = mod->mod_end;
     if (mod_end_phys < mod_start_phys) {
-        printf("INITRD: Invalid module range\n");
+        KERNEL_INIT_LOG("INITRD: Invalid module range\n");
         return;
     }
     mod_size = mod_end_phys - mod_start_phys;
@@ -92,13 +92,13 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     initrd_mod0_phys_end = mod_end_phys;
     
     if (mod_size < sizeof(initrd_header_t)) {
-        printf("INITRD: Module too small to contain header (%u bytes)\n", mod_size);
+        KERNEL_INIT_LOG("INITRD: Module too small to contain header (%u bytes)\n", mod_size);
         return;
     }
 
     start_page = mod_start_phys & ~0xFFF;
     if (mod_end_phys > UINT64_MAX - 0xFFF) {
-        printf("INITRD: Invalid module end\n");
+        KERNEL_INIT_LOG("INITRD: Invalid module end\n");
         return;
     }
     end_page = (mod_end_phys + 0xFFF) & ~0xFFF;
@@ -112,7 +112,7 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     initrd_header = (initrd_header_t *)initrd_base;
 
     if (initrd_header->magic != INITRD_MAGIC) {
-        printf("INITRD: Invalid magic (got 0x%08X, expected 0x%08X)\n",
+        KERNEL_INIT_LOG("INITRD: Invalid magic (got 0x%08X, expected 0x%08X)\n",
                (unsigned int)initrd_header->magic, (unsigned int)INITRD_MAGIC);
         return;
     }
@@ -124,29 +124,29 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     file_headers = (initrd_file_header_t *)(initrd_base + sizeof(initrd_header_t));
 
     if (file_count > UINT64_MAX / sizeof(initrd_file_header_t)) {
-        printf("INITRD: Invalid file count\n");
+        KERNEL_INIT_LOG("INITRD: Invalid file count\n");
         return;
     }
     headers_size = file_count * sizeof(initrd_file_header_t);
     if (headers_size > mod_size - sizeof(initrd_header_t)) {
-        printf("INITRD: File header array overruns module (headers end beyond module)\n");
+        KERNEL_INIT_LOG("INITRD: File header array overruns module (headers end beyond module)\n");
         return;
     }
 
     if (file_count > SIZE_MAX / sizeof(initrd_file_t)) {
-        printf("INITRD: File array is too large\n");
+        KERNEL_INIT_LOG("INITRD: File array is too large\n");
         return;
     }
 
     if (file_count == 0) {
         files = NULL;
-        printf("INITRD: Initialized 0 files (version %u)\n", initrd_version);
+        KERNEL_INIT_LOG("INITRD: Initialized 0 files (version %u)\n", initrd_version);
         return;
     }
 
     files = (initrd_file_t *)kmalloc(file_count * sizeof(initrd_file_t));
     if (!files) {
-        printf("INITRD: Failed to allocate file array\n");
+        KERNEL_INIT_LOG("INITRD: Failed to allocate file array\n");
         return;
     }
 
@@ -165,7 +165,7 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
 
         if (files[i].type != INITRD_TYPE_FILE &&
             files[i].type != INITRD_TYPE_DIR) {
-            printf("INITRD: File %u (%s) has invalid type %u\n",
+            KERNEL_INIT_LOG("INITRD: File %u (%s) has invalid type %u\n",
                    i, files[i].name, files[i].type);
             kfree(files);
             files = NULL;
@@ -175,7 +175,7 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
 
         if (files[i].type == INITRD_TYPE_FILE) {
             if (hdr_off > mod_size || len > mod_size - hdr_off) {
-                printf("INITRD: File %u (%s) has out-of-bounds offset/length (off=%u len=%u mod_size=%u)\n",
+                KERNEL_INIT_LOG("INITRD: File %u (%s) has out-of-bounds offset/length (off=%u len=%u mod_size=%u)\n",
                        i, files[i].name, hdr_off, len, mod_size);
                 kfree(files);
                 files = NULL;
@@ -192,7 +192,7 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         }
     }
 
-    printf("INITRD: Initialized %u files (version %u)\n", file_count, initrd_version);
+    KERNEL_INIT_LOG("INITRD: Initialized %u files (version %u)\n", file_count, initrd_version);
 }
 
 uint64_t initrd_get_file_count(void) {

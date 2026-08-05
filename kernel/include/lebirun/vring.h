@@ -114,6 +114,7 @@ kproc_t *kproc_find_by_pid(int32_t pid);
 int klog_printf(int level, const char *fmt, ...);
 int klog_enqueue_raw(const char *buf, size_t len);
 void klog_persist_enable(void);
+int klog_early_storage_reclaimable(void);
 void klog_reclaim_unused(void);
 int klog_drain_console0(uint64_t max_items);
 int klog_snapshot(char *buf, int bufsz);

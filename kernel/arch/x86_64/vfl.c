@@ -1,4 +1,5 @@
 #include <lebirun/vfl.h>
+#include <lebirun/common.h>
 #include <lebirun/vfs.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/task.h>
@@ -708,7 +709,7 @@ static uint64_t vfl_dev_write(vfs_node_t *n, uint64_t off, uint64_t sz, uint8_t 
 
 static vfs_node_t dev_vfl_node;
 
-void vfl_register_devfs(void) {
+void KERNEL_INIT vfl_register_devfs(void) {
     memset(&dev_vfl_node, 0, sizeof(vfs_node_t));
     strcpy(dev_vfl_node.name, "vfl");
     dev_vfl_node.flags = VFS_CHARDEVICE;

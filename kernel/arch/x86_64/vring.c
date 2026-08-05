@@ -50,9 +50,10 @@ static volatile int klog_persist_pos = 0;
 static int klog_persist_cap = 0;
 
 #define KLOG_EARLY_SZ 512
-static char klog_early_buf[KLOG_EARLY_SZ];
-static volatile int klog_early_pos = 0;
-static volatile int klog_early_done = 0;
+static char klog_early_buf[KLOG_EARLY_SZ] KERNEL_INIT_OPTIONAL_BSS;
+static volatile int klog_early_pos KERNEL_INIT_OPTIONAL_BSS;
+static volatile int klog_early_done KERNEL_INIT_OPTIONAL_BSS;
+static int klog_early_reclaimable;
 
 #define KPRINT_MAX_ITEMS 32
 #define KPRINT_MAX_LEN   128
@@ -232,14 +233,40 @@ static void klog_persist_append_locked(const char *buf, uint64_t len) {
     }
 }
 
-void klog_persist_enable(void) {
+void KERNEL_INIT klog_persist_enable(void) {
     uint64_t flags;
+    int ppos;
+    int newcap;
+    char *new_buf;
 
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
+    if (klog_persist_buf) {
+        klog_early_reclaimable = 1;
+        klog_early_done = 1;
+        spin_unlock(&klog_persist_lock);
+        klog_irqrestore(flags);
+        return;
+    }
+    ppos = klog_early_pos;
+    newcap = ppos + 1;
+    if (newcap < 1) newcap = 1;
+    new_buf = (char *)kmalloc((size_t)newcap);
+    if (new_buf) {
+        if (ppos > 0) memcpy(new_buf, klog_early_buf, (size_t)ppos);
+        new_buf[ppos] = '\0';
+        klog_persist_buf = new_buf;
+        klog_persist_pos = ppos;
+        klog_persist_cap = newcap;
+        klog_early_reclaimable = 1;
+    }
     klog_early_done = 1;
     spin_unlock(&klog_persist_lock);
     klog_irqrestore(flags);
+}
+
+int klog_early_storage_reclaimable(void) {
+    return klog_early_reclaimable;
 }
 
 void klog_reclaim_unused(void) {
@@ -329,6 +356,7 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
             klog_persist_pos = ppos;
             if (ppos > 0) memcpy(klog_persist_buf, klog_early_buf, ppos);
             klog_persist_buf[klog_persist_pos] = '\0';
+            klog_early_reclaimable = 1;
             klog_persist_append_locked(buf, len);
         }
     }
@@ -1104,7 +1132,7 @@ void KERNEL_INIT kproc_print_init(void) {
             add_task_to_runqueue(t);
             unlock_scheduler();
         }
-        printf("VRING: Kernel print process created (PID %d, ring 0.1)\n", pid);
+        KERNEL_INIT_LOG("VRING: Kernel print process created (PID %d, ring 0.1)\n", pid);
     }
 }
 
@@ -1258,7 +1286,7 @@ bool kprint_is_ready(void) {
     return kprint_ready != 0;
 }
 
-void kprint_enable(void) {
+void KERNEL_INIT kprint_enable(void) {
     kprint_ready = 1;
 }
 

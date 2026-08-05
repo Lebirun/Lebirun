@@ -6,6 +6,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/tty.h>
 #include <lebirun/task.h>
+#include <lebirun/common.h>
 #include <string.h>
 
 const mac_addr_t MAC_BROADCAST = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
@@ -78,7 +79,7 @@ void net_ensure_hw(void) {
 }
 
 void KERNEL_INIT net_init(void) {
-    printf("NET: Initializing network stack...\n");
+    KERNEL_INIT_LOG("NET: Initializing network stack...\n");
 
     net_hw_initialized = 0;
     net_has_interface = 0;
@@ -91,5 +92,5 @@ void KERNEL_INIT net_init(void) {
     tcp_init();
     dns_init();
 
-    printf("NET: Network stack initialized\n");
+    KERNEL_INIT_LOG("NET: Network stack initialized\n");
 }

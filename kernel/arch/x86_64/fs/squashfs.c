@@ -1514,11 +1514,11 @@ void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     start_page = mod_start & ~0xFFF;
     end_page = (mod_end + 0xFFF) & ~0xFFF;
     squashfs_module_pages = (end_page - start_page) / PAGE_SIZE;
-    printf("SQUASHFS: Initializing from phys 0x%016lX - 0x%016lX (%lu bytes)\n", 
+    KERNEL_INIT_LOG("SQUASHFS: Initializing from phys 0x%016lX - 0x%016lX (%lu bytes)\n",
            mod_start, mod_end, mod_size);
     
     if (mod_size < sizeof(squashfs_super_t)) {
-        printf("SQUASHFS: Image too small\n");
+        KERNEL_INIT_LOG("SQUASHFS: Image too small\n");
         return;
     }
     
@@ -1533,13 +1533,13 @@ void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     super = (squashfs_super_t *)squashfs_ctx.base;
     
     if (super->magic != SQUASHFS_MAGIC && super->magic != SQUASHFS_MAGIC_SWAP) {
-        printf("SQUASHFS: Invalid magic 0x%08X (expected 0x%08X)\n", 
+        KERNEL_INIT_LOG("SQUASHFS: Invalid magic 0x%08X (expected 0x%08X)\n",
                super->magic, SQUASHFS_MAGIC);
         return;
     }
     
     if (super->version_major != 4) {
-        printf("SQUASHFS: Unsupported version %u.%u (need 4.x)\n",
+        KERNEL_INIT_LOG("SQUASHFS: Unsupported version %u.%u (need 4.x)\n",
                super->version_major, super->version_minor);
         return;
     }
@@ -1553,11 +1553,11 @@ void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     squashfs_ctx.id_table_start = super->id_table_start;
     squashfs_ctx.fragment_count = super->fragment_entry_count;
     
-    printf("SQUASHFS: block_size=%u compression=%u inodes=%u\n",
+    KERNEL_INIT_LOG("SQUASHFS: block_size=%u compression=%u inodes=%u\n",
            squashfs_ctx.block_size, squashfs_ctx.compression_id, super->inode_count);
     squashfs_vfs_root = squashfs_create_vfs_node(super->root_inode, "/");
     if (!squashfs_vfs_root) {
-        printf("SQUASHFS: Failed to create root node\n");
+        KERNEL_INIT_LOG("SQUASHFS: Failed to create root node\n");
         return;
     }
     if (squashfs_vfs_root->private_data) {
@@ -1567,7 +1567,7 @@ void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     }
     
     squashfs_initialized = 1;
-    printf("SQUASHFS: Initialized successfully\n");
+    KERNEL_INIT_LOG("SQUASHFS: Initialized successfully\n");
 }
 
 uint64_t squashfs_get_module_pages(void) {

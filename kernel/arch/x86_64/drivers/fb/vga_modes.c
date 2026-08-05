@@ -1,17 +1,8 @@
 #include <lebirun/drivers/fb/vga_modes.h>
+#include <lebirun/common.h>
 #include <lebirun/mem_map.h>
 #include <stdint.h>
 #include <string.h>
-
-static inline void outb(uint16_t port, uint8_t value) {
-    __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
 
 static inline void outl(uint16_t port, uint32_t value) {
     __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
@@ -418,7 +409,9 @@ static void vga_load_font(const uint8_t *font_data, uint16_t num_chars, uint8_t 
     outb(0x3CF, 0x0E);
 }
 
-int vga_set_text_mode(const uint8_t *font_data, uint16_t num_chars, uint8_t font_height) {
+int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
+                                  uint16_t num_chars,
+                                  uint8_t font_height) {
     volatile uint64_t delay;
     uint8_t misc_val;
     uint16_t vtotal;

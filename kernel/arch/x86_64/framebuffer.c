@@ -415,7 +415,7 @@ static psf_font_t default_font = {
     .unicode_table_size = 0
 };
 
-const uint8_t *fb_get_default_font_data(void) {
+const uint8_t *KERNEL_INIT fb_get_default_font_data(void) {
     return default_font_data;
 }
 
@@ -576,7 +576,7 @@ void KERNEL_EARLY_INIT fb_init_textmode(const uint8_t *font_glyphs, uint16_t num
     fb.cursor_y = 0;
 }
 
-void fb_set_font(psf_font_t *font) {
+void KERNEL_INIT fb_set_font(psf_font_t *font) {
     uint64_t old_cols;
     uint64_t old_rows;
     uint64_t redraw_rows;

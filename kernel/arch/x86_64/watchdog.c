@@ -25,7 +25,7 @@ void watchdog_disable(void) {
     wdt_disabled = 1;
 }
 
-void watchdog_set_init_pid(int pid) {
+void KERNEL_INIT watchdog_set_init_pid(int pid) {
     wdt_init_pid = pid;
 }
 

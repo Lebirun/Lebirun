@@ -6,11 +6,11 @@
 #include <stdio.h>
 
 static const char *cmdline_buf = "";
-static char init_path[CMDLINE_INIT_PATH_MAX];
-static char root_dev[64];
+static char init_path[CMDLINE_INIT_PATH_MAX] KERNEL_INIT_BSS;
+static char root_dev[64] KERNEL_INIT_BSS;
 static int num_consoles;
-static int text_mode;
-static int lke_enabled;
+static int text_mode KERNEL_INIT_BSS;
+static int lke_enabled KERNEL_INIT_BSS;
 
 static int KERNEL_EARLY_INIT parse_int(const char *s)
 {

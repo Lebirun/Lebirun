@@ -266,7 +266,7 @@ int KERNEL_INIT ahci_probe(void) {
     uint64_t header_type;
     uint64_t cmd;
 
-    printf("AHCI: Probing PCI bus for AHCI controllers...\n");
+    KERNEL_INIT_LOG("AHCI: Probing PCI bus for AHCI controllers...\n");
 
     for (bus = 0; bus < 256; bus++) {
         for (slot = 0; slot < 32; slot++) {
@@ -298,15 +298,16 @@ int KERNEL_INIT ahci_probe(void) {
                     prog_if == PCI_PROGIF_AHCI) {
 
                     device_id = (vendor_device >> 16) & 0xFFFF;
-                    printf("AHCI: Found controller at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
-                           bus, slot, func, vendor, device_id);
+                    KERNEL_INIT_LOG("AHCI: Found controller at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
+                                    bus, slot, func, vendor, device_id);
 
                     g_ahci_controller.pci_bus = bus;
                     g_ahci_controller.pci_slot = slot;
                     g_ahci_controller.pci_func = func;
 
                     g_ahci_controller.abar = pci_read_config(bus, slot, func, 0x24) & 0xFFFFFFF0;
-                    printf("AHCI: ABAR = 0x%016lX\n", g_ahci_controller.abar);
+                    KERNEL_INIT_LOG("AHCI: ABAR = 0x%016lX\n",
+                                    g_ahci_controller.abar);
 
                     cmd = pci_read_config(bus, slot, func, 0x04);
                     cmd |= (1 << 1) | (1 << 2);
@@ -318,7 +319,7 @@ int KERNEL_INIT ahci_probe(void) {
         }
     }
 
-    printf("AHCI: No AHCI controller found\n");
+    KERNEL_INIT_LOG("AHCI: No AHCI controller found\n");
     return -1;
 }
 
@@ -334,7 +335,8 @@ int KERNEL_INIT ahci_port_init(ahci_port_t *port) {
 
     page_phys = pfa_alloc();
     if (!page_phys) {
-        printf("AHCI: Failed to allocate page for port %u\n", port->port_num);
+        KERNEL_INIT_LOG("AHCI: Failed to allocate page for port %u\n",
+                        port->port_num);
         return -1;
     }
 
@@ -375,26 +377,27 @@ int KERNEL_INIT ahci_port_init(ahci_port_t *port) {
 
     ahci_start_cmd(port);
 
-    printf("AHCI: Port %u initialized (single page at 0x%016lX)\n",
-           port->port_num, page_phys);
+    KERNEL_INIT_LOG("AHCI: Port %u initialized (single page at 0x%016lX)\n",
+                    port->port_num, page_phys);
 
     return 0;
 }
 
 int KERNEL_INIT ahci_identify(ahci_port_t *port) {
-    printf("AHCI: Identifying device on port %u...\n", port->port_num);
+    KERNEL_INIT_LOG("AHCI: Identifying device on port %u...\n",
+                    port->port_num);
     
     ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
     
     int slot = ahci_find_slot(port);
     if (slot < 0) {
-        printf("AHCI: No free command slot\n");
+        KERNEL_INIT_LOG("AHCI: No free command slot\n");
         return -1;
     }
     
     uint64_t buf_phys = pfa_alloc();
     if (!buf_phys) {
-        printf("AHCI: Failed to allocate identify buffer\n");
+        KERNEL_INIT_LOG("AHCI: Failed to allocate identify buffer\n");
         return -1;
     }
     
@@ -462,8 +465,9 @@ int KERNEL_INIT ahci_identify(ahci_port_t *port) {
     }
     
     uint64_t size_mb = (port->sector_count * AHCI_SECTOR_SIZE) / (1024 * 1024);
-    printf("AHCI: Port %u: Model=\"%s\" Serial=\"%s\" Size=%llu MB\n",
-           port->port_num, port->model, port->serial, (unsigned long long)size_mb);
+    KERNEL_INIT_LOG("AHCI: Port %u: Model=\"%s\" Serial=\"%s\" Size=%llu MB\n",
+                    port->port_num, port->model, port->serial,
+                    (unsigned long long)size_mb);
     
     pfa_free(buf_phys);
     
@@ -868,7 +872,7 @@ int KERNEL_INIT ahci_init(void) {
         return -1;
     probed = 1;
 
-    printf("AHCI: Initializing AHCI driver...\n");
+    KERNEL_INIT_LOG("AHCI: Initializing AHCI driver...\n");
     
     memset(&g_ahci_controller, 0, sizeof(g_ahci_controller));
     
@@ -894,7 +898,7 @@ int KERNEL_INIT ahci_init(void) {
     ports_capacity = ahci_required_port_capacity(g_ahci_controller.ports_impl);
     g_ahci_controller.ports = (ahci_port_t *)kmalloc(ports_capacity * sizeof(ahci_port_t));
     if (!g_ahci_controller.ports) {
-        printf("AHCI: Failed to allocate port table\n");
+        KERNEL_INIT_LOG("AHCI: Failed to allocate port table\n");
         for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
             vmm_unmap_page(abar_virt + offset);
         }
@@ -906,11 +910,13 @@ int KERNEL_INIT ahci_init(void) {
     memset(ahci_port_map, 0xFF, sizeof(ahci_port_map));
     g_ahci_controller.ports_capacity = ports_capacity;
     
-    printf("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n", cap, g_ahci_controller.ports_impl, g_ahci_controller.version);
-    printf("AHCI: Version %u.%u, %u command slots\n",
-           (g_ahci_controller.version >> 16) & 0xFFFF,
-           g_ahci_controller.version & 0xFFFF,
-           g_ahci_controller.num_cmd_slots);
+    KERNEL_INIT_LOG("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n",
+                    cap, g_ahci_controller.ports_impl,
+                    g_ahci_controller.version);
+    KERNEL_INIT_LOG("AHCI: Version %u.%u, %u command slots\n",
+                    (g_ahci_controller.version >> 16) & 0xFFFF,
+                    g_ahci_controller.version & 0xFFFF,
+                    g_ahci_controller.num_cmd_slots);
     
     ghc = ahci_hba_read(abar_virt, AHCI_GHC);
     ghc |= AHCI_GHC_AE;
@@ -945,7 +951,7 @@ int KERNEL_INIT ahci_init(void) {
             case AHCI_DEV_PM: type_str = "Port Multiplier"; break;
             default: break;
         }
-        printf("AHCI: Port %u: %s detected\n", i, type_str);
+        KERNEL_INIT_LOG("AHCI: Port %u: %s detected\n", i, type_str);
         
         if (ahci_port_init(port) < 0) {
             port->type = AHCI_DEV_NULL;
@@ -967,7 +973,8 @@ int KERNEL_INIT ahci_init(void) {
     
     g_ahci_controller.initialized = true;
     
-    printf("AHCI: Initialization complete. %u ports active.\n", g_ahci_controller.num_ports);
+    KERNEL_INIT_LOG("AHCI: Initialization complete. %u ports active.\n",
+                    g_ahci_controller.num_ports);
     
     return 0;
 }

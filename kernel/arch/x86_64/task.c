@@ -137,8 +137,8 @@ static uint64_t task_random_stack_top(void) {
 static uint64_t task_random_mmap_base(void) {
     uint64_t pages;
 
-    pages = rng_get_u32() & 0x3FF0ULL;
-    return USER_MMAP_HIGH_BASE + pages * PAGE_SIZE;
+    pages = rng_get_u32() & 0x7FULL;
+    return USER_MMAP_LOW_BASE + pages * PAGE_SIZE;
 }
 
 static spinlock_t sched_lock = {0};
@@ -174,7 +174,7 @@ __attribute__((naked, noreturn)) static void task_cpu_idle_entry(void) {
     );
 }
 
-void task_prepare_cpu_idle(struct cpu_info *cpu_ptr) {
+void KERNEL_INIT task_prepare_cpu_idle(struct cpu_info *cpu_ptr) {
     cpu_info_t *cpu;
     registers_t *frame;
     uint64_t cr3;
@@ -307,8 +307,7 @@ volatile uint64_t task_context_switches = 0;
 
 static uint64_t next_task_id = 1;
 static pid_t next_kernel_pid = -1;
-static uint8_t default_fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
-static int fpu_state_ready = 0;
+static uint32_t fpu_mxcsr_mask;
 
 typedef struct exec_page_cache_entry {
     vfs_node_t *node;
@@ -379,17 +378,47 @@ static inline void fpu_save_area(uint8_t *area) {
 }
 
 static inline void fpu_restore_area(uint8_t *area) {
-    uint8_t *state;
+    uint32_t mxcsr;
 
-    state = area ? area : default_fpu_state;
-    __asm__ volatile ("fxrstor64 %0" : : "m"(*(uint8_t (*)[FPU_STATE_SIZE])state) : "memory");
+    if (area) {
+        __asm__ volatile (
+            "fxrstor64 %0"
+            :
+            : "m"(*(uint8_t (*)[FPU_STATE_SIZE])area)
+            : "memory"
+        );
+        return;
+    }
+    mxcsr = 0x1F80;
+    __asm__ volatile ("fninit" ::: "memory");
+    __asm__ volatile ("ldmxcsr %0" : : "m"(mxcsr) : "memory");
 }
 
 static void fpu_init_default_state(void) {
-    if (fpu_state_ready) return;
+    uint8_t state[FPU_STATE_SIZE] __attribute__((aligned(16)));
+    uint32_t mxcsr;
+
+    if (fpu_mxcsr_mask != 0) return;
+    mxcsr = 0x1F80;
     __asm__ volatile ("fninit" ::: "memory");
-    fpu_save_area(default_fpu_state);
-    fpu_state_ready = 1;
+    __asm__ volatile ("ldmxcsr %0" : : "m"(mxcsr) : "memory");
+    fpu_save_area(state);
+    memcpy(&fpu_mxcsr_mask, state + 28, sizeof(fpu_mxcsr_mask));
+    if (fpu_mxcsr_mask == 0) fpu_mxcsr_mask = 0x0000FFBF;
+}
+
+static void fpu_initialize_area(uint8_t *state) {
+    uint16_t control_word;
+    uint32_t mxcsr;
+
+    if (!state) return;
+    fpu_init_default_state();
+    memset(state, 0, FPU_STATE_SIZE);
+    control_word = 0x037F;
+    mxcsr = 0x1F80;
+    memcpy(state, &control_word, sizeof(control_word));
+    memcpy(state + 24, &mxcsr, sizeof(mxcsr));
+    memcpy(state + 28, &fpu_mxcsr_mask, sizeof(fpu_mxcsr_mask));
 }
 
 static int task_init_fpu_state(task_t *task) {
@@ -399,7 +428,7 @@ static int task_init_fpu_state(task_t *task) {
     fpu_init_default_state();
     state = (uint8_t *)kmalloc_aligned(FPU_STATE_SIZE, 16);
     if (!state) return -1;
-    memcpy(state, default_fpu_state, FPU_STATE_SIZE);
+    fpu_initialize_area(state);
     task->fpu_state = state;
     return 0;
 }
@@ -412,7 +441,7 @@ static int task_ensure_fpu_state(task_t *task) {
 
 static void task_reset_fpu_state(task_t *task) {
     if (task_ensure_fpu_state(task) != 0) return;
-    memcpy(task->fpu_state, default_fpu_state, FPU_STATE_SIZE);
+    fpu_initialize_area(task->fpu_state);
 }
 
 static void task_free_fpu_state(task_t *task) {

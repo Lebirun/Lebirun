@@ -419,7 +419,7 @@ void KERNEL_EARLY_INIT heap_init(void) {
 
     #if HEAP_USE_DEMAND_PAGING
         if (heap_reserve_virtual(HEAP_START, HEAP_INITIAL_SIZE) < 0) {
-            printf("heap_init: Failed to reserve initial virtual range\n");
+            KERNEL_INIT_LOG("heap_init: Failed to reserve initial virtual range\n");
         }
         
         kernel_heap.end_addr = HEAP_START;
@@ -446,10 +446,10 @@ void KERNEL_EARLY_INIT heap_init(void) {
     klog_persist_enable();
     slab_init();
 
-    printf("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
+    KERNEL_INIT_LOG("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
            kernel_heap.total_size / 1024);
-    printf("Early heap used: %u / %u bytes\n", early_heap_used, early_heap_total);
+    KERNEL_INIT_LOG("Early heap used: %u / %u bytes\n", early_heap_used, early_heap_total);
 }
 
 uint64_t heap_get_early_total(void) { return early_heap_total; }

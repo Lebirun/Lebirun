@@ -232,7 +232,7 @@ static void KERNEL_INIT find_acpi_tables(void) {
 
     rsdp = find_rsdp();
     if (!rsdp) {
-        printf("SMP: RSDP not found, assuming single CPU\n");
+        KERNEL_INIT_LOG("SMP: RSDP not found, assuming single CPU\n");
         cpus[0].lapic_id = 0;
         cpus[0].processor_id = 0;
         cpus[0].bsp = 1;
@@ -257,7 +257,7 @@ static void KERNEL_INIT find_acpi_tables(void) {
         }
     }
 
-    printf("SMP: MADT not found in RSDT\n");
+    KERNEL_INIT_LOG("SMP: MADT not found in RSDT\n");
     cpus[0].lapic_id = 0;
     cpus[0].processor_id = 0;
     cpus[0].bsp = 1;
@@ -314,7 +314,7 @@ void KERNEL_INIT ioapic_init(void) {
     ver = ioapic_read(IOAPIC_REG_VER);
     ioapic_max_redir = (ver >> 16) & 0xFF;
 
-    printf("SMP: IOAPIC at phys 0x%016lX, max redirection entries: %u\n",
+    KERNEL_INIT_LOG("SMP: IOAPIC at phys 0x%016lX, max redirection entries: %u\n",
            ioapic_phys, ioapic_max_redir);
 }
 
@@ -580,7 +580,7 @@ void KERNEL_INIT smp_start_aps(void) {
 
     tramp_size = (uint64_t)(ap_tramp_end - ap_tramp_start);
     if (tramp_size > 0x1000) {
-        printf("SMP: trampoline too large (%u bytes)\n", tramp_size);
+        KERNEL_INIT_LOG("SMP: trampoline too large (%u bytes)\n", tramp_size);
         return;
     }
 
@@ -609,7 +609,7 @@ void KERNEL_INIT smp_start_aps(void) {
 
         cpus[i].kernel_stack = kstack_alloc();
         if (!cpus[i].kernel_stack) {
-            printf("SMP: failed to allocate stack for CPU %u\n", cpus[i].lapic_id);
+            KERNEL_INIT_LOG("SMP: failed to allocate stack for CPU %u\n", cpus[i].lapic_id);
             continue;
         }
 
@@ -641,10 +641,10 @@ void KERNEL_INIT smp_start_aps(void) {
         }
 
         if (*tramp_flag) {
-            printf("SMP: CPU %u (LAPIC ID %u) started\n",
+            KERNEL_INIT_LOG("SMP: CPU %u (LAPIC ID %u) started\n",
                    i, cpus[i].lapic_id);
         } else {
-            printf("SMP: CPU %u (LAPIC ID %u) failed to start\n",
+            KERNEL_INIT_LOG("SMP: CPU %u (LAPIC ID %u) failed to start\n",
                    i, cpus[i].lapic_id);
         }
     }
@@ -692,7 +692,7 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
         __asm__ volatile ("sti" ::: "memory");
 }
 
-void smp_enable_scheduling(void) {
+void KERNEL_INIT smp_enable_scheduling(void) {
     __sync_synchronize();
     smp_scheduler_ready = 1;
 }
@@ -716,7 +716,7 @@ void KERNEL_INIT smp_init(void) {
         cpu_count = 1;
     }
 
-    printf("SMP: Found %d CPU(s)\n", cpu_count);
+    KERNEL_INIT_LOG("SMP: Found %d CPU(s)\n", cpu_count);
 
     lapic_init();
 
@@ -774,12 +774,12 @@ void KERNEL_INIT smp_init(void) {
             while (cpus_booted < expected_aps && --ap_timeout > 0)
                 __asm__ volatile ("pause");
             if (cpus_booted < expected_aps) {
-                printf("SMP: Warning: only %d of %d APs finished init\n",
+                KERNEL_INIT_LOG("SMP: Warning: only %d of %d APs finished init\n",
                        cpus_booted, expected_aps);
             }
         }
     }
     __sync_synchronize();
     smp_percpu_irq_ready = 1;
-    printf("SMP: %d CPU(s) active\n", cpus_booted + 1);
+    KERNEL_INIT_LOG("SMP: %d CPU(s) active\n", cpus_booted + 1);
 }

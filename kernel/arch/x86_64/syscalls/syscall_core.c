@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/common.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/panic.h>
@@ -44,21 +45,27 @@ static int *in_line_editing;
 static int *serial_displayed_len;
 static int syscall_console_count;
 
-static char line_buffers_fallback[1][LINE_BUF_SIZE];
-static char *line_buffers_fallback_ptr[1];
-static int line_len_fallback[1];
-static int line_cursor_fallback[1];
-static int line_ready_fallback[1];
-static int line_last_cr_fallback[1];
-static int history_head_fallback[1];
-static int history_count_fallback[1];
-static int history_browse_fallback[1];
-static int history_saved_len_fallback[1];
-static int esc_state_fallback[1];
-static char esc_buf_fallback[1][8];
-static int esc_len_fallback[1];
-static int in_line_editing_fallback[1];
-static int serial_displayed_len_fallback[1];
+static char line_buffers_fallback[1][LINE_BUF_SIZE]
+    KERNEL_INIT_OPTIONAL_BSS;
+static char *line_buffers_fallback_ptr[1] KERNEL_INIT_OPTIONAL_BSS;
+static int line_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int line_cursor_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int line_ready_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int line_last_cr_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int history_head_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int history_count_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int history_browse_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int history_saved_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int esc_state_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static char esc_buf_fallback[1][8] KERNEL_INIT_OPTIONAL_BSS;
+static int esc_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int in_line_editing_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int serial_displayed_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int syscall_core_fallback_active = 1;
+
+int syscall_core_fallback_reclaimable(void) {
+    return !syscall_core_fallback_active;
+}
 
 static int syscall_core_console_count(void) {
     int count;
@@ -1380,52 +1387,40 @@ void syscalls_core_init(void) {
     state = (uint8_t *)kmalloc(state_bytes);
 
     if (state) {
+        syscall_core_fallback_active = 0;
         off = 0;
         line_buffers = (void *)(state + off);
         off += (uint64_t)count * sizeof(*line_buffers);
-        off = (off + 7ULL) & ~7ULL;
         line_len = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         line_cursor = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         line_ready = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         line_last_cr = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         history_head = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         history_count = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         history_browse = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         history_saved_len = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         esc_state = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         esc_buf = (void *)(state + off);
         off += (uint64_t)count * sizeof(*esc_buf);
-        off = (off + 7ULL) & ~7ULL;
         esc_len = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         in_line_editing = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         serial_displayed_len = (void *)(state + off);
         off += count_bytes;
-        off = (off + 7ULL) & ~7ULL;
         history = NULL;
         history_saved = NULL;
     } else {
+        syscall_core_fallback_active = 1;
         line_buffers_fallback_ptr[0] = line_buffers_fallback[0];
         line_buffers = line_buffers_fallback_ptr;
         line_len = line_len_fallback;

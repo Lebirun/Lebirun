@@ -3,6 +3,7 @@
 #include <lebirun/mouse.h>
 #include <lebirun/pit.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/common.h>
 #include <string.h>
 
 static struct evdev_device evdev_kbd;
@@ -408,7 +409,7 @@ void KERNEL_INIT evdev_init(void) {
 
     memset(&evdev_kbd, 0, sizeof(evdev_kbd));
     waitq_init(&evdev_kbd.waitq);
-    strcpy(evdev_kbd.name, "Lebirun PS/2 Keyboard");
+    strcpy(evdev_kbd.name, KERNEL_INIT_STRING("Lebirun PS/2 Keyboard"));
     evdev_kbd.id.bustype = BUS_I8042;
     evdev_kbd.id.vendor = 0x0001;
     evdev_kbd.id.product = 0x0001;
@@ -422,7 +423,7 @@ void KERNEL_INIT evdev_init(void) {
 
     memset(&evdev_mouse, 0, sizeof(evdev_mouse));
     waitq_init(&evdev_mouse.waitq);
-    strcpy(evdev_mouse.name, "Lebirun PS/2 Mouse");
+    strcpy(evdev_mouse.name, KERNEL_INIT_STRING("Lebirun PS/2 Mouse"));
     evdev_mouse.id.bustype = BUS_I8042;
     evdev_mouse.id.vendor = 0x0002;
     evdev_mouse.id.product = 0x0001;

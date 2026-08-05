@@ -12,6 +12,7 @@
 #include <lebirun/drivers/net/ipv4.h>
 #include <lebirun/drivers/net/dns.h>
 #include <lebirun/drivers/net/udp.h>
+#include <lebirun/common.h>
 #include <string.h>
 
 #define R_X86_64_32    10
@@ -518,7 +519,7 @@ int lke_list(char *buf, int size) {
     return (int)required;
 }
 
-static void lke_autoload_entry(char *line, size_t length) {
+static void KERNEL_INIT lke_autoload_entry(char *line, size_t length) {
     int rc;
 
     while (length > 0 &&
@@ -528,7 +529,7 @@ static void lke_autoload_entry(char *line, size_t length) {
     line[length] = '\0';
     if (length == 0 || line[0] == '#') return;
     rc = lke_load(line);
-    if (rc < 0) printf("LKE: autoload failed: %s (%d)\n", line, rc);
+    if (rc < 0) KERNEL_INIT_LOG("LKE: autoload failed: %s (%d)\n", line, rc);
 }
 
 void KERNEL_INIT lke_autoload(void) {
@@ -592,7 +593,7 @@ void KERNEL_INIT lke_autoload(void) {
 
     if (!out_of_memory && line && line_len > 0)
         lke_autoload_entry(line, line_len);
-    if (out_of_memory) printf("LKE: autoload stopped: out of memory\n");
+    if (out_of_memory) KERNEL_INIT_LOG("LKE: autoload stopped: out of memory\n");
     kfree(line);
     vfs_release(node);
 }

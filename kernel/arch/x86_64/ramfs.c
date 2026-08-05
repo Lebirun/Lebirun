@@ -2001,7 +2001,7 @@ void KERNEL_INIT tmpfs_vfs_register(void) {
     vfs_register_fs(&tmpfs_fs_type);
 }
 
-static void ramfs_internalize_node(ramfs_node_t *node) {
+static void KERNEL_INIT ramfs_internalize_node(ramfs_node_t *node) {
     uint8_t *copy;
     ramfs_node_t *child;
 
@@ -2025,7 +2025,7 @@ static void ramfs_internalize_node(ramfs_node_t *node) {
     }
 }
 
-void ramfs_internalize_all(void) {
+void KERNEL_INIT ramfs_internalize_all(void) {
     if (!ramfs_root) return;
     ramfs_lock();
     ramfs_internalize_node(ramfs_root);

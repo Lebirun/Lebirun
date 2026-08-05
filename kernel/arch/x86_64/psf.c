@@ -86,18 +86,18 @@ int KERNEL_EARLY_INIT psf_load(const void *data, size_t size, psf_font_t *font) 
     memset(font, 0, sizeof(psf_font_t));
     
     const uint8_t *bytes = (const uint8_t *)data;
-    printf("psf_load: magic=%02X%02X%02X%02X size=%u\n", bytes[0], bytes[1], bytes[2], bytes[3], (unsigned)size);
+    KERNEL_INIT_LOG("psf_load: magic=%02X%02X%02X%02X size=%u\n", bytes[0], bytes[1], bytes[2], bytes[3], (unsigned)size);
     
     if (bytes[0] == PSF2_MAGIC0 && bytes[1] == PSF2_MAGIC1 &&
         bytes[2] == PSF2_MAGIC2 && bytes[3] == PSF2_MAGIC3) {
         int r = psf2_load(data, size, font);
-        if (r == 0) printf("psf_load: PSF2 header ok width=%u height=%u glyphs=%u bytes/glyph=%u\n", font->width, font->height, font->numglyph, font->bytesperglyph);
+        if (r == 0) KERNEL_INIT_LOG("psf_load: PSF2 header ok width=%u height=%u glyphs=%u bytes/glyph=%u\n", font->width, font->height, font->numglyph, font->bytesperglyph);
         return r;
     }
     
     if (bytes[0] == PSF1_MAGIC0 && bytes[1] == PSF1_MAGIC1) {
         int r = psf1_load(data, size, font);
-        if (r == 0) printf("psf_load: PSF1 header ok height=%u glyphs=%u\n", font->height, font->numglyph);
+        if (r == 0) KERNEL_INIT_LOG("psf_load: PSF1 header ok height=%u glyphs=%u\n", font->height, font->numglyph);
         return r;
     }
     

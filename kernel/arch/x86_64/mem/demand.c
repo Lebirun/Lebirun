@@ -124,7 +124,7 @@ void KERNEL_EARLY_INIT demand_paging_init(void) {
            sizeof(demand_committed_extensions));
     demand_reserved_end = demand_base;
     demand_initialized = 1;
-    printf("Demand paging initialized: base=0x%016lX max_pages=%lu\n",
+    KERNEL_INIT_LOG("Demand paging initialized: base=0x%016lX max_pages=%lu\n",
            demand_base, demand_max_pages);
 }
 

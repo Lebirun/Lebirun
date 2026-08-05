@@ -24,13 +24,13 @@ extern void sleep_ms(uint64_t ms);
 extern void wake_task(task_t *task);
 
 static console_t *consoles;
-static console_t console_fallback[1];
+static console_t console_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int console_fallback_active = 1;
 static int console_count = 0;
 static int current_console = 0;
 static int console_initialized = 0;
 static int console_batch = 0;
 static spinlock_t console_lock = {0};
-static task_t *writer_thread = NULL;
 static volatile int writer_thread_running = 0;
 static volatile int console_switching = 0;
 static volatile int console_switch_in_progress = 0;
@@ -157,11 +157,18 @@ static int console_ensure_pool(void) {
     consoles = (console_t *)kmalloc(count * sizeof(console_t));
     if (!consoles) {
         consoles = console_fallback;
+        console_fallback_active = 1;
         count = 1;
+    } else {
+        console_fallback_active = 0;
     }
     console_count = count;
     memset(consoles, 0, console_count * sizeof(console_t));
     return 0;
+}
+
+int console_fallback_reclaimable(void) {
+    return !console_fallback_active;
 }
 
 static int console_ensure_alloc(int n) {
@@ -308,29 +315,6 @@ static void console_ensure_nondefault_color(console_t *con) {
     if (console_current_attr(con) != 0x70) {
         console_ensure_color_buffer(con);
     }
-}
-
-static int console_ensure_write_buffer(console_t *con) {
-    if (!con || !con->allocated) return -1;
-    if (con->write_buffer && con->write_flags && con->write_buffer_size > 0) return 0;
-    con->write_buffer_size = CONSOLE_WRITE_BUFFER_INIT;
-    con->write_head = 0;
-    con->write_tail = 0;
-    con->write_buffer = (char *)kmalloc(con->write_buffer_size);
-    if (!con->write_buffer) {
-        con->write_buffer_size = 0;
-        return -1;
-    }
-    con->write_flags = (uint8_t *)kmalloc(con->write_buffer_size);
-    if (!con->write_flags) {
-        kfree(con->write_buffer);
-        con->write_buffer = NULL;
-        con->write_buffer_size = 0;
-        return -1;
-    }
-    memset(con->write_buffer, 0, con->write_buffer_size);
-    memset(con->write_flags, 0, con->write_buffer_size);
-    return 0;
 }
 
 int console_alloc(int n) {
@@ -498,52 +482,6 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     con->color_buffer = new_color;
     con->line_wrapped = new_wrapped;
     con->buffer_rows = needed_rows;
-}
-
-static void console_grow_write_buffer(console_t *con) {
-    char *new_wb;
-    uint8_t *new_wf;
-    char *old_wb;
-    uint8_t *old_wf;
-    uint64_t new_size;
-    uint64_t old_size;
-    uint64_t tail;
-    uint64_t head;
-    uint64_t used;
-    uint64_t i;
-    uint64_t gflags;
-
-    if (!con->allocated || !con->write_buffer) return;
-    old_size = con->write_buffer_size;
-    new_size = old_size * 2;
-    if (new_size > CONSOLE_WRITE_BUFFER_MAX) new_size = CONSOLE_WRITE_BUFFER_MAX;
-    if (new_size <= old_size) return;
-    new_wb = (char *)kmalloc(new_size);
-    if (!new_wb) return;
-    new_wf = (uint8_t *)kmalloc(new_size);
-    if (!new_wf) { kfree(new_wb); return; }
-    gflags = console_irqsave();
-    spin_lock(&console_lock);
-    tail = con->write_tail;
-    head = con->write_head;
-    used = (head >= tail) ? (head - tail) : (old_size - tail + head);
-    for (i = 0; i < used; i++) {
-        new_wb[i] = con->write_buffer[(tail + i) % old_size];
-        new_wf[i] = con->write_flags[(tail + i) % old_size];
-    }
-    memset(new_wb + used, 0, new_size - used);
-    memset(new_wf + used, 0, new_size - used);
-    old_wb = con->write_buffer;
-    old_wf = con->write_flags;
-    con->write_buffer = new_wb;
-    con->write_flags = new_wf;
-    con->write_buffer_size = new_size;
-    con->write_tail = 0;
-    con->write_head = used;
-    spin_unlock(&console_lock);
-    console_irqrestore(gflags);
-    kfree(old_wb);
-    kfree(old_wf);
 }
 
 static void console_reclaim_default_color(console_t *con) {
@@ -1489,10 +1427,6 @@ void console_redraw_current(void) {
     if (!console_initialized) return;
     if (console_switch_in_progress) return;
     if (console_get_graphics_mode(current_console)) return;
-    if (writer_thread_running) {
-        console_redraw_prepare(current_console);
-        return;
-    }
     console_redraw_sync(current_console);
 }
 
@@ -1541,9 +1475,6 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
             pending_console_switch = console_num;
             spin_unlock(&console_lock);
             console_irqrestore(flags);
-            if (writer_thread) {
-                wake_task(writer_thread);
-            }
             return;
         }
         spin_unlock(&console_lock);
@@ -1580,7 +1511,6 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         pending_console_switch = console_num;
         spin_unlock(&console_lock);
         console_irqrestore(flags);
-        if (writer_thread) wake_task(writer_thread);
         return;
     }
     console_grow_buffer(new_con, rows);
@@ -1616,9 +1546,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     }
 
     console_redraw_prepare(current_console);
-    if (!writer_thread_running && !from_interrupt) {
-        console_redraw_sync(current_console);
-    }
+    if (!from_interrupt) console_redraw_sync(current_console);
 }
 
 static void console_switch_internal(int console_num) {
@@ -1636,9 +1564,6 @@ void console_switch(int console_num) {
             return;
         }
         pending_console_switch = console_num;
-        if (writer_thread) {
-            wake_task(writer_thread);
-        }
         return;
     }
     
@@ -1655,9 +1580,6 @@ void console_switch_via_interrupt(int console_num) {
     flags = console_irqsave();
     pending_console_switch = console_num;
     console_irqrestore(flags);
-    if (writer_thread) {
-        wake_task(writer_thread);
-    }
 }
 
 void console_process_pending(void) {
@@ -2483,8 +2405,6 @@ void console_write_to_fb_only(int console_num, const char *data, size_t size) {
 static void console_write_internal(int console_num, const char *data, size_t size, int skip_serial_async) {
     int target_console;
     size_t i;
-    uint64_t head;
-    uint64_t next_head;
     int skip_serial;
     int batch_started;
     size_t off;
@@ -2503,14 +2423,11 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     uint64_t sc;
     console_t *con;
     framebuffer_t *fb;
-    int use_async_writer;
 
     if (!console_initialized) {
         for (i = 0; i < size; i++) terminal_putchar(data[i]);
         return;
     }
-
-    use_async_writer = writer_thread_running && size > 512;
 
     target_console = console_num;
     if (!console_valid_index(target_console)) {
@@ -2525,11 +2442,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     con = &consoles[target_console];
     console_expand_color_buffer(con);
 
-    if (use_async_writer && console_ensure_write_buffer(con) != 0) {
-        use_async_writer = 0;
-    }
-
-    if (console_num == 0 && !skip_serial_async && !use_async_writer) {
+    if (console_num == 0 && !skip_serial_async) {
         if (kprint_is_ready()) {
             kprint_serial_async(data, size);
         } else {
@@ -2537,46 +2450,6 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         }
     }
 
-    if (use_async_writer) {
-        i = 0;
-        while (i < size) {
-            flags = console_irqsave();
-            spin_lock(&console_lock);
-            while (i < size) {
-                head = con->write_head;
-                next_head = (head + 1) % con->write_buffer_size;
-                if (next_head == con->write_tail) {
-                    break;
-                }
-                con->write_buffer[head] = data[i];
-                con->write_flags[head] = skip_serial_async ? 1 : 0;
-                con->write_head = next_head;
-                i++;
-            }
-            con->dirty = 1;
-            spin_unlock(&console_lock);
-            console_irqrestore(flags);
-            if (i < size) {
-                console_grow_write_buffer(con);
-                head = con->write_head;
-                next_head = (head + 1) % con->write_buffer_size;
-                if (next_head == con->write_tail) {
-                    if (writer_thread) {
-                        wake_task(writer_thread);
-                    }
-                    yield();
-                }
-            }
-            if (pending_console_switch >= 0 && console_interrupts_enabled()) {
-                console_process_pending();
-            }
-        }
-        if (writer_thread) {
-            wake_task(writer_thread);
-        }
-        return;
-    }
-    
     skip_serial = (target_console == 0);
 
     batch_started = 0;
@@ -3019,7 +2892,7 @@ bool console_is_initialized(void) {
     return console_initialized;
 }
 
-static void console_writer_thread(void) {
+static void __attribute__((unused)) console_writer_thread(void) {
     int work_done;
     int pending_switch_requested;
     uint64_t chunk_rows;
@@ -3460,37 +3333,5 @@ handle_pending:
     }
 }
 
-void KERNEL_INIT console_writer_init(void) {
-    extern void lock_scheduler(void);
-    extern void unlock_scheduler(void);
-    extern void add_task_to_runqueue(task_t* new_task);
-    if (writer_thread_running) return;
-    
-    extern task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
-    
-    writer_thread = create_kernel_task(console_writer_thread, TASK_READY);
-    if (writer_thread) {
-        strcpy(writer_thread->name, "console_writer");
-        lock_scheduler();
-        add_task_to_runqueue(writer_thread);
-        unlock_scheduler();
-    }
-}
-
 void console_writer_flush(void) {
-    int all_empty;
-    int i;
-
-    while (writer_thread_running) {
-        all_empty = 1;
-        for (i = 0; i < console_count; i++) {
-            if (!consoles[i].allocated) continue;
-            if (consoles[i].write_tail != consoles[i].write_head) {
-                all_empty = 0;
-                break;
-            }
-        }
-        if (all_empty) break;
-        yield();
-    }
 }

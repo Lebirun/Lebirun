@@ -10,7 +10,9 @@ extern int scheduler_initialized;
 extern void task_memory_pressure_request(void);
 
 uint8_t *pfa_bitmap = 0;
-static uint64_t bitmap_bytes_used = 0;
+static uint32_t pfa_inline_directory[PFA_INLINE_DIRECTORY_ENTRIES];
+static uint32_t *pfa_directory_extension = NULL;
+static uint64_t pfa_directory_entries = 0;
 static uint64_t bitmap_entries_used = 0;
 static uint64_t bitmap_leaf_pages = 0;
 
@@ -133,21 +135,33 @@ static int frame_is_reserved(uint64_t frame_idx) {
     return 0;
 }
 
-static uint8_t **bitmap_directory(void) {
-    return (uint8_t **)(void *)pfa_bitmap;
+static uint32_t bitmap_directory_get(uint64_t chunk) {
+    if (chunk >= pfa_directory_entries) return 0;
+    if (chunk < PFA_INLINE_DIRECTORY_ENTRIES)
+        return pfa_inline_directory[chunk];
+    if (!pfa_directory_extension) return 0;
+    return pfa_directory_extension[chunk - PFA_INLINE_DIRECTORY_ENTRIES];
+}
+
+static void bitmap_directory_set(uint64_t chunk, uint32_t frame) {
+    if (chunk >= pfa_directory_entries) return;
+    if (chunk < PFA_INLINE_DIRECTORY_ENTRIES) {
+        pfa_inline_directory[chunk] = frame;
+        return;
+    }
+    if (!pfa_directory_extension) return;
+    pfa_directory_extension[chunk - PFA_INLINE_DIRECTORY_ENTRIES] = frame;
 }
 
 static uint8_t *bitmap_get_leaf(uint64_t frame_idx) {
     uint64_t chunk;
-    uint64_t chunks;
-    uint8_t **directory;
+    uint32_t leaf_frame;
 
     if (!pfa_bitmap || frame_idx >= bitmap_entries_used) return NULL;
     chunk = frame_idx / PFA_SPARSE_CHUNK_FRAMES;
-    chunks = bitmap_bytes_used / sizeof(uint8_t *);
-    if (chunk >= chunks) return NULL;
-    directory = bitmap_directory();
-    return directory[chunk];
+    leaf_frame = bitmap_directory_get(chunk);
+    if (leaf_frame == 0) return NULL;
+    return (uint8_t *)((uint64_t)leaf_frame * PAGE_SIZE + KERNEL_VMA);
 }
 
 static bool bitmap_test_raw(uint64_t frame_idx) {
@@ -187,22 +201,20 @@ static int bitmap_ensure_leaf(uint64_t frame_idx, uint64_t exclude_start,
     uint64_t leaf_bit;
     uint8_t *storage_leaf;
     uint8_t *leaf;
-    uint8_t **directory;
 
     if (!pfa_bitmap || frame_idx >= bitmap_entries_used) return -1;
     chunk = frame_idx / PFA_SPARSE_CHUNK_FRAMES;
-    directory = bitmap_directory();
-    if (directory[chunk]) return 0;
+    if (bitmap_directory_get(chunk) != 0) return 0;
     if (bitmap_leaf_candidate(exclude_start, exclude_end, &leaf_frame) != 0)
         return -1;
     leaf_phys = leaf_frame * PAGE_SIZE;
     leaf = (uint8_t *)(leaf_phys + KERNEL_VMA);
     memset(leaf, 0, PAGE_SIZE);
-    directory[chunk] = leaf;
+    bitmap_directory_set(chunk, (uint32_t)leaf_frame);
     leaf_bit = leaf_frame % PFA_SPARSE_CHUNK_FRAMES;
     storage_leaf = bitmap_get_leaf(leaf_frame);
     if (!storage_leaf) {
-        directory[chunk] = NULL;
+        bitmap_directory_set(chunk, 0);
         return -1;
     }
     storage_leaf[leaf_bit / 8] |= (uint8_t)(1u << (leaf_bit % 8));
@@ -256,7 +268,7 @@ bool test_bit(uint64_t frame_idx) {
     return bitmap_test_raw(frame_idx);
 }
 
-uint64_t count_free_frames(void) {
+uint64_t KERNEL_INIT count_free_frames(void) {
     uint64_t count;
     uint64_t region_start;
     uint64_t region_end;
@@ -382,6 +394,59 @@ void pfa_free(uint64_t phys_addr) {
     pfa_lock_release(eflags);
 }
 
+uint64_t KERNEL_INIT pfa_release_multiboot_range(uint64_t phys_start,
+                                                 uint64_t phys_end) {
+    uint64_t start_frame;
+    uint64_t end_frame;
+    uint64_t frame;
+    uint64_t region;
+    uint64_t freed;
+    uint64_t eflags;
+    uint64_t i;
+
+    if ((phys_start & (PAGE_SIZE - 1)) != 0) return 0;
+    if ((phys_end & (PAGE_SIZE - 1)) != 0) return 0;
+    if (phys_end <= phys_start) return 0;
+
+    region = num_reserved_regions;
+    for (i = 0; i < num_reserved_regions; i++) {
+        if (reserved_regions[i].kind != RESERVED_REGION_MULTIBOOT_INFO)
+            continue;
+        if (reserved_regions[i].start_phys == phys_start &&
+            reserved_regions[i].end_phys == phys_end) {
+            region = i;
+            break;
+        }
+    }
+    if (region == num_reserved_regions) return 0;
+
+    start_frame = phys_start / PAGE_SIZE;
+    end_frame = phys_end / PAGE_SIZE;
+    if (end_frame > total_pages_managed) return 0;
+    for (frame = start_frame; frame < end_frame; frame++) {
+        if (!frame_is_usable(frame)) return 0;
+    }
+
+    freed = 0;
+    pfa_lock_acquire(&eflags);
+    for (frame = start_frame; frame < end_frame; frame++) {
+        if (bitmap_test_raw(frame)) {
+            clear_bit(frame);
+            freed++;
+        }
+    }
+    for (i = region + 1; i < num_reserved_regions; i++) {
+        reserved_regions[i - 1] = reserved_regions[i];
+    }
+    num_reserved_regions--;
+    if (freed != 0) {
+        __sync_fetch_and_add(&pfa_cached_free, freed);
+        if (start_frame < last_alloc_hint) last_alloc_hint = start_frame;
+    }
+    pfa_lock_release(eflags);
+    return freed;
+}
+
 static void pfa_reclaim_kernel_range_internal(uint64_t phys_start,
                                               uint64_t phys_end,
                                               int report) {
@@ -473,10 +538,6 @@ uint64_t pfa_count_free(void) {
     return pfa_cached_free;
 }
 
-void pfa_sync_free_count(void) {
-    pfa_cached_free = count_free_frames();
-}
-
 static uint64_t system_total_ram_kb = 0;
 static uint64_t system_usable_ram_kb = 0;
 static uint64_t initial_free_frames = 0;
@@ -511,7 +572,8 @@ uint64_t pfa_get_kernel_reclaimed_pages(void) {
     return kernel_reclaimed_pages;
 }
 
-void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb) {
+void KERNEL_INIT pfa_set_reserved_stats(uint64_t kern_bin_kb,
+                                        uint64_t bmp_kb) {
     kernel_binary_kb = kern_bin_kb;
     bitmap_alloc_kb = bmp_kb;
 }
@@ -669,16 +731,25 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
 }
 
 void KERNEL_EARLY_INIT pfa_init_internal_setup(
-        uint64_t bitmap_bytes, uint64_t bitmap_entries,
-        uint64_t total_pages, uint64_t kernel_frames,
-        uint64_t hole_start, uint64_t hole_end) {
-    (void)hole_start;
-    (void)hole_end;
-    bitmap_bytes_used = bitmap_bytes;
+        uint64_t directory_entries, uint64_t bitmap_entries,
+        uint64_t total_pages, uint64_t extension_phys,
+        uint64_t extension_pages) {
+    uint64_t extension_bytes;
+
+    memset(pfa_inline_directory, 0, sizeof(pfa_inline_directory));
+    pfa_directory_entries = directory_entries;
+    pfa_directory_extension = NULL;
+    extension_bytes = extension_pages * PAGE_SIZE;
+    if (extension_phys != 0 && extension_bytes != 0) {
+        pfa_directory_extension =
+            (uint32_t *)(extension_phys + KERNEL_VMA);
+        memset(pfa_directory_extension, 0, extension_bytes);
+    }
+    pfa_bitmap = (uint8_t *)(void *)pfa_inline_directory;
     bitmap_entries_used = bitmap_entries;
     bitmap_leaf_pages = 0;
     total_pages_managed = total_pages;
-    kernel_reserved_frames = kernel_frames;
+    kernel_reserved_frames = 0;
     low_page_limit = 0x00800000;
 }
 

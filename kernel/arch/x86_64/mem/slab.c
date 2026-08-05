@@ -299,7 +299,7 @@ void KERNEL_EARLY_INIT slab_init(void) {
         slab_caches[i].free_count = 0;
     }
     slab_initialized = 1;
-    printf("Slab allocator initialized (sizes: 32, 128)\n");
+    KERNEL_INIT_LOG("Slab allocator initialized (sizes: 32, 128)\n");
 }
 
 void *slab_alloc(size_t size, void *caller) {

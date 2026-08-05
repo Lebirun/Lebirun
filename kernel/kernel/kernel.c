@@ -91,12 +91,40 @@ static void kernel_reclaim_init_memory(void) {
     kernel_reclaim_memory(_kernel_init_start, _kernel_init_end, 1, 1);
 }
 
+static void kernel_reclaim_optional_init_memory(void) {
+    extern uint8_t _kernel_init_optional_start[];
+    extern uint8_t _kernel_init_optional_end[];
+    extern int syscall_core_fallback_reclaimable(void);
+
+    if (!klog_early_storage_reclaimable()) return;
+    if (!syscall_core_fallback_reclaimable()) return;
+    if (!console_fallback_reclaimable()) return;
+    kernel_reclaim_memory(_kernel_init_optional_start,
+                          _kernel_init_optional_end, 1, 1);
+}
+
 static void kernel_reclaim_boot_stack_memory(void) {
     extern uint8_t _kernel_boot_stack_start[];
     extern uint8_t _kernel_boot_stack_end[];
 
     kernel_reclaim_memory(_kernel_boot_stack_start,
                           _kernel_boot_stack_end, 1, 0);
+}
+
+static void kernel_reclaim_multiboot_memory(void) {
+    extern uint8_t _kernel_multiboot_start[];
+    extern uint8_t _kernel_multiboot_end[];
+    uint64_t start;
+    uint64_t end;
+    uint64_t address;
+
+    start = (uint64_t)(uintptr_t)_kernel_multiboot_start;
+    end = (uint64_t)(uintptr_t)_kernel_multiboot_end;
+    for (address = start; address < end; address += PAGE_SIZE) {
+        vmm_unmap_page(address + KERNEL_VMA);
+    }
+    if (smp_tlb_flush_all_sync() < 0) return;
+    pfa_reclaim_kernel_range_quiet(start, end);
 }
 
 static void KERNEL_INIT kernel_boot(void) {
@@ -189,7 +217,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
         console_init();
 
-        printf("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
+        KERNEL_INIT_LOG("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
                (unsigned long long)early_fb_addr,
                early_fb_width, early_fb_height,
                early_fb_pitch, early_fb_bpp, early_fb_type);
@@ -265,11 +293,12 @@ static void KERNEL_INIT kernel_boot(void) {
         ramfs_upper = NULL;
         overlay_ctx = NULL;
 
-        mount_ret = vfs_mount(NULL, "/", "ramfs");
+        mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/"),
+                              KERNEL_INIT_STRING("ramfs"));
         if (mount_ret == 0) {
-            printf("KERNEL: Mounted ramfs as root\n");
+            KERNEL_INIT_LOG("KERNEL: Mounted ramfs as root\n");
         } else {
-            printf("KERNEL: Failed to mount ramfs as root\n");
+            KERNEL_INIT_LOG("KERNEL: Failed to mount ramfs as root\n");
         }
 
         tag_mod = NULL;
@@ -288,39 +317,44 @@ static void KERNEL_INIT kernel_boot(void) {
         }
         if (tag_mod) {
             squashfs_init(tag_mod->mod_start, tag_mod->mod_end);
-            mount_ret = vfs_mount(NULL, "/squashfs", "squashfs");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/squashfs"),
+                                  KERNEL_INIT_STRING("squashfs"));
             if (mount_ret == 0) {
-                squashfs_root = vfs_namei("/squashfs");
+                squashfs_root = vfs_namei(KERNEL_INIT_STRING("/squashfs"));
                 use_squashfs = 1;
             } else {
-                printf("KERNEL: SquashFS mount failed\n");
+                KERNEL_INIT_LOG("KERNEL: SquashFS mount failed\n");
             }
         }
-        ramfs_create_dir("/var", 0755);
-        ramfs_create_dir("/tmp", 0777);
-        ramfs_create_dir("/home", 0755);
-        ramfs_create_dir("/root", 0700);
-        ramfs_create_dir("/root/.config", 0700);
-        ramfs_create_dir("/root/.config/htop", 0700);
-        ramfs_create_dir("/run", 0755);
+        ramfs_create_dir(KERNEL_INIT_STRING("/var"), 0755);
+        ramfs_create_dir(KERNEL_INIT_STRING("/tmp"), 0777);
+        ramfs_create_dir(KERNEL_INIT_STRING("/home"), 0755);
+        ramfs_create_dir(KERNEL_INIT_STRING("/root"), 0700);
+        ramfs_create_dir(KERNEL_INIT_STRING("/root/.config"), 0700);
+        ramfs_create_dir(KERNEL_INIT_STRING("/root/.config/htop"), 0700);
+        ramfs_create_dir(KERNEL_INIT_STRING("/run"), 0755);
 
         if (use_squashfs && squashfs_root) {
             ramfs_upper = vfs_get_root();
             overlay_ctx = overlayfs_create(squashfs_root, ramfs_upper);
             if (overlay_ctx && overlay_ctx->merged_root) {
-                vfs_replace_mount_root("/", overlay_ctx->merged_root, NULL, NULL);
-                printf("KERNEL: OverlayFS active: squashfs (lower) + ramfs (upper) on /\n");
+                vfs_replace_mount_root(KERNEL_INIT_STRING("/"),
+                                       overlay_ctx->merged_root, NULL, NULL);
+                KERNEL_INIT_LOG("KERNEL: OverlayFS active: squashfs (lower) + ramfs (upper) on /\n");
             }
         } else {
-            mount_ret = vfs_mount(NULL, "/ro", "initrd");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/ro"),
+                                  KERNEL_INIT_STRING("initrd"));
             if (mount_ret == 0) {
-                initrd_root = vfs_namei("/ro");
+                initrd_root = vfs_namei(KERNEL_INIT_STRING("/ro"));
                 if (initrd_root) {
                     ramfs_upper = vfs_get_root();
                     overlay_ctx = overlayfs_create(initrd_root, ramfs_upper);
                     if (overlay_ctx && overlay_ctx->merged_root) {
-                        vfs_replace_mount_root("/", overlay_ctx->merged_root, NULL, NULL);
-                        printf("KERNEL: OverlayFS active: initrd (lower) + ramfs (upper) on /\n");
+                        vfs_replace_mount_root(KERNEL_INIT_STRING("/"),
+                                               overlay_ctx->merged_root,
+                                               NULL, NULL);
+                        KERNEL_INIT_LOG("KERNEL: OverlayFS active: initrd (lower) + ramfs (upper) on /\n");
                     }
                 }
             }
@@ -344,10 +378,14 @@ static void KERNEL_INIT kernel_boot(void) {
         if (cmdline_get_lke())
             lke_init();
 
-        vfs_mount(NULL, "/dev", "devfs");
-        vfs_mount(NULL, "/proc", "procfs");
-        vfs_mount(NULL, "/sys", "sysfs");
-        vfs_mount(NULL, "/tmp", "tmpfs");
+        vfs_mount(NULL, KERNEL_INIT_STRING("/dev"),
+                  KERNEL_INIT_STRING("devfs"));
+        vfs_mount(NULL, KERNEL_INIT_STRING("/proc"),
+                  KERNEL_INIT_STRING("procfs"));
+        vfs_mount(NULL, KERNEL_INIT_STRING("/sys"),
+                  KERNEL_INIT_STRING("sysfs"));
+        vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
+                  KERNEL_INIT_STRING("tmpfs"));
 
         if (use_squashfs) {
             vfs_block_squashfs_access();
@@ -359,10 +397,12 @@ static void KERNEL_INIT kernel_boot(void) {
 
         sqctx = squashfs_get_context();
         if (sqctx && sqctx->base && sqctx->size > 0) {
-            ramfs_create_dir("/boot", 0755);
-            ramfs_create_file("/boot/rootfs.squashfs", 0444);
-            ramfs_set_backing("/boot/rootfs.squashfs", sqctx->base, sqctx->size);
-            printf("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
+            ramfs_create_dir(KERNEL_INIT_STRING("/boot"), 0755);
+            ramfs_create_file(KERNEL_INIT_STRING("/boot/rootfs.squashfs"),
+                              0444);
+            ramfs_set_backing(KERNEL_INIT_STRING("/boot/rootfs.squashfs"),
+                              sqctx->base, sqctx->size);
+            KERNEL_INIT_LOG("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
         }
 
 #if CONFIG_DRIVER_AHCI
@@ -375,7 +415,7 @@ static void KERNEL_INIT kernel_boot(void) {
     } else {
         root_dev = cmdline_get_root();
         if (root_dev) {
-            printf("BOOT: Installed mode: root=%s\n", root_dev);
+            KERNEL_INIT_LOG("BOOT: Installed mode: root=%s\n", root_dev);
 
             vfs_init();
             initrd_vfs_register();
@@ -384,9 +424,10 @@ static void KERNEL_INIT kernel_boot(void) {
             overlayfs_vfs_register();
             tmpfs_vfs_register();
 
-            mount_ret = vfs_mount(NULL, "/", "ramfs");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/"),
+                                  KERNEL_INIT_STRING("ramfs"));
             if (mount_ret != 0) {
-                printf("BOOT: Failed to mount ramfs as root\n");
+                KERNEL_INIT_LOG("BOOT: Failed to mount ramfs as root\n");
             }
 
             procfs_init();
@@ -398,7 +439,8 @@ static void KERNEL_INIT kernel_boot(void) {
             if (cmdline_get_lke())
                 lke_init();
 
-            vfs_mount(NULL, "/dev", "devfs");
+            vfs_mount(NULL, KERNEL_INIT_STRING("/dev"),
+                      KERNEL_INIT_STRING("devfs"));
 
             ext4_init();
             ext4_vfs_register();
@@ -407,7 +449,7 @@ static void KERNEL_INIT kernel_boot(void) {
 #if CONFIG_DRIVER_AHCI
             if (ahci_init() == 0) {
                 ahci_done = 1;
-                printf("AHCI SATA driver initialized successfully\n");
+                KERNEL_INIT_LOG("AHCI SATA driver initialized successfully\n");
 
                 j = 0;
                 sr_idx = 0;
@@ -419,12 +461,13 @@ static void KERNEL_INIT kernel_boot(void) {
                         devname[2] = (char)('a' + j);
                         devname[3] = '\0';
                         devfs_register_blockdev(devname, pi);
-                        printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
+                        KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
                         if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
-                            printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
+                            KERNEL_INIT_LOG("PART: Found %d partition(s) on /dev/%s (%s)\n",
                                    ptable.count, devname,
-                                   ptable.is_gpt ? "GPT" : "MBR");
+                                   ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
+                                                   KERNEL_INIT_STRING("MBR"));
                             for (pk = 0; pk < ptable.count; pk++) {
                                 partname[0] = 's';
                                 partname[1] = 'd';
@@ -440,7 +483,7 @@ static void KERNEL_INIT kernel_boot(void) {
                                 devfs_register_partition(partname, pi,
                                                          ptable.parts[pk].start_lba,
                                                          ptable.parts[pk].sector_count);
-                                printf("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
+                                KERNEL_INIT_LOG("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
                                        partname,
                                        (unsigned long long)ptable.parts[pk].start_lba,
                                        (unsigned long long)ptable.parts[pk].sector_count);
@@ -453,50 +496,58 @@ static void KERNEL_INIT kernel_boot(void) {
                         devname[2] = (char)('0' + sr_idx);
                         devname[3] = '\0';
                         devfs_register_cdrom(devname, pi);
-                        printf("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
+                        KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
                         sr_idx++;
                     }
                 }
                 devs_registered = 1;
             } else {
-                printf("AHCI SATA driver not available\n");
+                KERNEL_INIT_LOG("AHCI SATA driver not available\n");
             }
 #else
-            printf("AHCI SATA driver disabled\n");
+            KERNEL_INIT_LOG("AHCI SATA driver disabled\n");
 #endif
 
             iso9660_vfs_register();
 
             ext4_root = NULL;
             if (ahci_done) {
-                mount_ret = vfs_mount(root_dev, "/mnt", "ext4");
+                mount_ret = vfs_mount(root_dev, KERNEL_INIT_STRING("/mnt"),
+                                      KERNEL_INIT_STRING("ext4"));
                 if (mount_ret == 0) {
-                    ext4_root = vfs_namei("/mnt");
+                    ext4_root = vfs_namei(KERNEL_INIT_STRING("/mnt"));
                 }
             }
 
             if (ext4_root) {
-                mount_ret = vfs_replace_mount_root("/", ext4_root, root_dev, "ext4");
+                mount_ret = vfs_replace_mount_root(
+                    KERNEL_INIT_STRING("/"), ext4_root, root_dev,
+                    KERNEL_INIT_STRING("ext4"));
                 if (mount_ret == 0) {
                     ext4_prepare_root_node(ext4_root);
-                    vfs_remove_mount("/mnt");
-                    printf("BOOT: ext4 root mounted from %s\n", root_dev);
+                    vfs_remove_mount(KERNEL_INIT_STRING("/mnt"));
+                    KERNEL_INIT_LOG("BOOT: ext4 root mounted from %s\n", root_dev);
                 } else {
-                    printf("BOOT: FATAL: failed to replace root mount with %s\n", root_dev);
+                    KERNEL_INIT_LOG("BOOT: FATAL: failed to replace root mount with %s\n", root_dev);
                 }
             } else {
-                printf("BOOT: FATAL: failed to mount ext4 root %s\n", root_dev);
+                KERNEL_INIT_LOG("BOOT: FATAL: failed to mount ext4 root %s\n", root_dev);
             }
 
-            vfs_mount(NULL, "/proc", "procfs");
-            vfs_mount(NULL, "/sys", "sysfs");
-            vfs_mount(NULL, "/tmp", "tmpfs");
+            vfs_mount(NULL, KERNEL_INIT_STRING("/proc"),
+                      KERNEL_INIT_STRING("procfs"));
+            vfs_mount(NULL, KERNEL_INIT_STRING("/sys"),
+                      KERNEL_INIT_STRING("sysfs"));
+            vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
+                      KERNEL_INIT_STRING("tmpfs"));
             if (cmdline_get_lke())
                 lke_autoload();
         } else {
-            printf("No multiboot modules present (mod_count=%u)\n", mod_count);
+            KERNEL_INIT_LOG("No multiboot modules present (mod_count=%u)\n", mod_count);
         }
     }
+
+    pfa_release_multiboot_range(mb_page, mb_end_page);
 
     mutex_init(&print_lock);
 
@@ -532,7 +583,7 @@ static void KERNEL_INIT kernel_boot(void) {
     if (!ahci_done && ahci_init() == 0) {
         ahci_done = 1;
     } else if (!ahci_done) {
-        printf("AHCI SATA driver not available (no controller found)\n");
+        KERNEL_INIT_LOG("AHCI SATA driver not available (no controller found)\n");
     }
 #endif
 
@@ -550,12 +601,13 @@ static void KERNEL_INIT kernel_boot(void) {
                 devname[2] = (char)('a' + j);
                 devname[3] = '\0';
                 devfs_register_blockdev(devname, pi);
-                printf("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
+                KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
                 if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
-                    printf("PART: Found %d partition(s) on /dev/%s (%s)\n",
+                    KERNEL_INIT_LOG("PART: Found %d partition(s) on /dev/%s (%s)\n",
                            ptable.count, devname,
-                           ptable.is_gpt ? "GPT" : "MBR");
+                           ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
+                                           KERNEL_INIT_STRING("MBR"));
                     for (pk = 0; pk < ptable.count; pk++) {
                         partname[0] = 's';
                         partname[1] = 'd';
@@ -571,7 +623,7 @@ static void KERNEL_INIT kernel_boot(void) {
                         devfs_register_partition(partname, pi,
                                                  ptable.parts[pk].start_lba,
                                                  ptable.parts[pk].sector_count);
-                        printf("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
+                        KERNEL_INIT_LOG("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
                                partname,
                                (unsigned long long)ptable.parts[pk].start_lba,
                                (unsigned long long)ptable.parts[pk].sector_count);
@@ -584,7 +636,7 @@ static void KERNEL_INIT kernel_boot(void) {
                 devname[2] = (char)('0' + sr_idx);
                 devname[3] = '\0';
                 devfs_register_cdrom(devname, pi);
-                printf("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
+                KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
                 sr_idx++;
             }
         }
@@ -593,7 +645,7 @@ static void KERNEL_INIT kernel_boot(void) {
 #if CONFIG_DRIVER_NET
     net_init();
 #else
-    printf("NET: Network stack disabled\n");
+    KERNEL_INIT_LOG("NET: Network stack disabled\n");
 #endif
 
     smp_enable_scheduling();
@@ -603,7 +655,7 @@ static void KERNEL_INIT kernel_boot(void) {
         kprint_enable();
         watchdog_init();
     } else {
-        printf("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
+        KERNEL_INIT_LOG("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
 
     console_reclaim_unused();
@@ -619,9 +671,9 @@ static void KERNEL_INIT kernel_boot(void) {
         int ci;
 
         init_candidates[0] = cmdline_get_init();
-        init_candidates[1] = "/init";
-        init_candidates[2] = "/sbin/init";
-        init_candidates[3] = "/bin/init";
+        init_candidates[1] = KERNEL_INIT_STRING("/init");
+        init_candidates[2] = KERNEL_INIT_STRING("/sbin/init");
+        init_candidates[3] = KERNEL_INIT_STRING("/bin/init");
 
         init_task = NULL;
         for (ci = 0; ci < 4; ci++) {
@@ -633,14 +685,18 @@ static void KERNEL_INIT kernel_boot(void) {
         }
     }
     if (!init_task) {
-        printf("BOOT: init not found, retrying in 5 seconds...\n");
+        KERNEL_INIT_LOG("BOOT: init not found, retrying in 5 seconds...\n");
         sleep_ms(5000);
-        init_task = launch_user_path("/init", 0);
-        if (!init_task) init_task = launch_user_path("/sbin/init", 0);
-        if (!init_task) init_task = launch_user_path("/bin/init", 0);
+        init_task = launch_user_path(KERNEL_INIT_STRING("/init"), 0);
+        if (!init_task)
+            init_task = launch_user_path(KERNEL_INIT_STRING("/sbin/init"), 0);
+        if (!init_task)
+            init_task = launch_user_path(KERNEL_INIT_STRING("/bin/init"), 0);
     }
     if (!init_task) {
-        kernel_panic("FATAL: no init executable found (/init, /sbin/init, /bin/init).", NULL);
+        kernel_panic(KERNEL_INIT_STRING(
+            "FATAL: no init executable found (/init, /sbin/init, /bin/init)."),
+            NULL);
     }
     watchdog_set_init_pid((int)init_task->pid);
 
@@ -660,7 +716,9 @@ static void kernel_idle_loop(void) {
 static void kernel_runtime(void) {
     asm volatile ("sti");
     kernel_reclaim_init_memory();
+    kernel_reclaim_optional_init_memory();
     kernel_reclaim_boot_stack_memory();
+    kernel_reclaim_multiboot_memory();
     heap_reclaim_unused();
 
     sleep_ticks(50);

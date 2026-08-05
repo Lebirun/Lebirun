@@ -7,9 +7,20 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-static e1000_device_t g_e1000_dev;
+static e1000_device_t *g_e1000_dev;
 static volatile int e1000_poll_lock = 0;
 static volatile int e1000_tx_lock = 0;
+
+static e1000_device_t *e1000_allocate_device(void) {
+    e1000_device_t *dev;
+
+    if (g_e1000_dev) return g_e1000_dev;
+    dev = (e1000_device_t *)kmalloc(sizeof(e1000_device_t));
+    if (!dev) return NULL;
+    memset(dev, 0, sizeof(e1000_device_t));
+    g_e1000_dev = dev;
+    return dev;
+}
 
 static int e1000_try_lock(volatile int *lock) {
     if (__sync_lock_test_and_set(lock, 1) == 0) return 1;
@@ -97,14 +108,14 @@ static inline void e1000_write(e1000_device_t *dev, uint32_t reg, uint32_t value
     }
 }
 
-static uint16_t KERNEL_INIT e1000_read_eeprom(e1000_device_t *dev, uint8_t addr) {
+static uint16_t e1000_read_eeprom(e1000_device_t *dev, uint8_t addr) {
     uint32_t tmp;
     e1000_write(dev, E1000_EERD, (1) | ((uint32_t)(addr) << 8));
     while (!((tmp = e1000_read(dev, E1000_EERD)) & (1 << 4)));
     return (uint16_t)((tmp >> 16) & 0xFFFF);
 }
 
-void KERNEL_INIT e1000_read_mac(e1000_device_t *dev) {
+void e1000_read_mac(e1000_device_t *dev) {
     uint32_t tmp;
     uint16_t word;
 
@@ -131,7 +142,7 @@ void KERNEL_INIT e1000_read_mac(e1000_device_t *dev) {
     dev->mac.addr[5] = (word >> 8) & 0xFF;
 }
 
-static void KERNEL_INIT e1000_reset(e1000_device_t *dev) {
+static void e1000_reset(e1000_device_t *dev) {
     uint32_t ctrl;
     volatile int i;
 
@@ -141,14 +152,14 @@ static void KERNEL_INIT e1000_reset(e1000_device_t *dev) {
     while (e1000_read(dev, E1000_CTRL) & E1000_CTRL_RST);
 }
 
-static void KERNEL_INIT e1000_linkup(e1000_device_t *dev) {
+static void e1000_linkup(e1000_device_t *dev) {
     uint32_t ctrl = e1000_read(dev, E1000_CTRL);
     ctrl |= E1000_CTRL_SLU | E1000_CTRL_ASDE;
     ctrl &= ~(E1000_CTRL_ILOS | E1000_CTRL_PHY_RST);
     e1000_write(dev, E1000_CTRL, ctrl);
 }
 
-static int KERNEL_INIT e1000_init_rx(e1000_device_t *dev) {
+static int e1000_init_rx(e1000_device_t *dev) {
     uint64_t rx_ring_phys;
     uint64_t rx_ring_virt;
     uint64_t buf_phys;
@@ -212,7 +223,7 @@ static int KERNEL_INIT e1000_init_rx(e1000_device_t *dev) {
     return 0;
 }
 
-static int KERNEL_INIT e1000_init_tx(e1000_device_t *dev) {
+static int e1000_init_tx(e1000_device_t *dev) {
     uint64_t tx_ring_phys;
     uint64_t tx_ring_virt;
     uint64_t buf_phys;
@@ -400,8 +411,8 @@ void e1000_irq_handler(void *regs) {
     uint32_t status;
 
     (void)regs;
-    dev = &g_e1000_dev;
-    if (!dev->initialized) return;
+    dev = g_e1000_dev;
+    if (!dev || !dev->initialized) return;
 
     icr = e1000_read(dev, E1000_ICR);
 
@@ -419,7 +430,7 @@ void e1000_irq_handler(void *regs) {
     }
 }
 
-int KERNEL_INIT e1000_probe(void) {
+static int e1000_probe_device(e1000_device_t *dev) {
     uint16_t bus;
     uint8_t slot;
     uint8_t func;
@@ -447,25 +458,25 @@ int KERNEL_INIT e1000_probe(void) {
                     printf("E1000: Found device at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
                            bus, slot, func, vendor, device);
 
-                    g_e1000_dev.pci_bus = bus;
-                    g_e1000_dev.pci_slot = slot;
-                    g_e1000_dev.pci_func = func;
-                    g_e1000_dev.device_id = device;
+                    dev->pci_bus = bus;
+                    dev->pci_slot = slot;
+                    dev->pci_func = func;
+                    dev->device_id = device;
 
                     bar0 = pci_read_config(bus, slot, func, 0x10);
-                    g_e1000_dev.bar_type = bar0 & 1;
+                    dev->bar_type = bar0 & 1;
 
-                    if (g_e1000_dev.bar_type == 0) {
-                        g_e1000_dev.bar0 = bar0 & 0xFFFFFFF0;
+                    if (dev->bar_type == 0) {
+                        dev->bar0 = bar0 & 0xFFFFFFF0;
                     } else {
-                        g_e1000_dev.io_base = bar0 & 0xFFFFFFFC;
+                        dev->io_base = bar0 & 0xFFFFFFFC;
                     }
 
                     cmd = pci_read_config(bus, slot, func, 0x04);
                     cmd |= (1 << 1) | (1 << 2);
                     pci_write_config(bus, slot, func, 0x04, cmd);
 
-                    g_e1000_dev.irq = pci_read_config(bus, slot, func, 0x3C) & 0xFF;
+                    dev->irq = pci_read_config(bus, slot, func, 0x3C) & 0xFF;
 
                     return 0;
                 }
@@ -477,12 +488,27 @@ int KERNEL_INIT e1000_probe(void) {
     return -1;
 }
 
+int e1000_probe(void) {
+    e1000_device_t *dev;
+    int result;
+
+    dev = e1000_allocate_device();
+    if (!dev) return -1;
+    result = e1000_probe_device(dev);
+    if (result < 0) {
+        g_e1000_dev = NULL;
+        kfree(dev);
+    }
+    return result;
+}
+
 e1000_device_t *e1000_get_device(void) {
-    return g_e1000_dev.initialized ? &g_e1000_dev : NULL;
+    if (!g_e1000_dev || !g_e1000_dev->initialized) return NULL;
+    return g_e1000_dev;
 }
 
 uint64_t e1000_get_allocated_pages(void) {
-    return g_e1000_dev.allocated_pages;
+    return g_e1000_dev ? g_e1000_dev->allocated_pages : 0;
 }
 
 void e1000_print_status(e1000_device_t *dev) {
@@ -500,60 +526,65 @@ void e1000_print_status(e1000_device_t *dev) {
            dev->packets_tx, dev->bytes_tx, dev->errors_tx);
 }
 
-int KERNEL_INIT e1000_init(void) {
+int e1000_init(void) {
     uint64_t bar0_phys;
     uint64_t bar0_virt;
     uint64_t off;
     uint32_t status;
     netif_t *netif;
+    e1000_device_t *dev;
     int i;
 
     printf("E1000: Initializing driver...\n");
 
-    memset(&g_e1000_dev, 0, sizeof(g_e1000_dev));
+    dev = e1000_allocate_device();
+    if (!dev) return -1;
+    memset(dev, 0, sizeof(e1000_device_t));
 
-    if (e1000_probe() < 0) {
+    if (e1000_probe_device(dev) < 0) {
+        g_e1000_dev = NULL;
+        kfree(dev);
         return -1;
     }
 
-    if (g_e1000_dev.bar_type == 0) {
-        bar0_phys = g_e1000_dev.bar0;
+    if (dev->bar_type == 0) {
+        bar0_phys = dev->bar0;
         bar0_virt = (KERNEL_VMA + 0x3C000000ULL);
 
         for (off = 0; off < 0x20000; off += PAGE_SIZE) {
             vmm_map_page(bar0_virt + off, bar0_phys + off, 0x003);
         }
 
-        g_e1000_dev.bar0_virt = bar0_virt;
+        dev->bar0_virt = bar0_virt;
     }
 
-    e1000_reset(&g_e1000_dev);
+    e1000_reset(dev);
 
     for (i = 0; i < 128; i++) {
-        e1000_write(&g_e1000_dev, E1000_MTA + i * 4, 0);
+        e1000_write(dev, E1000_MTA + i * 4, 0);
     }
 
-    e1000_read_mac(&g_e1000_dev);
+    e1000_read_mac(dev);
     printf("E1000: MAC = %02X:%02X:%02X:%02X:%02X:%02X\n",
-           g_e1000_dev.mac.addr[0], g_e1000_dev.mac.addr[1],
-           g_e1000_dev.mac.addr[2], g_e1000_dev.mac.addr[3],
-           g_e1000_dev.mac.addr[4], g_e1000_dev.mac.addr[5]);
+           dev->mac.addr[0], dev->mac.addr[1],
+           dev->mac.addr[2], dev->mac.addr[3],
+           dev->mac.addr[4], dev->mac.addr[5]);
 
-    e1000_linkup(&g_e1000_dev);
+    e1000_linkup(dev);
 
-    if (e1000_init_rx(&g_e1000_dev) < 0) {
+    if (e1000_init_rx(dev) < 0) {
         printf("E1000: Failed to initialize RX\n");
         return -1;
     }
 
-    if (e1000_init_tx(&g_e1000_dev) < 0) {
+    if (e1000_init_tx(dev) < 0) {
         printf("E1000: Failed to initialize TX\n");
         return -1;
     }
 
-    status = e1000_read(&g_e1000_dev, E1000_STATUS);
-    g_e1000_dev.link_up = (status & E1000_STATUS_LU) ? 1 : 0;
-    printf("E1000: Link is %s\n", g_e1000_dev.link_up ? "UP" : "DOWN");
+    status = e1000_read(dev, E1000_STATUS);
+    dev->link_up = (status & E1000_STATUS_LU) ? 1 : 0;
+    printf("E1000: Link is %s\n", dev->link_up ? "UP" : "DOWN");
 
     netif = netif_alloc();
     if (!netif) {
@@ -562,25 +593,25 @@ int KERNEL_INIT e1000_init(void) {
     }
 
     memcpy(netif->name, "eth0", 5);
-    memcpy(&netif->mac, &g_e1000_dev.mac, sizeof(mac_addr_t));
+    memcpy(&netif->mac, &dev->mac, sizeof(mac_addr_t));
     netif->mtu = ETH_MTU;
-    netif->link_up = g_e1000_dev.link_up;
+    netif->link_up = dev->link_up;
     netif->send = e1000_send;
     netif->poll = e1000_poll;
-    netif->driver_data = &g_e1000_dev;
-    g_e1000_dev.netif = netif;
+    netif->driver_data = dev;
+    dev->netif = netif;
 
     netif_register(netif);
     netif_set_default(netif);
 
-    if (g_e1000_dev.irq > 0 && g_e1000_dev.irq < 16) {
-        irq_register_handler(g_e1000_dev.irq, (irq_handler_t)e1000_irq_handler);
-        irq_unmask(g_e1000_dev.irq);
-        e1000_enable_interrupts(&g_e1000_dev);
-        printf("E1000: Interrupts enabled (IRQ %u)\n", g_e1000_dev.irq);
+    if (dev->irq > 0 && dev->irq < 16) {
+        irq_register_handler(dev->irq, (irq_handler_t)e1000_irq_handler);
+        irq_unmask(dev->irq);
+        e1000_enable_interrupts(dev);
+        printf("E1000: Interrupts enabled (IRQ %u)\n", dev->irq);
     }
 
-    g_e1000_dev.initialized = 1;
+    dev->initialized = 1;
     printf("E1000: Initialization complete\n");
 
     return 0;

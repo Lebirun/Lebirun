@@ -1,4 +1,5 @@
 #include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/common.h>
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/idt.h>
 #include <lebirun/mem_map.h>
@@ -230,7 +231,7 @@ static ext4_vfs_private_t *ext4_reset_private(vfs_node_t *node, ext4_fs_t *fs) {
     return priv;
 }
 
-int ext4_prepare_root_node(vfs_node_t *node) {
+int KERNEL_INIT ext4_prepare_root_node(vfs_node_t *node) {
     ext4_fs_t *fs;
     ext4_vfs_private_t *priv;
 

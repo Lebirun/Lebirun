@@ -17,28 +17,30 @@ extern uint64_t low_bump;
 reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
 uint64_t num_reserved_regions = 0;
 
-static uint64_t multiboot_physical_ram_kb = 0;
-static uint64_t multiboot_usable_ram_kb = 0;
+static uint64_t multiboot_physical_ram_kb KERNEL_INIT_BSS;
+static uint64_t multiboot_usable_ram_kb KERNEL_INIT_BSS;
 
-uint64_t early_fb_addr;
-uint32_t early_fb_width;
-uint32_t early_fb_height;
-uint32_t early_fb_pitch;
-uint8_t early_fb_bpp;
-uint8_t early_fb_type;
-int early_fb_valid = 0;
+uint64_t early_fb_addr KERNEL_INIT_BSS;
+uint32_t early_fb_width KERNEL_INIT_BSS;
+uint32_t early_fb_height KERNEL_INIT_BSS;
+uint32_t early_fb_pitch KERNEL_INIT_BSS;
+uint8_t early_fb_bpp KERNEL_INIT_BSS;
+uint8_t early_fb_type KERNEL_INIT_BSS;
+int early_fb_valid KERNEL_INIT_BSS;
 
 #define EARLY_CMDLINE_MAX 256
 char early_cmdline[EARLY_CMDLINE_MAX];
 
-uint32_t early_mod_count;
+uint32_t early_mod_count KERNEL_INIT_BSS;
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
 extern void pmm_zero_page_phys(uint64_t phys_addr);
-extern void pfa_init_internal_setup(uint64_t bitmap_bytes, uint64_t bitmap_entries,
-                                    uint64_t total_pages, uint64_t kernel_frames,
-                                    uint64_t hole_start, uint64_t hole_end);
+extern void pfa_init_internal_setup(uint64_t directory_entries,
+                                    uint64_t bitmap_entries,
+                                    uint64_t total_pages,
+                                    uint64_t extension_phys,
+                                    uint64_t extension_pages);
 extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
 extern uint64_t count_free_frames(void);
 extern void set_bit(uint64_t bit_idx);
@@ -67,7 +69,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     early_mod_count = 0;
 
     if (mb_magic != MULTIBOOT2_MAGIC || mb_ptr == 0) {
-        printf("Bad multiboot2 magic (0x%08lX) - skip map.\n", mb_magic);
+        KERNEL_INIT_LOG("Bad multiboot2 magic (0x%08lX) - skip map.\n", mb_magic);
         return;
     }
 
@@ -228,6 +230,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         if (num_reserved_regions < MAX_RESERVED_REGIONS) {
             reserved_regions[num_reserved_regions].start_phys = mb_start_page;
             reserved_regions[num_reserved_regions].end_phys = mb_end_page;
+            reserved_regions[num_reserved_regions].kind = RESERVED_REGION_MULTIBOOT_INFO;
             num_reserved_regions++;
         }
     }
@@ -245,6 +248,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
                 reserved_regions[num_reserved_regions].start_phys = start_page;
                 reserved_regions[num_reserved_regions].end_phys = end_page;
+                reserved_regions[num_reserved_regions].kind = RESERVED_REGION_MODULE;
                 num_reserved_regions++;
             }
         }
@@ -273,6 +277,8 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     uint64_t detected_max_phys;
     uint64_t actual_total_pages;
     uint64_t bitmap_entries;
+    uint64_t directory_entries;
+    uint64_t extension_entries;
     uint64_t actual_bitmap_bytes;
     uint64_t bitmap_pages;
     uint64_t bitmap_alloc_phys;
@@ -307,19 +313,21 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
 
     bitmap_entries = actual_total_pages;
-    actual_bitmap_bytes =
-        ((bitmap_entries + PFA_SPARSE_CHUNK_FRAMES - 1) /
-         PFA_SPARSE_CHUNK_FRAMES) * sizeof(uint8_t *);
-    actual_bitmap_bytes = (actual_bitmap_bytes + 7) & ~7u;
-
-    pfa_init_internal_setup(actual_bitmap_bytes, bitmap_entries,
-                            actual_total_pages, 0, 0, 0);
+    directory_entries =
+        (bitmap_entries + PFA_SPARSE_CHUNK_FRAMES - 1) /
+        PFA_SPARSE_CHUNK_FRAMES;
+    extension_entries =
+        directory_entries > PFA_INLINE_DIRECTORY_ENTRIES ?
+        directory_entries - PFA_INLINE_DIRECTORY_ENTRIES : 0;
+    actual_bitmap_bytes = extension_entries * sizeof(uint32_t);
+    actual_bitmap_bytes = (actual_bitmap_bytes + 7) & ~7ULL;
 
     bitmap_pages = (actual_bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     bitmap_alloc_end = (uint64_t)bitmap_pages * PAGE_SIZE;
     bitmap_alloc_phys = 0;
     found_bitmap_space = 0;
-    for (r = 0; r < num_regions && !found_bitmap_space; r++) {
+    for (r = 0; bitmap_pages != 0 && r < num_regions && !found_bitmap_space;
+         r++) {
         if (memory_map[r].type != 1) continue;
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
@@ -345,17 +353,18 @@ void KERNEL_EARLY_INIT pfa_init(void) {
             }
         }
     }
-    if (!found_bitmap_space) {
+    if (bitmap_pages != 0 && !found_bitmap_space) {
         bitmap_alloc_phys = (bump_current + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     }
     if (bump_current < bitmap_alloc_phys + bitmap_alloc_end) {
         bump_current = bitmap_alloc_phys + bitmap_alloc_end;
     }
 
-    pfa_bitmap = (uint8_t *)(bitmap_alloc_phys + KERNEL_VMA);
-    memset(pfa_bitmap, 0, actual_bitmap_bytes);
+    pfa_init_internal_setup(directory_entries, bitmap_entries,
+                            actual_total_pages, bitmap_alloc_phys,
+                            bitmap_pages);
 
-    printf("PFA: 64-bit mode, managing %u pages (%u KB bitmap directory, %u pages)\n",
+    KERNEL_INIT_LOG("PFA: 64-bit mode, managing %u pages (%u KB bitmap directory, %u pages)\n",
            actual_total_pages, bitmap_pages * (PAGE_SIZE / 1024),
            bitmap_pages);
     if (bitmap_alloc_phys + bitmap_alloc_end > kernel_end_phys) {
@@ -366,7 +375,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     kernel_reserved_frames = kernel_frames;
     for (f = 0; f < kernel_frames; f++) set_bit(f);
 
-    printf("PFA: Kernel ends at phys 0x%016lX (%u frames reserved)\n", (unsigned long)kernel_end_phys, kernel_frames);
+    KERNEL_INIT_LOG("PFA: Kernel ends at phys 0x%016lX (%u frames reserved)\n", (unsigned long)kernel_end_phys, kernel_frames);
 
     total_free_frames = 0;
     for (r = 0; r < num_regions; r++) {
@@ -397,10 +406,10 @@ void KERNEL_EARLY_INIT pfa_init(void) {
             region_free++;
         }
         if (region_free > 0) {
-            printf("PFA: Region %u [0x%08lX-0x%08lX]: %u free frames\n", r,
+            KERNEL_INIT_LOG("PFA: Region %u [0x%08lX-0x%08lX]: %u free frames\n", r,
                    (unsigned long)region_start_capped, (unsigned long)region_end_capped, region_free);
         } else {
-            printf("PFA: Region %u skipped (low RAM protected)\n", r);
+            KERNEL_INIT_LOG("PFA: Region %u skipped (low RAM protected)\n", r);
         }
     }
 
@@ -415,7 +424,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
                 reserved_count++;
             }
         }
-        printf("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
+        KERNEL_INIT_LOG("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
                r, reserved_regions[r].start_phys, reserved_regions[r].end_phys, reserved_count);
     }
 
@@ -423,7 +432,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     total_free_frames = actual_free;
 
     total_mb = (total_free_frames + 255ULL) / 256ULL;
-    printf("PFA ready: %llu total free frames (~%llu MB)\n",
+    KERNEL_INIT_LOG("PFA ready: %llu total free frames (~%llu MB)\n",
            (unsigned long long)total_free_frames, (unsigned long long)total_mb);
 
     system_total_ram_kb = 0;
@@ -446,7 +455,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     bmp_kb = (bitmap_pages * PAGE_SIZE) / 1024;
     pfa_set_reserved_stats(kern_bin_kb, bmp_kb);
 
-    printf("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n",
+    KERNEL_INIT_LOG("PFA: Total system RAM: %u KB (~%u MB), InitFree: %u KB\n",
            system_total_ram_kb, system_total_ram_kb / 1024, (uint64_t)(actual_free * 4));
 
     __asm__ volatile ("movq %%cr3, %0" : "=r"(cr3_val));
