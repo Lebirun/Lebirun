@@ -5,7 +5,7 @@ If you want to contribute to this project, you have to fulfill these:
 - Attempt to **not** increase memory usage much.
 
 Tips:
-- If you are willing to contribute with the usage of LLM, consider using the latest and best models instead of something quite old or weak.
+- If you are willing to contribute with the usage of LLM, please do not make slop (AI slop does not mean ALL contributions with the usage of AI)
 
 Development Setup
 - x86_64-elf-gcc for building the OS, libc and anything in userprog
