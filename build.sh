@@ -206,26 +206,27 @@ if [ -d "initrd" ]; then
 fi
 
 if command -v grub-mkimage >/dev/null 2>&1; then
-  mkdir -p root/boot/grub/i386-pc
-  if [ ! -f root/boot/grub/i386-pc/core.img ]; then
-    GRUB_EARLY_CFG=$(mktemp)
-    GRUB_CORE_TMP=root/boot/grub/i386-pc/core.img.tmp
-    cat > "$GRUB_EARLY_CFG" <<'GRUBEOF'
+  mkdir -p root/boot/grub/i386-pc root/boot/grub/fonts
+  if [ -f /usr/share/grub/ascii.pf2 ]; then
+    cp /usr/share/grub/ascii.pf2 root/boot/grub/fonts/ascii.pf2
+  fi
+  GRUB_EARLY_CFG=$(mktemp)
+  GRUB_CORE_TMP=root/boot/grub/i386-pc/core.img.tmp
+  cat > "$GRUB_EARLY_CFG" <<'GRUBEOF'
 set root=(hd0,msdos1)
 set prefix=(hd0,msdos1)/boot/grub
 insmod normal
 normal
 GRUBEOF
-    if grub-mkimage -O i386-pc -o "$GRUB_CORE_TMP" \
-      -c "$GRUB_EARLY_CFG" \
-      -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile; then
-      mv "$GRUB_CORE_TMP" root/boot/grub/i386-pc/core.img
-    else
-      rm -f "$GRUB_CORE_TMP"
-      printf "\033[0;33mWarning: skipping installed-system GRUB core image; install grub-pc-bin if needed.\033[0m\n"
-    fi
-    rm -f "$GRUB_EARLY_CFG"
+  if grub-mkimage -O i386-pc -o "$GRUB_CORE_TMP" \
+    -c "$GRUB_EARLY_CFG" \
+    -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile font video video_fb all_video vbe gfxterm; then
+    mv "$GRUB_CORE_TMP" root/boot/grub/i386-pc/core.img
+  else
+    rm -f "$GRUB_CORE_TMP"
+    printf "\033[0;33mWarning: skipping installed-system GRUB core image; install grub-pc-bin if needed.\033[0m\n"
   fi
+  rm -f "$GRUB_EARLY_CFG"
   if [ -f /usr/lib/grub/i386-pc/boot.img ]; then
     cp /usr/lib/grub/i386-pc/boot.img root/boot/grub/i386-pc/boot.img
   fi
