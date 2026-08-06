@@ -162,7 +162,7 @@ long_mode_entry:
     movabsq $higher_half, %rax
     jmp *%rax
 
-.section .text
+.section .init.text
 .code64
 higher_half:
     movabsq $stack_top, %rsp

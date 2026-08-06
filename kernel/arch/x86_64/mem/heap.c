@@ -927,6 +927,13 @@ void *krealloc(void *ptr, size_t new_size) {
         return ptr;
     }
 
+    if (new_block_size <= block->size) {
+        block->alloc_size = new_size;
+        set_canaries(block);
+        heap_lock_release(eflags);
+        return ptr;
+    }
+
     old_size = block->alloc_size;
     heap_lock_release(eflags);
 

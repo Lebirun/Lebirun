@@ -117,6 +117,7 @@ uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
 void pfa_free(uint64_t phys_addr);
 uint64_t pfa_release_multiboot_range(uint64_t phys_start, uint64_t phys_end);
+uint64_t pfa_release_cold_low_memory(uint64_t phys_end);
 void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end);
 void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end);
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames);

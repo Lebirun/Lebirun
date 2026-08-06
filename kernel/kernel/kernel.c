@@ -47,6 +47,7 @@ extern uint64_t boot_pml4[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_low[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_high[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pd_0[512] __attribute__((aligned(4096)));
+extern uint8_t _kernel_phys_start[];
 
 extern uint32_t multiboot_magic;
 extern uint64_t multiboot_ptr;
@@ -650,7 +651,9 @@ static void KERNEL_INIT kernel_boot(void) {
 
     smp_enable_scheduling();
     asm volatile ("sti");
-    pt_reclaim_low_identity();
+    if (pt_reclaim_low_identity() == 0)
+        pfa_release_cold_low_memory(
+            (uint64_t)(uintptr_t)_kernel_phys_start);
     if (vring_boot_enabled) {
         kprint_enable();
         watchdog_init();
@@ -728,7 +731,7 @@ static void kernel_runtime(void) {
     kernel_idle_loop();
 }
 
-void kernel_main(void) {
+void KERNEL_INIT kernel_main(void) {
     uint8_t *runtime_stack;
     extern void kernel_switch_stack(uint64_t stack_top, void (*entry)(void));
 

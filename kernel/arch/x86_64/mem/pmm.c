@@ -40,6 +40,8 @@ static volatile int refht_lock_val = 0;
 
 static int low_exhausted = 0;
 static uint64_t low_page_limit = 0x00400000;
+static uint64_t cold_low_start_frame = 0;
+static uint64_t cold_low_end_frame = 0;
 
 extern mem_region_t memory_map[MAX_REGIONS];
 extern uint64_t num_regions;
@@ -344,6 +346,10 @@ static uint64_t find_free_frames(uint64_t num) {
     if (!result && start > kernel_reserved_frames) {
         result = find_free_frames_range(kernel_reserved_frames, start, num);
     }
+    if (!result && cold_low_end_frame > cold_low_start_frame) {
+        result = find_free_frames_range(cold_low_start_frame,
+                                        cold_low_end_frame, num);
+    }
 
     pfa_lock_release(eflags);
     return result;
@@ -370,7 +376,8 @@ void pfa_free(uint64_t phys_addr) {
     if (idx >= (uint64_t)total_pages_managed) {
         return;
     }
-    if (idx < kernel_reserved_frames) {
+    if (idx < kernel_reserved_frames &&
+        (idx < cold_low_start_frame || idx >= cold_low_end_frame)) {
         return;
     }
     if (!frame_is_usable(idx) || frame_is_reserved(idx)) return;
@@ -442,6 +449,39 @@ uint64_t KERNEL_INIT pfa_release_multiboot_range(uint64_t phys_start,
     if (freed != 0) {
         __sync_fetch_and_add(&pfa_cached_free, freed);
         if (start_frame < last_alloc_hint) last_alloc_hint = start_frame;
+    }
+    pfa_lock_release(eflags);
+    return freed;
+}
+
+uint64_t KERNEL_INIT pfa_release_cold_low_memory(uint64_t phys_end) {
+    uint64_t start_frame;
+    uint64_t end_frame;
+    uint64_t frame;
+    uint64_t freed;
+    uint64_t eflags;
+
+    if ((phys_end & (PAGE_SIZE - 1)) != 0) return 0;
+    start_frame = 1;
+    end_frame = phys_end / PAGE_SIZE;
+    if (end_frame > kernel_reserved_frames)
+        end_frame = kernel_reserved_frames;
+    if (end_frame <= start_frame) return 0;
+
+    freed = 0;
+    pfa_lock_acquire(&eflags);
+    for (frame = start_frame; frame < end_frame; frame++) {
+        if (!frame_is_usable(frame) || frame_is_reserved(frame)) continue;
+        if (bitmap_test_raw(frame)) {
+            clear_bit(frame);
+            freed++;
+        }
+    }
+    cold_low_start_frame = start_frame;
+    cold_low_end_frame = end_frame;
+    if (freed != 0) {
+        __sync_fetch_and_add(&pfa_cached_free, freed);
+        kernel_reclaimed_pages += freed;
     }
     pfa_lock_release(eflags);
     return freed;
@@ -520,7 +560,9 @@ void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {
     for (i = 0; i < num_frames; i++) {
         idx = start_idx + i;
         if (idx >= total_pages_managed) break;
-        if (idx < kernel_reserved_frames) continue;
+        if (idx < kernel_reserved_frames &&
+            (idx < cold_low_start_frame || idx >= cold_low_end_frame))
+            continue;
         if (!frame_is_usable(idx) || frame_is_reserved(idx)) continue;
         if (test_bit(idx)) {
             clear_bit(idx);
