@@ -157,6 +157,8 @@ static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
 static volatile int memory_pressure_pending = MEMORY_PRESSURE_BOOT_RECLAIM;
 static uint64_t memory_pressure_last_tick;
+static uint64_t memory_report_current_exec_reclaimed;
+static uint64_t memory_report_partial_exec_reclaimed;
 
 _Static_assert(KSTACK_RUNTIME_SIZE == 0x1E00, "idle stack layout");
 _Static_assert(sizeof(registers_t) <= KSTACK_IDLE_RESERVE, "idle frame size");
@@ -2465,8 +2467,30 @@ static int task_pml4_has_multiple_users(task_t *owner) {
     return 0;
 }
 
+static int task_file_page_has_overlap(task_t *task, int map_index,
+                                      uint64_t address) {
+    task_file_map_t *area;
+    uint64_t area_end;
+    uint64_t page_end;
+    int i;
+
+    if (!task) return 1;
+    page_end = address + PAGE_SIZE;
+    if (page_end < address) return 1;
+    for (i = 0; i < task->file_map_count; i++) {
+        if (i == map_index) continue;
+        area = &task->file_maps[i];
+        area_end = area->vaddr + area->memsz;
+        if (area_end < area->vaddr) return 1;
+        if (area->vaddr < page_end && area_end > address) return 1;
+    }
+    return 0;
+}
+
 static uint64_t task_reclaim_file_exec_pages(task_t *task,
-                                             uint64_t max_pages) {
+                                             uint64_t max_pages,
+                                             uint64_t protected_address,
+                                             uint64_t *partial_pages) {
     task_file_map_t *area;
     uint64_t address;
     uint64_t area_end;
@@ -2475,11 +2499,13 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
     uint64_t flags;
     uint64_t reclaimed;
     uint64_t area_reclaimed;
+    uint64_t partial_reclaimed;
     int i;
 
     if (!task || !task->is_user || !task->pml4_phys || max_pages == 0)
         return 0;
     reclaimed = 0;
+    partial_reclaimed = 0;
     for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
         area = &task->file_maps[i];
         if (!area->node ||
@@ -2499,8 +2525,11 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
         for (address = area->vaddr;
              address < area_end && reclaimed < max_pages;
              address += PAGE_SIZE) {
-            if (address > file_end || file_end - address < PAGE_SIZE)
-                continue;
+            if (address >= file_end) continue;
+            if (file_end - address < PAGE_SIZE &&
+                task_file_page_has_overlap(task, i, address)) continue;
+            if (protected_address >= address &&
+                protected_address < address + PAGE_SIZE) continue;
             flags = vmm_get_flags_in_pml4(task->pml4_phys, address);
             if (!(flags & VMM_PTE_PRESENT) ||
                 (flags & (VMM_PTE_WRITE | VMM_PTE_NX | VMM_PTE_COW |
@@ -2511,6 +2540,7 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
             task_untrack_user_page(task, removed);
             exec_page_cache_on_page_release(removed);
             pfa_cow_release64(removed);
+            if (file_end - address < PAGE_SIZE) partial_reclaimed++;
             reclaimed++;
             area_reclaimed++;
         }
@@ -2518,10 +2548,12 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
             vmm_prune_user_range(task->pml4_phys, area->vaddr,
                                  area->memsz);
     }
+    if (partial_pages) *partial_pages += partial_reclaimed;
     return reclaimed;
 }
 
-static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages) {
+static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages,
+                                               uint64_t *partial_pages) {
     task_t *task;
     uint64_t reclaimed;
     uint64_t remaining;
@@ -2541,9 +2573,35 @@ static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages) {
             !task_pml4_has_multiple_users(task) &&
             !task_pml4_is_current_on_any_cpu(task->pml4_phys)) {
             remaining = max_pages - reclaimed;
-            reclaimed += task_reclaim_file_exec_pages(task, remaining);
+            reclaimed += task_reclaim_file_exec_pages(task, remaining, 0,
+                                                       partial_pages);
         }
         task = task->all_next;
+    }
+    unlock_scheduler();
+    return reclaimed;
+}
+
+static uint64_t task_reclaim_current_file_exec(uint64_t max_pages,
+                                               uint64_t *partial_pages) {
+    task_t *task;
+    registers_t *frame;
+    uint64_t protected_address;
+    uint64_t reclaimed;
+
+    if (max_pages == 0) return 0;
+    reclaimed = 0;
+    lock_scheduler();
+    task = current_task;
+    frame = task ? task->syscall_frame : NULL;
+    if (task && frame && task->is_user && !task->resources_released &&
+        task->exec_completed == 0 && task->pml4_phys &&
+        !task_pml4_has_multiple_users(task)) {
+        protected_address = frame->rip;
+        if (protected_address >= 0x1000 && protected_address < KERNEL_VMA) {
+            reclaimed = task_reclaim_file_exec_pages(
+                task, max_pages, protected_address, partial_pages);
+        }
     }
     unlock_scheduler();
     return reclaimed;
@@ -2869,10 +2927,22 @@ void task_reclaim_exited_now(void) {
 
 void task_memory_collect_for_report(void) {
     task_reclaim_exited_now();
-    task_reclaim_blocked_file_exec(32);
+    memory_report_partial_exec_reclaimed = 0;
+    task_reclaim_blocked_file_exec(32,
+                                   &memory_report_partial_exec_reclaimed);
+    memory_report_current_exec_reclaimed = task_reclaim_current_file_exec(
+        128, &memory_report_partial_exec_reclaimed);
     task_reclaim_inactive_zero_anon(128);
     klog_reclaim_unused();
     heap_reclaim_unused();
+}
+
+uint64_t task_memory_report_current_exec_reclaimed(void) {
+    return memory_report_current_exec_reclaimed;
+}
+
+uint64_t task_memory_report_partial_exec_reclaimed(void) {
+    return memory_report_partial_exec_reclaimed;
 }
 
 void task_memory_pressure_request(void) {
@@ -2893,7 +2963,8 @@ static void task_memory_pressure_reclaim(void) {
     kstack_reclaim_unused();
     heap_reclaim_unused();
     pfa_ref_gc();
-    task_reclaim_blocked_file_exec(64);
+    task_reclaim_blocked_file_exec(64, NULL);
+    task_reclaim_current_file_exec(64, NULL);
     reclaimed = task_reclaim_inactive_zero_anon(128);
     if (reclaimed < 128)
         task_reclaim_zero_anon(current_task, 128 - reclaimed);

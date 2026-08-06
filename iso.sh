@@ -33,11 +33,6 @@ progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Preparing ISO directory"
 rm -f isodir/boot/initrd.img isodir/boot/lebirun.kernel isodir/boot/rootfs.squashfs
 mkdir -p isodir/boot/grub
 
-if [ -f root/boot/grub/fonts/ascii.pf2 ]; then
-    mkdir -p isodir/boot/grub/fonts
-    cp root/boot/grub/fonts/ascii.pf2 isodir/boot/grub/fonts/ascii.pf2
-fi
-
 if [ -f initrd.img ]; then
     cp initrd.img isodir/boot/initrd.img
 fi
@@ -73,14 +68,6 @@ CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mWriting GRUB config...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Writing GRUB config"
 cat > isodir/boot/grub/grub.cfg << EOF
-if loadfont /boot/grub/fonts/ascii.pf2; then
-	set gfxmode=1024x768x32,auto
-	set gfxpayload=keep
-	insmod all_video
-	insmod gfxterm
-	terminal_output gfxterm
-fi
-
 set timeout=10
 set default=0
 
@@ -93,7 +80,7 @@ EOF
 
 GRUB_DIRECTORY="${GRUB_DIRECTORY:-/usr/lib/grub/i386-pc}"
 GRUB_ISO_DIRECTORY="$(mktemp -d)"
-GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660 font video video_fb all_video vbe gfxterm"
+GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
 trap 'rm -rf -- "$GRUB_ISO_DIRECTORY"' EXIT HUP INT TERM
 cp -a "$GRUB_DIRECTORY/." "$GRUB_ISO_DIRECTORY/"
 printf '%s\n' part_msdos > "$GRUB_ISO_DIRECTORY/partmap.lst"

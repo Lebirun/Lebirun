@@ -206,10 +206,7 @@ if [ -d "initrd" ]; then
 fi
 
 if command -v grub-mkimage >/dev/null 2>&1; then
-  mkdir -p root/boot/grub/i386-pc root/boot/grub/fonts
-  if [ -f /usr/share/grub/ascii.pf2 ]; then
-    cp /usr/share/grub/ascii.pf2 root/boot/grub/fonts/ascii.pf2
-  fi
+  mkdir -p root/boot/grub/i386-pc
   GRUB_EARLY_CFG=$(mktemp)
   GRUB_CORE_TMP=root/boot/grub/i386-pc/core.img.tmp
   cat > "$GRUB_EARLY_CFG" <<'GRUBEOF'
@@ -220,7 +217,7 @@ normal
 GRUBEOF
   if grub-mkimage -O i386-pc -o "$GRUB_CORE_TMP" \
     -c "$GRUB_EARLY_CFG" \
-    -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile font video video_fb all_video vbe gfxterm; then
+    -p '(hd0,msdos1)/boot/grub' biosdisk part_msdos ext2 multiboot2 normal configfile; then
     mv "$GRUB_CORE_TMP" root/boot/grub/i386-pc/core.img
   else
     rm -f "$GRUB_CORE_TMP"

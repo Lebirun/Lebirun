@@ -294,6 +294,8 @@ void exec_page_cache_reclaim(uint64_t target_pages);
 uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);
 void task_memory_collect_for_report(void);
+uint64_t task_memory_report_current_exec_reclaimed(void);
+uint64_t task_memory_report_partial_exec_reclaimed(void);
 void task_memory_pressure_request(void);
 void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);

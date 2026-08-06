@@ -149,7 +149,7 @@ void kfree_aligned(void *ptr);
 void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
-void heap_profile(char *out, uint64_t out_size);
+uint64_t heap_profile_read(uint64_t offset, uint64_t size, uint8_t *out);
 uint64_t heap_free_space(void);
 int is_early_heap_ptr(void *ptr);
 void heap_reclaim_unused(void);

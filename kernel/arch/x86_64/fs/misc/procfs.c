@@ -53,7 +53,13 @@ static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
 static spinlock_t proc_mem_report_lock = {0};
 
-#define PROC_MEMDETAIL_BUF_SIZE 12288
+typedef struct proc_stream {
+    uint64_t offset;
+    uint64_t size;
+    uint64_t position;
+    uint64_t copied;
+    uint8_t *buffer;
+} proc_stream_t;
 
 static dirent_t *proc_task_readdir(vfs_node_t *node, uint64_t index);
 static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name);
@@ -163,6 +169,42 @@ static void proc_collect_memory_report(void) {
     slab_reclaim_empty();
     heap_reclaim_unused();
     pfa_ref_gc();
+}
+
+static void proc_stream_append(proc_stream_t *stream, const char *text,
+                               uint64_t length) {
+    uint64_t request_end;
+    uint64_t text_start;
+    uint64_t text_end;
+    uint64_t copy_start;
+    uint64_t copy_end;
+    uint64_t copy_length;
+
+    if (!stream || !text) return;
+    text_start = stream->position;
+    text_end = text_start + length;
+    request_end = stream->offset + stream->size;
+    if (request_end < stream->offset) request_end = UINT64_MAX;
+    copy_start = text_start > stream->offset ? text_start : stream->offset;
+    copy_end = text_end < request_end ? text_end : request_end;
+    if (copy_end > copy_start && stream->buffer) {
+        copy_length = copy_end - copy_start;
+        memcpy(stream->buffer + stream->copied,
+               text + copy_start - text_start, copy_length);
+        stream->copied += copy_length;
+    }
+    stream->position = text_end;
+}
+
+static void proc_stream_value(proc_stream_t *stream, const char *format,
+                              uint64_t value) {
+    char line[64];
+    int length;
+
+    length = snprintf(line, sizeof(line), format, value);
+    if (length <= 0) return;
+    if ((uint64_t)length >= sizeof(line)) length = sizeof(line) - 1;
+    proc_stream_append(stream, line, (uint64_t)length);
 }
 
 static void proc_format_octal4(char *output, uint64_t value) {
@@ -1077,9 +1119,7 @@ static uint64_t proc_vmstat_read(vfs_node_t *node, uint64_t offset, uint64_t siz
 }
 
 static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char *buf;
-    int len;
-    uint64_t remaining;
+    proc_stream_t stream;
     uint64_t pfa_used_kb;
     uint64_t kern_kb;
     uint64_t bitmap_kb;
@@ -1123,7 +1163,12 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t console_bytes;
     uint64_t kstack_slots;
     uint64_t kstack_pages;
-    int add;
+    uint64_t current_exec_reclaimed;
+    uint64_t partial_exec_reclaimed;
+    uint64_t profile_start;
+    uint64_t profile_offset;
+    uint64_t profile_size;
+    uint64_t request_end;
     task_mem_stats_t task_stats;
 
     (void)node;
@@ -1183,238 +1228,137 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     dead_elf_pages = task_stats.dead_file_pages;
     active_elf_pages = task_stats.active_file_pages;
     current_elf_pages = task_stats.current_file_pages;
+    current_exec_reclaimed = task_memory_report_current_exec_reclaimed();
+    partial_exec_reclaimed = task_memory_report_partial_exec_reclaimed();
     spin_unlock(&proc_mem_report_lock);
 
-    buf = (char *)kmalloc(PROC_MEMDETAIL_BUF_SIZE);
-    if (!buf) return 0;
+    stream.offset = offset;
+    stream.size = size;
+    stream.position = 0;
+    stream.copied = 0;
+    stream.buffer = buffer;
 
-    len = snprintf(buf, PROC_MEMDETAIL_BUF_SIZE,
-        "MemAllUsedKB:       %8lu\n"
-        "PFANetAllocatedKB:  %8lu\n"
-        "KernelImageKB:      %8lu\n"
-        "KernelReclaimedPages:%7lu\n"
-        "KernelReclaimedKB:  %8lu\n"
-        "BitmapKB:           %8lu\n"
-        "DemandBitmapBytes:  %8lu\n"
-        "DemandBitmapExtPages:%6lu\n"
-        "DemandBitmapExtKB:  %8lu\n"
-        "EarlyHeapTotalKB:   %8lu\n"
-        "EarlyHeapUsedKB:    %8lu\n"
-        "HeapCommitPages:    %8lu\n"
-        "HeapCommitKB:       %8lu\n"
-        "HeapReservePages:   %8lu\n"
-        "HeapAllocatedBytes: %8lu\n"
-        "HeapVirtualSpanBytes:%7lu\n"
-        "TaskCount:          %8lu\n"
-        "TaskStructBytes:    %8lu\n"
-        "TaskFPUBytes:       %8lu\n"
-        "TaskFDBytes:        %8lu\n"
-        "TaskPageArrayBytes: %8lu\n"
-        "TaskFileMapBytes:   %8lu\n"
-        "KernelStackSlots:   %8lu\n"
-        "KernelStackPages:   %8lu\n"
-        "KernelStackKB:      %8lu\n"
-        "SlabPages:          %8lu\n"
-        "SlabKB:             %8lu\n"
-        "E1000Pages:         %8lu\n"
-        "E1000KB:            %8lu\n"
-        "AHCIPages:          %8lu\n"
-        "AHCIKB:             %8lu\n"
-        "PT_VMMPTPages:     %8lu\n"
-        "PT_VMMPTKB:        %8lu\n"
-        "PT_HeapPTPages:    %8lu\n"
-        "PT_HeapPTKB:       %8lu\n"
-        "UserELFPages:       %8lu\n"
-        "UserELFKB:          %8lu\n"
-        "UserHeapPages:      %8lu\n"
-        "UserHeapKB:         %8lu\n"
-        "UserMmapPages:      %8lu\n"
-        "UserMmapKB:         %8lu\n"
-        "UserStackPages:     %8lu\n"
-        "UserStackKB:        %8lu\n"
-        "UserPDPages:        %8lu\n"
-        "UserPDKB:           %8lu\n"
-        "UserPTPages:        %8lu\n"
-        "UserPTKB:           %8lu\n"
-        "ActiveUserPages:    %8lu\n"
-        "ActiveUserKB:       %8lu\n"
-        "CurrentUserPages:   %8lu\n"
-        "CurrentUserKB:      %8lu\n"
-        "CurrentUserPTPages: %8lu\n"
-        "CurrentUserPTKB:    %8lu\n"
-        "CurrentELFPages:    %8lu\n"
-        "CurrentHeapPages:   %8lu\n"
-        "CurrentHeapKB:      %8lu\n"
-        "CurrentMmapPages:   %8lu\n"
-        "CurrentMmapKB:      %8lu\n"
-        "CurrentStackPages:  %8lu\n"
-        "CurrentStackKB:     %8lu\n"
-        "DeadUserPages:      %8lu\n"
-        "DeadUserKB:         %8lu\n"
-        "DeadELFPages:       %8lu\n"
-        "DeadELFKB:          %8lu\n"
-        "DeadHeapPages:      %8lu\n"
-        "DeadHeapKB:         %8lu\n"
-        "DeadMmapPages:      %8lu\n"
-        "DeadMmapKB:         %8lu\n"
-        "DeadStackPages:     %8lu\n"
-        "DeadStackKB:        %8lu\n"
-        "DeadPDPages:        %8lu\n"
-        "DeadPDKB:           %8lu\n"
-        "DeadUserPTPages:    %8lu\n"
-        "DeadUserPTKB:       %8lu\n"
-        "DeadExecOldPages:   %8lu\n"
-        "DeadExecOldKB:      %8lu\n"
-        "ExecCleanupEntries: %8lu\n"
-        "ExecCleanupPages:   %8lu\n"
-        "ExecCleanupKB:      %8lu\n"
-        "ExecCachePages:     %8lu\n"
-        "ExecCacheKB:        %8lu\n"
-        "ExecReclaimPages:   %8lu\n"
-        "ExecReclaimKB:      %8lu\n"
-        "ExecNonReclaimPages:%8lu\n"
-        "ExecNonReclaimKB:   %8lu\n"
-        "OverlayCacheNodes:  %8lu\n"
-        "OverlayCacheCap:    %8lu\n"
-        "OverlayCacheBytes:  %8lu\n"
-        "SquashCacheNodes:   %8lu\n"
-        "SquashCacheCap:     %8lu\n"
-        "SquashCacheBytes:   %8lu\n"
-        "SquashCacheData:    %8lu\n"
-        "SquashModulePages:  %8lu\n"
-        "SquashModuleKB:     %8lu\n"
-        "SquashDecompFail:   %8lu\n"
-        "SquashDecompOver:   %8lu\n"
-        "SquashDecompPadded: %8lu\n"
-        "ConsoleBuffers:     %8lu\n"
-        "ConsoleBytes:       %8lu\n"
-        "PFARefActiveNodes:  %8lu\n"
-        "PFARefFreeNodes:    %8lu\n",
-        mem_all_used_kb,
-        pfa_used_kb,
-        kern_kb,
-        kernel_reclaimed_pages,
-        kernel_reclaimed_pages * 4,
-        bitmap_kb,
-        demand_bitmap_bytes,
-        demand_bitmap_extension_pages,
-        demand_bitmap_extension_pages * 4,
-        early_heap_total_kb,
-        early_heap_used_kb,
-        heap_committed,
-        heap_committed * 4,
-        heap_reserved,
-        heap_used,
-        heap_total,
-        task_stats.task_count,
-        task_stats.task_struct_bytes,
-        task_stats.task_fpu_bytes,
-        task_stats.task_fd_bytes,
-        task_stats.task_page_array_bytes,
-        task_stats.task_file_map_bytes,
-        kstack_slots,
-        kstack_pages,
-        kstack_pages * 4,
-        slab_pages,
-        slab_pages * 4,
-        e1000_pages,
-        e1000_pages * 4,
-        ahci_pages,
-        ahci_pages * 4,
-        pt_pt_pages,
-        pt_pt_pages * 4,
-        pt_heap_pt,
-        pt_heap_pt * 4,
-        active_elf_pages,
-        active_elf_pages * 4,
-        task_stats.active_heap_pages,
-        task_stats.active_heap_pages * 4,
-        task_stats.active_mmap_pages,
-        task_stats.active_mmap_pages * 4,
-        user_stack_pages,
-        user_stack_pages * 4,
-        user_pd_pages,
-        user_pd_pages * 4,
-        task_stats.active_user_pt_pages,
-        task_stats.active_user_pt_pages * 4,
-        task_stats.active_user_pages,
-        task_stats.active_user_pages * 4,
-        task_stats.current_user_pages,
-        task_stats.current_user_pages * 4,
-        task_stats.current_user_pt_pages,
-        task_stats.current_user_pt_pages * 4,
-        current_elf_pages,
-        task_stats.current_heap_pages,
-        task_stats.current_heap_pages * 4,
-        task_stats.current_mmap_pages,
-        task_stats.current_mmap_pages * 4,
-        task_stats.current_stack_pages,
-        task_stats.current_stack_pages * 4,
-        task_stats.dead_user_pages,
-        task_stats.dead_user_pages * 4,
-        dead_elf_pages,
-        dead_elf_pages * 4,
-        task_stats.dead_heap_pages,
-        task_stats.dead_heap_pages * 4,
-        task_stats.dead_mmap_pages,
-        task_stats.dead_mmap_pages * 4,
-        task_stats.dead_stack_pages,
-        task_stats.dead_stack_pages * 4,
-        task_stats.dead_pd_pages,
-        task_stats.dead_pd_pages * 4,
-        task_stats.dead_user_pt_pages,
-        task_stats.dead_user_pt_pages * 4,
-        task_stats.dead_exec_old_pages,
-        task_stats.dead_exec_old_pages * 4,
-        task_stats.exec_cleanup_entries,
-        task_stats.exec_cleanup_user_pages,
-        task_stats.exec_cleanup_user_pages * 4,
-        exec_cache_pages,
-        exec_cache_pages * 4,
-        exec_reclaim_pages,
-        exec_reclaim_pages * 4,
-        task_stats.exec_nonreclaim_pages,
-        task_stats.exec_nonreclaim_pages * 4,
-        overlay_nodes,
-        overlay_capacity,
-        overlay_bytes,
-        sqfs_nodes,
-        sqfs_capacity,
-        sqfs_bytes,
-        sqfs_data_bytes,
-        sqfs_module_pages,
-        sqfs_module_pages * 4,
-        sqfs_decomp_failures,
-        sqfs_decomp_oversize,
-        sqfs_decomp_padded,
-        console_buffers,
-        console_bytes,
-        ref_active_nodes,
-        ref_free_nodes);
+#define MEMDETAIL_VALUE(format, value) \
+    proc_stream_value(&stream, (format), (uint64_t)(value))
 
-    if (len < 0) len = 0;
-    if (len > PROC_MEMDETAIL_BUF_SIZE) len = PROC_MEMDETAIL_BUF_SIZE;
-    if (len < PROC_MEMDETAIL_BUF_SIZE) {
-        add = snprintf(buf + len, PROC_MEMDETAIL_BUF_SIZE - len, "HeapProfile:\n");
-        if (add > 0) {
-            len += add;
-            if (len > PROC_MEMDETAIL_BUF_SIZE) len = PROC_MEMDETAIL_BUF_SIZE;
-        }
+    MEMDETAIL_VALUE("MemAllUsedKB:       %8lu\n", mem_all_used_kb);
+    MEMDETAIL_VALUE("PFANetAllocatedKB:  %8lu\n", pfa_used_kb);
+    MEMDETAIL_VALUE("KernelImageKB:      %8lu\n", kern_kb);
+    MEMDETAIL_VALUE("KernelReclaimedPages:%7lu\n", kernel_reclaimed_pages);
+    MEMDETAIL_VALUE("KernelReclaimedKB:  %8lu\n", kernel_reclaimed_pages * 4);
+    MEMDETAIL_VALUE("BitmapKB:           %8lu\n", bitmap_kb);
+    MEMDETAIL_VALUE("DemandBitmapBytes:  %8lu\n", demand_bitmap_bytes);
+    MEMDETAIL_VALUE("DemandBitmapExtPages:%6lu\n", demand_bitmap_extension_pages);
+    MEMDETAIL_VALUE("DemandBitmapExtKB:  %8lu\n", demand_bitmap_extension_pages * 4);
+    MEMDETAIL_VALUE("EarlyHeapTotalKB:   %8lu\n", early_heap_total_kb);
+    MEMDETAIL_VALUE("EarlyHeapUsedKB:    %8lu\n", early_heap_used_kb);
+    MEMDETAIL_VALUE("HeapCommitPages:    %8lu\n", heap_committed);
+    MEMDETAIL_VALUE("HeapCommitKB:       %8lu\n", heap_committed * 4);
+    MEMDETAIL_VALUE("HeapReservePages:   %8lu\n", heap_reserved);
+    MEMDETAIL_VALUE("HeapAllocatedBytes: %8lu\n", heap_used);
+    MEMDETAIL_VALUE("HeapVirtualSpanBytes:%7lu\n", heap_total);
+    MEMDETAIL_VALUE("TaskCount:          %8lu\n", task_stats.task_count);
+    MEMDETAIL_VALUE("TaskStructBytes:    %8lu\n", task_stats.task_struct_bytes);
+    MEMDETAIL_VALUE("TaskFPUBytes:       %8lu\n", task_stats.task_fpu_bytes);
+    MEMDETAIL_VALUE("TaskFDBytes:        %8lu\n", task_stats.task_fd_bytes);
+    MEMDETAIL_VALUE("TaskPageArrayBytes: %8lu\n", task_stats.task_page_array_bytes);
+    MEMDETAIL_VALUE("TaskFileMapBytes:   %8lu\n", task_stats.task_file_map_bytes);
+    MEMDETAIL_VALUE("KernelStackSlots:   %8lu\n", kstack_slots);
+    MEMDETAIL_VALUE("KernelStackPages:   %8lu\n", kstack_pages);
+    MEMDETAIL_VALUE("KernelStackKB:      %8lu\n", kstack_pages * 4);
+    MEMDETAIL_VALUE("SlabPages:          %8lu\n", slab_pages);
+    MEMDETAIL_VALUE("SlabKB:             %8lu\n", slab_pages * 4);
+    MEMDETAIL_VALUE("E1000Pages:         %8lu\n", e1000_pages);
+    MEMDETAIL_VALUE("E1000KB:            %8lu\n", e1000_pages * 4);
+    MEMDETAIL_VALUE("AHCIPages:          %8lu\n", ahci_pages);
+    MEMDETAIL_VALUE("AHCIKB:             %8lu\n", ahci_pages * 4);
+    MEMDETAIL_VALUE("PT_VMMPTPages:     %8lu\n", pt_pt_pages);
+    MEMDETAIL_VALUE("PT_VMMPTKB:        %8lu\n", pt_pt_pages * 4);
+    MEMDETAIL_VALUE("PT_HeapPTPages:    %8lu\n", pt_heap_pt);
+    MEMDETAIL_VALUE("PT_HeapPTKB:       %8lu\n", pt_heap_pt * 4);
+    MEMDETAIL_VALUE("UserELFPages:       %8lu\n", active_elf_pages);
+    MEMDETAIL_VALUE("UserELFKB:          %8lu\n", active_elf_pages * 4);
+    MEMDETAIL_VALUE("UserHeapPages:      %8lu\n", task_stats.active_heap_pages);
+    MEMDETAIL_VALUE("UserHeapKB:         %8lu\n", task_stats.active_heap_pages * 4);
+    MEMDETAIL_VALUE("UserMmapPages:      %8lu\n", task_stats.active_mmap_pages);
+    MEMDETAIL_VALUE("UserMmapKB:         %8lu\n", task_stats.active_mmap_pages * 4);
+    MEMDETAIL_VALUE("UserStackPages:     %8lu\n", user_stack_pages);
+    MEMDETAIL_VALUE("UserStackKB:        %8lu\n", user_stack_pages * 4);
+    MEMDETAIL_VALUE("UserPDPages:        %8lu\n", user_pd_pages);
+    MEMDETAIL_VALUE("UserPDKB:           %8lu\n", user_pd_pages * 4);
+    MEMDETAIL_VALUE("UserPTPages:        %8lu\n", task_stats.active_user_pt_pages);
+    MEMDETAIL_VALUE("UserPTKB:           %8lu\n", task_stats.active_user_pt_pages * 4);
+    MEMDETAIL_VALUE("ActiveUserPages:    %8lu\n", task_stats.active_user_pages);
+    MEMDETAIL_VALUE("ActiveUserKB:       %8lu\n", task_stats.active_user_pages * 4);
+    MEMDETAIL_VALUE("CurrentUserPages:   %8lu\n", task_stats.current_user_pages);
+    MEMDETAIL_VALUE("CurrentUserKB:      %8lu\n", task_stats.current_user_pages * 4);
+    MEMDETAIL_VALUE("CurrentUserPTPages: %8lu\n", task_stats.current_user_pt_pages);
+    MEMDETAIL_VALUE("CurrentUserPTKB:    %8lu\n", task_stats.current_user_pt_pages * 4);
+    MEMDETAIL_VALUE("CurrentELFPages:    %8lu\n", current_elf_pages);
+    MEMDETAIL_VALUE("CurrentHeapPages:   %8lu\n", task_stats.current_heap_pages);
+    MEMDETAIL_VALUE("CurrentHeapKB:      %8lu\n", task_stats.current_heap_pages * 4);
+    MEMDETAIL_VALUE("CurrentMmapPages:   %8lu\n", task_stats.current_mmap_pages);
+    MEMDETAIL_VALUE("CurrentMmapKB:      %8lu\n", task_stats.current_mmap_pages * 4);
+    MEMDETAIL_VALUE("CurrentStackPages:  %8lu\n", task_stats.current_stack_pages);
+    MEMDETAIL_VALUE("CurrentStackKB:     %8lu\n", task_stats.current_stack_pages * 4);
+    MEMDETAIL_VALUE("DeadUserPages:      %8lu\n", task_stats.dead_user_pages);
+    MEMDETAIL_VALUE("DeadUserKB:         %8lu\n", task_stats.dead_user_pages * 4);
+    MEMDETAIL_VALUE("DeadELFPages:       %8lu\n", dead_elf_pages);
+    MEMDETAIL_VALUE("DeadELFKB:          %8lu\n", dead_elf_pages * 4);
+    MEMDETAIL_VALUE("DeadHeapPages:      %8lu\n", task_stats.dead_heap_pages);
+    MEMDETAIL_VALUE("DeadHeapKB:         %8lu\n", task_stats.dead_heap_pages * 4);
+    MEMDETAIL_VALUE("DeadMmapPages:      %8lu\n", task_stats.dead_mmap_pages);
+    MEMDETAIL_VALUE("DeadMmapKB:         %8lu\n", task_stats.dead_mmap_pages * 4);
+    MEMDETAIL_VALUE("DeadStackPages:     %8lu\n", task_stats.dead_stack_pages);
+    MEMDETAIL_VALUE("DeadStackKB:        %8lu\n", task_stats.dead_stack_pages * 4);
+    MEMDETAIL_VALUE("DeadPDPages:        %8lu\n", task_stats.dead_pd_pages);
+    MEMDETAIL_VALUE("DeadPDKB:           %8lu\n", task_stats.dead_pd_pages * 4);
+    MEMDETAIL_VALUE("DeadUserPTPages:    %8lu\n", task_stats.dead_user_pt_pages);
+    MEMDETAIL_VALUE("DeadUserPTKB:       %8lu\n", task_stats.dead_user_pt_pages * 4);
+    MEMDETAIL_VALUE("DeadExecOldPages:   %8lu\n", task_stats.dead_exec_old_pages);
+    MEMDETAIL_VALUE("DeadExecOldKB:      %8lu\n", task_stats.dead_exec_old_pages * 4);
+    MEMDETAIL_VALUE("ExecCleanupEntries: %8lu\n", task_stats.exec_cleanup_entries);
+    MEMDETAIL_VALUE("ExecCleanupPages:   %8lu\n", task_stats.exec_cleanup_user_pages);
+    MEMDETAIL_VALUE("ExecCleanupKB:      %8lu\n", task_stats.exec_cleanup_user_pages * 4);
+    MEMDETAIL_VALUE("ExecCachePages:     %8lu\n", exec_cache_pages);
+    MEMDETAIL_VALUE("ExecCacheKB:        %8lu\n", exec_cache_pages * 4);
+    MEMDETAIL_VALUE("ExecReclaimPages:   %8lu\n", exec_reclaim_pages);
+    MEMDETAIL_VALUE("ExecReclaimKB:      %8lu\n", exec_reclaim_pages * 4);
+    MEMDETAIL_VALUE("ExecNonReclaimPages:%8lu\n", task_stats.exec_nonreclaim_pages);
+    MEMDETAIL_VALUE("ExecNonReclaimKB:   %8lu\n", task_stats.exec_nonreclaim_pages * 4);
+    MEMDETAIL_VALUE("CurrentExecReclaimed:%7lu\n", current_exec_reclaimed);
+    MEMDETAIL_VALUE("PartialExecReclaimed:%7lu\n", partial_exec_reclaimed);
+    MEMDETAIL_VALUE("OverlayCacheNodes:  %8lu\n", overlay_nodes);
+    MEMDETAIL_VALUE("OverlayCacheCap:    %8lu\n", overlay_capacity);
+    MEMDETAIL_VALUE("OverlayCacheBytes:  %8lu\n", overlay_bytes);
+    MEMDETAIL_VALUE("SquashCacheNodes:   %8lu\n", sqfs_nodes);
+    MEMDETAIL_VALUE("SquashCacheCap:     %8lu\n", sqfs_capacity);
+    MEMDETAIL_VALUE("SquashCacheBytes:   %8lu\n", sqfs_bytes);
+    MEMDETAIL_VALUE("SquashCacheData:    %8lu\n", sqfs_data_bytes);
+    MEMDETAIL_VALUE("SquashModulePages:  %8lu\n", sqfs_module_pages);
+    MEMDETAIL_VALUE("SquashModuleKB:     %8lu\n", sqfs_module_pages * 4);
+    MEMDETAIL_VALUE("SquashDecompFail:   %8lu\n", sqfs_decomp_failures);
+    MEMDETAIL_VALUE("SquashDecompOver:   %8lu\n", sqfs_decomp_oversize);
+    MEMDETAIL_VALUE("SquashDecompPadded: %8lu\n", sqfs_decomp_padded);
+    MEMDETAIL_VALUE("ConsoleBuffers:     %8lu\n", console_buffers);
+    MEMDETAIL_VALUE("ConsoleBytes:       %8lu\n", console_bytes);
+    MEMDETAIL_VALUE("PFARefActiveNodes:  %8lu\n", ref_active_nodes);
+    MEMDETAIL_VALUE("PFARefFreeNodes:    %8lu\n", ref_free_nodes);
+
+#undef MEMDETAIL_VALUE
+
+    proc_stream_append(&stream, "HeapProfile:\n", 13);
+    profile_start = stream.position;
+    request_end = offset + size;
+    if (request_end < offset) request_end = UINT64_MAX;
+    if (stream.copied < size && request_end > profile_start && buffer) {
+        profile_offset = offset > profile_start ? offset - profile_start : 0;
+        profile_size = size - stream.copied;
+        stream.copied += heap_profile_read(profile_offset, profile_size,
+                                           buffer + stream.copied);
     }
-    if (len < PROC_MEMDETAIL_BUF_SIZE) {
-        heap_profile(buf + len, PROC_MEMDETAIL_BUF_SIZE - len);
-        len = strlen(buf);
-        if (len > PROC_MEMDETAIL_BUF_SIZE) len = PROC_MEMDETAIL_BUF_SIZE;
-    }
-    if (offset >= (uint64_t)len) {
-        kfree(buf);
-        return 0;
-    }
-    remaining = (uint64_t)len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    kfree(buf);
-    return size;
+    return stream.copied;
+
 }
 
 static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {

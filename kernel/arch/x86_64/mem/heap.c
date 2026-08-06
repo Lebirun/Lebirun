@@ -1083,7 +1083,31 @@ void heap_verify(void) {
     }
 }
 
-void heap_profile(char *out, uint64_t out_size) {
+static void heap_profile_copy(uint64_t offset, uint64_t size, uint8_t *out,
+                              uint64_t *position, uint64_t *copied,
+                              const char *text, uint64_t length) {
+    uint64_t request_end;
+    uint64_t text_start;
+    uint64_t text_end;
+    uint64_t copy_start;
+    uint64_t copy_end;
+    uint64_t copy_length;
+
+    text_start = *position;
+    text_end = text_start + length;
+    request_end = offset + size;
+    if (request_end < offset) request_end = UINT64_MAX;
+    copy_start = text_start > offset ? text_start : offset;
+    copy_end = text_end < request_end ? text_end : request_end;
+    if (copy_end > copy_start && out) {
+        copy_length = copy_end - copy_start;
+        memcpy(out + *copied, text + copy_start - text_start, copy_length);
+        *copied += copy_length;
+    }
+    *position = text_end;
+}
+
+uint64_t heap_profile_read(uint64_t offset, uint64_t size, uint8_t *out) {
     heap_block_t *block;
     uint64_t callers[32];
     uint64_t caller_bytes[32];
@@ -1094,20 +1118,22 @@ void heap_profile(char *out, uint64_t out_size) {
     uint64_t found;
     uint64_t baddr;
     uint64_t bend;
-    int written;
+    uint64_t position;
+    uint64_t copied;
+    char line[96];
     int r;
     int skip;
     uint64_t eflags;
 
-    if (!out || out_size == 0) return;
-    out[0] = '\0';
+    if (!out || size == 0) return 0;
     n = 0;
     eflags = heap_lock_acquire();
     block = (heap_block_t *)kernel_heap.start_addr;
     while (block && (uint64_t)block < kernel_heap.end_addr) {
         baddr = (uint64_t)(uintptr_t)block;
         bend = baddr + sizeof(heap_block_t) + block->size;
-        skip = ((uint64_t)(uintptr_t)out >= baddr && (uint64_t)(uintptr_t)out < bend) ? 1 : 0;
+        skip = ((uint64_t)(uintptr_t)out >= baddr &&
+                (uint64_t)(uintptr_t)out < bend) ? 1 : 0;
         if (!block->is_free && block->alloc_size > 0 && !skip) {
             found = 0;
             for (j = 0; j < n; j++) {
@@ -1129,12 +1155,17 @@ void heap_profile(char *out, uint64_t out_size) {
         block = block->next;
     }
     heap_lock_release(eflags);
-    written = 0;
+    position = 0;
+    copied = 0;
     for (i = 0; i < n; i++) {
-        r = snprintf(out + written, out_size - written,
+        r = snprintf(line, sizeof(line),
                      "caller=0x%016lX count=%lu bytes=%lu\n",
                      callers[i], caller_count[i], caller_bytes[i]);
-        if (r <= 0 || (uint64_t)(written + r) >= out_size) break;
-        written += r;
+        if (r <= 0) continue;
+        if ((uint64_t)r >= sizeof(line)) r = sizeof(line) - 1;
+        heap_profile_copy(offset, size, out, &position, &copied, line,
+                          (uint64_t)r);
+        if (copied >= size) break;
     }
+    return copied;
 }

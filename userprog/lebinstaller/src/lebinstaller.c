@@ -965,14 +965,6 @@ static int inst_write_grub_config(const char *mountpoint, const char *part_dev)
     int written;
 
     snprintf(grub_cfg, sizeof(grub_cfg),
-        "if loadfont /boot/grub/fonts/ascii.pf2; then\n"
-        "\tset gfxmode=1024x768x32,auto\n"
-        "\tset gfxpayload=keep\n"
-        "\tinsmod all_video\n"
-        "\tinsmod gfxterm\n"
-        "\tterminal_output gfxterm\n"
-        "fi\n"
-        "\n"
         "set timeout=5\n"
         "set default=0\n"
         "\n"
