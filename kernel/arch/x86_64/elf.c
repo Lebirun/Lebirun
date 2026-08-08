@@ -380,7 +380,9 @@ static int elf_read_exact(vfs_node_t *node, uint64_t offset, uint64_t size, void
     return 0;
 }
 
-int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count) {
+int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node,
+                        task_file_map_list_t *file_maps, elf_info_t *info,
+                        uint64_t **out_pages, uint64_t *out_page_count) {
     Elf64_Ehdr ehdr;
     Elf64_Phdr *phdr;
     uint64_t phdr_size;
@@ -420,6 +422,10 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     uint64_t tmp_size;
 
     if (!pd_phys || !node || !info) {
+        return -1;
+    }
+    if (file_maps &&
+        (file_maps->maps || file_maps->count || file_maps->capacity)) {
         return -1;
     }
     if (node->length < sizeof(Elf64_Ehdr)) {
@@ -480,7 +486,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
     info->phnum = ehdr.e_phnum;
     info->phdr_vaddr = 0;
 
-    if (!is_pie && current_task && current_task->is_user) {
+    if (!is_pie && file_maps) {
         for (i = 0; i < ehdr.e_phnum; i++) {
             if (phdr[i].p_type == PT_PHDR) {
                 info->phdr_vaddr = phdr[i].p_vaddr;
@@ -496,9 +502,9 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node, elf_info_t *info, ui
             if (phdr[i].p_flags & PF_W) {
                 flags |= 0x2;
             }
-            if (task_add_file_mapping(current_task, node, phdr[i].p_vaddr,
-                                      phdr[i].p_memsz, phdr[i].p_filesz,
-                                      phdr[i].p_offset, flags) != 0) {
+            if (task_file_map_list_add(file_maps, node, phdr[i].p_vaddr,
+                                       phdr[i].p_memsz, phdr[i].p_filesz,
+                                       phdr[i].p_offset, flags) != 0) {
                 kfree(phdr);
                 return -10;
             }

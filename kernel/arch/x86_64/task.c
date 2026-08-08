@@ -1735,17 +1735,33 @@ int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys) {
     return task_track_user_page(task, new_phys);
 }
 
-static int task_ensure_file_map_capacity(task_t *task, int needed) {
+static int task_ensure_file_map_list_capacity(task_file_map_list_t *list,
+                                              int needed) {
     task_file_map_t *new_maps;
 
-    if (!task || needed < 0) return -1;
-    if (needed <= task->file_map_capacity) return 0;
+    if (!list || needed < 0) return -1;
+    if (needed <= list->capacity) return 0;
     new_maps = (task_file_map_t *)krealloc(
-        task->file_maps, needed * sizeof(task_file_map_t));
+        list->maps, needed * sizeof(task_file_map_t));
     if (!new_maps) return -1;
-    task->file_maps = new_maps;
-    task->file_map_capacity = needed;
+    list->maps = new_maps;
+    list->capacity = needed;
     return 0;
+}
+
+static int task_ensure_file_map_capacity(task_t *task, int needed) {
+    task_file_map_list_t list;
+    int result;
+
+    if (!task) return -1;
+    list.maps = task->file_maps;
+    list.count = task->file_map_count;
+    list.capacity = task->file_map_capacity;
+    result = task_ensure_file_map_list_capacity(&list, needed);
+    task->file_maps = list.maps;
+    task->file_map_count = list.count;
+    task->file_map_capacity = list.capacity;
+    return result;
 }
 
 static exec_page_cache_entry_t *exec_page_cache_find_locked(vfs_node_t *node, uint64_t offset) {
@@ -2126,31 +2142,55 @@ static void task_release_dead_resources(task_t *t) {
     }
 }
 
-int task_add_file_mapping(task_t *task, vfs_node_t *node, uint64_t vaddr,
-                          uint64_t memsz, uint64_t filesz, uint64_t offset,
-                          uint64_t flags) {
+void task_file_map_list_init(task_file_map_list_t *list) {
+    if (!list) return;
+    list->maps = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+int task_file_map_list_add(task_file_map_list_t *list, vfs_node_t *node,
+                           uint64_t vaddr, uint64_t memsz, uint64_t filesz,
+                           uint64_t offset, uint64_t flags) {
     uint64_t start;
     uint64_t end;
     uint64_t delta;
     int idx;
 
-    if (!task || !node || memsz == 0) return -1;
+    if (!list || !node || memsz == 0) return -1;
     start = vaddr & ~(PAGE_SIZE - 1);
     delta = vaddr - start;
     if (offset < delta) return -1;
     end = (vaddr + memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    if (task_ensure_file_map_capacity(task, task->file_map_count + 1) != 0) return -1;
-    idx = task->file_map_count;
+    if (end < vaddr) return -1;
+    if (filesz > memsz || filesz + delta < filesz) return -1;
+    if (task_ensure_file_map_list_capacity(list, list->count + 1) != 0)
+        return -1;
+    idx = list->count;
     vfs_open(node, 0);
-    task->file_maps[idx].node = node;
-    task->file_maps[idx].vaddr = start;
-    task->file_maps[idx].memsz = end - start;
-    task->file_maps[idx].filesz = filesz + delta;
-    task->file_maps[idx].offset = offset - delta;
-    task->file_maps[idx].flags = flags;
-    task->file_maps[idx].map_flags = TASK_VMA_FILE | TASK_VMA_PRIVATE;
-    task->file_map_count++;
+    list->maps[idx].node = node;
+    list->maps[idx].vaddr = start;
+    list->maps[idx].memsz = end - start;
+    list->maps[idx].filesz = filesz + delta;
+    list->maps[idx].offset = offset - delta;
+    list->maps[idx].flags = flags;
+    list->maps[idx].map_flags = TASK_VMA_FILE | TASK_VMA_PRIVATE;
+    list->count++;
     return 0;
+}
+
+void task_file_map_list_release(task_file_map_list_t *list) {
+    if (!list) return;
+    task_release_file_mappings(list->maps, list->count);
+    task_file_map_list_init(list);
+}
+
+void task_file_map_list_adopt(task_t *task, task_file_map_list_t *list) {
+    if (!task || !list) return;
+    task->file_maps = list->maps;
+    task->file_map_count = list->count;
+    task->file_map_capacity = list->capacity;
+    task_file_map_list_init(list);
 }
 
 int task_add_vm_area(task_t *task, vfs_node_t *node, uint64_t vaddr,
@@ -4670,6 +4710,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t new_user_brk;
     uint64_t exec_euid;
     uint64_t exec_egid;
+    task_file_map_list_t new_file_maps;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
@@ -4826,8 +4867,11 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     elf_pages = NULL;
     elf_page_count = 0;
+    task_file_map_list_init(&new_file_maps);
     if (use_node) {
-        load_result = elf_load_node_to_pd(new_pd, bin_node, &elf_info, &elf_pages, &elf_page_count);
+        load_result = elf_load_node_to_pd(new_pd, bin_node, &new_file_maps,
+                                          &elf_info, &elf_pages,
+                                          &elf_page_count);
     } else {
         load_result = elf_load_to_pd(new_pd, kernel_bin, bin_size, &elf_info, &elf_pages, &elf_page_count);
     }
@@ -4839,6 +4883,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         load_errno = (load_result == -10 || load_result == -12) ?
                      KERR_ENOMEM : KERR_ENOEXEC;
         task_error("task_exec_with_args: ELF loading failed code=%d\n", load_result);
+        task_file_map_list_release(&new_file_maps);
         task_abort_file_mappings(current_task, use_node, old_file_maps,
                                  old_file_map_count, old_file_map_capacity);
         if (elf_pages) kfree(elf_pages);
@@ -4855,6 +4900,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         task_set_exec_state(current_task, 0);
         return -load_errno;
     }
+    if (use_node) task_file_map_list_adopt(current_task, &new_file_maps);
 
     if (kernel_bin) kfree(kernel_bin);
 

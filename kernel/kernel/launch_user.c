@@ -252,6 +252,7 @@ task_t* launch_user_path(const char *path, int console_id) {
     registers_t *frame;
     uint64_t i;
     uint64_t *user_pages;
+    task_file_map_list_t file_maps;
 
     if (!path || path[0] == '\0') return NULL;
 
@@ -282,11 +283,14 @@ task_t* launch_user_path(const char *path, int console_id) {
 
     elf_pages = NULL;
     elf_page_count = 0;
-    load_result = elf_load_node_to_pd(new_pd, node, &elf_info, &elf_pages, &elf_page_count);
+    task_file_map_list_init(&file_maps);
+    load_result = elf_load_node_to_pd(new_pd, node, &file_maps, &elf_info,
+                                      &elf_pages, &elf_page_count);
     vfs_release(node);
 
     if (load_result != 0) {
         printf("launch_user_path: ELF load failed (%d) for '%s'\n", load_result, path);
+        task_file_map_list_release(&file_maps);
         if (elf_pages) {
             for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
@@ -302,6 +306,7 @@ task_t* launch_user_path(const char *path, int console_id) {
         &stack_page_count);
     if (!stack_pages || stack_page_count == 0) {
         printf("launch_user_path: stack mapping failed for '%s'\n", path);
+        task_file_map_list_release(&file_maps);
         if (elf_pages) {
             for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
@@ -314,6 +319,7 @@ task_t* launch_user_path(const char *path, int console_id) {
     initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
     if (setup_initial_stack_with_elf(new_pd, path, &elf_info, &initial_useresp) != 0) {
         printf("launch_user_path: stack setup failed for '%s'\n", path);
+        task_file_map_list_release(&file_maps);
         if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
         if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
         vmm_free_pml4(new_pd);
@@ -323,29 +329,38 @@ task_t* launch_user_path(const char *path, int console_id) {
     total_pages = elf_page_count + stack_page_count;
     if (total_pages == 0 || total_pages > 65536) {
         printf("launch_user_path: suspicious total_pages=%u for '%s'\n", total_pages, path);
+        task_file_map_list_release(&file_maps);
         if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
         if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
         vmm_free_pml4(new_pd);
         return NULL;
     }
 
-    user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
-    if (!user_pages) {
-        printf("launch_user_path: page tracking allocation failed for '%s'\n", path);
-        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
-        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
-        vmm_free_pml4(new_pd);
-        return NULL;
+    if (elf_page_count == 0) {
+        user_pages = stack_pages;
+        stack_pages = NULL;
+    } else {
+        user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
+        if (!user_pages) {
+            printf("launch_user_path: page tracking allocation failed for '%s'\n", path);
+            task_file_map_list_release(&file_maps);
+            if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
+            if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+            vmm_free_pml4(new_pd);
+            return NULL;
+        }
+        if (elf_pages) memcpy(user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
+        if (stack_pages) memcpy(user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
     }
-    if (elf_pages) memcpy(user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
-    if (stack_pages) memcpy(user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
 
     t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
     if (!t) {
         printf("launch_user_path: create_task failed for '%s'\n", path);
+        task_file_map_list_release(&file_maps);
+        for (i = 0; i < total_pages; i++) pfa_free(user_pages[i]);
         kfree(user_pages);
-        if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
-        if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }
+        if (elf_pages) kfree(elf_pages);
+        if (stack_pages) kfree(stack_pages);
         vmm_free_pml4(new_pd);
         return NULL;
     }
@@ -355,6 +370,7 @@ task_t* launch_user_path(const char *path, int console_id) {
     t->user_brk_start = t->user_brk;
     t->console_id = console_id;
     t->stack_size = USER_STACK_SIZE;
+    task_file_map_list_adopt(t, &file_maps);
 
     base = path;
     for (bi = 0; path[bi]; bi++)

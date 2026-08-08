@@ -19,6 +19,11 @@ SECTIONS
     .text : {
         KEEP(*(.text._start))
         KEEP(*(.text._start_c))
+        *(.text.hot.user)
+        *(.text.read)
+        *(.text.write)
+        *(.text.getuid)
+        *(.text.strcmp)
         KEEP(*(.text.main))
         *(.text.entry)
         *(.text .text.*)

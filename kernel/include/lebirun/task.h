@@ -61,6 +61,12 @@ typedef struct {
     uint32_t map_flags;
 } task_file_map_t;
 
+typedef struct task_file_map_list {
+    task_file_map_t *maps;
+    int count;
+    int capacity;
+} task_file_map_list_t;
+
 #define TASK_VMA_PRIVATE   0x0001u
 #define TASK_VMA_SHARED    0x0002u
 #define TASK_VMA_ANONYMOUS 0x0004u
@@ -273,9 +279,12 @@ uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
 void task_free_user_memory(task_t* t);
 int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys);
-int task_add_file_mapping(task_t *task, struct vfs_node *node, uint64_t vaddr,
-                          uint64_t memsz, uint64_t filesz, uint64_t offset,
-                          uint64_t flags);
+void task_file_map_list_init(task_file_map_list_t *list);
+int task_file_map_list_add(task_file_map_list_t *list, struct vfs_node *node,
+                           uint64_t vaddr, uint64_t memsz, uint64_t filesz,
+                           uint64_t offset, uint64_t flags);
+void task_file_map_list_release(task_file_map_list_t *list);
+void task_file_map_list_adopt(task_t *task, task_file_map_list_t *list);
 int task_add_vm_area(task_t *task, struct vfs_node *node, uint64_t vaddr,
                      uint64_t size, uint64_t file_size, uint64_t offset,
                      uint64_t flags, uint32_t map_flags);

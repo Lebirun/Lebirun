@@ -46,7 +46,7 @@ static void write_tty_num(int n)
     write(1, buf, i);
 }
 
-int main(int argc, char **argv)
+int __attribute__((section(".text.hot.user"))) main(int argc, char **argv)
 {
     int console_num;
     char username[MAX_USERNAME];

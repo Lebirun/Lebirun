@@ -199,7 +199,7 @@ static void gpu_lock_release(volatile int *lock, uint64_t flags) {
     if (flags & (1ULL << 9)) __asm__ __volatile__("sti" ::: "memory");
 }
 
-static int release_failed_device(void) {
+static int KERNEL_INIT release_failed_device(void) {
     if (gpu.common) gpu.common->device_status = 0;
     if (gpu.framebuffer_phys && gpu.framebuffer_pages) {
         pfa_free_contiguous(gpu.framebuffer_phys, gpu.framebuffer_pages);
@@ -221,7 +221,8 @@ static int release_failed_device(void) {
     return -1;
 }
 
-static uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+static uint32_t KERNEL_INIT pci_read32(uint8_t bus, uint8_t slot,
+                                       uint8_t function, uint8_t offset) {
     uint32_t address;
     uint32_t value;
 
@@ -233,7 +234,9 @@ static uint32_t pci_read32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t 
     return value;
 }
 
-static void pci_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset, uint32_t value) {
+static void KERNEL_INIT pci_write32(uint8_t bus, uint8_t slot,
+                                    uint8_t function, uint8_t offset,
+                                    uint32_t value) {
     uint32_t address;
 
     address = 0x80000000U | ((uint32_t)bus << 16) |
@@ -243,14 +246,16 @@ static void pci_write32(uint8_t bus, uint8_t slot, uint8_t function, uint8_t off
     __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"((uint16_t)PCI_CONFIG_DATA));
 }
 
-static uint8_t pci_read8(uint8_t bus, uint8_t slot, uint8_t function, uint8_t offset) {
+static uint8_t KERNEL_INIT pci_read8(uint8_t bus, uint8_t slot,
+                                     uint8_t function, uint8_t offset) {
     uint32_t value;
 
     value = pci_read32(bus, slot, function, offset);
     return (uint8_t)(value >> ((offset & 3) * 8));
 }
 
-static uint64_t pci_bar_address(uint8_t bus, uint8_t slot, uint8_t function, uint8_t bar) {
+static uint64_t KERNEL_INIT pci_bar_address(uint8_t bus, uint8_t slot,
+                                            uint8_t function, uint8_t bar) {
     uint32_t low;
     uint32_t high;
     uint64_t address;
@@ -266,7 +271,9 @@ static uint64_t pci_bar_address(uint8_t bus, uint8_t slot, uint8_t function, uin
     return address;
 }
 
-static volatile uint8_t *map_capability(uint8_t bar, uint32_t offset, uint32_t length) {
+static volatile uint8_t *KERNEL_INIT map_capability(uint8_t bar,
+                                                    uint32_t offset,
+                                                    uint32_t length) {
     uint64_t bar_phys;
     uint64_t first_page;
     uint64_t last_page;
@@ -285,7 +292,7 @@ static volatile uint8_t *map_capability(uint8_t bar, uint32_t offset, uint32_t l
     return (volatile uint8_t *)(virt_base + offset);
 }
 
-static int find_device(void) {
+static int KERNEL_INIT find_device(void) {
     uint16_t bus;
     uint8_t slot;
     uint8_t function;
@@ -328,7 +335,7 @@ static int find_device(void) {
     return -1;
 }
 
-static int map_pci_capabilities(void) {
+static int KERNEL_INIT map_pci_capabilities(void) {
     uint8_t pointer;
     uint8_t id;
     uint8_t next;
@@ -379,7 +386,7 @@ static int map_physical_range(uint64_t phys, uint64_t pages) {
     return 0;
 }
 
-static int setup_queue(void) {
+static int KERNEL_INIT setup_queue(void) {
     uint64_t desc_size;
     uint64_t avail_offset;
     uint64_t used_offset;
@@ -563,7 +570,8 @@ static int release_resource(uint32_t resource_id) {
     return command_ok(&request, sizeof(request));
 }
 
-int virtio_gpu_init(uint64_t preferred_width, uint64_t preferred_height) {
+int KERNEL_INIT virtio_gpu_init(uint64_t preferred_width,
+                                uint64_t preferred_height) {
     virtio_gpu_ctrl_hdr_t request;
     virtio_gpu_resp_display_info_t display;
     uint32_t width;
@@ -614,12 +622,14 @@ int virtio_gpu_init(uint64_t preferred_width, uint64_t preferred_height) {
     if (!width || !height) return release_failed_device();
     if (create_scanout(width, height, 1) < 0) return release_failed_device();
     gpu.active = 1;
-    terminal_init_fb(gpu.framebuffer_phys, width, height, (uint64_t)width * 4, 32, 1);
+    terminal_init_fb(gpu.framebuffer_phys, width, height,
+                     (uint64_t)width * 4, 32, 1);
     if (console_is_initialized()) console_force_redraw();
     virtio_gpu_flush();
     command = pci_read32(gpu.bus, gpu.slot, gpu.function, 0x04);
-    printf("Virtio GPU: PCI %u:%u.%u, %ux%u, command=0x%04X\n",
-           gpu.bus, gpu.slot, gpu.function, width, height, command & 0xFFFF);
+    KERNEL_INIT_LOG("Virtio GPU: PCI %u:%u.%u, %ux%u, command=0x%04X\n",
+                    gpu.bus, gpu.slot, gpu.function, width, height,
+                    command & 0xFFFF);
     return 0;
 }
 

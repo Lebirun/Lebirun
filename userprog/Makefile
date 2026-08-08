@@ -41,8 +41,8 @@ LSH_BUILD := $(LSH_DIR)/build-cross
 LSH_OUTDIR := $(LSH_BUILD)/.build
 HOSTCC ?= gcc
 LSH_CONFIGURE_ARGS = --host=x86_64-elf --prefix=/usr
-LSH_CFLAGS = -Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -Oz -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic
-LSH_LDFLAGS = -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC_ABS)/user.ld
+LSH_CFLAGS = -Wall -Wextra -fno-builtin -fno-stack-protector -fno-pic -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -falign-functions=1 -falign-jumps=1 -falign-labels=1 -falign-loops=1 -Oz -nostdinc -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic
+LSH_LDFLAGS = -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--sort-section=alignment -Wl,--build-id=none -T $(LIBC_ABS)/user.ld
 
 SYSROOT_BIN = ../root/bin
 BINDIR = bin
