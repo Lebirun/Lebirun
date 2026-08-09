@@ -26,8 +26,6 @@
 #define PART_TYPE_LINUX_LVM     0x8E
 #define PART_TYPE_GPT_PROTECT   0xEE
 
-#define PARTITION_MAX           16
-
 typedef struct {
     uint8_t  status;
     uint8_t  chs_first[3];
@@ -102,13 +100,15 @@ typedef struct {
 
 typedef struct {
     int             count;
+    int             capacity;
     int             is_gpt;
-    partition_info_t parts[PARTITION_MAX];
+    partition_info_t *parts;
 } partition_table_t;
 
 int partition_scan(uint64_t port_index, partition_table_t *table);
 int partition_scan_mbr(uint64_t port_index, partition_table_t *table);
 int partition_scan_gpt(uint64_t port_index, partition_table_t *table);
+void partition_table_free(partition_table_t *table);
 const char *partition_type_name(uint8_t mbr_type);
 int partition_is_guid_zero(const uint8_t *guid);
 int partition_is_guid_equal(const uint8_t *a, const uint8_t *b);

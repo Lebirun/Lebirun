@@ -276,9 +276,6 @@ typedef struct {
     uint16_t phnum;
 } elf_info_t;
 
-#define DL_MAX_HANDLES 4096
-#define DL_MAX_SYMBOLS 65536
-
 typedef struct {
     int in_use;
     char name[64];

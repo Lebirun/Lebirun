@@ -45,9 +45,10 @@ static int vfs_grow_mounts(void) {
     int i;
     vfs_mount_t *new_mounts;
 
+    if (mounts_capacity == INT32_MAX) return -1;
     new_cap = mounts_capacity + 1;
-    if (new_cap > VFS_MAX_MOUNTS) new_cap = VFS_MAX_MOUNTS;
     if (new_cap <= mounts_capacity) return -1;
+    if ((uint64_t)new_cap > UINT64_MAX / sizeof(vfs_mount_t)) return -1;
     new_mounts = (vfs_mount_t *)krealloc(mounts, new_cap * sizeof(vfs_mount_t));
     if (!new_mounts) return -1;
     for (i = mounts_capacity; i < new_cap; i++) {
@@ -67,9 +68,10 @@ static int vfs_grow_fds(void) {
     int i;
     vfs_fd_t *new_table;
 
+    if (fd_table_capacity > INT32_MAX / 2) return -1;
     new_cap = fd_table_capacity ? fd_table_capacity * 2 : VFS_INITIAL_FDS;
-    if (new_cap > VFS_MAX_FDS) new_cap = VFS_MAX_FDS;
     if (new_cap <= fd_table_capacity) return -1;
+    if ((uint64_t)new_cap > UINT64_MAX / sizeof(vfs_fd_t)) return -1;
     new_table = (vfs_fd_t *)krealloc(fd_table, new_cap * sizeof(vfs_fd_t));
     if (!new_table) return -1;
     for (i = fd_table_capacity; i < new_cap; i++) {

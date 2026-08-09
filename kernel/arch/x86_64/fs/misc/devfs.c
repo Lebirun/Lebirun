@@ -19,7 +19,6 @@
 #include <stdlib.h>
 
 #define DEVFS_INITIAL_BLOCKDEVS 1
-#define DEVFS_MAX_BLOCKDEVS 32
 
 typedef struct {
     vfs_node_t node;
@@ -84,10 +83,11 @@ static int devfs_grow_blockdevs(void) {
     int i;
     devfs_blockdev_t *new_blockdevs;
 
-    new_cap = devfs_blockdev_capacity * 2;
-    if (new_cap <= 0) new_cap = DEVFS_INITIAL_BLOCKDEVS;
-    if (new_cap > DEVFS_MAX_BLOCKDEVS) new_cap = DEVFS_MAX_BLOCKDEVS;
+    if (devfs_blockdev_capacity > INT32_MAX / 2) return -1;
+    new_cap = devfs_blockdev_capacity ?
+              devfs_blockdev_capacity * 2 : DEVFS_INITIAL_BLOCKDEVS;
     if (new_cap <= devfs_blockdev_capacity) return -1;
+    if ((uint64_t)new_cap > UINT64_MAX / sizeof(devfs_blockdev_t)) return -1;
     new_blockdevs = (devfs_blockdev_t *)krealloc(devfs_blockdevs, new_cap * sizeof(devfs_blockdev_t));
     if (!new_blockdevs) return -1;
     for (i = 0; i < devfs_blockdev_capacity; i++) {
@@ -1056,19 +1056,19 @@ int devfs_rescan_partitions(const char *devname) {
     int i;
     int pk;
     int found;
-    char drive_letter;
+    int drive_slot;
     char partname[16];
     uint64_t port_index;
     partition_table_t ptable;
 
     found = 0;
     port_index = 0;
-    drive_letter = 0;
+    drive_slot = -1;
     for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (devfs_blockdevs[i].in_use && !devfs_blockdevs[i].is_partition &&
             strcmp(devfs_blockdevs[i].node.name, devname) == 0) {
             port_index = devfs_blockdevs[i].port_index;
-            drive_letter = devfs_blockdevs[i].node.name[2];
+            drive_slot = i;
             found = 1;
             break;
         }
@@ -1085,27 +1085,23 @@ int devfs_rescan_partitions(const char *devname) {
         }
     }
 
-    if (partition_scan(port_index, &ptable) != 0 || ptable.count <= 0)
+    if (partition_scan(port_index, &ptable) != 0 || ptable.count <= 0) {
+        partition_table_free(&ptable);
         return 0;
+    }
 
     for (pk = 0; pk < ptable.count; pk++) {
-        partname[0] = 's';
-        partname[1] = 'd';
-        partname[2] = drive_letter;
-        if (ptable.parts[pk].part_number >= 10) {
-            partname[3] = '0' + (ptable.parts[pk].part_number / 10);
-            partname[4] = '0' + (ptable.parts[pk].part_number % 10);
-            partname[5] = '\0';
-        } else {
-            partname[3] = '0' + ptable.parts[pk].part_number;
-            partname[4] = '\0';
-        }
+        snprintf(partname, sizeof(partname), "%s%d",
+                 devfs_blockdevs[drive_slot].node.name,
+                 ptable.parts[pk].part_number);
         devfs_register_partition(partname, port_index,
                                  ptable.parts[pk].start_lba,
                                  ptable.parts[pk].sector_count);
     }
 
-    return ptable.count;
+    found = ptable.count;
+    partition_table_free(&ptable);
+    return found;
 }
 
 void KERNEL_INIT devfs_register_initrd(void) {

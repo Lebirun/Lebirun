@@ -4,6 +4,39 @@
 #include <string.h>
 #include <stdio.h>
 
+static int partition_table_reserve(partition_table_t *table, int needed) {
+    partition_info_t *parts;
+    int old_capacity;
+    int capacity;
+
+    if (needed < 0) return -1;
+    if (needed <= table->capacity) return 0;
+    old_capacity = table->capacity;
+    capacity = old_capacity ? old_capacity : MBR_PARTITION_COUNT;
+    while (capacity < needed) {
+        if (capacity > INT32_MAX / 2) return -1;
+        capacity *= 2;
+    }
+    if ((uint64_t)capacity > UINT64_MAX / sizeof(partition_info_t)) return -1;
+    parts = (partition_info_t *)krealloc(table->parts,
+                                         (uint64_t)capacity * sizeof(partition_info_t));
+    if (!parts) return -1;
+    memset(parts + old_capacity, 0,
+           (uint64_t)(capacity - old_capacity) * sizeof(partition_info_t));
+    table->parts = parts;
+    table->capacity = capacity;
+    return 0;
+}
+
+void partition_table_free(partition_table_t *table) {
+    if (!table) return;
+    if (table->parts) kfree(table->parts);
+    table->parts = NULL;
+    table->count = 0;
+    table->capacity = 0;
+    table->is_gpt = 0;
+}
+
 int partition_is_guid_zero(const uint8_t *guid) {
     int i;
     for (i = 0; i < 16; i++) {
@@ -83,8 +116,11 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
         if (pe->type == PART_TYPE_EXTENDED || pe->type == PART_TYPE_EXTENDED_LBA)
             continue;
 
-        if (count >= PARTITION_MAX)
-            break;
+        if (partition_table_reserve(table, count + 1) != 0) {
+            kfree(buf);
+            partition_table_free(table);
+            return -1;
+        }
 
         table->parts[count].valid = 1;
         table->parts[count].port_index = port_index;
@@ -110,7 +146,12 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
     uint64_t num_entries;
     uint64_t entry_size;
     uint64_t sectors_needed;
-    uint8_t *entry_buf;
+    uint64_t entries_size;
+    uint64_t entry_offset;
+    uint64_t entry_sector;
+    uint64_t entry_sector_offset;
+    uint64_t entry_sectors;
+    uint8_t entry_buf[1024];
     uint64_t i;
     int count;
 
@@ -149,38 +190,54 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
         return -1;
     if (num_entries == 0)
         return -1;
-    if (num_entries > 128)
-        num_entries = 128;
-
-    sectors_needed = (num_entries * entry_size + 511) / 512;
-    entry_buf = (uint8_t *)kmalloc(sectors_needed * 512);
-    if (!entry_buf)
+    if (entry_size > UINT64_MAX / num_entries)
         return -1;
-
-    if (ahci_read_sectors(port, entry_lba, sectors_needed, entry_buf) != 0) {
-        kfree(entry_buf);
+    entries_size = num_entries * entry_size;
+    if (entries_size > UINT64_MAX - 511)
         return -1;
-    }
-
+    sectors_needed = (entries_size + 511) / 512;
+    if (sectors_needed > UINT64_MAX / 512)
+        return -1;
+    if (entry_lba > port->sector_count ||
+        sectors_needed > port->sector_count - entry_lba)
+        return -1;
     table->is_gpt = 1;
     count = 0;
 
     for (i = 0; i < num_entries; i++) {
         gpt_partition_entry_t *gpe;
 
-        gpe = (gpt_partition_entry_t *)(entry_buf + i * entry_size);
+        entry_offset = i * entry_size;
+        entry_sector = entry_offset / 512;
+        entry_sector_offset = entry_offset % 512;
+        entry_sectors = (entry_sector_offset +
+                         sizeof(gpt_partition_entry_t) + 511) / 512;
+        if (ahci_read_sectors(port, entry_lba + entry_sector,
+                              entry_sectors, entry_buf) != 0) {
+            partition_table_free(table);
+            return -1;
+        }
+        gpe = (gpt_partition_entry_t *)(entry_buf + entry_sector_offset);
 
         if (partition_is_guid_zero(gpe->type_guid))
             continue;
         if (gpe->starting_lba == 0 || gpe->ending_lba == 0)
             continue;
+        if (gpe->ending_lba < gpe->starting_lba)
+            continue;
+        if (i >= INT32_MAX) {
+            partition_table_free(table);
+            return -1;
+        }
 
-        if (count >= PARTITION_MAX)
-            break;
+        if (partition_table_reserve(table, count + 1) != 0) {
+            partition_table_free(table);
+            return -1;
+        }
 
         table->parts[count].valid = 1;
         table->parts[count].port_index = port_index;
-        table->parts[count].part_number = count + 1;
+        table->parts[count].part_number = (int)i + 1;
         table->parts[count].start_lba = gpe->starting_lba;
         table->parts[count].sector_count = gpe->ending_lba - gpe->starting_lba + 1;
         table->parts[count].mbr_type = 0;
@@ -190,7 +247,6 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
     }
 
     table->count = count;
-    kfree(entry_buf);
     return 0;
 }
 
@@ -199,7 +255,11 @@ int partition_scan(uint64_t port_index, partition_table_t *table) {
     uint8_t *buf;
     mbr_t *mbr;
 
-    memset(table, 0, sizeof(partition_table_t));
+    if (!table) return -1;
+    table->count = 0;
+    table->capacity = 0;
+    table->is_gpt = 0;
+    table->parts = NULL;
 
     port = ahci_get_port(port_index);
     if (!port) {

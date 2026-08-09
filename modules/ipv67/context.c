@@ -79,10 +79,9 @@ static int ipv67_ensure_context_cap(int needed) {
     int next_cap;
     int i;
 
-    if (needed > IPV67_CONTEXT_CAP_MAX) return IPV67_ERR_NOMEM;
+    if (needed <= 0) return IPV67_ERR_NOMEM;
     if (needed <= ipv67_context_cap) return IPV67_ERR_OK;
     next_cap = needed;
-    if (next_cap > IPV67_CONTEXT_CAP_MAX) next_cap = IPV67_CONTEXT_CAP_MAX;
     next = (ipv67_context_t **)kmalloc(sizeof(ipv67_context_t *) * next_cap);
     if (!next) return IPV67_ERR_NOMEM;
     memset(next, 0, sizeof(ipv67_context_t *) * next_cap);
@@ -150,10 +149,9 @@ int ipv67_ensure_peer_cap(int needed) {
     int next_cap;
     int i;
 
-    if (needed > IPV67_PEER_CAP_MAX) needed = IPV67_PEER_CAP_MAX;
+    if (needed <= 0) return IPV67_ERR_NOMEM;
     if (needed <= ipv67_current->peer_cap) return IPV67_ERR_OK;
     next_cap = needed;
-    if (next_cap > IPV67_PEER_CAP_MAX) next_cap = IPV67_PEER_CAP_MAX;
     next = (ipv67_peer_t *)kmalloc(sizeof(ipv67_peer_t) * next_cap);
     if (!next) return IPV67_ERR_NOMEM;
     memset(next, 0, sizeof(ipv67_peer_t) * next_cap);
@@ -171,10 +169,9 @@ int ipv67_ensure_route_cap(int needed) {
     int next_cap;
     int i;
 
-    if (needed > IPV67_ROUTE_CAP_MAX) needed = IPV67_ROUTE_CAP_MAX;
+    if (needed <= 0) return IPV67_ERR_NOMEM;
     if (needed <= ipv67_current->route_cap) return IPV67_ERR_OK;
     next_cap = needed;
-    if (next_cap > IPV67_ROUTE_CAP_MAX) next_cap = IPV67_ROUTE_CAP_MAX;
     next = (ipv67_route_t *)kmalloc(sizeof(ipv67_route_t) * next_cap);
     if (!next) return IPV67_ERR_NOMEM;
     memset(next, 0, sizeof(ipv67_route_t) * next_cap);
@@ -192,10 +189,9 @@ int ipv67_ensure_asn_cap(int needed) {
     int next_cap;
     int i;
 
-    if (needed > IPV67_ASN_CAP_MAX) needed = IPV67_ASN_CAP_MAX;
+    if (needed <= 0) return IPV67_ERR_NOMEM;
     if (needed <= ipv67_current->asn_cap) return IPV67_ERR_OK;
     next_cap = needed;
-    if (next_cap > IPV67_ASN_CAP_MAX) next_cap = IPV67_ASN_CAP_MAX;
     next = (ipv67_asn_claim_t *)kmalloc(sizeof(ipv67_asn_claim_t) * next_cap);
     if (!next) return IPV67_ERR_NOMEM;
     memset(next, 0, sizeof(ipv67_asn_claim_t) * next_cap);

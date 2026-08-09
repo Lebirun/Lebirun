@@ -56,6 +56,17 @@ mutex_t print_lock;
 
 extern task_t* current_task;
 
+#if CONFIG_DRIVER_AHCI
+static void KERNEL_INIT ahci_blockdev_name(char *name, size_t size, int index) {
+    if (index < 26) {
+        snprintf(name, size, "sd%c", 'a' + index);
+    } else {
+        snprintf(name, size, "sd%c%c", 'a' + index / 26 - 1,
+                 'a' + index % 26);
+    }
+}
+#endif
+
 static void kernel_reclaim_memory(uint8_t *section_start, uint8_t *section_end,
                                   int flush_cpus, int report) {
     uint64_t start;
@@ -454,13 +465,10 @@ static void KERNEL_INIT kernel_boot(void) {
 
                 j = 0;
                 sr_idx = 0;
-                for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
+                for (pi = 0; pi < AHCI_PORT_COUNT; pi++) {
                     port = ahci_get_port(pi);
                     if (port && port->type == AHCI_DEV_SATA) {
-                        devname[0] = 's';
-                        devname[1] = 'd';
-                        devname[2] = (char)('a' + j);
-                        devname[3] = '\0';
+                        ahci_blockdev_name(devname, sizeof(devname), j);
                         devfs_register_blockdev(devname, pi);
                         KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
@@ -470,17 +478,8 @@ static void KERNEL_INIT kernel_boot(void) {
                                    ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
                                                    KERNEL_INIT_STRING("MBR"));
                             for (pk = 0; pk < ptable.count; pk++) {
-                                partname[0] = 's';
-                                partname[1] = 'd';
-                                partname[2] = (char)('a' + j);
-                                if (ptable.parts[pk].part_number >= 10) {
-                                    partname[3] = '0' + (ptable.parts[pk].part_number / 10);
-                                    partname[4] = '0' + (ptable.parts[pk].part_number % 10);
-                                    partname[5] = '\0';
-                                } else {
-                                    partname[3] = '0' + ptable.parts[pk].part_number;
-                                    partname[4] = '\0';
-                                }
+                                snprintf(partname, sizeof(partname), "%s%d", devname,
+                                         ptable.parts[pk].part_number);
                                 devfs_register_partition(partname, pi,
                                                          ptable.parts[pk].start_lba,
                                                          ptable.parts[pk].sector_count);
@@ -490,12 +489,10 @@ static void KERNEL_INIT kernel_boot(void) {
                                        (unsigned long long)ptable.parts[pk].sector_count);
                             }
                         }
+                        partition_table_free(&ptable);
                         j++;
                     } else if (port && port->type == AHCI_DEV_SATAPI) {
-                        devname[0] = 's';
-                        devname[1] = 'r';
-                        devname[2] = (char)('0' + sr_idx);
-                        devname[3] = '\0';
+                        snprintf(devname, sizeof(devname), "sr%d", sr_idx);
                         devfs_register_cdrom(devname, pi);
                         KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
                         sr_idx++;
@@ -594,13 +591,10 @@ static void KERNEL_INIT kernel_boot(void) {
 
         j = 0;
         sr_idx = 0;
-        for (pi = 0; pi < AHCI_MAX_PORTS; pi++) {
+        for (pi = 0; pi < AHCI_PORT_COUNT; pi++) {
             port = ahci_get_port(pi);
             if (port && port->type == AHCI_DEV_SATA) {
-                devname[0] = 's';
-                devname[1] = 'd';
-                devname[2] = (char)('a' + j);
-                devname[3] = '\0';
+                ahci_blockdev_name(devname, sizeof(devname), j);
                 devfs_register_blockdev(devname, pi);
                 KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
 
@@ -610,17 +604,8 @@ static void KERNEL_INIT kernel_boot(void) {
                            ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
                                            KERNEL_INIT_STRING("MBR"));
                     for (pk = 0; pk < ptable.count; pk++) {
-                        partname[0] = 's';
-                        partname[1] = 'd';
-                        partname[2] = (char)('a' + j);
-                        if (ptable.parts[pk].part_number >= 10) {
-                            partname[3] = '0' + (ptable.parts[pk].part_number / 10);
-                            partname[4] = '0' + (ptable.parts[pk].part_number % 10);
-                            partname[5] = '\0';
-                        } else {
-                            partname[3] = '0' + ptable.parts[pk].part_number;
-                            partname[4] = '\0';
-                        }
+                        snprintf(partname, sizeof(partname), "%s%d", devname,
+                                 ptable.parts[pk].part_number);
                         devfs_register_partition(partname, pi,
                                                  ptable.parts[pk].start_lba,
                                                  ptable.parts[pk].sector_count);
@@ -630,12 +615,10 @@ static void KERNEL_INIT kernel_boot(void) {
                                (unsigned long long)ptable.parts[pk].sector_count);
                     }
                 }
+                partition_table_free(&ptable);
                 j++;
             } else if (port && port->type == AHCI_DEV_SATAPI) {
-                devname[0] = 's';
-                devname[1] = 'r';
-                devname[2] = (char)('0' + sr_idx);
-                devname[3] = '\0';
+                snprintf(devname, sizeof(devname), "sr%d", sr_idx);
                 devfs_register_cdrom(devname, pi);
                 KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
                 sr_idx++;

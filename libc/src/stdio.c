@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 
 #define FILE_FLAG_READ   0x01
 #define FILE_FLAG_WRITE  0x02
@@ -15,7 +16,6 @@
 #define FILE_FLAG_APPEND 0x20
 
 #define STDIO_BUFSIZE 1024
-#define MAX_OPEN_FILES 64
 
 struct _IO_FILE {
     int fd;
@@ -47,10 +47,10 @@ static int reserve_open_file_slot(void) {
     int i;
 
     if (open_files_count < open_files_capacity) return 0;
-    if (open_files_capacity >= MAX_OPEN_FILES) return -1;
+    if (open_files_capacity > INT_MAX / 2) return -1;
 
     new_capacity = open_files_capacity ? open_files_capacity * 2 : 4;
-    if (new_capacity > MAX_OPEN_FILES) new_capacity = MAX_OPEN_FILES;
+    if ((size_t)new_capacity > SIZE_MAX / sizeof(struct _IO_FILE *)) return -1;
 
     new_files = (struct _IO_FILE **)realloc(open_files, (size_t)new_capacity * sizeof(struct _IO_FILE *));
     if (!new_files) return -1;

@@ -151,7 +151,7 @@
 #define ATA_SR_ERR      0x01
 
 #define AHCI_SECTOR_SIZE    512
-#define AHCI_MAX_PORTS      4
+#define AHCI_PORT_COUNT     32
 #define AHCI_CMD_LIST_SIZE  1024
 #define AHCI_CMD_SLOTS      2
 #define AHCI_FIS_SIZE       256

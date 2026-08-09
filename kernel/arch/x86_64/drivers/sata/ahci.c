@@ -9,14 +9,13 @@
 #include <stddef.h>
 
 static ahci_controller_t g_ahci_controller;
-static uint8_t ahci_port_map[AHCI_MAX_PORTS];
 
 static uint64_t KERNEL_INIT ahci_required_port_capacity(uint64_t ports_impl) {
     uint64_t i;
     uint64_t capacity;
 
     capacity = 0;
-    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (i = 0; i < AHCI_PORT_COUNT; i++) {
         if (ports_impl & (1ULL << i)) capacity++;
     }
     if (capacity == 0) capacity = 1;
@@ -24,12 +23,17 @@ static uint64_t KERNEL_INIT ahci_required_port_capacity(uint64_t ports_impl) {
 }
 
 static ahci_port_t *ahci_port_slot(uint64_t index) {
+    uint64_t i;
     uint64_t slot;
 
     if (!g_ahci_controller.ports) return NULL;
-    if (index >= AHCI_MAX_PORTS) return NULL;
-    slot = ahci_port_map[index];
-    if (slot == 0xFF || slot >= g_ahci_controller.ports_capacity) return NULL;
+    if (index >= AHCI_PORT_COUNT) return NULL;
+    if (!(g_ahci_controller.ports_impl & (1ULL << index))) return NULL;
+    slot = 0;
+    for (i = 0; i < index; i++) {
+        if (g_ahci_controller.ports_impl & (1ULL << i)) slot++;
+    }
+    if (slot >= g_ahci_controller.ports_capacity) return NULL;
     return &g_ahci_controller.ports[slot];
 }
 
@@ -727,7 +731,7 @@ int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffe
 ahci_port_t *ahci_find_cdrom(void) {
     uint64_t i;
 
-    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (i = 0; i < AHCI_PORT_COUNT; i++) {
         ahci_port_t *port = ahci_get_port(i);
         if (port && port->present && port->type == AHCI_DEV_SATAPI)
             return port;
@@ -825,7 +829,7 @@ void ahci_debug_info(void) {
            g_ahci_controller.num_ports);
     printf("Command Slots: %u\n", g_ahci_controller.num_cmd_slots);
     
-    for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (uint64_t i = 0; i < AHCI_PORT_COUNT; i++) {
         ahci_port_t *port = ahci_port_slot(i);
         if (!port)
             continue;
@@ -859,9 +863,9 @@ int KERNEL_INIT ahci_init(void) {
     uint64_t ghc;
     uint64_t ports_impl;
     uint64_t ports_capacity;
+    uint64_t controller_port_count;
     uint64_t offset;
     uint64_t i;
-    uint64_t port_slot_idx;
     ahci_port_t *port;
     const char *type_str;
 
@@ -883,8 +887,7 @@ int KERNEL_INIT ahci_init(void) {
     abar_phys = g_ahci_controller.abar;
     abar_virt = KERNEL_VMA + 0x37100000ULL;
     
-    abar_size = AHCI_PORT_BASE + AHCI_MAX_PORTS * AHCI_PORT_SIZE;
-    abar_size = (abar_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    abar_size = PAGE_SIZE;
     for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
         vmm_map_page(abar_virt + offset, abar_phys + offset, 0x003);
     }
@@ -895,6 +898,14 @@ int KERNEL_INIT ahci_init(void) {
     g_ahci_controller.num_cmd_slots = ((cap >> 8) & 0x1F) + 1;
     g_ahci_controller.ports_impl = ahci_hba_read(abar_virt, AHCI_PI);
     g_ahci_controller.version = ahci_hba_read(abar_virt, AHCI_VS);
+    controller_port_count = (cap & 0x1F) + 1;
+    g_ahci_controller.ports_impl &=
+        (1ULL << controller_port_count) - 1;
+    abar_size = AHCI_PORT_BASE + controller_port_count * AHCI_PORT_SIZE;
+    abar_size = (abar_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    for (offset = PAGE_SIZE; offset < abar_size; offset += PAGE_SIZE) {
+        vmm_map_page(abar_virt + offset, abar_phys + offset, 0x003);
+    }
     ports_capacity = ahci_required_port_capacity(g_ahci_controller.ports_impl);
     g_ahci_controller.ports = (ahci_port_t *)kmalloc(ports_capacity * sizeof(ahci_port_t));
     if (!g_ahci_controller.ports) {
@@ -907,7 +918,6 @@ int KERNEL_INIT ahci_init(void) {
         return -1;
     }
     memset(g_ahci_controller.ports, 0, ports_capacity * sizeof(ahci_port_t));
-    memset(ahci_port_map, 0xFF, sizeof(ahci_port_map));
     g_ahci_controller.ports_capacity = ports_capacity;
     
     KERNEL_INIT_LOG("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n",
@@ -923,13 +933,10 @@ int KERNEL_INIT ahci_init(void) {
     ahci_hba_write(abar_virt, AHCI_GHC, ghc);
     
     ports_impl = g_ahci_controller.ports_impl;
-    port_slot_idx = 0;
-    for (i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (i = 0; i < AHCI_PORT_COUNT; i++) {
         if (!(ports_impl & (1ULL << i)))
             continue;
 
-        ahci_port_map[i] = (uint8_t)port_slot_idx;
-        port_slot_idx++;
         port = ahci_port_slot(i);
         if (!port)
             continue;
@@ -1377,8 +1384,8 @@ void ahci_irq_handler(void *regs) {
     
     uint64_t is = ahci_hba_read(g_ahci_controller.abar_virt, AHCI_IS);
     
-    for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
-        if (is & (1 << i)) {
+    for (uint64_t i = 0; i < AHCI_PORT_COUNT; i++) {
+        if (is & (1ULL << i)) {
             ahci_port_t *port = ahci_port_slot(i);
             if (port && port->present) {
                 ahci_port_irq_handler(port);
@@ -1411,7 +1418,7 @@ void ahci_enable_interrupts(void) {
     ghc |= AHCI_GHC_IE;
     ahci_hba_write(g_ahci_controller.abar_virt, AHCI_GHC, ghc);
     
-    for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (uint64_t i = 0; i < AHCI_PORT_COUNT; i++) {
         ahci_port_t *port = ahci_port_slot(i);
         if (!port)
             continue;
@@ -1435,7 +1442,7 @@ void ahci_disable_interrupts(void) {
     ghc &= ~AHCI_GHC_IE;
     ahci_hba_write(g_ahci_controller.abar_virt, AHCI_GHC, ghc);
     
-    for (uint64_t i = 0; i < AHCI_MAX_PORTS; i++) {
+    for (uint64_t i = 0; i < AHCI_PORT_COUNT; i++) {
         ahci_port_t *port = ahci_port_slot(i);
         if (!port)
             continue;

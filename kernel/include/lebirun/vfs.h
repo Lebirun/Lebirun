@@ -38,8 +38,6 @@
 
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
-#define VFS_MAX_FDS     128
-#define VFS_MAX_MOUNTS  65535
 
 struct vfs_node;
 struct dirent;

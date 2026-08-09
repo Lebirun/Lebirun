@@ -22,10 +22,6 @@ extern uint64_t net_get_ticks(void);
 
 #define IPV67_RX_PENDING_MAX 8
 #define IPV67_RX_PACKET_MAX 1472
-#define IPV67_CONTEXT_CAP_MAX 16
-#define IPV67_PEER_CAP_MAX 64
-#define IPV67_ROUTE_CAP_MAX 256
-#define IPV67_ASN_CAP_MAX 128
 #define IPV67_REPLAY_GLOBAL_SLOTS 32
 
 typedef struct {

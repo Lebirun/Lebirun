@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#define INITRD_INITIAL_FDS 8
+
 static initrd_header_t *initrd_header = NULL; 
 static initrd_file_header_t *file_headers = NULL;
 static uint8_t *initrd_base = NULL;
@@ -21,6 +23,7 @@ static uint64_t initrd_mod1_phys_start = 0;
 static uint64_t initrd_mod1_phys_end = 0;
 
 static initrd_fd_t *fd_table = NULL;
+static int fd_table_capacity;
 
 static vfs_node_t *initrd_vfs_nodes = NULL;
 static uint64_t initrd_vfs_node_count = 0;
@@ -239,10 +242,11 @@ void initrd_init_fds(void) {
     int i;
 
     if (!fd_table) {
-        fd_table = (initrd_fd_t *)kmalloc(INITRD_MAX_FDS * sizeof(initrd_fd_t));
+        fd_table = (initrd_fd_t *)kmalloc(INITRD_INITIAL_FDS * sizeof(initrd_fd_t));
         if (!fd_table) return;
+        fd_table_capacity = INITRD_INITIAL_FDS;
     }
-    for (i = 0; i < INITRD_MAX_FDS; i++) {
+    for (i = 0; i < fd_table_capacity; i++) {
         fd_table[i].in_use = 0;
         fd_table[i].file_index = 0;
         fd_table[i].offset = 0;
@@ -251,14 +255,32 @@ void initrd_init_fds(void) {
 }
 
 static int find_free_fd(void) {
+    initrd_fd_t *new_table;
+    int old_capacity;
+    int new_capacity;
     int i;
 
     if (!fd_table) initrd_init_fds();
     if (!fd_table) return -1;
-    for (i = 3; i < INITRD_MAX_FDS; i++) {
+    for (i = 3; i < fd_table_capacity; i++) {
         if (!fd_table[i].in_use) return i;
     }
-    return -1;
+    if (fd_table_capacity > INT32_MAX / 2) return -1;
+    old_capacity = fd_table_capacity;
+    new_capacity = old_capacity * 2;
+    if ((uint64_t)new_capacity > UINT64_MAX / sizeof(initrd_fd_t)) return -1;
+    new_table = (initrd_fd_t *)krealloc(fd_table,
+                                        (uint64_t)new_capacity * sizeof(initrd_fd_t));
+    if (!new_table) return -1;
+    fd_table = new_table;
+    fd_table_capacity = new_capacity;
+    for (i = old_capacity; i < new_capacity; i++) {
+        fd_table[i].in_use = 0;
+        fd_table[i].file_index = 0;
+        fd_table[i].offset = 0;
+        fd_table[i].flags = 0;
+    }
+    return old_capacity;
 }
 
 initrd_file_t *initrd_find_path(const char *path) {
@@ -362,7 +384,7 @@ int initrd_read(int fd, void *buf, uint64_t count) {
     uint64_t to_read;
     initrd_file_t *f;
 
-    if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table) return -1;
     if (!fd_table[fd].in_use) return -1;
     if (!buf || count == 0) return 0;
@@ -385,7 +407,7 @@ int initrd_read(int fd, void *buf, uint64_t count) {
 }
 
 int initrd_close(int fd) {
-    if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table) return -1;
     if (!fd_table[fd].in_use) return -1;
 
@@ -401,7 +423,7 @@ int initrd_fstat_fd(int fd, uint64_t *size, uint8_t *type) {
     uint64_t idx;
     initrd_file_t *f;
 
-    if (fd < 0 || fd >= INITRD_MAX_FDS) return -1;
+    if (fd < 0 || fd >= fd_table_capacity) return -1;
     if (!fd_table) return -1;
     if (!fd_table[fd].in_use) return -1;
     idx = fd_table[fd].file_index;
@@ -593,9 +615,10 @@ void initrd_copy_to_root(void) {
     const char **p;
     int r;
     uint64_t i;
+    uint64_t traversed;
     char destpath[INITRD_MAX_PATH];
     char tmp[INITRD_MAX_PATH];
-    int cur;
+    uint64_t cur;
     char namebuf[VFS_MAX_NAME];
     char newtmp[INITRD_MAX_PATH];
     int k;
@@ -659,8 +682,9 @@ void initrd_copy_to_root(void) {
         
         destpath[0] = '\0';
         tmp[0] = '\0';
-        cur = (int)i;
-        while (cur >= 0 && cur < (int)file_count) {
+        cur = i;
+        traversed = 0;
+        while (cur < file_count && traversed < file_count) {
             k = 0;
             while (k < VFS_MAX_NAME - 1 && files[cur].name[k]) { 
                 namebuf[k] = files[cur].name[k]; 
@@ -677,7 +701,14 @@ void initrd_copy_to_root(void) {
             if (files[cur].parent_index == 0xFFFF || files[cur].parent_index >= file_count) {
                 break;
             }
-            cur = (int)files[cur].parent_index;
+            cur = files[cur].parent_index;
+            traversed++;
+        }
+        if (traversed >= file_count && cur < file_count &&
+            files[cur].parent_index != 0xFFFF &&
+            files[cur].parent_index < file_count) {
+            errors++;
+            continue;
         }
         strncpy(destpath, tmp, sizeof(destpath) - 1);
         destpath[sizeof(destpath) - 1] = '\0';
@@ -762,8 +793,8 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     char *tmp;
     char *namebuf;
     char *newtmp;
-    int cur;
-    int depth;
+    uint64_t cur;
+    uint64_t traversed;
     int k;
     bool is_root_level_dir;
     bool is_standard_root;
@@ -848,9 +879,10 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
-    if (num_entries > 1000) {
-        printf("ROOTFS: Too many entries (%u), limiting to 1000\n", num_entries);
-        num_entries = 1000;
+    if ((uint64_t)num_entries >
+        (mod_size - sizeof(initrd_header_t)) / sizeof(initrd_file_header_t)) {
+        printf("ROOTFS: File header array exceeds module size\n");
+        return;
     }
 
     hdrs = (initrd_file_header_t *)(rootfs_base + sizeof(initrd_header_t));
@@ -878,6 +910,7 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
 
     for (i = 0; i < num_entries; i++) {
         memcpy(rfiles[i].name, hdrs[i].name, 64);
+        rfiles[i].name[63] = '\0';
         rfiles[i].length = hdrs[i].length;
         rfiles[i].type = hdrs[i].type;
         rfiles[i].permissions = hdrs[i].permissions;
@@ -889,7 +922,7 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             hdr_off = hdrs[i].offset;
             hdr_len = hdrs[i].length;
 
-            if (hdr_off + hdr_len > mod_size) {
+            if (hdr_off > mod_size || hdr_len > mod_size - hdr_off) {
                 printf("ROOTFS: File %u (%s) out-of-bounds\n",
                        i, rfiles[i].name);
                 rfiles[i].offset = hdr_off;
@@ -935,9 +968,9 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         namebuf[0] = '\0';
         newtmp[0] = '\0';
         
-        cur = (int)i;
-        depth = 0;
-        while (cur >= 0 && cur < (int)num_entries && depth < 16) {
+        cur = i;
+        traversed = 0;
+        while (cur < num_entries && traversed < num_entries) {
             k = 0;
             while (k < VFS_MAX_NAME - 1 && rfiles[cur].name[k]) { 
                 namebuf[k] = rfiles[cur].name[k]; 
@@ -954,8 +987,14 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             if (rfiles[cur].parent_index == 0xFFFF || rfiles[cur].parent_index >= num_entries) {
                 break;
             }
-            cur = (int)rfiles[cur].parent_index;
-            depth++;
+            cur = rfiles[cur].parent_index;
+            traversed++;
+        }
+        if (traversed >= num_entries && cur < num_entries &&
+            rfiles[cur].parent_index != 0xFFFF &&
+            rfiles[cur].parent_index < num_entries) {
+            errors++;
+            continue;
         }
         strncpy(destpath, tmp, INITRD_MAX_PATH - 1);
         destpath[INITRD_MAX_PATH - 1] = '\0';
