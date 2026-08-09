@@ -38,6 +38,35 @@ uint16_t ipv4_checksum(void *data, uint64_t len) {
     return ~sum;
 }
 
+uint16_t ipv4_transport_checksum(ipv4_addr_t src, ipv4_addr_t dest,
+                                 uint8_t protocol, uint8_t *data,
+                                 uint64_t len) {
+    uint64_t sum;
+    uint16_t *ptr;
+    uint64_t remaining;
+
+    sum = ((uint16_t)src.octets[0] << 8) | src.octets[1];
+    sum += ((uint16_t)src.octets[2] << 8) | src.octets[3];
+    sum += ((uint16_t)dest.octets[0] << 8) | dest.octets[1];
+    sum += ((uint16_t)dest.octets[2] << 8) | dest.octets[3];
+    sum += protocol;
+    sum += len;
+
+    ptr = (uint16_t *)data;
+    remaining = len;
+    while (remaining > 1) {
+        sum += ntohs(*ptr++);
+        remaining -= 2;
+    }
+    if (remaining == 1)
+        sum += *((uint8_t *)ptr) << 8;
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return htons(~sum);
+}
+
 int ipv4_is_local(netif_t *netif, ipv4_addr_t ip) {
     uint32_t local;
     uint32_t mask;
@@ -68,8 +97,6 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
     if (!packet) return -1;
 
     ip = (ipv4_header_t *)packet;
-    memset(ip, 0, sizeof(ipv4_header_t));
-
     ip->version_ihl = 0x45;
     ip->tos = 0;
     ip->total_length = htons(total_len);

@@ -87,37 +87,6 @@ static uint16_t tcp_alloc_port(void) {
     return port;
 }
 
-static uint16_t tcp_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
-    uint64_t sum;
-    uint16_t *ptr;
-    uint64_t remaining;
-
-    sum = 0;
-
-    sum += (src.octets[0] << 8) | src.octets[1];
-    sum += (src.octets[2] << 8) | src.octets[3];
-    sum += (dest.octets[0] << 8) | dest.octets[1];
-    sum += (dest.octets[2] << 8) | dest.octets[3];
-    sum += IP_PROTO_TCP;
-    sum += len;
-
-    ptr = (uint16_t *)data;
-    remaining = len;
-    while (remaining > 1) {
-        sum += ntohs(*ptr++);
-        remaining -= 2;
-    }
-    if (remaining == 1) {
-        sum += (*((uint8_t *)ptr)) << 8;
-    }
-
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return htons(~sum);
-}
-
 static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, uint64_t len) {
     uint64_t header_len;
     uint64_t tcp_len;
@@ -146,8 +115,6 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
     }
 
     tcp = (tcp_header_t *)packet;
-    memset(tcp, 0, sizeof(tcp_header_t));
-
     tcp->src_port = htons(sock->local_port);
     tcp->dest_port = htons(sock->remote_port);
     tcp->seq_num = htonl(sock->send_next);
@@ -162,7 +129,8 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
         memcpy(packet + header_len, data, len);
     }
 
-    tcp->checksum = tcp_checksum(sock->local_ip, sock->remote_ip, packet, tcp_len);
+    tcp->checksum = ipv4_transport_checksum(sock->local_ip, sock->remote_ip,
+                                            IP_PROTO_TCP, packet, tcp_len);
 
     result = ipv4_send(sock->netif, sock->remote_ip, IP_PROTO_TCP, packet, tcp_len);
     kfree(packet);

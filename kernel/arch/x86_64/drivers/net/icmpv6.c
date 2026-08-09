@@ -44,7 +44,6 @@ static void icmpv6_parse_options(netif_t *netif, ipv6_addr_t *src, uint8_t *data
             prefix_len = data[offset + 2];
             flags = data[offset + 3];
             if (prefix_len == 64 && (flags & 0x40)) {
-                memset(&new_addr, 0, sizeof(new_addr));
                 memcpy(&new_addr.octets[0], data + offset + 16, 8);
                 icmpv6_make_eui64(&new_addr, netif->mac);
                 if (icmpv6_is_link_local(netif->ipv6)) {
@@ -97,8 +96,6 @@ void icmpv6_receive(netif_t *netif, ipv6_addr_t *src, uint8_t *data, uint64_t le
             icmpv6_parse_options(netif, src, data, len, 24);
             target = (ipv6_addr_t *)(data + 8);
             if (ipv6_eq(*target, netif->ipv6)) {
-                memset(reply_buf, 0, sizeof(reply_buf));
-
                 na = (icmpv6_header_t *)reply_buf;
                 na->type = ICMPV6_NEIGHBOR_ADVERTISEMENT;
                 na->code = 0;
@@ -175,8 +172,6 @@ int icmpv6_send_neighbor_solicitation(netif_t *netif, ipv6_addr_t target) {
 
     if (!netif) return -1;
 
-    memset(packet, 0, sizeof(packet));
-
     ns = (icmpv6_header_t *)packet;
     ns->type = ICMPV6_NEIGHBOR_SOLICITATION;
     ns->code = 0;
@@ -209,8 +204,6 @@ int icmpv6_send_router_solicitation(netif_t *netif) {
     ipv6_addr_t all_routers;
 
     if (!netif) return -1;
-
-    memset(packet, 0, sizeof(packet));
 
     rs = (icmpv6_header_t *)packet;
     rs->type = ICMPV6_ROUTER_SOLICITATION;

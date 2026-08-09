@@ -62,6 +62,8 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     uint64_t base;
     uint64_t len;
     uint64_t kernel_end_phys;
+    uint64_t reserved_index;
+    int cursor_advanced;
     int cl;
 
     early_fb_valid = 0;
@@ -254,6 +256,20 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         }
         tag = multiboot2_next_tag(tag);
     }
+
+    do {
+        cursor_advanced = 0;
+        for (reserved_index = 0;
+             reserved_index < num_reserved_regions;
+             reserved_index++) {
+            if (bump_current < reserved_regions[reserved_index].start_phys ||
+                bump_current >= reserved_regions[reserved_index].end_phys) {
+                continue;
+            }
+            bump_current = reserved_regions[reserved_index].end_phys;
+            cursor_advanced = 1;
+        }
+    } while (cursor_advanced);
 }
 
 void KERNEL_EARLY_INIT pfa_init(void) {
@@ -311,6 +327,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     actual_total_pages = (uint64_t)((detected_max_phys + PAGE_SIZE - 1) / PAGE_SIZE);
     kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
     kernel_end_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (kernel_end_phys < bump_current) kernel_end_phys = bump_current;
 
     bitmap_entries = actual_total_pages;
     directory_entries =

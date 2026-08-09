@@ -265,8 +265,6 @@ int ipv6_send(netif_t *netif, ipv6_addr_t dest, uint8_t next_header, uint8_t *da
     if (!packet) return -1;
 
     ip6 = (ipv6_header_t *)packet;
-    memset(ip6, 0, sizeof(ipv6_header_t));
-
     ip6->version_tc_flow = htonl(0x60000000);
     ip6->payload_length = htons(len);
     ip6->next_header = next_header;

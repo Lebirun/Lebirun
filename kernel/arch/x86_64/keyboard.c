@@ -4,7 +4,6 @@
 #include <lebirun/task.h>
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
-#include <lebirun/task.h>
 #include <lebirun/mem_map.h>
 #include <string.h>
 
@@ -48,29 +47,6 @@ void keyboard_unregister_observer(void) {
     kbd_observer = NULL;
 }
 
-#define SCANCODE_F1  0x3B
-#define SCANCODE_F2  0x3C
-#define SCANCODE_F3  0x3D
-#define SCANCODE_F4  0x3E
-#define SCANCODE_F5  0x3F
-#define SCANCODE_F6  0x40
-#define SCANCODE_F7  0x41
-#define SCANCODE_F8  0x42
-#define SCANCODE_F9  0x43
-#define SCANCODE_F10 0x44
-#define SCANCODE_F11 0x57
-#define SCANCODE_F12 0x58
-
-#define SC2_F1  0x05
-#define SC2_F2  0x06
-#define SC2_F3  0x04
-#define SC2_F4  0x0C
-#define SC2_F5  0x03
-#define SC2_F6  0x0B
-#define SC2_F7  0x83
-#define SC2_F8  0x0A
-#define SC2_F9  0x01
-
 #define SCANCODE_CTRL  0x1D
 #define SCANCODE_ALT   0x38
 #define SCANCODE_CAPS  0x3A
@@ -78,13 +54,6 @@ void keyboard_unregister_observer(void) {
 #define SCANCODE_LSHIFT 0x2A
 #define SCANCODE_RSHIFT 0x36
 #define SCANCODE_C      0x2E
-
-#define SC2_LSHIFT     0x12
-#define SC2_RSHIFT     0x59
-#define SC2_CTRL       0x14
-#define SC2_ALT        0x11
-#define SC2_CAPS       0x58
-#define SC2_C  0x21
 
 static const char qwerty_lowercase[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
@@ -117,16 +86,8 @@ static inline bool is_alpha(char c) {
 }
 
 static inline char apply_caps_shift(char c, bool shift) {
-    if (!is_alpha(c)) return c;
-    bool upper = (c >= 'A' && c <= 'Z');
-    bool want_upper = upper;
-    if (caps_lock) want_upper = !want_upper;
-    if (shift) want_upper = !want_upper;
-    if (want_upper) {
-        if (c >= 'a' && c <= 'z') return (char)(c - 'a' + 'A');
-        return c;
-    }
-    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    if (c >= 'a' && c <= 'z' && caps_lock != shift)
+        return (char)(c - 'a' + 'A');
     return c;
 }
 
@@ -273,16 +234,8 @@ void keyboard_handler(registers_t* regs) {
 
     if (ctrl_pressed && alt_pressed) {
         console_num = -1;
-        if (code == SCANCODE_F1) console_num = 0;
-        else if (code == SCANCODE_F2) console_num = 1;
-        else if (code == SCANCODE_F3) console_num = 2;
-        else if (code == SCANCODE_F4) console_num = 3;
-        else if (code == SCANCODE_F5) console_num = 4;
-        else if (code == SCANCODE_F6) console_num = 5;
-        else if (code == SCANCODE_F7) console_num = 6;
-        else if (code == SCANCODE_F8) console_num = 7;
-        else if (code == SCANCODE_F9) console_num = 8;
-        else if (code == SCANCODE_F10) console_num = 9;
+        if (code >= SCANCODE_F1 && code <= SCANCODE_F10)
+            console_num = code - SCANCODE_F1;
         else if (code == SCANCODE_F11) console_num = 10;
         else if (code == SCANCODE_F12) console_num = 11;
         if (console_num >= 0 && console_num < cmdline_get_consoles()) {

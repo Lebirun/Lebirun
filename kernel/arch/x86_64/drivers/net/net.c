@@ -30,7 +30,6 @@ void net_poll(void) {
 }
 
 static int net_hw_initialized;
-static int net_has_interface;
 static spinlock_t net_hw_lock = {0};
 
 void net_ensure_hw(void) {
@@ -54,7 +53,6 @@ void net_ensure_hw(void) {
         spin_unlock(&net_hw_lock);
         return;
     }
-    net_has_interface = 1;
     netif = netif_get_default();
     if (netif)
         dhcp_init(netif);
@@ -82,7 +80,6 @@ void KERNEL_INIT net_init(void) {
     KERNEL_INIT_LOG("NET: Initializing network stack...\n");
 
     net_hw_initialized = 0;
-    net_has_interface = 0;
 
     netif_init();
     arp_init();

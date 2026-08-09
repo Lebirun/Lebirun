@@ -35,7 +35,7 @@ typedef struct {
 } rng_state_t;
 
 static rng_state_t g_rng_storage;
-static rng_state_t *g_rng = &g_rng_storage;
+#define g_rng (&g_rng_storage)
 static int rng_initializing;
 
 static uint64_t rng_irqsave(void)
@@ -145,10 +145,10 @@ static void rng_fallback_fill(void *buf, size_t len)
 
 static int rng_ready(void)
 {
-    if (g_rng && g_rng->initialized) return 1;
+    if (g_rng->initialized) return 1;
     if (rng_initializing) return 0;
     rng_init();
-    return g_rng && g_rng->initialized;
+    return g_rng->initialized;
 }
 
 static inline uint32_t rotl32(uint32_t x, int n)
@@ -169,8 +169,7 @@ static void chacha20_block(const chacha20_ctx_t *ctx, uint32_t out[16])
 {
     int i;
 
-    for (i = 0; i < 16; i++)
-        out[i] = ctx->state[i];
+    memcpy(out, ctx->state, sizeof(ctx->state));
 
     for (i = 0; i < CHACHA_ROUNDS; i += 2) {
         chacha_quarter_round(&out[0], &out[4], &out[8],  &out[12]);
@@ -223,7 +222,6 @@ static void chacha20_generate(chacha20_ctx_t *ctx, uint8_t *out, size_t len)
     uint32_t block[16];
     uint8_t *bp;
     size_t chunk;
-    size_t i;
 
     while (len > 0) {
         ctx->state[12] = ctx->counter;
@@ -232,8 +230,7 @@ static void chacha20_generate(chacha20_ctx_t *ctx, uint8_t *out, size_t len)
 
         bp = (uint8_t *)block;
         chunk = len < 64 ? len : 64;
-        for (i = 0; i < chunk; i++)
-            out[i] = bp[i];
+        memcpy(out, bp, chunk);
         out += chunk;
         len -= chunk;
     }
@@ -293,12 +290,6 @@ static void jitter_harvest(uint8_t *out, size_t len)
 
     memset(hash, 0, sizeof(hash));
     memset(&ctx, 0, sizeof(ctx));
-}
-
-static void pool_init(entropy_pool_t *pool)
-{
-    memset(pool->data, 0, RNG_POOL_SIZE);
-    pool->count = 0;
 }
 
 static void pool_add(entropy_pool_t *pool, const uint8_t *data, size_t len)
@@ -480,14 +471,7 @@ void rng_init(void)
     rng_initializing = 1;
     memset(g_rng, 0, sizeof(rng_state_t));
 
-    spinlock_init(&g_rng->lock);
-    g_rng->pool_index = 0;
-    g_rng->reseed_counter = 0;
-    g_rng->generation_counter = 0;
     g_rng->output_pos = RNG_OUTPUT_BUF_SIZE;
-
-    for (i = 0; i < RNG_NUM_POOLS; i++)
-        pool_init(&g_rng->pools[i]);
 
     collect_boot_entropy(boot_entropy, RNG_ENTROPY_POOL_SIZE);
 

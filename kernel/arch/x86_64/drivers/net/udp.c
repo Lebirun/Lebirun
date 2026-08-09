@@ -31,36 +31,6 @@ void udp_unregister_port_hook(const udp_port_hook_t *hook) {
     if (udp_port_hook == hook) udp_port_hook = NULL;
 }
 
-static uint16_t udp_pseudo_checksum(ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
-    uint64_t sum;
-    uint16_t *ptr;
-    uint64_t remaining;
-
-    sum = 0;
-    ptr = (uint16_t *)data;
-    remaining = len;
-
-    sum += (src.octets[0] << 8) | src.octets[1];
-    sum += (src.octets[2] << 8) | src.octets[3];
-    sum += (dest.octets[0] << 8) | dest.octets[1];
-    sum += (dest.octets[2] << 8) | dest.octets[3];
-    sum += IP_PROTO_UDP;
-    sum += len;
-    while (remaining > 1) {
-        sum += ntohs(*ptr++);
-        remaining -= 2;
-    }
-    if (remaining == 1) {
-        sum += (*((uint8_t *)ptr)) << 8;
-    }
-
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return htons(~sum);
-}
-
 int udp_send(netif_t *netif, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
     return udp_send_from(netif, netif->ipv4, dest, src_port, dest_port, data, len);
 }
@@ -86,52 +56,14 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
 
     memcpy(packet + sizeof(udp_header_t), data, len);
 
-    udp->checksum = udp_pseudo_checksum(src, dest, packet, udp_len);
+    udp->checksum = ipv4_transport_checksum(src, dest, IP_PROTO_UDP,
+                                            packet, udp_len);
     if (udp->checksum == 0) udp->checksum = 0xFFFF;
 
     result = ipv4_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
     kfree(packet);
 
     return result;
-}
-
-static uint16_t udp6_pseudo_checksum(ipv6_addr_t src, ipv6_addr_t dest, uint8_t *data, uint64_t len) {
-    uint64_t sum;
-    uint16_t *ptr;
-    uint64_t remaining;
-    int i;
-
-    sum = 0;
-    ptr = (uint16_t *)src.octets;
-    for (i = 0; i < 8; i++) {
-        sum += ntohs(ptr[i]);
-    }
-
-    ptr = (uint16_t *)dest.octets;
-    for (i = 0; i < 8; i++) {
-        sum += ntohs(ptr[i]);
-    }
-
-    sum += (len >> 16) & 0xFFFF;
-    sum += len & 0xFFFF;
-    sum += IP_PROTO_UDP;
-
-    ptr = (uint16_t *)data;
-    remaining = len;
-    while (remaining > 1) {
-        sum += ntohs(*ptr++);
-        remaining -= 2;
-    }
-
-    if (remaining == 1) {
-        sum += (*((uint8_t *)ptr)) << 8;
-    }
-
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return htons(~sum);
 }
 
 int udp_send6(netif_t *netif, ipv6_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
@@ -155,7 +87,8 @@ int udp_send6(netif_t *netif, ipv6_addr_t dest, uint16_t src_port, uint16_t dest
 
     memcpy(packet + sizeof(udp_header_t), data, len);
 
-    udp->checksum = udp6_pseudo_checksum(netif->ipv6, dest, packet, udp_len);
+    udp->checksum = ipv6_checksum(&netif->ipv6, &dest, IP_PROTO_UDP,
+                                  packet, udp_len);
     if (udp->checksum == 0) udp->checksum = 0xFFFF;
 
     result = ipv6_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
@@ -183,7 +116,9 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     udp_len = ntohs(udp->length);
 
     if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
-    if (udp->checksum != 0 && udp_pseudo_checksum(src, dest, data, udp_len) != 0) return;
+    if (udp->checksum != 0 &&
+        ipv4_transport_checksum(src, dest, IP_PROTO_UDP, data, udp_len) != 0)
+        return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);
@@ -198,10 +133,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     }
 
     if (udp_port_hook && udp_port_hook->port_active && udp_port_hook->receive4 && udp_port_hook->port_active(dest_port)) {
-        src_ipv4 = ((uint32_t)src.octets[0] << 24) |
-                   ((uint32_t)src.octets[1] << 16) |
-                   ((uint32_t)src.octets[2] << 8) |
-                   (uint32_t)src.octets[3];
+        src_ipv4 = ipv4_to_u32(src);
         udp_port_hook->receive4(dest_port, src_ipv4, src_port, payload, payload_len);
         return;
     }
@@ -239,7 +171,9 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
     udp_len = ntohs(udp->length);
 
     if (udp_len < sizeof(udp_header_t) || udp_len > len) return;
-    if (udp->checksum == 0 || udp6_pseudo_checksum(src, dest, data, udp_len) != 0) return;
+    if (udp->checksum == 0 ||
+        ipv6_checksum(&src, &dest, IP_PROTO_UDP, data, udp_len) != 0)
+        return;
 
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);

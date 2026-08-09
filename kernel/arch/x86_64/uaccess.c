@@ -24,10 +24,11 @@ int user_access_ok(const void *ptr, size_t size, int access) {
     if ((uint64_t)size - 1 > UINT64_MAX - start) return 0;
     end = start + (uint64_t)size - 1;
     if (end >= KERNEL_VMA) return 0;
+    end &= ~(PAGE_SIZE - 1);
     page = start & ~(PAGE_SIZE - 1);
     for (;;) {
         if (!user_page_access_ok(page, access)) return 0;
-        if (page == (end & ~(PAGE_SIZE - 1))) break;
+        if (page == end) break;
         page += PAGE_SIZE;
     }
     return 1;

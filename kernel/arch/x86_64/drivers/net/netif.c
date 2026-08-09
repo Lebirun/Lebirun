@@ -32,16 +32,16 @@ netif_t *netif_get_default(void) {
 }
 
 netif_t *netif_find(const char *name) {
-    netif_t *netif = netif_list;
+    netif_t *netif;
+    int i;
+
+    if (!name) return NULL;
+
+    netif = netif_list;
     while (netif) {
-        int match = 1;
-        for (int i = 0; i < 16 && name[i]; i++) {
-            if (netif->name[i] != name[i]) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return netif;
+        i = 0;
+        while (i < 16 && name[i] && netif->name[i] == name[i]) i++;
+        if (i == 16 || name[i] == '\0') return netif;
         netif = netif->next;
     }
     return NULL;

@@ -94,9 +94,7 @@ static int dhcp_send_discover(netif_t *netif) {
     pkt.op = DHCP_OP_REQUEST;
     pkt.htype = 1;
     pkt.hlen = 6;
-    pkt.hops = 0;
     pkt.xid = htonl(g_dhcp_state.xid);
-    pkt.secs = 0;
     pkt.flags = htons(0x8000);
     memcpy(pkt.chaddr, &netif->mac, 6);
     pkt.magic = htonl(DHCP_MAGIC);
@@ -130,9 +128,7 @@ static int dhcp_send_request(netif_t *netif) {
     pkt.op = DHCP_OP_REQUEST;
     pkt.htype = 1;
     pkt.hlen = 6;
-    pkt.hops = 0;
     pkt.xid = htonl(g_dhcp_state.xid);
-    pkt.secs = 0;
     pkt.flags = htons(0x8000);
     memcpy(pkt.chaddr, &netif->mac, 6);
     pkt.magic = htonl(DHCP_MAGIC);
@@ -290,41 +286,26 @@ void dhcp_tick(void) {
 
     now = net_get_ticks();
 
-    if (g_dhcp_state.state == DHCP_STATE_SELECTING) {
+    if (g_dhcp_state.state == DHCP_STATE_SELECTING ||
+        g_dhcp_state.state == DHCP_STATE_REQUESTING) {
         elapsed = now - g_dhcp_state.last_send_time;
         retry_interval = DHCP_RETRY_INTERVAL * (1u + g_dhcp_state.retries);
         if (retry_interval > DHCP_RETRY_INTERVAL * 4) {
             retry_interval = DHCP_RETRY_INTERVAL * 4;
         }
-        if (elapsed >= retry_interval) {
-            if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
-                g_dhcp_state.retries = 0;
-                g_dhcp_state.xid = dhcp_rand_xid();
-                dhcp_send_discover(g_dhcp_state.netif);
-            } else {
-                g_dhcp_state.retries++;
-                dhcp_send_discover(g_dhcp_state.netif);
-            }
-        }
-        return;
-    }
+        if (elapsed < retry_interval) return;
 
-    if (g_dhcp_state.state == DHCP_STATE_REQUESTING) {
-        elapsed = now - g_dhcp_state.last_send_time;
-        retry_interval = DHCP_RETRY_INTERVAL * (1u + g_dhcp_state.retries);
-        if (retry_interval > DHCP_RETRY_INTERVAL * 4) {
-            retry_interval = DHCP_RETRY_INTERVAL * 4;
-        }
-        if (elapsed >= retry_interval) {
-            if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
-                g_dhcp_state.state = DHCP_STATE_SELECTING;
-                g_dhcp_state.retries = 0;
-                g_dhcp_state.xid = dhcp_rand_xid();
+        if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
+            g_dhcp_state.state = DHCP_STATE_SELECTING;
+            g_dhcp_state.retries = 0;
+            g_dhcp_state.xid = dhcp_rand_xid();
+            dhcp_send_discover(g_dhcp_state.netif);
+        } else {
+            g_dhcp_state.retries++;
+            if (g_dhcp_state.state == DHCP_STATE_SELECTING)
                 dhcp_send_discover(g_dhcp_state.netif);
-            } else {
-                g_dhcp_state.retries++;
+            else
                 dhcp_send_request(g_dhcp_state.netif);
-            }
         }
         return;
     }

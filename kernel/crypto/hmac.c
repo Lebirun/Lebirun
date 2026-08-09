@@ -18,13 +18,13 @@ void hmac_sha256(const uint8_t *key, size_t key_len,
         key_len = 32;
     }
 
-    for (i = 0; i < 64; i++) {
-        k_ipad[i] = (i < key_len) ? key[i] : 0x00;
-        k_opad[i] = (i < key_len) ? key[i] : 0x00;
+    for (i = 0; i < key_len; i++) {
+        k_ipad[i] = key[i] ^ 0x36;
+        k_opad[i] = key[i] ^ 0x5c;
     }
-    for (i = 0; i < 64; i++) {
-        k_ipad[i] ^= 0x36;
-        k_opad[i] ^= 0x5c;
+    for (; i < 64; i++) {
+        k_ipad[i] = 0x36;
+        k_opad[i] = 0x5c;
     }
 
     sha256_init(&ctx);
@@ -54,13 +54,13 @@ void hmac_sha512(const uint8_t *key, size_t key_len,
         key_len = 64;
     }
 
-    for (i = 0; i < 128; i++) {
-        k_ipad[i] = (i < key_len) ? key[i] : 0x00;
-        k_opad[i] = (i < key_len) ? key[i] : 0x00;
+    for (i = 0; i < key_len; i++) {
+        k_ipad[i] = key[i] ^ 0x36;
+        k_opad[i] = key[i] ^ 0x5c;
     }
-    for (i = 0; i < 128; i++) {
-        k_ipad[i] ^= 0x36;
-        k_opad[i] ^= 0x5c;
+    for (; i < 128; i++) {
+        k_ipad[i] = 0x36;
+        k_opad[i] = 0x5c;
     }
 
     sha512_init(&ctx);

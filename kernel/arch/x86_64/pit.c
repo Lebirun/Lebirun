@@ -99,19 +99,25 @@ static void pit_set_divisor(uint16_t divisor) {
 }
 
 static uint16_t pit_read_count(void) {
-    uint64_t flags = save_flags_cli();
+    uint64_t flags;
+    uint16_t count;
+
+    flags = save_flags_cli();
     outb(PIT_COMMAND, PIT_CMD_LATCH);
     io_wait();
-    uint16_t count = inb(PIT_CHANNEL0_DATA);
+    count = inb(PIT_CHANNEL0_DATA);
     count |= (uint16_t)inb(PIT_CHANNEL0_DATA) << 8;
     restore_flags(flags);
     return count;
 }
 
 static uint64_t pit_get_subtick_us(void) {
+    uint16_t count;
+    uint64_t elapsed;
+
     if (current_divisor == 0) return 0;
-    uint16_t count = pit_read_count();
-    uint64_t elapsed = current_divisor - count;
+    count = pit_read_count();
+    elapsed = current_divisor - count;
     return (elapsed * 1000000UL) / PIT_BASE_FREQ;
 }
 
@@ -142,7 +148,6 @@ void KERNEL_INIT pit_init(uint64_t freq) {
     pit_set_divisor((uint16_t)divisor);
     
     actual_freq = PIT_BASE_FREQ / divisor;
-    error_ppm = 0;
     if (actual_freq > freq) {
         error_ppm = ((actual_freq - freq) * 1000000) / freq;
     } else {
@@ -154,6 +159,8 @@ void KERNEL_INIT pit_init(uint64_t freq) {
 }
 
 void pit_set_frequency(uint64_t freq) {
+    uint64_t divisor;
+
     if (freq == 0) freq = 100;
     if (freq > PIT_BASE_FREQ) freq = PIT_BASE_FREQ;
     if (freq < 19) freq = 19;
@@ -162,7 +169,7 @@ void pit_set_frequency(uint64_t freq) {
     calibrated_freq = freq;
     us_per_tick = 1000000 / freq;
     
-    uint64_t divisor = PIT_BASE_FREQ / freq;
+    divisor = PIT_BASE_FREQ / freq;
     if (divisor > 65535) divisor = 65535;
     if (divisor < 1) divisor = 1;
     
@@ -170,34 +177,43 @@ void pit_set_frequency(uint64_t freq) {
 }
 
 static void delay_ticks(uint64_t ticks) {
+    volatile uint64_t start;
+
     if (ticks == 0) return;
-    volatile uint64_t start = tick_count;
+    start = tick_count;
     while ((tick_count - start) < ticks) {
         __asm__ volatile("hlt");
     }
 }
 
 void delay_us(uint64_t us) {
+    uint64_t loops;
+    uint64_t start_tick;
+    uint64_t start_subtick;
+    uint64_t current_tick;
+    uint64_t current_subtick;
+    uint64_t elapsed_ticks;
+    uint64_t elapsed_us;
+
     if (us == 0) return;
     
     if (us < 50) {
-        uint64_t loops = us * 10;
+        loops = us * 10;
         while (loops--) {
             __asm__ volatile("nop");
         }
         return;
     }
     
-    uint64_t start_tick = tick_count;
-    uint64_t start_subtick = pit_get_subtick_us();
-    uint64_t target_us = us;
+    start_tick = tick_count;
+    start_subtick = pit_get_subtick_us();
     
     while (1) {
-        uint64_t current_tick = tick_count;
-        uint64_t current_subtick = pit_get_subtick_us();
+        current_tick = tick_count;
+        current_subtick = pit_get_subtick_us();
         
-        uint64_t elapsed_ticks = current_tick - start_tick;
-        uint64_t elapsed_us = elapsed_ticks * us_per_tick;
+        elapsed_ticks = current_tick - start_tick;
+        elapsed_us = elapsed_ticks * us_per_tick;
         
         if (current_subtick >= start_subtick) {
             elapsed_us += current_subtick - start_subtick;
@@ -205,19 +221,22 @@ void delay_us(uint64_t us) {
             elapsed_us += us_per_tick - start_subtick + current_subtick;
         }
         
-        if (elapsed_us >= target_us) break;
+        if (elapsed_us >= us) break;
         
-        if ((target_us - elapsed_us) > us_per_tick) {
+        if ((us - elapsed_us) > us_per_tick) {
             __asm__ volatile("hlt");
         }
     }
 }
 
 void delay(uint64_t ms) {
+    uint64_t ticks_needed;
+    uint64_t remainder_us;
+
     if (ms == 0) return;
     
-    uint64_t ticks_needed = (ms * calibrated_freq) / 1000;
-    uint64_t remainder_us = ((ms * 1000) % (1000000 / calibrated_freq));
+    ticks_needed = (ms * calibrated_freq) / 1000;
+    remainder_us = ((ms * 1000) % (1000000 / calibrated_freq));
     
     if (ticks_needed > 0) {
         delay_ticks(ticks_needed);
@@ -235,8 +254,10 @@ void delay_inMs(uint64_t ms) {
 }
 
 void delay_inSecs(uint64_t secs) {
+    uint64_t chunk;
+
     while (secs > 0) {
-        uint64_t chunk = (secs > 60) ? 60 : secs;
+        chunk = (secs > 60) ? 60 : secs;
         delay(chunk * 1000);
         secs -= chunk;
     }
@@ -244,7 +265,7 @@ void delay_inSecs(uint64_t secs) {
 
 void delay_inMins(uint64_t mins) {
     while (mins > 0) {
-        delay_inSecs(60);
+        delay(60000);
         mins--;
     }
 }
@@ -256,22 +277,32 @@ uint64_t pit_get_ticks(void) {
 uint64_t pit_get_uptime_us(void) {
     extern volatile uint32_t *lapic_base;
     extern uint32_t lapic_timer_reload;
-    uint64_t flags = save_flags_cli();
+    uint64_t flags;
+    uint64_t current;
+    uint64_t delta;
+    uint64_t ticks;
+    uint32_t ccr;
+    uint32_t reload;
+    uint64_t base_us;
+    uint64_t result;
+    uint64_t elapsed;
+    uint64_t subtick_us;
+
+    flags = save_flags_cli();
     spin_lock(&uptime_lock);
-    uint64_t current = tick_count;
-    uint64_t delta = current - last_tick;
+    current = tick_count;
+    delta = current - last_tick;
     uptime_ticks += delta;
     last_tick = current;
-    uint64_t ticks = uptime_ticks;
-    uint32_t ccr = 0;
-    uint32_t reload = lapic_timer_reload;
+    ticks = uptime_ticks;
+    ccr = 0;
+    reload = lapic_timer_reload;
     if (lapic_base && reload > 0)
         ccr = lapic_base[0x390 / 4];
-    uint64_t base_us = (ticks * 1000000ULL) / calibrated_freq;
-    uint64_t result;
+    base_us = (ticks * 1000000ULL) / calibrated_freq;
     if (lapic_base && reload > 0) {
-        uint64_t elapsed = (ccr < reload) ? (reload - ccr) : 0;
-        uint64_t subtick_us = (elapsed * (1000000ULL / calibrated_freq)) / reload;
+        elapsed = (ccr < reload) ? (reload - ccr) : 0;
+        subtick_us = (elapsed * (1000000ULL / calibrated_freq)) / reload;
         result = base_us + subtick_us;
     } else {
         spin_unlock(&uptime_lock);
@@ -289,13 +320,18 @@ uint64_t pit_get_uptime_us(void) {
 }
 
 uint64_t pit_get_ticks64(void) {
-    uint64_t flags = save_flags_cli();
+    uint64_t flags;
+    uint64_t current;
+    uint64_t delta;
+    uint64_t result;
+
+    flags = save_flags_cli();
     spin_lock(&uptime_lock);
-    uint64_t current = tick_count;
-    uint64_t delta = current - last_tick;
+    current = tick_count;
+    delta = current - last_tick;
     uptime_ticks += delta;
     last_tick = current;
-    uint64_t result = uptime_ticks;
+    result = uptime_ticks;
     spin_unlock(&uptime_lock);
     restore_flags(flags);
     return result;
@@ -306,7 +342,7 @@ uint64_t pit_get_uptime_ms(void) {
 }
 
 uint64_t pit_get_uptime_secs(void) {
-    return (uint64_t)(pit_get_uptime_ms() / 1000);
+    return pit_get_uptime_us() / 1000000;
 }
 
 uint64_t pit_get_frequency(void) {
@@ -322,7 +358,7 @@ uint64_t pit_ms_to_ticks(uint64_t ms) {
 }
 
 uint64_t pit_ticks_to_us(uint64_t ticks) {
-    return ((uint64_t)ticks * 1000000ULL) / calibrated_freq;
+    return (ticks * 1000000ULL) / calibrated_freq;
 }
 
 uint64_t pit_us_to_ticks(uint64_t us) {
@@ -406,16 +442,20 @@ void pit_process_callbacks(void) {
 }
 
 void speaker_play(uint64_t freq) {
+    uint64_t divisor;
+    uint64_t flags;
+    uint8_t tmp;
+
     if (freq == 0) {
         speaker_stop();
         return;
     }
     
-    uint64_t divisor = PIT_BASE_FREQ / freq;
+    divisor = PIT_BASE_FREQ / freq;
     if (divisor > 65535) divisor = 65535;
     if (divisor < 1) divisor = 1;
     
-    uint64_t flags = save_flags_cli();
+    flags = save_flags_cli();
     
     outb(PIT_COMMAND, PIT_CMD_CH2_INIT);
     io_wait();
@@ -424,14 +464,16 @@ void speaker_play(uint64_t freq) {
     outb(PIT_CHANNEL2_DATA, (divisor >> 8) & 0xFF);
     io_wait();
     
-    uint8_t tmp = inb(SPEAKER_PORT);
+    tmp = inb(SPEAKER_PORT);
     outb(SPEAKER_PORT, tmp | SPEAKER_ENABLE);
     
     restore_flags(flags);
 }
 
 void speaker_stop(void) {
-    uint8_t tmp = inb(SPEAKER_PORT);
+    uint8_t tmp;
+
+    tmp = inb(SPEAKER_PORT);
     outb(SPEAKER_PORT, tmp & ~SPEAKER_ENABLE);
 }
 

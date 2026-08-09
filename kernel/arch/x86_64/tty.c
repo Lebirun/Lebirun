@@ -24,11 +24,13 @@ static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
 static void terminal_updatecursor(void) {
+    uint16_t pos;
+
     if (use_framebuffer) {
         fb_update_cursor();
         return;
     }
-    uint16_t pos = terminal_row * VGA_WIDTH + terminal_column;
+    pos = terminal_row * VGA_WIDTH + terminal_column;
     outb(0x3D4, 14);
     outb(0x3D5, (pos >> 8) & 0xFF);
     outb(0x3D4, 15);
@@ -40,16 +42,16 @@ static void terminal_updatecursor(void) {
 }
 
 void KERNEL_EARLY_INIT terminal_initialize(void) {
+	size_t index;
+	uint16_t blank;
+
 	terminal_row = 0;
 	terminal_column = 0;
 	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 	terminal_buffer = VGA_MEMORY;
-	for (size_t y = 0; y < VGA_HEIGHT; y++) {
-		for (size_t x = 0; x < VGA_WIDTH; x++) {
-			const size_t index = y * VGA_WIDTH + x;
-			terminal_buffer[index] = vga_entry(' ', terminal_color);
-		}
-	}
+	blank = vga_entry(' ', terminal_color);
+	for (index = 0; index < VGA_WIDTH * VGA_HEIGHT; index++)
+		terminal_buffer[index] = blank;
 	terminal_updatecursor();
 }
 
@@ -65,18 +67,24 @@ void terminal_setcolor(uint8_t color) {
 }
 
 void terminal_putentryat(unsigned char c, uint8_t color, size_t x, size_t y) {
-	const size_t index = y * VGA_WIDTH + x;
+	size_t index;
+
+	index = y * VGA_WIDTH + x;
 	terminal_buffer[index] = vga_entry(c, color);
 }
 void terminal_scroll(void) {
+    size_t bytes;
+    size_t last_row;
+    size_t x;
+
     if (use_framebuffer) {
         fb_scroll();
         return;
     }
-	const size_t bytes = VGA_WIDTH * (VGA_HEIGHT - 1) * sizeof(uint16_t);
+	bytes = VGA_WIDTH * (VGA_HEIGHT - 1) * sizeof(uint16_t);
 	memmove(terminal_buffer, terminal_buffer + VGA_WIDTH, bytes);
-	const size_t last_row = VGA_HEIGHT - 1;
-	for (size_t x = 0; x < VGA_WIDTH; x++) {
+	last_row = VGA_HEIGHT - 1;
+	for (x = 0; x < VGA_WIDTH; x++) {
 		terminal_putentryat(' ', terminal_color, x, last_row);
 	}
 }
@@ -131,11 +139,13 @@ void terminal_putchar(char c) {
 }
 
 void terminal_write(const char* data, size_t size) {
-       if (console_is_initialized()) {
+	size_t i;
+
+	if (console_is_initialized()) {
 		console_write_to(0, data, size);
 		return;
 	}
-	for (size_t i = 0; i < size; i++)
+	for (i = 0; i < size; i++)
 		terminal_putchar(data[i]);
 }
 
@@ -156,7 +166,6 @@ int KERNEL_EARLY_INIT terminal_load_psf_font(const void *data, size_t size) {
 
 int KERNEL_EARLY_INIT terminal_load_embedded_font(const void *glyphs, size_t size) {
     if (!use_framebuffer || !glyphs || size != 8192) return -1;
-    memset(&loaded_font, 0, sizeof(loaded_font));
     loaded_font.version = 1;
     loaded_font.width = 8;
     loaded_font.height = 16;

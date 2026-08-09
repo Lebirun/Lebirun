@@ -64,7 +64,6 @@ static void evdev_ensure_ring(struct evdev_device *dev) {
     if (dev->ring && dev->ring_capacity > 0) return;
     ring = (struct input_event *)kmalloc(EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
     if (!ring) return;
-    memset(ring, 0, EVDEV_BUF_INIT_EVENTS * sizeof(struct input_event));
     dev->ring = ring;
     dev->ring_capacity = EVDEV_BUF_INIT_EVENTS;
     dev->head = 0;
@@ -76,12 +75,11 @@ static void evdev_ring_put(struct evdev_device *dev, const struct input_event *e
     uint32_t old_capacity;
     uint32_t new_capacity;
     uint32_t count;
-    uint32_t i;
     struct input_event *new_ring;
 
     if (!dev->ring || dev->ring_capacity == 0)
         return;
-    next = (dev->head + 1) % dev->ring_capacity;
+    next = (dev->head + 1) & (dev->ring_capacity - 1);
     if (next == dev->tail) {
         old_capacity = dev->ring_capacity;
         if (old_capacity >= EVDEV_BUF_EVENTS)
@@ -95,18 +93,15 @@ static void evdev_ring_put(struct evdev_device *dev, const struct input_event *e
         count = 0;
         while (dev->tail != dev->head && count < old_capacity - 1) {
             new_ring[count] = dev->ring[dev->tail];
-            dev->tail = (dev->tail + 1) % old_capacity;
+            dev->tail = (dev->tail + 1) & (old_capacity - 1);
             count++;
-        }
-        for (i = count; i < new_capacity; i++) {
-            memset(&new_ring[i], 0, sizeof(struct input_event));
         }
         kfree(dev->ring);
         dev->ring = new_ring;
         dev->ring_capacity = new_capacity;
         dev->tail = 0;
         dev->head = count;
-        next = (dev->head + 1) % dev->ring_capacity;
+        next = (dev->head + 1) & (dev->ring_capacity - 1);
         if (next == dev->tail)
             return;
     }
@@ -120,7 +115,7 @@ static int evdev_ring_get(struct evdev_device *dev, struct input_event *ev) {
     if (dev->head == dev->tail)
         return 0;
     *ev = dev->ring[dev->tail];
-    dev->tail = (dev->tail + 1) % dev->ring_capacity;
+    dev->tail = (dev->tail + 1) & (dev->ring_capacity - 1);
     return 1;
 }
 
@@ -350,21 +345,11 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
 
 static dirent_t *evdev_input_readdir(vfs_node_t *node, uint64_t index) {
     (void)node;
-    if (index == 0) {
-        memset(&evdev_dirent, 0, sizeof(evdev_dirent));
-        strcpy(evdev_dirent.name, "event0");
-        evdev_dirent.inode = 300;
-        evdev_dirent.type = VFS_CHARDEVICE;
-        return &evdev_dirent;
-    }
-    if (index == 1) {
-        memset(&evdev_dirent, 0, sizeof(evdev_dirent));
-        strcpy(evdev_dirent.name, "event1");
-        evdev_dirent.inode = 301;
-        evdev_dirent.type = VFS_CHARDEVICE;
-        return &evdev_dirent;
-    }
-    return NULL;
+    if (index > 1) return NULL;
+    strcpy(evdev_dirent.name, index == 0 ? "event0" : "event1");
+    evdev_dirent.inode = 300 + index;
+    evdev_dirent.type = VFS_CHARDEVICE;
+    return &evdev_dirent;
 }
 
 static vfs_node_t *evdev_input_finddir(vfs_node_t *node, const char *name) {
@@ -391,9 +376,8 @@ vfs_node_t *evdev_get_input_dir(void) {
 }
 
 vfs_node_t *evdev_get_event_node(int index) {
-    if (index == 0) return &evdev_event0;
-    if (index == 1) return &evdev_event1;
-    return NULL;
+    if (index < 0 || index > 1) return NULL;
+    return index == 0 ? &evdev_event0 : &evdev_event1;
 }
 
 struct evdev_device *evdev_get_kbd(void) {

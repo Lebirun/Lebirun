@@ -13,32 +13,18 @@ extern void terminal_putchar(char c);
 void* memset(void* bufptr, int value, size_t size) {
 	unsigned char *buf;
 	unsigned char byte_val;
-	uint32_t word_val;
-	size_t words;
-	size_t pre;
-	size_t tail;
 
 	if (!bufptr) return bufptr;
 	buf = (unsigned char*) bufptr;
 	byte_val = (unsigned char) value;
 
-	pre = (4 - ((uintptr_t)buf & 3)) & 3;
-	if (pre > size) pre = size;
-	size -= pre;
-	while (pre--) *buf++ = byte_val;
-
 	if (size >= 16) {
-		word_val = (uint32_t)byte_val | ((uint32_t)byte_val << 8) |
-		           ((uint32_t)byte_val << 16) | ((uint32_t)byte_val << 24);
-		words = size >> 2;
-		tail = size & 3;
 		__asm__ volatile (
-			"rep stosl"
-			: "=D"(buf), "=c"(words)
-			: "D"(buf), "c"(words), "a"(word_val)
+			"rep stosb"
+			: "+D"(buf), "+c"(size)
+			: "a"(byte_val)
 			: "memory"
 		);
-		while (tail--) *buf++ = byte_val;
 	} else {
 		while (size--) *buf++ = byte_val;
 	}
@@ -48,31 +34,19 @@ void* memset(void* bufptr, int value, size_t size) {
 void* memcpy(void* __restrict dstptr, const void* __restrict srcptr, size_t size) {
 	unsigned char *dst;
 	const unsigned char *src;
-	size_t words;
-	size_t tail;
 
 	if (!dstptr || !srcptr) return dstptr;
+	dst = (unsigned char*) dstptr;
+	src = (const unsigned char*) srcptr;
 
-	if (size >= 16 && ((uintptr_t)dstptr & 3) == 0 && ((uintptr_t)srcptr & 3) == 0) {
-		words = size >> 2;
-		tail = size & 3;
+	if (size >= 16) {
 		__asm__ volatile (
-			"rep movsl"
-			: "=S"(srcptr), "=D"(dstptr), "=c"(words)
-			: "S"(srcptr), "D"(dstptr), "c"(words)
+			"rep movsb"
+			: "+S"(src), "+D"(dst), "+c"(size)
+			:
 			: "memory"
 		);
-		if (tail) {
-			__asm__ volatile (
-				"rep movsb"
-				: "=S"(srcptr), "=D"(dstptr), "=c"(tail)
-				: "S"(srcptr), "D"(dstptr), "c"(tail)
-				: "memory"
-			);
-		}
 	} else {
-		dst = (unsigned char*) dstptr;
-		src = (const unsigned char*) srcptr;
 		while (size--) *dst++ = *src++;
 	}
 	return dstptr;
@@ -81,58 +55,40 @@ void* memcpy(void* __restrict dstptr, const void* __restrict srcptr, size_t size
 void* memmove(void* dstptr, const void* srcptr, size_t size) {
 	unsigned char *dst;
 	const unsigned char *src;
-	uint32_t *dp;
-	const uint32_t *sp;
+	uint64_t *dp;
+	const uint64_t *sp;
 	size_t words;
 	size_t tail;
 
 	if (!dstptr || !srcptr) return dstptr;
 	dst = (unsigned char*) dstptr;
 	src = (const unsigned char*) srcptr;
+	if (dst == src || size == 0) return dstptr;
 
-	if (dst < src || dst >= src + size) {
-		if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
-			dp = (uint32_t *)dst;
-			sp = (const uint32_t *)src;
-			words = size / 4;
-			tail = size & 3;
-			while (words >= 8) {
-				dp[0] = sp[0]; dp[1] = sp[1];
-				dp[2] = sp[2]; dp[3] = sp[3];
-				dp[4] = sp[4]; dp[5] = sp[5];
-				dp[6] = sp[6]; dp[7] = sp[7];
-				dp += 8; sp += 8; words -= 8;
-			}
-			while (words--) *dp++ = *sp++;
-			dst = (unsigned char *)dp;
-			src = (const unsigned char *)sp;
-			while (tail--) *dst++ = *src++;
-		} else {
-			while (size--) *dst++ = *src++;
-		}
+	if (dst < src) {
+		__asm__ volatile (
+			"rep movsb"
+			: "+S"(src), "+D"(dst), "+c"(size)
+			:
+			: "memory"
+		);
+		return dstptr;
+	}
+	if (dst >= src + size) return memcpy(dstptr, srcptr, size);
+
+	if (size >= 16 && ((uintptr_t)dst & 7) == 0 && ((uintptr_t)src & 7) == 0) {
+		dst += size;
+		src += size;
+		tail = size & 7;
+		while (tail--) *--dst = *--src;
+		dp = (uint64_t *)dst;
+		sp = (const uint64_t *)src;
+		words = size >> 3;
+		while (words--) *--dp = *--sp;
 	} else {
 		dst += size;
 		src += size;
-		if (size >= 16 && ((uintptr_t)dst & 3) == 0 && ((uintptr_t)src & 3) == 0) {
-			dp = (uint32_t *)dst;
-			sp = (const uint32_t *)src;
-			words = size / 4;
-			tail = size & 3;
-			while (tail--) *--dst = *--src;
-			dp = (uint32_t *)dst;
-			sp = (const uint32_t *)src;
-			while (words >= 8) {
-				dp -= 8; sp -= 8;
-				dp[0] = sp[0]; dp[1] = sp[1];
-				dp[2] = sp[2]; dp[3] = sp[3];
-				dp[4] = sp[4]; dp[5] = sp[5];
-				dp[6] = sp[6]; dp[7] = sp[7];
-				words -= 8;
-			}
-			while (words--) *--dp = *--sp;
-		} else {
-			while (size--) *--dst = *--src;
-		}
+		while (size--) *--dst = *--src;
 	}
 	return dstptr;
 }
@@ -146,10 +102,7 @@ int memcmp(const void* aptr, const void* bptr, size_t size) {
 	a = (const unsigned char*) aptr;
 	b = (const unsigned char*) bptr;
 	for (i = 0; i < size; i++) {
-		if (a[i] < b[i])
-			return -1;
-		else if (b[i] < a[i])
-			return 1;
+		if (a[i] != b[i]) return (int)a[i] - (int)b[i];
 	}
 	return 0;
 }
@@ -226,27 +179,17 @@ char* strrchr(const char* s, int c) {
 	return (c == '\0') ? (char*)s : (char*)last;
 }
 
-static int putchar_kernel(int c) {
-	char ch = (char)c;
-	if (console_is_initialized() && kprint_is_ready()) {
-		kprint_write(0, &ch, 1);
-		return c;
-	}
-	terminal_putchar(ch);
-	return c;
-}
-
-static bool kprint(const char* data, size_t length) {
+static void kprint(const char* data, size_t length) {
 	size_t i;
-	if (!data || length == 0) return true;
+
+	if (!data || length == 0) return;
 	if (console_is_initialized() && kprint_is_ready()) {
 		kprint_write(0, data, length);
-		return true;
+		return;
 	}
 	for (i = 0; i < length; i++) {
-		putchar_kernel(data[i]);
+		terminal_putchar(data[i]);
 	}
-	return true;
 }
 
 static void reverse(char* str, size_t len) {

@@ -350,14 +350,18 @@ static inline int ipv4_eq(ipv4_addr_t a, ipv4_addr_t b) {
 }
 
 static inline int mac_eq(mac_addr_t a, mac_addr_t b) {
-    for (int i = 0; i < ETH_ALEN; i++) {
+    int i;
+
+    for (i = 0; i < ETH_ALEN; i++) {
         if (a.addr[i] != b.addr[i]) return 0;
     }
     return 1;
 }
 
 static inline int ipv6_eq(ipv6_addr_t a, ipv6_addr_t b) {
-    for (int i = 0; i < 16; i++) {
+    int i;
+
+    for (i = 0; i < 16; i++) {
         if (a.octets[i] != b.octets[i]) return 0;
     }
     return 1;

@@ -106,8 +106,5 @@ uint64_t rtc_get_time(void) {
 }
 
 void rtc_init(void) {
-    uint64_t time;
-    
-    time = rtc_get_time();
-    (void)time;
+    (void)rtc_get_time();
 }

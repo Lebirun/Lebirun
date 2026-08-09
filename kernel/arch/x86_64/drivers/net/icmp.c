@@ -11,9 +11,11 @@
 static ping_state_t g_ping_state;
 
 void icmp_receive(netif_t *netif, ipv4_addr_t src, uint8_t *data, uint64_t len) {
+    icmp_header_t *icmp;
+
     if (!netif || !data || len < sizeof(icmp_header_t)) return;
 
-    icmp_header_t *icmp = (icmp_header_t *)data;
+    icmp = (icmp_header_t *)data;
 
     if (ipv4_checksum(data, len) != 0) return;
 
@@ -40,15 +42,22 @@ void icmp_receive(netif_t *netif, ipv4_addr_t src, uint8_t *data, uint64_t len) 
     }
 }
 
-int icmp_send_echo_request(netif_t *netif, ipv4_addr_t dest, uint16_t id, uint16_t seq, uint8_t *data, uint64_t len) {
+static int icmp_send_echo(netif_t *netif, ipv4_addr_t dest, uint16_t id,
+                          uint16_t seq, uint8_t *data, uint64_t len,
+                          uint8_t type) {
+    uint64_t icmp_len;
+    uint8_t *packet;
+    icmp_header_t *icmp;
+    int result;
+
     if (!netif) return -1;
 
-    uint64_t icmp_len = sizeof(icmp_header_t) + len;
-    uint8_t *packet = (uint8_t *)kmalloc(icmp_len);
+    icmp_len = sizeof(icmp_header_t) + len;
+    packet = (uint8_t *)kmalloc(icmp_len);
     if (!packet) return -1;
 
-    icmp_header_t *icmp = (icmp_header_t *)packet;
-    icmp->type = ICMP_ECHO_REQUEST;
+    icmp = (icmp_header_t *)packet;
+    icmp->type = type;
     icmp->code = 0;
     icmp->checksum = 0;
     icmp->identifier = htons(id);
@@ -60,40 +69,36 @@ int icmp_send_echo_request(netif_t *netif, ipv4_addr_t dest, uint16_t id, uint16
 
     icmp->checksum = ipv4_checksum(packet, icmp_len);
 
-    int result = ipv4_send(netif, dest, IP_PROTO_ICMP, packet, icmp_len);
+    result = ipv4_send(netif, dest, IP_PROTO_ICMP, packet, icmp_len);
     kfree(packet);
 
     return result;
 }
 
-int icmp_send_echo_reply(netif_t *netif, ipv4_addr_t dest, uint16_t id, uint16_t seq, uint8_t *data, uint64_t len) {
-    if (!netif) return -1;
+int icmp_send_echo_request(netif_t *netif, ipv4_addr_t dest, uint16_t id,
+                           uint16_t seq, uint8_t *data, uint64_t len) {
+    return icmp_send_echo(netif, dest, id, seq, data, len,
+                          ICMP_ECHO_REQUEST);
+}
 
-    uint64_t icmp_len = sizeof(icmp_header_t) + len;
-    uint8_t *packet = (uint8_t *)kmalloc(icmp_len);
-    if (!packet) return -1;
-
-    icmp_header_t *icmp = (icmp_header_t *)packet;
-    icmp->type = ICMP_ECHO_REPLY;
-    icmp->code = 0;
-    icmp->checksum = 0;
-    icmp->identifier = htons(id);
-    icmp->sequence = htons(seq);
-
-    if (data && len > 0) {
-        memcpy(packet + sizeof(icmp_header_t), data, len);
-    }
-
-    icmp->checksum = ipv4_checksum(packet, icmp_len);
-
-    int result = ipv4_send(netif, dest, IP_PROTO_ICMP, packet, icmp_len);
-    kfree(packet);
-
-    return result;
+int icmp_send_echo_reply(netif_t *netif, ipv4_addr_t dest, uint16_t id,
+                         uint16_t seq, uint8_t *data, uint64_t len) {
+    return icmp_send_echo(netif, dest, id, seq, data, len, ICMP_ECHO_REPLY);
 }
 
 int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
-    netif_t *netif = netif_get_default();
+    netif_t *netif;
+    uint16_t id;
+    uint64_t received;
+    uint64_t total_rtt;
+    uint64_t seq;
+    uint64_t timeout_ticks;
+    uint64_t start;
+    uint8_t payload[56];
+    int i;
+    int key;
+
+    netif = netif_get_default();
     if (!netif) {
         printf("ping: no network interface\n");
         return -1;
@@ -103,11 +108,13 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
            target.octets[0], target.octets[1],
            target.octets[2], target.octets[3]);
 
-    uint16_t id = (uint16_t)(net_get_ticks() & 0xFFFF);
-    uint64_t received = 0;
-    uint64_t total_rtt = 0;
+    id = (uint16_t)(net_get_ticks() & 0xFFFF);
+    received = 0;
+    total_rtt = 0;
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    for (i = 0; i < 56; i++) payload[i] = i;
 
-    for (uint64_t seq = 0; seq < count; seq++) {
+    for (seq = 0; seq < count; seq++) {
         g_ping_state.target = target;
         g_ping_state.id = id;
         g_ping_state.seq = seq;
@@ -115,18 +122,12 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
         g_ping_state.rtt = 0;
         g_ping_state.send_time = net_get_ticks();
 
-        uint8_t payload[56];
-        for (int i = 0; i < 56; i++) {
-            payload[i] = i;
-        }
-
         if (icmp_send_echo_request(netif, target, id, seq, payload, sizeof(payload)) < 0) {
             printf("ping: send failed\n");
             continue;
         }
 
-        uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-        uint64_t start = pit_get_ticks();
+        start = pit_get_ticks();
         while (!g_ping_state.received) {
             __asm__ volatile("sti");
             netif_poll_all();
@@ -134,8 +135,8 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
                 break;
             }
             if (keyboard_has_data()) {
-                int k = keyboard_getchar_nb();
-                if (k == 0x03) {
+                key = keyboard_getchar_nb();
+                if (key == 0x03) {
                     printf("ping: interrupted\n");
                     return -1;
                 }
@@ -169,12 +170,19 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
 }
 
 int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
-    netif_t *netif = netif_get_default();
+    netif_t *netif;
+    static uint16_t ping_id = 0;
+    uint8_t payload[56];
+    uint64_t timeout_ticks;
+    uint64_t start;
+    int i;
+    int key;
+
+    netif = netif_get_default();
     if (!netif) {
         return -4;
     }
 
-    static uint16_t ping_id = 0;
     if (seq == 0) {
         ping_id = (uint16_t)(net_get_ticks() & 0xFFFF);
     }
@@ -186,8 +194,7 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
     g_ping_state.rtt = 0;
     g_ping_state.send_time = net_get_ticks();
 
-    uint8_t payload[56];
-    for (int i = 0; i < 56; i++) {
+    for (i = 0; i < 56; i++) {
         payload[i] = i;
     }
 
@@ -195,8 +202,8 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
         return -3;
     }
 
-    uint64_t timeout_ticks = pit_ms_to_ticks(timeout_ms);
-    uint64_t start = pit_get_ticks();
+    timeout_ticks = pit_ms_to_ticks(timeout_ms);
+    start = pit_get_ticks();
     while (!g_ping_state.received) {
         __asm__ volatile("sti");
         netif_poll_all();
@@ -204,8 +211,8 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
             return -1; 
         }
         if (keyboard_has_data()) {
-            int k = keyboard_getchar_nb();
-            if (k == 0x03) {
+            key = keyboard_getchar_nb();
+            if (key == 0x03) {
                 return -2;
             }
         }

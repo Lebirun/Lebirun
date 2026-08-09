@@ -165,7 +165,6 @@ void arp_request(netif_t *netif, ipv4_addr_t target_ip) {
 
     memcpy(&arp.sender_mac, &netif->mac, ETH_ALEN);
     arp.sender_ip = netif->ipv4;
-    memset(&arp.target_mac, 0, ETH_ALEN);
     arp.target_ip = target_ip;
 
     eth_send(netif, MAC_BROADCAST, ETH_TYPE_ARP, (uint8_t *)&arp, sizeof(arp));
@@ -188,7 +187,6 @@ void arp_receive(netif_t *netif, arp_packet_t *arp) {
     if (opcode == ARP_OP_REQUEST) {
         if (ipv4_eq(arp->target_ip, netif->ipv4)) {
             arp_packet_t reply;
-            memset(&reply, 0, sizeof(reply));
 
             reply.hw_type = htons(ARP_HW_ETHER);
             reply.proto_type = htons(ETH_TYPE_IPV4);
@@ -232,10 +230,7 @@ int arp_get_cache(uint64_t *ips, uint8_t *macs, int max_entries) {
 
     for (i = 0; i < arp_cache_capacity && count < max_entries; i++) {
         if (arp_cache[i].valid) {
-            ips[count] = (arp_cache[i].ip.octets[0] << 24) |
-                        (arp_cache[i].ip.octets[1] << 16) |
-                        (arp_cache[i].ip.octets[2] << 8) |
-                        (arp_cache[i].ip.octets[3]);
+            ips[count] = ipv4_to_u32(arp_cache[i].ip);
             memcpy(&macs[count * 6], arp_cache[i].mac.addr, 6);
             count++;
         }

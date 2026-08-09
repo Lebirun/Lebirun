@@ -54,33 +54,19 @@ void dns_set_server2(ipv4_addr_t server) {
 
 static int dns_cache_lookup(const char *name, ipv4_addr_t *out_ipv4) {
     int i;
-    int j;
-    int match;
     uint64_t age;
 
     if (!dns_cache)
         return -1;
 
     for (i = 0; i < dns_cache_capacity; i++) {
-        if (dns_cache[i].has_ipv4) {
-            match = 1;
-            for (j = 0; name[j] && j < 255; j++) {
-                if (dns_cache[i].name[j] != name[j]) {
-                    match = 0;
-                    break;
-                }
+        if (dns_cache[i].has_ipv4 && strcmp(dns_cache[i].name, name) == 0) {
+            age = net_get_ticks() - dns_cache[i].timestamp;
+            if (age < dns_cache[i].ttl * 1000 && age < DNS_CACHE_TTL) {
+                *out_ipv4 = dns_cache[i].ipv4;
+                return 0;
             }
-            if (match && dns_cache[i].name[j] != '\0') {
-                match = 0;
-            }
-            if (match) {
-                age = net_get_ticks() - dns_cache[i].timestamp;
-                if (age < dns_cache[i].ttl * 1000 && age < DNS_CACHE_TTL) {
-                    *out_ipv4 = dns_cache[i].ipv4;
-                    return 0;
-                }
-                dns_cache[i].has_ipv4 = 0;
-            }
+            dns_cache[i].has_ipv4 = 0;
         }
     }
     return -1;
@@ -217,7 +203,6 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
 
     query = (uint8_t *)kmalloc(512);
     if (!query) return -1;
-    memset(query, 0, 512);
 
     hdr = (dns_header_t *)query;
     id = dns_id_counter++;
@@ -287,7 +272,6 @@ int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
 
     query = (uint8_t *)kmalloc(512);
     if (!query) return -1;
-    memset(query, 0, 512);
 
     hdr = (dns_header_t *)query;
     id = dns_id_counter++;
