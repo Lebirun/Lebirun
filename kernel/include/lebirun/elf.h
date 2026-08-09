@@ -299,7 +299,7 @@ typedef struct {
     uint64_t fini_array_size;
     uint64_t init_func;
     uint64_t fini_func;
-    char needed[16][64];
+    char (*needed)[64];
     int needed_count;
 } dl_handle_t;
 

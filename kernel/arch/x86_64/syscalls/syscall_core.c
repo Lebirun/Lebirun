@@ -1023,16 +1023,8 @@ static int sys_read_impl(int fd, char *buf, int len) {
                     line_ready[con_id] = 0;
                     if (t->c_lflag & ISIG) {
                         int fg = tty_get_foreground_pgrp(con_id);
-                        if (fg > 0) {
-                            pid_t pids[64];
-                            int npids;
-                            int si;
-                            npids = collect_pids_in_pgrp((pid_t)fg, pids, 64);
-                            for (si = 0; si < npids; si++) {
-                                task_t *tgt = task_find(pids[si]);
-                                if (tgt) deliver_signal_to_task(tgt, 2);
-                            }
-                        }
+                        if (fg > 0)
+                            deliver_signal_to_pgrp((pid_t)fg, 2);
                     }
                     in_line_editing[con_id] = 0;
                     return -EINTR;
@@ -1131,16 +1123,8 @@ static int sys_read_impl(int fd, char *buf, int len) {
                         char c = (char)key;
                         if ((t->c_lflag & ISIG) && c == 0x03) {
                             int fg = tty_get_foreground_pgrp(con_id);
-                            if (fg > 0) {
-                                pid_t pids[64];
-                                int npids;
-                                int si;
-                                npids = collect_pids_in_pgrp((pid_t)fg, pids, 64);
-                                for (si = 0; si < npids; si++) {
-                                    task_t *tgt = task_find(pids[si]);
-                                    if (tgt) deliver_signal_to_task(tgt, 2);
-                                }
-                            }
+                            if (fg > 0)
+                                deliver_signal_to_pgrp((pid_t)fg, 2);
                             return total > 0 ? total : -EINTR;
                         }
                         if (t->c_iflag & ISTRIP) c &= 0x7F;
@@ -1270,17 +1254,15 @@ struct iovec {
 static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
     uint64_t iov_addr;
     uint64_t iov_end;
-    struct iovec *iov;
-    struct iovec stack_iov[16];
+    struct iovec iov;
     uint64_t base;
     uint64_t len;
+    uint64_t vector_len;
     int total;
     int written;
     int i;
-    int heap_iov;
 
     if (!iov_ptr || iovcnt <= 0) return -EINVAL;
-    if (iovcnt > 1024) return -EINVAL;
     
     iov_addr = (uint64_t)iov_ptr;
     if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -EFAULT;
@@ -1288,57 +1270,40 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
     if (iov_end < iov_addr || iov_end >= KERNEL_VMA) return -EFAULT;
     if (!syscall_core_user_range_mapped(iov_addr, (uint64_t)iovcnt * sizeof(struct iovec))) return -EFAULT;
 
-    heap_iov = 0;
-    if (iovcnt <= 16) {
-        iov = stack_iov;
-    } else {
-        iov = (struct iovec *)kmalloc((uint64_t)iovcnt * sizeof(struct iovec));
-        if (!iov) return -ENOMEM;
-        heap_iov = 1;
-    }
-    memcpy(iov, (const void *)iov_addr, (uint64_t)iovcnt * sizeof(struct iovec));
-
     total = 0;
     
     for (i = 0; i < iovcnt; i++) {
-        base = (uint64_t)iov[i].iov_base;
-        len = iov[i].iov_len;
+        if (copy_from_user(&iov,
+                (const void *)(uintptr_t)(iov_addr +
+                (uint64_t)i * sizeof(struct iovec)), sizeof(iov)) < 0)
+            return total > 0 ? total : -EFAULT;
+        base = (uint64_t)iov.iov_base;
+        vector_len = iov.iov_len;
+        len = vector_len;
 
         if (len == 0) continue;
-        if (len > 0x7FFFFFFFULL) {
-            if (heap_iov) kfree(iov);
+        if (len > 0x7FFFFFFFULL)
             return total > 0 ? total : -EINVAL;
-        }
-        if (base >= KERNEL_VMA || base < 0x1000) {
-            if (heap_iov) kfree(iov);
+        if (base >= KERNEL_VMA || base < 0x1000)
             return total > 0 ? total : -EFAULT;
-        }
-        if (base + len < base || base + len >= KERNEL_VMA) {
-            if (heap_iov) kfree(iov);
+        if (base + len < base || base + len >= KERNEL_VMA)
             return total > 0 ? total : -EFAULT;
-        }
-        if (!syscall_core_user_range_mapped(base, len)) {
-            if (heap_iov) kfree(iov);
+        if (!syscall_core_user_range_mapped(base, len))
             return total > 0 ? total : -EFAULT;
-        }
+        if (len > (uint64_t)(0x7FFFFFFF - total))
+            len = (uint64_t)(0x7FFFFFFF - total);
+        if (len == 0) return total;
         
         written = sys_write(fd, (const char *)base, (int)len);
-        if (written < 0) {
-            if (heap_iov) kfree(iov);
+        if (written < 0)
             return total > 0 ? total : written;
-        }
-        if (written == 0) {
-            if (heap_iov) kfree(iov);
+        if (written == 0)
             return total > 0 ? total : -EIO;
-        }
         total += written;
-        if ((uint64_t)written < len) {
-            if (heap_iov) kfree(iov);
+        if ((uint64_t)written < len || len < vector_len)
             return total;
-        }
     }
     
-    if (heap_iov) kfree(iov);
     return total;
 }
 

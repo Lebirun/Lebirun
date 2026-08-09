@@ -58,7 +58,6 @@
 #define BACKLOG_INIT_SIZE 8
 #define UNIX_PATH_MAX 108
 #define SCM_MAX_FDS 16
-#define SOCKET_IOV_MAX 1024
 
 typedef unsigned int socklen_t;
 typedef long ssize_t;
@@ -1088,9 +1087,15 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     if (!sock) return -EBADF;
     if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
         return -EFAULT;
-    if (msg.msg_iovlen < 0 || msg.msg_iovlen > SOCKET_IOV_MAX)
-        return -EINVAL;
+    if (msg.msg_iovlen < 0) return -EINVAL;
     if (msg.msg_iovlen != 0 && !msg.msg_iov) return -EFAULT;
+    if (msg.msg_iovlen > 0 &&
+        ((uint64_t)(uintptr_t)msg.msg_iov > UINT64_MAX -
+         (uint64_t)msg.msg_iovlen * sizeof(struct iovec) ||
+         !user_access_ok(msg.msg_iov,
+                         (uint64_t)msg.msg_iovlen * sizeof(struct iovec),
+                         UACCESS_READ)))
+        return -EFAULT;
 
     (void)flags;
 
@@ -1143,7 +1148,9 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
 
     total = 0;
     for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
-        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
+        if (copy_from_user(&iov,
+                (const void *)(uintptr_t)((uint64_t)(uintptr_t)msg.msg_iov +
+                (uint64_t)iov_index * sizeof(struct iovec)), sizeof(iov)) < 0)
             return -EFAULT;
         if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
         if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_READ))
@@ -1208,9 +1215,15 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     if (!sock) return -EBADF;
     if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
         return -EFAULT;
-    if (msg.msg_iovlen < 0 || msg.msg_iovlen > SOCKET_IOV_MAX)
-        return -EINVAL;
+    if (msg.msg_iovlen < 0) return -EINVAL;
     if (msg.msg_iovlen != 0 && !msg.msg_iov) return -EFAULT;
+    if (msg.msg_iovlen > 0 &&
+        ((uint64_t)(uintptr_t)msg.msg_iov > UINT64_MAX -
+         (uint64_t)msg.msg_iovlen * sizeof(struct iovec) ||
+         !user_access_ok(msg.msg_iov,
+                         (uint64_t)msg.msg_iovlen * sizeof(struct iovec),
+                         UACCESS_READ)))
+        return -EFAULT;
 
     (void)flags;
     msg.msg_flags = 0;
@@ -1266,7 +1279,9 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 
     total = 0;
     for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
-        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
+        if (copy_from_user(&iov,
+                (const void *)(uintptr_t)((uint64_t)(uintptr_t)msg.msg_iov +
+                (uint64_t)iov_index * sizeof(struct iovec)), sizeof(iov)) < 0)
             return -EFAULT;
         if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
         if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_WRITE))

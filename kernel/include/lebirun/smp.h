@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include <lebirun/registers.h>
 
-#define MAX_CPUS 16
-
 #define LAPIC_REG_ID        0x020
 #define LAPIC_REG_VER       0x030
 #define LAPIC_REG_TPR       0x080

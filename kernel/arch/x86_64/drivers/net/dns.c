@@ -138,7 +138,7 @@ static int dns_encode_name(const char *name, uint8_t *buffer, int buffer_size) {
 static int dns_decode_name(uint8_t *packet, uint64_t packet_len, uint64_t offset, char *name, int max_len) {
     int name_offset;
     int jumped;
-    int jump_count;
+    uint64_t jump_count;
     uint8_t len;
     uint16_t ptr;
     int i;
@@ -147,7 +147,7 @@ static int dns_decode_name(uint8_t *packet, uint64_t packet_len, uint64_t offset
     jumped = 0;
     jump_count = 0;
 
-    while (offset < packet_len && jump_count < 10) {
+    while (offset < packet_len && jump_count < packet_len) {
         len = packet[offset];
         if (len == 0) {
             offset++;

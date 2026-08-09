@@ -285,10 +285,6 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     pty_t *pty;
     int raw_cr;
     int cr_newline;
-    pid_t pids[64];
-    task_t *signal_task;
-    int npids;
-    int si;
 
     pty = get_pty_by_master(fd);
     if (!pty) return -1;
@@ -327,39 +323,24 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {
-                if (pty->pgrp > 0) {
-                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
-                    for (si = 0; si < npids; si++) {
-                        signal_task = task_find(pids[si]);
-                        if (signal_task) deliver_signal_to_task(signal_task, 2);
-                    }
-                }
+                if (pty->pgrp > 0)
+                    deliver_signal_to_pgrp(pty->pgrp, 2);
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VQUIT]) {
-                if (pty->pgrp > 0) {
-                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
-                    for (si = 0; si < npids; si++) {
-                        signal_task = task_find(pids[si]);
-                        if (signal_task) deliver_signal_to_task(signal_task, 3);
-                    }
-                }
+                if (pty->pgrp > 0)
+                    deliver_signal_to_pgrp(pty->pgrp, 3);
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 return to_write;
             }
             if (c == pty->termios.c_cc[VSUSP]) {
-                if (pty->pgrp > 0) {
-                    npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
-                    for (si = 0; si < npids; si++) {
-                        signal_task = task_find(pids[si]);
-                        if (signal_task) deliver_signal_to_task(signal_task, 20);
-                    }
-                }
+                if (pty->pgrp > 0)
+                    deliver_signal_to_pgrp(pty->pgrp, 20);
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
@@ -522,17 +503,8 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             return 0;
         case TIOCSWINSZ:
             if (arg) memcpy(&pty->winsize, arg, sizeof(struct winsize));
-            if (pty->pgrp > 0) {
-                pid_t pids[64];
-                int npids;
-                int si;
-
-                npids = collect_pids_in_pgrp(pty->pgrp, pids, 64);
-                for (si = 0; si < npids; si++) {
-                    task_t *t = task_find(pids[si]);
-                    if (t) deliver_signal_to_task(t, 28);
-                }
-            }
+            if (pty->pgrp > 0)
+                deliver_signal_to_pgrp(pty->pgrp, 28);
             return 0;
         case TIOCGPGRP:
             if (arg) *(pid_t *)arg = pty->pgrp;

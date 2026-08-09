@@ -345,6 +345,45 @@ void KERNEL_INIT keyboard_init(void) {
     outb(0x21, master_mask);
 }
 
+static pid_t keyboard_next_sigint_target(int console_id, pid_t foreground_pgid,
+                                         pid_t after)
+{
+    task_t *task;
+    pid_t task_pgid;
+    pid_t join_pid;
+    pid_t next;
+    uintptr_t address;
+
+    next = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task) {
+        address = (uintptr_t)task;
+        if (address < KERNEL_VMA)
+            break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u)
+            break;
+
+        task_pgid = task->pgid ? task->pgid : task->pid;
+        if (task_pgid == foreground_pgid && task->is_user &&
+                task->state != TASK_DEAD && task->pid > after &&
+                (next == 0 || task->pid < next))
+            next = task->pid;
+
+        if (task->is_user && task->state == TASK_BLOCKED &&
+                (task->waiting_for_any_child || task->join_target) &&
+                task->join_target && task->console_id == console_id) {
+            join_pid = task->join_target->pid;
+            if (join_pid > after && (next == 0 || join_pid < next))
+                next = join_pid;
+        }
+
+        task = task->all_next;
+    }
+    unlock_scheduler();
+    return next;
+}
+
 void keyboard_process_sigint(void)
 {
     extern struct termios *tty_termios;
@@ -353,17 +392,9 @@ void keyboard_process_sigint(void)
     extern int deliver_signal_to_task(task_t *target, int sig);
     int i;
     int fg;
-    task_t *t;
     task_t *target;
-    int guard;
-    int count;
-    int j;
-    int k;
-    int seen;
-    uintptr_t a;
-    pid_t t_pgid;
-    pid_t target_pid;
-    pid_t pids[256];
+    pid_t last_pid;
+    pid_t next_pid;
 
     if (!kbd_consoles || !tty_termios || !tty_pgrp) return;
 
@@ -381,44 +412,13 @@ void keyboard_process_sigint(void)
         if (fg <= 0)
             continue;
 
-        count = 0;
-        lock_scheduler();
-        t = all_tasks_head;
-        guard = 0;
-        while (t && guard < 4096 && count < 256) {
-            a = (uintptr_t)t;
-            if (a < KERNEL_VMA)
+        last_pid = 0;
+        for (;;) {
+            next_pid = keyboard_next_sigint_target(i, (pid_t)fg, last_pid);
+            if (next_pid <= 0)
                 break;
-            if ((a & 0xFFFF0000u) == 0xFEFE0000u)
-                break;
-            t_pgid = t->pgid ? t->pgid : t->pid;
-            if (t_pgid == (pid_t)fg && t->is_user && t->state != TASK_DEAD) {
-                pids[count] = t->pid;
-                count++;
-            }
-            if (t->is_user && t->state == TASK_BLOCKED &&
-                    (t->waiting_for_any_child || t->join_target) &&
-                    t->join_target && t->console_id == i) {
-                target_pid = t->join_target->pid;
-                seen = 0;
-                for (k = 0; k < count; k++) {
-                    if (pids[k] == target_pid) {
-                        seen = 1;
-                        break;
-                    }
-                }
-                if (!seen && count < 256) {
-                    pids[count] = target_pid;
-                    count++;
-                }
-            }
-            t = t->all_next;
-            guard++;
-        }
-        unlock_scheduler();
-
-        for (j = 0; j < count; j++) {
-            target = task_find(pids[j]);
+            last_pid = next_pid;
+            target = task_find(next_pid);
             if (target && target->is_user && target->state != TASK_DEAD) {
                 deliver_signal_to_task(target, 2);
             }

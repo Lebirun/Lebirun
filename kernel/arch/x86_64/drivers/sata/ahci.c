@@ -10,6 +10,9 @@
 
 static ahci_controller_t g_ahci_controller;
 
+#define AHCI_SYNC_TRANSFER_SECTORS 128
+#define AHCI_LBA48_MAX 0x0000FFFFFFFFFFFFULL
+
 static uint64_t KERNEL_INIT ahci_required_port_capacity(uint64_t ports_impl) {
     uint64_t i;
     uint64_t capacity;
@@ -478,7 +481,7 @@ int KERNEL_INIT ahci_identify(ahci_port_t *port) {
     return 0;
 }
 
-int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer) {
+static int ahci_read_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer) {
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
@@ -488,11 +491,11 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     hba_cmd_table_t *cmd_table;
     fis_reg_h2d_t *fis;
 
-    if (!port->present || port->type != AHCI_DEV_SATA) {
+    if (!port || !buffer || !port->present || port->type != AHCI_DEV_SATA) {
         return -1;
     }
     
-    if (count == 0 || count > 128) {
+    if (count == 0 || count > AHCI_SYNC_TRANSFER_SECTORS) {
         return -1;
     }
 
@@ -560,7 +563,7 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     return result;
 }
 
-int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer) {
+static int ahci_write_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer) {
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
@@ -570,11 +573,11 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     hba_cmd_table_t *cmd_table;
     fis_reg_h2d_t *fis;
 
-    if (!port->present || port->type != AHCI_DEV_SATA) {
+    if (!port || !buffer || !port->present || port->type != AHCI_DEV_SATA) {
         return -1;
     }
     
-    if (count == 0 || count > 128) {
+    if (count == 0 || count > AHCI_SYNC_TRANSFER_SECTORS) {
         return -1;
     }
 
@@ -638,6 +641,68 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     mutex_unlock(&port->io_lock);
     
     return result;
+}
+
+int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer) {
+    uint64_t completed;
+    uint64_t chunk;
+    uint64_t byte_offset;
+    uint8_t *bytes;
+    int result;
+
+    if (!port || !buffer || count == 0) return -1;
+    if (lba > AHCI_LBA48_MAX || count - 1 > AHCI_LBA48_MAX - lba) return -1;
+    if (count > UINT64_MAX / AHCI_SECTOR_SIZE) return -1;
+    if ((uint64_t)(uintptr_t)buffer > UINT64_MAX -
+        (AHCI_SECTOR_SIZE - 1)) return -1;
+    if (count - 1 > (UINT64_MAX - (uint64_t)(uintptr_t)buffer -
+                     (AHCI_SECTOR_SIZE - 1)) / AHCI_SECTOR_SIZE) return -1;
+
+    completed = 0;
+    bytes = (uint8_t *)buffer;
+    while (completed < count) {
+        chunk = count - completed;
+        if (chunk > AHCI_SYNC_TRANSFER_SECTORS) {
+            chunk = AHCI_SYNC_TRANSFER_SECTORS;
+        }
+        byte_offset = completed * AHCI_SECTOR_SIZE;
+        result = ahci_read_sectors_chunk(port, lba + completed, chunk,
+                                         bytes + byte_offset);
+        if (result != 0) return result;
+        completed += chunk;
+    }
+    return 0;
+}
+
+int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer) {
+    uint64_t completed;
+    uint64_t chunk;
+    uint64_t byte_offset;
+    const uint8_t *bytes;
+    int result;
+
+    if (!port || !buffer || count == 0) return -1;
+    if (lba > AHCI_LBA48_MAX || count - 1 > AHCI_LBA48_MAX - lba) return -1;
+    if (count > UINT64_MAX / AHCI_SECTOR_SIZE) return -1;
+    if ((uint64_t)(uintptr_t)buffer > UINT64_MAX -
+        (AHCI_SECTOR_SIZE - 1)) return -1;
+    if (count - 1 > (UINT64_MAX - (uint64_t)(uintptr_t)buffer -
+                     (AHCI_SECTOR_SIZE - 1)) / AHCI_SECTOR_SIZE) return -1;
+
+    completed = 0;
+    bytes = (const uint8_t *)buffer;
+    while (completed < count) {
+        chunk = count - completed;
+        if (chunk > AHCI_SYNC_TRANSFER_SECTORS) {
+            chunk = AHCI_SYNC_TRANSFER_SECTORS;
+        }
+        byte_offset = completed * AHCI_SECTOR_SIZE;
+        result = ahci_write_sectors_chunk(port, lba + completed, chunk,
+                                          bytes + byte_offset);
+        if (result != 0) return result;
+        completed += chunk;
+    }
+    return 0;
 }
 
 int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffer) {

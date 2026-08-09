@@ -382,17 +382,8 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             memcpy(&tty_winsize[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_winsize));
             {
                 int pgrp = tty_get_foreground_pgrp(tty_id);
-                if (pgrp > 0) {
-                    pid_t pids[64];
-                    int npids;
-                    int si;
-
-                    npids = collect_pids_in_pgrp((pid_t)pgrp, pids, 64);
-                    for (si = 0; si < npids; si++) {
-                        task_t *t = task_find(pids[si]);
-                        if (t) deliver_signal_to_task(t, 28);
-                    }
-                }
+                if (pgrp > 0)
+                    deliver_signal_to_pgrp((pid_t)pgrp, 28);
             }
             return 0;
             
@@ -472,13 +463,10 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         case VT_WAITACTIVE:
         {
             int target_vt;
-            int guard;
             target_vt = arg;
             if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
-            guard = 0;
-            while (console_get_current() != (target_vt - 1) && guard < 50000) {
+            while (console_get_current() != (target_vt - 1)) {
                 schedule();
-                guard++;
             }
             return 0;
         }

@@ -1602,7 +1602,6 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     int reclen;
     struct linux_dirent *de;
     int i;
-    int guard;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
@@ -1623,9 +1622,8 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     buf = (uint8_t *)dirp_addr;
     written = 0;
     dir_offset = task_fd_position_get(tfd);
-    guard = 0;
 
-    while (written < count && guard < 4096) {
+    while (written < count) {
         if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
 
         name_len = 0;
@@ -1655,7 +1653,6 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
 
         written += reclen;
         dir_offset++;
-        guard++;
     }
 
     task_fd_position_set(tfd, dir_offset);
@@ -2063,66 +2060,52 @@ static int sys_readv(int fd, const struct iovec *iov, int iovcnt) {
     uint64_t iov_len;
     uint64_t base;
     uint64_t len;
-    struct iovec *kiov;
-    struct iovec stack_iov[16];
+    uint64_t vector_len;
+    struct iovec local_iov;
     int total;
     int ret;
     int i;
-    int heap_iov;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!iov || iovcnt <= 0) return -EINVAL;
-    if (iovcnt > 1024) return -EINVAL;
     iov_addr = (uint64_t)iov;
     iov_len = (uint64_t)iovcnt * sizeof(struct iovec);
     if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -EFAULT;
     if (iov_addr + iov_len < iov_addr || iov_addr + iov_len >= KERNEL_VMA) return -EFAULT;
     if (!posix_user_range_mapped(iov_addr, iov_len)) return -EFAULT;
 
-    heap_iov = 0;
-    if (iovcnt <= 16) {
-        kiov = stack_iov;
-    } else {
-        kiov = (struct iovec *)kmalloc(iov_len);
-        if (!kiov) return -ENOMEM;
-        heap_iov = 1;
-    }
-    memcpy(kiov, (const void *)iov_addr, iov_len);
-    
     total = 0;
     for (i = 0; i < iovcnt; i++) {
-        if (kiov[i].iov_len == 0) continue;
-        base = (uint64_t)kiov[i].iov_base;
-        len = (uint64_t)kiov[i].iov_len;
-        if (len > 0x7FFFFFFFULL) {
-            if (heap_iov) kfree(kiov);
+        if (copy_from_user(&local_iov,
+                (const void *)(uintptr_t)(iov_addr +
+                (uint64_t)i * sizeof(struct iovec)), sizeof(local_iov)) < 0)
+            return total > 0 ? total : -EFAULT;
+        if (local_iov.iov_len == 0) continue;
+        base = (uint64_t)local_iov.iov_base;
+        vector_len = (uint64_t)local_iov.iov_len;
+        len = vector_len;
+        if (len > 0x7FFFFFFFULL)
             return total > 0 ? total : -EINVAL;
-        }
-        if (!base || base >= KERNEL_VMA || base < 0x1000) {
-            if (heap_iov) kfree(kiov);
+        if (!base || base >= KERNEL_VMA || base < 0x1000)
             return total > 0 ? total : -EFAULT;
-        }
-        if (base + len < base || base + len >= KERNEL_VMA) {
-            if (heap_iov) kfree(kiov);
+        if (base + len < base || base + len >= KERNEL_VMA)
             return total > 0 ? total : -EFAULT;
-        }
-        if (!posix_user_range_mapped(base, len)) {
-            if (heap_iov) kfree(kiov);
+        if (!posix_user_range_mapped(base, len))
             return total > 0 ? total : -EFAULT;
-        }
+        if (len > (uint64_t)(0x7FFFFFFF - total))
+            len = (uint64_t)(0x7FFFFFFF - total);
+        if (len == 0) return total;
 
-        ret = syscall_core_read_for_readv(fd, kiov[i].iov_base, (int)len);
+        ret = syscall_core_read_for_readv(fd, local_iov.iov_base, (int)len);
         if (ret < 0) {
-            if (heap_iov) kfree(kiov);
             if (total > 0) return total;
             return ret;
         }
         if (ret == 0) break;
         total += ret;
-        if ((size_t)ret < kiov[i].iov_len) break;
+        if ((uint64_t)ret < len || len < vector_len) break;
     }
-    if (heap_iov) kfree(kiov);
     return total;
 }
 
@@ -2143,7 +2126,6 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     int reclen;
     struct linux_dirent64 *de;
     int i;
-    int guard;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
@@ -2164,9 +2146,8 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     buf = (uint8_t *)dirp;
     written = 0;
     dir_offset = task_fd_position_get(tfd);
-    guard = 0;
     
-    while ((unsigned int)written < count && guard < 4096) {
+    while ((unsigned int)written < count) {
         if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
         
         name_len = 0;
@@ -2196,7 +2177,6 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
         
         written += reclen;
         dir_offset++;
-        guard++;
     }
     
     task_fd_position_set(tfd, dir_offset);

@@ -249,24 +249,42 @@ static void vfs_mount_clear_strings(vfs_mount_t *mount) {
 }
 
 vfs_fs_type_t *vfs_find_fs(const char *name) {
-    int iterations;
     vfs_fs_type_t *cur;
-    iterations = 0;
+    vfs_fs_type_t *slow;
+    vfs_fs_type_t *fast;
+    int cycle_check_started;
+
     if (!name) return NULL;
     cur = registered_fs;
+    slow = registered_fs;
+    fast = registered_fs;
+    cycle_check_started = 0;
     while (cur) {
-        if (++iterations > 100) {
-            printf("VFS: ERROR: vfs_find_fs loop detected after %d iterations!\n", iterations);
-            return NULL;
-        }
         if (!vfs_fs_type_valid(cur)) {
-            printf("VFS: ERROR: Invalid fs_type at %p (iter %d)\n", (void*)cur, iterations);
+            printf("VFS: ERROR: Invalid fs_type at %p\n", (void*)cur);
             return NULL;
         }
         if (strcmp(cur->name, name) == 0) {
             return cur;
         }
+        if (cycle_check_started && slow && fast && slow == fast) {
+            printf("VFS: ERROR: vfs_find_fs loop detected\n");
+            return NULL;
+        }
         cur = cur->next;
+        if (slow) {
+            if (!vfs_fs_type_valid(slow)) return NULL;
+            slow = slow->next;
+        }
+        if (fast) {
+            if (!vfs_fs_type_valid(fast)) return NULL;
+            fast = fast->next;
+            if (fast) {
+                if (!vfs_fs_type_valid(fast)) return NULL;
+                fast = fast->next;
+            }
+        }
+        cycle_check_started = 1;
     }
     return NULL;
 }
@@ -615,20 +633,17 @@ void vfs_lookup_hazard_clear(vfs_node_t *node) {
 int vfs_lookup_hazard_contains(vfs_node_t *node) {
     task_t *task;
     int found;
-    int limit;
 
     if (!node) return 0;
     found = 0;
-    limit = 4096;
     lock_scheduler();
     task = all_tasks_head;
-    while (task && limit > 0) {
+    while (task) {
         if (__atomic_load_n(&task->vfs_lookup_node, __ATOMIC_ACQUIRE) == node) {
             found = 1;
             break;
         }
         task = task->all_next;
-        limit--;
     }
     unlock_scheduler();
     return found;
@@ -643,7 +658,6 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
     size_t len;
     size_t pathlen;
     vfs_node_t *cur;
-    int depth;
 
     if (!node || !buf || size == 0)
         return -1;
@@ -670,10 +684,7 @@ static int vfs_node_to_path(vfs_node_t *node, char *buf, size_t size) {
     temp[pos] = '\0';
 
     cur = node;
-    depth = 0;
     while (cur && cur != vfs_root) {
-        if (depth++ >= VFS_MAX_PATH)
-            return -1;
         for (i = 0; i < mounts_capacity; i++) {
             if (mounts[i].in_use && mounts[i].root == cur) {
                 len = vfs_bounded_strlen(mounts[i].path, VFS_MAX_PATH);

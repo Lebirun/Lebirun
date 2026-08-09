@@ -491,7 +491,7 @@ static int task_is_current_on_any_cpu(task_t *task) {
     int i;
 
     if (!task) return 0;
-    for (i = 0; i < cpu_count && i < MAX_CPUS; i++) {
+    for (i = 0; i < cpu_count; i++) {
         if (!cpus[i].active) continue;
         if (cpus[i].running_task == task) return 1;
     }
@@ -504,7 +504,7 @@ static int task_pml4_is_current_on_any_cpu(uint64_t pml4_phys) {
     int i;
 
     if (!pml4_phys) return 0;
-    for (i = 0; i < cpu_count && i < MAX_CPUS; i++) {
+    for (i = 0; i < cpu_count; i++) {
         if (!cpus[i].active) continue;
         running = cpus[i].running_task;
         if (running && running->pml4_phys == pml4_phys) return 1;
@@ -792,42 +792,36 @@ static int task_ptr_valid(task_t *t) {
 }
 
 task_t* task_find(pid_t pid) {
-    int limit;
     task_t *t;
 
     lock_scheduler();
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->pid == pid) {
             unlock_scheduler();
             return t;
         }
         t = t->all_next;
-        limit--;
     }
     unlock_scheduler();
     return NULL;
 }
 
 int task_find_from_irq(pid_t pid, task_t **result) {
-    int limit;
     task_t *t;
 
     if (!result) return 0;
     *result = NULL;
     if (!spin_trylock(&sched_lock)) return 0;
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->pid == pid) {
             *result = t;
             break;
         }
         t = t->all_next;
-        limit--;
     }
     spin_unlock(&sched_lock);
     return 1;
@@ -835,30 +829,25 @@ int task_find_from_irq(pid_t pid, task_t **result) {
 
 task_t* task_find_by_pml4(uint64_t pml4_phys) {
     task_t *t;
-    int limit;
 
     if (!pml4_phys) return NULL;
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->pml4_phys == pml4_phys) {
             return t;
         }
         t = t->all_next;
-        limit--;
     }
     return NULL;
 }
 
 static void task_wake_parent_waiter_locked(task_t *task) {
     task_t *parent;
-    int limit;
 
     if (!task || task->ppid <= 0) return;
     parent = all_tasks_head;
-    limit = 4096;
-    while (parent && limit > 0) {
+    while (parent) {
         if (!task_ptr_valid(parent)) break;
         if (parent->pid == task->ppid) {
             if (parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
@@ -867,17 +856,14 @@ static void task_wake_parent_waiter_locked(task_t *task) {
             return;
         }
         parent = parent->all_next;
-        limit--;
     }
 }
 
 static void task_finish_death_locked(task_t *task) {
     task_t *parent;
-    int limit;
 
     parent = all_tasks_head;
-    limit = 4096;
-    while (parent && limit > 0) {
+    while (parent) {
         if (!task_ptr_valid(parent)) break;
         if (parent->pid == task->ppid) {
             parent->child_utime += task->utime + task->child_utime;
@@ -889,7 +875,6 @@ static void task_finish_death_locked(task_t *task) {
             break;
         }
         parent = parent->all_next;
-        limit--;
     }
     waitq_wake_all(&task->join_waiters);
     task_wake_parent_waiter_locked(task);
@@ -897,15 +882,13 @@ static void task_finish_death_locked(task_t *task) {
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
     int found;
-    int limit;
     task_t *t;
     found = 0;
 
     lock_scheduler();
 
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->ppid == parent_pid) {
             if (pgid_filter <= 0 || t->pgid == pgid_filter) {
@@ -914,7 +897,6 @@ int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
             }
         }
         t = t->all_next;
-        limit--;
     }
 
     unlock_scheduler();
@@ -943,7 +925,6 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
     task_t *t;
     task_t *d;
     int found;
-    int limit;
 
     if (!current_task) return -1;
     lock_scheduler();
@@ -961,8 +942,7 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
 
     found = 0;
     t = all_tasks_head;
-    limit = 1024;
-    while (t && limit > 0) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->ppid == parent_pid) {
             if (pgid_filter <= 0 || t->pgid == pgid_filter) {
@@ -971,7 +951,6 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
             }
         }
         t = t->all_next;
-        limit--;
     }
 
     if (!found) {
@@ -1295,30 +1274,24 @@ static inline void remove_task_from_runqueue(task_t* task) {
 
 static int task_in_runqueue_locked(task_t *task) {
     task_t *t;
-    int limit;
 
     if (!task || !ready_queue_head) return 0;
     t = ready_queue_head;
-    limit = 0;
     do {
         if (t == task) return 1;
         t = t->next;
-        limit++;
-    } while (t && t != ready_queue_head && limit < 10000);
+    } while (t && t != ready_queue_head);
     return 0;
 }
 
 static task_t *task_find_idle_locked(void) {
     task_t *t;
-    int limit;
 
     t = all_tasks_head;
-    limit = 0;
-    while (t && limit < 4096) {
+    while (t) {
         if (!task_ptr_valid(t)) break;
         if (t->id == 0 && !t->is_user && !t->resources_released) return t;
         t = t->all_next;
-        limit++;
     }
     return NULL;
 }
@@ -1513,18 +1486,12 @@ void sleep_ticks(uint64_t ticks) {
 }
 
 static void wake_sleeping_tasks_locked(void) {
-    int safety;
     task_t **ptr;
     task_t *t;
     task_t *next;
 
-    safety = 0;
     ptr = &sleep_queue_head;
     while (*ptr) {
-        if (++safety > 10000) {
-            *ptr = NULL;
-            break;
-        }
         t = *ptr;
         if (!task_ptr_valid(t)) {
             *ptr = NULL;
@@ -2597,16 +2564,12 @@ static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages,
     task_t *task;
     uint64_t reclaimed;
     uint64_t remaining;
-    int visited;
 
     if (max_pages == 0) return 0;
     reclaimed = 0;
-    visited = 0;
     lock_scheduler();
     task = all_tasks_head;
-    while (task && task_ptr_valid(task) && reclaimed < max_pages &&
-           visited < 32) {
-        visited++;
+    while (task && task_ptr_valid(task) && reclaimed < max_pages) {
         if (task->state == TASK_BLOCKED && task->is_user &&
             !task->resources_released && task->exec_completed == 0 &&
             task->pml4_phys &&
@@ -2666,8 +2629,8 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
     reclaimed = 0;
     scanned = 0;
     shared_zero = 0;
-    if (max_pages > 128)
-        scan_limit = 512;
+    if (max_pages > UINT64_MAX / 4)
+        scan_limit = UINT64_MAX;
     else
         scan_limit = max_pages * 4;
     for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
@@ -2724,16 +2687,12 @@ uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages) {
     task_t *task;
     uint64_t reclaimed;
     uint64_t remaining;
-    int visited;
 
     if (max_pages == 0) return 0;
     reclaimed = 0;
-    visited = 0;
     lock_scheduler();
     task = all_tasks_head;
-    while (task && task_ptr_valid(task) && reclaimed < max_pages &&
-           visited < 16) {
-        visited++;
+    while (task && task_ptr_valid(task) && reclaimed < max_pages) {
         if (task->is_user && task->state != TASK_DEAD &&
             !task->resources_released && task->pml4_phys &&
             !task_pml4_is_current_on_any_cpu(task->pml4_phys)) {
@@ -2897,7 +2856,6 @@ static void task_reclaim_stale_exec_now(void) {
     uint64_t count;
     int found;
     int freed;
-    int limit;
 
     do {
         owner = NULL;
@@ -2926,8 +2884,7 @@ static void task_reclaim_stale_exec_now(void) {
             if (freed) {
                 lock_scheduler();
                 scan = all_tasks_head;
-                limit = 1024;
-                while (scan && limit > 0) {
+                while (scan) {
                     if (!task_ptr_valid(scan)) break;
                     if (scan == owner) {
                         if (scan->exec_old_pml4 == pd) {
@@ -2940,7 +2897,6 @@ static void task_reclaim_stale_exec_now(void) {
                         break;
                     }
                     scan = scan->all_next;
-                    limit--;
                 }
                 unlock_scheduler();
                 (void)count;
@@ -3266,17 +3222,15 @@ int task_futex_wake(uint64_t key, int count) {
 int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset) {
     task_t *task;
     int woken;
-    int safety;
 
     if (key == 0) return -KERR_EFAULT;
     if (bitset == 0) return -KERR_EINVAL;
     if (count < 0) return -KERR_EINVAL;
     if (count == 0) return 0;
     woken = 0;
-    safety = 0;
     lock_scheduler();
     task = all_tasks_head;
-    while (task && safety < 10000 && woken < count) {
+    while (task && task_ptr_valid(task) && woken < count) {
         if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
             (uint64_t)(uintptr_t)task->waiting_queue == key &&
             (task->futex_bitset & bitset) != 0) {
@@ -3286,7 +3240,6 @@ int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset) {
             woken++;
         }
         task = task->all_next;
-        safety++;
     }
     unlock_scheduler();
     return woken;
@@ -3297,16 +3250,14 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
     task_t *task;
     int woken;
     int requeued;
-    int safety;
 
     if (!old_key || !new_key) return -KERR_EFAULT;
     if (wake_count < 0 || requeue_count < 0) return -KERR_EINVAL;
     woken = 0;
     requeued = 0;
-    safety = 0;
     lock_scheduler();
     task = all_tasks_head;
-    while (task && safety < 10000) {
+    while (task && task_ptr_valid(task)) {
         if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
             (uint64_t)(uintptr_t)task->waiting_queue == old_key) {
             if (woken < wake_count) {
@@ -3320,7 +3271,6 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
             }
         }
         task = task->all_next;
-        safety++;
     }
     unlock_scheduler();
     return woken + requeued;
@@ -3553,7 +3503,6 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int must_switch;
     int dead_switch;
     bool is_idle;
-    int safety;
     uint64_t rsp0;
     int got_lock;
     int run_deferred;
@@ -3644,7 +3593,6 @@ registers_t* schedule_from_irq(registers_t* regs) {
         next = prev_task->next ? prev_task->next : ready_queue_head;
     }
     start = next;
-    safety = 0;
     return_frame = NULL;
     candidate_frame = NULL;
     candidate = NULL;
@@ -3667,7 +3615,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
             }
         }
         next = next->next;
-        if (next == start || ++safety > 10000) {
+        if (next == start) {
             next = NULL;
             break;
         }
@@ -3984,7 +3932,6 @@ void task_fd_position_share(task_fd_t *source, task_fd_t *copy) {
     task_t *task;
     int group;
     int i;
-    int limit;
 
     if (!source || !copy) return;
     if (source->type != FD_TYPE_FILE || copy->type != FD_TYPE_FILE) return;
@@ -3993,8 +3940,7 @@ void task_fd_position_share(task_fd_t *source, task_fd_t *copy) {
         group = 0;
         lock_scheduler();
         task = all_tasks_head;
-        limit = 0;
-        while (task && task_ptr_valid(task) && limit < 4096) {
+        while (task && task_ptr_valid(task)) {
             if (task->fds) {
                 for (i = 0; i < task->fds_capacity; i++) {
                     if (&task->fds[i] != source) continue;
@@ -4005,7 +3951,6 @@ void task_fd_position_share(task_fd_t *source, task_fd_t *copy) {
             }
             if (group > 1) break;
             task = task->all_next;
-            limit++;
         }
         unlock_scheduler();
         if (group <= 1) return;
@@ -4024,7 +3969,6 @@ void task_fd_position_set(task_fd_t *fd, uint64_t value) {
     task_t *task;
     int group;
     int i;
-    int limit;
 
     if (!fd) return;
     fd->offset = value;
@@ -4032,8 +3976,7 @@ void task_fd_position_set(task_fd_t *fd, uint64_t value) {
     if (fd->type != FD_TYPE_FILE || group <= 1) return;
     lock_scheduler();
     task = all_tasks_head;
-    limit = 0;
-    while (task && task_ptr_valid(task) && limit < 4096) {
+    while (task && task_ptr_valid(task)) {
         if (task->fds) {
             for (i = 0; i < task->fds_capacity; i++) {
                 if (!task->fds[i].in_use) continue;
@@ -4043,7 +3986,6 @@ void task_fd_position_set(task_fd_t *fd, uint64_t value) {
             }
         }
         task = task->all_next;
-        limit++;
     }
     unlock_scheduler();
 }
@@ -4493,8 +4435,9 @@ static __attribute__((unused)) int task_exec_legacy(
     current_task->user_brk_start = current_task->user_brk;
 
     total_pages = elf_page_count + stack_page_count;
-    if (total_pages == 0 || total_pages > 65536) {
-        task_error("task_exec: suspicious total_pages=%u\n", total_pages);
+    if (elf_page_count > UINT64_MAX - stack_page_count ||
+        total_pages == 0 || total_pages > SIZE_MAX / sizeof(uint64_t)) {
+        task_error("task_exec: invalid total_pages=%u\n", total_pages);
         task_restore_file_mappings(current_task, old_file_maps,
                                    old_file_map_count, old_file_map_capacity);
         kfree(elf_pages);
@@ -4927,8 +4870,9 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     new_user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
 
     total_pages = elf_page_count + stack_page_count;
-    if (total_pages == 0 || total_pages > 65536) {
-        task_error("task_exec_with_args: suspicious total_pages=%u\n", total_pages);
+    if (elf_page_count > UINT64_MAX - stack_page_count ||
+        total_pages == 0 || total_pages > SIZE_MAX / sizeof(uint64_t)) {
+        task_error("task_exec_with_args: invalid total_pages=%u\n", total_pages);
         task_abort_file_mappings(current_task, use_node, old_file_maps,
                                  old_file_map_count, old_file_map_capacity);
         kfree(elf_pages);

@@ -117,28 +117,32 @@ static int check_fd_writable(int fd) {
 
 static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
                          int timeout_ms) {
-    uint64_t read_addr = (uint64_t)readfds_ptr;
-    uint64_t write_addr = (uint64_t)writefds_ptr;
-    fd_mask *readfds = NULL;
-    fd_mask *writefds = NULL;
-    fd_mask *in_read = NULL;
-    fd_mask *in_write = NULL;
-    fd_mask *result_read = NULL;
-    fd_mask *result_write = NULL;
+    uint64_t read_addr;
+    uint64_t write_addr;
+    fd_mask *readfds;
+    fd_mask *writefds;
+    fd_mask read_word;
+    fd_mask write_word;
+    fd_mask result_read_word;
+    fd_mask result_write_word;
     uint64_t words;
     uint64_t set_bytes;
-    uint64_t allocation_bytes;
+    uint64_t word_index;
     uint64_t start_tick;
     uint64_t timeout_ticks;
     int count;
     int fd;
+    int bit;
     int descriptor_events;
     uint64_t ready_generation;
     uint64_t elapsed_ticks;
     uint64_t wait_ticks;
 
+    read_addr = (uint64_t)readfds_ptr;
+    write_addr = (uint64_t)writefds_ptr;
+    readfds = NULL;
+    writefds = NULL;
     if (nfds < 0) return -EINVAL;
-    if (nfds > 4096) nfds = 4096;
 
     words = FD_WORDS(nfds);
     set_bytes = words * sizeof(fd_mask);
@@ -153,35 +157,27 @@ static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
                             UACCESS_READ | UACCESS_WRITE)) return -EFAULT;
     }
 
-    allocation_bytes = set_bytes ? set_bytes * 4 : sizeof(fd_mask) * 4;
-    in_read = (fd_mask *)kmalloc(allocation_bytes);
-    if (!in_read) return -ENOMEM;
-    in_write = in_read + words;
-    result_read = in_write + words;
-    result_write = result_read + words;
-
-    memset(in_read, 0, set_bytes);
-    memset(in_write, 0, set_bytes);
-    if (readfds && copy_from_user(in_read, readfds, set_bytes) < 0) {
-        kfree(in_read);
-        return -EFAULT;
-    }
-    if (writefds && copy_from_user(in_write, writefds, set_bytes) < 0) {
-        kfree(in_read);
-        return -EFAULT;
-    }
-
-    for (fd = 0; fd < nfds; fd++) {
-        if ((!readfds || !FD_ISSET_DYN(fd, in_read)) &&
-                (!writefds || !FD_ISSET_DYN(fd, in_write))) continue;
-        if (is_socket_fd(fd)) continue;
-        descriptor_events = event_descriptor_poll(fd);
-        if (descriptor_events >= 0) continue;
-        if (!current_task || !current_task->fds ||
-                fd >= current_task->fds_capacity ||
-                !current_task->fds[fd].in_use) {
-            kfree(in_read);
-            return -EBADF;
+    for (word_index = 0; word_index < words; word_index++) {
+        read_word = 0;
+        write_word = 0;
+        if (readfds && copy_from_user(&read_word, &readfds[word_index],
+                                      sizeof(read_word)) < 0)
+            return -EFAULT;
+        if (writefds && copy_from_user(&write_word, &writefds[word_index],
+                                       sizeof(write_word)) < 0)
+            return -EFAULT;
+        for (bit = 0; bit < (int)NFDBITS; bit++) {
+            fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+            if (fd >= nfds) break;
+            if (!(read_word & (1UL << bit)) &&
+                !(write_word & (1UL << bit))) continue;
+            if (is_socket_fd(fd)) continue;
+            descriptor_events = event_descriptor_poll(fd);
+            if (descriptor_events >= 0) continue;
+            if (!current_task || !current_task->fds ||
+                    fd >= current_task->fds_capacity ||
+                    !current_task->fds[fd].in_use)
+                return -EBADF;
         }
     }
 
@@ -192,21 +188,27 @@ static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
 
     do {
         ready_generation = descriptor_ready_generation();
-        memset(result_read, 0, set_bytes);
-        memset(result_write, 0, set_bytes);
         count = 0;
 
-        for (fd = 0; fd < nfds; fd++) {
-            if (readfds && FD_ISSET_DYN(fd, in_read)) {
-                if (check_fd_readable(fd)) {
-                    FD_SET_DYN(fd, result_read);
-                    count++;
+        for (word_index = 0; word_index < words; word_index++) {
+            read_word = 0;
+            write_word = 0;
+            if (readfds && copy_from_user(&read_word,
+                    &readfds[word_index], sizeof(read_word)) < 0)
+                return -EFAULT;
+            if (writefds && copy_from_user(&write_word,
+                    &writefds[word_index], sizeof(write_word)) < 0)
+                return -EFAULT;
+            for (bit = 0; bit < (int)NFDBITS; bit++) {
+                fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+                if (fd >= nfds) break;
+                if ((read_word & (1UL << bit)) &&
+                    check_fd_readable(fd)) {
+                    if (count < 0x7FFFFFFF) count++;
                 }
-            }
-            if (writefds && FD_ISSET_DYN(fd, in_write)) {
-                if (check_fd_writable(fd)) {
-                    FD_SET_DYN(fd, result_write);
-                    count++;
+                if ((write_word & (1UL << bit)) &&
+                    check_fd_writable(fd)) {
+                    if (count < 0x7FFFFFFF) count++;
                 }
             }
         }
@@ -220,7 +222,6 @@ static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
         }
 
         if (select_interrupted()) {
-            kfree(in_read);
             return -EINTR;
         }
         wait_ticks = UINT64_MAX;
@@ -232,22 +233,43 @@ static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
         wait_ticks = event_descriptor_wait_timeout(wait_ticks);
         descriptor_ready_wait(ready_generation, wait_ticks);
         if (select_interrupted()) {
-            kfree(in_read);
             return -EINTR;
         }
 
     } while (timeout_ms < 0 || (tick_count - start_tick) < timeout_ticks);
 
-    if (readfds && copy_to_user(readfds, result_read, set_bytes) < 0) {
-        kfree(in_read);
-        return -EFAULT;
-    }
-    if (writefds && copy_to_user(writefds, result_write, set_bytes) < 0) {
-        kfree(in_read);
-        return -EFAULT;
+    count = 0;
+    for (word_index = 0; word_index < words; word_index++) {
+        read_word = 0;
+        write_word = 0;
+        result_read_word = 0;
+        result_write_word = 0;
+        if (readfds && copy_from_user(&read_word, &readfds[word_index],
+                                      sizeof(read_word)) < 0)
+            return -EFAULT;
+        if (writefds && copy_from_user(&write_word, &writefds[word_index],
+                                       sizeof(write_word)) < 0)
+            return -EFAULT;
+        for (bit = 0; bit < (int)NFDBITS; bit++) {
+            fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+            if (fd >= nfds) break;
+            if ((read_word & (1UL << bit)) && check_fd_readable(fd)) {
+                result_read_word |= 1UL << bit;
+                if (count < 0x7FFFFFFF) count++;
+            }
+            if ((write_word & (1UL << bit)) && check_fd_writable(fd)) {
+                result_write_word |= 1UL << bit;
+                if (count < 0x7FFFFFFF) count++;
+            }
+        }
+        if (readfds && copy_to_user(&readfds[word_index], &result_read_word,
+                                    sizeof(result_read_word)) < 0)
+            return -EFAULT;
+        if (writefds && copy_to_user(&writefds[word_index], &result_write_word,
+                                     sizeof(result_write_word)) < 0)
+            return -EFAULT;
     }
 
-    kfree(in_read);
     return count;
 }
 

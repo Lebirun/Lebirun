@@ -192,8 +192,9 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
 
     uint64_t total_pages = elf_page_count + stack_page_count;
 
-    if (total_pages == 0 || total_pages > 65536) {
-        printf("launch_user_binary: suspicious total_pages=%u\n", total_pages);
+    if (elf_page_count > UINT64_MAX - stack_page_count ||
+        total_pages == 0 || total_pages > SIZE_MAX / sizeof(uint64_t)) {
+        printf("launch_user_binary: invalid total_pages=%u\n", total_pages);
         if (elf_pages) {
             for (uint64_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
@@ -268,7 +269,7 @@ task_t* launch_user_path(const char *path, int console_id) {
         return NULL;
     }
 
-    if (node->length == 0 || node->length > (32u * 1024u * 1024u)) {
+    if (node->length == 0) {
         printf("launch_user_path: '%s' invalid size %u\n", path, node->length);
         vfs_release(node);
         return NULL;
@@ -327,8 +328,9 @@ task_t* launch_user_path(const char *path, int console_id) {
     }
 
     total_pages = elf_page_count + stack_page_count;
-    if (total_pages == 0 || total_pages > 65536) {
-        printf("launch_user_path: suspicious total_pages=%u for '%s'\n", total_pages, path);
+    if (elf_page_count > UINT64_MAX - stack_page_count ||
+        total_pages == 0 || total_pages > SIZE_MAX / sizeof(uint64_t)) {
+        printf("launch_user_path: invalid total_pages=%u for '%s'\n", total_pages, path);
         task_file_map_list_release(&file_maps);
         if (elf_pages) { for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]); kfree(elf_pages); }
         if (stack_pages) { for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]); kfree(stack_pages); }

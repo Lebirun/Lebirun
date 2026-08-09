@@ -219,7 +219,6 @@ uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer
 uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     struct evdev_device *dev;
     uint64_t written;
-    int guard;
 
     (void)offset;
     dev = (struct evdev_device *)node->private_data;
@@ -230,8 +229,7 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
     if (dev == &evdev_mouse)
         evdev_process_mouse();
 
-    guard = 0;
-    while (!evdev_has_data(dev) && guard < 10000) {
+    while (!evdev_has_data(dev)) {
         if (dev == &evdev_mouse)
             evdev_process_mouse();
         if (evdev_has_data(dev))
@@ -240,7 +238,6 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
         block_current();
         if (dev == &evdev_mouse)
             evdev_process_mouse();
-        guard++;
     }
 
     written = evdev_read_nonblocking(node, size, buffer);

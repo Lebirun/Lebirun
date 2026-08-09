@@ -1635,15 +1635,18 @@ int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
     if (old_priv->fs != new_priv->fs) return -1;
     mutex_lock(&old_priv->fs->lock);
     attempt = 0;
-    do {
+    for (;;) {
         snprintf(temporary, sizeof(temporary), ".lebex-%u-%u-%u",
-                 old_priv->ino, new_priv->ino, attempt++);
+                 old_priv->ino, new_priv->ino, attempt);
         result = ext4_dir_lookup(old_priv->fs, old_priv->ino, temporary,
                                  &existing);
-    } while (result == 0 && attempt < 64);
-    if (result == 0) {
-        mutex_unlock(&old_priv->fs->lock);
-        return -1;
+        if (result != 0)
+            break;
+        if (attempt == (unsigned int)-1) {
+            mutex_unlock(&old_priv->fs->lock);
+            return -1;
+        }
+        attempt++;
     }
     stage = 0;
     result = ext4_rename_file(old_priv->fs, old_priv->ino, old_name,

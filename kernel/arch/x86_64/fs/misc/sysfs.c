@@ -173,7 +173,7 @@ static uint64_t sysfs_cpu_kernel_max_read(vfs_node_t *node, uint64_t offset, uin
     int last;
     int len;
 
-    last = MAX_CPUS - 1;
+    last = UINT8_MAX;
     len = snprintf(value, sizeof(value), "%d\n", last);
     return sysfs_read_static(node, offset, size, buffer, value, (uint64_t)len);
 }

@@ -41,8 +41,6 @@ static uint64_t ioapic_phys = 0xFEC00000u;
 static uint64_t ioapic_gsi_base = 0;
 static uint8_t ioapic_max_redir = 0;
 
-#define MAX_IRQ_OVERRIDES 24
-
 typedef struct {
     uint8_t source;
     uint64_t gsi;
@@ -76,6 +74,15 @@ static int KERNEL_INIT smp_ensure_cpu_capacity(int needed) {
     memset(&new_cpus[needed - 1], 0, sizeof(cpu_info_t));
     cpus = new_cpus;
     return 1;
+}
+
+static int KERNEL_INIT smp_has_lapic_id(uint64_t lapic_id) {
+    int i;
+
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == lapic_id) return 1;
+    }
+    return 0;
 }
 
 static void lapic_write(uint32_t reg, uint32_t val) {
@@ -182,10 +189,11 @@ static void KERNEL_INIT parse_madt_phys(uint64_t madt_phys) {
         if (entry_len < 2) break;
         if (offset + entry_len > end_offset) break;
 
-        if (type == 0 && entry_len >= 8 && cpu_count < MAX_CPUS) {
+        if (type == 0 && entry_len >= 8) {
             acpi_read_phys(madt_phys + offset, entry_buf, 8);
             lapic_flags = *(uint32_t *)(entry_buf + 4);
             if ((lapic_flags & 0x3) &&
+                !smp_has_lapic_id(entry_buf[3]) &&
                 smp_ensure_cpu_capacity(cpu_count + 1)) {
                 cpus[cpu_count].lapic_id = entry_buf[3];
                 cpus[cpu_count].processor_id = entry_buf[2];
@@ -199,8 +207,7 @@ static void KERNEL_INIT parse_madt_phys(uint64_t madt_phys) {
             gsi_base32 = *(uint32_t *)(entry_buf + 8);
             ioapic_phys = (uint64_t)ioapic_addr32;
             ioapic_gsi_base = (uint64_t)gsi_base32;
-        } else if (type == 2 && entry_len >= 10 &&
-                   irq_override_count < MAX_IRQ_OVERRIDES) {
+        } else if (type == 2 && entry_len >= 10) {
             new_overrides = (irq_override_t *)krealloc(
                 irq_overrides,
                 (uint64_t)(irq_override_count + 1) *
@@ -730,8 +737,7 @@ void KERNEL_INIT smp_init(void) {
         }
     }
 
-    if (!found && cpu_count < MAX_CPUS &&
-        smp_ensure_cpu_capacity(cpu_count + 1)) {
+    if (!found && smp_ensure_cpu_capacity(cpu_count + 1)) {
         cpus[cpu_count].lapic_id = bsp_apic_id;
         cpus[cpu_count].processor_id = 0;
         cpus[cpu_count].bsp = 1;

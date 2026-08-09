@@ -487,6 +487,12 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
         kfree(dl_handles[slot].strtab2);
         dl_handles[slot].strtab2 = NULL;
     }
+
+    if (dl_handles[slot].needed) {
+        kfree(dl_handles[slot].needed);
+        dl_handles[slot].needed = NULL;
+        dl_handles[slot].needed_count = 0;
+    }
     
     if (dl_handles[slot].file_data) {
         kfree(dl_handles[slot].file_data);

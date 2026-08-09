@@ -713,6 +713,81 @@ static int strcmp_local(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+static int elf_collect_needed(const uint8_t *data, uint64_t size,
+                              const Elf64_Ehdr *ehdr,
+                              const Elf64_Phdr *phdr,
+                              dl_handle_t *handle) {
+    const Elf64_Dyn *dyn;
+    uint64_t dyn_count;
+    uint64_t dyn_index;
+    uint64_t strtab_offset;
+    uint64_t strtab_size;
+    uint64_t needed_count;
+    uint64_t needed_index;
+    uint64_t string_offset;
+    uint64_t string_index;
+    uint16_t i;
+
+    handle->needed = NULL;
+    handle->needed_count = 0;
+    for (i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_DYNAMIC) continue;
+        if (phdr[i].p_offset > size ||
+            phdr[i].p_filesz > size - phdr[i].p_offset) return -1;
+        dyn = (const Elf64_Dyn *)(data + phdr[i].p_offset);
+        dyn_count = phdr[i].p_filesz / sizeof(Elf64_Dyn);
+        strtab_offset = 0;
+        strtab_size = 0;
+        for (dyn_index = 0; dyn_index < dyn_count; dyn_index++) {
+            if (dyn[dyn_index].d_tag == DT_NULL) break;
+            if (dyn[dyn_index].d_tag == DT_STRTAB) {
+                strtab_offset = dyn[dyn_index].d_un.d_ptr;
+            } else if (dyn[dyn_index].d_tag == DT_STRSZ) {
+                strtab_size = dyn[dyn_index].d_un.d_val;
+            }
+        }
+        if (strtab_offset == 0 || strtab_offset >= size ||
+            strtab_size == 0) return 0;
+        if (strtab_size > size - strtab_offset) {
+            strtab_size = size - strtab_offset;
+        }
+        needed_count = 0;
+        for (dyn_index = 0; dyn_index < dyn_count; dyn_index++) {
+            if (dyn[dyn_index].d_tag == DT_NULL) break;
+            if (dyn[dyn_index].d_tag == DT_NEEDED &&
+                dyn[dyn_index].d_un.d_val < strtab_size) {
+                if (needed_count == INT32_MAX) return -1;
+                needed_count++;
+            }
+        }
+        if (needed_count == 0) return 0;
+        if (needed_count > SIZE_MAX / sizeof(*handle->needed)) return -1;
+        handle->needed = (char (*)[64])kmalloc(
+            needed_count * sizeof(*handle->needed));
+        if (!handle->needed) return -1;
+        needed_index = 0;
+        for (dyn_index = 0; dyn_index < dyn_count; dyn_index++) {
+            if (dyn[dyn_index].d_tag == DT_NULL) break;
+            if (dyn[dyn_index].d_tag != DT_NEEDED ||
+                dyn[dyn_index].d_un.d_val >= strtab_size) continue;
+            string_offset = strtab_offset + dyn[dyn_index].d_un.d_val;
+            string_index = 0;
+            while (string_index < 63 &&
+                   dyn[dyn_index].d_un.d_val + string_index < strtab_size &&
+                   data[string_offset + string_index]) {
+                handle->needed[needed_index][string_index] =
+                    (char)data[string_offset + string_index];
+                string_index++;
+            }
+            handle->needed[needed_index][string_index] = '\0';
+            needed_index++;
+        }
+        handle->needed_count = (int)needed_index;
+        return 0;
+    }
+    return 0;
+}
+
 int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t base_addr, dl_handle_t *handle) {
     int valid;
     const Elf64_Ehdr *ehdr;
@@ -748,10 +823,8 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
     uint64_t type;
     uint64_t addr;
     uint64_t value;
-    uint64_t dyn_strtab_offset;
-    uint64_t dyn_strtab_size;
-    uint64_t needed_offsets[16];
-    int needed_count;
+    uint64_t dyn_count;
+    uint64_t dyn_index;
 
     if (!pd_phys || !data || !handle) {
         return -1;
@@ -785,10 +858,20 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
     }
 
     total_size = load_end_val - load_start;
+    if (total_size > UINT64_MAX - (PAGE_SIZE - 1)) return -10;
     total_pages = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (total_pages == 0 ||
+        total_pages > SIZE_MAX / sizeof(uint64_t)) return -10;
+
+    if (elf_collect_needed(data, size, ehdr, phdr, handle) != 0) {
+        return -14;
+    }
 
     handle->pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
     if (!handle->pages) {
+        if (handle->needed) kfree(handle->needed);
+        handle->needed = NULL;
+        handle->needed_count = 0;
         return -11;
     }
     memset(handle->pages, 0, total_pages * sizeof(uint64_t));
@@ -812,12 +895,15 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
             flags |= VMM_PTE_NX;
         }
 
-        if (offset + filesz > size) {
+        if (offset > size || filesz > size - offset) {
             for (j = 0; j < handle->page_count; j++) {
                 pfa_free(handle->pages[j]);
             }
             kfree(handle->pages);
             handle->pages = NULL;
+            if (handle->needed) kfree(handle->needed);
+            handle->needed = NULL;
+            handle->needed_count = 0;
             return -12;
         }
 
@@ -834,6 +920,9 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
                 }
                 kfree(handle->pages);
                 handle->pages = NULL;
+                if (handle->needed) kfree(handle->needed);
+                handle->needed = NULL;
+                handle->needed_count = 0;
                 return -13;
             }
 
@@ -864,7 +953,6 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
     handle->fini_array_size = 0;
     handle->init_func = 0;
     handle->fini_func = 0;
-    handle->needed_count = 0;
 
     if (ehdr->e_shoff && ehdr->e_shnum) {
         shdr = (const Elf64_Shdr *)(data + ehdr->e_shoff);
@@ -919,37 +1007,27 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
             dyn = (const Elf64_Dyn *)(data + phdr[i].p_offset);
             rel_offset = 0;
             rel_size = 0;
-            dyn_strtab_offset = 0;
-            dyn_strtab_size = 0;
-            needed_count = 0;
-            
-            while (dyn->d_tag != DT_NULL) {
-                if (dyn->d_tag == DT_RELA) {
-                    rel_offset = dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_RELASZ) {
-                    rel_size = dyn->d_un.d_val;
-                } else if (dyn->d_tag == DT_INIT) {
-                    handle->init_func = base_addr + dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_FINI) {
-                    handle->fini_func = base_addr + dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_INIT_ARRAY) {
-                    handle->init_array_vaddr = base_addr + dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_INIT_ARRAYSZ) {
-                    handle->init_array_size = dyn->d_un.d_val;
-                } else if (dyn->d_tag == DT_FINI_ARRAY) {
-                    handle->fini_array_vaddr = base_addr + dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_FINI_ARRAYSZ) {
-                    handle->fini_array_size = dyn->d_un.d_val;
-                } else if (dyn->d_tag == DT_STRTAB) {
-                    dyn_strtab_offset = dyn->d_un.d_ptr;
-                } else if (dyn->d_tag == DT_STRSZ) {
-                    dyn_strtab_size = dyn->d_un.d_val;
-                } else if (dyn->d_tag == DT_NEEDED) {
-                    if (needed_count < 16) {
-                        needed_offsets[needed_count++] = dyn->d_un.d_val;
-                    }
+            dyn_count = phdr[i].p_filesz / sizeof(Elf64_Dyn);
+
+            for (dyn_index = 0; dyn_index < dyn_count; dyn_index++) {
+                if (dyn[dyn_index].d_tag == DT_NULL) break;
+                if (dyn[dyn_index].d_tag == DT_RELA) {
+                    rel_offset = dyn[dyn_index].d_un.d_ptr;
+                } else if (dyn[dyn_index].d_tag == DT_RELASZ) {
+                    rel_size = dyn[dyn_index].d_un.d_val;
+                } else if (dyn[dyn_index].d_tag == DT_INIT) {
+                    handle->init_func = base_addr + dyn[dyn_index].d_un.d_ptr;
+                } else if (dyn[dyn_index].d_tag == DT_FINI) {
+                    handle->fini_func = base_addr + dyn[dyn_index].d_un.d_ptr;
+                } else if (dyn[dyn_index].d_tag == DT_INIT_ARRAY) {
+                    handle->init_array_vaddr = base_addr + dyn[dyn_index].d_un.d_ptr;
+                } else if (dyn[dyn_index].d_tag == DT_INIT_ARRAYSZ) {
+                    handle->init_array_size = dyn[dyn_index].d_un.d_val;
+                } else if (dyn[dyn_index].d_tag == DT_FINI_ARRAY) {
+                    handle->fini_array_vaddr = base_addr + dyn[dyn_index].d_un.d_ptr;
+                } else if (dyn[dyn_index].d_tag == DT_FINI_ARRAYSZ) {
+                    handle->fini_array_size = dyn[dyn_index].d_un.d_val;
                 }
-                dyn++;
             }
             
             if (rel_size > 0 && rel_offset < size) {
@@ -962,20 +1040,6 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
                         addr = base_addr + rel[r].r_offset;
                         value = base_addr + rel[r].r_addend;
                         vmm_copy_to_pml4(pd_phys, addr, &value, sizeof(uint64_t));
-                    }
-                }
-            }
-
-            handle->needed_count = 0;
-            if (dyn_strtab_offset > 0 && dyn_strtab_offset < size && needed_count > 0) {
-                for (r = 0; r < (uint64_t)needed_count; r++) {
-                    if (needed_offsets[r] < dyn_strtab_size &&
-                        dyn_strtab_offset + needed_offsets[r] < size) {
-                        strncpy(handle->needed[handle->needed_count],
-                                (const char *)(data + dyn_strtab_offset + needed_offsets[r]),
-                                63);
-                        handle->needed[handle->needed_count][63] = '\0';
-                        handle->needed_count++;
                     }
                 }
             }

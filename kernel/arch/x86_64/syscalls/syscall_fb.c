@@ -59,17 +59,8 @@ static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) 
                 tty_winsize[ci].ws_xpixel = fb->width;
                 tty_winsize[ci].ws_ypixel = fb->height;
             }
-            if (tty_pgrp[ci] > 0) {
-                pid_t pids[64];
-                int npids;
-                int si;
-
-                npids = collect_pids_in_pgrp(tty_pgrp[ci], pids, 64);
-                for (si = 0; si < npids; si++) {
-                    task_t *t = task_find(pids[si]);
-                    if (t) deliver_signal_to_task(t, 28);
-                }
-            }
+            if (tty_pgrp[ci] > 0)
+                deliver_signal_to_pgrp(tty_pgrp[ci], 28);
         }
     }
     return result;

@@ -192,12 +192,13 @@ static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
 }
 
 static int sys_net_ping(int ip_packed, const char *unused2, int count) {
+    ipv4_addr_t target;
+
     (void)unused2;
     net_ensure_hw();
     klog("[DEBUG] sys_net_ping called with ip=0x%08X count=%d\n", ip_packed, count);
-    ipv4_addr_t target = u32_to_ipv4((uint64_t)ip_packed);
+    target = u32_to_ipv4((uint64_t)ip_packed);
     if (count <= 0) count = 4;
-    if (count > 100) count = 100;
     return ping(target, count, 3000);
 }
 

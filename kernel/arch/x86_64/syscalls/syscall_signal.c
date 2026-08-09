@@ -791,39 +791,88 @@ int deliver_signal_to_task(task_t *target, int sig) {
     return 0;
 }
 
-int collect_pids_in_pgrp(pid_t pgid, pid_t *out, int out_cap) {
-    int count = 0;
-    int guard = 0;
+static pid_t signal_find_next_pgrp(pid_t pgid, pid_t after) {
     task_t *t;
-    uint64_t a;
-    pid_t t_pgid;
+    uint64_t address;
+    pid_t task_pgid;
+    pid_t result;
 
-    if (!out || out_cap <= 0) return 0;
-    if (pgid <= 0) return 0;
-
+    result = 0;
     lock_scheduler();
     t = all_tasks_head;
-    while (t && guard < 4096) {
-        a = (uint64_t)t;
-        if (a < KERNEL_VMA) break;
-        if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
-
-        t_pgid = t->pgid ? t->pgid : t->pid;
-        if (t_pgid == pgid) {
-            if (count < out_cap) {
-                out[count++] = t->pid;
-            }
+    while (t) {
+        address = (uint64_t)t;
+        if (address < KERNEL_VMA) break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+        task_pgid = t->pgid ? t->pgid : t->pid;
+        if (task_pgid == pgid && t->pid > after &&
+            (result == 0 || t->pid < result)) {
+            result = t->pid;
         }
-
         t = t->all_next;
-        guard++;
     }
     unlock_scheduler();
-    return count;
+    return result;
+}
+
+int deliver_signal_to_pgrp(pid_t pgid, int sig) {
+    task_t *task;
+    pid_t last_pid;
+    pid_t next_pid;
+    int sent;
+
+    if (pgid <= 0) return 0;
+    last_pid = 0;
+    sent = 0;
+    for (;;) {
+        next_pid = signal_find_next_pgrp(pgid, last_pid);
+        if (next_pid <= 0) break;
+        last_pid = next_pid;
+        task = task_find(next_pid);
+        if (task) {
+            deliver_signal_to_task(task, sig);
+            sent++;
+        }
+    }
+    return sent;
+}
+
+static pid_t signal_find_next_permitted(pid_t after, pid_t self_pid,
+                                        uint64_t uid, uint64_t euid) {
+    task_t *t;
+    uint64_t address;
+    pid_t result;
+
+    result = 0;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        address = (uint64_t)t;
+        if (address < KERNEL_VMA) break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+        if (t->is_user && t->pid != self_pid && t->pid != 1 &&
+            t->pid > after &&
+            (uid == 0 || uid == t->uid || euid == t->uid) &&
+            (result == 0 || t->pid < result)) {
+            result = t->pid;
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    return result;
 }
 
 int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     int sig;
+    int sent;
+    task_t *t;
+    task_t *target;
+    pid_t pgid;
+    pid_t self_pid;
+    pid_t last_pid;
+    pid_t next_pid;
+    uint64_t uid;
+    uint64_t euid;
 
     (void)unused;
     sig = (int)(uintptr_t)sig_ptr;
@@ -831,10 +880,6 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     
     if (sig == 0) {
-        task_t *t;
-        pid_t pgid;
-        pid_t tmp[1];
-
         if (pid > 0) {
             t = task_find((pid_t)pid);
             return t ? 0 : -ESRCH;
@@ -843,12 +888,10 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         pgid = 0;
         if (pid == 0) pgid = current_task->pgid ? current_task->pgid : current_task->pid;
         else pgid = (pid_t)(-pid);
-        return collect_pids_in_pgrp(pgid, tmp, 1) > 0 ? 0 : -ESRCH;
+        return signal_find_next_pgrp(pgid, 0) > 0 ? 0 : -ESRCH;
     }
 
     if (pid > 0) {
-        task_t *target;
-
         target = task_find((pid_t)pid);
         if (!target) return -ESRCH;
         if (target->is_kernel_task) return -EPERM;
@@ -861,36 +904,17 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (!current_task) return -ESRCH;
 
     if (pid == -1) {
-        int sent = 0;
-        pid_t self_pid = current_task->pid;
-        uint64_t my_uid = current_task->uid;
-        uint64_t my_euid = current_task->euid;
-        pid_t pids[256];
-        int guard = 0;
-        int count = 0;
-        int i;
-        uint64_t a;
-        task_t *t;
-
-        lock_scheduler();
-        t = all_tasks_head;
-        while (t && guard < 4096) {
-            a = (uint64_t)t;
-            if (a < KERNEL_VMA) break;
-            if ((a & 0xFFFF0000u) == 0xFEFE0000u) break;
-            if (t->is_user && t->pid != self_pid && t->pid != 1 &&
-                (my_uid == 0 || my_uid == t->uid || my_euid == t->uid)) {
-                if (count < 256) {
-                    pids[count] = t->pid;
-                    count++;
-                }
-            }
-            t = t->all_next;
-            guard++;
-        }
-        unlock_scheduler();
-        for (i = 0; i < count; i++) {
-            t = task_find(pids[i]);
+        sent = 0;
+        self_pid = current_task->pid;
+        uid = current_task->uid;
+        euid = current_task->euid;
+        last_pid = 0;
+        for (;;) {
+            next_pid = signal_find_next_permitted(last_pid, self_pid, uid,
+                                                  euid);
+            if (next_pid <= 0) break;
+            last_pid = next_pid;
+            t = task_find(next_pid);
             if (t) {
                 deliver_signal_to_task(t, sig);
                 sent++;
@@ -899,31 +923,26 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         return sent > 0 ? 0 : -ESRCH;
     }
 
-    {
-        pid_t pgid = 0;
-        pid_t pids[256];
-        int n;
-        int i;
+    if (pid == 0) {
+        pgid = current_task->pgid ? current_task->pgid : current_task->pid;
+    } else {
+        pgid = (pid_t)(-pid);
+    }
+    if (pgid <= 0) return -EINVAL;
 
-        if (pid == 0) {
-            pgid = current_task->pgid ? current_task->pgid : current_task->pid;
-        } else {
-            pgid = (pid_t)(-pid);
-        }
-        if (pgid <= 0) return -EINVAL;
-
-        n = collect_pids_in_pgrp(pgid, pids, 256);
-        if (n <= 0) return -ESRCH;
-
-        for (i = 0; i < n; i++) {
-            task_t *t = task_find(pids[i]);
-            if (t) {
-                deliver_signal_to_task(t, sig);
-            }
+    sent = 0;
+    last_pid = 0;
+    for (;;) {
+        next_pid = signal_find_next_pgrp(pgid, last_pid);
+        if (next_pid <= 0) break;
+        last_pid = next_pid;
+        t = task_find(next_pid);
+        if (t) {
+            deliver_signal_to_task(t, sig);
+            sent++;
         }
     }
-
-    return 0;
+    return sent > 0 ? 0 : -ESRCH;
 }
 
 static int sys_tgkill(int tgid, const char *tid_ptr, int sig) {
