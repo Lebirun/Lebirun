@@ -5,26 +5,31 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define CONSOLE_BUFFER_COLS 160
 #define CONSOLE_INACTIVE_INITIAL_ROWS 4
 #define CONSOLE_WRITE_BUFFER_INIT 512
-#define CONSOLE_WRITE_BUFFER_MAX  65536
 
 bool console_is_initialized(void);
 
 typedef struct {
-    char (*buffer)[CONSOLE_BUFFER_COLS];
-    uint8_t (*color_buffer)[CONSOLE_BUFFER_COLS];
+    char *buffer;
+    uint8_t *color_buffer;
     uint64_t color_run_count;
     uint8_t color_packed;
     uint8_t *line_wrapped;
     uint64_t buffer_rows;
+    uint64_t buffer_cols;
     uint64_t cursor_x;
     uint64_t cursor_y;
     uint64_t scroll_offset;
 
     int esc_state;
-    char esc_buf[32];
+    union {
+        char inline_data[32];
+        struct {
+            char *data;
+            int capacity;
+        } dynamic;
+    } esc;
     int esc_len;
     uint8_t ansi_fg;
     uint8_t ansi_bg;
@@ -48,10 +53,11 @@ typedef struct {
 
     int alt_screen_active;
     volatile int alt_screen_pending;
-    char (*alt_saved_buffer)[CONSOLE_BUFFER_COLS];
-    uint8_t (*alt_saved_color)[CONSOLE_BUFFER_COLS];
+    char *alt_saved_buffer;
+    uint8_t *alt_saved_color;
     uint8_t *alt_saved_wrapped;
     uint64_t alt_saved_rows;
+    uint64_t alt_saved_cols;
     uint64_t alt_saved_cx;
     uint64_t alt_saved_cy;
     uint64_t alt_saved_scroll;

@@ -29,7 +29,8 @@
 #define IPV67_TYPE_PUNCH       0x0f
 
 #define IPV67_PORT_DEFAULT     6767
-#define IPV67_MAX_HOPS         16
+#define IPV67_DEFAULT_HOPS     16
+#define IPV67_MAX_HOPS         255
 #define IPV67_BLOCK_BITS       12
 #define IPV67_AUTH_KEY_SIZE    32
 #define IPV67_IDENTITY_SIZE    32

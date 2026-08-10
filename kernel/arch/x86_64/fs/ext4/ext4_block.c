@@ -35,35 +35,22 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     }
 
     if (oldest < 0) {
-        if (fs->block_cache_count < EXT4_CACHE_BLOCKS_MAX) {
-            old_count = fs->block_cache_count;
-            if (old_count == 0) {
-                new_count = 1;
-            } else {
-                new_count = old_count * 2;
-            }
-            if (new_count <= old_count) {
-                return -1;
-            }
-            if (new_count > EXT4_CACHE_BLOCKS_MAX) {
-                new_count = EXT4_CACHE_BLOCKS_MAX;
-            }
-            new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
-                new_count * sizeof(ext4_block_cache_entry_t));
-            if (!new_cache) {
-                return -1;
-            }
-            memset(new_cache + old_count, 0,
-                (new_count - old_count) * sizeof(ext4_block_cache_entry_t));
-            fs->block_cache = new_cache;
-            fs->block_cache_count = new_count;
-            return (int)old_count;
-        }
-        return -1;
+        old_count = fs->block_cache_count;
+        if (old_count == 0) new_count = 1;
+        else if (old_count > UINT32_MAX / 2) return -1;
+        else new_count = old_count * 2;
+        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
+            (uint64_t)new_count * sizeof(ext4_block_cache_entry_t));
+        if (!new_cache) return -1;
+        memset(new_cache + old_count, 0,
+            (uint64_t)(new_count - old_count) * sizeof(ext4_block_cache_entry_t));
+        fs->block_cache = new_cache;
+        fs->block_cache_count = new_count;
+        return (int)old_count;
     }
 
     if (fs->block_cache[oldest].dirty &&
-        fs->block_cache_count < EXT4_CACHE_BLOCKS) {
+        fs->block_cache_count < UINT32_MAX) {
         old_count = fs->block_cache_count;
         new_count = old_count + 1;
         new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
@@ -277,6 +264,32 @@ int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
     return reclaimed;
 }
 
+void ext4_compact_block_cache(ext4_fs_t *fs) {
+    ext4_block_cache_entry_t *cache;
+    uint32_t read_index;
+    uint32_t write_index;
+
+    if (!fs || !fs->block_cache) return;
+    write_index = 0;
+    for (read_index = 0; read_index < fs->block_cache_count; read_index++) {
+        if (!fs->block_cache[read_index].data) continue;
+        if (read_index != write_index)
+            fs->block_cache[write_index] = fs->block_cache[read_index];
+        write_index++;
+    }
+    if (write_index == 0) {
+        kfree(fs->block_cache);
+        fs->block_cache = NULL;
+        fs->block_cache_count = 0;
+        return;
+    }
+    cache = (ext4_block_cache_entry_t *)krealloc(
+        fs->block_cache,
+        (uint64_t)write_index * sizeof(ext4_block_cache_entry_t));
+    if (cache) fs->block_cache = cache;
+    fs->block_cache_count = write_index;
+}
+
 void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block) {
     int idx = find_cache_entry(fs, block);
     if (idx >= 0) {
@@ -292,7 +305,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     int max_run;
     int run_len;
     uint32_t temp;
-    uint32_t dirty_idx[EXT4_CACHE_BLOCKS_MAX];
+    uint32_t *dirty_idx;
     ahci_port_t *port;
     uint8_t *batch_buf;
     uint64_t base_lba;
@@ -320,6 +333,10 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
         }
         return errors ? -1 : 0;
     }
+
+    if ((uint64_t)dirty_count > SIZE_MAX / sizeof(uint32_t)) return -1;
+    dirty_idx = (uint32_t *)kmalloc((uint64_t)dirty_count * sizeof(uint32_t));
+    if (!dirty_idx) return -1;
 
     j = 0;
     for (i = 0; i < (int)fs->block_cache_count; i++) {
@@ -398,6 +415,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
         i += run_len;
     }
 
+    kfree(dirty_idx);
     return errors ? -1 : 0;
 }
 

@@ -6,7 +6,6 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-#define IPV6_NEIGHBOR_CACHE_SIZE 32
 #define IPV6_NEIGHBOR_TTL       300000
 
 typedef struct {
@@ -102,11 +101,10 @@ static int ipv6_neighbor_grow_cache(void) {
     ipv6_neighbor_entry_t *new_neighbors;
     int new_capacity;
 
-    if (ipv6_neighbor_capacity >= IPV6_NEIGHBOR_CACHE_SIZE) return 0;
-
+    if (ipv6_neighbor_capacity > INT32_MAX / 2) return -1;
     new_capacity = ipv6_neighbor_capacity * 2;
     if (new_capacity < 4) new_capacity = 4;
-    if (new_capacity > IPV6_NEIGHBOR_CACHE_SIZE) new_capacity = IPV6_NEIGHBOR_CACHE_SIZE;
+    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(ipv6_neighbor_entry_t)) return -1;
 
     new_neighbors = (ipv6_neighbor_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
     if (!new_neighbors) return -1;
@@ -154,7 +152,7 @@ void ipv6_neighbor_update(ipv6_addr_t ip, mac_addr_t mac) {
         }
     }
 
-    if (free_idx < 0 && ipv6_neighbor_capacity < IPV6_NEIGHBOR_CACHE_SIZE) {
+    if (free_idx < 0) {
         if (ipv6_neighbor_grow_cache() == 0) free_idx = ipv6_neighbor_capacity / 2;
     }
     if (free_idx < 0) free_idx = oldest_idx;

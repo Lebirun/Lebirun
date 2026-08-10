@@ -16,8 +16,6 @@ void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
 
 #define fd_table (current_task->fds)
 
-#define POSIX_EXEC_PATH_MAX 256
-
 static uint64_t posix_user_pd(void) {
     if (!current_task) return 0;
     if (current_task->cr3) return current_task->cr3;
@@ -980,12 +978,12 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     argv_addr = (uint64_t)argv_ptr;
     envp_addr = (uint64_t)envp_ptr;
 
-    ret = posix_copy_user_string(&path, (const char *)path_addr, POSIX_EXEC_PATH_MAX);
-    if (ret != 0) return ret;
-
     stack_limit = task_rlimit_get(current_task, 3, 0);
     exec_budget = USER_STACK_TOP - USER_STACK_FLOOR;
     if (stack_limit < exec_budget) exec_budget = stack_limit;
+    ret = posix_copy_user_string(&path, (const char *)path_addr, exec_budget);
+    if (ret != 0) return ret;
+
     ret = posix_copy_user_string_array(&argv, &argc, argv_addr,
                                        &exec_budget);
     if (ret != 0) {

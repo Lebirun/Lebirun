@@ -9,10 +9,7 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_CACHE_BLOCKS       2
-#define EXT4_CACHE_BLOCKS_MAX   8
 #define EXT4_INODE_CACHE_INIT   4
-#define EXT4_INODE_CACHE_MAX    256
 
 struct ext4_fs;
 
@@ -70,6 +67,7 @@ typedef struct ext4_fs {
 int ext4_read_superblock(ext4_fs_t *fs);
 int ext4_write_superblock(ext4_fs_t *fs);
 int ext4_sync_inodes(ext4_fs_t *fs);
+void ext4_reclaim_inodes(ext4_fs_t *fs);
 int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 
@@ -80,6 +78,7 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);
 uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block);
 void ext4_release_block(ext4_fs_t *fs, uint64_t block);
 int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks);
+void ext4_compact_block_cache(ext4_fs_t *fs);
 int ext4_sync_blocks(ext4_fs_t *fs);
 int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint);

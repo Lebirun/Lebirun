@@ -139,7 +139,7 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
         reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PEER_ACK;
         reply_hdr.payload_len = 0;
-        reply_hdr.hop_limit = IPV67_MAX_HOPS;
+        reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;
         if (ipv67_self_set) {
             ipv67_addr_format(&ipv67_self, reply_hdr.src, IPV67_ADDR_STR_MAX);
         }
@@ -276,7 +276,7 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
         reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PEER_ACK;
         reply_hdr.payload_len = 0;
-        reply_hdr.hop_limit = IPV67_MAX_HOPS;
+        reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;
         if (ipv67_self_set) {
             ipv67_addr_format(&ipv67_self, reply_hdr.src, IPV67_ADDR_STR_MAX);
         }
@@ -299,7 +299,7 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
         reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PONG;
         reply_hdr.payload_len = payload_len;
-        reply_hdr.hop_limit = IPV67_MAX_HOPS;
+        reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;
         if (ipv67_self_set) {
             ipv67_addr_format(&ipv67_self, reply_hdr.src, IPV67_ADDR_STR_MAX);
         }

@@ -34,6 +34,25 @@ static int dns_ensure_cache(void) {
     return 0;
 }
 
+static int dns_grow_cache(void) {
+    dns_cache_entry_t *new_cache;
+    int old_capacity;
+    int new_capacity;
+
+    old_capacity = dns_cache_capacity;
+    if (old_capacity > INT32_MAX / 2) return -1;
+    new_capacity = old_capacity ? old_capacity * 2 : DNS_CACHE_INIT;
+    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(dns_cache_entry_t)) return -1;
+    new_cache = (dns_cache_entry_t *)krealloc(
+        dns_cache, (uint64_t)new_capacity * sizeof(dns_cache_entry_t));
+    if (!new_cache) return -1;
+    memset(new_cache + old_capacity, 0,
+           (uint64_t)(new_capacity - old_capacity) * sizeof(dns_cache_entry_t));
+    dns_cache = new_cache;
+    dns_cache_capacity = new_capacity;
+    return 0;
+}
+
 void KERNEL_INIT dns_init(void) {
     dns_cache = NULL;
     dns_cache_capacity = 0;
@@ -77,16 +96,23 @@ void dns_cache_add(const char *name, ipv4_addr_t ip, uint64_t ttl) {
     uint64_t oldest_time;
     int i;
     int len;
+    int selected_idx;
+    int old_capacity;
 
     if (dns_ensure_cache() < 0)
         return;
 
     oldest_idx = 0;
-    oldest_time = 0xFFFFFFFF;
+    oldest_time = UINT64_MAX;
+    selected_idx = -1;
 
     for (i = 0; i < dns_cache_capacity; i++) {
+        if (dns_cache[i].has_ipv4 && strcmp(dns_cache[i].name, name) == 0) {
+            selected_idx = i;
+            break;
+        }
         if (!dns_cache[i].has_ipv4) {
-            oldest_idx = i;
+            selected_idx = i;
             break;
         }
         if (dns_cache[i].timestamp < oldest_time) {
@@ -95,16 +121,24 @@ void dns_cache_add(const char *name, ipv4_addr_t ip, uint64_t ttl) {
         }
     }
 
+    if (selected_idx < 0) {
+        old_capacity = dns_cache_capacity;
+        if (dns_grow_cache() == 0)
+            selected_idx = old_capacity;
+        else
+            selected_idx = oldest_idx;
+    }
+
     len = 0;
     while (name[len] && len < 255) {
-        dns_cache[oldest_idx].name[len] = name[len];
+        dns_cache[selected_idx].name[len] = name[len];
         len++;
     }
-    dns_cache[oldest_idx].name[len] = 0;
-    dns_cache[oldest_idx].ipv4 = ip;
-    dns_cache[oldest_idx].has_ipv4 = 1;
-    dns_cache[oldest_idx].timestamp = net_get_ticks();
-    dns_cache[oldest_idx].ttl = ttl;
+    dns_cache[selected_idx].name[len] = 0;
+    dns_cache[selected_idx].ipv4 = ip;
+    dns_cache[selected_idx].has_ipv4 = 1;
+    dns_cache[selected_idx].timestamp = net_get_ticks();
+    dns_cache[selected_idx].ttl = ttl;
 }
 
 static int dns_encode_name(const char *name, uint8_t *buffer, int buffer_size) {

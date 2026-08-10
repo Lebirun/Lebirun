@@ -105,9 +105,12 @@ static int shm_range_free(uint64_t address, uint64_t size) {
     uint64_t area_end;
     int i;
 
-    if (!current_task || address < USER_DYNAMIC_BASE ||
-        address + size < address || address + size > USER_DYNAMIC_LIMIT)
+    if (!current_task || address + size < address)
         return 0;
+    if (!((address >= USER_DYNAMIC_BASE &&
+           address + size <= USER_DYNAMIC_LIMIT) ||
+          (address >= USER_HIGH_DYNAMIC_BASE &&
+           address + size <= USER_HIGH_DYNAMIC_LIMIT))) return 0;
     end = address + size;
     if (address < current_task->user_brk &&
         end > current_task->user_brk_start) return 0;
@@ -133,10 +136,26 @@ static uint64_t shm_find_address(uint64_t requested, uint64_t size) {
         return shm_range_free(address, size) ? address : 0;
     }
     address = current_task->mmap_next_addr;
+    if (address >= USER_HIGH_DYNAMIC_BASE &&
+        address <= USER_HIGH_DYNAMIC_LIMIT) {
+        address &= ~(PAGE_SIZE - 1);
+        while (address >= USER_HIGH_DYNAMIC_BASE + size) {
+            address -= size;
+            if (shm_range_free(address, size)) return address;
+            address += size - PAGE_SIZE;
+        }
+        return 0;
+    }
     if (address <= USER_DYNAMIC_BASE || address > USER_DYNAMIC_LIMIT)
         address = USER_DYNAMIC_LIMIT;
     address &= ~(PAGE_SIZE - 1);
     while (address >= USER_DYNAMIC_BASE + size) {
+        address -= size;
+        if (shm_range_free(address, size)) return address;
+        address += size - PAGE_SIZE;
+    }
+    address = USER_HIGH_DYNAMIC_LIMIT & ~(PAGE_SIZE - 1);
+    while (address >= USER_HIGH_DYNAMIC_BASE + size) {
         address -= size;
         if (shm_range_free(address, size)) return address;
         address += size - PAGE_SIZE;
@@ -244,7 +263,7 @@ static int sys_shmget(int key, const char *size_ptr, int shmflg) {
     return slot;
 }
 
-static int sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
+static int64_t sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
     uint64_t requested;
     uint64_t address;
     uint64_t flags;
@@ -302,10 +321,10 @@ static int sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
     segment->nattach++;
     current_task->mmap_next_addr = address;
     mutex_unlock(&shm_lock);
-    return (int)address;
+    return (int64_t)address;
 }
 
-static int sys_shmdt(int shmaddr, const char *unused1, int unused2) {
+static int sys_shmdt(uint64_t shmaddr, const char *unused1, int unused2) {
     uint64_t address;
     shm_attachment_t **link;
     shm_attachment_t *attachment;
@@ -314,7 +333,7 @@ static int sys_shmdt(int shmaddr, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
     if (!current_task) return -ESRCH;
-    address = (uint64_t)(uint32_t)shmaddr;
+    address = shmaddr;
     mutex_lock(&shm_lock);
     link = &shm_attachments;
     while (*link && ((*link)->pid != current_task->pid ||

@@ -2,13 +2,13 @@
 #include <lebirun/common.h>
 #include <stdint.h>
 
-mem_region_t memory_map[MAX_REGIONS];
+mem_region_t *memory_map = NULL;
 uint64_t num_regions = 0;
 uint64_t bump_current = 0;
 uint64_t active_region = 0;
 uint64_t low_bump = 0;
 uint64_t kernel_reserved_frames = 0;
-uint64_t total_pages_managed = TOTAL_PAGES;
+uint64_t total_pages_managed = PHYSICAL_ADDRESS_LIMIT / PAGE_SIZE;
 static uint64_t kernel_pml4_phys = 0;
 uint64_t kernel_irq_cr3 = 0;
 

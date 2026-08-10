@@ -68,9 +68,12 @@ static int net_user_range_free(uint64_t base, uint64_t size) {
     uint64_t area_end;
     int i;
 
-    if (!current_task || size == 0 || base < USER_DYNAMIC_BASE) return 0;
+    if (!current_task || size == 0) return 0;
     end = base + size;
-    if (end < base || end > USER_DYNAMIC_LIMIT) return 0;
+    if (end < base) return 0;
+    if (!((base >= USER_DYNAMIC_BASE && end <= USER_DYNAMIC_LIMIT) ||
+          (base >= USER_HIGH_DYNAMIC_BASE &&
+           end <= USER_HIGH_DYNAMIC_LIMIT))) return 0;
     for (i = 0; i < current_task->file_map_count; i++) {
         area_end = current_task->file_maps[i].vaddr +
                    current_task->file_maps[i].memsz;
@@ -88,11 +91,27 @@ static int net_user_range_free(uint64_t base, uint64_t size) {
 static uint64_t net_find_user_mapping(uint64_t cursor, uint64_t size) {
     uint64_t base;
 
-    if (size == 0 || size > USER_DYNAMIC_LIMIT - USER_DYNAMIC_BASE) return 0;
+    if (size == 0 || size > USER_HIGH_DYNAMIC_LIMIT - USER_HIGH_DYNAMIC_BASE)
+        return 0;
+    if (cursor >= USER_HIGH_DYNAMIC_BASE && cursor <= USER_HIGH_DYNAMIC_LIMIT) {
+        cursor &= ~(PAGE_SIZE - 1u);
+        while (cursor >= USER_HIGH_DYNAMIC_BASE + size) {
+            base = cursor - size;
+            if (net_user_range_free(base, size)) return base;
+            cursor -= PAGE_SIZE;
+        }
+        return 0;
+    }
     if (cursor <= USER_DYNAMIC_BASE || cursor > USER_DYNAMIC_LIMIT)
         cursor = USER_DYNAMIC_LIMIT;
     cursor &= ~(PAGE_SIZE - 1u);
     while (cursor >= USER_DYNAMIC_BASE + size) {
+        base = cursor - size;
+        if (net_user_range_free(base, size)) return base;
+        cursor -= PAGE_SIZE;
+    }
+    cursor = USER_HIGH_DYNAMIC_LIMIT & ~(PAGE_SIZE - 1u);
+    while (cursor >= USER_HIGH_DYNAMIC_BASE + size) {
         base = cursor - size;
         if (net_user_range_free(base, size)) return base;
         cursor -= PAGE_SIZE;
@@ -388,8 +407,8 @@ static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
 }
 
 static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) {
-    uint64_t ips[16];
-    uint8_t macs[16 * 6];
+    uint64_t *ips;
+    uint8_t *macs;
     int count;
     uint64_t need;
     arp_user_entry_t *entries;
@@ -398,17 +417,30 @@ static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) 
 
     if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
     net_ensure_hw();
-    
-    
-    if (max_entries > 16) max_entries = 16;
-    
+    if ((uint64_t)max_entries > SIZE_MAX / sizeof(*ips) ||
+        (uint64_t)max_entries > SIZE_MAX / 6) return -1;
+    ips = (uint64_t *)kmalloc((uint64_t)max_entries * sizeof(*ips));
+    if (!ips) return -1;
+    macs = (uint8_t *)kmalloc((uint64_t)max_entries * 6);
+    if (!macs) {
+        kfree(ips);
+        return -1;
+    }
     count = arp_get_cache(ips, macs, max_entries);
     
     if (count > 0) {
         need = (uint64_t)count * (uint64_t)sizeof(arp_user_entry_t);
-        if (!user_range_mapped((uint64_t)buf_ptr, need)) return -1;
+        if (!user_range_mapped((uint64_t)buf_ptr, need)) {
+            kfree(macs);
+            kfree(ips);
+            return -1;
+        }
     }
-    if (!user_range_mapped((uint64_t)(uintptr_t)count_ptr, sizeof(int))) return -1;
+    if (!user_range_mapped((uint64_t)(uintptr_t)count_ptr, sizeof(int))) {
+        kfree(macs);
+        kfree(ips);
+        return -1;
+    }
 
     entries = (arp_user_entry_t *)(uintptr_t)buf_ptr;
     for (i = 0; i < count; i++) {
@@ -419,7 +451,8 @@ static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) 
     }
 
     *(int *)count_ptr = count;
-    
+    kfree(macs);
+    kfree(ips);
     return 0;
 }
 

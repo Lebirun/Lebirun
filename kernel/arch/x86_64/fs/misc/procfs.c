@@ -153,11 +153,13 @@ extern void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 extern void slab_reclaim_empty(void);
 extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
+extern void klog_reclaim_unused(void);
 
 static void proc_collect_memory_report(void) {
     task_memory_collect_for_report();
     fb_reclaim_unused();
     console_reclaim_unused();
+    klog_reclaim_unused();
     slab_gc();
     slab_reclaim_empty();
     kstack_reclaim_unused();

@@ -20,8 +20,6 @@
 #define R_X86_64_32S   11
 #define R_X86_64_PLT32  4
 
-#define LKE_NR_SYSCALLS 284
-
 static lke_module_t *modules;
 static size_t lke_count;
 
@@ -29,7 +27,7 @@ static lke_ksym_t *ksym_table;
 static int ksym_count = 0;
 
 int lke_register_syscall(int num, void *fn) {
-    if (num < 0 || num >= LKE_NR_SYSCALLS || !fn) return -1;
+    if (num < 0 || !fn) return -1;
     if (syscall_table_get(num) && syscall_table_get(num) != fn) return -2;
     syscall_table_set(num, fn);
     if (syscall_table_get(num) != fn) return -1;
@@ -37,7 +35,7 @@ int lke_register_syscall(int num, void *fn) {
 }
 
 void lke_unregister_syscall(int num, void *fn) {
-    if (num < 0 || num >= LKE_NR_SYSCALLS) return;
+    if (num < 0) return;
     if (syscall_table_get(num) == fn) syscall_table_set(num, NULL);
 }
 

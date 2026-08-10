@@ -20,9 +20,12 @@ extern void *kmalloc(uint64_t size);
 extern void kfree(void *ptr);
 extern uint64_t net_get_ticks(void);
 
-#define IPV67_RX_PENDING_MAX 8
 #define IPV67_RX_PACKET_MAX 1472
-#define IPV67_REPLAY_GLOBAL_SLOTS 32
+
+typedef struct {
+    uint64_t packet_id;
+    uint64_t seen_at;
+} ipv67_replay_entry_t;
 
 typedef struct {
     ipv67_addr_t target;
@@ -47,8 +50,8 @@ typedef struct {
     uint16_t port;
     int auth_required;
     uint64_t next_sequence;
-    uint64_t replay_ids[IPV67_REPLAY_GLOBAL_SLOTS];
-    int replay_pos;
+    ipv67_replay_entry_t *replay_entries;
+    int replay_count;
     uint32_t route_sequence;
     ipv67_peer_t *peers;
     int peer_cap;
@@ -110,15 +113,14 @@ typedef struct {
 } __attribute__((packed)) ipv67_punch_payload_t;
 
 typedef struct ipv67_pending_rx {
-    int next;
-    int state;
+    struct ipv67_pending_rx *next;
     uint8_t family;
     uint16_t local_port;
     uint16_t src_port;
     uint32_t src_ipv4;
     ipv6_addr_t src_ipv6;
     uint64_t len;
-    uint8_t *packet;
+    uint8_t packet[];
 } ipv67_pending_rx_t;
 
 extern ipv67_context_t **ipv67_contexts;
@@ -137,8 +139,8 @@ extern const uint8_t ipv67_bootstrap_key[IPV67_AUTH_KEY_SIZE];
 #define ipv67_identity_public ipv67_current->auth_state->identity_public
 #define ipv67_identity_key_set (ipv67_current->auth_state && ipv67_current->auth_state->identity_key_set)
 #define ipv67_next_sequence ipv67_current->next_sequence
-#define ipv67_replay_ids ipv67_current->replay_ids
-#define ipv67_replay_pos ipv67_current->replay_pos
+#define ipv67_replay_entries ipv67_current->replay_entries
+#define ipv67_replay_count ipv67_current->replay_count
 #define ipv67_route_sequence ipv67_current->route_sequence
 #define ipv67_peers ipv67_current->peers
 #define ipv67_peer_count_val ipv67_current->peer_count_val

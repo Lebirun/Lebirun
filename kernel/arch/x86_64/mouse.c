@@ -3,31 +3,65 @@
 #include <lebirun/idt.h>
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/spinlock.h>
 
 #define PS2_DATA_PORT    0x60
 #define PS2_STATUS_PORT  0x64
 #define PS2_CMD_PORT     0x64
 
 #define MOUSE_IRQ        12
+#define MOUSE_RING_INITIAL 16
 
 static uint8_t mouse_cycle = 0;
 static int8_t mouse_bytes[3];
 static uint8_t *ring_buffer;
 static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
+static uint32_t ring_capacity;
 static wait_queue_t mouse_waitq;
+static spinlock_t mouse_lock = {0};
 
-static int mouse_ensure_ring(void) {
+static uint64_t mouse_irqsave(void) {
+    uint64_t flags;
+
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static void mouse_irqrestore(uint64_t flags) {
+    if (flags & (1ULL << 9)) __asm__ volatile("sti" ::: "memory");
+}
+
+static uint32_t mouse_ring_used(void) {
+    if (ring_head >= ring_tail) return ring_head - ring_tail;
+    return ring_capacity - ring_tail + ring_head;
+}
+
+static int mouse_reserve_ring(uint32_t additional) {
     uint8_t *new_ring;
+    uint32_t used;
+    uint32_t new_capacity;
+    uint32_t i;
 
-    if (ring_buffer) return 1;
-    new_ring = (uint8_t *)kmalloc(MOUSE_BUF_SIZE);
-    if (!new_ring) return 0;
-    if (__sync_bool_compare_and_swap(&ring_buffer, NULL, new_ring)) {
-        new_ring = NULL;
+    used = ring_buffer ? mouse_ring_used() : 0;
+    new_capacity = ring_capacity;
+    if (new_capacity == 0) new_capacity = MOUSE_RING_INITIAL;
+    while ((uint64_t)used + additional + 1 > new_capacity) {
+        if (new_capacity > UINT32_MAX / 2) return 0;
+        new_capacity *= 2;
     }
-    if (new_ring) kfree(new_ring);
-    return ring_buffer != NULL;
+    if (ring_buffer && new_capacity == ring_capacity) return 1;
+    new_ring = (uint8_t *)kmalloc(new_capacity);
+    if (!new_ring) return 0;
+    for (i = 0; i < used; i++) {
+        new_ring[i] = ring_buffer[(ring_tail + i) % ring_capacity];
+    }
+    kfree(ring_buffer);
+    ring_buffer = new_ring;
+    ring_capacity = new_capacity;
+    ring_tail = 0;
+    ring_head = used;
+    return 1;
 }
 
 static void KERNEL_INIT ps2_wait_input(void) {
@@ -59,14 +93,10 @@ static uint8_t KERNEL_INIT ps2_mouse_read(void) {
 }
 
 static void ring_put(uint8_t byte) {
-    uint32_t next;
     if (!ring_buffer)
         return;
-    next = (ring_head + 1) % MOUSE_BUF_SIZE;
-    if (next == ring_tail)
-        return;
     ring_buffer[ring_head] = byte;
-    ring_head = next;
+    ring_head = (ring_head + 1) % ring_capacity;
 }
 
 void mouse_handler(registers_t *regs) {
@@ -75,6 +105,7 @@ void mouse_handler(registers_t *regs) {
     uint8_t buttons;
     int8_t dx;
     int8_t dy;
+    uint64_t flags;
 
     (void)regs;
 
@@ -103,9 +134,15 @@ void mouse_handler(registers_t *regs) {
         dx = mouse_bytes[1];
         dy = mouse_bytes[2];
 
-        ring_put(buttons);
-        ring_put((uint8_t)dx);
-        ring_put((uint8_t)dy);
+        flags = mouse_irqsave();
+        spin_lock(&mouse_lock);
+        if (ring_buffer && mouse_reserve_ring(3)) {
+            ring_put(buttons);
+            ring_put((uint8_t)dx);
+            ring_put((uint8_t)dy);
+        }
+        spin_unlock(&mouse_lock);
+        mouse_irqrestore(flags);
 
         waitq_wake_all(&mouse_waitq);
         descriptor_ready_notify();
@@ -114,26 +151,41 @@ void mouse_handler(registers_t *regs) {
 }
 
 int mouse_has_data(void) {
-    mouse_ensure_ring();
-    return ring_head != ring_tail;
+    uint64_t flags;
+    int result;
+
+    flags = mouse_irqsave();
+    spin_lock(&mouse_lock);
+    mouse_reserve_ring(0);
+    result = ring_head != ring_tail;
+    spin_unlock(&mouse_lock);
+    mouse_irqrestore(flags);
+    return result;
 }
 
 int mouse_read(uint8_t *buf, uint32_t count) {
     uint32_t i;
+    uint64_t flags;
+
     i = 0;
-    mouse_ensure_ring();
-    if (!ring_buffer)
+    flags = mouse_irqsave();
+    spin_lock(&mouse_lock);
+    if (!mouse_reserve_ring(0)) {
+        spin_unlock(&mouse_lock);
+        mouse_irqrestore(flags);
         return 0;
+    }
     while (i < count && ring_head != ring_tail) {
         buf[i] = ring_buffer[ring_tail];
-        ring_tail = (ring_tail + 1) % MOUSE_BUF_SIZE;
+        ring_tail = (ring_tail + 1) % ring_capacity;
         i++;
     }
+    spin_unlock(&mouse_lock);
+    mouse_irqrestore(flags);
     return (int)i;
 }
 
 wait_queue_t *mouse_get_waitq(void) {
-    mouse_ensure_ring();
     return &mouse_waitq;
 }
 
@@ -143,6 +195,7 @@ void KERNEL_INIT mouse_init(void) {
     ring_head = 0;
     ring_tail = 0;
     ring_buffer = NULL;
+    ring_capacity = 0;
     mouse_cycle = 0;
     waitq_init(&mouse_waitq);
 

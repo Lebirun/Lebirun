@@ -551,10 +551,10 @@ int creds_syscall_allowed(task_t *task, int syscall_number) {
     int word;
     int bit;
 
-    if (!task || syscall_number < 0 || syscall_number >= NR_SYSCALLS)
-        return 0;
+    if (!task || syscall_number < 0) return 0;
     creds = (task_creds_t *)task->creds_data;
     if (!creds || !creds->syscall_mask) return 1;
+    if (syscall_number >= NR_SYSCALLS) return 0;
     word = syscall_number / 64;
     bit = syscall_number % 64;
     return (creds->syscall_mask[word] & (1ULL << bit)) != 0;

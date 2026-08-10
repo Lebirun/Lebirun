@@ -3,7 +3,6 @@
 
 #include <lebirun/drivers/net/net_types.h>
 
-#define DNS_MAX_CACHE 16
 #define DNS_CACHE_TTL 300000
 
 typedef struct {

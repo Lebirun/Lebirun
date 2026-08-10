@@ -13,6 +13,8 @@
 #define REG_NOMATCH     1
 #define REG_BADPAT      2
 #define REG_ESPACE      12
+#define REGEX_COMPILED_MAGIC 0x4C45425245475831ULL
+#define LEGACY_MATCH_COUNT 16
 
 #define FNM_PATHNAME    0x1
 #define FNM_NOESCAPE    0x2
@@ -32,8 +34,7 @@
 #define GLOB_ABORTED    2
 #define GLOB_NOMATCH    3
 
-#define MAX_REGEX_SIZE  512
-#define MAX_GROUPS      16
+#define LEGACY_REGEX_SIZE 512
 
 #define NODE_CHAR       1
 #define NODE_ANY        2
@@ -57,9 +58,6 @@
 #define QUANT_QUESTION 3
 #define QUANT_RANGE    4
 
-#define MAX_NODES      512
-#define MAX_CAPTURES   MAX_GROUPS
-
 typedef struct {
     int type;
     int quant;
@@ -67,7 +65,7 @@ typedef struct {
     int min_rep;
     int max_rep;
     char ch;
-    char class_start[64];
+    char *class_start;
     int class_negate;
     int group_num;
     int alt_next;
@@ -75,9 +73,11 @@ typedef struct {
 } regex_node_t;
 
 typedef struct {
+    uint64_t magic;
     int num_nodes;
     int num_groups;
-    regex_node_t nodes[MAX_NODES];
+    int node_capacity;
+    regex_node_t *nodes;
 } compiled_regex_t;
 
 typedef struct {
@@ -89,7 +89,7 @@ typedef long regoff_t;
 
 typedef struct {
     size_t re_nsub;
-    char pattern[MAX_REGEX_SIZE];
+    char pattern[LEGACY_REGEX_SIZE];
     int cflags;
     int compiled;
     char compiled_data[4096];
@@ -251,21 +251,74 @@ static int parse_quantifier(const char **p, regex_node_t *node, int extended) {
     return 1;
 }
 
+static void compiled_regex_release(compiled_regex_t *compiled) {
+    int i;
+
+    if (!compiled) return;
+    for (i = 0; i < compiled->num_nodes; i++) {
+        if (compiled->nodes[i].class_start)
+            kfree(compiled->nodes[i].class_start);
+    }
+    if (compiled->nodes) kfree(compiled->nodes);
+    compiled->nodes = NULL;
+    compiled->num_nodes = 0;
+    compiled->num_groups = 0;
+    compiled->node_capacity = 0;
+}
+
+static int compiled_regex_grow(compiled_regex_t *compiled, int needed) {
+    regex_node_t *nodes;
+    int capacity;
+
+    if (needed <= compiled->node_capacity) return 1;
+    capacity = compiled->node_capacity ? compiled->node_capacity : 8;
+    while (capacity < needed) {
+        if (capacity > INT32_MAX / 2) return 0;
+        capacity *= 2;
+    }
+    if ((size_t)capacity > SIZE_MAX / sizeof(regex_node_t)) return 0;
+    nodes = (regex_node_t *)krealloc(compiled->nodes,
+                                     (size_t)capacity * sizeof(regex_node_t));
+    if (!nodes) return 0;
+    memset(nodes + compiled->node_capacity, 0,
+           (size_t)(capacity - compiled->node_capacity) * sizeof(regex_node_t));
+    compiled->nodes = nodes;
+    compiled->node_capacity = capacity;
+    return 1;
+}
+
 static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cflags) {
-    const char *p = pattern;
-    int extended = cflags & REG_EXTENDED;
-    int node_idx = 0;
-    int group_count = 0;
-    int group_stack[MAX_GROUPS];
-    int group_depth = 0;
-    int alt_stack[MAX_GROUPS];
-    int alt_depth = 0;
-    
-    (void)alt_stack;
-    (void)alt_depth;
-    
-    while (*p && node_idx < MAX_NODES - 1) {
-        regex_node_t *node = &compiled->nodes[node_idx];
+    const char *p;
+    const char *class_begin;
+    regex_node_t *node;
+    int *group_stack;
+    int *resized_stack;
+    int extended;
+    int node_idx;
+    int group_count;
+    int group_depth;
+    int group_capacity;
+    size_t class_len;
+
+    p = pattern;
+    extended = cflags & REG_EXTENDED;
+    node_idx = 0;
+    group_count = 0;
+    group_stack = NULL;
+    group_depth = 0;
+    group_capacity = 0;
+    memset(compiled, 0, sizeof(*compiled));
+    compiled->magic = REGEX_COMPILED_MAGIC;
+
+    while (*p) {
+        if (!compiled_regex_grow(compiled, node_idx + 1)) {
+            if (group_stack) kfree(group_stack);
+            compiled_regex_release(compiled);
+            return REG_ESPACE;
+        }
+        node = &compiled->nodes[node_idx];
+        memset(node, 0, sizeof(*node));
+        compiled->num_nodes = node_idx + 1;
         node->quant = QUANT_NONE;
         node->greedy = 1;
         node->min_rep = 1;
@@ -286,10 +339,8 @@ static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cf
             parse_quantifier(&p, node, extended);
             node_idx++;
         } else if (*p == '[') {
-            int ci;
             node->type = NODE_CLASS;
             p++;
-            ci = 0;
             node->class_negate = 0;
             
             if (*p == '^') {
@@ -297,16 +348,24 @@ static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cf
                 p++;
             }
             
-            if (*p == ']') {
-                node->class_start[ci++] = ']';
-                p++;
+            class_begin = p;
+            if (*p == ']') p++;
+            while (*p && *p != ']') p++;
+            class_len = (size_t)(p - class_begin);
+            if (class_len == SIZE_MAX) {
+                if (group_stack) kfree(group_stack);
+                compiled_regex_release(compiled);
+                return REG_ESPACE;
             }
-            
-            while (*p && *p != ']' && ci < 62) {
-                node->class_start[ci++] = *p++;
+            node->class_start = (char *)kmalloc(class_len + 1);
+            if (!node->class_start) {
+                if (group_stack) kfree(group_stack);
+                compiled->num_nodes = node_idx + 1;
+                compiled_regex_release(compiled);
+                return REG_ESPACE;
             }
-            node->class_start[ci] = '\0';
-            
+            if (class_len) memcpy(node->class_start, class_begin, class_len);
+            node->class_start[class_len] = '\0';
             if (*p == ']') p++;
             parse_quantifier(&p, node, extended);
             node_idx++;
@@ -341,12 +400,35 @@ static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cf
                 node->group_num = -1;
                 p += 3;
             } else {
+                if (group_count == INT32_MAX) {
+                    if (group_stack) kfree(group_stack);
+                    compiled->num_nodes = node_idx + 1;
+                    compiled_regex_release(compiled);
+                    return REG_ESPACE;
+                }
                 group_count++;
                 node->group_num = group_count;
             }
             
-            if (group_depth < MAX_GROUPS)
-                group_stack[group_depth++] = node_idx;
+            if (group_depth == group_capacity) {
+                if (group_capacity > INT32_MAX / 2) {
+                    if (group_stack) kfree(group_stack);
+                    compiled->num_nodes = node_idx + 1;
+                    compiled_regex_release(compiled);
+                    return REG_ESPACE;
+                }
+                group_capacity = group_capacity ? group_capacity * 2 : 8;
+                resized_stack = (int *)krealloc(
+                    group_stack, (size_t)group_capacity * sizeof(int));
+                if (!resized_stack) {
+                    if (group_stack) kfree(group_stack);
+                    compiled->num_nodes = node_idx + 1;
+                    compiled_regex_release(compiled);
+                    return REG_ESPACE;
+                }
+                group_stack = resized_stack;
+            }
+            group_stack[group_depth++] = node_idx;
             node_idx++;
         } else if (*p == ')' && extended) {
             node->type = NODE_GROUP_END;
@@ -375,7 +457,7 @@ static int compile_regex(const char *pattern, compiled_regex_t *compiled, int cf
     
     compiled->num_nodes = node_idx;
     compiled->num_groups = group_count;
-    
+    if (group_stack) kfree(group_stack);
     return REG_OK;
 }
 
@@ -481,25 +563,23 @@ static int is_word_boundary(const char *text, const char *pos) {
 }
 
 static int regex_exec_internal(compiled_regex_t *compiled, const char *text, const char *start,
-                               capture_t *captures, int cflags, int eflags);
+                               capture_t *captures, size_t capture_count,
+                               int cflags, int eflags);
 
 static int try_match(compiled_regex_t *compiled, int node_start, const char *text, const char *start,
-                     const char **end_pos, capture_t *captures, int cflags, int eflags) {
-    const char *pos = text;
-    int node_idx = node_start;
-    capture_t local_captures[MAX_CAPTURES];
-    
-    for (int i = 0; i < MAX_CAPTURES; i++) {
-        local_captures[i].start = captures ? captures[i].start : NULL;
-        local_captures[i].end = captures ? captures[i].end : NULL;
-    }
+                     const char **end_pos, capture_t *captures,
+                     size_t capture_count, int cflags, int eflags) {
+    const char *pos;
+    int node_idx;
+
+    pos = text;
+    node_idx = node_start;
     
     while (node_idx < compiled->num_nodes) {
         int min_rep;
         int max_rep;
         int greedy;
         int matched;
-        const char *positions[256];
         int pos_count;
         regex_node_t *node = &compiled->nodes[node_idx];
         
@@ -544,15 +624,17 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
         
         if (node->type == NODE_GROUP_START) {
-            if (node->group_num > 0 && node->group_num < MAX_CAPTURES)
-                local_captures[node->group_num].start = pos;
+            if (captures && node->group_num > 0 &&
+                (size_t)node->group_num < capture_count)
+                captures[node->group_num].start = pos;
             node_idx++;
             continue;
         }
         
         if (node->type == NODE_GROUP_END) {
-            if (node->group_num > 0 && node->group_num < MAX_CAPTURES)
-                local_captures[node->group_num].end = pos;
+            if (captures && node->group_num > 0 &&
+                (size_t)node->group_num < capture_count)
+                captures[node->group_num].end = pos;
             
             if (node->quant != QUANT_NONE) {
                 node_idx++;
@@ -579,10 +661,11 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
-            for (int i = 0; i < sub_compiled.num_nodes && i < MAX_NODES; i++)
-                sub_compiled.nodes[i] = compiled->nodes[la_start + i];
+            sub_compiled.node_capacity = sub_compiled.num_nodes;
+            sub_compiled.nodes = compiled->nodes + la_start;
             
-            if (!try_match(&sub_compiled, 0, pos, start, &dummy, local_captures, cflags, eflags))
+            if (!try_match(&sub_compiled, 0, pos, start, &dummy, captures,
+                           capture_count, cflags, eflags))
                 return 0;
             
             node_idx = la_end;
@@ -606,10 +689,11 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
-            for (int i = 0; i < sub_compiled.num_nodes && i < MAX_NODES; i++)
-                sub_compiled.nodes[i] = compiled->nodes[la_start + i];
+            sub_compiled.node_capacity = sub_compiled.num_nodes;
+            sub_compiled.nodes = compiled->nodes + la_start;
             
-            if (try_match(&sub_compiled, 0, pos, start, &dummy, local_captures, cflags, eflags))
+            if (try_match(&sub_compiled, 0, pos, start, &dummy, captures,
+                          capture_count, cflags, eflags))
                 return 0;
             
             node_idx = la_end;
@@ -618,9 +702,10 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         
         if (node->type == NODE_BACKREF) {
             int grp = node->group_num;
-            if (grp > 0 && grp < MAX_CAPTURES && local_captures[grp].start && local_captures[grp].end) {
-                const char *cap_start = local_captures[grp].start;
-                const char *cap_end = local_captures[grp].end;
+            if (captures && grp > 0 && (size_t)grp < capture_count &&
+                captures[grp].start && captures[grp].end) {
+                const char *cap_start = captures[grp].start;
+                const char *cap_end = captures[grp].end;
                 int cap_len = cap_end - cap_start;
                 int icase = cflags & REG_ICASE;
                 
@@ -642,7 +727,8 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         
         if (node->alt_next > 0) {
             const char *alt_end;
-            if (try_match(compiled, node_idx + 1, pos, start, &alt_end, local_captures, cflags, eflags)) {
+            if (try_match(compiled, node_idx + 1, pos, start, &alt_end,
+                          captures, capture_count, cflags, eflags)) {
                 pos = alt_end;
                 while (node_idx < compiled->num_nodes && compiled->nodes[node_idx].alt_next <= 0)
                     node_idx++;
@@ -660,14 +746,13 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         matched = 0;
         pos_count = 0;
         
-        positions[pos_count++] = pos;
-        
-        while ((max_rep < 0 || matched < max_rep) && *pos && pos_count < 255) {
+        pos_count = 1;
+        while ((max_rep < 0 || matched < max_rep) && *pos) {
             if (!match_node(node, *pos, cflags))
                 break;
             pos++;
             matched++;
-            positions[pos_count++] = pos;
+            pos_count++;
         }
         
         if (matched < min_rep)
@@ -678,27 +763,17 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
                 const char *try_pos;
                 const char *next_end;
                 if (i < min_rep) break;
-                try_pos = positions[i];
+                try_pos = text + i;
                 
                 if (node_idx + 1 >= compiled->num_nodes) {
                     pos = try_pos;
-                    if (captures) {
-                        for (int j = 0; j < MAX_CAPTURES; j++) {
-                            captures[j].start = local_captures[j].start;
-                            captures[j].end = local_captures[j].end;
-                        }
-                    }
                     *end_pos = pos;
                     return 1;
                 }
                 
-                if (try_match(compiled, node_idx + 1, try_pos, start, &next_end, local_captures, cflags, eflags)) {
-                    if (captures) {
-                        for (int j = 0; j < MAX_CAPTURES; j++) {
-                            captures[j].start = local_captures[j].start;
-                            captures[j].end = local_captures[j].end;
-                        }
-                    }
+                if (try_match(compiled, node_idx + 1, try_pos, start,
+                              &next_end, captures, capture_count,
+                              cflags, eflags)) {
                     *end_pos = next_end;
                     return 1;
                 }
@@ -706,28 +781,18 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             return 0;
         } else {
             for (int i = min_rep; i < pos_count; i++) {
-                const char *try_pos = positions[i];
+                const char *try_pos = text + i;
                 const char *next_end;
                 
                 if (node_idx + 1 >= compiled->num_nodes) {
                     pos = try_pos;
-                    if (captures) {
-                        for (int j = 0; j < MAX_CAPTURES; j++) {
-                            captures[j].start = local_captures[j].start;
-                            captures[j].end = local_captures[j].end;
-                        }
-                    }
                     *end_pos = pos;
                     return 1;
                 }
                 
-                if (try_match(compiled, node_idx + 1, try_pos, start, &next_end, local_captures, cflags, eflags)) {
-                    if (captures) {
-                        for (int j = 0; j < MAX_CAPTURES; j++) {
-                            captures[j].start = local_captures[j].start;
-                            captures[j].end = local_captures[j].end;
-                        }
-                    }
+                if (try_match(compiled, node_idx + 1, try_pos, start,
+                              &next_end, captures, capture_count,
+                              cflags, eflags)) {
                     *end_pos = next_end;
                     return 1;
                 }
@@ -736,25 +801,21 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
     }
     
-    if (captures) {
-        for (int i = 0; i < MAX_CAPTURES; i++) {
-            captures[i].start = local_captures[i].start;
-            captures[i].end = local_captures[i].end;
-        }
-    }
     *end_pos = pos;
     return 1;
 }
 
 static int regex_exec_internal(compiled_regex_t *compiled, const char *text, const char *start,
-                               capture_t *captures, int cflags, int eflags) {
+                               capture_t *captures, size_t capture_count,
+                               int cflags, int eflags) {
     const char *pos = text;
     const char *end_pos;
     
     int has_anchor = compiled->num_nodes > 0 && compiled->nodes[0].type == NODE_ANCHOR_START;
     
     if (has_anchor) {
-        if (try_match(compiled, 0, pos, start, &end_pos, captures, cflags, eflags)) {
+        if (try_match(compiled, 0, pos, start, &end_pos, captures,
+                      capture_count, cflags, eflags)) {
             if (captures) {
                 captures[0].start = pos;
                 captures[0].end = end_pos;
@@ -765,7 +826,8 @@ static int regex_exec_internal(compiled_regex_t *compiled, const char *text, con
     }
     
     do {
-        if (try_match(compiled, 0, pos, start, &end_pos, captures, cflags, eflags)) {
+        if (try_match(compiled, 0, pos, start, &end_pos, captures,
+                      capture_count, cflags, eflags)) {
             if (captures) {
                 captures[0].start = pos;
                 captures[0].end = end_pos;
@@ -781,8 +843,12 @@ static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
     uint64_t preg_addr;
     uint64_t pat_addr;
     const char *pattern;
-    int len;
+    kernel_regex_t *preg;
+    compiled_regex_t *compiled;
+    size_t len;
+    size_t i;
     int result;
+
     if (!preg_ptr || !pattern_ptr) return -EINVAL;
     
     preg_addr = (uint64_t)preg_ptr;
@@ -790,18 +856,18 @@ static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
     
     if (preg_addr >= KERNEL_VMA || pat_addr >= KERNEL_VMA) return -EFAULT;
     
-    kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
+    preg = (kernel_regex_t *)preg_addr;
     pattern = (const char *)pat_addr;
-    
+    compiled = (compiled_regex_t *)preg->compiled_data;
+    if (compiled->magic == REGEX_COMPILED_MAGIC)
+        compiled_regex_release(compiled);
+
     len = 0;
-    while (pattern[len] && len < MAX_REGEX_SIZE - 1) len++;
-    
-    for (int i = 0; i < len; i++)
+    while (pattern[len] && len < LEGACY_REGEX_SIZE - 1) len++;
+    for (i = 0; i < len; i++)
         preg->pattern[i] = pattern[i];
     preg->pattern[len] = '\0';
     preg->cflags = cflags;
-    
-    compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
     result = compile_regex(pattern, compiled, cflags);
     
     if (result != REG_OK) {
@@ -819,7 +885,15 @@ static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int
     uint64_t preg_addr;
     uint64_t str_addr;
     const char *string;
+    kernel_regex_t *preg;
+    kernel_regmatch_t *pmatch;
+    compiled_regex_t *compiled;
+    capture_t *captures;
     size_t nmatch;
+    size_t capture_count;
+    size_t i;
+    int matched;
+
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
     
     preg_addr = (uint64_t)preg_ptr;
@@ -827,27 +901,35 @@ static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
-    kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
+    preg = (kernel_regex_t *)preg_addr;
     string = (const char *)str_addr;
-    
     if (!preg->compiled) return REG_BADPAT;
-    
+    compiled = (compiled_regex_t *)preg->compiled_data;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) return REG_BADPAT;
+    if (nmatch_arg < 0) return REG_ESPACE;
     nmatch = (size_t)nmatch_arg;
-    kernel_regmatch_t *pmatch = pmatch_arg ? (kernel_regmatch_t *)(uintptr_t)pmatch_arg : NULL;
-    
-    compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
-    capture_t captures[MAX_CAPTURES];
-    
-    for (int i = 0; i < MAX_CAPTURES; i++) {
+    pmatch = pmatch_arg ? (kernel_regmatch_t *)(uintptr_t)pmatch_arg : NULL;
+    capture_count = (size_t)compiled->num_groups + 1;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) return REG_ESPACE;
+    captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
+    if (!captures) return REG_ESPACE;
+    for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
-    
-    if (!regex_exec_internal(compiled, string, string, captures, preg->cflags, 0))
+    matched = regex_exec_internal(compiled, string, string, captures,
+                                  capture_count, preg->cflags, 0);
+    if (!matched) {
+        kfree(captures);
         return REG_NOMATCH;
-    
+    }
     if (pmatch && nmatch > 0) {
-        for (size_t i = 0; i < nmatch && i < MAX_CAPTURES; i++) {
+        for (i = 0; i < nmatch; i++) {
+            if (i >= capture_count) {
+                pmatch[i].rm_so = -1;
+                pmatch[i].rm_eo = -1;
+                continue;
+            }
             if (captures[i].start && captures[i].end) {
                 pmatch[i].rm_so = captures[i].start - string;
                 pmatch[i].rm_eo = captures[i].end - string;
@@ -857,12 +939,15 @@ static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int
             }
         }
     }
-    
+    kfree(captures);
     return REG_OK;
 }
 
 static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
     uint64_t preg_addr;
+    kernel_regex_t *preg;
+    compiled_regex_t *compiled;
+
     (void)unused1; (void)unused2;
     
     if (!preg_ptr) return 0;
@@ -870,7 +955,12 @@ static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
     preg_addr = (uint64_t)preg_ptr;
     if (preg_addr >= KERNEL_VMA) return -EFAULT;
     
-    kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
+    preg = (kernel_regex_t *)preg_addr;
+    compiled = (compiled_regex_t *)preg->compiled_data;
+    if (compiled->magic == REGEX_COMPILED_MAGIC) {
+        compiled_regex_release(compiled);
+        memset(compiled, 0, sizeof(*compiled));
+    }
     preg->compiled = 0;
     preg->pattern[0] = '\0';
     preg->re_nsub = 0;
@@ -1619,7 +1709,15 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     const char *string;
     const char *replacement;
     char *output;
+    kernel_regex_t *preg;
+    compiled_regex_t *compiled;
+    capture_t *captures;
+    size_t capture_count;
+    size_t i;
     int out_idx;
+    int matched;
+    int len;
+    int copy_index;
     const char *s;
     const char *r;
     if (!preg_ptr || !string_ptr) return -EINVAL;
@@ -1631,34 +1729,39 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return -EFAULT;
     
-    kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
+    preg = (kernel_regex_t *)preg_addr;
     string = (const char *)str_addr;
     replacement = repl_addr ? (const char *)repl_addr : "";
     output = out_addr ? (char *)out_addr : NULL;
     
     if (!preg->compiled) return -EINVAL;
     
-    compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
-    capture_t captures[MAX_CAPTURES];
-    
-    for (int i = 0; i < MAX_CAPTURES; i++) {
+    compiled = (compiled_regex_t *)preg->compiled_data;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) return -EINVAL;
+    capture_count = (size_t)compiled->num_groups + 1;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) return -ENOMEM;
+    captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
+    if (!captures) return -ENOMEM;
+    for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
-    
-    if (!regex_exec_internal(compiled, string, string, captures, preg->cflags, 0)) {
-        int len;
+    matched = regex_exec_internal(compiled, string, string, captures,
+                                  capture_count, preg->cflags, 0);
+    if (!matched) {
         if (output) {
-            int i = 0;
-            while (string[i]) {
-                output[i] = string[i];
-                i++;
+            copy_index = 0;
+            while (string[copy_index]) {
+                output[copy_index] = string[copy_index];
+                copy_index++;
             }
-            output[i] = '\0';
-            return i;
+            output[copy_index] = '\0';
+            kfree(captures);
+            return copy_index;
         }
         len = 0;
         while (string[len]) len++;
+        kfree(captures);
         return len;
     }
     
@@ -1676,7 +1779,7 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
         if (*r == '\\' && r[1] >= '0' && r[1] <= '9') {
             int grp = r[1] - '0';
             r += 2;
-            if (grp < MAX_CAPTURES && captures[grp].start && captures[grp].end) {
+            if ((size_t)grp < capture_count && captures[grp].start && captures[grp].end) {
                 const char *cs = captures[grp].start;
                 while (cs < captures[grp].end) {
                     if (output) output[out_idx] = *cs;
@@ -1687,7 +1790,7 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
         } else if (*r == '$' && r[1] >= '0' && r[1] <= '9') {
             int grp = r[1] - '0';
             r += 2;
-            if (grp < MAX_CAPTURES && captures[grp].start && captures[grp].end) {
+            if ((size_t)grp < capture_count && captures[grp].start && captures[grp].end) {
                 const char *cs = captures[grp].start;
                 while (cs < captures[grp].end) {
                     if (output) output[out_idx] = *cs;
@@ -1720,6 +1823,7 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     }
     
     if (output) output[out_idx] = '\0';
+    kfree(captures);
     return out_idx;
 }
 
@@ -1728,6 +1832,14 @@ static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) 
     uint64_t str_addr;
     uint64_t pm_addr;
     const char *string;
+    kernel_regex_t *preg;
+    kernel_regmatch_t *pmatch;
+    compiled_regex_t *compiled;
+    capture_t *captures;
+    size_t capture_count;
+    size_t i;
+    int matched;
+
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
     
     preg_addr = (uint64_t)preg_ptr;
@@ -1736,26 +1848,31 @@ static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) 
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
-    kernel_regex_t *preg = (kernel_regex_t *)preg_addr;
+    preg = (kernel_regex_t *)preg_addr;
     string = (const char *)str_addr;
-    kernel_regmatch_t *pmatch = pm_addr ? (kernel_regmatch_t *)pm_addr : NULL;
+    pmatch = pm_addr ? (kernel_regmatch_t *)pm_addr : NULL;
     
     if (!preg->compiled) return REG_BADPAT;
     
-    compiled_regex_t *compiled = (compiled_regex_t *)preg->compiled_data;
-    capture_t captures[MAX_CAPTURES];
-    
-    for (int i = 0; i < MAX_CAPTURES; i++) {
+    compiled = (compiled_regex_t *)preg->compiled_data;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) return REG_BADPAT;
+    capture_count = (size_t)compiled->num_groups + 1;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) return REG_ESPACE;
+    captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
+    if (!captures) return REG_ESPACE;
+    for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
-    
-    if (!regex_exec_internal(compiled, string, string, captures, preg->cflags, 0))
+    matched = regex_exec_internal(compiled, string, string, captures,
+                                  capture_count, preg->cflags, 0);
+    if (!matched) {
+        kfree(captures);
         return REG_NOMATCH;
-    
+    }
     if (pmatch) {
-        for (int i = 0; i < MAX_CAPTURES; i++) {
-            if (captures[i].start && captures[i].end) {
+        for (i = 0; i < LEGACY_MATCH_COUNT; i++) {
+            if (i < capture_count && captures[i].start && captures[i].end) {
                 pmatch[i].rm_so = captures[i].start - string;
                 pmatch[i].rm_eo = captures[i].end - string;
             } else {
@@ -1764,7 +1881,7 @@ static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) 
             }
         }
     }
-    
+    kfree(captures);
     return REG_OK;
 }
 

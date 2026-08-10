@@ -7,8 +7,6 @@
 #include <lebirun/mutex.h>
 
 #define RAMFS_BLOCK_SIZE       4096
-#define RAMFS_MAX_NAME_LEN     VFS_MAX_NAME
-
 #define RAMFS_ERR_OK           0
 #define RAMFS_ERR_NOMEM        -1
 #define RAMFS_ERR_NOENT        -2

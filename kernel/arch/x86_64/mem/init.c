@@ -8,14 +8,15 @@ extern char _kernel_start[];
 extern uint64_t kernel_reserved_frames;
 extern uint64_t total_pages_managed;
 
-extern mem_region_t memory_map[MAX_REGIONS];
+extern mem_region_t *memory_map;
 extern uint64_t num_regions;
 extern uint64_t bump_current;
 extern uint64_t active_region;
 extern uint64_t low_bump;
 
-reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
+reserved_region_t reserved_regions[1];
 uint64_t num_reserved_regions = 0;
+static void *multiboot_info_address KERNEL_INIT_BSS;
 
 static uint64_t multiboot_physical_ram_kb KERNEL_INIT_BSS;
 static uint64_t multiboot_usable_ram_kb KERNEL_INIT_BSS;
@@ -45,12 +46,50 @@ extern uint64_t count_free_frames(void);
 extern void set_bit(uint64_t bit_idx);
 extern bool test_bit(uint64_t bit_idx);
 
+static uint64_t KERNEL_EARLY_INIT multiboot_module_overlap_end(
+    uint64_t start, uint64_t end) {
+    struct multiboot2_tag *tag;
+    struct multiboot2_tag_module *mod;
+    uint64_t module_start;
+    uint64_t module_end;
+    uint64_t overlap_end;
+
+    if (!multiboot_info_address || end <= start) return 0;
+    overlap_end = 0;
+    tag = multiboot2_first_tag(multiboot_info_address);
+    while (tag->type != MULTIBOOT2_TAG_END) {
+        if (tag->type == MULTIBOOT2_TAG_MODULE) {
+            mod = (struct multiboot2_tag_module *)tag;
+            module_start = mod->mod_start & ~(uint64_t)(PAGE_SIZE - 1);
+            module_end = (mod->mod_end + PAGE_SIZE - 1) &
+                         ~(uint64_t)(PAGE_SIZE - 1);
+            if (start < module_end && end > module_start &&
+                module_end > overlap_end)
+                overlap_end = module_end;
+        }
+        tag = multiboot2_next_tag(tag);
+    }
+    return overlap_end;
+}
+
+int KERNEL_INIT mem_map_relocate(void) {
+    mem_region_t *relocated;
+
+    if (!memory_map || num_regions == 0) return 1;
+    if (num_regions > SIZE_MAX / sizeof(mem_region_t)) return 0;
+    relocated = (mem_region_t *)kmalloc(num_regions * sizeof(mem_region_t));
+    if (!relocated) return 0;
+    memcpy(relocated, memory_map, num_regions * sizeof(mem_region_t));
+    memory_map = relocated;
+    return 1;
+}
+
 void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     struct multiboot2_tag *tag;
     struct multiboot2_tag_basic_meminfo *meminfo;
     struct multiboot2_tag_mmap *mmap_tag;
+    struct multiboot2_tag_mmap *selected_mmap_tag;
     struct multiboot2_mmap_entry *mmap_entry;
-    struct multiboot2_tag_module *mod;
     struct multiboot2_tag_framebuffer *fb_tag;
     struct multiboot2_tag_string *cmd_tag;
     void *mb_info;
@@ -62,6 +101,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     uint64_t len;
     uint64_t kernel_end_phys;
     uint64_t reserved_index;
+    uint64_t module_overlap_end;
     int cursor_advanced;
 
     early_fb_valid = 0;
@@ -74,8 +114,10 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     }
 
     mb_info = (void *)mb_ptr;
+    multiboot_info_address = mb_info;
     max_phys_memory = 0;
     total_usable_kb = 0;
+    selected_mmap_tag = NULL;
 
     tag = multiboot2_first_tag(mb_info);
     while (tag->type != MULTIBOOT2_TAG_END) {
@@ -107,6 +149,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
         if (tag->type == MULTIBOOT2_TAG_MMAP) {
             mmap_tag = (struct multiboot2_tag_mmap *)tag;
+            if (!selected_mmap_tag) selected_mmap_tag = mmap_tag;
             entry_count = (mmap_tag->size - 16) / mmap_tag->entry_size;
             mmap_entry = mmap_tag->entries;
 
@@ -117,8 +160,12 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
                 if (mmap_entry->type == MULTIBOOT2_MMAP_AVAILABLE && len > 0) {
                     total_usable_kb += len / 1024;
                 }
-                if (len > 0 && base + len > max_phys_memory) {
-                    max_phys_memory = base + len;
+                if (len > 0 && base < PHYSICAL_ADDRESS_LIMIT) {
+                    if (len > PHYSICAL_ADDRESS_LIMIT - base) {
+                        max_phys_memory = PHYSICAL_ADDRESS_LIMIT;
+                    } else if (base + len > max_phys_memory) {
+                        max_phys_memory = base + len;
+                    }
                 }
 
                 mmap_entry = (struct multiboot2_mmap_entry *)((uint8_t *)mmap_entry + mmap_tag->entry_size);
@@ -128,9 +175,6 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         tag = multiboot2_next_tag(tag);
     }
 
-    if (max_phys_memory > MAX_PHYSICAL_MEMORY) {
-        max_phys_memory = MAX_PHYSICAL_MEMORY;
-    }
     if ((uint64_t)(max_phys_memory / 1024) > multiboot_physical_ram_kb) {
         multiboot_physical_ram_kb = (uint64_t)(max_phys_memory / 1024);
     }
@@ -140,37 +184,34 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     multiboot_usable_ram_kb = (uint64_t)total_usable_kb;
 
     merged_count = 0;
-    tag = multiboot2_first_tag(mb_info);
-    while (tag->type != MULTIBOOT2_TAG_END) {
-        if (tag->type == MULTIBOOT2_TAG_MMAP) {
-            mmap_tag = (struct multiboot2_tag_mmap *)tag;
-            entry_count = (mmap_tag->size - 16) / mmap_tag->entry_size;
-            mmap_entry = mmap_tag->entries;
-
-            while (entry_count > 0) {
-                base = mmap_entry->addr;
-                len = mmap_entry->len;
-
-                if (mmap_entry->type != MULTIBOOT2_MMAP_AVAILABLE || len == 0) {
-                    mmap_entry = (struct multiboot2_mmap_entry *)((uint8_t *)mmap_entry + mmap_tag->entry_size);
-                    entry_count--;
-                    continue;
-                }
-
-                if (merged_count == 0 || memory_map[merged_count-1].base + memory_map[merged_count-1].length != base) {
-                    if (merged_count < MAX_REGIONS) {
-                        memory_map[merged_count].base = base;
-                        memory_map[merged_count].length = len;
-                        merged_count++;
-                    }
+    memory_map = NULL;
+    if (selected_mmap_tag && selected_mmap_tag->entry_size >=
+        sizeof(struct multiboot2_mmap_entry)) {
+        mmap_tag = selected_mmap_tag;
+        entry_count = (mmap_tag->size - 16) / mmap_tag->entry_size;
+        mmap_entry = mmap_tag->entries;
+        memory_map = (mem_region_t *)(void *)mmap_tag->entries;
+        while (entry_count > 0) {
+            base = mmap_entry->addr;
+            len = mmap_entry->len;
+            if (mmap_entry->type == MULTIBOOT2_MMAP_AVAILABLE && len > 0 &&
+                base < PHYSICAL_ADDRESS_LIMIT) {
+                if (len > PHYSICAL_ADDRESS_LIMIT - base)
+                    len = PHYSICAL_ADDRESS_LIMIT - base;
+                if (merged_count > 0 &&
+                    memory_map[merged_count - 1].base +
+                    memory_map[merged_count - 1].length == base) {
+                    memory_map[merged_count - 1].length += len;
                 } else {
-                    memory_map[merged_count-1].length += len;
+                    memory_map[merged_count].base = base;
+                    memory_map[merged_count].length = len;
+                    merged_count++;
                 }
-                mmap_entry = (struct multiboot2_mmap_entry *)((uint8_t *)mmap_entry + mmap_tag->entry_size);
-                entry_count--;
             }
+            mmap_entry = (struct multiboot2_mmap_entry *)
+                ((uint8_t *)mmap_entry + mmap_tag->entry_size);
+            entry_count--;
         }
-        tag = multiboot2_next_tag(tag);
     }
     num_regions = merged_count;
 
@@ -221,32 +262,12 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         uint32_t mb2_total_size = *(uint32_t *)mb_info;
         uint64_t mb_start_page = mb_ptr & ~0xFFFu;
         uint64_t mb_end_page = (mb_ptr + mb2_total_size + 0xFFFu) & ~0xFFFu;
-        if (num_reserved_regions < MAX_RESERVED_REGIONS) {
+        if (num_reserved_regions == 0) {
             RESERVED_REGION_SET(reserved_regions[num_reserved_regions],
                                 mb_start_page, mb_end_page,
                                 RESERVED_REGION_MULTIBOOT_INFO);
             num_reserved_regions++;
         }
-    }
-
-    tag = multiboot2_first_tag(mb_info);
-    while (tag->type != MULTIBOOT2_TAG_END) {
-        uint64_t start_page;
-        uint64_t end_page;
-
-        if (tag->type == MULTIBOOT2_TAG_MODULE) {
-            if (num_reserved_regions < MAX_RESERVED_REGIONS) {
-                mod = (struct multiboot2_tag_module *)tag;
-                start_page = mod->mod_start & ~0xFFFu;
-                end_page = (mod->mod_end + 0xFFF) & ~0xFFFu;
-
-                RESERVED_REGION_SET(reserved_regions[num_reserved_regions],
-                                    start_page, end_page,
-                                    RESERVED_REGION_MODULE);
-                num_reserved_regions++;
-            }
-        }
-        tag = multiboot2_next_tag(tag);
     }
 
     do {
@@ -262,10 +283,18 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
             bump_current = reserved_regions[reserved_index].end_phys;
             cursor_advanced = 1;
         }
+        module_overlap_end = multiboot_module_overlap_end(bump_current,
+                                                          bump_current + 1);
+        if (module_overlap_end > bump_current) {
+            bump_current = module_overlap_end;
+            cursor_advanced = 1;
+        }
     } while (cursor_advanced);
 }
 
 void KERNEL_EARLY_INIT pfa_init(void) {
+    struct multiboot2_tag *tag;
+    struct multiboot2_tag_module *module;
     uint64_t kernel_end_phys;
     uint64_t kernel_frames;
     uint64_t total_free_frames;
@@ -299,6 +328,9 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     uint64_t res_start_frame;
     uint64_t res_end_frame;
     uint64_t reserved_count;
+    uint64_t module_start;
+    uint64_t module_end;
+    uint64_t module_overlap_end;
     uint64_t kern_phys_start;
     uint64_t kern_phys_end_raw;
     uint64_t kern_bin_kb;
@@ -308,13 +340,17 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
     detected_max_phys = 0;
     for (r = 0; r < num_regions; r++) {
-        rend = memory_map[r].base + memory_map[r].length;
+        if (memory_map[r].length > PHYSICAL_ADDRESS_LIMIT -
+            memory_map[r].base)
+            rend = PHYSICAL_ADDRESS_LIMIT;
+        else
+            rend = memory_map[r].base + memory_map[r].length;
         if (rend > detected_max_phys) detected_max_phys = rend;
     }
 
-    max_phys = MAX_PHYSICAL_MEMORY;
+    max_phys = PHYSICAL_ADDRESS_LIMIT;
     if (detected_max_phys > max_phys) detected_max_phys = max_phys;
-    if (detected_max_phys == 0) detected_max_phys = max_phys;
+    if (detected_max_phys == 0) return;
 
     actual_total_pages = (uint64_t)((detected_max_phys + PAGE_SIZE - 1) / PAGE_SIZE);
     kernel_end_phys = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
@@ -345,6 +381,13 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         if (candidate < kernel_end_phys) candidate = kernel_end_phys;
         while (candidate + bitmap_alloc_end <= region_end) {
             overlaps_reserved = 0;
+            module_overlap_end = multiboot_module_overlap_end(
+                candidate, candidate + bitmap_alloc_end);
+            if (module_overlap_end > candidate) {
+                candidate = (module_overlap_end + PAGE_SIZE - 1) &
+                            ~(uint64_t)(PAGE_SIZE - 1);
+                continue;
+            }
             for (rr = 0; rr < num_reserved_regions; rr++) {
                 if (candidate + bitmap_alloc_end <=
                         RESERVED_REGION_START(reserved_regions[rr]) ||
@@ -434,6 +477,29 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         KERNEL_INIT_LOG("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
                r, RESERVED_REGION_START(reserved_regions[r]),
                reserved_regions[r].end_phys, reserved_count);
+    }
+
+    if (multiboot_info_address) {
+        tag = multiboot2_first_tag(multiboot_info_address);
+        while (tag->type != MULTIBOOT2_TAG_END) {
+            if (tag->type == MULTIBOOT2_TAG_MODULE) {
+                module = (struct multiboot2_tag_module *)tag;
+                module_start = module->mod_start &
+                               ~(uint64_t)(PAGE_SIZE - 1);
+                module_end = (module->mod_end + PAGE_SIZE - 1) &
+                             ~(uint64_t)(PAGE_SIZE - 1);
+                res_start_frame = module_start / PAGE_SIZE;
+                res_end_frame = module_end / PAGE_SIZE;
+                for (f = res_start_frame;
+                     f < res_end_frame && f < total_pages_managed; f++) {
+                    if (!test_bit(f)) {
+                        set_bit(f);
+                        total_free_frames--;
+                    }
+                }
+            }
+            tag = multiboot2_next_tag(tag);
+        }
     }
 
     actual_free = count_free_frames();

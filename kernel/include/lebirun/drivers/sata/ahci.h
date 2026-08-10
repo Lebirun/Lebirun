@@ -157,7 +157,6 @@
 #define AHCI_FIS_SIZE       256
 #define AHCI_CMD_TABLE_SIZE 256
 #define AHCI_PRDT_ENTRIES   4
-#define AHCI_CMD_QUEUE_SIZE 32
 
 typedef struct {
     uint8_t fis_type;

@@ -33,7 +33,8 @@ static uint64_t align_up_u64(uint64_t v, uint64_t align) {
 }
 
 static int user_mmap_range_valid(uint64_t addr, uint64_t end) {
-    return addr >= USER_DYNAMIC_BASE && end < USER_DYNAMIC_LIMIT;
+    if (addr >= USER_DYNAMIC_BASE && end < USER_DYNAMIC_LIMIT) return 1;
+    return addr >= USER_HIGH_DYNAMIC_BASE && end < USER_HIGH_DYNAMIC_LIMIT;
 }
 
 static int user_range_free_pages(uint64_t addr, uint64_t size,
@@ -80,12 +81,28 @@ static uint64_t user_mmap_auto_base(uint64_t next, uint64_t size) {
     uint64_t cursor;
     uint64_t base;
 
-    if (size == 0 || size > USER_DYNAMIC_LIMIT - USER_DYNAMIC_BASE) return 0;
+    if (size == 0 || size > USER_HIGH_DYNAMIC_LIMIT - USER_HIGH_DYNAMIC_BASE)
+        return 0;
+    if (next >= USER_HIGH_DYNAMIC_BASE && next <= USER_HIGH_DYNAMIC_LIMIT) {
+        cursor = next & ~(PAGE_SIZE - 1u);
+        while (cursor >= USER_HIGH_DYNAMIC_BASE + size) {
+            base = cursor - size;
+            if (user_range_free_pages(base, size, 0, 0)) return base;
+            cursor -= PAGE_SIZE;
+        }
+        return 0;
+    }
     cursor = next;
     if (cursor <= USER_DYNAMIC_BASE || cursor > USER_DYNAMIC_LIMIT)
         cursor = USER_DYNAMIC_LIMIT;
     cursor &= ~(PAGE_SIZE - 1u);
     while (cursor >= USER_DYNAMIC_BASE + size) {
+        base = cursor - size;
+        if (user_range_free_pages(base, size, 0, 0)) return base;
+        cursor -= PAGE_SIZE;
+    }
+    cursor = USER_HIGH_DYNAMIC_LIMIT & ~(PAGE_SIZE - 1u);
+    while (cursor >= USER_HIGH_DYNAMIC_BASE + size) {
         base = cursor - size;
         if (user_range_free_pages(base, size, 0, 0)) return base;
         cursor -= PAGE_SIZE;
@@ -300,7 +317,7 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     return (int)requested;
 }
 
-static int sys_mmap(int a1, const char *a2, int a3) {
+static int64_t sys_mmap(int a1, const char *a2, int a3) {
     uint64_t length;
     uint64_t size;
     uint64_t base;
@@ -373,10 +390,10 @@ static int sys_mmap(int a1, const char *a2, int a3) {
         return -ENOMEM;
     }
 
-    return (int)base;
+    return (int64_t)base;
 }
 
-static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int64_t pgoffset) {
+static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int64_t pgoffset) {
     uint64_t size;
     uint64_t base;
     uint64_t page_count;
@@ -476,7 +493,7 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
                     release_user_leaf_range(base, base + size);
                     return -ENOMEM;
                 }
-                return (int)base;
+                return (int64_t)base;
             }
         }
     }
@@ -532,7 +549,7 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
         return -ENOMEM;
     }
 
-    return (int)base;
+    return (int64_t)base;
 }
 
 static int sys_munmap(void *addr, size_t length) {

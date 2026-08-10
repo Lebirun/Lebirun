@@ -9,8 +9,6 @@
 #define MOUSE_RIGHT_BUTTON  0x02
 #define MOUSE_MIDDLE_BUTTON 0x04
 
-#define MOUSE_BUF_SIZE 1024
-
 struct mouse_packet {
     int8_t dx;
     int8_t dy;

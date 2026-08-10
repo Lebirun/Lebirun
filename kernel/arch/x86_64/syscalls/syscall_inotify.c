@@ -7,8 +7,6 @@
 #define INOTIFY_MASK_ADD 0x20000000
 #define INOTIFY_MASK_CREATE 0x10000000
 #define INOTIFY_IGNORED 0x00008000
-#define INOTIFY_NAME_MAX 63
-
 typedef struct {
     int wd;
     vfs_node_t *node;
@@ -21,7 +19,7 @@ typedef struct inotify_queued_event {
     uint32_t mask;
     uint32_t cookie;
     uint32_t name_length;
-    char name[INOTIFY_NAME_MAX + 1];
+    char name[];
 } inotify_queued_event_t;
 
 typedef struct {
@@ -46,9 +44,13 @@ static int inotify_grow(void) {
     inotify_instance_t *new_instances;
     int i;
 
+    if (inotify_capacity > INT32_MAX / 2) return -1;
     new_capacity = inotify_capacity ? inotify_capacity * 2 : 1;
+    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(inotify_instance_t))
+        return -1;
     new_instances = (inotify_instance_t *)krealloc(
-        inotify_instances, new_capacity * sizeof(inotify_instance_t));
+        inotify_instances,
+        (uint64_t)new_capacity * sizeof(inotify_instance_t));
     if (!new_instances) return -1;
     for (i = inotify_capacity; i < new_capacity; i++) {
         memset(&new_instances[i], 0, sizeof(inotify_instance_t));
@@ -83,22 +85,24 @@ static inotify_instance_t *inotify_get(int fd) {
 static void inotify_queue(inotify_instance_t *instance, int wd, uint32_t mask,
                           const char *name) {
     inotify_queued_event_t *event;
-    uint32_t length;
+    size_t length;
+    size_t padded_length;
+    size_t allocation_size;
 
     if (!instance) return;
-    event = (inotify_queued_event_t *)kmalloc(sizeof(inotify_queued_event_t));
+    length = name ? strlen(name) : 0;
+    if (length > UINT32_MAX - 4) return;
+    padded_length = name ? (length + 1 + 3) & ~(size_t)3 : 0;
+    if (padded_length > SIZE_MAX - sizeof(inotify_queued_event_t)) return;
+    allocation_size = sizeof(inotify_queued_event_t) + padded_length;
+    event = (inotify_queued_event_t *)kmalloc(allocation_size);
     if (!event) return;
-    memset(event, 0, sizeof(inotify_queued_event_t));
+    memset(event, 0, allocation_size);
     event->wd = wd;
     event->mask = mask;
-    length = 0;
     if (name) {
-        while (length < INOTIFY_NAME_MAX && name[length]) {
-            event->name[length] = name[length];
-            length++;
-        }
-        event->name[length] = '\0';
-        event->name_length = (length + 1 + 3) & ~3U;
+        memcpy(event->name, name, length);
+        event->name_length = (uint32_t)padded_length;
     }
     if (instance->tail) {
         instance->tail->next = event;
@@ -178,10 +182,21 @@ static int sys_inotify_add_watch(int fd, const char *pathname, uint64_t mask) {
         return wd;
     }
     if (instance->watch_count == instance->watch_capacity) {
+        if (instance->watch_capacity > INT32_MAX / 2) {
+            mutex_unlock(&inotify_lock);
+            vfs_release(node);
+            return -ENOMEM;
+        }
         new_capacity = instance->watch_capacity ?
                        instance->watch_capacity * 2 : 1;
+        if ((uint64_t)new_capacity > SIZE_MAX / sizeof(inotify_watch_t)) {
+            mutex_unlock(&inotify_lock);
+            vfs_release(node);
+            return -ENOMEM;
+        }
         new_watches = (inotify_watch_t *)krealloc(
-            instance->watches, new_capacity * sizeof(inotify_watch_t));
+            instance->watches,
+            (uint64_t)new_capacity * sizeof(inotify_watch_t));
         if (!new_watches) {
             mutex_unlock(&inotify_lock);
             vfs_release(node);
@@ -267,7 +282,7 @@ int inotify_poll_fd(int fd) {
 int inotify_read_fd(int fd, void *buffer, int length) {
     inotify_instance_t *instance;
     inotify_queued_event_t *event;
-    uint8_t output[16 + INOTIFY_NAME_MAX + 4];
+    uint8_t output[16];
     uint32_t output_size;
     int flags;
 
@@ -301,13 +316,14 @@ retry_read:
     memcpy(output + 4, &event->mask, sizeof(event->mask));
     memcpy(output + 8, &event->cookie, sizeof(event->cookie));
     memcpy(output + 12, &event->name_length, sizeof(event->name_length));
-    if (event->name_length) memcpy(output + 16, event->name,
-                                   event->name_length);
     instance->head = event->next;
     if (!instance->head) instance->tail = NULL;
     instance->queue_count--;
     mutex_unlock(&inotify_lock);
-    if (copy_to_user(buffer, output, output_size) < 0) {
+    if (copy_to_user(buffer, output, sizeof(output)) < 0 ||
+        (event->name_length &&
+         copy_to_user((uint8_t *)buffer + sizeof(output), event->name,
+                      event->name_length) < 0)) {
         kfree(event);
         return -EFAULT;
     }

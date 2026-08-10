@@ -43,7 +43,7 @@ static uint64_t low_page_limit = 0x00400000;
 static uint64_t cold_low_start_frame = 0;
 static uint64_t cold_low_end_frame = 0;
 
-extern mem_region_t memory_map[MAX_REGIONS];
+extern mem_region_t *memory_map;
 extern uint64_t num_regions;
 extern uint64_t bump_current;
 extern uint64_t active_region;
@@ -439,10 +439,9 @@ uint64_t KERNEL_INIT pfa_release_multiboot_range(uint64_t phys_start,
             freed++;
         }
     }
-    for (i = region + 1; i < num_reserved_regions; i++) {
-        reserved_regions[i - 1] = reserved_regions[i];
-    }
-    num_reserved_regions--;
+    reserved_regions[0].start_phys = 0;
+    reserved_regions[0].end_phys = 0;
+    num_reserved_regions = 0;
     if (freed != 0) {
         __sync_fetch_and_add(&pfa_cached_free, freed);
         if (start_frame < last_alloc_hint) last_alloc_hint = start_frame;

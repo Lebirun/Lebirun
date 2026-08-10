@@ -8,6 +8,7 @@ static void ipv67_context_free_members(ipv67_context_t *ctx) {
     if (ctx->stats) kfree(ctx->stats);
     if (ctx->auth_state) kfree(ctx->auth_state);
     if (ctx->ping_state) kfree(ctx->ping_state);
+    if (ctx->replay_entries) kfree(ctx->replay_entries);
 }
 
 void ipv67_context_reset(ipv67_context_t *ctx, uint16_t port) {

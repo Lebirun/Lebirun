@@ -58,26 +58,23 @@ static int find_free_inode_cache(ext4_fs_t *fs) {
         fs->inode_cache_count++;
         return i;
     }
-    if (fs->inode_cache_capacity < EXT4_INODE_CACHE_MAX) {
-        if (fs->inode_cache_capacity == 0) {
-            new_cap = 1;
-        } else {
-            new_cap = fs->inode_cache_capacity * 2;
-        }
-        if (new_cap > EXT4_INODE_CACHE_MAX)
-            new_cap = EXT4_INODE_CACHE_MAX;
-        new_cache = (ext4_inode_cache_t *)kmalloc(new_cap * sizeof(ext4_inode_cache_t));
-        if (new_cache) {
-            if (fs->inode_cache_count > 0)
-                memcpy(new_cache, fs->inode_cache, fs->inode_cache_count * sizeof(ext4_inode_cache_t));
-            memset(new_cache + fs->inode_cache_count, 0, (new_cap - fs->inode_cache_count) * sizeof(ext4_inode_cache_t));
-            i = (int)fs->inode_cache_count;
-            kfree(fs->inode_cache);
-            fs->inode_cache = new_cache;
-            fs->inode_cache_capacity = new_cap;
-            fs->inode_cache_count++;
-            return i;
-        }
+    if (fs->inode_cache_capacity == 0) new_cap = 1;
+    else if (fs->inode_cache_capacity > UINT32_MAX / 2) return -1;
+    else new_cap = fs->inode_cache_capacity * 2;
+    new_cache = (ext4_inode_cache_t *)kmalloc(
+        (uint64_t)new_cap * sizeof(ext4_inode_cache_t));
+    if (new_cache) {
+        if (fs->inode_cache_count > 0)
+            memcpy(new_cache, fs->inode_cache,
+                   (uint64_t)fs->inode_cache_count * sizeof(ext4_inode_cache_t));
+        memset(new_cache + fs->inode_cache_count, 0,
+               (uint64_t)(new_cap - fs->inode_cache_count) * sizeof(ext4_inode_cache_t));
+        i = (int)fs->inode_cache_count;
+        kfree(fs->inode_cache);
+        fs->inode_cache = new_cache;
+        fs->inode_cache_capacity = new_cap;
+        fs->inode_cache_count++;
+        return i;
     }
     return -1;
 }
@@ -197,6 +194,39 @@ void ext4_release_inode(ext4_inode_cache_t *ic) {
     if (ic->ref_count > 0) {
         ic->ref_count--;
     }
+}
+
+void ext4_reclaim_inodes(ext4_fs_t *fs) {
+    ext4_inode_cache_t *cache;
+    uint32_t read_index;
+    uint32_t write_index;
+
+    if (!fs || !fs->inode_cache) return;
+    for (read_index = 0; read_index < fs->inode_cache_count; read_index++) {
+        if (fs->inode_cache[read_index].ref_count != 0) return;
+    }
+    write_index = 0;
+    for (read_index = 0; read_index < fs->inode_cache_count; read_index++) {
+        if (fs->inode_cache[read_index].ref_count == 0 &&
+            !fs->inode_cache[read_index].dirty)
+            continue;
+        if (read_index != write_index)
+            fs->inode_cache[write_index] = fs->inode_cache[read_index];
+        write_index++;
+    }
+    if (write_index == 0) {
+        kfree(fs->inode_cache);
+        fs->inode_cache = NULL;
+        fs->inode_cache_count = 0;
+        fs->inode_cache_capacity = 0;
+        return;
+    }
+    cache = (ext4_inode_cache_t *)krealloc(
+        fs->inode_cache,
+        (uint64_t)write_index * sizeof(ext4_inode_cache_t));
+    if (cache) fs->inode_cache = cache;
+    fs->inode_cache_count = write_index;
+    fs->inode_cache_capacity = write_index;
 }
 
 int ext4_sync_inodes(ext4_fs_t *fs) {

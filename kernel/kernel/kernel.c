@@ -202,6 +202,7 @@ static void KERNEL_INIT kernel_boot(void) {
     vfs_node_t *ext4_root;
     int ahci_done;
     int devs_registered;
+    int mem_map_relocated;
     struct multiboot2_tag_module *tag_mod_initrd;
 
     gdt_init();
@@ -215,6 +216,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
     pfa_init();
 
+    mem_map_relocated = mem_map_relocate();
     heap_init();
 
     cmdline_parse(early_cmdline && early_cmdline[0] ? early_cmdline : NULL);
@@ -545,7 +547,8 @@ static void KERNEL_INIT kernel_boot(void) {
         }
     }
 
-    pfa_release_multiboot_range(mb_page, mb_end_page);
+    if (mem_map_relocated)
+        pfa_release_multiboot_range(mb_page, mb_end_page);
 
     mutex_init(&print_lock);
 
@@ -686,6 +689,9 @@ static void KERNEL_INIT kernel_boot(void) {
     }
     watchdog_set_init_pid((int)init_task->pid);
     cmdline_reclaim_boot_values();
+    kprint_flush();
+    klog_reclaim_unused();
+    heap_reclaim_unused();
 
 }
 

@@ -25,14 +25,13 @@ static volatile uint64_t print_queue_head = 0;
 static volatile uint64_t print_queue_tail = 0;
 static volatile uint64_t print_queue_count = 0;
 
-#define KLOG_MAX_ITEMS 8
-#define KLOG_MAX_LEN   128
+#define KLOG_ITEM_DATA 128
 #define KLOG_CONSOLE   0x80
 
 typedef struct {
     uint16_t len;
     uint8_t level;
-    char msg[KLOG_MAX_LEN];
+    char msg[KLOG_ITEM_DATA];
 } klog_item_t;
 
 static klog_item_t *klog_ring;
@@ -43,11 +42,9 @@ static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
 static volatile uint64_t klog_dropped = 0;
 
-#define KLOG_PERSIST_SZ 32768
-#define KLOG_RECLAIM_RETAIN 4096
 static char *klog_persist_buf;
-static volatile int klog_persist_pos = 0;
-static int klog_persist_cap = 0;
+static volatile size_t klog_persist_pos = 0;
+static size_t klog_persist_cap = 0;
 
 #define KLOG_EARLY_SZ 512
 static char klog_early_buf[KLOG_EARLY_SZ] KERNEL_INIT_OPTIONAL_BSS;
@@ -55,7 +52,6 @@ static volatile int klog_early_pos KERNEL_INIT_OPTIONAL_BSS;
 static volatile int klog_early_done KERNEL_INIT_OPTIONAL_BSS;
 static int klog_early_reclaimable;
 
-#define KPRINT_MAX_ITEMS 32
 #define KPRINT_MAX_LEN   128
 
 typedef struct {
@@ -107,13 +103,6 @@ static vring_t *vring_find(uint8_t minor) {
         ring = ring->next;
     }
     return NULL;
-}
-
-static size_t klog_strnlen(const char *s, size_t maxlen) {
-    size_t n = 0;
-    if (!s) return 0;
-    while (n < maxlen && s[n]) n++;
-    return n;
 }
 
 static inline uint64_t klog_irqsave(void) {
@@ -187,25 +176,20 @@ static void serial_drain(uint64_t max_chars) {
 }
 
 static void klog_persist_append_locked(const char *buf, uint64_t len) {
-    int ppos;
-    int need;
-    int newcap;
-    int discard;
-    int remaining;
+    size_t ppos;
+    size_t need;
+    size_t newcap;
     char *nb;
     uint64_t avail;
 
     if (!klog_persist_buf || !buf || len == 0) return;
-    if (len >= KLOG_PERSIST_SZ) {
-        buf += len - (KLOG_PERSIST_SZ - 1);
-        len = KLOG_PERSIST_SZ - 1;
-    }
+    if (len > SIZE_MAX - klog_persist_pos - 1) return;
 
     ppos = klog_persist_pos;
-    need = ppos + (int)len + 1;
-    if (need > klog_persist_cap && klog_persist_cap < KLOG_PERSIST_SZ) {
-        newcap = (need + 4095) & ~4095;
-        if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
+    need = ppos + (size_t)len + 1;
+    if (need > klog_persist_cap) {
+        if (need > SIZE_MAX - 4095) return;
+        newcap = (need + 4095) & ~(size_t)4095;
         nb = krealloc(klog_persist_buf, newcap);
         if (nb) {
             klog_persist_buf = nb;
@@ -214,29 +198,17 @@ static void klog_persist_append_locked(const char *buf, uint64_t len) {
     }
 
     avail = (uint64_t)(klog_persist_cap - ppos - 1);
-    if (len > avail && klog_persist_cap == KLOG_PERSIST_SZ) {
-        discard = (int)(len - avail);
-        while (discard < ppos && klog_persist_buf[discard - 1] != '\n') discard++;
-        remaining = ppos - discard;
-        if (remaining > 0) {
-            memmove(klog_persist_buf, klog_persist_buf + discard, (size_t)remaining);
-        }
-        ppos = remaining;
-        klog_persist_pos = ppos;
-        avail = (uint64_t)(klog_persist_cap - ppos - 1);
-    }
-
     if (len <= avail) {
         memcpy(klog_persist_buf + ppos, buf, (size_t)len);
-        klog_persist_pos = ppos + (int)len;
+        klog_persist_pos = ppos + (size_t)len;
         klog_persist_buf[klog_persist_pos] = '\0';
     }
 }
 
 void KERNEL_INIT klog_persist_enable(void) {
     uint64_t flags;
-    int ppos;
-    int newcap;
+    size_t ppos;
+    size_t newcap;
     char *new_buf;
 
     flags = klog_irqsave();
@@ -273,25 +245,10 @@ void klog_reclaim_unused(void) {
     uint64_t flags;
     char *new_buf;
     klog_item_t *old_ring;
-    int discard;
-    int raw_discard;
-    int needed;
+    size_t needed;
 
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
-    if (klog_persist_buf && klog_persist_pos >= KLOG_RECLAIM_RETAIN) {
-        raw_discard = klog_persist_pos - KLOG_RECLAIM_RETAIN + 1;
-        discard = raw_discard;
-        while (discard < klog_persist_pos &&
-               klog_persist_buf[discard - 1] != '\n') discard++;
-        if (discard >= klog_persist_pos) discard = raw_discard;
-        klog_persist_pos -= discard;
-        if (klog_persist_pos > 0) {
-            memmove(klog_persist_buf, klog_persist_buf + discard,
-                    (size_t)klog_persist_pos);
-        }
-        klog_persist_buf[klog_persist_pos] = '\0';
-    }
     needed = klog_persist_pos + 1;
     if (klog_persist_buf && needed > 0 && needed < klog_persist_cap) {
         new_buf = (char *)krealloc(klog_persist_buf, (size_t)needed);
@@ -323,13 +280,14 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     klog_item_t *it;
     klog_item_t *new_ring;
     klog_item_t *old_ring;
-    int ppos;
-    int newcap;
+    size_t ppos;
+    size_t newcap;
     int eavail;
     char *nb;
     uint64_t ring_len;
     uint64_t new_capacity;
     uint64_t i;
+    uint64_t offset;
 
     if (!buf || len == 0) return 0;
 
@@ -346,9 +304,13 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
         }
     } else {
         ppos = klog_early_pos;
-        if (ppos >= KLOG_PERSIST_SZ) ppos = KLOG_PERSIST_SZ - 1;
-        newcap = ppos + (int)len + 1;
-        if (newcap > KLOG_PERSIST_SZ) newcap = KLOG_PERSIST_SZ;
+        if (len > SIZE_MAX - ppos - 1) newcap = 0;
+        else newcap = ppos + (size_t)len + 1;
+        if (newcap == 0) {
+            spin_unlock(&klog_persist_lock);
+            klog_irqrestore(flags);
+            return -1;
+        }
         nb = (char *)kmalloc(newcap);
         if (nb) {
             klog_persist_buf = nb;
@@ -363,54 +325,60 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     spin_unlock(&klog_persist_lock);
     klog_irqrestore(flags);
 
-    ring_len = len;
-    if (ring_len >= KLOG_MAX_LEN) ring_len = KLOG_MAX_LEN - 1;
+    offset = 0;
+    while (offset < len) {
+        ring_len = len - offset;
+        if (ring_len >= KLOG_ITEM_DATA) ring_len = KLOG_ITEM_DATA - 1;
 
-    flags = klog_irqsave();
-    spin_lock(&klog_ring_lock);
-    if (!klog_ring || klog_count >= klog_capacity) {
-        if (klog_capacity < KLOG_MAX_ITEMS) {
-            new_capacity = klog_capacity ? klog_capacity * 2 : 2;
-            if (new_capacity > KLOG_MAX_ITEMS) new_capacity = KLOG_MAX_ITEMS;
-            new_ring = (klog_item_t *)kmalloc(new_capacity * sizeof(klog_item_t));
-            if (new_ring) {
-                old_ring = klog_ring;
-                for (i = 0; i < klog_count; i++) {
-                    if (old_ring) {
-                        new_ring[i] = old_ring[(klog_head + i) % klog_capacity];
+        flags = klog_irqsave();
+        spin_lock(&klog_ring_lock);
+        if (!klog_ring || klog_count >= klog_capacity) {
+            if (klog_capacity <= UINT64_MAX / 2 &&
+                klog_capacity <= SIZE_MAX / sizeof(klog_item_t) / 2) {
+                new_capacity = klog_capacity ? klog_capacity * 2 : 2;
+                new_ring = (klog_item_t *)kmalloc(new_capacity * sizeof(klog_item_t));
+                if (new_ring) {
+                    old_ring = klog_ring;
+                    for (i = 0; i < klog_count; i++) {
+                        if (old_ring) {
+                            new_ring[i] = old_ring[(klog_head + i) % klog_capacity];
+                        }
                     }
+                    if (old_ring) kfree(old_ring);
+                    klog_ring = new_ring;
+                    klog_capacity = new_capacity;
+                    klog_head = 0;
+                    klog_tail = klog_count % klog_capacity;
                 }
-                if (old_ring) kfree(old_ring);
-                klog_ring = new_ring;
-                klog_capacity = new_capacity;
-                klog_head = 0;
-                klog_tail = klog_count % klog_capacity;
             }
         }
-    }
-    if (!klog_ring || klog_count >= klog_capacity) {
-        klog_dropped++;
+        if (!klog_ring || klog_count >= klog_capacity) {
+            klog_dropped++;
+            spin_unlock(&klog_ring_lock);
+            klog_irqrestore(flags);
+            return -1;
+        }
+        it = &klog_ring[klog_tail];
+        it->level = level;
+        it->len = (uint16_t)ring_len;
+        memcpy(it->msg, buf + offset, ring_len);
+        it->msg[ring_len] = '\0';
+        klog_tail = (klog_tail + 1) % klog_capacity;
+        klog_count++;
         spin_unlock(&klog_ring_lock);
         klog_irqrestore(flags);
-        return -1;
+        offset += ring_len;
     }
-    it = &klog_ring[klog_tail];
-    it->level = level;
-    it->len = (uint16_t)ring_len;
-    memcpy(it->msg, buf, ring_len);
-    it->msg[ring_len] = '\0';
-    klog_tail = (klog_tail + 1) % klog_capacity;
-    klog_count++;
-    spin_unlock(&klog_ring_lock);
-    klog_irqrestore(flags);
     waitq_wake_one(&kprint_waitq);
     return (int)len;
 }
 
 static int klog_dequeue(klog_item_t *out) {
     uint64_t flags;
+    klog_item_t *old_ring;
 
     if (!out) return -1;
+    old_ring = NULL;
     flags = klog_irqsave();
     spin_lock(&klog_ring_lock);
     if (!klog_ring || klog_capacity == 0 || klog_count == 0) {
@@ -421,8 +389,16 @@ static int klog_dequeue(klog_item_t *out) {
     *out = klog_ring[klog_head];
     klog_head = (klog_head + 1) % klog_capacity;
     klog_count--;
+    if (klog_count == 0) {
+        old_ring = klog_ring;
+        klog_ring = NULL;
+        klog_capacity = 0;
+        klog_head = 0;
+        klog_tail = 0;
+    }
     spin_unlock(&klog_ring_lock);
     klog_irqrestore(flags);
+    if (old_ring) kfree(old_ring);
     return 0;
 }
 
@@ -546,9 +522,11 @@ int kprint_write(int console_id, const char *buf, size_t len) {
 }
 
 int klog_printf(int level, const char *fmt, ...) {
-    char tmp[KLOG_MAX_LEN];
+    char tmp[KLOG_ITEM_DATA];
+    char *formatted;
     va_list ap;
     int n;
+    int result;
     uint64_t len;
     
     (void)level;
@@ -558,8 +536,17 @@ int klog_printf(int level, const char *fmt, ...) {
     n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n <= 0) return 0;
+    if ((size_t)n >= sizeof(tmp)) {
+        formatted = (char *)kmalloc((size_t)n + 1);
+        if (!formatted) return -1;
+        va_start(ap, fmt);
+        vsnprintf(formatted, (size_t)n + 1, fmt, ap);
+        va_end(ap);
+        result = klog_enqueue((uint8_t)level, formatted, (uint64_t)n);
+        kfree(formatted);
+        return result;
+    }
     len = (uint64_t)n;
-    if (len >= sizeof(tmp)) len = (uint64_t)sizeof(tmp) - 1;
     return klog_enqueue((uint8_t)level, tmp, len);
 }
 
@@ -567,10 +554,9 @@ int klog_enqueue_raw(const char *buf, size_t len) {
     int display;
     int result;
 
-    display = kprint_ready && len < KLOG_MAX_LEN;
+    display = kprint_ready;
     result = klog_enqueue(display ? KLOG_CONSOLE : 0,
                           buf, (uint64_t)len);
-    if (kprint_ready && !display) return -1;
     return result;
 }
 
@@ -1051,7 +1037,7 @@ void kproc_debug_log(const char *msg, int level) {
     (void)level;
     
     if (!msg) return;
-    klog_enqueue((uint8_t)level, msg, (uint64_t)klog_strnlen(msg, KLOG_MAX_LEN - 2));
+    klog_enqueue((uint8_t)level, msg, (uint64_t)strlen(msg));
     klog_enqueue((uint8_t)level, "\n", 1);
 }
 

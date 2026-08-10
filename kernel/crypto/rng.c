@@ -4,6 +4,7 @@
 #include <lebirun/pit.h>
 #include <lebirun/rtc.h>
 #include <lebirun/io.h>
+#include <lebirun/common.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -146,9 +147,7 @@ static void rng_fallback_fill(void *buf, size_t len)
 static int rng_ready(void)
 {
     if (g_rng->initialized) return 1;
-    if (rng_initializing) return 0;
-    rng_init();
-    return g_rng->initialized;
+    return 0;
 }
 
 static inline uint32_t rotl32(uint32_t x, int n)
@@ -460,7 +459,7 @@ static void rng_extract(uint8_t *out, size_t len)
     }
 }
 
-void rng_init(void)
+void KERNEL_INIT rng_init(void)
 {
     uint8_t boot_entropy[RNG_ENTROPY_POOL_SIZE];
     uint8_t initial_key[32];

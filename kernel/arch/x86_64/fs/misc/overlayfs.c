@@ -14,7 +14,7 @@ static dirent_t overlay_dirent;
 
 typedef struct {
     vfs_node_t *parent;
-    char name[64];
+    char *name;
     overlay_node_t *onode;
 } ov_node_cache_entry_t;
 
@@ -120,6 +120,9 @@ static void overlay_set_parent(vfs_node_t *child, vfs_node_t *parent) {
 static int ov_cache_ensure_space(void) {
     ov_node_cache_entry_t *new_cache;
 
+    if (ov_node_cache_count == UINT64_MAX ||
+        ov_node_cache_count + 1 >
+        SIZE_MAX / sizeof(ov_node_cache_entry_t)) return -1;
     new_cache = (ov_node_cache_entry_t *)krealloc(
         ov_node_cache,
         (ov_node_cache_count + 1) * sizeof(ov_node_cache_entry_t));
@@ -137,6 +140,7 @@ void overlay_flush_cache(void) {
     mutex_lock(&overlay_node_lock);
     for (i = 0; i < ov_node_cache_count; i++) {
         onode = ov_node_cache[i].onode;
+        kfree(ov_node_cache[i].name);
         if (!onode) continue;
         onode->refcount--;
         overlay_try_free_node(onode);
@@ -151,12 +155,20 @@ void overlay_flush_cache(void) {
 }
 
 void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
+    uint64_t i;
+    uint64_t total;
+
     mutex_lock(&overlay_node_lock);
     if (nodes) *nodes = ov_node_cache_count;
     if (capacity) *capacity = ov_node_cache_capacity;
     if (bytes) {
-        *bytes = ov_node_cache_capacity * sizeof(ov_node_cache_entry_t) +
-                 ov_node_cache_count * sizeof(overlay_node_t);
+        total = ov_node_cache_capacity * sizeof(ov_node_cache_entry_t) +
+                ov_node_cache_count * sizeof(overlay_node_t);
+        for (i = 0; i < ov_node_cache_count; i++) {
+            if (ov_node_cache[i].name)
+                total += strlen(ov_node_cache[i].name) + 1;
+        }
+        *bytes = total;
     }
     mutex_unlock(&overlay_node_lock);
 }
@@ -182,6 +194,7 @@ static void ov_cache_remove(overlay_node_t *onode) {
 
     for (i = 0; i < ov_node_cache_count; i++) {
         if (ov_node_cache[i].onode == onode) {
+            kfree(ov_node_cache[i].name);
             ov_node_cache_count--;
             if (i < ov_node_cache_count) {
                 memmove(&ov_node_cache[i], &ov_node_cache[i + 1],
@@ -220,22 +233,29 @@ static void ov_cache_invalidate(vfs_node_t *parent, const char *name) {
 
 static int ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
     size_t nlen;
+    char *name_copy;
 
-    if (ov_cache_ensure_space() < 0)
+    if (!name) return 0;
+    nlen = strlen(name);
+    if (nlen == SIZE_MAX) return 0;
+    name_copy = (char *)kmalloc(nlen + 1);
+    if (!name_copy) return 0;
+    memcpy(name_copy, name, nlen + 1);
+    if (ov_cache_ensure_space() < 0) {
+        kfree(name_copy);
         return 0;
+    }
 
     if (ov_node_cache_count < ov_node_cache_capacity) {
         onode->refcount++;
         ov_node_cache[ov_node_cache_count].parent = parent;
-        nlen = strlen(name);
-        if (nlen >= 64) nlen = 63;
-        memcpy(ov_node_cache[ov_node_cache_count].name, name, nlen);
-        ov_node_cache[ov_node_cache_count].name[nlen] = '\0';
+        ov_node_cache[ov_node_cache_count].name = name_copy;
         ov_node_cache[ov_node_cache_count].onode = onode;
         ov_node_cache_count++;
         return 1;
     }
 
+    kfree(name_copy);
     return 0;
 }
 

@@ -416,15 +416,33 @@ int ipv67_header_has_peer_auth(ipv67_header_t *hdr, const uint8_t *payload, uint
 }
 
 static int ipv67_global_replay_seen(uint64_t packet_id) {
+    ipv67_replay_entry_t *resized;
+    uint64_t now;
     int i;
+    int kept;
 
     if (packet_id == 0) return 1;
-    for (i = 0; i < IPV67_REPLAY_GLOBAL_SLOTS; i++) {
-        if (ipv67_replay_ids[i] == packet_id) return 1;
+    now = net_get_ticks();
+    kept = 0;
+    for (i = 0; i < ipv67_replay_count; i++) {
+        if (now - ipv67_replay_entries[i].seen_at >
+            IPV67_PEER_TTL_TICKS) continue;
+        if (ipv67_replay_entries[i].packet_id == packet_id) return 1;
+        if (kept != i) ipv67_replay_entries[kept] = ipv67_replay_entries[i];
+        kept++;
     }
-    ipv67_replay_ids[ipv67_replay_pos] = packet_id;
-    ipv67_replay_pos++;
-    if (ipv67_replay_pos >= IPV67_REPLAY_GLOBAL_SLOTS) ipv67_replay_pos = 0;
+    ipv67_replay_count = kept;
+    if (ipv67_replay_count == INT32_MAX ||
+        (size_t)(ipv67_replay_count + 1) >
+        SIZE_MAX / sizeof(ipv67_replay_entry_t)) return 1;
+    resized = (ipv67_replay_entry_t *)krealloc(
+        ipv67_replay_entries,
+        (size_t)(ipv67_replay_count + 1) * sizeof(ipv67_replay_entry_t));
+    if (!resized) return 1;
+    ipv67_replay_entries = resized;
+    ipv67_replay_entries[ipv67_replay_count].packet_id = packet_id;
+    ipv67_replay_entries[ipv67_replay_count].seen_at = now;
+    ipv67_replay_count++;
     return 0;
 }
 

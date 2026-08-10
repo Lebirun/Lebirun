@@ -13,9 +13,7 @@
 int smp_processor_id(void);
 #define TEMP_SLOT(n) (TEMP_MAP_BASE + ((uint64_t)smp_processor_id() * TEMP_MAP_PAGES_PER_CPU + (n)) * PAGE_SIZE)
 
-#define MAX_PHYSICAL_MEMORY 0x10000000000ULL
-#define TOTAL_PAGES (MAX_PHYSICAL_MEMORY / PAGE_SIZE)
-#define BITMAP_BYTES_MAX (TOTAL_PAGES / 8)
+#define PHYSICAL_ADDRESS_LIMIT 0x0010000000000000ULL
 #define PFA_SPARSE_CHUNK_FRAMES (PAGE_SIZE * 8)
 #define PFA_INLINE_DIRECTORY_ENTRIES 32
 #define VMM_PTE_COW 0x200ULL
@@ -69,16 +67,12 @@ typedef struct {
     uint64_t used_size;
 } heap_t;
 
-#define MAX_REGIONS 32
-
-extern mem_region_t memory_map[MAX_REGIONS];
+extern mem_region_t *memory_map;
 extern uint64_t num_regions;
 extern uint8_t *pfa_bitmap;
 extern heap_t kernel_heap;
 
-#define MAX_RESERVED_REGIONS 8
 #define RESERVED_REGION_MULTIBOOT_INFO 1
-#define RESERVED_REGION_MODULE 2
 typedef struct {
     uint64_t start_phys;
     uint64_t end_phys;
@@ -91,7 +85,7 @@ typedef struct {
     (region).start_phys = (start) | (uint64_t)(value); \
     (region).end_phys = (end); \
 } while (0)
-extern reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
+extern reserved_region_t reserved_regions[1];
 extern uint64_t num_reserved_regions;
 
 void vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
@@ -113,6 +107,7 @@ void vmm_register_kernel_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_kernel_cr3(void);
 
 void init_mem_map(uint64_t mb_magic, uint64_t mb_ptr);
+int mem_map_relocate(void);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint64_t num);
 void *pmm_alloc_low_page(void);

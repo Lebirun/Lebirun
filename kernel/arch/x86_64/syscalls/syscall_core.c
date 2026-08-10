@@ -15,26 +15,24 @@ extern int is_epoll_special_fd(int fd);
 extern int event_descriptor_write(int fd, const void *buffer, int length);
 extern int event_descriptor_read(int fd, void *buffer, int length);
 
-#define LINE_BUF_SIZE 256
+#define LINE_BUF_INITIAL 16
+#define LINE_BUF_FALLBACK 256
 static char **line_buffers;
 static int *line_len;
 static int *line_cursor;
 static int *line_ready;
 static int *line_last_cr;
+static int *line_capacity;
 
-#define HISTORY_COUNT 4
-#define HISTORY_LINE_SIZE 128
 #define SYS_RW_STACK_BUF 512
 #define SYS_RW_HEAP_LIMIT 65536
 static char ***history;
-static int *history_head;
 static int *history_count;
 static int *history_browse;
 static char **history_saved;
 static int *history_saved_len;
 
 static int *esc_state;
-static char (*esc_buf)[8];
 static int *esc_len;
 
 static int syscall_core_interrupted(void) {
@@ -45,19 +43,18 @@ static int *in_line_editing;
 static int *serial_displayed_len;
 static int syscall_console_count;
 
-static char line_buffers_fallback[1][LINE_BUF_SIZE]
+static char line_buffers_fallback[1][LINE_BUF_FALLBACK]
     KERNEL_INIT_OPTIONAL_BSS;
 static char *line_buffers_fallback_ptr[1] KERNEL_INIT_OPTIONAL_BSS;
 static int line_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int line_cursor_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int line_ready_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int line_last_cr_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
-static int history_head_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
+static int line_capacity_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int history_count_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int history_browse_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int history_saved_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int esc_state_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
-static char esc_buf_fallback[1][8] KERNEL_INIT_OPTIONAL_BSS;
 static int esc_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int in_line_editing_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
 static int serial_displayed_len_fallback[1] KERNEL_INIT_OPTIONAL_BSS;
@@ -102,11 +99,6 @@ static int history_tables_ready(void) {
 static int history_console_ready(int con_id) {
     if (!syscall_core_valid_console(con_id)) return 0;
     if (!history_tables_ready()) return 0;
-    if (!history[con_id]) {
-        history[con_id] = (char **)kmalloc(HISTORY_COUNT * sizeof(*history[con_id]));
-        if (!history[con_id]) return 0;
-        memset(history[con_id], 0, HISTORY_COUNT * sizeof(*history[con_id]));
-    }
     return 1;
 }
 
@@ -114,10 +106,36 @@ static int line_buffer_ready(int con_id) {
     if (!syscall_core_valid_console(con_id)) return 0;
     if (!line_buffers) return 0;
     if (!line_buffers[con_id]) {
-        line_buffers[con_id] = (char *)kmalloc(LINE_BUF_SIZE);
+        line_buffers[con_id] = (char *)kmalloc(LINE_BUF_INITIAL);
         if (!line_buffers[con_id]) return 0;
-        memset(line_buffers[con_id], 0, LINE_BUF_SIZE);
+        memset(line_buffers[con_id], 0, LINE_BUF_INITIAL);
+        line_capacity[con_id] = LINE_BUF_INITIAL;
     }
+    return 1;
+}
+
+static int line_buffer_reserve(int con_id, int needed) {
+    char *grown;
+    int capacity;
+    int new_capacity;
+
+    if (!line_buffer_ready(con_id)) return 0;
+    if (needed <= line_capacity[con_id]) return 1;
+    if (needed < 0) return 0;
+    capacity = line_capacity[con_id];
+    if (capacity < 1) capacity = 1;
+    new_capacity = capacity;
+    while (new_capacity < needed) {
+        if (new_capacity > INT32_MAX / 2) {
+            new_capacity = needed;
+            break;
+        }
+        new_capacity *= 2;
+    }
+    grown = (char *)krealloc(line_buffers[con_id], (uint64_t)new_capacity);
+    if (!grown) return 0;
+    line_buffers[con_id] = grown;
+    line_capacity[con_id] = new_capacity;
     return 1;
 }
 
@@ -132,7 +150,8 @@ void syscall_core_flush_tty_input(int con_id) {
     if (esc_len) esc_len[con_id] = 0;
     if (in_line_editing) in_line_editing[con_id] = 0;
     if (serial_displayed_len) serial_displayed_len[con_id] = 0;
-    if (line_buffers[con_id]) memset(line_buffers[con_id], 0, LINE_BUF_SIZE);
+    if (line_buffers[con_id] && line_capacity[con_id] > 0)
+        memset(line_buffers[con_id], 0, (uint64_t)line_capacity[con_id]);
 }
 
 static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
@@ -264,8 +283,7 @@ static void line_redraw_from_cursor(int con_id, int echo) {
 
 static void history_add(int con_id, const char *line, int len) {
     char *entry;
-    char *old_entry;
-    int slot;
+    char **entries;
     int copy_len;
 
     if (!syscall_core_valid_console(con_id)) return;
@@ -275,17 +293,26 @@ static void history_add(int con_id, const char *line, int len) {
     copy_len = len;
     if (copy_len > 0 && line[copy_len - 1] == '\n') copy_len--;
     if (copy_len <= 0) return;
-    if (copy_len >= HISTORY_LINE_SIZE) copy_len = HISTORY_LINE_SIZE - 1;
     entry = (char *)kmalloc((uint64_t)copy_len + 1);
     if (!entry) return;
     memcpy(entry, line, copy_len);
     entry[copy_len] = '\0';
-    slot = history_head[con_id];
-    old_entry = history[con_id][slot];
-    history[con_id][slot] = entry;
-    if (old_entry) kfree(old_entry);
-    history_head[con_id] = (slot + 1) % HISTORY_COUNT;
-    if (history_count[con_id] < HISTORY_COUNT) history_count[con_id]++;
+    if (history_count[con_id] == INT32_MAX ||
+        (uint64_t)(history_count[con_id] + 1) >
+        SIZE_MAX / sizeof(*entries)) {
+        kfree(entry);
+        return;
+    }
+    entries = (char **)krealloc(history[con_id],
+                                (uint64_t)(history_count[con_id] + 1) *
+                                sizeof(*entries));
+    if (!entries) {
+        kfree(entry);
+        return;
+    }
+    history[con_id] = entries;
+    history[con_id][history_count[con_id]] = entry;
+    history_count[con_id]++;
 }
 
 static void history_replace_line(int con_id, const char *new_line, int new_len, int echo) {
@@ -301,7 +328,8 @@ static void history_replace_line(int con_id, const char *new_line, int new_len, 
     for (i = 0; i < line_len[con_id]; i++) {
         if (echo) tty_echo_str(con_id, "\033[D", 3);
     }
-    if (new_len >= LINE_BUF_SIZE) new_len = LINE_BUF_SIZE - 2;
+    if (new_len < 0 || new_len == INT32_MAX) return;
+    if (!line_buffer_reserve(con_id, new_len + 1)) return;
     memcpy(line_buffers[con_id], new_line, new_len);
     line_len[con_id] = new_len;
     line_cursor[con_id] = new_len;
@@ -897,9 +925,12 @@ static int sys_read_impl(int fd, char *buf, int len) {
                 
                 if (esc_state[con_id] == 2) {
                     if (c >= '0' && c <= '9') {
-                        if (esc_len[con_id] < 6) {
-                            esc_buf[con_id][esc_len[con_id]++] = c;
-                        }
+                        if (esc_len[con_id] <=
+                            (INT32_MAX - (c - '0')) / 10)
+                            esc_len[con_id] = esc_len[con_id] * 10 +
+                                              (c - '0');
+                        else
+                            esc_len[con_id] = INT32_MAX;
                         continue;
                     }
                     esc_state[con_id] = 0;
@@ -915,7 +946,7 @@ static int sys_read_impl(int fd, char *buf, int len) {
                         } else {
                             continue;
                         }
-                        idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
+                        idx = history_count[con_id] - 1 - history_browse[con_id];
                         history_replace_line(con_id, history[con_id][idx], strlen(history[con_id][idx]), echo);
                         serial_redraw_line(con_id);
                         continue;
@@ -929,7 +960,7 @@ static int sys_read_impl(int fd, char *buf, int len) {
                         if (history_browse[con_id] < 0) {
                             history_replace_line(con_id, history_saved[con_id], history_saved_len[con_id], echo);
                         } else {
-                            idx = (history_head[con_id] - 1 - history_browse[con_id] + HISTORY_COUNT) % HISTORY_COUNT;
+                            idx = history_count[con_id] - 1 - history_browse[con_id];
                             history_replace_line(con_id, history[con_id][idx], strlen(history[con_id][idx]), echo);
                         }
                         serial_redraw_line(con_id);
@@ -968,7 +999,7 @@ static int sys_read_impl(int fd, char *buf, int len) {
                         continue;
                     }
                     
-                    if (c == '~' && esc_len[con_id] == 1 && esc_buf[con_id][0] == '3') {
+                    if (c == '~' && esc_len[con_id] == 3) {
                         if (line_cursor[con_id] < line_len[con_id]) {
                             memmove(&line_buffers[con_id][line_cursor[con_id]],
                                     &line_buffers[con_id][line_cursor[con_id] + 1],
@@ -1007,7 +1038,8 @@ static int sys_read_impl(int fd, char *buf, int len) {
                     if (echo) {
                         history_add(con_id, line_buffers[con_id], line_len[con_id]);
                     }
-                    if (line_len[con_id] < LINE_BUF_SIZE) {
+                    if (line_len[con_id] < INT32_MAX &&
+                        line_buffer_reserve(con_id, line_len[con_id] + 1)) {
                         line_buffers[con_id][line_len[con_id]++] = '\n';
                     }
                     line_cursor[con_id] = line_len[con_id];
@@ -1061,7 +1093,8 @@ static int sys_read_impl(int fd, char *buf, int len) {
                     line_cursor[con_id] = 0;
                     serial_redraw_line(con_id);
                 } else if (c >= 32 && c < 127) {
-                    if (line_len[con_id] < LINE_BUF_SIZE - 2) {
+                    if (line_len[con_id] < INT32_MAX &&
+                        line_buffer_reserve(con_id, line_len[con_id] + 1)) {
                         if (line_cursor[con_id] < line_len[con_id]) {
                             memmove(&line_buffers[con_id][line_cursor[con_id] + 1],
                                     &line_buffers[con_id][line_cursor[con_id]],
@@ -1350,8 +1383,7 @@ void syscalls_core_init(void) {
 
     count_bytes = (uint64_t)count * sizeof(int);
     state_bytes = (uint64_t)count * sizeof(*line_buffers) +
-                  count_bytes * 12 +
-                  (uint64_t)count * sizeof(*esc_buf);
+                  count_bytes * 12;
     state = (uint8_t *)kmalloc(state_bytes);
 
     if (state) {
@@ -1367,7 +1399,7 @@ void syscalls_core_init(void) {
         off += count_bytes;
         line_last_cr = (void *)(state + off);
         off += count_bytes;
-        history_head = (void *)(state + off);
+        line_capacity = (void *)(state + off);
         off += count_bytes;
         history_count = (void *)(state + off);
         off += count_bytes;
@@ -1377,8 +1409,6 @@ void syscalls_core_init(void) {
         off += count_bytes;
         esc_state = (void *)(state + off);
         off += count_bytes;
-        esc_buf = (void *)(state + off);
-        off += (uint64_t)count * sizeof(*esc_buf);
         esc_len = (void *)(state + off);
         off += count_bytes;
         in_line_editing = (void *)(state + off);
@@ -1395,12 +1425,11 @@ void syscalls_core_init(void) {
         line_cursor = line_cursor_fallback;
         line_ready = line_ready_fallback;
         line_last_cr = line_last_cr_fallback;
-        history_head = history_head_fallback;
+        line_capacity = line_capacity_fallback;
         history_count = history_count_fallback;
         history_browse = history_browse_fallback;
         history_saved_len = history_saved_len_fallback;
         esc_state = esc_state_fallback;
-        esc_buf = esc_buf_fallback;
         esc_len = esc_len_fallback;
         in_line_editing = in_line_editing_fallback;
         serial_displayed_len = serial_displayed_len_fallback;
@@ -1416,18 +1445,18 @@ void syscalls_core_init(void) {
     memset(line_cursor, 0, count_bytes);
     memset(line_ready, 0, count_bytes);
     memset(line_last_cr, 0, count_bytes);
-    memset(history_head, 0, count_bytes);
+    memset(line_capacity, 0, count_bytes);
     memset(history_count, 0, count_bytes);
     memset(history_browse, 0, count_bytes);
     memset(history_saved_len, 0, count_bytes);
     memset(esc_state, 0, count_bytes);
-    memset(esc_buf, 0, (uint64_t)count * sizeof(*esc_buf));
     memset(esc_len, 0, count_bytes);
     memset(in_line_editing, 0, count_bytes);
     memset(serial_displayed_len, 0, count_bytes);
 
     if (line_buffers == line_buffers_fallback_ptr) {
         line_buffers[0] = line_buffers_fallback[0];
+        line_capacity[0] = LINE_BUF_FALLBACK;
     }
 
     for (i = 0; i < count; i++) {
@@ -1435,7 +1464,6 @@ void syscalls_core_init(void) {
         line_cursor[i] = 0;
         line_ready[i] = 0;
         line_last_cr[i] = 0;
-        history_head[i] = 0;
         history_count[i] = 0;
         history_browse[i] = -1;
         history_saved_len[i] = 0;

@@ -1,6 +1,8 @@
 #ifndef _SYSCALL_DEFS_H
 #define _SYSCALL_DEFS_H
 
+#define LEBIRUN_SYSCALL_FLAG 0x80000000u
+
 #include <lebirun/registers.h>
 #include <lebirun/kernel_syscall.h>
 #include <lebirun/tty.h>

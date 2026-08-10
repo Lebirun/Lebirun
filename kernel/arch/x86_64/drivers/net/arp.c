@@ -35,11 +35,10 @@ static int arp_grow_cache(void) {
     arp_entry_t *new_cache;
     int new_capacity;
 
-    if (arp_cache_capacity >= ARP_CACHE_SIZE) return 0;
-
+    if (arp_cache_capacity > INT32_MAX / 2) return -1;
     new_capacity = arp_cache_capacity * 2;
     if (new_capacity < 4) new_capacity = 4;
-    if (new_capacity > ARP_CACHE_SIZE) new_capacity = ARP_CACHE_SIZE;
+    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(arp_entry_t)) return -1;
 
     new_cache = (arp_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(arp_entry_t));
     if (!new_cache) return -1;
@@ -81,7 +80,7 @@ void arp_add_entry(ipv4_addr_t ip, mac_addr_t mac) {
         }
     }
 
-    if (free_idx < 0 && arp_cache_capacity < ARP_CACHE_SIZE) {
+    if (free_idx < 0) {
         if (arp_grow_cache() == 0) free_idx = arp_cache_capacity / 2;
     }
     if (free_idx >= 0) oldest_idx = free_idx;

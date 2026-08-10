@@ -52,6 +52,24 @@ static uint64_t console_calc_rows(void) {
     return r;
 }
 
+static uint64_t console_calc_cols(void) {
+    uint64_t cols;
+    framebuffer_t *fb;
+
+    fb = fb_get();
+    cols = fb ? fb->cols : 80;
+    if (cols == 0) cols = 80;
+    return cols;
+}
+
+static char *console_char_row(console_t *con, uint64_t row) {
+    return con->buffer + row * con->buffer_cols;
+}
+
+static uint8_t *console_color_row(console_t *con, uint64_t row) {
+    return con->color_buffer + row * con->buffer_cols;
+}
+
 static int console_runtime_count(void) {
     int count;
 
@@ -177,6 +195,7 @@ int console_fallback_reclaimable(void) {
 
 static int console_ensure_alloc(int n) {
     uint64_t rows;
+    uint64_t cols;
     console_t *con;
 
     if (!console_valid_index(n)) return -1;
@@ -188,8 +207,11 @@ static int console_ensure_alloc(int n) {
         rows = CONSOLE_INACTIVE_INITIAL_ROWS;
     }
     if (rows == 0) rows = 25;
+    cols = console_calc_cols();
+    if (rows > SIZE_MAX / cols) return -1;
     con->buffer_rows = rows;
-    con->buffer = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    con->buffer_cols = cols;
+    con->buffer = (char *)kmalloc(rows * cols);
     if (!con->buffer) return -1;
     con->line_wrapped = (uint8_t *)kmalloc(rows);
     if (!con->line_wrapped) {
@@ -197,7 +219,7 @@ static int console_ensure_alloc(int n) {
         con->buffer = NULL;
         return -1;
     }
-    memset(con->buffer, ' ', rows * CONSOLE_BUFFER_COLS);
+    memset(con->buffer, ' ', rows * cols);
     memset(con->line_wrapped, 0, rows);
     con->allocated = 1;
     return 0;
@@ -235,8 +257,8 @@ static uint8_t console_color_at(console_t *con, uint64_t row, uint64_t col) {
     uint8_t *packed;
 
     if (!con || !con->color_buffer) return 0x70;
-    if (!con->color_packed) return con->color_buffer[row][col];
-    cell = row * CONSOLE_BUFFER_COLS + col;
+    if (!con->color_packed) return console_color_row(con, row)[col];
+    cell = row * con->buffer_cols + col;
     packed = (uint8_t *)(void *)con->color_buffer;
     low = 0;
     high = con->color_run_count;
@@ -261,7 +283,7 @@ static int console_expand_color_buffer(console_t *con) {
     uint8_t attr;
 
     if (!con || !con->color_buffer || !con->color_packed) return 0;
-    cells = con->buffer_rows * CONSOLE_BUFFER_COLS;
+    cells = con->buffer_rows * con->buffer_cols;
     packed = (uint8_t *)(void *)con->color_buffer;
     full = (uint8_t *)kmalloc(cells);
     if (!full) {
@@ -295,7 +317,7 @@ static int console_expand_color_buffer(console_t *con) {
         return -1;
     }
     kfree(packed);
-    con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])(void *)full;
+    con->color_buffer = full;
     con->color_run_count = 0;
     con->color_packed = 0;
     return 0;
@@ -312,7 +334,7 @@ static void console_pack_color_buffer(console_t *con) {
     uint8_t attr;
 
     if (!con || !con->color_buffer || con->color_packed) return;
-    cells = con->buffer_rows * CONSOLE_BUFFER_COLS;
+    cells = con->buffer_rows * con->buffer_cols;
     if (cells == 0) return;
     full = (uint8_t *)(void *)con->color_buffer;
     runs = 1;
@@ -333,20 +355,22 @@ static void console_pack_color_buffer(console_t *con) {
         if (i < cells) attr = full[i];
     }
     kfree(full);
-    con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])(void *)packed;
+    con->color_buffer = packed;
     con->color_run_count = runs;
     con->color_packed = 1;
 }
 
 static int console_ensure_color_buffer(console_t *con) {
-    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
+    uint8_t *new_color;
+    uint64_t cells;
 
     if (!con || !con->allocated) return -1;
     if (con->color_buffer) return console_expand_color_buffer(con);
     if (con->buffer_rows == 0) return -1;
-    new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(con->buffer_rows * CONSOLE_BUFFER_COLS);
+    cells = con->buffer_rows * con->buffer_cols;
+    new_color = (uint8_t *)kmalloc(cells);
     if (!new_color) return -1;
-    memset(new_color, 0x70, con->buffer_rows * CONSOLE_BUFFER_COLS);
+    memset(new_color, 0x70, cells);
     con->color_buffer = new_color;
     con->color_run_count = 0;
     con->color_packed = 0;
@@ -355,6 +379,7 @@ static int console_ensure_color_buffer(console_t *con) {
 
 static void console_ensure_nondefault_color(console_t *con) {
     if (!con) return;
+    if (con->color_packed) console_expand_color_buffer(con);
     if (console_current_attr(con) != 0x70) {
         console_ensure_color_buffer(con);
     }
@@ -371,20 +396,22 @@ int console_alt_screen_active(int n) {
 
 static void console_enter_alt_screen(console_t *con) {
     uint64_t rows;
+    uint64_t cells;
     uint8_t *new_wrapped;
     uint64_t flags;
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
+    char *new_buf;
+    uint8_t *new_color;
 
     if (con->alt_screen_active) return;
     console_expand_color_buffer(con);
     rows = con->buffer_rows;
     if (!rows || !con->buffer) return;
+    cells = rows * con->buffer_cols;
 
-    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+    new_buf = (char *)kmalloc(cells);
     new_color = NULL;
     if (con->color_buffer) {
-        new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(rows * CONSOLE_BUFFER_COLS);
+        new_color = (uint8_t *)kmalloc(cells);
     }
     new_wrapped = (uint8_t *)kmalloc(rows);
     if (!new_buf || (con->color_buffer && !new_color) || !new_wrapped) {
@@ -393,8 +420,8 @@ static void console_enter_alt_screen(console_t *con) {
         if (new_wrapped) kfree(new_wrapped);
         return;
     }
-    memset(new_buf, ' ', rows * CONSOLE_BUFFER_COLS);
-    if (new_color) memset(new_color, 0x70, rows * CONSOLE_BUFFER_COLS);
+    memset(new_buf, ' ', cells);
+    if (new_color) memset(new_color, 0x70, cells);
     memset(new_wrapped, 0, rows);
 
     flags = console_irqsave();
@@ -404,6 +431,7 @@ static void console_enter_alt_screen(console_t *con) {
     con->alt_saved_color = con->color_buffer;
     con->alt_saved_wrapped = con->line_wrapped;
     con->alt_saved_rows = rows;
+    con->alt_saved_cols = con->buffer_cols;
     con->alt_saved_cx = con->cursor_x;
     con->alt_saved_cy = con->cursor_y;
     con->alt_saved_scroll = con->scroll_offset;
@@ -423,8 +451,8 @@ static void console_enter_alt_screen(console_t *con) {
 static void console_leave_alt_screen(console_t *con) {
     uint8_t *old_wrapped;
     uint64_t flags;
-    char (*old_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*old_color)[CONSOLE_BUFFER_COLS];
+    char *old_buf;
+    uint8_t *old_color;
 
     if (!con->alt_screen_active) return;
     if (!con->alt_saved_buffer) return;
@@ -441,6 +469,7 @@ static void console_leave_alt_screen(console_t *con) {
     con->color_buffer = con->alt_saved_color;
     con->line_wrapped = con->alt_saved_wrapped;
     con->buffer_rows = con->alt_saved_rows;
+    con->buffer_cols = con->alt_saved_cols;
     con->cursor_x = con->alt_saved_cx;
     con->cursor_y = con->alt_saved_cy;
     con->scroll_offset = con->alt_saved_scroll;
@@ -481,41 +510,60 @@ static void console_process_alt_screen_pending(int console_num) {
 static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     uint8_t *new_wrapped;
     uint64_t old_rows;
+    uint64_t old_cols;
+    uint64_t needed_cols;
+    uint64_t target_rows;
     uint64_t copy_rows;
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color)[CONSOLE_BUFFER_COLS];
+    uint64_t copy_cols;
+    uint64_t row;
+    char *new_buf;
+    uint8_t *new_color;
 
     if (!con->allocated) return;
     console_expand_color_buffer(con);
-    if (needed_rows <= con->buffer_rows) return;
     old_rows = con->buffer_rows;
-    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
+    target_rows = needed_rows;
+    if (target_rows < old_rows) target_rows = old_rows;
+    needed_cols = console_calc_cols();
+    if (needed_cols < con->buffer_cols) needed_cols = con->buffer_cols;
+    if (target_rows <= con->buffer_rows && needed_cols <= con->buffer_cols) return;
+    if (needed_cols == 0 || target_rows > SIZE_MAX / needed_cols) return;
+    old_cols = con->buffer_cols;
+    new_buf = (char *)kmalloc(target_rows * needed_cols);
     if (!new_buf) return;
     new_color = NULL;
     if (con->color_buffer) {
-        new_color = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(needed_rows * CONSOLE_BUFFER_COLS);
+        new_color = (uint8_t *)kmalloc(target_rows * needed_cols);
         if (!new_color) {
             kfree(new_buf);
             return;
         }
     }
-    new_wrapped = (uint8_t *)kmalloc(needed_rows);
+    new_wrapped = (uint8_t *)kmalloc(target_rows);
     if (!new_wrapped) {
         if (new_color) kfree(new_color);
         kfree(new_buf);
         return;
     }
-    memset(new_buf, ' ', needed_rows * CONSOLE_BUFFER_COLS);
-    if (new_color) memset(new_color, 0x70, needed_rows * CONSOLE_BUFFER_COLS);
-    memset(new_wrapped, 0, needed_rows);
+    memset(new_buf, ' ', target_rows * needed_cols);
+    if (new_color) memset(new_color, 0x70, target_rows * needed_cols);
+    memset(new_wrapped, 0, target_rows);
     copy_rows = old_rows;
-    if (copy_rows > needed_rows) copy_rows = needed_rows;
+    if (copy_rows > target_rows) copy_rows = target_rows;
+    copy_cols = old_cols;
+    if (copy_cols > needed_cols) copy_cols = needed_cols;
     if (con->buffer) {
-        memcpy(new_buf, con->buffer, copy_rows * CONSOLE_BUFFER_COLS);
+        for (row = 0; row < copy_rows; row++) {
+            memcpy(new_buf + row * needed_cols,
+                   con->buffer + row * old_cols, copy_cols);
+        }
         kfree(con->buffer);
     }
     if (con->color_buffer) {
-        memcpy(new_color, con->color_buffer, copy_rows * CONSOLE_BUFFER_COLS);
+        for (row = 0; row < copy_rows; row++) {
+            memcpy(new_color + row * needed_cols,
+                   con->color_buffer + row * old_cols, copy_cols);
+        }
         kfree(con->color_buffer);
     }
     if (con->line_wrapped) {
@@ -525,21 +573,37 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     con->buffer = new_buf;
     con->color_buffer = new_color;
     con->line_wrapped = new_wrapped;
-    con->buffer_rows = needed_rows;
+    con->buffer_rows = target_rows;
+    con->buffer_cols = needed_cols;
 }
 
 static void console_reclaim_default_color(console_t *con) {
+    uint8_t *packed;
+    uint64_t cells;
     uint64_t rows;
     uint64_t cols;
     uint64_t r;
     uint64_t c;
 
-    if (!con || !con->color_buffer || con->color_packed) return;
+    if (!con || !con->color_buffer) return;
+    if (con->color_packed) {
+        cells = con->buffer_rows * con->buffer_cols;
+        packed = (uint8_t *)(void *)con->color_buffer;
+        if (con->color_run_count == 1 &&
+            console_color_run_end(packed, 0) == cells &&
+            packed[8] == 0x70) {
+            kfree(packed);
+            con->color_buffer = NULL;
+            con->color_run_count = 0;
+            con->color_packed = 0;
+        }
+        return;
+    }
     rows = con->buffer_rows;
-    cols = CONSOLE_BUFFER_COLS;
+    cols = con->buffer_cols;
     for (r = 0; r < rows; r++) {
         for (c = 0; c < cols; c++) {
-            if (con->color_buffer[r][c] != 0x70) return;
+            if (console_color_row(con, r)[c] != 0x70) return;
         }
     }
     kfree(con->color_buffer);
@@ -592,14 +656,14 @@ void console_memory_stats(uint64_t *buffers, uint64_t *bytes) {
             if (!con->allocated) continue;
             if (con->buffer) {
                 b++;
-                sz += con->buffer_rows * CONSOLE_BUFFER_COLS;
+                sz += con->buffer_rows * con->buffer_cols;
             }
             if (con->color_buffer) {
                 b++;
                 if (con->color_packed)
                     sz += console_packed_color_bytes(con);
                 else
-                    sz += con->buffer_rows * CONSOLE_BUFFER_COLS;
+                    sz += con->buffer_rows * con->buffer_cols;
             }
             if (con->line_wrapped) {
                 b++;
@@ -627,8 +691,8 @@ int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t 
     if (!console_valid_index(console_num)) return -1;
     con = &consoles[console_num];
     if (!con->allocated || !con->buffer) return -1;
-    if (x >= CONSOLE_BUFFER_COLS || y >= con->buffer_rows) return -1;
-    if (ch) *ch = con->buffer[y][x];
+    if (x >= con->buffer_cols || y >= con->buffer_rows) return -1;
+    if (ch) *ch = console_char_row(con, y)[x];
     if (attr) {
         *attr = console_color_at(con, y, x);
     }
@@ -732,12 +796,12 @@ static void console_fast_redraw_locked(int console_num) {
     rows = fb->rows;
     cols = fb->cols;
     if (rows > con->buffer_rows) rows = con->buffer_rows;
-    if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+    if (cols > con->buffer_cols) cols = con->buffer_cols;
 
     prev_attr = 0xFF;
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
-            c = con->buffer[row][col];
+            c = console_char_row(con, row)[col];
             attr = console_color_at(con, row, col);
             if (attr != prev_attr) {
                 console_apply_attr(attr, fb);
@@ -795,8 +859,6 @@ static void console_redraw_prepare(int console_num) {
     }
 
     visible_rows = rows;
-    visible_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
-
     flags = console_irqsave();
     spin_lock(&console_lock);
 
@@ -813,6 +875,7 @@ static void console_redraw_prepare(int console_num) {
     }
 
     con = &consoles[console_num];
+    visible_cols = cols < con->buffer_cols ? cols : con->buffer_cols;
     console_redraw_cursor_x = con->cursor_x;
     console_redraw_cursor_y = con->cursor_y;
 
@@ -843,8 +906,11 @@ static void console_redraw_step(uint64_t max_rows) {
     uint64_t flags;
     uint8_t attr;
     uint8_t prev_attr;
-    char row_chars[CONSOLE_BUFFER_COLS];
-    uint8_t row_attrs[CONSOLE_BUFFER_COLS];
+    char row_chars_inline[80];
+    uint8_t row_attrs_inline[80];
+    char *row_chars;
+    uint8_t *row_attrs;
+    uint64_t row_capacity;
     framebuffer_t *fb = fb_get();
     console_t *con;
     int redraw_console_cached;
@@ -867,6 +933,22 @@ static void console_redraw_step(uint64_t max_rows) {
     spin_unlock(&console_lock);
     console_irqrestore(flags);
 
+    row_capacity = visible_cols_cached;
+    if (row_capacity < fb->cols) row_capacity = fb->cols;
+    row_chars = row_chars_inline;
+    row_attrs = row_attrs_inline;
+    if (row_capacity > sizeof(row_chars_inline)) {
+        row_chars = (char *)kmalloc(row_capacity);
+        row_attrs = (uint8_t *)kmalloc(row_capacity);
+        if (!row_chars || !row_attrs) {
+            if (row_chars && row_chars != row_chars_inline) kfree(row_chars);
+            if (row_attrs && row_attrs != row_attrs_inline) kfree(row_attrs);
+            row_chars = row_chars_inline;
+            row_attrs = row_attrs_inline;
+            row_capacity = sizeof(row_chars_inline);
+        }
+    }
+
     end_row = current_row_cached + max_rows;
     if (end_row > fb_rows) {
         end_row = fb_rows;
@@ -879,11 +961,11 @@ static void console_redraw_step(uint64_t max_rows) {
         spin_lock(&console_lock);
         con = console_valid_index(redraw_console_cached) ?
               &consoles[redraw_console_cached] : NULL;
-        for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
+        for (col = 0; col < row_capacity; col++) {
             if (con && con->allocated && con->buffer &&
                 row < visible_rows_cached && col < visible_cols_cached &&
                 row < con->buffer_rows) {
-                row_chars[col] = con->buffer[row][col];
+                row_chars[col] = console_char_row(con, row)[col];
                 row_attrs[col] = console_color_at(con, row, col);
             } else {
                 row_chars[col] = ' ';
@@ -895,7 +977,7 @@ static void console_redraw_step(uint64_t max_rows) {
 
         cols = fb->cols;
         for (col = 0; col < cols; col++) {
-            if (col < CONSOLE_BUFFER_COLS) {
+            if (col < row_capacity) {
                 c = row_chars[col];
                 attr = row_attrs[col];
             } else {
@@ -941,6 +1023,8 @@ static void console_redraw_step(uint64_t max_rows) {
     spin_unlock(&console_lock);
     console_irqrestore(flags);
     fb_flush();
+    if (row_chars != row_chars_inline) kfree(row_chars);
+    if (row_attrs != row_attrs_inline) kfree(row_attrs);
 }
 
 void console_tick_redraw(void) {
@@ -997,12 +1081,12 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
 
     if (max_cols == 0) max_cols = 1;
     if (max_rows == 0) max_rows = 1;
-    if (max_cols > CONSOLE_BUFFER_COLS) max_cols = CONSOLE_BUFFER_COLS;
-
     for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         if (!con->allocated) continue;
         console_expand_color_buffer(con);
+        if (i == current_console && max_cols > con->buffer_cols)
+            console_grow_buffer(con, max_rows);
         if (i == current_console) {
             console_grow_buffer(con, max_rows);
             row_limit = max_rows;
@@ -1016,15 +1100,19 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
         if (con->cursor_y >= row_limit) {
             shift = con->cursor_y - (row_limit - 1);
             if (shift > 0 && con->buffer && con->buffer_rows > shift) {
-                memmove(con->buffer[0], con->buffer[shift], (con->buffer_rows - shift) * CONSOLE_BUFFER_COLS);
+                memmove(console_char_row(con, 0), console_char_row(con, shift),
+                        (con->buffer_rows - shift) * con->buffer_cols);
                 if (con->color_buffer)
-                    memmove(con->color_buffer[0], con->color_buffer[shift], (con->buffer_rows - shift) * CONSOLE_BUFFER_COLS);
+                    memmove(console_color_row(con, 0),
+                            console_color_row(con, shift),
+                            (con->buffer_rows - shift) * con->buffer_cols);
                 if (con->line_wrapped)
                     memmove(con->line_wrapped, con->line_wrapped + shift, con->buffer_rows - shift);
                 for (r = con->buffer_rows - shift; r < con->buffer_rows; r++) {
-                    memset(con->buffer[r], ' ', CONSOLE_BUFFER_COLS);
+                    memset(console_char_row(con, r), ' ', con->buffer_cols);
                     if (con->color_buffer)
-                        memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
+                        memset(console_color_row(con, r), 0x70,
+                               con->buffer_cols);
                     if (con->line_wrapped)
                         con->line_wrapped[r] = 0;
                 }
@@ -1075,27 +1163,35 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     uint64_t lpos;
     uint64_t chars_left;
     uint64_t chunk;
+    uint64_t shift;
+    uint64_t r;
     int cursor_found;
-    int total_chars_before_cursor;
-    int chars_counted;
-    int new_cursor_chars;
+    uint64_t total_chars_before_cursor;
+    uint64_t chars_counted;
+    uint64_t new_cursor_chars;
     uint64_t buf_rows;
+    uint64_t old_stride;
     int have_colors;
-    char (*new_buf)[CONSOLE_BUFFER_COLS];
-    uint8_t (*new_color_buf)[CONSOLE_BUFFER_COLS];
+    char *new_buf;
+    uint8_t *new_color_buf;
+    char *old_buffer;
+    uint8_t *old_color_buffer;
+    uint8_t *old_wrapped;
 
     if (!con->allocated || !con->buffer) return;
     if (old_cols == 0) old_cols = 1;
     if (new_cols == 0) new_cols = 1;
     if (new_rows == 0) new_rows = 1;
-    if (new_cols > CONSOLE_BUFFER_COLS) new_cols = CONSOLE_BUFFER_COLS;
-    if (old_cols > CONSOLE_BUFFER_COLS) old_cols = CONSOLE_BUFFER_COLS;
+    old_stride = con->buffer_cols;
+    if (old_cols > old_stride) old_cols = old_stride;
 
     console_grow_buffer(con, new_rows);
     buf_rows = con->buffer_rows;
     have_colors = (con->color_buffer != NULL);
 
-    linebuf_cap = buf_rows * CONSOLE_BUFFER_COLS;
+    if (buf_rows > SIZE_MAX / new_cols) return;
+    if (buf_rows > SIZE_MAX / old_cols) return;
+    linebuf_cap = buf_rows * old_cols;
     linebuf = (char *)kmalloc(linebuf_cap);
     if (!linebuf) return;
 
@@ -1108,7 +1204,7 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         }
     }
 
-    new_buf = (char (*)[CONSOLE_BUFFER_COLS])kmalloc(buf_rows * CONSOLE_BUFFER_COLS);
+    new_buf = (char *)kmalloc(buf_rows * new_cols);
     if (!new_buf) {
         kfree(colorbuf);
         kfree(linebuf);
@@ -1117,7 +1213,7 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
 
     new_color_buf = NULL;
     if (have_colors) {
-        new_color_buf = (uint8_t (*)[CONSOLE_BUFFER_COLS])kmalloc(buf_rows * CONSOLE_BUFFER_COLS);
+        new_color_buf = (uint8_t *)kmalloc(buf_rows * new_cols);
         if (!new_color_buf) {
             kfree(new_buf);
             kfree(colorbuf);
@@ -1135,9 +1231,9 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         return;
     }
 
-    memset(new_buf, ' ', buf_rows * CONSOLE_BUFFER_COLS);
+    memset(new_buf, ' ', buf_rows * new_cols);
     if (new_color_buf)
-        memset(new_color_buf, 0x70, buf_rows * CONSOLE_BUFFER_COLS);
+        memset(new_color_buf, 0x70, buf_rows * new_cols);
     memset(new_wrapped, 0, buf_rows);
 
     total_chars_before_cursor = 0;
@@ -1147,7 +1243,7 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     for (src_row = 0; src_row < buf_rows; src_row++) {
         if (src_row < con->cursor_y) {
             row_end = old_cols;
-            while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
+            while (row_end > 0 && console_char_row(con, src_row)[row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = old_cols;
             total_chars_before_cursor += row_end;
             if (!con->line_wrapped[src_row]) total_chars_before_cursor++;
@@ -1166,13 +1262,13 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
 
         while (src_row < buf_rows) {
             row_end = old_cols;
-            while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
+            while (row_end > 0 && console_char_row(con, src_row)[row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = old_cols;
 
             for (col = 0; col < row_end && linebuf_len < linebuf_cap; col++) {
-                linebuf[linebuf_len] = con->buffer[src_row][col];
+                linebuf[linebuf_len] = console_char_row(con, src_row)[col];
                 if (colorbuf)
-                    colorbuf[linebuf_len] = con->color_buffer[src_row][col];
+                    colorbuf[linebuf_len] = console_color_row(con, src_row)[col];
                 linebuf_len++;
             }
 
@@ -1193,13 +1289,17 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
             lpos = 0;
             while (lpos < linebuf_len) {
                 if (out_row >= buf_rows) {
-                    memmove(new_buf[0], new_buf[1], (buf_rows - 1) * CONSOLE_BUFFER_COLS);
+                    memmove(new_buf, new_buf + new_cols,
+                            (buf_rows - 1) * new_cols);
                     if (new_color_buf)
-                        memmove(new_color_buf[0], new_color_buf[1], (buf_rows - 1) * CONSOLE_BUFFER_COLS);
+                        memmove(new_color_buf, new_color_buf + new_cols,
+                                (buf_rows - 1) * new_cols);
                     memmove(new_wrapped, new_wrapped + 1, buf_rows - 1);
-                    memset(new_buf[buf_rows - 1], ' ', CONSOLE_BUFFER_COLS);
+                    memset(new_buf + (buf_rows - 1) * new_cols, ' ',
+                           new_cols);
                     if (new_color_buf)
-                        memset(new_color_buf[buf_rows - 1], 0x70, CONSOLE_BUFFER_COLS);
+                        memset(new_color_buf + (buf_rows - 1) * new_cols,
+                               0x70, new_cols);
                     new_wrapped[buf_rows - 1] = 0;
                     out_row = buf_rows - 1;
                 }
@@ -1208,9 +1308,10 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
                 chunk = (chars_left > new_cols) ? new_cols : chars_left;
 
                 for (col = 0; col < chunk; col++) {
-                    new_buf[out_row][col] = linebuf[lpos + col];
+                    new_buf[out_row * new_cols + col] = linebuf[lpos + col];
                     if (new_color_buf && colorbuf)
-                        new_color_buf[out_row][col] = colorbuf[lpos + col];
+                        new_color_buf[out_row * new_cols + col] =
+                            colorbuf[lpos + col];
                 }
 
                 lpos += chunk;
@@ -1226,13 +1327,19 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         }
     }
 
-    memcpy(con->buffer, new_buf, buf_rows * CONSOLE_BUFFER_COLS);
-    memcpy(con->line_wrapped, new_wrapped, buf_rows);
-
-    if (have_colors && new_color_buf) {
-        for (src_row = 0; src_row < buf_rows; src_row++)
-            memcpy(con->color_buffer[src_row], new_color_buf[src_row], CONSOLE_BUFFER_COLS);
-    }
+    old_buffer = con->buffer;
+    old_color_buffer = con->color_buffer;
+    old_wrapped = con->line_wrapped;
+    con->buffer = new_buf;
+    con->color_buffer = new_color_buf;
+    con->line_wrapped = new_wrapped;
+    con->buffer_cols = new_cols;
+    new_buf = NULL;
+    new_color_buf = NULL;
+    new_wrapped = NULL;
+    kfree(old_buffer);
+    kfree(old_color_buffer);
+    kfree(old_wrapped);
 
     if (cursor_found) {
         chars_counted = 0;
@@ -1242,13 +1349,13 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
 
         for (src_row = 0; src_row < buf_rows; src_row++) {
             row_end = new_cols;
-            while (row_end > 0 && con->buffer[src_row][row_end - 1] == ' ') row_end--;
+            while (row_end > 0 && console_char_row(con, src_row)[row_end - 1] == ' ') row_end--;
             if (con->line_wrapped[src_row]) row_end = new_cols;
 
-            if (chars_counted + (int)row_end >= new_cursor_chars) {
+            if (chars_counted + row_end >= new_cursor_chars) {
                 con->cursor_y = src_row;
                 con->cursor_x = new_cursor_chars - chars_counted;
-                if ((uint64_t)con->cursor_x >= new_cols) con->cursor_x = (int)new_cols - 1;
+                if (con->cursor_x >= new_cols) con->cursor_x = new_cols - 1;
                 break;
             }
 
@@ -1264,21 +1371,21 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
 
     if (con->cursor_x >= new_cols) con->cursor_x = new_cols - 1;
     if (con->cursor_y >= new_rows) {
-        uint64_t shift;
-        uint64_t r;
         shift = con->cursor_y - (new_rows - 1);
         if (shift > buf_rows) shift = buf_rows;
-        memmove(con->buffer, con->buffer + shift,
-                (buf_rows - shift) * CONSOLE_BUFFER_COLS);
+        memmove(con->buffer, con->buffer + shift * con->buffer_cols,
+                (buf_rows - shift) * con->buffer_cols);
         if (con->color_buffer)
-            memmove(con->color_buffer, con->color_buffer + shift,
-                    (buf_rows - shift) * CONSOLE_BUFFER_COLS);
+            memmove(con->color_buffer,
+                    con->color_buffer + shift * con->buffer_cols,
+                    (buf_rows - shift) * con->buffer_cols);
         memmove(con->line_wrapped, con->line_wrapped + shift,
                 (buf_rows - shift) * sizeof(con->line_wrapped[0]));
         for (r = buf_rows - shift; r < buf_rows; r++) {
-            memset(con->buffer[r], ' ', CONSOLE_BUFFER_COLS);
+            memset(console_char_row(con, r), ' ', con->buffer_cols);
             if (con->color_buffer)
-                memset(con->color_buffer[r], 0x70, CONSOLE_BUFFER_COLS);
+                memset(console_color_row(con, r), 0x70,
+                       con->buffer_cols);
             con->line_wrapped[r] = 0;
         }
         con->cursor_y = new_rows - 1;
@@ -1335,6 +1442,7 @@ void KERNEL_EARLY_INIT console_init(void) {
         con->line_wrapped = NULL;
         con->write_buffer = NULL;
         con->buffer_rows = 0;
+        con->buffer_cols = 0;
         con->write_buffer_size = 0;
         con->allocated = 0;
         con->cursor_x = 0;
@@ -1342,6 +1450,7 @@ void KERNEL_EARLY_INIT console_init(void) {
         con->scroll_offset = 0;
         con->esc_state = 0;
         con->esc_len = 0;
+        con->esc.inline_data[0] = '\0';
         con->write_head = 0;
         con->write_tail = 0;
         con->dirty = 0;
@@ -1360,6 +1469,7 @@ void KERNEL_EARLY_INIT console_init(void) {
         con->alt_saved_color = NULL;
         con->alt_saved_wrapped = NULL;
         con->alt_saved_rows = 0;
+        con->alt_saved_cols = 0;
         con->alt_saved_cx = 0;
         con->alt_saved_cy = 0;
         con->alt_saved_scroll = 0;
@@ -1466,8 +1576,8 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     cols = fb ? fb->cols : 80;
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
-    if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
-    if (from_interrupt && new_con->buffer_rows < rows) {
+    if (from_interrupt &&
+        (new_con->buffer_rows < rows || new_con->buffer_cols < cols)) {
         console_switching = 0;
         console_switch_in_progress = 0;
         pending_console_switch = console_num;
@@ -1476,6 +1586,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         return;
     }
     console_grow_buffer(new_con, rows);
+    if (cols > new_con->buffer_cols) cols = new_con->buffer_cols;
     
     console_clamp_cursors_locked(cols, rows);
     
@@ -1584,14 +1695,20 @@ void console_putchar(char c) {
 }
 
 static int parse_csi_params(const char *buf, int len, int *params, int max_params) {
-    int count = 0;
-    int val = 0;
-    int has_digit = 0;
+    int count;
+    int val;
+    int has_digit;
     int i;
 
+    count = 0;
+    val = 0;
+    has_digit = 0;
     for (i = 0; i < len && count < max_params; i++) {
         if (buf[i] >= '0' && buf[i] <= '9') {
-            val = val * 10 + (buf[i] - '0');
+            if (val <= (INT32_MAX - (buf[i] - '0')) / 10)
+                val = val * 10 + (buf[i] - '0');
+            else
+                val = INT32_MAX;
             has_digit = 1;
         } else if (buf[i] == ';') {
             params[count++] = has_digit ? val : 1;
@@ -1611,17 +1728,17 @@ static void console_scroll_region_up(console_t *con, uint64_t top, uint64_t bott
 
     if (top >= bottom) return;
     if (bottom > con->buffer_rows) bottom = con->buffer_rows;
-    copy_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
+    copy_cols = cols < con->buffer_cols ? cols : con->buffer_cols;
     for (row = top; row < bottom - 1; row++) {
-        memcpy(con->buffer[row], con->buffer[row + 1], copy_cols);
+        memcpy(console_char_row(con, row), console_char_row(con, row + 1), copy_cols);
         if (con->color_buffer)
-            memcpy(con->color_buffer[row], con->color_buffer[row + 1], copy_cols);
+            memcpy(console_color_row(con, row), console_color_row(con, row + 1), copy_cols);
         con->line_wrapped[row] = con->line_wrapped[row + 1];
     }
     if (bottom > 0) {
-        memset(con->buffer[bottom - 1], ' ', copy_cols);
+        memset(console_char_row(con, bottom - 1), ' ', copy_cols);
         if (con->color_buffer)
-            memset(con->color_buffer[bottom - 1], console_current_attr(con), copy_cols);
+            memset(console_color_row(con, bottom - 1), console_current_attr(con), copy_cols);
         con->line_wrapped[bottom - 1] = 0;
     }
 }
@@ -1632,24 +1749,84 @@ static void console_scroll_region_down(console_t *con, uint64_t top, uint64_t bo
 
     if (top >= bottom) return;
     if (bottom > con->buffer_rows) bottom = con->buffer_rows;
-    copy_cols = cols < CONSOLE_BUFFER_COLS ? cols : CONSOLE_BUFFER_COLS;
+    copy_cols = cols < con->buffer_cols ? cols : con->buffer_cols;
     for (row = bottom - 1; row > top; row--) {
-        memcpy(con->buffer[row], con->buffer[row - 1], copy_cols);
+        memcpy(console_char_row(con, row), console_char_row(con, row - 1), copy_cols);
         if (con->color_buffer)
-            memcpy(con->color_buffer[row], con->color_buffer[row - 1], copy_cols);
+            memcpy(console_color_row(con, row), console_color_row(con, row - 1), copy_cols);
         con->line_wrapped[row] = con->line_wrapped[row - 1];
     }
-    memset(con->buffer[top], ' ', copy_cols);
+    memset(console_char_row(con, top), ' ', copy_cols);
     if (con->color_buffer)
-        memset(con->color_buffer[top], console_current_attr(con), copy_cols);
+        memset(console_color_row(con, top), console_current_attr(con), copy_cols);
     con->line_wrapped[top] = 0;
+}
+
+static char *console_esc_data(console_t *con) {
+    if (con->esc_len >= (int)sizeof(con->esc.inline_data) - 1)
+        return con->esc.dynamic.data;
+    return con->esc.inline_data;
+}
+
+static void console_esc_reset(console_t *con) {
+    if (con->esc_len >= (int)sizeof(con->esc.inline_data) - 1 &&
+        con->esc.dynamic.data)
+        kfree(con->esc.dynamic.data);
+    con->esc_len = 0;
+    con->esc.inline_data[0] = '\0';
+}
+
+static int console_esc_append(console_t *con, char c) {
+    char *grown;
+    char *data;
+    char inline_copy[32];
+    int capacity;
+
+    if (con->esc_len == INT32_MAX) return 0;
+    if (con->esc_len < (int)sizeof(con->esc.inline_data) - 2) {
+        con->esc.inline_data[con->esc_len++] = c;
+        con->esc.inline_data[con->esc_len] = '\0';
+        return 1;
+    }
+    if (con->esc_len == (int)sizeof(con->esc.inline_data) - 2) {
+        memcpy(inline_copy, con->esc.inline_data, (size_t)con->esc_len);
+        capacity = (int)sizeof(con->esc.inline_data) * 2;
+        grown = (char *)kmalloc((size_t)capacity);
+        if (!grown) return 0;
+        memcpy(grown, inline_copy, (size_t)con->esc_len);
+        con->esc.dynamic.data = grown;
+        con->esc.dynamic.capacity = capacity;
+    } else {
+        capacity = con->esc.dynamic.capacity;
+        grown = con->esc.dynamic.data;
+    }
+    while (capacity <= con->esc_len + 1) {
+        if (capacity > INT32_MAX / 2) {
+            capacity = con->esc_len + 2;
+            break;
+        }
+        capacity *= 2;
+    }
+    if (capacity != con->esc.dynamic.capacity) {
+        grown = (char *)krealloc(grown, (size_t)capacity);
+        if (!grown) return 0;
+        con->esc.dynamic.data = grown;
+        con->esc.dynamic.capacity = capacity;
+    }
+    data = con->esc.dynamic.data;
+    data[con->esc_len++] = c;
+    data[con->esc_len] = '\0';
+    return 1;
 }
 
 static void console_handle_csi(int console_num, console_t *con, framebuffer_t *fb, uint64_t rows, uint64_t cols, int is_active) {
     char cmd;
+    char *esc_data;
     int param_start;
     int is_private;
-    int params[8];
+    int inline_params[8];
+    int *params;
+    int param_capacity;
     int nparams;
     int n;
     int p;
@@ -1664,25 +1841,41 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     (void)console_num;
 
     if (con->esc_len == 0) return;
+    esc_data = console_esc_data(con);
+    param_capacity = 1;
+    for (n = 0; n < con->esc_len - 1; n++) {
+        if (esc_data[n] == ';') {
+            if (param_capacity == INT32_MAX) return;
+            param_capacity++;
+        }
+    }
+    params = inline_params;
+    if (param_capacity > (int)(sizeof(inline_params) / sizeof(inline_params[0]))) {
+        if ((size_t)param_capacity > SIZE_MAX / sizeof(int)) return;
+        params = (int *)kmalloc((size_t)param_capacity * sizeof(int));
+        if (!params) return;
+    }
 
     if (rows == 0) rows = 1;
     if (cols == 0) cols = 1;
     console_grow_buffer(con, rows);
     if (rows > con->buffer_rows) rows = con->buffer_rows;
-    if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+    if (cols > con->buffer_cols) cols = con->buffer_cols;
     console_ensure_nondefault_color(con);
 
-    cmd = con->esc_buf[con->esc_len - 1];
+    cmd = esc_data[con->esc_len - 1];
     
     param_start = 0;
     is_private = 0;
-    if (con->esc_buf[0] == '?') {
+    if (esc_data[0] == '?') {
         is_private = 1;
         param_start = 1;
     }
     
-    memset(params, 0, sizeof(params));
-    nparams = parse_csi_params(con->esc_buf + param_start, con->esc_len - 1 - param_start, params, 8);
+    memset(params, 0, (size_t)param_capacity * sizeof(int));
+    nparams = parse_csi_params(esc_data + param_start,
+                               con->esc_len - 1 - param_start,
+                               params, param_capacity);
 
     if (is_private) {
         if (cmd == 'h') {
@@ -1709,6 +1902,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
                 con->dirty = 1;
             }
         }
+        if (params != inline_params) kfree(params);
         return;
     }
 
@@ -1782,9 +1976,9 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         if (mode == 2 || mode == 3) {
             if (con->allocated && con->buffer) {
                 for (r = 0; r < con->buffer_rows; r++) {
-                    for (c2 = 0; c2 < CONSOLE_BUFFER_COLS; c2++) {
-                        con->buffer[r][c2] = ' ';
-                        if (con->color_buffer) con->color_buffer[r][c2] = console_current_attr(con);
+                    for (c2 = 0; c2 < con->buffer_cols; c2++) {
+                        console_char_row(con, r)[c2] = ' ';
+                        if (con->color_buffer) console_color_row(con, r)[c2] = console_current_attr(con);
                     }
                     con->line_wrapped[r] = 0;
                 }
@@ -1797,14 +1991,14 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
                 console_fast_redraw_locked(console_num);
             }
         } else if (mode == 0) {
-            for (c2 = con->cursor_x; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                con->buffer[con->cursor_y][c2] = ' ';
-                if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+            for (c2 = con->cursor_x; c2 < cols && c2 < con->buffer_cols; c2++) {
+                console_char_row(con, con->cursor_y)[c2] = ' ';
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
             }
             for (r = con->cursor_y + 1; r < rows && r < con->buffer_rows; r++)
-                for (c2 = 0; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                    con->buffer[r][c2] = ' ';
-                    if (con->color_buffer) con->color_buffer[r][c2] = console_current_attr(con);
+                for (c2 = 0; c2 < cols && c2 < con->buffer_cols; c2++) {
+                    console_char_row(con, r)[c2] = ' ';
+                    if (con->color_buffer) console_color_row(con, r)[c2] = console_current_attr(con);
                 }
             if (is_active && fb) {
                 for (c2 = con->cursor_x; c2 < cols; c2++)
@@ -1815,13 +2009,13 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
             }
         } else if (mode == 1) {
             for (r = 0; r < con->cursor_y && r < con->buffer_rows; r++)
-                for (c2 = 0; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                    con->buffer[r][c2] = ' ';
-                    if (con->color_buffer) con->color_buffer[r][c2] = console_current_attr(con);
+                for (c2 = 0; c2 < cols && c2 < con->buffer_cols; c2++) {
+                    console_char_row(con, r)[c2] = ' ';
+                    if (con->color_buffer) console_color_row(con, r)[c2] = console_current_attr(con);
                 }
-            for (c2 = 0; c2 <= con->cursor_x && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                con->buffer[con->cursor_y][c2] = ' ';
-                if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+            for (c2 = 0; c2 <= con->cursor_x && c2 < con->buffer_cols; c2++) {
+                console_char_row(con, con->cursor_y)[c2] = ' ';
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
             }
             if (is_active && fb) {
                 for (r = 0; r < con->cursor_y; r++)
@@ -1835,48 +2029,48 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     case 'K':
         mode = (nparams >= 1) ? params[0] : 0;
         if (mode == 0) {
-            for (c2 = con->cursor_x; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                con->buffer[con->cursor_y][c2] = ' ';
-                if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+            for (c2 = con->cursor_x; c2 < cols && c2 < con->buffer_cols; c2++) {
+                console_char_row(con, con->cursor_y)[c2] = ' ';
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
                 if (is_active && fb) fb_putchar(' ', c2, con->cursor_y);
             }
         } else if (mode == 1) {
-            for (c2 = 0; c2 <= con->cursor_x && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                con->buffer[con->cursor_y][c2] = ' ';
-                if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+            for (c2 = 0; c2 <= con->cursor_x && c2 < con->buffer_cols; c2++) {
+                console_char_row(con, con->cursor_y)[c2] = ' ';
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
                 if (is_active && fb) fb_putchar(' ', c2, con->cursor_y);
             }
         } else if (mode == 2) {
-            for (c2 = 0; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-                con->buffer[con->cursor_y][c2] = ' ';
-                if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+            for (c2 = 0; c2 < cols && c2 < con->buffer_cols; c2++) {
+                console_char_row(con, con->cursor_y)[c2] = ' ';
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
                 if (is_active && fb) fb_putchar(' ', c2, con->cursor_y);
             }
         }
         break;
     case 'X':
         n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
-        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint64_t)n && c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-            con->buffer[con->cursor_y][c2] = ' ';
-            if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint64_t)n && c2 < cols && c2 < con->buffer_cols; c2++) {
+            console_char_row(con, con->cursor_y)[c2] = ' ';
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
             if (is_active && fb) fb_putchar(' ', c2, con->cursor_y);
         }
         break;
     case '@':
         n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         if ((uint64_t)n > cols - con->cursor_x) n = cols - con->cursor_x;
-        for (c2 = cols - 1; c2 >= con->cursor_x + (uint64_t)n && c2 < CONSOLE_BUFFER_COLS; c2--) {
-            con->buffer[con->cursor_y][c2] = con->buffer[con->cursor_y][c2 - n];
-            if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = con->color_buffer[con->cursor_y][c2 - n];
+        for (c2 = cols - 1; c2 >= con->cursor_x + (uint64_t)n && c2 < con->buffer_cols; c2--) {
+            console_char_row(con, con->cursor_y)[c2] = console_char_row(con, con->cursor_y)[c2 - n];
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_color_row(con, con->cursor_y)[c2 - n];
         }
-        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint64_t)n && c2 < CONSOLE_BUFFER_COLS; c2++) {
-            con->buffer[con->cursor_y][c2] = ' ';
-            if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+        for (c2 = con->cursor_x; c2 < con->cursor_x + (uint64_t)n && c2 < con->buffer_cols; c2++) {
+            console_char_row(con, con->cursor_y)[c2] = ' ';
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
         }
         if (is_active && fb) {
             for (c2 = 0; c2 < cols; c2++) {
-                if (con->color_buffer) console_apply_attr(con->color_buffer[con->cursor_y][c2], fb);
-                fb_putchar(con->buffer[con->cursor_y][c2], c2, con->cursor_y);
+                if (con->color_buffer) console_apply_attr(console_color_row(con, con->cursor_y)[c2], fb);
+                fb_putchar(console_char_row(con, con->cursor_y)[c2], c2, con->cursor_y);
             }
             console_apply_colors(con, fb);
         }
@@ -1884,18 +2078,18 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     case 'P':
         n = (nparams >= 1 && params[0] > 0) ? params[0] : 1;
         if ((uint64_t)n > cols - con->cursor_x) n = cols - con->cursor_x;
-        for (c2 = con->cursor_x; c2 + (uint64_t)n < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-            con->buffer[con->cursor_y][c2] = con->buffer[con->cursor_y][c2 + n];
-            if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = con->color_buffer[con->cursor_y][c2 + n];
+        for (c2 = con->cursor_x; c2 + (uint64_t)n < cols && c2 < con->buffer_cols; c2++) {
+            console_char_row(con, con->cursor_y)[c2] = console_char_row(con, con->cursor_y)[c2 + n];
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_color_row(con, con->cursor_y)[c2 + n];
         }
-        for (c2 = cols - (uint64_t)n; c2 < cols && c2 < CONSOLE_BUFFER_COLS; c2++) {
-            con->buffer[con->cursor_y][c2] = ' ';
-            if (con->color_buffer) con->color_buffer[con->cursor_y][c2] = console_current_attr(con);
+        for (c2 = cols - (uint64_t)n; c2 < cols && c2 < con->buffer_cols; c2++) {
+            console_char_row(con, con->cursor_y)[c2] = ' ';
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[c2] = console_current_attr(con);
         }
         if (is_active && fb) {
             for (c2 = 0; c2 < cols; c2++) {
-                if (con->color_buffer) console_apply_attr(con->color_buffer[con->cursor_y][c2], fb);
-                fb_putchar(con->buffer[con->cursor_y][c2], c2, con->cursor_y);
+                if (con->color_buffer) console_apply_attr(console_color_row(con, con->cursor_y)[c2], fb);
+                fb_putchar(console_char_row(con, con->cursor_y)[c2], c2, con->cursor_y);
             }
             console_apply_colors(con, fb);
         }
@@ -1911,8 +2105,8 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         if (is_active && fb) {
             for (r = top; r < bot; r++)
                 for (c2 = 0; c2 < cols; c2++) {
-                    if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                    fb_putchar(con->buffer[r][c2], c2, r);
+                    if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                    fb_putchar(console_char_row(con, r)[c2], c2, r);
                 }
             console_apply_colors(con, fb);
         }
@@ -1931,8 +2125,8 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
             } else {
                 for (r = top; r < bot; r++)
                     for (c2 = 0; c2 < cols; c2++) {
-                        if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                        fb_putchar(con->buffer[r][c2], c2, r);
+                        if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                        fb_putchar(console_char_row(con, r)[c2], c2, r);
                     }
             }
             console_apply_colors(con, fb);
@@ -1951,8 +2145,8 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
             } else {
                 for (r = top; r < bot; r++)
                     for (c2 = 0; c2 < cols; c2++) {
-                        if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                        fb_putchar(con->buffer[r][c2], c2, r);
+                        if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                        fb_putchar(console_char_row(con, r)[c2], c2, r);
                     }
             }
             console_apply_colors(con, fb);
@@ -1968,8 +2162,8 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
         if (is_active && fb) {
             for (r = top; r < bot; r++)
                 for (c2 = 0; c2 < cols; c2++) {
-                    if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                    fb_putchar(con->buffer[r][c2], c2, r);
+                    if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                    fb_putchar(console_char_row(con, r)[c2], c2, r);
                 }
             console_apply_colors(con, fb);
         }
@@ -2055,6 +2249,7 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     default:
         break;
     }
+    if (params != inline_params) kfree(params);
 }
 
 static void console_putchar_to_nolock(int console_num, char c) {
@@ -2108,7 +2303,7 @@ static void console_putchar_to_nolock(int console_num, char c) {
     if (con->esc_state == 1) {
         if (c == '[') {
             con->esc_state = 2;
-            con->esc_len = 0;
+            console_esc_reset(con);
             return;
         }
         if (c == '(' || c == ')') {
@@ -2123,8 +2318,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
                 if (is_active && fb) {
                     for (r = sc_top; r < sc_bot; r++)
                         for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                            fb_putchar(con->buffer[r][c2], c2, r);
+                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                            fb_putchar(console_char_row(con, r)[c2], c2, r);
                         }
                     console_apply_colors(con, fb);
                 }
@@ -2146,8 +2341,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
                     } else {
                         for (r = sc_top; r < sc_bot; r++)
                             for (c2 = 0; c2 < cols; c2++) {
-                                if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                                fb_putchar(con->buffer[r][c2], c2, r);
+                                if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                                fb_putchar(console_char_row(con, r)[c2], c2, r);
                             }
                     }
                     console_apply_colors(con, fb);
@@ -2201,24 +2396,22 @@ static void console_putchar_to_nolock(int console_num, char c) {
     
     if (con->esc_state == 2) {
         if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
-            if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-                con->esc_buf[con->esc_len++] = c;
+            if (!console_esc_append(con, c)) {
+                con->esc_state = 0;
+                console_esc_reset(con);
             }
             return;
         }
-        if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-            con->esc_buf[con->esc_len++] = c;
-        }
-        con->esc_buf[con->esc_len] = '\0';
-        console_handle_csi(console_num, con, fb, rows, cols, is_active);
+        if (console_esc_append(con, c))
+            console_handle_csi(console_num, con, fb, rows, cols, is_active);
         con->esc_state = 0;
-        con->esc_len = 0;
+        console_esc_reset(con);
         return;
     }
 
     if (c == '\033') {
         con->esc_state = 1;
-        con->esc_len = 0;
+        console_esc_reset(con);
         return;
     }
 
@@ -2242,8 +2435,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
                 } else {
                     for (r = sc_top; r < sc_bot; r++)
                         for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                            fb_putchar(con->buffer[r][c2], c2, r);
+                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                            fb_putchar(console_char_row(con, r)[c2], c2, r);
                         }
                 }
                 console_apply_colors(con, fb);
@@ -2271,8 +2464,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
     if (c == '\b') {
         if (con->cursor_x > 0) {
             con->cursor_x--;
-            con->buffer[con->cursor_y][con->cursor_x] = ' ';
-            if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+            console_char_row(con, con->cursor_y)[con->cursor_x] = ' ';
+            if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
             if (is_active && fb) {
                 fb->cursor_x = con->cursor_x;
                 fb_putchar(' ', con->cursor_x, con->cursor_y);
@@ -2290,9 +2483,9 @@ static void console_putchar_to_nolock(int console_num, char c) {
         return;
     }
 
-    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
-        con->buffer[con->cursor_y][con->cursor_x] = c;
-        if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+    if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
+        console_char_row(con, con->cursor_y)[con->cursor_x] = c;
+        if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
     }
 
     if (is_active && fb) {
@@ -2315,8 +2508,8 @@ static void console_putchar_to_nolock(int console_num, char c) {
                 } else {
                     for (r = sc_top; r < sc_bot; r++)
                         for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(con->color_buffer[r][c2], fb);
-                            fb_putchar(con->buffer[r][c2], c2, r);
+                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
+                            fb_putchar(console_char_row(con, r)[c2], c2, r);
                         }
                 }
                 console_apply_colors(con, fb);
@@ -2440,7 +2633,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         if (!is_active && con->buffer_rows > 0) rows = con->buffer_rows;
         console_grow_buffer(con, rows);
         if (rows > con->buffer_rows) rows = con->buffer_rows;
-        if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+        if (cols > con->buffer_cols) cols = con->buffer_cols;
         fb_ok = is_active && fb && !batch_fb_skip;
 
         for (i = 0; i < chunk; i++) {
@@ -2452,7 +2645,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             if (con->esc_state == 1) {
                 if (c == '[') {
                     con->esc_state = 2;
-                    con->esc_len = 0;
+                    console_esc_reset(con);
                     continue;
                 }
                 if (c == '(' || c == ')') {
@@ -2467,8 +2660,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                         if (fb_ok) {
                             for (sr = sc_top; sr < sc_bot; sr++)
                                 for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                 }
                             console_apply_colors(con, fb);
                         }
@@ -2487,8 +2680,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                         if (fb_ok) {
                             for (sr = sc_top; sr < sc_bot; sr++)
                                 for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                 }
                             console_apply_colors(con, fb);
                         }
@@ -2540,18 +2733,16 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
             if (con->esc_state == 2) {
                 if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
-                    if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-                        con->esc_buf[con->esc_len++] = c;
+                    if (!console_esc_append(con, c)) {
+                        con->esc_state = 0;
+                        console_esc_reset(con);
                     }
                     continue;
                 }
-                if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-                    con->esc_buf[con->esc_len++] = c;
-                }
-                con->esc_buf[con->esc_len] = '\0';
-                console_handle_csi(target_console, con, fb, rows, cols, fb_ok);
+                if (console_esc_append(con, c))
+                    console_handle_csi(target_console, con, fb, rows, cols, fb_ok);
                 con->esc_state = 0;
-                con->esc_len = 0;
+                console_esc_reset(con);
                 if (con->alt_screen_pending) {
                     chunk = i + 1;
                     break;
@@ -2561,7 +2752,7 @@ static void console_write_internal(int console_num, const char *data, size_t siz
 
             if (c == '\033') {
                 con->esc_state = 1;
-                con->esc_len = 0;
+                console_esc_reset(con);
                 continue;
             }
 
@@ -2588,8 +2779,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                         } else {
                             for (sr = sc_top; sr < sc_bot; sr++)
                                 for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                 }
                         }
                         console_apply_colors(con, fb);
@@ -2615,8 +2806,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             if (c == '\b') {
                 if (con->cursor_x > 0) {
                     con->cursor_x--;
-                    con->buffer[con->cursor_y][con->cursor_x] = ' ';
-                    if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+                    console_char_row(con, con->cursor_y)[con->cursor_x] = ' ';
+                    if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
                     if (fb_ok) {
                         fb->cursor_x = con->cursor_x;
                         fb_putchar(' ', con->cursor_x, con->cursor_y);
@@ -2628,9 +2819,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             if (c == '\t') {
                 tab_stop = 8 - (con->cursor_x % 8);
                 for (t = 0; t < tab_stop; t++) {
-                    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
-                        con->buffer[con->cursor_y][con->cursor_x] = ' ';
-                        if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+                    if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
+                        console_char_row(con, con->cursor_y)[con->cursor_x] = ' ';
+                        if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
                     }
                     if (fb_ok) {
                         fb_putchar(' ', con->cursor_x, con->cursor_y);
@@ -2655,8 +2846,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                                 } else {
                                     for (sr = sc_top; sr < sc_bot; sr++)
                                         for (sc = 0; sc < cols; sc++) {
-                                            if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                            if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                            fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                         }
                                 }
                                 console_apply_colors(con, fb);
@@ -2667,9 +2858,9 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 continue;
             }
 
-            if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
-                con->buffer[con->cursor_y][con->cursor_x] = c;
-                if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+            if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
+                console_char_row(con, con->cursor_y)[con->cursor_x] = c;
+                if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
             }
 
             if (fb_ok) {
@@ -2696,8 +2887,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                         } else {
                             for (sr = sc_top; sr < sc_bot; sr++)
                                 for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                 }
                         }
                         console_apply_colors(con, fb);
@@ -2762,8 +2953,8 @@ void console_writestring(const char *data) {
 
 void console_clear(int console_num) {
     uint64_t flags;
-    int row;
-    int col;
+    uint64_t row;
+    uint64_t col;
     console_t *con;
     framebuffer_t *fb;
 
@@ -2775,10 +2966,10 @@ void console_clear(int console_num) {
     con = &consoles[console_num];
     console_expand_color_buffer(con);
     if (con->allocated && con->buffer) {
-        for (row = 0; row < (int)con->buffer_rows; row++) {
-            for (col = 0; col < CONSOLE_BUFFER_COLS; col++) {
-                con->buffer[row][col] = ' ';
-                if (con->color_buffer) con->color_buffer[row][col] = 0x70;
+        for (row = 0; row < con->buffer_rows; row++) {
+            for (col = 0; col < con->buffer_cols; col++) {
+                console_char_row(con, row)[col] = ' ';
+                if (con->color_buffer) console_color_row(con, row)[col] = 0x70;
             }
             con->line_wrapped[row] = 0;
         }
@@ -2979,7 +3170,7 @@ static void __attribute__((unused)) console_writer_thread(void) {
                 if (cols == 0) cols = 80;
                 console_grow_buffer(con, rows);
                 if (rows > con->buffer_rows) rows = con->buffer_rows;
-                if (cols > CONSOLE_BUFFER_COLS) cols = CONSOLE_BUFFER_COLS;
+                if (cols > con->buffer_cols) cols = con->buffer_cols;
                 is_active = (i == current_console && !console_switch_in_progress &&
                              !con->graphics_mode);
                 wt_fb_ok = is_active && fb && !burst_fb_skip;
@@ -2989,7 +3180,7 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     if (con->esc_state == 1) {
                         if (c == '[') {
                             con->esc_state = 2;
-                            con->esc_len = 0;
+                            console_esc_reset(con);
                         } else if (c == '(' || c == ')') {
                             con->esc_state = 3;
                         } else if (c == 'M') {
@@ -3000,8 +3191,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                                 if (wt_fb_ok) {
                                     for (sr = sc_top; sr < sc_bot; sr++)
                                         for (sc = 0; sc < cols; sc++) {
-                                            if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                            if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                            fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                         }
                                     console_apply_colors(con, fb);
                                 }
@@ -3021,8 +3212,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                                     } else {
                                         for (sr = sc_top; sr < sc_bot; sr++)
                                             for (sc = 0; sc < cols; sc++) {
-                                                if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                                fb_putchar(con->buffer[sr][sc], sc, sr);
+                                                if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                                fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                             }
                                     }
                                     console_apply_colors(con, fb);
@@ -3069,18 +3260,16 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     
                     if (con->esc_state == 2) {
                         if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
-                            if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-                                con->esc_buf[con->esc_len++] = c;
+                            if (!console_esc_append(con, c)) {
+                                con->esc_state = 0;
+                                console_esc_reset(con);
                             }
                             continue;
                         }
-                        if (con->esc_len < (int)(sizeof(con->esc_buf) - 1)) {
-                            con->esc_buf[con->esc_len++] = c;
-                        }
-                        con->esc_buf[con->esc_len] = '\0';
-                        console_handle_csi(i, con, fb, rows, cols, wt_fb_ok);
+                        if (console_esc_append(con, c))
+                            console_handle_csi(i, con, fb, rows, cols, wt_fb_ok);
                         con->esc_state = 0;
-                        con->esc_len = 0;
+                        console_esc_reset(con);
                         if (con->alt_screen_pending) {
                             chunk_size = j + 1;
                             break;
@@ -3090,7 +3279,7 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     
                     if (c == '\033') {
                         con->esc_state = 1;
-                        con->esc_len = 0;
+                        console_esc_reset(con);
                         continue;
                     }
 
@@ -3112,8 +3301,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                                 } else {
                                     for (sr = sc_top; sr < sc_bot; sr++)
                                         for (sc = 0; sc < cols; sc++) {
-                                            if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                            if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                            fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                         }
                                 }
                                 console_apply_colors(con, fb);
@@ -3137,8 +3326,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     if (c == '\b') {
                         if (con->cursor_x > 0) {
                             con->cursor_x--;
-                            con->buffer[con->cursor_y][con->cursor_x] = ' ';
-                            if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+                            console_char_row(con, con->cursor_y)[con->cursor_x] = ' ';
+                            if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
                             if (wt_fb_ok) {
                                 fb->cursor_x = con->cursor_x;
                                 fb_putchar(' ', con->cursor_x, con->cursor_y);
@@ -3150,9 +3339,9 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     if (c == '\t') {
                         tab_stop = 8 - (con->cursor_x % 8);
                         for (wt = 0; wt < tab_stop; wt++) {
-                            if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
-                                con->buffer[con->cursor_y][con->cursor_x] = ' ';
-                                if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+                            if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
+                                console_char_row(con, con->cursor_y)[con->cursor_x] = ' ';
+                                if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
                             }
                             if (wt_fb_ok) fb_putchar(' ', con->cursor_x, con->cursor_y);
                             con->cursor_x++;
@@ -3170,8 +3359,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                                         } else {
                                             for (sr = sc_top; sr < sc_bot; sr++)
                                                 for (sc = 0; sc < cols; sc++) {
-                                                    if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                                    fb_putchar(con->buffer[sr][sc], sc, sr);
+                                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                                 }
                                         }
                                         console_apply_colors(con, fb);
@@ -3182,9 +3371,9 @@ static void __attribute__((unused)) console_writer_thread(void) {
                         continue;
                     }
                     
-                    if (con->cursor_y < con->buffer_rows && con->cursor_x < CONSOLE_BUFFER_COLS) {
-                        con->buffer[con->cursor_y][con->cursor_x] = c;
-                        if (con->color_buffer) con->color_buffer[con->cursor_y][con->cursor_x] = console_current_attr(con);
+                    if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
+                        console_char_row(con, con->cursor_y)[con->cursor_x] = c;
+                        if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
                     }
                     if (wt_fb_ok) fb_putchar(c, con->cursor_x, con->cursor_y);
                     
@@ -3203,8 +3392,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                                 } else {
                                     for (sr = sc_top; sr < sc_bot; sr++)
                                         for (sc = 0; sc < cols; sc++) {
-                                            if (con->color_buffer) console_apply_attr(con->color_buffer[sr][sc], fb);
-                                            fb_putchar(con->buffer[sr][sc], sc, sr);
+                                            if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                                            fb_putchar(console_char_row(con, sr)[sc], sc, sr);
                                         }
                                 }
                                 console_apply_colors(con, fb);

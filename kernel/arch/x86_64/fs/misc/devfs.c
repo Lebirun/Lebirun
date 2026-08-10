@@ -102,24 +102,11 @@ static int devfs_grow_blockdevs(void) {
     return 0;
 }
 
-#define DEVFS_DIRENT_POOL_SIZE 4
-
-static dirent_t *devfs_dirent_pool;
-static volatile uint64_t devfs_dirent_index;
+static dirent_t devfs_boot_dirent;
 
 static dirent_t *devfs_alloc_dirent(void) {
-    uint64_t idx;
-
-    if (!devfs_dirent_pool) {
-        devfs_dirent_pool = (dirent_t *)kmalloc(DEVFS_DIRENT_POOL_SIZE * sizeof(dirent_t));
-        if (!devfs_dirent_pool)
-            return NULL;
-        memset(devfs_dirent_pool, 0, DEVFS_DIRENT_POOL_SIZE * sizeof(dirent_t));
-        devfs_dirent_index = 0;
-    }
-    idx = devfs_dirent_index;
-    devfs_dirent_index = (idx + 1) % DEVFS_DIRENT_POOL_SIZE;
-    return &devfs_dirent_pool[idx];
+    memset(&devfs_boot_dirent, 0, sizeof(devfs_boot_dirent));
+    return &devfs_boot_dirent;
 }
 
 static uint64_t dev_null_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -788,8 +775,6 @@ void KERNEL_INIT devfs_init(void) {
     int tty_count_local;
     vfs_fs_type_t *fs_type;
 
-    devfs_dirent_index = 0;
-    devfs_dirent_pool = NULL;
     devfs_blockdev_capacity = 0;
     devfs_blockdevs = NULL;
     for (i = 0; i < DEVFS_NODE_COUNT; i++) {

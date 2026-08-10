@@ -111,7 +111,6 @@ typedef struct {
 
 static dirent_t ext4_dirent;
 
-#define EXT4_VFS_CACHE_MAX 32
 typedef struct {
     ext4_fs_t *fs;
     uint32_t ino;
@@ -264,13 +263,15 @@ static int ext4_vfs_cache_grow(void) {
     int i;
     ext4_vfs_cache_entry_t *new_cache;
 
-    if (ext4_vfs_cache_capacity >= EXT4_VFS_CACHE_MAX) return -1;
-
+    if (ext4_vfs_cache_capacity > INT32_MAX / 2) return -1;
     new_capacity = ext4_vfs_cache_capacity * 2;
     if (new_capacity < 4) new_capacity = 4;
-    if (new_capacity > EXT4_VFS_CACHE_MAX) new_capacity = EXT4_VFS_CACHE_MAX;
+    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(ext4_vfs_cache_entry_t))
+        return -1;
 
-    new_cache = (ext4_vfs_cache_entry_t *)krealloc(ext4_vfs_cache, new_capacity * sizeof(ext4_vfs_cache_entry_t));
+    new_cache = (ext4_vfs_cache_entry_t *)krealloc(
+        ext4_vfs_cache,
+        (uint64_t)new_capacity * sizeof(ext4_vfs_cache_entry_t));
     if (!new_cache) return -1;
 
     for (i = ext4_vfs_cache_capacity; i < new_capacity; i++) {
@@ -1706,6 +1707,8 @@ void ext4_reclaim_mounted_caches(uint32_t max_blocks) {
     while (fs) {
         mutex_lock(&fs->lock);
         ext4_reclaim_clean_blocks(fs, max_blocks);
+        ext4_compact_block_cache(fs);
+        ext4_reclaim_inodes(fs);
         mutex_unlock(&fs->lock);
         fs = fs->next_mount;
     }

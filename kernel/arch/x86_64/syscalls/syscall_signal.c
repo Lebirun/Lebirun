@@ -705,8 +705,8 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     sigs = ensure_task_signals(target);
     if (!sigs) return -ENOMEM;
     limit = task_rlimit_get(target, 11, 0);
-    if (limit > 256) limit = 256;
-    if (sigs->queue_count >= limit) return -EAGAIN;
+    if (sigs->queue_count == UINT32_MAX || sigs->queue_count >= limit)
+        return -EAGAIN;
     entry = (queued_signal_t *)kmalloc(sizeof(queued_signal_t));
     if (!entry) return -ENOMEM;
     memset(entry, 0, sizeof(*entry));

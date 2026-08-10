@@ -52,6 +52,9 @@ static int syscall_table_set_override(int number, void *handler) {
         syscall_table_overrides[i].handler = handler;
         return 0;
     }
+    if (syscall_table_override_count == INT32_MAX) return -1;
+    if ((size_t)syscall_table_override_count + 1 >
+        SIZE_MAX / sizeof(syscall_table_override_t)) return -1;
     resized = (syscall_table_override_t *)krealloc(
         syscall_table_overrides,
         (size_t)(syscall_table_override_count + 1) *
@@ -68,7 +71,14 @@ void syscall_table_set(int number, void *handler) {
     uintptr_t address;
     uint32_t offset;
 
-    if (number < 0 || number >= NR_SYSCALLS) return;
+    if (number < 0) return;
+    if (number >= NR_SYSCALLS) {
+        if (handler)
+            syscall_table_set_override(number, handler);
+        else
+            syscall_table_remove_override(number);
+        return;
+    }
     address = (uintptr_t)handler;
     if (!handler) {
         syscall_table_remove_override(number);
@@ -96,11 +106,12 @@ void *syscall_table_get(int number) {
     uint32_t offset;
     int i;
 
-    if (number < 0 || number >= NR_SYSCALLS) return NULL;
+    if (number < 0) return NULL;
     for (i = 0; i < syscall_table_override_count; i++) {
         if (syscall_table_overrides[i].number == number)
             return syscall_table_overrides[i].handler;
     }
+    if (number >= NR_SYSCALLS) return NULL;
     offset = (uint32_t)syscall_table_storage[number][0];
     offset |= (uint32_t)syscall_table_storage[number][1] << 8;
     offset |= (uint32_t)syscall_table_storage[number][2] << 16;
@@ -126,8 +137,6 @@ void syscall_clear_exec_completed(void) {
         current_task->exec_completed = 0;
     }
 }
-
-#define LEBIRUN_SYSCALL_FLAG 0x80000000
 
 struct user_desc {
     unsigned int entry_number;
@@ -171,9 +180,6 @@ static int linux_to_kernel_syscall(int linux_nr) {
     int leb_nr;
     if (linux_nr & LEBIRUN_SYSCALL_FLAG) {
         leb_nr = linux_nr & ~LEBIRUN_SYSCALL_FLAG;
-        if (leb_nr < 0 || leb_nr >= NR_SYSCALLS) {
-            return -1;
-        }
         return leb_nr;
     }
     
@@ -472,7 +478,9 @@ void do_syscall(registers_t *regs) {
 
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
-    } else if (num == SYSCALL_LSEEK) {
+    } else if (num == SYSCALL_LSEEK || num == SYSCALL_MMAP ||
+               num == SYSCALL_MMAP2 || num == SYSCALL_MREMAP ||
+               num == SYSCALL_SHMAT) {
         result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))handler)(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);

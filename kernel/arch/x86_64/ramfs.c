@@ -85,7 +85,7 @@ static char *ramfs_strdup_name(const char *name) {
 
     if (!name) return NULL;
     len = strlen(name);
-    if (len >= VFS_MAX_NAME) return NULL;
+    if (len == SIZE_MAX) return NULL;
     copy = (char *)kmalloc((uint64_t)len + 1);
     if (!copy) return NULL;
     memcpy(copy, name, len + 1);
