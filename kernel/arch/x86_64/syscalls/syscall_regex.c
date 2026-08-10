@@ -1,6 +1,5 @@
 #include "syscall_defs.h"
 
-extern void **syscall_table;
 
 #define REG_EXTENDED    1
 #define REG_ICASE       2
@@ -1770,15 +1769,15 @@ static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) 
 }
 
 void syscalls_regex_init(void) {
-    syscall_table[SYSCALL_REGCOMP] = sys_regcomp;
-    syscall_table[SYSCALL_REGEXEC] = sys_regexec;
-    syscall_table[SYSCALL_REGFREE] = sys_regfree;
-    syscall_table[SYSCALL_REGERROR] = sys_regerror;
-    syscall_table[SYSCALL_FNMATCH] = sys_fnmatch;
-    syscall_table[SYSCALL_GLOB] = sys_glob;
-    syscall_table[SYSCALL_GLOBFREE] = sys_globfree;
-    syscall_table[SYSCALL_SSCANF] = sys_sscanf;
-    syscall_table[SYSCALL_SCANF_GETCHAR] = sys_scanf_getchar;
-    syscall_table[SYSCALL_REGSUB] = sys_regsub;
-    syscall_table[SYSCALL_REGEXEC_EX] = sys_regexec_ex;
+    syscall_table_set(SYSCALL_REGCOMP, (void *)(sys_regcomp));
+    syscall_table_set(SYSCALL_REGEXEC, (void *)(sys_regexec));
+    syscall_table_set(SYSCALL_REGFREE, (void *)(sys_regfree));
+    syscall_table_set(SYSCALL_REGERROR, (void *)(sys_regerror));
+    syscall_table_set(SYSCALL_FNMATCH, (void *)(sys_fnmatch));
+    syscall_table_set(SYSCALL_GLOB, (void *)(sys_glob));
+    syscall_table_set(SYSCALL_GLOBFREE, (void *)(sys_globfree));
+    syscall_table_set(SYSCALL_SSCANF, (void *)(sys_sscanf));
+    syscall_table_set(SYSCALL_SCANF_GETCHAR, (void *)(sys_scanf_getchar));
+    syscall_table_set(SYSCALL_REGSUB, (void *)(sys_regsub));
+    syscall_table_set(SYSCALL_REGEXEC_EX, (void *)(sys_regexec_ex));
 }

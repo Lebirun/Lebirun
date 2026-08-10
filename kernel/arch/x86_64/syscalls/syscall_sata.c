@@ -64,9 +64,9 @@ static int sys_blockdev_rescan(int devname_ptr, const char *unused2, int unused3
 }
 
 void syscalls_sata_init(void) {
-    syscall_table[SYSCALL_SATA_TEST] = sys_sata_test;
-    syscall_table[SYSCALL_SATA_INFO] = sys_sata_info;
-    syscall_table[SYSCALL_SATA_SMART] = sys_sata_smart;
-    syscall_table[SYSCALL_SATA_IRQ] = sys_sata_irq;
-    syscall_table[SYSCALL_BLOCKDEV_RESCAN] = sys_blockdev_rescan;
+    syscall_table_set(SYSCALL_SATA_TEST, (void *)(sys_sata_test));
+    syscall_table_set(SYSCALL_SATA_INFO, (void *)(sys_sata_info));
+    syscall_table_set(SYSCALL_SATA_SMART, (void *)(sys_sata_smart));
+    syscall_table_set(SYSCALL_SATA_IRQ, (void *)(sys_sata_irq));
+    syscall_table_set(SYSCALL_BLOCKDEV_RESCAN, (void *)(sys_blockdev_rescan));
 }

@@ -9,8 +9,104 @@
 
 extern task_t* current_task;
 
-static void *syscall_table_storage[NR_SYSCALLS];
-void **syscall_table = syscall_table_storage;
+static uint8_t syscall_table_storage[NR_SYSCALLS][3];
+
+typedef struct {
+    int number;
+    void *handler;
+} syscall_table_override_t;
+
+static syscall_table_override_t *syscall_table_overrides;
+static int syscall_table_override_count;
+
+static void syscall_table_remove_override(int number) {
+    int i;
+    syscall_table_override_t *resized;
+
+    for (i = 0; i < syscall_table_override_count; i++) {
+        if (syscall_table_overrides[i].number != number) continue;
+        syscall_table_override_count--;
+        if (i < syscall_table_override_count)
+            syscall_table_overrides[i] =
+                syscall_table_overrides[syscall_table_override_count];
+        if (syscall_table_override_count == 0) {
+            kfree(syscall_table_overrides);
+            syscall_table_overrides = NULL;
+        } else {
+            resized = (syscall_table_override_t *)krealloc(
+                syscall_table_overrides,
+                (size_t)syscall_table_override_count *
+                    sizeof(syscall_table_override_t));
+            if (resized) syscall_table_overrides = resized;
+        }
+        return;
+    }
+}
+
+static int syscall_table_set_override(int number, void *handler) {
+    int i;
+    syscall_table_override_t *resized;
+
+    for (i = 0; i < syscall_table_override_count; i++) {
+        if (syscall_table_overrides[i].number != number) continue;
+        syscall_table_overrides[i].handler = handler;
+        return 0;
+    }
+    resized = (syscall_table_override_t *)krealloc(
+        syscall_table_overrides,
+        (size_t)(syscall_table_override_count + 1) *
+            sizeof(syscall_table_override_t));
+    if (!resized) return -1;
+    syscall_table_overrides = resized;
+    syscall_table_overrides[syscall_table_override_count].number = number;
+    syscall_table_overrides[syscall_table_override_count].handler = handler;
+    syscall_table_override_count++;
+    return 0;
+}
+
+void syscall_table_set(int number, void *handler) {
+    uintptr_t address;
+    uint32_t offset;
+
+    if (number < 0 || number >= NR_SYSCALLS) return;
+    address = (uintptr_t)handler;
+    if (!handler) {
+        syscall_table_remove_override(number);
+        syscall_table_storage[number][0] = 0;
+        syscall_table_storage[number][1] = 0;
+        syscall_table_storage[number][2] = 0;
+        return;
+    }
+    if (address < KERNEL_VMA || address - KERNEL_VMA >= 0x1000000u) {
+        if (syscall_table_set_override(number, handler) == 0) {
+            syscall_table_storage[number][0] = 0;
+            syscall_table_storage[number][1] = 0;
+            syscall_table_storage[number][2] = 0;
+        }
+        return;
+    }
+    syscall_table_remove_override(number);
+    offset = (uint32_t)(address - KERNEL_VMA);
+    syscall_table_storage[number][0] = (uint8_t)offset;
+    syscall_table_storage[number][1] = (uint8_t)(offset >> 8);
+    syscall_table_storage[number][2] = (uint8_t)(offset >> 16);
+}
+
+void *syscall_table_get(int number) {
+    uint32_t offset;
+    int i;
+
+    if (number < 0 || number >= NR_SYSCALLS) return NULL;
+    for (i = 0; i < syscall_table_override_count; i++) {
+        if (syscall_table_overrides[i].number == number)
+            return syscall_table_overrides[i].handler;
+    }
+    offset = (uint32_t)syscall_table_storage[number][0];
+    offset |= (uint32_t)syscall_table_storage[number][1] << 8;
+    offset |= (uint32_t)syscall_table_storage[number][2] << 16;
+    if (!offset) return NULL;
+    return (void *)(uintptr_t)(KERNEL_VMA + offset);
+}
 
 void syscall_set_exec_completed(void) {
     if (current_task) {
@@ -330,6 +426,7 @@ void do_syscall(registers_t *regs) {
     int err;
     int64_t result;
     struct user_desc *u_info;
+    void *handler;
 
     syscall_clear_exec_completed();
     if (current_task) {
@@ -354,7 +451,8 @@ void do_syscall(registers_t *regs) {
         return;
     }
 
-    if (num >= NR_SYSCALLS || !syscall_table || !syscall_table[num]) {
+    handler = syscall_table_get(num);
+    if (!handler) {
         clear_syscall_frame();
         regs->rax = -ENOSYS;
         return;
@@ -375,11 +473,11 @@ void do_syscall(registers_t *regs) {
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
     } else if (num == SYSCALL_LSEEK) {
-        result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))syscall_table[num])(
+        result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))handler)(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);
     } else {
-        result = ((int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))syscall_table[num])(
+        result = ((int (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))handler)(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);
     }
@@ -414,7 +512,7 @@ void do_syscall(registers_t *regs) {
 }
 
 void KERNEL_INIT syscall_init(void) {
-    memset(syscall_table, 0, NR_SYSCALLS * sizeof(void *));
+    memset(syscall_table_storage, 0, sizeof(syscall_table_storage));
 
     syscalls_core_init();
     syscalls_process_init();

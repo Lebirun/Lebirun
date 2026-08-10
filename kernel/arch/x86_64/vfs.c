@@ -1079,7 +1079,8 @@ static void vfs_normalize_path(char *path) {
     *dst = '\0';
 }
 
-static int vfs_apply_task_root(char *path, size_t size, int depth) {
+static int vfs_apply_task_root(char *path, size_t size,
+                               int redirected_before) {
     char rooted[VFS_MAX_PATH];
     const char *root;
     size_t root_len;
@@ -1090,7 +1091,7 @@ static int vfs_apply_task_root(char *path, size_t size, int depth) {
         return 0;
     root = current_task->root;
     root_len = strlen(root);
-    if (depth > 0 && strncmp(path, root, root_len) == 0 &&
+    if (redirected_before && strncmp(path, root, root_len) == 0 &&
         (path[root_len] == '\0' || path[root_len] == '/')) return 0;
     path_len = strlen(path);
     if (root_len + path_len + 1 >= sizeof(rooted)) return -1;
@@ -1103,8 +1104,6 @@ static int vfs_apply_task_root(char *path, size_t size, int depth) {
     strcpy(path, rooted);
     return 0;
 }
-
-#define VFS_MAX_SYMLINKS 8
 
 static int vfs_readlink_node(vfs_node_t *node, char *buf, size_t size) {
     uint64_t n;
@@ -1155,7 +1154,9 @@ static int vfs_build_symlink_path(char *out, size_t outsz,
     return 0;
 }
 
-static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int depth) {
+static vfs_node_t *vfs_namei_once(const char *in_path, int follow_final,
+                                  int redirected_before, char *redirect,
+                                  int *did_redirect) {
     char resolved[VFS_MAX_PATH];
     char prefix[VFS_MAX_PATH];
     char component[VFS_MAX_NAME];
@@ -1177,7 +1178,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
     vfs_node_t *parent;
 
     if (!in_path) return NULL;
-    if (depth > VFS_MAX_SYMLINKS) return NULL;
+    *did_redirect = 0;
 
     path = in_path;
 
@@ -1196,7 +1197,7 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
         path = resolved;
     }
 
-    if (vfs_apply_task_root(resolved, sizeof(resolved), depth) != 0)
+    if (vfs_apply_task_root(resolved, sizeof(resolved), redirected_before) != 0)
         return NULL;
     path = resolved;
 
@@ -1299,7 +1300,9 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
                 vfs_normalize_path(newpath);
                 if (node_is_transient) vfs_release(node);
                 if (next_ephemeral) vfs_release(next);
-                return vfs_namei_internal(newpath, follow_final, depth + 1);
+                strcpy(redirect, newpath);
+                *did_redirect = 1;
+                return NULL;
             }
         }
 
@@ -1325,10 +1328,73 @@ static vfs_node_t *vfs_namei_internal(const char *in_path, int follow_final, int
     return node;
 }
 
+static void vfs_free_redirects(char **redirects, size_t count) {
+    size_t i;
+
+    for (i = 0; i < count; i++) kfree(redirects[i]);
+    kfree(redirects);
+}
+
+static vfs_node_t *vfs_namei_internal(const char *path, int follow_final) {
+    char redirect[VFS_MAX_PATH];
+    char **redirects;
+    char **grown;
+    char *copy;
+    const char *current;
+    vfs_node_t *result;
+    size_t count;
+    size_t i;
+    size_t length;
+    int did_redirect;
+
+    if (!path) return NULL;
+    redirects = NULL;
+    count = 0;
+    current = path;
+    for (;;) {
+        result = vfs_namei_once(current, follow_final, count != 0,
+                                redirect, &did_redirect);
+        if (!did_redirect) {
+            vfs_free_redirects(redirects, count);
+            return result;
+        }
+        for (i = 0; i < count; i++) {
+            if (strcmp(redirects[i], redirect) == 0) {
+                vfs_free_redirects(redirects, count);
+                return NULL;
+            }
+        }
+        if (count == SIZE_MAX / sizeof(char *)) {
+            vfs_free_redirects(redirects, count);
+            return NULL;
+        }
+        length = strlen(redirect);
+        if (length == SIZE_MAX) {
+            vfs_free_redirects(redirects, count);
+            return NULL;
+        }
+        copy = (char *)kmalloc(length + 1);
+        if (!copy) {
+            vfs_free_redirects(redirects, count);
+            return NULL;
+        }
+        memcpy(copy, redirect, length + 1);
+        grown = (char **)krealloc(redirects, (count + 1) * sizeof(char *));
+        if (!grown) {
+            kfree(copy);
+            vfs_free_redirects(redirects, count);
+            return NULL;
+        }
+        redirects = grown;
+        redirects[count++] = copy;
+        current = copy;
+    }
+}
+
 vfs_node_t *vfs_namei(const char *path) {
     vfs_node_t *result;
 
-    result = vfs_namei_internal(path, 1, 0);
+    result = vfs_namei_internal(path, 1);
     return result;
 }
 
@@ -1338,7 +1404,7 @@ void vfs_block_squashfs_access(void) {
 }
 
 vfs_node_t *vfs_namei_nofollow(const char *path) {
-    return vfs_namei_internal(path, 0, 0);
+    return vfs_namei_internal(path, 0);
 }
 
 vfs_node_t *vfs_lookup(const char *path) {

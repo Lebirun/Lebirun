@@ -83,10 +83,10 @@ static int sys_fstat(int fd, const char *size_ptr, int type_ptr) {
 }
 
 void syscalls_initrd_init(void) {
-    syscall_table[SYSCALL_INITRD_COUNT] = sys_initrd_count;
-    syscall_table[SYSCALL_INITRD_STAT] = sys_initrd_stat;
-    syscall_table[SYSCALL_INITRD_READ] = sys_initrd_read;
-    syscall_table[SYSCALL_OPEN] = sys_open;
-    syscall_table[SYSCALL_CLOSE] = sys_close;
-    syscall_table[SYSCALL_FSTAT] = sys_fstat;
+    syscall_table_set(SYSCALL_INITRD_COUNT, (void *)(sys_initrd_count));
+    syscall_table_set(SYSCALL_INITRD_STAT, (void *)(sys_initrd_stat));
+    syscall_table_set(SYSCALL_INITRD_READ, (void *)(sys_initrd_read));
+    syscall_table_set(SYSCALL_OPEN, (void *)(sys_open));
+    syscall_table_set(SYSCALL_CLOSE, (void *)(sys_close));
+    syscall_table_set(SYSCALL_FSTAT, (void *)(sys_fstat));
 }

@@ -58,6 +58,6 @@ static int sys_panic(int cmd, const char *user_msg, int unused) {
 }
 
 void syscalls_power_init(void) {
-    syscall_table[SYSCALL_REBOOT] = sys_reboot;
-    syscall_table[SYSCALL_PANIC] = sys_panic;
+    syscall_table_set(SYSCALL_REBOOT, (void *)(sys_reboot));
+    syscall_table_set(SYSCALL_PANIC, (void *)(sys_panic));
 }

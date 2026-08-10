@@ -7,10 +7,11 @@
 #include <lebirun/mem_map.h>
 #include <string.h>
 
-#define BUFFER_SIZE 128
+#define KEYBOARD_BUFFER_INITIAL 8
 
 typedef struct {
-    char buffer[BUFFER_SIZE];
+    char *buffer;
+    unsigned int capacity;
     volatile unsigned int head;
     volatile unsigned int tail;
     wait_queue_t waitq;
@@ -91,17 +92,55 @@ static inline char apply_caps_shift(char c, bool shift) {
     return c;
 }
 
+static int buffer_grow(kbd_console_t *console) {
+    char *grown;
+    unsigned int old_capacity;
+    unsigned int new_capacity;
+    unsigned int count;
+    unsigned int i;
+
+    old_capacity = console->capacity;
+    if (old_capacity == 0) {
+        new_capacity = KEYBOARD_BUFFER_INITIAL;
+    } else {
+        if (old_capacity > UINT32_MAX / 2) return 0;
+        new_capacity = old_capacity * 2;
+    }
+    grown = (char *)kmalloc(new_capacity);
+    if (!grown) return 0;
+    count = 0;
+    if (console->buffer && old_capacity != 0) {
+        i = console->tail;
+        while (i != console->head) {
+            grown[count++] = console->buffer[i];
+            i = (i + 1) % old_capacity;
+        }
+    }
+    kfree(console->buffer);
+    console->buffer = grown;
+    console->capacity = new_capacity;
+    console->tail = 0;
+    console->head = count;
+    return 1;
+}
+
 static void buffer_put(char c) {
+    kbd_console_t *console;
     int cur;
     unsigned int next;
 
     if (!kbd_consoles) return;
     cur = console_is_initialized() ? console_get_current() : 0;
     if (cur < 0 || cur >= kbd_num_consoles) return;
-    next = (kbd_consoles[cur].head + 1) % BUFFER_SIZE;
-    if (next == kbd_consoles[cur].tail) return;
-    kbd_consoles[cur].buffer[kbd_consoles[cur].head] = c;
-    kbd_consoles[cur].head = next;
+    console = &kbd_consoles[cur];
+    if (!console->buffer && !buffer_grow(console)) return;
+    next = (console->head + 1) % console->capacity;
+    if (next == console->tail) {
+        if (!buffer_grow(console)) return;
+        next = (console->head + 1) % console->capacity;
+    }
+    console->buffer[console->head] = c;
+    console->head = next;
 }
 
 static void buffer_put_seq(const char *seq, int len) {
@@ -122,22 +161,27 @@ int keyboard_getchar_nb(void) {
 }
 
 int keyboard_has_data_for(int console_id) {
-    if (console_id < 0 || console_id >= kbd_num_consoles) return 0;
+    if (!kbd_consoles || console_id < 0 ||
+        console_id >= kbd_num_consoles) return 0;
     return kbd_consoles[console_id].head != kbd_consoles[console_id].tail;
 }
 
 int keyboard_getchar_nb_for(int console_id) {
     int c;
 
-    if (console_id < 0 || console_id >= kbd_num_consoles) return -1;
+    if (!kbd_consoles || console_id < 0 ||
+        console_id >= kbd_num_consoles) return -1;
     if (kbd_consoles[console_id].head == kbd_consoles[console_id].tail) return -1;
     c = (unsigned char)kbd_consoles[console_id].buffer[kbd_consoles[console_id].tail];
-    kbd_consoles[console_id].tail = (kbd_consoles[console_id].tail + 1) % BUFFER_SIZE;
+    kbd_consoles[console_id].tail =
+        (kbd_consoles[console_id].tail + 1) %
+            kbd_consoles[console_id].capacity;
     return c;
 }
 
 void keyboard_flush_for(int console_id) {
-    if (console_id < 0 || console_id >= kbd_num_consoles) return;
+    if (!kbd_consoles || console_id < 0 ||
+        console_id >= kbd_num_consoles) return;
     kbd_consoles[console_id].head = 0;
     kbd_consoles[console_id].tail = 0;
     kbd_consoles[console_id].sigint_pending = 0;
@@ -145,12 +189,13 @@ void keyboard_flush_for(int console_id) {
 
 wait_queue_t* keyboard_get_waitq(void) {
     int cur = console_is_initialized() ? console_get_current() : 0;
-    if (cur < 0 || cur >= kbd_num_consoles) return NULL;
+    if (!kbd_consoles || cur < 0 || cur >= kbd_num_consoles) return NULL;
     return &kbd_consoles[cur].waitq;
 }
 
 wait_queue_t* keyboard_get_waitq_for(int console_id) {
-    if (console_id < 0 || console_id >= kbd_num_consoles) return NULL;
+    if (!kbd_consoles || console_id < 0 ||
+        console_id >= kbd_num_consoles) return NULL;
     return &kbd_consoles[console_id].waitq;
 }
 
@@ -238,7 +283,7 @@ void keyboard_handler(registers_t* regs) {
             console_num = code - SCANCODE_F1;
         else if (code == SCANCODE_F11) console_num = 10;
         else if (code == SCANCODE_F12) console_num = 11;
-        if (console_num >= 0 && console_num < cmdline_get_consoles()) {
+        if (console_num >= 0 && console_num < console_get_count()) {
             console_switch_via_interrupt(console_num);
             return;
         }
@@ -329,16 +374,15 @@ void KERNEL_INIT keyboard_init(void) {
         inb(0x60);
     }
 
-    kbd_num_consoles = cmdline_get_consoles();
+    kbd_num_consoles = console_get_count();
     if (kbd_num_consoles <= 0) kbd_num_consoles = 1;
-    if (kbd_num_consoles > NUM_CONSOLES) kbd_num_consoles = NUM_CONSOLES;
     kbd_consoles = kmalloc(kbd_num_consoles * sizeof(kbd_console_t));
     if (kbd_consoles) {
         memset(kbd_consoles, 0, kbd_num_consoles * sizeof(kbd_console_t));
         for (i = 0; i < kbd_num_consoles; i++) {
             waitq_init(&kbd_consoles[i].waitq);
         }
-    }
+    } else kbd_num_consoles = 0;
 
     master_mask = inb(0x21);
     master_mask &= ~(1 << 1);

@@ -24,6 +24,6 @@ static int sys_time(int tloc_ptr, const char *unused2, int unused3) {
 }
 
 void syscalls_time_init(void) {
-    syscall_table[SYSCALL_GETTICKS] = sys_getticks;
-    syscall_table[SYSCALL_TIME] = sys_time;
+    syscall_table_set(SYSCALL_GETTICKS, (void *)(sys_getticks));
+    syscall_table_set(SYSCALL_TIME, (void *)(sys_time));
 }

@@ -515,7 +515,8 @@ extern struct kernel_winsize *tty_winsize;
 extern int *tty_pgrp;
 extern int tty_count;
 
-extern void **syscall_table;
+void syscall_table_set(int number, void *handler);
+void *syscall_table_get(int number);
 
 void KERNEL_INIT syscalls_core_init(void);
 void KERNEL_INIT syscalls_process_init(void);

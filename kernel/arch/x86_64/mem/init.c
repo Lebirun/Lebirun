@@ -28,8 +28,7 @@ uint8_t early_fb_bpp KERNEL_INIT_BSS;
 uint8_t early_fb_type KERNEL_INIT_BSS;
 int early_fb_valid KERNEL_INIT_BSS;
 
-#define EARLY_CMDLINE_MAX 256
-char early_cmdline[EARLY_CMDLINE_MAX];
+const char *early_cmdline KERNEL_INIT_BSS;
 
 uint32_t early_mod_count KERNEL_INIT_BSS;
 
@@ -64,10 +63,9 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
     uint64_t kernel_end_phys;
     uint64_t reserved_index;
     int cursor_advanced;
-    int cl;
 
     early_fb_valid = 0;
-    early_cmdline[0] = '\0';
+    early_cmdline = NULL;
     early_mod_count = 0;
 
     if (mb_magic != MULTIBOOT2_MAGIC || mb_ptr == 0) {
@@ -100,12 +98,7 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
         if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
             cmd_tag = (struct multiboot2_tag_string *)tag;
-            cl = 0;
-            while (cmd_tag->string[cl] && cl < EARLY_CMDLINE_MAX - 1) {
-                early_cmdline[cl] = cmd_tag->string[cl];
-                cl++;
-            }
-            early_cmdline[cl] = '\0';
+            early_cmdline = cmd_tag->string;
         }
 
         if (tag->type == MULTIBOOT2_TAG_MODULE) {
@@ -168,7 +161,6 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
                     if (merged_count < MAX_REGIONS) {
                         memory_map[merged_count].base = base;
                         memory_map[merged_count].length = len;
-                        memory_map[merged_count].type = 1;
                         merged_count++;
                     }
                 } else {
@@ -230,9 +222,9 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         uint64_t mb_start_page = mb_ptr & ~0xFFFu;
         uint64_t mb_end_page = (mb_ptr + mb2_total_size + 0xFFFu) & ~0xFFFu;
         if (num_reserved_regions < MAX_RESERVED_REGIONS) {
-            reserved_regions[num_reserved_regions].start_phys = mb_start_page;
-            reserved_regions[num_reserved_regions].end_phys = mb_end_page;
-            reserved_regions[num_reserved_regions].kind = RESERVED_REGION_MULTIBOOT_INFO;
+            RESERVED_REGION_SET(reserved_regions[num_reserved_regions],
+                                mb_start_page, mb_end_page,
+                                RESERVED_REGION_MULTIBOOT_INFO);
             num_reserved_regions++;
         }
     }
@@ -248,9 +240,9 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
                 start_page = mod->mod_start & ~0xFFFu;
                 end_page = (mod->mod_end + 0xFFF) & ~0xFFFu;
 
-                reserved_regions[num_reserved_regions].start_phys = start_page;
-                reserved_regions[num_reserved_regions].end_phys = end_page;
-                reserved_regions[num_reserved_regions].kind = RESERVED_REGION_MODULE;
+                RESERVED_REGION_SET(reserved_regions[num_reserved_regions],
+                                    start_page, end_page,
+                                    RESERVED_REGION_MODULE);
                 num_reserved_regions++;
             }
         }
@@ -262,7 +254,8 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
         for (reserved_index = 0;
              reserved_index < num_reserved_regions;
              reserved_index++) {
-            if (bump_current < reserved_regions[reserved_index].start_phys ||
+            if (bump_current < RESERVED_REGION_START(
+                                   reserved_regions[reserved_index]) ||
                 bump_current >= reserved_regions[reserved_index].end_phys) {
                 continue;
             }
@@ -315,7 +308,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
     detected_max_phys = 0;
     for (r = 0; r < num_regions; r++) {
-        if (memory_map[r].type != 1) continue;
         rend = memory_map[r].base + memory_map[r].length;
         if (rend > detected_max_phys) detected_max_phys = rend;
     }
@@ -345,7 +337,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     found_bitmap_space = 0;
     for (r = 0; bitmap_pages != 0 && r < num_regions && !found_bitmap_space;
          r++) {
-        if (memory_map[r].type != 1) continue;
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
         if (region_base >= detected_max_phys) continue;
@@ -355,7 +346,8 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         while (candidate + bitmap_alloc_end <= region_end) {
             overlaps_reserved = 0;
             for (rr = 0; rr < num_reserved_regions; rr++) {
-                if (candidate + bitmap_alloc_end <= reserved_regions[rr].start_phys ||
+                if (candidate + bitmap_alloc_end <=
+                        RESERVED_REGION_START(reserved_regions[rr]) ||
                     candidate >= reserved_regions[rr].end_phys) {
                     continue;
                 }
@@ -396,8 +388,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
     total_free_frames = 0;
     for (r = 0; r < num_regions; r++) {
-        if (memory_map[r].type != 1) continue;
-
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
 
@@ -431,7 +421,7 @@ void KERNEL_EARLY_INIT pfa_init(void) {
     }
 
     for (r = 0; r < num_reserved_regions; r++) {
-        res_start_frame = reserved_regions[r].start_phys / PAGE_SIZE;
+        res_start_frame = RESERVED_REGION_START(reserved_regions[r]) / PAGE_SIZE;
         res_end_frame = reserved_regions[r].end_phys / PAGE_SIZE;
         reserved_count = 0;
         for (f = res_start_frame; f < res_end_frame && f < total_pages_managed; f++) {
@@ -442,7 +432,8 @@ void KERNEL_EARLY_INIT pfa_init(void) {
             }
         }
         KERNEL_INIT_LOG("PFA: Reserved region %u [0x%016lX-0x%016lX]: %u frames marked as used\n",
-               r, reserved_regions[r].start_phys, reserved_regions[r].end_phys, reserved_count);
+               r, RESERVED_REGION_START(reserved_regions[r]),
+               reserved_regions[r].end_phys, reserved_count);
     }
 
     actual_free = count_free_frames();
@@ -454,7 +445,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
     system_total_ram_kb = 0;
     for (r = 0; r < num_regions; r++) {
-        if (memory_map[r].type != 1) continue;
         region_base = memory_map[r].base;
         region_end = region_base + memory_map[r].length;
         if (region_base >= detected_max_phys) continue;

@@ -52,7 +52,7 @@ static uint64_t slot_page_addr(int slot, int page_idx) {
 
 static int addr_to_slot(uint64_t addr) {
     uint64_t offset;
-    if (addr < KSTACK_REGION_START || addr >= KSTACK_REGION_END) return -1;
+    if (addr < KSTACK_REGION_START) return -1;
     offset = addr - KSTACK_REGION_START;
     return (int)(offset / KSTACK_SLOT_SIZE);
 }
@@ -98,7 +98,7 @@ uint8_t *kstack_alloc(void) {
         previous = current;
         current = current->next;
     }
-    if (slot >= KSTACK_MAX_STACKS) {
+    if ((uint64_t)slot >= KSTACK_SLOT_COUNT) {
         kstack_lock_release(flags);
         kfree(entry);
         return NULL;
@@ -221,7 +221,7 @@ int kstack_page_fault_handler(uint64_t fault_addr) {
     uint64_t flags;
 
     if (!kstack_initialized) return 0;
-    if (fault_addr < KSTACK_REGION_START || fault_addr >= KSTACK_REGION_END) return 0;
+    if (fault_addr < KSTACK_REGION_START) return 0;
 
     slot = addr_to_slot(fault_addr);
     if (slot < 0) return 0;
@@ -256,7 +256,7 @@ int kstack_page_fault_handler(uint64_t fault_addr) {
 }
 
 int kstack_is_in_region(uint64_t addr) {
-    return (addr >= KSTACK_REGION_START && addr < KSTACK_REGION_END);
+    return addr >= KSTACK_REGION_START;
 }
 
 int kstack_prepare_syscall(void) {

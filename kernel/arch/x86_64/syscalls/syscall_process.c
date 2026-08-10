@@ -299,15 +299,15 @@ static int sys_clone(int flags, const char *child_stack, int ptid,
 }
 
 void syscalls_process_init(void) {
-    syscall_table[SYSCALL_GETPID] = sys_getpid;
-    syscall_table[SYSCALL_YIELD] = sys_yield;
-    syscall_table[SYSCALL_SLEEP] = sys_sleep;
-    syscall_table[SYSCALL_WAITPID] = sys_waitpid;
-    syscall_table[SYSCALL_WAIT4] = sys_wait4;
-    syscall_table[SYSCALL_WAITID] = sys_waitid;
-    syscall_table[SYSCALL_KILL] = sys_kill;
-    syscall_table[SYSCALL_FORK] = sys_fork;
-    syscall_table[SYSCALL_EXEC] = sys_exec;
-    syscall_table[SYSCALL_VFORK] = sys_vfork;
-    syscall_table[SYSCALL_CLONE] = sys_clone;
+    syscall_table_set(SYSCALL_GETPID, (void *)(sys_getpid));
+    syscall_table_set(SYSCALL_YIELD, (void *)(sys_yield));
+    syscall_table_set(SYSCALL_SLEEP, (void *)(sys_sleep));
+    syscall_table_set(SYSCALL_WAITPID, (void *)(sys_waitpid));
+    syscall_table_set(SYSCALL_WAIT4, (void *)(sys_wait4));
+    syscall_table_set(SYSCALL_WAITID, (void *)(sys_waitid));
+    syscall_table_set(SYSCALL_KILL, (void *)(sys_kill));
+    syscall_table_set(SYSCALL_FORK, (void *)(sys_fork));
+    syscall_table_set(SYSCALL_EXEC, (void *)(sys_exec));
+    syscall_table_set(SYSCALL_VFORK, (void *)(sys_vfork));
+    syscall_table_set(SYSCALL_CLONE, (void *)(sys_clone));
 }

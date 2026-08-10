@@ -72,7 +72,6 @@ static int syscall_core_console_count(void) {
 
     count = syscall_console_count;
     if (count < 1) count = 1;
-    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
     return count;
 }
 
@@ -156,7 +155,6 @@ static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) {
             if (!task_handle_file_page_fault(current_task, p)) {
                 if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= current_task->user_brk && p < 0x40000000u) ||
                         (p >= 0x1000u && p < current_task->user_brk)) {
                     phys = pfa_alloc();
                     if (!phys) return 0;
@@ -449,9 +447,9 @@ static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     uint64_t i;
 
     if (!pipe) return -ENOMEM;
-    if (required > PIPE_BUF_SIZE) required = PIPE_BUF_SIZE;
     if (required == pipe->buf_size) return 0;
     if (required == 0) return 0;
+    if (required < pipe->count || required > SIZE_MAX) return -ENOMEM;
     new_buffer = (uint8_t *)kmalloc(required);
     if (!new_buffer) return -ENOMEM;
     for (i = 0; i < pipe->count; i++) {
@@ -559,8 +557,13 @@ static int sys_write_impl(int fd, const char *buf, int len) {
                         if (total > 0) return (int)total;
                         return -EPIPE;
                     }
+                    if (chunk - done > UINT64_MAX - p->count) {
+                        pipe_unlock_irqrestore(p, pipe_flags);
+                        if (heap_buf) kfree(kbuf);
+                        if (total > 0 || done > 0) return (int)(total + done);
+                        return -ENOMEM;
+                    }
                     bytes = p->count + chunk - done;
-                    if (bytes > PIPE_BUF_SIZE) bytes = PIPE_BUF_SIZE;
                     if (bytes > p->buf_size &&
                         pipe_resize_buffer(p, bytes) < 0 && p->buf_size == 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
@@ -1196,8 +1199,9 @@ static int sys_read_nb(int fd, char *buf, int len) {
 
     if (tfd && tfd->type == FD_TYPE_STDIN) {
         con_id = current_task ? current_task->console_id : console_get_current();
-        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = console_get_current();
-        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+        if (con_id < 0 || con_id >= syscall_core_console_count())
+            con_id = console_get_current();
+        if (con_id < 0 || con_id >= syscall_core_console_count()) con_id = 0;
         
         if (!keyboard_has_data_for(con_id)) {
             return 0;
@@ -1332,17 +1336,16 @@ void syscalls_core_init(void) {
     uint64_t off;
     uint8_t *state;
 
-    syscall_table[SYSCALL_EXIT] = sys_exit;
-    syscall_table[SYSCALL_WRITE] = sys_write;
-    syscall_table[SYSCALL_READ] = sys_read;
-    syscall_table[SYSCALL_READ_NB] = sys_read_nb;
-    syscall_table[SYSCALL_ISATTY] = sys_isatty;
-    syscall_table[SYSCALL_WRITEV] = sys_writev;
-    syscall_table[SYSCALL_LSEEK] = sys_lseek;
+    syscall_table_set(SYSCALL_EXIT, (void *)(sys_exit));
+    syscall_table_set(SYSCALL_WRITE, (void *)(sys_write));
+    syscall_table_set(SYSCALL_READ, (void *)(sys_read));
+    syscall_table_set(SYSCALL_READ_NB, (void *)(sys_read_nb));
+    syscall_table_set(SYSCALL_ISATTY, (void *)(sys_isatty));
+    syscall_table_set(SYSCALL_WRITEV, (void *)(sys_writev));
+    syscall_table_set(SYSCALL_LSEEK, (void *)(sys_lseek));
 
-    count = cmdline_get_consoles();
+    count = console_get_count();
     if (count < 1) count = 1;
-    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
     syscall_console_count = count;
 
     count_bytes = (uint64_t)count * sizeof(int);

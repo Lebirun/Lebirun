@@ -30,8 +30,7 @@ extern uint64_t total_pages_managed;
 
 #define HEAP_START       0xFFFFFFFFC0000000ULL
 #define HEAP_INITIAL_SIZE 0x10000
-#define HEAP_MAX_SIZE_DEFAULT 0x01000000
-#define HEAP_MAX_SIZE_CAP 0x10000000
+#define HEAP_VIRTUAL_END 0xFFFFFFFFD4000000ULL
 #define HEAP_MAGIC 0xDEADBEEF
 #define HEAP_MIN_BLOCK 16
 
@@ -48,7 +47,6 @@ extern uint64_t total_pages_managed;
 typedef struct {
     uint64_t base;
     uint64_t length;
-    uint64_t type;
 } mem_region_t;
 
 typedef struct heap_block {
@@ -84,8 +82,15 @@ extern heap_t kernel_heap;
 typedef struct {
     uint64_t start_phys;
     uint64_t end_phys;
-    uint32_t kind;
 } reserved_region_t;
+#define RESERVED_REGION_START(region) \
+    ((region).start_phys & ~(uint64_t)(PAGE_SIZE - 1))
+#define RESERVED_REGION_KIND(region) \
+    ((uint32_t)((region).start_phys & (PAGE_SIZE - 1)))
+#define RESERVED_REGION_SET(region, start, end, value) do { \
+    (region).start_phys = (start) | (uint64_t)(value); \
+    (region).end_phys = (end); \
+} while (0)
 extern reserved_region_t reserved_regions[MAX_RESERVED_REGIONS];
 extern uint64_t num_reserved_regions;
 
@@ -193,6 +198,7 @@ uint64_t demand_get_bitmap_bytes(void);
 uint64_t demand_get_bitmap_extension_pages(void);
 uint64_t demand_get_reserved_pages(void);
 int demand_reserve_range(uint64_t virt_start, uint64_t size);
+uint64_t demand_count_uncommitted(uint64_t virt_start, uint64_t virt_end);
 int demand_is_reserved(uint64_t virt_addr);
 int demand_commit_page(uint64_t virt_addr);
 void demand_mark_committed(uint64_t virt_addr);

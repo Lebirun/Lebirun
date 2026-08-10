@@ -224,8 +224,17 @@ static void poison_memory(void *ptr, size_t size, uint8_t pattern) {
 static heap_block_t *find_best_fit(size_t size) {
     heap_block_t *best;
     heap_block_t *current;
+    uint64_t current_end;
+    uint64_t current_uncommitted;
+    uint64_t current_pages;
+    uint64_t best_uncommitted;
+    uint64_t best_pages;
+    uint64_t first_page;
+    uint64_t last_page;
     
     best = NULL;
+    best_uncommitted = UINT64_MAX;
+    best_pages = UINT64_MAX;
     current = kernel_heap.free_list;
 
     while (current) {
@@ -237,9 +246,24 @@ static heap_block_t *find_best_fit(size_t size) {
         }
 
         if (current->is_free && current->size >= size) {
-            if (!best || current->size < best->size) {
+            current_end = (uint64_t)current + sizeof(heap_block_t) + size;
+            if (current->size >= size + sizeof(heap_block_t) +
+                    HEAP_MIN_BLOCK)
+                current_end += sizeof(heap_block_t);
+            current_uncommitted = demand_count_uncommitted(
+                (uint64_t)current, current_end);
+            first_page = (uint64_t)current & ~(PAGE_SIZE - 1);
+            last_page = (current_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            current_pages = (last_page - first_page) / PAGE_SIZE;
+            if (!best || current_uncommitted < best_uncommitted ||
+                (current_uncommitted == best_uncommitted &&
+                 current_pages < best_pages) ||
+                (current_uncommitted == best_uncommitted &&
+                 current_pages == best_pages && current->size < best->size)) {
                 best = current;
-                if (current->size == size) break;
+                best_uncommitted = current_uncommitted;
+                best_pages = current_pages;
+                if (current->size == size && current_uncommitted == 0) break;
             }
         }
         current = current->next;
@@ -399,18 +423,9 @@ static int heap_expand(uint64_t new_end) {
 }
 
 void KERNEL_EARLY_INIT heap_init(void) {
-    uint64_t total_kb;
-    uint64_t heap_max;
-    
-    total_kb = pfa_get_total_ram_kb();
-    heap_max = (total_kb / 4) * 1024;
-    if (heap_max < HEAP_MAX_SIZE_DEFAULT) heap_max = HEAP_MAX_SIZE_DEFAULT;
-    if (heap_max > HEAP_MAX_SIZE_CAP) heap_max = HEAP_MAX_SIZE_CAP;
-    heap_max = (heap_max + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    
     kernel_heap.start_addr = HEAP_START;
     kernel_heap.end_addr = HEAP_START;
-    kernel_heap.max_addr = HEAP_START + heap_max;
+    kernel_heap.max_addr = HEAP_VIRTUAL_END;
     kernel_heap.free_list = NULL;
     kernel_heap.total_size = 0;
     kernel_heap.used_size = 0;
@@ -507,7 +522,14 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
             }
         }
         
-        needed = total_size + sizeof(heap_block_t) + PAGE_SIZE;
+        if (old_end >= kernel_heap.max_addr ||
+            total_size > kernel_heap.max_addr - old_end ||
+            sizeof(heap_block_t) >
+                kernel_heap.max_addr - old_end - total_size) {
+            printf("kmalloc: Heap exhausted\n");
+            return NULL;
+        }
+        needed = total_size + sizeof(heap_block_t);
         new_end = old_end + needed;
 
         if (new_end > kernel_heap.max_addr) {

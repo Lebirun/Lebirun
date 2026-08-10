@@ -10,6 +10,8 @@
 #include <lebirun/io.h>
 #include <string.h>
 
+extern uint8_t unifont_glyphs_start[];
+
 static framebuffer_t fb;
 static uint64_t cursor_prev_x = 0;
 static uint64_t cursor_prev_y = 0;
@@ -273,7 +275,7 @@ static void fb_draw_cursor_block(uint64_t cx, uint64_t cy, uint64_t color) {
     }
 }
 
-static uint8_t default_font_data[] = {
+static const uint8_t default_font_data[] KERNEL_INIT_RODATA = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x00,0x00,0x7E,0x81,0xA5,0x81,0x81,0xBD,0x99,0x81,0x81,0x7E,0x00,0x00,0x00,0x00,
     0x00,0x00,0x7E,0xFF,0xDB,0xFF,0xFF,0xC3,0xE7,0xFF,0xFF,0x7E,0x00,0x00,0x00,0x00,
@@ -409,8 +411,8 @@ static psf_font_t default_font = {
     .width = 8,
     .height = 16,
     .bytesperglyph = 16,
-    .numglyph = 128,
-    .glyphs = default_font_data,
+    .numglyph = 512,
+    .glyphs = unifont_glyphs_start,
     .unicode_table = 0,
     .unicode_table_size = 0
 };

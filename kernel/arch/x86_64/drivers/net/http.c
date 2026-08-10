@@ -470,12 +470,12 @@ static int http_is_redirect(int status_code) {
 
 int http_download(const char *url, uint8_t *buffer, uint64_t buffer_size, uint64_t *out_size, int *out_status) {
     return http_download_ex(url, buffer, buffer_size, out_size, out_status,
-                            HTTP_MAX_REDIRECTS_DEFAULT, NULL, 0, NULL);
+                            HTTP_MAX_REDIRECTS_DEFAULT, NULL, NULL);
 }
 
 int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
                      uint64_t *out_size, int *out_status, int max_redirects,
-                     uint8_t *headers_buf, uint64_t headers_buf_size, uint64_t *out_headers_len) {
+                     uint8_t **out_headers, uint64_t *out_headers_len) {
     char *host;
     char *path;
     char *current_url;
@@ -487,7 +487,6 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
     uint64_t copy_len;
     int redir;
     uint64_t url_len;
-    uint64_t hdr_copy;
     int is_https;
     int saved_ret;
     uint64_t off;
@@ -503,6 +502,8 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
     if (!current_url) { kfree(host); kfree(path); return -1; }
     response = (http_response_t *)kmalloc(sizeof(http_response_t));
     if (!response) { kfree(host); kfree(path); kfree(current_url); return -1; }
+    if (out_headers) *out_headers = NULL;
+    if (out_headers_len) *out_headers_len = 0;
 
     url_len = 0;
     while (url[url_len] && url_len < 511) {
@@ -511,7 +512,8 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
     }
     current_url[url_len] = '\0';
 
-    for (redir = 0; redir <= max_redirects; redir++) {
+    redir = 0;
+    for (;;) {
         is_https = 0;
         if (http_parse_url(current_url, host, &port, path, &is_https) < 0) {
             kfree(host); kfree(path); kfree(current_url); kfree(response);
@@ -556,17 +558,17 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
                 current_url[li] = '\0';
             }
             http_response_free(response);
+            redir++;
             continue;
         }
 
         if (out_status) *out_status = response->status_code;
 
-        if (headers_buf && headers_buf_size > 0 && response->raw_headers && response->raw_headers_len > 0) {
-            hdr_copy = response->raw_headers_len < headers_buf_size ? response->raw_headers_len : headers_buf_size;
-            memcpy(headers_buf, response->raw_headers, hdr_copy);
-            if (out_headers_len) *out_headers_len = hdr_copy;
-        } else if (out_headers_len) {
-            *out_headers_len = 0;
+        if (out_headers && response->raw_headers &&
+            response->raw_headers_len > 0) {
+            *out_headers = response->raw_headers;
+            if (out_headers_len) *out_headers_len = response->raw_headers_len;
+            response->raw_headers = NULL;
         }
 
         copy_len = response->body_len < buffer_size ? response->body_len : buffer_size;
@@ -580,14 +582,11 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
         kfree(host); kfree(path); kfree(current_url); kfree(response);
         return 0;
     }
-
-    kfree(host); kfree(path); kfree(current_url); kfree(response);
-    return -1;
 }
 
 int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
                         int *out_status, int max_redirects,
-                        uint8_t *headers_buf, uint64_t headers_buf_size, uint64_t *out_headers_len) {
+                        uint8_t **out_headers, uint64_t *out_headers_len) {
     char *host;
     char *path;
     char *current_url;
@@ -598,7 +597,6 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
     int ret;
     int redir;
     uint64_t url_len;
-    uint64_t hdr_copy;
     int is_https;
     int saved_ret;
     uint64_t off;
@@ -608,6 +606,8 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
 
     if (!out_body) return -1;
     *out_body = NULL;
+    if (out_headers) *out_headers = NULL;
+    if (out_headers_len) *out_headers_len = 0;
 
     host = (char *)kmalloc(256);
     if (!host) return -1;
@@ -625,7 +625,8 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
     }
     current_url[url_len] = '\0';
 
-    for (redir = 0; redir <= max_redirects; redir++) {
+    redir = 0;
+    for (;;) {
         is_https = 0;
         if (http_parse_url(current_url, host, &port, path, &is_https) < 0) {
             kfree(host); kfree(path); kfree(current_url); kfree(response);
@@ -666,17 +667,17 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
                 current_url[li] = '\0';
             }
             http_response_free(response);
+            redir++;
             continue;
         }
 
         if (out_status) *out_status = response->status_code;
 
-        if (headers_buf && headers_buf_size > 0 && response->raw_headers && response->raw_headers_len > 0) {
-            hdr_copy = response->raw_headers_len < headers_buf_size ? response->raw_headers_len : headers_buf_size;
-            memcpy(headers_buf, response->raw_headers, hdr_copy);
-            if (out_headers_len) *out_headers_len = hdr_copy;
-        } else if (out_headers_len) {
-            *out_headers_len = 0;
+        if (out_headers && response->raw_headers &&
+            response->raw_headers_len > 0) {
+            *out_headers = response->raw_headers;
+            if (out_headers_len) *out_headers_len = response->raw_headers_len;
+            response->raw_headers = NULL;
         }
 
         *out_body = response->body;
@@ -687,9 +688,6 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
         kfree(host); kfree(path); kfree(current_url); kfree(response);
         return 0;
     }
-
-    kfree(host); kfree(path); kfree(current_url); kfree(response);
-    return -1;
 }
 
 int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *path,
@@ -942,12 +940,39 @@ int http_post_download(const char *url, const char *content_type,
                        const uint8_t *post_body, uint64_t post_body_len,
                        uint8_t *buffer, uint64_t buffer_size,
                        uint64_t *out_size, int *out_status) {
+    uint8_t *body;
+    uint64_t body_size;
+    uint64_t copy_len;
+    int result;
+
+    body = NULL;
+    body_size = 0;
+    result = http_post_download_alloc(url, content_type, post_body,
+                                      post_body_len, &body, &body_size,
+                                      out_status);
+    if (result != 0) return result;
+    copy_len = body_size < buffer_size ? body_size : buffer_size;
+    if (body && copy_len > 0) memcpy(buffer, body, copy_len);
+    if (body) kfree(body);
+    if (out_size) *out_size = copy_len;
+    return 0;
+}
+
+int http_post_download_alloc(const char *url, const char *content_type,
+                             const uint8_t *post_body,
+                             uint64_t post_body_len,
+                             uint8_t **out_body, uint64_t *out_size,
+                             int *out_status) {
     char *host;
     char *path;
     uint16_t port;
     http_response_t *response;
-    uint64_t copy_len;
+    int attempt;
+    int ok;
 
+    if (!out_body) return -1;
+    *out_body = NULL;
+    if (out_size) *out_size = 0;
     host = (char *)kmalloc(256);
     if (!host) return -1;
     path = (char *)kmalloc(256);
@@ -960,34 +985,24 @@ int http_post_download(const char *url, const char *content_type,
         return -1;
     }
 
-    {
-        int attempt;
-        int max_attempts = 2;
-        int ok = 0;
-        for (attempt = 0; attempt < max_attempts; attempt++) {
-            if (http_post(host, port, path, content_type, post_body, post_body_len, response, 15000) == 0) {
-                ok = 1;
-                break;
-            }
-            if (attempt + 1 < max_attempts) {
-                sleep_ms(500);
-            }
+    ok = 0;
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (http_post(host, port, path, content_type, post_body,
+                      post_body_len, response, 15000) == 0) {
+            ok = 1;
+            break;
         }
-        if (!ok) {
-            kfree(host); kfree(path); kfree(response);
-            return -1;
-        }
+        if (attempt + 1 < 2) sleep_ms(500);
+    }
+    if (!ok) {
+        kfree(host); kfree(path); kfree(response);
+        return -1;
     }
 
     if (out_status) *out_status = response->status_code;
-
-    copy_len = response->body_len < buffer_size ? response->body_len : buffer_size;
-    if (response->body) {
-        memcpy(buffer, response->body, copy_len);
-    }
-
-    if (out_size) *out_size = copy_len;
-
+    *out_body = response->body;
+    if (out_size) *out_size = response->body_len;
+    response->body = NULL;
     http_response_free(response);
     kfree(host); kfree(path); kfree(response);
     return 0;

@@ -57,7 +57,6 @@
 #define SOCKET_BUF_SIZE 4096
 #define BACKLOG_INIT_SIZE 8
 #define UNIX_PATH_MAX 108
-#define SCM_MAX_FDS 16
 
 typedef unsigned int socklen_t;
 typedef long ssize_t;
@@ -176,7 +175,7 @@ typedef struct {
 
 static socket_t *sockets = NULL;
 static int socket_capacity = 0;
-static int socket_base_fd = 100;
+static int socket_base_fd = 0x30000000;
 static uint64_t next_ephemeral_port = 49152;
 
 static int socket_grow(void) {
@@ -231,7 +230,8 @@ static int socket_ensure_pending_fd_capacity(socket_t *sock, int needed) {
     task_fd_t *new_fds;
     int new_capacity;
 
-    if (!sock || needed < 0 || needed > SCM_MAX_FDS) return -ENOMEM;
+    if (!sock || needed < 0 ||
+        (size_t)needed > SIZE_MAX / sizeof(task_fd_t)) return -ENOMEM;
     if (needed <= sock->pending_fd_capacity) return 0;
     new_capacity = needed;
     new_fds = (task_fd_t *)kmalloc((size_t)new_capacity * sizeof(task_fd_t));
@@ -244,6 +244,74 @@ static int socket_ensure_pending_fd_capacity(socket_t *sock, int needed) {
     kfree(sock->pending_fds);
     sock->pending_fds = new_fds;
     sock->pending_fd_capacity = new_capacity;
+    return 0;
+}
+
+static int socket_send_rights(socket_t *sock, const struct msghdr *msg,
+                              const struct cmsghdr *cmsg) {
+    socket_t *peer;
+    task_fd_t *src_tfd;
+    pipe_t *passed_pipe;
+    int *fd_arr;
+    int nfds_to_pass;
+    int i;
+    int src_fd;
+    size_t fd_bytes;
+    const uint8_t *control_data;
+
+    if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
+        cmsg->cmsg_len > msg->msg_controllen)
+        return -EINVAL;
+    fd_bytes = cmsg->cmsg_len - sizeof(struct cmsghdr);
+    if (fd_bytes % sizeof(int) != 0 ||
+        fd_bytes / sizeof(int) > 0x7FFFFFFFUL)
+        return -EINVAL;
+    nfds_to_pass = (int)(fd_bytes / sizeof(int));
+    if (sock->peer_socket < 0 || sock->peer_socket >= socket_capacity)
+        return -ENOTCONN;
+    peer = &sockets[sock->peer_socket];
+    if (!peer->in_use) return -ENOTCONN;
+    if (nfds_to_pass > 0x7FFFFFFF - peer->pending_fd_count) return -ENOMEM;
+    if (nfds_to_pass == 0) return 0;
+    fd_arr = (int *)kmalloc(fd_bytes);
+    if (!fd_arr) return -ENOMEM;
+    control_data = (const uint8_t *)msg->msg_control +
+                   sizeof(struct cmsghdr);
+    if (copy_from_user(fd_arr, control_data, fd_bytes) < 0) {
+        kfree(fd_arr);
+        return -EFAULT;
+    }
+    for (i = 0; i < nfds_to_pass; i++) {
+        src_fd = fd_arr[i];
+        if (!current_task || src_fd < 0 ||
+            src_fd >= current_task->fds_capacity ||
+            !current_task->fds[src_fd].in_use) {
+            kfree(fd_arr);
+            return -EBADF;
+        }
+    }
+    if (socket_ensure_pending_fd_capacity(
+            peer, peer->pending_fd_count + nfds_to_pass) < 0) {
+        kfree(fd_arr);
+        return -ENOMEM;
+    }
+    for (i = 0; i < nfds_to_pass; i++) {
+        src_fd = fd_arr[i];
+        src_tfd = &current_task->fds[src_fd];
+        memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd,
+               sizeof(task_fd_t));
+        if (src_tfd->type == FD_TYPE_FILE && src_tfd->node) {
+            vfs_open((vfs_node_t *)src_tfd->node, 0);
+            task_fd_position_share(
+                src_tfd, &peer->pending_fds[peer->pending_fd_count]);
+        }
+        if (src_tfd->private_data && FD_TYPE_IS_PIPE(src_tfd->type)) {
+            passed_pipe = (pipe_t *)src_tfd->private_data;
+            pipe_retain_reference(passed_pipe, src_tfd->type);
+        }
+        peer->pending_fd_count++;
+    }
+    kfree(fd_arr);
     return 0;
 }
 
@@ -735,7 +803,7 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     }
     
     if (backlog < 1) backlog = 1;
-    if (backlog > 128) backlog = 128;
+    if ((size_t)backlog > SIZE_MAX / sizeof(pending_conn_t)) return -ENOMEM;
 
     new_backlog = (pending_conn_t *)kmalloc(backlog * sizeof(pending_conn_t));
     if (!new_backlog) return -ENOMEM;
@@ -934,12 +1002,10 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
             break;
         case SO_SNDBUF:
             if (value <= 0) return -EINVAL;
-            if (value > SOCKET_BUF_SIZE) value = SOCKET_BUF_SIZE;
             sock->so_sndbuf = value;
             break;
         case SO_RCVBUF:
             if (value <= 0) return -EINVAL;
-            if (value > SOCKET_BUF_SIZE) value = SOCKET_BUF_SIZE;
             sock->so_rcvbuf = value;
             break;
         default:
@@ -1072,16 +1138,8 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     ssize_t total;
     ssize_t sent;
     socket_t *sock;
-    socket_t *peer;
-    task_fd_t *src_tfd;
-    pipe_t *passed_pipe;
-    int nfds_to_pass;
-    int fd_arr[SCM_MAX_FDS];
-    int i;
-    int src_fd;
     int iov_index;
-    size_t fd_bytes;
-    const uint8_t *control_data;
+    int rights_result;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
@@ -1103,46 +1161,8 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
         if (copy_from_user(&cmsg, msg.msg_control, sizeof(cmsg)) < 0)
             return -EFAULT;
         if (cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS) {
-            if (cmsg.cmsg_len < sizeof(struct cmsghdr) ||
-                cmsg.cmsg_len > msg.msg_controllen)
-                return -EINVAL;
-            fd_bytes = cmsg.cmsg_len - sizeof(struct cmsghdr);
-            if (fd_bytes % sizeof(int) != 0) return -EINVAL;
-            nfds_to_pass = (int)(fd_bytes / sizeof(int));
-            if (nfds_to_pass > SCM_MAX_FDS) nfds_to_pass = SCM_MAX_FDS;
-            control_data = (const uint8_t *)msg.msg_control + sizeof(struct cmsghdr);
-            if (copy_from_user(fd_arr, control_data,
-                               (size_t)nfds_to_pass * sizeof(int)) < 0)
-                return -EFAULT;
-            if (sock->peer_socket < 0 || sock->peer_socket >= socket_capacity)
-                return -ENOTCONN;
-            peer = &sockets[sock->peer_socket];
-            if (!peer->in_use) return -ENOTCONN;
-            if (peer->pending_fd_count + nfds_to_pass > SCM_MAX_FDS)
-                return -ENOMEM;
-            for (i = 0; i < nfds_to_pass; i++) {
-                src_fd = fd_arr[i];
-                if (!current_task || src_fd < 0 || src_fd >= current_task->fds_capacity)
-                    return -EBADF;
-                if (!current_task->fds[src_fd].in_use) return -EBADF;
-            }
-            if (socket_ensure_pending_fd_capacity(
-                    peer, peer->pending_fd_count + nfds_to_pass) < 0)
-                return -ENOMEM;
-            for (i = 0; i < nfds_to_pass; i++) {
-                src_fd = fd_arr[i];
-                src_tfd = &current_task->fds[src_fd];
-                memcpy(&peer->pending_fds[peer->pending_fd_count], src_tfd, sizeof(task_fd_t));
-                if (src_tfd->type == FD_TYPE_FILE && src_tfd->node) {
-                    vfs_open((vfs_node_t *)src_tfd->node, 0);
-                    task_fd_position_share(src_tfd, &peer->pending_fds[peer->pending_fd_count]);
-                }
-                if (src_tfd->private_data && FD_TYPE_IS_PIPE(src_tfd->type)) {
-                    passed_pipe = (pipe_t *)src_tfd->private_data;
-                    pipe_retain_reference(passed_pipe, src_tfd->type);
-                }
-                peer->pending_fd_count++;
-            }
+            rights_result = socket_send_rights(sock, &msg, &cmsg);
+            if (rights_result < 0) return rights_result;
         }
     }
 
@@ -1205,11 +1225,12 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     socket_t *sock;
     int nfds;
     socklen_t needed;
-    int out_fds[SCM_MAX_FDS];
+    int *out_fds;
     int i;
     int newfd;
     int iov_index;
     uint8_t *control_data;
+    size_t needed_size;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
@@ -1230,11 +1251,17 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 
     if (sock->pending_fd_count > 0) {
         nfds = sock->pending_fd_count;
-        needed = (socklen_t)(sizeof(struct cmsghdr) +
-                             (size_t)nfds * sizeof(int));
-        if (msg.msg_control && needed <= msg.msg_controllen) {
+        out_fds = NULL;
+        needed_size = sizeof(struct cmsghdr) +
+                      (size_t)nfds * sizeof(int);
+        needed = needed_size <= 0xFFFFFFFFUL ?
+                 (socklen_t)needed_size : 0;
+        if (msg.msg_control && needed_size <= 0xFFFFFFFFUL &&
+            needed <= msg.msg_controllen) {
             if (!user_access_ok(msg.msg_control, needed, UACCESS_WRITE))
                 return -EFAULT;
+            out_fds = (int *)kmalloc((size_t)nfds * sizeof(int));
+            if (!out_fds) return -ENOMEM;
             memset(&cmsg, 0, sizeof(cmsg));
             cmsg.cmsg_len = needed;
             cmsg.cmsg_level = SOL_SOCKET;
@@ -1255,8 +1282,11 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
             control_data = (uint8_t *)msg.msg_control + sizeof(struct cmsghdr);
             if (copy_to_user(msg.msg_control, &cmsg, sizeof(cmsg)) < 0 ||
                 copy_to_user(control_data, out_fds,
-                             (size_t)nfds * sizeof(int)) < 0)
+                             (size_t)nfds * sizeof(int)) < 0) {
+                kfree(out_fds);
                 return -EFAULT;
+            }
+            kfree(out_fds);
             msg.msg_controllen = needed;
             sock->pending_fd_count = 0;
             kfree(sock->pending_fds);
@@ -1465,20 +1495,20 @@ void syscalls_socket_init(void) {
     sockets = NULL;
     socket_capacity = 0;
     
-    syscall_table[SYSCALL_SOCKET] = sys_socket;
-    syscall_table[SYSCALL_SOCKETPAIR] = sys_socketpair;
-    syscall_table[SYSCALL_BIND] = sys_bind;
-    syscall_table[SYSCALL_CONNECT] = sys_connect;
-    syscall_table[SYSCALL_LISTEN] = sys_listen;
-    syscall_table[SYSCALL_ACCEPT] = sys_accept;
-    syscall_table[SYSCALL_ACCEPT4] = sys_accept4;
-    syscall_table[SYSCALL_GETSOCKOPT] = sys_getsockopt;
-    syscall_table[SYSCALL_SETSOCKOPT] = sys_setsockopt;
-    syscall_table[SYSCALL_GETSOCKNAME] = sys_getsockname;
-    syscall_table[SYSCALL_GETPEERNAME] = sys_getpeername;
-    syscall_table[SYSCALL_SENDTO] = sys_sendto;
-    syscall_table[SYSCALL_SENDMSG] = sys_sendmsg;
-    syscall_table[SYSCALL_RECVFROM] = sys_recvfrom;
-    syscall_table[SYSCALL_RECVMSG] = sys_recvmsg;
-    syscall_table[SYSCALL_SHUTDOWN] = sys_shutdown;
+    syscall_table_set(SYSCALL_SOCKET, (void *)(sys_socket));
+    syscall_table_set(SYSCALL_SOCKETPAIR, (void *)(sys_socketpair));
+    syscall_table_set(SYSCALL_BIND, (void *)(sys_bind));
+    syscall_table_set(SYSCALL_CONNECT, (void *)(sys_connect));
+    syscall_table_set(SYSCALL_LISTEN, (void *)(sys_listen));
+    syscall_table_set(SYSCALL_ACCEPT, (void *)(sys_accept));
+    syscall_table_set(SYSCALL_ACCEPT4, (void *)(sys_accept4));
+    syscall_table_set(SYSCALL_GETSOCKOPT, (void *)(sys_getsockopt));
+    syscall_table_set(SYSCALL_SETSOCKOPT, (void *)(sys_setsockopt));
+    syscall_table_set(SYSCALL_GETSOCKNAME, (void *)(sys_getsockname));
+    syscall_table_set(SYSCALL_GETPEERNAME, (void *)(sys_getpeername));
+    syscall_table_set(SYSCALL_SENDTO, (void *)(sys_sendto));
+    syscall_table_set(SYSCALL_SENDMSG, (void *)(sys_sendmsg));
+    syscall_table_set(SYSCALL_RECVFROM, (void *)(sys_recvfrom));
+    syscall_table_set(SYSCALL_RECVMSG, (void *)(sys_recvmsg));
+    syscall_table_set(SYSCALL_SHUTDOWN, (void *)(sys_shutdown));
 }

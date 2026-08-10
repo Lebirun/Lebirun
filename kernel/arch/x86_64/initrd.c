@@ -30,10 +30,53 @@ static uint64_t initrd_vfs_node_count = 0;
 static vfs_node_t *initrd_vfs_root = NULL;
 static dirent_t initrd_dirent;
 
-static inline int initrd_is_root_parent(uint16_t parent_index) {
-    if (parent_index == 0xFFFF) return 1;
-    if (initrd_version <= 1 && parent_index == 0) return 1;
+static int initrd_is_root_parent_version(uint32_t parent_index,
+                                         uint64_t version) {
+    if (version >= 3) return parent_index == UINT32_MAX;
+    if (parent_index == 0xFFFFu) return 1;
+    if (version <= 1 && parent_index == 0) return 1;
     return 0;
+}
+
+static int initrd_is_root_parent(uint32_t parent_index) {
+    return initrd_is_root_parent_version(parent_index, initrd_version);
+}
+
+static int initrd_decode_parent(const initrd_file_header_t *header,
+                                uint64_t version, uint32_t *parent_index) {
+    uint32_t high;
+
+    if (!header || !parent_index) return -1;
+    if (version < 3) {
+        *parent_index = header->parent_index;
+        return 0;
+    }
+    if (header->reserved & 0xFFFF0000u) return -1;
+    high = header->reserved & 0xFFFFu;
+    *parent_index = header->parent_index | (high << 16);
+    return 0;
+}
+
+static int initrd_parent_graph_valid(initrd_file_t *entries,
+                                     uint64_t count, uint64_t version) {
+    uint64_t i;
+    uint64_t current;
+    uint64_t traversed;
+    uint32_t parent;
+
+    for (i = 0; i < count; i++) {
+        current = i;
+        traversed = 0;
+        for (;;) {
+            parent = entries[current].parent_index;
+            if (initrd_is_root_parent_version(parent, version)) break;
+            if ((uint64_t)parent >= count) return 0;
+            current = parent;
+            traversed++;
+            if (traversed >= count) return 0;
+        }
+    }
+    return 1;
 }
 
 void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
@@ -121,6 +164,10 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
     }
     initrd_version = initrd_header->version;
     if (initrd_version == 0) initrd_version = 1;
+    if (initrd_version > INITRD_VERSION) {
+        KERNEL_INIT_LOG("INITRD: Unsupported version %u\n", initrd_version);
+        return;
+    }
 
     file_count = initrd_header->num_entries;
 
@@ -159,7 +206,14 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         files[i].length = file_headers[i].length;
         files[i].type = file_headers[i].type;
         files[i].permissions = file_headers[i].permissions;
-        files[i].parent_index = file_headers[i].parent_index;
+        if (initrd_decode_parent(&file_headers[i], initrd_version,
+                                 &files[i].parent_index) != 0) {
+            KERNEL_INIT_LOG("INITRD: File %u has invalid parent encoding\n", i);
+            kfree(files);
+            files = NULL;
+            file_count = 0;
+            return;
+        }
         files[i].uid = file_headers[i].uid;
         files[i].gid = file_headers[i].gid;
 
@@ -195,6 +249,14 @@ void KERNEL_INIT initrd_init(uint64_t mods_count, uint64_t mods_addr) {
         }
     }
 
+    if (!initrd_parent_graph_valid(files, file_count, initrd_version)) {
+        KERNEL_INIT_LOG("INITRD: Invalid parent graph\n");
+        kfree(files);
+        files = NULL;
+        file_count = 0;
+        return;
+    }
+
     KERNEL_INIT_LOG("INITRD: Initialized %u files (version %u)\n", file_count, initrd_version);
 }
 
@@ -208,7 +270,9 @@ initrd_file_t *initrd_get_file(uint64_t index) {
 }
 
 initrd_file_t *initrd_find_file(const char *name) {
-    for (uint64_t i = 0; i < file_count; i++) {
+    uint64_t i;
+
+    for (i = 0; i < file_count; i++) {
         if (strcmp(files[i].name, name) == 0) {
             return &files[i];
         }
@@ -217,17 +281,19 @@ initrd_file_t *initrd_find_file(const char *name) {
 }
 
 void initrd_list_files(void) {
+    uint64_t i;
+    char tname[65];
+    char typechar;
+    char rperm;
+    char wperm;
+    char xperm;
+
     printf("INITRD: File listing (%u files, version %u):\n", file_count, initrd_version);
     if (file_count == 0) {
         printf("  (no files or initrd not initialized)\n");
         return;
     }
-    for (uint64_t i = 0; i < file_count; i++) {
-        char tname[65];
-        char typechar;
-        char rperm;
-        char wperm;
-        char xperm;
+    for (i = 0; i < file_count; i++) {
         memcpy(tname, files[i].name, 64);
         tname[64] = '\0';
         typechar = (files[i].type == INITRD_TYPE_DIR) ? 'd' : '-';
@@ -285,7 +351,7 @@ static int find_free_fd(void) {
 
 initrd_file_t *initrd_find_path(const char *path) {
     char component[65];
-    uint16_t current_parent;
+    uint32_t current_parent;
     uint64_t i;
     int len;
     initrd_file_t *found;
@@ -295,14 +361,15 @@ initrd_file_t *initrd_find_path(const char *path) {
     while (*path == '/') path++;
     if (*path == '\0') {
         for (i = 0; i < file_count; i++) {
-            if (files[i].type == INITRD_TYPE_DIR && files[i].parent_index == 0xFFFF) {
+            if (files[i].type == INITRD_TYPE_DIR &&
+                initrd_is_root_parent(files[i].parent_index)) {
                 return &files[i];
             }
         }
         return NULL;
     }
 
-    current_parent = 0xFFFF;
+    current_parent = initrd_version >= 3 ? UINT32_MAX : 0xFFFFu;
 
     while (*path) {
         while (*path == '/') path++;
@@ -480,12 +547,17 @@ static void initrd_vfs_close(vfs_node_t *node) {
 static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint64_t parent_idx;
     uint64_t count;
+    uint64_t i;
+    uint32_t pi;
+    int match;
+    int j;
+
     if (!node || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     parent_idx = node->inode;
     count = 0;
-    for (uint64_t i = 0; i < file_count; i++) {
-        uint16_t pi = files[i].parent_index;
-        int match = 0;
+    for (i = 0; i < file_count; i++) {
+        pi = files[i].parent_index;
+        match = 0;
         if (node == initrd_vfs_root) {
             match = initrd_is_root_parent(pi);
         } else {
@@ -493,7 +565,7 @@ static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint64_t index) {
         }
         if (match) {
             if (count == index) {
-                for (int j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
+                for (j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
                     initrd_dirent.name[j] = files[i].name[j];
                     initrd_dirent.name[j + 1] = '\0';
                 }
@@ -509,11 +581,15 @@ static dirent_t *initrd_vfs_readdir(vfs_node_t *node, uint64_t index) {
 
 static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
     uint64_t parent_idx;
+    uint64_t i;
+    uint32_t pi;
+    int match;
+
     if (!node || !name || VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return NULL;
     parent_idx = node->inode;
-    for (uint64_t i = 0; i < file_count; i++) {
-        uint16_t pi = files[i].parent_index;
-        int match = 0;
+    for (i = 0; i < file_count; i++) {
+        pi = files[i].parent_index;
+        match = 0;
         if (node == initrd_vfs_root) {
             match = initrd_is_root_parent(pi);
         } else {
@@ -527,6 +603,10 @@ static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoint) {
+    uint64_t i;
+    vfs_node_t *node;
+    int j;
+
     (void)device;
     (void)mountpoint;
 
@@ -556,33 +636,33 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
     initrd_vfs_root->finddir = initrd_vfs_finddir;
     initrd_vfs_root->parent = NULL;
     
-    for (uint64_t i = 0; i < file_count; i++) {
-        vfs_node_t *n = &initrd_vfs_nodes[i];
-        for (int j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
-            n->name[j] = files[i].name[j];
-            n->name[j + 1] = '\0';
+    for (i = 0; i < file_count; i++) {
+        node = &initrd_vfs_nodes[i];
+        for (j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
+            node->name[j] = files[i].name[j];
+            node->name[j + 1] = '\0';
         }
-        n->inode = i;
-        n->length = files[i].length;
-        n->uid = files[i].uid;
-        n->gid = files[i].gid;
-        n->mask = files[i].permissions;
+        node->inode = i;
+        node->length = files[i].length;
+        node->uid = files[i].uid;
+        node->gid = files[i].gid;
+        node->mask = files[i].permissions;
         if (files[i].type == INITRD_TYPE_DIR) {
-            n->flags = VFS_DIRECTORY;
-            n->readdir = initrd_vfs_readdir;
-            n->finddir = initrd_vfs_finddir;
+            node->flags = VFS_DIRECTORY;
+            node->readdir = initrd_vfs_readdir;
+            node->finddir = initrd_vfs_finddir;
         } else {
-            n->flags = VFS_FILE;
-            n->read = initrd_vfs_read;
+            node->flags = VFS_FILE;
+            node->read = initrd_vfs_read;
         }
-        n->open = initrd_vfs_open;
-        n->close = initrd_vfs_close;
-        if (files[i].parent_index == 0xFFFF) {
-            n->parent = initrd_vfs_root;
+        node->open = initrd_vfs_open;
+        node->close = initrd_vfs_close;
+        if (initrd_is_root_parent(files[i].parent_index)) {
+            node->parent = initrd_vfs_root;
         } else if (files[i].parent_index < file_count) {
-            n->parent = &initrd_vfs_nodes[files[i].parent_index];
+            node->parent = &initrd_vfs_nodes[files[i].parent_index];
         } else {
-            n->parent = initrd_vfs_root;
+            node->parent = initrd_vfs_root;
         }
     }
     
@@ -698,14 +778,15 @@ void initrd_copy_to_root(void) {
             }
             strncpy(tmp, newtmp, sizeof(tmp) - 1);
             tmp[sizeof(tmp) - 1] = '\0';
-            if (files[cur].parent_index == 0xFFFF || files[cur].parent_index >= file_count) {
+            if (initrd_is_root_parent(files[cur].parent_index) ||
+                files[cur].parent_index >= file_count) {
                 break;
             }
             cur = files[cur].parent_index;
             traversed++;
         }
         if (traversed >= file_count && cur < file_count &&
-            files[cur].parent_index != 0xFFFF &&
+            !initrd_is_root_parent(files[cur].parent_index) &&
             files[cur].parent_index < file_count) {
             errors++;
             continue;
@@ -713,7 +794,8 @@ void initrd_copy_to_root(void) {
         strncpy(destpath, tmp, sizeof(destpath) - 1);
         destpath[sizeof(destpath) - 1] = '\0';
 
-        is_root_level_dir = (files[i].parent_index == 0xFFFF && files[i].type == INITRD_TYPE_DIR);
+        is_root_level_dir = (initrd_is_root_parent(files[i].parent_index) &&
+                             files[i].type == INITRD_TYPE_DIR);
         if (is_root_level_dir) {
             is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
                                      strcmp(destpath, "/etc") == 0 || strcmp(destpath, "/home") == 0 ||
@@ -808,6 +890,7 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     int ret;
     uint64_t hdr_off;
     uint64_t hdr_len;
+    uint64_t rootfs_version;
     multiboot_module_t *mods;
     multiboot_module_t *mod;
     initrd_header_t *hdr;
@@ -871,6 +954,13 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         return;
     }
 
+    rootfs_version = hdr->version;
+    if (rootfs_version == 0) rootfs_version = 1;
+    if (rootfs_version > INITRD_VERSION) {
+        printf("ROOTFS: Unsupported version %u\n", rootfs_version);
+        return;
+    }
+
     num_entries = hdr->num_entries;
     printf("ROOTFS: Found %u entries\n", num_entries);
 
@@ -914,7 +1004,13 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         rfiles[i].length = hdrs[i].length;
         rfiles[i].type = hdrs[i].type;
         rfiles[i].permissions = hdrs[i].permissions;
-        rfiles[i].parent_index = hdrs[i].parent_index;
+        if (initrd_decode_parent(&hdrs[i], rootfs_version,
+                                 &rfiles[i].parent_index) != 0) {
+            printf("ROOTFS: Entry %u has invalid parent encoding\n", i);
+            kfree(scratch);
+            kfree(rfiles);
+            return;
+        }
         rfiles[i].uid = hdrs[i].uid;
         rfiles[i].gid = hdrs[i].gid;
 
@@ -940,6 +1036,13 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             rfiles[i].offset = 0;
             rfiles[i].data = NULL;
         }
+    }
+
+    if (!initrd_parent_graph_valid(rfiles, num_entries, rootfs_version)) {
+        printf("ROOTFS: Invalid parent graph\n");
+        kfree(scratch);
+        kfree(rfiles);
+        return;
     }
 
     printf("ROOTFS: Copying %u files to /...\n", num_entries);
@@ -984,14 +1087,17 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             }
             strncpy(tmp, newtmp, INITRD_MAX_PATH - 1);
             tmp[INITRD_MAX_PATH - 1] = '\0';
-            if (rfiles[cur].parent_index == 0xFFFF || rfiles[cur].parent_index >= num_entries) {
+            if (initrd_is_root_parent_version(rfiles[cur].parent_index,
+                                              rootfs_version) ||
+                rfiles[cur].parent_index >= num_entries) {
                 break;
             }
             cur = rfiles[cur].parent_index;
             traversed++;
         }
         if (traversed >= num_entries && cur < num_entries &&
-            rfiles[cur].parent_index != 0xFFFF &&
+            !initrd_is_root_parent_version(rfiles[cur].parent_index,
+                                           rootfs_version) &&
             rfiles[cur].parent_index < num_entries) {
             errors++;
             continue;
@@ -1001,7 +1107,10 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         
         if (destpath[0] == '\0') continue;
 
-        is_root_level_dir = (rfiles[i].parent_index == 0xFFFF && rfiles[i].type == INITRD_TYPE_DIR);
+        is_root_level_dir =
+            (initrd_is_root_parent_version(rfiles[i].parent_index,
+                                           rootfs_version) &&
+             rfiles[i].type == INITRD_TYPE_DIR);
         if (is_root_level_dir) {
             is_standard_root = (strcmp(destpath, "/bin") == 0 || strcmp(destpath, "/dev") == 0 ||
                                      strcmp(destpath, "/etc") == 0 || strcmp(destpath, "/home") == 0 ||

@@ -518,13 +518,14 @@ int kprint_write(int console_id, const char *buf, size_t len) {
 
     if (!kprint_ready) {
         con_id_early = console_id;
-        if (con_id_early < 0 || con_id_early >= NUM_CONSOLES) con_id_early = 0;
+        if (con_id_early < 0 ||
+            con_id_early >= console_get_count()) con_id_early = 0;
         console_write_to(con_id_early, buf, len);
         return (int)len;
     }
 
     con_id = console_id;
-    if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+    if (con_id < 0 || con_id >= console_get_count()) con_id = 0;
 
     off = 0;
     while (off < len) {
@@ -1071,7 +1072,8 @@ static void klog_task_main(void) {
             drained = 0;
             while (drained < 32 && kprint_dequeue(&it) == 0) {
                 con_id = it.con_id;
-                if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+                if (con_id < 0 ||
+                    con_id >= console_get_count()) con_id = 0;
                 if (!console_alt_screen_active(con_id))
                     console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
                 drained++;
@@ -1302,7 +1304,7 @@ void KERNEL_INIT kprint_flush(void) {
         total = 0;
         while (kprint_dequeue(&it) == 0) {
             con_id = it.con_id;
-            if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+            if (con_id < 0 || con_id >= console_get_count()) con_id = 0;
             if (!console_alt_screen_active(con_id))
                 console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
             total++;

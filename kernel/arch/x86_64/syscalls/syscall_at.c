@@ -21,8 +21,7 @@ typedef struct {
 
 static int task_fd_alloc_from(int start) {
     int i;
-    int new_cap;
-    task_fd_t *new_fds;
+    int ret;
 
     if (!current_task || !current_task->fds) return -ESRCH;
     if (start < 0) start = 0;
@@ -35,18 +34,14 @@ static int task_fd_alloc_from(int start) {
             return i;
         }
     }
-    if (current_task->fds_capacity >= TASK_MAX_FDS) return -EMFILE;
-    new_cap = current_task->fds_capacity * 2;
-    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
-    if (start >= new_cap) new_cap = start + 16;
-    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
-    new_fds = (task_fd_t *)krealloc(current_task->fds, new_cap * sizeof(task_fd_t));
-    if (!new_fds) return -ENOMEM;
-    memset(&new_fds[current_task->fds_capacity], 0, (new_cap - current_task->fds_capacity) * sizeof(task_fd_t));
-    i = current_task->fds_capacity;
-    if (start > i) i = start;
-    current_task->fds = new_fds;
-    current_task->fds_capacity = new_cap;
+    ret = task_fd_ensure_capacity(
+        current_task, start >= current_task->fds_capacity ?
+        start : current_task->fds_capacity);
+    if (ret != 0) return -EMFILE;
+    for (i = start; i < current_task->fds_capacity; i++) {
+        if (!current_task->fds[i].in_use) break;
+    }
+    if (i >= current_task->fds_capacity) return -EMFILE;
     memset(&current_task->fds[i], 0, sizeof(task_fd_t));
     current_task->fds[i].in_use = 1;
     current_task->fds[i].ref_count = 1;
@@ -75,7 +70,6 @@ static int at_user_range_mapped(uint64_t addr, uint64_t size) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) {
             if (!task_handle_file_page_fault(current_task, p)) {
                 if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= current_task->user_brk && p < 0x40000000u) ||
                         (p >= 0x1000u && p < current_task->user_brk)) {
                     phys = pfa_alloc();
                     if (!phys) return 0;
@@ -1131,18 +1125,18 @@ static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd,
 }
 
 void syscalls_at_init(void) {
-    syscall_table[SYSCALL_OPENAT] = sys_openat;
-    syscall_table[SYSCALL_MKDIRAT] = sys_mkdirat;
-    syscall_table[SYSCALL_MKNODAT] = sys_mknodat;
-    syscall_table[SYSCALL_FCHOWNAT] = sys_fchownat;
-    syscall_table[SYSCALL_UNLINKAT] = sys_unlinkat;
-    syscall_table[SYSCALL_RENAMEAT] = sys_renameat;
-    syscall_table[SYSCALL_LINKAT] = sys_linkat;
-    syscall_table[SYSCALL_SYMLINKAT] = sys_symlinkat;
-    syscall_table[SYSCALL_READLINKAT] = sys_readlinkat;
-    syscall_table[SYSCALL_FCHMODAT] = sys_fchmodat;
-    syscall_table[SYSCALL_FACCESSAT] = sys_faccessat;
-    syscall_table[SYSCALL_FSTATAT] = sys_fstatat;
-    syscall_table[SYSCALL_UTIMENSAT] = sys_utimensat;
-    syscall_table[SYSCALL_RENAMEAT2] = sys_renameat2;
+    syscall_table_set(SYSCALL_OPENAT, (void *)(sys_openat));
+    syscall_table_set(SYSCALL_MKDIRAT, (void *)(sys_mkdirat));
+    syscall_table_set(SYSCALL_MKNODAT, (void *)(sys_mknodat));
+    syscall_table_set(SYSCALL_FCHOWNAT, (void *)(sys_fchownat));
+    syscall_table_set(SYSCALL_UNLINKAT, (void *)(sys_unlinkat));
+    syscall_table_set(SYSCALL_RENAMEAT, (void *)(sys_renameat));
+    syscall_table_set(SYSCALL_LINKAT, (void *)(sys_linkat));
+    syscall_table_set(SYSCALL_SYMLINKAT, (void *)(sys_symlinkat));
+    syscall_table_set(SYSCALL_READLINKAT, (void *)(sys_readlinkat));
+    syscall_table_set(SYSCALL_FCHMODAT, (void *)(sys_fchmodat));
+    syscall_table_set(SYSCALL_FACCESSAT, (void *)(sys_faccessat));
+    syscall_table_set(SYSCALL_FSTATAT, (void *)(sys_fstatat));
+    syscall_table_set(SYSCALL_UTIMENSAT, (void *)(sys_utimensat));
+    syscall_table_set(SYSCALL_RENAMEAT2, (void *)(sys_renameat2));
 }

@@ -8,12 +8,10 @@
 #include <string.h>
 
 #define PTY_INIT_COUNT 1
-#define PTY_BUF_SIZE 4096
-
 typedef struct {
     int in_use;
-    uint16_t master_capacity;
-    uint16_t slave_capacity;
+    size_t master_capacity;
+    size_t slave_capacity;
     uint8_t *master_buf;
     uint64_t master_head;
     uint64_t master_tail;
@@ -94,21 +92,20 @@ found:
     return i;
 }
 
-static int pty_reserve_buffer(uint8_t **buffer, uint16_t *capacity,
+static int pty_reserve_buffer(uint8_t **buffer, size_t *capacity,
                               uint64_t *head, uint64_t *tail,
                               size_t additional) {
     uint64_t used;
     uint64_t required;
-    uint16_t new_capacity;
+    size_t new_capacity;
     uint8_t *new_buffer;
     uint64_t i;
 
     used = *tail - *head;
-    if (used > PTY_BUF_SIZE) return -12;
-    if (additional > PTY_BUF_SIZE - used) return -12;
+    if (used > SIZE_MAX || additional > SIZE_MAX - (size_t)used) return -12;
     required = used + additional;
     if (required <= *capacity) return 0;
-    new_capacity = (uint16_t)required;
+    new_capacity = (size_t)required;
     new_buffer = (uint8_t *)kmalloc(new_capacity);
     if (!new_buffer) return -12;
     for (i = 0; i < used; i++) {
@@ -122,7 +119,7 @@ static int pty_reserve_buffer(uint8_t **buffer, uint16_t *capacity,
     return 0;
 }
 
-static void pty_compact_buffer(uint8_t **buffer, uint16_t *capacity,
+static void pty_compact_buffer(uint8_t **buffer, size_t *capacity,
                                uint64_t *head, uint64_t *tail) {
     uint64_t used;
     uint8_t *new_buffer;
@@ -145,7 +142,7 @@ static void pty_compact_buffer(uint8_t **buffer, uint16_t *capacity,
     }
     kfree(*buffer);
     *buffer = new_buffer;
-    *capacity = (uint16_t)used;
+    *capacity = (size_t)used;
     *head = 0;
     *tail = used;
 }
@@ -220,7 +217,7 @@ char *pty_name(int master_fd) {
     if (idx == 0) {
         name[len++] = '0';
     } else {
-        char tmp[8];
+        char tmp[16];
         int i = 0;
         int t = idx;
         while (t > 0) {
@@ -237,10 +234,6 @@ char *pty_name(int master_fd) {
 
 static size_t buf_used(uint64_t head, uint64_t tail) {
     return tail - head;
-}
-
-static size_t buf_free(uint64_t head, uint64_t tail, size_t size) {
-    return size - buf_used(head, tail);
 }
 
 ssize_t pty_master_read(int fd, void *buf, size_t count) {
@@ -277,7 +270,6 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_master_write(int fd, const void *buf, size_t count) {
-    size_t space;
     size_t to_write;
     const uint8_t *src;
     size_t i;
@@ -293,8 +285,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     
     mutex_lock(&pty->lock);
     
-    space = buf_free(pty->master_head, pty->master_tail, PTY_BUF_SIZE);
-    to_write = (count < space) ? count : space;
+    to_write = count;
     if (to_write > 0 && pty_ensure_master_buf(pty, to_write) < 0) {
         mutex_unlock(&pty->lock);
         return -12;
@@ -390,7 +381,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         found_line = 0;
         line_end = 0;
         
-        for (i = 0; i < available && i < PTY_BUF_SIZE; i++) {
+        for (i = 0; i < available; i++) {
             c = pty->master_buf[(pty->master_head + i) % pty->master_capacity];
             if (c == '\n' || c == pty->termios.c_cc[VEOF] || c == pty->termios.c_cc[VEOL]) {
                 found_line = 1;
@@ -433,7 +424,6 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
 }
 
 ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
-    size_t space;
     size_t consumed;
     size_t output_size;
     size_t character_size;
@@ -449,7 +439,6 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
     
     mutex_lock(&pty->lock);
     
-    space = buf_free(pty->slave_head, pty->slave_tail, PTY_BUF_SIZE);
     consumed = 0;
     output_size = 0;
     src = (const uint8_t *)buf;
@@ -458,7 +447,7 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
         c = src[i];
         character_size = (pty->termios.c_oflag & OPOST) &&
                          c == '\n' && (pty->termios.c_oflag & ONLCR) ? 2 : 1;
-        if (character_size > space - output_size) break;
+        if (character_size > SIZE_MAX - output_size) break;
         output_size += character_size;
         consumed++;
     }

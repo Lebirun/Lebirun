@@ -160,7 +160,7 @@ static void KERNEL_INIT kernel_boot(void) {
     extern uint32_t early_fb_pitch;
     extern uint8_t early_fb_bpp;
     extern uint8_t early_fb_type;
-    extern char early_cmdline[];
+    extern const char *early_cmdline;
     extern uint32_t early_mod_count;
     uint32_t i;
     uint64_t mod_start;
@@ -217,7 +217,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
     heap_init();
 
-    cmdline_parse(early_cmdline[0] ? early_cmdline : NULL);
+    cmdline_parse(early_cmdline && early_cmdline[0] ? early_cmdline : NULL);
 
     if (cmdline_get_text_mode()) {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
@@ -685,6 +685,7 @@ static void KERNEL_INIT kernel_boot(void) {
             NULL);
     }
     watchdog_set_init_pid((int)init_task->pid);
+    cmdline_reclaim_boot_values();
 
 }
 

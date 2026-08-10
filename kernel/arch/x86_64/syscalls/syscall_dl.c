@@ -2,7 +2,6 @@
 #include <lebirun/elf.h>
 #include <lebirun/vfs.h>
 
-extern void **syscall_table;
 
 #define RTLD_LAZY    0x00001
 #define RTLD_NOW     0x00002
@@ -16,37 +15,38 @@ extern void **syscall_table;
 static dl_handle_t *dl_handles;
 static int dl_capacity = 0;
 static char *dl_error_msg;
+static size_t dl_error_capacity;
 static int dl_initialized = 0;
 static uint64_t dl_next_base = DL_BASE_ADDR;
 
-#define DL_ERROR_SIZE 128
-
-static int dl_ensure_error(void) {
+static int dl_ensure_error(size_t needed) {
     char *msg;
 
-    if (dl_error_msg) return 1;
-    msg = (char *)kmalloc(DL_ERROR_SIZE);
+    if (needed == 0) needed = 1;
+    if (dl_error_msg && dl_error_capacity >= needed) return 1;
+    msg = (char *)krealloc(dl_error_msg, needed);
     if (!msg) return 0;
-    msg[0] = '\0';
+    if (!dl_error_msg) msg[0] = '\0';
     dl_error_msg = msg;
+    dl_error_capacity = needed;
     return 1;
 }
 
 static void dl_set_error(const char *msg) {
-    uint64_t i;
+    size_t length;
 
-    if (!dl_ensure_error()) return;
-    i = 0;
-    while (msg[i] && i < DL_ERROR_SIZE - 1) {
-        dl_error_msg[i] = msg[i];
-        i++;
-    }
-    dl_error_msg[i] = '\0';
+    if (!msg) return;
+    length = strlen(msg);
+    if (length == SIZE_MAX || !dl_ensure_error(length + 1)) return;
+    memcpy(dl_error_msg, msg, length + 1);
 }
 
 static void dl_set_error_invalid_so(int code) {
-    if (!dl_ensure_error()) return;
-    snprintf(dl_error_msg, DL_ERROR_SIZE, "dlopen: invalid shared object (code=%d)", code);
+    char formatted[64];
+
+    snprintf(formatted, sizeof(formatted),
+             "dlopen: invalid shared object (code=%d)", code);
+    dl_set_error(formatted);
 }
 
 static void dl_clear_error(void) {
@@ -59,6 +59,7 @@ static void init_dl(void) {
     dl_handles = NULL;
     dl_capacity = 0;
     dl_error_msg = NULL;
+    dl_error_capacity = 0;
     dl_next_base = DL_BASE_ADDR;
 }
 
@@ -511,22 +512,26 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
 }
 
 static int sys_dlerror(int buf_ptr, const char *size_ptr, int unused) {
+    uint64_t buf_addr;
+    uint64_t size;
+    char *buf;
+    int len;
+
     (void)unused;
     init_dl();
-    
-    uint64_t buf_addr = (uint64_t)buf_ptr;
-    uint64_t size = (uint64_t)(uintptr_t)size_ptr;
+    buf_addr = (uint64_t)buf_ptr;
+    size = (uint64_t)(uintptr_t)size_ptr;
     
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) {
         return 0;
     }
     
-    if (!dl_error_msg || dl_error_msg[0] == '\0') {
+    if (size == 0 || !dl_error_msg || dl_error_msg[0] == '\0') {
         return 0;
     }
-    
-    char *buf = (char *)buf_addr;
-    int len = 0;
+
+    buf = (char *)buf_addr;
+    len = 0;
     while (dl_error_msg[len] && (uint64_t)len < size - 1) {
         buf[len] = dl_error_msg[len];
         len++;
@@ -540,8 +545,8 @@ static int sys_dlerror(int buf_ptr, const char *size_ptr, int unused) {
 
 void syscalls_dl_init(void) {
     init_dl();
-    syscall_table[SYSCALL_DLOPEN] = sys_dlopen;
-    syscall_table[SYSCALL_DLSYM] = sys_dlsym;
-    syscall_table[SYSCALL_DLCLOSE] = sys_dlclose;
-    syscall_table[SYSCALL_DLERROR] = sys_dlerror;
+    syscall_table_set(SYSCALL_DLOPEN, (void *)(sys_dlopen));
+    syscall_table_set(SYSCALL_DLSYM, (void *)(sys_dlsym));
+    syscall_table_set(SYSCALL_DLCLOSE, (void *)(sys_dlclose));
+    syscall_table_set(SYSCALL_DLERROR, (void *)(sys_dlerror));
 }

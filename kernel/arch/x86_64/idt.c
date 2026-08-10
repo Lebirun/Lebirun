@@ -76,24 +76,25 @@ volatile uint64_t cpu_user_ticks = 0;
 volatile uint64_t cpu_system_ticks = 0;
 volatile uint64_t cpu_idle_ticks = 0;
 
-#define MAX_IRQ_HANDLERS 16
 static irq_handler_t *irq_handlers = NULL;
 static int irq_handler_capacity = 0;
 
-static int irq_ensure_handlers(void) {
+static int irq_ensure_handlers(int needed) {
     irq_handler_t *new_handlers;
 
-    if (irq_handler_capacity >= MAX_IRQ_HANDLERS) return 0;
-    new_handlers = (irq_handler_t *)kmalloc(MAX_IRQ_HANDLERS * sizeof(irq_handler_t));
+    if (needed <= irq_handler_capacity) return 0;
+    new_handlers = (irq_handler_t *)krealloc(
+        irq_handlers, (size_t)needed * sizeof(irq_handler_t));
     if (!new_handlers) return -1;
-    memset(new_handlers, 0, MAX_IRQ_HANDLERS * sizeof(irq_handler_t));
+    memset(new_handlers + irq_handler_capacity, 0,
+           (size_t)(needed - irq_handler_capacity) * sizeof(irq_handler_t));
     irq_handlers = new_handlers;
-    irq_handler_capacity = MAX_IRQ_HANDLERS;
+    irq_handler_capacity = needed;
     return 0;
 }
 
 void irq_register_handler(uint8_t irq, irq_handler_t handler) {
-    if (irq < MAX_IRQ_HANDLERS && irq_ensure_handlers() == 0) {
+    if (irq_ensure_handlers((int)irq + 1) == 0) {
         irq_handlers[irq] = handler;
     }
 }

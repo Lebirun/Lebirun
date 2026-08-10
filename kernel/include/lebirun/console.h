@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define NUM_CONSOLES 12
 #define CONSOLE_BUFFER_COLS 160
 #define CONSOLE_INACTIVE_INITIAL_ROWS 4
 #define CONSOLE_WRITE_BUFFER_INIT 512
@@ -16,8 +15,7 @@ bool console_is_initialized(void);
 typedef struct {
     char (*buffer)[CONSOLE_BUFFER_COLS];
     uint8_t (*color_buffer)[CONSOLE_BUFFER_COLS];
-    uint8_t color_palette[4];
-    uint8_t color_palette_count;
+    uint64_t color_run_count;
     uint8_t color_packed;
     uint8_t *line_wrapped;
     uint64_t buffer_rows;
@@ -69,6 +67,7 @@ void console_switch_via_interrupt(int console_num);
 void console_switch_tty(int tty_num);
 void console_process_pending(void);
 int console_get_current(void);
+int console_get_count(void);
 void console_putchar(char c);
 void console_putchar_to(int console_num, char c);
 void console_write(const char *data, size_t size);

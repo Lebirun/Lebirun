@@ -91,7 +91,6 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
     if (minfd < 0) minfd = 0;
-    if (minfd >= TASK_MAX_FDS) return -EINVAL;
 
     newfd = -1;
     for (i = minfd; i < current_task->fds_capacity; i++) {
@@ -609,18 +608,17 @@ void syscalls_termios_init(void) {
     int i;
     int count;
 
-    syscall_table[SYSCALL_TCGETATTR] = sys_tcgetattr;
-    syscall_table[SYSCALL_TCSETATTR] = sys_tcsetattr;
-    syscall_table[SYSCALL_IOCTL] = sys_ioctl;
-    syscall_table[SYSCALL_TCFLUSH] = sys_tcflush;
-    syscall_table[SYSCALL_TCFLOW] = sys_tcflow;
-    syscall_table[SYSCALL_TCDRAIN] = sys_tcdrain;
-    syscall_table[SYSCALL_TCGETPGRP] = sys_tcgetpgrp;
-    syscall_table[SYSCALL_TCSETPGRP] = sys_tcsetpgrp;
+    syscall_table_set(SYSCALL_TCGETATTR, (void *)(sys_tcgetattr));
+    syscall_table_set(SYSCALL_TCSETATTR, (void *)(sys_tcsetattr));
+    syscall_table_set(SYSCALL_IOCTL, (void *)(sys_ioctl));
+    syscall_table_set(SYSCALL_TCFLUSH, (void *)(sys_tcflush));
+    syscall_table_set(SYSCALL_TCFLOW, (void *)(sys_tcflow));
+    syscall_table_set(SYSCALL_TCDRAIN, (void *)(sys_tcdrain));
+    syscall_table_set(SYSCALL_TCGETPGRP, (void *)(sys_tcgetpgrp));
+    syscall_table_set(SYSCALL_TCSETPGRP, (void *)(sys_tcsetpgrp));
     
-    count = cmdline_get_consoles();
+    count = console_get_count();
     if (count <= 0) count = 1;
-    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
 
     tty_termios = (struct kernel_termios *)kmalloc(count * sizeof(struct kernel_termios));
     tty_winsize = (struct kernel_winsize *)kmalloc(count * sizeof(struct kernel_winsize));

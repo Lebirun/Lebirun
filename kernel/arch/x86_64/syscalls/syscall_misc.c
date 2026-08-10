@@ -7,7 +7,6 @@
 #include <lebirun/timekeeping.h>
 
 extern task_t *current_task;
-extern void **syscall_table;
 
 struct sysinfo {
     long uptime;
@@ -81,8 +80,8 @@ static struct rlimit default_rlimits[RLIM_NLIMITS] = {
     [RLIMIT_STACK]      = { 8 * 1024 * 1024, RLIM_INFINITY },
     [RLIMIT_CORE]       = { 0, RLIM_INFINITY },
     [RLIMIT_RSS]        = { RLIM_INFINITY, RLIM_INFINITY },
-    [RLIMIT_NPROC]      = { 1024, 1024 },
-    [RLIMIT_NOFILE]     = { 1024, 4096 },
+    [RLIMIT_NPROC]      = { RLIM_INFINITY, RLIM_INFINITY },
+    [RLIMIT_NOFILE]     = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_MEMLOCK]    = { 65536, 65536 },
     [RLIMIT_AS]         = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_LOCKS]      = { RLIM_INFINITY, RLIM_INFINITY },
@@ -835,9 +834,6 @@ static int sys_lchown(const char *pathname, int owner, int group) {
     return sys_chown(pathname, owner, group);
 }
 
-#define ENV_NAME_SIZE 64
-#define ENV_VALUE_SIZE 256
-
 typedef struct {
     char *name;
     char *value;
@@ -855,12 +851,13 @@ static void env_invalidate_environ(void) {
     environ_dirty = 1;
 }
 
-static char *env_duplicate(const char *source, size_t limit) {
+static char *env_duplicate(const char *source) {
     size_t length;
     char *copy;
 
-    length = 0;
-    while (source[length] && length + 1 < limit) length++;
+    if (!source) return NULL;
+    length = strlen(source);
+    if (length == SIZE_MAX) return NULL;
     copy = (char *)kmalloc(length + 1);
     if (!copy) return NULL;
     memcpy(copy, source, length);
@@ -873,9 +870,9 @@ static int env_add(const char *name, const char *value) {
     char *new_value;
     env_entry_t *new_entries;
 
-    new_name = env_duplicate(name, ENV_NAME_SIZE);
+    new_name = env_duplicate(name);
     if (!new_name) return -1;
-    new_value = env_duplicate(value, ENV_VALUE_SIZE);
+    new_value = env_duplicate(value);
     if (!new_value) {
         kfree(new_name);
         return -1;
@@ -973,7 +970,7 @@ static int sys_setenv(const char *name, const char *value, int overwrite) {
     idx = find_env(name);
     if (idx >= 0) {
         if (!overwrite) return 0;
-        new_value = env_duplicate(value, ENV_VALUE_SIZE);
+        new_value = env_duplicate(value);
         if (!new_value) return -ENOMEM;
         kfree(env_entries[idx].value);
         env_entries[idx].value = new_value;
@@ -1233,41 +1230,41 @@ static int sys_lke_list(char *buf, int size) {
 void syscalls_misc_init(void) {
     init_default_environ();
     
-    syscall_table[SYSCALL_UNAME] = sys_uname;
-    syscall_table[SYSCALL_SYSINFO] = sys_sysinfo;
-    syscall_table[SYSCALL_GETRLIMIT] = sys_getrlimit;
-    syscall_table[SYSCALL_SETRLIMIT] = sys_setrlimit;
-    syscall_table[SYSCALL_GETRUSAGE] = sys_getrusage;
-    syscall_table[SYSCALL_PRLIMIT64] = sys_prlimit64;
-    syscall_table[SYSCALL_GETRANDOM] = sys_getrandom;
-    syscall_table[SYSCALL_PRCTL] = sys_prctl;
-    syscall_table[SYSCALL_ARCH_PRCTL] = sys_arch_prctl;
-    syscall_table[SYSCALL_SET_TID_ADDRESS] = sys_set_tid_address;
-    syscall_table[SYSCALL_SETITIMER] = sys_setitimer;
-    syscall_table[SYSCALL_GETITIMER] = sys_getitimer;
-    syscall_table[SYSCALL_ALARM] = sys_alarm;
-    syscall_table[SYSCALL_NANOSLEEP] = sys_nanosleep;
-    syscall_table[SYSCALL_CHMOD] = sys_chmod;
-    syscall_table[SYSCALL_CHOWN] = sys_chown;
-    syscall_table[SYSCALL_LCHOWN] = sys_lchown;
-    syscall_table[SYSCALL_SETENV] = sys_setenv;
-    syscall_table[SYSCALL_GETENV] = sys_getenv;
-    syscall_table[SYSCALL_UNSETENV] = sys_unsetenv;
-    syscall_table[SYSCALL_CLEARENV] = sys_clearenv;
-    syscall_table[SYSCALL_POSIX_OPENPT] = sys_posix_openpt;
-    syscall_table[SYSCALL_GRANTPT] = sys_grantpt;
-    syscall_table[SYSCALL_UNLOCKPT] = sys_unlockpt;
-    syscall_table[SYSCALL_PTSNAME] = sys_ptsname;
-    syscall_table[SYSCALL_GETPRIORITY] = sys_getpriority;
-    syscall_table[SYSCALL_SETPRIORITY] = sys_setpriority;
-    syscall_table[SYSCALL_SCHED_SETPARAM] = sys_sched_setparam;
-    syscall_table[SYSCALL_SCHED_GETPARAM] = sys_sched_getparam;
-    syscall_table[SYSCALL_SCHED_SETSCHEDULER] = sys_sched_setscheduler;
-    syscall_table[SYSCALL_SCHED_GETSCHEDULER] = sys_sched_getscheduler;
-    syscall_table[SYSCALL_SCHED_GET_PRIORITY_MAX] = sys_sched_priority_max;
-    syscall_table[SYSCALL_SCHED_GET_PRIORITY_MIN] = sys_sched_priority_min;
-    syscall_table[SYSCALL_SCHED_RR_GET_INTERVAL] = sys_sched_rr_interval;
-    syscall_table[SYSCALL_LKE_LOAD] = sys_lke_load;
-    syscall_table[SYSCALL_LKE_UNLOAD] = sys_lke_unload;
-    syscall_table[SYSCALL_LKE_LIST] = sys_lke_list;
+    syscall_table_set(SYSCALL_UNAME, (void *)(sys_uname));
+    syscall_table_set(SYSCALL_SYSINFO, (void *)(sys_sysinfo));
+    syscall_table_set(SYSCALL_GETRLIMIT, (void *)(sys_getrlimit));
+    syscall_table_set(SYSCALL_SETRLIMIT, (void *)(sys_setrlimit));
+    syscall_table_set(SYSCALL_GETRUSAGE, (void *)(sys_getrusage));
+    syscall_table_set(SYSCALL_PRLIMIT64, (void *)(sys_prlimit64));
+    syscall_table_set(SYSCALL_GETRANDOM, (void *)(sys_getrandom));
+    syscall_table_set(SYSCALL_PRCTL, (void *)(sys_prctl));
+    syscall_table_set(SYSCALL_ARCH_PRCTL, (void *)(sys_arch_prctl));
+    syscall_table_set(SYSCALL_SET_TID_ADDRESS, (void *)(sys_set_tid_address));
+    syscall_table_set(SYSCALL_SETITIMER, (void *)(sys_setitimer));
+    syscall_table_set(SYSCALL_GETITIMER, (void *)(sys_getitimer));
+    syscall_table_set(SYSCALL_ALARM, (void *)(sys_alarm));
+    syscall_table_set(SYSCALL_NANOSLEEP, (void *)(sys_nanosleep));
+    syscall_table_set(SYSCALL_CHMOD, (void *)(sys_chmod));
+    syscall_table_set(SYSCALL_CHOWN, (void *)(sys_chown));
+    syscall_table_set(SYSCALL_LCHOWN, (void *)(sys_lchown));
+    syscall_table_set(SYSCALL_SETENV, (void *)(sys_setenv));
+    syscall_table_set(SYSCALL_GETENV, (void *)(sys_getenv));
+    syscall_table_set(SYSCALL_UNSETENV, (void *)(sys_unsetenv));
+    syscall_table_set(SYSCALL_CLEARENV, (void *)(sys_clearenv));
+    syscall_table_set(SYSCALL_POSIX_OPENPT, (void *)(sys_posix_openpt));
+    syscall_table_set(SYSCALL_GRANTPT, (void *)(sys_grantpt));
+    syscall_table_set(SYSCALL_UNLOCKPT, (void *)(sys_unlockpt));
+    syscall_table_set(SYSCALL_PTSNAME, (void *)(sys_ptsname));
+    syscall_table_set(SYSCALL_GETPRIORITY, (void *)(sys_getpriority));
+    syscall_table_set(SYSCALL_SETPRIORITY, (void *)(sys_setpriority));
+    syscall_table_set(SYSCALL_SCHED_SETPARAM, (void *)(sys_sched_setparam));
+    syscall_table_set(SYSCALL_SCHED_GETPARAM, (void *)(sys_sched_getparam));
+    syscall_table_set(SYSCALL_SCHED_SETSCHEDULER, (void *)(sys_sched_setscheduler));
+    syscall_table_set(SYSCALL_SCHED_GETSCHEDULER, (void *)(sys_sched_getscheduler));
+    syscall_table_set(SYSCALL_SCHED_GET_PRIORITY_MAX, (void *)(sys_sched_priority_max));
+    syscall_table_set(SYSCALL_SCHED_GET_PRIORITY_MIN, (void *)(sys_sched_priority_min));
+    syscall_table_set(SYSCALL_SCHED_RR_GET_INTERVAL, (void *)(sys_sched_rr_interval));
+    syscall_table_set(SYSCALL_LKE_LOAD, (void *)(sys_lke_load));
+    syscall_table_set(SYSCALL_LKE_UNLOAD, (void *)(sys_lke_unload));
+    syscall_table_set(SYSCALL_LKE_LIST, (void *)(sys_lke_list));
 }

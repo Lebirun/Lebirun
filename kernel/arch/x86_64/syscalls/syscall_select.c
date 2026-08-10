@@ -44,14 +44,14 @@ static int check_fd_readable(int fd) {
     if (!current_task->fds[fd].in_use) {
         if (fd == 0) {
             con_id = (current_task->console_id >= 0) ? current_task->console_id : console_get_current();
-            if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+            if (con_id < 0 || con_id >= console_get_count()) con_id = 0;
             return keyboard_has_data_for(con_id) ? 1 : 0;
         }
         return 0;
     }
     if (current_task->fds[fd].type == FD_TYPE_STDIN) {
         con_id = (current_task->console_id >= 0) ? current_task->console_id : console_get_current();
-        if (con_id < 0 || con_id >= NUM_CONSOLES) con_id = 0;
+        if (con_id < 0 || con_id >= console_get_count()) con_id = 0;
         return keyboard_has_data_for(con_id) ? 1 : 0;
     }
     if (current_task->fds[fd].type == FD_TYPE_PIPE_R ||
@@ -105,7 +105,7 @@ static int check_fd_writable(int fd) {
         pipe = (pipe_t *)current_task->fds[fd].private_data;
         if (!pipe) return 0;
         pipe_flags = pipe_lock_irqsave(pipe);
-        writable = pipe->readers <= 0 || pipe->count < PIPE_BUF_SIZE;
+        writable = pipe->readers <= 0 || pipe->count < UINT64_MAX;
         pipe_unlock_irqrestore(pipe, pipe_flags);
         return writable;
     }
@@ -489,8 +489,8 @@ static int sys_ppoll(int fds_ptr, const char *nfds_ptr, int timeout_ptr) {
 }
 
 void syscalls_select_init(void) {
-    syscall_table[SYSCALL_SELECT] = sys_select;
-    syscall_table[SYSCALL_PSELECT6] = sys_pselect6;
-    syscall_table[SYSCALL_POLL] = sys_poll;
-    syscall_table[SYSCALL_PPOLL] = sys_ppoll;
+    syscall_table_set(SYSCALL_SELECT, (void *)(sys_select));
+    syscall_table_set(SYSCALL_PSELECT6, (void *)(sys_pselect6));
+    syscall_table_set(SYSCALL_POLL, (void *)(sys_poll));
+    syscall_table_set(SYSCALL_PPOLL, (void *)(sys_ppoll));
 }

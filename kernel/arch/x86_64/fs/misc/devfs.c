@@ -815,9 +815,8 @@ void KERNEL_INIT devfs_init(void) {
     evdev_get_event_node(0)->parent = evdev_get_input_dir();
     evdev_get_event_node(1)->parent = evdev_get_input_dir();
 
-    tty_count_local = cmdline_get_consoles();
+    tty_count_local = console_get_count();
     if (tty_count_local <= 0) tty_count_local = 1;
-    if (tty_count_local > NUM_CONSOLES) tty_count_local = NUM_CONSOLES;
     dev_ttys = (vfs_node_t **)kmalloc(tty_count_local * sizeof(vfs_node_t *));
     if (!dev_ttys) {
         tty_count_local = 0;

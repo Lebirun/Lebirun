@@ -82,11 +82,10 @@ static void evdev_ring_put(struct evdev_device *dev, const struct input_event *e
     next = (dev->head + 1) & (dev->ring_capacity - 1);
     if (next == dev->tail) {
         old_capacity = dev->ring_capacity;
-        if (old_capacity >= EVDEV_BUF_EVENTS)
-            return;
+        if (old_capacity > UINT32_MAX / 2 ||
+            (uint64_t)old_capacity * 2 >
+                SIZE_MAX / sizeof(struct input_event)) return;
         new_capacity = old_capacity * 2;
-        if (new_capacity > EVDEV_BUF_EVENTS)
-            new_capacity = EVDEV_BUF_EVENTS;
         new_ring = (struct input_event *)kmalloc(new_capacity * sizeof(struct input_event));
         if (!new_ring)
             return;

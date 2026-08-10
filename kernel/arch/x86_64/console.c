@@ -57,7 +57,14 @@ static int console_runtime_count(void) {
 
     count = cmdline_get_consoles();
     if (count <= 0) count = 1;
-    if (count > NUM_CONSOLES) count = NUM_CONSOLES;
+    return count;
+}
+
+int console_get_count(void) {
+    int count;
+
+    count = console_count;
+    if (count <= 0) count = console_runtime_count();
     return count;
 }
 
@@ -199,59 +206,97 @@ static int console_ensure_alloc(int n) {
 static uint8_t console_current_attr(console_t *con);
 
 static uint64_t console_packed_color_bytes(console_t *con) {
-    uint64_t cells;
+    uint64_t bytes;
 
-    cells = con->buffer_rows * CONSOLE_BUFFER_COLS;
-    return (cells + 3) / 4;
+    if (!con || con->color_run_count > UINT64_MAX / 9) return UINT64_MAX;
+    bytes = con->color_run_count * 9;
+    return bytes;
+}
+
+static uint64_t console_color_run_end(const uint8_t *packed,
+                                      uint64_t run) {
+    uint64_t end;
+
+    memcpy(&end, packed + run * 9, sizeof(end));
+    return end;
+}
+
+static void console_set_color_run(uint8_t *packed, uint64_t run,
+                                  uint64_t end, uint8_t attr) {
+    memcpy(packed + run * 9, &end, sizeof(end));
+    packed[run * 9 + 8] = attr;
 }
 
 static uint8_t console_color_at(console_t *con, uint64_t row, uint64_t col) {
     uint64_t cell;
-    uint8_t entry;
-    uint8_t index;
-    uint8_t shift;
+    uint64_t low;
+    uint64_t high;
+    uint64_t middle;
     uint8_t *packed;
 
     if (!con || !con->color_buffer) return 0x70;
     if (!con->color_packed) return con->color_buffer[row][col];
     cell = row * CONSOLE_BUFFER_COLS + col;
     packed = (uint8_t *)(void *)con->color_buffer;
-    entry = packed[cell >> 2];
-    shift = (uint8_t)((cell & 3) << 1);
-    index = (entry >> shift) & 3;
-    return index < con->color_palette_count ?
-           con->color_palette[index] : 0x70;
+    low = 0;
+    high = con->color_run_count;
+    while (low < high) {
+        middle = low + (high - low) / 2;
+        if (cell < console_color_run_end(packed, middle))
+            high = middle;
+        else
+            low = middle + 1;
+    }
+    if (low >= con->color_run_count) return 0x70;
+    return packed[low * 9 + 8];
 }
 
 static int console_expand_color_buffer(console_t *con) {
     uint8_t *packed;
     uint8_t *full;
     uint64_t cells;
-    uint64_t i;
-    uint8_t entry;
-    uint8_t index;
-    uint8_t shift;
+    uint64_t run;
+    uint64_t start;
+    uint64_t end;
+    uint8_t attr;
 
     if (!con || !con->color_buffer || !con->color_packed) return 0;
     cells = con->buffer_rows * CONSOLE_BUFFER_COLS;
     packed = (uint8_t *)(void *)con->color_buffer;
-    full = (uint8_t *)krealloc(packed, cells);
+    full = (uint8_t *)kmalloc(cells);
     if (!full) {
         kfree(packed);
         con->color_buffer = NULL;
-        con->color_palette_count = 0;
+        con->color_run_count = 0;
         con->color_packed = 0;
         return -1;
     }
-    for (i = cells; i > 0; i--) {
-        entry = full[(i - 1) >> 2];
-        shift = (uint8_t)(((i - 1) & 3) << 1);
-        index = (entry >> shift) & 3;
-        full[i - 1] = index < con->color_palette_count ?
-                      con->color_palette[index] : 0x70;
+    start = 0;
+    for (run = 0; run < con->color_run_count; run++) {
+        end = console_color_run_end(packed, run);
+        if (end <= start || end > cells) {
+            kfree(full);
+            kfree(packed);
+            con->color_buffer = NULL;
+            con->color_run_count = 0;
+            con->color_packed = 0;
+            return -1;
+        }
+        attr = packed[run * 9 + 8];
+        memset(full + start, attr, end - start);
+        start = end;
     }
+    if (start != cells) {
+        kfree(full);
+        kfree(packed);
+        con->color_buffer = NULL;
+        con->color_run_count = 0;
+        con->color_packed = 0;
+        return -1;
+    }
+    kfree(packed);
     con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])(void *)full;
-    con->color_palette_count = 0;
+    con->color_run_count = 0;
     con->color_packed = 0;
     return 0;
 }
@@ -259,55 +304,38 @@ static int console_expand_color_buffer(console_t *con) {
 static void console_pack_color_buffer(console_t *con) {
     uint8_t *full;
     uint8_t *packed;
-    uint8_t *resized;
     uint64_t cells;
     uint64_t i;
-    uint64_t j;
-    uint8_t value;
-    uint8_t entry;
-    uint8_t index;
-    uint64_t k;
-    int found;
+    uint64_t runs;
+    uint64_t run;
+    uint64_t bytes;
+    uint8_t attr;
 
     if (!con || !con->color_buffer || con->color_packed) return;
     cells = con->buffer_rows * CONSOLE_BUFFER_COLS;
+    if (cells == 0) return;
     full = (uint8_t *)(void *)con->color_buffer;
-    con->color_palette_count = 0;
-    for (i = 0; i < cells; i++) {
-        value = full[i];
-        found = 0;
-        for (j = 0; j < con->color_palette_count; j++) {
-            if (con->color_palette[j] == value) {
-                found = 1;
-                break;
-            }
-        }
-        if (found) continue;
-        if (con->color_palette_count == 4) {
-            con->color_palette_count = 0;
-            return;
-        }
-        con->color_palette[con->color_palette_count++] = value;
+    runs = 1;
+    for (i = 1; i < cells; i++) {
+        if (full[i] != full[i - 1]) runs++;
     }
-    packed = full;
-    for (i = 0; i < cells; i += 4) {
-        entry = 0;
-        for (k = 0; k < 4 && i + k < cells; k++) {
-            index = 0;
-            for (j = 0; j < con->color_palette_count; j++) {
-                if (con->color_palette[j] == full[i + k]) {
-                    index = (uint8_t)j;
-                    break;
-                }
-            }
-            entry |= (uint8_t)(index << (k << 1));
-        }
-        packed[i >> 2] = entry;
+    if (runs > UINT64_MAX / 9) return;
+    bytes = runs * 9;
+    if (bytes >= cells) return;
+    packed = (uint8_t *)kmalloc(bytes);
+    if (!packed) return;
+    run = 0;
+    attr = full[0];
+    for (i = 1; i <= cells; i++) {
+        if (i < cells && full[i] == attr) continue;
+        console_set_color_run(packed, run, i, attr);
+        run++;
+        if (i < cells) attr = full[i];
     }
+    kfree(full);
+    con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])(void *)packed;
+    con->color_run_count = runs;
     con->color_packed = 1;
-    resized = (uint8_t *)krealloc(packed, console_packed_color_bytes(con));
-    if (resized)
-        con->color_buffer = (uint8_t (*)[CONSOLE_BUFFER_COLS])(void *)resized;
 }
 
 static int console_ensure_color_buffer(console_t *con) {
@@ -320,7 +348,7 @@ static int console_ensure_color_buffer(console_t *con) {
     if (!new_color) return -1;
     memset(new_color, 0x70, con->buffer_rows * CONSOLE_BUFFER_COLS);
     con->color_buffer = new_color;
-    con->color_palette_count = 0;
+    con->color_run_count = 0;
     con->color_packed = 0;
     return 0;
 }
@@ -400,6 +428,7 @@ static void console_leave_alt_screen(console_t *con) {
 
     if (!con->alt_screen_active) return;
     if (!con->alt_saved_buffer) return;
+    console_expand_color_buffer(con);
 
     flags = console_irqsave();
     spin_lock(&console_lock);
@@ -515,7 +544,7 @@ static void console_reclaim_default_color(console_t *con) {
     }
     kfree(con->color_buffer);
     con->color_buffer = NULL;
-    con->color_palette_count = 0;
+    con->color_run_count = 0;
     con->color_packed = 0;
 }
 
@@ -598,12 +627,10 @@ int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t 
     if (!console_valid_index(console_num)) return -1;
     con = &consoles[console_num];
     if (!con->allocated || !con->buffer) return -1;
-    console_expand_color_buffer(con);
     if (x >= CONSOLE_BUFFER_COLS || y >= con->buffer_rows) return -1;
     if (ch) *ch = con->buffer[y][x];
     if (attr) {
-        if (con->color_buffer) *attr = con->color_buffer[y][x];
-        else *attr = 0x70;
+        *attr = console_color_at(con, y, x);
     }
     return 0;
 }
@@ -1303,7 +1330,7 @@ void KERNEL_EARLY_INIT console_init(void) {
         con = &consoles[i];
         con->buffer = NULL;
         con->color_buffer = NULL;
-        con->color_palette_count = 0;
+        con->color_run_count = 0;
         con->color_packed = 0;
         con->line_wrapped = NULL;
         con->write_buffer = NULL;

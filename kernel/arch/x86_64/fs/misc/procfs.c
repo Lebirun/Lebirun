@@ -996,23 +996,29 @@ static uint64_t proc_filesystems_read(vfs_node_t *node, uint64_t offset, uint64_
 
 static uint64_t proc_cmdline_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     const char *raw;
-    char buf[CMDLINE_MAX + 32];
+    const char *source;
     uint64_t len;
-    uint64_t remaining;
+    uint64_t total;
+    uint64_t copied;
+    uint64_t chunk;
     
     (void)node;
     
     raw = cmdline_get();
-    if (raw[0])
-        len = snprintf(buf, sizeof(buf), "%s\n", raw);
-    else
-        len = snprintf(buf, sizeof(buf), "console=tty0 root=/dev/ram0 rw\n");
-    
-    if (offset >= len) return 0;
-    remaining = len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    return size;
+    source = raw[0] ? raw : "console=tty0 root=/dev/ram0 rw";
+    len = strlen(source);
+    total = len + 1;
+    if (offset >= total || size == 0) return 0;
+    if (size > total - offset) size = total - offset;
+    copied = 0;
+    if (offset < len) {
+        chunk = len - offset;
+        if (chunk > size) chunk = size;
+        memcpy(buffer, source + offset, chunk);
+        copied = chunk;
+    }
+    if (copied < size) buffer[copied++] = '\n';
+    return copied;
 }
 
 static uint64_t proc_devices_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {

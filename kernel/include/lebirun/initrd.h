@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 #define INITRD_MAGIC 0x4452544E
-#define INITRD_VERSION 2
+#define INITRD_VERSION 3
 
 #define INITRD_TYPE_FILE 0
 #define INITRD_TYPE_DIR  1
@@ -42,7 +42,7 @@ typedef struct {
     uint8_t *data;
     uint8_t type;
     uint8_t permissions;
-    uint16_t parent_index;
+    uint32_t parent_index;
     uint64_t uid;
     uint64_t gid;
 } initrd_file_t;

@@ -33,26 +33,64 @@ static uint64_t align_up_u64(uint64_t v, uint64_t align) {
 }
 
 static int user_mmap_range_valid(uint64_t addr, uint64_t end) {
-    if (addr >= USER_MMAP_LOW_BASE && end < USER_MMAP_LOW_LIMIT) return 1;
-    if (addr >= USER_MMAP_HIGH_BASE && end < USER_MMAP_HIGH_LIMIT) return 1;
-    return 0;
+    return addr >= USER_DYNAMIC_BASE && end < USER_DYNAMIC_LIMIT;
+}
+
+static int user_range_free_pages(uint64_t addr, uint64_t size,
+                                 uint64_t allow_base,
+                                 uint64_t allow_size) {
+    uint64_t end;
+    uint64_t page;
+    uint64_t last;
+    uint64_t allow_end;
+    uint64_t range_end;
+    uint64_t area_end;
+    int i;
+
+    if (!current_task) return 0;
+    if (size == 0) return 1;
+    end = addr + size - 1;
+    if (end < addr) return 0;
+    range_end = end + 1;
+    allow_end = allow_base + allow_size;
+    for (i = 0; i < current_task->file_map_count; i++) {
+        area_end = current_task->file_maps[i].vaddr +
+                   current_task->file_maps[i].memsz;
+        if (area_end < current_task->file_maps[i].vaddr) return 0;
+        if (addr >= area_end || range_end <= current_task->file_maps[i].vaddr)
+            continue;
+        if (allow_size != 0 &&
+            current_task->file_maps[i].vaddr >= allow_base &&
+            area_end <= allow_end) continue;
+        return 0;
+    }
+    page = addr & ~(PAGE_SIZE - 1u);
+    last = end & ~(PAGE_SIZE - 1u);
+    for (;;) {
+        if (vmm_get_phys_in_pml4(current_task->pml4_phys, page) != 0 &&
+            !(allow_size != 0 && page >= allow_base && page < allow_end))
+            return 0;
+        if (page == last) break;
+        page += PAGE_SIZE;
+    }
+    return 1;
 }
 
 static uint64_t user_mmap_auto_base(uint64_t next, uint64_t size) {
+    uint64_t cursor;
     uint64_t base;
 
-    if (next >= USER_MMAP_LOW_BASE && next < USER_MMAP_LOW_LIMIT) {
-        base = align_up_u64(next, PAGE_SIZE);
-        if (base < USER_MMAP_LOW_LIMIT &&
-            size <= USER_MMAP_LOW_LIMIT - base) return base;
+    if (size == 0 || size > USER_DYNAMIC_LIMIT - USER_DYNAMIC_BASE) return 0;
+    cursor = next;
+    if (cursor <= USER_DYNAMIC_BASE || cursor > USER_DYNAMIC_LIMIT)
+        cursor = USER_DYNAMIC_LIMIT;
+    cursor &= ~(PAGE_SIZE - 1u);
+    while (cursor >= USER_DYNAMIC_BASE + size) {
+        base = cursor - size;
+        if (user_range_free_pages(base, size, 0, 0)) return base;
+        cursor -= PAGE_SIZE;
     }
-    if (next < USER_MMAP_HIGH_BASE || next >= USER_MMAP_HIGH_LIMIT) {
-        next = USER_MMAP_HIGH_BASE;
-    }
-    base = align_up_u64(next, PAGE_SIZE);
-    if (base >= USER_MMAP_HIGH_LIMIT ||
-        size > USER_MMAP_HIGH_LIMIT - base) return 0;
-    return base;
+    return 0;
 }
 
 static int user_range_mapped_mem(uint64_t addr, uint64_t size) {
@@ -106,27 +144,13 @@ static int user_range_covered_by_vmas(uint64_t addr, uint64_t size) {
 
 static int user_range_free_mem(uint64_t addr, uint64_t size, uint64_t allow_base, uint64_t allow_size) {
     uint64_t end;
-    uint64_t p;
-    uint64_t pend;
-    uint64_t allow_end;
 
     if (!current_task) return 0;
     if (size == 0) return 1;
     end = addr + size - 1;
     if (end < addr) return 0;
     if (!user_mmap_range_valid(addr, end)) return 0;
-    allow_end = allow_base + allow_size;
-    p = addr & ~0xFFFu;
-    pend = end & ~0xFFFu;
-    for (;;) {
-        if (vmm_get_phys_in_pml4(current_task->cr3, p) != 0) {
-            if (!(allow_size != 0 && p >= allow_base && p < allow_end)) return 0;
-        }
-        if (p == pend) break;
-        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
-        p += 0x1000u;
-    }
-    return 1;
+    return user_range_free_pages(addr, size, allow_base, allow_size);
 }
 
 static void compact_user_pages(void) {
@@ -229,12 +253,15 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     
     newbrk = (requested + 0xFFF) & ~0xFFFu;
     
-    if (newbrk >= USER_MMAP_LOW_BASE) {
+    if (newbrk > USER_DYNAMIC_LIMIT) {
         return (int)current_brk;
     }
     
     old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
     if (newbrk > old_page_end) {
+        if (!user_range_free_pages(old_page_end,
+                                   newbrk - old_page_end, 0, 0))
+            return (int)current_brk;
         if (!task_memory_allows(current_task, newbrk - old_page_end)) {
             return (int)current_brk;
         }
@@ -304,10 +331,10 @@ static int sys_mmap(int a1, const char *a2, int a3) {
 
     base = user_mmap_auto_base(current_task->mmap_next_addr, size);
     if (!base) return -ENOMEM;
-    current_task->mmap_next_addr = base + size;
 
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
     if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
+    current_task->mmap_next_addr = base;
 
     page_count = 0;
     new_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, base,
@@ -408,11 +435,14 @@ static int sys_mmap2(void *addr, size_t length, int prot, int flags, int fd, int
     } else {
         base = user_mmap_auto_base(current_task->mmap_next_addr, size);
         if (!base) return -ENOMEM;
-        current_task->mmap_next_addr = base + size;
+        current_task->mmap_next_addr = base;
     }
 
     if (base < 0x1000) return -EPERM;
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
+    if (!user_mmap_range_valid(base, base + size - 1)) return -EINVAL;
+    if ((flags & 0x10) && base < current_task->user_brk &&
+        base + size > current_task->user_brk_start) return -EINVAL;
     if ((flags & 0x10) && base < KERNEL_VMA) {
         if (task_unmap_vm_areas(current_task, base, size) != 0)
             return -ENOMEM;
@@ -532,9 +562,9 @@ static int sys_munmap(void *addr, size_t length) {
         release_user_leaf_range(base, end);
     }
 
-    if (end == current_task->mmap_next_addr &&
+    if (base == current_task->mmap_next_addr &&
             user_mmap_range_valid(base, end - 1)) {
-        current_task->mmap_next_addr = base;
+        current_task->mmap_next_addr = end;
     }
 
     return 0;
@@ -695,8 +725,8 @@ static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int fl
     }
 
     release_user_leaf_range(old_base, old_base + old_len);
-    if (base + size > current_task->mmap_next_addr)
-        current_task->mmap_next_addr = base + size;
+    if (base < current_task->mmap_next_addr)
+        current_task->mmap_next_addr = base;
 
     return (void *)base;
 }
@@ -845,13 +875,13 @@ static int sys_mincore(void *addr, size_t length, unsigned char *vec) {
 }
 
 void syscalls_mem_init(void) {
-    syscall_table[SYSCALL_SBRK] = sys_brk;
-    syscall_table[SYSCALL_MMAP] = sys_mmap;
-    syscall_table[SYSCALL_MMAP2] = sys_mmap2;
-    syscall_table[SYSCALL_MUNMAP] = sys_munmap;
-    syscall_table[SYSCALL_MPROTECT] = sys_mprotect;
-    syscall_table[SYSCALL_MREMAP] = sys_mremap;
-    syscall_table[SYSCALL_MADVISE] = sys_madvise;
-    syscall_table[SYSCALL_MINCORE] = sys_mincore;
-    syscall_table[SYSCALL_MSYNC] = sys_msync;
+    syscall_table_set(SYSCALL_SBRK, (void *)(sys_brk));
+    syscall_table_set(SYSCALL_MMAP, (void *)(sys_mmap));
+    syscall_table_set(SYSCALL_MMAP2, (void *)(sys_mmap2));
+    syscall_table_set(SYSCALL_MUNMAP, (void *)(sys_munmap));
+    syscall_table_set(SYSCALL_MPROTECT, (void *)(sys_mprotect));
+    syscall_table_set(SYSCALL_MREMAP, (void *)(sys_mremap));
+    syscall_table_set(SYSCALL_MADVISE, (void *)(sys_madvise));
+    syscall_table_set(SYSCALL_MINCORE, (void *)(sys_mincore));
+    syscall_table_set(SYSCALL_MSYNC, (void *)(sys_msync));
 }

@@ -143,7 +143,7 @@ void e1000_read_mac(e1000_device_t *dev) {
     dev->mac.addr[5] = (word >> 8) & 0xFF;
 }
 
-static void KERNEL_INIT e1000_reset(e1000_device_t *dev) {
+static void e1000_reset(e1000_device_t *dev) {
     uint32_t ctrl;
     volatile int i;
 
@@ -153,14 +153,16 @@ static void KERNEL_INIT e1000_reset(e1000_device_t *dev) {
     while (e1000_read(dev, E1000_CTRL) & E1000_CTRL_RST);
 }
 
-static void KERNEL_INIT e1000_linkup(e1000_device_t *dev) {
-    uint32_t ctrl = e1000_read(dev, E1000_CTRL);
+static void e1000_linkup(e1000_device_t *dev) {
+    uint32_t ctrl;
+
+    ctrl = e1000_read(dev, E1000_CTRL);
     ctrl |= E1000_CTRL_SLU | E1000_CTRL_ASDE;
     ctrl &= ~(E1000_CTRL_ILOS | E1000_CTRL_PHY_RST);
     e1000_write(dev, E1000_CTRL, ctrl);
 }
 
-static int KERNEL_INIT e1000_init_rx(e1000_device_t *dev) {
+static int e1000_init_rx(e1000_device_t *dev) {
     uint64_t rx_ring_phys;
     uint64_t rx_ring_virt;
     uint64_t buf_phys;
@@ -224,7 +226,7 @@ static int KERNEL_INIT e1000_init_rx(e1000_device_t *dev) {
     return 0;
 }
 
-static int KERNEL_INIT e1000_init_tx(e1000_device_t *dev) {
+static int e1000_init_tx(e1000_device_t *dev) {
     uint64_t tx_ring_phys;
     uint64_t tx_ring_virt;
     uint64_t buf_phys;
@@ -527,7 +529,7 @@ void e1000_print_status(e1000_device_t *dev) {
            dev->packets_tx, dev->bytes_tx, dev->errors_tx);
 }
 
-int KERNEL_INIT e1000_init(void) {
+int e1000_init(void) {
     uint64_t bar0_phys;
     uint64_t bar0_virt;
     uint64_t off;
@@ -536,7 +538,7 @@ int KERNEL_INIT e1000_init(void) {
     e1000_device_t *dev;
     int i;
 
-    KERNEL_INIT_LOG("E1000: Initializing driver...\n");
+    printf("E1000: Initializing driver...\n");
 
     dev = e1000_allocate_device();
     if (!dev) return -1;
@@ -566,32 +568,30 @@ int KERNEL_INIT e1000_init(void) {
     }
 
     e1000_read_mac(dev);
-    KERNEL_INIT_LOG("E1000: MAC = %02X:%02X:%02X:%02X:%02X:%02X\n",
-                    dev->mac.addr[0], dev->mac.addr[1],
-                    dev->mac.addr[2], dev->mac.addr[3],
-                    dev->mac.addr[4], dev->mac.addr[5]);
+    printf("E1000: MAC = %02X:%02X:%02X:%02X:%02X:%02X\n",
+           dev->mac.addr[0], dev->mac.addr[1],
+           dev->mac.addr[2], dev->mac.addr[3],
+           dev->mac.addr[4], dev->mac.addr[5]);
 
     e1000_linkup(dev);
 
     if (e1000_init_rx(dev) < 0) {
-        KERNEL_INIT_LOG("E1000: Failed to initialize RX\n");
+        printf("E1000: Failed to initialize RX\n");
         return -1;
     }
 
     if (e1000_init_tx(dev) < 0) {
-        KERNEL_INIT_LOG("E1000: Failed to initialize TX\n");
+        printf("E1000: Failed to initialize TX\n");
         return -1;
     }
 
     status = e1000_read(dev, E1000_STATUS);
     dev->link_up = (status & E1000_STATUS_LU) ? 1 : 0;
-    KERNEL_INIT_LOG("E1000: Link is %s\n",
-                    dev->link_up ? KERNEL_INIT_STRING("UP") :
-                                   KERNEL_INIT_STRING("DOWN"));
+    printf("E1000: Link is %s\n", dev->link_up ? "UP" : "DOWN");
 
     netif = netif_alloc();
     if (!netif) {
-        KERNEL_INIT_LOG("E1000: Failed to allocate network interface\n");
+        printf("E1000: Failed to allocate network interface\n");
         return -1;
     }
 
@@ -611,11 +611,11 @@ int KERNEL_INIT e1000_init(void) {
         irq_register_handler(dev->irq, (irq_handler_t)e1000_irq_handler);
         irq_unmask(dev->irq);
         e1000_enable_interrupts(dev);
-        KERNEL_INIT_LOG("E1000: Interrupts enabled (IRQ %u)\n", dev->irq);
+        printf("E1000: Interrupts enabled (IRQ %u)\n", dev->irq);
     }
 
     dev->initialized = 1;
-    KERNEL_INIT_LOG("E1000: Initialization complete\n");
+    printf("E1000: Initialization complete\n");
 
     return 0;
 }

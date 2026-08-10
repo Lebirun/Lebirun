@@ -13,6 +13,7 @@
 #include <lebirun/drivers/net/dns.h>
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/common.h>
+#include "syscalls/syscall_defs.h"
 #include <string.h>
 
 #define R_X86_64_32    10
@@ -27,20 +28,17 @@ static size_t lke_count;
 static lke_ksym_t *ksym_table;
 static int ksym_count = 0;
 
-extern void **syscall_table;
-
 int lke_register_syscall(int num, void *fn) {
     if (num < 0 || num >= LKE_NR_SYSCALLS || !fn) return -1;
-    if (!syscall_table) return -1;
-    if (syscall_table[num] && syscall_table[num] != fn) return -2;
-    syscall_table[num] = fn;
+    if (syscall_table_get(num) && syscall_table_get(num) != fn) return -2;
+    syscall_table_set(num, fn);
+    if (syscall_table_get(num) != fn) return -1;
     return 0;
 }
 
 void lke_unregister_syscall(int num, void *fn) {
     if (num < 0 || num >= LKE_NR_SYSCALLS) return;
-    if (!syscall_table) return;
-    if (syscall_table[num] == fn) syscall_table[num] = NULL;
+    if (syscall_table_get(num) == fn) syscall_table_set(num, NULL);
 }
 
 void lke_register_symbol(const char *name, void *addr) {

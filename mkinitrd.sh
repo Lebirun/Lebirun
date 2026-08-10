@@ -31,6 +31,11 @@ trap "rm -rf $TMPDIR" EXIT
 find "$INITRD_DIR" -mindepth 1 \( -type f -o -type d \) ! -name '.gitkeep' | sort > "$TMPDIR/all_entries.txt"
 NUM_ENTRIES=$(wc -l < "$TMPDIR/all_entries.txt" | tr -d ' ')
 
+if [ "$NUM_ENTRIES" -gt 4294967295 ]; then
+    echo "Error: Too many initrd entries"
+    exit 1
+fi
+
 if [ "$NUM_ENTRIES" -eq 0 ]; then
     echo "Warning: No entries found in $INITRD_DIR, creating empty initrd"
 fi
@@ -50,14 +55,14 @@ lookup_parent_index() {
     local PARENT_DIR=$(dirname "$RELPATH")
     
     if [ "$PARENT_DIR" = "." ] || [ -z "$PARENT_DIR" ]; then
-        echo "65535"
+        echo "4294967295"
         return
     fi
     
     local PARENT_INDEX=$(grep -E "^[0-9]+ ${PARENT_DIR}$" "$TMPDIR/path_to_index.txt" | head -1 | cut -d' ' -f1)
     
     if [ -z "$PARENT_INDEX" ]; then
-        echo "65535"
+        echo "4294967295"
     else
         echo "$PARENT_INDEX"
     fi
@@ -67,11 +72,15 @@ rm -f "$OUTPUT"
 touch "$OUTPUT"
 
 perl -e 'print pack("V", 0x4452544E)' >> "$OUTPUT"
-perl -e 'print pack("V", 2)' >> "$OUTPUT"
+perl -e 'print pack("V", 3)' >> "$OUTPUT"
 perl -e 'print pack("V", $ARGV[0])' "$NUM_ENTRIES" >> "$OUTPUT"
 perl -e 'print pack("V", 0)' >> "$OUTPUT"
 
 DATA_OFFSET=$((HEADER_SIZE + NUM_ENTRIES * FILE_HEADER_SIZE))
+if [ "$DATA_OFFSET" -gt 4294967295 ]; then
+    echo "Error: Initrd header table exceeds the format offset range"
+    exit 1
+fi
 CURRENT_OFFSET=$DATA_OFFSET
 
 > "$TMPDIR/file_data_list.txt"
@@ -80,6 +89,8 @@ while IFS= read -r FILEPATH; do
     RELPATH="${FILEPATH#$INITRD_DIR/}"
     
     PARENT_INDEX=$(lookup_parent_index "$RELPATH")
+    PARENT_LOW=$((PARENT_INDEX & 65535))
+    PARENT_HIGH=$(((PARENT_INDEX >> 16) & 65535))
     
     if [ -d "$FILEPATH" ]; then
         PERM=$((PERM_READ | PERM_WRITE | PERM_EXEC))
@@ -88,10 +99,10 @@ while IFS= read -r FILEPATH; do
         perl -e 'print pack("V", 0)' >> "$OUTPUT" 
         perl -e 'print pack("C", $ARGV[0])' "$TYPE_DIR" >> "$OUTPUT"
         perl -e 'print pack("C", $ARGV[0])' "$PERM" >> "$OUTPUT"
-        perl -e 'print pack("v", $ARGV[0])' "$PARENT_INDEX" >> "$OUTPUT" 
-        perl -e 'print pack("V", 0)' >> "$OUTPUT" 
-        perl -e 'print pack("V", 0)' >> "$OUTPUT"  
-        perl -e 'print pack("V", 0)' >> "$OUTPUT"  
+        perl -e 'print pack("v", $ARGV[0])' "$PARENT_LOW" >> "$OUTPUT"
+        perl -e 'print pack("V", 0)' >> "$OUTPUT"
+        perl -e 'print pack("V", 0)' >> "$OUTPUT"
+        perl -e 'print pack("V", $ARGV[0])' "$PARENT_HIGH" >> "$OUTPUT"
         echo "  Added DIR: $RELPATH (parent=$PARENT_INDEX)"
     else
         FILE_TO_ADD="$FILEPATH"
@@ -104,6 +115,11 @@ while IFS= read -r FILEPATH; do
         fi
 
         SIZE=$(stat -c%s "$FILE_TO_ADD")
+        if [ "$SIZE" -gt 4294967295 ] ||
+           [ "$CURRENT_OFFSET" -gt $((4294967295 - SIZE)) ]; then
+            echo "Error: Initrd data exceeds the format offset range"
+            exit 1
+        fi
 
         IS_ELF="no"
         if [ "$(dd if="$FILE_TO_ADD" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
@@ -131,10 +147,10 @@ while IFS= read -r FILEPATH; do
         perl -e 'print pack("V", $ARGV[0])' "$SIZE" >> "$OUTPUT"
         perl -e 'print pack("C", $ARGV[0])' "$TYPE_FILE" >> "$OUTPUT"
         perl -e 'print pack("C", $ARGV[0])' "$PERM" >> "$OUTPUT"
-        perl -e 'print pack("v", $ARGV[0])' "$PARENT_INDEX" >> "$OUTPUT"
+        perl -e 'print pack("v", $ARGV[0])' "$PARENT_LOW" >> "$OUTPUT"
         perl -e 'print pack("V", 0)' >> "$OUTPUT"
         perl -e 'print pack("V", 0)' >> "$OUTPUT"
-        perl -e 'print pack("V", 0)' >> "$OUTPUT"
+        perl -e 'print pack("V", $ARGV[0])' "$PARENT_HIGH" >> "$OUTPUT"
 
         echo "  Added FILE: $RELPATH ($SIZE bytes) perm=$PERM parent=$PARENT_INDEX"
         CURRENT_OFFSET=$((CURRENT_OFFSET + SIZE))

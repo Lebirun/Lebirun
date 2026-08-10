@@ -16,10 +16,7 @@ void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
 
 #define fd_table (current_task->fds)
 
-#define POSIX_EXEC_MAX_ARGS 256
-#define POSIX_EXEC_MAX_ENVS 256
 #define POSIX_EXEC_PATH_MAX 256
-#define POSIX_EXEC_STRING_MAX 4096
 
 static uint64_t posix_user_pd(void) {
     if (!current_task) return 0;
@@ -120,7 +117,9 @@ static void posix_free_string_array(char **arr, int count) {
     kfree(arr);
 }
 
-static int posix_copy_user_string_array(char ***out, int *out_count, uint64_t array_addr, int max_count, uint64_t max_len) {
+static int posix_copy_user_string_array(char ***out, int *out_count,
+                                        uint64_t array_addr,
+                                        uint64_t *remaining) {
     char **arr;
     char **new_arr;
     uint64_t str_addr;
@@ -129,21 +128,25 @@ static int posix_copy_user_string_array(char ***out, int *out_count, uint64_t ar
     int cap;
     int new_cap;
     int ret;
+    uint64_t string_len;
+    uint64_t used;
 
-    if (!out || !out_count) return -EFAULT;
+    if (!out || !out_count || !remaining) return -EFAULT;
     *out = NULL;
     *out_count = 0;
     if (!array_addr) return 0;
     cap = 8;
-    if (cap > max_count + 1) cap = max_count + 1;
     arr = (char **)kmalloc(cap * sizeof(char *));
     if (!arr) return -ENOMEM;
     memset(arr, 0, cap * sizeof(char *));
     count = 0;
-    while (count < max_count) {
+    while (count < INT32_MAX) {
         if (count + 1 >= cap) {
+            if (cap > INT32_MAX / 2) {
+                posix_free_string_array(arr, count);
+                return -E2BIG;
+            }
             new_cap = cap * 2;
-            if (new_cap > max_count + 1) new_cap = max_count + 1;
             new_arr = (char **)krealloc(arr, new_cap * sizeof(char *));
             if (!new_arr) {
                 posix_free_string_array(arr, count);
@@ -164,19 +167,29 @@ static int posix_copy_user_string_array(char ***out, int *out_count, uint64_t ar
             return ret;
         }
         if (!str_addr) break;
-        ret = posix_copy_user_string(&arr[count], (const char *)str_addr, max_len);
+        if (*remaining <= sizeof(uint64_t)) {
+            posix_free_string_array(arr, count);
+            return -E2BIG;
+        }
+        ret = posix_copy_user_string(&arr[count], (const char *)str_addr,
+                                     *remaining - sizeof(uint64_t));
         if (ret != 0) {
             posix_free_string_array(arr, count);
             return ret;
         }
-        count++;
-    }
-    if (count == max_count) {
-        ret = posix_user_read_u64(array_addr + (uint64_t)count * sizeof(uint64_t), &str_addr);
-        if (ret != 0 || str_addr != 0) {
+        string_len = strlen(arr[count]) + 1u;
+        used = (string_len + 7u) & ~7u;
+        if (used > *remaining - sizeof(uint64_t)) {
+            kfree(arr[count]);
             posix_free_string_array(arr, count);
             return -E2BIG;
         }
+        *remaining -= used + sizeof(uint64_t);
+        count++;
+    }
+    if (count == INT32_MAX) {
+        posix_free_string_array(arr, count);
+        return -E2BIG;
     }
     arr[count] = NULL;
     *out = arr;
@@ -273,7 +286,6 @@ static int fd_alloc_from(int start) {
 
     if (!current_task) return -1;
     if (start < 0) start = 0;
-    if (start >= TASK_MAX_FDS) return -1;
     capacity = current_task->fds_capacity;
     for (i = start; i < capacity; i++) {
         if (!fd_table[i].in_use) {
@@ -324,7 +336,7 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     newfd = (int)(uintptr_t)newfd_ptr;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= TASK_MAX_FDS) return -EBADF;
+    if (newfd < 0) return -EBADF;
     if (newfd >= current_task->fds_capacity) {
         ret = task_fd_ensure_capacity(current_task, newfd);
         if (ret != 0) return -EMFILE;
@@ -942,6 +954,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     int new_argc;
     int na;
     int kern_args;
+    uint64_t exec_budget;
+    uint64_t stack_limit;
     char shebang_interp[256];
     char shebang_arg[256];
     int shebang_has_arg;
@@ -969,7 +983,11 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     ret = posix_copy_user_string(&path, (const char *)path_addr, POSIX_EXEC_PATH_MAX);
     if (ret != 0) return ret;
 
-    ret = posix_copy_user_string_array(&argv, &argc, argv_addr, POSIX_EXEC_MAX_ARGS, POSIX_EXEC_STRING_MAX);
+    stack_limit = task_rlimit_get(current_task, 3, 0);
+    exec_budget = USER_STACK_TOP - USER_STACK_FLOOR;
+    if (stack_limit < exec_budget) exec_budget = stack_limit;
+    ret = posix_copy_user_string_array(&argv, &argc, argv_addr,
+                                       &exec_budget);
     if (ret != 0) {
         kfree(path);
         return ret;
@@ -991,7 +1009,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         argc = 1;
     }
 
-    ret = posix_copy_user_string_array(&envp, &envc, envp_addr, POSIX_EXEC_MAX_ENVS, POSIX_EXEC_STRING_MAX);
+    ret = posix_copy_user_string_array(&envp, &envc, envp_addr,
+                                       &exec_budget);
     if (ret != 0) {
         posix_free_string_array(argv, argc);
         kfree(path);
@@ -1172,12 +1191,13 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             return -EFAULT;
         }
 
-        result = task_exec_node_with_args(interp_node, regs, na, new_argv, envc, envp);
+        result = task_exec_node_with_owned_args(interp_node, regs, na,
+                                                new_argv, envc, envp);
         vfs_close(interp_node);
-        for (i = 0; i < kern_args; i++) kfree(new_argv[i]);
-        kfree(new_argv);
-        posix_free_string_array(envp, envc);
-        posix_free_string_array(argv, argc);
+        if (argv) {
+            if (argv[0]) kfree(argv[0]);
+            kfree(argv);
+        }
         kfree(path);
 
         if (result == 0) {
@@ -1199,10 +1219,9 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         return -EFAULT;
     }
 
-    result = task_exec_node_with_args(node, regs, argc, argv, envc, envp);
+    result = task_exec_node_with_owned_args(node, regs, argc, argv,
+                                            envc, envp);
     vfs_close(node);
-    posix_free_string_array(envp, envc);
-    posix_free_string_array(argv, argc);
     kfree(path);
 
     if (result == 0) {
@@ -1451,7 +1470,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
         case F_DUPFD:
         case F_DUPFD_CLOEXEC:
             minfd = arg;
-            if (minfd < 0 || minfd >= TASK_MAX_FDS) return -EINVAL;
+            if (minfd < 0) return -EINVAL;
             newfd = fd_alloc_from(minfd);
             if (newfd < 0) return -EMFILE;
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
@@ -1842,7 +1861,7 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     if (!current_task) return -ESRCH;
     if (flags & ~VFS_O_CLOEXEC) return -EINVAL;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
-    if (newfd < 0 || newfd >= TASK_MAX_FDS) return -EBADF;
+    if (newfd < 0) return -EBADF;
     if (newfd >= current_task->fds_capacity) {
         ret = task_fd_ensure_capacity(current_task, newfd);
         if (ret != 0) return -EMFILE;
@@ -2184,45 +2203,45 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
 }
 
 void syscalls_posix_init(void) {
-    syscall_table[SYSCALL_DUP] = sys_dup;
-    syscall_table[SYSCALL_DUP2] = sys_dup2;
-    syscall_table[SYSCALL_DUP3] = sys_dup3;
-    syscall_table[SYSCALL_PIPE] = sys_pipe;
-    syscall_table[SYSCALL_PIPE2] = sys_pipe2;
-    syscall_table[SYSCALL_STAT] = sys_stat;
-    syscall_table[SYSCALL_FSTAT] = sys_fstat;
-    syscall_table[SYSCALL_GETCWD] = sys_getcwd;
-    syscall_table[SYSCALL_CHDIR] = sys_chdir;
-    syscall_table[SYSCALL_CHROOT] = sys_chroot;
-    syscall_table[SYSCALL_PIVOT_ROOT] = sys_pivot_root;
-    syscall_table[SYSCALL_FCHDIR] = sys_fchdir;
-    syscall_table[SYSCALL_ACCESS] = sys_access;
-    syscall_table[SYSCALL_CLOCK_GETTIME] = sys_clock_gettime;
-    syscall_table[SYSCALL_CLOCK_SETTIME] = sys_clock_settime;
-    syscall_table[SYSCALL_SETTIMEOFDAY] = sys_settimeofday;
-    syscall_table[SYSCALL_CLOCK_GETRES] = sys_clock_getres;
-    syscall_table[SYSCALL_CLOCK_NANOSLEEP] = sys_clock_nanosleep;
-    syscall_table[SYSCALL_GETTIMEOFDAY] = sys_gettimeofday;
-    syscall_table[SYSCALL_EXECVE] = sys_execve;
-    syscall_table[SYSCALL_LSEEK] = sys_lseek_new;
-    syscall_table[SYSCALL_FCNTL] = sys_fcntl;
-    syscall_table[SYSCALL_TRUNCATE] = sys_truncate;
-    syscall_table[SYSCALL_FTRUNCATE] = sys_ftruncate;
-    syscall_table[SYSCALL_UMASK] = sys_umask;
-    syscall_table[SYSCALL_RENAME] = sys_rename;
-    syscall_table[SYSCALL_LINK] = sys_link;
-    syscall_table[SYSCALL_SYMLINK] = sys_symlink;
-    syscall_table[SYSCALL_READLINK] = sys_readlink;
-    syscall_table[SYSCALL_GETDENTS] = sys_getdents;
-    syscall_table[SYSCALL_GETDENTS64] = sys_getdents64;
-    syscall_table[SYSCALL_FCHMOD] = sys_fchmod;
-    syscall_table[SYSCALL_FCHOWN] = sys_fchown;
-    syscall_table[SYSCALL_FSYNC] = sys_fsync;
-    syscall_table[SYSCALL_FDATASYNC] = sys_fdatasync;
-    syscall_table[SYSCALL_SYNC] = sys_sync;
-    syscall_table[SYSCALL_SYNCFS] = sys_syncfs;
-    syscall_table[SYSCALL_FLOCK] = sys_flock;
-    syscall_table[SYSCALL_PREAD64] = sys_pread64;
-    syscall_table[SYSCALL_PWRITE64] = sys_pwrite64;
-    syscall_table[SYSCALL_READV] = sys_readv;
+    syscall_table_set(SYSCALL_DUP, (void *)(sys_dup));
+    syscall_table_set(SYSCALL_DUP2, (void *)(sys_dup2));
+    syscall_table_set(SYSCALL_DUP3, (void *)(sys_dup3));
+    syscall_table_set(SYSCALL_PIPE, (void *)(sys_pipe));
+    syscall_table_set(SYSCALL_PIPE2, (void *)(sys_pipe2));
+    syscall_table_set(SYSCALL_STAT, (void *)(sys_stat));
+    syscall_table_set(SYSCALL_FSTAT, (void *)(sys_fstat));
+    syscall_table_set(SYSCALL_GETCWD, (void *)(sys_getcwd));
+    syscall_table_set(SYSCALL_CHDIR, (void *)(sys_chdir));
+    syscall_table_set(SYSCALL_CHROOT, (void *)(sys_chroot));
+    syscall_table_set(SYSCALL_PIVOT_ROOT, (void *)(sys_pivot_root));
+    syscall_table_set(SYSCALL_FCHDIR, (void *)(sys_fchdir));
+    syscall_table_set(SYSCALL_ACCESS, (void *)(sys_access));
+    syscall_table_set(SYSCALL_CLOCK_GETTIME, (void *)(sys_clock_gettime));
+    syscall_table_set(SYSCALL_CLOCK_SETTIME, (void *)(sys_clock_settime));
+    syscall_table_set(SYSCALL_SETTIMEOFDAY, (void *)(sys_settimeofday));
+    syscall_table_set(SYSCALL_CLOCK_GETRES, (void *)(sys_clock_getres));
+    syscall_table_set(SYSCALL_CLOCK_NANOSLEEP, (void *)(sys_clock_nanosleep));
+    syscall_table_set(SYSCALL_GETTIMEOFDAY, (void *)(sys_gettimeofday));
+    syscall_table_set(SYSCALL_EXECVE, (void *)(sys_execve));
+    syscall_table_set(SYSCALL_LSEEK, (void *)(sys_lseek_new));
+    syscall_table_set(SYSCALL_FCNTL, (void *)(sys_fcntl));
+    syscall_table_set(SYSCALL_TRUNCATE, (void *)(sys_truncate));
+    syscall_table_set(SYSCALL_FTRUNCATE, (void *)(sys_ftruncate));
+    syscall_table_set(SYSCALL_UMASK, (void *)(sys_umask));
+    syscall_table_set(SYSCALL_RENAME, (void *)(sys_rename));
+    syscall_table_set(SYSCALL_LINK, (void *)(sys_link));
+    syscall_table_set(SYSCALL_SYMLINK, (void *)(sys_symlink));
+    syscall_table_set(SYSCALL_READLINK, (void *)(sys_readlink));
+    syscall_table_set(SYSCALL_GETDENTS, (void *)(sys_getdents));
+    syscall_table_set(SYSCALL_GETDENTS64, (void *)(sys_getdents64));
+    syscall_table_set(SYSCALL_FCHMOD, (void *)(sys_fchmod));
+    syscall_table_set(SYSCALL_FCHOWN, (void *)(sys_fchown));
+    syscall_table_set(SYSCALL_FSYNC, (void *)(sys_fsync));
+    syscall_table_set(SYSCALL_FDATASYNC, (void *)(sys_fdatasync));
+    syscall_table_set(SYSCALL_SYNC, (void *)(sys_sync));
+    syscall_table_set(SYSCALL_SYNCFS, (void *)(sys_syncfs));
+    syscall_table_set(SYSCALL_FLOCK, (void *)(sys_flock));
+    syscall_table_set(SYSCALL_PREAD64, (void *)(sys_pread64));
+    syscall_table_set(SYSCALL_PWRITE64, (void *)(sys_pwrite64));
+    syscall_table_set(SYSCALL_READV, (void *)(sys_readv));
 }

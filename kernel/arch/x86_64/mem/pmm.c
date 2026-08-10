@@ -74,7 +74,6 @@ void *pmm_alloc_early_page(void) {
 
     bump_current = (bump_current + 0xFFF) & ~0xFFFULL;
     for (i = 0; i < num_regions; i++) {
-        if (memory_map[i].type != 1) continue;
         rend = memory_map[i].base + memory_map[i].length;
         if (bump_current < memory_map[i].base) bump_current = memory_map[i].base;
         if (bump_current >= rend) continue;
@@ -97,7 +96,6 @@ void *pmm_alloc_early_pages(uint64_t num) {
     bytes = num * PAGE_SIZE;
     bump_current = (bump_current + 0xFFF) & ~0xFFFULL;
     for (i = 0; i < num_regions; i++) {
-        if (memory_map[i].type != 1) continue;
         rend = memory_map[i].base + memory_map[i].length;
         if (bump_current < memory_map[i].base) bump_current = memory_map[i].base;
         if (bump_current >= rend) continue;
@@ -117,7 +115,6 @@ static int frame_is_usable(uint64_t frame_idx) {
 
     phys = frame_idx * PAGE_SIZE;
     for (i = 0; i < num_regions; i++) {
-        if (memory_map[i].type != 1) continue;
         region_start = memory_map[i].base;
         region_end = region_start + memory_map[i].length;
         if (phys >= region_start && phys + PAGE_SIZE <= region_end) return 1;
@@ -131,7 +128,7 @@ static int frame_is_reserved(uint64_t frame_idx) {
 
     phys = frame_idx * PAGE_SIZE;
     for (i = 0; i < num_reserved_regions; i++) {
-        if (phys >= reserved_regions[i].start_phys &&
+        if (phys >= RESERVED_REGION_START(reserved_regions[i]) &&
             phys < reserved_regions[i].end_phys) return 1;
     }
     return 0;
@@ -279,7 +276,6 @@ uint64_t KERNEL_INIT count_free_frames(void) {
 
     count = 0;
     for (i = 0; i < num_regions; i++) {
-        if (memory_map[i].type != 1) continue;
         region_start = (memory_map[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
         region_end = (memory_map[i].base + memory_map[i].length) / PAGE_SIZE;
         if (region_start >= bitmap_entries_used) continue;
@@ -417,9 +413,10 @@ uint64_t KERNEL_INIT pfa_release_multiboot_range(uint64_t phys_start,
 
     region = num_reserved_regions;
     for (i = 0; i < num_reserved_regions; i++) {
-        if (reserved_regions[i].kind != RESERVED_REGION_MULTIBOOT_INFO)
+        if (RESERVED_REGION_KIND(reserved_regions[i]) !=
+            RESERVED_REGION_MULTIBOOT_INFO)
             continue;
-        if (reserved_regions[i].start_phys == phys_start &&
+        if (RESERVED_REGION_START(reserved_regions[i]) == phys_start &&
             reserved_regions[i].end_phys == phys_end) {
             region = i;
             break;

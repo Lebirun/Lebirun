@@ -1,7 +1,6 @@
 #include "syscall_defs.h"
 
 extern task_t *current_task;
-extern void **syscall_table;
 
 #define SHM_INIT_COUNT 1
 #define SHM_RDONLY 010000
@@ -102,10 +101,23 @@ static int shm_allocate_pages(shm_seg_t *segment, uint64_t size) {
 
 static int shm_range_free(uint64_t address, uint64_t size) {
     uint64_t offset;
+    uint64_t end;
+    uint64_t area_end;
+    int i;
 
-    if (!current_task || address < USER_MMAP_HIGH_BASE ||
-        address + size < address || address + size > USER_MMAP_HIGH_LIMIT)
+    if (!current_task || address < USER_DYNAMIC_BASE ||
+        address + size < address || address + size > USER_DYNAMIC_LIMIT)
         return 0;
+    end = address + size;
+    if (address < current_task->user_brk &&
+        end > current_task->user_brk_start) return 0;
+    for (i = 0; i < current_task->file_map_count; i++) {
+        area_end = current_task->file_maps[i].vaddr +
+                   current_task->file_maps[i].memsz;
+        if (area_end < current_task->file_maps[i].vaddr) return 0;
+        if (address < area_end && end > current_task->file_maps[i].vaddr)
+            return 0;
+    }
     for (offset = 0; offset < size; offset += PAGE_SIZE) {
         if (vmm_get_phys_in_pml4(current_task->pml4_phys,
                                  address + offset) != 0) return 0;
@@ -121,13 +133,13 @@ static uint64_t shm_find_address(uint64_t requested, uint64_t size) {
         return shm_range_free(address, size) ? address : 0;
     }
     address = current_task->mmap_next_addr;
-    if (address < USER_MMAP_HIGH_BASE || address >= USER_MMAP_HIGH_LIMIT)
-        address = USER_MMAP_HIGH_BASE;
-    address = (address + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    while (address + size >= address &&
-           address + size <= USER_MMAP_HIGH_LIMIT) {
+    if (address <= USER_DYNAMIC_BASE || address > USER_DYNAMIC_LIMIT)
+        address = USER_DYNAMIC_LIMIT;
+    address &= ~(PAGE_SIZE - 1);
+    while (address >= USER_DYNAMIC_BASE + size) {
+        address -= size;
         if (shm_range_free(address, size)) return address;
-        address += PAGE_SIZE;
+        address += size - PAGE_SIZE;
     }
     return 0;
 }
@@ -288,7 +300,7 @@ static int sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
     attachment->next = shm_attachments;
     shm_attachments = attachment;
     segment->nattach++;
-    current_task->mmap_next_addr = address + segment->size;
+    current_task->mmap_next_addr = address;
     mutex_unlock(&shm_lock);
     return (int)address;
 }
@@ -480,10 +492,10 @@ void syscalls_shm_init(void) {
     shm_capacity = 0;
     shm_attachments = NULL;
     mutex_init(&shm_lock);
-    syscall_table[SYSCALL_SHMGET] = sys_shmget;
-    syscall_table[SYSCALL_SHMAT] = sys_shmat;
-    syscall_table[SYSCALL_SHMDT] = sys_shmdt;
-    syscall_table[SYSCALL_SHMCTL] = sys_shmctl;
-    syscall_table[SYSCALL_SHM_OPEN] = sys_shm_open;
-    syscall_table[SYSCALL_SHM_UNLINK] = sys_shm_unlink;
+    syscall_table_set(SYSCALL_SHMGET, (void *)(sys_shmget));
+    syscall_table_set(SYSCALL_SHMAT, (void *)(sys_shmat));
+    syscall_table_set(SYSCALL_SHMDT, (void *)(sys_shmdt));
+    syscall_table_set(SYSCALL_SHMCTL, (void *)(sys_shmctl));
+    syscall_table_set(SYSCALL_SHM_OPEN, (void *)(sys_shm_open));
+    syscall_table_set(SYSCALL_SHM_UNLINK, (void *)(sys_shm_unlink));
 }

@@ -10,10 +10,11 @@
 #define TIMERFD_INIT_COUNT 1
 #define SIGNALFD_INIT_COUNT 1
 
-#define EPOLL_BASE_FD    (TASK_MAX_FDS + 1)
-#define EVENTFD_BASE_FD  (TASK_MAX_FDS + 0x1001)
-#define TIMERFD_BASE_FD  (TASK_MAX_FDS + 0x2001)
-#define SIGNALFD_BASE_FD (TASK_MAX_FDS + 0x3001)
+#define EPOLL_BASE_FD    0x40000000
+#define EVENTFD_BASE_FD  0x50000000
+#define TIMERFD_BASE_FD  0x60000000
+#define SIGNALFD_BASE_FD 0x70000000
+#define SIGNALFD_END_FD  0x78000000
 
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
@@ -1228,7 +1229,7 @@ retry_read:
         return sizeof(value);
     }
     index = fd - SIGNALFD_BASE_FD;
-    if (index >= 0 && fd < SIGNALFD_BASE_FD + 0x1000) {
+    if (index >= 0 && fd < SIGNALFD_END_FD) {
         if (length < (int)sizeof(event_signalfd_info_t)) return -EINVAL;
         if (!user_access_ok(buffer, sizeof(event_signalfd_info_t),
                             UACCESS_WRITE)) return -EFAULT;
@@ -1557,19 +1558,19 @@ void syscalls_epoll_init(void) {
     mutex_init(&timerfd_lock);
     mutex_init(&signalfd_lock);
     
-    syscall_table[SYSCALL_EPOLL_CREATE] = sys_epoll_create;
-    syscall_table[SYSCALL_EPOLL_CREATE1] = sys_epoll_create1;
-    syscall_table[SYSCALL_EPOLL_CTL] = sys_epoll_ctl;
-    syscall_table[SYSCALL_EPOLL_WAIT] = sys_epoll_wait;
-    syscall_table[SYSCALL_EPOLL_PWAIT] = sys_epoll_pwait;
-    syscall_table[SYSCALL_FUTEX] = sys_futex;
-    syscall_table[SYSCALL_EVENTFD] = sys_eventfd;
-    syscall_table[SYSCALL_EVENTFD2] = sys_eventfd2;
-    syscall_table[SYSCALL_SET_ROBUST_LIST] = sys_set_robust_list;
-    syscall_table[SYSCALL_GET_ROBUST_LIST] = sys_get_robust_list;
-    syscall_table[SYSCALL_TIMERFD_CREATE] = sys_timerfd_create;
-    syscall_table[SYSCALL_TIMERFD_SETTIME] = sys_timerfd_settime;
-    syscall_table[SYSCALL_TIMERFD_GETTIME] = sys_timerfd_gettime;
-    syscall_table[SYSCALL_SIGNALFD] = sys_signalfd;
-    syscall_table[SYSCALL_SIGNALFD4] = sys_signalfd4;
+    syscall_table_set(SYSCALL_EPOLL_CREATE, (void *)(sys_epoll_create));
+    syscall_table_set(SYSCALL_EPOLL_CREATE1, (void *)(sys_epoll_create1));
+    syscall_table_set(SYSCALL_EPOLL_CTL, (void *)(sys_epoll_ctl));
+    syscall_table_set(SYSCALL_EPOLL_WAIT, (void *)(sys_epoll_wait));
+    syscall_table_set(SYSCALL_EPOLL_PWAIT, (void *)(sys_epoll_pwait));
+    syscall_table_set(SYSCALL_FUTEX, (void *)(sys_futex));
+    syscall_table_set(SYSCALL_EVENTFD, (void *)(sys_eventfd));
+    syscall_table_set(SYSCALL_EVENTFD2, (void *)(sys_eventfd2));
+    syscall_table_set(SYSCALL_SET_ROBUST_LIST, (void *)(sys_set_robust_list));
+    syscall_table_set(SYSCALL_GET_ROBUST_LIST, (void *)(sys_get_robust_list));
+    syscall_table_set(SYSCALL_TIMERFD_CREATE, (void *)(sys_timerfd_create));
+    syscall_table_set(SYSCALL_TIMERFD_SETTIME, (void *)(sys_timerfd_settime));
+    syscall_table_set(SYSCALL_TIMERFD_GETTIME, (void *)(sys_timerfd_gettime));
+    syscall_table_set(SYSCALL_SIGNALFD, (void *)(sys_signalfd));
+    syscall_table_set(SYSCALL_SIGNALFD4, (void *)(sys_signalfd4));
 }

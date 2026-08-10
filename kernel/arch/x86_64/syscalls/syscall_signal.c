@@ -1130,19 +1130,19 @@ void signals_init_task(task_t *task) {
 }
 
 void syscalls_signal_init(void) {
-    syscall_table[SYSCALL_SIGACTION] = sys_rt_sigaction;
-    syscall_table[SYSCALL_RT_SIGACTION] = sys_rt_sigaction;
-    syscall_table[SYSCALL_SIGPROCMASK] = sys_rt_sigprocmask;
-    syscall_table[SYSCALL_RT_SIGPROCMASK] = sys_rt_sigprocmask;
-    syscall_table[SYSCALL_RT_SIGPENDING] = sys_rt_sigpending;
-    syscall_table[SYSCALL_RT_SIGSUSPEND] = sys_rt_sigsuspend;
-    syscall_table[SYSCALL_RT_SIGRETURN] = sys_rt_sigreturn;
-    syscall_table[SYSCALL_RT_SIGTIMEDWAIT] = sys_rt_sigtimedwait;
-    syscall_table[SYSCALL_RT_SIGQUEUEINFO] = sys_rt_sigqueueinfo;
-    syscall_table[SYSCALL_TGKILL] = sys_tgkill;
-    syscall_table[SYSCALL_TKILL] = sys_tkill;
-    syscall_table[SYSCALL_SIGALTSTACK] = sys_sigaltstack;
-    syscall_table[SYSCALL_PAUSE] = sys_pause;
-    syscall_table[SYSCALL_ALARM] = sys_alarm;
-    syscall_table[SYSCALL_SIGRETURN] = sys_sigreturn;
+    syscall_table_set(SYSCALL_SIGACTION, (void *)(sys_rt_sigaction));
+    syscall_table_set(SYSCALL_RT_SIGACTION, (void *)(sys_rt_sigaction));
+    syscall_table_set(SYSCALL_SIGPROCMASK, (void *)(sys_rt_sigprocmask));
+    syscall_table_set(SYSCALL_RT_SIGPROCMASK, (void *)(sys_rt_sigprocmask));
+    syscall_table_set(SYSCALL_RT_SIGPENDING, (void *)(sys_rt_sigpending));
+    syscall_table_set(SYSCALL_RT_SIGSUSPEND, (void *)(sys_rt_sigsuspend));
+    syscall_table_set(SYSCALL_RT_SIGRETURN, (void *)(sys_rt_sigreturn));
+    syscall_table_set(SYSCALL_RT_SIGTIMEDWAIT, (void *)(sys_rt_sigtimedwait));
+    syscall_table_set(SYSCALL_RT_SIGQUEUEINFO, (void *)(sys_rt_sigqueueinfo));
+    syscall_table_set(SYSCALL_TGKILL, (void *)(sys_tgkill));
+    syscall_table_set(SYSCALL_TKILL, (void *)(sys_tkill));
+    syscall_table_set(SYSCALL_SIGALTSTACK, (void *)(sys_sigaltstack));
+    syscall_table_set(SYSCALL_PAUSE, (void *)(sys_pause));
+    syscall_table_set(SYSCALL_ALARM, (void *)(sys_alarm));
+    syscall_table_set(SYSCALL_SIGRETURN, (void *)(sys_sigreturn));
 }

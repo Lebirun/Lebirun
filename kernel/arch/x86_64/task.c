@@ -138,7 +138,7 @@ static uint64_t task_random_mmap_base(void) {
     uint64_t pages;
 
     pages = rng_get_u32() & 0x7FULL;
-    return USER_MMAP_LOW_BASE + pages * PAGE_SIZE;
+    return USER_DYNAMIC_LIMIT - pages * PAGE_SIZE;
 }
 
 static spinlock_t sched_lock = {0};
@@ -687,27 +687,17 @@ static uint64_t task_heap_pages(task_t *task) {
 
 static uint64_t task_mmap_pages(task_t *task) {
     uint64_t pages;
-    uint64_t file_mmap_pages;
     int i;
 
     if (!task || !task->pml4_phys) return 0;
-    pages = vmm_count_present_pages_in_range(
-        task->pml4_phys, USER_MMAP_LOW_BASE, USER_MMAP_LOW_LIMIT);
-    pages += vmm_count_present_pages_in_range(
-        task->pml4_phys, USER_MMAP_HIGH_BASE, USER_MMAP_HIGH_LIMIT);
-    file_mmap_pages = 0;
+    pages = 0;
     for (i = 0; i < task->file_map_count; i++) {
-        if (!task->file_maps[i].node) continue;
-        if (!((task->file_maps[i].vaddr >= USER_MMAP_LOW_BASE &&
-               task->file_maps[i].vaddr < USER_MMAP_LOW_LIMIT) ||
-              (task->file_maps[i].vaddr >= USER_MMAP_HIGH_BASE &&
-               task->file_maps[i].vaddr < USER_MMAP_HIGH_LIMIT))) continue;
-        file_mmap_pages += vmm_count_present_pages_in_range(task->pml4_phys,
-                                                            task->file_maps[i].vaddr,
-                                                            task->file_maps[i].vaddr + task->file_maps[i].memsz);
+        if (task->file_maps[i].node) continue;
+        pages += vmm_count_present_pages_in_range(
+            task->pml4_phys, task->file_maps[i].vaddr,
+            task->file_maps[i].vaddr + task->file_maps[i].memsz);
     }
-    if (pages >= file_mmap_pages) return pages - file_mmap_pages;
-    return 0;
+    return pages;
 }
 
 static void exec_cleanup_stats(uint64_t *entries, uint64_t *pages) {
@@ -3861,20 +3851,26 @@ int task_fd_alloc(task_t *task) {
 
 int task_fd_ensure_capacity(task_t *task, int min_fd) {
     task_fd_t *new_fds;
+    unsigned long limit;
     int old_cap;
     int new_cap;
 
     if (!task || !task->fds) return -1;
     if (min_fd < 0) return -1;
-    if (min_fd >= TASK_MAX_FDS) return -1;
+    limit = task_rlimit_get(task, 7, 0);
+    if (limit > 0x7FFFFFFFUL) limit = 0x7FFFFFFFUL;
+    if ((unsigned long)min_fd >= limit) return -1;
     if (min_fd < task->fds_capacity) return 0;
     old_cap = task->fds_capacity;
     new_cap = old_cap;
     if (new_cap < TASK_INIT_FDS) new_cap = TASK_INIT_FDS;
     while (new_cap <= min_fd) {
-        if (new_cap >= TASK_MAX_FDS) return -1;
-        new_cap *= 2;
-        if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
+        if ((unsigned long)new_cap >= limit) return -1;
+        if (new_cap > 0x3FFFFFFF)
+            new_cap = min_fd + 1;
+        else
+            new_cap *= 2;
+        if ((unsigned long)new_cap > limit) new_cap = (int)limit;
     }
     new_fds = (task_fd_t *)krealloc(task->fds, new_cap * sizeof(task_fd_t));
     if (!new_fds) return -1;
@@ -4607,8 +4603,27 @@ static __attribute__((unused)) int task_exec_legacy(
     return 0;
 }
 
+static void task_free_owned_exec_args(int argc, char **argv,
+                                      int envc, char **envp) {
+    int i;
+
+    if (argv) {
+        for (i = 0; i < argc; i++) {
+            if (argv[i]) kfree(argv[i]);
+        }
+        kfree(argv);
+    }
+    if (envp) {
+        for (i = 0; i < envc; i++) {
+            if (envp[i]) kfree(envp[i]);
+        }
+        kfree(envp);
+    }
+}
+
 static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
-                                      int argc, char **argv, int envc, char **envp) {
+                                      int argc, char **argv, int envc, char **envp,
+                                      int take_arguments) {
     uint8_t *kernel_bin;
     char **k_argv;
     char **k_envp;
@@ -4627,8 +4642,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t *stack_pages;
     uint64_t total_pages;
     uint64_t sp;
-    uint64_t *envp_ptrs;
-    uint64_t *argv_ptrs;
     uint8_t random_bytes[16];
     uint64_t random_addr;
     uint64_t entry_to_use;
@@ -4645,6 +4658,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t tbl_bytes;
     int tbl_cap;
     int tbl_heap;
+    int argv_table_index;
+    int envp_table_index;
     task_file_map_t *old_file_maps;
     int old_file_map_count;
     int old_file_map_capacity;
@@ -4653,10 +4668,13 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     uint64_t new_user_brk;
     uint64_t exec_euid;
     uint64_t exec_egid;
+    uint64_t stack_limit;
     task_file_map_list_t new_file_maps;
 
     if (!current_task || !current_task->is_user) {
         task_error("task_exec_with_args: can only exec in user tasks\n");
+        if (take_arguments)
+            task_free_owned_exec_args(argc, argv, envc, envp);
         if (bin_start) kfree((void *)bin_start);
         return -KERR_EPERM;
     }
@@ -4673,6 +4691,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     }
     if ((!use_node && !bin_start) || bin_size == 0) {
         task_error("task_exec_with_args: invalid binary\n");
+        if (take_arguments)
+            task_free_owned_exec_args(argc, argv, envc, envp);
         if (bin_start) kfree((void *)bin_start);
         return -KERR_ENOEXEC;
     }
@@ -4682,7 +4702,11 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
     k_argv = NULL;
     k_envp = NULL;
 
-    if (argc > 0 && argv) {
+    if (take_arguments) {
+        k_argv = argv;
+        k_envp = envp;
+    } else {
+        if (argc > 0 && argv) {
             k_argv = (char **)kmalloc((argc + 1) * sizeof(char *));
             if (!k_argv) {
                 if (kernel_bin) kfree(kernel_bin);
@@ -4729,6 +4753,7 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
             }
             k_envp[envc] = NULL;
         }
+    }
 
     elf_valid = 0;
     if (!use_node) {
@@ -4751,9 +4776,11 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         return -KERR_ENOEXEC;
     }
 
-    stack_top = task_random_stack_top();
     stack_size = task_initial_stack_size(argc, k_argv, envc, k_envp, "program", 11);
-    if (stack_size > USER_STACK_SIZE) {
+    stack_limit = task_rlimit_get(current_task, 3, 0);
+    if (stack_limit > USER_STACK_TOP - USER_STACK_FLOOR - USER_STACK_GAP)
+        stack_limit = USER_STACK_TOP - USER_STACK_FLOOR - USER_STACK_GAP;
+    if (stack_size > stack_limit) {
         task_error("task_exec_with_args: initial stack too large\n");
         if (k_argv) {
             for (i = 0; i < argc; i++) kfree(k_argv[i]);
@@ -4766,6 +4793,9 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
         if (kernel_bin) kfree(kernel_bin);
         return -KERR_ENOMEM;
     }
+    stack_top = task_random_stack_top();
+    if (stack_top < USER_STACK_FLOOR + USER_STACK_GAP + stack_size)
+        stack_top = USER_STACK_TOP;
 
     old_pd = current_task->pml4_phys;
     old_user_pages = current_task->user_pages;
@@ -4938,69 +4968,59 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
     sp = stack_top - USER_STACK_GAP - 16;
 
-    envp_ptrs = NULL;
-    argv_ptrs = NULL;
     tbl_buf = NULL;
     tbl_idx = 0;
     tbl_bytes = 0;
     tbl_cap = argc + envc + 32;
     tbl_heap = 0;
 
-    if (envc > 0 && k_envp) {
-        envp_ptrs = (uint64_t *)kmalloc((envc + 1) * sizeof(uint64_t));
-        if (!envp_ptrs) {
-            task_abort_file_mappings(current_task, use_node, old_file_maps,
-                                     old_file_map_count, old_file_map_capacity);
-            kfree(new_user_pages);
-            vmm_free_pml4(new_pd);
-            if (k_argv) {
-                for (i = 0; i < argc; i++) kfree(k_argv[i]);
-                kfree(k_argv);
-            }
-            if (k_envp) {
-                for (i = 0; i < envc; i++) kfree(k_envp[i]);
-                kfree(k_envp);
-            }
-            task_set_exec_state(current_task, 0);
-            return -KERR_ENOMEM;
+    if (tbl_cap <= (int)(sizeof(tbl_stack) / sizeof(tbl_stack[0]))) {
+        tbl_buf = tbl_stack;
+    } else {
+        tbl_buf = (uint64_t *)kmalloc((uint64_t)tbl_cap * sizeof(uint64_t));
+        tbl_heap = 1;
+    }
+    if (!tbl_buf) {
+        task_abort_file_mappings(current_task, use_node, old_file_maps,
+                                 old_file_map_count, old_file_map_capacity);
+        kfree(new_user_pages);
+        vmm_free_pml4(new_pd);
+        if (k_argv) {
+            for (i = 0; i < argc; i++) kfree(k_argv[i]);
+            kfree(k_argv);
         }
+        if (k_envp) {
+            for (i = 0; i < envc; i++) kfree(k_envp[i]);
+            kfree(k_envp);
+        }
+        task_set_exec_state(current_task, 0);
+        return -KERR_ENOMEM;
+    }
+
+    tbl_buf[tbl_idx++] = (uint64_t)argc;
+    argv_table_index = tbl_idx;
+    for (i = 0; i <= argc; i++) tbl_buf[tbl_idx++] = 0;
+    envp_table_index = tbl_idx;
+    for (i = 0; i <= envc; i++) tbl_buf[tbl_idx++] = 0;
+
+    if (envc > 0 && k_envp) {
         for (i = envc - 1; i >= 0; i--) {
             len = 0;
             while (k_envp[i][len]) len++;
             sp -= (len + 1 + 7) & ~7;
             vmm_copy_to_pml4(new_pd, sp, k_envp[i], len + 1);
-            envp_ptrs[i] = sp;
+            tbl_buf[envp_table_index + i] = sp;
         }
-        envp_ptrs[envc] = 0;
     }
 
     if (argc > 0 && k_argv) {
-        argv_ptrs = (uint64_t *)kmalloc((argc + 1) * sizeof(uint64_t));
-        if (!argv_ptrs) {
-            task_abort_file_mappings(current_task, use_node, old_file_maps,
-                                     old_file_map_count, old_file_map_capacity);
-            kfree(new_user_pages);
-            if (envp_ptrs) kfree(envp_ptrs);
-            vmm_free_pml4(new_pd);
-            if (k_argv) {
-                for (i = 0; i < argc; i++) kfree(k_argv[i]);
-                kfree(k_argv);
-            }
-            if (k_envp) {
-                for (i = 0; i < envc; i++) kfree(k_envp[i]);
-                kfree(k_envp);
-            }
-            task_set_exec_state(current_task, 0);
-            return -KERR_ENOMEM;
-        }
         for (i = argc - 1; i >= 0; i--) {
             len = 0;
             while (k_argv[i][len]) len++;
             sp -= (len + 1 + 7) & ~7;
             vmm_copy_to_pml4(new_pd, sp, k_argv[i], len + 1);
-            argv_ptrs[i] = sp;
+            tbl_buf[argv_table_index + i] = sp;
         }
-        argv_ptrs[argc] = 0;
     }
 
     rng_fill(random_bytes, sizeof(random_bytes));
@@ -5021,47 +5041,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 #define AT_GID          13
 #define AT_EGID         14
 #define AT_RANDOM       25
-
-    if (tbl_cap <= (int)(sizeof(tbl_stack) / sizeof(tbl_stack[0]))) {
-        tbl_buf = tbl_stack;
-    } else {
-        tbl_buf = (uint64_t *)kmalloc((uint64_t)tbl_cap * sizeof(uint64_t));
-        tbl_heap = 1;
-    }
-    if (!tbl_buf) {
-        task_abort_file_mappings(current_task, use_node, old_file_maps,
-                                 old_file_map_count, old_file_map_capacity);
-        kfree(new_user_pages);
-        if (argv_ptrs) kfree(argv_ptrs);
-        if (envp_ptrs) kfree(envp_ptrs);
-        vmm_free_pml4(new_pd);
-        if (k_argv) {
-            for (i = 0; i < argc; i++) kfree(k_argv[i]);
-            kfree(k_argv);
-        }
-        if (k_envp) {
-            for (i = 0; i < envc; i++) kfree(k_envp[i]);
-            kfree(k_envp);
-        }
-        task_set_exec_state(current_task, 0);
-        return -KERR_ENOMEM;
-    }
-
-    tbl_buf[tbl_idx++] = (uint64_t)argc;
-
-    if (argv_ptrs) {
-        for (i = 0; i <= argc; i++)
-            tbl_buf[tbl_idx++] = argv_ptrs[i];
-    } else {
-        tbl_buf[tbl_idx++] = 0;
-    }
-
-    if (envp_ptrs) {
-        for (i = 0; i <= envc; i++)
-            tbl_buf[tbl_idx++] = envp_ptrs[i];
-    } else {
-        tbl_buf[tbl_idx++] = 0;
-    }
 
     if (elf_info.phdr_vaddr != 0 && elf_info.phnum != 0) {
         tbl_buf[tbl_idx++] = AT_PHDR;
@@ -5104,9 +5083,6 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 #undef AT_GID
 #undef AT_EGID
 #undef AT_RANDOM
-
-    if (argv_ptrs) kfree(argv_ptrs);
-    if (envp_ptrs) kfree(envp_ptrs);
 
     if (k_argv && k_argv[0]) {
         base = k_argv[0];
@@ -5247,7 +5223,8 @@ static int task_exec_with_args_common(vfs_node_t *bin_node, const uint8_t *bin_s
 
 int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs,
                         int argc, char **argv, int envc, char **envp) {
-    return task_exec_with_args_common(NULL, bin_start, bin_size, regs, argc, argv, envc, envp);
+    return task_exec_with_args_common(NULL, bin_start, bin_size, regs,
+                                      argc, argv, envc, envp, 0);
 }
 
 int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
@@ -5263,12 +5240,20 @@ int task_exec(const uint8_t *bin_start, uint64_t bin_size, registers_t *regs) {
     }
     argv[0] = "program";
     return task_exec_with_args_common(NULL, kernel_bin, bin_size, regs,
-                                      1, argv, 0, NULL);
+                                      1, argv, 0, NULL, 0);
 }
 
 int task_exec_node_with_args(vfs_node_t *node, registers_t *regs,
                              int argc, char **argv, int envc, char **envp) {
-    return task_exec_with_args_common(node, NULL, 0, regs, argc, argv, envc, envp);
+    return task_exec_with_args_common(node, NULL, 0, regs,
+                                      argc, argv, envc, envp, 0);
+}
+
+int task_exec_node_with_owned_args(vfs_node_t *node, registers_t *regs,
+                                   int argc, char **argv,
+                                   int envc, char **envp) {
+    return task_exec_with_args_common(node, NULL, 0, regs,
+                                      argc, argv, envc, envp, 1);
 }
 
 pid_t task_create_thread(void (*entry)(void)) {
@@ -5342,7 +5327,9 @@ pid_t task_create_thread(void (*entry)(void)) {
     thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
-    if (!task_memory_allows(current_task, thread_stack_size) ||
+    if (thread_stack_top < thread_stack_base ||
+        thread_stack_top > USER_DYNAMIC_LIMIT - 0x1000u ||
+        !task_memory_allows(current_task, thread_stack_size) ||
         !task_stack_allows(new_task, thread_stack_size)) {
         task_rlimit_free(new_task);
         task_free_signal_data(new_task);
@@ -5520,7 +5507,9 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
     thread_stack_top = thread_stack_base + thread_stack_size;
-    if (!task_memory_allows(current_task, thread_stack_size) ||
+    if (thread_stack_top < thread_stack_base ||
+        thread_stack_top > USER_DYNAMIC_LIMIT - 0x1000u ||
+        !task_memory_allows(current_task, thread_stack_size) ||
         !task_stack_allows(new_task, thread_stack_size)) {
         task_rlimit_free(new_task);
         task_free_signal_data(new_task);

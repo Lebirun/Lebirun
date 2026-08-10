@@ -377,9 +377,7 @@ int tcp_disconnect(tcp_socket_t *sock, uint64_t timeout_ms) {
     return 0;
 }
 
-#define TCP_RECV_BUF_MAX 1048576
-
-static void tcp_grow_recv_buffer(tcp_socket_t *sock) {
+static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     uint64_t old_size;
     uint64_t new_size;
     uint8_t *new_buf;
@@ -387,8 +385,15 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock) {
     uint64_t i;
 
     old_size = sock->recv_buffer_size;
-    new_size = old_size * 2;
-    if (new_size > TCP_RECV_BUF_MAX) new_size = TCP_RECV_BUF_MAX;
+    if (old_size == 0) return;
+    new_size = old_size;
+    while (new_size < required) {
+        if (new_size > UINT64_MAX / 2) {
+            new_size = required;
+            break;
+        }
+        new_size *= 2;
+    }
     if (new_size <= old_size) return;
     new_buf = (uint8_t *)kmalloc(new_size);
     if (!new_buf) return;
@@ -501,8 +506,9 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                     used = sock->recv_buffer_size - sock->recv_buffer_head + sock->recv_buffer_tail;
                 }
                 avail = sock->recv_buffer_size - 1 - used;
-                if (avail < payload_len && sock->recv_buffer_size < TCP_RECV_BUF_MAX) {
-                    tcp_grow_recv_buffer(sock);
+                if (avail < payload_len &&
+                    payload_len <= UINT64_MAX - used - 1) {
+                    tcp_grow_recv_buffer(sock, used + payload_len + 1);
                 }
                 for (i = 0; i < payload_len; i++) {
                     next = (sock->recv_buffer_tail + 1) % sock->recv_buffer_size;

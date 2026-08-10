@@ -128,11 +128,11 @@ static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
 }
 
 void syscalls_fb_init(void) {
-    syscall_table[SYSCALL_FB_PUTPIXEL] = sys_fb_putpixel;
-    syscall_table[SYSCALL_FB_SETCOLORS] = sys_fb_setcolors;
-    syscall_table[SYSCALL_FB_GETINFO] = sys_fb_getinfo;
-    syscall_table[SYSCALL_FB_CLEAR] = sys_fb_clear;
-    syscall_table[SYSCALL_FB_SET_MODE] = sys_fb_set_mode;
-    syscall_table[SYSCALL_FB_GET_DETAILED_INFO] = sys_fb_get_detailed_info;
-    syscall_table[SYSCALL_FB_GET_CAPS] = sys_fb_get_caps;
+    syscall_table_set(SYSCALL_FB_PUTPIXEL, (void *)(sys_fb_putpixel));
+    syscall_table_set(SYSCALL_FB_SETCOLORS, (void *)(sys_fb_setcolors));
+    syscall_table_set(SYSCALL_FB_GETINFO, (void *)(sys_fb_getinfo));
+    syscall_table_set(SYSCALL_FB_CLEAR, (void *)(sys_fb_clear));
+    syscall_table_set(SYSCALL_FB_SET_MODE, (void *)(sys_fb_set_mode));
+    syscall_table_set(SYSCALL_FB_GET_DETAILED_INFO, (void *)(sys_fb_get_detailed_info));
+    syscall_table_set(SYSCALL_FB_GET_CAPS, (void *)(sys_fb_get_caps));
 }

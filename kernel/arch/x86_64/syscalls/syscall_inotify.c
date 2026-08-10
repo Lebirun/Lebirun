@@ -1,14 +1,12 @@
 #include "syscall_defs.h"
 #include <lebirun/inotify.h>
 
-#define INOTIFY_BASE_FD (TASK_MAX_FDS + 0x4001)
+#define INOTIFY_BASE_FD 0x78000000
 #define INOTIFY_NONBLOCK 0x800
 #define INOTIFY_CLOEXEC 0x80000
 #define INOTIFY_MASK_ADD 0x20000000
 #define INOTIFY_MASK_CREATE 0x10000000
 #define INOTIFY_IGNORED 0x00008000
-#define INOTIFY_Q_OVERFLOW 0x00004000
-#define INOTIFY_QUEUE_MAX 32
 #define INOTIFY_NAME_MAX 63
 
 typedef struct {
@@ -36,7 +34,7 @@ typedef struct {
     int watch_capacity;
     inotify_queued_event_t *head;
     inotify_queued_event_t *tail;
-    int queue_count;
+    uint64_t queue_count;
 } inotify_instance_t;
 
 static inotify_instance_t *inotify_instances;
@@ -85,23 +83,9 @@ static inotify_instance_t *inotify_get(int fd) {
 static void inotify_queue(inotify_instance_t *instance, int wd, uint32_t mask,
                           const char *name) {
     inotify_queued_event_t *event;
-    inotify_queued_event_t *dropped;
     uint32_t length;
 
     if (!instance) return;
-    if (instance->queue_count >= INOTIFY_QUEUE_MAX) {
-        if (instance->tail && instance->tail->mask == INOTIFY_Q_OVERFLOW)
-            return;
-        dropped = instance->head;
-        if (!dropped) return;
-        instance->head = dropped->next;
-        if (!instance->head) instance->tail = NULL;
-        instance->queue_count--;
-        kfree(dropped);
-        wd = -1;
-        mask = INOTIFY_Q_OVERFLOW;
-        name = NULL;
-    }
     event = (inotify_queued_event_t *)kmalloc(sizeof(inotify_queued_event_t));
     if (!event) return;
     memset(event, 0, sizeof(inotify_queued_event_t));
@@ -457,8 +441,8 @@ void syscalls_inotify_init(void) {
     inotify_instances = NULL;
     inotify_capacity = 0;
     mutex_init(&inotify_lock);
-    syscall_table[SYSCALL_INOTIFY_INIT] = sys_inotify_init;
-    syscall_table[SYSCALL_INOTIFY_INIT1] = sys_inotify_init1;
-    syscall_table[SYSCALL_INOTIFY_ADD_WATCH] = sys_inotify_add_watch;
-    syscall_table[SYSCALL_INOTIFY_RM_WATCH] = sys_inotify_rm_watch;
+    syscall_table_set(SYSCALL_INOTIFY_INIT, (void *)(sys_inotify_init));
+    syscall_table_set(SYSCALL_INOTIFY_INIT1, (void *)(sys_inotify_init1));
+    syscall_table_set(SYSCALL_INOTIFY_ADD_WATCH, (void *)(sys_inotify_add_watch));
+    syscall_table_set(SYSCALL_INOTIFY_RM_WATCH, (void *)(sys_inotify_rm_watch));
 }

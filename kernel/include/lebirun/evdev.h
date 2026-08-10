@@ -161,7 +161,6 @@ struct input_absinfo {
     int32_t resolution;
 };
 
-#define EVDEV_BUF_EVENTS 256
 #define EVDEV_BUF_INIT_EVENTS 8
 
 struct evdev_device {

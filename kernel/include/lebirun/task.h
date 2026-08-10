@@ -9,13 +9,10 @@ struct vfs_node;
 struct cpu_info;
 
 #define TASK_INIT_FDS 3
-#define TASK_MAX_FDS 1024
-#define USER_STACK_TOP 0x00600000u
-#define USER_STACK_FLOOR 0x005E0000u
-#define USER_MMAP_LOW_BASE 0x00500000u
-#define USER_MMAP_LOW_LIMIT USER_STACK_FLOOR
-#define USER_MMAP_HIGH_BASE 0x10000000u
-#define USER_MMAP_HIGH_LIMIT 0x40000000u
+#define USER_DYNAMIC_BASE 0x00500000u
+#define USER_DYNAMIC_LIMIT 0x3F800000u
+#define USER_STACK_FLOOR USER_DYNAMIC_LIMIT
+#define USER_STACK_TOP 0x40000000u
 
 #define FD_TYPE_FILE   0
 #define FD_TYPE_PIPE_R 1
@@ -363,6 +360,9 @@ int task_exec_with_args(const uint8_t *bin_start, uint64_t bin_size, registers_t
                         int argc, char **argv, int envc, char **envp);
 int task_exec_node_with_args(struct vfs_node *node, registers_t *regs,
                              int argc, char **argv, int envc, char **envp);
+int task_exec_node_with_owned_args(struct vfs_node *node, registers_t *regs,
+                                   int argc, char **argv,
+                                   int envc, char **envp);
 pid_t task_create_thread(void (*entry)(void));
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
 

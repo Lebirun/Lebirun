@@ -117,7 +117,6 @@ static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) {
             if (!task_handle_file_page_fault(current_task, p)) {
                 if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= current_task->user_brk && p < 0x40000000u) ||
                         (p >= 0x1000u && p < current_task->user_brk)) {
                     phys = pfa_alloc();
                     if (!phys) return 0;
@@ -219,8 +218,7 @@ int vfs_check_perm(vfs_node_t *node, int want) {
 
 static int task_fd_alloc_from(int start) {
     int i;
-    int new_cap;
-    task_fd_t *new_fds;
+    int ret;
 
     if (!current_task || !current_task->fds) return -ESRCH;
     if (start < 0) start = 0;
@@ -233,18 +231,14 @@ static int task_fd_alloc_from(int start) {
             return i;
         }
     }
-    if (current_task->fds_capacity >= TASK_MAX_FDS) return -EMFILE;
-    new_cap = current_task->fds_capacity * 2;
-    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
-    if (start >= new_cap) new_cap = start + 16;
-    if (new_cap > TASK_MAX_FDS) new_cap = TASK_MAX_FDS;
-    new_fds = (task_fd_t *)krealloc(current_task->fds, new_cap * sizeof(task_fd_t));
-    if (!new_fds) return -ENOMEM;
-    memset(&new_fds[current_task->fds_capacity], 0, (new_cap - current_task->fds_capacity) * sizeof(task_fd_t));
-    i = current_task->fds_capacity;
-    if (start > i) i = start;
-    current_task->fds = new_fds;
-    current_task->fds_capacity = new_cap;
+    ret = task_fd_ensure_capacity(
+        current_task, start >= current_task->fds_capacity ?
+        start : current_task->fds_capacity);
+    if (ret != 0) return -EMFILE;
+    for (i = start; i < current_task->fds_capacity; i++) {
+        if (!current_task->fds[i].in_use) break;
+    }
+    if (i >= current_task->fds_capacity) return -EMFILE;
     memset(&current_task->fds[i], 0, sizeof(task_fd_t));
     current_task->fds[i].in_use = 1;
     current_task->fds[i].ref_count = 1;
@@ -1180,20 +1174,20 @@ static int sys_vfs_umount_user(int target_ptr, const char *unused1, int unused2)
 }
 
 void syscalls_vfs_init(void) {
-    syscall_table[SYSCALL_OPEN] = sys_vfs_open;
-    syscall_table[SYSCALL_CLOSE] = sys_vfs_close;
-    syscall_table[SYSCALL_VFS_OPEN] = sys_vfs_open;
-    syscall_table[SYSCALL_VFS_CLOSE] = sys_vfs_close;
-    syscall_table[SYSCALL_VFS_READ] = sys_vfs_read;
-    syscall_table[SYSCALL_VFS_READDIR] = (void*)1;
-    syscall_table[SYSCALL_VFS_STAT] = sys_vfs_stat;
-    syscall_table[SYSCALL_VFS_MOUNTS] = sys_vfs_mounts;
-    syscall_table[SYSCALL_VFS_WRITE] = sys_vfs_write;
-    syscall_table[SYSCALL_VFS_CREATE] = sys_vfs_create;
-    syscall_table[SYSCALL_VFS_MKDIR] = sys_vfs_mkdir;
-    syscall_table[SYSCALL_VFS_UNLINK] = sys_vfs_unlink;
-    syscall_table[SYSCALL_STATFS] = sys_statfs;
-    syscall_table[SYSCALL_FSTATFS] = sys_fstatfs;
-    syscall_table[SYSCALL_VFS_MOUNT] = sys_vfs_mount_user;
-    syscall_table[SYSCALL_VFS_UMOUNT] = sys_vfs_umount_user;
+    syscall_table_set(SYSCALL_OPEN, (void *)(sys_vfs_open));
+    syscall_table_set(SYSCALL_CLOSE, (void *)(sys_vfs_close));
+    syscall_table_set(SYSCALL_VFS_OPEN, (void *)(sys_vfs_open));
+    syscall_table_set(SYSCALL_VFS_CLOSE, (void *)(sys_vfs_close));
+    syscall_table_set(SYSCALL_VFS_READ, (void *)(sys_vfs_read));
+    syscall_table_set(SYSCALL_VFS_READDIR, (void *)((void*)1));
+    syscall_table_set(SYSCALL_VFS_STAT, (void *)(sys_vfs_stat));
+    syscall_table_set(SYSCALL_VFS_MOUNTS, (void *)(sys_vfs_mounts));
+    syscall_table_set(SYSCALL_VFS_WRITE, (void *)(sys_vfs_write));
+    syscall_table_set(SYSCALL_VFS_CREATE, (void *)(sys_vfs_create));
+    syscall_table_set(SYSCALL_VFS_MKDIR, (void *)(sys_vfs_mkdir));
+    syscall_table_set(SYSCALL_VFS_UNLINK, (void *)(sys_vfs_unlink));
+    syscall_table_set(SYSCALL_STATFS, (void *)(sys_statfs));
+    syscall_table_set(SYSCALL_FSTATFS, (void *)(sys_fstatfs));
+    syscall_table_set(SYSCALL_VFS_MOUNT, (void *)(sys_vfs_mount_user));
+    syscall_table_set(SYSCALL_VFS_UMOUNT, (void *)(sys_vfs_umount_user));
 }

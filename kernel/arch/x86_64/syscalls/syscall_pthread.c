@@ -1,7 +1,6 @@
 #include "syscall_defs.h"
 
 extern task_t *current_task;
-extern void **syscall_table;
 
 #define THREAD_INIT_COUNT 1
 #define PTHREAD_STACK_SIZE 0x4000
@@ -468,19 +467,19 @@ void syscalls_pthread_init(void) {
     mutex_capacity = 0;
     conds = NULL;
     cond_capacity = 0;
-    syscall_table[SYSCALL_PTHREAD_CREATE] = sys_pthread_create;
-    syscall_table[SYSCALL_PTHREAD_EXIT] = sys_pthread_exit;
-    syscall_table[SYSCALL_PTHREAD_JOIN] = sys_pthread_join;
-    syscall_table[SYSCALL_PTHREAD_DETACH] = sys_pthread_detach;
-    syscall_table[SYSCALL_PTHREAD_SELF] = sys_pthread_self;
-    syscall_table[SYSCALL_PTHREAD_MUTEX_INIT] = sys_pthread_mutex_init;
-    syscall_table[SYSCALL_PTHREAD_MUTEX_DESTROY] = sys_pthread_mutex_destroy;
-    syscall_table[SYSCALL_PTHREAD_MUTEX_LOCK] = sys_pthread_mutex_lock;
-    syscall_table[SYSCALL_PTHREAD_MUTEX_TRYLOCK] = sys_pthread_mutex_trylock;
-    syscall_table[SYSCALL_PTHREAD_MUTEX_UNLOCK] = sys_pthread_mutex_unlock;
-    syscall_table[SYSCALL_PTHREAD_COND_INIT] = sys_pthread_cond_init;
-    syscall_table[SYSCALL_PTHREAD_COND_DESTROY] = sys_pthread_cond_destroy;
-    syscall_table[SYSCALL_PTHREAD_COND_WAIT] = sys_pthread_cond_wait;
-    syscall_table[SYSCALL_PTHREAD_COND_SIGNAL] = sys_pthread_cond_signal;
-    syscall_table[SYSCALL_PTHREAD_COND_BROADCAST] = sys_pthread_cond_broadcast;
+    syscall_table_set(SYSCALL_PTHREAD_CREATE, (void *)(sys_pthread_create));
+    syscall_table_set(SYSCALL_PTHREAD_EXIT, (void *)(sys_pthread_exit));
+    syscall_table_set(SYSCALL_PTHREAD_JOIN, (void *)(sys_pthread_join));
+    syscall_table_set(SYSCALL_PTHREAD_DETACH, (void *)(sys_pthread_detach));
+    syscall_table_set(SYSCALL_PTHREAD_SELF, (void *)(sys_pthread_self));
+    syscall_table_set(SYSCALL_PTHREAD_MUTEX_INIT, (void *)(sys_pthread_mutex_init));
+    syscall_table_set(SYSCALL_PTHREAD_MUTEX_DESTROY, (void *)(sys_pthread_mutex_destroy));
+    syscall_table_set(SYSCALL_PTHREAD_MUTEX_LOCK, (void *)(sys_pthread_mutex_lock));
+    syscall_table_set(SYSCALL_PTHREAD_MUTEX_TRYLOCK, (void *)(sys_pthread_mutex_trylock));
+    syscall_table_set(SYSCALL_PTHREAD_MUTEX_UNLOCK, (void *)(sys_pthread_mutex_unlock));
+    syscall_table_set(SYSCALL_PTHREAD_COND_INIT, (void *)(sys_pthread_cond_init));
+    syscall_table_set(SYSCALL_PTHREAD_COND_DESTROY, (void *)(sys_pthread_cond_destroy));
+    syscall_table_set(SYSCALL_PTHREAD_COND_WAIT, (void *)(sys_pthread_cond_wait));
+    syscall_table_set(SYSCALL_PTHREAD_COND_SIGNAL, (void *)(sys_pthread_cond_signal));
+    syscall_table_set(SYSCALL_PTHREAD_COND_BROADCAST, (void *)(sys_pthread_cond_broadcast));
 }
