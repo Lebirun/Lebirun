@@ -42,8 +42,9 @@ static int initrd_is_root_parent(uint32_t parent_index) {
     return initrd_is_root_parent_version(parent_index, initrd_version);
 }
 
-static int initrd_decode_parent(const initrd_file_header_t *header,
-                                uint64_t version, uint32_t *parent_index) {
+static int KERNEL_INIT initrd_decode_parent(
+    const initrd_file_header_t *header, uint64_t version,
+    uint32_t *parent_index) {
     uint32_t high;
 
     if (!header || !parent_index) return -1;
@@ -57,8 +58,9 @@ static int initrd_decode_parent(const initrd_file_header_t *header,
     return 0;
 }
 
-static int initrd_parent_graph_valid(initrd_file_t *entries,
-                                     uint64_t count, uint64_t version) {
+static int KERNEL_INIT initrd_parent_graph_valid(initrd_file_t *entries,
+                                                 uint64_t count,
+                                                 uint64_t version) {
     uint64_t i;
     uint64_t current;
     uint64_t traversed;
@@ -387,7 +389,7 @@ initrd_file_t *initrd_find_path(const char *path) {
         for (i = 0; i < file_count; i++) {
             if (files[i].parent_index == current_parent && strcmp(files[i].name, component) == 0) {
                 found = &files[i];
-                current_parent = (uint16_t)i;
+                current_parent = (uint32_t)i;
                 break;
             }
         }
@@ -604,8 +606,8 @@ static vfs_node_t *initrd_vfs_finddir(vfs_node_t *node, const char *name) {
 
 static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoint) {
     uint64_t i;
+    uint64_t k;
     vfs_node_t *node;
-    int j;
 
     (void)device;
     (void)mountpoint;
@@ -627,8 +629,13 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
     memset(initrd_vfs_nodes, 0, initrd_vfs_node_count * sizeof(vfs_node_t));
     
     initrd_vfs_root = &initrd_vfs_nodes[file_count];
-    initrd_vfs_root->name[0] = '/';
-    initrd_vfs_root->name[1] = '\0';
+    if (vfs_node_set_name(initrd_vfs_root, "/") != 0) {
+        kfree(initrd_vfs_nodes);
+        initrd_vfs_nodes = NULL;
+        initrd_vfs_root = NULL;
+        initrd_vfs_node_count = 0;
+        return NULL;
+    }
     initrd_vfs_root->flags = VFS_DIRECTORY;
     initrd_vfs_root->inode = 0xFFFFFFFF;
     initrd_vfs_root->length = 0;
@@ -638,10 +645,6 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
     
     for (i = 0; i < file_count; i++) {
         node = &initrd_vfs_nodes[i];
-        for (j = 0; j < VFS_MAX_NAME - 1 && files[i].name[j]; j++) {
-            node->name[j] = files[i].name[j];
-            node->name[j + 1] = '\0';
-        }
         node->inode = i;
         node->length = files[i].length;
         node->uid = files[i].uid;
@@ -654,6 +657,16 @@ static vfs_node_t *initrd_vfs_do_mount(const char *device, const char *mountpoin
         } else {
             node->flags = VFS_FILE;
             node->read = initrd_vfs_read;
+        }
+        if (vfs_node_set_name(node, files[i].name) != 0) {
+            for (k = 0; k <= i; k++)
+                vfs_node_release_name(&initrd_vfs_nodes[k]);
+            vfs_node_release_name(initrd_vfs_root);
+            kfree(initrd_vfs_nodes);
+            initrd_vfs_nodes = NULL;
+            initrd_vfs_root = NULL;
+            initrd_vfs_node_count = 0;
+            return NULL;
         }
         node->open = initrd_vfs_open;
         node->close = initrd_vfs_close;
@@ -688,26 +701,66 @@ void KERNEL_INIT initrd_vfs_register(void) {
     vfs_register_fs(&initrd_fs_type);
 }
 
-void initrd_copy_to_root(void) {
+static char *KERNEL_INIT initrd_build_path(initrd_file_t *entries,
+                                           uint64_t count, uint64_t index,
+                                           uint64_t version) {
+    uint64_t cur;
+    uint64_t traversed;
+    size_t total;
+    size_t length;
+    size_t pos;
+    char *path;
+
+    if (!entries || index >= count) return NULL;
+    cur = index;
+    traversed = 0;
+    total = 0;
+    while (cur < count && traversed < count) {
+        length = strlen(entries[cur].name);
+        if (length > SIZE_MAX - total - 1) return NULL;
+        total += length + 1;
+        if (initrd_is_root_parent_version(entries[cur].parent_index,
+                                           version) ||
+            entries[cur].parent_index >= count) break;
+        cur = entries[cur].parent_index;
+        traversed++;
+    }
+    if (traversed >= count && cur < count &&
+        !initrd_is_root_parent_version(entries[cur].parent_index, version) &&
+        entries[cur].parent_index < count) return NULL;
+    path = (char *)kmalloc(total + 1);
+    if (!path) return NULL;
+    path[total] = '\0';
+    pos = total;
+    cur = index;
+    traversed = 0;
+    while (cur < count && traversed < count) {
+        length = strlen(entries[cur].name);
+        pos -= length;
+        memcpy(path + pos, entries[cur].name, length);
+        path[--pos] = '/';
+        if (initrd_is_root_parent_version(entries[cur].parent_index,
+                                           version) ||
+            entries[cur].parent_index >= count) break;
+        cur = entries[cur].parent_index;
+        traversed++;
+    }
+    return path;
+}
+
+void KERNEL_INIT initrd_copy_to_root(void) {
     uint64_t dirs_created;
     uint64_t files_copied;
     uint64_t errors;
     const char **p;
     int r;
     uint64_t i;
-    uint64_t traversed;
-    char destpath[INITRD_MAX_PATH];
-    char tmp[INITRD_MAX_PATH];
-    uint64_t cur;
-    char namebuf[VFS_MAX_NAME];
-    char newtmp[INITRD_MAX_PATH];
-    int k;
+    char *destpath;
     bool is_root_level_dir;
     bool is_standard_root;
-    int dlen;
-    int cp;
-    char sub[INITRD_MAX_PATH];
-    int sublen;
+    size_t dlen;
+    size_t cp;
+    char saved;
     int ret;
     int written;
     initrd_file_t *f;
@@ -760,39 +813,11 @@ void initrd_copy_to_root(void) {
             continue;
         }
         
-        destpath[0] = '\0';
-        tmp[0] = '\0';
-        cur = i;
-        traversed = 0;
-        while (cur < file_count && traversed < file_count) {
-            k = 0;
-            while (k < VFS_MAX_NAME - 1 && files[cur].name[k]) { 
-                namebuf[k] = files[cur].name[k]; 
-                k++; 
-            }
-            namebuf[k] = '\0';
-            if (tmp[0] == '\0') {
-                snprintf(newtmp, sizeof(newtmp), "/%s", namebuf);
-            } else {
-                snprintf(newtmp, sizeof(newtmp), "/%s%s", namebuf, tmp);
-            }
-            strncpy(tmp, newtmp, sizeof(tmp) - 1);
-            tmp[sizeof(tmp) - 1] = '\0';
-            if (initrd_is_root_parent(files[cur].parent_index) ||
-                files[cur].parent_index >= file_count) {
-                break;
-            }
-            cur = files[cur].parent_index;
-            traversed++;
-        }
-        if (traversed >= file_count && cur < file_count &&
-            !initrd_is_root_parent(files[cur].parent_index) &&
-            files[cur].parent_index < file_count) {
+        destpath = initrd_build_path(files, file_count, i, initrd_version);
+        if (!destpath) {
             errors++;
             continue;
         }
-        strncpy(destpath, tmp, sizeof(destpath) - 1);
-        destpath[sizeof(destpath) - 1] = '\0';
 
         is_root_level_dir = (initrd_is_root_parent(files[i].parent_index) &&
                              files[i].type == INITRD_TYPE_DIR);
@@ -804,20 +829,21 @@ void initrd_copy_to_root(void) {
                                      strcmp(destpath, "/tmp") == 0 || strcmp(destpath, "/proc") == 0 ||
                                      strcmp(destpath, "/run") == 0 || strcmp(destpath, "/root") == 0);
             if (is_standard_root) {
+                kfree(destpath);
                 continue;
             }
         }
 
-        dlen = (int)strlen(destpath);
+        dlen = strlen(destpath);
         for (cp = 1; cp < dlen; cp++) {
             if (destpath[cp] == '/') {
-                sublen = cp;
-                memcpy(sub, destpath, sublen);
-                sub[sublen] = '\0';
-                if (sublen > 1) {
-                    r = ramfs_create_dir(sub, 0755);
+                saved = destpath[cp];
+                destpath[cp] = '\0';
+                if (cp > 1) {
+                    r = ramfs_create_dir(destpath, 0755);
                     (void)r; 
                 }
+                destpath[cp] = saved;
             }
         }
 
@@ -848,12 +874,13 @@ void initrd_copy_to_root(void) {
                 errors++;
             }
         }
+        kfree(destpath);
     }
     
     printf("INITRD: Copied %u dirs, %u files (%u errors)\n", dirs_created, files_copied, errors);
 }
 
-void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
+void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     uint64_t mods_start_page;
     uint64_t mods_end_page;
     uint64_t phys;
@@ -872,20 +899,11 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     const char **p;
     int r;
     char *destpath;
-    char *tmp;
-    char *namebuf;
-    char *newtmp;
-    uint64_t cur;
-    uint64_t traversed;
-    int k;
     bool is_root_level_dir;
     bool is_standard_root;
-    char *sub;
-    char *scratch;
-    uint64_t scratch_size;
-    int dlen;
-    int cp;
-    int sublen;
+    size_t dlen;
+    size_t cp;
+    char saved;
     uint8_t perms;
     int ret;
     uint64_t hdr_off;
@@ -984,20 +1002,6 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     }
     memset(rfiles, 0, num_entries * sizeof(initrd_file_t));
 
-    scratch_size = (uint64_t)INITRD_MAX_PATH * 4 + VFS_MAX_NAME;
-    scratch = (char *)kmalloc(scratch_size);
-    if (!scratch) {
-        printf("ROOTFS: Failed to allocate path scratch\n");
-        kfree(rfiles);
-        return;
-    }
-    memset(scratch, 0, scratch_size);
-    destpath = scratch;
-    tmp = destpath + INITRD_MAX_PATH;
-    newtmp = tmp + INITRD_MAX_PATH;
-    sub = newtmp + INITRD_MAX_PATH;
-    namebuf = sub + INITRD_MAX_PATH;
-
     for (i = 0; i < num_entries; i++) {
         memcpy(rfiles[i].name, hdrs[i].name, 64);
         rfiles[i].name[63] = '\0';
@@ -1007,7 +1011,6 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         if (initrd_decode_parent(&hdrs[i], rootfs_version,
                                  &rfiles[i].parent_index) != 0) {
             printf("ROOTFS: Entry %u has invalid parent encoding\n", i);
-            kfree(scratch);
             kfree(rfiles);
             return;
         }
@@ -1040,7 +1043,6 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
 
     if (!initrd_parent_graph_valid(rfiles, num_entries, rootfs_version)) {
         printf("ROOTFS: Invalid parent graph\n");
-        kfree(scratch);
         kfree(rfiles);
         return;
     }
@@ -1066,46 +1068,16 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         
         if (!f || f->name[0] == '\0') continue;
         
-        destpath[0] = '\0';
-        tmp[0] = '\0';
-        namebuf[0] = '\0';
-        newtmp[0] = '\0';
-        
-        cur = i;
-        traversed = 0;
-        while (cur < num_entries && traversed < num_entries) {
-            k = 0;
-            while (k < VFS_MAX_NAME - 1 && rfiles[cur].name[k]) { 
-                namebuf[k] = rfiles[cur].name[k]; 
-                k++; 
-            }
-            namebuf[k] = '\0';
-            if (tmp[0] == '\0') {
-                snprintf(newtmp, INITRD_MAX_PATH, "/%s", namebuf);
-            } else {
-                snprintf(newtmp, INITRD_MAX_PATH, "/%s%s", namebuf, tmp);
-            }
-            strncpy(tmp, newtmp, INITRD_MAX_PATH - 1);
-            tmp[INITRD_MAX_PATH - 1] = '\0';
-            if (initrd_is_root_parent_version(rfiles[cur].parent_index,
-                                              rootfs_version) ||
-                rfiles[cur].parent_index >= num_entries) {
-                break;
-            }
-            cur = rfiles[cur].parent_index;
-            traversed++;
-        }
-        if (traversed >= num_entries && cur < num_entries &&
-            !initrd_is_root_parent_version(rfiles[cur].parent_index,
-                                           rootfs_version) &&
-            rfiles[cur].parent_index < num_entries) {
+        destpath = initrd_build_path(rfiles, num_entries, i,
+                                     rootfs_version);
+        if (!destpath) {
             errors++;
             continue;
         }
-        strncpy(destpath, tmp, INITRD_MAX_PATH - 1);
-        destpath[INITRD_MAX_PATH - 1] = '\0';
-        
-        if (destpath[0] == '\0') continue;
+        if (destpath[0] == '\0') {
+            kfree(destpath);
+            continue;
+        }
 
         is_root_level_dir =
             (initrd_is_root_parent_version(rfiles[i].parent_index,
@@ -1118,18 +1090,19 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
                                      strcmp(destpath, "/usr") == 0 || strcmp(destpath, "/var") == 0 ||
                                      strcmp(destpath, "/tmp") == 0 || strcmp(destpath, "/proc") == 0 ||
                                      strcmp(destpath, "/run") == 0 || strcmp(destpath, "/root") == 0);
-            if (is_standard_root) continue;
+            if (is_standard_root) {
+                kfree(destpath);
+                continue;
+            }
         }
 
-        dlen = (int)strlen(destpath);
+        dlen = strlen(destpath);
         for (cp = 1; cp < dlen; cp++) {
             if (destpath[cp] == '/') {
-                sublen = cp;
-                memcpy(sub, destpath, sublen);
-                sub[sublen] = '\0';
-                if (sublen > 1) {
-                    ramfs_create_dir(sub, 0755);
-                }
+                saved = destpath[cp];
+                destpath[cp] = '\0';
+                if (cp > 1) ramfs_create_dir(destpath, 0755);
+                destpath[cp] = saved;
             }
         }
 
@@ -1156,9 +1129,9 @@ void rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
                 errors++;
             }
         }
+        kfree(destpath);
     }
     
-    kfree(scratch);
     kfree(rfiles);
     printf("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n", dirs_created, files_copied, errors);
 }
@@ -1185,6 +1158,8 @@ static void initrd_free_region(uint64_t phys_start, uint64_t phys_end) {
 }
 
 void initrd_free_pages(void) {
+    uint64_t i;
+
     if (initrd_mod0_phys_start && initrd_mod0_phys_end) {
         initrd_free_region(initrd_mod0_phys_start, initrd_mod0_phys_end);
         initrd_mod0_phys_start = 0;
@@ -1206,6 +1181,8 @@ void initrd_free_pages(void) {
     }
 
     if (initrd_vfs_nodes) {
+        for (i = 0; i < initrd_vfs_node_count; i++)
+            vfs_node_release_name(&initrd_vfs_nodes[i]);
         kfree(initrd_vfs_nodes);
         initrd_vfs_nodes = NULL;
         initrd_vfs_node_count = 0;

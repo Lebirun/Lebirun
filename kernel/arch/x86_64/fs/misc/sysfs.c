@@ -257,8 +257,8 @@ static uint64_t sysfs_topology_thread_siblings_read(vfs_node_t *node, uint64_t o
 
 static void sysfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vfs_node_t *parent) {
     memset(n, 0, sizeof(vfs_node_t));
-    strcpy(n->name, name);
     n->flags = flags;
+    vfs_node_set_name(n, name);
     n->parent = parent;
     n->ref_count = 1;
 }
@@ -317,6 +317,7 @@ static void sysfs_reclaim_lazy_node(vfs_node_t **slot, vfs_node_t *active) {
     if (node->ref_count > 1) return;
     if (sysfs_node_has_busy_descendant(node)) return;
     *slot = NULL;
+    vfs_node_release_name(node);
     kfree(node);
 }
 

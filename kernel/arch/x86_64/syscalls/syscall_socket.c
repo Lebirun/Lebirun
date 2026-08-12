@@ -819,7 +819,8 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     return 0;
 }
 
-static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+static int sys_accept(int sockfd, const char *addr_ptr,
+                      uint64_t addrlen_ptr) {
     int idx;
     int i;
     int listener_idx;
@@ -915,12 +916,14 @@ static int sys_accept(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     return socket_base_fd + idx;
 }
 
-static int sys_accept4(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+static int sys_accept4(int sockfd, const char *addr_ptr,
+                       uint64_t addrlen_ptr) {
     return sys_accept(sockfd, addr_ptr, addrlen_ptr);
 }
 
 static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
-                          int optval_ptr, int optlen_ptr, int unused) {
+                          uint64_t optval_ptr, uint64_t optlen_ptr,
+                          int unused) {
     int level;
     int *optval;
     socklen_t *optlen;
@@ -972,7 +975,7 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
 }
 
 static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
-                          int optval_ptr, int optlen, int unused) {
+                          uint64_t optval_ptr, int optlen, int unused) {
     int level;
     int value;
     int *optval;
@@ -1015,7 +1018,8 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
     return 0;
 }
 
-static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+static int sys_getsockname(int sockfd, const char *addr_ptr,
+                           uint64_t addrlen_ptr) {
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
     socket_t *sock;
@@ -1057,7 +1061,8 @@ static int sys_getsockname(int sockfd, const char *addr_ptr, int addrlen_ptr) {
     return -EINVAL;
 }
 
-static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
+static int sys_getpeername(int sockfd, const char *addr_ptr,
+                           uint64_t addrlen_ptr) {
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
     socket_t *sock;
@@ -1097,7 +1102,7 @@ static int sys_getpeername(int sockfd, const char *addr_ptr, int addrlen_ptr) {
 }
 
 static int sys_sendto(int sockfd, const char *buf_ptr, int len,
-                      int flags, int dest_addr_ptr, int addrlen) {
+                      int flags, uint64_t dest_addr_ptr, int addrlen) {
     const void *buf;
     int ret;
     socket_t *sock;
@@ -1185,7 +1190,8 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
 }
 
 static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
-                        int flags, int src_addr_ptr, int addrlen_ptr) {
+                        int flags, uint64_t src_addr_ptr,
+                        uint64_t addrlen_ptr) {
     void *buf;
     size_t available;
     uint64_t timeout_ms;

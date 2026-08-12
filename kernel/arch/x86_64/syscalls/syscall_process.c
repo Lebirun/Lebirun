@@ -235,7 +235,7 @@ static int sys_fork(int unused, const char *unused2, int unused3) {
     return result;
 }
 
-static int sys_exec(int bin_ptr, const char *size_ptr, int unused) {
+static int sys_exec(uint64_t bin_ptr, const char *size_ptr, int unused) {
     registers_t *regs;
     uint64_t bin_addr;
     uint64_t bin_size;

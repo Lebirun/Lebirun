@@ -24,14 +24,14 @@
 #define AT_EGID         14
 #define AT_RANDOM       25
 
-static uint64_t align_down_u64(uint64_t v, uint64_t align) {
+static uint64_t KERNEL_INIT align_down_u64(uint64_t v, uint64_t align) {
     if (align == 0) return v;
     return v & ~(align - 1u);
 }
 
-static int setup_initial_stack_with_elf(uint64_t pd_phys, const char *argv0, 
-                                         const elf_info_t *elf_info,
-                                         uint64_t *out_useresp) {
+static int KERNEL_INIT setup_initial_stack_with_elf(
+    uint64_t pd_phys, const char *argv0, const elf_info_t *elf_info,
+    uint64_t *out_useresp) {
     uint64_t sp;
     uint64_t zero;
     uint64_t argc_val;
@@ -104,64 +104,87 @@ static int setup_initial_stack_with_elf(uint64_t pd_phys, const char *argv0,
     return 0;
 }
 
-static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t *bin_end, int console_id, const char *argv0) {
-    if (!bin_start || !bin_end || bin_end <= bin_start) return NULL;
-    uint64_t size = (uint64_t)(bin_end - bin_start);
+static task_t* KERNEL_INIT launch_user_binary_common(
+    const uint8_t *bin_start, const uint8_t *bin_end, int console_id,
+    const char *argv0) {
+    uint64_t size;
+    uint64_t new_pd;
+    uint64_t *elf_pages;
+    uint64_t elf_page_count;
+    uint64_t stack_page_count;
+    uint64_t *stack_pages;
+    uint64_t initial_useresp;
+    uint64_t total_pages;
+    uint64_t i;
+    int elf_valid;
+    int load_result;
+    int ni;
+    int bi;
+    elf_info_t elf_info;
+    task_t *t;
+    const char *base;
+    registers_t *frame;
 
-    int elf_valid = elf_validate(bin_start, size);
+    if (!bin_start || !bin_end || bin_end <= bin_start) return NULL;
+    size = (uint64_t)(bin_end - bin_start);
+
+    elf_valid = elf_validate(bin_start, size);
     if (elf_valid != 0) {
         printf("launch_user_binary: ELF validation failed (%d)\n", elf_valid);
         return NULL;
     }
 
-    uint64_t new_pd = vmm_create_pml4();
+    new_pd = vmm_create_pml4();
     if (!new_pd) {
         printf("launch_user_binary: Failed to create page directory\n");
         return NULL;
     }
 
-    elf_info_t elf_info;
-    uint64_t *elf_pages = NULL;
-    uint64_t elf_page_count = 0;
+    elf_pages = NULL;
+    elf_page_count = 0;
 
-    int load_result = elf_load_to_pd(new_pd, bin_start, size, &elf_info, &elf_pages, &elf_page_count);
+    load_result = elf_load_to_pd(new_pd, bin_start, size, &elf_info,
+                                 &elf_pages, &elf_page_count);
     if (load_result != 0) {
         printf("launch_user_binary: ELF loading failed (%d)\n", load_result);
         if (elf_pages) {
-            for (uint64_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         vmm_free_pml4(new_pd);
         return NULL;
     }
 
-    uint64_t stack_page_count = 0;
-    uint64_t *stack_pages = vmm_map_range_in_pml4_tracked(new_pd, USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE, USER_STACK_SIZE, 0x7 | VMM_PTE_NX, &stack_page_count);
+    stack_page_count = 0;
+    stack_pages = vmm_map_range_in_pml4_tracked(
+        new_pd, USER_STACK_TOP - USER_STACK_GAP - USER_STACK_SIZE,
+        USER_STACK_SIZE, 0x7 | VMM_PTE_NX, &stack_page_count);
 
-    uint64_t initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
+    initial_useresp = USER_STACK_TOP - USER_STACK_GAP - 16u;
     if (setup_initial_stack_with_elf(new_pd, argv0, &elf_info, &initial_useresp) != 0) {
         printf("launch_user_binary: failed to setup initial user stack\n");
         if (elf_pages) {
-            for (uint64_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         if (stack_pages) {
-            for (uint64_t i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
+            for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
             kfree(stack_pages);
         }
         vmm_free_pml4(new_pd);
         return NULL;
     }
 
-    task_t* t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
+    t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED,
+                             true, new_pd);
     if (!t) {
         printf("launch_user_binary: create_task failed\n");
         if (elf_pages) {
-            for (uint64_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         if (stack_pages) {
-            for (uint64_t i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
+            for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
             kfree(stack_pages);
         }
         vmm_free_pml4(new_pd);
@@ -174,33 +197,30 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     t->console_id = console_id;
     t->stack_size = USER_STACK_SIZE;
 
-    {
-        const char *base = argv0;
-        int ni = 0;
-        if (base) {
-            int bi;
-            for (bi = 0; argv0[bi]; bi++) {
-                if (argv0[bi] == '/') base = &argv0[bi + 1];
-            }
-            while (ni < 15 && base[ni]) { t->name[ni] = base[ni]; ni++; }
+    base = argv0;
+    ni = 0;
+    if (base) {
+        for (bi = 0; argv0[bi]; bi++) {
+            if (argv0[bi] == '/') base = &argv0[bi + 1];
         }
-        t->name[ni] = '\0';
+        while (ni < 15 && base[ni]) { t->name[ni] = base[ni]; ni++; }
     }
+    t->name[ni] = '\0';
 
-    registers_t *frame = (registers_t *)(uintptr_t)t->regs.rsp;
+    frame = (registers_t *)(uintptr_t)t->regs.rsp;
     frame->rsp = initial_useresp;
 
-    uint64_t total_pages = elf_page_count + stack_page_count;
+    total_pages = elf_page_count + stack_page_count;
 
     if (elf_page_count > UINT64_MAX - stack_page_count ||
         total_pages == 0 || total_pages > SIZE_MAX / sizeof(uint64_t)) {
         printf("launch_user_binary: invalid total_pages=%u\n", total_pages);
         if (elf_pages) {
-            for (uint64_t i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
+            for (i = 0; i < elf_page_count; i++) pfa_free(elf_pages[i]);
             kfree(elf_pages);
         }
         if (stack_pages) {
-            for (uint64_t i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
+            for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
             kfree(stack_pages);
         }
         vmm_free_pml4(new_pd);
@@ -231,11 +251,13 @@ static task_t* launch_user_binary_common(const uint8_t *bin_start, const uint8_t
     return t;
 }
 
-task_t* launch_user_binary(const uint8_t *bin_start, const uint8_t *bin_end, int console_id) {
+task_t* KERNEL_INIT launch_user_binary(const uint8_t *bin_start,
+                                       const uint8_t *bin_end,
+                                       int console_id) {
     return launch_user_binary_common(bin_start, bin_end, console_id, "program");
 }
 
-task_t* launch_user_path(const char *path, int console_id) {
+task_t* KERNEL_INIT launch_user_path(const char *path, int console_id) {
     vfs_node_t *node;
     uint64_t new_pd;
     elf_info_t elf_info;

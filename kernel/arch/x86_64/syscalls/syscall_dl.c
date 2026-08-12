@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/elf.h>
 #include <lebirun/vfs.h>
+#include <lebirun/task.h>
 
 
 #define RTLD_LAZY    0x00001
@@ -10,7 +11,7 @@
 #define RTLD_DEFAULT ((void *)0)
 #define RTLD_NEXT    ((void *)-1)
 
-#define DL_BASE_ADDR 0x20000000
+#define DL_BASE_ADDR USER_HIGH_DYNAMIC_BASE
 
 static dl_handle_t *dl_handles;
 static int dl_capacity = 0;
@@ -39,14 +40,6 @@ static void dl_set_error(const char *msg) {
     length = strlen(msg);
     if (length == SIZE_MAX || !dl_ensure_error(length + 1)) return;
     memcpy(dl_error_msg, msg, length + 1);
-}
-
-static void dl_set_error_invalid_so(int code) {
-    char formatted[64];
-
-    snprintf(formatted, sizeof(formatted),
-             "dlopen: invalid shared object (code=%d)", code);
-    dl_set_error(formatted);
 }
 
 static void dl_clear_error(void) {
@@ -112,24 +105,29 @@ static void dl_call_fini(dl_handle_t *h) {
 }
 
 static int read_file_data(const char *path, uint8_t **out_data, uint64_t *out_size) {
-    vfs_node_t *node = vfs_namei(path);
+    vfs_node_t *node;
+    uint64_t size;
+    uint8_t *data;
+    uint64_t read;
+
+    node = vfs_namei(path);
     if (!node) {
         return -1;
     }
     
-    uint64_t size = node->length;
+    size = node->length;
     if (size == 0) {
         vfs_release(node);
         return -2;
     }
     
-    uint8_t *data = (uint8_t *)kmalloc(size);
+    data = (uint8_t *)kmalloc(size);
     if (!data) {
         vfs_release(node);
         return -3;
     }
     
-    uint64_t read = vfs_read(node, 0, size, data);
+    read = vfs_read(node, 0, size, data);
     vfs_release(node);
     if (read != size) {
         kfree(data);
@@ -141,40 +139,107 @@ static int read_file_data(const char *path, uint8_t **out_data, uint64_t *out_si
     return 0;
 }
 
-static int dl_open_by_name(const char *name, int name_len) {
+static char *dl_join_path(const char *prefix, const char *name,
+                          size_t name_len) {
+    size_t prefix_len;
+    char *path;
+
+    prefix_len = prefix ? strlen(prefix) : 0;
+    if (prefix_len > SIZE_MAX - name_len - 1) return NULL;
+    path = (char *)kmalloc(prefix_len + name_len + 1);
+    if (!path) return NULL;
+    if (prefix_len) memcpy(path, prefix, prefix_len);
+    memcpy(path + prefix_len, name, name_len);
+    path[prefix_len + name_len] = '\0';
+    return path;
+}
+
+static int dl_copy_user_name(uint64_t address, char **out, size_t *out_len) {
+    uint64_t current;
+    uint64_t page_end;
+    size_t length;
+    char *copy;
+
+    if (!out || !out_len || !current_task || address < 0x1000 ||
+        address >= KERNEL_VMA) return -1;
+    *out = NULL;
+    length = 0;
+    for (;;) {
+        current = address + length;
+        if (current < address || current >= KERNEL_VMA) return -1;
+        if (!vmm_get_phys_in_pml4(current_task->pml4_phys,
+                                  current & ~(PAGE_SIZE - 1))) return -1;
+        page_end = (current | (PAGE_SIZE - 1)) + 1;
+        while (current < page_end && current < KERNEL_VMA) {
+            if (*(const char *)(uintptr_t)current == '\0') {
+                if (length == SIZE_MAX) return -1;
+                copy = (char *)kmalloc(length + 1);
+                if (!copy) return -1;
+                memcpy(copy, (const void *)(uintptr_t)address, length + 1);
+                *out = copy;
+                *out_len = length;
+                return 0;
+            }
+            current++;
+            length++;
+        }
+    }
+}
+
+static uint64_t dl_find_mapping_base(uint64_t span) {
+    uint64_t candidate;
+    uint64_t page;
+    uint64_t end;
+    uint64_t pd_phys;
+
+    if (!current_task || span == 0 ||
+        span > USER_HIGH_DYNAMIC_LIMIT - USER_HIGH_DYNAMIC_BASE) return 0;
+    pd_phys = current_task->pml4_phys;
+    candidate = dl_next_base;
+    if (candidate < USER_HIGH_DYNAMIC_BASE) candidate = USER_HIGH_DYNAMIC_BASE;
+    candidate = (candidate + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    while (candidate <= USER_HIGH_DYNAMIC_LIMIT - span) {
+        end = candidate + span;
+        for (page = candidate; page < end; page += PAGE_SIZE) {
+            if (vmm_get_phys_in_pml4(pd_phys, page)) break;
+        }
+        if (page == end) return candidate;
+        if (page > USER_HIGH_DYNAMIC_LIMIT - PAGE_SIZE) return 0;
+        candidate = page + PAGE_SIZE;
+    }
+    return 0;
+}
+
+static int dl_open_by_name(const char *name, size_t name_len) {
     int slot;
     int new_cap;
     dl_handle_t *new_arr;
-    char full_path[128];
-    int path_len;
+    char *full_path;
+    char *stored_name;
     uint8_t *file_data;
     uint64_t file_size;
     int ret;
     int valid;
     uint64_t load_base;
+    uint64_t mapping_span;
     uint64_t pd_phys;
-    int d;
-    int nlen;
+    uint64_t next_base;
+    uint64_t d;
+    size_t nlen;
+    int i;
 
     init_dl();
 
-    for (int i = 0; i < dl_capacity; i++) {
-        if (dl_handles[i].in_use) {
-            int match = 1;
-            for (int j = 0; j < name_len; j++) {
-                if (dl_handles[i].name[j] != name[j]) {
-                    match = 0;
-                    break;
-                }
-            }
-            if (match && dl_handles[i].name[name_len] == '\0') {
-                return (int)(i + 1);
-            }
-        }
+    if (!name || name_len == SIZE_MAX) return 0;
+    for (i = 0; i < dl_capacity; i++) {
+        if (dl_handles[i].in_use && dl_handles[i].name &&
+            strlen(dl_handles[i].name) == name_len &&
+            memcmp(dl_handles[i].name, name, name_len) == 0)
+            return i + 1;
     }
 
     slot = -1;
-    for (int i = 0; i < dl_capacity; i++) {
+    for (i = 0; i < dl_capacity; i++) {
         if (!dl_handles[i].in_use) {
             slot = i;
             break;
@@ -182,11 +247,11 @@ static int dl_open_by_name(const char *name, int name_len) {
     }
 
     if (slot < 0) {
+        if (dl_capacity > INT32_MAX / 2) return 0;
         new_cap = dl_capacity == 0 ? 4 : dl_capacity * 2;
+        if ((size_t)new_cap > SIZE_MAX / sizeof(dl_handle_t)) return 0;
         new_arr = (dl_handle_t *)kmalloc(new_cap * sizeof(dl_handle_t));
-        if (!new_arr) {
-            return 0;
-        }
+        if (!new_arr) return 0;
         memset(new_arr, 0, new_cap * sizeof(dl_handle_t));
         if (dl_handles) {
             memcpy(new_arr, dl_handles, dl_capacity * sizeof(dl_handle_t));
@@ -197,37 +262,20 @@ static int dl_open_by_name(const char *name, int name_len) {
         dl_capacity = new_cap;
     }
 
-    path_len = 0;
-    if (name[0] == '/') {
-        for (int i = 0; i < name_len && path_len < 127; i++) {
-            full_path[path_len++] = name[i];
-        }
-    } else {
-        const char *lib_prefix = "/lib/";
-        for (int i = 0; i < 5; i++) {
-            full_path[path_len++] = lib_prefix[i];
-        }
-        for (int i = 0; i < name_len && path_len < 127; i++) {
-            full_path[path_len++] = name[i];
-        }
-    }
-    full_path[path_len] = '\0';
+    full_path = dl_join_path(name[0] == '/' ? NULL : "/lib/",
+                             name, name_len);
+    if (!full_path) return 0;
 
     file_data = NULL;
     file_size = 0;
     ret = read_file_data(full_path, &file_data, &file_size);
     if (ret != 0 && name[0] != '/') {
-        path_len = 0;
-        const char *usr_prefix = "/usr/lib/";
-        for (int i = 0; i < 9; i++) {
-            full_path[path_len++] = usr_prefix[i];
-        }
-        for (int i = 0; i < name_len && path_len < 127; i++) {
-            full_path[path_len++] = name[i];
-        }
-        full_path[path_len] = '\0';
+        kfree(full_path);
+        full_path = dl_join_path("/usr/lib/", name, name_len);
+        if (!full_path) return 0;
         ret = read_file_data(full_path, &file_data, &file_size);
     }
+    kfree(full_path);
     if (ret != 0) {
         return 0;
     }
@@ -238,29 +286,41 @@ static int dl_open_by_name(const char *name, int name_len) {
         return 0;
     }
 
-    load_base = dl_next_base;
-    dl_next_base += 0x100000;
+    if (elf_so_mapping_span(file_data, file_size, &mapping_span) != 0) {
+        kfree(file_data);
+        return 0;
+    }
 
+    stored_name = dl_join_path(NULL, name, name_len);
+    if (!stored_name) {
+        kfree(file_data);
+        return 0;
+    }
+    load_base = dl_find_mapping_base(mapping_span);
+    if (!load_base) {
+        kfree(stored_name);
+        kfree(file_data);
+        return 0;
+    }
     pd_phys = current_task->pml4_phys;
 
     ret = elf_load_so(pd_phys, file_data, file_size, load_base, &dl_handles[slot]);
     kfree(file_data);
 
     if (ret != 0) {
+        kfree(stored_name);
         return 0;
     }
 
-    for (int i = 0; i < name_len && i < 63; i++) {
-        dl_handles[slot].name[i] = name[i];
-    }
-    dl_handles[slot].name[name_len < 63 ? name_len : 63] = '\0';
+    next_base = load_base + mapping_span;
+    dl_next_base = next_base;
+    dl_handles[slot].name = stored_name;
     dl_handles[slot].in_use = 1;
 
     elf_relocate_so(pd_phys, &dl_handles[slot], dl_handles, dl_capacity);
 
     for (d = 0; d < dl_handles[slot].needed_count; d++) {
-        nlen = 0;
-        while (dl_handles[slot].needed[d][nlen] && nlen < 63) nlen++;
+        nlen = strlen(dl_handles[slot].needed[d]);
         dl_open_by_name(dl_handles[slot].needed[d], nlen);
     }
 
@@ -269,152 +329,37 @@ static int dl_open_by_name(const char *name, int name_len) {
     return (int)(slot + 1);
 }
 
-static int sys_dlopen(int filename_ptr, const char *flags_ptr, int unused) {
+static int sys_dlopen(uint64_t filename_ptr, const char *flags_ptr, int unused) {
+    char *filename;
+    size_t length;
+    int handle;
+    int flags;
+
     (void)unused;
     init_dl();
-    
-    int flags = (int)(uintptr_t)flags_ptr;
+    flags = (int)(uintptr_t)flags_ptr;
     (void)flags;
-    
+
     if (!filename_ptr) {
         dl_set_error("dlopen: NULL filename not supported");
         return 0;
     }
-    
-    uint64_t name_addr = (uint64_t)filename_ptr;
-    if (name_addr >= KERNEL_VMA || name_addr < 0x1000) {
+
+    if (dl_copy_user_name(filename_ptr, &filename, &length) != 0) {
         dl_set_error("dlopen: invalid filename pointer");
         return 0;
     }
-    
-    const char *filename = (const char *)name_addr;
-    
-    int slot = -1;
-    for (int i = 0; i < dl_capacity; i++) {
-        if (!dl_handles[i].in_use) {
-            slot = i;
-            break;
-        }
-    }
-    
-    if (slot < 0) {
-        int new_cap = dl_capacity == 0 ? 4 : dl_capacity * 2;
-        dl_handle_t *new_arr = (dl_handle_t *)kmalloc(new_cap * sizeof(dl_handle_t));
-        if (!new_arr) {
-            dl_set_error("dlopen: out of memory");
-            return 0;
-        }
-        memset(new_arr, 0, new_cap * sizeof(dl_handle_t));
-        if (dl_handles) {
-            memcpy(new_arr, dl_handles, dl_capacity * sizeof(dl_handle_t));
-            kfree(dl_handles);
-        }
-        slot = dl_capacity;
-        dl_handles = new_arr;
-        dl_capacity = new_cap;
-    }
-    
-    int len = 0;
-    while (filename[len] && len < 63) len++;
-    
-    for (int i = 0; i < dl_capacity; i++) {
-        if (dl_handles[i].in_use) {
-            int match = 1;
-            for (int j = 0; j < len; j++) {
-                if (dl_handles[i].name[j] != filename[j]) {
-                    match = 0;
-                    break;
-                }
-            }
-            if (match && dl_handles[i].name[len] == '\0') {
-                return (int)(i + 1);
-            }
-        }
-    }
-    
-    char full_path[128];
-    int path_len = 0;
-    
-    if (filename[0] == '/') {
-        while (filename[path_len] && path_len < 127) {
-            full_path[path_len] = filename[path_len];
-            path_len++;
-        }
-    } else {
-        const char *lib_prefix = "/lib/";
-        int prefix_len = 5;
-        for (int i = 0; i < prefix_len; i++) {
-            full_path[path_len++] = lib_prefix[i];
-        }
-        for (int i = 0; i < len && path_len < 127; i++) {
-            full_path[path_len++] = filename[i];
-        }
-    }
-    full_path[path_len] = '\0';
-    
-    uint8_t *file_data = NULL;
-    uint64_t file_size = 0;
-    int ret = read_file_data(full_path, &file_data, &file_size);
-    if (ret != 0 && filename[0] != '/') {
-        path_len = 0;
-        const char *usr_prefix = "/usr/lib/";
-        int uprefix_len = 9;
-        for (int i = 0; i < uprefix_len; i++) {
-            full_path[path_len++] = usr_prefix[i];
-        }
-        for (int i = 0; i < len && path_len < 127; i++) {
-            full_path[path_len++] = filename[i];
-        }
-        full_path[path_len] = '\0';
-        ret = read_file_data(full_path, &file_data, &file_size);
-    }
-    if (ret != 0) {
-        dl_set_error("dlopen: failed to read file");
-        return 0;
-    }
-    
-    int valid = elf_validate_so(file_data, file_size);
-    if (valid != 0) {
-        kfree(file_data);
-        dl_set_error_invalid_so(valid);
-        return 0;
-    }
-    
-    uint64_t load_base = dl_next_base;
-    dl_next_base += 0x100000;
-    
-    uint64_t pd_phys = current_task->pml4_phys;
-    
-    ret = elf_load_so(pd_phys, file_data, file_size, load_base, &dl_handles[slot]);
-    kfree(file_data);
-    
-    if (ret != 0) {
+    handle = dl_open_by_name(filename, length);
+    kfree(filename);
+    if (!handle) {
         dl_set_error("dlopen: failed to load shared object");
         return 0;
     }
-
-    for (int i = 0; i < len; i++) {
-        dl_handles[slot].name[i] = filename[i];
-    }
-    dl_handles[slot].name[len] = '\0';
-    dl_handles[slot].in_use = 1;
-
-    elf_relocate_so(pd_phys, &dl_handles[slot], dl_handles, dl_capacity);
-
-    for (int d = 0; d < dl_handles[slot].needed_count; d++) {
-        int nlen = 0;
-        while (dl_handles[slot].needed[d][nlen] && nlen < 63) nlen++;
-        dl_open_by_name(dl_handles[slot].needed[d], nlen);
-    }
-
-    dl_call_init(&dl_handles[slot]);
-    
     dl_clear_error();
-    
-    return (int)(slot + 1);
+    return handle;
 }
 
-static int sys_dlsym(int handle, const char *symbol_ptr, int unused) {
+static int64_t sys_dlsym(int handle, const char *symbol_ptr, int unused) {
     (void)unused;
     init_dl();
     
@@ -449,7 +394,7 @@ static int sys_dlsym(int handle, const char *symbol_ptr, int unused) {
     }
     
     dl_clear_error();
-    return (int)addr;
+    return (int64_t)addr;
 }
 
 static int sys_dlclose(int handle, const char *unused1, int unused2) {
@@ -489,11 +434,7 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
         dl_handles[slot].strtab2 = NULL;
     }
 
-    if (dl_handles[slot].needed) {
-        kfree(dl_handles[slot].needed);
-        dl_handles[slot].needed = NULL;
-        dl_handles[slot].needed_count = 0;
-    }
+    elf_free_needed(&dl_handles[slot]);
     
     if (dl_handles[slot].file_data) {
         kfree(dl_handles[slot].file_data);
@@ -504,14 +445,18 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
         kfree(dl_handles[slot].pages);
         dl_handles[slot].pages = NULL;
     }
+
+    if (dl_handles[slot].name) {
+        kfree(dl_handles[slot].name);
+        dl_handles[slot].name = NULL;
+    }
     
     dl_handles[slot].in_use = 0;
-    dl_handles[slot].name[0] = '\0';
     
     return 0;
 }
 
-static int sys_dlerror(int buf_ptr, const char *size_ptr, int unused) {
+static int sys_dlerror(uint64_t buf_ptr, const char *size_ptr, int unused) {
     uint64_t buf_addr;
     uint64_t size;
     char *buf;

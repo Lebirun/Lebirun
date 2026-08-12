@@ -422,7 +422,9 @@ static int heap_expand(uint64_t new_end) {
     return 0;
 }
 
-void KERNEL_EARLY_INIT heap_init(void) {
+int KERNEL_EARLY_INIT heap_init(void) {
+    int mem_map_relocated;
+
     kernel_heap.start_addr = HEAP_START;
     kernel_heap.end_addr = HEAP_START;
     kernel_heap.max_addr = HEAP_VIRTUAL_END;
@@ -459,12 +461,14 @@ void KERNEL_EARLY_INIT heap_init(void) {
     main_heap_initialized = 1;
     early_heap_reclaim_unused();
     klog_persist_enable();
+    mem_map_relocated = mem_map_relocate();
     slab_init();
 
     KERNEL_INIT_LOG("Heap initialized: 0x%08X - 0x%08X (%u KB) [demand paging + slab]\n",
            kernel_heap.start_addr, kernel_heap.end_addr,
            kernel_heap.total_size / 1024);
     KERNEL_INIT_LOG("Early heap used: %u / %u bytes\n", early_heap_used, early_heap_total);
+    return mem_map_relocated;
 }
 
 uint64_t heap_get_early_total(void) { return early_heap_total; }
@@ -883,11 +887,15 @@ void kfree_secure(void *ptr) {
 
 void *krealloc(void *ptr, size_t new_size) {
     heap_block_t *block;
+    heap_block_t *next;
     heap_block_t *remainder;
     void *new_ptr;
     size_t old_size;
     size_t old_block_size;
     size_t new_block_size;
+    size_t combined_size;
+    uint64_t block_end;
+    uint64_t commit_end;
     uint64_t eflags;
     
     if (!ptr) return kmalloc(new_size);
@@ -954,6 +962,35 @@ void *krealloc(void *ptr, size_t new_size) {
         set_canaries(block);
         heap_lock_release(eflags);
         return ptr;
+    }
+
+    next = block->next;
+    block_end = (uint64_t)block + sizeof(heap_block_t) + block->size;
+    if (next && next->is_free && block_end == (uint64_t)next &&
+            next->size <= SIZE_MAX - sizeof(heap_block_t) &&
+            block->size <= SIZE_MAX - sizeof(heap_block_t) - next->size) {
+        combined_size = block->size + sizeof(heap_block_t) + next->size;
+        if (combined_size >= new_block_size) {
+            commit_end = (uint64_t)block + sizeof(heap_block_t) +
+                         new_block_size;
+            if (combined_size - new_block_size >= sizeof(heap_block_t) +
+                    HEAP_MIN_BLOCK) {
+                commit_end += sizeof(heap_block_t);
+            }
+            if (heap_commit_span((uint64_t)block, commit_end) == 0) {
+                old_block_size = block->size;
+                block->size = combined_size;
+                block->next = next->next;
+                if (block->next) block->next->prev = block;
+                next->magic = 0xDEAD0003;
+                split_block(block, new_block_size);
+                kernel_heap.used_size += block->size - old_block_size;
+                block->alloc_size = new_size;
+                set_canaries(block);
+                heap_lock_release(eflags);
+                return ptr;
+            }
+        }
     }
 
     old_size = block->alloc_size;

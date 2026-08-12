@@ -12,8 +12,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#define LAPIC_VIRT_BASE     (KERNEL_VMA + 0x3EC01000ULL)
-#define IOAPIC_VIRT_BASE    (KERNEL_VMA + 0x3EC00000ULL)
+#define LAPIC_VIRT_BASE     0xFFFFFFFFD8001000ULL
+#define IOAPIC_VIRT_BASE    0xFFFFFFFFD8000000ULL
 
 #define AP_TRAMPOLINE_PHYS  0x8000u
 
@@ -23,7 +23,7 @@ volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
 uint32_t lapic_timer_reload = 0;
 
-static cpu_info_t cpu_bootstrap[1];
+static cpu_info_t cpu_bootstrap[4];
 cpu_info_t *cpus = cpu_bootstrap;
 int cpu_count = 0;
 volatile int cpus_booted = 0;
@@ -60,7 +60,8 @@ extern volatile uint64_t ap_boot_entry;
 static int KERNEL_INIT smp_ensure_cpu_capacity(int needed) {
     cpu_info_t *new_cpus;
 
-    if (needed <= 1) return 1;
+    if (needed <= (int)(sizeof(cpu_bootstrap) / sizeof(cpu_bootstrap[0])))
+        return 1;
     if (cpus == cpu_bootstrap) {
         new_cpus = (cpu_info_t *)kmalloc(
             (uint64_t)needed * sizeof(cpu_info_t));
@@ -93,12 +94,12 @@ static uint32_t lapic_read(uint32_t reg) {
     return lapic_base[reg / 4];
 }
 
-static void ioapic_write(uint32_t reg, uint32_t val) {
+static void KERNEL_INIT ioapic_write(uint32_t reg, uint32_t val) {
     ioapic_base[0] = reg;
     ioapic_base[4] = val;
 }
 
-static uint32_t ioapic_read(uint32_t reg) {
+static uint32_t KERNEL_INIT ioapic_read(uint32_t reg) {
     ioapic_base[0] = reg;
     return ioapic_base[4];
 }
@@ -325,7 +326,7 @@ void KERNEL_INIT ioapic_init(void) {
            ioapic_phys, ioapic_max_redir);
 }
 
-static uint64_t irq_to_gsi(uint8_t irq) {
+static uint64_t KERNEL_INIT irq_to_gsi(uint8_t irq) {
     int i;
 
     if (!irq_overrides) return (uint64_t)irq;
@@ -337,7 +338,8 @@ static uint64_t irq_to_gsi(uint8_t irq) {
     return (uint64_t)irq;
 }
 
-void ioapic_route_irq(uint8_t irq, uint8_t vector, uint64_t dest_apic_id) {
+void KERNEL_INIT ioapic_route_irq(uint8_t irq, uint8_t vector,
+                                  uint64_t dest_apic_id) {
     uint64_t redtbl_lo;
     uint64_t redtbl_hi;
     uint64_t reg;
@@ -353,7 +355,7 @@ void ioapic_route_irq(uint8_t irq, uint8_t vector, uint64_t dest_apic_id) {
     ioapic_write(reg, redtbl_lo);
 }
 
-void ioapic_mask_irq(uint8_t irq) {
+void KERNEL_INIT ioapic_mask_irq(uint8_t irq) {
     uint64_t reg;
     uint64_t lo;
     uint64_t gsi;

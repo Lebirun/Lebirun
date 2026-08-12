@@ -4,15 +4,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 #define SYS_GETDENTS (80 | 0x80000000)
 
 struct __dirstream {
     int fd;
     off_t tell;
-    int buf_pos;
-    int buf_end;
-    char buf[2048];
+    size_t buf_pos;
+    size_t buf_end;
+    size_t buf_capacity;
+    char *buf;
 };
 
 static inline int syscall3(int num, int arg1, int arg2, int arg3) {
@@ -37,7 +39,9 @@ DIR *opendir(const char *name) {
 }
 
 DIR *fdopendir(int fd) {
-    DIR *dir = (DIR *)malloc(sizeof(DIR));
+    DIR *dir;
+
+    dir = (DIR *)malloc(sizeof(DIR));
     if (!dir) {
         close(fd);
         return (void*)0;
@@ -46,23 +50,48 @@ DIR *fdopendir(int fd) {
     dir->tell = 0;
     dir->buf_pos = 0;
     dir->buf_end = 0;
+    dir->buf_capacity = 0;
+    dir->buf = (char *)0;
     return dir;
 }
 
 int closedir(DIR *dirp) {
+    int ret;
+
     if (!dirp) return -1;
-    int ret = close(dirp->fd);
+    ret = close(dirp->fd);
+    free(dirp->buf);
     free(dirp);
     return ret;
 }
 
 struct dirent *readdir(DIR *dirp) {
     static struct dirent result;
+    struct dirent *de;
+    char *resized;
+    int len;
+    int i;
+    const char *src;
     
     if (!dirp) return (void*)0;
     
     if (dirp->buf_pos >= dirp->buf_end) {
-        int len = getdents(dirp->fd, (struct dirent *)dirp->buf, sizeof(dirp->buf));
+        if (!dirp->buf) {
+            dirp->buf_capacity = 512;
+            dirp->buf = (char *)malloc(dirp->buf_capacity);
+            if (!dirp->buf) return (void *)0;
+        }
+        for (;;) {
+            len = getdents(dirp->fd, (struct dirent *)dirp->buf,
+                           dirp->buf_capacity);
+            if (len != -EINVAL) break;
+            if (dirp->buf_capacity > UINT_MAX / 2) return (void *)0;
+            resized = (char *)realloc(dirp->buf,
+                                      dirp->buf_capacity * 2);
+            if (!resized) return (void *)0;
+            dirp->buf = resized;
+            dirp->buf_capacity *= 2;
+        }
         if (len <= 0) {
             return (void*)0;
         }
@@ -70,15 +99,15 @@ struct dirent *readdir(DIR *dirp) {
         dirp->buf_end = len;
     }
     
-    struct dirent *de = (struct dirent *)(dirp->buf + dirp->buf_pos);
+    de = (struct dirent *)(dirp->buf + dirp->buf_pos);
     
     result.d_ino = de->d_ino;
     result.d_off = de->d_off;
     result.d_reclen = de->d_reclen;
     result.d_type = de->d_type;
     
-    int i = 0;
-    const char *src = de->d_name;
+    i = 0;
+    src = de->d_name;
     while (*src && i < 255) {
         result.d_name[i++] = *src++;
     }
@@ -145,22 +174,30 @@ int alphasort(const struct dirent **a, const struct dirent **b) {
 int scandir(const char *path, struct dirent ***namelist,
             int (*filter)(const struct dirent *),
             int (*compar)(const struct dirent **, const struct dirent **)) {
-    DIR *d = opendir(path);
-    if (!d) return -1;
-    
-    struct dirent **list = (void*)0;
-    int count = 0;
-    int capacity = 0;
-    
+    DIR *d;
+    struct dirent **list;
+    struct dirent **newlist;
     struct dirent *entry;
+    struct dirent *copy;
+    struct dirent *tmp;
+    int count;
+    int capacity;
+    int i;
+    int j;
+
+    d = opendir(path);
+    if (!d) return -1;
+    list = (void*)0;
+    count = 0;
+    capacity = 0;
     while ((entry = readdir(d)) != (void*)0) {
         if (filter && !filter(entry)) continue;
         
         if (count >= capacity) {
             capacity = capacity ? capacity * 2 : 16;
-            struct dirent **newlist = (struct dirent **)realloc(list, capacity * sizeof(struct dirent *));
+            newlist = (struct dirent **)realloc(list, capacity * sizeof(struct dirent *));
             if (!newlist) {
-                for (int i = 0; i < count; i++) free(list[i]);
+                for (i = 0; i < count; i++) free(list[i]);
                 free(list);
                 closedir(d);
                 return -1;
@@ -168,9 +205,9 @@ int scandir(const char *path, struct dirent ***namelist,
             list = newlist;
         }
         
-        struct dirent *copy = (struct dirent *)malloc(sizeof(struct dirent));
+        copy = (struct dirent *)malloc(sizeof(struct dirent));
         if (!copy) {
-            for (int i = 0; i < count; i++) free(list[i]);
+            for (i = 0; i < count; i++) free(list[i]);
             free(list);
             closedir(d);
             return -1;
@@ -182,11 +219,11 @@ int scandir(const char *path, struct dirent ***namelist,
     closedir(d);
     
     if (compar && count > 1) {
-        for (int i = 0; i < count - 1; i++) {
-            for (int j = 0; j < count - i - 1; j++) {
+        for (i = 0; i < count - 1; i++) {
+            for (j = 0; j < count - i - 1; j++) {
                 if (compar((const struct dirent **)&list[j], 
                            (const struct dirent **)&list[j+1]) > 0) {
-                    struct dirent *tmp = list[j];
+                    tmp = list[j];
                     list[j] = list[j+1];
                     list[j+1] = tmp;
                 }

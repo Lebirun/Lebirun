@@ -149,13 +149,15 @@ static int sys_inotify_add_watch(int fd, const char *pathname, uint64_t mask) {
     inotify_instance_t *instance;
     inotify_watch_t *new_watches;
     vfs_node_t *node;
-    char path[VFS_MAX_PATH];
+    char *path;
     int new_capacity;
     int i;
     int wd;
 
-    if (copy_string_from_user(path, pathname, sizeof(path)) < 0) return -EFAULT;
+    path = copy_string_from_user_alloc(pathname);
+    if (!path) return -EFAULT;
     node = vfs_lookup(path);
+    kfree(path);
     if (!node) return -ENOENT;
     mutex_lock(&inotify_lock);
     instance = inotify_get(fd);

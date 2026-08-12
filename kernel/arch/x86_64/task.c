@@ -250,7 +250,7 @@ int task_set_cwd(task_t *task, const char *cwd) {
         return 0;
     }
     len = strlen(visible);
-    if (len >= VFS_MAX_PATH) return -1;
+    if (len == SIZE_MAX) return -1;
     copy = (char *)kmalloc(len + 1);
     if (!copy) return -1;
     memcpy(copy, visible, len + 1);
@@ -270,7 +270,7 @@ int task_set_root(task_t *task, const char *root) {
         return 0;
     }
     len = strlen(root);
-    if (len >= VFS_MAX_PATH) return -1;
+    if (len == SIZE_MAX) return -1;
     copy = (char *)kmalloc(len + 1);
     if (!copy) return -1;
     memcpy(copy, root, len + 1);
@@ -570,6 +570,7 @@ static int task_free_pml4_if_unowned(task_t *owner, uint64_t pd) {
     if (task_is_current_on_any_cpu(owner)) return 0;
     if ((read_cr3() & ~0xFFFULL) == (pd & ~0xFFFULL)) return 0;
     if (task_pml4_has_other_owner(owner, pd)) return 0;
+    regex_release_address_space(pd);
     vmm_free_pml4(pd);
     return 1;
 }
@@ -579,6 +580,7 @@ static int task_free_exec_old_pml4_if_unowned(task_t *owner, uint64_t pd) {
     if (task_is_current_on_any_cpu(owner)) return 0;
     if ((read_cr3() & ~0xFFFULL) == (pd & ~0xFFFULL)) return 0;
     if (task_pml4_has_owner(owner, pd, 1, 0)) return 0;
+    regex_release_address_space(pd);
     vmm_free_pml4(pd);
     return 1;
 }
@@ -1286,11 +1288,15 @@ static task_t *task_find_idle_locked(void) {
     return NULL;
 }
 
-task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode) {
+task_t* KERNEL_INIT create_task(void (*entry)(void),
+                                task_state_t initial_state,
+                                bool user_mode) {
     return create_task_with_cr3(entry, initial_state, user_mode, read_cr3());
 }
 
-task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bool user_mode, uint64_t cr3) {
+task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
+                                         task_state_t initial_state,
+                                         bool user_mode, uint64_t cr3) {
     uint8_t *kernel_stack_base;
     uint64_t *krsp;
     uint64_t user_rsp;
@@ -1444,7 +1450,8 @@ task_t* create_task_with_cr3(void (*entry)(void), task_state_t initial_state, bo
     return new_task;
 }
 
-task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state) {
+task_t* KERNEL_INIT create_kernel_task(void (*entry)(void),
+                                       task_state_t initial_state) {
     task_t *t;
 
     t = create_task(entry, initial_state, false);
@@ -1840,7 +1847,7 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     task_t *task;
     uint64_t vaddr;
     uint64_t phys;
-    uint8_t old_ref;
+    uint64_t old_ref;
     int added_existing_ref;
     int i;
 
@@ -2415,6 +2422,7 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
         if (!(area->map_flags & TASK_VMA_ANONYMOUS) ||
             (area->map_flags & TASK_VMA_SHARED)) continue;
         if (page < area->vaddr || page >= area->vaddr + area->memsz) continue;
+        if (write_fault && !(area->flags & VMM_PTE_WRITE)) return 0;
         map_flags = area->flags;
         if (write_fault) {
             physical = pfa_alloc();
@@ -2487,6 +2495,7 @@ static int task_file_page_has_overlap(task_t *task, int map_index,
 static uint64_t task_reclaim_file_exec_pages(task_t *task,
                                              uint64_t max_pages,
                                              uint64_t protected_address,
+                                             int include_nx,
                                              uint64_t *partial_pages) {
     task_file_map_t *area;
     uint64_t address;
@@ -2511,7 +2520,7 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
             (area->map_flags & (TASK_VMA_SHARED | TASK_VMA_ANONYMOUS)) ||
             !(area->flags & VMM_PTE_USER) ||
             (area->flags & VMM_PTE_WRITE) ||
-            (area->flags & VMM_PTE_NX))
+            (!include_nx && (area->flags & VMM_PTE_NX)))
             continue;
         area_end = area->vaddr + area->memsz;
         file_end = area->vaddr + area->filesz;
@@ -2529,8 +2538,9 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
                 protected_address < address + PAGE_SIZE) continue;
             flags = vmm_get_flags_in_pml4(task->pml4_phys, address);
             if (!(flags & VMM_PTE_PRESENT) ||
-                (flags & (VMM_PTE_WRITE | VMM_PTE_NX | VMM_PTE_COW |
-                          VMM_PTE_NOFREE | VMM_PTE_SHARED)))
+                (flags & (VMM_PTE_WRITE | VMM_PTE_COW |
+                          VMM_PTE_NOFREE | VMM_PTE_SHARED)) ||
+                (!include_nx && (flags & VMM_PTE_NX)))
                 continue;
             removed = vmm_unmap_page_in_pml4(task->pml4_phys, address);
             if (!removed) continue;
@@ -2566,7 +2576,7 @@ static uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages,
             !task_pml4_has_multiple_users(task) &&
             !task_pml4_is_current_on_any_cpu(task->pml4_phys)) {
             remaining = max_pages - reclaimed;
-            reclaimed += task_reclaim_file_exec_pages(task, remaining, 0,
+            reclaimed += task_reclaim_file_exec_pages(task, remaining, 0, 1,
                                                        partial_pages);
         }
         task = task->all_next;
@@ -2593,48 +2603,93 @@ static uint64_t task_reclaim_current_file_exec(uint64_t max_pages,
         protected_address = frame->rip;
         if (protected_address >= 0x1000 && protected_address < KERNEL_VMA) {
             reclaimed = task_reclaim_file_exec_pages(
-                task, max_pages, protected_address, partial_pages);
+                task, max_pages, protected_address, 0, partial_pages);
         }
     }
     unlock_scheduler();
     return reclaimed;
 }
 
+static uint64_t task_zero_reclaim_cursor_get(task_t *task) {
+    uint64_t cursor;
+
+    cursor = 0;
+    memcpy(&cursor, task->zero_reclaim_cursor,
+           sizeof(task->zero_reclaim_cursor));
+    return cursor;
+}
+
+static void task_zero_reclaim_cursor_set(task_t *task, uint64_t cursor) {
+    memcpy(task->zero_reclaim_cursor, &cursor,
+           sizeof(task->zero_reclaim_cursor));
+}
+
 uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
     task_file_map_t *area;
     uint64_t address;
+    uint64_t area_end;
     uint64_t physical;
     uint64_t flags;
     uint64_t *words;
     uint64_t word;
     uint64_t reclaimed;
     uint64_t scanned;
-    uint64_t scan_limit;
+    uint64_t scan_budget;
+    uint64_t cursor;
+    uint64_t position;
+    uint64_t area_pages;
+    uint64_t page_index;
     uint64_t shared_zero;
     uint64_t replacement_flags;
+    int file_backed;
     int zero;
     int i;
 
     if (!task || !task->is_user || max_pages == 0) return 0;
     reclaimed = 0;
     scanned = 0;
-    shared_zero = 0;
     if (max_pages > UINT64_MAX / 4)
-        scan_limit = UINT64_MAX;
+        scan_budget = UINT64_MAX;
     else
-        scan_limit = max_pages * 4;
-    for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
+        scan_budget = max_pages * 4;
+    shared_zero = 0;
+    cursor = task_zero_reclaim_cursor_get(task);
+    position = 0;
+    for (i = 0; i < task->file_map_count && reclaimed < max_pages &&
+         scanned < scan_budget; i++) {
         area = &task->file_maps[i];
-        if (!(area->map_flags & TASK_VMA_ANONYMOUS) ||
-            (area->map_flags & TASK_VMA_SHARED)) continue;
-        for (address = area->vaddr;
-             address < area->vaddr + area->memsz && reclaimed < max_pages &&
-             scanned < scan_limit;
-             address += PAGE_SIZE) {
+        area_end = area->vaddr + area->memsz;
+        file_backed = area->node != NULL &&
+                      !(area->map_flags & TASK_VMA_ANONYMOUS);
+        if (area_end < area->vaddr ||
+            (area->map_flags & TASK_VMA_SHARED) ||
+            (!file_backed &&
+             !(area->map_flags & TASK_VMA_ANONYMOUS)) ||
+            (file_backed && !(area->flags & VMM_PTE_WRITE))) continue;
+        area_pages = area->memsz / PAGE_SIZE;
+        if (area->memsz % PAGE_SIZE) area_pages++;
+        if (area_pages > UINT64_MAX - position) {
+            task_zero_reclaim_cursor_set(task, 0);
+            return reclaimed;
+        }
+        if (cursor >= position + area_pages) {
+            position += area_pages;
+            continue;
+        }
+        page_index = cursor > position ? cursor - position : 0;
+        address = area->vaddr + page_index * PAGE_SIZE;
+        for (;
+             page_index < area_pages && address < area_end &&
+             reclaimed < max_pages &&
+             scanned < scan_budget;
+             address += PAGE_SIZE, page_index++) {
             scanned++;
+            task_zero_reclaim_cursor_set(task, position + page_index + 1);
             physical = vmm_get_phys_in_pml4(task->pml4_phys, address);
             flags = vmm_get_flags_in_pml4(task->pml4_phys, address);
-            if (!physical ||
+            if (!physical || !(flags & VMM_PTE_PRESENT) ||
+                !(flags & VMM_PTE_USER) ||
+                (file_backed && !(flags & VMM_PTE_WRITE)) ||
                 (flags & (VMM_PTE_COW | VMM_PTE_NOFREE |
                           VMM_PTE_SHARED)))
                 continue;
@@ -2665,11 +2720,19 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
                                      flags);
                 continue;
             }
-            pfa_free(physical);
+            if (file_backed) {
+                exec_page_cache_on_page_release(physical);
+                pfa_cow_release64(physical);
+            } else {
+                pfa_free(physical);
+            }
             reclaimed++;
         }
-        if (scanned >= scan_limit) break;
+        if (page_index < area_pages && address < area_end)
+            return reclaimed;
+        position += area_pages;
     }
+    if (i >= task->file_map_count) task_zero_reclaim_cursor_set(task, 0);
     return reclaimed;
 }
 
@@ -2698,6 +2761,7 @@ uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages) {
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     uint64_t page;
     uint64_t old_phys;
+    uint64_t old_flags;
     uint64_t new_phys;
     uint64_t map_flags;
     uint8_t *old_ptr;
@@ -2710,9 +2774,9 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     match = -1;
     for (i = 0; i < task->file_map_count; i++) {
         if (!(task->file_maps[i].flags & 0x2)) continue;
+        if (task->file_maps[i].map_flags & TASK_VMA_SHARED) continue;
         if (!task->file_maps[i].node &&
-            (!(task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS) ||
-             (task->file_maps[i].map_flags & TASK_VMA_SHARED))) continue;
+            !(task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS)) continue;
         if (page < task->file_maps[i].vaddr) continue;
         if (page >= task->file_maps[i].vaddr + task->file_maps[i].memsz) continue;
         match = i;
@@ -2722,6 +2786,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
 
     old_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
     if (!old_phys) return 0;
+    old_flags = vmm_get_flags_in_pml4(task->pml4_phys, page);
 
     new_phys = pfa_alloc();
     if (!new_phys) return 0;
@@ -2742,7 +2807,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     }
 
     if (task_replace_user_page(task, old_phys, new_phys) != 0) {
-        vmm_unmap_page_in_pml4(task->pml4_phys, page);
+        vmm_map_page_in_pml4(task->pml4_phys, page, old_phys, old_flags);
         pfa_free(new_phys);
         return 0;
     }
@@ -2952,8 +3017,12 @@ static void task_memory_pressure_reclaim(void) {
     task_reclaim_blocked_file_exec(64, NULL);
     task_reclaim_current_file_exec(64, NULL);
     reclaimed = task_reclaim_inactive_zero_anon(128);
-    if (reclaimed < 128)
-        task_reclaim_zero_anon(current_task, 128 - reclaimed);
+    if (reclaimed < 128) {
+        lock_scheduler();
+        if (current_task && !task_pml4_has_multiple_users(current_task))
+            task_reclaim_zero_anon(current_task, 128 - reclaimed);
+        unlock_scheduler();
+    }
 }
 
 void task_memory_pressure_reclaim_now(void) {
@@ -4304,6 +4373,13 @@ pid_t task_fork(registers_t *parent_regs, int share_address_space,
             kfree(child);
             return -KERR_EFAULT;
         }
+    }
+
+    if (!share_address_space &&
+        regex_clone_address_space(parent->pml4_phys, child_pd) != 0) {
+        task_release_dead_resources(child);
+        kfree(child);
+        return -KERR_ENOMEM;
     }
 
     if (shm_fork_task(parent->pid, child->pid) != 0) {

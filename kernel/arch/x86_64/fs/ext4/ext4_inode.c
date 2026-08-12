@@ -3,8 +3,10 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-extern int ext4_load_group_descs(ext4_fs_t *fs);
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);
+
+static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint64_t group,
+                                         ext4_group_desc_t *desc);
 
 static int find_inode_cache(ext4_fs_t *fs, uint32_t ino) {
     int i;
@@ -85,7 +87,9 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     uint64_t inode_table;
     uint64_t inode_block;
     uint32_t inode_offset;
+    size_t copy_size;
     uint8_t *block;
+    ext4_group_desc_t desc;
 
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
@@ -94,15 +98,10 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     group = (ino - 1) / fs->sb.s_inodes_per_group;
     index = (ino - 1) % fs->sb.s_inodes_per_group;
 
-    if (!fs->group_descs) {
-        if (ext4_load_group_descs(fs) != 0) {
-            return -1;
-        }
-    }
-
-    inode_table = fs->group_descs[group].bg_inode_table_lo;
+    if (ext4_read_group_desc_internal(fs, group, &desc) != 0) return -1;
+    inode_table = desc.bg_inode_table_lo;
     if (fs->is_64bit) {
-        inode_table |= ((uint64_t)fs->group_descs[group].bg_inode_table_hi << 32);
+        inode_table |= ((uint64_t)desc.bg_inode_table_hi << 32);
     }
 
     inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
@@ -113,7 +112,10 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
         return -1;
     }
 
-    memcpy(inode, block + inode_offset, sizeof(ext4_inode_t));
+    copy_size = fs->inode_size;
+    if (copy_size > sizeof(ext4_inode_t)) copy_size = sizeof(ext4_inode_t);
+    memset(inode, 0, sizeof(ext4_inode_t));
+    memcpy(inode, block + inode_offset, copy_size);
     ext4_release_block(fs, inode_block);
 
     return 0;
@@ -125,7 +127,9 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     uint64_t inode_table;
     uint64_t inode_block;
     uint32_t inode_offset;
+    size_t copy_size;
     uint8_t *block;
+    ext4_group_desc_t desc;
 
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
@@ -134,15 +138,10 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     group = (ino - 1) / fs->sb.s_inodes_per_group;
     index = (ino - 1) % fs->sb.s_inodes_per_group;
 
-    if (!fs->group_descs) {
-        if (ext4_load_group_descs(fs) != 0) {
-            return -1;
-        }
-    }
-
-    inode_table = fs->group_descs[group].bg_inode_table_lo;
+    if (ext4_read_group_desc_internal(fs, group, &desc) != 0) return -1;
+    inode_table = desc.bg_inode_table_lo;
     if (fs->is_64bit) {
-        inode_table |= ((uint64_t)fs->group_descs[group].bg_inode_table_hi << 32);
+        inode_table |= ((uint64_t)desc.bg_inode_table_hi << 32);
     }
 
     inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
@@ -153,7 +152,9 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
         return -1;
     }
 
-    memcpy(block + inode_offset, inode, sizeof(ext4_inode_t));
+    copy_size = fs->inode_size;
+    if (copy_size > sizeof(ext4_inode_t)) copy_size = sizeof(ext4_inode_t);
+    memcpy(block + inode_offset, inode, copy_size);
     ext4_mark_block_dirty(fs, inode_block);
     ext4_release_block(fs, inode_block);
 
@@ -465,11 +466,16 @@ uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logic
     }
 }
 
-static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint32_t group, ext4_group_desc_t *desc) {
-    uint32_t desc_block = fs->first_data_block + 1 + (group * fs->desc_size) / fs->block_size;
-    uint32_t desc_offset = (group * fs->desc_size) % fs->block_size;
+static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+    uint64_t desc_block;
+    uint32_t desc_offset;
+    uint8_t *block;
 
-    uint8_t *block = ext4_get_block(fs, desc_block);
+    if (group > UINT64_MAX / fs->desc_size) return -1;
+    desc_block = fs->first_data_block + 1 +
+                 (group * fs->desc_size) / fs->block_size;
+    desc_offset = (group * fs->desc_size) % fs->block_size;
+    block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
@@ -480,11 +486,16 @@ static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint32_t group, ext4_gro
     return 0;
 }
 
-static int ext4_write_group_desc_internal(ext4_fs_t *fs, uint32_t group, ext4_group_desc_t *desc) {
-    uint32_t desc_block = fs->first_data_block + 1 + (group * fs->desc_size) / fs->block_size;
-    uint32_t desc_offset = (group * fs->desc_size) % fs->block_size;
+static int ext4_write_group_desc_internal(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+    uint64_t desc_block;
+    uint32_t desc_offset;
+    uint8_t *block;
 
-    uint8_t *block = ext4_get_block(fs, desc_block);
+    if (group > UINT64_MAX / fs->desc_size) return -1;
+    desc_block = fs->first_data_block + 1 +
+                 (group * fs->desc_size) / fs->block_size;
+    desc_offset = (group * fs->desc_size) % fs->block_size;
+    block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
@@ -492,10 +503,6 @@ static int ext4_write_group_desc_internal(ext4_fs_t *fs, uint32_t group, ext4_gr
     memcpy(block + desc_offset, desc, sizeof(ext4_group_desc_t));
     ext4_mark_block_dirty(fs, desc_block);
     ext4_release_block(fs, desc_block);
-
-    if (fs->group_descs) {
-        memcpy(&fs->group_descs[group], desc, sizeof(ext4_group_desc_t));
-    }
 
     return 0;
 }

@@ -105,6 +105,7 @@ static int devfs_grow_blockdevs(void) {
 static dirent_t devfs_boot_dirent;
 
 static dirent_t *devfs_alloc_dirent(void) {
+    vfs_dirent_release_name(&devfs_boot_dirent);
     memset(&devfs_boot_dirent, 0, sizeof(devfs_boot_dirent));
     return &devfs_boot_dirent;
 }
@@ -544,8 +545,8 @@ static const devfs_static_node_desc_t devfs_node_descs[DEVFS_NODE_COUNT] = {
 
 static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_t *desc, int idx) {
     memset(node, 0, sizeof(vfs_node_t));
-    strcpy(node->name, desc->name);
     node->flags = desc->flags;
+    vfs_node_set_name(node, desc->name);
     node->mask = desc->mask;
     node->uid = 0;
     node->gid = 0;
@@ -586,22 +587,12 @@ static vfs_node_t *devfs_get_base_node_by_name(const char *name) {
 }
 
 static void devfs_init_tty_node(vfs_node_t *tty, int idx) {
-    char name[8];
+    char name[16];
 
     memset(tty, 0, sizeof(vfs_node_t));
-    name[0] = 't';
-    name[1] = 't';
-    name[2] = 'y';
-    if (idx >= 10) {
-        name[3] = '0' + (idx / 10);
-        name[4] = '0' + (idx % 10);
-        name[5] = '\0';
-    } else {
-        name[3] = '0' + idx;
-        name[4] = '\0';
-    }
-    strcpy(tty->name, name);
+    snprintf(name, sizeof(name), "tty%d", idx);
     tty->flags = VFS_CHARDEVICE;
+    vfs_node_set_name(tty, name);
     tty->mask = 0620;
     tty->uid = 0;
     tty->gid = 0;
@@ -631,9 +622,6 @@ static vfs_node_t *devfs_get_tty_node(int idx) {
 
 static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     dirent_t *d;
-
-    (void)node;
-    
     static const char *base_entries[] = {
         "null", "zero", "urandom", "random", "tty", "console",
         "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
@@ -642,6 +630,10 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         , "vfl"
 #endif
     };
+    int count;
+    int i;
+
+    (void)node;
     
     if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
         d = devfs_alloc_dirent();
@@ -658,17 +650,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     if (index < (uint64_t)dev_tty_count) {
         d = devfs_alloc_dirent();
         if (!d) return NULL;
-        d->name[0] = 't';
-        d->name[1] = 't';
-        d->name[2] = 'y';
-        if (index >= 10) {
-            d->name[3] = '0' + (index / 10);
-            d->name[4] = '0' + (index % 10);
-            d->name[5] = '\0';
-        } else {
-            d->name[3] = '0' + index;
-            d->name[4] = '\0';
-        }
+        snprintf(d->name, sizeof(d->name), "tty%lu", index);
         d->inode = 16 + index + 1;
         d->type = VFS_CHARDEVICE;
         return d;
@@ -676,15 +658,15 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     
     index -= (uint64_t)dev_tty_count;
     if (index < (uint64_t)devfs_blockdev_count) {
-        int count;
-        int i;
         count = 0;
         for (i = 0; i < devfs_blockdev_capacity; i++) {
             if (devfs_blockdevs[i].in_use) {
                 if (count == (int)index) {
                     d = devfs_alloc_dirent();
                     if (!d) return NULL;
-                    strcpy(d->name, devfs_blockdevs[i].node.name);
+                    if (vfs_dirent_set_name(
+                            d, vfs_node_name(&devfs_blockdevs[i].node)) != 0)
+                        return NULL;
                     d->inode = 100 + i;
                     d->type = VFS_BLOCKDEVICE;
                     return d;
@@ -710,6 +692,7 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
 static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     int i;
     int idx;
+    int digit;
     vfs_node_t *root;
     vfs_node_t *base_node;
 
@@ -722,17 +705,21 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "vfl") == 0) return vfl_get_devfs_node();
 #endif
     
-    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' && name[3] >= '0' && name[3] <= '9') {
-        idx = name[3] - '0';
-        if (name[4] >= '0' && name[4] <= '9' && name[5] == '\0')
-            idx = idx * 10 + (name[4] - '0');
-        else if (name[4] != '\0')
-            return NULL;
+    if (name[0] == 't' && name[1] == 't' && name[2] == 'y' &&
+        name[3] >= '0' && name[3] <= '9') {
+        idx = 0;
+        for (i = 3; name[i] != '\0'; i++) {
+            if (name[i] < '0' || name[i] > '9') return NULL;
+            digit = name[i] - '0';
+            if (idx > (INT32_MAX - digit) / 10) return NULL;
+            idx = idx * 10 + digit;
+        }
         return devfs_get_tty_node(idx);
     }
     
     for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (devfs_blockdevs[i].in_use && strcmp(devfs_blockdevs[i].node.name, name) == 0)
+        if (devfs_blockdevs[i].in_use &&
+            strcmp(vfs_node_name(&devfs_blockdevs[i].node), name) == 0)
             return &devfs_blockdevs[i].node;
     }
 
@@ -740,7 +727,7 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
         root = initrd_get_vfs_root();
         if (!root)
             return NULL;
-        strcpy(root->name, "initrd");
+        vfs_node_set_name(root, "initrd");
         root->parent = &devfs_root;
         return root;
     }
@@ -782,8 +769,8 @@ void KERNEL_INIT devfs_init(void) {
     }
 
     memset(&devfs_root, 0, sizeof(vfs_node_t));
-    strcpy(devfs_root.name, "dev");
     devfs_root.flags = VFS_DIRECTORY;
+    vfs_node_set_name(&devfs_root, "dev");
     devfs_root.mask = VFS_PERM_READ | VFS_PERM_EXEC;
     devfs_root.uid = 0;
     devfs_root.gid = 0;
@@ -874,12 +861,6 @@ int KERNEL_INIT devfs_register_blockdev(const char *name,
         devfs_blockdevs[slot].sector_count = 0;
     }
 
-    len = strlen(name);
-    if (len >= VFS_MAX_NAME)
-        len = VFS_MAX_NAME - 1;
-    memcpy(devfs_blockdevs[slot].node.name, name, len);
-    devfs_blockdevs[slot].node.name[len] = '\0';
-
     devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
     devfs_blockdevs[slot].node.mask = 0660;
     devfs_blockdevs[slot].node.uid = 0;
@@ -892,6 +873,11 @@ int KERNEL_INIT devfs_register_blockdev(const char *name,
     devfs_blockdevs[slot].node.parent = &devfs_root;
     devfs_blockdevs[slot].node.ref_count = 1;
     devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
+    len = strlen(name);
+    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
+        devfs_blockdevs[slot].in_use = 0;
+        return -1;
+    }
 
     devfs_blockdev_count++;
     return 0;
@@ -932,12 +918,6 @@ int KERNEL_INIT devfs_register_cdrom(const char *name,
     devfs_blockdevs[slot].is_cdrom = 1;
     devfs_blockdevs[slot].sector_count = 0;
 
-    len = strlen(name);
-    if (len >= VFS_MAX_NAME)
-        len = VFS_MAX_NAME - 1;
-    memcpy(devfs_blockdevs[slot].node.name, name, len);
-    devfs_blockdevs[slot].node.name[len] = '\0';
-
     devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
     devfs_blockdevs[slot].node.mask = 0440;
     devfs_blockdevs[slot].node.uid = 0;
@@ -950,6 +930,11 @@ int KERNEL_INIT devfs_register_cdrom(const char *name,
     devfs_blockdevs[slot].node.parent = &devfs_root;
     devfs_blockdevs[slot].node.ref_count = 1;
     devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
+    len = strlen(name);
+    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
+        devfs_blockdevs[slot].in_use = 0;
+        return -1;
+    }
 
     devfs_blockdev_count++;
     return 0;
@@ -989,12 +974,6 @@ int devfs_register_partition(const char *name, uint64_t port_index,
     devfs_blockdevs[slot].sector_count = sector_count;
     devfs_blockdevs[slot].is_partition = 1;
 
-    len = strlen(name);
-    if (len >= VFS_MAX_NAME)
-        len = VFS_MAX_NAME - 1;
-    memcpy(devfs_blockdevs[slot].node.name, name, len);
-    devfs_blockdevs[slot].node.name[len] = '\0';
-
     devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
     devfs_blockdevs[slot].node.mask = 0660;
     devfs_blockdevs[slot].node.uid = 0;
@@ -1008,6 +987,11 @@ int devfs_register_partition(const char *name, uint64_t port_index,
     devfs_blockdevs[slot].node.parent = &devfs_root;
     devfs_blockdevs[slot].node.ref_count = 1;
     devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
+    len = strlen(name);
+    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
+        devfs_blockdevs[slot].in_use = 0;
+        return -1;
+    }
 
     devfs_blockdev_count++;
     return 0;
@@ -1047,7 +1031,7 @@ int devfs_rescan_partitions(const char *devname) {
     drive_slot = -1;
     for (i = 0; i < devfs_blockdev_capacity; i++) {
         if (devfs_blockdevs[i].in_use && !devfs_blockdevs[i].is_partition &&
-            strcmp(devfs_blockdevs[i].node.name, devname) == 0) {
+            strcmp(vfs_node_name(&devfs_blockdevs[i].node), devname) == 0) {
             port_index = devfs_blockdevs[i].port_index;
             drive_slot = i;
             found = 1;
@@ -1073,7 +1057,7 @@ int devfs_rescan_partitions(const char *devname) {
 
     for (pk = 0; pk < ptable.count; pk++) {
         snprintf(partname, sizeof(partname), "%s%d",
-                 devfs_blockdevs[drive_slot].node.name,
+                 vfs_node_name(&devfs_blockdevs[drive_slot].node),
                  ptable.parts[pk].part_number);
         devfs_register_partition(partname, port_index,
                                  ptable.parts[pk].start_lba,

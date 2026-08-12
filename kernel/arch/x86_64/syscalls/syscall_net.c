@@ -182,6 +182,41 @@ static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) 
     return -1;
 }
 
+static int copy_user_string_alloc(char **out, const char *src_user) {
+    uint64_t addr;
+    uint64_t pd;
+    uint64_t length;
+    uint64_t current;
+    uint64_t page_end;
+    char *copy;
+
+    if (!out || !src_user) return -1;
+    *out = NULL;
+    addr = (uint64_t)(uintptr_t)src_user;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return -1;
+    pd = get_user_pd();
+    if (!pd) return -1;
+    length = 0;
+    for (;;) {
+        current = addr + length;
+        if (current < addr || current >= KERNEL_VMA) return -1;
+        if (vmm_get_phys_in_pml4(pd, current & ~0xFFFu) == 0) return -1;
+        page_end = (current | 0xFFFu) + 1;
+        while (current < page_end && current < KERNEL_VMA) {
+            if (*(const char *)(uintptr_t)current == '\0') {
+                if (length == SIZE_MAX) return -1;
+                copy = (char *)kmalloc((size_t)length + 1);
+                if (!copy) return -1;
+                memcpy(copy, src_user, (size_t)length + 1);
+                *out = copy;
+                return 0;
+            }
+            current++;
+            length++;
+        }
+    }
+}
+
 static void klog(const char *fmt, ...) {
     char buf[256];
     int len;
@@ -268,7 +303,7 @@ static int sys_net_arp(int unused, const char *unused2, int unused3) {
     return 0;
 }
 
-static int sys_net_dns(int unused, const char *hostname, int result_ptr) {
+static int sys_net_dns(int unused, const char *hostname, uint64_t result_ptr) {
     char hostbuf[256];
     int ret;
     (void)unused;
@@ -367,7 +402,7 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
     return -1;
 }
 
-static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
+static int sys_net_getinfo(uint64_t buf_ptr, const char *unused2, int unused3) {
     netif_t *netif;
     netinfo_user_t info;
     int i;
@@ -406,7 +441,8 @@ static int sys_net_getinfo(int buf_ptr, const char *unused2, int unused3) {
     return 0;
 }
 
-static int sys_net_arp_get(int buf_ptr, const char *count_ptr, int max_entries) {
+static int sys_net_arp_get(uint64_t buf_ptr, const char *count_ptr,
+                           int max_entries) {
     uint64_t *ips;
     uint8_t *macs;
     int count;
@@ -467,7 +503,8 @@ static int sys_net_ping_one(int ip_packed, const char *seq_ptr, int timeout_ms) 
     return ping_one(target, seq, (uint64_t)timeout_ms);
 }
 
-static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unused) {
+static int sys_net_dns_resolve(uint64_t hostname_ptr,
+                               const char *result_ptr, int unused) {
     const char *hostname;
     char hostbuf[256];
     int ret;
@@ -487,7 +524,8 @@ static int sys_net_dns_resolve(int hostname_ptr, const char *result_ptr, int unu
     return ret;
 }
 
-static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
+static int sys_net_http_get(uint64_t req_ptr, const char *unused1,
+                            int unused2) {
     char *url_buf;
     uint64_t user_buf_addr;
     uint8_t *kbuf;
@@ -512,10 +550,8 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
                        sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
 
-    url_buf = (char *)kmalloc(512);
-    if (!url_buf) return -1;
-
-    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); return -1; }
+    url_buf = NULL;
+    if (copy_user_string_alloc(&url_buf, req.url) != 0) return -1;
 
     user_buf_addr = (uint64_t)(uintptr_t)req.buffer;
     if (!user_range_ok(user_buf_addr, req.buffer_size)) { kfree(url_buf); return -1; }
@@ -590,7 +626,8 @@ static int sys_net_http_get(int req_ptr, const char *unused1, int unused2) {
     return ret;
 }
 
-static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
+static int sys_net_http_post(uint64_t req_ptr, const char *unused1,
+                             int unused2) {
     char *url_buf;
     char *ct_buf;
     uint64_t user_buf_addr;
@@ -611,16 +648,11 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
                        sizeof(req)) != 0) return -1;
     if (!req.url || !req.buffer || req.buffer_size == 0) return -1;
 
-    url_buf = (char *)kmalloc(512);
-    if (!url_buf) return -1;
-    ct_buf = (char *)kmalloc(128);
-    if (!ct_buf) { kfree(url_buf); return -1; }
-
-    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); kfree(ct_buf); return -1; }
-
-    ct_buf[0] = '\0';
+    url_buf = NULL;
+    ct_buf = NULL;
+    if (copy_user_string_alloc(&url_buf, req.url) != 0) return -1;
     if (req.content_type) {
-        if (copy_user_string(ct_buf, 128, req.content_type) != 0) { kfree(url_buf); kfree(ct_buf); return -1; }
+        if (copy_user_string_alloc(&ct_buf, req.content_type) != 0) { kfree(url_buf); return -1; }
     }
 
     user_buf_addr = (uint64_t)(uintptr_t)req.buffer;
@@ -634,7 +666,7 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
     downloaded = 0;
     status = 0;
     ret = http_post_download_alloc(
-        url_buf, ct_buf[0] ? ct_buf : NULL,
+        url_buf, ct_buf,
         (const uint8_t *)(uintptr_t)req.post_body,
         req.post_body ? req.post_body_len : 0,
         &kbuf, &downloaded, &status);
@@ -669,7 +701,8 @@ static int sys_net_http_post(int req_ptr, const char *unused1, int unused2) {
     return ret;
 }
 
-static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2) {
+static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
+                                  int unused2) {
     char *url_buf;
     uint8_t *kbuf;
     uint8_t *khdr;
@@ -707,10 +740,8 @@ static int sys_net_http_get_alloc(int req_ptr, const char *unused1, int unused2)
         !user_range_mapped((uint64_t)(uintptr_t)req.out_size,
                            sizeof(uint64_t))) return -1;
 
-    url_buf = (char *)kmalloc(512);
-    if (!url_buf) return -1;
-
-    if (copy_user_string(url_buf, 512, req.url) != 0) { kfree(url_buf); return -1; }
+    url_buf = NULL;
+    if (copy_user_string_alloc(&url_buf, req.url) != 0) return -1;
 
     max_redir = req.max_redirects;
     if (max_redir < 0) max_redir = 0;

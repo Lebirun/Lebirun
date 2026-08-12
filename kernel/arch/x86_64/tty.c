@@ -165,12 +165,12 @@ int KERNEL_EARLY_INIT terminal_load_psf_font(const void *data, size_t size) {
 }
 
 int KERNEL_EARLY_INIT terminal_load_embedded_font(const void *glyphs, size_t size) {
-    if (!use_framebuffer || !glyphs || size != 8192) return -1;
+    if (!use_framebuffer || !glyphs || size != 4096) return -1;
     loaded_font.version = 1;
     loaded_font.width = 8;
     loaded_font.height = 16;
     loaded_font.bytesperglyph = 16;
-    loaded_font.numglyph = 512;
+    loaded_font.numglyph = 256;
     loaded_font.glyphs = (uint8_t *)glyphs;
     loaded_font.unicode_table = NULL;
     loaded_font.unicode_table_size = 0;

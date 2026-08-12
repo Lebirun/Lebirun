@@ -45,16 +45,16 @@ int ext4_read_superblock(ext4_fs_t *fs) {
     }
 
     fs->total_inodes = fs->sb.s_inodes_count;
-    fs->groups_count = (fs->sb.s_blocks_count_lo - fs->sb.s_first_data_block + 
-                        fs->sb.s_blocks_per_group - 1) / fs->sb.s_blocks_per_group;
+    if (fs->total_blocks < fs->sb.s_first_data_block) return -1;
+    fs->groups_count = (fs->total_blocks - fs->sb.s_first_data_block +
+                        fs->sb.s_blocks_per_group - 1) /
+                       fs->sb.s_blocks_per_group;
 
     if (fs->is_64bit && fs->sb.s_desc_size > 0) {
         fs->desc_size = fs->sb.s_desc_size;
     } else {
         fs->desc_size = 32;
     }
-    fs->desc_per_block = fs->block_size / fs->desc_size;
-
     fs->use_extents = (fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0;
 
     return 0;
@@ -89,6 +89,9 @@ int ext4_write_superblock(ext4_fs_t *fs) {
 }
 
 int ext4_validate_superblock(ext4_superblock_t *sb) {
+    uint32_t block_size;
+    uint32_t inode_size;
+
     if (sb->s_magic != EXT4_SUPER_MAGIC) {
         return -1;
     }
@@ -101,7 +104,12 @@ int ext4_validate_superblock(ext4_superblock_t *sb) {
         return -1;
     }
 
-    if (sb->s_inode_size != 0 && (sb->s_inode_size < 128 || sb->s_inode_size > 1024)) {
+    block_size = 1024U << sb->s_log_block_size;
+    inode_size = sb->s_inode_size ? sb->s_inode_size :
+                                   EXT4_GOOD_OLD_INODE_SIZE;
+    if (inode_size < EXT4_GOOD_OLD_INODE_SIZE ||
+        inode_size > block_size ||
+        (inode_size & (inode_size - 1)) != 0) {
         return -1;
     }
 

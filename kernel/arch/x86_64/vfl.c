@@ -711,8 +711,8 @@ static vfs_node_t dev_vfl_node;
 
 void KERNEL_INIT vfl_register_devfs(void) {
     memset(&dev_vfl_node, 0, sizeof(vfs_node_t));
-    strcpy(dev_vfl_node.name, "vfl");
     dev_vfl_node.flags = VFS_CHARDEVICE;
+    vfs_node_set_name(&dev_vfl_node, "vfl");
     dev_vfl_node.mask = 0660;
     dev_vfl_node.uid = 0;
     dev_vfl_node.gid = 0;

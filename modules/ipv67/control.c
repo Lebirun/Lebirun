@@ -25,7 +25,6 @@ int ipv67_ping(const ipv67_addr_t *dst, uint32_t timeout_ms) {
 
     memset(&hdr, 0, sizeof(ipv67_header_t));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = IPV67_TYPE_PING;
     hdr.payload_len = sizeof(uint32_t);
     hdr.hop_limit = IPV67_DEFAULT_HOPS;

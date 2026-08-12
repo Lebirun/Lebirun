@@ -536,76 +536,32 @@ void rng_reseed(void)
 uint8_t rng_get_u8(void)
 {
     uint8_t val;
-    uint64_t flags;
 
-    val = 0;
-    if (!rng_ready()) {
-        rng_fallback_fill(&val, sizeof(val));
-        return val;
-    }
-
-    flags = rng_irqsave();
-    spin_lock(&g_rng->lock);
-    rng_extract(&val, sizeof(val));
-    spin_unlock(&g_rng->lock);
-    rng_irqrestore(flags);
+    rng_fill(&val, sizeof(val));
     return val;
 }
 
 uint16_t rng_get_u16(void)
 {
     uint16_t val;
-    uint64_t flags;
 
-    val = 0;
-    if (!rng_ready()) {
-        rng_fallback_fill(&val, sizeof(val));
-        return val;
-    }
-
-    flags = rng_irqsave();
-    spin_lock(&g_rng->lock);
-    rng_extract((uint8_t *)&val, sizeof(val));
-    spin_unlock(&g_rng->lock);
-    rng_irqrestore(flags);
+    rng_fill(&val, sizeof(val));
     return val;
 }
 
 uint32_t rng_get_u32(void)
 {
     uint32_t val;
-    uint64_t flags;
 
-    val = 0;
-    if (!rng_ready()) {
-        rng_fallback_fill(&val, sizeof(val));
-        return val;
-    }
-
-    flags = rng_irqsave();
-    spin_lock(&g_rng->lock);
-    rng_extract((uint8_t *)&val, sizeof(val));
-    spin_unlock(&g_rng->lock);
-    rng_irqrestore(flags);
+    rng_fill(&val, sizeof(val));
     return val;
 }
 
 uint64_t rng_get_u64(void)
 {
     uint64_t val;
-    uint64_t flags;
 
-    val = 0;
-    if (!rng_ready()) {
-        rng_fallback_fill(&val, sizeof(val));
-        return val;
-    }
-
-    flags = rng_irqsave();
-    spin_lock(&g_rng->lock);
-    rng_extract((uint8_t *)&val, sizeof(val));
-    spin_unlock(&g_rng->lock);
-    rng_irqrestore(flags);
+    rng_fill(&val, sizeof(val));
     return val;
 }
 

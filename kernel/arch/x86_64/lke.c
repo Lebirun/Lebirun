@@ -39,7 +39,7 @@ void lke_unregister_syscall(int num, void *fn) {
     if (syscall_table_get(num) == fn) syscall_table_set(num, NULL);
 }
 
-void lke_register_symbol(const char *name, void *addr) {
+void KERNEL_INIT lke_register_symbol(const char *name, void *addr) {
     lke_ksym_t *new_tab;
 
     if (ksym_count == INT32_MAX) return;

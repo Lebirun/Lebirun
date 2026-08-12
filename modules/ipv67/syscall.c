@@ -6,6 +6,7 @@
 #include <string.h>
 
 #define EFAULT 14
+#define ENOMEM 12
 #define EBUSY 16
 #define ENODEV 19
 #define EINVAL 22
@@ -131,6 +132,48 @@ static int user_range_mapped_ipv67(uint64_t addr, uint64_t size) {
     return 1;
 }
 
+static int ipv67_copy_user_string(uint64_t addr, char **out) {
+    char *buffer;
+    char *new_buffer;
+    uint64_t capacity;
+    uint64_t length;
+    uint64_t new_capacity;
+
+    if (!out || !user_range_mapped_ipv67(addr, 1)) return -EFAULT;
+    *out = NULL;
+    capacity = 64;
+    buffer = (char *)kmalloc(capacity);
+    if (!buffer) return -ENOMEM;
+    length = 0;
+    for (;;) {
+        if (!user_range_mapped_ipv67(addr + length, 1)) {
+            kfree(buffer);
+            return -EFAULT;
+        }
+        buffer[length] = *(const char *)(addr + length);
+        if (buffer[length] == '\0') {
+            *out = buffer;
+            return 0;
+        }
+        length++;
+        if (length < capacity) continue;
+        if (capacity > SIZE_MAX / 2) {
+            kfree(buffer);
+            return -ENOMEM;
+        }
+        new_capacity = capacity * 2;
+        new_buffer = (char *)kmalloc(new_capacity);
+        if (!new_buffer) {
+            kfree(buffer);
+            return -ENOMEM;
+        }
+        memcpy(new_buffer, buffer, length);
+        kfree(buffer);
+        buffer = new_buffer;
+        capacity = new_capacity;
+    }
+}
+
 static int ipv67_readonly_cmd(int cmd) {
     if (cmd == IPV67_CMD_GET_ADDR) return 1;
     if (cmd == IPV67_CMD_GET_PEERS) return 1;
@@ -187,7 +230,7 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
     ipv67_asn_user_t user_asn;
     ipv67_asn_claim_t asn_claim;
     char addr_str[IPV67_ADDR_STR_MAX];
-    char host_str[256];
+    char *host_str;
     const char *src;
     ipv4_addr_t resolved4;
     ipv6_addr_t resolved6;
@@ -197,10 +240,12 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
     int max;
     int i;
     int ret;
+    int result;
     uint64_t j;
 
     (void)unused1;
     (void)unused2;
+    host_str = NULL;
     req_addr = (uint64_t)(uintptr_t)req_ptr;
     if (!user_range_mapped_ipv67(req_addr, sizeof(ipv67_syscall_req_t))) return -EFAULT;
     memcpy(&req, (const void *)req_addr, sizeof(ipv67_syscall_req_t));
@@ -249,23 +294,23 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
         return ipv67_add_peer6(&addr6, (uint16_t)req.arg2, &addr);
 
     case IPV67_CMD_ADD_PEER_HOST:
-        if (!user_range_mapped_ipv67(req.arg1, 1)) return -EFAULT;
         if (!user_range_mapped_ipv67(req.arg3, sizeof(ipv67_addr_t))) return -EFAULT;
-        for (j = 0; j < sizeof(host_str); j++) {
-            if (!user_range_mapped_ipv67(req.arg1 + j, 1)) break;
-            host_str[j] = ((const char *)req.arg1)[j];
-            if (host_str[j] == '\0') break;
-        }
-        host_str[sizeof(host_str) - 1] = '\0';
+        ret = ipv67_copy_user_string(req.arg1, &host_str);
+        if (ret != 0) return ret;
         memcpy(&addr, (const void *)req.arg3, sizeof(ipv67_addr_t));
         ret = dns_resolve_timeout(host_str, &resolved4, 5000);
         if (ret == 0) {
-            return ipv67_add_peer_with_addr(ipv4_to_u32(resolved4), (uint16_t)req.arg2, &addr);
+            result = ipv67_add_peer_with_addr(ipv4_to_u32(resolved4), (uint16_t)req.arg2, &addr);
+            kfree(host_str);
+            return result;
         }
         ret = dns_resolve6(host_str, &resolved6);
         if (ret == 0) {
-            return ipv67_add_peer6(&resolved6, (uint16_t)req.arg2, &addr);
+            result = ipv67_add_peer6(&resolved6, (uint16_t)req.arg2, &addr);
+            kfree(host_str);
+            return result;
         }
+        kfree(host_str);
         return IPV67_ERR_NOROUTE;
 
     case IPV67_CMD_ADD_ENDPOINT:
@@ -277,21 +322,21 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
             memcpy(&addr6, (const void *)req.arg1, sizeof(ipv6_addr_t));
             return ipv67_add_peer6(&addr6, (uint16_t)req.arg2, NULL);
         }
-        if (!user_range_mapped_ipv67(req.arg1, 1)) return -EFAULT;
-        for (j = 0; j < sizeof(host_str); j++) {
-            if (!user_range_mapped_ipv67(req.arg1 + j, 1)) break;
-            host_str[j] = ((const char *)req.arg1)[j];
-            if (host_str[j] == '\0') break;
-        }
-        host_str[sizeof(host_str) - 1] = '\0';
+        ret = ipv67_copy_user_string(req.arg1, &host_str);
+        if (ret != 0) return ret;
         ret = dns_resolve_timeout(host_str, &resolved4, 5000);
         if (ret == 0) {
-            return ipv67_add_peer_with_addr(ipv4_to_u32(resolved4), (uint16_t)req.arg2, NULL);
+            result = ipv67_add_peer_with_addr(ipv4_to_u32(resolved4), (uint16_t)req.arg2, NULL);
+            kfree(host_str);
+            return result;
         }
         ret = dns_resolve6(host_str, &resolved6);
         if (ret == 0) {
-            return ipv67_add_peer6(&resolved6, (uint16_t)req.arg2, NULL);
+            result = ipv67_add_peer6(&resolved6, (uint16_t)req.arg2, NULL);
+            kfree(host_str);
+            return result;
         }
+        kfree(host_str);
         return IPV67_ERR_NOROUTE;
 
     case IPV67_CMD_REMOVE_PEER:

@@ -117,13 +117,14 @@ CRTEND:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtend.o)
 UNIFONT_BIN=fonts/unifont.psf
 UNIFONT_GLYPHS=$(ARCHDIR)/unifont_glyphs.bin
 UNIFONT_OBJ=$(ARCHDIR)/unifont_bin.o
+UNIFONT_GLYPH_BYTES=4096
 
-$(UNIFONT_GLYPHS): $(wildcard $(UNIFONT_BIN))
+$(UNIFONT_GLYPHS): $(wildcard $(UNIFONT_BIN)) Makefile
 	@if [ -f "$(UNIFONT_BIN)" ]; then \
 		set -- $$(od -An -tu1 -N4 "$(UNIFONT_BIN)"); \
 		test "$$1" = 54 -a "$$2" = 4 -a $$(( $$3 & 1 )) = 1 -a "$$4" = 16; \
-		dd if="$(UNIFONT_BIN)" of="$@" bs=1 skip=4 count=8192 status=none; \
-		test "$$(wc -c < "$@")" = 8192; \
+		dd if="$(UNIFONT_BIN)" of="$@" bs=1 skip=4 count=$(UNIFONT_GLYPH_BYTES) status=none; \
+		test "$$(wc -c < "$@")" = $(UNIFONT_GLYPH_BYTES); \
 	else \
 		printf '\0' > "$@"; \
 	fi

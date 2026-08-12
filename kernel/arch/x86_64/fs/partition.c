@@ -4,6 +4,58 @@
 #include <string.h>
 #include <stdio.h>
 
+static int partition_table_reserve(partition_table_t *table, int needed);
+
+typedef struct {
+    uint64_t inline_lbas[8];
+    uint64_t *lbas;
+    size_t count;
+    size_t capacity;
+} ebr_visit_set_t;
+
+static int ebr_visit_add(ebr_visit_set_t *set, uint64_t lba) {
+    uint64_t *grown;
+    size_t new_capacity;
+    size_t i;
+
+    for (i = 0; i < set->count; i++) {
+        if (set->lbas[i] == lba) return 1;
+    }
+    if (set->count == set->capacity) {
+        if (set->capacity > SIZE_MAX / 2) return -1;
+        new_capacity = set->capacity * 2;
+        if (new_capacity > SIZE_MAX / sizeof(*grown)) return -1;
+        grown = (uint64_t *)kmalloc(new_capacity * sizeof(*grown));
+        if (!grown) return -1;
+        memcpy(grown, set->lbas, set->count * sizeof(*grown));
+        if (set->lbas != set->inline_lbas) kfree(set->lbas);
+        set->lbas = grown;
+        set->capacity = new_capacity;
+    }
+    set->lbas[set->count++] = lba;
+    return 0;
+}
+
+static int partition_add_mbr_entry(partition_table_t *table, int *count,
+                                   uint64_t port_index, int part_number,
+                                   uint64_t start_lba, uint64_t sector_count,
+                                   uint8_t type) {
+    partition_info_t *part;
+
+    if (partition_table_reserve(table, *count + 1) != 0) return -1;
+    part = &table->parts[*count];
+    part->valid = 1;
+    part->port_index = port_index;
+    part->part_number = part_number;
+    part->start_lba = start_lba;
+    part->sector_count = sector_count;
+    part->mbr_type = type;
+    part->is_gpt = 0;
+    memset(part->gpt_type_guid, 0, 16);
+    (*count)++;
+    return 0;
+}
+
 static int partition_table_reserve(partition_table_t *table, int needed) {
     partition_info_t *parts;
     int old_capacity;
@@ -79,6 +131,17 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
     ahci_port_t *port;
     uint8_t *buf;
     mbr_t *mbr;
+    mbr_partition_entry_t primary[MBR_PARTITION_COUNT];
+    mbr_partition_entry_t *pe;
+    mbr_partition_entry_t *logical;
+    mbr_partition_entry_t *link;
+    ebr_visit_set_t visited;
+    uint64_t extended_base;
+    uint64_t ebr_lba;
+    uint64_t next_lba;
+    uint64_t logical_start;
+    int visit_result;
+    int logical_number;
     int i;
     int count;
 
@@ -101,36 +164,94 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
         kfree(buf);
         return -1;
     }
+    memcpy(primary, mbr->partitions, sizeof(primary));
 
     table->is_gpt = 0;
     count = 0;
+    logical_number = 5;
 
     for (i = 0; i < MBR_PARTITION_COUNT; i++) {
-        mbr_partition_entry_t *pe;
-
-        pe = &mbr->partitions[i];
+        pe = &primary[i];
         if (pe->type == PART_TYPE_EMPTY)
             continue;
         if (pe->lba_start == 0 || pe->sector_count == 0)
             continue;
-        if (pe->type == PART_TYPE_EXTENDED || pe->type == PART_TYPE_EXTENDED_LBA)
+        if (pe->type == PART_TYPE_EXTENDED ||
+            pe->type == PART_TYPE_EXTENDED_LBA) {
+            extended_base = pe->lba_start;
+            ebr_lba = extended_base;
+            memset(&visited, 0, sizeof(visited));
+            visited.lbas = visited.inline_lbas;
+            visited.capacity = sizeof(visited.inline_lbas) /
+                               sizeof(visited.inline_lbas[0]);
+            while (ebr_lba) {
+                if (ebr_lba >= port->sector_count) break;
+                visit_result = ebr_visit_add(&visited, ebr_lba);
+                if (visit_result != 0) {
+                    if (visit_result < 0) {
+                        if (visited.lbas != visited.inline_lbas)
+                            kfree(visited.lbas);
+                        kfree(buf);
+                        partition_table_free(table);
+                        return -1;
+                    }
+                    break;
+                }
+                if (ahci_read_sectors(port, ebr_lba, 1, buf) != 0) break;
+                mbr = (mbr_t *)buf;
+                if (mbr->signature != MBR_SIGNATURE) break;
+                logical = &mbr->partitions[0];
+                if (logical->type != PART_TYPE_EMPTY &&
+                    logical->type != PART_TYPE_EXTENDED &&
+                    logical->type != PART_TYPE_EXTENDED_LBA &&
+                    logical->lba_start && logical->sector_count) {
+                    if ((uint64_t)logical->lba_start <=
+                        UINT64_MAX - ebr_lba) {
+                        logical_start = ebr_lba + logical->lba_start;
+                        if (logical_start < port->sector_count &&
+                            (uint64_t)logical->sector_count <=
+                            port->sector_count - logical_start) {
+                            if (partition_add_mbr_entry(
+                                    table, &count, port_index,
+                                    logical_number, logical_start,
+                                    logical->sector_count,
+                                    logical->type) != 0) {
+                                if (visited.lbas != visited.inline_lbas)
+                                    kfree(visited.lbas);
+                                kfree(buf);
+                                partition_table_free(table);
+                                return -1;
+                            }
+                            logical_number++;
+                        }
+                    }
+                }
+                link = &mbr->partitions[1];
+                next_lba = 0;
+                if ((link->type == PART_TYPE_EXTENDED ||
+                     link->type == PART_TYPE_EXTENDED_LBA) &&
+                    link->lba_start &&
+                    (uint64_t)link->lba_start <=
+                    UINT64_MAX - extended_base) {
+                    next_lba = extended_base + link->lba_start;
+                }
+                ebr_lba = next_lba;
+            }
+            if (visited.lbas != visited.inline_lbas) kfree(visited.lbas);
             continue;
+        }
 
-        if (partition_table_reserve(table, count + 1) != 0) {
+        if ((uint64_t)pe->lba_start >= port->sector_count ||
+            (uint64_t)pe->sector_count >
+            port->sector_count - (uint64_t)pe->lba_start)
+            continue;
+        if (partition_add_mbr_entry(table, &count, port_index, i + 1,
+                                    pe->lba_start, pe->sector_count,
+                                    pe->type) != 0) {
             kfree(buf);
             partition_table_free(table);
             return -1;
         }
-
-        table->parts[count].valid = 1;
-        table->parts[count].port_index = port_index;
-        table->parts[count].part_number = i + 1;
-        table->parts[count].start_lba = pe->lba_start;
-        table->parts[count].sector_count = pe->sector_count;
-        table->parts[count].mbr_type = pe->type;
-        table->parts[count].is_gpt = 0;
-        memset(table->parts[count].gpt_type_guid, 0, 16);
-        count++;
     }
 
     table->count = count;

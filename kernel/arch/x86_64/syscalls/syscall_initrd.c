@@ -5,7 +5,7 @@ static int sys_initrd_count(int unused, const char *unused2, int unused3) {
     return (int)initrd_get_file_count();
 }
 
-static int sys_initrd_stat(int index, const char *name_buf, int len_ptr) {
+static int sys_initrd_stat(int index, const char *name_buf, uint64_t len_ptr) {
     uint64_t name_addr = (uint64_t)name_buf;
     uint64_t len_addr = (uint64_t)len_ptr;
     initrd_file_t *f;
@@ -48,7 +48,7 @@ static int sys_initrd_read(int index, const char *buf, int maxlen) {
     return (int)to_copy;
 }
 
-static int sys_open(int path_ptr, const char *flags_ptr, int unused) {
+static int sys_open(uint64_t path_ptr, const char *flags_ptr, int unused) {
     uint64_t path_addr = (uint64_t)path_ptr;
     const char *path = (const char *)path_addr;
     int flags = (int)(uintptr_t)flags_ptr;
@@ -64,7 +64,7 @@ static int sys_close(int fd, const char *unused1, int unused2) {
     return initrd_close(fd);
 }
 
-static int sys_fstat(int fd, const char *size_ptr, int type_ptr) {
+static int sys_fstat(int fd, const char *size_ptr, uint64_t type_ptr) {
     uint64_t size_addr = (uint64_t)size_ptr;
     uint64_t type_addr = (uint64_t)type_ptr;
     uint64_t size;

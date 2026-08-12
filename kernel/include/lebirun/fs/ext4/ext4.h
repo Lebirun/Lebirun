@@ -14,7 +14,7 @@
 struct ext4_fs;
 
 typedef struct {
-    uint32_t block_num;
+    uint64_t block_num;
     uint8_t *data;
     bool dirty;
     uint32_t ref_count;
@@ -36,9 +36,8 @@ typedef struct ext4_fs {
     ext4_superblock_t sb;
     uint32_t block_size;
     uint32_t inodes_per_block;
+    uint64_t groups_count;
     uint32_t sectors_per_block;
-    uint32_t groups_count;
-    uint32_t desc_per_block;
     uint32_t inode_size;
     uint32_t first_data_block;
     uint64_t total_blocks;
@@ -46,7 +45,6 @@ typedef struct ext4_fs {
     bool use_extents;
     bool is_64bit;
     uint32_t desc_size;
-    ext4_group_desc_t *group_descs;
     ext4_block_cache_entry_t *block_cache;
     uint32_t block_cache_count;
     ext4_inode_cache_t *inode_cache;
@@ -60,7 +58,6 @@ typedef struct ext4_fs {
     uint8_t writeback_epoch;
     vfs_node_t *root_node;
     vfs_node_t *vfs_nodes;
-    char mountpoint[VFS_MAX_PATH];
     struct ext4_fs *next_mount;
 } ext4_fs_t;
 
@@ -81,7 +78,7 @@ int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 void ext4_compact_block_cache(ext4_fs_t *fs);
 int ext4_sync_blocks(ext4_fs_t *fs);
 int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks);
-int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint);
+int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint);
 int ext4_free_block(ext4_fs_t *fs, uint64_t block);
 
 int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode);

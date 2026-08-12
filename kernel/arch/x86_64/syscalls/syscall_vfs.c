@@ -147,42 +147,6 @@ static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
     return 1;
 }
 
-static int vfs_user_string_mapped(const char *s, size_t max) {
-    uint64_t addr;
-    uint64_t current;
-    size_t chunk;
-    size_t page_remaining;
-    size_t i;
-    size_t j;
-
-    if (!s || max == 0) return 0;
-    addr = (uint64_t)(uintptr_t)s;
-    i = 0;
-    while (i < max) {
-        current = addr + i;
-        if (current < addr) return 0;
-        page_remaining = 0x1000 - (size_t)(current & 0xFFF);
-        chunk = max - i;
-        if (chunk > page_remaining) chunk = page_remaining;
-        if (!vfs_user_range_mapped(current, chunk)) return 0;
-        for (j = 0; j < chunk; j++) {
-            if (s[i + j] == '\0') return 1;
-        }
-        i += chunk;
-    }
-    return 0;
-}
-
-static size_t vfs_bounded_strlen(const char *s, size_t max) {
-    size_t i;
-
-    if (!s) return 0;
-    for (i = 0; i < max; i++) {
-        if (s[i] == '\0') return i;
-    }
-    return max;
-}
-
 int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t mode;
     uint64_t uid;
@@ -246,6 +210,7 @@ static int task_fd_alloc_from(int start) {
     return i;
 }
 
+#if 0
 static const char *resolve_cwd_path(const char *pathname, char *resolved, size_t size) {
     uint64_t path_addr;
     const char *cwd;
@@ -319,26 +284,77 @@ static int split_parent_child_path(const char *path, char *parent_path, size_t p
     if (child[0] == '\0') return -EINVAL;
     return 0;
 }
+#endif
+
+static char *resolve_cwd_path_alloc(const char *pathname) {
+    size_t path_len;
+    size_t cwd_len;
+    size_t position;
+    const char *cwd;
+    char *path;
+    char *input;
+
+    input = copy_string_from_user_alloc(pathname);
+    if (!input) return NULL;
+    path_len = strlen(input);
+    if (input[0] == '/') return input;
+    cwd = current_task && current_task->cwd && current_task->cwd[0] ?
+          current_task->cwd : "/";
+    cwd_len = strlen(cwd);
+    if (path_len > SIZE_MAX - 2 || cwd_len > SIZE_MAX - path_len - 2) {
+        kfree(input);
+        return NULL;
+    }
+    path = (char *)kmalloc(cwd_len + path_len + 2);
+    if (!path) {
+        kfree(input);
+        return NULL;
+    }
+    memcpy(path, cwd, cwd_len);
+    position = cwd_len;
+    if (position == 0 || path[position - 1] != '/') path[position++] = '/';
+    memcpy(path + position, input, path_len + 1);
+    kfree(input);
+    return path;
+}
+
+static int split_parent_child_inplace(char *path, char **parent,
+                                      char **child) {
+    char *slash;
+
+    if (!path || !parent || !child) return -EINVAL;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        *parent = "/";
+        *child = path;
+    } else if (slash == path) {
+        *parent = "/";
+        *child = slash + 1;
+    } else {
+        *slash = '\0';
+        *parent = path;
+        *child = slash + 1;
+    }
+    return (*child)[0] ? 0 : -EINVAL;
+}
 
 static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg) {
     uint64_t path_addr;
     int flags;
     int mode;
     uint64_t create_mode;
-    const char *path;
+    char *path;
+    char *split_path;
+    char *parent_path;
+    char *filename;
     int fd;
-    char resolved_path[256];
-    char parent_path[256];
-    char filename[64];
-    int len;
-    int last_slash;
-    int i;
-    int j;
     int ret;
     vfs_node_t *node;
     vfs_node_t *parent;
     pipe_t *pipe;
     int pipe_type;
+    int want;
+    int perm_ret;
     uint64_t pipe_flags;
     uint64_t mount_flags;
 
@@ -348,12 +364,13 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
     mode = (int)mode_arg;
     if (!current_task) return -ESRCH;
 
-    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
     node = vfs_namei(path);
 
     if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
         vfs_release(node);
+        kfree(path);
         return -EEXIST;
     }
 
@@ -362,48 +379,43 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
         create_mode &= ~current_task->creation_mask;
         if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
 
-        len = 0;
-        while (path[len]) len++;
-
-        last_slash = -1;
-        for (i = 0; i < len; i++) {
-            if (path[i] == '/') last_slash = i;
+        split_path = (char *)kmalloc(strlen(path) + 1);
+        if (!split_path) {
+            kfree(path);
+            return -ENOMEM;
         }
-
-        if (last_slash < 0) {
-            parent_path[0] = '/';
-            parent_path[1] = '\0';
-            for (i = 0; i < len && i < 63; i++) filename[i] = path[i];
-            filename[len < 63 ? len : 63] = '\0';
-        } else if (last_slash == 0) {
-            parent_path[0] = '/';
-            parent_path[1] = '\0';
-            j = 0;
-            for (i = 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-            filename[j] = '\0';
-        } else {
-            for (i = 0; i < last_slash && i < 255; i++) parent_path[i] = path[i];
-            parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-            j = 0;
-            for (i = last_slash + 1; i < len && j < 63; i++, j++) filename[j] = path[i];
-            filename[j] = '\0';
+        strcpy(split_path, path);
+        ret = split_parent_child_inplace(split_path, &parent_path, &filename);
+        if (ret < 0) {
+            kfree(split_path);
+            kfree(path);
+            return ret;
         }
 
         parent = vfs_namei(parent_path);
-        if (!parent) return -ENOENT;
+        if (!parent) {
+            kfree(split_path);
+            kfree(path);
+            return -ENOENT;
+        }
         if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
             vfs_release(parent);
+            kfree(split_path);
+            kfree(path);
             return -EROFS;
         }
 
         ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
+        kfree(split_path);
         if (ret < 0 && !(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
         } else if (ret == 0) {
             node = vfs_namei(path);
         }
     }
+
+    kfree(path);
 
     if (!node) {
         return -ENOENT;
@@ -423,20 +435,15 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
         return -EACCES;
     }
 
-    {
-        int want;
-        int perm_ret;
-
-        want = VFS_PERM_READ;
-        if ((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR))
-            want |= VFS_PERM_WRITE;
-        if (flags & VFS_O_TRUNC)
-            want |= VFS_PERM_WRITE;
-        perm_ret = vfs_check_perm(node, want);
-        if (perm_ret < 0) {
-            vfs_release(node);
-            return perm_ret;
-        }
+    want = VFS_PERM_READ;
+    if ((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR))
+        want |= VFS_PERM_WRITE;
+    if (flags & VFS_O_TRUNC)
+        want |= VFS_PERM_WRITE;
+    perm_ret = vfs_check_perm(node, want);
+    if (perm_ret < 0) {
+        vfs_release(node);
+        return perm_ret;
     }
 
     if ((flags & VFS_O_TRUNC) && node->truncate) {
@@ -639,6 +646,7 @@ int sys_vfs_readdir(registers_t *regs) {
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
+    const char *entry_name;
 
     fd = (int)regs->rbx;
     name_addr = regs->rcx;
@@ -660,11 +668,12 @@ int sys_vfs_readdir(registers_t *regs) {
     if (vfs_readdir_copy(node, index, &local_copy) != 0) {
         return -ENOENT;
     }
+    entry_name = vfs_dirent_name(&local_copy);
 
     if (name_addr) {
         i = 0;
-        for (; i < 63 && local_copy.name[i]; i++) {
-            ((char*)name_addr)[i] = local_copy.name[i];
+        for (; i < 63 && entry_name[i]; i++) {
+            ((char*)name_addr)[i] = entry_name[i];
         }
         ((char*)name_addr)[i] = '\0';
     }
@@ -676,18 +685,61 @@ int sys_vfs_readdir(registers_t *regs) {
     return 0;
 }
 
-static int sys_vfs_stat(int fd, const char *size_ptr, int type_ptr) {
-    uint64_t size_addr = (uint64_t)size_ptr;
-    uint64_t type_addr = (uint64_t)type_ptr;
+static int sys_vfs_readdir2(int fd, uint64_t name_addr, uint64_t capacity,
+                            uint64_t type_addr, uint64_t index,
+                            uint64_t required_addr) {
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    dirent_t local_copy;
+    const char *entry_name;
+    size_t required;
+    uint32_t type;
+
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    if (!current_task->fds[fd].in_use) return -EBADF;
+    if (required_addr &&
+        !vfs_user_range_mapped(required_addr, sizeof(size_t))) return -EFAULT;
+    if (type_addr &&
+        !vfs_user_range_mapped(type_addr, sizeof(uint32_t))) return -EFAULT;
+
+    tfd = &current_task->fds[fd];
+    if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
+    node = (vfs_node_t *)tfd->node;
+    if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
+    if (vfs_readdir_copy(node, index, &local_copy) != 0) return -ENOENT;
+
+    entry_name = vfs_dirent_name(&local_copy);
+    required = strlen(entry_name) + 1;
+    if (required_addr) *(size_t *)(uintptr_t)required_addr = required;
+    if (type_addr) {
+        type = (uint32_t)local_copy.type;
+        *(uint32_t *)(uintptr_t)type_addr = type;
+    }
+    if (!name_addr) return capacity == 0 ? 0 : -EFAULT;
+    if (capacity < required) return -ERANGE;
+    if (!vfs_user_range_mapped(name_addr, required)) return -EFAULT;
+    memcpy((void *)(uintptr_t)name_addr, entry_name, required);
+    return 0;
+}
+
+static int sys_vfs_stat(int fd, const char *size_ptr, uint64_t type_ptr) {
+    uint64_t size_addr;
+    uint64_t type_addr;
     uint64_t size;
     uint64_t flags;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
+    size_addr = (uint64_t)size_ptr;
+    type_addr = (uint64_t)type_ptr;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
 
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
+    node = (vfs_node_t *)tfd->node;
     size = node->length;
     flags = node->flags;
     
@@ -766,13 +818,12 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     return (int)total;
 }
 
-static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
+static int sys_vfs_create(uint64_t path_ptr, const char *perms_ptr, int unused) {
     uint64_t path_addr;
-    const char *path;
+    char *path;
+    char *parent_path;
+    char *filename;
     uint64_t perms;
-    char resolved_path[256];
-    char parent_path[256];
-    char filename[64];
     int ret;
     vfs_node_t *parent;
     int perm_ret;
@@ -781,34 +832,35 @@ static int sys_vfs_create(int path_ptr, const char *perms_ptr, int unused) {
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
     if (current_task) perms &= ~current_task->creation_mask;
 
-    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), filename, sizeof(filename));
-    if (ret < 0) return ret;
+    ret = split_parent_child_inplace(path, &parent_path, &filename);
+    if (ret < 0) { kfree(path); return ret; }
 
     parent = vfs_namei(parent_path);
-    if (!parent) return -ENOENT;
+    if (!parent) { kfree(path); return -ENOENT; }
     if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
         vfs_release(parent);
+        kfree(path);
         return -EROFS;
     }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_create(parent, filename, perms);
     vfs_release(parent);
+    kfree(path);
     return r;
 }
 
-static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
+static int sys_vfs_mkdir(uint64_t path_ptr, const char *perms_ptr, int unused) {
     uint64_t path_addr;
-    const char *path;
+    char *path;
+    char *parent_path;
+    char *dirname;
     uint64_t perms;
-    char resolved_path[256];
-    char parent_path[256];
-    char dirname[64];
     int ret;
     vfs_node_t *parent;
     int perm_ret;
@@ -817,33 +869,34 @@ static int sys_vfs_mkdir(int path_ptr, const char *perms_ptr, int unused) {
     (void)unused;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
     perms = (uint64_t)(uintptr_t)perms_ptr;
     if (current_task) perms &= ~current_task->creation_mask;
 
-    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), dirname, sizeof(dirname));
-    if (ret < 0) return ret;
+    ret = split_parent_child_inplace(path, &parent_path, &dirname);
+    if (ret < 0) { kfree(path); return ret; }
 
     parent = vfs_namei(parent_path);
-    if (!parent) return -ENOENT;
+    if (!parent) { kfree(path); return -ENOENT; }
     if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
         vfs_release(parent);
+        kfree(path);
         return -EROFS;
     }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_mkdir(parent, dirname, perms);
     vfs_release(parent);
+    kfree(path);
     return r;
 }
 
-static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
+static int sys_vfs_unlink(uint64_t path_ptr, const char *unused1, int unused2) {
     uint64_t path_addr;
-    const char *path;
-    char resolved_path[256];
-    char parent_path[256];
-    char filename[64];
+    char *path;
+    char *parent_path;
+    char *filename;
     int ret;
     vfs_node_t *parent;
     int perm_ret;
@@ -852,22 +905,24 @@ static int sys_vfs_unlink(int path_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
     path_addr = (uint64_t)path_ptr;
     if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    path = resolve_cwd_path((const char *)path_addr, resolved_path, sizeof(resolved_path));
+    path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
 
-    ret = split_parent_child_path(path, parent_path, sizeof(parent_path), filename, sizeof(filename));
-    if (ret < 0) return ret;
+    ret = split_parent_child_inplace(path, &parent_path, &filename);
+    if (ret < 0) { kfree(path); return ret; }
 
     parent = vfs_namei(parent_path);
-    if (!parent) return -ENOENT;
+    if (!parent) { kfree(path); return -ENOENT; }
     if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
         vfs_release(parent);
+        kfree(path);
         return -EROFS;
     }
     perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
-    if (perm_ret < 0) { vfs_release(parent); return perm_ret; }
+    if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_unlink_checked(parent, filename, 0);
     vfs_release(parent);
+    kfree(path);
     return r;
 }
 
@@ -901,7 +956,15 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     vfs_mount_t *mount;
     vfs_mount_t *best;
     vfs_node_t *root;
-
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint32_t bsize32;
+    uint64_t bsize;
+    uint64_t total_kb;
+    uint64_t free_kb;
+    ramfs_stats_t rs;
+    uint64_t used;
+    squashfs_context_t *sqctx;
 
     memset(buf, 0, sizeof(struct statfs_kernel));
     buf->f_namelen = 255;
@@ -912,8 +975,7 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     for (i = 0; i < mount_count; i++) {
         mount = vfs_get_mount(i);
         if (!mount) continue;
-        mlen = vfs_bounded_strlen(mount->path, VFS_MAX_PATH);
-        if (mlen == VFS_MAX_PATH) continue;
+        mlen = strlen(mount->path);
         if (strncmp(path, mount->path, mlen) == 0 &&
             (path[mlen] == '\0' || path[mlen] == '/' ||
              (mlen == 1 && mount->path[0] == '/'))) {
@@ -934,10 +996,8 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "ext4") == 0) {
-        uint64_t total_blocks, free_blocks;
-        uint32_t bsize32;
         if (ext4_get_stats(&total_blocks, &free_blocks, &bsize32) == 0) {
-            uint64_t bsize = bsize32;
+            bsize = bsize32;
             buf->f_type = EXT4_MAGIC;
             buf->f_bsize = bsize;
             buf->f_frsize = bsize;
@@ -951,8 +1011,6 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "tmpfs") == 0) {
-        uint64_t total_kb;
-        uint64_t free_kb;
         total_kb = pfa_get_usable_ram_kb() / 2;
         free_kb = pfa_count_free() * 4;
         if (free_kb > total_kb) free_kb = total_kb;
@@ -968,9 +1026,6 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "ramfs") == 0 || strcmp(fsname, "overlayfs") == 0) {
-        ramfs_stats_t rs;
-        uint64_t used;
-        squashfs_context_t *sqctx;
         if (ramfs_get_stats(&rs) == 0) {
             used = rs.used_size;
             sqctx = squashfs_get_context();
@@ -989,7 +1044,6 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "procfs") == 0) {
-        uint64_t total_kb;
         total_kb = pfa_get_usable_ram_kb();
         buf->f_type = PROCFS_MAGIC;
         buf->f_bsize = 4096;
@@ -1001,7 +1055,6 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "devfs") == 0) {
-        uint64_t total_kb;
         total_kb = pfa_get_usable_ram_kb();
         buf->f_type = DEVFS_MAGIC;
         buf->f_bsize = 4096;
@@ -1013,7 +1066,6 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     }
 
     if (strcmp(fsname, "sysfs") == 0) {
-        uint64_t total_kb;
         total_kb = pfa_get_usable_ram_kb();
         buf->f_type = 0x62656572;
         buf->f_bsize = 4096;
@@ -1032,14 +1084,14 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
     buf->f_bavail = 0;
 }
 
-static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
+static int sys_statfs(uint64_t path_ptr, const char *size_ptr,
+                      uint64_t buf_ptr_int) {
     uint64_t path_addr;
     int size;
     uint64_t buf_addr;
     uint64_t arg2_addr;
-    char path[VFS_MAX_PATH];
+    char *path;
     struct statfs_kernel *buf;
-    size_t i;
 
     path_addr = (uint64_t)path_ptr;
     size = (int)(uintptr_t)size_ptr;
@@ -1061,22 +1113,17 @@ static int sys_statfs(int path_ptr, const char *size_ptr, int buf_ptr_int) {
         return -EINVAL;
     }
 
-    if (!vfs_user_string_mapped((const char *)path_addr, sizeof(path))) {
-        return -EFAULT;
-    }
-    for (i = 0; i < sizeof(path); i++) {
-        path[i] = ((const char *)path_addr)[i];
-        if (path[i] == '\0') break;
-    }
-    path[sizeof(path) - 1] = '\0';
+    path = resolve_cwd_path_alloc((const char *)path_addr);
+    if (!path) return -EFAULT;
     buf = (struct statfs_kernel *)buf_addr;
 
     fill_statfs_for_path(path, buf);
+    kfree(path);
 
     return 0;
 }
 
-static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
+static int sys_fstatfs(int fd, const char *size_ptr, uint64_t buf_ptr_int) {
     int size;
     uint64_t buf_addr;
     uint64_t arg2_addr;
@@ -1123,7 +1170,8 @@ static int sys_fstatfs(int fd, const char *size_ptr, int buf_ptr_int) {
     return 0;
 }
 
-static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype_ptr, int flags_val) {
+static int sys_vfs_mount_user(uint64_t source_ptr, const char *target_ptr,
+                              uint64_t fstype_ptr, int flags_val) {
     uint64_t src_addr;
     uint64_t tgt_addr;
     uint64_t fs_addr;
@@ -1158,7 +1206,8 @@ static int sys_vfs_mount_user(int source_ptr, const char *target_ptr, int fstype
     return vfs_mount_flags(source, target, fstype, mnt_flags);
 }
 
-static int sys_vfs_umount_user(int target_ptr, const char *unused1, int unused2) {
+static int sys_vfs_umount_user(uint64_t target_ptr, const char *unused1,
+                               int unused2) {
     uint64_t tgt_addr;
     const char *target;
 
@@ -1180,6 +1229,7 @@ void syscalls_vfs_init(void) {
     syscall_table_set(SYSCALL_VFS_CLOSE, (void *)(sys_vfs_close));
     syscall_table_set(SYSCALL_VFS_READ, (void *)(sys_vfs_read));
     syscall_table_set(SYSCALL_VFS_READDIR, (void *)((void*)1));
+    syscall_table_set(SYSCALL_VFS_READDIR2, (void *)(sys_vfs_readdir2));
     syscall_table_set(SYSCALL_VFS_STAT, (void *)(sys_vfs_stat));
     syscall_table_set(SYSCALL_VFS_MOUNTS, (void *)(sys_vfs_mounts));
     syscall_table_set(SYSCALL_VFS_WRITE, (void *)(sys_vfs_write));

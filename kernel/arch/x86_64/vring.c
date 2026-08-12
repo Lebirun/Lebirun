@@ -325,6 +325,8 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     spin_unlock(&klog_persist_lock);
     klog_irqrestore(flags);
 
+    if (!vring_initialized) return (int)len;
+
     offset = 0;
     while (offset < len) {
         ring_len = len - offset;
@@ -917,7 +919,8 @@ void KERNEL_INIT kproc_init(void) {
     kproc_initialized = 1;
 }
 
-int32_t kproc_create(const char *name, uint8_t vring_minor, kproc_entry_t entry, void *priv) {
+int32_t KERNEL_INIT kproc_create(const char *name, uint8_t vring_minor,
+                                 kproc_entry_t entry, void *priv) {
     int32_t pid;
     uint64_t flags;
     kproc_t *proc;
@@ -1124,7 +1127,7 @@ void KERNEL_INIT kproc_print_init(void) {
     }
 }
 
-static void vring_selftest_sandbox_task(void) {
+static void KERNEL_INIT vring_selftest_sandbox_task(void) {
     volatile uint8_t *allowed;
     volatile uint8_t *forbidden;
     uint8_t value;
@@ -1149,7 +1152,7 @@ static void vring_selftest_sandbox_task(void) {
     task_exit(4);
 }
 
-static void vring_selftest_cleanup(void) {
+static void KERNEL_INIT vring_selftest_cleanup(void) {
     vring_remove(7);
     if (vring_selftest_buf) {
         kfree_aligned(vring_selftest_buf);
@@ -1159,7 +1162,7 @@ static void vring_selftest_cleanup(void) {
     vring_selftest_task_ref = NULL;
 }
 
-static void vring_selftest_supervisor(void) {
+static void KERNEL_INIT vring_selftest_supervisor(void) {
     task_t *t;
     int i;
     int ret;
@@ -1253,7 +1256,7 @@ static void vring_selftest_supervisor(void) {
     task_exit(0);
 }
 
-void vring_selftest_start(void) {
+void KERNEL_INIT vring_selftest_start(void) {
     task_t *t;
 
     if (vring_selftest_started) return;

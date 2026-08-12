@@ -435,7 +435,8 @@ int signal_take_pending(task_t *task, uint64_t mask) {
     return 0;
 }
 
-static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
+static int sys_rt_sigaction(int signum, const char *act_ptr,
+                            uint64_t oldact_ptr) {
     task_signals_t *sigs;
     uint64_t act_addr;
     uint64_t old_addr;
@@ -476,7 +477,8 @@ static int sys_rt_sigaction(int signum, const char *act_ptr, int oldact_ptr) {
     return 0;
 }
 
-static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
+static int sys_rt_sigprocmask(int how, const char *set_ptr,
+                              uint64_t oldset_ptr) {
     task_signals_t *sigs;
     uint64_t set_addr;
     uint64_t old_addr;
@@ -529,7 +531,8 @@ static int sys_rt_sigprocmask(int how, const char *set_ptr, int oldset_ptr) {
     return 0;
 }
 
-static int sys_rt_sigpending(int set_ptr, const char *sigsetsize_ptr, int unused) {
+static int sys_rt_sigpending(uint64_t set_ptr, const char *sigsetsize_ptr,
+                             int unused) {
     task_signals_t *sigs;
     uint64_t addr;
     sigset_k empty_set;
@@ -548,7 +551,8 @@ static int sys_rt_sigpending(int set_ptr, const char *sigsetsize_ptr, int unused
     return 0;
 }
 
-static int sys_rt_sigsuspend(int mask_ptr, const char *sigsetsize_ptr, int unused) {
+static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
+                             int unused) {
     task_signals_t *sigs;
     uint64_t addr;
     sigset_k old_mask;
@@ -957,7 +961,8 @@ static int sys_tkill(int tid, const char *sig_ptr, int unused) {
     return sys_kill_impl(tid, sig_ptr, unused);
 }
 
-static int sys_sigaltstack(int ss_ptr, const char *old_ss_ptr, int unused) {
+static int sys_sigaltstack(uint64_t ss_ptr, const char *old_ss_ptr,
+                           int unused) {
     task_signals_t *sigs;
     uint64_t old_addr;
     uint64_t new_addr;

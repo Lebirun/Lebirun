@@ -96,7 +96,6 @@ int ipv67_advertise_to_peer(const ipv67_peer_t *peer, uint8_t type) {
     if (payload) plen = ipv67_build_route_adv(payload, (uint16_t)payload_size, &peer_copy);
     memset(&hdr, 0, sizeof(ipv67_header_t));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = type;
     hdr.payload_len = plen;
     hdr.hop_limit = IPV67_DEFAULT_HOPS;
@@ -255,7 +254,6 @@ int ipv67_send_auth_to_peer(ipv67_peer_t *peer, uint8_t type) {
     ipv67_make_auth_payload(peer, &auth, type);
     memset(&hdr, 0, sizeof(ipv67_header_t));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = type;
     hdr.payload_len = sizeof(auth);
     hdr.hop_limit = IPV67_DEFAULT_HOPS;
@@ -285,7 +283,6 @@ static int ipv67_send_punch_payload(const ipv67_addr_t *dst, ipv67_punch_payload
     ipv67_addr_format(dst, dst_str, sizeof(dst_str));
     memset(&hdr, 0, sizeof(hdr));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = IPV67_TYPE_PUNCH;
     hdr.payload_len = sizeof(*payload);
     hdr.hop_limit = IPV67_DEFAULT_HOPS;
@@ -524,7 +521,6 @@ int ipv67_send(const ipv67_addr_t *dst, const uint8_t *data, uint64_t len) {
 
     memset(&hdr, 0, sizeof(ipv67_header_t));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = IPV67_TYPE_DATA;
     hdr.payload_len = (uint16_t)len;
     hdr.hop_limit = IPV67_DEFAULT_HOPS;

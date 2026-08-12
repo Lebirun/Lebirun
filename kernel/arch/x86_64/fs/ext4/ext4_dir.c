@@ -163,18 +163,37 @@ int ext4_dir_get_entry(ext4_fs_t *fs, uint32_t dir_ino, uint32_t index, ext4_dir
 }
 
 int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t ino, uint8_t file_type) {
+    size_t name_len;
+    uint32_t needed_len;
+    ext4_inode_cache_t *ic;
+    uint64_t dir_size;
+    uint64_t offset;
+    uint64_t block_num;
+    uint32_t block_off;
+    uint64_t phys_block;
+    uint8_t *block;
+    ext4_dir_entry_t *entry;
+    uint32_t actual_len;
+    uint32_t free_space;
+    uint16_t old_rec_len;
+    ext4_dir_entry_t *new_entry;
+    int64_t new_block;
+    uint8_t *new_block_data;
+    uint64_t block_idx;
+
     if (!name) {
         return -1;
     }
 
-    size_t name_len = strlen(name);
+    name_len = strlen(name);
     if (name_len > EXT4_NAME_LEN) {
         return -1;
     }
 
-    uint32_t needed_len = ((sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN + name_len + 3) / 4) * 4;
+    needed_len = ((sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN +
+                   name_len + 3) / 4) * 4;
 
-    ext4_inode_cache_t *ic = ext4_get_inode(fs, dir_ino);
+    ic = ext4_get_inode(fs, dir_ino);
     if (!ic) {
         return -1;
     }
@@ -184,25 +203,25 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
         return -1;
     }
 
-    uint64_t dir_size = ext4_inode_get_size(&ic->inode);
-    uint64_t offset = 0;
+    dir_size = ext4_inode_get_size(&ic->inode);
+    offset = 0;
 
     while (offset < dir_size) {
-        uint64_t block_num = offset / fs->block_size;
-        uint32_t block_off = offset % fs->block_size;
+        block_num = offset / fs->block_size;
+        block_off = offset % fs->block_size;
 
-        uint64_t phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
+        phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
         if (phys_block == 0) {
             break;
         }
 
-        uint8_t *block = ext4_get_block(fs, phys_block);
+        block = ext4_get_block(fs, phys_block);
         if (!block) {
             break;
         }
 
         while (block_off < fs->block_size && offset < dir_size) {
-            ext4_dir_entry_t *entry = (ext4_dir_entry_t *)(block + block_off);
+            entry = (ext4_dir_entry_t *)(block + block_off);
 
             if (entry->rec_len == 0) {
                 ext4_release_block(fs, phys_block);
@@ -210,8 +229,9 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
                 return -1;
             }
 
-            uint32_t actual_len = ((sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN + entry->name_len + 3) / 4) * 4;
-            uint32_t free_space = entry->rec_len - actual_len;
+            actual_len = ((sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN +
+                           entry->name_len + 3) / 4) * 4;
+            free_space = entry->rec_len - actual_len;
 
             if (entry->inode == 0 && entry->rec_len >= needed_len) {
                 entry->inode = ino;
@@ -226,10 +246,11 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
             }
 
             if (entry->inode != 0 && free_space >= needed_len) {
-                uint16_t old_rec_len = entry->rec_len;
+                old_rec_len = entry->rec_len;
                 entry->rec_len = actual_len;
 
-                ext4_dir_entry_t *new_entry = (ext4_dir_entry_t *)(block + block_off + actual_len);
+                new_entry = (ext4_dir_entry_t *)(block + block_off +
+                                                 actual_len);
                 new_entry->inode = ino;
                 new_entry->rec_len = old_rec_len - actual_len;
                 new_entry->name_len = name_len;
@@ -249,13 +270,13 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
         ext4_release_block(fs, phys_block);
     }
 
-    int new_block = ext4_alloc_block(fs, 0);
+    new_block = ext4_alloc_block(fs, 0);
     if (new_block < 0) {
         ext4_release_inode(ic);
         return -1;
     }
 
-    uint8_t *new_block_data = (uint8_t *)kmalloc(fs->block_size);
+    new_block_data = (uint8_t *)kmalloc(fs->block_size);
     if (!new_block_data) {
         ext4_free_block(fs, new_block);
         ext4_release_inode(ic);
@@ -264,7 +285,7 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
 
     memset(new_block_data, 0, fs->block_size);
 
-    ext4_dir_entry_t *new_entry = (ext4_dir_entry_t *)new_block_data;
+    new_entry = (ext4_dir_entry_t *)new_block_data;
     new_entry->inode = ino;
     new_entry->rec_len = fs->block_size;
     new_entry->name_len = name_len;
@@ -280,11 +301,12 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
 
     kfree(new_block_data);
 
-    uint64_t block_idx = dir_size / fs->block_size;
+    block_idx = dir_size / fs->block_size;
     
     if (!(ic->inode.i_flags & EXT4_INODE_FLAG_EXTENTS)) {
-        if (block_idx < EXT4_NDIR_BLOCKS) {
-            ic->inode.i_block[block_idx] = new_block;
+        if (block_idx < EXT4_NDIR_BLOCKS &&
+            (uint64_t)new_block <= UINT32_MAX) {
+            ic->inode.i_block[block_idx] = (uint32_t)new_block;
         } else {
             ext4_free_block(fs, new_block);
             ext4_release_inode(ic);

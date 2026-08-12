@@ -191,7 +191,6 @@ static vfs_node_t *iso_create_vfs_node(iso9660_context_t *ctx, const char *name,
                                         uint32_t extent_lba,
                                         uint32_t data_length, uint8_t flags) {
     iso9660_vfs_node_t *inode;
-    size_t name_len;
 
     inode = (iso9660_vfs_node_t *)kmalloc(sizeof(iso9660_vfs_node_t));
     if (!inode) return NULL;
@@ -200,12 +199,6 @@ static vfs_node_t *iso_create_vfs_node(iso9660_context_t *ctx, const char *name,
     inode->extent_lba = extent_lba;
     inode->data_length = data_length;
     inode->ctx = ctx;
-
-    name_len = strlen(name);
-    if (name_len >= VFS_MAX_NAME)
-        name_len = VFS_MAX_NAME - 1;
-    memcpy(inode->vfs.name, name, name_len);
-    inode->vfs.name[name_len] = '\0';
 
     inode->vfs.mask = 0555;
     inode->vfs.uid = 0;
@@ -223,6 +216,11 @@ static vfs_node_t *iso_create_vfs_node(iso9660_context_t *ctx, const char *name,
     } else {
         inode->vfs.flags = VFS_FILE;
         inode->vfs.read = iso_vfs_read;
+    }
+
+    if (vfs_node_set_name(&inode->vfs, name) != 0) {
+        kfree(inode);
+        return NULL;
     }
 
     return &inode->vfs;
@@ -272,6 +270,8 @@ static dirent_t *iso_vfs_readdir(vfs_node_t *node, uint64_t index) {
     uint64_t byte_off;
     iso9660_dirent_t *de;
     uint64_t cur_index;
+    char *entry_name;
+    int name_result;
 
     if (!node) return NULL;
     inode = (iso9660_vfs_node_t *)node->private_data;
@@ -311,7 +311,19 @@ static dirent_t *iso_vfs_readdir(vfs_node_t *node, uint64_t index) {
         }
 
         if (cur_index == index) {
-            iso_name_to_lower(de->name, de->name_length, iso_dirent.name, VFS_MAX_NAME);
+            entry_name = (char *)kmalloc((size_t)de->name_length + 1);
+            if (!entry_name) {
+                kfree(dir_data);
+                return NULL;
+            }
+            iso_name_to_lower(de->name, de->name_length, entry_name,
+                              (size_t)de->name_length + 1);
+            name_result = vfs_dirent_set_name(&iso_dirent, entry_name);
+            kfree(entry_name);
+            if (name_result != 0) {
+                kfree(dir_data);
+                return NULL;
+            }
             iso_dirent.inode = read_le32(de->extent_location.le);
             iso_dirent.type = (de->file_flags & ISO9660_DE_FLAG_DIRECTORY) ? VFS_DIRECTORY : VFS_FILE;
             kfree(dir_data);
@@ -333,7 +345,7 @@ static vfs_node_t *iso_vfs_finddir(vfs_node_t *node, const char *name) {
     uint64_t dir_offset;
     uint64_t dir_size;
     iso9660_dirent_t *de;
-    char entry_name[VFS_MAX_NAME];
+    char *entry_name;
     uint32_t extent;
     uint32_t length;
 
@@ -346,8 +358,14 @@ static vfs_node_t *iso_vfs_finddir(vfs_node_t *node, const char *name) {
 
     dir_data = kmalloc(dir_size);
     if (!dir_data) return NULL;
+    entry_name = (char *)kmalloc(256);
+    if (!entry_name) {
+        kfree(dir_data);
+        return NULL;
+    }
 
     if (iso_read_data(ctx, (uint64_t)inode->extent_lba * ISO9660_SECTOR_SIZE, dir_size, dir_data) < 0) {
+        kfree(entry_name);
         kfree(dir_data);
         return NULL;
     }
@@ -372,18 +390,22 @@ static vfs_node_t *iso_vfs_finddir(vfs_node_t *node, const char *name) {
             continue;
         }
 
-        iso_name_to_lower(de->name, de->name_length, entry_name, VFS_MAX_NAME);
+        iso_name_to_lower(de->name, de->name_length, entry_name, 256);
 
         if (strcmp(entry_name, name) == 0) {
             extent = read_le32(de->extent_location.le);
             length = read_le32(de->data_length.le);
             kfree(dir_data);
-            return iso_create_vfs_node(ctx, entry_name, extent, length, de->file_flags);
+            node = iso_create_vfs_node(ctx, entry_name, extent, length,
+                                       de->file_flags);
+            kfree(entry_name);
+            return node;
         }
 
         dir_offset += de->length;
     }
 
+    kfree(entry_name);
     kfree(dir_data);
     return NULL;
 }

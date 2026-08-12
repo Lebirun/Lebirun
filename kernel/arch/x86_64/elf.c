@@ -713,6 +713,46 @@ static int strcmp_local(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+int elf_so_mapping_span(const uint8_t *data, uint64_t size,
+                        uint64_t *out_span) {
+    const Elf64_Ehdr *ehdr;
+    const Elf64_Phdr *phdr;
+    uint64_t end;
+    uint64_t segment_end;
+    uint16_t index;
+    int valid;
+
+    if (!out_span) return -1;
+    valid = elf_validate_so(data, size);
+    if (valid != 0) return valid;
+    ehdr = (const Elf64_Ehdr *)data;
+    phdr = (const Elf64_Phdr *)(data + ehdr->e_phoff);
+    end = 0;
+    for (index = 0; index < ehdr->e_phnum; index++) {
+        if (phdr[index].p_type != PT_LOAD || phdr[index].p_memsz == 0)
+            continue;
+        if (phdr[index].p_vaddr > UINT64_MAX - phdr[index].p_memsz)
+            return -1;
+        segment_end = phdr[index].p_vaddr + phdr[index].p_memsz;
+        if (segment_end > end) end = segment_end;
+    }
+    if (end == 0 || end > UINT64_MAX - (PAGE_SIZE - 1)) return -1;
+    *out_span = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    return 0;
+}
+
+void elf_free_needed(dl_handle_t *handle) {
+    uint64_t index;
+
+    if (!handle || !handle->needed) return;
+    for (index = 0; index < handle->needed_count; index++) {
+        if (handle->needed[index]) kfree(handle->needed[index]);
+    }
+    kfree(handle->needed);
+    handle->needed = NULL;
+    handle->needed_count = 0;
+}
+
 static int elf_collect_needed(const uint8_t *data, uint64_t size,
                               const Elf64_Ehdr *ehdr,
                               const Elf64_Phdr *phdr,
@@ -726,6 +766,7 @@ static int elf_collect_needed(const uint8_t *data, uint64_t size,
     uint64_t needed_index;
     uint64_t string_offset;
     uint64_t string_index;
+    uint64_t string_length;
     uint16_t i;
 
     handle->needed = NULL;
@@ -756,33 +797,44 @@ static int elf_collect_needed(const uint8_t *data, uint64_t size,
             if (dyn[dyn_index].d_tag == DT_NULL) break;
             if (dyn[dyn_index].d_tag == DT_NEEDED &&
                 dyn[dyn_index].d_un.d_val < strtab_size) {
-                if (needed_count == INT32_MAX) return -1;
+                if (needed_count == UINT64_MAX) return -1;
                 needed_count++;
             }
         }
         if (needed_count == 0) return 0;
         if (needed_count > SIZE_MAX / sizeof(*handle->needed)) return -1;
-        handle->needed = (char (*)[64])kmalloc(
-            needed_count * sizeof(*handle->needed));
+        handle->needed = (char **)kmalloc(
+            (size_t)needed_count * sizeof(*handle->needed));
         if (!handle->needed) return -1;
+        memset(handle->needed, 0,
+               (size_t)needed_count * sizeof(*handle->needed));
         needed_index = 0;
         for (dyn_index = 0; dyn_index < dyn_count; dyn_index++) {
             if (dyn[dyn_index].d_tag == DT_NULL) break;
             if (dyn[dyn_index].d_tag != DT_NEEDED ||
                 dyn[dyn_index].d_un.d_val >= strtab_size) continue;
             string_offset = strtab_offset + dyn[dyn_index].d_un.d_val;
-            string_index = 0;
-            while (string_index < 63 &&
-                   dyn[dyn_index].d_un.d_val + string_index < strtab_size &&
-                   data[string_offset + string_index]) {
+            string_length = 0;
+            while (dyn[dyn_index].d_un.d_val + string_length < strtab_size &&
+                   data[string_offset + string_length]) string_length++;
+            if (dyn[dyn_index].d_un.d_val + string_length >= strtab_size ||
+                string_length == SIZE_MAX) {
+                elf_free_needed(handle);
+                return -1;
+            }
+            handle->needed[needed_index] =
+                (char *)kmalloc((size_t)string_length + 1);
+            if (!handle->needed[needed_index]) {
+                elf_free_needed(handle);
+                return -1;
+            }
+            for (string_index = 0; string_index <= string_length;
+                 string_index++)
                 handle->needed[needed_index][string_index] =
                     (char)data[string_offset + string_index];
-                string_index++;
-            }
-            handle->needed[needed_index][string_index] = '\0';
             needed_index++;
+            handle->needed_count = needed_index;
         }
-        handle->needed_count = (int)needed_index;
         return 0;
     }
     return 0;
@@ -869,9 +921,7 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
 
     handle->pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
     if (!handle->pages) {
-        if (handle->needed) kfree(handle->needed);
-        handle->needed = NULL;
-        handle->needed_count = 0;
+        elf_free_needed(handle);
         return -11;
     }
     memset(handle->pages, 0, total_pages * sizeof(uint64_t));
@@ -901,9 +951,7 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
             }
             kfree(handle->pages);
             handle->pages = NULL;
-            if (handle->needed) kfree(handle->needed);
-            handle->needed = NULL;
-            handle->needed_count = 0;
+            elf_free_needed(handle);
             return -12;
         }
 
@@ -920,9 +968,7 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
                 }
                 kfree(handle->pages);
                 handle->pages = NULL;
-                if (handle->needed) kfree(handle->needed);
-                handle->needed = NULL;
-                handle->needed_count = 0;
+                elf_free_needed(handle);
                 return -13;
             }
 

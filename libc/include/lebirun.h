@@ -14,6 +14,8 @@ int vfs_open(const char *path, int flags);
 int vfs_close_fd(int fd);
 int vfs_read_fd(int fd, void *buf, unsigned int count);
 int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index);
+int vfs_readdir2(int fd, char *name, size_t capacity, unsigned int *type,
+                 uint64_t index, size_t *required);
 int vfs_stat(int fd, uint64_t *size, uint64_t *type);
 int vfs_mounts(void);
 int vfs_write_fd(int fd, const void *buf, unsigned int count);

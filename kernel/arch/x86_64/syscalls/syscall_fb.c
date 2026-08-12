@@ -13,9 +13,9 @@ static int sys_fb_setcolors(int fg, const char *bg_ptr, int unused) {
     return 0;
 }
 
-static int sys_fb_getinfo(int info_ptr, const char *unused1, int unused2) {
+static int sys_fb_getinfo(uint64_t info_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = (uint64_t)(uint32_t)info_ptr;
+    uint64_t info_addr = info_ptr;
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) return -EFAULT;
 
     framebuffer_t *fb = fb_get();
@@ -66,9 +66,10 @@ static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) 
     return result;
 }
 
-static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unused2) {
+static int sys_fb_get_detailed_info(uint64_t info_ptr, const char *unused1,
+                                    int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = (uint64_t)(uint32_t)info_ptr;
+    uint64_t info_addr = info_ptr;
     
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {
         return -EFAULT;
@@ -90,7 +91,8 @@ static int sys_fb_get_detailed_info(int info_ptr, const char *unused1, int unuse
     return 0;
 }
 
-static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
+static int sys_fb_get_caps(uint64_t info_ptr, const char *words_ptr,
+                           int unused2) {
     uint64_t info_addr;
     uint64_t words;
     uint32_t *out;
@@ -100,7 +102,7 @@ static int sys_fb_get_caps(int info_ptr, const char *words_ptr, int unused2) {
     int ret;
 
     (void)unused2;
-    info_addr = (uint64_t)(uint32_t)info_ptr;
+    info_addr = info_ptr;
     words = (uint64_t)(uintptr_t)words_ptr;
 
     if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {

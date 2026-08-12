@@ -82,7 +82,7 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
     uint32_t ptrs_per_block;
     uint8_t *ind_block;
     uint32_t *ptrs;
-    int new_block;
+    int64_t new_block;
     uint8_t *zero_block;
     uint8_t *dind_block;
     uint32_t *dptrs;
@@ -93,6 +93,7 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
     if (inode->i_flags & EXT4_INODE_FLAG_EXTENTS) {
         return -1;
     }
+    if (phys_block > UINT32_MAX) return -1;
 
     ptrs_per_block = fs->block_size / 4;
 
@@ -109,7 +110,11 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
             if (new_block < 0) {
                 return -1;
             }
-            inode->i_block[EXT4_IND_BLOCK] = new_block;
+            if ((uint64_t)new_block > UINT32_MAX) {
+                ext4_free_block(fs, (uint64_t)new_block);
+                return -1;
+            }
+            inode->i_block[EXT4_IND_BLOCK] = (uint32_t)new_block;
             
             zero_block = (uint8_t *)kmalloc(fs->block_size);
             if (zero_block) {
@@ -139,7 +144,11 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
             if (new_block < 0) {
                 return -1;
             }
-            inode->i_block[EXT4_DIND_BLOCK] = new_block;
+            if ((uint64_t)new_block > UINT32_MAX) {
+                ext4_free_block(fs, (uint64_t)new_block);
+                return -1;
+            }
+            inode->i_block[EXT4_DIND_BLOCK] = (uint32_t)new_block;
 
             zero_block = (uint8_t *)kmalloc(fs->block_size);
             if (zero_block) {
@@ -164,7 +173,12 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                 ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
                 return -1;
             }
-            dptrs[ind_idx] = new_block;
+            if ((uint64_t)new_block > UINT32_MAX) {
+                ext4_free_block(fs, (uint64_t)new_block);
+                ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
+                return -1;
+            }
+            dptrs[ind_idx] = (uint32_t)new_block;
             ext4_mark_block_dirty(fs, inode->i_block[EXT4_DIND_BLOCK]);
 
             zero_block = (uint8_t *)kmalloc(fs->block_size);
@@ -197,7 +211,7 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     ext4_inode_cache_t *ic;
     uint64_t file_size;
     uint64_t new_size;
-    int new_block;
+    int64_t new_block;
     uint32_t bytes_written;
     uint64_t block_num;
     uint32_t block_off;
@@ -210,7 +224,7 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     uint32_t run_blocks;
     uint32_t run_bytes;
     uint64_t next_phys_block;
-    int next_new_block;
+    int64_t next_new_block;
 
     if (!buffer || size == 0) {
         return 0;
@@ -287,7 +301,8 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
                    bytes_written + (run_blocks + 1) * fs->block_size <= size) {
                 next_phys_block = ext4_inode_get_block(fs, &ic->inode, block_num + run_blocks);
                 if (next_phys_block == 0) {
-                    next_new_block = ext4_alloc_block(fs, (uint32_t)(phys_block + run_blocks - 1));
+                    next_new_block = ext4_alloc_block(fs,
+                        phys_block + run_blocks - 1);
                     if (next_new_block < 0) {
                         break;
                     }

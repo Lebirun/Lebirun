@@ -251,7 +251,8 @@ registers_t* interrupt_handler(registers_t* regs)
         if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
             int cow_result;
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
-            cow_result = cow_handle_fault(fault_addr, current_task->pml4_phys);
+            cow_result = cow_handle_fault(fault_addr,
+                                          current_task->pml4_phys);
             if (cow_result == 1) {
                 return regs;
             }
@@ -366,7 +367,8 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t sc_cow_addr;
             __asm__ ("movq %%cr2, %0" : "=r" (sc_cow_addr));
             if (sc_cow_addr < KERNEL_VMA) {
-                sc_cow_result = cow_handle_fault(sc_cow_addr, current_task->pml4_phys);
+                sc_cow_result = cow_handle_fault(sc_cow_addr,
+                                                 current_task->pml4_phys);
                 if (sc_cow_result == 1) {
                     return regs;
                 }

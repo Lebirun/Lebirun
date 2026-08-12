@@ -6,7 +6,6 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
-extern int ext4_load_group_descs(ext4_fs_t *fs);
 extern void ext4_flush_cache(ext4_fs_t *fs);
 extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
 extern int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino);
@@ -244,7 +243,7 @@ int KERNEL_INIT ext4_prepare_root_node(vfs_node_t *node) {
     node->inode = EXT4_ROOT_INO;
     node->flags &= ~VFS_DYNAMIC;
     node->flags |= VFS_DIRECTORY | VFS_MOUNTPOINT;
-    node->name[0] = '\0';
+    vfs_node_set_name(node, "");
     node->ref_count = 1;
     return 0;
 }
@@ -496,6 +495,7 @@ static void ext4_free_vfs_nodes(ext4_fs_t *fs) {
         if (priv) kfree(priv);
         n->private_data = NULL;
         n->impl = 0;
+        vfs_node_release_name(n);
         kfree(n);
         n = next;
     }
@@ -508,6 +508,7 @@ void ext4_drop_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     if (node == fs->root_node) return;
     if (node->ref_count != 0) return;
     ext4_detach_vfs_node(fs, node);
+    vfs_node_release_name(node);
     kfree(node);
 }
 
@@ -529,7 +530,6 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     ext4_inode_cache_t *ic;
     vfs_node_t *node;
     ext4_vfs_private_t *priv;
-    size_t name_len;
     uint16_t mode;
     vfs_node_t *cached;
 
@@ -567,13 +567,6 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     priv->readdir_offset = 0;
     priv->readdir_index = 0;
 
-    name_len = strlen(name);
-    if (name_len >= VFS_MAX_NAME) {
-        name_len = VFS_MAX_NAME - 1;
-    }
-    memcpy(node->name, name, name_len);
-    node->name[name_len] = '\0';
-
     node->inode = ino;
     node->length = ext4_inode_get_size(&ic->inode);
     node->uid = ic->inode.i_uid;
@@ -599,6 +592,12 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
         node->flags = VFS_PIPE | VFS_DYNAMIC;
     } else {
         node->flags = VFS_FILE | VFS_DYNAMIC;
+    }
+    if (vfs_node_set_name(node, name) != 0) {
+        kfree(priv);
+        kfree(node);
+        ext4_release_inode(ic);
+        return NULL;
     }
 
     node->read = ext4_vfs_read;
@@ -754,11 +753,12 @@ static dirent_t *ext4_vfs_readdir(vfs_node_t *node, uint64_t index) {
             if (entry->inode != 0) {
                 if (priv->readdir_index == index) {
                     name_len = entry->name_len;
-                    if (name_len >= VFS_MAX_NAME) {
-                        name_len = VFS_MAX_NAME - 1;
+                    if (vfs_dirent_set_name_n(&ext4_dirent, entry->name, name_len) != 0) {
+                        ext4_release_block(priv->fs, phys_block);
+                        ext4_release_inode(ic);
+                        mutex_unlock(&priv->fs->lock);
+                        return NULL;
                     }
-                    memcpy(ext4_dirent.name, entry->name, name_len);
-                    ext4_dirent.name[name_len] = '\0';
                     ext4_dirent.inode = entry->inode;
                     ext4_dirent.type = ext4_type_to_vfs(entry->file_type);
                     priv->readdir_index++;
@@ -854,13 +854,37 @@ static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags)
     return 0;
 }
 
+static int ext4_split_vfs_path(const char *path, char **parent_out,
+                               char name[EXT4_NAME_LEN + 1]) {
+    const char *slash;
+    const char *name_start;
+    size_t parent_length;
+    size_t name_length;
+    char *parent;
+
+    if (!path || !parent_out || !name) return -1;
+    slash = strrchr(path, '/');
+    name_start = slash ? slash + 1 : path;
+    name_length = strlen(name_start);
+    if (name_length == 0 || name_length > EXT4_NAME_LEN) return -1;
+    parent_length = !slash || slash == path ? 1 : (size_t)(slash - path);
+    parent = (char *)kmalloc(parent_length + 1);
+    if (!parent) return -1;
+    if (!slash || slash == path) {
+        parent[0] = '/';
+        parent[1] = '\0';
+    } else {
+        memcpy(parent, path, parent_length);
+        parent[parent_length] = '\0';
+    }
+    memcpy(name, name_start, name_length + 1);
+    *parent_out = parent;
+    return 0;
+}
+
 int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t flags) {
-    char parent_path[VFS_MAX_PATH];
-    char name[VFS_MAX_NAME];
-    int len;
-    int last_slash;
-    int i;
-    int j;
+    char *parent_path;
+    char name[EXT4_NAME_LEN + 1];
     size_t target_len;
     vfs_node_t *parent;
     ext4_vfs_private_t *priv;
@@ -871,40 +895,10 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
 
     if (!target || !linkpath) return -1;
     target_len = strlen(target);
-    if (target_len == 0 || target_len >= VFS_MAX_PATH) return -1;
-
-    len = 0;
-    while (linkpath[len]) {
-        if (len >= VFS_MAX_PATH - 1) return -1;
-        len++;
-    }
-
-    last_slash = -1;
-    for (i = 0; i < len; i++) {
-        if (linkpath[i] == '/') last_slash = i;
-    }
-
-    if (last_slash < 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        for (i = 0; i < len && i < VFS_MAX_NAME - 1; i++) name[i] = linkpath[i];
-        name[i] = '\0';
-    } else if (last_slash == 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        j = 0;
-        for (i = 1; i < len && j < VFS_MAX_NAME - 1; i++, j++) name[j] = linkpath[i];
-        name[j] = '\0';
-    } else {
-        for (i = 0; i < last_slash && i < VFS_MAX_PATH - 1; i++) parent_path[i] = linkpath[i];
-        parent_path[i] = '\0';
-        j = 0;
-        for (i = last_slash + 1; i < len && j < VFS_MAX_NAME - 1; i++, j++) name[j] = linkpath[i];
-        name[j] = '\0';
-    }
-
-    if (name[0] == '\0') return -1;
+    if (target_len == 0 || target_len > 0x7FFFFFFFu) return -1;
+    if (ext4_split_vfs_path(linkpath, &parent_path, name) != 0) return -1;
     parent = vfs_namei(parent_path);
+    kfree(parent_path);
     if (!parent) return -1;
     if (parent->create != ext4_vfs_create || !parent->private_data) {
         vfs_release(parent);
@@ -930,12 +924,8 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
 }
 
 int ext4_vfs_link_node(const char *oldpath, const char *newpath) {
-    char parent_path[VFS_MAX_PATH];
-    char name[VFS_MAX_NAME];
-    int len;
-    int last_slash;
-    int i;
-    int j;
+    char *parent_path;
+    char name[EXT4_NAME_LEN + 1];
     vfs_node_t *source;
     vfs_node_t *parent;
     ext4_vfs_private_t *source_priv;
@@ -949,38 +939,12 @@ int ext4_vfs_link_node(const char *oldpath, const char *newpath) {
         if (source) vfs_release(source);
         return -1;
     }
-    len = 0;
-    while (newpath[len]) {
-        if (len >= VFS_MAX_PATH - 1) {
-            vfs_release(source);
-            return -1;
-        }
-        len++;
-    }
-    last_slash = -1;
-    for (i = 0; i < len; i++) {
-        if (newpath[i] == '/') last_slash = i;
-    }
-    if (last_slash <= 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
-        i = last_slash == 0 ? 1 : 0;
-        j = 0;
-        while (i < len && j < VFS_MAX_NAME - 1) name[j++] = newpath[i++];
-        name[j] = '\0';
-    } else {
-        for (i = 0; i < last_slash; i++) parent_path[i] = newpath[i];
-        parent_path[i] = '\0';
-        j = 0;
-        for (i = last_slash + 1;
-             i < len && j < VFS_MAX_NAME - 1; i++) name[j++] = newpath[i];
-        name[j] = '\0';
-    }
-    if (name[0] == '\0') {
+    if (ext4_split_vfs_path(newpath, &parent_path, name) != 0) {
         vfs_release(source);
         return -1;
     }
     parent = vfs_namei(parent_path);
+    kfree(parent_path);
     if (!parent || !parent->private_data ||
         VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) {
         if (parent) vfs_release(parent);
@@ -1083,7 +1047,7 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
     uint16_t mode;
     int new_ino;
     ext4_inode_cache_t *ic;
-    int new_block;
+    int64_t new_block;
     uint8_t *dir_block;
     ext4_dir_entry_t *dot;
     ext4_dir_entry_t *dotdot;
@@ -1132,8 +1096,15 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
         mutex_unlock(&fs->lock);
         return -1;
     }
+    if ((uint64_t)new_block > UINT32_MAX) {
+        ext4_free_block(fs, (uint64_t)new_block);
+        ext4_release_inode(ic);
+        ext4_free_inode(fs, new_ino);
+        mutex_unlock(&fs->lock);
+        return -1;
+    }
 
-    ic->inode.i_block[0] = new_block;
+    ic->inode.i_block[0] = (uint32_t)new_block;
     ic->inode.i_blocks_lo = fs->sectors_per_block;
     ext4_inode_set_size(&ic->inode, fs->block_size);
     ic->inode.i_links_count = 2;
@@ -1194,11 +1165,11 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     uint64_t part_start;
     ahci_port_t *port;
     ext4_fs_t *fs;
-    size_t mp_len;
     vfs_node_t *root;
 
     extern uint64_t devfs_get_partition_start(vfs_node_t *node);
 
+    (void)mountpoint;
     port_idx = 0;
     part_start = 0;
     if (device && device[0] != '\0') {
@@ -1257,34 +1228,17 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
 
     ext4_print_superblock(&fs->sb);
 
-    if (ext4_load_group_descs(fs) != 0) {
-        printf("EXT4: Failed to load group descriptors\n");
-        kfree(fs->block_cache);
-        kfree(fs->inode_cache);
-        kfree(fs);
-        return NULL;
-    }
-
     if (ext4_prepare_rw_mount(fs) != 0) {
         printf("EXT4: Filesystem recovery failed\n");
-        kfree(fs->group_descs);
         kfree(fs->block_cache);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
     }
-
-    mp_len = strlen(mountpoint);
-    if (mp_len >= VFS_MAX_PATH) {
-        mp_len = VFS_MAX_PATH - 1;
-    }
-    memcpy(fs->mountpoint, mountpoint, mp_len);
-    fs->mountpoint[mp_len] = '\0';
 
     root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
         printf("EXT4: Failed to create root node\n");
-        kfree(fs->group_descs);
         kfree(fs->block_cache);
         kfree(fs->inode_cache);
         kfree(fs);
@@ -1348,10 +1302,6 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
 
     ext4_free_vfs_nodes(fs);
 
-    if (fs->group_descs) {
-        kfree(fs->group_descs);
-    }
-
     if (fs->block_cache) {
         kfree(fs->block_cache);
     }
@@ -1379,7 +1329,11 @@ int ext4_get_stats(uint64_t *total_blocks, uint64_t *free_blocks, uint32_t *bloc
         return -1;
     }
     if (total_blocks) *total_blocks = fs->total_blocks;
-    if (free_blocks) *free_blocks = fs->sb.s_free_blocks_count_lo;
+    if (free_blocks) {
+        *free_blocks = fs->sb.s_free_blocks_count_lo;
+        if (fs->is_64bit)
+            *free_blocks |= (uint64_t)fs->sb.s_free_blocks_count_hi << 32;
+    }
     if (block_size) *block_size = fs->block_size;
     return 0;
 }
@@ -1402,9 +1356,9 @@ static int ext4_vfs_sync(vfs_node_t *node, int data_only) {
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     ahci_port_t *port;
     ext4_fs_t *fs;
-    size_t mp_len;
     vfs_node_t *root;
 
+    (void)mountpoint;
     port = ahci_get_port(port_index);
     if (!port) {
         return NULL;
@@ -1440,31 +1394,15 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
         return NULL;
     }
 
-    if (ext4_load_group_descs(fs) != 0) {
-        kfree(fs->block_cache);
-        kfree(fs->inode_cache);
-        kfree(fs);
-        return NULL;
-    }
-
     if (ext4_prepare_rw_mount(fs) != 0) {
-        kfree(fs->group_descs);
         kfree(fs->block_cache);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
     }
-
-    mp_len = strlen(mountpoint);
-    if (mp_len >= VFS_MAX_PATH) {
-        mp_len = VFS_MAX_PATH - 1;
-    }
-    memcpy(fs->mountpoint, mountpoint, mp_len);
-    fs->mountpoint[mp_len] = '\0';
 
     root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
-        kfree(fs->group_descs);
         kfree(fs->block_cache);
         kfree(fs->inode_cache);
         kfree(fs);
@@ -1504,10 +1442,6 @@ int ext4_unmount(ext4_fs_t *fs) {
     }
 
     ext4_free_vfs_nodes(fs);
-
-    if (fs->group_descs) {
-        kfree(fs->group_descs);
-    }
 
     if (fs->block_cache) {
         kfree(fs->block_cache);

@@ -355,7 +355,7 @@ static int sys_shmdt(uint64_t shmaddr, const char *unused1, int unused2) {
     return 0;
 }
 
-static int sys_shmctl(int shmid, const char *cmd_ptr, int buf) {
+static int sys_shmctl(int shmid, const char *cmd_ptr, uint64_t buf) {
     int cmd;
     shm_seg_t *segment;
 
@@ -384,27 +384,27 @@ static int sys_shmctl(int shmid, const char *cmd_ptr, int buf) {
     return 0;
 }
 
-static int shm_name_key(int name_ptr, int *key) {
+static int shm_name_key(uint64_t name_ptr, int *key) {
     const char *name;
     char value;
-    int hash;
-    int i;
+    uint32_t hash;
+    size_t i;
 
     if (!name_ptr || !key) return -EFAULT;
-    name = (const char *)(uintptr_t)(uint32_t)name_ptr;
+    name = (const char *)(uintptr_t)name_ptr;
     hash = 0;
-    for (i = 0; i < VFS_MAX_NAME; i++) {
+    for (i = 0; ; i++) {
         if (copy_from_user(&value, &name[i], 1) != 0) return -EFAULT;
         if (value == '\0') {
-            *key = hash;
+            *key = (int)hash;
             return 0;
         }
-        hash = hash * 31 + (unsigned char)value;
+        hash = hash * 31u + (unsigned char)value;
+        if (i == SIZE_MAX) return -ENAMETOOLONG;
     }
-    return -ENAMETOOLONG;
 }
 
-static int sys_shm_open(int name_ptr, const char *oflag_ptr, int mode) {
+static int sys_shm_open(uint64_t name_ptr, const char *oflag_ptr, int mode) {
     int key;
     int oflag;
     int flags;
@@ -419,7 +419,7 @@ static int sys_shm_open(int name_ptr, const char *oflag_ptr, int mode) {
     return sys_shmget(key, (const char *)(uintptr_t)PAGE_SIZE, flags);
 }
 
-static int sys_shm_unlink(int name_ptr, const char *unused1, int unused2) {
+static int sys_shm_unlink(uint64_t name_ptr, const char *unused1, int unused2) {
     int key;
     int i;
     int result;

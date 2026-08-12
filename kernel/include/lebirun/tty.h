@@ -140,6 +140,7 @@ typedef unsigned int speed_t;
 #define VT_ACTIVATE     0x5606
 #define VT_WAITACTIVE   0x5607
 #define VT_DISALLOCATE  0x5608
+#define VT_GETSTATE2    0x56F0
 
 #define KDSETMODE       0x4B3A
 #define KDGETMODE       0x4B3B
@@ -161,6 +162,13 @@ struct vt_stat_s {
     uint16_t v_active;
     uint16_t v_signal;
     uint16_t v_state;
+};
+
+struct vt_stat2_s {
+    uint64_t v_active;
+    uint64_t v_count;
+    uint64_t v_state_words;
+    uint64_t v_state_ptr;
 };
 
 struct termios {

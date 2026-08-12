@@ -10,6 +10,8 @@ void creds_release_task(struct task *task);
 int creds_syscall_allowed(struct task *task, int syscall_number);
 int creds_set_syscall_mask(struct task *task, const uint64_t *mask,
                            size_t word_count);
+int creds_set_syscall_mask_ex(struct task *task, const uint64_t *mask,
+                              size_t word_count, int default_allow);
 int creds_set_strict_syscalls(struct task *task);
 int creds_set_no_new_privs(struct task *task);
 int creds_get_no_new_privs(struct task *task);

@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 
 #define EPERM   1
 #define ENOENT  2
@@ -239,10 +240,14 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
-    ssize_t total = 0;
-    for (int i = 0; i < iovcnt; i++) {
+    ssize_t total;
+    ssize_t n;
+    int i;
+
+    total = 0;
+    for (i = 0; i < iovcnt; i++) {
         if (iov[i].iov_len == 0) continue;
-        ssize_t n = read(fd, iov[i].iov_base, iov[i].iov_len);
+        n = read(fd, iov[i].iov_base, iov[i].iov_len);
         if (n < 0) return (total > 0) ? total : n;
         total += n;
         if ((size_t)n < iov[i].iov_len) break;
@@ -477,8 +482,22 @@ int usleep(unsigned int usec) {
 }
 
 char *getenv(const char *name) {
-    static char env_buf[256];
-    int ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, (long)env_buf, 256);
+    static char *env_buf;
+    static size_t env_capacity;
+    char *resized;
+    int needed;
+    int ret;
+
+    needed = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, 0, 0);
+    if (needed <= 0) return (char *)0;
+    if ((size_t)needed > env_capacity) {
+        resized = (char *)realloc(env_buf, (size_t)needed);
+        if (!resized) return (char *)0;
+        env_buf = resized;
+        env_capacity = (size_t)needed;
+    }
+    ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name,
+                   (long)env_buf, needed);
     if (ret < 0) return (char *)0;
     return env_buf;
 }

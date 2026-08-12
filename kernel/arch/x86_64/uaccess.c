@@ -5,8 +5,25 @@
 
 static int user_page_access_ok(uint64_t address, int access) {
     uint64_t flags;
+    int fault_result;
 
     flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    if (!(flags & VMM_PTE_PRESENT)) {
+        if (!task_handle_file_page_fault(current_task, address) &&
+            !task_handle_anon_page_fault(current_task, address,
+                (access & UACCESS_WRITE) != 0)) return 0;
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    }
+    if ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE) &&
+        (flags & VMM_PTE_COW)) {
+        fault_result = cow_handle_fault(address, current_task->pml4_phys);
+        if (fault_result != 1) return 0;
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    }
+    if ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE)) {
+        if (!task_handle_file_write_fault(current_task, address)) return 0;
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    }
     if (!(flags & VMM_PTE_PRESENT) || !(flags & VMM_PTE_USER)) return 0;
     if ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE)) return 0;
     return 1;
@@ -95,4 +112,25 @@ int copy_string_from_user(char *dest, const char *src, size_t dest_size) {
     if (strnlen_user(src, dest_size, &length) < 0) return -1;
     if (copy_from_user(dest, src, length + 1) < 0) return -1;
     return 0;
+}
+
+char *copy_string_from_user_alloc(const char *src) {
+    uint64_t address;
+    size_t maximum;
+    size_t length;
+    char *copy;
+
+    if (!src) return NULL;
+    address = (uint64_t)(uintptr_t)src;
+    if (address < 0x1000 || address >= KERNEL_VMA) return NULL;
+    maximum = (size_t)(KERNEL_VMA - address);
+    if (strnlen_user(src, maximum, &length) < 0) return NULL;
+    if (length == SIZE_MAX) return NULL;
+    copy = (char *)kmalloc(length + 1);
+    if (!copy) return NULL;
+    if (copy_from_user(copy, src, length + 1) < 0) {
+        kfree(copy);
+        return NULL;
+    }
+    return copy;
 }

@@ -431,8 +431,10 @@ int vfs_check_perm(vfs_node_t *node, int want);
 #define SYSCALL_SYNC 295
 #define SYSCALL_SYNCFS 296
 #define SYSCALL_MSYNC 297
+#define SYSCALL_REGEXEC_EX2 298
+#define SYSCALL_VFS_READDIR2 299
 
-#define NR_SYSCALLS 298
+#define NR_SYSCALLS 300
 
 struct kernel_stat {
     unsigned long long st_dev;

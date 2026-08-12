@@ -216,8 +216,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
     pfa_init();
 
-    mem_map_relocated = mem_map_relocate();
-    heap_init();
+    mem_map_relocated = heap_init();
 
     cmdline_parse(early_cmdline && early_cmdline[0] ? early_cmdline : NULL);
 

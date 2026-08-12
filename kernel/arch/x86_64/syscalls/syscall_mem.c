@@ -228,7 +228,7 @@ static void release_user_leaf_range(uint64_t base, uint64_t end) {
     vmm_prune_user_range(current_task->pml4_phys, base, end - base);
 }
 
-static int sys_brk(int addr, const char *unused, int unused2) {
+static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
     uint64_t requested;
     uint64_t current_brk;
     uint64_t newbrk;
@@ -250,13 +250,13 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     current_brk = current_task->user_brk;
     
     if (requested == 0) {
-        return (int)current_brk;
+        return (int64_t)current_brk;
     }
 
     if (requested < current_task->user_brk_start) {
-        return (int)current_brk;
+        return (int64_t)current_brk;
     }
-    if (!task_data_allows(current_task, requested)) return (int)current_brk;
+    if (!task_data_allows(current_task, requested)) return (int64_t)current_brk;
     
     if (requested < current_brk) {
         old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
@@ -265,22 +265,22 @@ static int sys_brk(int addr, const char *unused, int unused2) {
             release_user_leaf_range(shrink_page_end, old_page_end);
         }
         current_task->user_brk = requested;
-        return (int)requested;
+        return (int64_t)requested;
     }
     
     newbrk = (requested + 0xFFF) & ~0xFFFu;
     
     if (newbrk > USER_DYNAMIC_LIMIT) {
-        return (int)current_brk;
+        return (int64_t)current_brk;
     }
     
     old_page_end = (current_brk + 0xFFF) & ~0xFFFu;
     if (newbrk > old_page_end) {
         if (!user_range_free_pages(old_page_end,
                                    newbrk - old_page_end, 0, 0))
-            return (int)current_brk;
+            return (int64_t)current_brk;
         if (!task_memory_allows(current_task, newbrk - old_page_end)) {
-            return (int)current_brk;
+            return (int64_t)current_brk;
         }
         page_count = 0;
         new_pages = vmm_map_range_in_pml4_tracked(
@@ -288,7 +288,7 @@ static int sys_brk(int addr, const char *unused, int unused2) {
             0x7 | VMM_PTE_NX, &page_count);
         
         if (!new_pages && (newbrk > old_page_end)) {
-            return (int)current_brk;
+            return (int64_t)current_brk;
         }
         
         if (new_pages && page_count > 0) {
@@ -298,7 +298,7 @@ static int sys_brk(int addr, const char *unused, int unused2) {
             if (!expanded) {
                 release_user_leaf_range(old_page_end, newbrk);
                 kfree(new_pages);
-                return (int)current_brk;
+                return (int64_t)current_brk;
             }
             if (current_task->user_pages && old_count > 0) {
                 memcpy(expanded, current_task->user_pages,
@@ -314,7 +314,7 @@ static int sys_brk(int addr, const char *unused, int unused2) {
     }
     
     current_task->user_brk = requested;
-    return (int)requested;
+    return (int64_t)requested;
 }
 
 static int64_t sys_mmap(int a1, const char *a2, int a3) {
@@ -471,7 +471,7 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if (fd >= 0) {
         if (tfd && tfd->in_use && tfd->node) {
             fnode = (vfs_node_t *)tfd->node;
-            if (strcmp(fnode->name, "fb0") == 0) {
+            if (strcmp(vfs_node_name(fnode), "fb0") == 0) {
                 fb_dev = fb_get();
                 if (!fb_dev || !fb_dev->phys_addr) return -ENODEV;
                 fb_phys_base = fb_dev->phys_addr;
@@ -500,7 +500,7 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
 
     if (fd >= 0 && tfd && tfd->in_use && tfd->node) {
         fnode = (vfs_node_t *)tfd->node;
-        if (strcmp(fnode->name, "fb0") != 0) {
+        if (strcmp(vfs_node_name(fnode), "fb0") != 0) {
             file_off = (uint64_t)pgoffset * 4096;
             vma_node = fnode;
             vma_file_size = length;
@@ -595,6 +595,7 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     uint64_t page;
     uint64_t pte_flags;
     uint64_t current_flags;
+    int cow_result;
     int i;
 
     if (!current_task) return -EINVAL;
@@ -627,6 +628,13 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
         if (!vmm_get_phys_in_pml4(current_task->pml4_phys, page)) continue;
         current_flags = vmm_get_flags_in_pml4(current_task->pml4_phys,
                                               page);
+        if (current_flags & VMM_PTE_COW) {
+            cow_result = cow_handle_fault(page,
+                                          current_task->pml4_phys);
+            if (cow_result != 1) return -ENOMEM;
+            current_flags = vmm_get_flags_in_pml4(
+                current_task->pml4_phys, page);
+        }
         if ((pte_flags & VMM_PTE_WRITE) &&
             (current_flags & VMM_PTE_NOFREE) &&
             !task_handle_file_write_fault(current_task, page))

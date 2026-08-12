@@ -74,10 +74,6 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
         IPV67_STATS_INC(malformed_drops);
         IPV67_RESTORE_RETURN(saved);
     }
-    if (hdr.version != IPV67_PROTO_VERSION) {
-        IPV67_STATS_INC(malformed_drops);
-        IPV67_RESTORE_RETURN(saved);
-    }
     if (!ipv67_type_known(hdr.type)) {
         IPV67_STATS_INC(malformed_drops);
         IPV67_RESTORE_RETURN(saved);
@@ -136,7 +132,6 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
     if (hdr.type == IPV67_TYPE_HELLO && ipv67_auth_required && !p) {
         memset(&reply_hdr, 0, sizeof(ipv67_header_t));
         reply_hdr.magic = IPV67_MAGIC;
-        reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PEER_ACK;
         reply_hdr.payload_len = 0;
         reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;
@@ -273,7 +268,6 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
     if (hdr.type == IPV67_TYPE_HELLO) {
         memset(&reply_hdr, 0, sizeof(ipv67_header_t));
         reply_hdr.magic = IPV67_MAGIC;
-        reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PEER_ACK;
         reply_hdr.payload_len = 0;
         reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;
@@ -296,7 +290,6 @@ void ipv67_receive_common_on_port_locked(uint8_t family, uint16_t local_port, ui
         ipv67_addr_format(&src_addr, src_str, sizeof(src_str));
         memset(&reply_hdr, 0, sizeof(ipv67_header_t));
         reply_hdr.magic = IPV67_MAGIC;
-        reply_hdr.version = IPV67_PROTO_VERSION;
         reply_hdr.type = IPV67_TYPE_PONG;
         reply_hdr.payload_len = payload_len;
         reply_hdr.hop_limit = IPV67_DEFAULT_HOPS;

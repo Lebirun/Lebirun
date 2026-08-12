@@ -106,6 +106,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     uint64_t payload_len;
     udp_socket_t *sock;
     uint32_t src_ipv4;
+    uint8_t *resized;
 
     (void)dest;
     if (!netif || !data || len < sizeof(udp_header_t)) return;
@@ -141,13 +142,18 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     sock = udp_sockets;
     while (sock) {
         if (sock->local_port == dest_port) {
-            if (payload_len <= sock->recv_buffer_size) {
-                memcpy(sock->recv_buffer, payload, payload_len);
-                sock->recv_len = payload_len;
-                sock->recv_from_ip = src;
-                sock->recv_from_port = src_port;
-                sock->has_data = 1;
+            if (payload_len > sock->recv_buffer_size) {
+                resized = (uint8_t *)kmalloc(payload_len);
+                if (!resized) return;
+                kfree(sock->recv_buffer);
+                sock->recv_buffer = resized;
+                sock->recv_buffer_size = payload_len;
             }
+            if (payload_len) memcpy(sock->recv_buffer, payload, payload_len);
+            sock->recv_len = payload_len;
+            sock->recv_from_ip = src;
+            sock->recv_from_port = src_port;
+            sock->has_data = 1;
             return;
         }
         sock = sock->next;
@@ -199,12 +205,6 @@ udp_socket_t *udp_socket_create(uint16_t port) {
     memset(sock, 0, sizeof(udp_socket_t));
 
     sock->local_port = port ? port : udp_ephemeral_port++;
-    sock->recv_buffer_size = 4096;
-    sock->recv_buffer = (uint8_t *)kmalloc(sock->recv_buffer_size);
-    if (!sock->recv_buffer) {
-        kfree(sock);
-        return NULL;
-    }
 
     sock->netif = netif_get_default();
     sock->next = udp_sockets;

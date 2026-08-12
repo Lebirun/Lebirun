@@ -42,7 +42,7 @@ void ipv67_stack_unlock(void) {
 int ipv67_rx_enqueue(uint8_t family, uint16_t local_port, uint32_t src_ipv4, const ipv6_addr_t *src_ipv6, uint16_t src_port, const uint8_t *packet, uint64_t len) {
     ipv67_pending_rx_t *rx;
 
-    if (!packet || len == 0 || len > IPV67_RX_PACKET_MAX) return 0;
+    if (!packet || len == 0) return 0;
     if (len > SIZE_MAX - sizeof(ipv67_pending_rx_t)) return 0;
     rx = (ipv67_pending_rx_t *)kmalloc(sizeof(ipv67_pending_rx_t) + len);
     if (!rx) return 0;

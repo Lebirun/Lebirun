@@ -11,7 +11,6 @@
 
 #define IPV67_ADDR_STR_MAX  (IPV67_ZONE_MAX + 1 + IPV67_ZONE_MAX + 1 + IPV67_DOMAIN_MAX + 1 + IPV67_NODE_MAX + 1 + IPV67_NODE_MAX + 1)
 
-#define IPV67_PROTO_VERSION    3
 #define IPV67_MAGIC            0x6937u
 
 #define IPV67_TYPE_DATA        0x01
@@ -74,7 +73,7 @@ typedef struct {
 
 typedef struct {
     uint16_t magic;
-    uint8_t  version;
+    uint8_t  reserved;
     uint8_t  type;
     uint16_t payload_len;
     uint8_t  hop_limit;

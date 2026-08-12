@@ -1,6 +1,7 @@
 #include <lebirun/framebuffer.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/smp.h>
 #include <lebirun/drivers/fb/bga.h>
 #include <lebirun/drivers/fb/vga_modes.h>
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
@@ -444,7 +445,7 @@ static psf_font_t default_font = {
     .width = 8,
     .height = 16,
     .bytesperglyph = 16,
-    .numglyph = 512,
+    .numglyph = 256,
     .glyphs = unifont_glyphs_start,
     .unicode_table = 0,
     .unicode_table_size = 0
@@ -513,14 +514,31 @@ static void fb_clear_region(uint64_t start_y, uint64_t end_y) {
 #endif
 }
 
-int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint8_t bpp, uint8_t type) {
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+#define FB_INIT_SECTION
+#else
+#define FB_INIT_SECTION KERNEL_INIT
+#endif
+
+int FB_INIT_SECTION fb_init(uint64_t addr, uint64_t width, uint64_t height,
+                            uint64_t pitch, uint8_t bpp, uint8_t type) {
     uint64_t fb_phys;
     uint64_t fb_size;
     uint64_t num_pages;
-    uint64_t i;
     uint64_t phys;
     uint64_t virt;
+    uint64_t mapped_size;
+    uint64_t remaining;
+    uint64_t step;
     uint64_t bytes_per_pixel;
+    int initial_mapping;
+
+    initial_mapping = mapped_pages_count == 0;
+    fb_phys = (uint64_t)addr;
+    if (height != 0 && pitch > UINT64_MAX / height) return -1;
+    fb_size = pitch * height;
+    if (fb_size > UINT64_MAX - fb_phys) return -1;
+    if (fb_size > UINT64_MAX - (KERNEL_VMA + 0x20000000ULL)) return -1;
 
     fb.width = width;
     fb.height = height;
@@ -530,18 +548,30 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     fb.phys_addr = addr;
     fb.refresh_rate = 60;
     
-    fb_phys = (uint64_t)addr;
-    fb_size = pitch * height;
-    num_pages = (fb_size + 0xFFF) / 0x1000;
-    
-    for (i = 0; i < num_pages; i++) {
-        phys = fb_phys + (i * 0x1000);
-        virt = (KERNEL_VMA + 0x20000000ULL) + (i * 0x1000);
-        vmm_map_page(virt, phys, 0x003);
+    num_pages = 0;
+    mapped_size = 0;
+
+    while (mapped_size < fb_size) {
+        phys = fb_phys + mapped_size;
+        virt = (KERNEL_VMA + 0x20000000ULL) + mapped_size;
+        remaining = fb_size - mapped_size;
+        if (initial_mapping && remaining >= VMM_HUGE_PAGE_SIZE &&
+            ((phys | virt) & (VMM_HUGE_PAGE_SIZE - 1)) == 0 &&
+            vmm_map_huge_page(virt, phys, 0x003) == 0) {
+            mapped_size += VMM_HUGE_PAGE_SIZE;
+            num_pages += VMM_HUGE_PAGE_SIZE / PAGE_SIZE;
+        } else {
+            vmm_map_page(virt, phys, 0x003);
+            step = remaining;
+            if (step > PAGE_SIZE) step = PAGE_SIZE;
+            mapped_size += step;
+            num_pages++;
+        }
     }
     mapped_pages_count = num_pages;
     
     tlb_flush_all();
+    smp_tlb_flush_all_sync();
     memory_barrier();
     
     vram_addr = (uint64_t *)(KERNEL_VMA + 0x20000000ULL);
@@ -557,7 +587,7 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     original_fb_width = width;
     original_fb_height = height;
     original_fb_pitch = pitch;
-    original_fb_size = pitch * height;
+    original_fb_size = fb_size;
     fb_vram_bytes = original_fb_size;
 #if CONFIG_DRIVER_VGA
     if (bga_is_available()) {
@@ -588,6 +618,8 @@ int fb_init(uint64_t addr, uint64_t width, uint64_t height, uint64_t pitch, uint
     fb_graphical = 1;
     return 0;
 }
+
+#undef FB_INIT_SECTION
 
 void KERNEL_EARLY_INIT fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
     if (font_height == 0) font_height = 16;
@@ -1305,6 +1337,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
         mapped_pages_count = num_pages;
 
         tlb_flush_all();
+        smp_tlb_flush_all_sync();
         memory_barrier();
 
         asm volatile("pause; pause; pause; pause; pause; pause; pause; pause");

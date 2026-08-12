@@ -423,6 +423,7 @@ static int syscall_needs_expanded_stack(int num) {
     if (num >= SYSCALL_STATFS && num <= SYSCALL_NET_HTTP_POST) return 1;
     if (num == SYSCALL_PIVOT_ROOT ||
         (num >= SYSCALL_VFS_MOUNT && num <= SYSCALL_LKE_LIST)) return 1;
+    if (num == SYSCALL_REGEXEC_EX2 || num == SYSCALL_VFS_READDIR2) return 1;
     return 0;
 }
 
@@ -478,9 +479,11 @@ void do_syscall(registers_t *regs) {
 
     if (num == SYSCALL_VFS_READDIR) {
         result = sys_vfs_readdir(regs);
-    } else if (num == SYSCALL_LSEEK || num == SYSCALL_MMAP ||
+    } else if (num == SYSCALL_SBRK || num == SYSCALL_LSEEK ||
+               num == SYSCALL_MMAP ||
                num == SYSCALL_MMAP2 || num == SYSCALL_MREMAP ||
-               num == SYSCALL_SHMAT) {
+               num == SYSCALL_SHMAT || num == SYSCALL_GETCWD ||
+               num == SYSCALL_DLSYM || num == SYSCALL_TIME) {
         result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))handler)(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);

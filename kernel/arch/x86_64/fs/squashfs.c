@@ -78,6 +78,8 @@ static void sqfs_free_node(squashfs_vfs_node_t *snode) {
         kfree(cached_data);
         snode->rd_cached_size = 0;
     }
+    vfs_dirent_release_name(&snode->rd_dirent);
+    vfs_node_release_name(&snode->vfs);
     kfree(snode);
 }
 
@@ -195,7 +197,7 @@ void squashfs_flush_cache(void) {
     mutex_unlock(&squashfs_lock);
 }
 
-void squashfs_set_access_blocked(int blocked) {
+void KERNEL_INIT squashfs_set_access_blocked(int blocked) {
     sqfs_access_blocked = blocked ? 1 : 0;
 }
 
@@ -398,6 +400,54 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     return result;
 }
 
+static int squashfs_copy_metadata_stream(uint64_t block_offset,
+                                         uint64_t metadata_offset,
+                                         uint8_t *output, size_t length) {
+    uint8_t *metadata;
+    uint16_t header;
+    uint64_t data_size;
+    uint64_t metadata_size;
+    size_t available;
+    size_t chunk;
+    size_t copied;
+    int need_free;
+
+    if (squashfs_ctx.size < 2) return -1;
+    copied = 0;
+    while (copied < length) {
+        if (block_offset > squashfs_ctx.size - 2) return -1;
+        header = read_u16(squashfs_ctx.base + block_offset);
+        data_size = header & 0x7FFF;
+        if (data_size > squashfs_ctx.size - block_offset - 2) return -1;
+        need_free = 0;
+        if (header & 0x8000) {
+            metadata = squashfs_ctx.base + block_offset + 2;
+            metadata_size = data_size;
+        } else {
+            metadata = squashfs_read_metadata_block(block_offset,
+                                                     &metadata_size);
+            if (!metadata) return -1;
+            need_free = 1;
+        }
+        if (metadata_offset > metadata_size) {
+            if (need_free) kfree(metadata);
+            return -1;
+        }
+        available = (size_t)(metadata_size - metadata_offset);
+        chunk = length - copied;
+        if (chunk > available) chunk = available;
+        if (chunk) memcpy(output + copied, metadata + metadata_offset, chunk);
+        if (need_free) kfree(metadata);
+        copied += chunk;
+        if (copied == length) return 0;
+        if (available == 0 || block_offset > UINT64_MAX - data_size - 2)
+            return -1;
+        block_offset += data_size + 2;
+        metadata_offset = 0;
+    }
+    return 0;
+}
+
 static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, uint64_t *out_meta_size, uint64_t *out_offset, squashfs_base_inode_t **out_base, int *out_need_free) {
     uint64_t block;
     uint16_t offset;
@@ -590,10 +640,12 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
     uint16_t meta_header;
     uint64_t meta_data_size;
     uint64_t loaded_offset;
+    uint64_t stream_offset;
     int need_free;
 
     block = (uint64_t)(inode_ref >> 16);
     offset = (uint16_t)(inode_ref & 0xFFFF);
+    stream_offset = offset;
     
     
     block_offset = squashfs_ctx.inode_table_start + block;
@@ -662,10 +714,6 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
                 return NULL;
             }
             stmp = (squashfs_symlink_inode_t *)(metadata + offset);
-            if (stmp->symlink_size > 4096) {
-                if (need_free) kfree(metadata);
-                return NULL;
-            }
             inode_size = sizeof(squashfs_symlink_inode_t) + stmp->symlink_size;
             break;
         case SQUASHFS_LSYMLINK_TYPE:
@@ -674,10 +722,6 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
                 return NULL;
             }
             stmp = (squashfs_symlink_inode_t *)(metadata + offset);
-            if (stmp->symlink_size > 4096) {
-                if (need_free) kfree(metadata);
-                return NULL;
-            }
             inode_size = sizeof(squashfs_symlink_inode_t) + stmp->symlink_size + 4;
             break;
         default:
@@ -691,46 +735,16 @@ static void *squashfs_read_inode(uint64_t inode_ref) {
         return NULL;
     }
     
-    if (offset + inode_size > meta_size) {
-        uint64_t first_part;
-        uint64_t next_block_offset;
-        uint8_t *next_metadata;
-        uint64_t next_meta_size;
-        uint16_t next_hdr;
-        uint64_t on_disk_size;
-        int next_need_free;
-
-        first_part = meta_size - offset;
-        memcpy(inode_copy, metadata + offset, first_part);
-
-        {
-            uint16_t cur_hdr = read_u16(squashfs_ctx.base + block_offset);
-            on_disk_size = cur_hdr & 0x7FFF;
+    if ((uint64_t)offset > meta_size ||
+        inode_size > (size_t)(meta_size - offset)) {
+        if (need_free) kfree(metadata);
+        if (squashfs_copy_metadata_stream(block_offset, stream_offset,
+                                          (uint8_t *)inode_copy,
+                                          inode_size) != 0) {
+            kfree(inode_copy);
+            return NULL;
         }
-        next_block_offset = block_offset + 2 + on_disk_size;
-
-        next_need_free = 0;
-        next_metadata = NULL;
-        next_meta_size = 0;
-        if (next_block_offset + 2 <= squashfs_ctx.size) {
-            next_hdr = read_u16(squashfs_ctx.base + next_block_offset);
-            if (next_hdr & 0x8000) {
-                next_meta_size = next_hdr & 0x7FFF;
-                if (next_block_offset + 2 + next_meta_size <= squashfs_ctx.size) {
-                    next_metadata = squashfs_ctx.base + next_block_offset + 2;
-                }
-            } else {
-                next_metadata = squashfs_read_metadata_block(next_block_offset, &next_meta_size);
-                if (next_metadata) next_need_free = 1;
-            }
-        }
-
-        if (next_metadata && inode_size - first_part <= next_meta_size) {
-            memcpy((uint8_t *)inode_copy + first_part, next_metadata, inode_size - first_part);
-        } else {
-            memset((uint8_t *)inode_copy + first_part, 0, inode_size - first_part);
-        }
-        if (next_need_free) kfree(next_metadata);
+        return inode_copy;
     } else {
         memcpy(inode_copy, metadata + offset, inode_size);
     }
@@ -769,13 +783,6 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
         sqfs_free_node(snode);
         return NULL;
     }
-    
-    name_len = strlen(name);
-    if (name_len >= VFS_MAX_NAME) {
-        name_len = VFS_MAX_NAME - 1;
-    }
-    memcpy(snode->vfs.name, name, name_len);
-    snode->vfs.name[name_len] = '\0';
     
     snode->vfs.mask = base->mode & 07777;
     snode->vfs.uid = base->uid_idx;
@@ -835,6 +842,13 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
             snode->vfs.flags = VFS_FILE;
             snode->vfs.length = 0;
             break;
+    }
+
+    name_len = strlen(name);
+    if (vfs_node_set_name_n(&snode->vfs, name, name_len) != 0) {
+        kfree(base);
+        sqfs_free_node(snode);
+        return NULL;
     }
     
     snode->vfs.open = squashfs_vfs_open;
@@ -1313,11 +1327,10 @@ static dirent_t *squashfs_vfs_readdir_unlocked(vfs_node_t *node, uint64_t index)
 
             if (entry_count == index) {
                 copy_name_len = actual_name_len;
-                if (copy_name_len >= VFS_MAX_NAME) {
-                    copy_name_len = VFS_MAX_NAME - 1;
-                }
-                memcpy(dirent->name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
-                dirent->name[copy_name_len] = '\0';
+                if (vfs_dirent_set_name_n(dirent,
+                        (const char *)(dir_data + pos + sizeof(squashfs_dir_entry_t)),
+                        copy_name_len) != 0)
+                    return NULL;
                 dirent->inode = cur_inode_number + entry->inode_offset;
                 switch (entry->type) {
                     case SQUASHFS_DIR_TYPE:
@@ -1359,11 +1372,10 @@ static dirent_t *squashfs_vfs_readdir_unlocked(vfs_node_t *node, uint64_t index)
             
             if (entry_count == index) {
                 copy_name_len = actual_name_len;
-                if (copy_name_len >= VFS_MAX_NAME) {
-                    copy_name_len = VFS_MAX_NAME - 1;
-                }
-                memcpy(dirent->name, dir_data + pos + sizeof(squashfs_dir_entry_t), copy_name_len);
-                dirent->name[copy_name_len] = '\0';
+                if (vfs_dirent_set_name_n(dirent,
+                        (const char *)(dir_data + pos + sizeof(squashfs_dir_entry_t)),
+                        copy_name_len) != 0)
+                    return NULL;
                 dirent->inode = hdr->inode_number + entry->inode_offset;
                 
                 switch (entry->type) {

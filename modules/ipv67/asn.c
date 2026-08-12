@@ -535,7 +535,6 @@ int ipv67_advertise_asns_to_peer(const ipv67_peer_t *peer) {
     ipv67_addr_format(&ipv67_self, self_str, sizeof(self_str));
     memset(&hdr, 0, sizeof(hdr));
     hdr.magic = IPV67_MAGIC;
-    hdr.version = IPV67_PROTO_VERSION;
     hdr.type = IPV67_TYPE_ASN_ADV;
     hdr.payload_len = plen;
     hdr.hop_limit = IPV67_DEFAULT_HOPS;

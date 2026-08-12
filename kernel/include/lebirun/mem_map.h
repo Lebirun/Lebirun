@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #define PAGE_SIZE 0x1000UL
+#define VMM_HUGE_PAGE_SIZE 0x200000ULL
 
 #define KERNEL_VMA 0xFFFFFFFF80000000ULL
 
@@ -15,7 +16,7 @@ int smp_processor_id(void);
 
 #define PHYSICAL_ADDRESS_LIMIT 0x0010000000000000ULL
 #define PFA_SPARSE_CHUNK_FRAMES (PAGE_SIZE * 8)
-#define PFA_INLINE_DIRECTORY_ENTRIES 32
+#define PFA_INLINE_DIRECTORY_ENTRIES 64
 #define VMM_PTE_COW 0x200ULL
 #define VMM_PTE_NOFREE 0x400ULL
 #define VMM_PTE_SHARED 0x800ULL
@@ -89,6 +90,8 @@ extern reserved_region_t reserved_regions[1];
 extern uint64_t num_reserved_regions;
 
 void vmm_map_page(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
+int vmm_map_huge_page(uint64_t virt_addr, uint64_t phys_addr,
+                      uint64_t flags);
 void vmm_map_page_early_avail(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 void vmm_map_range_alloc(uint64_t virt_addr, uint64_t size, uint64_t flags);
 
@@ -127,8 +130,8 @@ uint64_t pfa_get_total_ram_kb(void);
 void pfa_ref_init(void);
 void pfa_ref_inc(uint64_t phys_addr);
 int pfa_ref_share(uint64_t phys_addr);
-int pfa_ref_dec(uint64_t phys_addr);
-uint8_t pfa_ref_get(uint64_t phys_addr);
+uint64_t pfa_ref_dec(uint64_t phys_addr);
+uint64_t pfa_ref_get(uint64_t phys_addr);
 void pfa_cow_release64(uint64_t phys_addr);
 void pfa_ref_gc(void);
 uint64_t pfa_ref_active_nodes(void);
@@ -143,7 +146,7 @@ uint64_t pfa_get_kernel_binary_kb(void);
 uint64_t pfa_get_bitmap_kb(void);
 uint64_t pfa_get_kernel_reclaimed_pages(void);
 void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb);
-void heap_init(void);
+int heap_init(void);
 void *kmalloc(size_t size);
 void *kmalloc_aligned(size_t size, uint64_t alignment);
 void kfree_aligned(void *ptr);

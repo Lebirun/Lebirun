@@ -27,7 +27,7 @@ static uint64_t pfa_refcount_entries = 0;
 
 typedef struct refht_node {
     uint64_t page_idx;
-    uint8_t refcount;
+    uint64_t refcount;
     struct refht_node *next;
 } refht_node_t;
 
@@ -362,7 +362,7 @@ uint64_t pfa_alloc(void) {
 void pfa_free(uint64_t phys_addr) {
     uint64_t idx;
     uint64_t eflags;
-    uint8_t cur_ref;
+    uint64_t cur_ref;
 
     if (phys_addr % PAGE_SIZE != 0) {
         return;
@@ -890,7 +890,7 @@ static refht_node_t *refht_find(uint64_t page_idx) {
     return NULL;
 }
 
-static int refht_add(uint64_t phys_addr, uint8_t initial) {
+static int refht_add(uint64_t phys_addr, uint64_t initial) {
     uint64_t idx;
     uint64_t eflags;
     refht_node_t *n;
@@ -905,7 +905,7 @@ static int refht_add(uint64_t phys_addr, uint8_t initial) {
     refht_lock_acquire(&eflags);
     n = refht_find(idx);
     if (n) {
-        if (n->refcount < 255) {
+        if (n->refcount < UINT64_MAX) {
             n->refcount++;
             result = 0;
         }
@@ -924,12 +924,12 @@ static int refht_add(uint64_t phys_addr, uint8_t initial) {
     return result;
 }
 
-static int refht_release(uint64_t phys_addr, int cow, int *free_page) {
+static uint64_t refht_release(uint64_t phys_addr, int cow, int *free_page) {
     uint64_t idx;
     uint64_t eflags;
     refht_node_t *n;
     refht_node_t *prev;
-    int result;
+    uint64_t result;
     int remove;
 
     if (free_page) *free_page = 0;
@@ -993,15 +993,15 @@ int pfa_ref_share(uint64_t phys_addr) {
     return refht_add(phys_addr, 2);
 }
 
-int pfa_ref_dec(uint64_t phys_addr) {
+uint64_t pfa_ref_dec(uint64_t phys_addr) {
     return refht_release(phys_addr, 0, NULL);
 }
 
-uint8_t pfa_ref_get(uint64_t phys_addr) {
+uint64_t pfa_ref_get(uint64_t phys_addr) {
     uint64_t idx;
     uint64_t eflags;
     refht_node_t *n;
-    uint8_t result;
+    uint64_t result;
 
     if (!refht_initialized) return 0;
     idx = phys_addr / PAGE_SIZE;

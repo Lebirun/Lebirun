@@ -95,7 +95,7 @@ static int posix_copy_user_string(char **out, const char *src_user, uint64_t max
 
 static char *posix_kstrdup(const char *src) {
     char *dst;
-    int len;
+    size_t len;
 
     if (!src) return NULL;
     len = strlen(src);
@@ -103,6 +103,114 @@ static char *posix_kstrdup(const char *src) {
     if (!dst) return NULL;
     memcpy(dst, src, len + 1);
     return dst;
+}
+
+static int posix_read_shebang(vfs_node_t *node, uint64_t size,
+                              char **interp_out, char **arg_out) {
+    uint8_t *line;
+    uint8_t *new_line;
+    uint64_t capacity;
+    uint64_t read_len;
+    uint64_t line_end;
+    uint64_t i;
+    uint64_t start;
+    uint64_t interp_len;
+    uint64_t arg_len;
+    char *interp;
+    char *arg;
+
+    *interp_out = NULL;
+    *arg_out = NULL;
+    capacity = size < 256 ? size : 256;
+    if (capacity < 2) return -ENOEXEC;
+    line = (uint8_t *)kmalloc((size_t)capacity + 1);
+    if (!line) return -ENOMEM;
+
+    for (;;) {
+        read_len = vfs_read(node, 0, capacity, line);
+        if (read_len != capacity) {
+            kfree(line);
+            return -EIO;
+        }
+        line_end = 2;
+        while (line_end < read_len && line[line_end] != '\n' &&
+               line[line_end] != '\r') line_end++;
+        if (line_end < read_len || read_len == size) break;
+        if (capacity > SIZE_MAX / 2) {
+            kfree(line);
+            return -ENOMEM;
+        }
+        read_len = capacity * 2;
+        if (read_len > size) read_len = size;
+        new_line = (uint8_t *)kmalloc((size_t)read_len + 1);
+        if (!new_line) {
+            kfree(line);
+            return -ENOMEM;
+        }
+        kfree(line);
+        line = new_line;
+        capacity = read_len;
+    }
+
+    i = 2;
+    while (i < line_end && (line[i] == ' ' || line[i] == '\t')) i++;
+    start = i;
+    while (i < line_end && line[i] != ' ' && line[i] != '\t') i++;
+    interp_len = i - start;
+    if (interp_len == 0) {
+        kfree(line);
+        return -ENOEXEC;
+    }
+    interp = (char *)kmalloc((size_t)interp_len + 1);
+    if (!interp) {
+        kfree(line);
+        return -ENOMEM;
+    }
+    memcpy(interp, line + start, (size_t)interp_len);
+    interp[interp_len] = '\0';
+
+    while (i < line_end && (line[i] == ' ' || line[i] == '\t')) i++;
+    start = i;
+    while (line_end > start &&
+           (line[line_end - 1] == ' ' || line[line_end - 1] == '\t')) {
+        line_end--;
+    }
+    arg_len = line_end - start;
+    arg = NULL;
+    if (arg_len) {
+        arg = (char *)kmalloc((size_t)arg_len + 1);
+        if (!arg) {
+            kfree(interp);
+            kfree(line);
+            return -ENOMEM;
+        }
+        memcpy(arg, line + start, (size_t)arg_len);
+        arg[arg_len] = '\0';
+    }
+    kfree(line);
+    *interp_out = interp;
+    *arg_out = arg;
+    return 0;
+}
+
+static int posix_split_path(char *path, char **parent, char **name) {
+    char *slash;
+
+    if (!path || !parent || !name) return -EINVAL;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        *parent = "/";
+        *name = path;
+    } else if (slash == path) {
+        *parent = "/";
+        *name = slash + 1;
+    } else {
+        *slash = '\0';
+        *parent = path;
+        *name = slash + 1;
+    }
+    if (!(*name)[0]) return -EINVAL;
+    return 0;
 }
 
 static void posix_free_string_array(char **arr, int count) {
@@ -351,7 +459,7 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     return newfd;
 }
 
-static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
+static int sys_pipe(uint64_t pipefd_ptr, const char *unused1, int unused2) {
     uint64_t addr;
     int *pipefd;
     int rfd;
@@ -384,7 +492,7 @@ static int sys_pipe(int pipefd_ptr, const char *unused1, int unused2) {
     return 0;
 }
 
-static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
+static int64_t sys_getcwd(uint64_t buf_ptr, const char *size_ptr, int unused) {
     uint64_t buf_addr;
     uint64_t size;
     const char *cwd;
@@ -401,20 +509,19 @@ static int sys_getcwd(int buf_ptr, const char *size_ptr, int unused) {
     if (len + 1 > size) return -ERANGE;
     if (!posix_user_range_mapped(buf_addr, len + 1)) return -EFAULT;
     memcpy((void *)buf_addr, cwd, len + 1);
-    return buf_ptr;
+    return (int64_t)buf_ptr;
 }
 
-static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
+static int sys_chdir(uint64_t path_ptr, const char *unused1, int unused2) {
     uint64_t addr;
     char *path;
     char *resolved;
-    char resolved_path[VFS_MAX_PATH];
     vfs_node_t *node;
     int ret;
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)path_ptr;
-    ret = posix_copy_user_string(&path, (const char *)addr, 256);
+    ret = posix_copy_user_string(&path, (const char *)addr, UINT64_MAX);
     if (ret < 0) return ret;
     if (strncmp(path, "/ro", 3) == 0 && (path[3] == '\0' || path[3] == '/')) {
         kfree(path);
@@ -424,8 +531,9 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
     if (!node) { kfree(path); return -ENOENT; }
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) { vfs_release(node); kfree(path); return -ENOTDIR; }
     if (!current_task) { vfs_release(node); kfree(path); return -EFAULT; }
-    resolved = vfs_get_path(node, resolved_path, sizeof(resolved_path));
+    resolved = vfs_get_path_alloc(node);
     ret = task_set_cwd(current_task, resolved ? resolved : path);
+    if (resolved) kfree(resolved);
     vfs_release(node);
     kfree(path);
     return ret == 0 ? 0 : -ENOMEM;
@@ -433,7 +541,6 @@ static int sys_chdir(int path_ptr, const char *unused1, int unused2) {
 
 static int sys_chroot(const char *path_arg, int unused1, int unused2) {
     char *path;
-    char resolved[VFS_MAX_PATH];
     char *canonical;
     vfs_node_t *node;
     int result;
@@ -442,7 +549,7 @@ static int sys_chroot(const char *path_arg, int unused1, int unused2) {
     (void)unused2;
     if (!current_task) return -ESRCH;
     if (!creds_has_capability(current_task, 18)) return -EPERM;
-    result = posix_copy_user_string(&path, path_arg, VFS_MAX_PATH);
+    result = posix_copy_user_string(&path, path_arg, UINT64_MAX);
     if (result < 0) return result;
     node = vfs_namei(path);
     kfree(path);
@@ -451,13 +558,14 @@ static int sys_chroot(const char *path_arg, int unused1, int unused2) {
         vfs_release(node);
         return -ENOTDIR;
     }
-    canonical = vfs_get_path(node, resolved, sizeof(resolved));
+    canonical = vfs_get_path_alloc(node);
     if (!canonical) {
         vfs_release(node);
         return -EINVAL;
     }
     result = task_set_root(current_task, canonical);
     if (result == 0) result = task_set_cwd(current_task, "/");
+    kfree(canonical);
     vfs_release(node);
     return result == 0 ? 0 : -ENOMEM;
 }
@@ -466,8 +574,6 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
                           int unused) {
     char *new_root;
     char *put_old;
-    char new_path[VFS_MAX_PATH];
-    char old_path[VFS_MAX_PATH];
     char *new_canonical;
     char *old_canonical;
     vfs_node_t *new_node;
@@ -479,9 +585,9 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
     (void)unused;
     if (!current_task) return -ESRCH;
     if (!creds_has_capability(current_task, 21)) return -EPERM;
-    result = posix_copy_user_string(&new_root, new_root_arg, VFS_MAX_PATH);
+    result = posix_copy_user_string(&new_root, new_root_arg, UINT64_MAX);
     if (result < 0) return result;
-    result = posix_copy_user_string(&put_old, put_old_arg, VFS_MAX_PATH);
+    result = posix_copy_user_string(&put_old, put_old_arg, UINT64_MAX);
     if (result < 0) {
         kfree(new_root);
         return result;
@@ -507,9 +613,11 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
         vfs_release(old_node);
         return -EINVAL;
     }
-    new_canonical = vfs_get_path(new_node, new_path, sizeof(new_path));
-    old_canonical = vfs_get_path(old_node, old_path, sizeof(old_path));
+    new_canonical = vfs_get_path_alloc(new_node);
+    old_canonical = vfs_get_path_alloc(old_node);
     if (!new_canonical || !old_canonical) {
+        if (new_canonical) kfree(new_canonical);
+        if (old_canonical) kfree(old_canonical);
         vfs_release(new_node);
         vfs_release(old_node);
         return -EINVAL;
@@ -517,12 +625,16 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
     new_length = strlen(new_canonical);
     if (strncmp(old_canonical, new_canonical, new_length) != 0 ||
         old_canonical[new_length] != '/') {
+        kfree(new_canonical);
+        kfree(old_canonical);
         vfs_release(new_node);
         vfs_release(old_node);
         return -EINVAL;
     }
     result = task_set_root(current_task, new_canonical);
     if (result == 0) result = task_set_cwd(current_task, "/");
+    kfree(new_canonical);
+    kfree(old_canonical);
     vfs_release(new_node);
     vfs_release(old_node);
     return result == 0 ? 0 : -ENOMEM;
@@ -530,7 +642,7 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
 
 static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
 
-static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
+static int sys_access(uint64_t path_ptr, const char *mode_ptr, int unused) {
     uint64_t addr;
     int mode;
     char *path;
@@ -542,7 +654,7 @@ static int sys_access(int path_ptr, const char *mode_ptr, int unused) {
     addr = (uint64_t)path_ptr;
     mode = (int)(uintptr_t)mode_ptr;
     if (mode & ~7) return -EINVAL;
-    ret = posix_copy_user_string(&path, (const char *)addr, 256);
+    ret = posix_copy_user_string(&path, (const char *)addr, UINT64_MAX);
     if (ret < 0) return ret;
     node = vfs_namei(path);
     kfree(path);
@@ -600,7 +712,7 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
     }
 }
 
-static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
+static int sys_stat(uint64_t path_ptr, const char *buf_ptr, int unused) {
     uint64_t path_addr;
     uint64_t buf_addr;
     char *path;
@@ -612,7 +724,7 @@ static int sys_stat(int path_ptr, const char *buf_ptr, int unused) {
     path_addr = (uint64_t)path_ptr;
     buf_addr = (uint64_t)(uintptr_t)buf_ptr;
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    ret = posix_copy_user_string(&path, (const char *)path_addr, 256);
+    ret = posix_copy_user_string(&path, (const char *)path_addr, UINT64_MAX);
     if (ret < 0) return ret;
     node = vfs_namei(path);
     kfree(path);
@@ -796,7 +908,7 @@ static int sys_clock_gettime(int clock_id, const char *tp_ptr, int unused) {
     return 0;
 }
 
-static int sys_gettimeofday(int tv_ptr, const char *tz_ptr, int unused) {
+static int sys_gettimeofday(uint64_t tv_ptr, const char *tz_ptr, int unused) {
     uint64_t tv_addr;
     struct kernel_timeval *tv;
     uint64_t nanoseconds;
@@ -847,7 +959,7 @@ static int sys_clock_settime(int clock_id, const char *tp_ptr, int unused) {
     return 0;
 }
 
-static int sys_settimeofday(int tv_ptr, const char *tz_ptr, int unused) {
+static int sys_settimeofday(uint64_t tv_ptr, const char *tz_ptr, int unused) {
     struct kernel_timeval value;
     uint64_t seconds;
     uint64_t nanoseconds;
@@ -887,7 +999,8 @@ static int sys_clock_getres(int clock_id, const char *tp_ptr, int unused) {
 }
 
 static int sys_clock_nanosleep(int clock_id, const char *flags_ptr,
-                               int request_ptr, int remain_ptr) {
+                               uint64_t request_ptr,
+                               uint64_t remain_ptr) {
     struct kernel_timespec request;
     struct kernel_timespec remain;
     uint64_t requested_ns;
@@ -932,7 +1045,8 @@ static int sys_clock_nanosleep(int clock_id, const char *flags_ptr,
     return -EINTR;
 }
 
-static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
+static int sys_execve(uint64_t path_ptr, const char *argv_ptr,
+                      uint64_t envp_ptr) {
     char **argv;
     char **envp;
     char **new_argv;
@@ -954,12 +1068,9 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     int kern_args;
     uint64_t exec_budget;
     uint64_t stack_limit;
-    char shebang_interp[256];
-    char shebang_arg[256];
+    char *shebang_interp;
+    char *shebang_arg;
     int shebang_has_arg;
-    int shebang_line_end;
-    int si;
-    int sj;
     registers_t *regs;
     vfs_node_t *node;
     vfs_node_t *interp_node;
@@ -971,6 +1082,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     path = NULL;
     node = NULL;
     interp_node = NULL;
+    shebang_interp = NULL;
+    shebang_arg = NULL;
     argc = 0;
     envc = 0;
 
@@ -1060,45 +1173,23 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
     }
 
     if (header_size >= 2 && header[0] == '#' && header[1] == '!') {
-        shebang_line_end = 2;
-        while (shebang_line_end < (int)header_size && shebang_line_end < 256 &&
-               header[shebang_line_end] != '\n' && header[shebang_line_end] != '\r') {
-            shebang_line_end++;
-        }
-
-        si = 2;
-        while (si < shebang_line_end && (header[si] == ' ' || header[si] == '\t')) si++;
-        sj = 0;
-        while (si < shebang_line_end && header[si] != ' ' && header[si] != '\t' &&
-               sj < 255) {
-            shebang_interp[sj++] = header[si++];
-        }
-        shebang_interp[sj] = '\0';
-        if (sj == 0) {
+        ret = posix_read_shebang(node, size, &shebang_interp, &shebang_arg);
+        if (ret != 0) {
             vfs_close(node);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
-            return -ENOEXEC;
+            return ret;
         }
-
-        shebang_has_arg = 0;
-        while (si < shebang_line_end && (header[si] == ' ' || header[si] == '\t')) si++;
-        if (si < shebang_line_end) {
-            sj = 0;
-            while (si < shebang_line_end && sj < 255) {
-                shebang_arg[sj++] = header[si++];
-            }
-            while (sj > 0 && (shebang_arg[sj - 1] == ' ' || shebang_arg[sj - 1] == '\t')) sj--;
-            shebang_arg[sj] = '\0';
-            if (sj > 0) shebang_has_arg = 1;
-        }
+        shebang_has_arg = shebang_arg != NULL;
 
         vfs_close(node);
         node = NULL;
 
         interp_node = vfs_namei(shebang_interp);
         if (!interp_node) {
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1106,7 +1197,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         }
         if (vfs_get_mount_flags_for_node(interp_node) & VFS_MS_NOEXEC) {
             vfs_release(interp_node);
-            vfs_close(node);
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1116,6 +1208,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         interp_size = interp_node->length;
         if (interp_size == 0) {
             vfs_close(interp_node);
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1126,6 +1220,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         new_argv = (char **)kmalloc((new_argc + 1) * sizeof(char *));
         if (!new_argv) {
             vfs_close(interp_node);
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1138,6 +1234,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
         if (!new_argv[na]) {
             kfree(new_argv);
             vfs_close(interp_node);
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1151,6 +1249,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
                 for (i = 0; i < na; i++) kfree(new_argv[i]);
                 kfree(new_argv);
                 vfs_close(interp_node);
+                kfree(shebang_arg);
+                kfree(shebang_interp);
                 posix_free_string_array(envp, envc);
                 posix_free_string_array(argv, argc);
                 kfree(path);
@@ -1164,6 +1264,8 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             for (i = 0; i < na; i++) kfree(new_argv[i]);
             kfree(new_argv);
             vfs_close(interp_node);
+            if (shebang_arg) kfree(shebang_arg);
+            kfree(shebang_interp);
             posix_free_string_array(envp, envc);
             posix_free_string_array(argv, argc);
             kfree(path);
@@ -1177,6 +1279,10 @@ static int sys_execve(int path_ptr, const char *argv_ptr, int envp_ptr) {
             na++;
         }
         new_argv[na] = NULL;
+        if (shebang_arg) kfree(shebang_arg);
+        kfree(shebang_interp);
+        shebang_arg = NULL;
+        shebang_interp = NULL;
 
         regs = current_task->syscall_frame;
         if (!regs) {
@@ -1536,7 +1642,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
     }
 }
 
-static int sys_truncate(int path_ptr, const char *len_ptr, int unused) {
+static int sys_truncate(uint64_t path_ptr, const char *len_ptr, int unused) {
     uint64_t path_addr;
     uint64_t length;
     const char *path;
@@ -1615,13 +1721,14 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
-    int name_len;
-    int reclen;
+    size_t name_len;
+    size_t reclen;
     struct linux_dirent *de;
     int i;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
+    const char *entry_name;
 
     dirp_addr = (uint64_t)(uintptr_t)dirp_ptr;
     if (!current_task) return -ESRCH;
@@ -1643,12 +1750,17 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     while (written < count) {
         if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
 
-        name_len = 0;
-        while (local_copy.name[name_len] && name_len < 63) name_len++;
-        reclen = (int)sizeof(struct linux_dirent) + name_len + 1;
+        entry_name = vfs_dirent_name(&local_copy);
+        name_len = strlen(entry_name);
+        if (name_len > UINT16_MAX - sizeof(struct linux_dirent) - 4)
+            return written ? written : -EOVERFLOW;
+        reclen = sizeof(struct linux_dirent) + name_len + 1;
         reclen = (reclen + 3) & ~3;
 
-        if (written + reclen > count) break;
+        if (reclen > UINT16_MAX)
+            return written ? written : -EOVERFLOW;
+        if (reclen > (size_t)(count - written))
+            return written ? written : -EINVAL;
 
         de = (struct linux_dirent *)(buf + written);
         de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
@@ -1663,12 +1775,12 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
         else if (local_copy.type == VFS_PIPE) de->d_type = 1;
         else de->d_type = 0;
 
-        for (i = 0; i < name_len; i++) {
-            de->d_name[i] = local_copy.name[i];
+        for (i = 0; i < (int)name_len; i++) {
+            de->d_name[i] = entry_name[i];
         }
         de->d_name[name_len] = '\0';
 
-        written += reclen;
+        written += (int)reclen;
         dir_offset++;
     }
 
@@ -1676,82 +1788,64 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     return written;
 }
 
-static int sys_rename(int oldpath_ptr, const char *newpath_ptr, int unused) {
-    uint64_t old_addr = (uint64_t)oldpath_ptr;
-    uint64_t new_addr = (uint64_t)(uintptr_t)newpath_ptr;
-    const char *oldpath;
-    const char *newpath;
-    char new_parent_path[256];
-    char new_name[64];
-    int len;
-    int last_slash;
-    char old_name[64];
-    int old_len;
-    int old_last_slash;
-    int k;
-    (void)unused;
-    
-    if (!old_addr || old_addr >= KERNEL_VMA || old_addr < 0x1000) return -1;
-    if (!new_addr || new_addr >= KERNEL_VMA || new_addr < 0x1000) return -1;
-    
-    oldpath = (const char *)old_addr;
-    newpath = (const char *)new_addr;
-    
-    vfs_node_t *old_node = vfs_namei(oldpath);
-    if (!old_node) return -1;
-    
-    vfs_node_t *old_parent = old_node->parent;
-    if (!old_parent || !old_parent->rename) { vfs_release(old_node); return -1; }
-    
-    len = 0;
-    while (newpath[len]) len++;
-    last_slash = -1;
-    for (int i = 0; i < len; i++) {
-        if (newpath[i] == '/') last_slash = i;
-    }
-    
+static int sys_rename(uint64_t oldpath_ptr, const char *newpath_ptr,
+                      int unused) {
+    char *oldpath;
+    char *newpath;
+    char *new_parent_path;
+    char *new_name;
+    const char *old_name;
+    vfs_node_t *old_node;
+    vfs_node_t *old_parent;
     vfs_node_t *new_parent;
-    if (last_slash <= 0) {
-        int j;
-        int k;
-        new_parent_path[0] = '/';
-        new_parent_path[1] = '\0';
-        j = (last_slash == 0) ? 1 : 0;
-        k = 0;
-        while (newpath[j] && k < 63) new_name[k++] = newpath[j++];
-        new_name[k] = '\0';
-    } else {
-        int k;
-        for (int i = 0; i < last_slash && i < 255; i++) new_parent_path[i] = newpath[i];
-        new_parent_path[last_slash < 255 ? last_slash : 255] = '\0';
-        k = 0;
-        for (int i = last_slash + 1; i < len && k < 63; i++) new_name[k++] = newpath[i];
-        new_name[k] = '\0';
+    int result;
+
+    (void)unused;
+
+    result = posix_copy_user_string(&oldpath,
+        (const char *)(uintptr_t)oldpath_ptr, UINT64_MAX);
+    if (result < 0) return result;
+    result = posix_copy_user_string(&newpath, newpath_ptr, UINT64_MAX);
+    if (result < 0) {
+        kfree(oldpath);
+        return result;
     }
-    
-    new_parent = vfs_namei(new_parent_path);
-    if (!new_parent) { vfs_release(old_node); return -1; }
-    
-    old_len = 0;
-    while (oldpath[old_len]) old_len++;
-    old_last_slash = -1;
-    for (int i = 0; i < old_len; i++) {
-        if (oldpath[i] == '/') old_last_slash = i;
+    result = posix_split_path(newpath, &new_parent_path, &new_name);
+    if (result < 0) {
+        kfree(oldpath);
+        kfree(newpath);
+        return result;
     }
-    k = 0;
-    for (int i = old_last_slash + 1; i < old_len && k < 63; i++) old_name[k++] = oldpath[i];
-    old_name[k] = '\0';
-    
-    {
-        int ret;
-        ret = old_parent->rename(old_parent, old_name, new_parent, new_name);
+    old_node = vfs_namei(oldpath);
+    if (!old_node) {
+        kfree(oldpath);
+        kfree(newpath);
+        return -ENOENT;
+    }
+    old_parent = old_node->parent;
+    if (!old_parent || !old_parent->rename) {
         vfs_release(old_node);
-        vfs_release(new_parent);
-        return ret;
+        kfree(oldpath);
+        kfree(newpath);
+        return -EINVAL;
     }
+    new_parent = vfs_namei(new_parent_path);
+    if (!new_parent) {
+        vfs_release(old_node);
+        kfree(oldpath);
+        kfree(newpath);
+        return -ENOENT;
+    }
+    old_name = vfs_node_name(old_node);
+    result = old_parent->rename(old_parent, old_name, new_parent, new_name);
+    vfs_release(old_node);
+    vfs_release(new_parent);
+    kfree(oldpath);
+    kfree(newpath);
+    return result;
 }
 
-static int sys_link(int oldpath_ptr, const char *newpath_ptr, int unused) {
+static int sys_link(uint64_t oldpath_ptr, const char *newpath_ptr, int unused) {
     char *oldpath;
     char *newpath;
     int result;
@@ -1759,9 +1853,9 @@ static int sys_link(int oldpath_ptr, const char *newpath_ptr, int unused) {
     (void)unused;
     result = posix_copy_user_string(&oldpath,
                                     (const char *)(uintptr_t)oldpath_ptr,
-                                    VFS_MAX_PATH);
+                                    UINT64_MAX);
     if (result < 0) return result;
-    result = posix_copy_user_string(&newpath, newpath_ptr, VFS_MAX_PATH);
+    result = posix_copy_user_string(&newpath, newpath_ptr, UINT64_MAX);
     if (result < 0) {
         kfree(oldpath);
         return result;
@@ -1779,7 +1873,8 @@ static int posix_vfs_symlink(const char *target, const char *linkpath, uint64_t 
     return -ENOSYS;
 }
 
-static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
+static int sys_symlink(uint64_t target_ptr, const char *linkpath_ptr,
+                       int unused) {
     const char *target;
     const char *linkpath;
     char *target_copy;
@@ -1790,9 +1885,9 @@ static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
     target = (const char *)(uintptr_t)target_ptr;
     linkpath = (const char *)(uintptr_t)linkpath_ptr;
 
-    ret = posix_copy_user_string(&target_copy, target, VFS_MAX_PATH);
+    ret = posix_copy_user_string(&target_copy, target, UINT64_MAX);
     if (ret < 0) return ret;
-    ret = posix_copy_user_string(&link_copy, linkpath, VFS_MAX_PATH);
+    ret = posix_copy_user_string(&link_copy, linkpath, UINT64_MAX);
     if (ret < 0) {
         kfree(target_copy);
         return ret;
@@ -1820,13 +1915,18 @@ static int sys_symlink(int target_ptr, const char *linkpath_ptr, int unused) {
     return -EIO;
 }
 
-static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
-    uint64_t path_addr = (uint64_t)path_ptr;
-    uint64_t buf_addr = (uint64_t)(uintptr_t)buf_ptr;
-
-    char target[VFS_MAX_PATH];
+static int sys_readlink(uint64_t path_ptr, const char *buf_ptr, int bufsiz) {
+    uint64_t path_addr;
+    uint64_t buf_addr;
+    char *target;
     uint64_t n;
     uint64_t copy_len;
+    uint64_t capacity;
+    uint64_t i;
+    vfs_node_t *node;
+
+    path_addr = (uint64_t)path_ptr;
+    buf_addr = (uint64_t)(uintptr_t)buf_ptr;
     if (!current_task) return -ESRCH;
     if (bufsiz <= 0) return -EINVAL;
 
@@ -1834,22 +1934,28 @@ static int sys_readlink(int path_ptr, const char *buf_ptr, int bufsiz) {
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)bufsiz >= KERNEL_VMA) return -EFAULT;
 
-    vfs_node_t *node = vfs_namei_nofollow((const char *)path_addr);
+    node = vfs_namei_nofollow((const char *)path_addr);
     if (!node) return -ENOENT;
     if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) { vfs_release(node); return -EINVAL; }
 
-    n = vfs_read(node, 0, sizeof(target) - 1, (uint8_t *)target);
+    capacity = node->length;
+    if (capacity == 0 || capacity > (uint64_t)bufsiz)
+        capacity = (uint64_t)bufsiz;
+    target = (char *)kmalloc((size_t)capacity);
+    if (!target) {
+        vfs_release(node);
+        return -ENOMEM;
+    }
+    n = vfs_read(node, 0, capacity, (uint8_t *)target);
     vfs_release(node);
-    if (n >= sizeof(target)) n = sizeof(target) - 1;
-    target[n] = '\0';
 
     copy_len = n;
     if (copy_len > (uint64_t)bufsiz) copy_len = (uint64_t)bufsiz;
 
-    for (uint64_t i = 0; i < copy_len; i++) {
+    for (i = 0; i < copy_len; i++) {
         ((char *)buf_addr)[i] = target[i];
     }
-
+    kfree(target);
     return (int)copy_len;
 }
 
@@ -1921,17 +2027,19 @@ static int sys_pipe2(int *pipefd, int flags) {
 
 static int sys_fchdir(int fd) {
     char *resolved;
-    char resolved_path[VFS_MAX_PATH];
     vfs_node_t *node;
+    int result;
 
     if (!current_task) return -ESRCH;
     if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
-    resolved = vfs_get_path(node, resolved_path, sizeof(resolved_path));
+    resolved = vfs_get_path_alloc(node);
     if (!resolved) return -ENOENT;
-    return task_set_cwd(current_task, resolved) == 0 ? 0 : -ENOMEM;
+    result = task_set_cwd(current_task, resolved);
+    kfree(resolved);
+    return result == 0 ? 0 : -ENOMEM;
 }
 
 static int sys_fchmod(int fd, int mode) {
@@ -2139,13 +2247,14 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
-    int name_len;
-    int reclen;
+    size_t name_len;
+    size_t reclen;
     struct linux_dirent64 *de;
     int i;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
+    const char *entry_name;
 
     dirp_addr = (uint64_t)dirp;
     if (!current_task) return -ESRCH;
@@ -2167,17 +2276,22 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     while ((unsigned int)written < count) {
         if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
         
-        name_len = 0;
-        while (local_copy.name[name_len] && name_len < 63) name_len++;
+        entry_name = vfs_dirent_name(&local_copy);
+        name_len = strlen(entry_name);
+        if (name_len > UINT16_MAX - sizeof(struct linux_dirent64) - 8)
+            return written ? written : -EOVERFLOW;
         reclen = sizeof(unsigned long long) + sizeof(long long) + sizeof(unsigned short) + sizeof(unsigned char) + name_len + 1;
         reclen = (reclen + 7) & ~7;
         
-        if ((unsigned int)(written + reclen) > count) break;
+        if (reclen > UINT16_MAX)
+            return written ? written : -EOVERFLOW;
+        if (reclen > (size_t)(count - (unsigned int)written))
+            return written ? written : -EINVAL;
         
         de = (struct linux_dirent64 *)(buf + written);
         de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
         de->d_off = dir_offset + 1;
-        de->d_reclen = reclen;
+        de->d_reclen = (unsigned short)reclen;
         
         if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
         else if (local_copy.type == VFS_FILE) de->d_type = 8;
@@ -2187,12 +2301,12 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
         else if (local_copy.type == VFS_PIPE) de->d_type = 1;
         else de->d_type = 0;
         
-        for (i = 0; i < name_len; i++) {
-            de->d_name[i] = local_copy.name[i];
+        for (i = 0; i < (int)name_len; i++) {
+            de->d_name[i] = entry_name[i];
         }
         de->d_name[name_len] = '\0';
         
-        written += reclen;
+        written += (int)reclen;
         dir_offset++;
     }
     

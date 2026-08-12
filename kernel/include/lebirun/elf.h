@@ -278,7 +278,7 @@ typedef struct {
 
 typedef struct {
     int in_use;
-    char name[64];
+    char *name;
     uint64_t load_base;
     uint64_t load_size;
     uint8_t *file_data;
@@ -299,12 +299,14 @@ typedef struct {
     uint64_t fini_array_size;
     uint64_t init_func;
     uint64_t fini_func;
-    char (*needed)[64];
-    int needed_count;
+    char **needed;
+    uint64_t needed_count;
 } dl_handle_t;
 
 int elf_validate(const uint8_t *data, uint64_t size);
 int elf_validate_so(const uint8_t *data, uint64_t size);
+int elf_so_mapping_span(const uint8_t *data, uint64_t size,
+                        uint64_t *out_span);
 int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count);
 int elf_load_node_to_pd(uint64_t pd_phys, struct vfs_node *node,
                         struct task_file_map_list *file_maps,
@@ -314,5 +316,6 @@ int elf_load_so(uint64_t pd_phys, const uint8_t *data, uint64_t size, uint64_t b
 int elf_relocate_so(uint64_t pd_phys, dl_handle_t *handle, dl_handle_t *all_handles, int num_handles);
 uint64_t elf_get_entry(const uint8_t *data);
 uint64_t elf_so_find_symbol(dl_handle_t *handle, const char *name);
+void elf_free_needed(dl_handle_t *handle);
 
 #endif

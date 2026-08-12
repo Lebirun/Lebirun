@@ -97,8 +97,8 @@ static void procfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vf
     uint64_t type;
 
     memset(n, 0, sizeof(vfs_node_t));
-    strcpy(n->name, name);
     n->flags = flags;
+    vfs_node_set_name(n, name);
     n->parent = parent;
     n->ref_count = 1;
     type = VFS_GET_TYPE(flags);
@@ -311,73 +311,74 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
 }
 
 static uint64_t proc_self_maps_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[2048];
-    char path[VFS_MAX_PATH];
+    char line[160];
+    char *path;
     const char *display;
-    int len;
     int n;
     int i;
-    uint64_t remaining;
     uint64_t end;
     task_t *task;
+    proc_stream_t stream;
     
-    len = 0;
+    stream.offset = offset;
+    stream.size = size;
+    stream.buffer = buffer;
+    stream.position = 0;
+    stream.copied = 0;
     task = procfs_get_task(node);
     
     if (task) {
-        for (i = 0; i < task->file_map_count &&
-             len < (int)sizeof(buf) - 1; i++) {
+        for (i = 0; i < task->file_map_count; i++) {
             end = task->file_maps[i].vaddr + task->file_maps[i].memsz;
             display = "";
-            if (task->file_maps[i].node &&
-                vfs_get_path(task->file_maps[i].node, path,
-                             sizeof(path)))
-                display = path;
-            else if (task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS)
+            path = NULL;
+            if (task->file_maps[i].node) {
+                path = vfs_get_path_alloc(task->file_maps[i].node);
+                if (path) display = path;
+            } else if (task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS) {
                 display = "[anon]";
-            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "%016lx-%016lx %c%c%c%c %08lx 00:00 %lu%s%s\n",
+            }
+            n = snprintf(line, sizeof(line),
+                "%016lx-%016lx %c%c%c%c %08lx 00:00 %lu",
                 task->file_maps[i].vaddr, end,
                 task->file_maps[i].flags & 1 ? 'r' : '-',
                 task->file_maps[i].flags & 2 ? 'w' : '-',
                 task->file_maps[i].flags & 4 ? 'x' : '-',
                 task->file_maps[i].map_flags & TASK_VMA_SHARED ? 's' : 'p',
                 task->file_maps[i].offset,
-                task->file_maps[i].node ? task->file_maps[i].node->inode : 0,
-                display[0] ? " " : "", display);
-            if (n < 0) break;
-            if (n >= (int)sizeof(buf) - len) {
-                len = (int)sizeof(buf) - 1;
-                break;
+                task->file_maps[i].node ? task->file_maps[i].node->inode : 0);
+            if (n > 0) {
+                if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+                proc_stream_append(&stream, line, (uint64_t)n);
+                if (display[0]) {
+                    proc_stream_append(&stream, " ", 1);
+                    proc_stream_append(&stream, display, strlen(display));
+                }
+                proc_stream_append(&stream, "\n", 1);
             }
-            len += n;
+            if (path) kfree(path);
         }
     }
     if (task && task->user_brk > task->user_brk_start) {
-        if (len < (int)sizeof(buf) - 1) {
-            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "%016lx-%016lx rw-p 00000000 00:00 0 [heap]\n",
-                task->user_brk_start, task->user_brk);
-            if (n > 0) len += n;
-            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+        n = snprintf(line, sizeof(line),
+            "%016lx-%016lx rw-p 00000000 00:00 0 [heap]\n",
+            task->user_brk_start, task->user_brk);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+            proc_stream_append(&stream, line, (uint64_t)n);
         }
     }
     if (task && task->stack_size > 0) {
-        if (len < (int)sizeof(buf) - 1) {
-            n = snprintf(buf + len, sizeof(buf) - (size_t)len,
-                "%016lx-%016lx rw-p 00000000 00:00 0 [stack]\n",
-                USER_STACK_TOP - task->stack_size,
-                (uint64_t)USER_STACK_TOP);
-            if (n > 0) len += n;
-            if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+        n = snprintf(line, sizeof(line),
+            "%016lx-%016lx rw-p 00000000 00:00 0 [stack]\n",
+            USER_STACK_TOP - task->stack_size,
+            (uint64_t)USER_STACK_TOP);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+            proc_stream_append(&stream, line, (uint64_t)n);
         }
     }
-    
-    if (offset >= (uint64_t)len) return 0;
-    remaining = (uint64_t)len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    return size;
+    return stream.copied;
 }
 
 static uint64_t proc_self_cmdline_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -898,9 +899,6 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
 }
 
 static uint64_t proc_mounts_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    size_t buf_size;
-    char *buf;
-    size_t len;
     int mount_count;
     int i;
     vfs_mount_t *mount;
@@ -908,68 +906,35 @@ static uint64_t proc_mounts_read(vfs_node_t *node, uint64_t offset, uint64_t siz
     const char *path;
     const char *fsname;
     const char *opts;
-    size_t remaining;
-    int written;
-    uint64_t available;
+    proc_stream_t stream;
     
     (void)node;
 
+    stream.offset = offset;
+    stream.size = size;
+    stream.buffer = buffer;
+    stream.position = 0;
+    stream.copied = 0;
     mount_count = vfs_get_mount_count();
-    buf_size = mount_count * (VFS_MAX_PATH * 2 + 64);
-    if (buf_size < 1024) buf_size = 1024;
-    buf = (char *)kmalloc(buf_size);
-    if (!buf) {
-        return 0;
-    }
-
-    len = 0;
     for (i = 0; i < mount_count; ++i) {
         mount = vfs_get_mount(i);
-        if (!mount) {
-            continue;
-        }
+        if (!mount) continue;
 
         device = mount->device[0] ? mount->device :
             (mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown");
         path = mount->path[0] ? mount->path : "/";
         fsname = mount->fs_type && mount->fs_type->name ? mount->fs_type->name : "unknown";
         opts = "rw";
-
-        if (len >= buf_size) {
-            break;
-        }
-
-        remaining = buf_size - len;
-        written = snprintf(buf + len, remaining, "%s %s %s %s 0 0\n",
-            device, path, fsname, opts);
-        if (written <= 0) {
-            continue;
-        }
-        if ((size_t)written >= remaining) {
-            len = buf_size - 1;
-            break;
-        }
-
-        len += (size_t)written;
+        proc_stream_append(&stream, device, strlen(device));
+        proc_stream_append(&stream, " ", 1);
+        proc_stream_append(&stream, path, strlen(path));
+        proc_stream_append(&stream, " ", 1);
+        proc_stream_append(&stream, fsname, strlen(fsname));
+        proc_stream_append(&stream, " ", 1);
+        proc_stream_append(&stream, opts, strlen(opts));
+        proc_stream_append(&stream, " 0 0\n", 6);
     }
-
-    if (len == 0) {
-        kfree(buf);
-        return 0;
-    }
-
-    if (offset >= len) {
-        kfree(buf);
-        return 0;
-    }
-
-    available = (uint64_t)(len - offset);
-    if (size > available) {
-        size = available;
-    }
-    memcpy(buffer, buf + offset, size);
-    kfree(buf);
-    return size;
+    return stream.copied;
 }
 
 static uint64_t proc_filesystems_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -1483,8 +1448,8 @@ static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
             fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
             if (!fnode) return NULL;
             memset(fnode, 0, sizeof(vfs_node_t));
-            strcpy(fnode->name, name);
             fnode->flags = VFS_FILE | VFS_DYNAMIC;
+            vfs_node_set_name(fnode, name);
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
             fnode->read = files[file_idx].read;
             fnode->parent = &procfs_root;
@@ -1497,8 +1462,8 @@ static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
         tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
         if (!tdir) return NULL;
         memset(tdir, 0, sizeof(vfs_node_t));
-        strcpy(tdir->name, "task");
         tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+        vfs_node_set_name(tdir, "task");
         tdir->inode = pid_val;
         tdir->readdir = proc_task_readdir;
         tdir->finddir = proc_task_finddir;
@@ -1540,8 +1505,8 @@ static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name) {
     tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
     if (!tdir) return NULL;
     memset(tdir, 0, sizeof(vfs_node_t));
-    snprintf(tdir->name, sizeof(tdir->name), "%d", pid);
     tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+    snprintf(tdir->name, sizeof(tdir->name), "%d", pid);
     tdir->inode = (uint64_t)pid;
     tdir->readdir = proc_task_thread_readdir;
     tdir->finddir = proc_task_thread_finddir;
@@ -1596,8 +1561,8 @@ static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name) 
             fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
             if (!fnode) return NULL;
             memset(fnode, 0, sizeof(vfs_node_t));
-            strcpy(fnode->name, name);
             fnode->flags = VFS_FILE | VFS_DYNAMIC;
+            vfs_node_set_name(fnode, name);
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
             fnode->read = files[file_idx].read;
             fnode->parent = &procfs_root;
@@ -1617,8 +1582,8 @@ static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
     dir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
     if (!dir) return NULL;
     memset(dir, 0, sizeof(vfs_node_t));
-    snprintf(dir->name, sizeof(dir->name), "%d", pid);
     dir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+    snprintf(dir->name, sizeof(dir->name), "%d", pid);
     dir->inode = raw_inode;
     dir->readdir = proc_pid_readdir;
     dir->finddir = proc_pid_finddir;
@@ -1838,8 +1803,8 @@ void KERNEL_INIT procfs_init(void) {
     procfs_type.next = NULL;
 
     memset(&procfs_root, 0, sizeof(vfs_node_t));
-    strcpy(procfs_root.name, "proc");
     procfs_root.flags = VFS_DIRECTORY;
+    vfs_node_set_name(&procfs_root, "proc");
     procfs_root.mask = 0555;
     procfs_root.readdir = procfs_readdir;
     procfs_root.finddir = procfs_finddir;

@@ -294,7 +294,9 @@
 #define LEB_SYSCALL_SCHED_RR_GET_INTERVAL 287u
 #define LEB_SYSCALL_CAPGET 288u
 #define LEB_SYSCALL_CAPSET 289u
-#define LEB_NR_SYSCALLS 290u
+#define LEB_SYSCALL_REGEXEC_EX2 298u
+#define LEB_SYSCALL_VFS_READDIR2 299u
+#define LEB_NR_SYSCALLS 300u
 
 #define LEB_MS_RDONLY   1
 #define LEB_MS_REMOUNT  32
@@ -326,6 +328,21 @@ static __inline__ long leb_syscall3(unsigned int n, long a1, long a2, long a3) {
 static __inline__ long leb_syscall4(unsigned int n, long a1, long a2, long a3, long a4) {
 	long ret;
 	__asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(n | LEBIRUN_SYSCALL_FLAG), "b"(a1), "c"(a2), "d"(a3), "S"(a4) : "memory");
+	return ret;
+}
+
+static __inline__ long leb_syscall6(unsigned int n, long a1, long a2, long a3,
+                                   long a4, long a5, long a6) {
+	long ret;
+	__asm__ __volatile__(
+		"movq %%rbp, %%r10\n\t"
+		"movq %7, %%rbp\n\t"
+		"int $0x80\n\t"
+		"movq %%r10, %%rbp"
+		: "=a"(ret)
+		: "a"(n | LEBIRUN_SYSCALL_FLAG), "b"(a1), "c"(a2), "d"(a3),
+		  "S"(a4), "D"(a5), "r"(a6)
+		: "memory", "r10");
 	return ret;
 }
 

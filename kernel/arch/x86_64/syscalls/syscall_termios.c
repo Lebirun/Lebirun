@@ -8,8 +8,10 @@ static int kernel_ptr_mapped(uint64_t addr) {
 }
 
 static int vfs_node_ptr_sane(vfs_node_t *node) {
+    uint64_t a;
+
     if (!node) return 0;
-    uint64_t a = (uint64_t)node;
+    a = (uint64_t)node;
     if ((a & 0xFFFFFF00) == 0xFEFEFE00) return 0;
     if (a < KERNEL_VMA || a >= 0xFFFFFFFFFFFFFF00ULL) return 0;
     if (!kernel_ptr_mapped(a)) return 0;
@@ -18,14 +20,18 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
 }
 
 static int user_range_mapped(uint64_t addr, uint64_t size) {
+    uint64_t end;
+    uint64_t p;
+    uint64_t pend;
+
     if (!current_task) return 0;
     if (size == 0) return 1;
-    uint64_t end = addr + size - 1;
+    end = addr + size - 1;
     if (end < addr) return 0;
     if (addr < 0x1000 || end >= KERNEL_VMA) return 0;
 
-    uint64_t p = addr & ~0xFFFu;
-    uint64_t pend = end & ~0xFFFu;
+    p = addr & ~0xFFFu;
+    pend = end & ~0xFFFu;
     for (;;) {
         if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
         if (p == pend) break;
@@ -36,7 +42,9 @@ static int user_range_mapped(uint64_t addr, uint64_t size) {
 }
 
 static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
-    size_t n = strlen(lit);
+    size_t n;
+
+    n = strlen(lit);
     if (n >= VFS_MAX_NAME) return 0;
     if (memcmp(name, lit, n) != 0) return 0;
     return name[n] == '\0';
@@ -208,6 +216,9 @@ static void termios_init_defaults(int tty_id) {
 }
 
 static int get_tty_id_for_fd(int fd) {
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
     if (fd < 0) return -1;
     if (!current_task) return (fd >= 0 && fd <= 2) ? console_get_current() : -1;
     if (fd >= current_task->fds_capacity) return -1;
@@ -215,18 +226,18 @@ static int get_tty_id_for_fd(int fd) {
         if (fd >= 0 && fd <= 2) return (current_task->console_id >= 0) ? current_task->console_id : console_get_current();
         return -1;
     }
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
     if (tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT || tfd->type == FD_TYPE_STDERR) {
         if (current_task->console_id >= 0) return current_task->console_id;
         return console_get_current();
     }
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
-        vfs_node_t *node = (vfs_node_t *)tfd->node;
+        node = (vfs_node_t *)tfd->node;
         if (!vfs_node_ptr_sane(node)) {
             return -1;
         }
         if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE &&
-            (vfs_name_is_tty(node->name) || vfs_name_is(node->name, "console"))) {
+            (vfs_name_is_tty(vfs_node_name(node)) || vfs_name_is(vfs_node_name(node), "console"))) {
             if (current_task->console_id >= 0) return current_task->console_id;
             return console_get_current();
         }
@@ -250,25 +261,29 @@ static int sys_tcgetattr(int fd, const char *termios_ptr, int unused) {
     return 0;
 }
 
-static int sys_tcsetattr(int fd, const char *actions_ptr, int termios_ptr) {
+static int sys_tcsetattr(int fd, const char *actions_ptr,
+                         uint64_t termios_ptr) {
     int actions;
     int tty_id;
     uint64_t addr;
 
     actions = (int)(uintptr_t)actions_ptr;
-    (void)actions;
 
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
 
     addr = (uint64_t)termios_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
+
+    if (actions == TCSAFLUSH) {
+        keyboard_flush_for(tty_id);
+        syscall_core_flush_tty_input(tty_id);
+    }
     memcpy(&tty_termios[tty_id], (void*)addr, sizeof(struct kernel_termios));
     return 0;
 }
 
-static int sys_ioctl(int fd, const char *request_ptr, int arg) {
+static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
     unsigned long request;
     int tty_id;
     int graphics_result;
@@ -276,6 +291,20 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     task_fd_t *tfd;
     uint64_t node_addr;
     vfs_node_t *vn;
+    framebuffer_t *fb;
+    struct vt_stat_s *vst;
+    struct vt_stat2_s vst2;
+    uint64_t state_capacity;
+    uint64_t state_words;
+    uint64_t state_word;
+    uint64_t state_index;
+    uint64_t state_bits;
+    int pgrp;
+    int active;
+    int vi;
+    int found;
+    int ci;
+    int target_vt;
 
     request = (unsigned long)(uintptr_t)request_ptr;
 
@@ -295,10 +324,10 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
     }
 
     if (request == 0ul || request == 0x406ul) {
-        return ioctl_fcntl_dupfd_compat(fd, (int)request, arg);
+        return ioctl_fcntl_dupfd_compat(fd, (int)request, (int)arg);
     }
     if (request == 1ul || request == 2ul || request == 3ul || request == 4ul) {
-        return ioctl_fcntl_basic_compat(fd, (int)request, arg);
+        return ioctl_fcntl_basic_compat(fd, (int)request, (int)arg);
     }
 
     if (current_task->fds[fd].in_use && current_task->fds[fd].node) {
@@ -357,6 +386,10 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
         case TIOCSETAF:
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_termios))) return -EFAULT;
+            if (request == TIOCSETAF) {
+                keyboard_flush_for(tty_id);
+                syscall_core_flush_tty_input(tty_id);
+            }
             memcpy(&tty_termios[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_termios));
             return 0;
             
@@ -364,7 +397,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
             {
-                framebuffer_t *fb = fb_get();
+                fb = fb_get();
                 if (fb && (fb->font || fb->cols)) {
                     tty_winsize[tty_id].ws_col = fb->cols;
                     tty_winsize[tty_id].ws_row = fb->rows;
@@ -380,7 +413,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
             memcpy(&tty_winsize[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_winsize));
             {
-                int pgrp = tty_get_foreground_pgrp(tty_id);
+                pgrp = tty_get_foreground_pgrp(tty_id);
                 if (pgrp > 0)
                     deliver_signal_to_pgrp((pid_t)pgrp, 28);
             }
@@ -390,7 +423,7 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             if (tty_id < 0) return -ENOTTY;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
             {
-                int pgrp = tty_get_foreground_pgrp(tty_id);
+                pgrp = tty_get_foreground_pgrp(tty_id);
                 if (pgrp == 0 && current_task) {
                     pgrp = current_task->pgid ? current_task->pgid : current_task->pid;
                     if (pgrp == 0) pgrp = 1;
@@ -419,9 +452,6 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
 
         case VT_OPENQRY:
         {
-            int active;
-            int vi;
-            int found;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
             active = console_get_current();
             found = -1;
@@ -437,8 +467,6 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
 
         case VT_GETSTATE:
         {
-            struct vt_stat_s *vst;
-            int ci;
             if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_stat_s))) return -EFAULT;
             vst = (struct vt_stat_s *)(uintptr_t)arg;
             memset(vst, 0, sizeof(*vst));
@@ -450,9 +478,38 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
             return 0;
         }
 
+        case VT_GETSTATE2:
+        {
+            if (!arg || copy_from_user(&vst2, (void *)(uintptr_t)arg,
+                                       sizeof(vst2)) < 0)
+                return -EFAULT;
+            state_capacity = vst2.v_state_words;
+            state_words = ((uint64_t)tty_count + 63) / 64;
+            vst2.v_active = (uint64_t)console_get_current() + 1;
+            vst2.v_count = (uint64_t)tty_count;
+            vst2.v_state_words = state_words;
+            if (copy_to_user((void *)(uintptr_t)arg, &vst2,
+                             sizeof(vst2)) < 0)
+                return -EFAULT;
+            if (!vst2.v_state_ptr) return 0;
+            if (state_capacity < state_words) return -ENOSPC;
+            for (state_index = 0; state_index < state_words;
+                 state_index++) {
+                state_bits = (uint64_t)tty_count - state_index * 64;
+                if (state_bits >= 64)
+                    state_word = UINT64_MAX;
+                else
+                    state_word = (1ULL << state_bits) - 1;
+                if (copy_to_user((void *)(uintptr_t)(vst2.v_state_ptr +
+                                 state_index * sizeof(state_word)),
+                                 &state_word, sizeof(state_word)) < 0)
+                    return -EFAULT;
+            }
+            return 0;
+        }
+
         case VT_ACTIVATE:
         {
-            int target_vt;
             target_vt = arg;
             if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
             console_switch(target_vt - 1);
@@ -461,7 +518,6 @@ static int sys_ioctl(int fd, const char *request_ptr, int arg) {
 
         case VT_WAITACTIVE:
         {
-            int target_vt;
             target_vt = arg;
             if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
             while (console_get_current() != (target_vt - 1)) {

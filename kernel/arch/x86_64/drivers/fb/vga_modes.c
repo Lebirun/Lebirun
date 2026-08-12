@@ -64,7 +64,7 @@ static uint8_t vga_crtc_read(uint8_t index) {
 }
 
 static int pci_find_cirrus(void) {
-    uint8_t bus;
+    uint16_t bus;
     uint8_t slot;
     uint8_t func;
     uint64_t id_reg;
@@ -75,35 +75,35 @@ static int pci_find_cirrus(void) {
     uint64_t hdr;
     uint64_t bar0;
 
-    for (bus = 0; bus < 255; bus++) {
+    for (bus = 0; bus < 256; bus++) {
         for (slot = 0; slot < 32; slot++) {
             for (func = 0; func < 8; func++) {
-                id_reg = pci_read32(bus, slot, func, 0x00);
+                id_reg = pci_read32((uint8_t)bus, slot, func, 0x00);
                 vendor = (uint16_t)(id_reg & 0xFFFF);
                 if (vendor == 0xFFFF) {
                     if (func == 0) break;
                     continue;
                 }
                 device = (uint16_t)(id_reg >> 16);
-                class_reg = pci_read32(bus, slot, func, 0x08);
+                class_reg = pci_read32((uint8_t)bus, slot, func, 0x08);
                 class_code = (uint16_t)(class_reg >> 16);
 
                 if (class_code != PCI_VGA_CLASS) {
                     if (func == 0) {
-                        hdr = pci_read32(bus, slot, func, 0x0C);
+                        hdr = pci_read32((uint8_t)bus, slot, func, 0x0C);
                         if (!((hdr >> 16) & 0x80)) break;
                     }
                     continue;
                 }
 
                 if (vendor == PCI_VENDOR_CIRRUS && device == PCI_DEVICE_5446) {
-                    bar0 = pci_read32(bus, slot, func, 0x10);
+                    bar0 = pci_read32((uint8_t)bus, slot, func, 0x10);
                     cirrus_fb_base = bar0 & 0xFFFFFFF0u;
                     return 1;
                 }
 
                 if (func == 0) {
-                    hdr = pci_read32(bus, slot, func, 0x0C);
+                    hdr = pci_read32((uint8_t)bus, slot, func, 0x0C);
                     if (!((hdr >> 16) & 0x80)) break;
                 }
             }

@@ -13,6 +13,7 @@
 #define VFS_MOUNTPOINT  0x08
 #define VFS_DYNAMIC     0x10
 #define VFS_EMBEDDED    0x20
+#define VFS_NAME_DYNAMIC 0x40
 
 #define VFS_TYPE_MASK   0x07
 #define VFS_GET_TYPE(flags) ((flags) & VFS_TYPE_MASK)
@@ -38,14 +39,19 @@
 
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
+#define VFS_NODE_INLINE_NAME 16
 
 struct vfs_node;
 struct dirent;
 
 typedef struct dirent {
-    char name[VFS_MAX_NAME];
+    union {
+        char name[VFS_MAX_NAME];
+        char *dynamic_name;
+    };
     uint64_t inode;
     uint8_t type;
+    uint8_t name_dynamic;
 } dirent_t;
 
 typedef uint64_t (*read_type_t)(struct vfs_node *, uint64_t offset, uint64_t size, uint8_t *buffer);
@@ -64,7 +70,10 @@ typedef int (*chown_type_t)(struct vfs_node *, uint64_t uid, uint64_t gid);
 typedef int (*ioctl_type_t)(struct vfs_node *, unsigned long request, void *arg);
 
 typedef struct vfs_node {
-    char name[VFS_MAX_NAME];
+    union {
+        char name[VFS_NODE_INLINE_NAME];
+        char *dynamic_name;
+    };
     uint64_t mask;
     uint64_t uid;
     uint64_t gid;
@@ -96,6 +105,15 @@ typedef struct vfs_node {
     uint64_t ref_count;
     void *private_data;
 } vfs_node_t;
+
+const char *vfs_node_name(const vfs_node_t *node);
+int vfs_node_set_name(vfs_node_t *node, const char *name);
+int vfs_node_set_name_n(vfs_node_t *node, const char *name, size_t length);
+void vfs_node_release_name(vfs_node_t *node);
+const char *vfs_dirent_name(const dirent_t *entry);
+int vfs_dirent_set_name(dirent_t *entry, const char *name);
+int vfs_dirent_set_name_n(dirent_t *entry, const char *name, size_t length);
+void vfs_dirent_release_name(dirent_t *entry);
 
 typedef struct {
     vfs_node_t *node;
@@ -160,6 +178,7 @@ void vfs_block_squashfs_access(void);
 vfs_node_t *vfs_lookup(const char *path);
 void vfs_release(vfs_node_t *node);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
+char *vfs_get_path_alloc(vfs_node_t *node);
 
 int vfs_open_path(const char *path, int flags);
 int vfs_close_fd(int fd);

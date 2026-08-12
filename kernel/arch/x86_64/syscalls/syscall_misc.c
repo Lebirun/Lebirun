@@ -82,11 +82,11 @@ static struct rlimit default_rlimits[RLIM_NLIMITS] = {
     [RLIMIT_RSS]        = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_NPROC]      = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_NOFILE]     = { RLIM_INFINITY, RLIM_INFINITY },
-    [RLIMIT_MEMLOCK]    = { 65536, 65536 },
+    [RLIMIT_MEMLOCK]    = { 65536, RLIM_INFINITY },
     [RLIMIT_AS]         = { RLIM_INFINITY, RLIM_INFINITY },
     [RLIMIT_LOCKS]      = { RLIM_INFINITY, RLIM_INFINITY },
-    [RLIMIT_SIGPENDING] = { 1024, 1024 },
-    [RLIMIT_MSGQUEUE]   = { 819200, 819200 },
+    [RLIMIT_SIGPENDING] = { 1024, RLIM_INFINITY },
+    [RLIMIT_MSGQUEUE]   = { 819200, RLIM_INFINITY },
     [RLIMIT_NICE]       = { 0, 0 },
     [RLIMIT_RTPRIO]     = { 0, 0 },
     [RLIMIT_RTTIME]     = { RLIM_INFINITY, RLIM_INFINITY },
@@ -454,12 +454,15 @@ static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
 #define PR_SET_NO_NEW_PRIVS 38
 #define PR_GET_NO_NEW_PRIVS 39
 #define PR_SET_SYSCALL_MASK 0x4C420001
+#define PR_SET_SYSCALL_MASK2 0x4C420002
 
 static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     char name[16];
     size_t length;
     uint64_t syscall_mask[(NR_SYSCALLS + 63) / 64];
+    uint64_t *extended_mask;
     size_t syscall_words;
+    int result;
 
     (void)arg4; (void)arg5;
     switch (option) {
@@ -515,6 +518,26 @@ static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigne
                                sizeof(syscall_mask)) != 0) return -EFAULT;
             return creds_set_syscall_mask(current_task, syscall_mask,
                                            syscall_words);
+
+        case PR_SET_SYSCALL_MASK2:
+            syscall_words = (size_t)arg3;
+            if (!arg2 || syscall_words == 0 ||
+                syscall_words > SIZE_MAX / sizeof(uint64_t) || arg4 > 1)
+                return -EINVAL;
+            if (!creds_get_no_new_privs(current_task) &&
+                !creds_has_capability(current_task, 21)) return -EPERM;
+            extended_mask = (uint64_t *)kmalloc(
+                syscall_words * sizeof(uint64_t));
+            if (!extended_mask) return -ENOMEM;
+            if (copy_from_user(extended_mask, (const void *)arg2,
+                               syscall_words * sizeof(uint64_t)) != 0) {
+                kfree(extended_mask);
+                return -EFAULT;
+            }
+            result = creds_set_syscall_mask_ex(current_task, extended_mask,
+                                                syscall_words, (int)arg4);
+            kfree(extended_mask);
+            return result;
             
         default:
             return -EINVAL;
@@ -932,11 +955,9 @@ static int sys_getenv(const char *name, char *buf, int bufsize) {
     int len;
     int i;
 
-    if (!name || !buf) return -EFAULT;
+    if (!name) return -EFAULT;
     name_addr = (uint64_t)name;
-    buf_addr = (uint64_t)buf;
     if (name_addr >= KERNEL_VMA || name_addr < 0x1000) return -EFAULT;
-    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     
     init_default_environ();
     
@@ -945,6 +966,10 @@ static int sys_getenv(const char *name, char *buf, int bufsize) {
 
     len = 0;
     while (env_entries[idx].value[len]) len++;
+    if (!buf && bufsize == 0) return len + 1;
+    if (!buf || bufsize <= 0) return -EFAULT;
+    buf_addr = (uint64_t)buf;
+    if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (len + 1 > bufsize) return -ERANGE;
 
     for (i = 0; i <= len; i++) {

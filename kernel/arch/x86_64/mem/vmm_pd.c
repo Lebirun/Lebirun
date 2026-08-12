@@ -13,8 +13,8 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 extern uint64_t pfa_alloc(void);
 extern void pfa_free(uint64_t phys_addr);
 extern void pfa_ref_inc(uint64_t phys_addr);
-extern int pfa_ref_dec(uint64_t phys_addr);
-extern uint8_t pfa_ref_get(uint64_t phys_addr);
+extern uint64_t pfa_ref_dec(uint64_t phys_addr);
+extern uint64_t pfa_ref_get(uint64_t phys_addr);
 extern void pfa_cow_release64(uint64_t phys_addr);
 extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
@@ -26,6 +26,50 @@ static inline bool clone_should_log_detail(uint64_t index) {
 
 static inline bool clone_should_log_sample(uint64_t index) {
     return index == 0;
+}
+
+static uint64_t vmm_table_read(uint64_t table_phys, uint64_t index) {
+    uint64_t temp_virt;
+    uint64_t *table;
+    uint64_t entry;
+
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    entry = table[index];
+    temp_unmap_raw(temp_virt);
+    return entry;
+}
+
+static void vmm_table_write(uint64_t table_phys, uint64_t index,
+                            uint64_t entry) {
+    uint64_t temp_virt;
+    uint64_t *table;
+
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, table_phys);
+    table = (uint64_t *)temp_virt;
+    table[index] = entry;
+    __asm__ volatile ("" ::: "memory");
+    temp_unmap_raw(temp_virt);
+}
+
+static void vmm_table_copy_from(uint64_t table_phys, uint64_t *copy) {
+    uint64_t temp_virt;
+
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, table_phys);
+    memcpy(copy, (void *)temp_virt, PAGE_SIZE);
+    temp_unmap_raw(temp_virt);
+}
+
+static void vmm_table_copy_to(uint64_t table_phys, const uint64_t *copy) {
+    uint64_t temp_virt;
+
+    temp_virt = TEMP_SLOT(0);
+    temp_map_raw(temp_virt, table_phys);
+    memcpy((void *)temp_virt, copy, PAGE_SIZE);
+    temp_unmap_raw(temp_virt);
 }
 
 uint64_t vmm_create_pml4(void) {
@@ -58,17 +102,10 @@ uint64_t vmm_create_pml4(void) {
 }
 
 static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int release_leaf_refs) {
-    uint64_t temp_pml4;
-    uint64_t temp_pdpt;
-    uint64_t temp_pd;
-    uint64_t temp_pt;
-    uint64_t *pml4;
-    uint64_t *pdpt_tbl;
-    uint64_t *pd_tbl;
-    uint64_t *pt_tbl;
     uint64_t i;
     uint64_t j;
     uint64_t k;
+    uint64_t l;
     uint64_t pml4e;
     uint64_t pdpt_phys;
     uint64_t pdpte;
@@ -82,57 +119,35 @@ static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
 
-    temp_pml4 = TEMP_SLOT(0);
-    temp_pdpt = TEMP_SLOT(1);
-    temp_pd   = TEMP_SLOT(2);
-    temp_pt   = TEMP_SLOT(3);
-
-    temp_map_raw(temp_pml4, pml4_phys);
-    pml4 = (uint64_t *)temp_pml4;
-
     for (i = 0; i < pml4_entries; i++) {
-        pml4e = pml4[i];
+        pml4e = vmm_table_read(pml4_phys, i);
         if (!(pml4e & 1)) continue;
         pdpt_phys = pml4e & VMM_PHYS_MASK;
 
-        temp_map_raw(temp_pdpt, pdpt_phys);
-        pdpt_tbl = (uint64_t *)temp_pdpt;
-
         for (j = 0; j < 512; j++) {
-            pdpte = pdpt_tbl[j];
+            pdpte = vmm_table_read(pdpt_phys, j);
             if (!(pdpte & 1)) continue;
             pd_phys_val = pdpte & VMM_PHYS_MASK;
 
-            temp_map_raw(temp_pd, pd_phys_val);
-            pd_tbl = (uint64_t *)temp_pd;
-
             for (k = 0; k < 512; k++) {
-                uint64_t l;
-                pde = pd_tbl[k];
+                pde = vmm_table_read(pd_phys_val, k);
                 if (!(pde & 1)) continue;
                 pt_phys_val = pde & VMM_PHYS_MASK;
 
-                temp_map_raw(temp_pt, pt_phys_val);
-                pt_tbl = (uint64_t *)temp_pt;
-
                 for (l = 0; l < 512; l++) {
-                    pte = pt_tbl[l];
+                    pte = vmm_table_read(pt_phys_val, l);
                     if ((pte & 1) && release_leaf_refs && !(pte & VMM_PTE_NOFREE)) {
                         exec_page_cache_on_page_release(pte & VMM_PHYS_MASK);
                         pfa_cow_release64(pte & VMM_PHYS_MASK);
                     }
                 }
-                temp_unmap_raw(temp_pt);
                 pfa_free(pt_phys_val);
             }
-            temp_unmap_raw(temp_pd);
             pfa_free(pd_phys_val);
         }
-        temp_unmap_raw(temp_pdpt);
         pfa_free(pdpt_phys);
     }
 
-    temp_unmap_raw(temp_pml4);
     pfa_free(pml4_phys);
 
     if (saved_flags & (1 << 9))
@@ -151,22 +166,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     uint64_t orig_cr3;
     uint64_t kernel_cr3;
     uint64_t new_pml4_phys;
-    uint64_t temp_src_pml4;
-    uint64_t temp_new_pml4;
-    uint64_t temp_src_pdpt = TEMP_SLOT(2);
-    uint64_t temp_new_pdpt;
-    uint64_t temp_src_pd = TEMP_SLOT(4);
-    uint64_t temp_new_pd;
-    uint64_t temp_src_pt = TEMP_SLOT(6);
-    uint64_t temp_new_pt;
-    uint64_t *src_pml4;
-    uint64_t *new_pml4;
-    uint64_t *src_pdpt_tbl;
-    uint64_t *new_pdpt_tbl;
-    uint64_t *src_pd_tbl;
-    uint64_t *new_pd_tbl;
-    uint64_t *src_pt_tbl;
-    uint64_t *new_pt_tbl;
     uint64_t *src_pt_copy;
     uint64_t *new_pt_copy;
     uint64_t i;
@@ -234,19 +233,11 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
 
-    temp_src_pml4 = TEMP_SLOT(0);
-    temp_new_pml4 = TEMP_SLOT(1);
-
-    temp_map_raw(temp_src_pml4, src_pml4_phys);
-    src_pml4 = (uint64_t *)temp_src_pml4;
-    temp_map_raw(temp_new_pml4, new_pml4_phys);
-    new_pml4 = (uint64_t *)temp_new_pml4;
-
-    new_pml4[511] = (pdpt_high_phys & VMM_PHYS_MASK) | 3;
-    __asm__ volatile ("" ::: "memory");
+    vmm_table_write(new_pml4_phys, 511,
+                    (pdpt_high_phys & VMM_PHYS_MASK) | 3);
 
     for (i = 0; i < 511; i++) {
-        pml4e = src_pml4[i];
+        pml4e = vmm_table_read(src_pml4_phys, i);
         if (!(pml4e & 1)) continue;
         src_pdpt_phys = pml4e & VMM_PHYS_MASK;
 
@@ -255,62 +246,39 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
         new_pdpt_phys = (uint64_t)alloc_page;
         pmm_zero_page_phys(new_pdpt_phys);
 
-        new_pml4[i] = (new_pdpt_phys & VMM_PHYS_MASK) | (pml4e & 0x8000000000000FFFULL);
-
-        temp_src_pdpt = TEMP_SLOT(2);
-        temp_new_pdpt = TEMP_SLOT(3);
-        temp_map_raw(temp_src_pdpt, src_pdpt_phys);
-        src_pdpt_tbl = (uint64_t *)temp_src_pdpt;
-        temp_map_raw(temp_new_pdpt, new_pdpt_phys);
-        new_pdpt_tbl = (uint64_t *)temp_new_pdpt;
+        vmm_table_write(new_pml4_phys, i,
+                        (new_pdpt_phys & VMM_PHYS_MASK) |
+                        (pml4e & 0x8000000000000FFFULL));
 
         for (j = 0; j < 512; j++) {
-            pdpte = src_pdpt_tbl[j];
+            pdpte = vmm_table_read(src_pdpt_phys, j);
             if (!(pdpte & 1)) continue;
             src_pd_phys = pdpte & VMM_PHYS_MASK;
 
             alloc_page = pmm_alloc_page();
-            if (!alloc_page) {
-                temp_unmap_raw(temp_new_pdpt);
-                temp_unmap_raw(temp_src_pdpt);
-                goto cleanup_fail;
-            }
+            if (!alloc_page) goto cleanup_fail;
             new_pd_phys = (uint64_t)alloc_page;
             pmm_zero_page_phys(new_pd_phys);
 
-            new_pdpt_tbl[j] = (new_pd_phys & VMM_PHYS_MASK) | (pdpte & 0x8000000000000FFFULL);
-
-            temp_src_pd = TEMP_SLOT(4);
-            temp_new_pd = TEMP_SLOT(5);
-            temp_map_raw(temp_src_pd, src_pd_phys);
-            src_pd_tbl = (uint64_t *)temp_src_pd;
-            temp_map_raw(temp_new_pd, new_pd_phys);
-            new_pd_tbl = (uint64_t *)temp_new_pd;
+            vmm_table_write(new_pdpt_phys, j,
+                            (new_pd_phys & VMM_PHYS_MASK) |
+                            (pdpte & 0x8000000000000FFFULL));
 
             for (k = 0; k < 512; k++) {
-                pde = src_pd_tbl[k];
+                pde = vmm_table_read(src_pd_phys, k);
                 if (!(pde & 1)) continue;
                 src_pt_phys = pde & VMM_PHYS_MASK;
                 pde_flags = pde & 0x8000000000000FFFULL;
 
                 alloc_page = pmm_alloc_page();
-                if (!alloc_page) {
-                    temp_unmap_raw(temp_new_pd);
-                    temp_unmap_raw(temp_src_pd);
-                    temp_unmap_raw(temp_new_pdpt);
-                    temp_unmap_raw(temp_src_pdpt);
-                    goto cleanup_fail;
-                }
+                if (!alloc_page) goto cleanup_fail;
                 new_pt_phys = (uint64_t)alloc_page;
+                pmm_zero_page_phys(new_pt_phys);
 
-                new_pd_tbl[k] = (new_pt_phys & VMM_PHYS_MASK) | pde_flags;
+                vmm_table_write(new_pd_phys, k,
+                                (new_pt_phys & VMM_PHYS_MASK) | pde_flags);
 
-                temp_src_pt = TEMP_SLOT(6);
-                temp_new_pt = TEMP_SLOT(7);
-                temp_map_raw(temp_src_pt, src_pt_phys);
-                src_pt_tbl = (uint64_t *)temp_src_pt;
-                memcpy(src_pt_copy, src_pt_tbl, PAGE_SIZE);
-                temp_unmap_raw(temp_src_pt);
+                vmm_table_copy_from(src_pt_phys, src_pt_copy);
                 memset(new_pt_copy, 0, PAGE_SIZE);
                 shared_ref_failed = 0;
 
@@ -367,30 +335,13 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                         if (src_pte & VMM_PTE_NOFREE) continue;
                         pfa_cow_release64(src_pte & VMM_PHYS_MASK);
                     }
-                    temp_unmap_raw(temp_new_pd);
-                    temp_unmap_raw(temp_src_pd);
-                    temp_unmap_raw(temp_new_pdpt);
-                    temp_unmap_raw(temp_src_pdpt);
                     goto cleanup_fail;
                 }
-                temp_map_raw(temp_src_pt, src_pt_phys);
-                src_pt_tbl = (uint64_t *)temp_src_pt;
-                memcpy(src_pt_tbl, src_pt_copy, PAGE_SIZE);
-                temp_unmap_raw(temp_src_pt);
-                temp_map_raw(temp_new_pt, new_pt_phys);
-                new_pt_tbl = (uint64_t *)temp_new_pt;
-                memcpy(new_pt_tbl, new_pt_copy, PAGE_SIZE);
-                temp_unmap_raw(temp_new_pt);
+                vmm_table_copy_to(src_pt_phys, src_pt_copy);
+                vmm_table_copy_to(new_pt_phys, new_pt_copy);
             }
-            temp_unmap_raw(temp_new_pd);
-            temp_unmap_raw(temp_src_pd);
         }
-        temp_unmap_raw(temp_new_pdpt);
-        temp_unmap_raw(temp_src_pdpt);
     }
-
-    temp_unmap_raw(temp_new_pml4);
-    temp_unmap_raw(temp_src_pml4);
 
     if (orig_cr3 == src_pml4_phys) {
         __asm__ volatile ("mov %0, %%cr3" : : "r"(src_pml4_phys) : "memory");
@@ -413,59 +364,7 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     return new_pml4_phys;
 
 cleanup_fail:
-    temp_unmap_raw(temp_new_pml4);
-    temp_unmap_raw(temp_src_pml4);
-
-    {
-        uint64_t ci, cj, ck, cl;
-        uint64_t c_pml4e, c_pdpte, c_pde, c_pte;
-        uint64_t c_pdpt_phys, c_pd_phys, c_pt_phys;
-
-        temp_map_raw(temp_new_pml4, new_pml4_phys);
-        new_pml4 = (uint64_t *)temp_new_pml4;
-
-        for (ci = 0; ci < 511; ci++) {
-            c_pml4e = new_pml4[ci];
-            if (!(c_pml4e & 1)) continue;
-            c_pdpt_phys = c_pml4e & VMM_PHYS_MASK;
-
-            temp_map_raw(temp_src_pdpt, c_pdpt_phys);
-            new_pdpt_tbl = (uint64_t *)temp_src_pdpt;
-
-            for (cj = 0; cj < 512; cj++) {
-                c_pdpte = new_pdpt_tbl[cj];
-                if (!(c_pdpte & 1)) continue;
-                c_pd_phys = c_pdpte & VMM_PHYS_MASK;
-
-                temp_map_raw(temp_src_pd, c_pd_phys);
-                new_pd_tbl = (uint64_t *)temp_src_pd;
-
-                for (ck = 0; ck < 512; ck++) {
-                    c_pde = new_pd_tbl[ck];
-                    if (!(c_pde & 1)) continue;
-                    c_pt_phys = c_pde & VMM_PHYS_MASK;
-
-                    temp_map_raw(temp_src_pt, c_pt_phys);
-                    new_pt_tbl = (uint64_t *)temp_src_pt;
-                    for (cl = 0; cl < 512; cl++) {
-                        c_pte = new_pt_tbl[cl];
-                        if ((c_pte & 1) && !(c_pte & VMM_PTE_NOFREE)) {
-                            exec_page_cache_on_page_release(c_pte & VMM_PHYS_MASK);
-                            pfa_cow_release64(c_pte & VMM_PHYS_MASK);
-                        }
-                    }
-                    temp_unmap_raw(temp_src_pt);
-                    pfa_free(c_pt_phys);
-                }
-                temp_unmap_raw(temp_src_pd);
-                pfa_free(c_pd_phys);
-            }
-            temp_unmap_raw(temp_src_pdpt);
-            pfa_free(c_pdpt_phys);
-        }
-        temp_unmap_raw(temp_new_pml4);
-    }
-    pfa_free(new_pml4_phys);
+    vmm_free_pml4_entries(new_pml4_phys, 511, 1);
 
     kfree(new_pt_copy);
     kfree(src_pt_copy);
@@ -501,8 +400,8 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
     uint64_t old_page_phys;
     uint64_t pte_flags;
     uint64_t new_page_phys;
-    uint8_t ref;
-    int remaining_ref;
+    uint64_t ref;
+    uint64_t remaining_ref;
     int tracked;
     uint64_t saved_flags;
 

@@ -2,7 +2,8 @@
 #include <lebirun/crypto.h>
 
 
-static int sys_crypto(int req_ptr, int unused1, int unused2, int unused3, int unused4, int unused5)
+static int sys_crypto(uint64_t req_ptr, int unused1, int unused2, int unused3,
+                      int unused4, int unused5)
 {
     struct crypto_request *req;
     uint8_t hash256[32];

@@ -47,6 +47,13 @@ int vfs_readdir(int fd, char *name, unsigned int *type, unsigned int index)
         (long)type, (long)index);
 }
 
+int vfs_readdir2(int fd, char *name, size_t capacity, unsigned int *type,
+                 uint64_t index, size_t *required)
+{
+    return (int)leb_syscall6(LEB_SYSCALL_VFS_READDIR2, fd, (long)name,
+        (long)capacity, (long)type, (long)index, (long)required);
+}
+
 int vfs_stat(int fd, uint64_t *size, uint64_t *type)
 {
     return (int)leb_syscall3(LEB_SYSCALL_VFS_STAT, fd, (long)size,

@@ -394,11 +394,11 @@ static int syscall_core_fd_is_console_output(int fd, task_fd_t *tfd) {
     node = (vfs_node_t *)tfd->node;
     type = VFS_GET_TYPE(node->flags);
     if (type == VFS_CHARDEVICE &&
-            (syscall_core_vfs_name_is_tty(node->name) ||
-             syscall_core_vfs_name_is(node->name, "console"))) {
+            (syscall_core_vfs_name_is_tty(vfs_node_name(node)) ||
+             syscall_core_vfs_name_is(vfs_node_name(node), "console"))) {
         return 1;
     }
-    if (type == VFS_SYMLINK && syscall_core_vfs_name_is_stdio_alias(node->name)) return 1;
+    if (type == VFS_SYMLINK && syscall_core_vfs_name_is_stdio_alias(vfs_node_name(node))) return 1;
     return 0;
 }
 
@@ -1221,8 +1221,8 @@ static int sys_read_nb(int fd, char *buf, int len) {
         tfd = &current_task->fds[fd];
     if (tfd && tfd->type == FD_TYPE_FILE && tfd->node) {
         node = (vfs_node_t *)tfd->node;
-        if (strcmp(node->name, "event0") == 0 ||
-            strcmp(node->name, "event1") == 0) {
+        if (strcmp(vfs_node_name(node), "event0") == 0 ||
+            strcmp(vfs_node_name(node), "event1") == 0) {
             if (len > SYS_RW_STACK_BUF) len = SYS_RW_STACK_BUF;
             bytes = evdev_read_nonblocking(node, (uint64_t)len, stack_buf);
             if (bytes > 0) memcpy((void *)buf_addr, stack_buf, bytes);
@@ -1277,7 +1277,7 @@ static int sys_isatty(int fd, const char *unused, int unused2) {
         if (a >= KERNEL_VMA &&
             vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), a) != 0 &&
             vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), a + (uint64_t)sizeof(vfs_node_t) - 1) != 0) {
-            if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE && (syscall_core_vfs_name_is_tty(node->name) || vfs_name_is(node->name, "console"))) return 1;
+            if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE && (syscall_core_vfs_name_is_tty(vfs_node_name(node)) || vfs_name_is(vfs_node_name(node), "console"))) return 1;
         }
     }
     return 0;

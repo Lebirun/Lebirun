@@ -35,6 +35,8 @@ int http_post(const char *host, uint16_t port, const char *path,
               const char *content_type, const uint8_t *body, uint64_t body_len,
               http_response_t *response, uint64_t timeout_ms);
 void http_response_free(http_response_t *response);
+char *http_response_header_dup(const http_response_t *response,
+                               const char *name);
 int http_download(const char *url, uint8_t *buffer, uint64_t buffer_size, uint64_t *out_size, int *out_status);
 int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
                      uint64_t *out_size, int *out_status, int max_redirects,

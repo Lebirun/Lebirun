@@ -365,7 +365,9 @@ uint64_t pit_us_to_ticks(uint64_t us) {
     return (us * calibrated_freq) / 1000000;
 }
 
-int pit_register_callback(pit_callback_t callback, uint64_t interval_ticks, bool oneshot) {
+int KERNEL_INIT pit_register_callback(pit_callback_t callback,
+                                      uint64_t interval_ticks,
+                                      bool oneshot) {
     uint64_t flags;
     pit_callback_entry_t *entry;
     int handle;

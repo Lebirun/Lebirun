@@ -89,6 +89,7 @@ static void overlay_try_free_node(overlay_node_t *onode) {
     overlay_release_parent_pin(onode);
     overlay_drop_node_refs(onode);
     onode->vfs.private_data = NULL;
+    vfs_node_release_name(&onode->vfs);
     kfree(onode);
 }
 
@@ -306,16 +307,22 @@ static void overlay_reset_readdir(overlay_node_t *onode) {
 }
 
 static int overlay_check_whiteout(vfs_node_t *upper_dir, const char *name) {
-    char wh_name[VFS_MAX_NAME];
+    char *wh_name;
     vfs_node_t *wh_node;
     int found;
+    size_t length;
 
     if (!upper_dir || !name) return 0;
-    
-    snprintf(wh_name, sizeof(wh_name), "%s%s", OVERLAY_WHITEOUT_PREFIX, name);
+    length = strlen(name);
+    if (length > SIZE_MAX - 5) return 0;
+    wh_name = (char *)kmalloc(length + 5);
+    if (!wh_name) return 0;
+    memcpy(wh_name, OVERLAY_WHITEOUT_PREFIX, 4);
+    memcpy(wh_name + 4, name, length + 1);
     wh_node = vfs_finddir(upper_dir, wh_name);
     found = wh_node != NULL;
     if (wh_node) vfs_release(wh_node);
+    kfree(wh_name);
     return found;
 }
 
@@ -350,12 +357,7 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
         return NULL;
     }
     
-    name_len = strlen(name);
-    if (name_len >= VFS_MAX_NAME) name_len = VFS_MAX_NAME - 1;
-    memcpy(onode->vfs.name, name, name_len);
-    onode->vfs.name[name_len] = '\0';
-    
-    onode->vfs.flags = effective->flags & ~VFS_DYNAMIC;
+    onode->vfs.flags = effective->flags & ~(VFS_DYNAMIC | VFS_NAME_DYNAMIC);
     onode->vfs.mask = effective->mask;
     onode->vfs.uid = effective->uid;
     onode->vfs.gid = effective->gid;
@@ -379,6 +381,13 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
         onode->vfs.mkdir = overlay_vfs_mkdir;
         onode->vfs.unlink = overlay_vfs_unlink;
         onode->vfs.rename = overlay_vfs_rename;
+    }
+
+    name_len = strlen(name);
+    if (vfs_node_set_name_n(&onode->vfs, name, name_len) != 0) {
+        overlay_drop_node_refs(onode);
+        kfree(onode);
+        return NULL;
     }
     
     return &onode->vfs;
@@ -456,7 +465,7 @@ static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t siz
 
 static uint64_t overlay_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
+    char *path;
     uint64_t written;
 
     if (!node || !buffer) return 0;
@@ -465,10 +474,13 @@ static uint64_t overlay_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t si
     if (!onode) return 0;
     
     if (!onode->upper_node && onode->lower_node) {
-        vfs_get_path(node, path, sizeof(path));
+        path = vfs_get_path_alloc(node);
+        if (!path) return 0;
         if (overlay_copy_up(onode, path) != 0) {
+            kfree(path);
             return 0;
         }
+        kfree(path);
     }
     
     if (!onode->upper_node) return 0;
@@ -539,7 +551,8 @@ static void overlay_vfs_close(vfs_node_t *node) {
 
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
+    char *path;
+    int ret;
 
     if (!node) return -1;
     
@@ -547,16 +560,19 @@ static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     if (!onode) return -1;
     
     if (!onode->upper_node && onode->lower_node) {
-        vfs_get_path(node, path, sizeof(path));
+        path = vfs_get_path_alloc(node);
+        if (!path) return -1;
         if (overlay_copy_up(onode, path) != 0) {
+            kfree(path);
             return -1;
         }
+        kfree(path);
     }
     
     if (!onode->upper_node) return -1;
     
     if (onode->upper_node->truncate) {
-        int ret = onode->upper_node->truncate(onode->upper_node, length);
+        ret = onode->upper_node->truncate(onode->upper_node, length);
         if (ret == 0)
             node->length = onode->upper_node->length;
         return ret;
@@ -566,7 +582,7 @@ static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
 
 static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
+    char *path;
     vfs_node_t *target;
     int ret;
 
@@ -576,10 +592,13 @@ static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode) {
     if (!onode) return -1;
 
     if (!onode->upper_node && onode->lower_node) {
-        vfs_get_path(node, path, sizeof(path));
+        path = vfs_get_path_alloc(node);
+        if (!path) return -1;
         if (overlay_copy_up(onode, path) != 0) {
+            kfree(path);
             return -1;
         }
+        kfree(path);
     }
 
     target = onode->upper_node ? onode->upper_node : onode->lower_node;
@@ -597,7 +616,7 @@ static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode) {
 
 static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
+    char *path;
     vfs_node_t *target;
     int ret;
 
@@ -607,10 +626,13 @@ static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid) {
     if (!onode) return -1;
 
     if (!onode->upper_node && onode->lower_node) {
-        vfs_get_path(node, path, sizeof(path));
+        path = vfs_get_path_alloc(node);
+        if (!path) return -1;
         if (overlay_copy_up(onode, path) != 0) {
+            kfree(path);
             return -1;
         }
+        kfree(path);
     }
 
     target = onode->upper_node ? onode->upper_node : onode->lower_node;
@@ -656,7 +678,7 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
         for (i = onode->rd_lower_index; ; i++) {
             entry = vfs_readdir(upper_dir, i);
             if (!entry) break;
-            if (overlay_is_whiteout(entry->name)) continue;
+            if (overlay_is_whiteout(vfs_dirent_name(entry))) continue;
             if (visible_count == index) {
                 memcpy(&overlay_dirent, entry, sizeof(dirent_t));
                 onode->rd_last_index = index;
@@ -680,10 +702,10 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
             entry = vfs_readdir(lower_dir, i);
             if (!entry) break;
 
-            if (upper_dir && overlay_check_whiteout(upper_dir, entry->name)) {
+            if (upper_dir && overlay_check_whiteout(upper_dir, vfs_dirent_name(entry))) {
                 continue;
             }
-            upper_match = upper_dir ? vfs_finddir(upper_dir, entry->name) : NULL;
+            upper_match = upper_dir ? vfs_finddir(upper_dir, vfs_dirent_name(entry)) : NULL;
             if (upper_match) {
                 vfs_release(upper_match);
                 continue;
@@ -708,7 +730,7 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
         for (i = 0; ; i++) {
             entry = vfs_readdir(upper_dir, i);
             if (!entry) break;
-            if (overlay_is_whiteout(entry->name)) continue;
+            if (overlay_is_whiteout(vfs_dirent_name(entry))) continue;
             if (upper_count == index) {
                 memcpy(&overlay_dirent, entry, sizeof(dirent_t));
                 onode->rd_last_index = index;
@@ -728,10 +750,10 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index) {
             entry = vfs_readdir(lower_dir, i);
             if (!entry) break;
             
-            if (upper_dir && overlay_check_whiteout(upper_dir, entry->name)) {
+            if (upper_dir && overlay_check_whiteout(upper_dir, vfs_dirent_name(entry))) {
                 continue;
             }
-            upper_match = upper_dir ? vfs_finddir(upper_dir, entry->name) : NULL;
+            upper_match = upper_dir ? vfs_finddir(upper_dir, vfs_dirent_name(entry)) : NULL;
             if (upper_match) {
                 vfs_release(upper_match);
                 continue;
@@ -837,11 +859,15 @@ static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 static void overlay_ensure_upper_dirs(const char *path) {
-    char tmp[VFS_MAX_PATH];
-    int i;
+    char *tmp;
+    size_t length;
+    size_t i;
 
-    strncpy(tmp, path, VFS_MAX_PATH - 1);
-    tmp[VFS_MAX_PATH - 1] = '\0';
+    if (!path) return;
+    length = strlen(path);
+    tmp = (char *)kmalloc(length + 1);
+    if (!tmp) return;
+    memcpy(tmp, path, length + 1);
     for (i = 1; tmp[i]; i++) {
         if (tmp[i] == '/') {
             tmp[i] = '\0';
@@ -849,12 +875,40 @@ static void overlay_ensure_upper_dirs(const char *path) {
             tmp[i] = '/';
         }
     }
+    kfree(tmp);
+}
+
+static char *overlay_join_path(const char *parent, const char *prefix,
+                               const char *name) {
+    size_t parent_length;
+    size_t prefix_length;
+    size_t name_length;
+    size_t position;
+    char *path;
+
+    if (!parent || !prefix || !name) return NULL;
+    parent_length = strlen(parent);
+    prefix_length = strlen(prefix);
+    name_length = strlen(name);
+    if (prefix_length > SIZE_MAX - name_length ||
+        prefix_length + name_length > SIZE_MAX - 2 ||
+        parent_length > SIZE_MAX - prefix_length - name_length - 2)
+        return NULL;
+    path = (char *)kmalloc(parent_length + prefix_length + name_length + 2);
+    if (!path) return NULL;
+    memcpy(path, parent, parent_length);
+    position = parent_length;
+    if (position == 0 || path[position - 1] != '/') path[position++] = '/';
+    memcpy(path + position, prefix, prefix_length);
+    position += prefix_length;
+    memcpy(path + position, name, name_length + 1);
+    return path;
 }
 
 static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
-    char parent_path[VFS_MAX_PATH];
+    char *path;
+    char *parent_path;
     int ret;
     ramfs_node_t *pnode;
 
@@ -864,8 +918,13 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
     onode = (overlay_node_t *)parent->private_data;
     if (!onode) return -1;
     
-    vfs_get_path(parent, parent_path, sizeof(parent_path));
-    snprintf(path, sizeof(path), "%s/%s", parent_path, name);
+    parent_path = vfs_get_path_alloc(parent);
+    if (!parent_path) return -1;
+    path = overlay_join_path(parent_path, "", name);
+    if (!path) {
+        kfree(parent_path);
+        return -1;
+    }
 
     overlay_ensure_upper_dirs(path);
     
@@ -875,13 +934,15 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
         if (pnode) onode->upper_node = pnode->vfs_node;
     }
     if (ret == 0) overlay_reset_readdir(onode);
+    kfree(path);
+    kfree(parent_path);
     return overlay_ramfs_result(ret);
 }
 
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
     overlay_node_t *onode;
-    char path[VFS_MAX_PATH];
-    char parent_path[VFS_MAX_PATH];
+    char *path;
+    char *parent_path;
     int ret;
     ramfs_node_t *pnode;
 
@@ -890,8 +951,13 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
     onode = (overlay_node_t *)parent->private_data;
     if (!onode) return -1;
     
-    vfs_get_path(parent, parent_path, sizeof(parent_path));
-    snprintf(path, sizeof(path), "%s/%s", parent_path, name);
+    parent_path = vfs_get_path_alloc(parent);
+    if (!parent_path) return -1;
+    path = overlay_join_path(parent_path, "", name);
+    if (!path) {
+        kfree(parent_path);
+        return -1;
+    }
 
     overlay_ensure_upper_dirs(path);
     
@@ -901,6 +967,8 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
         if (pnode) onode->upper_node = pnode->vfs_node;
     }
     if (ret == 0) overlay_reset_readdir(onode);
+    kfree(path);
+    kfree(parent_path);
     return overlay_ramfs_result(ret);
 }
 
@@ -910,8 +978,8 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     vfs_node_t *lower_dir;
     vfs_node_t *in_upper;
     vfs_node_t *in_lower;
-    char wh_path[VFS_MAX_PATH];
-    char parent_path[VFS_MAX_PATH];
+    char *wh_path;
+    char *parent_path;
     int ret;
 
     if (!parent || !name) return -1;
@@ -935,9 +1003,22 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     }
     
     if (in_lower) {
-        vfs_get_path(parent, parent_path, sizeof(parent_path));
-        snprintf(wh_path, sizeof(wh_path), "%s/%s%s", parent_path, OVERLAY_WHITEOUT_PREFIX, name);
+        parent_path = vfs_get_path_alloc(parent);
+        if (!parent_path) {
+            if (in_upper) vfs_release(in_upper);
+            vfs_release(in_lower);
+            return -1;
+        }
+        wh_path = overlay_join_path(parent_path, OVERLAY_WHITEOUT_PREFIX,
+                                    name);
+        kfree(parent_path);
+        if (!wh_path) {
+            if (in_upper) vfs_release(in_upper);
+            vfs_release(in_lower);
+            return -1;
+        }
         ret = ramfs_create_file(wh_path, 0644);
+        kfree(wh_path);
         if (ret != 0 && ret != RAMFS_ERR_EXIST) {
             if (in_upper) vfs_release(in_upper);
             vfs_release(in_lower);
@@ -958,11 +1039,11 @@ static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     overlay_node_t *new_parent_node;
     overlay_node_t *source_node;
     vfs_node_t *source;
-    char old_parent_path[VFS_MAX_PATH];
-    char new_parent_path[VFS_MAX_PATH];
-    char old_path[VFS_MAX_PATH];
-    char new_path[VFS_MAX_PATH];
-    char whiteout_path[VFS_MAX_PATH];
+    char *old_parent_path;
+    char *new_parent_path;
+    char *old_path;
+    char *new_path;
+    char *whiteout_path;
     int has_lower;
     int whiteout_created;
     int ret;
@@ -980,26 +1061,34 @@ static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
         return -1;
     }
 
-    vfs_get_path(old_parent, old_parent_path, sizeof(old_parent_path));
-    vfs_get_path(new_parent, new_parent_path, sizeof(new_parent_path));
-    snprintf(old_path, sizeof(old_path), "%s/%s", old_parent_path, old_name);
-    snprintf(new_path, sizeof(new_path), "%s/%s", new_parent_path, new_name);
-    snprintf(whiteout_path, sizeof(whiteout_path), "%s/%s%s",
-             old_parent_path, OVERLAY_WHITEOUT_PREFIX, old_name);
+    old_parent_path = vfs_get_path_alloc(old_parent);
+    new_parent_path = vfs_get_path_alloc(new_parent);
+    old_path = old_parent_path ?
+               overlay_join_path(old_parent_path, "", old_name) : NULL;
+    new_path = new_parent_path ?
+               overlay_join_path(new_parent_path, "", new_name) : NULL;
+    whiteout_path = old_parent_path ?
+                    overlay_join_path(old_parent_path,
+                                      OVERLAY_WHITEOUT_PREFIX, old_name) :
+                    NULL;
+    if (!old_parent_path || !new_parent_path || !old_path || !new_path ||
+        !whiteout_path) {
+        ret = -1;
+        goto rename_free_paths;
+    }
     has_lower = source_node->lower_node != NULL;
 
     if (!source_node->upper_node &&
         overlay_copy_up(source_node, old_path) != 0) {
-        vfs_release(source);
-        return -1;
+        ret = -1;
+        goto rename_free_paths;
     }
     overlay_ensure_upper_dirs(new_path);
     whiteout_created = 0;
     if (has_lower) {
         ret = ramfs_create_file(whiteout_path, 0644);
         if (ret != 0 && ret != RAMFS_ERR_EXIST) {
-            vfs_release(source);
-            return ret;
+            goto rename_free_paths;
         }
         whiteout_created = ret == 0;
     }
@@ -1007,17 +1096,25 @@ static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     ret = ramfs_rename(old_path, new_path);
     if (ret != 0) {
         if (whiteout_created) ramfs_unlink(whiteout_path);
-        vfs_release(source);
-        return overlay_ramfs_result(ret);
+        ret = overlay_ramfs_result(ret);
+        goto rename_free_paths;
     }
-    vfs_release(source);
 
     ov_cache_invalidate(old_parent, old_name);
     ov_cache_invalidate(new_parent, new_name);
     overlay_reset_readdir(old_parent_node);
     if (new_parent_node != old_parent_node)
         overlay_reset_readdir(new_parent_node);
-    return 0;
+    ret = 0;
+
+rename_free_paths:
+    if (old_parent_path) kfree(old_parent_path);
+    if (new_parent_path) kfree(new_parent_path);
+    if (old_path) kfree(old_path);
+    if (new_path) kfree(new_path);
+    if (whiteout_path) kfree(whiteout_path);
+    vfs_release(source);
+    return ret;
 }
 
 static vfs_node_t *overlay_vfs_do_mount(const char *device, const char *mountpoint) {

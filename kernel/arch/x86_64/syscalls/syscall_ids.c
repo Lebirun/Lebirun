@@ -10,7 +10,7 @@ typedef struct {
     uint64_t sgid;
     uint64_t fsuid;
     uint64_t fsgid;
-    uint64_t groups[16];
+    uint64_t *groups;
     int ngroups;
     uint64_t umask_val;
     pid_t pgid;
@@ -19,6 +19,8 @@ typedef struct {
     uint64_t cap_permitted;
     uint64_t cap_inheritable;
     uint64_t *syscall_mask;
+    size_t syscall_mask_words;
+    int syscall_mask_default_allow;
     int no_new_privs;
     int syscall_filter_mode;
     int dumpable;
@@ -40,6 +42,7 @@ typedef struct {
 
 static task_creds_t *get_task_creds(void) {
     task_creds_t *creds;
+    size_t group_bytes;
 
     if (!current_task) return NULL;
     creds = (task_creds_t *)current_task->creds_data;
@@ -55,8 +58,20 @@ static task_creds_t *get_task_creds(void) {
         creds->sgid   = current_task->sgid;
         creds->fsuid  = current_task->fsuid;
         creds->fsgid  = current_task->fsgid;
-        if (current_task->groups && current_task->ngroups > 0)
-            memcpy(creds->groups, current_task->groups, current_task->ngroups * sizeof(uint64_t));
+        if (current_task->groups && current_task->ngroups > 0) {
+            if ((size_t)current_task->ngroups >
+                SIZE_MAX / sizeof(uint64_t)) {
+                kfree(creds);
+                return NULL;
+            }
+            group_bytes = (size_t)current_task->ngroups * sizeof(uint64_t);
+            creds->groups = (uint64_t *)kmalloc(group_bytes);
+            if (!creds->groups) {
+                kfree(creds);
+                return NULL;
+            }
+            memcpy(creds->groups, current_task->groups, group_bytes);
+        }
         creds->ngroups = current_task->ngroups;
         creds->umask_val = 022;
         creds->pgid = current_task->pgid ? current_task->pgid : current_task->pid;
@@ -337,7 +352,8 @@ static int sys_setresgid(int rgid, const char *egid_ptr, int sgid) {
     return 0;
 }
 
-static int sys_getresuid(int ruid_ptr, const char *euid_ptr, int suid_ptr) {
+static int sys_getresuid(uint64_t ruid_ptr, const char *euid_ptr,
+                         uint64_t suid_ptr) {
     uint64_t r_addr = (uint64_t)ruid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)euid_ptr;
     uint64_t s_addr = (uint64_t)suid_ptr;
@@ -350,7 +366,8 @@ static int sys_getresuid(int ruid_ptr, const char *euid_ptr, int suid_ptr) {
     return 0;
 }
 
-static int sys_getresgid(int rgid_ptr, const char *egid_ptr, int sgid_ptr) {
+static int sys_getresgid(uint64_t rgid_ptr, const char *egid_ptr,
+                         uint64_t sgid_ptr) {
     uint64_t r_addr = (uint64_t)rgid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)egid_ptr;
     uint64_t s_addr = (uint64_t)sgid_ptr;
@@ -394,35 +411,63 @@ static int sys_setfsgid(int fsgid, const char *unused1, int unused2) {
 }
 
 static int sys_getgroups(int size, const char *list_ptr, int unused) {
-    int count;
-    uint64_t addr = (uint64_t)(uintptr_t)list_ptr;
+    uint64_t addr;
+    uint32_t group;
+    int i;
 
     (void)unused;
     if (!current_task) return -ESRCH;
     if (size == 0) return current_task->ngroups;
+    if (size < 0 || size < current_task->ngroups) return -EINVAL;
+    if (current_task->ngroups == 0) return 0;
+    addr = (uint64_t)(uintptr_t)list_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    count = (size < current_task->ngroups) ? size : current_task->ngroups;
-    memcpy((void *)addr, current_task->groups, count * sizeof(uint64_t));
-    
-    return count;
+    for (i = 0; i < current_task->ngroups; i++) {
+        if (current_task->groups[i] > UINT32_MAX) return -EOVERFLOW;
+        group = (uint32_t)current_task->groups[i];
+        if (copy_to_user((void *)(uintptr_t)(addr +
+                         (size_t)i * sizeof(group)), &group,
+                         sizeof(group)) < 0) return -EFAULT;
+    }
+    return current_task->ngroups;
 }
 
 static int sys_setgroups(int size, const char *list_ptr, int unused) {
     uint64_t addr;
+    uint64_t *groups;
+    size_t bytes;
+    task_creds_t *creds;
+    uint32_t group;
+    int i;
+
     (void)unused;
-    task_creds_t *creds = get_task_creds();
+    creds = get_task_creds();
     if (!creds) return -ESRCH;
     
     if (creds->euid != 0) return -EPERM;
     
-    if (size < 0 || size > 16) return -EINVAL;
+    if (size < 0) return -EINVAL;
     
+    groups = NULL;
     if (size > 0) {
         addr = (uint64_t)(uintptr_t)list_ptr;
         if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-        memcpy(creds->groups, (void *)addr, size * sizeof(uint64_t));
+        if ((size_t)size > SIZE_MAX / sizeof(uint64_t)) return -EINVAL;
+        bytes = (size_t)size * sizeof(uint64_t);
+        groups = (uint64_t *)kmalloc(bytes);
+        if (!groups) return -ENOMEM;
+        for (i = 0; i < size; i++) {
+            if (copy_from_user(&group, (const void *)(uintptr_t)(addr +
+                               (size_t)i * sizeof(group)),
+                               sizeof(group)) < 0) {
+                kfree(groups);
+                return -EFAULT;
+            }
+            groups[i] = group;
+        }
     }
-    
+    if (creds->groups) kfree(creds->groups);
+    creds->groups = groups;
     creds->ngroups = size;
     sync_creds_to_task(creds);
     return 0;
@@ -541,6 +586,7 @@ void creds_release_task(task_t *task) {
 
     if (!task || !task->creds_data) return;
     creds = (task_creds_t *)task->creds_data;
+    if (creds->groups) kfree(creds->groups);
     if (creds->syscall_mask) kfree(creds->syscall_mask);
     kfree(creds);
     task->creds_data = NULL;
@@ -548,41 +594,60 @@ void creds_release_task(task_t *task) {
 
 int creds_syscall_allowed(task_t *task, int syscall_number) {
     task_creds_t *creds;
-    int word;
+    size_t word;
     int bit;
 
     if (!task || syscall_number < 0) return 0;
     creds = (task_creds_t *)task->creds_data;
     if (!creds || !creds->syscall_mask) return 1;
-    if (syscall_number >= NR_SYSCALLS) return 0;
-    word = syscall_number / 64;
+    word = (size_t)syscall_number / 64;
     bit = syscall_number % 64;
+    if (word >= creds->syscall_mask_words)
+        return creds->syscall_mask_default_allow;
     return (creds->syscall_mask[word] & (1ULL << bit)) != 0;
+}
+
+int creds_set_syscall_mask_ex(task_t *task, const uint64_t *mask,
+                              size_t word_count, int default_allow) {
+    task_creds_t *creds;
+    uint64_t *new_mask;
+    size_t output_words;
+    size_t i;
+    uint64_t requested;
+    uint64_t existing;
+
+    if (!task || !mask || word_count == 0 || default_allow < 0 ||
+        default_allow > 1) return -EINVAL;
+    if (word_count > SIZE_MAX / sizeof(uint64_t)) return -EINVAL;
+    creds = get_task_creds();
+    if (!creds) return -ENOMEM;
+    output_words = word_count;
+    if (creds->syscall_mask_words > output_words)
+        output_words = creds->syscall_mask_words;
+    if (output_words > SIZE_MAX / sizeof(uint64_t)) return -EINVAL;
+    new_mask = (uint64_t *)kmalloc(output_words * sizeof(uint64_t));
+    if (!new_mask) return -ENOMEM;
+    for (i = 0; i < output_words; i++) {
+        requested = i < word_count ? mask[i] :
+                    (default_allow ? UINT64_MAX : 0);
+        existing = !creds->syscall_mask ? UINT64_MAX :
+                   (i < creds->syscall_mask_words ? creds->syscall_mask[i] :
+                    (creds->syscall_mask_default_allow ? UINT64_MAX : 0));
+        new_mask[i] = requested & existing;
+    }
+    if (creds->syscall_mask) kfree(creds->syscall_mask);
+    creds->syscall_mask = new_mask;
+    creds->syscall_mask_words = output_words;
+    creds->syscall_mask_default_allow =
+        default_allow && (!creds->syscall_filter_mode ||
+                          creds->syscall_mask_default_allow);
+    creds->syscall_filter_mode = 2;
+    return 0;
 }
 
 int creds_set_syscall_mask(task_t *task, const uint64_t *mask,
                            size_t word_count) {
-    task_creds_t *creds;
-    uint64_t *new_mask;
-    size_t required_words;
-    size_t i;
-
-    if (!task || !mask) return -EINVAL;
-    required_words = (NR_SYSCALLS + 63) / 64;
-    if (word_count != required_words) return -EINVAL;
-    creds = get_task_creds();
-    if (!creds) return -ENOMEM;
-    new_mask = (uint64_t *)kmalloc(required_words * sizeof(uint64_t));
-    if (!new_mask) return -ENOMEM;
-    memcpy(new_mask, mask, required_words * sizeof(uint64_t));
-    if (creds->syscall_mask) {
-        for (i = 0; i < required_words; i++)
-            new_mask[i] &= creds->syscall_mask[i];
-        kfree(creds->syscall_mask);
-    }
-    creds->syscall_mask = new_mask;
-    creds->syscall_filter_mode = 2;
-    return 0;
+    return creds_set_syscall_mask_ex(task, mask, word_count, 0);
 }
 
 int creds_set_strict_syscalls(task_t *task) {
@@ -659,7 +724,11 @@ int creds_copy_task(task_t *parent, task_t *child) {
     task_creds_t *pcreds;
     task_creds_t *ccreds;
     uint64_t *copied_mask;
+    uint64_t *copied_groups;
+    uint64_t *old_mask;
+    uint64_t *old_groups;
     size_t mask_bytes;
+    size_t group_bytes;
 
     if (!parent || !child) return -1;
     pcreds = (task_creds_t *)parent->creds_data;
@@ -687,15 +756,34 @@ int creds_copy_task(task_t *parent, task_t *child) {
         memset(ccreds, 0, sizeof(task_creds_t));
         child->creds_data = ccreds;
     }
+    old_mask = ccreds->syscall_mask;
+    old_groups = ccreds->groups;
     copied_mask = NULL;
-    mask_bytes = ((NR_SYSCALLS + 63) / 64) * sizeof(uint64_t);
+    copied_groups = NULL;
+    mask_bytes = pcreds->syscall_mask_words * sizeof(uint64_t);
     if (pcreds->syscall_mask) {
         copied_mask = (uint64_t *)kmalloc(mask_bytes);
         if (!copied_mask) return -1;
         memcpy(copied_mask, pcreds->syscall_mask, mask_bytes);
     }
+    if (pcreds->groups && pcreds->ngroups > 0) {
+        if ((size_t)pcreds->ngroups > SIZE_MAX / sizeof(uint64_t)) {
+            if (copied_mask) kfree(copied_mask);
+            return -1;
+        }
+        group_bytes = (size_t)pcreds->ngroups * sizeof(uint64_t);
+        copied_groups = (uint64_t *)kmalloc(group_bytes);
+        if (!copied_groups) {
+            if (copied_mask) kfree(copied_mask);
+            return -1;
+        }
+        memcpy(copied_groups, pcreds->groups, group_bytes);
+    }
+    if (old_mask) kfree(old_mask);
+    if (old_groups) kfree(old_groups);
     memcpy(ccreds, pcreds, sizeof(task_creds_t));
     ccreds->syscall_mask = copied_mask;
+    ccreds->groups = copied_groups;
     child->groups = ccreds->groups;
     child->uid   = ccreds->uid;
     child->euid  = ccreds->euid;

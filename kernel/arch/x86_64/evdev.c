@@ -418,16 +418,16 @@ void KERNEL_INIT evdev_init(void) {
     set_bit(evdev_mouse.rel_bits, REL_Y);
 
     memset(&evdev_input_dir, 0, sizeof(vfs_node_t));
-    strcpy(evdev_input_dir.name, "input");
     evdev_input_dir.flags = VFS_DIRECTORY;
+    vfs_node_set_name(&evdev_input_dir, "input");
     evdev_input_dir.mask = 0755;
     evdev_input_dir.readdir = evdev_input_readdir;
     evdev_input_dir.finddir = evdev_input_finddir;
     evdev_input_dir.ref_count = 1;
 
     memset(&evdev_event0, 0, sizeof(vfs_node_t));
-    strcpy(evdev_event0.name, "event0");
     evdev_event0.flags = VFS_CHARDEVICE;
+    vfs_node_set_name(&evdev_event0, "event0");
     evdev_event0.mask = 0660;
     evdev_event0.read = evdev_read;
     evdev_event0.write = evdev_write;
@@ -439,8 +439,8 @@ void KERNEL_INIT evdev_init(void) {
     evdev_event0.private_data = &evdev_kbd;
 
     memset(&evdev_event1, 0, sizeof(vfs_node_t));
-    strcpy(evdev_event1.name, "event1");
     evdev_event1.flags = VFS_CHARDEVICE;
+    vfs_node_set_name(&evdev_event1, "event1");
     evdev_event1.mask = 0660;
     evdev_event1.read = evdev_read;
     evdev_event1.write = evdev_write;

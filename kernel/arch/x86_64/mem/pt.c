@@ -143,14 +143,21 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
     uint64_t pt_phys;
     uint64_t i;
     void *pt_page;
-    uint64_t flags;
+    uint64_t leaf_flags;
+    uint64_t table_flags;
+    uint64_t eflags;
+    volatile uint64_t *w;
 
     pde = pd[pd_idx];
     if (!(pde & 1)) return 0;
     if (!(pde & 0x80)) return 0;
 
     huge_phys = pde & 0x000FFFFFFFE00000ULL;
-    flags = pde & 0x1F;
+    leaf_flags = pde & (0xFFFULL | VMM_PTE_NX);
+    leaf_flags &= ~(0x80ULL | 0x1000ULL);
+    if (pde & 0x1000) leaf_flags |= 0x80;
+    table_flags = VMM_PTE_PRESENT | VMM_PTE_WRITE |
+                  (pde & VMM_PTE_USER);
 
     pt_page = pt_alloc_pt_page();
     if (!pt_page) pt_page = pmm_alloc_page();
@@ -159,21 +166,17 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
 
     pt_zero_page(pt_phys);
 
-    {
-        uint64_t eflags;
-        volatile uint64_t *w;
-        __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
-        __asm__ volatile ("cli");
-        temp_map_raw(PT_TEMP_ZERO_VIRT, pt_phys);
-        w = (volatile uint64_t *)PT_TEMP_ZERO_VIRT;
-        for (i = 0; i < 512; i++) {
-            w[i] = (huge_phys + i * PAGE_SIZE) | flags;
-        }
-        temp_unmap_raw(PT_TEMP_ZERO_VIRT);
-        if (eflags & (1 << 9)) __asm__ volatile ("sti");
+    __asm__ volatile ("pushf; pop %0" : "=r"(eflags));
+    __asm__ volatile ("cli");
+    temp_map_raw(PT_TEMP_ZERO_VIRT, pt_phys);
+    w = (volatile uint64_t *)PT_TEMP_ZERO_VIRT;
+    for (i = 0; i < 512; i++) {
+        w[i] = (huge_phys + i * PAGE_SIZE) | leaf_flags;
     }
+    temp_unmap_raw(PT_TEMP_ZERO_VIRT);
+    if (eflags & (1 << 9)) __asm__ volatile ("sti");
 
-    pd[pd_idx] = (pt_phys & ~0xFFFULL) | (flags & ~0x80ULL);
+    pd[pd_idx] = (pt_phys & ~0xFFFULL) | table_flags;
     __asm__ volatile(
         "mov %%cr3, %%rax\n\t"
         "mov %%rax, %%cr3\n\t"
@@ -368,7 +371,9 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
         pt_phys = (uint64_t)pt_page;
         pt_zero_page(pt_phys);
 
-        pd[pt_pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | (flags | 3);
+        pd[pt_pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) |
+                        VMM_PTE_PRESENT | VMM_PTE_WRITE |
+                        (flags & VMM_PTE_USER);
         pt_sync_kernel_mappings();
 
         id_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;
@@ -404,6 +409,49 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
     }
 
     vmm_pae_lock_release();
+}
+
+int vmm_map_huge_page_pae(uint64_t virt_addr, uint64_t phys_addr,
+                          uint64_t flags) {
+    uint64_t pd_idx;
+    uint64_t pde;
+    uint64_t new_pde;
+    uint64_t huge_flags;
+    uint64_t *pd;
+
+    if (virt_addr < KERNEL_VMA) return -1;
+    if (((virt_addr | phys_addr) & (VMM_HUGE_PAGE_SIZE - 1)) != 0)
+        return -1;
+    if (phys_addr >= PHYSICAL_ADDRESS_LIMIT) return -1;
+
+    vmm_pae_lock_acquire();
+
+    flags &= ~VMM_PTE_USER;
+    pd_idx = (virt_addr >> 21) & 0x1FF;
+    pd = pt_get_pd_for_pdpt(virt_addr);
+    if (!pd) {
+        vmm_pae_lock_release();
+        return -1;
+    }
+
+    pde = pd[pd_idx];
+    if ((pde & VMM_PTE_PRESENT) && !(pde & 0x80)) {
+        vmm_pae_lock_release();
+        return -1;
+    }
+
+    huge_flags = flags & (0xFFFULL | VMM_PTE_NX);
+    huge_flags &= ~(0x80ULL | 0x1000ULL);
+    if (flags & 0x80) huge_flags |= 0x1000;
+    new_pde = (phys_addr & 0x000FFFFFFFE00000ULL) |
+              huge_flags | 0x80;
+    if (pde != new_pde) {
+        pd[pd_idx] = new_pde;
+        __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    }
+
+    vmm_pae_lock_release();
+    return 0;
 }
 
 void vmm_map_page_early_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
@@ -509,7 +557,9 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
             pt_phys = (uint64_t)pt_page;
             pt_zero_page(pt_phys);
 
-            pd[pt_pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | (flags | 3);
+            pd[pt_pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) |
+                            VMM_PTE_PRESENT | VMM_PTE_WRITE |
+                            (flags & VMM_PTE_USER);
             pt_sync_kernel_mappings();
 
             id_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;

@@ -4,11 +4,44 @@
 #include <lebirun/tty.h>
 #include <string.h>
 
+static uint32_t ext4_group_free_blocks(ext4_fs_t *fs,
+                                       const ext4_group_desc_t *desc) {
+    uint32_t count;
+
+    count = desc->bg_free_blocks_count_lo;
+    if (fs->is_64bit)
+        count |= (uint32_t)desc->bg_free_blocks_count_hi << 16;
+    return count;
+}
+
+static void ext4_set_group_free_blocks(ext4_fs_t *fs,
+                                       ext4_group_desc_t *desc,
+                                       uint32_t count) {
+    desc->bg_free_blocks_count_lo = (uint16_t)count;
+    if (fs->is_64bit)
+        desc->bg_free_blocks_count_hi = (uint16_t)(count >> 16);
+}
+
+static uint64_t ext4_super_free_blocks(ext4_fs_t *fs) {
+    uint64_t count;
+
+    count = fs->sb.s_free_blocks_count_lo;
+    if (fs->is_64bit)
+        count |= (uint64_t)fs->sb.s_free_blocks_count_hi << 32;
+    return count;
+}
+
+static void ext4_set_super_free_blocks(ext4_fs_t *fs, uint64_t count) {
+    fs->sb.s_free_blocks_count_lo = (uint32_t)count;
+    if (fs->is_64bit)
+        fs->sb.s_free_blocks_count_hi = (uint32_t)(count >> 32);
+}
+
 static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
     int i;
 
     for (i = 0; i < (int)fs->block_cache_count; i++) {
-        if (fs->block_cache[i].data && fs->block_cache[i].block_num == (uint32_t)block) {
+        if (fs->block_cache[i].data && fs->block_cache[i].block_num == block) {
             return i;
         }
     }
@@ -465,11 +498,16 @@ void ext4_flush_cache(ext4_fs_t *fs) {
     }
 }
 
-static int ext4_read_group_desc(ext4_fs_t *fs, uint32_t group, ext4_group_desc_t *desc) {
-    uint32_t desc_block = fs->first_data_block + 1 + (group * fs->desc_size) / fs->block_size;
-    uint32_t desc_offset = (group * fs->desc_size) % fs->block_size;
+static int ext4_read_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+    uint64_t desc_block;
+    uint32_t desc_offset;
+    uint8_t *block;
 
-    uint8_t *block = ext4_get_block(fs, desc_block);
+    if (group > UINT64_MAX / fs->desc_size) return -1;
+    desc_block = fs->first_data_block + 1 +
+                 (group * fs->desc_size) / fs->block_size;
+    desc_offset = (group * fs->desc_size) % fs->block_size;
+    block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
@@ -480,11 +518,16 @@ static int ext4_read_group_desc(ext4_fs_t *fs, uint32_t group, ext4_group_desc_t
     return 0;
 }
 
-static int ext4_write_group_desc(ext4_fs_t *fs, uint32_t group, ext4_group_desc_t *desc) {
-    uint32_t desc_block = fs->first_data_block + 1 + (group * fs->desc_size) / fs->block_size;
-    uint32_t desc_offset = (group * fs->desc_size) % fs->block_size;
+static int ext4_write_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+    uint64_t desc_block;
+    uint32_t desc_offset;
+    uint8_t *block;
 
-    uint8_t *block = ext4_get_block(fs, desc_block);
+    if (group > UINT64_MAX / fs->desc_size) return -1;
+    desc_block = fs->first_data_block + 1 +
+                 (group * fs->desc_size) / fs->block_size;
+    desc_offset = (group * fs->desc_size) % fs->block_size;
+    block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
@@ -496,11 +539,11 @@ static int ext4_write_group_desc(ext4_fs_t *fs, uint32_t group, ext4_group_desc_
     return 0;
 }
 
-int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
-    uint32_t start_group;
+int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
+    uint64_t start_group;
     uint32_t start_bit;
-    uint32_t g;
-    uint32_t group;
+    uint64_t g;
+    uint64_t group;
     ext4_group_desc_t desc;
     uint64_t bitmap_block;
     uint8_t *bitmap;
@@ -511,6 +554,8 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
     uint32_t byte_idx;
     uint32_t bit_idx;
     uint64_t allocated;
+    uint32_t free_blocks;
+    uint64_t super_free;
 
     if (!fs || fs->groups_count == 0) {
         return -1;
@@ -537,7 +582,8 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
             continue;
         }
 
-        if (desc.bg_free_blocks_count_lo == 0) {
+        free_blocks = ext4_group_free_blocks(fs, &desc);
+        if (free_blocks == 0) {
             continue;
         }
 
@@ -553,7 +599,8 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
 
         blocks_in_group = fs->sb.s_blocks_per_group;
         if (group == fs->groups_count - 1) {
-            blocks_in_group = (fs->sb.s_blocks_count_lo - fs->first_data_block) % fs->sb.s_blocks_per_group;
+            blocks_in_group = (fs->total_blocks - fs->first_data_block) %
+                              fs->sb.s_blocks_per_group;
             if (blocks_in_group == 0) blocks_in_group = fs->sb.s_blocks_per_group;
         }
 
@@ -574,17 +621,20 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
                     ext4_mark_block_dirty(fs, bitmap_block);
                     ext4_release_block(fs, bitmap_block);
 
-                    desc.bg_free_blocks_count_lo--;
+                    ext4_set_group_free_blocks(fs, &desc,
+                                               free_blocks - 1);
                     ext4_write_group_desc(fs, group, &desc);
 
-                    fs->sb.s_free_blocks_count_lo--;
+                    super_free = ext4_super_free_blocks(fs);
+                    if (super_free) ext4_set_super_free_blocks(
+                        fs, super_free - 1);
                     fs->super_dirty = true;
 
                     fs->alloc_last_group = group;
                     fs->alloc_last_bit = bit;
 
                     allocated = fs->first_data_block + group * fs->sb.s_blocks_per_group + bit;
-                    return (int)allocated;
+                    return (int64_t)allocated;
                 }
 
                 bit++;
@@ -599,30 +649,39 @@ int ext4_alloc_block(ext4_fs_t *fs, uint32_t hint) {
 }
 
 int ext4_free_block(ext4_fs_t *fs, uint64_t block) {
+    uint64_t group;
+    uint32_t bit;
+    ext4_group_desc_t desc;
+    uint64_t bitmap_block;
+    uint8_t *bitmap;
+    uint32_t byte_idx;
+    uint32_t bit_idx;
+    uint32_t free_blocks;
+    uint64_t super_free;
+
     if (block < fs->first_data_block || block >= fs->total_blocks) {
         return -1;
     }
 
-    uint32_t group = (block - fs->first_data_block) / fs->sb.s_blocks_per_group;
-    uint32_t bit = (block - fs->first_data_block) % fs->sb.s_blocks_per_group;
+    group = (block - fs->first_data_block) / fs->sb.s_blocks_per_group;
+    bit = (block - fs->first_data_block) % fs->sb.s_blocks_per_group;
 
-    ext4_group_desc_t desc;
     if (ext4_read_group_desc(fs, group, &desc) != 0) {
         return -1;
     }
 
-    uint64_t bitmap_block = desc.bg_block_bitmap_lo;
+    bitmap_block = desc.bg_block_bitmap_lo;
     if (fs->is_64bit) {
         bitmap_block |= ((uint64_t)desc.bg_block_bitmap_hi << 32);
     }
 
-    uint8_t *bitmap = ext4_get_block(fs, bitmap_block);
+    bitmap = ext4_get_block(fs, bitmap_block);
     if (!bitmap) {
         return -1;
     }
 
-    uint32_t byte_idx = bit / 8;
-    uint32_t bit_idx = bit % 8;
+    byte_idx = bit / 8;
+    bit_idx = bit % 8;
 
     if (!(bitmap[byte_idx] & (1 << bit_idx))) {
         ext4_release_block(fs, bitmap_block);
@@ -633,28 +692,15 @@ int ext4_free_block(ext4_fs_t *fs, uint64_t block) {
     ext4_mark_block_dirty(fs, bitmap_block);
     ext4_release_block(fs, bitmap_block);
 
-    desc.bg_free_blocks_count_lo++;
+    free_blocks = ext4_group_free_blocks(fs, &desc);
+    if (free_blocks == UINT32_MAX) return -1;
+    ext4_set_group_free_blocks(fs, &desc, free_blocks + 1);
     ext4_write_group_desc(fs, group, &desc);
 
-    fs->sb.s_free_blocks_count_lo++;
+    super_free = ext4_super_free_blocks(fs);
+    if (super_free != UINT64_MAX)
+        ext4_set_super_free_blocks(fs, super_free + 1);
     fs->super_dirty = true;
-
-    return 0;
-}
-
-int ext4_load_group_descs(ext4_fs_t *fs) {
-    fs->group_descs = (ext4_group_desc_t *)kmalloc(fs->groups_count * sizeof(ext4_group_desc_t));
-    if (!fs->group_descs) {
-        return -1;
-    }
-
-    for (uint32_t i = 0; i < fs->groups_count; i++) {
-        if (ext4_read_group_desc(fs, i, &fs->group_descs[i]) != 0) {
-            kfree(fs->group_descs);
-            fs->group_descs = NULL;
-            return -1;
-        }
-    }
 
     return 0;
 }

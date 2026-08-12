@@ -8,7 +8,7 @@ static int sys_getticks(int unused, const char *unused2, int unused3) {
     return (int)tick_count;
 }
 
-static int sys_time(int tloc_ptr, const char *unused2, int unused3) {
+static int64_t sys_time(uint64_t tloc_ptr, const char *unused2, int unused3) {
     uint64_t nanoseconds;
     uint64_t secs;
     uint64_t *tloc;
@@ -16,11 +16,11 @@ static int sys_time(int tloc_ptr, const char *unused2, int unused3) {
     (void)unused2; (void)unused3;
     nanoseconds = timekeeping_realtime_ns();
     secs = nanoseconds / 1000000000ULL;
-    tloc = (uint64_t *)(uintptr_t)(uint32_t)tloc_ptr;
+    tloc = (uint64_t *)(uintptr_t)tloc_ptr;
     if (tloc && copy_to_user(tloc, &secs, sizeof(secs)) != 0) {
         return -EFAULT;
     }
-    return (int)secs;
+    return (int64_t)secs;
 }
 
 void syscalls_time_init(void) {

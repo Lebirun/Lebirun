@@ -402,10 +402,20 @@ static void console_enter_alt_screen(console_t *con) {
     char *new_buf;
     uint8_t *new_color;
 
-    if (con->alt_screen_active) return;
+    flags = console_irqsave();
+    spin_lock(&console_lock);
+    if (con->alt_screen_active) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
     console_expand_color_buffer(con);
     rows = con->buffer_rows;
-    if (!rows || !con->buffer) return;
+    if (!rows || !con->buffer) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
     cells = rows * con->buffer_cols;
 
     new_buf = (char *)kmalloc(cells);
@@ -418,14 +428,13 @@ static void console_enter_alt_screen(console_t *con) {
         if (new_buf) kfree(new_buf);
         if (new_color) kfree(new_color);
         if (new_wrapped) kfree(new_wrapped);
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
         return;
     }
     memset(new_buf, ' ', cells);
     if (new_color) memset(new_color, 0x70, cells);
     memset(new_wrapped, 0, rows);
-
-    flags = console_irqsave();
-    spin_lock(&console_lock);
 
     con->alt_saved_buffer = con->buffer;
     con->alt_saved_color = con->color_buffer;
@@ -454,12 +463,14 @@ static void console_leave_alt_screen(console_t *con) {
     char *old_buf;
     uint8_t *old_color;
 
-    if (!con->alt_screen_active) return;
-    if (!con->alt_saved_buffer) return;
-    console_expand_color_buffer(con);
-
     flags = console_irqsave();
     spin_lock(&console_lock);
+    if (!con->alt_screen_active || !con->alt_saved_buffer) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
+    console_expand_color_buffer(con);
 
     old_buf = con->buffer;
     old_color = con->color_buffer;
@@ -490,11 +501,20 @@ static void console_leave_alt_screen(console_t *con) {
 static void console_process_alt_screen_pending(int console_num) {
     int pending;
     console_t *con;
+    uint64_t flags;
 
     con = &consoles[console_num];
+    flags = console_irqsave();
+    spin_lock(&console_lock);
     pending = con->alt_screen_pending;
-    if (pending == 0) return;
+    if (pending == 0) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
     con->alt_screen_pending = 0;
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
 
     if (pending == 1) {
         console_enter_alt_screen(con);
@@ -502,9 +522,13 @@ static void console_process_alt_screen_pending(int console_num) {
         console_leave_alt_screen(con);
     }
 
+    flags = console_irqsave();
+    spin_lock(&console_lock);
     if (console_num == current_console && !con->graphics_mode) {
         console_fast_redraw_locked(console_num);
     }
+    spin_unlock(&console_lock);
+    console_irqrestore(flags);
 }
 
 static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
@@ -2595,7 +2619,6 @@ static void console_write_internal(int console_num, const char *data, size_t siz
     }
 
     con = &consoles[target_console];
-    console_expand_color_buffer(con);
 
     if (console_num == 0 && !skip_serial_async) {
         if (kprint_is_ready()) {

@@ -20,8 +20,6 @@ extern void *kmalloc(uint64_t size);
 extern void kfree(void *ptr);
 extern uint64_t net_get_ticks(void);
 
-#define IPV67_RX_PACKET_MAX 1472
-
 typedef struct {
     uint64_t packet_id;
     uint64_t seen_at;

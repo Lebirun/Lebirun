@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/spinlock.h>
 
 
 #define REG_EXTENDED    1
@@ -33,8 +34,6 @@
 #define GLOB_NOSPACE    1
 #define GLOB_ABORTED    2
 #define GLOB_NOMATCH    3
-
-#define LEGACY_REGEX_SIZE 512
 
 #define NODE_CHAR       1
 #define NODE_ANY        2
@@ -74,9 +73,9 @@ typedef struct {
 
 typedef struct {
     uint64_t magic;
-    int num_nodes;
-    int num_groups;
-    int node_capacity;
+    size_t num_nodes;
+    size_t num_groups;
+    size_t node_capacity;
     regex_node_t *nodes;
 } compiled_regex_t;
 
@@ -89,11 +88,25 @@ typedef long regoff_t;
 
 typedef struct {
     size_t re_nsub;
-    char pattern[LEGACY_REGEX_SIZE];
-    int cflags;
-    int compiled;
-    char compiled_data[4096];
+    void *opaque;
+    void *padding[4];
+    size_t nsub2;
+    char padding2;
 } kernel_regex_t;
+
+typedef struct regex_handle {
+    uint64_t token;
+    uint64_t owner_cr3;
+    int cflags;
+    uint64_t users;
+    int removed;
+    compiled_regex_t compiled;
+    struct regex_handle *next;
+} regex_handle_t;
+
+static regex_handle_t *regex_handles;
+static uint64_t regex_next_token = 1;
+static spinlock_t regex_handles_lock = {0};
 
 typedef struct {
     regoff_t rm_so;
@@ -252,7 +265,7 @@ static int parse_quantifier(const char **p, regex_node_t *node, int extended) {
 }
 
 static void compiled_regex_release(compiled_regex_t *compiled) {
-    int i;
+    size_t i;
 
     if (!compiled) return;
     for (i = 0; i < compiled->num_nodes; i++) {
@@ -266,22 +279,312 @@ static void compiled_regex_release(compiled_regex_t *compiled) {
     compiled->node_capacity = 0;
 }
 
-static int compiled_regex_grow(compiled_regex_t *compiled, int needed) {
+static int compiled_regex_copy(compiled_regex_t *dest,
+                               const compiled_regex_t *source) {
+    size_t i;
+    size_t length;
+
+    if (!dest || !source || source->magic != REGEX_COMPILED_MAGIC)
+        return -1;
+    memset(dest, 0, sizeof(*dest));
+    if (source->num_nodes > SIZE_MAX / sizeof(regex_node_t)) return -1;
+    if (source->num_nodes) {
+        dest->nodes = (regex_node_t *)kmalloc(
+            source->num_nodes * sizeof(regex_node_t));
+        if (!dest->nodes) return -1;
+        memcpy(dest->nodes, source->nodes,
+               source->num_nodes * sizeof(regex_node_t));
+        dest->num_nodes = source->num_nodes;
+        dest->node_capacity = source->num_nodes;
+        for (i = 0; i < dest->num_nodes; i++)
+            dest->nodes[i].class_start = NULL;
+        for (i = 0; i < dest->num_nodes; i++) {
+            if (!source->nodes[i].class_start) continue;
+            length = strlen(source->nodes[i].class_start);
+            if (length == SIZE_MAX) {
+                compiled_regex_release(dest);
+                return -1;
+            }
+            dest->nodes[i].class_start = (char *)kmalloc(length + 1);
+            if (!dest->nodes[i].class_start) {
+                compiled_regex_release(dest);
+                return -1;
+            }
+            memcpy(dest->nodes[i].class_start,
+                   source->nodes[i].class_start, length + 1);
+        }
+    }
+    dest->num_groups = source->num_groups;
+    dest->magic = REGEX_COMPILED_MAGIC;
+    return 0;
+}
+
+static uint64_t regex_owner_cr3(void) {
+    if (!current_task) return 0;
+    return current_task->pml4_phys;
+}
+
+static regex_handle_t *regex_handle_acquire(uint64_t token) {
+    regex_handle_t *handle;
+    uint64_t owner_cr3;
+
+    owner_cr3 = regex_owner_cr3();
+    spin_lock(&regex_handles_lock);
+    handle = regex_handles;
+    while (handle) {
+        if (!handle->removed && handle->token == token &&
+            handle->owner_cr3 == owner_cr3) {
+            handle->users++;
+            spin_unlock(&regex_handles_lock);
+            return handle;
+        }
+        handle = handle->next;
+    }
+    spin_unlock(&regex_handles_lock);
+    return NULL;
+}
+
+static uint64_t regex_allocate_token_locked(void) {
+    uint64_t token;
+
+    token = regex_next_token++;
+    if (token == 0) token = regex_next_token++;
+    return token;
+}
+
+static regex_handle_t *regex_handle_create(void) {
+    regex_handle_t *handle;
+
+    handle = (regex_handle_t *)kmalloc(sizeof(regex_handle_t));
+    if (!handle) return NULL;
+    memset(handle, 0, sizeof(regex_handle_t));
+    handle->users = 1;
+    handle->owner_cr3 = regex_owner_cr3();
+    return handle;
+}
+
+static void regex_handle_publish(regex_handle_t *handle) {
+    if (!handle) return;
+    spin_lock(&regex_handles_lock);
+    handle->token = regex_allocate_token_locked();
+    handle->next = regex_handles;
+    regex_handles = handle;
+    spin_unlock(&regex_handles_lock);
+}
+
+static void regex_handle_destroy(regex_handle_t *handle) {
+    if (!handle) return;
+    compiled_regex_release(&handle->compiled);
+    kfree(handle);
+}
+
+static void regex_handle_release(regex_handle_t *handle) {
+    int destroy;
+
+    if (!handle) return;
+    destroy = 0;
+    spin_lock(&regex_handles_lock);
+    if (handle->users > 0) handle->users--;
+    if (handle->removed && handle->users == 0) destroy = 1;
+    spin_unlock(&regex_handles_lock);
+    if (destroy) regex_handle_destroy(handle);
+}
+
+static void regex_handle_remove(regex_handle_t *handle) {
+    regex_handle_t **link;
+    int destroy;
+
+    if (!handle) return;
+    destroy = 0;
+    spin_lock(&regex_handles_lock);
+    if (handle->removed) {
+        spin_unlock(&regex_handles_lock);
+        return;
+    }
+    link = &regex_handles;
+    while (*link && *link != handle) link = &(*link)->next;
+    if (*link == handle) *link = handle->next;
+    handle->removed = 1;
+    if (handle->users == 0) destroy = 1;
+    spin_unlock(&regex_handles_lock);
+    if (destroy) regex_handle_destroy(handle);
+}
+
+void regex_release_address_space(uint64_t owner_cr3) {
+    regex_handle_t *handle;
+    regex_handle_t *next;
+    regex_handle_t *release;
+    regex_handle_t **link;
+
+    release = NULL;
+    spin_lock(&regex_handles_lock);
+    link = &regex_handles;
+    while (*link) {
+        handle = *link;
+        if (handle->owner_cr3 == owner_cr3) {
+            *link = handle->next;
+            handle->removed = 1;
+            if (handle->users == 0) {
+                handle->next = release;
+                release = handle;
+            } else {
+                handle->next = NULL;
+            }
+        } else {
+            link = &handle->next;
+        }
+    }
+    spin_unlock(&regex_handles_lock);
+    while (release) {
+        next = release->next;
+        if (release->users == 0) regex_handle_destroy(release);
+        release = next;
+    }
+}
+
+int regex_clone_address_space(uint64_t source_cr3, uint64_t dest_cr3) {
+    regex_handle_t **snapshot;
+    regex_handle_t *handle;
+    regex_handle_t *clone;
+    size_t capacity;
+    size_t count;
+    size_t i;
+    int result;
+
+    if (!source_cr3 || !dest_cr3 || source_cr3 == dest_cr3) return 0;
+    snapshot = NULL;
+    capacity = 0;
+    for (;;) {
+        spin_lock(&regex_handles_lock);
+        count = 0;
+        handle = regex_handles;
+        while (handle) {
+            if (!handle->removed && handle->owner_cr3 == source_cr3)
+                count++;
+            handle = handle->next;
+        }
+        spin_unlock(&regex_handles_lock);
+        if (!count) return 0;
+        if (count > SIZE_MAX / sizeof(*snapshot)) return -1;
+        snapshot = (regex_handle_t **)kmalloc(count * sizeof(*snapshot));
+        if (!snapshot) return -1;
+        capacity = count;
+        spin_lock(&regex_handles_lock);
+        count = 0;
+        handle = regex_handles;
+        while (handle) {
+            if (!handle->removed && handle->owner_cr3 == source_cr3)
+                count++;
+            handle = handle->next;
+        }
+        if (count <= capacity) {
+            i = 0;
+            handle = regex_handles;
+            while (handle) {
+                if (!handle->removed && handle->owner_cr3 == source_cr3) {
+                    handle->users++;
+                    snapshot[i++] = handle;
+                }
+                handle = handle->next;
+            }
+            spin_unlock(&regex_handles_lock);
+            count = i;
+            break;
+        }
+        spin_unlock(&regex_handles_lock);
+        kfree(snapshot);
+        snapshot = NULL;
+    }
+    result = 0;
+    for (i = 0; i < count; i++) {
+        handle = snapshot[i];
+        clone = (regex_handle_t *)kmalloc(sizeof(*clone));
+        if (!clone) {
+            result = -1;
+        } else {
+            memset(clone, 0, sizeof(*clone));
+            clone->token = handle->token;
+            clone->owner_cr3 = dest_cr3;
+            clone->cflags = handle->cflags;
+            if (compiled_regex_copy(&clone->compiled,
+                                    &handle->compiled) != 0) {
+                kfree(clone);
+                clone = NULL;
+                result = -1;
+            }
+        }
+        if (clone) {
+            spin_lock(&regex_handles_lock);
+            clone->next = regex_handles;
+            regex_handles = clone;
+            spin_unlock(&regex_handles_lock);
+        }
+        regex_handle_release(handle);
+        if (result != 0) {
+            i++;
+            while (i < count) regex_handle_release(snapshot[i++]);
+            break;
+        }
+    }
+    kfree(snapshot);
+    if (result != 0) regex_release_address_space(dest_cr3);
+    return result;
+}
+
+static int regex_copy_user_string(const char *source, char **result) {
+    char *buffer;
+    char *resized;
+    size_t length;
+    size_t capacity;
+    char value;
+
+    if (!source || !result) return -EFAULT;
+    buffer = NULL;
+    length = 0;
+    capacity = 0;
+    for (;;) {
+        if (copy_from_user(&value, source + length, 1) < 0) {
+            if (buffer) kfree(buffer);
+            return -EFAULT;
+        }
+        if (length == capacity) {
+            if (capacity > SIZE_MAX / 2) {
+                if (buffer) kfree(buffer);
+                return -ENOMEM;
+            }
+            capacity = capacity ? capacity * 2 : 64;
+            resized = (char *)krealloc(buffer, capacity);
+            if (!resized) {
+                if (buffer) kfree(buffer);
+                return -ENOMEM;
+            }
+            buffer = resized;
+        }
+        buffer[length++] = value;
+        if (value == '\0') break;
+    }
+    resized = (char *)krealloc(buffer, length);
+    if (resized) buffer = resized;
+    *result = buffer;
+    return 0;
+}
+
+static int compiled_regex_grow(compiled_regex_t *compiled, size_t needed) {
     regex_node_t *nodes;
-    int capacity;
+    size_t capacity;
 
     if (needed <= compiled->node_capacity) return 1;
     capacity = compiled->node_capacity ? compiled->node_capacity : 8;
     while (capacity < needed) {
-        if (capacity > INT32_MAX / 2) return 0;
+        if (capacity > SIZE_MAX / 2) return 0;
         capacity *= 2;
     }
-    if ((size_t)capacity > SIZE_MAX / sizeof(regex_node_t)) return 0;
+    if (capacity > SIZE_MAX / sizeof(regex_node_t)) return 0;
     nodes = (regex_node_t *)krealloc(compiled->nodes,
-                                     (size_t)capacity * sizeof(regex_node_t));
+                                     capacity * sizeof(regex_node_t));
     if (!nodes) return 0;
     memset(nodes + compiled->node_capacity, 0,
-           (size_t)(capacity - compiled->node_capacity) * sizeof(regex_node_t));
+           (capacity - compiled->node_capacity) * sizeof(regex_node_t));
     compiled->nodes = nodes;
     compiled->node_capacity = capacity;
     return 1;
@@ -566,22 +869,38 @@ static int regex_exec_internal(compiled_regex_t *compiled, const char *text, con
                                capture_t *captures, size_t capture_count,
                                int cflags, int eflags);
 
-static int try_match(compiled_regex_t *compiled, int node_start, const char *text, const char *start,
+static int try_match(compiled_regex_t *compiled, size_t node_start, const char *text, const char *start,
                      const char **end_pos, capture_t *captures,
                      size_t capture_count, int cflags, int eflags) {
     const char *pos;
-    int node_idx;
+    const char *dummy;
+    const char *alt_end;
+    const char *cap_start;
+    const char *cap_end;
+    const char *try_pos;
+    const char *next_end;
+    size_t node_idx;
+    size_t la_start;
+    size_t la_end;
+    size_t cap_len;
+    size_t cap_index;
+    int min_rep;
+    int max_rep;
+    int greedy;
+    int matched;
+    int pos_count;
+    int depth;
+    int grp;
+    int icase;
+    int i;
+    regex_node_t *node;
+    compiled_regex_t sub_compiled;
 
     pos = text;
     node_idx = node_start;
     
     while (node_idx < compiled->num_nodes) {
-        int min_rep;
-        int max_rep;
-        int greedy;
-        int matched;
-        int pos_count;
-        regex_node_t *node = &compiled->nodes[node_idx];
+        node = &compiled->nodes[node_idx];
         
         if (node->type == NODE_ANCHOR_START) {
             if (pos != start) {
@@ -645,11 +964,9 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
         
         if (node->type == NODE_LOOKAHEAD) {
-            int depth = 1;
-            int la_start = node_idx + 1;
-            int la_end = la_start;
-            
-            const char *dummy;
+            depth = 1;
+            la_start = node_idx + 1;
+            la_end = la_start;
             while (la_end < compiled->num_nodes && depth > 0) {
                 if (compiled->nodes[la_end].type == NODE_GROUP_START)
                     depth++;
@@ -658,7 +975,6 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
                 la_end++;
             }
             
-            compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
             sub_compiled.node_capacity = sub_compiled.num_nodes;
@@ -673,11 +989,9 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
         
         if (node->type == NODE_NEG_LOOKAHEAD) {
-            int depth = 1;
-            int la_start = node_idx + 1;
-            int la_end = la_start;
-            
-            const char *dummy;
+            depth = 1;
+            la_start = node_idx + 1;
+            la_end = la_start;
             while (la_end < compiled->num_nodes && depth > 0) {
                 if (compiled->nodes[la_end].type == NODE_GROUP_START)
                     depth++;
@@ -686,7 +1000,6 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
                 la_end++;
             }
             
-            compiled_regex_t sub_compiled;
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
             sub_compiled.node_capacity = sub_compiled.num_nodes;
@@ -701,21 +1014,22 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
         
         if (node->type == NODE_BACKREF) {
-            int grp = node->group_num;
+            grp = node->group_num;
             if (captures && grp > 0 && (size_t)grp < capture_count &&
                 captures[grp].start && captures[grp].end) {
-                const char *cap_start = captures[grp].start;
-                const char *cap_end = captures[grp].end;
-                int cap_len = cap_end - cap_start;
-                int icase = cflags & REG_ICASE;
+                cap_start = captures[grp].start;
+                cap_end = captures[grp].end;
+                cap_len = (size_t)(cap_end - cap_start);
+                icase = cflags & REG_ICASE;
                 
-                for (int i = 0; i < cap_len; i++) {
+                for (cap_index = 0; cap_index < cap_len; cap_index++) {
                     if (!*pos) return 0;
                     if (icase) {
-                        if (char_tolower(*pos) != char_tolower(cap_start[i]))
+                        if (char_tolower(*pos) !=
+                            char_tolower(cap_start[cap_index]))
                             return 0;
                     } else {
-                        if (*pos != cap_start[i])
+                        if (*pos != cap_start[cap_index])
                             return 0;
                     }
                     pos++;
@@ -726,17 +1040,16 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
         }
         
         if (node->alt_next > 0) {
-            const char *alt_end;
             if (try_match(compiled, node_idx + 1, pos, start, &alt_end,
                           captures, capture_count, cflags, eflags)) {
                 pos = alt_end;
                 while (node_idx < compiled->num_nodes && compiled->nodes[node_idx].alt_next <= 0)
                     node_idx++;
                 if (node_idx < compiled->num_nodes)
-                    node_idx = compiled->nodes[node_idx].alt_next;
+                    node_idx = (size_t)compiled->nodes[node_idx].alt_next;
                 continue;
             }
-            node_idx = node->alt_next;
+            node_idx = (size_t)node->alt_next;
             continue;
         }
         
@@ -759,9 +1072,7 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             return 0;
         
         if (greedy) {
-            for (int i = pos_count - 1; i >= 0; i--) {
-                const char *try_pos;
-                const char *next_end;
+            for (i = pos_count - 1; i >= 0; i--) {
                 if (i < min_rep) break;
                 try_pos = text + i;
                 
@@ -780,9 +1091,8 @@ static int try_match(compiled_regex_t *compiled, int node_start, const char *tex
             }
             return 0;
         } else {
-            for (int i = min_rep; i < pos_count; i++) {
-                const char *try_pos = text + i;
-                const char *next_end;
+            for (i = min_rep; i < pos_count; i++) {
+                try_pos = text + i;
                 
                 if (node_idx + 1 >= compiled->num_nodes) {
                     pos = try_pos;
@@ -839,14 +1149,12 @@ static int regex_exec_internal(compiled_regex_t *compiled, const char *text, con
     return 0;
 }
 
-static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
+static int sys_regcomp(uint64_t preg_ptr, const char *pattern_ptr, int cflags) {
     uint64_t preg_addr;
     uint64_t pat_addr;
-    const char *pattern;
-    kernel_regex_t *preg;
-    compiled_regex_t *compiled;
-    size_t len;
-    size_t i;
+    char *pattern;
+    kernel_regex_t value;
+    regex_handle_t *handle;
     int result;
 
     if (!preg_ptr || !pattern_ptr) return -EINVAL;
@@ -856,42 +1164,51 @@ static int sys_regcomp(int preg_ptr, const char *pattern_ptr, int cflags) {
     
     if (preg_addr >= KERNEL_VMA || pat_addr >= KERNEL_VMA) return -EFAULT;
     
-    preg = (kernel_regex_t *)preg_addr;
-    pattern = (const char *)pat_addr;
-    compiled = (compiled_regex_t *)preg->compiled_data;
-    if (compiled->magic == REGEX_COMPILED_MAGIC)
-        compiled_regex_release(compiled);
-
-    len = 0;
-    while (pattern[len] && len < LEGACY_REGEX_SIZE - 1) len++;
-    for (i = 0; i < len; i++)
-        preg->pattern[i] = pattern[i];
-    preg->pattern[len] = '\0';
-    preg->cflags = cflags;
-    result = compile_regex(pattern, compiled, cflags);
-    
+    result = regex_copy_user_string((const char *)(uintptr_t)pat_addr,
+                                    &pattern);
+    if (result < 0) return result;
+    handle = regex_handle_create();
+    if (!handle) {
+        kfree(pattern);
+        return REG_ESPACE;
+    }
+    handle->cflags = cflags;
+    result = compile_regex(pattern, &handle->compiled, cflags);
+    kfree(pattern);
     if (result != REG_OK) {
-        preg->compiled = 0;
+        regex_handle_remove(handle);
+        regex_handle_release(handle);
         return result;
     }
-    
-    preg->compiled = 1;
-    preg->re_nsub = compiled->num_groups;
-    
+    regex_handle_publish(handle);
+    memset(&value, 0, sizeof(value));
+    value.re_nsub = handle->compiled.num_groups;
+    value.nsub2 = handle->compiled.num_groups;
+    value.opaque = (void *)(uintptr_t)handle->token;
+    if (copy_to_user((void *)(uintptr_t)preg_addr, &value,
+                     sizeof(value)) < 0) {
+        regex_handle_remove(handle);
+        regex_handle_release(handle);
+        return -EFAULT;
+    }
+    regex_handle_release(handle);
     return REG_OK;
 }
 
-static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int pmatch_arg) {
+static int sys_regexec(uint64_t preg_ptr, const char *string_ptr,
+                       uint64_t nmatch_arg, uint64_t pmatch_arg) {
     uint64_t preg_addr;
     uint64_t str_addr;
-    const char *string;
-    kernel_regex_t *preg;
-    kernel_regmatch_t *pmatch;
+    char *string;
+    kernel_regex_t value;
+    kernel_regmatch_t match;
     compiled_regex_t *compiled;
+    regex_handle_t *handle;
     capture_t *captures;
     size_t nmatch;
     size_t capture_count;
     size_t i;
+    int copy_result;
     int matched;
 
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
@@ -901,52 +1218,98 @@ static int sys_regexec(int preg_ptr, const char *string_ptr, int nmatch_arg, int
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
-    preg = (kernel_regex_t *)preg_addr;
-    string = (const char *)str_addr;
-    if (!preg->compiled) return REG_BADPAT;
-    compiled = (compiled_regex_t *)preg->compiled_data;
-    if (compiled->magic != REGEX_COMPILED_MAGIC) return REG_BADPAT;
-    if (nmatch_arg < 0) return REG_ESPACE;
+    copy_result = regex_copy_user_string(
+        (const char *)(uintptr_t)str_addr, &string);
+    if (copy_result < 0)
+        return copy_result == -ENOMEM ? REG_ESPACE : REG_NOMATCH;
+    if (copy_from_user(&value, (const void *)(uintptr_t)preg_addr,
+                       sizeof(value)) < 0) {
+        kfree(string);
+        return REG_BADPAT;
+    }
+    handle = regex_handle_acquire((uint64_t)(uintptr_t)value.opaque);
+    if (!handle) {
+        kfree(string);
+        return REG_BADPAT;
+    }
+    compiled = &handle->compiled;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_BADPAT;
+    }
     nmatch = (size_t)nmatch_arg;
-    pmatch = pmatch_arg ? (kernel_regmatch_t *)(uintptr_t)pmatch_arg : NULL;
+    if (handle->cflags & REG_NOSUB) {
+        nmatch = 0;
+        pmatch_arg = 0;
+    }
+    if (pmatch_arg && (pmatch_arg >= KERNEL_VMA ||
+        nmatch > (KERNEL_VMA - pmatch_arg) / sizeof(match))) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
+    if (compiled->num_groups == SIZE_MAX) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     capture_count = (size_t)compiled->num_groups + 1;
-    if (capture_count > SIZE_MAX / sizeof(capture_t)) return REG_ESPACE;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
-    if (!captures) return REG_ESPACE;
+    if (!captures) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
     matched = regex_exec_internal(compiled, string, string, captures,
-                                  capture_count, preg->cflags, 0);
+                                  capture_count, handle->cflags, 0);
     if (!matched) {
         kfree(captures);
+        regex_handle_release(handle);
+        kfree(string);
         return REG_NOMATCH;
     }
-    if (pmatch && nmatch > 0) {
+    if (pmatch_arg && nmatch > 0) {
         for (i = 0; i < nmatch; i++) {
             if (i >= capture_count) {
-                pmatch[i].rm_so = -1;
-                pmatch[i].rm_eo = -1;
-                continue;
-            }
-            if (captures[i].start && captures[i].end) {
-                pmatch[i].rm_so = captures[i].start - string;
-                pmatch[i].rm_eo = captures[i].end - string;
+                match.rm_so = -1;
+                match.rm_eo = -1;
+            } else if (captures[i].start && captures[i].end) {
+                match.rm_so = captures[i].start - string;
+                match.rm_eo = captures[i].end - string;
             } else {
-                pmatch[i].rm_so = -1;
-                pmatch[i].rm_eo = -1;
+                match.rm_so = -1;
+                match.rm_eo = -1;
+            }
+            if (copy_to_user((void *)(uintptr_t)(pmatch_arg +
+                             i * sizeof(match)), &match,
+                             sizeof(match)) < 0) {
+                kfree(captures);
+                regex_handle_release(handle);
+                kfree(string);
+                return REG_ESPACE;
             }
         }
     }
     kfree(captures);
+    regex_handle_release(handle);
+    kfree(string);
     return REG_OK;
 }
 
-static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
+static int sys_regfree(uint64_t preg_ptr, const char *unused1, int unused2) {
     uint64_t preg_addr;
-    kernel_regex_t *preg;
-    compiled_regex_t *compiled;
+    kernel_regex_t value;
+    regex_handle_t *handle;
 
     (void)unused1; (void)unused2;
     
@@ -955,23 +1318,26 @@ static int sys_regfree(int preg_ptr, const char *unused1, int unused2) {
     preg_addr = (uint64_t)preg_ptr;
     if (preg_addr >= KERNEL_VMA) return -EFAULT;
     
-    preg = (kernel_regex_t *)preg_addr;
-    compiled = (compiled_regex_t *)preg->compiled_data;
-    if (compiled->magic == REGEX_COMPILED_MAGIC) {
-        compiled_regex_release(compiled);
-        memset(compiled, 0, sizeof(*compiled));
+    if (copy_from_user(&value, (const void *)(uintptr_t)preg_addr,
+                       sizeof(value)) < 0) return -EFAULT;
+    handle = regex_handle_acquire((uint64_t)(uintptr_t)value.opaque);
+    if (handle) {
+        regex_handle_remove(handle);
+        regex_handle_release(handle);
     }
-    preg->compiled = 0;
-    preg->pattern[0] = '\0';
-    preg->re_nsub = 0;
-    
+    memset(&value, 0, sizeof(value));
+    if (copy_to_user((void *)(uintptr_t)preg_addr, &value,
+                     sizeof(value)) < 0) return -EFAULT;
     return 0;
 }
 
-static int sys_regerror(int errcode, int preg_arg, int errbuf_arg, int errbuf_size_arg) {
+static int sys_regerror(int errcode, uint64_t preg_arg, uint64_t errbuf_arg,
+                        uint64_t errbuf_size_arg) {
     char *errbuf;
     size_t errbuf_size;
     const char *msg;
+    size_t copy;
+    size_t i;
     int len;
     (void)preg_arg;
     
@@ -990,8 +1356,9 @@ static int sys_regerror(int errcode, int preg_arg, int errbuf_arg, int errbuf_si
     while (msg[len]) len++;
     
     if (errbuf && errbuf_size > 0) {
-        int copy = len < (int)errbuf_size - 1 ? len : (int)errbuf_size - 1;
-        for (int i = 0; i < copy; i++)
+        copy = (size_t)len;
+        if (copy >= errbuf_size) copy = errbuf_size - 1;
+        for (i = 0; i < copy; i++)
             errbuf[i] = msg[i];
         errbuf[copy] = '\0';
     }
@@ -1111,7 +1478,7 @@ static int fnmatch_internal(const char *pattern, const char *string, int flags) 
     return *s == '\0' ? 0 : FNM_NOMATCH;
 }
 
-static int sys_fnmatch(int pattern_ptr, const char *string_ptr, int flags) {
+static int sys_fnmatch(uint64_t pattern_ptr, const char *string_ptr, int flags) {
     uint64_t pat_addr;
     uint64_t str_addr;
     const char *pattern;
@@ -1133,20 +1500,36 @@ static int glob_match_pattern(const char *pattern, const char *name) {
     return fnmatch_internal(pattern, name, 0) == 0;
 }
 
-static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_ptr) {
+static int sys_glob(uint64_t pattern_ptr, const char *flags_errfunc_ptr,
+                    uint64_t pglob_ptr) {
     uint64_t pat_addr;
     uint64_t glob_addr;
     const char *pattern;
     int flags;
-    char dir_path[256] = "/";
-    char file_pattern[256];
-    int last_slash;
-    int i;
+    char *dir_path;
+    char *file_pattern;
+    size_t pattern_len;
+    size_t dir_len;
+    size_t file_len;
+    size_t last_slash;
+    size_t i;
+    size_t j;
     char **results;
     size_t count;
     size_t capacity;
+    size_t new_capacity;
     uint64_t idx;
     char **pathv;
+    char **new_results;
+    char *path;
+    const char *entry_name;
+    kernel_glob_t *pglob;
+    vfs_node_t *dir;
+    dirent_t *dirent;
+    size_t entry_len;
+    size_t total;
+    size_t pos;
+    int need_slash;
     if (!pattern_ptr || !pglob_ptr) return GLOB_NOMATCH;
     
     pat_addr = (uint64_t)pattern_ptr;
@@ -1155,7 +1538,7 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     if (pat_addr >= KERNEL_VMA || glob_addr >= KERNEL_VMA) return GLOB_NOMATCH;
     
     pattern = (const char *)pat_addr;
-    kernel_glob_t *pglob = (kernel_glob_t *)glob_addr;
+    pglob = (kernel_glob_t *)glob_addr;
     flags = (int)(uintptr_t)flags_errfunc_ptr;
     
     if (!(flags & GLOB_APPEND)) {
@@ -1163,57 +1546,70 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
         pglob->gl_pathv = NULL;
     }
     
-    last_slash = -1;
-    
-    i = 0;
-    while (pattern[i]) {
+    pattern_len = strlen(pattern);
+    last_slash = pattern_len;
+    for (i = 0; i < pattern_len; i++) {
         if (pattern[i] == '/') last_slash = i;
-        i++;
     }
-    
-    if (last_slash >= 0) {
-        int k;
-        for (int j = 0; j < last_slash && j < 255; j++)
-            dir_path[j] = pattern[j];
-        dir_path[last_slash] = '\0';
+
+    if (last_slash < pattern_len) {
+        dir_len = last_slash ? last_slash : 1;
+        file_len = pattern_len - last_slash - 1;
+    } else {
+        dir_len = 1;
+        file_len = pattern_len;
+    }
+    dir_path = (char *)kmalloc(dir_len + 1);
+    file_pattern = (char *)kmalloc(file_len + 1);
+    if (!dir_path || !file_pattern) {
+        if (dir_path) kfree(dir_path);
+        if (file_pattern) kfree(file_pattern);
+        return GLOB_NOSPACE;
+    }
+
+    if (last_slash < pattern_len) {
         if (last_slash == 0) {
             dir_path[0] = '/';
             dir_path[1] = '\0';
+        } else {
+            memcpy(dir_path, pattern, last_slash);
+            dir_path[last_slash] = '\0';
         }
-        
-        k = 0;
-        for (int j = last_slash + 1; pattern[j] && k < 255; j++, k++)
-            file_pattern[k] = pattern[j];
-        file_pattern[k] = '\0';
+        memcpy(file_pattern, pattern + last_slash + 1, file_len);
+        file_pattern[file_len] = '\0';
     } else {
         dir_path[0] = '.';
         dir_path[1] = '\0';
-        for (int j = 0; pattern[j] && j < 255; j++)
-            file_pattern[j] = pattern[j];
-        file_pattern[i] = '\0';
+        memcpy(file_pattern, pattern, file_len);
+        file_pattern[file_len] = '\0';
     }
     
-    vfs_node_t *dir = vfs_namei(dir_path);
+    dir = vfs_namei(dir_path);
     if (!dir) {
         if (flags & GLOB_NOCHECK) {
-            int plen;
-            char **pathv;
             pglob->gl_pathc = 1;
-            plen = 0;
-            while (pattern[plen]) plen++;
             pathv = (char **)kmalloc(2 * sizeof(char *));
-            if (!pathv) return GLOB_NOSPACE;
-            pathv[0] = (char *)kmalloc(plen + 1);
-            if (!pathv[0]) {
-                kfree(pathv);
+            if (!pathv) {
+                kfree(file_pattern);
+                kfree(dir_path);
                 return GLOB_NOSPACE;
             }
-            for (int j = 0; j <= plen; j++)
-                pathv[0][j] = pattern[j];
+            pathv[0] = (char *)kmalloc(pattern_len + 1);
+            if (!pathv[0]) {
+                kfree(pathv);
+                kfree(file_pattern);
+                kfree(dir_path);
+                return GLOB_NOSPACE;
+            }
+            memcpy(pathv[0], pattern, pattern_len + 1);
             pathv[1] = NULL;
             pglob->gl_pathv = pathv;
+            kfree(file_pattern);
+            kfree(dir_path);
             return 0;
         }
+        kfree(file_pattern);
+        kfree(dir_path);
         return GLOB_NOMATCH;
     }
     
@@ -1222,59 +1618,66 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     capacity = 0;
     
     idx = 0;
-    dirent_t *dirent;
     
     while ((dirent = vfs_readdir(dir, idx)) != NULL) {
-        if (dirent->name[0] == '\0') break;
+        entry_name = vfs_dirent_name(dirent);
+        if (entry_name[0] == '\0') break;
         
-        if (glob_match_pattern(file_pattern, dirent->name)) {
-            int dlen;
-            int nlen;
-            int need_slash;
-            int total;
-            char *path;
-            int pos;
+        if (glob_match_pattern(file_pattern, entry_name)) {
             if (count >= capacity) {
-                size_t new_cap = capacity ? capacity * 2 : 8;
-                char **new_results = (char **)kmalloc(new_cap * sizeof(char *));
-                if (!new_results) {
-                    for (size_t j = 0; j < count; j++)
-                        kfree(results[j]);
+                new_capacity = capacity ? capacity * 2 : 8;
+                if (new_capacity < capacity ||
+                    new_capacity > SIZE_MAX / sizeof(char *)) {
+                    for (j = 0; j < count; j++) kfree(results[j]);
                     if (results) kfree(results);
                     vfs_release(dir);
+                    kfree(file_pattern);
+                    kfree(dir_path);
                     return GLOB_NOSPACE;
                 }
-                for (size_t j = 0; j < count; j++)
-                    new_results[j] = results[j];
+                new_results = (char **)kmalloc(new_capacity * sizeof(char *));
+                if (!new_results) {
+                    for (j = 0; j < count; j++) kfree(results[j]);
+                    if (results) kfree(results);
+                    vfs_release(dir);
+                    kfree(file_pattern);
+                    kfree(dir_path);
+                    return GLOB_NOSPACE;
+                }
+                for (j = 0; j < count; j++) new_results[j] = results[j];
                 if (results) kfree(results);
                 results = new_results;
-                capacity = new_cap;
+                capacity = new_capacity;
             }
             
-            dlen = 0;
-            while (dir_path[dlen]) dlen++;
-            nlen = 0;
-            while (dirent->name[nlen]) nlen++;
-            
-            need_slash = (dlen > 0 && dir_path[dlen-1] != '/') ? 1 : 0;
-            total = dlen + need_slash + nlen + 1;
+            entry_len = strlen(entry_name);
+            need_slash = (dir_len > 0 && dir_path[dir_len - 1] != '/') ? 1 : 0;
+            if (entry_len > SIZE_MAX - dir_len - (size_t)need_slash - 1) {
+                for (j = 0; j < count; j++) kfree(results[j]);
+                if (results) kfree(results);
+                vfs_release(dir);
+                kfree(file_pattern);
+                kfree(dir_path);
+                return GLOB_NOSPACE;
+            }
+            total = dir_len + (size_t)need_slash + entry_len + 1;
             
             path = (char *)kmalloc(total);
             if (!path) {
-                for (size_t j = 0; j < count; j++)
-                    kfree(results[j]);
+                for (j = 0; j < count; j++) kfree(results[j]);
                 if (results) kfree(results);
                 vfs_release(dir);
+                kfree(file_pattern);
+                kfree(dir_path);
                 return GLOB_NOSPACE;
             }
             
             pos = 0;
-            for (int j = 0; j < dlen; j++)
-                path[pos++] = dir_path[j];
-            if (need_slash)
-                path[pos++] = '/';
-            for (int j = 0; j < nlen; j++)
-                path[pos++] = dirent->name[j];
+            memcpy(path + pos, dir_path, dir_len);
+            pos += dir_len;
+            if (need_slash) path[pos++] = '/';
+            memcpy(path + pos, entry_name, entry_len);
+            pos += entry_len;
             path[pos] = '\0';
             
             results[count++] = path;
@@ -1286,38 +1689,48 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
         if (results) kfree(results);
         vfs_release(dir);
         if (flags & GLOB_NOCHECK) {
-            int plen;
-            char **pathv;
             pglob->gl_pathc = 1;
-            plen = 0;
-            while (pattern[plen]) plen++;
             pathv = (char **)kmalloc(2 * sizeof(char *));
-            if (!pathv) return GLOB_NOSPACE;
-            pathv[0] = (char *)kmalloc(plen + 1);
-            if (!pathv[0]) {
-                kfree(pathv);
+            if (!pathv) {
+                kfree(file_pattern);
+                kfree(dir_path);
                 return GLOB_NOSPACE;
             }
-            for (int j = 0; j <= plen; j++)
-                pathv[0][j] = pattern[j];
+            pathv[0] = (char *)kmalloc(pattern_len + 1);
+            if (!pathv[0]) {
+                kfree(pathv);
+                kfree(file_pattern);
+                kfree(dir_path);
+                return GLOB_NOSPACE;
+            }
+            memcpy(pathv[0], pattern, pattern_len + 1);
             pathv[1] = NULL;
             pglob->gl_pathv = pathv;
+            kfree(file_pattern);
+            kfree(dir_path);
             return 0;
         }
+        kfree(file_pattern);
+        kfree(dir_path);
         return GLOB_NOMATCH;
     }
     
     vfs_release(dir);
+    kfree(file_pattern);
+    kfree(dir_path);
+    if (count == SIZE_MAX / sizeof(char *)) {
+        for (j = 0; j < count; j++) kfree(results[j]);
+        kfree(results);
+        return GLOB_NOSPACE;
+    }
     pathv = (char **)kmalloc((count + 1) * sizeof(char *));
     if (!pathv) {
-        for (size_t j = 0; j < count; j++)
-            kfree(results[j]);
+        for (j = 0; j < count; j++) kfree(results[j]);
         kfree(results);
         return GLOB_NOSPACE;
     }
     
-    for (size_t j = 0; j < count; j++)
-        pathv[j] = results[j];
+    for (j = 0; j < count; j++) pathv[j] = results[j];
     pathv[count] = NULL;
     
     kfree(results);
@@ -1328,8 +1741,11 @@ static int sys_glob(int pattern_ptr, const char *flags_errfunc_ptr, int pglob_pt
     return 0;
 }
 
-static int sys_globfree(int pglob_ptr, const char *unused1, int unused2) {
+static int sys_globfree(uint64_t pglob_ptr, const char *unused1, int unused2) {
     uint64_t glob_addr;
+    kernel_glob_t *pglob;
+    size_t i;
+
     (void)unused1; (void)unused2;
     
     if (!pglob_ptr) return 0;
@@ -1337,10 +1753,10 @@ static int sys_globfree(int pglob_ptr, const char *unused1, int unused2) {
     glob_addr = (uint64_t)pglob_ptr;
     if (glob_addr >= KERNEL_VMA) return -EFAULT;
     
-    kernel_glob_t *pglob = (kernel_glob_t *)glob_addr;
+    pglob = (kernel_glob_t *)glob_addr;
     
     if (pglob->gl_pathv) {
-        for (size_t i = 0; i < pglob->gl_pathc; i++) {
+        for (i = 0; i < pglob->gl_pathc; i++) {
             if (pglob->gl_pathv[i])
                 kfree(pglob->gl_pathv[i]);
         }
@@ -1671,7 +2087,8 @@ static int vsscanf_internal(const char *str, const char *format, uint64_t *args)
     return count;
 }
 
-static int sys_sscanf(int str_ptr, const char *format_ptr, int args_ptr) {
+static int sys_sscanf(uint64_t str_ptr, const char *format_ptr,
+                      uint64_t args_ptr) {
     uint64_t str_addr;
     uint64_t fmt_addr;
     uint64_t arg_addr;
@@ -1701,7 +2118,8 @@ static int sys_scanf_getchar(int unused1, const char *unused2, int unused3) {
     return keyboard_getchar_nb();
 }
 
-static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_output) {
+static int sys_regsub(uint64_t preg_ptr, const char *string_ptr,
+                      int replacement_output) {
     uint64_t preg_addr;
     uint64_t str_addr;
     uint64_t repl_addr;
@@ -1709,7 +2127,8 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     const char *string;
     const char *replacement;
     char *output;
-    kernel_regex_t *preg;
+    kernel_regex_t value;
+    regex_handle_t *handle;
     compiled_regex_t *compiled;
     capture_t *captures;
     size_t capture_count;
@@ -1729,25 +2148,35 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return -EFAULT;
     
-    preg = (kernel_regex_t *)preg_addr;
     string = (const char *)str_addr;
     replacement = repl_addr ? (const char *)repl_addr : "";
     output = out_addr ? (char *)out_addr : NULL;
     
-    if (!preg->compiled) return -EINVAL;
-    
-    compiled = (compiled_regex_t *)preg->compiled_data;
-    if (compiled->magic != REGEX_COMPILED_MAGIC) return -EINVAL;
+    if (copy_from_user(&value, (const void *)(uintptr_t)preg_addr,
+                       sizeof(value)) < 0) return -EFAULT;
+    handle = regex_handle_acquire((uint64_t)(uintptr_t)value.opaque);
+    if (!handle) return -EINVAL;
+    compiled = &handle->compiled;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) {
+        regex_handle_release(handle);
+        return -EINVAL;
+    }
     capture_count = (size_t)compiled->num_groups + 1;
-    if (capture_count > SIZE_MAX / sizeof(capture_t)) return -ENOMEM;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) {
+        regex_handle_release(handle);
+        return -ENOMEM;
+    }
     captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
-    if (!captures) return -ENOMEM;
+    if (!captures) {
+        regex_handle_release(handle);
+        return -ENOMEM;
+    }
     for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
     matched = regex_exec_internal(compiled, string, string, captures,
-                                  capture_count, preg->cflags, 0);
+                                  capture_count, handle->cflags, 0);
     if (!matched) {
         if (output) {
             copy_index = 0;
@@ -1757,11 +2186,13 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
             }
             output[copy_index] = '\0';
             kfree(captures);
+            regex_handle_release(handle);
             return copy_index;
         }
         len = 0;
         while (string[len]) len++;
         kfree(captures);
+        regex_handle_release(handle);
         return len;
     }
     
@@ -1824,20 +2255,24 @@ static int sys_regsub(int preg_ptr, const char *string_ptr, int replacement_outp
     
     if (output) output[out_idx] = '\0';
     kfree(captures);
+    regex_handle_release(handle);
     return out_idx;
 }
 
-static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) {
+static int regex_exec_matches(uint64_t preg_ptr, const char *string_ptr,
+                              uint64_t pmatch_ptr, size_t nmatch) {
     uint64_t preg_addr;
     uint64_t str_addr;
     uint64_t pm_addr;
-    const char *string;
-    kernel_regex_t *preg;
-    kernel_regmatch_t *pmatch;
+    char *string;
+    kernel_regex_t value;
+    regex_handle_t *handle;
+    kernel_regmatch_t match;
     compiled_regex_t *compiled;
     capture_t *captures;
     size_t capture_count;
     size_t i;
+    int copy_result;
     int matched;
 
     if (!preg_ptr || !string_ptr) return REG_NOMATCH;
@@ -1848,41 +2283,93 @@ static int sys_regexec_ex(int preg_ptr, const char *string_ptr, int pmatch_ptr) 
     
     if (preg_addr >= KERNEL_VMA || str_addr >= KERNEL_VMA) return REG_NOMATCH;
     
-    preg = (kernel_regex_t *)preg_addr;
-    string = (const char *)str_addr;
-    pmatch = pm_addr ? (kernel_regmatch_t *)pm_addr : NULL;
-    
-    if (!preg->compiled) return REG_BADPAT;
-    
-    compiled = (compiled_regex_t *)preg->compiled_data;
-    if (compiled->magic != REGEX_COMPILED_MAGIC) return REG_BADPAT;
+    if (pm_addr && (pm_addr >= KERNEL_VMA ||
+        nmatch > (KERNEL_VMA - pm_addr) / sizeof(match)))
+        return REG_ESPACE;
+    copy_result = regex_copy_user_string(
+        (const char *)(uintptr_t)str_addr, &string);
+    if (copy_result < 0)
+        return copy_result == -ENOMEM ? REG_ESPACE : REG_NOMATCH;
+    if (copy_from_user(&value, (const void *)(uintptr_t)preg_addr,
+                       sizeof(value)) < 0) {
+        kfree(string);
+        return REG_BADPAT;
+    }
+    handle = regex_handle_acquire((uint64_t)(uintptr_t)value.opaque);
+    if (!handle) {
+        kfree(string);
+        return REG_BADPAT;
+    }
+    compiled = &handle->compiled;
+    if (compiled->magic != REGEX_COMPILED_MAGIC) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_BADPAT;
+    }
+    if (compiled->num_groups == SIZE_MAX) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     capture_count = (size_t)compiled->num_groups + 1;
-    if (capture_count > SIZE_MAX / sizeof(capture_t)) return REG_ESPACE;
+    if (capture_count > SIZE_MAX / sizeof(capture_t)) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     captures = (capture_t *)kmalloc(capture_count * sizeof(capture_t));
-    if (!captures) return REG_ESPACE;
+    if (!captures) {
+        regex_handle_release(handle);
+        kfree(string);
+        return REG_ESPACE;
+    }
     for (i = 0; i < capture_count; i++) {
         captures[i].start = NULL;
         captures[i].end = NULL;
     }
     matched = regex_exec_internal(compiled, string, string, captures,
-                                  capture_count, preg->cflags, 0);
+                                  capture_count, handle->cflags, 0);
     if (!matched) {
         kfree(captures);
+        regex_handle_release(handle);
+        kfree(string);
         return REG_NOMATCH;
     }
-    if (pmatch) {
-        for (i = 0; i < LEGACY_MATCH_COUNT; i++) {
+    if (pm_addr) {
+        for (i = 0; i < nmatch; i++) {
             if (i < capture_count && captures[i].start && captures[i].end) {
-                pmatch[i].rm_so = captures[i].start - string;
-                pmatch[i].rm_eo = captures[i].end - string;
+                match.rm_so = captures[i].start - string;
+                match.rm_eo = captures[i].end - string;
             } else {
-                pmatch[i].rm_so = -1;
-                pmatch[i].rm_eo = -1;
+                match.rm_so = -1;
+                match.rm_eo = -1;
+            }
+            if (copy_to_user((void *)(uintptr_t)(pm_addr +
+                             i * sizeof(match)), &match,
+                             sizeof(match)) < 0) {
+                kfree(captures);
+                regex_handle_release(handle);
+                kfree(string);
+                return REG_ESPACE;
             }
         }
     }
     kfree(captures);
+    regex_handle_release(handle);
+    kfree(string);
     return REG_OK;
+}
+
+static int sys_regexec_ex(uint64_t preg_ptr, const char *string_ptr,
+                          uint64_t pmatch_ptr) {
+    return regex_exec_matches(preg_ptr, string_ptr, pmatch_ptr,
+                              LEGACY_MATCH_COUNT);
+}
+
+static int sys_regexec_ex2(uint64_t preg_ptr, const char *string_ptr,
+                           uint64_t pmatch_ptr, uint64_t nmatch) {
+    return regex_exec_matches(preg_ptr, string_ptr, pmatch_ptr,
+                              (size_t)nmatch);
 }
 
 void syscalls_regex_init(void) {
@@ -1897,4 +2384,5 @@ void syscalls_regex_init(void) {
     syscall_table_set(SYSCALL_SCANF_GETCHAR, (void *)(sys_scanf_getchar));
     syscall_table_set(SYSCALL_REGSUB, (void *)(sys_regsub));
     syscall_table_set(SYSCALL_REGEXEC_EX, (void *)(sys_regexec_ex));
+    syscall_table_set(SYSCALL_REGEXEC_EX2, (void *)(sys_regexec_ex2));
 }

@@ -65,10 +65,10 @@ static int check_fd_readable(int fd) {
     }
     if (current_task->fds[fd].type == FD_TYPE_FILE) {
         node = (vfs_node_t *)current_task->fds[fd].node;
-        if (node && strcmp(node->name, "mice") == 0)
+        if (node && strcmp(vfs_node_name(node), "mice") == 0)
             return mouse_has_data() ? 1 : 0;
-        if (node && (strcmp(node->name, "event0") == 0 ||
-                     strcmp(node->name, "event1") == 0))
+        if (node && (strcmp(vfs_node_name(node), "event0") == 0 ||
+                     strcmp(vfs_node_name(node), "event1") == 0))
             return evdev_node_has_data(node);
         return 1;
     }
@@ -115,7 +115,8 @@ static int check_fd_writable(int fd) {
     return 0;
 }
 
-static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
+static int select_common(int nfds, uint64_t readfds_ptr,
+                         uint64_t writefds_ptr,
                          int timeout_ms) {
     uint64_t read_addr;
     uint64_t write_addr;
@@ -273,8 +274,9 @@ static int select_common(int nfds, int readfds_ptr, int writefds_ptr,
     return count;
 }
 
-static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
-                      int exceptfds_ptr, int timeout_ptr, int unused) {
+static int sys_select(int nfds, uint64_t readfds_ptr,
+                      uint64_t writefds_ptr, uint64_t exceptfds_ptr,
+                      uint64_t timeout_ptr, int unused) {
     struct kernel_timeval timeout_value;
     int timeout_ms;
 
@@ -283,7 +285,7 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
     timeout_ms = -1;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
-                           (const void *)(uintptr_t)(uint32_t)timeout_ptr,
+                           (const void *)(uintptr_t)timeout_ptr,
                            sizeof(timeout_value)) < 0) return -EFAULT;
         if (timeout_value.tv_sec < 0 || timeout_value.tv_usec < 0 ||
             timeout_value.tv_usec >= 1000000) return -EINVAL;
@@ -294,8 +296,9 @@ static int sys_select(int nfds, int readfds_ptr, int writefds_ptr,
     return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
 }
 
-static int sys_pselect6(int nfds, int readfds_ptr, int writefds_ptr,
-                        int exceptfds_ptr, int timeout_ptr, int sigmask_ptr) {
+static int sys_pselect6(int nfds, uint64_t readfds_ptr,
+                        uint64_t writefds_ptr, uint64_t exceptfds_ptr,
+                        uint64_t timeout_ptr, uint64_t sigmask_ptr) {
     struct kernel_timespec timeout_value;
     uint64_t milliseconds;
     int timeout_ms;
@@ -305,7 +308,7 @@ static int sys_pselect6(int nfds, int readfds_ptr, int writefds_ptr,
     timeout_ms = -1;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
-                           (const void *)(uintptr_t)(uint32_t)timeout_ptr,
+                           (const void *)(uintptr_t)timeout_ptr,
                            sizeof(timeout_value)) < 0) return -EFAULT;
         if (timeout_value.tv_sec < 0 || timeout_value.tv_nsec < 0 ||
             timeout_value.tv_nsec >= 1000000000) return -EINVAL;
@@ -335,7 +338,7 @@ struct pollfd_k {
 #define POLLWRNORM 0x0100
 #define POLLWRBAND 0x0200
 
-static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
+static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
     uint64_t addr;
     int nfds;
     struct pollfd_k *fds;
@@ -469,7 +472,8 @@ static int sys_poll(int fds_ptr, const char *nfds_ptr, int timeout) {
     return ready_count;
 }
 
-static int sys_ppoll(int fds_ptr, const char *nfds_ptr, int timeout_ptr) {
+static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
+                     uint64_t timeout_ptr) {
     int timeout_ms;
     uint64_t ts_addr;
     struct kernel_timespec timeout;
