@@ -49,25 +49,46 @@ static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
 }
 
 static int find_free_cache_entry(ext4_fs_t *fs) {
-    int oldest = -1;
-    uint32_t oldest_tick = 0xFFFFFFFF;
+    int oldest;
+    int dirty_oldest;
+    uint32_t oldest_tick;
+    uint32_t dirty_oldest_tick;
     int i;
     uint32_t old_count;
     uint32_t new_count;
     ext4_block_cache_entry_t *new_cache;
     int ret;
 
+    oldest = -1;
+    dirty_oldest = -1;
+    oldest_tick = 0xFFFFFFFF;
+    dirty_oldest_tick = 0xFFFFFFFF;
     for (i = 0; i < (int)fs->block_cache_count; i++) {
         if (!fs->block_cache[i].data) {
             return i;
         }
-        if (fs->block_cache[i].ref_count == 0 && fs->block_cache[i].last_access < oldest_tick) {
-            oldest_tick = fs->block_cache[i].last_access;
-            oldest = i;
+        if (fs->block_cache[i].ref_count == 0) {
+            if (fs->block_cache[i].dirty &&
+                fs->block_cache[i].last_access < dirty_oldest_tick) {
+                dirty_oldest_tick = fs->block_cache[i].last_access;
+                dirty_oldest = i;
+            } else if (!fs->block_cache[i].dirty &&
+                       fs->block_cache[i].last_access < oldest_tick) {
+                oldest_tick = fs->block_cache[i].last_access;
+                oldest = i;
+            }
         }
     }
 
-    if (oldest < 0) {
+    if (oldest >= 0) return oldest;
+
+    if (dirty_oldest >= 0 && fs->block_cache_count >= 8) {
+        ret = ext4_sync_blocks(fs);
+        if (ret != 0) return -1;
+        return dirty_oldest;
+    }
+
+    if (dirty_oldest < 0 || fs->block_cache_count < 8) {
         old_count = fs->block_cache_count;
         if (old_count == 0) new_count = 1;
         else if (old_count > UINT32_MAX / 2) return -1;
@@ -82,28 +103,7 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
         return (int)old_count;
     }
 
-    if (fs->block_cache[oldest].dirty &&
-        fs->block_cache_count < UINT32_MAX) {
-        old_count = fs->block_cache_count;
-        new_count = old_count + 1;
-        new_cache = (ext4_block_cache_entry_t *)krealloc(fs->block_cache,
-            new_count * sizeof(ext4_block_cache_entry_t));
-        if (new_cache) {
-            memset(new_cache + old_count, 0,
-                sizeof(ext4_block_cache_entry_t));
-            fs->block_cache = new_cache;
-            fs->block_cache_count = new_count;
-            return (int)old_count;
-        }
-    }
-
-    if (oldest >= 0 && fs->block_cache[oldest].dirty) {
-        ret = ext4_write_block(fs, fs->block_cache[oldest].block_num, fs->block_cache[oldest].data);
-        if (ret != 0) return -1;
-        fs->block_cache[oldest].dirty = false;
-    }
-
-    return oldest;
+    return -1;
 }
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
@@ -330,6 +330,46 @@ void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block) {
     }
 }
 
+static void ext4_dirty_heap_sift(ext4_fs_t *fs, uint32_t *indices,
+                                 int count, int root) {
+    int child;
+    int largest;
+    uint32_t temp;
+
+    for (;;) {
+        child = root * 2 + 1;
+        if (child >= count) return;
+        largest = root;
+        if (fs->block_cache[indices[child]].block_num >
+            fs->block_cache[indices[largest]].block_num)
+            largest = child;
+        if (child + 1 < count &&
+            fs->block_cache[indices[child + 1]].block_num >
+            fs->block_cache[indices[largest]].block_num)
+            largest = child + 1;
+        if (largest == root) return;
+        temp = indices[root];
+        indices[root] = indices[largest];
+        indices[largest] = temp;
+        root = largest;
+    }
+}
+
+static void ext4_sort_dirty_indices(ext4_fs_t *fs, uint32_t *indices,
+                                    int count) {
+    int i;
+    uint32_t temp;
+
+    for (i = count / 2 - 1; i >= 0; i--)
+        ext4_dirty_heap_sift(fs, indices, count, i);
+    for (i = count - 1; i > 0; i--) {
+        temp = indices[0];
+        indices[0] = indices[i];
+        indices[i] = temp;
+        ext4_dirty_heap_sift(fs, indices, i, 0);
+    }
+}
+
 int ext4_sync_blocks(ext4_fs_t *fs) {
     int errors = 0;
     int dirty_count = 0;
@@ -337,10 +377,9 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     int j;
     int max_run;
     int run_len;
-    uint32_t temp;
     uint32_t *dirty_idx;
     ahci_port_t *port;
-    uint8_t *batch_buf;
+    const void *vectors[8];
     uint64_t base_lba;
     uint64_t total_sectors;
 
@@ -378,18 +417,10 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
         }
     }
 
-    for (i = 0; i < dirty_count - 1; i++) {
-        for (j = i + 1; j < dirty_count; j++) {
-            if (fs->block_cache[dirty_idx[j]].block_num < fs->block_cache[dirty_idx[i]].block_num) {
-                temp = dirty_idx[i];
-                dirty_idx[i] = dirty_idx[j];
-                dirty_idx[j] = temp;
-            }
-        }
-    }
+    ext4_sort_dirty_indices(fs, dirty_idx, dirty_count);
 
     port = ahci_get_port(fs->port_index);
-    max_run = 16;
+    max_run = 8;
 
     i = 0;
     while (i < dirty_count) {
@@ -418,25 +449,12 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
         base_lba = fs->partition_start_lba +
                    (uint64_t)fs->block_cache[dirty_idx[i]].block_num * fs->sectors_per_block;
 
-        batch_buf = (uint8_t *)kmalloc(run_len * fs->block_size);
-        if (!batch_buf) {
-            for (j = 0; j < run_len; j++) {
-                if (ext4_write_block(fs, fs->block_cache[dirty_idx[i + j]].block_num,
-                                     fs->block_cache[dirty_idx[i + j]].data) != 0) {
-                    errors++;
-                } else {
-                    fs->block_cache[dirty_idx[i + j]].dirty = false;
-                }
-            }
-            i += run_len;
-            continue;
-        }
-
         for (j = 0; j < run_len; j++) {
-            memcpy(batch_buf + j * fs->block_size, fs->block_cache[dirty_idx[i + j]].data, fs->block_size);
+            vectors[j] = fs->block_cache[dirty_idx[i + j]].data;
         }
 
-        if (ahci_write_sectors(port, base_lba, total_sectors, batch_buf) != 0) {
+        if (ahci_write_sectorsv(port, base_lba, total_sectors, vectors,
+                                (uint32_t)run_len, fs->block_size) != 0) {
             errors++;
         } else {
             for (j = 0; j < run_len; j++) {
@@ -444,36 +462,11 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
             }
         }
 
-        kfree(batch_buf);
         i += run_len;
     }
 
     kfree(dirty_idx);
     return errors ? -1 : 0;
-}
-
-int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
-    int errors;
-    int written;
-    int i;
-
-    if (!fs || max_blocks == 0) return 0;
-    errors = 0;
-    written = 0;
-
-    for (i = 0; i < (int)fs->block_cache_count; i++) {
-        if (written >= (int)max_blocks) break;
-        if (fs->block_cache[i].data && fs->block_cache[i].dirty && fs->block_cache[i].ref_count == 0) {
-            if (ext4_write_block(fs, fs->block_cache[i].block_num, fs->block_cache[i].data) != 0) {
-                errors++;
-            } else {
-                fs->block_cache[i].dirty = false;
-                written++;
-            }
-        }
-    }
-
-    return errors ? -1 : written;
 }
 
 void ext4_flush_cache(ext4_fs_t *fs) {
@@ -539,7 +532,8 @@ static int ext4_write_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_
     return 0;
 }
 
-int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
+uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
+                              uint32_t max_count, uint64_t *first_block) {
     uint64_t start_group;
     uint32_t start_bit;
     uint64_t g;
@@ -556,10 +550,12 @@ int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
     uint64_t allocated;
     uint32_t free_blocks;
     uint64_t super_free;
+    uint32_t run_count;
+    uint32_t run_bit;
 
-    if (!fs || fs->groups_count == 0) {
-        return -1;
-    }
+    if (!fs || !first_block || fs->groups_count == 0 || max_count == 0)
+        return 0;
+    *first_block = 0;
 
     start_group = 0;
     start_bit = 0;
@@ -616,25 +612,45 @@ int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
                 byte_idx = bit / 8;
                 bit_idx = bit % 8;
 
+                if (bit_idx == 0 && bitmap[byte_idx] == 0xFF) {
+                    bit += 8;
+                    continue;
+                }
+
                 if (!(bitmap[byte_idx] & (1 << bit_idx))) {
-                    bitmap[byte_idx] |= (1 << bit_idx);
+                    run_count = 1;
+                    while (run_count < max_count &&
+                           run_count < free_blocks &&
+                           bit + run_count < limit) {
+                        run_bit = bit + run_count;
+                        if (bitmap[run_bit / 8] &
+                            (1u << (run_bit % 8)))
+                            break;
+                        run_count++;
+                    }
+                    for (run_bit = bit; run_bit < bit + run_count;
+                         run_bit++)
+                        bitmap[run_bit / 8] |=
+                            (uint8_t)(1u << (run_bit % 8));
                     ext4_mark_block_dirty(fs, bitmap_block);
                     ext4_release_block(fs, bitmap_block);
 
                     ext4_set_group_free_blocks(fs, &desc,
-                                               free_blocks - 1);
+                                               free_blocks - run_count);
                     ext4_write_group_desc(fs, group, &desc);
 
                     super_free = ext4_super_free_blocks(fs);
-                    if (super_free) ext4_set_super_free_blocks(
-                        fs, super_free - 1);
+                    if (super_free >= run_count)
+                        ext4_set_super_free_blocks(fs,
+                                                   super_free - run_count);
                     fs->super_dirty = true;
 
                     fs->alloc_last_group = group;
-                    fs->alloc_last_bit = bit;
+                    fs->alloc_last_bit = bit + run_count - 1;
 
                     allocated = fs->first_data_block + group * fs->sb.s_blocks_per_group + bit;
-                    return (int64_t)allocated;
+                    *first_block = allocated;
+                    return run_count;
                 }
 
                 bit++;
@@ -645,7 +661,14 @@ int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
         start_bit = 0;
     }
 
-    return -1;
+    return 0;
+}
+
+int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint) {
+    uint64_t block;
+
+    if (ext4_alloc_block_run(fs, hint, 1, &block) != 1) return -1;
+    return (int64_t)block;
 }
 
 int ext4_free_block(ext4_fs_t *fs, uint64_t block) {

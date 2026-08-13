@@ -35,6 +35,7 @@ extern void file_locks_release_process(pid_t pid);
 extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
                                             int release_flock);
 extern void syscall_robust_list_exit(task_t *task);
+extern void copy_file_range_release_task(void *owner);
 
 #define TASK_FILE_FAULT_TEMP TEMP_SLOT(5)
 #define TASK_ANON_RECLAIM_TEMP TEMP_SLOT(6)
@@ -51,6 +52,7 @@ extern void syscall_robust_list_exit(task_t *task);
 
 #define TASK_WAIT_QUEUE_NORMAL 1
 #define TASK_WAIT_QUEUE_FUTEX  2
+#define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
 #define MEMORY_PRESSURE_BOOT_RECLAIM 2
 
@@ -217,7 +219,7 @@ void task_set_current(task_t *task) {
 
     cpu = smp_this_cpu();
     if (cpu) {
-        cpu_id = smp_processor_id();
+        cpu_id = (int)(cpu - cpus);
         old_task = cpu->running_task;
         if (old_task && old_task != task &&
             old_task->running_cpu == cpu_id)
@@ -757,6 +759,26 @@ static void sleepq_remove(task_t* t) {
     }
 }
 
+static void sleepq_insert(task_t *task) {
+    task_t **link;
+    task_t *current;
+
+    if (!task) return;
+    link = &sleep_queue_head;
+    while (*link) {
+        current = *link;
+        if (!task_ptr_valid(current)) {
+            *link = NULL;
+            break;
+        }
+        if (current->wake_tick > task->wake_tick) break;
+        link = &current->sleep_next;
+    }
+    task->sleep_next = *link;
+    task->in_sleep_queue = 1;
+    *link = task;
+}
+
 static void task_remove_wait_locked(task_t *task) {
     if (!task) return;
     if (task->in_wait_queue == TASK_WAIT_QUEUE_NORMAL &&
@@ -1116,9 +1138,7 @@ int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
         wake_tick = tick_count + timeout_ticks;
         if (wake_tick < tick_count) wake_tick = UINT64_MAX;
         current_task->wake_tick = wake_tick;
-        current_task->in_sleep_queue = 1;
-        current_task->sleep_next = sleep_queue_head;
-        sleep_queue_head = current_task;
+        sleepq_insert(current_task);
     }
     unlock_scheduler();
     schedule();
@@ -1466,47 +1486,29 @@ void sleep_ticks(uint64_t ticks) {
     if (!current_task || ticks == 0) return;
     lock_scheduler();
     new_wake = tick_count + ticks;
+    if (new_wake < tick_count) new_wake = UINT64_MAX;
     sleepq_remove(current_task);
-    if (current_task->in_sleep_queue) {
-        current_task->wake_tick = new_wake;
-        unlock_scheduler();
-        schedule();
-        return;
-    }
     current_task->wake_tick = new_wake;
     current_task->state = TASK_BLOCKED;
-    current_task->in_sleep_queue = 1;
-    current_task->sleep_next = sleep_queue_head;
-    sleep_queue_head = current_task;
+    sleepq_insert(current_task);
     unlock_scheduler();
     schedule();
 }
 
 static void wake_sleeping_tasks_locked(void) {
-    task_t **ptr;
     task_t *t;
-    task_t *next;
 
-    ptr = &sleep_queue_head;
-    while (*ptr) {
-        t = *ptr;
+    while (sleep_queue_head) {
+        t = sleep_queue_head;
         if (!task_ptr_valid(t)) {
-            *ptr = NULL;
+            sleep_queue_head = NULL;
             break;
         }
-        if (t->wake_tick <= tick_count) {
-            *ptr = t->sleep_next;
-            t->sleep_next = NULL;
-            t->in_sleep_queue = 0;
-            if (t->state == TASK_BLOCKED) t->state = TASK_READY;
-        } else {
-            next = t->sleep_next;
-            if (next && !task_ptr_valid(next)) {
-                t->sleep_next = NULL;
-                break;
-            }
-            ptr = &t->sleep_next;
-        }
+        if (t->wake_tick > tick_count) break;
+        sleep_queue_head = t->sleep_next;
+        t->sleep_next = NULL;
+        t->in_sleep_queue = 0;
+        if (t->state == TASK_BLOCKED) t->state = TASK_READY;
     }
 }
 
@@ -1534,6 +1536,7 @@ void task_exit(uint64_t exit_code) {
 void task_exit_deferred(uint64_t exit_code) {
     cpu_info_t *cpu;
     task_t *task;
+    task_t *parent;
     uint64_t clear_address;
     uint64_t clear_physical;
     uint64_t clear_key;
@@ -1577,6 +1580,8 @@ void task_exit_deferred(uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
+    parent = task_find(task->ppid);
+    if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
     reap_request();
 }
 
@@ -2076,6 +2081,7 @@ static void task_release_exit_resources(task_t *t) {
     event_descriptors_close_task(t->pid);
     shm_close_task(t->pid);
     file_locks_release_process(t->pid);
+    copy_file_range_release_task(t);
     task_fd_close_all(t);
     if (t->fds) {
         kfree(t->fds);
@@ -3125,9 +3131,16 @@ void task_get_memory_stats(task_mem_stats_t *stats) {
 }
 
 void task_deferred_work(void) {
+    cpu_info_t *cpu;
+    task_t *task;
     uint64_t usable_pages;
     uint64_t free_pages;
     uint64_t low_watermark;
+    int cpu_id;
+
+    cpu = smp_this_cpu();
+    task = cpu ? cpu->running_task : NULL;
+    cpu_id = cpu ? (int)(cpu - cpus) : 0;
 
     if (reap_pending) {
         reap_pending = 0;
@@ -3137,8 +3150,8 @@ void task_deferred_work(void) {
         exec_drain_pending = 0;
         exec_cleanup_drain();
     }
-    if ((!current_task || !current_task->is_user) &&
-        smp_processor_id() == 0) {
+    if ((!task || !task->is_user) &&
+        cpu_id == 0) {
         usable_pages = pfa_get_usable_ram_kb() / 4;
         free_pages = pfa_count_free();
         low_watermark = usable_pages / 64;
@@ -3155,8 +3168,8 @@ void task_deferred_work(void) {
             task_memory_pressure_reclaim_now();
         }
     }
-    if ((!current_task || !current_task->is_user) &&
-        smp_processor_id() == 0 && tick_count >= 10000 &&
+    if ((!task || !task->is_user) &&
+        cpu_id == 0 && tick_count >= 10000 &&
         tick_count % 100 == 0)
         exec_page_cache_reclaim(exec_page_cache_target_pages());
 }
@@ -3256,9 +3269,7 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
         wake_tick = tick_count + timeout_ticks;
         if (wake_tick < tick_count) wake_tick = UINT64_MAX;
         current_task->wake_tick = wake_tick;
-        current_task->in_sleep_queue = 1;
-        current_task->sleep_next = sleep_queue_head;
-        sleep_queue_head = current_task;
+        sleepq_insert(current_task);
     }
     unlock_scheduler();
     schedule();
@@ -3336,6 +3347,8 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
 }
 
 void task_kill(task_t* task, uint64_t exit_code) {
+    task_t *parent;
+
     if (!task) return;
     if (task == current_task) {
         task_exit(exit_code);
@@ -3362,6 +3375,8 @@ void task_kill(task_t* task, uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
+    parent = task_find(task->ppid);
+    if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
     reap_request();
 }
 
@@ -3584,9 +3599,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     idle_task = NULL;
     switch_to_cpu_idle = 0;
-    cpu_id = smp_processor_id();
-    if (!cpus || cpu_id < 0 || cpu_id >= cpu_count) return regs;
-    this_cpu = &cpus[cpu_id];
+    this_cpu = smp_this_cpu();
+    if (!cpus || !this_cpu) return regs;
+    cpu_id = (int)(this_cpu - cpus);
+    if (cpu_id < 0 || cpu_id >= cpu_count) return regs;
     if (!ready_queue_head) return regs;
     if (!smp_scheduling_enabled()) return regs;
 
@@ -3660,8 +3676,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     while (next) {
         if (next->state == TASK_READY && next != prev_task &&
             !next->resources_released && task_cpu_available(next, cpu_id) &&
-            (this_cpu->bsp || next->id != 0 || next->is_user) &&
-            !task_is_current_on_any_cpu(next)) {
+            (this_cpu->bsp || next->id != 0 || next->is_user)) {
             selectable = 0;
             if (task_irq_return_frame(next, &candidate_frame)) selectable = 1;
             if (selectable) {
@@ -3723,7 +3738,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         spin_unlock(&sched_lock);
         kernel_panic_custom("SCHEDULER IDLE FAILURE",
                             "cpu=%d prev=%d state=%d idle=%p rsp=0x%lX",
-                            smp_processor_id(), prev_task->id, prev_task->state,
+                            cpu_id, prev_task->id, prev_task->state,
                             idle_task, idle_task ? idle_task->regs.rsp : 0);
     }
     

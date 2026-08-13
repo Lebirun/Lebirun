@@ -427,10 +427,6 @@ void e1000_irq_handler(void *regs) {
         }
     }
 
-    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO)) {
-        extern volatile int net_work_pending;
-        net_work_pending = 1;
-    }
 }
 
 static int e1000_probe_device(e1000_device_t *dev) {

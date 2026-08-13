@@ -15,36 +15,31 @@ void mutex_lock(mutex_t* m) {
     cpu_info_t *cpu;
     task_t *task;
     volatile int i;
+    uint64_t owner;
 
     if (!m) return;
 
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : current_task;
+    owner = task ? task->id : 0;
     if (!scheduler_initialized) {
-        while (m->locked) {
+        while (!__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
             __asm__ __volatile__ ("pause");
         }
-        m->locked = 1;
         m->owner = 0;
         return;
     }
 
     while (1) {
-        lock_scheduler();
-
-        if (!m->locked) {
-            m->locked = 1;
-            m->owner = task ? task->id : 0;
-            unlock_scheduler();
+        if (__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
+            m->owner = owner;
             return;
         }
 
-        if (task && m->owner == task->id && task->id != 0) {
-            unlock_scheduler();
+        if (task && m->owner == owner && owner != 0) {
             return;
         }
 
-        unlock_scheduler();
         for (i = 0; i < 64 && m->locked; i++) {
             __asm__ volatile ("pause" ::: "memory");
         }
@@ -66,23 +61,19 @@ void mutex_unlock(mutex_t* m) {
     
     if (!scheduler_initialized) {
         if (m->locked) {
-            m->locked = 0;
             m->owner = 0;
+            __sync_lock_release(&m->locked);
         }
         return;
     }
 
-    lock_scheduler();
     if (!m->locked) {
-        unlock_scheduler();
         return;
     }
     if (m->owner != (task ? task->id : 0)) {
-        unlock_scheduler();
         return;
     }
 
-    m->locked = 0;
     m->owner = 0;
-    unlock_scheduler();
+    __sync_lock_release(&m->locked);
 }

@@ -183,6 +183,7 @@ int vfs_check_perm(vfs_node_t *node, int want);
 #define SYSCALL_PIPE 67
 #define SYSCALL_SIGACTION 68
 #define SYSCALL_SIGPROCMASK 69
+#define SYSCALL_COPY_FILE_RANGE 70
 #define SYSCALL_STAT 71
 #define SYSCALL_GETCWD 72
 #define SYSCALL_CHDIR 73

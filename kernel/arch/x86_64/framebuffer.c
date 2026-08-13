@@ -69,6 +69,9 @@ static void vga_text_update_cursor(uint64_t x, uint64_t y) {
 }
 
 void fb_flush(void) {
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    if (virtio_gpu_is_available()) virtio_gpu_flush();
+#endif
 }
 
 #if CONFIG_DRIVER_VGA

@@ -10,7 +10,6 @@ extern uint64_t pit_freq;
 
 void pit_init(uint64_t freq);
 void pit_set_frequency(uint64_t freq);
-void calibrate_pit(void);
 
 void delay(uint64_t ms);
 void delay_us(uint64_t us);

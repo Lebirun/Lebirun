@@ -155,8 +155,8 @@
 #define AHCI_CMD_LIST_SIZE  1024
 #define AHCI_CMD_SLOTS      2
 #define AHCI_FIS_SIZE       256
-#define AHCI_CMD_TABLE_SIZE 256
-#define AHCI_PRDT_ENTRIES   4
+#define AHCI_CMD_TABLE_SIZE 384
+#define AHCI_PRDT_ENTRIES   16
 
 typedef struct {
     uint8_t fis_type;
@@ -420,6 +420,9 @@ int ahci_probe(void);
 int ahci_port_init(ahci_port_t *port);
 int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer);
 int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer);
+int ahci_write_sectorsv(ahci_port_t *port, uint64_t lba,
+                        uint64_t sectors, const void *const *buffers,
+                        uint32_t buffer_count, uint64_t bytes_per_buffer);
 int ahci_atapi_read(ahci_port_t *port, uint64_t lba, uint32_t count, void *buffer);
 ahci_port_t *ahci_find_cdrom(void);
 int ahci_identify(ahci_port_t *port);

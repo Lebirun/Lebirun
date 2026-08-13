@@ -52,6 +52,24 @@ typedef struct {
     uint64_t export_table_start;
 } __attribute__((packed)) squashfs_super_t;
 
+typedef struct squashfs_transfer_cache {
+    uint8_t *data;
+    uint64_t data_capacity;
+    uint8_t *scratch;
+    uint64_t scratch_capacity;
+    uint64_t metadata_block;
+    uint64_t metadata_size;
+    uint64_t fragment_start;
+    uint64_t fragment_stored_size;
+    uint64_t fragment_size;
+    uint64_t fragment_index;
+    uint64_t fragment_entry_start;
+    uint32_t fragment_entry_size;
+    int metadata_valid;
+    int fragment_valid;
+    int fragment_entry_valid;
+} squashfs_transfer_cache_t;
+
 typedef struct {
     uint16_t inode_type;
     uint16_t mode;
@@ -191,5 +209,13 @@ void squashfs_set_access_blocked(int blocked);
 void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, uint64_t *data_bytes);
 void squashfs_decomp_stats(uint64_t *failures, uint64_t *oversize, uint64_t *padded);
 uint64_t squashfs_get_module_pages(void);
+uint64_t squashfs_transfer_window_size(vfs_node_t *node);
+uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
+                                uint64_t size, uint8_t *buffer,
+                                uint64_t capacity);
+uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
+                                     uint64_t size,
+                                     squashfs_transfer_cache_t *cache,
+                                     uint8_t **view);
 
 #endif

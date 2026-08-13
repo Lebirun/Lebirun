@@ -652,8 +652,6 @@ registers_t* interrupt_handler(registers_t* regs)
 
             regs = schedule_from_irq(regs);
 
-            if (smp_is_bsp())
-                keyboard_process_sigint();
             if (task_state_requires_schedule(current_task)) {
                 regs = schedule_from_irq(regs);
             }

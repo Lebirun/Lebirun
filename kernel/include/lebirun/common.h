@@ -45,26 +45,4 @@ static inline uint64_t read_cr0(void) {
     return val;
 }
 
-static inline __attribute__((unused)) void serial_puts(const char *str) {
-    while (*str) {
-        outb(0x3F8, *str++);
-    }
-}
-
-static inline __attribute__((unused)) void serial_putchar(char c) {
-    if (c == '\n')
-        outb(0x3F8, '\r');
-    outb(0x3F8, (uint8_t)c);
-}
-
-static inline __attribute__((unused)) void serial_puthex(uint64_t v) {
-    int i;
-    unsigned int nib;
-    serial_puts("0x");
-    for (i = 0; i < 16; i++) {
-        nib = (v >> ((15 - i) * 4)) & 0xF;
-        outb(0x3F8, (nib < 10) ? ('0' + nib) : ('A' + (nib - 10)));
-    }
-}
-
 #endif

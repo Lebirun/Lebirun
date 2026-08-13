@@ -602,10 +602,17 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
-    work_size = (uint64_t)len;
     if (tfd->flags & VFS_O_APPEND) {
         task_fd_position_set(tfd, node->length);
     }
+    if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
+        bytes = vfs_read(node, task_fd_position_get(tfd), (uint64_t)len,
+                         (uint8_t *)(uintptr_t)buf_addr);
+        if (bytes > (uint64_t)len) bytes = (uint64_t)len;
+        task_fd_position_add(tfd, bytes);
+        return (int)bytes;
+    }
+    work_size = (uint64_t)len;
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;
     if (work_size <= VFS_RW_STACK_BUF) {
@@ -786,6 +793,13 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
+    if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
+        bytes = vfs_write(node, task_fd_position_get(tfd), (uint64_t)len,
+                          (uint8_t *)(uintptr_t)buf_addr);
+        if (bytes > (uint64_t)len) bytes = (uint64_t)len;
+        task_fd_position_add(tfd, bytes);
+        return (int)bytes;
+    }
     work_size = (uint64_t)len;
     if (work_size > VFS_RW_HEAP_LIMIT) work_size = VFS_RW_HEAP_LIMIT;
     heap_buf = 0;

@@ -257,7 +257,8 @@ task_t* KERNEL_INIT launch_user_binary(const uint8_t *bin_start,
     return launch_user_binary_common(bin_start, bin_end, console_id, "program");
 }
 
-task_t* KERNEL_INIT launch_user_path(const char *path, int console_id) {
+task_t* KERNEL_INIT launch_user_path_state(const char *path, int console_id,
+                                           task_state_t initial_state) {
     vfs_node_t *node;
     uint64_t new_pd;
     elf_info_t elf_info;
@@ -278,6 +279,8 @@ task_t* KERNEL_INIT launch_user_path(const char *path, int console_id) {
     task_file_map_list_t file_maps;
 
     if (!path || path[0] == '\0') return NULL;
+    if (initial_state != TASK_READY && initial_state != TASK_BLOCKED)
+        return NULL;
 
     node = vfs_namei(path);
     if (!node) {
@@ -412,10 +415,14 @@ task_t* KERNEL_INIT launch_user_path(const char *path, int console_id) {
     if (elf_pages) kfree(elf_pages);
     if (stack_pages) kfree(stack_pages);
 
-    t->state = TASK_READY;
+    t->state = initial_state;
     lock_scheduler();
     add_task_to_runqueue(t);
     unlock_scheduler();
 
     return t;
+}
+
+task_t* KERNEL_INIT launch_user_path(const char *path, int console_id) {
+    return launch_user_path_state(path, console_id, TASK_READY);
 }

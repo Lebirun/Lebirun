@@ -267,26 +267,6 @@ bool test_bit(uint64_t frame_idx) {
     return bitmap_test_raw(frame_idx);
 }
 
-uint64_t KERNEL_INIT count_free_frames(void) {
-    uint64_t count;
-    uint64_t region_start;
-    uint64_t region_end;
-    uint64_t frame;
-    uint64_t i;
-
-    count = 0;
-    for (i = 0; i < num_regions; i++) {
-        region_start = (memory_map[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
-        region_end = (memory_map[i].base + memory_map[i].length) / PAGE_SIZE;
-        if (region_start >= bitmap_entries_used) continue;
-        if (region_end > bitmap_entries_used) region_end = bitmap_entries_used;
-        for (frame = region_start; frame < region_end; frame++) {
-            if (!bitmap_test_raw(frame)) count++;
-        }
-    }
-    return count;
-}
-
 static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
                                         uint64_t num, uint64_t phys_offset) {
     uint64_t frame_idx;
@@ -791,13 +771,18 @@ void KERNEL_EARLY_INIT pfa_init_internal_setup(
     low_page_limit = 0x00800000;
 }
 
-void KERNEL_EARLY_INIT pfa_init_ram_stats(uint64_t total_kb,
-                                           uint64_t usable_kb,
-                                           uint64_t init_free_frames) {
+uint64_t KERNEL_EARLY_INIT pfa_init_ram_stats(uint64_t total_kb,
+                                              uint64_t usable_kb,
+                                              uint64_t init_free_frames) {
+    if (init_free_frames >= bitmap_leaf_pages)
+        init_free_frames -= bitmap_leaf_pages;
+    else
+        init_free_frames = 0;
     system_total_ram_kb = total_kb;
     system_usable_ram_kb = usable_kb;
     initial_free_frames = init_free_frames;
-    pfa_cached_free = count_free_frames();
+    pfa_cached_free = init_free_frames;
+    return init_free_frames;
 }
 
 static void refht_lock_acquire(uint64_t *eflags_out) {

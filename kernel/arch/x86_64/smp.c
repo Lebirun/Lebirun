@@ -385,9 +385,23 @@ static void KERNEL_INIT delay_ms(uint64_t ms) {
 }
 
 int smp_processor_id(void) {
+    cpu_info_t *cpu;
+    uintptr_t address;
+    uintptr_t base;
+    uintptr_t end;
     uint64_t id;
     int i;
 
+    if (smp_gs_ready && cpus && cpu_count > 0) {
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(cpu));
+        address = (uintptr_t)cpu;
+        base = (uintptr_t)cpus;
+        end = base + (uintptr_t)cpu_count * sizeof(cpu_info_t);
+        if (address >= base && address < end &&
+            (address - base) % sizeof(cpu_info_t) == 0 &&
+            cpu->self == cpu)
+            return (int)((address - base) / sizeof(cpu_info_t));
+    }
     if (!lapic_base) return 0;
     id = lapic_get_id();
     for (i = 0; i < cpu_count; i++) {
@@ -398,33 +412,41 @@ int smp_processor_id(void) {
 
 cpu_info_t *smp_this_cpu(void) {
     cpu_info_t *cpu;
+    uintptr_t address;
+    uintptr_t base;
+    uintptr_t end;
     int idx;
-    int i;
 
-    if (smp_gs_ready) {
+    if (smp_gs_ready && cpus && cpu_count > 0) {
         __asm__ volatile ("movq %%gs:0, %0" : "=r"(cpu));
-        if (cpus && cpu_count > 0) {
-            for (i = 0; i < cpu_count; i++) {
-                if (cpu == &cpus[i]) return cpu;
-            }
-            idx = smp_processor_id();
-            if (idx < 0 || idx >= cpu_count) idx = 0;
-            cpu = &cpus[idx];
-            cpu->self = cpu;
-            smp_set_cpu_base(cpu);
+        address = (uintptr_t)cpu;
+        base = (uintptr_t)cpus;
+        end = base + (uintptr_t)cpu_count * sizeof(cpu_info_t);
+        if (address >= base && address < end &&
+            (address - base) % sizeof(cpu_info_t) == 0 &&
+            cpu->self == cpu) {
             return cpu;
         }
     }
     idx = smp_processor_id();
-    return &cpus[idx];
+    if (idx < 0 || idx >= cpu_count) idx = 0;
+    cpu = &cpus[idx];
+    cpu->self = cpu;
+    if (smp_gs_ready) smp_set_cpu_base(cpu);
+    return cpu;
 }
 
 task_t *smp_current_task_safe(void) {
+    cpu_info_t *cpu;
     uint64_t id;
     int i;
 
     if (!cpus || cpu_count <= 0)
         return NULL;
+    if (smp_gs_ready) {
+        cpu = smp_this_cpu();
+        return cpu ? cpu->running_task : NULL;
+    }
     if (!lapic_base)
         return cpus[0].running_task;
     id = lapic_get_id();
@@ -450,10 +472,10 @@ static void smp_set_cpu_base(cpu_info_t *cpu) {
 }
 
 int smp_is_bsp(void) {
-    int idx;
+    cpu_info_t *cpu;
 
-    idx = smp_processor_id();
-    return cpus[idx].bsp;
+    cpu = smp_this_cpu();
+    return cpu ? cpu->bsp : 1;
 }
 
 void smp_tlb_flush_all(void) {
@@ -586,6 +608,7 @@ void KERNEL_INIT smp_start_aps(void) {
     volatile uint64_t *tramp_stack;
     volatile uint32_t *tramp_flag;
     volatile uint64_t *tramp_entry;
+    int aps_prepared;
 
     tramp_size = (uint64_t)(ap_tramp_end - ap_tramp_start);
     if (tramp_size > 0x1000) {
@@ -608,6 +631,7 @@ void KERNEL_INIT smp_start_aps(void) {
     *tramp_entry = (uint64_t)(uintptr_t)ap_main;
 
     bsp_id = lapic_get_id();
+    aps_prepared = 0;
 
     for (i = 0; i < cpu_count; i++) {
         if (cpus[i].lapic_id == bsp_id) {
@@ -625,28 +649,41 @@ void KERNEL_INIT smp_start_aps(void) {
         cpus[i].gdt = (uint8_t *)cpus[i].kernel_stack + KSTACK_GDT_OFFSET;
         cpus[i].tss = (uint8_t *)cpus[i].kernel_stack + KSTACK_TSS_OFFSET;
         task_prepare_cpu_idle(&cpus[i]);
+        aps_prepared++;
+    }
+
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == bsp_id || !cpus[i].kernel_stack) continue;
+        lapic_send_ipi(cpus[i].lapic_id, ICR_INIT | ICR_LEVEL_ASSERT);
+    }
+    if (aps_prepared > 0) delay_ms(10);
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == bsp_id || !cpus[i].kernel_stack) continue;
+        lapic_send_ipi(cpus[i].lapic_id, ICR_INIT | ICR_LEVEL_DEASSERT);
+    }
+
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].lapic_id == bsp_id || !cpus[i].kernel_stack) continue;
         *tramp_stack = (uint64_t)cpus[i].kernel_stack + KSTACK_RUNTIME_SIZE;
         *tramp_cr3 = read_cr3();
         *tramp_flag = 0;
-
-        lapic_send_ipi(cpus[i].lapic_id, ICR_INIT | ICR_LEVEL_ASSERT);
-        delay_ms(10);
-        lapic_send_ipi(cpus[i].lapic_id, ICR_INIT | ICR_LEVEL_DEASSERT);
-        delay_ms(10);
+        __sync_synchronize();
 
         lapic_send_ipi(cpus[i].lapic_id,
                        ICR_STARTUP | (AP_TRAMPOLINE_PHYS >> 12));
-        delay_ms(1);
+        timeout = 100000;
+        while (!*tramp_flag && --timeout > 0) {
+            __asm__ volatile ("pause");
+        }
 
         if (!*tramp_flag) {
             lapic_send_ipi(cpus[i].lapic_id,
                            ICR_STARTUP | (AP_TRAMPOLINE_PHYS >> 12));
             delay_ms(1);
-        }
-
-        timeout = 100000;
-        while (!*tramp_flag && --timeout > 0) {
-            __asm__ volatile ("pause");
+            timeout = 100000;
+            while (!*tramp_flag && --timeout > 0) {
+                __asm__ volatile ("pause");
+            }
         }
 
         if (*tramp_flag) {

@@ -133,21 +133,18 @@ void KERNEL_INIT pit_init(uint64_t freq) {
     if (freq > PIT_BASE_FREQ) freq = PIT_BASE_FREQ;
     if (freq < 19) freq = 19;
     
-    pit_freq = freq;
-    calibrated_freq = freq;
-    
     divisor = PIT_BASE_FREQ / freq;
     if (divisor > 65535) divisor = 65535;
     if (divisor < 1) divisor = 1;
     
-    us_per_tick = 1000000 / freq;
+    pit_set_divisor((uint16_t)divisor);
 
+    actual_freq = PIT_BASE_FREQ / divisor;
+    pit_freq = actual_freq;
+    calibrated_freq = actual_freq;
+    us_per_tick = 1000000 / actual_freq;
     uptime_ticks = 0;
     last_tick = tick_count;
-    
-    pit_set_divisor((uint16_t)divisor);
-    
-    actual_freq = PIT_BASE_FREQ / divisor;
     if (actual_freq > freq) {
         error_ppm = ((actual_freq - freq) * 1000000) / freq;
     } else {
@@ -160,19 +157,20 @@ void KERNEL_INIT pit_init(uint64_t freq) {
 
 void pit_set_frequency(uint64_t freq) {
     uint64_t divisor;
+    uint64_t actual_freq;
 
     if (freq == 0) freq = 100;
     if (freq > PIT_BASE_FREQ) freq = PIT_BASE_FREQ;
     if (freq < 19) freq = 19;
-    
-    pit_freq = freq;
-    calibrated_freq = freq;
-    us_per_tick = 1000000 / freq;
-    
+
     divisor = PIT_BASE_FREQ / freq;
     if (divisor > 65535) divisor = 65535;
     if (divisor < 1) divisor = 1;
-    
+
+    actual_freq = PIT_BASE_FREQ / divisor;
+    pit_freq = actual_freq;
+    calibrated_freq = actual_freq;
+    us_per_tick = 1000000 / actual_freq;
     pit_set_divisor((uint16_t)divisor);
 }
 
@@ -483,85 +481,4 @@ void speaker_beep(uint64_t freq, uint64_t duration_ms) {
     speaker_play(freq);
     delay(duration_ms);
     speaker_stop();
-}
-
-void KERNEL_INIT calibrate_pit(void) {
-    uint64_t entry_flags;
-    uint64_t sync_start;
-    uint64_t start_ticks;
-    uint64_t observed;
-    uint64_t old_freq;
-    uint64_t cal_divisor;
-    uint64_t divisor;
-    uint64_t spin_limit;
-    uint64_t expected_freq;
-
-    KERNEL_INIT_LOG("PIT: Calibrating...\n");
-
-    old_freq = pit_freq;
-    cal_divisor = PIT_BASE_FREQ / 1000;
-
-    entry_flags = save_flags_cli();
-    pit_set_divisor((uint16_t)cal_divisor);
-
-    __asm__ volatile("sti");
-
-    sync_start = tick_count;
-    spin_limit = 20000000ULL;
-    while (tick_count == sync_start) {
-        if (spin_limit-- == 0) {
-            calibrated_freq = old_freq;
-            us_per_tick = 1000000 / calibrated_freq;
-            divisor = PIT_BASE_FREQ / old_freq;
-            if (divisor > 65535) divisor = 65535;
-            if (divisor < 1) divisor = 1;
-            pit_set_divisor((uint16_t)divisor);
-            pit_freq = old_freq;
-            restore_flags(entry_flags);
-            KERNEL_INIT_LOG("PIT: Calibration skipped (no timer IRQs yet)\n");
-            return;
-        }
-        __asm__ volatile("pause");
-    }
-
-    start_ticks = tick_count;
-
-    while ((tick_count - start_ticks) < 100) {
-        if (spin_limit-- == 0) {
-            calibrated_freq = old_freq;
-            us_per_tick = 1000000 / calibrated_freq;
-            divisor = PIT_BASE_FREQ / old_freq;
-            if (divisor > 65535) divisor = 65535;
-            if (divisor < 1) divisor = 1;
-            pit_set_divisor((uint16_t)divisor);
-            pit_freq = old_freq;
-            restore_flags(entry_flags);
-            KERNEL_INIT_LOG("PIT: Calibration timeout, using base frequency\n");
-            return;
-        }
-        __asm__ volatile("pause");
-    }
-
-    observed = tick_count - start_ticks;
-    if (observed == 0) observed = 1;
-    expected_freq = (observed * 1000) / 100;
-
-    if (expected_freq >= 800 && expected_freq <= 1200) {
-        calibrated_freq = (old_freq * expected_freq) / 1000;
-    } else {
-        KERNEL_INIT_LOG("PIT: Calibration out of range (%u Hz)\n", expected_freq);
-        calibrated_freq = old_freq;
-    }
-    
-    us_per_tick = 1000000 / calibrated_freq;
-    
-    divisor = PIT_BASE_FREQ / old_freq;
-    if (divisor > 65535) divisor = 65535;
-    if (divisor < 1) divisor = 1;
-    pit_set_divisor((uint16_t)divisor);
-    pit_freq = old_freq;
-
-    restore_flags(entry_flags);
-
-    KERNEL_INIT_LOG("PIT: Calibrated to %u Hz\n", calibrated_freq);
 }

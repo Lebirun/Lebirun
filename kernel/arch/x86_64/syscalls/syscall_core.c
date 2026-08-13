@@ -531,6 +531,20 @@ static int sys_write_impl(int fd, const char *buf, int len) {
         return syscall_core_console_write_user(buf, len);
     }
 
+    if (tfd && tfd->type == FD_TYPE_FILE && tfd->node) {
+        node = (vfs_node_t *)tfd->node;
+        if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
+            if (tfd->flags & VFS_O_APPEND)
+                task_fd_position_set(tfd, node->length);
+            bytes = vfs_write(node, task_fd_position_get(tfd),
+                              (uint64_t)len,
+                              (uint8_t *)(uintptr_t)buf_addr);
+            if (bytes > (uint64_t)len) bytes = (uint64_t)len;
+            task_fd_position_add(tfd, bytes);
+            return bytes ? (int)bytes : -EIO;
+        }
+    }
+
     work_size = (uint64_t)len;
     if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
     heap_buf = 0;
@@ -723,6 +737,23 @@ static int sys_read_impl(int fd, char *buf, int len) {
     if (is_epoll_special_fd(fd))
         return event_descriptor_read(fd, buf, len);
 
+    tfd = NULL;
+    if (current_task && current_task->fds && fd >= 0 &&
+        fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
+        tfd = &current_task->fds[fd];
+        if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            node = (vfs_node_t *)tfd->node;
+            if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
+                bytes = vfs_read(node, task_fd_position_get(tfd),
+                                 (uint64_t)len,
+                                 (uint8_t *)(uintptr_t)buf_addr);
+                if (bytes > (uint64_t)len) bytes = (uint64_t)len;
+                task_fd_position_add(tfd, bytes);
+                return (int)bytes;
+            }
+        }
+    }
+
     work_size = (uint64_t)len;
     if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
     heap_buf = 0;
@@ -755,9 +786,7 @@ static int sys_read_impl(int fd, char *buf, int len) {
         return (int)total;
     }
 
-    tfd = NULL;
-    if (current_task && current_task->fds && fd >= 0 && fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
-        tfd = &current_task->fds[fd];
+    if (tfd) {
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_RW) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {

@@ -541,6 +541,11 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
             byte_idx = bit / 8;
             bit_idx = bit % 8;
 
+            if (bit_idx == 0 && bitmap[byte_idx] == 0xFF) {
+                bit += 7;
+                continue;
+            }
+
             if (!(bitmap[byte_idx] & (1 << bit_idx))) {
                 bitmap[byte_idx] |= (1 << bit_idx);
                 ext4_mark_block_dirty(fs, bitmap_block);

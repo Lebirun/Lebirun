@@ -36,6 +36,10 @@ static vfs_node_t *overlay_backing_node(vfs_node_t *node) {
     return onode->upper_node ? onode->upper_node : onode->lower_node;
 }
 
+vfs_node_t *overlay_get_backing_node(vfs_node_t *node) {
+    return overlay_backing_node(node);
+}
+
 int overlay_same_file(vfs_node_t *first, vfs_node_t *second) {
     vfs_node_t *first_backing;
     vfs_node_t *second_backing;

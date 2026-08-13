@@ -7,6 +7,10 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/timekeeping.h>
 #include <lebirun/creds.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/overlayfs.h>
+#include <lebirun/squashfs.h>
+#include <string.h>
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
@@ -15,6 +19,122 @@ void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
                                      int release_flock);
 
 #define fd_table (current_task->fds)
+
+#define COPY_TRANSFER_SCRATCH_SIZE 16384
+
+typedef struct {
+    task_t *owner;
+    vfs_node_t *mount_root;
+    uint64_t physical;
+    uint64_t pages;
+    uint32_t active;
+    int release_pending;
+    squashfs_transfer_cache_t *cache;
+} copy_transfer_session_t;
+
+static copy_transfer_session_t copy_transfer_session;
+static mutex_t copy_transfer_lock;
+
+static void copy_transfer_release_locked(void) {
+    if (copy_transfer_session.physical)
+        pfa_free_contiguous(copy_transfer_session.physical,
+                            copy_transfer_session.pages);
+    memset(&copy_transfer_session, 0, sizeof(copy_transfer_session));
+}
+
+static copy_transfer_session_t *copy_transfer_acquire(task_t *owner,
+                                                       vfs_node_t *output,
+                                                       uint64_t data_size) {
+    vfs_mount_t *mount;
+    uint64_t total_size;
+    uint64_t pages;
+    uint64_t physical;
+    uint8_t *memory;
+
+    if (!owner || !output || data_size == 0) return NULL;
+    mount = vfs_get_mount_for_node(output);
+    if (!mount || !mount->root || !mount->fs_type ||
+        !mount->fs_type->name || strcmp(mount->fs_type->name, "ext4") != 0)
+        return NULL;
+    mutex_lock(&copy_transfer_lock);
+    if (copy_transfer_session.physical) {
+        if (copy_transfer_session.owner == owner &&
+            copy_transfer_session.mount_root == mount->root &&
+            copy_transfer_session.cache &&
+            copy_transfer_session.cache->data_capacity >= data_size &&
+            !copy_transfer_session.release_pending) {
+            copy_transfer_session.active++;
+            mutex_unlock(&copy_transfer_lock);
+            return &copy_transfer_session;
+        }
+        if (copy_transfer_session.owner != owner) {
+            mutex_unlock(&copy_transfer_lock);
+            return NULL;
+        }
+        copy_transfer_release_locked();
+    }
+    if (data_size > UINT64_MAX - COPY_TRANSFER_SCRATCH_SIZE) {
+        mutex_unlock(&copy_transfer_lock);
+        return NULL;
+    }
+    total_size = data_size + COPY_TRANSFER_SCRATCH_SIZE;
+    pages = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    physical = pfa_alloc_contiguous(pages);
+    if (!physical) {
+        mutex_unlock(&copy_transfer_lock);
+        return NULL;
+    }
+    memory = (uint8_t *)(uintptr_t)(physical + KERNEL_VMA);
+    memset(memory, 0, pages * PAGE_SIZE);
+    copy_transfer_session.owner = owner;
+    copy_transfer_session.mount_root = mount->root;
+    copy_transfer_session.physical = physical;
+    copy_transfer_session.pages = pages;
+    copy_transfer_session.cache =
+        (squashfs_transfer_cache_t *)(memory + data_size);
+    copy_transfer_session.cache->data = memory;
+    copy_transfer_session.cache->data_capacity = data_size;
+    copy_transfer_session.cache->scratch = memory + data_size +
+                                            sizeof(*copy_transfer_session.cache);
+    copy_transfer_session.cache->scratch_capacity =
+        pages * PAGE_SIZE - data_size - sizeof(*copy_transfer_session.cache);
+    copy_transfer_session.active = 1;
+    mutex_unlock(&copy_transfer_lock);
+    return &copy_transfer_session;
+}
+
+static void copy_transfer_finish(copy_transfer_session_t *session) {
+    mutex_lock(&copy_transfer_lock);
+    if (session == &copy_transfer_session && copy_transfer_session.active) {
+        copy_transfer_session.active--;
+        if (copy_transfer_session.active == 0 &&
+            copy_transfer_session.release_pending)
+            copy_transfer_release_locked();
+    }
+    mutex_unlock(&copy_transfer_lock);
+}
+
+void copy_file_range_release_task(void *owner) {
+    mutex_lock(&copy_transfer_lock);
+    if (copy_transfer_session.owner == owner) {
+        if (copy_transfer_session.active)
+            copy_transfer_session.release_pending = 1;
+        else
+            copy_transfer_release_locked();
+    }
+    mutex_unlock(&copy_transfer_lock);
+}
+
+void copy_file_range_release_mount(vfs_node_t *root) {
+    mutex_lock(&copy_transfer_lock);
+    if (copy_transfer_session.mount_root == root) {
+        if (copy_transfer_session.active)
+            copy_transfer_session.release_pending = 1;
+        else
+            copy_transfer_release_locked();
+    }
+    mutex_unlock(&copy_transfer_lock);
+}
 
 static uint64_t posix_user_pd(void) {
     if (!current_task) return 0;
@@ -2175,6 +2295,192 @@ static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset)
     return vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
 }
 
+static int sys_copy_file_range(int fd_in, uint64_t off_in_ptr, int fd_out,
+                               uint64_t off_out_ptr, uint64_t length,
+                               unsigned int flags) {
+    task_fd_t *input_fd;
+    task_fd_t *output_fd;
+    vfs_node_t *input_node;
+    vfs_node_t *output_node;
+    int64_t input_offset_value;
+    int64_t output_offset_value;
+    uint64_t input_offset;
+    uint64_t output_offset;
+    uint64_t available;
+    uint64_t limit;
+    uint64_t window_size;
+    uint64_t window_pages;
+    uint64_t window_phys;
+    uint8_t *window;
+    uint8_t *view;
+    uint8_t *scratch;
+    uint64_t scratch_capacity;
+    copy_transfer_session_t *session;
+    uint64_t total;
+    uint64_t request;
+    uint64_t received;
+    uint64_t consumed;
+    uint64_t written;
+    int error;
+
+    if (flags != 0) return -EINVAL;
+    if (!current_task) return -ESRCH;
+    if (fd_in < 0 || fd_in >= current_task->fds_capacity) return -EBADF;
+    if (fd_out < 0 || fd_out >= current_task->fds_capacity) return -EBADF;
+    input_fd = &fd_table[fd_in];
+    output_fd = &fd_table[fd_out];
+    if (!input_fd->in_use || !output_fd->in_use) return -EBADF;
+    if (input_fd->type != FD_TYPE_FILE ||
+        output_fd->type != FD_TYPE_FILE) return -EBADF;
+    if (!input_fd->node || !output_fd->node) return -EBADF;
+    if ((input_fd->flags & 3) == VFS_O_WRONLY) return -EBADF;
+    if ((output_fd->flags & 3) == VFS_O_RDONLY) return -EBADF;
+    if (output_fd->flags & VFS_O_APPEND) return -EBADF;
+    input_node = (vfs_node_t *)input_fd->node;
+    output_node = (vfs_node_t *)output_fd->node;
+    if (VFS_GET_TYPE(input_node->flags) != VFS_FILE ||
+        VFS_GET_TYPE(output_node->flags) != VFS_FILE) return -EINVAL;
+    if (input_node == output_node ||
+        overlay_same_file(input_node, output_node)) return -EINVAL;
+    if (vfs_get_mount_flags_for_node(output_node) & VFS_MS_RDONLY)
+        return -EROFS;
+    error = vfs_check_perm(input_node, VFS_PERM_READ);
+    if (error < 0) return error;
+    error = vfs_check_perm(output_node, VFS_PERM_WRITE);
+    if (error < 0) return error;
+    if (length == 0) return 0;
+
+    if (off_in_ptr != 0) {
+        if (!posix_user_range_mapped(off_in_ptr,
+                                     sizeof(input_offset_value)))
+            return -EFAULT;
+        if (copy_from_user(&input_offset_value,
+                           (const void *)(uintptr_t)off_in_ptr,
+                           sizeof(input_offset_value)) != 0)
+            return -EFAULT;
+        if (input_offset_value < 0) return -EINVAL;
+        input_offset = (uint64_t)input_offset_value;
+    } else {
+        input_offset = task_fd_position_get(input_fd);
+    }
+    if (off_out_ptr != 0) {
+        if (!posix_user_range_mapped(off_out_ptr,
+                                     sizeof(output_offset_value)))
+            return -EFAULT;
+        if (copy_from_user(&output_offset_value,
+                           (const void *)(uintptr_t)off_out_ptr,
+                           sizeof(output_offset_value)) != 0)
+            return -EFAULT;
+        if (output_offset_value < 0) return -EINVAL;
+        output_offset = (uint64_t)output_offset_value;
+    } else {
+        output_offset = task_fd_position_get(output_fd);
+    }
+    if (input_offset >= input_node->length) return 0;
+    available = input_node->length - input_offset;
+    limit = length;
+    if (limit > available) limit = available;
+    if (limit > INT32_MAX) limit = INT32_MAX;
+    if (output_offset + limit < output_offset) return -EOVERFLOW;
+
+    window_size = vfs_transfer_window_size(input_node);
+    if (window_size == 0) return -EIO;
+    window_phys = 0;
+    window_pages = 0;
+    scratch = NULL;
+    scratch_capacity = 0;
+    session = NULL;
+    if (vfs_transfer_reuse_supported(input_node))
+        session = copy_transfer_acquire(current_task, output_node,
+                                        window_size);
+    if (session) {
+        window = session->cache->data;
+        scratch = session->cache->scratch;
+        scratch_capacity = session->cache->scratch_capacity;
+    } else {
+        window_pages = (window_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        window_phys = pfa_alloc_contiguous(window_pages);
+        if (!window_phys) return -ENOMEM;
+        window = (uint8_t *)(uintptr_t)(window_phys + KERNEL_VMA);
+    }
+    total = 0;
+    error = 0;
+    while (total < limit) {
+        request = limit - total;
+        if (request > window_size) request = window_size;
+        view = window;
+        if (session) {
+            received = vfs_transfer_read_view(input_node,
+                                              input_offset + total,
+                                              request, session->cache,
+                                              &view);
+            if (received == 0) {
+                view = window;
+                received = vfs_transfer_read(input_node,
+                                             input_offset + total,
+                                             request, window,
+                                             window_size);
+            }
+        } else {
+            received = vfs_transfer_read(input_node, input_offset + total,
+                                         request, window, window_size);
+        }
+        if (received > request) received = request;
+        if (received == 0) {
+            error = -EIO;
+            break;
+        }
+        consumed = 0;
+        while (consumed < received) {
+            if (session) {
+                written = vfs_transfer_write(output_node,
+                                             output_offset + total,
+                                             received - consumed,
+                                             view + consumed, scratch,
+                                             scratch_capacity);
+            } else {
+                written = vfs_write(output_node, output_offset + total,
+                                    received - consumed,
+                                    window + consumed);
+            }
+            if (written > received - consumed)
+                written = received - consumed;
+            if (written == 0) {
+                error = -EIO;
+                break;
+            }
+            consumed += written;
+            total += written;
+        }
+        if (error != 0 || consumed < received) break;
+        if (received < request) break;
+    }
+    if (window_phys) pfa_free_contiguous(window_phys, window_pages);
+    if (session) copy_transfer_finish(session);
+
+    input_offset_value = (int64_t)(input_offset + total);
+    output_offset_value = (int64_t)(output_offset + total);
+    if (off_in_ptr != 0) {
+        if (copy_to_user((void *)(uintptr_t)off_in_ptr,
+                         &input_offset_value,
+                         sizeof(input_offset_value)) != 0)
+            return total ? (int)total : -EFAULT;
+    } else {
+        task_fd_position_set(input_fd, input_offset + total);
+    }
+    if (off_out_ptr != 0) {
+        if (copy_to_user((void *)(uintptr_t)off_out_ptr,
+                         &output_offset_value,
+                         sizeof(output_offset_value)) != 0)
+            return total ? (int)total : -EFAULT;
+    } else {
+        task_fd_position_set(output_fd, output_offset + total);
+    }
+    if (total != 0) return (int)total;
+    if (error != 0) return error;
+    return 0;
+}
+
 struct iovec {
     void *iov_base;
     size_t iov_len;
@@ -2315,6 +2621,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
 }
 
 void syscalls_posix_init(void) {
+    mutex_init(&copy_transfer_lock);
     syscall_table_set(SYSCALL_DUP, (void *)(sys_dup));
     syscall_table_set(SYSCALL_DUP2, (void *)(sys_dup2));
     syscall_table_set(SYSCALL_DUP3, (void *)(sys_dup3));
@@ -2355,5 +2662,7 @@ void syscalls_posix_init(void) {
     syscall_table_set(SYSCALL_FLOCK, (void *)(sys_flock));
     syscall_table_set(SYSCALL_PREAD64, (void *)(sys_pread64));
     syscall_table_set(SYSCALL_PWRITE64, (void *)(sys_pwrite64));
+    syscall_table_set(SYSCALL_COPY_FILE_RANGE,
+                      (void *)(sys_copy_file_range));
     syscall_table_set(SYSCALL_READV, (void *)(sys_readv));
 }

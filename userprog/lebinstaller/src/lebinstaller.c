@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -13,7 +14,6 @@
 
 #define SECTOR_SIZE  512
 #define BUF_SIZE     4096
-#define COPY_BUF_MAX 65536
 #define MAX_PATH     256
 #define MAX_LINE     128
 #define LEBPKG_INSTALLED_DIR "/etc/lebpkg/installed"
@@ -303,80 +303,7 @@ static int inst_enumerate_disks(void)
     return disk_count;
 }
 
-static uint64_t inst_get_free_mem(void)
-{
-    int fd;
-    char mbuf[512];
-    int n;
-    char *p;
-    uint64_t mem_free;
-
-    mem_free = 0;
-    fd = vfs_open("/proc/meminfo", 0);
-    if (fd < 0) return 0;
-    n = vfs_read_fd(fd, mbuf, sizeof(mbuf) - 1);
-    vfs_close_fd(fd);
-    if (n <= 0) return 0;
-    mbuf[n] = '\0';
-    p = mbuf;
-    while (*p) {
-        if (strncmp(p, "MemFree:", 8) == 0) {
-            p += 8;
-            while (*p == ' ' || *p == '\t') p++;
-            while (*p >= '0' && *p <= '9') {
-                mem_free = mem_free * 10 + (*p - '0');
-                p++;
-            }
-            break;
-        }
-        while (*p && *p != '\n') p++;
-        if (*p == '\n') p++;
-    }
-    return mem_free * 1024;
-}
-
-static char *copy_buf = NULL;
-static int copy_buf_size = 0;
 static int copy_overwrite_existing = 1;
-
-static int inst_resize_copy_buf(uint64_t file_size)
-{
-    uint64_t avail;
-    uint64_t want64;
-    char *new_buf;
-    int want;
-
-    if (copy_buf && copy_buf_size >= COPY_BUF_MAX) return 0;
-    if (copy_buf && file_size > 0 && file_size <= (uint64_t)copy_buf_size) return 0;
-
-    avail = inst_get_free_mem();
-    if (avail == 0) avail = BUF_SIZE;
-
-    want64 = avail / 16;
-    if (file_size > 0 && file_size < want64) want64 = file_size;
-    if (want64 < BUF_SIZE) want64 = BUF_SIZE;
-    if (want64 > COPY_BUF_MAX) want64 = COPY_BUF_MAX;
-    if (want64 > 0x7fffffffULL) want64 = 0x7fffffffULL;
-
-    want = (int)want64;
-    if (copy_buf && copy_buf_size >= want) return 0;
-
-    while (want >= BUF_SIZE) {
-        new_buf = (char *)malloc(want);
-        if (new_buf) {
-            memset(new_buf, 0, want);
-            if (copy_buf) free(copy_buf);
-            copy_buf = new_buf;
-            copy_buf_size = want;
-            return 0;
-        }
-        want /= 2;
-    }
-
-    if (copy_buf) return 0;
-
-    return -1;
-}
 
 static int inst_copy_file_vfs(const char *src, const char *dst)
 {
@@ -396,11 +323,6 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     if (fstat(fd_in, &src_st) == 0)
         src_mode = src_st.st_mode & 07777;
 
-    if (inst_resize_copy_buf((uint64_t)src_st.st_size) < 0) {
-        vfs_close_fd(fd_in);
-        return -1;
-    }
-
     fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
                                O_WRONLY | O_CREAT | O_TRUNC,
                                src_mode);
@@ -415,13 +337,9 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     }
 
     for (;;) {
-        r = read(fd_in, copy_buf, copy_buf_size);
+        r = (int)copy_file_range(fd_in, NULL, fd_out, NULL,
+                                 (size_t)0x7fffffffU, 0);
         if (r <= 0) break;
-        if (write(fd_out, copy_buf, r) != r) {
-            close(fd_in);
-            close(fd_out);
-            return -1;
-        }
     }
 
     if (r < 0) {
@@ -523,7 +441,10 @@ static void inst_copy_current(const char *path)
 
     pct = 10 + (copy_done * 85) / copy_total;
     if (pct > 95) pct = 95;
-    lebui_progress_update(&prog_st, path, pct);
+    if (pct != copy_last_pct) {
+        copy_last_pct = pct;
+        lebui_progress_update(&prog_st, path, pct);
+    }
 }
 
 static int inst_copy_symlink_vfs(const char *src, const char *dst)
@@ -715,9 +636,6 @@ static int inst_copy_rootfs(const char *mountpoint)
     char dst[MAX_PATH];
     int i;
     int errors;
-
-    if (inst_resize_copy_buf(0) < 0)
-        return -1;
 
     errors = 0;
 
@@ -1785,10 +1703,6 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
         lebui_progress_log(&prog_st, "Bootloader installed.");
     }
 
-    free(copy_buf);
-    copy_buf = NULL;
-    copy_buf_size = 0;
-
     for (i = 0; i < user_count; i++) {
         lebui_progress_update(&prog_st, "Creating user accounts...", 97);
         snprintf(logbuf, sizeof(logbuf), "Creating user: %s", users[i].username);
@@ -2114,10 +2028,6 @@ static int step_do_update(int disk_idx, int part_idx)
         else
             lebui_progress_log(&prog_st, "GRUB configuration updated.");
     }
-
-    free(copy_buf);
-    copy_buf = NULL;
-    copy_buf_size = 0;
 
     if (upd_selected[UPD_PKGDB]) {
         lebui_progress_update(&prog_st, "Updating package database...", 98);

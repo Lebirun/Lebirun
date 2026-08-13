@@ -3,6 +3,7 @@
 #include <lebirun/power.h>
 #include <lebirun/watchdog.h>
 #include <lebirun/common.h>
+#include <lebirun/vfs.h>
 
 static inline void outw(uint16_t port, uint16_t value) {
     __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
@@ -12,6 +13,7 @@ void KERNEL_INIT power_init(void) {
 }
 
 void power_shutdown(void) {
+    vfs_sync_all(0);
     watchdog_disable();
     __asm__ __volatile__("cli");
     outw(0x604, 0x2000);
@@ -24,6 +26,7 @@ void power_shutdown(void) {
 void power_reboot(void) {
     uint8_t good;
 
+    vfs_sync_all(0);
     watchdog_disable();
     __asm__ __volatile__("cli");
 

@@ -43,6 +43,7 @@
 
 struct vfs_node;
 struct dirent;
+struct squashfs_transfer_cache;
 
 typedef struct dirent {
     union {
@@ -158,6 +159,17 @@ int vfs_remove_mount(const char *mountpoint);
 
 uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+uint64_t vfs_transfer_window_size(vfs_node_t *node);
+int vfs_transfer_reuse_supported(vfs_node_t *node);
+uint64_t vfs_transfer_read(vfs_node_t *node, uint64_t offset, uint64_t size,
+                           uint8_t *buffer, uint64_t capacity);
+uint64_t vfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
+                                uint64_t size,
+                                struct squashfs_transfer_cache *cache,
+                                uint8_t **view);
+uint64_t vfs_transfer_write(vfs_node_t *node, uint64_t offset, uint64_t size,
+                            uint8_t *buffer, uint8_t *scratch,
+                            uint64_t scratch_capacity);
 void vfs_open(vfs_node_t *node, uint64_t flags);
 void vfs_close(vfs_node_t *node);
 void vfs_lookup_hazard_set(vfs_node_t *node);

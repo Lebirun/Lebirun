@@ -223,6 +223,7 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 145: return SYSCALL_READV;
         case 180: return SYSCALL_PREAD64;
         case 181: return SYSCALL_PWRITE64;
+        case 377: return SYSCALL_COPY_FILE_RANGE;
         
         case 63:  return SYSCALL_DUP;
         case 41:  return SYSCALL_DUP2;
@@ -412,7 +413,7 @@ static int syscall_needs_expanded_stack(int num) {
     if (num >= SYSCALL_INITRD_STAT && num <= SYSCALL_VFS_UNLINK &&
         num != SYSCALL_VFS_READ) return 1;
     if (num >= SYSCALL_SATA_TEST && num <= SYSCALL_NET_HTTP_GET) return 1;
-    if (num == SYSCALL_EXECVE) return 1;
+    if (num == SYSCALL_EXECVE || num == SYSCALL_COPY_FILE_RANGE) return 1;
     if (num >= SYSCALL_STAT && num <= SYSCALL_READLINK) return 1;
     if (num >= SYSCALL_OPENAT && num <= SYSCALL_RENAMEAT2) return 1;
     if (num >= SYSCALL_MMAP2 && num <= SYSCALL_MINCORE) return 1;

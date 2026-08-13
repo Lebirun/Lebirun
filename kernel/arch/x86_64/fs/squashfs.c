@@ -38,6 +38,7 @@ static uint64_t sqfs_decomp_oversize = 0;
 static uint64_t sqfs_decomp_padded = 0;
 static squashfs_vfs_node_t *sqfs_all_nodes = NULL;
 static int sqfs_access_blocked = 0;
+static squashfs_transfer_cache_t *sqfs_transfer_cache = NULL;
 
 static void sqfs_track_node(squashfs_vfs_node_t *snode) {
     if (!snode) return;
@@ -400,6 +401,58 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     return result;
 }
 
+static uint8_t *squashfs_transfer_metadata_block(uint64_t block_offset,
+                                                 uint64_t *out_size,
+                                                 int *out_need_free) {
+    squashfs_transfer_cache_t *cache;
+    uint8_t *base;
+    uint8_t *src;
+    uint16_t header;
+    uint64_t data_size;
+    int decomp_ret;
+
+    if (out_need_free) *out_need_free = 0;
+    cache = sqfs_transfer_cache;
+    base = squashfs_ctx.base;
+    if (!cache || !cache->scratch || cache->scratch_capacity < 8192 ||
+        block_offset + 2 > squashfs_ctx.size) {
+        if (out_need_free) *out_need_free = 1;
+        return squashfs_read_metadata_block(block_offset, out_size);
+    }
+    header = read_u16(base + block_offset);
+    data_size = header & 0x7FFF;
+    if (block_offset + 2 + data_size > squashfs_ctx.size) return NULL;
+    if (header & 0x8000) {
+        if (out_size) *out_size = data_size;
+        return base + block_offset + 2;
+    }
+    if (cache->metadata_valid && cache->metadata_block == block_offset) {
+        if (out_size) *out_size = cache->metadata_size;
+        return cache->scratch;
+    }
+    src = base + block_offset + 2;
+    decomp_ret = squashfs_decompress(src, data_size, cache->scratch,
+                                     cache->scratch_capacity,
+                                     squashfs_ctx.compression_id);
+    if (decomp_ret < 0) {
+        sqfs_decomp_failures++;
+        cache->metadata_valid = 0;
+        return NULL;
+    }
+    if (decomp_ret > 8192) {
+        sqfs_decomp_oversize++;
+        cache->metadata_valid = 0;
+        return NULL;
+    }
+    if (decomp_ret > 8192 - (int)SQFS_DECOMP_PAD)
+        sqfs_decomp_padded++;
+    cache->metadata_block = block_offset;
+    cache->metadata_size = (uint64_t)decomp_ret;
+    cache->metadata_valid = 1;
+    if (out_size) *out_size = cache->metadata_size;
+    return cache->scratch;
+}
+
 static int squashfs_copy_metadata_stream(uint64_t block_offset,
                                          uint64_t metadata_offset,
                                          uint8_t *output, size_t length) {
@@ -455,8 +508,6 @@ static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, 
     uint8_t *metadata;
     uint64_t meta_size;
     squashfs_base_inode_t *base;
-    uint16_t meta_header;
-    uint64_t meta_data_size;
     int need_free;
 
     if (!out_meta || !out_meta_size || !out_offset || !out_base || !out_need_free) {
@@ -467,25 +518,13 @@ static int squashfs_load_inode_metadata(uint64_t inode_ref, uint8_t **out_meta, 
     offset = (uint16_t)(inode_ref & 0xFFFF);
     block_offset = squashfs_ctx.inode_table_start + block;
 
-    need_free = 0;
-    if (block_offset + 2 <= squashfs_ctx.size) {
-        meta_header = read_u16(squashfs_ctx.base + block_offset);
-        if (meta_header & 0x8000) {
-            meta_data_size = meta_header & 0x7FFF;
-            if (block_offset + 2 + meta_data_size <= squashfs_ctx.size) {
-                metadata = squashfs_ctx.base + block_offset + 2;
-                meta_size = meta_data_size;
-            } else {
-                metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-                if (!metadata) return -1;
-                need_free = 1;
-            }
-        } else {
-            metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-            if (!metadata) return -1;
-            need_free = 1;
-        }
-    } else {
+    metadata = squashfs_transfer_metadata_block(block_offset, &meta_size,
+                                                &need_free);
+    if (!metadata) return -1;
+
+    if (offset + sizeof(squashfs_reg_inode_t) > meta_size &&
+        !need_free && sqfs_transfer_cache &&
+        metadata == sqfs_transfer_cache->scratch) {
         metadata = squashfs_read_metadata_block(block_offset, &meta_size);
         if (!metadata) return -1;
         need_free = 1;
@@ -567,8 +606,6 @@ static int squashfs_read_fragment_entry(uint64_t fragment_index, squashfs_fragme
     uint8_t *metadata;
     uint64_t meta_size;
     squashfs_fragment_entry_t *entry;
-    uint16_t meta_header;
-    uint64_t meta_data_size;
     int need_free;
 
     if (!out_entry) {
@@ -576,6 +613,13 @@ static int squashfs_read_fragment_entry(uint64_t fragment_index, squashfs_fragme
     }
     if (!squashfs_ctx.fragment_count || fragment_index >= squashfs_ctx.fragment_count) {
         return -1;
+    }
+    if (sqfs_transfer_cache &&
+        sqfs_transfer_cache->fragment_entry_valid &&
+        sqfs_transfer_cache->fragment_index == fragment_index) {
+        out_entry->start_block = sqfs_transfer_cache->fragment_entry_start;
+        out_entry->size = sqfs_transfer_cache->fragment_entry_size;
+        return 0;
     }
 
     entries_per_block = 8192 / sizeof(squashfs_fragment_entry_t);
@@ -592,29 +636,9 @@ static int squashfs_read_fragment_entry(uint64_t fragment_index, squashfs_fragme
         return -1;
     }
 
-    need_free = 0;
-    if (block_offset + 2 <= squashfs_ctx.size) {
-        meta_header = read_u16(squashfs_ctx.base + block_offset);
-        if (meta_header & 0x8000) {
-            meta_data_size = meta_header & 0x7FFF;
-            if (block_offset + 2 + meta_data_size <= squashfs_ctx.size) {
-                metadata = squashfs_ctx.base + block_offset + 2;
-                meta_size = meta_data_size;
-            } else {
-                metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-                if (!metadata) return -1;
-                need_free = 1;
-            }
-        } else {
-            metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-            if (!metadata) return -1;
-            need_free = 1;
-        }
-    } else {
-        metadata = squashfs_read_metadata_block(block_offset, &meta_size);
-        if (!metadata) return -1;
-        need_free = 1;
-    }
+    metadata = squashfs_transfer_metadata_block(block_offset, &meta_size,
+                                                &need_free);
+    if (!metadata) return -1;
 
     if ((entry_index + 1) * sizeof(squashfs_fragment_entry_t) > meta_size) {
         if (need_free) kfree(metadata);
@@ -623,6 +647,12 @@ static int squashfs_read_fragment_entry(uint64_t fragment_index, squashfs_fragme
 
     entry = (squashfs_fragment_entry_t *)(metadata + entry_index * sizeof(squashfs_fragment_entry_t));
     memcpy(out_entry, entry, sizeof(squashfs_fragment_entry_t));
+    if (sqfs_transfer_cache) {
+        sqfs_transfer_cache->fragment_index = fragment_index;
+        sqfs_transfer_cache->fragment_entry_start = out_entry->start_block;
+        sqfs_transfer_cache->fragment_entry_size = out_entry->size;
+        sqfs_transfer_cache->fragment_entry_valid = 1;
+    }
     if (need_free) kfree(metadata);
     return 0;
 }
@@ -863,7 +893,10 @@ static vfs_node_t *squashfs_create_vfs_node(uint64_t inode_ref, const char *name
     return &snode->vfs;
 }
 
-static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uint64_t size, uint8_t *buffer) {
+static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset,
+                                        uint64_t size, uint8_t *buffer,
+                                        uint64_t buffer_capacity,
+                                        uint8_t **out_view) {
     uint8_t *metadata;
     uint64_t meta_size;
     uint64_t inode_offset;
@@ -880,6 +913,7 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     uint64_t to_read;
     uint64_t bytes_read;
     uint64_t i;
+    uint64_t first_block;
     uint64_t cur_offset;
     uint64_t data_pos;
     uint64_t entry_size;
@@ -903,6 +937,8 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     uint64_t temp_phys;
     uint64_t temp_pages;
     int meta_need_free;
+    int direct_decomp;
+    int fragment_cached;
 
     metadata = NULL;
     meta_size = 0;
@@ -912,6 +948,7 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     meta_need_free = 0;
     temp_phys = 0;
     temp_pages = 0;
+    if (out_view) *out_view = buffer;
 
 
     if (squashfs_load_inode_metadata(inode_ref, &metadata, &meta_size, &inode_offset, &base, &meta_need_free) != 0) {
@@ -967,10 +1004,29 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     }
 
     bytes_read = 0;
-    cur_offset = 0;
+    first_block = offset / block_size;
+    if (first_block > block_count) first_block = block_count;
+    cur_offset = first_block * block_size;
     data_pos = start_block;
 
-    for (i = 0; i < block_count && bytes_read < to_read; i++) {
+    if (sqfs_transfer_cache && first_block < block_count)
+        sqfs_transfer_cache->fragment_valid = 0;
+
+    for (i = 0; i < first_block; i++) {
+        entry_size = read_u32(block_list + i * 4);
+        stored_size = entry_size & 0x00FFFFFF;
+        if (stored_size == 0 || stored_size > block_size * 2) {
+            if (meta_need_free) kfree(metadata);
+            return 0;
+        }
+        if (data_pos + stored_size > squashfs_ctx.size) {
+            if (meta_need_free) kfree(metadata);
+            return 0;
+        }
+        data_pos += stored_size;
+    }
+
+    for (i = first_block; i < block_count && bytes_read < to_read; i++) {
         entry_size = read_u32(block_list + i * 4);
         compressed = !(entry_size & 0x01000000);
         stored_size = entry_size & 0x00FFFFFF;
@@ -1001,23 +1057,33 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
             }
 
             if (compressed) {
-                temp_size = uncompressed_size + SQFS_DECOMP_PAD;
-                if (temp_size == 0) temp_size = 1;
-                temp = sqfs_temp_alloc(temp_size, &temp_phys, &temp_pages);
-                if (!temp) {
-                    break;
+                direct_decomp = block_offset == 0 &&
+                                copy_len == uncompressed_size &&
+                                bytes_read + uncompressed_size <=
+                                    buffer_capacity;
+                if (direct_decomp) {
+                    temp = buffer + bytes_read;
+                    temp_size = uncompressed_size;
+                    temp_phys = 0;
+                    temp_pages = 0;
+                } else {
+                    temp_size = uncompressed_size + SQFS_DECOMP_PAD;
+                    if (temp_size == 0) temp_size = 1;
+                    temp = sqfs_temp_alloc(temp_size, &temp_phys,
+                                           &temp_pages);
+                    if (!temp) break;
                 }
                 decomp_ret = squashfs_decompress(squashfs_ctx.base + data_pos, stored_size, temp, temp_size, squashfs_ctx.compression_id);
                 if (decomp_ret < 0) {
                     sqfs_decomp_failures++;
                     printf("SQUASHFS: decompression failed for block[%u] stored=%u uncomp=%u\n", i, stored_size, uncompressed_size);
-                    sqfs_temp_free(temp_phys, temp_pages);
+                    if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
                     break;
                 }
                 if ((uint64_t)decomp_ret > uncompressed_size) {
                     sqfs_decomp_oversize++;
                     printf("SQUASHFS: decompression failed for block[%u] stored=%u uncomp=%u\n", i, stored_size, uncompressed_size);
-                    sqfs_temp_free(temp_phys, temp_pages);
+                    if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
                     break;
                 }
                 if ((uint64_t)decomp_ret > uncompressed_size - (uncompressed_size < SQFS_DECOMP_PAD ? uncompressed_size : SQFS_DECOMP_PAD)) {
@@ -1030,10 +1096,10 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
                         copy_len = 0;
                     }
                 }
-                if (copy_len > 0) {
+                if (copy_len > 0 && !direct_decomp) {
                     memcpy(buffer + bytes_read, temp + block_offset, copy_len);
                 }
-                sqfs_temp_free(temp_phys, temp_pages);
+                if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
             } else {
                 if (data_pos + block_offset + copy_len > squashfs_ctx.size) {
                     printf("SQUASHFS: uncompressed read exceeds image\n");
@@ -1070,17 +1136,67 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
                 if (frag_size == 0 || frag_size > block_size * 2) {
                     printf("SQUASHFS: invalid fragment size=%u (raw=0x%08X)\n", frag_size, frag_stored_size);
                 } else if (frag_compressed) {
-                    temp_size = block_size + SQFS_DECOMP_PAD;
-                    if (temp_size == 0) temp_size = 1;
-                    temp = sqfs_temp_alloc(temp_size, &temp_phys, &temp_pages);
+                    fragment_cached = 0;
+                    if (sqfs_transfer_cache &&
+                        sqfs_transfer_cache->fragment_valid &&
+                        sqfs_transfer_cache->fragment_start ==
+                            frag_entry.start_block &&
+                        sqfs_transfer_cache->fragment_stored_size ==
+                            frag_stored_size) {
+                        temp = sqfs_transfer_cache->data;
+                        temp_size = sqfs_transfer_cache->data_capacity;
+                        temp_phys = 0;
+                        temp_pages = 0;
+                        decomp_ret = (int)sqfs_transfer_cache->fragment_size;
+                        fragment_cached = 1;
+                    } else if (sqfs_transfer_cache &&
+                               sqfs_transfer_cache->data_capacity >=
+                                   block_size) {
+                        temp = sqfs_transfer_cache->data;
+                        temp_size = sqfs_transfer_cache->data_capacity;
+                        temp_phys = 0;
+                        temp_pages = 0;
+                    } else if (bytes_read + block_size <= buffer_capacity) {
+                        temp = buffer + bytes_read;
+                        temp_size = block_size;
+                        temp_phys = 0;
+                        temp_pages = 0;
+                    } else {
+                        temp_size = block_size + SQFS_DECOMP_PAD;
+                        if (temp_size == 0) temp_size = 1;
+                        temp = sqfs_temp_alloc(temp_size, &temp_phys,
+                                               &temp_pages);
+                    }
                     if (temp) {
-                        decomp_ret = squashfs_decompress(squashfs_ctx.base + (uint64_t)frag_entry.start_block, frag_size, temp, temp_size, squashfs_ctx.compression_id);
+                        if (!fragment_cached)
+                            decomp_ret = squashfs_decompress(squashfs_ctx.base + (uint64_t)frag_entry.start_block, frag_size, temp, temp_size, squashfs_ctx.compression_id);
                         if (decomp_ret >= 0 && (uint64_t)decomp_ret <= block_size) {
-                            if ((uint64_t)decomp_ret > block_size - (block_size < SQFS_DECOMP_PAD ? block_size : SQFS_DECOMP_PAD)) {
+                            if (sqfs_transfer_cache &&
+                                temp == sqfs_transfer_cache->data) {
+                                sqfs_transfer_cache->fragment_start =
+                                    frag_entry.start_block;
+                                sqfs_transfer_cache->fragment_stored_size =
+                                    frag_stored_size;
+                                sqfs_transfer_cache->fragment_size =
+                                    (uint64_t)decomp_ret;
+                                sqfs_transfer_cache->fragment_valid = 1;
+                            }
+                            if (!fragment_cached &&
+                                (uint64_t)decomp_ret > block_size -
+                                    (block_size < SQFS_DECOMP_PAD ?
+                                     block_size : SQFS_DECOMP_PAD)) {
                                 sqfs_decomp_padded++;
                             }
                             if ((uint64_t)decomp_ret >= frag_offset + frag_offset_in_file + frag_copy_len) {
-                                memcpy(buffer + bytes_read, temp + frag_offset + frag_offset_in_file, frag_copy_len);
+                                if (out_view && bytes_read == 0) {
+                                    *out_view = temp + frag_offset +
+                                                frag_offset_in_file;
+                                } else {
+                                    memmove(buffer + bytes_read,
+                                            temp + frag_offset +
+                                                frag_offset_in_file,
+                                            frag_copy_len);
+                                }
                                 bytes_read += frag_copy_len;
                             }
                         } else {
@@ -1091,11 +1207,17 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
                             }
                             printf("SQUASHFS: fragment decompression failed\n");
                         }
-                        sqfs_temp_free(temp_phys, temp_pages);
+                        if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
                     }
                 } else {
                     if ((uint64_t)frag_entry.start_block + frag_offset + frag_offset_in_file + frag_copy_len <= squashfs_ctx.size) {
-                        memcpy(buffer + bytes_read, squashfs_ctx.base + (uint64_t)frag_entry.start_block + frag_offset + frag_offset_in_file, frag_copy_len);
+                        if (out_view && bytes_read == 0) {
+                            *out_view = squashfs_ctx.base +
+                                        (uint64_t)frag_entry.start_block +
+                                        frag_offset + frag_offset_in_file;
+                        } else {
+                            memcpy(buffer + bytes_read, squashfs_ctx.base + (uint64_t)frag_entry.start_block + frag_offset + frag_offset_in_file, frag_copy_len);
+                        }
                         bytes_read += frag_copy_len;
                     } else {
                         printf("SQUASHFS: fragment read exceeds image\n");
@@ -1118,7 +1240,10 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset, uin
     return bytes_read;
 }
 
-static uint64_t squashfs_vfs_read_unlocked(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+static uint64_t squashfs_vfs_read_unlocked(vfs_node_t *node, uint64_t offset,
+                                           uint64_t size, uint8_t *buffer,
+                                           uint64_t buffer_capacity,
+                                           uint8_t **out_view) {
     squashfs_vfs_node_t *snode;
     squashfs_symlink_inode_t *sym;
     char *symlink_target;
@@ -1146,7 +1271,8 @@ static uint64_t squashfs_vfs_read_unlocked(vfs_node_t *node, uint64_t offset, ui
         return copy_len;
     }
     
-    return squashfs_read_file_data(snode->inode_ref, offset, size, buffer);
+    return squashfs_read_file_data(snode->inode_ref, offset, size, buffer,
+                                   buffer_capacity, out_view);
 }
 
 static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset,
@@ -1155,7 +1281,49 @@ static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset,
 
     if (squashfs_expand_syscall_stack() != 0) return 0;
     mutex_lock(&squashfs_lock);
-    result = squashfs_vfs_read_unlocked(node, offset, size, buffer);
+    result = squashfs_vfs_read_unlocked(node, offset, size, buffer, size,
+                                        NULL);
+    mutex_unlock(&squashfs_lock);
+    return result;
+}
+
+uint64_t squashfs_transfer_window_size(vfs_node_t *node) {
+    if (!node || node->read != squashfs_vfs_read) return 0;
+    return squashfs_ctx.block_size;
+}
+
+uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
+                                uint64_t size, uint8_t *buffer,
+                                uint64_t capacity) {
+    uint64_t result;
+
+    if (!node || node->read != squashfs_vfs_read || !buffer) return 0;
+    if (size > capacity) size = capacity;
+    if (squashfs_expand_syscall_stack() != 0) return 0;
+    mutex_lock(&squashfs_lock);
+    result = squashfs_vfs_read_unlocked(node, offset, size, buffer,
+                                        capacity, NULL);
+    mutex_unlock(&squashfs_lock);
+    return result;
+}
+
+uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
+                                     uint64_t size,
+                                     squashfs_transfer_cache_t *cache,
+                                     uint8_t **view) {
+    uint64_t result;
+
+    if (!node || node->read != squashfs_vfs_read || !cache || !view)
+        return 0;
+    if (!cache->data || cache->data_capacity == 0) return 0;
+    if (size > cache->data_capacity) size = cache->data_capacity;
+    if (squashfs_expand_syscall_stack() != 0) return 0;
+    mutex_lock(&squashfs_lock);
+    sqfs_transfer_cache = cache;
+    *view = cache->data;
+    result = squashfs_vfs_read_unlocked(node, offset, size, cache->data,
+                                        cache->data_capacity, view);
+    sqfs_transfer_cache = NULL;
     mutex_unlock(&squashfs_lock);
     return result;
 }

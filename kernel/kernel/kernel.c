@@ -96,47 +96,71 @@ static void kernel_reclaim_early_init_memory(void) {
                           _kernel_early_init_end, 0, 0);
 }
 
-static void kernel_reclaim_init_memory(void) {
-    extern uint8_t _kernel_init_start[];
-    extern uint8_t _kernel_init_end[];
-
-    kernel_reclaim_memory(_kernel_init_start, _kernel_init_end, 1, 1);
-}
-
-static void kernel_reclaim_optional_init_memory(void) {
-    extern uint8_t _kernel_init_optional_start[];
-    extern uint8_t _kernel_init_optional_end[];
-    extern int syscall_core_fallback_reclaimable(void);
-
-    if (!klog_early_storage_reclaimable()) return;
-    if (!syscall_core_fallback_reclaimable()) return;
-    if (!console_fallback_reclaimable()) return;
-    kernel_reclaim_memory(_kernel_init_optional_start,
-                          _kernel_init_optional_end, 1, 1);
-}
-
-static void kernel_reclaim_boot_stack_memory(void) {
-    extern uint8_t _kernel_boot_stack_start[];
-    extern uint8_t _kernel_boot_stack_end[];
-
-    kernel_reclaim_memory(_kernel_boot_stack_start,
-                          _kernel_boot_stack_end, 1, 0);
-}
-
-static void kernel_reclaim_multiboot_memory(void) {
-    extern uint8_t _kernel_multiboot_start[];
-    extern uint8_t _kernel_multiboot_end[];
-    uint64_t start;
-    uint64_t end;
+static void kernel_unmap_virtual_memory(uint8_t *section_start,
+                                        uint8_t *section_end) {
     uint64_t address;
 
-    start = (uint64_t)(uintptr_t)_kernel_multiboot_start;
-    end = (uint64_t)(uintptr_t)_kernel_multiboot_end;
-    for (address = start; address < end; address += PAGE_SIZE) {
+    for (address = (uint64_t)(uintptr_t)section_start;
+         address < (uint64_t)(uintptr_t)section_end;
+         address += PAGE_SIZE) {
+        vmm_unmap_page(address);
+    }
+}
+
+static void kernel_release_virtual_memory(uint8_t *section_start,
+                                          uint8_t *section_end,
+                                          int report) {
+    uint64_t start;
+    uint64_t end;
+
+    start = (uint64_t)(uintptr_t)section_start - KERNEL_VMA;
+    end = (uint64_t)(uintptr_t)section_end - KERNEL_VMA;
+    if (report)
+        pfa_reclaim_kernel_range(start, end);
+    else
+        pfa_reclaim_kernel_range_quiet(start, end);
+}
+
+static void kernel_reclaim_runtime_memory(void) {
+    extern uint8_t _kernel_init_start[];
+    extern uint8_t _kernel_init_end[];
+    extern uint8_t _kernel_init_optional_start[];
+    extern uint8_t _kernel_init_optional_end[];
+    extern uint8_t _kernel_boot_stack_start[];
+    extern uint8_t _kernel_boot_stack_end[];
+    extern uint8_t _kernel_multiboot_start[];
+    extern uint8_t _kernel_multiboot_end[];
+    extern int syscall_core_fallback_reclaimable(void);
+    uint64_t multiboot_start;
+    uint64_t multiboot_end;
+    uint64_t address;
+    int reclaim_optional;
+
+    reclaim_optional = klog_early_storage_reclaimable() &&
+                       syscall_core_fallback_reclaimable() &&
+                       console_fallback_reclaimable();
+    multiboot_start = (uint64_t)(uintptr_t)_kernel_multiboot_start;
+    multiboot_end = (uint64_t)(uintptr_t)_kernel_multiboot_end;
+
+    kernel_unmap_virtual_memory(_kernel_init_start, _kernel_init_end);
+    if (reclaim_optional)
+        kernel_unmap_virtual_memory(_kernel_init_optional_start,
+                                    _kernel_init_optional_end);
+    kernel_unmap_virtual_memory(_kernel_boot_stack_start,
+                                _kernel_boot_stack_end);
+    for (address = multiboot_start; address < multiboot_end;
+         address += PAGE_SIZE) {
         vmm_unmap_page(address + KERNEL_VMA);
     }
     if (smp_tlb_flush_all_sync() < 0) return;
-    pfa_reclaim_kernel_range_quiet(start, end);
+
+    kernel_release_virtual_memory(_kernel_init_start, _kernel_init_end, 1);
+    if (reclaim_optional)
+        kernel_release_virtual_memory(_kernel_init_optional_start,
+                                      _kernel_init_optional_end, 1);
+    kernel_release_virtual_memory(_kernel_boot_stack_start,
+                                  _kernel_boot_stack_end, 0);
+    pfa_reclaim_kernel_range_quiet(multiboot_start, multiboot_end);
 }
 
 static void KERNEL_INIT kernel_boot(void) {
@@ -204,6 +228,13 @@ static void KERNEL_INIT kernel_boot(void) {
     int devs_registered;
     int mem_map_relocated;
     struct multiboot2_tag_module *tag_mod_initrd;
+    char fb_boot_line[128];
+    int fb_boot_line_len;
+    int fb_boot_line_pending;
+
+    fb_boot_line[0] = '\0';
+    fb_boot_line_len = 0;
+    fb_boot_line_pending = 0;
 
     gdt_init();
     idt_init();
@@ -228,12 +259,22 @@ static void KERNEL_INIT kernel_boot(void) {
                         early_fb_height, early_fb_pitch,
                         early_fb_bpp, early_fb_type);
 
-        console_init();
+        fb_boot_line_len = snprintf(
+            fb_boot_line, sizeof(fb_boot_line),
+            KERNEL_INIT_STRING(
+                "FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n"),
+            (unsigned long long)early_fb_addr, early_fb_width,
+            early_fb_height, early_fb_pitch, early_fb_bpp,
+            early_fb_type);
+        if (fb_boot_line_len > 0) {
+            if (fb_boot_line_len >= (int)sizeof(fb_boot_line))
+                fb_boot_line_len = sizeof(fb_boot_line) - 1;
+            terminal_write_fb_only(fb_boot_line,
+                                   (size_t)fb_boot_line_len);
+            fb_boot_line_pending = 1;
+        }
 
-        KERNEL_INIT_LOG("FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n",
-               (unsigned long long)early_fb_addr,
-               early_fb_width, early_fb_height,
-               early_fb_pitch, early_fb_bpp, early_fb_type);
+        console_init();
     } else {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
@@ -563,7 +604,6 @@ static void KERNEL_INIT kernel_boot(void) {
     vring_boot_enabled = 1;
     
     pit_init(1000);
-    calibrate_pit();
 
     if (lapic_base) {
         lapic_timer_init(1000);
@@ -645,6 +685,8 @@ static void KERNEL_INIT kernel_boot(void) {
     } else {
         KERNEL_INIT_LOG("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
+    if (fb_boot_line_pending)
+        serial_write_direct(fb_boot_line, (size_t)fb_boot_line_len);
 
     console_reclaim_unused();
     fb_reclaim_unused();
@@ -666,7 +708,8 @@ static void KERNEL_INIT kernel_boot(void) {
         init_task = NULL;
         for (ci = 0; ci < 4; ci++) {
             if (!init_candidates[ci] || !init_candidates[ci][0]) continue;
-            init_task = launch_user_path(init_candidates[ci], 0);
+            init_task = launch_user_path_state(init_candidates[ci], 0,
+                                               TASK_BLOCKED);
             if (init_task) {
                 break;
             }
@@ -675,11 +718,14 @@ static void KERNEL_INIT kernel_boot(void) {
     if (!init_task) {
         KERNEL_INIT_LOG("BOOT: init not found, retrying in 5 seconds...\n");
         sleep_ms(5000);
-        init_task = launch_user_path(KERNEL_INIT_STRING("/init"), 0);
+        init_task = launch_user_path_state(KERNEL_INIT_STRING("/init"), 0,
+                                           TASK_BLOCKED);
         if (!init_task)
-            init_task = launch_user_path(KERNEL_INIT_STRING("/sbin/init"), 0);
+            init_task = launch_user_path_state(
+                KERNEL_INIT_STRING("/sbin/init"), 0, TASK_BLOCKED);
         if (!init_task)
-            init_task = launch_user_path(KERNEL_INIT_STRING("/bin/init"), 0);
+            init_task = launch_user_path_state(
+                KERNEL_INIT_STRING("/bin/init"), 0, TASK_BLOCKED);
     }
     if (!init_task) {
         kernel_panic(KERNEL_INIT_STRING(
@@ -705,17 +751,22 @@ static void kernel_idle_loop(void) {
     }
 }
 
+static void kernel_start_init(void) {
+    task_t *init_task;
+
+    init_task = task_find(1);
+    if (!init_task)
+        kernel_panic("FATAL: init task disappeared.", NULL);
+    wake_task(init_task);
+    yield();
+}
+
 static void kernel_runtime(void) {
     asm volatile ("sti");
-    kernel_reclaim_init_memory();
-    kernel_reclaim_optional_init_memory();
-    kernel_reclaim_boot_stack_memory();
-    kernel_reclaim_multiboot_memory();
+    kernel_reclaim_runtime_memory();
     heap_reclaim_unused();
 
-    sleep_ticks(50);
-
-    yield();
+    kernel_start_init();
 
     kernel_idle_loop();
 }
@@ -727,10 +778,8 @@ void KERNEL_INIT kernel_main(void) {
     kernel_boot();
     runtime_stack = kstack_alloc();
     if (!runtime_stack) {
-        kernel_reclaim_init_memory();
         heap_reclaim_unused();
-        sleep_ticks(50);
-        yield();
+        kernel_start_init();
         kernel_idle_loop();
     }
     current_task->kernel_stack_base = runtime_stack;

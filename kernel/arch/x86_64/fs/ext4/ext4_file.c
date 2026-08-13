@@ -207,7 +207,10 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
     return -1;
 }
 
-uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, const uint8_t *buffer) {
+uint32_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
+                                   uint32_t offset, uint32_t size,
+                                   const uint8_t *buffer, uint8_t *scratch,
+                                   uint32_t scratch_capacity) {
     ext4_inode_cache_t *ic;
     uint64_t file_size;
     uint64_t new_size;
@@ -225,6 +228,10 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     uint32_t run_bytes;
     uint64_t next_phys_block;
     int64_t next_new_block;
+    uint32_t allocated_blocks;
+    uint32_t requested_blocks;
+    uint32_t set_index;
+    uint64_t allocated_first;
 
     if (!buffer || size == 0) {
         return 0;
@@ -277,6 +284,40 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
         phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
         allocated_now = 0;
 
+        if (phys_block == 0 && block_off == 0 &&
+            to_write == fs->block_size) {
+            max_run_blocks = 256 / fs->sectors_per_block;
+            if (max_run_blocks == 0) max_run_blocks = 1;
+            requested_blocks = (size - bytes_written) / fs->block_size;
+            if (requested_blocks > max_run_blocks)
+                requested_blocks = max_run_blocks;
+            allocated_blocks = ext4_alloc_block_run(fs, 0,
+                requested_blocks, &allocated_first);
+            if (allocated_blocks == 0) break;
+
+            run_blocks = 0;
+            for (set_index = 0; set_index < allocated_blocks; set_index++) {
+                if (ext4_inode_set_block(fs, &ic->inode,
+                        block_num + set_index,
+                        allocated_first + set_index) != 0) {
+                    while (set_index < allocated_blocks) {
+                        ext4_free_block(fs, allocated_first + set_index);
+                        set_index++;
+                    }
+                    break;
+                }
+                ic->inode.i_blocks_lo += fs->sectors_per_block;
+                run_blocks++;
+            }
+            if (run_blocks == 0) break;
+            run_bytes = run_blocks * fs->block_size;
+            if (ext4_write_blocks(fs, allocated_first, run_blocks,
+                    buffer + bytes_written) != 0)
+                break;
+            bytes_written += run_bytes;
+            continue;
+        }
+
         if (phys_block == 0) {
             new_block = ext4_alloc_block(fs, 0);
             if (new_block < 0) {
@@ -294,7 +335,7 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
         }
 
         if (block_off == 0 && to_write == fs->block_size) {
-            max_run_blocks = 128 / fs->sectors_per_block;
+            max_run_blocks = 256 / fs->sectors_per_block;
             if (max_run_blocks == 0) max_run_blocks = 1;
             run_blocks = 1;
             while (run_blocks < max_run_blocks &&
@@ -326,6 +367,17 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
             continue;
         }
 
+        if (allocated_now && block_off == 0 && fs->block_size != 4096 &&
+            scratch &&
+            scratch_capacity >= fs->block_size) {
+            memset(scratch, 0, fs->block_size);
+            memcpy(scratch, buffer + bytes_written, to_write);
+            if (ext4_write_block(fs, phys_block, scratch) != 0)
+                break;
+            bytes_written += to_write;
+            continue;
+        }
+
         if (allocated_now) {
             block = ext4_get_block_overwrite(fs, phys_block);
             if (block) {
@@ -353,6 +405,11 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t 
     ext4_release_inode(ic);
 
     return bytes_written;
+}
+
+uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset,
+                         uint32_t size, const uint8_t *buffer) {
+    return ext4_file_write_workspace(fs, ino, offset, size, buffer, NULL, 0);
 }
 
 int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t new_size) {
@@ -439,22 +496,10 @@ int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint1
         return -1;
     }
 
-    if (ext4_sync(fs) != 0) {
-        ext4_free_inode(fs, new_ino);
-        return -1;
-    }
-
     file_type = ext4_mode_to_type(mode);
 
     if (ext4_dir_add_entry(fs, parent_ino, name, new_ino, file_type) != 0) {
         ext4_free_inode(fs, new_ino);
-        return -1;
-    }
-
-    if (ext4_sync(fs) != 0) {
-        ext4_dir_remove_entry(fs, parent_ino, name);
-        ext4_free_inode(fs, new_ino);
-        ext4_sync(fs);
         return -1;
     }
 
@@ -579,24 +624,9 @@ int ext4_link_file(ext4_fs_t *fs, uint32_t ino, uint32_t parent_ino,
     file_type = ext4_mode_to_type(ic->inode.i_mode);
     ic->inode.i_links_count++;
     ext4_mark_inode_dirty(ic);
-    if (ext4_sync(fs) != 0) {
-        ic->inode.i_links_count--;
-        ext4_mark_inode_dirty(ic);
-        ext4_release_inode(ic);
-        return -1;
-    }
     if (ext4_dir_add_entry(fs, parent_ino, name, ino, file_type) != 0) {
         ic->inode.i_links_count--;
         ext4_mark_inode_dirty(ic);
-        ext4_sync(fs);
-        ext4_release_inode(ic);
-        return -1;
-    }
-    if (ext4_sync(fs) != 0) {
-        ext4_dir_remove_entry(fs, parent_ino, name);
-        ic->inode.i_links_count--;
-        ext4_mark_inode_dirty(ic);
-        ext4_sync(fs);
         ext4_release_inode(ic);
         return -1;
     }
@@ -639,16 +669,9 @@ int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_nam
         return -1;
     }
 
-    if (ext4_sync(fs) != 0) {
-        ext4_dir_remove_entry(fs, new_parent_ino, new_name);
-        ext4_sync(fs);
-        return -1;
-    }
-
     if (ext4_dir_remove_entry(fs, old_parent_ino, old_name) != 0) {
         ext4_dir_remove_entry(fs, new_parent_ino, new_name);
-        ext4_sync(fs);
         return -1;
     }
-    return ext4_sync(fs);
+    return 0;
 }

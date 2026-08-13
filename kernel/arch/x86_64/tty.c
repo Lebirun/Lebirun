@@ -23,6 +23,22 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
+static void terminal_serial_write_byte(uint8_t value) {
+    uint32_t spins;
+
+    spins = 100000;
+    while (spins > 0 && !(inb(0x3FD) & 0x20)) {
+        __asm__ volatile("pause");
+        spins--;
+    }
+    outb(0x3F8, value);
+}
+
+void serial_putchar(char c) {
+    if (c == '\n') terminal_serial_write_byte('\r');
+    terminal_serial_write_byte((uint8_t)c);
+}
+
 static void terminal_updatecursor(void) {
     uint16_t pos;
 
@@ -147,6 +163,13 @@ void terminal_write(const char* data, size_t size) {
 	}
 	for (i = 0; i < size; i++)
 		terminal_putchar(data[i]);
+}
+
+void KERNEL_INIT terminal_write_fb_only(const char *data, size_t size) {
+    size_t i;
+
+    if (!data || !use_framebuffer) return;
+    for (i = 0; i < size; i++) fb_write_char(data[i]);
 }
 
 void terminal_writestring(const char* data) {

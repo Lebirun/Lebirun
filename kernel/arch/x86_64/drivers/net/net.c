@@ -14,7 +14,6 @@ const mac_addr_t MAC_ZERO = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 const ipv6_addr_t IPV6_ZERO = {{0}};
 
 static volatile uint64_t net_ticks = 0;
-volatile int net_work_pending = 0;
 
 uint64_t net_get_ticks(void) {
     return net_ticks;
@@ -22,7 +21,6 @@ uint64_t net_get_ticks(void) {
 
 void net_tick(void) {
     net_ticks++;
-    net_work_pending = 1;
 }
 
 void net_poll(void) {

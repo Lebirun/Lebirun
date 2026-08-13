@@ -55,7 +55,6 @@ typedef struct ext4_fs {
     uint32_t alloc_last_group;
     uint32_t alloc_last_bit;
     bool super_dirty;
-    uint8_t writeback_epoch;
     vfs_node_t *root_node;
     vfs_node_t *vfs_nodes;
     struct ext4_fs *next_mount;
@@ -77,8 +76,9 @@ void ext4_release_block(ext4_fs_t *fs, uint64_t block);
 int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 void ext4_compact_block_cache(ext4_fs_t *fs);
 int ext4_sync_blocks(ext4_fs_t *fs);
-int ext4_sync_some_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint);
+uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
+                              uint32_t max_count, uint64_t *first_block);
 int ext4_free_block(ext4_fs_t *fs, uint64_t block);
 
 int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode);
@@ -99,6 +99,10 @@ int ext4_dir_get_entry(ext4_fs_t *fs, uint32_t dir_ino, uint32_t index, ext4_dir
 
 uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, uint8_t *buffer);
 uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, const uint8_t *buffer);
+uint32_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
+                                   uint32_t offset, uint32_t size,
+                                   const uint8_t *buffer, uint8_t *scratch,
+                                   uint32_t scratch_capacity);
 int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t size);
 
 void ext4_init(void);
@@ -115,8 +119,11 @@ int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
 int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode);
 int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
                         vfs_node_t *new_parent, const char *new_name);
-void ext4_background_writeback(uint32_t max_blocks);
 void ext4_reclaim_mounted_caches(uint32_t max_blocks);
+uint64_t ext4_transfer_write(vfs_node_t *node, uint64_t offset,
+                             uint64_t size, uint8_t *buffer,
+                             uint8_t *scratch,
+                             uint64_t scratch_capacity);
 
 uint8_t ext4_type_to_vfs(uint8_t ext4_type);
 uint8_t ext4_mode_to_type(uint16_t mode);

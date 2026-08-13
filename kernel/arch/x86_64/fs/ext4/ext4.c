@@ -663,6 +663,35 @@ static uint64_t ext4_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size,
     return written;
 }
 
+uint64_t ext4_transfer_write(vfs_node_t *node, uint64_t offset,
+                             uint64_t size, uint8_t *buffer,
+                             uint8_t *scratch,
+                             uint64_t scratch_capacity) {
+    ext4_vfs_private_t *priv;
+    ext4_inode_cache_t *ic;
+    uint32_t written;
+
+    if (!node || node->write != ext4_vfs_write) return UINT64_MAX;
+    if (!node->private_data || !buffer || offset > UINT32_MAX ||
+        size > UINT32_MAX || scratch_capacity > UINT32_MAX)
+        return 0;
+    priv = (ext4_vfs_private_t *)node->private_data;
+    mutex_lock(&priv->fs->lock);
+    written = ext4_file_write_workspace(priv->fs, priv->ino,
+                                        (uint32_t)offset, (uint32_t)size,
+                                        buffer, scratch,
+                                        (uint32_t)scratch_capacity);
+    if (written > 0) {
+        ic = ext4_get_inode(priv->fs, priv->ino);
+        if (ic) {
+            node->length = ext4_inode_get_size(&ic->inode);
+            ext4_release_inode(ic);
+        }
+    }
+    mutex_unlock(&priv->fs->lock);
+    return written;
+}
+
 static void ext4_vfs_open(vfs_node_t *node, uint64_t flags) {
     (void)node;
     (void)flags;
@@ -1051,6 +1080,7 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
     uint8_t *dir_block;
     ext4_dir_entry_t *dot;
     ext4_dir_entry_t *dotdot;
+    ext4_dir_entry_t *free_entry;
     ext4_inode_cache_t *parent_ic;
 
     if (!parent || !parent->private_data || !name) {
@@ -1129,11 +1159,17 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
 
     dotdot = (ext4_dir_entry_t *)(dir_block + 12);
     dotdot->inode = priv->ino;
-    dotdot->rec_len = fs->block_size - 12;
+    dotdot->rec_len = 12;
     dotdot->name_len = 2;
     dotdot->file_type = EXT4_FT_DIR;
     dotdot->name[0] = '.';
     dotdot->name[1] = '.';
+
+    free_entry = (ext4_dir_entry_t *)(dir_block + 24);
+    free_entry->inode = 0;
+    free_entry->rec_len = fs->block_size - 24;
+    free_entry->name_len = 0;
+    free_entry->file_type = 0;
 
     ext4_write_block(fs, new_block, dir_block);
     kfree(dir_block);
@@ -1473,15 +1509,18 @@ int ext4_sync(ext4_fs_t *fs) {
     ret = ext4_sync_blocks(fs);
     if (ret != 0) return ret;
     if (fs->super_dirty) {
-        ret = ext4_flush_device(fs);
-        if (ret != 0) return ret;
         ret = ext4_write_superblock(fs);
         if (ret != 0) {
             return ret;
         }
         fs->super_dirty = false;
     }
-    return ext4_flush_device(fs);
+    ret = ext4_flush_device(fs);
+    if (ret != 0) return ret;
+    ext4_reclaim_clean_blocks(fs, 0);
+    ext4_compact_block_cache(fs);
+    ext4_reclaim_inodes(fs);
+    return 0;
 }
 
 int ext4_sync_mounted(void) {
@@ -1606,31 +1645,6 @@ int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
     }
     mutex_unlock(&old_priv->fs->lock);
     return result;
-}
-
-void ext4_background_writeback(uint32_t max_blocks) {
-    ext4_fs_t *fs;
-    uint8_t epoch;
-
-    if (max_blocks == 0) {
-        return;
-    }
-
-    epoch = (uint8_t)(tick_count / 100);
-    mutex_lock(&ext4_mounts_lock);
-    fs = ext4_mounts_head;
-    if (fs)
-        mutex_lock(&fs->lock);
-    mutex_unlock(&ext4_mounts_lock);
-    if (fs) {
-        if (fs->writeback_epoch == epoch) {
-            mutex_unlock(&fs->lock);
-            return;
-        }
-        fs->writeback_epoch = epoch;
-        ext4_sync_some_blocks(fs, max_blocks);
-        mutex_unlock(&fs->lock);
-    }
 }
 
 void ext4_reclaim_mounted_caches(uint32_t max_blocks) {

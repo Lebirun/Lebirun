@@ -8,6 +8,8 @@
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/inotify.h>
 #include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/overlayfs.h>
+#include <lebirun/squashfs.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -18,6 +20,7 @@ extern void slab_reclaim_empty(void);
 extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
 extern void pfa_ref_gc(void);
+extern void copy_file_range_release_mount(vfs_node_t *root);
 
 static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
@@ -583,6 +586,7 @@ int vfs_unmount(const char *mountpoint) {
     
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
+            copy_file_range_release_mount(mounts[i].root);
             vfs_reclaim_fds();
             overlay_flush_cache();
             squashfs_flush_cache();
@@ -653,6 +657,74 @@ uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *bu
         return written;
     }
     return 0;
+}
+
+uint64_t vfs_transfer_window_size(vfs_node_t *node) {
+    vfs_node_t *backing;
+    uint64_t size;
+
+    if (!node) return 0;
+    backing = overlay_get_backing_node(node);
+    if (!backing) backing = node;
+    size = squashfs_transfer_window_size(backing);
+    if (size != 0) return size;
+    return 65536;
+}
+
+int vfs_transfer_reuse_supported(vfs_node_t *node) {
+    vfs_node_t *backing;
+
+    if (!node) return 0;
+    backing = overlay_get_backing_node(node);
+    if (!backing) backing = node;
+    return squashfs_transfer_window_size(backing) != 0;
+}
+
+uint64_t vfs_transfer_read(vfs_node_t *node, uint64_t offset, uint64_t size,
+                           uint8_t *buffer, uint64_t capacity) {
+    vfs_node_t *backing;
+    uint64_t window_size;
+
+    if (!node || !buffer || capacity == 0) return 0;
+    if (size > capacity) size = capacity;
+    backing = overlay_get_backing_node(node);
+    if (!backing) backing = node;
+    window_size = squashfs_transfer_window_size(backing);
+    if (window_size != 0)
+        return squashfs_transfer_read(backing, offset, size, buffer,
+                                      capacity);
+    return vfs_read(node, offset, size, buffer);
+}
+
+uint64_t vfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
+                                uint64_t size,
+                                struct squashfs_transfer_cache *cache,
+                                uint8_t **view) {
+    vfs_node_t *backing;
+    uint64_t window_size;
+
+    if (!node || !cache || !view) return 0;
+    backing = overlay_get_backing_node(node);
+    if (!backing) backing = node;
+    window_size = squashfs_transfer_window_size(backing);
+    if (window_size == 0) return 0;
+    if (size > cache->data_capacity) size = cache->data_capacity;
+    return squashfs_transfer_read_view(backing, offset, size, cache, view);
+}
+
+uint64_t vfs_transfer_write(vfs_node_t *node, uint64_t offset, uint64_t size,
+                            uint8_t *buffer, uint8_t *scratch,
+                            uint64_t scratch_capacity) {
+    uint64_t written;
+
+    if (!node || !buffer) return 0;
+    written = ext4_transfer_write(node, offset, size, buffer, scratch,
+                                  scratch_capacity);
+    if (written != UINT64_MAX) {
+        if (written) inotify_notify(node, 0x00000002U, NULL);
+        return written;
+    }
+    return vfs_write(node, offset, size, buffer);
 }
 
 void vfs_open(vfs_node_t *node, uint64_t flags) {

@@ -41,8 +41,8 @@ extern void pfa_init_internal_setup(uint64_t directory_entries,
                                     uint64_t total_pages,
                                     uint64_t extension_phys,
                                     uint64_t extension_pages);
-extern void pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb, uint64_t init_free_frames);
-extern uint64_t count_free_frames(void);
+extern uint64_t pfa_init_ram_stats(uint64_t total_kb, uint64_t usable_kb,
+                                   uint64_t init_free_frames);
 extern void set_bit(uint64_t bit_idx);
 extern bool test_bit(uint64_t bit_idx);
 
@@ -446,15 +446,10 @@ void KERNEL_EARLY_INIT pfa_init(void) {
 
         start_frame = (uint64_t)((region_start_capped + PAGE_SIZE - 1) / PAGE_SIZE);
         end_frame = (uint64_t)(region_end_capped / PAGE_SIZE);
-        region_free = 0;
-
         if (end_frame > actual_total_pages) end_frame = actual_total_pages;
-
-        for (f = start_frame; f < end_frame; f++) {
-            if (f < kernel_frames) continue;
-            total_free_frames++;
-            region_free++;
-        }
+        if (start_frame < kernel_frames) start_frame = kernel_frames;
+        region_free = end_frame > start_frame ? end_frame - start_frame : 0;
+        total_free_frames += region_free;
         if (region_free > 0) {
             KERNEL_INIT_LOG("PFA: Region %u [0x%08lX-0x%08lX]: %u free frames\n", r,
                    (unsigned long)region_start_capped, (unsigned long)region_end_capped, region_free);
@@ -502,13 +497,6 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         }
     }
 
-    actual_free = count_free_frames();
-    total_free_frames = actual_free;
-
-    total_mb = (total_free_frames + 255ULL) / 256ULL;
-    KERNEL_INIT_LOG("PFA ready: %llu total free frames (~%llu MB)\n",
-           (unsigned long long)total_free_frames, (unsigned long long)total_mb);
-
     system_total_ram_kb = 0;
     for (r = 0; r < num_regions; r++) {
         region_base = memory_map[r].base;
@@ -518,8 +506,14 @@ void KERNEL_EARLY_INIT pfa_init(void) {
         system_total_ram_kb += (uint64_t)((region_end - region_base) / 1024);
     }
     system_usable_ram_kb = system_total_ram_kb;
-    actual_free = count_free_frames();
-    pfa_init_ram_stats(system_total_ram_kb, system_usable_ram_kb, actual_free);
+    actual_free = pfa_init_ram_stats(system_total_ram_kb,
+                                     system_usable_ram_kb,
+                                     total_free_frames);
+    total_free_frames = actual_free;
+
+    total_mb = (total_free_frames + 255ULL) / 256ULL;
+    KERNEL_INIT_LOG("PFA ready: %llu total free frames (~%llu MB)\n",
+           (unsigned long long)total_free_frames, (unsigned long long)total_mb);
 
     kern_phys_start = (uint64_t)(uintptr_t)_kernel_start - KERNEL_VMA;
     kern_phys_end_raw = (uint64_t)(uintptr_t)_kernel_end - KERNEL_VMA;
