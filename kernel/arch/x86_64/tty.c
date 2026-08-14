@@ -165,13 +165,6 @@ void terminal_write(const char* data, size_t size) {
 		terminal_putchar(data[i]);
 }
 
-void KERNEL_INIT terminal_write_fb_only(const char *data, size_t size) {
-    size_t i;
-
-    if (!data || !use_framebuffer) return;
-    for (i = 0; i < size; i++) fb_write_char(data[i]);
-}
-
 void terminal_writestring(const char* data) {
 	terminal_write(data, strlen(data));
 }

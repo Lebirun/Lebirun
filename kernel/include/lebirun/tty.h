@@ -197,7 +197,6 @@ void terminal_init_fb(uint64_t addr, uint64_t width, uint64_t height, uint64_t p
 void terminal_putchar(char c);
 void serial_putchar(char c);
 void terminal_write(const char* data, size_t size);
-void terminal_write_fb_only(const char *data, size_t size);
 void terminal_writestring(const char* data);
 void terminal_setcursor(uint16_t pos);
 int terminal_load_psf_font(const void *data, size_t size);

@@ -420,11 +420,11 @@ static int syscall_needs_expanded_stack(int num) {
     if (num >= SYSCALL_FCHDIR && num <= SYSCALL_GETDENTS64) return 1;
     if (num == SYSCALL_CLONE || num == SYSCALL_VFORK) return 1;
     if (num >= SYSCALL_POSIX_OPENPT && num <= SYSCALL_LCHOWN) return 1;
-    if (num >= SYSCALL_SHM_OPEN && num <= SYSCALL_REGEXEC_EX) return 1;
+    if (num >= SYSCALL_SHM_OPEN && num <= SYSCALL_DLERROR) return 1;
     if (num >= SYSCALL_STATFS && num <= SYSCALL_NET_HTTP_POST) return 1;
     if (num == SYSCALL_PIVOT_ROOT ||
         (num >= SYSCALL_VFS_MOUNT && num <= SYSCALL_LKE_LIST)) return 1;
-    if (num == SYSCALL_REGEXEC_EX2 || num == SYSCALL_VFS_READDIR2) return 1;
+    if (num == SYSCALL_VFS_READDIR2) return 1;
     return 0;
 }
 
@@ -549,7 +549,6 @@ void KERNEL_INIT syscall_init(void) {
     syscalls_pthread_init();
     syscalls_shm_init();
     syscalls_dl_init();
-    syscalls_regex_init();
     syscalls_power_init();
     syscalls_crypto_init();
 }

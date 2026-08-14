@@ -228,13 +228,6 @@ static void KERNEL_INIT kernel_boot(void) {
     int devs_registered;
     int mem_map_relocated;
     struct multiboot2_tag_module *tag_mod_initrd;
-    char fb_boot_line[128];
-    int fb_boot_line_len;
-    int fb_boot_line_pending;
-
-    fb_boot_line[0] = '\0';
-    fb_boot_line_len = 0;
-    fb_boot_line_pending = 0;
 
     gdt_init();
     idt_init();
@@ -258,21 +251,6 @@ static void KERNEL_INIT kernel_boot(void) {
         terminal_init_fb(early_fb_addr, early_fb_width,
                         early_fb_height, early_fb_pitch,
                         early_fb_bpp, early_fb_type);
-
-        fb_boot_line_len = snprintf(
-            fb_boot_line, sizeof(fb_boot_line),
-            KERNEL_INIT_STRING(
-                "FB: addr=0x%llX %ux%u pitch=%u bpp=%u type=%u\n"),
-            (unsigned long long)early_fb_addr, early_fb_width,
-            early_fb_height, early_fb_pitch, early_fb_bpp,
-            early_fb_type);
-        if (fb_boot_line_len > 0) {
-            if (fb_boot_line_len >= (int)sizeof(fb_boot_line))
-                fb_boot_line_len = sizeof(fb_boot_line) - 1;
-            terminal_write_fb_only(fb_boot_line,
-                                   (size_t)fb_boot_line_len);
-            fb_boot_line_pending = 1;
-        }
 
         console_init();
     } else {
@@ -685,17 +663,13 @@ static void KERNEL_INIT kernel_boot(void) {
     } else {
         KERNEL_INIT_LOG("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
-    if (fb_boot_line_pending)
-        serial_write_direct(fb_boot_line, (size_t)fb_boot_line_len);
-
-    console_reclaim_unused();
-    fb_reclaim_unused();
-    slab_reclaim_empty();
-    kstack_reclaim_unused();
-    heap_reclaim_unused();
     console_writer_flush();
     kprint_flush();
+    console_reclaim_unused();
+    fb_reclaim_unused();
     klog_reclaim_unused();
+    slab_reclaim_empty();
+    kstack_reclaim_unused();
     {
         const char *init_candidates[4];
         int ci;
@@ -736,7 +710,6 @@ static void KERNEL_INIT kernel_boot(void) {
     cmdline_reclaim_boot_values();
     kprint_flush();
     klog_reclaim_unused();
-    heap_reclaim_unused();
 
 }
 

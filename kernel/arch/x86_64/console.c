@@ -227,26 +227,21 @@ static int console_ensure_alloc(int n) {
 
 static uint8_t console_current_attr(console_t *con);
 
-static uint64_t console_packed_color_bytes(console_t *con) {
-    uint64_t bytes;
+#define CONSOLE_COLOR_PALETTE 1
+#define CONSOLE_COLOR_RUNS 2
 
-    if (!con || con->color_run_count > UINT64_MAX / 9) return UINT64_MAX;
-    bytes = con->color_run_count * 9;
-    return bytes;
-}
-
-static uint64_t console_color_run_end(const uint8_t *packed,
+static uint16_t console_color_run_end(const uint8_t *packed,
                                       uint64_t run) {
-    uint64_t end;
+    uint16_t end;
 
-    memcpy(&end, packed + run * 9, sizeof(end));
+    memcpy(&end, packed + run * 3, sizeof(end));
     return end;
 }
 
-static void console_set_color_run(uint8_t *packed, uint64_t run,
-                                  uint64_t end, uint8_t attr) {
-    memcpy(packed + run * 9, &end, sizeof(end));
-    packed[run * 9 + 8] = attr;
+static void console_color_run_set(uint8_t *packed, uint64_t run,
+                                  uint16_t end, uint8_t attr) {
+    memcpy(packed + run * 3, &end, sizeof(end));
+    packed[run * 3 + 2] = attr;
 }
 
 static uint8_t console_color_at(console_t *con, uint64_t row, uint64_t col) {
@@ -255,66 +250,69 @@ static uint8_t console_color_at(console_t *con, uint64_t row, uint64_t col) {
     uint64_t high;
     uint64_t middle;
     uint8_t *packed;
+    uint8_t index;
 
     if (!con || !con->color_buffer) return 0x70;
     if (!con->color_packed) return console_color_row(con, row)[col];
     cell = row * con->buffer_cols + col;
     packed = (uint8_t *)(void *)con->color_buffer;
-    low = 0;
-    high = con->color_run_count;
-    while (low < high) {
-        middle = low + (high - low) / 2;
-        if (cell < console_color_run_end(packed, middle))
-            high = middle;
-        else
-            low = middle + 1;
+    if (con->color_packed == CONSOLE_COLOR_RUNS) {
+        low = 0;
+        high = con->color_run_count;
+        while (low < high) {
+            middle = low + (high - low) / 2;
+            if (cell < console_color_run_end(packed, middle))
+                high = middle;
+            else
+                low = middle + 1;
+        }
+        if (low >= con->color_run_count) return 0x70;
+        return packed[low * 3 + 2];
     }
-    if (low >= con->color_run_count) return 0x70;
-    return packed[low * 9 + 8];
+    index = packed[16 + cell / 2];
+    if (cell & 1) index >>= 4;
+    else index &= 0x0F;
+    if (index >= con->color_run_count) return 0x70;
+    return packed[index];
 }
 
 static int console_expand_color_buffer(console_t *con) {
     uint8_t *packed;
     uint8_t *full;
     uint64_t cells;
+    uint8_t attr;
+    uint64_t i;
     uint64_t run;
     uint64_t start;
     uint64_t end;
-    uint8_t attr;
 
     if (!con || !con->color_buffer || !con->color_packed) return 0;
     cells = con->buffer_rows * con->buffer_cols;
     packed = (uint8_t *)(void *)con->color_buffer;
     full = (uint8_t *)kmalloc(cells);
-    if (!full) {
-        kfree(packed);
-        con->color_buffer = NULL;
-        con->color_run_count = 0;
-        con->color_packed = 0;
-        return -1;
-    }
-    start = 0;
-    for (run = 0; run < con->color_run_count; run++) {
-        end = console_color_run_end(packed, run);
-        if (end <= start || end > cells) {
+    if (!full) return -1;
+    if (con->color_packed == CONSOLE_COLOR_RUNS) {
+        start = 0;
+        for (run = 0; run < con->color_run_count; run++) {
+            end = console_color_run_end(packed, run);
+            if (end <= start || end > cells) {
+                kfree(full);
+                return -1;
+            }
+            memset(full + start, packed[run * 3 + 2], end - start);
+            start = end;
+        }
+        if (start != cells) {
             kfree(full);
-            kfree(packed);
-            con->color_buffer = NULL;
-            con->color_run_count = 0;
-            con->color_packed = 0;
             return -1;
         }
-        attr = packed[run * 9 + 8];
-        memset(full + start, attr, end - start);
-        start = end;
-    }
-    if (start != cells) {
-        kfree(full);
-        kfree(packed);
-        con->color_buffer = NULL;
-        con->color_run_count = 0;
-        con->color_packed = 0;
-        return -1;
+    } else {
+        for (i = 0; i < cells; i++) {
+            attr = packed[16 + i / 2];
+            if (i & 1) attr >>= 4;
+            else attr &= 0x0F;
+            full[i] = attr < con->color_run_count ? packed[attr] : 0x70;
+        }
     }
     kfree(packed);
     con->color_buffer = full;
@@ -328,36 +326,74 @@ static void console_pack_color_buffer(console_t *con) {
     uint8_t *packed;
     uint64_t cells;
     uint64_t i;
+    uint64_t bytes;
+    uint64_t palette_bytes;
+    uint64_t run_bytes;
     uint64_t runs;
     uint64_t run;
-    uint64_t bytes;
+    uint64_t palette_count;
+    uint64_t palette_index;
     uint8_t attr;
+    uint8_t palette[16];
+    uint8_t run_attr;
 
     if (!con || !con->color_buffer || con->color_packed) return;
     cells = con->buffer_rows * con->buffer_cols;
     if (cells == 0) return;
     full = (uint8_t *)(void *)con->color_buffer;
+    palette_count = 0;
+    for (i = 0; i < cells; i++) {
+        attr = full[i];
+        for (palette_index = 0; palette_index < palette_count;
+             palette_index++) {
+            if (palette[palette_index] == attr) break;
+        }
+        if (palette_index == palette_count) {
+            if (palette_count == 16) break;
+            palette[palette_count++] = attr;
+        }
+    }
+    palette_bytes = i == cells ? 16 + (cells + 1) / 2 : UINT64_MAX;
     runs = 1;
     for (i = 1; i < cells; i++) {
         if (full[i] != full[i - 1]) runs++;
     }
-    if (runs > UINT64_MAX / 9) return;
-    bytes = runs * 9;
+    run_bytes = cells <= UINT16_MAX ? runs * 3 : UINT64_MAX;
+    bytes = palette_bytes < run_bytes ? palette_bytes : run_bytes;
     if (bytes >= cells) return;
     packed = (uint8_t *)kmalloc(bytes);
     if (!packed) return;
-    run = 0;
-    attr = full[0];
-    for (i = 1; i <= cells; i++) {
-        if (i < cells && full[i] == attr) continue;
-        console_set_color_run(packed, run, i, attr);
-        run++;
-        if (i < cells) attr = full[i];
+    if (palette_bytes <= run_bytes) {
+        memset(packed, 0, bytes);
+        memcpy(packed, palette, palette_count);
+        for (i = 0; i < cells; i++) {
+            attr = full[i];
+            for (palette_index = 0; palette_index < palette_count;
+                 palette_index++) {
+                if (palette[palette_index] == attr) break;
+            }
+            if (i & 1)
+                packed[16 + i / 2] |=
+                    (uint8_t)((uint8_t)palette_index << 4);
+            else
+                packed[16 + i / 2] = (uint8_t)palette_index;
+        }
+        con->color_run_count = palette_count;
+        con->color_packed = CONSOLE_COLOR_PALETTE;
+    } else {
+        run = 0;
+        run_attr = full[0];
+        for (i = 1; i <= cells; i++) {
+            if (i < cells && full[i] == run_attr) continue;
+            console_color_run_set(packed, run, (uint16_t)i, run_attr);
+            run++;
+            if (i < cells) run_attr = full[i];
+        }
+        con->color_run_count = runs;
+        con->color_packed = CONSOLE_COLOR_RUNS;
     }
     kfree(full);
     con->color_buffer = packed;
-    con->color_run_count = runs;
-    con->color_packed = 1;
 }
 
 static int console_ensure_color_buffer(console_t *con) {
@@ -379,10 +415,10 @@ static int console_ensure_color_buffer(console_t *con) {
 
 static void console_ensure_nondefault_color(console_t *con) {
     if (!con) return;
-    if (con->color_packed) console_expand_color_buffer(con);
     if (console_current_attr(con) != 0x70) {
         console_ensure_color_buffer(con);
     }
+    if (con->color_packed) console_expand_color_buffer(con);
 }
 
 int console_alloc(int n) {
@@ -602,32 +638,17 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
 }
 
 static void console_reclaim_default_color(console_t *con) {
-    uint8_t *packed;
-    uint64_t cells;
     uint64_t rows;
     uint64_t cols;
     uint64_t r;
     uint64_t c;
 
     if (!con || !con->color_buffer) return;
-    if (con->color_packed) {
-        cells = con->buffer_rows * con->buffer_cols;
-        packed = (uint8_t *)(void *)con->color_buffer;
-        if (con->color_run_count == 1 &&
-            console_color_run_end(packed, 0) == cells &&
-            packed[8] == 0x70) {
-            kfree(packed);
-            con->color_buffer = NULL;
-            con->color_run_count = 0;
-            con->color_packed = 0;
-        }
-        return;
-    }
     rows = con->buffer_rows;
     cols = con->buffer_cols;
     for (r = 0; r < rows; r++) {
         for (c = 0; c < cols; c++) {
-            if (console_color_row(con, r)[c] != 0x70) return;
+            if (console_color_at(con, r, c) != 0x70) return;
         }
     }
     kfree(con->color_buffer);
@@ -684,8 +705,11 @@ void console_memory_stats(uint64_t *buffers, uint64_t *bytes) {
             }
             if (con->color_buffer) {
                 b++;
-                if (con->color_packed)
-                    sz += console_packed_color_bytes(con);
+                if (con->color_packed == CONSOLE_COLOR_RUNS)
+                    sz += con->color_run_count * 3;
+                else if (con->color_packed)
+                    sz += 16 +
+                          (con->buffer_rows * con->buffer_cols + 1) / 2;
                 else
                     sz += con->buffer_rows * con->buffer_cols;
             }

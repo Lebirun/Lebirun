@@ -350,17 +350,10 @@ static uint64_t *demand_get_pte(uint64_t page_virt) {
     return &pt64[pt_idx];
 }
 
-int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
-    uint64_t eflags;
-    uint64_t page_virt;
-    uint64_t page_idx;
+static int demand_decommit_bounds(uint64_t virt_start, uint64_t virt_end,
+                                  uint64_t *start_out, uint64_t *end_out) {
     uint64_t start;
     uint64_t end;
-    uint64_t *pte_ptr;
-    uint64_t pte;
-    uint64_t phys;
-    int changed;
-    int flush_result;
 
     if (!demand_initialized) return -1;
     start = virt_start & ~(PAGE_SIZE - 1);
@@ -368,10 +361,37 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
     if (end < start) return -1;
     if (start < demand_base) return -1;
     if (end > demand_base + (demand_max_pages * PAGE_SIZE)) return -1;
-    if (start == end) return 0;
+    *start_out = start;
+    *end_out = end;
+    return 0;
+}
 
+int demand_decommit_batch_begin(demand_decommit_batch_t *batch) {
+    uint64_t eflags;
+
+    if (!batch || !demand_initialized) return -1;
     demand_lock_acquire(&eflags);
-    changed = 0;
+    batch->eflags = eflags;
+    batch->reserved_end = demand_reserved_end;
+    batch->active = 1;
+    batch->changed = 0;
+    batch->result = 0;
+    return 0;
+}
+
+int demand_decommit_batch_stage(demand_decommit_batch_t *batch,
+                                uint64_t virt_start, uint64_t virt_end) {
+    uint64_t page_virt;
+    uint64_t page_idx;
+    uint64_t start;
+    uint64_t end;
+    uint64_t *pte_ptr;
+    uint64_t pte;
+
+    if (!batch || !batch->active) return -1;
+    if (demand_decommit_bounds(virt_start, virt_end, &start, &end) < 0)
+        return -1;
+    if (start == end) return 0;
     for (page_virt = start; page_virt < end; page_virt += PAGE_SIZE) {
         page_idx = demand_page_index(page_virt);
         if (!demand_test_committed(page_idx)) continue;
@@ -384,10 +404,33 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
         if (pte & 1) {
             *pte_ptr = pte & ~1ULL;
             __asm__ volatile("invlpg (%0)" : : "r"(page_virt) : "memory");
-            changed = 1;
+            batch->changed = 1;
         }
     }
-    flush_result = changed ? smp_tlb_flush_all_sync() : 0;
+    if (end == demand_reserved_end && start < batch->reserved_end)
+        batch->reserved_end = start;
+    return 0;
+}
+
+int demand_decommit_batch_flush(demand_decommit_batch_t *batch) {
+    if (!batch || !batch->active) return -1;
+    batch->result = batch->changed ? smp_tlb_flush_all_sync() : 0;
+    return batch->result;
+}
+
+void demand_decommit_batch_finish(demand_decommit_batch_t *batch,
+                                  uint64_t virt_start, uint64_t virt_end) {
+    uint64_t page_virt;
+    uint64_t page_idx;
+    uint64_t start;
+    uint64_t end;
+    uint64_t *pte_ptr;
+    uint64_t pte;
+    uint64_t phys;
+
+    if (!batch || !batch->active) return;
+    if (demand_decommit_bounds(virt_start, virt_end, &start, &end) < 0)
+        return;
     for (page_virt = start; page_virt < end; page_virt += PAGE_SIZE) {
         page_idx = demand_page_index(page_virt);
         if (!demand_test_committed(page_idx)) continue;
@@ -401,7 +444,7 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
             demand_clear_committed(page_idx);
             continue;
         }
-        if (flush_result < 0) {
+        if (batch->result < 0) {
             if (!(pte & 1) && (pte & ~0xFFFULL)) *pte_ptr = pte | 1ULL;
             continue;
         }
@@ -410,10 +453,33 @@ int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
         demand_clear_committed(page_idx);
         if (phys >= 0x1000) pfa_free(phys);
     }
-    if (flush_result == 0 && end == demand_reserved_end)
-        demand_reserved_end = start;
+}
+
+void demand_decommit_batch_end(demand_decommit_batch_t *batch) {
+    uint64_t eflags;
+
+    if (!batch || !batch->active) return;
+    if (batch->result == 0 && batch->reserved_end < demand_reserved_end)
+        demand_reserved_end = batch->reserved_end;
+    eflags = batch->eflags;
+    batch->active = 0;
     demand_lock_release(eflags);
-    return flush_result;
+}
+
+int demand_decommit_range(uint64_t virt_start, uint64_t virt_end) {
+    demand_decommit_batch_t batch;
+    int result;
+
+    if (demand_decommit_batch_begin(&batch) < 0) return -1;
+    if (demand_decommit_batch_stage(&batch, virt_start, virt_end) < 0) {
+        batch.result = -1;
+        demand_decommit_batch_end(&batch);
+        return -1;
+    }
+    result = demand_decommit_batch_flush(&batch);
+    demand_decommit_batch_finish(&batch, virt_start, virt_end);
+    demand_decommit_batch_end(&batch);
+    return result;
 }
 
 uint64_t demand_get_bitmap_bytes(void) {

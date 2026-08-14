@@ -221,20 +221,27 @@ static void poison_memory(void *ptr, size_t size, uint8_t pattern) {
     memset(ptr, pattern, size);
 }
 
-static heap_block_t *find_best_fit(size_t size) {
+static heap_block_t *find_best_fit(size_t size, uint64_t *placement_out) {
     heap_block_t *best;
     heap_block_t *current;
+    uint64_t current_start;
     uint64_t current_end;
+    uint64_t extent_end;
+    uint64_t placement;
+    uint64_t prefix_size;
     uint64_t current_uncommitted;
     uint64_t current_pages;
     uint64_t best_uncommitted;
     uint64_t best_pages;
+    uint64_t best_waste;
+    uint64_t waste;
     uint64_t first_page;
     uint64_t last_page;
     
     best = NULL;
     best_uncommitted = UINT64_MAX;
     best_pages = UINT64_MAX;
+    best_waste = UINT64_MAX;
     current = kernel_heap.free_list;
 
     while (current) {
@@ -246,30 +253,85 @@ static heap_block_t *find_best_fit(size_t size) {
         }
 
         if (current->is_free && current->size >= size) {
-            current_end = (uint64_t)current + sizeof(heap_block_t) + size;
-            if (current->size >= size + sizeof(heap_block_t) +
+            current_start = (uint64_t)current;
+            extent_end = current_start + sizeof(heap_block_t) +
+                         current->size;
+            placement = current_start;
+            current_end = placement + sizeof(heap_block_t) + size;
+            if (size + sizeof(heap_block_t) * 2 <= PAGE_SIZE &&
+                    (placement & ~(PAGE_SIZE - 1)) !=
+                    ((current_end + sizeof(heap_block_t) - 1) &
+                     ~(PAGE_SIZE - 1))) {
+                placement = (placement + sizeof(heap_block_t) +
+                             PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            } else if (size + sizeof(heap_block_t) * 2 > PAGE_SIZE &&
+                       (placement & (PAGE_SIZE - 1)) != 0) {
+                placement = (placement + sizeof(heap_block_t) +
+                             PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            }
+            prefix_size = placement - current_start;
+            if (prefix_size != 0 &&
+                    prefix_size < sizeof(heap_block_t) + HEAP_MIN_BLOCK) {
+                placement += PAGE_SIZE;
+                prefix_size = placement - current_start;
+            }
+            current_end = placement + sizeof(heap_block_t) + size;
+            if (current_end > extent_end) {
+                current = current->next;
+                continue;
+            }
+            if (extent_end - current_end >= sizeof(heap_block_t) +
                     HEAP_MIN_BLOCK)
                 current_end += sizeof(heap_block_t);
             current_uncommitted = demand_count_uncommitted(
-                (uint64_t)current, current_end);
-            first_page = (uint64_t)current & ~(PAGE_SIZE - 1);
+                placement, current_end);
+            first_page = placement & ~(PAGE_SIZE - 1);
             last_page = (current_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             current_pages = (last_page - first_page) / PAGE_SIZE;
+            waste = extent_end - current_end;
             if (!best || current_uncommitted < best_uncommitted ||
                 (current_uncommitted == best_uncommitted &&
                  current_pages < best_pages) ||
                 (current_uncommitted == best_uncommitted &&
-                 current_pages == best_pages && current->size < best->size)) {
+                 current_pages == best_pages && waste < best_waste)) {
                 best = current;
                 best_uncommitted = current_uncommitted;
                 best_pages = current_pages;
-                if (current->size == size && current_uncommitted == 0) break;
+                best_waste = waste;
+                *placement_out = placement;
+                if (waste == 0 && current_uncommitted == 0) break;
             }
         }
         current = current->next;
     }
 
     return best;
+}
+
+static heap_block_t *split_block_prefix(heap_block_t *block,
+                                        uint64_t placement) {
+    heap_block_t *new_block;
+    uint64_t block_start;
+    uint64_t block_end;
+    uint64_t prefix_size;
+
+    block_start = (uint64_t)block;
+    if (placement == block_start) return block;
+    block_end = block_start + sizeof(heap_block_t) + block->size;
+    prefix_size = placement - block_start - sizeof(heap_block_t);
+    new_block = (heap_block_t *)placement;
+    new_block->magic = HEAP_MAGIC;
+    new_block->size = block_end - placement - sizeof(heap_block_t);
+    new_block->alloc_size = 0;
+    new_block->alloc_caller = 0;
+    new_block->flags = 0;
+    new_block->is_free = 1;
+    new_block->next = block->next;
+    new_block->prev = block;
+    if (new_block->next) new_block->next->prev = new_block;
+    block->next = new_block;
+    block->size = prefix_size;
+    return new_block;
 }
 
 static void split_block(heap_block_t *block, size_t size) {
@@ -349,12 +411,12 @@ static void coalesce_free_blocks(heap_block_t *block) {
 
 }
 
-static void heap_trim(void) {
+static heap_block_t *heap_trim_candidate(uint64_t *trim_start_out,
+                                         int *remove_out) {
     heap_block_t *last;
     heap_block_t *cur;
     uint64_t block_end;
     uint64_t trim_start;
-    uint64_t new_end;
 
     last = NULL;
     cur = kernel_heap.free_list;
@@ -369,22 +431,24 @@ static void heap_trim(void) {
         cur = cur->next;
     }
 
-    if (!last) return;
+    if (!last) return NULL;
 
     block_end = (uint64_t)last + sizeof(heap_block_t) + last->size;
-    if (block_end != kernel_heap.end_addr) return;
+    if (block_end != kernel_heap.end_addr) return NULL;
+
+    if (((uint64_t)last & (PAGE_SIZE - 1)) == 0) {
+        *trim_start_out = (uint64_t)last;
+        *remove_out = 1;
+        return last;
+    }
 
     trim_start = ((uint64_t)last + sizeof(heap_block_t) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
-    if (trim_start >= kernel_heap.end_addr) return;
-    if (trim_start <= (uint64_t)last + sizeof(heap_block_t)) return;
-
-    demand_decommit_range(trim_start, kernel_heap.end_addr);
-
-    new_end = trim_start;
-    last->size = new_end - (uint64_t)last - sizeof(heap_block_t);
-    kernel_heap.end_addr = new_end;
-    kernel_heap.total_size = new_end - kernel_heap.start_addr;
+    if (trim_start >= kernel_heap.end_addr) return NULL;
+    if (trim_start <= (uint64_t)last + sizeof(heap_block_t)) return NULL;
+    *trim_start_out = trim_start;
+    *remove_out = 0;
+    return last;
 }
 
 static int heap_reserve_virtual(uint64_t virt_start, uint64_t size) {
@@ -492,12 +556,15 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
     heap_block_t *cur;
     void *ptr;
     uint64_t commit_end;
+    uint64_t placement;
+    uint64_t extent_end;
 
     orig_size = size;
     total_size = size + CANARY_OVERHEAD;
     total_size = (total_size + 7) & ~7;
 
-    block = find_best_fit(total_size);
+    placement = 0;
+    block = find_best_fit(total_size, &placement);
 
     if (!block) {
         old_end = kernel_heap.end_addr;
@@ -521,7 +588,7 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
                 initial_block->prev = NULL;
                 kernel_heap.free_list = initial_block;
                 
-                block = find_best_fit(total_size);
+                block = find_best_fit(total_size, &placement);
                 if (block) goto alloc_found;
             }
         }
@@ -600,7 +667,7 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
             coalesce_free_blocks(new_block);
         }
 
-        block = find_best_fit(total_size);
+        block = find_best_fit(total_size, &placement);
         if (!block) {
             printf("kmalloc: Failed after expand\n");
             return NULL;
@@ -609,15 +676,17 @@ static void *kmalloc_internal(size_t size, uint64_t caller) {
 
 alloc_found:
 
-    commit_end = (uint64_t)block + sizeof(heap_block_t) + total_size;
-    if (block->size >= total_size + sizeof(heap_block_t) + HEAP_MIN_BLOCK) {
+    extent_end = (uint64_t)block + sizeof(heap_block_t) + block->size;
+    commit_end = placement + sizeof(heap_block_t) + total_size;
+    if (extent_end - commit_end >= sizeof(heap_block_t) + HEAP_MIN_BLOCK) {
         commit_end += sizeof(heap_block_t);
     }
-    if (heap_commit_span((uint64_t)block, commit_end) < 0) {
-        printf("kmalloc: Failed to commit split span at 0x%08X\n", (uint64_t)block);
+    if (heap_commit_span(placement, commit_end) < 0) {
+        printf("kmalloc: Failed to commit split span at 0x%08X\n", placement);
         return NULL;
     }
 
+    block = split_block_prefix(block, placement);
     split_block(block, total_size);
 
     block->is_free = 0;
@@ -660,15 +729,31 @@ void *kmalloc(size_t size) {
 }
 
 void heap_reclaim_unused(void) {
+    demand_decommit_batch_t batch;
     uint64_t eflags;
     uint64_t region_start;
     uint64_t region_end;
     uint64_t first_page;
     uint64_t last_page;
+    uint64_t trim_start;
+    uint64_t trim_end;
     heap_block_t *block;
+    heap_block_t *trim_block;
+    heap_block_t *trim_prev;
+    int trim_remove;
+    int result;
 
     if (!main_heap_initialized) return;
     eflags = heap_lock_acquire();
+    if (demand_decommit_batch_begin(&batch) < 0) {
+        heap_lock_release(eflags);
+        return;
+    }
+    trim_start = 0;
+    trim_remove = 0;
+    trim_block = heap_trim_candidate(&trim_start, &trim_remove);
+    trim_prev = trim_block ? trim_block->prev : NULL;
+    trim_end = kernel_heap.end_addr;
     block = kernel_heap.free_list;
     while (block) {
         if (block->is_free) {
@@ -676,11 +761,41 @@ void heap_reclaim_unused(void) {
             region_end = region_start + block->size;
             first_page = (region_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             last_page = region_end & ~(PAGE_SIZE - 1);
-            demand_decommit_range(first_page, last_page);
+            demand_decommit_batch_stage(&batch, first_page, last_page);
         }
         block = block->next;
     }
-    heap_trim();
+    if (trim_block && trim_remove)
+        demand_decommit_batch_stage(&batch, trim_start, trim_end);
+    result = demand_decommit_batch_flush(&batch);
+    block = kernel_heap.free_list;
+    while (block) {
+        if (trim_remove && block == trim_block) break;
+        if (block->is_free) {
+            region_start = (uint64_t)block + sizeof(heap_block_t);
+            region_end = region_start + block->size;
+            first_page = (region_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            last_page = region_end & ~(PAGE_SIZE - 1);
+            demand_decommit_batch_finish(&batch, first_page, last_page);
+        }
+        block = block->next;
+    }
+    if (trim_block && trim_remove)
+        demand_decommit_batch_finish(&batch, trim_start, trim_end);
+    demand_decommit_batch_end(&batch);
+    if (result == 0 && trim_block) {
+        if (trim_remove) {
+            if (trim_prev)
+                trim_prev->next = NULL;
+            else
+                kernel_heap.free_list = NULL;
+        } else {
+            trim_block->size = trim_start - (uint64_t)trim_block -
+                               sizeof(heap_block_t);
+        }
+        kernel_heap.end_addr = trim_start;
+        kernel_heap.total_size = trim_start - kernel_heap.start_addr;
+    }
     heap_lock_release(eflags);
 }
 

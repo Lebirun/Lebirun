@@ -547,7 +547,6 @@ void KERNEL_INIT syscalls_epoll_init(void);
 void KERNEL_INIT syscalls_pthread_init(void);
 void KERNEL_INIT syscalls_shm_init(void);
 void KERNEL_INIT syscalls_dl_init(void);
-void KERNEL_INIT syscalls_regex_init(void);
 void KERNEL_INIT syscalls_power_init(void);
 void KERNEL_INIT syscalls_crypto_init(void);
 

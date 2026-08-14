@@ -203,6 +203,22 @@ void demand_mark_committed(uint64_t virt_addr);
 int demand_decommit_page(uint64_t virt_addr);
 int demand_decommit_range(uint64_t virt_start, uint64_t virt_end);
 
+typedef struct demand_decommit_batch {
+    uint64_t eflags;
+    uint64_t reserved_end;
+    int active;
+    int changed;
+    int result;
+} demand_decommit_batch_t;
+
+int demand_decommit_batch_begin(demand_decommit_batch_t *batch);
+int demand_decommit_batch_stage(demand_decommit_batch_t *batch,
+                                uint64_t virt_start, uint64_t virt_end);
+int demand_decommit_batch_flush(demand_decommit_batch_t *batch);
+void demand_decommit_batch_finish(demand_decommit_batch_t *batch,
+                                  uint64_t virt_start, uint64_t virt_end);
+void demand_decommit_batch_end(demand_decommit_batch_t *batch);
+
 void vmm_unmap_page(uint64_t virt_addr);
 void vmm_map_temp(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 void vmm_unmap_temp(uint64_t virt_addr);

@@ -18,6 +18,8 @@
 #define AP_TRAMPOLINE_PHYS  0x8000u
 
 #define RSDP_SIG "RSD PTR "
+#define SMP_IPI_WAIT_SPINS 262144ULL
+#define SMP_TLB_FLUSH_ROUNDS 4
 
 volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
@@ -32,7 +34,9 @@ static volatile int smp_scheduler_ready = 0;
 static volatile int smp_gs_ready = 0;
 static void smp_set_cpu_base(cpu_info_t *cpu);
 static volatile int smp_tlb_flush_lock = 0;
-static volatile int smp_tlb_flush_acks = 0;
+static volatile uint64_t smp_tlb_flush_acks[4];
+static volatile int smp_tlb_flush_pending = 0;
+static int smp_tlb_flush_initiator = 0;
 
 _Static_assert(__builtin_offsetof(cpu_info_t, irq_cr3) == 72, "irq cr3 offset");
 
@@ -307,10 +311,15 @@ uint64_t lapic_get_id(void) {
 }
 
 void lapic_send_ipi(uint64_t apic_id, uint64_t vector) {
+    uint64_t wait;
+
     lapic_write(LAPIC_REG_ICR_HI, apic_id << 24);
     lapic_write(LAPIC_REG_ICR_LO, vector);
-    while (lapic_read(LAPIC_REG_ICR_LO) & ICR_DELIVERY_STATUS)
+    wait = SMP_IPI_WAIT_SPINS;
+    while ((lapic_read(LAPIC_REG_ICR_LO) & ICR_DELIVERY_STATUS) && wait > 0) {
         __asm__ volatile ("pause");
+        wait--;
+    }
 }
 
 void KERNEL_INIT ioapic_init(void) {
@@ -493,35 +502,80 @@ void smp_tlb_flush_all(void) {
 }
 
 void smp_tlb_flush_ack(void) {
-    __sync_fetch_and_add(&smp_tlb_flush_acks, 1);
+    uint64_t bit;
+    int index;
+
+    index = smp_processor_id();
+    if (index < 0 || index >= 256) return;
+    bit = 1ULL << (index & 63);
+    __sync_fetch_and_or(&smp_tlb_flush_acks[index >> 6], bit);
+}
+
+static int smp_tlb_flush_complete(int initiator) {
+    uint64_t bit;
+    int i;
+
+    for (i = 0; i < cpu_count; i++) {
+        if (i == initiator || !cpus[i].active) continue;
+        if (i >= 256) return 0;
+        bit = 1ULL << (i & 63);
+        if (!(smp_tlb_flush_acks[i >> 6] & bit)) return 0;
+    }
+    return 1;
+}
+
+static void smp_tlb_flush_send_missing(int initiator) {
+    uint64_t bit;
+    int i;
+
+    for (i = 0; i < cpu_count; i++) {
+        if (i == initiator || !cpus[i].active) continue;
+        if (i < 256) {
+            bit = 1ULL << (i & 63);
+            if (smp_tlb_flush_acks[i >> 6] & bit) continue;
+        }
+        lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
+    }
 }
 
 int smp_tlb_flush_all_sync(void) {
-    uint64_t my_id;
     uint64_t wait;
+    int initiator;
     int i;
+    int round;
     int result;
-    int targets;
 
     if (!lapic_base || cpu_count <= 1) return 0;
     if (__sync_lock_test_and_set(&smp_tlb_flush_lock, 1))
         return -1;
-    my_id = lapic_get_id();
-    targets = 0;
-    smp_tlb_flush_acks = 0;
+    if (smp_tlb_flush_pending) {
+        if (!smp_tlb_flush_complete(smp_tlb_flush_initiator)) {
+            smp_tlb_flush_send_missing(smp_tlb_flush_initiator);
+            __sync_lock_release(&smp_tlb_flush_lock);
+            return -1;
+        }
+        smp_tlb_flush_pending = 0;
+    }
+    initiator = smp_processor_id();
+    smp_tlb_flush_initiator = initiator;
+    for (i = 0; i < 4; i++) smp_tlb_flush_acks[i] = 0;
     __sync_synchronize();
-    for (i = 0; i < cpu_count; i++) {
-        if (cpus[i].lapic_id == my_id) continue;
-        if (!cpus[i].active) continue;
-        targets++;
-        lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
+    smp_tlb_flush_send_missing(initiator);
+    result = -1;
+    for (round = 0; round < SMP_TLB_FLUSH_ROUNDS; round++) {
+        wait = SMP_IPI_WAIT_SPINS;
+        while (wait > 0) {
+            if (smp_tlb_flush_complete(initiator)) {
+                result = 0;
+                break;
+            }
+            __asm__ volatile ("pause" ::: "memory");
+            wait--;
+        }
+        if (result == 0) break;
+        smp_tlb_flush_send_missing(initiator);
     }
-    wait = 10000000;
-    while (smp_tlb_flush_acks < targets && wait > 0) {
-        __asm__ volatile ("pause" ::: "memory");
-        wait--;
-    }
-    result = smp_tlb_flush_acks == targets ? 0 : -1;
+    if (result < 0) smp_tlb_flush_pending = 1;
     __sync_lock_release(&smp_tlb_flush_lock);
     return result;
 }

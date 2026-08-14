@@ -572,7 +572,6 @@ static int task_free_pml4_if_unowned(task_t *owner, uint64_t pd) {
     if (task_is_current_on_any_cpu(owner)) return 0;
     if ((read_cr3() & ~0xFFFULL) == (pd & ~0xFFFULL)) return 0;
     if (task_pml4_has_other_owner(owner, pd)) return 0;
-    regex_release_address_space(pd);
     vmm_free_pml4(pd);
     return 1;
 }
@@ -582,7 +581,6 @@ static int task_free_exec_old_pml4_if_unowned(task_t *owner, uint64_t pd) {
     if (task_is_current_on_any_cpu(owner)) return 0;
     if ((read_cr3() & ~0xFFFULL) == (pd & ~0xFFFULL)) return 0;
     if (task_pml4_has_owner(owner, pd, 1, 0)) return 0;
-    regex_release_address_space(pd);
     vmm_free_pml4(pd);
     return 1;
 }
@@ -2969,21 +2967,25 @@ static void task_reclaim_stale_exec_now(void) {
     } while (found);
 }
 
-void task_reclaim_exited_now(void) {
+static void task_reclaim_exited(int reclaim_heap) {
     task_reclaim_stale_exec_now();
     exec_cleanup_drain();
     reap_dead_tasks();
     exec_page_cache_reclaim(0);
     slab_gc();
     pfa_ref_gc();
-    heap_reclaim_unused();
+    if (reclaim_heap) heap_reclaim_unused();
     exec_cleanup_drain();
     exec_page_cache_reclaim(0);
     pfa_ref_gc();
 }
 
+void task_reclaim_exited_now(void) {
+    task_reclaim_exited(1);
+}
+
 void task_memory_collect_for_report(void) {
-    task_reclaim_exited_now();
+    task_reclaim_exited(0);
     memory_report_partial_exec_reclaimed = 0;
     task_reclaim_blocked_file_exec(32,
                                    &memory_report_partial_exec_reclaimed);
@@ -2991,7 +2993,6 @@ void task_memory_collect_for_report(void) {
         128, &memory_report_partial_exec_reclaimed);
     task_reclaim_inactive_zero_anon(128);
     klog_reclaim_unused();
-    heap_reclaim_unused();
 }
 
 uint64_t task_memory_report_current_exec_reclaimed(void) {
@@ -4388,13 +4389,6 @@ pid_t task_fork(registers_t *parent_regs, int share_address_space,
             kfree(child);
             return -KERR_EFAULT;
         }
-    }
-
-    if (!share_address_space &&
-        regex_clone_address_space(parent->pml4_phys, child_pd) != 0) {
-        task_release_dead_resources(child);
-        kfree(child);
-        return -KERR_ENOMEM;
     }
 
     if (shm_fork_task(parent->pid, child->pid) != 0) {

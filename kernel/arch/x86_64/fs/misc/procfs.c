@@ -163,7 +163,6 @@ static void proc_collect_memory_report(void) {
     slab_gc();
     slab_reclaim_empty();
     kstack_reclaim_unused();
-    heap_reclaim_unused();
     pfa_ref_gc();
     exec_page_cache_reclaim(0);
     overlay_flush_cache();

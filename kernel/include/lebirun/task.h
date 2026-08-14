@@ -321,8 +321,6 @@ int task_rlimit_set(task_t *task, int resource, unsigned long current,
                     unsigned long maximum);
 int task_rlimit_copy(task_t *dest, task_t *src);
 void task_rlimit_free(task_t *task);
-void regex_release_address_space(uint64_t owner_cr3);
-int regex_clone_address_space(uint64_t source_cr3, uint64_t dest_cr3);
 int task_get_nice(task_t *task);
 int task_set_nice(task_t *task, int nice_value);
 int task_set_scheduler(task_t *task, int policy, int priority);
