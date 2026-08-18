@@ -197,12 +197,12 @@ static void proc_stream_append(proc_stream_t *stream, const char *text,
     stream->position = text_end;
 }
 
-static void proc_stream_value(proc_stream_t *stream, const char *format,
-                              uint64_t value) {
+static void proc_stream_named_value(proc_stream_t *stream, const char *name,
+                                    uint64_t value) {
     char line[64];
     int length;
 
-    length = snprintf(line, sizeof(line), format, value);
+    length = snprintf(line, sizeof(line), "%-21s%7lu\n", name, value);
     if (length <= 0) return;
     if ((uint64_t)length >= sizeof(line)) length = sizeof(line) - 1;
     proc_stream_append(stream, line, (uint64_t)length);
@@ -1137,10 +1137,6 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t kstack_pages;
     uint64_t current_exec_reclaimed;
     uint64_t partial_exec_reclaimed;
-    uint64_t profile_start;
-    uint64_t profile_offset;
-    uint64_t profile_size;
-    uint64_t request_end;
     task_mem_stats_t task_stats;
 
     (void)node;
@@ -1210,125 +1206,115 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset, uint64_t 
     stream.copied = 0;
     stream.buffer = buffer;
 
-#define MEMDETAIL_VALUE(format, value) \
-    proc_stream_value(&stream, (format), (uint64_t)(value))
+#define MEMDETAIL_VALUE(name, value) \
+    proc_stream_named_value(&stream, (name), (uint64_t)(value))
 
-    MEMDETAIL_VALUE("MemAllUsedKB:       %8lu\n", mem_all_used_kb);
-    MEMDETAIL_VALUE("PFANetAllocatedKB:  %8lu\n", pfa_used_kb);
-    MEMDETAIL_VALUE("KernelImageKB:      %8lu\n", kern_kb);
-    MEMDETAIL_VALUE("KernelReclaimedPages:%7lu\n", kernel_reclaimed_pages);
-    MEMDETAIL_VALUE("KernelReclaimedKB:  %8lu\n", kernel_reclaimed_pages * 4);
-    MEMDETAIL_VALUE("BitmapKB:           %8lu\n", bitmap_kb);
-    MEMDETAIL_VALUE("DemandBitmapBytes:  %8lu\n", demand_bitmap_bytes);
-    MEMDETAIL_VALUE("DemandBitmapExtPages:%6lu\n", demand_bitmap_extension_pages);
-    MEMDETAIL_VALUE("DemandBitmapExtKB:  %8lu\n", demand_bitmap_extension_pages * 4);
-    MEMDETAIL_VALUE("EarlyHeapTotalKB:   %8lu\n", early_heap_total_kb);
-    MEMDETAIL_VALUE("EarlyHeapUsedKB:    %8lu\n", early_heap_used_kb);
-    MEMDETAIL_VALUE("HeapCommitPages:    %8lu\n", heap_committed);
-    MEMDETAIL_VALUE("HeapCommitKB:       %8lu\n", heap_committed * 4);
-    MEMDETAIL_VALUE("HeapReservePages:   %8lu\n", heap_reserved);
-    MEMDETAIL_VALUE("HeapAllocatedBytes: %8lu\n", heap_used);
-    MEMDETAIL_VALUE("HeapVirtualSpanBytes:%7lu\n", heap_total);
-    MEMDETAIL_VALUE("TaskCount:          %8lu\n", task_stats.task_count);
-    MEMDETAIL_VALUE("TaskStructBytes:    %8lu\n", task_stats.task_struct_bytes);
-    MEMDETAIL_VALUE("TaskFPUBytes:       %8lu\n", task_stats.task_fpu_bytes);
-    MEMDETAIL_VALUE("TaskFDBytes:        %8lu\n", task_stats.task_fd_bytes);
-    MEMDETAIL_VALUE("TaskPageArrayBytes: %8lu\n", task_stats.task_page_array_bytes);
-    MEMDETAIL_VALUE("TaskFileMapBytes:   %8lu\n", task_stats.task_file_map_bytes);
-    MEMDETAIL_VALUE("KernelStackSlots:   %8lu\n", kstack_slots);
-    MEMDETAIL_VALUE("KernelStackPages:   %8lu\n", kstack_pages);
-    MEMDETAIL_VALUE("KernelStackKB:      %8lu\n", kstack_pages * 4);
-    MEMDETAIL_VALUE("SlabPages:          %8lu\n", slab_pages);
-    MEMDETAIL_VALUE("SlabKB:             %8lu\n", slab_pages * 4);
-    MEMDETAIL_VALUE("E1000Pages:         %8lu\n", e1000_pages);
-    MEMDETAIL_VALUE("E1000KB:            %8lu\n", e1000_pages * 4);
-    MEMDETAIL_VALUE("AHCIPages:          %8lu\n", ahci_pages);
-    MEMDETAIL_VALUE("AHCIKB:             %8lu\n", ahci_pages * 4);
-    MEMDETAIL_VALUE("PT_VMMPTPages:     %8lu\n", pt_pt_pages);
-    MEMDETAIL_VALUE("PT_VMMPTKB:        %8lu\n", pt_pt_pages * 4);
-    MEMDETAIL_VALUE("PT_HeapPTPages:    %8lu\n", pt_heap_pt);
-    MEMDETAIL_VALUE("PT_HeapPTKB:       %8lu\n", pt_heap_pt * 4);
-    MEMDETAIL_VALUE("UserELFPages:       %8lu\n", active_elf_pages);
-    MEMDETAIL_VALUE("UserELFKB:          %8lu\n", active_elf_pages * 4);
-    MEMDETAIL_VALUE("UserHeapPages:      %8lu\n", task_stats.active_heap_pages);
-    MEMDETAIL_VALUE("UserHeapKB:         %8lu\n", task_stats.active_heap_pages * 4);
-    MEMDETAIL_VALUE("UserMmapPages:      %8lu\n", task_stats.active_mmap_pages);
-    MEMDETAIL_VALUE("UserMmapKB:         %8lu\n", task_stats.active_mmap_pages * 4);
-    MEMDETAIL_VALUE("UserStackPages:     %8lu\n", user_stack_pages);
-    MEMDETAIL_VALUE("UserStackKB:        %8lu\n", user_stack_pages * 4);
-    MEMDETAIL_VALUE("UserPDPages:        %8lu\n", user_pd_pages);
-    MEMDETAIL_VALUE("UserPDKB:           %8lu\n", user_pd_pages * 4);
-    MEMDETAIL_VALUE("UserPTPages:        %8lu\n", task_stats.active_user_pt_pages);
-    MEMDETAIL_VALUE("UserPTKB:           %8lu\n", task_stats.active_user_pt_pages * 4);
-    MEMDETAIL_VALUE("ActiveUserPages:    %8lu\n", task_stats.active_user_pages);
-    MEMDETAIL_VALUE("ActiveUserKB:       %8lu\n", task_stats.active_user_pages * 4);
-    MEMDETAIL_VALUE("CurrentUserPages:   %8lu\n", task_stats.current_user_pages);
-    MEMDETAIL_VALUE("CurrentUserKB:      %8lu\n", task_stats.current_user_pages * 4);
-    MEMDETAIL_VALUE("CurrentUserPTPages: %8lu\n", task_stats.current_user_pt_pages);
-    MEMDETAIL_VALUE("CurrentUserPTKB:    %8lu\n", task_stats.current_user_pt_pages * 4);
-    MEMDETAIL_VALUE("CurrentELFPages:    %8lu\n", current_elf_pages);
-    MEMDETAIL_VALUE("CurrentHeapPages:   %8lu\n", task_stats.current_heap_pages);
-    MEMDETAIL_VALUE("CurrentHeapKB:      %8lu\n", task_stats.current_heap_pages * 4);
-    MEMDETAIL_VALUE("CurrentMmapPages:   %8lu\n", task_stats.current_mmap_pages);
-    MEMDETAIL_VALUE("CurrentMmapKB:      %8lu\n", task_stats.current_mmap_pages * 4);
-    MEMDETAIL_VALUE("CurrentStackPages:  %8lu\n", task_stats.current_stack_pages);
-    MEMDETAIL_VALUE("CurrentStackKB:     %8lu\n", task_stats.current_stack_pages * 4);
-    MEMDETAIL_VALUE("DeadUserPages:      %8lu\n", task_stats.dead_user_pages);
-    MEMDETAIL_VALUE("DeadUserKB:         %8lu\n", task_stats.dead_user_pages * 4);
-    MEMDETAIL_VALUE("DeadELFPages:       %8lu\n", dead_elf_pages);
-    MEMDETAIL_VALUE("DeadELFKB:          %8lu\n", dead_elf_pages * 4);
-    MEMDETAIL_VALUE("DeadHeapPages:      %8lu\n", task_stats.dead_heap_pages);
-    MEMDETAIL_VALUE("DeadHeapKB:         %8lu\n", task_stats.dead_heap_pages * 4);
-    MEMDETAIL_VALUE("DeadMmapPages:      %8lu\n", task_stats.dead_mmap_pages);
-    MEMDETAIL_VALUE("DeadMmapKB:         %8lu\n", task_stats.dead_mmap_pages * 4);
-    MEMDETAIL_VALUE("DeadStackPages:     %8lu\n", task_stats.dead_stack_pages);
-    MEMDETAIL_VALUE("DeadStackKB:        %8lu\n", task_stats.dead_stack_pages * 4);
-    MEMDETAIL_VALUE("DeadPDPages:        %8lu\n", task_stats.dead_pd_pages);
-    MEMDETAIL_VALUE("DeadPDKB:           %8lu\n", task_stats.dead_pd_pages * 4);
-    MEMDETAIL_VALUE("DeadUserPTPages:    %8lu\n", task_stats.dead_user_pt_pages);
-    MEMDETAIL_VALUE("DeadUserPTKB:       %8lu\n", task_stats.dead_user_pt_pages * 4);
-    MEMDETAIL_VALUE("DeadExecOldPages:   %8lu\n", task_stats.dead_exec_old_pages);
-    MEMDETAIL_VALUE("DeadExecOldKB:      %8lu\n", task_stats.dead_exec_old_pages * 4);
-    MEMDETAIL_VALUE("ExecCleanupEntries: %8lu\n", task_stats.exec_cleanup_entries);
-    MEMDETAIL_VALUE("ExecCleanupPages:   %8lu\n", task_stats.exec_cleanup_user_pages);
-    MEMDETAIL_VALUE("ExecCleanupKB:      %8lu\n", task_stats.exec_cleanup_user_pages * 4);
-    MEMDETAIL_VALUE("ExecCachePages:     %8lu\n", exec_cache_pages);
-    MEMDETAIL_VALUE("ExecCacheKB:        %8lu\n", exec_cache_pages * 4);
-    MEMDETAIL_VALUE("ExecReclaimPages:   %8lu\n", exec_reclaim_pages);
-    MEMDETAIL_VALUE("ExecReclaimKB:      %8lu\n", exec_reclaim_pages * 4);
-    MEMDETAIL_VALUE("ExecNonReclaimPages:%8lu\n", task_stats.exec_nonreclaim_pages);
-    MEMDETAIL_VALUE("ExecNonReclaimKB:   %8lu\n", task_stats.exec_nonreclaim_pages * 4);
-    MEMDETAIL_VALUE("CurrentExecReclaimed:%7lu\n", current_exec_reclaimed);
-    MEMDETAIL_VALUE("PartialExecReclaimed:%7lu\n", partial_exec_reclaimed);
-    MEMDETAIL_VALUE("OverlayCacheNodes:  %8lu\n", overlay_nodes);
-    MEMDETAIL_VALUE("OverlayCacheCap:    %8lu\n", overlay_capacity);
-    MEMDETAIL_VALUE("OverlayCacheBytes:  %8lu\n", overlay_bytes);
-    MEMDETAIL_VALUE("SquashCacheNodes:   %8lu\n", sqfs_nodes);
-    MEMDETAIL_VALUE("SquashCacheCap:     %8lu\n", sqfs_capacity);
-    MEMDETAIL_VALUE("SquashCacheBytes:   %8lu\n", sqfs_bytes);
-    MEMDETAIL_VALUE("SquashCacheData:    %8lu\n", sqfs_data_bytes);
-    MEMDETAIL_VALUE("SquashModulePages:  %8lu\n", sqfs_module_pages);
-    MEMDETAIL_VALUE("SquashModuleKB:     %8lu\n", sqfs_module_pages * 4);
-    MEMDETAIL_VALUE("SquashDecompFail:   %8lu\n", sqfs_decomp_failures);
-    MEMDETAIL_VALUE("SquashDecompOver:   %8lu\n", sqfs_decomp_oversize);
-    MEMDETAIL_VALUE("SquashDecompPadded: %8lu\n", sqfs_decomp_padded);
-    MEMDETAIL_VALUE("ConsoleBuffers:     %8lu\n", console_buffers);
-    MEMDETAIL_VALUE("ConsoleBytes:       %8lu\n", console_bytes);
-    MEMDETAIL_VALUE("PFARefActiveNodes:  %8lu\n", ref_active_nodes);
-    MEMDETAIL_VALUE("PFARefFreeNodes:    %8lu\n", ref_free_nodes);
+    MEMDETAIL_VALUE("MemAllUsedKB:", mem_all_used_kb);
+    MEMDETAIL_VALUE("PFANetAllocatedKB:", pfa_used_kb);
+    MEMDETAIL_VALUE("KernelImageKB:", kern_kb);
+    MEMDETAIL_VALUE("KernelReclaimedPages:", kernel_reclaimed_pages);
+    MEMDETAIL_VALUE("KernelReclaimedKB:", kernel_reclaimed_pages * 4);
+    MEMDETAIL_VALUE("BitmapKB:", bitmap_kb);
+    MEMDETAIL_VALUE("DemandBitmapBytes:", demand_bitmap_bytes);
+    MEMDETAIL_VALUE("DemandBitmapExtPages:", demand_bitmap_extension_pages);
+    MEMDETAIL_VALUE("DemandBitmapExtKB:", demand_bitmap_extension_pages * 4);
+    MEMDETAIL_VALUE("EarlyHeapTotalKB:", early_heap_total_kb);
+    MEMDETAIL_VALUE("EarlyHeapUsedKB:", early_heap_used_kb);
+    MEMDETAIL_VALUE("HeapCommitPages:", heap_committed);
+    MEMDETAIL_VALUE("HeapCommitKB:", heap_committed * 4);
+    MEMDETAIL_VALUE("HeapReservePages:", heap_reserved);
+    MEMDETAIL_VALUE("HeapAllocatedBytes:", heap_used);
+    MEMDETAIL_VALUE("HeapVirtualSpanBytes:", heap_total);
+    MEMDETAIL_VALUE("TaskCount:", task_stats.task_count);
+    MEMDETAIL_VALUE("TaskStructBytes:", task_stats.task_struct_bytes);
+    MEMDETAIL_VALUE("TaskFPUBytes:", task_stats.task_fpu_bytes);
+    MEMDETAIL_VALUE("TaskFDBytes:", task_stats.task_fd_bytes);
+    MEMDETAIL_VALUE("TaskPageArrayBytes:", task_stats.task_page_array_bytes);
+    MEMDETAIL_VALUE("TaskFileMapBytes:", task_stats.task_file_map_bytes);
+    MEMDETAIL_VALUE("KernelStackSlots:", kstack_slots);
+    MEMDETAIL_VALUE("KernelStackPages:", kstack_pages);
+    MEMDETAIL_VALUE("KernelStackKB:", kstack_pages * 4);
+    MEMDETAIL_VALUE("SlabPages:", slab_pages);
+    MEMDETAIL_VALUE("SlabKB:", slab_pages * 4);
+    MEMDETAIL_VALUE("E1000Pages:", e1000_pages);
+    MEMDETAIL_VALUE("E1000KB:", e1000_pages * 4);
+    MEMDETAIL_VALUE("AHCIPages:", ahci_pages);
+    MEMDETAIL_VALUE("AHCIKB:", ahci_pages * 4);
+    MEMDETAIL_VALUE("PT_VMMPTPages:", pt_pt_pages);
+    MEMDETAIL_VALUE("PT_VMMPTKB:", pt_pt_pages * 4);
+    MEMDETAIL_VALUE("PT_HeapPTPages:", pt_heap_pt);
+    MEMDETAIL_VALUE("PT_HeapPTKB:", pt_heap_pt * 4);
+    MEMDETAIL_VALUE("UserELFPages:", active_elf_pages);
+    MEMDETAIL_VALUE("UserELFKB:", active_elf_pages * 4);
+    MEMDETAIL_VALUE("UserHeapPages:", task_stats.active_heap_pages);
+    MEMDETAIL_VALUE("UserHeapKB:", task_stats.active_heap_pages * 4);
+    MEMDETAIL_VALUE("UserMmapPages:", task_stats.active_mmap_pages);
+    MEMDETAIL_VALUE("UserMmapKB:", task_stats.active_mmap_pages * 4);
+    MEMDETAIL_VALUE("UserStackPages:", user_stack_pages);
+    MEMDETAIL_VALUE("UserStackKB:", user_stack_pages * 4);
+    MEMDETAIL_VALUE("UserPDPages:", user_pd_pages);
+    MEMDETAIL_VALUE("UserPDKB:", user_pd_pages * 4);
+    MEMDETAIL_VALUE("UserPTPages:", task_stats.active_user_pt_pages);
+    MEMDETAIL_VALUE("UserPTKB:", task_stats.active_user_pt_pages * 4);
+    MEMDETAIL_VALUE("ActiveUserPages:", task_stats.active_user_pages);
+    MEMDETAIL_VALUE("ActiveUserKB:", task_stats.active_user_pages * 4);
+    MEMDETAIL_VALUE("CurrentUserPages:", task_stats.current_user_pages);
+    MEMDETAIL_VALUE("CurrentUserKB:", task_stats.current_user_pages * 4);
+    MEMDETAIL_VALUE("CurrentUserPTPages:", task_stats.current_user_pt_pages);
+    MEMDETAIL_VALUE("CurrentUserPTKB:", task_stats.current_user_pt_pages * 4);
+    MEMDETAIL_VALUE("CurrentELFPages:", current_elf_pages);
+    MEMDETAIL_VALUE("CurrentHeapPages:", task_stats.current_heap_pages);
+    MEMDETAIL_VALUE("CurrentHeapKB:", task_stats.current_heap_pages * 4);
+    MEMDETAIL_VALUE("CurrentMmapPages:", task_stats.current_mmap_pages);
+    MEMDETAIL_VALUE("CurrentMmapKB:", task_stats.current_mmap_pages * 4);
+    MEMDETAIL_VALUE("CurrentStackPages:", task_stats.current_stack_pages);
+    MEMDETAIL_VALUE("CurrentStackKB:", task_stats.current_stack_pages * 4);
+    MEMDETAIL_VALUE("DeadUserPages:", task_stats.dead_user_pages);
+    MEMDETAIL_VALUE("DeadUserKB:", task_stats.dead_user_pages * 4);
+    MEMDETAIL_VALUE("DeadELFPages:", dead_elf_pages);
+    MEMDETAIL_VALUE("DeadELFKB:", dead_elf_pages * 4);
+    MEMDETAIL_VALUE("DeadHeapPages:", task_stats.dead_heap_pages);
+    MEMDETAIL_VALUE("DeadHeapKB:", task_stats.dead_heap_pages * 4);
+    MEMDETAIL_VALUE("DeadMmapPages:", task_stats.dead_mmap_pages);
+    MEMDETAIL_VALUE("DeadMmapKB:", task_stats.dead_mmap_pages * 4);
+    MEMDETAIL_VALUE("DeadStackPages:", task_stats.dead_stack_pages);
+    MEMDETAIL_VALUE("DeadStackKB:", task_stats.dead_stack_pages * 4);
+    MEMDETAIL_VALUE("DeadPDPages:", task_stats.dead_pd_pages);
+    MEMDETAIL_VALUE("DeadPDKB:", task_stats.dead_pd_pages * 4);
+    MEMDETAIL_VALUE("DeadUserPTPages:", task_stats.dead_user_pt_pages);
+    MEMDETAIL_VALUE("DeadUserPTKB:", task_stats.dead_user_pt_pages * 4);
+    MEMDETAIL_VALUE("DeadExecOldPages:", task_stats.dead_exec_old_pages);
+    MEMDETAIL_VALUE("DeadExecOldKB:", task_stats.dead_exec_old_pages * 4);
+    MEMDETAIL_VALUE("ExecCleanupEntries:", task_stats.exec_cleanup_entries);
+    MEMDETAIL_VALUE("ExecCleanupPages:", task_stats.exec_cleanup_user_pages);
+    MEMDETAIL_VALUE("ExecCleanupKB:", task_stats.exec_cleanup_user_pages * 4);
+    MEMDETAIL_VALUE("ExecCachePages:", exec_cache_pages);
+    MEMDETAIL_VALUE("ExecCacheKB:", exec_cache_pages * 4);
+    MEMDETAIL_VALUE("ExecReclaimPages:", exec_reclaim_pages);
+    MEMDETAIL_VALUE("ExecReclaimKB:", exec_reclaim_pages * 4);
+    MEMDETAIL_VALUE("ExecNonReclaimPages:", task_stats.exec_nonreclaim_pages);
+    MEMDETAIL_VALUE("ExecNonReclaimKB:", task_stats.exec_nonreclaim_pages * 4);
+    MEMDETAIL_VALUE("CurrentExecReclaimed:", current_exec_reclaimed);
+    MEMDETAIL_VALUE("PartialExecReclaimed:", partial_exec_reclaimed);
+    MEMDETAIL_VALUE("OverlayCacheNodes:", overlay_nodes);
+    MEMDETAIL_VALUE("OverlayCacheCap:", overlay_capacity);
+    MEMDETAIL_VALUE("OverlayCacheBytes:", overlay_bytes);
+    MEMDETAIL_VALUE("SquashCacheNodes:", sqfs_nodes);
+    MEMDETAIL_VALUE("SquashCacheCap:", sqfs_capacity);
+    MEMDETAIL_VALUE("SquashCacheBytes:", sqfs_bytes);
+    MEMDETAIL_VALUE("SquashCacheData:", sqfs_data_bytes);
+    MEMDETAIL_VALUE("SquashModulePages:", sqfs_module_pages);
+    MEMDETAIL_VALUE("SquashModuleKB:", sqfs_module_pages * 4);
+    MEMDETAIL_VALUE("SquashDecompFail:", sqfs_decomp_failures);
+    MEMDETAIL_VALUE("SquashDecompOver:", sqfs_decomp_oversize);
+    MEMDETAIL_VALUE("SquashDecompPadded:", sqfs_decomp_padded);
+    MEMDETAIL_VALUE("ConsoleBuffers:", console_buffers);
+    MEMDETAIL_VALUE("ConsoleBytes:", console_bytes);
+    MEMDETAIL_VALUE("PFARefActiveNodes:", ref_active_nodes);
+    MEMDETAIL_VALUE("PFARefFreeNodes:", ref_free_nodes);
 
 #undef MEMDETAIL_VALUE
 
-    proc_stream_append(&stream, "HeapProfile:\n", 13);
-    profile_start = stream.position;
-    request_end = offset + size;
-    if (request_end < offset) request_end = UINT64_MAX;
-    if (stream.copied < size && request_end > profile_start && buffer) {
-        profile_offset = offset > profile_start ? offset - profile_start : 0;
-        profile_size = size - stream.copied;
-        stream.copied += heap_profile_read(profile_offset, profile_size,
-                                           buffer + stream.copied);
-    }
     return stream.copied;
 
 }

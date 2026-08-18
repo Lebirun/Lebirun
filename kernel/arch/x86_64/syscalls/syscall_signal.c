@@ -24,27 +24,8 @@
 #define SIGTTOU   22
 #define SIGURG    23
 
-static int signal_user_range_mapped(uint64_t addr, uint64_t size) {
-    uint64_t end;
-    uint64_t page;
-    uint64_t last;
-    uint64_t pd;
-
-    if (!current_task || size == 0) return 0;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
-    end = addr + size - 1;
-    if (end < addr || end >= KERNEL_VMA) return 0;
-    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
-    if (!pd) return 0;
-    page = addr & ~0xFFFULL;
-    last = end & ~0xFFFULL;
-    for (;;) {
-        if (!vmm_get_phys_in_pml4(pd, page)) return 0;
-        if (page == last) break;
-        page += PAGE_SIZE;
-    }
-    return 1;
-}
+#define signal_user_range_mapped(addr, size) \
+    syscall_user_range_present((addr), (size), 0, 1)
 #define SIGXCPU   24
 #define SIGXFSZ   25
 #define SIGVTALRM 26

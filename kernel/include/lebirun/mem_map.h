@@ -51,7 +51,6 @@ typedef struct {
 typedef struct heap_block {
     uint64_t size;
     uint64_t alloc_size;
-    uint64_t alloc_caller;
     struct heap_block *next;
     struct heap_block *prev;
     uint32_t magic;
@@ -153,7 +152,6 @@ void kfree_aligned(void *ptr);
 void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void heap_dump(void);
-uint64_t heap_profile_read(uint64_t offset, uint64_t size, uint8_t *out);
 uint64_t heap_free_space(void);
 int is_early_heap_ptr(void *ptr);
 void heap_reclaim_unused(void);
@@ -179,7 +177,7 @@ void heap_verify(void);
 void vmm_debug_page(uint64_t virt_addr);
 
 void slab_init(void);
-void *slab_alloc(size_t size, void *caller);
+void *slab_alloc(size_t size);
 void slab_free(void *ptr, void *caller);
 void slab_gc(void);
 void slab_reclaim_empty(void);

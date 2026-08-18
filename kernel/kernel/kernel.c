@@ -19,6 +19,7 @@
 #include <lebirun/squashfs.h>
 #include <lebirun/iso9660.h>
 #include <lebirun/overlayfs.h>
+#include <lebirun/devfs.h>
 #include <lebirun/framebuffer.h>
 #include <lebirun/console.h>
 #include <lebirun/vfs.h>
@@ -193,12 +194,6 @@ static void KERNEL_INIT kernel_boot(void) {
     int vring_boot_enabled;
     uint32_t mod_count;
     extern void procfs_init(void);
-    extern void devfs_init(void);
-    extern int devfs_register_blockdev(const char *name, uint32_t port_index);
-    extern int devfs_register_cdrom(const char *name, uint32_t port_index);
-    extern int devfs_register_partition(const char *name, uint32_t port_index,
-                                        uint64_t start_lba, uint64_t sector_count);
-    extern void devfs_register_initrd(void);
     extern void sysfs_init(void);
     extern void lke_init(void);
     extern void lke_autoload(void);

@@ -63,7 +63,7 @@ SECTIONS
         KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .ctors))
         KEEP(*(SORT(.ctors.*)))
         KEEP(*(.ctors))
-        __CTOR_END__ = .;
+        PROVIDE(__CTOR_END__ = .);
     } :data
 
     .dtors : {
@@ -73,7 +73,7 @@ SECTIONS
         KEEP(*(EXCLUDE_FILE(*crtend.o *crtend?.o) .dtors))
         KEEP(*(SORT(.dtors.*)))
         KEEP(*(.dtors))
-        __DTOR_END__ = .;
+        PROVIDE(__DTOR_END__ = .);
     } :data
 
     .fini_array : {

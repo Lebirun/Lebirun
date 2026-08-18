@@ -49,58 +49,6 @@ static int task_fd_alloc_from(int start) {
     return i;
 }
 
-static int at_user_range_mapped(uint64_t addr, uint64_t size) {
-    uint64_t pd;
-    uint64_t start;
-    uint64_t end;
-    uint64_t p;
-    uint64_t phys;
-    uint64_t *new_user_pages;
-
-    if (!current_task) return 0;
-    if (size == 0) return 0;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
-    if (addr + size < addr || addr + size > KERNEL_VMA) return 0;
-    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
-    if (!pd) return 0;
-    start = addr & ~0xFFFu;
-    end = (addr + size - 1) & ~0xFFFu;
-    p = start;
-    for (;;) {
-        if (vmm_get_phys_in_pml4(pd, p) == 0) {
-            if (!task_handle_file_page_fault(current_task, p)) {
-                if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= 0x1000u && p < current_task->user_brk)) {
-                    phys = pfa_alloc();
-                    if (!phys) return 0;
-                    pmm_zero_page_phys(phys);
-                    vmm_map_page_in_pml4(pd, p, phys, 0x7);
-                    if (vmm_get_phys_in_pml4(pd, p) == 0) {
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
-                    if (!new_user_pages) {
-                        vmm_unmap_page_in_pml4(pd, p);
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    current_task->user_pages = new_user_pages;
-                    current_task->user_pages[current_task->user_pages_count] = phys;
-                    current_task->user_pages_count++;
-                } else {
-                    return 0;
-                }
-            }
-            if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
-        }
-        if (p == end) break;
-        if (p > end) return 0;
-        p += 0x1000;
-    }
-    return 1;
-}
-
 static char *resolve_at_path_alloc(int dirfd, const char *pathname) {
     char *input;
     char *base_alloc;
@@ -774,7 +722,7 @@ static int sys_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
         return 0;
     }
     if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000 ||
-        !at_user_range_mapped(buf_addr, buf_size)) {
+        !syscall_user_range_mapped(buf_addr, buf_size, 0)) {
         kfree(path);
         return -EFAULT;
     }
@@ -952,7 +900,7 @@ static int sys_utimensat(int dirfd, const char *pathname,
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     if (!current_task) return -ESRCH;
     if (!pathname ||
-        !at_user_range_mapped((uint64_t)(uintptr_t)pathname, 1))
+        !syscall_user_range_mapped((uint64_t)(uintptr_t)pathname, 1, 0))
         return -EFAULT;
     node = NULL;
     if (pathname && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {

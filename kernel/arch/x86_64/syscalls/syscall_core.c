@@ -154,14 +154,14 @@ void syscall_core_flush_tty_input(int con_id) {
         memset(line_buffers[con_id], 0, (uint64_t)line_capacity[con_id]);
 }
 
-static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
+int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
     uint64_t end;
     uint64_t p;
     uint64_t pd;
     uint64_t phys;
     uint64_t *new_user_pages;
 
-    if (len == 0) return 1;
+    if (len == 0) return empty_mapped;
     if (!current_task) return 0;
     if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
     if (addr + len < addr || addr + len > KERNEL_VMA) return 0;
@@ -202,6 +202,30 @@ static int syscall_core_user_range_mapped(uint64_t addr, uint64_t len) {
         p += 0x1000ULL;
     }
     return 1;
+}
+
+int syscall_user_range_present(uint64_t addr, uint64_t len,
+                               int empty_mapped, int fallback_pd) {
+    uint64_t end;
+    uint64_t page;
+    uint64_t last;
+    uint64_t pd;
+
+    if (!current_task) return 0;
+    if (len == 0) return empty_mapped;
+    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
+    end = addr + len - 1;
+    if (end < addr || end >= KERNEL_VMA) return 0;
+    pd = current_task->cr3;
+    if (!pd && fallback_pd) pd = current_task->pml4_phys;
+    if (!pd) return 0;
+    page = addr & ~0xFFFULL;
+    last = end & ~0xFFFULL;
+    for (;;) {
+        if (!vmm_get_phys_in_pml4(pd, page)) return 0;
+        if (page == last) return 1;
+        page += PAGE_SIZE;
+    }
 }
 
 static void serial_write_move_back(int n) {
@@ -517,7 +541,7 @@ static int sys_write_impl(int fd, const char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (is_epoll_special_fd(fd))
         return event_descriptor_write(fd, buf, len);
 
@@ -733,7 +757,7 @@ static int sys_read_impl(int fd, char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (is_epoll_special_fd(fd))
         return event_descriptor_read(fd, buf, len);
 
@@ -1242,7 +1266,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
-    if (!syscall_core_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
 
     tfd = NULL;
     if (current_task && current_task->fds && fd >= 0 &&
@@ -1334,7 +1358,7 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
     if (iov_addr >= KERNEL_VMA || iov_addr < 0x1000) return -EFAULT;
     iov_end = iov_addr + (uint64_t)iovcnt * sizeof(struct iovec);
     if (iov_end < iov_addr || iov_end >= KERNEL_VMA) return -EFAULT;
-    if (!syscall_core_user_range_mapped(iov_addr, (uint64_t)iovcnt * sizeof(struct iovec))) return -EFAULT;
+    if (!syscall_user_range_mapped(iov_addr, (uint64_t)iovcnt * sizeof(struct iovec), 1)) return -EFAULT;
 
     total = 0;
     
@@ -1354,7 +1378,7 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
             return total > 0 ? total : -EFAULT;
         if (base + len < base || base + len >= KERNEL_VMA)
             return total > 0 ? total : -EFAULT;
-        if (!syscall_core_user_range_mapped(base, len))
+        if (!syscall_user_range_mapped(base, len, 1))
             return total > 0 ? total : -EFAULT;
         if (len > (uint64_t)(0x7FFFFFFF - total))
             len = (uint64_t)(0x7FFFFFFF - total);

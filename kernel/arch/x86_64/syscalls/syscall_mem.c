@@ -110,26 +110,8 @@ static uint64_t user_mmap_auto_base(uint64_t next, uint64_t size) {
     return 0;
 }
 
-static int user_range_mapped_mem(uint64_t addr, uint64_t size) {
-    uint64_t end;
-    uint64_t p;
-    uint64_t pend;
-
-    if (!current_task) return 0;
-    if (size == 0) return 1;
-    end = addr + size - 1;
-    if (end < addr) return 0;
-    if (addr < 0x1000 || end >= KERNEL_VMA) return 0;
-    p = addr & ~0xFFFu;
-    pend = end & ~0xFFFu;
-    for (;;) {
-        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
-        if (p == pend) break;
-        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
-        p += 0x1000u;
-    }
-    return 1;
-}
+#define user_range_mapped_mem(addr, size) \
+    syscall_user_range_present((addr), (size), 1, 0)
 
 static int user_range_covered_by_vmas(uint64_t addr, uint64_t size) {
     uint64_t end;

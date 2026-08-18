@@ -344,18 +344,23 @@ registers_t* interrupt_handler(registers_t* regs)
                 if (sp_phys) {
                     uint64_t tv;
                     uint64_t *kp;
+                    uint64_t stack_values[16];
                     int si;
+                    int stack_count;
                     uint64_t soff;
                     tv = TEMP_SLOT(1);
                     temp_map_raw(tv, sp_phys);
                     soff = regs->rsp - sp_page;
                     kp = (uint64_t *)(tv + soff);
-                    printf("  Stack:");
                     for (si = 0; si < 16 && (soff + si * 8) < 4096; si++) {
-                        printf(" 0x%lX", kp[si]);
+                        stack_values[si] = kp[si];
                     }
-                    printf("\n");
+                    stack_count = si;
                     temp_unmap_raw(tv);
+                    printf("  Stack:");
+                    for (si = 0; si < stack_count; si++)
+                        printf(" 0x%lX", stack_values[si]);
+                    printf("\n");
                 }
             }
             task_exit_deferred(139);

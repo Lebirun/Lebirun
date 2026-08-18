@@ -308,7 +308,7 @@ static void pool_add(entropy_pool_t *pool, const uint8_t *data, size_t len)
     memset(&ctx, 0, sizeof(ctx));
 }
 
-static void collect_boot_entropy(uint8_t *buf, size_t len)
+static void KERNEL_INIT collect_boot_entropy(uint8_t *buf, size_t len)
 {
     sha256_ctx_t ctx;
     uint8_t hash[32];

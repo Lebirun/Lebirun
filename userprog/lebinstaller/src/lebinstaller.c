@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <crypt.h>
@@ -593,34 +595,148 @@ static int inst_umount_partition(const char *mountpoint)
     return ret;
 }
 
-static int inst_format_ext4(const char *devpath)
+static void inst_format_process_line(char *line, char *error,
+                                     size_t error_size)
 {
+    unsigned int current;
+    unsigned int total;
+    int pct;
+    size_t len;
+
+    len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n')) {
+        line[len - 1] = '\0';
+        len--;
+    }
+    if (line[0] == '\0') return;
+    if (sscanf(line, "LEBFORMAT_PROGRESS %u %u", &current, &total) == 2 &&
+        total > 0 && current <= total) {
+        pct = 1 + (int)(current * 3 / total);
+        if (pct > 4) pct = 4;
+        lebui_progress_update(&prog_st, "Formatting partition...", pct);
+        return;
+    }
+    if (error && error_size > 0 &&
+        (strstr(line, "lformat.ext4:") ||
+         strstr(line, "Unable to start lformat.ext4")))
+        snprintf(error, error_size, "%s", line);
+    lebui_progress_log(&prog_st, line);
+}
+
+static int inst_format_ext4(const char *devpath, char *error,
+                            size_t error_size)
+{
+    int pipefd[2];
     int pid;
-    int ret;
+    int status;
+    int wait_result;
+    int poll_result;
+    int child_done;
+    int pipe_open;
+    int cancelled;
+    int n;
+    int i;
+    int line_len;
+    char read_buf[128];
+    char line[192];
+    char input_buf[16];
+    char *argv[4];
+    struct pollfd fds[2];
+
+    if (error && error_size > 0) error[0] = '\0';
+    if (pipe(pipefd) != 0) return -1;
 
     pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
 
     if (pid == 0) {
-        int null_fd;
-        char *argv[3];
-        null_fd = open("/dev/null", O_WRONLY);
-        if (null_fd >= 0) {
-            dup2(null_fd, 1);
-            dup2(null_fd, 2);
-            close(null_fd);
-        }
+        close(pipefd[0]);
+        dup2(pipefd[1], 1);
+        dup2(pipefd[1], 2);
+        close(pipefd[1]);
         argv[0] = "lformat.ext4";
         argv[1] = (char *)devpath;
-        argv[2] = NULL;
+        argv[2] = "--progress";
+        argv[3] = NULL;
         execv("/sbin/lformat.ext4", argv);
         execv("/bin/lformat.ext4", argv);
         execv("/bin/lebu", argv);
+        fprintf(stderr, "Unable to start lformat.ext4");
+        fflush(stderr);
         _exit(127);
     }
 
-    waitpid(pid, &ret, 0);
-    return ret;
+    close(pipefd[1]);
+    status = 0;
+    child_done = 0;
+    pipe_open = 1;
+    cancelled = 0;
+    line_len = 0;
+
+    while (!child_done || pipe_open) {
+        wait_result = waitpid(pid, &status, WNOHANG);
+        if (wait_result == pid) child_done = 1;
+
+        fds[0].fd = pipe_open ? pipefd[0] : -1;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        fds[1].fd = STDIN_FILENO;
+        fds[1].events = POLLIN;
+        fds[1].revents = 0;
+        poll_result = poll(fds, 2, 100);
+        if (poll_result < 0) continue;
+
+        if (fds[1].revents & POLLIN) {
+            n = (int)read(STDIN_FILENO, input_buf, sizeof(input_buf));
+            for (i = 0; i < n; i++) {
+                if (input_buf[i] == 3 || input_buf[i] == 27) {
+                    cancelled = 1;
+                }
+            }
+            if (cancelled && !child_done) kill(pid, SIGTERM);
+        }
+
+        if (pipe_open &&
+            (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+            n = (int)read(pipefd[0], read_buf, sizeof(read_buf));
+            if (n > 0) {
+                for (i = 0; i < n; i++) {
+                    if (read_buf[i] == '\n') {
+                        line[line_len] = '\0';
+                        inst_format_process_line(line, error, error_size);
+                        line_len = 0;
+                    } else if (line_len < (int)sizeof(line) - 1) {
+                        line[line_len++] = read_buf[i];
+                    }
+                }
+            }
+            if (n == 0 || (fds[0].revents & POLLERR)) {
+                close(pipefd[0]);
+                pipe_open = 0;
+            }
+        }
+    }
+
+    if (!child_done) {
+        wait_result = waitpid(pid, &status, 0);
+        if (wait_result != pid) return -1;
+    }
+    if (line_len > 0) {
+        line[line_len] = '\0';
+        inst_format_process_line(line, error, error_size);
+    }
+    if (cancelled) {
+        if (error && error_size > 0)
+            snprintf(error, error_size, "Formatting cancelled.");
+        return -1;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
 }
 
 static int inst_copy_rootfs(const char *mountpoint)
@@ -1652,9 +1768,12 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
         lebui_progress_update(&prog_st, "Formatting partition...", 0);
         snprintf(fmsg, sizeof(fmsg), "Formatting %s as ext4...", p->devpath);
         lebui_progress_log(&prog_st, fmsg);
-        fret = inst_format_ext4(p->devpath);
+        fret = inst_format_ext4(p->devpath, fmsg, sizeof(fmsg));
         if (fret != 0) {
-            snprintf(fmsg, sizeof(fmsg), "Failed to format partition (status=%d, path=%s).", fret, p->devpath);
+            if (fmsg[0] == '\0')
+                snprintf(fmsg, sizeof(fmsg),
+                         "Failed to format partition (status=%d, path=%s).",
+                         fret, p->devpath);
             lebui_msgbox_auto("Error", fmsg, term_sz.rows, term_sz.cols);
             return -1;
         }

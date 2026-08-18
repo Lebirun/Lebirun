@@ -136,44 +136,20 @@ void copy_file_range_release_mount(vfs_node_t *root) {
     mutex_unlock(&copy_transfer_lock);
 }
 
-static uint64_t posix_user_pd(void) {
-    if (!current_task) return 0;
-    if (current_task->cr3) return current_task->cr3;
-    return current_task->pml4_phys;
-}
-
-static int posix_user_range_mapped(uint64_t addr, uint64_t size) {
-    uint64_t pd;
-    uint64_t start;
-    uint64_t end;
-    uint64_t p;
-
-    if (size == 0) return 0;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
-    if (addr + size < addr || addr + size > KERNEL_VMA) return 0;
-    pd = posix_user_pd();
-    if (!pd) return 0;
-    start = addr & ~0xFFFu;
-    end = (addr + size - 1) & ~0xFFFu;
-    p = start;
-    for (;;) {
-        if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
-        if (p == end) break;
-        if (p > end) return 0;
-        p += 0x1000;
-    }
-    return 1;
-}
+#define posix_user_range_mapped(addr, size) \
+    syscall_user_range_mapped((addr), (size), 0)
 
 static int posix_user_read_u64(uint64_t addr, uint64_t *out) {
     if (!out) return -EFAULT;
-    if (!posix_user_range_mapped(addr, sizeof(uint64_t))) return -EFAULT;
-    *out = *(uint64_t *)addr;
+    if (copy_from_user(out, (const void *)(uintptr_t)addr,
+                       sizeof(uint64_t)) != 0)
+        return -EFAULT;
     return 0;
 }
 
 static int posix_copy_user_string(char **out, const char *src_user, uint64_t max_len) {
     char *dst;
+    char scratch[64];
     uint64_t addr;
     uint64_t cur;
     uint64_t chunk;
@@ -181,29 +157,33 @@ static int posix_copy_user_string(char **out, const char *src_user, uint64_t max
     uint64_t i;
     uint64_t j;
     uint64_t alloc_len;
-    char c;
+    uint64_t address_limit;
 
     if (!out || !src_user || max_len == 0) return -EFAULT;
     *out = NULL;
     addr = (uint64_t)src_user;
     if (addr < 0x1000 || addr >= KERNEL_VMA) return -EFAULT;
+    address_limit = KERNEL_VMA - addr;
+    if (max_len > address_limit) max_len = address_limit;
     i = 0;
     while (i < max_len) {
         cur = addr + i;
-        if (cur < addr) {
-            return -EFAULT;
-        }
-        page_remaining = 0x1000 - (cur & 0xFFF);
         chunk = max_len - i;
+        page_remaining = PAGE_SIZE - (cur & (PAGE_SIZE - 1));
         if (chunk > page_remaining) chunk = page_remaining;
-        if (!posix_user_range_mapped(cur, chunk)) return -EFAULT;
+        if (chunk > sizeof(scratch)) chunk = sizeof(scratch);
+        if (copy_from_user(scratch, (const void *)(uintptr_t)cur,
+                           (size_t)chunk) != 0)
+            return -EFAULT;
         for (j = 0; j < chunk; j++) {
-            c = *(const char *)(cur + j);
-            if (c == '\0') {
+            if (scratch[j] == '\0') {
                 alloc_len = i + j + 1;
                 dst = (char *)kmalloc(alloc_len);
                 if (!dst) return -ENOMEM;
-                memcpy(dst, (const void *)addr, alloc_len);
+                if (copy_from_user(dst, src_user, (size_t)alloc_len) != 0) {
+                    kfree(dst);
+                    return -EFAULT;
+                }
                 *out = dst;
                 return 0;
             }

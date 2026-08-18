@@ -97,56 +97,6 @@ void pipe_destroy_if_unused(pipe_t *pipe) {
     kfree(pipe);
 }
 
-static int vfs_user_range_mapped(uint64_t addr, uint64_t len) {
-    uint64_t end;
-    uint64_t p;
-    uint64_t pd;
-    uint64_t phys;
-    uint64_t *new_user_pages;
-
-    if (len == 0) return 1;
-    if (!current_task) return 0;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return 0;
-    if (addr + len < addr || addr + len > KERNEL_VMA) return 0;
-    pd = current_task->cr3 ? current_task->cr3 : current_task->pml4_phys;
-    if (!pd) return 0;
-
-    end = addr + len - 1;
-    p = addr & ~0xFFFULL;
-    while (p <= end) {
-        if (vmm_get_phys_in_pml4(pd, p) == 0) {
-            if (!task_handle_file_page_fault(current_task, p)) {
-                if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= 0x1000u && p < current_task->user_brk)) {
-                    phys = pfa_alloc();
-                    if (!phys) return 0;
-                    pmm_zero_page_phys(phys);
-                    vmm_map_page_in_pml4(pd, p, phys, 0x7);
-                    if (vmm_get_phys_in_pml4(pd, p) == 0) {
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
-                    if (!new_user_pages) {
-                        vmm_unmap_page_in_pml4(pd, p);
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    current_task->user_pages = new_user_pages;
-                    current_task->user_pages[current_task->user_pages_count] = phys;
-                    current_task->user_pages_count++;
-                } else {
-                    return 0;
-                }
-            }
-            if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
-        }
-        if (p + 0x1000ULL <= p) return 0;
-        p += 0x1000ULL;
-    }
-    return 1;
-}
-
 int vfs_check_perm(vfs_node_t *node, int want) {
     uint64_t mode;
     uint64_t uid;
@@ -594,7 +544,7 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!vfs_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
@@ -660,8 +610,8 @@ int sys_vfs_readdir(registers_t *regs) {
     type_addr = regs->rdx;
     index = regs->rsi;
 
-    if (name_addr && !vfs_user_range_mapped(name_addr, 64)) return -EFAULT;
-    if (type_addr && !vfs_user_range_mapped(type_addr, sizeof(uint32_t))) return -EFAULT;
+    if (name_addr && !syscall_user_range_mapped(name_addr, 64, 1)) return -EFAULT;
+    if (type_addr && !syscall_user_range_mapped(type_addr, sizeof(uint32_t), 1)) return -EFAULT;
 
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
@@ -706,9 +656,9 @@ static int sys_vfs_readdir2(int fd, uint64_t name_addr, uint64_t capacity,
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
     if (required_addr &&
-        !vfs_user_range_mapped(required_addr, sizeof(size_t))) return -EFAULT;
+        !syscall_user_range_mapped(required_addr, sizeof(size_t), 1)) return -EFAULT;
     if (type_addr &&
-        !vfs_user_range_mapped(type_addr, sizeof(uint32_t))) return -EFAULT;
+        !syscall_user_range_mapped(type_addr, sizeof(uint32_t), 1)) return -EFAULT;
 
     tfd = &current_task->fds[fd];
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
@@ -725,7 +675,7 @@ static int sys_vfs_readdir2(int fd, uint64_t name_addr, uint64_t capacity,
     }
     if (!name_addr) return capacity == 0 ? 0 : -EFAULT;
     if (capacity < required) return -ERANGE;
-    if (!vfs_user_range_mapped(name_addr, required)) return -EFAULT;
+    if (!syscall_user_range_mapped(name_addr, required, 1)) return -EFAULT;
     memcpy((void *)(uintptr_t)name_addr, entry_name, required);
     return 0;
 }
@@ -784,7 +734,7 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!vfs_user_range_mapped(buf_addr, (uint64_t)len)) return -EFAULT;
+    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;

@@ -22,11 +22,15 @@
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/http.h>
+#include <lebirun/devfs.h>
 
 void syscall_set_exec_completed(void);
 int syscall_check_exec_completed(void);
 void syscall_clear_exec_completed(void);
 void syscall_core_flush_tty_input(int con_id);
+int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped);
+int syscall_user_range_present(uint64_t addr, uint64_t len,
+                               int empty_mapped, int fallback_pd);
 int vfs_check_perm(vfs_node_t *node, int want);
 
 #define EPERM    1
@@ -553,13 +557,4 @@ void KERNEL_INIT syscalls_crypto_init(void);
 int sys_vfs_readdir(registers_t *regs);
 
 void procfs_init(void);
-void devfs_init(void);
-int devfs_register_blockdev(const char *name, uint32_t port_index);
-int devfs_register_partition(const char *name, uint32_t port_index,
-                             uint64_t start_lba, uint64_t sector_count);
-uint64_t devfs_get_partition_start(vfs_node_t *node);
-int devfs_is_partition(vfs_node_t *node);
-int devfs_rescan_partitions(const char *devname);
-void devfs_register_initrd(void);
-
 #endif

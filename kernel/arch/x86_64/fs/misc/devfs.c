@@ -1,4 +1,5 @@
 #include <lebirun/vfs.h>
+#include <lebirun/devfs.h>
 #include <lebirun/pty.h>
 #if CONFIG_VIRT_VFL
 #include <lebirun/vfl.h>
@@ -62,15 +63,24 @@ enum {
     DEVFS_NODE_COUNT
 };
 
+enum {
+    DEVFS_OP_NULL,
+    DEVFS_OP_ZERO,
+    DEVFS_OP_RANDOM,
+    DEVFS_OP_TTY,
+    DEVFS_OP_LINK,
+    DEVFS_OP_NONE,
+    DEVFS_OP_OPEN,
+    DEVFS_OP_FULL,
+    DEVFS_OP_MICE,
+    DEVFS_OP_FB
+};
+
 typedef struct {
     const char *name;
-    uint64_t flags;
-    uint64_t mask;
-    read_type_t read;
-    write_type_t write;
-    ioctl_type_t ioctl;
-    open_type_t open;
-    close_type_t close;
+    uint16_t flags;
+    uint16_t mask;
+    uint8_t operations;
 } devfs_static_node_desc_t;
 
 static vfs_node_t *devfs_nodes[DEVFS_NODE_COUNT];
@@ -523,24 +533,24 @@ static uint64_t dev_stdio_link_read(vfs_node_t *node, uint64_t offset, uint64_t 
 }
 
 static const devfs_static_node_desc_t devfs_node_descs[DEVFS_NODE_COUNT] = {
-    { "null", VFS_CHARDEVICE, 0666, dev_null_read, dev_null_write, NULL, devfs_open, devfs_close },
-    { "zero", VFS_CHARDEVICE, 0666, dev_zero_read, dev_zero_write, NULL, devfs_open, devfs_close },
-    { "urandom", VFS_CHARDEVICE, 0666, dev_urandom_read, dev_urandom_write, NULL, devfs_open, devfs_close },
-    { "random", VFS_CHARDEVICE, 0666, dev_urandom_read, dev_urandom_write, NULL, devfs_open, devfs_close },
-    { "tty", VFS_CHARDEVICE, 0666, dev_tty_read, dev_tty_write, NULL, devfs_open, devfs_close },
-    { "console", VFS_CHARDEVICE, 0600, dev_tty_read, dev_tty_write, NULL, devfs_open, devfs_close },
-    { "stdin", VFS_SYMLINK, 0777, dev_stdio_link_read, NULL, NULL, NULL, NULL },
-    { "stdout", VFS_SYMLINK, 0777, dev_stdio_link_read, NULL, NULL, NULL, NULL },
-    { "stderr", VFS_SYMLINK, 0777, dev_stdio_link_read, NULL, NULL, NULL, NULL },
-    { "fd", VFS_DIRECTORY, 0755, NULL, NULL, NULL, NULL, NULL },
-    { "ptmx", VFS_CHARDEVICE, 0666, NULL, NULL, NULL, devfs_open, devfs_close },
-    { "pts", VFS_DIRECTORY, 0755, NULL, NULL, NULL, NULL, NULL },
-    { "full", VFS_CHARDEVICE, 0666, dev_full_read, dev_full_write, NULL, devfs_open, devfs_close },
-    { "mem", VFS_CHARDEVICE, 0640, NULL, NULL, NULL, devfs_open, devfs_close },
-    { "kmem", VFS_CHARDEVICE, 0640, NULL, NULL, NULL, devfs_open, devfs_close },
-    { "port", VFS_CHARDEVICE, 0640, NULL, NULL, NULL, devfs_open, devfs_close },
-    { "mice", VFS_CHARDEVICE, 0666, dev_mice_read, dev_mice_write, NULL, devfs_open, devfs_close },
-    { "fb0", VFS_CHARDEVICE, 0666, dev_fb0_read, dev_fb0_write, dev_fb0_ioctl, devfs_open, devfs_close }
+    { "null", VFS_CHARDEVICE, 0666, DEVFS_OP_NULL },
+    { "zero", VFS_CHARDEVICE, 0666, DEVFS_OP_ZERO },
+    { "urandom", VFS_CHARDEVICE, 0666, DEVFS_OP_RANDOM },
+    { "random", VFS_CHARDEVICE, 0666, DEVFS_OP_RANDOM },
+    { "tty", VFS_CHARDEVICE, 0666, DEVFS_OP_TTY },
+    { "console", VFS_CHARDEVICE, 0600, DEVFS_OP_TTY },
+    { "stdin", VFS_SYMLINK, 0777, DEVFS_OP_LINK },
+    { "stdout", VFS_SYMLINK, 0777, DEVFS_OP_LINK },
+    { "stderr", VFS_SYMLINK, 0777, DEVFS_OP_LINK },
+    { "fd", VFS_DIRECTORY, 0755, DEVFS_OP_NONE },
+    { "ptmx", VFS_CHARDEVICE, 0666, DEVFS_OP_OPEN },
+    { "pts", VFS_DIRECTORY, 0755, DEVFS_OP_NONE },
+    { "full", VFS_CHARDEVICE, 0666, DEVFS_OP_FULL },
+    { "mem", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
+    { "kmem", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
+    { "port", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
+    { "mice", VFS_CHARDEVICE, 0666, DEVFS_OP_MICE },
+    { "fb0", VFS_CHARDEVICE, 0666, DEVFS_OP_FB }
 };
 
 static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_t *desc, int idx) {
@@ -551,11 +561,47 @@ static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_
     node->uid = 0;
     node->gid = 0;
     node->inode = idx + 1;
-    node->read = desc->read;
-    node->write = desc->write;
-    node->ioctl = desc->ioctl;
-    node->open = desc->open;
-    node->close = desc->close;
+    switch (desc->operations) {
+        case DEVFS_OP_NULL:
+            node->read = dev_null_read;
+            node->write = dev_null_write;
+            break;
+        case DEVFS_OP_ZERO:
+            node->read = dev_zero_read;
+            node->write = dev_zero_write;
+            break;
+        case DEVFS_OP_RANDOM:
+            node->read = dev_urandom_read;
+            node->write = dev_urandom_write;
+            break;
+        case DEVFS_OP_TTY:
+            node->read = dev_tty_read;
+            node->write = dev_tty_write;
+            break;
+        case DEVFS_OP_LINK:
+            node->read = dev_stdio_link_read;
+            break;
+        case DEVFS_OP_FULL:
+            node->read = dev_full_read;
+            node->write = dev_full_write;
+            break;
+        case DEVFS_OP_MICE:
+            node->read = dev_mice_read;
+            node->write = dev_mice_write;
+            break;
+        case DEVFS_OP_FB:
+            node->read = dev_fb0_read;
+            node->write = dev_fb0_write;
+            node->ioctl = dev_fb0_ioctl;
+            break;
+        default:
+            break;
+    }
+    if (desc->operations != DEVFS_OP_LINK &&
+        desc->operations != DEVFS_OP_NONE) {
+        node->open = devfs_open;
+        node->close = devfs_close;
+    }
     node->parent = &devfs_root;
     node->ref_count = 1;
     node->ptr = NULL;
@@ -622,31 +668,36 @@ static vfs_node_t *devfs_get_tty_node(int idx) {
 
 static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     dirent_t *d;
-    static const char *base_entries[] = {
-        "null", "zero", "urandom", "random", "tty", "console",
-        "stdin", "stdout", "stderr", "fd", "ptmx", "pts", "full",
-        "mem", "kmem", "port", "mice", "fb0", "input"
-#if CONFIG_VIRT_VFL
-        , "vfl"
-#endif
-    };
+    const char *entry_name;
+    uint64_t base_count;
     int count;
     int i;
 
     (void)node;
-    
-    if (index < sizeof(base_entries)/sizeof(base_entries[0])) {
+
+    base_count = DEVFS_NODE_COUNT + 1;
+#if CONFIG_VIRT_VFL
+    base_count++;
+#endif
+    if (index < base_count) {
         d = devfs_alloc_dirent();
         if (!d) return NULL;
-        strcpy(d->name, base_entries[index]);
+        if (index < DEVFS_NODE_COUNT) {
+            entry_name = devfs_node_descs[index].name;
+            d->type = devfs_node_descs[index].flags;
+        } else if (index == DEVFS_NODE_COUNT) {
+            entry_name = "input";
+            d->type = VFS_DIRECTORY;
+        } else {
+            entry_name = "vfl";
+            d->type = VFS_CHARDEVICE;
+        }
+        strcpy(d->name, entry_name);
         d->inode = index + 1;
-        d->type = VFS_CHARDEVICE;
-        if (index == 6 || index == 7 || index == 8) d->type = VFS_SYMLINK;
-        if (index == 9 || index == 11 || index == 18) d->type = VFS_DIRECTORY;
         return d;
     }
-    
-    index -= sizeof(base_entries)/sizeof(base_entries[0]);
+
+    index -= base_count;
     if (index < (uint64_t)dev_tty_count) {
         d = devfs_alloc_dirent();
         if (!d) return NULL;

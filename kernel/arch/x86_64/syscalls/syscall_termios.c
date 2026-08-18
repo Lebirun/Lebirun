@@ -19,28 +19,6 @@ static int vfs_node_ptr_sane(vfs_node_t *node) {
     return 1;
 }
 
-static int user_range_mapped(uint64_t addr, uint64_t size) {
-    uint64_t end;
-    uint64_t p;
-    uint64_t pend;
-
-    if (!current_task) return 0;
-    if (size == 0) return 1;
-    end = addr + size - 1;
-    if (end < addr) return 0;
-    if (addr < 0x1000 || end >= KERNEL_VMA) return 0;
-
-    p = addr & ~0xFFFu;
-    pend = end & ~0xFFFu;
-    for (;;) {
-        if (vmm_get_phys_in_pml4(current_task->cr3, p) == 0) return 0;
-        if (p == pend) break;
-        if (p > 0xFFFFFFFFFFFFF000ULL) return 0;
-        p += 0x1000u;
-    }
-    return 1;
-}
-
 static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
     size_t n;
 
@@ -371,13 +349,13 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         case TIOCGSID:
 
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             *(int *)(uintptr_t)arg = (int)creds_get_sid(0);
             return 0;
 
         case TIOCGETA:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_termios))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct kernel_termios), 1, 0)) return -EFAULT;
             memcpy((void*)(uintptr_t)arg, &tty_termios[tty_id], sizeof(struct kernel_termios));
             return 0;
             
@@ -385,7 +363,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         case TIOCSETAW:
         case TIOCSETAF:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_termios))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct kernel_termios), 1, 0)) return -EFAULT;
             if (request == TIOCSETAF) {
                 keyboard_flush_for(tty_id);
                 syscall_core_flush_tty_input(tty_id);
@@ -395,7 +373,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             
         case TIOCGWINSZ:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct kernel_winsize), 1, 0)) return -EFAULT;
             {
                 fb = fb_get();
                 if (fb && (fb->font || fb->cols)) {
@@ -410,7 +388,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             
         case TIOCSWINSZ:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct kernel_winsize))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct kernel_winsize), 1, 0)) return -EFAULT;
             memcpy(&tty_winsize[tty_id], (void*)(uintptr_t)arg, sizeof(struct kernel_winsize));
             {
                 pgrp = tty_get_foreground_pgrp(tty_id);
@@ -421,7 +399,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             
         case TIOCGPGRP:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             {
                 pgrp = tty_get_foreground_pgrp(tty_id);
                 if (pgrp == 0 && current_task) {
@@ -435,13 +413,13 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             
         case TIOCSPGRP:
             if (tty_id < 0) return -ENOTTY;
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             tty_set_foreground_pgrp(tty_id, *(int *)(uintptr_t)arg);
             return 0;
             
         case FIONREAD:
             if (fd == 0 && tty_id >= 0) {
-                if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+                if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
                 *(int*)(uintptr_t)arg = keyboard_has_data_for(tty_id) ? 1 : 0;
                 return 0;
             }
@@ -452,7 +430,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
 
         case VT_OPENQRY:
         {
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             active = console_get_current();
             found = -1;
             for (vi = 0; vi < tty_count; vi++) {
@@ -467,7 +445,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
 
         case VT_GETSTATE:
         {
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_stat_s))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct vt_stat_s), 1, 0)) return -EFAULT;
             vst = (struct vt_stat_s *)(uintptr_t)arg;
             memset(vst, 0, sizeof(*vst));
             vst->v_active = (uint16_t)(console_get_current() + 1);
@@ -527,12 +505,12 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         }
 
         case VT_GETMODE:
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_mode_s))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct vt_mode_s), 1, 0)) return -EFAULT;
             memcpy((void *)(uintptr_t)arg, &vt_mode, sizeof(struct vt_mode_s));
             return 0;
 
         case VT_SETMODE:
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(struct vt_mode_s))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct vt_mode_s), 1, 0)) return -EFAULT;
             memcpy(&vt_mode, (void *)(uintptr_t)arg, sizeof(struct vt_mode_s));
             return 0;
 
@@ -553,7 +531,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             return 0;
 
         case KDGETMODE:
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             if (!tty_valid_id(tty_id)) return -ENOTTY;
             *(int *)(uintptr_t)arg = console_get_graphics_mode(tty_id) ?
                                      KD_GRAPHICS : KD_TEXT;
@@ -563,7 +541,7 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             return 0;
 
         case KDGKBTYPE:
-            if (!arg || !user_range_mapped((uint64_t)arg, sizeof(int))) return -EFAULT;
+            if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             *(int *)(uintptr_t)arg = KB_101;
             return 0;
 

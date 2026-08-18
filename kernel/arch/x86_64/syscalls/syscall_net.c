@@ -135,24 +135,8 @@ static int user_range_ok(uint64_t addr, uint64_t size) {
     return 1;
 }
 
-static int user_range_mapped(uint64_t addr, uint64_t size) {
-    uint64_t pd;
-    uint64_t start;
-    uint64_t end;
-    uint64_t p;
-
-    if (!user_range_ok(addr, size)) return 0;
-    pd = get_user_pd();
-    if (!pd) return 0;
-    start = addr & ~0xFFFu;
-    end = (addr + size - 1) & ~0xFFFu;
-    for (p = start;; p += 0x1000) {
-        if (vmm_get_phys_in_pml4(pd, p) == 0) return 0;
-        if (p == end) break;
-        if (p > end) return 0;
-    }
-    return 1;
-}
+#define user_range_mapped(addr, size) \
+    syscall_user_range_present((addr), (size), 0, 1)
 
 static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) {
     uint64_t addr;

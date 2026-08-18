@@ -238,12 +238,7 @@ static int ahci_append_direct_prdt(hba_cmd_table_t *cmd_table,
 
     if (!cmd_table || !buffer || bytes == 0) return 0;
     if ((uint64_t)(uintptr_t)buffer < KERNEL_VMA) return 0;
-    if (current_task) {
-        pml4 = current_task->pml4_phys;
-        if (!pml4) pml4 = current_task->cr3;
-    } else {
-        pml4 = vmm_get_kernel_cr3();
-    }
+    pml4 = vmm_get_kernel_cr3();
     if (!pml4) return 0;
 
     entries = first_entry;

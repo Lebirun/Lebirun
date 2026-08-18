@@ -6,8 +6,8 @@
 #include <stdio.h>
 
 static char *cmdline_buf;
-static char *init_path;
-static char *root_dev;
+static char *init_path KERNEL_INIT_BSS;
+static char *root_dev KERNEL_INIT_BSS;
 static int num_consoles;
 static int text_mode KERNEL_INIT_BSS;
 static int lke_enabled KERNEL_INIT_BSS;
