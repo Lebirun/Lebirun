@@ -226,20 +226,6 @@ static int fb_ensure_color_buffers(void) {
     return 1;
 }
 
-static uint64_t fb_attr_color(uint8_t idx, int bright) {
-    static const uint64_t normal[8] = {
-        0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
-        0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
-    };
-    static const uint64_t intense[8] = {
-        0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
-        0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
-    };
-
-    idx &= 7;
-    return bright ? intense[idx] : normal[idx];
-}
-
 void fb_reclaim_unused(void) {
     if (!console_is_initialized()) return;
     if (screen_buffer) {
