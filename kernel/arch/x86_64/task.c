@@ -3153,6 +3153,7 @@ void task_deferred_work(void) {
     }
     if ((!task || !task->is_user) &&
         cpu_id == 0) {
+        klog_drain_console0(32);
         usable_pages = pfa_get_usable_ram_kb() / 4;
         free_pages = pfa_count_free();
         low_watermark = usable_pages / 64;

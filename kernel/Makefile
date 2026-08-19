@@ -87,7 +87,6 @@ $(ARCHDIR)/syscalls/syscall_core.o \
 $(ARCHDIR)/syscalls/syscall_mem.o \
 $(ARCHDIR)/syscalls/syscall_net.o \
 $(ARCHDIR)/syscalls/syscall_socket.o \
-$(ARCHDIR)/console.o \
 $(ARCHDIR)/drivers/net/net.o \
 $(ARCHDIR)/drivers/net/netif.o \
 $(ARCHDIR)/drivers/net/ethernet.o \

@@ -52,24 +52,7 @@ static volatile int klog_early_pos KERNEL_INIT_OPTIONAL_BSS;
 static volatile int klog_early_done KERNEL_INIT_OPTIONAL_BSS;
 static int klog_early_reclaimable;
 
-#define KPRINT_MAX_LEN   128
-
-typedef struct {
-    uint16_t len;
-    uint8_t con_id;
-    uint8_t reserved;
-    char msg[KPRINT_MAX_LEN];
-} kprint_item_t;
-
-static kprint_item_t *kprint_ring;
-static uint64_t kprint_capacity;
-static volatile uint64_t kprint_head = 0;
-static volatile uint64_t kprint_tail = 0;
-static volatile uint64_t kprint_count = 0;
-
 static volatile int kprint_ready = 0;
-
-static wait_queue_t kprint_waitq;
 
 #define VRING_PTE_NX 0x8000000000000000ULL
 
@@ -371,7 +354,6 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
         klog_irqrestore(flags);
         offset += ring_len;
     }
-    waitq_wake_one(&kprint_waitq);
     return (int)len;
 }
 
@@ -463,23 +445,6 @@ int klog_snapshot_range(char *buf, int offset, int count) {
     return count;
 }
 
-static int kprint_dequeue(kprint_item_t *out) {
-    uint64_t flags;
-
-    if (!out) return -1;
-    if (!kprint_ring || kprint_capacity == 0) return -1;
-    flags = klog_irqsave();
-    if (kprint_count == 0) {
-        klog_irqrestore(flags);
-        return -1;
-    }
-    *out = kprint_ring[kprint_head];
-    kprint_head = (kprint_head + 1) % kprint_capacity;
-    kprint_count--;
-    klog_irqrestore(flags);
-    return 0;
-}
-
 int kprint_write(int console_id, const char *buf, size_t len) {
     size_t i;
     int con_id_early;
@@ -508,7 +473,6 @@ int kprint_write(int console_id, const char *buf, size_t len) {
     off = 0;
     while (off < len) {
         chunk = (uint64_t)(len - off);
-        if (chunk >= (KPRINT_MAX_LEN - 1)) chunk = (KPRINT_MAX_LEN - 1);
 
         if (con_id == 0) {
             serial_write(buf + off, chunk);
@@ -591,24 +555,17 @@ int klog_drain_console0(uint64_t max_items) {
 
 void kprint_poll(uint64_t max_items) {
     serial_drain(max_items ? max_items : 256);
-    if (klog_count > 0 || kprint_count > 0) waitq_wake_one(&kprint_waitq);
 }
 
 void KERNEL_INIT vring_init(void) {
     klog_ring = NULL;
     klog_capacity = 0;
-    kprint_ring = NULL;
-    kprint_capacity = 0;
     klog_early_done = 1;
 
     klog_head = 0;
     klog_tail = 0;
     klog_count = 0;
     klog_dropped = 0;
-    kprint_head = 0;
-    kprint_tail = 0;
-    kprint_count = 0;
-
     subrings = NULL;
     
     vring_initialized = 1;
@@ -1044,58 +1001,10 @@ void kproc_debug_log(const char *msg, int level) {
     klog_enqueue((uint8_t)level, "\n", 1);
 }
 
-static void klog_task_main(void) {
-    while (1) {
-        uint64_t did;
-        uint64_t drained;
-        kprint_item_t it;
-        klog_item_t kit;
-        int con_id;
-        uint64_t backlog;
-
-        waitq_wait(&kprint_waitq);
-
-        while (kprint_count > 0 || klog_count > 0) {
-            did = 0;
-
-            drained = 0;
-            while (drained < 32 && kprint_dequeue(&it) == 0) {
-                con_id = it.con_id;
-                if (con_id < 0 ||
-                    con_id >= console_get_count()) con_id = 0;
-                if (!console_alt_screen_active(con_id))
-                    console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
-                drained++;
-            }
-            did += drained;
-
-            drained = 0;
-            while (drained < 8 && klog_dequeue(&kit) == 0) {
-                if (kit.level & KLOG_CONSOLE)
-                    kprint_write(0, kit.msg, (size_t)kit.len);
-                drained++;
-            }
-            did += drained;
-
-            if (did == 0) break;
-
-            backlog = kprint_count + klog_count;
-            if (backlog >= 256) {
-                sleep_ms(1);
-            } else {
-                yield();
-            }
-        }
-    }
-}
-
 void KERNEL_INIT kproc_print_init(void) {
     int32_t pid;
-    task_t *t;
 
     vring_create(1, "kprint");
-
-    waitq_init(&kprint_waitq);
     
     vring_add_region(1, HEAP_START, kernel_heap.max_addr, 
                      VRING_PERM_READ | VRING_PERM_WRITE);
@@ -1112,17 +1021,6 @@ void KERNEL_INIT kproc_print_init(void) {
     pid = kproc_create("kprint", 1, NULL, NULL);
 
     if (pid == -1) {
-        t = create_kernel_task(klog_task_main, TASK_READY);
-        if (t) {
-            t->pid = pid;
-            t->is_user = false;
-            task_set_vring(t, 1);
-            t->console_id = 0;
-            strcpy(t->name, "klog");
-            lock_scheduler();
-            add_task_to_runqueue(t);
-            unlock_scheduler();
-        }
         KERNEL_INIT_LOG("VRING: Kernel print process created (PID %d, ring 0.1)\n", pid);
     }
 }
@@ -1282,22 +1180,13 @@ void KERNEL_INIT kprint_enable(void) {
 }
 
 void KERNEL_INIT kprint_flush(void) {
-    kprint_item_t it;
     klog_item_t kit;
     uint64_t total;
     uint64_t retries;
-    int con_id;
 
     retries = 0;
     do {
         total = 0;
-        while (kprint_dequeue(&it) == 0) {
-            con_id = it.con_id;
-            if (con_id < 0 || con_id >= console_get_count()) con_id = 0;
-            if (!console_alt_screen_active(con_id))
-                console_write_to_fb_only(con_id, it.msg, (size_t)it.len);
-            total++;
-        }
         while (klog_dequeue(&kit) == 0) {
             if (kit.level & KLOG_CONSOLE)
                 kprint_write(0, kit.msg, (size_t)kit.len);

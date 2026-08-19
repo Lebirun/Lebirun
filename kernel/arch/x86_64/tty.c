@@ -133,10 +133,7 @@ void terminal_putchar(char c) {
     }
 
     if (c == '\b') {
-        if (terminal_column > 0) {
-            terminal_column--;
-            terminal_putentryat(' ', terminal_color, terminal_column, terminal_row);
-        }
+        if (terminal_column > 0) terminal_column--;
         terminal_updatecursor();
         serial_putchar(c);
         return;
