@@ -1120,28 +1120,32 @@ static int inst_create_user(const char *mountpoint, const char *username, const 
 static int inst_write_timezone(const char *mountpoint, const char *tz)
 {
     char path[MAX_PATH];
+    char line[128];
     int fd;
     int len;
+    int written;
 
     snprintf(path, sizeof(path), "%s/etc/timezone", mountpoint);
-    vfs_create(path, 0644);
-    fd = vfs_open(path, 2);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return -1;
-    len = (int)strlen(tz);
-    vfs_write_fd(fd, tz, len);
-    vfs_write_fd(fd, "\n", 1);
-    vfs_close_fd(fd);
+    len = snprintf(line, sizeof(line), "%s\n", tz);
+    if (len < 0 || len >= (int)sizeof(line)) {
+        close(fd);
+        return -1;
+    }
+    written = (int)write(fd, line, (size_t)len);
+    if (close(fd) < 0 || written != len) return -1;
 
     snprintf(path, sizeof(path), "%s/etc/environment", mountpoint);
-    {
-        char envline[128];
-        vfs_create(path, 0644);
-        fd = vfs_open(path, 2);
-        if (fd < 0) return -1;
-        snprintf(envline, sizeof(envline), "TZ=%s\n", tz);
-        vfs_write_fd(fd, envline, (int)strlen(envline));
-        vfs_close_fd(fd);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    len = snprintf(line, sizeof(line), "TZ=%s\n", tz);
+    if (len < 0 || len >= (int)sizeof(line)) {
+        close(fd);
+        return -1;
     }
+    written = (int)write(fd, line, (size_t)len);
+    if (close(fd) < 0 || written != len) return -1;
 
     return 0;
 }
@@ -1839,7 +1843,9 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_update(&prog_st, "Setting timezone...", 99);
     snprintf(logbuf, sizeof(logbuf), "Timezone: %s", tz_values[tz_idx]);
     lebui_progress_log(&prog_st, logbuf);
-    inst_write_timezone(mountpoint, tz_values[tz_idx]);
+    if (inst_write_timezone(mountpoint, tz_values[tz_idx]) < 0) {
+        lebui_progress_log(&prog_st, "Warning: timezone could not be saved.");
+    }
 
     lebui_progress_update(&prog_st, "Writing package database...", 99);
     seeded = inst_seed_pkg_db_from_iso(mountpoint);

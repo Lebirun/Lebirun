@@ -434,6 +434,7 @@ void keyboard_process_sigint(void)
     extern int *tty_pgrp;
     extern int tty_count;
     extern int deliver_signal_to_task(task_t *target, int sig);
+    extern void syscall_core_flush_tty_input(int con_id);
     int i;
     int fg;
     task_t *target;
@@ -451,6 +452,11 @@ void keyboard_process_sigint(void)
 
         if (!(tty_termios[i].c_lflag & ISIG))
             continue;
+
+        if (!(tty_termios[i].c_lflag & NOFLSH)) {
+            keyboard_flush_for(i);
+            syscall_core_flush_tty_input(i);
+        }
 
         fg = tty_pgrp[i];
         if (fg <= 0)

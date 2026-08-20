@@ -50,6 +50,8 @@ typedef struct {
     void *private_data;
 } task_fd_t;
 
+#define TASK_FD_POSITION_EOF (1ULL << 63)
+
 typedef struct {
     struct vfs_node *node;
     uint64_t vaddr;
@@ -304,7 +306,6 @@ uint64_t exec_page_cache_get_pages(void);
 uint64_t exec_page_cache_get_reclaimable_pages(void);
 void task_memory_collect_for_report(void);
 uint64_t task_memory_report_current_exec_reclaimed(void);
-uint64_t task_memory_report_partial_exec_reclaimed(void);
 void task_memory_pressure_request(void);
 void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);
@@ -349,6 +350,8 @@ void task_fd_position_share(task_fd_t *source, task_fd_t *copy);
 uint64_t task_fd_position_get(task_fd_t *fd);
 void task_fd_position_set(task_fd_t *fd, uint64_t value);
 void task_fd_position_add(task_fd_t *fd, uint64_t value);
+int task_fd_position_is_eof(task_fd_t *fd);
+void task_fd_position_mark_eof(task_fd_t *fd);
 void task_fd_close_all(task_t *task);
 void task_fd_close_cloexec(task_t *task);
 int task_set_cwd(task_t *task, const char *cwd);

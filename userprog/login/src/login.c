@@ -57,6 +57,31 @@ static int read_password(char *buf, int max)
     return r;
 }
 
+static int load_timezone(char *env, int max)
+{
+    int fd;
+    int len;
+    int end;
+
+    if (max < 5) return -1;
+    fd = open("/etc/timezone", O_RDONLY);
+    if (fd < 0) return -1;
+    len = (int)read(fd, env + 3, (size_t)(max - 4));
+    close(fd);
+    if (len <= 0) return -1;
+
+    end = 0;
+    while (end < len && env[end + 3] != '\n' && env[end + 3] != '\r') {
+        end++;
+    }
+    if (end == 0) return -1;
+    env[0] = 'T';
+    env[1] = 'Z';
+    env[2] = '=';
+    env[end + 3] = '\0';
+    return 0;
+}
+
 static int parse_field(const char *line, int field_num, char *out, int out_max)
 {
     int i;
@@ -259,10 +284,9 @@ int main(int argc, char **argv)
     int gid;
     int attempts;
     char *shell_argv[2];
-    char *shell_envp[4];
+    char *shell_envp[5];
     char env_home[MAX_FIELD + 8];
     char env_user[MAX_USERNAME + 8];
-    char env_path[32];
     int exec_attempts;
 
     if (argc >= 2) {
@@ -341,14 +365,19 @@ int main(int argc, char **argv)
         strcat(env_home, home);
         strcpy(env_user, "USER=");
         strcat(env_user, username);
-        strcpy(env_path, "PATH=/bin:/sbin");
 
         shell_argv[0] = shell;
         shell_argv[1] = (char *)0;
         shell_envp[0] = env_home;
         shell_envp[1] = env_user;
-        shell_envp[2] = env_path;
-        shell_envp[3] = (char *)0;
+        shell_envp[2] = "PATH=/bin:/sbin";
+        if (load_timezone(stored_hash, sizeof(stored_hash)) == 0) {
+            shell_envp[3] = stored_hash;
+            shell_envp[4] = (char *)0;
+        } else {
+            shell_envp[3] = (char *)0;
+            shell_envp[4] = (char *)0;
+        }
 
         for (exec_attempts = 0; exec_attempts < 5; exec_attempts++) {
             execve(shell, shell_argv, shell_envp);

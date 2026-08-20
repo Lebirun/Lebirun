@@ -768,11 +768,16 @@ static int sys_read_impl(int fd, char *buf, int len) {
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
             if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
+                if (task_fd_position_is_eof(tfd)) return 0;
+                if (node->length > 0 &&
+                    task_fd_position_get(tfd) >= node->length) return 0;
                 bytes = vfs_read(node, task_fd_position_get(tfd),
                                  (uint64_t)len,
                                  (uint8_t *)(uintptr_t)buf_addr);
                 if (bytes > (uint64_t)len) bytes = (uint64_t)len;
                 task_fd_position_add(tfd, bytes);
+                if (node->length == 0 && bytes < (uint64_t)len)
+                    task_fd_position_mark_eof(tfd);
                 return (int)bytes;
             }
         }
