@@ -200,7 +200,6 @@ static void KERNEL_INIT kernel_boot(void) {
 #if CONFIG_VIRT_VFL
     extern void vfl_register_devfs(void);
 #endif
-    extern void ramfs_debug_check_root(const char *location);
     int mount_ret;
     int use_squashfs;
     overlay_context_t *overlay_ctx;
@@ -663,7 +662,6 @@ static void KERNEL_INIT kernel_boot(void) {
     console_reclaim_unused();
     fb_reclaim_unused();
     klog_reclaim_unused();
-    slab_reclaim_empty();
     kstack_reclaim_unused();
     {
         const char *init_candidates[4];

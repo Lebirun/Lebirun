@@ -563,8 +563,9 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
                          (uint8_t *)(uintptr_t)buf_addr);
         if (bytes > (uint64_t)len) bytes = (uint64_t)len;
         task_fd_position_add(tfd, bytes);
-        if (node->length == 0 && bytes < (uint64_t)len)
+        if (node->length == 0 && bytes < (uint64_t)len) {
             task_fd_position_mark_eof(tfd);
+        }
         return (int)bytes;
     }
     work_size = (uint64_t)len;

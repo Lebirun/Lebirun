@@ -200,7 +200,9 @@ registers_t* interrupt_handler(registers_t* regs)
             else access_type |= VRING_PERM_READ;
             if (regs->err_code & 0x10) access_type |= VRING_PERM_EXEC;
             
-            if (current_kproc && current_kproc->vring_minor != 0) {
+            if (current_kproc &&
+                (!current_task || !current_task->is_user) &&
+                current_kproc->vring_minor != 0) {
                 if (!vring_check_access(current_kproc->vring_minor, fault_addr, PAGE_SIZE, access_type)) {
                     vring_handle_violation(current_kproc->vring_minor, fault_addr, access_type);
                     return schedule_from_irq(regs);

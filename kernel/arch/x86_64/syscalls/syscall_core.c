@@ -515,7 +515,8 @@ static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     return 0;
 }
 
-static int sys_write_impl(int fd, const char *buf, int len) {
+static int __attribute__((optimize("Oz"))) sys_write_impl(
+        int fd, const char *buf, int len) {
     uint64_t buf_addr;
     uint64_t work_size;
     uint64_t remaining;
@@ -732,7 +733,8 @@ static int sys_write(int fd, const char *buf, int len) {
     return result;
 }
 
-static int sys_read_impl(int fd, char *buf, int len) {
+static int __attribute__((optimize("Oz"))) sys_read_impl(
+        int fd, char *buf, int len) {
     uint64_t buf_addr;
     uint64_t work_size;
     uint64_t remaining;

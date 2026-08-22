@@ -249,7 +249,6 @@ static heap_block_t *find_best_fit(size_t size, uint64_t *placement_out) {
         if (current->magic != HEAP_MAGIC) {
             printf("Heap corruption detected at 0x%08X\n", (uint64_t)current);
             heap_verify();
-            dump_map_debug();
             return NULL;
         }
 

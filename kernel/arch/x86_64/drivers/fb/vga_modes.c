@@ -368,7 +368,9 @@ int vga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint64_t *out_pi
     return 0;
 }
 
-static void vga_load_font(const uint8_t *font_data, uint16_t num_chars, uint8_t bytes_per_char) {
+static void KERNEL_INIT vga_load_font(const uint8_t *font_data,
+                                      uint16_t num_chars,
+                                      uint8_t bytes_per_char) {
     volatile uint8_t *plane2;
     uint16_t i;
     uint8_t j;

@@ -217,9 +217,6 @@ typedef struct {
     uint64_t dead_exec_old_pages;
     uint64_t exec_cleanup_entries;
     uint64_t exec_cleanup_user_pages;
-    uint64_t exec_cache_pages;
-    uint64_t exec_reclaim_pages;
-    uint64_t exec_nonreclaim_pages;
 } task_mem_stats_t;
 
 task_t *task_current(void);
@@ -299,13 +296,10 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
                                 int write_fault);
 uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages);
 uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages);
+uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages);
+uint64_t task_reclaim_current_file_exec(uint64_t max_pages);
 int task_track_user_page(task_t *task, uint64_t physical);
 void task_untrack_user_page(task_t *task, uint64_t physical);
-void exec_page_cache_reclaim(uint64_t target_pages);
-uint64_t exec_page_cache_get_pages(void);
-uint64_t exec_page_cache_get_reclaimable_pages(void);
-void task_memory_collect_for_report(void);
-uint64_t task_memory_report_current_exec_reclaimed(void);
 void task_memory_pressure_request(void);
 void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);

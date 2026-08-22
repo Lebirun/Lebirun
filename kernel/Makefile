@@ -106,7 +106,7 @@ kernel/kernel.o \
 kernel/launch_user.o \
 lib/string.o
 
-$(KERNEL_SENSITIVE_OBJS): CFLAGS += -Os
+$(KERNEL_SENSITIVE_OBJS): CFLAGS += -Oz
 
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o

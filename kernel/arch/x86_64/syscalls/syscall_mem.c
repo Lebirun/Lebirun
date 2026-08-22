@@ -3,7 +3,6 @@
 #include <stddef.h>
 
 extern void pfa_cow_release(uint64_t phys_addr);
-extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
 #define PROT_NONE  0x0
 #define PROT_READ  0x1
@@ -201,7 +200,6 @@ static void release_user_leaf_range(uint64_t base, uint64_t end) {
         phys = vmm_unmap_page_in_pml4(current_task->pml4_phys, page_addr);
         if (phys) {
             if (remove_user_page_phys(phys)) {
-                exec_page_cache_on_page_release(phys);
                 pfa_cow_release(phys);
             }
         }

@@ -439,12 +439,6 @@ void slab_free(void *ptr, void *caller) {
     slab_lock_release(eflags);
 }
 
-void slab_gc(void) {
-}
-
-void slab_reclaim_empty(void) {
-}
-
 int slab_owns(void *ptr) {
     slab_page_t *page;
     uint64_t address;

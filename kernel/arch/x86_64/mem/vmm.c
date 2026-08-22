@@ -35,6 +35,3 @@ int heap_map_page(uint64_t virt_addr) {
 void vmm_unmap_page(uint64_t virt_addr) {
     vmm_unmap_page_pae(virt_addr);
 }
-
-void dump_map_debug(void) {
-}

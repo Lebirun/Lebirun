@@ -47,8 +47,6 @@ bool vring_check_access(uint8_t minor, uint64_t addr, uint64_t size, uint8_t acc
 bool vring_check_cap(uint8_t minor, uint8_t cap);
 void vring_panic_forbidden(uint8_t minor, uint64_t addr, uint8_t access_type);
 void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type);
-void vring_selftest_start(void);
-
 #define KPROC_PID_BASE (-1)
 
 typedef enum {

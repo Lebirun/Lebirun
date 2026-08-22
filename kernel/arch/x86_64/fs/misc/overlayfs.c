@@ -23,6 +23,8 @@ static uint64_t ov_node_cache_count = 0;
 static uint64_t ov_node_cache_capacity = 0;
 static mutex_t overlay_node_lock;
 
+#define OV_NODE_CACHE_LIMIT 4
+
 static void overlay_try_free_node(overlay_node_t *onode);
 static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 
@@ -124,17 +126,23 @@ static void overlay_set_parent(vfs_node_t *child, vfs_node_t *parent) {
 
 static int ov_cache_ensure_space(void) {
     ov_node_cache_entry_t *new_cache;
+    uint64_t new_capacity;
 
+    if (ov_node_cache_count < ov_node_cache_capacity) return 0;
+    if (ov_node_cache_capacity >= OV_NODE_CACHE_LIMIT) return -1;
     if (ov_node_cache_count == UINT64_MAX ||
         ov_node_cache_count + 1 >
         SIZE_MAX / sizeof(ov_node_cache_entry_t)) return -1;
+    new_capacity = ov_node_cache_count + 1;
+    if (new_capacity > OV_NODE_CACHE_LIMIT)
+        new_capacity = OV_NODE_CACHE_LIMIT;
     new_cache = (ov_node_cache_entry_t *)krealloc(
         ov_node_cache,
-        (ov_node_cache_count + 1) * sizeof(ov_node_cache_entry_t));
+        new_capacity * sizeof(ov_node_cache_entry_t));
     if (!new_cache)
         return -1;
     ov_node_cache = new_cache;
-    ov_node_cache_capacity = ov_node_cache_count + 1;
+    ov_node_cache_capacity = new_capacity;
     return 0;
 }
 
@@ -179,6 +187,7 @@ void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
 }
 
 static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
+    ov_node_cache_entry_t entry;
     uint64_t i;
 
     if (!ov_node_cache)
@@ -187,7 +196,14 @@ static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
     for (i = 0; i < ov_node_cache_count; i++) {
         if (ov_node_cache[i].parent == parent &&
             strcmp(ov_node_cache[i].name, name) == 0) {
-            return ov_node_cache[i].onode;
+            entry = ov_node_cache[i];
+            if (i + 1 < ov_node_cache_count) {
+                memmove(&ov_node_cache[i], &ov_node_cache[i + 1],
+                        (ov_node_cache_count - i - 1) *
+                            sizeof(ov_node_cache[0]));
+                ov_node_cache[ov_node_cache_count - 1] = entry;
+            }
+            return entry.onode;
         }
     }
     return NULL;
@@ -195,7 +211,6 @@ static overlay_node_t *ov_cache_lookup(vfs_node_t *parent, const char *name) {
 
 static void ov_cache_remove(overlay_node_t *onode) {
     uint64_t i;
-    ov_node_cache_entry_t *new_cache;
 
     for (i = 0; i < ov_node_cache_count; i++) {
         if (ov_node_cache[i].onode == onode) {
@@ -209,14 +224,6 @@ static void ov_cache_remove(overlay_node_t *onode) {
                 kfree(ov_node_cache);
                 ov_node_cache = NULL;
                 ov_node_cache_capacity = 0;
-            } else {
-                new_cache = (ov_node_cache_entry_t *)krealloc(
-                    ov_node_cache,
-                    ov_node_cache_count * sizeof(ov_node_cache_entry_t));
-                if (new_cache) {
-                    ov_node_cache = new_cache;
-                    ov_node_cache_capacity = ov_node_cache_count;
-                }
             }
             return;
         }
@@ -237,12 +244,26 @@ static void ov_cache_invalidate(vfs_node_t *parent, const char *name) {
 }
 
 static int ov_cache_insert(vfs_node_t *parent, const char *name, overlay_node_t *onode) {
+    ov_node_cache_entry_t entry;
     size_t nlen;
     char *name_copy;
 
     if (!name) return 0;
     nlen = strlen(name);
     if (nlen == SIZE_MAX) return 0;
+    if (ov_node_cache && ov_node_cache_count >= OV_NODE_CACHE_LIMIT) {
+        entry = ov_node_cache[0];
+        ov_node_cache_count--;
+        if (ov_node_cache_count > 0) {
+            memmove(&ov_node_cache[0], &ov_node_cache[1],
+                    ov_node_cache_count * sizeof(ov_node_cache[0]));
+        }
+        kfree(entry.name);
+        if (entry.onode) {
+            if (entry.onode->refcount > 0) entry.onode->refcount--;
+            overlay_try_free_node(entry.onode);
+        }
+    }
     name_copy = (char *)kmalloc(nlen + 1);
     if (!name_copy) return 0;
     memcpy(name_copy, name, nlen + 1);

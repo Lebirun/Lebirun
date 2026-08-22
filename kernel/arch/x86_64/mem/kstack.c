@@ -3,6 +3,8 @@
 #include <lebirun/panic.h>
 #include <lebirun/common.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/task.h>
+#include <lebirun/smp.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -185,6 +187,84 @@ void kstack_free(uint8_t *base) {
 }
 
 void kstack_reclaim_unused(void) {
+    task_t *task;
+    kstack_slot_t *entry;
+    registers_t *frame;
+    uint64_t base;
+    uint64_t top_page;
+    uint64_t top;
+    uint64_t rsp;
+    uint64_t frame_address;
+    uint64_t phys;
+    uint64_t flags;
+    int slot;
+    int cpu_index;
+    int running;
+
+    if (!kstack_initialized) return;
+
+    for (;;) {
+        phys = 0;
+        slot = -1;
+        lock_scheduler();
+        task = all_tasks_head;
+        while (task) {
+            if (task->state != TASK_BLOCKED || task->resources_released ||
+                !task->kernel_stack_base || task->running_cpu != -1) {
+                task = task->all_next;
+                continue;
+            }
+            running = 0;
+            for (cpu_index = 0; cpu_index < cpu_count; cpu_index++) {
+                if (cpus[cpu_index].active &&
+                    cpus[cpu_index].running_task == task) {
+                    running = 1;
+                    break;
+                }
+            }
+            if (running) {
+                task = task->all_next;
+                continue;
+            }
+            base = (uint64_t)task->kernel_stack_base;
+            top_page = base + PAGE_SIZE;
+            top = base + KSTACK_USABLE_SIZE;
+            rsp = task->regs.rsp;
+            if (top_page < base || top < top_page ||
+                rsp < top_page || rsp >= top) {
+                task = task->all_next;
+                continue;
+            }
+            frame = task->syscall_frame;
+            if (frame) {
+                frame_address = (uint64_t)frame;
+                if (frame_address < top_page || frame_address >= top ||
+                    sizeof(registers_t) > top - frame_address) {
+                    task = task->all_next;
+                    continue;
+                }
+            }
+            slot = addr_to_slot(base);
+            if (slot < 0 || base != slot_bottom_addr(slot)) {
+                task = task->all_next;
+                continue;
+            }
+            kstack_lock_acquire(&flags);
+            entry = kstack_find_slot_locked(slot);
+            if (entry && entry->page_phys[0]) {
+                phys = entry->page_phys[0];
+                entry->page_phys[0] = 0;
+                entry->bottom_mapped = 0;
+                entry->syscall_bottom = 0;
+            }
+            kstack_lock_release(flags);
+            if (phys) vmm_unmap_page(slot_page_addr(slot, 0));
+            break;
+        }
+        unlock_scheduler();
+        if (!phys) break;
+        pfa_free(phys);
+    }
 }
 
 void kstack_memory_stats(uint64_t *slots, uint64_t *pages) {

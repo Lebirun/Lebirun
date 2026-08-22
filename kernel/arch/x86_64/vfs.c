@@ -16,7 +16,6 @@
 extern void overlay_flush_cache(void);
 extern void squashfs_flush_cache(void);
 extern void squashfs_set_access_blocked(int blocked);
-extern void slab_reclaim_empty(void);
 extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
 extern void pfa_ref_gc(void);
@@ -590,7 +589,6 @@ int vfs_unmount(const char *mountpoint) {
             vfs_reclaim_fds();
             overlay_flush_cache();
             squashfs_flush_cache();
-            slab_reclaim_empty();
             heap_reclaim_unused();
             if (mounts[i].fs_type && mounts[i].fs_type->unmount) {
                 ret = mounts[i].fs_type->unmount(mounts[i].root);
@@ -608,7 +606,6 @@ int vfs_unmount(const char *mountpoint) {
             overlay_flush_cache();
             squashfs_flush_cache();
             vfs_reclaim_fds();
-            slab_reclaim_empty();
             kstack_reclaim_unused();
             heap_reclaim_unused();
             pfa_ref_gc();

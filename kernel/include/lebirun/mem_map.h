@@ -174,13 +174,9 @@ uint64_t heap_block_size_for_ptr(void *ptr);
 uint64_t heap_get_early_total(void);
 uint64_t heap_get_early_used(void);
 void heap_verify(void);
-void vmm_debug_page(uint64_t virt_addr);
-
 void slab_init(void);
 void *slab_alloc(size_t size);
 void slab_free(void *ptr, void *caller);
-void slab_gc(void);
-void slab_reclaim_empty(void);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
 size_t slab_alloc_size(void *ptr);
@@ -240,9 +236,5 @@ void vmm_temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint64_t temp_virt);
 
 void pmm_zero_page_phys(uint64_t phys_addr);
-
-void dump_map_debug(void);
-void dump_pml4_for_virt(uint64_t virt_addr);
-void vmm_dump_for_pml4(uint64_t pml4_phys, uint64_t virt_addr);
 
 #endif

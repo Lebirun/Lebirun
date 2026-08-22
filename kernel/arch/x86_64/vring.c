@@ -61,14 +61,6 @@ extern char _kernel_text_end[];
 extern char _kernel_rodata_end[];
 extern char _kernel_end[];
 
-static volatile int vring_selftest_stage = 0;
-static volatile int vring_selftest_failed = 0;
-static volatile int vring_selftest_violation_seen = 0;
-static volatile int vring_selftest_started = 0;
-static uint64_t vring_selftest_pml4;
-static uint8_t *vring_selftest_buf;
-static task_t *vring_selftest_task_ref;
-
 static spinlock_t serial_lock = { .locked = 0 };
 static spinlock_t klog_persist_lock = { .locked = 0 };
 
@@ -495,7 +487,6 @@ int klog_printf(int level, const char *fmt, ...) {
     int result;
     uint64_t len;
     
-    (void)level;
     if (!fmt) return 0;
 
     va_start(ap, fmt);
@@ -521,6 +512,7 @@ int klog_enqueue_raw(const char *buf, size_t len) {
     int result;
 
     display = kprint_ready;
+    if (display) kprint_serial_async(buf, len);
     result = klog_enqueue(display ? KLOG_CONSOLE : 0,
                           buf, (uint64_t)len);
     return result;
@@ -804,7 +796,6 @@ void vring_handle_violation(uint8_t minor, uint64_t addr, uint8_t access_type) {
     }
 
     if (current_task && !current_task->is_user && current_task->vring_minor == minor) {
-        if (minor == 7) vring_selftest_violation_seen = 1;
         task_exit_deferred(1);
     }
 }
@@ -1023,152 +1014,6 @@ void KERNEL_INIT kproc_print_init(void) {
     if (pid == -1) {
         KERNEL_INIT_LOG("VRING: Kernel print process created (PID %d, ring 0.1)\n", pid);
     }
-}
-
-static void KERNEL_INIT vring_selftest_sandbox_task(void) {
-    volatile uint8_t *allowed;
-    volatile uint8_t *forbidden;
-    uint8_t value;
-
-    allowed = (volatile uint8_t *)vring_selftest_buf;
-    forbidden = (volatile uint8_t *)(vring_selftest_buf + PAGE_SIZE);
-
-    vring_selftest_stage = 1;
-    allowed[0] = 0x5A;
-    value = allowed[0];
-    if (value != 0x5A) {
-        vring_selftest_failed = 1;
-        task_exit(2);
-    }
-    if (read_cr3() != vring_selftest_pml4) {
-        vring_selftest_failed = 2;
-        task_exit(3);
-    }
-    vring_selftest_stage = 2;
-    value = forbidden[0];
-    vring_selftest_failed = 3 + value;
-    task_exit(4);
-}
-
-static void KERNEL_INIT vring_selftest_cleanup(void) {
-    vring_remove(7);
-    if (vring_selftest_buf) {
-        kfree_aligned(vring_selftest_buf);
-        vring_selftest_buf = NULL;
-    }
-    vring_selftest_pml4 = 0;
-    vring_selftest_task_ref = NULL;
-}
-
-static void KERNEL_INIT vring_selftest_supervisor(void) {
-    task_t *t;
-    int i;
-    int ret;
-    uint64_t allowed_addr;
-    uint64_t forbidden_addr;
-    uint64_t allowed_phys;
-    uint64_t forbidden_phys;
-    vring_t *ring;
-
-    printf("VRINGTEST: starting sandboxed VRing checks\n");
-    vring_selftest_violation_seen = 0;
-
-    ret = vring_create_sandboxed(7, "selftest", 0);
-    if (ret != 0) {
-        printf("VRINGTEST: FAIL create sandboxed ring ret=%d\n", ret);
-        task_exit(1);
-        return;
-    }
-
-    vring_selftest_buf = kmalloc_aligned(PAGE_SIZE * 2, PAGE_SIZE);
-    if (!vring_selftest_buf) {
-        printf("VRINGTEST: FAIL allocation\n");
-        vring_selftest_cleanup();
-        task_exit(1);
-        return;
-    }
-
-    allowed_addr = (uint64_t)vring_selftest_buf;
-    forbidden_addr = allowed_addr + PAGE_SIZE;
-    ret = vring_add_region(7, allowed_addr, allowed_addr + PAGE_SIZE,
-                           VRING_PERM_READ | VRING_PERM_WRITE);
-    if (ret != 0) {
-        printf("VRINGTEST: FAIL add allowed page ret=%d\n", ret);
-        vring_selftest_cleanup();
-        task_exit(1);
-        return;
-    }
-
-    ring = vring_get(7);
-    if (!ring || !ring->vring_pml4) {
-        printf("VRINGTEST: FAIL missing sandbox PML4\n");
-        vring_selftest_cleanup();
-        task_exit(1);
-        return;
-    }
-    vring_selftest_pml4 = ring->vring_pml4;
-
-    allowed_phys = vmm_get_phys_in_pml4(ring->vring_pml4, allowed_addr);
-    forbidden_phys = vmm_get_phys_in_pml4(ring->vring_pml4, forbidden_addr);
-    if (!allowed_phys || forbidden_phys) {
-        printf("VRINGTEST: FAIL page map allowed=0x%016lX forbidden=0x%016lX\n",
-               allowed_phys, forbidden_phys);
-        vring_selftest_cleanup();
-        task_exit(1);
-        return;
-    }
-
-    t = create_kernel_task(vring_selftest_sandbox_task, TASK_READY);
-    if (!t) {
-        printf("VRINGTEST: FAIL create task\n");
-        vring_selftest_cleanup();
-        task_exit(1);
-        return;
-    }
-    vring_selftest_task_ref = t;
-    task_set_vring(t, 7);
-    strcpy(t->name, "vringtest");
-    lock_scheduler();
-    add_task_to_runqueue(t);
-    unlock_scheduler();
-
-    for (i = 0; i < 200; i++) {
-        if (vring_selftest_violation_seen) break;
-        yield();
-    }
-
-    if (vring_selftest_failed) {
-        printf("VRINGTEST: FAIL sandbox task escaped with code=%d\n", vring_selftest_failed);
-    } else if (vring_selftest_stage != 2) {
-        printf("VRINGTEST: FAIL sandbox task stopped at stage=%d state=%d\n",
-               vring_selftest_stage, vring_selftest_task_ref->state);
-    } else if (!vring_selftest_violation_seen) {
-        printf("VRINGTEST: FAIL forbidden access did not kill task\n");
-    } else {
-        printf("VRINGTEST: PASS allowed access worked and forbidden access killed sandboxed task\n");
-    }
-
-    if (vring_selftest_task_ref && vring_selftest_task_ref->state != TASK_DEAD)
-        task_kill(vring_selftest_task_ref, 1);
-    vring_selftest_cleanup();
-    task_exit(0);
-}
-
-void KERNEL_INIT vring_selftest_start(void) {
-    task_t *t;
-
-    if (vring_selftest_started) return;
-    vring_selftest_started = 1;
-
-    t = create_kernel_task(vring_selftest_supervisor, TASK_READY);
-    if (!t) {
-        printf("VRINGTEST: FAIL supervisor create\n");
-        return;
-    }
-    strcpy(t->name, "vringtestd");
-    lock_scheduler();
-    add_task_to_runqueue(t);
-    unlock_scheduler();
 }
 
 bool kprint_is_ready(void) {

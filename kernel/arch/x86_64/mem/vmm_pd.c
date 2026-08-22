@@ -16,7 +16,6 @@ extern void pfa_ref_inc(uint64_t phys_addr);
 extern uint64_t pfa_ref_dec(uint64_t phys_addr);
 extern uint64_t pfa_ref_get(uint64_t phys_addr);
 extern void pfa_cow_release64(uint64_t phys_addr);
-extern void exec_page_cache_on_page_release(uint64_t phys_addr);
 
 #define VMM_PHYS_MASK 0x000FFFFFFFFFF000ULL
 
@@ -137,7 +136,6 @@ static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int
                 for (l = 0; l < 512; l++) {
                     pte = vmm_table_read(pt_phys_val, l);
                     if ((pte & 1) && release_leaf_refs && !(pte & VMM_PTE_NOFREE)) {
-                        exec_page_cache_on_page_release(pte & VMM_PHYS_MASK);
                         pfa_cow_release64(pte & VMM_PHYS_MASK);
                     }
                 }
@@ -497,7 +495,6 @@ int cow_handle_fault(uint64_t fault_addr, uint64_t pml4_phys) {
         return -1;
     }
 
-    exec_page_cache_on_page_release(old_page_phys);
     remaining_ref = pfa_ref_dec(old_page_phys);
     if (remaining_ref == 0) {
         pfa_free(old_page_phys);

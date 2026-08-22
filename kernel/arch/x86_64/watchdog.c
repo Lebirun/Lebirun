@@ -3,16 +3,15 @@
 #include <lebirun/task.h>
 #include <lebirun/panic.h>
 #include <lebirun/common.h>
+#include <lebirun/smp.h>
+#include <lebirun/vfs.h>
 #include <stdint.h>
 #include <stdbool.h>
 
 static volatile uint64_t wdt_last_kick = 0;
-static volatile uint64_t wdt_last_sched_tick = 0;
-static volatile uint64_t wdt_prev_tick_count = 0;
 static volatile uint64_t wdt_stall_strikes = 0;
 static volatile int wdt_disabled = 0;
 static volatile int wdt_init_pid = 0;
-static int wdt_handle = -1;
 
 extern volatile uint64_t tick_count;
 extern task_t *all_tasks_head;
@@ -29,12 +28,11 @@ void KERNEL_INIT watchdog_set_init_pid(int pid) {
     wdt_init_pid = pid;
 }
 
-uint64_t watchdog_get_last_kick(void) {
-    return wdt_last_kick;
-}
-
 static void watchdog_print_task_state(task_t *t) {
     const char *state_name;
+    const char *lookup_name;
+    registers_t *frame;
+    vfs_node_t *lookup;
 
     switch (t->state) {
     case TASK_READY:   state_name = "READY";   break;
@@ -44,9 +42,16 @@ static void watchdog_print_task_state(task_t *t) {
     case TASK_DEAD:    state_name = "DEAD";    break;
     default:           state_name = "UNKNOWN"; break;
     }
-    printf("  PID=%d name=%s state=%s console=%d is_user=%d\n",
+    frame = t->syscall_frame;
+    lookup = __atomic_load_n(&t->vfs_lookup_node, __ATOMIC_ACQUIRE);
+    lookup_name = lookup ? vfs_node_name(lookup) : "-";
+    printf("  PID=%d name=%s state=%s syscall=%lu rip=0x%lX min=%lu maj=%lu lookup=%s\n",
            (int)t->pid, t->name[0] ? t->name : "(none)",
-           state_name, t->console_id, t->is_user);
+           state_name,
+           frame ? frame->rax : UINT64_MAX,
+           frame ? frame->rip : t->regs.rip,
+           t->minor_faults, t->major_faults,
+           lookup_name ? lookup_name : "-");
 }
 
 static void watchdog_dump_tasks(void) {
@@ -68,23 +73,27 @@ static void watchdog_dump_tasks(void) {
 
 static void watchdog_callback(uint64_t ticks) {
     task_t *t;
+    cpu_info_t *cpu;
     uint64_t elapsed;
+    uint64_t flags;
     int lookup_complete;
     (void)ticks;
 
     if (wdt_disabled) return;
 
-    if (tick_count != wdt_prev_tick_count) {
-        wdt_last_sched_tick = tick_count;
-        wdt_prev_tick_count = tick_count;
+    elapsed = tick_count - wdt_last_kick;
+    if (elapsed <= WATCHDOG_SCHED_TIMEOUT) {
         wdt_stall_strikes = 0;
     }
 
-    elapsed = tick_count - wdt_last_sched_tick;
     if (elapsed > WATCHDOG_SCHED_TIMEOUT) {
+        __asm__ volatile ("pushf; pop %0" : "=r"(flags) : : "memory");
+        cpu = smp_this_cpu();
         wdt_stall_strikes++;
-        printf("WATCHDOG: scheduler stall detected (%u ms, strike %u/%u)\n",
-               elapsed, wdt_stall_strikes, WATCHDOG_MAX_STRIKES);
+        printf("WATCHDOG: scheduler stall detected (%u ms, strike %u/%u, lock=%d, irq=%d)\n",
+               elapsed, wdt_stall_strikes, WATCHDOG_MAX_STRIKES,
+               cpu ? cpu->scheduler_lock_depth : -1,
+               (flags & (1ULL << 9)) != 0);
         watchdog_dump_tasks();
         if (wdt_stall_strikes < WATCHDOG_MAX_STRIKES) {
             if (current_task && current_task->pid > 1 && current_task->is_user) {
@@ -93,7 +102,7 @@ static void watchdog_callback(uint64_t ticks) {
                        current_task->name[0] ? current_task->name : "(none)");
                 task_kill(current_task, 137);
             }
-            wdt_last_sched_tick = tick_count;
+            wdt_last_kick = tick_count;
         } else {
             kernel_panic_msg("WATCHDOG: scheduler stall unrecoverable (%u ms, %u strikes)",
                              elapsed, wdt_stall_strikes);
@@ -116,22 +125,19 @@ static void watchdog_callback(uint64_t ticks) {
 
 void KERNEL_INIT watchdog_init(void) {
     uint64_t interval_ticks;
+    int handle;
 
     wdt_last_kick = tick_count;
-    wdt_last_sched_tick = tick_count;
-    wdt_prev_tick_count = tick_count;
     wdt_stall_strikes = 0;
     wdt_init_pid = 0;
     interval_ticks = pit_ms_to_ticks(WATCHDOG_INTERVAL_MS);
     if (interval_ticks == 0)
-        interval_ticks = 5000;
+        interval_ticks = WATCHDOG_INTERVAL_MS;
 
-    wdt_handle = pit_register_callback(watchdog_callback, interval_ticks, false);
-    if (wdt_handle < 0) {
+    handle = pit_register_callback(watchdog_callback, interval_ticks, false);
+    if (handle < 0) {
         printf("WATCHDOG: failed to register timer callback\n");
         return;
     }
 
-    printf("WATCHDOG: initialized, interval=%ums, sched_timeout=%ums, max_strikes=%u\n",
-           WATCHDOG_INTERVAL_MS, WATCHDOG_SCHED_TIMEOUT, WATCHDOG_MAX_STRIKES);
 }

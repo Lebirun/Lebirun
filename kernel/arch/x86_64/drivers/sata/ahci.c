@@ -40,36 +40,6 @@ static ahci_port_t *ahci_port_slot(uint64_t index) {
     return &g_ahci_controller.ports[slot];
 }
 
-static inline uint64_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
-                      (func << 8) | (offset & 0xFC) | 0x80000000);
-    outb(PCI_CONFIG_ADDRESS, address & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 1, (address >> 8) & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 2, (address >> 16) & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 3, (address >> 24) & 0xFF);
-    
-    uint64_t data = 0;
-    data = inb(PCI_CONFIG_DATA);
-    data |= (uint64_t)inb(PCI_CONFIG_DATA + 1) << 8;
-    data |= (uint64_t)inb(PCI_CONFIG_DATA + 2) << 16;
-    data |= (uint64_t)inb(PCI_CONFIG_DATA + 3) << 24;
-    return data;
-}
-
-static inline void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint64_t value) {
-    uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
-                      (func << 8) | (offset & 0xFC) | 0x80000000);
-    outb(PCI_CONFIG_ADDRESS, address & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 1, (address >> 8) & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 2, (address >> 16) & 0xFF);
-    outb(PCI_CONFIG_ADDRESS + 3, (address >> 24) & 0xFF);
-    
-    outb(PCI_CONFIG_DATA, value & 0xFF);
-    outb(PCI_CONFIG_DATA + 1, (value >> 8) & 0xFF);
-    outb(PCI_CONFIG_DATA + 2, (value >> 16) & 0xFF);
-    outb(PCI_CONFIG_DATA + 3, (value >> 24) & 0xFF);
-}
-
 static inline void outl(uint16_t port, uint32_t value) {
     __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
 }
@@ -80,14 +50,17 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
-static uint64_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+static uint64_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func,
+                                uint8_t offset) {
     uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
                       (func << 8) | (offset & 0xFC) | 0x80000000);
     outl(PCI_CONFIG_ADDRESS, address);
     return inl(PCI_CONFIG_DATA);
 }
 
-static void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint64_t value) {
+static void KERNEL_INIT pci_write_config(uint8_t bus, uint8_t slot,
+                                         uint8_t func, uint8_t offset,
+                                         uint64_t value) {
     uint64_t address = (uint64_t)((bus << 16) | (slot << 11) |
                       (func << 8) | (offset & 0xFC) | 0x80000000);
     outl(PCI_CONFIG_ADDRESS, address);

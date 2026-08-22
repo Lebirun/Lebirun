@@ -22,10 +22,6 @@ static uint64_t ramfs_next_inode = 1;
 static ramfs_stats_t ramfs_stats;
 static int ramfs_stats_initialized = 0;
 
-void ramfs_debug_check_root(const char *location) {
-    (void)location;
-}
-
 static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags);

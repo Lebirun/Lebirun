@@ -435,7 +435,7 @@ static int kprint_at_line_start = 1;
 
 int printf(const char* format, ...) {
 	va_list ap;
-	char buf[1024];
+	char buf[512];
 	char prefix[24];
 	int len;
 	int plen;
