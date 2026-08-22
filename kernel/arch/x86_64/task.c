@@ -32,6 +32,9 @@ extern void sysfs_reclaim_unused(void);
 extern void event_descriptors_close_task(pid_t pid);
 extern void shm_close_task(pid_t pid);
 extern int shm_fork_task(pid_t parent_pid, pid_t child_pid);
+extern void socket_close_task(pid_t pid);
+extern void socket_close_cloexec(pid_t pid);
+extern void pty_close_task(pid_t pid);
 extern void file_locks_release_process(pid_t pid);
 extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
                                             int release_flock);
@@ -1859,6 +1862,8 @@ static void task_release_exit_resources(task_t *t) {
     }
     event_descriptors_close_task(t->pid);
     shm_close_task(t->pid);
+    socket_close_task(t->pid);
+    pty_close_task(t->pid);
     file_locks_release_process(t->pid);
     copy_file_range_release_task(t);
     task_fd_close_all(t);
@@ -3839,7 +3844,9 @@ void task_fd_close_cloexec(task_t *task) {
     task_fd_t *tfd;
     pipe_t *p;
 
-    if (!task || !task->fds) return;
+    if (!task) return;
+    socket_close_cloexec(task->pid);
+    if (!task->fds) return;
     for (i = 3; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;

@@ -143,6 +143,7 @@ typedef struct {
     int protocol;
     uint64_t local_addr;
     uint16_t local_port;
+    pid_t owner_pid;
     uint64_t remote_addr;
     uint16_t remote_port;
     uint8_t *recv_buf;
@@ -176,7 +177,8 @@ typedef struct {
 static socket_t *sockets = NULL;
 static int socket_capacity = 0;
 static int socket_base_fd = 0x30000000;
-static uint64_t next_ephemeral_port = 49152;
+static uint16_t next_ephemeral_port = 49152;
+static uint16_t socket_cloexec_count;
 
 static int socket_grow(void) {
     int new_cap;
@@ -205,6 +207,7 @@ static int alloc_socket(void) {
 found:
     memset(&sockets[i], 0, sizeof(socket_t));
     sockets[i].in_use = 1;
+    sockets[i].owner_pid = current_task ? current_task->pid : 0;
     sockets[i].so_sndbuf = SOCKET_BUF_SIZE;
     sockets[i].so_rcvbuf = SOCKET_BUF_SIZE;
     sockets[i].peer_socket = -1;
@@ -315,30 +318,82 @@ static int socket_send_rights(socket_t *sock, const struct msghdr *msg,
     return 0;
 }
 
-static void free_socket(int idx) {
+static void free_socket(int idx, int graceful) {
+    int i;
+    int peer_idx;
+    socket_t *sock;
+    socket_t *peer;
+
+    if (idx < 0 || idx >= socket_capacity || !sockets[idx].in_use) return;
+    sock = &sockets[idx];
+    if (sock->cloexec && socket_cloexec_count > 0)
+        socket_cloexec_count--;
+    for (i = 0; i < sock->pending_fd_count; i++)
+        socket_release_pending_fd(&sock->pending_fds[i]);
+    sock->pending_fd_count = 0;
+    if (sock->domain == AF_UNIX) {
+        for (i = 0; i < sock->backlog_capacity; i++) {
+            if (!sock->backlog[i].valid) continue;
+            peer_idx = sock->backlog[i].peer_idx;
+            if (peer_idx != idx) free_socket(peer_idx, 0);
+        }
+    }
+    if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+        peer = &sockets[sock->peer_socket];
+        if (peer->in_use && peer->peer_socket == idx) peer->peer_socket = -1;
+    }
+    if (sock->tcp) {
+        if (graceful) tcp_disconnect(sock->tcp, 1000);
+        tcp_socket_close(sock->tcp);
+    }
+    kfree(sock->recv_buf);
+    kfree(sock->backlog);
+    kfree(sock->sun_path);
+    kfree(sock->pending_fds);
+    memset(sock, 0, sizeof(*sock));
+}
+
+static void socket_reclaim_storage(void) {
+    int new_capacity;
+    socket_t *new_sockets;
+
+    new_capacity = socket_capacity;
+    while (new_capacity > 0 && !sockets[new_capacity - 1].in_use)
+        new_capacity--;
+    if (new_capacity == socket_capacity) return;
+    if (new_capacity == 0) {
+        kfree(sockets);
+        sockets = NULL;
+        socket_capacity = 0;
+        return;
+    }
+    new_sockets = (socket_t *)krealloc(
+        sockets, (size_t)new_capacity * sizeof(socket_t));
+    if (!new_sockets) return;
+    sockets = new_sockets;
+    socket_capacity = new_capacity;
+}
+
+void socket_close_task(pid_t pid) {
     int i;
 
-    if (idx >= 0 && idx < socket_capacity) {
-        for (i = 0; i < sockets[idx].pending_fd_count; i++) {
-            socket_release_pending_fd(&sockets[idx].pending_fds[i]);
-        }
-        sockets[idx].pending_fd_count = 0;
-        if (sockets[idx].tcp) {
-            tcp_disconnect(sockets[idx].tcp, 1000);
-            tcp_socket_close(sockets[idx].tcp);
-        }
-        kfree(sockets[idx].recv_buf);
-        kfree(sockets[idx].backlog);
-        kfree(sockets[idx].sun_path);
-        kfree(sockets[idx].pending_fds);
-        sockets[idx].recv_buf = NULL;
-        sockets[idx].backlog = NULL;
-        sockets[idx].sun_path = NULL;
-        sockets[idx].pending_fds = NULL;
-        sockets[idx].pending_fd_capacity = 0;
-        sockets[idx].tcp = NULL;
-        sockets[idx].in_use = 0;
+    for (i = 0; i < socket_capacity; i++) {
+        if (sockets[i].in_use && sockets[i].owner_pid == pid)
+            free_socket(i, 0);
     }
+    socket_reclaim_storage();
+}
+
+void socket_close_cloexec(pid_t pid) {
+    int i;
+
+    if (socket_cloexec_count == 0) return;
+    for (i = 0; i < socket_capacity; i++) {
+        if (sockets[i].in_use && sockets[i].owner_pid == pid &&
+            sockets[i].cloexec)
+            free_socket(i, 0);
+    }
+    socket_reclaim_storage();
 }
 
 static ipv4_addr_t socket_ipv4_from_addr(uint32_t addr)
@@ -352,17 +407,21 @@ static uint32_t socket_addr_from_ipv4(ipv4_addr_t ip)
 }
 
 static socket_t *get_socket(int fd) {
-    int idx = fd - socket_base_fd;
+    int idx;
+
+    idx = fd - socket_base_fd;
     if (idx < 0 || idx >= socket_capacity) return NULL;
     if (!sockets[idx].in_use) return NULL;
+    if (!current_task || sockets[idx].owner_pid != current_task->pid)
+        return NULL;
     return &sockets[idx];
 }
 
 static uint16_t alloc_ephemeral_port(void) {
-    uint16_t port = next_ephemeral_port++;
-    if (next_ephemeral_port > 65535) {
-        next_ephemeral_port = 49152;
-    }
+    uint16_t port;
+
+    port = next_ephemeral_port++;
+    if (port == UINT16_MAX) next_ephemeral_port = 49152;
     return port;
 }
 
@@ -504,6 +563,7 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
     sockets[idx].state = SOCKSTATE_CLOSED;
     sockets[idx].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
     sockets[idx].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
+    if (sockets[idx].cloexec) socket_cloexec_count++;
     
     return socket_base_fd + idx;
 }
@@ -535,7 +595,8 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     
     idx2 = alloc_socket();
     if (idx2 < 0) {
-        free_socket(idx1);
+        free_socket(idx1, 0);
+        socket_reclaim_storage();
         return -EMFILE;
     }
     
@@ -544,6 +605,7 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx1].state = SOCKSTATE_CONNECTED;
     sockets[idx1].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
     sockets[idx1].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
+    if (sockets[idx1].cloexec) socket_cloexec_count++;
     sockets[idx1].peer_socket = idx2;
     
     sockets[idx2].domain = domain;
@@ -551,13 +613,15 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx2].state = SOCKSTATE_CONNECTED;
     sockets[idx2].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
     sockets[idx2].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
+    if (sockets[idx2].cloexec) socket_cloexec_count++;
     sockets[idx2].peer_socket = idx1;
     
     sv_values[0] = socket_base_fd + idx1;
     sv_values[1] = socket_base_fd + idx2;
     if (copy_to_user(sv, sv_values, sizeof(sv_values)) < 0) {
-        free_socket(idx1);
-        free_socket(idx2);
+        free_socket(idx1, 0);
+        free_socket(idx2, 0);
+        socket_reclaim_storage();
         return -EFAULT;
     }
 
@@ -696,14 +760,17 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         
         sockets[peer_idx].domain = AF_UNIX;
         sockets[peer_idx].type = sockets[listener_idx].type;
+        sockets[peer_idx].owner_pid = sockets[listener_idx].owner_pid;
         sockets[peer_idx].state = SOCKSTATE_CONNECTED;
         sockets[peer_idx].peer_socket = sockfd - socket_base_fd;
         if (socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path) < 0) {
-            free_socket(peer_idx);
+            free_socket(peer_idx, 0);
+            socket_reclaim_storage();
             return -ENOMEM;
         }
         if (socket_set_sun_path(sock, uaddr->sun_path) < 0) {
-            free_socket(peer_idx);
+            free_socket(peer_idx, 0);
+            socket_reclaim_storage();
             return -ENOMEM;
         }
         
@@ -1468,7 +1535,10 @@ int socket_close_fd(int fd) {
     idx = fd - socket_base_fd;
     if (idx < 0 || idx >= socket_capacity) return -EBADF;
     if (!sockets[idx].in_use) return -EBADF;
-    free_socket(idx);
+    if (!current_task || sockets[idx].owner_pid != current_task->pid)
+        return -EBADF;
+    free_socket(idx, 1);
+    socket_reclaim_storage();
     return 0;
 }
 
@@ -1485,6 +1555,9 @@ int socket_fcntl(int fd, int cmd, int arg) {
         case SOCKET_F_GETFD:
             return sock->cloexec ? 1 : 0;
         case SOCKET_F_SETFD:
+            if (!sock->cloexec && (arg & 1)) socket_cloexec_count++;
+            if (sock->cloexec && !(arg & 1) && socket_cloexec_count > 0)
+                socket_cloexec_count--;
             sock->cloexec = (arg & 1) ? 1 : 0;
             return 0;
         case SOCKET_F_GETFL:
@@ -1500,6 +1573,7 @@ int socket_fcntl(int fd, int cmd, int arg) {
 void syscalls_socket_init(void) {
     sockets = NULL;
     socket_capacity = 0;
+    socket_cloexec_count = 0;
     
     syscall_table_set(SYSCALL_SOCKET, (void *)(sys_socket));
     syscall_table_set(SYSCALL_SOCKETPAIR, (void *)(sys_socketpair));

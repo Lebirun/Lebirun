@@ -10,6 +10,7 @@
 #define PTY_INIT_COUNT 1
 typedef struct {
     int in_use;
+    pid_t owner_pid;
     size_t master_capacity;
     size_t slave_capacity;
     uint8_t *master_buf;
@@ -85,6 +86,8 @@ static int alloc_pty(void) {
 found:
     memset(&ptys[i], 0, sizeof(pty_t));
     ptys[i].in_use = 1;
+    ptys[i].owner_pid = current_task ? current_task->pid : 0;
+    ptys[i].slave_closed = 1;
     init_default_termios(&ptys[i].termios);
     ptys[i].winsize.ws_row = 24;
     ptys[i].winsize.ws_col = 80;
@@ -160,16 +163,24 @@ static int pty_ensure_slave_buf(pty_t *pty, size_t additional) {
 }
 
 static pty_t *get_pty_by_master(int fd) {
-    int idx = fd - pty_base_master;
+    int idx;
+
+    idx = fd - pty_base_master;
     if (idx < 0 || idx >= pty_capacity) return NULL;
     if (!ptys[idx].in_use) return NULL;
+    if (!current_task || ptys[idx].owner_pid != current_task->pid)
+        return NULL;
     return &ptys[idx];
 }
 
 static pty_t *get_pty_by_slave(int fd) {
-    int idx = fd - pty_base_slave;
+    int idx;
+
+    idx = fd - pty_base_slave;
     if (idx < 0 || idx >= pty_capacity) return NULL;
     if (!ptys[idx].in_use) return NULL;
+    if (!current_task || ptys[idx].owner_pid != current_task->pid)
+        return NULL;
     return &ptys[idx];
 }
 
@@ -188,9 +199,19 @@ int pty_open_master(void) {
 }
 
 int pty_open_slave(int master_fd) {
-    pty_t *pty = get_pty_by_master(master_fd);
-    if (!pty) return -1;
-    return pty_base_slave + (int)(pty - ptys);
+    pty_t *pty;
+    int fd;
+
+    mutex_lock(&pty_lock);
+    pty = get_pty_by_master(master_fd);
+    if (!pty) {
+        mutex_unlock(&pty_lock);
+        return -1;
+    }
+    pty->slave_closed = 0;
+    fd = pty_base_slave + (int)(pty - ptys);
+    mutex_unlock(&pty_lock);
+    return fd;
 }
 
 int pty_grant(int master_fd) {
@@ -517,46 +538,90 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
     }
 }
 
+static void pty_release(pty_t *pty) {
+    if (!pty || !pty->master_closed || !pty->slave_closed) return;
+    pty->in_use = 0;
+    kfree(pty->master_buf);
+    kfree(pty->slave_buf);
+    pty->master_buf = NULL;
+    pty->slave_buf = NULL;
+    pty->master_capacity = 0;
+    pty->slave_capacity = 0;
+}
+
+static void pty_reclaim_storage(void) {
+    int new_capacity;
+    pty_t *new_ptys;
+
+    new_capacity = pty_capacity;
+    while (new_capacity > 0 && !ptys[new_capacity - 1].in_use)
+        new_capacity--;
+    if (new_capacity == pty_capacity) return;
+    if (new_capacity == 0) {
+        kfree(ptys);
+        ptys = NULL;
+        pty_capacity = 0;
+        return;
+    }
+    new_ptys = (pty_t *)krealloc(
+        ptys, (size_t)new_capacity * sizeof(pty_t));
+    if (!new_ptys) return;
+    ptys = new_ptys;
+    pty_capacity = new_capacity;
+}
+
 int pty_close_master(int fd) {
-    pty_t *pty = get_pty_by_master(fd);
-    if (!pty) return -1;
-    
+    pty_t *pty;
+
+    mutex_lock(&pty_lock);
+    pty = get_pty_by_master(fd);
+    if (!pty) {
+        mutex_unlock(&pty_lock);
+        return -1;
+    }
     mutex_lock(&pty->lock);
     pty->master_closed = 1;
-    
-    if (pty->slave_closed) {
-        pty->in_use = 0;
-        kfree(pty->master_buf);
-        kfree(pty->slave_buf);
-        pty->master_buf = NULL;
-        pty->slave_buf = NULL;
-        pty->master_capacity = 0;
-        pty->slave_capacity = 0;
-    }
-    
+    pty_release(pty);
     mutex_unlock(&pty->lock);
+    pty_reclaim_storage();
+    mutex_unlock(&pty_lock);
     return 0;
 }
 
 int pty_close_slave(int fd) {
-    pty_t *pty = get_pty_by_slave(fd);
-    if (!pty) return -1;
-    
+    pty_t *pty;
+
+    mutex_lock(&pty_lock);
+    pty = get_pty_by_slave(fd);
+    if (!pty) {
+        mutex_unlock(&pty_lock);
+        return -1;
+    }
     mutex_lock(&pty->lock);
     pty->slave_closed = 1;
-    
-    if (pty->master_closed) {
-        pty->in_use = 0;
-        kfree(pty->master_buf);
-        kfree(pty->slave_buf);
-        pty->master_buf = NULL;
-        pty->slave_buf = NULL;
-        pty->master_capacity = 0;
-        pty->slave_capacity = 0;
-    }
-    
+    pty_release(pty);
     mutex_unlock(&pty->lock);
+    pty_reclaim_storage();
+    mutex_unlock(&pty_lock);
     return 0;
+}
+
+void pty_close_task(pid_t pid) {
+    int i;
+    pty_t *pty;
+
+    mutex_lock(&pty_lock);
+    for (i = 0; i < pty_capacity; i++) {
+        pty = &ptys[i];
+        if (!pty->in_use || pty->owner_pid != pid) continue;
+        mutex_lock(&pty->lock);
+        pty->master_closed = 1;
+        pty->slave_closed = 1;
+        pty_release(pty);
+        mutex_unlock(&pty->lock);
+    }
+    pty_reclaim_storage();
+    mutex_unlock(&pty_lock);
 }
 
 int is_pty_master(int fd) {

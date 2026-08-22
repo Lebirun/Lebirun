@@ -481,25 +481,29 @@ int usleep(unsigned int usec) {
     return syscall1(SYS_SLEEP, ms);
 }
 
+static char *getenv_buffer;
+static size_t getenv_capacity;
+
 char *getenv(const char *name) {
-    static char *env_buf;
-    static size_t env_capacity;
     char *resized;
     int needed;
     int ret;
 
     needed = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, 0, 0);
     if (needed <= 0) return (char *)0;
-    if ((size_t)needed > env_capacity) {
-        resized = (char *)realloc(env_buf, (size_t)needed);
-        if (!resized) return (char *)0;
-        env_buf = resized;
-        env_capacity = (size_t)needed;
+    if ((size_t)needed > getenv_capacity ||
+        getenv_capacity - (size_t)needed >= 4096) {
+        resized = (char *)realloc(getenv_buffer, (size_t)needed);
+        if (!resized && (size_t)needed > getenv_capacity) return (char *)0;
+        if (resized) {
+            getenv_buffer = resized;
+            getenv_capacity = (size_t)needed;
+        }
     }
     ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name,
-                   (long)env_buf, needed);
+                   (long)getenv_buffer, needed);
     if (ret < 0) return (char *)0;
-    return env_buf;
+    return getenv_buffer;
 }
 
 int setenv(const char *name, const char *value, int overwrite) {
@@ -511,7 +515,15 @@ int unsetenv(const char *name) {
 }
 
 int clearenv(void) {
-    return syscall0(222 | LEBIRUN_SYSCALL_FLAG);
+    int ret;
+
+    ret = syscall0(222 | LEBIRUN_SYSCALL_FLAG);
+    if (ret == 0) {
+        free(getenv_buffer);
+        getenv_buffer = (char *)0;
+        getenv_capacity = 0;
+    }
+    return ret;
 }
 
 int putenv(char *string) {

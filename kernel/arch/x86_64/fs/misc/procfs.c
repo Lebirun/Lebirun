@@ -14,11 +14,13 @@
 #include <lebirun/common.h>
 #include <lebirun/smp.h>
 #include <lebirun/creds.h>
+#include <lebirun/console.h>
 #include <string.h>
 #include <stdio.h>
 
 extern task_t *current_task;
 extern task_t *ready_queue_head;
+extern void sysfs_reclaim_unused(void);
 
 static vfs_node_t procfs_root;
 static vfs_node_t *proc_self;
@@ -468,6 +470,10 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
     if (offset == 0) {
         task_reclaim_blocked_file_exec(64);
         task_reclaim_current_file_exec(64);
+        console_reclaim_unused();
+        klog_reclaim_unused();
+        sysfs_reclaim_unused();
+        heap_reclaim_unused();
         kstack_reclaim_unused();
     }
 
@@ -1356,6 +1362,10 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     if (offset == 0) {
         task_reclaim_blocked_file_exec(64);
         current_exec_reclaimed = task_reclaim_current_file_exec(64);
+        console_reclaim_unused();
+        klog_reclaim_unused();
+        sysfs_reclaim_unused();
+        heap_reclaim_unused();
         kstack_reclaim_unused();
     }
     memset(&snapshot, 0, sizeof(snapshot));

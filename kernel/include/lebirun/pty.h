@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <lebirun/common.h>
 #include <lebirun/tty.h>
 
 typedef long ssize_t;
@@ -21,6 +22,7 @@ int pty_ioctl(int fd, unsigned long request, void *arg);
 
 int pty_close_master(int fd);
 int pty_close_slave(int fd);
+void pty_close_task(pid_t pid);
 
 int is_pty_master(int fd);
 int is_pty_slave(int fd);
