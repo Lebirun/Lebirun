@@ -8,8 +8,12 @@
 
 extern int is_socket_fd(int fd);
 extern int socket_close_fd(int fd);
+extern void socket_close_range(unsigned int first, unsigned int last,
+                               int cloexec);
 extern int is_epoll_special_fd(int fd);
 extern int epoll_close_fd(int fd);
+extern void event_descriptors_close_range(unsigned int first,
+                                          unsigned int last, int cloexec);
 extern int event_descriptor_read(int fd, void *buffer, int length);
 extern int event_descriptor_write(int fd, const void *buffer, int length);
 extern void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
@@ -525,6 +529,34 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
 
     memset(tfd, 0, sizeof(*tfd));
     task_fd_reclaim_unused(current_task);
+    return 0;
+}
+
+static int sys_close_range(unsigned int first, const char *last_ptr,
+                           unsigned int flags) {
+    unsigned int last;
+    int fd;
+
+    if (!current_task) return -ESRCH;
+    if (flags & ~4u) return -EINVAL;
+    last = (unsigned int)(uintptr_t)last_ptr;
+    if (first > last) return -EINVAL;
+    socket_close_range(first, last, (flags & 4u) != 0);
+    event_descriptors_close_range(first, last, (flags & 4u) != 0);
+    if (first >= (unsigned int)current_task->fds_capacity) return 0;
+    if (last >= (unsigned int)current_task->fds_capacity)
+        last = (unsigned int)current_task->fds_capacity - 1;
+    if (flags & 4u) {
+        for (fd = (int)first; fd <= (int)last; fd++) {
+            if (current_task->fds[fd].in_use)
+                current_task->fds[fd].flags |= 1u;
+        }
+        return 0;
+    }
+    for (fd = (int)last; fd >= (int)first; fd--) {
+        if (current_task->fds[fd].in_use)
+            sys_vfs_close(fd, NULL, 0);
+    }
     return 0;
 }
 
@@ -1213,4 +1245,5 @@ void syscalls_vfs_init(void) {
     syscall_table_set(SYSCALL_FSTATFS, (void *)(sys_fstatfs));
     syscall_table_set(SYSCALL_VFS_MOUNT, (void *)(sys_vfs_mount_user));
     syscall_table_set(SYSCALL_VFS_UMOUNT, (void *)(sys_vfs_umount_user));
+    syscall_table_set(SYSCALL_CLOSE_RANGE, (void *)(sys_close_range));
 }

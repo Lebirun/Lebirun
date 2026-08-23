@@ -1,6 +1,8 @@
 #include "syscall_defs.h"
 #include <lebirun/task.h>
 #include <lebirun/drivers/net/tcp.h>
+#include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/net.h>
 
 #define AF_UNSPEC   0
 #define AF_UNIX     1
@@ -111,6 +113,12 @@ struct timeval {
     long tv_usec;
 };
 
+struct ucred {
+    pid_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
+
 typedef enum {
     SOCKSTATE_CLOSED = 0,
     SOCKSTATE_BOUND,
@@ -165,13 +173,19 @@ typedef struct {
     int backlog_count;
     int backlog_capacity;
     int peer_socket;
+    pid_t peer_pid;
+    uint32_t peer_uid;
+    uint32_t peer_gid;
+    int peer_write_closed;
     tcp_socket_t *tcp;
+    udp_socket_t *udp;
     sock_state_t state;
     pending_conn_t *backlog;
     char *sun_path;
     task_fd_t *pending_fds;
     int pending_fd_count;
     int pending_fd_capacity;
+    wait_queue_t *waitq;
 } socket_t;
 
 static socket_t *sockets = NULL;
@@ -179,6 +193,9 @@ static int socket_capacity = 0;
 static int socket_base_fd = 0x30000000;
 static uint16_t next_ephemeral_port = 49152;
 static uint16_t socket_cloexec_count;
+
+static socket_t *get_socket(int fd);
+extern int task_has_pending_signals(void);
 
 static int socket_grow(void) {
     int new_cap;
@@ -212,6 +229,18 @@ found:
     sockets[i].so_rcvbuf = SOCKET_BUF_SIZE;
     sockets[i].peer_socket = -1;
     return i;
+}
+
+static wait_queue_t *socket_get_waitq(socket_t *sock) {
+    wait_queue_t *waitq;
+
+    if (!sock) return NULL;
+    if (sock->waitq) return sock->waitq;
+    waitq = (wait_queue_t *)kmalloc(sizeof(wait_queue_t));
+    if (!waitq) return NULL;
+    waitq_init(waitq);
+    sock->waitq = waitq;
+    return waitq;
 }
 
 static void socket_release_pending_fd(task_fd_t *fd) {
@@ -340,16 +369,24 @@ static void free_socket(int idx, int graceful) {
     }
     if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         peer = &sockets[sock->peer_socket];
-        if (peer->in_use && peer->peer_socket == idx) peer->peer_socket = -1;
+        if (peer->in_use && peer->peer_socket == idx) {
+            peer->peer_socket = -1;
+            if (peer->waitq) waitq_wake_all(peer->waitq);
+        }
     }
     if (sock->tcp) {
         if (graceful) tcp_disconnect(sock->tcp, 1000);
         tcp_socket_close(sock->tcp);
     }
+    if (sock->udp) udp_socket_close(sock->udp);
     kfree(sock->recv_buf);
     kfree(sock->backlog);
     kfree(sock->sun_path);
     kfree(sock->pending_fds);
+    if (sock->waitq) {
+        waitq_wake_all(sock->waitq);
+        kfree(sock->waitq);
+    }
     memset(sock, 0, sizeof(*sock));
 }
 
@@ -513,8 +550,35 @@ static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
         sock->recv_buf[sock->recv_tail % sock->recv_capacity] = src[i];
         sock->recv_tail++;
     }
-    if (to_write != 0) descriptor_ready_notify();
+    if (to_write != 0) {
+        if (sock->waitq) waitq_wake_all(sock->waitq);
+        descriptor_ready_notify();
+    }
     return (int)to_write;
+}
+
+static int socket_wait_for_data(socket_t **sock_ptr, int fd, int flags) {
+    socket_t *sock;
+    wait_queue_t *waitq;
+
+    sock = *sock_ptr;
+    while (recv_buf_used(sock) == 0) {
+        if (sock->peer_socket < 0 ||
+            sock->peer_write_closed ||
+            sock->state == SOCKSTATE_SHUTDOWN_RD ||
+            sock->state == SOCKSTATE_SHUTDOWN_RDWR)
+            return 0;
+        if (sock->nonblocking || (flags & MSG_DONTWAIT)) return -EAGAIN;
+        waitq = socket_get_waitq(sock);
+        if (!waitq) return -ENOMEM;
+        waitq_add(waitq, current_task);
+        block_current();
+        if (task_has_pending_signals()) return -EINTR;
+        sock = get_socket(fd);
+        if (!sock) return -EBADF;
+        *sock_ptr = sock;
+    }
+    return 1;
 }
 
 static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
@@ -607,6 +671,9 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx1].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
     if (sockets[idx1].cloexec) socket_cloexec_count++;
     sockets[idx1].peer_socket = idx2;
+    sockets[idx1].peer_pid = current_task ? current_task->pid : 0;
+    sockets[idx1].peer_uid = current_task ? current_task->euid : 0;
+    sockets[idx1].peer_gid = current_task ? current_task->egid : 0;
     
     sockets[idx2].domain = domain;
     sockets[idx2].type = type;
@@ -615,6 +682,9 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx2].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
     if (sockets[idx2].cloexec) socket_cloexec_count++;
     sockets[idx2].peer_socket = idx1;
+    sockets[idx2].peer_pid = current_task ? current_task->pid : 0;
+    sockets[idx2].peer_uid = current_task ? current_task->euid : 0;
+    sockets[idx2].peer_gid = current_task ? current_task->egid : 0;
     
     sv_values[0] = socket_base_fd + idx1;
     sv_values[1] = socket_base_fd + idx2;
@@ -655,11 +725,74 @@ static int socket_set_sun_path(socket_t *sock, const char *path) {
     return 0;
 }
 
+static int socket_create_path_node(const char *path) {
+    char parent_path[UNIX_PATH_MAX];
+    const char *name;
+    const char *slash;
+    size_t parent_length;
+    vfs_node_t *existing;
+    vfs_node_t *parent;
+    int result;
+
+    if (!path || path[0] != '/') return -EINVAL;
+    existing = vfs_namei(path);
+    if (existing) {
+        vfs_release(existing);
+        return -EADDRINUSE;
+    }
+    slash = strrchr(path, '/');
+    if (!slash || !slash[1]) return -EINVAL;
+    name = slash + 1;
+    parent_length = (size_t)(slash - path);
+    if (parent_length == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+    } else {
+        if (parent_length >= sizeof(parent_path)) return -ENAMETOOLONG;
+        memcpy(parent_path, path, parent_length);
+        parent_path[parent_length] = '\0';
+    }
+    parent = vfs_namei(parent_path);
+    if (!parent) return -ENOENT;
+    result = vfs_mknod(parent, name, S_IFSOCK | 0777);
+    if (result < 0)
+        result = vfs_create(parent, name, VFS_SOCKET | 0777);
+    vfs_release(parent);
+    if (result < 0) return -EACCES;
+    return 0;
+}
+
+static int socket_path_node_exists(const char *path) {
+    vfs_node_t *node;
+    int exists;
+
+    node = vfs_namei(path);
+    if (!node) return 0;
+    exists = VFS_GET_TYPE(node->flags) == VFS_SOCKET;
+    vfs_release(node);
+    return exists;
+}
+
+static void socket_forget_unlinked_path(const char *path) {
+    int i;
+
+    if (socket_path_node_exists(path)) return;
+    for (i = 0; i < socket_capacity; i++) {
+        if (!sockets[i].in_use || !sockets[i].sun_path) continue;
+        if (sockets[i].state != SOCKSTATE_BOUND &&
+            sockets[i].state != SOCKSTATE_LISTENING) continue;
+        if (strcmp(sockets[i].sun_path, path) != 0) continue;
+        kfree(sockets[i].sun_path);
+        sockets[i].sun_path = NULL;
+    }
+}
+
 static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
     struct sockaddr_in6 *addr6;
     struct sockaddr_un *uaddr;
     socket_t *sock;
+    int path_result;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
@@ -676,7 +809,14 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         if (uaddr->sun_family != AF_UNIX) {
             return -EAFNOSUPPORT;
         }
+        socket_forget_unlinked_path(uaddr->sun_path);
         if (socket_set_sun_path(sock, uaddr->sun_path) < 0) return -ENOMEM;
+        path_result = socket_create_path_node(sock->sun_path);
+        if (path_result < 0) {
+            kfree(sock->sun_path);
+            sock->sun_path = NULL;
+            return path_result;
+        }
         sock->state = SOCKSTATE_BOUND;
         return 0;
     }
@@ -689,12 +829,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         if (addr6->sin6_family != AF_INET6) {
             return -EAFNOSUPPORT;
         }
-        sock->local_port = ntohs(addr6->sin6_port);
-        if (sock->local_port == 0) {
-            sock->local_port = alloc_ephemeral_port();
-        }
-        sock->state = SOCKSTATE_BOUND;
-        return 0;
+        return -EOPNOTSUPP;
     }
 
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
@@ -709,7 +844,11 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     sock->local_addr = addr->sin_addr.s_addr;
     sock->local_port = ntohs(addr->sin_port);
     
-    if (sock->local_port == 0) {
+    if (sock->type == SOCK_DGRAM) {
+        sock->udp = udp_socket_create(sock->local_port);
+        if (!sock->udp) return -EADDRINUSE;
+        sock->local_port = sock->udp->local_port;
+    } else if (sock->local_port == 0) {
         sock->local_port = alloc_ephemeral_port();
     }
     
@@ -726,6 +865,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     int socket_idx;
     int i;
     socket_t *sock;
+    task_t *listener_task;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
@@ -746,7 +886,8 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         }
         
         listener_idx = find_unix_listener(uaddr->sun_path);
-        if (listener_idx < 0) {
+        if (listener_idx < 0 ||
+            !socket_path_node_exists(uaddr->sun_path)) {
             return -ECONNREFUSED;
         }
         
@@ -763,6 +904,9 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         sockets[peer_idx].owner_pid = sockets[listener_idx].owner_pid;
         sockets[peer_idx].state = SOCKSTATE_CONNECTED;
         sockets[peer_idx].peer_socket = sockfd - socket_base_fd;
+        sockets[peer_idx].peer_pid = sock->owner_pid;
+        sockets[peer_idx].peer_uid = current_task ? current_task->euid : 0;
+        sockets[peer_idx].peer_gid = current_task ? current_task->egid : 0;
         if (socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path) < 0) {
             free_socket(peer_idx, 0);
             socket_reclaim_storage();
@@ -779,12 +923,18 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
                 sockets[listener_idx].backlog[i].valid = 1;
                 sockets[listener_idx].backlog[i].peer_idx = peer_idx;
                 sockets[listener_idx].backlog_count++;
+                if (sockets[listener_idx].waitq)
+                    waitq_wake_all(sockets[listener_idx].waitq);
                 descriptor_ready_notify();
                 break;
             }
         }
         
         sock->peer_socket = peer_idx;
+        sock->peer_pid = sockets[listener_idx].owner_pid;
+        listener_task = task_find(sockets[listener_idx].owner_pid);
+        sock->peer_uid = listener_task ? listener_task->euid : 0;
+        sock->peer_gid = listener_task ? listener_task->egid : 0;
         sock->state = SOCKSTATE_CONNECTED;
         
         return 0;
@@ -798,16 +948,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         if (addr6->sin6_family != AF_INET6) {
             return -EAFNOSUPPORT;
         }
-        sock->remote_port = ntohs(addr6->sin6_port);
-        if (sock->state == SOCKSTATE_CLOSED) {
-            sock->local_port = alloc_ephemeral_port();
-        }
-        if (sock->nonblocking) {
-            sock->state = SOCKSTATE_CONNECTING;
-            return -EINPROGRESS;
-        }
-        sock->state = SOCKSTATE_CONNECTED;
-        return 0;
+        return -EOPNOTSUPP;
     }
 
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
@@ -822,8 +963,17 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     sock->remote_addr = addr->sin_addr.s_addr;
     sock->remote_port = ntohs(addr->sin_port);
     
-    if (sock->state == SOCKSTATE_CLOSED) {
+    if (sock->state == SOCKSTATE_CLOSED && sock->type != SOCK_DGRAM) {
         sock->local_port = alloc_ephemeral_port();
+    }
+    if (sock->type == SOCK_DGRAM) {
+        if (!sock->udp) {
+            sock->udp = udp_socket_create(sock->local_port);
+            if (!sock->udp) return -EADDRINUSE;
+            sock->local_port = sock->udp->local_port;
+        }
+        sock->state = SOCKSTATE_CONNECTED;
+        return 0;
     }
     
     sock->tcp = tcp_socket_create();
@@ -897,6 +1047,7 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     socklen_t *user_addrlen;
     pending_conn_t *conn;
     socket_t *sock;
+    wait_queue_t *waitq;
 
     sock = get_socket(sockfd);
     if (!sock) return -EBADF;
@@ -906,11 +1057,16 @@ static int sys_accept(int sockfd, const char *addr_ptr,
         return -EINVAL;
     }
     
-    if (sock->backlog_count == 0) {
-        if (sock->nonblocking) {
-            return -EAGAIN;
-        }
-        return -EAGAIN;
+    while (sock->backlog_count == 0) {
+        if (sock->nonblocking) return -EAGAIN;
+        waitq = socket_get_waitq(sock);
+        if (!waitq) return -ENOMEM;
+        waitq_add(waitq, current_task);
+        block_current();
+        if (task_has_pending_signals()) return -EINTR;
+        sock = get_socket(sockfd);
+        if (!sock) return -EBADF;
+        if (sock->state != SOCKSTATE_LISTENING) return -EINVAL;
     }
     
     if (sock->domain == AF_UNIX) {
@@ -984,8 +1140,18 @@ static int sys_accept(int sockfd, const char *addr_ptr,
 }
 
 static int sys_accept4(int sockfd, const char *addr_ptr,
-                       uint64_t addrlen_ptr) {
-    return sys_accept(sockfd, addr_ptr, addrlen_ptr);
+                       uint64_t addrlen_ptr, int flags) {
+    int fd;
+    int idx;
+
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
+    fd = sys_accept(sockfd, addr_ptr, addrlen_ptr);
+    if (fd < 0) return fd;
+    idx = fd - socket_base_fd;
+    sockets[idx].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
+    sockets[idx].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
+    if (sockets[idx].cloexec) socket_cloexec_count++;
+    return fd;
 }
 
 static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
@@ -995,6 +1161,7 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
     int *optval;
     socklen_t *optlen;
     int value;
+    struct ucred credentials;
     socket_t *sock = get_socket(sockfd);
     (void)unused;
     if (!sock) return -EBADF;
@@ -1004,6 +1171,16 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
     optlen = (socklen_t *)(uintptr_t)optlen_ptr;
     if (!optval || !optlen || *optlen < sizeof(int)) return -EINVAL;
     if (level != SOL_SOCKET) return -ENOPROTOOPT;
+
+    if (optname == SO_PEERCRED) {
+        if (*optlen < sizeof(credentials)) return -EINVAL;
+        credentials.pid = sock->peer_pid;
+        credentials.uid = sock->peer_uid;
+        credentials.gid = sock->peer_gid;
+        memcpy(optval, &credentials, sizeof(credentials));
+        *optlen = sizeof(credentials);
+        return 0;
+    }
 
     value = 0;
     switch (optname) {
@@ -1174,18 +1351,47 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
     int ret;
     socket_t *sock;
     socket_t *peer;
+    struct sockaddr_in destination;
+    uint32_t destination_addr;
+    uint16_t destination_port;
 
     sock = get_socket(sockfd);
     (void)flags;
-    (void)dest_addr_ptr;
-    (void)addrlen;
     if (!sock) return -EBADF;
+    if (len < 0) return -EINVAL;
     
     if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED) {
         return -ENOTCONN;
     }
     
     buf = (const void *)(uintptr_t)buf_ptr;
+
+    if (sock->domain == AF_INET && sock->type == SOCK_DGRAM) {
+        if (dest_addr_ptr) {
+            if (addrlen < (int)sizeof(destination) ||
+                copy_from_user(&destination,
+                    (const void *)(uintptr_t)dest_addr_ptr,
+                    sizeof(destination)) < 0)
+                return -EFAULT;
+            if (destination.sin_family != AF_INET) return -EAFNOSUPPORT;
+            destination_addr = destination.sin_addr.s_addr;
+            destination_port = ntohs(destination.sin_port);
+        } else {
+            if (sock->state != SOCKSTATE_CONNECTED) return -EDESTADDRREQ;
+            destination_addr = (uint32_t)sock->remote_addr;
+            destination_port = sock->remote_port;
+        }
+        if (!sock->udp) {
+            sock->udp = udp_socket_create(sock->local_port);
+            if (!sock->udp) return -EADDRINUSE;
+            sock->local_port = sock->udp->local_port;
+        }
+        ret = udp_socket_send(sock->udp,
+                              socket_ipv4_from_addr(destination_addr),
+                              destination_port, (uint8_t *)buf,
+                              (uint64_t)len);
+        return ret < 0 ? -EIO : len;
+    }
 
     if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
         ret = tcp_send(sock->tcp, (uint8_t *)buf, (uint64_t)len);
@@ -1260,15 +1466,61 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
                         int flags, uint64_t src_addr_ptr,
                         uint64_t addrlen_ptr) {
     void *buf;
-    size_t available;
     uint64_t timeout_ms;
     int ret;
-    socket_t *sock = get_socket(sockfd);
+    int wait_result;
+    socket_t *sock;
+    ipv4_addr_t source_ip;
+    uint16_t source_port;
+    struct sockaddr_in source;
+    socklen_t source_length;
+
+    sock = get_socket(sockfd);
     (void)src_addr_ptr;
     (void)addrlen_ptr;
     if (!sock) return -EBADF;
+    if (len < 0) return -EINVAL;
     
     buf = (void *)(uintptr_t)buf_ptr;
+
+    if (sock->domain == AF_INET && sock->type == SOCK_DGRAM) {
+        if (!sock->udp) {
+            sock->udp = udp_socket_create(sock->local_port);
+            if (!sock->udp) return -EADDRINUSE;
+            sock->local_port = sock->udp->local_port;
+        }
+        if (sock->nonblocking || (flags & MSG_DONTWAIT))
+            timeout_ms = 0;
+        else if (sock->so_rcvtimeo.tv_sec || sock->so_rcvtimeo.tv_usec)
+            timeout_ms = (uint64_t)sock->so_rcvtimeo.tv_sec * 1000 +
+                         (uint64_t)sock->so_rcvtimeo.tv_usec / 1000;
+        else
+            timeout_ms = UINT64_MAX;
+        ret = udp_socket_recv(sock->udp, (uint8_t *)buf, (uint64_t)len,
+                              &source_ip, &source_port, timeout_ms);
+        if (ret < 0)
+            return timeout_ms == 0 ? -EAGAIN : -ETIMEDOUT;
+        if (src_addr_ptr && addrlen_ptr) {
+            if (copy_from_user(&source_length,
+                    (const void *)(uintptr_t)addrlen_ptr,
+                    sizeof(source_length)) < 0)
+                return -EFAULT;
+            if (source_length >= sizeof(source)) {
+                memset(&source, 0, sizeof(source));
+                source.sin_family = AF_INET;
+                source.sin_port = htons(source_port);
+                source.sin_addr.s_addr = socket_addr_from_ipv4(source_ip);
+                if (copy_to_user((void *)(uintptr_t)src_addr_ptr, &source,
+                                 sizeof(source)) < 0)
+                    return -EFAULT;
+            }
+            source_length = sizeof(source);
+            if (copy_to_user((void *)(uintptr_t)addrlen_ptr,
+                             &source_length, sizeof(source_length)) < 0)
+                return -EFAULT;
+        }
+        return ret;
+    }
 
     if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
         timeout_ms = (sock->nonblocking || (flags & MSG_DONTWAIT)) ? 0 : 15000;
@@ -1278,14 +1530,8 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
         return ret;
     }
     
-    available = recv_buf_used(sock);
-    if (available == 0) {
-        if (sock->nonblocking) {
-            return -EAGAIN;
-        }
-        return 0;
-    }
-    
+    wait_result = socket_wait_for_data(&sock, sockfd, flags);
+    if (wait_result <= 0) return wait_result;
     return (int)recv_buf_read(sock, buf, len, flags & MSG_PEEK);
 }
 
@@ -1405,6 +1651,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
     int how;
     socket_t *sock;
+    socket_t *peer;
 
     (void)unused;
     sock = get_socket(sockfd);
@@ -1432,6 +1679,15 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
 
     descriptor_ready_notify();
 
+    if ((how == SHUT_WR || how == SHUT_RDWR) &&
+        sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+        peer = &sockets[sock->peer_socket];
+        if (peer->in_use) {
+            peer->peer_write_closed = 1;
+            if (peer->waitq) waitq_wake_all(peer->waitq);
+        }
+    }
+
     if (sock->tcp && (how == SHUT_WR || how == SHUT_RDWR)) {
         tcp_disconnect(sock->tcp, 1000);
     }
@@ -1446,6 +1702,8 @@ int socket_poll_events(int fd) {
 
     sock = get_socket(fd);
     if (!sock) return 0;
+
+    if (sock->domain == AF_INET) netif_poll_all();
     
     events = 0;
     
@@ -1456,8 +1714,9 @@ int socket_poll_events(int fd) {
     if (sock->tcp && sock->tcp->recv_buffer_head != sock->tcp->recv_buffer_tail) {
         events |= 0x01;
     }
+    if (sock->udp && sock->udp->has_data) events |= 0x01;
     
-    if (sock->tcp) {
+    if (sock->tcp || sock->udp) {
         events |= 0x04;
     } else if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         peer = &sockets[sock->peer_socket];
@@ -1475,12 +1734,44 @@ int socket_poll_events(int fd) {
     if (sock->state == SOCKSTATE_SHUTDOWN_RD || sock->state == SOCKSTATE_SHUTDOWN_RDWR) {
         events |= 0x10;
     }
+    if (sock->domain == AF_UNIX && sock->state == SOCKSTATE_CONNECTED &&
+        (sock->peer_socket < 0 || sock->peer_write_closed))
+        events |= 0x11;
     
     return events;
 }
 
 int is_socket_fd(int fd) {
     return get_socket(fd) != NULL;
+}
+
+int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
+    socket_t *sock;
+    uint64_t available;
+    int value;
+
+    sock = get_socket(fd);
+    if (!sock) return -EBADF;
+    if (!arg) return -EFAULT;
+    if (request == FIONBIO) {
+        if (copy_from_user(&value, (const void *)(uintptr_t)arg,
+                           sizeof(value)) < 0)
+            return -EFAULT;
+        sock->nonblocking = value ? 1 : 0;
+        return 0;
+    }
+    if (request != FIONREAD) return -ENOTTY;
+    available = recv_buf_used(sock);
+    if (sock->tcp)
+        available = sock->tcp->recv_buffer_tail -
+                    sock->tcp->recv_buffer_head;
+    else if (sock->udp && sock->udp->has_data)
+        available = sock->udp->recv_len;
+    if (available > INT32_MAX) available = INT32_MAX;
+    value = (int)available;
+    if (copy_to_user((void *)(uintptr_t)arg, &value, sizeof(value)) < 0)
+        return -EFAULT;
+    return 0;
 }
 
 int socket_write(int fd, const void *buf, int len) {
@@ -1511,8 +1802,8 @@ int socket_write(int fd, const void *buf, int len) {
 
 int socket_read(int fd, void *buf, int len) {
     socket_t *sock = get_socket(fd);
-    size_t available;
     int ret;
+    int wait_result;
     if (!sock) return -EBADF;
     if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
         ret = tcp_recv(sock->tcp, (uint8_t *)buf, (uint64_t)len,
@@ -1521,11 +1812,8 @@ int socket_read(int fd, void *buf, int len) {
         if (ret == 0 && sock->nonblocking) return -EAGAIN;
         return ret;
     }
-    available = recv_buf_used(sock);
-    if (available == 0) {
-        if (sock->nonblocking) return -EAGAIN;
-        return 0;
-    }
+    wait_result = socket_wait_for_data(&sock, fd, 0);
+    if (wait_result <= 0) return wait_result;
     return recv_buf_read(sock, buf, len, 0);
 }
 
@@ -1540,6 +1828,27 @@ int socket_close_fd(int fd) {
     free_socket(idx, 1);
     socket_reclaim_storage();
     return 0;
+}
+
+void socket_close_range(unsigned int first, unsigned int last, int cloexec) {
+    unsigned int fd;
+    int i;
+
+    if (!current_task) return;
+    for (i = socket_capacity - 1; i >= 0; i--) {
+        if (!sockets[i].in_use ||
+            sockets[i].owner_pid != current_task->pid)
+            continue;
+        fd = (unsigned int)(socket_base_fd + i);
+        if (fd < first || fd > last) continue;
+        if (cloexec) {
+            if (!sockets[i].cloexec) socket_cloexec_count++;
+            sockets[i].cloexec = 1;
+        } else {
+            free_socket(i, 1);
+        }
+    }
+    if (!cloexec) socket_reclaim_storage();
 }
 
 #define SOCKET_F_DUPFD       0

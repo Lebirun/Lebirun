@@ -1580,14 +1580,17 @@ int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
 
 int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
     ext4_vfs_private_t *priv;
+    uint16_t inode_type;
     int result;
 
     if (!parent || !parent->private_data || !name) return -1;
-    if ((mode & 0xF000) != EXT4_S_IFIFO) return -1;
+    inode_type = (uint16_t)(mode & 0xF000);
+    if (inode_type != EXT4_S_IFIFO && inode_type != EXT4_S_IFSOCK)
+        return -1;
     priv = (ext4_vfs_private_t *)parent->private_data;
     mutex_lock(&priv->fs->lock);
     result = ext4_create_file(priv->fs, priv->ino, name,
-                              (uint16_t)(EXT4_S_IFIFO | (mode & 07777)));
+                              (uint16_t)(inode_type | (mode & 07777)));
     mutex_unlock(&priv->fs->lock);
     return result;
 }

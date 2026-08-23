@@ -1671,7 +1671,10 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
 }
 
 static void console_switch_internal(int console_num) {
+    if (!tty_vt_switch_request(console_num)) return;
     console_switch_internal_impl(console_num, 0);
+    if (console_num == current_console)
+        tty_vt_switch_complete(console_num);
 }
 
 void console_switch(int console_num) {

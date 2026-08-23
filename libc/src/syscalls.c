@@ -924,7 +924,7 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 }
 
 int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
-    return syscall4(SYS_ACCEPT, sockfd, (long)addr, (long)addrlen, flags);
+    return syscall4(SYS_ACCEPT4, sockfd, (long)addr, (long)addrlen, flags);
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {

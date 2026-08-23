@@ -10,6 +10,7 @@
 #define VFS_BLOCKDEVICE 0x04
 #define VFS_PIPE        0x05
 #define VFS_SYMLINK     0x06
+#define VFS_SOCKET      0x07
 #define VFS_MOUNTPOINT  0x08
 #define VFS_DYNAMIC     0x10
 #define VFS_EMBEDDED    0x20

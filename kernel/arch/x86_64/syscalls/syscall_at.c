@@ -865,6 +865,7 @@ static int sys_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
         case VFS_CHARDEVICE:  mode = S_IFCHR | (perms ? perms : 0660); break;
         case VFS_BLOCKDEVICE: mode = S_IFBLK | (perms ? perms : 0660); break;
         case VFS_PIPE:        mode = S_IFIFO | (perms ? perms : 0644); break;
+        case VFS_SOCKET:      mode = S_IFSOCK | (perms ? perms : 0777); break;
         default:              mode = S_IFREG | (perms ? perms : 0644); break;
     }
     

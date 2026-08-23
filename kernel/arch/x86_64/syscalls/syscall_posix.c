@@ -807,6 +807,8 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
             return S_IFBLK | (perms ? perms : 0660);
         case VFS_PIPE:
             return S_IFIFO | (perms ? perms : 0644);
+        case VFS_SOCKET:
+            return S_IFSOCK | (perms ? perms : 0777);
         default:
             return S_IFREG | (perms ? perms : 0644);
     }
@@ -1798,6 +1800,33 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     return -ENOSYS;
 }
 
+static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
+                         int64_t length) {
+    int mode;
+    uint64_t end;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+
+    mode = (int)(uintptr_t)mode_ptr;
+    if (mode != 0) return -EOPNOTSUPP;
+    if (offset < 0 || length <= 0) return -EINVAL;
+    if ((uint64_t)offset > UINT64_MAX - (uint64_t)length)
+        return -EFBIG;
+    if (!current_task) return -ESRCH;
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    tfd = &fd_table[fd];
+    if (!tfd->in_use || tfd->type != FD_TYPE_FILE || !tfd->node)
+        return -EBADF;
+    if ((tfd->flags & 3) == VFS_O_RDONLY) return -EBADF;
+    node = (vfs_node_t *)tfd->node;
+    if (VFS_GET_TYPE(node->flags) != VFS_FILE) return -EINVAL;
+    if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
+    end = (uint64_t)offset + (uint64_t)length;
+    if (end <= node->length) return 0;
+    if (!node->truncate) return -EOPNOTSUPP;
+    return node->truncate(node, end);
+}
+
 static int sys_umask(int mask, const char *unused1, int unused2) {
     int old;
 
@@ -1873,6 +1902,7 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
         else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
         else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
         else if (local_copy.type == VFS_PIPE) de->d_type = 1;
+        else if (local_copy.type == VFS_SOCKET) de->d_type = 12;
         else de->d_type = 0;
 
         for (i = 0; i < (int)name_len; i++) {
@@ -2585,6 +2615,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
         else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
         else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
         else if (local_copy.type == VFS_PIPE) de->d_type = 1;
+        else if (local_copy.type == VFS_SOCKET) de->d_type = 12;
         else de->d_type = 0;
         
         for (i = 0; i < (int)name_len; i++) {
@@ -2626,6 +2657,7 @@ void syscalls_posix_init(void) {
     syscall_table_set(SYSCALL_FCNTL, (void *)(sys_fcntl));
     syscall_table_set(SYSCALL_TRUNCATE, (void *)(sys_truncate));
     syscall_table_set(SYSCALL_FTRUNCATE, (void *)(sys_ftruncate));
+    syscall_table_set(SYSCALL_FALLOCATE, (void *)(sys_fallocate));
     syscall_table_set(SYSCALL_UMASK, (void *)(sys_umask));
     syscall_table_set(SYSCALL_RENAME, (void *)(sys_rename));
     syscall_table_set(SYSCALL_LINK, (void *)(sys_link));

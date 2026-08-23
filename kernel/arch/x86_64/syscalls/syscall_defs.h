@@ -438,6 +438,8 @@ int vfs_check_perm(vfs_node_t *node, int want);
 #define SYSCALL_MSYNC 297
 #define SYSCALL_REGEXEC_EX2 298
 #define SYSCALL_VFS_READDIR2 299
+#define SYSCALL_CLOSE_RANGE 436
+#define SYSCALL_FALLOCATE 324
 
 #define NR_SYSCALLS 300
 

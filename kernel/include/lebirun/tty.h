@@ -147,8 +147,19 @@ typedef unsigned int speed_t;
 #define KD_TEXT         0x00
 #define KD_GRAPHICS    0x01
 #define KDMKTONE        0x4B30
+#define KDGETLED        0x4B31
+#define KDSETLED        0x4B32
 #define KDGKBTYPE       0x4B33
+#define KDGKBMODE       0x4B44
+#define KDSKBMODE       0x4B45
+#define KDGKBLED        0x4B64
+#define KDSKBLED        0x4B65
 #define KB_101          0x02
+#define K_RAW           0x00
+#define K_XLATE         0x01
+#define K_MEDIUMRAW     0x02
+#define K_UNICODE       0x03
+#define K_OFF           0x04
 
 struct vt_mode_s {
     uint8_t mode;
@@ -170,6 +181,10 @@ struct vt_stat2_s {
     uint64_t v_state_words;
     uint64_t v_state_ptr;
 };
+
+int tty_vt_switch_request(int target_vt);
+void tty_vt_switch_complete(int target_vt);
+void tty_vt_release_owner(pid_t pid);
 
 struct termios {
     tcflag_t c_iflag;

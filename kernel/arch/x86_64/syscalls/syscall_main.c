@@ -309,6 +309,8 @@ static int linux_to_kernel_syscall(int linux_nr) {
         case 320: return SYSCALL_UTIMENSAT;
         case 353: return SYSCALL_RENAMEAT2;
         case 344: return SYSCALL_SYNCFS;
+        case 324: return SYSCALL_FALLOCATE;
+        case 436: return SYSCALL_CLOSE_RANGE;
         
         case 24:  return SYSCALL_GETUID;
         case 199: return SYSCALL_GETUID;

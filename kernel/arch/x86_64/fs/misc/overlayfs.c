@@ -937,7 +937,6 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
     int ret;
     ramfs_node_t *pnode;
 
-    (void)flags;
     if (!parent || !name) return -1;
     
     onode = (overlay_node_t *)parent->private_data;
@@ -953,7 +952,10 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
 
     overlay_ensure_upper_dirs(path);
     
-    ret = ramfs_create_file(path, 0644);
+    if (VFS_GET_TYPE(flags) == VFS_SOCKET)
+        ret = ramfs_create_socket(path, (uint16_t)(flags & 07777));
+    else
+        ret = ramfs_create_file(path, 0644);
     if (ret == 0 && !onode->upper_node) {
         pnode = ramfs_find_node(parent_path);
         if (pnode) onode->upper_node = pnode->vfs_node;

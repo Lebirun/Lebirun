@@ -19,6 +19,7 @@ void mouse_init(void);
 void mouse_handler(registers_t *regs);
 int mouse_has_data(void);
 int mouse_read(uint8_t *buf, uint32_t count);
+uint32_t mouse_get_packet_size(void);
 wait_queue_t *mouse_get_waitq(void);
 
 #endif

@@ -20,6 +20,7 @@
 #include <lebirun/panic.h>
 #include <lebirun/uaccess.h>
 #include <lebirun/watchdog.h>
+#include <lebirun/evdev.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -30,6 +31,7 @@ extern char _kernel_text_start[];
 extern char _kernel_text_end[];
 extern void sysfs_reclaim_unused(void);
 extern void event_descriptors_close_task(pid_t pid);
+extern void event_descriptors_close_cloexec(pid_t pid);
 extern void shm_close_task(pid_t pid);
 extern int shm_fork_task(pid_t parent_pid, pid_t child_pid);
 extern void socket_close_task(pid_t pid);
@@ -1549,6 +1551,8 @@ void task_exit_deferred(uint64_t exit_code) {
     }
     syscall_robust_list_exit(task);
     console_release_graphics_owner(task->pid);
+    tty_vt_release_owner(task->pid);
+    evdev_release_grabs(task->pid);
     lock_scheduler();
     if (task->state == TASK_DEAD) {
         unlock_scheduler();
@@ -3846,6 +3850,7 @@ void task_fd_close_cloexec(task_t *task) {
 
     if (!task) return;
     socket_close_cloexec(task->pid);
+    event_descriptors_close_cloexec(task->pid);
     if (!task->fds) return;
     for (i = 3; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];

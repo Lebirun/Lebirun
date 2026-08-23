@@ -128,13 +128,16 @@
 #define EVIOCGVERSION   0x80044501
 #define EVIOCGID        0x80084502
 #define EVIOCGNAME(len) (0x80004506 | ((len) << 16))
-#define EVIOCGBIT(ev,len) (0x80004520 | ((ev) << 8) | ((len) << 16))
+#define EVIOCGBIT(ev,len) (0x80004520 | (ev) | ((len) << 16))
 #define EVIOCGABS(abs)  (0x80184540 | (abs))
 #define EVIOCGPROP(len) (0x80004509 | ((len) << 16))
+#define EVIOCGKEY(len)  (0x80004518 | ((len) << 16))
+#define EVIOCGRAB       0x40044590
 
 #define EVIOCGBIT_BASE  0x80004520
 #define EVIOCGNAME_BASE 0x80004506
 #define EVIOCGPROP_BASE 0x80004509
+#define EVIOCGKEY_BASE  0x80004518
 #define EVIOCGABS_BASE  0x80184540
 
 struct input_event {
@@ -176,6 +179,8 @@ struct evdev_device {
     uint8_t rel_bits[4];
     uint8_t abs_bits[4];
     uint8_t prop_bits[4];
+    uint8_t key_state[(KEY_MAX + 7) / 8];
+    pid_t grab_pid;
 };
 
 void evdev_init(void);
@@ -183,6 +188,7 @@ void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, in
 void evdev_push_sync(struct evdev_device *dev);
 int evdev_has_data(struct evdev_device *dev);
 int evdev_node_has_data(vfs_node_t *node);
+void evdev_release_grabs(pid_t pid);
 
 struct evdev_device *evdev_get_kbd(void);
 struct evdev_device *evdev_get_mouse(void);

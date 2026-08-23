@@ -13,7 +13,8 @@
 #define MOUSE_RING_INITIAL 16
 
 static uint8_t mouse_cycle = 0;
-static int8_t mouse_bytes[3];
+static int8_t mouse_bytes[4];
+static uint32_t mouse_packet_size = 3;
 static uint8_t *ring_buffer;
 static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
@@ -105,6 +106,7 @@ void mouse_handler(registers_t *regs) {
     uint8_t buttons;
     int8_t dx;
     int8_t dy;
+    int complete;
     uint64_t flags;
 
     (void)regs;
@@ -115,6 +117,7 @@ void mouse_handler(registers_t *regs) {
 
     data = inb(PS2_DATA_PORT);
 
+    complete = 0;
     switch (mouse_cycle) {
     case 0:
         if (data & 0x08) {
@@ -128,26 +131,39 @@ void mouse_handler(registers_t *regs) {
         break;
     case 2:
         mouse_bytes[2] = (int8_t)data;
-        mouse_cycle = 0;
-
-        buttons = (uint8_t)(mouse_bytes[0] & 0x07);
-        dx = mouse_bytes[1];
-        dy = mouse_bytes[2];
-
-        flags = mouse_irqsave();
-        spin_lock(&mouse_lock);
-        if (ring_buffer && mouse_reserve_ring(3)) {
-            ring_put(buttons);
-            ring_put((uint8_t)dx);
-            ring_put((uint8_t)dy);
+        if (mouse_packet_size == 4)
+            mouse_cycle = 3;
+        else {
+            mouse_cycle = 0;
+            complete = 1;
         }
-        spin_unlock(&mouse_lock);
-        mouse_irqrestore(flags);
-
-        waitq_wake_all(&mouse_waitq);
-        descriptor_ready_notify();
+        break;
+    case 3:
+        mouse_bytes[3] = (int8_t)data;
+        mouse_cycle = 0;
+        complete = 1;
         break;
     }
+
+    if (!complete) return;
+    buttons = (uint8_t)(mouse_bytes[0] & 0x07);
+    dx = mouse_bytes[1];
+    dy = mouse_bytes[2];
+
+    flags = mouse_irqsave();
+    spin_lock(&mouse_lock);
+    if (ring_buffer && mouse_reserve_ring(mouse_packet_size)) {
+        ring_put(buttons);
+        ring_put((uint8_t)dx);
+        ring_put((uint8_t)dy);
+        if (mouse_packet_size == 4)
+            ring_put((uint8_t)mouse_bytes[3]);
+    }
+    spin_unlock(&mouse_lock);
+    mouse_irqrestore(flags);
+
+    waitq_wake_all(&mouse_waitq);
+    descriptor_ready_notify();
 }
 
 int mouse_has_data(void) {
@@ -185,18 +201,24 @@ int mouse_read(uint8_t *buf, uint32_t count) {
     return (int)i;
 }
 
+uint32_t mouse_get_packet_size(void) {
+    return mouse_packet_size;
+}
+
 wait_queue_t *mouse_get_waitq(void) {
     return &mouse_waitq;
 }
 
 void KERNEL_INIT mouse_init(void) {
     uint8_t config;
+    uint8_t device_id;
 
     ring_head = 0;
     ring_tail = 0;
     ring_buffer = NULL;
     ring_capacity = 0;
     mouse_cycle = 0;
+    mouse_packet_size = 3;
     waitq_init(&mouse_waitq);
 
     ps2_wait_input();
@@ -220,6 +242,24 @@ void KERNEL_INIT mouse_init(void) {
 
     ps2_mouse_write(0xF6);
     ps2_mouse_read();
+
+    ps2_mouse_write(0xF3);
+    ps2_mouse_read();
+    ps2_mouse_write(200);
+    ps2_mouse_read();
+    ps2_mouse_write(0xF3);
+    ps2_mouse_read();
+    ps2_mouse_write(100);
+    ps2_mouse_read();
+    ps2_mouse_write(0xF3);
+    ps2_mouse_read();
+    ps2_mouse_write(80);
+    ps2_mouse_read();
+    ps2_mouse_write(0xF2);
+    ps2_mouse_read();
+    device_id = ps2_mouse_read();
+    if (device_id == 3 || device_id == 4)
+        mouse_packet_size = 4;
 
     ps2_mouse_write(0xF4);
     ps2_mouse_read();

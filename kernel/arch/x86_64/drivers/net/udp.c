@@ -154,6 +154,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             sock->recv_from_ip = src;
             sock->recv_from_port = src_port;
             sock->has_data = 1;
+            descriptor_ready_notify();
             return;
         }
         sock = sock->next;
@@ -198,13 +199,35 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
 
 udp_socket_t *udp_socket_create(uint16_t port) {
     udp_socket_t *sock;
+    udp_socket_t *existing;
+    uint16_t candidate;
+    int occupied;
+
+    candidate = port;
+    do {
+        if (!candidate) {
+            candidate = udp_ephemeral_port++;
+            if (udp_ephemeral_port < 49152) udp_ephemeral_port = 49152;
+        }
+        occupied = 0;
+        existing = udp_sockets;
+        while (existing) {
+            if (existing->local_port == candidate) {
+                occupied = 1;
+                break;
+            }
+            existing = existing->next;
+        }
+        if (occupied && port) return NULL;
+        if (occupied) candidate = 0;
+    } while (occupied);
 
     sock = (udp_socket_t *)kmalloc(sizeof(udp_socket_t));
     if (!sock) return NULL;
 
     memset(sock, 0, sizeof(udp_socket_t));
 
-    sock->local_port = port ? port : udp_ephemeral_port++;
+    sock->local_port = candidate;
 
     sock->netif = netif_get_default();
     sock->next = udp_sockets;
@@ -244,6 +267,7 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr
     uint64_t copy_len;
 
     if (!sock) return -1;
+    if (!sock->has_data && timeout_ms == 0) return -1;
 
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();
@@ -251,7 +275,8 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr
     while (!sock->has_data) {
         __asm__ volatile("sti");
         netif_poll_all();
-        if (pit_get_ticks() - start > timeout_ticks) {
+        if (timeout_ms != UINT64_MAX &&
+            pit_get_ticks() - start > timeout_ticks) {
             return -1;
         }
         schedule();

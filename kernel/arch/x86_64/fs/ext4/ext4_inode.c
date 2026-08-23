@@ -659,7 +659,7 @@ uint8_t ext4_type_to_vfs(uint8_t ext4_type) {
         case EXT4_FT_CHRDEV:   return VFS_CHARDEVICE;
         case EXT4_FT_BLKDEV:   return VFS_BLOCKDEVICE;
         case EXT4_FT_FIFO:     return VFS_PIPE;
-        case EXT4_FT_SOCK:     return VFS_PIPE;
+        case EXT4_FT_SOCK:     return VFS_SOCKET;
         case EXT4_FT_SYMLINK:  return VFS_SYMLINK;
         default:              return VFS_FILE;
     }

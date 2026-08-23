@@ -66,7 +66,75 @@ static void tty_set_foreground_pgrp(int tty_id, int pgrp) {
     tty_pgrp[tty_id] = (int)(state | ((uint32_t)pgrp & ~TTY_OUTPUT_STOPPED));
 }
 
-static struct vt_mode_s vt_mode = { VT_AUTO, 0, 0, 0, 0 };
+static struct vt_mode_s *vt_modes;
+static pid_t *vt_owners;
+static uint8_t *kbd_modes;
+static int vt_pending_switch = -1;
+static int vt_switch_bypass;
+
+extern int is_socket_fd(int fd);
+extern int socket_ioctl(int fd, unsigned long request, uint64_t arg);
+
+int tty_vt_switch_request(int target_vt) {
+    int active;
+    int result;
+    struct vt_mode_s *mode;
+
+    if (vt_switch_bypass || !vt_modes || !vt_owners) return 1;
+    active = console_get_current();
+    if (active < 0 || active >= tty_count) return 1;
+    mode = &vt_modes[active];
+    if (mode->mode != VT_PROCESS || vt_owners[active] <= 0) return 1;
+    result = sys_kill_impl(vt_owners[active],
+                           (const char *)(uintptr_t)mode->relsig, 0);
+    if (result < 0) {
+        memset(mode, 0, sizeof(*mode));
+        vt_owners[active] = 0;
+        return 1;
+    }
+    vt_pending_switch = target_vt;
+    return 0;
+}
+
+void tty_vt_switch_complete(int target_vt) {
+    struct vt_mode_s *mode;
+
+    if (!vt_modes || !vt_owners) return;
+    if (target_vt < 0 || target_vt >= tty_count) return;
+    mode = &vt_modes[target_vt];
+    if (mode->mode == VT_PROCESS && vt_owners[target_vt] > 0 &&
+        mode->acqsig > 0)
+        sys_kill_impl(vt_owners[target_vt],
+                      (const char *)(uintptr_t)mode->acqsig, 0);
+}
+
+void tty_vt_release_owner(pid_t pid) {
+    int i;
+    int target_vt;
+
+    if (!vt_modes || !vt_owners) return;
+    target_vt = -1;
+    for (i = 0; i < tty_count; i++) {
+        if (vt_owners[i] != pid) continue;
+        memset(&vt_modes[i], 0, sizeof(vt_modes[i]));
+        vt_owners[i] = 0;
+        if (kbd_modes) kbd_modes[i] = K_XLATE;
+        if (i == console_get_current() &&
+            console_get_graphics_mode(i))
+            console_set_graphics_mode(i, 0, pid);
+        if (i == console_get_current() && vt_pending_switch >= 0) {
+            target_vt = vt_pending_switch;
+            vt_pending_switch = -1;
+        }
+    }
+    if (target_vt >= 0) {
+        vt_switch_bypass = 1;
+        console_switch(target_vt);
+        vt_switch_bypass = 0;
+        if (console_get_current() == target_vt)
+            tty_vt_switch_complete(target_vt);
+    }
+}
 
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     pipe_t *p;
@@ -216,6 +284,13 @@ static int get_tty_id_for_fd(int fd) {
         }
         if (VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE &&
             (vfs_name_is_tty(vfs_node_name(node)) || vfs_name_is(vfs_node_name(node), "console"))) {
+            if (vfs_node_name(node)[0] == 't' &&
+                vfs_node_name(node)[1] == 't' &&
+                vfs_node_name(node)[2] == 'y' &&
+                vfs_node_name(node)[3] >= '0' &&
+                vfs_node_name(node)[3] <= '9' &&
+                node->inode < (uint64_t)tty_count)
+                return (int)node->inode;
             if (current_task->console_id >= 0) return current_task->console_id;
             return console_get_current();
         }
@@ -283,10 +358,12 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
     int found;
     int ci;
     int target_vt;
+    struct vt_mode_s requested_mode;
 
-    request = (unsigned long)(uintptr_t)request_ptr;
+    request = (uint32_t)(uintptr_t)request_ptr;
 
     if (!current_task) return -ESRCH;
+    if (is_socket_fd(fd)) return socket_ioctl(fd, request, arg);
     if (fd < 0 || fd >= current_task->fds_capacity) {
         return -EBADF;
     }
@@ -506,15 +583,50 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
 
         case VT_GETMODE:
             if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct vt_mode_s), 1, 0)) return -EFAULT;
-            memcpy((void *)(uintptr_t)arg, &vt_mode, sizeof(struct vt_mode_s));
+            if (!tty_valid_id(tty_id) || !vt_modes) return -ENOTTY;
+            memcpy((void *)(uintptr_t)arg, &vt_modes[tty_id],
+                   sizeof(struct vt_mode_s));
             return 0;
 
         case VT_SETMODE:
             if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(struct vt_mode_s), 1, 0)) return -EFAULT;
-            memcpy(&vt_mode, (void *)(uintptr_t)arg, sizeof(struct vt_mode_s));
+            if (!tty_valid_id(tty_id) || !vt_modes || !vt_owners)
+                return -ENOTTY;
+            memcpy(&requested_mode, (void *)(uintptr_t)arg,
+                   sizeof(requested_mode));
+            if (requested_mode.mode != VT_AUTO &&
+                requested_mode.mode != VT_PROCESS)
+                return -EINVAL;
+            if (requested_mode.relsig < 0 || requested_mode.relsig > 64 ||
+                requested_mode.acqsig < 0 || requested_mode.acqsig > 64 ||
+                (requested_mode.mode == VT_PROCESS &&
+                 requested_mode.relsig == 0))
+                return -EINVAL;
+            vt_modes[tty_id] = requested_mode;
+            if (requested_mode.mode == VT_PROCESS)
+                vt_owners[tty_id] = current_task->pid;
+            else
+                vt_owners[tty_id] = 0;
             return 0;
 
         case VT_RELDISP:
+            if (!tty_valid_id(tty_id) || !vt_modes || !vt_owners)
+                return -ENOTTY;
+            if (vt_owners[tty_id] != current_task->pid) return -EPERM;
+            if (arg == VT_ACKACQ) return 0;
+            if (vt_pending_switch < 0) return -EINVAL;
+            if (arg == 0) {
+                vt_pending_switch = -1;
+                return 0;
+            }
+            if (arg != 1) return -EINVAL;
+            target_vt = vt_pending_switch;
+            vt_pending_switch = -1;
+            vt_switch_bypass = 1;
+            console_switch(target_vt);
+            vt_switch_bypass = 0;
+            if (console_get_current() == target_vt)
+                tty_vt_switch_complete(target_vt);
             return 0;
 
         case VT_DISALLOCATE:
@@ -544,6 +656,32 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             if (!arg || !syscall_user_range_present((uint64_t)arg, sizeof(int), 1, 0)) return -EFAULT;
             *(int *)(uintptr_t)arg = KB_101;
             return 0;
+
+        case KDGKBMODE:
+            if (!arg || !syscall_user_range_present((uint64_t)arg,
+                    sizeof(int), 1, 0)) return -EFAULT;
+            if (!tty_valid_id(tty_id) || !kbd_modes) return -ENOTTY;
+            *(int *)(uintptr_t)arg = kbd_modes[tty_id];
+            return 0;
+
+        case KDSKBMODE:
+            if (!tty_valid_id(tty_id) || !kbd_modes) return -ENOTTY;
+            if (arg != K_RAW && arg != K_XLATE && arg != K_MEDIUMRAW &&
+                arg != K_UNICODE && arg != K_OFF)
+                return -EINVAL;
+            kbd_modes[tty_id] = (uint8_t)arg;
+            return 0;
+
+        case KDGETLED:
+        case KDGKBLED:
+            if (!arg || !syscall_user_range_present((uint64_t)arg,
+                    sizeof(char), 1, 0)) return -EFAULT;
+            *(char *)(uintptr_t)arg = 0;
+            return 0;
+
+        case KDSETLED:
+        case KDSKBLED:
+            return arg <= 7 ? 0 : -EINVAL;
 
         default:
             return -EINVAL;
@@ -641,6 +779,9 @@ static int sys_tcsetpgrp(int fd, const char *pgrp_ptr, int unused) {
 void syscalls_termios_init(void) {
     int i;
     int count;
+    size_t state_size;
+    uint8_t *state_cursor;
+    void *state_storage;
 
     syscall_table_set(SYSCALL_TCGETATTR, (void *)(sys_tcgetattr));
     syscall_table_set(SYSCALL_TCSETATTR, (void *)(sys_tcsetattr));
@@ -654,24 +795,41 @@ void syscalls_termios_init(void) {
     count = console_get_count();
     if (count <= 0) count = 1;
 
-    tty_termios = (struct kernel_termios *)kmalloc(count * sizeof(struct kernel_termios));
-    tty_winsize = (struct kernel_winsize *)kmalloc(count * sizeof(struct kernel_winsize));
-    tty_pgrp = (int *)kmalloc(count * sizeof(int));
-
-    if (!tty_termios || !tty_winsize || !tty_pgrp) {
-        if (tty_termios) kfree(tty_termios);
-        if (tty_winsize) kfree(tty_winsize);
-        if (tty_pgrp) kfree(tty_pgrp);
+    state_size = (size_t)count *
+        (sizeof(struct kernel_termios) + sizeof(struct kernel_winsize) +
+         sizeof(int) + sizeof(struct vt_mode_s) + sizeof(pid_t) +
+         sizeof(uint8_t));
+    state_storage = kmalloc(state_size);
+    if (!state_storage) {
         tty_termios = NULL;
         tty_winsize = NULL;
         tty_pgrp = NULL;
+        vt_modes = NULL;
+        vt_owners = NULL;
+        kbd_modes = NULL;
         count = 0;
+    } else {
+        state_cursor = (uint8_t *)state_storage;
+        tty_termios = (struct kernel_termios *)state_cursor;
+        state_cursor += (size_t)count * sizeof(struct kernel_termios);
+        tty_winsize = (struct kernel_winsize *)state_cursor;
+        state_cursor += (size_t)count * sizeof(struct kernel_winsize);
+        tty_pgrp = (int *)state_cursor;
+        state_cursor += (size_t)count * sizeof(int);
+        vt_modes = (struct vt_mode_s *)state_cursor;
+        state_cursor += (size_t)count * sizeof(struct vt_mode_s);
+        vt_owners = (pid_t *)state_cursor;
+        state_cursor += (size_t)count * sizeof(pid_t);
+        kbd_modes = state_cursor;
     }
 
     tty_count = count;
     memset(tty_termios, 0, tty_count * sizeof(struct kernel_termios));
     memset(tty_winsize, 0, tty_count * sizeof(struct kernel_winsize));
     memset(tty_pgrp, 0, tty_count * sizeof(int));
+    memset(vt_modes, 0, tty_count * sizeof(struct vt_mode_s));
+    memset(vt_owners, 0, tty_count * sizeof(pid_t));
+    memset(kbd_modes, K_XLATE, tty_count * sizeof(uint8_t));
 
     for (i = 0; i < tty_count; i++) {
         termios_init_defaults(i);

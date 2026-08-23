@@ -13,6 +13,7 @@ extern task_t *current_task;
 #define RAMFS_NODE_DIR     1
 #define RAMFS_NODE_SYMLINK 2
 #define RAMFS_NODE_FIFO    3
+#define RAMFS_NODE_SOCKET  4
 
 static ramfs_node_t *ramfs_root = NULL;
 static vfs_node_t *ramfs_vfs_root = NULL;
@@ -178,6 +179,8 @@ static vfs_node_t *ramfs_get_vfs_node(ramfs_node_t *rn, vfs_node_t *parent_vn) {
         vn->flags = VFS_SYMLINK;
     } else if (rn->type == RAMFS_NODE_FIFO) {
         vn->flags = VFS_PIPE;
+    } else if (rn->type == RAMFS_NODE_SOCKET) {
+        vn->flags = VFS_SOCKET;
     } else {
         vn->flags = VFS_FILE;
     }
@@ -466,6 +469,19 @@ int ramfs_create_file(const char *path, uint16_t permissions) {
     kfree(storage);
     ramfs_unlock();
     
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_create_socket(const char *path, uint16_t permissions) {
+    ramfs_node_t *node;
+    int result;
+
+    result = ramfs_create_file(path, permissions);
+    if (result != RAMFS_ERR_OK) return result;
+    node = ramfs_find_node(path);
+    if (!node) return RAMFS_ERR_NOENT;
+    node->type = RAMFS_NODE_SOCKET;
+    if (node->vfs_node) node->vfs_node->flags = VFS_SOCKET;
     return RAMFS_ERR_OK;
 }
 
@@ -1523,7 +1539,10 @@ int ramfs_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
         ramfs_unlock();
         return RAMFS_ERR_NOMEM;
     }
-    node->type = RAMFS_NODE_FIFO;
+    if ((mode & 0170000) == 0140000)
+        node->type = RAMFS_NODE_SOCKET;
+    else
+        node->type = RAMFS_NODE_FIFO;
     node->permissions = (uint16_t)(mode & 07777);
     node->uid = current_task ? current_task->euid : 0;
     node->gid = current_task ? current_task->egid : 0;
@@ -1633,6 +1652,8 @@ static dirent_t *ramfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
                 ramfs_dirent.type = VFS_SYMLINK;
             } else if (child->type == RAMFS_NODE_FIFO) {
                 ramfs_dirent.type = VFS_PIPE;
+            } else if (child->type == RAMFS_NODE_SOCKET) {
+                ramfs_dirent.type = VFS_SOCKET;
             } else {
                 ramfs_dirent.type = VFS_FILE;
             }
@@ -1704,15 +1725,19 @@ static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn) {
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
 
 static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
+    ramfs_node_t *prn;
+    ramfs_node_t *existing;
+    ramfs_node_t *node;
+
     if (!parent || !name || VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return RAMFS_ERR_INVAL;
     
-    ramfs_node_t *prn = (ramfs_node_t *)parent->private_data;
+    prn = (ramfs_node_t *)parent->private_data;
     if (!prn || prn->type != RAMFS_NODE_DIR) return RAMFS_ERR_NOTDIR;
     
     ramfs_lock();
     ramfs_node_lock(prn);
     
-    ramfs_node_t *existing = ramfs_find_child(prn, name);
+    existing = ramfs_find_child(prn, name);
     
     if (existing && (flags & VFS_O_EXCL)) {
         ramfs_node_unlock(prn);
@@ -1726,7 +1751,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
         return RAMFS_ERR_OK;
     }
     
-    ramfs_node_t *node = ramfs_alloc_node();
+    node = ramfs_alloc_node();
     if (!node) {
         ramfs_node_unlock(prn);
         ramfs_unlock();
@@ -1739,7 +1764,10 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
         ramfs_unlock();
         return RAMFS_ERR_NOMEM;
     }
-    node->type = RAMFS_NODE_FILE;
+    if (VFS_GET_TYPE(flags) == VFS_SOCKET)
+        node->type = RAMFS_NODE_SOCKET;
+    else
+        node->type = RAMFS_NODE_FILE;
     node->permissions = (uint16_t)(flags & 07777);
     if (node->permissions == 0) node->permissions = 0644;
     node->uid = current_task ? current_task->euid : 0;

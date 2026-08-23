@@ -5,6 +5,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/idt.h>
+#include <lebirun/task.h>
 #include <lebirun/tty.h>
 #include <string.h>
 
@@ -426,6 +427,9 @@ void e1000_irq_handler(void *regs) {
             dev->netif->link_up = dev->link_up;
         }
     }
+
+    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO))
+        descriptor_ready_notify();
 
 }
 

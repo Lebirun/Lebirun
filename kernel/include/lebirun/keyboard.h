@@ -20,6 +20,7 @@
 struct keyboard_event {
     uint8_t scancode;
     uint8_t is_release;
+    uint8_t is_extended;
     uint8_t ctrl_held;
     uint8_t alt_held;
     uint8_t shift_held;

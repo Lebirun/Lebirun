@@ -18,6 +18,9 @@ static dirent_t evdev_dirent;
 static uint8_t prev_mouse_buttons = 0;
 
 static void evdev_process_mouse(void);
+static uint16_t evdev_extended_key(uint8_t scancode);
+static void set_bit(uint8_t *bits, int bit);
+static void clear_bit(uint8_t *bits, int bit);
 
 extern volatile uint64_t tick_count;
 extern uint64_t pit_freq;
@@ -128,6 +131,8 @@ int evdev_node_has_data(vfs_node_t *node) {
     if (!node) return 0;
     dev = (struct evdev_device *)node->private_data;
     if (!dev) return 0;
+    if (dev->grab_pid && (!current_task ||
+        dev->grab_pid != current_task->pid)) return 0;
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse) evdev_process_mouse();
     return evdev_has_data(dev);
@@ -153,25 +158,36 @@ void evdev_push_sync(struct evdev_device *dev) {
 
 static void evdev_kbd_observer(struct keyboard_event event) {
     uint16_t keycode;
+
     if (event.scancode >= 128)
         return;
-    keycode = scancode_to_evdev[event.scancode];
+    if (event.is_extended)
+        keycode = evdev_extended_key(event.scancode);
+    else
+        keycode = scancode_to_evdev[event.scancode];
     if (keycode == KEY_RESERVED)
         return;
+    if (event.is_release)
+        clear_bit(evdev_kbd.key_state, keycode);
+    else
+        set_bit(evdev_kbd.key_state, keycode);
     evdev_push_event(&evdev_kbd, EV_KEY, keycode, event.is_release ? 0 : 1);
     evdev_push_sync(&evdev_kbd);
 }
 
 static void evdev_process_mouse(void) {
-    uint8_t pkt[3];
+    uint8_t pkt[4];
+    uint32_t packet_size;
     int nread;
     uint8_t buttons;
     int8_t dx;
     int8_t dy;
+    int8_t wheel;
 
+    packet_size = mouse_get_packet_size();
     while (mouse_has_data()) {
-        nread = mouse_read(pkt, 3);
-        if (nread < 3)
+        nread = mouse_read(pkt, packet_size);
+        if (nread < (int)packet_size)
             break;
         buttons = pkt[0];
         dx = (int8_t)pkt[1];
@@ -181,6 +197,13 @@ static void evdev_process_mouse(void) {
             evdev_push_event(&evdev_mouse, EV_REL, REL_X, (int32_t)dx);
         if (dy != 0)
             evdev_push_event(&evdev_mouse, EV_REL, REL_Y, (int32_t)(-dy));
+        if (packet_size == 4) {
+            wheel = (int8_t)(pkt[3] & 0x0F);
+            if (wheel & 0x08) wheel = (int8_t)(wheel | 0xF0);
+            if (wheel != 0)
+                evdev_push_event(&evdev_mouse, EV_REL, REL_WHEEL,
+                                 (int32_t)(-wheel));
+        }
 
         if ((buttons & 0x01) != (prev_mouse_buttons & 0x01))
             evdev_push_event(&evdev_mouse, EV_KEY, BTN_LEFT, (buttons & 0x01) ? 1 : 0);
@@ -203,6 +226,8 @@ uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer
     if (!node || !buffer) return 0;
     dev = (struct evdev_device *)node->private_data;
     if (!dev) return 0;
+    if (dev->grab_pid && (!current_task ||
+        dev->grab_pid != current_task->pid)) return 0;
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse) evdev_process_mouse();
     ev_size = sizeof(struct input_event);
@@ -223,6 +248,8 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
     dev = (struct evdev_device *)node->private_data;
     if (!dev)
         return 0;
+    if (dev->grab_pid && (!current_task ||
+        dev->grab_pid != current_task->pid)) return 0;
 
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse)
@@ -255,6 +282,30 @@ static void set_bit(uint8_t *bits, int bit) {
     bits[bit / 8] |= (1 << (bit % 8));
 }
 
+static void clear_bit(uint8_t *bits, int bit) {
+    bits[bit / 8] &= (uint8_t)~(1 << (bit % 8));
+}
+
+static uint16_t evdev_extended_key(uint8_t scancode) {
+    switch (scancode) {
+    case 0x1C: return KEY_KPENTER;
+    case 0x1D: return KEY_RIGHTCTRL;
+    case 0x35: return KEY_KPSLASH;
+    case 0x38: return KEY_RIGHTALT;
+    case 0x47: return KEY_HOME;
+    case 0x48: return KEY_UP;
+    case 0x49: return KEY_PAGEUP;
+    case 0x4B: return KEY_LEFT;
+    case 0x4D: return KEY_RIGHT;
+    case 0x4F: return KEY_END;
+    case 0x50: return KEY_DOWN;
+    case 0x51: return KEY_PAGEDOWN;
+    case 0x52: return KEY_INSERT;
+    case 0x53: return KEY_DELETE;
+    default: return KEY_RESERVED;
+    }
+}
+
 int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     struct evdev_device *dev;
     struct input_id *id_out;
@@ -263,27 +314,46 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     unsigned long ev_type;
     unsigned long len;
     unsigned long copylen;
+    int grab;
 
     dev = (struct evdev_device *)node->private_data;
     if (!dev)
         return -22;
 
     if (request == EVIOCGVERSION) {
+        if (!arg) return -14;
         ver = (int *)arg;
         *ver = 0x010001;
         return 0;
     }
 
     if (request == EVIOCGID) {
+        if (!arg) return -14;
         id_out = (struct input_id *)arg;
         *id_out = dev->id;
         return 0;
     }
 
-    base = request & 0xFFFF00FF;
+    if (request == EVIOCGRAB) {
+        grab = (int)(uintptr_t)arg;
+        if (!current_task) return -22;
+        if (grab) {
+            if (dev->grab_pid && dev->grab_pid != current_task->pid)
+                return -16;
+            dev->grab_pid = current_task->pid;
+        } else {
+            if (dev->grab_pid && dev->grab_pid != current_task->pid)
+                return -1;
+            dev->grab_pid = 0;
+        }
+        return 0;
+    }
+
+    base = request & 0xE000FFFF;
 
     if (base == EVIOCGNAME_BASE) {
         len = (request >> 16) & 0x1FFF;
+        if (!arg || len == 0) return -22;
         copylen = strlen(dev->name);
         if (copylen >= len)
             copylen = len - 1;
@@ -294,6 +364,7 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
 
     if (base == EVIOCGPROP_BASE) {
         len = (request >> 16) & 0x1FFF;
+        if (!arg && len) return -14;
         copylen = sizeof(dev->prop_bits);
         if (copylen > len)
             copylen = len;
@@ -301,9 +372,20 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
         return 0;
     }
 
-    if ((request & 0xFF) >= 0x20 && (request & 0xFF) <= 0x3F) {
-        ev_type = (request >> 8) & 0xFF;
+    if (base == EVIOCGKEY_BASE) {
         len = (request >> 16) & 0x1FFF;
+        if (!arg && len) return -14;
+        copylen = sizeof(dev->key_state);
+        if (copylen > len)
+            copylen = len;
+        memcpy(arg, dev->key_state, copylen);
+        return 0;
+    }
+
+    if ((request & 0xFF) >= 0x20 && (request & 0xFF) <= 0x3F) {
+        ev_type = (request & 0xFF) - 0x20;
+        len = (request >> 16) & 0x1FFF;
+        if (!arg && len) return -14;
         switch (ev_type) {
         case 0:
             copylen = sizeof(dev->ev_bits);
@@ -332,6 +414,7 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     }
 
     if ((request & 0xFF) >= 0x40 && (request & 0xFF) <= 0x7F) {
+        if (!arg) return -14;
         memset(arg, 0, sizeof(struct input_absinfo));
         return 0;
     }
@@ -365,7 +448,14 @@ static void devfs_open_stub(vfs_node_t *node, uint64_t flags) {
     dev = (struct evdev_device *)node->private_data;
     evdev_ensure_ring(dev);
 }
-static void devfs_close_stub(vfs_node_t *node) { (void)node; }
+static void devfs_close_stub(vfs_node_t *node) {
+    struct evdev_device *dev;
+
+    if (!node || !current_task) return;
+    dev = (struct evdev_device *)node->private_data;
+    if (dev && dev->grab_pid == current_task->pid)
+        dev->grab_pid = 0;
+}
 
 vfs_node_t *evdev_get_input_dir(void) {
     return &evdev_input_dir;
@@ -384,6 +474,11 @@ struct evdev_device *evdev_get_mouse(void) {
     return &evdev_mouse;
 }
 
+void evdev_release_grabs(pid_t pid) {
+    if (evdev_kbd.grab_pid == pid) evdev_kbd.grab_pid = 0;
+    if (evdev_mouse.grab_pid == pid) evdev_mouse.grab_pid = 0;
+}
+
 void KERNEL_INIT evdev_init(void) {
     int i;
 
@@ -400,6 +495,20 @@ void KERNEL_INIT evdev_init(void) {
         if (scancode_to_evdev[i] != KEY_RESERVED)
             set_bit(evdev_kbd.key_bits, scancode_to_evdev[i]);
     }
+    set_bit(evdev_kbd.key_bits, KEY_KPENTER);
+    set_bit(evdev_kbd.key_bits, KEY_RIGHTCTRL);
+    set_bit(evdev_kbd.key_bits, KEY_KPSLASH);
+    set_bit(evdev_kbd.key_bits, KEY_RIGHTALT);
+    set_bit(evdev_kbd.key_bits, KEY_HOME);
+    set_bit(evdev_kbd.key_bits, KEY_UP);
+    set_bit(evdev_kbd.key_bits, KEY_PAGEUP);
+    set_bit(evdev_kbd.key_bits, KEY_LEFT);
+    set_bit(evdev_kbd.key_bits, KEY_RIGHT);
+    set_bit(evdev_kbd.key_bits, KEY_END);
+    set_bit(evdev_kbd.key_bits, KEY_DOWN);
+    set_bit(evdev_kbd.key_bits, KEY_PAGEDOWN);
+    set_bit(evdev_kbd.key_bits, KEY_INSERT);
+    set_bit(evdev_kbd.key_bits, KEY_DELETE);
 
     memset(&evdev_mouse, 0, sizeof(evdev_mouse));
     waitq_init(&evdev_mouse.waitq);
@@ -416,6 +525,7 @@ void KERNEL_INIT evdev_init(void) {
     set_bit(evdev_mouse.key_bits, BTN_MIDDLE);
     set_bit(evdev_mouse.rel_bits, REL_X);
     set_bit(evdev_mouse.rel_bits, REL_Y);
+    set_bit(evdev_mouse.rel_bits, REL_WHEEL);
 
     memset(&evdev_input_dir, 0, sizeof(vfs_node_t));
     evdev_input_dir.flags = VFS_DIRECTORY;

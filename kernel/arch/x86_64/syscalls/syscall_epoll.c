@@ -772,51 +772,12 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     }
 }
 
-static int sys_eventfd(unsigned int initval, const char *flags_ptr, int unused) {
+static int eventfd_create(unsigned int initval, int flags) {
     int idx;
     int i;
 
-    (void)flags_ptr;
-    (void)unused;
-    
-    mutex_lock(&eventfd_lock);
-    idx = -1;
-    for (i = 0; i < eventfd_capacity; i++) {
-        if (!eventfds[i].in_use) {
-            idx = i;
-            break;
-        }
-    }
-    
-    if (idx < 0) {
-        if (eventfd_grow() < 0) {
-            mutex_unlock(&eventfd_lock);
-            return -EMFILE;
-        }
-        idx = eventfd_capacity / 2;
-    }
-    
-    memset(&eventfds[idx], 0, sizeof(eventfd_instance_t));
-    eventfds[idx].in_use = 1;
-    eventfds[idx].owner_pid = current_task ? current_task->pid : 0;
-    eventfds[idx].counter = initval;
-    eventfds[idx].flags = 0;
-    eventfds[idx].semaphore = 0;
-    
-    mutex_unlock(&eventfd_lock);
-    return EVENTFD_BASE_FD + idx;
-}
-
-static int sys_eventfd2(unsigned int initval, const char *flags_ptr, int unused) {
-    int flags;
-    int idx;
-    int i;
-
-    flags = (int)(uintptr_t)flags_ptr;
-    (void)unused;
     if (flags & ~(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK))
         return -EINVAL;
-    
     mutex_lock(&eventfd_lock);
     idx = -1;
     for (i = 0; i < eventfd_capacity; i++) {
@@ -843,6 +804,17 @@ static int sys_eventfd2(unsigned int initval, const char *flags_ptr, int unused)
     
     mutex_unlock(&eventfd_lock);
     return EVENTFD_BASE_FD + idx;
+}
+
+static int sys_eventfd(unsigned int initval, const char *flags_ptr, int unused) {
+    (void)flags_ptr;
+    (void)unused;
+    return eventfd_create(initval, 0);
+}
+
+static int sys_eventfd2(unsigned int initval, const char *flags_ptr, int unused) {
+    (void)unused;
+    return eventfd_create(initval, (int)(uintptr_t)flags_ptr);
 }
 
 static int sys_set_robust_list(void *head, size_t length, int unused) {
@@ -1477,6 +1449,106 @@ int epoll_close_fd(int fd) {
         return 0;
     }
     return -EBADF;
+}
+
+void event_descriptors_close_range(unsigned int first, unsigned int last,
+                                   int cloexec) {
+    unsigned int fd;
+    int i;
+
+    inotify_close_range(first, last, cloexec);
+    if (!current_task) return;
+    if (cloexec) {
+        mutex_lock(&epoll_lock);
+        for (i = 0; i < epoll_capacity; i++) {
+            fd = (unsigned int)(EPOLL_BASE_FD + i);
+            if (fd >= first && fd <= last && epoll_instances[i].in_use &&
+                epoll_instances[i].owner_pid == current_task->pid)
+                epoll_instances[i].flags |= EFD_CLOEXEC;
+        }
+        mutex_unlock(&epoll_lock);
+        mutex_lock(&eventfd_lock);
+        for (i = 0; i < eventfd_capacity; i++) {
+            fd = (unsigned int)(EVENTFD_BASE_FD + i);
+            if (fd >= first && fd <= last && eventfds[i].in_use &&
+                eventfds[i].owner_pid == current_task->pid)
+                eventfds[i].flags |= EFD_CLOEXEC;
+        }
+        mutex_unlock(&eventfd_lock);
+        mutex_lock(&timerfd_lock);
+        for (i = 0; i < timerfd_capacity; i++) {
+            fd = (unsigned int)(TIMERFD_BASE_FD + i);
+            if (fd >= first && fd <= last && timerfds[i].in_use &&
+                timerfds[i].owner_pid == current_task->pid)
+                timerfds[i].flags |= EFD_CLOEXEC;
+        }
+        mutex_unlock(&timerfd_lock);
+        mutex_lock(&signalfd_lock);
+        for (i = 0; i < signalfd_capacity; i++) {
+            fd = (unsigned int)(SIGNALFD_BASE_FD + i);
+            if (fd >= first && fd <= last && signalfds[i].in_use &&
+                signalfds[i].owner_pid == current_task->pid)
+                signalfds[i].flags |= EFD_CLOEXEC;
+        }
+        mutex_unlock(&signalfd_lock);
+        return;
+    }
+    for (i = epoll_capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(EPOLL_BASE_FD + i);
+        if (fd >= first && fd <= last && is_epoll_special_fd((int)fd))
+            epoll_close_fd((int)fd);
+    }
+    for (i = eventfd_capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(EVENTFD_BASE_FD + i);
+        if (fd >= first && fd <= last && is_epoll_special_fd((int)fd))
+            epoll_close_fd((int)fd);
+    }
+    for (i = timerfd_capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(TIMERFD_BASE_FD + i);
+        if (fd >= first && fd <= last && is_epoll_special_fd((int)fd))
+            epoll_close_fd((int)fd);
+    }
+    for (i = signalfd_capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(SIGNALFD_BASE_FD + i);
+        if (fd >= first && fd <= last && is_epoll_special_fd((int)fd))
+            epoll_close_fd((int)fd);
+    }
+}
+
+void event_descriptors_close_cloexec(pid_t pid) {
+    int fd;
+    int i;
+
+    inotify_close_cloexec(pid);
+    for (i = epoll_capacity - 1; i >= 0; i--) {
+        if (!epoll_instances[i].in_use ||
+            epoll_instances[i].owner_pid != pid ||
+            !(epoll_instances[i].flags & EFD_CLOEXEC))
+            continue;
+        fd = EPOLL_BASE_FD + i;
+        epoll_close_fd(fd);
+    }
+    for (i = eventfd_capacity - 1; i >= 0; i--) {
+        if (!eventfds[i].in_use || eventfds[i].owner_pid != pid ||
+            !(eventfds[i].flags & EFD_CLOEXEC))
+            continue;
+        fd = EVENTFD_BASE_FD + i;
+        epoll_close_fd(fd);
+    }
+    for (i = timerfd_capacity - 1; i >= 0; i--) {
+        if (!timerfds[i].in_use || timerfds[i].owner_pid != pid ||
+            !(timerfds[i].flags & EFD_CLOEXEC))
+            continue;
+        fd = TIMERFD_BASE_FD + i;
+        epoll_close_fd(fd);
+    }
+    for (i = signalfd_capacity - 1; i >= 0; i--) {
+        if (!signalfds[i].in_use || signalfds[i].owner_pid != pid ||
+            !(signalfds[i].flags & EFD_CLOEXEC))
+            continue;
+        fd = SIGNALFD_BASE_FD + i;
+        epoll_close_fd(fd);
+    }
 }
 
 void event_descriptors_close_task(pid_t pid) {

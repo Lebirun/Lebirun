@@ -412,6 +412,8 @@ static void KERNEL_INIT kernel_boot(void) {
                   KERNEL_INIT_STRING("sysfs"));
         vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
                   KERNEL_INIT_STRING("tmpfs"));
+        vfs_mount(NULL, KERNEL_INIT_STRING("/dev/shm"),
+                  KERNEL_INIT_STRING("tmpfs"));
 
         if (use_squashfs) {
             vfs_block_squashfs_access();
@@ -551,6 +553,8 @@ static void KERNEL_INIT kernel_boot(void) {
             vfs_mount(NULL, KERNEL_INIT_STRING("/sys"),
                       KERNEL_INIT_STRING("sysfs"));
             vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
+                      KERNEL_INIT_STRING("tmpfs"));
+            vfs_mount(NULL, KERNEL_INIT_STRING("/dev/shm"),
                       KERNEL_INIT_STRING("tmpfs"));
             if (cmdline_get_lke())
                 lke_autoload();

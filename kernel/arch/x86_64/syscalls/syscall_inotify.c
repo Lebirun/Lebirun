@@ -377,6 +377,48 @@ int inotify_close_fd(int fd) {
     return 0;
 }
 
+void inotify_close_range(unsigned int first, unsigned int last, int cloexec) {
+    unsigned int fd;
+    int capacity;
+    int i;
+
+    if (!current_task) return;
+    if (cloexec) {
+        mutex_lock(&inotify_lock);
+        for (i = 0; i < inotify_capacity; i++) {
+            fd = (unsigned int)(INOTIFY_BASE_FD + i);
+            if (fd < first || fd > last || !inotify_instances[i].in_use ||
+                inotify_instances[i].owner_pid != current_task->pid)
+                continue;
+            inotify_instances[i].flags |= INOTIFY_CLOEXEC;
+        }
+        mutex_unlock(&inotify_lock);
+        return;
+    }
+    capacity = inotify_capacity;
+    for (i = capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(INOTIFY_BASE_FD + i);
+        if (fd >= first && fd <= last && inotify_is_fd((int)fd))
+            inotify_close_fd((int)fd);
+    }
+}
+
+void inotify_close_cloexec(pid_t pid) {
+    int capacity;
+    int fd;
+    int i;
+
+    capacity = inotify_capacity;
+    for (i = capacity - 1; i >= 0; i--) {
+        if (!inotify_instances[i].in_use ||
+            inotify_instances[i].owner_pid != pid ||
+            !(inotify_instances[i].flags & INOTIFY_CLOEXEC))
+            continue;
+        fd = INOTIFY_BASE_FD + i;
+        inotify_close_fd(fd);
+    }
+}
+
 void inotify_close_task(pid_t pid) {
     inotify_queued_event_t *event;
     inotify_queued_event_t *next;

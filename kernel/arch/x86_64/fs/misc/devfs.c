@@ -60,6 +60,7 @@ enum {
     DEVFS_NODE_PORT,
     DEVFS_NODE_MICE,
     DEVFS_NODE_FB0,
+    DEVFS_NODE_SHM,
     DEVFS_NODE_COUNT
 };
 
@@ -325,6 +326,7 @@ static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     framebuffer_t *fb;
     struct fb_var_screeninfo *var;
     struct fb_fix_screeninfo *fix;
+    uint32_t expected_bpp;
 
     (void)node;
     fb = fb_get();
@@ -360,11 +362,22 @@ static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
         fix->line_length = (uint32_t)fb->pitch;
         return 0;
     case FBIOPUT_VSCREENINFO:
+        var = (struct fb_var_screeninfo *)arg;
+        if (!var) return -14;
+        expected_bpp = (uint32_t)fb->bpp;
+        if (var->xres != (uint32_t)fb->width ||
+            var->yres != (uint32_t)fb->height ||
+            var->xres_virtual != (uint32_t)fb->width ||
+            var->yres_virtual != (uint32_t)fb->height ||
+            var->xoffset != 0 || var->yoffset != 0 ||
+            var->bits_per_pixel != expected_bpp)
+            return -22;
+        return 0;
     case FBIOGETCMAP:
     case FBIOPUTCMAP:
-        return 0;
+        return -25;
     default:
-        return -22;
+        return -25;
     }
 }
 
@@ -550,7 +563,8 @@ static const devfs_static_node_desc_t devfs_node_descs[DEVFS_NODE_COUNT] = {
     { "kmem", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
     { "port", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
     { "mice", VFS_CHARDEVICE, 0666, DEVFS_OP_MICE },
-    { "fb0", VFS_CHARDEVICE, 0666, DEVFS_OP_FB }
+    { "fb0", VFS_CHARDEVICE, 0666, DEVFS_OP_FB },
+    { "shm", VFS_DIRECTORY, 01777, DEVFS_OP_NONE }
 };
 
 static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_t *desc, int idx) {

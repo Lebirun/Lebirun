@@ -237,6 +237,7 @@ void keyboard_handler(registers_t* regs) {
     if (kbd_observer) {
         kev.scancode = code;
         kev.is_release = is_release ? 1 : 0;
+        kev.is_extended = was_e0 ? 1 : 0;
         kev.ctrl_held = ctrl_pressed ? 1 : 0;
         kev.alt_held = alt_pressed ? 1 : 0;
         kev.shift_held = shift_is_down() ? 1 : 0;
