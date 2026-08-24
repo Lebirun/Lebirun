@@ -294,7 +294,9 @@ static int dequeue_queued_signal(task_signals_t *sigs, uint64_t mask,
                 scan = scan->next;
             }
             if (!still_pending)
-                sigs->pending.sig[0] &= ~(1ULL << (entry->signum - 1));
+                __atomic_fetch_and(&sigs->pending.sig[0],
+                                   ~(1ULL << (entry->signum - 1)),
+                                   __ATOMIC_ACQ_REL);
             if (info) memcpy(info, entry->info, sizeof(entry->info));
             still_pending = entry->signum;
             kfree(entry);
@@ -333,7 +335,7 @@ void task_reset_signals_on_exec(void) {
         return;
     }
 
-    sigs->pending.sig[0] = 0;
+    __atomic_store_n(&sigs->pending.sig[0], 0, __ATOMIC_RELEASE);
     sigs->blocked.sig[0] = 0;
     sigs->in_signal = 0;
     free_signal_queue(sigs);
@@ -369,7 +371,8 @@ int task_has_pending_signals(void) {
     sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return 0;
     if (sigs->owner_pid != current_task->pid) return 0;
-    unblocked = sigs->pending.sig[0] & ~sigs->blocked.sig[0];
+    unblocked = __atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE) &
+        ~sigs->blocked.sig[0];
     return unblocked != 0;
 }
 
@@ -379,7 +382,7 @@ uint64_t signal_pending_mask(task_t *task) {
     if (!task || !task->signal_data) return 0;
     sigs = (task_signals_t *)task->signal_data;
     if (sigs->owner_pid != task->pid) return 0;
-    return sigs->pending.sig[0];
+    return __atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE);
 }
 
 uint64_t signal_blocked_mask(task_t *task) {
@@ -402,15 +405,19 @@ uint32_t signal_queue_count(task_t *task) {
 
 int signal_take_pending(task_t *task, uint64_t mask) {
     task_signals_t *sigs;
+    uint64_t bit;
+    uint64_t previous;
     int signal_number;
 
     if (!task || !task->signal_data) return 0;
     sigs = (task_signals_t *)task->signal_data;
     if (sigs->owner_pid != task->pid) return 0;
     for (signal_number = 1; signal_number < 64; signal_number++) {
-        if (!(mask & (1ULL << (signal_number - 1)))) continue;
-        if (!(sigs->pending.sig[0] & (1ULL << (signal_number - 1)))) continue;
-        sigs->pending.sig[0] &= ~(1ULL << (signal_number - 1));
+        bit = 1ULL << (signal_number - 1);
+        if (!(mask & bit)) continue;
+        previous = __atomic_fetch_and(&sigs->pending.sig[0], ~bit,
+                                      __ATOMIC_ACQ_REL);
+        if (!(previous & bit)) continue;
         return signal_number;
     }
     return 0;
@@ -516,19 +523,19 @@ static int sys_rt_sigpending(uint64_t set_ptr, const char *sigsetsize_ptr,
                              int unused) {
     task_signals_t *sigs;
     uint64_t addr;
-    sigset_k empty_set;
+    sigset_k pending_set;
 
     (void)sigsetsize_ptr; (void)unused;
 
     addr = (uint64_t)set_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    memset(&pending_set, 0, sizeof(pending_set));
     if (sigs && sigs->owner_pid == current_task->pid) {
-        memcpy((void *)addr, &sigs->pending, sizeof(sigset_k));
-    } else {
-        memset(&empty_set, 0, sizeof(empty_set));
-        memcpy((void *)addr, &empty_set, sizeof(sigset_k));
+        pending_set.sig[0] = __atomic_load_n(&sigs->pending.sig[0],
+                                             __ATOMIC_ACQUIRE);
     }
+    memcpy((void *)addr, &pending_set, sizeof(sigset_k));
     return 0;
 }
 
@@ -649,7 +656,8 @@ static int sys_rt_sigtimedwait(const sigset_k *set_ptr, void *info_ptr,
     memset(info, 0, sizeof(info));
     signum = dequeue_queued_signal(sigs, set.sig[0], info);
     if (!signum) {
-        pending = sigs->pending.sig[0] & set.sig[0];
+        pending = __atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE) &
+            set.sig[0];
         signum = signal_take_pending(current_task, pending);
         if (signum) memcpy(info, &signum, sizeof(signum));
     }
@@ -660,7 +668,8 @@ static int sys_rt_sigtimedwait(const sigset_k *set_ptr, void *info_ptr,
             block_current();
         signum = dequeue_queued_signal(sigs, set.sig[0], info);
         if (!signum) {
-            pending = sigs->pending.sig[0] & set.sig[0];
+            pending = __atomic_load_n(&sigs->pending.sig[0],
+                                      __ATOMIC_ACQUIRE) & set.sig[0];
             signum = signal_take_pending(current_task, pending);
             if (signum) memcpy(info, &signum, sizeof(signum));
         }
@@ -766,7 +775,8 @@ int deliver_signal_to_task(task_t *target, int sig) {
         return 0;
     }
 
-    sigs->pending.sig[(sig - 1) / 64] |= (1UL << ((sig - 1) % 64));
+    __atomic_fetch_or(&sigs->pending.sig[(sig - 1) / 64],
+                      1UL << ((sig - 1) % 64), __ATOMIC_ACQ_REL);
 
     if (target->state == TASK_BLOCKED) {
         wake_task(target);
@@ -997,6 +1007,8 @@ void signal_deliver_pending(registers_t *regs) {
     uint64_t sp;
     uint64_t *frame;
     uint64_t info_address;
+    uint64_t bit;
+    uint64_t previous;
     uint8_t signal_info[128];
     int queued;
 
@@ -1008,15 +1020,19 @@ void signal_deliver_pending(registers_t *regs) {
     if (sigs->owner_pid != current_task->pid) return;
 
     for (sig = 1; sig < NSIG; sig++) {
-        if (!(sigs->pending.sig[0] & (1UL << (sig - 1)))) continue;
-        if (sigs->blocked.sig[0] & (1UL << (sig - 1))) continue;
+        bit = 1UL << (sig - 1);
+        if (!(__atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE) & bit))
+            continue;
+        if (sigs->blocked.sig[0] & bit) continue;
 
         memset(signal_info, 0, sizeof(signal_info));
         memcpy(signal_info, &sig, sizeof(sig));
-        queued = dequeue_queued_signal(sigs, 1ULL << (sig - 1),
-                                       signal_info);
-        if (!queued)
-            sigs->pending.sig[0] &= ~(1UL << (sig - 1));
+        queued = dequeue_queued_signal(sigs, bit, signal_info);
+        if (!queued) {
+            previous = __atomic_fetch_and(&sigs->pending.sig[0], ~bit,
+                                          __ATOMIC_ACQ_REL);
+            if (!(previous & bit)) continue;
+        }
         act = get_signal_action(sigs, sig, &default_act);
 
         if (act->sa_handler == SIG_IGN) continue;

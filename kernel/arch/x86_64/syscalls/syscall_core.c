@@ -871,6 +871,14 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
+            if ((tfd->flags & VFS_O_NONBLOCK) &&
+                (strcmp(vfs_node_name(node), "event0") == 0 ||
+                 strcmp(vfs_node_name(node), "event1") == 0)) {
+                bytes = evdev_read_nonblocking(node, work_size, kbuf);
+                if (bytes > 0) memcpy((void *)buf_addr, kbuf, bytes);
+                if (heap_buf) kfree(kbuf);
+                return bytes > 0 ? (int)bytes : -EAGAIN;
+            }
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;

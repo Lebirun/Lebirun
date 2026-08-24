@@ -1836,6 +1836,8 @@ static void task_release_exit_resources(task_t *t) {
     if (!t || t->resources_released) return;
     if (task_is_current_on_any_cpu(t)) return;
 
+    t->syscall_frame = NULL;
+
     if (t->exec_old_pml4) {
         freed = task_free_exec_old_pml4_if_unowned(t, t->exec_old_pml4);
         if (freed) {
@@ -1859,11 +1861,6 @@ static void task_release_exit_resources(task_t *t) {
     t->regs.entry_cr3 = 0;
     t->regs.return_cr3 = 0;
     t->regs.saved_entry_cr3 = 0;
-    if (t->syscall_frame) {
-        t->syscall_frame->entry_cr3 = 0;
-        t->syscall_frame->return_cr3 = 0;
-        t->syscall_frame->saved_entry_cr3 = 0;
-    }
     event_descriptors_close_task(t->pid);
     shm_close_task(t->pid);
     socket_close_task(t->pid);

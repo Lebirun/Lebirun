@@ -590,6 +590,8 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
         node->flags = VFS_BLOCKDEVICE | VFS_DYNAMIC;
     } else if ((mode & 0xF000) == EXT4_S_IFIFO) {
         node->flags = VFS_PIPE | VFS_DYNAMIC;
+    } else if ((mode & 0xF000) == EXT4_S_IFSOCK) {
+        node->flags = VFS_SOCKET | VFS_DYNAMIC;
     } else {
         node->flags = VFS_FILE | VFS_DYNAMIC;
     }

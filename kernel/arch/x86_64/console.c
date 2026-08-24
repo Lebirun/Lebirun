@@ -896,6 +896,8 @@ static void console_redraw_prepare(int console_num) {
 
     if (!fb || (fb->rows == 0 && fb->cols == 0)) {
         console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
         return;
     }
 
@@ -903,6 +905,8 @@ static void console_redraw_prepare(int console_num) {
     cols = fb->cols;
     if (rows == 0 || cols == 0) {
         console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
         return;
     }
 
@@ -914,6 +918,8 @@ static void console_redraw_prepare(int console_num) {
         spin_unlock(&console_lock);
         console_irqrestore(flags);
         console_redraw_pending = 0;
+        console_switch_in_progress = 0;
+        console_switching = 0;
         return;
     }
 
@@ -1531,7 +1537,7 @@ void KERNEL_EARLY_INIT console_init(void) {
     current_console = 0;
     console_switching = 0;
     console_switch_in_progress = 0;
-    pending_console_switch = -1;
+    __atomic_store_n(&pending_console_switch, -1, __ATOMIC_RELEASE);
     console_redraw_pending = 0;
     console_batch = 0;
     
@@ -1558,7 +1564,8 @@ void console_force_redraw(void) {
     console_redraw_sync(current_console);
 }
 
-static void console_switch_internal_impl(int console_num, int from_interrupt) {
+static int console_switch_internal_impl(int console_num, int from_interrupt,
+                                        int defer_on_busy) {
     uint64_t rows;
     uint64_t cols;
     uint64_t flags;
@@ -1568,21 +1575,25 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
     framebuffer_t *fb;
     console_t *new_con;
     
-    if (!console_valid_index(console_num)) return;
-    if (!console_initialized) return;
-    if (console_num == current_console) return;
+    if (!console_valid_index(console_num)) return -1;
+    if (!console_initialized) return -1;
+    if (console_num == current_console) return 0;
 
     if (console_switching) {
-        pending_console_switch = console_num;
-        return;
+        if (defer_on_busy)
+            __atomic_store_n(&pending_console_switch, console_num,
+                             __ATOMIC_RELEASE);
+        return 1;
     }
 
     flags = console_irqsave();
     lock_acquired = spin_trylock(&console_lock);
     if (!lock_acquired) {
         console_irqrestore(flags);
-        pending_console_switch = console_num;
-        return;
+        if (defer_on_busy)
+            __atomic_store_n(&pending_console_switch, console_num,
+                             __ATOMIC_RELEASE);
+        return 1;
     }
     
     console_switching = 1;
@@ -1592,10 +1603,11 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         if (from_interrupt) {
             console_switching = 0;
             console_switch_in_progress = 0;
-            pending_console_switch = console_num;
+            __atomic_store_n(&pending_console_switch, console_num,
+                             __ATOMIC_RELEASE);
             spin_unlock(&console_lock);
             console_irqrestore(flags);
-            return;
+            return 1;
         }
         spin_unlock(&console_lock);
         console_irqrestore(flags);
@@ -1607,7 +1619,7 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
             console_switch_in_progress = 0;
             spin_unlock(&console_lock);
             console_irqrestore(flags);
-            return;
+            return -1;
         }
     }
     
@@ -1628,10 +1640,11 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         (new_con->buffer_rows < rows || new_con->buffer_cols < cols)) {
         console_switching = 0;
         console_switch_in_progress = 0;
-        pending_console_switch = console_num;
+        __atomic_store_n(&pending_console_switch, console_num,
+                         __ATOMIC_RELEASE);
         spin_unlock(&console_lock);
         console_irqrestore(flags);
-        return;
+        return 1;
     }
     console_grow_buffer(new_con, rows);
     if (cols > new_con->buffer_cols) cols = new_con->buffer_cols;
@@ -1663,16 +1676,17 @@ static void console_switch_internal_impl(int console_num, int from_interrupt) {
         console_switch_in_progress = 0;
         spin_unlock(&console_lock);
         console_irqrestore(flags);
-        return;
+        return 0;
     }
 
     console_redraw_prepare(current_console);
     if (!from_interrupt) console_redraw_sync(current_console);
+    return 0;
 }
 
 static void console_switch_internal(int console_num) {
     if (!tty_vt_switch_request(console_num)) return;
-    console_switch_internal_impl(console_num, 0);
+    console_switch_internal_impl(console_num, 0, 1);
     if (console_num == current_console)
         tty_vt_switch_complete(console_num);
 }
@@ -1684,14 +1698,38 @@ void console_switch(int console_num) {
 
     if (!console_interrupts_enabled()) {
         if (console_switching) {
-            pending_console_switch = console_num;
+            __atomic_store_n(&pending_console_switch, console_num,
+                             __ATOMIC_RELEASE);
             return;
         }
-        pending_console_switch = console_num;
+        __atomic_store_n(&pending_console_switch, console_num,
+                         __ATOMIC_RELEASE);
         return;
     }
     
     console_switch_internal(console_num);
+}
+
+int console_switch_committed(int console_num) {
+    uint64_t flags;
+    int result;
+
+    if (!console_valid_index(console_num)) return -1;
+    if (!console_initialized) return -1;
+    if (console_num == current_console) return 0;
+
+    flags = console_irqsave();
+    __atomic_store_n(&pending_console_switch, -1, __ATOMIC_RELEASE);
+    console_irqrestore(flags);
+    for (;;) {
+        result = console_switch_internal_impl(console_num, 0, 0);
+        if (result == 0)
+            return console_num == current_console ? 0 : -1;
+        if (result < 0 || !current_task)
+            return -1;
+        if (!console_interrupts_enabled()) return 1;
+        yield();
+    }
 }
 
 void console_switch_via_interrupt(int console_num) {
@@ -1702,7 +1740,7 @@ void console_switch_via_interrupt(int console_num) {
     if (console_num == current_console) return;
 
     flags = console_irqsave();
-    pending_console_switch = console_num;
+    __atomic_store_n(&pending_console_switch, console_num, __ATOMIC_RELEASE);
     console_irqrestore(flags);
 }
 
@@ -1714,16 +1752,13 @@ void console_process_pending(void) {
     if (!console_initialized) return;
     if (!console_interrupts_enabled()) return;
     
-    if (in_processing) return;
-    in_processing = 1;
+    if (__atomic_exchange_n(&in_processing, 1, __ATOMIC_ACQUIRE)) return;
 
     while (1) {
         if (console_switching) break;
         flags = console_irqsave();
-        pending = pending_console_switch;
-        if (console_valid_index(pending)) {
-            pending_console_switch = -1;
-        }
+        pending = __atomic_exchange_n(&pending_console_switch, -1,
+                                      __ATOMIC_ACQ_REL);
         console_irqrestore(flags);
 
         if (console_valid_index(pending)) {
@@ -1733,7 +1768,7 @@ void console_process_pending(void) {
         break;
     }
 
-    in_processing = 0;
+    __atomic_store_n(&in_processing, 0, __ATOMIC_RELEASE);
 }
 
 
@@ -2921,7 +2956,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
             console_process_alt_screen_pending(target_console);
 
         off += chunk;
-        if (pending_console_switch >= 0 && console_interrupts_enabled()) {
+        if (__atomic_load_n(&pending_console_switch, __ATOMIC_ACQUIRE) >= 0 &&
+            console_interrupts_enabled()) {
             console_process_pending();
         }
         if (current_task && console_interrupts_enabled() && (off % 4096) == 0) {
@@ -2952,7 +2988,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         console_irqrestore(flags);
         fb_flush();
     }
-    if (pending_console_switch >= 0 && console_interrupts_enabled()) {
+    if (__atomic_load_n(&pending_console_switch, __ATOMIC_ACQUIRE) >= 0 &&
+        console_interrupts_enabled()) {
         console_process_pending();
     }
 }
@@ -3121,7 +3158,7 @@ static void __attribute__((unused)) console_writer_thread(void) {
             }
         }
 
-        if (pending_console_switch >= 0) {
+        if (__atomic_load_n(&pending_console_switch, __ATOMIC_ACQUIRE) >= 0) {
             pending_switch_requested = 1;
             goto handle_pending;
         }
@@ -3131,7 +3168,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
             if (!con->allocated) continue;
             while (con->write_tail != con->write_head) {
 
-                if (pending_console_switch >= 0) {
+                if (__atomic_load_n(&pending_console_switch,
+                                    __ATOMIC_ACQUIRE) >= 0) {
                     pending_switch_requested = 1;
                     goto handle_pending;
                 }
@@ -3453,7 +3491,8 @@ static void __attribute__((unused)) console_writer_thread(void) {
                     fb_flush();
                 }
                 work_done = 1;
-                if (pending_console_switch >= 0) {
+                if (__atomic_load_n(&pending_console_switch,
+                                    __ATOMIC_ACQUIRE) >= 0) {
                     pending_switch_requested = 1;
                     goto handle_pending;
                 }
@@ -3471,7 +3510,7 @@ static void __attribute__((unused)) console_writer_thread(void) {
             }
         }
         
-        if (pending_console_switch >= 0) {
+        if (__atomic_load_n(&pending_console_switch, __ATOMIC_ACQUIRE) >= 0) {
             pending_switch_requested = 1;
         }
 
@@ -3482,7 +3521,8 @@ handle_pending:
         }
         
         if (!work_done) {
-            if (pending_console_switch == -1) {
+            if (__atomic_load_n(&pending_console_switch,
+                                __ATOMIC_ACQUIRE) == -1) {
                 sleep_ms(1);
             } else {
                 yield();

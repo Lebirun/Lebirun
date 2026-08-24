@@ -598,9 +598,6 @@ static int inst_umount_partition(const char *mountpoint)
 static void inst_format_process_line(char *line, char *error,
                                      size_t error_size)
 {
-    unsigned int current;
-    unsigned int total;
-    int pct;
     size_t len;
 
     len = strlen(line);
@@ -609,13 +606,6 @@ static void inst_format_process_line(char *line, char *error,
         len--;
     }
     if (line[0] == '\0') return;
-    if (sscanf(line, "LEBFORMAT_PROGRESS %u %u", &current, &total) == 2 &&
-        total > 0 && current <= total) {
-        pct = 1 + (int)(current * 3 / total);
-        if (pct > 4) pct = 4;
-        lebui_progress_update(&prog_st, "Formatting partition...", pct);
-        return;
-    }
     if (error && error_size > 0 &&
         (strstr(line, "lformat.ext4:") ||
          strstr(line, "Unable to start lformat.ext4")))
@@ -640,7 +630,7 @@ static int inst_format_ext4(const char *devpath, char *error,
     char read_buf[128];
     char line[192];
     char input_buf[16];
-    char *argv[4];
+    char *argv[3];
     struct pollfd fds[2];
 
     if (error && error_size > 0) error[0] = '\0';
@@ -660,8 +650,7 @@ static int inst_format_ext4(const char *devpath, char *error,
         close(pipefd[1]);
         argv[0] = "lformat.ext4";
         argv[1] = (char *)devpath;
-        argv[2] = "--progress";
-        argv[3] = NULL;
+        argv[2] = NULL;
         execv("/sbin/lformat.ext4", argv);
         execv("/bin/lformat.ext4", argv);
         execv("/bin/lebu", argv);

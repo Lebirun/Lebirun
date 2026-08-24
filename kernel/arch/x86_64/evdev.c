@@ -22,6 +22,16 @@ static uint16_t evdev_extended_key(uint8_t scancode);
 static void set_bit(uint8_t *bits, int bit);
 static void clear_bit(uint8_t *bits, int bit);
 
+static int evdev_grab_allowed(struct evdev_device *dev) {
+    task_t *owner;
+
+    if (!dev->grab_pid) return 1;
+    if (!current_task) return 0;
+    if (dev->grab_pid == current_task->pid) return 1;
+    owner = task_find(dev->grab_pid);
+    return owner && owner->pml4_phys == current_task->pml4_phys;
+}
+
 extern volatile uint64_t tick_count;
 extern uint64_t pit_freq;
 
@@ -131,8 +141,7 @@ int evdev_node_has_data(vfs_node_t *node) {
     if (!node) return 0;
     dev = (struct evdev_device *)node->private_data;
     if (!dev) return 0;
-    if (dev->grab_pid && (!current_task ||
-        dev->grab_pid != current_task->pid)) return 0;
+    if (!evdev_grab_allowed(dev)) return 0;
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse) evdev_process_mouse();
     return evdev_has_data(dev);
@@ -226,8 +235,7 @@ uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer
     if (!node || !buffer) return 0;
     dev = (struct evdev_device *)node->private_data;
     if (!dev) return 0;
-    if (dev->grab_pid && (!current_task ||
-        dev->grab_pid != current_task->pid)) return 0;
+    if (!evdev_grab_allowed(dev)) return 0;
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse) evdev_process_mouse();
     ev_size = sizeof(struct input_event);
@@ -248,8 +256,7 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
     dev = (struct evdev_device *)node->private_data;
     if (!dev)
         return 0;
-    if (dev->grab_pid && (!current_task ||
-        dev->grab_pid != current_task->pid)) return 0;
+    if (!evdev_grab_allowed(dev)) return 0;
 
     evdev_ensure_ring(dev);
     if (dev == &evdev_mouse)
@@ -338,12 +345,10 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
         grab = (int)(uintptr_t)arg;
         if (!current_task) return -22;
         if (grab) {
-            if (dev->grab_pid && dev->grab_pid != current_task->pid)
-                return -16;
-            dev->grab_pid = current_task->pid;
+            if (!evdev_grab_allowed(dev)) return -16;
+            if (!dev->grab_pid) dev->grab_pid = current_task->pid;
         } else {
-            if (dev->grab_pid && dev->grab_pid != current_task->pid)
-                return -1;
+            if (!evdev_grab_allowed(dev)) return -1;
             dev->grab_pid = 0;
         }
         return 0;
@@ -453,8 +458,7 @@ static void devfs_close_stub(vfs_node_t *node) {
 
     if (!node || !current_task) return;
     dev = (struct evdev_device *)node->private_data;
-    if (dev && dev->grab_pid == current_task->pid)
-        dev->grab_pid = 0;
+    if (dev && evdev_grab_allowed(dev)) dev->grab_pid = 0;
 }
 
 vfs_node_t *evdev_get_input_dir(void) {

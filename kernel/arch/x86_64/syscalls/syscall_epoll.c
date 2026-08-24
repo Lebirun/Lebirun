@@ -4,6 +4,7 @@
 #include <lebirun/inotify.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/rtc.h>
+#include <lebirun/evdev.h>
 
 #define EPOLL_INIT_COUNT 1
 #define EVENTFD_INIT_COUNT 1
@@ -332,12 +333,17 @@ found:
 
 static epoll_instance_t *get_epoll(int fd) {
     int idx;
+    task_t *owner;
 
     idx = fd - EPOLL_BASE_FD;
     if (idx < 0 || idx >= epoll_capacity) return NULL;
     if (!epoll_instances[idx].in_use) return NULL;
-    if (!current_task || epoll_instances[idx].owner_pid != current_task->pid)
-        return NULL;
+    if (!current_task) return NULL;
+    if (epoll_instances[idx].owner_pid != current_task->pid) {
+        owner = task_find(epoll_instances[idx].owner_pid);
+        if (!owner || owner->pml4_phys != current_task->pml4_phys)
+            return NULL;
+    }
     return &epoll_instances[idx];
 }
 
@@ -1094,7 +1100,19 @@ int event_descriptor_poll(int fd) {
     int events;
     int found;
     uint64_t pending;
+    task_fd_t *descriptor;
+    vfs_node_t *node;
 
+    descriptor = NULL;
+    if (current_task && current_task->fds && fd >= 0 &&
+        fd < current_task->fds_capacity && current_task->fds[fd].in_use)
+        descriptor = &current_task->fds[fd];
+    if (descriptor && descriptor->type == FD_TYPE_FILE && descriptor->node) {
+        node = (vfs_node_t *)descriptor->node;
+        if (strcmp(vfs_node_name(node), "event0") == 0 ||
+            strcmp(vfs_node_name(node), "event1") == 0)
+            return evdev_node_has_data(node) ? EPOLLIN : 0;
+    }
     events = inotify_poll_fd(fd);
     if (events >= 0) return events ? EPOLLIN : 0;
     events = 0;

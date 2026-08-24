@@ -332,6 +332,7 @@ if [ -d "root" ]; then
 fi
 
 if [ -d "root" ]; then
+  mkdir -p root/var/log
   find root -type d -exec chmod 0755 {} +
   find root -type f ! -perm -111 -exec chmod 0644 {} +
   find root -type f -perm -111 -exec chmod 0755 {} +

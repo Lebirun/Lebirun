@@ -70,46 +70,207 @@ static struct vt_mode_s *vt_modes;
 static pid_t *vt_owners;
 static uint8_t *kbd_modes;
 static int vt_pending_switch = -1;
-static int vt_switch_bypass;
 
 extern int is_socket_fd(int fd);
 extern int socket_ioctl(int fd, unsigned long request, uint64_t arg);
 
+static int vt_release_limit(void) {
+    int64_t limit;
+
+    if (tty_count <= 0) return -1;
+    limit = (int64_t)tty_count * tty_count;
+    if (limit > INT32_MAX) return -1;
+    return tty_count * tty_count;
+}
+
+static int vt_release_encode(int source_vt, int target_vt) {
+    if (tty_count <= 0 || source_vt < 0 || target_vt < 0 ||
+        source_vt >= tty_count || target_vt >= tty_count)
+        return -1;
+    if (vt_release_limit() < 0) return -1;
+    return source_vt * tty_count + target_vt;
+}
+
+static int vt_acquire_encode(int source_vt, int target_vt) {
+    int64_t encoded;
+    int limit;
+    int slot;
+
+    limit = vt_release_limit();
+    if (limit < 0 || source_vt < 0 || source_vt >= tty_count ||
+        target_vt < -1 || target_vt >= tty_count)
+        return -1;
+    slot = target_vt + 1;
+    encoded = (int64_t)limit +
+        (int64_t)source_vt * (tty_count + 1) + slot;
+    if (encoded > INT32_MAX) return -1;
+    return (int)encoded;
+}
+
+static int vt_pending_phase(int pending) {
+    int limit;
+    int source;
+    int slot;
+
+    limit = vt_release_limit();
+    if (pending < 0 || limit < 0) return 0;
+    if (pending < limit) return 1;
+    source = (pending - limit) / (tty_count + 1);
+    slot = (pending - limit) % (tty_count + 1);
+    if (source >= 0 && source < tty_count &&
+        slot >= 0 && slot <= tty_count)
+        return 2;
+    return 0;
+}
+
+static int vt_pending_source(int pending) {
+    int limit;
+    int phase;
+
+    limit = vt_release_limit();
+    phase = vt_pending_phase(pending);
+    if (phase == 1) return pending / tty_count;
+    if (phase == 2) return (pending - limit) / (tty_count + 1);
+    return -1;
+}
+
+static int vt_pending_target(int pending) {
+    int limit;
+    int phase;
+
+    limit = vt_release_limit();
+    phase = vt_pending_phase(pending);
+    if (phase == 1) return pending % tty_count;
+    if (phase == 2)
+        return ((pending - limit) % (tty_count + 1)) - 1;
+    return -1;
+}
+
+static int vt_pending_take(int phase, int source_vt) {
+    int pending;
+    int expected;
+
+    for (;;) {
+        pending = __atomic_load_n(&vt_pending_switch, __ATOMIC_ACQUIRE);
+        if (vt_pending_phase(pending) != phase ||
+            vt_pending_source(pending) != source_vt)
+            return -1;
+        expected = pending;
+        if (__atomic_compare_exchange_n(&vt_pending_switch, &expected, -1,
+                                        0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            return pending;
+    }
+}
+
 int tty_vt_switch_request(int target_vt) {
     int active;
+    int encoded;
+    int expected;
+    int pending;
+    int phase;
+    int source;
     int result;
+    int updated;
     struct vt_mode_s *mode;
 
-    if (vt_switch_bypass || !vt_modes || !vt_owners) return 1;
+    if (!vt_modes || !vt_owners)
+        return 1;
     active = console_get_current();
     if (active < 0 || active >= tty_count) return 1;
     mode = &vt_modes[active];
     if (mode->mode != VT_PROCESS || vt_owners[active] <= 0) return 1;
+    encoded = vt_release_encode(active, target_vt);
+    if (encoded < 0) return 1;
+    for (;;) {
+        pending = __atomic_load_n(&vt_pending_switch, __ATOMIC_ACQUIRE);
+        if (pending >= 0) {
+            phase = vt_pending_phase(pending);
+            source = vt_pending_source(pending);
+            if (source == active && phase == 1) {
+                if (pending == encoded) return 0;
+                expected = pending;
+                if (__atomic_compare_exchange_n(&vt_pending_switch,
+                                                &expected, encoded, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    return 0;
+                continue;
+            }
+            if (source == active && phase == 2) {
+                updated = vt_acquire_encode(active, target_vt);
+                if (updated < 0) return 0;
+                expected = pending;
+                if (__atomic_compare_exchange_n(&vt_pending_switch,
+                                                &expected, updated, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    return 0;
+                continue;
+            }
+            if (phase != 0 && source >= 0 && source < tty_count &&
+                vt_modes[source].mode == VT_PROCESS &&
+                vt_owners[source] > 0)
+                return 0;
+            expected = pending;
+            __atomic_compare_exchange_n(&vt_pending_switch, &expected, -1,
+                                        0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE);
+            continue;
+        }
+        expected = -1;
+        if (__atomic_compare_exchange_n(&vt_pending_switch, &expected,
+                                        encoded, 0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+            break;
+    }
     result = sys_kill_impl(vt_owners[active],
                            (const char *)(uintptr_t)mode->relsig, 0);
-    if (result < 0) {
+    if (result < 0 && result != -EINTR) {
+        expected = encoded;
+        __atomic_compare_exchange_n(&vt_pending_switch, &expected, -1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         memset(mode, 0, sizeof(*mode));
         vt_owners[active] = 0;
         return 1;
     }
-    vt_pending_switch = target_vt;
     return 0;
 }
 
 void tty_vt_switch_complete(int target_vt) {
+    int encoded;
+    int expected;
+    int result;
     struct vt_mode_s *mode;
 
     if (!vt_modes || !vt_owners) return;
     if (target_vt < 0 || target_vt >= tty_count) return;
     mode = &vt_modes[target_vt];
-    if (mode->mode == VT_PROCESS && vt_owners[target_vt] > 0 &&
-        mode->acqsig > 0)
-        sys_kill_impl(vt_owners[target_vt],
-                      (const char *)(uintptr_t)mode->acqsig, 0);
+    if (mode->mode != VT_PROCESS || vt_owners[target_vt] <= 0 ||
+        mode->acqsig <= 0)
+        return;
+    encoded = vt_acquire_encode(target_vt, -1);
+    if (encoded < 0) return;
+    expected = -1;
+    if (!__atomic_compare_exchange_n(&vt_pending_switch, &expected, encoded,
+                                     0, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
+        return;
+    result = sys_kill_impl(vt_owners[target_vt],
+                           (const char *)(uintptr_t)mode->acqsig, 0);
+    if (result < 0 && result != -EINTR) {
+        expected = encoded;
+        __atomic_compare_exchange_n(&vt_pending_switch, &expected, -1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        memset(mode, 0, sizeof(*mode));
+        vt_owners[target_vt] = 0;
+    }
 }
 
 void tty_vt_release_owner(pid_t pid) {
     int i;
+    int pending;
+    int phase;
     int target_vt;
 
     if (!vt_modes || !vt_owners) return;
@@ -122,16 +283,17 @@ void tty_vt_release_owner(pid_t pid) {
         if (i == console_get_current() &&
             console_get_graphics_mode(i))
             console_set_graphics_mode(i, 0, pid);
-        if (i == console_get_current() && vt_pending_switch >= 0) {
-            target_vt = vt_pending_switch;
-            vt_pending_switch = -1;
-        }
+        pending = __atomic_load_n(&vt_pending_switch, __ATOMIC_ACQUIRE);
+        phase = vt_pending_phase(pending);
+        if (phase != 0 && vt_pending_source(pending) == i)
+            pending = vt_pending_take(phase, i);
+        else
+            pending = -1;
+        if (pending >= 0 && phase == 1 && i == console_get_current())
+            target_vt = vt_pending_target(pending);
     }
     if (target_vt >= 0) {
-        vt_switch_bypass = 1;
-        console_switch(target_vt);
-        vt_switch_bypass = 0;
-        if (console_get_current() == target_vt)
+        if (console_switch_committed(target_vt) == 0)
             tty_vt_switch_complete(target_vt);
     }
 }
@@ -357,6 +519,9 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
     int vi;
     int found;
     int ci;
+    int pending;
+    int expected;
+    int switch_result;
     int target_vt;
     struct vt_mode_s requested_mode;
 
@@ -602,6 +767,13 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
                 (requested_mode.mode == VT_PROCESS &&
                  requested_mode.relsig == 0))
                 return -EINVAL;
+            if (requested_mode.mode == VT_AUTO ||
+                vt_owners[tty_id] != current_task->pid) {
+                pending = __atomic_load_n(&vt_pending_switch,
+                                          __ATOMIC_ACQUIRE);
+                if (vt_pending_source(pending) == tty_id)
+                    vt_pending_take(vt_pending_phase(pending), tty_id);
+            }
             vt_modes[tty_id] = requested_mode;
             if (requested_mode.mode == VT_PROCESS)
                 vt_owners[tty_id] = current_task->pid;
@@ -613,20 +785,32 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             if (!tty_valid_id(tty_id) || !vt_modes || !vt_owners)
                 return -ENOTTY;
             if (vt_owners[tty_id] != current_task->pid) return -EPERM;
-            if (arg == VT_ACKACQ) return 0;
-            if (vt_pending_switch < 0) return -EINVAL;
-            if (arg == 0) {
-                vt_pending_switch = -1;
+            if (arg == VT_ACKACQ) {
+                if (console_get_current() != tty_id) return -EINVAL;
+                pending = vt_pending_take(2, tty_id);
+                if (pending < 0) return 0;
+                target_vt = vt_pending_target(pending);
+                if (target_vt >= 0)
+                    tty_vt_switch_request(target_vt);
                 return 0;
             }
+            if (arg == 0) {
+                return vt_pending_take(1, tty_id) >= 0 ? 0 : -EINVAL;
+            }
             if (arg != 1) return -EINVAL;
-            target_vt = vt_pending_switch;
-            vt_pending_switch = -1;
-            vt_switch_bypass = 1;
-            console_switch(target_vt);
-            vt_switch_bypass = 0;
-            if (console_get_current() == target_vt)
-                tty_vt_switch_complete(target_vt);
+            pending = vt_pending_take(1, tty_id);
+            if (pending < 0) return -EINVAL;
+            target_vt = vt_pending_target(pending);
+            if (!tty_valid_id(target_vt)) return -EINVAL;
+            switch_result = console_switch_committed(target_vt);
+            if (switch_result != 0) {
+                expected = -1;
+                __atomic_compare_exchange_n(&vt_pending_switch, &expected,
+                                            pending, 0, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE);
+                return switch_result > 0 ? -EAGAIN : -EIO;
+            }
+            tty_vt_switch_complete(target_vt);
             return 0;
 
         case VT_DISALLOCATE:

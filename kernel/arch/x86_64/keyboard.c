@@ -278,7 +278,9 @@ void keyboard_handler(registers_t* regs) {
     if (code == SCANCODE_ALT) { alt_pressed = true; return; }
     if (code == SCANCODE_CAPS) { caps_lock = !caps_lock; return; }
 
-    if (ctrl_pressed && alt_pressed) {
+    if (ctrl_pressed && alt_pressed &&
+        (!console_is_initialized() ||
+         !console_get_graphics_mode(console_get_current()))) {
         console_num = -1;
         if (code >= SCANCODE_F1 && code <= SCANCODE_F10)
             console_num = code - SCANCODE_F1;
