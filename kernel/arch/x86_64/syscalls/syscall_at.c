@@ -178,6 +178,12 @@ static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
         return -ESRCH;
     }
 
+    if (pty_path_supported(path)) {
+        fd = pty_open_path(path, flags);
+        kfree(path);
+        return fd < 0 ? -ENODEV : fd;
+    }
+
     node = vfs_namei(path);
 
     if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
@@ -268,12 +274,13 @@ static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
         while (!(flags & VFS_O_NONBLOCK) &&
                ((pipe_type == FD_TYPE_PIPE_R && pipe->writers == 0) ||
                 (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0))) {
-            pipe_unlock_irqrestore(pipe, pipe_flags);
             if (pipe_type == FD_TYPE_PIPE_R)
                 waitq_add(&pipe->read_waitq, current_task);
             else
                 waitq_add(&pipe->write_waitq, current_task);
-            block_current();
+            current_task->state = TASK_BLOCKED;
+            pipe_unlock_irqrestore(pipe, pipe_flags);
+            schedule();
             if (task_has_pending_signals()) {
                 pipe_release_reference(pipe, pipe_type);
                 pipe_destroy_if_unused(pipe);

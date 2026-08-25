@@ -73,6 +73,7 @@ static int vt_pending_switch = -1;
 
 extern int is_socket_fd(int fd);
 extern int socket_ioctl(int fd, unsigned long request, uint64_t arg);
+extern void socket_retain_task_fd(task_fd_t *descriptor);
 
 static int vt_release_limit(void) {
     int64_t limit;
@@ -340,6 +341,10 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
         vfs_open((vfs_node_t *)current_task->fds[newfd].node, 0);
         task_fd_position_share(&current_task->fds[oldfd], &current_task->fds[newfd]);
     }
+    if (FD_TYPE_IS_PTY(current_task->fds[newfd].type))
+        pty_retain_endpoint((int)(uintptr_t)current_task->fds[newfd].private_data);
+    if (current_task->fds[newfd].type == FD_TYPE_SOCKET)
+        socket_retain_task_fd(&current_task->fds[newfd]);
     if (current_task->fds[oldfd].private_data &&
         FD_TYPE_IS_PIPE(current_task->fds[oldfd].type)) {
         p = (pipe_t *)current_task->fds[oldfd].private_data;
@@ -550,6 +555,25 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         return ioctl_fcntl_basic_compat(fd, (int)request, (int)arg);
     }
 
+    if (request == FIONBIO) {
+        if (!arg || !syscall_user_range_present(arg, sizeof(int), 1, 0))
+            return -EFAULT;
+        tfd = &current_task->fds[fd];
+        if (*(int *)(uintptr_t)arg)
+            tfd->flags |= VFS_O_NONBLOCK;
+        else
+            tfd->flags &= ~VFS_O_NONBLOCK;
+        return 0;
+    }
+
+    tty_id = get_tty_id_for_fd(fd);
+    if (!tty_valid_id(tty_id)) tty_id = -1;
+
+    if (FD_TYPE_IS_PTY(current_task->fds[fd].type)) {
+        pty_fd = (int)(uintptr_t)current_task->fds[fd].private_data;
+        return pty_ioctl(pty_fd, request, (void *)(uintptr_t)arg);
+    }
+
     if (current_task->fds[fd].in_use && current_task->fds[fd].node) {
         vn = (vfs_node_t *)current_task->fds[fd].node;
         if (vn->ioctl) {
@@ -557,16 +581,6 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         }
     }
 
-    if (current_task->fds[fd].in_use && current_task->fds[fd].private_data) {
-        pty_fd = (int)(uintptr_t)current_task->fds[fd].private_data;
-        if (is_pty_master(pty_fd) || is_pty_slave(pty_fd)) {
-            return pty_ioctl(pty_fd, request, (void *)(uintptr_t)arg);
-        }
-    }
-
-    tty_id = get_tty_id_for_fd(fd);
-    if (!tty_valid_id(tty_id)) tty_id = -1;
-    
     switch (request) {
         case TIOCSCTTY:
             if (tty_id < 0) return -ENOTTY;

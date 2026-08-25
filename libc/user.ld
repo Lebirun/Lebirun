@@ -4,13 +4,15 @@ ENTRY(_start)
 
 PHDRS
 {
-    text PT_LOAD FLAGS(5);
+    phdr PT_PHDR PHDRS FLAGS(4);
+    text PT_LOAD FILEHDR PHDRS FLAGS(5);
     data PT_LOAD FLAGS(6);
+    tls PT_TLS FLAGS(4);
 }
 
 SECTIONS
 {
-    . = 0x00400000;
+    . = 0x00400000 + SIZEOF_HEADERS;
 
     .init : {
         KEEP(*(.init))
@@ -85,11 +87,11 @@ SECTIONS
 
     .tdata : {
         *(.tdata .tdata.*)
-    } :data
+    } :data :tls
 
     .tbss : {
         *(.tbss .tbss.*)
-    } :data
+    } :data :tls
 
     .data : {
         *(.data .data.*)

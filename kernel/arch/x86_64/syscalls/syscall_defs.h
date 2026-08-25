@@ -19,6 +19,7 @@
 #include <lebirun/vring.h>
 #include <lebirun/vfs.h>
 #include <lebirun/pipe.h>
+#include <lebirun/pty.h>
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/http.h>

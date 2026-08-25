@@ -202,17 +202,20 @@ static void inst_scan_disk(disk_info_t *disk)
     unsigned int dtype;
     unsigned int didx;
     int dlen;
+    int part_number;
+    int digit;
     char partpath[64];
+    const char *suffix;
     uint64_t psize;
     uint64_t ptype;
+    uint64_t stat_size;
+    uint64_t stat_type;
 
     disk->part_count = 0;
     disk->disk_sectors = 0;
 
     stat_fd = vfs_open(disk->devpath, 0);
     if (stat_fd >= 0) {
-        uint64_t stat_size;
-        uint64_t stat_type;
         stat_size = 0;
         stat_type = 0;
         if (vfs_stat(stat_fd, &stat_size, &stat_type) == 0) {
@@ -249,7 +252,19 @@ static void inst_scan_disk(disk_info_t *disk)
     for (didx = 0; ; didx++) {
         if (vfs_readdir(devfd, name, &dtype, didx) != 0) break;
         if (strncmp(name, disk->devname, dlen) != 0) continue;
-        if (name[dlen] < '1' || name[dlen] > '9') continue;
+        suffix = name + dlen;
+        if (*suffix < '1' || *suffix > '9') continue;
+        part_number = 0;
+        while (*suffix >= '0' && *suffix <= '9') {
+            digit = *suffix - '0';
+            if (part_number > (INT32_MAX - digit) / 10) {
+                part_number = -1;
+                break;
+            }
+            part_number = part_number * 10 + digit;
+            suffix++;
+        }
+        if (part_number <= 0 || *suffix != '\0') continue;
 
         snprintf(partpath, sizeof(partpath), "/dev/%s", name);
         stat_fd = vfs_open(partpath, 0);
@@ -262,7 +277,7 @@ static void inst_scan_disk(disk_info_t *disk)
         part = inst_add_part(disk);
         if (!part) break;
         part->valid = 1;
-        part->number = name[dlen] - '0';
+        part->number = part_number;
         part->start_lba = 0;
         part->sector_count = psize / SECTOR_SIZE;
         part->mbr_type = 0x83;
@@ -298,11 +313,18 @@ static int inst_enumerate_disks(void)
         memset(disk->devpath, 0, sizeof(disk->devpath));
         strncpy(disk->devname, name, sizeof(disk->devname) - 1);
         snprintf(disk->devpath, sizeof(disk->devpath), "/dev/%s", name);
-        inst_scan_disk(disk);
         disk_count++;
     }
     vfs_close_fd(fd);
     return disk_count;
+}
+
+static void inst_scan_disks(void)
+{
+    int i;
+
+    for (i = 0; i < disk_count; i++)
+        inst_scan_disk(&disks[i]);
 }
 
 static int copy_overwrite_existing = 1;
@@ -1339,10 +1361,7 @@ static int inst_upgrade_pkg_db_from_iso(const char *mountpoint, int *kept)
 
 static void cleanup_exit(void)
 {
-    lebui_show_cursor();
-    printf("\033[?1049l");
-    fflush(stdout);
-    lebui_raw_disable();
+    lebui_shutdown();
 }
 
 #define STEP_DISK    0
@@ -2457,6 +2476,7 @@ static int run_update_page(void)
 int main(int argc, char **argv)
 {
     int active_page;
+    int scan_result;
     int ret;
 
     (void)argc;
@@ -2464,27 +2484,36 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IOFBF, 8192);
 
-    lebui_get_size(&term_sz);
-    lebui_raw_enable();
-    printf("\033[?1049h");
-    fflush(stdout);
-    lebui_hide_cursor();
-
     if (getuid() != 0) {
-        lebui_msgbox_auto("Error", "This installer must be run as root.", term_sz.rows, term_sz.cols);
+        fprintf(stderr, "lebinstaller: must be run as root\n");
+        return 1;
+    }
+
+    lebui_get_size(&term_sz);
+    if (lebui_init() != LEBUI_RESULT_OK) {
+        fprintf(stderr, "lebinstaller: cannot initialize terminal\n");
+        return 1;
+    }
+    if (atexit(lebui_shutdown) != 0) {
         cleanup_exit();
+        fprintf(stderr, "lebinstaller: cannot register terminal cleanup\n");
         return 1;
     }
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Scanning", term_sz.rows, term_sz.cols);
     lebui_progress_update(&prog_st, "Scanning for disks...", 0);
-
-    if (inst_enumerate_disks() <= 0) {
-        lebui_msgbox_auto("Error", "No disks found.", term_sz.rows, term_sz.cols);
+    lebui_flush();
+    scan_result = inst_enumerate_disks();
+    if (scan_result <= 0) {
+        lebui_msgbox_auto("Error", "No disks found.", term_sz.rows,
+                          term_sz.cols);
         cleanup_exit();
         return 1;
     }
+    lebui_progress_update(&prog_st, "Reading partition tables...", 25);
+    lebui_flush();
+    inst_scan_disks();
 
     active_page = 0;
 

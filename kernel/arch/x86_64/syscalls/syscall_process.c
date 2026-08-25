@@ -74,24 +74,17 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
     }
 
     if (pid > 0) {
-        t = task_find((pid_t)pid);
-        if (!t) return -ECHILD;
-        if (t->ppid != current_task->pid) return -ECHILD;
-
         if (options & WNOHANG) {
+            t = task_find((pid_t)pid);
+            if (!t || t->ppid != current_task->pid) return -ECHILD;
             if (t->state != TASK_DEAD) return 0;
         }
 
         exit_code = 0;
-        r = task_join(t, &exit_code);
-        if (r == -EINTR && t->state != TASK_DEAD) return -EINTR;
-        if (r == -EINTR) {
-            exit_code = t->exit_code;
-            r = 0;
-        }
+        r = task_wait_child_pid((pid_t)pid, current_task->pid, &exit_code);
+        if (r == -EINTR) return -EINTR;
         if (r != 0) return -ECHILD;
 
-        t->waited = 1;
         reap_dead_tasks();
 
         if (status_ptr) {
@@ -173,7 +166,6 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
     int id;
     uint64_t info_addr;
     pid_t target_pid;
-    task_t *t;
     uint64_t exit_code;
     int r;
     struct siginfo_k *info;
@@ -193,15 +185,10 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
     }
     
     if (target_pid > 0) {
-        t = task_find(target_pid);
-        if (!t) return -ECHILD;
-        
         exit_code = 0;
-        r = task_join(t, &exit_code);
+        r = task_wait_child_pid(target_pid, current_task->pid, &exit_code);
         if (r == -EINTR) return -EINTR;
         if (r != 0) return -ECHILD;
-        
-        t->waited = 1;
         reap_dead_tasks();
 
         if (info_addr && info_addr < KERNEL_VMA && info_addr >= 0x1000) {

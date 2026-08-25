@@ -462,8 +462,6 @@ void keyboard_process_sigint(void)
         }
 
         fg = tty_pgrp[i];
-        if (fg <= 0)
-            continue;
 
         last_pid = 0;
         for (;;) {

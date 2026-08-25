@@ -1,5 +1,6 @@
 #include <lebirun/task.h>
 #include <lebirun/pipe.h>
+#include <lebirun/pty.h>
 #include <lebirun/registers.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
@@ -34,9 +35,9 @@ extern void event_descriptors_close_task(pid_t pid);
 extern void event_descriptors_close_cloexec(pid_t pid);
 extern void shm_close_task(pid_t pid);
 extern int shm_fork_task(pid_t parent_pid, pid_t child_pid);
-extern void socket_close_task(pid_t pid);
-extern void socket_close_cloexec(pid_t pid);
-extern void pty_close_task(pid_t pid);
+extern void socket_close_task(task_t *task);
+extern void socket_close_cloexec(task_t *task);
+extern void socket_retain_task_fd(task_fd_t *descriptor);
 extern void file_locks_release_process(pid_t pid);
 extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
                                             int release_flock);
@@ -49,6 +50,7 @@ extern void copy_file_range_release_task(void *owner);
 #define KERR_EPERM   1
 #define KERR_EIO     5
 #define KERR_ENOEXEC 8
+#define KERR_ECHILD 10
 #define KERR_EINTR   4
 #define KERR_EAGAIN  11
 #define KERR_EFAULT  14
@@ -1863,8 +1865,7 @@ static void task_release_exit_resources(task_t *t) {
     t->regs.saved_entry_cr3 = 0;
     event_descriptors_close_task(t->pid);
     shm_close_task(t->pid);
-    socket_close_task(t->pid);
-    pty_close_task(t->pid);
+    socket_close_task(t);
     file_locks_release_process(t->pid);
     copy_file_range_release_task(t);
     task_fd_close_all(t);
@@ -3160,6 +3161,83 @@ int task_join(task_t* task, uint64_t* exit_code) {
     return 0;
 }
 
+int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
+    extern int task_has_pending_signals(void);
+    task_t *task;
+    task_t *wait_target;
+    int interrupted;
+
+    if (!current_task || pid <= 0 || parent_pid <= 0) return -KERR_ECHILD;
+
+    for (;;) {
+        lock_scheduler();
+        task = all_tasks_head;
+        while (task && task_ptr_valid(task)) {
+            if (task->pid == pid) break;
+            task = task->all_next;
+        }
+        if (!task || !task_ptr_valid(task) || task->ppid != parent_pid) {
+            unlock_scheduler();
+            return -KERR_ECHILD;
+        }
+        if (task->state == TASK_DEAD) {
+            if (exit_code) *exit_code = task->exit_code;
+            task->waited = 1;
+            unlock_scheduler();
+            return 0;
+        }
+        if (task_has_pending_signals()) {
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        if (current_task->in_wait_queue || current_task->waiting_queue) {
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        task->join_refs++;
+        current_task->join_target = task;
+        waitq_add(&task->join_waiters, current_task);
+        if (current_task->waiting_queue != &task->join_waiters) {
+            if (task->join_refs) task->join_refs--;
+            current_task->join_target = NULL;
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        current_task->state = TASK_BLOCKED;
+        unlock_scheduler();
+
+        schedule();
+
+        lock_scheduler();
+        wait_target = current_task->join_target;
+        if (current_task->waiting_queue)
+            waitq_remove(current_task->waiting_queue, current_task);
+        if (wait_target && wait_target->join_refs)
+            wait_target->join_refs--;
+        current_task->join_target = NULL;
+        interrupted = task_has_pending_signals();
+        unlock_scheduler();
+
+        if (interrupted) {
+            lock_scheduler();
+            task = all_tasks_head;
+            while (task && task_ptr_valid(task)) {
+                if (task->pid == pid) break;
+                task = task->all_next;
+            }
+            if (task && task_ptr_valid(task) && task->ppid == parent_pid &&
+                task->state == TASK_DEAD) {
+                if (exit_code) *exit_code = task->exit_code;
+                task->waited = 1;
+                unlock_scheduler();
+                return 0;
+            }
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+    }
+}
+
 static inline void save_irq_frame_into_task(task_t* task, const registers_t* regs, uint64_t regs_ptr, uint64_t entry_cr3) {
     task->regs.return_cr3 = regs->return_cr3;
     task->regs.entry_cr3 = regs->entry_cr3;
@@ -3812,6 +3890,7 @@ void task_fd_position_mark_eof(task_fd_t *fd) {
 
 void task_fd_close_all(task_t *task) {
     int i;
+    int endpoint;
     task_fd_t *tfd;
     pipe_t *p;
     
@@ -3826,6 +3905,12 @@ void task_fd_close_all(task_t *task) {
                     pipe_destroy_if_unused(p);
                 }
             }
+        } else if (FD_TYPE_IS_PTY(tfd->type)) {
+            endpoint = (int)(uintptr_t)tfd->private_data;
+            if (tfd->type == FD_TYPE_PTY_MASTER)
+                pty_close_master(endpoint);
+            else
+                pty_close_slave(endpoint);
         } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
             vfs_close((vfs_node_t *)tfd->node);
         }
@@ -3844,9 +3929,10 @@ void task_fd_close_cloexec(task_t *task) {
     int release_flock;
     task_fd_t *tfd;
     pipe_t *p;
+    int endpoint;
 
     if (!task) return;
-    socket_close_cloexec(task->pid);
+    socket_close_cloexec(task);
     event_descriptors_close_cloexec(task->pid);
     if (!task->fds) return;
     for (i = 3; i < task->fds_capacity; i++) {
@@ -3860,6 +3946,12 @@ void task_fd_close_cloexec(task_t *task) {
                     pipe_destroy_if_unused(p);
                 }
             }
+        } else if (FD_TYPE_IS_PTY(tfd->type)) {
+            endpoint = (int)(uintptr_t)tfd->private_data;
+            if (tfd->type == FD_TYPE_PTY_MASTER)
+                pty_close_master(endpoint);
+            else
+                pty_close_slave(endpoint);
         } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
             release_flock = 1;
             if (tfd->ref_count > 1) {
@@ -4083,9 +4175,15 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
             task_fd_position_share(&parent->fds[i], &child->fds[i]);
             vfs_open((vfs_node_t *)child->fds[i].node, 0);
         }
+        if (child->fds[i].in_use && FD_TYPE_IS_PTY(child->fds[i].type)) {
+            pty_retain_endpoint((int)(uintptr_t)child->fds[i].private_data);
+        }
         if (child->fds[i].in_use && FD_TYPE_IS_PIPE(child->fds[i].type) && child->fds[i].private_data) {
             child_pipe = (pipe_t *)child->fds[i].private_data;
             pipe_retain_reference(child_pipe, child->fds[i].type);
+        }
+        if (child->fds[i].in_use && child->fds[i].type == FD_TYPE_SOCKET) {
+            socket_retain_task_fd(&child->fds[i]);
         }
     }
     child->envp = NULL;

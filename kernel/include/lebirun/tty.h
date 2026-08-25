@@ -128,6 +128,8 @@ typedef unsigned int speed_t;
 #define TIOCNOTTY 0x5422
 #define FIONREAD  0x541B
 #define FIONBIO   0x5421
+#define TIOCSPTLCK 0x40045431
+#define TIOCGPTN   0x80045430
 
 #define VT_OPENQRY      0x5600
 #define VT_GETMODE      0x5601

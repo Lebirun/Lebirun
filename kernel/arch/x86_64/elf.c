@@ -35,6 +35,32 @@ static int elf_vaddr_file_offset(const Elf64_Phdr *phdr, uint16_t phnum,
     return -1;
 }
 
+static uint64_t elf_program_header_vaddr(const Elf64_Ehdr *ehdr,
+                                         const Elf64_Phdr *phdr,
+                                         uint64_t pie_base) {
+    uint64_t phdr_size;
+    uint64_t delta;
+    uint64_t vaddr;
+    uint16_t i;
+
+    if (!ehdr || !phdr) return 0;
+    phdr_size = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+    for (i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD) continue;
+        if (ehdr->e_phoff < phdr[i].p_offset) continue;
+        delta = ehdr->e_phoff - phdr[i].p_offset;
+        if (delta > phdr[i].p_filesz) continue;
+        if (phdr_size > phdr[i].p_filesz - delta) continue;
+        if (delta > phdr[i].p_memsz) continue;
+        if (phdr_size > phdr[i].p_memsz - delta) continue;
+        if (phdr[i].p_vaddr > UINT64_MAX - delta) continue;
+        vaddr = phdr[i].p_vaddr + delta;
+        if (vaddr > UINT64_MAX - pie_base) continue;
+        return vaddr + pie_base;
+    }
+    return 0;
+}
+
 int elf_validate(const uint8_t *data, uint64_t size) {
     if (!data || size < sizeof(Elf64_Ehdr)) {
         return -1;
@@ -195,7 +221,7 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
     info->bss_end = 0;
     info->phent = ehdr->e_phentsize;
     info->phnum = ehdr->e_phnum;
-    info->phdr_vaddr = 0;
+    info->phdr_vaddr = elf_program_header_vaddr(ehdr, phdr, pie_base);
 
     estimated_pages = count_loadable_pages(data);
     page_list = NULL;
@@ -207,13 +233,6 @@ int elf_load_to_pd(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_inf
             return -10;
         }
         memset(page_list, 0, estimated_pages * sizeof(uint64_t));
-    }
-
-    for (i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_PHDR) {
-            info->phdr_vaddr = phdr[i].p_vaddr + pie_base;
-            break;
-        }
     }
 
     for (i = 0; i < ehdr->e_phnum; i++) {
@@ -484,16 +503,9 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node,
     info->bss_end = 0;
     info->phent = ehdr.e_phentsize;
     info->phnum = ehdr.e_phnum;
-    info->phdr_vaddr = 0;
+    info->phdr_vaddr = elf_program_header_vaddr(&ehdr, phdr, pie_base);
 
     if (!is_pie && file_maps) {
-        for (i = 0; i < ehdr.e_phnum; i++) {
-            if (phdr[i].p_type == PT_PHDR) {
-                info->phdr_vaddr = phdr[i].p_vaddr;
-                break;
-            }
-        }
-
         for (i = 0; i < ehdr.e_phnum; i++) {
             if (phdr[i].p_type != PT_LOAD || phdr[i].p_memsz == 0) {
                 continue;
@@ -546,13 +558,6 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node,
             return -10;
         }
         memset(page_list, 0, estimated_pages * sizeof(uint64_t));
-    }
-
-    for (i = 0; i < ehdr.e_phnum; i++) {
-        if (phdr[i].p_type == PT_PHDR) {
-            info->phdr_vaddr = phdr[i].p_vaddr + pie_base;
-            break;
-        }
     }
 
     for (i = 0; i < ehdr.e_phnum; i++) {

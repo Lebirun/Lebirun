@@ -156,10 +156,11 @@ typedef struct {
     uint16_t remote_port;
     uint8_t *recv_buf;
     uint32_t recv_capacity;
+    volatile uint32_t recv_lock;
     uint64_t recv_head;
     uint64_t recv_tail;
     int nonblocking;
-    int cloexec;
+    int descriptor_refs;
     int error;
     int so_reuseaddr;
     int so_reuseport;
@@ -185,17 +186,83 @@ typedef struct {
     task_fd_t *pending_fds;
     int pending_fd_count;
     int pending_fd_capacity;
-    wait_queue_t *waitq;
 } socket_t;
 
 static socket_t *sockets = NULL;
 static int socket_capacity = 0;
-static int socket_base_fd = 0x30000000;
 static uint16_t next_ephemeral_port = 49152;
-static uint16_t socket_cloexec_count;
+static spinlock_t socket_table_lock;
 
 static socket_t *get_socket(int fd);
+static void free_socket(int idx, int graceful);
+int is_socket_fd(int fd);
 extern int task_has_pending_signals(void);
+
+static int socket_descriptor_index(task_fd_t *descriptor) {
+    uintptr_t encoded;
+
+    if (!descriptor || !descriptor->in_use ||
+        descriptor->type != FD_TYPE_SOCKET || !descriptor->private_data)
+        return -1;
+    encoded = (uintptr_t)descriptor->private_data;
+    if (encoded == 0 || encoded - 1 > 0x7FFFFFFFUL) return -1;
+    return (int)(encoded - 1);
+}
+
+static int socket_fd_index(task_t *task, int fd) {
+    if (!task || !task->fds || fd < 0 || fd >= task->fds_capacity)
+        return -1;
+    return socket_descriptor_index(&task->fds[fd]);
+}
+
+static int socket_fd_alloc_from(int idx, int flags, int start) {
+    task_fd_t *descriptor;
+    int fd;
+    int i;
+
+    if (!current_task || start < 0 || idx < 0 || idx >= socket_capacity ||
+        !sockets[idx].in_use)
+        return -EMFILE;
+    fd = -1;
+    for (i = start; i < current_task->fds_capacity; i++) {
+        if (!current_task->fds[i].in_use) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd < 0) {
+        if (task_fd_ensure_capacity(current_task,
+                                    start >= current_task->fds_capacity ?
+                                    start : current_task->fds_capacity) != 0)
+            return -EMFILE;
+        for (i = start; i < current_task->fds_capacity; i++) {
+            if (!current_task->fds[i].in_use) {
+                fd = i;
+                break;
+            }
+        }
+    }
+    if (fd < 0) return -EMFILE;
+    descriptor = &current_task->fds[fd];
+    memset(descriptor, 0, sizeof(*descriptor));
+    descriptor->in_use = 1;
+    descriptor->ref_count = 1;
+    descriptor->type = FD_TYPE_SOCKET;
+    descriptor->flags = (uint64_t)flags;
+    descriptor->private_data = (void *)(uintptr_t)(idx + 1);
+    sockets[idx].descriptor_refs++;
+    return fd;
+}
+
+static int socket_fd_alloc(int idx, int flags) {
+    return socket_fd_alloc_from(idx, flags, 3);
+}
+
+static void socket_release_index(int idx, int graceful) {
+    if (idx < 0 || idx >= socket_capacity || !sockets[idx].in_use) return;
+    if (sockets[idx].descriptor_refs > 0) sockets[idx].descriptor_refs--;
+    if (sockets[idx].descriptor_refs == 0) free_socket(idx, graceful);
+}
 
 static int socket_grow(void) {
     int new_cap;
@@ -231,29 +298,28 @@ found:
     return i;
 }
 
-static wait_queue_t *socket_get_waitq(socket_t *sock) {
-    wait_queue_t *waitq;
-
-    if (!sock) return NULL;
-    if (sock->waitq) return sock->waitq;
-    waitq = (wait_queue_t *)kmalloc(sizeof(wait_queue_t));
-    if (!waitq) return NULL;
-    waitq_init(waitq);
-    sock->waitq = waitq;
-    return waitq;
-}
-
 static void socket_release_pending_fd(task_fd_t *fd) {
     pipe_t *pipe;
+    int endpoint;
+    int socket_idx;
 
     if (!fd || !fd->in_use) return;
     if (fd->type == FD_TYPE_FILE && fd->node) {
         vfs_close((vfs_node_t *)fd->node);
+    } else if (FD_TYPE_IS_PTY(fd->type) && fd->private_data) {
+        endpoint = (int)(uintptr_t)fd->private_data;
+        if (fd->type == FD_TYPE_PTY_MASTER)
+            pty_close_master(endpoint);
+        else
+            pty_close_slave(endpoint);
     } else if (FD_TYPE_IS_PIPE(fd->type) && fd->private_data) {
         pipe = (pipe_t *)fd->private_data;
         if (pipe_release_reference(pipe, fd->type)) {
             pipe_destroy_if_unused(pipe);
         }
+    } else if (fd->type == FD_TYPE_SOCKET && fd->private_data) {
+        socket_idx = (int)((uintptr_t)fd->private_data - 1);
+        socket_release_index(socket_idx, 0);
     }
     memset(fd, 0, sizeof(task_fd_t));
 }
@@ -337,9 +403,18 @@ static int socket_send_rights(socket_t *sock, const struct msghdr *msg,
             task_fd_position_share(
                 src_tfd, &peer->pending_fds[peer->pending_fd_count]);
         }
+        if (FD_TYPE_IS_PTY(src_tfd->type) && src_tfd->private_data) {
+            pty_retain_endpoint((int)(uintptr_t)src_tfd->private_data);
+        }
         if (src_tfd->private_data && FD_TYPE_IS_PIPE(src_tfd->type)) {
             passed_pipe = (pipe_t *)src_tfd->private_data;
             pipe_retain_reference(passed_pipe, src_tfd->type);
+        }
+        if (src_tfd->type == FD_TYPE_SOCKET && src_tfd->private_data) {
+            src_fd = (int)((uintptr_t)src_tfd->private_data - 1);
+            if (src_fd >= 0 && src_fd < socket_capacity &&
+                sockets[src_fd].in_use)
+                sockets[src_fd].descriptor_refs++;
         }
         peer->pending_fd_count++;
     }
@@ -355,8 +430,6 @@ static void free_socket(int idx, int graceful) {
 
     if (idx < 0 || idx >= socket_capacity || !sockets[idx].in_use) return;
     sock = &sockets[idx];
-    if (sock->cloexec && socket_cloexec_count > 0)
-        socket_cloexec_count--;
     for (i = 0; i < sock->pending_fd_count; i++)
         socket_release_pending_fd(&sock->pending_fds[i]);
     sock->pending_fd_count = 0;
@@ -371,7 +444,6 @@ static void free_socket(int idx, int graceful) {
         peer = &sockets[sock->peer_socket];
         if (peer->in_use && peer->peer_socket == idx) {
             peer->peer_socket = -1;
-            if (peer->waitq) waitq_wake_all(peer->waitq);
         }
     }
     if (sock->tcp) {
@@ -383,10 +455,6 @@ static void free_socket(int idx, int graceful) {
     kfree(sock->backlog);
     kfree(sock->sun_path);
     kfree(sock->pending_fds);
-    if (sock->waitq) {
-        waitq_wake_all(sock->waitq);
-        kfree(sock->waitq);
-    }
     memset(sock, 0, sizeof(*sock));
 }
 
@@ -411,26 +479,41 @@ static void socket_reclaim_storage(void) {
     socket_capacity = new_capacity;
 }
 
-void socket_close_task(pid_t pid) {
+void socket_close_task(task_t *task) {
     int i;
+    int idx;
 
-    for (i = 0; i < socket_capacity; i++) {
-        if (sockets[i].in_use && sockets[i].owner_pid == pid)
-            free_socket(i, 0);
+    if (!task || !task->fds) return;
+    spin_lock(&socket_table_lock);
+    for (i = 0; i < task->fds_capacity; i++) {
+        if (!task->fds[i].in_use || task->fds[i].type != FD_TYPE_SOCKET)
+            continue;
+        idx = socket_fd_index(task, i);
+        memset(&task->fds[i], 0, sizeof(task_fd_t));
+        socket_release_index(idx, 0);
     }
     socket_reclaim_storage();
+    spin_unlock(&socket_table_lock);
+    descriptor_ready_notify();
 }
 
-void socket_close_cloexec(pid_t pid) {
+void socket_close_cloexec(task_t *task) {
     int i;
+    int idx;
 
-    if (socket_cloexec_count == 0) return;
-    for (i = 0; i < socket_capacity; i++) {
-        if (sockets[i].in_use && sockets[i].owner_pid == pid &&
-            sockets[i].cloexec)
-            free_socket(i, 0);
+    if (!task || !task->fds) return;
+    spin_lock(&socket_table_lock);
+    for (i = 3; i < task->fds_capacity; i++) {
+        if (!task->fds[i].in_use || task->fds[i].type != FD_TYPE_SOCKET ||
+            !(task->fds[i].flags & 1))
+            continue;
+        idx = socket_fd_index(task, i);
+        memset(&task->fds[i], 0, sizeof(task_fd_t));
+        socket_release_index(idx, 0);
     }
     socket_reclaim_storage();
+    spin_unlock(&socket_table_lock);
+    descriptor_ready_notify();
 }
 
 static ipv4_addr_t socket_ipv4_from_addr(uint32_t addr)
@@ -446,12 +529,33 @@ static uint32_t socket_addr_from_ipv4(ipv4_addr_t ip)
 static socket_t *get_socket(int fd) {
     int idx;
 
-    idx = fd - socket_base_fd;
+    idx = socket_fd_index(current_task, fd);
     if (idx < 0 || idx >= socket_capacity) return NULL;
     if (!sockets[idx].in_use) return NULL;
-    if (!current_task || sockets[idx].owner_pid != current_task->pid)
-        return NULL;
     return &sockets[idx];
+}
+
+void socket_retain_task_fd(task_fd_t *descriptor) {
+    int idx;
+
+    spin_lock(&socket_table_lock);
+    idx = socket_descriptor_index(descriptor);
+    if (idx >= 0 && idx < socket_capacity && sockets[idx].in_use)
+        sockets[idx].descriptor_refs++;
+    spin_unlock(&socket_table_lock);
+}
+
+void socket_release_task_fd(task_fd_t *descriptor) {
+    int idx;
+
+    if (!descriptor) return;
+    spin_lock(&socket_table_lock);
+    idx = socket_descriptor_index(descriptor);
+    memset(descriptor, 0, sizeof(*descriptor));
+    socket_release_index(idx, 1);
+    socket_reclaim_storage();
+    spin_unlock(&socket_table_lock);
+    descriptor_ready_notify();
 }
 
 static uint16_t alloc_ephemeral_port(void) {
@@ -464,6 +568,18 @@ static uint16_t alloc_ephemeral_port(void) {
 
 static size_t recv_buf_used(socket_t *sock) {
     return sock->recv_tail - sock->recv_head;
+}
+
+static void socket_recv_lock(socket_t *sock) {
+    while (__sync_lock_test_and_set(&sock->recv_lock, 1)) {
+        while (sock->recv_lock) {
+            __asm__ volatile("pause" ::: "memory");
+        }
+    }
+}
+
+static void socket_recv_unlock(socket_t *sock) {
+    __sync_lock_release(&sock->recv_lock);
 }
 
 static size_t recv_buf_free(socket_t *sock) {
@@ -542,43 +658,57 @@ static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
     const uint8_t *src;
     size_t i;
 
+    socket_recv_lock(sock);
     free = recv_buf_free(sock);
     to_write = (len < free) ? len : free;
-    if (to_write > 0 && socket_ensure_recv_buf(sock, to_write) < 0) return -ENOMEM;
+    if (to_write > 0 && socket_ensure_recv_buf(sock, to_write) < 0) {
+        socket_recv_unlock(sock);
+        return -ENOMEM;
+    }
     src = (const uint8_t *)data;
     for (i = 0; i < to_write; i++) {
         sock->recv_buf[sock->recv_tail % sock->recv_capacity] = src[i];
         sock->recv_tail++;
     }
-    if (to_write != 0) {
-        if (sock->waitq) waitq_wake_all(sock->waitq);
-        descriptor_ready_notify();
-    }
+    socket_recv_unlock(sock);
     return (int)to_write;
 }
 
 static int socket_wait_for_data(socket_t **sock_ptr, int fd, int flags) {
     socket_t *sock;
-    wait_queue_t *waitq;
+    size_t used;
+    uint64_t ready_generation;
 
-    sock = *sock_ptr;
-    while (recv_buf_used(sock) == 0) {
+    for (;;) {
+        ready_generation = descriptor_ready_generation();
+        spin_lock(&socket_table_lock);
+        sock = get_socket(fd);
+        if (!sock) {
+            spin_unlock(&socket_table_lock);
+            return -EBADF;
+        }
+        socket_recv_lock(sock);
+        used = recv_buf_used(sock);
+        socket_recv_unlock(sock);
+        if (used != 0) {
+            *sock_ptr = sock;
+            return 1;
+        }
         if (sock->peer_socket < 0 ||
             sock->peer_write_closed ||
             sock->state == SOCKSTATE_SHUTDOWN_RD ||
-            sock->state == SOCKSTATE_SHUTDOWN_RDWR)
+            sock->state == SOCKSTATE_SHUTDOWN_RDWR) {
+            spin_unlock(&socket_table_lock);
             return 0;
-        if (sock->nonblocking || (flags & MSG_DONTWAIT)) return -EAGAIN;
-        waitq = socket_get_waitq(sock);
-        if (!waitq) return -ENOMEM;
-        waitq_add(waitq, current_task);
-        block_current();
+        }
+        if (sock->nonblocking || (flags & MSG_DONTWAIT)) {
+            spin_unlock(&socket_table_lock);
+            return -EAGAIN;
+        }
+        spin_unlock(&socket_table_lock);
+        descriptor_ready_wait(ready_generation, UINT64_MAX);
         if (task_has_pending_signals()) return -EINTR;
-        sock = get_socket(fd);
-        if (!sock) return -EBADF;
-        *sock_ptr = sock;
     }
-    return 1;
 }
 
 static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
@@ -588,8 +718,13 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     uint64_t head;
     size_t i;
 
+    socket_recv_lock(sock);
     used = recv_buf_used(sock);
     to_read = (len < used) ? len : used;
+    if (to_read != 0 && (!sock->recv_buf || sock->recv_capacity == 0)) {
+        socket_recv_unlock(sock);
+        return 0;
+    }
     dst = (uint8_t *)data;
     head = sock->recv_head;
     for (i = 0; i < to_read; i++) {
@@ -599,15 +734,20 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     if (!peek) {
         sock->recv_head = head;
         socket_compact_recv_buffer(sock);
-        if (to_read != 0) descriptor_ready_notify();
     }
+    socket_recv_unlock(sock);
     return to_read;
 }
 
 static int sys_socket(int domain, const char *type_ptr, int protocol) {
-    int type = (int)(uintptr_t)type_ptr;
-    int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int type;
+    int flags;
     int idx;
+    int fd;
+    int fd_flags;
+
+    type = (int)(uintptr_t)type_ptr;
+    flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
     type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
     
     if (domain != AF_INET && domain != AF_UNIX && domain != AF_INET6) {
@@ -618,18 +758,29 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
         return -ESOCKTNOSUPPORT;
     }
     
+    spin_lock(&socket_table_lock);
     idx = alloc_socket();
-    if (idx < 0) return -EMFILE;
+    if (idx < 0) {
+        spin_unlock(&socket_table_lock);
+        return -EMFILE;
+    }
     
     sockets[idx].domain = domain;
     sockets[idx].type = type;
     sockets[idx].protocol = protocol;
     sockets[idx].state = SOCKSTATE_CLOSED;
     sockets[idx].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
-    sockets[idx].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
-    if (sockets[idx].cloexec) socket_cloexec_count++;
-    
-    return socket_base_fd + idx;
+    fd_flags = (flags & SOCK_CLOEXEC ? 1 : 0) |
+               (flags & SOCK_NONBLOCK ? 0x800 : 0);
+    fd = socket_fd_alloc(idx, fd_flags);
+    if (fd < 0) {
+        free_socket(idx, 0);
+        socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
+        return fd;
+    }
+    spin_unlock(&socket_table_lock);
+    return fd;
 }
 
 static int sys_socketpair(int domain, const char *type_ptr, int protocol,
@@ -639,6 +790,7 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     int sv_values[2];
     int idx1;
     int idx2;
+    int fd_flags;
 
     (void)protocol;
     type = (int)(uintptr_t)type_ptr;
@@ -654,13 +806,18 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
         return -ESOCKTNOSUPPORT;
     }
     
+    spin_lock(&socket_table_lock);
     idx1 = alloc_socket();
-    if (idx1 < 0) return -EMFILE;
+    if (idx1 < 0) {
+        spin_unlock(&socket_table_lock);
+        return -EMFILE;
+    }
     
     idx2 = alloc_socket();
     if (idx2 < 0) {
         free_socket(idx1, 0);
         socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
         return -EMFILE;
     }
     
@@ -668,8 +825,6 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx1].type = type;
     sockets[idx1].state = SOCKSTATE_CONNECTED;
     sockets[idx1].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
-    sockets[idx1].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
-    if (sockets[idx1].cloexec) socket_cloexec_count++;
     sockets[idx1].peer_socket = idx2;
     sockets[idx1].peer_pid = current_task ? current_task->pid : 0;
     sockets[idx1].peer_uid = current_task ? current_task->euid : 0;
@@ -679,21 +834,40 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx2].type = type;
     sockets[idx2].state = SOCKSTATE_CONNECTED;
     sockets[idx2].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
-    sockets[idx2].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
-    if (sockets[idx2].cloexec) socket_cloexec_count++;
     sockets[idx2].peer_socket = idx1;
     sockets[idx2].peer_pid = current_task ? current_task->pid : 0;
     sockets[idx2].peer_uid = current_task ? current_task->euid : 0;
     sockets[idx2].peer_gid = current_task ? current_task->egid : 0;
     
-    sv_values[0] = socket_base_fd + idx1;
-    sv_values[1] = socket_base_fd + idx2;
-    if (copy_to_user(sv, sv_values, sizeof(sv_values)) < 0) {
+    fd_flags = (flags & SOCK_CLOEXEC ? 1 : 0) |
+               (flags & SOCK_NONBLOCK ? 0x800 : 0);
+    sv_values[0] = socket_fd_alloc(idx1, fd_flags);
+    if (sv_values[0] < 0) {
         free_socket(idx1, 0);
         free_socket(idx2, 0);
         socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
+        return sv_values[0];
+    }
+    sv_values[1] = socket_fd_alloc(idx2, fd_flags);
+    if (sv_values[1] < 0) {
+        task_fd_free(current_task, sv_values[0]);
+        socket_release_index(idx1, 0);
+        free_socket(idx2, 0);
+        socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
+        return sv_values[1];
+    }
+    if (copy_to_user(sv, sv_values, sizeof(sv_values)) < 0) {
+        task_fd_free(current_task, sv_values[0]);
+        task_fd_free(current_task, sv_values[1]);
+        socket_release_index(idx1, 0);
+        socket_release_index(idx2, 0);
+        socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
         return -EFAULT;
     }
+    spin_unlock(&socket_table_lock);
 
     return 0;
 }
@@ -793,52 +967,70 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_un *uaddr;
     socket_t *sock;
     int path_result;
+    int result;
 
+    result = 0;
+    spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!sock) {
+        result = -EBADF;
+        goto out;
+    }
     
     if (sock->state != SOCKSTATE_CLOSED) {
-        return -EINVAL;
+        result = -EINVAL;
+        goto out;
     }
     
     if (sock->domain == AF_UNIX) {
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
         if (!uaddr || addrlen < 3) {
-            return -EINVAL;
+            result = -EINVAL;
+            goto out;
         }
         if (uaddr->sun_family != AF_UNIX) {
-            return -EAFNOSUPPORT;
+            result = -EAFNOSUPPORT;
+            goto out;
         }
         socket_forget_unlinked_path(uaddr->sun_path);
-        if (socket_set_sun_path(sock, uaddr->sun_path) < 0) return -ENOMEM;
+        if (socket_set_sun_path(sock, uaddr->sun_path) < 0) {
+            result = -ENOMEM;
+            goto out;
+        }
         path_result = socket_create_path_node(sock->sun_path);
         if (path_result < 0) {
             kfree(sock->sun_path);
             sock->sun_path = NULL;
-            return path_result;
+            result = path_result;
+            goto out;
         }
         sock->state = SOCKSTATE_BOUND;
-        return 0;
+        goto out;
     }
     
     if (sock->domain == AF_INET6) {
         addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
-            return -EINVAL;
+            result = -EINVAL;
+            goto out;
         }
         if (addr6->sin6_family != AF_INET6) {
-            return -EAFNOSUPPORT;
+            result = -EAFNOSUPPORT;
+            goto out;
         }
-        return -EOPNOTSUPP;
+        result = -EOPNOTSUPP;
+        goto out;
     }
 
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
-        return -EINVAL;
+        result = -EINVAL;
+        goto out;
     }
     
     if (sock->domain == AF_INET && addr->sin_family != AF_INET) {
-        return -EAFNOSUPPORT;
+        result = -EAFNOSUPPORT;
+        goto out;
     }
     
     sock->local_addr = addr->sin_addr.s_addr;
@@ -846,14 +1038,19 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     
     if (sock->type == SOCK_DGRAM) {
         sock->udp = udp_socket_create(sock->local_port);
-        if (!sock->udp) return -EADDRINUSE;
+        if (!sock->udp) {
+            result = -EADDRINUSE;
+            goto out;
+        }
         sock->local_port = sock->udp->local_port;
     } else if (sock->local_port == 0) {
         sock->local_port = alloc_ephemeral_port();
     }
     
     sock->state = SOCKSTATE_BOUND;
-    return 0;
+out:
+    spin_unlock(&socket_table_lock);
+    return result;
 }
 
 static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
@@ -866,55 +1063,80 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     int i;
     socket_t *sock;
     task_t *listener_task;
+    tcp_socket_t *tcp;
+    uint16_t remote_port;
+    pid_t listener_pid;
 
+    spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
-    socket_idx = sockfd - socket_base_fd;
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    socket_idx = socket_fd_index(current_task, sockfd);
     
     if (sock->state == SOCKSTATE_CONNECTED) {
+        spin_unlock(&socket_table_lock);
         return -EISCONN;
     }
     
     if (sock->state == SOCKSTATE_LISTENING) {
+        spin_unlock(&socket_table_lock);
         return -EINVAL;
     }
     
     if (sock->domain == AF_UNIX) {
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
         if (!uaddr || addrlen < 3) {
+            spin_unlock(&socket_table_lock);
             return -EINVAL;
         }
-        
+        spin_unlock(&socket_table_lock);
+        if (!socket_path_node_exists(uaddr->sun_path))
+            return -ECONNREFUSED;
+        spin_lock(&socket_table_lock);
+        sock = get_socket(sockfd);
+        if (!sock || sock->state == SOCKSTATE_CONNECTED ||
+            sock->state == SOCKSTATE_LISTENING) {
+            spin_unlock(&socket_table_lock);
+            return -ECONNREFUSED;
+        }
         listener_idx = find_unix_listener(uaddr->sun_path);
-        if (listener_idx < 0 ||
-            !socket_path_node_exists(uaddr->sun_path)) {
+        if (listener_idx < 0) {
+            spin_unlock(&socket_table_lock);
             return -ECONNREFUSED;
         }
         
         if (sockets[listener_idx].backlog_count >= sockets[listener_idx].backlog_size) {
+            spin_unlock(&socket_table_lock);
             return -ECONNREFUSED;
         }
         
         peer_idx = alloc_socket();
-        if (peer_idx < 0) return -ENOMEM;
+        if (peer_idx < 0) {
+            spin_unlock(&socket_table_lock);
+            return -ENOMEM;
+        }
         sock = &sockets[socket_idx];
         
         sockets[peer_idx].domain = AF_UNIX;
         sockets[peer_idx].type = sockets[listener_idx].type;
         sockets[peer_idx].owner_pid = sockets[listener_idx].owner_pid;
         sockets[peer_idx].state = SOCKSTATE_CONNECTED;
-        sockets[peer_idx].peer_socket = sockfd - socket_base_fd;
+        sockets[peer_idx].peer_socket = socket_idx;
         sockets[peer_idx].peer_pid = sock->owner_pid;
         sockets[peer_idx].peer_uid = current_task ? current_task->euid : 0;
         sockets[peer_idx].peer_gid = current_task ? current_task->egid : 0;
         if (socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path) < 0) {
             free_socket(peer_idx, 0);
             socket_reclaim_storage();
+            spin_unlock(&socket_table_lock);
             return -ENOMEM;
         }
         if (socket_set_sun_path(sock, uaddr->sun_path) < 0) {
             free_socket(peer_idx, 0);
             socket_reclaim_storage();
+            spin_unlock(&socket_table_lock);
             return -ENOMEM;
         }
         
@@ -923,40 +1145,48 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
                 sockets[listener_idx].backlog[i].valid = 1;
                 sockets[listener_idx].backlog[i].peer_idx = peer_idx;
                 sockets[listener_idx].backlog_count++;
-                if (sockets[listener_idx].waitq)
-                    waitq_wake_all(sockets[listener_idx].waitq);
-                descriptor_ready_notify();
                 break;
             }
         }
         
         sock->peer_socket = peer_idx;
-        sock->peer_pid = sockets[listener_idx].owner_pid;
-        listener_task = task_find(sockets[listener_idx].owner_pid);
-        sock->peer_uid = listener_task ? listener_task->euid : 0;
-        sock->peer_gid = listener_task ? listener_task->egid : 0;
+        listener_pid = sockets[listener_idx].owner_pid;
+        sock->peer_pid = listener_pid;
         sock->state = SOCKSTATE_CONNECTED;
-        
+        spin_unlock(&socket_table_lock);
+        listener_task = task_find(listener_pid);
+        spin_lock(&socket_table_lock);
+        sock = get_socket(sockfd);
+        if (sock && sock->peer_socket == peer_idx) {
+            sock->peer_uid = listener_task ? listener_task->euid : 0;
+            sock->peer_gid = listener_task ? listener_task->egid : 0;
+        }
+        spin_unlock(&socket_table_lock);
+        descriptor_ready_notify();
         return 0;
     }
-    
     if (sock->domain == AF_INET6) {
         addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
+            spin_unlock(&socket_table_lock);
             return -EINVAL;
         }
         if (addr6->sin6_family != AF_INET6) {
+            spin_unlock(&socket_table_lock);
             return -EAFNOSUPPORT;
         }
+        spin_unlock(&socket_table_lock);
         return -EOPNOTSUPP;
     }
 
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
+        spin_unlock(&socket_table_lock);
         return -EINVAL;
     }
     
     if (sock->domain == AF_INET && addr->sin_family != AF_INET) {
+        spin_unlock(&socket_table_lock);
         return -EAFNOSUPPORT;
     }
     
@@ -969,34 +1199,55 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     if (sock->type == SOCK_DGRAM) {
         if (!sock->udp) {
             sock->udp = udp_socket_create(sock->local_port);
-            if (!sock->udp) return -EADDRINUSE;
+            if (!sock->udp) {
+                spin_unlock(&socket_table_lock);
+                return -EADDRINUSE;
+            }
             sock->local_port = sock->udp->local_port;
         }
         sock->state = SOCKSTATE_CONNECTED;
+        spin_unlock(&socket_table_lock);
         return 0;
     }
     
     sock->tcp = tcp_socket_create();
     if (!sock->tcp) {
+        spin_unlock(&socket_table_lock);
         return -ENOMEM;
     }
 
     if (sock->nonblocking) {
         sock->state = SOCKSTATE_CONNECTING;
+        spin_unlock(&socket_table_lock);
         return -EINPROGRESS;
     }
 
-    if (tcp_connect(sock->tcp, socket_ipv4_from_addr(addr->sin_addr.s_addr),
-                    sock->remote_port, 60000) < 0) {
-        tcp_socket_close(sock->tcp);
-        sock->tcp = NULL;
-        sock->state = SOCKSTATE_CLOSED;
+    tcp = sock->tcp;
+    remote_port = sock->remote_port;
+    spin_unlock(&socket_table_lock);
+    if (tcp_connect(tcp, socket_ipv4_from_addr(addr->sin_addr.s_addr),
+                    remote_port, 60000) < 0) {
+        spin_lock(&socket_table_lock);
+        sock = get_socket(sockfd);
+        if (sock && sock->tcp == tcp) {
+            sock->tcp = NULL;
+            sock->state = SOCKSTATE_CLOSED;
+        }
+        spin_unlock(&socket_table_lock);
+        tcp_socket_close(tcp);
         return -ECONNREFUSED;
     }
 
-    sock->local_port = sock->tcp->local_port;
-    sock->local_addr = socket_addr_from_ipv4(sock->tcp->local_ip);
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock || sock->tcp != tcp) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    sock->local_port = tcp->local_port;
+    sock->local_addr = socket_addr_from_ipv4(tcp->local_ip);
     sock->state = SOCKSTATE_CONNECTED;
+    spin_unlock(&socket_table_lock);
     return 0;
 }
 
@@ -1006,25 +1257,30 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     pending_conn_t *new_backlog;
 
     (void)unused;
-    sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
-    
     backlog = (int)(uintptr_t)backlog_ptr;
-    
-    if (sock->state != SOCKSTATE_BOUND) {
-        return -EINVAL;
-    }
-    
-    if (sock->type != SOCK_STREAM && sock->type != SOCK_SEQPACKET) {
-        return -EOPNOTSUPP;
-    }
-    
     if (backlog < 1) backlog = 1;
     if ((size_t)backlog > SIZE_MAX / sizeof(pending_conn_t)) return -ENOMEM;
 
     new_backlog = (pending_conn_t *)kmalloc(backlog * sizeof(pending_conn_t));
     if (!new_backlog) return -ENOMEM;
     memset(new_backlog, 0, backlog * sizeof(pending_conn_t));
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        kfree(new_backlog);
+        return -EBADF;
+    }
+    if (sock->state != SOCKSTATE_BOUND) {
+        spin_unlock(&socket_table_lock);
+        kfree(new_backlog);
+        return -EINVAL;
+    }
+    if (sock->type != SOCK_STREAM && sock->type != SOCK_SEQPACKET) {
+        spin_unlock(&socket_table_lock);
+        kfree(new_backlog);
+        return -EOPNOTSUPP;
+    }
     kfree(sock->backlog);
     sock->backlog = new_backlog;
     sock->backlog_capacity = backlog;
@@ -1032,7 +1288,8 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     sock->backlog_size = backlog;
     sock->backlog_count = 0;
     sock->state = SOCKSTATE_LISTENING;
-    
+    spin_unlock(&socket_table_lock);
+    descriptor_ready_notify();
     return 0;
 }
 
@@ -1042,33 +1299,41 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     int i;
     int listener_idx;
     int conn_idx;
+    int accepted_fd;
+    int fd_flags;
     struct sockaddr_in *addr;
     struct sockaddr_un *uaddr;
     socklen_t *user_addrlen;
     pending_conn_t *conn;
     socket_t *sock;
-    wait_queue_t *waitq;
+    uint64_t ready_generation;
+    uint16_t remote_port;
+    uint32_t remote_addr;
 
-    sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
-    listener_idx = sockfd - socket_base_fd;
-    
-    if (sock->state != SOCKSTATE_LISTENING) {
-        return -EINVAL;
-    }
-    
-    while (sock->backlog_count == 0) {
-        if (sock->nonblocking) return -EAGAIN;
-        waitq = socket_get_waitq(sock);
-        if (!waitq) return -ENOMEM;
-        waitq_add(waitq, current_task);
-        block_current();
-        if (task_has_pending_signals()) return -EINTR;
+    listener_idx = -1;
+    for (;;) {
+        ready_generation = descriptor_ready_generation();
+        spin_lock(&socket_table_lock);
         sock = get_socket(sockfd);
-        if (!sock) return -EBADF;
-        if (sock->state != SOCKSTATE_LISTENING) return -EINVAL;
+        if (!sock) {
+            spin_unlock(&socket_table_lock);
+            return -EBADF;
+        }
+        listener_idx = socket_fd_index(current_task, sockfd);
+        if (sock->state != SOCKSTATE_LISTENING) {
+            spin_unlock(&socket_table_lock);
+            return -EINVAL;
+        }
+        if (sock->backlog_count != 0) break;
+        if (sock->nonblocking) {
+            spin_unlock(&socket_table_lock);
+            return -EAGAIN;
+        }
+        spin_unlock(&socket_table_lock);
+        descriptor_ready_wait(ready_generation, UINT64_MAX);
+        if (task_has_pending_signals()) return -EINTR;
     }
-    
+
     if (sock->domain == AF_UNIX) {
         conn = NULL;
         for (i = 0; i < sock->backlog_size; i++) {
@@ -1077,12 +1342,21 @@ static int sys_accept(int sockfd, const char *addr_ptr,
                 break;
             }
         }
-        if (!conn) return -EAGAIN;
+        if (!conn) {
+            spin_unlock(&socket_table_lock);
+            return -EAGAIN;
+        }
         
         idx = conn->peer_idx;
+        fd_flags = sockets[idx].nonblocking ? 0x800 : 0;
+        accepted_fd = socket_fd_alloc(idx, fd_flags);
+        if (accepted_fd < 0) {
+            spin_unlock(&socket_table_lock);
+            return accepted_fd;
+        }
         conn->valid = 0;
         sock->backlog_count--;
-        
+        spin_unlock(&socket_table_lock);
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
         user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
         if (uaddr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_un)) {
@@ -1091,7 +1365,7 @@ static int sys_accept(int sockfd, const char *addr_ptr,
             *user_addrlen = sizeof(uint16_t);
         }
         
-        return socket_base_fd + idx;
+        return accepted_fd;
     }
     
     conn = NULL;
@@ -1105,11 +1379,15 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     }
     
     if (!conn) {
+        spin_unlock(&socket_table_lock);
         return -EAGAIN;
     }
     
     idx = alloc_socket();
-    if (idx < 0) return -EMFILE;
+    if (idx < 0) {
+        spin_unlock(&socket_table_lock);
+        return -EMFILE;
+    }
     sock = &sockets[listener_idx];
     conn = &sock->backlog[conn_idx];
 
@@ -1122,35 +1400,58 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     sockets[idx].remote_addr = conn->remote_addr;
     sockets[idx].remote_port = conn->remote_port;
     sockets[idx].nonblocking = sock->nonblocking;
+    fd_flags = sockets[idx].nonblocking ? 0x800 : 0;
+    accepted_fd = socket_fd_alloc(idx, fd_flags);
+    if (accepted_fd < 0) {
+        free_socket(idx, 0);
+        socket_reclaim_storage();
+        spin_unlock(&socket_table_lock);
+        return accepted_fd;
+    }
     
     conn->valid = 0;
     sock->backlog_count--;
-    
+    remote_port = sockets[idx].remote_port;
+    remote_addr = sockets[idx].remote_addr;
+    spin_unlock(&socket_table_lock);
+
     addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
     user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
     
     if (addr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_in)) {
         addr->sin_family = AF_INET;
-        addr->sin_port = htons(sockets[idx].remote_port);
-        addr->sin_addr.s_addr = sockets[idx].remote_addr;
+        addr->sin_port = htons(remote_port);
+        addr->sin_addr.s_addr = remote_addr;
         *user_addrlen = sizeof(struct sockaddr_in);
     }
     
-    return socket_base_fd + idx;
+    return accepted_fd;
 }
 
 static int sys_accept4(int sockfd, const char *addr_ptr,
                        uint64_t addrlen_ptr, int flags) {
     int fd;
-    int idx;
+    socket_t *sock;
+    task_fd_t *descriptor;
 
     if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) return -EINVAL;
     fd = sys_accept(sockfd, addr_ptr, addrlen_ptr);
     if (fd < 0) return fd;
-    idx = fd - socket_base_fd;
-    sockets[idx].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
-    sockets[idx].cloexec = (flags & SOCK_CLOEXEC) ? 1 : 0;
-    if (sockets[idx].cloexec) socket_cloexec_count++;
+    spin_lock(&socket_table_lock);
+    sock = get_socket(fd);
+    if (sock) {
+        sock->nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
+        descriptor = &current_task->fds[fd];
+        if (flags & SOCK_NONBLOCK)
+            descriptor->flags |= 0x800;
+        else
+            descriptor->flags &= ~0x800UL;
+        if (flags & SOCK_CLOEXEC)
+            descriptor->flags |= 1;
+        else
+            descriptor->flags &= ~1UL;
+    }
+    spin_unlock(&socket_table_lock);
     return fd;
 }
 
@@ -1162,9 +1463,8 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
     socklen_t *optlen;
     int value;
     struct ucred credentials;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
     (void)unused;
-    if (!sock) return -EBADF;
     
     level = (int)(uintptr_t)level_ptr;
     optval = (int *)(uintptr_t)optval_ptr;
@@ -1172,11 +1472,21 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
     if (!optval || !optlen || *optlen < sizeof(int)) return -EINVAL;
     if (level != SOL_SOCKET) return -ENOPROTOOPT;
 
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     if (optname == SO_PEERCRED) {
-        if (*optlen < sizeof(credentials)) return -EINVAL;
+        if (*optlen < sizeof(credentials)) {
+            spin_unlock(&socket_table_lock);
+            return -EINVAL;
+        }
         credentials.pid = sock->peer_pid;
         credentials.uid = sock->peer_uid;
         credentials.gid = sock->peer_gid;
+        spin_unlock(&socket_table_lock);
         memcpy(optval, &credentials, sizeof(credentials));
         *optlen = sizeof(credentials);
         return 0;
@@ -1210,9 +1520,11 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
             value = sock->so_rcvbuf;
             break;
         default:
+            spin_unlock(&socket_table_lock);
             return -ENOPROTOOPT;
     }
 
+    spin_unlock(&socket_table_lock);
     *optval = value;
     *optlen = sizeof(int);
     return 0;
@@ -1223,9 +1535,8 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
     int level;
     int value;
     int *optval;
-    socket_t *sock = get_socket(sockfd);
+    socket_t *sock;
     (void)unused;
-    if (!sock) return -EBADF;
     
     level = (int)(uintptr_t)level_ptr;
     if (level != SOL_SOCKET) return -ENOPROTOOPT;
@@ -1234,6 +1545,12 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
     if (!optval) return -EINVAL;
     value = *optval;
 
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     switch (optname) {
         case SO_REUSEADDR:
             sock->so_reuseaddr = value ? 1 : 0;
@@ -1248,17 +1565,27 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
             sock->so_broadcast = value ? 1 : 0;
             break;
         case SO_SNDBUF:
-            if (value <= 0) return -EINVAL;
+            if (value <= 0) {
+                spin_unlock(&socket_table_lock);
+                return -EINVAL;
+            }
             sock->so_sndbuf = value;
             break;
         case SO_RCVBUF:
-            if (value <= 0) return -EINVAL;
+            if (value <= 0) {
+                spin_unlock(&socket_table_lock);
+                return -EINVAL;
+            }
+            socket_recv_lock(sock);
             sock->so_rcvbuf = value;
+            socket_recv_unlock(sock);
             break;
         default:
+            spin_unlock(&socket_table_lock);
             return -ENOPROTOOPT;
     }
 
+    spin_unlock(&socket_table_lock);
     return 0;
 }
 
@@ -1271,8 +1598,12 @@ static int sys_getsockname(int sockfd, const char *addr_ptr,
     socklen_t pathlen;
     socklen_t *addrlen;
 
+    spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     
     if (sock->domain == AF_UNIX) {
         uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
@@ -1286,8 +1617,10 @@ static int sys_getsockname(int sockfd, const char *addr_ptr,
                         *addrlen - sizeof(uint16_t));
             }
             *addrlen = sizeof(uint16_t) + pathlen + 1;
+            spin_unlock(&socket_table_lock);
             return 0;
         }
+        spin_unlock(&socket_table_lock);
         return -EINVAL;
     }
     
@@ -1299,9 +1632,11 @@ static int sys_getsockname(int sockfd, const char *addr_ptr,
         addr->sin_port = htons(sock->local_port);
         addr->sin_addr.s_addr = sock->local_addr;
         *addrlen = sizeof(struct sockaddr_in);
+        spin_unlock(&socket_table_lock);
         return 0;
     }
     
+    spin_unlock(&socket_table_lock);
     return -EINVAL;
 }
 
@@ -1312,10 +1647,15 @@ static int sys_getpeername(int sockfd, const char *addr_ptr,
     socket_t *sock;
     socklen_t *addrlen;
 
+    spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     
     if (sock->state != SOCKSTATE_CONNECTED) {
+        spin_unlock(&socket_table_lock);
         return -ENOTCONN;
     }
     
@@ -1326,8 +1666,10 @@ static int sys_getpeername(int sockfd, const char *addr_ptr,
             uaddr->sun_family = AF_UNIX;
             memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
             *addrlen = sizeof(uint16_t);
+            spin_unlock(&socket_table_lock);
             return 0;
         }
+        spin_unlock(&socket_table_lock);
         return -EINVAL;
     }
     
@@ -1339,9 +1681,11 @@ static int sys_getpeername(int sockfd, const char *addr_ptr,
         addr->sin_port = htons(sock->remote_port);
         addr->sin_addr.s_addr = sock->remote_addr;
         *addrlen = sizeof(struct sockaddr_in);
+        spin_unlock(&socket_table_lock);
         return 0;
     }
     
+    spin_unlock(&socket_table_lock);
     return -EINVAL;
 }
 
@@ -1354,19 +1698,58 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
     struct sockaddr_in destination;
     uint32_t destination_addr;
     uint16_t destination_port;
+    int domain;
+    int type;
+    int state;
+    uint32_t remote_addr;
+    uint16_t remote_port;
+    tcp_socket_t *tcp;
+    udp_socket_t *udp;
 
-    sock = get_socket(sockfd);
     (void)flags;
-    if (!sock) return -EBADF;
     if (len < 0) return -EINVAL;
-    
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED) {
+        spin_unlock(&socket_table_lock);
         return -ENOTCONN;
     }
-    
     buf = (const void *)(uintptr_t)buf_ptr;
+    if (sock->domain == AF_UNIX) {
+        if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+            peer = &sockets[sock->peer_socket];
+            if (peer->in_use) {
+                ret = recv_buf_write(peer, buf, len);
+                spin_unlock(&socket_table_lock);
+                if (ret > 0) descriptor_ready_notify();
+                return ret;
+            }
+        }
+        spin_unlock(&socket_table_lock);
+        return -EOPNOTSUPP;
+    }
+    domain = sock->domain;
+    type = sock->type;
+    state = sock->state;
+    remote_addr = sock->remote_addr;
+    remote_port = sock->remote_port;
+    if (domain == AF_INET && type == SOCK_DGRAM && !sock->udp) {
+        sock->udp = udp_socket_create(sock->local_port);
+        if (!sock->udp) {
+            spin_unlock(&socket_table_lock);
+            return -EADDRINUSE;
+        }
+        sock->local_port = sock->udp->local_port;
+    }
+    tcp = sock->tcp;
+    udp = sock->udp;
+    spin_unlock(&socket_table_lock);
 
-    if (sock->domain == AF_INET && sock->type == SOCK_DGRAM) {
+    if (domain == AF_INET && type == SOCK_DGRAM) {
         if (dest_addr_ptr) {
             if (addrlen < (int)sizeof(destination) ||
                 copy_from_user(&destination,
@@ -1377,33 +1760,21 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
             destination_addr = destination.sin_addr.s_addr;
             destination_port = ntohs(destination.sin_port);
         } else {
-            if (sock->state != SOCKSTATE_CONNECTED) return -EDESTADDRREQ;
-            destination_addr = (uint32_t)sock->remote_addr;
-            destination_port = sock->remote_port;
+            if (state != SOCKSTATE_CONNECTED) return -EDESTADDRREQ;
+            destination_addr = remote_addr;
+            destination_port = remote_port;
         }
-        if (!sock->udp) {
-            sock->udp = udp_socket_create(sock->local_port);
-            if (!sock->udp) return -EADDRINUSE;
-            sock->local_port = sock->udp->local_port;
-        }
-        ret = udp_socket_send(sock->udp,
+        ret = udp_socket_send(udp,
                               socket_ipv4_from_addr(destination_addr),
                               destination_port, (uint8_t *)buf,
                               (uint64_t)len);
         return ret < 0 ? -EIO : len;
     }
 
-    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
-        ret = tcp_send(sock->tcp, (uint8_t *)buf, (uint64_t)len);
+    if (domain == AF_INET && type == SOCK_STREAM && tcp) {
+        ret = tcp_send(tcp, (uint8_t *)buf, (uint64_t)len);
         if (ret < 0) return -EIO;
         return ret;
-    }
-    
-    if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
-        peer = &sockets[sock->peer_socket];
-        if (peer->in_use) {
-            return recv_buf_write(peer, buf, len);
-        }
     }
     
     return -EOPNOTSUPP;
@@ -1419,8 +1790,7 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     int iov_index;
     int rights_result;
 
-    sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!is_socket_fd(sockfd)) return -EBADF;
     if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
         return -EFAULT;
     if (msg.msg_iovlen < 0) return -EINVAL;
@@ -1439,7 +1809,14 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
         if (copy_from_user(&cmsg, msg.msg_control, sizeof(cmsg)) < 0)
             return -EFAULT;
         if (cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS) {
+            spin_lock(&socket_table_lock);
+            sock = get_socket(sockfd);
+            if (!sock) {
+                spin_unlock(&socket_table_lock);
+                return -EBADF;
+            }
             rights_result = socket_send_rights(sock, &msg, &cmsg);
+            spin_unlock(&socket_table_lock);
             if (rights_result < 0) return rights_result;
         }
     }
@@ -1474,29 +1851,51 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
     uint16_t source_port;
     struct sockaddr_in source;
     socklen_t source_length;
+    int domain;
+    int type;
+    int nonblocking;
+    long timeout_sec;
+    long timeout_usec;
+    tcp_socket_t *tcp;
+    udp_socket_t *udp;
 
-    sock = get_socket(sockfd);
     (void)src_addr_ptr;
     (void)addrlen_ptr;
-    if (!sock) return -EBADF;
     if (len < 0) return -EINVAL;
     
     buf = (void *)(uintptr_t)buf_ptr;
-
-    if (sock->domain == AF_INET && sock->type == SOCK_DGRAM) {
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    domain = sock->domain;
+    type = sock->type;
+    nonblocking = sock->nonblocking;
+    timeout_sec = sock->so_rcvtimeo.tv_sec;
+    timeout_usec = sock->so_rcvtimeo.tv_usec;
+    if (domain == AF_INET && type == SOCK_DGRAM && !sock->udp) {
+        sock->udp = udp_socket_create(sock->local_port);
         if (!sock->udp) {
-            sock->udp = udp_socket_create(sock->local_port);
-            if (!sock->udp) return -EADDRINUSE;
-            sock->local_port = sock->udp->local_port;
+            spin_unlock(&socket_table_lock);
+            return -EADDRINUSE;
         }
-        if (sock->nonblocking || (flags & MSG_DONTWAIT))
+        sock->local_port = sock->udp->local_port;
+    }
+    tcp = sock->tcp;
+    udp = sock->udp;
+    spin_unlock(&socket_table_lock);
+
+    if (domain == AF_INET && type == SOCK_DGRAM) {
+        if (nonblocking || (flags & MSG_DONTWAIT))
             timeout_ms = 0;
-        else if (sock->so_rcvtimeo.tv_sec || sock->so_rcvtimeo.tv_usec)
-            timeout_ms = (uint64_t)sock->so_rcvtimeo.tv_sec * 1000 +
-                         (uint64_t)sock->so_rcvtimeo.tv_usec / 1000;
+        else if (timeout_sec || timeout_usec)
+            timeout_ms = (uint64_t)timeout_sec * 1000 +
+                         (uint64_t)timeout_usec / 1000;
         else
             timeout_ms = UINT64_MAX;
-        ret = udp_socket_recv(sock->udp, (uint8_t *)buf, (uint64_t)len,
+        ret = udp_socket_recv(udp, (uint8_t *)buf, (uint64_t)len,
                               &source_ip, &source_port, timeout_ms);
         if (ret < 0)
             return timeout_ms == 0 ? -EAGAIN : -ETIMEDOUT;
@@ -1522,17 +1921,20 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
         return ret;
     }
 
-    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
-        timeout_ms = (sock->nonblocking || (flags & MSG_DONTWAIT)) ? 0 : 15000;
-        ret = tcp_recv(sock->tcp, (uint8_t *)buf, (uint64_t)len, timeout_ms);
+    if (domain == AF_INET && type == SOCK_STREAM && tcp) {
+        timeout_ms = (nonblocking || (flags & MSG_DONTWAIT)) ? 0 : 15000;
+        ret = tcp_recv(tcp, (uint8_t *)buf, (uint64_t)len, timeout_ms);
         if (ret < 0) return -EIO;
-        if (ret == 0 && (sock->nonblocking || (flags & MSG_DONTWAIT))) return -EAGAIN;
+        if (ret == 0 && (nonblocking || (flags & MSG_DONTWAIT))) return -EAGAIN;
         return ret;
     }
     
     wait_result = socket_wait_for_data(&sock, sockfd, flags);
     if (wait_result <= 0) return wait_result;
-    return (int)recv_buf_read(sock, buf, len, flags & MSG_PEEK);
+    ret = (int)recv_buf_read(sock, buf, len, flags & MSG_PEEK);
+    spin_unlock(&socket_table_lock);
+    if (ret > 0 && !(flags & MSG_PEEK)) descriptor_ready_notify();
+    return ret;
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -1551,8 +1953,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     uint8_t *control_data;
     size_t needed_size;
 
-    sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!is_socket_fd(sockfd)) return -EBADF;
     if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
         return -EFAULT;
     if (msg.msg_iovlen < 0) return -EINVAL;
@@ -1568,6 +1969,12 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     (void)flags;
     msg.msg_flags = 0;
 
+    spin_lock(&socket_table_lock);
+    sock = get_socket(sockfd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     if (sock->pending_fd_count > 0) {
         nfds = sock->pending_fd_count;
         out_fds = NULL;
@@ -1577,10 +1984,15 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
                  (socklen_t)needed_size : 0;
         if (msg.msg_control && needed_size <= 0xFFFFFFFFUL &&
             needed <= msg.msg_controllen) {
-            if (!user_access_ok(msg.msg_control, needed, UACCESS_WRITE))
+            if (!user_access_ok(msg.msg_control, needed, UACCESS_WRITE)) {
+                spin_unlock(&socket_table_lock);
                 return -EFAULT;
+            }
             out_fds = (int *)kmalloc((size_t)nfds * sizeof(int));
-            if (!out_fds) return -ENOMEM;
+            if (!out_fds) {
+                spin_unlock(&socket_table_lock);
+                return -ENOMEM;
+            }
             memset(&cmsg, 0, sizeof(cmsg));
             cmsg.cmsg_len = needed;
             cmsg.cmsg_level = SOL_SOCKET;
@@ -1603,6 +2015,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
                 copy_to_user(control_data, out_fds,
                              (size_t)nfds * sizeof(int)) < 0) {
                 kfree(out_fds);
+                spin_unlock(&socket_table_lock);
                 return -EFAULT;
             }
             kfree(out_fds);
@@ -1625,6 +2038,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     } else {
         msg.msg_controllen = 0;
     }
+    spin_unlock(&socket_table_lock);
 
     total = 0;
     for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
@@ -1652,14 +2066,20 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
     int how;
     socket_t *sock;
     socket_t *peer;
+    tcp_socket_t *tcp;
 
     (void)unused;
+    spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
-    if (!sock) return -EBADF;
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
     
     how = (int)(uintptr_t)how_ptr;
     
     if (sock->state != SOCKSTATE_CONNECTED) {
+        spin_unlock(&socket_table_lock);
         return -ENOTCONN;
     }
     
@@ -1674,40 +2094,55 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
             sock->state = SOCKSTATE_SHUTDOWN_RDWR;
             break;
         default:
+            spin_unlock(&socket_table_lock);
             return -EINVAL;
     }
-
-    descriptor_ready_notify();
 
     if ((how == SHUT_WR || how == SHUT_RDWR) &&
         sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         peer = &sockets[sock->peer_socket];
         if (peer->in_use) {
             peer->peer_write_closed = 1;
-            if (peer->waitq) waitq_wake_all(peer->waitq);
         }
     }
-
-    if (sock->tcp && (how == SHUT_WR || how == SHUT_RDWR)) {
-        tcp_disconnect(sock->tcp, 1000);
-    }
-    
+    tcp = sock->tcp;
+    spin_unlock(&socket_table_lock);
+    descriptor_ready_notify();
+    if (tcp && (how == SHUT_WR || how == SHUT_RDWR))
+        tcp_disconnect(tcp, 1000);
     return 0;
 }
 
 int socket_poll_events(int fd) {
     int events;
+    int readable;
+    int writable;
     socket_t *sock;
     socket_t *peer;
 
+    spin_lock(&socket_table_lock);
     sock = get_socket(fd);
-    if (!sock) return 0;
-
-    if (sock->domain == AF_INET) netif_poll_all();
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return 0;
+    }
+    if (sock->domain == AF_INET) {
+        spin_unlock(&socket_table_lock);
+        netif_poll_all();
+        spin_lock(&socket_table_lock);
+        sock = get_socket(fd);
+        if (!sock) {
+            spin_unlock(&socket_table_lock);
+            return 0;
+        }
+    }
     
     events = 0;
-    
-    if (recv_buf_used(sock) > 0) {
+
+    socket_recv_lock(sock);
+    readable = recv_buf_used(sock) > 0;
+    socket_recv_unlock(sock);
+    if (readable) {
         events |= 0x01;
     }
 
@@ -1720,7 +2155,13 @@ int socket_poll_events(int fd) {
         events |= 0x04;
     } else if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
         peer = &sockets[sock->peer_socket];
-        if (peer->in_use && recv_buf_free(peer) > 0) events |= 0x04;
+        writable = 0;
+        if (peer->in_use) {
+            socket_recv_lock(peer);
+            writable = recv_buf_free(peer) > 0;
+            socket_recv_unlock(peer);
+        }
+        if (writable) events |= 0x04;
     }
     
     if (sock->state == SOCKSTATE_LISTENING && sock->backlog_count > 0) {
@@ -1737,12 +2178,17 @@ int socket_poll_events(int fd) {
     if (sock->domain == AF_UNIX && sock->state == SOCKSTATE_CONNECTED &&
         (sock->peer_socket < 0 || sock->peer_write_closed))
         events |= 0x11;
-    
+    spin_unlock(&socket_table_lock);
     return events;
 }
 
 int is_socket_fd(int fd) {
-    return get_socket(fd) != NULL;
+    int result;
+
+    spin_lock(&socket_table_lock);
+    result = get_socket(fd) != NULL;
+    spin_unlock(&socket_table_lock);
+    return result;
 }
 
 int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
@@ -1750,23 +2196,41 @@ int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
     uint64_t available;
     int value;
 
-    sock = get_socket(fd);
-    if (!sock) return -EBADF;
     if (!arg) return -EFAULT;
     if (request == FIONBIO) {
         if (copy_from_user(&value, (const void *)(uintptr_t)arg,
                            sizeof(value)) < 0)
             return -EFAULT;
+        spin_lock(&socket_table_lock);
+        sock = get_socket(fd);
+        if (!sock) {
+            spin_unlock(&socket_table_lock);
+            return -EBADF;
+        }
         sock->nonblocking = value ? 1 : 0;
+        if (value)
+            current_task->fds[fd].flags |= 0x800;
+        else
+            current_task->fds[fd].flags &= ~0x800UL;
+        spin_unlock(&socket_table_lock);
         return 0;
     }
     if (request != FIONREAD) return -ENOTTY;
+    spin_lock(&socket_table_lock);
+    sock = get_socket(fd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    socket_recv_lock(sock);
     available = recv_buf_used(sock);
+    socket_recv_unlock(sock);
     if (sock->tcp)
         available = sock->tcp->recv_buffer_tail -
                     sock->tcp->recv_buffer_head;
     else if (sock->udp && sock->udp->has_data)
         available = sock->udp->recv_len;
+    spin_unlock(&socket_table_lock);
     if (available > INT32_MAX) available = INT32_MAX;
     value = (int)available;
     if (copy_to_user((void *)(uintptr_t)arg, &value, sizeof(value)) < 0)
@@ -1778,77 +2242,124 @@ int socket_write(int fd, const void *buf, int len) {
     int ret;
     socket_t *sock;
     socket_t *peer;
+    tcp_socket_t *tcp;
+    int inet_stream;
 
+    spin_lock(&socket_table_lock);
     sock = get_socket(fd);
-    if (!sock) return -EBADF;
-    if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED)
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    if (sock->type == SOCK_STREAM && sock->state != SOCKSTATE_CONNECTED) {
+        spin_unlock(&socket_table_lock);
         return -ENOTCONN;
-    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
-        ret = tcp_send(sock->tcp, (uint8_t *)buf, (uint64_t)len);
+    }
+    if (sock->domain == AF_UNIX) {
+        if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+            peer = &sockets[sock->peer_socket];
+            if (peer->in_use) {
+                ret = recv_buf_write(peer, buf, len);
+                if (ret == 0 && len > 0 && sock->nonblocking)
+                    ret = -EAGAIN;
+                spin_unlock(&socket_table_lock);
+                if (ret > 0) descriptor_ready_notify();
+                return ret;
+            }
+        }
+        spin_unlock(&socket_table_lock);
+        return -EOPNOTSUPP;
+    }
+    tcp = sock->tcp;
+    inet_stream = sock->domain == AF_INET && sock->type == SOCK_STREAM && tcp;
+    spin_unlock(&socket_table_lock);
+    if (inet_stream) {
+        ret = tcp_send(tcp, (uint8_t *)buf, (uint64_t)len);
         if (ret < 0) return -EIO;
         return ret;
-    }
-    if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
-        peer = &sockets[sock->peer_socket];
-        if (peer->in_use) {
-            ret = recv_buf_write(peer, buf, len);
-            if (ret == 0 && len > 0 && sock->nonblocking)
-                return -EAGAIN;
-            return ret;
-        }
     }
     return -EOPNOTSUPP;
 }
 
 int socket_read(int fd, void *buf, int len) {
-    socket_t *sock = get_socket(fd);
+    socket_t *sock;
+    tcp_socket_t *tcp;
     int ret;
     int wait_result;
-    if (!sock) return -EBADF;
-    if (sock->domain == AF_INET && sock->type == SOCK_STREAM && sock->tcp) {
-        ret = tcp_recv(sock->tcp, (uint8_t *)buf, (uint64_t)len,
-                       sock->nonblocking ? 0 : 15000);
+    int nonblocking;
+    int inet_stream;
+
+    spin_lock(&socket_table_lock);
+    sock = get_socket(fd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    tcp = sock->tcp;
+    nonblocking = sock->nonblocking;
+    inet_stream = sock->domain == AF_INET && sock->type == SOCK_STREAM && tcp;
+    spin_unlock(&socket_table_lock);
+    if (inet_stream) {
+        ret = tcp_recv(tcp, (uint8_t *)buf, (uint64_t)len,
+                       nonblocking ? 0 : 15000);
         if (ret < 0) return -EIO;
-        if (ret == 0 && sock->nonblocking) return -EAGAIN;
+        if (ret == 0 && nonblocking) return -EAGAIN;
         return ret;
     }
     wait_result = socket_wait_for_data(&sock, fd, 0);
     if (wait_result <= 0) return wait_result;
-    return recv_buf_read(sock, buf, len, 0);
+    ret = (int)recv_buf_read(sock, buf, len, 0);
+    spin_unlock(&socket_table_lock);
+    if (ret > 0) descriptor_ready_notify();
+    return ret;
 }
 
 int socket_close_fd(int fd) {
     int idx;
+    int result;
 
-    idx = fd - socket_base_fd;
-    if (idx < 0 || idx >= socket_capacity) return -EBADF;
-    if (!sockets[idx].in_use) return -EBADF;
-    if (!current_task || sockets[idx].owner_pid != current_task->pid)
-        return -EBADF;
-    free_socket(idx, 1);
-    socket_reclaim_storage();
-    return 0;
+    result = 0;
+    spin_lock(&socket_table_lock);
+    idx = socket_fd_index(current_task, fd);
+    if (idx < 0 || idx >= socket_capacity) result = -EBADF;
+    else if (!sockets[idx].in_use) result = -EBADF;
+    else {
+        memset(&current_task->fds[fd], 0, sizeof(task_fd_t));
+        socket_release_index(idx, 1);
+        socket_reclaim_storage();
+    }
+    spin_unlock(&socket_table_lock);
+    if (result == 0) {
+        task_fd_reclaim_unused(current_task);
+        descriptor_ready_notify();
+    }
+    return result;
 }
 
 void socket_close_range(unsigned int first, unsigned int last, int cloexec) {
     unsigned int fd;
+    int idx;
     int i;
 
     if (!current_task) return;
-    for (i = socket_capacity - 1; i >= 0; i--) {
-        if (!sockets[i].in_use ||
-            sockets[i].owner_pid != current_task->pid)
+    spin_lock(&socket_table_lock);
+    for (i = current_task->fds_capacity - 1; i >= 0; i--) {
+        if (!current_task->fds[i].in_use ||
+            current_task->fds[i].type != FD_TYPE_SOCKET)
             continue;
-        fd = (unsigned int)(socket_base_fd + i);
+        fd = (unsigned int)i;
         if (fd < first || fd > last) continue;
         if (cloexec) {
-            if (!sockets[i].cloexec) socket_cloexec_count++;
-            sockets[i].cloexec = 1;
+            current_task->fds[i].flags |= 1;
         } else {
-            free_socket(i, 1);
+            idx = socket_fd_index(current_task, i);
+            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
+            socket_release_index(idx, 1);
         }
     }
     if (!cloexec) socket_reclaim_storage();
+    spin_unlock(&socket_table_lock);
+    if (!cloexec) descriptor_ready_notify();
 }
 
 #define SOCKET_F_DUPFD       0
@@ -1856,33 +2367,60 @@ void socket_close_range(unsigned int first, unsigned int last, int cloexec) {
 #define SOCKET_F_SETFD       2
 #define SOCKET_F_GETFL       3
 #define SOCKET_F_SETFL       4
+#define SOCKET_F_DUPFD_CLOEXEC 1030
 
 int socket_fcntl(int fd, int cmd, int arg) {
-    socket_t *sock = get_socket(fd);
-    if (!sock) return -EBADF;
+    socket_t *sock;
+    task_fd_t *descriptor;
+    int idx;
+    int result;
+
+    spin_lock(&socket_table_lock);
+    sock = get_socket(fd);
+    if (!sock) {
+        spin_unlock(&socket_table_lock);
+        return -EBADF;
+    }
+    descriptor = &current_task->fds[fd];
+    idx = socket_fd_index(current_task, fd);
+    result = 0;
     switch (cmd) {
+        case SOCKET_F_DUPFD:
+            result = socket_fd_alloc_from(idx, descriptor->flags & ~1UL,
+                                          arg);
+            break;
+        case SOCKET_F_DUPFD_CLOEXEC:
+            result = socket_fd_alloc_from(idx, descriptor->flags | 1, arg);
+            break;
         case SOCKET_F_GETFD:
-            return sock->cloexec ? 1 : 0;
+            result = descriptor->flags & 1 ? 1 : 0;
+            break;
         case SOCKET_F_SETFD:
-            if (!sock->cloexec && (arg & 1)) socket_cloexec_count++;
-            if (sock->cloexec && !(arg & 1) && socket_cloexec_count > 0)
-                socket_cloexec_count--;
-            sock->cloexec = (arg & 1) ? 1 : 0;
-            return 0;
+            if (arg & 1)
+                descriptor->flags |= 1;
+            else
+                descriptor->flags &= ~1UL;
+            break;
         case SOCKET_F_GETFL:
-            return sock->nonblocking ? 0x800 : 0;
+            result = sock->nonblocking ? 0x800 : 0;
+            break;
         case SOCKET_F_SETFL:
             sock->nonblocking = (arg & 0x800) ? 1 : 0;
-            return 0;
+            descriptor->flags = (descriptor->flags & 1) |
+                                ((uint64_t)arg & ~1UL);
+            break;
         default:
-            return -EINVAL;
+            result = -EINVAL;
+            break;
     }
+    spin_unlock(&socket_table_lock);
+    return result;
 }
 
 void syscalls_socket_init(void) {
     sockets = NULL;
     socket_capacity = 0;
-    socket_cloexec_count = 0;
+    spinlock_init(&socket_table_lock);
     
     syscall_table_set(SYSCALL_SOCKET, (void *)(sys_socket));
     syscall_table_set(SYSCALL_SOCKETPAIR, (void *)(sys_socketpair));

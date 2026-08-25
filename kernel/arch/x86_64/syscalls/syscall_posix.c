@@ -14,6 +14,8 @@
 
 extern int is_socket_fd(int fd);
 extern int socket_fcntl(int fd, int cmd, int arg);
+extern void socket_retain_task_fd(task_fd_t *descriptor);
+extern void socket_release_task_fd(task_fd_t *descriptor);
 extern int syscall_core_read_for_readv(int fd, char *buf, int len);
 void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
                                      int release_flock);
@@ -425,17 +427,29 @@ static void fd_release_entry(task_fd_t *tfd) {
     pipe_t *pipe_to_release;
     int release_flock;
     int i;
+    int pty_endpoint;
+    int pty_type;
 
     if (!tfd || !tfd->in_use) return;
+
+    if (tfd->type == FD_TYPE_SOCKET) {
+        socket_release_task_fd(tfd);
+        return;
+    }
 
     node_to_close = NULL;
     pipe_to_release = NULL;
     pipe_type = 0;
     release_flock = 1;
+    pty_endpoint = -1;
+    pty_type = 0;
 
     if (FD_TYPE_IS_PIPE(tfd->type)) {
         pipe_to_release = (pipe_t *)tfd->private_data;
         pipe_type = tfd->type;
+    } else if (FD_TYPE_IS_PTY(tfd->type)) {
+        pty_endpoint = (int)(uintptr_t)tfd->private_data;
+        pty_type = tfd->type;
     } else if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node_to_close = (vfs_node_t *)tfd->node;
         if (current_task && tfd->ref_count > 1) {
@@ -467,6 +481,12 @@ static void fd_release_entry(task_fd_t *tfd) {
     if (node_to_close) {
         vfs_close(node_to_close);
     }
+    if (pty_endpoint >= 0) {
+        if (pty_type == FD_TYPE_PTY_MASTER)
+            pty_close_master(pty_endpoint);
+        else
+            pty_close_slave(pty_endpoint);
+    }
 }
 
 static void fd_retain_entry(task_fd_t *tfd) {
@@ -474,6 +494,14 @@ static void fd_retain_entry(task_fd_t *tfd) {
     vfs_node_t *node;
 
     if (!tfd || !tfd->in_use) return;
+    if (tfd->type == FD_TYPE_SOCKET) {
+        socket_retain_task_fd(tfd);
+        return;
+    }
+    if (FD_TYPE_IS_PTY(tfd->type)) {
+        pty_retain_endpoint((int)(uintptr_t)tfd->private_data);
+        return;
+    }
     if (tfd->type == FD_TYPE_FILE && tfd->node) {
         node = (vfs_node_t *)tfd->node;
         vfs_open(node, 0);
@@ -897,15 +925,21 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             return 0;
         }
         
-        if (fd_table[fd].private_data) {
+        if (FD_TYPE_IS_PTY(fd_table[fd].type)) {
             pty_fd = (int)(uintptr_t)fd_table[fd].private_data;
-            if (is_pty_master(pty_fd) || is_pty_slave(pty_fd)) {
-                st->st_mode = S_IFCHR | 0620;
-                st->st_rdev = 0x8801;
-                st->st_blksize = 1024;
-                st->st_nlink = 1;
-                return 0;
-            }
+            if (pty_fd < 0) return -EBADF;
+            st->st_mode = S_IFCHR | 0620;
+            st->st_rdev = 0x8801;
+            st->st_blksize = 1024;
+            st->st_nlink = 1;
+            return 0;
+        }
+
+        if (fd_table[fd].type == FD_TYPE_SOCKET) {
+            st->st_mode = S_IFSOCK | 0600;
+            st->st_blksize = 4096;
+            st->st_nlink = 1;
+            return 0;
         }
         
         node = (vfs_node_t *)fd_table[fd].node;
@@ -959,6 +993,7 @@ static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
+    if (FD_TYPE_IS_PTY(tfd->type)) return -ESPIPE;
     if (FD_TYPE_IS_PIPE(tfd->type)) return -ESPIPE;
     if (tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT || tfd->type == FD_TYPE_STDERR) return -ESPIPE;
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;

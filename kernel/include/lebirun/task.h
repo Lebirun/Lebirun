@@ -23,6 +23,12 @@ struct cpu_info;
 #define FD_TYPE_STDOUT 4
 #define FD_TYPE_STDERR 5
 #define FD_TYPE_PIPE_RW 6
+#define FD_TYPE_PTY_MASTER 7
+#define FD_TYPE_PTY_SLAVE 8
+#define FD_TYPE_SOCKET 9
+
+#define FD_TYPE_IS_PTY(type) ((type) == FD_TYPE_PTY_MASTER || \
+                              (type) == FD_TYPE_PTY_SLAVE)
 
 #define FD_TYPE_IS_PIPE(type) ((type) == FD_TYPE_PIPE_R || \
                                (type) == FD_TYPE_PIPE_W || \
@@ -263,6 +269,7 @@ void task_exit(uint64_t exit_code);
 void task_exit_deferred(uint64_t exit_code);
 void sleep_ms(uint64_t ms);
 int task_join(task_t* task, uint64_t* exit_code);
+int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code);
 
 void waitq_init(wait_queue_t* q);
 void waitq_add(wait_queue_t* q, task_t* t);

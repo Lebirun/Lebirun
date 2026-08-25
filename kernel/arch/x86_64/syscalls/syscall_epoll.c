@@ -1102,11 +1102,17 @@ int event_descriptor_poll(int fd) {
     uint64_t pending;
     task_fd_t *descriptor;
     vfs_node_t *node;
+    int pty_endpoint;
 
     descriptor = NULL;
     if (current_task && current_task->fds && fd >= 0 &&
         fd < current_task->fds_capacity && current_task->fds[fd].in_use)
         descriptor = &current_task->fds[fd];
+    if (descriptor && FD_TYPE_IS_PTY(descriptor->type)) {
+        pty_endpoint = (int)(uintptr_t)descriptor->private_data;
+        events = pty_poll_events(pty_endpoint);
+        if (events >= 0) return events;
+    }
     if (descriptor && descriptor->type == FD_TYPE_FILE && descriptor->node) {
         node = (vfs_node_t *)descriptor->node;
         if (strcmp(vfs_node_name(node), "event0") == 0 ||

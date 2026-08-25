@@ -535,6 +535,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     task_fd_t *tfd;
     vfs_node_t *node;
     pipe_t *p;
+    int pty_endpoint;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -554,6 +555,16 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
 
     if (console_output) {
         return syscall_core_console_write_user(buf, len);
+    }
+
+    pty_endpoint = tfd && FD_TYPE_IS_PTY(tfd->type) ?
+        pty_task_endpoint(fd) : -1;
+    if (pty_endpoint >= 0) {
+        if (tfd->type == FD_TYPE_PTY_MASTER)
+            result = (int)pty_master_write(pty_endpoint, buf, (size_t)len);
+        else
+            result = (int)pty_slave_write(pty_endpoint, buf, (size_t)len);
+        return result;
     }
 
     if (tfd && tfd->type == FD_TYPE_FILE && tfd->node) {
@@ -645,14 +656,16 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         return -EIO;
                     }
                     while (p->count == p->buf_size) {
-                        pipe_unlock_irqrestore(p, pipe_flags);
                         if (tfd->flags & VFS_O_NONBLOCK) {
+                            pipe_unlock_irqrestore(p, pipe_flags);
                             if (heap_buf) kfree(kbuf);
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EAGAIN;
                         }
                         waitq_add(&p->write_waitq, current_task);
-                        block_current();
+                        current_task->state = TASK_BLOCKED;
+                        pipe_unlock_irqrestore(p, pipe_flags);
+                        schedule();
                         if (syscall_core_interrupted()) {
                             if (heap_buf) kfree(kbuf);
                             if (total > 0) return (int)total;
@@ -752,6 +765,8 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     vfs_node_t *node;
     pipe_t *p;
     uint64_t pipe_flags;
+    uint64_t generation;
+    int pty_endpoint;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -767,6 +782,24 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     if (current_task && current_task->fds && fd >= 0 &&
         fd < current_task->fds_capacity && current_task->fds[fd].in_use) {
         tfd = &current_task->fds[fd];
+        pty_endpoint = FD_TYPE_IS_PTY(tfd->type) ?
+            pty_task_endpoint(fd) : -1;
+        if (pty_endpoint >= 0) {
+            for (;;) {
+                generation = descriptor_ready_generation();
+                if (tfd->type == FD_TYPE_PTY_MASTER)
+                    result = (int)pty_master_read(pty_endpoint, buf,
+                                                  (size_t)len);
+                else
+                    result = (int)pty_slave_read(pty_endpoint, buf,
+                                                 (size_t)len);
+                if (result != -EAGAIN) return result;
+                if (tfd->flags & VFS_O_NONBLOCK) return -EAGAIN;
+                if (syscall_core_interrupted()) return -EINTR;
+                descriptor_ready_wait(generation, UINT64_MAX);
+                if (syscall_core_interrupted()) return -EINTR;
+            }
+        }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
             if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
@@ -836,9 +869,10 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                     if (heap_buf) kfree(kbuf);
                     return -EAGAIN;
                 }
-                pipe_unlock_irqrestore(p, pipe_flags);
                 waitq_add(&p->read_waitq, current_task);
-                block_current();
+                current_task->state = TASK_BLOCKED;
+                pipe_unlock_irqrestore(p, pipe_flags);
+                schedule();
                 if (syscall_core_interrupted()) {
                     if (heap_buf) kfree(kbuf);
                     return -EINTR;
@@ -1331,15 +1365,22 @@ static int vfs_name_is(const char name[VFS_MAX_NAME], const char *lit) {
 
 static int sys_isatty(int fd, const char *unused, int unused2) {
     int t;
+    int endpoint;
+    uint64_t a;
+    vfs_node_t *node;
+
     (void)unused; (void)unused2;
     if (!current_task) return 0;
     if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) return 0;
     t = current_task->fds[fd].type;
     if (t == FD_TYPE_STDIN || t == FD_TYPE_STDOUT || t == FD_TYPE_STDERR) return 1;
+    if (FD_TYPE_IS_PTY(t)) {
+        endpoint = pty_task_endpoint(fd);
+        return endpoint >= 0 ? 1 : 0;
+    }
     if (t == FD_TYPE_FILE && current_task->fds[fd].node) {
-        uint64_t a;
-        vfs_node_t *node = (vfs_node_t *)current_task->fds[fd].node;
+        node = (vfs_node_t *)current_task->fds[fd].node;
         a = (uint64_t)node;
         if ((a & 0xFFFF0000u) == 0xFEFE0000u) return 0;
         if (a >= KERNEL_VMA &&
@@ -1413,13 +1454,18 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
 }
 
 static int sys_lseek(int fd, const char *offset_ptr, int whence) {
-    int32_t offset = (int32_t)(uintptr_t)offset_ptr;
+    int32_t offset;
+    task_fd_t *tfd;
+    vfs_node_t *node;
+    int32_t new_off;
+
+    offset = (int32_t)(uintptr_t)offset_ptr;
     if (!current_task) return -ESRCH;
     if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity || !current_task->fds[fd].in_use) return -EBADF;
-    task_fd_t *tfd = &current_task->fds[fd];
+    tfd = &current_task->fds[fd];
+    if (FD_TYPE_IS_PTY(tfd->type)) return -ESPIPE;
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -ESPIPE;
-    vfs_node_t *node = (vfs_node_t *)tfd->node;
-    int32_t new_off;
+    node = (vfs_node_t *)tfd->node;
     if (whence == VFS_SEEK_SET) new_off = offset;
     else if (whence == VFS_SEEK_CUR) new_off = (int32_t)task_fd_position_get(tfd) + offset;
     else if (whence == VFS_SEEK_END) new_off = (int32_t)node->length + offset;

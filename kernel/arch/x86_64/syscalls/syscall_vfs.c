@@ -321,6 +321,11 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
 
     path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
+    if (pty_path_supported(path)) {
+        fd = pty_open_path(path, flags);
+        kfree(path);
+        return fd < 0 ? -ENODEV : fd;
+    }
     node = vfs_namei(path);
 
     if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
@@ -426,12 +431,13 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
         while (!(flags & VFS_O_NONBLOCK) &&
                ((pipe_type == FD_TYPE_PIPE_R && pipe->writers == 0) ||
                 (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0))) {
-            pipe_unlock_irqrestore(pipe, pipe_flags);
             if (pipe_type == FD_TYPE_PIPE_R)
                 waitq_add(&pipe->read_waitq, current_task);
             else
                 waitq_add(&pipe->write_waitq, current_task);
-            block_current();
+            current_task->state = TASK_BLOCKED;
+            pipe_unlock_irqrestore(pipe, pipe_flags);
+            schedule();
             if (task_has_pending_signals()) {
                 pipe_release_reference(pipe, pipe_type);
                 pipe_destroy_if_unused(pipe);
@@ -478,12 +484,12 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     int release_flock;
     int i;
     int lock_group;
+    int endpoint;
+    int pty_type;
 
     (void)unused1; (void)unused2;
     if (is_socket_fd(fd)) return socket_close_fd(fd);
     if (is_epoll_special_fd(fd)) return epoll_close_fd(fd);
-    if (is_pty_master(fd)) return pty_close_master(fd);
-    if (is_pty_slave(fd)) return pty_close_slave(fd);
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
     if (!current_task->fds[fd].in_use) return -EBADF;
@@ -492,7 +498,6 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     p = NULL;
     node = NULL;
     release_flock = 1;
-
     if (FD_TYPE_IS_PIPE(tfd->type)) {
         p = (pipe_t *)tfd->private_data;
         if (p) {
@@ -501,6 +506,18 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
             }
         }
         memset(tfd, 0, sizeof(*tfd));
+        task_fd_reclaim_unused(current_task);
+        return 0;
+    }
+
+    if (FD_TYPE_IS_PTY(tfd->type)) {
+        endpoint = (int)(uintptr_t)tfd->private_data;
+        pty_type = tfd->type;
+        memset(tfd, 0, sizeof(*tfd));
+        if (pty_type == FD_TYPE_PTY_MASTER)
+            pty_close_master(endpoint);
+        else
+            pty_close_slave(endpoint);
         task_fd_reclaim_unused(current_task);
         return 0;
     }
@@ -570,6 +587,9 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     uint8_t stack_buf[VFS_RW_STACK_BUF];
     uint8_t *kbuf;
     int heap_buf;
+    int result;
+    int pty_endpoint;
+    uint64_t generation;
     task_fd_t *tfd;
     vfs_node_t *node;
 
@@ -585,6 +605,26 @@ static int sys_vfs_read(int fd, const char *buf, int len) {
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
+    pty_endpoint = FD_TYPE_IS_PTY(tfd->type) ?
+        pty_task_endpoint(fd) : -1;
+    if (pty_endpoint >= 0) {
+        for (;;) {
+            generation = descriptor_ready_generation();
+            if (tfd->type == FD_TYPE_PTY_MASTER)
+                result = (int)pty_master_read(pty_endpoint,
+                                              (void *)(uintptr_t)buf_addr,
+                                              (size_t)len);
+            else
+                result = (int)pty_slave_read(pty_endpoint,
+                                             (void *)(uintptr_t)buf_addr,
+                                             (size_t)len);
+            if (result != -EAGAIN) return result;
+            if (tfd->flags & VFS_O_NONBLOCK) return -EAGAIN;
+            if (task_has_pending_signals()) return -EINTR;
+            descriptor_ready_wait(generation, UINT64_MAX);
+            if (task_has_pending_signals()) return -EINTR;
+        }
+    }
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
     if (tfd->flags & VFS_O_APPEND) {
@@ -766,6 +806,8 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     uint8_t stack_buf[VFS_RW_STACK_BUF];
     uint8_t *kbuf;
     int heap_buf;
+    int result;
+    int pty_endpoint;
     task_fd_t *tfd;
     vfs_node_t *node;
 
@@ -781,6 +823,19 @@ static int sys_vfs_write(int fd, const char *buf, int len) {
     if (!current_task->fds[fd].in_use) return -EBADF;
 
     tfd = &current_task->fds[fd];
+    pty_endpoint = FD_TYPE_IS_PTY(tfd->type) ?
+        pty_task_endpoint(fd) : -1;
+    if (pty_endpoint >= 0) {
+        if (tfd->type == FD_TYPE_PTY_MASTER)
+            result = (int)pty_master_write(pty_endpoint,
+                                           (const void *)(uintptr_t)buf_addr,
+                                           (size_t)len);
+        else
+            result = (int)pty_slave_write(pty_endpoint,
+                                          (const void *)(uintptr_t)buf_addr,
+                                          (size_t)len);
+        return result;
+    }
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;

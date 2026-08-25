@@ -1204,25 +1204,32 @@ static int sys_sched_rr_interval(int pid, const char *interval_ptr, int unused) 
 }
 
 static int sys_posix_openpt(int flags) {
-    (void)flags;
-    return pty_open_master();
+    return pty_open_path("/dev/ptmx", flags);
 }
 
 static int sys_grantpt(int fd) {
-    return pty_grant(fd) == 0 ? 0 : -EBADF;
+    int endpoint;
+
+    endpoint = pty_task_endpoint(fd);
+    return endpoint >= 0 && pty_grant(endpoint) == 0 ? 0 : -EBADF;
 }
 
 static int sys_unlockpt(int fd) {
-    return pty_unlock(fd) == 0 ? 0 : -EBADF;
+    int endpoint;
+
+    endpoint = pty_task_endpoint(fd);
+    return endpoint >= 0 && pty_unlock(endpoint) == 0 ? 0 : -EBADF;
 }
 
 static int sys_ptsname(int fd, char *buf, int buflen) {
     char *name;
     int i;
+    int endpoint;
 
     if (!buf || buflen <= 0) return -EINVAL;
     if ((uint64_t)buf < 0x1000 || (uint64_t)buf >= KERNEL_VMA) return -EFAULT;
-    name = pty_name(fd);
+    endpoint = pty_task_endpoint(fd);
+    name = endpoint >= 0 ? pty_name(endpoint) : NULL;
     if (!name) return -ENOTTY;
     for (i = 0; name[i] && i < buflen - 1; i++) {
         buf[i] = name[i];

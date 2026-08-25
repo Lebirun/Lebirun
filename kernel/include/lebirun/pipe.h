@@ -51,13 +51,15 @@ static inline int pipe_release_reference(pipe_t *pipe, int type) {
 
     if (!pipe) return 0;
     flags = pipe_lock_irqsave(pipe);
-    if (type == FD_TYPE_PIPE_R || type == FD_TYPE_PIPE_RW) pipe->readers--;
-    if (type == FD_TYPE_PIPE_W || type == FD_TYPE_PIPE_RW) pipe->writers--;
-    waitq_wake_all(&pipe->read_waitq);
-    waitq_wake_all(&pipe->write_waitq);
-    descriptor_ready_notify();
+    if ((type == FD_TYPE_PIPE_R || type == FD_TYPE_PIPE_RW) &&
+        pipe->readers > 0) pipe->readers--;
+    if ((type == FD_TYPE_PIPE_W || type == FD_TYPE_PIPE_RW) &&
+        pipe->writers > 0) pipe->writers--;
+    if (pipe->writers == 0) waitq_wake_all(&pipe->read_waitq);
+    if (pipe->readers == 0) waitq_wake_all(&pipe->write_waitq);
     release = pipe->readers <= 0 && pipe->writers <= 0;
     pipe_unlock_irqrestore(pipe, flags);
+    descriptor_ready_notify();
     return release;
 }
 

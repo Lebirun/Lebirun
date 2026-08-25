@@ -390,10 +390,10 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
             if (is_socket_fd(curfd)) {
                 sevents = socket_poll_events(curfd);
                 if ((value.events & (POLLIN | POLLRDNORM)) && (sevents & 0x01)) {
-                    value.revents |= POLLIN | POLLRDNORM;
+                    value.revents |= value.events & (POLLIN | POLLRDNORM);
                 }
                 if ((value.events & (POLLOUT | POLLWRNORM)) && (sevents & 0x04)) {
-                    value.revents |= POLLOUT | POLLWRNORM;
+                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
                 }
                 if (sevents & 0x08) value.revents |= POLLERR;
                 if (sevents & 0x10) value.revents |= POLLHUP;
@@ -407,10 +407,10 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
             if (descriptor_events >= 0) {
                 if ((value.events & (POLLIN | POLLRDNORM)) &&
                     (descriptor_events & POLLIN))
-                    value.revents |= POLLIN | POLLRDNORM;
+                    value.revents |= value.events & (POLLIN | POLLRDNORM);
                 if ((value.events & (POLLOUT | POLLWRNORM)) &&
                     (descriptor_events & POLLOUT))
-                    value.revents |= POLLOUT | POLLWRNORM;
+                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
                 if (descriptor_events & POLLERR) value.revents |= POLLERR;
                 if (descriptor_events & POLLHUP) value.revents |= POLLHUP;
                 if (value.revents) ready_count++;
@@ -430,13 +430,13 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
 
             if (value.events & (POLLIN | POLLRDNORM)) {
                 if (check_fd_readable(curfd)) {
-                    value.revents |= POLLIN | POLLRDNORM;
+                    value.revents |= value.events & (POLLIN | POLLRDNORM);
                 }
             }
 
             if (value.events & (POLLOUT | POLLWRNORM)) {
                 if (check_fd_writable(curfd)) {
-                    value.revents |= POLLOUT | POLLWRNORM;
+                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
                 }
             }
             if (value.revents) ready_count++;
