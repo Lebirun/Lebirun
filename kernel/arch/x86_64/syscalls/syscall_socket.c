@@ -2240,10 +2240,23 @@ int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
 
 int socket_write(int fd, const void *buf, int len) {
     int ret;
+    int total;
+    int nonblocking;
+    int peer_idx;
     socket_t *sock;
     socket_t *peer;
     tcp_socket_t *tcp;
     int inet_stream;
+    uint64_t ready_generation;
+    const uint8_t *bytes;
+
+    if (len < 0) return -EINVAL;
+    if (len == 0) return 0;
+    total = 0;
+    bytes = (const uint8_t *)buf;
+
+retry:
+    ready_generation = descriptor_ready_generation();
 
     spin_lock(&socket_table_lock);
     sock = get_socket(fd);
@@ -2256,19 +2269,32 @@ int socket_write(int fd, const void *buf, int len) {
         return -ENOTCONN;
     }
     if (sock->domain == AF_UNIX) {
-        if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
-            peer = &sockets[sock->peer_socket];
-            if (peer->in_use) {
-                ret = recv_buf_write(peer, buf, len);
-                if (ret == 0 && len > 0 && sock->nonblocking)
-                    ret = -EAGAIN;
+        nonblocking = sock->nonblocking;
+        peer_idx = sock->peer_socket;
+        if (peer_idx >= 0 && peer_idx < socket_capacity) {
+            peer = &sockets[peer_idx];
+            if (peer->in_use && !peer->peer_write_closed) {
+                ret = recv_buf_write(peer, bytes + total,
+                                     (size_t)(len - total));
                 spin_unlock(&socket_table_lock);
-                if (ret > 0) descriptor_ready_notify();
-                return ret;
+                if (ret < 0) return total > 0 ? total : ret;
+                if (ret > 0) {
+                    total += ret;
+                    descriptor_ready_notify();
+                    if (total == len || nonblocking) return total;
+                    goto retry;
+                }
+                if (nonblocking) return total > 0 ? total : -EAGAIN;
+                if (task_has_pending_signals())
+                    return total > 0 ? total : -EINTR;
+                descriptor_ready_wait(ready_generation, UINT64_MAX);
+                if (task_has_pending_signals())
+                    return total > 0 ? total : -EINTR;
+                goto retry;
             }
         }
         spin_unlock(&socket_table_lock);
-        return -EOPNOTSUPP;
+        return total > 0 ? total : -EPIPE;
     }
     tcp = sock->tcp;
     inet_stream = sock->domain == AF_INET && sock->type == SOCK_STREAM && tcp;

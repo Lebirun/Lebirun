@@ -8,6 +8,9 @@
 
 typedef long ssize_t;
 
+#define PTY_OPEN_FALLBACK -2
+#define PTY_OPEN_NOCTTY -6
+
 int pty_open_master(void);
 int pty_open_slave(int master_fd);
 int pty_path_supported(const char *path);
@@ -15,7 +18,7 @@ int pty_open_path(const char *path, int flags);
 int pty_task_endpoint(int fd);
 int pty_grant(int master_fd);
 int pty_unlock(int master_fd);
-char *pty_name(int master_fd);
+int pty_name(int master_fd, char *buffer, size_t size);
 int pty_retain_endpoint(int fd);
 
 ssize_t pty_master_read(int fd, void *buf, size_t count);

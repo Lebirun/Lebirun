@@ -1222,15 +1222,15 @@ static int sys_unlockpt(int fd) {
 }
 
 static int sys_ptsname(int fd, char *buf, int buflen) {
-    char *name;
+    char name[32];
     int i;
     int endpoint;
 
     if (!buf || buflen <= 0) return -EINVAL;
     if ((uint64_t)buf < 0x1000 || (uint64_t)buf >= KERNEL_VMA) return -EFAULT;
     endpoint = pty_task_endpoint(fd);
-    name = endpoint >= 0 ? pty_name(endpoint) : NULL;
-    if (!name) return -ENOTTY;
+    if (endpoint < 0 || pty_name(endpoint, name, sizeof(name)) < 0)
+        return -ENOTTY;
     for (i = 0; name[i] && i < buflen - 1; i++) {
         buf[i] = name[i];
     }

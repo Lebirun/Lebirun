@@ -88,6 +88,7 @@ found:
     memset(&ptys[i], 0, sizeof(pty_t));
     ptys[i].in_use = 1;
     ptys[i].master_refs = 1;
+    ptys[i].slave_refs = -1;
     init_default_termios(&ptys[i].termios);
     ptys[i].winsize.ws_row = 24;
     ptys[i].winsize.ws_col = 80;
@@ -208,9 +209,13 @@ int pty_open_slave(int master_fd) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    pty->slave_refs++;
+    if (pty->slave_refs < 0)
+        pty->slave_refs = 1;
+    else
+        pty->slave_refs++;
     fd = pty_base_slave + (int)(pty - ptys);
     mutex_unlock(&pty_lock);
+    descriptor_ready_notify();
     return fd;
 }
 
@@ -243,6 +248,10 @@ int pty_path_supported(const char *path) {
 
     if (!path) return 0;
     if (strcmp(path, "/dev/ptmx") == 0) return 1;
+    if (strcmp(path, "/dev/tty") == 0) return 1;
+    if (strcmp(path, "/dev/stdin") == 0) return 1;
+    if (strcmp(path, "/dev/stdout") == 0) return 1;
+    if (strcmp(path, "/dev/stderr") == 0) return 1;
     if (strncmp(path, "/dev/pts/", 9) != 0) return 0;
     digits = path + 9;
     if (!*digits) return 0;
@@ -251,6 +260,62 @@ int pty_path_supported(const char *path) {
         digits++;
     }
     return 1;
+}
+
+static int pty_open_task_alias(const char *path, int flags) {
+    task_fd_t *source;
+    pty_t *pty;
+    pid_t session;
+    int source_fd;
+    int endpoint;
+    int descriptor_type;
+    int fd;
+    int i;
+
+    source_fd = -1;
+    endpoint = -1;
+    descriptor_type = FD_TYPE_PTY_SLAVE;
+    if (strcmp(path, "/dev/stdin") == 0) source_fd = 0;
+    if (strcmp(path, "/dev/stdout") == 0) source_fd = 1;
+    if (strcmp(path, "/dev/stderr") == 0) source_fd = 2;
+    if (source_fd >= 0) {
+        source = task_fd_get(current_task, source_fd);
+        if (!source || !FD_TYPE_IS_PTY(source->type))
+            return PTY_OPEN_FALLBACK;
+        endpoint = (int)(uintptr_t)source->private_data;
+        descriptor_type = source->type;
+        if (pty_retain_endpoint(endpoint) < 0) return -1;
+    } else if (strcmp(path, "/dev/tty") == 0) {
+        session = current_task->sid ? current_task->sid : current_task->pid;
+        mutex_lock(&pty_lock);
+        for (i = 0; i < pty_capacity; i++) {
+            pty = &ptys[i];
+            if (!pty->in_use || pty->session != session ||
+                pty->slave_refs <= 0)
+                continue;
+            pty->slave_refs++;
+            endpoint = pty_base_slave + i;
+            break;
+        }
+        mutex_unlock(&pty_lock);
+        if (endpoint < 0)
+            return current_task->console_id >= 0 ?
+                   PTY_OPEN_FALLBACK : PTY_OPEN_NOCTTY;
+    } else {
+        return PTY_OPEN_FALLBACK;
+    }
+    fd = task_fd_alloc(current_task);
+    if (fd < 0) {
+        if (descriptor_type == FD_TYPE_PTY_MASTER)
+            pty_close_master(endpoint);
+        else
+            pty_close_slave(endpoint);
+        return -1;
+    }
+    current_task->fds[fd].type = descriptor_type;
+    current_task->fds[fd].flags = (uint64_t)flags;
+    current_task->fds[fd].private_data = (void *)(uintptr_t)endpoint;
+    return fd;
 }
 
 static int pty_has_controlling_session(pid_t session, pty_t *candidate) {
@@ -291,6 +356,11 @@ int pty_open_path(const char *path, int flags) {
     int fd;
 
     if (!current_task || !path) return -1;
+    if (strcmp(path, "/dev/tty") == 0 ||
+        strcmp(path, "/dev/stdin") == 0 ||
+        strcmp(path, "/dev/stdout") == 0 ||
+        strcmp(path, "/dev/stderr") == 0)
+        return pty_open_task_alias(path, flags);
     if (strcmp(path, "/dev/ptmx") == 0) {
         endpoint = pty_open_master();
         descriptor_type = FD_TYPE_PTY_MASTER;
@@ -363,24 +433,24 @@ int pty_task_endpoint(int fd) {
     return endpoint;
 }
 
-char *pty_name(int master_fd) {
-    static char name[32];
+int pty_name(int master_fd, char *buffer, size_t size) {
     char tmp[16];
     int idx;
     int len;
     int i;
     int t;
 
+    if (!buffer || size < 11) return -1;
     mutex_lock(&pty_lock);
     if (!get_pty_by_master(master_fd)) {
         mutex_unlock(&pty_lock);
-        return NULL;
+        return -1;
     }
     idx = master_fd - pty_base_master;
-    strcpy(name, "/dev/pts/");
+    strcpy(buffer, "/dev/pts/");
     len = 9;
     if (idx == 0) {
-        name[len++] = '0';
+        buffer[len++] = '0';
     } else {
         i = 0;
         t = idx;
@@ -389,16 +459,42 @@ char *pty_name(int master_fd) {
             t /= 10;
         }
         while (i > 0) {
-            name[len++] = tmp[--i];
+            if ((size_t)(len + 1) >= size) {
+                mutex_unlock(&pty_lock);
+                return -1;
+            }
+            buffer[len++] = tmp[--i];
         }
     }
-    name[len] = '\0';
+    buffer[len] = '\0';
     mutex_unlock(&pty_lock);
-    return name;
+    return 0;
 }
 
 static size_t buf_used(uint64_t head, uint64_t tail) {
     return tail - head;
+}
+
+static size_t pty_slave_readable(pty_t *pty) {
+    size_t available;
+    size_t i;
+    uint8_t c;
+
+    available = buf_used(pty->master_head, pty->master_tail);
+    if (pty->termios.c_lflag & ICANON) {
+        for (i = 0; i < available; i++) {
+            c = pty->master_buf[
+                (pty->master_head + i) % pty->master_capacity];
+            if (c == '\n' || c == pty->termios.c_cc[VEOF] ||
+                c == pty->termios.c_cc[VEOL])
+                return i + 1;
+        }
+        return 0;
+    }
+    if (pty->termios.c_cc[VMIN] > 0 &&
+        available < pty->termios.c_cc[VMIN])
+        return 0;
+    return available;
 }
 
 static int pty_append_slave_output(pty_t *pty, uint8_t c) {
@@ -457,7 +553,7 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
         closed = pty->slave_refs == 0;
         mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
-        if (closed) return 0;
+        if (closed) return -5;
         return -11;
     }
     
@@ -486,6 +582,11 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     pty_t *pty;
     int raw_cr;
     int cr_newline;
+    int signal_number;
+    pid_t signal_pgrp;
+
+    signal_number = 0;
+    signal_pgrp = 0;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
@@ -493,7 +594,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    if (pty->slave_refs == 0) {
+    if (pty->slave_refs <= 0) {
         mutex_unlock(&pty_lock);
         return -32;
     }
@@ -528,32 +629,38 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         
         if (pty->termios.c_lflag & ISIG) {
             if (c == pty->termios.c_cc[VINTR]) {
-                if (pty->pgrp > 0)
-                    deliver_signal_to_pgrp(pty->pgrp, 2);
+                signal_number = 2;
+                signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
+                if (signal_pgrp > 0)
+                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
                 return to_write;
             }
             if (c == pty->termios.c_cc[VQUIT]) {
-                if (pty->pgrp > 0)
-                    deliver_signal_to_pgrp(pty->pgrp, 3);
+                signal_number = 3;
+                signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
+                if (signal_pgrp > 0)
+                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
                 return to_write;
             }
             if (c == pty->termios.c_cc[VSUSP]) {
-                if (pty->pgrp > 0)
-                    deliver_signal_to_pgrp(pty->pgrp, 20);
+                signal_number = 20;
+                signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
                                    &pty->master_head, &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
+                if (signal_pgrp > 0)
+                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
                 return to_write;
             }
@@ -740,6 +847,14 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
     pty_t *pty;
     int index;
     int lock_value;
+    int changed;
+    int queue;
+    pid_t signal_pgrp;
+    size_t available;
+    size_t readable;
+
+    changed = 0;
+    signal_pgrp = 0;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
@@ -756,34 +871,104 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
         case TCSETS:
         case TCSETSW:
         case TCSETSF:
-            if (arg) memcpy(&pty->termios, arg, sizeof(struct termios));
+            if (arg && memcmp(&pty->termios, arg,
+                              sizeof(struct termios)) != 0) {
+                memcpy(&pty->termios, arg, sizeof(struct termios));
+                changed = 1;
+            }
             break;
         case TIOCGWINSZ:
             if (arg) memcpy(arg, &pty->winsize, sizeof(struct winsize));
             break;
         case TIOCSWINSZ:
-            if (arg) memcpy(&pty->winsize, arg, sizeof(struct winsize));
-            if (pty->pgrp > 0)
-                deliver_signal_to_pgrp(pty->pgrp, 28);
+            if (arg && memcmp(&pty->winsize, arg,
+                              sizeof(struct winsize)) != 0) {
+                memcpy(&pty->winsize, arg, sizeof(struct winsize));
+                changed = 1;
+                if (pty->pgrp > 0)
+                    signal_pgrp = pty->pgrp;
+            }
             break;
         case TIOCGPGRP:
             if (arg) *(pid_t *)arg = pty->pgrp;
             break;
+        case FIONREAD:
+            if (!arg) {
+                mutex_unlock(&pty->lock);
+                mutex_unlock(&pty_lock);
+                return -22;
+            }
+            if (get_pty_by_master(fd)) {
+                available = buf_used(pty->slave_head, pty->slave_tail);
+                readable = available;
+            } else {
+                readable = pty_slave_readable(pty);
+            }
+            if (readable > INT32_MAX) readable = INT32_MAX;
+            *(int *)arg = (int)readable;
+            break;
         case TIOCSPGRP:
-            if (arg) pty->pgrp = *(pid_t *)arg;
+            if (arg && pty->pgrp != *(pid_t *)arg) {
+                pty->pgrp = *(pid_t *)arg;
+                changed = 1;
+            }
             break;
         case TIOCGSID:
             if (arg) *(pid_t *)arg = pty->session;
             break;
         case TIOCSCTTY:
-            pty->session = current_task->sid ? current_task->sid :
-                           current_task->pid;
-            pty->pgrp = current_task->pgid ? current_task->pgid :
-                        current_task->pid;
+            if (pty->session != (current_task->sid ? current_task->sid :
+                                current_task->pid) ||
+                pty->pgrp != (current_task->pgid ? current_task->pgid :
+                              current_task->pid)) {
+                pty->session = current_task->sid ? current_task->sid :
+                               current_task->pid;
+                pty->pgrp = current_task->pgid ? current_task->pgid :
+                            current_task->pid;
+                changed = 1;
+            }
             break;
         case TIOCNOTTY:
-            pty->session = 0;
-            pty->pgrp = 0;
+            if (pty->session != 0 || pty->pgrp != 0) {
+                pty->session = 0;
+                pty->pgrp = 0;
+                changed = 1;
+            }
+            break;
+        case TCSBRK:
+            break;
+        case TCXONC:
+            if ((int)(uintptr_t)arg < TCOOFF ||
+                (int)(uintptr_t)arg > TCION) {
+                mutex_unlock(&pty->lock);
+                mutex_unlock(&pty_lock);
+                return -22;
+            }
+            break;
+        case TCFLSH:
+            queue = (int)(uintptr_t)arg;
+            if (queue < TCIFLUSH || queue > TCIOFLUSH) {
+                mutex_unlock(&pty->lock);
+                mutex_unlock(&pty_lock);
+                return -22;
+            }
+            if (queue == TCIFLUSH || queue == TCIOFLUSH) {
+                pty->master_head = pty->master_tail;
+                pty->input_cr_pending = 0;
+                pty_compact_buffer(&pty->master_buf,
+                                   &pty->master_capacity,
+                                   &pty->master_head,
+                                   &pty->master_tail);
+                changed = 1;
+            }
+            if (queue == TCOFLUSH || queue == TCIOFLUSH) {
+                pty->slave_head = pty->slave_tail;
+                pty_compact_buffer(&pty->slave_buf,
+                                   &pty->slave_capacity,
+                                   &pty->slave_head,
+                                   &pty->slave_tail);
+                changed = 1;
+            }
             break;
         case TIOCGPTN:
             if (!arg || !get_pty_by_master(fd)) {
@@ -801,7 +986,10 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
                 return -22;
             }
             lock_value = *(int *)arg;
-            pty->unlocked = lock_value ? 0 : 1;
+            if (pty->unlocked != (lock_value ? 0 : 1)) {
+                pty->unlocked = lock_value ? 0 : 1;
+                changed = 1;
+            }
             break;
         default:
             mutex_unlock(&pty->lock);
@@ -810,12 +998,15 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
     }
     mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
-    descriptor_ready_notify();
+    if (signal_pgrp > 0)
+        deliver_signal_to_pgrp(signal_pgrp, 28);
+    if (changed)
+        descriptor_ready_notify();
     return 0;
 }
 
 static void pty_release(pty_t *pty) {
-    if (!pty || pty->master_refs != 0 || pty->slave_refs != 0) return;
+    if (!pty || pty->master_refs != 0 || pty->slave_refs > 0) return;
     pty->in_use = 0;
     kfree(pty->master_buf);
     kfree(pty->slave_buf);
@@ -938,7 +1129,7 @@ int pty_has_data_for_slave(int fd) {
         mutex_unlock(&pty_lock);
         return 0;
     }
-    available = buf_used(pty->master_head, pty->master_tail);
+    available = pty_slave_readable(pty);
     available = available > 0 || pty->master_refs == 0;
     mutex_unlock(&pty_lock);
     return available ? 1 : 0;
@@ -972,17 +1163,19 @@ int pty_poll_events(int fd) {
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
     if (pty) {
-        events = buf_used(pty->slave_head, pty->slave_tail) > 0 ||
-                 pty->slave_refs == 0 ? 0x01 : 0;
+        events = (buf_used(pty->slave_head, pty->slave_tail) > 0 ||
+                  pty->slave_refs == 0) ? 0x01 : 0;
         if (pty->slave_refs > 0) events |= 0x04;
+        if (pty->slave_refs == 0) events |= 0x10;
         mutex_unlock(&pty_lock);
         return events;
     }
     pty = get_pty_by_slave(fd);
     if (pty) {
-        events = buf_used(pty->master_head, pty->master_tail) > 0 ||
-                 pty->master_refs == 0 ? 0x01 : 0;
+        events = (pty_slave_readable(pty) > 0 ||
+                  pty->master_refs == 0) ? 0x01 : 0;
         if (pty->master_refs > 0) events |= 0x04;
+        if (pty->master_refs == 0) events |= 0x10;
         mutex_unlock(&pty_lock);
         return events;
     }

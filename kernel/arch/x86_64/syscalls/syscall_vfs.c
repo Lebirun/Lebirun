@@ -323,8 +323,11 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg, uint64_t mode_arg
     if (!path) return -EFAULT;
     if (pty_path_supported(path)) {
         fd = pty_open_path(path, flags);
-        kfree(path);
-        return fd < 0 ? -ENODEV : fd;
+        if (fd != PTY_OPEN_FALLBACK) {
+            kfree(path);
+            if (fd == PTY_OPEN_NOCTTY) return -ENXIO;
+            return fd < 0 ? -ENODEV : fd;
+        }
     }
     node = vfs_namei(path);
 

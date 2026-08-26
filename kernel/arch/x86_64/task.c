@@ -1101,8 +1101,8 @@ uint64_t descriptor_ready_generation(void) {
 }
 
 void descriptor_ready_notify(void) {
-    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
     lock_scheduler();
+    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
     waitq_wake_all(&descriptor_ready_waitq);
     unlock_scheduler();
 }
@@ -1132,6 +1132,13 @@ int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
         if (wake_tick < tick_count) wake_tick = UINT64_MAX;
         current_task->wake_tick = wake_tick;
         sleepq_insert(current_task);
+    }
+    if (descriptor_ready_generation() != generation) {
+        task_remove_wait_locked(current_task);
+        sleepq_remove(current_task);
+        current_task->state = TASK_RUNNING;
+        unlock_scheduler();
+        return 1;
     }
     unlock_scheduler();
     schedule();

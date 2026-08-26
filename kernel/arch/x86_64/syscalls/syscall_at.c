@@ -180,8 +180,11 @@ static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
 
     if (pty_path_supported(path)) {
         fd = pty_open_path(path, flags);
-        kfree(path);
-        return fd < 0 ? -ENODEV : fd;
+        if (fd != PTY_OPEN_FALLBACK) {
+            kfree(path);
+            if (fd == PTY_OPEN_NOCTTY) return -ENXIO;
+            return fd < 0 ? -ENODEV : fd;
+        }
     }
 
     node = vfs_namei(path);

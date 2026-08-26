@@ -45,7 +45,6 @@ int *tty_pgrp;
 int tty_count;
 
 #define TTY_OUTPUT_STOPPED 0x80000000U
-#define TCXONC 0x540A
 
 static int sys_tcflow(int fd, const char *action_ptr, int unused);
 
@@ -467,13 +466,29 @@ static int get_tty_id_for_fd(int fd) {
 
 static int sys_tcgetattr(int fd, const char *termios_ptr, int unused) {
     int tty_id;
+    int pty_fd;
+    int result;
     uint64_t addr;
+    struct kernel_termios value;
 
     (void)unused;
 
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        addr = (uint64_t)termios_ptr;
+        if (!addr || !user_access_ok((void *)(uintptr_t)addr,
+                                     sizeof(value), UACCESS_WRITE))
+            return -EFAULT;
+        result = pty_ioctl(pty_fd, TCGETS, &value);
+        if (result < 0) return -ENOTTY;
+        if (copy_to_user((void *)(uintptr_t)addr, &value,
+                         sizeof(value)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
-
     addr = (uint64_t)termios_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     
@@ -485,9 +500,26 @@ static int sys_tcsetattr(int fd, const char *actions_ptr,
                          uint64_t termios_ptr) {
     int actions;
     int tty_id;
+    int pty_fd;
+    int result;
     uint64_t addr;
+    struct kernel_termios value;
 
     actions = (int)(uintptr_t)actions_ptr;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        if (actions < TCSANOW || actions > TCSAFLUSH) return -EINVAL;
+        addr = termios_ptr;
+        if (!addr || !user_access_ok((void *)(uintptr_t)addr,
+                                     sizeof(value), UACCESS_READ))
+            return -EFAULT;
+        if (copy_from_user(&value, (void *)(uintptr_t)addr,
+                           sizeof(value)) < 0)
+            return -EFAULT;
+        result = pty_ioctl(pty_fd, TCSETS + actions, &value);
+        return result < 0 ? -ENOTTY : 0;
+    }
 
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
@@ -809,11 +841,12 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
                 return 0;
             }
             if (arg == 0) {
-                return vt_pending_take(1, tty_id) >= 0 ? 0 : -EINVAL;
+                vt_pending_take(1, tty_id);
+                return 0;
             }
             if (arg != 1) return -EINVAL;
             pending = vt_pending_take(1, tty_id);
-            if (pending < 0) return -EINVAL;
+            if (pending < 0) return 0;
             target_vt = vt_pending_target(pending);
             if (!tty_valid_id(target_vt)) return -EINVAL;
             switch_result = console_switch_committed(target_vt);
@@ -889,9 +922,18 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
 static int sys_tcflush(int fd, const char *queue_ptr, int unused) {
     int queue;
     int tty_id;
+    int pty_fd;
+    int result;
 
     (void)unused;
     queue = (int)(uintptr_t)queue_ptr;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        result = pty_ioctl(pty_fd, TCFLSH,
+                           (void *)(uintptr_t)queue);
+        return result < 0 ? result : 0;
+    }
 
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
@@ -909,9 +951,18 @@ static int sys_tcflush(int fd, const char *queue_ptr, int unused) {
 static int sys_tcflow(int fd, const char *action_ptr, int unused) {
     int action;
     int tty_id;
+    int pty_fd;
+    int result;
 
     (void)unused;
     action = (int)(uintptr_t)action_ptr;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        result = pty_ioctl(pty_fd, TCXONC,
+                           (void *)(uintptr_t)action);
+        return result < 0 ? result : 0;
+    }
 
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
@@ -933,8 +984,16 @@ static int sys_tcflow(int fd, const char *action_ptr, int unused) {
 
 static int sys_tcdrain(int fd, const char *unused1, int unused2) {
     int tty_id;
+    int pty_fd;
+    int result;
 
     (void)unused1; (void)unused2;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        result = pty_ioctl(pty_fd, TCSBRK, (void *)(uintptr_t)1);
+        return result < 0 ? result : 0;
+    }
     
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
@@ -945,8 +1004,17 @@ static int sys_tcdrain(int fd, const char *unused1, int unused2) {
 static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
     int tty_id;
     int pgrp;
+    int pty_fd;
+    int result;
 
     (void)unused1; (void)unused2;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        pgrp = 0;
+        result = pty_ioctl(pty_fd, TIOCGPGRP, &pgrp);
+        return result < 0 ? -ENOTTY : pgrp;
+    }
     
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;
@@ -963,9 +1031,17 @@ static int sys_tcgetpgrp(int fd, const char *unused1, int unused2) {
 static int sys_tcsetpgrp(int fd, const char *pgrp_ptr, int unused) {
     int pgrp;
     int tty_id;
+    int pty_fd;
+    int result;
 
     (void)unused;
     pgrp = (int)(uintptr_t)pgrp_ptr;
+
+    pty_fd = pty_task_endpoint(fd);
+    if (pty_fd >= 0) {
+        result = pty_ioctl(pty_fd, TIOCSPGRP, &pgrp);
+        return result < 0 ? -ENOTTY : 0;
+    }
 
     tty_id = get_tty_id_for_fd(fd);
     if (!tty_valid_id(tty_id)) return -ENOTTY;

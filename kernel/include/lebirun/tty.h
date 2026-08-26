@@ -126,6 +126,9 @@ typedef unsigned int speed_t;
 #define TIOCGSID  0x5429
 #define TIOCSCTTY 0x540E
 #define TIOCNOTTY 0x5422
+#define TCSBRK    0x5409
+#define TCXONC    0x540A
+#define TCFLSH    0x540B
 #define FIONREAD  0x541B
 #define FIONBIO   0x5421
 #define TIOCSPTLCK 0x40045431

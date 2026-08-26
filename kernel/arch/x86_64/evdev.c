@@ -167,6 +167,7 @@ void evdev_push_sync(struct evdev_device *dev) {
 
 static void evdev_kbd_observer(struct keyboard_event event) {
     uint16_t keycode;
+    int refs;
 
     if (event.scancode >= 128)
         return;
@@ -180,6 +181,9 @@ static void evdev_kbd_observer(struct keyboard_event event) {
         clear_bit(evdev_kbd.key_state, keycode);
     else
         set_bit(evdev_kbd.key_state, keycode);
+    refs = __atomic_load_n(&evdev_event0.ref_count, __ATOMIC_ACQUIRE);
+    if (refs <= 1)
+        return;
     evdev_push_event(&evdev_kbd, EV_KEY, keycode, event.is_release ? 0 : 1);
     evdev_push_sync(&evdev_kbd);
 }
@@ -447,11 +451,15 @@ static vfs_node_t *evdev_input_finddir(vfs_node_t *node, const char *name) {
 
 static void devfs_open_stub(vfs_node_t *node, uint64_t flags) {
     struct evdev_device *dev;
+    int refs;
 
     (void)flags;
     if (!node) return;
     dev = (struct evdev_device *)node->private_data;
     evdev_ensure_ring(dev);
+    refs = __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE);
+    if (dev && refs == 2)
+        dev->head = dev->tail;
 }
 static void devfs_close_stub(vfs_node_t *node) {
     struct evdev_device *dev;
