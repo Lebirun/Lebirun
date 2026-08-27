@@ -134,6 +134,7 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     int count;
     int fd;
     int bit;
+    int fd_ready;
     int descriptor_events;
     uint64_t ready_generation;
     uint64_t elapsed_ticks;
@@ -203,14 +204,12 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             for (bit = 0; bit < (int)NFDBITS; bit++) {
                 fd = (int)(word_index * NFDBITS + (uint64_t)bit);
                 if (fd >= nfds) break;
+                fd_ready = 0;
                 if ((read_word & (1UL << bit)) &&
-                    check_fd_readable(fd)) {
-                    if (count < 0x7FFFFFFF) count++;
-                }
+                    check_fd_readable(fd)) fd_ready = 1;
                 if ((write_word & (1UL << bit)) &&
-                    check_fd_writable(fd)) {
-                    if (count < 0x7FFFFFFF) count++;
-                }
+                    check_fd_writable(fd)) fd_ready = 1;
+                if (fd_ready && count < 0x7FFFFFFF) count++;
             }
         }
 
@@ -254,14 +253,16 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         for (bit = 0; bit < (int)NFDBITS; bit++) {
             fd = (int)(word_index * NFDBITS + (uint64_t)bit);
             if (fd >= nfds) break;
+            fd_ready = 0;
             if ((read_word & (1UL << bit)) && check_fd_readable(fd)) {
                 result_read_word |= 1UL << bit;
-                if (count < 0x7FFFFFFF) count++;
+                fd_ready = 1;
             }
             if ((write_word & (1UL << bit)) && check_fd_writable(fd)) {
                 result_write_word |= 1UL << bit;
-                if (count < 0x7FFFFFFF) count++;
+                fd_ready = 1;
             }
+            if (fd_ready && count < 0x7FFFFFFF) count++;
         }
         if (readfds && copy_to_user(&readfds[word_index], &result_read_word,
                                     sizeof(result_read_word)) < 0)

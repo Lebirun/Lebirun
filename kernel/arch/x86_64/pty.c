@@ -26,7 +26,6 @@ typedef struct {
     struct winsize winsize;
     pid_t session;
     pid_t pgrp;
-    int input_cr_pending;
     mutex_t lock;
 } pty_t;
 
@@ -44,7 +43,7 @@ static void init_default_termios(struct termios *t) {
     t->c_lflag = ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN;
     t->c_cc[VINTR] = 3;
     t->c_cc[VQUIT] = 28;
-    t->c_cc[VERASE] = 8;
+    t->c_cc[VERASE] = 127;
     t->c_cc[VKILL] = 21;
     t->c_cc[VEOF] = 4;
     t->c_cc[VTIME] = 0;
@@ -475,18 +474,27 @@ static size_t buf_used(uint64_t head, uint64_t tail) {
     return tail - head;
 }
 
-static size_t pty_slave_readable(pty_t *pty) {
+static int pty_cc_matches(pty_t *pty, int index, uint8_t c) {
+    return pty->termios.c_cc[index] != 0 &&
+           c == pty->termios.c_cc[index];
+}
+
+static size_t pty_slave_readable(pty_t *pty, int *end_of_file) {
     size_t available;
     size_t i;
     uint8_t c;
 
+    if (end_of_file) *end_of_file = 0;
     available = buf_used(pty->master_head, pty->master_tail);
     if (pty->termios.c_lflag & ICANON) {
         for (i = 0; i < available; i++) {
             c = pty->master_buf[
                 (pty->master_head + i) % pty->master_capacity];
-            if (c == '\n' || c == pty->termios.c_cc[VEOF] ||
-                c == pty->termios.c_cc[VEOL])
+            if (pty_cc_matches(pty, VEOF, c)) {
+                if (end_of_file) *end_of_file = 1;
+                return i;
+            }
+            if (c == '\n' || pty_cc_matches(pty, VEOL, c))
                 return i + 1;
         }
         return 0;
@@ -580,8 +588,6 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     uint8_t c;
     uint8_t previous;
     pty_t *pty;
-    int raw_cr;
-    int cr_newline;
     int signal_number;
     pid_t signal_pgrp;
 
@@ -610,9 +616,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     for (i = 0; i < to_write; i++) {
         c = src[i];
         if (pty->termios.c_iflag & ISTRIP) c &= 0x7F;
-        raw_cr = (c == '\r');
         if ((pty->termios.c_iflag & IGNCR) && c == '\r') {
-            pty->input_cr_pending = 0;
             continue;
         }
         if ((pty->termios.c_iflag & ICRNL) && c == '\r') {
@@ -620,15 +624,9 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         } else if ((pty->termios.c_iflag & INLCR) && c == '\n') {
             c = '\r';
         }
-        if (pty->input_cr_pending && !raw_cr && c == '\n') {
-            pty->input_cr_pending = 0;
-            continue;
-        }
-        cr_newline = raw_cr && c == '\n';
-        pty->input_cr_pending = cr_newline;
-        
+
         if (pty->termios.c_lflag & ISIG) {
-            if (c == pty->termios.c_cc[VINTR]) {
+            if (pty_cc_matches(pty, VINTR, c)) {
                 signal_number = 2;
                 signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
@@ -640,7 +638,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
                 descriptor_ready_notify();
                 return to_write;
             }
-            if (c == pty->termios.c_cc[VQUIT]) {
+            if (pty_cc_matches(pty, VQUIT, c)) {
                 signal_number = 3;
                 signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
@@ -652,7 +650,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
                 descriptor_ready_notify();
                 return to_write;
             }
-            if (c == pty->termios.c_cc[VSUSP]) {
+            if (pty_cc_matches(pty, VSUSP, c)) {
                 signal_number = 20;
                 signal_pgrp = pty->pgrp;
                 pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
@@ -667,13 +665,13 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         }
 
         if ((pty->termios.c_lflag & ICANON) &&
-            (c == pty->termios.c_cc[VERASE] ||
+            (pty_cc_matches(pty, VERASE, c) ||
              (c == '\b' && pty->termios.c_cc[VERASE] == 127))) {
             if (pty->master_tail > pty->master_head) {
                 previous = pty->master_buf[
                     (pty->master_tail - 1) % pty->master_capacity];
                 if (previous != '\n' &&
-                    previous != pty->termios.c_cc[VEOL]) {
+                    !pty_cc_matches(pty, VEOL, previous)) {
                     pty->master_tail--;
                     pty_echo_erase(pty);
                 }
@@ -681,12 +679,12 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             continue;
         }
         if ((pty->termios.c_lflag & ICANON) &&
-            c == pty->termios.c_cc[VKILL]) {
+            pty_cc_matches(pty, VKILL, c)) {
             while (pty->master_tail > pty->master_head) {
                 previous = pty->master_buf[
                     (pty->master_tail - 1) % pty->master_capacity];
                 if (previous == '\n' ||
-                    previous == pty->termios.c_cc[VEOL]) break;
+                    pty_cc_matches(pty, VEOL, previous)) break;
                 pty->master_tail--;
                 pty_echo_erase(pty);
             }
@@ -722,6 +720,9 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
     size_t to_read;
     pty_t *pty;
     cc_t vmin;
+    cc_t vtime;
+    size_t required;
+    int eof_delimiter;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_slave(fd);
@@ -733,51 +734,67 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return 0;
     }
+    if (count == 0) {
+        mutex_unlock(&pty_lock);
+        return 0;
+    }
     mutex_lock(&pty->lock);
     available = buf_used(pty->master_head, pty->master_tail);
-    if (available == 0) {
-        mutex_unlock(&pty->lock);
-        mutex_unlock(&pty_lock);
-        return -11;
-    }
-    
+
     dst = (uint8_t *)buf;
     read_count = 0;
-    
+
     if (pty->termios.c_lflag & ICANON) {
         found_line = 0;
         line_end = 0;
-        
+        eof_delimiter = 0;
+
         for (i = 0; i < available; i++) {
             c = pty->master_buf[(pty->master_head + i) % pty->master_capacity];
-            if (c == '\n' || c == pty->termios.c_cc[VEOF] || c == pty->termios.c_cc[VEOL]) {
+            if (pty_cc_matches(pty, VEOF, c)) {
+                found_line = 1;
+                line_end = i;
+                eof_delimiter = 1;
+                break;
+            }
+            if (c == '\n' || pty_cc_matches(pty, VEOL, c)) {
                 found_line = 1;
                 line_end = i + 1;
                 break;
             }
         }
-        
+
         if (!found_line) {
             mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return -11;
         }
-        
+
         to_read = (count < line_end) ? count : line_end;
         for (i = 0; i < to_read; i++) {
             dst[i] = pty->master_buf[pty->master_head % pty->master_capacity];
             pty->master_head++;
         }
+        if (eof_delimiter && to_read == line_end)
+            pty->master_head++;
         read_count = to_read;
     } else {
         vmin = pty->termios.c_cc[VMIN];
-        
-        if (vmin > 0 && available < vmin) {
+        vtime = pty->termios.c_cc[VTIME];
+        required = vmin;
+        if (required > count) required = count;
+
+        if (available == 0) {
+            mutex_unlock(&pty->lock);
+            mutex_unlock(&pty_lock);
+            return vmin == 0 && vtime == 0 ? 0 : -11;
+        }
+        if (required > 0 && available < required) {
             mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return -11;
         }
-        
+
         to_read = (count < available) ? count : available;
         for (i = 0; i < to_read; i++) {
             dst[i] = pty->master_buf[pty->master_head % pty->master_capacity];
@@ -876,6 +893,14 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
                 memcpy(&pty->termios, arg, sizeof(struct termios));
                 changed = 1;
             }
+            if (request == TCSETSF && arg) {
+                pty->master_head = pty->master_tail;
+                pty_compact_buffer(&pty->master_buf,
+                                   &pty->master_capacity,
+                                   &pty->master_head,
+                                   &pty->master_tail);
+                changed = 1;
+            }
             break;
         case TIOCGWINSZ:
             if (arg) memcpy(arg, &pty->winsize, sizeof(struct winsize));
@@ -902,7 +927,7 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
                 available = buf_used(pty->slave_head, pty->slave_tail);
                 readable = available;
             } else {
-                readable = pty_slave_readable(pty);
+                readable = pty_slave_readable(pty, NULL);
             }
             if (readable > INT32_MAX) readable = INT32_MAX;
             *(int *)arg = (int)readable;
@@ -954,7 +979,6 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             }
             if (queue == TCIFLUSH || queue == TCIOFLUSH) {
                 pty->master_head = pty->master_tail;
-                pty->input_cr_pending = 0;
                 pty_compact_buffer(&pty->master_buf,
                                    &pty->master_capacity,
                                    &pty->master_head,
@@ -1122,6 +1146,7 @@ int pty_has_data_for_master(int fd) {
 int pty_has_data_for_slave(int fd) {
     size_t available;
     pty_t *pty;
+    int end_of_file;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_slave(fd);
@@ -1129,8 +1154,8 @@ int pty_has_data_for_slave(int fd) {
         mutex_unlock(&pty_lock);
         return 0;
     }
-    available = pty_slave_readable(pty);
-    available = available > 0 || pty->master_refs == 0;
+    available = pty_slave_readable(pty, &end_of_file);
+    available = available > 0 || end_of_file || pty->master_refs == 0;
     mutex_unlock(&pty_lock);
     return available ? 1 : 0;
 }
@@ -1159,6 +1184,7 @@ int pty_can_write(int fd) {
 int pty_poll_events(int fd) {
     int events;
     pty_t *pty;
+    int end_of_file;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
@@ -1172,7 +1198,8 @@ int pty_poll_events(int fd) {
     }
     pty = get_pty_by_slave(fd);
     if (pty) {
-        events = (pty_slave_readable(pty) > 0 ||
+        events = (pty_slave_readable(pty, &end_of_file) > 0 ||
+                  end_of_file ||
                   pty->master_refs == 0) ? 0x01 : 0;
         if (pty->master_refs > 0) events |= 0x04;
         if (pty->master_refs == 0) events |= 0x10;
