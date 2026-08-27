@@ -49,6 +49,8 @@ extern uint64_t boot_pdpt_low[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pdpt_high[512] __attribute__((aligned(4096)));
 extern uint64_t boot_pd_0[512] __attribute__((aligned(4096)));
 extern uint8_t _kernel_phys_start[];
+extern uint8_t _kernel_bss_start[];
+extern uint8_t _kernel_bss_end[];
 
 extern uint32_t multiboot_magic;
 extern uint64_t multiboot_ptr;
@@ -68,8 +70,9 @@ static void KERNEL_INIT ahci_blockdev_name(char *name, size_t size, int index) {
 }
 #endif
 
-static void kernel_reclaim_memory(uint8_t *section_start, uint8_t *section_end,
-                                  int flush_cpus, int report) {
+static void KERNEL_INIT kernel_reclaim_memory(
+    uint8_t *section_start, uint8_t *section_end, int flush_cpus,
+    int report) {
     uint64_t start;
     uint64_t end;
     uint64_t address;
@@ -89,7 +92,7 @@ static void kernel_reclaim_memory(uint8_t *section_start, uint8_t *section_end,
     }
 }
 
-static void kernel_reclaim_early_init_memory(void) {
+static void KERNEL_INIT kernel_reclaim_early_init_memory(void) {
     extern uint8_t _kernel_early_init_start[];
     extern uint8_t _kernel_early_init_end[];
 
@@ -235,6 +238,9 @@ static void KERNEL_INIT kernel_boot(void) {
     pfa_init();
 
     mem_map_relocated = heap_init();
+
+    pt_reclaim_zero_bss((uint64_t)(uintptr_t)_kernel_bss_start,
+                        (uint64_t)(uintptr_t)_kernel_bss_end);
 
     cmdline_parse(early_cmdline && early_cmdline[0] ? early_cmdline : NULL);
 
@@ -661,7 +667,6 @@ static void KERNEL_INIT kernel_boot(void) {
     } else {
         KERNEL_INIT_LOG("BOOT: kprint/watchdog skipped (bring-up fallback)\n");
     }
-    console_writer_flush();
     kprint_flush();
     console_reclaim_unused();
     fb_reclaim_unused();

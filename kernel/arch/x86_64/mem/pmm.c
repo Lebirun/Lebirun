@@ -268,30 +268,87 @@ bool test_bit(uint64_t frame_idx) {
 }
 
 static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
-                                        uint64_t num, uint64_t phys_offset) {
+                                        uint64_t num) {
     uint64_t frame_idx;
+    uint64_t frame_end;
+    uint64_t region_idx;
+    uint64_t region_start;
+    uint64_t region_end;
+    uint64_t region_phys_end;
+    uint64_t chunk_end;
+    uint64_t bit_idx;
+    uint64_t byte_base;
+    uint64_t available;
     uint64_t j;
     uint64_t run;
     uint64_t run_start;
-    run = 0;
-    run_start = from;
-    for (frame_idx = from; frame_idx < to; frame_idx++) {
-        if (test_bit(frame_idx + phys_offset)) {
-            run = 0;
-            run_start = frame_idx + 1;
-        } else {
+    uint8_t *leaf;
+    uint8_t used;
+    uint8_t free_bits;
+
+    if (to <= from || num == 0) return 0;
+    if (num != 1) {
+        run = 0;
+        run_start = from;
+        for (frame_idx = from; frame_idx < to; frame_idx++) {
+            if (test_bit(frame_idx)) {
+                run = 0;
+                run_start = frame_idx + 1;
+                continue;
+            }
             if (run == 0) run_start = frame_idx;
             run++;
-            if (run >= num) {
-                if (bitmap_prepare_range(run_start + phys_offset, num) != 0)
-                    return 0;
-                for (j = 0; j < num; j++) {
-                    set_bit(run_start + phys_offset + j);
+            if (run < num) continue;
+            if (bitmap_prepare_range(run_start, num) != 0) return 0;
+            for (j = 0; j < num; j++) set_bit(run_start + j);
+            last_alloc_hint = run_start + num;
+            __sync_fetch_and_sub(&pfa_cached_free, num);
+            return run_start * PAGE_SIZE;
+        }
+        return 0;
+    }
+    for (region_idx = 0; region_idx < num_regions; region_idx++) {
+        region_start = memory_map[region_idx].base / PAGE_SIZE;
+        if (memory_map[region_idx].base & (PAGE_SIZE - 1)) region_start++;
+        if (memory_map[region_idx].length >
+            UINT64_MAX - memory_map[region_idx].base)
+            region_phys_end = UINT64_MAX;
+        else
+            region_phys_end = memory_map[region_idx].base +
+                              memory_map[region_idx].length;
+        region_end = region_phys_end / PAGE_SIZE;
+        frame_idx = region_start > from ? region_start : from;
+        frame_end = region_end < to ? region_end : to;
+        if (frame_end <= frame_idx) continue;
+        while (frame_idx < frame_end) {
+            bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
+            chunk_end = frame_idx +
+                        (PFA_SPARSE_CHUNK_FRAMES - bit_idx);
+            if (chunk_end > frame_end) chunk_end = frame_end;
+            leaf = bitmap_get_leaf(frame_idx);
+            if (!leaf) {
+                run_start = frame_idx;
+            } else {
+                bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
+                byte_base = frame_idx - (bit_idx & 7);
+                used = leaf[bit_idx / 8];
+                used |= (uint8_t)((1u << (bit_idx & 7)) - 1u);
+                available = chunk_end - byte_base;
+                if (available < 8)
+                    used |= (uint8_t)(0xFFu << available);
+                free_bits = (uint8_t)~used;
+                if (!free_bits) {
+                    frame_idx = byte_base + 8;
+                    continue;
                 }
-                last_alloc_hint = run_start + phys_offset + num;
-                __sync_fetch_and_sub(&pfa_cached_free, num);
-                return (run_start + phys_offset) * PAGE_SIZE;
+                run_start = byte_base +
+                            (uint64_t)__builtin_ctz((unsigned)free_bits);
             }
+            if (bitmap_prepare_range(run_start, 1) != 0) return 0;
+            set_bit(run_start);
+            last_alloc_hint = run_start + 1;
+            __sync_fetch_and_sub(&pfa_cached_free, 1);
+            return run_start * PAGE_SIZE;
         }
     }
     return 0;
@@ -299,7 +356,7 @@ static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
 
 static uint64_t find_free_frames_range(uint64_t from, uint64_t to, uint64_t num) {
     if (to <= from || num == 0) return 0;
-    return find_free_frames_bitmap(from, to, num, 0);
+    return find_free_frames_bitmap(from, to, num);
 }
 
 static uint64_t find_free_frames(uint64_t num) {
@@ -510,6 +567,29 @@ void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end) {
 
 void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end) {
     pfa_reclaim_kernel_range_internal(phys_start, phys_end, 0);
+}
+
+int pfa_claim_reclaimed_kernel_page(uint64_t phys_addr) {
+    uint64_t frame;
+    uint64_t eflags;
+    int result;
+
+    if ((phys_addr & (PAGE_SIZE - 1)) != 0) return -1;
+    frame = phys_addr / PAGE_SIZE;
+    if (frame >= kernel_reserved_frames || frame >= total_pages_managed)
+        return -1;
+    result = -1;
+    pfa_lock_acquire(&eflags);
+    if (!test_bit(frame) && frame_is_usable(frame) &&
+        !frame_is_reserved(frame)) {
+        if (bitmap_prepare_range(frame, 1) == 0) {
+            set_bit(frame);
+            __sync_fetch_and_sub(&pfa_cached_free, 1);
+            result = 0;
+        }
+    }
+    pfa_lock_release(eflags);
+    return result;
 }
 
 uint64_t pfa_alloc_contiguous(uint64_t num_frames) {

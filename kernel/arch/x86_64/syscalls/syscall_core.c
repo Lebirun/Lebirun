@@ -731,7 +731,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     return -EBADF;
 }
 
-static int sys_write(int fd, const char *buf, int len) {
+int syscall_fd_write(int fd, const char *buf, int len) {
     task_fd_t *descriptor;
     int result;
 
@@ -1281,7 +1281,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     return initrd_read(fd, (void *)buf_addr, (uint64_t)len);
 }
 
-static int sys_read(int fd, char *buf, int len) {
+int syscall_fd_read(int fd, char *buf, int len) {
     task_fd_t *descriptor;
     int result;
 
@@ -1297,7 +1297,7 @@ static int sys_read(int fd, char *buf, int len) {
 }
 
 int syscall_core_read_for_readv(int fd, char *buf, int len) {
-    return sys_read(fd, buf, len);
+    return syscall_fd_read(fd, buf, len);
 }
 
 static int sys_read_nb(int fd, char *buf, int len) {
@@ -1440,7 +1440,7 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
             len = (uint64_t)(0x7FFFFFFF - total);
         if (len == 0) return total;
         
-        written = sys_write(fd, (const char *)base, (int)len);
+        written = syscall_fd_write(fd, (const char *)base, (int)len);
         if (written < 0)
             return total > 0 ? total : written;
         if (written == 0)
@@ -1484,8 +1484,8 @@ void syscalls_core_init(void) {
     uint8_t *state;
 
     syscall_table_set(SYSCALL_EXIT, (void *)(sys_exit));
-    syscall_table_set(SYSCALL_WRITE, (void *)(sys_write));
-    syscall_table_set(SYSCALL_READ, (void *)(sys_read));
+    syscall_table_set(SYSCALL_WRITE, (void *)(syscall_fd_write));
+    syscall_table_set(SYSCALL_READ, (void *)(syscall_fd_read));
     syscall_table_set(SYSCALL_READ_NB, (void *)(sys_read_nb));
     syscall_table_set(SYSCALL_ISATTY, (void *)(sys_isatty));
     syscall_table_set(SYSCALL_WRITEV, (void *)(sys_writev));

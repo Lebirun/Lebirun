@@ -48,45 +48,8 @@ static int sys_initrd_read(int index, const char *buf, int maxlen) {
     return (int)to_copy;
 }
 
-static int sys_open(uint64_t path_ptr, const char *flags_ptr, int unused) {
-    uint64_t path_addr = (uint64_t)path_ptr;
-    const char *path = (const char *)path_addr;
-    int flags = (int)(uintptr_t)flags_ptr;
-
-    (void)unused;
-    if (path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    
-    return initrd_open(path, flags);
-}
-
-static int sys_close(int fd, const char *unused1, int unused2) {
-    (void)unused1; (void)unused2;
-    return initrd_close(fd);
-}
-
-static int sys_fstat(int fd, const char *size_ptr, uint64_t type_ptr) {
-    uint64_t size_addr = (uint64_t)size_ptr;
-    uint64_t type_addr = (uint64_t)type_ptr;
-    uint64_t size;
-    uint8_t type;
-
-    if (initrd_fstat_fd(fd, &size, &type) < 0) return -EBADF;
-    
-    if (size_addr && size_addr < KERNEL_VMA && size_addr >= 0x1000) {
-        *(uint64_t *)size_addr = size;
-    }
-    if (type_addr && type_addr < KERNEL_VMA && type_addr >= 0x1000) {
-        *(uint8_t *)type_addr = type;
-    }
-    
-    return 0;
-}
-
 void syscalls_initrd_init(void) {
     syscall_table_set(SYSCALL_INITRD_COUNT, (void *)(sys_initrd_count));
     syscall_table_set(SYSCALL_INITRD_STAT, (void *)(sys_initrd_stat));
     syscall_table_set(SYSCALL_INITRD_READ, (void *)(sys_initrd_read));
-    syscall_table_set(SYSCALL_OPEN, (void *)(sys_open));
-    syscall_table_set(SYSCALL_CLOSE, (void *)(sys_close));
-    syscall_table_set(SYSCALL_FSTAT, (void *)(sys_fstat));
 }

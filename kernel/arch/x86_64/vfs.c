@@ -131,6 +131,13 @@ static int root_unlink(vfs_node_t *parent, const char *name);
 static int root_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
 static int root_rename(vfs_node_t *old_parent, const char *old_name, vfs_node_t *new_parent, const char *new_name);
 
+static const vfs_node_ops_t root_ops = {
+    .create = root_create,
+    .unlink = root_unlink,
+    .mkdir = root_mkdir,
+    .rename = root_rename
+};
+
 static int vfs_grow_mounts(void) {
     int new_cap;
     int i;
@@ -231,10 +238,7 @@ void KERNEL_INIT vfs_init(void) {
     root_node.mask = 0755;
     root_node.readdir = root_readdir;
     root_node.finddir = root_finddir;
-    root_node.create = root_create;
-    root_node.unlink = root_unlink;
-    root_node.mkdir = root_mkdir;
-    root_node.rename = root_rename;
+    root_node.ops = &root_ops;
     root_node.ref_count = 1;
     root_node.parent = NULL;
     
@@ -396,22 +400,22 @@ static const char *vfs_detect_fs(const char *device) {
     if (!port)
         return NULL;
 
-    buf = (uint8_t *)kmalloc(4096);
+    buf = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     if (!buf)
         return NULL;
 
     if (ahci_read_sectors(port, part_start, 8, buf) != 0) {
-        kfree(buf);
+        slab_page_free(buf, PAGE_SIZE);
         return NULL;
     }
 
     ext_magic = *(uint16_t *)(buf + 1024 + 56);
     if (ext_magic == 0xEF53) {
-        kfree(buf);
+        slab_page_free(buf, PAGE_SIZE);
         return "ext4";
     }
 
-    kfree(buf);
+    slab_page_free(buf, PAGE_SIZE);
     return NULL;
 }
 
@@ -725,16 +729,19 @@ uint64_t vfs_transfer_write(vfs_node_t *node, uint64_t offset, uint64_t size,
 }
 
 void vfs_open(vfs_node_t *node, uint64_t flags) {
+    open_type_t open;
     uintptr_t open_addr;
 
     if (!node) return;
     __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     vfs_lookup_hazard_clear(node);
-    open_addr = (uintptr_t)node->open;
-    if (node->open && open_addr >= KERNEL_VMA) node->open(node, flags);
+    open = node->open;
+    open_addr = (uintptr_t)open;
+    if (open && open_addr >= KERNEL_VMA) open(node, flags);
 }
 
 void vfs_close(vfs_node_t *node) {
+    close_type_t close;
     int generic_owned;
     int callback_owns_node;
     uintptr_t close_addr;
@@ -759,9 +766,10 @@ void vfs_close(vfs_node_t *node) {
     generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
     callback_owns_node = (node->flags & VFS_EMBEDDED) != 0;
 
-    close_addr = (uintptr_t)node->close;
-    if (node->close && close_addr >= KERNEL_VMA) {
-        node->close(node);
+    close = node->close;
+    close_addr = (uintptr_t)close;
+    if (close && close_addr >= KERNEL_VMA) {
+        close(node);
         if (callback_owns_node) return;
     }
 
@@ -1086,12 +1094,14 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
+    create_type_t create;
     int result;
 
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->create) {
-        result = parent->create(parent, name, flags);
+    create = parent->ops ? parent->ops->create : NULL;
+    if (create) {
+        result = create(parent, name, flags);
         if (result == 0) inotify_notify(parent, 0x00000100U, name);
         return result;
     }
@@ -1099,12 +1109,14 @@ int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
 }
 
 int vfs_unlink(vfs_node_t *parent, const char *name) {
+    unlink_type_t unlink;
     int result;
 
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->unlink) {
-        result = parent->unlink(parent, name);
+    unlink = parent->ops ? parent->ops->unlink : NULL;
+    if (unlink) {
+        result = unlink(parent, name);
         if (result == 0) inotify_notify(parent, 0x00000200U, name);
         return result;
     }
@@ -1137,12 +1149,14 @@ int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_director
 }
 
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
+    mkdir_type_t mkdir;
     int result;
 
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
-    if (parent->mkdir) {
-        result = parent->mkdir(parent, name, perms);
+    mkdir = parent->ops ? parent->ops->mkdir : NULL;
+    if (mkdir) {
+        result = mkdir(parent, name, perms);
         if (result == 0)
             inotify_notify(parent, 0x40000100U, name);
         return result;
@@ -1775,6 +1789,7 @@ vfs_node_t *vfs_lookup(const char *path) {
 }
 
 void vfs_release(vfs_node_t *node) {
+    close_type_t close;
     int generic_owned;
     int callback_owns_node;
     uintptr_t close_addr;
@@ -1786,9 +1801,10 @@ void vfs_release(vfs_node_t *node) {
     if (refs == 0) {
         generic_owned = (node->flags & VFS_DYNAMIC) && !(node->flags & VFS_EMBEDDED);
         callback_owns_node = (node->flags & VFS_EMBEDDED) != 0;
-        close_addr = (uintptr_t)node->close;
-        if (node->close && close_addr >= KERNEL_VMA) {
-            node->close(node);
+        close = node->close;
+        close_addr = (uintptr_t)close;
+        if (close && close_addr >= KERNEL_VMA) {
+            close(node);
             if (callback_owns_node) return;
         }
         if (generic_owned && node->private_data == NULL) {
@@ -1970,8 +1986,8 @@ int vfs_open_path(const char *path, int flags) {
     
     if (!node) return -1;
     
-    if ((flags & VFS_O_TRUNC) && node->truncate) {
-        node->truncate(node, 0);
+    if ((flags & VFS_O_TRUNC) && node->ops && node->ops->truncate) {
+        node->ops->truncate(node, 0);
     }
     
     mutex_lock(&vfs_lock);
@@ -2492,8 +2508,8 @@ static int root_create(vfs_node_t *parent, const char *name, uint64_t flags) {
 
     (void)parent;
     r = root_mount_root();
-    if (r && r->create)
-        return r->create(r, name, flags);
+    if (r && r->ops && r->ops->create)
+        return r->ops->create(r, name, flags);
     return -1;
 }
 
@@ -2502,8 +2518,8 @@ static int root_unlink(vfs_node_t *parent, const char *name) {
 
     (void)parent;
     r = root_mount_root();
-    if (r && r->unlink)
-        return r->unlink(r, name);
+    if (r && r->ops && r->ops->unlink)
+        return r->ops->unlink(r, name);
     return -1;
 }
 
@@ -2512,8 +2528,8 @@ static int root_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
 
     (void)parent;
     r = root_mount_root();
-    if (r && r->mkdir)
-        return r->mkdir(r, name, perms);
+    if (r && r->ops && r->ops->mkdir)
+        return r->ops->mkdir(r, name, perms);
     return -1;
 }
 
@@ -2522,7 +2538,7 @@ static int root_rename(vfs_node_t *old_parent, const char *old_name, vfs_node_t 
 
     (void)old_parent;
     r = root_mount_root();
-    if (r && r->rename)
-        return r->rename(r, old_name, new_parent, new_name);
+    if (r && r->ops && r->ops->rename)
+        return r->ops->rename(r, old_name, new_parent, new_name);
     return -1;
 }

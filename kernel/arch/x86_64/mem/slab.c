@@ -371,6 +371,65 @@ void *slab_alloc(size_t size) {
     return result;
 }
 
+void *slab_page_alloc(size_t size) {
+    uint64_t pages;
+    uint64_t virt;
+    uint64_t eflags;
+
+    if (!slab_initialized || size == 0 ||
+        size > UINT64_MAX - PAGE_SIZE + 1) return NULL;
+    pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    slab_lock_acquire(&eflags);
+    virt = slab_virtual_alloc(pages);
+    if (!virt || !slab_map_pages(virt, pages)) {
+        slab_lock_release(eflags);
+        return NULL;
+    }
+    slab_pages_allocated += pages;
+    slab_lock_release(eflags);
+    return (void *)(uintptr_t)virt;
+}
+
+void slab_page_free(void *ptr, size_t size) {
+    uint64_t address;
+    uint64_t region_end;
+    uint64_t pages;
+    uint64_t page;
+    uint64_t eflags;
+
+    if (!ptr || !slab_initialized || size == 0 ||
+        size > UINT64_MAX - PAGE_SIZE + 1) return;
+    address = (uint64_t)(uintptr_t)ptr;
+    if (address & (PAGE_SIZE - 1)) return;
+    if (!slab_region_contains(address, SLAB_PRIMARY_START,
+                              SLAB_PRIMARY_SIZE) &&
+        !slab_region_contains(address, SLAB_OVERFLOW_START,
+                              SLAB_OVERFLOW_SIZE)) return;
+    pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages > UINT64_MAX / PAGE_SIZE ||
+        address > UINT64_MAX - pages * PAGE_SIZE) return;
+    region_end = slab_region_contains(address, SLAB_PRIMARY_START,
+                                      SLAB_PRIMARY_SIZE) ?
+                 SLAB_PRIMARY_START + SLAB_PRIMARY_SIZE :
+                 SLAB_OVERFLOW_START + SLAB_OVERFLOW_SIZE;
+    if (address + pages * PAGE_SIZE > region_end) return;
+    slab_lock_acquire(&eflags);
+    for (page = 0; page < pages; page++) {
+        if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(),
+                                  address + page * PAGE_SIZE)) {
+            slab_lock_release(eflags);
+            return;
+        }
+    }
+    if (pages > slab_pages_allocated) {
+        slab_lock_release(eflags);
+        return;
+    }
+    slab_pages_allocated -= pages;
+    slab_unmap_pages(address, pages);
+    slab_lock_release(eflags);
+}
+
 void slab_free(void *ptr, void *caller) {
     slab_page_t *page;
     slab_block_t *block;

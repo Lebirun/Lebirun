@@ -43,12 +43,6 @@ typedef struct {
     uint64_t saved_cursor_x;
     uint64_t saved_cursor_y;
 
-    char *write_buffer;
-    uint8_t *write_flags;
-    uint64_t write_buffer_size;
-    volatile uint64_t write_head;
-    volatile uint64_t write_tail;
-    volatile uint64_t dirty;
     int allocated;
 
     int alt_screen_active;
@@ -89,7 +83,6 @@ void console_force_redraw(void);
 void console_tick_redraw(void);
 void console_clamp_cursors(uint64_t max_cols, uint64_t max_rows);
 void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows);
-void console_writer_flush(void);
 void console_tick(void);
 int console_alloc(int n);
 int console_alt_screen_active(int n);
@@ -97,6 +90,7 @@ void console_reclaim_unused(void);
 int console_fallback_reclaimable(void);
 void console_memory_stats(uint64_t *buffers, uint64_t *bytes);
 int console_get_cell(int console_num, uint64_t x, uint64_t y, char *ch, uint8_t *attr);
+uint64_t console_ansi_color(uint8_t idx, int bright);
 int console_set_graphics_mode(int console_num, int enabled, int owner_pid);
 int console_get_graphics_mode(int console_num);
 void console_release_graphics_owner(int owner_pid);

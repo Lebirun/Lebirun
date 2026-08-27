@@ -33,6 +33,17 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped);
 int syscall_user_range_present(uint64_t addr, uint64_t len,
                                int empty_mapped, int fallback_pd);
 int vfs_check_perm(vfs_node_t *node, int want);
+int syscall_vfs_open_resolved(char *path, int flags, int mode);
+int syscall_fd_read(int fd, char *buf, int len);
+int syscall_fd_write(int fd, const char *buf, int len);
+int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
+                     const char *newpath);
+int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                   const char *newpath, int flags);
+int syscall_symlinkat(uint64_t target, const char *dirfd, uint64_t linkpath);
+int syscall_readlinkat(int dirfd, const char *path, uint64_t buffer,
+                       uint64_t size);
+int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 
 #define EPERM    1
 #define ENOENT   2

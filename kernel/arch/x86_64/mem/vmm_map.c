@@ -41,73 +41,9 @@ static uint64_t get_page_phys_in_pd(uint64_t pd_phys, uint64_t virt_addr) {
     return result;
 }
 
-uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
-    uint64_t pml4_idx;
-    uint64_t pdpt_idx;
-    uint64_t pd_idx;
-    uint64_t pt_idx;
-    uint64_t temp_virt;
-    uint64_t *table;
-    uint64_t entry;
-    uint64_t pdpt_phys;
-    uint64_t pd_phys;
-    uint64_t pt_phys;
-    uint64_t pte;
-    uint64_t saved_flags;
-    uint64_t result;
-
-    pml4_idx = (virt_addr >> 39) & 0x1FF;
-    pdpt_idx = (virt_addr >> 30) & 0x1FF;
-    pd_idx = (virt_addr >> 21) & 0x1FF;
-    pt_idx = (virt_addr >> 12) & 0x1FF;
-
-    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
-
-    temp_virt = TEMP_SLOT(0);
-    temp_map_raw(temp_virt, pml4_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pml4_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { result = 0; goto out; }
-    pdpt_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(1);
-    temp_map_raw(temp_virt, pdpt_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pdpt_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { result = 0; goto out; }
-    pd_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(2);
-    temp_map_raw(temp_virt, pd_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pd_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { result = 0; goto out; }
-
-    if (entry & 0x80) {
-        uint64_t huge_phys = (entry & 0x000FFFFFFFE00000ULL) | (virt_addr & 0x1FFFFFULL);
-        result = huge_phys ? huge_phys : 1;
-        goto out;
-    }
-
-    pt_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(3);
-    temp_map_raw(temp_virt, pt_phys);
-    table = (uint64_t *)temp_virt;
-    pte = table[pt_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(pte & 1)) { result = 0; goto out; }
-
-    result = pte & VMM_PHYS_MASK;
-out:
-    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
-    return result;
-}
-
-uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+static int vmm_walk_leaf(uint64_t pml4_phys, uint64_t virt_addr,
+                         uint64_t *entry_out, uint64_t *effective_out,
+                         int *huge_out) {
     uint64_t pml4_idx;
     uint64_t pdpt_idx;
     uint64_t pd_idx;
@@ -117,16 +53,15 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     uint64_t entry;
     uint64_t table_phys;
     uint64_t saved_flags;
-    uint64_t result;
     uint64_t effective;
+    int result;
 
     pml4_idx = (virt_addr >> 39) & 0x1FF;
     pdpt_idx = (virt_addr >> 30) & 0x1FF;
     pd_idx = (virt_addr >> 21) & 0x1FF;
     pt_idx = (virt_addr >> 12) & 0x1FF;
-    result = 0;
     effective = VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_USER;
-
+    result = 0;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
     temp_virt = TEMP_SLOT(0);
     temp_map_raw(temp_virt, pml4_phys);
@@ -138,7 +73,6 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
     if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
     table_phys = entry & VMM_PHYS_MASK;
-
     temp_virt = TEMP_SLOT(1);
     temp_map_raw(temp_virt, table_phys);
     table = (uint64_t *)temp_virt;
@@ -149,7 +83,6 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
     if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
     table_phys = entry & VMM_PHYS_MASK;
-
     temp_virt = TEMP_SLOT(2);
     temp_map_raw(temp_virt, table_phys);
     table = (uint64_t *)temp_virt;
@@ -160,26 +93,60 @@ uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
     if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
     if (entry & 0x80) {
-        result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE |
-                                        VMM_PTE_SHARED));
+        *entry_out = entry;
+        if (effective_out) *effective_out = effective;
+        if (huge_out) *huge_out = 1;
+        result = 1;
         goto out;
     }
     table_phys = entry & VMM_PHYS_MASK;
-
     temp_virt = TEMP_SLOT(3);
     temp_map_raw(temp_virt, table_phys);
     table = (uint64_t *)temp_virt;
     entry = table[pt_idx];
     temp_unmap_raw(temp_virt);
-    if (!(entry & VMM_PTE_PRESENT)) goto out;
-    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
-    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
-    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
-    result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE |
-                                    VMM_PTE_SHARED));
-
+    if (entry & VMM_PTE_PRESENT) {
+        if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+        if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+        if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+    }
+    *entry_out = entry;
+    if (effective_out) *effective_out = effective;
+    if (huge_out) *huge_out = 0;
+    result = 1;
 out:
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    return result;
+}
+
+uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+    uint64_t entry;
+    uint64_t result;
+    int huge;
+
+    result = 0;
+    if (!vmm_walk_leaf(pml4_phys, virt_addr, &entry, NULL, &huge) ||
+        !(entry & VMM_PTE_PRESENT)) return 0;
+    if (huge) {
+        result = (entry & 0x000FFFFFFFE00000ULL) |
+                 (virt_addr & 0x1FFFFFULL);
+        if (!result) result = 1;
+        return result;
+    }
+    result = entry & VMM_PHYS_MASK;
+    return result;
+}
+
+uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+    uint64_t entry;
+    uint64_t result;
+    uint64_t effective;
+
+    result = 0;
+    if (!vmm_walk_leaf(pml4_phys, virt_addr, &entry, &effective, NULL) ||
+        !(entry & VMM_PTE_PRESENT)) return 0;
+    result = effective | (entry & (VMM_PTE_COW | VMM_PTE_NOFREE |
+                                    VMM_PTE_SHARED));
     return result;
 }
 

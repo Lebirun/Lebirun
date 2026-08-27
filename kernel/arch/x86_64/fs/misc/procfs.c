@@ -1078,6 +1078,9 @@ static const char proc_memdetail_names[] =
     "KernelImageKB:\0"
     "KernelReclaimedPages:\0"
     "KernelReclaimedKB:\0"
+    "ColdZeroPages:\0"
+    "ColdZeroKB:\0"
+    "ColdZeroFaults:\0"
     "BitmapKB:\0"
     "DemandBitmapBytes:\0"
     "DemandBitmapExtPages:\0"
@@ -1183,6 +1186,8 @@ typedef struct {
     uint64_t pfa_used_kb;
     uint64_t kern_kb;
     uint64_t kernel_reclaimed_pages;
+    uint64_t cold_zero_pages;
+    uint64_t cold_zero_faults;
     uint64_t bitmap_kb;
     uint64_t demand_bitmap_bytes;
     uint64_t demand_bitmap_extension_pages;
@@ -1235,6 +1240,9 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
     PROC_FIELD(kern_kb, 0),
     PROC_FIELD(kernel_reclaimed_pages, 0),
     PROC_FIELD(kernel_reclaimed_pages, 2),
+    PROC_FIELD(cold_zero_pages, 0),
+    PROC_FIELD(cold_zero_pages, 2),
+    PROC_FIELD(cold_zero_faults, 0),
     PROC_FIELD(bitmap_kb, 0),
     PROC_FIELD(demand_bitmap_bytes, 0),
     PROC_FIELD(demand_bitmap_extension_pages, 0),
@@ -1341,7 +1349,7 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
 _Static_assert(sizeof(proc_memdetail_snapshot_t) <= UINT16_MAX,
                "memdetail snapshot offset");
 _Static_assert(sizeof(proc_memdetail_fields) /
-                   sizeof(proc_memdetail_fields[0]) == 103,
+                   sizeof(proc_memdetail_fields[0]) == 106,
                "memdetail field count");
 
 static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
@@ -1394,6 +1402,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     snapshot.mem_all_used_kb = total_kb > free_kb ?
                                total_kb - free_kb : 0;
     snapshot.kernel_reclaimed_pages = pfa_get_kernel_reclaimed_pages();
+    snapshot.cold_zero_pages = pt_get_cold_zero_pages();
+    snapshot.cold_zero_faults = pt_get_cold_zero_faults();
     snapshot.early_heap_total_kb = heap_get_early_total() / 1024;
     snapshot.early_heap_used_kb = heap_get_early_used() / 1024;
     snapshot.heap_committed = demand_get_committed_pages();

@@ -526,6 +526,14 @@ static int ext4_vfs_sync(vfs_node_t *node, int data_only);
 static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                            vfs_node_t *new_parent, const char *new_name);
 
+static const vfs_node_ops_t ext4_node_ops = {
+    .create = ext4_vfs_create,
+    .unlink = ext4_vfs_unlink,
+    .mkdir = ext4_vfs_mkdir,
+    .truncate = ext4_vfs_truncate,
+    .rename = ext4_vfs_rename
+};
+
 static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char *name) {
     ext4_inode_cache_t *ic;
     vfs_node_t *node;
@@ -608,11 +616,7 @@ static vfs_node_t *ext4_create_vfs_node(ext4_fs_t *fs, uint32_t ino, const char 
     node->close = ext4_vfs_close;
     node->readdir = ext4_vfs_readdir;
     node->finddir = ext4_vfs_finddir;
-    node->create = ext4_vfs_create;
-    node->unlink = ext4_vfs_unlink;
-    node->mkdir = ext4_vfs_mkdir;
-    node->truncate = ext4_vfs_truncate;
-    node->rename = ext4_vfs_rename;
+    node->ops = &ext4_node_ops;
 
     node->private_data = priv;
     node->ref_count = 0;
@@ -931,7 +935,8 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
     parent = vfs_namei(parent_path);
     kfree(parent_path);
     if (!parent) return -1;
-    if (parent->create != ext4_vfs_create || !parent->private_data) {
+    if (!parent->ops || parent->ops->create != ext4_vfs_create ||
+        !parent->private_data) {
         vfs_release(parent);
         return -1;
     }
@@ -1250,7 +1255,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
 
     if (ext4_read_superblock(fs) != 0) {
         printf("EXT4: Failed to read superblock\n");
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1258,7 +1263,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
 
     if (ext4_validate_superblock(&fs->sb) != 0) {
         printf("EXT4: Invalid superblock\n");
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1268,7 +1273,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
 
     if (ext4_prepare_rw_mount(fs) != 0) {
         printf("EXT4: Filesystem recovery failed\n");
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1277,7 +1282,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
         printf("EXT4: Failed to create root node\n");
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1341,7 +1346,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     ext4_free_vfs_nodes(fs);
 
     if (fs->block_cache) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
     }
 
     if (fs->inode_cache) {
@@ -1419,21 +1424,21 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     fs->block_cache = NULL;
 
     if (ext4_read_superblock(fs) != 0) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
     }
 
     if (ext4_validate_superblock(&fs->sb) != 0) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
     }
 
     if (ext4_prepare_rw_mount(fs) != 0) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1441,7 +1446,7 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
 
     root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
         kfree(fs->inode_cache);
         kfree(fs);
         return NULL;
@@ -1482,7 +1487,7 @@ int ext4_unmount(ext4_fs_t *fs) {
     ext4_free_vfs_nodes(fs);
 
     if (fs->block_cache) {
-        kfree(fs->block_cache);
+        ext4_drop_block_cache(fs);
     }
 
     if (fs->inode_cache) {

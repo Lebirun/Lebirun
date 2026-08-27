@@ -375,11 +375,9 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
             klog_con(con_id, "  DNS: %u.%u.%u.%u\n",
                      netif->dns_server.octets[0], netif->dns_server.octets[1],
                      netif->dns_server.octets[2], netif->dns_server.octets[3]);
-            console_writer_flush();
             return 0;
         }
         klog_con(con_id, "DHCP: Timed out\n");
-        console_writer_flush();
         return -1;
     }
     return -1;

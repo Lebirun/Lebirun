@@ -20,9 +20,12 @@ int smp_processor_id(void);
 #define VMM_PTE_COW 0x200ULL
 #define VMM_PTE_NOFREE 0x400ULL
 #define VMM_PTE_SHARED 0x800ULL
+#define VMM_PTE_COLD_ZERO (VMM_PTE_COW | VMM_PTE_NOFREE)
 #define VMM_PTE_PRESENT 0x001ULL
 #define VMM_PTE_WRITE 0x002ULL
 #define VMM_PTE_USER 0x004ULL
+#define VMM_PTE_PWT 0x008ULL
+#define VMM_PTE_PCD 0x010ULL
 #define VMM_PTE_NX 0x8000000000000000ULL
 
 extern uint64_t total_pages_managed;
@@ -120,6 +123,7 @@ uint64_t pfa_alloc_contiguous(uint64_t num_frames);
 void pfa_free(uint64_t phys_addr);
 uint64_t pfa_release_multiboot_range(uint64_t phys_start, uint64_t phys_end);
 uint64_t pfa_release_cold_low_memory(uint64_t phys_end);
+int pfa_claim_reclaimed_kernel_page(uint64_t phys_addr);
 void pfa_reclaim_kernel_range(uint64_t phys_start, uint64_t phys_end);
 void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end);
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames);
@@ -177,6 +181,8 @@ void heap_verify(void);
 void slab_init(void);
 void *slab_alloc(size_t size);
 void slab_free(void *ptr, void *caller);
+void *slab_page_alloc(size_t size);
+void slab_page_free(void *ptr, size_t size);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
 size_t slab_alloc_size(void *ptr);
@@ -218,6 +224,10 @@ void vmm_map_temp(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 void vmm_unmap_temp(uint64_t virt_addr);
 int pt_ensure_phys_mapped(uint64_t phys_addr);
 int pt_reclaim_low_identity(void);
+uint64_t pt_reclaim_zero_bss(uint64_t virt_start, uint64_t virt_end);
+int pt_cold_zero_page_fault(uint64_t fault_addr, uint64_t err_code);
+uint64_t pt_get_cold_zero_pages(void);
+uint64_t pt_get_cold_zero_faults(void);
 
 int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);

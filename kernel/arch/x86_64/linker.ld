@@ -82,10 +82,33 @@ SECTIONS
         *(.data .data.*)
     } :data
 
+    .bss.critical (NOLOAD) : AT(ADDR(.bss.critical) - KERNEL_VMA) {
+        arch/x86_64/gdt.o(.bss .bss.* COMMON)
+        arch/x86_64/idt.o(.bss .bss.* COMMON)
+        arch/x86_64/panic.o(.bss .bss.* COMMON)
+        arch/x86_64/smp.o(.bss .bss.* COMMON)
+        arch/x86_64/task.o(.bss .bss.* COMMON)
+        arch/x86_64/vring.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/globals.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/pmm.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/pt.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/vmm.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/vmm_map.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/vmm_pd.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/temp_map.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/demand.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/heap.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/slab.o(.bss .bss.* COMMON)
+        arch/x86_64/mem/kstack.o(.bss .bss.* COMMON)
+        kernel/kernel.o(.bss .bss.* COMMON)
+    } :data
+
     .bss : AT(ADDR(.bss) - KERNEL_VMA) {
+        _kernel_bss_start = .;
         *(COMMON)
         *(.bss)
         *(SORT_BY_ALIGNMENT(.bss.*))
+        _kernel_bss_end = .;
     } :data
 
     .bootstrap_stack ALIGN(4K) : AT(ADDR(.bootstrap_stack) - KERNEL_VMA) {

@@ -1613,7 +1613,7 @@ static void task_clear_file_mappings(task_t *t) {
         return;
     }
     buffer = NULL;
-    if (t->pml4_phys) buffer = (uint8_t *)kmalloc(PAGE_SIZE);
+    if (t->pml4_phys) buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     for (i = 0; i < t->file_map_count; i++) {
         if (buffer && t->file_maps[i].node &&
             (t->file_maps[i].map_flags & TASK_VMA_SHARED) &&
@@ -1642,7 +1642,7 @@ static void task_clear_file_mappings(task_t *t) {
             t->file_maps[i].node = NULL;
         }
     }
-    if (buffer) kfree(buffer);
+    if (buffer) slab_page_free(buffer, PAGE_SIZE);
     kfree(t->file_maps);
     t->file_maps = NULL;
     t->file_map_count = 0;
@@ -2278,11 +2278,15 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
     uint64_t removed;
     uint64_t flags;
     uint64_t reclaimed;
+    uint64_t prune_start;
+    uint64_t prune_end;
     int i;
 
     if (!task || !task->is_user || !task->pml4_phys || max_pages == 0)
         return 0;
     reclaimed = 0;
+    prune_start = 0;
+    prune_end = 0;
     for (i = 0; i < task->file_map_count && reclaimed < max_pages; i++) {
         area = &task->file_maps[i];
         if (!area->node ||
@@ -2309,9 +2313,16 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
             if (!removed) continue;
             task_untrack_user_page(task, removed);
             pfa_cow_release64(removed);
+            if (!prune_start || address < prune_start)
+                prune_start = address;
+            if (address + PAGE_SIZE > prune_end)
+                prune_end = address + PAGE_SIZE;
             reclaimed++;
         }
     }
+    if (prune_end > prune_start)
+        vmm_prune_user_range(task->pml4_phys, prune_start,
+                             prune_end - prune_start);
     return reclaimed;
 }
 
@@ -2751,7 +2762,7 @@ void task_reclaim_exited_now(void) {
 }
 
 void task_memory_pressure_request(void) {
-    memory_pressure_pending |= MEMORY_PRESSURE_REQUESTED;
+    __sync_fetch_and_or(&memory_pressure_pending, MEMORY_PRESSURE_REQUESTED);
 }
 
 static void task_memory_pressure_reclaim(void) {
@@ -2779,7 +2790,7 @@ static void task_memory_pressure_reclaim(void) {
 }
 
 void task_memory_pressure_reclaim_now(void) {
-    memory_pressure_pending = 0;
+    __sync_lock_test_and_set(&memory_pressure_pending, 0);
     memory_pressure_last_tick = tick_count;
     task_memory_pressure_reclaim();
 }
@@ -2900,8 +2911,6 @@ void task_deferred_work(void) {
         } else if (((memory_pressure_pending & MEMORY_PRESSURE_REQUESTED) ||
                     free_pages < low_watermark) &&
             tick_count - memory_pressure_last_tick >= 25) {
-            memory_pressure_pending = 0;
-            memory_pressure_last_tick = tick_count;
             task_memory_pressure_reclaim_now();
         }
     }

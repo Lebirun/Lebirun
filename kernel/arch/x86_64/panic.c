@@ -80,6 +80,16 @@ static void panic_print_hex(uint64_t v) {
     panic_print(buf);
 }
 
+static void __attribute__((noinline)) panic_print_hex_pair(
+    const char *first, uint64_t first_value, const char *second,
+    uint64_t second_value) {
+    panic_print(first);
+    panic_print_hex(first_value);
+    panic_print(second);
+    panic_print_hex(second_value);
+    panic_print("\n");
+}
+
 static void panic_print_dec(int v) {
     char buf[12];
     int i;
@@ -120,6 +130,25 @@ static int is_valid_kernel_ptr(uint64_t addr) {
     if (vmm_get_phys_in_pml4(cr3, addr) == 0) return 0;
 
     return 1;
+}
+
+static void __attribute__((noinline)) panic_print_stack_trace(
+    uint64_t *frame) {
+    int frame_count;
+
+    if (!frame) return;
+    panic_print("\n--- STACK TRACE (RBP CHAIN) ---\n");
+    frame_count = 0;
+    while (frame && frame_count < 10) {
+        if (!is_valid_kernel_ptr((uint64_t)frame)) break;
+        if (!is_valid_kernel_ptr((uint64_t)&frame[1])) break;
+        panic_print("  #");
+        panic_print_hex(frame_count);
+        panic_print_hex_pair("  RBP=0x", (uint64_t)frame,
+                             "  RET=0x", frame[1]);
+        frame = (uint64_t *)frame[0];
+        frame_count++;
+    }
 }
 
 static void panic_dump_memory(uint64_t addr, int count) {
@@ -293,7 +322,6 @@ void kernel_panic(const char *reason, registers_t *regs) {
     uint64_t cr3_val;
     uint64_t cr4_val;
     uint64_t *ebp_ptr;
-    int frame_count;
 
     fault_addr = 0;
     cr0_val = 0;
@@ -319,41 +347,25 @@ void kernel_panic(const char *reason, registers_t *regs) {
         }
 
         panic_print("\n--- EXCEPTION INFO ---\n");
-        panic_print("  INT=0x");
-        panic_print_hex(regs->int_no);
-        panic_print("  ERR=0x");
-        panic_print_hex(regs->err_code);
-        panic_print("\n  RIP=0x");
-        panic_print_hex(regs->rip);
-        panic_print("  CS=0x");
-        panic_print_hex(regs->cs);
-        panic_print("\n");
+        panic_print_hex_pair("  INT=0x", regs->int_no,
+                             "  ERR=0x", regs->err_code);
+        panic_print_hex_pair("  RIP=0x", regs->rip,
+                             "  CS=0x", regs->cs);
 
         panic_print("\n--- REGISTERS ---\n");
-        panic_print("  RAX=0x");
-        panic_print_hex(regs->rax);
-        panic_print("  RBX=0x");
-        panic_print_hex(regs->rbx);
-        panic_print("\n  RCX=0x");
-        panic_print_hex(regs->rcx);
-        panic_print("  RDX=0x");
-        panic_print_hex(regs->rdx);
-        panic_print("\n  RSI=0x");
-        panic_print_hex(regs->rsi);
-        panic_print("  RDI=0x");
-        panic_print_hex(regs->rdi);
-        panic_print("\n  RBP=0x");
-        panic_print_hex(regs->rbp);
-        panic_print("  RSP=0x");
-        panic_print_hex(regs->rsp);
-        panic_print("\n");
+        panic_print_hex_pair("  RAX=0x", regs->rax,
+                             "  RBX=0x", regs->rbx);
+        panic_print_hex_pair("  RCX=0x", regs->rcx,
+                             "  RDX=0x", regs->rdx);
+        panic_print_hex_pair("  RSI=0x", regs->rsi,
+                             "  RDI=0x", regs->rdi);
+        panic_print_hex_pair("  RBP=0x", regs->rbp,
+                             "  RSP=0x", regs->rsp);
 
         panic_print("\n--- SEGMENT REGISTERS ---\n");
-        panic_print("  DS=0x");
-        panic_print_hex(regs->ds);
-        panic_print("  ES=0x");
-        panic_print_hex(regs->es);
-        panic_print("\n  RFLAGS=0x");
+        panic_print_hex_pair("  DS=0x", regs->ds,
+                             "  ES=0x", regs->es);
+        panic_print("  RFLAGS=0x");
         panic_print_hex(regs->rflags);
         panic_print("\n");
 
@@ -424,22 +436,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
             break;
         }
 
-        panic_print("\n--- STACK TRACE (RBP CHAIN) ---\n");
-        ebp_ptr = (uint64_t *)regs->rbp;
-        frame_count = 0;
-        while (ebp_ptr && frame_count < 10) {
-            if (!is_valid_kernel_ptr((uint64_t)ebp_ptr)) break;
-            if (!is_valid_kernel_ptr((uint64_t)&ebp_ptr[1])) break;
-            panic_print("  #");
-            panic_print_hex(frame_count);
-            panic_print("  RBP=0x");
-            panic_print_hex((uint64_t)ebp_ptr);
-            panic_print("  RET=0x");
-            panic_print_hex(ebp_ptr[1]);
-            panic_print("\n");
-            ebp_ptr = (uint64_t *)ebp_ptr[0];
-            frame_count++;
-        }
+        panic_print_stack_trace((uint64_t *)regs->rbp);
 
         if (is_valid_kernel_ptr(regs->rsp)) {
             panic_print("\n--- STACK DUMP (8 QWORDS @ RSP) ---\n");
@@ -452,23 +449,7 @@ void kernel_panic(const char *reason, registers_t *regs) {
         }
     } else {
         __asm__ volatile ("mov %%rbp, %0" : "=r"(ebp_ptr));
-        if (ebp_ptr) {
-            panic_print("\n--- STACK TRACE (RBP CHAIN) ---\n");
-            frame_count = 0;
-            while (ebp_ptr && frame_count < 10) {
-                if (!is_valid_kernel_ptr((uint64_t)ebp_ptr)) break;
-                if (!is_valid_kernel_ptr((uint64_t)&ebp_ptr[1])) break;
-                panic_print("  #");
-                panic_print_hex(frame_count);
-                panic_print("  RBP=0x");
-                panic_print_hex((uint64_t)ebp_ptr);
-                panic_print("  RET=0x");
-                panic_print_hex(ebp_ptr[1]);
-                panic_print("\n");
-                ebp_ptr = (uint64_t *)ebp_ptr[0];
-                frame_count++;
-            }
-        }
+        panic_print_stack_trace(ebp_ptr);
     }
 
     panic_print("\n*** SYSTEM HALTED ***\n");

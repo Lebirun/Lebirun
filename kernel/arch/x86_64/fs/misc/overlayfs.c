@@ -299,6 +299,22 @@ static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length);
 static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode);
 static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid);
+
+static const vfs_node_ops_t overlay_file_ops = {
+    .truncate = overlay_vfs_truncate,
+    .chmod = overlay_vfs_chmod,
+    .chown = overlay_vfs_chown
+};
+
+static const vfs_node_ops_t overlay_dir_ops = {
+    .create = overlay_vfs_create,
+    .unlink = overlay_vfs_unlink,
+    .mkdir = overlay_vfs_mkdir,
+    .truncate = overlay_vfs_truncate,
+    .rename = overlay_vfs_rename,
+    .chmod = overlay_vfs_chmod,
+    .chown = overlay_vfs_chown
+};
 static void overlay_ensure_upper_dirs(const char *path);
 
 static int overlay_ramfs_result(int result) {
@@ -391,21 +407,16 @@ static vfs_node_t *overlay_wrap_node(vfs_node_t *lower, vfs_node_t *upper, const
     onode->vfs.mtime = effective->mtime;
     onode->vfs.private_data = onode;
     
-    onode->vfs.open = overlay_vfs_open;
-    onode->vfs.close = overlay_vfs_close;
     onode->vfs.read = overlay_vfs_read;
     onode->vfs.write = overlay_vfs_write;
-    onode->vfs.truncate = overlay_vfs_truncate;
-    onode->vfs.chmod = overlay_vfs_chmod;
-    onode->vfs.chown = overlay_vfs_chown;
+    onode->vfs.open = overlay_vfs_open;
+    onode->vfs.close = overlay_vfs_close;
+    onode->vfs.ops = &overlay_file_ops;
     
     if (VFS_GET_TYPE(effective->flags) == VFS_DIRECTORY) {
         onode->vfs.readdir = overlay_vfs_readdir;
         onode->vfs.finddir = overlay_vfs_finddir;
-        onode->vfs.create = overlay_vfs_create;
-        onode->vfs.mkdir = overlay_vfs_mkdir;
-        onode->vfs.unlink = overlay_vfs_unlink;
-        onode->vfs.rename = overlay_vfs_rename;
+        onode->vfs.ops = &overlay_dir_ops;
     }
 
     name_len = strlen(name);
@@ -596,8 +607,8 @@ static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     
     if (!onode->upper_node) return -1;
     
-    if (onode->upper_node->truncate) {
-        ret = onode->upper_node->truncate(onode->upper_node, length);
+    if (onode->upper_node->ops && onode->upper_node->ops->truncate) {
+        ret = onode->upper_node->ops->truncate(onode->upper_node, length);
         if (ret == 0)
             node->length = onode->upper_node->length;
         return ret;
@@ -629,8 +640,8 @@ static int overlay_vfs_chmod(vfs_node_t *node, uint64_t mode) {
     target = onode->upper_node ? onode->upper_node : onode->lower_node;
     if (!target) return -1;
 
-    if (target->chmod) {
-        ret = target->chmod(target, mode);
+    if (target->ops && target->ops->chmod) {
+        ret = target->ops->chmod(target, mode);
         if (ret == 0) node->mask = mode;
         return ret;
     }
@@ -663,8 +674,8 @@ static int overlay_vfs_chown(vfs_node_t *node, uint64_t uid, uint64_t gid) {
     target = onode->upper_node ? onode->upper_node : onode->lower_node;
     if (!target) return -1;
 
-    if (target->chown) {
-        ret = target->chown(target, uid, gid);
+    if (target->ops && target->ops->chown) {
+        ret = target->ops->chown(target, uid, gid);
         if (ret == 0) {
             node->uid = target->uid;
             node->gid = target->gid;
@@ -1020,8 +1031,8 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     in_upper = upper_dir ? vfs_finddir(upper_dir, name) : NULL;
     in_lower = lower_dir ? vfs_finddir(lower_dir, name) : NULL;
     
-    if (in_upper && upper_dir->unlink) {
-        ret = upper_dir->unlink(upper_dir, name);
+    if (in_upper && upper_dir->ops && upper_dir->ops->unlink) {
+        ret = upper_dir->ops->unlink(upper_dir, name);
         if (ret != 0) {
             vfs_release(in_upper);
             if (in_lower) vfs_release(in_lower);

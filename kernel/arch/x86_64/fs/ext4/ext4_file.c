@@ -16,6 +16,8 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
     uint64_t phys_block;
     uint8_t *block;
     uint8_t *inline_data;
+    uint32_t run_blocks;
+    uint32_t run_limit;
 
     if (!buffer || size == 0) {
         return 0;
@@ -33,7 +35,7 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
         return 0;
     }
 
-    if (offset + size > file_size) {
+    if (size > file_size - offset) {
         size = file_size - offset;
     }
 
@@ -57,11 +59,27 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
             to_read = size - bytes_read;
         }
 
-        phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
+        run_limit = 1;
+        if (block_off == 0 && to_read == fs->block_size) {
+            run_limit = (size - bytes_read) / fs->block_size;
+            if (fs->sectors_per_block != 0 &&
+                run_limit > 256 / fs->sectors_per_block)
+                run_limit = 256 / fs->sectors_per_block;
+            if (run_limit == 0) run_limit = 1;
+        }
+        run_blocks = ext4_inode_get_run(fs, &ic->inode, block_num,
+                                        run_limit, &phys_block);
 
-        if (phys_block == 0) {
+        if (run_blocks == 0 || phys_block == 0) {
             memset(buffer + bytes_read, 0, to_read);
         } else {
+            if (block_off == 0 && to_read == fs->block_size &&
+                run_blocks > 1 &&
+                ext4_read_blocks(fs, phys_block, run_blocks,
+                                 buffer + bytes_read) == 0) {
+                bytes_read += run_blocks * fs->block_size;
+                continue;
+            }
             block = ext4_get_block(fs, phys_block);
             if (!block) {
                 break;
@@ -83,7 +101,6 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
     uint8_t *ind_block;
     uint32_t *ptrs;
     int64_t new_block;
-    uint8_t *zero_block;
     uint8_t *dind_block;
     uint32_t *dptrs;
     uint32_t ind_idx;
@@ -115,12 +132,10 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                 return -1;
             }
             inode->i_block[EXT4_IND_BLOCK] = (uint32_t)new_block;
-            
-            zero_block = (uint8_t *)kmalloc(fs->block_size);
-            if (zero_block) {
-                memset(zero_block, 0, fs->block_size);
-                ext4_write_block(fs, new_block, zero_block);
-                kfree(zero_block);
+            if (ext4_zero_block(fs, (uint64_t)new_block) != 0) {
+                inode->i_block[EXT4_IND_BLOCK] = 0;
+                ext4_free_block(fs, (uint64_t)new_block);
+                return -1;
             }
         }
 
@@ -149,12 +164,10 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                 return -1;
             }
             inode->i_block[EXT4_DIND_BLOCK] = (uint32_t)new_block;
-
-            zero_block = (uint8_t *)kmalloc(fs->block_size);
-            if (zero_block) {
-                memset(zero_block, 0, fs->block_size);
-                ext4_write_block(fs, new_block, zero_block);
-                kfree(zero_block);
+            if (ext4_zero_block(fs, (uint64_t)new_block) != 0) {
+                inode->i_block[EXT4_DIND_BLOCK] = 0;
+                ext4_free_block(fs, (uint64_t)new_block);
+                return -1;
             }
         }
 
@@ -180,12 +193,12 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
             }
             dptrs[ind_idx] = (uint32_t)new_block;
             ext4_mark_block_dirty(fs, inode->i_block[EXT4_DIND_BLOCK]);
-
-            zero_block = (uint8_t *)kmalloc(fs->block_size);
-            if (zero_block) {
-                memset(zero_block, 0, fs->block_size);
-                ext4_write_block(fs, new_block, zero_block);
-                kfree(zero_block);
+            if (ext4_zero_block(fs, (uint64_t)new_block) != 0) {
+                dptrs[ind_idx] = 0;
+                ext4_free_block(fs, (uint64_t)new_block);
+                ext4_release_block(fs,
+                                   inode->i_block[EXT4_DIND_BLOCK]);
+                return -1;
             }
         }
 

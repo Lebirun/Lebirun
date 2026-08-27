@@ -12,6 +12,8 @@
 static e1000_device_t *g_e1000_dev;
 static volatile int e1000_poll_lock = 0;
 static volatile int e1000_tx_lock = 0;
+static inline uint32_t e1000_read(e1000_device_t *dev, uint32_t reg);
+static inline void e1000_write(e1000_device_t *dev, uint32_t reg, uint32_t value);
 
 static e1000_device_t *e1000_allocate_device(void) {
     e1000_device_t *dev;
@@ -37,6 +39,45 @@ static void e1000_lock(volatile int *lock) {
 
 static void e1000_unlock(volatile int *lock) {
     __sync_lock_release(lock);
+}
+
+static void e1000_release_device(e1000_device_t *dev) {
+    uint64_t virt;
+    uint64_t phys;
+    int i;
+
+    if (!dev) return;
+    if (dev->bar0 || dev->io_base) {
+        e1000_write(dev, E1000_IMC, 0xFFFFFFFF);
+        e1000_write(dev, E1000_RCTL, 0);
+        e1000_write(dev, E1000_TCTL, 0);
+        (void)e1000_read(dev, E1000_STATUS);
+    }
+    for (i = 0; i < E1000_NUM_RX_DESC; i += 2) {
+        if (!dev->rx_buffers_phys[i]) continue;
+        phys = dev->rx_buffers_phys[i] & ~(PAGE_SIZE - 1);
+        virt = (uint64_t)dev->rx_buffers[i] & ~(PAGE_SIZE - 1);
+        if (virt) vmm_unmap_page(virt);
+        pfa_free(phys);
+    }
+    for (i = 0; i < E1000_TX_BUFFER_DESC; i += 2) {
+        if (!dev->tx_buffers_phys[i]) continue;
+        phys = dev->tx_buffers_phys[i] & ~(PAGE_SIZE - 1);
+        virt = (uint64_t)dev->tx_buffers[i] & ~(PAGE_SIZE - 1);
+        if (virt) vmm_unmap_page(virt);
+        pfa_free(phys);
+    }
+    if (dev->rx_descs_phys) {
+        if (dev->rx_descs) vmm_unmap_page((uint64_t)dev->rx_descs);
+        pfa_free(dev->rx_descs_phys);
+    }
+    if (dev->tx_descs_phys) {
+        if (dev->tx_descs) vmm_unmap_page((uint64_t)dev->tx_descs);
+        pfa_free(dev->tx_descs_phys);
+    }
+    if (dev->netif) kfree(dev->netif);
+    if (g_e1000_dev == dev) g_e1000_dev = NULL;
+    kfree(dev);
 }
 
 static void e1000_ensure_mmio_mapped(e1000_device_t *dev) {
@@ -577,11 +618,13 @@ int e1000_init(void) {
 
     if (e1000_init_rx(dev) < 0) {
         printf("E1000: Failed to initialize RX\n");
+        e1000_release_device(dev);
         return -1;
     }
 
     if (e1000_init_tx(dev) < 0) {
         printf("E1000: Failed to initialize TX\n");
+        e1000_release_device(dev);
         return -1;
     }
 
@@ -592,6 +635,7 @@ int e1000_init(void) {
     netif = netif_alloc();
     if (!netif) {
         printf("E1000: Failed to allocate network interface\n");
+        e1000_release_device(dev);
         return -1;
     }
 

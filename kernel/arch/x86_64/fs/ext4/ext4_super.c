@@ -5,23 +5,26 @@
 #include <string.h>
 
 int ext4_read_superblock(ext4_fs_t *fs) {
-    ahci_port_t *port = ahci_get_port(fs->port_index);
+    ahci_port_t *port;
+    uint8_t *buffer;
+
+    port = ahci_get_port(fs->port_index);
     if (!port) {
         return -1;
     }
 
-    uint8_t *buffer = (uint8_t *)kmalloc(4096);
+    buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     if (!buffer) {
         return -1;
     }
 
     if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
-        kfree(buffer);
+        slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
 
     memcpy(&fs->sb, buffer + EXT4_SUPERBLOCK_OFFSET, sizeof(ext4_superblock_t));
-    kfree(buffer);
+    slab_page_free(buffer, PAGE_SIZE);
 
     if (fs->sb.s_magic != EXT4_SUPER_MAGIC) {
         return -1;
@@ -61,30 +64,33 @@ int ext4_read_superblock(ext4_fs_t *fs) {
 }
 
 int ext4_write_superblock(ext4_fs_t *fs) {
-    ahci_port_t *port = ahci_get_port(fs->port_index);
+    ahci_port_t *port;
+    uint8_t *buffer;
+
+    port = ahci_get_port(fs->port_index);
     if (!port) {
         return -1;
     }
 
-    uint8_t *buffer = (uint8_t *)kmalloc(4096);
+    buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     if (!buffer) {
         return -1;
     }
 
     memset(buffer, 0, 4096);
     if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
-        kfree(buffer);
+        slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
 
     memcpy(buffer + EXT4_SUPERBLOCK_OFFSET, &fs->sb, sizeof(ext4_superblock_t));
 
     if (ahci_write_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
-        kfree(buffer);
+        slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
 
-    kfree(buffer);
+    slab_page_free(buffer, PAGE_SIZE);
     return 0;
 }
 

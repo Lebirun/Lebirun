@@ -19,36 +19,6 @@ typedef struct {
     long tv_nsec;
 } at_timespec_t;
 
-static int task_fd_alloc_from(int start) {
-    int i;
-    int ret;
-
-    if (!current_task || !current_task->fds) return -ESRCH;
-    if (start < 0) start = 0;
-    for (i = start; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) {
-            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-            current_task->fds[i].in_use = 1;
-            current_task->fds[i].ref_count = 1;
-            current_task->fds[i].type = FD_TYPE_FILE;
-            return i;
-        }
-    }
-    ret = task_fd_ensure_capacity(
-        current_task, start >= current_task->fds_capacity ?
-        start : current_task->fds_capacity);
-    if (ret != 0) return -EMFILE;
-    for (i = start; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) break;
-    }
-    if (i >= current_task->fds_capacity) return -EMFILE;
-    memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-    current_task->fds[i].in_use = 1;
-    current_task->fds[i].ref_count = 1;
-    current_task->fds[i].type = FD_TYPE_FILE;
-    return i;
-}
-
 static char *resolve_at_path_alloc(int dirfd, const char *pathname) {
     char *input;
     char *base_alloc;
@@ -156,178 +126,11 @@ static int split_at_path_alloc(const char *path, char **parent_out,
 
 static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
     char *path;
-    vfs_node_t *node;
-    int fd;
-    uint64_t create_mode;
-    char *parent_path;
-    char *filename;
-    int ret;
-    int want;
-    int perm_ret;
-    int pipe_type;
-    uint64_t pipe_flags;
-    uint64_t mount_flags;
-    pipe_t *pipe;
-    vfs_node_t *parent;
 
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
-
-    if (!current_task) {
-        kfree(path);
-        return -ESRCH;
-    }
-
-    if (pty_path_supported(path)) {
-        fd = pty_open_path(path, flags);
-        if (fd != PTY_OPEN_FALLBACK) {
-            kfree(path);
-            if (fd == PTY_OPEN_NOCTTY) return -ENXIO;
-            return fd < 0 ? -ENODEV : fd;
-        }
-    }
-
-    node = vfs_namei(path);
-
-    if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
-        vfs_release(node);
-        kfree(path);
-        return -EEXIST;
-    }
-
-    if (!node && (flags & VFS_O_CREAT)) {
-        create_mode = (uint64_t)(mode & 0777);
-        create_mode &= ~current_task->creation_mask;
-        if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
-
-        ret = split_at_path_alloc(path, &parent_path, &filename);
-        if (ret != 0) {
-            kfree(path);
-            return ret;
-        }
-
-        parent = vfs_namei(parent_path);
-        kfree(parent_path);
-        if (!parent) {
-            kfree(filename);
-            kfree(path);
-            return -ENOENT;
-        }
-
-        if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
-            vfs_release(parent);
-            kfree(filename);
-            kfree(path);
-            return -EROFS;
-        }
-
-        ret = vfs_create(parent, filename, create_mode);
-        vfs_release(parent);
-        kfree(filename);
-        if (ret < 0 && !(flags & VFS_O_EXCL)) {
-            node = vfs_namei(path);
-        } else if (ret == 0) {
-            node = vfs_namei(path);
-        }
-    }
-
-    kfree(path);
-    if (!node) return -ENOENT;
-
-    mount_flags = vfs_get_mount_flags_for_node(node);
-    if (((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR) ||
-         (flags & VFS_O_TRUNC)) &&
-        (mount_flags & VFS_MS_RDONLY)) {
-        vfs_release(node);
-        return -EROFS;
-    }
-    if ((VFS_GET_TYPE(node->flags) == VFS_CHARDEVICE ||
-         VFS_GET_TYPE(node->flags) == VFS_BLOCKDEVICE) &&
-        (mount_flags & VFS_MS_NODEV)) {
-        vfs_release(node);
-        return -EACCES;
-    }
-    want = VFS_PERM_READ;
-    if ((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR) ||
-        (flags & VFS_O_TRUNC)) want |= VFS_PERM_WRITE;
-    perm_ret = vfs_check_perm(node, want);
-    if (perm_ret < 0) {
-        vfs_release(node);
-        return perm_ret;
-    }
-
-    if (VFS_GET_TYPE(node->flags) == VFS_PIPE) {
-        if ((flags & 0x3) == VFS_O_WRONLY) pipe_type = FD_TYPE_PIPE_W;
-        else if ((flags & 0x3) == VFS_O_RDWR) pipe_type = FD_TYPE_PIPE_RW;
-        else pipe_type = FD_TYPE_PIPE_R;
-        pipe = pipe_named_open(node, pipe_type);
-        if (!pipe) {
-            vfs_release(node);
-            return -ENOMEM;
-        }
-        pipe_flags = pipe_lock_irqsave(pipe);
-        if (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0 &&
-            (flags & VFS_O_NONBLOCK)) {
-            pipe_unlock_irqrestore(pipe, pipe_flags);
-            pipe_release_reference(pipe, pipe_type);
-            pipe_destroy_if_unused(pipe);
-            vfs_release(node);
-            return -ENXIO;
-        }
-        while (!(flags & VFS_O_NONBLOCK) &&
-               ((pipe_type == FD_TYPE_PIPE_R && pipe->writers == 0) ||
-                (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0))) {
-            if (pipe_type == FD_TYPE_PIPE_R)
-                waitq_add(&pipe->read_waitq, current_task);
-            else
-                waitq_add(&pipe->write_waitq, current_task);
-            current_task->state = TASK_BLOCKED;
-            pipe_unlock_irqrestore(pipe, pipe_flags);
-            schedule();
-            if (task_has_pending_signals()) {
-                pipe_release_reference(pipe, pipe_type);
-                pipe_destroy_if_unused(pipe);
-                vfs_release(node);
-                return -EINTR;
-            }
-            pipe_flags = pipe_lock_irqsave(pipe);
-        }
-        pipe_unlock_irqrestore(pipe, pipe_flags);
-        fd = task_fd_alloc_from(0);
-        if (fd < 0) {
-            pipe_release_reference(pipe, pipe_type);
-            pipe_destroy_if_unused(pipe);
-            vfs_release(node);
-            return fd;
-        }
-        current_task->fds[fd].type = pipe_type;
-        current_task->fds[fd].node = node;
-        current_task->fds[fd].private_data = pipe;
-        current_task->fds[fd].flags = (uint64_t)flags;
-        vfs_release(node);
-        return fd;
-    }
-
-    if ((flags & VFS_O_TRUNC) && node->truncate) {
-        node->truncate(node, 0);
-    }
-
-    if ((flags & 0200000) && VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
-        vfs_release(node);
-        return -ENOTDIR;
-    }
-
-    fd = task_fd_alloc_from(0);
-    if (fd < 0) { vfs_release(node); return fd; }
-
-    vfs_open(node, (uint64_t)flags);
-    current_task->fds[fd].type = FD_TYPE_FILE;
-    current_task->fds[fd].node = node;
-    current_task->fds[fd].offset = (flags & VFS_O_APPEND) ? node->length : 0;
-    current_task->fds[fd].flags = (uint64_t)flags;
-    return fd;
+    return syscall_vfs_open_resolved(path, flags, mode);
 }
-
 static int sys_mkdirat(int dirfd, const char *pathname, int mode) {
     char *path;
     char *parent_path;
@@ -438,8 +241,8 @@ static int sys_fchownat(int dirfd, const char *pathname, int owner) {
         return -EROFS;
     }
 
-    if (node->chown) {
-        result = node->chown(node, (uint64_t)owner, node->gid);
+    if (node->ops && node->ops->chown) {
+        result = node->ops->chown(node, (uint64_t)owner, node->gid);
         vfs_release(node);
         return result;
     }
@@ -498,7 +301,8 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     return r;
 }
 
-static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath_arg) {
+int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
+                     const char *newpath_arg) {
     char *old_path;
     char *new_path;
     char *old_parent_path;
@@ -534,7 +338,7 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     }
 
     old_parent = old_node->parent;
-    if (!old_parent || !old_parent->rename) {
+    if (!old_parent || !old_parent->ops || !old_parent->ops->rename) {
         r = ramfs_rename(old_path, new_path) ? -ENOENT : 0;
         vfs_release(old_node);
         kfree(old_path);
@@ -580,7 +384,7 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
         return -EROFS;
     }
 
-    r = old_parent->rename(old_parent, old_name, new_parent, new_name);
+    r = old_parent->ops->rename(old_parent, old_name, new_parent, new_name);
     vfs_release(old_node);
     vfs_release(new_parent);
     kfree(old_name);
@@ -590,8 +394,8 @@ static int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
     return r;
 }
 
-static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd,
-                      const char *newpath, int flags) {
+int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,
+                   const char *newpath, int flags) {
     char *parent_path;
     char *name;
     char *old_path;
@@ -653,8 +457,8 @@ static int sys_linkat(int olddirfd, const char *oldpath, int newdirfd,
     return result;
 }
 
-static int sys_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
-                         uint64_t linkpath) {
+int syscall_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
+                      uint64_t linkpath) {
     char *parent_path;
     char *name;
     char *link_path;
@@ -717,8 +521,8 @@ static int sys_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
     return -EIO;
 }
 
-static int sys_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
-                          uint64_t buf_size) {
+int syscall_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
+                       uint64_t buf_size) {
     char *path;
     uint64_t buf_addr;
     uint64_t n;
@@ -776,8 +580,8 @@ static int sys_fchmodat(int dirfd, const char *pathname, int mode) {
         return -EPERM;
     }
 
-    if (node->chmod) {
-        result = node->chmod(node, (uint64_t)mode & 07777);
+    if (node->ops && node->ops->chmod) {
+        result = node->ops->chmod(node, (uint64_t)mode & 07777);
         vfs_release(node);
         return result;
     }
@@ -831,7 +635,7 @@ static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     return -EACCES;
 }
 
-static int sys_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
+int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
     char *path;
     uint64_t buf_addr;
     vfs_node_t *node;
@@ -1082,7 +886,7 @@ exchange_free_names:
             return -EEXIST;
         }
     }
-    return sys_renameat(olddirfd, oldpath, newdirfd, newpath);
+    return syscall_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
 void syscalls_at_init(void) {
@@ -1091,13 +895,13 @@ void syscalls_at_init(void) {
     syscall_table_set(SYSCALL_MKNODAT, (void *)(sys_mknodat));
     syscall_table_set(SYSCALL_FCHOWNAT, (void *)(sys_fchownat));
     syscall_table_set(SYSCALL_UNLINKAT, (void *)(sys_unlinkat));
-    syscall_table_set(SYSCALL_RENAMEAT, (void *)(sys_renameat));
-    syscall_table_set(SYSCALL_LINKAT, (void *)(sys_linkat));
-    syscall_table_set(SYSCALL_SYMLINKAT, (void *)(sys_symlinkat));
-    syscall_table_set(SYSCALL_READLINKAT, (void *)(sys_readlinkat));
+    syscall_table_set(SYSCALL_RENAMEAT, (void *)(syscall_renameat));
+    syscall_table_set(SYSCALL_LINKAT, (void *)(syscall_linkat));
+    syscall_table_set(SYSCALL_SYMLINKAT, (void *)(syscall_symlinkat));
+    syscall_table_set(SYSCALL_READLINKAT, (void *)(syscall_readlinkat));
     syscall_table_set(SYSCALL_FCHMODAT, (void *)(sys_fchmodat));
     syscall_table_set(SYSCALL_FACCESSAT, (void *)(sys_faccessat));
-    syscall_table_set(SYSCALL_FSTATAT, (void *)(sys_fstatat));
+    syscall_table_set(SYSCALL_FSTATAT, (void *)(syscall_fstatat));
     syscall_table_set(SYSCALL_UTIMENSAT, (void *)(sys_utimensat));
     syscall_table_set(SYSCALL_RENAMEAT2, (void *)(sys_renameat2));
 }

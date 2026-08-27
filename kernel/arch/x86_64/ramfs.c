@@ -40,6 +40,21 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn);
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
 
+static const vfs_node_ops_t ramfs_file_ops = {
+    .truncate = ramfs_vfs_truncate,
+    .chmod = ramfs_vfs_chmod,
+    .chown = ramfs_vfs_chown
+};
+
+static const vfs_node_ops_t ramfs_dir_ops = {
+    .create = ramfs_vfs_create,
+    .unlink = ramfs_vfs_unlink,
+    .mkdir = ramfs_vfs_mkdir,
+    .rename = ramfs_vfs_rename,
+    .chmod = ramfs_vfs_chmod,
+    .chown = ramfs_vfs_chown
+};
+
 static void ramfs_init_stats(void) {
     uint64_t ram_kb;
     if (!ramfs_stats_initialized) {
@@ -209,8 +224,7 @@ static vfs_node_t *ramfs_get_vfs_node(ramfs_node_t *rn, vfs_node_t *parent_vn) {
         vn->read = ramfs_vfs_read;
         vn->open = ramfs_vfs_open;
         vn->close = ramfs_vfs_close;
-        vn->chmod = ramfs_vfs_chmod;
-        vn->chown = ramfs_vfs_chown;
+        vn->ops = &ramfs_file_ops;
     } else if (rn->type == RAMFS_NODE_FILE) {
         ramfs_setup_vfs_file_callbacks(vn);
     }
@@ -577,7 +591,8 @@ int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
     size_t target_length;
 
     if (!parent || !name || !target ||
-        parent->create != ramfs_vfs_create) return RAMFS_ERR_INVAL;
+        !parent->ops || parent->ops->create != ramfs_vfs_create)
+        return RAMFS_ERR_INVAL;
     prn = (ramfs_node_t *)parent->private_data;
     if (!prn || prn->type != RAMFS_NODE_DIR) return RAMFS_ERR_NOTDIR;
     target_length = strlen(target);
@@ -632,7 +647,8 @@ int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
     uint64_t stored;
 
     if (!source || !parent || !name || source->read != ramfs_vfs_read ||
-        parent->create != ramfs_vfs_create) return RAMFS_ERR_INVAL;
+        !parent->ops || parent->ops->create != ramfs_vfs_create)
+        return RAMFS_ERR_INVAL;
     source_node = (ramfs_node_t *)source->private_data;
     parent_node = (ramfs_node_t *)parent->private_data;
     if (!source_node || !parent_node ||
@@ -1717,9 +1733,7 @@ static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn) {
     vn->write = ramfs_vfs_write;
     vn->open = ramfs_vfs_open;
     vn->close = ramfs_vfs_close;
-    vn->truncate = ramfs_vfs_truncate;
-    vn->chmod = ramfs_vfs_chmod;
-    vn->chown = ramfs_vfs_chown;
+    vn->ops = &ramfs_file_ops;
 }
 
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
@@ -1977,14 +1991,9 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn) {
     vn->readdir = ramfs_vfs_readdir;
     vn->finddir = ramfs_vfs_finddir;
-    vn->create = ramfs_vfs_create;
-    vn->unlink = ramfs_vfs_unlink;
-    vn->mkdir = ramfs_vfs_mkdir;
-    vn->rename = ramfs_vfs_rename;
     vn->open = ramfs_vfs_open;
     vn->close = ramfs_vfs_close;
-    vn->chmod = ramfs_vfs_chmod;
-    vn->chown = ramfs_vfs_chown;
+    vn->ops = &ramfs_dir_ops;
 }
 
 static vfs_node_t *ramfs_vfs_do_mount(const char *device, const char *mountpoint) {

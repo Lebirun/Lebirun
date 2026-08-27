@@ -265,90 +265,121 @@ void ext4_inode_set_size(ext4_inode_t *inode, uint64_t size) {
     inode->i_size_high = (uint32_t)(size >> 32);
 }
 
-static uint64_t ext4_extent_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block) {
-    ext4_extent_header_t *header = (ext4_extent_header_t *)inode->i_block;
-    
-    if (header->eh_magic != EXT4_EXTENT_MAGIC) {
-        return 0;
-    }
+static uint32_t ext4_extent_get_run(ext4_fs_t *fs, ext4_inode_t *inode,
+                                    uint64_t logical_block,
+                                    uint32_t max_blocks,
+                                    uint64_t *physical_out) {
+    ext4_extent_header_t *header;
+    ext4_extent_t *extents;
+    ext4_extent_idx_t *indices;
+    uint8_t *block;
+    uint64_t block_num;
+    uint64_t next_block;
+    uint64_t physical;
+    uint64_t offset;
+    uint64_t available;
+    uint32_t capacity;
+    uint32_t start;
+    uint32_t length;
+    uint32_t run;
+    uint16_t depth;
+    uint16_t i;
+    int found;
+    int unwritten;
 
-    uint8_t *block_buf = NULL;
-
-    while (1) {
-        if (header->eh_depth == 0) {
-            ext4_extent_t *extents = (ext4_extent_t *)(header + 1);
-            for (uint16_t i = 0; i < header->eh_entries; i++) {
-                uint32_t start = extents[i].ee_block;
-                uint16_t len = extents[i].ee_len;
-                
-                if (len > 32768) {
-                    len = len - 32768;
+    if (!physical_out || max_blocks == 0) return 0;
+    *physical_out = 0;
+    header = (ext4_extent_header_t *)inode->i_block;
+    block = NULL;
+    block_num = 0;
+    depth = header->eh_depth;
+    if (depth > 5) return 0;
+    for (;;) {
+        if (block) available = fs->block_size;
+        else available = sizeof(inode->i_block);
+        if (available < sizeof(*header)) break;
+        available -= sizeof(*header);
+        if (depth == 0)
+            capacity = available / sizeof(ext4_extent_t);
+        else
+            capacity = available / sizeof(ext4_extent_idx_t);
+        if (header->eh_magic != EXT4_EXTENT_MAGIC ||
+            header->eh_depth != depth ||
+            header->eh_entries > header->eh_max ||
+            header->eh_max > capacity) break;
+        if (depth == 0) {
+            extents = (ext4_extent_t *)(header + 1);
+            for (i = 0; i < header->eh_entries; i++) {
+                start = extents[i].ee_block;
+                length = extents[i].ee_len;
+                unwritten = length > 32768;
+                if (unwritten) length -= 32768;
+                if (length == 0 || logical_block < start ||
+                    logical_block - start >= length) continue;
+                offset = logical_block - start;
+                run = length - (uint32_t)offset;
+                if (run > max_blocks) run = max_blocks;
+                if (unwritten) {
+                    if (block) ext4_release_block(fs, block_num);
+                    return run;
                 }
-
-                if (logical_block >= start && logical_block < start + len) {
-                    uint64_t phys_start = extents[i].ee_start_lo;
-                    phys_start |= ((uint64_t)extents[i].ee_start_hi << 32);
-                    
-                    if (block_buf) {
-                        ext4_release_block(fs, 0);
-                        kfree(block_buf);
-                    }
-                    
-                    return phys_start + (logical_block - start);
-                }
+                physical = extents[i].ee_start_lo |
+                           ((uint64_t)extents[i].ee_start_hi << 32);
+                *physical_out = physical + offset;
+                if (block) ext4_release_block(fs, block_num);
+                return run;
             }
-            
-            if (block_buf) {
-                kfree(block_buf);
-            }
-            return 0;
-        } else {
-            ext4_extent_idx_t *indices = (ext4_extent_idx_t *)(header + 1);
-            int found = -1;
-            
-            for (int i = header->eh_entries - 1; i >= 0; i--) {
-                if (logical_block >= indices[i].ei_block) {
-                    found = i;
-                    break;
-                }
-            }
-
-            if (found < 0) {
-                if (block_buf) {
-                    kfree(block_buf);
-                }
-                return 0;
-            }
-
-            uint64_t next_block = indices[found].ei_leaf_lo;
-            next_block |= ((uint64_t)indices[found].ei_leaf_hi << 32);
-
-            if (block_buf) {
-                kfree(block_buf);
-            }
-            
-            block_buf = (uint8_t *)kmalloc(fs->block_size);
-            if (!block_buf) {
-                return 0;
-            }
-
-            if (ext4_read_block(fs, next_block, block_buf) != 0) {
-                kfree(block_buf);
-                return 0;
-            }
-
-            header = (ext4_extent_header_t *)block_buf;
-            
-            if (header->eh_magic != EXT4_EXTENT_MAGIC) {
-                kfree(block_buf);
-                return 0;
+            break;
+        }
+        indices = (ext4_extent_idx_t *)(header + 1);
+        found = -1;
+        for (i = header->eh_entries; i > 0; i--) {
+            if (logical_block >= indices[i - 1].ei_block) {
+                found = (int)i - 1;
+                break;
             }
         }
+        if (found < 0) break;
+        next_block = indices[found].ei_leaf_lo |
+                     ((uint64_t)indices[found].ei_leaf_hi << 32);
+        if (block) ext4_release_block(fs, block_num);
+        block = ext4_get_block(fs, next_block);
+        if (!block) return 0;
+        block_num = next_block;
+        header = (ext4_extent_header_t *)(void *)block;
+        depth--;
     }
+    if (block) ext4_release_block(fs, block_num);
+    return 0;
 }
 
-static uint64_t ext4_indirect_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block) {
-    uint32_t ptrs_per_block = fs->block_size / 4;
+static uint64_t ext4_extent_get_block(ext4_fs_t *fs, ext4_inode_t *inode,
+                                      uint64_t logical_block) {
+    uint64_t physical;
+
+    if (ext4_extent_get_run(fs, inode, logical_block, 1, &physical) == 0)
+        return 0;
+    return physical;
+}
+
+static uint64_t ext4_indirect_get_block(ext4_fs_t *fs, ext4_inode_t *inode,
+                                        uint64_t logical_block) {
+    uint8_t *ind_block;
+    uint8_t *dind_block;
+    uint8_t *tind_block;
+    uint32_t *ptrs;
+    uint32_t *dptrs;
+    uint32_t *tptrs;
+    uint64_t result;
+    uint32_t ptrs_per_block;
+    uint32_t ind_idx;
+    uint32_t ind_off;
+    uint32_t dind_idx;
+    uint32_t dind_off;
+    uint32_t ind_block_num;
+    uint32_t dind_block_num;
+
+    ptrs_per_block = fs->block_size / 4;
 
     if (logical_block < EXT4_NDIR_BLOCKS) {
         return inode->i_block[logical_block];
@@ -361,13 +392,13 @@ static uint64_t ext4_indirect_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint
             return 0;
         }
 
-        uint8_t *ind_block = ext4_get_block(fs, inode->i_block[EXT4_IND_BLOCK]);
+        ind_block = ext4_get_block(fs, inode->i_block[EXT4_IND_BLOCK]);
         if (!ind_block) {
             return 0;
         }
 
-        uint32_t *ptrs = (uint32_t *)ind_block;
-        uint64_t result = ptrs[logical_block];
+        ptrs = (uint32_t *)ind_block;
+        result = ptrs[logical_block];
         ext4_release_block(fs, inode->i_block[EXT4_IND_BLOCK]);
         return result;
     }
@@ -379,30 +410,30 @@ static uint64_t ext4_indirect_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint
             return 0;
         }
 
-        uint8_t *dind_block = ext4_get_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
+        dind_block = ext4_get_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
         if (!dind_block) {
             return 0;
         }
 
-        uint32_t *dptrs = (uint32_t *)dind_block;
-        uint32_t ind_idx = logical_block / ptrs_per_block;
-        uint32_t ind_off = logical_block % ptrs_per_block;
+        dptrs = (uint32_t *)dind_block;
+        ind_idx = logical_block / ptrs_per_block;
+        ind_off = logical_block % ptrs_per_block;
 
         if (dptrs[ind_idx] == 0) {
             ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
             return 0;
         }
 
-        uint32_t ind_block_num = dptrs[ind_idx];
+        ind_block_num = dptrs[ind_idx];
         ext4_release_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
 
-        uint8_t *ind_block = ext4_get_block(fs, ind_block_num);
+        ind_block = ext4_get_block(fs, ind_block_num);
         if (!ind_block) {
             return 0;
         }
 
-        uint32_t *ptrs = (uint32_t *)ind_block;
-        uint64_t result = ptrs[ind_off];
+        ptrs = (uint32_t *)ind_block;
+        result = ptrs[ind_off];
         ext4_release_block(fs, ind_block_num);
         return result;
     }
@@ -413,47 +444,47 @@ static uint64_t ext4_indirect_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint
         return 0;
     }
 
-    uint8_t *tind_block = ext4_get_block(fs, inode->i_block[EXT4_TIND_BLOCK]);
+    tind_block = ext4_get_block(fs, inode->i_block[EXT4_TIND_BLOCK]);
     if (!tind_block) {
         return 0;
     }
 
-    uint32_t *tptrs = (uint32_t *)tind_block;
-    uint32_t dind_idx = logical_block / (ptrs_per_block * ptrs_per_block);
-    uint32_t dind_off = logical_block % (ptrs_per_block * ptrs_per_block);
+    tptrs = (uint32_t *)tind_block;
+    dind_idx = logical_block / (ptrs_per_block * ptrs_per_block);
+    dind_off = logical_block % (ptrs_per_block * ptrs_per_block);
 
     if (tptrs[dind_idx] == 0) {
         ext4_release_block(fs, inode->i_block[EXT4_TIND_BLOCK]);
         return 0;
     }
 
-    uint32_t dind_block_num = tptrs[dind_idx];
+    dind_block_num = tptrs[dind_idx];
     ext4_release_block(fs, inode->i_block[EXT4_TIND_BLOCK]);
 
-    uint8_t *dind_block = ext4_get_block(fs, dind_block_num);
+    dind_block = ext4_get_block(fs, dind_block_num);
     if (!dind_block) {
         return 0;
     }
 
-    uint32_t *dptrs = (uint32_t *)dind_block;
-    uint32_t ind_idx = dind_off / ptrs_per_block;
-    uint32_t ind_off = dind_off % ptrs_per_block;
+    dptrs = (uint32_t *)dind_block;
+    ind_idx = dind_off / ptrs_per_block;
+    ind_off = dind_off % ptrs_per_block;
 
     if (dptrs[ind_idx] == 0) {
         ext4_release_block(fs, dind_block_num);
         return 0;
     }
 
-    uint32_t ind_block_num = dptrs[ind_idx];
+    ind_block_num = dptrs[ind_idx];
     ext4_release_block(fs, dind_block_num);
 
-    uint8_t *ind_block = ext4_get_block(fs, ind_block_num);
+    ind_block = ext4_get_block(fs, ind_block_num);
     if (!ind_block) {
         return 0;
     }
 
-    uint32_t *ptrs = (uint32_t *)ind_block;
-    uint64_t result = ptrs[ind_off];
+    ptrs = (uint32_t *)ind_block;
+    result = ptrs[ind_off];
     ext4_release_block(fs, ind_block_num);
     return result;
 }
@@ -464,6 +495,29 @@ uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logic
     } else {
         return ext4_indirect_get_block(fs, inode, logical_block);
     }
+}
+
+uint32_t ext4_inode_get_run(ext4_fs_t *fs, ext4_inode_t *inode,
+                            uint64_t logical_block, uint32_t max_blocks,
+                            uint64_t *physical_out) {
+    uint64_t physical;
+    uint64_t next;
+    uint32_t run;
+
+    if (!physical_out || max_blocks == 0) return 0;
+    if (inode->i_flags & EXT4_INODE_FLAG_EXTENTS)
+        return ext4_extent_get_run(fs, inode, logical_block, max_blocks,
+                                   physical_out);
+    physical = ext4_indirect_get_block(fs, inode, logical_block);
+    *physical_out = physical;
+    if (!physical) return 0;
+    run = 1;
+    while (run < max_blocks) {
+        next = ext4_indirect_get_block(fs, inode, logical_block + run);
+        if (next != physical + run) break;
+        run++;
+    }
+    return run;
 }
 
 static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {

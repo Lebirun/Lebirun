@@ -72,28 +72,7 @@ typedef int (*chmod_type_t)(struct vfs_node *, uint64_t mode);
 typedef int (*chown_type_t)(struct vfs_node *, uint64_t uid, uint64_t gid);
 typedef int (*ioctl_type_t)(struct vfs_node *, unsigned long request, void *arg);
 
-typedef struct vfs_node {
-    union {
-        char name[VFS_NODE_INLINE_NAME];
-        char *dynamic_name;
-    };
-    uint64_t mask;
-    uint64_t uid;
-    uint64_t gid;
-    uint64_t flags;
-    uint64_t inode;
-    uint64_t length;
-    uint64_t impl;
-    uint64_t atime;
-    uint64_t mtime;
-    uint64_t ctime;
-    
-    read_type_t read;
-    write_type_t write;
-    open_type_t open;
-    close_type_t close;
-    readdir_type_t readdir;
-    finddir_type_t finddir;
+typedef struct vfs_node_ops {
     create_type_t create;
     unlink_type_t unlink;
     mkdir_type_t mkdir;
@@ -101,7 +80,32 @@ typedef struct vfs_node {
     rename_type_t rename;
     chmod_type_t chmod;
     chown_type_t chown;
+} vfs_node_ops_t;
+
+typedef struct vfs_node {
+    union {
+        char name[VFS_NODE_INLINE_NAME];
+        char *dynamic_name;
+    };
+    uint64_t inode;
+    uint64_t length;
+    uint64_t impl;
+    uint64_t atime;
+    uint64_t mtime;
+    uint64_t ctime;
+    uint32_t mask;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t flags;
+    
+    read_type_t read;
+    write_type_t write;
+    open_type_t open;
+    close_type_t close;
+    readdir_type_t readdir;
+    finddir_type_t finddir;
     ioctl_type_t ioctl;
+    const vfs_node_ops_t *ops;
     
     struct vfs_node *ptr;
     struct vfs_node *parent;

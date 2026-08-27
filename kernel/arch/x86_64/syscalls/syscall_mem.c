@@ -799,7 +799,7 @@ static int sys_msync(void *addr, size_t length, int flags) {
     if (length == 0) return 0;
     end = base + length;
     if (end < base || end > KERNEL_VMA) return -ENOMEM;
-    buffer = (uint8_t *)kmalloc(PAGE_SIZE);
+    buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     if (!buffer) return -ENOMEM;
     matched = 0;
     for (i = 0; i < current_task->file_map_count; i++) {
@@ -829,18 +829,18 @@ static int sys_msync(void *addr, size_t length, int flags) {
             written = vfs_write(current_task->file_maps[i].node,
                                 file_position, chunk, buffer);
             if (written != chunk) {
-                kfree(buffer);
+                slab_page_free(buffer, PAGE_SIZE);
                 return -EIO;
             }
             position += chunk;
         }
         if ((flags & MS_SYNC) &&
             vfs_sync_node(current_task->file_maps[i].node, 0) != 0) {
-            kfree(buffer);
+            slab_page_free(buffer, PAGE_SIZE);
             return -EIO;
         }
     }
-    kfree(buffer);
+    slab_page_free(buffer, PAGE_SIZE);
     if (!matched) return -ENOMEM;
     if (flags & MS_INVALIDATE)
         release_user_leaf_range(base, align_up_u64(end, PAGE_SIZE));

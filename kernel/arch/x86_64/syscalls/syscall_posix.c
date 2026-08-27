@@ -21,6 +21,7 @@ void file_locks_release_process_node(pid_t owner, vfs_node_t *node,
                                      int release_flock);
 
 #define fd_table (current_task->fds)
+#define POSIX_AT_FDCWD -100
 
 #define COPY_TRANSFER_SCRATCH_SIZE 16384
 
@@ -292,26 +293,6 @@ static int posix_read_shebang(vfs_node_t *node, uint64_t size,
     kfree(line);
     *interp_out = interp;
     *arg_out = arg;
-    return 0;
-}
-
-static int posix_split_path(char *path, char **parent, char **name) {
-    char *slash;
-
-    if (!path || !parent || !name) return -EINVAL;
-    slash = strrchr(path, '/');
-    if (!slash) {
-        *parent = "/";
-        *name = path;
-    } else if (slash == path) {
-        *parent = "/";
-        *name = slash + 1;
-    } else {
-        *slash = '\0';
-        *parent = path;
-        *name = slash + 1;
-    }
-    if (!(*name)[0]) return -EINVAL;
     return 0;
 }
 
@@ -843,42 +824,11 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
 }
 
 static int sys_stat(uint64_t path_ptr, const char *buf_ptr, int unused) {
-    uint64_t path_addr;
-    uint64_t buf_addr;
-    char *path;
-    struct kernel_stat *st;
-    vfs_node_t *node;
-    int ret;
-
     (void)unused;
-    path_addr = (uint64_t)path_ptr;
-    buf_addr = (uint64_t)(uintptr_t)buf_ptr;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    ret = posix_copy_user_string(&path, (const char *)path_addr, UINT64_MAX);
-    if (ret < 0) return ret;
-    node = vfs_namei(path);
-    kfree(path);
-    if (!node) return -ENOENT;
-    st = (struct kernel_stat *)buf_addr;
-    memset(st, 0, sizeof(struct kernel_stat));
-    st->st_dev = 1;
-    st->st_ino = node->inode ? node->inode : 1;
-
-    st->st_mode = vfs_node_to_unix_mode(node);
-    st->st_nlink = 1;
-    st->st_uid = node->uid;
-    st->st_gid = node->gid;
-    st->st_rdev = 0;
-    st->st_size = node->length;
-    st->st_blksize = 4096;
-    st->st_blocks = (node->length + 511) / 512;
-    st->st_atim.tv_sec = node->atime;
-    st->st_mtim.tv_sec = node->mtime;
-    st->st_ctim.tv_sec = node->ctime;
-    vfs_release(node);
-    return 0;
+    return syscall_fstatat(POSIX_AT_FDCWD,
+                           (const char *)(uintptr_t)path_ptr,
+                           (uint64_t)(uintptr_t)buf_ptr);
 }
-
 static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     uint64_t buf_addr;
     struct kernel_stat *st;
@@ -1802,8 +1752,8 @@ static int sys_truncate(uint64_t path_ptr, const char *len_ptr, int unused) {
         return -EROFS;
     }
     
-    if (node->truncate) {
-        result = node->truncate(node, length);
+    if (node->ops && node->ops->truncate) {
+        result = node->ops->truncate(node, length);
         vfs_release(node);
         return result;
     }
@@ -1828,8 +1778,8 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
     
-    if (node->truncate) {
-        return node->truncate(node, length);
+    if (node->ops && node->ops->truncate) {
+        return node->ops->truncate(node, length);
     }
     
     return -ENOSYS;
@@ -1858,8 +1808,8 @@ static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
     end = (uint64_t)offset + (uint64_t)length;
     if (end <= node->length) return 0;
-    if (!node->truncate) return -EOPNOTSUPP;
-    return node->truncate(node, end);
+    if (!node->ops || !node->ops->truncate) return -EOPNOTSUPP;
+    return node->ops->truncate(node, end);
 }
 
 static int sys_umask(int mask, const char *unused1, int unused2) {
@@ -1955,175 +1905,32 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
 
 static int sys_rename(uint64_t oldpath_ptr, const char *newpath_ptr,
                       int unused) {
-    char *oldpath;
-    char *newpath;
-    char *new_parent_path;
-    char *new_name;
-    const char *old_name;
-    vfs_node_t *old_node;
-    vfs_node_t *old_parent;
-    vfs_node_t *new_parent;
-    int result;
-
     (void)unused;
-
-    result = posix_copy_user_string(&oldpath,
-        (const char *)(uintptr_t)oldpath_ptr, UINT64_MAX);
-    if (result < 0) return result;
-    result = posix_copy_user_string(&newpath, newpath_ptr, UINT64_MAX);
-    if (result < 0) {
-        kfree(oldpath);
-        return result;
-    }
-    result = posix_split_path(newpath, &new_parent_path, &new_name);
-    if (result < 0) {
-        kfree(oldpath);
-        kfree(newpath);
-        return result;
-    }
-    old_node = vfs_namei(oldpath);
-    if (!old_node) {
-        kfree(oldpath);
-        kfree(newpath);
-        return -ENOENT;
-    }
-    old_parent = old_node->parent;
-    if (!old_parent || !old_parent->rename) {
-        vfs_release(old_node);
-        kfree(oldpath);
-        kfree(newpath);
-        return -EINVAL;
-    }
-    new_parent = vfs_namei(new_parent_path);
-    if (!new_parent) {
-        vfs_release(old_node);
-        kfree(oldpath);
-        kfree(newpath);
-        return -ENOENT;
-    }
-    old_name = vfs_node_name(old_node);
-    result = old_parent->rename(old_parent, old_name, new_parent, new_name);
-    vfs_release(old_node);
-    vfs_release(new_parent);
-    kfree(oldpath);
-    kfree(newpath);
-    return result;
+    return syscall_renameat(POSIX_AT_FDCWD,
+                            (const char *)(uintptr_t)oldpath_ptr,
+                            POSIX_AT_FDCWD, newpath_ptr);
 }
-
-static int sys_link(uint64_t oldpath_ptr, const char *newpath_ptr, int unused) {
-    char *oldpath;
-    char *newpath;
-    int result;
-
+static int sys_link(uint64_t oldpath_ptr, const char *newpath_ptr,
+                    int unused) {
     (void)unused;
-    result = posix_copy_user_string(&oldpath,
-                                    (const char *)(uintptr_t)oldpath_ptr,
-                                    UINT64_MAX);
-    if (result < 0) return result;
-    result = posix_copy_user_string(&newpath, newpath_ptr, UINT64_MAX);
-    if (result < 0) {
-        kfree(oldpath);
-        return result;
-    }
-    result = ext4_vfs_link_node(oldpath, newpath);
-    kfree(newpath);
-    kfree(oldpath);
-    return result == 0 ? 0 : -EIO;
+    return syscall_linkat(POSIX_AT_FDCWD,
+                          (const char *)(uintptr_t)oldpath_ptr,
+                          POSIX_AT_FDCWD, newpath_ptr, 0);
 }
-
-static int posix_vfs_symlink(const char *target, const char *linkpath, uint64_t flags) {
-    if (ext4_vfs_symlink_node(target, linkpath, flags) == 0) {
-        return 0;
-    }
-    return -ENOSYS;
-}
-
 static int sys_symlink(uint64_t target_ptr, const char *linkpath_ptr,
                        int unused) {
-    const char *target;
-    const char *linkpath;
-    char *target_copy;
-    char *link_copy;
-    int ret;
-
     (void)unused;
-    target = (const char *)(uintptr_t)target_ptr;
-    linkpath = (const char *)(uintptr_t)linkpath_ptr;
-
-    ret = posix_copy_user_string(&target_copy, target, UINT64_MAX);
-    if (ret < 0) return ret;
-    ret = posix_copy_user_string(&link_copy, linkpath, UINT64_MAX);
-    if (ret < 0) {
-        kfree(target_copy);
-        return ret;
-    }
-
-    ret = posix_vfs_symlink(target_copy, link_copy, (uint64_t)unused);
-    if (ret == -ENOSYS) {
-        ret = ramfs_create_symlink(link_copy, target_copy, 0777);
-        if (ret == 0) {
-            kfree(target_copy);
-            kfree(link_copy);
-            return 0;
-        }
-        if (ret == RAMFS_ERR_EXIST) ret = -EEXIST;
-        else if (ret == RAMFS_ERR_NOENT) ret = -ENOENT;
-        else if (ret == RAMFS_ERR_NOSPC) ret = -ENOSPC;
-        else if (ret == RAMFS_ERR_NOMEM) ret = -ENOMEM;
-        else ret = -EIO;
-    }
-
-    kfree(target_copy);
-    kfree(link_copy);
-    if (ret == 0) return 0;
-    if (ret == -EEXIST || ret == -ENOENT || ret == -ENOSPC || ret == -ENOMEM || ret == -EINVAL || ret == -ENOTDIR) return ret;
-    return -EIO;
+    return syscall_symlinkat(target_ptr,
+        (const char *)(intptr_t)POSIX_AT_FDCWD,
+        (uint64_t)(uintptr_t)linkpath_ptr);
 }
-
-static int sys_readlink(uint64_t path_ptr, const char *buf_ptr, int bufsiz) {
-    uint64_t path_addr;
-    uint64_t buf_addr;
-    char *target;
-    uint64_t n;
-    uint64_t copy_len;
-    uint64_t capacity;
-    uint64_t i;
-    vfs_node_t *node;
-
-    path_addr = (uint64_t)path_ptr;
-    buf_addr = (uint64_t)(uintptr_t)buf_ptr;
-    if (!current_task) return -ESRCH;
+static int sys_readlink(uint64_t path_ptr, const char *buf_ptr,
+                        int bufsiz) {
     if (bufsiz <= 0) return -EINVAL;
-
-    if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -EFAULT;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    if (buf_addr + (uint64_t)bufsiz >= KERNEL_VMA) return -EFAULT;
-
-    node = vfs_namei_nofollow((const char *)path_addr);
-    if (!node) return -ENOENT;
-    if (VFS_GET_TYPE(node->flags) != VFS_SYMLINK) { vfs_release(node); return -EINVAL; }
-
-    capacity = node->length;
-    if (capacity == 0 || capacity > (uint64_t)bufsiz)
-        capacity = (uint64_t)bufsiz;
-    target = (char *)kmalloc((size_t)capacity);
-    if (!target) {
-        vfs_release(node);
-        return -ENOMEM;
-    }
-    n = vfs_read(node, 0, capacity, (uint8_t *)target);
-    vfs_release(node);
-
-    copy_len = n;
-    if (copy_len > (uint64_t)bufsiz) copy_len = (uint64_t)bufsiz;
-
-    for (i = 0; i < copy_len; i++) {
-        ((char *)buf_addr)[i] = target[i];
-    }
-    kfree(target);
-    return (int)copy_len;
+    return syscall_readlinkat(POSIX_AT_FDCWD,
+        (const char *)(uintptr_t)path_ptr,
+        (uint64_t)(uintptr_t)buf_ptr, (uint64_t)bufsiz);
 }
-
 static int sys_dup3(int oldfd, int newfd, int flags) {
     int ret;
 
@@ -2219,8 +2026,8 @@ static int sys_fchmod(int fd, int mode) {
         return -EPERM;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
 
-    if (node->chmod) {
-        return node->chmod(node, mode & 07777);
+    if (node->ops && node->ops->chmod) {
+        return node->ops->chmod(node, mode & 07777);
     }
     node->mask = mode & 07777;
     return 0;
@@ -2238,8 +2045,8 @@ static int sys_fchown(int fd, int uid, int gid) {
         return -EPERM;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
 
-    if (node->chown) {
-        return node->chown(node, uid, gid);
+    if (node->ops && node->ops->chown) {
+        return node->ops->chown(node, uid, gid);
     }
     if (uid != -1) node->uid = uid;
     if (gid != -1) node->gid = gid;

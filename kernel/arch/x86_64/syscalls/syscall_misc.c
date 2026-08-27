@@ -816,8 +816,8 @@ static int sys_chmod(const char *pathname, int mode) {
         return -EPERM;
     }
 
-    if (node->chmod) {
-        ret = node->chmod(node, mode & 07777);
+    if (node->ops && node->ops->chmod) {
+        ret = node->ops->chmod(node, mode & 07777);
         vfs_release(node);
         return ret;
     }
@@ -841,9 +841,9 @@ static int sys_chown(const char *pathname, int owner, int group) {
     node = vfs_namei(pathname);
     if (!node) return -ENOENT;
 
-    if (node->chown) {
+    if (node->ops && node->ops->chown) {
         int r;
-        r = node->chown(node, owner, group);
+        r = node->ops->chown(node, owner, group);
         vfs_release(node);
         return r;
     }

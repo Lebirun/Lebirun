@@ -287,7 +287,8 @@ static volatile uint8_t *KERNEL_INIT map_capability(uint8_t bar,
     last_page = ((uint64_t)offset + length + 0xFFFULL) & ~0xFFFULL;
     virt_base = VIRTIO_GPU_MMIO_BASE + (uint64_t)bar * VIRTIO_GPU_BAR_STRIDE;
     for (page = first_page; page < last_page; page += PAGE_SIZE) {
-        vmm_map_page(virt_base + page, bar_phys + page, 0x003);
+        vmm_map_page(virt_base + page, bar_phys + page,
+                     VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_PCD);
     }
     return (volatile uint8_t *)(virt_base + offset);
 }

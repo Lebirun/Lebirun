@@ -197,14 +197,14 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
     user_pages = (uint64_t *)kmalloc(user_page_capacity * sizeof(uint64_t));
     if (!user_pages) return 0;
-    src_pt_copy = (uint64_t *)kmalloc(PAGE_SIZE);
+    src_pt_copy = (uint64_t *)slab_page_alloc(PAGE_SIZE);
     if (!src_pt_copy) {
         kfree(user_pages);
         return 0;
     }
-    new_pt_copy = (uint64_t *)kmalloc(PAGE_SIZE);
+    new_pt_copy = (uint64_t *)slab_page_alloc(PAGE_SIZE);
     if (!new_pt_copy) {
-        kfree(src_pt_copy);
+        slab_page_free(src_pt_copy, PAGE_SIZE);
         kfree(user_pages);
         return 0;
     }
@@ -217,8 +217,8 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
     alloc_page = pmm_alloc_page();
     if (!alloc_page) {
-        kfree(new_pt_copy);
-        kfree(src_pt_copy);
+        slab_page_free(new_pt_copy, PAGE_SIZE);
+        slab_page_free(src_pt_copy, PAGE_SIZE);
         kfree(user_pages);
         if (kernel_cr3 && orig_cr3 != kernel_cr3)
             __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
@@ -350,8 +350,8 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     if (out_user_pages) *out_user_pages = user_pages;
     else kfree(user_pages);
     if (out_user_pages_count) *out_user_pages_count = user_page_count;
-    kfree(new_pt_copy);
-    kfree(src_pt_copy);
+    slab_page_free(new_pt_copy, PAGE_SIZE);
+    slab_page_free(src_pt_copy, PAGE_SIZE);
 
     if (kernel_cr3 && orig_cr3 != kernel_cr3 && orig_cr3 != src_pml4_phys) {
         __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
@@ -364,8 +364,8 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 cleanup_fail:
     vmm_free_pml4_entries(new_pml4_phys, 511, 1);
 
-    kfree(new_pt_copy);
-    kfree(src_pt_copy);
+    slab_page_free(new_pt_copy, PAGE_SIZE);
+    slab_page_free(src_pt_copy, PAGE_SIZE);
     kfree(user_pages);
 
     if (kernel_cr3 && orig_cr3 != kernel_cr3) {

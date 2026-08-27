@@ -16,6 +16,9 @@ extern uint8_t unifont_glyphs_start[];
 static framebuffer_t fb;
 static uint64_t cursor_prev_x = 0;
 static uint64_t cursor_prev_y = 0;
+static char cursor_char = ' ';
+static uint32_t cursor_fg = 0xFFFFFFFFu;
+static uint32_t cursor_bg = 0;
 static int cursor_visible = 1;
 static int cursor_drawn = 0;
 static int cursor_hidden_by_app = 0;
@@ -29,6 +32,7 @@ static uint64_t hw_height = 0;
 static uint64_t hw_pitch = 0;
 static uint64_t fb_vram_bytes = 0;
 static uint64_t mapped_pages_count = 0;
+static uint64_t fb_map_flags = VMM_PTE_PRESENT | VMM_PTE_WRITE;
 
 static uint64_t *vram_addr = 0;
 
@@ -71,6 +75,10 @@ void fb_flush(void) {
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
     if (virtio_gpu_is_available()) virtio_gpu_flush();
 #endif
+}
+
+int fb_avoid_vram_reads(void) {
+    return fb_graphical && (fb_map_flags & VMM_PTE_PWT) != 0;
 }
 
 #if CONFIG_DRIVER_VGA
@@ -244,32 +252,55 @@ void fb_reclaim_unused(void) {
     screen_buffer_cols = 0;
 }
 
-static void fb_toggle_cursor(uint64_t cx, uint64_t cy) {
+static void fb_render_cursor_rows(uint64_t cx, uint64_t cy, int underline) {
+    const uint8_t *glyph;
     uint64_t px;
     uint64_t py;
     uint64_t row;
     uint64_t col;
     uint64_t bytes_per_pixel;
+    uint64_t bytes_per_line;
+    uint64_t byte_idx;
+    uint8_t bit;
+    uint32_t color;
     uint8_t *pixel;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint16_t rgb565;
 
-    if (!fb.font) return;
+    if (!fb.font || !fb.font->glyphs) return;
+    glyph = psf_get_glyph(fb.font, (uint8_t)cursor_char);
+    if (!glyph) return;
     bytes_per_pixel = fb.bpp / 8u;
     if (bytes_per_pixel == 0) return;
+    bytes_per_line = fb.font->bytesperglyph / fb.font->height;
+    if (bytes_per_line == 0) bytes_per_line = (fb.font->width + 7) / 8;
     px = cx * fb.font->width;
     py = cy * fb.font->height + fb.font->height - 2;
     for (row = 0; row < 2; row++) {
         for (col = 0; col < fb.font->width; col++) {
             if (px + col >= hw_width || py + row >= hw_height) continue;
+            byte_idx = (fb.font->height - 2 + row) * bytes_per_line + col / 8;
+            bit = 7 - (col % 8);
+            color = underline ? cursor_fg :
+                    ((glyph[byte_idx] & (1u << bit)) ? cursor_fg : cursor_bg);
             pixel = (uint8_t *)fb.addr + (py + row) * hw_pitch +
                     (px + col) * bytes_per_pixel;
             if (fb.bpp == 32)
-                *(uint32_t *)pixel ^= 0x00AAAAAAu;
+                *(uint32_t *)pixel = color;
             else if (fb.bpp == 24) {
-                pixel[0] ^= 0xAA;
-                pixel[1] ^= 0xAA;
-                pixel[2] ^= 0xAA;
-            } else if (fb.bpp == 16)
-                *(uint16_t *)pixel ^= 0xAD55u;
+                pixel[0] = (uint8_t)(color & 0xFF);
+                pixel[1] = (uint8_t)((color >> 8) & 0xFF);
+                pixel[2] = (uint8_t)((color >> 16) & 0xFF);
+            } else if (fb.bpp == 16) {
+                r = (uint8_t)((color >> 16) & 0xFF);
+                g = (uint8_t)((color >> 8) & 0xFF);
+                b = (uint8_t)(color & 0xFF);
+                rgb565 = (uint16_t)(((r >> 3) << 11) |
+                         ((g >> 2) << 5) | (b >> 3));
+                *(uint16_t *)pixel = rgb565;
+            }
         }
     }
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
@@ -499,9 +530,17 @@ int FB_INIT_SECTION fb_init(uint64_t addr, uint64_t width, uint64_t height,
     uint64_t remaining;
     uint64_t step;
     uint64_t bytes_per_pixel;
+    uint64_t map_flags;
     int initial_mapping;
 
     initial_mapping = mapped_pages_count == 0;
+    map_flags = VMM_PTE_PRESENT | VMM_PTE_WRITE;
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    if (!virtio_gpu_is_available()) map_flags |= VMM_PTE_PWT;
+#else
+    map_flags |= VMM_PTE_PWT;
+#endif
+    fb_map_flags = map_flags;
     fb_phys = (uint64_t)addr;
     if (height != 0 && pitch > UINT64_MAX / height) return -1;
     fb_size = pitch * height;
@@ -525,11 +564,11 @@ int FB_INIT_SECTION fb_init(uint64_t addr, uint64_t width, uint64_t height,
         remaining = fb_size - mapped_size;
         if (initial_mapping && remaining >= VMM_HUGE_PAGE_SIZE &&
             ((phys | virt) & (VMM_HUGE_PAGE_SIZE - 1)) == 0 &&
-            vmm_map_huge_page(virt, phys, 0x003) == 0) {
+            vmm_map_huge_page(virt, phys, map_flags) == 0) {
             mapped_size += VMM_HUGE_PAGE_SIZE;
             num_pages += VMM_HUGE_PAGE_SIZE / PAGE_SIZE;
         } else {
-            vmm_map_page(virt, phys, 0x003);
+            vmm_map_page(virt, phys, map_flags);
             step = remaining;
             if (step > PAGE_SIZE) step = PAGE_SIZE;
             mapped_size += step;
@@ -775,6 +814,7 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
     uint64_t row;
     uint8_t bits;
     uint32_t *p32;
+    uint64_t *p64;
     uint64_t col;
     uint64_t byte_idx;
     uint8_t bit;
@@ -803,7 +843,7 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
 
     if (cursor_drawn) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
-            fb_toggle_cursor(cursor_prev_x, cursor_prev_y);
+            fb_render_cursor_rows(cursor_prev_x, cursor_prev_y, 0);
         }
         cursor_drawn = 0;
     }
@@ -816,6 +856,11 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
         }
         if (screen_fg_buf) screen_fg_buf[cy * screen_buffer_cols + cx] = (uint32_t)fb.fg_color;
         if (screen_bg_buf) screen_bg_buf[cy * screen_buffer_cols + cx] = (uint32_t)fb.bg_color;
+    }
+    if (cx == fb.cursor_x && cy == fb.cursor_y) {
+        cursor_char = c;
+        cursor_fg = (uint32_t)fb.fg_color;
+        cursor_bg = (uint32_t)fb.bg_color;
     }
     
     uc = (uint8_t)c;
@@ -840,14 +885,15 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
         for (row = 0; row < fb.font->height; row++) {
             bits = glyph[row];
             p32 = (uint32_t *)(base + (py + row) * hw_pitch + px * 4u);
-            p32[0] = (bits & 0x80) ? fg : bg;
-            p32[1] = (bits & 0x40) ? fg : bg;
-            p32[2] = (bits & 0x20) ? fg : bg;
-            p32[3] = (bits & 0x10) ? fg : bg;
-            p32[4] = (bits & 0x08) ? fg : bg;
-            p32[5] = (bits & 0x04) ? fg : bg;
-            p32[6] = (bits & 0x02) ? fg : bg;
-            p32[7] = (bits & 0x01) ? fg : bg;
+            p64 = (uint64_t *)(void *)p32;
+            p64[0] = (uint64_t)((bits & 0x80) ? fg : bg) |
+                     (uint64_t)((bits & 0x40) ? fg : bg) << 32;
+            p64[1] = (uint64_t)((bits & 0x20) ? fg : bg) |
+                     (uint64_t)((bits & 0x10) ? fg : bg) << 32;
+            p64[2] = (uint64_t)((bits & 0x08) ? fg : bg) |
+                     (uint64_t)((bits & 0x04) ? fg : bg) << 32;
+            p64[3] = (uint64_t)((bits & 0x02) ? fg : bg) |
+                     (uint64_t)((bits & 0x01) ? fg : bg) << 32;
         }
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
         virtio_gpu_mark_dirty(px, py, fb.font->width, fb.font->height);
@@ -892,7 +938,10 @@ void fb_scroll(void) {
     uint64_t scroll_rows;
     uint64_t scroll_cols;
     uint64_t col;
+    uint64_t row;
     uint64_t x;
+    uint64_t saved_fg;
+    uint64_t saved_bg;
 
     if (fb.rows == 0 || fb.cols == 0) {
         return;
@@ -907,8 +956,49 @@ void fb_scroll(void) {
     }
 
     if (cursor_drawn) {
-        fb_toggle_cursor(cursor_prev_x, cursor_prev_y);
+        fb_render_cursor_rows(cursor_prev_x, cursor_prev_y, 0);
         cursor_drawn = 0;
+    }
+
+    scroll_rows = (fb.rows > 1 && fb.rows <= screen_buffer_rows) ? fb.rows - 1 : 0;
+    scroll_cols = fb.cols < screen_buffer_cols ? fb.cols : screen_buffer_cols;
+
+    if (scroll_rows > 0 && scroll_cols > 0 &&
+        scroll_rows < screen_buffer_rows && screen_buffer) {
+        memmove(screen_buffer, screen_buffer + screen_buffer_cols,
+                scroll_rows * screen_buffer_cols * sizeof(char));
+        if (screen_fg_buf)
+            memmove(screen_fg_buf, screen_fg_buf + screen_buffer_cols,
+                    scroll_rows * screen_buffer_cols * sizeof(uint32_t));
+        if (screen_bg_buf)
+            memmove(screen_bg_buf, screen_bg_buf + screen_buffer_cols,
+                    scroll_rows * screen_buffer_cols * sizeof(uint32_t));
+
+        for (col = 0; col < scroll_cols; col++) {
+            screen_buffer[(fb.rows - 1) * screen_buffer_cols + col] = ' ';
+            if (screen_fg_buf)
+                screen_fg_buf[(fb.rows - 1) * screen_buffer_cols + col] =
+                    (uint32_t)fb.fg_color;
+            if (screen_bg_buf)
+                screen_bg_buf[(fb.rows - 1) * screen_buffer_cols + col] =
+                    (uint32_t)fb.bg_color;
+        }
+    }
+
+    if (fb_avoid_vram_reads() && screen_buffer) {
+        saved_fg = fb.fg_color;
+        saved_bg = fb.bg_color;
+        for (row = 0; row < fb.rows && row < screen_buffer_rows; row++) {
+            for (col = 0; col < scroll_cols; col++) {
+                if (screen_fg_buf) fb.fg_color = screen_fg_buf[row * screen_buffer_cols + col];
+                if (screen_bg_buf) fb.bg_color = screen_bg_buf[row * screen_buffer_cols + col];
+                fb_putchar(screen_buffer[row * screen_buffer_cols + col], col, row);
+            }
+        }
+        fb.fg_color = saved_fg;
+        fb.bg_color = saved_bg;
+        if (cursor_prev_y > 0) cursor_prev_y--;
+        return;
     }
 
     line_height = fb.font->height;
@@ -928,28 +1018,6 @@ void fb_scroll(void) {
     if (clear_end > hw_height) clear_end = hw_height;
     if (last_row_start < hw_height) {
         fb_clear_region(last_row_start, clear_end);
-    }
-
-    scroll_rows = (fb.rows > 1 && fb.rows <= screen_buffer_rows) ? fb.rows - 1 : 0;
-    scroll_cols = fb.cols < screen_buffer_cols ? fb.cols : screen_buffer_cols;
-
-    if (scroll_rows > 0 && scroll_cols > 0 && scroll_rows < screen_buffer_rows && screen_buffer) {
-        memmove(screen_buffer, screen_buffer + screen_buffer_cols,
-                scroll_rows * screen_buffer_cols * sizeof(char));
-        if (screen_fg_buf)
-            memmove(screen_fg_buf, screen_fg_buf + screen_buffer_cols,
-                    scroll_rows * screen_buffer_cols * sizeof(uint32_t));
-        if (screen_bg_buf)
-            memmove(screen_bg_buf, screen_bg_buf + screen_buffer_cols,
-                    scroll_rows * screen_buffer_cols * sizeof(uint32_t));
-
-        if (fb.rows > 0 && fb.rows - 1 < screen_buffer_rows) {
-            for (col = 0; col < scroll_cols; col++) {
-                screen_buffer[(fb.rows - 1) * screen_buffer_cols + col] = ' ';
-                if (screen_fg_buf) screen_fg_buf[(fb.rows - 1) * screen_buffer_cols + col] = (uint32_t)fb.fg_color;
-                if (screen_bg_buf) screen_bg_buf[(fb.rows - 1) * screen_buffer_cols + col] = (uint32_t)fb.bg_color;
-            }
-        }
     }
 
     if (cursor_prev_y > 0) {
@@ -1013,26 +1081,55 @@ void fb_write_string(const char *str) {
 }
 
 void fb_update_cursor(void) {
+    char cell_char;
+    uint8_t cell_attr;
+    uint8_t fg_index;
+    uint8_t bg_index;
+    int refresh_cell;
 
     if (!fb_graphical) {
         vga_text_update_cursor(fb.cursor_x, fb.cursor_y);
         return;
     }
 
-    if (cursor_drawn && (cursor_prev_x != fb.cursor_x || cursor_prev_y != fb.cursor_y)) {
+    refresh_cell = cursor_prev_x != fb.cursor_x || cursor_prev_y != fb.cursor_y;
+    if (cursor_drawn && refresh_cell) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
-            fb_toggle_cursor(cursor_prev_x, cursor_prev_y);
+            fb_render_cursor_rows(cursor_prev_x, cursor_prev_y, 0);
         }
         cursor_drawn = 0;
     }
     if (cursor_drawn && (!cursor_visible || cursor_hidden_by_app)) {
         if (cursor_prev_x < fb.cols && cursor_prev_y < fb.rows) {
-            fb_toggle_cursor(cursor_prev_x, cursor_prev_y);
+            fb_render_cursor_rows(cursor_prev_x, cursor_prev_y, 0);
         }
         cursor_drawn = 0;
     }
     if (cursor_visible && !cursor_hidden_by_app && !cursor_drawn && fb.cursor_x < fb.cols && fb.cursor_y < fb.rows) {
-        fb_toggle_cursor(fb.cursor_x, fb.cursor_y);
+        if (refresh_cell) {
+            cursor_char = ' ';
+            cursor_fg = (uint32_t)fb.fg_color;
+            cursor_bg = (uint32_t)fb.bg_color;
+            if (screen_buffer && fb.cursor_y < screen_buffer_rows &&
+                fb.cursor_x < screen_buffer_cols) {
+                cursor_char = screen_buffer[fb.cursor_y * screen_buffer_cols + fb.cursor_x];
+                if (screen_fg_buf)
+                    cursor_fg = screen_fg_buf[fb.cursor_y * screen_buffer_cols + fb.cursor_x];
+                if (screen_bg_buf)
+                    cursor_bg = screen_bg_buf[fb.cursor_y * screen_buffer_cols + fb.cursor_x];
+            } else if (console_is_initialized() &&
+                       console_get_cell(console_get_current(), fb.cursor_x,
+                                        fb.cursor_y, &cell_char, &cell_attr) == 0) {
+                fg_index = (cell_attr >> 4) & 0x0F;
+                bg_index = cell_attr & 0x0F;
+                cursor_char = cell_char;
+                cursor_fg = (uint32_t)console_ansi_color(fg_index & 7,
+                                                         fg_index >= 8);
+                cursor_bg = (uint32_t)console_ansi_color(bg_index & 7,
+                                                         bg_index >= 8);
+            }
+        }
+        fb_render_cursor_rows(fb.cursor_x, fb.cursor_y, 1);
         cursor_prev_x = fb.cursor_x;
         cursor_prev_y = fb.cursor_y;
         cursor_drawn = 1;
@@ -1280,7 +1377,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
                 for (page_idx = batch_start; page_idx < batch_end; page_idx++) {
                     phys = fb_phys + (page_idx * 0x1000);
                     virt = (KERNEL_VMA + 0x20000000ULL) + (page_idx * 0x1000);
-                    vmm_map_page(virt, phys, 0x003);
+                    vmm_map_page(virt, phys, fb_map_flags);
                     tlb_flush_page(virt);
                 }
 
@@ -1291,7 +1388,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate) {
             for (page_idx = 0; page_idx < num_pages; page_idx++) {
                 phys = fb_phys + (page_idx * 0x1000);
                 virt = (KERNEL_VMA + 0x20000000ULL) + (page_idx * 0x1000);
-                vmm_map_page(virt, phys, 0x003);
+                vmm_map_page(virt, phys, fb_map_flags);
                 if ((page_idx & 0x1F) == 0x1F) {
                     tlb_flush_page(virt);
                     asm volatile("pause; pause");

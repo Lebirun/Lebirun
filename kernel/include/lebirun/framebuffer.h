@@ -38,6 +38,7 @@ void fb_update_cursor(void);
 void fb_set_cursor_hidden(int hidden);
 void fb_tick(void);
 void fb_flush(void);
+int fb_avoid_vram_reads(void);
 framebuffer_t *fb_get(void);
 int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate);
 int fb_get_info(uint64_t *width, uint64_t *height, uint64_t *bpp, uint64_t *refresh_rate);
