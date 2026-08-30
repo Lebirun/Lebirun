@@ -569,29 +569,6 @@ void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end) {
     pfa_reclaim_kernel_range_internal(phys_start, phys_end, 0);
 }
 
-int pfa_claim_reclaimed_kernel_page(uint64_t phys_addr) {
-    uint64_t frame;
-    uint64_t eflags;
-    int result;
-
-    if ((phys_addr & (PAGE_SIZE - 1)) != 0) return -1;
-    frame = phys_addr / PAGE_SIZE;
-    if (frame >= kernel_reserved_frames || frame >= total_pages_managed)
-        return -1;
-    result = -1;
-    pfa_lock_acquire(&eflags);
-    if (!test_bit(frame) && frame_is_usable(frame) &&
-        !frame_is_reserved(frame)) {
-        if (bitmap_prepare_range(frame, 1) == 0) {
-            set_bit(frame);
-            __sync_fetch_and_sub(&pfa_cached_free, 1);
-            result = 0;
-        }
-    }
-    pfa_lock_release(eflags);
-    return result;
-}
-
 uint64_t pfa_alloc_contiguous(uint64_t num_frames) {
     uint64_t result;
 

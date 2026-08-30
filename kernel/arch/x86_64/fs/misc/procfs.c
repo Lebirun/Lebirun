@@ -179,8 +179,11 @@ static void proc_stream_named_value(proc_stream_t *stream, const char *name,
                                     uint64_t value) {
     char line[64];
     int length;
+    int width;
 
-    length = snprintf(line, sizeof(line), "%-21s%7lu\n", name, value);
+    width = 27 - (int)strlen(name);
+    if (width < 1) width = 1;
+    length = snprintf(line, sizeof(line), "%s:%*lu\n", name, width, value);
     if (length <= 0) return;
     if ((uint64_t)length >= sizeof(line)) length = sizeof(line) - 1;
     proc_stream_append(stream, line, (uint64_t)length);
@@ -1073,112 +1076,109 @@ static uint64_t proc_vmstat_read(vfs_node_t *node, uint64_t offset, uint64_t siz
 }
 
 static const char proc_memdetail_names[] =
-    "MemAllUsedKB:\0"
-    "PFANetAllocatedKB:\0"
-    "KernelImageKB:\0"
-    "KernelReclaimedPages:\0"
-    "KernelReclaimedKB:\0"
-    "ColdZeroPages:\0"
-    "ColdZeroKB:\0"
-    "ColdZeroFaults:\0"
-    "BitmapKB:\0"
-    "DemandBitmapBytes:\0"
-    "DemandBitmapExtPages:\0"
-    "DemandBitmapExtKB:\0"
-    "EarlyHeapTotalKB:\0"
-    "EarlyHeapUsedKB:\0"
-    "HeapCommitPages:\0"
-    "HeapCommitKB:\0"
-    "HeapReservePages:\0"
-    "HeapAllocatedBytes:\0"
-    "HeapVirtualSpanBytes:\0"
-    "TaskCount:\0"
-    "TaskStructBytes:\0"
-    "TaskFPUBytes:\0"
-    "TaskFDBytes:\0"
-    "TaskPageArrayBytes:\0"
-    "TaskFileMapBytes:\0"
-    "KernelStackSlots:\0"
-    "KernelStackPages:\0"
-    "KernelStackKB:\0"
-    "SlabPages:\0"
-    "SlabKB:\0"
-    "E1000Pages:\0"
-    "E1000KB:\0"
-    "AHCIPages:\0"
-    "AHCIKB:\0"
-    "PT_VMMPTPages:\0"
-    "PT_VMMPTKB:\0"
-    "PT_HeapPTPages:\0"
-    "PT_HeapPTKB:\0"
-    "UserELFPages:\0"
-    "UserELFKB:\0"
-    "UserHeapPages:\0"
-    "UserHeapKB:\0"
-    "UserMmapPages:\0"
-    "UserMmapKB:\0"
-    "UserStackPages:\0"
-    "UserStackKB:\0"
-    "UserPDPages:\0"
-    "UserPDKB:\0"
-    "UserPTPages:\0"
-    "UserPTKB:\0"
-    "ActiveUserPages:\0"
-    "ActiveUserKB:\0"
-    "CurrentUserPages:\0"
-    "CurrentUserKB:\0"
-    "CurrentUserPTPages:\0"
-    "CurrentUserPTKB:\0"
-    "CurrentELFPages:\0"
-    "CurrentHeapPages:\0"
-    "CurrentHeapKB:\0"
-    "CurrentMmapPages:\0"
-    "CurrentMmapKB:\0"
-    "CurrentStackPages:\0"
-    "CurrentStackKB:\0"
-    "DeadUserPages:\0"
-    "DeadUserKB:\0"
-    "DeadELFPages:\0"
-    "DeadELFKB:\0"
-    "DeadHeapPages:\0"
-    "DeadHeapKB:\0"
-    "DeadMmapPages:\0"
-    "DeadMmapKB:\0"
-    "DeadStackPages:\0"
-    "DeadStackKB:\0"
-    "DeadPDPages:\0"
-    "DeadPDKB:\0"
-    "DeadUserPTPages:\0"
-    "DeadUserPTKB:\0"
-    "DeadExecOldPages:\0"
-    "DeadExecOldKB:\0"
-    "ExecCleanupEntries:\0"
-    "ExecCleanupPages:\0"
-    "ExecCleanupKB:\0"
-    "ExecCachePages:\0"
-    "ExecCacheKB:\0"
-    "ExecReclaimPages:\0"
-    "ExecReclaimKB:\0"
-    "ExecNonReclaimPages:\0"
-    "ExecNonReclaimKB:\0"
-    "CurrentExecReclaimed:\0"
-    "PartialExecReclaimed:\0"
-    "OverlayCacheNodes:\0"
-    "OverlayCacheCap:\0"
-    "OverlayCacheBytes:\0"
-    "SquashCacheNodes:\0"
-    "SquashCacheCap:\0"
-    "SquashCacheBytes:\0"
-    "SquashCacheData:\0"
-    "SquashModulePages:\0"
-    "SquashModuleKB:\0"
-    "SquashDecompFail:\0"
-    "SquashDecompOver:\0"
-    "SquashDecompPadded:\0"
-    "ConsoleBuffers:\0"
-    "ConsoleBytes:\0"
-    "PFARefActiveNodes:\0"
-    "PFARefFreeNodes:\0";
+    "MemAllUsedKB\0"
+    "PFANetAllocatedKB\0"
+    "KernelImageKB\0"
+    "KernelReclaimedPages\0"
+    "KernelReclaimedKB\0"
+    "BitmapKB\0"
+    "DemandBitmapBytes\0"
+    "DemandBitmapExtPages\0"
+    "DemandBitmapExtKB\0"
+    "EarlyHeapTotalKB\0"
+    "EarlyHeapUsedKB\0"
+    "HeapCommitPages\0"
+    "HeapCommitKB\0"
+    "HeapReservePages\0"
+    "HeapAllocatedBytes\0"
+    "HeapVirtualSpanBytes\0"
+    "TaskCount\0"
+    "TaskStructBytes\0"
+    "TaskFPUBytes\0"
+    "TaskFDBytes\0"
+    "TaskPageArrayBytes\0"
+    "TaskFileMapBytes\0"
+    "KernelStackSlots\0"
+    "KernelStackPages\0"
+    "KernelStackKB\0"
+    "SlabPages\0"
+    "SlabKB\0"
+    "E1000Pages\0"
+    "E1000KB\0"
+    "AHCIPages\0"
+    "AHCIKB\0"
+    "PT_VMMPTPages\0"
+    "PT_VMMPTKB\0"
+    "PT_HeapPTPages\0"
+    "PT_HeapPTKB\0"
+    "UserELFPages\0"
+    "UserELFKB\0"
+    "UserHeapPages\0"
+    "UserHeapKB\0"
+    "UserMmapPages\0"
+    "UserMmapKB\0"
+    "UserStackPages\0"
+    "UserStackKB\0"
+    "UserPDPages\0"
+    "UserPDKB\0"
+    "UserPTPages\0"
+    "UserPTKB\0"
+    "ActiveUserPages\0"
+    "ActiveUserKB\0"
+    "CurrentUserPages\0"
+    "CurrentUserKB\0"
+    "CurrentUserPTPages\0"
+    "CurrentUserPTKB\0"
+    "CurrentELFPages\0"
+    "CurrentHeapPages\0"
+    "CurrentHeapKB\0"
+    "CurrentMmapPages\0"
+    "CurrentMmapKB\0"
+    "CurrentStackPages\0"
+    "CurrentStackKB\0"
+    "DeadUserPages\0"
+    "DeadUserKB\0"
+    "DeadELFPages\0"
+    "DeadELFKB\0"
+    "DeadHeapPages\0"
+    "DeadHeapKB\0"
+    "DeadMmapPages\0"
+    "DeadMmapKB\0"
+    "DeadStackPages\0"
+    "DeadStackKB\0"
+    "DeadPDPages\0"
+    "DeadPDKB\0"
+    "DeadUserPTPages\0"
+    "DeadUserPTKB\0"
+    "DeadExecOldPages\0"
+    "DeadExecOldKB\0"
+    "ExecCleanupEntries\0"
+    "ExecCleanupPages\0"
+    "ExecCleanupKB\0"
+    "ExecCachePages\0"
+    "ExecCacheKB\0"
+    "ExecReclaimPages\0"
+    "ExecReclaimKB\0"
+    "ExecNonReclaimPages\0"
+    "ExecNonReclaimKB\0"
+    "CurrentExecReclaimed\0"
+    "PartialExecReclaimed\0"
+    "OverlayCacheNodes\0"
+    "OverlayCacheCap\0"
+    "OverlayCacheBytes\0"
+    "SquashCacheNodes\0"
+    "SquashCacheCap\0"
+    "SquashCacheBytes\0"
+    "SquashCacheData\0"
+    "SquashModulePages\0"
+    "SquashModuleKB\0"
+    "SquashDecompFail\0"
+    "SquashDecompOver\0"
+    "SquashDecompPadded\0"
+    "ConsoleBuffers\0"
+    "ConsoleBytes\0"
+    "PFARefActiveNodes\0"
+    "PFARefFreeNodes\0";
 
 typedef struct {
     uint64_t zero;
@@ -1186,8 +1186,6 @@ typedef struct {
     uint64_t pfa_used_kb;
     uint64_t kern_kb;
     uint64_t kernel_reclaimed_pages;
-    uint64_t cold_zero_pages;
-    uint64_t cold_zero_faults;
     uint64_t bitmap_kb;
     uint64_t demand_bitmap_bytes;
     uint64_t demand_bitmap_extension_pages;
@@ -1240,9 +1238,6 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
     PROC_FIELD(kern_kb, 0),
     PROC_FIELD(kernel_reclaimed_pages, 0),
     PROC_FIELD(kernel_reclaimed_pages, 2),
-    PROC_FIELD(cold_zero_pages, 0),
-    PROC_FIELD(cold_zero_pages, 2),
-    PROC_FIELD(cold_zero_faults, 0),
     PROC_FIELD(bitmap_kb, 0),
     PROC_FIELD(demand_bitmap_bytes, 0),
     PROC_FIELD(demand_bitmap_extension_pages, 0),
@@ -1349,7 +1344,7 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
 _Static_assert(sizeof(proc_memdetail_snapshot_t) <= UINT16_MAX,
                "memdetail snapshot offset");
 _Static_assert(sizeof(proc_memdetail_fields) /
-                   sizeof(proc_memdetail_fields[0]) == 106,
+                   sizeof(proc_memdetail_fields[0]) == 103,
                "memdetail field count");
 
 static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
@@ -1402,8 +1397,6 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     snapshot.mem_all_used_kb = total_kb > free_kb ?
                                total_kb - free_kb : 0;
     snapshot.kernel_reclaimed_pages = pfa_get_kernel_reclaimed_pages();
-    snapshot.cold_zero_pages = pt_get_cold_zero_pages();
-    snapshot.cold_zero_faults = pt_get_cold_zero_faults();
     snapshot.early_heap_total_kb = heap_get_early_total() / 1024;
     snapshot.early_heap_used_kb = heap_get_early_used() / 1024;
     snapshot.heap_committed = demand_get_committed_pages();

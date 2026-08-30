@@ -25,17 +25,19 @@ int initrd_read(int index, void *buf, unsigned int maxlen)
         (long)maxlen);
 }
 
-int vfs_open(const char *path, int flags)
+int __attribute__((section(".text.hot.user")))
+vfs_open(const char *path, int flags)
 {
     return (int)leb_syscall2(LEB_SYSCALL_VFS_OPEN, (long)path, flags);
 }
 
-int vfs_close_fd(int fd)
+int __attribute__((section(".text.hot.user"))) vfs_close_fd(int fd)
 {
     return (int)leb_syscall1(LEB_SYSCALL_VFS_CLOSE, fd);
 }
 
-int vfs_read_fd(int fd, void *buf, unsigned int count)
+int __attribute__((section(".text.hot.user")))
+vfs_read_fd(int fd, void *buf, unsigned int count)
 {
     return (int)leb_syscall3(LEB_SYSCALL_VFS_READ, fd, (long)buf,
         (long)count);
@@ -54,7 +56,8 @@ int vfs_readdir2(int fd, char *name, size_t capacity, unsigned int *type,
         (long)capacity, (long)type, (long)index, (long)required);
 }
 
-int vfs_stat(int fd, uint64_t *size, uint64_t *type)
+int __attribute__((section(".text.hot.user")))
+vfs_stat(int fd, uint64_t *size, uint64_t *type)
 {
     return (int)leb_syscall3(LEB_SYSCALL_VFS_STAT, fd, (long)size,
         (long)type);

@@ -284,7 +284,8 @@ static void *slab_extent_allocate(size_t size) {
                SLAB_EXTENT_HEAD_SIZE - SLAB_EXTENT_TAIL_SIZE) return NULL;
     total = size + sizeof(slab_page_t) + SLAB_EXTENT_HEAD_SIZE +
             SLAB_EXTENT_TAIL_SIZE;
-    pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    pages = total / PAGE_SIZE;
+    if (total % PAGE_SIZE) pages++;
     virt = slab_virtual_alloc(pages);
     if (!virt || !slab_map_pages(virt, pages)) return NULL;
     extent = (slab_page_t *)virt;
@@ -532,6 +533,31 @@ size_t slab_alloc_size(void *ptr) {
     block = slab_small_block_for_ptr(page, ptr);
     if (!block || !block->requested) return 0;
     return block->requested;
+}
+
+int slab_shrink_releases_pages(void *ptr, size_t new_size) {
+    slab_page_t *page;
+    uint64_t address;
+    uint64_t total;
+    uint64_t pages;
+
+    if (!ptr || !slab_initialized || new_size == 0) return 0;
+    address = (uint64_t)ptr & ~(PAGE_SIZE - 1);
+    if (!slab_region_contains(address, SLAB_PRIMARY_START,
+                              SLAB_PRIMARY_SIZE) &&
+        !slab_region_contains(address, SLAB_OVERFLOW_START,
+                              SLAB_OVERFLOW_SIZE)) return 0;
+    if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), address)) return 0;
+    page = (slab_page_t *)address;
+    if (page->magic != SLAB_MAGIC || page->kind != SLAB_KIND_EXTENT ||
+        (uint8_t *)page + sizeof(*page) + SLAB_EXTENT_HEAD_SIZE !=
+            (uint8_t *)ptr) return 0;
+    if (new_size > UINT64_MAX - sizeof(*page) -
+                   SLAB_EXTENT_HEAD_SIZE - SLAB_EXTENT_TAIL_SIZE) return 0;
+    total = new_size + sizeof(*page) + SLAB_EXTENT_HEAD_SIZE +
+            SLAB_EXTENT_TAIL_SIZE;
+    pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    return pages < page->pages;
 }
 
 size_t slab_max_size(void) {

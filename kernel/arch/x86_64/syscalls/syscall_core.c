@@ -767,6 +767,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     uint64_t pipe_flags;
     uint64_t generation;
     int pty_endpoint;
+    int to_copy;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -951,22 +952,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             if (!line_buffer_ready(con_id)) {
                 return -ENOMEM;
             }
-            if (line_ready[con_id]) {
-                int to_copy = line_len[con_id];
-                if (to_copy > len) to_copy = len;
-                memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
-                
-                if (to_copy < line_len[con_id]) {
-                    memmove(line_buffers[con_id], line_buffers[con_id] + to_copy, 
-                            line_len[con_id] - to_copy);
-                    line_len[con_id] -= to_copy;
-                } else {
-                    line_len[con_id] = 0;
-                    line_cursor[con_id] = 0;
-                    line_ready[con_id] = 0;
-                }
-                return to_copy;
-            }
+            if (line_ready[con_id]) goto canonical_ready;
             
             history_browse[con_id] = -1;
             in_line_editing[con_id] = 1;
@@ -989,7 +975,6 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                     }
                     block_current();
                     if (syscall_core_interrupted()) {
-                        if (heap_buf) kfree(kbuf);
                         return -EINTR;
                     }
                 }
@@ -1218,22 +1203,21 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 }
             }
             
-            {
-                int to_copy = line_len[con_id];
-                if (to_copy > len) to_copy = len;
-                memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
-                
-                if (to_copy < line_len[con_id]) {
-                    memmove(line_buffers[con_id], line_buffers[con_id] + to_copy, 
-                            line_len[con_id] - to_copy);
-                    line_len[con_id] -= to_copy;
-                } else {
-                    line_len[con_id] = 0;
-                    line_cursor[con_id] = 0;
-                    line_ready[con_id] = 0;
-                }
-                return to_copy;
+canonical_ready:
+            to_copy = line_len[con_id];
+            if (to_copy > len) to_copy = len;
+            memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
+
+            if (to_copy < line_len[con_id]) {
+                memmove(line_buffers[con_id], line_buffers[con_id] + to_copy,
+                        line_len[con_id] - to_copy);
+                line_len[con_id] -= to_copy;
+            } else {
+                line_len[con_id] = 0;
+                line_cursor[con_id] = 0;
+                line_ready[con_id] = 0;
             }
+            return to_copy;
         } else {
             int total = 0;
             int vmin = t->c_cc[VMIN];
@@ -1250,7 +1234,6 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                     }
                     block_current();
                     if (syscall_core_interrupted()) {
-                        if (heap_buf) kfree(kbuf);
                         return total > 0 ? total : -EINTR;
                     }
                 }

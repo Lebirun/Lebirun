@@ -189,12 +189,10 @@ registers_t* interrupt_handler(registers_t* regs)
     cpu_info_t *cpu_info;
 
     if (regs->int_no < 32) {
+        if (regs->int_no == 7 && (regs->cs & 3) == 3 &&
+            task_handle_fpu_fault()) return regs;
         if (regs->int_no == 14) {
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
-            if (!(regs->err_code & 0x4) &&
-                pt_cold_zero_page_fault(fault_addr, regs->err_code)) {
-                return regs;
-            }
             access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
             else access_type |= VRING_PERM_READ;
@@ -389,36 +387,13 @@ registers_t* interrupt_handler(registers_t* regs)
 
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
 
-                if (sc_phys != 0) {
-                    if (sc_actual_cr3 != sc_expected_pd) {
-                        regs->return_cr3 = sc_expected_pd;
-                    } else {
-                        __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
-                    }
-                    return regs;
-                }
-
-                if (task_handle_file_page_fault(current_task, sc_fault_addr)) {
-                    if (sc_actual_cr3 != sc_expected_pd) {
-                        regs->return_cr3 = sc_expected_pd;
-                    } else {
-                        __asm__ volatile ("invlpg (%0)" : : "r"(sc_fault_page) : "memory");
-                    }
-                    return regs;
-                }
-                if (task_handle_anon_page_fault(current_task,
-                                                sc_fault_addr,
-                                                (regs->err_code & 0x2) != 0)) {
-                    if (sc_actual_cr3 != sc_expected_pd) {
-                        regs->return_cr3 = sc_expected_pd;
-                    } else {
-                        __asm__ volatile ("invlpg (%0)" : :
-                                          "r"(sc_fault_page) : "memory");
-                    }
-                    return regs;
-                }
-
-                if (task_map_stack_fault(current_task, sc_fault_addr,
+                if (sc_phys != 0 ||
+                    task_handle_file_page_fault(current_task,
+                                                sc_fault_addr) ||
+                    task_handle_anon_page_fault(
+                        current_task, sc_fault_addr,
+                        (regs->err_code & 0x2) != 0) ||
+                    task_map_stack_fault(current_task, sc_fault_addr,
                                          sc_fault_page)) {
                     if (sc_actual_cr3 != sc_expected_pd) {
                         regs->return_cr3 = sc_expected_pd;

@@ -38,9 +38,9 @@ EXEC_PREFIX?=$(PREFIX)
 BOOTDIR?=$(EXEC_PREFIX)/boot
 INCLUDEDIR?=$(PREFIX)/include
 
-CFLAGS:=$(CFLAGS) -flto -ffunction-sections -fdata-sections -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
+CFLAGS:=$(CFLAGS) -flto=auto -fno-fat-lto-objects -ffunction-sections -fdata-sections -falign-functions=1 -ffreestanding -Wall -Wextra -fdiagnostics-color=always
 CPPFLAGS:=$(CPPFLAGS) -nostdinc -D__is_kernel -Iinclude -isystem ../sysroot/usr/include
-LDFLAGS:=$(LDFLAGS) -flto
+LDFLAGS:=$(LDFLAGS) -flto=auto
 LIBS:=$(LIBS) -nostdlib -lgcc
 
 BUILD_TZ:=$(shell date +%z)

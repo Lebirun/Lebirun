@@ -1020,7 +1020,8 @@ void *krealloc(void *ptr, size_t new_size) {
     if (slab_owns(ptr)) {
         old_size = slab_alloc_size(ptr);
         if (new_size <= old_size) {
-            if (new_size > old_size / 2) return ptr;
+            if (new_size > old_size / 2 &&
+                !slab_shrink_releases_pages(ptr, new_size)) return ptr;
             new_ptr = kmalloc(new_size);
             if (!new_ptr) return ptr;
             memcpy(new_ptr, ptr, new_size);

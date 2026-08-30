@@ -21,6 +21,15 @@ SECTIONS
     .text : {
         KEEP(*(.text._start))
         KEEP(*(.text._start_c))
+        *(.text.__init_libc)
+        *(.text.libc_start_init)
+        *(.text.libc_start_main_stage2)
+        *(.text.__libc_start_main)
+        *(.text.__init_tp)
+        *(.text.__copy_tls)
+        *(.text.static_init_tls)
+        *(.text.__set_thread_area)
+        *(.rodata.__init_libc.str1.1)
         *(.text.hot.user)
         *(.text.read)
         *(.text.write)
@@ -99,6 +108,16 @@ SECTIONS
 
     .bss : {
         __bss_start = .;
+        *(.bss.__sysinfo)
+        *(.bss.__progname_full)
+        *(.bss.__progname)
+        *(.bss.__hwcap)
+        *(.bss.__libc)
+        *(.bss.__environ)
+        *(.bss.main_tls)
+        *(.bss.builtin_tls)
+        *(.bss.__thread_list_lock)
+        *(.bss.hot.user)
         *(.bss .bss.*)
         *(COMMON)
         __bss_end = .;

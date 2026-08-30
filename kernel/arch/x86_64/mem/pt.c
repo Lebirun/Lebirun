@@ -40,8 +40,6 @@ static inline void vmm_pae_lock_release(void) {
 static uint64_t pt_heap_pt_count = 0;
 uint64_t pt_vmm_pt_count = 0;
 static int low_identity_active = 1;
-static volatile uint64_t cold_zero_pages;
-static volatile uint64_t cold_zero_faults;
 
 extern void *pmm_alloc_page(void);
 extern void *pmm_alloc_low_page(void);
@@ -57,8 +55,6 @@ static void *pt_alloc_pt_page(void) {
 }
 
 #define PT_TEMP_ZERO_VIRT TEMP_SLOT(7)
-#define PT_PHYS_MASK 0x000FFFFFFFFFF000ULL
-
 static void pt_zero_page(uint64_t phys_addr) {
     uint64_t eflags;
 
@@ -317,168 +313,6 @@ int KERNEL_INIT pt_reclaim_low_identity(void) {
     start = (uint64_t)(uintptr_t)boot_pdpt_low;
     pfa_reclaim_kernel_range(start, start + PAGE_SIZE);
     return 0;
-}
-
-static uint64_t *pt_cold_leaf_locked(uint64_t virt_addr, int split) {
-    uint64_t pd_idx;
-    uint64_t pt_idx;
-    uint64_t pde;
-    uint64_t *pd;
-    uint64_t *pt;
-
-    pd_idx = (virt_addr >> 21) & 0x1FF;
-    pt_idx = (virt_addr >> 12) & 0x1FF;
-    pd = pt_get_pd_for_pdpt(virt_addr);
-    if (!pd) return NULL;
-    pde = pd[pd_idx];
-    if ((pde & 0x80) && split) {
-        if (pt_split_huge_page(pd, pd_idx) < 0) return NULL;
-        pde = pd[pd_idx];
-    }
-    if (!(pde & VMM_PTE_PRESENT) || (pde & 0x80)) return NULL;
-    pt = (uint64_t *)((pde & PT_PHYS_MASK) + KERNEL_VMA);
-    return &pt[pt_idx];
-}
-
-uint64_t KERNEL_INIT pt_reclaim_zero_bss(uint64_t virt_start,
-                                         uint64_t virt_end) {
-    uint64_t start;
-    uint64_t end;
-    uint64_t address;
-    uint64_t physical;
-    uint64_t page_flags;
-    uint64_t *pte;
-    uint64_t *words;
-    uint64_t i;
-    uint64_t reclaimed;
-    int zero;
-
-    start = (virt_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    end = virt_end & ~(PAGE_SIZE - 1);
-    reclaimed = 0;
-    for (address = start; address < end; address += PAGE_SIZE) {
-        words = (uint64_t *)(uintptr_t)address;
-        zero = 1;
-        for (i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
-            if (words[i] != 0) {
-                zero = 0;
-                break;
-            }
-        }
-        if (!zero) continue;
-        vmm_pae_lock_acquire();
-        pte = pt_cold_leaf_locked(address, 1);
-        if (!pte || !(*pte & VMM_PTE_PRESENT)) {
-            vmm_pae_lock_release();
-            continue;
-        }
-        physical = *pte & PT_PHYS_MASK;
-        if (physical != address - KERNEL_VMA) {
-            vmm_pae_lock_release();
-            continue;
-        }
-        page_flags = *pte & VMM_PTE_NX;
-        *pte = physical | page_flags | VMM_PTE_COLD_ZERO;
-        __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
-        vmm_pae_lock_release();
-        pfa_reclaim_kernel_range_quiet(physical, physical + PAGE_SIZE);
-        reclaimed++;
-    }
-    cold_zero_pages = reclaimed;
-    cold_zero_faults = 0;
-    return reclaimed;
-}
-
-int pt_cold_zero_page_fault(uint64_t fault_addr, uint64_t err_code) {
-    extern uint8_t _kernel_bss_start[];
-    extern uint8_t _kernel_bss_end[];
-    uint64_t start;
-    uint64_t end;
-    uint64_t address;
-    uint64_t physical;
-    uint64_t marker_physical;
-    uint64_t page_flags;
-    uint64_t entry;
-    uint64_t *pte;
-    int claimed_original;
-
-    if (err_code & (VMM_PTE_PRESENT | VMM_PTE_USER)) return 0;
-    start = ((uint64_t)(uintptr_t)_kernel_bss_start + PAGE_SIZE - 1) &
-            ~(PAGE_SIZE - 1);
-    end = (uint64_t)(uintptr_t)_kernel_bss_end & ~(PAGE_SIZE - 1);
-    address = fault_addr & ~(PAGE_SIZE - 1);
-    if (address < start || address >= end) return 0;
-    for (;;) {
-        vmm_pae_lock_acquire();
-        pte = pt_cold_leaf_locked(address, 0);
-        if (!pte) {
-            vmm_pae_lock_release();
-            return 0;
-        }
-        entry = *pte;
-        if (entry & VMM_PTE_PRESENT) {
-            __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
-            vmm_pae_lock_release();
-            return 1;
-        }
-        if ((entry & 0xFFFULL) ==
-            (VMM_PTE_COLD_ZERO | VMM_PTE_SHARED)) {
-            vmm_pae_lock_release();
-            __asm__ volatile("pause" ::: "memory");
-            continue;
-        }
-        if ((entry & 0xFFFULL) != VMM_PTE_COLD_ZERO) {
-            vmm_pae_lock_release();
-            return 0;
-        }
-        marker_physical = entry & PT_PHYS_MASK;
-        page_flags = entry & VMM_PTE_NX;
-        *pte = marker_physical | page_flags | VMM_PTE_COLD_ZERO |
-               VMM_PTE_SHARED;
-        vmm_pae_lock_release();
-        break;
-    }
-    physical = marker_physical;
-    claimed_original = pfa_claim_reclaimed_kernel_page(physical) == 0;
-    if (!claimed_original) {
-        physical = pfa_alloc();
-        if (!physical) {
-            vmm_pae_lock_acquire();
-            pte = pt_cold_leaf_locked(address, 0);
-            if (pte && (*pte & 0xFFFULL) ==
-                (VMM_PTE_COLD_ZERO | VMM_PTE_SHARED))
-                *pte = marker_physical | page_flags | VMM_PTE_COLD_ZERO;
-            vmm_pae_lock_release();
-            return 0;
-        }
-    }
-    pmm_zero_page_phys(physical);
-    vmm_pae_lock_acquire();
-    pte = pt_cold_leaf_locked(address, 0);
-    if (!pte || (*pte & 0xFFFULL) !=
-        (VMM_PTE_COLD_ZERO | VMM_PTE_SHARED)) {
-        vmm_pae_lock_release();
-        if (claimed_original)
-            pfa_reclaim_kernel_range_quiet(physical,
-                                           physical + PAGE_SIZE);
-        else
-            pfa_free(physical);
-        return 0;
-    }
-    *pte = physical | page_flags | VMM_PTE_PRESENT | VMM_PTE_WRITE;
-    __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
-    __sync_fetch_and_sub(&cold_zero_pages, 1);
-    __sync_fetch_and_add(&cold_zero_faults, 1);
-    vmm_pae_lock_release();
-    return 1;
-}
-
-uint64_t pt_get_cold_zero_pages(void) {
-    return __atomic_load_n(&cold_zero_pages, __ATOMIC_RELAXED);
-}
-
-uint64_t pt_get_cold_zero_faults(void) {
-    return __atomic_load_n(&cold_zero_faults, __ATOMIC_RELAXED);
 }
 
 void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {

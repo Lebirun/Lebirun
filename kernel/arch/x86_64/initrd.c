@@ -776,11 +776,11 @@ void KERNEL_INIT initrd_copy_to_root(void) {
     };
 
     if (!files || file_count == 0) {
-        printf("INITRD: No files to copy to root\n");
+        KERNEL_INIT_LOG("INITRD: No files to copy to root\n");
         return;
     }
     
-    printf("INITRD: Copying %u files to /...\n", file_count);
+    KERNEL_INIT_LOG("INITRD: Copying %u files to /...\n", file_count);
     
     dirs_created = 0;
     files_copied = 0;
@@ -791,7 +791,8 @@ void KERNEL_INIT initrd_copy_to_root(void) {
         if (r == 0) {
             dirs_created++;
         } else {
-            printf("INITRD: Failed to create root dir %s (%d)\n", *p, r);
+            KERNEL_INIT_LOG("INITRD: Failed to create root dir %s (%d)\n",
+                            *p, r);
             errors++;
         }
     }
@@ -801,7 +802,8 @@ void KERNEL_INIT initrd_copy_to_root(void) {
         if (r == 0) {
             dirs_created++;
         } else {
-            printf("INITRD: Failed to create nested dir %s (%d)\n", *p, r);
+            KERNEL_INIT_LOG("INITRD: Failed to create nested dir %s (%d)\n",
+                            *p, r);
             errors++;
         }
     }
@@ -852,7 +854,7 @@ void KERNEL_INIT initrd_copy_to_root(void) {
             if (ret == 0) {
                 dirs_created++;
             } else if (ret != RAMFS_ERR_EXIST) {
-                printf("  mkdir %s FAILED (%d)\n", destpath, ret);
+                KERNEL_INIT_LOG("  mkdir %s FAILED (%d)\n", destpath, ret);
                 errors++;
             }
         } else {
@@ -863,21 +865,23 @@ void KERNEL_INIT initrd_copy_to_root(void) {
                     if (written >= 0) {
                         files_copied++;
                     } else {
-                        printf("  write %s FAILED (%d)\n", destpath, written);
+                        KERNEL_INIT_LOG("  write %s FAILED (%d)\n",
+                                        destpath, written);
                         errors++;
                     }
                 } else {
                     files_copied++;
                 }
             } else {
-                printf("  create %s FAILED (%d)\n", destpath, ret);
+                KERNEL_INIT_LOG("  create %s FAILED (%d)\n", destpath, ret);
                 errors++;
             }
         }
         kfree(destpath);
     }
     
-    printf("INITRD: Copied %u dirs, %u files (%u errors)\n", dirs_created, files_copied, errors);
+    KERNEL_INIT_LOG("INITRD: Copied %u dirs, %u files (%u errors)\n",
+                    dirs_created, files_copied, errors);
 }
 
 void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
@@ -927,7 +931,7 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     initrd_file_t *f;
 
     if (mods_count < 2) {
-        printf("ROOTFS: No rootfs module loaded (need at least 2 modules)\n");
+        KERNEL_INIT_LOG("ROOTFS: No rootfs module loaded (need at least 2 modules)\n");
         return;
     }
 
@@ -948,11 +952,11 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     initrd_mod1_phys_start = mod_start_phys;
     initrd_mod1_phys_end = mod_end_phys;
     
-    printf("ROOTFS: Module at phys 0x%016lX - 0x%016lX (%lu bytes)\n", 
-           mod_start_phys, mod_end_phys, mod_size);
+    KERNEL_INIT_LOG("ROOTFS: Module at phys 0x%016lX - 0x%016lX (%lu bytes)\n",
+                    mod_start_phys, mod_end_phys, mod_size);
 
     if (mod_size < sizeof(initrd_header_t)) {
-        printf("ROOTFS: Module too small\n");
+        KERNEL_INIT_LOG("ROOTFS: Module too small\n");
         return;
     }
 
@@ -967,29 +971,30 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     hdr = (initrd_header_t *)rootfs_base;
 
     if (hdr->magic != INITRD_MAGIC) {
-        printf("ROOTFS: Invalid magic (got 0x%08X, expected 0x%08X)\n",
-               (unsigned int)hdr->magic, (unsigned int)INITRD_MAGIC);
+        KERNEL_INIT_LOG("ROOTFS: Invalid magic (got 0x%08X, expected 0x%08X)\n",
+                        (unsigned int)hdr->magic,
+                        (unsigned int)INITRD_MAGIC);
         return;
     }
 
     rootfs_version = hdr->version;
     if (rootfs_version == 0) rootfs_version = 1;
     if (rootfs_version > INITRD_VERSION) {
-        printf("ROOTFS: Unsupported version %u\n", rootfs_version);
+        KERNEL_INIT_LOG("ROOTFS: Unsupported version %u\n", rootfs_version);
         return;
     }
 
     num_entries = hdr->num_entries;
-    printf("ROOTFS: Found %u entries\n", num_entries);
+    KERNEL_INIT_LOG("ROOTFS: Found %u entries\n", num_entries);
 
     if (num_entries == 0) {
-        printf("ROOTFS: No entries to copy\n");
+        KERNEL_INIT_LOG("ROOTFS: No entries to copy\n");
         return;
     }
 
     if ((uint64_t)num_entries >
         (mod_size - sizeof(initrd_header_t)) / sizeof(initrd_file_header_t)) {
-        printf("ROOTFS: File header array exceeds module size\n");
+        KERNEL_INIT_LOG("ROOTFS: File header array exceeds module size\n");
         return;
     }
 
@@ -997,7 +1002,7 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
 
     rfiles = (initrd_file_t *)kmalloc(num_entries * sizeof(initrd_file_t));
     if (!rfiles) {
-        printf("ROOTFS: Failed to allocate file array\n");
+        KERNEL_INIT_LOG("ROOTFS: Failed to allocate file array\n");
         return;
     }
     memset(rfiles, 0, num_entries * sizeof(initrd_file_t));
@@ -1010,7 +1015,8 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
         rfiles[i].permissions = hdrs[i].permissions;
         if (initrd_decode_parent(&hdrs[i], rootfs_version,
                                  &rfiles[i].parent_index) != 0) {
-            printf("ROOTFS: Entry %u has invalid parent encoding\n", i);
+            KERNEL_INIT_LOG("ROOTFS: Entry %u has invalid parent encoding\n",
+                            i);
             kfree(rfiles);
             return;
         }
@@ -1022,8 +1028,8 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
             hdr_len = hdrs[i].length;
 
             if (hdr_off > mod_size || hdr_len > mod_size - hdr_off) {
-                printf("ROOTFS: File %u (%s) out-of-bounds\n",
-                       i, rfiles[i].name);
+                KERNEL_INIT_LOG("ROOTFS: File %u (%s) out-of-bounds\n",
+                                i, rfiles[i].name);
                 rfiles[i].offset = hdr_off;
                 rfiles[i].data = NULL;
                 rfiles[i].length = 0;
@@ -1042,12 +1048,12 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     }
 
     if (!initrd_parent_graph_valid(rfiles, num_entries, rootfs_version)) {
-        printf("ROOTFS: Invalid parent graph\n");
+        KERNEL_INIT_LOG("ROOTFS: Invalid parent graph\n");
         kfree(rfiles);
         return;
     }
 
-    printf("ROOTFS: Copying %u files to /...\n", num_entries);
+    KERNEL_INIT_LOG("ROOTFS: Copying %u files to /...\n", num_entries);
     
     dirs_created = 0;
     files_copied = 0;
@@ -1133,7 +1139,8 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
     }
     
     kfree(rfiles);
-    printf("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n", dirs_created, files_copied, errors);
+    KERNEL_INIT_LOG("ROOTFS: Created %u dirs, %u files with backing (%u errors)\n",
+                    dirs_created, files_copied, errors);
 }
 
 static void initrd_free_region(uint64_t phys_start, uint64_t phys_end) {

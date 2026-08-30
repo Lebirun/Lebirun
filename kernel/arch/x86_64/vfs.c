@@ -244,31 +244,33 @@ void KERNEL_INIT vfs_init(void) {
     
     vfs_root = &root_node;
     
-    printf("VFS: Virtual Filesystem initialized\n");
+    KERNEL_INIT_LOG("VFS: Virtual Filesystem initialized\n");
 }
 
 int KERNEL_INIT vfs_register_fs(vfs_fs_type_t *fs) {
     vfs_fs_type_t *cur;
     
     if (!fs) {
-        printf("VFS: ERROR: NULL filesystem struct\n");
+        KERNEL_INIT_LOG("VFS: ERROR: NULL filesystem struct\n");
         return -1;
     }
     
     if (!fs->name) {
-        printf("VFS: ERROR: Filesystem has NULL name\n");
+        KERNEL_INIT_LOG("VFS: ERROR: Filesystem has NULL name\n");
         return -1;
     }
     
     if ((uintptr_t)fs->name < 0x1000) {
-        printf("VFS: ERROR: Invalid name pointer: %p\n", (void*)fs->name);
+        KERNEL_INIT_LOG("VFS: ERROR: Invalid name pointer: %p\n",
+                        (void *)fs->name);
         return -1;
     }
     
     cur = registered_fs;
     while (cur) {
         if (strcmp(cur->name, fs->name) == 0) {
-            printf("VFS: WARNING: Filesystem '%s' already registered\n", fs->name);
+            KERNEL_INIT_LOG("VFS: WARNING: Filesystem '%s' already registered\n",
+                            fs->name);
             return -1;
         }
         cur = cur->next;
@@ -277,7 +279,7 @@ int KERNEL_INIT vfs_register_fs(vfs_fs_type_t *fs) {
     fs->next = registered_fs;
     registered_fs = fs;
     
-    printf("VFS: Registered filesystem: %s\n", fs->name);
+    KERNEL_INIT_LOG("VFS: Registered filesystem: %s\n", fs->name);
     return 0;
 }
 
