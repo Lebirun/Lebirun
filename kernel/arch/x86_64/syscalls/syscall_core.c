@@ -1193,11 +1193,16 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                         if (echo) {
                             if (line_cursor[con_id] == line_len[con_id]) {
                                 tty_echo_char(con_id, c);
+                                if (con_id == 0) {
+                                    serial_write_direct(&c, 1);
+                                    serial_displayed_len[con_id] =
+                                        line_len[con_id];
+                                }
                             } else {
                                 tty_echo_char(con_id, c);
                                 line_redraw_from_cursor(con_id, echo);
+                                serial_redraw_line(con_id);
                             }
-                            serial_redraw_line(con_id);
                         }
                     }
                 }

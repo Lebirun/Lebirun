@@ -423,18 +423,6 @@ static void fpu_initialize_area(uint8_t *state) {
     memcpy(state + 28, &fpu_mxcsr_mask, sizeof(fpu_mxcsr_mask));
 }
 
-static void fpu_set_unavailable(void) {
-    uint64_t cr0;
-
-    __asm__ volatile ("movq %%cr0, %0" : "=r"(cr0));
-    cr0 |= 1ULL << 3;
-    __asm__ volatile ("movq %0, %%cr0" : : "r"(cr0) : "memory");
-}
-
-static void fpu_set_available(void) {
-    __asm__ volatile ("clts" ::: "memory");
-}
-
 static int task_init_fpu_state(task_t *task) {
     uint8_t *state;
 
@@ -447,40 +435,16 @@ static int task_init_fpu_state(task_t *task) {
     return 0;
 }
 
-static int task_ensure_fpu_state(task_t *task) {
-    if (!task) return -1;
-    if (task->fpu_state) return 0;
-    return task_init_fpu_state(task);
-}
-
 static void task_free_fpu_state(task_t *task) {
     if (!task || !task->fpu_state) return;
     kfree_aligned(task->fpu_state);
     task->fpu_state = NULL;
 }
 
-static void task_switch_fpu(task_t *previous, task_t *next) {
-    if (previous && previous->fpu_state) fpu_save_area(previous->fpu_state);
-    if (next && next->fpu_state) {
-        fpu_set_available();
-        fpu_restore_area(next->fpu_state);
-    } else {
-        fpu_set_unavailable();
-    }
-}
-
-int task_handle_fpu_fault(void) {
-    task_t *task;
-
-    task = current_task;
-    if (!task || !task->is_user) return 0;
-    fpu_set_available();
-    if (task_ensure_fpu_state(task) != 0) {
-        fpu_set_unavailable();
-        return 0;
-    }
+static void task_reset_fpu_state(task_t *task) {
+    if (!task || !task->fpu_state) return;
+    fpu_initialize_area(task->fpu_state);
     fpu_restore_area(task->fpu_state);
-    return 1;
 }
 
 static void task_write_fs_base(uint64_t base) {
@@ -1366,6 +1330,13 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     }
     memset(new_task, 0, sizeof(task_t));
     if (user_mode && task_set_cwd(new_task, "/") != 0) {
+        kfree(new_task);
+        kstack_free(kernel_stack_base);
+        return NULL;
+    }
+    if (user_mode && task_init_fpu_state(new_task) != 0) {
+        printf("Task fpu alloc fail!\n");
+        task_free_cwd(new_task);
         kfree(new_task);
         kstack_free(kernel_stack_base);
         return NULL;
@@ -2337,10 +2308,15 @@ static uint64_t task_reclaim_file_exec_pages(task_t *task,
             if (!removed) continue;
             task_untrack_user_page(task, removed);
             pfa_cow_release64(removed);
-            if (!prune_start || address < prune_start)
+            if (prune_end && address != prune_end) {
+                vmm_prune_user_range(task->pml4_phys, prune_start,
+                                     prune_end - prune_start);
+                prune_start = 0;
+                prune_end = 0;
+            }
+            if (!prune_end)
                 prune_start = address;
-            if (address + PAGE_SIZE > prune_end)
-                prune_end = address + PAGE_SIZE;
+            prune_end = address + PAGE_SIZE;
             reclaimed++;
         }
     }
@@ -2965,7 +2941,8 @@ void switch_to(task_t* next) {
     }
 
     prev->cr3 = read_cr3();
-    task_switch_fpu(prev, next);
+    fpu_save_area(prev->fpu_state);
+    fpu_restore_area(next->fpu_state);
 
     switch_to_asm(&prev->regs.rsp, next->regs.rsp);
 
@@ -3588,7 +3565,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         goto out_restore_cr3;
     }
 
-    if (prev_task && !dead_switch && prev_task->fpu_state)
+    if (prev_task && !dead_switch)
         fpu_save_area(prev_task->fpu_state);
     if (switch_to_cpu_idle) {
         task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
@@ -3598,17 +3575,11 @@ registers_t* schedule_from_irq(registers_t* regs) {
         return_frame->return_cr3 = kernel_cr3;
         rsp0 = (uint64_t)this_cpu->kernel_stack + KSTACK_RUNTIME_SIZE;
         tss_set_rsp0(rsp0);
-        fpu_set_unavailable();
         result = return_frame;
         spin_unlock(&sched_lock);
         return result;
     }
-    if (next->fpu_state) {
-        fpu_set_available();
-        fpu_restore_area(next->fpu_state);
-    } else {
-        fpu_set_unavailable();
-    }
+    fpu_restore_area(next->fpu_state);
 
     if (next != prev_task) {
         task_context_switches++;
@@ -4087,19 +4058,17 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
-    if (parent->fpu_state) {
-        fpu_save_area(parent->fpu_state);
-        if (task_init_fpu_state(child) != 0) {
-            printf("task_fork: fpu allocation failed\n");
-            task_free_cwd(child);
-            kfree(child);
-            kstack_free(kernel_stack_base);
-            if (child_user_pages) kfree(child_user_pages);
-            if (owns_child_pd) vmm_free_pml4(child_pd);
-            return -1;
-        }
-        memcpy(child->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
+    if (task_init_fpu_state(child) != 0) {
+        printf("task_fork: fpu allocation failed\n");
+        task_free_cwd(child);
+        kfree(child);
+        kstack_free(kernel_stack_base);
+        if (child_user_pages) kfree(child_user_pages);
+        if (owns_child_pd) vmm_free_pml4(child_pd);
+        return -1;
     }
+    fpu_save_area(parent->fpu_state);
+    memcpy(child->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
 
     child->id = next_task_id;
     child->pid = next_task_id;
@@ -4425,8 +4394,7 @@ static __attribute__((unused)) int task_exec_legacy(
     current_task->tls_limit = 0;
     task_write_fs_base(0);
     current_task->stack_size = stack_size;
-    task_free_fpu_state(current_task);
-    fpu_set_unavailable();
+    task_reset_fpu_state(current_task);
 
     sp = stack_top - USER_STACK_GAP - 16;
     zero = 0;
@@ -5106,8 +5074,7 @@ static int task_exec_with_args_common(
     }
 
     creds_apply_exec_ids(current_task, exec_euid, exec_egid);
-    task_free_fpu_state(current_task);
-    fpu_set_unavailable();
+    task_reset_fpu_state(current_task);
 
     return 0;
 }
@@ -5165,6 +5132,11 @@ pid_t task_create_thread(void (*entry)(void)) {
     
     memset(new_task, 0, sizeof(task_t));
     if (task_copy_cwd(new_task, current_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
+    if (task_init_fpu_state(new_task) != 0) {
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }
@@ -5340,6 +5312,11 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     
     memset(new_task, 0, sizeof(task_t));
     if (task_copy_cwd(new_task, current_task) != 0) {
+        kfree(new_task);
+        return -1;
+    }
+    if (task_init_fpu_state(new_task) != 0) {
+        task_free_cwd(new_task);
         kfree(new_task);
         return -1;
     }

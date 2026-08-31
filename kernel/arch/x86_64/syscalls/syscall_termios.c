@@ -722,10 +722,15 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             active = console_get_current();
             found = -1;
             for (vi = 0; vi < tty_count; vi++) {
-                if (vi != active) {
-                    found = vi + 1;
-                    break;
-                }
+                if (vi == active || console_get_graphics_mode(vi))
+                    continue;
+                if (tty_get_foreground_pgrp(vi) != 0)
+                    continue;
+                if (vt_modes && vt_modes[vi].mode == VT_PROCESS &&
+                    vt_owners && vt_owners[vi] > 0)
+                    continue;
+                found = vi + 1;
+                break;
             }
             *(int *)(uintptr_t)arg = found;
             return 0;
@@ -866,6 +871,12 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         case KDSETMODE:
             if (arg != KD_TEXT && arg != KD_GRAPHICS) return -EINVAL;
             if (!tty_valid_id(tty_id)) return -ENOTTY;
+            pgrp = tty_get_foreground_pgrp(tty_id);
+            if (arg == KD_GRAPHICS && pgrp > 0 &&
+                (!current_task ||
+                 (pgrp != current_task->pgid &&
+                  pgrp != current_task->pid)))
+                return -EBUSY;
             graphics_result = console_set_graphics_mode(
                 tty_id, arg == KD_GRAPHICS,
                 current_task ? current_task->pid : 0);

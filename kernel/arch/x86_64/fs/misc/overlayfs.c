@@ -317,6 +317,54 @@ static const vfs_node_ops_t overlay_dir_ops = {
 };
 static void overlay_ensure_upper_dirs(const char *path);
 
+static vfs_node_t *overlay_upper_node_at_path(const char *path) {
+    vfs_node_t *node;
+    vfs_node_t *next;
+    char *copy;
+    char *part;
+    char *slash;
+    size_t length;
+
+    if (!path || !overlay_ctx.upper.root) return NULL;
+    length = strlen(path);
+    copy = (char *)kmalloc(length + 1);
+    if (!copy) return NULL;
+    memcpy(copy, path, length + 1);
+    node = overlay_ctx.upper.root;
+    part = copy;
+    while (*part == '/') part++;
+    while (*part) {
+        slash = strchr(part, '/');
+        if (slash) *slash = '\0';
+        next = vfs_finddir(node, part);
+        if (!next) {
+            kfree(copy);
+            return NULL;
+        }
+        node = next;
+        if (!slash) break;
+        part = slash + 1;
+        while (*part == '/') part++;
+    }
+    kfree(copy);
+    return node;
+}
+
+static void overlay_attach_upper_node(overlay_node_t *onode,
+                                      const char *path) {
+    vfs_node_t *upper;
+
+    if (!onode || onode->upper_node) return;
+    upper = overlay_upper_node_at_path(path);
+    if (!upper) return;
+    mutex_lock(&overlay_node_lock);
+    if (!onode->upper_node) {
+        __atomic_add_fetch(&upper->ref_count, 1, __ATOMIC_ACQ_REL);
+        onode->upper_node = upper;
+    }
+    mutex_unlock(&overlay_node_lock);
+}
+
 static int overlay_ramfs_result(int result) {
     switch (result) {
         case RAMFS_ERR_NOMEM: return -12;
@@ -946,7 +994,6 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
     char *path;
     char *parent_path;
     int ret;
-    ramfs_node_t *pnode;
 
     if (!parent || !name) return -1;
     
@@ -967,10 +1014,8 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
         ret = ramfs_create_socket(path, (uint16_t)(flags & 07777));
     else
         ret = ramfs_create_file(path, 0644);
-    if (ret == 0 && !onode->upper_node) {
-        pnode = ramfs_find_node(parent_path);
-        if (pnode) onode->upper_node = pnode->vfs_node;
-    }
+    if (ret == RAMFS_ERR_OK || ret == RAMFS_ERR_EXIST)
+        overlay_attach_upper_node(onode, parent_path);
     if (ret == 0) overlay_reset_readdir(onode);
     kfree(path);
     kfree(parent_path);
@@ -982,7 +1027,6 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
     char *path;
     char *parent_path;
     int ret;
-    ramfs_node_t *pnode;
 
     if (!parent || !name) return -1;
     
@@ -1000,10 +1044,8 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
     overlay_ensure_upper_dirs(path);
     
     ret = ramfs_create_dir(path, perms);
-    if (ret == 0 && !onode->upper_node) {
-        pnode = ramfs_find_node(parent_path);
-        if (pnode) onode->upper_node = pnode->vfs_node;
-    }
+    if (ret == RAMFS_ERR_OK || ret == RAMFS_ERR_EXIST)
+        overlay_attach_upper_node(onode, parent_path);
     if (ret == 0) overlay_reset_readdir(onode);
     kfree(path);
     kfree(parent_path);

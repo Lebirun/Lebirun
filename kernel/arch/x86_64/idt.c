@@ -189,8 +189,6 @@ registers_t* interrupt_handler(registers_t* regs)
     cpu_info_t *cpu_info;
 
     if (regs->int_no < 32) {
-        if (regs->int_no == 7 && (regs->cs & 3) == 3 &&
-            task_handle_fpu_fault()) return regs;
         if (regs->int_no == 14) {
             __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
             access_type = 0;

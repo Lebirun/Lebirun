@@ -311,7 +311,6 @@ void task_memory_pressure_request(void);
 void task_memory_pressure_reclaim_now(void);
 void task_get_memory_stats(task_mem_stats_t *stats);
 void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pml4);
-int task_handle_fpu_fault(void);
 void task_get_cached_stats(int *proc_count, int *unused1, int *unused2,
                            pid_t *unused3);
 uint64_t task_user_memory_bytes(task_t *task);

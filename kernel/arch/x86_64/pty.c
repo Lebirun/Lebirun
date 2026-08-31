@@ -122,32 +122,17 @@ static int pty_reserve_buffer(uint8_t **buffer, size_t *capacity,
     return 0;
 }
 
-static void pty_compact_buffer(uint8_t **buffer, size_t *capacity,
-                               uint64_t *head, uint64_t *tail) {
+static void pty_release_empty_buffer(uint8_t **buffer, size_t *capacity,
+                                     uint64_t *head, uint64_t *tail) {
     uint64_t used;
-    uint8_t *new_buffer;
-    uint64_t i;
 
     used = *tail - *head;
-    if (used == *capacity) return;
-    if (used == 0) {
-        kfree(*buffer);
-        *buffer = NULL;
-        *capacity = 0;
-        *head = 0;
-        *tail = 0;
-        return;
-    }
-    new_buffer = (uint8_t *)kmalloc(used);
-    if (!new_buffer) return;
-    for (i = 0; i < used; i++) {
-        new_buffer[i] = (*buffer)[(*head + i) % *capacity];
-    }
+    if (used != 0) return;
     kfree(*buffer);
-    *buffer = new_buffer;
-    *capacity = (size_t)used;
+    *buffer = NULL;
+    *capacity = 0;
     *head = 0;
-    *tail = used;
+    *tail = 0;
 }
 
 static int pty_ensure_master_buf(pty_t *pty, size_t additional) {
@@ -572,8 +557,8 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
         dst[i] = pty->slave_buf[pty->slave_head % pty->slave_capacity];
         pty->slave_head++;
     }
-    pty_compact_buffer(&pty->slave_buf, &pty->slave_capacity,
-                       &pty->slave_head, &pty->slave_tail);
+    pty_release_empty_buffer(&pty->slave_buf, &pty->slave_capacity,
+                             &pty->slave_head, &pty->slave_tail);
     
     mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
@@ -629,8 +614,10 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VINTR, c)) {
                 signal_number = 2;
                 signal_pgrp = pty->pgrp;
-                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
-                                   &pty->master_head, &pty->master_tail);
+                pty_release_empty_buffer(&pty->master_buf,
+                                         &pty->master_capacity,
+                                         &pty->master_head,
+                                         &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 if (signal_pgrp > 0)
@@ -641,8 +628,10 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VQUIT, c)) {
                 signal_number = 3;
                 signal_pgrp = pty->pgrp;
-                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
-                                   &pty->master_head, &pty->master_tail);
+                pty_release_empty_buffer(&pty->master_buf,
+                                         &pty->master_capacity,
+                                         &pty->master_head,
+                                         &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 if (signal_pgrp > 0)
@@ -653,8 +642,10 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VSUSP, c)) {
                 signal_number = 20;
                 signal_pgrp = pty->pgrp;
-                pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
-                                   &pty->master_head, &pty->master_tail);
+                pty_release_empty_buffer(&pty->master_buf,
+                                         &pty->master_capacity,
+                                         &pty->master_head,
+                                         &pty->master_tail);
                 mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 if (signal_pgrp > 0)
@@ -700,8 +691,8 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             (c == '\n' && (pty->termios.c_lflag & ECHONL)))
             pty_echo_input(pty, c);
     }
-    pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
-                       &pty->master_head, &pty->master_tail);
+    pty_release_empty_buffer(&pty->master_buf, &pty->master_capacity,
+                             &pty->master_head, &pty->master_tail);
     
     mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
@@ -802,8 +793,8 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         }
         read_count = to_read;
     }
-    pty_compact_buffer(&pty->master_buf, &pty->master_capacity,
-                       &pty->master_head, &pty->master_tail);
+    pty_release_empty_buffer(&pty->master_buf, &pty->master_capacity,
+                             &pty->master_head, &pty->master_tail);
     
     mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
@@ -895,10 +886,10 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             }
             if (request == TCSETSF && arg) {
                 pty->master_head = pty->master_tail;
-                pty_compact_buffer(&pty->master_buf,
-                                   &pty->master_capacity,
-                                   &pty->master_head,
-                                   &pty->master_tail);
+                pty_release_empty_buffer(&pty->master_buf,
+                                         &pty->master_capacity,
+                                         &pty->master_head,
+                                         &pty->master_tail);
                 changed = 1;
             }
             break;
@@ -979,18 +970,18 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             }
             if (queue == TCIFLUSH || queue == TCIOFLUSH) {
                 pty->master_head = pty->master_tail;
-                pty_compact_buffer(&pty->master_buf,
-                                   &pty->master_capacity,
-                                   &pty->master_head,
-                                   &pty->master_tail);
+                pty_release_empty_buffer(&pty->master_buf,
+                                         &pty->master_capacity,
+                                         &pty->master_head,
+                                         &pty->master_tail);
                 changed = 1;
             }
             if (queue == TCOFLUSH || queue == TCIOFLUSH) {
                 pty->slave_head = pty->slave_tail;
-                pty_compact_buffer(&pty->slave_buf,
-                                   &pty->slave_capacity,
-                                   &pty->slave_head,
-                                   &pty->slave_tail);
+                pty_release_empty_buffer(&pty->slave_buf,
+                                         &pty->slave_capacity,
+                                         &pty->slave_head,
+                                         &pty->slave_tail);
                 changed = 1;
             }
             break;
