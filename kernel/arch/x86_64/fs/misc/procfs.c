@@ -15,6 +15,8 @@
 #include <lebirun/smp.h>
 #include <lebirun/creds.h>
 #include <lebirun/console.h>
+#include <lebirun/mouse.h>
+#include <lebirun/evdev.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -212,11 +214,18 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
     uint64_t pending;
     uint64_t blocked;
     unsigned long signal_limit;
+    task_state_t state;
 
     len = 0;
     task = procfs_get_task(node);
     
     if (task) {
+        state = task->state;
+        if (offset == 0 && size != 0) {
+            task_debug_snapshot(task->pid);
+            mouse_debug_snapshot();
+            evdev_debug_snapshot();
+        }
         ruid = task->uid;
         rgid = task->gid;
         if (!task->is_user) {
@@ -255,13 +264,17 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             "SigPnd:\t%016lx\n"
             "SigBlk:\t%016lx\n"
             "Seccomp:\t%d\n"
+            "KernelStage:\t%u\n"
             "KernelTask:\t%d\n",
             task->name[0] ? task->name : "unknown",
             umask_text,
-            task->state == TASK_RUNNING ? 'R' : 
-            task->state == TASK_BLOCKED ? 'S' : 'Z',
-            task->state == TASK_RUNNING ? "running" :
-            task->state == TASK_BLOCKED ? "sleeping" : "zombie",
+            state == TASK_RUNNING || state == TASK_READY ? 'R' :
+            state == TASK_BLOCKED ? 'S' : state == TASK_STOPPED ? 'T' :
+            state == TASK_DEAD ? 'Z' : '?',
+            state == TASK_RUNNING || state == TASK_READY ? "running" :
+            state == TASK_BLOCKED ? "sleeping" :
+            state == TASK_STOPPED ? "stopped" :
+            state == TASK_DEAD ? "zombie" : "unknown",
             task->pid,
             task->pid,
             task->ppid,
@@ -280,6 +293,7 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             pending,
             blocked,
             creds_get_syscall_filter_mode(task),
+            task->kernel_stage,
             task->is_kernel_task ? 1 : 0);
     }
     
@@ -618,11 +632,13 @@ static uint64_t proc_self_stat_read(vfs_node_t *node, uint64_t offset, uint64_t 
     uint64_t starttime_val;
     uint64_t vsize_val;
     uint64_t rss_val;
+    task_state_t state;
     
     len = 0;
     task = procfs_get_task(node);
     
     if (task) {
+        state = task->state;
         utime_val = task->utime;
         stime_val = task->stime;
         starttime_val = task->start_tick;
@@ -636,8 +652,10 @@ static uint64_t proc_self_stat_read(vfs_node_t *node, uint64_t offset, uint64_t 
             "%d (%s) %c %d %d %d 0 -1 0 0 0 0 0 %lu %lu 0 0 20 0 1 0 %lu %lu %lu -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             task->pid,
             task->name[0] ? task->name : "unknown",
-            task->state == TASK_RUNNING ? 'R' : 
-            task->state == TASK_BLOCKED ? 'S' : 'Z',
+            state == TASK_RUNNING || state == TASK_READY ? 'R' :
+            state == TASK_BLOCKED ? 'S' :
+            state == TASK_STOPPED ? 'T' :
+            state == TASK_DEAD ? 'Z' : '?',
             task->ppid,
             task->pgid,
             task->sid,

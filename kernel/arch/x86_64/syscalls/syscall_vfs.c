@@ -624,6 +624,7 @@ int sys_vfs_readdir(registers_t *regs) {
     }
 
     if (type_addr) *(uint32_t *)type_addr = (uint32_t)local_copy.type;
+    vfs_dirent_release_name(&local_copy);
     return 0;
 }
 
@@ -658,10 +659,20 @@ static int sys_vfs_readdir2(int fd, uint64_t name_addr, uint64_t capacity,
         type = (uint32_t)local_copy.type;
         *(uint32_t *)(uintptr_t)type_addr = type;
     }
-    if (!name_addr) return capacity == 0 ? 0 : -EFAULT;
-    if (capacity < required) return -ERANGE;
-    if (!syscall_user_range_mapped(name_addr, required, 1)) return -EFAULT;
+    if (!name_addr) {
+        vfs_dirent_release_name(&local_copy);
+        return capacity == 0 ? 0 : -EFAULT;
+    }
+    if (capacity < required) {
+        vfs_dirent_release_name(&local_copy);
+        return -ERANGE;
+    }
+    if (!syscall_user_range_mapped(name_addr, required, 1)) {
+        vfs_dirent_release_name(&local_copy);
+        return -EFAULT;
+    }
     memcpy((void *)(uintptr_t)name_addr, entry_name, required);
+    vfs_dirent_release_name(&local_copy);
     return 0;
 }
 

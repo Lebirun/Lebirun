@@ -74,4 +74,4 @@ $QEMU_CMD \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
     -device e1000,netdev=net0 \
     -accel kvm \
-    -boot c
+    -boot d

@@ -68,8 +68,6 @@ int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer);
-int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
-                     void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);
@@ -94,9 +92,6 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino);
 uint64_t ext4_inode_get_size(ext4_inode_t *inode);
 void ext4_inode_set_size(ext4_inode_t *inode, uint64_t size);
 uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block);
-uint32_t ext4_inode_get_run(ext4_fs_t *fs, ext4_inode_t *inode,
-                            uint64_t logical_block, uint32_t max_blocks,
-                            uint64_t *physical_out);
 
 int ext4_dir_lookup(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t *result_ino);
 int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t ino, uint8_t file_type);

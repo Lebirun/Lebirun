@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <lebirun/tty.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/console.h>
@@ -17,6 +18,9 @@
 #include <lebirun/kstack.h>
 
 #define IDT_ENOMEM 12
+
+_Static_assert(offsetof(registers_t, int_no) == 160, "interrupt vector offset");
+_Static_assert(sizeof(registers_t) == 216, "interrupt frame size");
 
 extern void isr0(void);
 extern void isr1(void);
@@ -147,6 +151,18 @@ static int task_state_requires_schedule(task_t *task) {
     return task->state == TASK_DEAD || task->state == TASK_BLOCKED || task->state == TASK_STOPPED;
 }
 
+static int task_handle_file_fault_from_interrupt(task_t *task,
+                                                 uint64_t fault_addr,
+                                                 uint64_t saved_rflags) {
+    int result;
+
+    if (saved_rflags & (1ULL << 9))
+        __asm__ volatile ("sti" ::: "memory");
+    result = task_handle_file_page_fault(task, fault_addr);
+    __asm__ volatile ("cli" ::: "memory");
+    return result;
+}
+
 static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
                                 uint64_t fault_page) {
     uint64_t new_phys;
@@ -177,9 +193,49 @@ static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
     return 1;
 }
 
-registers_t* interrupt_handler(registers_t* regs)
+registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr) {
+    task_t *task;
+    uint64_t base;
+    uint64_t top;
+    uint64_t stack;
+    uint64_t destination;
+    uint64_t page;
+    uint64_t last_page;
+    uint64_t pd;
+
+    task = smp_current_task_safe();
+    if (!task || !task->is_user || !task->kernel_stack_base) return regs;
+    if ((regs->cs & 3) == 0 && kstack_is_in_region(fault_addr)) return regs;
+    base = (uint64_t)task->kernel_stack_base;
+    top = base + task->kernel_stack_size;
+    if (top < base || task->kernel_stack_size < sizeof(*regs) + 16)
+        kernel_panic("Invalid page-fault task stack", regs);
+    stack = top;
+    if ((regs->cs & 3) == 0) {
+        stack = regs->rsp;
+        if (stack < base || stack > top) return regs;
+    }
+    if (stack < base + sizeof(*regs) + 16)
+        kernel_panic("Page-fault task stack overflow", regs);
+    destination = (stack - sizeof(*regs)) & ~15ULL;
+    if (destination < base + 16)
+        kernel_panic("Page-fault task stack overflow", regs);
+    pd = vmm_get_kernel_cr3();
+    last_page = (destination + sizeof(*regs) - 1) & ~(PAGE_SIZE - 1);
+    page = (destination - 8) & ~(PAGE_SIZE - 1);
+    for (;;) {
+        if (!vmm_get_phys_in_pml4(pd, page) &&
+            !kstack_page_fault_handler(page))
+            kernel_panic("Cannot prepare page-fault task stack", regs);
+        if (page == last_page) break;
+        page += PAGE_SIZE;
+    }
+    memcpy((void *)destination, regs, sizeof(*regs));
+    return (registers_t *)destination;
+}
+
+registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 {
-    uint64_t fault_addr;
     uint64_t orig_cr3;
     uint64_t kernel_cr3;
     uint8_t access_type;
@@ -190,7 +246,6 @@ registers_t* interrupt_handler(registers_t* regs)
 
     if (regs->int_no < 32) {
         if (regs->int_no == 14) {
-            __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
             access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
             else access_type |= VRING_PERM_READ;
@@ -254,6 +309,9 @@ registers_t* interrupt_handler(registers_t* regs)
             }
             printf("[KERNEL] User exception %d at RIP=0x%016lX sig=%d\n",
                    regs->int_no, regs->rip, sig);
+            vt_debug_printf("[VTDBG PROC] fault pid=%d name=%s int=%llu rip=%llx sig=%d\n",
+                            current_task->pid, current_task->name,
+                            regs->int_no, regs->rip, sig);
             
             task_exit_deferred(128 + sig);
             return schedule_from_irq(regs);
@@ -261,7 +319,6 @@ registers_t* interrupt_handler(registers_t* regs)
         
         if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
             int cow_result;
-            __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
             cow_result = cow_handle_fault(fault_addr,
                                           current_task->pml4_phys);
             if (cow_result == 1) {
@@ -278,7 +335,6 @@ registers_t* interrupt_handler(registers_t* regs)
             uint64_t entry_phys;
             uint64_t fault_page;
             uint64_t phys;
-            __asm__ ("movq %%cr2, %0" : "=r" (fault_addr));
             actual_cr3 = regs->entry_cr3;
             if (!actual_cr3) __asm__ ("movq %%cr3, %0" : "=r" (actual_cr3));
             expected_pd = current_task->pml4_phys;
@@ -295,7 +351,8 @@ registers_t* interrupt_handler(registers_t* regs)
                 fault_page = fault_addr & ~0xFFFu;
                 phys = vmm_get_phys_in_pml4(current_task->pml4_phys, fault_page);
                 if (phys == 0) {
-                    if (task_handle_file_page_fault(current_task, fault_addr)) {
+                    if (task_handle_file_fault_from_interrupt(
+                            current_task, fault_addr, regs->rflags)) {
                         return regs;
                     }
                     if (task_handle_anon_page_fault(current_task, fault_addr,
@@ -312,6 +369,9 @@ registers_t* interrupt_handler(registers_t* regs)
                    current_task->file_map_count, fault_addr, regs->rip,
                    regs->err_code, regs->entry_cr3,
                    current_task->pml4_phys);
+            vt_debug_printf("[VTDBG PROC] segv pid=%d name=%s addr=%llx rip=%llx err=%llx\n",
+                            current_task->pid, current_task->name,
+                            fault_addr, regs->rip, regs->err_code);
             printf("  RAX=0x%lX RBX=0x%lX RCX=0x%lX RDX=0x%lX\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
             printf("  RSI=0x%lX RDI=0x%lX RSP=0x%lX RBP=0x%lX\n", regs->rsi, regs->rdi, regs->rsp, regs->rbp);
             printf("  R8=0x%lX R9=0x%lX R10=0x%lX R11=0x%lX\n", regs->r8, regs->r9, regs->r10, regs->r11);
@@ -352,7 +412,7 @@ registers_t* interrupt_handler(registers_t* regs)
         if (regs->int_no == 14 && !(regs->err_code & 0x4) && (regs->err_code & 0x3) == 0x3 && current_task && current_task->is_user && current_task->syscall_frame) {
             int sc_cow_result;
             uint64_t sc_cow_addr;
-            __asm__ ("movq %%cr2, %0" : "=r" (sc_cow_addr));
+            sc_cow_addr = fault_addr;
             if (sc_cow_addr < KERNEL_VMA) {
                 sc_cow_result = cow_handle_fault(sc_cow_addr,
                                                  current_task->pml4_phys);
@@ -376,7 +436,7 @@ registers_t* interrupt_handler(registers_t* regs)
                 kernel_panic("Kernel control-flow fault during syscall", regs);
             }
 
-            __asm__ ("movq %%cr2, %0" : "=r" (sc_fault_addr));
+            sc_fault_addr = fault_addr;
             if (sc_fault_addr < KERNEL_VMA) {
                 sc_fault_page = sc_fault_addr & ~0xFFFu;
                 sc_expected_pd = current_task->pml4_phys;
@@ -386,8 +446,8 @@ registers_t* interrupt_handler(registers_t* regs)
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
 
                 if (sc_phys != 0 ||
-                    task_handle_file_page_fault(current_task,
-                                                sc_fault_addr) ||
+                    task_handle_file_fault_from_interrupt(
+                        current_task, sc_fault_addr, regs->rflags) ||
                     task_handle_anon_page_fault(
                         current_task, sc_fault_addr,
                         (regs->err_code & 0x2) != 0) ||

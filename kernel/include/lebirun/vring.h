@@ -124,6 +124,7 @@ void kprint_serial_async(const char *buf, size_t len);
 bool kprint_is_ready(void);
 void kprint_enable(void);
 void serial_write_direct(const char *buf, size_t len);
+void vt_debug_printf(const char *fmt, ...);
 void kprint_flush(void);
 
 extern kproc_t *current_kproc;

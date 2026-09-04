@@ -64,6 +64,7 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     ext4_block_cache_entry_t *new_cache;
     int ret;
 
+retry:
     oldest = -1;
     dirty_oldest = -1;
     oldest_tick = 0xFFFFFFFF;
@@ -90,7 +91,7 @@ static int find_free_cache_entry(ext4_fs_t *fs) {
     if (dirty_oldest >= 0 && fs->block_cache_count >= 8) {
         ret = ext4_sync_blocks(fs);
         if (ret != 0) return -1;
-        return dirty_oldest;
+        goto retry;
     }
 
     if (dirty_oldest < 0 || fs->block_cache_count < 8) {
@@ -127,39 +128,6 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
     }
 
     return 0;
-}
-
-int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
-                     void *buffer) {
-    ahci_port_t *port;
-    uint64_t sectors;
-    uint64_t lba;
-    uint64_t bytes;
-    uint64_t address;
-    uint32_t i;
-
-    if (!fs || !buffer || count < 2) return -1;
-    address = (uint64_t)(uintptr_t)buffer;
-    if (address < KERNEL_VMA || fs->block_size == 0 ||
-        (uint64_t)count > UINT64_MAX / fs->block_size) return -1;
-    bytes = (uint64_t)count * fs->block_size;
-    if (bytes > UINT64_MAX - address) return -1;
-    if (bytes > (uint64_t)AHCI_PRDT_ENTRIES * PAGE_SIZE -
-                (address & (PAGE_SIZE - 1))) return -1;
-    if (fs->sectors_per_block == 0 ||
-        (uint64_t)count > UINT64_MAX / fs->sectors_per_block) return -1;
-    if ((uint64_t)count - 1 > UINT64_MAX - block) return -1;
-    if (block > (UINT64_MAX - fs->partition_start_lba) /
-                fs->sectors_per_block) return -1;
-    for (i = 0; i < count; i++) {
-        if (find_cache_entry(fs, block + i) >= 0) return -1;
-    }
-    port = ahci_get_port(fs->port_index);
-    if (!port) return -1;
-    sectors = (uint64_t)count * fs->sectors_per_block;
-    lba = fs->partition_start_lba + block * fs->sectors_per_block;
-    if (sectors - 1 > UINT64_MAX - lba) return -1;
-    return ahci_read_sectors(port, lba, sectors, buffer);
 }
 
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
@@ -240,6 +208,8 @@ int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void 
 }
 
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
+    uint8_t *data;
+    int cached_idx;
     int idx;
     
     idx = find_cache_entry(fs, block);
@@ -254,23 +224,42 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
         return NULL;
     }
 
-    if (!fs->block_cache[idx].data) {
-        fs->block_cache[idx].data = (uint8_t *)kmalloc(fs->block_size);
-        if (!fs->block_cache[idx].data) {
+    data = fs->block_cache[idx].data;
+    memset(&fs->block_cache[idx], 0, sizeof(fs->block_cache[idx]));
+    if (!data) {
+        data = (uint8_t *)kmalloc(fs->block_size);
+        if (!data) {
             return NULL;
         }
     }
 
-    if (ext4_read_block(fs, block, fs->block_cache[idx].data) != 0) {
-        ext4_discard_cache_entry(&fs->block_cache[idx]);
+    if (ext4_read_block(fs, block, data) != 0) {
+        kfree(data);
         return NULL;
     }
 
-    fs->block_cache[idx].block_num = block;
-    fs->block_cache[idx].ref_count = 1;
-    fs->block_cache[idx].dirty = false;
-    fs->block_cache[idx].last_access = ++fs->cache_tick;
+    idx = find_cache_entry(fs, block);
+    if (idx < 0) {
+        idx = find_free_cache_entry(fs);
+        cached_idx = find_cache_entry(fs, block);
+        if (cached_idx < 0) {
+            if (idx < 0) {
+                kfree(data);
+                return NULL;
+            }
+            ext4_discard_cache_entry(&fs->block_cache[idx]);
+            fs->block_cache[idx].data = data;
+            fs->block_cache[idx].block_num = block;
+            fs->block_cache[idx].ref_count = 1;
+            fs->block_cache[idx].last_access = ++fs->cache_tick;
+            return data;
+        }
+        idx = cached_idx;
+    }
 
+    fs->block_cache[idx].ref_count++;
+    fs->block_cache[idx].last_access = ++fs->cache_tick;
+    kfree(data);
     return fs->block_cache[idx].data;
 }
 

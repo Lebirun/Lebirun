@@ -4,6 +4,7 @@
 #include <lebirun/pit.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/vring.h>
 #include <string.h>
 
 static struct evdev_device evdev_kbd;
@@ -16,6 +17,8 @@ static vfs_node_t evdev_event1;
 static dirent_t evdev_dirent;
 
 static uint8_t prev_mouse_buttons = 0;
+static uint64_t mouse_debug_converted;
+static uint64_t mouse_debug_returned;
 
 static void evdev_process_mouse(void);
 static uint16_t evdev_extended_key(uint8_t scancode);
@@ -161,8 +164,7 @@ void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, in
 
 void evdev_push_sync(struct evdev_device *dev) {
     evdev_push_event(dev, EV_SYN, SYN_REPORT, 0);
-    waitq_wake_all(&dev->waitq);
-    descriptor_ready_notify();
+    descriptor_ready_notify_irq();
 }
 
 static void evdev_kbd_observer(struct keyboard_event event) {
@@ -202,6 +204,7 @@ static void evdev_process_mouse(void) {
         nread = mouse_read(pkt, packet_size);
         if (nread < (int)packet_size)
             break;
+        __atomic_add_fetch(&mouse_debug_converted, 1, __ATOMIC_RELAXED);
         buttons = pkt[0];
         dx = (int8_t)pkt[1];
         dy = (int8_t)pkt[2];
@@ -249,12 +252,36 @@ uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer
         memcpy(buffer + written, &ev, ev_size);
         written += ev_size;
     }
+    if (dev == &evdev_mouse && written)
+        __atomic_add_fetch(&mouse_debug_returned, written / ev_size,
+                           __ATOMIC_RELAXED);
     return written;
+}
+
+void evdev_debug_snapshot(void) {
+    uint64_t converted;
+    uint64_t returned;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t capacity;
+    int grab;
+    uint64_t refs;
+
+    converted = __atomic_load_n(&mouse_debug_converted, __ATOMIC_RELAXED);
+    returned = __atomic_load_n(&mouse_debug_returned, __ATOMIC_RELAXED);
+    head = __atomic_load_n(&evdev_mouse.head, __ATOMIC_RELAXED);
+    tail = __atomic_load_n(&evdev_mouse.tail, __ATOMIC_RELAXED);
+    capacity = __atomic_load_n(&evdev_mouse.ring_capacity, __ATOMIC_RELAXED);
+    grab = __atomic_load_n(&evdev_mouse.grab_pid, __ATOMIC_RELAXED);
+    refs = __atomic_load_n(&evdev_event1.ref_count, __ATOMIC_RELAXED);
+    vt_debug_printf("[VTDBG EVDEV] converted=%llu returned=%llu head=%u tail=%u cap=%u grab=%d refs=%llu\n",
+                    converted, returned, head, tail, capacity, grab, refs);
 }
 
 uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     struct evdev_device *dev;
     uint64_t written;
+    uint64_t generation;
 
     (void)offset;
     dev = (struct evdev_device *)node->private_data;
@@ -267,12 +294,12 @@ uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *b
         evdev_process_mouse();
 
     while (!evdev_has_data(dev)) {
+        generation = descriptor_ready_generation();
         if (dev == &evdev_mouse)
             evdev_process_mouse();
         if (evdev_has_data(dev))
             break;
-        waitq_add(&dev->waitq, current_task);
-        block_current();
+        descriptor_ready_wait(generation, UINT64_MAX);
         if (dev == &evdev_mouse)
             evdev_process_mouse();
     }
@@ -495,7 +522,6 @@ void KERNEL_INIT evdev_init(void) {
     int i;
 
     memset(&evdev_kbd, 0, sizeof(evdev_kbd));
-    waitq_init(&evdev_kbd.waitq);
     strcpy(evdev_kbd.name, KERNEL_INIT_STRING("Lebirun PS/2 Keyboard"));
     evdev_kbd.id.bustype = BUS_I8042;
     evdev_kbd.id.vendor = 0x0001;
@@ -523,7 +549,6 @@ void KERNEL_INIT evdev_init(void) {
     set_bit(evdev_kbd.key_bits, KEY_DELETE);
 
     memset(&evdev_mouse, 0, sizeof(evdev_mouse));
-    waitq_init(&evdev_mouse.waitq);
     strcpy(evdev_mouse.name, KERNEL_INIT_STRING("Lebirun PS/2 Mouse"));
     evdev_mouse.id.bustype = BUS_I8042;
     evdev_mouse.id.vendor = 0x0002;

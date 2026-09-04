@@ -624,32 +624,17 @@ static int socket_ensure_recv_buf(socket_t *sock, size_t additional) {
                                  additional, (uint32_t)sock->so_rcvbuf);
 }
 
-static void socket_compact_recv_buffer(socket_t *sock) {
+static void socket_release_empty_recv_buffer(socket_t *sock) {
     uint64_t used;
-    uint8_t *new_buffer;
-    uint64_t i;
 
     if (!sock) return;
     used = sock->recv_tail - sock->recv_head;
-    if (used == sock->recv_capacity) return;
-    if (used == 0) {
-        kfree(sock->recv_buf);
-        sock->recv_buf = NULL;
-        sock->recv_capacity = 0;
-        sock->recv_head = 0;
-        sock->recv_tail = 0;
-        return;
-    }
-    new_buffer = (uint8_t *)kmalloc(used);
-    if (!new_buffer) return;
-    for (i = 0; i < used; i++) {
-        new_buffer[i] = sock->recv_buf[(sock->recv_head + i) % sock->recv_capacity];
-    }
+    if (used != 0) return;
     kfree(sock->recv_buf);
-    sock->recv_buf = new_buffer;
-    sock->recv_capacity = (uint32_t)used;
+    sock->recv_buf = NULL;
+    sock->recv_capacity = 0;
     sock->recv_head = 0;
-    sock->recv_tail = used;
+    sock->recv_tail = 0;
 }
 
 static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
@@ -733,7 +718,7 @@ static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
     }
     if (!peek) {
         sock->recv_head = head;
-        socket_compact_recv_buffer(sock);
+        socket_release_empty_recv_buffer(sock);
     }
     socket_recv_unlock(sock);
     return to_read;

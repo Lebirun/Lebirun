@@ -199,13 +199,15 @@ static uint64_t dev_ttyN_write(vfs_node_t *node, uint64_t offset, uint64_t size,
 }
 
 static uint64_t dev_mice_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    uint64_t generation;
     int nread;
 
     (void)node;
     (void)offset;
     while (!mouse_has_data()) {
-        waitq_add(mouse_get_waitq(), current_task);
-        block_current();
+        generation = descriptor_ready_generation();
+        if (mouse_has_data()) break;
+        descriptor_ready_wait(generation, UINT64_MAX);
     }
     nread = mouse_read(buffer, (uint32_t)size);
     return (uint64_t)nread;

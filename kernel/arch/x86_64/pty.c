@@ -26,7 +26,6 @@ typedef struct {
     struct winsize winsize;
     pid_t session;
     pid_t pgrp;
-    mutex_t lock;
 } pty_t;
 
 static pty_t *ptys = NULL;
@@ -91,7 +90,6 @@ found:
     init_default_termios(&ptys[i].termios);
     ptys[i].winsize.ws_row = 24;
     ptys[i].winsize.ws_col = 80;
-    mutex_init(&ptys[i].lock);
     return i;
 }
 
@@ -122,17 +120,19 @@ static int pty_reserve_buffer(uint8_t **buffer, size_t *capacity,
     return 0;
 }
 
-static void pty_release_empty_buffer(uint8_t **buffer, size_t *capacity,
-                                     uint64_t *head, uint64_t *tail) {
+static uint8_t *pty_detach_empty_buffer(uint8_t **buffer, size_t *capacity,
+                                        uint64_t *head, uint64_t *tail) {
     uint64_t used;
+    uint8_t *released;
 
     used = *tail - *head;
-    if (used != 0) return;
-    kfree(*buffer);
+    if (used != 0) return NULL;
+    released = *buffer;
     *buffer = NULL;
     *capacity = 0;
     *head = 0;
     *tail = 0;
+    return released;
 }
 
 static int pty_ensure_master_buf(pty_t *pty, size_t additional) {
@@ -530,6 +530,7 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
     size_t available;
     size_t to_read;
     uint8_t *dst;
+    uint8_t *released;
     size_t i;
     pty_t *pty;
     int closed;
@@ -540,11 +541,9 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    mutex_lock(&pty->lock);
     available = buf_used(pty->slave_head, pty->slave_tail);
     if (available == 0) {
         closed = pty->slave_refs == 0;
-        mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
         if (closed) return -5;
         return -11;
@@ -557,11 +556,13 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
         dst[i] = pty->slave_buf[pty->slave_head % pty->slave_capacity];
         pty->slave_head++;
     }
-    pty_release_empty_buffer(&pty->slave_buf, &pty->slave_capacity,
-                             &pty->slave_head, &pty->slave_tail);
+    released = pty_detach_empty_buffer(&pty->slave_buf,
+                                       &pty->slave_capacity,
+                                       &pty->slave_head,
+                                       &pty->slave_tail);
     
-    mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
+    kfree(released);
     descriptor_ready_notify();
     return to_read;
 }
@@ -573,11 +574,13 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     uint8_t c;
     uint8_t previous;
     pty_t *pty;
+    uint8_t *released;
     int signal_number;
     pid_t signal_pgrp;
 
     signal_number = 0;
     signal_pgrp = 0;
+    released = NULL;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
@@ -589,10 +592,8 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return -32;
     }
-    mutex_lock(&pty->lock);
     to_write = count;
     if (to_write > 0 && pty_ensure_master_buf(pty, to_write) < 0) {
-        mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
         return -12;
     }
@@ -614,12 +615,12 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VINTR, c)) {
                 signal_number = 2;
                 signal_pgrp = pty->pgrp;
-                pty_release_empty_buffer(&pty->master_buf,
-                                         &pty->master_capacity,
-                                         &pty->master_head,
-                                         &pty->master_tail);
-                mutex_unlock(&pty->lock);
+                released = pty_detach_empty_buffer(&pty->master_buf,
+                                                   &pty->master_capacity,
+                                                   &pty->master_head,
+                                                   &pty->master_tail);
                 mutex_unlock(&pty_lock);
+                kfree(released);
                 if (signal_pgrp > 0)
                     deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
@@ -628,12 +629,12 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VQUIT, c)) {
                 signal_number = 3;
                 signal_pgrp = pty->pgrp;
-                pty_release_empty_buffer(&pty->master_buf,
-                                         &pty->master_capacity,
-                                         &pty->master_head,
-                                         &pty->master_tail);
-                mutex_unlock(&pty->lock);
+                released = pty_detach_empty_buffer(&pty->master_buf,
+                                                   &pty->master_capacity,
+                                                   &pty->master_head,
+                                                   &pty->master_tail);
                 mutex_unlock(&pty_lock);
+                kfree(released);
                 if (signal_pgrp > 0)
                     deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
@@ -642,12 +643,12 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             if (pty_cc_matches(pty, VSUSP, c)) {
                 signal_number = 20;
                 signal_pgrp = pty->pgrp;
-                pty_release_empty_buffer(&pty->master_buf,
-                                         &pty->master_capacity,
-                                         &pty->master_head,
-                                         &pty->master_tail);
-                mutex_unlock(&pty->lock);
+                released = pty_detach_empty_buffer(&pty->master_buf,
+                                                   &pty->master_capacity,
+                                                   &pty->master_head,
+                                                   &pty->master_tail);
                 mutex_unlock(&pty_lock);
+                kfree(released);
                 if (signal_pgrp > 0)
                     deliver_signal_to_pgrp(signal_pgrp, signal_number);
                 descriptor_ready_notify();
@@ -691,11 +692,13 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
             (c == '\n' && (pty->termios.c_lflag & ECHONL)))
             pty_echo_input(pty, c);
     }
-    pty_release_empty_buffer(&pty->master_buf, &pty->master_capacity,
-                             &pty->master_head, &pty->master_tail);
+    released = pty_detach_empty_buffer(&pty->master_buf,
+                                       &pty->master_capacity,
+                                       &pty->master_head,
+                                       &pty->master_tail);
     
-    mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
+    kfree(released);
     descriptor_ready_notify();
     return to_write;
 }
@@ -710,6 +713,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
     uint8_t c;
     size_t to_read;
     pty_t *pty;
+    uint8_t *released;
     cc_t vmin;
     cc_t vtime;
     size_t required;
@@ -729,7 +733,6 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return 0;
     }
-    mutex_lock(&pty->lock);
     available = buf_used(pty->master_head, pty->master_tail);
 
     dst = (uint8_t *)buf;
@@ -756,7 +759,6 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         }
 
         if (!found_line) {
-            mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return -11;
         }
@@ -776,12 +778,10 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         if (required > count) required = count;
 
         if (available == 0) {
-            mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return vmin == 0 && vtime == 0 ? 0 : -11;
         }
         if (required > 0 && available < required) {
-            mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return -11;
         }
@@ -793,11 +793,13 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
         }
         read_count = to_read;
     }
-    pty_release_empty_buffer(&pty->master_buf, &pty->master_capacity,
-                             &pty->master_head, &pty->master_tail);
+    released = pty_detach_empty_buffer(&pty->master_buf,
+                                       &pty->master_capacity,
+                                       &pty->master_head,
+                                       &pty->master_tail);
     
-    mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
+    kfree(released);
     descriptor_ready_notify();
     return read_count;
 }
@@ -821,7 +823,6 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
         mutex_unlock(&pty_lock);
         return -32;
     }
-    mutex_lock(&pty->lock);
     
     consumed = 0;
     output_size = 0;
@@ -836,7 +837,6 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
         consumed++;
     }
     if (output_size > 0 && pty_ensure_slave_buf(pty, output_size) < 0) {
-        mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
         return -12;
     }
@@ -845,7 +845,6 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
         pty_append_slave_output(pty, c);
     }
 
-    mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
     descriptor_ready_notify();
     return consumed;
@@ -860,9 +859,13 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
     pid_t signal_pgrp;
     size_t available;
     size_t readable;
+    uint8_t *released_master;
+    uint8_t *released_slave;
 
     changed = 0;
     signal_pgrp = 0;
+    released_master = NULL;
+    released_slave = NULL;
 
     mutex_lock(&pty_lock);
     pty = get_pty_by_master(fd);
@@ -871,7 +874,6 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    mutex_lock(&pty->lock);
     switch (request) {
         case TCGETS:
             if (arg) memcpy(arg, &pty->termios, sizeof(struct termios));
@@ -886,10 +888,9 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             }
             if (request == TCSETSF && arg) {
                 pty->master_head = pty->master_tail;
-                pty_release_empty_buffer(&pty->master_buf,
-                                         &pty->master_capacity,
-                                         &pty->master_head,
-                                         &pty->master_tail);
+                released_master = pty_detach_empty_buffer(
+                    &pty->master_buf, &pty->master_capacity,
+                    &pty->master_head, &pty->master_tail);
                 changed = 1;
             }
             break;
@@ -910,7 +911,6 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             break;
         case FIONREAD:
             if (!arg) {
-                mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 return -22;
             }
@@ -956,7 +956,6 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
         case TCXONC:
             if ((int)(uintptr_t)arg < TCOOFF ||
                 (int)(uintptr_t)arg > TCION) {
-                mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 return -22;
             }
@@ -964,30 +963,26 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
         case TCFLSH:
             queue = (int)(uintptr_t)arg;
             if (queue < TCIFLUSH || queue > TCIOFLUSH) {
-                mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 return -22;
             }
             if (queue == TCIFLUSH || queue == TCIOFLUSH) {
                 pty->master_head = pty->master_tail;
-                pty_release_empty_buffer(&pty->master_buf,
-                                         &pty->master_capacity,
-                                         &pty->master_head,
-                                         &pty->master_tail);
+                released_master = pty_detach_empty_buffer(
+                    &pty->master_buf, &pty->master_capacity,
+                    &pty->master_head, &pty->master_tail);
                 changed = 1;
             }
             if (queue == TCOFLUSH || queue == TCIOFLUSH) {
                 pty->slave_head = pty->slave_tail;
-                pty_release_empty_buffer(&pty->slave_buf,
-                                         &pty->slave_capacity,
-                                         &pty->slave_head,
-                                         &pty->slave_tail);
+                released_slave = pty_detach_empty_buffer(
+                    &pty->slave_buf, &pty->slave_capacity,
+                    &pty->slave_head, &pty->slave_tail);
                 changed = 1;
             }
             break;
         case TIOCGPTN:
             if (!arg || !get_pty_by_master(fd)) {
-                mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 return -22;
             }
@@ -996,7 +991,6 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             break;
         case TIOCSPTLCK:
             if (!arg || !get_pty_by_master(fd)) {
-                mutex_unlock(&pty->lock);
                 mutex_unlock(&pty_lock);
                 return -22;
             }
@@ -1007,12 +1001,12 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             }
             break;
         default:
-            mutex_unlock(&pty->lock);
             mutex_unlock(&pty_lock);
             return -22;
     }
-    mutex_unlock(&pty->lock);
     mutex_unlock(&pty_lock);
+    kfree(released_master);
+    kfree(released_slave);
     if (signal_pgrp > 0)
         deliver_signal_to_pgrp(signal_pgrp, 28);
     if (changed)
@@ -1061,15 +1055,12 @@ int pty_close_master(int fd) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    mutex_lock(&pty->lock);
     if (pty->master_refs <= 0) {
-        mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
         return -1;
     }
     pty->master_refs--;
     pty_release(pty);
-    mutex_unlock(&pty->lock);
     pty_reclaim_storage();
     mutex_unlock(&pty_lock);
     descriptor_ready_notify();
@@ -1085,15 +1076,12 @@ int pty_close_slave(int fd) {
         mutex_unlock(&pty_lock);
         return -1;
     }
-    mutex_lock(&pty->lock);
     if (pty->slave_refs <= 0) {
-        mutex_unlock(&pty->lock);
         mutex_unlock(&pty_lock);
         return -1;
     }
     pty->slave_refs--;
     pty_release(pty);
-    mutex_unlock(&pty->lock);
     pty_reclaim_storage();
     mutex_unlock(&pty_lock);
     descriptor_ready_notify();

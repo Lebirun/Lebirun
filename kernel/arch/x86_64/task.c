@@ -22,6 +22,7 @@
 #include <lebirun/uaccess.h>
 #include <lebirun/watchdog.h>
 #include <lebirun/evdev.h>
+#include <lebirun/mutex.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -44,7 +45,6 @@ extern void file_locks_release_process_node(pid_t pid, vfs_node_t *node,
 extern void syscall_robust_list_exit(task_t *task);
 extern void copy_file_range_release_task(void *owner);
 
-#define TASK_FILE_FAULT_TEMP TEMP_SLOT(5)
 #define TASK_ANON_RECLAIM_TEMP TEMP_SLOT(6)
 
 #define KERR_EPERM   1
@@ -60,10 +60,14 @@ extern void copy_file_range_release_task(void *owner);
 
 #define TASK_WAIT_QUEUE_NORMAL 1
 #define TASK_WAIT_QUEUE_FUTEX  2
+#define TASK_DEFERRED_REAP 1
+#define TASK_DEFERRED_EXEC_DRAIN 2
+#define TASK_DEFERRED_DEBUG 4
 #define TASK_INIT_PID 1
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
-#define MEMORY_PRESSURE_BOOT_RECLAIM 2
+
+_Static_assert(sizeof(task_t) == 904, "task size changed");
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
@@ -166,9 +170,8 @@ static task_t* dead_queue_head = NULL;
 static int task_ptr_valid(task_t *t);
 static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
-static volatile int memory_pressure_pending = MEMORY_PRESSURE_BOOT_RECLAIM;
+static volatile int memory_pressure_pending;
 static uint64_t memory_pressure_last_tick;
-
 _Static_assert(KSTACK_RUNTIME_SIZE == 0x1E00, "idle stack layout");
 _Static_assert(sizeof(registers_t) <= KSTACK_IDLE_RESERVE, "idle frame size");
 _Static_assert(KSTACK_TSS_OFFSET + TSS_CPU_BYTES <= KSTACK_USABLE_SIZE,
@@ -312,8 +315,7 @@ static void task_set_exec_state(task_t *task, int state) {
     unlock_scheduler();
 }
 
-static volatile int reap_pending = 0;
-static volatile int exec_drain_pending = 0;
+static volatile uint32_t task_deferred_pending = 0;
 volatile uint64_t task_context_switches = 0;
 
 static uint64_t next_task_id = 1;
@@ -322,6 +324,10 @@ static uint32_t fpu_mxcsr_mask;
 
 static spinlock_t user_zero_page_lock = {0};
 static uint64_t user_zero_page_phys = 0;
+static mutex_t task_file_fault_commit_lock;
+static uint64_t task_allocate_id(void) {
+    return __atomic_fetch_add(&next_task_id, 1, __ATOMIC_RELAXED);
+}
 
 static uint64_t task_align_up(uint64_t v, uint64_t align) {
     if (align == 0) return v;
@@ -1090,6 +1096,7 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
 
 static wait_queue_t descriptor_ready_waitq;
 static volatile uint64_t descriptor_ready_sequence = 1;
+static volatile int descriptor_ready_irq_pending;
 
 uint64_t descriptor_ready_generation(void) {
     return __atomic_load_n(&descriptor_ready_sequence, __ATOMIC_ACQUIRE);
@@ -1097,9 +1104,29 @@ uint64_t descriptor_ready_generation(void) {
 
 void descriptor_ready_notify(void) {
     lock_scheduler();
+    __atomic_store_n(&descriptor_ready_irq_pending, 0, __ATOMIC_RELEASE);
     __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
     waitq_wake_all(&descriptor_ready_waitq);
     unlock_scheduler();
+}
+
+void descriptor_ready_notify_irq(void) {
+    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&descriptor_ready_irq_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void descriptor_ready_drain_irq_locked(void) {
+    if (!__atomic_exchange_n(&descriptor_ready_irq_pending, 0,
+                             __ATOMIC_ACQ_REL)) return;
+    waitq_wake_all(&descriptor_ready_waitq);
+}
+
+static void descriptor_ready_try_drain_irq(void) {
+    if (!__atomic_load_n(&descriptor_ready_irq_pending, __ATOMIC_ACQUIRE))
+        return;
+    if (!spin_trylock(&sched_lock)) return;
+    descriptor_ready_drain_irq_locked();
+    spin_unlock(&sched_lock);
 }
 
 int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
@@ -1345,9 +1372,8 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
 
     lock_scheduler();
     if (user_mode) {
-        new_task->id = next_task_id;
-        new_task->pid = next_task_id;
-        next_task_id++;
+        new_task->id = task_allocate_id();
+        new_task->pid = (pid_t)new_task->id;
     } else {
         new_task->id = 0x8000000000000000ULL |
                        (uint64_t)(-(int64_t)next_kernel_pid);
@@ -1759,8 +1785,6 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     task_t *task;
     uint64_t vaddr;
     uint64_t phys;
-    uint64_t old_ref;
-    int added_existing_ref;
     int i;
 
     if (!node) return 0;
@@ -1769,8 +1793,11 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     task = all_tasks_head;
     while (task && task_ptr_valid(task)) {
         if (task != current_task && task->is_user &&
-            task->state != TASK_DEAD && task->exec_completed == 0 &&
-            task->pml4_phys) {
+            task->state != TASK_DEAD &&
+            !task->resources_released && task->exec_completed == 0 &&
+            task->pml4_phys && !task_is_current_on_any_cpu(task) &&
+            task->file_maps && task->file_map_count > 0 &&
+            task->file_map_count <= task->file_map_capacity) {
             for (i = 0; i < task->file_map_count; i++) {
                 if (!overlay_same_file(task->file_maps[i].node, node)) continue;
                 if (offset < task->file_maps[i].offset) continue;
@@ -1783,23 +1810,7 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
         if (phys) break;
         task = task->all_next;
     }
-    if (phys) {
-        added_existing_ref = 0;
-        old_ref = pfa_ref_get(phys);
-        if (old_ref == 0) {
-            pfa_ref_inc(phys);
-            if (pfa_ref_get(phys) == 0) phys = 0;
-            else added_existing_ref = 1;
-        }
-        if (phys) {
-            old_ref = pfa_ref_get(phys);
-            pfa_ref_inc(phys);
-            if (pfa_ref_get(phys) <= old_ref) {
-                if (added_existing_ref) pfa_ref_dec(phys);
-                phys = 0;
-            }
-        }
-    }
+    if (phys && pfa_ref_share(phys) != 0) phys = 0;
     unlock_scheduler();
     return phys;
 }
@@ -2104,11 +2115,13 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     uint64_t mapped_phys;
     uint64_t map_flags;
     uint64_t read_actual;
-    uint64_t temp_virt;
     int cached_page;
     int match;
-    uint8_t *dst;
+    int share_page;
+    int memory_allowed;
     int i;
+    uint8_t pinned;
+    uint8_t stage;
 
     if (!task || !task->is_user) return 0;
     page = fault_addr & ~(PAGE_SIZE - 1);
@@ -2131,7 +2144,13 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
         }
     }
     if (match >= task->file_map_count) return 0;
-    if (!task_memory_allows(task, PAGE_SIZE)) return 0;
+    pinned = task->kernel_cpu_pinned;
+    task->kernel_cpu_pinned = 1;
+    memory_allowed = task_memory_allows(task, PAGE_SIZE);
+    if (!memory_allowed) {
+        task->kernel_cpu_pinned = pinned;
+        return 0;
+    }
 
     phys = 0;
     cached_page = 0;
@@ -2145,53 +2164,88 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     if (read_end > read_start) {
         read_off = task->file_maps[match].offset + (read_start - task->file_maps[match].vaddr);
         read_len = read_end - read_start;
-        if (read_start == page &&
-            (!(task->file_maps[match].flags & 0x2) ||
-             (task->file_maps[match].map_flags & TASK_VMA_SHARED))) {
+        share_page = read_start == page &&
+                     (!(task->file_maps[match].flags & 0x2) ||
+                      (task->file_maps[match].map_flags & TASK_VMA_SHARED));
+        if (share_page) {
             phys = exec_page_find_active(task->file_maps[match].node,
                                          read_off & ~(PAGE_SIZE - 1));
             if (phys) cached_page = 1;
         }
         if (!phys) {
             phys = pfa_alloc();
-            if (!phys) return 0;
+            if (!phys) {
+                task->kernel_cpu_pinned = pinned;
+                return 0;
+            }
             pmm_zero_page_phys(phys);
-            temp_virt = TASK_FILE_FAULT_TEMP;
-            temp_map_raw(temp_virt, phys);
-            dst = (uint8_t *)(temp_virt + (read_start - page));
-            read_actual = vfs_read(task->file_maps[match].node, read_off,
-                                   read_len, dst);
-            temp_unmap_raw(temp_virt);
+            stage = task->kernel_stage;
+            task->kernel_stage = TASK_KERNEL_STAGE_FILE_FAULT;
+            read_actual = vfs_read_phys_page(task->file_maps[match].node,
+                                             read_off, read_len, phys,
+                                             read_start - page);
+            task->kernel_stage = stage;
             if (read_actual != read_len) {
                 pfa_free(phys);
+                task->kernel_cpu_pinned = pinned;
                 return 0;
             }
         }
     } else {
         phys = user_zero_page_get();
-        if (!phys) return 0;
+        if (!phys) {
+            task->kernel_cpu_pinned = pinned;
+            return 0;
+        }
         map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
         cached_page = 2;
     }
-    vmm_map_page_in_pml4(task->pml4_phys, page, phys, map_flags);
+    mutex_lock(&task_file_fault_commit_lock);
     mapped_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
-    if (mapped_phys == 0) {
+    if (mapped_phys) {
+        mutex_unlock(&task_file_fault_commit_lock);
+        if (cached_page == 1)
+            pfa_ref_dec(phys);
+        else if (!cached_page)
+            pfa_free(phys);
+        task->kernel_cpu_pinned = pinned;
+        return 1;
+    }
+    if (vmm_map_page_in_pml4(task->pml4_phys, page, phys, map_flags) < 0) {
+        mutex_unlock(&task_file_fault_commit_lock);
         if (cached_page == 1) {
             pfa_ref_dec(phys);
         } else if (!cached_page) {
             pfa_free(phys);
         }
+        task->kernel_cpu_pinned = pinned;
+        return 0;
+    }
+    mapped_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
+    if (mapped_phys != phys) {
+        vmm_unmap_page_in_pml4(task->pml4_phys, page);
+        mutex_unlock(&task_file_fault_commit_lock);
+        if (cached_page == 1) {
+            pfa_ref_dec(phys);
+        } else if (!cached_page) {
+            pfa_free(phys);
+        }
+        task->kernel_cpu_pinned = pinned;
         return 0;
     }
     if (task_track_user_page(task, phys) != 0) {
         vmm_unmap_page_in_pml4(task->pml4_phys, page);
+        mutex_unlock(&task_file_fault_commit_lock);
         if (cached_page == 1) {
             pfa_ref_dec(phys);
         } else if (!cached_page) {
             pfa_free(phys);
         }
+        task->kernel_cpu_pinned = pinned;
         return 0;
     }
+    mutex_unlock(&task_file_fault_commit_lock);
+    task->kernel_cpu_pinned = pinned;
     if (cached_page == 1 || cached_page == 2)
         task->minor_faults++;
     else
@@ -2604,6 +2658,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
 
 void reap_dead_tasks(void) {
     task_t *t;
+    task_t **pp;
     task_t *keep = NULL;
     task_t *next;
     task_t *k;
@@ -2645,19 +2700,16 @@ void reap_dead_tasks(void) {
             continue;
         }
 
-        {
-            task_t **pp;
-            lock_scheduler();
-            pp = &all_tasks_head;
-            while (*pp) {
-                if (*pp == t) {
-                    *pp = t->all_next;
-                    break;
-                }
-                pp = &(*pp)->all_next;
+        lock_scheduler();
+        pp = &all_tasks_head;
+        while (*pp) {
+            if (*pp == t) {
+                *pp = t->all_next;
+                break;
             }
-            unlock_scheduler();
+            pp = &(*pp)->all_next;
         }
+        unlock_scheduler();
 
         kfree(t);
         t = next;
@@ -2679,11 +2731,18 @@ void reap_dead_tasks(void) {
 }
 
 void reap_request(void) {
-    reap_pending = 1;
+    __atomic_fetch_or(&task_deferred_pending, TASK_DEFERRED_REAP,
+                      __ATOMIC_RELEASE);
+}
+
+void task_debug_request(void) {
+    __atomic_fetch_or(&task_deferred_pending, TASK_DEFERRED_DEBUG,
+                      __ATOMIC_RELEASE);
 }
 
 void exec_drain_request(void) {
-    exec_drain_pending = 1;
+    __atomic_fetch_or(&task_deferred_pending, TASK_DEFERRED_EXEC_DRAIN,
+                      __ATOMIC_RELEASE);
 }
 
 static void task_reclaim_stale_exec_now(void) {
@@ -2883,20 +2942,22 @@ void task_deferred_work(void) {
     uint64_t usable_pages;
     uint64_t free_pages;
     uint64_t low_watermark;
+    uint32_t deferred;
     int cpu_id;
 
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : NULL;
     cpu_id = cpu ? (int)(cpu - cpus) : 0;
 
-    if (reap_pending) {
-        reap_pending = 0;
-        reap_dead_tasks();
+    deferred = __atomic_exchange_n(&task_deferred_pending, 0,
+                                   __ATOMIC_ACQ_REL);
+    if (deferred & TASK_DEFERRED_DEBUG) {
+        vt_debug_printf("[VTDBG SNAPSHOT] begin cpu=%d\n", cpu_id);
+        task_debug_snapshot_users();
+        vt_debug_printf("[VTDBG SNAPSHOT] end cpu=%d\n", cpu_id);
     }
-    if (exec_drain_pending) {
-        exec_drain_pending = 0;
-        exec_cleanup_drain();
-    }
+    if (deferred & TASK_DEFERRED_REAP) reap_dead_tasks();
+    if (deferred & TASK_DEFERRED_EXEC_DRAIN) exec_cleanup_drain();
     if ((!task || !task->is_user) &&
         cpu_id == 0) {
         klog_drain_console0(32);
@@ -2905,11 +2966,8 @@ void task_deferred_work(void) {
         low_watermark = usable_pages / 64;
         if (low_watermark < 64) low_watermark = 64;
         if (low_watermark > 4096) low_watermark = 4096;
-        if ((memory_pressure_pending & MEMORY_PRESSURE_BOOT_RECLAIM) &&
-            tick_count >= 100) {
-            task_memory_pressure_reclaim_now();
-        } else if (((memory_pressure_pending & MEMORY_PRESSURE_REQUESTED) ||
-                    free_pages < low_watermark) &&
+        if (((memory_pressure_pending & MEMORY_PRESSURE_REQUESTED) ||
+             free_pages < low_watermark) &&
             tick_count - memory_pressure_last_tick >= 25) {
             task_memory_pressure_reclaim_now();
         }
@@ -2941,8 +2999,8 @@ void switch_to(task_t* next) {
     }
 
     prev->cr3 = read_cr3();
-    fpu_save_area(prev->fpu_state);
-    fpu_restore_area(next->fpu_state);
+    if (prev->fpu_state) fpu_save_area(prev->fpu_state);
+    if (next->fpu_state) fpu_restore_area(next->fpu_state);
 
     switch_to_asm(&prev->regs.rsp, next->regs.rsp);
 
@@ -3092,6 +3150,9 @@ void task_kill(task_t* task, uint64_t exit_code) {
     task_t *parent;
 
     if (!task) return;
+    vt_debug_printf("[VTDBG PROC] kill pid=%d name=%s code=%llu by=%d\n",
+                    task->pid, task->name, exit_code,
+                    current_task ? current_task->pid : 0);
     if (task == current_task) {
         task_exit(exit_code);
         return;
@@ -3344,6 +3405,170 @@ static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
     return 1;
 }
 
+static int task_debug_try_lock(void) {
+    cpu_info_t *cpu;
+    uint64_t flags;
+
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    cpu = smp_this_cpu();
+    if (!cpu || cpu->scheduler_lock_depth || !spin_trylock(&sched_lock)) {
+        if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+        vt_debug_printf("[VTDBG SNAPSHOT] scheduler-busy\n");
+        return 0;
+    }
+    cpu->sched_saved_rflags = flags;
+    cpu->scheduler_lock_depth = 1;
+    return 1;
+}
+
+void task_debug_snapshot(pid_t pid) {
+    task_t *task;
+    registers_t *frame;
+    const char *frame_error;
+    char name[16];
+    uint64_t rsp;
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t wait;
+    uint64_t pd;
+    uint64_t pending;
+    uint64_t blocked;
+    uint64_t generation;
+    uint64_t stack_base;
+    uint64_t stack_top;
+    int handler;
+    int descriptor_wait;
+    int irq_pending;
+    int state;
+    int owner;
+    int pinned;
+    int stage;
+    int queued;
+    int valid;
+    int running;
+
+    if (!task_debug_try_lock()) return;
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task) && task->pid != pid)
+        task = task->all_next;
+    if (!task || !task_ptr_valid(task)) {
+        unlock_scheduler();
+        vt_debug_printf("[VTDBG TASK] pid=%d missing\n", pid);
+        return;
+    }
+    memcpy(name, task->name, sizeof(name));
+    name[sizeof(name) - 1] = 0;
+    state = task->state;
+    owner = task->running_cpu;
+    pinned = task->kernel_cpu_pinned;
+    stage = task->kernel_stage;
+    wait = (uint64_t)(uintptr_t)task->waiting_queue;
+    pending = signal_pending_mask(task);
+    blocked = signal_blocked_mask(task);
+    handler = signal_debug_in_handler(task);
+    descriptor_wait = task->waiting_queue == &descriptor_ready_waitq;
+    generation = descriptor_ready_generation();
+    irq_pending = __atomic_load_n(&descriptor_ready_irq_pending, __ATOMIC_ACQUIRE);
+    queued = task_in_runqueue_locked(task);
+    running = task_is_current_on_any_cpu(task);
+    rsp = task->regs.rsp;
+    stack_base = (uint64_t)task->kernel_stack_base;
+    stack_top = stack_base + task->kernel_stack_size;
+    rip = 0;
+    cs = 0;
+    valid = -1;
+    frame = NULL;
+    frame_error = running ? "running" : "released";
+    pd = vmm_get_kernel_cr3();
+    if (!running && !task->resources_released) {
+        valid = 0;
+        frame_error = "ownership";
+        if (task_owns_irq_frame(task, rsp)) {
+            frame_error = "mapping";
+            if (rsp <= UINT64_MAX - sizeof(registers_t) &&
+                vmm_get_phys_in_pml4(pd, rsp) &&
+                vmm_get_phys_in_pml4(pd, rsp + sizeof(registers_t) - 1)) {
+                frame = (registers_t *)rsp;
+                rip = frame->rip;
+                cs = frame->cs;
+                frame_error = "address";
+                if ((frame->es & 0xFFFF) != 0x10 &&
+                    (frame->es & 0xFFFF) != 0x23 && (frame->es & 0xFFFF) != 0)
+                    frame_error = "es";
+                else if ((frame->ds & 0xFFFF) != 0x10 &&
+                         (frame->ds & 0xFFFF) != 0x23 && (frame->ds & 0xFFFF) != 0)
+                    frame_error = "ds";
+                else if ((cs & 0xFFFF) != 0x08 && (cs & 0xFFFF) != 0x1B)
+                    frame_error = "cs";
+                else if (!(((cs & 0xFFFF) == 0x08 &&
+                            rip >= (uint64_t)_kernel_text_start &&
+                            rip < (uint64_t)_kernel_text_end) ||
+                           ((cs & 0xFFFF) == 0x1B && task->is_user &&
+                            rip >= 0x1000 && rip < KERNEL_VMA)))
+                    frame_error = "rip";
+                valid = task_irq_return_frame(task, &frame);
+                if (valid) frame_error = "none";
+            }
+        }
+    }
+    unlock_scheduler();
+    vt_debug_printf("[VTDBG TASK] pid=%d name=%s state=%d cpu=%d pin=%d stage=%d rq=%d running=%d\n",
+                    pid, name, state, owner, pinned, stage, queued, running);
+    vt_debug_printf("[VTDBG FRAME] pid=%d valid=%d rsp=%llx rip=%llx cs=%llx\n",
+                    pid, valid, rsp, rip, cs);
+    vt_debug_printf("[VTDBG STACK] pid=%d base=%llx top=%llx error=%s\n",
+                    pid, stack_base, stack_top, frame_error);
+    vt_debug_printf("[VTDBG SIGNAL] pid=%d pending=%llx blocked=%llx handler=%d\n",
+                    pid, pending, blocked, handler);
+    vt_debug_printf("[VTDBG DWAIT] pid=%d waiting=%d queue=%llx generation=%llx irq=%d\n",
+                    pid, descriptor_wait, wait, generation, irq_pending);
+}
+
+void task_debug_snapshot_users(void) {
+    task_t *task;
+    pid_t last;
+    pid_t next;
+    pid_t limit;
+    pid_t pid;
+    uint64_t running;
+    int cpu;
+    int depth;
+    int locked;
+
+    for (cpu = 0; cpus && cpu < cpu_count; cpu++) {
+        depth = __atomic_load_n(&cpus[cpu].scheduler_lock_depth, __ATOMIC_ACQUIRE);
+        locked = task_debug_try_lock();
+        task = __atomic_load_n(&cpus[cpu].running_task, __ATOMIC_ACQUIRE);
+        running = (uint64_t)task;
+        pid = -1;
+        if (locked) {
+            if (task && task_ptr_valid(task)) pid = task->pid;
+            unlock_scheduler();
+        }
+        vt_debug_printf("[VTDBG CPU] cpu=%d task=%llx pid=%d depth=%d sampled=%d\n",
+                        cpu, running, pid, depth, locked);
+    }
+    limit = 0;
+    if (!task_debug_try_lock()) return;
+    for (task = all_tasks_head; task && task_ptr_valid(task); task = task->all_next) {
+        if (task->is_user && task->pid > limit) limit = task->pid;
+    }
+    unlock_scheduler();
+    last = 0;
+    while (last < limit) {
+        next = 0;
+        if (!task_debug_try_lock()) return;
+        for (task = all_tasks_head; task && task_ptr_valid(task); task = task->all_next) {
+            if (task->is_user && task->pid > last && task->pid <= limit &&
+                (!next || task->pid < next)) next = task->pid;
+        }
+        unlock_scheduler();
+        if (!next) break;
+        task_debug_snapshot(next);
+        last = next;
+    }
+}
+
 static int cpu_idle_frame_valid(cpu_info_t *cpu, registers_t *frame) {
     uint64_t base;
     uint64_t expected;
@@ -3369,7 +3594,8 @@ static int task_cpu_available(task_t *task, int cpu_id) {
 static void task_release_from_cpu(task_t *task, registers_t *frame,
                                   int cpu_id, int preserve_cpu) {
     if (!task || task->running_cpu != cpu_id) return;
-    if (preserve_cpu && frame && (frame->cs & 0x3) == 0)
+    if ((preserve_cpu || task->kernel_cpu_pinned) && frame &&
+        (frame->cs & 0x3) == 0)
         task->running_cpu = -(cpu_id + 2);
     else
         task->running_cpu = -1;
@@ -3415,6 +3641,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int rank;
     int best_rank;
     int forced_reschedule;
+    int eligible;
 
     idle_task = NULL;
     switch_to_cpu_idle = 0;
@@ -3422,11 +3649,17 @@ registers_t* schedule_from_irq(registers_t* regs) {
     if (!cpus || !this_cpu) return regs;
     cpu_id = (int)(this_cpu - cpus);
     if (cpu_id < 0 || cpu_id >= cpu_count) return regs;
+    if (this_cpu->scheduler_lock_depth == 0)
+        descriptor_ready_try_drain_irq();
     if (!ready_queue_head) return regs;
     if (!smp_scheduling_enabled()) return regs;
 
     prev_task = this_cpu->running_task;
     forced_reschedule = this_cpu->schedule_force;
+    if (prev_task && prev_task->kernel_cpu_pinned &&
+        prev_task->state == TASK_RUNNING && regs->int_no != 48) {
+        return regs;
+    }
     run_deferred = 0;
     forced_state_switch = prev_task &&
                           (prev_task->state == TASK_DEAD ||
@@ -3440,6 +3673,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         if (!forced_state_switch) return regs;
         spin_lock(&sched_lock);
     }
+    descriptor_ready_drain_irq_locked();
     result = regs;
 
     entry_cr3 = regs->entry_cr3;
@@ -3493,18 +3727,19 @@ registers_t* schedule_from_irq(registers_t* regs) {
     best_rank = -1;
     
     while (next) {
-        if (next->state == TASK_READY && next != prev_task &&
-            !next->resources_released && task_cpu_available(next, cpu_id) &&
-            (this_cpu->bsp || next->id != 0 || next->is_user)) {
-            selectable = 0;
-            if (task_irq_return_frame(next, &candidate_frame)) selectable = 1;
-            if (selectable) {
-                rank = task_scheduler_rank(next);
-                if (!candidate || rank > best_rank) {
-                    candidate = next;
-                    return_frame = candidate_frame;
-                    best_rank = rank;
-                }
+        eligible = next->state == TASK_READY && next != prev_task &&
+                   !next->resources_released &&
+                   task_cpu_available(next, cpu_id) &&
+                   (this_cpu->bsp || next->id != 0 || next->is_user);
+        selectable = 0;
+        if (eligible && task_irq_return_frame(next, &candidate_frame))
+            selectable = 1;
+        if (selectable) {
+            rank = task_scheduler_rank(next);
+            if (!candidate || rank > best_rank) {
+                candidate = next;
+                return_frame = candidate_frame;
+                best_rank = rank;
             }
         }
         next = next->next;
@@ -3565,7 +3800,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         goto out_restore_cr3;
     }
 
-    if (prev_task && !dead_switch)
+    if (prev_task && !dead_switch && prev_task->fpu_state)
         fpu_save_area(prev_task->fpu_state);
     if (switch_to_cpu_idle) {
         task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
@@ -3579,7 +3814,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         spin_unlock(&sched_lock);
         return result;
     }
-    fpu_restore_area(next->fpu_state);
+    if (next->fpu_state) fpu_restore_area(next->fpu_state);
 
     if (next != prev_task) {
         task_context_switches++;
@@ -3671,7 +3906,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         }
     }
 
-    if (!must_switch && (reap_pending || exec_drain_pending)) {
+    if (!must_switch &&
+        __atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE)) {
         run_deferred = 1;
     }
 
@@ -3683,7 +3919,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
 out_restore_cr3:
     regs->return_cr3 = entry_cr3;
-    if ((reap_pending || exec_drain_pending) && (!current_task || current_task->state != TASK_DEAD)) {
+    if (__atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE) &&
+        (!current_task || current_task->state != TASK_DEAD)) {
         run_deferred = 1;
     }
     spin_unlock(&sched_lock);
@@ -4006,12 +4243,15 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     uint8_t* kernel_stack_base;
     uint64_t i;
     int parent_cap;
+    uint8_t parent_stage;
     task_t* child;
     task_t* parent;
     registers_t *child_frame;
     registers_t parent_frame;
     pipe_t *child_pipe;
     int owns_child_pd;
+    int clone_error;
+    pid_t child_pid;
 
     parent = current_task;
     if (!parent || !parent->is_user || !parent_regs) {
@@ -4029,11 +4269,14 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     if (share_address_space) {
         child_pd = parent->pml4_phys;
     } else {
+        parent_stage = parent->kernel_stage;
+        parent->kernel_stage = TASK_KERNEL_STAGE_FORK;
         child_pd = vmm_clone_pml4(parent->pml4_phys, &child_user_pages,
-                                  &child_user_pages_count);
+                                  &child_user_pages_count, &clone_error);
+        parent->kernel_stage = parent_stage;
         if (!child_pd) {
             printf("task_fork: failed to clone page directory\n");
-            return -1;
+            return clone_error;
         }
     }
 
@@ -4067,12 +4310,14 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -1;
     }
-    fpu_save_area(parent->fpu_state);
-    memcpy(child->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
+    if (parent->fpu_state) {
+        fpu_save_area(parent->fpu_state);
+        memcpy(child->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
+    }
 
-    child->id = next_task_id;
-    child->pid = next_task_id;
-    next_task_id++;
+    child->id = task_allocate_id();
+    child->pid = (pid_t)child->id;
+    child_pid = child->pid;
 
     if (creds_copy_task(parent, child) != 0) {
         task_free_fpu_state(child);
@@ -4254,7 +4499,7 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     unlock_scheduler();
 
 
-    return child->pid;
+    return child_pid;
 }
 
 static __attribute__((unused)) int task_exec_legacy(
@@ -5150,8 +5395,8 @@ pid_t task_create_thread(void (*entry)(void)) {
     }
     new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     
-    new_task->id = next_task_id++;
-    new_task->pid = new_task->id;
+    new_task->id = task_allocate_id();
+    new_task->pid = (pid_t)new_task->id;
     signals_init_task(new_task);
     new_task->state = TASK_READY;
     new_task->is_user = true;
@@ -5330,8 +5575,8 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     }
     new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
     
-    new_task->id = next_task_id++;
-    new_task->pid = new_task->id;
+    new_task->id = task_allocate_id();
+    new_task->pid = (pid_t)new_task->id;
     signals_init_task(new_task);
     new_task->state = TASK_READY;
     new_task->is_user = true;

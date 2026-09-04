@@ -805,6 +805,24 @@ void pmm_zero_page_phys(uint64_t phys_addr) {
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
+void pmm_copy_to_page_phys(uint64_t phys_addr, uint64_t offset,
+                           const void *source, uint64_t size) {
+    uint64_t temp_virt;
+    uint64_t saved_flags;
+
+    if (!source || offset > PAGE_SIZE || size > PAGE_SIZE - offset) return;
+    if (size == 0) return;
+
+    __asm__ volatile ("pushfq; pop %0; cli"
+                      : "=r"(saved_flags) :: "memory");
+    temp_virt = TEMP_SLOT(5);
+    temp_map_raw(temp_virt, phys_addr);
+    memcpy((void *)(uintptr_t)(temp_virt + offset), source, (size_t)size);
+    temp_unmap_raw(temp_virt);
+    if (saved_flags & (1ULL << 9))
+        __asm__ volatile ("sti" ::: "memory");
+}
+
 void KERNEL_EARLY_INIT pfa_init_internal_setup(
         uint64_t directory_entries, uint64_t bitmap_entries,
         uint64_t total_pages, uint64_t extension_phys,

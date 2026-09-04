@@ -188,6 +188,8 @@ struct vt_stat2_s {
 };
 
 int tty_vt_switch_request(int target_vt);
+int tty_vt_debug_owner(pid_t pid);
+void tty_vt_debug_wait(void);
 void tty_vt_switch_complete(int target_vt);
 void tty_vt_release_owner(pid_t pid);
 

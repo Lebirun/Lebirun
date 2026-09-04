@@ -650,6 +650,26 @@ uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buf
     return 0;
 }
 
+uint64_t vfs_read_phys_page(vfs_node_t *node, uint64_t offset, uint64_t size,
+                            uint64_t phys_addr, uint64_t phys_offset) {
+    uint64_t scratch_phys;
+    uint64_t result;
+    uint8_t *scratch;
+
+    if (!node || !phys_addr) return 0;
+    if (phys_offset > PAGE_SIZE || size > PAGE_SIZE - phys_offset) return 0;
+    if (size == 0) return 0;
+    scratch_phys = pfa_alloc();
+    if (!scratch_phys) return 0;
+    scratch = (uint8_t *)(uintptr_t)(scratch_phys + KERNEL_VMA);
+    result = vfs_read(node, offset, size, scratch);
+    if (result > size) result = 0;
+    if (result != 0)
+        pmm_copy_to_page_phys(phys_addr, phys_offset, scratch, result);
+    pfa_free(scratch_phys);
+    return result;
+}
+
 uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     uint64_t written;
 
@@ -1024,15 +1044,58 @@ dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 int vfs_readdir_copy(vfs_node_t *node, uint64_t index, dirent_t *entry) {
+    const char *name;
     dirent_t *result;
+    int status;
 
     if (!node || !entry) return -1;
     mutex_lock(&vfs_lock);
     result = vfs_readdir(node, index);
-    if (result)
-        memcpy(entry, result, sizeof(dirent_t));
+    status = -1;
+    if (result) {
+        name = vfs_dirent_name(result);
+        memset(entry, 0, sizeof(*entry));
+        if (vfs_dirent_set_name(entry, name) == 0) {
+            entry->inode = result->inode;
+            entry->type = result->type;
+            status = 0;
+        }
+    }
     mutex_unlock(&vfs_lock);
-    return result ? 0 : -1;
+    return status;
+}
+
+int vfs_readdir_next_copy(vfs_node_t *node, uint64_t *cookie,
+                          dirent_t *entry) {
+    const char *name;
+    dirent_t *result;
+    int direct;
+    int status;
+
+    if (!node || !cookie || !entry) return -1;
+    mutex_lock(&vfs_lock);
+    direct = node->ops && node->ops->readdir_next &&
+             !vfs_has_mount_children(node);
+    mutex_unlock(&vfs_lock);
+    if (direct) return node->ops->readdir_next(node, cookie, entry);
+    mutex_lock(&vfs_lock);
+    result = vfs_readdir(node, *cookie);
+    if (result) (*cookie)++;
+    if (result) {
+        name = vfs_dirent_name(result);
+        entry->inode = result->inode;
+        entry->type = result->type;
+        if (vfs_dirent_set_name(entry, name) != 0) {
+            result = NULL;
+            status = VFS_READDIR_NOMEM;
+        } else {
+            status = 0;
+        }
+    } else {
+        status = VFS_READDIR_END;
+    }
+    mutex_unlock(&vfs_lock);
+    return status;
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {

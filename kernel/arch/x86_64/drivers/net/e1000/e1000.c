@@ -470,7 +470,7 @@ void e1000_irq_handler(void *regs) {
     }
 
     if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO))
-        descriptor_ready_notify();
+        descriptor_ready_notify_irq();
 
 }
 

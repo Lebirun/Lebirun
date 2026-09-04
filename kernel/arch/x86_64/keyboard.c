@@ -5,6 +5,7 @@
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/vring.h>
 #include <string.h>
 
 #define KEYBOARD_BUFFER_INITIAL 8
@@ -14,7 +15,6 @@ typedef struct {
     unsigned int capacity;
     volatile unsigned int head;
     volatile unsigned int tail;
-    wait_queue_t waitq;
     volatile int sigint_pending;
 } kbd_console_t;
 
@@ -187,18 +187,6 @@ void keyboard_flush_for(int console_id) {
     kbd_consoles[console_id].sigint_pending = 0;
 }
 
-wait_queue_t* keyboard_get_waitq(void) {
-    int cur = console_is_initialized() ? console_get_current() : 0;
-    if (!kbd_consoles || cur < 0 || cur >= kbd_num_consoles) return NULL;
-    return &kbd_consoles[cur].waitq;
-}
-
-wait_queue_t* keyboard_get_waitq_for(int console_id) {
-    if (!kbd_consoles || console_id < 0 ||
-        console_id >= kbd_num_consoles) return NULL;
-    return &kbd_consoles[console_id].waitq;
-}
-
 int getchar(void) {
     while (!keyboard_has_data()) asm volatile("hlt");
     return keyboard_getchar_nb();
@@ -233,6 +221,18 @@ void keyboard_handler(registers_t* regs) {
 
     is_release = (scancode & 0x80) != 0;
     code = scancode & 0x7F;
+
+    if (!is_release && code == SCANCODE_F1 && ctrl_pressed && alt_pressed)
+        task_debug_request();
+
+    if (code == SCANCODE_CTRL || code == SCANCODE_ALT ||
+        code == SCANCODE_F1 || code == SCANCODE_F1 + 1) {
+        cur = console_is_initialized() ? console_get_current() : -1;
+        vt_debug_printf("[VTDBG KEY] code=%x rel=%d e0=%d c=%d a=%d vt=%d g=%d\n",
+                        code, is_release ? 1 : 0, was_e0 ? 1 : 0,
+                        ctrl_pressed ? 1 : 0, alt_pressed ? 1 : 0, cur,
+                        cur >= 0 ? console_get_graphics_mode(cur) : 0);
+    }
 
     if (kbd_observer) {
         kev.scancode = code;
@@ -287,6 +287,8 @@ void keyboard_handler(registers_t* regs) {
         else if (code == SCANCODE_F11) console_num = 10;
         else if (code == SCANCODE_F12) console_num = 11;
         if (console_num >= 0 && console_num < console_get_count()) {
+            vt_debug_printf("[VTDBG KEY] queue target=%d active=%d\n",
+                            console_num, console_get_current());
             console_switch_via_interrupt(console_num);
             return;
         }
@@ -349,14 +351,10 @@ void keyboard_handler(registers_t* regs) {
     return;
 
 wake:
-    cur = console_is_initialized() ? console_get_current() : 0;
-    if (cur >= 0 && cur < kbd_num_consoles)
-        waitq_wake_all(&kbd_consoles[cur].waitq);
-    descriptor_ready_notify();
+    descriptor_ready_notify_irq();
 }
 
 void KERNEL_INIT keyboard_init(void) {
-    int i;
     uint8_t cmd;
     uint8_t master_mask;
 
@@ -382,9 +380,6 @@ void KERNEL_INIT keyboard_init(void) {
     kbd_consoles = kmalloc(kbd_num_consoles * sizeof(kbd_console_t));
     if (kbd_consoles) {
         memset(kbd_consoles, 0, kbd_num_consoles * sizeof(kbd_console_t));
-        for (i = 0; i < kbd_num_consoles; i++) {
-            waitq_init(&kbd_consoles[i].waitq);
-        }
     } else kbd_num_consoles = 0;
 
     master_mask = inb(0x21);

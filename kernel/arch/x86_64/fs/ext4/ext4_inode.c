@@ -497,29 +497,6 @@ uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logic
     }
 }
 
-uint32_t ext4_inode_get_run(ext4_fs_t *fs, ext4_inode_t *inode,
-                            uint64_t logical_block, uint32_t max_blocks,
-                            uint64_t *physical_out) {
-    uint64_t physical;
-    uint64_t next;
-    uint32_t run;
-
-    if (!physical_out || max_blocks == 0) return 0;
-    if (inode->i_flags & EXT4_INODE_FLAG_EXTENTS)
-        return ext4_extent_get_run(fs, inode, logical_block, max_blocks,
-                                   physical_out);
-    physical = ext4_indirect_get_block(fs, inode, logical_block);
-    *physical_out = physical;
-    if (!physical) return 0;
-    run = 1;
-    while (run < max_blocks) {
-        next = ext4_indirect_get_block(fs, inode, logical_block + run);
-        if (next != physical + run) break;
-        run++;
-    }
-    return run;
-}
-
 static int ext4_read_group_desc_internal(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
     uint64_t desc_block;
     uint32_t desc_offset;

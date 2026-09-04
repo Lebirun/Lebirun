@@ -16,8 +16,6 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
     uint64_t phys_block;
     uint8_t *block;
     uint8_t *inline_data;
-    uint32_t run_blocks;
-    uint32_t run_limit;
 
     if (!buffer || size == 0) {
         return 0;
@@ -59,27 +57,11 @@ uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t s
             to_read = size - bytes_read;
         }
 
-        run_limit = 1;
-        if (block_off == 0 && to_read == fs->block_size) {
-            run_limit = (size - bytes_read) / fs->block_size;
-            if (fs->sectors_per_block != 0 &&
-                run_limit > 256 / fs->sectors_per_block)
-                run_limit = 256 / fs->sectors_per_block;
-            if (run_limit == 0) run_limit = 1;
-        }
-        run_blocks = ext4_inode_get_run(fs, &ic->inode, block_num,
-                                        run_limit, &phys_block);
+        phys_block = ext4_inode_get_block(fs, &ic->inode, block_num);
 
-        if (run_blocks == 0 || phys_block == 0) {
+        if (phys_block == 0) {
             memset(buffer + bytes_read, 0, to_read);
         } else {
-            if (block_off == 0 && to_read == fs->block_size &&
-                run_blocks > 1 &&
-                ext4_read_blocks(fs, phys_block, run_blocks,
-                                 buffer + bytes_read) == 0) {
-                bytes_read += run_blocks * fs->block_size;
-                continue;
-            }
             block = ext4_get_block(fs, phys_block);
             if (!block) {
                 break;

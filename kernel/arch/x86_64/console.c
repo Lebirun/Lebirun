@@ -95,7 +95,11 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
     uint64_t flags;
     int redraw;
 
-    if (!console_valid_index(console_num)) return -1;
+    if (!console_valid_index(console_num)) {
+        vt_debug_printf("[VTDBG MODE] graphics invalid vt=%d on=%d pid=%d\n",
+                        console_num, enabled, owner_pid);
+        return -1;
+    }
     con = &consoles[console_num];
     fb = fb_get();
     redraw = 0;
@@ -104,6 +108,8 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
     spin_lock(&console_lock);
     if (enabled) {
         if (con->graphics_mode && con->graphics_owner_pid != owner_pid) {
+            vt_debug_printf("[VTDBG MODE] graphics busy vt=%d owner=%d pid=%d\n",
+                            console_num, con->graphics_owner_pid, owner_pid);
             spin_unlock(&console_lock);
             console_irqrestore(flags);
             return -2;
@@ -134,6 +140,8 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
         fb_set_cursor_hidden(!con->cursor_visible);
         console_force_redraw();
     }
+    vt_debug_printf("[VTDBG MODE] graphics vt=%d on=%d pid=%d active=%d\n",
+                    console_num, enabled, owner_pid, current_console);
     return 0;
 }
 
@@ -154,6 +162,8 @@ void console_release_graphics_owner(int owner_pid) {
     for (console_num = 0; console_num < console_count; console_num++) {
         if (consoles[console_num].graphics_mode &&
             consoles[console_num].graphics_owner_pid == owner_pid) {
+            vt_debug_printf("[VTDBG MODE] release vt=%d pid=%d active=%d\n",
+                            console_num, owner_pid, current_console);
             consoles[console_num].graphics_mode = 0;
             consoles[console_num].graphics_owner_pid = 0;
             if (console_num == current_console) redraw = 1;
@@ -1573,7 +1583,10 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
     uint64_t new_cy;
     framebuffer_t *fb;
     console_t *new_con;
-    
+
+    vt_debug_printf("[VTDBG SWITCH] begin src=%d dst=%d irq=%d sw=%d prog=%d\n",
+                    current_console, console_num, from_interrupt,
+                    console_switching, console_switch_in_progress);
     if (!console_valid_index(console_num)) return -1;
     if (!console_initialized) return -1;
     if (console_num == current_console) return 0;
@@ -1582,6 +1595,8 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         if (defer_on_busy)
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
+        vt_debug_printf("[VTDBG SWITCH] busy src=%d dst=%d defer=%d\n",
+                        current_console, console_num, defer_on_busy);
         return 1;
     }
 
@@ -1592,6 +1607,8 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         if (defer_on_busy)
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
+        vt_debug_printf("[VTDBG SWITCH] lock-busy src=%d dst=%d defer=%d\n",
+                        current_console, console_num, defer_on_busy);
         return 1;
     }
     
@@ -1606,6 +1623,8 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
                              __ATOMIC_RELEASE);
             spin_unlock(&console_lock);
             console_irqrestore(flags);
+            vt_debug_printf("[VTDBG SWITCH] defer-alloc src=%d dst=%d\n",
+                            current_console, console_num);
             return 1;
         }
         spin_unlock(&console_lock);
@@ -1618,6 +1637,8 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
             console_switch_in_progress = 0;
             spin_unlock(&console_lock);
             console_irqrestore(flags);
+            vt_debug_printf("[VTDBG SWITCH] alloc-fail src=%d dst=%d\n",
+                            current_console, console_num);
             return -1;
         }
     }
@@ -1643,6 +1664,8 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
                          __ATOMIC_RELEASE);
         spin_unlock(&console_lock);
         console_irqrestore(flags);
+        vt_debug_printf("[VTDBG SWITCH] defer-grow src=%d dst=%d\n",
+                        current_console, console_num);
         return 1;
     }
     console_grow_buffer(new_con, rows);
@@ -1675,16 +1698,25 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         console_switch_in_progress = 0;
         spin_unlock(&console_lock);
         console_irqrestore(flags);
+        vt_debug_printf("[VTDBG SWITCH] end active=%d graphics=1\n",
+                        current_console);
         return 0;
     }
 
     console_redraw_prepare(current_console);
     if (!from_interrupt) console_redraw_sync(current_console);
+    vt_debug_printf("[VTDBG SWITCH] end active=%d graphics=0\n",
+                    current_console);
     return 0;
 }
 
 static void console_switch_internal(int console_num) {
-    if (!tty_vt_switch_request(console_num)) return;
+    if (!tty_vt_switch_request(console_num)) {
+        vt_debug_printf("[VTDBG SWITCH] wait-owner active=%d target=%d\n",
+                        current_console, console_num);
+        tty_vt_debug_wait();
+        return;
+    }
     console_switch_internal_impl(console_num, 0, 1);
     if (console_num == current_console)
         tty_vt_switch_complete(console_num);
@@ -1699,10 +1731,14 @@ void console_switch(int console_num) {
         if (console_switching) {
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
+            vt_debug_printf("[VTDBG SWITCH] defer-irqs active=%d target=%d sw=1\n",
+                            current_console, console_num);
             return;
         }
         __atomic_store_n(&pending_console_switch, console_num,
                          __ATOMIC_RELEASE);
+        vt_debug_printf("[VTDBG SWITCH] defer-irqs active=%d target=%d sw=%d\n",
+                        current_console, console_num, console_switching);
         return;
     }
     
@@ -1741,6 +1777,8 @@ void console_switch_via_interrupt(int console_num) {
     flags = console_irqsave();
     __atomic_store_n(&pending_console_switch, console_num, __ATOMIC_RELEASE);
     console_irqrestore(flags);
+    vt_debug_printf("[VTDBG SWITCH] queued active=%d target=%d\n",
+                    current_console, console_num);
 }
 
 void console_process_pending(void) {
@@ -1761,6 +1799,8 @@ void console_process_pending(void) {
         console_irqrestore(flags);
 
         if (console_valid_index(pending)) {
+            vt_debug_printf("[VTDBG SWITCH] dequeue active=%d target=%d\n",
+                            current_console, pending);
             console_switch_internal(pending);
             continue;
         }

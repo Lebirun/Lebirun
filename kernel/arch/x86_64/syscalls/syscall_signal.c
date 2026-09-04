@@ -394,6 +394,15 @@ uint64_t signal_blocked_mask(task_t *task) {
     return sigs->blocked.sig[0];
 }
 
+int signal_debug_in_handler(task_t *task) {
+    task_signals_t *sigs;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = (task_signals_t *)task->signal_data;
+    if (sigs->owner_pid != task->pid) return 0;
+    return sigs->in_signal;
+}
+
 uint32_t signal_queue_count(task_t *task) {
     task_signals_t *sigs;
 
@@ -576,6 +585,8 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
 
     (void)unused1; (void)unused2; (void)unused3;
 
+    if (current_task && tty_vt_debug_owner(current_task->pid))
+        vt_debug_printf("[VTDBG SIGNAL] return-begin pid=%d\n", current_task->pid);
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
     if (sigs && sigs->owner_pid == current_task->pid) {
         sigs->in_signal = 0;
@@ -615,6 +626,9 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     regs->r14    = frame[16];
     regs->r15    = frame[17];
 
+    if (tty_vt_debug_owner(current_task->pid))
+        vt_debug_printf("[VTDBG SIGNAL] return-end pid=%d rip=%llx rsp=%llx\n",
+                        current_task->pid, saved_rip, saved_rsp);
     return (int)regs->rax;
 }
 
@@ -1108,6 +1122,9 @@ void signal_deliver_pending(registers_t *regs) {
 
         sigs->in_signal = 1;
 
+        if (tty_vt_debug_owner(current_task->pid))
+            vt_debug_printf("[VTDBG SIGNAL] dispatch pid=%d sig=%d handler=%llx rsp=%llx\n",
+                            current_task->pid, sig, regs->rip, regs->rsp);
         if (act->sa_flags & SA_RESETHAND) {
             default_signal_action(&default_act);
             set_signal_action(sigs, sig, &default_act);

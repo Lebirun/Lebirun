@@ -42,6 +42,9 @@
 #define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
 #define VFS_NODE_INLINE_NAME 16
+#define VFS_READDIR_END 1
+#define VFS_READDIR_IO -5
+#define VFS_READDIR_NOMEM -12
 
 struct vfs_node;
 struct dirent;
@@ -62,6 +65,8 @@ typedef uint64_t (*write_type_t)(struct vfs_node *, uint64_t offset, uint64_t si
 typedef void (*open_type_t)(struct vfs_node *, uint64_t flags);
 typedef void (*close_type_t)(struct vfs_node *);
 typedef struct dirent *(*readdir_type_t)(struct vfs_node *, uint64_t index);
+typedef int (*readdir_next_type_t)(struct vfs_node *, uint64_t *cookie,
+                                   struct dirent *entry);
 typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, const char *name);
 typedef int (*create_type_t)(struct vfs_node *parent, const char *name, uint64_t flags);
 typedef int (*unlink_type_t)(struct vfs_node *parent, const char *name);
@@ -80,6 +85,7 @@ typedef struct vfs_node_ops {
     rename_type_t rename;
     chmod_type_t chmod;
     chown_type_t chown;
+    readdir_next_type_t readdir_next;
 } vfs_node_ops_t;
 
 typedef struct vfs_node {
@@ -164,6 +170,8 @@ int vfs_unmount(const char *mountpoint);
 int vfs_remove_mount(const char *mountpoint);
 
 uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
+uint64_t vfs_read_phys_page(vfs_node_t *node, uint64_t offset, uint64_t size,
+                            uint64_t phys_addr, uint64_t phys_offset);
 uint64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 uint64_t vfs_transfer_window_size(vfs_node_t *node);
 int vfs_transfer_reuse_supported(vfs_node_t *node);
@@ -184,6 +192,8 @@ int vfs_lookup_hazard_contains(vfs_node_t *node);
 
 dirent_t *vfs_readdir(vfs_node_t *node, uint64_t index);
 int vfs_readdir_copy(vfs_node_t *node, uint64_t index, dirent_t *entry);
+int vfs_readdir_next_copy(vfs_node_t *node, uint64_t *cookie,
+                          dirent_t *entry);
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name);
 int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 int vfs_unlink(vfs_node_t *parent, const char *name);

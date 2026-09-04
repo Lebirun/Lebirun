@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <lebirun/registers.h>
-#include <lebirun/task.h>
 
 #define MOUSE_LEFT_BUTTON   0x01
 #define MOUSE_RIGHT_BUTTON  0x02
@@ -20,6 +19,6 @@ void mouse_handler(registers_t *regs);
 int mouse_has_data(void);
 int mouse_read(uint8_t *buf, uint32_t count);
 uint32_t mouse_get_packet_size(void);
-wait_queue_t *mouse_get_waitq(void);
+void mouse_debug_snapshot(void);
 
 #endif

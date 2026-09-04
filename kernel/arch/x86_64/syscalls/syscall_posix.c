@@ -1835,6 +1835,7 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
+    uint64_t next_offset;
     size_t name_len;
     size_t reclen;
     struct linux_dirent *de;
@@ -1843,6 +1844,7 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     vfs_node_t *node;
     dirent_t local_copy;
     const char *entry_name;
+    int readdir_status;
 
     dirp_addr = (uint64_t)(uintptr_t)dirp_ptr;
     if (!current_task) return -ESRCH;
@@ -1860,25 +1862,50 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     buf = (uint8_t *)dirp_addr;
     written = 0;
     dir_offset = task_fd_position_get(tfd);
+    memset(&local_copy, 0, sizeof(local_copy));
 
     while (written < count) {
-        if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
+        next_offset = dir_offset;
+        readdir_status = vfs_readdir_next_copy(node, &next_offset,
+                                               &local_copy);
+        if (readdir_status == VFS_READDIR_END) {
+            dir_offset = next_offset;
+            break;
+        }
+        if (readdir_status != 0) {
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : readdir_status;
+        }
+        if (next_offset <= dir_offset) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : -EIO;
+        }
 
         entry_name = vfs_dirent_name(&local_copy);
         name_len = strlen(entry_name);
-        if (name_len > UINT16_MAX - sizeof(struct linux_dirent) - 4)
+        if (name_len > UINT16_MAX - sizeof(struct linux_dirent) - 4) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
             return written ? written : -EOVERFLOW;
+        }
         reclen = sizeof(struct linux_dirent) + name_len + 1;
         reclen = (reclen + 3) & ~3;
 
-        if (reclen > UINT16_MAX)
+        if (reclen > UINT16_MAX) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
             return written ? written : -EOVERFLOW;
-        if (reclen > (size_t)(count - written))
-            return written ? written : -EINVAL;
+        }
+        if (reclen > (size_t)(count - written)) {
+            vfs_dirent_release_name(&local_copy);
+            if (!written) return -EINVAL;
+            break;
+        }
 
         de = (struct linux_dirent *)(buf + written);
         de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
-        de->d_off = dir_offset + 1;
+        de->d_off = next_offset;
         de->d_reclen = (unsigned short)reclen;
 
         if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
@@ -1894,9 +1921,10 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
             de->d_name[i] = entry_name[i];
         }
         de->d_name[name_len] = '\0';
+        vfs_dirent_release_name(&local_copy);
 
         written += (int)reclen;
-        dir_offset++;
+        dir_offset = next_offset;
     }
 
     task_fd_position_set(tfd, dir_offset);
@@ -2405,6 +2433,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     uint8_t *buf;
     int written;
     uint64_t dir_offset;
+    uint64_t next_offset;
     size_t name_len;
     size_t reclen;
     struct linux_dirent64 *de;
@@ -2413,6 +2442,7 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     vfs_node_t *node;
     dirent_t local_copy;
     const char *entry_name;
+    int readdir_status;
 
     dirp_addr = (uint64_t)dirp;
     if (!current_task) return -ESRCH;
@@ -2430,25 +2460,50 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     buf = (uint8_t *)dirp;
     written = 0;
     dir_offset = task_fd_position_get(tfd);
+    memset(&local_copy, 0, sizeof(local_copy));
     
     while ((unsigned int)written < count) {
-        if (vfs_readdir_copy(node, dir_offset, &local_copy) != 0) break;
+        next_offset = dir_offset;
+        readdir_status = vfs_readdir_next_copy(node, &next_offset,
+                                               &local_copy);
+        if (readdir_status == VFS_READDIR_END) {
+            dir_offset = next_offset;
+            break;
+        }
+        if (readdir_status != 0) {
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : readdir_status;
+        }
+        if (next_offset <= dir_offset) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : -EIO;
+        }
         
         entry_name = vfs_dirent_name(&local_copy);
         name_len = strlen(entry_name);
-        if (name_len > UINT16_MAX - sizeof(struct linux_dirent64) - 8)
+        if (name_len > UINT16_MAX - sizeof(struct linux_dirent64) - 8) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
             return written ? written : -EOVERFLOW;
+        }
         reclen = sizeof(unsigned long long) + sizeof(long long) + sizeof(unsigned short) + sizeof(unsigned char) + name_len + 1;
         reclen = (reclen + 7) & ~7;
         
-        if (reclen > UINT16_MAX)
+        if (reclen > UINT16_MAX) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
             return written ? written : -EOVERFLOW;
-        if (reclen > (size_t)(count - (unsigned int)written))
-            return written ? written : -EINVAL;
+        }
+        if (reclen > (size_t)(count - (unsigned int)written)) {
+            vfs_dirent_release_name(&local_copy);
+            if (!written) return -EINVAL;
+            break;
+        }
         
         de = (struct linux_dirent64 *)(buf + written);
         de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
-        de->d_off = dir_offset + 1;
+        de->d_off = next_offset;
         de->d_reclen = (unsigned short)reclen;
         
         if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
@@ -2464,9 +2519,10 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
             de->d_name[i] = entry_name[i];
         }
         de->d_name[name_len] = '\0';
+        vfs_dirent_release_name(&local_copy);
         
         written += (int)reclen;
-        dir_offset++;
+        dir_offset = next_offset;
     }
     
     task_fd_position_set(tfd, dir_offset);

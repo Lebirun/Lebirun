@@ -45,12 +45,13 @@ static void watchdog_print_task_state(task_t *t) {
     frame = t->syscall_frame;
     lookup = __atomic_load_n(&t->vfs_lookup_node, __ATOMIC_ACQUIRE);
     lookup_name = lookup ? vfs_node_name(lookup) : "-";
-    printf("  PID=%d name=%s state=%s syscall=%lu rip=0x%lX min=%lu maj=%lu lookup=%s\n",
+    printf("  PID=%d name=%s state=%s syscall=%lu rip=0x%lX min=%lu maj=%lu stage=%u lookup=%s\n",
            (int)t->pid, t->name[0] ? t->name : "(none)",
            state_name,
            frame ? frame->rax : UINT64_MAX,
            frame ? frame->rip : t->regs.rip,
            t->minor_faults, t->major_faults,
+           t->kernel_stage,
            lookup_name ? lookup_name : "-");
 }
 

@@ -1,6 +1,7 @@
 .section .text
 
 .extern interrupt_handler
+.extern interrupt_prepare_page_fault
 .extern kernel_irq_cr3
 .extern smp_percpu_irq_ready
 
@@ -129,7 +130,22 @@ isr_common_stub:
     movw %ax, %ds
     movw %ax, %es
 
-    movq %rsp, %rdi
+    cld
+    movq %rsp, %r12
+    xorq %r13, %r13
+    cmpq $14, 160(%r12)
+    jne 3f
+    movq %cr2, %r13
+    movq %r12, %rdi
+    movq %r13, %rsi
+    andq $-16, %rsp
+    call interrupt_prepare_page_fault
+    movq %rax, %r12
+3:
+    movq %r12, %rsp
+    andq $-16, %rsp
+    movq %r12, %rdi
+    movq %r13, %rsi
     call interrupt_handler
     movq %rax, %rsp
     movq 0(%rsp), %rax

@@ -13,7 +13,6 @@
 #include <lebirun/task.h>
 #include <lebirun/mutex.h>
 #include <lebirun/kernel_syscall.h>
-#include <lebirun/io.h>
 #include <lebirun/initrd.h>
 #include <lebirun/ramfs.h>
 #include <lebirun/squashfs.h>

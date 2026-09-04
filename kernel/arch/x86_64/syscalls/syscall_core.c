@@ -4,6 +4,7 @@
 #include <lebirun/cmdline.h>
 #include <lebirun/panic.h>
 #include <lebirun/evdev.h>
+#include <lebirun/vring.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -536,6 +537,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     vfs_node_t *node;
     pipe_t *p;
     int pty_endpoint;
+    uint8_t kernel_stage;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -560,25 +562,37 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     pty_endpoint = tfd && FD_TYPE_IS_PTY(tfd->type) ?
         pty_task_endpoint(fd) : -1;
     if (pty_endpoint >= 0) {
-        if (tfd->type == FD_TYPE_PTY_MASTER)
-            result = (int)pty_master_write(pty_endpoint, buf, (size_t)len);
-        else
-            result = (int)pty_slave_write(pty_endpoint, buf, (size_t)len);
-        return result;
-    }
-
-    if (tfd && tfd->type == FD_TYPE_FILE && tfd->node) {
-        node = (vfs_node_t *)tfd->node;
-        if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
-            if (tfd->flags & VFS_O_APPEND)
-                task_fd_position_set(tfd, node->length);
-            bytes = vfs_write(node, task_fd_position_get(tfd),
-                              (uint64_t)len,
-                              (uint8_t *)(uintptr_t)buf_addr);
-            if (bytes > (uint64_t)len) bytes = (uint64_t)len;
-            task_fd_position_add(tfd, bytes);
-            return bytes ? (int)bytes : -EIO;
+        kernel_stage = current_task->kernel_stage;
+        current_task->kernel_stage = TASK_KERNEL_STAGE_PTY_WRITE;
+        total = 0;
+        remaining = (uint64_t)len;
+        while (remaining > 0) {
+            chunk = remaining;
+            if (chunk > sizeof(stack_buf)) chunk = sizeof(stack_buf);
+            if (copy_from_user(stack_buf,
+                               (const void *)(uintptr_t)(buf_addr + total),
+                               (size_t)chunk) < 0) {
+                current_task->kernel_stage = kernel_stage;
+                if (total > 0) return (int)total;
+                return -EFAULT;
+            }
+            if (tfd->type == FD_TYPE_PTY_MASTER)
+                result = (int)pty_master_write(pty_endpoint, stack_buf,
+                                               (size_t)chunk);
+            else
+                result = (int)pty_slave_write(pty_endpoint, stack_buf,
+                                              (size_t)chunk);
+            if (result <= 0) {
+                current_task->kernel_stage = kernel_stage;
+                if (total > 0) return (int)total;
+                return result;
+            }
+            total += (uint64_t)result;
+            remaining -= (uint64_t)result;
+            if ((uint64_t)result < chunk) break;
         }
+        current_task->kernel_stage = kernel_stage;
+        return (int)total;
     }
 
     work_size = (uint64_t)len;
@@ -768,6 +782,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     uint64_t generation;
     int pty_endpoint;
     int to_copy;
+    uint8_t kernel_stage;
 
     if (len == 0) return 0;
     if (!buf) return -EFAULT;
@@ -786,35 +801,46 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
         pty_endpoint = FD_TYPE_IS_PTY(tfd->type) ?
             pty_task_endpoint(fd) : -1;
         if (pty_endpoint >= 0) {
+            kernel_stage = current_task->kernel_stage;
+            current_task->kernel_stage = TASK_KERNEL_STAGE_PTY_READ;
+            to_read = (uint64_t)len;
+            if (to_read > sizeof(stack_buf)) to_read = sizeof(stack_buf);
+            if (!user_access_ok((void *)(uintptr_t)buf_addr,
+                                (size_t)to_read, UACCESS_WRITE)) {
+                current_task->kernel_stage = kernel_stage;
+                return -EFAULT;
+            }
             for (;;) {
                 generation = descriptor_ready_generation();
                 if (tfd->type == FD_TYPE_PTY_MASTER)
-                    result = (int)pty_master_read(pty_endpoint, buf,
-                                                  (size_t)len);
+                    result = (int)pty_master_read(pty_endpoint, stack_buf,
+                                                  (size_t)to_read);
                 else
-                    result = (int)pty_slave_read(pty_endpoint, buf,
-                                                 (size_t)len);
-                if (result != -EAGAIN) return result;
-                if (tfd->flags & VFS_O_NONBLOCK) return -EAGAIN;
-                if (syscall_core_interrupted()) return -EINTR;
+                    result = (int)pty_slave_read(pty_endpoint, stack_buf,
+                                                 (size_t)to_read);
+                if (result != -EAGAIN) {
+                    if (result > 0 &&
+                        copy_to_user((void *)(uintptr_t)buf_addr, stack_buf,
+                                     (size_t)result) < 0) {
+                        current_task->kernel_stage = kernel_stage;
+                        return -EFAULT;
+                    }
+                    current_task->kernel_stage = kernel_stage;
+                    return result;
+                }
+                if (tfd->flags & VFS_O_NONBLOCK) {
+                    current_task->kernel_stage = kernel_stage;
+                    return -EAGAIN;
+                }
+                if (syscall_core_interrupted()) {
+                    current_task->kernel_stage = kernel_stage;
+                    return -EINTR;
+                }
                 descriptor_ready_wait(generation, UINT64_MAX);
-                if (syscall_core_interrupted()) return -EINTR;
-            }
-        }
-        if (tfd->type == FD_TYPE_FILE && tfd->node) {
-            node = (vfs_node_t *)tfd->node;
-            if (VFS_GET_TYPE(node->flags) == VFS_FILE) {
-                if (task_fd_position_is_eof(tfd)) return 0;
-                if (node->length > 0 &&
-                    task_fd_position_get(tfd) >= node->length) return 0;
-                bytes = vfs_read(node, task_fd_position_get(tfd),
-                                 (uint64_t)len,
-                                 (uint8_t *)(uintptr_t)buf_addr);
-                if (bytes > (uint64_t)len) bytes = (uint64_t)len;
-                task_fd_position_add(tfd, bytes);
-                if (node->length == 0 && bytes < (uint64_t)len)
-                    task_fd_position_mark_eof(tfd);
-                return (int)bytes;
+                if (syscall_core_interrupted()) {
+                    current_task->kernel_stage = kernel_stage;
+                    return -EINTR;
+                }
             }
         }
     }
@@ -906,6 +932,15 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
+            if (task_fd_position_is_eof(tfd)) {
+                if (heap_buf) kfree(kbuf);
+                return 0;
+            }
+            if (node->length > 0 &&
+                task_fd_position_get(tfd) >= node->length) {
+                if (heap_buf) kfree(kbuf);
+                return 0;
+            }
             if ((tfd->flags & VFS_O_NONBLOCK) &&
                 (strcmp(vfs_node_name(node), "event0") == 0 ||
                  strcmp(vfs_node_name(node), "event1") == 0)) {
@@ -926,6 +961,8 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 if (bytes < chunk) break;
             }
             task_fd_position_add(tfd, total);
+            if (node->length == 0 && total < (uint64_t)len)
+                task_fd_position_mark_eof(tfd);
             if (heap_buf) kfree(kbuf);
             return (int)total;
         }
@@ -966,14 +1003,9 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 int raw_cr;
                 
                 while (!keyboard_has_data_for(con_id)) {
-                    wait_queue_t *wq = keyboard_get_waitq_for(con_id);
-                    if (!wq) return -1;
-                    waitq_add(wq, current_task);
-                    if (keyboard_has_data_for(con_id)) {
-                        waitq_remove(wq, current_task);
-                        break;
-                    }
-                    block_current();
+                    generation = descriptor_ready_generation();
+                    if (keyboard_has_data_for(con_id)) break;
+                    descriptor_ready_wait(generation, UINT64_MAX);
                     if (syscall_core_interrupted()) {
                         return -EINTR;
                     }
@@ -1230,14 +1262,9 @@ canonical_ready:
             if (vmin > len) vmin = len;
             while (total < vmin) {
                 while (!keyboard_has_data_for(con_id)) {
-                    wait_queue_t *wq = keyboard_get_waitq_for(con_id);
-                    if (!wq) return total > 0 ? total : -1;
-                    waitq_add(wq, current_task);
-                    if (keyboard_has_data_for(con_id)) {
-                        waitq_remove(wq, current_task);
-                        break;
-                    }
-                    block_current();
+                    generation = descriptor_ready_generation();
+                    if (keyboard_has_data_for(con_id)) break;
+                    descriptor_ready_wait(generation, UINT64_MAX);
                     if (syscall_core_interrupted()) {
                         return total > 0 ? total : -EINTR;
                     }

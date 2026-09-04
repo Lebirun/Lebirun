@@ -80,6 +80,13 @@ typedef struct task_file_map_list {
 #define TASK_VMA_FILE      0x0008u
 #define TASK_VMA_DEVICE    0x0010u
 
+#define TASK_KERNEL_STAGE_NONE       0
+#define TASK_KERNEL_STAGE_PTY_READ   1
+#define TASK_KERNEL_STAGE_PTY_WRITE  2
+#define TASK_KERNEL_STAGE_FORK       3
+#define TASK_KERNEL_STAGE_FILE_FAULT 5
+#define TASK_KERNEL_STAGE_MUTEX      6
+
 typedef struct task {
     uint64_t id;
     pid_t pid;
@@ -177,6 +184,8 @@ typedef struct task {
 
     uint8_t vring_minor;
     bool is_kernel_task;
+    uint8_t kernel_stage;
+    uint8_t kernel_cpu_pinned;
 
     int exec_completed;
     int waited;
@@ -280,6 +289,7 @@ void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
 uint64_t descriptor_ready_generation(void);
 void descriptor_ready_notify(void);
+void descriptor_ready_notify_irq(void);
 int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks);
 uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
@@ -329,6 +339,7 @@ int task_set_scheduler(task_t *task, int policy, int priority);
 int task_get_scheduler(task_t *task, int *priority);
 uint64_t signal_pending_mask(task_t *task);
 uint64_t signal_blocked_mask(task_t *task);
+int signal_debug_in_handler(task_t *task);
 uint32_t signal_queue_count(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
@@ -386,5 +397,8 @@ void task_free_signal_data(task_t *task);
 void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
 void task_reclaim_exited_now(void);
+void task_debug_snapshot(pid_t pid);
+void task_debug_snapshot_users(void);
+void task_debug_request(void);
 
 #endif

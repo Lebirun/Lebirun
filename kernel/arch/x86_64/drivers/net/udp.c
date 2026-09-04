@@ -154,7 +154,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             sock->recv_from_ip = src;
             sock->recv_from_port = src_port;
             sock->has_data = 1;
-            descriptor_ready_notify();
+            descriptor_ready_notify_irq();
             return;
         }
         sock = sock->next;

@@ -99,7 +99,7 @@ void vmm_map_range_alloc(uint64_t virt_addr, uint64_t size, uint64_t flags);
 uint64_t vmm_create_pml4(void);
 uint64_t vmm_create_vring_pml4(void);
 void vmm_free_vring_pml4(uint64_t pml4_phys);
-uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count);
+uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint64_t *out_user_pages_count, int *out_error);
 void vmm_free_pml4(uint64_t pml4_phys);
 void vmm_set_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_cr3(void);
@@ -241,5 +241,7 @@ void vmm_temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint64_t temp_virt);
 
 void pmm_zero_page_phys(uint64_t phys_addr);
+void pmm_copy_to_page_phys(uint64_t phys_addr, uint64_t offset,
+                           const void *source, uint64_t size);
 
 #endif

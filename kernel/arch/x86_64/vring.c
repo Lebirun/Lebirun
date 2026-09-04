@@ -146,6 +146,45 @@ void serial_write_direct(const char *buf, size_t len) {
     serial_write(buf, len);
 }
 
+void vt_debug_printf(const char *fmt, ...) {
+    char buffer[128];
+    va_list args;
+    int length;
+    int i;
+    int j;
+    int bytes;
+    unsigned int budget;
+    uint64_t flags;
+
+    if (!fmt) return;
+    va_start(args, fmt);
+    length = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    if (length <= 0) return;
+    if ((size_t)length >= sizeof(buffer)) length = sizeof(buffer) - 1;
+    buffer[length - 1] = '\n';
+    flags = klog_irqsave();
+    if (!spin_trylock(&serial_lock)) {
+        klog_irqrestore(flags);
+        return;
+    }
+    budget = 65536;
+    for (i = 0; i < length; i++) {
+        bytes = buffer[i] == '\n' ? 2 : 1;
+        for (j = 0; j < bytes; j++) {
+            while (budget && !serial_thr_empty()) {
+                budget--;
+                cpu_relax();
+            }
+            if (!budget) goto out;
+            outb(0x3F8, bytes == 2 && j == 0 ? '\r' : (uint8_t)buffer[i]);
+        }
+    }
+out:
+    spin_unlock(&serial_lock);
+    klog_irqrestore(flags);
+}
+
 static void serial_drain(uint64_t max_chars) {
     (void)max_chars;
 }
