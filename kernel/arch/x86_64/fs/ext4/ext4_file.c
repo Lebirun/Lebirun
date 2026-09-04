@@ -119,6 +119,7 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                 ext4_free_block(fs, (uint64_t)new_block);
                 return -1;
             }
+            inode->i_blocks_lo += fs->sectors_per_block;
         }
 
         ind_block = ext4_get_block(fs, inode->i_block[EXT4_IND_BLOCK]);
@@ -151,6 +152,7 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                 ext4_free_block(fs, (uint64_t)new_block);
                 return -1;
             }
+            inode->i_blocks_lo += fs->sectors_per_block;
         }
 
         dind_block = ext4_get_block(fs, inode->i_block[EXT4_DIND_BLOCK]);
@@ -182,6 +184,7 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
                                    inode->i_block[EXT4_DIND_BLOCK]);
                 return -1;
             }
+            inode->i_blocks_lo += fs->sectors_per_block;
         }
 
         ind_block_num = dptrs[ind_idx];
@@ -407,70 +410,196 @@ uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset,
     return ext4_file_write_workspace(fs, ino, offset, size, buffer, NULL, 0);
 }
 
-int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t new_size) {
-    ext4_inode_cache_t *ic;
-    uint64_t old_size;
-    uint64_t new_blocks;
-    uint64_t old_blocks;
-    uint64_t i;
-    uint64_t phys_block;
+static int ext4_truncate_blocks(ext4_fs_t *fs, ext4_inode_cache_t *ic,
+                                 uint32_t *entries, uint32_t count,
+                                 unsigned int depth, uint64_t first,
+                                 uint64_t new_size, uint64_t owner,
+                                 uint64_t *retained) {
+    uint32_t *removed;
+    uint32_t *children;
+    uint8_t *block;
+    uint32_t pointers;
+    uint32_t removed_count;
+    uint32_t i;
+    uint32_t j;
+    uint32_t physical;
+    uint32_t entry_index;
+    uint32_t tail;
+    uint64_t span;
+    uint64_t logical;
+    uint64_t keep;
+    int empty;
+    int result;
 
-    ic = ext4_get_inode(fs, ino);
-    if (!ic) {
-        return -1;
-    }
+    pointers = fs->block_size / sizeof(uint32_t);
+    removed = kmalloc(count * sizeof(uint32_t));
+    if (!removed) return -1;
+    removed_count = 0;
+    result = -1;
+    span = 1;
+    for (i = 0; i < depth; i++) span *= pointers;
+    keep = new_size / fs->block_size;
+    tail = new_size % fs->block_size;
+    if (tail) keep++;
 
-    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFREG) {
-        ext4_release_inode(ic);
-        return -1;
-    }
-
-    old_size = ext4_inode_get_size(&ic->inode);
-
-    if (new_size == old_size) {
-        ext4_release_inode(ic);
-        return 0;
-    }
-
-    if (new_size < old_size) {
-        new_blocks = (new_size + fs->block_size - 1) / fs->block_size;
-        old_blocks = (old_size + fs->block_size - 1) / fs->block_size;
-
-        ext4_inode_set_size(&ic->inode, new_size);
-        ext4_mark_inode_dirty(ic);
-        if (ext4_sync(fs) != 0) {
-            ext4_release_inode(ic);
-            return -1;
-        }
-        if (ic->inode.i_blocks_lo == 0) {
-            ext4_release_inode(ic);
-            return 0;
-        }
-
-        for (i = new_blocks; i < old_blocks; i++) {
-            phys_block = ext4_inode_get_block(fs, &ic->inode, i);
-            if (phys_block != 0) {
-                ext4_free_block(fs, phys_block);
-
-                if (!(ic->inode.i_flags & EXT4_INODE_FLAG_EXTENTS) && i < EXT4_NDIR_BLOCKS) {
-                    ic->inode.i_block[i] = 0;
-                }
-
-                if (ic->inode.i_blocks_lo >= fs->sectors_per_block) {
-                    ic->inode.i_blocks_lo -= fs->sectors_per_block;
+    for (i = 0; i < count; i++) {
+        entry_index = !owner && depth ? EXT4_NDIR_BLOCKS + depth - 1 : i;
+        physical = owner ? entries[entry_index] : ic->inode.i_block[entry_index];
+        if (!physical) continue;
+        logical = first + i * span;
+        empty = logical >= keep;
+        if (depth) {
+            children = (uint32_t *)ext4_get_block(fs, physical);
+            if (!children) goto out;
+            if (ext4_truncate_blocks(fs, ic, children, pointers,
+                    depth - 1, logical, new_size, physical, retained) != 0) {
+                ext4_release_block(fs, physical);
+                goto out;
+            }
+            empty = 1;
+            for (j = 0; j < pointers; j++) {
+                if (children[j]) {
+                    empty = 0;
+                    break;
                 }
             }
+            ext4_release_block(fs, physical);
+        } else if (tail && logical == keep - 1) {
+            block = ext4_get_block(fs, physical);
+            if (!block) goto out;
+            memset(block + tail, 0, fs->block_size - tail);
+            ext4_mark_block_dirty(fs, physical);
+            ext4_release_block(fs, physical);
         }
-        ext4_mark_inode_dirty(ic);
-        ext4_release_inode(ic);
-        return ext4_sync(fs);
+        if (empty) {
+            if (owner) {
+                entries[entry_index] = 0;
+                ext4_mark_block_dirty(fs, owner);
+            } else {
+                ic->inode.i_block[entry_index] = 0;
+                ext4_mark_inode_dirty(ic);
+            }
+            removed[removed_count++] = physical;
+        } else {
+            (*retained)++;
+        }
     }
 
+    if (removed_count) {
+        if (ext4_sync(fs) != 0) goto out;
+        for (i = 0; i < removed_count; i++) {
+            if (ext4_free_block(fs, removed[i]) != 0) goto out;
+        }
+    }
+    result = 0;
+out:
+    kfree(removed);
+    return result;
+}
+
+static int ext4_free_detached_blocks(ext4_fs_t *fs, uint32_t physical,
+                                      unsigned int depth) {
+    uint32_t *children;
+    uint32_t count;
+    uint32_t i;
+
+    if (!physical) return 0;
+    if (depth) {
+        children = (uint32_t *)ext4_get_block(fs, physical);
+        if (!children) return -1;
+        count = fs->block_size / sizeof(uint32_t);
+        for (i = 0; i < count; i++) {
+            if (ext4_free_detached_blocks(fs, children[i], depth - 1) != 0) {
+                ext4_release_block(fs, physical);
+                return -1;
+            }
+        }
+        ext4_release_block(fs, physical);
+    }
+    return ext4_free_block(fs, physical);
+}
+
+int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t new_size) {
+    ext4_inode_cache_t *ic;
+    uint32_t detached[EXT4_N_BLOCKS];
+    uint64_t old_size;
+    uint64_t retained;
+    uint64_t first;
+    uint64_t span;
+    uint64_t sectors;
+    unsigned int depth;
+    unsigned int i;
+    int result;
+
+    ic = ext4_get_inode(fs, ino);
+    if (!ic) return -1;
+    result = -1;
+    if ((ic->inode.i_mode & 0xF000) != EXT4_S_IFREG) goto out;
+    old_size = ext4_inode_get_size(&ic->inode);
+    if (new_size == old_size && new_size != 0) {
+        result = 0;
+        goto out;
+    }
+    if (ic->inode.i_flags & EXT4_INODE_FLAG_EXTENTS) {
+        if (new_size == old_size) result = 0;
+        goto out;
+    }
+    if (new_size == 0 && old_size == 0) {
+        for (i = 0; i < EXT4_N_BLOCKS; i++) {
+            if (ic->inode.i_block[i]) break;
+        }
+        if (i == EXT4_N_BLOCKS) {
+            result = 0;
+            goto out;
+        }
+    }
+    if (new_size == 0) {
+        memcpy(detached, ic->inode.i_block, sizeof(detached));
+        memset(ic->inode.i_block, 0, sizeof(ic->inode.i_block));
+        ext4_inode_set_size(&ic->inode, 0);
+        ic->inode.i_blocks_lo =
+            (ic->inode.i_file_acl_lo || ic->inode.i_file_acl_high) ?
+            fs->sectors_per_block : 0;
+        ic->inode.i_blocks_high = 0;
+        ext4_mark_inode_dirty(ic);
+        if (ext4_sync(fs) != 0) goto out;
+        for (i = 0; i < EXT4_N_BLOCKS; i++) {
+            depth = i < EXT4_NDIR_BLOCKS ? 0 : i - EXT4_NDIR_BLOCKS + 1;
+            if (ext4_free_detached_blocks(fs, detached[i], depth) != 0)
+                goto out;
+        }
+        result = ext4_sync(fs);
+        goto out;
+    }
+    if (new_size <= old_size) {
+        ext4_inode_set_size(&ic->inode, new_size);
+        ext4_mark_inode_dirty(ic);
+        if (ext4_sync(fs) != 0) goto out;
+        retained = 0;
+        if (ext4_truncate_blocks(fs, ic, NULL,
+                EXT4_NDIR_BLOCKS, 0, 0, new_size, 0, &retained) != 0)
+            goto out;
+        first = EXT4_NDIR_BLOCKS;
+        span = fs->block_size / sizeof(uint32_t);
+        for (depth = 1; depth <= 3; depth++) {
+            if (ext4_truncate_blocks(fs, ic, NULL,
+                    1, depth, first, new_size, 0, &retained) != 0)
+                goto out;
+            first += span;
+            span *= fs->block_size / sizeof(uint32_t);
+        }
+        if (ic->inode.i_file_acl_lo || ic->inode.i_file_acl_high)
+            retained++;
+        sectors = retained * fs->sectors_per_block;
+        ic->inode.i_blocks_lo = (uint32_t)sectors;
+        ic->inode.i_blocks_high = (uint16_t)(sectors >> 32);
+    }
     ext4_inode_set_size(&ic->inode, new_size);
     ext4_mark_inode_dirty(ic);
+    result = ext4_sync(fs);
+out:
     ext4_release_inode(ic);
-
-    return 0;
+    return result;
 }
 
 int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint16_t mode) {
@@ -531,6 +660,13 @@ int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name) {
     }
 
     if (ic->inode.i_links_count == 0) {
+        ext4_release_inode(ic);
+        return -1;
+    }
+
+    if (ic->inode.i_links_count == 1 &&
+        (ic->inode.i_mode & 0xF000) == EXT4_S_IFREG &&
+        (ic->inode.i_flags & EXT4_INODE_FLAG_EXTENTS)) {
         ext4_release_inode(ic);
         return -1;
     }

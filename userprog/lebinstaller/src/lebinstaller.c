@@ -334,52 +334,92 @@ static int inst_copy_file_vfs(const char *src, const char *dst)
     int fd_in;
     int fd_out;
     int r;
+    int result;
     struct stat src_st;
+    struct stat dst_st;
     mode_t src_mode;
-    int created_with_mode;
+    off_t copied;
 
     fd_in = vfs_open(src, 0);
     if (fd_in < 0) return -1;
-
-    created_with_mode = 0;
-    src_mode = 0644;
-    src_st.st_size = 0;
-    if (fstat(fd_in, &src_st) == 0)
-        src_mode = src_st.st_mode & 07777;
-
-    fd_out = (int)leb_syscall3(LEB_SYSCALL_VFS_OPEN, (long)dst,
-                               O_WRONLY | O_CREAT | O_TRUNC,
-                               src_mode);
-    if (fd_out >= 0)
-        created_with_mode = 1;
+    if (fstat(fd_in, &src_st) != 0 || src_st.st_size < 0) {
+        close(fd_in);
+        return -1;
+    }
+    src_mode = src_st.st_mode & 07777;
+    fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, src_mode);
     if (fd_out < 0) {
-        fd_out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, src_mode);
-        if (fd_out < 0) {
-            close(fd_in);
-            return -1;
-        }
+        close(fd_in);
+        return -1;
     }
 
+    copied = 0;
+    result = -1;
     for (;;) {
         r = (int)copy_file_range(fd_in, NULL, fd_out, NULL,
                                  (size_t)0x7fffffffU, 0);
         if (r <= 0) break;
+        if (r > src_st.st_size - copied) goto out;
+        copied += r;
     }
+    if (r < 0 || copied != src_st.st_size) goto out;
+    if (fstat(fd_out, &dst_st) != 0 || dst_st.st_size != copied)
+        goto out;
+    result = 0;
+out:
+    if (close(fd_in) != 0) result = -1;
+    if (close(fd_out) != 0) result = -1;
+    return result;
+}
 
-    if (r < 0) {
-        close(fd_in);
-        close(fd_out);
-        return -1;
+static int inst_verify_kernel(const char *dst)
+{
+    int fd_in;
+    int fd_out;
+    int result;
+    ssize_t received;
+    ssize_t received_out;
+    size_t compared;
+    size_t request;
+    off_t remaining;
+    struct stat src_st;
+    struct stat dst_st;
+    uint8_t *buffer;
+
+    result = -1;
+    fd_in = -1;
+    fd_out = -1;
+    buffer = malloc(BUF_SIZE * 2);
+    if (!buffer) return -1;
+    fd_in = open("/boot/lebirun.kernel", O_RDONLY);
+    fd_out = open(dst, O_RDONLY);
+    if (fd_in < 0 || fd_out < 0) goto out;
+    if (fsync(fd_out) != 0) goto out;
+    if (fstat(fd_in, &src_st) != 0 || fstat(fd_out, &dst_st) != 0 ||
+        src_st.st_size <= 0 || src_st.st_size != dst_st.st_size)
+        goto out;
+    remaining = src_st.st_size;
+    while (remaining > 0) {
+        request = remaining > BUF_SIZE ? BUF_SIZE : (size_t)remaining;
+        received = read(fd_in, buffer, request);
+        if (received <= 0) goto out;
+        compared = 0;
+        while (compared < (size_t)received) {
+            received_out = read(fd_out, buffer + BUF_SIZE + compared,
+                                (size_t)received - compared);
+            if (received_out <= 0) goto out;
+            compared += received_out;
+        }
+        if (memcmp(buffer, buffer + BUF_SIZE, (size_t)received) != 0)
+            goto out;
+        remaining -= received;
     }
-
-    close(fd_in);
-    close(fd_out);
-
-    if (!created_with_mode) {
-        chmod(dst, src_mode);
-    }
-
-    return 0;
+    result = 0;
+out:
+    if (fd_in >= 0 && close(fd_in) != 0) result = -1;
+    if (fd_out >= 0 && close(fd_out) != 0) result = -1;
+    free(buffer);
+    return result;
 }
 
 #define PKG_CORE       0
@@ -843,7 +883,7 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     mbr_buf = (uint8_t *)malloc(SECTOR_SIZE);
     boot_buf = (uint8_t *)malloc(SECTOR_SIZE);
     core_buf = (uint8_t *)malloc(BUF_SIZE);
-    verify_buf = (uint8_t *)malloc(SECTOR_SIZE);
+    verify_buf = (uint8_t *)malloc(BUF_SIZE);
     if (!mbr_buf || !boot_buf || !core_buf || !verify_buf) {
         snprintf(boot_error, sizeof(boot_error), "boot: allocation failed");
         goto out;
@@ -945,17 +985,21 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
         snprintf(boot_error, sizeof(boot_error), "boot: seek verify failed");
         goto out;
     }
-    r = vfs_read_fd(fd_disk, verify_buf, SECTOR_SIZE);
-    if (r >= SECTOR_SIZE) {
-        fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
-        if (fd_core >= 0) {
-            vfs_read_fd(fd_core, core_buf, SECTOR_SIZE);
-            vfs_close_fd(fd_core);
-            if (memcmp(verify_buf, core_buf, SECTOR_SIZE) != 0) {
-                lseek(fd_disk, (off_t)SECTOR_SIZE, SEEK_SET);
-                vfs_write_fd(fd_disk, core_buf, SECTOR_SIZE);
-            }
+    fd_core = vfs_open("/boot/grub/i386-pc/core.img", 0);
+    if (fd_core < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: open core.img for verify failed");
+        goto out;
+    }
+    while ((r = vfs_read_fd(fd_core, core_buf, BUF_SIZE)) > 0) {
+        if (vfs_read_fd(fd_disk, verify_buf, r) != r ||
+            memcmp(verify_buf, core_buf, r) != 0) {
+            snprintf(boot_error, sizeof(boot_error), "boot: core.img verification failed");
+            goto out;
         }
+    }
+    if (r < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: read core.img for verify failed");
+        goto out;
     }
 
     result = 0;
@@ -1022,18 +1066,12 @@ static int inst_write_grub_config(const char *mountpoint, const char *part_dev)
     vfs_mkdir(grub_dir, 0755);
 
     snprintf(cfg_path, sizeof(cfg_path), "%s/boot/grub/grub.cfg", mountpoint);
-    vfs_create(cfg_path, 0644);
-    fd = vfs_open(cfg_path, 2);
-    if (fd < 0) {
-        fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    }
+    fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return -1;
 
-    written = vfs_write_fd(fd, grub_cfg, strlen(grub_cfg));
-    if (written < 0)
-        written = write(fd, grub_cfg, strlen(grub_cfg));
-    vfs_close_fd(fd);
-    return (written < 0) ? -1 : 0;
+    written = write(fd, grub_cfg, strlen(grub_cfg));
+    if (close(fd) != 0) return -1;
+    return written == (int)strlen(grub_cfg) ? 0 : -1;
 }
 
 #define SALT_LEN 8
@@ -1254,48 +1292,14 @@ static int inst_copy_pkg_db_entry(const char *mountpoint, const char *pkgname)
     char src_path[MAX_PATH];
     char db_dir[MAX_PATH];
     char dst_path[MAX_PATH];
-    char buf[512];
-    int src_fd;
-    int dst_fd;
-    int n;
-    int written;
-    int off;
 
     snprintf(src_path, sizeof(src_path), "%s/%s", LEBPKG_INSTALLED_DIR, pkgname);
-    src_fd = vfs_open(src_path, 0);
-    if (src_fd < 0) return -1;
-
     snprintf(db_dir, sizeof(db_dir), "%s/etc/lebpkg", mountpoint);
     vfs_mkdir(db_dir, 0755);
     snprintf(db_dir, sizeof(db_dir), "%s%s", mountpoint, LEBPKG_INSTALLED_DIR);
     vfs_mkdir(db_dir, 0755);
     snprintf(dst_path, sizeof(dst_path), "%s%s/%s", mountpoint, LEBPKG_INSTALLED_DIR, pkgname);
-    vfs_unlink(dst_path);
-    vfs_create(dst_path, 0644);
-    dst_fd = vfs_open(dst_path, 2);
-    if (dst_fd < 0) {
-        vfs_close_fd(src_fd);
-        return -1;
-    }
-
-    for (;;) {
-        n = vfs_read_fd(src_fd, buf, sizeof(buf));
-        if (n <= 0) break;
-        off = 0;
-        while (off < n) {
-            written = vfs_write_fd(dst_fd, buf + off, n - off);
-            if (written <= 0) {
-                vfs_close_fd(src_fd);
-                vfs_close_fd(dst_fd);
-                return -1;
-            }
-            off += written;
-        }
-    }
-
-    vfs_close_fd(src_fd);
-    vfs_close_fd(dst_fd);
-    return 0;
+    return inst_copy_file_vfs(src_path, dst_path);
 }
 
 static int inst_seed_pkg_db_from_iso(const char *mountpoint)
@@ -1336,7 +1340,10 @@ static int inst_upgrade_pkg_db_from_iso(const char *mountpoint, int *kept)
     *kept = 0;
     snprintf(inst_dir, sizeof(inst_dir), "%s%s", mountpoint, LEBPKG_INSTALLED_DIR);
     fd = vfs_open(inst_dir, 0);
-    if (fd < 0) return 0;
+    if (fd < 0) {
+        inst_set_copy_error("Package database open failed", inst_dir);
+        return -1;
+    }
     upgraded = 0;
     for (idx = 0; ; idx++) {
         if (vfs_readdir(fd, name, &dtype, idx) != 0) break;
@@ -1349,8 +1356,12 @@ static int inst_upgrade_pkg_db_from_iso(const char *mountpoint, int *kept)
         if (inst_read_pkg_version_file(target_path, installed_ver, sizeof(installed_ver)) < 0)
             installed_ver[0] = '\0';
         if (installed_ver[0] == '\0' || inst_compare_versions(live_ver, installed_ver) > 0) {
-            if (inst_copy_pkg_db_entry(mountpoint, name) == 0)
-                upgraded++;
+            if (inst_copy_pkg_db_entry(mountpoint, name) != 0) {
+                inst_set_copy_error("Package record failed", target_path);
+                vfs_close_fd(fd);
+                return -1;
+            }
+            upgraded++;
         } else {
             (*kept)++;
         }
@@ -1928,12 +1939,10 @@ static int upd_path_is_preserved(const char *dst_path, const char *mountpoint)
             dst_path[strlen(full)] == '/') return 1;
     }
 
-    if (!upd_selected[UPD_GRUB_CODE]) {
-        snprintf(full, sizeof(full), "%s/boot/grub/i386-pc", mountpoint);
-        if (strcmp(dst_path, full) == 0) return 1;
-        if (strncmp(dst_path, full, strlen(full)) == 0 &&
-            dst_path[strlen(full)] == '/') return 1;
-    }
+    snprintf(full, sizeof(full), "%s/boot/grub/i386-pc", mountpoint);
+    if (strcmp(dst_path, full) == 0) return 1;
+    if (strncmp(dst_path, full, strlen(full)) == 0 &&
+        dst_path[strlen(full)] == '/') return 1;
 
     if (!upd_selected[UPD_GRUB_CFG]) {
         snprintf(full, sizeof(full), "%s/boot/grub/grub.cfg", mountpoint);
@@ -1958,7 +1967,10 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
     vfs_mkdir(dst, 0755);
 
     fd = vfs_open(src, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        inst_set_copy_error("Directory open failed", src);
+        return -1;
+    }
 
     errors = 0;
     for (idx = 0; ; idx++) {
@@ -1967,11 +1979,13 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
 
         slen = snprintf(src_path, sizeof(src_path), "%s/%s", src, name);
         if (slen < 0 || slen >= (int)sizeof(src_path)) {
+            inst_set_copy_error("Path too long", src);
             errors++;
             continue;
         }
         dlen = snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, name);
         if (dlen < 0 || dlen >= (int)sizeof(dst_path)) {
+            inst_set_copy_error("Path too long", src);
             errors++;
             continue;
         }
@@ -1985,14 +1999,18 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
                 errors++;
         } else if (type == 6) {
             inst_copy_current(src_path);
-            if (inst_copy_symlink_vfs(src_path, dst_path) < 0)
+            if (inst_copy_symlink_vfs(src_path, dst_path) < 0) {
+                inst_set_copy_error("Symlink failed", dst_path);
                 errors++;
+            }
             copy_done++;
             inst_copy_progress(src_path);
         } else {
             inst_copy_current(src_path);
-            if (inst_copy_file_vfs(src_path, dst_path) < 0)
+            if (inst_copy_file_vfs(src_path, dst_path) < 0) {
+                inst_set_copy_error("File failed", dst_path);
                 errors++;
+            }
             copy_done++;
             inst_copy_progress(src_path);
         }
@@ -2046,6 +2064,7 @@ static int step_do_update(int disk_idx, int part_idx)
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
     did_work = 0;
+    copy_error[0] = '\0';
 
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Updating", term_sz.rows, term_sz.cols);
@@ -2080,7 +2099,10 @@ static int step_do_update(int disk_idx, int part_idx)
         }
     }
     if (upd_selected[UPD_BOOT]) {
-        copy_total += inst_count_dir_entries("/boot", mountpoint);
+        copy_total += inst_count_dir_entries("/boot", "/boot/grub/i386-pc");
+    }
+    if (upd_selected[UPD_GRUB_CODE]) {
+        copy_total += inst_count_dir_entries("/boot/grub/i386-pc", mountpoint);
     }
     if (upd_selected[UPD_USR_INC]) {
         copy_total += inst_count_dir_entries("/usr/include", mountpoint);
@@ -2097,14 +2119,17 @@ static int step_do_update(int disk_idx, int part_idx)
         lebui_progress_log(&prog_st, "Updating core system files...");
         snprintf(src, sizeof(src), "/init");
         snprintf(dst, sizeof(dst), "%s/init", mountpoint);
-        if (inst_copy_file_vfs(src, dst) == 0) {
-            copy_done++;
-            inst_copy_progress(src);
+        if (inst_copy_file_vfs(src, dst) != 0) {
+            inst_set_copy_error("File failed", dst);
+            goto failed;
         }
+        copy_done++;
+        inst_copy_progress(src);
         for (i = 0; core_dirs[i]; i++) {
             snprintf(src, sizeof(src), "/%s", core_dirs[i]);
             snprintf(dst, sizeof(dst), "%s/%s", mountpoint, core_dirs[i]);
-            inst_update_dir_recursive(src, dst, mountpoint);
+            if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
+                goto failed;
         }
         did_work = 1;
     }
@@ -2113,7 +2138,8 @@ static int step_do_update(int disk_idx, int part_idx)
         lebui_progress_log(&prog_st, "Updating boot files...");
         snprintf(src, sizeof(src), "/boot");
         snprintf(dst, sizeof(dst), "%s/boot", mountpoint);
-        inst_update_dir_recursive(src, dst, mountpoint);
+        if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
+            goto failed;
         did_work = 1;
     }
 
@@ -2121,7 +2147,8 @@ static int step_do_update(int disk_idx, int part_idx)
         lebui_progress_log(&prog_st, "Updating development headers...");
         snprintf(src, sizeof(src), "/usr/include");
         snprintf(dst, sizeof(dst), "%s/usr/include", mountpoint);
-        inst_update_dir_recursive(src, dst, mountpoint);
+        if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
+            goto failed;
         did_work = 1;
     }
 
@@ -2129,7 +2156,8 @@ static int step_do_update(int disk_idx, int part_idx)
         lebui_progress_log(&prog_st, "Updating terminal database...");
         snprintf(src, sizeof(src), "/usr/share/terminfo");
         snprintf(dst, sizeof(dst), "%s/usr/share/terminfo", mountpoint);
-        inst_update_dir_recursive(src, dst, mountpoint);
+        if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
+            goto failed;
         did_work = 1;
     }
 
@@ -2142,12 +2170,11 @@ static int step_do_update(int disk_idx, int part_idx)
         lebui_progress_log(&prog_st, "Updating GRUB boot code and modules...");
         snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
         vfs_mkdir(dst, 0755);
-        inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL);
+        if (inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL) != 0)
+            goto failed;
         if (inst_install_grub_mbr(d->devpath, p->number) < 0) {
-            lebui_progress_log(&prog_st, "Warning: GRUB boot code update failed.");
-            if (boot_error[0] != '\0') {
-                lebui_progress_log(&prog_st, boot_error);
-            }
+            inst_set_copy_error("GRUB boot code failed", boot_error);
+            goto failed;
         } else {
             lebui_progress_log(&prog_st, "GRUB boot code updated.");
         }
@@ -2156,25 +2183,37 @@ static int step_do_update(int disk_idx, int part_idx)
     if (upd_selected[UPD_GRUB_CFG]) {
         lebui_progress_update(&prog_st, "Updating GRUB config...", 97);
         lebui_progress_log(&prog_st, "Updating GRUB configuration...");
-        if (inst_write_grub_config(mountpoint, p->devpath) < 0)
-            lebui_progress_log(&prog_st, "Warning: GRUB config update failed.");
-        else
-            lebui_progress_log(&prog_st, "GRUB configuration updated.");
+        if (inst_write_grub_config(mountpoint, p->devpath) < 0) {
+            inst_set_copy_error("GRUB configuration failed", mountpoint);
+            goto failed;
+        }
+        lebui_progress_log(&prog_st, "GRUB configuration updated.");
     }
 
     if (upd_selected[UPD_PKGDB]) {
         lebui_progress_update(&prog_st, "Updating package database...", 98);
         lebui_progress_log(&prog_st, "Updating package database...");
         upgraded_pkgs = inst_upgrade_pkg_db_from_iso(mountpoint, &kept_pkgs);
+        if (upgraded_pkgs < 0) goto failed;
         snprintf(logbuf, sizeof(logbuf), "Package records upgraded: %d", upgraded_pkgs);
         lebui_progress_log(&prog_st, logbuf);
         snprintf(logbuf, sizeof(logbuf), "Package records kept: %d", kept_pkgs);
         lebui_progress_log(&prog_st, logbuf);
     }
 
+    if (upd_selected[UPD_BOOT]) {
+        lebui_progress_log(&prog_st, "Verifying installed kernel...");
+        snprintf(dst, sizeof(dst), "%s/boot/lebirun.kernel", mountpoint);
+        if (inst_verify_kernel(dst) != 0) {
+            inst_set_copy_error("Kernel verification failed", dst);
+            goto failed;
+        }
+    }
+
     lebui_progress_log(&prog_st, "Unmounting...");
     if (inst_umount_partition(mountpoint) != 0) {
-        lebui_progress_log(&prog_st, "Warning: unmount failed.");
+        inst_set_copy_error("Unmount failed", mountpoint);
+        goto report_failed;
     }
 
     lebui_progress_update(&prog_st, "Update complete!", 100);
@@ -2194,6 +2233,17 @@ static int step_do_update(int disk_idx, int part_idx)
                  p->devpath);
     lebui_msgbox_auto("Complete", donemsg, term_sz.rows, term_sz.cols);
     return 0;
+
+failed:
+    if (inst_umount_partition(mountpoint) != 0)
+        lebui_progress_log(&prog_st, "Unmount failed after update error.");
+report_failed:
+    lebui_progress_log(&prog_st, "Update incomplete.");
+    if (copy_error[0] != '\0') lebui_progress_log(&prog_st, copy_error);
+    snprintf(donemsg, sizeof(donemsg), "Update incomplete. %s",
+             copy_error[0] ? copy_error : "A selected update step failed.");
+    lebui_msgbox_auto("Update failed", donemsg, term_sz.rows, term_sz.cols);
+    return -1;
 }
 
 static const char *g_tab_names[] = { "Install", "Update" };

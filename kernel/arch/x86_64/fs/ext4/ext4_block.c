@@ -752,14 +752,19 @@ int ext4_free_block(ext4_fs_t *fs, uint64_t block) {
         return -1;
     }
 
+    free_blocks = ext4_group_free_blocks(fs, &desc);
+    if (free_blocks == UINT32_MAX) {
+        ext4_release_block(fs, bitmap_block);
+        return -1;
+    }
+    ext4_set_group_free_blocks(fs, &desc, free_blocks + 1);
+    if (ext4_write_group_desc(fs, group, &desc) != 0) {
+        ext4_release_block(fs, bitmap_block);
+        return -1;
+    }
     bitmap[byte_idx] &= ~(1 << bit_idx);
     ext4_mark_block_dirty(fs, bitmap_block);
     ext4_release_block(fs, bitmap_block);
-
-    free_blocks = ext4_group_free_blocks(fs, &desc);
-    if (free_blocks == UINT32_MAX) return -1;
-    ext4_set_group_free_blocks(fs, &desc, free_blocks + 1);
-    ext4_write_group_desc(fs, group, &desc);
 
     super_free = ext4_super_free_blocks(fs);
     if (super_free != UINT64_MAX)

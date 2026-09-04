@@ -399,7 +399,11 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {
     }
 
     if ((flags & VFS_O_TRUNC) && node->ops && node->ops->truncate) {
-        node->ops->truncate(node, 0);
+        ret = node->ops->truncate(node, 0);
+        if (ret != 0) {
+            vfs_release(node);
+            return ret < 0 ? ret : -EIO;
+        }
     }
 
     if (VFS_GET_TYPE(node->flags) == VFS_PIPE) {
