@@ -505,6 +505,43 @@ static int sys_net_dns_resolve(uint64_t hostname_ptr,
     return ret;
 }
 
+static int __attribute__((noinline, noclone)) net_http_copy_body(
+    uint64_t address, const uint8_t *body, uint64_t length) {
+    if (!user_range_mapped(address, length)) return -1;
+    memcpy((void *)address, body, length);
+    return 0;
+}
+
+static int __attribute__((noinline, noclone)) net_http_copy_headers(
+    uint8_t *destination, uint64_t capacity, uint8_t *headers,
+    uint64_t *length, int result) {
+    uint64_t copied;
+
+    if (headers && *length > 0 && capacity > 0) {
+        copied = *length < capacity ? *length : capacity;
+        if (user_range_mapped((uint64_t)(uintptr_t)destination, copied))
+            memcpy(destination, headers, copied);
+        else result = -1;
+        *length = copied;
+    } else if (headers) {
+        *length = 0;
+    }
+    if (headers) kfree(headers);
+    return result;
+}
+
+static void net_http_store_size(uint64_t *destination, uint64_t value) {
+    if (destination && user_range_mapped((uint64_t)(uintptr_t)destination,
+                                         sizeof(*destination)))
+        *destination = value;
+}
+
+static void net_http_store_status(int *destination, int value) {
+    if (destination && user_range_mapped((uint64_t)(uintptr_t)destination,
+                                         sizeof(*destination)))
+        *destination = value;
+}
+
 static int sys_net_http_get(uint64_t req_ptr, const char *unused1,
                             int unused2) {
     char *url_buf;
@@ -518,9 +555,6 @@ static int sys_net_http_get(uint64_t req_ptr, const char *unused1,
     uint64_t hdr_len;
     uint64_t hdr_buf_sz;
     uint64_t copy_len;
-    uint64_t out_addr;
-    uint64_t status_addr;
-    uint64_t hlen_addr;
     http_request_user_t req;
 
     (void)unused1; (void)unused2;
@@ -559,50 +593,25 @@ static int sys_net_http_get(uint64_t req_ptr, const char *unused1,
 
     if (ret == 0 && kbuf && downloaded > 0) {
         copy_len = downloaded < req.buffer_size ? downloaded : req.buffer_size;
-        if (!user_range_mapped(user_buf_addr, copy_len)) {
+        if (net_http_copy_body(user_buf_addr, kbuf, copy_len) < 0) {
             kfree(kbuf);
             if (khdr) kfree(khdr);
             kfree(url_buf);
             return -1;
         }
-        memcpy((void *)user_buf_addr, kbuf, copy_len);
         downloaded = copy_len;
     }
     if (kbuf) kfree(kbuf);
     kfree(url_buf);
 
-    if (khdr && hdr_len > 0 && hdr_buf_sz > 0) {
-        copy_len = hdr_len < hdr_buf_sz ? hdr_len : hdr_buf_sz;
-        if (user_range_mapped((uint64_t)(uintptr_t)req.headers_buf, copy_len))
-            memcpy((void *)(uintptr_t)req.headers_buf, khdr, copy_len);
-        else ret = -1;
-        hdr_len = copy_len;
-        kfree(khdr);
-    } else if (khdr) {
-        kfree(khdr);
-        hdr_len = 0;
-    }
+    ret = net_http_copy_headers(req.headers_buf, hdr_buf_sz, khdr,
+                                &hdr_len, ret);
 
-    if (req.out_size) {
-        out_addr = (uint64_t)(uintptr_t)req.out_size;
-        if (user_range_mapped(out_addr, sizeof(uint64_t))) {
-            *(req.out_size) = downloaded;
-        }
-    }
+    net_http_store_size(req.out_size, downloaded);
 
-    if (req.status_code) {
-        status_addr = (uint64_t)(uintptr_t)req.status_code;
-        if (user_range_mapped(status_addr, sizeof(int))) {
-            *(req.status_code) = status_code;
-        }
-    }
+    net_http_store_status(req.status_code, status_code);
 
-    if (req.out_headers_len) {
-        hlen_addr = (uint64_t)(uintptr_t)req.out_headers_len;
-        if (user_range_mapped(hlen_addr, sizeof(uint64_t))) {
-            *(req.out_headers_len) = hdr_len;
-        }
-    }
+    net_http_store_size(req.out_headers_len, hdr_len);
 
     return ret;
 }
@@ -615,8 +624,6 @@ static int sys_net_http_post(uint64_t req_ptr, const char *unused1,
     uint8_t *kbuf;
     uint64_t downloaded;
     uint64_t copy_len;
-    uint64_t out_addr;
-    uint64_t status_addr;
     int status;
     int ret;
     http_post_request_user_t req;
@@ -654,30 +661,19 @@ static int sys_net_http_post(uint64_t req_ptr, const char *unused1,
 
     copy_len = downloaded < req.buffer_size ? downloaded : req.buffer_size;
     if (ret == 0 && kbuf && copy_len > 0) {
-        if (!user_range_mapped(user_buf_addr, copy_len)) {
+        if (net_http_copy_body(user_buf_addr, kbuf, copy_len) < 0) {
             kfree(kbuf);
             kfree(url_buf); kfree(ct_buf);
             return -1;
         }
-        memcpy((void *)user_buf_addr, kbuf, copy_len);
     }
     if (kbuf) kfree(kbuf);
     downloaded = copy_len;
     kfree(url_buf); kfree(ct_buf);
 
-    if (req.out_size) {
-        out_addr = (uint64_t)(uintptr_t)req.out_size;
-        if (user_range_mapped(out_addr, sizeof(uint64_t))) {
-            *(req.out_size) = downloaded;
-        }
-    }
+    net_http_store_size(req.out_size, downloaded);
 
-    if (req.status_code) {
-        status_addr = (uint64_t)(uintptr_t)req.status_code;
-        if (user_range_mapped(status_addr, sizeof(int))) {
-            *(req.status_code) = status;
-        }
-    }
+    net_http_store_status(req.status_code, status);
 
     return ret;
 }
@@ -700,11 +696,6 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     uint64_t old_count;
     uint64_t new_count;
     uint64_t *expanded;
-    uint64_t copy_len;
-    uint64_t sa;
-    uint64_t ha;
-    uint64_t oa;
-    uint64_t ba;
     uint64_t i;
     http_get_alloc_req_t req;
 
@@ -745,42 +736,17 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
                               max_redir, &khdr, &hdr_len);
     kfree(url_buf);
 
-    if (khdr && hdr_len > 0 && hdr_buf_sz > 0) {
-        copy_len = hdr_len < hdr_buf_sz ? hdr_len : hdr_buf_sz;
-        if (user_range_mapped((uint64_t)(uintptr_t)req.headers_buf, copy_len))
-            memcpy((void *)(uintptr_t)req.headers_buf, khdr, copy_len);
-        else ret = -1;
-        hdr_len = copy_len;
-        kfree(khdr);
-    } else if (khdr) {
-        kfree(khdr);
-        hdr_len = 0;
-    }
+    ret = net_http_copy_headers(req.headers_buf, hdr_buf_sz, khdr,
+                                &hdr_len, ret);
 
-    if (req.status_code) {
-        sa = (uint64_t)(uintptr_t)req.status_code;
-        if (user_range_mapped(sa, sizeof(int)))
-            *(req.status_code) = status_code;
-    }
+    net_http_store_status(req.status_code, status_code);
 
-    if (req.out_headers_len) {
-        ha = (uint64_t)(uintptr_t)req.out_headers_len;
-        if (user_range_mapped(ha, sizeof(uint64_t)))
-            *(req.out_headers_len) = hdr_len;
-    }
+    net_http_store_size(req.out_headers_len, hdr_len);
 
     if (ret < 0 || !kbuf || downloaded == 0) {
         if (kbuf) kfree(kbuf);
-        if (req.out_size) {
-            oa = (uint64_t)(uintptr_t)req.out_size;
-            if (user_range_mapped(oa, sizeof(uint64_t)))
-                *(req.out_size) = 0;
-        }
-        if (req.out_buffer) {
-            ba = (uint64_t)(uintptr_t)req.out_buffer;
-            if (user_range_mapped(ba, sizeof(uint64_t)))
-                *(req.out_buffer) = 0;
-        }
+        net_http_store_size(req.out_size, 0);
+        net_http_store_size(req.out_buffer, 0);
         return ret;
     }
 
@@ -859,17 +825,9 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     memcpy((void *)base, kbuf, downloaded);
     kfree(kbuf);
 
-    if (req.out_buffer) {
-        ba = (uint64_t)(uintptr_t)req.out_buffer;
-        if (user_range_mapped(ba, sizeof(uint64_t)))
-            *(req.out_buffer) = base;
-    }
+    net_http_store_size(req.out_buffer, base);
 
-    if (req.out_size) {
-        oa = (uint64_t)(uintptr_t)req.out_size;
-        if (user_range_mapped(oa, sizeof(uint64_t)))
-            *(req.out_size) = downloaded;
-    }
+    net_http_store_size(req.out_size, downloaded);
 
     return 0;
 }

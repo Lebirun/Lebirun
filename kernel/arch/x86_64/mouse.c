@@ -21,8 +21,6 @@ static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
 static uint32_t ring_capacity;
 static spinlock_t mouse_lock = {0};
-static uint64_t mouse_debug_packets;
-static uint64_t mouse_debug_queued;
 
 static uint64_t mouse_irqsave(void) {
     uint64_t flags;
@@ -154,40 +152,17 @@ void mouse_handler(registers_t *regs) {
 
     flags = mouse_irqsave();
     spin_lock(&mouse_lock);
-    mouse_debug_packets++;
     if (ring_buffer && mouse_reserve_ring(mouse_packet_size)) {
         ring_put(buttons);
         ring_put((uint8_t)dx);
         ring_put((uint8_t)dy);
         if (mouse_packet_size == 4)
             ring_put((uint8_t)mouse_bytes[3]);
-        mouse_debug_queued++;
     }
     spin_unlock(&mouse_lock);
     mouse_irqrestore(flags);
 
     descriptor_ready_notify_irq();
-}
-
-void mouse_debug_snapshot(void) {
-    uint64_t flags;
-    uint64_t packets;
-    uint64_t queued;
-    uint32_t used;
-    uint32_t capacity;
-    uint32_t packet_size;
-
-    flags = mouse_irqsave();
-    spin_lock(&mouse_lock);
-    packets = mouse_debug_packets;
-    queued = mouse_debug_queued;
-    used = ring_buffer ? mouse_ring_used() : 0;
-    capacity = ring_capacity;
-    packet_size = mouse_packet_size;
-    spin_unlock(&mouse_lock);
-    mouse_irqrestore(flags);
-    vt_debug_printf("[VTDBG MOUSE] packets=%llu queued=%llu bytes=%u capacity=%u packet=%u\n",
-                    packets, queued, used, capacity, packet_size);
 }
 
 int mouse_has_data(void) {

@@ -118,8 +118,9 @@ SECTIONS
         *(.bss.builtin_tls)
         *(.bss.__thread_list_lock)
         *(.bss.hot.user)
-        *(.bss .bss.*)
+        EXCLUDE_FILE (*stdout.o) *(.bss .bss.*)
         *(COMMON)
+        *stdout.o(.bss .bss.*)
         __bss_end = .;
     } :data
 

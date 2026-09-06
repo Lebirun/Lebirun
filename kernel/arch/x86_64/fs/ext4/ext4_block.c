@@ -48,8 +48,22 @@ static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
     return -1;
 }
 
-static void ext4_discard_cache_entry(ext4_block_cache_entry_t *entry) {
-    if (entry->data) kfree(entry->data);
+static uint8_t *ext4_alloc_cache_data(ext4_fs_t *fs) {
+    if (fs->block_size >= PAGE_SIZE)
+        return (uint8_t *)slab_page_alloc(fs->block_size);
+    return (uint8_t *)kmalloc(fs->block_size);
+}
+
+static void ext4_free_cache_data(ext4_fs_t *fs, uint8_t *data) {
+    if (fs->block_size >= PAGE_SIZE)
+        slab_page_free(data, fs->block_size);
+    else
+        kfree(data);
+}
+
+static void ext4_discard_cache_entry(ext4_fs_t *fs,
+                                      ext4_block_cache_entry_t *entry) {
+    if (entry->data) ext4_free_cache_data(fs, entry->data);
     memset(entry, 0, sizeof(*entry));
 }
 
@@ -227,14 +241,14 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
     data = fs->block_cache[idx].data;
     memset(&fs->block_cache[idx], 0, sizeof(fs->block_cache[idx]));
     if (!data) {
-        data = (uint8_t *)kmalloc(fs->block_size);
+        data = ext4_alloc_cache_data(fs);
         if (!data) {
             return NULL;
         }
     }
 
     if (ext4_read_block(fs, block, data) != 0) {
-        kfree(data);
+        ext4_free_cache_data(fs, data);
         return NULL;
     }
 
@@ -244,10 +258,10 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
         cached_idx = find_cache_entry(fs, block);
         if (cached_idx < 0) {
             if (idx < 0) {
-                kfree(data);
+                ext4_free_cache_data(fs, data);
                 return NULL;
             }
-            ext4_discard_cache_entry(&fs->block_cache[idx]);
+            ext4_discard_cache_entry(fs, &fs->block_cache[idx]);
             fs->block_cache[idx].data = data;
             fs->block_cache[idx].block_num = block;
             fs->block_cache[idx].ref_count = 1;
@@ -259,7 +273,7 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
 
     fs->block_cache[idx].ref_count++;
     fs->block_cache[idx].last_access = ++fs->cache_tick;
-    kfree(data);
+    ext4_free_cache_data(fs, data);
     return fs->block_cache[idx].data;
 }
 
@@ -279,7 +293,7 @@ uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block) {
     }
 
     if (!fs->block_cache[idx].data) {
-        fs->block_cache[idx].data = (uint8_t *)kmalloc(fs->block_size);
+        fs->block_cache[idx].data = ext4_alloc_cache_data(fs);
         if (!fs->block_cache[idx].data) {
             return NULL;
         }
@@ -306,7 +320,7 @@ int ext4_zero_block(ext4_fs_t *fs, uint64_t block) {
     }
     idx = find_cache_entry(fs, block);
     if (idx >= 0 && fs->block_cache[idx].data == data)
-        ext4_discard_cache_entry(&fs->block_cache[idx]);
+        ext4_discard_cache_entry(fs, &fs->block_cache[idx]);
     return -1;
 }
 
@@ -333,7 +347,7 @@ int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks) {
         if (fs->block_cache[i].data &&
             fs->block_cache[i].ref_count == 0 &&
             !fs->block_cache[i].dirty) {
-            ext4_discard_cache_entry(&fs->block_cache[i]);
+            ext4_discard_cache_entry(fs, &fs->block_cache[i]);
             reclaimed++;
         }
     }
@@ -518,7 +532,7 @@ void ext4_drop_block_cache(ext4_fs_t *fs) {
 
     if (!fs) return;
     for (i = 0; i < (int)fs->block_cache_count; i++) {
-        ext4_discard_cache_entry(&fs->block_cache[i]);
+        ext4_discard_cache_entry(fs, &fs->block_cache[i]);
     }
     if (fs->block_cache) {
         kfree(fs->block_cache);

@@ -62,7 +62,6 @@ extern void copy_file_range_release_task(void *owner);
 #define TASK_WAIT_QUEUE_FUTEX  2
 #define TASK_DEFERRED_REAP 1
 #define TASK_DEFERRED_EXEC_DRAIN 2
-#define TASK_DEFERRED_DEBUG 4
 #define TASK_INIT_PID 1
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
@@ -2735,11 +2734,6 @@ void reap_request(void) {
                       __ATOMIC_RELEASE);
 }
 
-void task_debug_request(void) {
-    __atomic_fetch_or(&task_deferred_pending, TASK_DEFERRED_DEBUG,
-                      __ATOMIC_RELEASE);
-}
-
 void exec_drain_request(void) {
     __atomic_fetch_or(&task_deferred_pending, TASK_DEFERRED_EXEC_DRAIN,
                       __ATOMIC_RELEASE);
@@ -2951,11 +2945,6 @@ void task_deferred_work(void) {
 
     deferred = __atomic_exchange_n(&task_deferred_pending, 0,
                                    __ATOMIC_ACQ_REL);
-    if (deferred & TASK_DEFERRED_DEBUG) {
-        vt_debug_printf("[VTDBG SNAPSHOT] begin cpu=%d\n", cpu_id);
-        task_debug_snapshot_users();
-        vt_debug_printf("[VTDBG SNAPSHOT] end cpu=%d\n", cpu_id);
-    }
     if (deferred & TASK_DEFERRED_REAP) reap_dead_tasks();
     if (deferred & TASK_DEFERRED_EXEC_DRAIN) exec_cleanup_drain();
     if ((!task || !task->is_user) &&
@@ -3150,9 +3139,6 @@ void task_kill(task_t* task, uint64_t exit_code) {
     task_t *parent;
 
     if (!task) return;
-    vt_debug_printf("[VTDBG PROC] kill pid=%d name=%s code=%llu by=%d\n",
-                    task->pid, task->name, exit_code,
-                    current_task ? current_task->pid : 0);
     if (task == current_task) {
         task_exit(exit_code);
         return;
@@ -3403,170 +3389,6 @@ static int task_irq_return_frame(task_t *task, registers_t **frame_out) {
     if (!valid_es || !valid_ds || !valid_cs || !valid_rip) return 0;
     if (frame_out) *frame_out = frame;
     return 1;
-}
-
-static int task_debug_try_lock(void) {
-    cpu_info_t *cpu;
-    uint64_t flags;
-
-    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
-    cpu = smp_this_cpu();
-    if (!cpu || cpu->scheduler_lock_depth || !spin_trylock(&sched_lock)) {
-        if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
-        vt_debug_printf("[VTDBG SNAPSHOT] scheduler-busy\n");
-        return 0;
-    }
-    cpu->sched_saved_rflags = flags;
-    cpu->scheduler_lock_depth = 1;
-    return 1;
-}
-
-void task_debug_snapshot(pid_t pid) {
-    task_t *task;
-    registers_t *frame;
-    const char *frame_error;
-    char name[16];
-    uint64_t rsp;
-    uint64_t rip;
-    uint64_t cs;
-    uint64_t wait;
-    uint64_t pd;
-    uint64_t pending;
-    uint64_t blocked;
-    uint64_t generation;
-    uint64_t stack_base;
-    uint64_t stack_top;
-    int handler;
-    int descriptor_wait;
-    int irq_pending;
-    int state;
-    int owner;
-    int pinned;
-    int stage;
-    int queued;
-    int valid;
-    int running;
-
-    if (!task_debug_try_lock()) return;
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task) && task->pid != pid)
-        task = task->all_next;
-    if (!task || !task_ptr_valid(task)) {
-        unlock_scheduler();
-        vt_debug_printf("[VTDBG TASK] pid=%d missing\n", pid);
-        return;
-    }
-    memcpy(name, task->name, sizeof(name));
-    name[sizeof(name) - 1] = 0;
-    state = task->state;
-    owner = task->running_cpu;
-    pinned = task->kernel_cpu_pinned;
-    stage = task->kernel_stage;
-    wait = (uint64_t)(uintptr_t)task->waiting_queue;
-    pending = signal_pending_mask(task);
-    blocked = signal_blocked_mask(task);
-    handler = signal_debug_in_handler(task);
-    descriptor_wait = task->waiting_queue == &descriptor_ready_waitq;
-    generation = descriptor_ready_generation();
-    irq_pending = __atomic_load_n(&descriptor_ready_irq_pending, __ATOMIC_ACQUIRE);
-    queued = task_in_runqueue_locked(task);
-    running = task_is_current_on_any_cpu(task);
-    rsp = task->regs.rsp;
-    stack_base = (uint64_t)task->kernel_stack_base;
-    stack_top = stack_base + task->kernel_stack_size;
-    rip = 0;
-    cs = 0;
-    valid = -1;
-    frame = NULL;
-    frame_error = running ? "running" : "released";
-    pd = vmm_get_kernel_cr3();
-    if (!running && !task->resources_released) {
-        valid = 0;
-        frame_error = "ownership";
-        if (task_owns_irq_frame(task, rsp)) {
-            frame_error = "mapping";
-            if (rsp <= UINT64_MAX - sizeof(registers_t) &&
-                vmm_get_phys_in_pml4(pd, rsp) &&
-                vmm_get_phys_in_pml4(pd, rsp + sizeof(registers_t) - 1)) {
-                frame = (registers_t *)rsp;
-                rip = frame->rip;
-                cs = frame->cs;
-                frame_error = "address";
-                if ((frame->es & 0xFFFF) != 0x10 &&
-                    (frame->es & 0xFFFF) != 0x23 && (frame->es & 0xFFFF) != 0)
-                    frame_error = "es";
-                else if ((frame->ds & 0xFFFF) != 0x10 &&
-                         (frame->ds & 0xFFFF) != 0x23 && (frame->ds & 0xFFFF) != 0)
-                    frame_error = "ds";
-                else if ((cs & 0xFFFF) != 0x08 && (cs & 0xFFFF) != 0x1B)
-                    frame_error = "cs";
-                else if (!(((cs & 0xFFFF) == 0x08 &&
-                            rip >= (uint64_t)_kernel_text_start &&
-                            rip < (uint64_t)_kernel_text_end) ||
-                           ((cs & 0xFFFF) == 0x1B && task->is_user &&
-                            rip >= 0x1000 && rip < KERNEL_VMA)))
-                    frame_error = "rip";
-                valid = task_irq_return_frame(task, &frame);
-                if (valid) frame_error = "none";
-            }
-        }
-    }
-    unlock_scheduler();
-    vt_debug_printf("[VTDBG TASK] pid=%d name=%s state=%d cpu=%d pin=%d stage=%d rq=%d running=%d\n",
-                    pid, name, state, owner, pinned, stage, queued, running);
-    vt_debug_printf("[VTDBG FRAME] pid=%d valid=%d rsp=%llx rip=%llx cs=%llx\n",
-                    pid, valid, rsp, rip, cs);
-    vt_debug_printf("[VTDBG STACK] pid=%d base=%llx top=%llx error=%s\n",
-                    pid, stack_base, stack_top, frame_error);
-    vt_debug_printf("[VTDBG SIGNAL] pid=%d pending=%llx blocked=%llx handler=%d\n",
-                    pid, pending, blocked, handler);
-    vt_debug_printf("[VTDBG DWAIT] pid=%d waiting=%d queue=%llx generation=%llx irq=%d\n",
-                    pid, descriptor_wait, wait, generation, irq_pending);
-}
-
-void task_debug_snapshot_users(void) {
-    task_t *task;
-    pid_t last;
-    pid_t next;
-    pid_t limit;
-    pid_t pid;
-    uint64_t running;
-    int cpu;
-    int depth;
-    int locked;
-
-    for (cpu = 0; cpus && cpu < cpu_count; cpu++) {
-        depth = __atomic_load_n(&cpus[cpu].scheduler_lock_depth, __ATOMIC_ACQUIRE);
-        locked = task_debug_try_lock();
-        task = __atomic_load_n(&cpus[cpu].running_task, __ATOMIC_ACQUIRE);
-        running = (uint64_t)task;
-        pid = -1;
-        if (locked) {
-            if (task && task_ptr_valid(task)) pid = task->pid;
-            unlock_scheduler();
-        }
-        vt_debug_printf("[VTDBG CPU] cpu=%d task=%llx pid=%d depth=%d sampled=%d\n",
-                        cpu, running, pid, depth, locked);
-    }
-    limit = 0;
-    if (!task_debug_try_lock()) return;
-    for (task = all_tasks_head; task && task_ptr_valid(task); task = task->all_next) {
-        if (task->is_user && task->pid > limit) limit = task->pid;
-    }
-    unlock_scheduler();
-    last = 0;
-    while (last < limit) {
-        next = 0;
-        if (!task_debug_try_lock()) return;
-        for (task = all_tasks_head; task && task_ptr_valid(task); task = task->all_next) {
-            if (task->is_user && task->pid > last && task->pid <= limit &&
-                (!next || task->pid < next)) next = task->pid;
-        }
-        unlock_scheduler();
-        if (!next) break;
-        task_debug_snapshot(next);
-        last = next;
-    }
 }
 
 static int cpu_idle_frame_valid(cpu_info_t *cpu, registers_t *frame) {
@@ -5357,184 +5179,6 @@ int task_exec_node_with_owned_args(vfs_node_t *node, registers_t *regs,
                                    int envc, char **envp) {
     return task_exec_with_args_common(node, NULL, 0, regs,
                                       argc, argv, envc, envp, 1);
-}
-
-pid_t task_create_thread(void (*entry)(void)) {
-    uint64_t thread_stack_size;
-    uint64_t thread_stack_base;
-    uint64_t thread_stack_top;
-    uint64_t stack_page_count;
-    uint64_t *stack_pages;
-    uint64_t *stack_ptr;
-    task_t *new_task;
-
-    if (!current_task || !current_task->is_user) {
-        return -1;
-    }
-    
-    new_task = (task_t *)kmalloc(sizeof(task_t));
-    if (!new_task) return -1;
-    
-    memset(new_task, 0, sizeof(task_t));
-    if (task_copy_cwd(new_task, current_task) != 0) {
-        kfree(new_task);
-        return -1;
-    }
-    if (task_init_fpu_state(new_task) != 0) {
-        task_free_cwd(new_task);
-        kfree(new_task);
-        return -1;
-    }
-    
-    new_task->kernel_stack_base = kstack_alloc();
-    if (!new_task->kernel_stack_base) {
-        task_free_fpu_state(new_task);
-        task_free_cwd(new_task);
-        kfree(new_task);
-        return -1;
-    }
-    new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
-    
-    new_task->id = task_allocate_id();
-    new_task->pid = (pid_t)new_task->id;
-    signals_init_task(new_task);
-    new_task->state = TASK_READY;
-    new_task->is_user = true;
-    new_task->time_slice = SCHED_DEFAULT_TIMESLICE;
-    new_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
-    new_task->nice_value = current_task->nice_value;
-    new_task->sched_policy = current_task->sched_policy;
-    new_task->sched_priority = current_task->sched_priority;
-    new_task->time_slice = task_timeslice_for_nice(new_task->nice_value);
-    new_task->base_time_slice = new_task->time_slice;
-    if (task_rlimit_copy(new_task, current_task) != 0) {
-        task_free_signal_data(new_task);
-        kstack_free(new_task->kernel_stack_base);
-        task_free_fpu_state(new_task);
-        task_free_cwd(new_task);
-        kfree(new_task);
-        return -1;
-    }
-    
-    new_task->pml4_phys = current_task->pml4_phys;
-    new_task->cr3 = current_task->cr3;
-    new_task->user_pages = NULL;
-    new_task->user_pages_count = 0;
-    new_task->file_map_count = 0;
-    new_task->user_brk = current_task->user_brk;
-    new_task->user_brk_start = current_task->user_brk_start;
-    new_task->console_id = current_task->console_id;
-    new_task->running_cpu = -1;
-    new_task->creation_mask = current_task->creation_mask;
-    
-    thread_stack_size = 0x2000;
-    thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
-    thread_stack_top = thread_stack_base + thread_stack_size;
-    if (thread_stack_top < thread_stack_base ||
-        thread_stack_top > USER_DYNAMIC_LIMIT - 0x1000u ||
-        !task_memory_allows(current_task, thread_stack_size) ||
-        !task_stack_allows(new_task, thread_stack_size)) {
-        task_rlimit_free(new_task);
-        task_free_signal_data(new_task);
-        kstack_free(new_task->kernel_stack_base);
-        task_free_fpu_state(new_task);
-        task_free_cwd(new_task);
-        kfree(new_task);
-        return -1;
-    }
-    
-    stack_page_count = 0;
-    stack_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, thread_stack_base, thread_stack_size, 0x7 | VMM_PTE_NX, &stack_page_count);
-    if (!stack_pages) {
-        task_rlimit_free(new_task);
-        task_free_signal_data(new_task);
-        kstack_free(new_task->kernel_stack_base);
-        task_free_fpu_state(new_task);
-        task_free_cwd(new_task);
-        kfree(new_task);
-        return -1;
-    }
-    
-    new_task->user_pages = stack_pages;
-    new_task->user_pages_count = stack_page_count;
-    new_task->stack_size = thread_stack_size;
-    
-    current_task->user_brk = thread_stack_top + 0x1000;
-    
-    stack_ptr = (uint64_t *)(new_task->kernel_stack_base + KSTACK_USABLE_SIZE);
-    
-    stack_ptr--;
-    *stack_ptr = 0x23;
-    stack_ptr--;
-    *stack_ptr = thread_stack_top - 16;
-    stack_ptr--;
-    *stack_ptr = 0x202;
-    stack_ptr--;
-    *stack_ptr = 0x1B;
-    stack_ptr--;
-    *stack_ptr = (uint64_t)entry;
-    
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    stack_ptr--;
-    *stack_ptr = 0;
-    
-    stack_ptr--;
-    *stack_ptr = 0x23;
-    stack_ptr--;
-    *stack_ptr = 0x23;
-    stack_ptr--;
-    *stack_ptr = new_task->cr3;
-    stack_ptr--;
-    *stack_ptr = new_task->cr3;
-    
-    new_task->regs.rsp = (uint64_t)stack_ptr;
-
-    new_task->regs.rip = (uint64_t)entry;
-    new_task->regs.cs = 0x1B;
-    new_task->regs.ds = new_task->regs.es = new_task->regs.ss = 0x23;
-    new_task->regs.rflags = 0x202;
-    
-    lock_scheduler();
-    new_task->all_next = all_tasks_head;
-    all_tasks_head = new_task;
-    add_task_to_runqueue(new_task);
-    unlock_scheduler();
-    
-    return new_task->pid;
 }
 
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {

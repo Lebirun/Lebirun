@@ -128,13 +128,6 @@ int vfs_dirent_set_name(dirent_t *entry, const char *name);
 int vfs_dirent_set_name_n(dirent_t *entry, const char *name, size_t length);
 void vfs_dirent_release_name(dirent_t *entry);
 
-typedef struct {
-    vfs_node_t *node;
-    uint64_t offset;
-    uint64_t flags;
-    int in_use;
-} vfs_fd_t;
-
 typedef struct vfs_fs_type {
     const char *name;
     vfs_node_t *(*mount)(const char *device, const char *mountpoint);
@@ -208,14 +201,6 @@ void vfs_release(vfs_node_t *node);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 char *vfs_get_path_alloc(vfs_node_t *node);
 
-int vfs_open_path(const char *path, int flags);
-int vfs_close_fd(int fd);
-int vfs_read_fd(int fd, void *buffer, uint64_t size);
-int vfs_write_fd(int fd, const void *buffer, uint64_t size);
-int64_t vfs_seek(int fd, int64_t offset, int whence);
-int64_t vfs_tell(int fd);
-int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags);
-int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index);
 int vfs_sync_node(vfs_node_t *node, int data_only);
 int vfs_sync_all(int data_only);
 int vfs_set_times(vfs_node_t *node, uint64_t atime, uint64_t mtime,

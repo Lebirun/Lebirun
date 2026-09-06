@@ -309,9 +309,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
             printf("[KERNEL] User exception %d at RIP=0x%016lX sig=%d\n",
                    regs->int_no, regs->rip, sig);
-            vt_debug_printf("[VTDBG PROC] fault pid=%d name=%s int=%llu rip=%llx sig=%d\n",
-                            current_task->pid, current_task->name,
-                            regs->int_no, regs->rip, sig);
             
             task_exit_deferred(128 + sig);
             return schedule_from_irq(regs);
@@ -369,9 +366,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                    current_task->file_map_count, fault_addr, regs->rip,
                    regs->err_code, regs->entry_cr3,
                    current_task->pml4_phys);
-            vt_debug_printf("[VTDBG PROC] segv pid=%d name=%s addr=%llx rip=%llx err=%llx\n",
-                            current_task->pid, current_task->name,
-                            fault_addr, regs->rip, regs->err_code);
             printf("  RAX=0x%lX RBX=0x%lX RCX=0x%lX RDX=0x%lX\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
             printf("  RSI=0x%lX RDI=0x%lX RSP=0x%lX RBP=0x%lX\n", regs->rsi, regs->rdi, regs->rsp, regs->rbp);
             printf("  R8=0x%lX R9=0x%lX R10=0x%lX R11=0x%lX\n", regs->r8, regs->r9, regs->r10, regs->r11);

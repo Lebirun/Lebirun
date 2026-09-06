@@ -9,21 +9,10 @@
 #include <stddef.h>
 
 static ahci_controller_t g_ahci_controller;
+static uint32_t ahci_ports_allocated;
 
 #define AHCI_SYNC_TRANSFER_SECTORS 256
 #define AHCI_LBA48_MAX 0x0000FFFFFFFFFFFFULL
-
-static uint64_t KERNEL_INIT ahci_required_port_capacity(uint64_t ports_impl) {
-    uint64_t i;
-    uint64_t capacity;
-
-    capacity = 0;
-    for (i = 0; i < AHCI_PORT_COUNT; i++) {
-        if (ports_impl & (1ULL << i)) capacity++;
-    }
-    if (capacity == 0) capacity = 1;
-    return capacity;
-}
 
 static ahci_port_t *ahci_port_slot(uint64_t index) {
     uint64_t i;
@@ -31,10 +20,10 @@ static ahci_port_t *ahci_port_slot(uint64_t index) {
 
     if (!g_ahci_controller.ports) return NULL;
     if (index >= AHCI_PORT_COUNT) return NULL;
-    if (!(g_ahci_controller.ports_impl & (1ULL << index))) return NULL;
+    if (!(ahci_ports_allocated & (1ULL << index))) return NULL;
     slot = 0;
     for (i = 0; i < index; i++) {
-        if (g_ahci_controller.ports_impl & (1ULL << i)) slot++;
+        if (ahci_ports_allocated & (1ULL << i)) slot++;
     }
     if (slot >= g_ahci_controller.ports_capacity) return NULL;
     return &g_ahci_controller.ports[slot];
@@ -113,17 +102,22 @@ static int ahci_interrupts_enabled(void) {
     return (flags & (1u << 9)) != 0;
 }
 
-static ahci_dev_type_t KERNEL_INIT ahci_check_type(ahci_port_t *port) {
-    uint64_t ssts = ahci_port_read(port, AHCI_PxSSTS);
-    uint8_t ipm = (ssts >> AHCI_PxSSTS_IPM_SHIFT) & 0x0F;
-    uint8_t det = ssts & AHCI_PxSSTS_DET_MASK;
+static ahci_dev_type_t KERNEL_INIT ahci_check_type(uint64_t port_base) {
+    uint64_t ssts;
+    uint64_t sig;
+    uint8_t ipm;
+    uint8_t det;
+
+    ssts = ahci_hba_read(port_base, AHCI_PxSSTS);
+    ipm = (ssts >> AHCI_PxSSTS_IPM_SHIFT) & 0x0F;
+    det = ssts & AHCI_PxSSTS_DET_MASK;
 
     if (det != AHCI_PxSSTS_DET_READY)
         return AHCI_DEV_NULL;
     if (ipm != AHCI_PxSSTS_IPM_ACTIVE)
         return AHCI_DEV_NULL;
 
-    uint64_t sig = ahci_port_read(port, AHCI_PxSIG);
+    sig = ahci_hba_read(port_base, AHCI_PxSIG);
     switch (sig) {
         case SATA_SIG_ATAPI:
             return AHCI_DEV_SATAPI;
@@ -1077,6 +1071,7 @@ int KERNEL_INIT ahci_init(void) {
     uint64_t offset;
     uint64_t i;
     ahci_port_t *port;
+    ahci_dev_type_t port_types[AHCI_PORT_COUNT];
     const char *type_str;
 
     if (g_ahci_controller.initialized)
@@ -1089,6 +1084,7 @@ int KERNEL_INIT ahci_init(void) {
     KERNEL_INIT_LOG("AHCI: Initializing AHCI driver...\n");
     
     memset(&g_ahci_controller, 0, sizeof(g_ahci_controller));
+    ahci_ports_allocated = 0;
     
     if (ahci_probe() < 0) {
         return -1;
@@ -1116,20 +1112,37 @@ int KERNEL_INIT ahci_init(void) {
     for (offset = PAGE_SIZE; offset < abar_size; offset += PAGE_SIZE) {
         vmm_map_page(abar_virt + offset, abar_phys + offset, 0x003);
     }
-    ports_capacity = ahci_required_port_capacity(g_ahci_controller.ports_impl);
-    g_ahci_controller.ports = (ahci_port_t *)kmalloc(ports_capacity * sizeof(ahci_port_t));
-    if (!g_ahci_controller.ports) {
-        KERNEL_INIT_LOG("AHCI: Failed to allocate port table\n");
-        for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
-            vmm_unmap_page(abar_virt + offset);
-        }
-        g_ahci_controller.abar_virt = 0;
-        probed = 0;
-        return -1;
+    ghc = ahci_hba_read(abar_virt, AHCI_GHC);
+    ahci_hba_write(abar_virt, AHCI_GHC, ghc | AHCI_GHC_AE);
+    ports_impl = g_ahci_controller.ports_impl;
+    ports_capacity = 0;
+    for (i = 0; i < AHCI_PORT_COUNT; i++) {
+        if (!(ports_impl & (1ULL << i))) continue;
+        port_types[i] = ahci_check_type(abar_virt + AHCI_PORT_BASE +
+                                        i * AHCI_PORT_SIZE);
+        if (port_types[i] == AHCI_DEV_NULL) continue;
+        ahci_ports_allocated |= 1U << i;
+        ports_capacity++;
     }
-    memset(g_ahci_controller.ports, 0, ports_capacity * sizeof(ahci_port_t));
+    if (ports_capacity != 0) {
+        g_ahci_controller.ports = (ahci_port_t *)kmalloc(
+            ports_capacity * sizeof(ahci_port_t));
+        if (!g_ahci_controller.ports) {
+            KERNEL_INIT_LOG("AHCI: Failed to allocate port table\n");
+            ahci_hba_write(abar_virt, AHCI_GHC, ghc);
+            for (offset = 0; offset < abar_size; offset += PAGE_SIZE) {
+                vmm_unmap_page(abar_virt + offset);
+            }
+            ahci_ports_allocated = 0;
+            g_ahci_controller.abar_virt = 0;
+            probed = 0;
+            return -1;
+        }
+        memset(g_ahci_controller.ports, 0,
+               ports_capacity * sizeof(ahci_port_t));
+    }
     g_ahci_controller.ports_capacity = ports_capacity;
-    
+
     KERNEL_INIT_LOG("AHCI: CAP=0x%08lX, PI=0x%08lX, VS=0x%08lX\n",
                     cap, g_ahci_controller.ports_impl,
                     g_ahci_controller.version);
@@ -1138,11 +1151,6 @@ int KERNEL_INIT ahci_init(void) {
                     g_ahci_controller.version & 0xFFFF,
                     g_ahci_controller.num_cmd_slots);
     
-    ghc = ahci_hba_read(abar_virt, AHCI_GHC);
-    ghc |= AHCI_GHC_AE;
-    ahci_hba_write(abar_virt, AHCI_GHC, ghc);
-    
-    ports_impl = g_ahci_controller.ports_impl;
     for (i = 0; i < AHCI_PORT_COUNT; i++) {
         if (!(ports_impl & (1ULL << i)))
             continue;
@@ -1155,10 +1163,7 @@ int KERNEL_INIT ahci_init(void) {
         port->port_base = abar_virt + AHCI_PORT_BASE + (i * AHCI_PORT_SIZE);
         mutex_init(&port->io_lock);
         
-        port->type = ahci_check_type(port);
-        if (port->type == AHCI_DEV_NULL) {
-            continue;
-        }
+        port->type = port_types[i];
         
         type_str = "Unknown";
         switch (port->type) {
@@ -1186,6 +1191,7 @@ int KERNEL_INIT ahci_init(void) {
         kfree(g_ahci_controller.ports);
         g_ahci_controller.ports = NULL;
         g_ahci_controller.ports_capacity = 0;
+        ahci_ports_allocated = 0;
     }
     
     g_ahci_controller.initialized = true;

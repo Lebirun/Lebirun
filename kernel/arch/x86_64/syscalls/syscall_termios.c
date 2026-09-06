@@ -163,35 +163,6 @@ static int vt_pending_take(int phase, int source_vt) {
     }
 }
 
-int tty_vt_debug_owner(pid_t pid) {
-    int i;
-
-    if (pid <= 0 || !vt_modes || !vt_owners) return 0;
-    for (i = 0; i < tty_count; i++) {
-        if (__atomic_load_n(&vt_owners[i], __ATOMIC_ACQUIRE) == pid &&
-            vt_modes[i].mode == VT_PROCESS) return 1;
-    }
-    return 0;
-}
-
-void tty_vt_debug_wait(void) {
-    int pending;
-    int phase;
-    int source;
-    int owner;
-
-    pending = __atomic_load_n(&vt_pending_switch, __ATOMIC_ACQUIRE);
-    phase = vt_pending_phase(pending);
-    source = vt_pending_source(pending);
-    owner = 0;
-    if (vt_owners && source >= 0 && source < tty_count)
-        owner = __atomic_load_n(&vt_owners[source], __ATOMIC_ACQUIRE);
-    vt_debug_printf("[VTDBG WAIT] phase=%s src=%d dst=%d owner=%d pending=%d\n",
-                    phase == 1 ? "release" : phase == 2 ? "acquire" : "none",
-                    source, vt_pending_target(pending), owner, pending);
-    task_debug_snapshot_users();
-}
-
 int tty_vt_switch_request(int target_vt) {
     int active;
     int encoded;
@@ -208,12 +179,7 @@ int tty_vt_switch_request(int target_vt) {
     active = console_get_current();
     if (active < 0 || active >= tty_count) return 1;
     mode = &vt_modes[active];
-    vt_debug_printf("[VTDBG VT] request src=%d dst=%d mode=%d owner=%d pending=%d\n",
-                    active, target_vt, mode->mode, vt_owners[active],
-                    vt_pending_switch);
     if (mode->mode != VT_PROCESS || vt_owners[active] <= 0) {
-        vt_debug_printf("[VTDBG VT] request auto src=%d dst=%d\n",
-                        active, target_vt);
         return 1;
     }
     encoded = vt_release_encode(active, target_vt);
@@ -262,9 +228,6 @@ int tty_vt_switch_request(int target_vt) {
     }
     result = sys_kill_impl(vt_owners[active],
                            (const char *)(uintptr_t)mode->relsig, 0);
-    vt_debug_printf("[VTDBG VT] release-signal src=%d dst=%d owner=%d sig=%d result=%d\n",
-                    active, target_vt, vt_owners[active], mode->relsig,
-                    result);
     if (result < 0 && result != -EINTR) {
         expected = encoded;
         __atomic_compare_exchange_n(&vt_pending_switch, &expected, -1, 0,
@@ -285,9 +248,6 @@ void tty_vt_switch_complete(int target_vt) {
     if (!vt_modes || !vt_owners) return;
     if (target_vt < 0 || target_vt >= tty_count) return;
     mode = &vt_modes[target_vt];
-    vt_debug_printf("[VTDBG VT] complete vt=%d mode=%d owner=%d pending=%d\n",
-                    target_vt, mode->mode, vt_owners[target_vt],
-                    vt_pending_switch);
     if (mode->mode != VT_PROCESS || vt_owners[target_vt] <= 0 ||
         mode->acqsig <= 0)
         return;
@@ -300,8 +260,6 @@ void tty_vt_switch_complete(int target_vt) {
         return;
     result = sys_kill_impl(vt_owners[target_vt],
                            (const char *)(uintptr_t)mode->acqsig, 0);
-    vt_debug_printf("[VTDBG VT] acquire-signal vt=%d owner=%d sig=%d result=%d\n",
-                    target_vt, vt_owners[target_vt], mode->acqsig, result);
     if (result < 0 && result != -EINTR) {
         expected = encoded;
         __atomic_compare_exchange_n(&vt_pending_switch, &expected, -1, 0,
@@ -321,8 +279,6 @@ void tty_vt_release_owner(pid_t pid) {
     target_vt = -1;
     for (i = 0; i < tty_count; i++) {
         if (vt_owners[i] != pid) continue;
-        vt_debug_printf("[VTDBG VT] owner-release pid=%d vt=%d pending=%d\n",
-                        pid, i, vt_pending_switch);
         memset(&vt_modes[i], 0, sizeof(vt_modes[i]));
         vt_owners[i] = 0;
         if (kbd_modes) kbd_modes[i] = K_XLATE;
@@ -909,9 +865,6 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         {
             target_vt = arg;
             if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
-            vt_debug_printf("[VTDBG IOCTL] activate pid=%d tty=%d target=%d\n",
-                            current_task ? current_task->pid : 0, tty_id,
-                            target_vt - 1);
             console_switch(target_vt - 1);
             return 0;
         }
@@ -920,15 +873,9 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         {
             target_vt = arg;
             if (target_vt < 1 || target_vt > tty_count) return -ENXIO;
-            vt_debug_printf("[VTDBG IOCTL] waitactive-begin pid=%d tty=%d target=%d active=%d\n",
-                            current_task ? current_task->pid : 0, tty_id,
-                            target_vt - 1, console_get_current());
             while (console_get_current() != (target_vt - 1)) {
                 schedule();
             }
-            vt_debug_printf("[VTDBG IOCTL] waitactive-end pid=%d target=%d\n",
-                            current_task ? current_task->pid : 0,
-                            target_vt - 1);
             return 0;
         }
 
@@ -965,17 +912,9 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
                 vt_owners[tty_id] = current_task->pid;
             else
                 vt_owners[tty_id] = 0;
-            vt_debug_printf("[VTDBG IOCTL] setmode pid=%d tty=%d mode=%d rel=%d acq=%d owner=%d pending=%d\n",
-                            current_task->pid, tty_id, requested_mode.mode,
-                            requested_mode.relsig, requested_mode.acqsig,
-                            vt_owners[tty_id], vt_pending_switch);
             return 0;
 
         case VT_RELDISP:
-            vt_debug_printf("[VTDBG IOCTL] reldisp pid=%d tty=%d arg=%llu owner=%d pending=%d\n",
-                            current_task ? current_task->pid : 0, tty_id,
-                            arg, tty_valid_id(tty_id) && vt_owners ?
-                            vt_owners[tty_id] : 0, vt_pending_switch);
             if (!tty_valid_id(tty_id) || !vt_modes || !vt_owners)
                 return -ENOTTY;
             if (vt_owners[tty_id] != current_task->pid) return -EPERM;
@@ -998,8 +937,6 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             target_vt = vt_pending_target(pending);
             if (!tty_valid_id(target_vt)) return -EINVAL;
             switch_result = console_switch_committed(target_vt);
-            vt_debug_printf("[VTDBG IOCTL] commit src=%d dst=%d result=%d\n",
-                            tty_id, target_vt, switch_result);
             if (switch_result != 0) {
                 expected = -1;
                 __atomic_compare_exchange_n(&vt_pending_switch, &expected,
@@ -1016,9 +953,6 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
         case KDSETMODE:
             if (arg != KD_TEXT && arg != KD_GRAPHICS) return -EINVAL;
             if (!tty_valid_id(tty_id)) return -ENOTTY;
-            vt_debug_printf("[VTDBG IOCTL] kdset pid=%d tty=%d mode=%llu pgrp=%d\n",
-                            current_task ? current_task->pid : 0, tty_id,
-                            arg, tty_get_foreground_pgrp(tty_id));
             pgrp = tty_get_foreground_pgrp(tty_id);
             if (arg == KD_GRAPHICS && pgrp > 0 &&
                 (!current_task ||
@@ -1028,9 +962,6 @@ static int sys_ioctl(int fd, const char *request_ptr, uint64_t arg) {
             graphics_result = console_set_graphics_mode(
                 tty_id, arg == KD_GRAPHICS,
                 current_task ? current_task->pid : 0);
-            vt_debug_printf("[VTDBG IOCTL] kdset-result pid=%d tty=%d mode=%llu result=%d\n",
-                            current_task ? current_task->pid : 0, tty_id,
-                            arg, graphics_result);
             if (graphics_result == -2) return -EBUSY;
             if (graphics_result != 0) return -ENODEV;
             return 0;

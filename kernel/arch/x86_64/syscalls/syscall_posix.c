@@ -833,11 +833,8 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     uint64_t buf_addr;
     struct kernel_stat *st;
     int pty_fd;
-    uint64_t size;
-    uint64_t flags;
     vfs_node_t *node;
     uint64_t node_address;
-    int ret;
 
     (void)unused;
     if (!current_task) return -ESRCH;
@@ -917,19 +914,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
         }
     }
     
-    size = 0;
-    flags = 0;
-    ret = vfs_stat_fd(fd, &size, &flags);
-    if (ret < 0) return -EBADF;
-    st->st_dev = 1;
-    st->st_ino = 1;
-    if (VFS_GET_TYPE(flags) == VFS_DIRECTORY) st->st_mode = S_IFDIR | 0755;
-    else st->st_mode = S_IFREG | 0644;
-    st->st_nlink = 1;
-    st->st_size = size;
-    st->st_blksize = 4096;
-    st->st_blocks = (size + 511) / 512;
-    return 0;
+    return -EBADF;
 }
 
 static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {

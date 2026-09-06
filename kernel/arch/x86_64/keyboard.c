@@ -222,18 +222,6 @@ void keyboard_handler(registers_t* regs) {
     is_release = (scancode & 0x80) != 0;
     code = scancode & 0x7F;
 
-    if (!is_release && code == SCANCODE_F1 && ctrl_pressed && alt_pressed)
-        task_debug_request();
-
-    if (code == SCANCODE_CTRL || code == SCANCODE_ALT ||
-        code == SCANCODE_F1 || code == SCANCODE_F1 + 1) {
-        cur = console_is_initialized() ? console_get_current() : -1;
-        vt_debug_printf("[VTDBG KEY] code=%x rel=%d e0=%d c=%d a=%d vt=%d g=%d\n",
-                        code, is_release ? 1 : 0, was_e0 ? 1 : 0,
-                        ctrl_pressed ? 1 : 0, alt_pressed ? 1 : 0, cur,
-                        cur >= 0 ? console_get_graphics_mode(cur) : 0);
-    }
-
     if (kbd_observer) {
         kev.scancode = code;
         kev.is_release = is_release ? 1 : 0;
@@ -287,8 +275,6 @@ void keyboard_handler(registers_t* regs) {
         else if (code == SCANCODE_F11) console_num = 10;
         else if (code == SCANCODE_F12) console_num = 11;
         if (console_num >= 0 && console_num < console_get_count()) {
-            vt_debug_printf("[VTDBG KEY] queue target=%d active=%d\n",
-                            console_num, console_get_current());
             console_switch_via_interrupt(console_num);
             return;
         }

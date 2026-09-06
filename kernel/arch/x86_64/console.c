@@ -96,8 +96,6 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
     int redraw;
 
     if (!console_valid_index(console_num)) {
-        vt_debug_printf("[VTDBG MODE] graphics invalid vt=%d on=%d pid=%d\n",
-                        console_num, enabled, owner_pid);
         return -1;
     }
     con = &consoles[console_num];
@@ -108,8 +106,6 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
     spin_lock(&console_lock);
     if (enabled) {
         if (con->graphics_mode && con->graphics_owner_pid != owner_pid) {
-            vt_debug_printf("[VTDBG MODE] graphics busy vt=%d owner=%d pid=%d\n",
-                            console_num, con->graphics_owner_pid, owner_pid);
             spin_unlock(&console_lock);
             console_irqrestore(flags);
             return -2;
@@ -140,8 +136,6 @@ int console_set_graphics_mode(int console_num, int enabled, int owner_pid) {
         fb_set_cursor_hidden(!con->cursor_visible);
         console_force_redraw();
     }
-    vt_debug_printf("[VTDBG MODE] graphics vt=%d on=%d pid=%d active=%d\n",
-                    console_num, enabled, owner_pid, current_console);
     return 0;
 }
 
@@ -162,8 +156,6 @@ void console_release_graphics_owner(int owner_pid) {
     for (console_num = 0; console_num < console_count; console_num++) {
         if (consoles[console_num].graphics_mode &&
             consoles[console_num].graphics_owner_pid == owner_pid) {
-            vt_debug_printf("[VTDBG MODE] release vt=%d pid=%d active=%d\n",
-                            console_num, owner_pid, current_console);
             consoles[console_num].graphics_mode = 0;
             consoles[console_num].graphics_owner_pid = 0;
             if (console_num == current_console) redraw = 1;
@@ -201,22 +193,27 @@ int console_fallback_reclaimable(void) {
 }
 
 static char *console_alloc_storage(uint64_t cells, uint64_t rows,
-                                   uint8_t **wrapped) {
+                                   uint8_t **wrapped, uint8_t **color) {
     char *buffer;
+    uint64_t bytes;
 
-    buffer = (char *)slab_page_alloc(cells);
+    if (color) *color = NULL;
+    if (color && cells > SIZE_MAX / 2) return NULL;
+    bytes = color ? cells * 2 : cells;
+    buffer = (char *)slab_page_alloc(bytes);
     if (!buffer) return NULL;
     *wrapped = (uint8_t *)kmalloc(rows);
     if (!*wrapped) {
-        slab_page_free(buffer, cells);
+        slab_page_free(buffer, bytes);
         return NULL;
     }
+    if (color) *color = (uint8_t *)buffer + cells;
     return buffer;
 }
 
 static void console_free_storage(char *buffer, uint64_t cells,
-                                 uint8_t *wrapped) {
-    slab_page_free(buffer, cells);
+                                 uint8_t *wrapped, uint8_t *color) {
+    slab_page_free(buffer, color ? cells * 2 : cells);
     kfree(wrapped);
 }
 
@@ -239,7 +236,7 @@ static int console_ensure_alloc(int n) {
     con->buffer_rows = rows;
     con->buffer_cols = cols;
     con->buffer = console_alloc_storage(rows * cols, rows,
-                                        &con->line_wrapped);
+                                        &con->line_wrapped, NULL);
     if (!con->buffer) return -1;
     memset(con->buffer, ' ', rows * cols);
     memset(con->line_wrapped, 0, rows);
@@ -252,13 +249,17 @@ static uint8_t console_current_attr(console_t *con);
 #define CONSOLE_COLOR_PALETTE 1
 #define CONSOLE_COLOR_RUNS 2
 
-static void console_free_color(uint8_t *buffer, uint64_t cells,
-                               uint8_t packed) {
-    if (!buffer) return;
-    if (packed)
-        kfree(buffer);
-    else
-        slab_page_free(buffer, cells);
+static void console_free_color(console_t *con, uint64_t cells) {
+    uint64_t retained;
+
+    if (!con->color_buffer) return;
+    if (con->color_packed) {
+        kfree(con->color_buffer);
+    } else {
+        retained = (cells + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (cells * 2 > retained)
+            slab_page_free(con->buffer + retained, cells * 2 - retained);
+    }
 }
 
 static uint16_t console_color_run_end(const uint8_t *packed,
@@ -310,6 +311,8 @@ static uint8_t console_color_at(console_t *con, uint64_t row, uint64_t col) {
 static int console_expand_color_buffer(console_t *con) {
     uint8_t *packed;
     uint8_t *full;
+    char *buffer;
+    char *old_buffer;
     uint64_t cells;
     uint8_t attr;
     uint64_t i;
@@ -319,22 +322,24 @@ static int console_expand_color_buffer(console_t *con) {
 
     if (!con || !con->color_buffer || !con->color_packed) return 0;
     cells = con->buffer_rows * con->buffer_cols;
+    if (cells > SIZE_MAX / 2) return -1;
     packed = (uint8_t *)(void *)con->color_buffer;
-    full = (uint8_t *)slab_page_alloc(cells);
-    if (!full) return -1;
+    buffer = (char *)slab_page_alloc(cells * 2);
+    if (!buffer) return -1;
+    full = (uint8_t *)buffer + cells;
     if (con->color_packed == CONSOLE_COLOR_RUNS) {
         start = 0;
         for (run = 0; run < con->color_run_count; run++) {
             end = console_color_run_end(packed, run);
             if (end <= start || end > cells) {
-                slab_page_free(full, cells);
+                slab_page_free(buffer, cells * 2);
                 return -1;
             }
             memset(full + start, packed[run * 3 + 2], end - start);
             start = end;
         }
         if (start != cells) {
-            slab_page_free(full, cells);
+            slab_page_free(buffer, cells * 2);
             return -1;
         }
     } else {
@@ -345,10 +350,14 @@ static int console_expand_color_buffer(console_t *con) {
             full[i] = attr < con->color_run_count ? packed[attr] : 0x70;
         }
     }
-    kfree(packed);
+    memcpy(buffer, con->buffer, cells);
+    old_buffer = con->buffer;
+    con->buffer = buffer;
     con->color_buffer = full;
     con->color_run_count = 0;
     con->color_packed = 0;
+    slab_page_free(old_buffer, cells);
+    kfree(packed);
     return 0;
 }
 
@@ -367,6 +376,7 @@ static void console_pack_color_buffer(console_t *con) {
     uint8_t attr;
     uint8_t palette[16];
     uint8_t run_attr;
+    uint8_t packed_kind;
 
     if (!con || !con->color_buffer || con->color_packed) return;
     cells = con->buffer_rows * con->buffer_cols;
@@ -410,7 +420,7 @@ static void console_pack_color_buffer(console_t *con) {
                 packed[16 + i / 2] = (uint8_t)palette_index;
         }
         con->color_run_count = palette_count;
-        con->color_packed = CONSOLE_COLOR_PALETTE;
+        packed_kind = CONSOLE_COLOR_PALETTE;
     } else {
         run = 0;
         run_attr = full[0];
@@ -421,26 +431,35 @@ static void console_pack_color_buffer(console_t *con) {
             if (i < cells) run_attr = full[i];
         }
         con->color_run_count = runs;
-        con->color_packed = CONSOLE_COLOR_RUNS;
+        packed_kind = CONSOLE_COLOR_RUNS;
     }
-    slab_page_free(full, cells);
+    console_free_color(con, cells);
     con->color_buffer = packed;
+    con->color_packed = packed_kind;
 }
 
 static int console_ensure_color_buffer(console_t *con) {
     uint8_t *new_color;
     uint64_t cells;
+    char *buffer;
+    char *old_buffer;
 
     if (!con || !con->allocated) return -1;
     if (con->color_buffer) return console_expand_color_buffer(con);
     if (con->buffer_rows == 0) return -1;
     cells = con->buffer_rows * con->buffer_cols;
-    new_color = (uint8_t *)slab_page_alloc(cells);
-    if (!new_color) return -1;
+    if (cells > SIZE_MAX / 2) return -1;
+    buffer = (char *)slab_page_alloc(cells * 2);
+    if (!buffer) return -1;
+    new_color = (uint8_t *)buffer + cells;
+    memcpy(buffer, con->buffer, cells);
     memset(new_color, 0x70, cells);
+    old_buffer = con->buffer;
+    con->buffer = buffer;
     con->color_buffer = new_color;
     con->color_run_count = 0;
     con->color_packed = 0;
+    slab_page_free(old_buffer, cells);
     return 0;
 }
 
@@ -489,14 +508,10 @@ static void console_enter_alt_screen(console_t *con) {
     }
     cells = rows * con->buffer_cols;
 
-    new_buf = console_alloc_storage(cells, rows, &new_wrapped);
     new_color = NULL;
-    if (con->color_buffer) {
-        new_color = (uint8_t *)slab_page_alloc(cells);
-    }
-    if (!new_buf || (con->color_buffer && !new_color)) {
-        if (new_buf) console_free_storage(new_buf, cells, new_wrapped);
-        if (new_color) slab_page_free(new_color, cells);
+    new_buf = console_alloc_storage(cells, rows, &new_wrapped,
+                                    con->color_buffer ? &new_color : NULL);
+    if (!new_buf) {
         spin_unlock(&console_lock);
         console_irqrestore(flags);
         return;
@@ -568,8 +583,7 @@ static void console_leave_alt_screen(console_t *con) {
     spin_unlock(&console_lock);
     console_irqrestore(flags);
 
-    console_free_storage(old_buf, old_cells, old_wrapped);
-    slab_page_free(old_color, old_cells);
+    console_free_storage(old_buf, old_cells, old_wrapped, old_color);
 }
 
 static void console_process_alt_screen_pending(int console_num) {
@@ -617,6 +631,7 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     char *new_buf;
     uint8_t *new_color;
     char *old_buf;
+    uint8_t *old_color;
     uint8_t *old_wrapped;
 
     if (!con->allocated) return;
@@ -629,18 +644,11 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
     if (target_rows <= con->buffer_rows && needed_cols <= con->buffer_cols) return;
     if (needed_cols == 0 || target_rows > SIZE_MAX / needed_cols) return;
     old_cols = con->buffer_cols;
-    new_buf = console_alloc_storage(target_rows * needed_cols, target_rows,
-                                    &new_wrapped);
-    if (!new_buf) return;
     new_color = NULL;
-    if (con->color_buffer) {
-        new_color = (uint8_t *)slab_page_alloc(target_rows * needed_cols);
-        if (!new_color) {
-            console_free_storage(new_buf, target_rows * needed_cols,
-                                 new_wrapped);
-            return;
-        }
-    }
+    new_buf = console_alloc_storage(target_rows * needed_cols, target_rows,
+                                    &new_wrapped,
+                                    con->color_buffer ? &new_color : NULL);
+    if (!new_buf) return;
     memset(new_buf, ' ', target_rows * needed_cols);
     if (new_color) memset(new_color, 0x70, target_rows * needed_cols);
     memset(new_wrapped, 0, target_rows);
@@ -659,19 +667,20 @@ static void console_grow_buffer(console_t *con, uint64_t needed_rows) {
             memcpy(new_color + row * needed_cols,
                    con->color_buffer + row * old_cols, copy_cols);
         }
-        slab_page_free(con->color_buffer, old_rows * old_cols);
     }
     if (con->line_wrapped) {
         memcpy(new_wrapped, con->line_wrapped, copy_rows);
     }
     old_buf = con->buffer;
+    old_color = con->color_buffer;
     old_wrapped = con->line_wrapped;
     con->buffer = new_buf;
     con->color_buffer = new_color;
     con->line_wrapped = new_wrapped;
     con->buffer_rows = target_rows;
     con->buffer_cols = needed_cols;
-    console_free_storage(old_buf, old_rows * old_cols, old_wrapped);
+    console_free_storage(old_buf, old_rows * old_cols, old_wrapped,
+                         old_color);
 }
 
 static void console_reclaim_default_color(console_t *con) {
@@ -688,8 +697,7 @@ static void console_reclaim_default_color(console_t *con) {
             if (console_color_at(con, r, c) != 0x70) return;
         }
     }
-    console_free_color(con->color_buffer, rows * cols,
-                       con->color_packed);
+    console_free_color(con, rows * cols);
     con->color_buffer = NULL;
     con->color_run_count = 0;
     con->color_packed = 0;
@@ -1156,7 +1164,7 @@ static void console_clamp_cursors_locked(uint64_t max_cols, uint64_t max_rows) {
     for (i = 0; i < console_count; i++) {
         con = &consoles[i];
         if (!con->allocated) continue;
-        console_expand_color_buffer(con);
+        if (console_expand_color_buffer(con) < 0) continue;
         if (i == current_console && max_cols > con->buffer_cols)
             console_grow_buffer(con, max_rows);
         if (i == current_console) {
@@ -1278,24 +1286,14 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         }
     }
 
+    new_color_buf = NULL;
     new_buf = console_alloc_storage(buf_rows * new_cols, buf_rows,
-                                    &new_wrapped);
+                                    &new_wrapped,
+                                    have_colors ? &new_color_buf : NULL);
     if (!new_buf) {
         kfree(colorbuf);
         kfree(linebuf);
         return;
-    }
-
-    new_color_buf = NULL;
-    if (have_colors) {
-        new_color_buf = (uint8_t *)slab_page_alloc(buf_rows * new_cols);
-        if (!new_color_buf) {
-            console_free_storage(new_buf, buf_rows * new_cols,
-                                 new_wrapped);
-            kfree(colorbuf);
-            kfree(linebuf);
-            return;
-        }
     }
 
     memset(new_buf, ' ', buf_rows * new_cols);
@@ -1405,8 +1403,8 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
     new_buf = NULL;
     new_color_buf = NULL;
     new_wrapped = NULL;
-    console_free_storage(old_buffer, old_cells, old_wrapped);
-    slab_page_free(old_color_buffer, old_cells);
+    console_free_storage(old_buffer, old_cells, old_wrapped,
+                         old_color_buffer);
 
     if (cursor_found) {
         chars_counted = 0;
@@ -1465,9 +1463,6 @@ static void console_rewrap_one(console_t *con, uint64_t old_cols, uint64_t new_c
         con->scroll_top = 0;
     }
 
-    if (new_color_buf)
-        slab_page_free(new_color_buf, buf_rows * new_cols);
-    kfree(new_buf);
     kfree(colorbuf);
     kfree(linebuf);
 }
@@ -1584,9 +1579,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
     framebuffer_t *fb;
     console_t *new_con;
 
-    vt_debug_printf("[VTDBG SWITCH] begin src=%d dst=%d irq=%d sw=%d prog=%d\n",
-                    current_console, console_num, from_interrupt,
-                    console_switching, console_switch_in_progress);
     if (!console_valid_index(console_num)) return -1;
     if (!console_initialized) return -1;
     if (console_num == current_console) return 0;
@@ -1595,8 +1587,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         if (defer_on_busy)
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
-        vt_debug_printf("[VTDBG SWITCH] busy src=%d dst=%d defer=%d\n",
-                        current_console, console_num, defer_on_busy);
         return 1;
     }
 
@@ -1607,8 +1597,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         if (defer_on_busy)
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
-        vt_debug_printf("[VTDBG SWITCH] lock-busy src=%d dst=%d defer=%d\n",
-                        current_console, console_num, defer_on_busy);
         return 1;
     }
     
@@ -1623,8 +1611,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
                              __ATOMIC_RELEASE);
             spin_unlock(&console_lock);
             console_irqrestore(flags);
-            vt_debug_printf("[VTDBG SWITCH] defer-alloc src=%d dst=%d\n",
-                            current_console, console_num);
             return 1;
         }
         spin_unlock(&console_lock);
@@ -1637,8 +1623,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
             console_switch_in_progress = 0;
             spin_unlock(&console_lock);
             console_irqrestore(flags);
-            vt_debug_printf("[VTDBG SWITCH] alloc-fail src=%d dst=%d\n",
-                            current_console, console_num);
             return -1;
         }
     }
@@ -1650,7 +1634,13 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
     }
     
     new_con = &consoles[console_num];
-    console_expand_color_buffer(new_con);
+    if (console_expand_color_buffer(new_con) < 0) {
+        console_switching = 0;
+        console_switch_in_progress = 0;
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return -1;
+    }
     
     rows = fb ? fb->rows : 25;
     cols = fb ? fb->cols : 80;
@@ -1664,8 +1654,6 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
                          __ATOMIC_RELEASE);
         spin_unlock(&console_lock);
         console_irqrestore(flags);
-        vt_debug_printf("[VTDBG SWITCH] defer-grow src=%d dst=%d\n",
-                        current_console, console_num);
         return 1;
     }
     console_grow_buffer(new_con, rows);
@@ -1698,23 +1686,16 @@ static int console_switch_internal_impl(int console_num, int from_interrupt,
         console_switch_in_progress = 0;
         spin_unlock(&console_lock);
         console_irqrestore(flags);
-        vt_debug_printf("[VTDBG SWITCH] end active=%d graphics=1\n",
-                        current_console);
         return 0;
     }
 
     console_redraw_prepare(current_console);
     if (!from_interrupt) console_redraw_sync(current_console);
-    vt_debug_printf("[VTDBG SWITCH] end active=%d graphics=0\n",
-                    current_console);
     return 0;
 }
 
 static void console_switch_internal(int console_num) {
     if (!tty_vt_switch_request(console_num)) {
-        vt_debug_printf("[VTDBG SWITCH] wait-owner active=%d target=%d\n",
-                        current_console, console_num);
-        tty_vt_debug_wait();
         return;
     }
     console_switch_internal_impl(console_num, 0, 1);
@@ -1731,14 +1712,10 @@ void console_switch(int console_num) {
         if (console_switching) {
             __atomic_store_n(&pending_console_switch, console_num,
                              __ATOMIC_RELEASE);
-            vt_debug_printf("[VTDBG SWITCH] defer-irqs active=%d target=%d sw=1\n",
-                            current_console, console_num);
             return;
         }
         __atomic_store_n(&pending_console_switch, console_num,
                          __ATOMIC_RELEASE);
-        vt_debug_printf("[VTDBG SWITCH] defer-irqs active=%d target=%d sw=%d\n",
-                        current_console, console_num, console_switching);
         return;
     }
     
@@ -1777,8 +1754,6 @@ void console_switch_via_interrupt(int console_num) {
     flags = console_irqsave();
     __atomic_store_n(&pending_console_switch, console_num, __ATOMIC_RELEASE);
     console_irqrestore(flags);
-    vt_debug_printf("[VTDBG SWITCH] queued active=%d target=%d\n",
-                    current_console, console_num);
 }
 
 void console_process_pending(void) {
@@ -1799,8 +1774,6 @@ void console_process_pending(void) {
         console_irqrestore(flags);
 
         if (console_valid_index(pending)) {
-            vt_debug_printf("[VTDBG SWITCH] dequeue active=%d target=%d\n",
-                            current_console, pending);
             console_switch_internal(pending);
             continue;
         }
@@ -2389,288 +2362,6 @@ static void console_handle_csi(int console_num, console_t *con, framebuffer_t *f
     if (params != inline_params) kfree(params);
 }
 
-static void __attribute__((unused)) console_putchar_to_nolock(int console_num, char c) {
-    uint64_t rows;
-    uint64_t cols;
-    int is_active;
-    uint64_t tab_stop;
-    uint64_t i;
-    uint64_t sc_top;
-    uint64_t sc_bot;
-    uint64_t r;
-    uint64_t c2;
-    console_t *con;
-    framebuffer_t *fb;
-
-    if (!console_initialized) {
-        terminal_putchar(c);
-        return;
-    }
-    
-    if (!console_valid_index(console_num)) {
-        console_num = current_console;
-    }
-    
-    if (console_num == 0) {
-        if (kprint_is_ready()) {
-            kprint_serial_async(&c, 1);
-        } else {
-            serial_write_direct(&c, 1);
-        }
-    }
-    
-    if (!consoles[console_num].allocated) {
-        console_ensure_alloc(console_num);
-        if (!consoles[console_num].allocated) return;
-    }
-    
-    con = &consoles[console_num];
-    fb = fb_get();
-    is_active = (console_num == current_console && !console_switch_in_progress &&
-                 !con->graphics_mode);
-    rows = fb ? fb->rows : 25;
-    cols = fb ? fb->cols : 80;
-    if (rows == 0) rows = 25;
-    if (cols == 0) cols = 80;
-    if (!is_active && con->buffer_rows > 0) rows = con->buffer_rows;
-
-    console_grow_buffer(con, rows);
-    if (rows > con->buffer_rows) rows = con->buffer_rows;
-
-    if (con->esc_state == 1) {
-        if (c == '[') {
-            con->esc_state = 2;
-            console_esc_reset(con);
-            return;
-        }
-        if (c == '(' || c == ')') {
-            con->esc_state = 3;
-            return;
-        }
-        if (c == 'M') {
-            sc_top = con->scroll_top;
-            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
-            if (con->cursor_y <= sc_top) {
-                console_scroll_region_down(con, sc_top, sc_bot, cols);
-                if (is_active && fb) {
-                    for (r = sc_top; r < sc_bot; r++)
-                        for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
-                            fb_putchar(console_char_row(con, r)[c2], c2, r);
-                        }
-                    console_apply_colors(con, fb);
-                }
-            } else {
-                con->cursor_y--;
-                if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
-            }
-            con->esc_state = 0;
-            return;
-        }
-        if (c == 'D') {
-            sc_top = con->scroll_top;
-            sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
-            if (con->cursor_y + 1 >= sc_bot) {
-                console_scroll_region_up(con, sc_top, sc_bot, cols);
-                if (is_active && fb) {
-                    if (sc_top == 0 && sc_bot == rows) {
-                        if (fb_avoid_vram_reads())
-                            console_fast_redraw_locked(console_num);
-                        else
-                            fb_scroll();
-                    } else {
-                        for (r = sc_top; r < sc_bot; r++)
-                            for (c2 = 0; c2 < cols; c2++) {
-                                if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
-                                fb_putchar(console_char_row(con, r)[c2], c2, r);
-                            }
-                    }
-                    console_apply_colors(con, fb);
-                }
-            } else {
-                con->cursor_y++;
-                if (is_active && fb) { fb->cursor_y = con->cursor_y; if (!console_batch) fb_update_cursor(); }
-            }
-            con->esc_state = 0;
-            return;
-        }
-        if (c == 'c') {
-            con->ansi_fg = 7;
-            con->ansi_bg = 0;
-            con->ansi_bold = 0;
-            con->ansi_reverse = 0;
-            con->scroll_top = 0;
-            con->scroll_bottom = 0;
-            con->cursor_visible = 1;
-            if (is_active && fb) console_apply_colors(con, fb);
-            con->esc_state = 0;
-            return;
-        }
-        if (c == '7') {
-            con->saved_cursor_x = con->cursor_x;
-            con->saved_cursor_y = con->cursor_y;
-            con->esc_state = 0;
-            return;
-        }
-        if (c == '8') {
-            con->cursor_x = con->saved_cursor_x;
-            con->cursor_y = con->saved_cursor_y;
-            if (con->cursor_x >= cols) con->cursor_x = cols - 1;
-            if (con->cursor_y >= rows) con->cursor_y = rows - 1;
-            if (is_active && fb) {
-                fb->cursor_x = con->cursor_x;
-                fb->cursor_y = con->cursor_y;
-                if (!console_batch) fb_update_cursor();
-            }
-            con->esc_state = 0;
-            return;
-        }
-        con->esc_state = 0;
-        return;
-    }
-
-    if (con->esc_state == 3) {
-        con->esc_state = 0;
-        return;
-    }
-    
-    if (con->esc_state == 2) {
-        if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
-            if (!console_esc_append(con, c)) {
-                con->esc_state = 0;
-                console_esc_reset(con);
-            }
-            return;
-        }
-        if (console_esc_append(con, c))
-            console_handle_csi(console_num, con, fb, rows, cols, is_active);
-        con->esc_state = 0;
-        console_esc_reset(con);
-        if (is_active && fb && !console_batch) {
-            fb->cursor_x = con->cursor_x;
-            fb->cursor_y = con->cursor_y;
-            fb_update_cursor();
-        }
-        return;
-    }
-
-    if (c == '\033') {
-        con->esc_state = 1;
-        console_esc_reset(con);
-        return;
-    }
-
-    if (c == 0x07 || c == 0x0E || c == 0x0F) {
-        return;
-    }
-
-    console_ensure_nondefault_color(con);
-
-    if (c == '\n') {
-        con->cursor_x = 0;
-        sc_top = con->scroll_top;
-        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
-        con->cursor_y++;
-        if (con->cursor_y >= sc_bot) {
-            con->cursor_y = sc_bot - 1;
-            console_scroll_region_up(con, sc_top, sc_bot, cols);
-            if (is_active && fb) {
-                if (sc_top == 0 && sc_bot == rows) {
-                    if (fb_avoid_vram_reads())
-                        console_fast_redraw_locked(console_num);
-                    else
-                        fb_scroll();
-                } else {
-                    for (r = sc_top; r < sc_bot; r++)
-                        for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
-                            fb_putchar(console_char_row(con, r)[c2], c2, r);
-                        }
-                }
-                console_apply_colors(con, fb);
-                fb->cursor_x = con->cursor_x;
-                fb->cursor_y = con->cursor_y;
-            }
-        }
-        if (is_active && fb) {
-            fb->cursor_x = con->cursor_x;
-            fb->cursor_y = con->cursor_y;
-            if (!console_batch) fb_update_cursor();
-        }
-        return;
-    }
-
-    if (c == '\r') {
-        con->cursor_x = 0;
-        if (is_active && fb) {
-            fb->cursor_x = 0;
-            if (!console_batch) fb_update_cursor();
-        }
-        return;
-    }
-
-    if (c == '\b') {
-        if (con->cursor_x > 0) {
-            con->cursor_x--;
-            if (is_active && fb) {
-                fb->cursor_x = con->cursor_x;
-                if (!console_batch) fb_update_cursor();
-            }
-        }
-        return;
-    }
-
-    if (c == '\t') {
-        tab_stop = 8 - (con->cursor_x % 8);
-        for (i = 0; i < tab_stop; i++) {
-            console_putchar_to_nolock(console_num, ' ');
-        }
-        return;
-    }
-
-    if (con->cursor_y < con->buffer_rows && con->cursor_x < con->buffer_cols) {
-        console_char_row(con, con->cursor_y)[con->cursor_x] = c;
-        if (con->color_buffer) console_color_row(con, con->cursor_y)[con->cursor_x] = console_current_attr(con);
-    }
-
-    if (is_active && fb) {
-        fb_putchar(c, con->cursor_x, con->cursor_y);
-    }
-
-    con->cursor_x++;
-    if (con->cursor_x >= cols) {
-        con->line_wrapped[con->cursor_y] = 1;
-        con->cursor_x = 0;
-        sc_bot = (con->scroll_bottom > 0) ? con->scroll_bottom : rows;
-        sc_top = con->scroll_top;
-        con->cursor_y++;
-        if (con->cursor_y >= sc_bot) {
-            con->cursor_y = sc_bot - 1;
-            console_scroll_region_up(con, sc_top, sc_bot, cols);
-            if (is_active && fb) {
-                if (sc_top == 0 && sc_bot == rows) {
-                    if (fb_avoid_vram_reads())
-                        console_fast_redraw_locked(console_num);
-                    else
-                        fb_scroll();
-                } else {
-                    for (r = sc_top; r < sc_bot; r++)
-                        for (c2 = 0; c2 < cols; c2++) {
-                            if (con->color_buffer) console_apply_attr(console_color_row(con, r)[c2], fb);
-                            fb_putchar(console_char_row(con, r)[c2], c2, r);
-                        }
-                }
-                console_apply_colors(con, fb);
-            }
-        }
-    }
-
-    if (is_active && fb) {
-        fb->cursor_x = con->cursor_x;
-        fb->cursor_y = con->cursor_y;
-        if (!console_batch) fb_update_cursor();
-    }
-}
 
 void console_putchar_to(int console_num, char c) {
     console_write_internal(console_num, &c, 1, 0);
@@ -2686,6 +2377,42 @@ void console_write_to(int console_num, const char *data, size_t size) {
 
 void console_write_to_fb_only(int console_num, const char *data, size_t size) {
     console_write_internal(console_num, data, size, 1);
+}
+
+static int console_scroll_batch(console_t *con, framebuffer_t *fb,
+                                uint64_t sc_top, uint64_t sc_bot,
+                                uint64_t rows, uint64_t cols, int fb_ok,
+                                int update_cursor) {
+    uint64_t sr;
+    uint64_t sc;
+
+    console_scroll_region_up(con, sc_top, sc_bot, cols);
+    batch_scroll_count++;
+    if (batch_scroll_count > (int)rows) {
+        batch_fb_skip = 1;
+        fb_ok = 0;
+    }
+    if (fb_ok) {
+        if (sc_top == 0 && sc_bot == rows &&
+            fb_avoid_vram_reads()) {
+            batch_fb_skip = 1;
+            fb_ok = 0;
+        } else if (sc_top == 0 && sc_bot == rows) {
+            fb_scroll();
+        } else {
+            for (sr = sc_top; sr < sc_bot; sr++)
+                for (sc = 0; sc < cols; sc++) {
+                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
+                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
+                }
+        }
+        console_apply_colors(con, fb);
+        if (update_cursor) {
+            fb->cursor_x = con->cursor_x;
+            fb->cursor_y = con->cursor_y;
+        }
+    }
+    return fb_ok;
 }
 
 static void console_write_internal(int console_num, const char *data, size_t size, int skip_serial_async) {
@@ -2762,6 +2489,11 @@ static void console_write_internal(int console_num, const char *data, size_t siz
         if (cols == 0) cols = 80;
         if (!is_active && con->buffer_rows > 0) rows = con->buffer_rows;
         console_grow_buffer(con, rows);
+        if (con->color_packed) {
+            spin_unlock(&console_lock);
+            console_irqrestore(flags);
+            break;
+        }
         if (rows > con->buffer_rows) rows = con->buffer_rows;
         if (cols > con->buffer_cols) cols = con->buffer_cols;
         fb_ok = is_active && fb && !batch_fb_skip;
@@ -2897,30 +2629,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 con->cursor_y++;
                 if (con->cursor_y >= sc_bot) {
                     con->cursor_y = sc_bot - 1;
-                    console_scroll_region_up(con, sc_top, sc_bot, cols);
-                    batch_scroll_count++;
-                    if (batch_scroll_count > (int)rows) {
-                        batch_fb_skip = 1;
-                        fb_ok = 0;
-                    }
-                    if (fb_ok) {
-                        if (sc_top == 0 && sc_bot == rows &&
-                            fb_avoid_vram_reads()) {
-                            batch_fb_skip = 1;
-                            fb_ok = 0;
-                        } else if (sc_top == 0 && sc_bot == rows) {
-                            fb_scroll();
-                        } else {
-                            for (sr = sc_top; sr < sc_bot; sr++)
-                                for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
-                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
-                                }
-                        }
-                        console_apply_colors(con, fb);
-                        fb->cursor_x = con->cursor_x;
-                        fb->cursor_y = con->cursor_y;
-                    }
+                    fb_ok = console_scroll_batch(con, fb, sc_top, sc_bot,
+                                                 rows, cols, fb_ok, 1);
                 }
                 if (fb_ok) {
                     fb->cursor_x = con->cursor_x;
@@ -2965,28 +2675,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                         con->cursor_y++;
                         if (con->cursor_y >= sc_bot) {
                             con->cursor_y = sc_bot - 1;
-                            console_scroll_region_up(con, sc_top, sc_bot, cols);
-                            batch_scroll_count++;
-                            if (batch_scroll_count > (int)rows) {
-                                batch_fb_skip = 1;
-                                fb_ok = 0;
-                            }
-                            if (fb_ok) {
-                                if (sc_top == 0 && sc_bot == rows &&
-                                    fb_avoid_vram_reads()) {
-                                    batch_fb_skip = 1;
-                                    fb_ok = 0;
-                                } else if (sc_top == 0 && sc_bot == rows) {
-                                    fb_scroll();
-                                } else {
-                                    for (sr = sc_top; sr < sc_bot; sr++)
-                                        for (sc = 0; sc < cols; sc++) {
-                                            if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
-                                            fb_putchar(console_char_row(con, sr)[sc], sc, sr);
-                                        }
-                                }
-                                console_apply_colors(con, fb);
-                            }
+                            fb_ok = console_scroll_batch(con, fb, sc_top, sc_bot,
+                                                         rows, cols, fb_ok, 0);
                         }
                     }
                 }
@@ -3010,28 +2700,8 @@ static void console_write_internal(int console_num, const char *data, size_t siz
                 con->cursor_y++;
                 if (con->cursor_y >= sc_bot) {
                     con->cursor_y = sc_bot - 1;
-                    console_scroll_region_up(con, sc_top, sc_bot, cols);
-                    batch_scroll_count++;
-                    if (batch_scroll_count > (int)rows) {
-                        batch_fb_skip = 1;
-                        fb_ok = 0;
-                    }
-                    if (fb_ok) {
-                        if (sc_top == 0 && sc_bot == rows &&
-                            fb_avoid_vram_reads()) {
-                            batch_fb_skip = 1;
-                            fb_ok = 0;
-                        } else if (sc_top == 0 && sc_bot == rows) {
-                            fb_scroll();
-                        } else {
-                            for (sr = sc_top; sr < sc_bot; sr++)
-                                for (sc = 0; sc < cols; sc++) {
-                                    if (con->color_buffer) console_apply_attr(console_color_row(con, sr)[sc], fb);
-                                    fb_putchar(console_char_row(con, sr)[sc], sc, sr);
-                                }
-                        }
-                        console_apply_colors(con, fb);
-                    }
+                    fb_ok = console_scroll_batch(con, fb, sc_top, sc_bot,
+                                                 rows, cols, fb_ok, 0);
                 }
             }
 
@@ -3105,7 +2775,11 @@ void console_clear(int console_num) {
     spin_lock(&console_lock);
     
     con = &consoles[console_num];
-    console_expand_color_buffer(con);
+    if (console_expand_color_buffer(con) < 0) {
+        spin_unlock(&console_lock);
+        console_irqrestore(flags);
+        return;
+    }
     if (con->allocated && con->buffer) {
         for (row = 0; row < con->buffer_rows; row++) {
             for (col = 0; col < con->buffer_cols; col++) {

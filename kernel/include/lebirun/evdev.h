@@ -188,7 +188,6 @@ void evdev_push_sync(struct evdev_device *dev);
 int evdev_has_data(struct evdev_device *dev);
 int evdev_node_has_data(vfs_node_t *node);
 void evdev_release_grabs(pid_t pid);
-void evdev_debug_snapshot(void);
 
 struct evdev_device *evdev_get_kbd(void);
 struct evdev_device *evdev_get_mouse(void);

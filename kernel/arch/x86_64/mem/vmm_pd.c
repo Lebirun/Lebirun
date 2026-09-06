@@ -200,7 +200,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     uint64_t active_cr3;
     int shared_ref_failed;
     int error;
-    const char *stage;
 
     user_page_capacity = 32;
     user_page_count = 0;
@@ -209,18 +208,14 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     new_pt_copy = NULL;
     new_pml4_phys = 0;
     error = -CLONE_ENOMEM;
-    stage = "page-array";
 
     user_pages = (uint64_t *)kmalloc(user_page_capacity * sizeof(uint64_t));
     if (!user_pages) goto cleanup_fail;
-    stage = "source-scratch";
     src_pt_copy = (uint64_t *)slab_page_alloc(PAGE_SIZE);
     if (!src_pt_copy) goto cleanup_fail;
-    stage = "child-scratch";
     new_pt_copy = (uint64_t *)slab_page_alloc(PAGE_SIZE);
     if (!new_pt_copy) goto cleanup_fail;
 
-    stage = "pml4";
     alloc_page = pmm_alloc_page();
     if (!alloc_page) goto cleanup_fail;
     new_pml4_phys = (uint64_t)alloc_page;
@@ -236,7 +231,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
         if (!(pml4e & 1)) continue;
         src_pdpt_phys = pml4e & VMM_PHYS_MASK;
 
-        stage = "pdpt";
         alloc_page = pmm_alloc_page();
         if (!alloc_page) goto cleanup_fail;
         new_pdpt_phys = (uint64_t)alloc_page;
@@ -251,7 +245,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
             if (!(pdpte & 1)) continue;
             src_pd_phys = pdpte & VMM_PHYS_MASK;
 
-            stage = "pd";
             alloc_page = pmm_alloc_page();
             if (!alloc_page) goto cleanup_fail;
             new_pd_phys = (uint64_t)alloc_page;
@@ -267,7 +260,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                 src_pt_phys = pde & VMM_PHYS_MASK;
                 pde_flags = pde & 0x8000000000000FFFULL;
 
-                stage = "pt";
                 alloc_page = pmm_alloc_page();
                 if (!alloc_page) goto cleanup_fail;
                 new_pt_phys = (uint64_t)alloc_page;
@@ -288,7 +280,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                     pte_flags = src_pte & 0x8000000000000FFFULL;
 
                     if (user_page_count >= user_page_capacity) {
-                        stage = "page-array-grow";
                         new_cap = user_page_capacity * 2;
                         new_arr = (uint64_t *)krealloc(
                             user_pages, new_cap * sizeof(uint64_t));
@@ -300,7 +291,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                         user_page_capacity = new_cap;
                     }
 
-                    stage = "page-reference";
                     if (pte_flags & VMM_PTE_NOFREE) {
                         new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
                     } else if (pte_flags & VMM_PTE_SHARED) {
@@ -348,7 +338,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
         (src_pml4_phys & VMM_PHYS_MASK))
         __asm__ volatile ("mov %0, %%cr3"
                           : : "r"(active_cr3) : "memory");
-    stage = "tlb-sync";
     if (smp_tlb_flush_all_sync() < 0) {
         error = -CLONE_EAGAIN;
         goto cleanup_fail;
@@ -364,9 +353,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
 cleanup_fail:
     if (out_error) *out_error = error;
-    vt_debug_printf("[VTDBG CLONE] pid=%d cpu=%d stage=%s error=%d src=%llx pages=%llu\n",
-                    current_task ? current_task->pid : -1, smp_processor_id(),
-                    stage, error, src_pml4_phys, user_page_count);
     if (new_pml4_phys) vmm_free_pml4_entries(new_pml4_phys, 511, 1);
 
     if (new_pt_copy) slab_page_free(new_pt_copy, PAGE_SIZE);
@@ -382,9 +368,6 @@ uint64_t vmm_clone_pml4(uint64_t src_pml4_phys, uint64_t **out_user_pages, uint6
     if (out_error) *out_error = 0;
     if (!src_pml4_phys || (src_pml4_phys & ~VMM_PHYS_MASK)) {
         if (out_error) *out_error = -CLONE_EINVAL;
-        vt_debug_printf("[VTDBG CLONE] pid=%d cpu=%d stage=source error=%d src=%llx pages=0\n",
-                        current_task ? current_task->pid : -1, smp_processor_id(),
-                        -CLONE_EINVAL, src_pml4_phys);
         return 0;
     }
     return vmm_clone_pml4_impl(src_pml4_phys, out_user_pages, out_user_pages_count, out_error);

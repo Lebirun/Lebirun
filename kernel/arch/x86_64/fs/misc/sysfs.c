@@ -1,12 +1,9 @@
 #include <lebirun/vfs.h>
 #include <lebirun/common.h>
-#include <lebirun/pit.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/smp.h>
 #include <string.h>
 #include <stdio.h>
-
-extern uint64_t pit_freq;
 
 static dirent_t *sysfs_dirent_pool;
 static volatile uint64_t sysfs_dirent_index;
@@ -51,18 +48,6 @@ static vfs_node_t *sysfs_devices_system;
 static vfs_node_t *sysfs_devices_system_cpu;
 static vfs_node_t *sysfs_devices_system_cpu_cpu0;
 static vfs_node_t *sysfs_cpu0_online;
-static vfs_node_t *sysfs_cpu0_cpufreq;
-static vfs_node_t *sysfs_cpu0_cpufreq_scaling_cur_freq;
-static vfs_node_t *sysfs_cpu0_cpufreq_scaling_min_freq;
-static vfs_node_t *sysfs_cpu0_cpufreq_scaling_max_freq;
-static vfs_node_t *sysfs_cpu0_cpufreq_cpuinfo_min_freq;
-static vfs_node_t *sysfs_cpu0_cpufreq_cpuinfo_max_freq;
-static vfs_node_t *sysfs_cpu0_cpufreq_scaling_governor;
-static vfs_node_t *sysfs_cpu0_topology;
-static vfs_node_t *sysfs_cpu0_topology_core_id;
-static vfs_node_t *sysfs_cpu0_topology_physical_package_id;
-static vfs_node_t *sysfs_cpu0_topology_core_siblings;
-static vfs_node_t *sysfs_cpu0_topology_thread_siblings;
 static vfs_node_t *sysfs_cpu_online;
 static vfs_node_t *sysfs_cpu_possible;
 static vfs_node_t *sysfs_cpu_present;
@@ -77,23 +62,11 @@ static vfs_node_t *sysfs_fs;
 static vfs_node_t *sysfs_bus;
 
 static vfs_node_t **sysfs_reclaim_slots[] = {
-    &sysfs_cpu0_cpufreq_scaling_cur_freq,
-    &sysfs_cpu0_cpufreq_scaling_min_freq,
-    &sysfs_cpu0_cpufreq_scaling_max_freq,
-    &sysfs_cpu0_cpufreq_cpuinfo_min_freq,
-    &sysfs_cpu0_cpufreq_cpuinfo_max_freq,
-    &sysfs_cpu0_cpufreq_scaling_governor,
-    &sysfs_cpu0_topology_core_id,
-    &sysfs_cpu0_topology_physical_package_id,
-    &sysfs_cpu0_topology_core_siblings,
-    &sysfs_cpu0_topology_thread_siblings,
     &sysfs_cpu0_online,
     &sysfs_cpu_online,
     &sysfs_cpu_possible,
     &sysfs_cpu_present,
     &sysfs_cpu_kernel_max,
-    &sysfs_cpu0_cpufreq,
-    &sysfs_cpu0_topology,
     &sysfs_devices_system_cpu_cpu0,
     &sysfs_devices_system_cpu,
     &sysfs_devices_system,
@@ -176,83 +149,6 @@ static uint64_t sysfs_cpu_kernel_max_read(vfs_node_t *node, uint64_t offset, uin
     last = UINT8_MAX;
     len = snprintf(value, sizeof(value), "%d\n", last);
     return sysfs_read_static(node, offset, size, buffer, value, (uint64_t)len);
-}
-
-static uint64_t sysfs_cpufreq_cur_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[32];
-    int len;
-    uint64_t freq_khz;
-    uint64_t remaining;
-
-    (void)node;
-
-    freq_khz = pit_freq * 1000;
-    if (freq_khz == 0) freq_khz = 1000000;
-    len = snprintf(buf, sizeof(buf), "%lu\n", freq_khz);
-    if (len < 0) len = 0;
-    if (offset >= (uint64_t)len) return 0;
-    remaining = (uint64_t)len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    return size;
-}
-
-static uint64_t sysfs_cpufreq_min_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[32];
-    int len;
-    uint64_t freq_khz;
-    uint64_t remaining;
-
-    (void)node;
-
-    freq_khz = pit_freq * 500;
-    if (freq_khz == 0) freq_khz = 500000;
-    len = snprintf(buf, sizeof(buf), "%lu\n", freq_khz);
-    if (len < 0) len = 0;
-    if (offset >= (uint64_t)len) return 0;
-    remaining = (uint64_t)len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    return size;
-}
-
-static uint64_t sysfs_cpufreq_max_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    char buf[32];
-    int len;
-    uint64_t freq_khz;
-    uint64_t remaining;
-
-    (void)node;
-
-    freq_khz = pit_freq * 1000;
-    if (freq_khz == 0) freq_khz = 1000000;
-    len = snprintf(buf, sizeof(buf), "%lu\n", freq_khz);
-    if (len < 0) len = 0;
-    if (offset >= (uint64_t)len) return 0;
-    remaining = (uint64_t)len - offset;
-    if (size > remaining) size = remaining;
-    memcpy(buffer, buf + offset, size);
-    return size;
-}
-
-static uint64_t sysfs_cpufreq_governor_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "performance\n", 12);
-}
-
-static uint64_t sysfs_topology_core_id_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
-}
-
-static uint64_t sysfs_topology_phys_pkg_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "0\n", 2);
-}
-
-static uint64_t sysfs_topology_core_siblings_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
-}
-
-static uint64_t sysfs_topology_thread_siblings_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    return sysfs_read_static(node, offset, size, buffer, "1\n", 2);
 }
 
 static void sysfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vfs_node_t *parent) {
@@ -356,10 +252,6 @@ void sysfs_reclaim_unused(void) {
     }
 }
 
-static dirent_t *sysfs_cpufreq_readdir(vfs_node_t *node, uint64_t index);
-static vfs_node_t *sysfs_cpufreq_finddir(vfs_node_t *node, const char *name);
-static dirent_t *sysfs_topology_readdir(vfs_node_t *node, uint64_t index);
-static vfs_node_t *sysfs_topology_finddir(vfs_node_t *node, const char *name);
 static dirent_t *sysfs_cpu0_readdir(vfs_node_t *node, uint64_t index);
 static vfs_node_t *sysfs_cpu0_finddir(vfs_node_t *node, const char *name);
 static dirent_t *sysfs_cpu_readdir(vfs_node_t *node, uint64_t index);
@@ -382,18 +274,6 @@ static vfs_node_t *sysfs_get_devices_system(void);
 static vfs_node_t *sysfs_get_devices_system_cpu(void);
 static vfs_node_t *sysfs_get_devices_system_cpu_cpu0(void);
 static vfs_node_t *sysfs_get_cpu0_online(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_cur_freq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_min_freq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_max_freq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_cpuinfo_min_freq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_cpuinfo_max_freq(void);
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_governor(void);
-static vfs_node_t *sysfs_get_cpu0_topology(void);
-static vfs_node_t *sysfs_get_cpu0_topology_core_id(void);
-static vfs_node_t *sysfs_get_cpu0_topology_physical_package_id(void);
-static vfs_node_t *sysfs_get_cpu0_topology_core_siblings(void);
-static vfs_node_t *sysfs_get_cpu0_topology_thread_siblings(void);
 static vfs_node_t *sysfs_get_cpu_online(void);
 static vfs_node_t *sysfs_get_cpu_possible(void);
 static vfs_node_t *sysfs_get_cpu_present(void);
@@ -425,54 +305,6 @@ static vfs_node_t *sysfs_get_devices_system_cpu_cpu0(void) {
 
 static vfs_node_t *sysfs_get_cpu0_online(void) {
     return sysfs_lazy_node(&sysfs_cpu0_online, "online", VFS_FILE, sysfs_get_devices_system_cpu_cpu0(), sysfs_cpu0_online_read, NULL, NULL);
-}
-
-static __attribute__((unused)) vfs_node_t *sysfs_get_cpu0_cpufreq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq, "cpufreq", VFS_DIRECTORY, sysfs_get_devices_system_cpu_cpu0(), NULL, sysfs_cpufreq_readdir, sysfs_cpufreq_finddir);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_cur_freq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_scaling_cur_freq, "scaling_cur_freq", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_cur_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_min_freq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_scaling_min_freq, "scaling_min_freq", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_min_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_max_freq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_scaling_max_freq, "scaling_max_freq", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_max_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_cpuinfo_min_freq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_cpuinfo_min_freq, "cpuinfo_min_freq", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_min_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_cpuinfo_max_freq(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_cpuinfo_max_freq, "cpuinfo_max_freq", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_max_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_cpufreq_scaling_governor(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_cpufreq_scaling_governor, "scaling_governor", VFS_FILE, sysfs_get_cpu0_cpufreq(), sysfs_cpufreq_governor_read, NULL, NULL);
-}
-
-static __attribute__((unused)) vfs_node_t *sysfs_get_cpu0_topology(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_topology, "topology", VFS_DIRECTORY, sysfs_get_devices_system_cpu_cpu0(), NULL, sysfs_topology_readdir, sysfs_topology_finddir);
-}
-
-static vfs_node_t *sysfs_get_cpu0_topology_core_id(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_topology_core_id, "core_id", VFS_FILE, sysfs_get_cpu0_topology(), sysfs_topology_core_id_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_topology_physical_package_id(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_topology_physical_package_id, "physical_package_id", VFS_FILE, sysfs_get_cpu0_topology(), sysfs_topology_phys_pkg_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_topology_core_siblings(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_topology_core_siblings, "core_siblings", VFS_FILE, sysfs_get_cpu0_topology(), sysfs_topology_core_siblings_read, NULL, NULL);
-}
-
-static vfs_node_t *sysfs_get_cpu0_topology_thread_siblings(void) {
-    return sysfs_lazy_node(&sysfs_cpu0_topology_thread_siblings, "thread_siblings", VFS_FILE, sysfs_get_cpu0_topology(), sysfs_topology_thread_siblings_read, NULL, NULL);
 }
 
 static vfs_node_t *sysfs_get_cpu_online(void) {
@@ -521,63 +353,6 @@ static vfs_node_t *sysfs_get_fs(void) {
 
 static vfs_node_t *sysfs_get_bus(void) {
     return sysfs_lazy_node(&sysfs_bus, "bus", VFS_DIRECTORY, &sysfs_root, NULL, sysfs_empty_readdir, sysfs_empty_finddir);
-}
-
-static dirent_t *sysfs_cpufreq_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-    static const char *names[] = {
-        "scaling_cur_freq", "scaling_min_freq", "scaling_max_freq",
-        "cpuinfo_min_freq", "cpuinfo_max_freq", "scaling_governor"
-    };
-
-    (void)node;
-
-    if (index >= 6) return NULL;
-    d = sysfs_alloc_dirent();
-    if (!d) return NULL;
-    strcpy(d->name, names[index]);
-    d->inode = 200 + index;
-    d->type = VFS_FILE;
-    return d;
-}
-
-static vfs_node_t *sysfs_cpufreq_finddir(vfs_node_t *node, const char *name) {
-    (void)node;
-
-    if (strcmp(name, "scaling_cur_freq") == 0) return sysfs_get_cpu0_cpufreq_scaling_cur_freq();
-    if (strcmp(name, "scaling_min_freq") == 0) return sysfs_get_cpu0_cpufreq_scaling_min_freq();
-    if (strcmp(name, "scaling_max_freq") == 0) return sysfs_get_cpu0_cpufreq_scaling_max_freq();
-    if (strcmp(name, "cpuinfo_min_freq") == 0) return sysfs_get_cpu0_cpufreq_cpuinfo_min_freq();
-    if (strcmp(name, "cpuinfo_max_freq") == 0) return sysfs_get_cpu0_cpufreq_cpuinfo_max_freq();
-    if (strcmp(name, "scaling_governor") == 0) return sysfs_get_cpu0_cpufreq_scaling_governor();
-    return NULL;
-}
-
-static dirent_t *sysfs_topology_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-    static const char *names[] = {
-        "core_id", "physical_package_id", "core_siblings", "thread_siblings"
-    };
-
-    (void)node;
-
-    if (index >= 4) return NULL;
-    d = sysfs_alloc_dirent();
-    if (!d) return NULL;
-    strcpy(d->name, names[index]);
-    d->inode = 300 + index;
-    d->type = VFS_FILE;
-    return d;
-}
-
-static vfs_node_t *sysfs_topology_finddir(vfs_node_t *node, const char *name) {
-    (void)node;
-
-    if (strcmp(name, "core_id") == 0) return sysfs_get_cpu0_topology_core_id();
-    if (strcmp(name, "physical_package_id") == 0) return sysfs_get_cpu0_topology_physical_package_id();
-    if (strcmp(name, "core_siblings") == 0) return sysfs_get_cpu0_topology_core_siblings();
-    if (strcmp(name, "thread_siblings") == 0) return sysfs_get_cpu0_topology_thread_siblings();
-    return NULL;
 }
 
 static dirent_t *sysfs_cpu0_readdir(vfs_node_t *node, uint64_t index) {
@@ -759,52 +534,85 @@ static vfs_node_t *sysfs_cpu_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-static dirent_t *sysfs_system_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
+typedef struct {
+    const char *name;
+    vfs_node_t *(*get)(void);
+    uint16_t inode;
+} sysfs_dir_entry_t;
 
-    (void)node;
+static const sysfs_dir_entry_t sysfs_system_entries[] = {
+    { "cpu", sysfs_get_devices_system_cpu, 30 },
+};
 
-    if (index == 0) {
-        d = sysfs_alloc_dirent();
-        if (!d) return NULL;
-        strcpy(d->name, "cpu");
-        d->inode = 30;
-        d->type = VFS_DIRECTORY;
-        return d;
+static const sysfs_dir_entry_t sysfs_devices_entries[] = {
+    { "system", sysfs_get_devices_system, 20 },
+};
+
+static const sysfs_dir_entry_t sysfs_class_entries[] = {
+    { "power_supply", sysfs_get_class_power_supply, 500 },
+};
+
+static const sysfs_dir_entry_t sysfs_kernel_entries[] = {
+    { "mm", sysfs_get_kernel_mm, 600 },
+};
+
+static const sysfs_dir_entry_t sysfs_kernel_mm_entries[] = {
+    { "hugepages", sysfs_get_kernel_mm_hugepages, 610 },
+};
+
+static const sysfs_dir_entry_t sysfs_root_entries[] = {
+    { "devices", sysfs_get_devices, 10 },
+    { "class", sysfs_get_class, 11 },
+    { "block", sysfs_get_block, 12 },
+    { "kernel", sysfs_get_kernel, 13 },
+    { "fs", sysfs_get_fs, 14 },
+    { "bus", sysfs_get_bus, 15 },
+};
+
+static dirent_t *sysfs_read_directory(const sysfs_dir_entry_t *entries,
+                                      size_t count, uint64_t index) {
+    dirent_t *entry;
+
+    if (index >= count) return NULL;
+    entry = sysfs_alloc_dirent();
+    if (!entry) return NULL;
+    strcpy(entry->name, entries[index].name);
+    entry->inode = entries[index].inode;
+    entry->type = VFS_DIRECTORY;
+    return entry;
+}
+
+static vfs_node_t *sysfs_find_directory(const sysfs_dir_entry_t *entries,
+                                        size_t count, const char *name) {
+    size_t index;
+
+    for (index = 0; index < count; index++) {
+        if (strcmp(name, entries[index].name) == 0)
+            return entries[index].get();
     }
     return NULL;
 }
 
+static dirent_t *sysfs_system_readdir(vfs_node_t *node, uint64_t index) {
+    (void)node;
+    return sysfs_read_directory(sysfs_system_entries,
+                                sizeof(sysfs_system_entries) / sizeof(sysfs_system_entries[0]), index);
+}
 static vfs_node_t *sysfs_system_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "cpu") == 0) return sysfs_get_devices_system_cpu();
-    return NULL;
+    return sysfs_find_directory(sysfs_system_entries,
+                                sizeof(sysfs_system_entries) / sizeof(sysfs_system_entries[0]), name);
 }
-
 static dirent_t *sysfs_devices_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-
     (void)node;
-
-    if (index == 0) {
-        d = sysfs_alloc_dirent();
-        if (!d) return NULL;
-        strcpy(d->name, "system");
-        d->inode = 20;
-        d->type = VFS_DIRECTORY;
-        return d;
-    }
-    return NULL;
+    return sysfs_read_directory(sysfs_devices_entries,
+                                sizeof(sysfs_devices_entries) / sizeof(sysfs_devices_entries[0]), index);
 }
-
 static vfs_node_t *sysfs_devices_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "system") == 0) return sysfs_get_devices_system();
-    return NULL;
+    return sysfs_find_directory(sysfs_devices_entries,
+                                sizeof(sysfs_devices_entries) / sizeof(sysfs_devices_entries[0]), name);
 }
-
 static dirent_t *sysfs_empty_readdir(vfs_node_t *node, uint64_t index) {
     (void)node;
     (void)index;
@@ -818,104 +626,45 @@ static vfs_node_t *sysfs_empty_finddir(vfs_node_t *node, const char *name) {
 }
 
 static dirent_t *sysfs_class_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-
     (void)node;
-
-    if (index == 0) {
-        d = sysfs_alloc_dirent();
-        if (!d) return NULL;
-        strcpy(d->name, "power_supply");
-        d->inode = 500;
-        d->type = VFS_DIRECTORY;
-        return d;
-    }
-    return NULL;
+    return sysfs_read_directory(sysfs_class_entries,
+                                sizeof(sysfs_class_entries) / sizeof(sysfs_class_entries[0]), index);
 }
-
 static vfs_node_t *sysfs_class_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "power_supply") == 0) return sysfs_get_class_power_supply();
-    return NULL;
+    return sysfs_find_directory(sysfs_class_entries,
+                                sizeof(sysfs_class_entries) / sizeof(sysfs_class_entries[0]), name);
 }
-
 static dirent_t *sysfs_kernel_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-
     (void)node;
-
-    if (index == 0) {
-        d = sysfs_alloc_dirent();
-        if (!d) return NULL;
-        strcpy(d->name, "mm");
-        d->inode = 600;
-        d->type = VFS_DIRECTORY;
-        return d;
-    }
-    return NULL;
+    return sysfs_read_directory(sysfs_kernel_entries,
+                                sizeof(sysfs_kernel_entries) / sizeof(sysfs_kernel_entries[0]), index);
 }
-
 static vfs_node_t *sysfs_kernel_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "mm") == 0) return sysfs_get_kernel_mm();
-    return NULL;
+    return sysfs_find_directory(sysfs_kernel_entries,
+                                sizeof(sysfs_kernel_entries) / sizeof(sysfs_kernel_entries[0]), name);
 }
-
 static dirent_t *sysfs_kernel_mm_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-
     (void)node;
-
-    if (index == 0) {
-        d = sysfs_alloc_dirent();
-        if (!d) return NULL;
-        strcpy(d->name, "hugepages");
-        d->inode = 610;
-        d->type = VFS_DIRECTORY;
-        return d;
-    }
-    return NULL;
+    return sysfs_read_directory(sysfs_kernel_mm_entries,
+                                sizeof(sysfs_kernel_mm_entries) / sizeof(sysfs_kernel_mm_entries[0]), index);
 }
-
 static vfs_node_t *sysfs_kernel_mm_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "hugepages") == 0) return sysfs_get_kernel_mm_hugepages();
-    return NULL;
+    return sysfs_find_directory(sysfs_kernel_mm_entries,
+                                sizeof(sysfs_kernel_mm_entries) / sizeof(sysfs_kernel_mm_entries[0]), name);
 }
-
 static dirent_t *sysfs_root_readdir(vfs_node_t *node, uint64_t index) {
-    dirent_t *d;
-    static const char *names[] = {
-        "devices", "class", "block", "kernel", "fs", "bus"
-    };
-    static const uint64_t inodes[] = { 10, 11, 12, 13, 14, 15 };
-
     (void)node;
-
-    if (index >= 6) return NULL;
-    d = sysfs_alloc_dirent();
-    if (!d) return NULL;
-    strcpy(d->name, names[index]);
-    d->inode = inodes[index];
-    d->type = VFS_DIRECTORY;
-    return d;
+    return sysfs_read_directory(sysfs_root_entries,
+                                sizeof(sysfs_root_entries) / sizeof(sysfs_root_entries[0]), index);
 }
-
 static vfs_node_t *sysfs_root_finddir(vfs_node_t *node, const char *name) {
     (void)node;
-
-    if (strcmp(name, "devices") == 0) return sysfs_get_devices();
-    if (strcmp(name, "class") == 0) return sysfs_get_class();
-    if (strcmp(name, "block") == 0) return sysfs_get_block();
-    if (strcmp(name, "kernel") == 0) return sysfs_get_kernel();
-    if (strcmp(name, "fs") == 0) return sysfs_get_fs();
-    if (strcmp(name, "bus") == 0) return sysfs_get_bus();
-    return NULL;
+    return sysfs_find_directory(sysfs_root_entries,
+                                sizeof(sysfs_root_entries) / sizeof(sysfs_root_entries[0]), name);
 }
-
 static vfs_node_t *sysfs_mount(const char *device, const char *mountpoint) {
     (void)device;
     (void)mountpoint;

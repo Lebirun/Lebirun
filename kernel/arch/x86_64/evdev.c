@@ -17,8 +17,6 @@ static vfs_node_t evdev_event1;
 static dirent_t evdev_dirent;
 
 static uint8_t prev_mouse_buttons = 0;
-static uint64_t mouse_debug_converted;
-static uint64_t mouse_debug_returned;
 
 static void evdev_process_mouse(void);
 static uint16_t evdev_extended_key(uint8_t scancode);
@@ -204,7 +202,6 @@ static void evdev_process_mouse(void) {
         nread = mouse_read(pkt, packet_size);
         if (nread < (int)packet_size)
             break;
-        __atomic_add_fetch(&mouse_debug_converted, 1, __ATOMIC_RELAXED);
         buttons = pkt[0];
         dx = (int8_t)pkt[1];
         dy = (int8_t)pkt[2];
@@ -252,30 +249,7 @@ uint64_t evdev_read_nonblocking(vfs_node_t *node, uint64_t size, uint8_t *buffer
         memcpy(buffer + written, &ev, ev_size);
         written += ev_size;
     }
-    if (dev == &evdev_mouse && written)
-        __atomic_add_fetch(&mouse_debug_returned, written / ev_size,
-                           __ATOMIC_RELAXED);
     return written;
-}
-
-void evdev_debug_snapshot(void) {
-    uint64_t converted;
-    uint64_t returned;
-    uint32_t head;
-    uint32_t tail;
-    uint32_t capacity;
-    int grab;
-    uint64_t refs;
-
-    converted = __atomic_load_n(&mouse_debug_converted, __ATOMIC_RELAXED);
-    returned = __atomic_load_n(&mouse_debug_returned, __ATOMIC_RELAXED);
-    head = __atomic_load_n(&evdev_mouse.head, __ATOMIC_RELAXED);
-    tail = __atomic_load_n(&evdev_mouse.tail, __ATOMIC_RELAXED);
-    capacity = __atomic_load_n(&evdev_mouse.ring_capacity, __ATOMIC_RELAXED);
-    grab = __atomic_load_n(&evdev_mouse.grab_pid, __ATOMIC_RELAXED);
-    refs = __atomic_load_n(&evdev_event1.ref_count, __ATOMIC_RELAXED);
-    vt_debug_printf("[VTDBG EVDEV] converted=%llu returned=%llu head=%u tail=%u cap=%u grab=%d refs=%llu\n",
-                    converted, returned, head, tail, capacity, grab, refs);
 }
 
 uint64_t evdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {

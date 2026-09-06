@@ -25,12 +25,8 @@ static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
 static vfs_mount_t *mounts = NULL;
 static int mounts_capacity = 0;
-static vfs_fd_t *fd_table = NULL;
-static int fd_table_capacity = 0;
 static mutex_t vfs_lock;
 static int squashfs_access_blocked = 0;
-
-#define VFS_INITIAL_FDS 4
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -161,76 +157,11 @@ static int vfs_grow_mounts(void) {
     return 0;
 }
 
-static int vfs_grow_fds(void) {
-    int new_cap;
-    int i;
-    vfs_fd_t *new_table;
-
-    if (fd_table_capacity > INT32_MAX / 2) return -1;
-    new_cap = fd_table_capacity ? fd_table_capacity * 2 : VFS_INITIAL_FDS;
-    if (new_cap <= fd_table_capacity) return -1;
-    if ((uint64_t)new_cap > UINT64_MAX / sizeof(vfs_fd_t)) return -1;
-    new_table = (vfs_fd_t *)krealloc(fd_table, new_cap * sizeof(vfs_fd_t));
-    if (!new_table) return -1;
-    for (i = fd_table_capacity; i < new_cap; i++) {
-        new_table[i].in_use = 0;
-        new_table[i].node = NULL;
-        new_table[i].offset = 0;
-        new_table[i].flags = 0;
-    }
-    fd_table = new_table;
-    fd_table_capacity = new_cap;
-    return 0;
-}
-
-static void vfs_reclaim_fds(void) {
-    int i;
-    int active;
-    vfs_fd_t *new_table;
-
-    mutex_lock(&vfs_lock);
-    active = 0;
-    for (i = 0; i < fd_table_capacity; i++) {
-        if (fd_table[i].in_use) {
-            active = 1;
-            break;
-        }
-    }
-    if (!active) {
-        if (fd_table) kfree(fd_table);
-        fd_table = NULL;
-        fd_table_capacity = 0;
-        mutex_unlock(&vfs_lock);
-        return;
-    }
-    if (fd_table_capacity <= VFS_INITIAL_FDS) {
-        mutex_unlock(&vfs_lock);
-        return;
-    }
-    for (i = VFS_INITIAL_FDS; i < fd_table_capacity; i++) {
-        if (fd_table[i].in_use) {
-            mutex_unlock(&vfs_lock);
-            return;
-        }
-    }
-    new_table = (vfs_fd_t *)krealloc(fd_table, VFS_INITIAL_FDS * sizeof(vfs_fd_t));
-    if (!new_table) {
-        mutex_unlock(&vfs_lock);
-        return;
-    }
-    fd_table = new_table;
-    fd_table_capacity = VFS_INITIAL_FDS;
-    mutex_unlock(&vfs_lock);
-}
-
 void KERNEL_INIT vfs_init(void) {
     mutex_init(&vfs_lock);
 
     mounts_capacity = 0;
     mounts = NULL;
-    
-    fd_table_capacity = 0;
-    fd_table = NULL;
     
     memset(&root_node, 0, sizeof(vfs_node_t));
     root_node.flags = VFS_DIRECTORY;
@@ -592,7 +523,6 @@ int vfs_unmount(const char *mountpoint) {
     for (i = 0; i < mounts_capacity; i++) {
         if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
             copy_file_range_release_mount(mounts[i].root);
-            vfs_reclaim_fds();
             overlay_flush_cache();
             squashfs_flush_cache();
             heap_reclaim_unused();
@@ -611,7 +541,6 @@ int vfs_unmount(const char *mountpoint) {
             printf("VFS: Unmounted %s\n", mountpoint);
             overlay_flush_cache();
             squashfs_flush_cache();
-            vfs_reclaim_fds();
             kstack_reclaim_unused();
             heap_reclaim_unused();
             pfa_ref_gc();
@@ -2010,211 +1939,6 @@ static int vfs_split_path_alloc(const char *path, char **parent_out,
     *parent_out = parent;
     *name_out = name;
     return 0;
-}
-
-int vfs_open_path(const char *path, int flags) {
-    char *parent_path;
-    char *filename;
-    int ret;
-    int fd;
-    int i;
-    vfs_node_t *node;
-    vfs_node_t *parent;
-
-    if (!path) return -1;
-    
-    node = vfs_namei(path);
-    
-    if (!node && (flags & VFS_O_CREAT)) {
-        if (vfs_split_path_alloc(path, &parent_path, &filename) < 0) {
-            return -1;
-        }
-        
-        parent = vfs_namei(parent_path);
-        kfree(parent_path);
-        if (!parent) {
-            kfree(filename);
-            return -1;
-        }
-        
-        ret = vfs_create(parent, filename, VFS_FILE);
-        kfree(filename);
-        vfs_release(parent);
-        if (ret < 0 && !(flags & VFS_O_EXCL)) {
-            node = vfs_namei(path);
-        } else if (ret == 0) {
-            node = vfs_namei(path);
-        }
-        
-        if (!node) return -1;
-    }
-    
-    if (!node) return -1;
-    
-    if ((flags & VFS_O_TRUNC) && node->ops && node->ops->truncate) {
-        node->ops->truncate(node, 0);
-    }
-    
-    mutex_lock(&vfs_lock);
-    
-    fd = -1;
-    for (i = 3; i < fd_table_capacity; i++) {
-        if (!fd_table[i].in_use) {
-            fd = i;
-            break;
-        }
-    }
-    
-    if (fd < 0) {
-        if (vfs_grow_fds() == 0) {
-            for (i = 3; i < fd_table_capacity; i++) {
-                if (!fd_table[i].in_use) {
-                    fd = i;
-                    break;
-                }
-            }
-        }
-    }
-    
-    if (fd < 0) {
-        mutex_unlock(&vfs_lock);
-        vfs_release(node);
-        return -1;
-    }
-    
-    vfs_open(node, flags);
-    
-    fd_table[fd].in_use = 1;
-    fd_table[fd].node = node;
-    fd_table[fd].offset = (flags & VFS_O_APPEND) ? node->length : 0;
-    fd_table[fd].flags = flags;
-    
-    mutex_unlock(&vfs_lock);
-    return fd;
-}
-
-int vfs_close_fd(int fd) {
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    
-    mutex_lock(&vfs_lock);
-    if (!fd_table[fd].in_use) {
-        mutex_unlock(&vfs_lock);
-        return -1;
-    }
-    
-    node = fd_table[fd].node;
-    
-    fd_table[fd].in_use = 0;
-    fd_table[fd].node = NULL;
-    fd_table[fd].offset = 0;
-    fd_table[fd].flags = 0;
-    mutex_unlock(&vfs_lock);
-    
-    if (node) vfs_close(node);
-    vfs_reclaim_fds();
-    
-    return 0;
-}
-
-int vfs_read_fd(int fd, void *buffer, uint64_t size) {
-    uint64_t bytes;
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use) return -1;
-    if (!buffer || size == 0) return -1;
-    
-    node = fd_table[fd].node;
-    if (!node) return -1;
-    
-    bytes = vfs_read(node, fd_table[fd].offset, size, (uint8_t *)buffer);
-    fd_table[fd].offset += bytes;
-    
-    return (int)bytes;
-}
-
-int vfs_write_fd(int fd, const void *buffer, uint64_t size) {
-    uint64_t bytes;
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use) return -1;
-    if (!buffer || size == 0) return -1;
-    
-    node = fd_table[fd].node;
-    if (!node) return -1;
-    
-    bytes = vfs_write(node, fd_table[fd].offset, size, (uint8_t *)buffer);
-    fd_table[fd].offset += bytes;
-    
-    return (int)bytes;
-}
-
-int64_t vfs_seek(int fd, int64_t offset, int whence) {
-    int64_t new_offset;
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use) return -1;
-    
-    node = fd_table[fd].node;
-    if (!node) return -1;
-    
-    switch (whence) {
-        case VFS_SEEK_SET:
-            new_offset = offset;
-            break;
-        case VFS_SEEK_CUR:
-            new_offset = (int64_t)fd_table[fd].offset + offset;
-            break;
-        case VFS_SEEK_END:
-            new_offset = (int64_t)node->length + offset;
-            break;
-        default:
-            return -1;
-    }
-    
-    if (new_offset < 0) return -1;
-    
-    fd_table[fd].offset = (uint64_t)new_offset;
-    return (int64_t)fd_table[fd].offset;
-}
-
-int64_t vfs_tell(int fd) {
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use) return -1;
-    
-    return (int64_t)fd_table[fd].offset;
-}
-
-int vfs_stat_fd(int fd, uint64_t *size, uint64_t *flags) {
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use) return -1;
-    
-    node = fd_table[fd].node;
-    if (!node) return -1;
-    
-    if (size) *size = node->length;
-    if (flags) *flags = node->flags;
-    
-    
-    return 0;
-}
-
-int vfs_readdir_fd(int fd, dirent_t *entry, uint64_t index) {
-    vfs_node_t *node;
-
-    if (fd < 0 || fd >= fd_table_capacity) return -1;
-    if (!fd_table[fd].in_use || !entry) return -1;
-    
-    node = fd_table[fd].node;
-    if (!node) return -1;
-
-    return vfs_readdir_copy(node, index, entry);
 }
 
 vfs_mount_t *vfs_get_mount_for_node(vfs_node_t *node) {

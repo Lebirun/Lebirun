@@ -56,7 +56,6 @@ void tmpfs_vfs_register(void);
 int ramfs_create_file(const char *path, uint16_t permissions);
 int ramfs_create_socket(const char *path, uint16_t permissions);
 int ramfs_create_dir(const char *path, uint16_t permissions);
-int ramfs_create_symlink(const char *path, const char *target, uint16_t permissions);
 int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
                               const char *target, uint16_t permissions);
 int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,

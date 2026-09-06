@@ -72,29 +72,6 @@ static vfs_node_t *procfs_get_self(void);
 static vfs_node_t *procfs_get_self_exe(void);
 static vfs_node_t *procfs_get_self_cwd(void);
 static vfs_node_t *procfs_get_self_fd(void);
-static vfs_node_t *procfs_get_self_maps(void);
-static vfs_node_t *procfs_get_self_status(void);
-static vfs_node_t *procfs_get_self_cmdline(void);
-static vfs_node_t *procfs_get_self_environ(void);
-static vfs_node_t *procfs_get_self_stat(void);
-static vfs_node_t *procfs_get_self_statm(void);
-static vfs_node_t *procfs_get_self_comm(void);
-static vfs_node_t *procfs_get_self_limits(void);
-static vfs_node_t *procfs_get_self_io(void);
-static vfs_node_t *procfs_get_version(void);
-static vfs_node_t *procfs_get_uptime(void);
-static vfs_node_t *procfs_get_meminfo(void);
-static vfs_node_t *procfs_get_cpuinfo(void);
-static vfs_node_t *procfs_get_loadavg(void);
-static vfs_node_t *procfs_get_stat(void);
-static vfs_node_t *procfs_get_mounts(void);
-static vfs_node_t *procfs_get_filesystems(void);
-static vfs_node_t *procfs_get_cmdline(void);
-static vfs_node_t *procfs_get_devices(void);
-static vfs_node_t *procfs_get_interrupts(void);
-static vfs_node_t *procfs_get_vmstat(void);
-static vfs_node_t *procfs_get_memdetail(void);
-static vfs_node_t *procfs_get_kmsg(void);
 
 static void procfs_init_node(vfs_node_t *n, const char *name, uint64_t flags, vfs_node_t *parent) {
     uint64_t type;
@@ -221,11 +198,6 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
     
     if (task) {
         state = task->state;
-        if (offset == 0 && size != 0) {
-            task_debug_snapshot(task->pid);
-            mouse_debug_snapshot();
-            evdev_debug_snapshot();
-        }
         ruid = task->uid;
         rgid = task->gid;
         if (!task->is_user) {
@@ -1452,26 +1424,67 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     return stream.copied;
 }
 
+typedef struct {
+    const char *name;
+    read_type_t read;
+    vfs_node_t **slot;
+} proc_file_t;
+
+static const proc_file_t proc_root_files[] = {
+    { "version", proc_version_read, &proc_version },
+    { "uptime", proc_uptime_read, &proc_uptime },
+    { "meminfo", proc_meminfo_read, &proc_meminfo },
+    { "cpuinfo", proc_cpuinfo_read, &proc_cpuinfo },
+    { "loadavg", proc_loadavg_read, &proc_loadavg },
+    { "stat", proc_stat_read, &proc_stat },
+    { "mounts", proc_mounts_read, &proc_mounts },
+    { "filesystems", proc_filesystems_read, &proc_filesystems },
+    { "cmdline", proc_cmdline_read, &proc_cmdline },
+    { "devices", proc_devices_read, &proc_devices },
+    { "interrupts", proc_interrupts_read, &proc_interrupts },
+    { "vmstat", proc_vmstat_read, &proc_vmstat },
+    { "memdetail", proc_memdetail_read, &proc_memdetail },
+    { "kmsg", proc_kmsg_read, &proc_kmsg },
+};
+
+static const proc_file_t proc_process_files[] = {
+    { "maps", proc_self_maps_read, &proc_self_maps },
+    { "status", proc_self_status_read, &proc_self_status },
+    { "cmdline", proc_self_cmdline_read, &proc_self_cmdline },
+    { "environ", proc_self_environ_read, &proc_self_environ },
+    { "stat", proc_self_stat_read, &proc_self_stat },
+    { "statm", proc_self_statm_read, &proc_self_statm },
+    { "comm", proc_self_comm_read, &proc_self_comm },
+    { "limits", proc_self_limits_read, &proc_self_limits },
+    { "io", proc_self_io_read, &proc_self_io },
+};
+
+static vfs_node_t *procfs_get_file(const proc_file_t *file,
+                                   vfs_node_t *parent) {
+    vfs_node_t *node;
+
+    node = procfs_lazy_node(file->slot, file->name, VFS_FILE, parent,
+                            file->read, NULL, NULL);
+    if (node && file->read == proc_kmsg_read) node->mask = 0400;
+    return node;
+}
+
 static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
-    static const char *entries[] = {
-        "self", "version", "uptime", "meminfo", "cpuinfo", "loadavg",
-        "stat", "mounts", "filesystems", "cmdline", "devices", "interrupts", "vmstat",
-        "memdetail", "kmsg"
-    };
     task_t *t;
     uint64_t count;
     uint64_t pid_index;
 
     (void)node;
 
-    if (index < sizeof(entries)/sizeof(entries[0])) {
-        strcpy(proc_dirent.name, entries[index]);
+    if (index < 1 + sizeof(proc_root_files) / sizeof(proc_root_files[0])) {
+        strcpy(proc_dirent.name,
+               index ? proc_root_files[index - 1].name : "self");
         proc_dirent.inode = index + 1;
         proc_dirent.type = (index == 0) ? VFS_DIRECTORY : VFS_FILE;
         return &proc_dirent;
     }
     
-    pid_index = index - (uint64_t)(sizeof(entries)/sizeof(entries[0]));
+    pid_index = index - (uint64_t)(1 + sizeof(proc_root_files) / sizeof(proc_root_files[0]));
     count = 0;
     lock_scheduler();
     t = all_tasks_head;
@@ -1514,21 +1527,17 @@ static int procfs_pid_visible(pid_t pid) {
 
 static dirent_t *proc_pid_readdir(vfs_node_t *node, uint64_t index) {
     static dirent_t pid_dirent;
-    static const char *entries[] = {
-        "maps", "status", "cmdline", "environ",
-        "stat", "statm", "comm", "limits", "io"
-    };
     
     (void)node;
     
-    if (index < sizeof(entries)/sizeof(entries[0])) {
-        strcpy(pid_dirent.name, entries[index]);
+    if (index < sizeof(proc_process_files) / sizeof(proc_process_files[0])) {
+        strcpy(pid_dirent.name, proc_process_files[index].name);
         pid_dirent.inode = node->inode * 100 + index;
         pid_dirent.type = VFS_FILE;
         return &pid_dirent;
     }
     
-    if (index == sizeof(entries)/sizeof(entries[0])) {
+    if (index == sizeof(proc_process_files) / sizeof(proc_process_files[0])) {
         strcpy(pid_dirent.name, "task");
         pid_dirent.inode = node->inode * 100 + 50;
         pid_dirent.type = VFS_DIRECTORY;
@@ -1540,57 +1549,23 @@ static dirent_t *proc_pid_readdir(vfs_node_t *node, uint64_t index) {
 
 static vfs_node_t *proc_pid_finddir(vfs_node_t *node, const char *name) {
     uint64_t pid_val;
-    int file_idx;
     vfs_node_t *tdir;
-    vfs_node_t *fnode;
     
-    static const struct {
-        const char *name;
-        read_type_t read;
-    } files[] = {
-        { "maps",    proc_self_maps_read },
-        { "status",  proc_self_status_read },
-        { "cmdline", proc_self_cmdline_read },
-        { "environ", proc_self_environ_read },
-        { "stat",    proc_self_stat_read },
-        { "statm",   proc_self_statm_read },
-        { "comm",    proc_self_comm_read },
-        { "limits",  proc_self_limits_read },
-        { "io",      proc_self_io_read },
-    };
-    
+    if (strcmp(name, "task") != 0)
+        return proc_task_thread_finddir(node, name);
     pid_val = node->inode;
-    
-    for (file_idx = 0; file_idx < (int)(sizeof(files)/sizeof(files[0])); file_idx++) {
-        if (strcmp(name, files[file_idx].name) == 0) {
-            fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-            if (!fnode) return NULL;
-            memset(fnode, 0, sizeof(vfs_node_t));
-            fnode->flags = VFS_FILE | VFS_DYNAMIC;
-            vfs_node_set_name(fnode, name);
-            fnode->inode = pid_val * 100 + (uint64_t)file_idx;
-            fnode->read = files[file_idx].read;
-            fnode->parent = &procfs_root;
-            fnode->mask = 0444;
-            return fnode;
-        }
-    }
-    
-    if (strcmp(name, "task") == 0) {
-        tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-        if (!tdir) return NULL;
-        memset(tdir, 0, sizeof(vfs_node_t));
-        tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
-        vfs_node_set_name(tdir, "task");
-        tdir->inode = pid_val;
-        tdir->readdir = proc_task_readdir;
-        tdir->finddir = proc_task_finddir;
-        tdir->parent = &procfs_root;
-        tdir->mask = 0555;
-        return tdir;
-    }
-    
-    return NULL;
+
+    tdir = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!tdir) return NULL;
+    memset(tdir, 0, sizeof(vfs_node_t));
+    tdir->flags = VFS_DIRECTORY | VFS_DYNAMIC;
+    vfs_node_set_name(tdir, "task");
+    tdir->inode = pid_val;
+    tdir->readdir = proc_task_readdir;
+    tdir->finddir = proc_task_finddir;
+    tdir->parent = &procfs_root;
+    tdir->mask = 0555;
+    return tdir;
 }
 
 static dirent_t *proc_task_readdir(vfs_node_t *node, uint64_t index) {
@@ -1635,15 +1610,11 @@ static vfs_node_t *proc_task_finddir(vfs_node_t *node, const char *name) {
 
 static dirent_t *proc_task_thread_readdir(vfs_node_t *node, uint64_t index) {
     static dirent_t task_thread_dirent;
-    static const char *entries[] = {
-        "maps", "status", "cmdline", "environ",
-        "stat", "statm", "comm", "limits", "io"
-    };
 
     (void)node;
 
-    if (index < sizeof(entries)/sizeof(entries[0])) {
-        strcpy(task_thread_dirent.name, entries[index]);
+    if (index < sizeof(proc_process_files) / sizeof(proc_process_files[0])) {
+        strcpy(task_thread_dirent.name, proc_process_files[index].name);
         task_thread_dirent.inode = node->inode * 100 + index;
         task_thread_dirent.type = VFS_FILE;
         return &task_thread_dirent;
@@ -1657,32 +1628,17 @@ static vfs_node_t *proc_task_thread_finddir(vfs_node_t *node, const char *name) 
     int file_idx;
     vfs_node_t *fnode;
 
-    static const struct {
-        const char *name;
-        read_type_t read;
-    } files[] = {
-        { "maps",    proc_self_maps_read },
-        { "status",  proc_self_status_read },
-        { "cmdline", proc_self_cmdline_read },
-        { "environ", proc_self_environ_read },
-        { "stat",    proc_self_stat_read },
-        { "statm",   proc_self_statm_read },
-        { "comm",    proc_self_comm_read },
-        { "limits",  proc_self_limits_read },
-        { "io",      proc_self_io_read },
-    };
-
     pid_val = node->inode;
 
-    for (file_idx = 0; file_idx < (int)(sizeof(files)/sizeof(files[0])); file_idx++) {
-        if (strcmp(name, files[file_idx].name) == 0) {
+    for (file_idx = 0; file_idx < (int)(sizeof(proc_process_files) / sizeof(proc_process_files[0])); file_idx++) {
+        if (strcmp(name, proc_process_files[file_idx].name) == 0) {
             fnode = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
             if (!fnode) return NULL;
             memset(fnode, 0, sizeof(vfs_node_t));
             fnode->flags = VFS_FILE | VFS_DYNAMIC;
             vfs_node_set_name(fnode, name);
             fnode->inode = pid_val * 100 + (uint64_t)file_idx;
-            fnode->read = files[file_idx].read;
+            fnode->read = proc_process_files[file_idx].read;
             fnode->parent = &procfs_root;
             fnode->mask = 0444;
             return fnode;
@@ -1711,42 +1667,34 @@ static vfs_node_t *procfs_setup_pid_dir(pid_t pid) {
 }
 
 static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
+    size_t index;
+    int pid;
+    int neg;
+    const char *p;
+
     (void)node;
     
     if (strcmp(name, "self") == 0) return procfs_get_self();
-    if (strcmp(name, "version") == 0) return procfs_get_version();
-    if (strcmp(name, "uptime") == 0) return procfs_get_uptime();
-    if (strcmp(name, "meminfo") == 0) return procfs_get_meminfo();
-    if (strcmp(name, "cpuinfo") == 0) return procfs_get_cpuinfo();
-    if (strcmp(name, "loadavg") == 0) return procfs_get_loadavg();
-    if (strcmp(name, "stat") == 0) return procfs_get_stat();
-    if (strcmp(name, "mounts") == 0) return procfs_get_mounts();
-    if (strcmp(name, "filesystems") == 0) return procfs_get_filesystems();
-    if (strcmp(name, "cmdline") == 0) return procfs_get_cmdline();
-    if (strcmp(name, "devices") == 0) return procfs_get_devices();
-    if (strcmp(name, "interrupts") == 0) return procfs_get_interrupts();
-    if (strcmp(name, "vmstat") == 0) return procfs_get_vmstat();
-    if (strcmp(name, "memdetail") == 0) return procfs_get_memdetail();
-    if (strcmp(name, "kmsg") == 0) return procfs_get_kmsg();
-    
-    {
-        int pid = 0;
-        int neg = 0;
-        const char *p = name;
+    for (index = 0; index < sizeof(proc_root_files) / sizeof(proc_root_files[0]); index++) {
+        if (strcmp(name, proc_root_files[index].name) == 0)
+            return procfs_get_file(&proc_root_files[index], &procfs_root);
+    }
+    pid = 0;
+    neg = 0;
+    p = name;
 
-        if (*p == '-') {
-            neg = 1;
-            p++;
-        }
-        while (*p >= '0' && *p <= '9') {
-            pid = pid * 10 + (*p - '0');
-            p++;
-        }
-        if (neg) pid = -pid;
-        if (*p == '\0' && pid != 0) {
-            if (procfs_pid_visible((pid_t)pid)) {
-                return procfs_setup_pid_dir((pid_t)pid);
-            }
+    if (*p == '-') {
+        neg = 1;
+        p++;
+    }
+    while (*p >= '0' && *p <= '9') {
+        pid = pid * 10 + (*p - '0');
+        p++;
+    }
+    if (neg) pid = -pid;
+    if (*p == '\0' && pid != 0) {
+        if (procfs_pid_visible((pid_t)pid)) {
+            return procfs_setup_pid_dir((pid_t)pid);
         }
     }
     
@@ -1754,15 +1702,13 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 static dirent_t *proc_self_readdir(vfs_node_t *node, uint64_t index) {
+    static const char *entries[] = { "exe", "cwd", "fd" };
+
     (void)node;
     
-    static const char *entries[] = {
-        "exe", "cwd", "fd", "maps", "status", "cmdline", "environ",
-        "stat", "statm", "comm", "limits", "io"
-    };
-    
-    if (index < sizeof(entries)/sizeof(entries[0])) {
-        strcpy(proc_self_dirent.name, entries[index]);
+    if (index < 3 + sizeof(proc_process_files) / sizeof(proc_process_files[0])) {
+        strcpy(proc_self_dirent.name, index < 3 ? entries[index] :
+               proc_process_files[index - 3].name);
         proc_self_dirent.inode = index + 100;
         proc_self_dirent.type = (index < 3) ? VFS_SYMLINK : VFS_FILE;
         return &proc_self_dirent;
@@ -1772,21 +1718,18 @@ static dirent_t *proc_self_readdir(vfs_node_t *node, uint64_t index) {
 }
 
 static vfs_node_t *proc_self_finddir(vfs_node_t *node, const char *name) {
+    size_t index;
+
     (void)node;
     
     if (strcmp(name, "exe") == 0) return procfs_get_self_exe();
     if (strcmp(name, "cwd") == 0) return procfs_get_self_cwd();
     if (strcmp(name, "fd") == 0) return procfs_get_self_fd();
-    if (strcmp(name, "maps") == 0) return procfs_get_self_maps();
-    if (strcmp(name, "status") == 0) return procfs_get_self_status();
-    if (strcmp(name, "cmdline") == 0) return procfs_get_self_cmdline();
-    if (strcmp(name, "environ") == 0) return procfs_get_self_environ();
-    if (strcmp(name, "stat") == 0) return procfs_get_self_stat();
-    if (strcmp(name, "statm") == 0) return procfs_get_self_statm();
-    if (strcmp(name, "comm") == 0) return procfs_get_self_comm();
-    if (strcmp(name, "limits") == 0) return procfs_get_self_limits();
-    if (strcmp(name, "io") == 0) return procfs_get_self_io();
-    
+    for (index = 0; index < sizeof(proc_process_files) / sizeof(proc_process_files[0]); index++) {
+        if (strcmp(name, proc_process_files[index].name) == 0)
+            return procfs_get_file(&proc_process_files[index], procfs_get_self());
+    }
+
     return NULL;
 }
 
@@ -1804,102 +1747,6 @@ static vfs_node_t *procfs_get_self_cwd(void) {
 
 static vfs_node_t *procfs_get_self_fd(void) {
     return procfs_lazy_node(&proc_self_fd, "fd", VFS_DIRECTORY, procfs_get_self(), NULL, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_maps(void) {
-    return procfs_lazy_node(&proc_self_maps, "maps", VFS_FILE, procfs_get_self(), proc_self_maps_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_status(void) {
-    return procfs_lazy_node(&proc_self_status, "status", VFS_FILE, procfs_get_self(), proc_self_status_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_cmdline(void) {
-    return procfs_lazy_node(&proc_self_cmdline, "cmdline", VFS_FILE, procfs_get_self(), proc_self_cmdline_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_environ(void) {
-    return procfs_lazy_node(&proc_self_environ, "environ", VFS_FILE, procfs_get_self(), proc_self_environ_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_stat(void) {
-    return procfs_lazy_node(&proc_self_stat, "stat", VFS_FILE, procfs_get_self(), proc_self_stat_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_statm(void) {
-    return procfs_lazy_node(&proc_self_statm, "statm", VFS_FILE, procfs_get_self(), proc_self_statm_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_comm(void) {
-    return procfs_lazy_node(&proc_self_comm, "comm", VFS_FILE, procfs_get_self(), proc_self_comm_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_limits(void) {
-    return procfs_lazy_node(&proc_self_limits, "limits", VFS_FILE, procfs_get_self(), proc_self_limits_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_self_io(void) {
-    return procfs_lazy_node(&proc_self_io, "io", VFS_FILE, procfs_get_self(), proc_self_io_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_version(void) {
-    return procfs_lazy_node(&proc_version, "version", VFS_FILE, &procfs_root, proc_version_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_uptime(void) {
-    return procfs_lazy_node(&proc_uptime, "uptime", VFS_FILE, &procfs_root, proc_uptime_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_meminfo(void) {
-    return procfs_lazy_node(&proc_meminfo, "meminfo", VFS_FILE, &procfs_root, proc_meminfo_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_cpuinfo(void) {
-    return procfs_lazy_node(&proc_cpuinfo, "cpuinfo", VFS_FILE, &procfs_root, proc_cpuinfo_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_loadavg(void) {
-    return procfs_lazy_node(&proc_loadavg, "loadavg", VFS_FILE, &procfs_root, proc_loadavg_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_stat(void) {
-    return procfs_lazy_node(&proc_stat, "stat", VFS_FILE, &procfs_root, proc_stat_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_mounts(void) {
-    return procfs_lazy_node(&proc_mounts, "mounts", VFS_FILE, &procfs_root, proc_mounts_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_filesystems(void) {
-    return procfs_lazy_node(&proc_filesystems, "filesystems", VFS_FILE, &procfs_root, proc_filesystems_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_cmdline(void) {
-    return procfs_lazy_node(&proc_cmdline, "cmdline", VFS_FILE, &procfs_root, proc_cmdline_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_devices(void) {
-    return procfs_lazy_node(&proc_devices, "devices", VFS_FILE, &procfs_root, proc_devices_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_interrupts(void) {
-    return procfs_lazy_node(&proc_interrupts, "interrupts", VFS_FILE, &procfs_root, proc_interrupts_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_vmstat(void) {
-    return procfs_lazy_node(&proc_vmstat, "vmstat", VFS_FILE, &procfs_root, proc_vmstat_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_memdetail(void) {
-    return procfs_lazy_node(&proc_memdetail, "memdetail", VFS_FILE, &procfs_root, proc_memdetail_read, NULL, NULL);
-}
-
-static vfs_node_t *procfs_get_kmsg(void) {
-    vfs_node_t *node;
-
-    node = procfs_lazy_node(&proc_kmsg, "kmsg", VFS_FILE, &procfs_root, proc_kmsg_read, NULL, NULL);
-    if (node) node->mask = 0400;
-    return node;
 }
 
 static vfs_node_t *procfs_mount(const char *device, const char *mountpoint) {

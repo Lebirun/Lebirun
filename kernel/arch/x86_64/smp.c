@@ -541,9 +541,6 @@ static void smp_tlb_flush_send_missing(int initiator) {
 
 int smp_tlb_flush_all_sync(void) {
     uint64_t wait;
-    uint64_t missing[4];
-    uint64_t bit;
-    const char *reason;
     int initiator;
     int i;
     int round;
@@ -551,22 +548,17 @@ int smp_tlb_flush_all_sync(void) {
 
     if (!lapic_base || cpu_count <= 1) return 0;
     if (__sync_lock_test_and_set(&smp_tlb_flush_lock, 1)) {
-        vt_debug_printf("[VTDBG TLB] pid=%d cpu=%d reason=lock-busy\n",
-                        current_task ? current_task->pid : -1, smp_processor_id());
         return -1;
     }
     if (smp_tlb_flush_pending) {
         if (!smp_tlb_flush_complete(smp_tlb_flush_initiator)) {
             smp_tlb_flush_send_missing(smp_tlb_flush_initiator);
-            initiator = smp_tlb_flush_initiator;
             result = -1;
-            reason = "previous-incomplete";
             goto out;
         }
         smp_tlb_flush_pending = 0;
     }
     initiator = smp_processor_id();
-    reason = "ack-timeout";
     smp_tlb_flush_initiator = initiator;
     for (i = 0; i < 4; i++) smp_tlb_flush_acks[i] = 0;
     __sync_synchronize();
@@ -587,27 +579,7 @@ int smp_tlb_flush_all_sync(void) {
     }
     if (result < 0) smp_tlb_flush_pending = 1;
 out:
-    if (result < 0) {
-        for (i = 0; i < 4; i++) missing[i] = 0;
-        for (i = 0; i < cpu_count && i < 256; i++) {
-            if (i == initiator || !cpus[i].active) continue;
-            bit = 1ULL << (i & 63);
-            if (!(__atomic_load_n(&smp_tlb_flush_acks[i >> 6], __ATOMIC_ACQUIRE) & bit))
-                missing[i >> 6] |= bit;
-        }
-    }
     __sync_lock_release(&smp_tlb_flush_lock);
-    if (result < 0) {
-        vt_debug_printf("[VTDBG TLB] pid=%d cpu=%d reason=%s initiator=%d\n",
-                        current_task ? current_task->pid : -1, smp_processor_id(),
-                        reason, initiator);
-        for (i = 0; i < 4; i++) {
-            if (missing[i])
-                vt_debug_printf("[VTDBG TLB] pid=%d initiator=%d missing-base=%d mask=%llx\n",
-                                current_task ? current_task->pid : -1,
-                                initiator, i * 64, missing[i]);
-        }
-    }
     return result;
 }
 
@@ -670,9 +642,16 @@ void ap_main(void) {
 
     __sync_fetch_and_add(&cpus_booted, 1);
 
+    while (!__atomic_load_n(&smp_percpu_irq_ready, __ATOMIC_ACQUIRE))
+        __asm__ volatile ("pause" ::: "memory");
+
+    lapic_write(LAPIC_REG_TPR, 0);
+    __asm__ volatile ("sti" ::: "memory");
+
     while (!smp_scheduler_ready)
         __asm__ volatile ("pause" ::: "memory");
 
+    __asm__ volatile ("cli" ::: "memory");
     lapic_write(LAPIC_REG_TIMER_DCR, 0x03);
     lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_PERIODIC | 32);
     lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
@@ -909,7 +888,6 @@ void KERNEL_INIT smp_init(void) {
             }
         }
     }
-    __sync_synchronize();
-    smp_percpu_irq_ready = 1;
+    __atomic_store_n(&smp_percpu_irq_ready, 1, __ATOMIC_RELEASE);
     KERNEL_INIT_LOG("SMP: %d CPU(s) active\n", cpus_booted + 1);
 }

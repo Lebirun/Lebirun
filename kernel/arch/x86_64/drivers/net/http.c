@@ -229,6 +229,111 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
     return 0;
 }
 
+static int http_finish_response(uint8_t *recv_buf, uint64_t total_recv,
+                                http_response_t *response) {
+    uint8_t *hdr_copy;
+
+    if (total_recv == 0) {
+        kfree(recv_buf);
+        return -1;
+    }
+
+    if (http_parse_response(recv_buf, total_recv, response) < 0) {
+        kfree(recv_buf);
+        return -1;
+    }
+
+    response->body = (uint8_t *)kmalloc(response->body_len + 1);
+    if (!response->body) {
+        memset(response, 0, sizeof(http_response_t));
+        kfree(recv_buf);
+        return -1;
+    }
+    memcpy(response->body, recv_buf + (total_recv - response->body_len), response->body_len);
+    response->body[response->body_len] = '\0';
+
+    if (response->raw_headers_len > 0) {
+        hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
+        if (hdr_copy) {
+            memcpy(hdr_copy, response->raw_headers, response->raw_headers_len);
+        }
+        if (!hdr_copy) {
+            kfree(response->body);
+            memset(response, 0, sizeof(http_response_t));
+            kfree(recv_buf);
+            return -1;
+        }
+        response->raw_headers = hdr_copy;
+    } else {
+        response->raw_headers = NULL;
+    }
+
+    kfree(recv_buf);
+    return 0;
+}
+
+static int __attribute__((noinline, noclone)) http_receive_reserve(
+        uint8_t **buffer, uint64_t *capacity, uint64_t total,
+        uint64_t expected) {
+    uint64_t grown_capacity;
+    uint8_t *grown;
+
+    if (expected != 0) return 0;
+    if (total > UINT64_MAX - 4096) return -1;
+    if (total + 4096 <= *capacity) return 0;
+    if (*capacity > UINT64_MAX / 2) return -1;
+    grown_capacity = *capacity * 2;
+    grown = (uint8_t *)krealloc(*buffer, grown_capacity);
+    if (!grown) return -1;
+    *buffer = grown;
+    *capacity = grown_capacity;
+    return 0;
+}
+
+static int __attribute__((noinline, noclone)) http_receive_headers(
+        uint8_t **buffer, uint64_t total, uint64_t *capacity,
+        uint64_t *expected) {
+    uint64_t i;
+    uint64_t header_end;
+    uint8_t *grown;
+    http_response_t *parsed;
+    int result;
+
+    header_end = 0;
+    for (i = 0; i + 3 < total; i++) {
+        if ((*buffer)[i] == '\r' && (*buffer)[i + 1] == '\n' &&
+            (*buffer)[i + 2] == '\r' && (*buffer)[i + 3] == '\n') {
+            header_end = i + 4;
+            break;
+        }
+    }
+    if (!header_end) return 0;
+    parsed = (http_response_t *)kmalloc(sizeof(*parsed));
+    if (!parsed) return 0;
+    memset(parsed, 0, sizeof(*parsed));
+    result = 0;
+    if (http_parse_response(*buffer, total, parsed) == 0 &&
+        parsed->content_length > 0) {
+        result = 1;
+        if (parsed->content_length > UINT64_MAX - header_end) {
+            result = -1;
+        } else {
+            *expected = header_end + parsed->content_length;
+            if (*expected > *capacity) {
+                grown = (uint8_t *)krealloc(*buffer, *expected);
+                if (grown) {
+                    *buffer = grown;
+                    *capacity = *expected;
+                } else {
+                    result = -1;
+                }
+            }
+        }
+    }
+    kfree(parsed);
+    return result;
+}
+
 int http_get_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *path, http_response_t *response, uint64_t timeout_ms) {
     return http_get_ip_tls(ip, port, host, path, response, timeout_ms, 0);
 }
@@ -253,13 +358,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     uint64_t start;
     int n;
     int sig_ret;
-    uint64_t header_end_pos;
     uint64_t expected_total;
-    uint64_t si;
-    uint64_t new_cap;
-    uint8_t *new_buf;
-    http_response_t *tmp_resp;
-    uint8_t *hdr_copy;
     int receive_error;
 
     if (!response) return -1;
@@ -362,25 +461,10 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
             return -4;
         }
 
-        if (expected_total == 0 && total_recv > UINT64_MAX - 4096) {
+        if (http_receive_reserve(&recv_buf, &buf_cap, total_recv,
+                                  expected_total) < 0) {
             receive_error = 1;
             break;
-        }
-        if (expected_total == 0 && total_recv + 4096 > buf_cap) {
-            if (buf_cap > UINT64_MAX / 2) {
-                receive_error = 1;
-                break;
-            }
-            new_cap = buf_cap * 2;
-            if (expected_total > 0 && new_cap < expected_total)
-                new_cap = expected_total + 256;
-            new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
-            if (!new_buf) {
-                receive_error = 1;
-                break;
-            }
-            recv_buf = new_buf;
-            buf_cap = new_cap;
         }
         if (use_tls) {
             n = tls_recv(tls, recv_buf + total_recv, buf_cap - total_recv, 1000);
@@ -399,42 +483,11 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
                 return -4;
             }
 
-            if (expected_total == 0) {
-                header_end_pos = 0;
-                for (si = 0; si + 3 < total_recv; si++) {
-                    if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
-                        recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
-                        header_end_pos = si + 4;
-                        break;
-                    }
-                }
-                if (header_end_pos > 0) {
-                    tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
-                    if (tmp_resp) {
-                        memset(tmp_resp, 0, sizeof(*tmp_resp));
-                        if (http_parse_response(recv_buf, total_recv, tmp_resp) == 0 &&
-                            tmp_resp->content_length > 0) {
-                            if (tmp_resp->content_length > UINT64_MAX - header_end_pos) {
-                                kfree(tmp_resp);
-                                receive_error = 1;
-                                break;
-                            }
-                            expected_total = header_end_pos + tmp_resp->content_length;
-                            if (expected_total > buf_cap) {
-                                new_buf = (uint8_t *)krealloc(recv_buf, expected_total);
-                                if (new_buf) {
-                                    recv_buf = new_buf;
-                                    buf_cap = expected_total;
-                                } else {
-                                    kfree(tmp_resp);
-                                    receive_error = 1;
-                                    break;
-                                }
-                            }
-                        }
-                        kfree(tmp_resp);
-                    }
-                }
+            if (expected_total == 0 &&
+                http_receive_headers(&recv_buf, total_recv, &buf_cap,
+                                     &expected_total) < 0) {
+                receive_error = 1;
+                break;
             }
 
             if (expected_total > 0 && total_recv >= expected_total) break;
@@ -463,43 +516,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
         return -4;
     }
 
-    if (total_recv == 0) {
-        kfree(recv_buf);
-        return -1;
-    }
-
-    if (http_parse_response(recv_buf, total_recv, response) < 0) {
-        kfree(recv_buf);
-        return -1;
-    }
-
-    response->body = (uint8_t *)kmalloc(response->body_len + 1);
-    if (!response->body) {
-        memset(response, 0, sizeof(http_response_t));
-        kfree(recv_buf);
-        return -1;
-    }
-    memcpy(response->body, recv_buf + (total_recv - response->body_len), response->body_len);
-    response->body[response->body_len] = '\0';
-
-    if (response->raw_headers_len > 0) {
-        hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
-        if (hdr_copy) {
-            memcpy(hdr_copy, response->raw_headers, response->raw_headers_len);
-        }
-        if (!hdr_copy) {
-            kfree(response->body);
-            memset(response, 0, sizeof(http_response_t));
-            kfree(recv_buf);
-            return -1;
-        }
-        response->raw_headers = hdr_copy;
-    } else {
-        response->raw_headers = NULL;
-    }
-
-    kfree(recv_buf);
-    return 0;
+    return http_finish_response(recv_buf, total_recv, response);
 }
 
 int http_get(const char *host, uint16_t port, const char *path, http_response_t *response, uint64_t timeout_ms) {
@@ -849,14 +866,9 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     uint64_t start;
     int n;
     uint64_t buf_cap;
-    uint64_t header_end_pos;
     uint64_t expected_total;
-    uint64_t si;
-    uint64_t new_cap;
-    uint8_t *new_buf;
-    http_response_t *tmp_resp;
-    uint8_t *hdr_copy;
     int receive_error;
+    int header_result;
 
     if (!response) return -1;
 
@@ -973,67 +985,23 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     for (;;) {
         if (task_has_pending_signals()) break;
 
-        if (expected_total == 0 && total_recv > UINT64_MAX - 4096) {
+        if (http_receive_reserve(&recv_buf, &buf_cap, total_recv,
+                                  expected_total) < 0) {
             receive_error = 1;
             break;
-        }
-        if (expected_total == 0 && total_recv + 4096 > buf_cap) {
-            if (buf_cap > UINT64_MAX / 2) {
-                receive_error = 1;
-                break;
-            }
-            new_cap = buf_cap * 2;
-            new_buf = (uint8_t *)krealloc(recv_buf, new_cap);
-            if (!new_buf) {
-                receive_error = 1;
-                break;
-            }
-            recv_buf = new_buf;
-            buf_cap = new_cap;
         }
         n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000);
         if (n > 0) {
             total_recv += n;
             start = net_get_ticks();
 
-            header_end_pos = 0;
-            for (si = 0; si + 3 < total_recv; si++) {
-                if (recv_buf[si] == '\r' && recv_buf[si+1] == '\n' &&
-                    recv_buf[si+2] == '\r' && recv_buf[si+3] == '\n') {
-                    header_end_pos = si + 4;
-                    break;
-                }
+            header_result = http_receive_headers(&recv_buf, total_recv,
+                                                   &buf_cap, &expected_total);
+            if (header_result < 0) {
+                receive_error = 1;
+                break;
             }
-            if (header_end_pos > 0) {
-                tmp_resp = (http_response_t *)kmalloc(sizeof(http_response_t));
-                if (tmp_resp) {
-                    memset(tmp_resp, 0, sizeof(*tmp_resp));
-                    if (http_parse_response(recv_buf, total_recv, tmp_resp) == 0 &&
-                        tmp_resp->content_length > 0) {
-                        if (tmp_resp->content_length > UINT64_MAX - header_end_pos) {
-                            kfree(tmp_resp);
-                            receive_error = 1;
-                            break;
-                        }
-                        expected_total = header_end_pos + tmp_resp->content_length;
-                        if (expected_total > buf_cap) {
-                            new_buf = (uint8_t *)krealloc(recv_buf, expected_total);
-                            if (new_buf) {
-                                recv_buf = new_buf;
-                                buf_cap = expected_total;
-                            } else {
-                                kfree(tmp_resp);
-                                receive_error = 1;
-                                break;
-                            }
-                        }
-                        kfree(tmp_resp);
-                        if (total_recv >= expected_total) break;
-                    } else {
-                        kfree(tmp_resp);
-                    }
-                }
-            }
+            if (header_result > 0 && total_recv >= expected_total) break;
             if (sock->state == TCP_STATE_CLOSE_WAIT ||
                 sock->state == TCP_STATE_CLOSED) {
                 break;
@@ -1055,43 +1023,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
         return -1;
     }
 
-    if (total_recv == 0) {
-        kfree(recv_buf);
-        return -1;
-    }
-
-    if (http_parse_response(recv_buf, total_recv, response) < 0) {
-        kfree(recv_buf);
-        return -1;
-    }
-
-    response->body = (uint8_t *)kmalloc(response->body_len + 1);
-    if (!response->body) {
-        memset(response, 0, sizeof(http_response_t));
-        kfree(recv_buf);
-        return -1;
-    }
-    memcpy(response->body, recv_buf + (total_recv - response->body_len), response->body_len);
-    response->body[response->body_len] = '\0';
-
-    if (response->raw_headers_len > 0) {
-        hdr_copy = (uint8_t *)kmalloc(response->raw_headers_len);
-        if (hdr_copy) {
-            memcpy(hdr_copy, response->raw_headers, response->raw_headers_len);
-        }
-        if (!hdr_copy) {
-            kfree(response->body);
-            memset(response, 0, sizeof(http_response_t));
-            kfree(recv_buf);
-            return -1;
-        }
-        response->raw_headers = hdr_copy;
-    } else {
-        response->raw_headers = NULL;
-    }
-
-    kfree(recv_buf);
-    return 0;
+    return http_finish_response(recv_buf, total_recv, response);
 }
 
 int http_post(const char *host, uint16_t port, const char *path,

@@ -339,7 +339,6 @@ int task_set_scheduler(task_t *task, int policy, int priority);
 int task_get_scheduler(task_t *task, int *priority);
 uint64_t signal_pending_mask(task_t *task);
 uint64_t signal_blocked_mask(task_t *task);
-int signal_debug_in_handler(task_t *task);
 uint32_t signal_queue_count(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
@@ -381,7 +380,6 @@ int task_exec_node_with_args(struct vfs_node *node, registers_t *regs,
 int task_exec_node_with_owned_args(struct vfs_node *node, registers_t *regs,
                                    int argc, char **argv,
                                    int envc, char **envp);
-pid_t task_create_thread(void (*entry)(void));
 pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg);
 
 bool task_is_kernel_pid(int32_t pid);
@@ -397,8 +395,5 @@ void task_free_signal_data(task_t *task);
 void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
 void task_reclaim_exited_now(void);
-void task_debug_snapshot(pid_t pid);
-void task_debug_snapshot_users(void);
-void task_debug_request(void);
 
 #endif
