@@ -68,6 +68,18 @@ static void sqfs_untrack_node(squashfs_vfs_node_t *snode) {
     }
 }
 
+static int sqfs_node_live_locked(vfs_node_t *node) {
+    squashfs_vfs_node_t *cur;
+
+    if (!node) return 0;
+    cur = sqfs_all_nodes;
+    while (cur) {
+        if (&cur->vfs == node) return 1;
+        cur = cur->next_all;
+    }
+    return 0;
+}
+
 static void sqfs_free_node(squashfs_vfs_node_t *snode) {
     uint8_t *cached_data;
 
@@ -94,15 +106,27 @@ static uint8_t *sqfs_temp_alloc(uint64_t size, uint64_t *out_phys, uint64_t *out
     pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (pages == 0) pages = 1;
     phys = pfa_alloc_contiguous(pages);
-    if (!phys) return NULL;
-    buf = (uint8_t *)(uintptr_t)(phys + KERNEL_VMA);
-    memset(buf, 0, pages * PAGE_SIZE);
-    *out_phys = phys;
-    *out_pages = pages;
+    if (phys && phys + pages * PAGE_SIZE <= 0x40000000ULL) {
+        buf = (uint8_t *)(uintptr_t)(phys + KERNEL_VMA);
+        memset(buf, 0, pages * PAGE_SIZE);
+        *out_phys = phys;
+        *out_pages = pages;
+        return buf;
+    }
+    if (phys) pfa_free_contiguous(phys, pages);
+    buf = (uint8_t *)kmalloc(size);
+    if (!buf) return NULL;
+    memset(buf, 0, size);
+    *out_phys = 1;
+    *out_pages = 0;
     return buf;
 }
 
-static void sqfs_temp_free(uint64_t phys, uint64_t pages) {
+static void sqfs_temp_free(uint8_t *buf, uint64_t phys, uint64_t pages) {
+    if (phys == 1) {
+        if (buf) kfree(buf);
+        return;
+    }
     if (!phys) return;
     pfa_free_contiguous(phys, pages);
 }
@@ -375,12 +399,12 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     decomp_ret = squashfs_decompress(src, data_size, scratch, scratch_size, squashfs_ctx.compression_id);
     if (decomp_ret < 0) {
         sqfs_decomp_failures++;
-        sqfs_temp_free(scratch_phys, scratch_pages);
+        sqfs_temp_free(scratch, scratch_phys, scratch_pages);
         return NULL;
     }
     if (decomp_ret > 8192) {
         sqfs_decomp_oversize++;
-        sqfs_temp_free(scratch_phys, scratch_pages);
+        sqfs_temp_free(scratch, scratch_phys, scratch_pages);
         return NULL;
     }
     if (decomp_ret > 8192 - (int)SQFS_DECOMP_PAD) {
@@ -391,12 +415,12 @@ static uint8_t *squashfs_read_metadata_block(uint64_t block_offset, uint64_t *ou
     result_size += SQFS_METADATA_ALLOC_PAD;
     result = kmalloc(result_size);
     if (!result) {
-        sqfs_temp_free(scratch_phys, scratch_pages);
+        sqfs_temp_free(scratch, scratch_phys, scratch_pages);
         return NULL;
     }
     memset(result, 0, result_size);
     if (decomp_ret > 0) memcpy(result, scratch, (uint64_t)decomp_ret);
-    sqfs_temp_free(scratch_phys, scratch_pages);
+    sqfs_temp_free(scratch, scratch_phys, scratch_pages);
     if (out_size) *out_size = (uint64_t)decomp_ret;
     return result;
 }
@@ -1077,13 +1101,13 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset,
                 if (decomp_ret < 0) {
                     sqfs_decomp_failures++;
                     printf("SQUASHFS: decompression failed for block[%u] stored=%u uncomp=%u\n", i, stored_size, uncompressed_size);
-                    if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
+                    if (temp_phys) sqfs_temp_free(temp, temp_phys, temp_pages);
                     break;
                 }
                 if ((uint64_t)decomp_ret > uncompressed_size) {
                     sqfs_decomp_oversize++;
                     printf("SQUASHFS: decompression failed for block[%u] stored=%u uncomp=%u\n", i, stored_size, uncompressed_size);
-                    if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
+                    if (temp_phys) sqfs_temp_free(temp, temp_phys, temp_pages);
                     break;
                 }
                 if ((uint64_t)decomp_ret > uncompressed_size - (uncompressed_size < SQFS_DECOMP_PAD ? uncompressed_size : SQFS_DECOMP_PAD)) {
@@ -1099,7 +1123,7 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset,
                 if (copy_len > 0 && !direct_decomp) {
                     memcpy(buffer + bytes_read, temp + block_offset, copy_len);
                 }
-                if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
+                if (temp_phys) sqfs_temp_free(temp, temp_phys, temp_pages);
             } else {
                 if (data_pos + block_offset + copy_len > squashfs_ctx.size) {
                     printf("SQUASHFS: uncompressed read exceeds image\n");
@@ -1207,7 +1231,7 @@ static uint64_t squashfs_read_file_data(uint64_t inode_ref, uint64_t offset,
                             }
                             printf("SQUASHFS: fragment decompression failed\n");
                         }
-                        if (temp_phys) sqfs_temp_free(temp_phys, temp_pages);
+                        if (temp_phys) sqfs_temp_free(temp, temp_phys, temp_pages);
                     }
                 } else {
                     if ((uint64_t)frag_entry.start_block + frag_offset + frag_offset_in_file + frag_copy_len <= squashfs_ctx.size) {
@@ -1276,13 +1300,19 @@ static uint64_t squashfs_vfs_read_unlocked(vfs_node_t *node, uint64_t offset,
 }
 
 static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset,
-                                  uint64_t size, uint8_t *buffer) {
+                                   uint64_t size, uint8_t *buffer) {
     uint64_t result;
+    int pinned;
 
     if (squashfs_expand_syscall_stack() != 0) return 0;
     mutex_lock(&squashfs_lock);
-    result = squashfs_vfs_read_unlocked(node, offset, size, buffer, size,
-                                        NULL);
+    pinned = sqfs_node_live_locked(node);
+    if (pinned)
+        __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    result = pinned ? squashfs_vfs_read_unlocked(node, offset, size,
+                                                 buffer, size, NULL) : 0;
+    if (pinned)
+        __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     mutex_unlock(&squashfs_lock);
     return result;
 }
@@ -1293,25 +1323,33 @@ uint64_t squashfs_transfer_window_size(vfs_node_t *node) {
 }
 
 uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
-                                uint64_t size, uint8_t *buffer,
-                                uint64_t capacity) {
+                                 uint64_t size, uint8_t *buffer,
+                                 uint64_t capacity) {
     uint64_t result;
+    int pinned;
 
     if (!node || node->read != squashfs_vfs_read || !buffer) return 0;
     if (size > capacity) size = capacity;
     if (squashfs_expand_syscall_stack() != 0) return 0;
     mutex_lock(&squashfs_lock);
-    result = squashfs_vfs_read_unlocked(node, offset, size, buffer,
-                                        capacity, NULL);
+    pinned = sqfs_node_live_locked(node);
+    if (pinned)
+        __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    result = pinned ? squashfs_vfs_read_unlocked(node, offset, size,
+                                                 buffer, capacity,
+                                                 NULL) : 0;
+    if (pinned)
+        __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     mutex_unlock(&squashfs_lock);
     return result;
 }
 
 uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
-                                     uint64_t size,
-                                     squashfs_transfer_cache_t *cache,
-                                     uint8_t **view) {
+                                      uint64_t size,
+                                      squashfs_transfer_cache_t *cache,
+                                      uint8_t **view) {
     uint64_t result;
+    int pinned;
 
     if (!node || node->read != squashfs_vfs_read || !cache || !view)
         return 0;
@@ -1319,11 +1357,18 @@ uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
     if (size > cache->data_capacity) size = cache->data_capacity;
     if (squashfs_expand_syscall_stack() != 0) return 0;
     mutex_lock(&squashfs_lock);
-    sqfs_transfer_cache = cache;
+    pinned = sqfs_node_live_locked(node);
+    if (pinned)
+        __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    sqfs_transfer_cache = pinned ? cache : NULL;
     *view = cache->data;
-    result = squashfs_vfs_read_unlocked(node, offset, size, cache->data,
-                                        cache->data_capacity, view);
+    result = pinned ? squashfs_vfs_read_unlocked(node, offset, size,
+                                                 cache->data,
+                                                 cache->data_capacity,
+                                                 view) : 0;
     sqfs_transfer_cache = NULL;
+    if (pinned)
+        __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     mutex_unlock(&squashfs_lock);
     return result;
 }
@@ -1338,6 +1383,7 @@ static void squashfs_vfs_close_unlocked(vfs_node_t *node) {
     uint8_t *cached_data;
 
     if (!node) return;
+    if (!sqfs_node_live_locked(node)) return;
     snode = (squashfs_vfs_node_t *)node->private_data;
     if (!snode) return;
     if (node->ref_count > 0) return;
@@ -1579,10 +1625,16 @@ static dirent_t *squashfs_vfs_readdir_unlocked(vfs_node_t *node, uint64_t index)
 
 static dirent_t *squashfs_vfs_readdir(vfs_node_t *node, uint64_t index) {
     dirent_t *result;
+    int pinned;
 
     if (squashfs_expand_syscall_stack() != 0) return NULL;
     mutex_lock(&squashfs_lock);
-    result = squashfs_vfs_readdir_unlocked(node, index);
+    pinned = sqfs_node_live_locked(node);
+    if (pinned)
+        __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    result = pinned ? squashfs_vfs_readdir_unlocked(node, index) : NULL;
+    if (pinned)
+        __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     mutex_unlock(&squashfs_lock);
     return result;
 }
@@ -1659,10 +1711,16 @@ static vfs_node_t *squashfs_vfs_finddir_unlocked(vfs_node_t *node, const char *n
 
 static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     vfs_node_t *result;
+    int pinned;
 
     if (squashfs_expand_syscall_stack() != 0) return NULL;
     mutex_lock(&squashfs_lock);
-    result = squashfs_vfs_finddir_unlocked(node, name);
+    pinned = sqfs_node_live_locked(node);
+    if (pinned)
+        __atomic_add_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
+    result = pinned ? squashfs_vfs_finddir_unlocked(node, name) : NULL;
+    if (pinned)
+        __atomic_sub_fetch(&node->ref_count, 1, __ATOMIC_ACQ_REL);
     mutex_unlock(&squashfs_lock);
     return result;
 }

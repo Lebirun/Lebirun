@@ -51,7 +51,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 
 static void *pt_alloc_pt_page(void) {
     if (!pfa_bitmap) return pmm_alloc_early_page();
-    return pmm_alloc_low_page();
+    return pmm_alloc_mapped_page();
 }
 
 #define PT_TEMP_ZERO_VIRT TEMP_SLOT(7)
@@ -122,10 +122,8 @@ static uint64_t *pt_ensure_kernel_pd(uint64_t virt_addr) {
         return (uint64_t *)(pd_phys + KERNEL_VMA);
     }
     page = pt_alloc_pt_page();
-    if (!page) page = pmm_alloc_page();
     if (!page) return NULL;
     pd_phys = (uint64_t)page;
-    if (pt_ensure_phys_mapped(pd_phys) < 0) return NULL;
     memset((void *)(pd_phys + KERNEL_VMA), 0, PAGE_SIZE);
     kv_pdpt_high[pdpt_idx] = (pd_phys & ~0xFFFULL) | 3;
     __asm__ volatile(
@@ -159,7 +157,6 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
                   (pde & VMM_PTE_USER);
 
     pt_page = pt_alloc_pt_page();
-    if (!pt_page) pt_page = pmm_alloc_page();
     if (!pt_page) return -1;
     pt_phys = (uint64_t)pt_page;
 
@@ -201,6 +198,7 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
     int pt_self_mapped;
 
     phys_addr &= ~(PAGE_SIZE - 1);
+    if (phys_addr >= HEAP_START - KERNEL_VMA) return -1;
     virt = phys_addr + KERNEL_VMA;
     pde_idx = (virt >> 21) & 0x1FF;
     pte_idx = (virt >> 12) & 0x1FF;
@@ -216,7 +214,6 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
 
     if (!(pde & 1)) {
         pt_page = pt_alloc_pt_page();
-        if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) return -1;
 
         pt_phys = (uint64_t)pt_page;
@@ -361,7 +358,6 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
         uint64_t id_pde_idx;
         uint64_t id_pte_idx;
         pt_page = pt_alloc_pt_page();
-        if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
             vmm_pae_lock_release();
             printf("vmm_map_page_pae: Failed to alloc page table\n");
@@ -547,7 +543,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
             uint64_t id_pde_idx;
             uint64_t id_pte_idx;
             pt_page = pt_alloc_pt_page();
-            if (!pt_page) pt_page = pmm_alloc_page();
             if (!pt_page) {
                 printf("vmm_map_range_alloc_pae: Failed to alloc page table\n");
                 vmm_pae_lock_release();
@@ -651,7 +646,6 @@ int heap_map_page_pae(uint64_t virt_addr) {
         uint64_t id_pde_idx;
         uint64_t id_pte_idx;
         pt_page = pt_alloc_pt_page();
-        if (!pt_page) pt_page = pmm_alloc_page();
         if (!pt_page) {
             printf("heap_map_page_pae: Failed to alloc page table\n");
             vmm_pae_lock_release();

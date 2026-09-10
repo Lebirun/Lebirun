@@ -115,6 +115,7 @@ int mem_map_relocate(void);
 void *pmm_alloc_page(void);
 void *pmm_alloc_pages(uint64_t num);
 void *pmm_alloc_low_page(void);
+void *pmm_alloc_mapped_page(void);
 void *pmm_alloc_early_pages(uint64_t num);
 void pfa_init(void);
 uint64_t pfa_alloc(void);

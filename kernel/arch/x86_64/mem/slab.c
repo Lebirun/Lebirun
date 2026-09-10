@@ -163,6 +163,11 @@ static int slab_map_pages(uint64_t virt, uint64_t pages) {
         if (!phys) break;
         address = virt + mapped * PAGE_SIZE;
         vmm_map_page(address, (uint64_t)phys, 3);
+        if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), address) !=
+            (uint64_t)phys) {
+            pfa_free((uint64_t)phys);
+            break;
+        }
         mapped++;
     }
     if (mapped == pages) return 1;

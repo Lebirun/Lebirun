@@ -452,6 +452,9 @@ int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 #define SYSCALL_VFS_READDIR2 299
 #define SYSCALL_CLOSE_RANGE 436
 #define SYSCALL_FALLOCATE 324
+#define SYSCALL_CLONE3 300
+#define SYSCALL_SCHED_SETAFFINITY 301
+#define SYSCALL_SCHED_GETAFFINITY 302
 
 #define NR_SYSCALLS 300
 

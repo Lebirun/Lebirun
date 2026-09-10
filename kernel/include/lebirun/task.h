@@ -199,6 +199,7 @@ typedef struct task {
     void *timer_data;
     void *limits_data;
     uint64_t alarm_tick;
+    uint32_t cpu_affinity;
 } task_t;
 
 typedef struct {
@@ -395,5 +396,8 @@ void task_free_signal_data(task_t *task);
 void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
 void task_reclaim_exited_now(void);
+int task_set_cpu_affinity(task_t *task, uint32_t mask);
+uint32_t task_get_cpu_affinity(task_t *task);
+int task_oom_kill_one(void);
 
 #endif

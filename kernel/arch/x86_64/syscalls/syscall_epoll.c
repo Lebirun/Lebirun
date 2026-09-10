@@ -685,7 +685,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
 
     switch (cmd) {
         case FUTEX_WAIT:
-            if (realtime) return -ENOSYS;
+            if (realtime) return -EINVAL;
             ret = futex_timeout_ticks(timeout, 0, 0, &timeout_ticks);
             if (ret < 0) return ret;
             return task_futex_wait(key, uaddr, val, timeout_ticks,

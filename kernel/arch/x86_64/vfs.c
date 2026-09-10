@@ -588,7 +588,7 @@ uint64_t vfs_read_phys_page(vfs_node_t *node, uint64_t offset, uint64_t size,
     if (!node || !phys_addr) return 0;
     if (phys_offset > PAGE_SIZE || size > PAGE_SIZE - phys_offset) return 0;
     if (size == 0) return 0;
-    scratch_phys = pfa_alloc();
+    scratch_phys = (uint64_t)pmm_alloc_mapped_page();
     if (!scratch_phys) return 0;
     scratch = (uint8_t *)(uintptr_t)(scratch_phys + KERNEL_VMA);
     result = vfs_read(node, offset, size, scratch);
@@ -1898,7 +1898,7 @@ char *vfs_get_path(vfs_node_t *node, char *buf, size_t size) {
     return buf;
 }
 
-static int vfs_split_path_alloc(const char *path, char **parent_out,
+static int __attribute__((unused)) vfs_split_path_alloc(const char *path, char **parent_out,
                                 char **name_out) {
     const char *slash;
     const char *name_start;

@@ -180,7 +180,7 @@ static int bitmap_leaf_candidate(uint64_t exclude_start,
     uint64_t frame;
 
     start = kernel_reserved_frames;
-    end = 0x80000000ULL / PAGE_SIZE;
+    end = 0x40000000ULL / PAGE_SIZE;
     if (end > bitmap_entries_used) end = bitmap_entries_used;
     for (frame = start; frame < end; frame++) {
         if (frame >= exclude_start && frame < exclude_end) continue;
@@ -714,6 +714,49 @@ void *pmm_alloc_pages(uint64_t num) {
     addr = find_free_frames(num);
     if (!addr) return NULL;
     return (void *)(uint64_t)addr;
+}
+
+void *pmm_alloc_mapped_page(void) {
+    extern uint64_t boot_pml4[];
+    extern void pt_init_temp_mapping(void);
+    extern uint64_t pt_temp_pt_ready_check(void);
+    uint64_t eflags;
+    uint64_t start;
+    uint64_t end;
+    uint64_t phys;
+    uint64_t saved_hint;
+    uint64_t pml4_phys;
+    int cold;
+
+    if (!pt_temp_pt_ready_check()) pt_init_temp_mapping();
+    if (!pt_temp_pt_ready_check()) return NULL;
+    pml4_phys = (uint64_t)(uintptr_t)boot_pml4;
+    pfa_lock_acquire(&eflags);
+    saved_hint = last_alloc_hint;
+    start = kernel_reserved_frames;
+    end = (HEAP_START - KERNEL_VMA) / PAGE_SIZE;
+    if (end > total_pages_managed) end = total_pages_managed;
+    phys = 0;
+    cold = 0;
+    for (;;) {
+        phys = find_free_frames_range(start, end, 1);
+        if (!phys) {
+            if (cold) break;
+            start = cold_low_start_frame;
+            end = cold_low_end_frame;
+            cold = 1;
+            continue;
+        }
+        if (vmm_get_phys_in_pml4(pml4_phys, phys + KERNEL_VMA) == phys &&
+            (vmm_get_flags_in_pml4(pml4_phys, phys + KERNEL_VMA) &
+             VMM_PTE_WRITE)) break;
+        clear_bit(phys / PAGE_SIZE);
+        __sync_fetch_and_add(&pfa_cached_free, 1);
+        start = phys / PAGE_SIZE + 1;
+    }
+    last_alloc_hint = saved_hint;
+    pfa_lock_release(eflags);
+    return (void *)phys;
 }
 
 void *pmm_alloc_low_page(void) {

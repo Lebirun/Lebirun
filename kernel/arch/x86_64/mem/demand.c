@@ -219,6 +219,12 @@ int demand_commit_page(uint64_t virt_addr) {
     }
     
     vmm_map_page_pae(page_virt, (uint64_t)phys_page, 3);
+    if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
+        (uint64_t)phys_page) {
+        pfa_free((uint64_t)phys_page);
+        demand_lock_release(eflags);
+        return -1;
+    }
     
     memset((void *)page_virt, 0, PAGE_SIZE);
     demand_set_committed(page_idx);

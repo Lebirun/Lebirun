@@ -66,7 +66,7 @@ extern void copy_file_range_release_task(void *owner);
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
 
-_Static_assert(sizeof(task_t) == 904, "task size changed");
+_Static_assert(sizeof(task_t) == 912, "task size changed");
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
@@ -171,6 +171,64 @@ static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
 static volatile int memory_pressure_pending;
 static uint64_t memory_pressure_last_tick;
+
+int task_set_cpu_affinity(task_t *task, uint32_t mask) {
+    uint32_t online;
+
+    if (!task) return -1;
+    if (mask == 0) return -1;
+    if (cpu_count <= 0 || cpu_count > 32) return -1;
+    online = cpu_count == 32 ? 0xFFFFFFFFu : ((1u << cpu_count) - 1);
+    if ((mask & online) == 0) return -1;
+    lock_scheduler();
+    task->cpu_affinity = mask;
+    unlock_scheduler();
+    return 0;
+}
+
+uint32_t task_get_cpu_affinity(task_t *task) {
+    uint32_t mask;
+
+    if (!task) return 0;
+    lock_scheduler();
+    mask = task->cpu_affinity;
+    if (mask == 0) mask = 0xFFFFFFFFu;
+    unlock_scheduler();
+    return mask;
+}
+
+int task_oom_kill_one(void) {
+    task_t *t;
+    pid_t victim_pid;
+    uint64_t pages;
+    uint64_t worst;
+
+    victim_pid = 0;
+    worst = 0;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t && task_ptr_valid(t)) {
+        if (t->is_user && t != task_current() && t->pid != TASK_INIT_PID &&
+            (t->state == TASK_READY || t->state == TASK_RUNNING ||
+             t->state == TASK_BLOCKED)) {
+            pages = t->user_pages_count;
+            if (pages > worst) {
+                worst = pages;
+                victim_pid = t->pid;
+            }
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    if (!victim_pid) return 0;
+    t = task_find(victim_pid);
+    if (!t || !t->is_user || t->pid == TASK_INIT_PID) return 0;
+    printf("oom: killing pid %d (%u pages)\n", victim_pid,
+           (unsigned)worst);
+    task_kill(t, 137);
+    return 1;
+}
+
 _Static_assert(KSTACK_RUNTIME_SIZE == 0x1E00, "idle stack layout");
 _Static_assert(sizeof(registers_t) <= KSTACK_IDLE_RESERVE, "idle frame size");
 _Static_assert(KSTACK_TSS_OFFSET + TSS_CPU_BYTES <= KSTACK_USABLE_SIZE,
@@ -1219,6 +1277,7 @@ void KERNEL_INIT init_tasks(void) {
     current_task->regs.ds = current_task->regs.es = 0x10;
     current_task->vring_minor = 0;
     current_task->is_kernel_task = false;
+    current_task->cpu_affinity = 0xFFFFFFFFu;
     ready_queue_head = current_task;
     all_tasks_head = current_task;
     current_task->all_next = NULL;
@@ -1414,6 +1473,7 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->syscall_frame = NULL;
     new_task->vring_minor = 0;
     new_task->is_kernel_task = false;
+    new_task->cpu_affinity = 0xFFFFFFFFu;
 
     if (user_mode) {
         krsp = (uint64_t*)(kernel_stack_base + KSTACK_USABLE_SIZE);
@@ -2959,6 +3019,8 @@ void task_deferred_work(void) {
              free_pages < low_watermark) &&
             tick_count - memory_pressure_last_tick >= 25) {
             task_memory_pressure_reclaim_now();
+            if (pfa_count_free() < low_watermark)
+                task_oom_kill_one();
         }
     }
 }
@@ -3407,10 +3469,15 @@ static int cpu_idle_frame_valid(cpu_info_t *cpu, registers_t *frame) {
 
 static int task_cpu_available(task_t *task, int cpu_id) {
     int owner;
+    uint32_t mask;
 
     if (!task) return 0;
     owner = task->running_cpu;
-    return owner == -1 || owner == -(cpu_id + 2);
+    if (owner != -1 && owner != -(cpu_id + 2)) return 0;
+    mask = task->cpu_affinity;
+    if (mask != 0 && cpu_id >= 0 && cpu_id < 32 &&
+        !(mask & (1u << cpu_id))) return 0;
+    return 1;
 }
 
 static void task_release_from_cpu(task_t *task, registers_t *frame,
@@ -4199,7 +4266,7 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     child->user_pages = child_user_pages;
     child->user_pages_count = child_user_pages_count;
     child->maxrss_kb = child_user_pages_count * 4ULL;
-    child->file_map_count = share_address_space ? 0 : parent->file_map_count;
+    child->file_map_count = parent->file_map_count;
     child->file_map_capacity = 0;
     child->file_maps = NULL;
     if (child->file_map_count > 0) {
@@ -4224,6 +4291,8 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     child->user_brk_start = parent->user_brk_start;
     child->mmap_next_addr = parent->mmap_next_addr;
     child->console_id = parent->console_id;
+    child->cpu_affinity = parent->cpu_affinity ?
+                          parent->cpu_affinity : 0xFFFFFFFFu;
     child->running_cpu = -1;
     child->tls_base = parent->tls_base;
     child->tls_limit = parent->tls_limit;
@@ -5191,6 +5260,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     uint64_t arg_val;
     uint64_t *stack_ptr;
     task_t *new_task;
+    uint64_t i;
 
     if (!current_task || !current_task->is_user) {
         return -1;
@@ -5244,12 +5314,34 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->cr3 = current_task->cr3;
     new_task->user_pages = NULL;
     new_task->user_pages_count = 0;
-    new_task->file_map_count = 0;
+    new_task->file_map_count = current_task->file_map_count;
+    new_task->file_map_capacity = 0;
+    new_task->file_maps = NULL;
+    if (new_task->file_map_count > 0) {
+        if (task_ensure_file_map_capacity(new_task,
+                                          new_task->file_map_count) != 0) {
+            task_rlimit_free(new_task);
+            task_free_signal_data(new_task);
+            kstack_free(new_task->kernel_stack_base);
+            task_free_fpu_state(new_task);
+            task_free_cwd(new_task);
+            kfree(new_task);
+            return -1;
+        }
+        for (i = 0; i < (uint64_t)new_task->file_map_count; i++) {
+            new_task->file_maps[i] = current_task->file_maps[i];
+            if (new_task->file_maps[i].node) {
+                vfs_open(new_task->file_maps[i].node, 0);
+            }
+        }
+    }
     new_task->user_brk = current_task->user_brk;
     new_task->user_brk_start = current_task->user_brk_start;
     new_task->console_id = current_task->console_id;
     new_task->running_cpu = -1;
     new_task->creation_mask = current_task->creation_mask;
+    new_task->cpu_affinity = current_task->cpu_affinity ?
+                             current_task->cpu_affinity : 0xFFFFFFFFu;
     
     thread_stack_size = 0x2000;
     thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;

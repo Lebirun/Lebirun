@@ -206,6 +206,7 @@ registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr
     task = smp_current_task_safe();
     if (!task || !task->is_user || !task->kernel_stack_base) return regs;
     if ((regs->cs & 3) == 0 && kstack_is_in_region(fault_addr)) return regs;
+    kstack_expand_syscall();
     base = (uint64_t)task->kernel_stack_base;
     top = base + task->kernel_stack_size;
     if (top < base || task->kernel_stack_size < sizeof(*regs) + 16)
@@ -225,7 +226,7 @@ registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr
     page = (destination - 8) & ~(PAGE_SIZE - 1);
     for (;;) {
         if (!vmm_get_phys_in_pml4(pd, page) &&
-            !kstack_page_fault_handler(page))
+            !kstack_page_fault_handler(page, regs->rip, regs->rsp))
             kernel_panic("Cannot prepare page-fault task stack", regs);
         if (page == last_page) break;
         page += PAGE_SIZE;
@@ -268,14 +269,15 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
             
             if (!(regs->err_code & 0x4)) {
+                kstack_expand_syscall();
                 if (demand_page_fault_handler(fault_addr, regs->err_code)) {
                     return regs;
                 }
             }
 
             {
-                extern int kstack_page_fault_handler(uint64_t fault_addr);
-                if (kstack_page_fault_handler(fault_addr)) {
+                if (kstack_page_fault_handler(fault_addr, regs->rip,
+                                              regs->rsp)) {
                     return regs;
                 }
             }

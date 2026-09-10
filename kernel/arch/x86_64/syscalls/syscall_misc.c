@@ -5,6 +5,7 @@
 #include <lebirun/pty.h>
 #include <lebirun/creds.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/smp.h>
 
 extern task_t *current_task;
 
@@ -1259,6 +1260,33 @@ static int sys_lke_list(char *buf, int size) {
     return lke_list(buf, size);
 }
 
+static int sys_sched_setaffinity(int pid, const char *mask_ptr, int len) {
+    uint32_t mask;
+    task_t *target;
+
+    if (len != 4) return -EINVAL;
+    target = sched_target(pid);
+    if (!target) return -ESRCH;
+    if (target != current_task && current_task->euid != 0 &&
+        target->euid != current_task->euid) return -EPERM;
+    if (copy_from_user(&mask, mask_ptr, sizeof(mask)) < 0) return -EFAULT;
+    if (task_set_cpu_affinity(target, mask) < 0) return -EINVAL;
+    return 0;
+}
+
+static int sys_sched_getaffinity(int pid, const char *mask_ptr, int len) {
+    uint32_t mask;
+    task_t *target;
+
+    if (len < 4) return -EINVAL;
+    target = sched_target(pid);
+    if (!target) return -ESRCH;
+    mask = task_get_cpu_affinity(target);
+    if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
+        return -EFAULT;
+    return 4;
+}
+
 void syscalls_misc_init(void) {
     init_default_environ();
     
@@ -1296,6 +1324,8 @@ void syscalls_misc_init(void) {
     syscall_table_set(SYSCALL_SCHED_GET_PRIORITY_MAX, (void *)(sys_sched_priority_max));
     syscall_table_set(SYSCALL_SCHED_GET_PRIORITY_MIN, (void *)(sys_sched_priority_min));
     syscall_table_set(SYSCALL_SCHED_RR_GET_INTERVAL, (void *)(sys_sched_rr_interval));
+    syscall_table_set(SYSCALL_SCHED_SETAFFINITY, (void *)(sys_sched_setaffinity));
+    syscall_table_set(SYSCALL_SCHED_GETAFFINITY, (void *)(sys_sched_getaffinity));
     syscall_table_set(SYSCALL_LKE_LOAD, (void *)(sys_lke_load));
     syscall_table_set(SYSCALL_LKE_UNLOAD, (void *)(sys_lke_unload));
     syscall_table_set(SYSCALL_LKE_LIST, (void *)(sys_lke_list));

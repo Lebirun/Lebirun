@@ -285,6 +285,66 @@ static int sys_clone(int flags, const char *child_stack, int ptid,
                           (int *)(uintptr_t)ptid, child_tid);
 }
 
+struct clone_args {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+};
+
+#define CLONE3_ALLOW_FLAGS (0x00000100u | 0x00000200u | 0x00000400u | \
+    0x00000800u | 0x00010000u | 0x00040000u | 0x00080000u | \
+    0x00100000u | 0x00200000u | 0x01000000u)
+
+static int sys_clone3(uint64_t uargs_addr, uint64_t usize, uint64_t unused2,
+                      uint64_t unused3, uint64_t unused4, uint64_t unused5) {
+    struct clone_args args;
+    registers_t *regs;
+    uint64_t stack_top;
+    int share_address_space;
+
+    (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    if (usize != sizeof(args)) return -EINVAL;
+    if (uargs_addr < 0x1000 || uargs_addr >= KERNEL_VMA) return -EFAULT;
+    if (copy_from_user(&args, (const void *)(uintptr_t)uargs_addr,
+                       sizeof(args)) < 0) return -EFAULT;
+    if (args.flags & ~((uint64_t)CLONE3_ALLOW_FLAGS)) return -EINVAL;
+    if (args.exit_signal > 64) return -EINVAL;
+    if (args.pidfd || args.set_tid || args.set_tid_size || args.cgroup)
+        return -EINVAL;
+    regs = current_task ? current_task->syscall_frame : NULL;
+    if (!regs) return -EAGAIN;
+    share_address_space = (args.flags & 0x00000100u) != 0;
+    stack_top = 0;
+    if (share_address_space) {
+        if (!args.stack || !args.stack_size) return -EINVAL;
+        if (args.stack < 0x1000 || args.stack >= KERNEL_VMA) return -EFAULT;
+        if (args.stack_size >= KERNEL_VMA ||
+            args.stack + args.stack_size < args.stack ||
+            args.stack + args.stack_size >= KERNEL_VMA) return -EFAULT;
+        stack_top = args.stack + args.stack_size;
+    }
+    if ((args.flags & 0x00100000u) &&
+        (args.parent_tid < 0x1000 || args.parent_tid >= KERNEL_VMA))
+        return -EFAULT;
+    if ((args.flags & 0x01000000u) &&
+        (args.child_tid < 0x1000 || args.child_tid >= KERNEL_VMA))
+        return -EFAULT;
+    return (int)task_fork(regs, share_address_space, stack_top,
+                          (args.flags & 0x00080000u) ? args.tls : 0,
+                          (args.flags & 0x00100000u) ?
+                              (int *)(uintptr_t)args.parent_tid : NULL,
+                          (args.flags & 0x01000000u) ?
+                              (int *)(uintptr_t)args.child_tid : NULL);
+}
+
 void syscalls_process_init(void) {
     syscall_table_set(SYSCALL_GETPID, (void *)(sys_getpid));
     syscall_table_set(SYSCALL_YIELD, (void *)(sys_yield));
@@ -297,4 +357,5 @@ void syscalls_process_init(void) {
     syscall_table_set(SYSCALL_EXEC, (void *)(sys_exec));
     syscall_table_set(SYSCALL_VFORK, (void *)(sys_vfork));
     syscall_table_set(SYSCALL_CLONE, (void *)(sys_clone));
+    syscall_table_set(SYSCALL_CLONE3, (void *)(sys_clone3));
 }

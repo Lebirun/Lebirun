@@ -758,8 +758,8 @@ static int sys_madvise(void *addr, size_t length, int advice) {
     if (size == 0 || base + size < base || base + size > KERNEL_VMA)
         return -ENOMEM;
     end = base + size;
+    covered = 0;
     for (page = base; page < end; page += PAGE_SIZE) {
-        covered = 0;
         for (i = 0; i < current_task->file_map_count; i++) {
             if (page >= current_task->file_maps[i].vaddr &&
                 page < current_task->file_maps[i].vaddr +
@@ -768,9 +768,9 @@ static int sys_madvise(void *addr, size_t length, int advice) {
                 break;
             }
         }
-        if (!covered) return -ENOMEM;
+        if (covered) break;
     }
-    if (sys_msync(addr, length, MS_ASYNC) < 0) return -EIO;
+    if (covered && sys_msync(addr, length, MS_ASYNC) < 0) return -EIO;
     release_user_leaf_range(base, end);
     return 0;
 }

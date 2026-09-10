@@ -4,9 +4,9 @@
 #include <stdint.h>
 
 #define KSTACK_REGION_START  0xFFFFFFFFD8100000ULL
-#define KSTACK_PAGES_PER_SLOT 3
 #define KSTACK_GUARD_PAGES    1
 #define KSTACK_USABLE_PAGES   2
+#define KSTACK_PAGES_PER_SLOT (KSTACK_GUARD_PAGES + KSTACK_USABLE_PAGES)
 #define KSTACK_SLOT_SIZE     ((uint64_t)KSTACK_PAGES_PER_SLOT * 0x1000ULL)
 #define KSTACK_USABLE_SIZE   (KSTACK_USABLE_PAGES * PAGE_SIZE)
 #define KSTACK_IDLE_RESERVE  0x200ULL
@@ -21,7 +21,8 @@ uint8_t *kstack_alloc(void);
 void kstack_free(uint8_t *base);
 void kstack_reclaim_unused(void);
 void kstack_memory_stats(uint64_t *slots, uint64_t *pages);
-int kstack_page_fault_handler(uint64_t fault_addr);
+int kstack_page_fault_handler(uint64_t fault_addr, uint64_t fault_rip,
+                              uint64_t fault_rsp);
 int kstack_is_in_region(uint64_t addr);
 int kstack_prepare_syscall(void);
 int kstack_expand_syscall(void);
