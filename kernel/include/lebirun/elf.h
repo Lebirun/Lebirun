@@ -271,6 +271,9 @@ typedef struct {
     uint64_t load_base;
     uint64_t load_end;
     uint64_t bss_end;
+    uint64_t load_bias;
+    uint64_t interp_entry;
+    uint64_t interp_base;
     uint64_t phdr_vaddr;
     uint16_t phent;
     uint16_t phnum;

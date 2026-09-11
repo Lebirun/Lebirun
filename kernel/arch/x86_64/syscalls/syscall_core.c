@@ -495,6 +495,28 @@ static int syscall_core_console_write_user(const char *buf, int len) {
     return len;
 }
 
+static int pipe_resize_buffer(pipe_t *pipe, uint64_t required);
+
+static void pipe_shrink_after_read(pipe_t *pipe) {
+    uint64_t target;
+
+    if (!pipe || !pipe->buffer || pipe->buf_size == 0) return;
+    if (pipe->count == 0) {
+        kfree(pipe->buffer);
+        pipe->buffer = NULL;
+        pipe->buf_size = 0;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+        return;
+    }
+    if (pipe->buf_size <= PIPE_BUF_SIZE) return;
+    if (pipe->count > SIZE_MAX / 2) return;
+    target = pipe->count * 2;
+    if (target < PIPE_BUF_SIZE) target = PIPE_BUF_SIZE;
+    if (target >= pipe->buf_size) return;
+    pipe_resize_buffer(pipe, target);
+}
+
 static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     uint8_t *new_buffer;
     uint64_t i;
@@ -923,6 +945,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 p->read_pos = (p->read_pos + 1) % p->buf_size;
             }
             p->count -= to_read;
+            pipe_shrink_after_read(p);
             pipe_unlock_irqrestore(p, pipe_flags);
             waitq_wake_all(&p->write_waitq);
             descriptor_ready_notify();

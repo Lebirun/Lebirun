@@ -9,6 +9,7 @@
 #include <lebirun/vring.h>
 #include <lebirun/overlayfs.h>
 #include <lebirun/squashfs.h>
+#include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/kstack.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
@@ -462,6 +463,8 @@ static uint64_t proc_meminfo_read(vfs_node_t *node, uint64_t offset, uint64_t si
         console_reclaim_unused();
         klog_reclaim_unused();
         sysfs_reclaim_unused();
+        ext4_reclaim_mounted_caches(64);
+        squashfs_flush_cache();
         heap_reclaim_unused();
         kstack_reclaim_unused();
     }
@@ -1358,6 +1361,8 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
         console_reclaim_unused();
         klog_reclaim_unused();
         sysfs_reclaim_unused();
+        ext4_reclaim_mounted_caches(64);
+        squashfs_flush_cache();
         heap_reclaim_unused();
         kstack_reclaim_unused();
     }

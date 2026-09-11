@@ -188,6 +188,7 @@ size_t slab_alloc_size(void *ptr);
 int slab_shrink_releases_pages(void *ptr, size_t new_size);
 void slab_stats(void);
 uint64_t slab_get_total_pages(void);
+int slab_flush_stale(void);
 
 int demand_page_fault_handler(uint64_t fault_addr, uint64_t err_code);
 void demand_paging_init(void);

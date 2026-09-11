@@ -203,9 +203,6 @@ void ext4_reclaim_inodes(ext4_fs_t *fs) {
     uint32_t write_index;
 
     if (!fs || !fs->inode_cache) return;
-    for (read_index = 0; read_index < fs->inode_cache_count; read_index++) {
-        if (fs->inode_cache[read_index].ref_count != 0) return;
-    }
     write_index = 0;
     for (read_index = 0; read_index < fs->inode_cache_count; read_index++) {
         if (fs->inode_cache[read_index].ref_count == 0 &&

@@ -84,6 +84,4 @@ void initrd_copy_to_root(void);
 
 void rootfs_init(uint64_t mods_count, uint64_t mods_addr);
 
-void initrd_free_pages(void);
-
 #endif

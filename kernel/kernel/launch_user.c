@@ -17,6 +17,7 @@
 #define AT_PHENT        4
 #define AT_PHNUM        5
 #define AT_PAGESZ       6
+#define AT_BASE         7
 #define AT_ENTRY        9
 #define AT_UID          11
 #define AT_EUID         12
@@ -78,6 +79,10 @@ static int KERNEL_INIT setup_initial_stack_with_elf(
     PUSH_AUXV(AT_UID, 0);
 
     PUSH_AUXV(AT_PAGESZ, 4096);
+
+    if (elf_info->interp_entry) {
+        PUSH_AUXV(AT_BASE, elf_info->interp_base);
+    }
 
     if (elf_info) {
         PUSH_AUXV(AT_ENTRY, elf_info->entry_point);
@@ -175,7 +180,9 @@ static task_t* KERNEL_INIT launch_user_binary_common(
         return NULL;
     }
 
-    t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED,
+    t = create_task_with_cr3((void*)(elf_info.interp_entry ?
+                                     elf_info.interp_entry :
+                                     elf_info.entry_point), TASK_BLOCKED,
                              true, new_pd);
     if (!t) {
         printf("launch_user_binary: create_task failed\n");
@@ -380,7 +387,9 @@ task_t* KERNEL_INIT launch_user_path_state(const char *path, int console_id,
         if (stack_pages) memcpy(user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
     }
 
-    t = create_task_with_cr3((void*)elf_info.entry_point, TASK_BLOCKED, true, new_pd);
+    t = create_task_with_cr3((void*)(elf_info.interp_entry ?
+                                     elf_info.interp_entry :
+                                     elf_info.entry_point), TASK_BLOCKED, true, new_pd);
     if (!t) {
         printf("launch_user_path: create_task failed for '%s'\n", path);
         task_file_map_list_release(&file_maps);

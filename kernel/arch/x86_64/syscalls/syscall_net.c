@@ -588,8 +588,12 @@ static int sys_net_http_get(uint64_t req_ptr, const char *unused1,
     downloaded = 0;
     status_code = 0;
     hdr_len = 0;
+#if CONFIG_DRIVER_NET
     ret = http_download_alloc(url_buf, &kbuf, &downloaded, &status_code,
                               max_redir, &khdr, &hdr_len);
+#else
+    ret = -ENOSYS;
+#endif
 
     if (ret == 0 && kbuf && downloaded > 0) {
         copy_len = downloaded < req.buffer_size ? downloaded : req.buffer_size;
@@ -653,11 +657,15 @@ static int sys_net_http_post(uint64_t req_ptr, const char *unused1,
     kbuf = NULL;
     downloaded = 0;
     status = 0;
+#if CONFIG_DRIVER_NET
     ret = http_post_download_alloc(
         url_buf, ct_buf,
         (const uint8_t *)(uintptr_t)req.post_body,
         req.post_body ? req.post_body_len : 0,
         &kbuf, &downloaded, &status);
+#else
+    ret = -ENOSYS;
+#endif
 
     copy_len = downloaded < req.buffer_size ? downloaded : req.buffer_size;
     if (ret == 0 && kbuf && copy_len > 0) {
@@ -732,8 +740,12 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     downloaded = 0;
     status_code = 0;
     hdr_len = 0;
+#if CONFIG_DRIVER_NET
     ret = http_download_alloc(url_buf, &kbuf, &downloaded, &status_code,
                               max_redir, &khdr, &hdr_len);
+#else
+    ret = -ENOSYS;
+#endif
     kfree(url_buf);
 
     ret = net_http_copy_headers(req.headers_buf, hdr_buf_sz, khdr,

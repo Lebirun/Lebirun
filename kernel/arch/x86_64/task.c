@@ -2890,6 +2890,7 @@ static void task_memory_pressure_reclaim(void) {
     klog_reclaim_unused();
     kstack_reclaim_unused();
     heap_reclaim_unused();
+    slab_flush_stale();
     pfa_ref_gc();
     task_reclaim_blocked_file_exec(64);
     task_reclaim_current_file_exec(64);
@@ -5035,6 +5036,7 @@ static int task_exec_with_args_common(
 #define AT_PHENT        4
 #define AT_PHNUM        5
 #define AT_PAGESZ       6
+#define AT_BASE         7
 #define AT_ENTRY        9
 #define AT_UID          11
 #define AT_EUID         12
@@ -5054,6 +5056,10 @@ static int task_exec_with_args_common(
     tbl_buf[tbl_idx++] = elf_info.entry_point;
     tbl_buf[tbl_idx++] = AT_PAGESZ;
     tbl_buf[tbl_idx++] = 4096;
+    if (elf_info.interp_entry) {
+        tbl_buf[tbl_idx++] = AT_BASE;
+        tbl_buf[tbl_idx++] = elf_info.interp_base;
+    }
     tbl_buf[tbl_idx++] = AT_UID;
     tbl_buf[tbl_idx++] = current_task->uid;
     tbl_buf[tbl_idx++] = AT_EUID;
@@ -5077,6 +5083,7 @@ static int task_exec_with_args_common(
 #undef AT_PHENT
 #undef AT_PHNUM
 #undef AT_PAGESZ
+#undef AT_BASE
 #undef AT_ENTRY
 #undef AT_UID
 #undef AT_EUID
@@ -5097,7 +5104,8 @@ static int task_exec_with_args_common(
 
     task_free_owned_exec_args(argc, k_argv, envc, k_envp);
 
-    entry_to_use = elf_info.entry_point;
+    entry_to_use = elf_info.interp_entry ? elf_info.interp_entry :
+                                               elf_info.entry_point;
 
     final_entry = entry_to_use;
     final_sp = sp;

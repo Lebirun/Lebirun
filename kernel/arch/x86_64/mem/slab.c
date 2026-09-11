@@ -196,7 +196,7 @@ static void slab_unmap_pages(uint64_t virt, uint64_t pages) {
     slab_virtual_dirty = 1;
 }
 
-static int slab_flush_stale(void) {
+int slab_flush_stale(void) {
     uint64_t eflags;
     int result;
 

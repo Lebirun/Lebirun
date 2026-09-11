@@ -1143,63 +1143,6 @@ void KERNEL_INIT rootfs_init(uint64_t mods_count, uint64_t mods_addr) {
                     dirs_created, files_copied, errors);
 }
 
-static void initrd_free_region(uint64_t phys_start, uint64_t phys_end) {
-    uint64_t page_start;
-    uint64_t page_end;
-    uint64_t phys;
-    uint64_t freed;
-
-    if (phys_start == 0 || phys_end == 0 || phys_end <= phys_start) return;
-
-    page_start = phys_start & ~0xFFFu;
-    page_end = (phys_end + 0xFFFu) & ~0xFFFu;
-    freed = 0;
-
-    for (phys = page_start; phys < page_end; phys += PAGE_SIZE) {
-        pfa_free(phys);
-        freed++;
-    }
-
-    printf("INITRD: Freed %lu pages (phys 0x%016lX-0x%016lX, %lu KB)\n",
-           freed, page_start, page_end, freed * 4);
-}
-
-void initrd_free_pages(void) {
-    uint64_t i;
-
-    if (initrd_mod0_phys_start && initrd_mod0_phys_end) {
-        initrd_free_region(initrd_mod0_phys_start, initrd_mod0_phys_end);
-        initrd_mod0_phys_start = 0;
-        initrd_mod0_phys_end = 0;
-    }
-
-    if (initrd_mod1_phys_start && initrd_mod1_phys_end) {
-        if (!squashfs_get_context()) {
-            initrd_free_region(initrd_mod1_phys_start, initrd_mod1_phys_end);
-            initrd_mod1_phys_start = 0;
-            initrd_mod1_phys_end = 0;
-        }
-    }
-
-    if (files) {
-        kfree(files);
-        files = NULL;
-        file_count = 0;
-    }
-
-    if (initrd_vfs_nodes) {
-        for (i = 0; i < initrd_vfs_node_count; i++)
-            vfs_node_release_name(&initrd_vfs_nodes[i]);
-        kfree(initrd_vfs_nodes);
-        initrd_vfs_nodes = NULL;
-        initrd_vfs_node_count = 0;
-    }
-
-    initrd_base = NULL;
-    initrd_header = NULL;
-    file_headers = NULL;
-}
-
 uint8_t *initrd_get_base(void) {
     return initrd_base;
 }
