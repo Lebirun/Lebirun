@@ -16,6 +16,7 @@
 typedef struct {
     int status_code;
     uint64_t content_length;
+    int chunked;
     char content_type[64];
     char location[512];
     uint8_t *body;

@@ -9,9 +9,14 @@ void tcp_tick(void);
 
 tcp_socket_t *tcp_socket_create(void);
 void tcp_socket_close(tcp_socket_t *sock);
+int tcp_listen(uint16_t port, int backlog);
+void tcp_unlisten(uint16_t port);
+tcp_socket_t *tcp_accept(uint16_t port);
+int tcp_accept_pending(uint16_t port);
 int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t timeout_ms);
+int tcp_connect_start(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port);
 int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len);
-int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms);
+int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms, int peek);
 int tcp_disconnect(tcp_socket_t *sock, uint64_t timeout_ms);
 
 #endif

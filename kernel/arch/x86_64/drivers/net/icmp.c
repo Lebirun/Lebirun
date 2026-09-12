@@ -9,6 +9,30 @@
 #include <string.h>
 
 static ping_state_t g_ping_state;
+static icmp_error_hook_t icmp_error_hook;
+
+void icmp_register_error_hook(icmp_error_hook_t hook) {
+    icmp_error_hook = hook;
+}
+
+static void icmp_report_error(uint8_t *data, uint64_t len, int error) {
+    ipv4_header_t *orig;
+    uint64_t ihl;
+    uint16_t local_port;
+
+    if (!icmp_error_hook) return;
+    if (len < sizeof(icmp_header_t) + sizeof(ipv4_header_t) + 4) return;
+    orig = (ipv4_header_t *)(data + sizeof(icmp_header_t));
+    if ((orig->version_ihl >> 4) != 4) return;
+    if (orig->protocol != IP_PROTO_TCP && orig->protocol != IP_PROTO_UDP)
+        return;
+    ihl = (uint64_t)(orig->version_ihl & 0x0F) * 4;
+    if (ihl < sizeof(ipv4_header_t) ||
+        len < sizeof(icmp_header_t) + ihl + 2)
+        return;
+    memcpy(&local_port, (uint8_t *)orig + ihl, 2);
+    icmp_error_hook(orig->protocol, ntohs(local_port), error);
+}
 
 void icmp_receive(netif_t *netif, ipv4_addr_t src, uint8_t *data, uint64_t len) {
     icmp_header_t *icmp;
@@ -38,6 +62,30 @@ void icmp_receive(netif_t *netif, ipv4_addr_t src, uint8_t *data, uint64_t len) 
             break;
 
         default:
+            break;
+
+        case 3:
+            switch (icmp->code) {
+                case 0:
+                    icmp_report_error(data, len, ICMP_ERR_NET_UNREACH);
+                    break;
+                case 1:
+                    icmp_report_error(data, len, ICMP_ERR_HOST_UNREACH);
+                    break;
+                case 3:
+                    icmp_report_error(data, len, ICMP_ERR_CONN_REFUSED);
+                    break;
+                case 4:
+                    icmp_report_error(data, len, ICMP_ERR_MSGSIZE);
+                    break;
+                default:
+                    icmp_report_error(data, len, ICMP_ERR_HOST_UNREACH);
+                    break;
+            }
+            break;
+
+        case 11:
+            icmp_report_error(data, len, ICMP_ERR_TIMEDOUT);
             break;
     }
 }
@@ -69,7 +117,7 @@ static int icmp_send_echo(netif_t *netif, ipv4_addr_t dest, uint16_t id,
 
     icmp->checksum = ipv4_checksum(packet, icmp_len);
 
-    result = ipv4_send(netif, dest, IP_PROTO_ICMP, packet, icmp_len);
+    result = ipv4_send(netif, dest, IP_PROTO_ICMP, packet, icmp_len, 64);
     kfree(packet);
 
     return result;

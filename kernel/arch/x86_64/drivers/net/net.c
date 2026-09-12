@@ -80,6 +80,7 @@ void KERNEL_INIT net_init(void) {
     net_hw_initialized = 0;
 
     netif_init();
+    netif_loopback_init();
     arp_init();
     ipv4_init();
     ipv6_init();

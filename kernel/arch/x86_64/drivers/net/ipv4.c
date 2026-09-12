@@ -1,4 +1,5 @@
 #include <lebirun/drivers/net/ipv4.h>
+#include <lebirun/drivers/net/netif.h>
 #include <lebirun/drivers/net/ethernet.h>
 #include <lebirun/drivers/net/arp.h>
 #include <lebirun/drivers/net/icmp.h>
@@ -81,7 +82,7 @@ int ipv4_is_local(netif_t *netif, ipv4_addr_t ip) {
     return (local & mask) == (target & mask);
 }
 
-int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data, uint64_t len) {
+int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data, uint64_t len, uint8_t ttl) {
     uint64_t total_len;
     uint8_t *packet;
     ipv4_header_t *ip;
@@ -102,7 +103,7 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
     ip->total_length = htons(total_len);
     ip->identification = htons(ip_id_counter++);
     ip->flags_fragment = htons(0x4000);
-    ip->ttl = 64;
+    ip->ttl = ttl ? ttl : 64;
     ip->protocol = protocol;
     ip->checksum = 0;
     ip->src = netif->ipv4;
@@ -111,6 +112,37 @@ int ipv4_send(netif_t *netif, ipv4_addr_t dest, uint8_t protocol, uint8_t *data,
     ip->checksum = ipv4_checksum(ip, sizeof(ipv4_header_t));
 
     memcpy(packet + sizeof(ipv4_header_t), data, len);
+
+    if (dest.octets[0] == 127) {
+        netif_t *lo = netif_find("lo");
+        if (lo && lo->link_up) {
+            if (ip->src.octets[0] != 127) {
+                uint8_t *transport;
+                ip->src = lo->ipv4;
+                transport = packet + sizeof(ipv4_header_t);
+                if (protocol == IP_PROTO_UDP && len >= 8) {
+                    transport[6] = 0;
+                    transport[7] = 0;
+                    *(uint16_t *)(transport + 6) = ipv4_transport_checksum(
+                        ip->src, dest, protocol, transport, len);
+                    if (*(uint16_t *)(transport + 6) == 0)
+                        *(uint16_t *)(transport + 6) = 0xFFFF;
+                } else if (protocol == IP_PROTO_TCP && len >= 18) {
+                    transport[16] = 0;
+                    transport[17] = 0;
+                    *(uint16_t *)(transport + 16) = ipv4_transport_checksum(
+                        ip->src, dest, protocol, transport, len);
+                }
+                ip->checksum = 0;
+                ip->checksum = ipv4_checksum(ip, sizeof(ipv4_header_t));
+            }
+            ipv4_receive(lo, packet, total_len);
+            kfree(packet);
+            return 0;
+        }
+        kfree(packet);
+        return -1;
+    }
 
     next_hop = dest;
 
@@ -174,6 +206,7 @@ void ipv4_receive(netif_t *netif, uint8_t *packet, uint64_t len) {
 
     if (!ipv4_eq(ip->dest, netif->ipv4) &&
         !ipv4_eq(ip->dest, IPV4_BROADCAST) &&
+        !(netif->loopback && ip->dest.octets[0] == 127) &&
         !(ipv4_eq(netif->ipv4, IPV4_ZERO) && !netif->dhcp_configured) &&
         !(!netif->dhcp_configured && dhcp_is_negotiating())) {
         return;

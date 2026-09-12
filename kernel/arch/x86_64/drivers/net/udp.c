@@ -32,10 +32,10 @@ void udp_unregister_port_hook(const udp_port_hook_t *hook) {
 }
 
 int udp_send(netif_t *netif, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
-    return udp_send_from(netif, netif->ipv4, dest, src_port, dest_port, data, len);
+    return udp_send_from(netif, netif->ipv4, dest, src_port, dest_port, data, len, 64);
 }
 
-int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
+int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len, uint8_t ttl) {
     uint64_t udp_len;
     uint8_t *packet;
     udp_header_t *udp;
@@ -60,7 +60,7 @@ int udp_send_from(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint16_t sr
                                             packet, udp_len);
     if (udp->checksum == 0) udp->checksum = 0xFFFF;
 
-    result = ipv4_send(netif, dest, IP_PROTO_UDP, packet, udp_len);
+    result = ipv4_send(netif, dest, IP_PROTO_UDP, packet, udp_len, ttl);
     kfree(packet);
 
     return result;
@@ -228,6 +228,7 @@ udp_socket_t *udp_socket_create(uint16_t port) {
     memset(sock, 0, sizeof(udp_socket_t));
 
     sock->local_port = candidate;
+    sock->ttl = 64;
 
     sock->netif = netif_get_default();
     sock->next = udp_sockets;
@@ -258,10 +259,10 @@ void udp_socket_close(udp_socket_t *sock) {
 
 int udp_socket_send(udp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint8_t *data, uint64_t len) {
     if (!sock || !sock->netif) return -1;
-    return udp_send(sock->netif, dest, sock->local_port, port, data, len);
+    return udp_send_from(sock->netif, sock->netif->ipv4, dest, sock->local_port, port, data, len, sock->ttl);
 }
 
-int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr_t *from_ip, uint16_t *from_port, uint64_t timeout_ms) {
+int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr_t *from_ip, uint16_t *from_port, uint64_t timeout_ms, int peek, uint64_t *full_len) {
     uint64_t timeout_ticks;
     uint64_t start;
     uint64_t copy_len;
@@ -287,7 +288,9 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr
 
     if (from_ip) *from_ip = sock->recv_from_ip;
     if (from_port) *from_port = sock->recv_from_port;
+    if (full_len) *full_len = sock->recv_len;
 
+    if (peek) return copy_len;
     sock->has_data = 0;
     sock->recv_len = 0;
 

@@ -70,6 +70,18 @@ static uint8_t dhcp_parse_options(uint8_t *options, uint64_t len, dhcp_state_t *
                     state->lease_time = ntohl(lt);
                 }
                 break;
+            case DHCP_OPT_T1:
+                if (opt_len >= 4) {
+                    memcpy(&lt, &options[i], 4);
+                    state->t1_time = ntohl(lt);
+                }
+                break;
+            case DHCP_OPT_T2:
+                if (opt_len >= 4) {
+                    memcpy(&lt, &options[i], 4);
+                    state->t2_time = ntohl(lt);
+                }
+                break;
             case DHCP_OPT_SERVER_ID:
                 if (opt_len >= 4) {
                     memcpy(&state->server_ip, &options[i], 4);
@@ -114,7 +126,7 @@ static int dhcp_send_discover(netif_t *netif) {
 
     return udp_send_from(netif, IPV4_ZERO, IPV4_BROADCAST,
                          DHCP_CLIENT_PORT, DHCP_SERVER_PORT,
-                         (uint8_t *)&pkt, sizeof(pkt));
+                         (uint8_t *)&pkt, sizeof(pkt), 64);
 }
 
 static int dhcp_send_request(netif_t *netif) {
@@ -152,7 +164,41 @@ static int dhcp_send_request(netif_t *netif) {
 
     return udp_send_from(netif, IPV4_ZERO, IPV4_BROADCAST,
                          DHCP_CLIENT_PORT, DHCP_SERVER_PORT,
-                         (uint8_t *)&pkt, sizeof(pkt));
+                         (uint8_t *)&pkt, sizeof(pkt), 64);
+}
+
+static int dhcp_send_renew(netif_t *netif, ipv4_addr_t dest) {
+    dhcp_packet_t pkt;
+    uint64_t opt_off;
+    uint8_t msg_type;
+    uint8_t param_list[3];
+
+    memset(&pkt, 0, sizeof(pkt));
+
+    pkt.op = DHCP_OP_REQUEST;
+    pkt.htype = 1;
+    pkt.hlen = 6;
+    pkt.xid = htonl(g_dhcp_state.xid);
+    memcpy(pkt.chaddr, &netif->mac, 6);
+    pkt.ciaddr = g_dhcp_state.offered_ip;
+    pkt.magic = htonl(DHCP_MAGIC);
+
+    opt_off = 0;
+    msg_type = DHCP_MSG_REQUEST;
+    dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_MSG_TYPE, 1, &msg_type);
+
+    param_list[0] = DHCP_OPT_SUBNET;
+    param_list[1] = DHCP_OPT_ROUTER;
+    param_list[2] = DHCP_OPT_DNS;
+    dhcp_add_option(pkt.options, &opt_off, DHCP_OPT_PARAM_LIST, sizeof(param_list), param_list);
+
+    pkt.options[opt_off++] = DHCP_OPT_END;
+
+    g_dhcp_state.last_send_time = net_get_ticks();
+
+    return udp_send_from(netif, g_dhcp_state.offered_ip, dest,
+                         DHCP_CLIENT_PORT, DHCP_SERVER_PORT,
+                         (uint8_t *)&pkt, sizeof(pkt), 64);
 }
 
 void dhcp_init(netif_t *netif) {
@@ -197,6 +243,10 @@ static void dhcp_apply_config(netif_t *netif, dhcp_state_t *temp) {
     if (temp->lease_time != 0) {
         g_dhcp_state.lease_time = temp->lease_time;
     }
+    g_dhcp_state.t1_time = temp->t1_time ?
+        temp->t1_time : g_dhcp_state.lease_time / 2;
+    g_dhcp_state.t2_time = temp->t2_time ?
+        temp->t2_time : g_dhcp_state.lease_time * 7 / 8;
 
     g_dhcp_state.state = DHCP_STATE_BOUND;
     g_dhcp_state.lease_start = net_get_ticks();
@@ -269,6 +319,16 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len) {
             }
             break;
 
+        case DHCP_STATE_RENEWING:
+        case DHCP_STATE_REBINDING:
+            if (msg_type == DHCP_MSG_ACK) {
+                dhcp_apply_config(netif, &temp);
+            } else if (msg_type == DHCP_MSG_NAK) {
+                g_dhcp_state.state = DHCP_STATE_INIT;
+                dhcp_start(netif);
+            }
+            break;
+
         default:
             break;
     }
@@ -276,18 +336,24 @@ void dhcp_receive(netif_t *netif, uint8_t *data, uint64_t len) {
 
 int dhcp_is_negotiating(void) {
     return g_dhcp_state.state == DHCP_STATE_SELECTING ||
-           g_dhcp_state.state == DHCP_STATE_REQUESTING;
+           g_dhcp_state.state == DHCP_STATE_REQUESTING ||
+           g_dhcp_state.state == DHCP_STATE_RENEWING ||
+           g_dhcp_state.state == DHCP_STATE_REBINDING;
 }
 
 void dhcp_tick(void) {
     uint64_t elapsed;
     uint64_t now;
     uint64_t retry_interval;
+    uint64_t t1_ms;
+    uint64_t t2_ms;
 
     now = net_get_ticks();
 
     if (g_dhcp_state.state == DHCP_STATE_SELECTING ||
-        g_dhcp_state.state == DHCP_STATE_REQUESTING) {
+        g_dhcp_state.state == DHCP_STATE_REQUESTING ||
+        g_dhcp_state.state == DHCP_STATE_RENEWING ||
+        g_dhcp_state.state == DHCP_STATE_REBINDING) {
         elapsed = now - g_dhcp_state.last_send_time;
         retry_interval = DHCP_RETRY_INTERVAL * (1u + g_dhcp_state.retries);
         if (retry_interval > DHCP_RETRY_INTERVAL * 4) {
@@ -296,27 +362,48 @@ void dhcp_tick(void) {
         if (elapsed < retry_interval) return;
 
         if (g_dhcp_state.retries >= DHCP_MAX_RETRIES) {
-            g_dhcp_state.state = DHCP_STATE_SELECTING;
-            g_dhcp_state.retries = 0;
-            g_dhcp_state.xid = dhcp_rand_xid();
-            dhcp_send_discover(g_dhcp_state.netif);
+            if (g_dhcp_state.state == DHCP_STATE_RENEWING) {
+                g_dhcp_state.state = DHCP_STATE_REBINDING;
+                g_dhcp_state.retries = 0;
+                dhcp_send_renew(g_dhcp_state.netif, IPV4_BROADCAST);
+            } else {
+                g_dhcp_state.state = DHCP_STATE_SELECTING;
+                g_dhcp_state.retries = 0;
+                g_dhcp_state.xid = dhcp_rand_xid();
+                dhcp_send_discover(g_dhcp_state.netif);
+            }
         } else {
             g_dhcp_state.retries++;
             if (g_dhcp_state.state == DHCP_STATE_SELECTING)
                 dhcp_send_discover(g_dhcp_state.netif);
-            else
+            else if (g_dhcp_state.state == DHCP_STATE_REQUESTING)
                 dhcp_send_request(g_dhcp_state.netif);
+            else if (g_dhcp_state.state == DHCP_STATE_RENEWING)
+                dhcp_send_renew(g_dhcp_state.netif,
+                                g_dhcp_state.server_ip);
+            else
+                dhcp_send_renew(g_dhcp_state.netif, IPV4_BROADCAST);
         }
         return;
     }
 
     if (g_dhcp_state.state == DHCP_STATE_BOUND && g_dhcp_state.lease_time > 0) {
         elapsed = now - g_dhcp_state.lease_start;
-        if (elapsed > g_dhcp_state.lease_time * 500) {
+        t1_ms = g_dhcp_state.t1_time * 1000;
+        t2_ms = g_dhcp_state.t2_time * 1000;
+        if (elapsed > g_dhcp_state.lease_time * 1000) {
             g_dhcp_state.state = DHCP_STATE_SELECTING;
             g_dhcp_state.retries = 0;
             g_dhcp_state.xid = dhcp_rand_xid();
             dhcp_send_discover(g_dhcp_state.netif);
+        } else if (elapsed > t2_ms) {
+            g_dhcp_state.state = DHCP_STATE_REBINDING;
+            g_dhcp_state.retries = 0;
+            dhcp_send_renew(g_dhcp_state.netif, IPV4_BROADCAST);
+        } else if (elapsed > t1_ms) {
+            g_dhcp_state.state = DHCP_STATE_RENEWING;
+            g_dhcp_state.retries = 0;
+            dhcp_send_renew(g_dhcp_state.netif, g_dhcp_state.server_ip);
         }
     }
 }

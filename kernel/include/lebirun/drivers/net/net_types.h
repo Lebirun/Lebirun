@@ -64,6 +64,8 @@
 #define DHCP_OPT_MSG_TYPE     53
 #define DHCP_OPT_SERVER_ID    54
 #define DHCP_OPT_PARAM_LIST   55
+#define DHCP_OPT_T1           58
+#define DHCP_OPT_T2           59
 #define DHCP_OPT_END          255
 
 #define DNS_PORT 53
@@ -230,6 +232,7 @@ struct netif {
     uint64_t mtu;
     uint8_t link_up;
     uint8_t dhcp_configured;
+    uint8_t loopback;
     netif_send_t send;
     netif_poll_t poll;
     void *driver_data;
@@ -259,6 +262,17 @@ typedef struct {
 
 #define TCP_WINDOW_SIZE 65535
 #define TCP_MSS 1460
+
+typedef struct tcp_socket tcp_socket_t;
+
+typedef struct tcp_listener {
+    uint16_t port;
+    int backlog;
+    int pending_count;
+    tcp_socket_t *completed_head;
+    tcp_socket_t *completed_tail;
+    struct tcp_listener *next;
+} tcp_listener_t;
 
 typedef struct tcp_retx_seg {
     uint8_t *data;
@@ -290,18 +304,25 @@ typedef struct tcp_socket {
     uint64_t send_buffer_tail;
     uint64_t retransmit_timeout;
     uint64_t last_ack_time;
+    uint8_t keepalive;
+    uint8_t ka_probes;
+    uint64_t ka_last;
+    uint64_t tw_enter;
     tcp_retx_seg_t *retx_head;
     tcp_retx_seg_t *retx_tail;
     uint32_t retx_count;
     uint64_t fin_send_time;
     uint8_t fin_retries;
+    uint8_t ttl;
     netif_t *netif;
     struct tcp_socket *next;
+    struct tcp_socket *accept_next;
 } tcp_socket_t;
 
 typedef struct udp_socket {
     ipv4_addr_t local_ip;
     uint16_t local_port;
+    uint8_t ttl;
     uint8_t *recv_buffer;
     uint64_t recv_buffer_size;
     uint64_t recv_len;

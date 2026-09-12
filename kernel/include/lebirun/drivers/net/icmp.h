@@ -19,4 +19,14 @@ typedef struct {
 int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms);
 int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms);
 
+typedef void (*icmp_error_hook_t)(uint8_t proto, uint16_t local_port,
+                                  int error);
+void icmp_register_error_hook(icmp_error_hook_t hook);
+
+#define ICMP_ERR_MSGSIZE 90
+#define ICMP_ERR_NET_UNREACH 101
+#define ICMP_ERR_TIMEDOUT 110
+#define ICMP_ERR_CONN_REFUSED 111
+#define ICMP_ERR_HOST_UNREACH 113
+
 #endif

@@ -93,7 +93,7 @@ static int wolf_recv_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx)
     tcp = (tcp_socket_t *)ctx;
     if (task_has_pending_signals()) return WOLFSSL_CBIO_ERR_GENERAL;
     netif_poll_all();
-    n = tcp_recv(tcp, (uint8_t *)buf, (uint64_t)sz, 15000);
+    n = tcp_recv(tcp, (uint8_t *)buf, (uint64_t)sz, 15000, 0);
     if (n < 0) return WOLFSSL_CBIO_ERR_GENERAL;
     if (n == 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
     return n;

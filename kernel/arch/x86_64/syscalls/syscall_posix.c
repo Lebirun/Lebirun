@@ -1742,9 +1742,9 @@ static int sys_truncate(uint64_t path_ptr, const char *len_ptr, int unused) {
         vfs_release(node);
         return result;
     }
-    
+
     vfs_release(node);
-    return -1;
+    return -EINVAL;
 }
 
 static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
@@ -1766,9 +1766,12 @@ static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     if (node->ops && node->ops->truncate) {
         return node->ops->truncate(node, length);
     }
-    
-    return -ENOSYS;
+
+    return -EINVAL;
 }
+
+#define FALLOC_FL_KEEP_SIZE 0x01
+#define FALLOC_FL_PUNCH_HOLE 0x02
 
 static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
                          int64_t length) {
@@ -1778,7 +1781,9 @@ static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
     vfs_node_t *node;
 
     mode = (int)(uintptr_t)mode_ptr;
-    if (mode != 0) return -EOPNOTSUPP;
+    if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+        return -EOPNOTSUPP;
+    if (mode & FALLOC_FL_PUNCH_HOLE) return -EOPNOTSUPP;
     if (offset < 0 || length <= 0) return -EINVAL;
     if ((uint64_t)offset > UINT64_MAX - (uint64_t)length)
         return -EFBIG;
@@ -1793,6 +1798,7 @@ static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
     end = (uint64_t)offset + (uint64_t)length;
     if (end <= node->length) return 0;
+    if (mode & FALLOC_FL_KEEP_SIZE) return 0;
     if (!node->ops || !node->ops->truncate) return -EOPNOTSUPP;
     return node->ops->truncate(node, end);
 }

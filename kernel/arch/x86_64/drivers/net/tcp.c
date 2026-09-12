@@ -8,12 +8,17 @@
 #include <string.h>
 
 static tcp_socket_t *tcp_sockets = NULL;
+static tcp_listener_t *tcp_listeners = NULL;
 static uint16_t tcp_ephemeral_port = 49152;
 static uint32_t tcp_isn = 0;
 
 #define TCP_RETX_TIMEOUT_MS 500
 #define TCP_RETX_MAX_RETRIES 8
 #define TCP_RECV_BUF_INIT 2048
+#define TCP_2MSL_MS 60000
+#define TCP_KEEPIDLE_MS 60000
+#define TCP_KEEPINTVL_MS 10000
+#define TCP_KEEPMAX_PROBES 6
 
 static void tcp_retx_queue_add(tcp_socket_t *sock, uint8_t *data, uint64_t len, uint32_t seq) {
     tcp_retx_seg_t *seg;
@@ -132,14 +137,14 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
     tcp->checksum = ipv4_transport_checksum(sock->local_ip, sock->remote_ip,
                                             IP_PROTO_TCP, packet, tcp_len);
 
-    result = ipv4_send(sock->netif, sock->remote_ip, IP_PROTO_TCP, packet, tcp_len);
+    if (flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) sock->send_next++;
+    if (len > 0) sock->send_next += (uint32_t)len;
+    result = ipv4_send(sock->netif, sock->remote_ip, IP_PROTO_TCP, packet, tcp_len, sock->ttl);
     kfree(packet);
 
-    if (result == 0 && (flags & (TCP_FLAG_SYN | TCP_FLAG_FIN))) {
-        sock->send_next++;
-    }
-    if (result == 0 && len > 0) {
-        sock->send_next += len;
+    if (result != 0) {
+        sock->send_next -= (uint32_t)len;
+        if (flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) sock->send_next--;
     }
 
     return result;
@@ -155,6 +160,7 @@ tcp_socket_t *tcp_socket_create(void) {
 
     sock->state = TCP_STATE_CLOSED;
     sock->local_port = tcp_alloc_port();
+    sock->ttl = 64;
     sock->recv_window = TCP_WINDOW_SIZE;
     sock->send_window = TCP_WINDOW_SIZE;
 
@@ -200,15 +206,11 @@ void tcp_socket_close(tcp_socket_t *sock) {
     kfree(sock);
 }
 
-int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t timeout_ms) {
-    uint64_t timeout_ticks;
-    uint64_t start;
-    uint64_t last_syn;
-    uint64_t syn_interval;
-    uint32_t syn_saved;
-
+int tcp_connect_start(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port) {
     net_ensure_hw();
     if (!sock || sock->state != TCP_STATE_CLOSED) return -1;
+    if (!sock->netif) sock->netif = netif_get_default();
+    if (!sock->netif) return -1;
 
     sock->remote_ip = dest;
     sock->remote_port = port;
@@ -224,6 +226,19 @@ int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t ti
         sock->state = TCP_STATE_CLOSED;
         return -1;
     }
+    sock->ka_last = pit_get_ticks();
+    sock->ka_probes = 0;
+    return 0;
+}
+
+int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t timeout_ms) {
+    uint64_t timeout_ticks;
+    uint64_t start;
+    uint64_t last_syn;
+    uint64_t syn_interval;
+    uint32_t syn_saved;
+
+    if (tcp_connect_start(sock, dest, port) < 0) return -1;
 
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();
@@ -260,6 +275,9 @@ int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
 
     if (!sock || sock->state != TCP_STATE_ESTABLISHED) return -1;
 
+    sock->ka_last = pit_get_ticks();
+    sock->ka_probes = 0;
+
     sent = 0;
     while (sent < len) {
         chunk = len - sent;
@@ -281,7 +299,7 @@ int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
     return sent;
 }
 
-int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms) {
+int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms, int peek) {
     uint64_t timeout_ticks;
     uint64_t start;
     uint64_t available;
@@ -331,9 +349,11 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
     copied = 0;
 
     while (copied < to_copy) {
-        buffer[copied++] = sock->recv_buffer[sock->recv_buffer_head];
-        sock->recv_buffer_head = (sock->recv_buffer_head + 1) % sock->recv_buffer_size;
+        buffer[copied] = sock->recv_buffer[(sock->recv_buffer_head + copied) % sock->recv_buffer_size];
+        copied++;
     }
+    if (peek) return copied;
+    sock->recv_buffer_head = (sock->recv_buffer_head + copied) % sock->recv_buffer_size;
 
     if (old_window < 4096 && sock->state == TCP_STATE_ESTABLISHED) {
         tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
@@ -413,12 +433,121 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     sock->recv_buffer_tail = used;
 }
 
+static tcp_listener_t *tcp_find_listener(uint16_t port) {
+    tcp_listener_t *l;
+
+    l = tcp_listeners;
+    while (l) {
+        if (l->port == port) return l;
+        l = l->next;
+    }
+    return NULL;
+}
+
+int tcp_listen(uint16_t port, int backlog) {
+    tcp_listener_t *l;
+
+    if (tcp_find_listener(port)) return -1;
+    l = (tcp_listener_t *)kmalloc(sizeof(tcp_listener_t));
+    if (!l) return -1;
+    memset(l, 0, sizeof(tcp_listener_t));
+    l->port = port;
+    l->backlog = backlog < 1 ? 1 : backlog;
+    l->next = tcp_listeners;
+    tcp_listeners = l;
+    return 0;
+}
+
+void tcp_unlisten(uint16_t port) {
+    tcp_listener_t **prev;
+    tcp_listener_t *l;
+    tcp_socket_t *sock;
+    tcp_socket_t *next;
+    tcp_socket_t *done;
+
+    prev = &tcp_listeners;
+    while (*prev) {
+        if ((*prev)->port == port) {
+            l = *prev;
+            *prev = l->next;
+            done = l->completed_head;
+            while (done) {
+                next = done->accept_next;
+                tcp_socket_close(done);
+                done = next;
+            }
+            kfree(l);
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+
+    sock = tcp_sockets;
+    while (sock) {
+        next = sock->next;
+        if (sock->state == TCP_STATE_SYN_RCVD && sock->local_port == port)
+            tcp_socket_close(sock);
+        sock = next;
+    }
+}
+
+int tcp_accept_pending(uint16_t port) {
+    tcp_listener_t *l;
+
+    l = tcp_find_listener(port);
+    return l && l->completed_head ? 1 : 0;
+}
+
+tcp_socket_t *tcp_accept(uint16_t port) {
+    tcp_listener_t *l;
+    tcp_socket_t *sock;
+
+    l = tcp_find_listener(port);
+    if (!l || !l->completed_head) return NULL;
+    sock = l->completed_head;
+    l->completed_head = sock->accept_next;
+    if (!l->completed_head) l->completed_tail = NULL;
+    sock->accept_next = NULL;
+    l->pending_count--;
+    return sock;
+}
+
+static void tcp_listener_complete(uint16_t port, tcp_socket_t *sock) {
+    tcp_listener_t *l;
+
+    l = tcp_find_listener(port);
+    if (!l) {
+        tcp_socket_close(sock);
+        return;
+    }
+    if (l->pending_count > l->backlog) {
+        tcp_socket_close(sock);
+        return;
+    }
+    sock->accept_next = NULL;
+    if (l->completed_tail) {
+        l->completed_tail->accept_next = sock;
+    } else {
+        l->completed_head = sock;
+    }
+    l->completed_tail = sock;
+}
+
+static void tcp_drop_server_socket(tcp_socket_t *sock) {
+    tcp_listener_t *l;
+
+    l = tcp_find_listener(sock->local_port);
+    if (l) l->pending_count--;
+    tcp_socket_close(sock);
+}
+
 void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
     tcp_header_t *tcp;
     uint16_t src_port;
     uint16_t dest_port;
     uint32_t seq;
     uint32_t ack;
+    uint32_t saved_send;
     uint8_t flags;
     uint64_t header_len;
     uint8_t *payload;
@@ -455,7 +584,34 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         sock = sock->next;
     }
 
-    if (!sock) return;
+    if (!sock) {
+        tcp_listener_t *listener;
+        tcp_socket_t *server;
+
+        if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) != TCP_FLAG_SYN)
+            return;
+        listener = tcp_find_listener(dest_port);
+        if (!listener || listener->pending_count >= listener->backlog)
+            return;
+        server = tcp_socket_create();
+        if (!server) return;
+        server->netif = netif;
+        server->local_port = dest_port;
+        server->local_ip = dest;
+        server->remote_ip = src;
+        server->remote_port = src_port;
+        server->recv_next = seq + 1;
+        server->send_next = tcp_isn++;
+        server->send_window = ntohs(tcp->window);
+        server->state = TCP_STATE_SYN_RCVD;
+        server->ka_last = pit_get_ticks();
+        if (tcp_send_segment(server, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0) < 0) {
+            tcp_socket_close(server);
+            return;
+        }
+        listener->pending_count++;
+        return;
+    }
 
     sock->send_window = ntohs(tcp->window);
 
@@ -470,7 +626,32 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                 sock->recv_next = seq + 1;
                 sock->send_una = ack;
                 sock->state = TCP_STATE_ESTABLISHED;
+                sock->ka_last = pit_get_ticks();
+                sock->ka_probes = 0;
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+            }
+            break;
+
+        case TCP_STATE_SYN_RCVD:
+            if (flags & TCP_FLAG_RST) {
+                tcp_drop_server_socket(sock);
+                break;
+            }
+            if (flags & TCP_FLAG_SYN) {
+                sock->recv_next = seq + 1;
+                sock->ka_last = pit_get_ticks();
+                saved_send = sock->send_next;
+                tcp_send_segment(sock, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
+                sock->send_next = saved_send;
+                break;
+            }
+            if ((flags & TCP_FLAG_ACK) && ack == sock->send_next) {
+                sock->state = TCP_STATE_ESTABLISHED;
+                sock->send_una = ack;
+                sock->ka_last = pit_get_ticks();
+                sock->ka_probes = 0;
+                tcp_listener_complete(sock->local_port, sock);
+                descriptor_ready_notify();
             }
             break;
 
@@ -483,6 +664,8 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             if (flags & TCP_FLAG_ACK) {
                 sock->send_una = ack;
                 sock->last_ack_time = pit_get_ticks();
+                sock->ka_last = sock->last_ack_time;
+                sock->ka_probes = 0;
                 tcp_retx_queue_ack(sock, ack);
             }
             if (payload_len > 0) {
@@ -542,6 +725,7 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                 if (flags & TCP_FLAG_FIN) {
                     sock->recv_next = seq + 1;
                     sock->state = TCP_STATE_TIME_WAIT;
+                    sock->tw_enter = pit_get_ticks();
                     tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
                 } else {
                     sock->state = TCP_STATE_FIN_WAIT2;
@@ -558,6 +742,7 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             if (flags & TCP_FLAG_FIN) {
                 sock->recv_next = seq + 1;
                 sock->state = TCP_STATE_TIME_WAIT;
+                sock->tw_enter = pit_get_ticks();
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
             }
             break;
@@ -580,16 +765,58 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
 
 void tcp_tick(void) {
     tcp_socket_t *sock;
+    tcp_socket_t *next;
     tcp_retx_seg_t *seg;
     uint64_t now;
     uint64_t timeout_ticks;
     uint32_t saved_send_next;
+    uint8_t probe;
 
     sock = tcp_sockets;
     now = pit_get_ticks();
     while (sock) {
+        next = sock->next;
         if (sock->state == TCP_STATE_TIME_WAIT) {
-            sock->state = TCP_STATE_CLOSED;
+            if (now - sock->tw_enter > pit_ms_to_ticks(TCP_2MSL_MS))
+                sock->state = TCP_STATE_CLOSED;
+        }
+        if (sock->state == TCP_STATE_SYN_RCVD &&
+            now - sock->ka_last > pit_ms_to_ticks(30000)) {
+            tcp_drop_server_socket(sock);
+            sock = next;
+            continue;
+        }
+        if (sock->state == TCP_STATE_SYN_SENT) {
+            if (sock->ka_probes >= 60) {
+                sock->state = TCP_STATE_CLOSED;
+                tcp_retx_queue_free(sock);
+            } else if (now - sock->ka_last >
+                       pit_ms_to_ticks(1000)) {
+                saved_send_next = sock->send_next;
+                tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
+                sock->send_next = saved_send_next;
+                sock->ka_last = now;
+                sock->ka_probes++;
+            }
+        }
+        if (sock->state == TCP_STATE_ESTABLISHED && sock->keepalive) {
+            if (now - sock->ka_last > pit_ms_to_ticks(sock->ka_probes ?
+                                                      TCP_KEEPINTVL_MS :
+                                                      TCP_KEEPIDLE_MS)) {
+                if (sock->ka_probes >= TCP_KEEPMAX_PROBES) {
+                    sock->state = TCP_STATE_CLOSED;
+                    tcp_retx_queue_free(sock);
+                } else if (sock->send_next != 0) {
+                    sock->send_next--;
+                    probe = 0;
+                    tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH,
+                                     &probe, 1);
+                    sock->ka_last = now;
+                    sock->ka_probes++;
+                } else {
+                    sock->ka_last = now;
+                }
+            }
         }
         if (sock->state == TCP_STATE_ESTABLISHED && sock->retx_head) {
             seg = sock->retx_head;
@@ -620,6 +847,6 @@ void tcp_tick(void) {
                 }
             }
         }
-        sock = sock->next;
+        sock = next;
     }
 }

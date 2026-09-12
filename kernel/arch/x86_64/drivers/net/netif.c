@@ -11,6 +11,22 @@ void KERNEL_INIT netif_init(void) {
     netif_default = NULL;
 }
 
+void netif_loopback_init(void) {
+    netif_t *lo;
+
+    if (netif_find("lo")) return;
+    lo = netif_alloc();
+    if (!lo) return;
+    memcpy(lo->name, "lo", 3);
+    lo->ipv4 = IPV4_ADDR(127, 0, 0, 1);
+    lo->netmask = IPV4_ADDR(255, 0, 0, 0);
+    lo->mtu = 65536;
+    lo->link_up = 1;
+    lo->loopback = 1;
+    netif_register(lo);
+    if (!netif_default) netif_default = lo;
+}
+
 netif_t *netif_alloc(void) {
     netif_t *netif = (netif_t *)kmalloc(sizeof(netif_t));
     if (!netif) return NULL;

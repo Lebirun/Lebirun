@@ -168,6 +168,7 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
     if (header_end == 0) return -1;
 
     response->content_length = 0;
+    response->chunked = 0;
     response->content_type[0] = '\0';
     response->location[0] = '\0';
     response->raw_headers = data;
@@ -221,12 +222,93 @@ static int http_parse_response(uint8_t *data, uint64_t len, http_response_t *res
             }
             response->location[loc_len] = '\0';
         }
+        if (i + 17 < header_end &&
+            (data[i] == 'T' || data[i] == 't') &&
+            (data[i+1] == 'r' || data[i+1] == 'R') &&
+            (data[i+2] == 'a' || data[i+2] == 'A') &&
+            (data[i+3] == 'n' || data[i+3] == 'N') &&
+            (data[i+4] == 's' || data[i+4] == 'S') &&
+            (data[i+5] == 'f' || data[i+5] == 'F') &&
+            (data[i+6] == 'e' || data[i+6] == 'E') &&
+            (data[i+7] == 'r' || data[i+7] == 'R') &&
+            data[i+8] == '-' &&
+            (data[i+9] == 'E' || data[i+9] == 'e') &&
+            (data[i+10] == 'n' || data[i+10] == 'N') &&
+            (data[i+11] == 'c' || data[i+11] == 'C') &&
+            (data[i+12] == 'o' || data[i+12] == 'O') &&
+            (data[i+13] == 'd' || data[i+13] == 'D') &&
+            (data[i+14] == 'i' || data[i+14] == 'I') &&
+            (data[i+15] == 'n' || data[i+15] == 'N') &&
+            (data[i+16] == 'g' || data[i+16] == 'G') &&
+            data[i+17] == ':') {
+            j = i + 18;
+            while (j < header_end && (data[j] == ' ' || data[j] == '\t')) j++;
+            if (j + 7 < header_end &&
+                (data[j] == 'c' || data[j] == 'C') &&
+                (data[j+1] == 'h' || data[j+1] == 'H') &&
+                (data[j+2] == 'u' || data[j+2] == 'U') &&
+                (data[j+3] == 'n' || data[j+3] == 'N') &&
+                (data[j+4] == 'k' || data[j+4] == 'K') &&
+                (data[j+5] == 'e' || data[j+5] == 'E') &&
+                (data[j+6] == 'd' || data[j+6] == 'D'))
+                response->chunked = 1;
+        }
     }
 
     response->body = data + header_end;
     response->body_len = len - header_end;
 
     return 0;
+}
+
+static int http_dechunk(uint8_t *data, uint64_t len, uint64_t *out_len) {
+    uint64_t r;
+    uint64_t w;
+    uint64_t chunk;
+    int digits;
+
+    r = 0;
+    w = 0;
+    while (r < len) {
+        chunk = 0;
+        digits = 0;
+        while (r < len && data[r] != '\r' && data[r] != '\n') {
+            if (data[r] >= '0' && data[r] <= '9')
+                chunk = chunk * 16 + (uint64_t)(data[r] - '0');
+            else if (data[r] >= 'a' && data[r] <= 'f')
+                chunk = chunk * 16 + (uint64_t)(data[r] - 'a' + 10);
+            else if (data[r] >= 'A' && data[r] <= 'F')
+                chunk = chunk * 16 + (uint64_t)(data[r] - 'A' + 10);
+            else if (data[r] == ';' || data[r] == ' ' || data[r] == '\t') {
+                while (r < len && data[r] != '\r' && data[r] != '\n') r++;
+                break;
+            } else {
+                return -1;
+            }
+            if (++digits > 16) return -1;
+            r++;
+        }
+        if (r + 1 >= len || data[r] != '\r' || data[r + 1] != '\n')
+            return -1;
+        r += 2;
+        if (chunk == 0) {
+            while (r + 1 < len && !(data[r] == '\r' && data[r + 1] == '\n')) {
+                while (r < len && data[r] != '\n') r++;
+                if (r < len) r++;
+            }
+            *out_len = w;
+            return 0;
+        }
+        if (chunk > len - r) return -1;
+        if (w + chunk < w) return -1;
+        memmove(data + w, data + r, chunk);
+        w += chunk;
+        r += chunk;
+        if (r + 1 >= len || data[r] != '\r' || data[r + 1] != '\n')
+            return -1;
+        r += 2;
+    }
+    return -1;
 }
 
 static int http_finish_response(uint8_t *recv_buf, uint64_t total_recv,
@@ -241,6 +323,14 @@ static int http_finish_response(uint8_t *recv_buf, uint64_t total_recv,
     if (http_parse_response(recv_buf, total_recv, response) < 0) {
         kfree(recv_buf);
         return -1;
+    }
+
+    if (response->chunked) {
+        if (http_dechunk(response->body, response->body_len,
+                         &response->body_len) < 0) {
+            kfree(recv_buf);
+            return -1;
+        }
     }
 
     response->body = (uint8_t *)kmalloc(response->body_len + 1);
@@ -469,7 +559,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
         if (use_tls) {
             n = tls_recv(tls, recv_buf + total_recv, buf_cap - total_recv, 1000);
         } else {
-            n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000);
+            n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000, 0);
         }
         if (n > 0) {
             total_recv += n;
@@ -990,7 +1080,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
             receive_error = 1;
             break;
         }
-        n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000);
+        n = tcp_recv(sock, recv_buf + total_recv, buf_cap - total_recv, 1000, 0);
         if (n > 0) {
             total_recv += n;
             start = net_get_ticks();

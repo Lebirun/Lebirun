@@ -4,6 +4,7 @@
 #include <lebirun/drivers/net/net_types.h>
 
 void netif_init(void);
+void netif_loopback_init(void);
 netif_t *netif_alloc(void);
 void netif_register(netif_t *netif);
 netif_t *netif_get_default(void);
