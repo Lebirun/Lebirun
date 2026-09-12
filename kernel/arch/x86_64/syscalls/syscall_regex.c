@@ -532,40 +532,12 @@ int regex_clone_address_space(uint64_t source_cr3, uint64_t dest_cr3) {
 }
 
 static int regex_copy_user_string(const char *source, char **result) {
-    char *buffer;
-    char *resized;
-    size_t length;
-    size_t capacity;
-    char value;
+    char *copy;
 
     if (!source || !result) return -EFAULT;
-    buffer = NULL;
-    length = 0;
-    capacity = 0;
-    for (;;) {
-        if (copy_from_user(&value, source + length, 1) < 0) {
-            if (buffer) kfree(buffer);
-            return -EFAULT;
-        }
-        if (length == capacity) {
-            if (capacity > SIZE_MAX / 2) {
-                if (buffer) kfree(buffer);
-                return -ENOMEM;
-            }
-            capacity = capacity ? capacity * 2 : 64;
-            resized = (char *)krealloc(buffer, capacity);
-            if (!resized) {
-                if (buffer) kfree(buffer);
-                return -ENOMEM;
-            }
-            buffer = resized;
-        }
-        buffer[length++] = value;
-        if (value == '\0') break;
-    }
-    resized = (char *)krealloc(buffer, length);
-    if (resized) buffer = resized;
-    *result = buffer;
+    copy = copy_string_from_user_alloc(source);
+    if (!copy) return -EFAULT;
+    *result = copy;
     return 0;
 }
 
@@ -963,7 +935,8 @@ static int try_match(compiled_regex_t *compiled, size_t node_start, const char *
             continue;
         }
         
-        if (node->type == NODE_LOOKAHEAD) {
+        if (node->type == NODE_LOOKAHEAD || node->type == NODE_NEG_LOOKAHEAD) {
+            int negate;
             depth = 1;
             la_start = node_idx + 1;
             la_end = la_start;
@@ -974,41 +947,17 @@ static int try_match(compiled_regex_t *compiled, size_t node_start, const char *
                     depth--;
                 la_end++;
             }
-            
+
             sub_compiled.num_nodes = la_end - la_start;
             sub_compiled.num_groups = compiled->num_groups;
             sub_compiled.node_capacity = sub_compiled.num_nodes;
             sub_compiled.nodes = compiled->nodes + la_start;
-            
-            if (!try_match(&sub_compiled, 0, pos, start, &dummy, captures,
-                           capture_count, cflags, eflags))
-                return 0;
-            
-            node_idx = la_end;
-            continue;
-        }
-        
-        if (node->type == NODE_NEG_LOOKAHEAD) {
-            depth = 1;
-            la_start = node_idx + 1;
-            la_end = la_start;
-            while (la_end < compiled->num_nodes && depth > 0) {
-                if (compiled->nodes[la_end].type == NODE_GROUP_START)
-                    depth++;
-                else if (compiled->nodes[la_end].type == NODE_GROUP_END)
-                    depth--;
-                la_end++;
-            }
-            
-            sub_compiled.num_nodes = la_end - la_start;
-            sub_compiled.num_groups = compiled->num_groups;
-            sub_compiled.node_capacity = sub_compiled.num_nodes;
-            sub_compiled.nodes = compiled->nodes + la_start;
-            
+
+            negate = (node->type == NODE_NEG_LOOKAHEAD);
             if (try_match(&sub_compiled, 0, pos, start, &dummy, captures,
-                          capture_count, cflags, eflags))
+                           capture_count, cflags, eflags) == negate)
                 return 0;
-            
+
             node_idx = la_end;
             continue;
         }

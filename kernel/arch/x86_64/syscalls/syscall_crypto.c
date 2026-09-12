@@ -6,8 +6,10 @@ static int sys_crypto(uint64_t req_ptr, int unused1, int unused2, int unused3,
                       int unused4, int unused5)
 {
     struct crypto_request *req;
-    uint8_t hash256[32];
-    uint8_t hash512[64];
+    union {
+        uint8_t hash256[32];
+        uint8_t hash512[64];
+    } hash;
 
     (void)unused1;
     (void)unused2;
@@ -23,28 +25,28 @@ static int sys_crypto(uint64_t req_ptr, int unused1, int unused2, int unused3,
     switch (req->operation) {
     case CRYPTO_OP_SHA256:
         if (req->output_len < 32) return -EINVAL;
-        sha256_hash(req->input, req->input_len, hash256);
-        memcpy(req->output, hash256, 32);
+        sha256_hash(req->input, req->input_len, hash.hash256);
+        memcpy(req->output, hash.hash256, 32);
         return 0;
 
     case CRYPTO_OP_SHA512:
         if (req->output_len < 64) return -EINVAL;
-        sha512_hash(req->input, req->input_len, hash512);
-        memcpy(req->output, hash512, 64);
+        sha512_hash(req->input, req->input_len, hash.hash512);
+        memcpy(req->output, hash.hash512, 64);
         return 0;
 
     case CRYPTO_OP_HMAC_SHA256:
         if (!req->key) return -EFAULT;
         if (req->output_len < 32) return -EINVAL;
-        hmac_sha256(req->key, req->key_len, req->input, req->input_len, hash256);
-        memcpy(req->output, hash256, 32);
+        hmac_sha256(req->key, req->key_len, req->input, req->input_len, hash.hash256);
+        memcpy(req->output, hash.hash256, 32);
         return 0;
 
     case CRYPTO_OP_HMAC_SHA512:
         if (!req->key) return -EFAULT;
         if (req->output_len < 64) return -EINVAL;
-        hmac_sha512(req->key, req->key_len, req->input, req->input_len, hash512);
-        memcpy(req->output, hash512, 64);
+        hmac_sha512(req->key, req->key_len, req->input, req->input_len, hash.hash512);
+        memcpy(req->output, hash.hash512, 64);
         return 0;
 
     case CRYPTO_OP_COMPARE:

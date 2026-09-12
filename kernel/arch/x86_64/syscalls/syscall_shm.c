@@ -385,23 +385,19 @@ static int sys_shmctl(int shmid, const char *cmd_ptr, uint64_t buf) {
 }
 
 static int shm_name_key(uint64_t name_ptr, int *key) {
-    const char *name;
-    char value;
+    char *copy;
+    char *p;
     uint32_t hash;
-    size_t i;
 
     if (!name_ptr || !key) return -EFAULT;
-    name = (const char *)(uintptr_t)name_ptr;
+    copy = copy_string_from_user_alloc((const char *)(uintptr_t)name_ptr);
+    if (!copy) return -EFAULT;
     hash = 0;
-    for (i = 0; ; i++) {
-        if (copy_from_user(&value, &name[i], 1) != 0) return -EFAULT;
-        if (value == '\0') {
-            *key = (int)hash;
-            return 0;
-        }
-        hash = hash * 31u + (unsigned char)value;
-        if (i == SIZE_MAX) return -ENAMETOOLONG;
-    }
+    for (p = copy; *p; p++)
+        hash = hash * 31u + (unsigned char)*p;
+    kfree(copy);
+    *key = (int)hash;
+    return 0;
 }
 
 static int sys_shm_open(uint64_t name_ptr, const char *oflag_ptr, int mode) {

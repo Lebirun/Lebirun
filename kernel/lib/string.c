@@ -55,10 +55,6 @@ void* memcpy(void* __restrict dstptr, const void* __restrict srcptr, size_t size
 void* memmove(void* dstptr, const void* srcptr, size_t size) {
 	unsigned char *dst;
 	const unsigned char *src;
-	uint64_t *dp;
-	const uint64_t *sp;
-	size_t words;
-	size_t tail;
 
 	if (!dstptr || !srcptr) return dstptr;
 	dst = (unsigned char*) dstptr;
@@ -76,20 +72,9 @@ void* memmove(void* dstptr, const void* srcptr, size_t size) {
 	}
 	if (dst >= src + size) return memcpy(dstptr, srcptr, size);
 
-	if (size >= 16 && ((uintptr_t)dst & 7) == 0 && ((uintptr_t)src & 7) == 0) {
-		dst += size;
-		src += size;
-		tail = size & 7;
-		while (tail--) *--dst = *--src;
-		dp = (uint64_t *)dst;
-		sp = (const uint64_t *)src;
-		words = size >> 3;
-		while (words--) *--dp = *--sp;
-	} else {
-		dst += size;
-		src += size;
-		while (size--) *--dst = *--src;
-	}
+	dst += size;
+	src += size;
+	while (size--) *--dst = *--src;
 	return dstptr;
 }
 

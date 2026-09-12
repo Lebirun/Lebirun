@@ -13,4 +13,8 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+static inline void outw(uint16_t port, uint16_t value) {
+    __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
 #endif

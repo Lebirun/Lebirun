@@ -35,7 +35,6 @@
 #include <lebirun/panic.h>
 #include <lebirun/kstack.h>
 #include <lebirun/smp.h>
-#include <lebirun/power.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/rng.h>
 #include <lebirun/watchdog.h>
@@ -573,7 +572,6 @@ static void KERNEL_INIT kernel_boot(void) {
     init_tasks();
     smp_init();
 
-    power_init();
     vring_init();
     kproc_init();
     kproc_print_init();

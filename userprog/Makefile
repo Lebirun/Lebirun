@@ -20,10 +20,10 @@ KERNEL_DIR = ../kernel/arch/x86_64
 INITRD_DIR = ../initrd
 SYSROOT_LIB = ../root/lib
 
-CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -Oz -fomit-frame-pointer -nostdinc -fdiagnostics-color=always
+CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -Oz -fomit-frame-pointer -nostdinc -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fdiagnostics-color=always
 CPPFLAGS = -isystem $(LIBC_ABS)/leblibc/include -isystem $(SYSROOT)/usr/include -isystem $(LIBC_ABS)/leblibc/arch/x86_64 -isystem $(LIBC_ABS)/leblibc/arch/generic -I$(LIBC_ABS)/include -I$(LIBC_ABS)/src
 
-SO_CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fPIC -O0 -nostdinc -fvisibility=default
+SO_CFLAGS = -Wall -Wextra -ffreestanding -fno-builtin -fno-stack-protector -fPIC -Oz -nostdinc -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fvisibility=default
 
 CRT1 = $(SYSROOT)/usr/lib/crt1.o
 CRTI = $(SYSROOT)/usr/lib/crti.o
@@ -98,7 +98,7 @@ build/%.o: %.c
 
 bin/%.bin: build/%.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -T $(LIBC)/user.ld -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC)/user.ld -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
 
 clean:
 	rm -f *.so

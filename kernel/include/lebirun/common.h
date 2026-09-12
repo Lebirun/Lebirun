@@ -22,17 +22,6 @@ typedef int32_t pid_t;
 #define __pid_t_defined
 #endif
 
-static inline void print_hex(unsigned long v) {
-    char buf[17];
-    int i;
-    buf[16] = '\0';
-    for (i = 0; i < 16; ++i) {
-        unsigned int nib = (v >> ((15 - i) * 4)) & 0xF;
-        buf[i] = (nib < 10) ? ('0' + nib) : ('A' + (nib - 10));
-    }
-    printf("%s", buf);
-}
-
 static inline uint64_t read_cr3(void) {
     uint64_t val;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(val));

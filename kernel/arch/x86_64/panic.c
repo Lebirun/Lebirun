@@ -33,41 +33,6 @@ static void panic_print(const char *s) {
     fb_panic_print(s);
 }
 
-#define WRAP_WIDTH 60
-
-static void panic_print_wrapped(const char *prefix, const char *text) {
-    int col;
-    int indent;
-    int i;
-    const char *p;
-    char c[2];
-
-    col = 0;
-    indent = 0;
-    c[1] = '\0';
-    p = prefix;
-    while (*p) {
-        c[0] = *p++;
-        panic_print(c);
-        col++;
-        indent++;
-    }
-    p = text;
-    while (*p) {
-        if (col >= WRAP_WIDTH) {
-            panic_print("\n");
-            for (i = 0; i < indent; i++) {
-                panic_print(" ");
-            }
-            col = indent;
-        }
-        c[0] = *p++;
-        panic_print(c);
-        col++;
-    }
-    panic_print("\n");
-}
-
 static void panic_print_hex(uint64_t v) {
     char buf[17];
     int i;
@@ -170,29 +135,29 @@ static void panic_dump_memory(uint64_t addr, int count) {
 static const char* exception_messages[] = {
     "Divide-by-zero",
     "Debug",
-    "Non-maskable Interrupt",
+    "NMI",
     "Breakpoint",
     "Overflow",
-    "Bound Range Exceeded",
+    "Bound Range",
     "Invalid Opcode",
-    "Device Not Available",
+    "Device Not Avail",
     "Double Fault",
-    "Coprocessor Segment Overrun",
+    "CSO",
     "Invalid TSS",
     "Segment Not Present",
-    "Stack-Segment Fault",
-    "General Protection Fault",
+    "Stack Fault",
+    "GPF",
     "Page Fault",
     "Reserved",
-    "x87 Floating-Point Exception",
+    "x87 FPE",
     "Alignment Check",
     "Machine Check",
-    "SIMD Floating-Point Exception",
-    "Virtualization Exception",
-    "Control Protection Exception",
-    "Hypervisor Injection Exception",
-    "VMM Communication Exception",
-    "Security Exception",
+    "SIMD FPE",
+    "Virtualization",
+    "Control Prot",
+    "Hypervisor Inject",
+    "VMM Comm",
+    "Security",
     "Reserved",
     "Reserved",
     "Reserved",
@@ -336,14 +301,17 @@ void kernel_panic(const char *reason, registers_t *regs) {
 
     smp_stop_other_cpus();
 
-    panic_print("\n!!! KERNEL PANIC !!!\n");
-    panic_print_wrapped("Reason: ", reason);
+    panic_print("\n!!! KERNEL PANIC !!!\nReason: ");
+    panic_print(reason);
+    panic_print("\n");
 
     print_task_info();
 
     if (regs) {
         if (regs->int_no < 32) {
-            panic_print_wrapped("Exception: ", exception_messages[regs->int_no]);
+            panic_print("Exception: ");
+            panic_print(exception_messages[regs->int_no]);
+            panic_print("\n");
         }
 
         panic_print("\n--- EXCEPTION INFO ---\n");
@@ -386,16 +354,16 @@ void kernel_panic(const char *reason, registers_t *regs) {
             print_double_fault_info();
             break;
         case 10:
-            print_selector_error_code(regs->err_code, "INVALID TSS ERROR CODE     ");
+            print_selector_error_code(regs->err_code, "INVALID TSS");
             break;
         case 11:
-            print_selector_error_code(regs->err_code, "SEGMENT NOT PRESENT CODE   ");
+            print_selector_error_code(regs->err_code, "SEGMENT NOT PRESENT");
             break;
         case 12:
-            print_selector_error_code(regs->err_code, "STACK-SEGMENT FAULT CODE   ");
+            print_selector_error_code(regs->err_code, "STACK FAULT");
             break;
         case 13:
-            print_selector_error_code(regs->err_code, "GPF ERROR CODE DECODE      ");
+            print_selector_error_code(regs->err_code, "GPF");
             break;
         case 14:
             __asm__ ("mov %%cr2, %0" : "=r" (fault_addr));
@@ -471,36 +439,10 @@ void kernel_panic_custom(const char *category, const char *fmt, ...) {
     char buf[256];
     char reason[320];
     va_list ap;
-    int cat_len;
-    int buf_len;
-    int i;
 
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-
-    cat_len = 0;
-    while (category[cat_len] && cat_len < 60) cat_len++;
-    buf_len = 0;
-    while (buf[buf_len] && buf_len < 250) buf_len++;
-
-    i = 0;
-    reason[i++] = '[';
-    {
-        int j;
-        for (j = 0; j < cat_len && i < 318; j++) {
-            reason[i++] = category[j];
-        }
-    }
-    reason[i++] = ']';
-    reason[i++] = ' ';
-    {
-        int j;
-        for (j = 0; j < buf_len && i < 319; j++) {
-            reason[i++] = buf[j];
-        }
-    }
-    reason[i] = '\0';
-
+    snprintf(reason, sizeof(reason), "[%s] %s", category, buf);
     kernel_panic(reason, NULL);
 }

@@ -464,11 +464,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
         }
         
-        terminal_writestring(">>> INT 0x");
-        print_hex(regs->int_no);
-        terminal_writestring(" RIP=0x");
-        print_hex(regs->rip);
-        terminal_writestring(" <<<\n");
+        printf(">>> INT 0x%lX RIP=0x%lX <<<\n", regs->int_no, regs->rip);
     }
 
     if (regs->int_no < 32) {
@@ -683,12 +679,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                 __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
             }
-        }
-
-        if (0) {
-            terminal_writestring("IRQ ");
-            print_hex(irq);
-            terminal_writestring(" handled\n");
         }
     }
 
