@@ -18,6 +18,8 @@
 #include <lebirun/console.h>
 #include <lebirun/mouse.h>
 #include <lebirun/evdev.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/rng.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -53,6 +55,9 @@ static vfs_node_t *proc_interrupts;
 static vfs_node_t *proc_vmstat;
 static vfs_node_t *proc_memdetail;
 static vfs_node_t *proc_kmsg;
+static vfs_node_t *proc_sysrq_trigger;
+static vfs_node_t *proc_schedstat;
+static vfs_node_t *proc_boot_id;
 
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
@@ -402,6 +407,108 @@ static uint64_t proc_kmsg_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     remaining = (uint64_t)len - offset;
     if (size > remaining) size = remaining;
     klog_snapshot_range((char *)buffer, (int)offset, (int)size);
+    return size;
+}
+
+static uint64_t proc_sysrq_trigger_read(vfs_node_t *node, uint64_t offset,
+                                        uint64_t size, uint8_t *buffer) {
+    static const char help[] = "SysRq trigger: write one of h s u b m t w\n";
+    uint64_t len;
+    uint64_t remaining;
+
+    (void)node;
+    len = sizeof(help) - 1;
+    if (offset >= len) return 0;
+    remaining = len - offset;
+    if (size > remaining) size = remaining;
+    memcpy(buffer, help + offset, size);
+    return size;
+}
+
+static uint64_t proc_sysrq_trigger_write(vfs_node_t *node, uint64_t offset,
+                                         uint64_t size, uint8_t *buffer) {
+    uint64_t i;
+
+    (void)node;
+    (void)offset;
+    for (i = 0; i < size; i++) {
+        if (buffer[i] == '\n' || buffer[i] == '\r' ||
+            buffer[i] == ' ' || buffer[i] == '\0') continue;
+        sysrq_handle_key((char)buffer[i], 0);
+    }
+    return size;
+}
+
+static uint64_t proc_schedstat_read(vfs_node_t *node, uint64_t offset,
+                                    uint64_t size, uint8_t *buffer) {
+    char buf[256];
+    task_t *t;
+    int running;
+    int blocked;
+    int stopped;
+    int dead;
+    uint64_t switches;
+    int len;
+    uint64_t remaining;
+
+    (void)node;
+    running = 0;
+    blocked = 0;
+    stopped = 0;
+    dead = 0;
+    switches = 0;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        if (t->state == TASK_RUNNING || t->state == TASK_READY) running++;
+        else if (t->state == TASK_BLOCKED) blocked++;
+        else if (t->state == TASK_STOPPED) stopped++;
+        else if (t->state == TASK_DEAD) dead++;
+        switches += t->voluntary_context_switches;
+        switches += t->involuntary_context_switches;
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    len = snprintf(buf, sizeof(buf),
+                   "running %d\nblocked %d\nstopped %d\ndead %d\n"
+                   "ctxt %lu\njiffies %lu\n",
+                   running, blocked, stopped, dead, switches, tick_count);
+    if (len <= 0) return 0;
+    if (offset >= (uint64_t)len) return 0;
+    remaining = (uint64_t)len - offset;
+    if (size > remaining) size = remaining;
+    memcpy(buffer, buf + offset, size);
+    return size;
+}
+
+static uint8_t proc_boot_id_value[16];
+static int proc_boot_id_ready;
+
+static uint64_t proc_boot_id_read(vfs_node_t *node, uint64_t offset,
+                                  uint64_t size, uint8_t *buffer) {
+    char buf[40];
+    int pos;
+    int i;
+    int len;
+    uint64_t remaining;
+
+    (void)node;
+    if (!proc_boot_id_ready) {
+        rng_fill(proc_boot_id_value, sizeof(proc_boot_id_value));
+        proc_boot_id_ready = 1;
+    }
+    pos = 0;
+    for (i = 0; i < 16; i++) {
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "%02x",
+                        proc_boot_id_value[i]);
+        if (i == 3 || i == 5 || i == 7 || i == 9) buf[pos++] = '-';
+    }
+    buf[pos++] = '\n';
+    len = pos;
+    if (offset >= (uint64_t)len) return 0;
+    remaining = (uint64_t)len - offset;
+    if (size > remaining) size = remaining;
+    memcpy(buffer, buf + offset, size);
     return size;
 }
 
@@ -1450,6 +1557,9 @@ static const proc_file_t proc_root_files[] = {
     { "vmstat", proc_vmstat_read, &proc_vmstat },
     { "memdetail", proc_memdetail_read, &proc_memdetail },
     { "kmsg", proc_kmsg_read, &proc_kmsg },
+    { "sysrq-trigger", proc_sysrq_trigger_read, &proc_sysrq_trigger },
+    { "schedstat", proc_schedstat_read, &proc_schedstat },
+    { "boot_id", proc_boot_id_read, &proc_boot_id },
 };
 
 static const proc_file_t proc_process_files[] = {
@@ -1471,6 +1581,10 @@ static vfs_node_t *procfs_get_file(const proc_file_t *file,
     node = procfs_lazy_node(file->slot, file->name, VFS_FILE, parent,
                             file->read, NULL, NULL);
     if (node && file->read == proc_kmsg_read) node->mask = 0400;
+    if (node && file->read == proc_sysrq_trigger_read) {
+        node->write = proc_sysrq_trigger_write;
+        node->mask = 0644;
+    }
     return node;
 }
 

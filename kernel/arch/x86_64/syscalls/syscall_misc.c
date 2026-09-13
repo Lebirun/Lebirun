@@ -6,6 +6,7 @@
 #include <lebirun/creds.h>
 #include <lebirun/timekeeping.h>
 #include <lebirun/smp.h>
+#include <lebirun/vring.h>
 
 extern task_t *current_task;
 
@@ -269,6 +270,9 @@ static void copy_string(char *dest, const char *src, int max) {
     dest[i] = '\0';
 }
 
+static char kern_hostname[65] = NODENAME;
+static char kern_domainname[65] = "localdomain";
+
 static int sys_uname(struct utsname *buf) {
     struct utsname value;
     char version_str[65];
@@ -278,7 +282,7 @@ static int sys_uname(struct utsname *buf) {
     if (!buf) return -EFAULT;
     memset(&value, 0, sizeof(value));
     copy_string(value.sysname, OS_NAME, 65);
-    copy_string(value.nodename, NODENAME, 65);
+    copy_string(value.nodename, kern_hostname, 65);
     copy_string(value.release, OS_VERSION, 65);
     
     len = 0;
@@ -1287,11 +1291,135 @@ static int sys_sched_getaffinity(int pid, const char *mask_ptr, int len) {
     return 4;
 }
 
+static int hostname_set(char *dst, const char *src, size_t len) {
+    if (!src || len == 0 || len > 64) return -EINVAL;
+    if (current_task && current_task->uid != 0 && current_task->euid != 0)
+        return -EPERM;
+    if (copy_from_user(dst, src, len) < 0) return -EFAULT;
+    dst[len] = '\0';
+    return 0;
+}
+
+static int hostname_get(char *dst, const char *src, size_t len) {
+    size_t have;
+    size_t copy;
+
+    if (!dst || len == 0) return -EINVAL;
+    have = strlen(src) + 1;
+    copy = have < len ? have : len;
+    if (copy_to_user(dst, src, copy) < 0) return -EFAULT;
+    return 0;
+}
+
+static int sys_sethostname(const char *name, size_t len) {
+    return hostname_set(kern_hostname, name, len);
+}
+
+static int sys_gethostname(char *name, size_t len) {
+    return hostname_get(name, kern_hostname, len);
+}
+
+static int sys_setdomainname(const char *name, size_t len) {
+    return hostname_set(kern_domainname, name, len);
+}
+
+static int sys_getdomainname(char *name, size_t len) {
+    return hostname_get(name, kern_domainname, len);
+}
+
+static int sys_syslog(int type, char *buf, int len) {
+    char chunk[1024];
+    int total;
+    int done;
+    int want;
+    int piece;
+
+    if (type == 9 || type == 10) {
+        total = klog_snapshot(NULL, 0);
+        return total < 0 ? 0 : total;
+    }
+    if (type == 0 || type == 1 || type == 5 || type == 6 || type == 7)
+        return 0;
+    if (type == 8) {
+        if (len < 1 || len > 8) return -EINVAL;
+        return 0;
+    }
+    if (type != 2 && type != 3 && type != 4) return -EINVAL;
+    total = klog_snapshot(NULL, 0);
+    if (total <= 0) return 0;
+    if (!buf || len <= 0) return -EINVAL;
+    want = total < len ? total : len;
+    done = 0;
+    while (done < want) {
+        piece = want - done;
+        if (piece > (int)sizeof(chunk)) piece = sizeof(chunk);
+        klog_snapshot_range(chunk, done, piece);
+        if (copy_to_user(buf + done, chunk, (size_t)piece) < 0)
+            return -EFAULT;
+        done += piece;
+    }
+    return done;
+}
+
+struct tms {
+    long tms_utime;
+    long tms_stime;
+    long tms_cutime;
+    long tms_cstime;
+};
+
+static int sys_times(struct tms *buf) {
+    struct tms value;
+    uint64_t frequency;
+
+    memset(&value, 0, sizeof(value));
+    frequency = pit_freq ? pit_freq : 1000;
+    if (current_task) {
+        value.tms_utime = (long)(current_task->utime * 100 / frequency);
+        value.tms_stime = (long)(current_task->stime * 100 / frequency);
+        value.tms_cutime =
+            (long)(current_task->child_utime * 100 / frequency);
+        value.tms_cstime =
+            (long)(current_task->child_stime * 100 / frequency);
+    }
+    if (buf && copy_to_user(buf, &value, sizeof(value)) < 0)
+        return -EFAULT;
+    return (int)(tick_count * 100 / frequency);
+}
+
+#define MEMBARRIER_CMD_QUERY 0
+#define MEMBARRIER_CMD_GLOBAL 1
+#define MEMBARRIER_CMD_PRIVATE 8
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED 16
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED 32
+
+static int sys_membarrier(int cmd, unsigned int flags) {
+    if (flags != 0) return -EINVAL;
+    if (cmd == MEMBARRIER_CMD_QUERY)
+        return MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE |
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED |
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+    if (cmd == MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) return 0;
+    if (cmd == MEMBARRIER_CMD_GLOBAL || cmd == MEMBARRIER_CMD_PRIVATE ||
+        cmd == MEMBARRIER_CMD_PRIVATE_EXPEDITED) {
+        __sync_synchronize();
+        return 0;
+    }
+    return -EINVAL;
+}
+
 void syscalls_misc_init(void) {
     init_default_environ();
     
     syscall_table_set(SYSCALL_UNAME, (void *)(sys_uname));
     syscall_table_set(SYSCALL_SYSINFO, (void *)(sys_sysinfo));
+    syscall_table_set(SYSCALL_SYSLOG, (void *)(sys_syslog));
+    syscall_table_set(SYSCALL_SETHOSTNAME, (void *)(sys_sethostname));
+    syscall_table_set(SYSCALL_GETHOSTNAME, (void *)(sys_gethostname));
+    syscall_table_set(SYSCALL_SETDOMAINNAME, (void *)(sys_setdomainname));
+    syscall_table_set(SYSCALL_GETDOMAINNAME, (void *)(sys_getdomainname));
+    syscall_table_set(SYSCALL_TIMES, (void *)(sys_times));
+    syscall_table_set(SYSCALL_MEMBARRIER, (void *)(sys_membarrier));
     syscall_table_set(SYSCALL_GETRLIMIT, (void *)(sys_getrlimit));
     syscall_table_set(SYSCALL_SETRLIMIT, (void *)(sys_setrlimit));
     syscall_table_set(SYSCALL_GETRUSAGE, (void *)(sys_getrusage));

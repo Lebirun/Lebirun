@@ -2520,6 +2520,206 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     return written;
 }
 
+struct kernel_statx_timestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    uint32_t __pad;
+};
+
+struct kernel_statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct kernel_statx_timestamp stx_atime;
+    struct kernel_statx_timestamp stx_btime;
+    struct kernel_statx_timestamp stx_ctime;
+    struct kernel_statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t stx_subvol;
+    uint32_t stx_atomic_write_unit_min;
+    uint32_t stx_atomic_write_unit_max;
+    uint32_t stx_atomic_write_segments_max;
+    uint32_t __pad1[1];
+    uint64_t __spare2[9];
+};
+
+static uint32_t statx_major(uint64_t dev) {
+    return (uint32_t)(((dev >> 32) & 0xFFFFF000u) | ((dev >> 8) & 0xFFFu));
+}
+
+static uint32_t statx_minor(uint64_t dev) {
+    return (uint32_t)(((dev >> 20) & 0xFFFFFFu) | (dev & 0xFFu));
+}
+
+static int sys_statx(int dirfd, const char *path, int flags,
+                     unsigned int mask, struct kernel_statx *buf) {
+    struct kernel_stat kst;
+    struct kernel_statx out;
+    int error;
+
+    (void)mask;
+    if (!path || !buf) return -EFAULT;
+    if (flags != 0) return -EINVAL;
+    error = vfs_stat_path(dirfd, path, &kst);
+    if (error < 0) return error;
+    memset(&out, 0, sizeof(out));
+    out.stx_mask = 0x7FFu;
+    out.stx_blksize = (uint32_t)kst.st_blksize;
+    out.stx_nlink = kst.st_nlink;
+    out.stx_uid = kst.st_uid;
+    out.stx_gid = kst.st_gid;
+    out.stx_mode = (uint16_t)kst.st_mode;
+    out.stx_ino = kst.st_ino;
+    out.stx_size = (uint64_t)kst.st_size;
+    out.stx_blocks = (uint64_t)kst.st_blocks;
+    out.stx_atime.tv_sec = (int64_t)kst.st_atim.tv_sec;
+    out.stx_atime.tv_nsec = (uint32_t)kst.st_atim.tv_nsec;
+    out.stx_ctime.tv_sec = (int64_t)kst.st_ctim.tv_sec;
+    out.stx_ctime.tv_nsec = (uint32_t)kst.st_ctim.tv_nsec;
+    out.stx_mtime.tv_sec = (int64_t)kst.st_mtim.tv_sec;
+    out.stx_mtime.tv_nsec = (uint32_t)kst.st_mtim.tv_nsec;
+    out.stx_rdev_major = statx_major(kst.st_rdev);
+    out.stx_rdev_minor = statx_minor(kst.st_rdev);
+    out.stx_dev_major = statx_major(kst.st_dev);
+    out.stx_dev_minor = statx_minor(kst.st_dev);
+    if (copy_to_user(buf, &out, sizeof(out)) < 0) return -EFAULT;
+    return 0;
+}
+
+static int sys_sendfile(int out_fd, int in_fd, int64_t *offset_ptr,
+                        size_t count) {
+    task_fd_t *in_entry;
+    task_fd_t *out_entry;
+    vfs_node_t *in_node;
+    vfs_node_t *out_node;
+    uint8_t chunk[4096];
+    uint64_t in_pos;
+    uint64_t out_pos;
+    uint64_t total;
+    uint64_t want;
+    uint64_t got;
+    uint64_t put;
+    int64_t off_value;
+    int error;
+
+    if (!current_task) return -ESRCH;
+    if (count == 0) return 0;
+    if (count > INT32_MAX) count = INT32_MAX;
+    if (in_fd < 0 || in_fd >= current_task->fds_capacity) return -EBADF;
+    if (out_fd < 0 || out_fd >= current_task->fds_capacity) return -EBADF;
+    in_entry = &fd_table[in_fd];
+    out_entry = &fd_table[out_fd];
+    if (!in_entry->in_use || !out_entry->in_use) return -EBADF;
+    if (in_entry->type != FD_TYPE_FILE ||
+        out_entry->type != FD_TYPE_FILE) return -EINVAL;
+    if (!in_entry->node || !out_entry->node) return -EBADF;
+    if ((in_entry->flags & 3) == VFS_O_WRONLY) return -EBADF;
+    if ((out_entry->flags & 3) == VFS_O_RDONLY) return -EBADF;
+    in_node = (vfs_node_t *)in_entry->node;
+    out_node = (vfs_node_t *)out_entry->node;
+    if (VFS_GET_TYPE(in_node->flags) != VFS_FILE ||
+        VFS_GET_TYPE(out_node->flags) != VFS_FILE) return -EINVAL;
+    if (in_node == out_node) return -EINVAL;
+    if (vfs_get_mount_flags_for_node(out_node) & VFS_MS_RDONLY)
+        return -EROFS;
+    error = vfs_check_perm(in_node, VFS_PERM_READ);
+    if (error < 0) return error;
+    error = vfs_check_perm(out_node, VFS_PERM_WRITE);
+    if (error < 0) return error;
+    if (offset_ptr) {
+        if (!posix_user_range_mapped((uint64_t)offset_ptr, sizeof(off_value)))
+            return -EFAULT;
+        if (copy_from_user(&off_value, offset_ptr, sizeof(off_value)) < 0)
+            return -EFAULT;
+        if (off_value < 0) return -EINVAL;
+        in_pos = (uint64_t)off_value;
+    } else {
+        in_pos = task_fd_position_get(in_entry);
+    }
+    out_pos = task_fd_position_get(out_entry);
+    total = 0;
+    while (total < count) {
+        want = count - total;
+        if (want > sizeof(chunk)) want = sizeof(chunk);
+        if (in_node->length > 0) {
+            if (in_pos + total >= in_node->length) break;
+            if (want > in_node->length - (in_pos + total))
+                want = in_node->length - (in_pos + total);
+        }
+        got = vfs_read(in_node, in_pos + total, want, chunk);
+        if (got > want) got = want;
+        if (got == 0) break;
+        put = vfs_write(out_node, out_pos + total, got, chunk);
+        if (put > got) put = got;
+        if (put == 0) {
+            if (total > 0) break;
+            return -EIO;
+        }
+        total += put;
+        if (put < got) break;
+    }
+    if (offset_ptr) {
+        off_value = (int64_t)(in_pos + total);
+        if (copy_to_user(offset_ptr, &off_value, sizeof(off_value)) < 0)
+            return -EFAULT;
+    } else {
+        task_fd_position_set(in_entry, in_pos + total);
+    }
+    task_fd_position_set(out_entry, out_pos + total);
+    return (int)total;
+}
+
+static int sys_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
+    pid_t pid;
+    task_t *target;
+    task_fd_t *source;
+    int newfd;
+
+    if (flags != 0) return -EINVAL;
+    if (!current_task) return -ESRCH;
+    if (targetfd < 0) return -EBADF;
+    pid = pidfd_lookup(pidfd);
+    if (pid < 0) return -EBADF;
+    lock_scheduler();
+    target = task_find(pid);
+    if (!target || !target->fds || targetfd >= target->fds_capacity ||
+        !target->fds[targetfd].in_use) {
+        unlock_scheduler();
+        return -EBADF;
+    }
+    source = &target->fds[targetfd];
+    if (source->type == FD_TYPE_SOCKET) {
+        unlock_scheduler();
+        return -EINVAL;
+    }
+    newfd = fd_alloc();
+    if (newfd < 0) {
+        unlock_scheduler();
+        return -EMFILE;
+    }
+    memcpy(&fd_table[newfd], source, sizeof(task_fd_t));
+    fd_table[newfd].ref_count = 1;
+    fd_retain_entry(&fd_table[newfd]);
+    task_fd_position_share(source, &fd_table[newfd]);
+    unlock_scheduler();
+    return newfd;
+}
+
 void syscalls_posix_init(void) {
     mutex_init(&copy_transfer_lock);
     syscall_table_set(SYSCALL_DUP, (void *)(sys_dup));
@@ -2565,5 +2765,8 @@ void syscalls_posix_init(void) {
     syscall_table_set(SYSCALL_PWRITE64, (void *)(sys_pwrite64));
     syscall_table_set(SYSCALL_COPY_FILE_RANGE,
                       (void *)(sys_copy_file_range));
+    syscall_table_set(SYSCALL_STATX, (void *)(sys_statx));
+    syscall_table_set(SYSCALL_SENDFILE, (void *)(sys_sendfile));
+    syscall_table_set(SYSCALL_PIDFD_GETFD, (void *)(sys_pidfd_getfd));
     syscall_table_set(SYSCALL_READV, (void *)(sys_readv));
 }

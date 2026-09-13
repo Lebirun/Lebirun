@@ -6,7 +6,95 @@
 #include <lebirun/cmdline.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/vring.h>
+#include <lebirun/vfs.h>
+#include <lebirun/power.h>
 #include <string.h>
+#include <stdio.h>
+
+volatile int sysrq_sync_pending;
+static int sysrq_armed;
+
+extern volatile uint64_t tick_count;
+extern uint64_t pit_freq;
+
+static void sysrq_emit(const char *s, int fb_ok) {
+    size_t len;
+    int cur;
+
+    len = strlen(s);
+    serial_write_direct(s, len);
+    if (!fb_ok) return;
+    cur = console_is_initialized() ? console_get_current() : 0;
+    if (cur >= 0) console_write_to_fb_only(cur, s, len);
+}
+
+void sysrq_handle_key(char c, int from_irq) {
+    char line[160];
+    task_t *t;
+    char st;
+
+    if (c == 'h' || c == 'H' || c == '?') {
+        sysrq_emit("SysRq: h help s sync u sync b reboot m mem t tasks w blocked\n", 1);
+        return;
+    }
+    if (c == 's' || c == 'S' || c == 'u' || c == 'U') {
+        if (from_irq) {
+            sysrq_sync_pending = 1;
+            sysrq_emit("SysRq: sync scheduled\n", 1);
+        } else {
+            vfs_sync_all(0);
+            sysrq_emit("SysRq: emergency sync done\n", 1);
+        }
+        return;
+    }
+    if (c == 'b' || c == 'B') {
+        sysrq_emit("SysRq: rebooting\n", 1);
+        if (from_irq) {
+            __asm__ volatile ("cli");
+            outb(0x64, 0xFE);
+            outb(0x0CF9, 0x06);
+            for (;;) __asm__ volatile ("hlt");
+        }
+        power_reboot();
+        return;
+    }
+    if (c == 'm' || c == 'M') {
+        snprintf(line, sizeof(line),
+                 "SysRq mem: total %lu kB free %lu kB uptime %lu s\n",
+                 pfa_get_total_ram_kb(), pfa_count_free() * 4,
+                 pit_freq ? tick_count / pit_freq : 0);
+        sysrq_emit(line, 1);
+        return;
+    }
+    if (c == 't' || c == 'T' || c == 'w' || c == 'W') {
+        int cur;
+
+        cur = from_irq ? -1 :
+              (console_is_initialized() ? console_get_current() : 0);
+        lock_scheduler();
+        t = all_tasks_head;
+        while (t) {
+            if ((c == 'w' || c == 'W') && t->state != TASK_BLOCKED) {
+                t = t->all_next;
+                continue;
+            }
+            st = (t->state == TASK_RUNNING || t->state == TASK_READY) ? 'R' :
+                 t->state == TASK_BLOCKED ? 'S' :
+                 t->state == TASK_STOPPED ? 'T' :
+                 t->state == TASK_DEAD ? 'Z' : '?';
+            snprintf(line, sizeof(line), "%d %c %s\n", t->pid, st,
+                     t->name[0] ? t->name : "?");
+            serial_write_direct(line, strlen(line));
+            if (cur >= 0)
+                console_write_to_fb_only(cur, line, strlen(line));
+            t = t->all_next;
+        }
+        unlock_scheduler();
+        return;
+    }
+    snprintf(line, sizeof(line), "SysRq: unknown key '%c' (h for help)\n", c);
+    sysrq_emit(line, 1);
+}
 
 #define KEYBOARD_BUFFER_INITIAL 8
 
@@ -235,11 +323,19 @@ void keyboard_handler(registers_t* regs) {
     if (was_e0) {
         if (is_release) {
             if (code == SCANCODE_CTRL) ctrl_pressed = false;
-            else if (code == SCANCODE_ALT) alt_pressed = false;
+            else if (code == SCANCODE_ALT) {
+                alt_pressed = false;
+                sysrq_armed = 0;
+            }
             return;
         }
         if (code == SCANCODE_CTRL) { ctrl_pressed = true; return; }
         if (code == SCANCODE_ALT) { alt_pressed = true; return; }
+        if (code == 0x37 && alt_pressed) { sysrq_armed = 1; return; }
+        if (code == 0x53 && ctrl_pressed && alt_pressed) {
+            sysrq_handle_key('b', 1);
+            return;
+        }
         if (console_is_initialized() &&
             console_get_graphics_mode(console_get_current())) return;
         if (code == 0x48) { buffer_put_seq("\033[A", 3); goto wake; }
@@ -256,7 +352,10 @@ void keyboard_handler(registers_t* regs) {
         if (code == SCANCODE_LSHIFT) left_shift_pressed = false;
         else if (code == SCANCODE_RSHIFT) right_shift_pressed = false;
         else if (code == SCANCODE_CTRL) ctrl_pressed = false;
-        else if (code == SCANCODE_ALT) alt_pressed = false;
+        else if (code == SCANCODE_ALT) {
+            alt_pressed = false;
+            sysrq_armed = 0;
+        }
         return;
     }
 
@@ -331,6 +430,11 @@ void keyboard_handler(registers_t* regs) {
     }
     c = apply_caps_shift(c, shift);
     if (c != 0) {
+        if (sysrq_armed && alt_pressed) {
+            sysrq_armed = 0;
+            sysrq_handle_key(c, 1);
+            return;
+        }
         buffer_put(c);
         goto wake;
     }

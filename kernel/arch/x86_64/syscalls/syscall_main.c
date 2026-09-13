@@ -176,7 +176,7 @@ static int do_set_thread_area(struct user_desc *u_info) {
     return 0;
 }
 
-static const uint16_t linux_syscall_map[437] = {
+static const uint16_t linux_syscall_map[439] = {
 #define LINUX_SYSCALL(linux_nr, leb_nr) [linux_nr] = (leb_nr) + 1
     LINUX_SYSCALL(1, SYSCALL_EXIT),
     LINUX_SYSCALL(2, SYSCALL_FORK),
@@ -204,6 +204,8 @@ static const uint16_t linux_syscall_map[437] = {
     LINUX_SYSCALL(37, SYSCALL_KILL),
     LINUX_SYSCALL(38, SYSCALL_RENAME),
     LINUX_SYSCALL(39, SYSCALL_VFS_MKDIR),
+    LINUX_SYSCALL(40, SYSCALL_SENDFILE),
+    LINUX_SYSCALL(103, SYSCALL_SYSLOG),
     LINUX_SYSCALL(41, SYSCALL_DUP2),
     LINUX_SYSCALL(42, SYSCALL_PIPE),
     LINUX_SYSCALL(45, SYSCALL_SBRK),
@@ -341,6 +343,7 @@ static const uint16_t linux_syscall_map[437] = {
     LINUX_SYSCALL(306, SYSCALL_FCHMODAT),
     LINUX_SYSCALL(307, SYSCALL_FACCESSAT),
     LINUX_SYSCALL(309, SYSCALL_PPOLL),
+    LINUX_SYSCALL(310, SYSCALL_PROCESS_VM_READV),
     LINUX_SYSCALL(311, SYSCALL_SET_ROBUST_LIST),
     LINUX_SYSCALL(312, SYSCALL_GET_ROBUST_LIST),
     LINUX_SYSCALL(319, SYSCALL_EPOLL_PWAIT),
@@ -351,6 +354,7 @@ static const uint16_t linux_syscall_map[437] = {
     LINUX_SYSCALL(329, SYSCALL_EPOLL_CREATE1),
     LINUX_SYSCALL(330, SYSCALL_DUP3),
     LINUX_SYSCALL(331, SYSCALL_PIPE2),
+    LINUX_SYSCALL(332, SYSCALL_STATX),
     LINUX_SYSCALL(340, SYSCALL_PRLIMIT64),
     LINUX_SYSCALL(344, SYSCALL_SYNCFS),
     LINUX_SYSCALL(353, SYSCALL_RENAMEAT2),
@@ -370,6 +374,9 @@ static const uint16_t linux_syscall_map[437] = {
     LINUX_SYSCALL(371, SYSCALL_RECVFROM),
     LINUX_SYSCALL(372, SYSCALL_RECVMSG),
     LINUX_SYSCALL(373, SYSCALL_SHUTDOWN),
+    LINUX_SYSCALL(424, SYSCALL_PIDFD_SEND_SIGNAL),
+    LINUX_SYSCALL(434, SYSCALL_PIDFD_OPEN),
+    LINUX_SYSCALL(438, SYSCALL_PIDFD_GETFD),
     LINUX_SYSCALL(377, SYSCALL_COPY_FILE_RANGE),
     LINUX_SYSCALL(435, SYSCALL_CLONE3),
     LINUX_SYSCALL(403, SYSCALL_CLOCK_GETTIME),
@@ -413,6 +420,7 @@ static int syscall_needs_expanded_stack(int num) {
     if (num == SYSCALL_PIVOT_ROOT ||
         (num >= SYSCALL_VFS_MOUNT && num <= SYSCALL_LKE_LIST)) return 1;
     if (num == SYSCALL_VFS_READDIR2) return 1;
+    if (num >= SYSCALL_SYSLOG && num <= SYSCALL_PIDFD_SEND_SIGNAL) return 1;
     return 0;
 }
 
@@ -423,6 +431,7 @@ void do_syscall(registers_t *regs) {
     int64_t result;
     struct user_desc *u_info;
     void *handler;
+    extern volatile int sysrq_sync_pending;
 
     syscall_clear_exec_completed();
     if (current_task) {
@@ -445,6 +454,11 @@ void do_syscall(registers_t *regs) {
         clear_syscall_frame();
         regs->rax = -ENOSYS;
         return;
+    }
+
+    if (sysrq_sync_pending) {
+        sysrq_sync_pending = 0;
+        vfs_sync_all(0);
     }
 
     handler = syscall_table_get(num);

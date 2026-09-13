@@ -1481,6 +1481,7 @@ void event_descriptors_close_range(unsigned int first, unsigned int last,
     int i;
 
     inotify_close_range(first, last, cloexec);
+    pidfd_close_range(first, last, cloexec);
     if (!current_task) return;
     if (cloexec) {
         mutex_lock(&epoll_lock);
@@ -1544,6 +1545,7 @@ void event_descriptors_close_cloexec(pid_t pid) {
     int i;
 
     inotify_close_cloexec(pid);
+    pidfd_close_cloexec(pid);
     for (i = epoll_capacity - 1; i >= 0; i--) {
         if (!epoll_instances[i].in_use ||
             epoll_instances[i].owner_pid != pid ||
@@ -1580,6 +1582,7 @@ void event_descriptors_close_task(pid_t pid) {
     int any_in_use;
 
     inotify_close_task(pid);
+    pidfd_close_task(pid);
     mutex_lock(&epoll_lock);
     any_in_use = 0;
     for (i = 0; i < epoll_capacity; i++) {

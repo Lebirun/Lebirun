@@ -345,7 +345,389 @@ static int sys_clone3(uint64_t uargs_addr, uint64_t usize, uint64_t unused2,
                               (int *)(uintptr_t)args.child_tid : NULL);
 }
 
+#define PIDFD_BASE_FD 0x68000000
+#define PIDFD_CLOEXEC 0x80000
+#define PIDFD_NONBLOCK 0x800
+
+typedef struct {
+    int in_use;
+    pid_t pid;
+    pid_t owner_pid;
+    int flags;
+} pidfd_entry_t;
+
+static pidfd_entry_t *pidfds;
+static int pidfd_capacity;
+static mutex_t pidfd_lock;
+
+static int pidfd_grow(void) {
+    pidfd_entry_t *grown;
+    int cap;
+    int i;
+
+    if (pidfd_capacity > INT32_MAX / 2) return -1;
+    cap = pidfd_capacity ? pidfd_capacity * 2 : 1;
+    grown = (pidfd_entry_t *)krealloc(pidfds,
+                                      (size_t)cap * sizeof(pidfd_entry_t));
+    if (!grown) return -1;
+    for (i = pidfd_capacity; i < cap; i++)
+        memset(&grown[i], 0, sizeof(pidfd_entry_t));
+    pidfds = grown;
+    pidfd_capacity = cap;
+    return 0;
+}
+
+static int sys_pidfd_open(int pid, unsigned int flags) {
+    task_t *target;
+    int i;
+    int idx;
+
+    if (flags & ~(unsigned int)(PIDFD_CLOEXEC | PIDFD_NONBLOCK))
+        return -EINVAL;
+    if (!current_task) return -ESRCH;
+    if (pid <= 0) return -EINVAL;
+    mutex_lock(&pidfd_lock);
+    target = task_find((pid_t)pid);
+    if (!target || target->state == TASK_DEAD) {
+        mutex_unlock(&pidfd_lock);
+        return -ESRCH;
+    }
+    idx = -1;
+    for (i = 0; i < pidfd_capacity; i++) {
+        if (!pidfds[i].in_use) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (pidfd_grow() < 0) {
+            mutex_unlock(&pidfd_lock);
+            return -EMFILE;
+        }
+        idx = pidfd_capacity / 2;
+    }
+    memset(&pidfds[idx], 0, sizeof(pidfd_entry_t));
+    pidfds[idx].in_use = 1;
+    pidfds[idx].pid = (pid_t)pid;
+    pidfds[idx].owner_pid = current_task->pid;
+    pidfds[idx].flags = (int)flags;
+    mutex_unlock(&pidfd_lock);
+    return PIDFD_BASE_FD + idx;
+}
+
+pid_t pidfd_lookup(int pidfd) {
+    int idx;
+    pid_t pid;
+
+    mutex_lock(&pidfd_lock);
+    idx = pidfd - PIDFD_BASE_FD;
+    if (idx < 0 || idx >= pidfd_capacity || !pidfds ||
+        !pidfds[idx].in_use || !current_task ||
+        pidfds[idx].owner_pid != current_task->pid) {
+        mutex_unlock(&pidfd_lock);
+        return -1;
+    }
+    pid = pidfds[idx].pid;
+    mutex_unlock(&pidfd_lock);
+    return pid;
+}
+
+int pidfd_is_fd(int fd) {
+    int idx;
+    int found;
+
+    found = 0;
+    mutex_lock(&pidfd_lock);
+    idx = fd - PIDFD_BASE_FD;
+    if (idx >= 0 && idx < pidfd_capacity && pidfds &&
+        pidfds[idx].in_use && current_task &&
+        pidfds[idx].owner_pid == current_task->pid) found = 1;
+    mutex_unlock(&pidfd_lock);
+    return found;
+}
+
+int pidfd_close_fd(int fd) {
+    int idx;
+    int i;
+    int any;
+
+    mutex_lock(&pidfd_lock);
+    idx = fd - PIDFD_BASE_FD;
+    if (idx < 0 || idx >= pidfd_capacity || !pidfds ||
+        !pidfds[idx].in_use || !current_task ||
+        pidfds[idx].owner_pid != current_task->pid) {
+        mutex_unlock(&pidfd_lock);
+        return -EBADF;
+    }
+    memset(&pidfds[idx], 0, sizeof(pidfd_entry_t));
+    any = 0;
+    for (i = 0; i < pidfd_capacity; i++) {
+        if (pidfds[i].in_use) {
+            any = 1;
+            break;
+        }
+    }
+    if (!any) {
+        kfree(pidfds);
+        pidfds = NULL;
+        pidfd_capacity = 0;
+    }
+    mutex_unlock(&pidfd_lock);
+    return 0;
+}
+
+void pidfd_close_range(unsigned int first, unsigned int last, int cloexec) {
+    unsigned int fd;
+    int i;
+
+    if (!current_task) return;
+    if (cloexec) {
+        mutex_lock(&pidfd_lock);
+        for (i = 0; i < pidfd_capacity; i++) {
+            fd = (unsigned int)(PIDFD_BASE_FD + i);
+            if (fd >= first && fd <= last && pidfds[i].in_use &&
+                pidfds[i].owner_pid == current_task->pid)
+                pidfds[i].flags |= PIDFD_CLOEXEC;
+        }
+        mutex_unlock(&pidfd_lock);
+        return;
+    }
+    for (i = pidfd_capacity - 1; i >= 0; i--) {
+        fd = (unsigned int)(PIDFD_BASE_FD + i);
+        if (fd >= first && fd <= last && pidfd_is_fd((int)fd))
+            pidfd_close_fd((int)fd);
+    }
+}
+
+void pidfd_close_cloexec(pid_t pid) {
+    int i;
+
+    mutex_lock(&pidfd_lock);
+    for (i = 0; i < pidfd_capacity; i++) {
+        if (!pidfds[i].in_use || pidfds[i].owner_pid != pid ||
+            !(pidfds[i].flags & PIDFD_CLOEXEC)) continue;
+        memset(&pidfds[i], 0, sizeof(pidfd_entry_t));
+    }
+    mutex_unlock(&pidfd_lock);
+}
+
+void pidfd_close_task(pid_t pid) {
+    int i;
+    int any;
+
+    mutex_lock(&pidfd_lock);
+    any = 0;
+    for (i = 0; i < pidfd_capacity; i++) {
+        if (pidfds[i].in_use && (pidfds[i].owner_pid == pid ||
+                                 pidfds[i].pid == pid))
+            memset(&pidfds[i], 0, sizeof(pidfd_entry_t));
+        if (pidfds[i].in_use) any = 1;
+    }
+    if (!any) {
+        kfree(pidfds);
+        pidfds = NULL;
+        pidfd_capacity = 0;
+    }
+    mutex_unlock(&pidfd_lock);
+}
+
+static int sys_pidfd_send_signal(int pidfd, int sig, const void *info,
+                                 unsigned int flags) {
+    pid_t pid;
+
+    if (flags != 0) return -EINVAL;
+    if (info) return -EINVAL;
+    if (sig < 0 || sig >= 65) return -EINVAL;
+    pid = pidfd_lookup(pidfd);
+    if (pid < 0) return -EBADF;
+    return sys_kill_impl((int)pid, (const char *)(uintptr_t)(uint64_t)sig, 0);
+}
+
+struct proc_vm_iovec {
+    void *base;
+    size_t len;
+};
+
+static uint64_t proc_vm_pd(task_t *task) {
+    uint64_t pd;
+
+    if (!task) return 0;
+    pd = task->cr3 ? task->cr3 : task->pml4_phys;
+    return pd;
+}
+
+static int proc_vm_range_ok(task_t *task, uint64_t addr, size_t len) {
+    uint64_t pd;
+    uint64_t end;
+    uint64_t page;
+
+    if (!task || len == 0) return 0;
+    pd = proc_vm_pd(task);
+    if (!pd) return 0;
+    if (addr < 0x1000 || len > UINT64_MAX - addr) return 0;
+    end = addr + (uint64_t)len - 1;
+    if (end >= KERNEL_VMA) return 0;
+    page = addr & ~(PAGE_SIZE - 1);
+    for (;;) {
+        if (!vmm_get_phys_in_pml4(pd, page)) return 0;
+        if (page >= end) break;
+        if (page > UINT64_MAX - PAGE_SIZE) return 0;
+        page += PAGE_SIZE;
+    }
+    return 1;
+}
+
+static int proc_vm_remote_ok(task_t *task, uint64_t addr, size_t len) {
+    if (!task || len == 0) return 0;
+    if (task == current_task)
+        return syscall_user_range_mapped(addr, (uint64_t)len, 1);
+    return proc_vm_range_ok(task, addr, len);
+}
+
+static int proc_vm_copy(task_t *task, uint64_t addr, void *buf, size_t len,
+                        int to_remote) {
+    uint64_t pd;
+
+    if (task == current_task) {
+        if (to_remote)
+            return copy_to_user((void *)(uintptr_t)addr, buf, len);
+        return copy_from_user(buf, (const void *)(uintptr_t)addr, len);
+    }
+    pd = proc_vm_pd(task);
+    if (!pd) return -1;
+    if (!proc_vm_range_ok(task, addr, len)) return -1;
+    if (to_remote)
+        vmm_copy_to_pml4(pd, addr, buf, (uint64_t)len);
+    else
+        vmm_read_from_pml4(pd, addr, buf, (uint64_t)len);
+    return 0;
+}
+
+static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
+                          unsigned long liovcnt,
+                          const struct proc_vm_iovec *remote,
+                          unsigned long riovcnt, unsigned long flags,
+                          int to_remote) {
+    task_t *target;
+    struct proc_vm_iovec liov;
+    struct proc_vm_iovec riov;
+    uint8_t chunk[1024];
+    uint64_t local_addr;
+    uint64_t remote_addr;
+    size_t local_left;
+    size_t remote_left;
+    size_t step;
+    unsigned long li;
+    unsigned long ri;
+    uint64_t total;
+
+    if (flags != 0) return -EINVAL;
+    if (!current_task) return -ESRCH;
+    if (liovcnt > 1024 || riovcnt > 1024) return -EINVAL;
+    if ((liovcnt == 0 || !local) && (riovcnt == 0 || !remote)) return 0;
+    if (liovcnt != 0 && !local) return -EFAULT;
+    if (riovcnt != 0 && !remote) return -EFAULT;
+    lock_scheduler();
+    target = task_find((pid_t)pid);
+    if (!target || target->state == TASK_DEAD || !target->pml4_phys) {
+        unlock_scheduler();
+        return -ESRCH;
+    }
+    if (target != current_task && current_task->euid != 0 &&
+        current_task->euid != target->euid &&
+        current_task->uid != target->euid) {
+        unlock_scheduler();
+        return -EPERM;
+    }
+    total = 0;
+    li = 0;
+    ri = 0;
+    local_left = 0;
+    remote_left = 0;
+    local_addr = 0;
+    remote_addr = 0;
+    for (;;) {
+        while (local_left == 0 && li < liovcnt) {
+            if (copy_from_user(&liov,
+                               &local[li],
+                               sizeof(liov)) < 0) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            li++;
+            if (liov.len == 0) continue;
+            local_addr = (uint64_t)(uintptr_t)liov.base;
+            if (!syscall_user_range_mapped(local_addr,
+                                           (uint64_t)liov.len, 1)) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            local_left = liov.len;
+            break;
+        }
+        while (remote_left == 0 && ri < riovcnt) {
+            if (copy_from_user(&riov,
+                               &remote[ri],
+                               sizeof(riov)) < 0) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            ri++;
+            if (riov.len == 0) continue;
+            remote_addr = (uint64_t)(uintptr_t)riov.base;
+            if (!proc_vm_remote_ok(target, remote_addr, riov.len)) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            remote_left = riov.len;
+            break;
+        }
+        if (local_left == 0 || remote_left == 0) break;
+        step = local_left < remote_left ? local_left : remote_left;
+        if (step > sizeof(chunk)) step = sizeof(chunk);
+        if (!to_remote) {
+            if (proc_vm_copy(target, remote_addr, chunk, step, 0) < 0 ||
+                copy_to_user((void *)(uintptr_t)local_addr, chunk,
+                             step) < 0) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+        } else {
+            if (copy_from_user(chunk, (const void *)(uintptr_t)local_addr,
+                               step) < 0 ||
+                proc_vm_copy(target, remote_addr, chunk, step, 1) < 0) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -EFAULT;
+            }
+        }
+        local_addr += step;
+        remote_addr += step;
+        local_left -= step;
+        remote_left -= step;
+        total += step;
+        if (total >= INT32_MAX) break;
+    }
+    unlock_scheduler();
+    return (int)total;
+}
+
+static int sys_process_vm_readv(int pid, const struct proc_vm_iovec *local,
+                                unsigned long liovcnt,
+                                const struct proc_vm_iovec *remote,
+                                unsigned long riovcnt, unsigned long flags) {
+    return sys_process_vm(pid, local, liovcnt, remote, riovcnt, flags, 0);
+}
+
+static int sys_process_vm_writev(int pid, const struct proc_vm_iovec *local,
+                                 unsigned long liovcnt,
+                                 const struct proc_vm_iovec *remote,
+                                 unsigned long riovcnt,
+                                 unsigned long flags) {
+    return sys_process_vm(pid, local, liovcnt, remote, riovcnt, flags, 1);
+}
+
 void syscalls_process_init(void) {
+    mutex_init(&pidfd_lock);
     syscall_table_set(SYSCALL_GETPID, (void *)(sys_getpid));
     syscall_table_set(SYSCALL_YIELD, (void *)(sys_yield));
     syscall_table_set(SYSCALL_SLEEP, (void *)(sys_sleep));
@@ -358,4 +740,11 @@ void syscalls_process_init(void) {
     syscall_table_set(SYSCALL_VFORK, (void *)(sys_vfork));
     syscall_table_set(SYSCALL_CLONE, (void *)(sys_clone));
     syscall_table_set(SYSCALL_CLONE3, (void *)(sys_clone3));
+    syscall_table_set(SYSCALL_PIDFD_OPEN, (void *)(sys_pidfd_open));
+    syscall_table_set(SYSCALL_PIDFD_SEND_SIGNAL,
+                      (void *)(sys_pidfd_send_signal));
+    syscall_table_set(SYSCALL_PROCESS_VM_READV,
+                      (void *)(sys_process_vm_readv));
+    syscall_table_set(SYSCALL_PROCESS_VM_WRITEV,
+                      (void *)(sys_process_vm_writev));
 }

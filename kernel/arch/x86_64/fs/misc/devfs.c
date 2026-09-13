@@ -15,6 +15,7 @@
 #include <lebirun/task.h>
 #include <lebirun/evdev.h>
 #include <lebirun/rng.h>
+#include <lebirun/vring.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +62,8 @@ enum {
     DEVFS_NODE_MICE,
     DEVFS_NODE_FB0,
     DEVFS_NODE_SHM,
+    DEVFS_NODE_KMSG,
+    DEVFS_NODE_HWRNG,
     DEVFS_NODE_COUNT
 };
 
@@ -74,7 +77,9 @@ enum {
     DEVFS_OP_OPEN,
     DEVFS_OP_FULL,
     DEVFS_OP_MICE,
-    DEVFS_OP_FB
+    DEVFS_OP_FB,
+    DEVFS_OP_KMSG,
+    DEVFS_OP_HWRNG
 };
 
 typedef struct {
@@ -547,6 +552,48 @@ static uint64_t dev_stdio_link_read(vfs_node_t *node, uint64_t offset, uint64_t 
     return copy_len;
 }
 
+static uint64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset,
+                              uint64_t size, uint8_t *buffer) {
+    int len;
+
+    (void)node;
+    len = klog_snapshot(NULL, 0);
+    if (len <= 0) return 0;
+    if (offset >= (uint64_t)len) return 0;
+    if (size > (uint64_t)len - offset) size = (uint64_t)len - offset;
+    klog_snapshot_range((char *)buffer, (int)offset, (int)size);
+    return size;
+}
+
+static uint64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset,
+                               uint64_t size, uint8_t *buffer) {
+    int written;
+
+    (void)node;
+    (void)offset;
+    if (size == 0) return 0;
+    if (size > 4096) size = 4096;
+    written = klog_enqueue_raw((const char *)buffer, (size_t)size);
+    if (written < 0) return (uint64_t)-5;
+    return (uint64_t)written;
+}
+
+static uint64_t dev_hwrng_read(vfs_node_t *node, uint64_t offset,
+                               uint64_t size, uint8_t *buffer) {
+    (void)node;
+    (void)offset;
+    rng_fill(buffer, size);
+    return size;
+}
+
+static uint64_t dev_hwrng_write(vfs_node_t *node, uint64_t offset,
+                                uint64_t size, uint8_t *buffer) {
+    (void)node;
+    (void)offset;
+    rng_add_entropy(buffer, size);
+    return size;
+}
+
 static const devfs_static_node_desc_t devfs_node_descs[DEVFS_NODE_COUNT] = {
     { "null", VFS_CHARDEVICE, 0666, DEVFS_OP_NULL },
     { "zero", VFS_CHARDEVICE, 0666, DEVFS_OP_ZERO },
@@ -566,7 +613,9 @@ static const devfs_static_node_desc_t devfs_node_descs[DEVFS_NODE_COUNT] = {
     { "port", VFS_CHARDEVICE, 0640, DEVFS_OP_OPEN },
     { "mice", VFS_CHARDEVICE, 0666, DEVFS_OP_MICE },
     { "fb0", VFS_CHARDEVICE, 0666, DEVFS_OP_FB },
-    { "shm", VFS_DIRECTORY, 01777, DEVFS_OP_NONE }
+    { "shm", VFS_DIRECTORY, 01777, DEVFS_OP_NONE },
+    { "kmsg", VFS_CHARDEVICE, 0666, DEVFS_OP_KMSG },
+    { "hwrng", VFS_CHARDEVICE, 0666, DEVFS_OP_HWRNG }
 };
 
 static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_t *desc, int idx) {
@@ -609,6 +658,14 @@ static void devfs_init_base_node(vfs_node_t *node, const devfs_static_node_desc_
             node->read = dev_fb0_read;
             node->write = dev_fb0_write;
             node->ioctl = dev_fb0_ioctl;
+            break;
+        case DEVFS_OP_KMSG:
+            node->read = dev_kmsg_read;
+            node->write = dev_kmsg_write;
+            break;
+        case DEVFS_OP_HWRNG:
+            node->read = dev_hwrng_read;
+            node->write = dev_hwrng_write;
             break;
         default:
             break;

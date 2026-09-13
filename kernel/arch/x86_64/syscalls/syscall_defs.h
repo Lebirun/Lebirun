@@ -455,6 +455,20 @@ int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 #define SYSCALL_CLONE3 300
 #define SYSCALL_SCHED_SETAFFINITY 301
 #define SYSCALL_SCHED_GETAFFINITY 302
+#define SYSCALL_SYSLOG 303
+#define SYSCALL_SETHOSTNAME 304
+#define SYSCALL_GETHOSTNAME 305
+#define SYSCALL_SETDOMAINNAME 306
+#define SYSCALL_GETDOMAINNAME 307
+#define SYSCALL_STATX 308
+#define SYSCALL_SENDFILE 309
+#define SYSCALL_TIMES 310
+#define SYSCALL_MEMBARRIER 311
+#define SYSCALL_PROCESS_VM_READV 312
+#define SYSCALL_PROCESS_VM_WRITEV 313
+#define SYSCALL_PIDFD_OPEN 314
+#define SYSCALL_PIDFD_GETFD 315
+#define SYSCALL_PIDFD_SEND_SIGNAL 316
 
 #define NR_SYSCALLS 300
 
@@ -483,6 +497,8 @@ struct kernel_sigaction {
     void (*sa_restorer)(void);
     unsigned long sa_mask;
 };
+
+int vfs_stat_path(int dirfd, const char *path, struct kernel_stat *st);
 
 #define S_IFMT  00170000
 #define S_IFSOCK 0140000
@@ -543,6 +559,13 @@ extern int tty_count;
 
 void syscall_table_set(int number, void *handler);
 void *syscall_table_get(int number);
+int pidfd_is_fd(int fd);
+int pidfd_close_fd(int fd);
+void pidfd_close_range(unsigned int first, unsigned int last, int cloexec);
+void pidfd_close_cloexec(pid_t pid);
+void pidfd_close_task(pid_t pid);
+pid_t pidfd_lookup(int pidfd);
+void sysrq_handle_key(char c, int from_irq);
 
 void KERNEL_INIT syscalls_core_init(void);
 void KERNEL_INIT syscalls_process_init(void);

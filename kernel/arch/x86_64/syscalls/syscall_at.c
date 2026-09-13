@@ -635,28 +635,20 @@ static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     return -EACCES;
 }
 
-int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
+int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
     char *path;
-    uint64_t buf_addr;
     vfs_node_t *node;
-    struct kernel_stat *st;
     uint64_t perms;
     uint64_t mode;
 
+    if (!st) return -EFAULT;
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
-
-    buf_addr = (uint64_t)statbuf;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) {
-        kfree(path);
-        return -EFAULT;
-    }
 
     node = vfs_namei(path);
     kfree(path);
     if (!node) return -ENOENT;
 
-    st = (struct kernel_stat *)buf_addr;
     memset(st, 0, sizeof(struct kernel_stat));
     
     st->st_dev = 1;
@@ -697,6 +689,15 @@ int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
     
     vfs_release(node);
     return 0;
+}
+
+int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
+    uint64_t buf_addr;
+
+    buf_addr = (uint64_t)statbuf;
+    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000)
+        return -EFAULT;
+    return vfs_stat_path(dirfd, pathname, (struct kernel_stat *)buf_addr);
 }
 
 static int sys_utimensat(int dirfd, const char *pathname,
