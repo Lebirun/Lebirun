@@ -163,6 +163,10 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->ttl = 64;
     sock->recv_window = TCP_WINDOW_SIZE;
     sock->send_window = TCP_WINDOW_SIZE;
+    sock->mss = TCP_MSS;
+    sock->cwnd = 2 * TCP_MSS;
+    sock->ssthresh = 65535;
+    sock->user_timeout = 0;
 
     sock->recv_buffer_size = TCP_RECV_BUF_INIT;
     sock->recv_buffer = (uint8_t *)kmalloc(sock->recv_buffer_size);
@@ -281,10 +285,12 @@ int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
     sent = 0;
     while (sent < len) {
         chunk = len - sent;
-        if (chunk > TCP_MSS) chunk = TCP_MSS;
+        if (chunk > (uint64_t)sock->mss) chunk = sock->mss;
+        if (chunk > sock->cwnd) chunk = sock->cwnd;
 
         seq_before = sock->send_next;
-        if (tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data + sent, chunk) < 0) {
+        if (tcp_send_segment(sock, TCP_FLAG_ACK | (sock->cork ? 0 : TCP_FLAG_PSH),
+                             data + sent, chunk) < 0) {
             return sent > 0 ? (int)sent : -1;
         }
         tcp_retx_queue_add(sock, data + sent, chunk, seq_before);
@@ -787,7 +793,8 @@ void tcp_tick(void) {
             continue;
         }
         if (sock->state == TCP_STATE_SYN_SENT) {
-            if (sock->ka_probes >= 60) {
+            if (now - sock->ka_last > pit_ms_to_ticks(sock->user_timeout ?
+                                                      sock->user_timeout : 60000)) {
                 sock->state = TCP_STATE_CLOSED;
                 tcp_retx_queue_free(sock);
             } else if (now - sock->ka_last >
@@ -803,7 +810,8 @@ void tcp_tick(void) {
             if (now - sock->ka_last > pit_ms_to_ticks(sock->ka_probes ?
                                                       TCP_KEEPINTVL_MS :
                                                       TCP_KEEPIDLE_MS)) {
-                if (sock->ka_probes >= TCP_KEEPMAX_PROBES) {
+                if (sock->user_timeout &&
+                    now - sock->last_ack_time > pit_ms_to_ticks(sock->user_timeout)) {
                     sock->state = TCP_STATE_CLOSED;
                     tcp_retx_queue_free(sock);
                 } else if (sock->send_next != 0) {
@@ -820,9 +828,11 @@ void tcp_tick(void) {
         }
         if (sock->state == TCP_STATE_ESTABLISHED && sock->retx_head) {
             seg = sock->retx_head;
-            timeout_ticks = sock->retransmit_timeout << seg->retries;
+            if (seg->retries > 6) timeout_ticks = sock->retransmit_timeout << 6;
+            else timeout_ticks = sock->retransmit_timeout << seg->retries;
             if (now - seg->send_time > timeout_ticks) {
-                if (seg->retries >= TCP_RETX_MAX_RETRIES) {
+                if (sock->user_timeout &&
+                    now - sock->last_ack_time > pit_ms_to_ticks(sock->user_timeout)) {
                     sock->state = TCP_STATE_CLOSED;
                     tcp_retx_queue_free(sock);
                 } else {
@@ -831,19 +841,21 @@ void tcp_tick(void) {
                     tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, seg->data, seg->len);
                     sock->send_next = saved_send_next;
                     seg->send_time = now;
-                    seg->retries++;
+                    if (seg->retries < 6) seg->retries++;
                 }
             }
         }
         if (sock->state == TCP_STATE_FIN_WAIT1) {
-            timeout_ticks = sock->retransmit_timeout << sock->fin_retries;
+            if (sock->fin_retries > 6) timeout_ticks = sock->retransmit_timeout << 6;
+            else timeout_ticks = sock->retransmit_timeout << sock->fin_retries;
             if (now - sock->fin_send_time > timeout_ticks) {
-                if (sock->fin_retries >= TCP_RETX_MAX_RETRIES) {
+                if (sock->user_timeout &&
+                    now - sock->fin_send_time > pit_ms_to_ticks(sock->user_timeout)) {
                     sock->state = TCP_STATE_CLOSED;
                 } else {
                     tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
                     sock->fin_send_time = now;
-                    sock->fin_retries++;
+                    if (sock->fin_retries < 6) sock->fin_retries++;
                 }
             }
         }

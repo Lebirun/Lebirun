@@ -294,6 +294,17 @@ typedef struct tcp_socket {
     uint32_t recv_next;
     uint16_t send_window;
     uint16_t recv_window;
+    uint8_t cork;
+    uint8_t fastopen;
+    uint32_t fastopen_cookie;
+    uint8_t sack_ok;
+    uint8_t ws_ok;
+    uint8_t ws_shift;
+    uint16_t mss;
+    uint32_t cwnd;
+    uint32_t ssthresh;
+    uint64_t user_timeout;
+    uint8_t ktls_tx;
     uint8_t *recv_buffer;
     uint64_t recv_buffer_size;
     uint64_t recv_buffer_head;
@@ -319,6 +330,11 @@ typedef struct tcp_socket {
     struct tcp_socket *accept_next;
 } tcp_socket_t;
 
+typedef struct udp_mcast {
+    ipv4_addr_t group;
+    struct udp_mcast *next;
+} udp_mcast_t;
+
 typedef struct udp_socket {
     ipv4_addr_t local_ip;
     uint16_t local_port;
@@ -329,6 +345,8 @@ typedef struct udp_socket {
     ipv4_addr_t recv_from_ip;
     uint16_t recv_from_port;
     uint8_t has_data;
+    uint64_t rx_stamp;
+    udp_mcast_t *mcast;
     netif_t *netif;
     struct udp_socket *next;
 } udp_socket_t;

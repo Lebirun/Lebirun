@@ -105,6 +105,20 @@ void netif_poll_all(void) {
     }
 }
 
+int netif_poll_budget(int budget) {
+    netif_t *netif = netif_list;
+    int done = 0;
+    if (budget <= 0) return 0;
+    while (netif && done < budget) {
+        if (netif->poll) {
+            netif->poll(netif);
+            done++;
+        }
+        netif = netif->next;
+    }
+    return done;
+}
+
 void netif_print_info(netif_t *netif) {
     if (!netif) return;
 

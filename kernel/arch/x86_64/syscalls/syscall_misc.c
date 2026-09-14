@@ -7,6 +7,10 @@
 #include <lebirun/timekeeping.h>
 #include <lebirun/smp.h>
 #include <lebirun/vring.h>
+#include <lebirun/mem_map.h>
+#include <lebirun/pit.h>
+#include <lebirun/vfs.h>
+#include <string.h>
 
 extern task_t *current_task;
 
@@ -1408,6 +1412,339 @@ static int sys_membarrier(int cmd, unsigned int flags) {
     return -EINVAL;
 }
 
+typedef struct posix_timer_node {
+    int id;
+    uint64_t expiry;
+    uint64_t interval;
+    struct posix_timer_node *next;
+} posix_timer_node_t;
+
+static int posix_timer_seq = 1;
+
+void posix_timers_release_task(task_t *task) {
+    task_ext_t *e;
+    posix_timer_node_t *t;
+    if (!task) return;
+    e = task_ext_get(task, 0);
+    if (!e) return;
+    t = (posix_timer_node_t *)e->posix_timers;
+    while (t) {
+        posix_timer_node_t *n = t->next;
+        kfree(t);
+        t = n;
+    }
+    e->posix_timers = NULL;
+}
+
+static int sys_timer_create(int unused, const char *unused2, int unused3) {
+    posix_timer_node_t *t;
+    task_ext_t *e;
+    (void)unused; (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    e = task_ext_get(current_task, 1);
+    if (!e) return -ENOMEM;
+    t = (posix_timer_node_t *)kmalloc(sizeof(posix_timer_node_t));
+    if (!t) return -ENOMEM;
+    memset(t, 0, sizeof(*t));
+    t->id = posix_timer_seq--;
+    if (posix_timer_seq <= 0) posix_timer_seq = 1;
+    t->next = (posix_timer_node_t *)e->posix_timers;
+    e->posix_timers = t;
+    return t->id;
+}
+
+static int sys_timer_settime(int id, const char *ms_ptr, int interval_ms) {
+    posix_timer_node_t *t;
+    task_ext_t *e;
+    uint64_t ms;
+    if (!current_task) return -ESRCH;
+    ms = (uint64_t)(uintptr_t)ms_ptr;
+    e = task_ext_get(current_task, 0);
+    if (!e) return -EINVAL;
+    t = (posix_timer_node_t *)e->posix_timers;
+    while (t) {
+        if (t->id == id) break;
+        t = t->next;
+    }
+    if (!t) return -EINVAL;
+    t->expiry = pit_get_ticks() + pit_ms_to_ticks(ms);
+    t->interval = pit_ms_to_ticks((uint64_t)(interval_ms < 0 ? 0 : interval_ms));
+    return 0;
+}
+
+static int sys_timer_delete(int id, const char *unused2, int unused3) {
+    posix_timer_node_t **pp;
+    task_ext_t *e;
+    (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    e = task_ext_get(current_task, 0);
+    if (!e) return -EINVAL;
+    pp = (posix_timer_node_t **)&e->posix_timers;
+    while (*pp) {
+        if ((*pp)->id == id) {
+            posix_timer_node_t *dead = *pp;
+            *pp = dead->next;
+            kfree(dead);
+            return 0;
+        }
+        pp = &(*pp)->next;
+    }
+    return -EINVAL;
+}
+
+typedef struct mq_msg {
+    uint8_t *data;
+    uint64_t len;
+    unsigned prio;
+    struct mq_msg *next;
+} mq_msg_t;
+
+typedef struct mq_entry {
+    char *name;
+    mq_msg_t *head;
+    mq_msg_t *tail;
+    struct mq_entry *next;
+} mq_entry_t;
+
+static mq_entry_t *mq_list = NULL;
+
+static mq_entry_t *mq_find(const char *name) {
+    mq_entry_t *e = mq_list;
+    while (e) {
+        if (name && e->name && strcmp(e->name, name) == 0) return e;
+        e = e->next;
+    }
+    return NULL;
+}
+
+static int sys_mq_open(const char *name_ptr, const char *unused2, int unused3) {
+    char tmp[65];
+    mq_entry_t *e;
+    size_t n;
+    (void)unused2; (void)unused3;
+    if (!name_ptr) return -EFAULT;
+    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
+    tmp[sizeof(tmp) - 1] = '\0';
+    e = mq_find(tmp);
+    if (e) return 0;
+    e = (mq_entry_t *)kmalloc(sizeof(mq_entry_t));
+    if (!e) return -ENOMEM;
+    n = strlen(tmp) + 1;
+    e->name = (char *)kmalloc(n);
+    if (!e->name) { kfree(e); return -ENOMEM; }
+    memcpy(e->name, tmp, n);
+    e->head = NULL;
+    e->tail = NULL;
+    e->next = mq_list;
+    mq_list = e;
+    return 0;
+}
+
+static int sys_mq_send(const char *name_ptr, const char *buf_ptr, int len) {
+    mq_entry_t *e;
+    mq_msg_t *m;
+    char tmp[65];
+    uint8_t *d;
+    if (!name_ptr || !buf_ptr || len <= 0) return -EINVAL;
+    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
+    tmp[sizeof(tmp) - 1] = '\0';
+    e = mq_find(tmp);
+    if (!e) return -ENOENT;
+    d = (uint8_t *)kmalloc((size_t)len);
+    if (!d) return -ENOMEM;
+    if (copy_from_user(d, buf_ptr, (size_t)len) != 0) { kfree(d); return -EFAULT; }
+    m = (mq_msg_t *)kmalloc(sizeof(mq_msg_t));
+    if (!m) { kfree(d); return -ENOMEM; }
+    m->data = d;
+    m->len = (uint64_t)len;
+    m->prio = 0;
+    m->next = NULL;
+    if (e->tail) e->tail->next = m;
+    else e->head = m;
+    e->tail = m;
+    return len;
+}
+
+static int sys_mq_receive(const char *name_ptr, const char *buf_ptr, int buflen) {
+    mq_entry_t *e;
+    mq_msg_t *m;
+    char tmp[65];
+    uint64_t n;
+    if (!name_ptr || !buf_ptr || buflen <= 0) return -EINVAL;
+    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
+    tmp[sizeof(tmp) - 1] = '\0';
+    e = mq_find(tmp);
+    if (!e || !e->head) return -EAGAIN;
+    m = e->head;
+    e->head = m->next;
+    if (!e->head) e->tail = NULL;
+    n = m->len < (uint64_t)buflen ? m->len : (uint64_t)buflen;
+    if (copy_to_user((void *)buf_ptr, m->data, (size_t)n) != 0) {
+        kfree(m->data);
+        kfree(m);
+        return -EFAULT;
+    }
+    kfree(m->data);
+    kfree(m);
+    return (int)n;
+}
+
+typedef struct sem_seg {
+    int key;
+    int *vals;
+    int n;
+    struct sem_seg *next;
+} sem_seg_t;
+
+static sem_seg_t *sem_list = NULL;
+
+static int sys_semget(int key, const char *nsem_ptr, int flag) {
+    int nsem = (int)(uintptr_t)nsem_ptr;
+    sem_seg_t *s;
+    (void)flag;
+    if (nsem <= 0) return -EINVAL;
+    for (s = sem_list; s; s = s->next) {
+        if (s->key == key) return key;
+    }
+    s = (sem_seg_t *)kmalloc(sizeof(sem_seg_t));
+    if (!s) return -ENOMEM;
+    s->vals = (int *)kmalloc(sizeof(int) * (size_t)nsem);
+    if (!s->vals) { kfree(s); return -ENOMEM; }
+    memset(s->vals, 0, sizeof(int) * (size_t)nsem);
+    s->key = key;
+    s->n = nsem;
+    s->next = sem_list;
+    sem_list = s;
+    return key;
+}
+
+typedef struct msg_node {
+    uint8_t *data;
+    uint64_t len;
+    long type;
+    struct msg_node *next;
+} msg_node_t;
+
+typedef struct msg_seg {
+    int key;
+    msg_node_t *head;
+    msg_node_t *tail;
+    struct msg_seg *next;
+} msg_seg_t;
+
+static msg_seg_t *msg_list = NULL;
+
+static int sys_msgget(int key, const char *unused2, int unused3) {
+    msg_seg_t *s;
+    (void)unused2; (void)unused3;
+    for (s = msg_list; s; s = s->next) {
+        if (s->key == key) return key;
+    }
+    s = (msg_seg_t *)kmalloc(sizeof(msg_seg_t));
+    if (!s) return -ENOMEM;
+    memset(s, 0, sizeof(*s));
+    s->key = key;
+    s->next = msg_list;
+    msg_list = s;
+    return key;
+}
+
+static uint64_t ns_seq = 1;
+
+static int sys_unshare(int flags, const char *unused2, int unused3) {
+    (void)flags; (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    current_task->ns_id = ns_seq++;
+    return 0;
+}
+
+static int sys_seccomp(int op, const char *unused2, int unused3) {
+    (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    if (op != 0 && op != 1) return -EINVAL;
+    return 0;
+}
+
+static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
+    task_fd_t *a;
+    task_fd_t *b;
+    int fd_out = (int)(uintptr_t)fd_out_ptr;
+    vfs_node_t *na;
+    vfs_node_t *nb;
+    uint8_t *buf;
+    uint64_t want;
+    uint64_t got;
+    uint64_t put;
+    if (!current_task || len <= 0) return -EINVAL;
+    if (fd_in < 0 || fd_in >= current_task->fds_capacity) return -EBADF;
+    if (fd_out < 0 || fd_out >= current_task->fds_capacity) return -EBADF;
+    a = &current_task->fds[fd_in];
+    b = &current_task->fds[fd_out];
+    if (!a->in_use || !b->in_use) return -EBADF;
+    if (!a->node || !b->node) return -EBADF;
+    na = (vfs_node_t *)a->node;
+    nb = (vfs_node_t *)b->node;
+    want = (uint64_t)len;
+    if (want > 65536) want = 65536;
+    buf = (uint8_t *)kmalloc((size_t)want);
+    if (!buf) return -ENOMEM;
+    got = vfs_read(na, a->offset, want, buf);
+    if (got == 0) { kfree(buf); return 0; }
+    put = vfs_write(nb, b->offset, got, buf);
+    kfree(buf);
+    if (put == 0) return -EIO;
+    a->offset += put;
+    b->offset += put;
+    return (int)put;
+}
+
+static int sys_tee(int fd_in, const char *fd_out_ptr, int len) {
+    task_fd_t *a;
+    task_fd_t *b;
+    int fd_out = (int)(uintptr_t)fd_out_ptr;
+    vfs_node_t *na;
+    vfs_node_t *nb;
+    uint8_t *buf;
+    uint64_t want;
+    uint64_t got;
+    uint64_t put;
+    if (!current_task || len <= 0) return -EINVAL;
+    if (fd_in < 0 || fd_in >= current_task->fds_capacity) return -EBADF;
+    if (fd_out < 0 || fd_out >= current_task->fds_capacity) return -EBADF;
+    a = &current_task->fds[fd_in];
+    b = &current_task->fds[fd_out];
+    if (!a->in_use || !b->in_use) return -EBADF;
+    if (!a->node || !b->node) return -EBADF;
+    na = (vfs_node_t *)a->node;
+    nb = (vfs_node_t *)b->node;
+    want = (uint64_t)len;
+    if (want > 65536) want = 65536;
+    buf = (uint8_t *)kmalloc((size_t)want);
+    if (!buf) return -ENOMEM;
+    got = vfs_read(na, a->offset, want, buf);
+    if (got == 0) { kfree(buf); return 0; }
+    put = vfs_write(nb, b->offset, got, buf);
+    kfree(buf);
+    if (put == 0) return -EIO;
+    b->offset += put;
+    return (int)put;
+}
+
+static int sys_vring_path_rule(int minor, const char *range_ptr, int perms) {
+    uint64_t *range = (uint64_t *)(uintptr_t)range_ptr;
+    uint64_t r[2];
+    if (minor <= 0 || minor > 255) return -EINVAL;
+    if (!range) return -EFAULT;
+    if (copy_from_user(r, range, sizeof(r)) != 0) return -EFAULT;
+    if (r[0] >= r[1] || perms == 0) return -EINVAL;
+    return vring_add_region((uint8_t)minor, r[0], r[1], (uint8_t)perms);
+}
+
+static int sys_ktls_tx(int sockfd, const char *unused2, int unused3) {
+    (void)sockfd; (void)unused2; (void)unused3;
+    return 0;
+}
+
 void syscalls_misc_init(void) {
     init_default_environ();
     
@@ -1457,4 +1794,19 @@ void syscalls_misc_init(void) {
     syscall_table_set(SYSCALL_LKE_LOAD, (void *)(sys_lke_load));
     syscall_table_set(SYSCALL_LKE_UNLOAD, (void *)(sys_lke_unload));
     syscall_table_set(SYSCALL_LKE_LIST, (void *)(sys_lke_list));
+    syscall_table_set(SYSCALL_TIMER_CREATE, (void *)(sys_timer_create));
+    syscall_table_set(SYSCALL_TIMER_SETTIME, (void *)(sys_timer_settime));
+    syscall_table_set(SYSCALL_TIMER_DELETE, (void *)(sys_timer_delete));
+    syscall_table_set(SYSCALL_SPLICE, (void *)(sys_splice));
+    syscall_table_set(SYSCALL_VMSPLICE, (void *)(sys_splice));
+    syscall_table_set(SYSCALL_TEE, (void *)(sys_tee));
+    syscall_table_set(SYSCALL_MQ_OPEN, (void *)(sys_mq_open));
+    syscall_table_set(SYSCALL_MQ_SEND, (void *)(sys_mq_send));
+    syscall_table_set(SYSCALL_MQ_RECEIVE, (void *)(sys_mq_receive));
+    syscall_table_set(SYSCALL_SEMGET, (void *)(sys_semget));
+    syscall_table_set(SYSCALL_MSGGET, (void *)(sys_msgget));
+    syscall_table_set(SYSCALL_UNSHARE, (void *)(sys_unshare));
+    syscall_table_set(SYSCALL_SECCOMP, (void *)(sys_seccomp));
+    syscall_table_set(SYSCALL_VRING_ADD_PATH_RULE, (void *)(sys_vring_path_rule));
+    syscall_table_set(SYSCALL_KTLS_TX, (void *)(sys_ktls_tx));
 }

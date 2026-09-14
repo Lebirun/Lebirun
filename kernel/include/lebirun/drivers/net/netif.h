@@ -15,6 +15,7 @@ void netif_set_dns(netif_t *netif, ipv4_addr_t dns1, ipv4_addr_t dns2);
 void netif_set_ipv6(netif_t *netif, ipv6_addr_t ip, uint8_t prefix, ipv6_addr_t gateway);
 int netif_send(netif_t *netif, uint8_t *data, uint64_t len);
 void netif_poll_all(void);
+int netif_poll_budget(int budget);
 void netif_print_info(netif_t *netif);
 
 #endif

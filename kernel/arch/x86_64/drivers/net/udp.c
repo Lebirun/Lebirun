@@ -154,6 +154,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             sock->recv_from_ip = src;
             sock->recv_from_port = src_port;
             sock->has_data = 1;
+            sock->rx_stamp = pit_get_ticks();
             descriptor_ready_notify_irq();
             return;
         }
@@ -239,6 +240,8 @@ udp_socket_t *udp_socket_create(uint16_t port) {
 
 void udp_socket_close(udp_socket_t *sock) {
     udp_socket_t **prev;
+    udp_mcast_t *mc;
+    udp_mcast_t *next;
 
     if (!sock) return;
 
@@ -251,6 +254,13 @@ void udp_socket_close(udp_socket_t *sock) {
         prev = &(*prev)->next;
     }
 
+    mc = sock->mcast;
+    while (mc) {
+        next = mc->next;
+        kfree(mc);
+        mc = next;
+    }
+    sock->mcast = NULL;
     if (sock->recv_buffer) {
         kfree(sock->recv_buffer);
     }

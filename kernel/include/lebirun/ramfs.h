@@ -52,6 +52,7 @@ typedef struct {
 void ramfs_init(void);
 void ramfs_vfs_register(void);
 void tmpfs_vfs_register(void);
+void devpts_vfs_register(void);
 
 int ramfs_create_file(const char *path, uint16_t permissions);
 int ramfs_create_socket(const char *path, uint16_t permissions);

@@ -200,7 +200,27 @@ typedef struct task {
     void *limits_data;
     uint64_t alarm_tick;
     uint32_t cpu_affinity;
+    int preferred_cpu;
+    int last_cpu;
+    uint64_t ns_id;
+    int pi_boost;
+    void *task_ext;
 } task_t;
+
+typedef struct task_ext {
+    uint64_t dl_runtime;
+    uint64_t dl_period;
+    uint64_t dl_deadline;
+    uint64_t dl_next_replenish;
+    uint64_t cgroup_mem_kb;
+    uint64_t cgroup_anon_kb;
+    void *posix_timers;
+    void *ofd_locks;
+    void *mq_data;
+    void *ipc_data;
+} task_ext_t;
+
+task_ext_t *task_ext_get(task_t *task, int create);
 
 typedef struct {
     uint64_t task_count;

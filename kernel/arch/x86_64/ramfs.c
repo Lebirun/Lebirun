@@ -2026,6 +2026,17 @@ void KERNEL_INIT tmpfs_vfs_register(void) {
     vfs_register_fs(&tmpfs_fs_type);
 }
 
+static vfs_fs_type_t devpts_fs_type;
+
+void KERNEL_INIT devpts_vfs_register(void) {
+    devpts_fs_type.name = "devpts";
+    devpts_fs_type.mount = tmpfs_vfs_do_mount;
+    devpts_fs_type.unmount = NULL;
+    devpts_fs_type.next = NULL;
+
+    vfs_register_fs(&devpts_fs_type);
+}
+
 static void KERNEL_INIT ramfs_internalize_node(ramfs_node_t *node) {
     uint8_t *copy;
     ramfs_node_t *child;

@@ -79,6 +79,10 @@ void mutex_lock(mutex_t* m) {
             waitq_add(&m->waiters, task);
             queued = task->waiting_queue == &m->waiters;
             if (queued) task->state = TASK_BLOCKED;
+            if (queued && m->owner) {
+                task_t *o = (task_t *)(uintptr_t)m->owner;
+                if (o && o != task && o->pi_boost < 40) o->pi_boost = 40;
+            }
             unlock_scheduler();
             if (queued) {
                 schedule();
@@ -129,6 +133,7 @@ void mutex_unlock(mutex_t* m) {
 
     m->depth = 0;
     m->owner = 0;
+    if (task) task->pi_boost = 0;
     __sync_lock_release(&m->locked);
     lock_scheduler();
     waitq_wake_one(&m->waiters);

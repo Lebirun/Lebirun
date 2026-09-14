@@ -312,6 +312,7 @@ static void KERNEL_INIT kernel_boot(void) {
         iso9660_vfs_register();
         overlayfs_vfs_register();
         tmpfs_vfs_register();
+        devpts_vfs_register();
 
         use_squashfs = 0;
         squashfs_root = NULL;
@@ -450,6 +451,7 @@ static void KERNEL_INIT kernel_boot(void) {
             squashfs_vfs_register();
             overlayfs_vfs_register();
             tmpfs_vfs_register();
+            devpts_vfs_register();
 
             mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/"),
                                   KERNEL_INIT_STRING("ramfs"));

@@ -509,10 +509,17 @@ static void pipe_shrink_after_read(pipe_t *pipe) {
         pipe->write_pos = 0;
         return;
     }
-    if (pipe->buf_size <= PIPE_BUF_SIZE) return;
+    if (pipe->count == 0) {
+        if (pipe->buf_size == 0) return;
+        kfree(pipe->buffer);
+        pipe->buffer = NULL;
+        pipe->buf_size = 0;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+        return;
+    }
     if (pipe->count > SIZE_MAX / 2) return;
     target = pipe->count * 2;
-    if (target < PIPE_BUF_SIZE) target = PIPE_BUF_SIZE;
     if (target >= pipe->buf_size) return;
     pipe_resize_buffer(pipe, target);
 }

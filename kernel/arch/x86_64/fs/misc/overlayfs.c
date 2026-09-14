@@ -129,13 +129,10 @@ static int ov_cache_ensure_space(void) {
     uint64_t new_capacity;
 
     if (ov_node_cache_count < ov_node_cache_capacity) return 0;
-    if (ov_node_cache_capacity >= OV_NODE_CACHE_LIMIT) return -1;
     if (ov_node_cache_count == UINT64_MAX ||
         ov_node_cache_count + 1 >
         SIZE_MAX / sizeof(ov_node_cache_entry_t)) return -1;
     new_capacity = ov_node_cache_count + 1;
-    if (new_capacity > OV_NODE_CACHE_LIMIT)
-        new_capacity = OV_NODE_CACHE_LIMIT;
     new_cache = (ov_node_cache_entry_t *)krealloc(
         ov_node_cache,
         new_capacity * sizeof(ov_node_cache_entry_t));

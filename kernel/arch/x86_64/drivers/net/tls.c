@@ -231,6 +231,13 @@ int tls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t timeout_ms)
     return r;
 }
 
+int tls_set_tx_only(tcp_socket_t *tcp, int enable)
+{
+    if (!tcp) return -1;
+    tcp->ktls_tx = enable ? 1 : 0;
+    return 0;
+}
+
 void tls_close(tls_conn_t *conn)
 {
     if (!conn) return;

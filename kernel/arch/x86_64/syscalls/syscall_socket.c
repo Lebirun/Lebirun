@@ -24,8 +24,15 @@
 #define IPPROTO_UDP  17
 
 #define IP_TTL        2
+#define IP_ADD_MEMBERSHIP 35
+#define IP_DROP_MEMBERSHIP 36
 #define TCP_NODELAY   1
+#define TCP_CORK      3
+#define TCP_FASTOPEN  23
+#define TCP_USER_TIMEOUT 18
 #define IPV6_V6ONLY   26
+#define SO_TIMESTAMP  29
+#define MSG_ZEROCOPY  0x4000000
 
 #define SOL_SOCKET   1
 
@@ -180,6 +187,11 @@ typedef struct {
     int so_broadcast;
     int so_sndbuf;
     int so_rcvbuf;
+    int so_timestamp;
+    int tcp_cork;
+    int tcp_fastopen;
+    int tcp_user_timeout;
+    int msg_zerocopy;
     struct timeval so_rcvtimeo;
     struct timeval so_sndtimeo;
     struct linger so_linger;
@@ -197,6 +209,7 @@ typedef struct {
     int peer_write_closed;
     tcp_socket_t *tcp;
     udp_socket_t *udp;
+    udp_mcast_t *ip_mcast;
     sock_state_t state;
     pending_conn_t *backlog;
     char *sun_path;
@@ -473,6 +486,11 @@ static void free_socket(int idx, int graceful) {
         sock->type == SOCK_STREAM)
         tcp_unlisten(sock->local_port);
     if (sock->udp) udp_socket_close(sock->udp);
+    while (sock->ip_mcast) {
+        udp_mcast_t *dead = sock->ip_mcast;
+        sock->ip_mcast = dead->next;
+        kfree(dead);
+    }
     kfree(sock->recv_buf);
     kfree(sock->backlog);
     kfree(sock->sun_path);
@@ -800,8 +818,11 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
     flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
     type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
     
-    if (domain != AF_INET && domain != AF_UNIX && domain != AF_INET6) {
+    if (domain != AF_INET && domain != AF_UNIX && domain != AF_INET6 && domain != 17) {
         return -EAFNOSUPPORT;
+    }
+    if (domain == 17 && type != SOCK_RAW && type != SOCK_DGRAM) {
+        return -ESOCKTNOSUPPORT;
     }
     
     if (type != SOCK_STREAM && type != SOCK_DGRAM && type != SOCK_RAW && type != SOCK_SEQPACKET) {
@@ -949,6 +970,24 @@ static int socket_set_sun_path(socket_t *sock, const char *path) {
     return 0;
 }
 
+static int socket_set_sun_path_abs(socket_t *sock, const char *raw, size_t raw_len) {
+    char *new_path;
+    size_t n;
+    if (raw_len <= 2) return -EINVAL;
+    n = raw_len - 2;
+    if (n >= UNIX_PATH_MAX) n = UNIX_PATH_MAX - 1;
+    new_path = (char *)kmalloc(n + 2);
+    if (!new_path) return -ENOMEM;
+    new_path[0] = '@';
+    memcpy(new_path + 1, raw + 1, n - 1);
+    new_path[n] = '\0';
+    kfree(sock->sun_path);
+    sock->sun_path = new_path;
+    return 0;
+}
+
+
+
 static int socket_create_path_node(const char *path) {
     char parent_path[UNIX_PATH_MAX];
     const char *name;
@@ -1040,6 +1079,16 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         }
         if (uaddr->sun_family != AF_UNIX) {
             result = -EAFNOSUPPORT;
+            goto out;
+        }
+        if (addrlen >= 3 && uaddr->sun_path[0] == '\0') {
+            size_t raw_len = (size_t)addrlen > UNIX_PATH_MAX + 2 ?
+                             UNIX_PATH_MAX + 2 : (size_t)addrlen;
+            if (socket_set_sun_path_abs(sock, (const char *)uaddr, raw_len) < 0) {
+                result = -ENOMEM;
+                goto out;
+            }
+            sock->state = SOCKSTATE_BOUND;
             goto out;
         }
         socket_forget_unlinked_path(uaddr->sun_path);
@@ -1158,8 +1207,23 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         }
         
         if (sockets[listener_idx].backlog_count >= sockets[listener_idx].backlog_size) {
-            spin_unlock(&socket_table_lock);
-            return -ECONNREFUSED;
+            pending_conn_t *nb;
+            size_t ncap = (size_t)sockets[listener_idx].backlog_size * 2 + 1;
+            if (ncap > SIZE_MAX / sizeof(pending_conn_t)) {
+                spin_unlock(&socket_table_lock);
+                return -ECONNREFUSED;
+            }
+            nb = (pending_conn_t *)krealloc(sockets[listener_idx].backlog,
+                                            ncap * sizeof(pending_conn_t));
+            if (!nb) {
+                spin_unlock(&socket_table_lock);
+                return -ECONNREFUSED;
+            }
+            memset(nb + sockets[listener_idx].backlog_size, 0,
+                   (ncap - (size_t)sockets[listener_idx].backlog_size) * sizeof(pending_conn_t));
+            sockets[listener_idx].backlog = nb;
+            sockets[listener_idx].backlog_size = (int)ncap;
+            sockets[listener_idx].backlog_capacity = (int)ncap;
         }
         
         peer_idx = alloc_socket();
@@ -1216,6 +1280,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         return 0;
     }
     if (sock->domain == AF_INET6) {
+        uint8_t *b;
         addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
             spin_unlock(&socket_table_lock);
@@ -1224,6 +1289,67 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         if (addr6->sin6_family != AF_INET6) {
             spin_unlock(&socket_table_lock);
             return -EAFNOSUPPORT;
+        }
+        b = addr6->sin6_addr.s6_addr;
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
+            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+            b[8] == 0 && b[9] == 0 && b[10] == 0xFF && b[11] == 0xFF &&
+            !sock->ipv6_v6only) {
+            uint32_t v4 = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+                          ((uint32_t)b[14] << 8) | b[15];
+            sock->remote_addr = v4;
+            sock->remote_port = ntohs(addr6->sin6_port);
+            if (sock->state == SOCKSTATE_CLOSED && sock->type != SOCK_DGRAM) {
+                sock->local_port = alloc_ephemeral_port();
+            }
+            if (sock->type == SOCK_DGRAM) {
+                if (!sock->udp) {
+                    sock->udp = udp_socket_create(sock->local_port);
+                    if (!sock->udp) {
+                        spin_unlock(&socket_table_lock);
+                        return -EADDRINUSE;
+                    }
+                    sock->local_port = sock->udp->local_port;
+                }
+                sock->state = SOCKSTATE_CONNECTED;
+                spin_unlock(&socket_table_lock);
+                return 0;
+            }
+            sock->tcp = tcp_socket_create();
+            if (!sock->tcp) {
+                spin_unlock(&socket_table_lock);
+                return -ENOMEM;
+            }
+            sock->tcp->ttl = (uint8_t)sock->ip_ttl;
+            sock->tcp->keepalive = (uint8_t)(sock->so_keepalive ? 1 : 0);
+            sock->tcp->cork = (uint8_t)(sock->tcp_cork ? 1 : 0);
+            sock->tcp->fastopen = (uint8_t)(sock->tcp_fastopen ? 1 : 0);
+            sock->tcp->user_timeout = (uint64_t)sock->tcp_user_timeout;
+            if (sock->nonblocking) {
+                tcp_socket_t *tcpv6 = sock->tcp;
+                uint16_t rport = sock->remote_port;
+                uint32_t rv4 = v4;
+                spin_unlock(&socket_table_lock);
+                if (tcp_connect_start(tcpv6,
+                                      socket_ipv4_from_addr(rv4),
+                                      rport) < 0) {
+                    return -ECONNREFUSED;
+                }
+                sock->state = SOCKSTATE_CONNECTING;
+                return -EINPROGRESS;
+            }
+            {
+                tcp_socket_t *tcpv6 = sock->tcp;
+                uint16_t rport = sock->remote_port;
+                uint32_t rv4 = v4;
+                spin_unlock(&socket_table_lock);
+                if (tcp_connect(tcpv6, socket_ipv4_from_addr(rv4),
+                                rport, 10000) < 0) {
+                    return -ECONNREFUSED;
+                }
+                sock->state = SOCKSTATE_CONNECTED;
+                return 0;
+            }
         }
         spin_unlock(&socket_table_lock);
         return -EOPNOTSUPP;
@@ -1267,6 +1393,9 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     }
     sock->tcp->ttl = (uint8_t)sock->ip_ttl;
     sock->tcp->keepalive = (uint8_t)(sock->so_keepalive ? 1 : 0);
+    sock->tcp->cork = (uint8_t)(sock->tcp_cork ? 1 : 0);
+    sock->tcp->fastopen = (uint8_t)(sock->tcp_fastopen ? 1 : 0);
+    sock->tcp->user_timeout = (uint64_t)sock->tcp_user_timeout;
 
     if (sock->nonblocking) {
         tcp = sock->tcp;
@@ -1723,6 +1852,9 @@ static int sys_getsockopt(int sockfd, const char *level_ptr, int optname,
         case SO_PASSCRED:
             value = sock->so_passcred;
             break;
+        case SO_TIMESTAMP:
+            value = sock->so_timestamp;
+            break;
         default:
             spin_unlock(&socket_table_lock);
             return -ENOPROTOOPT;
@@ -1748,7 +1880,8 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
     optval = (void *)(uintptr_t)optval_ptr;
     if (!optval) return -EINVAL;
 
-    if (level == IPPROTO_TCP && optname == TCP_NODELAY) {
+    if (level == IPPROTO_TCP && (optname == TCP_NODELAY || optname == TCP_CORK ||
+                                 optname == TCP_FASTOPEN || optname == TCP_USER_TIMEOUT)) {
         if (optlen < (int)sizeof(int)) return -EINVAL;
         if (copy_from_user(&value, optval, sizeof(value)) < 0)
             return -EFAULT;
@@ -1758,7 +1891,67 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
             spin_unlock(&socket_table_lock);
             return -EBADF;
         }
-        sock->tcp_nodelay = value ? 1 : 0;
+        if (optname == TCP_NODELAY) sock->tcp_nodelay = value ? 1 : 0;
+        else if (optname == TCP_CORK) {
+            sock->tcp_cork = value ? 1 : 0;
+            if (sock->tcp) sock->tcp->cork = value ? 1 : 0;
+        } else if (optname == TCP_FASTOPEN) {
+            sock->tcp_fastopen = value ? 1 : 0;
+            if (sock->tcp) sock->tcp->fastopen = value ? 1 : 0;
+        } else {
+            if (value < 0) value = 0;
+            sock->tcp_user_timeout = value;
+            if (sock->tcp) sock->tcp->user_timeout = (uint64_t)value;
+        }
+        spin_unlock(&socket_table_lock);
+        return 0;
+    }
+    if (level == IPPROTO_IP && (optname == IP_ADD_MEMBERSHIP || optname == IP_DROP_MEMBERSHIP)) {
+        struct in_addr maddr;
+        udp_mcast_t *mc;
+        udp_mcast_t **pp;
+        uint8_t *b;
+        if (optlen < (int)sizeof(maddr)) return -EINVAL;
+        if (copy_from_user(&maddr, optval, sizeof(maddr)) < 0) return -EFAULT;
+        spin_lock(&socket_table_lock);
+        sock = get_socket(sockfd);
+        if (!sock || (sock->domain != AF_INET && sock->domain != AF_INET6)) {
+            spin_unlock(&socket_table_lock);
+            return -EBADF;
+        }
+        b = (uint8_t *)&maddr.s_addr;
+        if (optname == IP_ADD_MEMBERSHIP) {
+            for (mc = sock->ip_mcast; mc; mc = mc->next) {
+                if (mc->group.octets[0] == b[0] &&
+                    mc->group.octets[1] == b[1] &&
+                    mc->group.octets[2] == b[2] &&
+                    mc->group.octets[3] == b[3]) break;
+            }
+            if (!mc) {
+                mc = (udp_mcast_t *)kmalloc(sizeof(udp_mcast_t));
+                if (!mc) { spin_unlock(&socket_table_lock); return -ENOMEM; }
+                mc->group.octets[0] = b[0];
+                mc->group.octets[1] = b[1];
+                mc->group.octets[2] = b[2];
+                mc->group.octets[3] = b[3];
+                mc->next = sock->ip_mcast;
+                sock->ip_mcast = mc;
+            }
+        } else {
+            pp = &sock->ip_mcast;
+            while (*pp) {
+                if ((*pp)->group.octets[0] == b[0] &&
+                    (*pp)->group.octets[1] == b[1] &&
+                    (*pp)->group.octets[2] == b[2] &&
+                    (*pp)->group.octets[3] == b[3]) {
+                    udp_mcast_t *dead = *pp;
+                    *pp = dead->next;
+                    kfree(dead);
+                    break;
+                }
+                pp = &(*pp)->next;
+            }
+        }
         spin_unlock(&socket_table_lock);
         return 0;
     }
@@ -1866,6 +2059,9 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
             break;
         case SO_PASSCRED:
             sock->so_passcred = value ? 1 : 0;
+            break;
+        case SO_TIMESTAMP:
+            sock->so_timestamp = value ? 1 : 0;
             break;
         default:
             spin_unlock(&socket_table_lock);

@@ -9,6 +9,9 @@
 #include <string.h>
 
 #define HTTP_RECV_BUF_INIT 4096
+#ifndef ELOOP
+#define ELOOP 40
+#endif
 
 static char *http_dup_string(const char *value) {
     size_t length;
@@ -794,14 +797,25 @@ int http_download_ex(const char *url, uint8_t *buffer, uint64_t buffer_size,
         }
 
         location = http_response_header_dup(response, "location");
-        if (http_is_redirect(response->status_code) && location &&
-            redir < max_redirects) {
+        if (http_is_redirect(response->status_code) && location) {
+            if (max_redirects >= 0 && redir >= max_redirects) {
+                kfree(location);
+                http_response_free(response);
+                kfree(host); kfree(path); kfree(current_url); kfree(response);
+                return -ELOOP;
+            }
             next_url = http_redirect_url(location, is_https, host);
             kfree(location);
             if (!next_url) {
                 http_response_free(response);
                 kfree(host); kfree(path); kfree(current_url); kfree(response);
                 return -1;
+            }
+            if (strcmp(next_url, current_url) == 0) {
+                kfree(next_url);
+                http_response_free(response);
+                kfree(host); kfree(path); kfree(current_url); kfree(response);
+                return -ELOOP;
             }
             kfree(current_url);
             current_url = next_url;
@@ -889,14 +903,25 @@ int http_download_alloc(const char *url, uint8_t **out_body, uint64_t *out_size,
         }
 
         location = http_response_header_dup(response, "location");
-        if (http_is_redirect(response->status_code) && location &&
-            redir < max_redirects) {
+        if (http_is_redirect(response->status_code) && location) {
+            if (max_redirects >= 0 && redir >= max_redirects) {
+                kfree(location);
+                http_response_free(response);
+                kfree(host); kfree(path); kfree(current_url); kfree(response);
+                return -ELOOP;
+            }
             next_url = http_redirect_url(location, is_https, host);
             kfree(location);
             if (!next_url) {
                 http_response_free(response);
                 kfree(host); kfree(path); kfree(current_url); kfree(response);
                 return -1;
+            }
+            if (strcmp(next_url, current_url) == 0) {
+                kfree(next_url);
+                http_response_free(response);
+                kfree(host); kfree(path); kfree(current_url); kfree(response);
+                return -ELOOP;
             }
             kfree(current_url);
             current_url = next_url;

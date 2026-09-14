@@ -131,6 +131,10 @@ int icmp_send_echo_request(netif_t *netif, ipv4_addr_t dest, uint16_t id,
 
 int icmp_send_echo_reply(netif_t *netif, ipv4_addr_t dest, uint16_t id,
                          uint16_t seq, uint8_t *data, uint64_t len) {
+    static uint64_t last_reply;
+    uint64_t now = pit_get_ticks();
+    if (last_reply && now - last_reply < pit_ms_to_ticks(10)) return 0;
+    last_reply = now;
     return icmp_send_echo(netif, dest, id, seq, data, len, ICMP_ECHO_REPLY);
 }
 

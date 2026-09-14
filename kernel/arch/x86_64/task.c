@@ -66,12 +66,14 @@ extern void copy_file_range_release_task(void *owner);
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
 
-_Static_assert(sizeof(task_t) == 912, "task size changed");
+_Static_assert(sizeof(task_t) == 944, "task size changed");
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
 #define TASK_SCHED_FIFO 1
 #define TASK_SCHED_RR 2
+#define TASK_SCHED_DEADLINE 6
+extern int cpu_count;
 
 static int task_timeslice_for_nice(int nice_value) {
     int slice;
@@ -84,10 +86,34 @@ static int task_timeslice_for_nice(int nice_value) {
 
 static int task_scheduler_rank(task_t *task) {
     if (!task) return -1;
+    if (task->sched_policy == TASK_SCHED_DEADLINE)
+        return 200;
     if (task->sched_policy == TASK_SCHED_FIFO ||
         task->sched_policy == TASK_SCHED_RR)
         return 100 + task->sched_priority;
-    return 0;
+    return task->pi_boost;
+}
+
+static int task_pick_cpu(task_t *task) {
+    cpu_info_t *me;
+    int n;
+    if (!task) return 0;
+    me = smp_this_cpu();
+    n = cpu_count > 0 ? cpu_count : 1;
+    if ((task->cpu_affinity & (1u << ((me ? smp_processor_id() : 0) & 31))) == 0) {
+        int i;
+        for (i = 0; i < n && i < 32; i++) {
+            if (task->cpu_affinity & (1u << i)) {
+                task->preferred_cpu = i;
+                return i;
+            }
+        }
+        task->preferred_cpu = me ? smp_processor_id() : 0;
+        return task->preferred_cpu;
+    }
+    task->preferred_cpu = me ? smp_processor_id() : 0;
+    task->last_cpu = task->preferred_cpu;
+    return task->preferred_cpu;
 }
 
 int task_get_nice(task_t *task) {
@@ -113,7 +139,18 @@ int task_set_nice(task_t *task, int nice_value) {
 int task_set_scheduler(task_t *task, int policy, int priority) {
     int slice;
 
-    if (!task || policy < TASK_SCHED_OTHER || policy > TASK_SCHED_RR)
+    if (!task) return -1;
+    if (policy == TASK_SCHED_DEADLINE) {
+        if (priority < 0) return -1;
+        lock_scheduler();
+        task->sched_policy = policy;
+        task->sched_priority = 0;
+        task->base_time_slice = 1;
+        task->time_slice = 1;
+        unlock_scheduler();
+        return 0;
+    }
+    if (policy < TASK_SCHED_OTHER || policy > TASK_SCHED_RR)
         return -1;
     if (policy == TASK_SCHED_OTHER && priority != 0) return -1;
     if (policy != TASK_SCHED_OTHER && (priority < 1 || priority > 99))
@@ -134,6 +171,20 @@ int task_get_scheduler(task_t *task, int *priority) {
     if (priority) *priority = task->sched_priority;
     return task->sched_policy;
 }
+
+task_ext_t *task_ext_get(task_t *task, int create) {
+    task_ext_t *e;
+    if (!task) return NULL;
+    e = (task_ext_t *)task->task_ext;
+    if (e || !create) return e;
+    e = (task_ext_t *)kmalloc(sizeof(task_ext_t));
+    if (!e) return NULL;
+    memset(e, 0, sizeof(*e));
+    task->task_ext = e;
+    return e;
+}
+
+extern void posix_timers_release_task(task_t *task);
 
 #define USER_STACK_SIZE 0x10000u
 #define USER_STACK_INITIAL_MIN 0x1000u
@@ -1326,6 +1377,7 @@ void unlock_scheduler(void) {
 void add_task_to_runqueue(task_t* new_task) {
     task_t *tail;
 
+    if (new_task) task_pick_cpu(new_task);
     if (!ready_queue_head) {
         ready_queue_head = new_task;
         new_task->next = new_task;
@@ -1948,6 +2000,11 @@ static void task_release_exit_resources(task_t *t) {
     }
     task_free_signal_data(t);
     task_rlimit_free(t);
+    posix_timers_release_task(t);
+    if (t->task_ext) {
+        kfree(t->task_ext);
+        t->task_ext = NULL;
+    }
     if (t->timer_data) {
         kfree(t->timer_data);
         t->timer_data = NULL;

@@ -12,5 +12,6 @@ int tls_send(tls_conn_t *conn, const uint8_t *data, uint64_t len);
 int tls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t timeout_ms);
 void tls_close(tls_conn_t *conn);
 int tls_load_ca_certs(const uint8_t *pem, size_t pem_len);
+int tls_set_tx_only(tcp_socket_t *tcp, int enable);
 
 #endif
