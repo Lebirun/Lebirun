@@ -13,6 +13,9 @@ typedef struct lke_module {
     void (*cleanup)(void);
     void *text_base;
     uint64_t text_pages;
+    int *owned_syscalls;
+    int owned_count;
+    int owned_capacity;
 } lke_module_t;
 
 typedef struct lke_ksym {

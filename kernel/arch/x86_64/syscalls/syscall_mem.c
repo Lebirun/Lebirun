@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/ramfs.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -419,6 +420,9 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
              VFS_MS_NOEXEC)) return -EACCES;
         if ((flags & 0x1) && (prot & PROT_WRITE) &&
             ((tfd->flags & 0x3) == VFS_O_RDONLY)) return -EACCES;
+        if ((prot & PROT_WRITE) && (flags & 0x1) && tfd->node &&
+            ramfs_node_has_seal((vfs_node_t *)tfd->node, 0x0010u))
+            return -EACCES;
     }
 
     size = (length + 0xFFF) & ~0xFFFu;

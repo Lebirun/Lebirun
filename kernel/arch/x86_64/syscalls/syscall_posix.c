@@ -1420,6 +1420,8 @@ static int sys_execve(uint64_t path_ptr, const char *argv_ptr,
 #define F_SETLK  6
 #define F_SETLKW 7
 #define F_DUPFD_CLOEXEC 1030
+#define F_ADD_SEALS 1033
+#define F_GET_SEALS 1034
 
 #define F_RDLCK 0
 #define F_WRLCK 1
@@ -1709,6 +1711,23 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             return file_lock_set(node, current_task->pid, start, end,
                                  flock.l_type, FILE_LOCK_POSIX,
                                  cmd == F_SETLKW);
+        case F_ADD_SEALS: {
+            if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
+                return -EBADF;
+            return ramfs_node_add_seals(
+                (vfs_node_t *)fd_table[fd].node, (uint32_t)arg);
+        }
+        case F_GET_SEALS: {
+            uint32_t seals;
+            int result;
+
+            if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
+                return -EBADF;
+            result = ramfs_node_get_seals(
+                (vfs_node_t *)fd_table[fd].node, &seals);
+            if (result != 0) return result;
+            return (int)seals;
+        }
         default:
             return -EINVAL;
     }
@@ -1783,7 +1802,6 @@ static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
     mode = (int)(uintptr_t)mode_ptr;
     if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
         return -EOPNOTSUPP;
-    if (mode & FALLOC_FL_PUNCH_HOLE) return -EOPNOTSUPP;
     if (offset < 0 || length <= 0) return -EINVAL;
     if ((uint64_t)offset > UINT64_MAX - (uint64_t)length)
         return -EFBIG;
@@ -1796,6 +1814,16 @@ static int sys_fallocate(int fd, const char *mode_ptr, int64_t offset,
     node = (vfs_node_t *)tfd->node;
     if (VFS_GET_TYPE(node->flags) != VFS_FILE) return -EINVAL;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
+    if (mode & FALLOC_FL_PUNCH_HOLE) {
+        int punched;
+
+        if (!(mode & FALLOC_FL_KEEP_SIZE)) return -EINVAL;
+        punched = ramfs_zero_range(node, (uint64_t)offset,
+                                   (uint64_t)length);
+        if (punched == -95) return -EOPNOTSUPP;
+        if (punched == -1) return -EPERM;
+        return punched;
+    }
     end = (uint64_t)offset + (uint64_t)length;
     if (end <= node->length) return 0;
     if (mode & FALLOC_FL_KEEP_SIZE) return 0;

@@ -34,6 +34,8 @@ typedef struct ramfs_node {
     uint64_t atime;
     uint64_t mtime;
     uint64_t ctime;
+    uint32_t seals;
+    uint8_t is_memfd;
     mutex_t lock;
     struct ramfs_node *parent;
     struct ramfs_node *children;
@@ -79,6 +81,12 @@ int ramfs_set_backing(const char *path, const uint8_t *data, uint64_t length);
 ramfs_node_t *ramfs_get_root(void);
 ramfs_node_t *ramfs_find_node(const char *path);
 int ramfs_get_stats(ramfs_stats_t *stats);
+
+vfs_node_t *ramfs_create_memfd(const char *name);
+int ramfs_node_add_seals(vfs_node_t *node, uint32_t seals);
+int ramfs_node_get_seals(vfs_node_t *node, uint32_t *out);
+int ramfs_node_has_seal(vfs_node_t *node, uint32_t seal);
+int ramfs_zero_range(vfs_node_t *node, uint64_t offset, uint64_t length);
 
 uint64_t ramfs_get_time(void);
 

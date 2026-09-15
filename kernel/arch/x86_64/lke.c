@@ -27,16 +27,69 @@ static lke_ksym_t *ksym_table;
 static int ksym_count = 0;
 
 int lke_register_syscall(int num, void *fn) {
+    size_t i;
+    lke_module_t *owner;
+    int *grown;
+
     if (num < 0 || !fn) return -1;
     if (syscall_table_get(num) && syscall_table_get(num) != fn) return -2;
     syscall_table_set(num, fn);
     if (syscall_table_get(num) != fn) return -1;
+    owner = NULL;
+    for (i = 0; i < lke_count; i++) {
+        uint64_t base = (uint64_t)(uintptr_t)modules[i].text_base;
+        uint64_t span = modules[i].text_pages * PAGE_SIZE;
+        uint64_t addr = (uint64_t)(uintptr_t)fn;
+        if (base && span > 0 && addr >= base && addr < base + span) {
+            owner = &modules[i];
+            break;
+        }
+    }
+    if (!owner) return 0;
+    for (i = 0; i < (size_t)owner->owned_count; i++) {
+        if (owner->owned_syscalls[i] == num) return 0;
+    }
+    if (owner->owned_count == owner->owned_capacity) {
+        int new_capacity = owner->owned_capacity ? owner->owned_capacity * 2 : 4;
+        grown = (int *)krealloc(owner->owned_syscalls,
+                                (size_t)new_capacity * sizeof(int));
+        if (!grown) {
+            if (syscall_table_get(num) == fn)
+                syscall_table_set(num, NULL);
+            return -1;
+        }
+        owner->owned_syscalls = grown;
+        owner->owned_capacity = new_capacity;
+    }
+    owner->owned_syscalls[owner->owned_count++] = num;
     return 0;
 }
 
 void lke_unregister_syscall(int num, void *fn) {
+    size_t i;
+    size_t j;
+    uint64_t addr;
+
     if (num < 0) return;
     if (syscall_table_get(num) == fn) syscall_table_set(num, NULL);
+    if (!fn) return;
+    addr = (uint64_t)(uintptr_t)fn;
+    for (i = 0; i < lke_count; i++) {
+        uint64_t base = (uint64_t)(uintptr_t)modules[i].text_base;
+        uint64_t span = modules[i].text_pages * PAGE_SIZE;
+        if (!base || !span || addr < base || addr >= base + span)
+            continue;
+        for (j = 0; j < (size_t)modules[i].owned_count; j++) {
+            if (modules[i].owned_syscalls[j] == num) {
+                modules[i].owned_count--;
+                if ((int)j != modules[i].owned_count)
+                    modules[i].owned_syscalls[j] =
+                        modules[i].owned_syscalls[modules[i].owned_count];
+                return;
+            }
+        }
+        return;
+    }
 }
 
 void KERNEL_INIT lke_register_symbol(const char *name, void *addr) {
@@ -206,6 +259,17 @@ static lke_module_t *lke_find_by_name_slice(const char *name, size_t name_len) {
     return NULL;
 }
 
+static int lke_range_ok(uint64_t off, uint64_t size, uint64_t total) {
+    if (off > total || size > total - off) return 0;
+    return 1;
+}
+
+static int lke_add_ok(uint64_t a, uint64_t b, uint64_t *out) {
+    if (b > UINT64_MAX - a) return 0;
+    *out = a + b;
+    return 1;
+}
+
 int lke_load(const char *path) {
     vfs_node_t *node;
     uint64_t data_size;
@@ -295,9 +359,30 @@ int lke_load(const char *path) {
         sh = &shdr[i];
         if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) &&
             (sh->sh_flags & 0x2)) {
-            if (sh->sh_addralign > 1)
-                total_alloc = (total_alloc + sh->sh_addralign - 1) & ~(sh->sh_addralign - 1);
-            total_alloc += sh->sh_size;
+            if (sh->sh_addralign > 1) {
+                uint64_t mask;
+                uint64_t aligned;
+
+                if ((sh->sh_addralign & (sh->sh_addralign - 1)) != 0) {
+                    lke_free_pages(data, data_pages);
+                    return -10;
+                }
+                mask = sh->sh_addralign - 1;
+                if (mask > UINT64_MAX - total_alloc) {
+                    lke_free_pages(data, data_pages);
+                    return -10;
+                }
+                aligned = (total_alloc + mask) & ~mask;
+                if (aligned < total_alloc) {
+                    lke_free_pages(data, data_pages);
+                    return -10;
+                }
+                total_alloc = aligned;
+            }
+            if (!lke_add_ok(total_alloc, sh->sh_size, &total_alloc)) {
+                lke_free_pages(data, data_pages);
+                return -10;
+            }
         }
     }
 
@@ -325,10 +410,19 @@ int lke_load(const char *path) {
         sh = &shdr[i];
         if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) &&
             (sh->sh_flags & 0x2)) {
-            if (sh->sh_addralign > 1)
-                offset = (offset + sh->sh_addralign - 1) & ~(sh->sh_addralign - 1);
+            if (sh->sh_addralign > 1) {
+                uint64_t mask = sh->sh_addralign - 1;
+                offset = (offset + mask) & ~mask;
+            }
             sec_offsets[i] = (uint64_t)(mem + offset) - 0;
             if (sh->sh_type == SHT_PROGBITS && sh->sh_size > 0) {
+                if (!lke_range_ok(sh->sh_offset, sh->sh_size,
+                                  data_size)) {
+                    kfree(sec_offsets);
+                    lke_free_pages(mem, mem_pages);
+                    lke_free_pages(data, data_pages);
+                    return -7;
+                }
                 memcpy(mem + offset, data + sh->sh_offset, sh->sh_size);
             }
             offset += sh->sh_size;
@@ -339,6 +433,12 @@ int lke_load(const char *path) {
     strtab_idx = 0;
     for (i = 0; i < ehdr->e_shnum; i++) {
         if (shdr[i].sh_type == SHT_SYMTAB) {
+            if (shdr[i].sh_link >= ehdr->e_shnum) {
+                kfree(sec_offsets);
+                lke_free_pages(mem, mem_pages);
+                lke_free_pages(data, data_pages);
+                return -13;
+            }
             symtab_idx = i;
             strtab_idx = shdr[i].sh_link;
             break;
@@ -354,6 +454,15 @@ int lke_load(const char *path) {
 
     symtab_sh = &shdr[symtab_idx];
     strtab_sh = &shdr[strtab_idx];
+    if (!lke_range_ok(symtab_sh->sh_offset, symtab_sh->sh_size,
+                      data_size) ||
+        !lke_range_ok(strtab_sh->sh_offset, strtab_sh->sh_size,
+                      data_size)) {
+        kfree(sec_offsets);
+        lke_free_pages(mem, mem_pages);
+        lke_free_pages(data, data_pages);
+        return -13;
+    }
     strtab = (const char *)(data + strtab_sh->sh_offset);
 
     for (i = 0; i < ehdr->e_shnum; i++) {
@@ -361,13 +470,35 @@ int lke_load(const char *path) {
         if (rela_sh->sh_type != SHT_RELA) continue;
         if (rela_sh->sh_info >= ehdr->e_shnum) continue;
         if (sec_offsets[rela_sh->sh_info] == 0) continue;
+        if (!lke_range_ok(rela_sh->sh_offset, rela_sh->sh_size,
+                          data_size)) {
+            kfree(sec_offsets);
+            lke_free_pages(mem, mem_pages);
+            lke_free_pages(data, data_pages);
+            return -7;
+        }
 
         for (j = 0; j < rela_sh->sh_size / sizeof(Elf64_Rela); j++) {
+            uint64_t sym_count;
+
             rela = (const Elf64_Rela *)(data + rela_sh->sh_offset + j * sizeof(Elf64_Rela));
             sym_idx = ELF64_R_SYM(rela->r_info);
             rtype = ELF64_R_TYPE(rela->r_info);
 
+            sym_count = symtab_sh->sh_size / sizeof(Elf64_Sym);
+            if (sym_idx >= sym_count) {
+                kfree(sec_offsets);
+                lke_free_pages(mem, mem_pages);
+                lke_free_pages(data, data_pages);
+                return -14;
+            }
             sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset + sym_idx * sizeof(Elf64_Sym));
+            if (sym->st_name >= strtab_sh->sh_size) {
+                kfree(sec_offsets);
+                lke_free_pages(mem, mem_pages);
+                lke_free_pages(data, data_pages);
+                return -14;
+            }
             sym_name = strtab + sym->st_name;
 
             S = 0;
@@ -413,6 +544,7 @@ int lke_load(const char *path) {
         if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL) continue;
         if (ELF64_ST_TYPE(sym->st_info) != STT_FUNC) continue;
         if (sym->st_shndx == 0 || sym->st_shndx >= ehdr->e_shnum) continue;
+        if (sym->st_name >= strtab_sh->sh_size) continue;
         sym_name = strtab + sym->st_name;
         if (strcmp(sym_name, "lke_module_init") == 0) {
             init_fn = (int (*)(void))(
@@ -454,7 +586,18 @@ int lke_load(const char *path) {
 
     lke_count++;
     if (init_fn() != 0) {
+        int k;
+
         lke_count--;
+        for (k = 0; k < mod->owned_count; k++) {
+            void *installed = syscall_table_get(mod->owned_syscalls[k]);
+            uint64_t base = (uint64_t)(uintptr_t)mod->text_base;
+            uint64_t addr = (uint64_t)(uintptr_t)installed;
+            if (addr >= base &&
+                addr < base + mod->text_pages * PAGE_SIZE)
+                syscall_table_set(mod->owned_syscalls[k], NULL);
+        }
+        kfree(mod->owned_syscalls);
         kfree(mod->name);
         lke_free_pages(mem, mem_pages);
         memset(mod, 0, sizeof(lke_module_t));
@@ -475,6 +618,7 @@ int lke_unload(const char *name) {
     mod = lke_find_by_name(name);
     if (!mod) return -2;
     idx = (size_t)(mod - modules);
+    if (mod->owned_count > 0) return -16;
     if (mod->cleanup) {
         mod->cleanup();
     }
@@ -485,6 +629,7 @@ int lke_unload(const char *name) {
 
     printf("LKE: unloaded '%s'\n", mod->name);
     kfree(mod->name);
+    kfree(mod->owned_syscalls);
     lke_count--;
     if (idx != lke_count) modules[idx] = modules[lke_count];
     memset(&modules[lke_count], 0, sizeof(lke_module_t));

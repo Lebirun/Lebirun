@@ -617,7 +617,67 @@ struct itimerval_k {
 
 typedef struct {
     struct itimerval_k values[3];
+    uint64_t expiry[3];
+    uint64_t interval[3];
 } task_timer_data_t;
+
+static volatile uint64_t timer_earliest_tick;
+
+static int timer_which_signal(int which) {
+    if (which == 1) return 26;
+    if (which == 2) return 27;
+    return 14;
+}
+
+static uint64_t timer_us_to_ticks(int64_t sec, int64_t usec) {
+    uint64_t total_us;
+    uint64_t ticks;
+
+    if (sec < 0 || usec < 0 || usec >= 1000000L) return UINT64_MAX;
+    if ((uint64_t)sec > (UINT64_MAX - (uint64_t)usec) / 1000000ULL)
+        return UINT64_MAX;
+    total_us = (uint64_t)sec * 1000000ULL + (uint64_t)usec;
+    if (total_us == 0) return 0;
+    if (pit_freq == 0) return UINT64_MAX;
+    if (total_us > (UINT64_MAX - 999999ULL) / pit_freq)
+        return UINT64_MAX - 1;
+    ticks = total_us * pit_freq / 1000000ULL;
+    if (ticks == 0) ticks = 1;
+    return ticks;
+}
+
+static void timer_ticks_to_value(uint64_t ticks, long *sec_out,
+                                 long *usec_out) {
+    uint64_t freq;
+
+    freq = pit_freq ? pit_freq : 1;
+    *sec_out = (long)(ticks / freq);
+    *usec_out = (long)((ticks % freq) * 1000000ULL / freq);
+}
+
+static void timer_earliest_update(uint64_t expiry) {
+    uint64_t old;
+
+    if (!expiry) return;
+    for (;;) {
+        old = timer_earliest_tick;
+        if (old && old <= expiry) return;
+        if (__sync_bool_compare_and_swap(&timer_earliest_tick, old,
+                                         expiry)) return;
+    }
+}
+
+static void timer_earliest_recompute(uint64_t next) {
+    uint64_t old;
+
+    for (;;) {
+        old = timer_earliest_tick;
+        if (old && next && old < next) return;
+        if (old == next) return;
+        if (__sync_bool_compare_and_swap(&timer_earliest_tick, old,
+                                         next)) return;
+    }
+}
 
 static task_timer_data_t *get_task_timer_data(int create) {
     task_timer_data_t *timers;
@@ -654,6 +714,9 @@ static int timer_data_is_empty(const task_timer_data_t *timers) {
 static int sys_setitimer(int which, const struct itimerval_k *new_value, struct itimerval_k *old_value) {
     task_timer_data_t *timers;
     struct itimerval_k value;
+    struct itimerval_k current;
+    uint64_t first;
+    uint64_t repeat;
 
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
@@ -664,49 +727,161 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
         ((uint64_t)new_value < 0x1000 || (uint64_t)new_value >= KERNEL_VMA))
         return -EFAULT;
 
-    timers = get_task_timer_data(0);
-    if (old_value) {
-        if (timers) {
-            memcpy(old_value, &timers->values[which], sizeof(struct itimerval_k));
-        } else {
-            memset(old_value, 0, sizeof(struct itimerval_k));
+    if (new_value) {
+        memcpy(&value, new_value, sizeof(struct itimerval_k));
+        first = timer_us_to_ticks(value.it_value.tv_sec,
+                                  value.it_value.tv_usec);
+        repeat = timer_us_to_ticks(value.it_interval.tv_sec,
+                                   value.it_interval.tv_usec);
+        if (first == UINT64_MAX || repeat == UINT64_MAX) return -EINVAL;
+        if (first == 0) {
+            repeat = 0;
+            memset(&value.it_interval, 0, sizeof(value.it_interval));
         }
     }
 
+    lock_scheduler();
+    timers = get_task_timer_data(0);
+    if (old_value) {
+        memset(&current, 0, sizeof(current));
+        if (timers && timers->expiry[which] > tick_count) {
+            timer_ticks_to_value(timers->expiry[which] - tick_count,
+                                 &current.it_value.tv_sec,
+                                 &current.it_value.tv_usec);
+            timer_ticks_to_value(timers->interval[which],
+                                 &current.it_interval.tv_sec,
+                                 &current.it_interval.tv_usec);
+        } else if (timers && timers->expiry[which]) {
+            timer_ticks_to_value(timers->interval[which],
+                                 &current.it_interval.tv_sec,
+                                 &current.it_interval.tv_usec);
+        }
+        memcpy(old_value, &current, sizeof(current));
+    }
+
     if (new_value) {
-        memcpy(&value, new_value, sizeof(struct itimerval_k));
-        if (!timers && !timer_value_is_zero(&value)) {
+        if (!timers && (first || repeat)) {
             timers = get_task_timer_data(1);
-            if (!timers) return -ENOMEM;
+            if (!timers) {
+                unlock_scheduler();
+                return -ENOMEM;
+            }
         }
         if (timers) {
-            memcpy(&timers->values[which], &value, sizeof(struct itimerval_k));
-            if (timer_data_is_empty(timers)) {
+            memcpy(&timers->values[which], &value,
+                   sizeof(struct itimerval_k));
+            timers->interval[which] = repeat;
+            if (first) {
+                timers->expiry[which] = tick_count + first;
+                if (timers->expiry[which] < tick_count)
+                    timers->expiry[which] = UINT64_MAX;
+                timer_earliest_update(timers->expiry[which]);
+            } else {
+                timers->expiry[which] = 0;
+            }
+            if (timer_data_is_empty(timers) &&
+                !timers->expiry[0] && !timers->expiry[1] &&
+                !timers->expiry[2]) {
                 kfree(timers);
                 current_task->timer_data = NULL;
             }
         }
     }
+    unlock_scheduler();
 
     return 0;
 }
 
 static int sys_getitimer(int which, struct itimerval_k *curr_value) {
     task_timer_data_t *timers;
+    struct itimerval_k current;
 
     if (which < 0 || which > 2) return -EINVAL;
     if (!current_task) return -ESRCH;
     if (!curr_value) return -EFAULT;
     if ((uint64_t)curr_value < 0x1000 || (uint64_t)curr_value >= KERNEL_VMA) return -EFAULT;
 
+    memset(&current, 0, sizeof(current));
+    lock_scheduler();
     timers = get_task_timer_data(0);
     if (timers) {
-        memcpy(curr_value, &timers->values[which], sizeof(struct itimerval_k));
+        if (timers->expiry[which] > tick_count) {
+            timer_ticks_to_value(timers->expiry[which] - tick_count,
+                                 &current.it_value.tv_sec,
+                                 &current.it_value.tv_usec);
+            timer_ticks_to_value(timers->interval[which],
+                                 &current.it_interval.tv_sec,
+                                 &current.it_interval.tv_usec);
+        } else if (timers->expiry[which]) {
+            timer_ticks_to_value(timers->interval[which],
+                                 &current.it_interval.tv_sec,
+                                 &current.it_interval.tv_usec);
+        }
+        memcpy(curr_value, &current, sizeof(current));
     } else {
         memset(curr_value, 0, sizeof(struct itimerval_k));
     }
+    unlock_scheduler();
 
     return 0;
+}
+
+void task_timer_check(void) {
+    task_t *t;
+    task_timer_data_t *timers;
+    uint64_t now;
+    uint64_t next;
+    uint64_t address;
+    int i;
+
+    if (!timer_earliest_tick) return;
+    now = tick_count;
+    if (now < timer_earliest_tick) return;
+    next = 0;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        address = (uint64_t)t;
+        if (address < KERNEL_VMA) break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+        if (t->alarm_tick && now >= t->alarm_tick) {
+            t->alarm_tick = 0;
+            deliver_signal_to_task(t, 14);
+        } else if (t->alarm_tick && (!next || t->alarm_tick < next)) {
+            next = t->alarm_tick;
+        }
+        timers = (task_timer_data_t *)t->timer_data;
+        if (timers) {
+            for (i = 0; i < 3; i++) {
+                if (!timers->expiry[i]) continue;
+                if (now >= timers->expiry[i]) {
+                    if (timers->interval[i] &&
+                        timers->interval[i] < UINT64_MAX / 2) {
+                        timers->expiry[i] += timers->interval[i];
+                        if (timers->expiry[i] <= now ||
+                            timers->expiry[i] < timers->interval[i])
+                            timers->expiry[i] = now +
+                                timers->interval[i];
+                        if (!timers->expiry[i]) timers->expiry[i] = 1;
+                    } else {
+                        timers->expiry[i] = 0;
+                    }
+                    deliver_signal_to_task(t, timer_which_signal(i));
+                }
+                if (timers->expiry[i] &&
+                    (!next || timers->expiry[i] < next))
+                    next = timers->expiry[i];
+            }
+            if (timer_data_is_empty(timers) && !timers->expiry[0] &&
+                !timers->expiry[1] && !timers->expiry[2]) {
+                kfree(timers);
+                t->timer_data = NULL;
+            }
+        }
+        t = t->all_next;
+    }
+    timer_earliest_recompute(next);
+    unlock_scheduler();
 }
 
 static int sys_alarm(int seconds, const char *unused1, int unused2) {
@@ -719,6 +894,7 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     
     if (seconds > 0) {
         current_task->alarm_tick = tick_count + (seconds * pit_freq);
+        timer_earliest_update(current_task->alarm_tick);
     } else {
         current_task->alarm_tick = 0;
     }
@@ -1446,7 +1622,7 @@ static int sys_timer_create(int unused, const char *unused2, int unused3) {
     t = (posix_timer_node_t *)kmalloc(sizeof(posix_timer_node_t));
     if (!t) return -ENOMEM;
     memset(t, 0, sizeof(*t));
-    t->id = posix_timer_seq--;
+    t->id = posix_timer_seq++;
     if (posix_timer_seq <= 0) posix_timer_seq = 1;
     t->next = (posix_timer_node_t *)e->posix_timers;
     e->posix_timers = t;
@@ -1671,7 +1847,10 @@ static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
     int fd_out = (int)(uintptr_t)fd_out_ptr;
     vfs_node_t *na;
     vfs_node_t *nb;
-    uint8_t *buf;
+    uint8_t buf[4096];
+    uint64_t in_pos;
+    uint64_t out_pos;
+    uint64_t total;
     uint64_t want;
     uint64_t got;
     uint64_t put;
@@ -1684,18 +1863,27 @@ static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
     if (!a->node || !b->node) return -EBADF;
     na = (vfs_node_t *)a->node;
     nb = (vfs_node_t *)b->node;
-    want = (uint64_t)len;
-    if (want > 65536) want = 65536;
-    buf = (uint8_t *)kmalloc((size_t)want);
-    if (!buf) return -ENOMEM;
-    got = vfs_read(na, a->offset, want, buf);
-    if (got == 0) { kfree(buf); return 0; }
-    put = vfs_write(nb, b->offset, got, buf);
-    kfree(buf);
-    if (put == 0) return -EIO;
-    a->offset += put;
-    b->offset += put;
-    return (int)put;
+    in_pos = a->offset;
+    out_pos = b->offset;
+    total = 0;
+    while (total < (uint64_t)len) {
+        want = (uint64_t)len - total;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        got = vfs_read(na, in_pos + total, want, buf);
+        if (got > want) got = want;
+        if (got == 0) break;
+        put = vfs_write(nb, out_pos + total, got, buf);
+        if (put > got) put = got;
+        if (put == 0) {
+            if (total > 0) break;
+            return -EIO;
+        }
+        total += put;
+        if (put < got) break;
+    }
+    a->offset += total;
+    b->offset += total;
+    return (int)total;
 }
 
 static int sys_tee(int fd_in, const char *fd_out_ptr, int len) {
@@ -1704,7 +1892,10 @@ static int sys_tee(int fd_in, const char *fd_out_ptr, int len) {
     int fd_out = (int)(uintptr_t)fd_out_ptr;
     vfs_node_t *na;
     vfs_node_t *nb;
-    uint8_t *buf;
+    uint8_t buf[4096];
+    uint64_t in_pos;
+    uint64_t out_pos;
+    uint64_t total;
     uint64_t want;
     uint64_t got;
     uint64_t put;
@@ -1717,17 +1908,26 @@ static int sys_tee(int fd_in, const char *fd_out_ptr, int len) {
     if (!a->node || !b->node) return -EBADF;
     na = (vfs_node_t *)a->node;
     nb = (vfs_node_t *)b->node;
-    want = (uint64_t)len;
-    if (want > 65536) want = 65536;
-    buf = (uint8_t *)kmalloc((size_t)want);
-    if (!buf) return -ENOMEM;
-    got = vfs_read(na, a->offset, want, buf);
-    if (got == 0) { kfree(buf); return 0; }
-    put = vfs_write(nb, b->offset, got, buf);
-    kfree(buf);
-    if (put == 0) return -EIO;
-    b->offset += put;
-    return (int)put;
+    in_pos = a->offset;
+    out_pos = b->offset;
+    total = 0;
+    while (total < (uint64_t)len) {
+        want = (uint64_t)len - total;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        got = vfs_read(na, in_pos + total, want, buf);
+        if (got > want) got = want;
+        if (got == 0) break;
+        put = vfs_write(nb, out_pos + total, got, buf);
+        if (put > got) put = got;
+        if (put == 0) {
+            if (total > 0) break;
+            return -EIO;
+        }
+        total += put;
+        if (put < got) break;
+    }
+    b->offset += total;
+    return (int)total;
 }
 
 static int sys_vring_path_rule(int minor, const char *range_ptr, int perms) {

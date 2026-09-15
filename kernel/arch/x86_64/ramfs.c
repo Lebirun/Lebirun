@@ -15,6 +15,13 @@ extern task_t *current_task;
 #define RAMFS_NODE_FIFO    3
 #define RAMFS_NODE_SOCKET  4
 
+#define RAMFS_SEAL_SEAL 0x0001u
+#define RAMFS_SEAL_SHRINK 0x0002u
+#define RAMFS_SEAL_GROW 0x0004u
+#define RAMFS_SEAL_WRITE 0x0008u
+#define RAMFS_SEAL_FUTURE_WRITE 0x0010u
+#define RAMFS_SEAL_ALL 0x001Fu
+
 static ramfs_node_t *ramfs_root = NULL;
 static vfs_node_t *ramfs_vfs_root = NULL;
 static dirent_t ramfs_dirent;
@@ -1203,7 +1210,12 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
     
     ramfs_lock();
     ramfs_node_lock(rn);
-    
+
+    if (rn->is_memfd && (rn->seals & RAMFS_SEAL_WRITE)) {
+        ramfs_node_unlock(rn);
+        ramfs_unlock();
+        return 0;
+    }
     if (!rn->data && rn->backing_data && rn->backing_length > 0) {
         backing_to_copy = rn->backing_length;
         if (!ramfs_check_space(backing_to_copy)) {
@@ -1269,6 +1281,12 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
         ramfs_stats.used_size += new_cap - old_capacity;
     }
     
+    if (needed > rn->length && rn->is_memfd &&
+        (rn->seals & RAMFS_SEAL_GROW)) {
+        ramfs_node_unlock(rn);
+        ramfs_unlock();
+        return 0;
+    }
     memcpy(rn->data + offset, buffer, size);
     if (needed > rn->length) {
         rn->length = needed;
@@ -1353,7 +1371,20 @@ static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {
     ramfs_lock();
     ramfs_node_lock(rn);
     old_capacity = rn->data_capacity;
-    
+
+    if (rn->is_memfd) {
+        if (length < rn->length && (rn->seals & RAMFS_SEAL_SHRINK)) {
+            ramfs_node_unlock(rn);
+            ramfs_unlock();
+            return -1;
+        }
+        if (length > rn->length && (rn->seals & RAMFS_SEAL_GROW)) {
+            ramfs_node_unlock(rn);
+            ramfs_unlock();
+            return -1;
+        }
+    }
+
     if (length == 0) {
         if (rn->data) {
             ramfs_stats.used_size -= rn->data_capacity;
@@ -1715,6 +1746,177 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
     ramfs_node_unlock(prn);
     ramfs_unlock();
     
+    return RAMFS_ERR_OK;
+}
+
+vfs_node_t *ramfs_create_memfd(const char *name) {
+    ramfs_node_t *node;
+    vfs_node_t *vn;
+    size_t len;
+    size_t i;
+
+    if (!name) return NULL;
+    len = strlen(name);
+    if (len == 0 || len == SIZE_MAX) return NULL;
+    for (i = 0; i < len; i++) {
+        if (name[i] == '/') return NULL;
+    }
+    node = ramfs_alloc_node();
+    if (!node) return NULL;
+    if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
+        kfree(node);
+        return NULL;
+    }
+    node->type = RAMFS_NODE_FILE;
+    node->permissions = 0700;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
+    node->is_memfd = 1;
+    ramfs_lock();
+    ramfs_stats.file_count++;
+    ramfs_unlock();
+    vn = ramfs_get_vfs_node(node, NULL);
+    if (!vn) {
+        ramfs_lock();
+        ramfs_stats.file_count--;
+        ramfs_unlock();
+        ramfs_free_node_name(node);
+        kfree(node);
+        return NULL;
+    }
+    vn->flags |= VFS_EMBEDDED;
+    vn->mask = node->permissions;
+    vn->uid = node->uid;
+    vn->gid = node->gid;
+    return vn;
+}
+
+int ramfs_node_get_seals(vfs_node_t *node, uint32_t *out) {
+    ramfs_node_t *rn;
+
+    if (!node || !out) return -22;
+    rn = (ramfs_node_t *)node->private_data;
+    if (!rn || rn->type != RAMFS_NODE_FILE || !rn->is_memfd)
+        return -22;
+    ramfs_node_lock(rn);
+    *out = rn->seals;
+    ramfs_node_unlock(rn);
+    return 0;
+}
+
+int ramfs_node_has_seal(vfs_node_t *node, uint32_t seal) {
+    ramfs_node_t *rn;
+    uint32_t seals;
+
+    if (!node) return 0;
+    rn = (ramfs_node_t *)node->private_data;
+    if (!rn || rn->type != RAMFS_NODE_FILE || !rn->is_memfd) return 0;
+    ramfs_node_lock(rn);
+    seals = rn->seals;
+    ramfs_node_unlock(rn);
+    return (seals & seal) != 0;
+}
+
+static int ramfs_memfd_mapped_writable(vfs_node_t *node) {
+    task_t *t;
+    uint64_t address;
+    int i;
+
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        address = (uint64_t)t;
+        if (address < KERNEL_VMA) break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+        for (i = 0; i < t->file_map_count; i++) {
+            if (t->file_maps[i].node == (struct vfs_node *)node &&
+                (t->file_maps[i].map_flags & TASK_VMA_SHARED) &&
+                (t->file_maps[i].flags & VMM_PTE_WRITE)) {
+                unlock_scheduler();
+                return 1;
+            }
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    return 0;
+}
+
+int ramfs_node_add_seals(vfs_node_t *node, uint32_t seals) {
+    ramfs_node_t *rn;
+
+    if (!node) return -22;
+    if (seals & ~RAMFS_SEAL_ALL) return -22;
+    rn = (ramfs_node_t *)node->private_data;
+    if (!rn || rn->type != RAMFS_NODE_FILE || !rn->is_memfd)
+        return -22;
+    ramfs_node_lock(rn);
+    if (rn->seals & RAMFS_SEAL_SEAL) {
+        ramfs_node_unlock(rn);
+        return -1;
+    }
+    if ((seals & RAMFS_SEAL_WRITE) &&
+        !(rn->seals & RAMFS_SEAL_WRITE)) {
+        ramfs_node_unlock(rn);
+        if (ramfs_memfd_mapped_writable(node)) return -16;
+        ramfs_node_lock(rn);
+        if (rn->seals & RAMFS_SEAL_SEAL) {
+            ramfs_node_unlock(rn);
+            return -1;
+        }
+    }
+    rn->seals |= seals;
+    ramfs_node_unlock(rn);
+    return 0;
+}
+
+int ramfs_zero_range(vfs_node_t *node, uint64_t offset, uint64_t length) {
+    ramfs_node_t *rn;
+    uint64_t end;
+
+    if (!node || length == 0) return RAMFS_ERR_INVAL;
+    if (offset > UINT64_MAX - length) return RAMFS_ERR_INVAL;
+    rn = (ramfs_node_t *)node->private_data;
+    if (!rn || rn->type != RAMFS_NODE_FILE) return RAMFS_ERR_ISDIR;
+    if (node->ops != &ramfs_file_ops) return -95;
+    ramfs_lock();
+    ramfs_node_lock(rn);
+    if (rn->is_memfd && (rn->seals & RAMFS_SEAL_WRITE)) {
+        ramfs_node_unlock(rn);
+        ramfs_unlock();
+        return -1;
+    }
+    if (offset >= rn->length) {
+        ramfs_node_unlock(rn);
+        ramfs_unlock();
+        return RAMFS_ERR_OK;
+    }
+    end = offset + length;
+    if (end > rn->length) end = rn->length;
+    if (rn->data) {
+        memset(rn->data + offset, 0, end - offset);
+    } else if (rn->backing_data && rn->backing_length > offset) {
+        uint8_t zeros[256];
+        uint64_t chunk;
+        uint64_t done;
+
+        memset(zeros, 0, sizeof(zeros));
+        ramfs_node_unlock(rn);
+        ramfs_unlock();
+        done = 0;
+        while (done < end - offset) {
+            chunk = end - offset - done;
+            if (chunk > sizeof(zeros)) chunk = sizeof(zeros);
+            if (ramfs_vfs_write(node, offset + done, chunk, zeros) !=
+                chunk) return RAMFS_ERR_NOSPC;
+            done += chunk;
+        }
+        return RAMFS_ERR_OK;
+    }
+    rn->mtime = ramfs_get_time();
+    node->mtime = rn->mtime;
+    ramfs_node_unlock(rn);
+    ramfs_unlock();
     return RAMFS_ERR_OK;
 }
 

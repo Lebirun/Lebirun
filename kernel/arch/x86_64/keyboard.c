@@ -8,6 +8,7 @@
 #include <lebirun/vring.h>
 #include <lebirun/vfs.h>
 #include <lebirun/power.h>
+#include <lebirun/panic.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -34,7 +35,7 @@ void sysrq_handle_key(char c, int from_irq) {
     char st;
 
     if (c == 'h' || c == 'H' || c == '?') {
-        sysrq_emit("SysRq: h help s sync u sync b reboot m mem t tasks w blocked\n", 1);
+        sysrq_emit("SysRq: h help s sync u sync b reboot o off c crash e term i kill f oom m mem t tasks w blocked\n", 1);
         return;
     }
     if (c == 's' || c == 'S' || c == 'u' || c == 'U') {
@@ -56,6 +57,61 @@ void sysrq_handle_key(char c, int from_irq) {
             for (;;) __asm__ volatile ("hlt");
         }
         power_reboot();
+        return;
+    }
+    if (c == 'o' || c == 'O') {
+        sysrq_emit("SysRq: powering off\n", 1);
+        if (from_irq) {
+            __asm__ volatile ("cli");
+            outw(0x604, 0x2000);
+            outw(0xB004, 0x2000);
+            outw(0x4004, 0x3400);
+            for (;;) __asm__ volatile ("hlt");
+        }
+        power_shutdown();
+        return;
+    }
+    if (c == 'c' || c == 'C') {
+        sysrq_emit("SysRq: crashing\n", 1);
+        kernel_panic("SysRq: crash requested", NULL);
+        return;
+    }
+    if (c == 'e' || c == 'E' || c == 'i' || c == 'I') {
+        pid_t last;
+        pid_t next;
+        task_t *target;
+        int sig;
+
+        sig = (c == 'e' || c == 'E') ? 15 : 9;
+        sysrq_emit(sig == 15 ? "SysRq: terminating all tasks\n" :
+                               "SysRq: killing all tasks\n", 1);
+        last = 0;
+        for (;;) {
+            next = 0;
+            lock_scheduler();
+            t = all_tasks_head;
+            while (t) {
+                uint64_t address = (uint64_t)t;
+                if (address < KERNEL_VMA) break;
+                if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+                if (t->pid > last && t->pid != 1 && t->is_user &&
+                    (next == 0 || t->pid < next)) next = t->pid;
+                t = t->all_next;
+            }
+            unlock_scheduler();
+            if (next <= 0) break;
+            last = next;
+            target = task_find(next);
+            if (target) deliver_signal_to_task(target, sig);
+        }
+        return;
+    }
+    if (c == 'f' || c == 'F') {
+        int victim;
+
+        victim = task_oom_kill_one();
+        snprintf(line, sizeof(line), "SysRq oom: killed %d\n", victim);
+        sysrq_emit(line, 1);
         return;
     }
     if (c == 'm' || c == 'M') {

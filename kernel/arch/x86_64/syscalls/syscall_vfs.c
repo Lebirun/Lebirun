@@ -1120,6 +1120,39 @@ static int sys_vfs_umount_user(uint64_t target_ptr, const char *unused1,
     return vfs_unmount(target);
 }
 
+static int sys_memfd_create(const char *name_ptr, const char *flags_ptr,
+                            int unused) {
+    char *name;
+    vfs_node_t *node;
+    int flags;
+    int fd;
+
+    (void)unused;
+    if (!current_task) return -ESRCH;
+    if (!name_ptr) return -EFAULT;
+    flags = (int)(uintptr_t)flags_ptr;
+    if (flags & ~(0x0001 | 0x0002 | 0x0004)) return -EINVAL;
+    if (flags & 0x0004) return -EOPNOTSUPP;
+    name = copy_string_from_user_alloc(name_ptr);
+    if (!name) return -EFAULT;
+    node = ramfs_create_memfd(name);
+    kfree(name);
+    if (!node) return -ENOMEM;
+    fd = task_fd_alloc_from(0);
+    if (fd < 0) {
+        vfs_open(node, VFS_O_RDWR);
+        vfs_close(node);
+        return fd;
+    }
+    vfs_open(node, VFS_O_RDWR);
+    current_task->fds[fd].type = FD_TYPE_FILE;
+    current_task->fds[fd].node = node;
+    current_task->fds[fd].offset = 0;
+    current_task->fds[fd].flags = (uint64_t)VFS_O_RDWR |
+        (flags & 0x0001 ? 1 : 0);
+    return fd;
+}
+
 void syscalls_vfs_init(void) {
     syscall_table_set(SYSCALL_OPEN, (void *)(sys_vfs_open));
     syscall_table_set(SYSCALL_CLOSE, (void *)(sys_vfs_close));
@@ -1139,4 +1172,5 @@ void syscalls_vfs_init(void) {
     syscall_table_set(SYSCALL_VFS_MOUNT, (void *)(sys_vfs_mount_user));
     syscall_table_set(SYSCALL_VFS_UMOUNT, (void *)(sys_vfs_umount_user));
     syscall_table_set(SYSCALL_CLOSE_RANGE, (void *)(sys_close_range));
+    syscall_table_set(SYSCALL_MEMFD_CREATE, (void *)(sys_memfd_create));
 }

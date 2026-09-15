@@ -185,6 +185,7 @@ task_ext_t *task_ext_get(task_t *task, int create) {
 }
 
 extern void posix_timers_release_task(task_t *task);
+extern void task_timer_check(void);
 
 #define USER_STACK_SIZE 0x10000u
 #define USER_STACK_INITIAL_MIN 0x1000u
@@ -214,6 +215,7 @@ extern void switch_to_asm(uint64_t* old_rsp, uint64_t new_rsp);
 
 static task_t* bootstrap_task = NULL;
 task_t* ready_queue_head = NULL;
+static task_t* ready_queue_tail = NULL;
 task_t* all_tasks_head = NULL;
 static task_t* sleep_queue_head = NULL;
 static task_t* dead_queue_head = NULL;
@@ -228,8 +230,10 @@ int task_set_cpu_affinity(task_t *task, uint32_t mask) {
 
     if (!task) return -1;
     if (mask == 0) return -1;
-    if (cpu_count <= 0 || cpu_count > 32) return -1;
-    online = cpu_count == 32 ? 0xFFFFFFFFu : ((1u << cpu_count) - 1);
+    if (cpu_count <= 0) return -1;
+    if (cpu_count >= 32) online = 0xFFFFFFFFu;
+    else online = (uint32_t)((1u << cpu_count) - 1u);
+    if (online == 0) online = 0xFFFFFFFFu;
     if ((mask & online) == 0) return -1;
     lock_scheduler();
     task->cpu_affinity = mask;
@@ -1330,6 +1334,7 @@ void KERNEL_INIT init_tasks(void) {
     current_task->is_kernel_task = false;
     current_task->cpu_affinity = 0xFFFFFFFFu;
     ready_queue_head = current_task;
+    ready_queue_tail = current_task;
     all_tasks_head = current_task;
     current_task->all_next = NULL;
 
@@ -1375,17 +1380,20 @@ void unlock_scheduler(void) {
 }
 
 void add_task_to_runqueue(task_t* new_task) {
-    task_t *tail;
-
     if (new_task) task_pick_cpu(new_task);
     if (!ready_queue_head) {
         ready_queue_head = new_task;
+        ready_queue_tail = new_task;
         new_task->next = new_task;
     } else {
-        tail = ready_queue_head;
-        while (tail->next != ready_queue_head) tail = tail->next;
-        tail->next = new_task;
+        if (!ready_queue_tail) {
+            ready_queue_tail = ready_queue_head;
+            while (ready_queue_tail->next != ready_queue_head)
+                ready_queue_tail = ready_queue_tail->next;
+        }
+        ready_queue_tail->next = new_task;
         new_task->next = ready_queue_head;
+        ready_queue_tail = new_task;
     }
 }
 
@@ -1397,6 +1405,7 @@ static inline void remove_task_from_runqueue(task_t* task) {
     if (task->next == task) {
         if (task == ready_queue_head) {
             ready_queue_head = NULL;
+            ready_queue_tail = NULL;
         }
         return;
     }
@@ -1411,6 +1420,9 @@ static inline void remove_task_from_runqueue(task_t* task) {
     
     prev->next = task->next;
     
+    if (task == ready_queue_tail) {
+        ready_queue_tail = prev;
+    }
     if (task == ready_queue_head) {
         ready_queue_head = task->next;
     }
@@ -3065,6 +3077,7 @@ void task_deferred_work(void) {
                                    __ATOMIC_ACQ_REL);
     if (deferred & TASK_DEFERRED_REAP) reap_dead_tasks();
     if (deferred & TASK_DEFERRED_EXEC_DRAIN) exec_cleanup_drain();
+    task_timer_check();
     if ((!task || !task->is_user) &&
         cpu_id == 0) {
         klog_drain_console0(32);
