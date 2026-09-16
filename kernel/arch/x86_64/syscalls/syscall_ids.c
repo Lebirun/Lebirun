@@ -310,6 +310,12 @@ static int sys_setregid(int rgid, const char *egid_ptr, int unused) {
         return 0;
     }
     
+    if (rgid != -1 && (uint64_t)rgid != creds->gid && (uint64_t)rgid != creds->egid) {
+        return -EPERM;
+    }
+    if (egid != -1 && (uint64_t)egid != creds->gid && (uint64_t)egid != creds->egid && (uint64_t)egid != creds->sgid) {
+        return -EPERM;
+    }
     if (rgid != -1) creds->gid = (uint64_t)rgid;
     if (egid != -1) creds->egid = (uint64_t)egid;
     sync_creds_to_task(creds);
@@ -357,12 +363,24 @@ static int sys_getresuid(uint64_t ruid_ptr, const char *euid_ptr,
     uint64_t r_addr = (uint64_t)ruid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)euid_ptr;
     uint64_t s_addr = (uint64_t)suid_ptr;
+    uint64_t value;
 
     if (!current_task) return -ESRCH;
-    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = current_task->uid;
-    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = current_task->euid;
-    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = current_task->suid;
-    
+    if (r_addr) {
+        value = current_task->uid;
+        if (copy_to_user((void *)(uintptr_t)r_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
+    if (e_addr) {
+        value = current_task->euid;
+        if (copy_to_user((void *)(uintptr_t)e_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
+    if (s_addr) {
+        value = current_task->suid;
+        if (copy_to_user((void *)(uintptr_t)s_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
     return 0;
 }
 
@@ -371,12 +389,24 @@ static int sys_getresgid(uint64_t rgid_ptr, const char *egid_ptr,
     uint64_t r_addr = (uint64_t)rgid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)egid_ptr;
     uint64_t s_addr = (uint64_t)sgid_ptr;
+    uint64_t value;
 
     if (!current_task) return -ESRCH;
-    if (r_addr && r_addr < KERNEL_VMA && r_addr >= 0x1000) *(uint64_t *)r_addr = current_task->gid;
-    if (e_addr && e_addr < KERNEL_VMA && e_addr >= 0x1000) *(uint64_t *)e_addr = current_task->egid;
-    if (s_addr && s_addr < KERNEL_VMA && s_addr >= 0x1000) *(uint64_t *)s_addr = current_task->sgid;
-    
+    if (r_addr) {
+        value = current_task->gid;
+        if (copy_to_user((void *)(uintptr_t)r_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
+    if (e_addr) {
+        value = current_task->egid;
+        if (copy_to_user((void *)(uintptr_t)e_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
+    if (s_addr) {
+        value = current_task->sgid;
+        if (copy_to_user((void *)(uintptr_t)s_addr, &value,
+                         sizeof(value)) < 0) return -EFAULT;
+    }
     return 0;
 }
 
@@ -493,20 +523,37 @@ static int sys_setpgid(int pid, const char *pgid_ptr, int unused) {
     int pgid;
     task_t *t;
     task_creds_t *creds;
+    task_t *scan;
+    int pgid_exists;
 
     (void)unused;
     pgid = (int)(uintptr_t)pgid_ptr;
-    
-    if (pid == 0) pid = current_task ? current_task->pid : 0;
+    if (!current_task) return -ESRCH;
+    if (pid == 0) pid = current_task->pid;
     if (pgid == 0) pgid = pid;
-    
+    if (pid <= 0 || pgid <= 0) return -EINVAL;
     t = task_find((pid_t)pid);
     if (!t) return -ESRCH;
-    
+    if (t->pid == t->sid) return -EPERM;
+    if (current_task->euid != 0) {
+        if (t != current_task && t->ppid != current_task->pid) return -EPERM;
+        if (t->sid != current_task->sid) return -EPERM;
+    }
+    if (pgid != t->pid) {
+        pgid_exists = 0;
+        lock_scheduler();
+        for (scan = all_tasks_head; scan; scan = scan->all_next) {
+            if (scan->pgid == (pid_t)pgid && scan->sid == t->sid) {
+                pgid_exists = 1;
+                break;
+            }
+        }
+        unlock_scheduler();
+        if (!pgid_exists) return -EPERM;
+    }
     creds = (task_creds_t *)t->creds_data;
     if (creds) creds->pgid = (pid_t)pgid;
     t->pgid = (pid_t)pgid;
-    
     return 0;
 }
 
@@ -524,12 +571,16 @@ static int sys_setsid(int unused1, const char *unused2, int unused3) {
     pid = current_task->pid;
     creds = (task_creds_t *)current_task->creds_data;
     if (creds) {
+        if (creds->pgid == pid) return -EPERM;
+    } else if (current_task->pgid == pid) {
+        return -EPERM;
+    }
+    if (creds) {
         creds->sid = pid;
         creds->pgid = pid;
     }
     current_task->sid = pid;
     current_task->pgid = pid;
-    
     return (int)pid;
 }
 

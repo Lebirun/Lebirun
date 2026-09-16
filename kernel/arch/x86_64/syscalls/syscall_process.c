@@ -60,7 +60,6 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
     task_t *dead;
     pid_t dead_pid;
     uint64_t exit_code;
-    uint64_t addr;
     int status;
     int r;
     int wait_state;
@@ -88,10 +87,9 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         reap_dead_tasks();
 
         if (status_ptr) {
-            addr = (uint64_t)status_ptr;
-            if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
             status = wait_status_from_exit_code(exit_code);
-            memcpy((void*)addr, &status, sizeof(int));
+            if (copy_to_user((void *)(uintptr_t)status_ptr, &status,
+                             sizeof(int)) < 0) return -EFAULT;
         }
         return (int)pid;
     }
@@ -120,10 +118,9 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             reap_dead_tasks();
 
             if (status_ptr) {
-                addr = (uint64_t)status_ptr;
-                if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
                 status = wait_status_from_exit_code(exit_code);
-                memcpy((void*)addr, &status, sizeof(int));
+                if (copy_to_user((void *)(uintptr_t)status_ptr, &status,
+                                 sizeof(int)) < 0) return -EFAULT;
             }
             return (int)dead_pid;
         }
@@ -168,7 +165,7 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
     pid_t target_pid;
     uint64_t exit_code;
     int r;
-    struct siginfo_k *info;
+    struct siginfo_k local_info;
 
     id = (int)(uintptr_t)id_ptr;
     info_addr = (uint64_t)infop;
@@ -191,11 +188,12 @@ static int sys_waitid(int idtype, const char *id_ptr, int infop) {
         if (r != 0) return -ECHILD;
         reap_dead_tasks();
 
-        if (info_addr && info_addr < KERNEL_VMA && info_addr >= 0x1000) {
-            info = (struct siginfo_k *)info_addr;
-            memset(info, 0, sizeof(struct siginfo_k));
-            info->si_signo = 17;
-            info->si_code = 1;
+        if (info_addr) {
+            memset(&local_info, 0, sizeof(local_info));
+            local_info.si_signo = 17;
+            local_info.si_code = 1;
+            if (copy_to_user((void *)(uintptr_t)info_addr, &local_info,
+                             sizeof(local_info)) < 0) return -EFAULT;
         }
         return 0;
     }

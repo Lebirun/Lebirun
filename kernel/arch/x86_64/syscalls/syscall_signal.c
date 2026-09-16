@@ -877,13 +877,30 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     if (sig == 0) {
         if (pid > 0) {
             t = task_find((pid_t)pid);
-            return t ? 0 : -ESRCH;
+            if (!t) return -ESRCH;
+            if (current_task && current_task->uid != 0 &&
+                current_task->uid != t->uid &&
+                current_task->euid != t->uid) return -EPERM;
+            return 0;
         }
         if (!current_task) return -ESRCH;
         pgid = 0;
         if (pid == 0) pgid = current_task->pgid ? current_task->pgid : current_task->pid;
         else pgid = (pid_t)(-pid);
-        return signal_find_next_pgrp(pgid, 0) > 0 ? 0 : -ESRCH;
+        next_pid = signal_find_next_pgrp(pgid, 0);
+        if (next_pid <= 0) return -ESRCH;
+        if (current_task->uid == 0) return 0;
+        last_pid = 0;
+        for (;;) {
+            next_pid = signal_find_next_pgrp(pgid, last_pid);
+            if (next_pid <= 0) break;
+            last_pid = next_pid;
+            t = task_find(next_pid);
+            if (t && !t->is_kernel_task &&
+                (current_task->uid == t->uid ||
+                 current_task->euid == t->uid)) return 0;
+        }
+        return -EPERM;
     }
 
     if (pid > 0) {
@@ -932,12 +949,16 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         if (next_pid <= 0) break;
         last_pid = next_pid;
         t = task_find(next_pid);
-        if (t) {
-            deliver_signal_to_task(t, sig);
-            sent++;
-        }
+        if (!t) continue;
+        if (t->is_kernel_task) continue;
+        if (current_task && current_task->uid != 0 &&
+            current_task->uid != t->uid &&
+            current_task->euid != t->uid) continue;
+        deliver_signal_to_task(t, sig);
+        sent++;
     }
-    return sent > 0 ? 0 : -ESRCH;
+    if (sent > 0) return 0;
+    return signal_find_next_pgrp(pgid, 0) > 0 ? -EPERM : -ESRCH;
 }
 
 static int sys_tgkill(int tgid, const char *tid_ptr, int sig) {
