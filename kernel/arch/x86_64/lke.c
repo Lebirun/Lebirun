@@ -7,6 +7,7 @@
 #include <lebirun/rng.h>
 #include <lebirun/crypto.h>
 #include <lebirun/task.h>
+#include <lebirun/uaccess.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/netif.h>
 #include <lebirun/drivers/net/ipv4.h>
@@ -135,6 +136,8 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("vfs_read", vfs_read);
     lke_register_symbol("vfs_write", vfs_write);
     lke_register_symbol("vfs_release", vfs_release);
+    lke_register_symbol("copy_from_user", copy_from_user);
+    lke_register_symbol("copy_to_user", copy_to_user);
     lke_register_symbol("pit_get_ticks64", pit_get_ticks64);
     lke_register_symbol("pit_get_uptime_ms", pit_get_uptime_ms);
     lke_register_symbol("pit_get_ticks", pit_get_ticks);

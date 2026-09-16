@@ -5,6 +5,7 @@
 #include <lebirun/panic.h>
 #include <lebirun/evdev.h>
 #include <lebirun/vring.h>
+#include <lebirun/uaccess.h>
 
 extern mutex_t print_lock;
 extern void serial_write_direct(const char *buf, size_t len);
@@ -181,6 +182,11 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
                     pmm_zero_page_phys(phys);
                     vmm_map_page_in_pml4(pd, p, phys, 0x7);
                     if (vmm_get_phys_in_pml4(pd, p) == 0) {
+                        pfa_free(phys);
+                        return 0;
+                    }
+                    if (current_task->user_pages_count >= SIZE_MAX / sizeof(uint64_t) - 1) {
+                        vmm_unmap_page_in_pml4(pd, p);
                         pfa_free(phys);
                         return 0;
                     }
@@ -642,7 +648,11 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
         while (remaining > 0) {
             chunk = remaining;
             if (chunk > work_size) chunk = work_size;
-            memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+            if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
+                if (heap_buf) kfree(kbuf);
+                if (total > 0) return (int)total;
+                return -EFAULT;
+            }
             result = socket_write(fd, kbuf, (int)chunk);
             if (result <= 0) {
                 if (heap_buf) kfree(kbuf);
@@ -668,7 +678,11 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
-                memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+                if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
+                    if (heap_buf) kfree(kbuf);
+                    if (total > 0) return (int)total;
+                    return -EFAULT;
+                }
                 done = 0;
                 while (done < chunk) {
                     pipe_flags = pipe_lock_irqsave(p);
@@ -749,7 +763,11 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
-                memcpy(kbuf, (const void *)(buf_addr + total), chunk);
+                if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
+                    if (heap_buf) kfree(kbuf);
+                    if (total > 0) return (int)total;
+                    return -EFAULT;
+                }
                 bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if (bytes == 0) {
                     if (heap_buf) kfree(kbuf);
@@ -897,7 +915,11 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 if (total > 0) return (int)total;
                 return result;
             }
-            memcpy((void *)(buf_addr + total), kbuf, (uint64_t)result);
+            if (copy_to_user((void *)(buf_addr + total), kbuf, (uint64_t)result) < 0) {
+                if (heap_buf) kfree(kbuf);
+                if (total > 0) return (int)total;
+                return -EFAULT;
+            }
             total += (uint64_t)result;
             remaining -= (uint64_t)result;
             if ((uint64_t)result < chunk) break;
@@ -956,7 +978,10 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             pipe_unlock_irqrestore(p, pipe_flags);
             waitq_wake_all(&p->write_waitq);
             descriptor_ready_notify();
-            memcpy((void *)buf_addr, kbuf, to_read);
+            if (copy_to_user((void *)buf_addr, kbuf, to_read) < 0) {
+                if (heap_buf) kfree(kbuf);
+                return -EFAULT;
+            }
             if (heap_buf) kfree(kbuf);
             return (int)to_read;
         }
@@ -975,7 +1000,10 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 (strcmp(vfs_node_name(node), "event0") == 0 ||
                  strcmp(vfs_node_name(node), "event1") == 0)) {
                 bytes = evdev_read_nonblocking(node, work_size, kbuf);
-                if (bytes > 0) memcpy((void *)buf_addr, kbuf, bytes);
+                if (bytes > 0 && copy_to_user((void *)buf_addr, kbuf, bytes) < 0) {
+                    if (heap_buf) kfree(kbuf);
+                    return -EFAULT;
+                }
                 if (heap_buf) kfree(kbuf);
                 return bytes > 0 ? (int)bytes : -EAGAIN;
             }
@@ -985,7 +1013,11 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if (bytes > chunk) bytes = chunk;
                 if (bytes == 0) break;
-                memcpy((void *)(buf_addr + total), kbuf, bytes);
+                if (copy_to_user((void *)(buf_addr + total), kbuf, bytes) < 0) {
+                    if (heap_buf) kfree(kbuf);
+                    if (total > 0) return (int)total;
+                    return -EFAULT;
+                }
                 total += bytes;
                 remaining -= bytes;
                 if (bytes < chunk) break;

@@ -607,6 +607,8 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
                           unsigned long riovcnt, unsigned long flags,
                           int to_remote) {
     task_t *target;
+    uint64_t target_pd;
+    int target_self;
     struct proc_vm_iovec liov;
     struct proc_vm_iovec riov;
     uint8_t chunk[1024];
@@ -637,6 +639,9 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
         unlock_scheduler();
         return -EPERM;
     }
+    target_pd = proc_vm_pd(target);
+    target_self = (target == current_task);
+    unlock_scheduler();
     total = 0;
     li = 0;
     ri = 0;
@@ -649,7 +654,6 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
             if (copy_from_user(&liov,
                                &local[li],
                                sizeof(liov)) < 0) {
-                unlock_scheduler();
                 return total > 0 ? (int)total : -EFAULT;
             }
             li++;
@@ -657,7 +661,6 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
             local_addr = (uint64_t)(uintptr_t)liov.base;
             if (!syscall_user_range_mapped(local_addr,
                                            (uint64_t)liov.len, 1)) {
-                unlock_scheduler();
                 return total > 0 ? (int)total : -EFAULT;
             }
             local_left = liov.len;
@@ -667,16 +670,20 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
             if (copy_from_user(&riov,
                                &remote[ri],
                                sizeof(riov)) < 0) {
-                unlock_scheduler();
                 return total > 0 ? (int)total : -EFAULT;
             }
             ri++;
             if (riov.len == 0) continue;
             remote_addr = (uint64_t)(uintptr_t)riov.base;
-            if (!proc_vm_remote_ok(target, remote_addr, riov.len)) {
+            lock_scheduler();
+            target = task_find((pid_t)pid);
+            if (!target || target->state == TASK_DEAD ||
+                proc_vm_pd(target) != target_pd ||
+                !proc_vm_remote_ok(target, remote_addr, riov.len)) {
                 unlock_scheduler();
                 return total > 0 ? (int)total : -EFAULT;
             }
+            unlock_scheduler();
             remote_left = riov.len;
             break;
         }
@@ -684,20 +691,37 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
         step = local_left < remote_left ? local_left : remote_left;
         if (step > sizeof(chunk)) step = sizeof(chunk);
         if (!to_remote) {
+            lock_scheduler();
+            target = task_find((pid_t)pid);
+            if (!target || target->state == TASK_DEAD ||
+                proc_vm_pd(target) != target_pd) {
+                unlock_scheduler();
+                return total > 0 ? (int)total : -ESRCH;
+            }
+            unlock_scheduler();
             if (proc_vm_copy(target, remote_addr, chunk, step, 0) < 0 ||
                 copy_to_user((void *)(uintptr_t)local_addr, chunk,
                              step) < 0) {
-                unlock_scheduler();
                 return total > 0 ? (int)total : -EFAULT;
             }
         } else {
             if (copy_from_user(chunk, (const void *)(uintptr_t)local_addr,
-                               step) < 0 ||
-                proc_vm_copy(target, remote_addr, chunk, step, 1) < 0) {
+                               step) < 0) {
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            lock_scheduler();
+            target = task_find((pid_t)pid);
+            if (!target || target->state == TASK_DEAD ||
+                proc_vm_pd(target) != target_pd) {
                 unlock_scheduler();
+                return total > 0 ? (int)total : -ESRCH;
+            }
+            unlock_scheduler();
+            if (proc_vm_copy(target, remote_addr, chunk, step, 1) < 0) {
                 return total > 0 ? (int)total : -EFAULT;
             }
         }
+        (void)target_self;
         local_addr += step;
         remote_addr += step;
         local_left -= step;
@@ -705,7 +729,6 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
         total += step;
         if (total >= INT32_MAX) break;
     }
-    unlock_scheduler();
     return (int)total;
 }
 

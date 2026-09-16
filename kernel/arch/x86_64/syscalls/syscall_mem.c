@@ -274,7 +274,17 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
         
         if (new_pages && page_count > 0) {
             old_count = current_task->user_pages_count;
+            if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
+                release_user_leaf_range(old_page_end, newbrk);
+                kfree(new_pages);
+                return (int64_t)current_brk;
+            }
             new_count = old_count + page_count;
+            if (new_count > SIZE_MAX / sizeof(uint64_t)) {
+                release_user_leaf_range(old_page_end, newbrk);
+                kfree(new_pages);
+                return (int64_t)current_brk;
+            }
             expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
             if (!expanded) {
                 release_user_leaf_range(old_page_end, newbrk);
@@ -345,6 +355,11 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
 
     if (new_pages && page_count > 0) {
         old_count = current_task->user_pages_count;
+        if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
+            release_user_leaf_range(base, base + size);
+            kfree(new_pages);
+            return -ENOMEM;
+        }
         new_count = old_count + page_count;
         expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
         if (!expanded) {
@@ -507,6 +522,11 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
 
     if (new_pages && page_count > 0) {
         old_count = current_task->user_pages_count;
+        if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
+            release_user_leaf_range(base, base + size);
+            kfree(new_pages);
+            return -ENOMEM;
+        }
         new_count = old_count + page_count;
         expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
         if (!expanded) {

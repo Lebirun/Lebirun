@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define EPERM   1
 #define ENOENT  2
@@ -224,7 +225,7 @@ int read(int fd, void *buf, size_t count) {
 
 int write(int fd, const void *buf, size_t count) {
     int ret = syscall3(SYS_WRITE, fd, (long)buf, (long)count);
-    if (ret < 0) { errno = EBADF; return -1; }
+    if (ret < 0) { errno = -ret; return -1; }
     return ret;
 }
 
@@ -236,7 +237,21 @@ struct iovec {
 #define SYS_WRITEV (62 | LEBIRUN_SYSCALL_FLAG)
 
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
-    return syscall3(SYS_WRITEV, fd, (long)iov, iovcnt);
+    ssize_t total;
+    ssize_t n;
+    int i;
+
+    if (!iov || iovcnt < 0) { errno = EINVAL; return -1; }
+    total = 0;
+    for (i = 0; i < iovcnt; i++) {
+        if (!iov[i].iov_base && iov[i].iov_len != 0) { errno = EFAULT; return total > 0 ? total : -1; }
+        if (iov[i].iov_len == 0) continue;
+        n = write(fd, iov[i].iov_base, iov[i].iov_len);
+        if (n < 0) return (total > 0) ? total : n;
+        total += n;
+        if ((size_t)n < iov[i].iov_len) break;
+    }
+    return total;
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
@@ -244,8 +259,10 @@ ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
     ssize_t n;
     int i;
 
+    if (!iov || iovcnt < 0) { errno = EINVAL; return -1; }
     total = 0;
     for (i = 0; i < iovcnt; i++) {
+        if (!iov[i].iov_base && iov[i].iov_len != 0) { errno = EFAULT; return total > 0 ? total : -1; }
         if (iov[i].iov_len == 0) continue;
         n = read(fd, iov[i].iov_base, iov[i].iov_len);
         if (n < 0) return (total > 0) ? total : n;
@@ -359,6 +376,7 @@ int gettimeofday(struct timeval *__restrict tv, void *__restrict tz) {
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if ((flags & 0x01) || fd >= 0 || offset != 0) { errno = ENOSYS; return (void*)-1; }
     (void)addr; (void)flags; (void)fd; (void)offset;
     return (void*)syscall2(SYS_MMAP, (long)length, prot);
 }
@@ -377,7 +395,7 @@ int isatty(int fd) {
 
 int close(int fd) {
     int ret = syscall1(SYS_VFS_CLOSE, fd);
-    if (ret < 0) { errno = EBADF; return -1; }
+    if (ret < 0) { errno = -ret; return -1; }
     return 0;
 }
 
@@ -393,7 +411,7 @@ int open(const char *pathname, int flags, ...) {
         va_end(ap);
     }
     ret = syscall3(SYS_VFS_OPEN, (long)pathname, flags, mode);
-    if (ret < 0) { errno = ENOENT; return -1; }
+    if (ret < 0) { errno = -ret; return -1; }
     return ret;
 }
 
@@ -527,13 +545,18 @@ int clearenv(void) {
 }
 
 int putenv(char *string) {
-    if (!string) return -1;
-    char *eq = string;
+    char *copy;
+    char *eq;
+    int ret;
+    if (!string) { errno = EINVAL; return -1; }
+    copy = strdup(string);
+    if (!copy) return -1;
+    eq = copy;
     while (*eq && *eq != '=') eq++;
-    if (!*eq) return -1;
+    if (!*eq) { free(copy); errno = EINVAL; return -1; }
     *eq = '\0';
-    int ret = setenv(string, eq + 1, 1);
-    *eq = '=';
+    ret = setenv(copy, eq + 1, 1);
+    free(copy);
     return ret;
 }
 

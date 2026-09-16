@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 
 struct tls_conn {
     WOLFSSL *ssl;
@@ -48,18 +49,21 @@ static WOLFSSL_CTX *tls_create_ctx(void)
     ca_node = vfs_namei("/etc/ssl/certs/ca-certificates.crt");
     if (!ca_node || ca_node->length == 0) {
         printf("TLS: CA bundle missing\n");
+        if (ca_node) vfs_release(ca_node);
         wolfSSL_CTX_free(ctx);
         return NULL;
     }
 
     ca_buf = (uint8_t *)kmalloc(ca_node->length);
     if (!ca_buf) {
+        vfs_release(ca_node);
         wolfSSL_CTX_free(ctx);
         return NULL;
     }
 
     rd = vfs_read(ca_node, 0, ca_node->length, ca_buf);
-    if (rd == 0) {
+    vfs_release(ca_node);
+    if (rd == 0 || (uint64_t)rd > (uint64_t)LONG_MAX) {
         printf("TLS: Failed to read CA bundle\n");
         kfree(ca_buf);
         wolfSSL_CTX_free(ctx);

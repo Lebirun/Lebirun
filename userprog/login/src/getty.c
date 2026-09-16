@@ -62,6 +62,10 @@ int __attribute__((section(".text.hot.user"))) main(int argc, char **argv)
     }
 
     console_num = atoi(argv[1]);
+    if (console_num < 0 || console_num > 63) {
+        WRITE_LIT(2, "getty: invalid console number\n");
+        return 1;
+    }
 
     setsid();
 
@@ -77,6 +81,8 @@ int __attribute__((section(".text.hot.user"))) main(int argc, char **argv)
         strcpy(uts.sysname, "lebirun");
         strcpy(uts.nodename, "localhost");
     }
+    uts.sysname[sizeof(uts.sysname) - 1] = '\0';
+    uts.nodename[sizeof(uts.nodename) - 1] = '\0';
 
     if (console_num != 0)
         WRITE_LIT(1, "\033[2J\033[H");

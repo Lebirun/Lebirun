@@ -2,6 +2,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <string.h>
+#include <stdint.h>
 
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);
 extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
@@ -432,7 +433,7 @@ static int ext4_truncate_blocks(ext4_fs_t *fs, ext4_inode_cache_t *ic,
     int result;
 
     pointers = fs->block_size / sizeof(uint32_t);
-    removed = kmalloc(count * sizeof(uint32_t));
+    removed = kmalloc((size_t)count * sizeof(uint32_t));
     if (!removed) return -1;
     removed_count = 0;
     result = -1;

@@ -398,12 +398,24 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
     }
     
     total = size * nmemb;
-    w = write(fd, ptr, total);
-    if (w <= 0) {
-        f->flags |= FILE_FLAG_ERROR;
-        return 0;
+    {
+        size_t done = 0;
+        while (done < total) {
+            w = write(fd, (const char *)ptr + done, total - done);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                f->flags |= FILE_FLAG_ERROR;
+                break;
+            }
+            if (w == 0) break;
+            done += (size_t)w;
+        }
+        if (done == 0 && total != 0) {
+            f->flags |= FILE_FLAG_ERROR;
+            return 0;
+        }
+        return done / size;
     }
-    return (size_t)w / size;
 }
 
 size_t fwrite_unlocked(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -583,7 +595,8 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
     if (!str || size == 0 || !format) return 0;
 
     out = str;
-    end = str + size - 1;
+    if (size - 1 > (size_t)(PTRDIFF_MAX)) end = (char *)(uintptr_t)-2;
+    else end = str + size - 1;
     p = format;
 
     while (*p && out < end) {
@@ -602,15 +615,17 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             }
 
             while (*p >= '0' && *p <= '9') {
-                width = width * 10 + (*p - '0');
+                if (width < 100) width = width * 10 + (*p - '0');
                 p++;
             }
+            if (width > (int)sizeof(tmp) - 2) width = (int)sizeof(tmp) - 2;
+            if (width < 0) width = 0;
 
             if (*p == '.') {
                 p++;
                 precision = 0;
                 while (*p >= '0' && *p <= '9') {
-                    precision = precision * 10 + (*p - '0');
+                    if (precision < 100) precision = precision * 10 + (*p - '0');
                     p++;
                 }
             }
@@ -631,19 +646,23 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                 case 'i': {
                     long val = long_arg ? va_arg(ap, long) : va_arg(ap, int);
                     int neg = val < 0;
-                    if (neg) val = -val;
-                    if (val == 0) tmp[tmplen++] = '0';
-                    else while (val) { tmp[tmplen++] = '0' + (val % 10); val /= 10; }
-                    while (tmplen < width) tmp[tmplen++] = zero_pad ? '0' : ' ';
-                    if (neg && out < end) *out++ = '-';
+                    unsigned long u = neg ? (unsigned long)(-(val + 1)) + 1u : (unsigned long)val;
+                    if (u == 0) tmp[tmplen++] = '0';
+                    else while (u && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = '0' + (u % 10); u /= 10; }
+                    if (neg) {
+                        while (tmplen < width - 1 && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
+                        if (out < end) *out++ = '-';
+                    } else {
+                        while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
+                    }
                     while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
                     break;
                 }
                 case 'u': {
                     unsigned long val = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
                     if (val == 0) tmp[tmplen++] = '0';
-                    else while (val) { tmp[tmplen++] = '0' + (val % 10); val /= 10; }
-                    while (tmplen < width) tmp[tmplen++] = zero_pad ? '0' : ' ';
+                    else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = '0' + (val % 10); val /= 10; }
+                    while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
                     while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
                     break;
                 }
@@ -652,8 +671,8 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                     unsigned long val = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
                     const char *hex = (*p == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
                     if (val == 0) tmp[tmplen++] = '0';
-                    else while (val) { tmp[tmplen++] = hex[val & 0xF]; val >>= 4; }
-                    while (tmplen < width) tmp[tmplen++] = zero_pad ? '0' : ' ';
+                    else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = hex[val & 0xF]; val >>= 4; }
+                    while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
                     while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
                     break;
                 }
@@ -662,8 +681,13 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                     if (out < end) *out++ = '0';
                     if (out < end) *out++ = 'x';
                     if (val == 0) tmp[tmplen++] = '0';
-                    else while (val) { tmp[tmplen++] = "0123456789abcdef"[val & 0xF]; val >>= 4; }
+                    else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = "0123456789abcdef"[val & 0xF]; val >>= 4; }
                     while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
+                    break;
+                }
+                case 'n': {
+                    int *np = va_arg(ap, int *);
+                    if (np) *np = (int)(out - str);
                     break;
                 }
                 case 's': {
@@ -925,10 +949,13 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream) {
     while ((c = fgetc(stream)) != EOF) {
         if (pos + 1 >= *n) {
             char *newbuf;
-            *n *= 2;
-            newbuf = (char *)realloc(*lineptr, *n);
+            size_t nn;
+            if (*n > (size_t)-1 / 2 - 1) return -1;
+            nn = *n * 2;
+            newbuf = (char *)realloc(*lineptr, nn);
             if (!newbuf) return -1;
             *lineptr = newbuf;
+            *n = nn;
         }
         (*lineptr)[pos++] = (char)c;
         if (c == delim) break;

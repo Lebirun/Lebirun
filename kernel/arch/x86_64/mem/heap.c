@@ -88,7 +88,11 @@ static void *early_kmalloc(size_t size) {
         phys = (uint64_t)pmm_alloc_early_pages(pages);
         if (!phys) return NULL;
         for (i = 0; i < pages; i++) {
-            if (pt_ensure_phys_mapped(phys + i * PAGE_SIZE) < 0) return NULL;
+            if (pt_ensure_phys_mapped(phys + i * PAGE_SIZE) < 0) {
+                if (i == 0) return NULL;
+                pages = i;
+                break;
+            }
         }
         chunk = (early_heap_chunk_t *)(phys + KERNEL_VMA);
         chunk->next = NULL;
@@ -1014,6 +1018,21 @@ void *krealloc(void *ptr, size_t new_size) {
 
     if (is_early_heap_ptr(ptr)) {
         new_ptr = kmalloc(new_size);
+        if (new_ptr) {
+            uint64_t a = (uint64_t)ptr;
+            early_heap_chunk_t *c = early_heap_chunks;
+            size_t avail = new_size;
+            while (c) {
+                uint64_t s = (uint64_t)c + sizeof(early_heap_chunk_t);
+                uint64_t e = s + c->used;
+                if (a >= s && a < e) {
+                    if ((size_t)(e - a) < avail) avail = (size_t)(e - a);
+                    break;
+                }
+                c = c->next;
+            }
+            memcpy(new_ptr, ptr, avail);
+        }
         return new_ptr;
     }
 

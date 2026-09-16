@@ -100,15 +100,18 @@ struct dirent *readdir(DIR *dirp) {
     }
     
     de = (struct dirent *)(dirp->buf + dirp->buf_pos);
-    
+
+    if (de->d_reclen == 0 || de->d_reclen > dirp->buf_end - dirp->buf_pos) return (void*)0;
     result.d_ino = de->d_ino;
     result.d_off = de->d_off;
     result.d_reclen = de->d_reclen;
     result.d_type = de->d_type;
-    
+
     i = 0;
     src = de->d_name;
-    while (*src && i < 255) {
+    while (i < 255) {
+        if ((size_t)(src - (const char *)de) + 1 > de->d_reclen) break;
+        if (!*src) break;
         result.d_name[i++] = *src++;
     }
     result.d_name[i] = '\0';
@@ -194,6 +197,13 @@ int scandir(const char *path, struct dirent ***namelist,
         if (filter && !filter(entry)) continue;
         
         if (count >= capacity) {
+            if ((size_t)capacity > (size_t)-1 / 2 / sizeof(struct dirent *)) {
+                for (i = 0; i < count; i++) free(list[i]);
+                free(list);
+                closedir(d);
+                errno = ENOMEM;
+                return -1;
+            }
             capacity = capacity ? capacity * 2 : 16;
             newlist = (struct dirent **)realloc(list, capacity * sizeof(struct dirent *));
             if (!newlist) {

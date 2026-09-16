@@ -4,6 +4,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/task.h>
 #include <lebirun/tty.h>
+#include <lebirun/uaccess.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -240,7 +241,10 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     memset(host_buf, 0, region->size);
 
     if (region->host_virt) {
-        memcpy(host_buf, (void *)region->host_virt, region->size);
+        if (copy_from_user(host_buf, (const void *)(uintptr_t)region->host_virt, region->size) < 0) {
+            kfree(host_buf);
+            return -1;
+        }
     }
 
     kfree(slot->host_mem);
@@ -263,8 +267,9 @@ static uint8_t *vfl_guest_to_host(vfl_vm_t *vm, uint64_t guest_addr, uint64_t le
     for (i = 0; i < vm->mem_slot_extent; i++) {
         slot = &vm->mem_slots[i];
         if (!slot->in_use) continue;
+        if (len > slot->size) continue;
         if (guest_addr >= slot->guest_phys &&
-            guest_addr + len <= slot->guest_phys + slot->size) {
+            guest_addr - slot->guest_phys <= slot->size - len) {
             return slot->host_mem + (guest_addr - slot->guest_phys);
         }
     }

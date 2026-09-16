@@ -166,6 +166,18 @@ static int lookup_shadow(const char *username, char *hash_out, int hash_max)
         } else {
             if (pos < MAX_LINE - 1)
                 buf[pos++] = c;
+            else {
+                while (rpos < rlen && rbuf[rpos] != '\n') rpos++;
+                if (rpos < rlen) { buf[pos] = '\0'; pos = 0; rpos++; continue; }
+                pos = 0;
+                while ((rlen = read(fd, rbuf, sizeof(rbuf))) > 0) {
+                    rpos = 0;
+                    while (rpos < rlen && rbuf[rpos] != '\n') rpos++;
+                    if (rpos < rlen) { rpos++; break; }
+                }
+                if (rlen <= 0) break;
+                continue;
+            }
         }
     }
     close(fd);
@@ -218,6 +230,18 @@ static int lookup_passwd(const char *username, int *uid, int *gid,
         } else {
             if (pos < MAX_LINE - 1)
                 buf[pos++] = c;
+            else {
+                while (rpos < rlen && rbuf[rpos] != '\n') rpos++;
+                if (rpos < rlen) { buf[0] = '\0'; pos = 0; rpos++; continue; }
+                pos = 0;
+                while ((rlen = read(fd, rbuf, sizeof(rbuf))) > 0) {
+                    rpos = 0;
+                    while (rpos < rlen && rbuf[rpos] != '\n') rpos++;
+                    if (rpos < rlen) { rpos++; break; }
+                }
+                if (rlen <= 0) break;
+                continue;
+            }
         }
     }
     close(fd);
@@ -354,10 +378,14 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        chdir(home);
+        if (chdir(home) < 0) chdir("/");
 
-        memset(password, 0, sizeof(password));
-        memset(stored_hash, 0, sizeof(stored_hash));
+        {
+            volatile char *vp = (volatile char *)password;
+            for (size_t i = 0; i < sizeof(password); i++) vp[i] = 0;
+            vp = (volatile char *)stored_hash;
+            for (size_t i = 0; i < sizeof(stored_hash); i++) vp[i] = 0;
+        }
 
         show_motd();
 

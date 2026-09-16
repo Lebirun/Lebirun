@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <crypt.h>
 #include <lebirun.h>
 #include <lebirun/syscall.h>
@@ -92,7 +93,9 @@ static int inst_disk_read(const char *devpath, uint32_t lba, uint32_t count, voi
     fd = vfs_open(devpath, 0);
     if (fd < 0) return -1;
 
+    if (count > UINT32_MAX / SECTOR_SIZE) { vfs_close_fd(fd); return -1; }
     total = count * SECTOR_SIZE;
+    if ((uint64_t)lba * SECTOR_SIZE > (uint64_t)INT64_MAX) { vfs_close_fd(fd); return -1; }
     offset = (off_t)lba * SECTOR_SIZE;
 
     if (offset > 0) {
@@ -892,7 +895,7 @@ static int inst_install_grub_mbr(const char *disk_dev, int boot_part_num)
     memset(mbr_buf, 0, SECTOR_SIZE);
     memset(boot_buf, 0, SECTOR_SIZE);
     memset(core_buf, 0, BUF_SIZE);
-    memset(verify_buf, 0, SECTOR_SIZE);
+    memset(verify_buf, 0, BUF_SIZE);
 
     fd_disk = vfs_open(disk_dev, 2);
     if (fd_disk < 0) {
@@ -1082,15 +1085,21 @@ static void inst_generate_salt(char *salt, int len)
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "0123456789./";
-    unsigned int ticks;
     unsigned int seed;
+    int fd;
     int i;
 
-    ticks = getticks();
-    seed = ticks ^ (ticks >> 16) ^ (unsigned int)getpid();
+    seed = getticks() ^ ((unsigned int)getpid() << 16) ^ (unsigned int)time(0);
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        unsigned int rnd = 0;
+        if (read(fd, &rnd, sizeof(rnd)) == (int)sizeof(rnd)) seed ^= rnd;
+        close(fd);
+    }
 
     for (i = 0; i < len; i++) {
         seed = seed * 1103515245 + 12345;
+        seed ^= (unsigned int)i * 2654435761u;
         salt[i] = charset[(seed >> 16) % (sizeof(charset) - 1)];
     }
     salt[len] = '\0';
@@ -1158,9 +1167,26 @@ static int inst_create_user(const char *mountpoint, const char *username, const 
         lseek(fd, (off_t)fsize, SEEK_SET);
     }
 
-    snprintf(line, sizeof(line), "%s:%s:0:0:99999:7:::\n", username, hashed ? hashed : "!");
-    wlen = (int)strlen(line);
-    vfs_write_fd(fd, line, wlen);
+    {
+        char hbuf[256];
+        const char *hpw = "!";
+        if (hashed) {
+            size_t hl = strlen(hashed);
+            if (hl >= sizeof(hbuf)) hl = sizeof(hbuf) - 1;
+            memcpy(hbuf, hashed, hl);
+            hbuf[hl] = '\0';
+            hpw = hbuf;
+            snprintf(line, sizeof(line), "%s:%s:0:0:99999:7:::\n", username, hpw);
+        } else {
+            snprintf(line, sizeof(line), "%s:%s:0:0:99999:7:::\n", username, hpw);
+        }
+        wlen = (int)strlen(line);
+        vfs_write_fd(fd, line, wlen);
+        {
+            volatile char *vp = (volatile char *)hbuf;
+            for (size_t i = 0; i < sizeof(hbuf); i++) vp[i] = 0;
+        }
+    }
     vfs_close_fd(fd);
 
     return 0;

@@ -43,6 +43,7 @@ int ipv67_rx_enqueue(uint8_t family, uint16_t local_port, uint32_t src_ipv4, con
     ipv67_pending_rx_t *rx;
 
     if (!packet || len == 0) return 0;
+    if (len > 65535) return 0;
     if (len > SIZE_MAX - sizeof(ipv67_pending_rx_t)) return 0;
     rx = (ipv67_pending_rx_t *)kmalloc(sizeof(ipv67_pending_rx_t) + len);
     if (!rx) return 0;

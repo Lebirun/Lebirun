@@ -517,8 +517,8 @@ void ipv67_apply_route_adv(uint8_t via_family, uint32_t via_ipv4, const ipv6_add
                     if (peer && ipv67_identity_key_set && !peer->session_established) ipv67_send_auth_to_peer(peer, IPV67_TYPE_AUTH_HELLO);
                     if (peer) punch_request = 1;
                 }
-                hops = entry.hops + 1;
-                if (hops > IPV67_MAX_HOPS) hops = IPV67_MAX_HOPS;
+                hops = (uint8_t)((unsigned)entry.hops + 1);
+                if ((unsigned)hops < (unsigned)entry.hops) hops = IPV67_MAX_HOPS;
                 metric = entry.metric;
                 if (metric < hops) metric = hops;
                 if (metric < IPV67_ROUTE_METRIC_MAX) metric++;

@@ -8,9 +8,21 @@
 #include <lebirun/tty.h>
 #include <lebirun/pit.h>
 #include <lebirun/task.h>
+#include <lebirun/spinlock.h>
 #include <string.h>
 
 static udp_socket_t *udp_sockets = NULL;
+static spinlock_t udp_lock = {0};
+static uint64_t udp_lock_irqsave(void) {
+    uint64_t f;
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    spin_lock(&udp_lock);
+    return f;
+}
+static void udp_lock_irqrestore(uint64_t f) {
+    spin_unlock(&udp_lock);
+    if (f & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+}
 static uint16_t udp_ephemeral_port = 49152;
 static const udp_port_hook_t *udp_port_hook;
 
@@ -139,15 +151,37 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         return;
     }
 
-    sock = udp_sockets;
-    while (sock) {
-        if (sock->local_port == dest_port) {
+    sock = NULL;
+    {
+        uint64_t f = udp_lock_irqsave();
+        sock = udp_sockets;
+        while (sock) {
+            if (sock->local_port == dest_port) break;
+            sock = sock->next;
+        }
+        if (sock) {
             if (payload_len > sock->recv_buffer_size) {
+                udp_lock_irqrestore(f);
                 resized = (uint8_t *)kmalloc(payload_len);
                 if (!resized) return;
-                kfree(sock->recv_buffer);
-                sock->recv_buffer = resized;
-                sock->recv_buffer_size = payload_len;
+                f = udp_lock_irqsave();
+                sock = udp_sockets;
+                while (sock) {
+                    if (sock->local_port == dest_port) break;
+                    sock = sock->next;
+                }
+                if (!sock) {
+                    udp_lock_irqrestore(f);
+                    kfree(resized);
+                    return;
+                }
+                if (payload_len > sock->recv_buffer_size) {
+                    kfree(sock->recv_buffer);
+                    sock->recv_buffer = resized;
+                    sock->recv_buffer_size = payload_len;
+                    resized = NULL;
+                }
+                if (resized) kfree(resized);
             }
             if (payload_len) memcpy(sock->recv_buffer, payload, payload_len);
             sock->recv_len = payload_len;
@@ -155,10 +189,11 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             sock->recv_from_port = src_port;
             sock->has_data = 1;
             sock->rx_stamp = pit_get_ticks();
+            udp_lock_irqrestore(f);
             descriptor_ready_notify_irq();
             return;
         }
-        sock = sock->next;
+        udp_lock_irqrestore(f);
     }
 }
 
@@ -211,13 +246,17 @@ udp_socket_t *udp_socket_create(uint16_t port) {
             if (udp_ephemeral_port < 49152) udp_ephemeral_port = 49152;
         }
         occupied = 0;
-        existing = udp_sockets;
-        while (existing) {
-            if (existing->local_port == candidate) {
-                occupied = 1;
-                break;
+        {
+            uint64_t f = udp_lock_irqsave();
+            existing = udp_sockets;
+            while (existing) {
+                if (existing->local_port == candidate) {
+                    occupied = 1;
+                    break;
+                }
+                existing = existing->next;
             }
-            existing = existing->next;
+            udp_lock_irqrestore(f);
         }
         if (occupied && port) return NULL;
         if (occupied) candidate = 0;
@@ -232,8 +271,12 @@ udp_socket_t *udp_socket_create(uint16_t port) {
     sock->ttl = 64;
 
     sock->netif = netif_get_default();
-    sock->next = udp_sockets;
-    udp_sockets = sock;
+    {
+        uint64_t f = udp_lock_irqsave();
+        sock->next = udp_sockets;
+        udp_sockets = sock;
+        udp_lock_irqrestore(f);
+    }
 
     return sock;
 }
@@ -245,13 +288,17 @@ void udp_socket_close(udp_socket_t *sock) {
 
     if (!sock) return;
 
-    prev = &udp_sockets;
-    while (*prev) {
-        if (*prev == sock) {
-            *prev = sock->next;
-            break;
+    {
+        uint64_t f = udp_lock_irqsave();
+        prev = &udp_sockets;
+        while (*prev) {
+            if (*prev == sock) {
+                *prev = sock->next;
+                break;
+            }
+            prev = &(*prev)->next;
         }
-        prev = &(*prev)->next;
+        udp_lock_irqrestore(f);
     }
 
     mc = sock->mcast;

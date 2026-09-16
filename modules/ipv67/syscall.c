@@ -1,6 +1,7 @@
 #include <lebirun/lke.h>
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/uaccess.h>
 #include <lebirun/drivers/net/ipv67.h>
 #include <lebirun/drivers/net/dns.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #define EBUSY 16
 #define ENODEV 19
 #define EINVAL 22
+#define ENAMETOOLONG 36
 
 #define SYSCALL_IPV67 280
 
@@ -146,12 +148,14 @@ static int ipv67_copy_user_string(uint64_t addr, char **out) {
     if (!buffer) return -ENOMEM;
     length = 0;
     for (;;) {
-        if (!user_range_mapped_ipv67(addr + length, 1)) {
+        char c;
+        if (length >= 65536) { kfree(buffer); return -ENAMETOOLONG; }
+        if (copy_from_user(&c, (const void *)(uintptr_t)(addr + length), 1) < 0) {
             kfree(buffer);
             return -EFAULT;
         }
-        buffer[length] = *(const char *)(addr + length);
-        if (buffer[length] == '\0') {
+        buffer[length] = c;
+        if (c == '\0') {
             *out = buffer;
             return 0;
         }
@@ -340,8 +344,7 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
         return IPV67_ERR_NOROUTE;
 
     case IPV67_CMD_REMOVE_PEER:
-        if (!user_range_mapped_ipv67(req.arg1, sizeof(ipv67_addr_t))) return -EFAULT;
-        memcpy(&addr, (const void *)req.arg1, sizeof(ipv67_addr_t));
+        if (copy_from_user(&addr, (const void *)(uintptr_t)req.arg1, sizeof(ipv67_addr_t)) < 0) return -EFAULT;
         return ipv67_remove_peer_by_addr(&addr);
 
     case IPV67_CMD_GET_PEERS:
@@ -367,7 +370,7 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
             memcpy(user_peer.alias, kernel_peer.alias, IPV67_ALIAS_SIZE);
             memcpy(user_peer.public_key, kernel_peer.public_key, IPV67_IDENTITY_SIZE);
             ipv67_addr_format(&kernel_peer.addr, user_peer.addr_str, IPV67_ADDR_STR_MAX);
-            memcpy((void *)(req.arg1 + (uint64_t)i * sizeof(ipv67_peer_user_t)), &user_peer, sizeof(ipv67_peer_user_t));
+            if (copy_to_user((void *)(uintptr_t)(req.arg1 + (uint64_t)i * sizeof(ipv67_peer_user_t)), &user_peer, sizeof(ipv67_peer_user_t)) < 0) return i > 0 ? i : -EFAULT;
         }
         return max;
 
@@ -384,11 +387,10 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
         return ipv67_get_local_asn();
 
     case IPV67_CMD_GET_STATS:
-        if (!user_range_mapped_ipv67(req.arg1, sizeof(ipv67_stats_t))) return -EFAULT;
         memset(&kernel_stats, 0, sizeof(kernel_stats));
         ret = ipv67_get_stats(&kernel_stats);
         if (ret < 0) return ret;
-        memcpy((void *)req.arg1, &kernel_stats, sizeof(kernel_stats));
+        if (copy_to_user((void *)(uintptr_t)req.arg1, &kernel_stats, sizeof(kernel_stats)) < 0) return -EFAULT;
         return 0;
 
     case IPV67_CMD_CLEAR_STATS:
@@ -416,7 +418,7 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
             user_route.sequence = kernel_route.sequence;
             memcpy(user_route.public_key, kernel_route.public_key, IPV67_IDENTITY_SIZE);
             ipv67_addr_format(&kernel_route.dest, user_route.dest_str, IPV67_ADDR_STR_MAX);
-            memcpy((void *)(req.arg1 + (uint64_t)i * sizeof(ipv67_route_user_t)), &user_route, sizeof(ipv67_route_user_t));
+            if (copy_to_user((void *)(uintptr_t)(req.arg1 + (uint64_t)i * sizeof(ipv67_route_user_t)), &user_route, sizeof(ipv67_route_user_t)) < 0) return i > 0 ? i : -EFAULT;
         }
         return max;
 
@@ -442,13 +444,12 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
             memcpy(user_asn.label, kernel_asn.label, IPV67_ASN_LABEL_SIZE);
             ipv67_addr_format(&kernel_asn.start, user_asn.start_str, IPV67_ADDR_STR_MAX);
             ipv67_addr_format(&kernel_asn.end, user_asn.end_str, IPV67_ADDR_STR_MAX);
-            memcpy((void *)(req.arg1 + (uint64_t)i * sizeof(ipv67_asn_user_t)), &user_asn, sizeof(user_asn));
+            if (copy_to_user((void *)(uintptr_t)(req.arg1 + (uint64_t)i * sizeof(user_asn)), &user_asn, sizeof(user_asn)) < 0) return i > 0 ? i : -EFAULT;
         }
         return max;
 
     case IPV67_CMD_SET_ASN:
-        if (!user_range_mapped_ipv67(req.arg1, sizeof(ipv67_asn_user_t))) return -EFAULT;
-        memcpy(&user_asn, (const void *)req.arg1, sizeof(user_asn));
+        if (copy_from_user(&user_asn, (const void *)(uintptr_t)req.arg1, sizeof(user_asn)) < 0) return -EFAULT;
         user_asn.start_str[IPV67_ADDR_STR_MAX - 1] = '\0';
         user_asn.end_str[IPV67_ADDR_STR_MAX - 1] = '\0';
         memset(&asn_claim, 0, sizeof(asn_claim));
@@ -470,8 +471,7 @@ static int sys_ipv67_impl(const char *req_ptr, int unused1, int unused2) {
         return ipv67_set_asn_claim(&asn_claim);
 
     case IPV67_CMD_REMOVE_ASN:
-        if (!user_range_mapped_ipv67(req.arg1, sizeof(ipv67_asn_user_t))) return -EFAULT;
-        memcpy(&user_asn, (const void *)req.arg1, sizeof(user_asn));
+        if (copy_from_user(&user_asn, (const void *)(uintptr_t)req.arg1, sizeof(user_asn)) < 0) return -EFAULT;
         user_asn.start_str[IPV67_ADDR_STR_MAX - 1] = '\0';
         user_asn.end_str[IPV67_ADDR_STR_MAX - 1] = '\0';
         ret = ipv67_addr_parse(user_asn.start_str, &addr);

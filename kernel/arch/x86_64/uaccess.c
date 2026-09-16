@@ -124,6 +124,7 @@ char *copy_string_from_user_alloc(const char *src) {
     address = (uint64_t)(uintptr_t)src;
     if (address < 0x1000 || address >= KERNEL_VMA) return NULL;
     maximum = (size_t)(KERNEL_VMA - address);
+    if (maximum > 65536) maximum = 65536;
     if (strnlen_user(src, maximum, &length) < 0) return NULL;
     if (length == SIZE_MAX) return NULL;
     copy = (char *)kmalloc(length + 1);

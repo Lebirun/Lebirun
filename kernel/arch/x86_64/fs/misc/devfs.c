@@ -408,10 +408,15 @@ static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t si
 
     lba = offset / 512;
     skip = offset % 512;
+    if (size > 1024 * 1024 || skip > 511) return 0;
+    if (skip > UINT64_MAX - size) return 0;
+    if (skip + size > UINT64_MAX - 511) return 0;
     sector_count = (skip + size + 511) / 512;
+    if (sector_count == 0 || sector_count > 2048) return 0;
 
     if (bdev->is_partition) {
-        if (lba + sector_count > bdev->sector_count)
+        if (sector_count > bdev->sector_count) return 0;
+        if (lba > bdev->sector_count - sector_count)
             return 0;
         abs_lba = bdev->start_lba + lba;
     } else {
@@ -453,10 +458,15 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
 
     lba = offset / 512;
     skip = offset % 512;
+    if (size > 1024 * 1024 || skip > 511) return 0;
+    if (skip > UINT64_MAX - size) return 0;
+    if (skip + size > UINT64_MAX - 511) return 0;
     sector_count = (skip + size + 511) / 512;
+    if (sector_count == 0 || sector_count > 2048) return 0;
 
     if (bdev->is_partition) {
-        if (lba + sector_count > bdev->sector_count)
+        if (sector_count > bdev->sector_count) return 0;
+        if (lba > bdev->sector_count - sector_count)
             return 0;
         abs_lba = bdev->start_lba + lba;
     } else {
@@ -512,7 +522,11 @@ static uint64_t dev_cdrom_read(vfs_node_t *node, uint64_t offset, uint64_t size,
 
     lba = offset / ATAPI_SECTOR_SIZE;
     skip = offset % ATAPI_SECTOR_SIZE;
+    if (size > 1024 * 1024 || skip >= ATAPI_SECTOR_SIZE) return 0;
+    if (skip > UINT64_MAX - size) return 0;
+    if (skip + size > UINT64_MAX - (ATAPI_SECTOR_SIZE - 1)) return 0;
     sector_count = (skip + size + ATAPI_SECTOR_SIZE - 1) / ATAPI_SECTOR_SIZE;
+    if (sector_count == 0 || sector_count > 512) return 0;
 
     tmp = (uint8_t *)kmalloc(sector_count * ATAPI_SECTOR_SIZE);
     if (!tmp)

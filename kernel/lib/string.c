@@ -83,7 +83,7 @@ int memcmp(const void* aptr, const void* bptr, size_t size) {
 	const unsigned char* b;
 	size_t i;
 
-	if (!aptr || !bptr) return 0;
+	if (!aptr || !bptr) return (aptr == bptr) ? 0 : (aptr ? 1 : -1);
 	a = (const unsigned char*) aptr;
 	b = (const unsigned char*) bptr;
 	for (i = 0; i < size; i++) {
@@ -103,7 +103,9 @@ size_t strlen(const char* str) {
 }
 
 int strcmp(const char* s1, const char* s2) {
-	if (!s1 || !s2) return 0;
+	if (s1 == s2) return 0;
+	if (!s1) return -1;
+	if (!s2) return 1;
 	while (*s1 && (*s1 == *s2)) {
 		s1++;
 		s2++;
@@ -112,7 +114,9 @@ int strcmp(const char* s1, const char* s2) {
 }
 
 int strncmp(const char* s1, const char* s2, size_t n) {
-	if (!s1 || !s2) return 0;
+	if (s1 == s2) return 0;
+	if (!s1) return -1;
+	if (!s2) return 1;
 	while (n && *s1 && (*s1 == *s2)) {
 		s1++;
 		s2++;

@@ -5,10 +5,22 @@
 #include <lebirun/tty.h>
 #include <lebirun/pit.h>
 #include <lebirun/task.h>
+#include <lebirun/spinlock.h>
 #include <string.h>
 
 static tcp_socket_t *tcp_sockets = NULL;
 static tcp_listener_t *tcp_listeners = NULL;
+static spinlock_t tcp_lock = {0};
+static uint64_t tcp_lock_irqsave(void) {
+    uint64_t f;
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    spin_lock(&tcp_lock);
+    return f;
+}
+static void tcp_lock_irqrestore(uint64_t f) {
+    spin_unlock(&tcp_lock);
+    if (f & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+}
 static uint16_t tcp_ephemeral_port = 49152;
 static uint32_t tcp_isn = 0;
 
@@ -23,6 +35,7 @@ static uint32_t tcp_isn = 0;
 static void tcp_retx_queue_add(tcp_socket_t *sock, uint8_t *data, uint64_t len, uint32_t seq) {
     tcp_retx_seg_t *seg;
 
+    if (!sock || !data || len == 0) return;
     seg = (tcp_retx_seg_t *)kmalloc(sizeof(tcp_retx_seg_t));
     if (!seg) return;
     seg->data = (uint8_t *)kmalloc(len);
@@ -104,6 +117,7 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
     if (!sock || !sock->netif) return -1;
 
     header_len = 20;
+    if (len > 65535 - header_len) return -1;
     tcp_len = header_len + len;
     packet = (uint8_t *)kmalloc(tcp_len);
     if (!packet) return -1;
@@ -184,8 +198,12 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->retx_count = 0;
     sock->retransmit_timeout = pit_ms_to_ticks(TCP_RETX_TIMEOUT_MS);
     sock->last_ack_time = pit_get_ticks();
-    sock->next = tcp_sockets;
-    tcp_sockets = sock;
+    {
+        uint64_t f = tcp_lock_irqsave();
+        sock->next = tcp_sockets;
+        tcp_sockets = sock;
+        tcp_lock_irqrestore(f);
+    }
 
     return sock;
 }
@@ -195,13 +213,17 @@ void tcp_socket_close(tcp_socket_t *sock) {
 
     if (!sock) return;
 
-    prev = &tcp_sockets;
-    while (*prev) {
-        if (*prev == sock) {
-            *prev = sock->next;
-            break;
+    {
+        uint64_t f = tcp_lock_irqsave();
+        prev = &tcp_sockets;
+        while (*prev) {
+            if (*prev == sock) {
+                *prev = sock->next;
+                break;
+            }
+            prev = &(*prev)->next;
         }
-        prev = &(*prev)->next;
+        tcp_lock_irqrestore(f);
     }
 
     tcp_retx_queue_free(sock);
@@ -459,41 +481,63 @@ int tcp_listen(uint16_t port, int backlog) {
     memset(l, 0, sizeof(tcp_listener_t));
     l->port = port;
     l->backlog = backlog < 1 ? 1 : backlog;
-    l->next = tcp_listeners;
-    tcp_listeners = l;
+    {
+        uint64_t f = tcp_lock_irqsave();
+        l->next = tcp_listeners;
+        tcp_listeners = l;
+        tcp_lock_irqrestore(f);
+    }
     return 0;
 }
 
 void tcp_unlisten(uint16_t port) {
-    tcp_listener_t **prev;
     tcp_listener_t *l;
     tcp_socket_t *sock;
     tcp_socket_t *next;
     tcp_socket_t *done;
 
-    prev = &tcp_listeners;
-    while (*prev) {
-        if ((*prev)->port == port) {
-            l = *prev;
-            *prev = l->next;
-            done = l->completed_head;
-            while (done) {
-                next = done->accept_next;
-                tcp_socket_close(done);
-                done = next;
+    l = NULL;
+    {
+        uint64_t f = tcp_lock_irqsave();
+        tcp_listener_t **prev = &tcp_listeners;
+        while (*prev) {
+            if ((*prev)->port == port) {
+                l = *prev;
+                *prev = l->next;
+                break;
             }
-            kfree(l);
-            break;
+            prev = &(*prev)->next;
         }
-        prev = &(*prev)->next;
+        tcp_lock_irqrestore(f);
+    }
+    if (!l) {
+        // fall through to close stray SYN_RCVD sockets
+    } else {
+        done = l->completed_head;
+        while (done) {
+            next = done->accept_next;
+            tcp_socket_close(done);
+            done = next;
+        }
+        kfree(l);
     }
 
-    sock = tcp_sockets;
-    while (sock) {
-        next = sock->next;
-        if (sock->state == TCP_STATE_SYN_RCVD && sock->local_port == port)
-            tcp_socket_close(sock);
-        sock = next;
+    sock = NULL;
+    for (;;) {
+        tcp_socket_t *cand = NULL;
+        uint64_t f = tcp_lock_irqsave();
+        sock = tcp_sockets;
+        while (sock) {
+            next = sock->next;
+            if (sock->state == TCP_STATE_SYN_RCVD && sock->local_port == port) {
+                cand = sock;
+                break;
+            }
+            sock = next;
+        }
+        tcp_lock_irqrestore(f);
+        if (!cand) break;
+        tcp_socket_close(cand);
     }
 }
 

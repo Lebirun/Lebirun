@@ -279,6 +279,7 @@ static dirent_t *iso_vfs_readdir(vfs_node_t *node, uint64_t index) {
     ctx = inode->ctx;
 
     dir_size = inode->data_length;
+    if (dir_size == 0 || dir_size > 8 * 1024 * 1024) return NULL;
     byte_off = (uint64_t)inode->extent_lba * ISO9660_SECTOR_SIZE;
 
     dir_data = kmalloc(dir_size);
