@@ -442,6 +442,15 @@ int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,
         kfree(new_path);
         return -ENOENT;
     }
+    if (VFS_GET_TYPE(old_node->flags) == VFS_DIRECTORY ||
+        (old_node->flags & VFS_MOUNTPOINT)) {
+        vfs_release(old_node);
+        vfs_release(parent);
+        kfree(name);
+        kfree(old_path);
+        kfree(new_path);
+        return -EPERM;
+    }
     result = ramfs_link_node(old_node, parent, name);
     vfs_release(old_node);
     vfs_release(parent);
@@ -498,6 +507,14 @@ int syscall_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
         kfree(link_path);
         kfree(target);
         return -EROFS;
+    }
+    if (parent->ops && parent->ops->symlink) {
+        ret = parent->ops->symlink(parent, name, target);
+        vfs_release(parent);
+        kfree(name);
+        kfree(link_path);
+        kfree(target);
+        return ret;
     }
     ret = ext4_vfs_symlink_node(target, link_path, 0);
     if (ret == 0) {

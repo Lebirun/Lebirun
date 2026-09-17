@@ -9,6 +9,7 @@
 #include <lebirun/io.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/vring.h>
 
 #include "vga.h"
 
@@ -23,20 +24,8 @@ static uint16_t* terminal_buffer;
 static bool use_framebuffer = false;
 static psf_font_t loaded_font;
 
-static void terminal_serial_write_byte(uint8_t value) {
-    uint32_t spins;
-
-    spins = 100000;
-    while (spins > 0 && !(inb(0x3FD) & 0x20)) {
-        __asm__ volatile("pause");
-        spins--;
-    }
-    outb(0x3F8, value);
-}
-
 void serial_putchar(char c) {
-    if (c == '\n') terminal_serial_write_byte('\r');
-    terminal_serial_write_byte((uint8_t)c);
+    serial_putchar_locked(c);
 }
 
 static void terminal_updatecursor(void) {
@@ -61,6 +50,7 @@ void KERNEL_EARLY_INIT terminal_initialize(void) {
 	size_t index;
 	uint16_t blank;
 
+	serial_init();
 	terminal_row = 0;
 	terminal_column = 0;
 	terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);

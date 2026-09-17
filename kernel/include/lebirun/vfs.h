@@ -71,6 +71,7 @@ typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, const char *name);
 typedef int (*create_type_t)(struct vfs_node *parent, const char *name, uint64_t flags);
 typedef int (*unlink_type_t)(struct vfs_node *parent, const char *name);
 typedef int (*mkdir_type_t)(struct vfs_node *parent, const char *name, uint64_t perms);
+typedef int (*symlink_type_t)(struct vfs_node *parent, const char *name, const char *target);
 typedef int (*truncate_type_t)(struct vfs_node *, uint64_t length);
 typedef int (*rename_type_t)(struct vfs_node *old_parent, const char *old_name, struct vfs_node *new_parent, const char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint64_t mode);
@@ -81,6 +82,7 @@ typedef struct vfs_node_ops {
     create_type_t create;
     unlink_type_t unlink;
     mkdir_type_t mkdir;
+    symlink_type_t symlink;
     truncate_type_t truncate;
     rename_type_t rename;
     chmod_type_t chmod;

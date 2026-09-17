@@ -493,6 +493,87 @@ int ramfs_create_file(const char *path, uint16_t permissions) {
     return RAMFS_ERR_OK;
 }
 
+int ramfs_create_symlink(const char *path, const char *target) {
+    char *storage;
+    char *name;
+    ramfs_node_t *parent;
+    ramfs_node_t *node;
+    size_t target_length;
+
+    if (!path || !target) return RAMFS_ERR_INVAL;
+    target_length = strlen(target);
+    if (target_length == 0) return RAMFS_ERR_INVAL;
+
+    ramfs_lock();
+    parent = ramfs_find_parent(path, &storage, &name);
+    if (!parent || parent->type != RAMFS_NODE_DIR) {
+        if (storage) kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_NOENT;
+    }
+
+    ramfs_node_lock(parent);
+
+    if (ramfs_find_child(parent, name)) {
+        ramfs_node_unlock(parent);
+        kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_EXIST;
+    }
+
+    if (!ramfs_check_space((uint64_t)target_length + 1)) {
+        ramfs_node_unlock(parent);
+        kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
+
+    node = ramfs_alloc_node();
+    if (!node) {
+        ramfs_node_unlock(parent);
+        kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+
+    if (ramfs_set_node_name(node, name) != RAMFS_ERR_OK) {
+        kfree(node);
+        ramfs_node_unlock(parent);
+        kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+
+    node->data = (uint8_t *)kmalloc((uint64_t)target_length + 1);
+    if (!node->data) {
+        ramfs_free_node_name(node);
+        kfree(node);
+        ramfs_node_unlock(parent);
+        kfree(storage);
+        ramfs_unlock();
+        return RAMFS_ERR_NOMEM;
+    }
+    memcpy(node->data, target, target_length + 1);
+    node->type = RAMFS_NODE_SYMLINK;
+    node->permissions = 0777;
+    node->uid = current_task ? current_task->euid : 0;
+    node->gid = current_task ? current_task->egid : 0;
+    node->parent = parent;
+    node->data_capacity = (uint64_t)target_length + 1;
+    node->length = (uint64_t)target_length;
+    node->next_sibling = parent->children;
+    parent->children = node;
+    parent->mtime = ramfs_get_time();
+    ramfs_stats.used_size += node->length;
+    ramfs_stats.file_count++;
+
+    ramfs_node_unlock(parent);
+    kfree(storage);
+    ramfs_unlock();
+
+    return RAMFS_ERR_OK;
+}
+
 int ramfs_create_socket(const char *path, uint16_t permissions) {
     ramfs_node_t *node;
     int result;

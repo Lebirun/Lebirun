@@ -290,6 +290,7 @@ static dirent_t *overlay_vfs_readdir(vfs_node_t *node, uint64_t index);
 static vfs_node_t *overlay_vfs_finddir(vfs_node_t *node, const char *name);
 static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
+static int overlay_vfs_symlink(vfs_node_t *parent, const char *name, const char *target);
 static int overlay_vfs_unlink(vfs_node_t *parent, const char *name);
 static int overlay_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                               vfs_node_t *new_parent, const char *new_name);
@@ -307,6 +308,7 @@ static const vfs_node_ops_t overlay_dir_ops = {
     .create = overlay_vfs_create,
     .unlink = overlay_vfs_unlink,
     .mkdir = overlay_vfs_mkdir,
+    .symlink = overlay_vfs_symlink,
     .truncate = overlay_vfs_truncate,
     .rename = overlay_vfs_rename,
     .chmod = overlay_vfs_chmod,
@@ -1041,6 +1043,36 @@ static int overlay_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perm
     overlay_ensure_upper_dirs(path);
     
     ret = ramfs_create_dir(path, perms);
+    if (ret == RAMFS_ERR_OK || ret == RAMFS_ERR_EXIST)
+        overlay_attach_upper_node(onode, parent_path);
+    if (ret == 0) overlay_reset_readdir(onode);
+    kfree(path);
+    kfree(parent_path);
+    return overlay_ramfs_result(ret);
+}
+
+static int overlay_vfs_symlink(vfs_node_t *parent, const char *name, const char *target) {
+    overlay_node_t *onode;
+    char *path;
+    char *parent_path;
+    int ret;
+
+    if (!parent || !name || !target) return -22;
+
+    onode = (overlay_node_t *)parent->private_data;
+    if (!onode) return -22;
+
+    parent_path = vfs_get_path_alloc(parent);
+    if (!parent_path) return -12;
+    path = overlay_join_path(parent_path, "", name);
+    if (!path) {
+        kfree(parent_path);
+        return -12;
+    }
+
+    overlay_ensure_upper_dirs(path);
+
+    ret = ramfs_create_symlink(path, target);
     if (ret == RAMFS_ERR_OK || ret == RAMFS_ERR_EXIST)
         overlay_attach_upper_node(onode, parent_path);
     if (ret == 0) overlay_reset_readdir(onode);

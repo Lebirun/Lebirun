@@ -100,30 +100,54 @@ static inline bool serial_thr_empty(void) {
     return (inb(0x3FD) & 0x20) != 0;
 }
 
-static int serial_wait_thr_empty(void) {
-    uint64_t attempts;
+static volatile int serial_present = 1;
 
-    attempts = 0;
-    while (!serial_thr_empty()) {
-        attempts++;
-        if (attempts >= 0x100000ULL) return 0;
-        cpu_relax();
+void serial_init(void) {
+    outb(0x3FC, 0x1B);
+    if (inb(0x3FC) != 0x1B) {
+        serial_present = 0;
+        return;
     }
-    return 1;
+    outb(0x3FC, 0x0B);
+    outb(0x3F9, 0x00);
+    outb(0x3FB, 0x80);
+    outb(0x3F8, 0x01);
+    outb(0x3F9, 0x00);
+    outb(0x3FB, 0x03);
+    outb(0x3FA, 0xC7);
+    outb(0x3FC, 0x0B);
+    serial_present = 1;
+}
+
+static void serial_putc_nolock(uint8_t ch) {
+    while (!serial_thr_empty())
+        cpu_relax();
+    outb(0x3F8, ch);
+}
+
+void serial_putchar_locked(char c) {
+    uint64_t flags;
+
+    if (!serial_present) return;
+    flags = klog_irqsave();
+    spin_lock(&serial_lock);
+    if (c == '\n')
+        serial_putc_nolock('\r');
+    serial_putc_nolock((uint8_t)c);
+    spin_unlock(&serial_lock);
+    klog_irqrestore(flags);
 }
 
 static void serial_write_nolock(const char *buf, size_t len) {
     size_t i;
     uint8_t ch;
 
+    if (!serial_present) return;
     for (i = 0; i < len; i++) {
         ch = (uint8_t)buf[i];
-        if (ch == '\n') {
-            if (!serial_wait_thr_empty()) return;
-            outb(0x3F8, '\r');
-        }
-        if (!serial_wait_thr_empty()) return;
-        outb(0x3F8, ch);
+        if (ch == '\n')
+            serial_putc_nolock('\r');
+        serial_putc_nolock(ch);
     }
 }
 
@@ -1042,39 +1066,12 @@ void KERNEL_INIT kprint_flush(void) {
 }
 
 void kprint_serial_async(const char *buf, size_t len) {
-    size_t i;
-    size_t start;
-    int in_esc;
     uint64_t flags;
 
     if (!buf || len == 0) return;
     flags = klog_irqsave();
     spin_lock(&serial_lock);
-
-    in_esc = 0;
-    start = 0;
-    for (i = 0; i < len; i++) {
-        if (in_esc) {
-            if ((buf[i] >= 'A' && buf[i] <= 'Z') ||
-                (buf[i] >= 'a' && buf[i] <= 'z')) {
-                in_esc = 0;
-                start = i + 1;
-            }
-            continue;
-        }
-        if (buf[i] == '\033') {
-            if (i > start) {
-                serial_write_nolock(buf + start, i - start);
-            }
-            in_esc = 1;
-            start = i;
-            continue;
-        }
-    }
-    if (!in_esc && i > start) {
-        serial_write_nolock(buf + start, i - start);
-    }
-
+    serial_write_nolock(buf, len);
     spin_unlock(&serial_lock);
     klog_irqrestore(flags);
 }
