@@ -99,12 +99,12 @@ int ext4_dir_remove_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name);
 int ext4_dir_iterate(ext4_fs_t *fs, uint32_t dir_ino, int (*callback)(ext4_dir_entry_t *, void *), void *ctx);
 int ext4_dir_get_entry(ext4_fs_t *fs, uint32_t dir_ino, uint32_t index, ext4_dir_entry_t *entry);
 
-uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, uint8_t *buffer);
-uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, const uint8_t *buffer);
-uint32_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
-                                   uint32_t offset, uint32_t size,
+uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t size, uint8_t *buffer);
+uint64_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t size, const uint8_t *buffer);
+uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
+                                   uint64_t offset, uint64_t size,
                                    const uint8_t *buffer, uint8_t *scratch,
-                                   uint32_t scratch_capacity);
+                                   uint64_t scratch_capacity);
 int ext4_file_truncate(ext4_fs_t *fs, uint32_t ino, uint64_t size);
 
 void ext4_init(void);

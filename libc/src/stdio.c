@@ -113,8 +113,14 @@ int putchar(int c) {
 
 int fflush(FILE *stream) {
     struct _IO_FILE *f;
+    int i;
 
-    if (!stream) return 0;
+    if (!stream) {
+        for (i = 0; i < open_files_count; i++) {
+            if (open_files[i] && open_files[i]->fd < 0) return EOF;
+        }
+        return 0;
+    }
     f = (struct _IO_FILE *)stream;
     if (f->fd < 0) return EOF;
     return 0;
@@ -130,37 +136,52 @@ FILE *fopen(const char *path, const char *mode) {
     
     flags = 0;
     oflags = 0;
-    
-    switch (mode[0]) {
-        case 'r':
-            flags = FILE_FLAG_READ;
-            oflags = O_RDONLY;
-            if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
-                flags |= FILE_FLAG_WRITE;
-                oflags = O_RDWR;
-            }
-            break;
-        case 'w':
-            flags = FILE_FLAG_WRITE;
-            oflags = O_WRONLY | O_CREAT | O_TRUNC;
-            if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
-                flags |= FILE_FLAG_READ;
-                oflags = O_RDWR | O_CREAT | O_TRUNC;
-            }
-            break;
-        case 'a':
-            flags = FILE_FLAG_WRITE | FILE_FLAG_APPEND;
-            oflags = O_WRONLY | O_CREAT | O_APPEND;
-            if (mode[1] == '+' || (mode[1] && mode[2] == '+')) {
-                flags |= FILE_FLAG_READ;
-                oflags = O_RDWR | O_CREAT | O_APPEND;
-            }
-            break;
-        default:
-            return NULL;
+    {
+        int plus = 0;
+        int excl = 0;
+        const char *m = mode + 1;
+        while (*m == 'b') m++;
+        if (*m == '+') { plus = 1; m++; }
+        while (*m == 'b') m++;
+        if (*m == 'x') { excl = 1; m++; }
+        while (*m == 'b') m++;
+        if (*m == '+' && !plus) { plus = 1; m++; }
+        while (*m == 'b') m++;
+        if (*m != '\0' && *m != ',') {
+            if (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a') return NULL;
+        }
+        switch (mode[0]) {
+            case 'r':
+                flags = FILE_FLAG_READ;
+                oflags = O_RDONLY;
+                if (plus) {
+                    flags |= FILE_FLAG_WRITE;
+                    oflags = O_RDWR;
+                }
+                break;
+            case 'w':
+                flags = FILE_FLAG_WRITE;
+                oflags = O_WRONLY | O_CREAT | O_TRUNC;
+                if (plus) {
+                    flags |= FILE_FLAG_READ;
+                    oflags = O_RDWR | O_CREAT | O_TRUNC;
+                }
+                break;
+            case 'a':
+                flags = FILE_FLAG_WRITE | FILE_FLAG_APPEND;
+                oflags = O_WRONLY | O_CREAT | O_APPEND;
+                if (plus) {
+                    flags |= FILE_FLAG_READ;
+                    oflags = O_RDWR | O_CREAT | O_APPEND;
+                }
+                break;
+            default:
+                return NULL;
+        }
+        if (excl) oflags |= O_EXCL;
     }
-    
-    fd = open(path, oflags);
+
+    fd = open(path, oflags, 0666);
     if (fd < 0) return NULL;
     
     f = alloc_file();
@@ -182,9 +203,65 @@ FILE *fopen(const char *path, const char *mode) {
 }
 
 FILE *freopen(const char *path, const char *mode, FILE *stream) {
-    if (stream) fclose(stream);
-    if (!path) return NULL;
-    return fopen(path, mode);
+    struct _IO_FILE *f;
+    int flags;
+    int oflags;
+    int fd;
+
+    if (!stream || !mode) return NULL;
+    f = (struct _IO_FILE *)stream;
+    switch (mode[0]) {
+        case 'r': flags = FILE_FLAG_READ; oflags = O_RDONLY; break;
+        case 'w': flags = FILE_FLAG_WRITE; oflags = O_WRONLY | O_CREAT | O_TRUNC; break;
+        case 'a': flags = FILE_FLAG_WRITE | FILE_FLAG_APPEND; oflags = O_WRONLY | O_CREAT | O_APPEND; break;
+        default: return NULL;
+    }
+    {
+        const char *m = mode + 1;
+        int plus = 0;
+        int excl = 0;
+        while (*m == 'b') m++;
+        if (*m == '+') { plus = 1; m++; }
+        while (*m == 'b') m++;
+        if (*m == 'x') { excl = 1; m++; }
+        while (*m == 'b') m++;
+        if (*m == '+' && !plus) plus = 1;
+        if (plus) {
+            flags |= (FILE_FLAG_READ | FILE_FLAG_WRITE);
+            oflags = (oflags & ~(O_RDONLY | O_WRONLY)) | O_RDWR;
+        }
+        if (excl) oflags |= O_EXCL;
+    }
+    if (!path) {
+        f->flags = (f->flags & ~(FILE_FLAG_READ | FILE_FLAG_WRITE | FILE_FLAG_APPEND)) | flags;
+        f->has_ungetc = 0;
+        f->buf_pos = 0;
+        f->buf_len = 0;
+        f->flags &= ~(FILE_FLAG_EOF | FILE_FLAG_ERROR);
+        return stream;
+    }
+    fd = open(path, oflags, 0666);
+    if (fd < 0) return NULL;
+    if (f->fd >= 0 && f != &_stdin_file && f != &_stdout_file && f != &_stderr_file) {
+        close(f->fd);
+    } else if (f->fd >= 0) {
+        close(f->fd);
+    }
+    f->fd = fd;
+    f->flags = flags;
+    f->has_ungetc = 0;
+    f->buf_pos = 0;
+    f->buf_len = 0;
+    f->file_pos = 0;
+    f->flags &= ~(FILE_FLAG_EOF | FILE_FLAG_ERROR);
+    if (!f->buf) {
+        f->buf = (unsigned char *)malloc(STDIO_BUFSIZE);
+        if (f->buf) {
+            f->flags |= FILE_FLAG_MYBUF;
+            f->buf_size = STDIO_BUFSIZE;
+        }
+    }
+    return stream;
 }
 
 FILE *fdopen(int fd, const char *mode) {
@@ -204,9 +281,15 @@ FILE *fdopen(int fd, const char *mode) {
     
     f = alloc_file();
     if (!f) return NULL;
-    
+
     f->fd = fd;
     f->flags = flags;
+    f->file_pos = 0;
+    f->buf = (unsigned char *)malloc(STDIO_BUFSIZE);
+    if (f->buf) {
+        f->flags |= FILE_FLAG_MYBUF;
+        f->buf_size = STDIO_BUFSIZE;
+    }
     return (FILE *)f;
 }
 
@@ -216,11 +299,20 @@ int fclose(FILE *stream) {
 
     if (!stream) return EOF;
     f = (struct _IO_FILE *)stream;
-    
+
     if (f == &_stdin_file || f == &_stdout_file || f == &_stderr_file) {
-        return 0;
+        fflush(stream);
+        ret = 0;
+        if (f->fd >= 0) {
+            ret = close(f->fd);
+            f->fd = -1;
+        }
+        f->buf_pos = 0;
+        f->buf_len = 0;
+        f->has_ungetc = 0;
+        return ret;
     }
-    
+
     fflush(stream);
     ret = 0;
     if (f->fd >= 0) {
@@ -557,17 +649,29 @@ int fprintf(FILE *stream, const char *format, ...) {
 }
 
 int vfprintf(FILE *stream, const char *format, va_list ap) {
-    char buf[1024];
-    int len;
+    va_list aq;
+    int needed;
+    char small[256];
+    char *buf;
     size_t w;
+    int ret;
 
     if (!stream || !format) return -1;
-    len = vsnprintf(buf, sizeof(buf), format, ap);
-    if (len > 0) {
-        w = fwrite(buf, 1, (size_t)len, stream);
-        return (int)w;
+    va_copy(aq, ap);
+    needed = vsnprintf(small, sizeof(small), format, aq);
+    va_end(aq);
+    if (needed < 0) return -1;
+    if (needed < (int)sizeof(small)) {
+        w = fwrite(small, 1, (size_t)needed, stream);
+        return (w == (size_t)needed) ? needed : -1;
     }
-    return len;
+    buf = (char *)malloc((size_t)needed + 1);
+    if (!buf) return -1;
+    ret = vsnprintf(buf, (size_t)needed + 1, format, ap);
+    if (ret < 0) { free(buf); return -1; }
+    w = fwrite(buf, 1, (size_t)ret, stream);
+    free(buf);
+    return (w == (size_t)ret) ? ret : -1;
 }
 
 int printf(const char *format, ...) {
@@ -588,18 +692,26 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
     char *out;
     char *end;
     const char *p;
-    int width, precision, left_align, zero_pad, long_arg;
-    char tmp[32];
+    int width, precision, left_align, zero_pad, long_arg, plus, space, alt;
+    char tmp[64];
     int tmplen;
+    int total;
 
-    if (!str || size == 0 || !format) return 0;
-
-    out = str;
-    if (size - 1 > (size_t)(PTRDIFF_MAX)) end = (char *)(uintptr_t)-2;
-    else end = str + size - 1;
+    if (!format) return -1;
+    if (!str && size != 0) return -1;
+    if (size == 0) {
+        out = NULL;
+        end = NULL;
+    } else {
+        out = str;
+        if (size - 1 > (size_t)(PTRDIFF_MAX)) end = (char *)(uintptr_t)-2;
+        else end = str + size - 1;
+    }
     p = format;
+    total = 0;
+#define EMIT(c) do { if (out && out < end) *out++ = (char)(c); if (total < 2147483647) total++; } while (0)
 
-    while (*p && out < end) {
+    while (*p) {
         if (*p == '%') {
             p++;
             width = 0;
@@ -607,25 +719,30 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
             left_align = 0;
             zero_pad = 0;
             long_arg = 0;
+            plus = 0;
+            space = 0;
+            alt = 0;
 
             while (*p == '-' || *p == '0' || *p == '+' || *p == ' ' || *p == '#') {
                 if (*p == '-') left_align = 1;
                 else if (*p == '0') zero_pad = 1;
+                else if (*p == '+') plus = 1;
+                else if (*p == ' ') space = 1;
+                else if (*p == '#') alt = 1;
                 p++;
             }
 
             while (*p >= '0' && *p <= '9') {
-                if (width < 100) width = width * 10 + (*p - '0');
+                if (width < 1000000) width = width * 10 + (*p - '0');
                 p++;
             }
-            if (width > (int)sizeof(tmp) - 2) width = (int)sizeof(tmp) - 2;
             if (width < 0) width = 0;
 
             if (*p == '.') {
                 p++;
                 precision = 0;
                 while (*p >= '0' && *p <= '9') {
-                    if (precision < 100) precision = precision * 10 + (*p - '0');
+                    if (precision < 1000000) precision = precision * 10 + (*p - '0');
                     p++;
                 }
             }
@@ -634,110 +751,229 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap) {
                 long_arg = 1;
                 p++;
                 if (*p == 'l') { p++; }
-            } else if (*p == 'z' || *p == 'h') {
+            } else if (*p == 'z' || *p == 'h' || *p == 't' || *p == 'j') {
+                if (*p == 'z' || *p == 't') long_arg = 1;
                 p++;
+                if ((*p == 'h' || *p == 'l') && (*(p-1) == 'h' || *(p-1) == 'l')) p++;
             }
 
             tmplen = 0;
-            (void)left_align; (void)zero_pad; (void)precision;
 
             switch (*p) {
                 case 'd':
                 case 'i': {
                     long val = long_arg ? va_arg(ap, long) : va_arg(ap, int);
                     int neg = val < 0;
+                    char sign = 0;
+                    int zeros;
+                    int len;
+                    int pad;
                     unsigned long u = neg ? (unsigned long)(-(val + 1)) + 1u : (unsigned long)val;
                     if (u == 0) tmp[tmplen++] = '0';
-                    else while (u && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = '0' + (u % 10); u /= 10; }
-                    if (neg) {
-                        while (tmplen < width - 1 && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
-                        if (out < end) *out++ = '-';
-                    } else {
-                        while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
+                    else while (u && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = (char)('0' + (u % 10)); u /= 10; }
+                    if (neg) sign = '-';
+                    else if (plus) sign = '+';
+                    else if (space) sign = ' ';
+                    zeros = 0;
+                    if (precision >= 0) {
+                        if (precision == 0 && tmplen == 1 && tmp[0] == '0') tmplen = 0;
+                        if (precision > tmplen) zeros = precision - tmplen;
                     }
-                    while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
+                    len = tmplen + zeros + (sign ? 1 : 0);
+                    pad = width > len ? width - len : 0;
+                    if (!left_align && !(zero_pad && precision < 0)) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
+                    if (sign) EMIT(sign);
+                    if (!left_align && zero_pad && precision < 0) {
+                        while (pad-- > 0) EMIT('0');
+                    }
+                    while (zeros-- > 0) EMIT('0');
+                    while (tmplen > 0) { tmplen--; EMIT(tmp[tmplen]); }
+                    if (left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
                     break;
                 }
                 case 'u': {
                     unsigned long val = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
+                    int zeros = 0;
+                    int len;
+                    int pad;
                     if (val == 0) tmp[tmplen++] = '0';
-                    else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = '0' + (val % 10); val /= 10; }
-                    while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
-                    while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
+                    else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = (char)('0' + (val % 10)); val /= 10; }
+                    if (precision >= 0) {
+                        if (precision == 0 && tmplen == 1 && tmp[0] == '0') tmplen = 0;
+                        if (precision > tmplen) zeros = precision - tmplen;
+                    }
+                    len = tmplen + zeros;
+                    pad = width > len ? width - len : 0;
+                    if (!left_align && !(zero_pad && precision < 0)) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
+                    if (!left_align && zero_pad && precision < 0) {
+                        while (pad-- > 0) EMIT('0');
+                    }
+                    while (zeros-- > 0) EMIT('0');
+                    while (tmplen > 0) { tmplen--; EMIT(tmp[tmplen]); }
+                    if (left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
                     break;
                 }
                 case 'x':
                 case 'X': {
                     unsigned long val = long_arg ? va_arg(ap, unsigned long) : va_arg(ap, unsigned int);
                     const char *hex = (*p == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+                    int zeros = 0;
+                    int pre = (alt && val != 0) ? 2 : 0;
+                    int len;
+                    int pad;
                     if (val == 0) tmp[tmplen++] = '0';
                     else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = hex[val & 0xF]; val >>= 4; }
-                    while (tmplen < width && tmplen < (int)sizeof(tmp)) tmp[tmplen++] = zero_pad ? '0' : ' ';
-                    while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
+                    if (precision >= 0) {
+                        if (precision == 0 && tmplen == 1 && tmp[0] == '0') tmplen = 0;
+                        if (precision > tmplen) zeros = precision - tmplen;
+                    }
+                    len = tmplen + zeros + pre;
+                    pad = width > len ? width - len : 0;
+                    if (!left_align && !(zero_pad && precision < 0)) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
+                    if (pre) { EMIT('0'); EMIT(*p == 'X' ? 'X' : 'x'); }
+                    if (!left_align && zero_pad && precision < 0) {
+                        while (pad-- > 0) EMIT('0');
+                    }
+                    while (zeros-- > 0) EMIT('0');
+                    while (tmplen > 0) { tmplen--; EMIT(tmp[tmplen]); }
+                    if (left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
                     break;
                 }
                 case 'p': {
                     unsigned long val = (unsigned long)(uintptr_t)va_arg(ap, void*);
-                    if (out < end) *out++ = '0';
-                    if (out < end) *out++ = 'x';
+                    EMIT('0');
+                    EMIT('x');
                     if (val == 0) tmp[tmplen++] = '0';
                     else while (val && tmplen < (int)sizeof(tmp)) { tmp[tmplen++] = "0123456789abcdef"[val & 0xF]; val >>= 4; }
-                    while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
+                    while (tmplen > 0) { tmplen--; EMIT(tmp[tmplen]); }
                     break;
                 }
                 case 'n': {
                     int *np = va_arg(ap, int *);
-                    if (np) *np = (int)(out - str);
+                    if (np) *np = total;
                     break;
                 }
                 case 's': {
                     const char *s = va_arg(ap, const char*);
+                    int slen;
+                    int i;
+                    int pad;
                     if (!s) s = "(null)";
-                    while (*s && out < end) *out++ = *s++;
+                    slen = 0;
+                    while (s[slen] && (precision < 0 || slen < precision)) slen++;
+                    pad = width > slen ? width - slen : 0;
+                    if (!left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
+                    for (i = 0; i < slen; i++) EMIT(s[i]);
+                    if (left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
                     break;
                 }
-                case 'c':
-                    if (out < end) *out++ = (char)va_arg(ap, int);
+                case 'c': {
+                    int ch = va_arg(ap, int);
+                    int pad = width > 1 ? width - 1 : 0;
+                    if (!left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
+                    EMIT(ch);
+                    if (left_align) {
+                        while (pad-- > 0) EMIT(' ');
+                    }
                     break;
+                }
                 case '%':
-                    if (out < end) *out++ = '%';
+                    EMIT('%');
                     break;
                 case 'g':
                 case 'f':
                 case 'e': {
                     double val = va_arg(ap, double);
-                    long ipart = (long)val;
-                    int neg = ipart < 0;
+                    long ipart;
+                    int neg;
                     double frac;
                     int i, d;
-                    if (neg) ipart = -ipart;
-                    if (ipart == 0) tmp[tmplen++] = '0';
-                    else while (ipart) { tmp[tmplen++] = '0' + (ipart % 10); ipart /= 10; }
-                    if (neg && out < end) *out++ = '-';
-                    while (tmplen > 0 && out < end) *out++ = tmp[--tmplen];
-                    if (out < end) *out++ = '.';
+                    int fprec = precision >= 0 ? precision : 6;
+                    int pad;
+                    int flen;
+                    char fbuf[40];
+                    int fi = 0;
+                    if (val != val) {
+                        const char *nan = "nan";
+                        flen = 3;
+                        pad = width > flen ? width - flen : 0;
+                        if (!left_align) while (pad-- > 0) EMIT(' ');
+                        while (*nan) { EMIT(*nan); nan++; }
+                        if (left_align) while (pad-- > 0) EMIT(' ');
+                        break;
+                    }
+                    if (val > 9.223372036854776e18 || val < -9.223372036854776e18) {
+                        const char *inf = "inf";
+                        neg = val < 0;
+                        flen = 3 + (neg ? 1 : 0);
+                        pad = width > flen ? width - flen : 0;
+                        if (!left_align) while (pad-- > 0) EMIT(' ');
+                        if (neg) EMIT('-');
+                        while (*inf) { EMIT(*inf); inf++; }
+                        if (left_align) while (pad-- > 0) EMIT(' ');
+                        break;
+                    }
+                    ipart = (long)val;
+                    neg = ipart < 0 || (ipart == 0 && 1.0/val < 0);
+                    if (ipart == 0) fbuf[fi++] = '0';
+                    else {
+                        long v = neg ? -ipart : ipart;
+                        char rev[32];
+                        int ri = 0;
+                        while (v) { rev[ri++] = (char)('0' + (v % 10)); v /= 10; }
+                        while (ri > 0 && fi < (int)sizeof(fbuf)) fbuf[fi++] = rev[--ri];
+                    }
+                    if (fprec > 0 || *p != 'g') {
+                        if (fi < (int)sizeof(fbuf)) fbuf[fi++] = '.';
+                    }
                     frac = val - (long)val;
                     if (frac < 0) frac = -frac;
-                    for (i = 0; i < 6 && out < end; i++) {
+                    for (i = 0; i < fprec && fi < (int)sizeof(fbuf); i++) {
                         frac *= 10;
                         d = (int)frac;
-                        *out++ = '0' + d;
+                        fbuf[fi++] = (char)('0' + d);
                         frac -= d;
                     }
+                    flen = fi + (neg ? 1 : 0);
+                    pad = width > flen ? width - flen : 0;
+                    if (!left_align) while (pad-- > 0) EMIT(' ');
+                    if (neg) EMIT('-');
+                    for (i = 0; i < fi; i++) EMIT(fbuf[i]);
+                    if (left_align) while (pad-- > 0) EMIT(' ');
                     break;
                 }
                 default:
-                    if (out < end) *out++ = '%';
-                    if (out < end) *out++ = *p;
+                    EMIT('%');
+                    EMIT(*p);
                     break;
             }
         } else {
-            *out++ = *p;
+            EMIT(*p);
         }
         p++;
     }
-    *out = '\0';
-    return (int)(out - str);
+    if (out && size > 0) *out = '\0';
+    else if (size > 0) *str = '\0';
+    return total;
+#undef EMIT
 }
 
 int snprintf(char *str, size_t size, const char *format, ...) {
@@ -828,13 +1064,19 @@ int strerror_r(int errnum, char *buf, size_t buflen) {
     const char *msg;
     size_t len;
 
-    msg = strerror(errnum);
+    if (!buf || buflen == 0) { errno = EINVAL; return -1; }
+    if (errnum >= 0 && (size_t)errnum < SYS_NERR && sys_errlist[errnum]) {
+        msg = sys_errlist[errnum];
+    } else {
+        snprintf(buf, buflen, "Unknown error %d", errnum);
+        if (strlen(buf) >= buflen) { errno = ERANGE; return -1; }
+        return 0;
+    }
     len = strlen(msg);
     if (len >= buflen) {
-        if (buflen > 0) {
-            memcpy(buf, msg, buflen - 1);
-            buf[buflen - 1] = '\0';
-        }
+        memcpy(buf, msg, buflen - 1);
+        buf[buflen - 1] = '\0';
+        errno = ERANGE;
         return -1;
     }
     memcpy(buf, msg, len + 1);

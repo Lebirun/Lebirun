@@ -643,7 +643,7 @@ static uint64_t ext4_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, 
 
 static uint64_t ext4_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ext4_vfs_private_t *priv;
-    uint32_t written;
+    uint64_t written;
     ext4_inode_cache_t *ic;
 
     if (!node || !node->private_data || !buffer) {
@@ -672,18 +672,17 @@ uint64_t ext4_transfer_write(vfs_node_t *node, uint64_t offset,
                              uint64_t scratch_capacity) {
     ext4_vfs_private_t *priv;
     ext4_inode_cache_t *ic;
-    uint32_t written;
+    uint64_t written;
 
     if (!node || node->write != ext4_vfs_write) return UINT64_MAX;
-    if (!node->private_data || !buffer || offset > UINT32_MAX ||
-        size > UINT32_MAX || scratch_capacity > UINT32_MAX)
+    if (!node->private_data || !buffer)
         return 0;
     priv = (ext4_vfs_private_t *)node->private_data;
     mutex_lock(&priv->fs->lock);
     written = ext4_file_write_workspace(priv->fs, priv->ino,
-                                        (uint32_t)offset, (uint32_t)size,
+                                        offset, size,
                                         buffer, scratch,
-                                        (uint32_t)scratch_capacity);
+                                        scratch_capacity);
     if (written > 0) {
         ic = ext4_get_inode(priv->fs, priv->ino);
         if (ic) {
@@ -946,7 +945,7 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
     vfs_node_t *parent;
     ext4_vfs_private_t *priv;
     int ino;
-    int written;
+    uint64_t written;
     int ret;
     (void)flags;
 
@@ -968,9 +967,9 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
     mutex_lock(&priv->fs->lock);
     ino = ext4_create_file(priv->fs, priv->ino, name, EXT4_S_IFLNK | 0777);
     if (ino >= 0) {
-        written = (int)ext4_file_write(priv->fs, (uint32_t)ino, 0,
-                                       (uint32_t)target_len, (const uint8_t *)target);
-        if (written == (int)target_len) {
+        written = ext4_file_write(priv->fs, (uint32_t)ino, 0,
+                                        target_len, (const uint8_t *)target);
+        if (written == target_len) {
             ret = 0;
         } else {
             ext4_unlink_file(priv->fs, priv->ino, name);

@@ -602,6 +602,7 @@ void KERNEL_INIT syscalls_signal_init(void);
 int sys_kill_impl(int pid, const char *sig_ptr, int unused);
 void KERNEL_INIT syscalls_ids_init(void);
 void KERNEL_INIT syscalls_misc_init(void);
+void KERNEL_INIT syscalls_regex_init(void);
 void KERNEL_INIT syscalls_inotify_init(void);
 void KERNEL_INIT syscalls_epoll_init(void);
 void KERNEL_INIT syscalls_pthread_init(void);

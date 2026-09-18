@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <fnmatch.h>
 
 #define EPERM   1
 #define ENOENT  2
@@ -192,19 +194,26 @@ void *sbrk(intptr_t inc) {
             return (void *)-1;
         }
     }
-    
+
     if (inc == 0) {
         return (void *)__brk_cur;
     }
-    
+
     uintptr_t old_brk = __brk_cur;
-    uintptr_t new_brk = old_brk + (uintptr_t)inc;
-    
+    uintptr_t new_brk;
+    if (inc > 0) {
+        if ((uintptr_t)inc > (uintptr_t)-1 - old_brk) return (void *)-1;
+        new_brk = old_brk + (uintptr_t)inc;
+    } else {
+        if ((uintptr_t)(-(inc + 1)) >= old_brk) return (void *)-1;
+        new_brk = old_brk + (uintptr_t)inc;
+    }
+
     uintptr_t result = (uintptr_t)syscall1(SYS_SBRK, (long)new_brk);
     if (result == (uintptr_t)-1 || result < new_brk) {
         return (void *)-1;
     }
-    
+
     __brk_cur = result;
     return (void *)old_brk;
 }
@@ -217,16 +226,16 @@ void _exit(int status) {
     __builtin_unreachable();
 }
 
-int read(int fd, void *buf, size_t count) {
-    int ret = syscall3(SYS_READ, fd, (long)buf, (long)count);
-    if (ret < 0) { errno = -ret; return -1; }
-    return ret;
+ssize_t read(int fd, void *buf, size_t count) {
+    long ret = syscall3(SYS_READ, fd, (long)buf, (long)count);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
-int write(int fd, const void *buf, size_t count) {
-    int ret = syscall3(SYS_WRITE, fd, (long)buf, (long)count);
-    if (ret < 0) { errno = -ret; return -1; }
-    return ret;
+ssize_t write(int fd, const void *buf, size_t count) {
+    long ret = syscall3(SYS_WRITE, fd, (long)buf, (long)count);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 struct iovec {
@@ -277,7 +286,9 @@ int getpid(void) {
 }
 
 int exec(const void *bin, unsigned int size) {
-    return syscall2(SYS_EXEC, (long)bin, (long)size);
+    int ret = syscall2(SYS_EXEC, (long)bin, (long)size);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fork(void) {
@@ -301,15 +312,21 @@ int waitpid(int pid, int *status, int options) {
 int wait(int *status) { return waitpid(-1, status, 0); }
 
 int dup(int oldfd) {
-    return syscall1(SYS_DUP, oldfd);
+    int ret = syscall1(SYS_DUP, oldfd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int dup2(int oldfd, int newfd) {
-    return syscall2(SYS_DUP2, oldfd, newfd);
+    int ret = syscall2(SYS_DUP2, oldfd, newfd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int pipe(int pipefd[2]) {
-    return syscall1(SYS_PIPE, (long)pipefd);
+    int ret = syscall1(SYS_PIPE, (long)pipefd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[]) {
@@ -334,30 +351,34 @@ int chdir(const char *path) {
 }
 
 int access(const char *pathname, int mode) {
-    return syscall2(SYS_ACCESS, (long)pathname, mode);
+    int ret = syscall2(SYS_ACCESS, (long)pathname, mode);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 struct stat;
 int stat(const char *pathname, struct stat *statbuf) {
     int ret = syscall2(SYS_STAT, (long)pathname, (long)statbuf);
-    if (ret < 0) { errno = ENOENT; return -1; }
+    if (ret < 0) { errno = (int)-ret; return -1; }
     return 0;
 }
 
 int fstat(int fd, struct stat *statbuf) {
     int ret = syscall2(SYS_FSTAT, fd, (long)statbuf);
-    if (ret < 0) { errno = EBADF; return -1; }
+    if (ret < 0) { errno = (int)-ret; return -1; }
     return 0;
 }
 
 int lstat(const char *pathname, struct stat *statbuf) {
     int ret = syscall2(SYS_STAT, (long)pathname, (long)statbuf);
-    if (ret < 0) { errno = ENOENT; return -1; }
+    if (ret < 0) { errno = (int)-ret; return -1; }
     return 0;
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    return syscall3(SYS_LSEEK, fd, (long)offset, whence);
+    long ret = syscall3(SYS_LSEEK, fd, (long)offset, whence);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (off_t)ret;
 }
 
 int sigsuspend(const sigset_t *mask) {
@@ -367,26 +388,38 @@ int sigsuspend(const sigset_t *mask) {
 }
 
 int clock_gettime(int clockid, struct timespec *tp) {
-    return syscall2(SYS_CLOCK_GETTIME, clockid, (long)tp);
+    int ret = syscall2(SYS_CLOCK_GETTIME, clockid, (long)tp);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 struct timeval;
 int gettimeofday(struct timeval *__restrict tv, void *__restrict tz) {
-    return syscall2(SYS_GETTIMEOFDAY, (long)tv, (long)tz);
+    int ret = syscall2(SYS_GETTIMEOFDAY, (long)tv, (long)tz);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    if ((flags & 0x01) || fd >= 0 || offset != 0) { errno = ENOSYS; return (void*)-1; }
+    long ret;
     (void)addr; (void)flags; (void)fd; (void)offset;
-    return (void*)syscall2(SYS_MMAP, (long)length, prot);
+    if (length == 0) { errno = EINVAL; return (void*)-1; }
+    if ((flags & 0x01) || fd >= 0 || offset != 0) { errno = ENOSYS; return (void*)-1; }
+    ret = syscall2(SYS_MMAP, (long)length, prot);
+    if (ret < 0 && ret > -4096) { errno = (int)-ret; return (void*)-1; }
+    return (void*)ret;
 }
 
 int munmap(void *addr, size_t length) {
-    return syscall2(SYS_MUNMAP, (long)addr, (long)length);
+    int ret = syscall2(SYS_MUNMAP, (long)addr, (long)length);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int mprotect(void *addr, size_t len, int prot) {
-    return syscall3(SYS_MPROTECT, (long)addr, (long)len, prot);
+    int ret = syscall3(SYS_MPROTECT, (long)addr, (long)len, prot);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int isatty(int fd) {
@@ -445,27 +478,39 @@ int fcntl(int fd, int cmd, ...) {
 }
 
 int truncate(const char *path, off_t length) {
-    return syscall2(SYS_TRUNCATE, (long)path, (long)length);
+    int ret = syscall2(SYS_TRUNCATE, (long)path, (long)length);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int ftruncate(int fd, off_t length) {
-    return syscall2(SYS_FTRUNCATE, fd, (long)length);
+    int ret = syscall2(SYS_FTRUNCATE, fd, (long)length);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int rename(const char *oldpath, const char *newpath) {
-    return syscall2(SYS_RENAME, (long)oldpath, (long)newpath);
+    int ret = syscall2(SYS_RENAME, (long)oldpath, (long)newpath);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int link(const char *oldpath, const char *newpath) {
-    return syscall2(SYS_LINK, (long)oldpath, (long)newpath);
+    int ret = syscall2(SYS_LINK, (long)oldpath, (long)newpath);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int symlink(const char *target, const char *linkpath) {
-    return syscall2(SYS_SYMLINK, (long)target, (long)linkpath);
+    int ret = syscall2(SYS_SYMLINK, (long)target, (long)linkpath);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz) {
-    return syscall3(SYS_READLINK, (long)pathname, (long)buf, (long)bufsiz);
+    long ret = syscall3(SYS_READLINK, (long)pathname, (long)buf, (long)bufsiz);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 mode_t umask(mode_t mask) {
@@ -473,15 +518,21 @@ mode_t umask(mode_t mask) {
 }
 
 int rmdir(const char *pathname) {
-    return syscall1(SYS_VFS_UNLINK, (long)pathname);
+    int ret = syscall1(SYS_VFS_UNLINK, (long)pathname);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int unlink(const char *pathname) {
-    return syscall1(SYS_VFS_UNLINK, (long)pathname);
+    int ret = syscall1(SYS_VFS_UNLINK, (long)pathname);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int mkdir(const char *pathname, mode_t mode) {
-    return syscall2(SYS_VFS_MKDIR, (long)pathname, mode);
+    int ret = syscall2(SYS_VFS_MKDIR, (long)pathname, mode);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 time_t time(time_t *tloc) {
@@ -489,14 +540,18 @@ time_t time(time_t *tloc) {
 }
 
 unsigned int sleep(unsigned int seconds) {
-    syscall1(SYS_SLEEP, seconds * 1000);
+    if (seconds > 4000000u) seconds = 4000000u;
+    syscall1(SYS_SLEEP, (long)seconds * 1000);
     return 0;
 }
 
 int usleep(unsigned int usec) {
     int ms = (usec + 999) / 1000;
+    int ret;
     if (ms < 1) ms = 1;
-    return syscall1(SYS_SLEEP, ms);
+    ret = syscall1(SYS_SLEEP, ms);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 static char *getenv_buffer;
@@ -507,40 +562,47 @@ char *getenv(const char *name) {
     int needed;
     int ret;
 
-    needed = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, 0, 0);
-    if (needed <= 0) return (char *)0;
-    if ((size_t)needed > getenv_capacity ||
-        getenv_capacity - (size_t)needed >= 4096) {
-        resized = (char *)realloc(getenv_buffer, (size_t)needed);
-        if (!resized && (size_t)needed > getenv_capacity) return (char *)0;
-        if (resized) {
-            getenv_buffer = resized;
-            getenv_capacity = (size_t)needed;
+    if (!name) return (char *)0;
+    for (;;) {
+        needed = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name, 0, 0);
+        if (needed <= 0) return (char *)0;
+        if ((size_t)needed > getenv_capacity ||
+            getenv_capacity - (size_t)needed >= 4096) {
+            resized = (char *)realloc(getenv_buffer, (size_t)needed);
+            if (!resized && (size_t)needed > getenv_capacity) return (char *)0;
+            if (resized) {
+                getenv_buffer = resized;
+                getenv_capacity = (size_t)needed;
+            }
         }
+        ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name,
+                       (long)getenv_buffer, needed);
+        if (ret == -34) continue;
+        if (ret < 0) return (char *)0;
+        return getenv_buffer;
     }
-    ret = syscall3(220 | LEBIRUN_SYSCALL_FLAG, (long)name,
-                   (long)getenv_buffer, needed);
-    if (ret < 0) return (char *)0;
-    return getenv_buffer;
 }
 
 int setenv(const char *name, const char *value, int overwrite) {
-    return syscall3(219 | LEBIRUN_SYSCALL_FLAG, (long)name, (long)value, overwrite);
+    int ret = syscall3(219 | LEBIRUN_SYSCALL_FLAG, (long)name, (long)value, overwrite);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int unsetenv(const char *name) {
-    return syscall1(221 | LEBIRUN_SYSCALL_FLAG, (long)name);
+    int ret = syscall1(221 | LEBIRUN_SYSCALL_FLAG, (long)name);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int clearenv(void) {
     int ret;
 
     ret = syscall0(222 | LEBIRUN_SYSCALL_FLAG);
-    if (ret == 0) {
-        free(getenv_buffer);
-        getenv_buffer = (char *)0;
-        getenv_capacity = 0;
-    }
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    free(getenv_buffer);
+    getenv_buffer = (char *)0;
+    getenv_capacity = 0;
     return ret;
 }
 
@@ -568,15 +630,35 @@ int geteuid(void) { return syscall0(135 | LEBIRUN_SYSCALL_FLAG); }
 int getgid(void) { return syscall0(134 | LEBIRUN_SYSCALL_FLAG); }
 int getegid(void) { return syscall0(136 | LEBIRUN_SYSCALL_FLAG); }
 
-int setuid(int uid) { return syscall1(137 | LEBIRUN_SYSCALL_FLAG, uid); }
-int setgid(int gid) { return syscall1(138 | LEBIRUN_SYSCALL_FLAG, gid); }
-int seteuid(int uid) { return syscall1(139 | LEBIRUN_SYSCALL_FLAG, uid); }
-int setegid(int gid) { return syscall1(140 | LEBIRUN_SYSCALL_FLAG, gid); }
+int setuid(int uid) {
+    int ret = syscall1(137 | LEBIRUN_SYSCALL_FLAG, uid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
+int setgid(int gid) {
+    int ret = syscall1(138 | LEBIRUN_SYSCALL_FLAG, gid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
+int seteuid(int uid) {
+    int ret = syscall1(139 | LEBIRUN_SYSCALL_FLAG, uid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
+int setegid(int gid) {
+    int ret = syscall1(140 | LEBIRUN_SYSCALL_FLAG, gid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
 
 int getppid(void) { return syscall0(156 | LEBIRUN_SYSCALL_FLAG); }
 int gettid(void) { return syscall0(158 | LEBIRUN_SYSCALL_FLAG); }
 
-int getpgid(int pid) { return syscall1(151 | LEBIRUN_SYSCALL_FLAG, pid); }
+int getpgid(int pid) {
+    int ret = syscall1(151 | LEBIRUN_SYSCALL_FLAG, pid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
 int setpgid(int pid, int pgid) {
     int ret = syscall2(152 | LEBIRUN_SYSCALL_FLAG, pid, pgid);
     if (ret < 0) {
@@ -594,14 +676,15 @@ int setsid(void) {
     }
     return ret;
 }
-int getsid(int pid) { return syscall1(155 | LEBIRUN_SYSCALL_FLAG, pid); }
+int getsid(int pid) {
+    int ret = syscall1(155 | LEBIRUN_SYSCALL_FLAG, pid);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
+}
 
 int tcgetpgrp(int fd) {
     int ret = syscall1(60 | LEBIRUN_SYSCALL_FLAG, fd);
-    if (ret < 0) {
-        errno = -ret;
-        return -1;
-    }
+    if (ret < 0) { errno = (int)-ret; return -1; }
     return ret;
 }
 
@@ -619,43 +702,63 @@ int killpg(int pgrp, int sig) {
 }
 
 int dup3(int oldfd, int newfd, int flags) {
-    return syscall3(179 | LEBIRUN_SYSCALL_FLAG, oldfd, newfd, flags);
+    int ret = syscall3(179 | LEBIRUN_SYSCALL_FLAG, oldfd, newfd, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int pipe2(int pipefd[2], int flags) {
-    return syscall2(180 | LEBIRUN_SYSCALL_FLAG, (long)pipefd, flags);
+    int ret = syscall2(180 | LEBIRUN_SYSCALL_FLAG, (long)pipefd, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fchdir(int fd) {
-    return syscall1(172 | LEBIRUN_SYSCALL_FLAG, fd);
+    int ret = syscall1(172 | LEBIRUN_SYSCALL_FLAG, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fchmod(int fd, mode_t mode) {
-    return syscall2(173 | LEBIRUN_SYSCALL_FLAG, fd, mode);
+    int ret = syscall2(173 | LEBIRUN_SYSCALL_FLAG, fd, mode);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fchown(int fd, int owner, int group) {
-    return syscall3(174 | LEBIRUN_SYSCALL_FLAG, fd, owner, group);
+    int ret = syscall3(174 | LEBIRUN_SYSCALL_FLAG, fd, owner, group);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fsync(int fd) {
-    return syscall1(175 | LEBIRUN_SYSCALL_FLAG, fd);
+    int ret = syscall1(175 | LEBIRUN_SYSCALL_FLAG, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int fdatasync(int fd) {
-    return syscall1(176 | LEBIRUN_SYSCALL_FLAG, fd);
+    int ret = syscall1(176 | LEBIRUN_SYSCALL_FLAG, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int flock(int fd, int operation) {
-    return syscall2(177 | LEBIRUN_SYSCALL_FLAG, fd, operation);
+    int ret = syscall2(177 | LEBIRUN_SYSCALL_FLAG, fd, operation);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
-    return syscall4(169 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
+    long ret = syscall4(169 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
-    return syscall4(170 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
+    long ret = syscall4(170 | LEBIRUN_SYSCALL_FLAG, fd, (long)buf, (long)count, (long)offset);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 struct utsname {
@@ -668,15 +771,21 @@ struct utsname {
 };
 
 int uname(struct utsname *buf) {
-    return syscall1(159 | LEBIRUN_SYSCALL_FLAG, (long)buf);
+    int ret = syscall1(159 | LEBIRUN_SYSCALL_FLAG, (long)buf);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
-    return syscall3(196 | LEBIRUN_SYSCALL_FLAG, (long)buf, (long)buflen, flags);
+    long ret = syscall3(196 | LEBIRUN_SYSCALL_FLAG, (long)buf, (long)buflen, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 int pause(void) {
-    return syscall0(131 | LEBIRUN_SYSCALL_FLAG);
+    int ret = syscall0(131 | LEBIRUN_SYSCALL_FLAG);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 unsigned int alarm(unsigned int seconds) {
@@ -684,32 +793,47 @@ unsigned int alarm(unsigned int seconds) {
 }
 
 int setitimer(int which, const struct itimerval *new_value, struct itimerval *old_value) {
-    return syscall3(212 | LEBIRUN_SYSCALL_FLAG, which, (long)new_value, (long)old_value);
+    int ret = syscall3(212 | LEBIRUN_SYSCALL_FLAG, which, (long)new_value, (long)old_value);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int getitimer(int which, struct itimerval *curr_value) {
-    return syscall2(213 | LEBIRUN_SYSCALL_FLAG, which, (long)curr_value);
+    int ret = syscall2(213 | LEBIRUN_SYSCALL_FLAG, which, (long)curr_value);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int chmod(const char *pathname, int mode) {
-    return syscall2(214 | LEBIRUN_SYSCALL_FLAG, (long)pathname, mode);
+    int ret = syscall2(214 | LEBIRUN_SYSCALL_FLAG, (long)pathname, mode);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int chown(const char *pathname, int owner, int group) {
-    return syscall3(215 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
+    int ret = syscall3(215 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int lchown(const char *pathname, int owner, int group) {
-    return syscall3(216 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
+    int ret = syscall3(216 | LEBIRUN_SYSCALL_FLAG, (long)pathname, owner, group);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-    return syscall2(217 | LEBIRUN_SYSCALL_FLAG, (long)req, (long)rem);
+    int ret = syscall2(217 | LEBIRUN_SYSCALL_FLAG, (long)req, (long)rem);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int wait4(int pid, int *wstatus, int options, void *rusage) {
+    int ret;
     (void)rusage;
-    return syscall3(194 | LEBIRUN_SYSCALL_FLAG, pid, (long)wstatus, options);
+    ret = syscall3(194 | LEBIRUN_SYSCALL_FLAG, pid, (long)wstatus, options);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int wait3(int *wstatus, int options, void *rusage) {
@@ -717,15 +841,21 @@ int wait3(int *wstatus, int options, void *rusage) {
 }
 
 int waitid(int idtype, int id, void *infop, int options) {
-    return syscall4(195 | LEBIRUN_SYSCALL_FLAG, idtype, id, (long)infop, options);
+    int ret = syscall4(195 | LEBIRUN_SYSCALL_FLAG, idtype, id, (long)infop, options);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
-int getdents(int fd, void *dirp, unsigned int count) {
-    return syscall3(80 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, count);
+int getdents(int fd, struct dirent *dirp, size_t count) {
+    long ret = syscall3(80 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, (long)count);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (int)ret;
 }
 
 int getdents64(int fd, void *dirp, unsigned int count) {
-    return syscall3(178 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, count);
+    int ret = syscall3(178 | LEBIRUN_SYSCALL_FLAG, fd, (long)dirp, count);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int sigreturn(void) {
@@ -760,7 +890,7 @@ long sysconf(int name) {
                 return (long)(si.totalram / 4096);
             }
             return -1;
-        default: return -1;
+        default: errno = EINVAL; return -1;
     }
 }
 
@@ -778,23 +908,33 @@ int ioctl(int fd, unsigned long request, ...) {
 }
 
 int tcgetattr(int fd, void *termios_p) {
-    return syscall2(54 | 0x80000000, fd, (long)termios_p);
+    int ret = syscall2(54 | 0x80000000, fd, (long)termios_p);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int tcsetattr(int fd, int optional_actions, const void *termios_p) {
-    return syscall3(55 | 0x80000000, fd, optional_actions, (long)termios_p);
+    int ret = syscall3(55 | 0x80000000, fd, optional_actions, (long)termios_p);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int tcflush(int fd, int queue_selector) {
-    return syscall2(57 | 0x80000000, fd, queue_selector);
+    int ret = syscall2(57 | 0x80000000, fd, queue_selector);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int tcdrain(int fd) {
-    return syscall1(59 | 0x80000000, fd);
+    int ret = syscall1(59 | 0x80000000, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int tcflow(int fd, int action) {
-    return syscall2(58 | 0x80000000, fd, action);
+    int ret = syscall2(58 | 0x80000000, fd, action);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 void *memset(void *s, int c, size_t n);
@@ -931,91 +1071,133 @@ struct sockaddr;
 typedef unsigned int socklen_t;
 
 int socket(int domain, int type, int protocol) {
-    return syscall3(SYS_SOCKET, domain, type, protocol);
+    int ret = syscall3(SYS_SOCKET, domain, type, protocol);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    return syscall3(SYS_BIND, sockfd, (long)addr, addrlen);
+    int ret = syscall3(SYS_BIND, sockfd, (long)addr, addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int listen(int sockfd, int backlog) {
-    return syscall2(SYS_LISTEN, sockfd, backlog);
+    int ret = syscall2(SYS_LISTEN, sockfd, backlog);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)addrlen);
+    int ret = syscall3(SYS_ACCEPT, sockfd, (long)addr, (long)addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
-    return syscall4(SYS_ACCEPT4, sockfd, (long)addr, (long)addrlen, flags);
+    int ret = syscall4(SYS_ACCEPT4, sockfd, (long)addr, (long)addrlen, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-    return syscall3(SYS_CONNECT, sockfd, (long)addr, addrlen);
+    int ret = syscall3(SYS_CONNECT, sockfd, (long)addr, addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
-    return syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, 0, 0);
+    long ret = syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, 0, 0);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
-    return syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, 0, 0);
+    long ret = syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, 0, 0);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
                const struct sockaddr *dest_addr, socklen_t addrlen) {
-    return syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, (long)dest_addr, addrlen);
+    long ret = syscall6(SYS_SENDTO, sockfd, (long)buf, (long)len, flags, (long)dest_addr, addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *src_addr, socklen_t *addrlen) {
-    return syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, (long)src_addr, (long)addrlen);
+    long ret = syscall6(SYS_RECVFROM, sockfd, (long)buf, (long)len, flags, (long)src_addr, (long)addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (ssize_t)ret;
 }
 
 int shutdown(int sockfd, int how) {
-    return syscall2(SYS_SHUTDOWN, sockfd, how);
+    int ret = syscall2(SYS_SHUTDOWN, sockfd, how);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen) {
-    return syscall5(SYS_SETSOCKOPT, sockfd, level, optname, (long)optval, optlen);
+    int ret = syscall5(SYS_SETSOCKOPT, sockfd, level, optname, (long)optval, optlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen) {
-    return syscall5(SYS_GETSOCKOPT, sockfd, level, optname, (long)optval, (long)optlen);
+    int ret = syscall5(SYS_GETSOCKOPT, sockfd, level, optname, (long)optval, (long)optlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_GETPEERNAME, sockfd, (long)addr, (long)addrlen);
+    int ret = syscall3(SYS_GETPEERNAME, sockfd, (long)addr, (long)addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return syscall3(SYS_GETSOCKNAME, sockfd, (long)addr, (long)addrlen);
+    int ret = syscall3(SYS_GETSOCKNAME, sockfd, (long)addr, (long)addrlen);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int socketpair(int domain, int type, int protocol, int sv[2]) {
-    return syscall4(SYS_SOCKETPAIR, domain, type, protocol, (long)sv);
+    int ret = syscall4(SYS_SOCKETPAIR, domain, type, protocol, (long)sv);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 struct epoll_event;
 
 int epoll_create(int size) {
-    return syscall1(SYS_EPOLL_CREATE, size);
+    int ret = syscall1(SYS_EPOLL_CREATE, size);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int epoll_create1(int flags) {
-    return syscall1(SYS_EPOLL_CREATE1, flags);
+    int ret = syscall1(SYS_EPOLL_CREATE1, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
-    return syscall4(SYS_EPOLL_CTL, epfd, op, fd, (long)event);
+    int ret = syscall4(SYS_EPOLL_CTL, epfd, op, fd, (long)event);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
-    return syscall4(SYS_EPOLL_WAIT, epfd, (long)events, maxevents, timeout);
+    int ret = syscall4(SYS_EPOLL_WAIT, epfd, (long)events, maxevents, timeout);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout, const sigset_t *sigmask) {
-    return syscall5(SYS_EPOLL_PWAIT, epfd, (long)events, maxevents, timeout, (long)sigmask);
+    int ret = syscall5(SYS_EPOLL_PWAIT, epfd, (long)events, maxevents, timeout, (long)sigmask);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int select(int nfds,
@@ -1023,7 +1205,9 @@ int select(int nfds,
            fd_set *__restrict writefds,
            fd_set *__restrict exceptfds,
            struct timeval *__restrict timeout) {
-    return syscall5(SYS_SELECT, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
+    int ret = syscall5(SYS_SELECT, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int pselect(int nfds,
@@ -1032,25 +1216,34 @@ int pselect(int nfds,
             fd_set *__restrict exceptfds,
             const struct timespec *__restrict timeout,
             const sigset_t *__restrict sigmask) {
-    (void)sigmask;
-    return syscall5(SYS_SELECT, nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout);
+    int ret = syscall6((265 | LEBIRUN_SYSCALL_FLAG), nfds, (long)readfds, (long)writefds, (long)exceptfds, (long)timeout, (long)sigmask);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 struct pollfd;
 
 int poll(struct pollfd *fds, unsigned long nfds, int timeout) {
-    return syscall3(SYS_POLL, (long)fds, (long)nfds, timeout);
+    int ret = syscall3(SYS_POLL, (long)fds, (long)nfds, timeout);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int ppoll(struct pollfd *fds, unsigned long nfds, const struct timespec *tmo_p, const sigset_t *sigmask) {
-    return syscall4(SYS_PPOLL, (long)fds, (long)nfds, (long)tmo_p, (long)sigmask);
+    int ret = syscall4(SYS_PPOLL, (long)fds, (long)nfds, (long)tmo_p, (long)sigmask);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int eventfd(unsigned int initval, int flags) {
+    int ret;
     if (flags) {
-        return syscall2(SYS_EVENTFD2, initval, flags);
+        ret = syscall2(SYS_EVENTFD2, initval, flags);
+    } else {
+        ret = syscall1(SYS_EVENTFD, initval);
     }
-    return syscall1(SYS_EVENTFD, initval);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 #define FUTEX_WAIT 0
@@ -1058,19 +1251,27 @@ int eventfd(unsigned int initval, int flags) {
 #define FUTEX_PRIVATE_FLAG 128
 
 int futex(int *uaddr, int futex_op, int val, const struct timespec *timeout, int *uaddr2, int val3) {
-    return syscall6(SYS_FUTEX, (long)uaddr, futex_op, val, (long)timeout, (long)uaddr2, val3);
+    int ret = syscall6(SYS_FUTEX, (long)uaddr, futex_op, val, (long)timeout, (long)uaddr2, val3);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int set_robust_list(void *head, size_t len) {
-    return syscall2(SYS_SET_ROBUST_LIST, (long)head, (long)len);
+    int ret = syscall2(SYS_SET_ROBUST_LIST, (long)head, (long)len);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int get_robust_list(int pid, void **head_ptr, size_t *len_ptr) {
-    return syscall3(SYS_GET_ROBUST_LIST, pid, (long)head_ptr, (long)len_ptr);
+    int ret = syscall3(SYS_GET_ROBUST_LIST, pid, (long)head_ptr, (long)len_ptr);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int __clone(int (*fn)(void *), void *stack, int flags, void *arg, ...) {
-    return syscall4(SYS_CLONE, (long)fn, (long)stack, flags, (long)arg);
+    int ret = syscall4(SYS_CLONE, (long)fn, (long)stack, flags, (long)arg);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int set_tid_address(int *tidptr) {
@@ -1078,45 +1279,60 @@ int set_tid_address(int *tidptr) {
 }
 
 int posix_openpt(int flags) {
-    return syscall1(SYS_POSIX_OPENPT, flags);
+    int ret = syscall1(SYS_POSIX_OPENPT, flags);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int grantpt(int fd) {
-    return syscall1(SYS_GRANTPT, fd);
+    int ret = syscall1(SYS_GRANTPT, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int unlockpt(int fd) {
-    return syscall1(SYS_UNLOCKPT, fd);
+    int ret = syscall1(SYS_UNLOCKPT, fd);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 char *ptsname(int fd) {
     static char pts_name[32];
     int ret = syscall2(SYS_PTSNAME, fd, (long)pts_name);
     if (ret < 0) return (void*)0;
+    pts_name[sizeof(pts_name) - 1] = '\0';
     return pts_name;
 }
 
 int ptsname_r(int fd, char *buf, size_t buflen) {
-    if (!buf || buflen < 16) return EINVAL;
-    int ret = syscall2(SYS_PTSNAME, fd, (long)buf);
-    return ret < 0 ? ENOTTY : 0;
+    char tmp[32];
+    size_t len;
+    if (!buf || buflen == 0) return EINVAL;
+    int ret = syscall2(SYS_PTSNAME, fd, (long)tmp);
+    if (ret < 0) return ENOTTY;
+    tmp[sizeof(tmp) - 1] = '\0';
+    len = strlen(tmp) + 1;
+    if (len > buflen) return ERANGE;
+    memcpy(buf, tmp, len);
+    return 0;
 }
 
 int openpty(int *amaster, int *aslave, char *name, void *termp, void *winp) {
     (void)termp; (void)winp;
+    if (!amaster || !aslave) return -1;
     int master = posix_openpt(2);
     if (master < 0) return -1;
     if (grantpt(master) < 0) { close(master); return -1; }
     if (unlockpt(master) < 0) { close(master); return -1; }
-    char *sname = ptsname(master);
-    if (!sname) { close(master); return -1; }
-    int slave = open(sname, 2);
+    char tmp[32];
+    if (ptsname_r(master, tmp, sizeof(tmp)) != 0) { close(master); return -1; }
+    int slave = open(tmp, 2);
     if (slave < 0) { close(master); return -1; }
     *amaster = master;
     *aslave = slave;
     if (name) {
-        int i = 0;
-        while (sname[i]) { name[i] = sname[i]; i++; }
+        size_t i = 0;
+        while (tmp[i]) { name[i] = tmp[i]; i++; }
         name[i] = '\0';
     }
     return 0;
@@ -1226,8 +1442,11 @@ void cfmakeraw(void *termios_p) {
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg) {
+    int ret;
     (void)attr;
-    return syscall3(SYS_PTHREAD_CREATE, (long)thread, (long)start_routine, (long)arg);
+    ret = syscall3(SYS_PTHREAD_CREATE, (long)thread, (long)start_routine, (long)arg);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 void pthread_exit(void *retval) {
@@ -1236,11 +1455,15 @@ void pthread_exit(void *retval) {
 }
 
 int pthread_join(pthread_t thread, void **retval) {
-    return syscall2(SYS_PTHREAD_JOIN, (long)thread, (long)retval);
+    int ret = syscall2(SYS_PTHREAD_JOIN, (long)thread, (long)retval);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_detach(pthread_t thread) {
-    return syscall1(SYS_PTHREAD_DETACH, (long)thread);
+    int ret = syscall1(SYS_PTHREAD_DETACH, (long)thread);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 pthread_t pthread_self(void) {
@@ -1248,45 +1471,67 @@ pthread_t pthread_self(void) {
 }
 
 int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
+    int ret;
     (void)attr;
-    return syscall1(SYS_PTHREAD_MUTEX_INIT, (long)mutex);
+    ret = syscall1(SYS_PTHREAD_MUTEX_INIT, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_mutex_destroy(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_DESTROY, (long)mutex);
+    int ret = syscall1(SYS_PTHREAD_MUTEX_DESTROY, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_mutex_lock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_LOCK, (long)mutex);
+    int ret = syscall1(SYS_PTHREAD_MUTEX_LOCK, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_mutex_trylock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_TRYLOCK, (long)mutex);
+    int ret = syscall1(SYS_PTHREAD_MUTEX_TRYLOCK, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex) {
-    return syscall1(SYS_PTHREAD_MUTEX_UNLOCK, (long)mutex);
+    int ret = syscall1(SYS_PTHREAD_MUTEX_UNLOCK, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
+    int ret;
     (void)attr;
-    return syscall1(SYS_PTHREAD_COND_INIT, (long)cond);
+    ret = syscall1(SYS_PTHREAD_COND_INIT, (long)cond);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_cond_destroy(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_DESTROY, (long)cond);
+    int ret = syscall1(SYS_PTHREAD_COND_DESTROY, (long)cond);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
-    return syscall2(SYS_PTHREAD_COND_WAIT, (long)cond, (long)mutex);
+    int ret = syscall2(SYS_PTHREAD_COND_WAIT, (long)cond, (long)mutex);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_cond_signal(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_SIGNAL, (long)cond);
+    int ret = syscall1(SYS_PTHREAD_COND_SIGNAL, (long)cond);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 int pthread_cond_broadcast(pthread_cond_t *cond) {
-    return syscall1(SYS_PTHREAD_COND_BROADCAST, (long)cond);
+    int ret = syscall1(SYS_PTHREAD_COND_BROADCAST, (long)cond);
+    if (ret < 0) return (int)-ret;
+    return ret;
 }
 
 #ifdef pthread_equal
@@ -1347,40 +1592,58 @@ int pthread_condattr_destroy(pthread_condattr_t *attr) {
 #define IPC_PRIVATE 0
 
 int shmget(key_t key, size_t size, int shmflg) {
-    return syscall3(SYS_SHMGET, key, (long)size, shmflg);
+    int ret = syscall3(SYS_SHMGET, key, (long)size, shmflg);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 void *shmat(int shmid, const void *shmaddr, int shmflg) {
-    return (void *)syscall3(SYS_SHMAT, shmid, (long)shmaddr, shmflg);
+    long ret = syscall3(SYS_SHMAT, shmid, (long)shmaddr, shmflg);
+    if (ret < 0 && ret > -4096) { errno = (int)-ret; return (void *)-1; }
+    return (void *)ret;
 }
 
 int shmdt(const void *shmaddr) {
-    return syscall1(SYS_SHMDT, (long)shmaddr);
+    int ret = syscall1(SYS_SHMDT, (long)shmaddr);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 struct shmid_ds;
 int shmctl(int shmid, int cmd, struct shmid_ds *buf) {
-    return syscall3(SYS_SHMCTL, shmid, cmd, (long)buf);
+    int ret = syscall3(SYS_SHMCTL, shmid, cmd, (long)buf);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int shm_open(const char *name, int oflag, mode_t mode) {
-    return syscall3(SYS_SHM_OPEN, (long)name, oflag, mode);
+    int ret = syscall3(SYS_SHM_OPEN, (long)name, oflag, mode);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 int shm_unlink(const char *name) {
-    return syscall1(SYS_SHM_UNLINK, (long)name);
+    int ret = syscall1(SYS_SHM_UNLINK, (long)name);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 void *dlopen(const char *filename, int flags) {
-    return (void *)syscall2(SYS_DLOPEN, (long)filename, flags);
+    long ret = syscall2(SYS_DLOPEN, (long)filename, flags);
+    if (ret < 0 && ret > -4096) { errno = (int)-ret; return (void *)0; }
+    return (void *)ret;
 }
 
 void *dlsym(void *handle, const char *symbol) {
-    return (void *)syscall2(SYS_DLSYM, (long)handle, (long)symbol);
+    long ret = syscall2(SYS_DLSYM, (long)handle, (long)symbol);
+    if (ret < 0 && ret > -4096) { errno = (int)-ret; return (void *)0; }
+    return (void *)ret;
 }
 
 int dlclose(void *handle) {
-    return syscall1(SYS_DLCLOSE, (long)handle);
+    int ret = syscall1(SYS_DLCLOSE, (long)handle);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return ret;
 }
 
 char *dlerror(void) {
@@ -1417,6 +1680,15 @@ void regfree(regex_t *preg) {
     syscall1(SYS_REGFREE, (long)preg);
 }
 
+int regsub(const regex_t *__restrict preg, const char *__restrict string,
+           const char *__restrict replacement, char *__restrict out,
+           size_t outsize) {
+    long ret = syscall6((257 | LEBIRUN_SYSCALL_FLAG), (long)preg, (long)string,
+                        (long)replacement, (long)out, (long)outsize, 0);
+    if (ret < 0) { errno = (int)-ret; return -1; }
+    return (int)ret;
+}
+
 size_t regerror(int errcode, const regex_t *__restrict preg,
                 char *__restrict errbuf, size_t errbuf_size) {
     return syscall4(SYS_REGERROR, errcode, (long)preg, (long)errbuf, (long)errbuf_size);
@@ -1426,14 +1698,341 @@ int fnmatch(const char *pattern, const char *string, int flags) {
     return syscall3(SYS_FNMATCH, (long)pattern, (long)string, flags);
 }
 
+static int glob_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 int glob(const char *__restrict pattern, int flags,
          int (*errfunc)(const char *, int), glob_t *__restrict pglob) {
-    (void)errfunc;
-    return syscall3(SYS_GLOB, (long)pattern, flags, (long)pglob);
+    const char *pat;
+    char *expanded;
+    const char *slash;
+    const char *file_pat;
+    char dirbuf[256];
+    char dirpath[256];
+    size_t dirlen;
+    size_t filelen;
+    int fd;
+    char *buf;
+    char **list;
+    size_t count;
+    size_t capacity;
+    size_t offs;
+    size_t i;
+    size_t j;
+    char *home;
+    struct dirent *de;
+    size_t pos;
+    ssize_t n;
+    int fnflags;
+    char *full;
+    size_t fulllen;
+    size_t need;
+    char **newlist;
+    char *copy;
+
+    if (!pattern || !pglob) { errno = EINVAL; return GLOB_ABORTED; }
+    expanded = NULL;
+    pat = pattern;
+    if ((flags & GLOB_TILDE) && pat[0] == '~' && (pat[1] == '/' || pat[1] == '\0')) {
+        home = getenv("HOME");
+        if (home && home[0]) {
+            size_t hlen = strlen(home);
+            size_t plen = strlen(pat + 1);
+            if (hlen > SIZE_MAX - plen - 1) { errno = ENOMEM; return GLOB_NOSPACE; }
+            expanded = (char *)malloc(hlen + plen + 1);
+            if (!expanded) { errno = ENOMEM; return GLOB_NOSPACE; }
+            memcpy(expanded, home, hlen);
+            memcpy(expanded + hlen, pat + 1, plen + 1);
+            pat = expanded;
+        } else if (flags & GLOB_TILDE_CHECK) {
+            return GLOB_NOMATCH;
+        }
+    }
+    slash = NULL;
+    {
+        const char *q = pat;
+        while (*q) {
+            if (*q == '/') slash = q;
+            q++;
+        }
+    }
+    if (slash) {
+        dirlen = (size_t)(slash - pat);
+        if (dirlen == 0) dirlen = 1;
+        if (dirlen >= sizeof(dirpath)) dirlen = sizeof(dirpath) - 1;
+        memcpy(dirpath, pat, dirlen);
+        dirpath[dirlen] = '\0';
+        file_pat = slash + 1;
+    } else {
+        dirpath[0] = '.';
+        dirpath[1] = '\0';
+        dirlen = 1;
+        file_pat = pat;
+    }
+    filelen = strlen(file_pat);
+    (void)filelen;
+    if (strlen(dirpath) >= sizeof(dirbuf)) {
+        free(expanded);
+        errno = ENAMETOOLONG;
+        return GLOB_ABORTED;
+    }
+    memcpy(dirbuf, dirpath, strlen(dirpath) + 1);
+    fd = open(dirbuf, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) {
+        int e = errno;
+        free(expanded);
+        if (errfunc && errfunc(dirbuf, e)) return GLOB_ABORTED;
+        if (flags & GLOB_NOCHECK) {
+            char **single = (char **)malloc(2 * sizeof(char *));
+            char *one;
+            if (!single) { errno = ENOMEM; return GLOB_NOSPACE; }
+            one = strdup(pattern);
+            if (!one) { free(single); errno = ENOMEM; return GLOB_NOSPACE; }
+            single[0] = one;
+            single[1] = NULL;
+            if (flags & GLOB_APPEND) {
+                size_t old = pglob->gl_pathc;
+                char **merged;
+                if (old > ((size_t)-1) / sizeof(char *) - 2) {
+                    free(one);
+                    free(single);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                merged = (char **)realloc(pglob->gl_pathv,
+                                          (old + 2) * sizeof(char *));
+                if (!merged) {
+                    free(one);
+                    free(single);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                merged[old] = one;
+                merged[old + 1] = NULL;
+                pglob->gl_pathv = merged;
+                pglob->gl_pathc = old + 1;
+                free(single);
+                return 0;
+            }
+            if (pglob->gl_pathv) free(pglob->gl_pathv);
+            pglob->gl_pathv = single;
+            pglob->gl_pathc = 1;
+            pglob->gl_offs = 0;
+            return 0;
+        }
+        errno = e;
+        return GLOB_NOMATCH;
+    }
+    fnflags = 0;
+    if (flags & GLOB_NOESCAPE) fnflags |= FNM_NOESCAPE;
+    if (flags & GLOB_PERIOD) fnflags |= FNM_PERIOD;
+    buf = (char *)malloc(2048);
+    if (!buf) {
+        free(expanded);
+        close(fd);
+        errno = ENOMEM;
+        return GLOB_NOSPACE;
+    }
+    list = NULL;
+    count = 0;
+    capacity = 0;
+    for (;;) {
+        n = getdents(fd, (struct dirent *)buf, 2048);
+        if (n < 0) {
+            int e = errno;
+            for (i = 0; i < count; i++) free(list[i]);
+            free(list);
+            free(buf);
+            free(expanded);
+            close(fd);
+            if (errfunc && errfunc(dirbuf, e)) return GLOB_ABORTED;
+            if (flags & GLOB_ERR) { errno = e; return GLOB_ABORTED; }
+            break;
+        }
+        if (n == 0) break;
+        pos = 0;
+        while (pos < (size_t)n) {
+            char name[256];
+            size_t k;
+            const char *src;
+            de = (struct dirent *)(buf + pos);
+            if (de->d_reclen == 0 || de->d_reclen > (size_t)n - pos) break;
+            k = 0;
+            src = de->d_name;
+            while (k < sizeof(name) - 1) {
+                if ((size_t)(src - (const char *)de) + 1 > de->d_reclen) break;
+                if (!*src) break;
+                name[k++] = *src++;
+            }
+            name[k] = '\0';
+            pos += de->d_reclen;
+            if (k == 0) continue;
+            if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+            if (name[0] == '.' && file_pat[0] != '.' &&
+                !(flags & GLOB_PERIOD))
+                continue;
+            if (fnmatch(file_pat, name, fnflags) != 0) continue;
+            need = dirlen + 1 + k + 1;
+            if (need < dirlen) continue;
+            full = (char *)malloc(need);
+            if (!full) {
+                for (i = 0; i < count; i++) free(list[i]);
+                free(list);
+                free(buf);
+                free(expanded);
+                close(fd);
+                errno = ENOMEM;
+                return GLOB_NOSPACE;
+            }
+            memcpy(full, dirpath, dirlen);
+            fulllen = dirlen;
+            if (dirpath[dirlen - 1] != '/') full[fulllen++] = '/';
+            memcpy(full + fulllen, name, k + 1);
+            if (de->d_type == DT_DIR && (flags & GLOB_MARK)) {
+                if (fulllen + 2 > need) {
+                    char *grown = (char *)realloc(full, fulllen + 2);
+                    if (!grown) {
+                        free(full);
+                        for (i = 0; i < count; i++) free(list[i]);
+                        free(list);
+                        free(buf);
+                        free(expanded);
+                        close(fd);
+                        errno = ENOMEM;
+                        return GLOB_NOSPACE;
+                    }
+                    full = grown;
+                }
+                full[fulllen++] = '/';
+                full[fulllen] = '\0';
+            }
+            if (count >= capacity) {
+                size_t ncap = capacity ? capacity * 2 : 16;
+                if (ncap < capacity ||
+                    ncap > ((size_t)-1) / sizeof(char *)) {
+                    free(full);
+                    for (i = 0; i < count; i++) free(list[i]);
+                    free(list);
+                    free(buf);
+                    free(expanded);
+                    close(fd);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                newlist = (char **)realloc(list, ncap * sizeof(char *));
+                if (!newlist) {
+                    free(full);
+                    for (i = 0; i < count; i++) free(list[i]);
+                    free(list);
+                    free(buf);
+                    free(expanded);
+                    close(fd);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                list = newlist;
+                capacity = ncap;
+            }
+            list[count++] = full;
+        }
+    }
+    free(buf);
+    free(expanded);
+    close(fd);
+    if (!(flags & GLOB_NOSORT) && count > 1)
+        qsort(list, count, sizeof(char *), glob_cmp);
+    if (count == 0) {
+        free(list);
+        if (flags & GLOB_NOCHECK) {
+            copy = strdup(pattern);
+            if (!copy) { errno = ENOMEM; return GLOB_NOSPACE; }
+            if (flags & GLOB_APPEND) {
+                size_t old = pglob->gl_pathc;
+                if (old > ((size_t)-1) / sizeof(char *) - 1) {
+                    free(copy);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                newlist = (char **)realloc(pglob->gl_pathv,
+                                           (old + 1) * sizeof(char *));
+                if (!newlist) {
+                    free(copy);
+                    errno = ENOMEM;
+                    return GLOB_NOSPACE;
+                }
+                newlist[old] = copy;
+                pglob->gl_pathv = newlist;
+                pglob->gl_pathc = old + 1;
+                return 0;
+            }
+            newlist = (char **)malloc(sizeof(char *));
+            if (!newlist) { free(copy); errno = ENOMEM; return GLOB_NOSPACE; }
+            newlist[0] = copy;
+            if (pglob->gl_pathv) free(pglob->gl_pathv);
+            pglob->gl_pathv = newlist;
+            pglob->gl_pathc = 1;
+            pglob->gl_offs = 0;
+            return 0;
+        }
+        return GLOB_NOMATCH;
+    }
+    if (flags & GLOB_APPEND) {
+        size_t old = pglob->gl_pathc;
+        if (count > ((size_t)-1) / sizeof(char *) - old) {
+            for (i = 0; i < count; i++) free(list[i]);
+            free(list);
+            errno = ENOMEM;
+            return GLOB_NOSPACE;
+        }
+        newlist = (char **)realloc(pglob->gl_pathv,
+                                   (old + count) * sizeof(char *));
+        if (!newlist) {
+            for (i = 0; i < count; i++) free(list[i]);
+            free(list);
+            errno = ENOMEM;
+            return GLOB_NOSPACE;
+        }
+        for (i = 0; i < count; i++) newlist[old + i] = list[i];
+        free(list);
+        pglob->gl_pathv = newlist;
+        pglob->gl_pathc = old + count;
+        return 0;
+    }
+    offs = (flags & GLOB_DOOFFS) ? pglob->gl_offs : 0;
+    if (count > ((size_t)-1) / sizeof(char *) - offs) {
+        for (i = 0; i < count; i++) free(list[i]);
+        free(list);
+        errno = ENOMEM;
+        return GLOB_NOSPACE;
+    }
+    newlist = (char **)malloc((offs + count) * sizeof(char *));
+    if (!newlist) {
+        for (i = 0; i < count; i++) free(list[i]);
+        free(list);
+        errno = ENOMEM;
+        return GLOB_NOSPACE;
+    }
+    for (j = 0; j < offs; j++) newlist[j] = NULL;
+    for (i = 0; i < count; i++) newlist[offs + i] = list[i];
+    free(list);
+    if (pglob->gl_pathv) free(pglob->gl_pathv);
+    pglob->gl_pathv = newlist;
+    pglob->gl_pathc = offs + count;
+    if (!(flags & GLOB_DOOFFS)) pglob->gl_offs = 0;
+    return 0;
 }
 
 void globfree(glob_t *pglob) {
-    syscall1(SYS_GLOBFREE, (long)pglob);
+    size_t i;
+    if (!pglob) return;
+    if (pglob->gl_pathv) {
+        for (i = 0; i < pglob->gl_pathc; i++) free(pglob->gl_pathv[i]);
+        free(pglob->gl_pathv);
+    }
+    pglob->gl_pathc = 0;
+    pglob->gl_pathv = NULL;
+    pglob->gl_offs = 0;
 }
 
 static int internal_getchar(void) {
@@ -1444,12 +2043,14 @@ int vsscanf(const char *__restrict str, const char *__restrict format, __builtin
     uintptr_t args[20];
     int arg_count = 0;
     const char *f = format;
-    
+    int suppressed;
+
     while (*f && arg_count < 20) {
         if (*f == '%') {
             f++;
             if (*f == '%') { f++; continue; }
-            if (*f == '*') { f++; }
+            suppressed = 0;
+            if (*f == '*') { suppressed = 1; f++; }
             while (*f >= '0' && *f <= '9') f++;
             if (*f == 'h' || *f == 'l' || *f == 'L' || *f == 'z' || *f == 't' || *f == 'j') {
                 f++;
@@ -1458,7 +2059,10 @@ int vsscanf(const char *__restrict str, const char *__restrict format, __builtin
             if (*f == 'd' || *f == 'i' || *f == 'u' || *f == 'x' || *f == 'X' ||
                 *f == 'o' || *f == 's' || *f == 'c' || *f == 'n' || *f == 'p' ||
                 *f == '[' || *f == 'f' || *f == 'e' || *f == 'g') {
-                args[arg_count++] = (uintptr_t)__builtin_va_arg(ap, void *);
+                if (!suppressed && arg_count < 20)
+                    args[arg_count++] = (uintptr_t)__builtin_va_arg(ap, void *);
+                else if (!suppressed)
+                    (void)__builtin_va_arg(ap, void *);
             }
             if (*f == '[') {
                 while (*f && *f != ']') f++;
@@ -1468,7 +2072,7 @@ int vsscanf(const char *__restrict str, const char *__restrict format, __builtin
             f++;
         }
     }
-    
+
     return syscall3(SYS_SSCANF, (long)str, (long)format, (long)args);
 }
 
@@ -1519,11 +2123,25 @@ extern FILE *stdout;
 extern FILE *stderr;
 
 int vfscanf(FILE *__restrict stream, const char *__restrict format, __builtin_va_list ap) {
-    if (!stream) return -1;
+    if (!stream || !format) return -1;
     char buf[1024];
-    int len = read(stream->fd, buf, 1023);
-    if (len <= 0) return -1;
-    buf[len] = '\0';
+    size_t pos = 0;
+    if (stream->has_ungetc && pos < sizeof(buf) - 1) {
+        buf[pos++] = (char)stream->ungetc_buf;
+        stream->has_ungetc = 0;
+    }
+    while (stream->buf && stream->buf_pos < stream->buf_len && pos < sizeof(buf) - 1) {
+        buf[pos++] = stream->buf[stream->buf_pos++];
+    }
+    if (pos == 0 || buf[pos - 1] != '\n') {
+        int len = read(stream->fd, buf + pos, sizeof(buf) - 1 - pos);
+        if (len <= 0) {
+            if (pos == 0) return -1;
+        } else {
+            pos += (size_t)len;
+        }
+    }
+    buf[pos] = '\0';
     return vsscanf(buf, format, ap);
 }
 

@@ -546,6 +546,7 @@ void KERNEL_INIT syscall_init(void) {
     syscalls_signal_init();
     syscalls_ids_init();
     syscalls_misc_init();
+    syscalls_regex_init();
     syscalls_inotify_init();
     syscalls_epoll_init();
     syscalls_pthread_init();

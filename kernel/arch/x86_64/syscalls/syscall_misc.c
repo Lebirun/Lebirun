@@ -436,7 +436,7 @@ static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
     size_t done;
     size_t chunk;
 
-    (void)flags;
+    if (flags & ~(0x0001u | 0x0002u)) return -EINVAL;
     if (!buf) return -EFAULT;
     if (buflen == 0) return 0;
     done = 0;
@@ -959,8 +959,7 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
     }
 
     if (task_has_pending_signals()) {
-        if (rem && (uint64_t)rem >= 0x1000 &&
-            (uint64_t)rem < KERNEL_VMA) {
+        if (rem) {
             elapsed_ns = timekeeping_monotonic_ns() - start_ns;
             remaining_ns = elapsed_ns < requested_ns ?
                            requested_ns - elapsed_ns : 0;
@@ -973,11 +972,9 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
     }
 
     if (rem) {
-        if ((uint64_t)rem >= 0x1000 && (uint64_t)rem < KERNEL_VMA) {
-            memset(&remaining, 0, sizeof(remaining));
-            if (copy_to_user(rem, &remaining, sizeof(remaining)) != 0)
-                return -EFAULT;
-        }
+        memset(&remaining, 0, sizeof(remaining));
+        if (copy_to_user(rem, &remaining, sizeof(remaining)) != 0)
+            return -EFAULT;
     }
 
     return 0;
@@ -1134,19 +1131,18 @@ static int find_env(const char *name) {
 }
 
 static int sys_getenv(const char *name, char *buf, int bufsize) {
-    uint64_t name_addr;
     uint64_t buf_addr;
+    char *kname;
     int idx;
     int len;
     int i;
 
     if (!name) return -EFAULT;
-    name_addr = (uint64_t)name;
-    if (name_addr >= KERNEL_VMA || name_addr < 0x1000) return -EFAULT;
-    
+    kname = copy_string_from_user_alloc(name);
+    if (!kname) return -EFAULT;
     init_default_environ();
-    
-    idx = find_env(name);
+    idx = find_env(kname);
+    kfree(kname);
     if (idx < 0) return -ENOENT;
 
     len = 0;
@@ -1158,29 +1154,30 @@ static int sys_getenv(const char *name, char *buf, int bufsize) {
     if (len + 1 > bufsize) return -ERANGE;
 
     for (i = 0; i <= len; i++) {
-        buf[i] = env_entries[idx].value[i];
+        if (copy_to_user(&buf[i], &env_entries[idx].value[i], 1) != 0) return -EFAULT;
     }
     return len;
 }
 
 static int sys_setenv(const char *name, const char *value, int overwrite) {
-    uint64_t name_addr;
-    uint64_t value_addr;
     int idx;
+    char *kname;
+    char *kvalue;
     char *new_value;
+    int ret;
 
     if (!name || !value) return -EFAULT;
-    name_addr = (uint64_t)name;
-    value_addr = (uint64_t)value;
-    if (name_addr >= KERNEL_VMA || name_addr < 0x1000) return -EFAULT;
-    if (value_addr >= KERNEL_VMA || value_addr < 0x1000) return -EFAULT;
-    
+    kname = copy_string_from_user_alloc(name);
+    if (!kname) return -EFAULT;
+    kvalue = copy_string_from_user_alloc(value);
+    if (!kvalue) { kfree(kname); return -EFAULT; }
     init_default_environ();
-    
-    idx = find_env(name);
+    idx = find_env(kname);
     if (idx >= 0) {
-        if (!overwrite) return 0;
-        new_value = env_duplicate(value);
+        if (!overwrite) { kfree(kname); kfree(kvalue); return 0; }
+        new_value = env_duplicate(kvalue);
+        kfree(kname);
+        kfree(kvalue);
         if (!new_value) return -ENOMEM;
         kfree(env_entries[idx].value);
         env_entries[idx].value = new_value;
@@ -1188,19 +1185,23 @@ static int sys_setenv(const char *name, const char *value, int overwrite) {
         return 0;
     }
 
-    return env_add(name, value) < 0 ? -ENOMEM : 0;
+    ret = env_add(kname, kvalue);
+    kfree(kname);
+    kfree(kvalue);
+    return ret < 0 ? -ENOMEM : 0;
 }
 
 static int sys_unsetenv(const char *name) {
-    uint64_t addr;
     int idx;
+    char *kname;
     env_entry_t *new_entries;
 
     if (!name) return -EFAULT;
-    addr = (uint64_t)name;
-    if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
+    kname = copy_string_from_user_alloc(name);
+    if (!kname) return -EFAULT;
 
-    idx = find_env(name);
+    idx = find_env(kname);
+    kfree(kname);
     if (idx < 0) return 0;
 
     kfree(env_entries[idx].name);
@@ -1697,10 +1698,12 @@ static int sys_mq_open(const char *name_ptr, const char *unused2, int unused3) {
     char tmp[65];
     mq_entry_t *e;
     size_t n;
+    size_t length;
     (void)unused2; (void)unused3;
     if (!name_ptr) return -EFAULT;
-    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
-    tmp[sizeof(tmp) - 1] = '\0';
+    if (strnlen_user(name_ptr, sizeof(tmp), &length) != 0) return -EFAULT;
+    if (length >= sizeof(tmp)) return -ENAMETOOLONG;
+    if (copy_from_user(tmp, name_ptr, length + 1) != 0) return -EFAULT;
     e = mq_find(tmp);
     if (e) return 0;
     e = (mq_entry_t *)kmalloc(sizeof(mq_entry_t));
@@ -1721,9 +1724,11 @@ static int sys_mq_send(const char *name_ptr, const char *buf_ptr, int len) {
     mq_msg_t *m;
     char tmp[65];
     uint8_t *d;
+    size_t length;
     if (!name_ptr || !buf_ptr || len <= 0) return -EINVAL;
-    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
-    tmp[sizeof(tmp) - 1] = '\0';
+    if (strnlen_user(name_ptr, sizeof(tmp), &length) != 0) return -EFAULT;
+    if (length >= sizeof(tmp)) return -ENAMETOOLONG;
+    if (copy_from_user(tmp, name_ptr, length + 1) != 0) return -EFAULT;
     e = mq_find(tmp);
     if (!e) return -ENOENT;
     d = (uint8_t *)kmalloc((size_t)len);
@@ -1746,9 +1751,11 @@ static int sys_mq_receive(const char *name_ptr, const char *buf_ptr, int buflen)
     mq_msg_t *m;
     char tmp[65];
     uint64_t n;
+    size_t length;
     if (!name_ptr || !buf_ptr || buflen <= 0) return -EINVAL;
-    if (copy_from_user(tmp, name_ptr, sizeof(tmp) - 1) != 0) return -EFAULT;
-    tmp[sizeof(tmp) - 1] = '\0';
+    if (strnlen_user(name_ptr, sizeof(tmp), &length) != 0) return -EFAULT;
+    if (length >= sizeof(tmp)) return -ENAMETOOLONG;
+    if (copy_from_user(tmp, name_ptr, length + 1) != 0) return -EFAULT;
     e = mq_find(tmp);
     if (!e || !e->head) return -EAGAIN;
     m = e->head;

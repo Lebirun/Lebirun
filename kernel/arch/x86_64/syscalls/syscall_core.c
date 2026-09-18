@@ -1530,26 +1530,51 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
     return total;
 }
 
-static int sys_lseek(int fd, const char *offset_ptr, int whence) {
-    int32_t offset;
+static int64_t sys_lseek(uint64_t fd_u, uint64_t off_u, uint64_t wh_u) {
+    int fd;
+    int64_t offset;
+    int whence;
     task_fd_t *tfd;
     vfs_node_t *node;
-    int32_t new_off;
+    uint64_t pos;
+    uint64_t base;
+    int64_t new_off;
 
-    offset = (int32_t)(uintptr_t)offset_ptr;
+    fd = (int)fd_u;
+    offset = (int64_t)off_u;
+    whence = (int)wh_u;
     if (!current_task) return -ESRCH;
     if (fd < 0 || !current_task->fds || fd >= current_task->fds_capacity || !current_task->fds[fd].in_use) return -EBADF;
     tfd = &current_task->fds[fd];
     if (FD_TYPE_IS_PTY(tfd->type)) return -ESPIPE;
     if (tfd->type != FD_TYPE_FILE || !tfd->node) return -ESPIPE;
     node = (vfs_node_t *)tfd->node;
-    if (whence == VFS_SEEK_SET) new_off = offset;
-    else if (whence == VFS_SEEK_CUR) new_off = (int32_t)task_fd_position_get(tfd) + offset;
-    else if (whence == VFS_SEEK_END) new_off = (int32_t)node->length + offset;
-    else return -EINVAL;
+    if (whence == VFS_SEEK_SET) {
+        if (offset < 0) return -EINVAL;
+        new_off = offset;
+    } else if (whence == VFS_SEEK_CUR) {
+        pos = task_fd_position_get(tfd);
+        if (offset >= 0) {
+            if ((uint64_t)offset > (uint64_t)(INT64_MAX - (int64_t)pos)) return -EOVERFLOW;
+            new_off = (int64_t)pos + offset;
+        } else {
+            if ((uint64_t)(-(offset + 1)) > pos) return -EINVAL;
+            new_off = (int64_t)(pos + (uint64_t)offset);
+        }
+    } else if (whence == VFS_SEEK_END) {
+        if (node->length > (uint64_t)INT64_MAX) return -EOVERFLOW;
+        base = node->length;
+        if (offset >= 0) {
+            if ((uint64_t)offset > (uint64_t)(INT64_MAX - (int64_t)base)) return -EOVERFLOW;
+            new_off = (int64_t)base + offset;
+        } else {
+            if ((uint64_t)(-(offset + 1)) > base) return -EINVAL;
+            new_off = (int64_t)(base + (uint64_t)offset);
+        }
+    } else return -EINVAL;
     if (new_off < 0) return -EINVAL;
     task_fd_position_set(tfd, (uint64_t)new_off);
-    return (int)task_fd_position_get(tfd);
+    return (int64_t)task_fd_position_get(tfd);
 }
 
 void syscalls_core_init(void) {

@@ -15,6 +15,7 @@ struct __dirstream {
     size_t buf_end;
     size_t buf_capacity;
     char *buf;
+    struct dirent result;
 };
 
 static inline int syscall3(int num, int arg1, int arg2, int arg3) {
@@ -66,13 +67,12 @@ int closedir(DIR *dirp) {
 }
 
 struct dirent *readdir(DIR *dirp) {
-    static struct dirent result;
     struct dirent *de;
     char *resized;
     int len;
     int i;
     const char *src;
-    
+
     if (!dirp) return (void*)0;
     
     if (dirp->buf_pos >= dirp->buf_end) {
@@ -102,24 +102,24 @@ struct dirent *readdir(DIR *dirp) {
     de = (struct dirent *)(dirp->buf + dirp->buf_pos);
 
     if (de->d_reclen == 0 || de->d_reclen > dirp->buf_end - dirp->buf_pos) return (void*)0;
-    result.d_ino = de->d_ino;
-    result.d_off = de->d_off;
-    result.d_reclen = de->d_reclen;
-    result.d_type = de->d_type;
+    dirp->result.d_ino = de->d_ino;
+    dirp->result.d_off = de->d_off;
+    dirp->result.d_reclen = de->d_reclen;
+    dirp->result.d_type = de->d_type;
 
     i = 0;
     src = de->d_name;
     while (i < 255) {
         if ((size_t)(src - (const char *)de) + 1 > de->d_reclen) break;
         if (!*src) break;
-        result.d_name[i++] = *src++;
+        dirp->result.d_name[i++] = *src++;
     }
-    result.d_name[i] = '\0';
-    
+    dirp->result.d_name[i] = '\0';
+
     dirp->buf_pos += de->d_reclen;
     dirp->tell++;
-    
-    return &result;
+
+    return &dirp->result;
 }
 
 int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result) {
@@ -220,6 +220,7 @@ int scandir(const char *path, struct dirent ***namelist,
             for (i = 0; i < count; i++) free(list[i]);
             free(list);
             closedir(d);
+            errno = ENOMEM;
             return -1;
         }
         *copy = *entry;

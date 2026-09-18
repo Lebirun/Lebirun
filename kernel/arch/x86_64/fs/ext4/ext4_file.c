@@ -7,10 +7,10 @@
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);
 extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
 
-uint32_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint32_t offset, uint32_t size, uint8_t *buffer) {
+uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ext4_inode_cache_t *ic;
     uint64_t file_size;
-    uint32_t bytes_read;
+    uint64_t bytes_read;
     uint64_t block_num;
     uint32_t block_off;
     uint32_t to_read;
@@ -206,15 +206,15 @@ static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t log
     return -1;
 }
 
-uint32_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
-                                   uint32_t offset, uint32_t size,
+uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
+                                   uint64_t offset, uint64_t size,
                                    const uint8_t *buffer, uint8_t *scratch,
-                                   uint32_t scratch_capacity) {
+                                   uint64_t scratch_capacity) {
     ext4_inode_cache_t *ic;
     uint64_t file_size;
     uint64_t new_size;
     int64_t new_block;
-    uint32_t bytes_written;
+    uint64_t bytes_written;
     uint64_t block_num;
     uint32_t block_off;
     uint32_t to_write;
@@ -406,8 +406,8 @@ uint32_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
     return bytes_written;
 }
 
-uint32_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint32_t offset,
-                         uint32_t size, const uint8_t *buffer) {
+uint64_t ext4_file_write(ext4_fs_t *fs, uint32_t ino, uint64_t offset,
+                         uint64_t size, const uint8_t *buffer) {
     return ext4_file_write_workspace(fs, ino, offset, size, buffer, NULL, 0);
 }
 
