@@ -361,15 +361,10 @@ static mutex_t pidfd_lock;
 static int pidfd_grow(void) {
     pidfd_entry_t *grown;
     int cap;
-    int i;
 
-    if (pidfd_capacity > INT32_MAX / 2) return -1;
-    cap = pidfd_capacity ? pidfd_capacity * 2 : 1;
-    grown = (pidfd_entry_t *)krealloc(pidfds,
-                                      (size_t)cap * sizeof(pidfd_entry_t));
+    grown = krealloc_grow_array(pidfds, pidfd_capacity, &cap, 1,
+                                sizeof(*grown));
     if (!grown) return -1;
-    for (i = pidfd_capacity; i < cap; i++)
-        memset(&grown[i], 0, sizeof(pidfd_entry_t));
     pidfds = grown;
     pidfd_capacity = cap;
     return 0;

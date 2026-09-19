@@ -50,31 +50,26 @@ static pthread_cond_internal_t *conds = NULL;
 static int cond_capacity = 0;
 
 static int thread_grow(void) {
-    int new_cap;
     thread_info_t *new_arr;
-    int i;
+    int new_cap;
 
-    new_cap = thread_capacity ? thread_capacity * 2 : THREAD_INIT_COUNT;
-    new_arr = (thread_info_t *)krealloc(threads, new_cap * sizeof(thread_info_t));
+    new_arr = krealloc_grow_array(threads, thread_capacity, &new_cap,
+                                  THREAD_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
-    for (i = thread_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(thread_info_t));
-    }
     threads = new_arr;
     thread_capacity = new_cap;
     return 0;
 }
 
 static int mutex_grow(void) {
-    int new_cap;
     pthread_mutex_internal_t *new_arr;
+    int new_cap;
     int i;
 
-    new_cap = mutex_capacity ? mutex_capacity * 2 : MUTEX_INIT_COUNT;
-    new_arr = (pthread_mutex_internal_t *)krealloc(mutexes, new_cap * sizeof(pthread_mutex_internal_t));
+    new_arr = krealloc_grow_array(mutexes, mutex_capacity, &new_cap,
+                                  MUTEX_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
     for (i = mutex_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(pthread_mutex_internal_t));
         waitq_init(&new_arr[i].waitq);
     }
     mutexes = new_arr;
@@ -83,15 +78,14 @@ static int mutex_grow(void) {
 }
 
 static int cond_grow(void) {
-    int new_cap;
     pthread_cond_internal_t *new_arr;
+    int new_cap;
     int i;
 
-    new_cap = cond_capacity ? cond_capacity * 2 : COND_INIT_COUNT;
-    new_arr = (pthread_cond_internal_t *)krealloc(conds, new_cap * sizeof(pthread_cond_internal_t));
+    new_arr = krealloc_grow_array(conds, cond_capacity, &new_cap,
+                                  COND_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
     for (i = cond_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(pthread_cond_internal_t));
         waitq_init(&new_arr[i].waitq);
     }
     conds = new_arr;

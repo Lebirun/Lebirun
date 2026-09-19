@@ -182,12 +182,8 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->ssthresh = 65535;
     sock->user_timeout = 0;
 
-    sock->recv_buffer_size = TCP_RECV_BUF_INIT;
-    sock->recv_buffer = (uint8_t *)kmalloc(sock->recv_buffer_size);
-    if (!sock->recv_buffer) {
-        kfree(sock);
-        return NULL;
-    }
+    sock->recv_buffer_size = 0;
+    sock->recv_buffer = NULL;
 
     sock->send_buffer_size = 0;
     sock->send_buffer = NULL;
@@ -382,8 +378,15 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
     }
     if (peek) return copied;
     sock->recv_buffer_head = (sock->recv_buffer_head + copied) % sock->recv_buffer_size;
+    if (sock->recv_buffer_head == sock->recv_buffer_tail) {
+        kfree(sock->recv_buffer);
+        sock->recv_buffer = NULL;
+        sock->recv_buffer_size = 0;
+        sock->recv_window = TCP_WINDOW_SIZE;
+    }
 
-    if (old_window < 4096 && sock->state == TCP_STATE_ESTABLISHED) {
+    if ((old_window < 4096 || sock->recv_buffer == NULL) &&
+        sock->state == TCP_STATE_ESTABLISHED) {
         tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
     }
 
@@ -433,7 +436,16 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     uint64_t i;
 
     old_size = sock->recv_buffer_size;
-    if (old_size == 0) return;
+    if (old_size == 0) {
+        if (required < 2) required = 2;
+        new_buf = (uint8_t *)kmalloc(required);
+        if (!new_buf) return;
+        sock->recv_buffer = new_buf;
+        sock->recv_buffer_size = required;
+        sock->recv_buffer_head = 0;
+        sock->recv_buffer_tail = 0;
+        return;
+    }
     new_size = old_size;
     while (new_size < required) {
         if (new_size > UINT64_MAX / 2) {
@@ -729,6 +741,13 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                         payload_len -= (sock->recv_next - seq);
                         seq = sock->recv_next;
                     } else {
+                        tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                        break;
+                    }
+                }
+                if (!sock->recv_buffer) {
+                    tcp_grow_recv_buffer(sock, payload_len + 1);
+                    if (!sock->recv_buffer) {
                         tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
                         break;
                     }

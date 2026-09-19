@@ -20,7 +20,7 @@ static uint8_t pending_resolved;
 static uint16_t pending_id;
 static uint16_t pending_qtype;
 static uint32_t pending_ttl;
-static char pending_cname[256];
+static char *pending_cname;
 static uint8_t pending_cname_set;
 
 static int dns_ensure_cache(void) {
@@ -39,18 +39,12 @@ static int dns_ensure_cache(void) {
 
 static int dns_grow_cache(void) {
     dns_cache_entry_t *new_cache;
-    int old_capacity;
     int new_capacity;
 
-    old_capacity = dns_cache_capacity;
-    if (old_capacity > INT32_MAX / 2) return -1;
-    new_capacity = old_capacity ? old_capacity * 2 : DNS_CACHE_INIT;
-    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(dns_cache_entry_t)) return -1;
-    new_cache = (dns_cache_entry_t *)krealloc(
-        dns_cache, (uint64_t)new_capacity * sizeof(dns_cache_entry_t));
+    new_cache = krealloc_grow_array(dns_cache, dns_cache_capacity,
+                                    &new_capacity, DNS_CACHE_INIT,
+                                    sizeof(*new_cache));
     if (!new_cache) return -1;
-    memset(new_cache + old_capacity, 0,
-           (uint64_t)(new_capacity - old_capacity) * sizeof(dns_cache_entry_t));
     dns_cache = new_cache;
     dns_cache_capacity = new_capacity;
     return 0;
@@ -62,6 +56,7 @@ void KERNEL_INIT dns_init(void) {
     g_dns_server = IPV4_ADDR(8, 8, 8, 8);
     g_dns_server2 = IPV4_ADDR(8, 8, 4, 4);
     dns_id_counter = 1;
+    pending_cname = NULL;
     pending_resolved = 0;
     pending_qtype = DNS_TYPE_A;
 }
@@ -251,6 +246,8 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
 
     query = (uint8_t *)kmalloc(512);
     if (!query) return -1;
+    pending_cname = (char *)kmalloc(256);
+    if (!pending_cname) { kfree(query); return -1; }
 
     for (depth = 0; depth < 4; depth++) {
         hdr = (dns_header_t *)query;
@@ -263,7 +260,7 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
         hdr->arcount = 0;
 
         name_len = dns_encode_name(qname, query + sizeof(dns_header_t), 512 - (int)sizeof(dns_header_t) - 4);
-        if (name_len < 0) { kfree(query); return -1; }
+        if (name_len < 0) { kfree(query); kfree(pending_cname); pending_cname = NULL; return -1; }
 
         qtype = query + sizeof(dns_header_t) + name_len;
         qtype[0] = 0;
@@ -291,6 +288,8 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
                 netif_poll_all();
                 if (task_has_pending_signals()) {
                     kfree(query);
+                    kfree(pending_cname);
+                    pending_cname = NULL;
                     return -1;
                 }
                 if (pit_get_ticks() - start > timeout_ticks) {
@@ -300,7 +299,7 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
             }
             if (pending_resolved) break;
         }
-        if (!pending_resolved) { kfree(query); return -1; }
+        if (!pending_resolved) { kfree(query); kfree(pending_cname); pending_cname = NULL; return -1; }
         if (!pending_cname_set) break;
         qn = 0;
         while (pending_cname[qn] && qn < 255) {
@@ -310,6 +309,8 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
         qname[qn] = 0;
     }
     kfree(query);
+    kfree(pending_cname);
+    pending_cname = NULL;
 
     if (!pending_resolved || pending_cname_set) return -1;
     *out_ipv4 = pending_result;
@@ -467,13 +468,14 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
 
         if (pending_qtype == DNS_TYPE_A && rtype == DNS_TYPE_CNAME &&
             offset + rdlength <= len) {
-            pending_cname[0] = 0;
-            dns_decode_name(data, len, offset, pending_cname,
-                            sizeof(pending_cname));
-            if (pending_cname[0]) {
-                pending_cname_set = 1;
-                pending_resolved = 1;
-                return;
+            if (pending_cname) {
+                pending_cname[0] = 0;
+                dns_decode_name(data, len, offset, pending_cname, 256);
+                if (pending_cname[0]) {
+                    pending_cname_set = 1;
+                    pending_resolved = 1;
+                    return;
+                }
             }
         }
 

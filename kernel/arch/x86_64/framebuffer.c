@@ -45,19 +45,21 @@ static const uint8_t ansi_to_vga[16] = {
     8, 12, 10, 14, 9, 13, 11, 15
 };
 
+const uint64_t fb_ansi_normal[8] = {
+    0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
+    0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
+};
+
+const uint64_t fb_ansi_intense[8] = {
+    0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
+    0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
+};
+
 static uint8_t rgb_to_vga_index(uint64_t rgb) {
     int i;
-    static const uint64_t normal[8] = {
-        0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500,
-        0xFF0000AA, 0xFFAA00AA, 0xFF00AAAA, 0xFFAAAAAA
-    };
-    static const uint64_t intense[8] = {
-        0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
-        0xFF5555FF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF
-    };
     for (i = 0; i < 8; i++) {
-        if (rgb == normal[i]) return ansi_to_vga[i];
-        if (rgb == intense[i]) return ansi_to_vga[i + 8];
+        if (rgb == fb_ansi_normal[i]) return ansi_to_vga[i];
+        if (rgb == fb_ansi_intense[i]) return ansi_to_vga[i + 8];
     }
     return 7;
 }

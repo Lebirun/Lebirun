@@ -101,20 +101,10 @@ static int ipv6_neighbor_grow_cache(void) {
     ipv6_neighbor_entry_t *new_neighbors;
     int new_capacity;
 
-    if (ipv6_neighbor_capacity > INT32_MAX / 2) return -1;
-    new_capacity = ipv6_neighbor_capacity * 2;
-    if (new_capacity < 4) new_capacity = 4;
-    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(ipv6_neighbor_entry_t)) return -1;
-
-    new_neighbors = (ipv6_neighbor_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
+    new_neighbors = krealloc_grow_array(ipv6_neighbors, ipv6_neighbor_capacity,
+                                         &new_capacity, 4,
+                                         sizeof(*new_neighbors));
     if (!new_neighbors) return -1;
-
-    memset(new_neighbors, 0, (uint64_t)new_capacity * sizeof(ipv6_neighbor_entry_t));
-    if (ipv6_neighbors && ipv6_neighbor_capacity > 0) {
-        memcpy(new_neighbors, ipv6_neighbors, (uint64_t)ipv6_neighbor_capacity * sizeof(ipv6_neighbor_entry_t));
-        kfree(ipv6_neighbors);
-    }
-
     ipv6_neighbors = new_neighbors;
     ipv6_neighbor_capacity = new_capacity;
     return 0;

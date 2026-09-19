@@ -411,6 +411,14 @@ static void KERNEL_INIT vga_load_font(const uint8_t *font_data,
     outb(0x3CF, 0x0E);
 }
 
+static const uint8_t vga_text_seq_regs[5] KERNEL_INIT_RODATA =
+    { 0x03, 0x00, 0x03, 0x00, 0x02 };
+static const uint8_t vga_text_attr_regs[21] KERNEL_INIT_RODATA = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+    0x0C, 0x00, 0x0F, 0x08, 0x00
+};
+
 int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
                                   uint16_t num_chars,
                                   uint8_t font_height) {
@@ -425,13 +433,6 @@ int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
     uint16_t i;
     volatile uint16_t *vga_text;
 
-    static const uint8_t seq_regs[5] = { 0x03, 0x00, 0x03, 0x00, 0x02 };
-    static const uint8_t attr_regs[21] = {
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
-        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
-        0x0C, 0x00, 0x0F, 0x08, 0x00
-    };
-
     inb(0x3DA);
     outb(0x3C0, 0x00);
 
@@ -440,7 +441,7 @@ int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
 
     vga_seq_write(0x00, 0x01);
     for (i = 0; i < 5; i++) {
-        vga_seq_write((uint8_t)(i), seq_regs[i]);
+        vga_seq_write((uint8_t)(i), vga_text_seq_regs[i]);
     }
     vga_seq_write(0x00, 0x03);
 
@@ -516,7 +517,7 @@ int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
     inb(0x3DA);
     for (i = 0; i < 21; i++) {
         outb(0x3C0, (uint8_t)i);
-        outb(0x3C0, attr_regs[i]);
+        outb(0x3C0, vga_text_attr_regs[i]);
     }
     outb(0x3C0, 0x20);
 

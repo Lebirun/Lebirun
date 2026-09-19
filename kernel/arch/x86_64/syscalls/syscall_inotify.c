@@ -40,21 +40,13 @@ static int inotify_capacity;
 static mutex_t inotify_lock;
 
 static int inotify_grow(void) {
-    int new_capacity;
     inotify_instance_t *new_instances;
-    int i;
+    int new_capacity;
 
-    if (inotify_capacity > INT32_MAX / 2) return -1;
-    new_capacity = inotify_capacity ? inotify_capacity * 2 : 1;
-    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(inotify_instance_t))
-        return -1;
-    new_instances = (inotify_instance_t *)krealloc(
-        inotify_instances,
-        (uint64_t)new_capacity * sizeof(inotify_instance_t));
+    new_instances = krealloc_grow_array(inotify_instances, inotify_capacity,
+                                        &new_capacity, 1,
+                                        sizeof(*new_instances));
     if (!new_instances) return -1;
-    for (i = inotify_capacity; i < new_capacity; i++) {
-        memset(&new_instances[i], 0, sizeof(inotify_instance_t));
-    }
     inotify_instances = new_instances;
     inotify_capacity = new_capacity;
     return 0;

@@ -44,5 +44,7 @@ int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate);
 int fb_get_info(uint64_t *width, uint64_t *height, uint64_t *bpp, uint64_t *refresh_rate);
 int fb_get_caps(uint64_t *out_words, uint64_t words);
 void fb_reclaim_unused(void);
+extern const uint64_t fb_ansi_normal[8];
+extern const uint64_t fb_ansi_intense[8];
 
 #endif

@@ -165,66 +165,49 @@ extern volatile uint64_t tick_count;
 extern uint64_t pit_freq;
 
 static int epoll_grow(void) {
-    int new_cap;
     epoll_instance_t *new_arr;
-    int i;
+    int new_cap;
 
-    new_cap = epoll_capacity ? epoll_capacity * 2 : EPOLL_INIT_COUNT;
-    new_arr = (epoll_instance_t *)krealloc(epoll_instances, new_cap * sizeof(epoll_instance_t));
+    new_arr = krealloc_grow_array(epoll_instances, epoll_capacity, &new_cap,
+                                  EPOLL_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
-    for (i = epoll_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(epoll_instance_t));
-    }
     epoll_instances = new_arr;
     epoll_capacity = new_cap;
     return 0;
 }
 
 static int eventfd_grow(void) {
-    int new_cap;
     eventfd_instance_t *new_arr;
-    int i;
+    int new_cap;
 
-    new_cap = eventfd_capacity ? eventfd_capacity * 2 : EVENTFD_INIT_COUNT;
-    new_arr = (eventfd_instance_t *)krealloc(eventfds, new_cap * sizeof(eventfd_instance_t));
+    new_arr = krealloc_grow_array(eventfds, eventfd_capacity, &new_cap,
+                                  EVENTFD_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
-    for (i = eventfd_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(eventfd_instance_t));
-    }
     eventfds = new_arr;
     eventfd_capacity = new_cap;
     return 0;
 }
 
 static int timerfd_grow(void) {
-    int new_capacity;
     timerfd_instance_t *new_array;
-    int i;
+    int new_capacity;
 
-    new_capacity = timerfd_capacity ? timerfd_capacity * 2 : TIMERFD_INIT_COUNT;
-    new_array = (timerfd_instance_t *)krealloc(
-        timerfds, new_capacity * sizeof(timerfd_instance_t));
+    new_array = krealloc_grow_array(timerfds, timerfd_capacity, &new_capacity,
+                                    TIMERFD_INIT_COUNT, sizeof(*new_array));
     if (!new_array) return -1;
-    for (i = timerfd_capacity; i < new_capacity; i++) {
-        memset(&new_array[i], 0, sizeof(timerfd_instance_t));
-    }
     timerfds = new_array;
     timerfd_capacity = new_capacity;
     return 0;
 }
 
 static int signalfd_grow(void) {
-    int new_capacity;
     signalfd_instance_t *new_array;
-    int i;
+    int new_capacity;
 
-    new_capacity = signalfd_capacity ? signalfd_capacity * 2 : SIGNALFD_INIT_COUNT;
-    new_array = (signalfd_instance_t *)krealloc(
-        signalfds, new_capacity * sizeof(signalfd_instance_t));
+    new_array = krealloc_grow_array(signalfds, signalfd_capacity,
+                                    &new_capacity, SIGNALFD_INIT_COUNT,
+                                    sizeof(*new_array));
     if (!new_array) return -1;
-    for (i = signalfd_capacity; i < new_capacity; i++) {
-        memset(&new_array[i], 0, sizeof(signalfd_instance_t));
-    }
     signalfds = new_array;
     signalfd_capacity = new_capacity;
     return 0;

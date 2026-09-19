@@ -59,16 +59,12 @@ static void init_default_termios(struct termios *t) {
 }
 
 static int pty_grow(void) {
-    int new_cap;
-    int i;
     pty_t *new_arr;
+    int new_cap;
 
-    new_cap = pty_capacity ? pty_capacity * 2 : PTY_INIT_COUNT;
-    new_arr = (pty_t *)krealloc(ptys, new_cap * sizeof(pty_t));
+    new_arr = krealloc_grow_array(ptys, pty_capacity, &new_cap,
+                                  PTY_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
-    for (i = pty_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(pty_t));
-    }
     ptys = new_arr;
     pty_capacity = new_cap;
     return 0;

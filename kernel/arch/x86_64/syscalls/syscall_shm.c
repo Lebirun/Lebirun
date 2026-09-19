@@ -36,20 +36,26 @@ static shm_attachment_t *shm_attachments;
 static mutex_t shm_lock;
 
 static int shm_grow(void) {
-    int new_capacity;
-    int i;
     shm_seg_t *new_segments;
+    int new_capacity;
 
-    new_capacity = shm_capacity ? shm_capacity * 2 : SHM_INIT_COUNT;
-    new_segments = (shm_seg_t *)krealloc(
-        shm_segs, (size_t)new_capacity * sizeof(shm_seg_t));
+    new_segments = krealloc_grow_array(shm_segs, shm_capacity, &new_capacity,
+                                       SHM_INIT_COUNT, sizeof(*new_segments));
     if (!new_segments) return -1;
-    for (i = shm_capacity; i < new_capacity; i++) {
-        memset(&new_segments[i], 0, sizeof(shm_seg_t));
-    }
     shm_segs = new_segments;
     shm_capacity = new_capacity;
     return 0;
+}
+
+static void shm_reclaim_storage(void) {
+    int i;
+
+    for (i = 0; i < shm_capacity; i++) {
+        if (shm_segs[i].in_use) return;
+    }
+    kfree(shm_segs);
+    shm_segs = NULL;
+    shm_capacity = 0;
 }
 
 static int shm_permission(shm_seg_t *segment, int write_access) {
@@ -350,6 +356,7 @@ static int sys_shmdt(uint64_t shmaddr, const char *unused1, int unused2) {
     segment = &shm_segs[attachment->shmid];
     if (segment->nattach > 0) segment->nattach--;
     if (segment->removed && segment->nattach == 0) shm_free_segment(segment);
+    shm_reclaim_storage();
     mutex_unlock(&shm_lock);
     kfree(attachment);
     return 0;
@@ -380,6 +387,7 @@ static int sys_shmctl(int shmid, const char *cmd_ptr, uint64_t buf) {
     segment->removed = 1;
     segment->key = -1;
     if (segment->nattach == 0) shm_free_segment(segment);
+    shm_reclaim_storage();
     mutex_unlock(&shm_lock);
     return 0;
 }
@@ -456,6 +464,7 @@ void shm_close_task(pid_t pid) {
             shm_free_segment(segment);
         kfree(attachment);
     }
+    shm_reclaim_storage();
     mutex_unlock(&shm_lock);
 }
 

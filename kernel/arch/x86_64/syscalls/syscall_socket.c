@@ -295,16 +295,12 @@ static void socket_release_index(int idx, int graceful) {
 }
 
 static int socket_grow(void) {
-    int new_cap;
-    int i;
     socket_t *new_arr;
+    int new_cap;
 
-    new_cap = socket_capacity ? socket_capacity * 2 : SOCKET_INIT_COUNT;
-    new_arr = (socket_t *)krealloc(sockets, new_cap * sizeof(socket_t));
+    new_arr = krealloc_grow_array(sockets, socket_capacity, &new_cap,
+                                  SOCKET_INIT_COUNT, sizeof(*new_arr));
     if (!new_arr) return -1;
-    for (i = socket_capacity; i < new_cap; i++) {
-        memset(&new_arr[i], 0, sizeof(socket_t));
-    }
     sockets = new_arr;
     socket_capacity = new_cap;
     return 0;
@@ -1206,6 +1202,22 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
             return -ECONNREFUSED;
         }
         
+        if (!sockets[listener_idx].backlog) {
+            int first = sockets[listener_idx].backlog_size;
+            pending_conn_t *fb;
+
+            if (first > BACKLOG_INIT_SIZE) first = BACKLOG_INIT_SIZE;
+            if (first < 1) first = 1;
+            fb = (pending_conn_t *)kmalloc((size_t)first * sizeof(pending_conn_t));
+            if (!fb) {
+                spin_unlock(&socket_table_lock);
+                return -ECONNREFUSED;
+            }
+            memset(fb, 0, (size_t)first * sizeof(pending_conn_t));
+            sockets[listener_idx].backlog = fb;
+            sockets[listener_idx].backlog_size = first;
+            sockets[listener_idx].backlog_capacity = first;
+        }
         if (sockets[listener_idx].backlog_count >= sockets[listener_idx].backlog_size) {
             pending_conn_t *nb;
             size_t ncap = (size_t)sockets[listener_idx].backlog_size * 2 + 1;
@@ -1460,36 +1472,29 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
 static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     int backlog;
     socket_t *sock;
-    pending_conn_t *new_backlog;
 
     (void)unused;
     backlog = (int)(uintptr_t)backlog_ptr;
     if (backlog < 1) backlog = 1;
     if ((size_t)backlog > SIZE_MAX / sizeof(pending_conn_t)) return -ENOMEM;
 
-    new_backlog = (pending_conn_t *)kmalloc(backlog * sizeof(pending_conn_t));
-    if (!new_backlog) return -ENOMEM;
-    memset(new_backlog, 0, backlog * sizeof(pending_conn_t));
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
     if (!sock) {
         spin_unlock(&socket_table_lock);
-        kfree(new_backlog);
         return -EBADF;
     }
     if (sock->state != SOCKSTATE_BOUND) {
         spin_unlock(&socket_table_lock);
-        kfree(new_backlog);
         return -EINVAL;
     }
     if (sock->type != SOCK_STREAM && sock->type != SOCK_SEQPACKET) {
         spin_unlock(&socket_table_lock);
-        kfree(new_backlog);
         return -EOPNOTSUPP;
     }
     kfree(sock->backlog);
-    sock->backlog = new_backlog;
-    sock->backlog_capacity = backlog;
+    sock->backlog = NULL;
+    sock->backlog_capacity = 0;
 
     sock->backlog_size = backlog;
     sock->backlog_count = 0;

@@ -35,20 +35,9 @@ static int arp_grow_cache(void) {
     arp_entry_t *new_cache;
     int new_capacity;
 
-    if (arp_cache_capacity > INT32_MAX / 2) return -1;
-    new_capacity = arp_cache_capacity * 2;
-    if (new_capacity < 4) new_capacity = 4;
-    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(arp_entry_t)) return -1;
-
-    new_cache = (arp_entry_t *)kmalloc((uint64_t)new_capacity * sizeof(arp_entry_t));
+    new_cache = krealloc_grow_array(arp_cache, arp_cache_capacity,
+                                    &new_capacity, 4, sizeof(*new_cache));
     if (!new_cache) return -1;
-
-    memset(new_cache, 0, (uint64_t)new_capacity * sizeof(arp_entry_t));
-    if (arp_cache && arp_cache_capacity > 0) {
-        memcpy(new_cache, arp_cache, (uint64_t)arp_cache_capacity * sizeof(arp_entry_t));
-        kfree(arp_cache);
-    }
-
     arp_cache = new_cache;
     arp_cache_capacity = new_capacity;
     return 0;

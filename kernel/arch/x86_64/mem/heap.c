@@ -1138,6 +1138,31 @@ void *krealloc(void *ptr, size_t new_size) {
     return new_ptr;
 }
 
+void *krealloc_grow_array(void *array, int capacity, int *new_capacity_out,
+                          int init_count, size_t elem_size) {
+    int grown_capacity;
+    size_t old_bytes;
+    size_t total;
+    void *grown;
+
+    if (!new_capacity_out || elem_size == 0 || init_count < 1 ||
+        capacity < 0) return NULL;
+    if (capacity == 0) {
+        grown_capacity = init_count;
+    } else {
+        if (capacity > INT32_MAX / 2) return NULL;
+        grown_capacity = capacity * 2;
+    }
+    if ((uint64_t)grown_capacity > SIZE_MAX / elem_size) return NULL;
+    old_bytes = (size_t)capacity * elem_size;
+    total = (size_t)grown_capacity * elem_size;
+    grown = krealloc(array, total);
+    if (!grown) return NULL;
+    memset((uint8_t *)grown + old_bytes, 0, total - old_bytes);
+    *new_capacity_out = grown_capacity;
+    return grown;
+}
+
 void heap_dump(void) {
     heap_block_t *block;
     uint64_t count;

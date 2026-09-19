@@ -254,25 +254,12 @@ static vfs_node_t *ext4_vfs_cache_lookup(ext4_fs_t *fs, uint32_t ino) {
 }
 
 static int ext4_vfs_cache_grow(void) {
-    int new_capacity;
-    int i;
     ext4_vfs_cache_entry_t *new_cache;
+    int new_capacity;
 
-    if (ext4_vfs_cache_capacity > INT32_MAX / 2) return -1;
-    new_capacity = ext4_vfs_cache_capacity * 2;
-    if (new_capacity < 4) new_capacity = 4;
-    if ((uint64_t)new_capacity > SIZE_MAX / sizeof(ext4_vfs_cache_entry_t))
-        return -1;
-
-    new_cache = (ext4_vfs_cache_entry_t *)krealloc(
-        ext4_vfs_cache,
-        (uint64_t)new_capacity * sizeof(ext4_vfs_cache_entry_t));
+    new_cache = krealloc_grow_array(ext4_vfs_cache, ext4_vfs_cache_capacity,
+                                    &new_capacity, 4, sizeof(*new_cache));
     if (!new_cache) return -1;
-
-    for (i = ext4_vfs_cache_capacity; i < new_capacity; i++) {
-        memset(&new_cache[i], 0, sizeof(ext4_vfs_cache_entry_t));
-    }
-
     ext4_vfs_cache = new_cache;
     ext4_vfs_cache_capacity = new_capacity;
     return 0;

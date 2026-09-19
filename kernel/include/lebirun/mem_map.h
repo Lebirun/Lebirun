@@ -154,6 +154,8 @@ void *kmalloc_aligned(size_t size, uint64_t alignment);
 void kfree_aligned(void *ptr);
 void kfree(void *ptr);
 void *krealloc(void *ptr, size_t new_size);
+void *krealloc_grow_array(void *array, int capacity, int *new_capacity_out,
+                          int init_count, size_t elem_size);
 void heap_dump(void);
 uint64_t heap_free_space(void);
 int is_early_heap_ptr(void *ptr);
