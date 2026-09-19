@@ -1679,9 +1679,9 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
             if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
                 return -EBADF;
             user_addr = (uint64_t)(uint32_t)arg;
-            if (!posix_user_range_mapped(user_addr, sizeof(flock)))
+            if (copy_from_user(&flock, (const void *)(uintptr_t)user_addr,
+                               sizeof(flock)) != 0)
                 return -EFAULT;
-            memcpy(&flock, (void *)user_addr, sizeof(flock));
             if (flock.l_type != F_RDLCK && flock.l_type != F_WRLCK &&
                 flock.l_type != F_UNLCK)
                 return -EINVAL;
@@ -1705,7 +1705,9 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
                     flock.l_type = F_UNLCK;
                 }
                 spin_unlock(&file_locks_lock);
-                memcpy((void *)user_addr, &flock, sizeof(flock));
+                if (copy_to_user((void *)(uintptr_t)user_addr, &flock,
+                                 sizeof(flock)) != 0)
+                    return -EFAULT;
                 return 0;
             }
             return file_lock_set(node, current_task->pid, start, end,

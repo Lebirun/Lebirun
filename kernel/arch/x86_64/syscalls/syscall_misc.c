@@ -728,7 +728,8 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
         return -EFAULT;
 
     if (new_value) {
-        memcpy(&value, new_value, sizeof(struct itimerval_k));
+        if (copy_from_user(&value, new_value, sizeof(struct itimerval_k)) != 0)
+            return -EFAULT;
         first = timer_us_to_ticks(value.it_value.tv_sec,
                                   value.it_value.tv_usec);
         repeat = timer_us_to_ticks(value.it_interval.tv_sec,
@@ -756,7 +757,6 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
                                  &current.it_interval.tv_sec,
                                  &current.it_interval.tv_usec);
         }
-        memcpy(old_value, &current, sizeof(current));
     }
 
     if (new_value) {
@@ -789,6 +789,11 @@ static int sys_setitimer(int which, const struct itimerval_k *new_value, struct 
     }
     unlock_scheduler();
 
+    if (old_value) {
+        if (copy_to_user(old_value, &current, sizeof(current)) != 0)
+            return -EFAULT;
+    }
+
     return 0;
 }
 
@@ -817,11 +822,11 @@ static int sys_getitimer(int which, struct itimerval_k *curr_value) {
                                  &current.it_interval.tv_sec,
                                  &current.it_interval.tv_usec);
         }
-        memcpy(curr_value, &current, sizeof(current));
-    } else {
-        memset(curr_value, 0, sizeof(struct itimerval_k));
     }
     unlock_scheduler();
+
+    if (copy_to_user(curr_value, &current, sizeof(current)) != 0)
+        return -EFAULT;
 
     return 0;
 }
@@ -927,8 +932,8 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
         if (!ts_ptr) return -EFAULT;
         if ((uint64_t)ts_ptr < 0x1000 || (uint64_t)ts_ptr >= KERNEL_VMA)
             return -EFAULT;
-        ts64.tv_sec = (long)ts_ptr[0];
-        ts64.tv_nsec = (long)ts_ptr[1];
+        if (copy_from_user(&ts64, ts_ptr, sizeof(ts64)) != 0)
+            return -EFAULT;
         req = &ts64;
     } else {
         req = (const struct kernel_timespec *)a0;
@@ -936,6 +941,9 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
         if (!req) return -EFAULT;
         if ((uint64_t)req < 0x1000 || (uint64_t)req >= KERNEL_VMA)
             return -EFAULT;
+        if (copy_from_user(&ts64, req, sizeof(ts64)) != 0)
+            return -EFAULT;
+        req = &ts64;
     }
 
     if (req->tv_sec < 0 || req->tv_nsec < 0 ||
@@ -981,16 +989,17 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
 }
 
 static int sys_chmod(const char *pathname, int mode) {
-    uint64_t addr;
+    char *kpath;
     vfs_node_t *node;
     int ret;
 
     if (!pathname) return -EFAULT;
-    addr = (uint64_t)pathname;
-    if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     if (!current_task) return -ESRCH;
+    kpath = copy_string_from_user_alloc(pathname);
+    if (!kpath) return -EFAULT;
 
-    node = vfs_namei(pathname);
+    node = vfs_namei(kpath);
+    kfree(kpath);
     if (!node) return -ENOENT;
 
     if (current_task->euid != 0 && current_task->euid != node->uid) {
@@ -1009,18 +1018,19 @@ static int sys_chmod(const char *pathname, int mode) {
 }
 
 static int sys_chown(const char *pathname, int owner, int group) {
-    uint64_t addr;
+    char *kpath;
     vfs_node_t *node;
 
     if (!pathname) return -EFAULT;
-    addr = (uint64_t)pathname;
-    if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
     if (!current_task) return -ESRCH;
 
     if (current_task->euid != 0)
         return -EPERM;
 
-    node = vfs_namei(pathname);
+    kpath = copy_string_from_user_alloc(pathname);
+    if (!kpath) return -EFAULT;
+    node = vfs_namei(kpath);
+    kfree(kpath);
     if (!node) return -ENOENT;
 
     if (node->ops && node->ops->chown) {
@@ -1409,7 +1419,7 @@ static int sys_unlockpt(int fd) {
 
 static int sys_ptsname(int fd, char *buf, int buflen) {
     char name[32];
-    int i;
+    size_t len;
     int endpoint;
 
     if (!buf || buflen <= 0) return -EINVAL;
@@ -1417,10 +1427,9 @@ static int sys_ptsname(int fd, char *buf, int buflen) {
     endpoint = pty_task_endpoint(fd);
     if (endpoint < 0 || pty_name(endpoint, name, sizeof(name)) < 0)
         return -ENOTTY;
-    for (i = 0; name[i] && i < buflen - 1; i++) {
-        buf[i] = name[i];
-    }
-    buf[i] = '\0';
+    len = strlen(name);
+    if (len + 1 > (size_t)buflen) len = (size_t)buflen - 1;
+    if (copy_to_user(buf, name, len + 1) != 0) return -EFAULT;
     return 0;
 }
 

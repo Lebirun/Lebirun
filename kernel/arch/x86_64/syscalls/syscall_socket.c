@@ -2074,13 +2074,23 @@ static int sys_setsockopt(int sockfd, const char *level_ptr, int optname,
 
 static int sys_getsockname(int sockfd, const char *addr_ptr,
                            uint64_t addrlen_ptr) {
-    struct sockaddr_in *addr;
-    struct sockaddr_in6 *addr6;
-    struct sockaddr_un *uaddr;
     socket_t *sock;
-    const char *path;
-    socklen_t pathlen;
-    socklen_t *addrlen;
+    const socklen_t *ulen;
+    socklen_t alen;
+    int domain;
+    uint16_t local_port;
+    uint32_t local_addr;
+    char kpath[UNIX_PATH_MAX];
+    size_t pathlen;
+    struct sockaddr_in kaddr;
+    struct sockaddr_in6 kaddr6;
+    struct sockaddr_un kunix;
+    socklen_t need;
+    size_t copy;
+
+    if (!addr_ptr || !addrlen_ptr) return -EINVAL;
+    ulen = (const socklen_t *)(uintptr_t)addrlen_ptr;
+    if (copy_from_user(&alen, ulen, sizeof(alen)) != 0) return -EFAULT;
 
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
@@ -2088,63 +2098,79 @@ static int sys_getsockname(int sockfd, const char *addr_ptr,
         spin_unlock(&socket_table_lock);
         return -EBADF;
     }
-    
-    if (sock->domain == AF_UNIX) {
-        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (uaddr && addrlen) {
-            path = sock->sun_path ? sock->sun_path : "";
-            pathlen = strlen(path);
-            uaddr->sun_family = AF_UNIX;
-            if (*addrlen > sizeof(uint16_t)) {
-                strncpy(uaddr->sun_path, path,
-                        *addrlen - sizeof(uint16_t));
-            }
-            *addrlen = sizeof(uint16_t) + pathlen + 1;
-            spin_unlock(&socket_table_lock);
-            return 0;
+    domain = sock->domain;
+    local_port = sock->local_port;
+    local_addr = sock->local_addr;
+    kpath[0] = '\0';
+    pathlen = 0;
+    if (domain == AF_UNIX) {
+        const char *path = sock->sun_path ? sock->sun_path : "";
+        size_t i = 0;
+        while (i < sizeof(kpath) - 1 && path[i]) {
+            kpath[i] = path[i];
+            i++;
         }
-        spin_unlock(&socket_table_lock);
-        return -EINVAL;
+        kpath[i] = '\0';
+        pathlen = i;
     }
+    spin_unlock(&socket_table_lock);
 
-    if (sock->domain == AF_INET6) {
-        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
-        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (addr6 && addrlen && *addrlen >= sizeof(struct sockaddr_in6)) {
-            memset(addr6, 0, sizeof(struct sockaddr_in6));
-            addr6->sin6_family = AF_INET6;
-            *addrlen = sizeof(struct sockaddr_in6);
-            spin_unlock(&socket_table_lock);
-            return 0;
-        }
-        spin_unlock(&socket_table_lock);
-        return -EINVAL;
-    }
-
-    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-
-    if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
-        addr->sin_family = AF_INET;
-        addr->sin_port = htons(sock->local_port);
-        addr->sin_addr.s_addr = sock->local_addr;
-        *addrlen = sizeof(struct sockaddr_in);
-        spin_unlock(&socket_table_lock);
+    if (domain == AF_UNIX) {
+        if (alen < sizeof(uint16_t)) return -EINVAL;
+        need = (socklen_t)(sizeof(uint16_t) + pathlen + 1);
+        memset(&kunix, 0, sizeof(kunix));
+        kunix.sun_family = AF_UNIX;
+        memcpy(kunix.sun_path, kpath, pathlen + 1);
+        copy = alen < need ? alen : need;
+        if (copy_to_user((void *)(uintptr_t)addr_ptr, &kunix, copy) != 0)
+            return -EFAULT;
+        if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+            return -EFAULT;
         return 0;
     }
 
-    spin_unlock(&socket_table_lock);
-    return -EINVAL;
+    if (domain == AF_INET6) {
+        if (alen < sizeof(kaddr6)) return -EINVAL;
+        memset(&kaddr6, 0, sizeof(kaddr6));
+        kaddr6.sin6_family = AF_INET6;
+        if (copy_to_user((void *)(uintptr_t)addr_ptr, &kaddr6, sizeof(kaddr6)) != 0)
+            return -EFAULT;
+        need = sizeof(kaddr6);
+        if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    if (alen < sizeof(kaddr)) return -EINVAL;
+    memset(&kaddr, 0, sizeof(kaddr));
+    kaddr.sin_family = AF_INET;
+    kaddr.sin_port = htons(local_port);
+    kaddr.sin_addr.s_addr = local_addr;
+    if (copy_to_user((void *)(uintptr_t)addr_ptr, &kaddr, sizeof(kaddr)) != 0)
+        return -EFAULT;
+    need = sizeof(kaddr);
+    if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+        return -EFAULT;
+    return 0;
 }
 
 static int sys_getpeername(int sockfd, const char *addr_ptr,
                            uint64_t addrlen_ptr) {
-    struct sockaddr_in *addr;
-    struct sockaddr_in6 *addr6;
-    struct sockaddr_un *uaddr;
     socket_t *sock;
-    socklen_t *addrlen;
+    const socklen_t *ulen;
+    socklen_t alen;
+    int domain;
+    int connected;
+    uint16_t remote_port;
+    uint32_t remote_addr;
+    struct sockaddr_in kaddr;
+    struct sockaddr_in6 kaddr6;
+    struct sockaddr_un kunix;
+    socklen_t need;
+
+    if (!addr_ptr || !addrlen_ptr) return -EINVAL;
+    ulen = (const socklen_t *)(uintptr_t)addrlen_ptr;
+    if (copy_from_user(&alen, ulen, sizeof(alen)) != 0) return -EFAULT;
 
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
@@ -2152,54 +2178,49 @@ static int sys_getpeername(int sockfd, const char *addr_ptr,
         spin_unlock(&socket_table_lock);
         return -EBADF;
     }
-    
-    if (sock->state != SOCKSTATE_CONNECTED) {
-        spin_unlock(&socket_table_lock);
-        return -ENOTCONN;
-    }
-    
-    if (sock->domain == AF_UNIX) {
-        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (uaddr && addrlen) {
-            uaddr->sun_family = AF_UNIX;
-            memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
-            *addrlen = sizeof(uint16_t);
-            spin_unlock(&socket_table_lock);
-            return 0;
-        }
-        spin_unlock(&socket_table_lock);
-        return -EINVAL;
-    }
-    
-    if (sock->domain == AF_INET6) {
-        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
-        addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (addr6 && addrlen && *addrlen >= sizeof(struct sockaddr_in6)) {
-            memset(addr6, 0, sizeof(struct sockaddr_in6));
-            addr6->sin6_family = AF_INET6;
-            *addrlen = sizeof(struct sockaddr_in6);
-            spin_unlock(&socket_table_lock);
-            return 0;
-        }
-        spin_unlock(&socket_table_lock);
-        return -EINVAL;
-    }
+    connected = sock->state == SOCKSTATE_CONNECTED;
+    domain = sock->domain;
+    remote_port = sock->remote_port;
+    remote_addr = sock->remote_addr;
+    spin_unlock(&socket_table_lock);
 
-    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
+    if (!connected) return -ENOTCONN;
 
-    if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_in)) {
-        addr->sin_family = AF_INET;
-        addr->sin_port = htons(sock->remote_port);
-        addr->sin_addr.s_addr = sock->remote_addr;
-        *addrlen = sizeof(struct sockaddr_in);
-        spin_unlock(&socket_table_lock);
+    if (domain == AF_UNIX) {
+        if (alen < sizeof(uint16_t)) return -EINVAL;
+        memset(&kunix, 0, sizeof(kunix));
+        kunix.sun_family = AF_UNIX;
+        need = sizeof(uint16_t);
+        if (copy_to_user((void *)(uintptr_t)addr_ptr, &kunix, need) != 0)
+            return -EFAULT;
+        if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+            return -EFAULT;
         return 0;
     }
 
-    spin_unlock(&socket_table_lock);
-    return -EINVAL;
+    if (domain == AF_INET6) {
+        if (alen < sizeof(kaddr6)) return -EINVAL;
+        memset(&kaddr6, 0, sizeof(kaddr6));
+        kaddr6.sin6_family = AF_INET6;
+        if (copy_to_user((void *)(uintptr_t)addr_ptr, &kaddr6, sizeof(kaddr6)) != 0)
+            return -EFAULT;
+        need = sizeof(kaddr6);
+        if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    if (alen < sizeof(kaddr)) return -EINVAL;
+    memset(&kaddr, 0, sizeof(kaddr));
+    kaddr.sin_family = AF_INET;
+    kaddr.sin_port = htons(remote_port);
+    kaddr.sin_addr.s_addr = remote_addr;
+    if (copy_to_user((void *)(uintptr_t)addr_ptr, &kaddr, sizeof(kaddr)) != 0)
+        return -EFAULT;
+    need = sizeof(kaddr);
+    if (copy_to_user((void *)(uintptr_t)addrlen_ptr, &need, sizeof(need)) != 0)
+        return -EFAULT;
+    return 0;
 }
 
 static int sys_sendto(int sockfd, const char *buf_ptr, int len,
