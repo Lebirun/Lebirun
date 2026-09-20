@@ -41,8 +41,10 @@ int user_access_ok(const void *ptr, size_t size, int access) {
     if ((uint64_t)size - 1 > UINT64_MAX - start) return 0;
     end = start + (uint64_t)size - 1;
     if (end >= KERNEL_VMA) return 0;
-    end &= ~(PAGE_SIZE - 1);
     page = start & ~(PAGE_SIZE - 1);
+    if (page == (end & ~(PAGE_SIZE - 1)))
+        return user_page_access_ok(page, access);
+    end &= ~(PAGE_SIZE - 1);
     for (;;) {
         if (!user_page_access_ok(page, access)) return 0;
         if (page == end) break;
@@ -92,14 +94,34 @@ int clear_user(void *dest, size_t size) {
 
 int strnlen_user(const char *src, size_t max_size, size_t *length) {
     size_t index;
-    char value;
+    size_t chunk;
+    size_t part;
+    size_t i;
+    uint64_t base;
+    uint64_t current;
+    char buf[128];
 
     if (!length) return -1;
-    for (index = 0; index < max_size; index++) {
-        if (copy_from_user(&value, src + index, 1) < 0) return -1;
-        if (value == '\0') {
-            *length = index;
-            return 0;
+    if (!src) return -1;
+    base = (uint64_t)(uintptr_t)src;
+    if (base < PAGE_SIZE || base >= KERNEL_VMA) return -1;
+    index = 0;
+    while (index < max_size) {
+        current = base + index;
+        if (current < base) return -1;
+        chunk = ((current & ~(PAGE_SIZE - 1)) + PAGE_SIZE) - current;
+        if (chunk > max_size - index) chunk = max_size - index;
+        while (chunk != 0) {
+            part = chunk < sizeof(buf) ? chunk : sizeof(buf);
+            if (copy_from_user(buf, src + index, part) < 0) return -1;
+            for (i = 0; i < part; i++) {
+                if (buf[i] == '\0') {
+                    *length = index + i;
+                    return 0;
+                }
+            }
+            index += part;
+            chunk -= part;
         }
     }
     return -1;

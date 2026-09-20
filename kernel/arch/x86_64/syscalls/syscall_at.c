@@ -82,45 +82,11 @@ static char *resolve_at_path_alloc(int dirfd, const char *pathname) {
 
 static int split_at_path_alloc(const char *path, char **parent_out,
                                char **name_out) {
-    const char *slash;
-    const char *name_start;
-    size_t parent_length;
-    size_t name_length;
-    char *parent;
-    char *name;
+    int r;
 
-    if (!path || !parent_out || !name_out) return -EINVAL;
-    *parent_out = NULL;
-    *name_out = NULL;
-    slash = strrchr(path, '/');
-    if (!slash || slash == path) {
-        parent_length = 1;
-        name_start = slash ? slash + 1 : path;
-    } else {
-        parent_length = (size_t)(slash - path);
-        name_start = slash + 1;
-    }
-    name_length = strlen(name_start);
-    if (name_length == 0 || parent_length > SIZE_MAX - 1 ||
-        name_length > SIZE_MAX - 1)
-        return -EINVAL;
-    parent = (char *)kmalloc(parent_length + 1);
-    if (!parent) return -ENOMEM;
-    name = (char *)kmalloc(name_length + 1);
-    if (!name) {
-        kfree(parent);
-        return -ENOMEM;
-    }
-    if (!slash || slash == path) {
-        parent[0] = '/';
-        parent[1] = '\0';
-    } else {
-        memcpy(parent, path, parent_length);
-        parent[parent_length] = '\0';
-    }
-    memcpy(name, name_start, name_length + 1);
-    *parent_out = parent;
-    *name_out = name;
+    r = vfs_split_path_alloc(path, parent_out, name_out);
+    if (r == -2) return -ENOMEM;
+    if (r != 0) return -EINVAL;
     return 0;
 }
 

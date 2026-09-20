@@ -32,11 +32,7 @@ uint16_t ipv4_checksum(void *data, uint64_t len) {
         sum += *((uint8_t *)ptr);
     }
 
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return ~sum;
+    return inet_cksum_fold(sum);
 }
 
 uint16_t ipv4_transport_checksum(ipv4_addr_t src, ipv4_addr_t dest,
@@ -62,10 +58,7 @@ uint16_t ipv4_transport_checksum(ipv4_addr_t src, ipv4_addr_t dest,
     if (remaining == 1)
         sum += *((uint8_t *)ptr) << 8;
 
-    while (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16);
-
-    return htons(~sum);
+    return htons(inet_cksum_fold(sum));
 }
 
 int ipv4_is_local(netif_t *netif, ipv4_addr_t ip) {

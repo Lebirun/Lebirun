@@ -220,11 +220,7 @@ uint16_t ipv6_checksum(ipv6_addr_t *src, ipv6_addr_t *dest, uint8_t next_header,
         sum += (*((uint8_t *)ptr)) << 8;
     }
 
-    while (sum >> 16) {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    return htons(~sum);
+    return htons(inet_cksum_fold(sum));
 }
 
 int ipv6_send(netif_t *netif, ipv6_addr_t dest, uint8_t next_header, uint8_t *data, uint64_t len) {

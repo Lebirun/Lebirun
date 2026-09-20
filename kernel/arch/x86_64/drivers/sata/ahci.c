@@ -14,6 +14,37 @@ static uint32_t ahci_ports_allocated;
 #define AHCI_SYNC_TRANSFER_SECTORS 256
 #define AHCI_LBA48_MAX 0x0000FFFFFFFFFFFFULL
 
+typedef struct {
+    uint64_t phys;
+    uint64_t pages;
+} ahci_bounce_buf_t;
+
+static int ahci_bounce_ensure(ahci_bounce_buf_t *bounce, uint64_t pages) {
+    uint64_t phys;
+
+    if (!bounce || pages == 0) return -1;
+    if (bounce->phys && bounce->pages >= pages) return 0;
+    if (bounce->phys) {
+        pfa_free_contiguous(bounce->phys, bounce->pages);
+        bounce->phys = 0;
+        bounce->pages = 0;
+    }
+    phys = pfa_alloc_contiguous(pages);
+    if (!phys) return -1;
+    bounce->phys = phys;
+    bounce->pages = pages;
+    return 0;
+}
+
+static void ahci_bounce_free(ahci_bounce_buf_t *bounce) {
+    if (!bounce) return;
+    if (bounce->phys) {
+        pfa_free_contiguous(bounce->phys, bounce->pages);
+        bounce->phys = 0;
+        bounce->pages = 0;
+    }
+}
+
 static ahci_port_t *ahci_port_slot(uint64_t index) {
     uint64_t i;
     uint64_t slot;
@@ -523,7 +554,7 @@ int KERNEL_INIT ahci_identify(ahci_port_t *port) {
     return 0;
 }
 
-static int ahci_read_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer) {
+static int ahci_read_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, void *buffer, ahci_bounce_buf_t *bounce) {
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
@@ -573,12 +604,12 @@ static int ahci_read_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t cou
     } else {
         memset(cmd_table, 0, sizeof(hba_cmd_table_t));
         buf_pages = (byte_count + PAGE_SIZE - 1) / PAGE_SIZE;
-        buf_phys = pfa_alloc_contiguous(buf_pages);
-        if (!buf_phys) {
+        if (ahci_bounce_ensure(bounce, buf_pages) != 0) {
             printf("AHCI: Failed to allocate DMA buffer\n");
             mutex_unlock(&port->io_lock);
             return -1;
         }
+        buf_phys = bounce->phys;
         buf_virt = buf_phys + KERNEL_VMA;
         cmd_header->prdtl = 1;
         cmd_table->prdt[0].dba = (uint32_t)buf_phys;
@@ -609,13 +640,12 @@ static int ahci_read_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t cou
     if (result == 0 && direct_entries == 0)
         memcpy(buffer, (void *)buf_virt, byte_count);
 
-    if (buf_phys) pfa_free_contiguous(buf_phys, buf_pages);
     mutex_unlock(&port->io_lock);
     
     return result;
 }
 
-static int ahci_write_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer) {
+static int ahci_write_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t count, const void *buffer, ahci_bounce_buf_t *bounce) {
     uint64_t buf_pages;
     uint64_t buf_phys;
     uint64_t buf_virt;
@@ -665,12 +695,12 @@ static int ahci_write_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t co
     } else {
         memset(cmd_table, 0, sizeof(hba_cmd_table_t));
         buf_pages = (byte_count + PAGE_SIZE - 1) / PAGE_SIZE;
-        buf_phys = pfa_alloc_contiguous(buf_pages);
-        if (!buf_phys) {
+        if (ahci_bounce_ensure(bounce, buf_pages) != 0) {
             printf("AHCI: Failed to allocate DMA buffer\n");
             mutex_unlock(&port->io_lock);
             return -1;
         }
+        buf_phys = bounce->phys;
         buf_virt = buf_phys + KERNEL_VMA;
         memcpy((void *)buf_virt, buffer, byte_count);
         cmd_header->prdtl = 1;
@@ -699,7 +729,6 @@ static int ahci_write_sectors_chunk(ahci_port_t *port, uint64_t lba, uint64_t co
     
     result = ahci_wait_cmd(port, slot, 5000);
     
-    if (buf_phys) pfa_free_contiguous(buf_phys, buf_pages);
     mutex_unlock(&port->io_lock);
     
     return result;
@@ -711,6 +740,7 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
     uint64_t byte_offset;
     uint8_t *bytes;
     int result;
+    ahci_bounce_buf_t bounce = { 0, 0 };
 
     if (!port || !buffer || count == 0) return -1;
     if (lba > AHCI_LBA48_MAX || count - 1 > AHCI_LBA48_MAX - lba) return -1;
@@ -729,10 +759,14 @@ int ahci_read_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, void *buf
         }
         byte_offset = completed * AHCI_SECTOR_SIZE;
         result = ahci_read_sectors_chunk(port, lba + completed, chunk,
-                                         bytes + byte_offset);
-        if (result != 0) return result;
+                                         bytes + byte_offset, &bounce);
+        if (result != 0) {
+            ahci_bounce_free(&bounce);
+            return result;
+        }
         completed += chunk;
     }
+    ahci_bounce_free(&bounce);
     return 0;
 }
 
@@ -742,6 +776,7 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
     uint64_t byte_offset;
     const uint8_t *bytes;
     int result;
+    ahci_bounce_buf_t bounce = { 0, 0 };
 
     if (!port || !buffer || count == 0) return -1;
     if (lba > AHCI_LBA48_MAX || count - 1 > AHCI_LBA48_MAX - lba) return -1;
@@ -760,10 +795,14 @@ int ahci_write_sectors(ahci_port_t *port, uint64_t lba, uint64_t count, const vo
         }
         byte_offset = completed * AHCI_SECTOR_SIZE;
         result = ahci_write_sectors_chunk(port, lba + completed, chunk,
-                                          bytes + byte_offset);
-        if (result != 0) return result;
+                                          bytes + byte_offset, &bounce);
+        if (result != 0) {
+            ahci_bounce_free(&bounce);
+            return result;
+        }
         completed += chunk;
     }
+    ahci_bounce_free(&bounce);
     return 0;
 }
 
@@ -1385,161 +1424,6 @@ static int ahci_check_port_error(ahci_port_t *port) {
     return 0;
 }
 
-static int ahci_find_free_slot(ahci_port_t *port) {
-    uint64_t slots;
-    uint64_t slot_count;
-    uint64_t i;
-
-    slots = port->cmd_issued | ahci_port_read(port, AHCI_PxCI) |
-            ahci_port_read(port, AHCI_PxSACT);
-    slot_count = g_ahci_controller.num_cmd_slots;
-    if (slot_count > AHCI_CMD_SLOTS) slot_count = AHCI_CMD_SLOTS;
-    for (i = 0; i < slot_count; i++) {
-        if ((slots & (1 << i)) == 0 && port->requests[i].state == AHCI_CMD_STATE_FREE)
-            return i;
-    }
-    return -1;
-}
-
-int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count,
-                    void *buffer, ahci_callback_t callback, void *ctx) {
-    if (!port->present || port->type != AHCI_DEV_SATA)
-        return -1;
-    
-    if (count == 0 || count > 128)
-        return -1;
-    
-    int slot = ahci_find_free_slot(port);
-    if (slot < 0)
-        return -1;
-    
-    ahci_cmd_request_t *req = &port->requests[slot];
-    req->state = AHCI_CMD_STATE_PENDING;
-    req->command = ATA_CMD_READ_DMA_EX;
-    req->lba = lba;
-    req->count = count;
-    req->buffer = buffer;
-    req->callback = callback;
-    req->callback_ctx = ctx;
-    req->result = 0;
-    req->completed = false;
-    
-    uint64_t buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    req->buf_phys = pfa_alloc_contiguous(buf_pages);
-    if (!req->buf_phys) {
-        req->state = AHCI_CMD_STATE_FREE;
-        return -1;
-    }
-    req->buf_pages = buf_pages;
-    
-    hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
-    cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
-    cmd_header->w = 0;
-    cmd_header->p = 0;
-    cmd_header->c = 1;
-    cmd_header->prdtl = 1;
-    
-    hba_cmd_table_t *cmd_table = port->cmd_table + slot;
-    memset(cmd_table, 0, sizeof(hba_cmd_table_t));
-    
-    cmd_table->prdt[0].dba = (uint32_t)req->buf_phys;
-    cmd_table->prdt[0].dbau = (uint32_t)(req->buf_phys >> 32);
-    cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
-    cmd_table->prdt[0].i = 1;
-    
-    fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table->cfis;
-    memset(fis, 0, sizeof(fis_reg_h2d_t));
-    fis->fis_type = FIS_TYPE_REG_H2D;
-    fis->c = 1;
-    fis->command = ATA_CMD_READ_DMA_EX;
-    fis->lba0 = (uint8_t)(lba & 0xFF);
-    fis->lba1 = (uint8_t)((lba >> 8) & 0xFF);
-    fis->lba2 = (uint8_t)((lba >> 16) & 0xFF);
-    fis->device = 1 << 6;
-    fis->lba3 = (uint8_t)((lba >> 24) & 0xFF);
-    fis->lba4 = (uint8_t)((lba >> 32) & 0xFF);
-    fis->lba5 = (uint8_t)((lba >> 40) & 0xFF);
-    fis->countl = count & 0xFF;
-    fis->counth = (count >> 8) & 0xFF;
-    
-    req->state = AHCI_CMD_STATE_ACTIVE;
-    port->cmd_issued |= (1 << slot);
-    ahci_port_write(port, AHCI_PxCI, 1 << slot);
-    
-    return slot;
-}
-
-int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
-                     const void *buffer, ahci_callback_t callback, void *ctx) {
-    if (!port->present || port->type != AHCI_DEV_SATA)
-        return -1;
-    
-    if (count == 0 || count > 128)
-        return -1;
-    
-    int slot = ahci_find_free_slot(port);
-    if (slot < 0)
-        return -1;
-    
-    ahci_cmd_request_t *req = &port->requests[slot];
-    req->state = AHCI_CMD_STATE_PENDING;
-    req->command = ATA_CMD_WRITE_DMA_EX;
-    req->lba = lba;
-    req->count = count;
-    req->buffer = (void *)buffer;
-    req->callback = callback;
-    req->callback_ctx = ctx;
-    req->result = 0;
-    req->completed = false;
-    
-    uint64_t buf_pages = (count * AHCI_SECTOR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    req->buf_phys = pfa_alloc_contiguous(buf_pages);
-    if (!req->buf_phys) {
-        req->state = AHCI_CMD_STATE_FREE;
-        return -1;
-    }
-    req->buf_pages = buf_pages;
-    
-    uint64_t buf_virt = req->buf_phys + KERNEL_VMA;
-    
-    memcpy((void *)buf_virt, buffer, count * AHCI_SECTOR_SIZE);
-    
-    hba_cmd_header_t *cmd_header = &port->cmd_list[slot];
-    cmd_header->cfl = sizeof(fis_reg_h2d_t) / 4;
-    cmd_header->w = 1;
-    cmd_header->p = 0;
-    cmd_header->c = 1;
-    cmd_header->prdtl = 1;
-    
-    hba_cmd_table_t *cmd_table = port->cmd_table + slot;
-    memset(cmd_table, 0, sizeof(hba_cmd_table_t));
-    
-    cmd_table->prdt[0].dba = (uint32_t)req->buf_phys;
-    cmd_table->prdt[0].dbau = (uint32_t)(req->buf_phys >> 32);
-    cmd_table->prdt[0].dbc = (count * AHCI_SECTOR_SIZE) - 1;
-    cmd_table->prdt[0].i = 1;
-    
-    fis_reg_h2d_t *fis = (fis_reg_h2d_t *)cmd_table->cfis;
-    memset(fis, 0, sizeof(fis_reg_h2d_t));
-    fis->fis_type = FIS_TYPE_REG_H2D;
-    fis->c = 1;
-    fis->command = ATA_CMD_WRITE_DMA_EX;
-    fis->lba0 = (uint8_t)(lba & 0xFF);
-    fis->lba1 = (uint8_t)((lba >> 8) & 0xFF);
-    fis->lba2 = (uint8_t)((lba >> 16) & 0xFF);
-    fis->device = 1 << 6;
-    fis->lba3 = (uint8_t)((lba >> 24) & 0xFF);
-    fis->lba4 = (uint8_t)((lba >> 32) & 0xFF);
-    fis->lba5 = (uint8_t)((lba >> 40) & 0xFF);
-    fis->countl = count & 0xFF;
-    fis->counth = (count >> 8) & 0xFF;
-    
-    req->state = AHCI_CMD_STATE_ACTIVE;
-    port->cmd_issued |= (1 << slot);
-    ahci_port_write(port, AHCI_PxCI, 1 << slot);
-    
-    return slot;
-}
 
 void ahci_poll_completion(ahci_port_t *port) {
     uint64_t ci = ahci_port_read(port, AHCI_PxCI);

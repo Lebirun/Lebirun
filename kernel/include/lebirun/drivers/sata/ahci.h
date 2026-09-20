@@ -433,10 +433,6 @@ uint64_t ahci_get_allocated_pages(void);
 void ahci_debug_info(void);
 int ahci_test_rw(void);
 
-int ahci_read_async(ahci_port_t *port, uint64_t lba, uint64_t count, 
-                    void *buffer, ahci_callback_t callback, void *ctx);
-int ahci_write_async(ahci_port_t *port, uint64_t lba, uint64_t count,
-                     const void *buffer, ahci_callback_t callback, void *ctx);
 void ahci_poll_completion(ahci_port_t *port);
 
 int ahci_port_reset(ahci_port_t *port);

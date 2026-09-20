@@ -899,28 +899,20 @@ static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags)
 
 static int ext4_split_vfs_path(const char *path, char **parent_out,
                                char name[EXT4_NAME_LEN + 1]) {
-    const char *slash;
-    const char *name_start;
-    size_t parent_length;
-    size_t name_length;
     char *parent;
+    char *split_name;
+    size_t name_length;
 
     if (!path || !parent_out || !name) return -1;
-    slash = strrchr(path, '/');
-    name_start = slash ? slash + 1 : path;
-    name_length = strlen(name_start);
-    if (name_length == 0 || name_length > EXT4_NAME_LEN) return -1;
-    parent_length = !slash || slash == path ? 1 : (size_t)(slash - path);
-    parent = (char *)kmalloc(parent_length + 1);
-    if (!parent) return -1;
-    if (!slash || slash == path) {
-        parent[0] = '/';
-        parent[1] = '\0';
-    } else {
-        memcpy(parent, path, parent_length);
-        parent[parent_length] = '\0';
+    if (vfs_split_path_alloc(path, &parent, &split_name) != 0) return -1;
+    name_length = strlen(split_name);
+    if (name_length > EXT4_NAME_LEN) {
+        kfree(parent);
+        kfree(split_name);
+        return -1;
     }
-    memcpy(name, name_start, name_length + 1);
+    memcpy(name, split_name, name_length + 1);
+    kfree(split_name);
     *parent_out = parent;
     return 0;
 }

@@ -904,19 +904,35 @@ void fb_putchar(char c, uint64_t cx, uint64_t cy) {
     }
 
     base = (uint8_t *)fb.addr;
-    for (row = 0; row < fb.font->height; row++) {
-        p = base + (py + row) * hw_pitch + px * bytes_per_pixel;
-        for (col = 0; col < fb.font->width; col++) {
-            byte_idx = row * bytes_per_line + col / 8;
-            bit = 7 - (col % 8);
-            color = (glyph[byte_idx] & (1u << bit)) ? (uint32_t)fb.fg_color : (uint32_t)fb.bg_color;
-            if (fb.bpp == 32) {
+    if (fb.bpp == 32) {
+        for (row = 0; row < fb.font->height; row++) {
+            p = base + (py + row) * hw_pitch + px * bytes_per_pixel;
+            for (col = 0; col < fb.font->width; col++) {
+                byte_idx = row * bytes_per_line + col / 8;
+                bit = 7 - (col % 8);
+                color = (glyph[byte_idx] & (1u << bit)) ? (uint32_t)fb.fg_color : (uint32_t)fb.bg_color;
                 *((uint32_t *)(p + col * bytes_per_pixel)) = color;
-            } else if (fb.bpp == 24) {
+            }
+        }
+    } else if (fb.bpp == 24) {
+        for (row = 0; row < fb.font->height; row++) {
+            p = base + (py + row) * hw_pitch + px * bytes_per_pixel;
+            for (col = 0; col < fb.font->width; col++) {
+                byte_idx = row * bytes_per_line + col / 8;
+                bit = 7 - (col % 8);
+                color = (glyph[byte_idx] & (1u << bit)) ? (uint32_t)fb.fg_color : (uint32_t)fb.bg_color;
                 p[col * bytes_per_pixel] = (uint8_t)(color & 0xFF);
                 p[col * bytes_per_pixel + 1] = (uint8_t)((color >> 8) & 0xFF);
                 p[col * bytes_per_pixel + 2] = (uint8_t)((color >> 16) & 0xFF);
-            } else if (fb.bpp == 16) {
+            }
+        }
+    } else if (fb.bpp == 16) {
+        for (row = 0; row < fb.font->height; row++) {
+            p = base + (py + row) * hw_pitch + px * bytes_per_pixel;
+            for (col = 0; col < fb.font->width; col++) {
+                byte_idx = row * bytes_per_line + col / 8;
+                bit = 7 - (col % 8);
+                color = (glyph[byte_idx] & (1u << bit)) ? (uint32_t)fb.fg_color : (uint32_t)fb.bg_color;
                 r = (uint8_t)((color >> 16) & 0xFF);
                 g = (uint8_t)((color >> 8) & 0xFF);
                 b = (uint8_t)(color & 0xFF);

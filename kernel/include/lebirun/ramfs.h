@@ -22,6 +22,7 @@
 
 typedef struct ramfs_node {
     char *name;
+    size_t name_len;
     uint8_t type;
     uint16_t permissions;
     uint64_t uid;

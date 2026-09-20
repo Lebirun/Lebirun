@@ -119,6 +119,7 @@ static int ramfs_set_node_name(ramfs_node_t *node, const char *name) {
     if (!copy) return RAMFS_ERR_NOMEM;
     if (node->name) kfree(node->name);
     node->name = copy;
+    node->name_len = strlen(copy);
     return RAMFS_ERR_OK;
 }
 
@@ -126,6 +127,7 @@ static void ramfs_free_node_name(ramfs_node_t *node) {
     if (node && node->name) {
         kfree(node->name);
         node->name = NULL;
+        node->name_len = 0;
     }
 }
 
@@ -277,16 +279,13 @@ void ramfs_init(void) {
     ramfs_stats.dir_count = 1;
 }
 
-static ramfs_node_t *ramfs_find_child(ramfs_node_t *parent, const char *name) {
-    ramfs_node_t *child;
+static ramfs_node_t *ramfs_find_child_length(ramfs_node_t *parent,
+                                              const char *name,
+                                              size_t length);
 
+static ramfs_node_t *ramfs_find_child(ramfs_node_t *parent, const char *name) {
     if (!parent || !name) return NULL;
-    child = parent->children;
-    while (child) {
-        if (strcmp(child->name, name) == 0) return child;
-        child = child->next_sibling;
-    }
-    return NULL;
+    return ramfs_find_child_length(parent, name, strlen(name));
 }
 
 static ramfs_node_t *ramfs_find_child_length(ramfs_node_t *parent,
@@ -297,7 +296,7 @@ static ramfs_node_t *ramfs_find_child_length(ramfs_node_t *parent,
     if (!parent || !name) return NULL;
     child = parent->children;
     while (child) {
-        if (strlen(child->name) == length &&
+        if (child->name && child->name_len == length &&
             memcmp(child->name, name, length) == 0)
             return child;
         child = child->next_sibling;
@@ -984,6 +983,7 @@ int ramfs_rename(const char *old_path, const char *new_path) {
 
     if (node->name) kfree(node->name);
     node->name = new_name_copy;
+    node->name_len = strlen(new_name);
     node->parent = new_parent;
     node->next_sibling = new_parent->children;
     new_parent->children = node;
@@ -1610,6 +1610,7 @@ int ramfs_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
     ramfs_node_t **old_link;
     ramfs_node_t **new_link;
     char *name;
+    size_t name_len;
     uint64_t now;
 
     if (!old_parent || !new_parent || !old_name || !new_name)
@@ -1629,6 +1630,9 @@ int ramfs_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
     name = old_node->name;
     old_node->name = new_node->name;
     new_node->name = name;
+    name_len = old_node->name_len;
+    old_node->name_len = new_node->name_len;
+    new_node->name_len = name_len;
     if (old_prn != new_prn) {
         old_link = &old_prn->children;
         while (*old_link && *old_link != old_node)
@@ -2166,6 +2170,7 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 
     if (node->name) kfree(node->name);
     node->name = new_name_copy;
+    node->name_len = strlen(new_name);
     node->parent = new_prn;
     node->next_sibling = new_prn->children;
     new_prn->children = node;

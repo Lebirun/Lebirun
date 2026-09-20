@@ -144,6 +144,65 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
     return 0;
 }
 
+int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                     void *buffer) {
+    ahci_port_t *port;
+    uint64_t lba;
+    uint64_t sectors;
+    int idx;
+    uint32_t i;
+
+    if (!fs || !buffer || count == 0) {
+        return -1;
+    }
+
+    if (count == 1) {
+        return ext4_read_block(fs, block, buffer);
+    }
+
+    port = ahci_get_port(fs->port_index);
+    if (!port) {
+        return -1;
+    }
+
+    if (fs->sectors_per_block != 0 &&
+        (uint64_t)count > UINT64_MAX / fs->sectors_per_block) {
+        return -1;
+    }
+    sectors = (uint64_t)count * fs->sectors_per_block;
+    if (fs->sectors_per_block != 0 &&
+        block > (UINT64_MAX - fs->partition_start_lba) /
+                fs->sectors_per_block) {
+        return -1;
+    }
+    if ((uint64_t)count - 1 > UINT64_MAX - block) return -1;
+
+    for (i = 0; i < count; i++) {
+        idx = find_cache_entry(fs, block + i);
+        if (idx >= 0 && fs->block_cache[idx].data &&
+            fs->block_cache[idx].dirty) {
+            return -1;
+        }
+    }
+
+    lba = fs->partition_start_lba + block * fs->sectors_per_block;
+    if (ahci_read_sectors(port, lba, sectors, buffer) != 0) {
+        return -1;
+    }
+
+    for (i = 0; i < count; i++) {
+        idx = find_cache_entry(fs, block + i);
+        if (idx >= 0 && fs->block_cache[idx].data) {
+            memcpy(fs->block_cache[idx].data,
+                   (const uint8_t *)buffer + (uint64_t)i * fs->block_size,
+                   fs->block_size);
+            fs->block_cache[idx].last_access = ++fs->cache_tick;
+        }
+    }
+
+    return 0;
+}
+
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
     ahci_port_t *port;
     uint64_t lba;

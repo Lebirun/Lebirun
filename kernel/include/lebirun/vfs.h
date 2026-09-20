@@ -202,6 +202,8 @@ vfs_node_t *vfs_lookup(const char *path);
 void vfs_release(vfs_node_t *node);
 char *vfs_get_path(vfs_node_t *node, char *buf, size_t size);
 char *vfs_get_path_alloc(vfs_node_t *node);
+int vfs_split_path_alloc(const char *path, char **parent_out,
+                         char **name_out);
 
 int vfs_sync_node(vfs_node_t *node, int data_only);
 int vfs_sync_all(int data_only);

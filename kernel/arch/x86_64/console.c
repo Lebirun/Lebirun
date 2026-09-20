@@ -1832,13 +1832,18 @@ static void console_scroll_region_up(console_t *con, uint64_t top, uint64_t bott
                     console_color_row(con, top + 1), move_rows * copy_cols);
         memmove(con->line_wrapped + top, con->line_wrapped + top + 1,
                 move_rows);
+    } else if (con->color_buffer) {
+        for (row = top; row < bottom - 1; row++) {
+            memcpy(console_char_row(con, row),
+                   console_char_row(con, row + 1), copy_cols);
+            memcpy(console_color_row(con, row),
+                   console_color_row(con, row + 1), copy_cols);
+            con->line_wrapped[row] = con->line_wrapped[row + 1];
+        }
     } else {
         for (row = top; row < bottom - 1; row++) {
             memcpy(console_char_row(con, row),
                    console_char_row(con, row + 1), copy_cols);
-            if (con->color_buffer)
-                memcpy(console_color_row(con, row),
-                       console_color_row(con, row + 1), copy_cols);
             con->line_wrapped[row] = con->line_wrapped[row + 1];
         }
     }
@@ -1867,13 +1872,18 @@ static void console_scroll_region_down(console_t *con, uint64_t top, uint64_t bo
                     console_color_row(con, top), move_rows * copy_cols);
         memmove(con->line_wrapped + top + 1, con->line_wrapped + top,
                 move_rows);
+    } else if (con->color_buffer) {
+        for (row = bottom - 1; row > top; row--) {
+            memcpy(console_char_row(con, row),
+                   console_char_row(con, row - 1), copy_cols);
+            memcpy(console_color_row(con, row),
+                   console_color_row(con, row - 1), copy_cols);
+            con->line_wrapped[row] = con->line_wrapped[row - 1];
+        }
     } else {
         for (row = bottom - 1; row > top; row--) {
             memcpy(console_char_row(con, row),
                    console_char_row(con, row - 1), copy_cols);
-            if (con->color_buffer)
-                memcpy(console_color_row(con, row),
-                       console_color_row(con, row - 1), copy_cols);
             con->line_wrapped[row] = con->line_wrapped[row - 1];
         }
     }

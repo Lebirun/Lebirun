@@ -650,12 +650,12 @@ static int http_is_redirect(int status_code) {
 }
 
 static int http_name_equal(const uint8_t *value, size_t length,
-                           const char *name) {
+                           const char *name, size_t name_len) {
     size_t i;
     uint8_t a;
     uint8_t b;
 
-    if (strlen(name) != length) return 0;
+    if (name_len != length) return 0;
     for (i = 0; i < length; i++) {
         a = value[i];
         b = (uint8_t)name[i];
@@ -676,10 +676,12 @@ char *http_response_header_dup(const http_response_t *response,
     uint64_t value;
     uint64_t value_length;
     char *location;
+    size_t name_len;
 
     if (!response || !response->raw_headers || !name || !name[0]) return NULL;
     headers = response->raw_headers;
     length = response->raw_headers_len;
+    name_len = strlen(name);
     line = 0;
     while (line < length) {
         end = line;
@@ -688,7 +690,7 @@ char *http_response_header_dup(const http_response_t *response,
         while (colon < end && headers[colon] != ':') colon++;
         if (colon < end && http_name_equal(headers + line,
                                             (size_t)(colon - line),
-                                            name)) {
+                                            name, name_len)) {
             value = colon + 1;
             while (value < end &&
                    (headers[value] == ' ' || headers[value] == '\t')) value++;

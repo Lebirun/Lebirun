@@ -15,6 +15,14 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
     uint32_t block_off;
     uint32_t to_read;
     uint64_t phys_block;
+    uint64_t next_phys_block;
+    uint32_t max_run_blocks;
+    uint32_t run_blocks;
+    uint32_t run_bytes;
+    uint64_t ra_logical;
+    uint64_t ra_phys;
+    uint64_t ra_expect;
+    uint32_t ra_blocks;
     uint8_t *block;
     uint8_t *inline_data;
 
@@ -63,6 +71,46 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
         if (phys_block == 0) {
             memset(buffer + bytes_read, 0, to_read);
         } else {
+            if (block_off == 0 && to_read == fs->block_size) {
+                max_run_blocks = 256 / fs->sectors_per_block;
+                if (max_run_blocks == 0) max_run_blocks = 1;
+                run_blocks = 1;
+                while (run_blocks < max_run_blocks &&
+                       bytes_read + (run_blocks + 1) * fs->block_size <= size) {
+                    next_phys_block = ext4_inode_get_block(fs, &ic->inode,
+                                                           block_num + run_blocks);
+                    if (next_phys_block == 0 ||
+                        next_phys_block != phys_block + run_blocks) {
+                        break;
+                    }
+                    run_blocks++;
+                }
+                if (run_blocks > 1) {
+                    run_bytes = run_blocks * fs->block_size;
+                    if (ext4_read_blocks(fs, phys_block, run_blocks,
+                                         buffer + bytes_read) == 0) {
+                        bytes_read += run_bytes;
+                        ra_blocks = 0;
+                        ra_expect = phys_block + run_blocks;
+                        while (ra_blocks < run_blocks) {
+                            ra_logical = block_num + run_blocks + ra_blocks;
+                            if (ra_logical > (file_size - 1) / fs->block_size)
+                                break;
+                            ra_phys = ext4_inode_get_block(fs, &ic->inode,
+                                                           ra_logical);
+                            if (ra_phys == 0 || ra_phys != ra_expect)
+                                break;
+                            block = ext4_get_block(fs, ra_phys);
+                            if (!block)
+                                break;
+                            ext4_release_block(fs, ra_phys);
+                            ra_expect++;
+                            ra_blocks++;
+                        }
+                        continue;
+                    }
+                }
+            }
             block = ext4_get_block(fs, phys_block);
             if (!block) {
                 break;

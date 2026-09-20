@@ -68,6 +68,8 @@ int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer);
+int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                     void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);

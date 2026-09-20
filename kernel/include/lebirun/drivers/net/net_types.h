@@ -396,6 +396,13 @@ static inline int mac_eq(mac_addr_t a, mac_addr_t b) {
     return 1;
 }
 
+static inline uint16_t inet_cksum_fold(uint64_t sum) {
+    while (sum >> 16) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
+
 static inline int ipv6_eq(ipv6_addr_t a, ipv6_addr_t b) {
     int i;
 
