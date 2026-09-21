@@ -6,6 +6,7 @@ VERBOSE=0
 DO_BUILD=0
 NO_BUILD=0
 DISK=0
+DEBUG=0
 ISO_ARGS=""
 for arg in "$@"; do
   case "$arg" in
@@ -13,6 +14,7 @@ for arg in "$@"; do
     -b|--build) DO_BUILD=1 ;;
     --no-build) NO_BUILD=1 ;;
     --disk) DISK=1 ;;
+    --debug) DEBUG=1 ;;
   esac
 done
 
@@ -61,13 +63,18 @@ if [ "$DISK" -eq 1 ]; then
     DISK_ARGS="-drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 -device ide-hd,drive=sata0,bus=ahci0.0"
 fi
 
+DEBUG_ARGS=""
+if [ "$DEBUG" -eq 1 ]; then
+    DEBUG_ARGS="-s -S"
+fi
+
 $QEMU_CMD \
     -m 4G \
     -smp 4 \
     -cpu host \
     -vga qxl \
     $CDROM_ARGS \
-    -s -S \
+    $DEBUG_ARGS \
     -serial stdio \
     -device ahci,id=ahci0 \
     $DISK_ARGS \
