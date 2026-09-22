@@ -2247,6 +2247,8 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
 
     (void)flags;
     if (len < 0) return -EINVAL;
+    if (len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_READ))
+        return -EFAULT;
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
     if (!sock) {
@@ -2413,6 +2415,8 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
     (void)src_addr_ptr;
     (void)addrlen_ptr;
     if (len < 0) return -EINVAL;
+    if (len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_WRITE))
+        return -EFAULT;
     
     buf = (void *)(uintptr_t)buf_ptr;
     spin_lock(&socket_table_lock);

@@ -309,10 +309,6 @@ typedef struct tcp_socket {
     uint64_t recv_buffer_size;
     uint64_t recv_buffer_head;
     uint64_t recv_buffer_tail;
-    uint8_t *send_buffer;
-    uint64_t send_buffer_size;
-    uint64_t send_buffer_head;
-    uint64_t send_buffer_tail;
     uint64_t retransmit_timeout;
     uint64_t last_ack_time;
     uint8_t keepalive;

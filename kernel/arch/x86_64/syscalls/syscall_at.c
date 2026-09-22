@@ -695,6 +695,7 @@ static int sys_utimensat(int dirfd, const char *pathname,
     uint64_t mtime;
     int explicit_time;
     int have_requested;
+    int empty_path;
 
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     if (!current_task) return -ESRCH;
@@ -702,7 +703,13 @@ static int sys_utimensat(int dirfd, const char *pathname,
         !syscall_user_range_mapped((uint64_t)(uintptr_t)pathname, 1, 0))
         return -EFAULT;
     node = NULL;
-    if (pathname && pathname[0] == '\0' && (flags & AT_EMPTY_PATH)) {
+    empty_path = 0;
+    if (pathname && (flags & AT_EMPTY_PATH)) {
+        char first;
+        if (copy_from_user(&first, pathname, 1) != 0) return -EFAULT;
+        empty_path = (first == '\0');
+    }
+    if (empty_path) {
         fd = task_fd_get(current_task, dirfd);
         if (!fd || !fd->in_use || !fd->node) return -EBADF;
         node = (vfs_node_t *)fd->node;

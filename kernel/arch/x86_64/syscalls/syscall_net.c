@@ -461,13 +461,24 @@ static int sys_net_arp_get(uint64_t buf_ptr, const char *count_ptr,
 
     entries = (arp_user_entry_t *)(uintptr_t)buf_ptr;
     for (i = 0; i < count; i++) {
-        entries[i].ip = ips[i];
+        arp_user_entry_t entry;
+        entry.ip = ips[i];
         for (j = 0; j < 6; j++) {
-            entries[i].mac[j] = macs[i * 6 + j];
+            entry.mac[j] = macs[i * 6 + j];
+        }
+        if (copy_to_user(&entries[i], &entry, sizeof(entry)) != 0) {
+            kfree(macs);
+            kfree(ips);
+            return -1;
         }
     }
 
-    *(int *)count_ptr = count;
+    if (copy_to_user((void *)(uintptr_t)count_ptr, &count,
+                     sizeof(count)) != 0) {
+        kfree(macs);
+        kfree(ips);
+        return -1;
+    }
     kfree(macs);
     kfree(ips);
     return 0;
@@ -500,15 +511,17 @@ static int sys_net_dns_resolve(uint64_t hostname_ptr,
     
     ret = dns_resolve(hostbuf, &resolved);
     if (ret == 0) {
-        *(uint64_t *)result_ptr = ipv4_to_u32(resolved);
+        uint64_t out = ipv4_to_u32(resolved);
+        if (copy_to_user((void *)(uintptr_t)result_ptr, &out,
+                         sizeof(out)) != 0) return -1;
     }
     return ret;
 }
 
 static int __attribute__((noinline, noclone)) net_http_copy_body(
     uint64_t address, const uint8_t *body, uint64_t length) {
-    if (!user_range_mapped(address, length)) return -1;
-    memcpy((void *)address, body, length);
+    if (copy_to_user((void *)(uintptr_t)address, body, length) != 0)
+        return -1;
     return 0;
 }
 
@@ -519,9 +532,8 @@ static int __attribute__((noinline, noclone)) net_http_copy_headers(
 
     if (headers && *length > 0 && capacity > 0) {
         copied = *length < capacity ? *length : capacity;
-        if (user_range_mapped((uint64_t)(uintptr_t)destination, copied))
-            memcpy(destination, headers, copied);
-        else result = -1;
+        if (copy_to_user(destination, headers, copied) != 0)
+            result = -1;
         *length = copied;
     } else if (headers) {
         *length = 0;
@@ -531,15 +543,15 @@ static int __attribute__((noinline, noclone)) net_http_copy_headers(
 }
 
 static void net_http_store_size(uint64_t *destination, uint64_t value) {
-    if (destination && user_range_mapped((uint64_t)(uintptr_t)destination,
-                                         sizeof(*destination)))
-        *destination = value;
+    if (destination)
+        copy_to_user((void *)(uintptr_t)destination, &value,
+                     sizeof(value));
 }
 
 static void net_http_store_status(int *destination, int value) {
-    if (destination && user_range_mapped((uint64_t)(uintptr_t)destination,
-                                         sizeof(*destination)))
-        *destination = value;
+    if (destination)
+        copy_to_user((void *)(uintptr_t)destination, &value,
+                     sizeof(value));
 }
 
 static int sys_net_http_get(uint64_t req_ptr, const char *unused1,

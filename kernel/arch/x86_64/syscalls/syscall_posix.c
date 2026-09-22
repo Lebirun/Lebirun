@@ -617,7 +617,7 @@ static int64_t sys_getcwd(uint64_t buf_ptr, const char *size_ptr, int unused) {
     while (cwd[len]) len++;
     if (len + 1 > size) return -ERANGE;
     if (!posix_user_range_mapped(buf_addr, len + 1)) return -EFAULT;
-    memcpy((void *)buf_addr, cwd, len + 1);
+    if (copy_to_user((void *)buf_addr, cwd, len + 1) != 0) return -EFAULT;
     return (int64_t)buf_ptr;
 }
 

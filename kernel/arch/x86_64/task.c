@@ -1380,12 +1380,18 @@ void unlock_scheduler(void) {
 }
 
 void add_task_to_runqueue(task_t* new_task) {
-    if (new_task) task_pick_cpu(new_task);
+    if (!new_task) return;
+    task_pick_cpu(new_task);
     if (!ready_queue_head) {
         ready_queue_head = new_task;
         ready_queue_tail = new_task;
         new_task->next = new_task;
     } else {
+        if (!ready_queue_tail) {
+            ready_queue_tail = ready_queue_head;
+            while (ready_queue_tail->next != ready_queue_head)
+                ready_queue_tail = ready_queue_tail->next;
+        }
         ready_queue_tail->next = new_task;
         new_task->next = ready_queue_head;
         ready_queue_tail = new_task;

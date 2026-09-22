@@ -30,6 +30,14 @@ int ext4_read_superblock(ext4_fs_t *fs) {
         return -1;
     }
 
+    if (fs->sb.s_log_block_size > 6) {
+        return -1;
+    }
+    if (fs->sb.s_blocks_per_group == 0 ||
+        fs->sb.s_inodes_per_group == 0) {
+        return -1;
+    }
+
     fs->block_size = 1024 << fs->sb.s_log_block_size;
     fs->inode_size = fs->sb.s_inode_size;
     if (fs->inode_size == 0) {

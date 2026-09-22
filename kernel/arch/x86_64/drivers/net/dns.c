@@ -5,6 +5,7 @@
 #include <lebirun/tty.h>
 #include <lebirun/pit.h>
 #include <lebirun/task.h>
+#include <lebirun/mutex.h>
 #include <string.h>
 
 static ipv4_addr_t g_dns_server;
@@ -22,6 +23,7 @@ static uint16_t pending_qtype;
 static uint32_t pending_ttl;
 static char *pending_cname;
 static uint8_t pending_cname_set;
+static mutex_t dns_resolve_lock;
 
 static int dns_ensure_cache(void) {
     if (dns_cache)
@@ -56,6 +58,7 @@ void KERNEL_INIT dns_init(void) {
     g_dns_server = IPV4_ADDR(8, 8, 8, 8);
     g_dns_server2 = IPV4_ADDR(8, 8, 4, 4);
     dns_id_counter = 1;
+    mutex_init(&dns_resolve_lock);
     pending_cname = NULL;
     pending_resolved = 0;
     pending_qtype = DNS_TYPE_A;
@@ -210,7 +213,7 @@ int dns_resolve(const char *hostname, ipv4_addr_t *out_ipv4) {
     return dns_resolve_timeout(hostname, out_ipv4, 5000);
 }
 
-int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t timeout_ms) {
+static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t timeout_ms) {
     netif_t *netif;
     uint8_t *query;
     dns_header_t *hdr;
@@ -319,7 +322,16 @@ int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t ti
     return 0;
 }
 
-int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
+int dns_resolve_timeout(const char *hostname, ipv4_addr_t *out_ipv4, uint64_t timeout_ms) {
+    int result;
+
+    mutex_lock(&dns_resolve_lock);
+    result = dns_resolve_timeout_locked(hostname, out_ipv4, timeout_ms);
+    mutex_unlock(&dns_resolve_lock);
+    return result;
+}
+
+static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
     netif_t *netif;
     uint8_t *query;
     dns_header_t *hdr;
@@ -385,6 +397,15 @@ int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
 
     memcpy(out_ipv6, &pending_result6, sizeof(ipv6_addr_t));
     return 0;
+}
+
+int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
+    int result;
+
+    mutex_lock(&dns_resolve_lock);
+    result = dns_resolve6_locked(hostname, out_ipv6);
+    mutex_unlock(&dns_resolve_lock);
+    return result;
 }
 
 void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *data, uint64_t len) {
