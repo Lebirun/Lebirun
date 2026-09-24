@@ -25,29 +25,50 @@ static char *http_dup_string(const char *value) {
     return copy;
 }
 
-__attribute__((weak)) tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host) {
-    (void)tcp;
-    (void)host;
-    return NULL;
+static const tls_provider_t *tls_active_provider;
+
+void tls_register_provider(const tls_provider_t *ops) {
+    tls_active_provider = ops;
 }
 
-__attribute__((weak)) int tls_send(tls_conn_t *conn, const uint8_t *data, uint64_t len) {
-    (void)conn;
-    (void)data;
-    (void)len;
-    return -1;
+void tls_unregister_provider(const tls_provider_t *ops) {
+    if (tls_active_provider == ops)
+        tls_active_provider = NULL;
 }
 
-__attribute__((weak)) int tls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t timeout_ms) {
-    (void)conn;
-    (void)buf;
-    (void)len;
-    (void)timeout_ms;
-    return -1;
+const tls_provider_t *tls_get_provider(void) {
+    return tls_active_provider;
 }
 
-__attribute__((weak)) void tls_close(tls_conn_t *conn) {
-    (void)conn;
+static const tls_provider_t *tls_current_provider(void) {
+    return tls_active_provider;
+}
+
+static tls_conn_t *tls_connect(tcp_socket_t *tcp, const char *host) {
+    const tls_provider_t *p;
+
+    p = tls_current_provider();
+    if (!p || !p->connect)
+        return NULL;
+    return p->connect(tcp, host);
+}
+
+static int tls_send(tls_conn_t *conn, const uint8_t *data, uint64_t len) {
+    if (!tls_active_provider || !tls_active_provider->send)
+        return -1;
+    return tls_active_provider->send(conn, data, len);
+}
+
+static int tls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t timeout_ms) {
+    if (!tls_active_provider || !tls_active_provider->recv)
+        return -1;
+    return tls_active_provider->recv(conn, buf, len, timeout_ms);
+}
+
+static void tls_close(tls_conn_t *conn) {
+    if (!tls_active_provider || !tls_active_provider->close)
+        return;
+    tls_active_provider->close(conn);
 }
 
 static int http_parse_url(const char *url, char **host_out, uint16_t *port,

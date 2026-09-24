@@ -12,6 +12,9 @@
 #include <lebirun/drivers/net/netif.h>
 #include <lebirun/drivers/net/ipv4.h>
 #include <lebirun/drivers/net/dns.h>
+#include <lebirun/drivers/net/tcp.h>
+#include <lebirun/drivers/net/tls.h>
+#include <lebirun/rtc.h>
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/common.h>
 #include "syscalls/syscall_defs.h"
@@ -142,9 +145,11 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("pit_get_uptime_ms", pit_get_uptime_ms);
     lke_register_symbol("pit_get_ticks", pit_get_ticks);
     lke_register_symbol("pit_ms_to_ticks", pit_ms_to_ticks);
+    lke_register_symbol("rtc_get_time", rtc_get_time);
     lke_register_symbol("rng_get_u64", rng_get_u64);
     lke_register_symbol("sha256_hash", sha256_hash);
     lke_register_symbol("hmac_sha256", hmac_sha256);
+    lke_register_symbol("sha384_hash", sha384_hash);
     lke_register_symbol("crypto_constant_compare", crypto_constant_compare);
     lke_register_symbol("netif_get_default", netif_get_default);
     lke_register_symbol("netif_poll_all", netif_poll_all);
@@ -159,6 +164,18 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("task_current", task_current);
     lke_register_symbol("schedule", schedule);
     lke_register_symbol("net_get_ticks", net_get_ticks);
+    lke_register_symbol("tcp_socket_create", tcp_socket_create);
+    lke_register_symbol("tcp_socket_close", tcp_socket_close);
+    lke_register_symbol("tcp_connect", tcp_connect);
+    lke_register_symbol("tcp_send", tcp_send);
+    lke_register_symbol("tcp_recv", tcp_recv);
+    lke_register_symbol("tcp_disconnect", tcp_disconnect);
+    lke_register_symbol("krealloc", krealloc);
+    lke_register_symbol("memmove", memmove);
+    lke_register_symbol("task_has_pending_signals", task_has_pending_signals);
+    lke_register_symbol("tls_register_provider", tls_register_provider);
+    lke_register_symbol("tls_unregister_provider", tls_unregister_provider);
+    lke_register_symbol("tls_get_provider", tls_get_provider);
     lke_register_symbol("lke_register_syscall", lke_register_syscall);
     lke_register_symbol("lke_unregister_syscall", lke_unregister_syscall);
 }

@@ -49,6 +49,10 @@ void sha512_update(sha512_ctx_t *ctx, const uint8_t *data, size_t len);
 void sha512_final(sha512_ctx_t *ctx, uint8_t hash[64]);
 void sha512_hash(const uint8_t *data, size_t len, uint8_t hash[64]);
 
+void sha384_init(sha512_ctx_t *ctx);
+void sha384_final(sha512_ctx_t *ctx, uint8_t hash[48]);
+void sha384_hash(const uint8_t *data, size_t len, uint8_t hash[48]);
+
 void hmac_sha256(const uint8_t *key, size_t key_len,
                  const uint8_t *data, size_t data_len,
                  uint8_t out[32]);

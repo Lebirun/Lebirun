@@ -392,11 +392,13 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
 
     old_window = sock->recv_window;
     to_copy = available < len ? available : len;
-    copied = 0;
-
-    while (copied < to_copy) {
-        buffer[copied] = sock->recv_buffer[(sock->recv_buffer_head + copied) % sock->recv_buffer_size];
-        copied++;
+    copied = sock->recv_buffer_size - sock->recv_buffer_head;
+    if (copied > to_copy)
+        copied = to_copy;
+    memcpy(buffer, sock->recv_buffer + sock->recv_buffer_head, copied);
+    if (copied < to_copy) {
+        memcpy(buffer + copied, sock->recv_buffer, to_copy - copied);
+        copied = to_copy;
     }
     if (peek) {
         tcp_lock_irqrestore(f);
@@ -459,7 +461,6 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     uint64_t new_size;
     uint8_t *new_buf;
     uint64_t used;
-    uint64_t i;
 
     old_size = sock->recv_buffer_size;
     if (old_size == 0) {
@@ -486,11 +487,13 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     used = 0;
     if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
         used = sock->recv_buffer_tail - sock->recv_buffer_head;
+        memcpy(new_buf, sock->recv_buffer + sock->recv_buffer_head, used);
     } else {
         used = old_size - sock->recv_buffer_head + sock->recv_buffer_tail;
-    }
-    for (i = 0; i < used; i++) {
-        new_buf[i] = sock->recv_buffer[(sock->recv_buffer_head + i) % old_size];
+        memcpy(new_buf, sock->recv_buffer + sock->recv_buffer_head,
+               old_size - sock->recv_buffer_head);
+        memcpy(new_buf + old_size - sock->recv_buffer_head, sock->recv_buffer,
+               sock->recv_buffer_tail);
     }
     kfree(sock->recv_buffer);
     sock->recv_buffer = new_buf;
@@ -643,7 +646,6 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     tcp_socket_t *sock;
     uint64_t avail;
     uint64_t used;
-    uint64_t i;
     uint64_t next;
 
     (void)dest;
@@ -790,14 +792,22 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                     if (avail < payload_len &&
                         payload_len <= UINT64_MAX - used - 1) {
                         tcp_grow_recv_buffer(sock, used + payload_len + 1);
-                    }
-                    for (i = 0; i < payload_len; i++) {
-                        next = (sock->recv_buffer_tail + 1) % sock->recv_buffer_size;
-                        if (next != sock->recv_buffer_head) {
-                            sock->recv_buffer[sock->recv_buffer_tail] = payload[i];
-                            sock->recv_buffer_tail = next;
+                        if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
+                            used = sock->recv_buffer_tail - sock->recv_buffer_head;
+                        } else {
+                            used = sock->recv_buffer_size - sock->recv_buffer_head + sock->recv_buffer_tail;
                         }
+                        avail = sock->recv_buffer_size - 1 - used;
                     }
+                    next = payload_len <= avail ? payload_len : avail;
+                    avail = sock->recv_buffer_size - sock->recv_buffer_tail;
+                    if (avail > next)
+                        avail = next;
+                    memcpy(sock->recv_buffer + sock->recv_buffer_tail, payload,
+                           avail);
+                    memcpy(sock->recv_buffer, payload + avail, next - avail);
+                    sock->recv_buffer_tail =
+                        (sock->recv_buffer_tail + next) % sock->recv_buffer_size;
                     sock->recv_next = seq + payload_len;
                     tcp_lock_irqrestore(f);
                 }

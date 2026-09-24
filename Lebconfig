@@ -26,4 +26,5 @@ subcategory "Device Drivers" {
 
 subcategory "Modules" {
     item type=bool name="[EXPERIMENTAL] IPv67" default=disable id=MODULE_IPV67 alias="MODULE_IPV67" help="IPv67 module"
+    item type=bool name="lebTLS" default=enable id=MODULE_LEBTLS alias="MODULE_LEBTLS" help="TLS 1.3 client"
 }

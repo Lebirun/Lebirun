@@ -9,6 +9,7 @@ OUTDIR = out
 
 CFLAGS = -Wall -Wextra -nostdlib -ffreestanding -fno-builtin \
          -fno-stack-protector -mcmodel=kernel -fno-pic -Os \
+         -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
          -ffunction-sections -fdata-sections
 
 CPPFLAGS = -nostdinc -isystem $(SYSROOT)/usr/include -I$(KERNEL_INCLUDE)
@@ -20,6 +21,7 @@ $(if $(filter y yes 1 true enable enabled,$(shell if [ -f "$(CONFIG_FILE)" ] && 
 endef
 
 CONFIG_MODULE_IPV67 := $(call read_bool,MODULE_IPV67)
+CONFIG_MODULE_LEBTLS := $(call read_bool,MODULE_LEBTLS)
 
 IPV67_SRC = \
 	ipv67/state.c \
@@ -42,6 +44,9 @@ MODULES =
 ifeq ($(CONFIG_MODULE_IPV67),1)
 MODULES += $(OUTDIR)/ipv67.lke
 endif
+ifeq ($(CONFIG_MODULE_LEBTLS),1)
+MODULES += $(OUTDIR)/lebtls.lke
+endif
 
 SYSROOT_LKE = ../root/lib/lke
 
@@ -59,8 +64,30 @@ $(OUTDIR)/%.o: ipv67/%.c
 $(OUTDIR)/ipv67.lke: $(IPV67_OBJS)
 	$(LD) -r -o $@ $(IPV67_OBJS)
 
+LEBTLS_SRC = \
+	lebtls/lebtls.c \
+	lebtls/record.c \
+	lebtls/hkdf.c \
+	lebtls/handshake.c \
+	lebtls/traffic.c \
+	lebtls/aead.c \
+	lebtls/x25519.c \
+	lebtls/p256.c \
+	lebtls/p384.c \
+	lebtls/verify.c \
+	lebtls/ca.c
+
+LEBTLS_OBJS = $(patsubst %.c,$(OUTDIR)/%.o,$(notdir $(LEBTLS_SRC)))
+
+$(OUTDIR)/%.o: lebtls/%.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(OUTDIR)/lebtls.lke: $(LEBTLS_OBJS)
+	$(LD) -r -o $@ $(LEBTLS_OBJS)
+
 stage: all
 	mkdir -p $(SYSROOT_LKE)
+	rm -f $(SYSROOT_LKE)/ipv67.lke $(SYSROOT_LKE)/lebtls.lke
 ifneq ($(strip $(MODULES)),)
 	cp $(MODULES) $(SYSROOT_LKE)/
 endif
