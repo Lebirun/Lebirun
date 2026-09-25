@@ -116,8 +116,9 @@ int ext4_prepare_root_node(vfs_node_t *node);
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint);
 int ext4_unmount(ext4_fs_t *fs);
 int ext4_sync(ext4_fs_t *fs);
+int ext4_sync_data(ext4_fs_t *fs);
 int ext4_sync_mounted(void);
-int ext4_sync_node(vfs_node_t *node);
+int ext4_sync_node(vfs_node_t *node, int data_only);
 int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
                         uint64_t ctime);
 int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode);

@@ -23,6 +23,7 @@
 #include <lebirun/watchdog.h>
 #include <lebirun/evdev.h>
 #include <lebirun/mutex.h>
+#include <lebirun/seccomp.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -66,7 +67,7 @@ extern void copy_file_range_release_task(void *owner);
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
 
-_Static_assert(sizeof(task_t) == 944, "task size changed");
+_Static_assert(sizeof(task_t) == 968, "task size changed");
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
@@ -94,26 +95,49 @@ static int task_scheduler_rank(task_t *task) {
     return task->pi_boost;
 }
 
+static uint64_t task_affinity_mask(task_t *task) {
+    uint64_t m;
+    if (!task)
+        return 0;
+    m = task->affinity64;
+    if (m == 0)
+        m = ((uint64_t)task->cpu_affinity_hi << 32) | task->cpu_affinity;
+    if (m == 0)
+        m = 0xFFFFFFFFFFFFFFFFULL;
+    return m;
+}
+
 static int task_pick_cpu(task_t *task) {
     cpu_info_t *me;
+    uint64_t mask;
+    uint64_t best_load;
+    int best;
     int n;
+    int i;
     if (!task) return 0;
     me = smp_this_cpu();
     n = cpu_count > 0 ? cpu_count : 1;
-    if ((task->cpu_affinity & (1u << ((me ? smp_processor_id() : 0) & 31))) == 0) {
-        int i;
-        for (i = 0; i < n && i < 32; i++) {
-            if (task->cpu_affinity & (1u << i)) {
-                task->preferred_cpu = i;
-                return i;
+    if (n > 64) n = 64;
+    mask = task_affinity_mask(task);
+    best = -1;
+    best_load = (uint64_t)-1;
+    for (i = 0; i < n; i++) {
+        if (!(mask & (1ULL << i)))
+            continue;
+        if (cpus && i < cpu_count && cpus[i].active) {
+            if (cpus[i].nr_running < best_load) {
+                best_load = cpus[i].nr_running;
+                best = i;
             }
+        } else if (best < 0) {
+            best = i;
         }
-        task->preferred_cpu = me ? smp_processor_id() : 0;
-        return task->preferred_cpu;
     }
-    task->preferred_cpu = me ? smp_processor_id() : 0;
-    task->last_cpu = task->preferred_cpu;
-    return task->preferred_cpu;
+    if (best < 0)
+        best = me ? smp_processor_id() : 0;
+    task->preferred_cpu = best;
+    task->last_cpu = best;
+    return best;
 }
 
 int task_get_nice(task_t *task) {
@@ -196,14 +220,14 @@ extern void task_timer_check(void);
 static uint64_t task_random_stack_top(void) {
     uint64_t pages;
 
-    pages = rng_get_u32() & 0xFULL;
+    pages = rng_get_u32() & 0xFFULL;
     return USER_STACK_TOP - pages * PAGE_SIZE;
 }
 
 static uint64_t task_random_mmap_base(void) {
     uint64_t pages;
 
-    pages = rng_get_u32() & 0x7FULL;
+    pages = rng_get_u32() & 0x3FFULL;
     return USER_DYNAMIC_LIMIT - pages * PAGE_SIZE;
 }
 
@@ -226,19 +250,49 @@ static volatile int memory_pressure_pending;
 static uint64_t memory_pressure_last_tick;
 
 int task_set_cpu_affinity(task_t *task, uint32_t mask) {
-    uint32_t online;
+    uint64_t online;
+    uint64_t m;
 
     if (!task) return -1;
     if (mask == 0) return -1;
     if (cpu_count <= 0) return -1;
-    if (cpu_count >= 32) online = 0xFFFFFFFFu;
-    else online = (uint32_t)((1u << cpu_count) - 1u);
-    if (online == 0) online = 0xFFFFFFFFu;
-    if ((mask & online) == 0) return -1;
+    if (cpu_count >= 64) online = 0xFFFFFFFFFFFFFFFFULL;
+    else online = (1ULL << cpu_count) - 1ULL;
+    if (online == 0) online = 0xFFFFFFFFFFFFFFFFULL;
+    m = ((uint64_t)task->cpu_affinity_hi << 32) | mask;
+    if (task->affinity64 != 0)
+        m = (task->affinity64 & ~0xFFFFFFFFULL) | mask;
+    if ((m & online) == 0) return -1;
     lock_scheduler();
     task->cpu_affinity = mask;
+    task->affinity64 = m;
     unlock_scheduler();
     return 0;
+}
+
+int task_set_cpu_affinity64(task_t *task, uint64_t mask) {
+    uint64_t online;
+    if (!task) return -1;
+    if (mask == 0) return -1;
+    if (cpu_count <= 0) return -1;
+    if (cpu_count >= 64) online = 0xFFFFFFFFFFFFFFFFULL;
+    else online = (1ULL << cpu_count) - 1ULL;
+    if ((mask & online) == 0) return -1;
+    lock_scheduler();
+    task->cpu_affinity = (uint32_t)mask;
+    task->cpu_affinity_hi = (uint32_t)(mask >> 32);
+    task->affinity64 = mask;
+    unlock_scheduler();
+    return 0;
+}
+
+uint64_t task_get_cpu_affinity64(task_t *task) {
+    uint64_t mask;
+    if (!task) return 0;
+    lock_scheduler();
+    mask = task_affinity_mask(task);
+    unlock_scheduler();
+    return mask;
 }
 
 uint32_t task_get_cpu_affinity(task_t *task) {
@@ -247,7 +301,8 @@ uint32_t task_get_cpu_affinity(task_t *task) {
     if (!task) return 0;
     lock_scheduler();
     mask = task->cpu_affinity;
-    if (mask == 0) mask = 0xFFFFFFFFu;
+    if (mask == 0 && task->affinity64 == 0) mask = 0xFFFFFFFFu;
+    else if (mask == 0) mask = (uint32_t)task->affinity64;
     unlock_scheduler();
     return mask;
 }
@@ -1333,6 +1388,9 @@ void KERNEL_INIT init_tasks(void) {
     current_task->vring_minor = 0;
     current_task->is_kernel_task = false;
     current_task->cpu_affinity = 0xFFFFFFFFu;
+    current_task->cpu_affinity_hi = 0xFFFFFFFFu;
+    current_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
+    current_task->vruntime = 0;
     ready_queue_head = current_task;
     ready_queue_tail = current_task;
     all_tasks_head = current_task;
@@ -1380,8 +1438,12 @@ void unlock_scheduler(void) {
 }
 
 void add_task_to_runqueue(task_t* new_task) {
+    int cpu;
     if (!new_task) return;
-    task_pick_cpu(new_task);
+    cpu = task_pick_cpu(new_task);
+    new_task->vruntime = 0;
+    if (cpu >= 0 && cpu < cpu_count && cpus)
+        cpus[cpu].nr_running++;
     if (!ready_queue_head) {
         ready_queue_head = new_task;
         ready_queue_tail = new_task;
@@ -1400,8 +1462,12 @@ void add_task_to_runqueue(task_t* new_task) {
 
 static inline void remove_task_from_runqueue(task_t* task) {
     task_t *prev;
+    int cpu;
 
     if (!ready_queue_head || !task) return;
+    cpu = task->preferred_cpu;
+    if (cpu >= 0 && cpu < cpu_count && cpus && cpus[cpu].nr_running > 0)
+        cpus[cpu].nr_running--;
     
     if (task->next == task) {
         if (task == ready_queue_head) {
@@ -1539,6 +1605,9 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->vring_minor = 0;
     new_task->is_kernel_task = false;
     new_task->cpu_affinity = 0xFFFFFFFFu;
+    new_task->cpu_affinity_hi = 0xFFFFFFFFu;
+    new_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
+    new_task->vruntime = 0;
 
     if (user_mode) {
         krsp = (uint64_t*)(kernel_stack_base + KSTACK_USABLE_SIZE);
@@ -2014,6 +2083,8 @@ static void task_release_exit_resources(task_t *t) {
     task_free_signal_data(t);
     task_rlimit_free(t);
     posix_timers_release_task(t);
+    seccomp_release_task(t);
+    vfs_mnt_ns_release(t);
     if (t->task_ext) {
         kfree(t->task_ext);
         t->task_ext = NULL;
@@ -3541,14 +3612,13 @@ static int cpu_idle_frame_valid(cpu_info_t *cpu, registers_t *frame) {
 
 static int task_cpu_available(task_t *task, int cpu_id) {
     int owner;
-    uint32_t mask;
+    uint64_t mask;
 
     if (!task) return 0;
     owner = task->running_cpu;
     if (owner != -1 && owner != -(cpu_id + 2)) return 0;
-    mask = task->cpu_affinity;
-    if (mask != 0 && cpu_id >= 0 && cpu_id < 32 &&
-        !(mask & (1u << cpu_id))) return 0;
+    mask = task_affinity_mask(task);
+    if (cpu_id >= 0 && cpu_id < 64 && !(mask & (1ULL << cpu_id))) return 0;
     return 1;
 }
 
@@ -3686,7 +3756,9 @@ registers_t* schedule_from_irq(registers_t* regs) {
     candidate_frame = NULL;
     candidate = NULL;
     best_rank = -1;
-    
+    {
+        uint64_t best_vruntime = 0;
+        int have_vruntime = 0;
     while (next) {
         eligible = next->state == TASK_READY && next != prev_task &&
                    !next->resources_released &&
@@ -3697,10 +3769,14 @@ registers_t* schedule_from_irq(registers_t* regs) {
             selectable = 1;
         if (selectable) {
             rank = task_scheduler_rank(next);
-            if (!candidate || rank > best_rank) {
+            if (!candidate || rank > best_rank ||
+                (rank == best_rank && next->sched_policy == TASK_SCHED_OTHER &&
+                 (!have_vruntime || next->vruntime < best_vruntime))) {
                 candidate = next;
                 return_frame = candidate_frame;
                 best_rank = rank;
+                best_vruntime = next->vruntime;
+                have_vruntime = 1;
                 if (best_rank == 200) break;
             }
         }
@@ -3710,7 +3786,22 @@ registers_t* schedule_from_irq(registers_t* regs) {
             break;
         }
     }
+    }
     next = candidate;
+    if (next && next->sched_policy == TASK_SCHED_OTHER) {
+        uint64_t weight = 1024;
+        int nice = next->nice_value;
+        if (nice < -20) nice = -20;
+        if (nice > 19) nice = 19;
+        if (nice > 0) weight = 1024 / (1 + (uint64_t)nice);
+        else if (nice < 0) weight = 1024 + (uint64_t)(-nice) * 64;
+        next->vruntime += 1024 * 1000 / (weight ? weight : 1);
+        if (next->vruntime > this_cpu->vruntime_min)
+            this_cpu->vruntime_min = next->vruntime;
+    }
+    if (prev_task && prev_task->sched_policy == TASK_SCHED_OTHER &&
+        !must_switch && prev_task->vruntime < this_cpu->vruntime_min)
+        this_cpu->vruntime_min = prev_task->vruntime;
     if (next && prev_task && !must_switch &&
         !forced_reschedule &&
         prev_task->sched_policy == TASK_SCHED_FIFO &&
@@ -4451,6 +4542,18 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     }
 
     if (shm_fork_task(parent->pid, child->pid) != 0) {
+        task_release_dead_resources(child);
+        kfree(child);
+        return -KERR_ENOMEM;
+    }
+
+    if (seccomp_fork(parent, child) != 0) {
+        task_release_dead_resources(child);
+        kfree(child);
+        return -KERR_ENOMEM;
+    }
+
+    if (vfs_mnt_ns_fork(parent, child) != 0) {
         task_release_dead_resources(child);
         kfree(child);
         return -KERR_ENOMEM;

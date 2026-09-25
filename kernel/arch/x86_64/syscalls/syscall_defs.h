@@ -34,6 +34,7 @@ int syscall_user_range_present(uint64_t addr, uint64_t len,
                                int empty_mapped, int fallback_pd);
 int vfs_check_perm(vfs_node_t *node, int want);
 int syscall_vfs_open_resolved(char *path, int flags, int mode);
+int ramfs_err_to_errno(int r);
 int syscall_fd_read(int fd, char *buf, int len);
 int syscall_fd_write(int fd, const char *buf, int len);
 int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
@@ -472,6 +473,8 @@ int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 #define SYSCALL_TIMER_CREATE 317
 #define SYSCALL_TIMER_SETTIME 318
 #define SYSCALL_TIMER_DELETE 319
+#define SYSCALL_TIMER_GETTIME 333
+#define SYSCALL_TIMER_GETOVERRUN 334
 #define SYSCALL_SPLICE 320
 #define SYSCALL_VMSPLICE 321
 #define SYSCALL_TEE 322

@@ -1038,7 +1038,9 @@ static int ext4_vfs_truncate(vfs_node_t *node, uint64_t length) {
     priv = (ext4_vfs_private_t *)node->private_data;
     mutex_lock(&priv->fs->lock);
     ret = ext4_file_truncate(priv->fs, priv->ino, length);
-    if (ret == 0) node->length = length;
+    if (ret == 0) {
+        node->length = length;
+    }
     mutex_unlock(&priv->fs->lock);
     return ret;
 }
@@ -1392,8 +1394,7 @@ void KERNEL_INIT ext4_vfs_register(void) {
 }
 
 static int ext4_vfs_sync(vfs_node_t *node, int data_only) {
-    (void)data_only;
-    return ext4_sync_node(node);
+    return ext4_sync_node(node, data_only);
 }
 
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
@@ -1547,7 +1548,25 @@ int ext4_sync_mounted(void) {
     return ret;
 }
 
-int ext4_sync_node(vfs_node_t *node) {
+int ext4_sync_data(ext4_fs_t *fs) {
+    int ret;
+
+    if (!fs) {
+        return -1;
+    }
+
+    ret = ext4_sync_blocks(fs);
+    if (ret != 0) return ret;
+    ret = ext4_flush_device(fs);
+    if (ret != 0) return ret;
+    ret = ext4_sync_blocks(fs);
+    if (ret != 0) return ret;
+    ret = ext4_flush_device(fs);
+    if (ret != 0) return ret;
+    return 0;
+}
+
+int ext4_sync_node(vfs_node_t *node, int data_only) {
     ext4_fs_t *fs;
     int ret;
 
@@ -1555,7 +1574,10 @@ int ext4_sync_node(vfs_node_t *node) {
     fs = ext4_find_node_mount(node);
     if (!fs) return 0;
     mutex_lock(&fs->lock);
-    ret = ext4_sync(fs);
+    if (data_only)
+        ret = ext4_sync_data(fs);
+    else
+        ret = ext4_sync(fs);
     mutex_unlock(&fs->lock);
     return ret;
 }

@@ -569,8 +569,9 @@ static uint64_t overlay_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t si
     if (!onode->upper_node) return 0;
     
     written = vfs_write(onode->upper_node, offset, size, buffer);
-    if (written > 0)
+    if (written > 0) {
         node->length = onode->upper_node->length;
+    }
     return written;
 }
 
@@ -656,8 +657,9 @@ static int overlay_vfs_truncate(vfs_node_t *node, uint64_t length) {
     
     if (onode->upper_node->ops && onode->upper_node->ops->truncate) {
         ret = onode->upper_node->ops->truncate(onode->upper_node, length);
-        if (ret == 0)
+        if (ret == 0) {
             node->length = onode->upper_node->length;
+        }
         return ret;
     }
     return -1;

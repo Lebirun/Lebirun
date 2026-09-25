@@ -200,10 +200,14 @@ typedef struct task {
     void *limits_data;
     uint64_t alarm_tick;
     uint32_t cpu_affinity;
+    uint32_t cpu_affinity_hi;
+    uint64_t affinity64;
+    uint64_t vruntime;
     int preferred_cpu;
     int last_cpu;
     uint64_t ns_id;
     int pi_boost;
+    struct vfs_mnt_ns *mnt_ns;
     void *task_ext;
 } task_t;
 
@@ -214,6 +218,9 @@ typedef struct task_ext {
     uint64_t dl_next_replenish;
     uint64_t cgroup_mem_kb;
     uint64_t cgroup_anon_kb;
+    uint64_t readahead_pages;
+    void *seccomp_filter;
+    uint64_t seccomp_filter_len;
     void *posix_timers;
     void *ofd_locks;
     void *mq_data;
@@ -417,6 +424,8 @@ void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
 void exec_cleanup_drain(void);
 void task_reclaim_exited_now(void);
 int task_set_cpu_affinity(task_t *task, uint32_t mask);
+uint64_t task_get_cpu_affinity64(task_t *task);
+int task_set_cpu_affinity64(task_t *task, uint64_t mask);
 uint32_t task_get_cpu_affinity(task_t *task);
 int task_oom_kill_one(void);
 

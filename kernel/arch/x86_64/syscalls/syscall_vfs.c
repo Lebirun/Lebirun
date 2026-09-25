@@ -213,8 +213,26 @@ static int split_parent_child_inplace(char *path, char **parent,
     return (*child)[0] ? 0 : -EINVAL;
 }
 
-int syscall_vfs_open_resolved(char *path, int flags, int mode) {
-    uint64_t create_mode;
+int ramfs_err_to_errno(int r) {
+    if (r >= 0) return r;
+    switch (r) {
+    case RAMFS_ERR_NOMEM: return -ENOMEM;
+    case RAMFS_ERR_NOENT: return -ENOENT;
+    case RAMFS_ERR_EXIST: return -EEXIST;
+    case RAMFS_ERR_NOTDIR: return -ENOTDIR;
+    case RAMFS_ERR_ISDIR: return -EISDIR;
+    case RAMFS_ERR_NOTEMPTY: return -ENOTEMPTY;
+    case RAMFS_ERR_NOSPC: return -ENOSPC;
+    case RAMFS_ERR_INVAL: return -EINVAL;
+    case RAMFS_ERR_NAMETOOLONG: return -ENAMETOOLONG;
+    case RAMFS_ERR_PERM: return -EPERM;
+    case RAMFS_ERR_BUSY: return -EBUSY;
+    default: break;
+    }
+    return r < -11 ? r : -EIO;
+}
+
+int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t create_mode;
     char *split_path;
     char *parent_path;
     char *filename;
@@ -284,10 +302,17 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {
         ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
         kfree(split_path);
-        if (ret < 0 && !(flags & VFS_O_EXCL)) {
+        if (ret == 0) {
             node = vfs_namei(path);
-        } else if (ret == 0) {
+        } else if (!(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
+            if (!node) {
+                kfree(path);
+                return ramfs_err_to_errno(ret);
+            }
+        } else {
+            kfree(path);
+            return ramfs_err_to_errno(ret);
         }
     }
 

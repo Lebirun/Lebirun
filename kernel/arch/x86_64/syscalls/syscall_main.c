@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/gdt.h>
 #include <lebirun/task.h>
+#include <lebirun/seccomp.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/kstack.h>
 #include <lebirun/creds.h>
@@ -466,6 +467,18 @@ void do_syscall(registers_t *regs) {
         clear_syscall_frame();
         regs->rax = -ENOSYS;
         return;
+    }
+
+    if (current_task) {
+        int64_t filter_result;
+        filter_result = seccomp_check(current_task, linux_nr, regs->rip,
+                                          regs->rbx, regs->rcx, regs->rdx,
+                                          regs->rsi, regs->rdi, regs->rbp);
+        if (filter_result != 0) {
+            clear_syscall_frame();
+            regs->rax = filter_result;
+            return;
+        }
     }
 
     if (current_task && !creds_syscall_allowed(current_task, num)) {

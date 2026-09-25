@@ -51,6 +51,8 @@ typedef struct cpu_info {
     uint64_t user_ticks;
     uint64_t system_ticks;
     uint64_t idle_ticks;
+    uint64_t nr_running;
+    uint64_t vruntime_min;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;

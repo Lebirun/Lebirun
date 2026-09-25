@@ -6,6 +6,7 @@
 #include <lebirun/gdt.h>
 #include <lebirun/idt.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/mouse.h>
 #include <lebirun/common.h>
@@ -652,6 +653,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
     smp_enable_scheduling();
     asm volatile ("sti");
+    tsc_init();
     if (pt_reclaim_low_identity() == 0)
         pfa_release_cold_low_memory(
             (uint64_t)(uintptr_t)_kernel_phys_start);

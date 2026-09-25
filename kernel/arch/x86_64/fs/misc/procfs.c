@@ -1,6 +1,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/vfs.h>
 #include <lebirun/task.h>
+#include <lebirun/inotify.h>
 #include <lebirun/about.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/drivers/net/e1000/e1000.h>
@@ -58,6 +59,12 @@ static vfs_node_t *proc_kmsg;
 static vfs_node_t *proc_sysrq_trigger;
 static vfs_node_t *proc_schedstat;
 static vfs_node_t *proc_boot_id;
+static vfs_node_t *proc_sys;
+static vfs_node_t *proc_sys_fs;
+static vfs_node_t *proc_sys_fs_inotify;
+static vfs_node_t *proc_inotify_max_instances;
+static vfs_node_t *proc_inotify_max_watches;
+static vfs_node_t *proc_inotify_max_queued;
 
 static dirent_t proc_dirent;
 static dirent_t proc_self_dirent;
@@ -437,6 +444,188 @@ static uint64_t proc_sysrq_trigger_write(vfs_node_t *node, uint64_t offset,
         sysrq_handle_key((char)buffer[i], 0);
     }
     return size;
+}
+
+#include <lebirun/inotify.h>
+
+static uint64_t proc_inotify_u64_read(vfs_node_t *node, uint64_t offset,
+                                      uint64_t size, uint8_t *buffer,
+                                      uint64_t value) {
+    char buf[32];
+    int len;
+    uint64_t remaining;
+
+    (void)node;
+    len = snprintf(buf, sizeof(buf), "%lu\n", value);
+    if (len <= 0) return 0;
+    if (offset >= (uint64_t)len) return 0;
+    remaining = (uint64_t)len - offset;
+    if (size > remaining) size = remaining;
+    memcpy(buffer, buf + offset, size);
+    return size;
+}
+
+static uint64_t proc_inotify_u64_write(vfs_node_t *node, uint64_t offset,
+                                       uint64_t size, uint8_t *buffer,
+                                       int which) {
+    uint64_t v = 0;
+    uint64_t i;
+    uint64_t ndigits = 0;
+
+    (void)node;
+    (void)offset;
+    if (!current_task || (current_task->uid != 0 && current_task->euid != 0))
+        return size;
+    for (i = 0; i < size; i++) {
+        if (buffer[i] >= '0' && buffer[i] <= '9') {
+            if (v > UINT64_MAX / 10) return size;
+            v = v * 10 + (uint64_t)(buffer[i] - '0');
+            if (v > 1048576) return size;
+            ndigits++;
+        } else if (buffer[i] == '\n' || buffer[i] == '\r' ||
+                   buffer[i] == ' ' || buffer[i] == '\0') {
+            continue;
+        } else {
+            return size;
+        }
+    }
+    if (ndigits == 0 || v == 0) return size;
+    if (which == 0) inotify_set_max_instances(v);
+    else if (which == 1) inotify_set_max_watches(v);
+    else inotify_set_max_queued(v);
+    return size;
+}
+
+static uint64_t proc_inotify_instances_read(vfs_node_t *node, uint64_t offset,
+                                            uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_read(node, offset, size, buffer,
+                                 inotify_get_max_instances());
+}
+
+static uint64_t proc_inotify_instances_write(vfs_node_t *node, uint64_t offset,
+                                             uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_write(node, offset, size, buffer, 0);
+}
+
+static uint64_t proc_inotify_watches_read(vfs_node_t *node, uint64_t offset,
+                                          uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_read(node, offset, size, buffer,
+                                 inotify_get_max_watches());
+}
+
+static uint64_t proc_inotify_watches_write(vfs_node_t *node, uint64_t offset,
+                                           uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_write(node, offset, size, buffer, 1);
+}
+
+static uint64_t proc_inotify_queued_read(vfs_node_t *node, uint64_t offset,
+                                         uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_read(node, offset, size, buffer,
+                                 inotify_get_max_queued());
+}
+
+static uint64_t proc_inotify_queued_write(vfs_node_t *node, uint64_t offset,
+                                          uint64_t size, uint8_t *buffer) {
+    return proc_inotify_u64_write(node, offset, size, buffer, 2);
+}
+
+static vfs_node_t *procfs_get_sys(void);
+static vfs_node_t *procfs_get_sys_fs(void);
+static vfs_node_t *procfs_get_sys_fs_inotify(void);
+
+static dirent_t *proc_sys_readdir(vfs_node_t *node, uint64_t index) {
+    (void)node;
+    if (index == 0) {
+        strcpy(proc_self_dirent.name, "fs");
+        proc_self_dirent.inode = 2000;
+        proc_self_dirent.type = VFS_DIRECTORY;
+        return &proc_self_dirent;
+    }
+    return NULL;
+}
+
+static vfs_node_t *proc_sys_finddir(vfs_node_t *node, const char *name) {
+    (void)node;
+    if (strcmp(name, "fs") == 0) return procfs_get_sys_fs();
+    return NULL;
+}
+
+static dirent_t *proc_sys_fs_readdir(vfs_node_t *node, uint64_t index) {
+    (void)node;
+    if (index == 0) {
+        strcpy(proc_self_dirent.name, "inotify");
+        proc_self_dirent.inode = 2001;
+        proc_self_dirent.type = VFS_DIRECTORY;
+        return &proc_self_dirent;
+    }
+    return NULL;
+}
+
+static vfs_node_t *proc_sys_fs_finddir(vfs_node_t *node, const char *name) {
+    (void)node;
+    if (strcmp(name, "inotify") == 0) return procfs_get_sys_fs_inotify();
+    return NULL;
+}
+
+static dirent_t *proc_inotify_readdir(vfs_node_t *node, uint64_t index) {
+    static const char *names[] = {
+        "max_user_instances", "max_user_watches", "max_queued_events"
+    };
+    (void)node;
+    if (index < 3) {
+        strcpy(proc_self_dirent.name, names[index]);
+        proc_self_dirent.inode = 2002 + index;
+        proc_self_dirent.type = VFS_FILE;
+        return &proc_self_dirent;
+    }
+    return NULL;
+}
+
+static vfs_node_t *proc_inotify_finddir(vfs_node_t *node, const char *name) {
+    vfs_node_t *n;
+    (void)node;
+    n = NULL;
+    if (strcmp(name, "max_user_instances") == 0)
+        n = procfs_lazy_node(&proc_inotify_max_instances,
+                             "max_user_instances", VFS_FILE,
+                             procfs_get_sys_fs_inotify(),
+                             proc_inotify_instances_read, NULL, NULL);
+    else if (strcmp(name, "max_user_watches") == 0)
+        n = procfs_lazy_node(&proc_inotify_max_watches, "max_user_watches",
+                             VFS_FILE, procfs_get_sys_fs_inotify(),
+                             proc_inotify_watches_read, NULL, NULL);
+    else if (strcmp(name, "max_queued_events") == 0)
+        n = procfs_lazy_node(&proc_inotify_max_queued, "max_queued_events",
+                             VFS_FILE, procfs_get_sys_fs_inotify(),
+                             proc_inotify_queued_read, NULL, NULL);
+    if (n) {
+        n->write = NULL;
+        if (strcmp(name, "max_user_instances") == 0)
+            n->write = proc_inotify_instances_write;
+        else if (strcmp(name, "max_user_watches") == 0)
+            n->write = proc_inotify_watches_write;
+        else
+            n->write = proc_inotify_queued_write;
+        n->mask = 0644;
+    }
+    return n;
+}
+
+static vfs_node_t *procfs_get_sys(void) {
+    return procfs_lazy_node(&proc_sys, "sys", VFS_DIRECTORY, &procfs_root,
+                            NULL, proc_sys_readdir, proc_sys_finddir);
+}
+
+static vfs_node_t *procfs_get_sys_fs(void) {
+    return procfs_lazy_node(&proc_sys_fs, "fs", VFS_DIRECTORY,
+                            procfs_get_sys(), NULL, proc_sys_fs_readdir,
+                            proc_sys_fs_finddir);
+}
+
+static vfs_node_t *procfs_get_sys_fs_inotify(void) {
+    return procfs_lazy_node(&proc_sys_fs_inotify, "inotify", VFS_DIRECTORY,
+                            procfs_get_sys_fs(), NULL, proc_inotify_readdir,
+                            proc_inotify_finddir);
 }
 
 static uint64_t proc_schedstat_read(vfs_node_t *node, uint64_t offset,
@@ -1595,15 +1784,26 @@ static dirent_t *procfs_readdir(vfs_node_t *node, uint64_t index) {
 
     (void)node;
 
-    if (index < 1 + sizeof(proc_root_files) / sizeof(proc_root_files[0])) {
-        strcpy(proc_dirent.name,
-               index ? proc_root_files[index - 1].name : "self");
+    if (index == 0) {
+        strcpy(proc_dirent.name, "self");
+        proc_dirent.inode = 1;
+        proc_dirent.type = VFS_DIRECTORY;
+        return &proc_dirent;
+    }
+    if (index == 1) {
+        strcpy(proc_dirent.name, "sys");
+        proc_dirent.inode = 2;
+        proc_dirent.type = VFS_DIRECTORY;
+        return &proc_dirent;
+    }
+    if (index < 2 + sizeof(proc_root_files) / sizeof(proc_root_files[0])) {
+        strcpy(proc_dirent.name, proc_root_files[index - 2].name);
         proc_dirent.inode = index + 1;
-        proc_dirent.type = (index == 0) ? VFS_DIRECTORY : VFS_FILE;
+        proc_dirent.type = VFS_FILE;
         return &proc_dirent;
     }
     
-    pid_index = index - (uint64_t)(1 + sizeof(proc_root_files) / sizeof(proc_root_files[0]));
+    pid_index = index - (uint64_t)(2 + sizeof(proc_root_files) / sizeof(proc_root_files[0]));
     count = 0;
     lock_scheduler();
     t = all_tasks_head;
@@ -1794,6 +1994,7 @@ static vfs_node_t *procfs_finddir(vfs_node_t *node, const char *name) {
     (void)node;
     
     if (strcmp(name, "self") == 0) return procfs_get_self();
+    if (strcmp(name, "sys") == 0) return procfs_get_sys();
     for (index = 0; index < sizeof(proc_root_files) / sizeof(proc_root_files[0]); index++) {
         if (strcmp(name, proc_root_files[index].name) == 0)
             return procfs_get_file(&proc_root_files[index], &procfs_root);

@@ -2,6 +2,7 @@
 #include <lebirun/lke.h>
 #include <lebirun/about.h>
 #include <lebirun/rng.h>
+#include <lebirun/seccomp.h>
 #include <lebirun/pty.h>
 #include <lebirun/creds.h>
 #include <lebirun/timekeeping.h>
@@ -464,6 +465,7 @@ static int sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
 #define PR_GET_NO_NEW_PRIVS 39
 #define PR_SET_SYSCALL_MASK 0x4C420001
 #define PR_SET_SYSCALL_MASK2 0x4C420002
+#define CLONE_NEWNS 0x00020000
 
 static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     char name[16];
@@ -510,9 +512,12 @@ static int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigne
             return creds_get_no_new_privs(current_task);
 
         case PR_SET_SECCOMP:
-            if (arg2 != 1) return -EINVAL;
+            if (arg2 != 1 && arg2 != 2) return -EINVAL;
             if (!creds_get_no_new_privs(current_task) &&
                 !creds_has_capability(current_task, 21)) return -EPERM;
+            if (arg2 == 2)
+                return seccomp_install(current_task,
+                                           (const void *)arg3);
             return creds_set_strict_syscalls(current_task);
 
         case PR_GET_SECCOMP:
@@ -838,8 +843,12 @@ void task_timer_check(void) {
     uint64_t next;
     uint64_t address;
     int i;
+    extern void posix_timers_check_tick(uint64_t now);
 
-    if (!timer_earliest_tick) return;
+    if (!timer_earliest_tick) {
+        posix_timers_check_tick(tick_count);
+        return;
+    }
     now = tick_count;
     if (now < timer_earliest_tick) return;
     next = 0;
@@ -887,6 +896,7 @@ void task_timer_check(void) {
     }
     timer_earliest_recompute(next);
     unlock_scheduler();
+    posix_timers_check_tick(now);
 }
 
 static int sys_alarm(int seconds, const char *unused1, int unused2) {
@@ -1455,26 +1465,39 @@ static int sys_lke_list(char *buf, int size) {
 }
 
 static int sys_sched_setaffinity(int pid, const char *mask_ptr, int len) {
+    uint64_t mask64;
     uint32_t mask;
     task_t *target;
 
-    if (len != 4) return -EINVAL;
+    if (len != 4 && len != 8) return -EINVAL;
     target = sched_target(pid);
     if (!target) return -ESRCH;
     if (target != current_task && current_task->euid != 0 &&
         target->euid != current_task->euid) return -EPERM;
+    if (len == 8) {
+        if (copy_from_user(&mask64, mask_ptr, sizeof(mask64)) < 0) return -EFAULT;
+        if (task_set_cpu_affinity64(target, mask64) < 0) return -EINVAL;
+        return 0;
+    }
     if (copy_from_user(&mask, mask_ptr, sizeof(mask)) < 0) return -EFAULT;
     if (task_set_cpu_affinity(target, mask) < 0) return -EINVAL;
     return 0;
 }
 
 static int sys_sched_getaffinity(int pid, const char *mask_ptr, int len) {
+    uint64_t mask64;
     uint32_t mask;
     task_t *target;
 
     if (len < 4) return -EINVAL;
     target = sched_target(pid);
     if (!target) return -ESRCH;
+    if (len >= 8) {
+        mask64 = task_get_cpu_affinity64(target);
+        if (copy_to_user((void *)mask_ptr, &mask64, sizeof(mask64)) < 0)
+            return -EFAULT;
+        return 8;
+    }
     mask = task_get_cpu_affinity(target);
     if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
         return -EFAULT;
@@ -1602,6 +1625,8 @@ typedef struct posix_timer_node {
     int id;
     uint64_t expiry;
     uint64_t interval;
+    uint64_t overrun;
+    int signo;
     struct posix_timer_node *next;
 } posix_timer_node_t;
 
@@ -1653,9 +1678,101 @@ static int sys_timer_settime(int id, const char *ms_ptr, int interval_ms) {
         t = t->next;
     }
     if (!t) return -EINVAL;
+    if (ms == 0 && interval_ms <= 0) {
+        t->expiry = 0;
+        t->interval = 0;
+        t->overrun = 0;
+        return 0;
+    }
     t->expiry = pit_get_ticks() + pit_ms_to_ticks(ms);
+    if (!t->expiry) t->expiry = 1;
     t->interval = pit_ms_to_ticks((uint64_t)(interval_ms < 0 ? 0 : interval_ms));
+    t->overrun = 0;
+    if (t->signo == 0) t->signo = 14;
     return 0;
+}
+
+static int sys_timer_gettime(int id, const char *ms_ptr, int unused) {
+    posix_timer_node_t *t;
+    task_ext_t *e;
+    uint64_t *out;
+    uint64_t now;
+    uint64_t left[2];
+    (void)unused;
+    if (!current_task) return -ESRCH;
+    if (!ms_ptr) return -EFAULT;
+    out = (uint64_t *)(uintptr_t)ms_ptr;
+    e = task_ext_get(current_task, 0);
+    if (!e) return -EINVAL;
+    t = (posix_timer_node_t *)e->posix_timers;
+    while (t) {
+        if (t->id == id) break;
+        t = t->next;
+    }
+    if (!t) return -EINVAL;
+    now = pit_get_ticks();
+    if (!t->expiry || t->expiry <= now) {
+        left[0] = 0;
+    } else {
+        left[0] = pit_ticks_to_ms(t->expiry - now);
+    }
+    left[1] = pit_ticks_to_ms(t->interval);
+    if (copy_to_user(out, left, sizeof(left)) != 0) return -EFAULT;
+    return 0;
+}
+
+static int sys_timer_getoverrun(int id, const char *unused2, int unused3) {
+    posix_timer_node_t *t;
+    task_ext_t *e;
+    uint64_t v;
+    (void)unused2; (void)unused3;
+    if (!current_task) return -ESRCH;
+    e = task_ext_get(current_task, 0);
+    if (!e) return -EINVAL;
+    t = (posix_timer_node_t *)e->posix_timers;
+    while (t) {
+        if (t->id == id) break;
+        t = t->next;
+    }
+    if (!t) return -EINVAL;
+    v = t->overrun;
+    t->overrun = 0;
+    if (v > 99) v = 99;
+    return (int)v;
+}
+
+void posix_timers_check_tick(uint64_t now) {
+    task_t *t;
+    task_ext_t *e;
+    posix_timer_node_t *n;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        if ((uint64_t)t < KERNEL_VMA) break;
+        e = task_ext_get(t, 0);
+        if (e && e->posix_timers) {
+            n = (posix_timer_node_t *)e->posix_timers;
+            while (n) {
+                if (n->expiry && now >= n->expiry) {
+                    if (n->interval) {
+                        uint64_t missed = (now - n->expiry) / n->interval;
+                        n->overrun += missed + 1;
+                        if (n->overrun > 99) n->overrun = 99;
+                        n->expiry += (missed + 1) * n->interval;
+                        if (n->expiry <= now || !n->expiry)
+                            n->expiry = now + n->interval;
+                    } else {
+                        n->expiry = 0;
+                        n->overrun++;
+                    }
+                    deliver_signal_to_task(t, n->signo ? n->signo : 14);
+                }
+                n = n->next;
+            }
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
 }
 
 static int sys_timer_delete(int id, const char *unused2, int unused3) {
@@ -1844,17 +1961,23 @@ static int sys_msgget(int key, const char *unused2, int unused3) {
 static uint64_t ns_seq = 1;
 
 static int sys_unshare(int flags, const char *unused2, int unused3) {
-    (void)flags; (void)unused2; (void)unused3;
+    (void)unused2; (void)unused3;
     if (!current_task) return -ESRCH;
+    if (flags & CLONE_NEWNS) {
+        if (vfs_unshare_ns(current_task) != 0) return -ENOMEM;
+    }
     current_task->ns_id = ns_seq++;
     return 0;
 }
 
-static int sys_seccomp(int op, const char *unused2, int unused3) {
-    (void)unused2; (void)unused3;
+static int sys_seccomp(int op, int flags, const void *prog) {
     if (!current_task) return -ESRCH;
-    if (op != 0 && op != 1) return -EINVAL;
-    return 0;
+    if (op == 0) return 0;
+    if (op != 1) return -EINVAL;
+    if (flags != 0) return -EINVAL;
+    if (!creds_get_no_new_privs(current_task) &&
+        !creds_has_capability(current_task, 21)) return -EPERM;
+    return seccomp_install(current_task, prog);
 }
 
 static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
@@ -2013,6 +2136,8 @@ void syscalls_misc_init(void) {
     syscall_table_set(SYSCALL_TIMER_CREATE, (void *)(sys_timer_create));
     syscall_table_set(SYSCALL_TIMER_SETTIME, (void *)(sys_timer_settime));
     syscall_table_set(SYSCALL_TIMER_DELETE, (void *)(sys_timer_delete));
+    syscall_table_set(SYSCALL_TIMER_GETTIME, (void *)(sys_timer_gettime));
+    syscall_table_set(SYSCALL_TIMER_GETOVERRUN, (void *)(sys_timer_getoverrun));
     syscall_table_set(SYSCALL_SPLICE, (void *)(sys_splice));
     syscall_table_set(SYSCALL_VMSPLICE, (void *)(sys_splice));
     syscall_table_set(SYSCALL_TEE, (void *)(sys_tee));

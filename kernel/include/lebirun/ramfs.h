@@ -20,6 +20,13 @@
 #define RAMFS_ERR_PERM         -10
 #define RAMFS_ERR_BUSY         -11
 
+typedef struct ramfs_limits {
+    uint64_t max_bytes;
+    uint64_t max_inodes;
+    uint64_t used_bytes;
+    uint64_t used_inodes;
+} ramfs_limits_t;
+
 typedef struct ramfs_node {
     char *name;
     size_t name_len;
@@ -42,6 +49,7 @@ typedef struct ramfs_node {
     struct ramfs_node *children;
     struct ramfs_node *next_sibling;
     vfs_node_t *vfs_node;
+    ramfs_limits_t *limits;
 } ramfs_node_t;
 
 typedef struct {

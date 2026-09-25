@@ -1,5 +1,6 @@
 #include <lebirun/ramfs.h>
 #include <lebirun/vfs.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/idt.h>
@@ -46,6 +47,12 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                             vfs_node_t *new_parent, const char *new_name);
 static void ramfs_setup_vfs_file_callbacks(vfs_node_t *vn);
 static void ramfs_setup_vfs_dir_callbacks(vfs_node_t *vn);
+static int ramfs_limits_fits(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes);
+static void ramfs_limits_add(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes);
+static void ramfs_limits_sub(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes);
 
 static const vfs_node_ops_t ramfs_file_ops = {
     .truncate = ramfs_vfs_truncate,
@@ -76,7 +83,7 @@ static void ramfs_init_stats(void) {
 }
 
 uint64_t ramfs_get_time(void) {
-    return tick_count;
+    return timekeeping_realtime_ns() / 1000000000ULL;
 }
 
 static inline void ramfs_lock(void) {
@@ -142,6 +149,7 @@ static void ramfs_dispose_removed_node_locked(ramfs_node_t *node) {
     } else {
         ramfs_stats.dir_count--;
     }
+    ramfs_limits_sub(node->limits, 0, 1);
     refs = vn ? __atomic_load_n(&vn->ref_count, __ATOMIC_ACQUIRE) : 0;
     if (refs > 0) {
         node->parent = NULL;
@@ -152,6 +160,7 @@ static void ramfs_dispose_removed_node_locked(ramfs_node_t *node) {
     }
     if (node->type == RAMFS_NODE_FILE && node->data_capacity > 0) {
         ramfs_stats.used_size -= node->data_capacity;
+        ramfs_limits_sub(node->limits, node->data_capacity, 0);
     }
     if (vn) {
         vn->private_data = NULL;
@@ -246,6 +255,7 @@ static void ramfs_free_node_data(ramfs_node_t *node) {
     if (node && node->data) {
         ramfs_lock();
         ramfs_stats.used_size -= node->data_capacity;
+        ramfs_limits_sub(node->limits, node->data_capacity, 0);
         ramfs_unlock();
         
         kfree(node->data);
@@ -379,6 +389,101 @@ static ramfs_node_t *ramfs_find_parent(const char *path, char **storage,
 static int ramfs_check_space(uint64_t size) {
     if (ramfs_stats.used_size > ramfs_stats.total_size) return 0;
     return size <= ramfs_stats.total_size - ramfs_stats.used_size;
+}
+
+static int ramfs_limits_fits(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes) {
+    if (!lim) return 1;
+    if (inodes) {
+        if (lim->used_inodes >= lim->max_inodes) return 0;
+        if (lim->max_inodes - lim->used_inodes < inodes) return 0;
+    }
+    if (bytes) {
+        if (lim->used_bytes > lim->max_bytes) return 0;
+        if (bytes > lim->max_bytes - lim->used_bytes) return 0;
+    }
+    return 1;
+}
+
+static void ramfs_limits_add(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes) {
+    if (!lim) return;
+    lim->used_bytes += bytes;
+    if (lim->used_bytes > lim->max_bytes) lim->used_bytes = lim->max_bytes;
+    lim->used_inodes += inodes;
+    if (lim->used_inodes > lim->max_inodes) lim->used_inodes = lim->max_inodes;
+}
+
+static void ramfs_limits_sub(ramfs_limits_t *lim, uint64_t bytes,
+                             uint64_t inodes) {
+    if (!lim) return;
+    if (bytes >= lim->used_bytes) lim->used_bytes = 0;
+    else lim->used_bytes -= bytes;
+    if (inodes >= lim->used_inodes) lim->used_inodes = 0;
+    else lim->used_inodes -= inodes;
+}
+
+static uint64_t ramfs_parse_scaled(const char *s, uint64_t *value) {
+    uint64_t v = 0;
+    uint64_t consumed = 0;
+    while (s[consumed] >= '0' && s[consumed] <= '9') {
+        if (v > UINT64_MAX / 10) return 0;
+        v = v * 10 + (uint64_t)(s[consumed] - '0');
+        consumed++;
+    }
+    if (consumed == 0) return 0;
+    if (s[consumed] == 'k' || s[consumed] == 'K') {
+        if (v > UINT64_MAX / 1024) return 0;
+        v *= 1024;
+        consumed++;
+    } else if (s[consumed] == 'm' || s[consumed] == 'M') {
+        if (v > UINT64_MAX / (1024 * 1024)) return 0;
+        v *= 1024 * 1024;
+        consumed++;
+    } else if (s[consumed] == 'g' || s[consumed] == 'G') {
+        if (v > UINT64_MAX / (1024 * 1024 * 1024)) return 0;
+        v *= 1024 * 1024 * 1024;
+        consumed++;
+    }
+    *value = v;
+    return consumed;
+}
+
+static void ramfs_parse_mount_options(const char *device, ramfs_limits_t *lim) {
+    const char *p;
+    uint64_t v;
+    uint64_t n;
+    if (!device || !lim) return;
+    p = device;
+    while (*p) {
+        while (*p == ',' || *p == ' ' || *p == '/') p++;
+        if (strncmp(p, "size=", 5) == 0) {
+            n = ramfs_parse_scaled(p + 5, &v);
+            if (n) lim->max_bytes = v;
+            p += 5 + n;
+        } else if (strncmp(p, "nr_inodes=", 10) == 0) {
+            n = ramfs_parse_scaled(p + 10, &v);
+            if (n) lim->max_inodes = v;
+            p += 10 + n;
+        } else {
+            while (*p && *p != ',' && *p != ' ' && *p != '/') p++;
+        }
+    }
+}
+
+static ramfs_limits_t *ramfs_limits_for_mount(const char *device) {
+    ramfs_limits_t *lim;
+    uint64_t ram_bytes;
+    lim = (ramfs_limits_t *)kmalloc(sizeof(ramfs_limits_t));
+    if (!lim) return NULL;
+    ram_bytes = (uint64_t)pfa_get_usable_ram_kb() * 1024;
+    lim->max_bytes = ram_bytes / 2;
+    lim->max_inodes = lim->max_bytes >> 12;
+    if (lim->max_inodes == 0) lim->max_inodes = 1;
+    lim->used_bytes = 0;
+    lim->used_inodes = 1;
+    if (device) ramfs_parse_mount_options(device, lim);
+    return lim;
 }
 
 static int ramfs_check_heap_allocation(uint64_t size) {
@@ -607,6 +712,10 @@ int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
         ramfs_unlock();
         return RAMFS_ERR_NOSPC;
     }
+    if (!ramfs_limits_fits(prn->limits, (uint64_t)target_length, 1)) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
     node = ramfs_alloc_node();
     if (!node) {
         ramfs_unlock();
@@ -630,12 +739,14 @@ int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
     node->uid = current_task ? current_task->euid : 0;
     node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
+    node->limits = prn->limits;
     node->data_capacity = (uint64_t)target_length + 1;
     node->length = (uint64_t)target_length;
     node->next_sibling = prn->children;
     prn->children = node;
     prn->mtime = ramfs_get_time();
     ramfs_stats.used_size += node->length;
+    ramfs_limits_add(prn->limits, node->length, 1);
     ramfs_stats.file_count++;
     ramfs_unlock();
     return RAMFS_ERR_OK;
@@ -661,7 +772,15 @@ int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
         ramfs_unlock();
         return RAMFS_ERR_EXIST;
     }
+    if (source_node->limits != parent_node->limits) {
+        ramfs_unlock();
+        return -18;
+    }
     if (!ramfs_check_space(source_node->length)) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
+    if (!ramfs_limits_fits(parent_node->limits, source_node->length, 1)) {
         ramfs_unlock();
         return RAMFS_ERR_NOSPC;
     }
@@ -699,6 +818,7 @@ int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
     node->uid = source_node->uid;
     node->gid = source_node->gid;
     node->parent = parent_node;
+    node->limits = parent_node->limits;
     node->length = source_node->length;
     node->data_capacity = source_node->length;
     node->atime = source_node->atime;
@@ -708,6 +828,7 @@ int ramfs_link_node(vfs_node_t *source, vfs_node_t *parent,
     parent_node->children = node;
     parent_node->mtime = node->ctime;
     ramfs_stats.used_size += node->data_capacity;
+    ramfs_limits_add(parent_node->limits, node->data_capacity, 1);
     ramfs_stats.file_count++;
     ramfs_unlock();
     return RAMFS_ERR_OK;
@@ -815,6 +936,7 @@ int ramfs_unlink(const char *path) {
     } else {
         ramfs_stats.dir_count--;
     }
+    ramfs_limits_sub(node->limits, 0, 1);
     
     ramfs_node_unlock(parent);
     ramfs_node_unlock(node);
@@ -962,6 +1084,7 @@ int ramfs_rename(const char *old_path, const char *new_path) {
         } else {
             ramfs_stats.dir_count--;
         }
+        ramfs_limits_sub(existing->limits, 0, 1);
 
         if (existing->vfs_node) {
             vfs_node_release_name(existing->vfs_node);
@@ -1304,6 +1427,11 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
             ramfs_unlock();
             return 0;
         }
+        if (!ramfs_limits_fits(rn->limits, backing_to_copy, 0)) {
+            ramfs_node_unlock(rn);
+            ramfs_unlock();
+            return 0;
+        }
         if (!ramfs_capacity_for_length(backing_to_copy, &new_cap)) {
             ramfs_node_unlock(rn);
             ramfs_unlock();
@@ -1320,6 +1448,7 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
         rn->data_capacity = new_cap;
         rn->length = backing_to_copy;
         ramfs_stats.used_size += backing_to_copy;
+        ramfs_limits_add(rn->limits, backing_to_copy, 0);
         rn->backing_data = NULL;
         rn->backing_length = 0;
     }
@@ -1335,6 +1464,11 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
             return 0;
         }
         if (!ramfs_check_space(new_cap - old_capacity)) {
+            ramfs_node_unlock(rn);
+            ramfs_unlock();
+            return 0;
+        }
+        if (!ramfs_limits_fits(rn->limits, new_cap - old_capacity, 0)) {
             ramfs_node_unlock(rn);
             ramfs_unlock();
             return 0;
@@ -1360,6 +1494,7 @@ static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size
         rn->data = new_data;
         rn->data_capacity = new_cap;
         ramfs_stats.used_size += new_cap - old_capacity;
+        ramfs_limits_add(rn->limits, new_cap - old_capacity, 0);
     }
     
     if (needed > rn->length && rn->is_memfd &&
@@ -1396,6 +1531,7 @@ static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags) {
         
         if (rn->data) {
             ramfs_stats.used_size -= rn->data_capacity;
+            ramfs_limits_sub(rn->limits, rn->data_capacity, 0);
             kfree(rn->data);
             rn->data = NULL;
             rn->data_capacity = 0;
@@ -1429,6 +1565,7 @@ static void ramfs_vfs_close(vfs_node_t *node) {
     }
     if (rn->type == RAMFS_NODE_FILE && rn->data_capacity > 0) {
         ramfs_stats.used_size -= rn->data_capacity;
+        ramfs_limits_sub(rn->limits, rn->data_capacity, 0);
     }
     if (rn->data) kfree(rn->data);
     ramfs_free_node_name(rn);
@@ -1469,6 +1606,7 @@ static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {
     if (length == 0) {
         if (rn->data) {
             ramfs_stats.used_size -= rn->data_capacity;
+            ramfs_limits_sub(rn->limits, rn->data_capacity, 0);
             kfree(rn->data);
             rn->data = NULL;
             rn->data_capacity = 0;
@@ -1481,6 +1619,7 @@ static int ramfs_vfs_truncate(vfs_node_t *node, uint64_t length) {
         if (rn->backing_length > length) rn->backing_length = length;
         ramfs_shrink_node_data(rn);
         ramfs_stats.used_size -= old_capacity - rn->data_capacity;
+        ramfs_limits_sub(rn->limits, old_capacity - rn->data_capacity, 0);
     } else if (length > rn->length) {
         rn->length = length;
     }
@@ -1572,6 +1711,10 @@ int ramfs_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
         ramfs_unlock();
         return RAMFS_ERR_EXIST;
     }
+    if (!ramfs_limits_fits(prn->limits, 0, 1)) {
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
     node = ramfs_alloc_node();
     if (!node) {
         ramfs_unlock();
@@ -1590,12 +1733,14 @@ int ramfs_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
     node->uid = current_task ? current_task->euid : 0;
     node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
+    node->limits = prn->limits;
     node->atime = ramfs_get_time();
     node->mtime = node->atime;
     node->ctime = node->atime;
     node->next_sibling = prn->children;
     prn->children = node;
     prn->mtime = node->mtime;
+    ramfs_limits_add(prn->limits, 0, 1);
     ramfs_stats.file_count++;
     ramfs_unlock();
     return RAMFS_ERR_OK;
@@ -1795,6 +1940,12 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
         ramfs_unlock();
         return RAMFS_ERR_OK;
     }
+
+    if (!ramfs_limits_fits(prn->limits, 0, 1)) {
+        ramfs_node_unlock(prn);
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
     
     node = ramfs_alloc_node();
     if (!node) {
@@ -1818,6 +1969,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
     node->uid = current_task ? current_task->euid : 0;
     node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
+    node->limits = prn->limits;
     node->data = NULL;
     node->data_capacity = 0;
     node->length = 0;
@@ -1825,6 +1977,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
     node->next_sibling = prn->children;
     prn->children = node;
     prn->mtime = ramfs_get_time();
+    ramfs_limits_add(prn->limits, 0, 1);
     
     ramfs_stats.file_count++;
     
@@ -2067,6 +2220,12 @@ static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms)
         ramfs_unlock();
         return -17;
     }
+
+    if (!ramfs_limits_fits(prn->limits, 0, 1)) {
+        ramfs_node_unlock(prn);
+        ramfs_unlock();
+        return RAMFS_ERR_NOSPC;
+    }
     
     node = ramfs_alloc_node();
     if (!node) {
@@ -2087,11 +2246,13 @@ static int ramfs_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms)
     node->uid = current_task ? current_task->euid : 0;
     node->gid = current_task ? current_task->egid : 0;
     node->parent = prn;
+    node->limits = prn->limits;
     node->children = NULL;
     
     node->next_sibling = prn->children;
     prn->children = node;
     prn->mtime = ramfs_get_time();
+    ramfs_limits_add(prn->limits, 0, 1);
     
     ramfs_stats.dir_count++;
     
@@ -2118,6 +2279,10 @@ static int ramfs_vfs_rename(vfs_node_t *old_parent, const char *old_name,
 
     if (!old_prn || !new_prn || old_prn->type != 1 || new_prn->type != 1) {
         return RAMFS_ERR_NOTDIR;
+    }
+
+    if (old_prn->limits != new_prn->limits) {
+        return -18;
     }
 
     ramfs_lock();
@@ -2253,13 +2418,19 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
     ramfs_node_t *rn;
     vfs_node_t *vn;
 
-    (void)device;
     (void)mountpoint;
 
     rn = ramfs_alloc_node();
     if (!rn) return NULL;
 
+    rn->limits = ramfs_limits_for_mount(device);
+    if (!rn->limits) {
+        kfree(rn);
+        return NULL;
+    }
+
     if (ramfs_set_node_name(rn, "tmpfs") != RAMFS_ERR_OK) {
+        kfree(rn->limits);
         kfree(rn);
         return NULL;
     }
@@ -2274,6 +2445,7 @@ static vfs_node_t *tmpfs_vfs_do_mount(const char *device, const char *mountpoint
     vn = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
     if (!vn) {
         ramfs_free_node_name(rn);
+        kfree(rn->limits);
         kfree(rn);
         return NULL;
     }

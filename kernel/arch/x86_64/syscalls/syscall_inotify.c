@@ -33,11 +33,38 @@ typedef struct {
     inotify_queued_event_t *head;
     inotify_queued_event_t *tail;
     uint64_t queue_count;
+    int overflowed;
 } inotify_instance_t;
 
 static inotify_instance_t *inotify_instances;
 static int inotify_capacity;
+static int inotify_instance_count;
 static mutex_t inotify_lock;
+
+static uint64_t inotify_max_instances = 128;
+static uint64_t inotify_max_watches = 8192;
+static uint64_t inotify_max_queued = 16384;
+
+#define INOTIFY_Q_OVERFLOW 0x00004000u
+
+uint64_t inotify_get_max_instances(void) { return inotify_max_instances; }
+uint64_t inotify_get_max_watches(void) { return inotify_max_watches; }
+uint64_t inotify_get_max_queued(void) { return inotify_max_queued; }
+int inotify_set_max_instances(uint64_t v) {
+    if (v == 0 || v > 1048576) return -1;
+    inotify_max_instances = v;
+    return 0;
+}
+int inotify_set_max_watches(uint64_t v) {
+    if (v == 0 || v > 1048576) return -1;
+    inotify_max_watches = v;
+    return 0;
+}
+int inotify_set_max_queued(uint64_t v) {
+    if (v == 0 || v > 1048576) return -1;
+    inotify_max_queued = v;
+    return 0;
+}
 
 static int inotify_grow(void) {
     inotify_instance_t *new_instances;
@@ -82,6 +109,16 @@ static void inotify_queue(inotify_instance_t *instance, int wd, uint32_t mask,
     size_t allocation_size;
 
     if (!instance) return;
+    if (instance->queue_count >= inotify_max_queued) {
+        if (!instance->overflowed) {
+            instance->overflowed = 1;
+            mask = INOTIFY_Q_OVERFLOW;
+            wd = -1;
+            name = NULL;
+        } else {
+            return;
+        }
+    }
     length = name ? strlen(name) : 0;
     if (length > UINT32_MAX - 4) return;
     padded_length = name ? (length + 1 + 3) & ~(size_t)3 : 0;
@@ -107,9 +144,18 @@ static void inotify_queue(inotify_instance_t *instance, int wd, uint32_t mask,
 
 static int inotify_create(int flags) {
     int index;
+    int count;
 
     if (flags & ~(INOTIFY_NONBLOCK | INOTIFY_CLOEXEC)) return -EINVAL;
     mutex_lock(&inotify_lock);
+    count = 0;
+    for (index = 0; index < inotify_capacity; index++) {
+        if (inotify_instances[index].in_use) count++;
+    }
+    if ((uint64_t)count >= inotify_max_instances) {
+        mutex_unlock(&inotify_lock);
+        return -EMFILE;
+    }
     index = inotify_allocate();
     if (index < 0) {
         mutex_unlock(&inotify_lock);
@@ -120,6 +166,7 @@ static int inotify_create(int flags) {
     inotify_instances[index].owner_pid = current_task ? current_task->pid : 0;
     inotify_instances[index].flags = flags;
     inotify_instances[index].next_wd = 1;
+    inotify_instance_count++;
     mutex_unlock(&inotify_lock);
     return INOTIFY_BASE_FD + index;
 }
@@ -174,6 +221,11 @@ static int sys_inotify_add_watch(int fd, const char *pathname, uint64_t mask) {
         mutex_unlock(&inotify_lock);
         vfs_release(node);
         return wd;
+    }
+    if ((uint64_t)instance->watch_count >= inotify_max_watches) {
+        mutex_unlock(&inotify_lock);
+        vfs_release(node);
+        return -ENOSPC;
     }
     if (instance->watch_count == instance->watch_capacity) {
         if (instance->watch_capacity > INT32_MAX / 2) {
@@ -311,7 +363,10 @@ retry_read:
     memcpy(output + 8, &event->cookie, sizeof(event->cookie));
     memcpy(output + 12, &event->name_length, sizeof(event->name_length));
     instance->head = event->next;
-    if (!instance->head) instance->tail = NULL;
+    if (!instance->head) {
+        instance->tail = NULL;
+        instance->overflowed = 0;
+    }
     instance->queue_count--;
     mutex_unlock(&inotify_lock);
     if (copy_to_user(buffer, output, sizeof(output)) < 0 ||
@@ -351,6 +406,7 @@ int inotify_close_fd(int fd) {
         event = next;
     }
     memset(instance, 0, sizeof(inotify_instance_t));
+    if (inotify_instance_count > 0) inotify_instance_count--;
     any_in_use = 0;
     for (i = 0; i < inotify_capacity; i++) {
         if (inotify_instances[i].in_use) {
@@ -439,6 +495,7 @@ void inotify_close_task(pid_t pid) {
             event = inotify_instances[index].head;
             memset(&inotify_instances[index], 0,
                    sizeof(inotify_instance_t));
+            if (inotify_instance_count > 0) inotify_instance_count--;
         }
         any_in_use = 0;
         for (i = 0; i < inotify_capacity; i++) {
@@ -487,6 +544,72 @@ void inotify_notify(vfs_node_t *node, uint32_t mask, const char *name) {
     }
     mutex_unlock(&inotify_lock);
     if (queued) descriptor_ready_notify();
+}
+
+void inotify_invalidate_node(vfs_node_t *node) {
+    inotify_instance_t *instance;
+    int i;
+    int j;
+    vfs_node_t *watched;
+
+    if (!node) return;
+    mutex_lock(&inotify_lock);
+    for (i = 0; i < inotify_capacity; i++) {
+        instance = &inotify_instances[i];
+        if (!instance->in_use) continue;
+        for (j = 0; j < instance->watch_count; j++) {
+            if (instance->watches[j].node != node) continue;
+            watched = instance->watches[j].node;
+            inotify_queue(instance, instance->watches[j].wd,
+                          INOTIFY_IGNORED, NULL);
+            if (j + 1 < instance->watch_count) {
+                memmove(&instance->watches[j], &instance->watches[j + 1],
+                        (instance->watch_count - j - 1) *
+                            sizeof(inotify_watch_t));
+            }
+            instance->watch_count--;
+            j--;
+            mutex_unlock(&inotify_lock);
+            vfs_close(watched);
+            descriptor_ready_notify();
+            mutex_lock(&inotify_lock);
+        }
+    }
+    mutex_unlock(&inotify_lock);
+}
+
+void inotify_invalidate_mount(void *mount) {
+    inotify_instance_t *instance;
+    vfs_mount_t *m;
+    int i;
+    int j;
+    vfs_node_t *watched;
+
+    if (!mount) return;
+    m = (vfs_mount_t *)mount;
+    mutex_lock(&inotify_lock);
+    for (i = 0; i < inotify_capacity; i++) {
+        instance = &inotify_instances[i];
+        if (!instance->in_use) continue;
+        for (j = 0; j < instance->watch_count; j++) {
+            watched = instance->watches[j].node;
+            if (!watched || vfs_get_mount_for_node(watched) != m) continue;
+            inotify_queue(instance, instance->watches[j].wd,
+                          INOTIFY_IGNORED, NULL);
+            if (j + 1 < instance->watch_count) {
+                memmove(&instance->watches[j], &instance->watches[j + 1],
+                        (instance->watch_count - j - 1) *
+                            sizeof(inotify_watch_t));
+            }
+            instance->watch_count--;
+            j--;
+            mutex_unlock(&inotify_lock);
+            vfs_close(watched);
+            descriptor_ready_notify();
+            mutex_lock(&inotify_lock);
+        }
+    }
+    mutex_unlock(&inotify_lock);
 }
 
 void syscalls_inotify_init(void) {

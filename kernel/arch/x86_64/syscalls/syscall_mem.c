@@ -12,6 +12,10 @@ extern void pfa_cow_release(uint64_t phys_addr);
 #define MS_ASYNC 1
 #define MS_INVALIDATE 2
 #define MS_SYNC 4
+#define MADV_NORMAL 0
+#define MADV_RANDOM 1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED 3
 #define MADV_DONTNEED 4
 #define MADV_FREE 8
 
@@ -765,6 +769,7 @@ static int sys_madvise(void *addr, size_t length, int advice) {
     uint64_t size;
     uint64_t end;
     uint64_t page;
+    task_ext_t *e;
     int covered;
     int i;
 
@@ -776,7 +781,42 @@ static int sys_madvise(void *addr, size_t length, int advice) {
     if (!((advice >= 0 && advice <= 4) ||
             (advice >= 8 && advice <= 21) ||
             (advice >= 100 && advice <= 101))) return -EINVAL;
-    if (length == 0 || (advice != MADV_DONTNEED && advice != MADV_FREE))
+    if (length == 0)
+        return 0;
+    if (!current_task) return -ESRCH;
+    if (advice == MADV_NORMAL || advice == MADV_SEQUENTIAL ||
+        advice == MADV_RANDOM) {
+        e = task_ext_get(current_task, 1);
+        if (!e) return -ENOMEM;
+        if (advice == MADV_SEQUENTIAL)
+            e->readahead_pages = 17;
+        else if (advice == MADV_RANDOM)
+            e->readahead_pages = 1;
+        else
+            e->readahead_pages = 2;
+        return 0;
+    }
+    if (advice == MADV_WILLNEED) {
+        size = align_up_u64(length, PAGE_SIZE);
+        if (size == 0 || base + size < base || base + size > KERNEL_VMA)
+            return -ENOMEM;
+        end = base + size;
+        for (page = base; page < end; page += PAGE_SIZE) {
+            for (i = 0; i < current_task->file_map_count; i++) {
+                if (!current_task->file_maps[i].node) continue;
+                if (current_task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS)
+                    continue;
+                if (page >= current_task->file_maps[i].vaddr &&
+                    page < current_task->file_maps[i].vaddr +
+                        current_task->file_maps[i].memsz) {
+                    task_handle_file_page_fault(current_task, page);
+                    break;
+                }
+            }
+        }
+        return 0;
+    }
+    if (advice != MADV_DONTNEED && advice != MADV_FREE)
         return 0;
     size = align_up_u64(length, PAGE_SIZE);
     if (size == 0 || base + size < base || base + size > KERNEL_VMA)

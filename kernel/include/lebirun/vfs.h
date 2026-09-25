@@ -49,6 +49,7 @@
 struct vfs_node;
 struct dirent;
 struct squashfs_transfer_cache;
+struct task;
 
 typedef struct dirent {
     union {
@@ -147,6 +148,13 @@ typedef struct {
     uint64_t flags;
 } vfs_mount_t;
 
+typedef struct vfs_mnt_ns vfs_mnt_ns_t;
+
+vfs_mnt_ns_t *vfs_task_ns(void);
+int vfs_unshare_ns(struct task *task);
+int vfs_mnt_ns_fork(struct task *parent, struct task *child);
+void vfs_mnt_ns_release(struct task *task);
+
 #define VFS_MS_RDONLY   1
 #define VFS_MS_NOSUID   2
 #define VFS_MS_NODEV    4
@@ -194,6 +202,8 @@ int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags);
 int vfs_unlink(vfs_node_t *parent, const char *name);
 int vfs_unlink_checked(vfs_node_t *parent, const char *name, int remove_directory);
 int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
+int vfs_rename(vfs_node_t *old_parent, const char *old_name,
+               vfs_node_t *new_parent, const char *new_name);
 
 vfs_node_t *vfs_namei(const char *path);
 vfs_node_t *vfs_namei_nofollow(const char *path);

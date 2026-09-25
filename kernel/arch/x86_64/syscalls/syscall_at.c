@@ -179,7 +179,7 @@ static int sys_mknodat(int dirfd, const char *pathname, int mode,
     }
     vfs_release(parent);
     kfree(name);
-    return result == 0 ? 0 : (result < -11 ? result : -EIO);
+    return ramfs_err_to_errno(result);
 }
 
 static int sys_fchownat(int dirfd, const char *pathname, int owner) {
@@ -350,7 +350,7 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
         return -EROFS;
     }
 
-    r = old_parent->ops->rename(old_parent, old_name, new_parent, new_name);
+    r = vfs_rename(old_parent, old_name, new_parent, new_name);
     vfs_release(old_node);
     vfs_release(new_parent);
     kfree(old_name);

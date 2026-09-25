@@ -23,10 +23,103 @@ extern void copy_file_range_release_mount(vfs_node_t *root);
 
 static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
-static vfs_mount_t *mounts = NULL;
-static int mounts_capacity = 0;
 static mutex_t vfs_lock;
 static int squashfs_access_blocked = 0;
+
+static int vfs_mount_set_strings(vfs_mount_t *mount, const char *path,
+                                 const char *device);
+static void vfs_mount_clear_strings(vfs_mount_t *mount);
+
+struct vfs_mnt_ns {
+    vfs_mount_t *mounts;
+    int capacity;
+    int refs;
+    int is_init;
+};
+
+static struct vfs_mnt_ns vfs_init_ns = { NULL, 0, 1, 1 };
+
+vfs_mnt_ns_t *vfs_task_ns(void) {
+    task_t *t = current_task;
+    if (t && t->mnt_ns) return t->mnt_ns;
+    return &vfs_init_ns;
+}
+
+int vfs_unshare_ns(task_t *task) {
+    vfs_mnt_ns_t *old_ns;
+    vfs_mnt_ns_t *ns;
+    int i;
+    if (!task) return -1;
+    old_ns = task->mnt_ns ? task->mnt_ns : &vfs_init_ns;
+    ns = (vfs_mnt_ns_t *)kmalloc(sizeof(vfs_mnt_ns_t));
+    if (!ns) return -1;
+    ns->mounts = NULL;
+    ns->capacity = 0;
+    ns->refs = 1;
+    ns->is_init = 0;
+    if (old_ns->capacity > 0) {
+        ns->mounts = (vfs_mount_t *)kmalloc((uint64_t)old_ns->capacity *
+                                            sizeof(vfs_mount_t));
+        if (!ns->mounts) {
+            kfree(ns);
+            return -1;
+        }
+        memset(ns->mounts, 0,
+               (uint64_t)old_ns->capacity * sizeof(vfs_mount_t));
+        ns->capacity = old_ns->capacity;
+        for (i = 0; i < old_ns->capacity; i++) {
+            if (!old_ns->mounts[i].in_use) continue;
+            ns->mounts[i].in_use = 1;
+            ns->mounts[i].flags = old_ns->mounts[i].flags;
+            ns->mounts[i].root = old_ns->mounts[i].root;
+            ns->mounts[i].fs_type = old_ns->mounts[i].fs_type;
+            if (vfs_mount_set_strings(&ns->mounts[i],
+                                      old_ns->mounts[i].path,
+                                      old_ns->mounts[i].device) != 0) {
+                ns->mounts[i].in_use = 0;
+            }
+        }
+    }
+    task->mnt_ns = ns;
+    if (!old_ns->is_init) {
+        old_ns->refs--;
+        if (old_ns->refs <= 0) {
+            for (i = 0; i < old_ns->capacity; i++) {
+                if (old_ns->mounts[i].in_use)
+                    vfs_mount_clear_strings(&old_ns->mounts[i]);
+            }
+            kfree(old_ns->mounts);
+            kfree(old_ns);
+        }
+    }
+    return 0;
+}
+
+int vfs_mnt_ns_fork(task_t *parent, task_t *child) {
+    vfs_mnt_ns_t *ns;
+    if (!parent || !child) return -1;
+    ns = parent->mnt_ns ? parent->mnt_ns : &vfs_init_ns;
+    child->mnt_ns = ns;
+    if (!ns->is_init) ns->refs++;
+    return 0;
+}
+
+void vfs_mnt_ns_release(task_t *task) {
+    vfs_mnt_ns_t *ns;
+    int i;
+    if (!task || !task->mnt_ns) return;
+    ns = task->mnt_ns;
+    task->mnt_ns = NULL;
+    if (ns->is_init) return;
+    ns->refs--;
+    if (ns->refs > 0) return;
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use)
+            vfs_mount_clear_strings(&ns->mounts[i]);
+    }
+    kfree(ns->mounts);
+    kfree(ns);
+}
 
 static vfs_node_t root_node;
 static dirent_t root_dirent;
@@ -134,34 +227,35 @@ static const vfs_node_ops_t root_ops = {
     .rename = root_rename
 };
 
-static int vfs_grow_mounts(void) {
+static int vfs_grow_mounts(vfs_mnt_ns_t *ns) {
     int new_cap;
     int i;
     vfs_mount_t *new_mounts;
 
-    if (mounts_capacity == INT32_MAX) return -1;
-    new_cap = mounts_capacity + 1;
-    if (new_cap <= mounts_capacity) return -1;
+    if (!ns) return -1;
+    if (ns->capacity == INT32_MAX) return -1;
+    new_cap = ns->capacity + 1;
+    if (new_cap <= ns->capacity) return -1;
     if ((uint64_t)new_cap > UINT64_MAX / sizeof(vfs_mount_t)) return -1;
-    new_mounts = (vfs_mount_t *)krealloc(mounts, new_cap * sizeof(vfs_mount_t));
+    new_mounts = (vfs_mount_t *)krealloc(ns->mounts, new_cap * sizeof(vfs_mount_t));
     if (!new_mounts) return -1;
-    for (i = mounts_capacity; i < new_cap; i++) {
+    for (i = ns->capacity; i < new_cap; i++) {
         new_mounts[i].in_use = 0;
         new_mounts[i].path = NULL;
         new_mounts[i].device = NULL;
         new_mounts[i].root = NULL;
         new_mounts[i].fs_type = NULL;
     }
-    mounts = new_mounts;
-    mounts_capacity = new_cap;
+    ns->mounts = new_mounts;
+    ns->capacity = new_cap;
     return 0;
 }
 
 void KERNEL_INIT vfs_init(void) {
     mutex_init(&vfs_lock);
 
-    mounts_capacity = 0;
-    mounts = NULL;
+    vfs_init_ns.mounts = NULL;
+    vfs_init_ns.capacity = 0;
     
     memset(&root_node, 0, sizeof(vfs_node_t));
     root_node.flags = VFS_DIRECTORY;
@@ -364,19 +458,21 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     vfs_node_t *parent_node;
     vfs_fs_type_t *fs;
     vfs_node_t *root;
+    vfs_mnt_ns_t *ns;
     
     
     if (!mountpoint || !fs_type) {
         return -1;
     }
 
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use) {
-            if (device && device[0] != '\0' && strcmp(mounts[i].device, device) == 0) {
-                printf("VFS: %s is already mounted on %s\n", device, mounts[i].path);
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use) {
+            if (device && device[0] != '\0' && strcmp(ns->mounts[i].device, device) == 0) {
+                printf("VFS: %s is already mounted on %s\n", device, ns->mounts[i].path);
                 return -1;
             }
-            if (strcmp(mounts[i].path, mountpoint) == 0) {
+            if (strcmp(ns->mounts[i].path, mountpoint) == 0) {
                 printf("VFS: %s already has a filesystem mounted\n", mountpoint);
                 return -1;
             }
@@ -409,17 +505,17 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     }
     
     slot = -1;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use) {
+    for (i = 0; i < ns->capacity; i++) {
+        if (!ns->mounts[i].in_use) {
             slot = i;
             break;
         }
     }
     
     if (slot < 0) {
-        if (vfs_grow_mounts() == 0) {
-            for (i = 0; i < mounts_capacity; i++) {
-                if (!mounts[i].in_use) {
+        if (vfs_grow_mounts(ns) == 0) {
+            for (i = 0; i < ns->capacity; i++) {
+                if (!ns->mounts[i].in_use) {
                     slot = i;
                     break;
                 }
@@ -432,13 +528,13 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
         return -1;
     }
 
-    if (vfs_mount_set_strings(&mounts[slot], mountpoint, device) != 0) {
+    if (vfs_mount_set_strings(&ns->mounts[slot], mountpoint, device) != 0) {
         return -1;
     }
     
     root = fs->mount(device, mountpoint);
     if (!root) {
-        vfs_mount_clear_strings(&mounts[slot]);
+        vfs_mount_clear_strings(&ns->mounts[slot]);
         return -1;
     }
     
@@ -448,10 +544,10 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
         root->ptr = existing;
     }
 
-    mounts[slot].in_use = 1;
-    mounts[slot].flags = flags;
-    mounts[slot].root = root;
-    mounts[slot].fs_type = fs;
+    ns->mounts[slot].in_use = 1;
+    ns->mounts[slot].flags = flags;
+    ns->mounts[slot].root = root;
+    ns->mounts[slot].fs_type = fs;
     
     root->parent = vfs_root;
     
@@ -468,10 +564,10 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
             n = (size_t)(end - base);
             if (vfs_node_set_name_n(root, base, n) != 0) {
                 if (fs->unmount) fs->unmount(root);
-                mounts[slot].in_use = 0;
-                mounts[slot].root = NULL;
-                mounts[slot].fs_type = NULL;
-                vfs_mount_clear_strings(&mounts[slot]);
+                ns->mounts[slot].in_use = 0;
+                ns->mounts[slot].root = NULL;
+                ns->mounts[slot].fs_type = NULL;
+                vfs_mount_clear_strings(&ns->mounts[slot]);
                 return -1;
             }
             
@@ -480,10 +576,10 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
             parent_path = (char *)kmalloc(n + 1);
             if (!parent_path) {
                 if (fs->unmount) fs->unmount(root);
-                mounts[slot].in_use = 0;
-                mounts[slot].root = NULL;
-                mounts[slot].fs_type = NULL;
-                vfs_mount_clear_strings(&mounts[slot]);
+                ns->mounts[slot].in_use = 0;
+                ns->mounts[slot].root = NULL;
+                ns->mounts[slot].fs_type = NULL;
+                vfs_mount_clear_strings(&ns->mounts[slot]);
                 return -1;
             }
             memcpy(parent_path, mountpoint, n);
@@ -515,28 +611,31 @@ int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
 }
 
 int vfs_unmount(const char *mountpoint) {
+    vfs_mnt_ns_t *ns;
     int i;
     int ret;
     
     if (!mountpoint) return -1;
     
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
-            copy_file_range_release_mount(mounts[i].root);
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, mountpoint) == 0) {
+            copy_file_range_release_mount(ns->mounts[i].root);
             overlay_flush_cache();
             squashfs_flush_cache();
             heap_reclaim_unused();
-            if (mounts[i].fs_type && mounts[i].fs_type->unmount) {
-                ret = mounts[i].fs_type->unmount(mounts[i].root);
+            inotify_invalidate_mount(&ns->mounts[i]);
+            if (ns->mounts[i].fs_type && ns->mounts[i].fs_type->unmount) {
+                ret = ns->mounts[i].fs_type->unmount(ns->mounts[i].root);
                 if (ret != 0) {
                     return ret;
                 }
             }
             
-            mounts[i].in_use = 0;
-            vfs_mount_clear_strings(&mounts[i]);
-            mounts[i].root = NULL;
-            mounts[i].fs_type = NULL;
+            ns->mounts[i].in_use = 0;
+            vfs_mount_clear_strings(&ns->mounts[i]);
+            ns->mounts[i].root = NULL;
+            ns->mounts[i].fs_type = NULL;
             
             printf("VFS: Unmounted %s\n", mountpoint);
             overlay_flush_cache();
@@ -552,16 +651,18 @@ int vfs_unmount(const char *mountpoint) {
 }
 
 int KERNEL_INIT vfs_remove_mount(const char *mountpoint) {
+    vfs_mnt_ns_t *ns;
     int i;
 
     if (!mountpoint) return -1;
 
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
-            mounts[i].in_use = 0;
-            vfs_mount_clear_strings(&mounts[i]);
-            mounts[i].root = NULL;
-            mounts[i].fs_type = NULL;
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, mountpoint) == 0) {
+            ns->mounts[i].in_use = 0;
+            vfs_mount_clear_strings(&ns->mounts[i]);
+            ns->mounts[i].root = NULL;
+            ns->mounts[i].fs_type = NULL;
             return 0;
         }
     }
@@ -781,6 +882,7 @@ static dirent_t *vfs_readdir_mount_children(vfs_node_t *node, uint64_t mount_ind
     int is_dup;
     uint64_t fi;
     dirent_t *fs_entry;
+    vfs_mnt_ns_t *ns;
 
     if (node == vfs_root)
         return NULL;
@@ -794,14 +896,15 @@ static dirent_t *vfs_readdir_mount_children(vfs_node_t *node, uint64_t mount_ind
     }
 
     count = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use)
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (!ns->mounts[i].in_use)
             continue;
-        if (strncmp(mounts[i].path, dir_path, dir_len) != 0)
+        if (strncmp(ns->mounts[i].path, dir_path, dir_len) != 0)
             continue;
-        if (mounts[i].path[dir_len] != '/')
+        if (ns->mounts[i].path[dir_len] != '/')
             continue;
-        child_name = mounts[i].path + dir_len + 1;
+        child_name = ns->mounts[i].path + dir_len + 1;
         if (strchr(child_name, '/') != NULL)
             continue;
         if (*child_name == '\0')
@@ -842,6 +945,7 @@ static int vfs_has_mount_children(vfs_node_t *node) {
     char *dir_path;
     size_t dir_len;
     const char *child_name;
+    vfs_mnt_ns_t *ns;
     int i;
 
     if (node == vfs_root)
@@ -851,14 +955,15 @@ static int vfs_has_mount_children(vfs_node_t *node) {
     dir_len = strlen(dir_path);
     if (dir_len > 1 && dir_path[dir_len - 1] == '/')
         dir_path[--dir_len] = '\0';
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use)
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (!ns->mounts[i].in_use)
             continue;
-        if (strncmp(mounts[i].path, dir_path, dir_len) != 0)
+        if (strncmp(ns->mounts[i].path, dir_path, dir_len) != 0)
             continue;
-        if (mounts[i].path[dir_len] != '/')
+        if (ns->mounts[i].path[dir_len] != '/')
             continue;
-        child_name = mounts[i].path + dir_len + 1;
+        child_name = ns->mounts[i].path + dir_len + 1;
         if (*child_name != '\0' && strchr(child_name, '/') == NULL) {
             kfree(dir_path);
             return 1;
@@ -997,12 +1102,15 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     memcpy(path + dir_len + 1, name, name_len);
     path[dir_len + 1 + name_len] = '\0';
 
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use)
-            continue;
-        if (strcmp(mounts[i].path, path) == 0) {
-            kfree(path);
-            return mounts[i].root;
+    {
+        vfs_mnt_ns_t *ns = vfs_task_ns();
+        for (i = 0; i < ns->capacity; i++) {
+            if (!ns->mounts[i].in_use)
+                continue;
+            if (strcmp(ns->mounts[i].path, path) == 0) {
+                kfree(path);
+                return ns->mounts[i].root;
+            }
         }
     }
 
@@ -1019,7 +1127,8 @@ int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
     create = parent->ops ? parent->ops->create : NULL;
     if (create) {
         result = create(parent, name, flags);
-        if (result == 0) inotify_notify(parent, 0x00000100U, name);
+        if (result == 0)
+            inotify_notify(parent, 0x00000100U, name);
         return result;
     }
     return -1;
@@ -1027,14 +1136,22 @@ int vfs_create(vfs_node_t *parent, const char *name, uint64_t flags) {
 
 int vfs_unlink(vfs_node_t *parent, const char *name) {
     unlink_type_t unlink;
+    vfs_node_t *target;
     int result;
 
     if (!parent || !name) return -1;
     if (VFS_GET_TYPE(parent->flags) != VFS_DIRECTORY) return -1;
     unlink = parent->ops ? parent->ops->unlink : NULL;
     if (unlink) {
+        target = vfs_finddir(parent, name);
+        if (target)
+            inotify_invalidate_node(target);
         result = unlink(parent, name);
-        if (result == 0) inotify_notify(parent, 0x00000200U, name);
+        if (result == 0) {
+            inotify_notify(parent, 0x00000200U, name);
+        }
+        if (target)
+            vfs_release(target);
         return result;
     }
     return -1;
@@ -1081,23 +1198,37 @@ int vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) {
     return -1;
 }
 
+int vfs_rename(vfs_node_t *old_parent, const char *old_name,
+               vfs_node_t *new_parent, const char *new_name) {
+    rename_type_t rename;
+
+    if (!old_parent || !old_name || !new_parent || !new_name) return -1;
+    if (VFS_GET_TYPE(old_parent->flags) != VFS_DIRECTORY) return -1;
+    if (VFS_GET_TYPE(new_parent->flags) != VFS_DIRECTORY) return -1;
+    rename = old_parent->ops ? old_parent->ops->rename : NULL;
+    if (!rename) return -1;
+    return rename(old_parent, old_name, new_parent, new_name);
+}
+
 static vfs_mount_t *find_mount_for_path(const char *path) {
     size_t best_len;
     int i;
     size_t len;
     vfs_mount_t *best;
+    vfs_mnt_ns_t *ns;
     
     best = NULL;
     best_len = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use) continue;
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (!ns->mounts[i].in_use) continue;
         
-        len = strlen(mounts[i].path);
+        len = strlen(ns->mounts[i].path);
         if (len <= best_len) continue;
-        if (strncmp(path, mounts[i].path, len) == 0) {
+        if (strncmp(path, ns->mounts[i].path, len) == 0) {
             if (path[len] == '\0' || path[len] == '/' || 
-                (len == 1 && mounts[i].path[0] == '/')) {
-                best = &mounts[i];
+                (len == 1 && ns->mounts[i].path[0] == '/')) {
+                best = &ns->mounts[i];
                 best_len = len;
             }
         }
@@ -1677,13 +1808,15 @@ int vfs_split_path_alloc(const char *path, char **parent_out,
 
 vfs_mount_t *vfs_get_mount_for_node(vfs_node_t *node) {
     vfs_node_t *ancestor;
+    vfs_mnt_ns_t *ns;
     int i;
 
     ancestor = node;
+    ns = vfs_task_ns();
     while (ancestor) {
-        for (i = 0; i < mounts_capacity; i++) {
-            if (mounts[i].in_use && mounts[i].root == ancestor)
-                return &mounts[i];
+        for (i = 0; i < ns->capacity; i++) {
+            if (ns->mounts[i].in_use && ns->mounts[i].root == ancestor)
+                return &ns->mounts[i];
         }
         ancestor = ancestor->parent;
     }
@@ -1707,15 +1840,17 @@ int vfs_sync_node(vfs_node_t *node, int data_only) {
 }
 
 int vfs_sync_all(int data_only) {
+    vfs_mnt_ns_t *ns;
     int i;
     int result;
 
     result = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use || !mounts[i].fs_type ||
-            !mounts[i].fs_type->sync)
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (!ns->mounts[i].in_use || !ns->mounts[i].fs_type ||
+            !ns->mounts[i].fs_type->sync)
             continue;
-        if (mounts[i].fs_type->sync(mounts[i].root, data_only != 0) != 0)
+        if (ns->mounts[i].fs_type->sync(ns->mounts[i].root, data_only != 0) != 0)
             result = -1;
     }
     return result;
@@ -1808,11 +1943,13 @@ int vfs_exchange(vfs_node_t *old_parent, const char *old_name,
 }
 
 vfs_node_t *vfs_get_root(void) {
+    vfs_mnt_ns_t *ns;
     int i;
     
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0) {
-            return mounts[i].root;
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, "/") == 0) {
+            return ns->mounts[i].root;
         }
     }
     return vfs_root;
@@ -1829,43 +1966,50 @@ int KERNEL_INIT vfs_replace_mount_root(const char *mountpoint,
 
     fs = fs_name ? vfs_find_fs(fs_name) : NULL;
 
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, mountpoint) == 0) {
-            if (device && vfs_mount_set_strings(&mounts[i], mounts[i].path, device) != 0)
-                return -1;
-            mounts[i].root = new_root;
-            new_root->parent = vfs_root;
-            if (strcmp(mountpoint, "/") == 0) {
-                vfs_node_release_name(new_root);
+    {
+        vfs_mnt_ns_t *ns = vfs_task_ns();
+        for (i = 0; i < ns->capacity; i++) {
+            if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, mountpoint) == 0) {
+                if (device && vfs_mount_set_strings(&ns->mounts[i], ns->mounts[i].path, device) != 0)
+                    return -1;
+                ns->mounts[i].root = new_root;
+                new_root->parent = vfs_root;
+                if (strcmp(mountpoint, "/") == 0) {
+                    vfs_node_release_name(new_root);
+                }
+                new_root->flags |= VFS_MOUNTPOINT;
+                if (fs)
+                    ns->mounts[i].fs_type = fs;
+                return 0;
             }
-            new_root->flags |= VFS_MOUNTPOINT;
-            if (fs)
-                mounts[i].fs_type = fs;
-            return 0;
         }
     }
     return -1;
 }
 
 int vfs_get_mount_count(void) {
+    vfs_mnt_ns_t *ns;
     int count;
     int i;
     
     count = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use) count++;
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use) count++;
     }
     return count;
 }
 
 vfs_mount_t *vfs_get_mount(int index) {
+    vfs_mnt_ns_t *ns;
     int count;
     int i;
     
     count = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use) {
-            if (count == index) return &mounts[i];
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use) {
+            if (count == index) return &ns->mounts[i];
             count++;
         }
     }
@@ -1873,14 +2017,16 @@ vfs_mount_t *vfs_get_mount(int index) {
 }
 
 void vfs_list_mounts(void) {
+    vfs_mnt_ns_t *ns;
     int i;
     
+    ns = vfs_task_ns();
     printf("VFS: Mount table:\n");
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use) {
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use) {
             printf("  %s -> %s\n", 
-                   mounts[i].path,
-                   mounts[i].fs_type ? mounts[i].fs_type->name : "(unknown)");
+                   ns->mounts[i].path,
+                   ns->mounts[i].fs_type ? ns->mounts[i].fs_type->name : "(unknown)");
         }
     }
 }
@@ -1900,61 +2046,67 @@ static dirent_t *root_readdir(vfs_node_t *node, uint64_t index) {
     (void)node;
     
     count = 0;
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, "/") != 0) {
-            if (strcmp(mounts[i].path, "/ro") == 0) {
-                continue;
+    {
+        vfs_mnt_ns_t *ns = vfs_task_ns();
+        for (i = 0; i < ns->capacity; i++) {
+            if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, "/") != 0) {
+                if (strcmp(ns->mounts[i].path, "/ro") == 0) {
+                    continue;
+                }
+                if (strcmp(ns->mounts[i].path, "/squashfs") == 0) {
+                    continue;
+                }
+                path = ns->mounts[i].path;
+                if (path[0] == '/') path++;
+                if (strchr(path, '/') != NULL) {
+                    continue;
+                }
+                if (count == index) {
+                    if (vfs_dirent_set_name(&root_dirent, path) != 0)
+                        return NULL;
+                    root_dirent.inode = i;
+                    root_dirent.type = VFS_DIRECTORY;
+                    
+                    return &root_dirent;
+                }
+                count++;
             }
-            if (strcmp(mounts[i].path, "/squashfs") == 0) {
-                continue;
-            }
-            path = mounts[i].path;
-            if (path[0] == '/') path++;
-            if (strchr(path, '/') != NULL) {
-                continue;
-            }
-            if (count == index) {
-                if (vfs_dirent_set_name(&root_dirent, path) != 0)
-                    return NULL;
-                root_dirent.inode = i;
-                root_dirent.type = VFS_DIRECTORY;
-                
-                return &root_dirent;
-            }
-            count++;
         }
     }
     
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
-            if (mounts[i].root->readdir) {
-                target = index - count;
-                ramfs_count = 0;
-                for (ramfs_idx = 0; ; ramfs_idx++) {
-                    entry = mounts[i].root->readdir(mounts[i].root, ramfs_idx);
-                    if (!entry) return NULL;
+    {
+        vfs_mnt_ns_t *ns = vfs_task_ns();
+        for (i = 0; i < ns->capacity; i++) {
+            if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, "/") == 0 && ns->mounts[i].root) {
+                if (ns->mounts[i].root->readdir) {
+                    target = index - count;
+                    ramfs_count = 0;
+                    for (ramfs_idx = 0; ; ramfs_idx++) {
+                        entry = ns->mounts[i].root->readdir(ns->mounts[i].root, ramfs_idx);
+                        if (!entry) return NULL;
 
-                    path = vfs_dirent_name(entry);
-                    entry_len = strlen(path);
+                        path = vfs_dirent_name(entry);
+                        entry_len = strlen(path);
 
-                    is_dup = 0;
-                    for (k = 0; k < mounts_capacity; k++) {
-                        if (mounts[k].in_use && mounts[k].path[0] == '/' &&
-                            strlen(mounts[k].path + 1) == entry_len &&
-                            memcmp(mounts[k].path + 1, path, entry_len) == 0) {
-                            is_dup = 1;
-                            break;
+                        is_dup = 0;
+                        for (k = 0; k < ns->capacity; k++) {
+                            if (ns->mounts[k].in_use && ns->mounts[k].path[0] == '/' &&
+                                strlen(ns->mounts[k].path + 1) == entry_len &&
+                                memcmp(ns->mounts[k].path + 1, path, entry_len) == 0) {
+                                is_dup = 1;
+                                break;
+                            }
                         }
-                    }
-                    if (is_dup) continue;
+                        if (is_dup) continue;
 
-                    if (ramfs_count == target) {
-                        return entry;
+                        if (ramfs_count == target) {
+                            return entry;
+                        }
+                        ramfs_count++;
                     }
-                    ramfs_count++;
                 }
+                break;
             }
-            break;
         }
     }
     
@@ -1978,38 +2130,41 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
     
     name_len = strlen(name);
     
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use) continue;
-        
-        if (strcmp(mounts[i].path, "/ro") == 0) {
-            continue;
-        }
-        if (strcmp(mounts[i].path, "/squashfs") == 0) {
-            continue;
-        }
-        
-        if (mounts[i].path[0] == '/' &&
-            strlen(mounts[i].path + 1) == name_len &&
-            memcmp(mounts[i].path + 1, name, name_len) == 0) {
-            return mounts[i].root;
-        }
-    }
-    
-    for (i = 0; i < mounts_capacity; i++) {
-        if (!mounts[i].in_use) continue;
-        if (strcmp(mounts[i].path, "/") == 0 && mounts[i].root) {
-            root = mounts[i].root;
-            if ((uintptr_t)root < 0x1000) {
-                return NULL;
+    {
+        vfs_mnt_ns_t *ns = vfs_task_ns();
+        for (i = 0; i < ns->capacity; i++) {
+            if (!ns->mounts[i].in_use) continue;
+            
+            if (strcmp(ns->mounts[i].path, "/ro") == 0) {
+                continue;
             }
-            if (root->finddir) {
-                if ((uintptr_t)root->finddir < 0x1000) {
+            if (strcmp(ns->mounts[i].path, "/squashfs") == 0) {
+                continue;
+            }
+            
+            if (ns->mounts[i].path[0] == '/' &&
+                strlen(ns->mounts[i].path + 1) == name_len &&
+                memcmp(ns->mounts[i].path + 1, name, name_len) == 0) {
+                return ns->mounts[i].root;
+            }
+        }
+        
+        for (i = 0; i < ns->capacity; i++) {
+            if (!ns->mounts[i].in_use) continue;
+            if (strcmp(ns->mounts[i].path, "/") == 0 && ns->mounts[i].root) {
+                root = ns->mounts[i].root;
+                if ((uintptr_t)root < 0x1000) {
                     return NULL;
                 }
-                found = root->finddir(root, name);
-                if (found) return found;
+                if (root->finddir) {
+                    if ((uintptr_t)root->finddir < 0x1000) {
+                        return NULL;
+                    }
+                    found = root->finddir(root, name);
+                    if (found) return found;
+                }
+                break;
             }
-            break;
         }
     }
     
@@ -2017,11 +2172,13 @@ static vfs_node_t *root_finddir(vfs_node_t *node, const char *name) {
 }
 
 static vfs_node_t *root_mount_root(void) {
+    vfs_mnt_ns_t *ns;
     int i;
 
-    for (i = 0; i < mounts_capacity; i++) {
-        if (mounts[i].in_use && strcmp(mounts[i].path, "/") == 0 && mounts[i].root)
-            return mounts[i].root;
+    ns = vfs_task_ns();
+    for (i = 0; i < ns->capacity; i++) {
+        if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, "/") == 0 && ns->mounts[i].root)
+            return ns->mounts[i].root;
     }
     return NULL;
 }

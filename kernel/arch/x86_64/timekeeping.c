@@ -2,14 +2,21 @@
 #include <lebirun/pit.h>
 #include <lebirun/rtc.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/common.h>
 
 static spinlock_t timekeeping_lock;
 static int64_t realtime_offset_ns;
 static int realtime_initialized;
 
 uint64_t timekeeping_monotonic_ns(void) {
+    uint64_t tsc_ns;
     uint64_t microseconds;
 
+    if (tsc_available()) {
+        tsc_ns = tsc_get_ns();
+        if (tsc_ns != 0)
+            return tsc_ns;
+    }
     microseconds = pit_get_uptime_us();
     if (microseconds > UINT64_MAX / 1000) return UINT64_MAX;
     return microseconds * 1000;
@@ -90,4 +97,76 @@ int timekeeping_set_realtime_ns(uint64_t value) {
     __atomic_store_n(&realtime_initialized, 1, __ATOMIC_RELEASE);
     spin_unlock(&timekeeping_lock);
     return 0;
+}
+static uint64_t tsc_freq_hz;
+static uint64_t tsc_base_tsc;
+static uint64_t tsc_base_us;
+static int tsc_ready;
+static inline uint64_t tsc_rdtsc(void)
+{
+    uint32_t lo;
+    uint32_t hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+static int tsc_has_invariant(void)
+{
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    eax = 0x80000000u;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (eax < 0x80000007u)
+        return 0;
+    eax = 0x80000007u;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    return (edx & (1u << 8)) != 0;
+}
+void tsc_init(void)
+{
+    uint64_t t0;
+    uint64_t t1;
+    uint64_t tick0;
+    uint64_t spins;
+    if (tsc_ready)
+        return;
+    if (!tsc_has_invariant())
+        return;
+    tick0 = pit_get_ticks();
+    t0 = tsc_rdtsc();
+    spins = 0;
+    do {
+        if (++spins > 100000000ULL)
+            return;
+        cpu_relax();
+    } while (pit_get_ticks() - tick0 < 25);
+    t1 = tsc_rdtsc();
+    if (t1 <= t0)
+        return;
+    tsc_freq_hz = (t1 - t0) * pit_get_frequency() / 25;
+    if (tsc_freq_hz < 1000000ULL)
+        return;
+    tsc_base_tsc = t1;
+    tsc_base_us = pit_get_uptime_us();
+    tsc_ready = 1;
+    printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+}
+uint64_t tsc_get_freq_hz(void)
+{
+    return tsc_freq_hz;
+}
+int tsc_available(void)
+{
+    return tsc_ready;
+}
+uint64_t tsc_get_ns(void)
+{
+    uint64_t now;
+    uint64_t delta;
+    if (!tsc_ready || !tsc_freq_hz)
+        return 0;
+    now = tsc_rdtsc();
+    delta = now >= tsc_base_tsc ? now - tsc_base_tsc : 0;
+    return tsc_base_us * 1000ULL + delta * 1000000000ULL / tsc_freq_hz;
 }
