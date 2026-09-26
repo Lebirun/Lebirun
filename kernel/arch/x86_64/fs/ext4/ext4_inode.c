@@ -1,5 +1,6 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/tty.h>
 #include <string.h>
 
@@ -545,6 +546,7 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
     uint8_t *bitmap;
     ext4_group_desc_t desc;
     ext4_inode_t new_inode;
+    uint32_t now;
 
     for (group = 0; group < fs->groups_count; group++) {
         if (ext4_read_group_desc_internal(fs, group, &desc) != 0) {
@@ -592,6 +594,11 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
                 memset(&new_inode, 0, sizeof(ext4_inode_t));
                 new_inode.i_mode = mode;
                 new_inode.i_links_count = 1;
+                now = (uint32_t)(timekeeping_realtime_ns() / 1000000000ULL);
+                new_inode.i_atime = now;
+                new_inode.i_mtime = now;
+                new_inode.i_ctime = now;
+                new_inode.i_crtime = now;
                 ext4_invalidate_inode_cache(fs, ino);
                 if (ext4_write_inode(fs, ino, &new_inode) != 0) return -1;
 

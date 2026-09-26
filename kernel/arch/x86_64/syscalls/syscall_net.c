@@ -416,8 +416,6 @@ static int sys_net_getinfo(uint64_t buf_ptr, const char *unused2, int unused3) {
 
     if (copy_to_user((void *)(uintptr_t)buf_ptr, &info,
                      sizeof(info)) != 0) return -1;
-    
-    klog("netinfo: %s ip=%u.%u.%u.%u\n", netif->name, netif->ipv4.octets[0], netif->ipv4.octets[1], netif->ipv4.octets[2], netif->ipv4.octets[3]);
 
     return 0;
 }
