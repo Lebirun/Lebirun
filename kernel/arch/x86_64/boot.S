@@ -18,9 +18,9 @@ mb2_fb_tag:
     .short 5
     .short 0
     .long 20
-    .long 1024
-    .long 768
-    .long 32
+    .long 0
+    .long 0
+    .long 0
 
     .align 8
     .short 0

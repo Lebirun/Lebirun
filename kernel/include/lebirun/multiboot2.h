@@ -69,6 +69,10 @@ struct multiboot2_tag_mmap {
     struct multiboot2_mmap_entry entries[];
 };
 
+#define MULTIBOOT2_FRAMEBUFFER_INDEXED 0
+#define MULTIBOOT2_FRAMEBUFFER_RGB     1
+#define MULTIBOOT2_FRAMEBUFFER_TEXT    2
+
 struct multiboot2_tag_framebuffer {
     uint32_t type;
     uint32_t size;

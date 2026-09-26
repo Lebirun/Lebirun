@@ -510,7 +510,7 @@ int KERNEL_INIT vga_set_text_mode(const uint8_t *font_data,
     }
 
     vga_text = (volatile uint16_t *)(0xB8000 + KERNEL_VMA);
-    for (i = 0; i < 16384; i++) {
+    for (i = 0; i < 80 * 25; i++) {
         vga_text[i] = 0x0720;
     }
 

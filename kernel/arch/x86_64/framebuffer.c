@@ -80,7 +80,8 @@ void fb_flush(void) {
 }
 
 int fb_avoid_vram_reads(void) {
-    return fb_graphical && (fb_map_flags & VMM_PTE_PWT) != 0;
+    if (!fb_graphical) return 1;
+    return (fb_map_flags & VMM_PTE_PWT) != 0;
 }
 
 #if CONFIG_DRIVER_VGA
@@ -630,6 +631,76 @@ int FB_INIT_SECTION fb_init(uint64_t addr, uint64_t width, uint64_t height,
 
 #undef FB_INIT_SECTION
 
+int KERNEL_INIT fb_boot_graphical(uint32_t req_w, uint32_t req_h) {
+#if CONFIG_DRIVER_VGA
+    uint64_t lfb;
+    uint64_t pitch;
+    uint64_t vram;
+    uint64_t need;
+
+    if (req_w == 0 || req_h == 0 || req_w > 16384 || req_h > 16384) return -1;
+    if (bga_is_available()) {
+        lfb = bga_get_lfb_base();
+        vram = bga_get_vram_bytes();
+        if (lfb && vram &&
+            bga_set_mode((uint16_t)req_w, (uint16_t)req_h, 32, &pitch) == 0) {
+            need = pitch * (uint64_t)req_h;
+            if (pitch >= (uint64_t)req_w * 4u && need <= vram &&
+                fb_init(lfb, req_w, req_h, pitch, 32, 1) == 0) return 0;
+        }
+        return -1;
+    }
+    if (vga_is_cirrus()) {
+        lfb = vga_get_framebuffer_base();
+        vram = vga_get_vram_bytes();
+        if (lfb && vram &&
+            vga_set_mode((uint16_t)req_w, (uint16_t)req_h, 32, &pitch) == 0) {
+            need = pitch * (uint64_t)req_h;
+            if (pitch >= (uint64_t)req_w * 4u && need <= vram &&
+                fb_init(lfb, req_w, req_h, pitch, 32, 1) == 0) return 0;
+        }
+        return -1;
+    }
+#else
+    (void)req_w;
+    (void)req_h;
+#endif
+    return -1;
+}
+
+int KERNEL_INIT fb_remodeset_grub(uint32_t *width, uint32_t *height, uint32_t *pitch, uint8_t *bpp, uint32_t req_w, uint32_t req_h) {
+#if CONFIG_DRIVER_VGA
+    uint64_t new_pitch;
+    uint64_t vram;
+    uint64_t need;
+
+    if (!width || !height || !pitch || !bpp) return -1;
+    if (!bga_is_available()) return -1;
+    if (req_w == 0 || req_h == 0 || req_w > 16384 || req_h > 16384) return -1;
+    if (*width == req_w && *height == req_h && *bpp == 32) return -1;
+    vram = bga_get_vram_bytes();
+    if (!vram) return -1;
+    if (bga_set_mode((uint16_t)req_w, (uint16_t)req_h, 32, &new_pitch) != 0) return -1;
+    if (!new_pitch || new_pitch < (uint64_t)req_w * 4u) return -1;
+    if (new_pitch > UINT64_MAX / (uint64_t)req_h) return -1;
+    need = new_pitch * (uint64_t)req_h;
+    if (need > vram) return -1;
+    *width = req_w;
+    *height = req_h;
+    *pitch = (uint32_t)new_pitch;
+    *bpp = 32;
+    return 0;
+#else
+    (void)width;
+    (void)height;
+    (void)pitch;
+    (void)bpp;
+    (void)req_w;
+    (void)req_h;
+    return -1;
+#endif
+}
+
 void KERNEL_EARLY_INIT fb_init_textmode(const uint8_t *font_glyphs, uint16_t num_chars, uint8_t font_height) {
     if (font_height == 0) font_height = 16;
 #if CONFIG_DRIVER_VGA
@@ -734,7 +805,7 @@ void fb_clear(void) {
 
     if (!fb_graphical) {
         volatile uint16_t *vga = (volatile uint16_t *)vga_text_mem;
-        for (i = 0; i < 16384; i++) {
+        for (i = 0; i < 80 * 25; i++) {
             vga[i] = (uint16_t)(' ' | ((uint16_t)vga_cur_attr << 8));
         }
         fb.cursor_x = 0;

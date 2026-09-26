@@ -41,6 +41,8 @@ void fb_flush(void);
 int fb_avoid_vram_reads(void);
 framebuffer_t *fb_get(void);
 int fb_set_mode(uint64_t width, uint64_t height, uint64_t refresh_rate);
+int fb_boot_graphical(uint32_t req_w, uint32_t req_h);
+int fb_remodeset_grub(uint32_t *width, uint32_t *height, uint32_t *pitch, uint8_t *bpp, uint32_t req_w, uint32_t req_h);
 int fb_get_info(uint64_t *width, uint64_t *height, uint64_t *bpp, uint64_t *refresh_rate);
 int fb_get_caps(uint64_t *out_words, uint64_t words);
 void fb_reclaim_unused(void);

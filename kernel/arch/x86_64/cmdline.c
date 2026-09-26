@@ -10,6 +10,8 @@ static char *init_path KERNEL_INIT_BSS;
 static char *root_dev KERNEL_INIT_BSS;
 static int num_consoles;
 static int text_mode KERNEL_INIT_BSS;
+static uint32_t screen_res_w KERNEL_INIT_BSS;
+static uint32_t screen_res_h KERNEL_INIT_BSS;
 static int lke_enabled KERNEL_INIT_BSS;
 
 static int KERNEL_EARLY_INIT parse_int(const char *s)
@@ -21,6 +23,33 @@ static int KERNEL_EARLY_INIT parse_int(const char *s)
     for (i = 0; s[i] >= '0' && s[i] <= '9'; i++)
         val = val * 10 + (s[i] - '0');
     return val;
+}
+
+static int KERNEL_EARLY_INIT parse_resolution(const char *s, uint32_t *w, uint32_t *h)
+{
+    uint32_t width;
+    uint32_t height;
+
+    width = 0;
+    while (*s >= '0' && *s <= '9') {
+        width = width * 10 + (uint32_t)(*s - '0');
+        if (width > 16384) return -1;
+        s++;
+    }
+    if (width == 0) return -1;
+    if (*s != 'x' && *s != 'X') return -1;
+    s++;
+    height = 0;
+    while (*s >= '0' && *s <= '9') {
+        height = height * 10 + (uint32_t)(*s - '0');
+        if (height > 16384) return -1;
+        s++;
+    }
+    if (height == 0) return -1;
+    if (*s && *s != ' ') return -1;
+    *w = width;
+    *h = height;
+    return 0;
 }
 
 static const char *KERNEL_EARLY_INIT find_param(const char *cmdline,
@@ -72,6 +101,8 @@ void KERNEL_EARLY_INIT cmdline_parse(const char *cmdline_str)
     if (cmdline_buf)
         memcpy(cmdline_buf, raw, raw_len + 1);
     text_mode = 0;
+    screen_res_w = 1024;
+    screen_res_h = 768;
     lke_enabled = 1;
 
     if (cmdline_str) {
@@ -93,6 +124,10 @@ void KERNEL_EARLY_INIT cmdline_parse(const char *cmdline_str)
         val = find_param(raw, "text");
         if (val)
             text_mode = parse_int(val);
+
+        val = find_param(raw, "screen.res");
+        if (val)
+            parse_resolution(val, &screen_res_w, &screen_res_h);
 
         val = find_param(raw, "lke");
         if (val)
@@ -130,6 +165,16 @@ const char *KERNEL_INIT cmdline_get_root(void)
 int KERNEL_INIT cmdline_get_text_mode(void)
 {
     return text_mode;
+}
+
+uint32_t KERNEL_INIT cmdline_get_screen_width(void)
+{
+    return screen_res_w;
+}
+
+uint32_t KERNEL_INIT cmdline_get_screen_height(void)
+{
+    return screen_res_h;
 }
 
 void KERNEL_INIT cmdline_reclaim_boot_values(void)

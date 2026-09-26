@@ -245,11 +245,20 @@ static void KERNEL_INIT kernel_boot(void) {
     if (cmdline_get_text_mode()) {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
         console_reinit();
-    } else if (early_fb_valid && CONFIG_DRIVER_VGA) {
+    } else if (early_fb_valid && CONFIG_DRIVER_VGA &&
+               early_fb_type != MULTIBOOT2_FRAMEBUFFER_TEXT) {
+        fb_remodeset_grub(&early_fb_width, &early_fb_height,
+                          &early_fb_pitch, &early_fb_bpp,
+                          cmdline_get_screen_width(),
+                          cmdline_get_screen_height());
         terminal_init_fb(early_fb_addr, early_fb_width,
                         early_fb_height, early_fb_pitch,
                         early_fb_bpp, early_fb_type);
 
+        console_init();
+    } else if (CONFIG_DRIVER_VGA &&
+               fb_boot_graphical(cmdline_get_screen_width(),
+                                 cmdline_get_screen_height()) == 0) {
         console_init();
     } else {
         fb_init_textmode(fb_get_default_font_data(), 128, 16);
@@ -258,8 +267,12 @@ static void KERNEL_INIT kernel_boot(void) {
 
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
     if (!cmdline_get_text_mode()) {
-        virtio_gpu_init(early_fb_valid ? early_fb_width : 0,
-                        early_fb_valid ? early_fb_height : 0);
+        if (early_fb_valid &&
+            early_fb_type != MULTIBOOT2_FRAMEBUFFER_TEXT)
+            virtio_gpu_init(early_fb_width, early_fb_height);
+        else
+            virtio_gpu_init(cmdline_get_screen_width(),
+                            cmdline_get_screen_height());
     }
 #endif
 

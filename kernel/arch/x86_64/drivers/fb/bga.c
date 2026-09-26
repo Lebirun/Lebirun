@@ -1,8 +1,15 @@
 #include <lebirun/drivers/fb/bga.h>
+#include <lebirun/common.h>
 #include <stdint.h>
 
-static inline void outw(uint16_t port, uint16_t value) {
-    __asm__ __volatile__("outw %0, %1" : : "a"(value), "Nd"(port));
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ __volatile__("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    __asm__ __volatile__("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
 }
 
 static inline uint16_t inw(uint16_t port) {
@@ -33,7 +40,15 @@ enum {
     VBE_DISPI_NOCLEARMEM = 0x80,
 
     VBE_DISPI_ID0 = 0xB0C0,
-    VBE_DISPI_ID5 = 0xB0C5
+    VBE_DISPI_ID5 = 0xB0C5,
+
+    PCI_CONFIG_ADDRESS = 0x0CF8,
+    PCI_CONFIG_DATA = 0x0CFC,
+
+    PCI_VGA_CLASS = 0x0300,
+    PCI_VENDOR_VMWARE = 0x15AD,
+    PCI_VENDOR_VIRTIO = 0x1AF4,
+    PCI_VENDOR_CIRRUS = 0x1013
 };
 
 static int bga_cached = -1;
@@ -79,6 +94,64 @@ uint64_t bga_get_vram_bytes(void) {
     return (uint64_t)blocks64k * 64u * 1024u;
 }
 
+static uint32_t bga_pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address;
+    address = (uint32_t)(1u << 31)
+            | ((uint32_t)bus << 16)
+            | ((uint32_t)(slot & 0x1F) << 11)
+            | ((uint32_t)(func & 0x07) << 8)
+            | ((uint32_t)offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    return inl(PCI_CONFIG_DATA);
+}
+
+uint64_t KERNEL_INIT bga_get_lfb_base(void) {
+    uint16_t bus;
+    uint8_t slot;
+    uint8_t func;
+    uint32_t id;
+    uint32_t class_reg;
+    uint32_t hdr;
+    uint32_t bar;
+    uint16_t vendor;
+    uint8_t bar_id;
+
+    for (bus = 0; bus < 256; bus++) {
+        for (slot = 0; slot < 32; slot++) {
+            for (func = 0; func < 8; func++) {
+                id = bga_pci_read((uint8_t)bus, slot, func, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF) {
+                    if (func == 0) break;
+                    continue;
+                }
+                class_reg = bga_pci_read((uint8_t)bus, slot, func, 0x08);
+                if ((uint16_t)(class_reg >> 16) != PCI_VGA_CLASS) {
+                    if (func == 0) {
+                        hdr = bga_pci_read((uint8_t)bus, slot, func, 0x0C);
+                        if (!((hdr >> 16) & 0x80)) break;
+                    }
+                    continue;
+                }
+                vendor = (uint16_t)(id & 0xFFFF);
+                if (vendor == PCI_VENDOR_VIRTIO || vendor == PCI_VENDOR_CIRRUS) {
+                    if (func == 0) {
+                        hdr = bga_pci_read((uint8_t)bus, slot, func, 0x0C);
+                        if (!((hdr >> 16) & 0x80)) break;
+                    }
+                    continue;
+                }
+                bar_id = (vendor == PCI_VENDOR_VMWARE) ? 1 : 0;
+                bar = bga_pci_read((uint8_t)bus, slot, func,
+                                   (uint8_t)(0x10 + bar_id * 4));
+                if (bar & 0x1) return 0;
+                if (!(bar & 0xFFFFFFF0u)) return 0;
+                return (uint64_t)(bar & 0xFFFFFFF0u);
+            }
+        }
+    }
+    return 0;
+}
+
 int bga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint64_t *out_pitch) {
     uint16_t got_w;
     uint16_t got_h;
@@ -112,6 +185,9 @@ int bga_set_mode(uint16_t width, uint16_t height, uint16_t bpp, uint64_t *out_pi
     virt_w = bga_read(VBE_DISPI_INDEX_VIRT_WIDTH);
 
     if (got_w != width || got_h != height || got_bpp != bpp) {
+        return -3;
+    }
+    if (virt_w == 0 || virt_w < width) {
         return -3;
     }
 
