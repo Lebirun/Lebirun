@@ -1444,24 +1444,40 @@ static int sys_ptsname(int fd, char *buf, int buflen) {
 }
 
 static int sys_lke_load(const char *pathname) {
+#if CONFIG_KERNEL_LKE
     if (!pathname) return -EFAULT;
     if ((uint64_t)pathname >= KERNEL_VMA || (uint64_t)pathname < 0x1000) return -EFAULT;
     if (!current_task || current_task->uid != 0) return -EPERM;
     return lke_load(pathname);
+#else
+    (void)pathname;
+    return -ENOSYS;
+#endif
 }
 
 static int sys_lke_unload(const char *name) {
+#if CONFIG_KERNEL_LKE
     if (!name) return -EFAULT;
     if ((uint64_t)name >= KERNEL_VMA || (uint64_t)name < 0x1000) return -EFAULT;
     if (!current_task || current_task->uid != 0) return -EPERM;
     return lke_unload(name);
+#else
+    (void)name;
+    return -ENOSYS;
+#endif
 }
 
 static int sys_lke_list(char *buf, int size) {
+#if CONFIG_KERNEL_LKE
     if (size < 0) return -EINVAL;
     if (!buf) return size == 0 ? lke_list(NULL, 0) : -EFAULT;
     if ((uint64_t)buf >= KERNEL_VMA || (uint64_t)buf < 0x1000) return -EFAULT;
     return lke_list(buf, size);
+#else
+    (void)buf;
+    (void)size;
+    return -ENOSYS;
+#endif
 }
 
 static int sys_sched_setaffinity(int pid, const char *mask_ptr, int len) {

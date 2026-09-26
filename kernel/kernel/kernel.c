@@ -195,8 +195,10 @@ static void KERNEL_INIT kernel_boot(void) {
     uint32_t mod_count;
     extern void procfs_init(void);
     extern void sysfs_init(void);
+#if CONFIG_KERNEL_LKE
     extern void lke_init(void);
     extern void lke_autoload(void);
+#endif
 #if CONFIG_VIRT_VFL
     extern void vfl_register_devfs(void);
 #endif
@@ -217,7 +219,9 @@ static void KERNEL_INIT kernel_boot(void) {
     task_t *init_task;
     squashfs_context_t *sqctx;
     const char *root_dev;
+#if CONFIG_FS_EXT4
     vfs_node_t *ext4_root;
+#endif
     int ahci_done;
     int devs_registered;
     int mem_map_relocated;
@@ -310,7 +314,9 @@ static void KERNEL_INIT kernel_boot(void) {
         initrd_vfs_register();
         ramfs_vfs_register();
         squashfs_vfs_register();
+#if CONFIG_FS_ISO9660
         iso9660_vfs_register();
+#endif
         overlayfs_vfs_register();
         tmpfs_vfs_register();
         devpts_vfs_register();
@@ -402,8 +408,10 @@ static void KERNEL_INIT kernel_boot(void) {
         vfl_register_devfs();
 #endif
         sysfs_init();
+#if CONFIG_KERNEL_LKE
         if (cmdline_get_lke())
             lke_init();
+#endif
 
         vfs_mount(NULL, KERNEL_INIT_STRING("/dev"),
                   KERNEL_INIT_STRING("devfs"));
@@ -439,8 +447,10 @@ static void KERNEL_INIT kernel_boot(void) {
             ahci_done = 1;
 #endif
 
+#if CONFIG_KERNEL_LKE
         if (cmdline_get_lke())
             lke_autoload();
+#endif
     } else {
         root_dev = cmdline_get_root();
         if (root_dev) {
@@ -466,14 +476,20 @@ static void KERNEL_INIT kernel_boot(void) {
             vfl_register_devfs();
 #endif
             sysfs_init();
+#if CONFIG_KERNEL_LKE
             if (cmdline_get_lke())
                 lke_init();
+#endif
 
             vfs_mount(NULL, KERNEL_INIT_STRING("/dev"),
                       KERNEL_INIT_STRING("devfs"));
 
+#if CONFIG_FS_EXT4
             ext4_init();
             ext4_vfs_register();
+#else
+            KERNEL_INIT_LOG("ext4 filesystem disabled\n");
+#endif
 
             ahci_done = 0;
 #if CONFIG_DRIVER_AHCI
@@ -524,8 +540,11 @@ static void KERNEL_INIT kernel_boot(void) {
             KERNEL_INIT_LOG("AHCI SATA driver disabled\n");
 #endif
 
+#if CONFIG_FS_ISO9660
             iso9660_vfs_register();
+#endif
 
+#if CONFIG_FS_EXT4
             ext4_root = NULL;
             if (ahci_done) {
                 mount_ret = vfs_mount(root_dev, KERNEL_INIT_STRING("/mnt"),
@@ -549,6 +568,9 @@ static void KERNEL_INIT kernel_boot(void) {
             } else {
                 KERNEL_INIT_LOG("BOOT: FATAL: failed to mount ext4 root %s\n", root_dev);
             }
+#else
+            KERNEL_INIT_LOG("ext4 filesystem disabled\n");
+#endif
 
             vfs_mount(NULL, KERNEL_INIT_STRING("/proc"),
                       KERNEL_INIT_STRING("procfs"));
@@ -558,8 +580,10 @@ static void KERNEL_INIT kernel_boot(void) {
                       KERNEL_INIT_STRING("tmpfs"));
             vfs_mount(NULL, KERNEL_INIT_STRING("/dev/shm"),
                       KERNEL_INIT_STRING("tmpfs"));
+#if CONFIG_KERNEL_LKE
             if (cmdline_get_lke())
                 lke_autoload();
+#endif
         } else {
             KERNEL_INIT_LOG("No multiboot modules present (mod_count=%u)\n", mod_count);
         }
@@ -605,8 +629,10 @@ static void KERNEL_INIT kernel_boot(void) {
 #endif
 
     if (ahci_done && !devs_registered) {
+#if CONFIG_FS_EXT4
         ext4_init();
         ext4_vfs_register();
+#endif
 
         j = 0;
         sr_idx = 0;

@@ -1,6 +1,14 @@
 title "Lebirun"
 desc "Hobby Operating System/Kernel"
 
+subcategory "Kernel Settings" {
+    subcategory "Filesystems" {
+        item type=bool name="ext4 filesystem" default=enable id=FS_EXT4 alias="FS_EXT4" help="Enable the ext4 filesystem"
+        item type=bool name="ISO9660 filesystem" default=enable id=FS_ISO9660 alias="FS_ISO9660" help="Enable the ISO9660 filesystem"
+    }
+    item type=bool name="LKE" default=enable id=KERNEL_LKE alias="KERNEL_LKE" help="Enable Lebirun Kernel Extensions, required for LKE modules"
+}
+
 subcategory "Virtualization" {
     item type=bool name="[EXPERIMENTAL] VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
 }
@@ -25,6 +33,6 @@ subcategory "Device Drivers" {
 }
 
 subcategory "Modules" {
-    item type=bool name="[EXPERIMENTAL] IPv67" default=disable id=MODULE_IPV67 alias="MODULE_IPV67" help="IPv67 module"
-    item type=bool name="lebTLS" default=enable id=MODULE_LEBTLS alias="MODULE_LEBTLS" help="TLS 1.3 client"
+    item type=bool name="[EXPERIMENTAL] IPv67" default=disable id=MODULE_IPV67 alias="MODULE_IPV67" depends-on=KERNEL_LKE help="IPv67 module"
+    item type=bool name="lebTLS" default=enable id=MODULE_LEBTLS alias="MODULE_LEBTLS" depends-on=KERNEL_LKE help="TLS 1.3 client"
 }
