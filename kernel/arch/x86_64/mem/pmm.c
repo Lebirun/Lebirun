@@ -997,6 +997,7 @@ static int refht_add(uint64_t phys_addr, uint64_t initial) {
     uint64_t idx;
     uint64_t eflags;
     refht_node_t *n;
+    refht_node_t *fresh;
     int result;
 
     if (!refht_initialized) refht_init();
@@ -1004,6 +1005,20 @@ static int refht_add(uint64_t phys_addr, uint64_t initial) {
     pfa_refcount_entries = total_pages_managed;
     idx = phys_addr / PAGE_SIZE;
     if (idx >= total_pages_managed) return -1;
+    refht_lock_acquire(&eflags);
+    n = refht_find(idx);
+    if (n) {
+        result = -1;
+        if (n->refcount < UINT64_MAX) {
+            n->refcount++;
+            result = 0;
+        }
+        refht_lock_release(eflags);
+        return result;
+    }
+    refht_lock_release(eflags);
+    fresh = refht_alloc_node();
+    if (!fresh) return -1;
     result = -1;
     refht_lock_acquire(&eflags);
     n = refht_find(idx);
@@ -1013,17 +1028,16 @@ static int refht_add(uint64_t phys_addr, uint64_t initial) {
             result = 0;
         }
     } else {
-        n = refht_alloc_node();
-        if (n) {
-            n->page_idx = idx;
-            n->refcount = initial;
-            n->next = refht_head;
-            refht_head = n;
-            refht_active_node_count++;
-            result = 0;
-        }
+        fresh->page_idx = idx;
+        fresh->refcount = initial;
+        fresh->next = refht_head;
+        refht_head = fresh;
+        refht_active_node_count++;
+        fresh = NULL;
+        result = 0;
     }
     refht_lock_release(eflags);
+    if (fresh) kfree(fresh);
     return result;
 }
 

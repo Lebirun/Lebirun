@@ -1567,11 +1567,12 @@ static int sys_syslog(int type, char *buf, int len) {
         total = klog_snapshot(NULL, 0);
         return total < 0 ? 0 : total;
     }
-    if (type == 0 || type == 1 || type == 5 || type == 6 || type == 7)
-        return 0;
+    if (type == 0 || type == 1) return 0;
+    if (type == 5) return klog_clear();
+    if (type == 6 || type == 7) return klog_syslog_console(type, 0);
     if (type == 8) {
         if (len < 1 || len > 8) return -EINVAL;
-        return 0;
+        return klog_syslog_console(type, len);
     }
     if (type != 2 && type != 3 && type != 4) return -EINVAL;
     total = klog_snapshot(NULL, 0);
@@ -1587,6 +1588,7 @@ static int sys_syslog(int type, char *buf, int len) {
             return -EFAULT;
         done += piece;
     }
+    if (type == 4) klog_clear();
     return done;
 }
 
@@ -2097,7 +2099,7 @@ static int sys_vring_path_rule(int minor, const char *range_ptr, int perms) {
 
 static int sys_ktls_tx(int sockfd, const char *unused2, int unused3) {
     (void)sockfd; (void)unused2; (void)unused3;
-    return 0;
+    return -EOPNOTSUPP;
 }
 
 void syscalls_misc_init(void) {

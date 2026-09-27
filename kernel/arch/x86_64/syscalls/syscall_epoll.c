@@ -716,7 +716,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
             else if (operation == FUTEX_OP_OR) new_value |= operation_argument;
             else if (operation == FUTEX_OP_ANDN) new_value &= ~operation_argument;
             else if (operation == FUTEX_OP_XOR) new_value ^= operation_argument;
-            else return -ENOSYS;
+            else return -EINVAL;
             expected_value = value;
             while (!__atomic_compare_exchange_n(uaddr2, &expected_value,
                     new_value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {

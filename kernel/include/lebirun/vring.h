@@ -117,6 +117,8 @@ void klog_reclaim_unused(void);
 int klog_drain_console0(uint64_t max_items);
 int klog_snapshot(char *buf, int bufsz);
 int klog_snapshot_range(char *buf, int offset, int count);
+int klog_clear(void);
+int klog_syslog_console(int type, int level);
 
 int kprint_write(int console_id, const char *buf, size_t len);
 void kprint_serial_async(const char *buf, size_t len);

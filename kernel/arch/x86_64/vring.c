@@ -41,6 +41,8 @@ static volatile uint64_t klog_head = 0;
 static volatile uint64_t klog_tail = 0;
 static volatile uint64_t klog_count = 0;
 static volatile uint64_t klog_dropped = 0;
+static volatile int syslog_console_enabled = 1;
+static volatile int syslog_console_loglevel = 7;
 
 static char *klog_persist_buf;
 static volatile size_t klog_persist_pos = 0;
@@ -461,6 +463,47 @@ int klog_snapshot_range(char *buf, int offset, int count) {
     return count;
 }
 
+int klog_clear(void) {
+    uint64_t flags;
+    klog_item_t *old_ring;
+    flags = klog_irqsave();
+    spin_lock(&klog_ring_lock);
+    old_ring = klog_ring;
+    klog_ring = NULL;
+    klog_capacity = 0;
+    klog_head = 0;
+    klog_tail = 0;
+    klog_count = 0;
+    spin_unlock(&klog_ring_lock);
+    klog_irqrestore(flags);
+    if (old_ring) kfree(old_ring);
+    flags = klog_irqsave();
+    spin_lock(&klog_persist_lock);
+    klog_persist_pos = 0;
+    if (klog_persist_buf) klog_persist_buf[0] = '\0';
+    else {
+        klog_early_pos = 0;
+        klog_early_buf[0] = '\0';
+    }
+    spin_unlock(&klog_persist_lock);
+    klog_irqrestore(flags);
+    return 0;
+}
+
+int klog_syslog_console(int type, int level) {
+    uint64_t flags;
+    if (type < 6 || type > 8) return -1;
+    if (type == 8 && (level < 1 || level > 8)) return -1;
+    flags = klog_irqsave();
+    spin_lock(&klog_ring_lock);
+    if (type == 6) syslog_console_enabled = 0;
+    else if (type == 7) syslog_console_enabled = 1;
+    else syslog_console_loglevel = level;
+    spin_unlock(&klog_ring_lock);
+    klog_irqrestore(flags);
+    return 0;
+}
+
 int kprint_write(int console_id, const char *buf, size_t len) {
     size_t i;
     int con_id_early;
@@ -560,7 +603,8 @@ int klog_drain_console0(uint64_t max_items) {
 
     drained = 0;
     while (drained < max_items && klog_dequeue(&it) == 0) {
-        if (!suppress && (it.level & KLOG_CONSOLE))
+        if (!suppress && syslog_console_enabled && (it.level & KLOG_CONSOLE) &&
+            ((it.level & (uint8_t)~KLOG_CONSOLE) <= (uint8_t)syslog_console_loglevel))
             console_write_to_fb_only(0, it.msg, (size_t)it.len);
         drained++;
     }
