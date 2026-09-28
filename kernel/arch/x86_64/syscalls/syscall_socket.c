@@ -5,6 +5,50 @@
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/drivers/net/net.h>
 
+#if !CONFIG_DRIVER_NET
+tcp_socket_t *tcp_socket_create(void) { return NULL; }
+void tcp_socket_close(tcp_socket_t *sock) { (void)sock; }
+int tcp_listen(uint16_t port, int backlog) { (void)port; (void)backlog; return -1; }
+void tcp_unlisten(uint16_t port) { (void)port; }
+int tcp_accept_pending(uint16_t port) { (void)port; return 0; }
+tcp_socket_t *tcp_accept(uint16_t port) { (void)port; return NULL; }
+int tcp_connect(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint64_t timeout_ms) {
+    (void)sock; (void)dest; (void)port; (void)timeout_ms;
+    return -1;
+}
+int tcp_connect_start(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port) {
+    (void)sock; (void)dest; (void)port;
+    return -1;
+}
+int tcp_send(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
+    (void)sock; (void)data; (void)len;
+    return -1;
+}
+int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout_ms, int peek) {
+    (void)sock; (void)buffer; (void)len; (void)timeout_ms; (void)peek;
+    return -1;
+}
+int tcp_disconnect(tcp_socket_t *sock, uint64_t timeout_ms) {
+    (void)sock; (void)timeout_ms;
+    return -1;
+}
+udp_socket_t *udp_socket_create(uint16_t port) { (void)port; return NULL; }
+void udp_socket_close(udp_socket_t *sock) { (void)sock; }
+int udp_socket_send(udp_socket_t *sock, ipv4_addr_t dest, uint16_t port, uint8_t *data, uint64_t len) {
+    (void)sock; (void)dest; (void)port; (void)data; (void)len;
+    return -1;
+}
+int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr_t *from_ip, uint16_t *from_port, uint64_t timeout_ms, int peek, uint64_t *full_len) {
+    (void)sock; (void)buffer; (void)len; (void)from_ip; (void)from_port;
+    (void)timeout_ms; (void)peek; (void)full_len;
+    return -1;
+}
+void netif_poll_all(void) { }
+netif_t *netif_get_default(void) { return NULL; }
+netif_t *netif_find(const char *name) { (void)name; return NULL; }
+void icmp_register_error_hook(icmp_error_hook_t hook) { (void)hook; }
+#endif
+
 #define AF_UNSPEC   0
 #define AF_UNIX     1
 #define AF_LOCAL    AF_UNIX
@@ -817,6 +861,11 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
     if (domain != AF_INET && domain != AF_UNIX && domain != AF_INET6 && domain != 17) {
         return -EAFNOSUPPORT;
     }
+#if !CONFIG_DRIVER_NET
+    if (domain == AF_INET || domain == AF_INET6) {
+        return -EAFNOSUPPORT;
+    }
+#endif
     if (domain == 17 && type != SOCK_RAW && type != SOCK_DGRAM) {
         return -ESOCKTNOSUPPORT;
     }

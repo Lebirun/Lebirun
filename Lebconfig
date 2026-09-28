@@ -28,7 +28,8 @@ subcategory "Device Drivers" {
     }
     subcategory "Networking" {
         item type=bool name="Network Stack" default=enable id=DRIVER_NET alias="DRIVER_NET" help="Enable the kernel network stack"
-        item type=bool name="Intel E1000" default=enable id=DRIVER_NET_E1000 alias="DRIVER_NET_E1000" help="Enable the Intel E1000 network driver"
+        item type=bool name="Intel E1000" default=enable id=DRIVER_NET_E1000 alias="DRIVER_NET_E1000" depends-on=DRIVER_NET help="Enable the Intel E1000 network driver"
+        item type=bool name="Virtio Net" default=enable id=DRIVER_NET_VIRTIO alias="DRIVER_NET_VIRTIO" depends-on=DRIVER_NET help="Enable the Virtio Net paravirtual network driver"
     }
 }
 

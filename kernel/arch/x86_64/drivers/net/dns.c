@@ -224,6 +224,7 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
     uint64_t query_len;
     uint64_t timeout_ticks;
     uint64_t start;
+    uint64_t gen;
     char qname[256];
     int depth;
     int si;
@@ -287,6 +288,7 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
             timeout_ticks = pit_ms_to_ticks(timeout_ms / 2);
             start = pit_get_ticks();
             while (!pending_resolved) {
+                gen = descriptor_ready_generation();
                 __asm__ volatile("sti");
                 netif_poll_all();
                 if (task_has_pending_signals()) {
@@ -298,7 +300,7 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
                 if (pit_get_ticks() - start > timeout_ticks) {
                     break;
                 }
-                schedule();
+                descriptor_ready_wait(gen, pit_ms_to_ticks(10));
             }
             if (pending_resolved) break;
         }
@@ -342,6 +344,7 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
     uint64_t query_len;
     uint64_t timeout_ticks;
     uint64_t start;
+    uint64_t gen;
 
     if (!hostname || !out_ipv6) return -1;
 
@@ -384,6 +387,7 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
     timeout_ticks = pit_ms_to_ticks(5000);
     start = pit_get_ticks();
     while (!pending_resolved) {
+        gen = descriptor_ready_generation();
         __asm__ volatile("sti");
         netif_poll_all();
         if (task_has_pending_signals()) {
@@ -392,7 +396,7 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
         if (pit_get_ticks() - start > timeout_ticks) {
             return -1;
         }
-        schedule();
+        descriptor_ready_wait(gen, pit_ms_to_ticks(10));
     }
 
     memcpy(out_ipv6, &pending_result6, sizeof(ipv6_addr_t));

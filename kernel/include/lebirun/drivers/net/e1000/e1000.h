@@ -175,6 +175,7 @@ typedef struct {
 } e1000_device_t;
 
 int e1000_init(void);
+int e1000_init_at(uint8_t bus, uint8_t slot, uint8_t func);
 int e1000_probe(void);
 void e1000_enable_interrupts(e1000_device_t *dev);
 void e1000_disable_interrupts(e1000_device_t *dev);

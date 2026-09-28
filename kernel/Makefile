@@ -101,6 +101,7 @@ $(ARCHDIR)/drivers/net/dhcp.o \
 $(ARCHDIR)/drivers/net/dns.o \
 $(ARCHDIR)/drivers/net/http.o \
 $(ARCHDIR)/drivers/net/e1000/e1000.o \
+$(ARCHDIR)/drivers/net/virtio_net/virtio_net.o \
 $(ARCHDIR)/watchdog.o \
 kernel/kernel.o \
 kernel/launch_user.o \

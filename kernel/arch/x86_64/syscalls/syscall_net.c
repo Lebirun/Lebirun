@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/pit.h>
 
 typedef struct {
     char name[16];
@@ -312,6 +313,7 @@ static int sys_net_dns(int unused, const char *hostname, uint64_t result_ptr) {
 static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
     int con_id;
     int i;
+    uint64_t gen;
     netif_t *netif;
 
     (void)unused2; (void)unused3;
@@ -331,10 +333,18 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
             return 0;
         }
     } else if (cmd == 1) {
+        if (netif->loopback) {
+            klog_con(con_id, "No network interface available\n");
+            return -1;
+        }
         klog_con(con_id, "DHCP: Starting...\n");
         dhcp_start(netif);
         return 0;
     } else if (cmd == 2) {
+        if (netif->loopback) {
+            klog_con(con_id, "No network interface available\n");
+            return -1;
+        }
         if (dhcp_is_bound(netif)) {
             klog_con(con_id, "DHCP: Already configured (%u.%u.%u.%u)\n",
                      netif->ipv4.octets[0], netif->ipv4.octets[1],
@@ -342,11 +352,12 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
             return 0;
         }
         for (i = 0; i < 10; i++) {
-            sleep_ms(10);
+            gen = descriptor_ready_generation();
             netif_poll_all();
             dhcp_tick();
             if (netif->link_up) break;
             if (task_has_pending_signals()) return -EINTR;
+            descriptor_ready_wait(gen, pit_ms_to_ticks(10));
         }
         if (!netif->link_up) {
             klog_con(con_id, "DHCP: No link detected\n");
@@ -355,11 +366,12 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
         klog_con(con_id, "DHCP: Link up, starting DHCP...\n");
         dhcp_start(netif);
         for (i = 0; i < 500; i++) {
-            sleep_ms(10);
+            gen = descriptor_ready_generation();
             netif_poll_all();
             dhcp_tick();
             if (dhcp_is_bound(netif)) break;
             if (task_has_pending_signals()) return -EINTR;
+            descriptor_ready_wait(gen, pit_ms_to_ticks(10));
         }
         if (dhcp_is_bound(netif)) {
             klog_con(con_id, "DHCP: Configured:\n");

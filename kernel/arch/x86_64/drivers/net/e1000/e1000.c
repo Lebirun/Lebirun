@@ -474,15 +474,53 @@ void e1000_irq_handler(void *regs) {
 
 }
 
+static int e1000_use_device(e1000_device_t *dev, uint8_t bus, uint8_t slot,
+                            uint8_t func, uint32_t vendor_device) {
+    uint16_t vendor;
+    uint16_t device;
+    uint32_t bar0;
+    uint32_t cmd;
+
+    vendor = vendor_device & 0xFFFF;
+    device = (vendor_device >> 16) & 0xFFFF;
+
+    if (vendor != E1000_VENDOR_ID) return -1;
+
+    if (device != E1000_DEVICE_82540EM &&
+        device != E1000_DEVICE_82545EM &&
+        device != E1000_DEVICE_82574L) return -1;
+
+    printf("E1000: Found device at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
+           bus, slot, func, vendor, device);
+
+    dev->pci_bus = bus;
+    dev->pci_slot = slot;
+    dev->pci_func = func;
+    dev->device_id = device;
+
+    bar0 = pci_read_config(bus, slot, func, 0x10);
+    dev->bar_type = bar0 & 1;
+
+    if (dev->bar_type == 0) {
+        dev->bar0 = bar0 & 0xFFFFFFF0;
+    } else {
+        dev->io_base = bar0 & 0xFFFFFFFC;
+    }
+
+    cmd = pci_read_config(bus, slot, func, 0x04);
+    cmd |= (1 << 1) | (1 << 2);
+    pci_write_config(bus, slot, func, 0x04, cmd);
+
+    dev->irq = pci_read_config(bus, slot, func, 0x3C) & 0xFF;
+
+    return 0;
+}
+
 static int e1000_probe_device(e1000_device_t *dev) {
     uint16_t bus;
     uint8_t slot;
     uint8_t func;
     uint32_t vendor_device;
-    uint16_t vendor;
-    uint16_t device;
-    uint32_t bar0;
-    uint32_t cmd;
 
     printf("E1000: Probing PCI bus...\n");
 
@@ -490,40 +528,8 @@ static int e1000_probe_device(e1000_device_t *dev) {
         for (slot = 0; slot < 32; slot++) {
             for (func = 0; func < 8; func++) {
                 vendor_device = pci_read_config(bus, slot, func, 0x00);
-                vendor = vendor_device & 0xFFFF;
-                device = (vendor_device >> 16) & 0xFFFF;
-
-                if (vendor != E1000_VENDOR_ID) continue;
-
-                if (device == E1000_DEVICE_82540EM ||
-                    device == E1000_DEVICE_82545EM ||
-                    device == E1000_DEVICE_82574L) {
-
-                    printf("E1000: Found device at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
-                           bus, slot, func, vendor, device);
-
-                    dev->pci_bus = bus;
-                    dev->pci_slot = slot;
-                    dev->pci_func = func;
-                    dev->device_id = device;
-
-                    bar0 = pci_read_config(bus, slot, func, 0x10);
-                    dev->bar_type = bar0 & 1;
-
-                    if (dev->bar_type == 0) {
-                        dev->bar0 = bar0 & 0xFFFFFFF0;
-                    } else {
-                        dev->io_base = bar0 & 0xFFFFFFFC;
-                    }
-
-                    cmd = pci_read_config(bus, slot, func, 0x04);
-                    cmd |= (1 << 1) | (1 << 2);
-                    pci_write_config(bus, slot, func, 0x04, cmd);
-
-                    dev->irq = pci_read_config(bus, slot, func, 0x3C) & 0xFF;
-
+                if (e1000_use_device(dev, (uint8_t)bus, slot, func, vendor_device) == 0)
                     return 0;
-                }
             }
         }
     }
@@ -570,26 +576,13 @@ void e1000_print_status(e1000_device_t *dev) {
            dev->packets_tx, dev->bytes_tx, dev->errors_tx);
 }
 
-int e1000_init(void) {
+static int e1000_bring_up(e1000_device_t *dev) {
     uint64_t bar0_phys;
     uint64_t bar0_virt;
     uint64_t off;
     uint32_t status;
     netif_t *netif;
-    e1000_device_t *dev;
     int i;
-
-    printf("E1000: Initializing driver...\n");
-
-    dev = e1000_allocate_device();
-    if (!dev) return -1;
-    memset(dev, 0, sizeof(e1000_device_t));
-
-    if (e1000_probe_device(dev) < 0) {
-        g_e1000_dev = NULL;
-        kfree(dev);
-        return -1;
-    }
 
     if (dev->bar_type == 0) {
         bar0_phys = dev->bar0;
@@ -662,4 +655,42 @@ int e1000_init(void) {
     printf("E1000: Initialization complete\n");
 
     return 0;
+}
+
+int e1000_init(void) {
+    e1000_device_t *dev;
+
+    printf("E1000: Initializing driver...\n");
+
+    dev = e1000_allocate_device();
+    if (!dev) return -1;
+    memset(dev, 0, sizeof(e1000_device_t));
+
+    if (e1000_probe_device(dev) < 0) {
+        g_e1000_dev = NULL;
+        kfree(dev);
+        return -1;
+    }
+
+    return e1000_bring_up(dev);
+}
+
+int e1000_init_at(uint8_t bus, uint8_t slot, uint8_t func) {
+    e1000_device_t *dev;
+    uint32_t vendor_device;
+
+    printf("E1000: Initializing driver...\n");
+
+    dev = e1000_allocate_device();
+    if (!dev) return -1;
+    memset(dev, 0, sizeof(e1000_device_t));
+
+    vendor_device = pci_read_config(bus, slot, func, 0x00);
+    if (e1000_use_device(dev, bus, slot, func, vendor_device) < 0) {
+        g_e1000_dev = NULL;
+        kfree(dev);
+        return -1;
+    }
+
+    return e1000_bring_up(dev);
 }

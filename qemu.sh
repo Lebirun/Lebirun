@@ -79,6 +79,6 @@ $QEMU_CMD \
     -device ahci,id=ahci0 \
     $DISK_ARGS \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
-    -device e1000,netdev=net0 \
+    -device virtio-net,netdev=net0 \
     -accel kvm \
     -boot d

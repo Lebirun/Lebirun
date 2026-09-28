@@ -550,7 +550,9 @@ void KERNEL_INIT syscall_init(void) {
     syscalls_console_init();
     syscalls_vfs_init();
     syscalls_sata_init();
+#if CONFIG_DRIVER_NET
     syscalls_net_init();
+#endif
     syscalls_termios_init();
     syscalls_posix_init();
     syscalls_select_init();

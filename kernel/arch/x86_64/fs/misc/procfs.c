@@ -1392,8 +1392,6 @@ static const char proc_memdetail_names[] =
     "KernelStackKB\0"
     "SlabPages\0"
     "SlabKB\0"
-    "E1000Pages\0"
-    "E1000KB\0"
     "AHCIPages\0"
     "AHCIKB\0"
     "PT_VMMPTPages\0"
@@ -1488,7 +1486,6 @@ typedef struct {
     uint64_t kstack_slots;
     uint64_t kstack_pages;
     uint64_t slab_pages;
-    uint64_t e1000_pages;
     uint64_t ahci_pages;
     uint64_t pt_pt_pages;
     uint64_t pt_heap_pt;
@@ -1549,8 +1546,6 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
     PROC_FIELD(kstack_pages, 2),
     PROC_FIELD(slab_pages, 0),
     PROC_FIELD(slab_pages, 2),
-    PROC_FIELD(e1000_pages, 0),
-    PROC_FIELD(e1000_pages, 2),
     PROC_FIELD(ahci_pages, 0),
     PROC_FIELD(ahci_pages, 2),
     PROC_FIELD(pt_pt_pages, 0),
@@ -1633,7 +1628,7 @@ static const proc_memdetail_field_t proc_memdetail_fields[] = {
 _Static_assert(sizeof(proc_memdetail_snapshot_t) <= UINT16_MAX,
                "memdetail snapshot offset");
 _Static_assert(sizeof(proc_memdetail_fields) /
-                   sizeof(proc_memdetail_fields[0]) == 103,
+                   sizeof(proc_memdetail_fields[0]) == 101,
                "memdetail field count");
 
 static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
@@ -1698,7 +1693,6 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     snapshot.heap_used = kernel_heap.used_size;
     snapshot.heap_total = kernel_heap.total_size;
     snapshot.slab_pages = slab_get_total_pages();
-    snapshot.e1000_pages = e1000_get_allocated_pages();
     snapshot.ahci_pages = ahci_get_allocated_pages();
     snapshot.sqfs_module_pages = squashfs_get_module_pages();
     snapshot.pt_pt_pages = pt_vmm_pt_count;

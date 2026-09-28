@@ -151,6 +151,7 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("hmac_sha256", hmac_sha256);
     lke_register_symbol("sha384_hash", sha384_hash);
     lke_register_symbol("crypto_constant_compare", crypto_constant_compare);
+#if CONFIG_DRIVER_NET
     lke_register_symbol("netif_get_default", netif_get_default);
     lke_register_symbol("netif_poll_all", netif_poll_all);
     lke_register_symbol("ipv4_is_local", ipv4_is_local);
@@ -160,9 +161,11 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("udp_unregister_port_hook", udp_unregister_port_hook);
     lke_register_symbol("dns_resolve_timeout", dns_resolve_timeout);
     lke_register_symbol("dns_resolve6", dns_resolve6);
+#endif
     lke_register_symbol("vmm_get_phys_in_pml4", vmm_get_phys_in_pml4);
     lke_register_symbol("task_current", task_current);
     lke_register_symbol("schedule", schedule);
+#if CONFIG_DRIVER_NET
     lke_register_symbol("net_get_ticks", net_get_ticks);
     lke_register_symbol("tcp_socket_create", tcp_socket_create);
     lke_register_symbol("tcp_socket_close", tcp_socket_close);
@@ -170,12 +173,15 @@ void KERNEL_INIT lke_init(void) {
     lke_register_symbol("tcp_send", tcp_send);
     lke_register_symbol("tcp_recv", tcp_recv);
     lke_register_symbol("tcp_disconnect", tcp_disconnect);
+#endif
     lke_register_symbol("krealloc", krealloc);
     lke_register_symbol("memmove", memmove);
     lke_register_symbol("task_has_pending_signals", task_has_pending_signals);
+#if CONFIG_DRIVER_NET
     lke_register_symbol("tls_register_provider", tls_register_provider);
     lke_register_symbol("tls_unregister_provider", tls_unregister_provider);
     lke_register_symbol("tls_get_provider", tls_get_provider);
+#endif
     lke_register_symbol("lke_register_syscall", lke_register_syscall);
     lke_register_symbol("lke_unregister_syscall", lke_unregister_syscall);
 }

@@ -146,6 +146,7 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
     uint64_t seq;
     uint64_t timeout_ticks;
     uint64_t start;
+    uint64_t gen;
     uint8_t payload[56];
     int i;
     int key;
@@ -181,6 +182,7 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
 
         start = pit_get_ticks();
         while (!g_ping_state.received) {
+            gen = descriptor_ready_generation();
             __asm__ volatile("sti");
             netif_poll_all();
             if (pit_get_ticks() - start > timeout_ticks) {
@@ -193,7 +195,7 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
                     return -1;
                 }
             }
-            schedule();
+            descriptor_ready_wait(gen, pit_ms_to_ticks(10));
         }
 
         if (g_ping_state.received) {
@@ -227,6 +229,7 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
     uint8_t payload[56];
     uint64_t timeout_ticks;
     uint64_t start;
+    uint64_t gen;
     int i;
     int key;
 
@@ -257,6 +260,7 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();
     while (!g_ping_state.received) {
+        gen = descriptor_ready_generation();
         __asm__ volatile("sti");
         netif_poll_all();
         if (pit_get_ticks() - start > timeout_ticks) {
@@ -268,7 +272,7 @@ int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms) {
                 return -2;
             }
         }
-        schedule();
+        descriptor_ready_wait(gen, pit_ms_to_ticks(10));
     }
 
     return (int)g_ping_state.rtt;

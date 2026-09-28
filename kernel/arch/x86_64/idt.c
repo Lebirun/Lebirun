@@ -631,7 +631,9 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 
                 fb_tick();
                 extern void net_tick(void);
+#if CONFIG_DRIVER_NET
                 net_tick();
+#endif
 
                 extern void kprint_poll(uint64_t max_items);
                 kprint_poll(64);
