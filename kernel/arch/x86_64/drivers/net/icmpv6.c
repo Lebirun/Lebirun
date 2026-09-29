@@ -1,5 +1,6 @@
 #include <lebirun/drivers/net/icmpv6.h>
 #include <lebirun/drivers/net/ipv6.h>
+#include <lebirun/drivers/net/dns.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <string.h>
@@ -27,6 +28,11 @@ static void icmpv6_parse_options(netif_t *netif, ipv6_addr_t *src, uint8_t *data
     uint8_t prefix_len;
     uint8_t flags;
     mac_addr_t mac;
+    uint32_t lifetime;
+    int naddrs;
+    int valid;
+    int i;
+    ipv6_addr_t *servers;
 
     while (offset + 2 <= len) {
         opt_type = data[offset];
@@ -49,6 +55,26 @@ static void icmpv6_parse_options(netif_t *netif, ipv6_addr_t *src, uint8_t *data
                 if (icmpv6_is_link_local(netif->ipv6)) {
                     netif->ipv6 = new_addr;
                     netif->ipv6_prefix = 64;
+                }
+            }
+        }
+
+        if (opt_type == 25 && opt_len >= 24 && ((opt_len - 8) % 16) == 0) {
+            lifetime = ((uint32_t)data[offset + 4] << 24) |
+                       ((uint32_t)data[offset + 5] << 16) |
+                       ((uint32_t)data[offset + 6] << 8) |
+                       (uint32_t)data[offset + 7];
+            if (lifetime != 0) {
+                naddrs = (int)((opt_len - 8) / 16);
+                servers = (ipv6_addr_t *)kmalloc((uint64_t)naddrs * sizeof(*servers));
+                if (servers) {
+                    valid = 0;
+                    for (i = 0; i < naddrs; i++) {
+                        memcpy(&servers[valid].octets[0], data + offset + 8 + (uint64_t)i * 16, 16);
+                        if (!ipv6_eq(servers[valid], IPV6_ZERO)) valid++;
+                    }
+                    if (valid > 0) dns6_set_servers(servers, valid);
+                    kfree(servers);
                 }
             }
         }

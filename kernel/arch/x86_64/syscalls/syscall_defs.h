@@ -475,6 +475,10 @@ int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 #define SYSCALL_TIMER_DELETE 319
 #define SYSCALL_TIMER_GETTIME 333
 #define SYSCALL_TIMER_GETOVERRUN 334
+#define SYSCALL_NET_DNS_SET 335
+#define SYSCALL_NET_DNS_GET 336
+#define SYSCALL_NET_DNS6_SET 337
+#define SYSCALL_NET_DNS6_GET 338
 #define SYSCALL_SPLICE 320
 #define SYSCALL_VMSPLICE 321
 #define SYSCALL_TEE 322

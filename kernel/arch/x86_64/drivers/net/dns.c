@@ -1,15 +1,21 @@
 #include <lebirun/drivers/net/dns.h>
 #include <lebirun/drivers/net/udp.h>
+#include <lebirun/drivers/net/ipv6.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <lebirun/pit.h>
 #include <lebirun/task.h>
 #include <lebirun/mutex.h>
+#include <lebirun/spinlock.h>
 #include <string.h>
 
-static ipv4_addr_t g_dns_server;
-static ipv4_addr_t g_dns_server2;
+static ipv4_addr_t *g_dns_servers;
+static int g_dns_server_count;
+static int g_dns_servers_dynamic;
+static ipv6_addr_t *g_dns6_servers;
+static int g_dns6_server_count;
+static spinlock_t dns_servers_lock = {0};
 static dns_cache_entry_t *dns_cache = NULL;
 static int dns_cache_capacity = 0;
 #define DNS_CACHE_INIT 1
@@ -55,8 +61,11 @@ static int dns_grow_cache(void) {
 void KERNEL_INIT dns_init(void) {
     dns_cache = NULL;
     dns_cache_capacity = 0;
-    g_dns_server = IPV4_ADDR(8, 8, 8, 8);
-    g_dns_server2 = IPV4_ADDR(8, 8, 4, 4);
+    g_dns_servers = NULL;
+    g_dns_server_count = 0;
+    g_dns_servers_dynamic = 0;
+    g_dns6_servers = NULL;
+    g_dns6_server_count = 0;
     dns_id_counter = 1;
     mutex_init(&dns_resolve_lock);
     pending_cname = NULL;
@@ -64,12 +73,142 @@ void KERNEL_INIT dns_init(void) {
     pending_qtype = DNS_TYPE_A;
 }
 
-void dns_set_server(ipv4_addr_t server) {
-    g_dns_server = server;
+static uint64_t dns_servers_lock_irqsave(void) {
+    uint64_t f;
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    spin_lock(&dns_servers_lock);
+    return f;
 }
 
-void dns_set_server2(ipv4_addr_t server) {
-    g_dns_server2 = server;
+static void dns_servers_unlock_irqrestore(uint64_t f) {
+    spin_unlock(&dns_servers_lock);
+    if (f & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+}
+
+int dns_server_count(void) {
+    int n;
+    uint64_t f;
+
+    f = dns_servers_lock_irqsave();
+    n = g_dns_servers ? g_dns_server_count : 0;
+    dns_servers_unlock_irqrestore(f);
+    return n;
+}
+
+ipv4_addr_t dns_server_at(int index) {
+    ipv4_addr_t s;
+    uint64_t f;
+
+    s = IPV4_ZERO;
+    f = dns_servers_lock_irqsave();
+    if (g_dns_servers && index >= 0 && index < g_dns_server_count)
+        s = g_dns_servers[index];
+    dns_servers_unlock_irqrestore(f);
+    return s;
+}
+
+static int dns_is_server(ipv4_addr_t addr) {
+    int found;
+    int i;
+    uint64_t f;
+
+    found = 0;
+    f = dns_servers_lock_irqsave();
+    if (g_dns_servers) {
+        for (i = 0; i < g_dns_server_count; i++) {
+            if (ipv4_eq(addr, g_dns_servers[i])) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    dns_servers_unlock_irqrestore(f);
+    return found;
+}
+
+int dns_set_servers(const ipv4_addr_t *servers, int count) {
+    ipv4_addr_t *list;
+    ipv4_addr_t *old;
+    int old_dynamic;
+    uint64_t f;
+    int i;
+
+    if (!servers || count <= 0) return -1;
+    if ((uint64_t)count > SIZE_MAX / sizeof(*list)) return -1;
+    list = (ipv4_addr_t *)kmalloc((uint64_t)count * sizeof(*list));
+    if (!list) return -1;
+    for (i = 0; i < count; i++) list[i] = servers[i];
+    f = dns_servers_lock_irqsave();
+    old = g_dns_servers;
+    old_dynamic = g_dns_servers_dynamic;
+    g_dns_servers = list;
+    g_dns_server_count = count;
+    g_dns_servers_dynamic = 1;
+    dns_servers_unlock_irqrestore(f);
+    if (old_dynamic && old) kfree(old);
+    return 0;
+}
+
+int dns6_server_count(void) {
+    int n;
+    uint64_t f;
+
+    f = dns_servers_lock_irqsave();
+    n = g_dns6_servers ? g_dns6_server_count : 0;
+    dns_servers_unlock_irqrestore(f);
+    return n;
+}
+
+ipv6_addr_t dns6_server_at(int index) {
+    ipv6_addr_t s;
+    uint64_t f;
+    int i;
+
+    for (i = 0; i < 16; i++) s.octets[i] = 0;
+    f = dns_servers_lock_irqsave();
+    if (g_dns6_servers && index >= 0 && index < g_dns6_server_count)
+        s = g_dns6_servers[index];
+    dns_servers_unlock_irqrestore(f);
+    return s;
+}
+
+static int dns6_is_server(const ipv6_addr_t *addr) {
+    int found;
+    int i;
+    uint64_t f;
+
+    found = 0;
+    f = dns_servers_lock_irqsave();
+    if (g_dns6_servers && addr) {
+        for (i = 0; i < g_dns6_server_count; i++) {
+            if (ipv6_eq(*addr, g_dns6_servers[i])) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    dns_servers_unlock_irqrestore(f);
+    return found;
+}
+
+int dns6_set_servers(const ipv6_addr_t *servers, int count) {
+    ipv6_addr_t *list;
+    ipv6_addr_t *old;
+    uint64_t f;
+    int i;
+
+    if (!servers || count <= 0) return -1;
+    if ((uint64_t)count > SIZE_MAX / sizeof(*list)) return -1;
+    list = (ipv6_addr_t *)kmalloc((uint64_t)count * sizeof(*list));
+    if (!list) return -1;
+    for (i = 0; i < count; i++) list[i] = servers[i];
+    f = dns_servers_lock_irqsave();
+    old = g_dns6_servers;
+    g_dns6_servers = list;
+    g_dns6_server_count = count;
+    dns_servers_unlock_irqrestore(f);
+    if (old) kfree(old);
+    return 0;
 }
 
 static int dns_cache_lookup(const char *name, ipv4_addr_t *out_ipv4) {
@@ -228,6 +367,10 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
     char qname[256];
     int depth;
     int si;
+    int sc;
+    int sc6;
+    ipv4_addr_t srv;
+    ipv6_addr_t srv6;
     int qn;
 
     if (!hostname || !out_ipv4) return -1;
@@ -252,6 +395,9 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
     if (!query) return -1;
     pending_cname = (char *)kmalloc(256);
     if (!pending_cname) { kfree(query); return -1; }
+    sc = dns_server_count();
+    sc6 = dns6_server_count();
+    if (sc + sc6 <= 0) { kfree(query); kfree(pending_cname); pending_cname = NULL; return -1; }
 
     for (depth = 0; depth < 4; depth++) {
         hdr = (dns_header_t *)query;
@@ -280,12 +426,17 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
         pending_cname_set = 0;
         pending_ttl = 300;
 
-        for (si = 0; si < 2; si++) {
-            send_result = udp_send(netif, si ? g_dns_server2 : g_dns_server,
-                                   53, DNS_PORT, query, query_len);
+        for (si = 0; si < sc + sc6; si++) {
+            if (si < sc) {
+                srv = dns_server_at(si);
+                send_result = udp_send(netif, srv, 53, DNS_PORT, query, query_len);
+            } else {
+                srv6 = dns6_server_at(si - sc);
+                send_result = udp_send6(netif, srv6, 53, DNS_PORT, query, query_len);
+            }
             if (send_result < 0) continue;
 
-            timeout_ticks = pit_ms_to_ticks(timeout_ms / 2);
+            timeout_ticks = pit_ms_to_ticks(timeout_ms / (uint64_t)(sc + sc6));
             start = pit_get_ticks();
             while (!pending_resolved) {
                 gen = descriptor_ready_generation();
@@ -345,6 +496,11 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
     uint64_t timeout_ticks;
     uint64_t start;
     uint64_t gen;
+    int si;
+    int sc;
+    int sc6;
+    ipv4_addr_t srv;
+    ipv6_addr_t srv6;
 
     if (!hostname || !out_ipv6) return -1;
 
@@ -352,6 +508,10 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
 
     netif = netif_get_default();
     if (!netif) return -1;
+
+    sc = dns_server_count();
+    sc6 = dns6_server_count();
+    if (sc + sc6 <= 0) return -1;
 
     query = (uint8_t *)kmalloc(512);
     if (!query) return -1;
@@ -380,24 +540,35 @@ static int dns_resolve6_locked(const char *hostname, ipv6_addr_t *out_ipv6) {
     pending_qtype = DNS_TYPE_AAAA;
     pending_resolved = 0;
 
-    send_result = udp_send(netif, g_dns_server, 53, DNS_PORT, query, query_len);
-    kfree(query);
-    if (send_result < 0) return -1;
+    for (si = 0; si < sc + sc6; si++) {
+        if (si < sc) {
+            srv = dns_server_at(si);
+            send_result = udp_send(netif, srv, 53, DNS_PORT, query, query_len);
+        } else {
+            srv6 = dns6_server_at(si - sc);
+            send_result = udp_send6(netif, srv6, 53, DNS_PORT, query, query_len);
+        }
+        if (send_result < 0) continue;
 
-    timeout_ticks = pit_ms_to_ticks(5000);
-    start = pit_get_ticks();
-    while (!pending_resolved) {
-        gen = descriptor_ready_generation();
-        __asm__ volatile("sti");
-        netif_poll_all();
-        if (task_has_pending_signals()) {
-            return -1;
+        timeout_ticks = pit_ms_to_ticks(5000 / (uint64_t)(sc + sc6));
+        start = pit_get_ticks();
+        while (!pending_resolved) {
+            gen = descriptor_ready_generation();
+            __asm__ volatile("sti");
+            netif_poll_all();
+            if (task_has_pending_signals()) {
+                kfree(query);
+                return -1;
+            }
+            if (pit_get_ticks() - start > timeout_ticks) {
+                break;
+            }
+            descriptor_ready_wait(gen, pit_ms_to_ticks(10));
         }
-        if (pit_get_ticks() - start > timeout_ticks) {
-            return -1;
-        }
-        descriptor_ready_wait(gen, pit_ms_to_ticks(10));
+        if (pending_resolved) break;
     }
+    kfree(query);
+    if (!pending_resolved) return -1;
 
     memcpy(out_ipv6, &pending_result6, sizeof(ipv6_addr_t));
     return 0;
@@ -412,7 +583,7 @@ int dns_resolve6(const char *hostname, ipv6_addr_t *out_ipv6) {
     return result;
 }
 
-void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *data, uint64_t len) {
+static void dns_handle_packet(uint8_t *data, uint64_t len) {
     dns_header_t *hdr;
     uint16_t id;
     uint16_t flags;
@@ -427,13 +598,7 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
     uint16_t rtype;
     uint16_t rdlength;
 
-    (void)netif;
-
-    if (len < sizeof(dns_header_t)) return;
-
-    if (src_port != DNS_PORT) return;
-
-    if (!ipv4_eq(src, g_dns_server) && !ipv4_eq(src, g_dns_server2)) return;
+    if (!data || len < sizeof(dns_header_t)) return;
 
     hdr = (dns_header_t *)data;
     id = ntohs(hdr->id);
@@ -512,6 +677,20 @@ void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *da
 
         offset += rdlength;
     }
+}
+
+void dns_receive(netif_t *netif, ipv4_addr_t src, uint16_t src_port, uint8_t *data, uint64_t len) {
+    (void)netif;
+    if (src_port != DNS_PORT) return;
+    if (!dns_is_server(src)) return;
+    dns_handle_packet(data, len);
+}
+
+void dns_receive6(netif_t *netif, const ipv6_addr_t *src, uint16_t src_port, uint8_t *data, uint64_t len) {
+    (void)netif;
+    if (src_port != DNS_PORT) return;
+    if (!dns6_is_server(src)) return;
+    dns_handle_packet(data, len);
 }
 
 void dns_cache_print(void) {

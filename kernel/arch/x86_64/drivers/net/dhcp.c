@@ -258,9 +258,17 @@ static void dhcp_apply_config(netif_t *netif, dhcp_state_t *temp) {
     netif_set_dns(netif, g_dhcp_state.dns1, g_dhcp_state.dns2);
     netif->dhcp_configured = 1;
 
-    dns_set_server(g_dhcp_state.dns1);
-    if (!ipv4_eq(g_dhcp_state.dns2, IPV4_ZERO)) {
-        dns_set_server2(g_dhcp_state.dns2);
+    {
+        ipv4_addr_t servers[2];
+        int nscount;
+
+        nscount = 0;
+        if (!ipv4_eq(g_dhcp_state.dns1, IPV4_ZERO))
+            servers[nscount++] = g_dhcp_state.dns1;
+        if (!ipv4_eq(g_dhcp_state.dns2, IPV4_ZERO))
+            servers[nscount++] = g_dhcp_state.dns2;
+        if (nscount > 0)
+            dns_set_servers(servers, nscount);
     }
 }
 

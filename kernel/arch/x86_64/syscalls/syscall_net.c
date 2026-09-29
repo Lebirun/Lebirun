@@ -13,6 +13,8 @@ typedef struct {
     uint8_t link_up;
     uint8_t dhcp_configured;
     uint8_t _pad2[2];
+    uint8_t ipv6[16];
+    uint8_t ipv6_prefix;
 } __attribute__((packed)) netinfo_user_t;
 
 typedef struct {
@@ -56,6 +58,13 @@ typedef struct {
 
 extern int arp_get_cache(uint64_t *ips, uint8_t *macs, int max_entries);
 extern int ping_one(ipv4_addr_t target, uint16_t seq, uint64_t timeout_ms);
+extern void netif_set_dns(netif_t *netif, ipv4_addr_t dns1, ipv4_addr_t dns2);
+extern int dns_server_count(void);
+extern ipv4_addr_t dns_server_at(int index);
+extern int dns_set_servers(const ipv4_addr_t *servers, int count);
+extern int dns6_server_count(void);
+extern ipv6_addr_t dns6_server_at(int index);
+extern int dns6_set_servers(const ipv6_addr_t *servers, int count);
 
 #include <stdarg.h>
 
@@ -228,44 +237,25 @@ static void klog_con(int con_id, const char *fmt, ...) {
     console_write_to(con_id, buf, (size_t)len);
 }
 
-static int sys_net_ifconfig(int unused, const char *unused2, int unused3) {
-    int con_id;
+static int sys_net_ifconfig(int raw_ip, const char *raw_mask, int raw_gateway, int fields) {
     netif_t *netif;
     ipv4_addr_t ip;
     ipv4_addr_t netmask;
     ipv4_addr_t gateway;
 
-    con_id = current_task ? current_task->console_id : 0;
+    if (!fields) return -1;
     net_ensure_hw();
     netif = netif_get_default();
     if (!netif) {
-        klog_con(con_id, "No network interface found\n");
+        klog("net: no network interface found\n");
         return -1;
     }
-    if (unused != 0) {
-        ip = u32_to_ipv4((uint64_t)(uint32_t)unused);
-        netmask = u32_to_ipv4((uint64_t)(uint32_t)(uintptr_t)unused2);
-        gateway = u32_to_ipv4((uint64_t)(uint32_t)unused3);
-        if (ipv4_eq(netif->ipv4, ip) && ipv4_eq(netif->netmask, netmask) && ipv4_eq(netif->gateway, gateway) && !netif->dhcp_configured) {
-            klog_con(con_id, "ifconfig: set %s ip=%u.%u.%u.%u netmask=%u.%u.%u.%u gateway=%u.%u.%u.%u\n",
-                     netif->name,
-                     ip.octets[0], ip.octets[1], ip.octets[2], ip.octets[3],
-                     netmask.octets[0], netmask.octets[1], netmask.octets[2], netmask.octets[3],
-                     gateway.octets[0], gateway.octets[1], gateway.octets[2], gateway.octets[3]);
-            return 0;
-        }
-        dhcp_stop(netif);
-        netif_set_ipv4(netif, ip, netmask, gateway);
-        netif->dhcp_configured = 0;
-        klog_con(con_id, "ifconfig: set %s ip=%u.%u.%u.%u netmask=%u.%u.%u.%u gateway=%u.%u.%u.%u\n",
-                 netif->name,
-                 ip.octets[0], ip.octets[1], ip.octets[2], ip.octets[3],
-                 netmask.octets[0], netmask.octets[1], netmask.octets[2], netmask.octets[3],
-                 gateway.octets[0], gateway.octets[1], gateway.octets[2], gateway.octets[3]);
-        return 0;
-    }
-    netif_print_info(netif);
-    klog("ifconfig: info printed for %s\n", netif->name);
+    ip = (fields & 1) ? u32_to_ipv4((uint64_t)(uint32_t)raw_ip) : netif->ipv4;
+    netmask = (fields & 2) ? u32_to_ipv4((uint64_t)(uint32_t)(uintptr_t)raw_mask) : netif->netmask;
+    gateway = (fields & 4) ? u32_to_ipv4((uint64_t)(uint32_t)raw_gateway) : netif->gateway;
+    dhcp_stop(netif);
+    netif_set_ipv4(netif, ip, netmask, gateway);
+    netif->dhcp_configured = 0;
     return 0;
 }
 
@@ -395,6 +385,149 @@ static int sys_net_dhcp(int cmd, const char *unused2, int unused3) {
     return -1;
 }
 
+static int sys_net_dns_set(uint64_t addrs_ptr, const char *unused, int count) {
+    netif_t *netif;
+    uint32_t *raw;
+    ipv4_addr_t *servers;
+    uint64_t need;
+    ipv4_addr_t second;
+    int i;
+    int ret;
+
+    (void)unused;
+    if (!addrs_ptr || count <= 0) return -1;
+    if ((uint64_t)count > SIZE_MAX / sizeof(uint32_t)) return -1;
+    need = (uint64_t)count * sizeof(uint32_t);
+    if (!user_range_mapped((uint64_t)addrs_ptr, need)) return -1;
+    raw = (uint32_t *)kmalloc(need);
+    if (!raw) return -1;
+    if (copy_from_user(raw, (const void *)(uintptr_t)addrs_ptr,
+                       (size_t)need) != 0) {
+        kfree(raw);
+        return -1;
+    }
+    if (raw[0] == 0) {
+        kfree(raw);
+        return -1;
+    }
+    if ((uint64_t)count > SIZE_MAX / sizeof(*servers)) {
+        kfree(raw);
+        return -1;
+    }
+    servers = (ipv4_addr_t *)kmalloc((uint64_t)count * sizeof(*servers));
+    if (!servers) {
+        kfree(raw);
+        return -1;
+    }
+    for (i = 0; i < count; i++) servers[i] = u32_to_ipv4(raw[i]);
+    kfree(raw);
+    net_ensure_hw();
+    netif = netif_get_default();
+    if (!netif) {
+        kfree(servers);
+        return -1;
+    }
+    ret = dns_set_servers(servers, count);
+    if (ret == 0) {
+        second = count > 1 ? dns_server_at(1) : u32_to_ipv4(0);
+        netif_set_dns(netif, dns_server_at(0), second);
+    }
+    kfree(servers);
+    return ret;
+}
+
+static int sys_net_dns_get(uint64_t buf_ptr, const char *count_ptr, int max_entries) {
+    int count;
+    int i;
+    uint64_t need;
+    uint32_t *out;
+    uint32_t addr;
+
+    if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
+    count = dns_server_count();
+    if (count > max_entries) count = max_entries;
+    if (count > 0) {
+        if ((uint64_t)count > SIZE_MAX / sizeof(uint32_t)) return -1;
+        need = (uint64_t)count * sizeof(uint32_t);
+        if (!user_range_mapped((uint64_t)buf_ptr, need)) return -1;
+    }
+    if (!user_range_mapped((uint64_t)(uintptr_t)count_ptr, sizeof(int))) return -1;
+    out = (uint32_t *)(uintptr_t)buf_ptr;
+    for (i = 0; i < count; i++) {
+        addr = (uint32_t)ipv4_to_u32(dns_server_at(i));
+        if (copy_to_user(&out[i], &addr, sizeof(addr)) != 0) return -1;
+    }
+    if (copy_to_user((void *)(uintptr_t)count_ptr, &count, sizeof(count)) != 0) return -1;
+    return 0;
+}
+
+static int sys_net_dns6_set(uint64_t addrs_ptr, const char *unused, int count) {
+    netif_t *netif;
+    ipv6_addr_t *servers;
+    uint64_t need;
+    int j;
+    int zero;
+    int ret;
+
+    (void)unused;
+    if (!addrs_ptr || count <= 0) return -1;
+    if ((uint64_t)count > SIZE_MAX / sizeof(*servers)) return -1;
+    need = (uint64_t)count * sizeof(*servers);
+    if (!user_range_mapped((uint64_t)addrs_ptr, need)) return -1;
+    servers = (ipv6_addr_t *)kmalloc(need);
+    if (!servers) return -1;
+    if (copy_from_user(servers, (const void *)(uintptr_t)addrs_ptr,
+                       (size_t)need) != 0) {
+        kfree(servers);
+        return -1;
+    }
+    zero = 1;
+    for (j = 0; j < 16; j++) {
+        if (servers[0].octets[j]) {
+            zero = 0;
+            break;
+        }
+    }
+    if (zero) {
+        kfree(servers);
+        return -1;
+    }
+    net_ensure_hw();
+    netif = netif_get_default();
+    if (!netif) {
+        kfree(servers);
+        return -1;
+    }
+    ret = dns6_set_servers(servers, count);
+    kfree(servers);
+    return ret;
+}
+
+static int sys_net_dns6_get(uint64_t buf_ptr, const char *count_ptr, int max_entries) {
+    int count;
+    int i;
+    uint64_t need;
+    ipv6_addr_t *out;
+    ipv6_addr_t addr;
+
+    if (!buf_ptr || !count_ptr || max_entries <= 0) return -1;
+    count = dns6_server_count();
+    if (count > max_entries) count = max_entries;
+    if (count > 0) {
+        if ((uint64_t)count > SIZE_MAX / sizeof(*out)) return -1;
+        need = (uint64_t)count * sizeof(*out);
+        if (!user_range_mapped((uint64_t)buf_ptr, need)) return -1;
+    }
+    if (!user_range_mapped((uint64_t)(uintptr_t)count_ptr, sizeof(int))) return -1;
+    out = (ipv6_addr_t *)(uintptr_t)buf_ptr;
+    for (i = 0; i < count; i++) {
+        addr = dns6_server_at(i);
+        if (copy_to_user(&out[i], &addr, sizeof(addr)) != 0) return -1;
+    }
+    if (copy_to_user((void *)(uintptr_t)count_ptr, &count, sizeof(count)) != 0) return -1;
+    return 0;
+}
+
 static int sys_net_getinfo(uint64_t buf_ptr, const char *unused2, int unused3) {
     netif_t *netif;
     netinfo_user_t info;
@@ -425,6 +558,8 @@ static int sys_net_getinfo(uint64_t buf_ptr, const char *unused2, int unused3) {
     info.mtu = netif->mtu;
     info.link_up = netif->link_up;
     info.dhcp_configured = netif->dhcp_configured;
+    for (i = 0; i < 16; i++) info.ipv6[i] = netif->ipv6.octets[i];
+    info.ipv6_prefix = netif->ipv6_prefix;
 
     if (copy_to_user((void *)(uintptr_t)buf_ptr, &info,
                      sizeof(info)) != 0) return -1;
@@ -872,6 +1007,10 @@ void syscalls_net_init(void) {
     syscall_table_set(SYSCALL_NET_ARP, (void *)(sys_net_arp));
     syscall_table_set(SYSCALL_NET_DNS, (void *)(sys_net_dns));
     syscall_table_set(SYSCALL_NET_DHCP, (void *)(sys_net_dhcp));
+    syscall_table_set(SYSCALL_NET_DNS_SET, (void *)(sys_net_dns_set));
+    syscall_table_set(SYSCALL_NET_DNS_GET, (void *)(sys_net_dns_get));
+    syscall_table_set(SYSCALL_NET_DNS6_SET, (void *)(sys_net_dns6_set));
+    syscall_table_set(SYSCALL_NET_DNS6_GET, (void *)(sys_net_dns6_get));
     syscall_table_set(SYSCALL_NET_GETINFO, (void *)(sys_net_getinfo));
     syscall_table_set(SYSCALL_NET_ARP_GET, (void *)(sys_net_arp_get));
     syscall_table_set(SYSCALL_NET_PING_ONE, (void *)(sys_net_ping_one));

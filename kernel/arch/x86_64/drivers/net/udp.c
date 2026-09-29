@@ -221,6 +221,10 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
     payload = data + sizeof(udp_header_t);
     payload_len = udp_len - sizeof(udp_header_t);
 
+    if (src_port == DNS_PORT) {
+        dns_receive6(netif, &src, src_port, payload, payload_len);
+    }
+
     if (udp_port_hook && udp_port_hook->port_active && udp_port_hook->receive6 && udp_port_hook->port_active(dest_port)) {
         udp_port_hook->receive6(dest_port, &src, src_port, payload, payload_len);
         return;
