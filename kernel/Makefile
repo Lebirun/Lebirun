@@ -81,7 +81,6 @@ $(ARCHDIR)/mem/temp_map.o \
 $(ARCHDIR)/uaccess.o \
 $(ARCHDIR)/task.o \
 $(ARCHDIR)/smp.o \
-$(ARCHDIR)/multithread.o \
 $(ARCHDIR)/syscalls/syscall_main.o \
 $(ARCHDIR)/syscalls/syscall_core.o \
 $(ARCHDIR)/syscalls/syscall_mem.o \

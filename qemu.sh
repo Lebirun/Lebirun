@@ -81,4 +81,4 @@ $QEMU_CMD \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
     -device virtio-net,netdev=net0 \
     -accel kvm \
-    -boot d
+    -boot c

@@ -117,7 +117,7 @@ uint8_t *kstack_alloc(void) {
     if (!phys) phys = pmm_alloc_page();
     if (phys) {
         page_virt = slot_page_addr(slot, p);
-        vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+        vmm_map_page(page_virt, (uint64_t)phys, 0x003 | VMM_PTE_NX);
         if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
             (uint64_t)phys) {
             pfa_free((uint64_t)phys);
@@ -205,76 +205,54 @@ void kstack_reclaim_unused(void) {
     uint64_t phys;
     uint64_t flags;
     int slot;
-    int cpu_index;
-    int running;
 
     if (!kstack_initialized) return;
 
-    for (;;) {
-        phys = 0;
-        slot = -1;
-        lock_scheduler();
-        task = all_tasks_head;
-        while (task) {
-            if (task->state != TASK_BLOCKED || task->resources_released ||
-                !task->kernel_stack_base || task->running_cpu != -1) {
-                task = task->all_next;
-                continue;
-            }
-            running = 0;
-            for (cpu_index = 0; cpu_index < cpu_count; cpu_index++) {
-                if (cpus[cpu_index].active &&
-                    cpus[cpu_index].running_task == task) {
-                    running = 1;
-                    break;
-                }
-            }
-            if (running) {
-                task = task->all_next;
-                continue;
-            }
-            base = (uint64_t)task->kernel_stack_base;
-            top_page = base + PAGE_SIZE;
-            top = base + KSTACK_USABLE_SIZE;
-            rsp = task->regs.rsp;
-            if (top_page < base || top < top_page ||
-                rsp < top_page || rsp >= top) {
-                task = task->all_next;
-                continue;
-            }
-            frame = task->syscall_frame;
-            if (frame) {
-                frame_address = (uint64_t)frame;
-                if (frame_address < top_page || frame_address >= top ||
-                    sizeof(registers_t) > top - frame_address) {
-                    task = task->all_next;
-                    continue;
-                }
-            }
-            slot = addr_to_slot(base);
-            if (slot < 0 || base != slot_bottom_addr(slot)) {
-                task = task->all_next;
-                continue;
-            }
-            kstack_lock_acquire(&flags);
-            entry = kstack_find_slot_locked(slot);
-            if (entry && entry->page_phys[0]) {
-                phys = entry->page_phys[0];
-                entry->page_phys[0] = 0;
-                entry->bottom_mapped = 0;
-                entry->syscall_bottom = 0;
-            }
-            kstack_lock_release(flags);
-            if (phys) {
-                vmm_unmap_page(slot_page_addr(slot, 0));
-                break;
-            }
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task) {
+        if (task->state == TASK_DEAD || task->resources_released ||
+            !task->kernel_stack_base) {
             task = task->all_next;
+            continue;
         }
-        unlock_scheduler();
-        if (!phys) break;
-        pfa_free(phys);
+        base = (uint64_t)task->kernel_stack_base;
+        top_page = base + PAGE_SIZE;
+        top = base + KSTACK_USABLE_SIZE;
+        rsp = task->regs.rsp;
+        if (top_page < base || top < top_page ||
+            rsp < top_page || rsp >= top) {
+            task = task->all_next;
+            continue;
+        }
+        frame = task->syscall_frame;
+        if (frame) {
+            frame_address = (uint64_t)frame;
+            if (frame_address < top_page || frame_address >= top ||
+                sizeof(registers_t) > top - frame_address) {
+                task = task->all_next;
+                continue;
+            }
+        }
+        slot = addr_to_slot(base);
+        if (slot < 0 || base != slot_bottom_addr(slot)) {
+            task = task->all_next;
+            continue;
+        }
+        kstack_lock_acquire(&flags);
+        entry = kstack_find_slot_locked(slot);
+        if (entry && entry->page_phys[0]) {
+            phys = entry->page_phys[0];
+            entry->page_phys[0] = 0;
+            entry->bottom_mapped = 0;
+            entry->syscall_bottom = 0;
+            vmm_unmap_page(slot_page_addr(slot, 0));
+            pfa_free(phys);
+        }
+        kstack_lock_release(flags);
+        task = task->all_next;
     }
+    unlock_scheduler();
 }
 
 void kstack_memory_stats(uint64_t *slots, uint64_t *pages) {
@@ -347,7 +325,7 @@ int kstack_page_fault_handler(uint64_t fault_addr, uint64_t fault_rip,
     if (!phys) phys = pmm_alloc_page();
     if (!phys) return 0;
 
-    vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+    vmm_map_page(page_virt, (uint64_t)phys, 0x003 | VMM_PTE_NX);
     if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
         (uint64_t)phys) {
         pfa_free((uint64_t)phys);
@@ -427,7 +405,7 @@ int kstack_expand_syscall(void) {
         if (!phys) phys = pmm_alloc_page();
         if (!phys) goto out;
         page_virt = slot_page_addr(slot, p);
-        vmm_map_page(page_virt, (uint64_t)phys, 0x003);
+        vmm_map_page(page_virt, (uint64_t)phys, 0x003 | VMM_PTE_NX);
         if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
             (uint64_t)phys) {
             pfa_free((uint64_t)phys);

@@ -718,6 +718,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
             else if (operation == FUTEX_OP_XOR) new_value ^= operation_argument;
             else return -EINVAL;
             expected_value = value;
+            __asm__ volatile ("mov %%cr4, %%rax; test $0x200000, %%rax; jz 1f; stac; 1:" ::: "rax", "memory");
             while (!__atomic_compare_exchange_n(uaddr2, &expected_value,
                     new_value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
                 value = expected_value;
@@ -733,6 +734,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
                 else
                     new_value ^= operation_argument;
             }
+            __asm__ volatile ("mov %%cr4, %%rax; test $0x200000, %%rax; jz 1f; clac; 1:" ::: "rax", "memory");
             result = task_futex_wake(key, val);
             compare_value = comparison_argument;
             if ((comparison == 0 && value == compare_value) ||
