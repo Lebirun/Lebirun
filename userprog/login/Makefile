@@ -49,11 +49,11 @@ build/%.o: src/%.c
 
 $(BINDIR)/login.bin: $(LOGIN_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--sort-section=alignment -Wl,--build-id=none -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(LOGIN_OBJS) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--sort-section=alignment -Wl,--build-id=none -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(LOGIN_OBJS) -l:libc.a $(CRTN) -lgcc
 
 $(BINDIR)/getty.bin: $(GETTY_OBJS) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--sort-section=alignment -Wl,--build-id=none -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(GETTY_OBJS) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--sort-section=alignment -Wl,--build-id=none -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(GETTY_OBJS) -l:libc.a $(CRTN) -lgcc
 
 stage: all
 	$(Q)mkdir -p $(SYSROOT_BIN)

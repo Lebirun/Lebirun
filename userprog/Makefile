@@ -82,8 +82,8 @@ bin/lsh.bin: $(LSH_SOURCE_FILES)
 		mkdir -p "$(LSH_BUILD)"; \
 		(cd "$(LSH_BUILD)" && sh ../configure $(LSH_CONFIGURE_ARGS) > "$(LSH_BUILD)/configure.log" 2>&1) || (cat "$(LSH_BUILD)/configure.log" >&2; false); \
 	fi
-	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" clean
-	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -lc $(CRTN_ABS) -lgcc" lsh
+	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -l:libc.a $(CRTN_ABS) -lgcc" clean
+	$(MAKE) -C $(LSH_DIR) OUTDIR="$(LSH_OUTDIR)" CFLAGS="$(LSH_CFLAGS)" LDFLAGS="$(LSH_LDFLAGS)" LIBS="$(CRT1_ABS) $(CRTI_ABS) -L$(SYSROOT)/usr/lib -l:libc.a $(CRTN_ABS) -lgcc" lsh
 	@cp "$(LSH_DIR)/lsh" "$(MAKEFILE_DIR)bin/lsh.bin"
 
 .PHONY: all clean
@@ -98,7 +98,7 @@ build/%.o: %.c
 
 bin/%.bin: build/%.o $(CRT1) $(CRTI) $(CRTN) $(LIBC_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC)/user.ld -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $< -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--build-id=none -T $(LIBC)/user.ld -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $< -l:libc.a $(CRTN) -lgcc
 
 clean:
 	rm -f *.so

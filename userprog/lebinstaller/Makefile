@@ -61,7 +61,7 @@ $(LEB_LSYSCALLS_OBJ): $(LEB_LSYSCALLS_SRC)
 
 $(BINDIR)/lebinstaller.bin: $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(CRT1) $(CRTI) $(CRTN) $(LIBC_A) $(LEBUI_A)
 	$(Q)mkdir -p $(BINDIR)
-	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(LEBUI_A) -lc $(CRTN) -lgcc
+	$(MSG_LD)$(CC) -nostdlib -static -Wl,-z,noexecstack -Wl,--gc-sections -T $(LD_SCRIPT) -L$(SYSROOT)/usr/lib -o $@ $(CRT1) $(CRTI) $(OBJS) $(LEB_SYSCALLS_OBJ) $(LEB_LSYSCALLS_OBJ) $(LEBUI_A) -l:libc.a $(CRTN) -lgcc
 
 stage: all
 	$(Q)mkdir -p $(SYSROOT_SBIN)
