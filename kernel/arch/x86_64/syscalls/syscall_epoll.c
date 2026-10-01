@@ -655,7 +655,6 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     int operation_argument;
     int comparison_argument;
     int new_value;
-    int expected_value;
     int result;
 
     op = (int)(uintptr_t)op_ptr;
@@ -711,30 +710,19 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
                 operation_argument = 1 << operation_argument;
             }
             new_value = value;
-            if (operation == FUTEX_OP_SET) new_value = operation_argument;
-            else if (operation == FUTEX_OP_ADD) new_value += operation_argument;
-            else if (operation == FUTEX_OP_OR) new_value |= operation_argument;
-            else if (operation == FUTEX_OP_ANDN) new_value &= ~operation_argument;
-            else if (operation == FUTEX_OP_XOR) new_value ^= operation_argument;
+            if (operation == FUTEX_OP_SET)
+                new_value = operation_argument;
+            else if (operation == FUTEX_OP_ADD)
+                new_value += operation_argument;
+            else if (operation == FUTEX_OP_OR)
+                new_value |= operation_argument;
+            else if (operation == FUTEX_OP_ANDN)
+                new_value &= ~operation_argument;
+            else if (operation == FUTEX_OP_XOR)
+                new_value ^= operation_argument;
             else return -EINVAL;
-            expected_value = value;
-            __asm__ volatile ("mov %%cr4, %%rax; test $0x200000, %%rax; jz 1f; stac; 1:" ::: "rax", "memory");
-            while (!__atomic_compare_exchange_n(uaddr2, &expected_value,
-                    new_value, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-                value = expected_value;
-                new_value = value;
-                if (operation == FUTEX_OP_SET)
-                    new_value = operation_argument;
-                else if (operation == FUTEX_OP_ADD)
-                    new_value += operation_argument;
-                else if (operation == FUTEX_OP_OR)
-                    new_value |= operation_argument;
-                else if (operation == FUTEX_OP_ANDN)
-                    new_value &= ~operation_argument;
-                else
-                    new_value ^= operation_argument;
-            }
-            __asm__ volatile ("mov %%cr4, %%rax; test $0x200000, %%rax; jz 1f; clac; 1:" ::: "rax", "memory");
+            if (copy_to_user(uaddr2, &new_value, sizeof(new_value)) < 0)
+                return -EFAULT;
             result = task_futex_wake(key, val);
             compare_value = comparison_argument;
             if ((comparison == 0 && value == compare_value) ||

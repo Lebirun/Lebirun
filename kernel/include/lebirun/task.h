@@ -202,6 +202,8 @@ typedef struct task {
     uint32_t cpu_affinity;
     uint32_t cpu_affinity_hi;
     uint64_t affinity64;
+    uint64_t *affinity_dyn;
+    int affinity_nwords;
     uint64_t vruntime;
     int preferred_cpu;
     int last_cpu;
@@ -427,6 +429,8 @@ int task_set_cpu_affinity(task_t *task, uint32_t mask);
 uint64_t task_get_cpu_affinity64(task_t *task);
 int task_set_cpu_affinity64(task_t *task, uint64_t mask);
 uint32_t task_get_cpu_affinity(task_t *task);
+int task_set_cpu_affinity_mask(task_t *task, const uint64_t *words, int nwords);
+int task_get_cpu_affinity_mask(task_t *task, uint64_t *words, int nwords);
 int task_oom_kill_one(void);
 
 #endif

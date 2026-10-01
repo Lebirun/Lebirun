@@ -35,7 +35,6 @@ static volatile int smp_scheduler_ready = 0;
 static volatile int smp_gs_ready = 0;
 static void smp_set_cpu_base(cpu_info_t *cpu);
 static volatile int smp_tlb_flush_lock = 0;
-static volatile uint64_t smp_tlb_flush_acks[4];
 static volatile uint64_t *smp_tlb_flush_acks_dyn;
 static int smp_tlb_flush_words;
 static volatile int smp_tlb_flush_pending = 0;
@@ -507,26 +506,36 @@ void smp_tlb_flush_all(void) {
 void smp_tlb_flush_ack(void) {
     uint64_t bit;
     int index;
-    int words;
 
+    if (!smp_tlb_flush_acks_dyn || smp_tlb_flush_words <= 0) return;
     index = smp_processor_id();
     if (index < 0) return;
-    words = smp_tlb_flush_words > 0 ? smp_tlb_flush_words : 4;
-    if (index >= words * 64) return;
+    if (index >= smp_tlb_flush_words * 64) return;
     bit = 1ULL << (index & 63);
-    if (smp_tlb_flush_acks_dyn)
-        __sync_fetch_and_or(&smp_tlb_flush_acks_dyn[index >> 6], bit);
-    else
-        __sync_fetch_and_or(&smp_tlb_flush_acks[index >> 6], bit);
+    __sync_fetch_and_or(&smp_tlb_flush_acks_dyn[index >> 6], bit);
 }
 
 static volatile uint64_t *smp_tlb_acks(void) {
-    return smp_tlb_flush_acks_dyn ? smp_tlb_flush_acks_dyn :
-        smp_tlb_flush_acks;
+    return smp_tlb_flush_acks_dyn;
 }
 
 static int smp_tlb_words(void) {
-    return smp_tlb_flush_words > 0 ? smp_tlb_flush_words : 4;
+    return smp_tlb_flush_words;
+}
+
+static int smp_tlb_flush_ensure(int words) {
+    volatile uint64_t *acks;
+    int i;
+
+    if (words <= 0) return 1;
+    if (smp_tlb_flush_acks_dyn && smp_tlb_flush_words >= words) return 1;
+    acks = (volatile uint64_t *)krealloc((void *)smp_tlb_flush_acks_dyn,
+        (uint64_t)words * sizeof(uint64_t));
+    if (!acks) return 0;
+    for (i = smp_tlb_flush_words; i < words; i++) acks[i] = 0;
+    smp_tlb_flush_acks_dyn = acks;
+    smp_tlb_flush_words = words;
+    return 1;
 }
 
 static int smp_tlb_flush_complete(int initiator) {
@@ -537,6 +546,7 @@ static int smp_tlb_flush_complete(int initiator) {
 
     acks = smp_tlb_acks();
     words = smp_tlb_words();
+    if (!acks || words <= 0) return 0;
     for (i = 0; i < cpu_count; i++) {
         if (i == initiator || !cpus[i].active) continue;
         if (i >= words * 64) return 0;
@@ -556,7 +566,7 @@ static void smp_tlb_flush_send_missing(int initiator) {
     words = smp_tlb_words();
     for (i = 0; i < cpu_count; i++) {
         if (i == initiator || !cpus[i].active) continue;
-        if (i < words * 64) {
+        if (acks && i < words * 64) {
             bit = 1ULL << (i & 63);
             if (acks[i >> 6] & bit) continue;
         }
@@ -573,6 +583,11 @@ int smp_tlb_flush_all_sync(void) {
 
     if (!lapic_base || cpu_count <= 1) return 0;
     if (__sync_lock_test_and_set(&smp_tlb_flush_lock, 1)) {
+        return -1;
+    }
+    if (!smp_tlb_flush_ensure((cpu_count + 63) / 64)) {
+        smp_tlb_flush_all();
+        __sync_lock_release(&smp_tlb_flush_lock);
         return -1;
     }
     if (smp_tlb_flush_pending) {
@@ -914,16 +929,6 @@ void KERNEL_INIT smp_init(void) {
         }
     }
     __atomic_store_n(&smp_percpu_irq_ready, 1, __ATOMIC_RELEASE);
-    if (cpu_count > 256) {
-        int words = (cpu_count + 63) / 64;
-        volatile uint64_t *acks = (volatile uint64_t *)kmalloc(
-            (uint64_t)words * sizeof(uint64_t));
-        if (acks) {
-            memset((void *)acks, 0, (uint64_t)words * sizeof(uint64_t));
-            __sync_synchronize();
-            smp_tlb_flush_acks_dyn = acks;
-            smp_tlb_flush_words = words;
-        }
-    }
+    smp_tlb_flush_ensure((cpu_count + 63) / 64);
     KERNEL_INIT_LOG("SMP: %d CPU(s) active\n", cpus_booted + 1);
 }

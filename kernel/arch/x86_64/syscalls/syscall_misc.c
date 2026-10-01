@@ -1480,44 +1480,89 @@ static int sys_lke_list(char *buf, int size) {
 #endif
 }
 
-static int sys_sched_setaffinity(int pid, const char *mask_ptr, int len) {
+static int sys_sched_setaffinity(int pid, int len, const char *mask_ptr) {
     uint64_t mask64;
     uint32_t mask;
+    uint64_t *words;
+    int nwords;
+    int ret;
     task_t *target;
 
-    if (len != 4 && len != 8) return -EINVAL;
+    if (len == 4 || len == 8) {
+        target = sched_target(pid);
+        if (!target) return -ESRCH;
+        if (target != current_task && current_task->euid != 0 &&
+            target->euid != current_task->euid) return -EPERM;
+        if (len == 8) {
+            if (copy_from_user(&mask64, mask_ptr, sizeof(mask64)) < 0)
+                return -EFAULT;
+            if (task_set_cpu_affinity64(target, mask64) < 0) return -EINVAL;
+            return 0;
+        }
+        if (copy_from_user(&mask, mask_ptr, sizeof(mask)) < 0) return -EFAULT;
+        if (task_set_cpu_affinity(target, mask) < 0) return -EINVAL;
+        return 0;
+    }
+    if (len <= 8 || (len & 7) || !mask_ptr) return -EINVAL;
+    if (cpu_count <= 0) return -EINVAL;
     target = sched_target(pid);
     if (!target) return -ESRCH;
     if (target != current_task && current_task->euid != 0 &&
         target->euid != current_task->euid) return -EPERM;
-    if (len == 8) {
-        if (copy_from_user(&mask64, mask_ptr, sizeof(mask64)) < 0) return -EFAULT;
-        if (task_set_cpu_affinity64(target, mask64) < 0) return -EINVAL;
-        return 0;
+    words = (uint64_t *)kmalloc((uint64_t)len);
+    if (!words) return -ENOMEM;
+    if (copy_from_user(words, mask_ptr, (uint64_t)len) < 0) {
+        kfree(words);
+        return -EFAULT;
     }
-    if (copy_from_user(&mask, mask_ptr, sizeof(mask)) < 0) return -EFAULT;
-    if (task_set_cpu_affinity(target, mask) < 0) return -EINVAL;
+    nwords = len / 8;
+    ret = task_set_cpu_affinity_mask(target, words, nwords);
+    kfree(words);
+    if (ret < 0) return -EINVAL;
     return 0;
 }
 
-static int sys_sched_getaffinity(int pid, const char *mask_ptr, int len) {
+static int sys_sched_getaffinity(int pid, int len, const char *mask_ptr) {
     uint64_t mask64;
     uint32_t mask;
+    uint64_t *words;
+    int nwords;
+    int ret;
     task_t *target;
 
     if (len < 4) return -EINVAL;
+    if (len <= 8) {
+        target = sched_target(pid);
+        if (!target) return -ESRCH;
+        if (len >= 8) {
+            mask64 = task_get_cpu_affinity64(target);
+            if (copy_to_user((void *)mask_ptr, &mask64, sizeof(mask64)) < 0)
+                return -EFAULT;
+            return 8;
+        }
+        mask = task_get_cpu_affinity(target);
+        if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
+            return -EFAULT;
+        return 4;
+    }
+    if ((len & 7) || !mask_ptr) return -EINVAL;
+    if (cpu_count <= 0) return -EINVAL;
     target = sched_target(pid);
     if (!target) return -ESRCH;
-    if (len >= 8) {
-        mask64 = task_get_cpu_affinity64(target);
-        if (copy_to_user((void *)mask_ptr, &mask64, sizeof(mask64)) < 0)
-            return -EFAULT;
-        return 8;
+    words = (uint64_t *)kmalloc((uint64_t)len);
+    if (!words) return -ENOMEM;
+    nwords = len / 8;
+    ret = task_get_cpu_affinity_mask(target, words, nwords);
+    if (ret < 0) {
+        kfree(words);
+        return -EINVAL;
     }
-    mask = task_get_cpu_affinity(target);
-    if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
+    if (copy_to_user((void *)mask_ptr, words, (uint64_t)len) < 0) {
+        kfree(words);
         return -EFAULT;
-    return 4;
+    }
+    kfree(words);
+    return len;
 }
 
 static int hostname_set(char *dst, const char *src, size_t len) {

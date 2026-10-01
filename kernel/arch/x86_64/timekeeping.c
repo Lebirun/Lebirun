@@ -101,11 +101,13 @@ int timekeeping_set_realtime_ns(uint64_t value) {
 static uint64_t tsc_freq_hz;
 static uint64_t tsc_base_tsc;
 static uint64_t tsc_base_us;
+static uint64_t tsc_last_ns;
 static int tsc_ready;
 static inline uint64_t tsc_rdtsc(void)
 {
     uint32_t lo;
     uint32_t hi;
+    __asm__ volatile("lfence" ::: "memory");
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
@@ -164,9 +166,20 @@ uint64_t tsc_get_ns(void)
 {
     uint64_t now;
     uint64_t delta;
+    uint64_t result;
+    uint64_t last;
     if (!tsc_ready || !tsc_freq_hz)
         return 0;
     now = tsc_rdtsc();
     delta = now >= tsc_base_tsc ? now - tsc_base_tsc : 0;
-    return tsc_base_us * 1000ULL + delta * 1000000000ULL / tsc_freq_hz;
+    result = tsc_base_us * 1000ULL + delta * 1000000000ULL / tsc_freq_hz;
+    last = __atomic_load_n(&tsc_last_ns, __ATOMIC_ACQUIRE);
+    if (result <= last)
+        return last;
+    while (!__atomic_compare_exchange_n(&tsc_last_ns, &last, result, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        if (result <= last)
+            return last;
+    }
+    return result;
 }
