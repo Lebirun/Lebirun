@@ -9,6 +9,7 @@
 #include <lebirun/pit.h>
 #include <lebirun/security.h>
 #include <lebirun/vring.h>
+#include <lebirun/panic.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -235,6 +236,29 @@ static void KERNEL_INIT parse_madt_phys(uint64_t madt_phys) {
     }
 }
 
+static void KERNEL_INIT ensure_timer_override(void) {
+    irq_override_t *expanded;
+    int i;
+
+    for (i = 0; i < irq_override_count; i++) {
+        if (irq_overrides && irq_overrides[i].source == 0) return;
+    }
+    if (irq_overrides) {
+        expanded = (irq_override_t *)krealloc(
+            irq_overrides,
+            (uint64_t)(irq_override_count + 1) * sizeof(irq_override_t));
+        if (!expanded) return;
+        irq_overrides = expanded;
+    } else {
+        irq_overrides = (irq_override_t *)kmalloc(sizeof(irq_override_t));
+        if (!irq_overrides) return;
+    }
+    irq_overrides[irq_override_count].source = 0;
+    irq_overrides[irq_override_count].gsi = 2;
+    irq_overrides[irq_override_count].flags = 0;
+    irq_override_count++;
+}
+
 static void KERNEL_INIT find_acpi_tables(void) {
     uint8_t *rsdp;
     uint64_t rsdt_phys;
@@ -247,6 +271,7 @@ static void KERNEL_INIT find_acpi_tables(void) {
     rsdp = find_rsdp();
     if (!rsdp) {
         KERNEL_INIT_LOG("SMP: RSDP not found, assuming single CPU\n");
+        ensure_timer_override();
         cpus[0].lapic_id = 0;
         cpus[0].processor_id = 0;
         cpus[0].bsp = 1;
@@ -267,11 +292,13 @@ static void KERNEL_INIT find_acpi_tables(void) {
 
         if (memcmp(sig, "APIC", 4) == 0) {
             parse_madt_phys(table_phys);
+            ensure_timer_override();
             return;
         }
     }
 
     KERNEL_INIT_LOG("SMP: MADT not found in RSDT\n");
+    ensure_timer_override();
     cpus[0].lapic_id = 0;
     cpus[0].processor_id = 0;
     cpus[0].bsp = 1;
@@ -807,6 +834,7 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     uint64_t elapsed_ticks;
     uint64_t timer_frequency;
     uint64_t flags;
+    uint64_t spins;
 
     if (freq_hz == 0) freq_hz = 1000;
     lapic_write(LAPIC_REG_TIMER_DCR, 0x03);
@@ -817,9 +845,12 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags) :: "memory");
     __asm__ volatile ("sti" ::: "memory");
     start_ticks = pit_get_ticks();
+    spins = 0;
     do {
         __asm__ volatile ("hlt" ::: "memory");
         elapsed_ticks = pit_get_ticks() - start_ticks;
+        if (++spins > 1000000000ULL)
+            kernel_panic(KERNEL_INIT_STRING("LAPIC calibration: PIT ticks not advancing"), NULL);
     } while (elapsed_ticks < 10);
     __asm__ volatile ("cli" ::: "memory");
 

@@ -67,7 +67,64 @@ fi
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mWriting GRUB config...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Writing GRUB config"
-cat > isodir/boot/grub/grub.cfg << EOF
+
+EFI_SYSTEM_DIR="/usr/lib/grub/x86_64-efi"
+EFI_LOCAL_DIR="${GRUB_EFI_DIRECTORY:-$HOME/.local/share/lebirun/grub/x86_64-efi}"
+EFI_MODULE_DIR=""
+if [ -d "$EFI_SYSTEM_DIR" ]; then
+    EFI_MODULE_DIR="$EFI_SYSTEM_DIR"
+elif [ -f "$EFI_LOCAL_DIR/modinfo.sh" ]; then
+    EFI_MODULE_DIR="$EFI_LOCAL_DIR"
+fi
+
+GRUB_DIRECTORY="${GRUB_DIRECTORY:-/usr/lib/grub/i386-pc}"
+GRUB_ISO_DIRECTORY="$(mktemp -d)"
+EFI_WORK_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf -- "$GRUB_ISO_DIRECTORY" "$EFI_WORK_DIRECTORY"' EXIT HUP INT TERM
+cp -a "$GRUB_DIRECTORY/." "$GRUB_ISO_DIRECTORY/"
+printf '%s\n' part_msdos > "$GRUB_ISO_DIRECTORY/partmap.lst"
+
+HYBRID=0
+if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
+    cat > "$EFI_WORK_DIRECTORY/early.cfg" << EOF
+search --set=root --file /boot/grub/grub.cfg
+set prefix=(\$root)/boot/grub
+configfile /boot/grub/grub.cfg
+EOF
+    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/early.cfg" efi_gop normal multiboot2 iso9660 part_msdos part_gpt configfile search && \
+       dd if=/dev/zero of="$EFI_WORK_DIRECTORY/efi.img" bs=1K count=1024 status=none && \
+       mformat -i "$EFI_WORK_DIRECTORY/efi.img" -v EFI :: >/dev/null && \
+       mmd -i "$EFI_WORK_DIRECTORY/efi.img" ::EFI ::EFI/BOOT >/dev/null && \
+       mcopy -i "$EFI_WORK_DIRECTORY/efi.img" "$EFI_WORK_DIRECTORY/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI; then
+        cp "$EFI_WORK_DIRECTORY/efi.img" isodir/efi.img
+        mkdir -p isodir/boot/grub/x86_64-efi
+        for _pm in part_acorn part_amiga part_bsd part_dfly part_dvh part_plan part_sun part_sunpc; do
+            cp "$EFI_MODULE_DIR/$_pm.mod" isodir/boot/grub/x86_64-efi/
+        done
+        HYBRID=1
+    else
+        printf "\033[0;33mWarning: EFI image build failed; building BIOS-only ISO.\033[0m\n"
+    fi
+fi
+
+if [ "$HYBRID" -eq 1 ]; then
+    GRUB_MODULES="multiboot2 biosdisk part_msdos part_gpt iso9660"
+    EXTRA_BOOT_ARGS="-eltorito-alt-boot -e efi.img -no-emul-boot"
+    cat > isodir/boot/grub/grub.cfg << EOF
+set timeout=10
+set default=0
+set gfxpayload=keep
+
+menuentry "Lebirun" {
+	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
+	module2 /boot/rootfs.squashfs
+	boot
+}
+EOF
+else
+    GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
+    EXTRA_BOOT_ARGS=""
+    cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=10
 set default=0
 
@@ -77,23 +134,20 @@ menuentry "Lebirun" {
 	boot
 }
 EOF
-
-GRUB_DIRECTORY="${GRUB_DIRECTORY:-/usr/lib/grub/i386-pc}"
-GRUB_ISO_DIRECTORY="$(mktemp -d)"
-GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
-trap 'rm -rf -- "$GRUB_ISO_DIRECTORY"' EXIT HUP INT TERM
-cp -a "$GRUB_DIRECTORY/." "$GRUB_ISO_DIRECTORY/"
-printf '%s\n' part_msdos > "$GRUB_ISO_DIRECTORY/partmap.lst"
+    if [ -z "$EFI_MODULE_DIR" ]; then
+        printf "\033[0;33mWarning: UEFI modules not found; building BIOS-only ISO. Install grub-efi-amd64-bin, or: apt-get download grub-efi-amd64-bin && mkdir -p $HOME/.local/share/lebirun/grub/x86_64-efi && dpkg-deb --fsys-tarfile grub-efi-amd64-bin_*.deb | tar -x -C $HOME/.local/share/lebirun/grub/x86_64-efi --strip-components=5 ./usr/lib/grub/x86_64-efi\033[0m\n"
+    fi
+fi
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mCreating ISO image...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Creating ISO image"
 if [ "$VERBOSE" -eq 1 ]; then
-    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir 2>&1 || \
-    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir $EXTRA_BOOT_ARGS 2>&1 || \
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir $EXTRA_BOOT_ARGS
 else
-    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir || \
-    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --compress=xz --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir $EXTRA_BOOT_ARGS || \
+    grub-mkrescue -d "$GRUB_ISO_DIRECTORY" --install-modules="$GRUB_MODULES" --fonts="" --locales="" --themes="" -o lebirun.iso isodir $EXTRA_BOOT_ARGS
 fi
 
 cleanup_bar

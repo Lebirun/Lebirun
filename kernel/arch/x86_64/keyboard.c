@@ -500,26 +500,60 @@ wake:
     descriptor_ready_notify_irq();
 }
 
+static int KERNEL_INIT kbd_wait_input(void) {
+    int timeout = 100000;
+    while (timeout--) {
+        if ((inb(0x64) & 0x02) == 0)
+            return 0;
+    }
+    return -1;
+}
+
+static int KERNEL_INIT kbd_wait_output(void) {
+    int timeout = 100000;
+    while (timeout--) {
+        if (inb(0x64) & 0x01)
+            return 0;
+    }
+    return -1;
+}
+
+static void KERNEL_INIT kbd_drain_output(void) {
+    int timeout = 100000;
+    while (timeout--) {
+        if (!(inb(0x64) & 0x01))
+            return;
+        inb(0x60);
+    }
+}
+
 void KERNEL_INIT keyboard_init(void) {
     uint8_t cmd;
     uint8_t master_mask;
 
-    while (inb(0x64) & 0x01) {
-        inb(0x60);
+    kbd_drain_output();
+
+    cmd = 0x47;
+    if (kbd_wait_input() == 0) {
+        outb(0x64, 0x20);
+        if (kbd_wait_output() == 0)
+            cmd = inb(0x60);
+    }
+    cmd |= 0x01;
+    cmd &= ~0x10;
+    if (kbd_wait_input() == 0) {
+        outb(0x64, 0x60);
+        if (kbd_wait_input() == 0)
+            outb(0x60, cmd);
     }
 
-    outb(0x64, 0x20); 
-    cmd = inb(0x60);
-    cmd |= 0x01;      
-    cmd &= ~0x10;      
-    outb(0x64, 0x60);  
-    outb(0x60, cmd);
-
-    outb(0x60, 0xF4);
-
-    while (inb(0x64) & 0x01) {
-        inb(0x60);
+    if (kbd_wait_input() == 0) {
+        outb(0x60, 0xF4);
+        if (kbd_wait_output() == 0)
+            inb(0x60);
     }
+
+    kbd_drain_output();
 
     kbd_num_consoles = console_get_count();
     if (kbd_num_consoles <= 0) kbd_num_consoles = 1;
