@@ -155,6 +155,14 @@ static uint64_t KERNEL_INIT acpi_read32(uint64_t phys_addr) {
     return val;
 }
 
+static uint64_t KERNEL_INIT acpi_read64(uint64_t phys_addr) {
+    uint64_t val;
+
+    val = 0;
+    acpi_read_phys(phys_addr, &val, 8);
+    return val;
+}
+
 static uint8_t *KERNEL_INIT find_rsdp(void) {
     uint8_t *p;
     uint8_t sum;
@@ -259,16 +267,62 @@ static void KERNEL_INIT ensure_timer_override(void) {
     irq_override_count++;
 }
 
-static void KERNEL_INIT find_acpi_tables(void) {
-    uint8_t *rsdp;
-    uint64_t rsdt_phys;
-    uint64_t rsdt_len;
+static uint8_t *KERNEL_INIT mb_rsdp_copy(void) {
+    extern uint8_t early_acpi_rsdp[36];
+    extern uint64_t early_acpi_rsdp_len;
+    uint64_t len;
+    uint64_t i;
+    uint8_t sum;
+    uint32_t total;
+
+    len = early_acpi_rsdp_len > 36 ? 36 : early_acpi_rsdp_len;
+    if (len < 20) return NULL;
+    sum = 0;
+    for (i = 0; i < 20; i++) sum += early_acpi_rsdp[i];
+    if (sum) return NULL;
+    if (len >= 36) {
+        total = *(uint32_t *)(early_acpi_rsdp + 20);
+        if (total != 36) return NULL;
+        sum = 0;
+        for (i = 0; i < 36; i++) sum += early_acpi_rsdp[i];
+        if (sum) return NULL;
+    }
+    return early_acpi_rsdp;
+}
+
+static int KERNEL_INIT find_madt_in(uint64_t sdt_phys, uint64_t step) {
+    uint64_t sdt_len;
     int num_entries;
     int i;
     uint64_t table_phys;
     uint8_t sig[4];
 
-    rsdp = find_rsdp();
+    sdt_len = acpi_read32(sdt_phys + 4);
+    if (sdt_len < 36 || sdt_len > 0x100000) return 0;
+    num_entries = (int)((sdt_len - 36) / step);
+    for (i = 0; i < num_entries; i++) {
+        if (step == 4)
+            table_phys = acpi_read32(sdt_phys + 36 + (uint64_t)i * 4);
+        else
+            table_phys = acpi_read64(sdt_phys + 36 + (uint64_t)i * 8);
+        acpi_read_phys(table_phys, sig, 4);
+        if (memcmp(sig, "APIC", 4) == 0) {
+            parse_madt_phys(table_phys);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void KERNEL_INIT find_acpi_tables(void) {
+    extern uint64_t early_acpi_rsdp_len;
+    uint8_t *copy;
+    uint8_t *rsdp;
+    uint64_t rsdt_phys;
+    uint64_t xsdt_phys;
+
+    copy = mb_rsdp_copy();
+    rsdp = copy ? copy : find_rsdp();
     if (!rsdp) {
         KERNEL_INIT_LOG("SMP: RSDP not found, assuming single CPU\n");
         ensure_timer_override();
@@ -279,25 +333,23 @@ static void KERNEL_INIT find_acpi_tables(void) {
         cpu_count = 1;
         return;
     }
+    if (copy)
+        KERNEL_INIT_LOG("SMP: RSDP from multiboot\n");
 
     rsdt_phys = (uint64_t)(*(uint32_t *)(rsdp + 16));
-
-    rsdt_len = acpi_read32(rsdt_phys + 4);
-    num_entries = (rsdt_len - 36) / 4;
-
-    for (i = 0; i < num_entries; i++) {
-        table_phys = acpi_read32(rsdt_phys + 36 + i * 4);
-
-        acpi_read_phys(table_phys, sig, 4);
-
-        if (memcmp(sig, "APIC", 4) == 0) {
-            parse_madt_phys(table_phys);
+    if (find_madt_in(rsdt_phys, 4)) {
+        ensure_timer_override();
+        return;
+    }
+    if (copy && early_acpi_rsdp_len >= 36) {
+        xsdt_phys = *(uint64_t *)(copy + 24);
+        if (find_madt_in(xsdt_phys, 8)) {
             ensure_timer_override();
             return;
         }
     }
 
-    KERNEL_INIT_LOG("SMP: MADT not found in RSDT\n");
+    KERNEL_INIT_LOG("SMP: MADT not found\n");
     ensure_timer_override();
     cpus[0].lapic_id = 0;
     cpus[0].processor_id = 0;

@@ -29,6 +29,9 @@ uint8_t early_fb_bpp KERNEL_INIT_BSS;
 uint8_t early_fb_type KERNEL_INIT_BSS;
 int early_fb_valid KERNEL_INIT_BSS;
 
+uint8_t early_acpi_rsdp[36] KERNEL_INIT_BSS;
+uint64_t early_acpi_rsdp_len KERNEL_INIT_BSS;
+
 const char *early_cmdline KERNEL_INIT_BSS;
 
 uint32_t early_mod_count KERNEL_INIT_BSS;
@@ -145,6 +148,15 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
         if (tag->type == MULTIBOOT2_TAG_MODULE) {
             early_mod_count++;
+        }
+
+        if (tag->type == MULTIBOOT2_TAG_ACPI_NEW && tag->size >= 44) {
+            memcpy(early_acpi_rsdp, (uint8_t *)tag + 8, 36);
+            early_acpi_rsdp_len = 36;
+        } else if (tag->type == MULTIBOOT2_TAG_ACPI_OLD && tag->size >= 28 &&
+                   !early_acpi_rsdp_len) {
+            memcpy(early_acpi_rsdp, (uint8_t *)tag + 8, 20);
+            early_acpi_rsdp_len = 20;
         }
 
         if (tag->type == MULTIBOOT2_TAG_MMAP) {
