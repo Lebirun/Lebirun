@@ -5,6 +5,7 @@
 #include <lebirun/common.h>
 #include <lebirun/io.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/mem_map.h>
 
@@ -98,7 +99,7 @@ static void pit_set_divisor(uint16_t divisor) {
     restore_flags(flags);
 }
 
-static uint16_t pit_read_count(void) {
+uint16_t pit_read_count(void) {
     uint64_t flags;
     uint16_t count;
 
@@ -286,6 +287,8 @@ uint64_t pit_get_uptime_us(void) {
     uint64_t elapsed;
     uint64_t subtick_us;
 
+    if (tsc_available())
+        return tsc_get_ns() / 1000;
     flags = save_flags_cli();
     spin_lock(&uptime_lock);
     current = tick_count;

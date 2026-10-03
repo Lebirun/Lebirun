@@ -100,14 +100,29 @@ static void ring_put(uint8_t byte) {
     ring_head = (ring_head + 1) % ring_capacity;
 }
 
+void mouse_inject_packet(uint8_t buttons, int8_t dx, int8_t dy, int8_t z,
+                         int has_z) {
+    uint64_t flags;
+
+    flags = mouse_irqsave();
+    spin_lock(&mouse_lock);
+    if (ring_buffer && mouse_reserve_ring(mouse_packet_size)) {
+        ring_put(buttons);
+        ring_put((uint8_t)dx);
+        ring_put((uint8_t)dy);
+        if (mouse_packet_size == 4)
+            ring_put((uint8_t)(has_z ? z : 0));
+    }
+    spin_unlock(&mouse_lock);
+    mouse_irqrestore(flags);
+
+    descriptor_ready_notify_irq();
+}
+
 void mouse_handler(registers_t *regs) {
     uint8_t status;
     uint8_t data;
-    uint8_t buttons;
-    int8_t dx;
-    int8_t dy;
     int complete;
-    uint64_t flags;
 
     (void)regs;
 
@@ -146,23 +161,9 @@ void mouse_handler(registers_t *regs) {
     }
 
     if (!complete) return;
-    buttons = (uint8_t)(mouse_bytes[0] & 0x07);
-    dx = mouse_bytes[1];
-    dy = mouse_bytes[2];
-
-    flags = mouse_irqsave();
-    spin_lock(&mouse_lock);
-    if (ring_buffer && mouse_reserve_ring(mouse_packet_size)) {
-        ring_put(buttons);
-        ring_put((uint8_t)dx);
-        ring_put((uint8_t)dy);
-        if (mouse_packet_size == 4)
-            ring_put((uint8_t)mouse_bytes[3]);
-    }
-    spin_unlock(&mouse_lock);
-    mouse_irqrestore(flags);
-
-    descriptor_ready_notify_irq();
+    mouse_inject_packet((uint8_t)(mouse_bytes[0] & 0x07), mouse_bytes[1],
+                        mouse_bytes[2], mouse_bytes[3],
+                        mouse_packet_size == 4);
 }
 
 int mouse_has_data(void) {

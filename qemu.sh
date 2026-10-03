@@ -8,6 +8,7 @@ NO_BUILD=0
 DISK=0
 DEBUG=0
 UEFI=0
+USB=0
 ISO_ARGS=""
 for arg in "$@"; do
   case "$arg" in
@@ -17,6 +18,7 @@ for arg in "$@"; do
     --disk) DISK=1 ;;
     --debug) DEBUG=1 ;;
     --uefi) UEFI=1 ;;
+    --usb) USB=1 ;;
   esac
 done
 
@@ -95,6 +97,11 @@ if [ "$DISK" -eq 1 ]; then
     DISK_ARGS="-drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 -device ide-hd,drive=sata0,bus=ahci0.0"
 fi
 
+USB_ARGS=""
+if [ "$USB" -eq 1 ]; then
+    USB_ARGS="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0"
+fi
+
 DEBUG_ARGS=""
 if [ "$DEBUG" -eq 1 ]; then
     DEBUG_ARGS="-s -S"
@@ -108,6 +115,7 @@ $QEMU_CMD \
     $CDROM_ARGS \
     $DEBUG_ARGS \
     $UEFI_ARGS \
+    $USB_ARGS \
     -serial stdio \
     -device ahci,id=ahci0 \
     $DISK_ARGS \

@@ -19,6 +19,7 @@ void delay_inMins(uint64_t mins);
 
 uint64_t pit_get_ticks(void);
 uint64_t pit_get_ticks64(void);
+uint16_t pit_read_count(void);
 
 uint64_t pit_get_uptime_us(void);
 uint64_t pit_get_uptime_ms(void);

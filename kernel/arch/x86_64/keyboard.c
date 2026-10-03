@@ -336,12 +336,11 @@ int getchar(void) {
     return keyboard_getchar_nb();
 }
 
-void keyboard_handler(registers_t* regs) {
+void keyboard_feed_ps2(uint8_t scancode) {
     static const char *f6_seqs[] = {
         "\033[17~", "\033[18~", "\033[19~", "\033[20~", "\033[21~"
     };
     struct keyboard_event kev;
-    uint8_t scancode;
     uint8_t code;
     int was_e0;
     int console_num;
@@ -351,9 +350,6 @@ void keyboard_handler(registers_t* regs) {
     char seq[4];
     char cc;
     char c;
-
-    (void)regs;
-    scancode = inb(0x60);
 
     if (scancode == 0xE0) {
         e0_prefix = true;
@@ -498,6 +494,11 @@ void keyboard_handler(registers_t* regs) {
 
 wake:
     descriptor_ready_notify_irq();
+}
+
+void keyboard_handler(registers_t* regs) {
+    (void)regs;
+    keyboard_feed_ps2(inb(0x60));
 }
 
 static int KERNEL_INIT kbd_wait_input(void) {

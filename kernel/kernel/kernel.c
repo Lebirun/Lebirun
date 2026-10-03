@@ -24,6 +24,7 @@
 #include <lebirun/console.h>
 #include <lebirun/vfs.h>
 #include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/drivers/usb/xhci.h>
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
 #include <lebirun/drivers/fb/virtio_gpu.h>
 #endif
@@ -618,6 +619,7 @@ static void KERNEL_INIT kernel_boot(void) {
     vring_boot_enabled = 1;
     
     pit_init(1000);
+    tsc_early_init();
 
     if (lapic_base) {
         lapic_timer_init(1000);
@@ -683,6 +685,10 @@ static void KERNEL_INIT kernel_boot(void) {
             }
         }
     }
+
+#if CONFIG_DRIVER_XHCI
+    xhci_init();
+#endif
 
 #if CONFIG_DRIVER_NET
     net_init();

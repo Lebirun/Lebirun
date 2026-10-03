@@ -103,6 +103,7 @@ static uint64_t tsc_base_tsc;
 static uint64_t tsc_base_us;
 static uint64_t tsc_last_ns;
 static int tsc_ready;
+static int tsc_provisional;
 static inline uint64_t tsc_rdtsc(void)
 {
     uint32_t lo;
@@ -125,13 +126,47 @@ static int tsc_has_invariant(void)
     __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
     return (edx & (1u << 8)) != 0;
 }
+void tsc_early_init(void)
+{
+    uint64_t freq;
+    uint64_t t0;
+    uint64_t t1;
+    uint64_t wraps;
+    uint16_t last;
+    uint16_t cur;
+    if (tsc_ready)
+        return;
+    freq = pit_get_frequency();
+    if (!freq)
+        return;
+    last = pit_read_count();
+    t0 = tsc_rdtsc();
+    wraps = 0;
+    while (wraps < 2) {
+        cur = pit_read_count();
+        if (cur > last)
+            wraps++;
+        last = cur;
+    }
+    t1 = tsc_rdtsc();
+    if (t1 <= t0)
+        return;
+    tsc_freq_hz = (t1 - t0) * freq / 2;
+    if (tsc_freq_hz < 1000000ULL)
+        return;
+    tsc_base_tsc = t1;
+    tsc_base_us = pit_get_uptime_us();
+    tsc_ready = 1;
+    tsc_provisional = 1;
+    printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+}
 void tsc_init(void)
 {
     uint64_t t0;
     uint64_t t1;
     uint64_t tick0;
     uint64_t spins;
-    if (tsc_ready)
+    if (tsc_ready && !tsc_provisional)
         return;
     if (!tsc_has_invariant())
         return;
@@ -152,6 +187,7 @@ void tsc_init(void)
     tsc_base_tsc = t1;
     tsc_base_us = pit_get_uptime_us();
     tsc_ready = 1;
+    tsc_provisional = 0;
     printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
 }
 uint64_t tsc_get_freq_hz(void)
@@ -172,7 +208,8 @@ uint64_t tsc_get_ns(void)
         return 0;
     now = tsc_rdtsc();
     delta = now >= tsc_base_tsc ? now - tsc_base_tsc : 0;
-    result = tsc_base_us * 1000ULL + delta * 1000000000ULL / tsc_freq_hz;
+    result = tsc_base_us * 1000ULL + delta / tsc_freq_hz * 1000000000ULL +
+             (delta % tsc_freq_hz) * 1000000000ULL / tsc_freq_hz;
     last = __atomic_load_n(&tsc_last_ns, __ATOMIC_ACQUIRE);
     if (result <= last)
         return last;
