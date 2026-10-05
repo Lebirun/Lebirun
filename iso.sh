@@ -107,6 +107,15 @@ EOF
     fi
 fi
 
+if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1; then
+    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64DISK.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/early.cfg" efi_gop normal multiboot2 fat ext2 part_msdos part_gpt configfile search search_label; then
+        mkdir -p isodir/boot/grub
+        cp "$EFI_WORK_DIRECTORY/BOOTX64DISK.EFI" isodir/boot/grub/BOOTX64.EFI
+    else
+        printf "\033[0;33mWarning: disk EFI image build failed; UEFI disk installs will lack a bootloader.\033[0m\n"
+    fi
+fi
+
 if [ "$HYBRID" -eq 1 ]; then
     GRUB_MODULES="multiboot2 biosdisk part_msdos part_gpt iso9660"
     EXTRA_BOOT_ARGS="-eltorito-alt-boot -e efi.img -no-emul-boot"

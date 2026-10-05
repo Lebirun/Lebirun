@@ -1,6 +1,9 @@
 #include <lebirun/io.h>
 #include <lebirun/tty.h>
 #include <lebirun/keyboard.h>
+#if CONFIG_DRIVER_USB_HID_KBD
+#include <lebirun/drivers/usb/hid.h>
+#endif
 #include <lebirun/task.h>
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
@@ -498,7 +501,13 @@ wake:
 
 void keyboard_handler(registers_t* regs) {
     (void)regs;
-    keyboard_feed_ps2(inb(0x60));
+    {
+        uint8_t sc = inb(0x60);
+#if CONFIG_DRIVER_USB_HID_KBD
+        if (usb_hid_kbd_recent()) return;
+#endif
+        keyboard_feed_ps2(sc);
+    }
 }
 
 static int KERNEL_INIT kbd_wait_input(void) {

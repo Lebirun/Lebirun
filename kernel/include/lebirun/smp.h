@@ -73,6 +73,7 @@ void ioapic_mask_irq(uint8_t irq);
 void smp_start_aps(void);
 int smp_processor_id(void);
 void lapic_timer_init(uint64_t freq_hz);
+void lapic_mask_timer(void);
 cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);
 void smp_tlb_flush_all(void);

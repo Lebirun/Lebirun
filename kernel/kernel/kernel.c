@@ -29,6 +29,7 @@
 #include <lebirun/drivers/fb/virtio_gpu.h>
 #endif
 #include <lebirun/fs/ext4/ext4.h>
+#include <lebirun/fs/fat.h>
 #include <lebirun/partition.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/tls.h>
@@ -504,6 +505,9 @@ static void KERNEL_INIT kernel_boot(void) {
 #else
             KERNEL_INIT_LOG("ext4 filesystem disabled\n");
 #endif
+#if CONFIG_FS_FAT
+            fat_vfs_register();
+#endif
 
             ahci_done = 0;
 #if CONFIG_DRIVER_AHCI
@@ -576,6 +580,30 @@ static void KERNEL_INIT kernel_boot(void) {
                     ext4_prepare_root_node(ext4_root);
                     vfs_remove_mount(KERNEL_INIT_STRING("/mnt"));
                     KERNEL_INIT_LOG("BOOT: ext4 root mounted from %s\n", root_dev);
+                    {
+                        static const char *need_dirs[] = {
+                            "dev", "proc", "sys", "tmp", "mnt", "run", NULL
+                        };
+                        vfs_node_t *new_root;
+                        char abs_path[16];
+                        int di;
+
+                        new_root = vfs_namei(KERNEL_INIT_STRING("/"));
+                        if (new_root) {
+                            for (di = 0; need_dirs[di]; di++) {
+                                snprintf(abs_path, sizeof(abs_path), "/%s",
+                                         need_dirs[di]);
+                                if (!vfs_namei(abs_path))
+                                    vfs_mkdir(new_root, need_dirs[di],
+                                              strcmp(need_dirs[di], "tmp") == 0 ? 01777 : 0755);
+                            }
+                        }
+                    }
+                    vfs_remove_mount(KERNEL_INIT_STRING("/dev"));
+                    mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/dev"),
+                                          KERNEL_INIT_STRING("devfs"));
+                    if (mount_ret != 0)
+                        KERNEL_INIT_LOG("BOOT: failed to mount devfs on /dev\n");
                 } else {
                     KERNEL_INIT_LOG("BOOT: FATAL: failed to replace root mount with %s\n", root_dev);
                 }
@@ -586,14 +614,22 @@ static void KERNEL_INIT kernel_boot(void) {
             KERNEL_INIT_LOG("ext4 filesystem disabled\n");
 #endif
 
-            vfs_mount(NULL, KERNEL_INIT_STRING("/proc"),
-                      KERNEL_INIT_STRING("procfs"));
-            vfs_mount(NULL, KERNEL_INIT_STRING("/sys"),
-                      KERNEL_INIT_STRING("sysfs"));
-            vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
-                      KERNEL_INIT_STRING("tmpfs"));
-            vfs_mount(NULL, KERNEL_INIT_STRING("/dev/shm"),
-                      KERNEL_INIT_STRING("tmpfs"));
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/proc"),
+                                      KERNEL_INIT_STRING("procfs"));
+            if (mount_ret != 0)
+                KERNEL_INIT_LOG("BOOT: failed to mount procfs on /proc\n");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/sys"),
+                                      KERNEL_INIT_STRING("sysfs"));
+            if (mount_ret != 0)
+                KERNEL_INIT_LOG("BOOT: failed to mount sysfs on /sys\n");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/tmp"),
+                                      KERNEL_INIT_STRING("tmpfs"));
+            if (mount_ret != 0)
+                KERNEL_INIT_LOG("BOOT: failed to mount tmpfs on /tmp\n");
+            mount_ret = vfs_mount(NULL, KERNEL_INIT_STRING("/dev/shm"),
+                                      KERNEL_INIT_STRING("tmpfs"));
+            if (mount_ret != 0)
+                KERNEL_INIT_LOG("BOOT: failed to mount tmpfs on /dev/shm\n");
 #if CONFIG_KERNEL_LKE
             if (cmdline_get_lke())
                 lke_autoload();
@@ -623,7 +659,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
     if (lapic_base) {
         lapic_timer_init(1000);
-        ioapic_mask_irq(0);
+        lapic_mask_timer();
     }
 
     rng_init();
@@ -647,6 +683,9 @@ static void KERNEL_INIT kernel_boot(void) {
 #if CONFIG_FS_EXT4
         ext4_init();
         ext4_vfs_register();
+#endif
+#if CONFIG_FS_FAT
+        fat_vfs_register();
 #endif
 
         j = 0;

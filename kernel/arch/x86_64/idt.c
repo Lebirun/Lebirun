@@ -640,6 +640,9 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 
                 pit_process_callbacks();
 
+                extern void tsc_tick_sync(void);
+                tsc_tick_sync();
+
                 if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                     __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
                 }

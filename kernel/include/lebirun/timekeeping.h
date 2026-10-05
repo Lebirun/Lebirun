@@ -15,6 +15,7 @@ int timekeeping_set_realtime_ns(uint64_t value);
 
 void tsc_init(void);
 void tsc_early_init(void);
+void tsc_tick_sync(void);
 uint64_t tsc_get_freq_hz(void);
 uint64_t tsc_get_ns(void);
 int tsc_available(void);

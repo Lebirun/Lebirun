@@ -192,6 +192,118 @@ static part_info_t *inst_add_part(disk_info_t *disk)
     return part;
 }
 
+static int inst_guid_is_zero(const uint8_t *g)
+{
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        if (g[i]) return 0;
+    }
+    return 1;
+}
+
+static uint8_t inst_guid_to_mbr(const uint8_t *g)
+{
+    static const uint8_t esp[16] = {
+        0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
+        0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B
+    };
+    static const uint8_t linux_fs[16] = {
+        0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+        0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4
+    };
+    static const uint8_t swap[16] = {
+        0x6D, 0xFD, 0x57, 0x06, 0xAB, 0xA4, 0xC4, 0x43,
+        0x84, 0xE5, 0x09, 0x33, 0xC8, 0x4B, 0x4F, 0x4F
+    };
+    static const uint8_t basic_data[16] = {
+        0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
+        0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7
+    };
+
+    if (memcmp(g, esp, 16) == 0) return 0xEF;
+    if (memcmp(g, linux_fs, 16) == 0) return 0x83;
+    if (memcmp(g, swap, 16) == 0) return 0x82;
+    if (memcmp(g, basic_data, 16) == 0) return 0x07;
+    return 0x00;
+}
+
+static int inst_scan_gpt(disk_info_t *disk)
+{
+    uint8_t hdr[SECTOR_SIZE];
+    uint8_t *entries;
+    uint64_t entries_lba;
+    uint64_t num_entries;
+    uint64_t entry_size;
+    uint64_t entries_bytes;
+    uint64_t entries_sectors;
+    uint64_t i;
+    int ret;
+
+    ret = inst_disk_read(disk->devpath, 0, 1, hdr);
+    if (ret < SECTOR_SIZE) return -1;
+    if (hdr[510] != 0x55 || hdr[511] != 0xAA) return -1;
+    ret = inst_disk_read(disk->devpath, 1, 1, hdr);
+    if (ret < SECTOR_SIZE) return -1;
+    if (memcmp(hdr, "EFI PART", 8) != 0) return -1;
+    entries_lba = (uint64_t)hdr[72] | ((uint64_t)hdr[73] << 8) |
+                  ((uint64_t)hdr[74] << 16) | ((uint64_t)hdr[75] << 24) |
+                  ((uint64_t)hdr[76] << 32) | ((uint64_t)hdr[77] << 40) |
+                  ((uint64_t)hdr[78] << 48) | ((uint64_t)hdr[79] << 56);
+    num_entries = (uint64_t)hdr[80] | ((uint64_t)hdr[81] << 8) |
+                  ((uint64_t)hdr[82] << 16) | ((uint64_t)hdr[83] << 24);
+    entry_size = (uint64_t)hdr[84] | ((uint64_t)hdr[85] << 8) |
+                 ((uint64_t)hdr[86] << 16) | ((uint64_t)hdr[87] << 24);
+    if (!num_entries || entry_size < 128) return -1;
+    if (num_entries > 1024) num_entries = 1024;
+    if (entry_size > 512) return -1;
+    entries_bytes = num_entries * entry_size;
+    entries_sectors = (entries_bytes + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    if (!entries_lba || entries_lba >= disk->disk_sectors) return -1;
+    if (entries_sectors > disk->disk_sectors - entries_lba) return -1;
+    if (entries_lba > 0xFFFFFFFFu || entries_sectors > 0xFFFFFFFFu)
+        return -1;
+    entries = (uint8_t *)malloc((size_t)(entries_sectors * SECTOR_SIZE));
+    if (!entries) return -1;
+    ret = inst_disk_read(disk->devpath, (uint32_t)entries_lba,
+                         (uint32_t)entries_sectors, entries);
+    if ((uint64_t)ret < entries_sectors * SECTOR_SIZE) {
+        free(entries);
+        return -1;
+    }
+    disk->part_count = 0;
+    for (i = 0; i < num_entries; i++) {
+        uint8_t *e = entries + i * entry_size;
+        uint64_t start;
+        uint64_t end;
+        part_info_t *part;
+
+        if (inst_guid_is_zero(e)) continue;
+        start = (uint64_t)e[32] | ((uint64_t)e[33] << 8) |
+                ((uint64_t)e[34] << 16) | ((uint64_t)e[35] << 24) |
+                ((uint64_t)e[36] << 32) | ((uint64_t)e[37] << 40) |
+                ((uint64_t)e[38] << 48) | ((uint64_t)e[39] << 56);
+        end = (uint64_t)e[40] | ((uint64_t)e[41] << 8) |
+              ((uint64_t)e[42] << 16) | ((uint64_t)e[43] << 24) |
+              ((uint64_t)e[44] << 32) | ((uint64_t)e[45] << 40) |
+              ((uint64_t)e[46] << 48) | ((uint64_t)e[47] << 56);
+        if (!start || !end || end < start) continue;
+        if (start >= disk->disk_sectors) continue;
+        if (end - start + 1 > disk->disk_sectors - start) continue;
+        part = inst_add_part(disk);
+        if (!part) break;
+        part->valid = 1;
+        part->number = (int)i + 1;
+        part->start_lba = start;
+        part->sector_count = end - start + 1;
+        part->mbr_type = inst_guid_to_mbr(e);
+        snprintf(part->devpath, sizeof(part->devpath), "%s%d", disk->devpath,
+                 (int)i + 1);
+    }
+    free(entries);
+    return 0;
+}
+
 static void inst_scan_disk(disk_info_t *disk)
 {
     uint8_t sector0[SECTOR_SIZE];
@@ -245,6 +357,9 @@ static void inst_scan_disk(disk_info_t *disk)
             }
         }
     }
+
+    if (disk->part_count == 1 && disk->parts[0].mbr_type == 0xEE)
+        inst_scan_gpt(disk);
 
     if (disk->part_count > 0) return;
 
@@ -619,7 +734,8 @@ static int inst_copy_dir_recursive(const char *src, const char *dst, const char 
     return (errors > 0) ? -1 : 0;
 }
 
-static int inst_mount_partition(const char *devpath, const char *mountpoint)
+static int inst_mount_partition_as(const char *devpath, const char *mountpoint,
+                                     const char *fstype)
 {
     int ret;
     int pid;
@@ -638,7 +754,7 @@ static int inst_mount_partition(const char *devpath, const char *mountpoint)
         }
         argv[0] = "mount";
         argv[1] = "-t";
-        argv[2] = "ext4";
+        argv[2] = (char *)fstype;
         argv[3] = (char *)devpath;
         argv[4] = (char *)mountpoint;
         argv[5] = NULL;
@@ -695,7 +811,7 @@ static int inst_format_ext4(const char *devpath, char *error,
     char read_buf[128];
     char line[192];
     char input_buf[16];
-    char *argv[3];
+    char *argv[5];
     struct pollfd fds[2];
 
     if (error && error_size > 0) error[0] = '\0';
@@ -715,7 +831,9 @@ static int inst_format_ext4(const char *devpath, char *error,
         close(pipefd[1]);
         argv[0] = "lformat.ext4";
         argv[1] = (char *)devpath;
-        argv[2] = NULL;
+        argv[2] = "-L";
+        argv[3] = "LEBIRUN";
+        argv[4] = NULL;
         execv("/sbin/lformat.ext4", argv);
         execv("/bin/lformat.ext4", argv);
         execv("/bin/lebu", argv);
@@ -793,12 +911,24 @@ static int inst_format_ext4(const char *devpath, char *error,
     return -1;
 }
 
+typedef struct {
+    const char *name;
+    int copy;
+    int mode;
+} inst_root_entry_t;
+
+static const inst_root_entry_t inst_root_entries[] = {
+    { "bin", 1, 0 }, { "boot", 1, 0 }, { "dev", 0, 0755 },
+    { "etc", 1, 0 }, { "home", 1, 0 }, { "lib", 1, 0 },
+    { "proc", 0, 0755 }, { "root", 1, 0 }, { "sbin", 1, 0 },
+    { "sys", 0, 0755 }, { "tmp", 0, 1777 }, { "usr", 1, 0 },
+    { "var", 1, 0 }, { "mnt", 0, 0755 }, { "run", 0, 0755 },
+    { "srv", 0, 0755 }, { "opt", 0, 0755 }, { "media", 0, 0755 },
+    { NULL, 0, 0 }
+};
+
 static int inst_copy_rootfs(const char *mountpoint)
 {
-    static const char *dirs[] = {
-        "bin", "boot", "dev", "etc", "home", "lib", "proc",
-        "root", "sbin", "tmp", "usr", "var", NULL
-    };
     static const char *root_files[] = {
         "init", NULL
     };
@@ -821,17 +951,22 @@ static int inst_copy_rootfs(const char *mountpoint)
         inst_copy_progress(src);
     }
 
-    for (i = 0; dirs[i]; i++) {
-        snprintf(src, sizeof(src), "/%s", dirs[i]);
-        snprintf(dst, sizeof(dst), "%s/%s", mountpoint, dirs[i]);
+    for (i = 0; inst_root_entries[i].name; i++) {
+        if (!inst_root_entries[i].copy) continue;
+        snprintf(src, sizeof(src), "/%s", inst_root_entries[i].name);
+        snprintf(dst, sizeof(dst), "%s/%s", mountpoint,
+                 inst_root_entries[i].name);
 
-        if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0) {
-            vfs_mkdir(dst, 0755);
-            continue;
-        }
         if (inst_copy_dir_recursive(src, dst, mountpoint) < 0) {
             errors++;
         }
+    }
+
+    for (i = 0; inst_root_entries[i].name; i++) {
+        if (inst_root_entries[i].copy) continue;
+        snprintf(dst, sizeof(dst), "%s/%s", mountpoint,
+                 inst_root_entries[i].name);
+        vfs_mkdir(dst, inst_root_entries[i].mode);
     }
 
     return (errors > 0) ? -1 : 0;
@@ -839,19 +974,14 @@ static int inst_copy_rootfs(const char *mountpoint)
 
 static int inst_count_rootfs(const char *skip)
 {
-    static const char *dirs[] = {
-        "bin", "boot", "dev", "etc", "home", "lib", "proc",
-        "root", "sbin", "tmp", "usr", "var", NULL
-    };
     int total;
     int i;
     char path[MAX_PATH];
 
     total = 1;
-    for (i = 0; dirs[i]; i++) {
-        if (strcmp(dirs[i], "dev") == 0 || strcmp(dirs[i], "proc") == 0)
-            continue;
-        snprintf(path, sizeof(path), "/%s", dirs[i]);
+    for (i = 0; inst_root_entries[i].name; i++) {
+        if (!inst_root_entries[i].copy) continue;
+        snprintf(path, sizeof(path), "/%s", inst_root_entries[i].name);
         total += inst_count_dir_entries(path, skip);
     }
     return total;
@@ -1021,11 +1151,409 @@ out:
 
 static int inst_write_grub_config(const char *mountpoint, const char *part_dev);
 
+static int inst_is_gpt(const char *disk_dev)
+{
+    uint8_t sector0[SECTOR_SIZE];
+    int fd;
+    int r;
+
+    fd = vfs_open(disk_dev, 0);
+    if (fd < 0) return 0;
+    r = vfs_read_fd(fd, sector0, SECTOR_SIZE);
+    vfs_close_fd(fd);
+    if (r < SECTOR_SIZE) return 0;
+    if (sector0[510] != 0x55 || sector0[511] != 0xAA) return 0;
+    return sector0[446 + 4] == 0xEE;
+}
+
+static int inst_find_esp(const char *disk_dev, char *out, size_t out_size)
+{
+    disk_info_t disk;
+    int i;
+
+    memset(&disk, 0, sizeof(disk));
+    snprintf(disk.devpath, sizeof(disk.devpath), "%s", disk_dev);
+    inst_scan_disk(&disk);
+    for (i = 0; i < disk.part_count; i++) {
+        if (disk.parts[i].mbr_type == 0xEF && disk.parts[i].valid) {
+            snprintf(out, out_size, "%s", disk.parts[i].devpath);
+            free(disk.parts);
+            return 0;
+        }
+    }
+    free(disk.parts);
+    return -1;
+}
+
+static int inst_format_fat(const char *devpath)
+{
+    int pid;
+    int status;
+    int ret;
+    char *argv[5];
+
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        argv[0] = "lformat.fat";
+        argv[1] = (char *)devpath;
+        argv[2] = "-L";
+        argv[3] = "ESP";
+        argv[4] = NULL;
+        execv("/sbin/lformat.fat", argv);
+        execv("/bin/lformat.fat", argv);
+        execv("/bin/lebu", argv);
+        _exit(127);
+    }
+    ret = waitpid(pid, &status, 0);
+    if (ret != pid) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+static int inst_write_grub_config_efi(const char *esp_mount,
+                                      const char *part_dev, int part_num,
+                                      int is_gpt)
+{
+    char cfg_path[MAX_PATH];
+    char grub_cfg[512];
+    int fd;
+    int written;
+
+    snprintf(grub_cfg, sizeof(grub_cfg),
+        "set timeout=5\n"
+        "set default=0\n"
+        "search --no-floppy --label LEBIRUN --set=root\n"
+        "if [ -z \"$root\" ]; then set root=(hd0,%s%d); fi\n"
+        "\n"
+        "menuentry \"Lebirun\" {\n"
+        "\tmultiboot2 /boot/lebirun.kernel root=%s\n"
+        "\tboot\n"
+        "}\n",
+        is_gpt ? "gpt" : "msdos", part_num, part_dev);
+
+    snprintf(cfg_path, sizeof(cfg_path), "%s/boot/grub/grub.cfg", esp_mount);
+    fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+
+    written = write(fd, grub_cfg, strlen(grub_cfg));
+    if (close(fd) != 0) return -1;
+    if (written != (int)strlen(grub_cfg)) return -1;
+
+    snprintf(cfg_path, sizeof(cfg_path), "%s/EFI/BOOT/grub.cfg", esp_mount);
+    fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+
+    written = write(fd, grub_cfg, strlen(grub_cfg));
+    if (close(fd) != 0) return -1;
+    return written == (int)strlen(grub_cfg) ? 0 : -1;
+}
+
+static int inst_iso_find(const char *cddev, const char *const *parts,
+                         int nparts, uint64_t *out_lba, uint64_t *out_size);
+static int inst_iso_copy(const char *cddev, uint64_t lba, uint64_t size,
+                         const char *dst);
+static void inst_clear_boot_code(const char *disk_dev);
+static int inst_install_efi(const char *disk_dev, const char *part_dev,
+                            int part_num)
+{
+    char esp_dev[MAX_PATH];
+    char esp_mount[] = "/tmp/espinstall";
+    char cd_dev[MAX_PATH];
+    char dst[MAX_PATH];
+    int is_gpt;
+    int i;
+    int cd_ok;
+    uint64_t efi_lba;
+    uint64_t efi_size;
+    const char *efi_parts[3];
+
+    is_gpt = inst_is_gpt(disk_dev);
+    if (inst_find_esp(disk_dev, esp_dev, sizeof(esp_dev)) != 0) {
+        if (is_gpt) {
+            snprintf(boot_error, sizeof(boot_error),
+                     "boot: no ESP found, create one with ldiskutil");
+            return -1;
+        }
+        return 1;
+    }
+
+    vfs_mkdir("/tmp", 0755);
+    cd_ok = 0;
+    for (i = 0; i < 4; i++) {
+        snprintf(cd_dev, sizeof(cd_dev), "/dev/sr%d", i);
+        efi_parts[0] = "boot";
+        efi_parts[1] = "grub";
+        efi_parts[2] = "BOOTX64.EFI";
+        if (inst_iso_find(cd_dev, efi_parts, 3, &efi_lba,
+                          &efi_size) == 0) {
+            cd_ok = 1;
+            break;
+        }
+    }
+    if (!cd_ok) {
+        snprintf(boot_error, sizeof(boot_error),
+                 "boot: install media not found");
+        return -1;
+    }
+
+    vfs_mkdir(esp_mount, 0755);
+    inst_umount_partition(esp_mount);
+    if (inst_mount_partition_as(esp_dev, esp_mount, "fat") != 0) {
+        if (inst_format_fat(esp_dev) != 0) {
+            snprintf(boot_error, sizeof(boot_error),
+                     "boot: format ESP failed");
+            return -1;
+        }
+        if (inst_mount_partition_as(esp_dev, esp_mount, "fat") != 0) {
+            snprintf(boot_error, sizeof(boot_error), "boot: mount ESP failed");
+            return -1;
+        }
+    }
+
+    snprintf(dst, sizeof(dst), "%s/EFI", esp_mount);
+    vfs_mkdir(dst, 0755);
+    snprintf(dst, sizeof(dst), "%s/EFI/BOOT", esp_mount);
+    vfs_mkdir(dst, 0755);
+    snprintf(dst, sizeof(dst), "%s/boot", esp_mount);
+    vfs_mkdir(dst, 0755);
+    snprintf(dst, sizeof(dst), "%s/boot/grub", esp_mount);
+    vfs_mkdir(dst, 0755);
+
+    snprintf(dst, sizeof(dst), "%s/EFI/BOOT/BOOTX64.EFI", esp_mount);
+    if (inst_iso_copy(cd_dev, efi_lba, efi_size, dst) < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: copy BOOTX64.EFI failed");
+        inst_umount_partition(esp_mount);
+        return -1;
+    }
+    if (inst_write_grub_config_efi(esp_mount, part_dev, part_num,
+                                   is_gpt) < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: write EFI grub.cfg failed");
+        inst_umount_partition(esp_mount);
+        return -1;
+    }
+    inst_clear_boot_code(disk_dev);
+    inst_umount_partition(esp_mount);
+    return 0;
+}
+
+static void inst_clear_boot_code(const char *disk_dev) {
+    uint8_t sec[SECTOR_SIZE];
+    int fd;
+    int r;
+    int i;
+    int dirty;
+
+    fd = vfs_open(disk_dev, 2);
+    if (fd < 0) return;
+    r = vfs_read_fd(fd, sec, SECTOR_SIZE);
+    if (r < SECTOR_SIZE) {
+        vfs_close_fd(fd);
+        return;
+    }
+    dirty = 0;
+    for (i = 0; i < 440; i++) {
+        if (sec[i]) {
+            sec[i] = 0;
+            dirty = 1;
+        }
+    }
+    if (!dirty) {
+        vfs_close_fd(fd);
+        return;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        vfs_close_fd(fd);
+        return;
+    }
+    vfs_write_fd(fd, sec, SECTOR_SIZE);
+    vfs_close_fd(fd);
+}
+
+static int inst_cd_pread(int cdfd, uint64_t lba, void *buf) {
+    int r;
+
+    if (lseek(cdfd, (off_t)(lba * 2048), SEEK_SET) < 0) return -1;
+    r = vfs_read_fd(cdfd, buf, 2048);
+    if (r < 2048) return -1;
+    return 0;
+}
+
+static uint32_t inst_iso_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int inst_iso_name_match(const uint8_t *raw, uint64_t raw_len,
+                               const char *want) {
+    uint64_t i;
+    uint64_t wl;
+
+    for (wl = 0; want[wl]; wl++) {
+    }
+    if (raw_len == wl) {
+        for (i = 0; i < wl; i++) {
+            char c = (char)raw[i];
+            char w = want[i];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            if (w >= 'a' && w <= 'z') w -= 32;
+            if (c != w) return 0;
+        }
+        return 1;
+    }
+    if (raw_len == wl + 2 && raw[wl] == ';' && raw[wl + 1] == '1') {
+        for (i = 0; i < wl; i++) {
+            char c = (char)raw[i];
+            char w = want[i];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            if (w >= 'a' && w <= 'z') w -= 32;
+            if (c != w) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int inst_iso_find(const char *cddev, const char *const *parts,
+                         int nparts, uint64_t *out_lba, uint64_t *out_size) {
+    static uint8_t sec[2048];
+    uint32_t extent;
+    uint32_t size;
+    int level;
+    int cdfd;
+    int rc;
+
+    cdfd = vfs_open(cddev, 0);
+    if (cdfd < 0) return -1;
+    rc = -1;
+    if (inst_cd_pread(cdfd, 16, sec) != 0) goto out;
+    if (sec[0] != 1 || memcmp(sec + 1, "CD001", 5) != 0) goto out;
+    extent = inst_iso_le32(sec + 156 + 2);
+    size = inst_iso_le32(sec + 156 + 10);
+    if (!extent || !size || size > 64 * 1024 * 1024) return -1;
+    for (level = 0; level < nparts; level++) {
+        uint64_t off = 0;
+        uint64_t seclba;
+        uint64_t secoff;
+        int found = 0;
+        while (off < size) {
+            uint8_t rec_len;
+            uint8_t name_len;
+            if (inst_cd_pread(cdfd, (uint64_t)extent + off / 2048,
+                              sec) != 0) goto out;
+            seclba = off / 2048;
+            secoff = off % 2048;
+            if (secoff + 33 > 2048) {
+                off = (seclba + 1) * 2048;
+                continue;
+            }
+            rec_len = sec[secoff];
+            if (!rec_len) {
+                off = (seclba + 1) * 2048;
+                continue;
+            }
+            if (rec_len < 33 || off + rec_len > size) goto out;
+            if ((uint64_t)secoff + rec_len > 2048) goto out;
+            name_len = sec[secoff + 32];
+            if (33 + (uint64_t)name_len > rec_len) goto out;
+            if (name_len == 1 &&
+                (sec[secoff + 33] == 0 || sec[secoff + 33] == 1)) {
+                off += rec_len;
+                continue;
+            }
+            if (inst_iso_name_match(sec + secoff + 33, name_len,
+                                    parts[level])) {
+                extent = inst_iso_le32(sec + secoff + 2);
+                size = inst_iso_le32(sec + secoff + 10);
+                if (!extent || size > 64 * 1024 * 1024) goto out;
+                found = 1;
+                break;
+            }
+            off += rec_len;
+        }
+        if (!found) goto out;
+    }
+    *out_lba = extent;
+    *out_size = size;
+    rc = 0;
+out:
+    vfs_close_fd(cdfd);
+    return rc;
+}
+
+static int inst_iso_copy(const char *cddev, uint64_t lba, uint64_t size,
+                         const char *dst) {
+    static uint8_t buf[32 * 2048];
+    int fd;
+    int cdfd;
+    uint64_t done;
+    uint64_t nsec;
+
+    cdfd = vfs_open(cddev, 0);
+    if (cdfd < 0) return -1;
+    fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        vfs_close_fd(cdfd);
+        return -1;
+    }
+    done = 0;
+    while (done < size) {
+        uint64_t want;
+        uint64_t got;
+        nsec = (size - done + 2047) / 2048;
+        if (nsec > 32) nsec = 32;
+        want = nsec * 2048;
+        if (lseek(cdfd, (off_t)((lba + done / 2048) * 2048), SEEK_SET) < 0) {
+            close(fd);
+            vfs_close_fd(cdfd);
+            return -1;
+        }
+        got = 0;
+        while (got < want) {
+            int r = vfs_read_fd(cdfd, buf + got, (uint32_t)(want - got));
+            if (r <= 0) {
+                close(fd);
+                vfs_close_fd(cdfd);
+                return -1;
+            }
+            got += (uint64_t)r;
+        }
+        {
+            uint64_t chunk = nsec * 2048;
+            uint64_t written = 0;
+            int w;
+            if (chunk > size - done) chunk = size - done;
+            while (written < chunk) {
+                w = write(fd, buf + written,
+                          (size_t)(chunk - written));
+                if (w <= 0) {
+                    close(fd);
+                    vfs_close_fd(cdfd);
+                    return -1;
+                }
+                written += (uint64_t)w;
+            }
+            done += chunk;
+        }
+    }
+    vfs_close_fd(cdfd);
+    if (close(fd) != 0) return -1;
+    return 0;
+}
+
 static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
 {
     char boot_dir[MAX_PATH];
     char grub_dir[MAX_PATH];
     char grub_mod_dir[MAX_PATH];
+
+    if (inst_is_gpt(disk_dev)) {
+        if (inst_write_grub_config(mountpoint, part_dev) < 0) {
+            snprintf(boot_error, sizeof(boot_error), "boot: write grub.cfg failed");
+            return -1;
+        }
+        return inst_install_efi(disk_dev, part_dev, part_num);
+    }
 
     snprintf(boot_dir, sizeof(boot_dir), "%s/boot", mountpoint);
     vfs_mkdir(boot_dir, 0755);
@@ -1480,6 +2008,7 @@ static int step_partition(int disk_idx, int *part_idx)
         case 0x82: type_name = "Swap"; break;
         case 0x0B: case 0x0C: type_name = "FAT32"; break;
         case 0x07: type_name = "NTFS"; break;
+        case 0xEF: type_name = "ESP"; break;
         default: type_name = "Other"; break;
         }
         snprintf(part_labels[i], sizeof(part_labels[i]),
@@ -1495,6 +2024,11 @@ static int step_partition(int disk_idx, int *part_idx)
     free(part_labels);
     if (choice < 0) return -1;
 
+    if (d->parts[choice].mbr_type == 0xEF) {
+        lebui_msgbox_auto("Error", "The ESP is reserved for the bootloader. Pick a Linux partition.",
+                          term_sz.rows, term_sz.cols);
+        return -1;
+    }
     *part_idx = choice;
     return 0;
 }
@@ -1808,6 +2342,13 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     d = &disks[disk_idx];
     p = &d->parts[part_idx];
 
+    if (p->mbr_type == 0xEF) {
+        lebui_msgbox_auto("Error",
+                          "Refusing to install onto the ESP. Pick a Linux partition.",
+                          term_sz.rows, term_sz.cols);
+        return -1;
+    }
+
     lebui_progress_reset(&prog_st);
     lebui_progress_init(&prog_st, "Installing", term_sz.rows, term_sz.cols);
     lebui_progress_update(&prog_st, "Preparing...", 0);
@@ -1837,7 +2378,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     lebui_progress_update(&prog_st, "Mounting partition...", 5);
     snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
     lebui_progress_log(&prog_st, logbuf);
-    if (inst_mount_partition(p->devpath, mountpoint) != 0) {
+    if (inst_mount_partition_as(p->devpath, mountpoint, "ext4") != 0) {
         lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
         return -1;
     }
@@ -2104,7 +2645,7 @@ static int step_do_update(int disk_idx, int part_idx)
     lebui_progress_update(&prog_st, "Mounting partition...", 5);
     snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
     lebui_progress_log(&prog_st, logbuf);
-    if (inst_mount_partition(p->devpath, mountpoint) != 0) {
+    if (inst_mount_partition_as(p->devpath, mountpoint, "ext4") != 0) {
         lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
         return -1;
     }

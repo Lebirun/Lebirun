@@ -129,36 +129,152 @@ static int tsc_has_invariant(void)
 void tsc_early_init(void)
 {
     uint64_t freq;
-    uint64_t t0;
-    uint64_t t1;
-    uint64_t wraps;
+    uint64_t samples[5];
+    uint64_t w;
+    uint64_t v;
+    uint64_t half;
     uint16_t last;
     uint16_t cur;
+    uint32_t maxleaf = 0;
+    uint32_t leaf = 0;
+    uint32_t denom = 0;
+    uint32_t numer = 0;
+    uint32_t crystal = 0;
     if (tsc_ready)
         return;
+    __asm__ volatile("cpuid"
+                     : "=a"(maxleaf) : "a"(leaf) : "ebx", "ecx", "edx");
+    if (maxleaf >= 0x15) {
+        leaf = 0x15;
+        __asm__ volatile("cpuid"
+                         : "+a"(leaf), "=b"(numer), "=c"(crystal),
+                           "=d"(denom));
+        if (denom && numer && crystal >= 1000000ULL &&
+            crystal <= 1000000000ULL) {
+            tsc_freq_hz = (uint64_t)numer * crystal / denom;
+            if (tsc_freq_hz >= 100000000ULL &&
+                tsc_freq_hz <= 10000000000ULL) {
+                tsc_base_tsc = tsc_rdtsc();
+                tsc_base_us = pit_get_uptime_us();
+                tsc_ready = 1;
+                tsc_provisional = 1;
+                printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+                return;
+            }
+        }
+    }
     freq = pit_get_frequency();
     if (!freq)
         return;
-    last = pit_read_count();
-    t0 = tsc_rdtsc();
-    wraps = 0;
-    while (wraps < 2) {
-        cur = pit_read_count();
-        if (cur > last)
-            wraps++;
-        last = cur;
+    half = 1193182 / freq / 2;
+    if (!half)
+        return;
+    for (w = 0; w < 5; w++) {
+        uint64_t tw0 = tsc_rdtsc();
+        uint64_t tw1;
+        uint64_t wc = 0;
+        last = pit_read_count();
+        while (wc < 8) {
+            cur = pit_read_count();
+            if (cur > last && (uint64_t)(cur - last) > half)
+                wc++;
+            last = cur;
+        }
+        tw1 = tsc_rdtsc();
+        samples[w] = tw1 > tw0 ? (tw1 - tw0) * freq / 8 : 0;
     }
-    t1 = tsc_rdtsc();
-    if (t1 <= t0)
+    for (w = 0; w < 4; w++) {
+        for (v = w + 1; v < 5; v++) {
+            if (samples[v] < samples[w]) {
+                uint64_t t = samples[w];
+                samples[w] = samples[v];
+                samples[v] = t;
+            }
+        }
+    }
+    if (!samples[2] || samples[2] < 1000000ULL)
         return;
-    tsc_freq_hz = (t1 - t0) * freq / 2;
-    if (tsc_freq_hz < 1000000ULL)
-        return;
-    tsc_base_tsc = t1;
+    tsc_freq_hz = samples[2];
+    tsc_base_tsc = tsc_rdtsc();
     tsc_base_us = pit_get_uptime_us();
     tsc_ready = 1;
     tsc_provisional = 1;
     printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+}
+void tsc_tick_sync(void)
+{
+    static uint64_t last_tsc;
+    static uint64_t last_tick;
+    static int started;
+    uint64_t now;
+    uint64_t tk;
+    uint64_t nf;
+    uint64_t cur_ns;
+
+    if (!tsc_ready || !tsc_freq_hz) return;
+    now = tsc_rdtsc();
+    tk = pit_get_ticks();
+    if (!started) {
+        last_tsc = now;
+        last_tick = tk;
+        started = 1;
+        return;
+    }
+    if (tk - last_tick < pit_get_frequency()) return;
+    if (now <= last_tsc) {
+        last_tsc = now;
+        last_tick = tk;
+        return;
+    }
+    {
+        uint64_t dt = tk - last_tick;
+        uint64_t expect = pit_get_frequency();
+        if (!expect || dt < expect * 9 / 10 || dt > expect * 11 / 10) {
+            last_tsc = now;
+            last_tick = tk;
+            return;
+        }
+        nf = (now - last_tsc) * expect / dt;
+        last_tsc = now;
+        last_tick = tk;
+    }
+    if (nf < 100000000ULL || nf > 10000000000ULL) return;
+    {
+        static uint64_t wins[3];
+        static uint64_t nw;
+        uint64_t a;
+        uint64_t b;
+        uint64_t c;
+        uint64_t tmp;
+        wins[nw++] = nf;
+        if (nw < 3) return;
+        nw = 0;
+        a = wins[0];
+        b = wins[1];
+        c = wins[2];
+        if (a > b) {
+            tmp = a;
+            a = b;
+            b = tmp;
+        }
+        if (b > c) {
+            tmp = b;
+            b = c;
+            c = tmp;
+        }
+        if (a > b) {
+            tmp = a;
+            a = b;
+            b = tmp;
+        }
+        if (c - a > b / 50) return;
+        nf = b;
+    }
+    cur_ns = tsc_get_ns();
+    tsc_freq_hz = (tsc_freq_hz * 3 + nf) / 4;
+    tsc_base_tsc = now;
+    tsc_base_us = cur_ns / 1000;
+    tsc_provisional = 0;
 }
 void tsc_init(void)
 {

@@ -244,6 +244,7 @@ static int vfs_grow_mounts(vfs_mnt_ns_t *ns) {
         new_mounts[i].path = NULL;
         new_mounts[i].device = NULL;
         new_mounts[i].root = NULL;
+        new_mounts[i].covered = NULL;
         new_mounts[i].fs_type = NULL;
     }
     ns->mounts = new_mounts;
@@ -539,7 +540,12 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     }
     
     existing = vfs_namei(mountpoint);
-    if (existing) {
+    if (existing && existing != vfs_root) {
+        existing->flags |= VFS_MOUNTPOINT;
+        existing->ptr = root;
+        __atomic_add_fetch(&existing->ref_count, 1, __ATOMIC_ACQ_REL);
+        ns->mounts[slot].covered = existing;
+    } else if (existing) {
         root->flags |= VFS_MOUNTPOINT;
         root->ptr = existing;
     }
@@ -593,10 +599,7 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
                 root->parent = parent_node;
             
             existing = root_finddir(vfs_root, vfs_node_name(root));
-            if (existing) {
-                root->ptr = existing;
-                root->flags |= VFS_MOUNTPOINT;
-            }
+            (void)existing;
         }
     }
     
@@ -631,6 +634,12 @@ int vfs_unmount(const char *mountpoint) {
                     return ret;
                 }
             }
+            if (ns->mounts[i].covered) {
+                ns->mounts[i].covered->flags &= ~VFS_MOUNTPOINT;
+                ns->mounts[i].covered->ptr = NULL;
+                vfs_close(ns->mounts[i].covered);
+                ns->mounts[i].covered = NULL;
+            }
             
             ns->mounts[i].in_use = 0;
             vfs_mount_clear_strings(&ns->mounts[i]);
@@ -659,6 +668,7 @@ int KERNEL_INIT vfs_remove_mount(const char *mountpoint) {
     ns = vfs_task_ns();
     for (i = 0; i < ns->capacity; i++) {
         if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, mountpoint) == 0) {
+            printf("VFS: Removed mount %s\n", mountpoint);
             ns->mounts[i].in_use = 0;
             vfs_mount_clear_strings(&ns->mounts[i]);
             ns->mounts[i].root = NULL;

@@ -1205,7 +1205,7 @@ static uint64_t proc_mounts_read(vfs_node_t *node, uint64_t offset, uint64_t siz
         proc_stream_append(&stream, fsname, strlen(fsname));
         proc_stream_append(&stream, " ", 1);
         proc_stream_append(&stream, opts, strlen(opts));
-        proc_stream_append(&stream, " 0 0\n", 6);
+        proc_stream_append(&stream, " 0 0\n", 5);
     }
     return stream.copied;
 }

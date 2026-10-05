@@ -89,12 +89,12 @@ fi
 
 CDROM_ARGS=""
 if [ "$NO_BUILD" -eq 0 ]; then
-    CDROM_ARGS="-cdrom lebirun.iso"
+    CDROM_ARGS="-drive file=lebirun.iso,if=none,id=cd0,media=cdrom,readonly=on -device ide-cd,drive=cd0,bus=ahci0.1"
 fi
-
-DISK_ARGS=""
 if [ "$DISK" -eq 1 ]; then
     DISK_ARGS="-drive file=sata_disk.qcow2,if=none,id=sata0,format=qcow2 -device ide-hd,drive=sata0,bus=ahci0.0"
+else
+    DISK_ARGS=""
 fi
 
 USB_ARGS=""
@@ -112,12 +112,12 @@ $QEMU_CMD \
     -smp 4 \
     -cpu host \
     -vga qxl \
-    $CDROM_ARGS \
     $DEBUG_ARGS \
     $UEFI_ARGS \
     $USB_ARGS \
     -serial stdio \
     -device ahci,id=ahci0 \
+    $CDROM_ARGS \
     $DISK_ARGS \
     -netdev user,id=net0,hostfwd=tcp::5555-:80 \
     -device virtio-net,netdev=net0 \

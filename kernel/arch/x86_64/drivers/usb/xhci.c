@@ -1056,7 +1056,7 @@ int KERNEL_INIT xhci_init(void) {
         if (!dev->used || !dev->has_hid || !dev->configured) continue;
         xhci_hid_queue(dev);
         if (!polled) {
-            pit_register_callback(xhci_hid_poll, 8, false);
+            pit_register_callback(xhci_hid_poll, 1, false);
             polled = 1;
         }
     }

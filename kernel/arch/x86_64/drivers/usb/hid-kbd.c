@@ -2,9 +2,29 @@
 #include <lebirun/drivers/usb/hid.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 
 extern volatile uint64_t tick_count;
 extern uint64_t pit_freq;
+
+#define HID_RPT_DELAY_NS 500000000ULL
+#define HID_RPT_RATE_NS (1000000000ULL / 30)
+
+static uint64_t hid_now_ns(void) {
+    if (tsc_available()) return tsc_get_ns();
+    return tick_count * (1000000000ULL / (pit_freq ? pit_freq : 1));
+}
+
+static uint64_t hid_last_ns;
+
+int usb_hid_kbd_recent(void) {
+    uint64_t now;
+
+    if (!hid_last_ns) return 0;
+    now = hid_now_ns();
+    if (now < hid_last_ns) return 1;
+    return now - hid_last_ns < 250000000ULL;
+}
 
 static const uint16_t hid_to_ps2[98] = {
     0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23,
@@ -34,8 +54,10 @@ static void hid_press(usb_hid_kbd_state_t *st, uint8_t usage) {
     ps2 = hid_to_ps2[usage - 0x04];
     if (!ps2) return;
     hid_feed((uint8_t)ps2, (uint8_t)(ps2 >> 8), 0);
-    st->rpt = usage;
-    st->rpt_due = tick_count + pit_freq / 2;
+    if (st->rpt != usage) {
+        st->rpt = usage;
+        st->rpt_due = hid_now_ns() + HID_RPT_DELAY_NS;
+    }
 }
 
 void usb_hid_kbd_report(usb_hid_kbd_state_t *st, uint8_t *r) {
@@ -52,6 +74,7 @@ void usb_hid_kbd_report(usb_hid_kbd_state_t *st, uint8_t *r) {
 
     if (r[2] == 0x01 && r[3] == 0x01 && r[4] == 0x01 &&
         r[5] == 0x01 && r[6] == 0x01 && r[7] == 0x01) return;
+    hid_last_ns = hid_now_ns();
     changed = (uint8_t)(r[0] ^ st->mods);
     for (i = 0; i < 8; i++) {
         if (changed & (1u << i))
@@ -91,9 +114,11 @@ void usb_hid_kbd_report(usb_hid_kbd_state_t *st, uint8_t *r) {
 
 void usb_hid_kbd_repeat_one(usb_hid_kbd_state_t *st) {
     uint16_t ps2;
+    uint64_t now;
 
     if (!st->rpt) return;
-    if (tick_count < st->rpt_due) return;
+    now = hid_now_ns();
+    if (now < st->rpt_due) return;
     if (st->rpt < 0x04 || st->rpt > 0x65) {
         st->rpt = 0;
         return;
@@ -104,5 +129,5 @@ void usb_hid_kbd_repeat_one(usb_hid_kbd_state_t *st) {
         return;
     }
     hid_feed((uint8_t)ps2, (uint8_t)(ps2 >> 8), 0);
-    st->rpt_due = tick_count + pit_freq / 30;
+    st->rpt_due = hid_now_ns() + HID_RPT_RATE_NS;
 }

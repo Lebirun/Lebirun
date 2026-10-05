@@ -445,8 +445,13 @@ void KERNEL_INIT ioapic_route_irq(uint8_t irq, uint8_t vector,
     ioapic_write(reg, redtbl_lo);
 }
 
-void KERNEL_INIT ioapic_mask_irq(uint8_t irq) {
-    uint64_t reg;
+
+void KERNEL_INIT lapic_mask_timer(void) {
+    if (!lapic_base) return;
+    lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_MASKED);
+}
+
+void KERNEL_INIT ioapic_mask_irq(uint8_t irq) {    uint64_t reg;
     uint64_t lo;
     uint64_t gsi;
 

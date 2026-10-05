@@ -333,6 +333,7 @@ fi
 
 if [ -d "root" ]; then
   mkdir -p root/var/log
+  mkdir -p root/dev root/proc root/sys root/tmp root/mnt root/home root/root root/run root/opt root/srv root/media root/var/tmp
   find root -type d -exec chmod 0755 {} +
   find root -type f ! -perm -111 -exec chmod 0644 {} +
   find root -type f -perm -111 -exec chmod 0755 {} +

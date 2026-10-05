@@ -143,6 +143,7 @@ typedef struct {
     char *path;
     char *device;
     vfs_node_t *root;
+    vfs_node_t *covered;
     vfs_fs_type_t *fs_type;
     int in_use;
     uint64_t flags;
