@@ -137,7 +137,7 @@ void KERNEL_INIT watchdog_init(void) {
 
     handle = pit_register_callback(watchdog_callback, interval_ticks, false);
     if (handle < 0) {
-        printf("WATCHDOG: failed to register timer callback\n");
+        KERNEL_INIT_LOG("WATCHDOG: failed to register timer callback\n");
         return;
     }
 

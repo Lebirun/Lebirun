@@ -431,18 +431,18 @@ static void ext4_vfs_cache_remove_fs(ext4_fs_t *fs) {
     ext4_vfs_cache_release_empty();
 }
 
-static void ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
+static int ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     ext4_vfs_private_t *priv;
     int i;
 
-    if (!fs || !node) return;
-    if (node == fs->root_node) return;
-    if (node->ref_count != 0) return;
-    if (vfs_lookup_hazard_contains(node)) return;
+    if (!fs || !node) return -1;
+    if (node == fs->root_node) return -1;
+    if (node->ref_count != 0) return -1;
+    if (vfs_lookup_hazard_contains(node)) return -1;
 
     priv = (ext4_vfs_private_t *)node->private_data;
-    if (priv && priv->fs != fs) return;
-    if (priv && priv->child_refs != 0) return;
+    if (priv && priv->fs != fs) return -1;
+    if (priv && priv->child_refs != 0) return -1;
 
     ext4_release_parent_pin(node);
     ext4_vfs_cache_remove(node);
@@ -455,6 +455,7 @@ static void ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     if (priv) kfree(priv);
     node->private_data = NULL;
     node->impl = 0;
+    return 0;
 }
 
 static void ext4_free_vfs_nodes(ext4_fs_t *fs) {
@@ -490,7 +491,12 @@ void ext4_drop_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     if (!fs || !node) return;
     if (node == fs->root_node) return;
     if (node->ref_count != 0) return;
-    ext4_detach_vfs_node(fs, node);
+    ext4_vfs_cache_remove(node);
+    vfs_lookup_hazard_clear(node);
+    if (ext4_detach_vfs_node(fs, node) != 0) {
+        vfs_lookup_hazard_set(node);
+        return;
+    }
     vfs_node_release_name(node);
     kfree(node);
 }

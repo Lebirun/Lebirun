@@ -99,7 +99,7 @@ fi
 
 USB_ARGS=""
 if [ "$USB" -eq 1 ]; then
-    USB_ARGS="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0"
+    USB_ARGS="-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0"
 fi
 
 DEBUG_ARGS=""

@@ -121,9 +121,20 @@ void serial_init(void) {
     serial_present = 1;
 }
 
-static void serial_putc_nolock(uint8_t ch) {
-    while (!serial_thr_empty())
+static int serial_wait_thr_empty(void) {
+    uint64_t attempts;
+
+    attempts = 0;
+    while (!serial_thr_empty()) {
+        attempts++;
+        if (attempts >= 0x100000ULL) return 0;
         cpu_relax();
+    }
+    return 1;
+}
+
+static void serial_putc_nolock(uint8_t ch) {
+    if (!serial_wait_thr_empty()) return;
     outb(0x3F8, ch);
 }
 

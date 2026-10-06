@@ -1098,7 +1098,7 @@ void ahci_debug_info(void) {
 }
 
 int KERNEL_INIT ahci_init(void) {
-    static int probed = 0;
+    static int probed KERNEL_INIT_BSS;
     uint64_t abar_phys;
     uint64_t abar_virt;
     uint64_t abar_size;

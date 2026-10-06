@@ -1091,6 +1091,8 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     vfs_node_t *in_lower;
     char *wh_path;
     char *parent_path;
+    int has_upper;
+    int has_lower;
     int ret;
 
     if (!parent || !name) return -1;
@@ -1103,42 +1105,36 @@ static int overlay_vfs_unlink(vfs_node_t *parent, const char *name) {
     
     in_upper = upper_dir ? vfs_finddir(upper_dir, name) : NULL;
     in_lower = lower_dir ? vfs_finddir(lower_dir, name) : NULL;
-    
-    if (in_upper && upper_dir->ops && upper_dir->ops->unlink) {
+    has_upper = in_upper != NULL;
+    has_lower = in_lower != NULL;
+    if (in_upper) vfs_release(in_upper);
+    if (in_lower) vfs_release(in_lower);
+
+    if (has_upper && upper_dir->ops && upper_dir->ops->unlink) {
         ret = upper_dir->ops->unlink(upper_dir, name);
         if (ret != 0) {
-            vfs_release(in_upper);
-            if (in_lower) vfs_release(in_lower);
             return overlay_ramfs_result(ret);
         }
     }
-    
-    if (in_lower) {
+
+    if (has_lower) {
         parent_path = vfs_get_path_alloc(parent);
         if (!parent_path) {
-            if (in_upper) vfs_release(in_upper);
-            vfs_release(in_lower);
             return -1;
         }
         wh_path = overlay_join_path(parent_path, OVERLAY_WHITEOUT_PREFIX,
                                     name);
         kfree(parent_path);
         if (!wh_path) {
-            if (in_upper) vfs_release(in_upper);
-            vfs_release(in_lower);
             return -1;
         }
         ret = ramfs_create_file(wh_path, 0644);
         kfree(wh_path);
         if (ret != 0 && ret != RAMFS_ERR_EXIST) {
-            if (in_upper) vfs_release(in_upper);
-            vfs_release(in_lower);
             return overlay_ramfs_result(ret);
         }
     }
 
-    if (in_upper) vfs_release(in_upper);
-    if (in_lower) vfs_release(in_lower);
     ov_cache_invalidate(parent, name);
     overlay_reset_readdir(onode);
     return 0;

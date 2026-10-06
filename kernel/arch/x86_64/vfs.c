@@ -668,7 +668,6 @@ int KERNEL_INIT vfs_remove_mount(const char *mountpoint) {
     ns = vfs_task_ns();
     for (i = 0; i < ns->capacity; i++) {
         if (ns->mounts[i].in_use && strcmp(ns->mounts[i].path, mountpoint) == 0) {
-            printf("VFS: Removed mount %s\n", mountpoint);
             ns->mounts[i].in_use = 0;
             vfs_mount_clear_strings(&ns->mounts[i]);
             ns->mounts[i].root = NULL;
@@ -865,6 +864,10 @@ int vfs_lookup_hazard_contains(vfs_node_t *node) {
     int found;
 
     if (!node) return 0;
+    task = current_task;
+    if (task &&
+        __atomic_load_n(&task->vfs_lookup_node, __ATOMIC_ACQUIRE) == node)
+        return 1;
     found = 0;
     lock_scheduler();
     task = all_tasks_head;
@@ -1156,12 +1159,13 @@ int vfs_unlink(vfs_node_t *parent, const char *name) {
         target = vfs_finddir(parent, name);
         if (target)
             inotify_invalidate_node(target);
+        if (target) {
+            vfs_release(target);
+        }
         result = unlink(parent, name);
         if (result == 0) {
             inotify_notify(parent, 0x00000200U, name);
         }
-        if (target)
-            vfs_release(target);
         return result;
     }
     return -1;
