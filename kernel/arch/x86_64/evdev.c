@@ -157,7 +157,23 @@ void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, in
     ev.type = type;
     ev.code = code;
     ev.value = value;
+    if (dev && type == EV_ABS && code < 2)
+        dev->abs_info[code].value = value;
     evdev_ring_put(dev, &ev);
+}
+
+void evdev_mouse_set_abs(int32_t max) {
+    struct evdev_device *dev;
+
+    if (max <= 0) return;
+    dev = &evdev_mouse;
+    set_bit(dev->ev_bits, EV_ABS);
+    set_bit(dev->abs_bits, ABS_X);
+    set_bit(dev->abs_bits, ABS_Y);
+    dev->abs_info[0].minimum = 0;
+    dev->abs_info[0].maximum = max;
+    dev->abs_info[1].minimum = 0;
+    dev->abs_info[1].maximum = max;
 }
 
 void evdev_push_sync(struct evdev_device *dev) {
@@ -426,6 +442,9 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     if ((request & 0xFF) >= 0x40 && (request & 0xFF) <= 0x7F) {
         if (!arg) return -14;
         memset(arg, 0, sizeof(struct input_absinfo));
+        if (dev && (request & 0xFF) - 0x40 < 2)
+            memcpy(arg, &dev->abs_info[(request & 0xFF) - 0x40],
+                   sizeof(struct input_absinfo));
         return 0;
     }
 

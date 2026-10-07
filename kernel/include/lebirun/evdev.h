@@ -17,6 +17,9 @@
 #define REL_Y           0x01
 #define REL_WHEEL       0x08
 
+#define ABS_X           0x00
+#define ABS_Y           0x01
+
 #define BTN_LEFT        0x110
 #define BTN_RIGHT       0x111
 #define BTN_MIDDLE      0x112
@@ -179,6 +182,7 @@ struct evdev_device {
     uint8_t abs_bits[4];
     uint8_t prop_bits[4];
     uint8_t key_state[(KEY_MAX + 7) / 8];
+    struct input_absinfo abs_info[2];
     pid_t grab_pid;
 };
 
@@ -191,6 +195,7 @@ void evdev_release_grabs(pid_t pid);
 
 struct evdev_device *evdev_get_kbd(void);
 struct evdev_device *evdev_get_mouse(void);
+void evdev_mouse_set_abs(int32_t max);
 
 vfs_node_t *evdev_get_input_dir(void);
 vfs_node_t *evdev_get_event_node(int index);

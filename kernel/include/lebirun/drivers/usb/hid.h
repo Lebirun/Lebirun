@@ -15,5 +15,7 @@ void usb_hid_kbd_repeat_one(usb_hid_kbd_state_t *st);
 int usb_hid_kbd_recent(void);
 void usb_hid_mouse_report(uint8_t *report, uint64_t mps);
 int usb_hid_mouse_recent(void);
+void usb_hid_mouse_abs_report(uint8_t *r, uint16_t x_off, uint8_t x_len,
+                               uint16_t y_off, uint8_t y_len, uint32_t max);
 
 #endif

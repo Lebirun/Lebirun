@@ -417,6 +417,12 @@ typedef struct {
     uint64_t ibuf_phys;
     uint64_t ipend;
     usb_hid_kbd_state_t hid_kbd;
+    uint8_t has_abs;
+    uint16_t abs_x_off;
+    uint8_t abs_x_len;
+    uint16_t abs_y_off;
+    uint8_t abs_y_len;
+    uint32_t abs_max;
 } usb_dev_t;
 
 static usb_dev_t usb_devs[8];
@@ -679,6 +685,21 @@ static int KERNEL_INIT xhci_get_descriptor(usb_dev_t *dev, uint64_t dtype,
     return 0;
 }
 
+static int KERNEL_INIT xhci_get_hid_report(usb_dev_t *dev, uint64_t len) {
+    uint8_t setup[8];
+
+    setup[0] = 0x81;
+    setup[1] = 6;
+    setup[2] = 0;
+    setup[3] = 0x22;
+    setup[4] = dev->iface;
+    setup[5] = 0;
+    setup[6] = (uint8_t)(len & 0xFF);
+    setup[7] = (uint8_t)((len >> 8) & 0xFF);
+    memset((void *)dev->xfer, 0, PAGE_SIZE);
+    return xhci_control(dev, setup, len, 1);
+}
+
 static int KERNEL_INIT xhci_set_configuration(usb_dev_t *dev,
                                               uint64_t value) {
     uint8_t setup[8];
@@ -692,6 +713,171 @@ static int KERNEL_INIT xhci_set_configuration(usb_dev_t *dev,
     setup[6] = 0;
     setup[7] = 0;
     return xhci_control(dev, setup, 0, 0);
+}
+
+static int KERNEL_INIT xhci_hid_parse_abs(uint8_t *d, uint64_t len,
+                                           uint16_t *x_off, uint8_t *x_len,
+                                           uint16_t *y_off, uint8_t *y_len,
+                                           uint32_t *max) {
+    uint64_t pos;
+    uint64_t bit;
+    uint32_t page;
+    int32_t lmin;
+    int32_t lmax;
+    uint32_t size;
+    uint32_t count;
+    uint32_t pend_page[8];
+    uint32_t pend_use[8];
+    int pend_n;
+    uint32_t loc_min;
+    uint32_t loc_min_page;
+    int loc_have_min;
+    uint16_t xo;
+    uint8_t xl;
+    uint16_t yo;
+    uint8_t yl;
+    int32_t xo_lmin;
+    int32_t xo_lmax;
+    int32_t yo_lmin;
+    int32_t yo_lmax;
+    int have_x;
+    int have_y;
+    uint64_t end;
+
+    if (!d || !x_off || !x_len || !y_off || !y_len || !max) return -1;
+    pos = 0;
+    bit = 0;
+    page = 0;
+    lmin = 0;
+    lmax = 0;
+    size = 0;
+    count = 0;
+    pend_n = 0;
+    loc_have_min = 0;
+    loc_min = 0;
+    loc_min_page = 0;
+    xo = 0;
+    xl = 0;
+    yo = 0;
+    yl = 0;
+    have_x = 0;
+    have_y = 0;
+    while (pos < len) {
+        uint8_t b;
+        uint64_t nb;
+        uint64_t v;
+        int32_t sv;
+        uint64_t type;
+        uint64_t tag;
+        uint64_t i;
+
+        b = d[pos];
+        if (b == 0xFE) {
+            if (pos + 2 >= len) return -1;
+            if (pos + 3 + d[pos + 1] < pos) return -1;
+            pos += 3 + d[pos + 1];
+            if (pos > len) return -1;
+            continue;
+        }
+        nb = b & 3;
+        if (nb == 3) nb = 4;
+        if (pos + 1 + nb > len) return -1;
+        v = 0;
+        for (i = 0; i < nb; i++) v |= (uint64_t)d[pos + 1 + i] << (i * 8);
+        if (nb == 1) sv = (int8_t)v;
+        else if (nb == 2) sv = (int16_t)v;
+        else sv = (int32_t)v;
+        type = (b >> 2) & 3;
+        tag = (b >> 4) & 15;
+        pos += 1 + nb;
+        if (type == 0) {
+            if (tag == 8) {
+                if (count > 256) return -1;
+                if ((v & 0x01) == 0 && (v & 0x04) == 0) {
+                    for (i = 0; i < count; i++) {
+                        uint64_t off;
+
+                        if ((int)i >= pend_n) break;
+                        if (pend_page[i] != 1) continue;
+                        if (size < 1 || size > 32) return -1;
+                        off = bit + i * size;
+                        if (off > 0xFFFF) return -1;
+                        if (pend_use[i] == 0x30 && !have_x) {
+                            xo = (uint16_t)off;
+                            xl = (uint8_t)size;
+                            xo_lmin = lmin;
+                            xo_lmax = lmax;
+                            have_x = 1;
+                        } else if (pend_use[i] == 0x31 && !have_y) {
+                            yo = (uint16_t)off;
+                            yl = (uint8_t)size;
+                            yo_lmin = lmin;
+                            yo_lmax = lmax;
+                            have_y = 1;
+                        }
+                    }
+                }
+                if (size > 32 || count > 0xFFFF) return -1;
+                bit += (uint64_t)size * count;
+                if (bit > 0xFFFF) return -1;
+            }
+            pend_n = 0;
+            loc_have_min = 0;
+        } else if (type == 1) {
+            if (tag == 0) page = (uint32_t)v;
+            else if (tag == 1) lmin = sv;
+            else if (tag == 2) lmax = sv;
+            else if (tag == 7) {
+                size = (uint32_t)v;
+                if (size > 32) return -1;
+            } else if (tag == 9) count = (uint32_t)v;
+        } else if (type == 2) {
+            uint32_t upage;
+            uint32_t u;
+
+            if (nb == 2 && tag == 0) {
+                upage = (uint32_t)(v >> 16);
+                u = (uint32_t)(v & 0xFFFF);
+            } else {
+                upage = page;
+                u = (uint32_t)v;
+            }
+            if (tag == 0) {
+                if (pend_n < 8) {
+                    pend_page[pend_n] = upage;
+                    pend_use[pend_n] = u;
+                    pend_n++;
+                }
+                loc_have_min = 0;
+            } else if (tag == 1) {
+                loc_min = u;
+                loc_min_page = upage;
+                loc_have_min = 1;
+            } else if (tag == 2) {
+                if (!loc_have_min) continue;
+                loc_have_min = 0;
+                while (pend_n < 8) {
+                    pend_page[pend_n] = loc_min_page;
+                    pend_use[pend_n] = loc_min;
+                    pend_n++;
+                    if (loc_min >= u) break;
+                    loc_min++;
+                }
+            }
+        }
+    }
+    if (!have_x || !have_y) return -1;
+    if (xo_lmin != 0 || yo_lmin != 0) return -1;
+    if (xo_lmax <= 0 || yo_lmax <= 0 || xo_lmax != yo_lmax) return -1;
+    end = (uint64_t)xo + xl;
+    if ((uint64_t)yo + yl > end) end = (uint64_t)yo + yl;
+    if (end > len * 8) return -1;
+    *x_off = xo;
+    *x_len = xl;
+    *y_off = yo;
+    *y_len = yl;
+    *max = (uint32_t)xo_lmax;
+    return 0;
 }
 
 static int KERNEL_INIT xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
@@ -710,14 +896,18 @@ static int KERNEL_INIT xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
         if (len < 2 || off + len > total) break;
         if (type == 4 && len >= 9) {
             uint8_t want = 0;
+            uint8_t abs_pointer = 0;
             candidate = 0;
 #if CONFIG_DRIVER_USB_HID_KBD
             want |= (uint8_t)(cfg[off + 7] == 1);
 #endif
 #if CONFIG_DRIVER_USB_HID_MOUSE
             want |= (uint8_t)(cfg[off + 7] == 2);
+            abs_pointer = (uint8_t)(cfg[off + 5] == 3 && cfg[off + 6] == 0 &&
+                                    cfg[off + 7] == 0);
 #endif
-            if (cfg[off + 5] == 3 && cfg[off + 6] == 1 && want) {
+            if ((cfg[off + 5] == 3 && cfg[off + 6] == 1 && want) ||
+                abs_pointer) {
                 iface = cfg[off + 2];
                 proto = cfg[off + 7];
                 candidate = 1;
@@ -881,6 +1071,44 @@ static int KERNEL_INIT xhci_enumerate_port(uint64_t port) {
         return -1;
     }
     xhci_parse_hid(dev, (uint8_t *)dev->xfer, total);
+    if (dev->has_hid && (dev->proto == 2 || dev->proto == 0)) {
+        uint16_t xo;
+        uint16_t yo;
+        uint8_t xl;
+        uint8_t yl;
+        uint32_t m;
+        uint64_t end;
+
+        xo = 0;
+        yo = 0;
+        xl = 0;
+        yl = 0;
+        m = 0;
+        if (xhci_get_hid_report(dev, 256) == 0) {
+            if (xhci_hid_parse_abs((uint8_t *)dev->xfer, 256, &xo, &xl, &yo,
+                                   &yl, &m) == 0) {
+                end = (uint64_t)xo + xl;
+                if ((uint64_t)yo + yl > end) end = (uint64_t)yo + yl;
+                if ((end + 7) / 8 <= dev->iep_mps) {
+                    dev->has_abs = 1;
+                    dev->abs_x_off = xo;
+                    dev->abs_x_len = xl;
+                    dev->abs_y_off = yo;
+                    dev->abs_y_len = yl;
+                    dev->abs_max = m;
+                    KERNEL_INIT_LOG("USB: Port %u: HID absolute axes xoff=%u xlen=%u yoff=%u ylen=%u max=%u\n",
+                                    dev->port, xo, xl, yo, yl, m);
+                }
+            }
+        }
+    }
+    if (dev->has_hid && dev->proto == 0 && !dev->has_abs) {
+        KERNEL_INIT_LOG("USB: Port %u: unsupported HID device, ignoring\n",
+                        port);
+        dev->used = 0;
+        usb_dev_count--;
+        return -1;
+    }
     if (dev->has_hid && xhci_configure_hid(dev) < 0) {
         dev->used = 0;
         usb_dev_count--;
@@ -892,7 +1120,7 @@ static int KERNEL_INIT xhci_enumerate_port(uint64_t port) {
         return -1;
     }
     if (dev->has_hid) {
-        if (xhci_hid_ctrl(dev, 0x0B, 0) < 0 ||
+        if ((!dev->has_abs && xhci_hid_ctrl(dev, 0x0B, 0) < 0) ||
             xhci_hid_ctrl(dev, 0x0A, 0) < 0) {
             KERNEL_INIT_LOG("USB: Port %u: HID boot setup failed\n", port);
             dev->used = 0;
@@ -931,8 +1159,14 @@ static void xhci_hid_report(usb_dev_t *dev) {
     }
 #endif
 #if CONFIG_DRIVER_USB_HID_MOUSE
-    if (dev->proto != 1)
-        usb_hid_mouse_report((uint8_t *)dev->ibuf, dev->iep_mps);
+    if (dev->proto != 1) {
+        if (dev->has_abs)
+            usb_hid_mouse_abs_report((uint8_t *)dev->ibuf, dev->abs_x_off,
+                                     dev->abs_x_len, dev->abs_y_off,
+                                     dev->abs_y_len, dev->abs_max);
+        else
+            usb_hid_mouse_report((uint8_t *)dev->ibuf, dev->iep_mps);
+    }
 #endif
 }
 
