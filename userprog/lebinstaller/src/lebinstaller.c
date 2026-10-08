@@ -59,8 +59,18 @@ static disk_info_t *disks;
 static int disk_count;
 static int disk_capacity;
 static lebui_size_t term_sz;
-static lebui_prog_state_t prog_st;
 static char boot_error[128];
+
+#define BOOT_BIOS 0
+#define BOOT_UEFI 1
+#define BOOT_BOTH 2
+
+static int boot_mode;
+static char boot_esp[32];
+
+static void wiz_prog_init(const char *title);
+static void wiz_prog_update(const char *msg, int pct);
+static void wiz_prog_log(const char *msg);
 
 static const char *timezones[] = {
     "GMT-12", "GMT-11", "GMT-10", "GMT-9", "GMT-8", "GMT-7",
@@ -609,7 +619,7 @@ static void inst_copy_progress(const char *path)
     if (pct > 95) pct = 95;
     if (pct != copy_last_pct) {
         copy_last_pct = pct;
-        lebui_progress_update(&prog_st, path, pct);
+        wiz_prog_update(path, pct);
     }
 }
 
@@ -625,7 +635,7 @@ static void inst_copy_current(const char *path)
     if (pct > 95) pct = 95;
     if (pct != copy_last_pct) {
         copy_last_pct = pct;
-        lebui_progress_update(&prog_st, path, pct);
+        wiz_prog_update(path, pct);
     }
 }
 
@@ -791,7 +801,7 @@ static void inst_format_process_line(char *line, char *error,
         (strstr(line, "lformat.ext4:") ||
          strstr(line, "Unable to start lformat.ext4")))
         snprintf(error, error_size, "%s", line);
-    lebui_progress_log(&prog_st, line);
+    wiz_prog_log(line);
 }
 
 static int inst_format_ext4(const char *devpath, char *error,
@@ -1269,7 +1279,9 @@ static int inst_install_efi(const char *disk_dev, const char *part_dev,
     const char *efi_parts[3];
 
     is_gpt = inst_is_gpt(disk_dev);
-    if (inst_find_esp(disk_dev, esp_dev, sizeof(esp_dev)) != 0) {
+    if (boot_esp[0] != '\0') {
+        snprintf(esp_dev, sizeof(esp_dev), "%s", boot_esp);
+    } else if (inst_find_esp(disk_dev, esp_dev, sizeof(esp_dev)) != 0) {
         if (is_gpt) {
             snprintf(boot_error, sizeof(boot_error),
                      "boot: no ESP found, create one with ldiskutil");
@@ -1541,19 +1553,11 @@ static int inst_iso_copy(const char *cddev, uint64_t lba, uint64_t size,
     return 0;
 }
 
-static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
+static int inst_install_boot_bios(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
 {
     char boot_dir[MAX_PATH];
     char grub_dir[MAX_PATH];
     char grub_mod_dir[MAX_PATH];
-
-    if (inst_is_gpt(disk_dev)) {
-        if (inst_write_grub_config(mountpoint, part_dev) < 0) {
-            snprintf(boot_error, sizeof(boot_error), "boot: write grub.cfg failed");
-            return -1;
-        }
-        return inst_install_efi(disk_dev, part_dev, part_num);
-    }
 
     snprintf(boot_dir, sizeof(boot_dir), "%s/boot", mountpoint);
     vfs_mkdir(boot_dir, 0755);
@@ -1574,6 +1578,40 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
     }
 
     return 0;
+}
+
+static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
+{
+    char esp_probe[MAX_PATH];
+
+    if (inst_is_gpt(disk_dev)) {
+        if (inst_write_grub_config(mountpoint, part_dev) < 0) {
+            snprintf(boot_error, sizeof(boot_error), "boot: write grub.cfg failed");
+            return -1;
+        }
+        return inst_install_efi(disk_dev, part_dev, part_num);
+    }
+    if (boot_mode == BOOT_UEFI) {
+        if (inst_write_grub_config(mountpoint, part_dev) < 0) {
+            snprintf(boot_error, sizeof(boot_error), "boot: write grub.cfg failed");
+            return -1;
+        }
+        if (boot_esp[0] == '\0' &&
+            inst_find_esp(disk_dev, esp_probe, sizeof(esp_probe)) != 0) {
+            snprintf(boot_error, sizeof(boot_error),
+                     "boot: no ESP found, create one with ldiskutil");
+            return -1;
+        }
+        return inst_install_efi(disk_dev, part_dev, part_num);
+    }
+    if (boot_mode == BOOT_BOTH) {
+        int r = inst_install_boot_bios(mountpoint, disk_dev, part_dev,
+                                       part_num);
+        if (r == 0 && inst_install_efi(disk_dev, part_dev, part_num) != 0)
+            wiz_prog_log("Warning: UEFI boot files failed.");
+        return r;
+    }
+    return inst_install_boot_bios(mountpoint, disk_dev, part_dev, part_num);
 }
 
 static int inst_write_grub_config(const char *mountpoint, const char *part_dev)
@@ -1929,115 +1967,6 @@ static void cleanup_exit(void)
     lebui_shutdown();
 }
 
-#define STEP_DISK    0
-#define STEP_PART    1
-#define STEP_FORMAT  2
-#define STEP_PKGS    3
-#define STEP_USER    4
-#define STEP_ROOTPW  5
-#define STEP_TZ      6
-#define STEP_INSTALL 7
-#define STEP_COUNT   8
-
-#define STEP_NONE    0
-#define STEP_DONE    1
-
-static int step_disk(int *disk_idx)
-{
-    char **disk_items;
-    char (*disk_labels)[64];
-    char sizebuf[32];
-    int i;
-    int choice;
-
-    disk_items = (char **)malloc((size_t)disk_count * sizeof(char *));
-    disk_labels = (char (*)[64])malloc((size_t)disk_count * sizeof(*disk_labels));
-    if (!disk_items || !disk_labels) {
-        free(disk_items);
-        free(disk_labels);
-        return -1;
-    }
-
-    for (i = 0; i < disk_count; i++) {
-        inst_format_size(disks[i].disk_sectors, sizebuf, sizeof(sizebuf));
-        snprintf(disk_labels[i], sizeof(disk_labels[i]),
-                 "%-10s  %8s  %d partition(s)",
-                 disks[i].devpath, sizebuf, disks[i].part_count);
-        disk_items[i] = disk_labels[i];
-    }
-
-    choice = lebui_menu_auto("Select Disk", (const char **)disk_items, disk_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
-    free(disk_items);
-    free(disk_labels);
-    if (choice < 0) return -1;
-
-    if (disks[choice].part_count == 0) {
-        lebui_msgbox_auto("No Partitions",
-                   "No partitions on this disk. Use ldiskutil first.", term_sz.rows, term_sz.cols);
-        return -1;
-    }
-
-    *disk_idx = choice;
-    return 0;
-}
-
-static int step_partition(int disk_idx, int *part_idx)
-{
-    disk_info_t *d;
-    char **part_items;
-    char (*part_labels)[64];
-    char sizebuf[32];
-    int i;
-    int choice;
-    const char *type_name;
-
-    d = &disks[disk_idx];
-    part_items = (char **)malloc((size_t)d->part_count * sizeof(char *));
-    part_labels = (char (*)[64])malloc((size_t)d->part_count * sizeof(*part_labels));
-    if (!part_items || !part_labels) {
-        free(part_items);
-        free(part_labels);
-        return -1;
-    }
-
-    for (i = 0; i < d->part_count; i++) {
-        inst_format_size(d->parts[i].sector_count, sizebuf, sizeof(sizebuf));
-        switch (d->parts[i].mbr_type) {
-        case 0x83: type_name = "Linux"; break;
-        case 0x82: type_name = "Swap"; break;
-        case 0x0B: case 0x0C: type_name = "FAT32"; break;
-        case 0x07: type_name = "NTFS"; break;
-        case 0xEF: type_name = "ESP"; break;
-        default: type_name = "Other"; break;
-        }
-        snprintf(part_labels[i], sizeof(part_labels[i]),
-                 "%-14s  %8s  %s",
-                 d->parts[i].devpath, sizebuf, type_name);
-        part_items[i] = part_labels[i];
-    }
-
-    choice = lebui_menu_auto("Select Partition", (const char **)part_items,
-                       d->part_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
-    free(part_items);
-    free(part_labels);
-    if (choice < 0) return -1;
-
-    if (d->parts[choice].mbr_type == 0xEF) {
-        lebui_msgbox_auto("Error", "The ESP is reserved for the bootloader. Pick a Linux partition.",
-                          term_sz.rows, term_sz.cols);
-        return -1;
-    }
-    *part_idx = choice;
-    return 0;
-}
-
-static int step_format(int *do_format)
-{
-    *do_format = lebui_confirm_auto("Format", "Format partition as ext4?", term_sz.rows, term_sz.cols);
-    return 0;
-}
 
 typedef struct {
     char username[64];
@@ -2067,156 +1996,6 @@ static int inst_reserve_users(int need)
     for (i = user_capacity; i < new_cap; i++)
         memset(&users[i], 0, sizeof(users[i]));
     user_capacity = new_cap;
-    return 0;
-}
-
-static int step_packages(void)
-{
-    static const char *pkg_names[PKG_COUNT] = {
-        "Core system (required)",
-        "C development headers",
-        "C development libraries"
-    };
-    int tmp[PKG_COUNT];
-    int i;
-
-    for (i = 0; i < PKG_COUNT; i++) tmp[i] = pkg_selected[i];
-    tmp[PKG_CORE] = -1;
-
-    if (lebui_checklist_auto("Package Selection", pkg_names, tmp, PKG_COUNT,
-                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel", term_sz.rows, term_sz.cols) < 0)
-        return -1;
-
-    tmp[PKG_CORE] = 1;
-    for (i = 0; i < PKG_COUNT; i++) pkg_selected[i] = tmp[i];
-    return 0;
-}
-
-static int step_user_setup(void)
-{
-    char **menu_items;
-    char (*menu_labels)[48];
-    int choice;
-    int i;
-    char password2[64];
-    int menu_count;
-    int done_idx;
-
-    for (;;) {
-        menu_count = user_count + 2;
-        menu_items = (char **)malloc((size_t)menu_count * sizeof(char *));
-        menu_labels = (char (*)[48])malloc((size_t)menu_count * sizeof(*menu_labels));
-        if (!menu_items || !menu_labels) {
-            free(menu_items);
-            free(menu_labels);
-            return -1;
-        }
-
-        for (i = 0; i < user_count; i++) {
-            snprintf(menu_labels[i], sizeof(menu_labels[i]), "  %s", users[i].username);
-            menu_items[i] = menu_labels[i];
-        }
-        snprintf(menu_labels[user_count], sizeof(menu_labels[user_count]), "  Add new user...");
-        menu_items[user_count] = menu_labels[user_count];
-        done_idx = user_count + 1;
-        snprintf(menu_labels[done_idx], sizeof(menu_labels[0]), "  Done");
-        menu_items[done_idx] = menu_labels[done_idx];
-
-        choice = lebui_menu_auto("User Accounts", (const char **)menu_items,
-                           menu_count,
-                           " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
-        free(menu_items);
-        free(menu_labels);
-        if (choice < 0) return 0;
-
-        if (choice == done_idx) {
-            return 0;
-        }
-
-        if (choice == user_count) {
-            if (inst_reserve_users(user_count + 1) < 0) {
-                lebui_msgbox_auto("Error", "Could not allocate user entry.", term_sz.rows, term_sz.cols);
-                continue;
-            }
-            users[user_count].username[0] = '\0';
-            users[user_count].password[0] = '\0';
-            if (lebui_input_ex("New User", "Enter username:", users[user_count].username,
-                          sizeof(users[user_count].username), 0, term_sz.rows, term_sz.cols) < 0)
-                continue;
-            if (users[user_count].username[0] == '\0') {
-                lebui_msgbox_auto("Error", "Username cannot be empty.", term_sz.rows, term_sz.cols);
-                continue;
-            }
-            for (;;) {
-                if (lebui_input_ex("New User", "Enter password (empty=none):",
-                              users[user_count].password,
-                              sizeof(users[user_count].password), 1, term_sz.rows, term_sz.cols) < 0)
-                    break;
-                if (users[user_count].password[0] == '\0') {
-                    user_count++;
-                    break;
-                }
-                if (lebui_input_ex("New User", "Confirm password:",
-                              password2, sizeof(password2), 1, term_sz.rows, term_sz.cols) < 0)
-                    break;
-                if (strcmp(users[user_count].password, password2) != 0) {
-                    lebui_msgbox_auto("Error", "Passwords do not match.", term_sz.rows, term_sz.cols);
-                    continue;
-                }
-                memset(password2, 0, sizeof(password2));
-                user_count++;
-                break;
-            }
-        } else if (choice < user_count) {
-            if (lebui_confirm_auto("Remove User", users[choice].username, term_sz.rows, term_sz.cols)) {
-                memset(users[choice].password, 0, sizeof(users[choice].password));
-                for (i = choice; i < user_count - 1; i++)
-                    users[i] = users[i + 1];
-                user_count--;
-            }
-        }
-    }
-}
-
-static int step_rootpw(void)
-{
-    char pw1[64];
-    char pw2[64];
-
-    for (;;) {
-        if (lebui_input_ex("Root Password", "Enter root password (empty=none):", pw1, sizeof(pw1), 1, term_sz.rows, term_sz.cols) < 0)
-            return -1;
-        if (pw1[0] == '\0') {
-            root_password[0] = '\0';
-            return 0;
-        }
-        if (lebui_input_ex("Root Password", "Confirm root password:", pw2, sizeof(pw2), 1, term_sz.rows, term_sz.cols) < 0)
-            return -1;
-        if (strcmp(pw1, pw2) != 0) {
-            lebui_msgbox_auto("Error", "Passwords do not match.", term_sz.rows, term_sz.cols);
-            continue;
-        }
-        strncpy(root_password, pw1, sizeof(root_password) - 1);
-        root_password[sizeof(root_password) - 1] = '\0';
-        memset(pw1, 0, sizeof(pw1));
-        memset(pw2, 0, sizeof(pw2));
-        return 0;
-    }
-}
-
-static int step_timezone(int *tz_idx)
-{
-    int tz_count;
-    int choice;
-
-    tz_count = 0;
-    while (timezones[tz_count]) tz_count++;
-
-    choice = lebui_menu_auto("Select Timezone", timezones, tz_count,
-                       " \x18\x19 Move  <Enter> Select  <Esc> Back", term_sz.rows, term_sz.cols);
-    if (choice < 0) return -1;
-
-    *tz_idx = choice;
     return 0;
 }
 
@@ -2326,6 +2105,137 @@ static int inst_set_root_password(const char *mountpoint, const char *password)
     return (wlen == new_len) ? 0 : -1;
 }
 
+typedef struct {
+    int drawn;
+    int bx;
+    int by;
+    int bw;
+    int log_y;
+    int log_h;
+    int log_count;
+    char log_lines[8][64];
+} wiz_prog_state_t;
+
+static wiz_prog_state_t wizprog;
+
+static void wiz_prog_init(const char *title)
+{
+    int rows = term_sz.rows;
+    int cols = term_sz.cols;
+    int bw = 56;
+    int prog_h = 8;
+    int log_h;
+    int by;
+    int log_y;
+    int bx;
+    int i;
+
+    wizprog.drawn = 0;
+    wizprog.log_count = 0;
+    if (!title)
+        title = "";
+    if (cols < 40)
+        return;
+    if (bw > cols - 4)
+        bw = cols - 4;
+    by = 3;
+    log_y = by + prog_h + 1;
+    log_h = rows - log_y - 2;
+    if (log_h < 4)
+        log_h = 4;
+    if (log_h > 10)
+        log_h = 10;
+    bx = (cols - bw) / 2 + 1;
+    if (bx < 2)
+        bx = 2;
+    lebui_draw_screen(NULL, " Please wait...", rows, cols);
+    lebui_draw_box_shadow(by, bx, prog_h, bw, title);
+    lebui_draw_box_shadow(log_y, bx, log_h, bw, "Log");
+    for (i = 0; i < 8; i++)
+        wizprog.log_lines[i][0] = '\0';
+    wizprog.drawn = 1;
+    wizprog.bx = bx;
+    wizprog.by = by;
+    wizprog.bw = bw;
+    wizprog.log_y = log_y;
+    wizprog.log_h = log_h;
+    lebui_flush();
+}
+
+static void wiz_prog_update(const char *msg, int pct)
+{
+    int bar_w;
+    int filled;
+    int mw;
+    int i;
+
+    if (!wizprog.drawn)
+        return;
+    if (!msg)
+        msg = "";
+    if (pct < 0)
+        pct = 0;
+    if (pct > 100)
+        pct = 100;
+    bar_w = wizprog.bw - 8;
+    if (bar_w < 1)
+        bar_w = 1;
+    mw = wizprog.bw - 6;
+    if (mw < 1)
+        mw = 1;
+    lebui_goto(wizprog.by + 2, wizprog.bx + 3);
+    printf("%s%-*.*s%s", LEBUI_CLR_MENU, mw, mw, msg, LEBUI_CLR_NORMAL);
+    filled = (pct * bar_w) / 100;
+    if (filled > bar_w)
+        filled = bar_w;
+    lebui_goto(wizprog.by + 4, wizprog.bx + 4);
+    printf("%s", LEBUI_CLR_PROG);
+    for (i = 0; i < filled; i++)
+        putchar(' ');
+    printf("%s", LEBUI_CLR_PROG_BG);
+    for (i = filled; i < bar_w; i++)
+        putchar(' ');
+    lebui_goto(wizprog.by + 5, wizprog.bx + wizprog.bw / 2 - 2);
+    printf("%s%3d%%%s", LEBUI_CLR_MENU, pct, LEBUI_CLR_NORMAL);
+    lebui_flush();
+}
+
+static void wiz_prog_log(const char *msg)
+{
+    int log_area;
+    int i;
+    int mw;
+
+    if (!wizprog.drawn || !msg)
+        return;
+    log_area = wizprog.log_h - 2;
+    if (log_area > 8)
+        log_area = 8;
+    if (log_area < 1)
+        return;
+    mw = wizprog.bw - 6;
+    if (mw < 1)
+        mw = 1;
+    if (mw > 63)
+        mw = 63;
+    if (wizprog.log_count < log_area) {
+        strncpy(wizprog.log_lines[wizprog.log_count], msg, mw);
+        wizprog.log_lines[wizprog.log_count][mw] = '\0';
+        wizprog.log_count++;
+    } else {
+        for (i = 0; i < log_area - 1; i++)
+            strcpy(wizprog.log_lines[i], wizprog.log_lines[i + 1]);
+        strncpy(wizprog.log_lines[log_area - 1], msg, mw);
+        wizprog.log_lines[log_area - 1][mw] = '\0';
+    }
+    for (i = 0; i < wizprog.log_count && i < log_area; i++) {
+        lebui_goto(wizprog.log_y + 1 + i, wizprog.bx + 3);
+        printf("%s%-*s%s", LEBUI_CLR_DIM_CLR, mw, wizprog.log_lines[i],
+               LEBUI_CLR_NORMAL);
+    }
+    lebui_flush();
+}
+
 static int step_do_install(int disk_idx, int part_idx, int do_format,
                            int tz_idx)
 {
@@ -2344,20 +2254,19 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
 
     if (p->mbr_type == 0xEF) {
         lebui_msgbox_auto("Error",
-                          "Refusing to install onto the ESP. Pick a Linux partition.",
+                          "Refusing to install onto the ESP.",
                           term_sz.rows, term_sz.cols);
         return -1;
     }
 
-    lebui_progress_reset(&prog_st);
-    lebui_progress_init(&prog_st, "Installing", term_sz.rows, term_sz.cols);
-    lebui_progress_update(&prog_st, "Preparing...", 0);
+    wiz_prog_init("Installing");
+    wiz_prog_update("Preparing...", 0);
     usleep(50000);
 
     if (do_format) {
-        lebui_progress_update(&prog_st, "Formatting partition...", 0);
+        wiz_prog_update("Formatting partition...", 0);
         snprintf(fmsg, sizeof(fmsg), "Formatting %s as ext4...", p->devpath);
-        lebui_progress_log(&prog_st, fmsg);
+        wiz_prog_log(fmsg);
         fret = inst_format_ext4(p->devpath, fmsg, sizeof(fmsg));
         if (fret != 0) {
             if (fmsg[0] == '\0')
@@ -2367,7 +2276,7 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
             lebui_msgbox_auto("Error", fmsg, term_sz.rows, term_sz.cols);
             return -1;
         }
-        lebui_progress_log(&prog_st, "Format complete.");
+        wiz_prog_log("Format complete.");
     }
 
     snprintf(mountpoint, sizeof(mountpoint), "/tmp/lebinstall");
@@ -2375,80 +2284,80 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     vfs_mkdir(mountpoint, 0755);
     inst_umount_partition(mountpoint);
 
-    lebui_progress_update(&prog_st, "Mounting partition...", 5);
+    wiz_prog_update("Mounting partition...", 5);
     snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
-    lebui_progress_log(&prog_st, logbuf);
+    wiz_prog_log(logbuf);
     if (inst_mount_partition_as(p->devpath, mountpoint, "ext4") != 0) {
         lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
         return -1;
     }
-    lebui_progress_log(&prog_st, "Partition mounted.");
+    wiz_prog_log("Partition mounted.");
 
-    lebui_progress_update(&prog_st, "Counting files...", 10);
-    lebui_progress_log(&prog_st, "Counting files to copy...");
+    wiz_prog_update("Counting files...", 10);
+    wiz_prog_log("Counting files to copy...");
     copy_total = inst_count_rootfs(mountpoint);
     if (copy_total < 1) copy_total = 1;
     copy_done = 0;
     copy_last_pct = -1;
     copy_overwrite_existing = 0;
     copy_error[0] = '\0';
-    lebui_progress_update(&prog_st, "Copying files...", 10);
-    lebui_progress_log(&prog_st, "Copying rootfs...");
+    wiz_prog_update("Copying files...", 10);
+    wiz_prog_log("Copying rootfs...");
     if (inst_copy_rootfs(mountpoint) < 0) {
-        lebui_progress_log(&prog_st, "Warning: some files could not be copied.");
-        if (copy_error[0] != '\0') lebui_progress_log(&prog_st, copy_error);
+        wiz_prog_log("Warning: some files could not be copied.");
+        if (copy_error[0] != '\0') wiz_prog_log(copy_error);
     }
     copy_overwrite_existing = 1;
-    lebui_progress_log(&prog_st, "Rootfs copy complete.");
+    wiz_prog_log("Rootfs copy complete.");
 
-    lebui_progress_update(&prog_st, "Installing bootloader...", 96);
-    lebui_progress_log(&prog_st, "Installing GRUB bootloader...");
+    wiz_prog_update("Installing bootloader...", 96);
+    wiz_prog_log("Installing GRUB bootloader...");
     if (inst_install_boot(mountpoint, d->devpath, p->devpath, p->number) < 0) {
-        lebui_progress_log(&prog_st, "Warning: bootloader had errors.");
+        wiz_prog_log("Warning: bootloader had errors.");
         if (boot_error[0] != '\0') {
-            lebui_progress_log(&prog_st, boot_error);
+            wiz_prog_log(boot_error);
         }
     } else {
-        lebui_progress_log(&prog_st, "Bootloader installed.");
+        wiz_prog_log("Bootloader installed.");
     }
 
     for (i = 0; i < user_count; i++) {
-        lebui_progress_update(&prog_st, "Creating user accounts...", 97);
+        wiz_prog_update("Creating user accounts...", 97);
         snprintf(logbuf, sizeof(logbuf), "Creating user: %s", users[i].username);
-        lebui_progress_log(&prog_st, logbuf);
+        wiz_prog_log(logbuf);
         inst_create_user(mountpoint, users[i].username, users[i].password, 1000 + i);
     }
 
     if (root_password[0] != '\0') {
-        lebui_progress_update(&prog_st, "Setting root password...", 98);
+        wiz_prog_update("Setting root password...", 98);
         inst_set_root_password(mountpoint, root_password);
         memset(root_password, 0, sizeof(root_password));
-        lebui_progress_log(&prog_st, "Root password updated.");
+        wiz_prog_log("Root password updated.");
     }
 
-    lebui_progress_update(&prog_st, "Setting timezone...", 99);
+    wiz_prog_update("Setting timezone...", 99);
     snprintf(logbuf, sizeof(logbuf), "Timezone: %s", tz_values[tz_idx]);
-    lebui_progress_log(&prog_st, logbuf);
+    wiz_prog_log(logbuf);
     if (inst_write_timezone(mountpoint, tz_values[tz_idx]) < 0) {
-        lebui_progress_log(&prog_st, "Warning: timezone could not be saved.");
+        wiz_prog_log("Warning: timezone could not be saved.");
     }
 
-    lebui_progress_update(&prog_st, "Writing package database...", 99);
+    wiz_prog_update("Writing package database...", 99);
     seeded = inst_seed_pkg_db_from_iso(mountpoint);
     if (seeded > 0) {
         snprintf(logbuf, sizeof(logbuf), "Package records copied: %d", seeded);
-        lebui_progress_log(&prog_st, logbuf);
+        wiz_prog_log(logbuf);
     } else {
-        lebui_progress_log(&prog_st, "No ISO package records found.");
+        wiz_prog_log("No ISO package records found.");
     }
 
-    lebui_progress_log(&prog_st, "Unmounting...");
+    wiz_prog_log("Unmounting...");
     if (inst_umount_partition(mountpoint) != 0) {
-        lebui_progress_log(&prog_st, "Warning: unmount failed.");
+        wiz_prog_log("Warning: unmount failed.");
     }
 
-    lebui_progress_update(&prog_st, "Installation complete!", 100);
-    lebui_progress_log(&prog_st, "Done!");
+    wiz_prog_update("Installation complete!", 100);
+    wiz_prog_log("Done!");
 
     snprintf(donemsg, sizeof(donemsg),
              "Lebirun installed to %s. Reboot to start.",
@@ -2458,11 +2367,6 @@ static int step_do_install(int disk_idx, int part_idx, int do_format,
     return 0;
 }
 
-#define UPSTEP_DISK    0
-#define UPSTEP_PART    1
-#define UPSTEP_ITEMS   2
-#define UPSTEP_DO      3
-#define UPSTEP_COUNT   4
 
 #define UPD_CORE       0
 #define UPD_BOOT       1
@@ -2586,28 +2490,6 @@ static int inst_update_dir_recursive(const char *src, const char *dst, const cha
     return (errors > 0) ? -1 : 0;
 }
 
-static int step_update_items(void)
-{
-    static const char *upd_names[UPD_COUNT] = {
-        "Core system files (/bin, /lib, /sbin, /init)",
-        "Kernel and boot files (/boot, preserving GRUB config)",
-        "Development headers (/usr/include)",
-        "Terminal database (/usr/share/terminfo)",
-        "Package database records",
-        "GRUB boot code and modules",
-        "GRUB configuration file"
-    };
-    int tmp[UPD_COUNT];
-    int i;
-
-    for (i = 0; i < UPD_COUNT; i++) tmp[i] = upd_selected[i];
-    if (lebui_checklist_auto("Update Selection", upd_names, tmp, UPD_COUNT,
-                      " <Space> Toggle  <Enter> Confirm  <Esc> Cancel", term_sz.rows, term_sz.cols) < 0)
-        return -1;
-    for (i = 0; i < UPD_COUNT; i++) upd_selected[i] = tmp[i] ? 1 : 0;
-    return 0;
-}
-
 static int step_do_update(int disk_idx, int part_idx)
 {
     disk_info_t *d;
@@ -2633,30 +2515,29 @@ static int step_do_update(int disk_idx, int part_idx)
     did_work = 0;
     copy_error[0] = '\0';
 
-    lebui_progress_reset(&prog_st);
-    lebui_progress_init(&prog_st, "Updating", term_sz.rows, term_sz.cols);
-    lebui_progress_update(&prog_st, "Preparing...", 0);
+    wiz_prog_init("Updating");
+    wiz_prog_update("Preparing...", 0);
 
     snprintf(mountpoint, sizeof(mountpoint), "/tmp/lebupdate");
     vfs_mkdir("/tmp", 0755);
     vfs_mkdir(mountpoint, 0755);
     inst_umount_partition(mountpoint);
 
-    lebui_progress_update(&prog_st, "Mounting partition...", 5);
+    wiz_prog_update("Mounting partition...", 5);
     snprintf(logbuf, sizeof(logbuf), "Mounting %s...", p->devpath);
-    lebui_progress_log(&prog_st, logbuf);
+    wiz_prog_log(logbuf);
     if (inst_mount_partition_as(p->devpath, mountpoint, "ext4") != 0) {
         lebui_msgbox_auto("Error", "Failed to mount partition.", term_sz.rows, term_sz.cols);
         return -1;
     }
-    lebui_progress_log(&prog_st, "Partition mounted.");
+    wiz_prog_log("Partition mounted.");
 
     old_ver[0] = '\0';
     inst_read_pkg_version(mountpoint, "lebirun-base", old_ver, sizeof(old_ver));
     new_ver[0] = '\0';
     inst_read_pkg_version_file(LEBPKG_INSTALLED_DIR "/lebirun-base", new_ver, sizeof(new_ver));
 
-    lebui_progress_update(&prog_st, "Counting files...", 10);
+    wiz_prog_update("Counting files...", 10);
     copy_total = 0;
     if (upd_selected[UPD_CORE]) {
         copy_total++;
@@ -2681,9 +2562,9 @@ static int step_do_update(int disk_idx, int part_idx)
     copy_done = 0;
     copy_last_pct = -1;
 
-    lebui_progress_update(&prog_st, "Copying files...", 10);
+    wiz_prog_update("Copying files...", 10);
     if (upd_selected[UPD_CORE]) {
-        lebui_progress_log(&prog_st, "Updating core system files...");
+        wiz_prog_log("Updating core system files...");
         snprintf(src, sizeof(src), "/init");
         snprintf(dst, sizeof(dst), "%s/init", mountpoint);
         if (inst_copy_file_vfs(src, dst) != 0) {
@@ -2702,7 +2583,7 @@ static int step_do_update(int disk_idx, int part_idx)
     }
 
     if (upd_selected[UPD_BOOT]) {
-        lebui_progress_log(&prog_st, "Updating boot files...");
+        wiz_prog_log("Updating boot files...");
         snprintf(src, sizeof(src), "/boot");
         snprintf(dst, sizeof(dst), "%s/boot", mountpoint);
         if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
@@ -2711,7 +2592,7 @@ static int step_do_update(int disk_idx, int part_idx)
     }
 
     if (upd_selected[UPD_USR_INC]) {
-        lebui_progress_log(&prog_st, "Updating development headers...");
+        wiz_prog_log("Updating development headers...");
         snprintf(src, sizeof(src), "/usr/include");
         snprintf(dst, sizeof(dst), "%s/usr/include", mountpoint);
         if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
@@ -2720,7 +2601,7 @@ static int step_do_update(int disk_idx, int part_idx)
     }
 
     if (upd_selected[UPD_TERMINFO]) {
-        lebui_progress_log(&prog_st, "Updating terminal database...");
+        wiz_prog_log("Updating terminal database...");
         snprintf(src, sizeof(src), "/usr/share/terminfo");
         snprintf(dst, sizeof(dst), "%s/usr/share/terminfo", mountpoint);
         if (inst_update_dir_recursive(src, dst, mountpoint) != 0)
@@ -2729,12 +2610,12 @@ static int step_do_update(int disk_idx, int part_idx)
     }
 
     if (did_work) {
-        lebui_progress_log(&prog_st, "Selected files updated.");
+        wiz_prog_log("Selected files updated.");
     }
 
     if (upd_selected[UPD_GRUB_CODE]) {
-        lebui_progress_update(&prog_st, "Updating bootloader...", 96);
-        lebui_progress_log(&prog_st, "Updating GRUB boot code and modules...");
+        wiz_prog_update("Updating bootloader...", 96);
+        wiz_prog_log("Updating GRUB boot code and modules...");
         snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
         vfs_mkdir(dst, 0755);
         if (inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL) != 0)
@@ -2743,33 +2624,33 @@ static int step_do_update(int disk_idx, int part_idx)
             inst_set_copy_error("GRUB boot code failed", boot_error);
             goto failed;
         } else {
-            lebui_progress_log(&prog_st, "GRUB boot code updated.");
+            wiz_prog_log("GRUB boot code updated.");
         }
     }
 
     if (upd_selected[UPD_GRUB_CFG]) {
-        lebui_progress_update(&prog_st, "Updating GRUB config...", 97);
-        lebui_progress_log(&prog_st, "Updating GRUB configuration...");
+        wiz_prog_update("Updating GRUB config...", 97);
+        wiz_prog_log("Updating GRUB configuration...");
         if (inst_write_grub_config(mountpoint, p->devpath) < 0) {
             inst_set_copy_error("GRUB configuration failed", mountpoint);
             goto failed;
         }
-        lebui_progress_log(&prog_st, "GRUB configuration updated.");
+        wiz_prog_log("GRUB configuration updated.");
     }
 
     if (upd_selected[UPD_PKGDB]) {
-        lebui_progress_update(&prog_st, "Updating package database...", 98);
-        lebui_progress_log(&prog_st, "Updating package database...");
+        wiz_prog_update("Updating package database...", 98);
+        wiz_prog_log("Updating package database...");
         upgraded_pkgs = inst_upgrade_pkg_db_from_iso(mountpoint, &kept_pkgs);
         if (upgraded_pkgs < 0) goto failed;
         snprintf(logbuf, sizeof(logbuf), "Package records upgraded: %d", upgraded_pkgs);
-        lebui_progress_log(&prog_st, logbuf);
+        wiz_prog_log(logbuf);
         snprintf(logbuf, sizeof(logbuf), "Package records kept: %d", kept_pkgs);
-        lebui_progress_log(&prog_st, logbuf);
+        wiz_prog_log(logbuf);
     }
 
     if (upd_selected[UPD_BOOT]) {
-        lebui_progress_log(&prog_st, "Verifying installed kernel...");
+        wiz_prog_log("Verifying installed kernel...");
         snprintf(dst, sizeof(dst), "%s/boot/lebirun.kernel", mountpoint);
         if (inst_verify_kernel(dst) != 0) {
             inst_set_copy_error("Kernel verification failed", dst);
@@ -2777,14 +2658,14 @@ static int step_do_update(int disk_idx, int part_idx)
         }
     }
 
-    lebui_progress_log(&prog_st, "Unmounting...");
+    wiz_prog_log("Unmounting...");
     if (inst_umount_partition(mountpoint) != 0) {
         inst_set_copy_error("Unmount failed", mountpoint);
         goto report_failed;
     }
 
-    lebui_progress_update(&prog_st, "Update complete!", 100);
-    lebui_progress_log(&prog_st, "Done!");
+    wiz_prog_update("Update complete!", 100);
+    wiz_prog_log("Done!");
 
     if (old_ver[0] != '\0' && new_ver[0] != '\0' && strcmp(old_ver, new_ver) != 0)
         snprintf(donemsg, sizeof(donemsg),
@@ -2803,10 +2684,10 @@ static int step_do_update(int disk_idx, int part_idx)
 
 failed:
     if (inst_umount_partition(mountpoint) != 0)
-        lebui_progress_log(&prog_st, "Unmount failed after update error.");
+        wiz_prog_log("Unmount failed after update error.");
 report_failed:
-    lebui_progress_log(&prog_st, "Update incomplete.");
-    if (copy_error[0] != '\0') lebui_progress_log(&prog_st, copy_error);
+    wiz_prog_log("Update incomplete.");
+    if (copy_error[0] != '\0') wiz_prog_log(copy_error);
     snprintf(donemsg, sizeof(donemsg), "Update incomplete. %s",
              copy_error[0] ? copy_error : "A selected update step failed.");
     lebui_msgbox_auto("Update failed", donemsg, term_sz.rows, term_sz.cols);
@@ -2820,272 +2701,2167 @@ static void attach_tabbar(int active_tab, int cols)
     lebui_tabbar_attach(g_tab_names, 2, active_tab, cols);
 }
 
-static int run_install_page(void)
-{
-    static const char *step_names[] = {
-        "Select Disk",
-        "Select Partition",
-        "Format Partition",
-        "Package Selection",
-        "User Accounts",
-        "Root Password",
-        "Select Timezone",
-        "Install"
-    };
-    int status[STEP_COUNT];
-    char labels[STEP_COUNT][56];
-    char *items[STEP_COUNT];
-    int disk_idx;
-    int part_idx;
-    int do_format;
-    int tz_idx;
-    int sel;
-    int i;
-    int ret;
-    char ubuf[32];
+static const char *ins_wiz_names[] = {
+    "Welcome",
+    "Disk",
+    "Partition",
+    "Boot",
+    "Packages",
+    "Users",
+    "Root password",
+    "Timezone",
+    "Summary",
+    "Install"
+};
 
-    for (i = 0; i < STEP_COUNT; i++) status[i] = STEP_NONE;
-    disk_idx = -1;
-    part_idx = -1;
-    do_format = 0;
-    tz_idx = 0;
-    user_count = 0;
-    root_password[0] = '\0';
+#define INS_WELCOME 0
+#define INS_DISK 1
+#define INS_PART 2
+#define INS_BOOT 3
+#define INS_PKGS 4
+#define INS_USER 5
+#define INS_ROOTPW 6
+#define INS_TZ 7
+#define INS_SUMMARY 8
+#define INS_INSTALL 9
+#define INS_COUNT 10
+
+static const char *uw_wiz_names[] = {
+    "Welcome",
+    "Disk",
+    "Partition",
+    "Items",
+    "Summary",
+    "Update"
+};
+
+#define UW_WELCOME 0
+#define UW_DISK 1
+#define UW_PART 2
+#define UW_ITEMS 3
+#define UW_SUMMARY 4
+#define UW_DO 5
+#define UW_COUNT 6
+
+#define WIZ_FOCUS_STEPS 0
+#define WIZ_FOCUS_CONTENT 1
+#define WIZ_HELP "Move:Up/Dn Pane:L/R OK:Enter Tog:Space Back:b Next:n Page:Tab Quit:Esc Scan:r"
+
+static const char *wiz_part_type(uint8_t t)
+{
+    switch (t) {
+    case 0x83:
+        return "Lebirun";
+    case 0x82:
+        return "Swap";
+    case 0x0B:
+    case 0x0C:
+        return "FAT32";
+    case 0x07:
+        return "NTFS";
+    case 0xEF:
+        return "ESP";
+    default:
+        return "Other";
+    }
+}
+
+static void wiz_disk_label(int di, char *buf, int bufsz)
+{
+    char sizebuf[32];
+
+    inst_format_size(disks[di].disk_sectors, sizebuf, sizeof(sizebuf));
+    snprintf(buf, bufsz, "%s  %s  %d part(s)", disks[di].devpath, sizebuf,
+             disks[di].part_count);
+}
+
+static void wiz_part_label(int di, int pi, char *buf, int bufsz)
+{
+    char sizebuf[32];
+
+    inst_format_size(disks[di].parts[pi].sector_count, sizebuf,
+                     sizeof(sizebuf));
+    snprintf(buf, bufsz, "%s  %s  %s", disks[di].parts[pi].devpath, sizebuf,
+             wiz_part_type(disks[di].parts[pi].mbr_type));
+}
+
+static int wiz_rescan(int *disk_idx, int *part_idx)
+{
+    char disksave[32];
+    char partsave[32];
+    int i;
+    int j;
+
+    disksave[0] = '\0';
+    partsave[0] = '\0';
+    if (*disk_idx >= 0 && *disk_idx < disk_count)
+        snprintf(disksave, sizeof(disksave), "%s",
+                 disks[*disk_idx].devpath);
+    if (*disk_idx >= 0 && *disk_idx < disk_count &&
+        *part_idx >= 0 && *part_idx < disks[*disk_idx].part_count)
+        snprintf(partsave, sizeof(partsave), "%s",
+                 disks[*disk_idx].parts[*part_idx].devpath);
+
+    if (inst_enumerate_disks() <= 0) {
+        *disk_idx = -1;
+        *part_idx = -1;
+        return 0;
+    }
+    inst_scan_disks();
+
+    *disk_idx = -1;
+    *part_idx = -1;
+    for (i = 0; i < disk_count; i++) {
+        if (disksave[0] && strcmp(disks[i].devpath, disksave) == 0) {
+            *disk_idx = i;
+            break;
+        }
+    }
+    if (*disk_idx >= 0 && partsave[0]) {
+        for (j = 0; j < disks[*disk_idx].part_count; j++) {
+            if (strcmp(disks[*disk_idx].parts[j].devpath, partsave) == 0) {
+                *part_idx = j;
+                break;
+            }
+        }
+    }
+    return disk_count;
+}
+
+static void wiz_side_row(int y, int x, int w, int i, const char **names,
+                         char status[][24], int cur, int cursor, int focused,
+                         const int *done, const int *locked);
+static void wiz_content_row(int y, int x, int w, char **labels,
+                            const int *checks, int idx, int count, int sel,
+                            int focused);
+static void wiz_draw_sidebar(int y, int x, int h, int w, const char **names,
+                             char status[][24], int count, int cur, int cursor,
+                             int focused, const int *done, const int *locked,
+                             const char *title)
+{
+    int inner;
+    int i;
+
+    lebui_draw_box_shadow(y, x, h, w, title);
+    inner = h - 2;
+    for (i = 0; i < inner && i < count; i++)
+        wiz_side_row(y + 1 + i, x, w, i, names, status, cur, cursor, focused,
+                     done, locked);
+    for (; i < inner; i++) {
+        lebui_goto(y + 1 + i, x + 1);
+        printf("%s%-*s", LEBUI_CLR_MENU, w - 2, "");
+    }
+    printf("%s", LEBUI_CLR_NORMAL);
+}
+
+static void wiz_draw_rows(int y, int x, int h, int w, char **labels,
+                          const int *checks, int count, int sel, int scroll,
+                          int focused)
+{
+    int i;
+
+    for (i = 0; i < h; i++)
+        wiz_content_row(y + i, x, w, labels, checks, scroll + i, count, sel,
+                        focused);
+    printf("%s", LEBUI_CLR_NORMAL);
+}
+
+static int wiz_draw_info(int y, int x, int w, const char **lines, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        lebui_goto(y + i, x + 1);
+        printf("%s  %-*.*s", LEBUI_CLR_MENU, w - 4, w - 4, lines[i]);
+    }
+    printf("%s", LEBUI_CLR_NORMAL);
+    return y + n;
+}
+
+typedef struct {
+    int cur;
+    int focus;
+    int side;
+    int sel;
+    int scr;
+} wiz_snap_t;
+
+static int wiz_stained;
+
+static void wiz_panes(int rows, int cols, int *sy, int *sx, int *sh, int *sw,
+                      int *cy, int *cx, int *ch, int *cw)
+{
+    int side_w;
+
+    side_w = cols - 48;
+    if (side_w > 32)
+        side_w = 32;
+    if (side_w < 18)
+        side_w = 18;
+    *sy = 3;
+    *sx = 2;
+    *sh = rows - 4;
+    if (*sh < 12)
+        *sh = 12;
+    *sw = side_w;
+    *cy = 3;
+    *cx = *sx + *sw + 1;
+    *ch = *sh;
+    *cw = cols - *cx - 1;
+    if (*cw < 24)
+        *cw = 24;
+}
+
+static void wiz_side_row(int y, int x, int w, int i, const char **names,
+                         char status[][24], int cur, int cursor, int focused,
+                         const int *done, const int *locked)
+{
+    char line[64];
+    char mark;
+    const char *color;
+
+    if (locked[i])
+        mark = '-';
+    else if (i == cur)
+        mark = '>';
+    else if (done[i])
+        mark = '*';
+    else
+        mark = ' ';
+    if (focused == WIZ_FOCUS_STEPS && i == cursor)
+        color = LEBUI_CLR_SELECT;
+    else if (i == cur)
+        color = LEBUI_CLR_SELECT;
+    else if (i == cursor)
+        color = LEBUI_CLR_DIM_CLR;
+    else if (locked[i])
+        color = LEBUI_CLR_DIM_CLR;
+    else
+        color = LEBUI_CLR_MENU;
+    if (status[i][0])
+        snprintf(line, sizeof(line), "%c %-13s %s", mark, names[i], status[i]);
+    else
+        snprintf(line, sizeof(line), "%c %s", mark, names[i]);
+    lebui_goto(y, x + 1);
+    printf("%s  %-*.*s%s", color, w - 4, w - 4, line, LEBUI_CLR_NORMAL);
+}
+
+static void wiz_content_row(int y, int x, int w, char **labels,
+                            const int *checks, int idx, int count, int sel,
+                            int focused)
+{
+    int maxw;
+
+    maxw = w - 2;
+    if (maxw < 4)
+        maxw = 4;
+    lebui_goto(y, x + 1);
+    if (idx >= count) {
+        printf("%s%-*s%s", LEBUI_CLR_MENU, maxw, "", LEBUI_CLR_NORMAL);
+        return;
+    }
+    if (idx == sel && focused == WIZ_FOCUS_CONTENT)
+        printf("%s", LEBUI_CLR_SELECT);
+    else if (idx == sel)
+        printf("%s", LEBUI_CLR_DIM_CLR);
+    else
+        printf("%s", LEBUI_CLR_MENU);
+    if (checks) {
+        if (checks[idx] < 0)
+            printf("  (*) %-*.*s", maxw - 6, maxw - 6, labels[idx]);
+        else
+            printf("  [%c] %-*.*s", checks[idx] ? 'x' : ' ', maxw - 6,
+                   maxw - 6, labels[idx]);
+    } else {
+        printf("  %-*.*s", maxw - 2, maxw - 2, labels[idx]);
+    }
+    printf("%s", LEBUI_CLR_NORMAL);
+}
+
+static void wiz_dlg_geo(int *bx, int *by, int *bw, int *bh)
+{
+    int rows = term_sz.rows;
+    int cols = term_sz.cols;
+    int sy, sx, sh, sw, cy, cx, ch, cw;
+
+    wiz_panes(rows, cols, &sy, &sx, &sh, &sw, &cy, &cx, &ch, &cw);
+    *bw = cw - 8;
+    if (*bw < 30)
+        *bw = 30;
+    if (*bw > 52)
+        *bw = 52;
+    if (*bw > cw - 4)
+        *bw = cw - 4;
+    *bh = 9;
+    *bx = cx + (cw - *bw) / 2;
+    if (*bx < cx + 1)
+        *bx = cx + 1;
+    *by = cy + (ch - *bh) / 2;
+    if (*by < cy + 1)
+        *by = cy + 1;
+}
+
+static void wiz_dlg_frame(const char *title, int *bx, int *by, int *bw,
+                          int *bh, const char *msg)
+{
+    const char *nl = strchr(msg, '\n');
+    int l1 = nl ? (int)(nl - msg) : (int)strlen(msg);
+    int l2 = nl ? (int)strlen(nl + 1) : 0;
+    int r;
+
+    wiz_dlg_geo(bx, by, bw, bh);
+    lebui_draw_box_shadow(*by, *bx, *bh, *bw, title);
+    for (r = 1; r < *bh - 1; r++) {
+        lebui_goto(*by + r, *bx + 1);
+        printf("%s%-*s%s", LEBUI_CLR_MENU, *bw - 2, "", LEBUI_CLR_NORMAL);
+    }
+    lebui_goto(*by + 2, *bx + 2);
+    printf("%s%.*s%s", LEBUI_CLR_MENU, *bw - 4 > l1 ? l1 : *bw - 4, msg,
+           LEBUI_CLR_NORMAL);
+    if (nl) {
+        lebui_goto(*by + 3, *bx + 2);
+        printf("%s%.*s%s", LEBUI_CLR_MENU, *bw - 4 > l2 ? l2 : *bw - 4,
+               nl + 1, LEBUI_CLR_NORMAL);
+    }
+    lebui_flush();
+}
+
+static int wiz_confirm(const char *title, const char *msg)
+{
+    int bx, by, bw, bh;
+    int sel = 0;
+    int key;
+
+    wiz_stained = 1;
+    wiz_dlg_frame(title, &bx, &by, &bw, &bh, msg);
+    for (;;) {
+        lebui_goto(by + 5, bx + bw / 2 - 9);
+        if (sel == 0)
+            printf("%s< Yes  >%s  %s[  No  ]%s", LEBUI_CLR_BTN_SEL,
+                   LEBUI_CLR_MENU, LEBUI_CLR_BTN, LEBUI_CLR_NORMAL);
+        else
+            printf("%s[ Yes  ]%s  %s<  No  >%s", LEBUI_CLR_BTN,
+                   LEBUI_CLR_MENU, LEBUI_CLR_BTN_SEL, LEBUI_CLR_NORMAL);
+        lebui_flush();
+        key = lebui_read_key();
+        if (key == LEBUI_KEY_TAB || key == LEBUI_KEY_LEFT ||
+            key == LEBUI_KEY_RIGHT)
+            sel = !sel;
+        else if (key == LEBUI_KEY_ENTER)
+            return (sel == 0) ? 1 : 0;
+        else if (key == LEBUI_KEY_ESC)
+            return 0;
+        else if (key == 'y' || key == 'Y')
+            return 1;
+        else if (key == 'n' || key == 'N')
+            return 0;
+    }
+}
+
+static void wiz_msgbox(const char *title, const char *msg)
+{
+    int bx, by, bw, bh;
+    int key;
+
+    wiz_stained = 1;
+    wiz_dlg_frame(title, &bx, &by, &bw, &bh, msg);
+    lebui_goto(by + 5, bx + bw / 2 - 4);
+    printf("%s< OK >%s", LEBUI_CLR_BTN_SEL, LEBUI_CLR_NORMAL);
+    lebui_flush();
+    for (;;) {
+        key = lebui_read_key();
+        if (key == LEBUI_KEY_ENTER || key == LEBUI_KEY_ESC)
+            return;
+    }
+}
+
+static int wiz_input(const char *title, const char *prompt, char *buf,
+                     int maxlen, int hidden)
+{
+    int bw, bh, bx, by, fw;
+    int len = 0;
+    int cur = 0;
+    int key;
+    int i;
+    int start;
+    int visible;
+    int r;
+
+    wiz_stained = 1;
+    buf[0] = '\0';
+    wiz_dlg_geo(&bx, &by, &bw, &bh);
+    fw = bw - 6;
+    if (fw < 1)
+        return -1;
+    lebui_draw_box_shadow(by, bx, bh, bw, title);
+    for (r = 1; r < bh - 1; r++) {
+        lebui_goto(by + r, bx + 1);
+        printf("%s%-*s%s", LEBUI_CLR_MENU, bw - 2, "", LEBUI_CLR_NORMAL);
+    }
+    lebui_goto(by + 2, bx + 2);
+    printf("%s%.*s%s", LEBUI_CLR_MENU, bw - 4, prompt, LEBUI_CLR_NORMAL);
+    lebui_goto(by + 6, bx + bw / 2 - 4);
+    printf("%s< OK >%s", LEBUI_CLR_BTN, LEBUI_CLR_NORMAL);
+    lebui_flush();
+    for (;;) {
+        start = 0;
+        if (cur >= fw)
+            start = cur - fw + 1;
+        visible = len - start;
+        if (visible > fw)
+            visible = fw;
+        lebui_goto(by + 4, bx + 3);
+        printf("%s", LEBUI_CLR_INPUT);
+        if (hidden) {
+            for (i = 0; i < visible; i++)
+                putchar('*');
+        } else {
+            for (i = 0; i < visible; i++)
+                putchar(buf[start + i]);
+        }
+        for (i = visible; i < fw; i++)
+            putchar(' ');
+        printf("%s", LEBUI_CLR_NORMAL);
+        lebui_goto(by + 4, bx + 3 + cur - start);
+        lebui_show_cursor();
+        lebui_flush();
+        key = lebui_read_key();
+        lebui_hide_cursor();
+        if (key == LEBUI_KEY_ENTER) {
+            buf[len] = '\0';
+            return len;
+        } else if (key == LEBUI_KEY_ESC) {
+            return -1;
+        } else if (key == LEBUI_KEY_LEFT && cur > 0) {
+            cur--;
+        } else if (key == LEBUI_KEY_RIGHT && cur < len) {
+            cur++;
+        } else if (key == LEBUI_KEY_HOME) {
+            cur = 0;
+        } else if (key == LEBUI_KEY_END) {
+            cur = len;
+        } else if (key == LEBUI_KEY_BKSP && cur > 0) {
+            memmove(&buf[cur - 1], &buf[cur], len - cur + 1);
+            len--;
+            cur--;
+        } else if (key == LEBUI_KEY_DELETE && cur < len) {
+            memmove(&buf[cur], &buf[cur + 1], len - cur);
+            len--;
+        } else if (key >= 32 && key < 127 && len < maxlen - 1) {
+            memmove(&buf[cur + 1], &buf[cur], len - cur + 1);
+            buf[cur] = (char)key;
+            len++;
+            cur++;
+        }
+        buf[len] = '\0';
+    }
+}
+
+static int wiz_rootpw(void)
+{
+    char pw1[64];
+    char pw2[64];
 
     for (;;) {
-        attach_tabbar(0, term_sz.cols);
-
-        for (i = 0; i < STEP_COUNT; i++) {
-            if (i == STEP_INSTALL) {
-                if (status[STEP_DISK] == STEP_DONE && status[STEP_PART] == STEP_DONE)
-                    snprintf(labels[i], sizeof(labels[i]), "  [>] %s", step_names[i]);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (need disk & partition)", step_names[i]);
-            } else if (status[i] == STEP_DONE) {
-                if (i == STEP_DISK)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], disks[disk_idx].devpath);
-                else if (i == STEP_PART)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], disks[disk_idx].parts[part_idx].devpath);
-                else if (i == STEP_FORMAT)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], do_format ? "ext4" : "No");
-                else if (i == STEP_PKGS) {
-                    int npkg;
-                    npkg = pkg_selected[PKG_C_HDR] + pkg_selected[PKG_C_LIB];
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (core +%d)", step_names[i], npkg);
-                } else if (i == STEP_USER) {
-                    snprintf(ubuf, sizeof(ubuf), "%d user(s)", user_count);
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], ubuf);
-                } else if (i == STEP_TZ)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", step_names[i], timezones[tz_idx]);
-                else if (i == STEP_ROOTPW)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (set)", step_names[i]);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s", step_names[i]);
-            } else {
-                if (i == STEP_FORMAT || i == STEP_USER || i == STEP_TZ || i == STEP_ROOTPW || i == STEP_PKGS)
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (optional)", step_names[i]);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", step_names[i]);
-            }
-            items[i] = labels[i];
+        if (wiz_input("Root Password", "Enter root password (empty=none):",
+                      pw1, sizeof(pw1), 1) < 0)
+            return -1;
+        if (pw1[0] == '\0') {
+            root_password[0] = '\0';
+            return 0;
         }
-
-        sel = lebui_menu_auto("Installation Steps", (const char **)items, STEP_COUNT,
-                        " \x18\x19 Move  <Enter> Select  <Esc> Quit", term_sz.rows, term_sz.cols);
-
-        if (sel == LEBUI_KEY_TAB) return LEBUI_KEY_TAB;
-
-        if (sel < 0) {
-            if (lebui_confirm_auto("Quit", "Exit the installer?", term_sz.rows, term_sz.cols)) {
-                return -1;
-            }
+        if (wiz_input("Root Password", "Confirm root password:", pw2,
+                      sizeof(pw2), 1) < 0)
+            return -1;
+        if (strcmp(pw1, pw2) != 0) {
+            wiz_msgbox("Error", "Passwords do not match.");
             continue;
         }
+        strncpy(root_password, pw1, sizeof(root_password) - 1);
+        root_password[sizeof(root_password) - 1] = '\0';
+        memset(pw1, 0, sizeof(pw1));
+        memset(pw2, 0, sizeof(pw2));
+        return 0;
+    }
+}
 
-        switch (sel) {
-        case STEP_DISK:
-            ret = step_disk(&disk_idx);
-            if (ret == 0) {
-                status[STEP_DISK] = STEP_DONE;
-                status[STEP_PART] = STEP_NONE;
-                part_idx = -1;
+static int wiz_add_user(void)
+{
+    char password2[64];
+    int i;
+
+    if (inst_reserve_users(user_count + 1) < 0) {
+        wiz_msgbox("Error", "Could not allocate user entry.");
+        return 0;
+    }
+    users[user_count].username[0] = '\0';
+    users[user_count].password[0] = '\0';
+    if (wiz_input("New User", "Enter username:", users[user_count].username,
+                  sizeof(users[user_count].username), 0) < 0)
+        return 0;
+    if (users[user_count].username[0] == '\0') {
+        wiz_msgbox("Error", "Username cannot be empty.");
+        return 0;
+    }
+    for (i = 0; i < user_count; i++) {
+        if (strcmp(users[i].username, users[user_count].username) == 0) {
+            wiz_msgbox("Error", "That username already exists.");
+            return 0;
+        }
+    }
+    for (;;) {
+        if (wiz_input("New User", "Enter password (empty=none):",
+                      users[user_count].password,
+                      sizeof(users[user_count].password), 1) < 0)
+            return 0;
+        if (users[user_count].password[0] == '\0') {
+            user_count++;
+            return 1;
+        }
+        if (wiz_input("New User", "Confirm password:", password2,
+                       sizeof(password2), 1) < 0)
+            break;
+        if (strcmp(users[user_count].password, password2) != 0) {
+            wiz_msgbox("Error", "Passwords do not match.");
+            continue;
+        }
+        memset(password2, 0, sizeof(password2));
+        user_count++;
+        return 1;
+    }
+    memset(users[user_count].password, 0,
+           sizeof(users[user_count].password));
+    memset(password2, 0, sizeof(password2));
+    return 0;
+}
+
+static int wiz_esp_part(int di, int n)
+{
+    int k;
+    int c = 0;
+
+    for (k = 0; k < disks[di].part_count; k++) {
+        if (disks[di].parts[k].mbr_type != 0xEF)
+            continue;
+        if (c == n)
+            return k;
+        c++;
+    }
+    return -1;
+}
+
+static int wiz_esp_count(int di)
+{
+    int k;
+    int c = 0;
+
+    for (k = 0; k < disks[di].part_count; k++) {
+        if (disks[di].parts[k].mbr_type == 0xEF)
+            c++;
+    }
+    return c;
+}
+
+static int wiz_boot_ready(int di)
+{
+    int k;
+
+    if (di < 0 || di >= disk_count)
+        return 0;
+    if (!inst_is_gpt(disks[di].devpath) && boot_mode == BOOT_BIOS)
+        return 1;
+    if (boot_esp[0] != '\0') {
+        for (k = 0; k < disks[di].part_count; k++) {
+            if (strcmp(disks[di].parts[k].devpath, boot_esp) == 0 &&
+                disks[di].parts[k].mbr_type == 0xEF)
+                return 1;
+        }
+        return 0;
+    }
+    return wiz_esp_count(di) > 0;
+}
+
+static void wiz_boot_short(int di, int gpt, char *buf, int bufsz)
+{
+    if (di < 0 || di >= disk_count) {
+        buf[0] = '\0';
+        return;
+    }
+    if (!gpt && boot_mode == BOOT_BIOS) {
+        snprintf(buf, bufsz, "BIOS");
+        return;
+    }
+    if (boot_esp[0] != '\0' && strncmp(boot_esp, "/dev/", 5) == 0)
+        snprintf(buf, bufsz, "%s %s", boot_mode == BOOT_BOTH ? "B+U" : "UEFI",
+                 boot_esp + 5);
+    else if (boot_esp[0] != '\0')
+        snprintf(buf, bufsz, "%s %s", boot_mode == BOOT_BOTH ? "B+U" : "UEFI",
+                 boot_esp);
+    else
+        snprintf(buf, bufsz, "UEFI auto");
+}
+
+static void wiz_boot_summary(int di, int gpt, char *buf, int bufsz)
+{
+    if (di < 0 || di >= disk_count) {
+        snprintf(buf, bufsz, "-");
+        return;
+    }
+    if (gpt || boot_mode == BOOT_UEFI)
+        snprintf(buf, bufsz, "UEFI via %s", boot_esp[0] ? boot_esp : "auto ESP");
+    else if (boot_mode == BOOT_BOTH)
+        snprintf(buf, bufsz, "BIOS+UEFI (%s)",
+                 boot_esp[0] ? boot_esp : "auto ESP");
+    else
+        snprintf(buf, bufsz, "BIOS (MBR)");
+}
+
+static void wiz_frame_empty(int y, int x, int h, int w, const char *title)
+{
+    int i;
+    int r;
+    int tw;
+
+    if (h < 2 || w < 2)
+        return;
+    lebui_goto(y, x);
+    printf("%s+", LEBUI_CLR_BORDER);
+    for (i = 0; i < w - 2; i++)
+        putchar('-');
+    putchar('+');
+    if (title && w > 4) {
+        tw = (int)strlen(title);
+        if (tw > w - 4)
+            tw = w - 4;
+        lebui_goto(y, x + (w - tw - 2) / 2);
+        printf("%s %.*s ", LEBUI_CLR_TITLE, tw, title);
+    }
+    for (r = 1; r < h - 1; r++) {
+        lebui_goto(y + r, x);
+        printf("%s|", LEBUI_CLR_BORDER);
+        lebui_goto(y + r, x + w - 1);
+        printf("%s|", LEBUI_CLR_BORDER);
+    }
+    lebui_goto(y + h - 1, x);
+    printf("%s+", LEBUI_CLR_BORDER);
+    for (i = 0; i < w - 2; i++)
+        putchar('-');
+    putchar('+');
+    for (r = 1; r < h; r++) {
+        lebui_goto(y + r, x + w);
+        printf("%s ", LEBUI_CLR_SHADOW);
+    }
+    lebui_goto(y + h, x + 1);
+    printf("%s", LEBUI_CLR_SHADOW);
+    for (i = 0; i < w; i++)
+        putchar(' ');
+    printf("%s", LEBUI_CLR_NORMAL);
+}
+
+static int run_install_page(void)
+{
+    int disk_idx = -1;
+    int part_idx = -1;
+    int tz_idx = 12;
+    int boot_done = 0;
+    int boot_sub = 0;
+    int disk_gpt = 0;
+    int wel_done = 0;
+    int pkgs_done = 0;
+    int root_done = 0;
+    int tz_done = 0;
+    int cur = INS_WELCOME;
+    int focus = WIZ_FOCUS_CONTENT;
+    int side_cur = INS_WELCOME;
+    int csel[INS_COUNT] = { 0 };
+    int cscr[INS_COUNT] = { 0 };
+    int tz_count = 0;
+
+    while (timezones[tz_count])
+        tz_count++;
+    if (tz_idx >= tz_count)
+        tz_idx = 0;
+    boot_mode = BOOT_BIOS;
+    boot_esp[0] = '\0';
+    disk_gpt = 0;
+
+    wiz_snap_t snap;
+    int need_full = 1;
+    int need_dirty = 0;
+    int full;
+    int stepch;
+
+    snap.cur = -1;
+    snap.focus = -1;
+    snap.side = -1;
+    snap.sel = -1;
+    snap.scr = -1;
+
+    for (;;) {
+        int rows = term_sz.rows;
+        int cols = term_sz.cols;
+        int locked[INS_COUNT];
+        int done[INS_COUNT];
+        char status[INS_COUNT][24];
+        int disk_ok;
+        int part_ok;
+        int i;
+        int sy, sx, sh, sw, cy, cx, ch, cw;
+        int ix, iw, iy, list_h, row;
+        int nitems = 0;
+        int infon = 0;
+        int need_free = 0;
+        char **draw_items = NULL;
+        char (*draw_labels)[64] = NULL;
+        int *draw_checks = NULL;
+        const char *hdrs[2];
+        char hdrbuf[2][64];
+        int hdr_n = 0;
+        char ctitle[48];
+        char smbuf[8][64];
+        char *smitems[8];
+        char sum[12][64];
+        const char *sums[12];
+        int key;
+        int pchk[PKG_COUNT];
+        int bchk[3];
+        int echk[16];
+
+        disk_ok = disk_idx >= 0 && disk_idx < disk_count;
+        part_ok = disk_ok && part_idx >= 0 &&
+                  part_idx < disks[disk_idx].part_count;
+
+        for (i = 0; i < INS_COUNT; i++) {
+            locked[i] = 0;
+            done[i] = 0;
+            status[i][0] = '\0';
+        }
+        locked[INS_PART] = !disk_ok;
+        locked[INS_BOOT] = !disk_ok;
+        locked[INS_PKGS] = !part_ok;
+        locked[INS_USER] = !part_ok;
+        locked[INS_ROOTPW] = !part_ok;
+        locked[INS_TZ] = !part_ok;
+        locked[INS_SUMMARY] = !part_ok;
+        locked[INS_INSTALL] = !part_ok;
+        done[INS_WELCOME] = wel_done;
+        done[INS_DISK] = disk_ok;
+        done[INS_PART] = part_ok;
+        done[INS_BOOT] = boot_done;
+        done[INS_PKGS] = pkgs_done;
+        done[INS_USER] = user_count > 0;
+        done[INS_ROOTPW] = root_done;
+        done[INS_TZ] = tz_done;
+
+        if (disk_ok)
+            snprintf(status[INS_DISK], sizeof(status[INS_DISK]), "%s",
+                     disks[disk_idx].devpath);
+        if (part_ok)
+            snprintf(status[INS_PART], sizeof(status[INS_PART]), "%s",
+                     disks[disk_idx].parts[part_idx].devpath);
+        if (disk_ok)
+            wiz_boot_short(disk_idx, disk_gpt, status[INS_BOOT],
+                           sizeof(status[INS_BOOT]));
+        snprintf(status[INS_PKGS], sizeof(status[INS_PKGS]), "core+%d",
+                 pkg_selected[PKG_C_HDR] + pkg_selected[PKG_C_LIB]);
+        if (user_count > 0)
+            snprintf(status[INS_USER], sizeof(status[INS_USER]), "%d",
+                     user_count);
+        else
+            snprintf(status[INS_USER], sizeof(status[INS_USER]), "none");
+        if (root_done)
+            snprintf(status[INS_ROOTPW], sizeof(status[INS_ROOTPW]), "%s",
+                     root_password[0] ? "set" : "none");
+        snprintf(status[INS_TZ], sizeof(status[INS_TZ]), "%s",
+                 timezones[tz_idx]);
+
+        wiz_panes(rows, cols, &sy, &sx, &sh, &sw, &cy, &cx, &ch, &cw);
+
+        full = need_full;
+        stepch = (!full && snap.cur != cur);
+        need_full = 0;
+
+        ix = cx + 2;
+        iw = cw - 4;
+        if (iw < 10)
+            iw = 10;
+        iy = cy + 2;
+
+        if (full) {
+            attach_tabbar(0, cols);
+            lebui_draw_screen(NULL, WIZ_HELP, rows, cols);
+        }
+        if (full || stepch) {
+            if (full)
+                wiz_draw_sidebar(sy, sx, sh, sw, ins_wiz_names, status, INS_COUNT,
+                                 cur, side_cur, focus, done, locked, "Install");
+            else {
+                for (i = 0; i < INS_COUNT; i++)
+                    wiz_side_row(sy + 1 + i, sx, sw, i, ins_wiz_names, status,
+                                 cur, side_cur, focus, done, locked);
+                printf("%s", LEBUI_CLR_NORMAL);
             }
-            break;
-
-        case STEP_PART:
-            if (status[STEP_DISK] != STEP_DONE) {
-                lebui_msgbox_auto("Error", "Select a disk first.", term_sz.rows, term_sz.cols);
-                break;
-            }
-            ret = step_partition(disk_idx, &part_idx);
-            if (ret == 0)
-                status[STEP_PART] = STEP_DONE;
-            break;
-
-        case STEP_FORMAT:
-            ret = step_format(&do_format);
-            if (ret == 0)
-                status[STEP_FORMAT] = STEP_DONE;
-            break;
-
-        case STEP_PKGS:
-            ret = step_packages();
-            if (ret == 0)
-                status[STEP_PKGS] = STEP_DONE;
-            break;
-
-        case STEP_USER:
-            step_user_setup();
-            if (user_count > 0)
-                status[STEP_USER] = STEP_DONE;
+            snprintf(ctitle, sizeof(ctitle), "Step %d/%d: %s", cur + 1,
+                     INS_COUNT, ins_wiz_names[cur]);
+            if (full)
+                lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
             else
-                status[STEP_USER] = STEP_NONE;
-            break;
+                wiz_frame_empty(cy, cx, ch, cw, ctitle);
+        }
 
-        case STEP_ROOTPW:
-            ret = step_rootpw();
-            if (ret == 0)
-                status[STEP_ROOTPW] = STEP_DONE;
+        switch (cur) {
+        case INS_WELCOME: {
+            static const char *wlines[] = {
+                "Welcome to the Lebirun installer.",
+                "",
+                "This wizard guides you through disk",
+                "selection, packages, users and",
+                "timezone, then installs the system.",
+                "",
+                "Pick a step on the left, or press",
+                "Next to continue."
+            };
+            for (i = 0; i < 8; i++) {
+                snprintf(sum[i], sizeof(sum[i]), "%s", wlines[i]);
+                sums[i] = sum[i];
+            }
+            infon = 8;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Continue");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
             break;
+        }
+        case INS_DISK: {
+            int k;
 
-        case STEP_TZ:
-            ret = step_timezone(&tz_idx);
-            if (ret == 0)
-                status[STEP_TZ] = STEP_DONE;
-            break;
-
-        case STEP_INSTALL:
-            if (status[STEP_DISK] != STEP_DONE || status[STEP_PART] != STEP_DONE) {
-                lebui_msgbox_auto("Error", "Select a disk and partition first.", term_sz.rows, term_sz.cols);
+            draw_labels = malloc(((size_t)disk_count + 1) *
+                                   sizeof(*draw_labels));
+            draw_items = malloc(((size_t)disk_count + 1) *
+                                sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
                 break;
             }
-            if (!lebui_confirm_auto("Confirm", "Proceed with installation?", term_sz.rows, term_sz.cols))
+            need_free = 1;
+            for (k = 0; k < disk_count; k++) {
+                wiz_disk_label(k, draw_labels[k],
+                               sizeof(draw_labels[k]));
+                draw_items[k] = draw_labels[k];
+            }
+            snprintf(draw_labels[disk_count],
+                     sizeof(draw_labels[disk_count]), "[ Rescan disks ]");
+            draw_items[disk_count] = draw_labels[disk_count];
+            nitems = disk_count + 1;
+            break;
+        }
+        case INS_PART: {
+            int k;
+
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]), "Disk: %s",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            if (!disk_ok) {
+                nitems = 0;
                 break;
-            ret = step_do_install(disk_idx, part_idx, do_format, tz_idx);
-            if (ret == 0) {
-                for (i = 0; i < user_count; i++)
-                    memset(users[i].password, 0, sizeof(users[i].password));
-                memset(root_password, 0, sizeof(root_password));
-                return 0;
+            }
+            if (disks[disk_idx].part_count == 0) {
+                snprintf(smbuf[0], sizeof(smbuf[0]),
+                         "(no partitions - use ldiskutil)");
+                smitems[0] = smbuf[0];
+                draw_items = smitems;
+                nitems = 1;
+                break;
+            }
+            draw_labels = malloc((size_t)disks[disk_idx].part_count *
+                                 sizeof(*draw_labels));
+            draw_items = malloc((size_t)disks[disk_idx].part_count *
+                                sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
+                break;
+            }
+            need_free = 1;
+            for (k = 0; k < disks[disk_idx].part_count; k++) {
+                wiz_part_label(disk_idx, k, draw_labels[k],
+                               sizeof(draw_labels[k]));
+                draw_items[k] = draw_labels[k];
+            }
+            nitems = disks[disk_idx].part_count;
+            break;
+        }
+        case INS_BOOT: {
+            int k;
+            int nesp;
+            int gpt;
+
+            if (!disk_ok) {
+                nitems = 0;
+                break;
+            }
+            gpt = disk_gpt;
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]), "Table: %s",
+                     gpt ? "GPT" : "MBR");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            nesp = wiz_esp_count(disk_idx);
+            if (!gpt && boot_sub == 0) {
+                int n = 0;
+                snprintf(smbuf[n], sizeof(smbuf[n]),
+                         "BIOS boot (GRUB on disk)");
+                smitems[n] = smbuf[n];
+                bchk[n] = (boot_mode == BOOT_BIOS);
+                n++;
+                if (nesp > 0) {
+                    snprintf(smbuf[n], sizeof(smbuf[n]),
+                             "UEFI boot (from ESP)");
+                    smitems[n] = smbuf[n];
+                    bchk[n] = (boot_mode == BOOT_UEFI);
+                    n++;
+                    snprintf(smbuf[n], sizeof(smbuf[n]),
+                             "BIOS + UEFI (both)");
+                    smitems[n] = smbuf[n];
+                    bchk[n] = (boot_mode == BOOT_BOTH);
+                    n++;
+                }
+                draw_items = smitems;
+                draw_checks = bchk;
+                nitems = n;
+            } else {
+                if (nesp == 0) {
+                    snprintf(smbuf[0], sizeof(smbuf[0]),
+                             "(no ESP - create one with ldiskutil)");
+                    smitems[0] = smbuf[0];
+                    draw_items = smitems;
+                    nitems = 1;
+                } else {
+                    if (nesp > 16)
+                        nesp = 16;
+                    draw_labels = malloc((size_t)nesp * sizeof(*draw_labels));
+                    draw_items = malloc((size_t)nesp * sizeof(*draw_items));
+                    if (!draw_labels || !draw_items) {
+                        free(draw_labels);
+                        free(draw_items);
+                        draw_labels = NULL;
+                        draw_items = NULL;
+                        nitems = 0;
+                        break;
+                    }
+                    need_free = 1;
+                    for (k = 0; k < nesp; k++) {
+                        int pi = wiz_esp_part(disk_idx, k);
+                        wiz_part_label(disk_idx, pi, draw_labels[k],
+                                       sizeof(draw_labels[k]));
+                        draw_items[k] = draw_labels[k];
+                        if (boot_esp[0] != '\0')
+                            echk[k] = (strcmp(disks[disk_idx].parts[pi].devpath,
+                                              boot_esp) == 0);
+                        else
+                            echk[k] = (k == 0);
+                    }
+                    draw_checks = echk;
+                    nitems = nesp;
+                }
             }
             break;
+        }
+        case INS_PKGS: {
+            static const char *pnames[] = {
+                "Core system (required)",
+                "C development headers",
+                "C development libraries"
+            };
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]),
+                     "Space toggles, Enter confirms.");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            for (i = 0; i < PKG_COUNT; i++) {
+                snprintf(smbuf[i], sizeof(smbuf[i]), "%s", pnames[i]);
+                smitems[i] = smbuf[i];
+            }
+            draw_items = smitems;
+            pchk[0] = -1;
+            pchk[1] = pkg_selected[PKG_C_HDR];
+            pchk[2] = pkg_selected[PKG_C_LIB];
+            draw_checks = pchk;
+            nitems = PKG_COUNT;
+            break;
+        }
+        case INS_USER: {
+            int k;
+
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]), "Users: %d (optional)",
+                     user_count);
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            draw_labels = malloc(((size_t)user_count + 1) *
+                                 sizeof(*draw_labels));
+            draw_items = malloc(((size_t)user_count + 1) *
+                                sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
+                break;
+            }
+            need_free = 1;
+            for (k = 0; k < user_count; k++) {
+                snprintf(draw_labels[k], sizeof(draw_labels[k]), "%s",
+                         users[k].username);
+                draw_items[k] = draw_labels[k];
+            }
+            snprintf(draw_labels[user_count],
+                     sizeof(draw_labels[user_count]), "Add new user...");
+            draw_items[user_count] = draw_labels[user_count];
+            nitems = user_count + 1;
+            break;
+        }
+        case INS_ROOTPW:
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]), "Status: %s",
+                     root_password[0] ? "set" : "none (optional)");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            snprintf(smbuf[0], sizeof(smbuf[0]),
+                     "Set / change root password...");
+            snprintf(smbuf[1], sizeof(smbuf[1]),
+                     "Clear password (no password)");
+            smitems[0] = smbuf[0];
+            smitems[1] = smbuf[1];
+            draw_items = smitems;
+            nitems = 2;
+            break;
+        case INS_TZ: {
+            int k;
+
+            draw_labels = malloc((size_t)tz_count * sizeof(*draw_labels));
+            draw_items = malloc((size_t)tz_count * sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
+                break;
+            }
+            need_free = 1;
+            for (k = 0; k < tz_count; k++) {
+                snprintf(draw_labels[k], sizeof(draw_labels[k]), "%s%s",
+                         timezones[k], k == tz_idx ? "  (current)" : "");
+                draw_items[k] = draw_labels[k];
+            }
+            nitems = tz_count;
+            break;
+        }
+        case INS_SUMMARY: {
+            char ulist[64];
+            int ulen = 0;
+            int sn = 0;
+            int k;
+
+            ulist[0] = '\0';
+            if (user_count == 0) {
+                snprintf(ulist, sizeof(ulist), "(none)");
+            } else {
+                for (k = 0; k < user_count; k++) {
+                    int w = snprintf(ulist + ulen, sizeof(ulist) - ulen,
+                                     "%s%s", k ? ", " : "",
+                                     users[k].username);
+                    if (w < 0 || w >= (int)sizeof(ulist) - ulen)
+                        break;
+                    ulen += w;
+                }
+            }
+            snprintf(sum[sn], sizeof(sum[sn]), "Review your choices.");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), " ");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Disk:      %s",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Partition: %s",
+                     part_ok ? disks[disk_idx].parts[part_idx].devpath : "-");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Format:    ext4 (erases data)");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Packages:  core + %d extra",
+                     pkg_selected[PKG_C_HDR] + pkg_selected[PKG_C_LIB]);
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Users:     %s", ulist);
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Root:      %s",
+                     root_done ? (root_password[0] ? "set" : "none") : "none");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Timezone:  %s",
+                     timezones[tz_idx]);
+            sums[sn] = sum[sn];
+            sn++;
+            wiz_boot_summary(disk_idx, disk_gpt, hdrbuf[0], sizeof(hdrbuf[0]));
+            snprintf(sum[sn], sizeof(sum[sn]), "Boot:      %s", hdrbuf[0]);
+            sums[sn] = sum[sn];
+            sn++;
+            infon = sn;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Continue to Install");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
+            break;
+        }
+        case INS_INSTALL:
+            snprintf(sum[0], sizeof(sum[0]), "Ready to install Lebirun.");
+            sums[0] = sum[0];
+            snprintf(sum[1], sizeof(sum[1]), " ");
+            sums[1] = sum[1];
+            snprintf(sum[2], sizeof(sum[2]), "Target: %s on %s",
+                     part_ok ? disks[disk_idx].parts[part_idx].devpath : "-",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            sums[2] = sum[2];
+            snprintf(sum[3], sizeof(sum[3]), "Format:  ext4 (erases all data)");
+            sums[3] = sum[3];
+            wiz_boot_summary(disk_idx, disk_gpt, hdrbuf[0], sizeof(hdrbuf[0]));
+            snprintf(sum[4], sizeof(sum[4]), "Boot: %s", hdrbuf[0]);
+            sums[4] = sum[4];
+            snprintf(sum[5], sizeof(sum[5]), " ");
+            sums[5] = sum[5];
+            snprintf(sum[6], sizeof(sum[6]), "Select Start to begin.");
+            sums[6] = sum[6];
+            infon = 7;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Start installation");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
+            break;
+        default:
+            nitems = 0;
+            break;
+        }
+
+        row = iy;
+        if (full || stepch || need_dirty || wiz_stained) {
+            if (infon > 0)
+                row = wiz_draw_info(iy, ix, iw, sums, infon) + 1;
+            else if (hdr_n > 0)
+                row = wiz_draw_info(iy, ix, iw, hdrs, hdr_n) + 1;
+        } else {
+            if (infon > 0)
+                row = iy + infon + 1;
+            else if (hdr_n > 0)
+                row = iy + hdr_n + 1;
+        }
+        if (nitems <= 0) {
+            csel[cur] = 0;
+            cscr[cur] = 0;
+        } else {
+            if (csel[cur] >= nitems)
+                csel[cur] = nitems - 1;
+            if (csel[cur] < 0)
+                csel[cur] = 0;
+        }
+        list_h = cy + ch - 3 - row;
+        if (list_h < 1)
+            list_h = 1;
+        if (cscr[cur] > csel[cur])
+            cscr[cur] = csel[cur];
+        if (cscr[cur] < csel[cur] - list_h + 1)
+            cscr[cur] = csel[cur] - list_h + 1;
+        if (cscr[cur] < 0)
+            cscr[cur] = 0;
+        if (full || stepch || need_dirty || wiz_stained) {
+            if (!full && !stepch) {
+                lebui_goto(iy - 1, cx + 1);
+                printf("%s%-*s%s", LEBUI_CLR_MENU, cw - 4, "", LEBUI_CLR_NORMAL);
+            }
+            wiz_draw_rows(row, ix, list_h, iw, draw_items, draw_checks, nitems,
+                          csel[cur], cscr[cur], focus);
+            need_dirty = 0;
+            wiz_stained = 0;
+        } else if (snap.focus != focus) {
+            wiz_content_row(row + csel[cur] - cscr[cur], ix, iw, draw_items,
+                            draw_checks, csel[cur], nitems, csel[cur], focus);
+            wiz_content_row(row + snap.sel - snap.scr, ix, iw, draw_items,
+                            draw_checks, snap.sel, nitems, csel[cur], focus);
+            wiz_side_row(sy + 1 + snap.side, sx, sw, snap.side, ins_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + side_cur, sx, sw, side_cur, ins_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + cur, sx, sw, cur, ins_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            printf("%s", LEBUI_CLR_NORMAL);
+        } else if (focus == WIZ_FOCUS_CONTENT) {
+            if (snap.scr != cscr[cur]) {
+                wiz_draw_rows(row, ix, list_h, iw, draw_items, draw_checks,
+                              nitems, csel[cur], cscr[cur], focus);
+            } else {
+                wiz_content_row(row + snap.sel - cscr[cur], ix, iw, draw_items,
+                                draw_checks, snap.sel, nitems, csel[cur],
+                                focus);
+                wiz_content_row(row + csel[cur] - cscr[cur], ix, iw,
+                                draw_items, draw_checks, csel[cur], nitems,
+                                csel[cur], focus);
+                printf("%s", LEBUI_CLR_NORMAL);
+            }
+        } else {
+            wiz_side_row(sy + 1 + snap.side, sx, sw, snap.side, ins_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + side_cur, sx, sw, side_cur, ins_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            printf("%s", LEBUI_CLR_NORMAL);
+        }
+        if (full || stepch) {
+            lebui_goto(cy + ch - 2, cx + 2);
+            printf("%s b:Back n:Next  %d/%d  %d/%d%s", LEBUI_CLR_DIM_CLR,
+                   cur + 1, INS_COUNT, nitems ? csel[cur] + 1 : 0, nitems,
+                   LEBUI_CLR_NORMAL);
+        }
+        printf("%s", LEBUI_CLR_NORMAL);
+        lebui_flush();
+        if (need_free) {
+            free(draw_labels);
+            free(draw_items);
+        }
+
+        snap.cur = cur;
+        snap.focus = focus;
+        snap.side = side_cur;
+        snap.sel = csel[cur];
+        snap.scr = cscr[cur];
+
+        key = lebui_read_key();
+
+        if (key == LEBUI_KEY_TAB)
+            return LEBUI_KEY_TAB;
+        if (key == LEBUI_KEY_UP) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (side_cur > 0)
+                    side_cur--;
+            } else if (csel[cur] > 0) {
+                csel[cur]--;
+            }
+        } else if (key == LEBUI_KEY_DOWN) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (side_cur < INS_COUNT - 1)
+                    side_cur++;
+            } else if (csel[cur] < nitems - 1) {
+                csel[cur]++;
+            }
+        } else if (key == LEBUI_KEY_PGUP) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                side_cur -= list_h;
+                if (side_cur < 0)
+                    side_cur = 0;
+            } else {
+                csel[cur] -= list_h;
+                if (csel[cur] < 0)
+                    csel[cur] = 0;
+            }
+        } else if (key == LEBUI_KEY_PGDN) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                side_cur += list_h;
+                if (side_cur > INS_COUNT - 1)
+                    side_cur = INS_COUNT - 1;
+            } else {
+                csel[cur] += list_h;
+                if (csel[cur] > nitems - 1)
+                    csel[cur] = nitems - 1;
+            }
+        } else if (key == LEBUI_KEY_HOME) {
+            if (focus == WIZ_FOCUS_STEPS)
+                side_cur = 0;
+            else
+                csel[cur] = 0;
+        } else if (key == LEBUI_KEY_END) {
+            if (focus == WIZ_FOCUS_STEPS)
+                side_cur = INS_COUNT - 1;
+            else
+                csel[cur] = nitems - 1;
+        } else if (key == LEBUI_KEY_LEFT) {
+            if (focus == WIZ_FOCUS_CONTENT) {
+                focus = WIZ_FOCUS_STEPS;
+                side_cur = cur;
+            } else if (cur == INS_BOOT && boot_sub == 1) {
+                boot_sub = 0;
+                need_dirty = 1;
+            } else {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
+        } else if (key == LEBUI_KEY_RIGHT) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                focus = WIZ_FOCUS_CONTENT;
+            } else {
+                int j = cur + 1;
+                while (j < INS_COUNT && locked[j])
+                    j++;
+                if (j < INS_COUNT) {
+                    if (cur == INS_WELCOME)
+                        wel_done = 1;
+                    cur = j;
+                    focus = WIZ_FOCUS_CONTENT;
+                    side_cur = cur;
+                } else if (cur == INS_INSTALL && part_ok) {
+                    goto try_install;
+                } else if (cur == INS_DISK) {
+                    wiz_msgbox("Error", "Select a disk first.");
+                } else if (cur == INS_PART) {
+                    wiz_msgbox("Error", "Select a partition first.");
+                }
+            }
+        } else if (key == 'b' || key == 'B' || key == LEBUI_KEY_BKSP) {
+            if (cur == INS_BOOT && boot_sub == 1) {
+                boot_sub = 0;
+                need_dirty = 1;
+            } else if (cur > 0) {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
+        } else if (key == 'n' || key == 'N') {
+            int j = cur + 1;
+            while (j < INS_COUNT && locked[j])
+                j++;
+            if (j < INS_COUNT) {
+                if (cur == INS_WELCOME)
+                    wel_done = 1;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            } else if (cur == INS_INSTALL && part_ok) {
+                goto try_install;
+            } else if (cur == INS_DISK) {
+                wiz_msgbox("Error", "Select a disk first.");
+            } else if (cur == INS_PART) {
+                wiz_msgbox("Error", "Select a partition first.");
+            }
+        } else if (key == ' ') {
+            if (focus == WIZ_FOCUS_CONTENT && cur == INS_PKGS) {
+                int s = csel[cur];
+                if (s == PKG_C_HDR || s == PKG_C_LIB) {
+                    pkg_selected[s] = !pkg_selected[s];
+                    pkgs_done = 1;
+                    need_dirty = 1;
+                }
+            }
+        } else if ((key == 'r' || key == 'R') && cur == INS_DISK) {
+            focus = WIZ_FOCUS_CONTENT;
+            csel[cur] = nitems - 1;
+        } else if (key == LEBUI_KEY_ENTER) {
+            int ret;
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (locked[side_cur]) {
+                    wiz_msgbox("Locked",
+                                      "Finish the earlier steps first.");
+                } else {
+                    cur = side_cur;
+                    focus = WIZ_FOCUS_CONTENT;
+                }
+                continue;
+            }
+            switch (cur) {
+            case INS_WELCOME:
+                wel_done = 1;
+                cur = INS_DISK;
+                break;
+            case INS_DISK:
+                if (csel[cur] < disk_count) {
+                    if (csel[cur] != disk_idx) {
+                        disk_idx = csel[cur];
+                        part_idx = -1;
+                        csel[INS_PART] = 0;
+                        cscr[INS_PART] = 0;
+                        disk_gpt = inst_is_gpt(disks[disk_idx].devpath);
+                        boot_mode = disk_gpt ? BOOT_UEFI : BOOT_BIOS;
+                        boot_esp[0] = '\0';
+                        boot_done = 0;
+                        boot_sub = 0;
+                    }
+                    cur = INS_PART;
+                } else {
+                    char rmsg[64];
+                    int n = wiz_rescan(&disk_idx, &part_idx);
+                    if (disk_idx < 0) {
+                        cur = INS_DISK;
+                        boot_mode = BOOT_BIOS;
+                        disk_gpt = 0;
+                        boot_esp[0] = '\0';
+                        boot_done = 0;
+                        boot_sub = 0;
+                    } else if (part_idx < 0 && cur > INS_PART) {
+                        cur = INS_PART;
+                    }
+                    if (disk_idx >= 0 && boot_esp[0] != '\0') {
+                        int k;
+                        int kept = 0;
+                        for (k = 0; k < disks[disk_idx].part_count; k++) {
+                            if (strcmp(disks[disk_idx].parts[k].devpath, boot_esp) == 0 &&
+                                disks[disk_idx].parts[k].mbr_type == 0xEF)
+                                kept = 1;
+                        }
+                        if (!kept) {
+                            boot_esp[0] = '\0';
+                            boot_done = 0;
+                            if (cur > INS_BOOT)
+                                cur = INS_BOOT;
+                        }
+                    }
+                    if (disk_idx >= 0)
+                        disk_gpt = inst_is_gpt(disks[disk_idx].devpath);
+                    snprintf(rmsg, sizeof(rmsg), "Found %d disk(s).", n);
+                    wiz_msgbox("Rescan", rmsg);
+                }
+                break;
+            case INS_PART:
+                if (!disk_ok || disks[disk_idx].part_count == 0) {
+                    wiz_msgbox("No Partitions",
+                                      "No partitions here. Use ldiskutil.");
+                } else if (disks[disk_idx].parts[csel[cur]].mbr_type == 0xEF) {
+                    wiz_msgbox("Error",
+                                      "The ESP holds the bootloader.\nUse a Lebirun partition or make one first.");
+                } else {
+                    part_idx = csel[cur];
+                    cur = INS_BOOT;
+                }
+                break;
+            case INS_BOOT: {
+                int gpt = disk_ok && disk_gpt;
+                int nesp = disk_ok ? wiz_esp_count(disk_idx) : 0;
+                if (!disk_ok)
+                    break;
+                if (!gpt && boot_sub == 0) {
+                    if (csel[cur] == 0) {
+                        boot_mode = BOOT_BIOS;
+                        boot_esp[0] = '\0';
+                        boot_done = 1;
+                        cur = INS_PKGS;
+                    } else {
+                        boot_mode = (csel[cur] == 1) ? BOOT_UEFI : BOOT_BOTH;
+                        if (nesp == 1) {
+                            int pi = wiz_esp_part(disk_idx, 0);
+                            snprintf(boot_esp, sizeof(boot_esp), "%s",
+                                     disks[disk_idx].parts[pi].devpath);
+                            boot_done = 1;
+                            cur = INS_PKGS;
+                        } else {
+                            boot_sub = 1;
+                            need_dirty = 1;
+                        }
+                    }
+                } else {
+                    if (nesp == 0) {
+                        wiz_msgbox("No ESP",
+                                   "Create an ESP with ldiskutil first.\nThen rescan from the Disk step.");
+                    } else if (csel[cur] < nesp) {
+                        int pi = wiz_esp_part(disk_idx, csel[cur]);
+                        snprintf(boot_esp, sizeof(boot_esp), "%s",
+                                 disks[disk_idx].parts[pi].devpath);
+                        if (gpt)
+                            boot_mode = BOOT_UEFI;
+                        boot_done = 1;
+                        cur = INS_PKGS;
+                    }
+                }
+                break;
+            }
+            case INS_PKGS:
+                pkgs_done = 1;
+                cur = INS_USER;
+                break;
+            case INS_USER:
+                if (csel[cur] < user_count) {
+                    if (wiz_confirm("Remove User",
+                                           users[csel[cur]].username)) {
+                        int k;
+                        for (k = csel[cur]; k < user_count - 1; k++)
+                            users[k] = users[k + 1];
+                        user_count--;
+                        memset(&users[user_count], 0,
+                               sizeof(users[user_count]));
+                        if (csel[cur] >= user_count && csel[cur] > 0)
+                            csel[cur]--;
+                    }
+                } else {
+                    wiz_add_user();
+                }
+                break;
+            case INS_ROOTPW:
+                if (csel[cur] == 0) {
+                    if (wiz_rootpw() == 0)
+                        root_done = 1;
+                } else {
+                    if (wiz_confirm("Root Password",
+                                           "Clear the root password?")) {
+                        memset(root_password, 0, sizeof(root_password));
+                        root_done = 1;
+                    }
+                }
+                break;
+            case INS_TZ:
+                tz_idx = csel[cur];
+                tz_done = 1;
+                cur = INS_SUMMARY;
+                break;
+            case INS_SUMMARY:
+                cur = INS_INSTALL;
+                break;
+            case INS_INSTALL:
+            try_install:
+                if (!wiz_boot_ready(disk_idx)) {
+                    wiz_msgbox("Boot", "UEFI boot needs an ESP.\nCreate one with ldiskutil first.");
+                    break;
+                }
+                if (wiz_confirm("Confirm",
+                                       "Proceed with installation?")) {
+                    ret = step_do_install(disk_idx, part_idx, 1,
+                                          tz_idx);
+                    need_full = 1;
+                    if (ret == 0) {
+                        for (i = 0; i < user_count; i++)
+                            memset(users[i].password, 0,
+                                   sizeof(users[i].password));
+                        memset(root_password, 0, sizeof(root_password));
+                        return 0;
+                    }
+                }
+                break;
+            }
+            side_cur = cur;
+        } else if (key == LEBUI_KEY_ESC || key == 'q' || key == 'Q') {
+            if (cur == INS_BOOT && boot_sub == 1) {
+                boot_sub = 0;
+                need_dirty = 1;
+            } else if (cur == INS_WELCOME) {
+                if (wiz_confirm("Quit", "Exit the installer?"))
+                    return -1;
+            } else {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
         }
     }
 }
 
+static const char *uw_item_names[] = {
+    "Core system files (/bin, /lib, /sbin, /init)",
+    "Kernel and boot files (/boot)",
+    "Development headers (/usr/include)",
+    "Terminal database (/usr/share/terminfo)",
+    "Package database records",
+    "GRUB boot code and modules",
+    "GRUB configuration file"
+};
+
 static int run_update_page(void)
 {
-    static const char *upd_step_names[] = {
-        "Select Disk",
-        "Select Partition",
-        "Update Selection",
-        "Update"
-    };
-    int status[UPSTEP_COUNT];
-    char labels[UPSTEP_COUNT][56];
-    char *items[UPSTEP_COUNT];
-    int disk_idx;
-    int part_idx;
-    int sel;
-    int i;
-    int ret;
-    int selected_count;
+    int disk_idx = -1;
+    int part_idx = -1;
+    int wel_done = 0;
+    int cur = UW_WELCOME;
+    int focus = WIZ_FOCUS_CONTENT;
+    int side_cur = UW_WELCOME;
+    int csel[UW_COUNT] = { 0 };
+    int cscr[UW_COUNT] = { 0 };
 
-    for (i = 0; i < UPSTEP_COUNT; i++) status[i] = STEP_NONE;
-    disk_idx = -1;
-    part_idx = -1;
+    wiz_snap_t snap;
+    int need_full = 1;
+    int need_dirty = 0;
+    int full;
+    int stepch;
+
+    snap.cur = -1;
+    snap.focus = -1;
+    snap.side = -1;
+    snap.sel = -1;
+    snap.scr = -1;
 
     for (;;) {
-        attach_tabbar(1, term_sz.cols);
+        int rows = term_sz.rows;
+        int cols = term_sz.cols;
+        int locked[UW_COUNT];
+        int done[UW_COUNT];
+        char status[UW_COUNT][24];
+        int disk_ok;
+        int part_ok;
+        int i;
+        int sy, sx, sh, sw, cy, cx, ch, cw;
+        int ix, iw, iy, list_h, row;
+        int nitems = 0;
+        int infon = 0;
+        int need_free = 0;
+        char **draw_items = NULL;
+        char (*draw_labels)[64] = NULL;
+        int *draw_checks = NULL;
+        const char *hdrs[2];
+        char hdrbuf[2][64];
+        int hdr_n = 0;
+        char ctitle[48];
+        char smbuf[8][64];
+        char *smitems[8];
+        char sum[12][64];
+        const char *sums[12];
+        int key;
+        int uchk[UPD_COUNT];
+        int sel_count = 0;
 
-        selected_count = 0;
+        disk_ok = disk_idx >= 0 && disk_idx < disk_count;
+        part_ok = disk_ok && part_idx >= 0 &&
+                  part_idx < disks[disk_idx].part_count;
+
+        for (i = 0; i < UW_COUNT; i++) {
+            locked[i] = 0;
+            done[i] = 0;
+            status[i][0] = '\0';
+        }
+        locked[UW_PART] = !disk_ok;
+        locked[UW_ITEMS] = !part_ok;
+        locked[UW_SUMMARY] = !part_ok;
+        locked[UW_DO] = !part_ok;
+        done[UW_WELCOME] = wel_done;
+        done[UW_DISK] = disk_ok;
+        done[UW_PART] = part_ok;
+        done[UW_ITEMS] = 1;
+
         for (i = 0; i < UPD_COUNT; i++) {
-            if (upd_selected[i]) selected_count++;
+            if (upd_selected[i])
+                sel_count++;
         }
 
-        for (i = 0; i < UPSTEP_COUNT; i++) {
-            if (i == UPSTEP_DO) {
-                if (status[UPSTEP_DISK] == STEP_DONE && status[UPSTEP_PART] == STEP_DONE)
-                    snprintf(labels[i], sizeof(labels[i]), "  [>] %s", upd_step_names[i]);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (need disk & partition)", upd_step_names[i]);
-            } else if (status[i] == STEP_DONE) {
-                if (i == UPSTEP_DISK)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].devpath);
-                else if (i == UPSTEP_PART)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%s)", upd_step_names[i], disks[disk_idx].parts[part_idx].devpath);
-                else if (i == UPSTEP_ITEMS)
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s  (%d item(s))", upd_step_names[i], selected_count);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [*] %s", upd_step_names[i]);
-            } else {
-                if (i == UPSTEP_ITEMS)
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s  (%d default item(s))", upd_step_names[i], selected_count);
-                else
-                    snprintf(labels[i], sizeof(labels[i]), "  [ ] %s", upd_step_names[i]);
+        if (disk_ok)
+            snprintf(status[UW_DISK], sizeof(status[UW_DISK]), "%s",
+                     disks[disk_idx].devpath);
+        if (part_ok)
+            snprintf(status[UW_PART], sizeof(status[UW_PART]), "%s",
+                     disks[disk_idx].parts[part_idx].devpath);
+        snprintf(status[UW_ITEMS], sizeof(status[UW_ITEMS]), "%d item(s)",
+                 sel_count);
+
+        wiz_panes(rows, cols, &sy, &sx, &sh, &sw, &cy, &cx, &ch, &cw);
+
+        full = need_full;
+        stepch = (!full && snap.cur != cur);
+        need_full = 0;
+
+        ix = cx + 2;
+        iw = cw - 4;
+        if (iw < 10)
+            iw = 10;
+        iy = cy + 2;
+
+        if (full) {
+            attach_tabbar(1, cols);
+            lebui_draw_screen(NULL, WIZ_HELP, rows, cols);
+        }
+        if (full || stepch) {
+            if (full)
+                wiz_draw_sidebar(sy, sx, sh, sw, uw_wiz_names, status, UW_COUNT,
+                                 cur, side_cur, focus, done, locked, "Update");
+            else {
+                for (i = 0; i < UW_COUNT; i++)
+                    wiz_side_row(sy + 1 + i, sx, sw, i, uw_wiz_names, status,
+                                 cur, side_cur, focus, done, locked);
+                printf("%s", LEBUI_CLR_NORMAL);
             }
-            items[i] = labels[i];
+            snprintf(ctitle, sizeof(ctitle), "Step %d/%d: %s", cur + 1,
+                     UW_COUNT, uw_wiz_names[cur]);
+            if (full)
+                lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
+            else
+                wiz_frame_empty(cy, cx, ch, cw, ctitle);
         }
 
-        sel = lebui_menu_auto("Update Steps", (const char **)items, UPSTEP_COUNT,
-                        " \x18\x19 Move  <Enter> Select  <Tab> Switch  <Esc> Quit", term_sz.rows, term_sz.cols);
-
-        if (sel == LEBUI_KEY_TAB) return LEBUI_KEY_TAB;
-
-        if (sel < 0) {
-            if (lebui_confirm_auto("Quit", "Exit the installer?", term_sz.rows, term_sz.cols)) {
-                return -1;
+        switch (cur) {
+        case UW_WELCOME: {
+            static const char *wlines[] = {
+                "Welcome to the Lebirun updater.",
+                "",
+                "This wizard updates an installed",
+                "system. User data and local config",
+                "are preserved.",
+                "",
+                "Pick a step on the left, or press",
+                "Next to continue."
+            };
+            for (i = 0; i < 8; i++) {
+                snprintf(sum[i], sizeof(sum[i]), "%s", wlines[i]);
+                sums[i] = sum[i];
             }
-            continue;
-        }
-
-        switch (sel) {
-        case UPSTEP_DISK:
-            ret = step_disk(&disk_idx);
-            if (ret == 0) {
-                status[UPSTEP_DISK] = STEP_DONE;
-                status[UPSTEP_PART] = STEP_NONE;
-                part_idx = -1;
-            }
+            infon = 8;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Continue");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
             break;
+        }
+        case UW_DISK: {
+            int k;
 
-        case UPSTEP_PART:
-            if (status[UPSTEP_DISK] != STEP_DONE) {
-                lebui_msgbox_auto("Error", "Select a disk first.", term_sz.rows, term_sz.cols);
+            draw_labels = malloc(((size_t)disk_count + 1) *
+                                 sizeof(*draw_labels));
+            draw_items = malloc(((size_t)disk_count + 1) *
+                                sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
                 break;
             }
-            ret = step_partition(disk_idx, &part_idx);
-            if (ret == 0)
-                status[UPSTEP_PART] = STEP_DONE;
+            need_free = 1;
+            for (k = 0; k < disk_count; k++) {
+                wiz_disk_label(k, draw_labels[k],
+                               sizeof(draw_labels[k]));
+                draw_items[k] = draw_labels[k];
+            }
+            snprintf(draw_labels[disk_count],
+                     sizeof(draw_labels[disk_count]), "[ Rescan disks ]");
+            draw_items[disk_count] = draw_labels[disk_count];
+            nitems = disk_count + 1;
             break;
+        }
+        case UW_PART: {
+            int k;
 
-        case UPSTEP_ITEMS:
-            ret = step_update_items();
-            if (ret == 0)
-                status[UPSTEP_ITEMS] = STEP_DONE;
-            break;
-
-        case UPSTEP_DO:
-            if (status[UPSTEP_DISK] != STEP_DONE || status[UPSTEP_PART] != STEP_DONE) {
-                lebui_msgbox_auto("Error", "Select a disk and partition first.", term_sz.rows, term_sz.cols);
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]), "Disk: %s",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
+            if (!disk_ok) {
+                nitems = 0;
                 break;
             }
-            selected_count = 0;
+            if (disks[disk_idx].part_count == 0) {
+                snprintf(smbuf[0], sizeof(smbuf[0]),
+                         "(no partitions on this disk)");
+                smitems[0] = smbuf[0];
+                draw_items = smitems;
+                nitems = 1;
+                break;
+            }
+            draw_labels = malloc((size_t)disks[disk_idx].part_count *
+                                 sizeof(*draw_labels));
+            draw_items = malloc((size_t)disks[disk_idx].part_count *
+                                sizeof(*draw_items));
+            if (!draw_labels || !draw_items) {
+                free(draw_labels);
+                free(draw_items);
+                draw_labels = NULL;
+                draw_items = NULL;
+                nitems = 0;
+                break;
+            }
+            need_free = 1;
+            for (k = 0; k < disks[disk_idx].part_count; k++) {
+                wiz_part_label(disk_idx, k, draw_labels[k],
+                               sizeof(draw_labels[k]));
+                draw_items[k] = draw_labels[k];
+            }
+            nitems = disks[disk_idx].part_count;
+            break;
+        }
+        case UW_ITEMS:
+            snprintf(hdrbuf[0], sizeof(hdrbuf[0]),
+                     "Space toggles, Enter confirms.");
+            hdrs[0] = hdrbuf[0];
+            hdr_n = 1;
             for (i = 0; i < UPD_COUNT; i++) {
-                if (upd_selected[i]) selected_count++;
+                snprintf(smbuf[i], sizeof(smbuf[i]), "%s", uw_item_names[i]);
+                smitems[i] = smbuf[i];
+                uchk[i] = upd_selected[i];
             }
-            if (selected_count == 0) {
-                lebui_msgbox_auto("Error", "Select at least one update item.", term_sz.rows, term_sz.cols);
-                break;
-            }
-            if (!lebui_confirm_auto("Confirm",
-                    "Update selected items? User data and local config will be preserved.",
-                    term_sz.rows, term_sz.cols))
-                break;
-            ret = step_do_update(disk_idx, part_idx);
-            if (ret == 0)
-                return 0;
+            draw_items = smitems;
+            draw_checks = uchk;
+            nitems = UPD_COUNT;
             break;
+        case UW_SUMMARY: {
+            int sn = 0;
+
+            snprintf(sum[sn], sizeof(sum[sn]), "Review the update.");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), " ");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Target: %s on %s",
+                     part_ok ? disks[disk_idx].parts[part_idx].devpath : "-",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]), "Items:  %d selected",
+                     sel_count);
+            sums[sn] = sum[sn];
+            sn++;
+            snprintf(sum[sn], sizeof(sum[sn]),
+                     "User data and config preserved.");
+            sums[sn] = sum[sn];
+            sn++;
+            infon = sn;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Continue to Update");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
+            break;
+        }
+        case UW_DO:
+            snprintf(sum[0], sizeof(sum[0]), "Ready to update Lebirun.");
+            sums[0] = sum[0];
+            snprintf(sum[1], sizeof(sum[1]), " ");
+            sums[1] = sum[1];
+            snprintf(sum[2], sizeof(sum[2]), "Target: %s on %s",
+                     part_ok ? disks[disk_idx].parts[part_idx].devpath : "-",
+                     disk_ok ? disks[disk_idx].devpath : "-");
+            sums[2] = sum[2];
+            snprintf(sum[3], sizeof(sum[3]), "Items:  %d selected",
+                     sel_count);
+            sums[3] = sum[3];
+            snprintf(sum[4], sizeof(sum[4]), " ");
+            sums[4] = sum[4];
+            snprintf(sum[5], sizeof(sum[5]), "Select Start to begin.");
+            sums[5] = sum[5];
+            infon = 6;
+            snprintf(smbuf[0], sizeof(smbuf[0]), "Start update");
+            smitems[0] = smbuf[0];
+            draw_items = smitems;
+            nitems = 1;
+            break;
+        default:
+            nitems = 0;
+            break;
+        }
+
+        row = iy;
+        if (full || stepch || need_dirty || wiz_stained) {
+            if (infon > 0)
+                row = wiz_draw_info(iy, ix, iw, sums, infon) + 1;
+            else if (hdr_n > 0)
+                row = wiz_draw_info(iy, ix, iw, hdrs, hdr_n) + 1;
+        } else {
+            if (infon > 0)
+                row = iy + infon + 1;
+            else if (hdr_n > 0)
+                row = iy + hdr_n + 1;
+        }
+        if (nitems <= 0) {
+            csel[cur] = 0;
+            cscr[cur] = 0;
+        } else {
+            if (csel[cur] >= nitems)
+                csel[cur] = nitems - 1;
+            if (csel[cur] < 0)
+                csel[cur] = 0;
+        }
+        list_h = cy + ch - 3 - row;
+        if (list_h < 1)
+            list_h = 1;
+        if (cscr[cur] > csel[cur])
+            cscr[cur] = csel[cur];
+        if (cscr[cur] < csel[cur] - list_h + 1)
+            cscr[cur] = csel[cur] - list_h + 1;
+        if (cscr[cur] < 0)
+            cscr[cur] = 0;
+        if (full || stepch || need_dirty || wiz_stained) {
+            if (!full && !stepch) {
+                lebui_goto(iy - 1, cx + 1);
+                printf("%s%-*s%s", LEBUI_CLR_MENU, cw - 4, "", LEBUI_CLR_NORMAL);
+            }
+            wiz_draw_rows(row, ix, list_h, iw, draw_items, draw_checks, nitems,
+                          csel[cur], cscr[cur], focus);
+            need_dirty = 0;
+            wiz_stained = 0;
+        } else if (snap.focus != focus) {
+            wiz_content_row(row + csel[cur] - cscr[cur], ix, iw, draw_items,
+                            draw_checks, csel[cur], nitems, csel[cur], focus);
+            wiz_content_row(row + snap.sel - snap.scr, ix, iw, draw_items,
+                            draw_checks, snap.sel, nitems, csel[cur], focus);
+            wiz_side_row(sy + 1 + snap.side, sx, sw, snap.side, uw_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + side_cur, sx, sw, side_cur, uw_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + cur, sx, sw, cur, uw_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            printf("%s", LEBUI_CLR_NORMAL);
+        } else if (focus == WIZ_FOCUS_CONTENT) {
+            if (snap.scr != cscr[cur]) {
+                wiz_draw_rows(row, ix, list_h, iw, draw_items, draw_checks,
+                              nitems, csel[cur], cscr[cur], focus);
+            } else {
+                wiz_content_row(row + snap.sel - cscr[cur], ix, iw, draw_items,
+                                draw_checks, snap.sel, nitems, csel[cur],
+                                focus);
+                wiz_content_row(row + csel[cur] - cscr[cur], ix, iw,
+                                draw_items, draw_checks, csel[cur], nitems,
+                                csel[cur], focus);
+                printf("%s", LEBUI_CLR_NORMAL);
+            }
+        } else {
+            wiz_side_row(sy + 1 + snap.side, sx, sw, snap.side, uw_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            wiz_side_row(sy + 1 + side_cur, sx, sw, side_cur, uw_wiz_names, status,
+                         cur, side_cur, focus, done, locked);
+            printf("%s", LEBUI_CLR_NORMAL);
+        }
+        if (full || stepch) {
+            lebui_goto(cy + ch - 2, cx + 2);
+            printf("%s b:Back n:Next  %d/%d  %d/%d%s", LEBUI_CLR_DIM_CLR,
+                   cur + 1, UW_COUNT, nitems ? csel[cur] + 1 : 0, nitems,
+                   LEBUI_CLR_NORMAL);
+        }
+        printf("%s", LEBUI_CLR_NORMAL);
+        lebui_flush();
+        if (need_free) {
+            free(draw_labels);
+            free(draw_items);
+        }
+
+        snap.cur = cur;
+        snap.focus = focus;
+        snap.side = side_cur;
+        snap.sel = csel[cur];
+        snap.scr = cscr[cur];
+
+        key = lebui_read_key();
+
+        if (key == LEBUI_KEY_TAB)
+            return LEBUI_KEY_TAB;
+        if (key == LEBUI_KEY_UP) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (side_cur > 0)
+                    side_cur--;
+            } else if (csel[cur] > 0) {
+                csel[cur]--;
+            }
+        } else if (key == LEBUI_KEY_DOWN) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (side_cur < UW_COUNT - 1)
+                    side_cur++;
+            } else if (csel[cur] < nitems - 1) {
+                csel[cur]++;
+            }
+        } else if (key == LEBUI_KEY_PGUP) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                side_cur -= list_h;
+                if (side_cur < 0)
+                    side_cur = 0;
+            } else {
+                csel[cur] -= list_h;
+                if (csel[cur] < 0)
+                    csel[cur] = 0;
+            }
+        } else if (key == LEBUI_KEY_PGDN) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                side_cur += list_h;
+                if (side_cur > UW_COUNT - 1)
+                    side_cur = UW_COUNT - 1;
+            } else {
+                csel[cur] += list_h;
+                if (csel[cur] > nitems - 1)
+                    csel[cur] = nitems - 1;
+            }
+        } else if (key == LEBUI_KEY_HOME) {
+            if (focus == WIZ_FOCUS_STEPS)
+                side_cur = 0;
+            else
+                csel[cur] = 0;
+        } else if (key == LEBUI_KEY_END) {
+            if (focus == WIZ_FOCUS_STEPS)
+                side_cur = UW_COUNT - 1;
+            else
+                csel[cur] = nitems - 1;
+        } else if (key == LEBUI_KEY_LEFT) {
+            if (focus == WIZ_FOCUS_CONTENT) {
+                focus = WIZ_FOCUS_STEPS;
+                side_cur = cur;
+            } else {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
+        } else if (key == LEBUI_KEY_RIGHT) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                focus = WIZ_FOCUS_CONTENT;
+            } else {
+                int j = cur + 1;
+                while (j < UW_COUNT && locked[j])
+                    j++;
+                if (j < UW_COUNT) {
+                    if (cur == UW_WELCOME)
+                        wel_done = 1;
+                    cur = j;
+                    focus = WIZ_FOCUS_CONTENT;
+                    side_cur = cur;
+                } else if (cur == UW_DO && part_ok) {
+                    goto try_update;
+                } else if (cur == UW_DISK) {
+                    wiz_msgbox("Error", "Select a disk first.");
+                } else if (cur == UW_PART) {
+                    wiz_msgbox("Error", "Select a partition first.");
+                }
+            }
+        } else if (key == 'b' || key == 'B' || key == LEBUI_KEY_BKSP) {
+            if (cur > 0) {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
+        } else if (key == 'n' || key == 'N') {
+            int j = cur + 1;
+            while (j < UW_COUNT && locked[j])
+                j++;
+            if (j < UW_COUNT) {
+                if (cur == UW_WELCOME)
+                    wel_done = 1;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            } else if (cur == UW_DO && part_ok) {
+                goto try_update;
+            } else if (cur == UW_DISK) {
+                wiz_msgbox("Error", "Select a disk first.");
+            } else if (cur == UW_PART) {
+                wiz_msgbox("Error", "Select a partition first.");
+            }
+        } else if (key == ' ') {
+            if (focus == WIZ_FOCUS_CONTENT && cur == UW_ITEMS) {
+                int s = csel[cur];
+                if (s >= 0 && s < UPD_COUNT) {
+                    upd_selected[s] = !upd_selected[s];
+                    need_dirty = 1;
+                }
+            }
+        } else if ((key == 'r' || key == 'R') && cur == UW_DISK) {
+            focus = WIZ_FOCUS_CONTENT;
+            csel[cur] = nitems - 1;
+        } else if (key == LEBUI_KEY_ENTER) {
+            if (focus == WIZ_FOCUS_STEPS) {
+                if (locked[side_cur]) {
+                    wiz_msgbox("Locked",
+                                      "Finish the earlier steps first.");
+                } else {
+                    cur = side_cur;
+                    focus = WIZ_FOCUS_CONTENT;
+                }
+                continue;
+            }
+            switch (cur) {
+            case UW_WELCOME:
+                wel_done = 1;
+                cur = UW_DISK;
+                break;
+            case UW_DISK:
+                if (csel[cur] < disk_count) {
+                    if (csel[cur] != disk_idx) {
+                        disk_idx = csel[cur];
+                        part_idx = -1;
+                        csel[UW_PART] = 0;
+                        cscr[UW_PART] = 0;
+                    }
+                    cur = UW_PART;
+                } else {
+                    char rmsg[64];
+                    int n = wiz_rescan(&disk_idx, &part_idx);
+                    if (disk_idx < 0)
+                        cur = UW_DISK;
+                    else if (part_idx < 0 && cur > UW_PART)
+                        cur = UW_PART;
+                    snprintf(rmsg, sizeof(rmsg), "Found %d disk(s).", n);
+                    wiz_msgbox("Rescan", rmsg);
+                }
+                break;
+            case UW_PART:
+                if (!disk_ok || disks[disk_idx].part_count == 0) {
+                    wiz_msgbox("No Partitions",
+                                      "No partitions here. Use ldiskutil.");
+                } else if (disks[disk_idx].parts[csel[cur]].mbr_type == 0xEF) {
+                    wiz_msgbox("Error",
+                                      "The ESP holds the bootloader.\nUse a Lebirun partition or make one first.");
+                } else {
+                    part_idx = csel[cur];
+                    cur = UW_ITEMS;
+                }
+                break;
+            case UW_ITEMS:
+                for (i = 0; i < UPD_COUNT; i++) {
+                    if (upd_selected[i])
+                        break;
+                }
+                if (i >= UPD_COUNT) {
+                    wiz_msgbox("Error",
+                                      "Select at least one update item.");
+                } else {
+                    cur = UW_SUMMARY;
+                }
+                break;
+            case UW_SUMMARY:
+                cur = UW_DO;
+                break;
+            case UW_DO:
+            try_update: {
+                int k;
+                int cnt = 0;
+                for (k = 0; k < UPD_COUNT; k++) {
+                    if (upd_selected[k])
+                        cnt++;
+                }
+                if (cnt == 0) {
+                    wiz_msgbox("Error",
+                                      "Select at least one update item.");
+                    break;
+                }
+                if (wiz_confirm("Confirm",
+                                       "Update selected items?")) {
+                    need_full = 1;
+                    if (step_do_update(disk_idx, part_idx) == 0)
+                        return 0;
+                }
+                break;
+            }
+            }
+            side_cur = cur;
+        } else if (key == LEBUI_KEY_ESC || key == 'q' || key == 'Q') {
+            if (cur == UW_WELCOME) {
+                if (wiz_confirm("Quit", "Exit the installer?"))
+                    return -1;
+            } else {
+                int j = cur - 1;
+                while (j > 0 && locked[j])
+                    j--;
+                cur = j;
+                focus = WIZ_FOCUS_CONTENT;
+                side_cur = cur;
+            }
         }
     }
 }
@@ -3106,6 +4882,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    scan_result = inst_enumerate_disks();
+    if (scan_result > 0)
+        inst_scan_disks();
+
     lebui_get_size(&term_sz);
     if (lebui_init() != LEBUI_RESULT_OK) {
         fprintf(stderr, "lebinstaller: cannot initialize terminal\n");
@@ -3117,20 +4897,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    lebui_progress_reset(&prog_st);
-    lebui_progress_init(&prog_st, "Scanning", term_sz.rows, term_sz.cols);
-    lebui_progress_update(&prog_st, "Scanning for disks...", 0);
-    lebui_flush();
-    scan_result = inst_enumerate_disks();
     if (scan_result <= 0) {
         lebui_msgbox_auto("Error", "No disks found.", term_sz.rows,
                           term_sz.cols);
         cleanup_exit();
         return 1;
     }
-    lebui_progress_update(&prog_st, "Reading partition tables...", 25);
-    lebui_flush();
-    inst_scan_disks();
 
     active_page = 0;
 
