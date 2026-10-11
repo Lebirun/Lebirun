@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/klog.h>
 #include <time.h>
 #include <crypt.h>
 #include <lebirun.h>
@@ -1205,6 +1206,12 @@ static int inst_format_fat(const char *devpath)
     pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        int nfd = open("/dev/null", O_WRONLY);
+        if (nfd >= 0) {
+            dup2(nfd, 1);
+            dup2(nfd, 2);
+            close(nfd);
+        }
         argv[0] = "lformat.fat";
         argv[1] = (char *)devpath;
         argv[2] = "-L";
@@ -4882,6 +4889,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    klogctl(6, NULL, 0);
     scan_result = inst_enumerate_disks();
     if (scan_result > 0)
         inst_scan_disks();

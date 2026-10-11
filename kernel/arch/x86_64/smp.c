@@ -38,8 +38,6 @@ static void smp_set_cpu_base(cpu_info_t *cpu);
 static volatile int smp_tlb_flush_lock = 0;
 static volatile uint64_t *smp_tlb_flush_acks_dyn;
 static int smp_tlb_flush_words;
-static volatile int smp_tlb_flush_pending = 0;
-static int smp_tlb_flush_initiator = 0;
 
 _Static_assert(__builtin_offsetof(cpu_info_t, irq_cr3) == 72, "irq cr3 offset");
 
@@ -674,16 +672,7 @@ int smp_tlb_flush_all_sync(void) {
         __sync_lock_release(&smp_tlb_flush_lock);
         return -1;
     }
-    if (smp_tlb_flush_pending) {
-        if (!smp_tlb_flush_complete(smp_tlb_flush_initiator)) {
-            smp_tlb_flush_send_missing(smp_tlb_flush_initiator);
-            result = -1;
-            goto out;
-        }
-        smp_tlb_flush_pending = 0;
-    }
     initiator = smp_processor_id();
-    smp_tlb_flush_initiator = initiator;
     for (i = 0; i < smp_tlb_words(); i++) smp_tlb_acks()[i] = 0;
     __sync_synchronize();
     smp_tlb_flush_send_missing(initiator);
@@ -701,8 +690,6 @@ int smp_tlb_flush_all_sync(void) {
         if (result == 0) break;
         smp_tlb_flush_send_missing(initiator);
     }
-    if (result < 0) smp_tlb_flush_pending = 1;
-out:
     __sync_lock_release(&smp_tlb_flush_lock);
     return result;
 }
