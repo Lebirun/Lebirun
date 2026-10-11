@@ -141,10 +141,14 @@ uint8_t *kstack_alloc(void) {
         return NULL;
     }
 
-    memset((void *)page_virt, 0, PAGE_SIZE);
     entry->page_phys[p] = (uint64_t)phys;
-
     base_virt = slot_bottom_addr(slot);
+    if (smp_tlb_flush_all_sync() < 0) {
+        kstack_free((uint8_t *)base_virt);
+        return NULL;
+    }
+    memset((void *)page_virt, 0, PAGE_SIZE);
+
     return (uint8_t *)base_virt;
 }
 
@@ -179,16 +183,15 @@ void kstack_free(uint8_t *base) {
         return;
     }
 
-    if (previous) previous->next = entry->next;
-    else kstack_slots = entry->next;
-    kstack_lock_release(flags);
-
     for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
         if (entry->page_phys[p]) {
             vmm_unmap_page(slot_page_addr(slot, p));
             pfa_free(entry->page_phys[p]);
         }
     }
+    if (previous) previous->next = entry->next;
+    else kstack_slots = entry->next;
+    kstack_lock_release(flags);
 
     kfree(entry);
 }
@@ -205,6 +208,7 @@ void kstack_reclaim_unused(void) {
     uint64_t phys;
     uint64_t flags;
     int slot;
+    int cpu;
 
     if (!kstack_initialized) return;
 
@@ -213,6 +217,16 @@ void kstack_reclaim_unused(void) {
     while (task) {
         if (task->state == TASK_DEAD || task->resources_released ||
             !task->kernel_stack_base) {
+            task = task->all_next;
+            continue;
+        }
+        for (cpu = 0; cpu < cpu_count; cpu++) {
+            if (!cpus[cpu].active) continue;
+            if (cpus[cpu].running_task == task ||
+                __atomic_load_n(&cpus[cpu].switching_task, __ATOMIC_ACQUIRE) == task)
+                break;
+        }
+        if (cpu < cpu_count) {
             task = task->all_next;
             continue;
         }

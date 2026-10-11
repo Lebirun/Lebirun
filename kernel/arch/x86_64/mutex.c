@@ -33,6 +33,7 @@ void mutex_lock(mutex_t* m) {
     staged = 0;
     if (!scheduler_initialized) {
         while (!__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
+            smp_tlb_flush_poll();
             __asm__ __volatile__ ("pause");
         }
         m->depth = 1;
@@ -55,6 +56,7 @@ void mutex_lock(mutex_t* m) {
         }
 
         for (i = 0; i < 64 && m->locked; i++) {
+            smp_tlb_flush_poll();
             __asm__ volatile ("pause" ::: "memory");
         }
         if (m->locked && can_block) {

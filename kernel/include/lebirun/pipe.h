@@ -42,6 +42,10 @@ static inline void pipe_retain_reference(pipe_t *pipe, int type) {
     flags = pipe_lock_irqsave(pipe);
     if (type == FD_TYPE_PIPE_R || type == FD_TYPE_PIPE_RW) pipe->readers++;
     if (type == FD_TYPE_PIPE_W || type == FD_TYPE_PIPE_RW) pipe->writers++;
+    if (pipe->named_node) {
+        waitq_wake_all(&pipe->read_waitq);
+        waitq_wake_all(&pipe->write_waitq);
+    }
     pipe_unlock_irqrestore(pipe, flags);
 }
 

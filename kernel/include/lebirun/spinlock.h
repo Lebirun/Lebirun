@@ -2,12 +2,14 @@
 #define KERNEL_SPINLOCK_H
 
 #include <stdint.h>
+#include <lebirun/smp.h>
 
 typedef struct spinlock {
     volatile uint64_t locked;
 } spinlock_t;
 
 static inline void cpu_relax(void) {
+    smp_tlb_flush_poll();
     asm volatile ("pause" ::: "memory");
 }
 

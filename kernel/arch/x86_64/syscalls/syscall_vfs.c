@@ -32,8 +32,6 @@ pipe_t *pipe_named_open(vfs_node_t *node, int type) {
     while (pipe) {
         if (pipe->named_node == node) {
             pipe_retain_reference(pipe, type);
-            waitq_wake_all(&pipe->read_waitq);
-            waitq_wake_all(&pipe->write_waitq);
             spin_unlock(&named_pipe_lock);
             return pipe;
         }
@@ -53,8 +51,6 @@ pipe_t *pipe_named_open(vfs_node_t *node, int type) {
     while (pipe) {
         if (pipe->named_node == node) {
             pipe_retain_reference(pipe, type);
-            waitq_wake_all(&pipe->read_waitq);
-            waitq_wake_all(&pipe->write_waitq);
             spin_unlock(&named_pipe_lock);
             vfs_close(node);
             kfree(created);
@@ -65,8 +61,6 @@ pipe_t *pipe_named_open(vfs_node_t *node, int type) {
     created->named_next = named_pipe_head;
     named_pipe_head = created;
     pipe_retain_reference(created, type);
-    waitq_wake_all(&created->read_waitq);
-    waitq_wake_all(&created->write_waitq);
     spin_unlock(&named_pipe_lock);
     return created;
 }
@@ -380,7 +374,6 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
                 waitq_add(&pipe->read_waitq, current_task);
             else
                 waitq_add(&pipe->write_waitq, current_task);
-            current_task->state = TASK_BLOCKED;
             pipe_unlock_irqrestore(pipe, pipe_flags);
             schedule();
             if (task_has_pending_signals()) {

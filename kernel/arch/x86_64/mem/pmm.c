@@ -1,5 +1,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/smp.h>
 #include <lebirun/pit.h>
 #include <lebirun/vring.h>
 #include <string.h>
@@ -58,6 +59,7 @@ static inline void pfa_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
     __asm__ volatile ("cli");
     while (__sync_lock_test_and_set(&pfa_lock, 1)) {
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }
@@ -908,6 +910,7 @@ static void refht_lock_acquire(uint64_t *eflags_out) {
 
     __asm__ volatile("pushf; pop %0; cli" : "=r"(ef));
     while (__sync_lock_test_and_set(&refht_lock_val, 1)) {
+        smp_tlb_flush_poll();
         __asm__ volatile("pause");
     }
     *eflags_out = ef;

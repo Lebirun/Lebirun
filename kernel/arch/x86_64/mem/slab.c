@@ -55,6 +55,7 @@ static inline void slab_lock_acquire(uint64_t *eflags_out) {
             return;
         }
         if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }
@@ -430,6 +431,7 @@ void *slab_alloc(size_t size) {
             slab_lock_release(eflags);
             if (result) return result;
         }
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }
@@ -469,6 +471,7 @@ void *slab_page_alloc(size_t size) {
             slab_fresh_only = 0;
             slab_lock_release(eflags);
         }
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }

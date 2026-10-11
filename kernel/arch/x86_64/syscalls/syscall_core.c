@@ -515,16 +515,7 @@ static void pipe_shrink_after_read(pipe_t *pipe) {
         pipe->write_pos = 0;
         return;
     }
-    if (pipe->count == 0) {
-        if (pipe->buf_size == 0) return;
-        kfree(pipe->buffer);
-        pipe->buffer = NULL;
-        pipe->buf_size = 0;
-        pipe->read_pos = 0;
-        pipe->write_pos = 0;
-        return;
-    }
-    if (pipe->count > SIZE_MAX / 2) return;
+    if (pipe->count > pipe->buf_size / 4) return;
     target = pipe->count * 2;
     if (target >= pipe->buf_size) return;
     pipe_resize_buffer(pipe, target);
@@ -532,22 +523,29 @@ static void pipe_shrink_after_read(pipe_t *pipe) {
 
 static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     uint8_t *new_buffer;
-    uint64_t i;
+    uint64_t capacity;
+    uint64_t first;
 
     if (!pipe) return -ENOMEM;
-    if (required == pipe->buf_size) return 0;
-    if (required == 0) return 0;
+    if (required == pipe->buf_size || required == 0) return 0;
     if (required < pipe->count || required > SIZE_MAX) return -ENOMEM;
-    new_buffer = (uint8_t *)kmalloc(required);
+    capacity = required;
+    if (required > pipe->buf_size && pipe->buf_size <= SIZE_MAX / 2 &&
+        capacity < pipe->buf_size * 2)
+        capacity = pipe->buf_size * 2;
+    new_buffer = (uint8_t *)kmalloc(capacity);
     if (!new_buffer) return -ENOMEM;
-    for (i = 0; i < pipe->count; i++) {
-        new_buffer[i] = pipe->buffer[(pipe->read_pos + i) % pipe->buf_size];
+    if (pipe->count) {
+        first = pipe->buf_size - pipe->read_pos;
+        if (first > pipe->count) first = pipe->count;
+        memcpy(new_buffer, pipe->buffer + pipe->read_pos, first);
+        memcpy(new_buffer + first, pipe->buffer, pipe->count - first);
     }
     kfree(pipe->buffer);
     pipe->buffer = new_buffer;
-    pipe->buf_size = required;
+    pipe->buf_size = capacity;
     pipe->read_pos = 0;
-    pipe->write_pos = pipe->count;
+    pipe->write_pos = pipe->count == capacity ? 0 : pipe->count;
     return 0;
 }
 
@@ -560,8 +558,8 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     uint64_t chunk;
     uint64_t done;
     uint64_t space;
-    uint64_t i;
     uint64_t bytes;
+    uint64_t first;
     uint8_t stack_buf[SYS_RW_STACK_BUF];
     uint8_t *kbuf;
     int heap_buf;
@@ -719,8 +717,10 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EAGAIN;
                         }
+                        lock_scheduler();
                         waitq_add(&p->write_waitq, current_task);
-                        current_task->state = TASK_BLOCKED;
+                        if (syscall_core_interrupted()) wake_task(current_task);
+                        unlock_scheduler();
                         pipe_unlock_irqrestore(p, pipe_flags);
                         schedule();
                         if (syscall_core_interrupted()) {
@@ -739,14 +739,18 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     space = p->buf_size - p->count;
                     bytes = chunk - done;
                     if (bytes > space) bytes = space;
-                    for (i = 0; i < bytes; i++) {
-                        p->buffer[p->write_pos] = kbuf[done + i];
-                        p->write_pos = (p->write_pos + 1) % p->buf_size;
-                    }
+                    first = p->buf_size - p->write_pos;
+                    if (first > bytes) first = bytes;
+                    memcpy(p->buffer + p->write_pos, kbuf + done, first);
+                    memcpy(p->buffer, kbuf + done + first, bytes - first);
+                    if (first == p->buf_size - p->write_pos)
+                        p->write_pos = bytes - first;
+                    else
+                        p->write_pos += bytes;
                     p->count += bytes;
                     done += bytes;
-                    pipe_unlock_irqrestore(p, pipe_flags);
                     waitq_wake_all(&p->read_waitq);
+                    pipe_unlock_irqrestore(p, pipe_flags);
                     descriptor_ready_notify();
                 }
                 total += chunk;
@@ -818,6 +822,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     uint64_t to_read;
     uint64_t i;
     uint64_t bytes;
+    uint64_t first;
     uint8_t stack_buf[SYS_RW_STACK_BUF];
     uint8_t *kbuf;
     int heap_buf;
@@ -947,8 +952,10 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                     if (heap_buf) kfree(kbuf);
                     return -EAGAIN;
                 }
+                lock_scheduler();
                 waitq_add(&p->read_waitq, current_task);
-                current_task->state = TASK_BLOCKED;
+                if (syscall_core_interrupted()) wake_task(current_task);
+                unlock_scheduler();
                 pipe_unlock_irqrestore(p, pipe_flags);
                 schedule();
                 if (syscall_core_interrupted()) {
@@ -969,14 +976,18 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             to_read = (uint64_t)len;
             if (to_read > avail) to_read = avail;
             if (to_read > work_size) to_read = work_size;
-            for (i = 0; i < to_read; i++) {
-                kbuf[i] = p->buffer[p->read_pos];
-                p->read_pos = (p->read_pos + 1) % p->buf_size;
-            }
+            first = p->buf_size - p->read_pos;
+            if (first > to_read) first = to_read;
+            memcpy(kbuf, p->buffer + p->read_pos, first);
+            memcpy(kbuf + first, p->buffer, to_read - first);
+            if (first == p->buf_size - p->read_pos)
+                p->read_pos = to_read - first;
+            else
+                p->read_pos += to_read;
             p->count -= to_read;
             pipe_shrink_after_read(p);
-            pipe_unlock_irqrestore(p, pipe_flags);
             waitq_wake_all(&p->write_waitq);
+            pipe_unlock_irqrestore(p, pipe_flags);
             descriptor_ready_notify();
             if (copy_to_user((void *)buf_addr, kbuf, to_read) < 0) {
                 if (heap_buf) kfree(kbuf);

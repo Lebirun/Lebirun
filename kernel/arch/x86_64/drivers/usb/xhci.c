@@ -7,6 +7,7 @@
 #include <lebirun/drivers/usb/xhci.h>
 #include <lebirun/drivers/usb/hid.h>
 #include <lebirun/pit.h>
+#include <lebirun/smp.h>
 
 #define XHCI_MMIO_VIRT (KERNEL_VMA + 0x37200000ULL)
 #define XHCI_MMIO_PAGES 4u
@@ -1203,6 +1204,7 @@ static void xhci_hid_poll(uint64_t ticks) {
 
     (void)ticks;
     while (xhci_next_event(&type, &code, &ptr, &slot)) {
+        smp_tlb_flush_poll();
         if (type != 32 || !ptr) continue;
         for (n = 0; n < usb_dev_count; n++) {
             usb_dev_t *dev = &usb_devs[n];
@@ -1216,6 +1218,7 @@ static void xhci_hid_poll(uint64_t ticks) {
         }
     }
     xhci_erdp_update();
+    smp_tlb_flush_poll();
     xhci_hid_repeat();
 }
 

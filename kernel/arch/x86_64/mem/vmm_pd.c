@@ -171,10 +171,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     uint64_t user_page_capacity;
     uint64_t user_page_count;
     uint64_t *user_pages;
-    uint64_t mod_cap;
-    uint64_t mod_n;
-    uint64_t *mod_pt;
-    uint64_t *mod_idx;
     uint64_t shared_cap;
     uint64_t shared_n;
     uint64_t *shared_j;
@@ -203,18 +199,14 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     uint64_t pdpt_high_phys;
     uint64_t new_cap;
     uint64_t *new_arr;
-    uint64_t undo;
     uint64_t active_cr3;
+    uint64_t undo;
     int shared_ref_failed;
     int error;
 
     user_page_capacity = 32;
     user_page_count = 0;
     user_pages = NULL;
-    mod_cap = 32;
-    mod_n = 0;
-    mod_pt = NULL;
-    mod_idx = NULL;
     shared_cap = 32;
     shared_n = 0;
     shared_j = NULL;
@@ -225,10 +217,6 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
 
     user_pages = (uint64_t *)kmalloc(user_page_capacity * sizeof(uint64_t));
     if (!user_pages) goto cleanup_fail;
-    mod_pt = (uint64_t *)kmalloc(mod_cap * sizeof(uint64_t));
-    if (!mod_pt) goto cleanup_fail;
-    mod_idx = (uint64_t *)kmalloc(mod_cap * sizeof(uint64_t));
-    if (!mod_idx) goto cleanup_fail;
     shared_j = (uint64_t *)kmalloc(shared_cap * sizeof(uint64_t));
     if (!shared_j) goto cleanup_fail;
     src_pt_copy = (uint64_t *)slab_page_alloc(PAGE_SIZE);
@@ -311,65 +299,35 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
                         user_page_capacity = new_cap;
                     }
 
-                    if (pte_flags & VMM_PTE_NOFREE) {
-                        new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
-                    } else if (pte_flags & VMM_PTE_SHARED) {
-                        new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) |
-                                         pte_flags;
-                        if (pfa_ref_share(src_page_phys) != 0) {
-                            shared_ref_failed = 1;
-                            break;
-                        }
-                    } else if (pte_flags & 0x2) {
-                        cow_flags64 = (pte_flags & ~0x2) | VMM_PTE_COW;
-                        src_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
-                        new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | cow_flags64;
-                        if (pfa_ref_share(src_page_phys) != 0) {
-                            shared_ref_failed = 1;
-                            break;
-                        }
-                        if (mod_n >= mod_cap) {
-                            uint64_t nc = mod_cap * 2;
-                            uint64_t *npt = (uint64_t *)krealloc(mod_pt, nc * sizeof(uint64_t));
-                            uint64_t *nidx;
-                            if (!npt) {
-                                shared_ref_failed = 1;
-                                break;
-                            }
-                            mod_pt = npt;
-                            nidx = (uint64_t *)krealloc(mod_idx, nc * sizeof(uint64_t));
-                            if (!nidx) {
-                                shared_ref_failed = 1;
-                                break;
-                            }
-                            mod_idx = nidx;
-                            mod_cap = nc;
-                        }
-                        mod_pt[mod_n] = src_pt_phys;
-                        mod_idx[mod_n] = l;
-                        mod_n++;
-                    } else {
-                        new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) | pte_flags;
-                        if (pfa_ref_share(src_page_phys) != 0) {
-                            shared_ref_failed = 1;
-                            break;
-                        }
-                    }
-
-                    user_pages[user_page_count++] = src_page_phys;
                     if (!(pte_flags & VMM_PTE_NOFREE)) {
                         if (shared_n >= shared_cap) {
-                            uint64_t nc = shared_cap * 2;
-                            uint64_t *narr = (uint64_t *)krealloc(shared_j, nc * sizeof(uint64_t));
-                            if (!narr) {
+                            new_cap = shared_cap * 2;
+                            new_arr = (uint64_t *)krealloc(
+                                shared_j, new_cap * sizeof(uint64_t));
+                            if (!new_arr) {
                                 shared_ref_failed = 1;
                                 break;
                             }
-                            shared_j = narr;
-                            shared_cap = nc;
+                            shared_j = new_arr;
+                            shared_cap = new_cap;
+                        }
+                        if (pfa_ref_share(src_page_phys) != 0) {
+                            shared_ref_failed = 1;
+                            break;
                         }
                         shared_j[shared_n++] = src_page_phys;
                     }
+
+                    if (!(pte_flags & (VMM_PTE_NOFREE | VMM_PTE_SHARED)) &&
+                        (pte_flags & 0x2)) {
+                        cow_flags64 = (pte_flags & ~0x2) | VMM_PTE_COW;
+                        src_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) |
+                                         cow_flags64;
+                        pte_flags = cow_flags64;
+                    }
+                    new_pt_copy[l] = (src_page_phys & VMM_PHYS_MASK) |
+                                     pte_flags;
+                    user_pages[user_page_count++] = src_page_phys;
                 }
                 if (shared_ref_failed)
                     goto cleanup_fail;
@@ -394,28 +352,19 @@ static uint64_t vmm_clone_pml4_impl(uint64_t src_pml4_phys, uint64_t **out_user_
     if (out_user_pages_count) *out_user_pages_count = user_page_count;
     slab_page_free(new_pt_copy, PAGE_SIZE);
     slab_page_free(src_pt_copy, PAGE_SIZE);
-    if (mod_pt) kfree(mod_pt);
-    if (mod_idx) kfree(mod_idx);
     if (shared_j) kfree(shared_j);
 
     return new_pml4_phys;
 
 cleanup_fail:
     if (out_error) *out_error = error;
-    for (undo = 0; undo < mod_n; undo++) {
-        uint64_t cur = vmm_table_read(mod_pt[undo], mod_idx[undo]);
-        cur = (cur & ~VMM_PTE_COW) | 0x2;
-        vmm_table_write(mod_pt[undo], mod_idx[undo], cur);
-    }
     for (undo = 0; undo < shared_n; undo++)
         pfa_cow_release64(shared_j[undo]);
-    if (new_pml4_phys) vmm_free_pml4_entries(new_pml4_phys, 511, 1);
+    if (new_pml4_phys) vmm_free_pml4_entries(new_pml4_phys, 511, 0);
 
     if (new_pt_copy) slab_page_free(new_pt_copy, PAGE_SIZE);
     if (src_pt_copy) slab_page_free(src_pt_copy, PAGE_SIZE);
     if (user_pages) kfree(user_pages);
-    if (mod_pt) kfree(mod_pt);
-    if (mod_idx) kfree(mod_idx);
     if (shared_j) kfree(shared_j);
 
     return 0;

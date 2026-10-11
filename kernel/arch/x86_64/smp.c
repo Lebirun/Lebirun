@@ -35,11 +35,11 @@ volatile int smp_percpu_irq_ready = 0;
 static volatile int smp_scheduler_ready = 0;
 static volatile int smp_gs_ready = 0;
 static void smp_set_cpu_base(cpu_info_t *cpu);
-static volatile int smp_tlb_flush_lock = 0;
-static volatile uint64_t *smp_tlb_flush_acks_dyn;
-static int smp_tlb_flush_words;
+static uint64_t smp_tlb_flush_generation;
 
 _Static_assert(__builtin_offsetof(cpu_info_t, irq_cr3) == 72, "irq cr3 offset");
+_Static_assert(__builtin_offsetof(cpu_info_t, switching_task) == 160,
+               "switching task offset");
 
 static uint64_t lapic_phys = 0xFEE00000u;
 static uint64_t ioapic_phys = 0xFEC00000u;
@@ -97,6 +97,33 @@ static void lapic_write(uint32_t reg, uint32_t val) {
 
 static uint32_t lapic_read(uint32_t reg) {
     return lapic_base[reg / 4];
+}
+
+static int smp_init_idle_poll_control(void) {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+
+    eax = 1;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (!(ecx & (1u << 31))) return 0;
+
+    eax = 0x40000000u;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (eax < 0x40000001u || ebx != 0x4B4D564Bu ||
+        ecx != 0x564B4D56u || edx != 0x0000004Du) return 0;
+
+    eax = 0x40000001u;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (!(eax & (1u << 12))) return 0;
+
+    __asm__ volatile ("wrmsr" : : "c"(0x4B564D05u), "a"(0u), "d"(0u)
+                      : "memory");
+    return 1;
 }
 
 static void KERNEL_INIT ioapic_write(uint32_t reg, uint32_t val) {
@@ -391,14 +418,28 @@ uint64_t lapic_get_id(void) {
 
 void lapic_send_ipi(uint64_t apic_id, uint64_t vector) {
     uint64_t wait;
+    uint64_t flags;
 
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    wait = SMP_IPI_WAIT_SPINS;
+    while ((lapic_read(LAPIC_REG_ICR_LO) & ICR_DELIVERY_STATUS) && wait > 0) {
+        smp_tlb_flush_poll();
+        __asm__ volatile ("pause" ::: "memory");
+        wait--;
+    }
+    if (lapic_read(LAPIC_REG_ICR_LO) & ICR_DELIVERY_STATUS) {
+        if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+        return;
+    }
     lapic_write(LAPIC_REG_ICR_HI, apic_id << 24);
     lapic_write(LAPIC_REG_ICR_LO, vector);
     wait = SMP_IPI_WAIT_SPINS;
     while ((lapic_read(LAPIC_REG_ICR_LO) & ICR_DELIVERY_STATUS) && wait > 0) {
-        __asm__ volatile ("pause");
+        smp_tlb_flush_poll();
+        __asm__ volatile ("pause" ::: "memory");
         wait--;
     }
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
 void KERNEL_INIT ioapic_init(void) {
@@ -586,101 +627,87 @@ void smp_tlb_flush_all(void) {
 }
 
 void smp_tlb_flush_ack(void) {
-    uint64_t bit;
-    int index;
+    cpu_info_t *cpu;
+    uint64_t generation;
+    uint64_t cr3;
+    uint64_t flags;
 
-    if (!smp_tlb_flush_acks_dyn || smp_tlb_flush_words <= 0) return;
-    index = smp_processor_id();
-    if (index < 0) return;
-    if (index >= smp_tlb_flush_words * 64) return;
-    bit = 1ULL << (index & 63);
-    __sync_fetch_and_or(&smp_tlb_flush_acks_dyn[index >> 6], bit);
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    cpu = smp_this_cpu();
+    generation = __atomic_load_n(&cpu->tlb_request, __ATOMIC_ACQUIRE);
+    __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3"
+                      : "=r"(cr3) :: "memory");
+    __atomic_store_n(&cpu->tlb_ack, generation, __ATOMIC_RELEASE);
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-static volatile uint64_t *smp_tlb_acks(void) {
-    return smp_tlb_flush_acks_dyn;
+void smp_tlb_flush_poll(void) {
+    cpu_info_t *cpu;
+    uint64_t flags;
+
+    if (!__atomic_load_n(&smp_percpu_irq_ready, __ATOMIC_ACQUIRE)) return;
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    cpu = smp_this_cpu();
+    if (__atomic_load_n(&cpu->tlb_request, __ATOMIC_ACQUIRE) >
+        __atomic_load_n(&cpu->tlb_ack, __ATOMIC_RELAXED))
+        smp_tlb_flush_ack();
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-static int smp_tlb_words(void) {
-    return smp_tlb_flush_words;
-}
-
-static int smp_tlb_flush_ensure(int words) {
-    volatile uint64_t *acks;
+static int smp_tlb_flush_complete(int initiator, uint64_t generation) {
     int i;
 
-    if (words <= 0) return 1;
-    if (smp_tlb_flush_acks_dyn && smp_tlb_flush_words >= words) return 1;
-    acks = (volatile uint64_t *)krealloc((void *)smp_tlb_flush_acks_dyn,
-        (uint64_t)words * sizeof(uint64_t));
-    if (!acks) return 0;
-    for (i = smp_tlb_flush_words; i < words; i++) acks[i] = 0;
-    smp_tlb_flush_acks_dyn = acks;
-    smp_tlb_flush_words = words;
-    return 1;
-}
-
-static int smp_tlb_flush_complete(int initiator) {
-    volatile uint64_t *acks;
-    uint64_t bit;
-    int words;
-    int i;
-
-    acks = smp_tlb_acks();
-    words = smp_tlb_words();
-    if (!acks || words <= 0) return 0;
     for (i = 0; i < cpu_count; i++) {
         if (i == initiator || !cpus[i].active) continue;
-        if (i >= words * 64) return 0;
-        bit = 1ULL << (i & 63);
-        if (!(acks[i >> 6] & bit)) return 0;
+        if (__atomic_load_n(&cpus[i].tlb_ack, __ATOMIC_ACQUIRE) < generation)
+            return 0;
     }
     return 1;
 }
 
-static void smp_tlb_flush_send_missing(int initiator) {
-    volatile uint64_t *acks;
-    uint64_t bit;
-    int words;
+static void smp_tlb_flush_send_missing(int initiator, uint64_t generation) {
     int i;
 
-    acks = smp_tlb_acks();
-    words = smp_tlb_words();
     for (i = 0; i < cpu_count; i++) {
         if (i == initiator || !cpus[i].active) continue;
-        if (acks && i < words * 64) {
-            bit = 1ULL << (i & 63);
-            if (acks[i >> 6] & bit) continue;
-        }
+        if (__atomic_load_n(&cpus[i].tlb_ack, __ATOMIC_ACQUIRE) >= generation)
+            continue;
         lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
     }
 }
 
 int smp_tlb_flush_all_sync(void) {
     uint64_t wait;
+    uint64_t flags;
+    uint64_t generation;
+    uint64_t requested;
     int initiator;
     int i;
     int round;
     int result;
 
     if (!lapic_base || cpu_count <= 1) return 0;
-    if (__sync_lock_test_and_set(&smp_tlb_flush_lock, 1)) {
-        return -1;
-    }
-    if (!smp_tlb_flush_ensure((cpu_count + 63) / 64)) {
-        smp_tlb_flush_all();
-        __sync_lock_release(&smp_tlb_flush_lock);
-        return -1;
-    }
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
     initiator = smp_processor_id();
-    for (i = 0; i < smp_tlb_words(); i++) smp_tlb_acks()[i] = 0;
-    __sync_synchronize();
-    smp_tlb_flush_send_missing(initiator);
+    generation = __atomic_add_fetch(&smp_tlb_flush_generation, 1,
+                                     __ATOMIC_SEQ_CST);
+    for (i = 0; i < cpu_count; i++) {
+        if (!cpus[i].active) continue;
+        requested = __atomic_load_n(&cpus[i].tlb_request, __ATOMIC_ACQUIRE);
+        while (requested < generation &&
+               !__atomic_compare_exchange_n(&cpus[i].tlb_request,
+                   &requested, generation, 0, __ATOMIC_SEQ_CST,
+                   __ATOMIC_ACQUIRE))
+            smp_tlb_flush_poll();
+    }
+    smp_tlb_flush_poll();
+    smp_tlb_flush_send_missing(initiator, generation);
     result = -1;
     for (round = 0; round < SMP_TLB_FLUSH_ROUNDS; round++) {
         wait = SMP_IPI_WAIT_SPINS;
         while (wait > 0) {
-            if (smp_tlb_flush_complete(initiator)) {
+            smp_tlb_flush_poll();
+            if (smp_tlb_flush_complete(initiator, generation)) {
                 result = 0;
                 break;
             }
@@ -688,9 +715,10 @@ int smp_tlb_flush_all_sync(void) {
             wait--;
         }
         if (result == 0) break;
-        smp_tlb_flush_send_missing(initiator);
+        smp_tlb_flush_send_missing(initiator, generation);
     }
-    __sync_lock_release(&smp_tlb_flush_lock);
+    smp_tlb_flush_poll();
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
     return result;
 }
 
@@ -728,6 +756,7 @@ void ap_main(void) {
                     cpus[cpu_idx].kernel_stack);
     }
     x86_security_enable();
+    smp_init_idle_poll_control();
 
     if (cpu_idx >= 0)
         smp_set_cpu_base(&cpus[cpu_idx]);
@@ -943,6 +972,9 @@ void KERNEL_INIT smp_init(void) {
 
     KERNEL_INIT_LOG("SMP: Found %d CPU(s)\n", cpu_count);
 
+    if (smp_init_idle_poll_control())
+        KERNEL_INIT_LOG("SMP: KVM idle halt polling disabled for this guest\n");
+
     lapic_init();
 
     bsp_apic_id = lapic_get_id();
@@ -1004,6 +1036,5 @@ void KERNEL_INIT smp_init(void) {
         }
     }
     __atomic_store_n(&smp_percpu_irq_ready, 1, __ATOMIC_RELEASE);
-    smp_tlb_flush_ensure((cpu_count + 63) / 64);
     KERNEL_INIT_LOG("SMP: %d CPU(s) active\n", cpus_booted + 1);
 }

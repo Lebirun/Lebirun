@@ -147,12 +147,21 @@ isr_common_stub:
     movq %r12, %rdi
     movq %r13, %rsi
     call interrupt_handler
+    xorq %rdx, %rdx
+    cmpq %r12, %rax
+    setne %dl
     movq %rax, %rsp
     movq 0(%rsp), %rax
     testq %rax, %rax
     jz 1f
     movq %rax, %cr3
 1:
+    testq %rdx, %rdx
+    jz 4f
+    cmpl $0, smp_percpu_irq_ready(%rip)
+    je 4f
+    movq $0, %gs:160
+4:
     addq $16, %rsp
 
     popq %rax

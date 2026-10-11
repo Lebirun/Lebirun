@@ -53,6 +53,9 @@ typedef struct cpu_info {
     uint64_t idle_ticks;
     uint64_t nr_running;
     uint64_t vruntime_min;
+    uint64_t tlb_request;
+    uint64_t tlb_ack;
+    task_t *switching_task;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;
@@ -79,6 +82,7 @@ int smp_is_bsp(void);
 void smp_tlb_flush_all(void);
 int smp_tlb_flush_all_sync(void);
 void smp_tlb_flush_ack(void);
+void smp_tlb_flush_poll(void);
 void smp_enable_scheduling(void);
 int smp_scheduling_enabled(void);
 task_t *smp_current_task_safe(void);

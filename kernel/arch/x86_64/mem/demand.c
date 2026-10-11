@@ -33,6 +33,7 @@ static inline void demand_lock_acquire(uint64_t *eflags_out) {
             return;
         }
         if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }

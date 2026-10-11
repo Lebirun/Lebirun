@@ -245,6 +245,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     task_t *fault_task;
     cpu_info_t *cpu_info;
 
+    if (regs->int_no >= 32 && regs->int_no != IPI_TLB_FLUSH_VECTOR)
+        smp_tlb_flush_poll();
     if (regs->int_no < 32) {
         if (regs->int_no == 14) {
             access_type = 0;
@@ -478,11 +480,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             return regs;
         }
         if (regs->int_no == 49) {
-            __asm__ volatile (
-                "movq %%cr3, %%rax\n\t"
-                "movq %%rax, %%cr3\n\t"
-                ::: "rax", "memory"
-            );
             smp_tlb_flush_ack();
             lapic_eoi();
             return regs;

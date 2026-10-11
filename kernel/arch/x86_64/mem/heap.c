@@ -1,5 +1,6 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/smp.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/vring.h>
 #include <string.h>
@@ -14,6 +15,7 @@ static inline uint64_t heap_lock_acquire(void) {
         __asm__ volatile ("pushf; pop %0; cli" : "=r"(eflags) :: "memory");
         if (spin_trylock(&heap_lock)) return eflags;
         if (eflags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }

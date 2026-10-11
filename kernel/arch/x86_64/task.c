@@ -307,6 +307,7 @@ static task_t* dead_queue_head = NULL;
 static int task_ptr_valid(task_t *t);
 static void task_release_exit_resources(task_t *t);
 static int task_is_current_on_any_cpu(task_t *task);
+static void waitq_remove_locked(wait_queue_t *q, task_t *t);
 static volatile int memory_pressure_pending;
 static uint64_t memory_pressure_last_tick;
 
@@ -760,6 +761,7 @@ static volatile int exec_cleanup_lock = 0;
 
 static inline void exec_cleanup_lock_acquire(void) {
     while (__sync_lock_test_and_set(&exec_cleanup_lock, 1)) {
+        smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
     }
 }
@@ -774,7 +776,9 @@ static int task_is_current_on_any_cpu(task_t *task) {
     if (!task) return 0;
     for (i = 0; i < cpu_count; i++) {
         if (!cpus[i].active) continue;
-        if (cpus[i].running_task == task) return 1;
+        if (cpus[i].running_task == task ||
+            __atomic_load_n(&cpus[i].switching_task, __ATOMIC_ACQUIRE) == task)
+            return 1;
     }
     if (current_task == task) return 1;
     return 0;
@@ -788,6 +792,8 @@ static int task_pml4_is_current_on_any_cpu(uint64_t pml4_phys) {
     for (i = 0; i < cpu_count; i++) {
         if (!cpus[i].active) continue;
         running = cpus[i].running_task;
+        if (running && running->pml4_phys == pml4_phys) return 1;
+        running = __atomic_load_n(&cpus[i].switching_task, __ATOMIC_ACQUIRE);
         if (running && running->pml4_phys == pml4_phys) return 1;
     }
     if (current_task && current_task->pml4_phys == pml4_phys) return 1;
@@ -1060,7 +1066,7 @@ static void task_remove_wait_locked(task_t *task) {
     if (!task) return;
     if (task->in_wait_queue == TASK_WAIT_QUEUE_NORMAL &&
         task->waiting_queue) {
-        waitq_remove(task->waiting_queue, task);
+        waitq_remove_locked(task->waiting_queue, task);
     } else if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX) {
         task->in_wait_queue = 0;
         task->waiting_queue = NULL;
@@ -1272,19 +1278,19 @@ void waitq_init(wait_queue_t* q) {
 }
 
 void waitq_add(wait_queue_t* q, task_t* t) {
-    uint64_t flags;
-
     if (!q || !t) return;
-    if (t->in_wait_queue || t->waiting_queue) return;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
-    t->wait_next = q->head;
-    q->head = t;
-    t->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
-    t->waiting_queue = q;
-    __asm__ volatile("push %0; popf" : : "r"(flags));
+    lock_scheduler();
+    if (!t->in_wait_queue && !t->waiting_queue && t->state != TASK_DEAD) {
+        t->wait_next = q->head;
+        q->head = t;
+        t->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
+        t->waiting_queue = q;
+        t->state = TASK_BLOCKED;
+    }
+    unlock_scheduler();
 }
 
-task_t* waitq_pop(wait_queue_t* q) {
+static task_t* waitq_pop_locked(wait_queue_t* q) {
     task_t *t;
 
     if (!q || !q->head) return NULL;
@@ -1309,40 +1315,47 @@ task_t* waitq_pop(wait_queue_t* q) {
     return t;
 }
 
-void waitq_wake_all(wait_queue_t* q) {
-    uint64_t flags;
+task_t* waitq_pop(wait_queue_t* q) {
     task_t *t;
 
-    if (!q) return;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
-    while ((t = waitq_pop(q))) {
+    lock_scheduler();
+    t = waitq_pop_locked(q);
+    unlock_scheduler();
+    return t;
+}
+
+static void waitq_wake_all_locked(wait_queue_t *q) {
+    task_t *t;
+
+    while ((t = waitq_pop_locked(q))) {
         if (t->state == TASK_BLOCKED) t->state = TASK_READY;
     }
-    __asm__ volatile("push %0; popf" : : "r"(flags));
+}
+
+void waitq_wake_all(wait_queue_t* q) {
+    if (!q) return;
+    lock_scheduler();
+    waitq_wake_all_locked(q);
+    unlock_scheduler();
 }
 
 void waitq_wake_one(wait_queue_t *q) {
-    uint64_t flags;
     task_t *t;
 
     if (!q) return;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
-    t = waitq_pop(q);
+    lock_scheduler();
+    t = waitq_pop_locked(q);
     if (t && t->state == TASK_BLOCKED) t->state = TASK_READY;
-    __asm__ volatile("push %0; popf" : : "r"(flags));
+    unlock_scheduler();
 }
 
 void waitq_wait(wait_queue_t *q) {
-    uint64_t flags;
     if (!q || !current_task) return;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
     waitq_add(q, current_task);
-    current_task->state = TASK_BLOCKED;
-    __asm__ volatile("push %0; popf" : : "r"(flags));
     yield();
 }
 
-void waitq_remove(wait_queue_t* q, task_t* t) {
+static void waitq_remove_locked(wait_queue_t* q, task_t* t) {
     task_t *prev;
     task_t *cur;
 
@@ -1377,6 +1390,13 @@ void waitq_remove(wait_queue_t* q, task_t* t) {
     }
 }
 
+void waitq_remove(wait_queue_t* q, task_t* t) {
+    if (!q || !t) return;
+    lock_scheduler();
+    waitq_remove_locked(q, t);
+    unlock_scheduler();
+}
+
 static wait_queue_t descriptor_ready_waitq;
 static volatile uint64_t descriptor_ready_sequence = 1;
 static volatile int descriptor_ready_irq_pending;
@@ -1401,7 +1421,7 @@ void descriptor_ready_notify_irq(void) {
 static void descriptor_ready_drain_irq_locked(void) {
     if (!__atomic_exchange_n(&descriptor_ready_irq_pending, 0,
                              __ATOMIC_ACQ_REL)) return;
-    waitq_wake_all(&descriptor_ready_waitq);
+    waitq_wake_all_locked(&descriptor_ready_waitq);
 }
 
 static void descriptor_ready_try_drain_irq(void) {
@@ -3742,6 +3762,7 @@ static int task_cpu_available(task_t *task, int cpu_id) {
     if (!task) return 0;
     owner = task->running_cpu;
     if (owner != -1 && owner != -(cpu_id + 2)) return 0;
+    if (task_is_current_on_any_cpu(task)) return 0;
     if (!task_cpu_allowed(task, cpu_id)) return 0;
     return 1;
 }
@@ -3977,6 +3998,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
     if (prev_task && !dead_switch && prev_task->fpu_state)
         fpu_save_area(prev_task->fpu_state);
     if (switch_to_cpu_idle) {
+        if (!this_cpu->switching_task)
+            __atomic_store_n(&this_cpu->switching_task, prev_task, __ATOMIC_RELEASE);
         task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
         this_cpu->running_task = NULL;
         this_cpu->irq_cr3 = 0;
@@ -4000,6 +4023,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         }
     }
 
+    if (!this_cpu->switching_task)
+        __atomic_store_n(&this_cpu->switching_task, prev_task, __ATOMIC_RELEASE);
     if (prev_task && prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
     next->state = TASK_RUNNING;
@@ -4080,20 +4105,13 @@ registers_t* schedule_from_irq(registers_t* regs) {
         }
     }
 
-    if (!must_switch &&
-        __atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE)) {
-        run_deferred = 1;
-    }
-
     spin_unlock(&sched_lock);
-    if (run_deferred) {
-        task_deferred_work();
-    }
     return return_frame;
 
 out_restore_cr3:
     regs->return_cr3 = entry_cr3;
-    if (__atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE) &&
+    if (!this_cpu->switching_task &&
+        __atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE) &&
         (!current_task || current_task->state != TASK_DEAD)) {
         run_deferred = 1;
     }
