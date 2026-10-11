@@ -820,7 +820,6 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     uint64_t chunk;
     uint64_t avail;
     uint64_t to_read;
-    uint64_t i;
     uint64_t bytes;
     uint64_t first;
     uint8_t stack_buf[SYS_RW_STACK_BUF];

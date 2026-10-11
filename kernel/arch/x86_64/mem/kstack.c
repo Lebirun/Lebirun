@@ -141,7 +141,9 @@ uint8_t *kstack_alloc(void) {
         return NULL;
     }
 
+    kstack_lock_acquire(&flags);
     entry->page_phys[p] = (uint64_t)phys;
+    kstack_lock_release(flags);
     base_virt = slot_bottom_addr(slot);
     if (smp_tlb_flush_all_sync() < 0) {
         kstack_free((uint8_t *)base_virt);
@@ -305,6 +307,7 @@ int kstack_page_fault_handler(uint64_t fault_addr, uint64_t fault_rip,
     uint64_t top;
     uint64_t used;
     int self_slot;
+    int result;
 
     if (!kstack_initialized) return 0;
     if (fault_addr < KSTACK_REGION_START) return 0;
@@ -313,8 +316,11 @@ int kstack_page_fault_handler(uint64_t fault_addr, uint64_t fault_rip,
     if (slot < 0) return 0;
     kstack_lock_acquire(&flags);
     entry = kstack_find_slot_locked(slot);
+    if (!entry) {
+        kstack_lock_release(flags);
+        return 0;
+    }
     kstack_lock_release(flags);
-    if (!entry) return 0;
 
     guard = slot_guard_addr(slot);
     page_virt = fault_addr & ~(PAGE_SIZE - 1);
@@ -333,21 +339,37 @@ int kstack_page_fault_handler(uint64_t fault_addr, uint64_t fault_rip,
     bottom = slot_bottom_addr(slot);
     if (page_virt < bottom || page_virt >= bottom + KSTACK_USABLE_SIZE) return 0;
     page_idx = (int)((page_virt - bottom) / PAGE_SIZE);
-    if (entry->page_phys[page_idx]) return 0;
+    kstack_lock_acquire(&flags);
+    entry = kstack_find_slot_locked(slot);
+    if (!entry || entry->page_phys[page_idx]) {
+        kstack_lock_release(flags);
+        return 0;
+    }
+    kstack_lock_release(flags);
 
     phys = pmm_alloc_low_page();
     if (!phys) phys = pmm_alloc_page();
     if (!phys) return 0;
 
+    kstack_lock_acquire(&flags);
+    entry = kstack_find_slot_locked(slot);
+    if (!entry || entry->page_phys[page_idx]) {
+        result = entry ? 1 : 0;
+        kstack_lock_release(flags);
+        pfa_free((uint64_t)phys);
+        return result;
+    }
     vmm_map_page(page_virt, (uint64_t)phys, 0x003 | VMM_PTE_NX);
     if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
         (uint64_t)phys) {
+        kstack_lock_release(flags);
         pfa_free((uint64_t)phys);
         return 0;
     }
     memset((void *)page_virt, 0, PAGE_SIZE);
     entry->page_phys[page_idx] = (uint64_t)phys;
     if (page_idx == 0) entry->bottom_mapped = 1;
+    kstack_lock_release(flags);
 
     return 1;
 }
@@ -368,8 +390,8 @@ int kstack_prepare_syscall(void) {
     current_slot = addr_to_slot(rsp);
     kstack_lock_acquire(&lock_flags);
     entry = kstack_find_slot_locked(current_slot);
-    kstack_lock_release(lock_flags);
     if (current_slot < 0 || !entry) {
+        kstack_lock_release(lock_flags);
         __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
         return -1;
     }
@@ -387,6 +409,7 @@ int kstack_prepare_syscall(void) {
         entry->bottom_mapped = 1;
     }
 
+    kstack_lock_release(lock_flags);
     __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
     return 0;
 }
@@ -408,25 +431,38 @@ int kstack_expand_syscall(void) {
     result = -1;
     if (slot < 0) goto out;
 
-    kstack_lock_acquire(&lock_flags);
-    entry = kstack_find_slot_locked(slot);
-    kstack_lock_release(lock_flags);
-    if (!entry) goto out;
-
     for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
-        if (entry->page_phys[p]) continue;
+        kstack_lock_acquire(&lock_flags);
+        entry = kstack_find_slot_locked(slot);
+        if (!entry) {
+            kstack_lock_release(lock_flags);
+            goto out;
+        }
+        if (entry->page_phys[p]) {
+            kstack_lock_release(lock_flags);
+            continue;
+        }
+        kstack_lock_release(lock_flags);
         phys = pmm_alloc_low_page();
         if (!phys) phys = pmm_alloc_page();
         if (!phys) goto out;
+        kstack_lock_acquire(&lock_flags);
+        entry = kstack_find_slot_locked(slot);
+        if (!entry || entry->page_phys[p]) {
+            kstack_lock_release(lock_flags);
+            pfa_free((uint64_t)phys);
+            if (!entry) goto out;
+            continue;
+        }
         page_virt = slot_page_addr(slot, p);
         vmm_map_page(page_virt, (uint64_t)phys, 0x003 | VMM_PTE_NX);
         if (vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_virt) !=
             (uint64_t)phys) {
+            kstack_lock_release(lock_flags);
             pfa_free((uint64_t)phys);
             goto out;
         }
         memset((void *)page_virt, 0, PAGE_SIZE);
-        kstack_lock_acquire(&lock_flags);
         entry->page_phys[p] = (uint64_t)phys;
         if (p == 0) {
             entry->bottom_mapped = 1;
@@ -435,9 +471,12 @@ int kstack_expand_syscall(void) {
         kstack_lock_release(lock_flags);
     }
     kstack_lock_acquire(&lock_flags);
-    entry->bottom_mapped = 1;
+    entry = kstack_find_slot_locked(slot);
+    if (entry) {
+        entry->bottom_mapped = 1;
+        result = 0;
+    }
     kstack_lock_release(lock_flags);
-    result = 0;
 out:
     __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
     return result;
@@ -466,10 +505,10 @@ void kstack_finish_syscall(void) {
     } else if (slot >= 0 && entry && entry->page_phys[0]) {
         entry->bottom_mapped = 2;
     }
-    kstack_lock_release(lock_flags);
     if (phys) {
         vmm_unmap_page(slot_page_addr(slot, 0));
         pfa_free(phys);
     }
+    kstack_lock_release(lock_flags);
     __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
 }

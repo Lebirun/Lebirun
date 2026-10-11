@@ -187,7 +187,7 @@ void slab_page_free(void *ptr, size_t size);
 int slab_owns(void *ptr);
 size_t slab_max_size(void);
 size_t slab_alloc_size(void *ptr);
-int slab_shrink_releases_pages(void *ptr, size_t new_size);
+int slab_resize(void *ptr, size_t new_size);
 void slab_stats(void);
 uint64_t slab_get_total_pages(void);
 int slab_flush_stale(void);

@@ -7,7 +7,6 @@
 #define SLAB_PRIMARY_SIZE   0x000FE000ULL
 #define SLAB_OVERFLOW_START HEAP_VIRTUAL_END
 #define SLAB_OVERFLOW_SIZE  (0xFFFFFFFFD8000000ULL - SLAB_OVERFLOW_START)
-#define SLAB_SMALL_MAX      1024
 #define SLAB_MAX_SIZE       65536
 
 #define SLAB_MAGIC 0x534C4142u
@@ -31,6 +30,9 @@ typedef struct {
     uint32_t span;
     uint32_t requested;
 } slab_block_t;
+
+#define SLAB_SMALL_MAX ((PAGE_SIZE - sizeof(slab_page_t) - \
+                        sizeof(slab_block_t)) & ~7ULL)
 
 static slab_page_t *slab_small_pages;
 static slab_page_t *slab_small_tail;
@@ -400,7 +402,8 @@ void KERNEL_EARLY_INIT slab_init(void) {
     slab_flush_active = 0;
     slab_fresh_only = 0;
     slab_initialized = 1;
-    KERNEL_INIT_LOG("Compact allocator initialized (8-1024 shared, extents to 65536)\n");
+    KERNEL_INIT_LOG("Compact allocator initialized (shared blocks to %u bytes, extents to 65536)\n",
+                    (unsigned int)SLAB_SMALL_MAX);
 }
 
 void *slab_alloc(size_t size) {
@@ -620,29 +623,88 @@ size_t slab_alloc_size(void *ptr) {
     return block->requested;
 }
 
-int slab_shrink_releases_pages(void *ptr, size_t new_size) {
+int slab_resize(void *ptr, size_t new_size) {
     slab_page_t *page;
+    slab_block_t *block;
+    slab_block_t *next;
+    slab_block_t *remainder;
     uint64_t address;
     uint64_t total;
     uint64_t pages;
+    uint64_t old_pages;
+    uint64_t eflags;
+    uint32_t needed;
+    uint32_t span;
+    uint32_t old_size;
+    uint32_t *head;
+    uint32_t *tail;
 
-    if (!ptr || !slab_initialized || new_size == 0) return 0;
+    if (!ptr || !slab_initialized || new_size == 0 ||
+        new_size > SLAB_MAX_SIZE) return 0;
     address = (uint64_t)ptr & ~(PAGE_SIZE - 1);
     if (!slab_region_contains(address, SLAB_PRIMARY_START,
                               SLAB_PRIMARY_SIZE) &&
         !slab_region_contains(address, SLAB_OVERFLOW_START,
                               SLAB_OVERFLOW_SIZE)) return 0;
-    if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), address)) return 0;
+    slab_lock_acquire(&eflags);
+    if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), address)) goto fail;
     page = (slab_page_t *)address;
-    if (page->magic != SLAB_MAGIC || page->kind != SLAB_KIND_EXTENT ||
+    if (page->magic != SLAB_MAGIC) goto fail;
+    if (page->kind == SLAB_KIND_SMALL) {
+        if (new_size > SLAB_SMALL_MAX) goto fail;
+        block = slab_small_block_for_ptr(page, ptr);
+        if (!block || !block->requested) goto fail;
+        needed = ((uint32_t)new_size + 7u) & ~7u;
+        needed += sizeof(*block);
+        span = block->span;
+        if (needed > span) {
+            if ((uint64_t)block + span >= address + PAGE_SIZE) goto fail;
+            next = (slab_block_t *)((uint8_t *)block + span);
+            if (next->requested || next->span < sizeof(*next) ||
+                next->span > address + PAGE_SIZE - (uint64_t)next ||
+                needed > span + next->span) goto fail;
+            span += next->span;
+        }
+        old_size = block->requested;
+        block->span = span;
+        if (span - needed >= sizeof(*block) + 8) {
+            remainder = (slab_block_t *)((uint8_t *)block + needed);
+            remainder->span = span - needed;
+            remainder->requested = 0;
+            block->span = needed;
+        }
+        block->requested = (uint32_t)new_size;
+        page->payload_size = page->payload_size - old_size + new_size;
+        slab_small_coalesce(page);
+        slab_lock_release(eflags);
+        return 1;
+    }
+    if (page->kind != SLAB_KIND_EXTENT || page->live_count != 1 ||
+        page->pages == 0 ||
         (uint8_t *)page + sizeof(*page) + SLAB_EXTENT_HEAD_SIZE !=
-            (uint8_t *)ptr) return 0;
-    if (new_size > UINT64_MAX - sizeof(*page) -
-                   SLAB_EXTENT_HEAD_SIZE - SLAB_EXTENT_TAIL_SIZE) return 0;
+            (uint8_t *)ptr) goto fail;
+    if (new_size <= SLAB_SMALL_MAX) goto fail;
     total = new_size + sizeof(*page) + SLAB_EXTENT_HEAD_SIZE +
             SLAB_EXTENT_TAIL_SIZE;
     pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
-    return pages < page->pages;
+    if (pages > page->pages) goto fail;
+    head = (uint32_t *)((uint8_t *)page + sizeof(*page));
+    tail = (uint32_t *)((uint8_t *)ptr + page->payload_size);
+    if (*head != HEAP_CANARY_HEAD || *tail != HEAP_CANARY_TAIL) goto fail;
+    old_pages = page->pages;
+    page->payload_size = (uint32_t)new_size;
+    page->pages = (uint16_t)pages;
+    tail = (uint32_t *)((uint8_t *)ptr + new_size);
+    *tail = HEAP_CANARY_TAIL;
+    if (pages < old_pages) {
+        slab_pages_allocated -= old_pages - pages;
+        slab_unmap_pages(address + pages * PAGE_SIZE, old_pages - pages);
+    }
+    slab_lock_release(eflags);
+    return 1;
+fail:
+    slab_lock_release(eflags);
+    return 0;
 }
 
 size_t slab_max_size(void) {
