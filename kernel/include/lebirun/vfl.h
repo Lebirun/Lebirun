@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define VFL_API_VERSION     1
+#define VFL_API_VERSION     4
 
 #define VFL_IOCTL_GET_API_VERSION   0xAE00
 #define VFL_IOCTL_CREATE_VM         0xAE01
@@ -17,6 +17,13 @@
 #define VFL_IOCTL_SET_SREGS         0xAE09
 #define VFL_IOCTL_GET_SREGS         0xAE0A
 #define VFL_IOCTL_VM_INFO           0xAE0B
+#define VFL_IOCTL_RESET_VCPU        0xAE0C
+#define VFL_IOCTL_SET_FPU           0xAE0D
+#define VFL_IOCTL_GET_FPU           0xAE0E
+#define VFL_IOCTL_INJECT_IRQ        0xAE0F
+#define VFL_IOCTL_SET_MSR           0xAE10
+#define VFL_IOCTL_GET_MSR           0xAE11
+#define VFL_IOCTL_GET_DIRTY         0xAE12
 
 #define VFL_EXIT_HLT        0
 #define VFL_EXIT_IO          1
@@ -30,6 +37,9 @@
 #define VFL_MEM_FLAG_WRITE  (1 << 1)
 #define VFL_MEM_FLAG_EXEC   (1 << 2)
 #define VFL_MEM_FLAG_RWX    (VFL_MEM_FLAG_READ | VFL_MEM_FLAG_WRITE | VFL_MEM_FLAG_EXEC)
+
+#define VFL_IRQ_EXTERNAL    0
+#define VFL_IRQ_NMI         2
 
 typedef struct {
     uint64_t rax, rbx, rcx, rdx;
@@ -58,6 +68,42 @@ typedef struct {
 } vfl_sregs_t;
 
 typedef struct {
+    uint64_t lo, hi;
+} vfl_xmm_t;
+
+typedef struct {
+    vfl_xmm_t xmm[16];
+    vfl_xmm_t ymm_hi[16];
+    uint32_t mxcsr;
+    uint64_t fpr_m[8];
+    uint16_t fpr_e[8];
+    uint16_t fcw, fsw, ftw, fop, fcs, fds;
+    uint32_t fip, fdp;
+} vfl_fpu_t;
+
+typedef struct {
+    uint8_t vector;
+    uint8_t type;
+    uint8_t has_error;
+    uint8_t reserved;
+    uint32_t error_code;
+} vfl_irq_t;
+
+typedef struct {
+    uint32_t index;
+    uint32_t reserved;
+    uint64_t value;
+} vfl_msr_t;
+
+typedef struct {
+    uint32_t slot;
+    uint32_t reserved;
+    uint64_t capacity;
+    uint64_t copied;
+    uint64_t bitmap;
+} vfl_dirty_t;
+
+typedef struct {
     uint32_t slot;
     uint32_t flags;
     uint64_t guest_phys;
@@ -76,7 +122,7 @@ typedef struct {
         } io;
         struct {
             uint64_t phys_addr;
-            uint8_t data[8];
+            uint8_t data[64];
             uint32_t len;
             uint8_t is_write;
         } mmio;
@@ -98,40 +144,22 @@ typedef struct {
     uint64_t total_mem;
 } vfl_vm_info_t;
 
-typedef struct vfl_mem_slot {
-    int in_use;
-    uint64_t guest_phys;
-    uint64_t size;
-    uint8_t *host_mem;
-    uint32_t flags;
-} vfl_mem_slot_t;
-
-typedef struct vfl_vcpu {
-    int active;
-    vfl_regs_t regs;
-    vfl_sregs_t sregs;
-    vfl_run_t last_exit;
-    int halted;
-} vfl_vcpu_t;
-
-typedef struct vfl_vm {
-    int active;
-    uint32_t id;
-    vfl_vcpu_t *vcpus;
-    int nr_vcpus;
-    vfl_mem_slot_t *mem_slots;
-    int nr_mem_slots;
-    int mem_slot_extent;
-} vfl_vm_t;
-
 int vfl_create_vm(void);
 int vfl_destroy_vm(uint32_t vm_id);
 int vfl_create_vcpu(uint32_t vm_id);
+int vfl_reset_vcpu(uint32_t vm_id, uint32_t vcpu_id);
 int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs);
 int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs);
 int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs);
 int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs);
+int vfl_set_fpu(uint32_t vm_id, uint32_t vcpu_id, const vfl_fpu_t *fpu);
+int vfl_get_fpu(uint32_t vm_id, uint32_t vcpu_id, vfl_fpu_t *fpu);
+int vfl_inject_irq(uint32_t vm_id, uint32_t vcpu_id, const vfl_irq_t *irq);
+int vfl_set_msr(uint32_t vm_id, uint32_t vcpu_id, const vfl_msr_t *msr);
+int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr);
 int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region);
+int vfl_get_memory(uint32_t vm_id, vfl_memory_region_t *region);
+int vfl_get_dirty(uint32_t vm_id, vfl_dirty_t *dirty);
 int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run);
 int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info);
 
