@@ -1436,16 +1436,15 @@ int vfl_simd_escape(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, i
             return 0;
 
         case 0x01: {
+            int save = *pos;
+
             *pos += 1;
             if (escape_modrm(v, run, buf, pos, rex_r, rex_b, &mod, &reg, &rm) < 0)
                 return vfl_exit_internal(v, run);
             n = *pos;
             if (mod != 3) {
-                if (vfl_decode_ea(v, buf, pos, mod, rm, asz, seg, rex_b, rex_x, &ea) < 0)
-                    return vfl_exit_internal(v, run);
-                n = *pos;
-                vfl_adv(v, n, ripmask);
-                return 0;
+                *pos = save;
+                return VFL_SIMD_NOTME;
             }
             if (reg == 7 && rm == 0) {
                 uint64_t t;
@@ -1458,8 +1457,10 @@ int vfl_simd_escape(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, i
             }
             if (reg == 7 && rm == 1) {
                 v->tsc += 1000;
-                v->regs.rax = (v->regs.rax & ~0xFFFFFFFFULL) | (v->tsc & 0xFFFFFFFFULL);
-                v->regs.rdx = (v->regs.rdx & ~0xFFFFFFFFULL) | ((v->tsc >> 32) & 0xFFFFFFFFULL);
+                v->regs.rax = (v->regs.rax & ~0xFFFFFFFFULL) |
+                              ((v->tsc + v->tsc_offset) & 0xFFFFFFFFULL);
+                v->regs.rdx = (v->regs.rdx & ~0xFFFFFFFFULL) |
+                              (((v->tsc + v->tsc_offset) >> 32) & 0xFFFFFFFFULL);
                 v->regs.rcx = (v->regs.rcx & ~0xFFFFFFFFULL) | (v->msr_tsc_aux & 0xFFFFFFFFULL);
                 vfl_adv(v, n, ripmask);
                 return 0;
@@ -1487,6 +1488,7 @@ int vfl_simd_escape(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, i
                 vfl_adv(v, n, ripmask);
                 return 0;
             }
+            *pos = save;
             return VFL_SIMD_NOTME;
         }
 
@@ -1501,6 +1503,8 @@ int vfl_simd_escape(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, i
             return 0;
 
         case 0xC7: {
+            int save = *pos;
+
             *pos += 1;
             if (escape_modrm(v, run, buf, pos, rex_r, rex_b, &mod, &reg, &rm) < 0)
                 return vfl_exit_internal(v, run);
@@ -1522,7 +1526,10 @@ int vfl_simd_escape(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, i
                 vfl_adv(v, n, ripmask);
                 return 0;
             }
-            if (reg != 1) return VFL_SIMD_NOTME;
+            if (reg != 1) {
+                *pos = save;
+                return VFL_SIMD_NOTME;
+            }
             n = escape_ea(v, buf, pos, mod, rm, asz, seg, rex_b, rex_x, &ea,
                           v->regs.rip, ripmask, 0);
             if (n < 0) return vfl_exit_internal(v, run);
@@ -3547,7 +3554,7 @@ static int sse_scalar_store(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_
             return vfl_mem_fault(v, run);
         for (i = 0; i < size && i < 8; i++)
             val |= (uint64_t)data[i] << (i * 8);
-        return vfl_exit_mmio_write(v, run, phys, val, size, n, ripmask);
+        return vfl_exit_mmio_write(vm, v, run, phys, val, size, n, ripmask);
     }
     if (rr < 0) return vfl_exit_exception(v, run, 13, 0);
     vfl_adv(v, n, ripmask);

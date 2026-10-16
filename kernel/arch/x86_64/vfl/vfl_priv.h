@@ -37,7 +37,10 @@
 #define VFL_MMU_EXEC  2
 
 typedef struct vfl_mem_slot {
-    int in_use;
+    struct vfl_mem_slot *next;
+    uint32_t slot;
+    int owned;
+    uint64_t ram_phys;
     uint64_t guest_phys;
     uint64_t size;
     uint8_t *host_mem;
@@ -87,7 +90,8 @@ struct vfl_hot_op {
 };
 
 typedef struct vfl_vcpu {
-    int active;
+    struct vfl_vcpu *next;
+    uint32_t id;
     vfl_regs_t regs;
     vfl_sregs_t sregs;
     vfl_fpu_t fpu;
@@ -123,21 +127,42 @@ typedef struct vfl_vcpu {
     uint64_t msr_sysenter_cs;
     uint64_t msr_sysenter_esp;
     uint64_t msr_sysenter_eip;
+    uint64_t msr_pat;
+    uint64_t msr_apic_base;
+    uint64_t msr_misc;
+    uint64_t msr_tsc_deadline;
     uint64_t tsc;
+    uint64_t tsc_offset;
+    uint32_t apic_id;
+    uint32_t apic_tpr;
+    uint32_t apic_spurious;
+    uint32_t apic_enabled;
+    uint32_t apic_icr_lo;
+    uint32_t apic_icr_hi;
+    uint32_t tmr_lvt;
+    uint32_t tmr_init;
+    uint32_t tmr_div;
+    uint64_t tmr_fire_us;
+    int tmr_armed;
+    int tmr_periodic;
+    uint64_t tsc_fire_us;
+    int tsc_armed;
+    int int_shadow;
+    int running;
     uint32_t mmu_vec;
     uint32_t mmu_code;
-    vfl_tlb_t tlb[16];
+    vfl_tlb_t tlb[64];
 } vfl_vcpu_t;
 
 typedef struct vfl_vm {
-    int active;
+    struct vfl_vm *next;
     uint32_t id;
     uint64_t tlb_epoch;
     vfl_vcpu_t *vcpus;
     int nr_vcpus;
+    uint32_t next_vcpu_id;
     vfl_mem_slot_t *mem_slots;
     int nr_mem_slots;
-    int mem_slot_extent;
 } vfl_vm_t;
 
 
@@ -200,7 +225,7 @@ int vfl_exit_io_in(vfl_vcpu_t *v, vfl_run_t *run, uint16_t port, int size,
 int vfl_exit_mmio_read(vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr, int size,
                        int pend, int reg, int rex, uint64_t src, uint32_t op,
                        int adv, uint64_t ripmask);
-int vfl_exit_mmio_write(vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr,
+int vfl_exit_mmio_write(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr,
                         uint64_t val, int size, int adv, uint64_t ripmask);
 int vfl_exit_mmio_write64(vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr,
                           uint8_t *d16, int len, int pend, int reg, int adv,
@@ -237,7 +262,23 @@ int vfl_x87_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, int 
 int vfl_vex_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint8_t *buf, int *pos,
                  int asz, int seg, int lm, uint64_t ripmask, int is_c4);
 int vfl_msr_read(vfl_vcpu_t *v, uint32_t index, uint64_t *val);
-int vfl_msr_write(vfl_vcpu_t *v, uint32_t index, uint64_t val);
+int vfl_msr_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint32_t index, uint64_t val);
+void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
+               uint32_t *b, uint32_t *c, uint32_t *d);
+int vfl_mov_from_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t *val);
+int vfl_mov_to_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t val);
+int vfl_apic_read(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t phys, uint8_t *out, uint64_t len);
+int vfl_apic_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t phys, uint8_t *in, uint64_t len);
+int vfl_apic_mmio(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t phys);
+int vfl_ipi(vfl_vm_t *vm, vfl_vcpu_t *src, uint32_t icr_lo, uint32_t icr_hi);
+int vfl_x2apic_read(vfl_vcpu_t *v, uint32_t index, uint64_t *val);
+int vfl_x2apic_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint32_t index, uint64_t val);
+int vfl_apic_x2(vfl_vcpu_t *v);
+void vfl_timer_poll(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run);
+vfl_mem_slot_t *vfl_find_slot_num(vfl_vm_t *vm, uint32_t slot);
+void *vfl_pages_alloc(uint64_t n);
+void vfl_pages_free(void *va, uint64_t n);
+int vfl_vm_running(vfl_vm_t *vm);
 
 vfl_vm_t *vfl_get_vm(uint32_t vm_id);
 vfl_vcpu_t *vfl_get_vcpu(uint32_t vm_id, uint32_t vcpu_id);

@@ -5,12 +5,9 @@
 #include <stdint.h>
 
 vfl_mem_slot_t *vfl_find_slot(vfl_vm_t *vm, uint64_t addr, uint64_t len) {
-    int i;
+    vfl_mem_slot_t *s;
 
-    for (i = 0; i < vm->mem_slot_extent; i++) {
-        vfl_mem_slot_t *s = &vm->mem_slots[i];
-
-        if (!s->in_use) continue;
+    for (s = vm->mem_slots; s; s = s->next) {
         if (len > s->size) continue;
         if (addr >= s->guest_phys &&
             addr - s->guest_phys <= s->size - len) {
@@ -50,12 +47,12 @@ void vfl_mark_dirty(vfl_vm_t *vm, uint64_t phys, uint64_t len) {
     if (!s->dirty) {
         s->dirty_pages = (s->size + 0xFFFULL) >> 12;
         if (s->dirty_pages == 0) return;
-        s->dirty = (uint8_t *)kmalloc((size_t)((s->dirty_pages + 7) >> 3));
+        s->dirty = (uint8_t *)vfl_pages_alloc(
+            (((s->dirty_pages + 7) >> 3) + 0xFFFULL) >> 12);
         if (!s->dirty) {
             s->dirty_pages = 0;
             return;
         }
-        memset(s->dirty, 0, (size_t)((s->dirty_pages + 7) >> 3));
     }
     first = (phys - s->guest_phys) >> 12;
     last = (phys - s->guest_phys + len - 1) >> 12;
@@ -135,7 +132,7 @@ static void vfl_tlb_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int acces
     uint64_t tag = (linear >> 12) | ((uint64_t)(access & 3) << 60) |
                    (user ? (1ULL << 59) : 0);
     vfl_tlb_t *e = &v->tlb[((linear >> 12) ^ ((uint64_t)access << 4) ^
-                            (linear >> 16)) & 15];
+                            (linear >> 16)) & 63];
     vfl_mem_slot_t *sl;
 
     if (leaf_w != 4 && leaf_w != 8) return;
@@ -154,7 +151,7 @@ static int vfl_tlb_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int acce
     uint64_t tag = (linear >> 12) | ((uint64_t)(access & 3) << 60) |
                    (user ? (1ULL << 59) : 0);
     vfl_tlb_t *e = &v->tlb[((linear >> 12) ^ ((uint64_t)access << 4) ^
-                            (linear >> 16)) & 15];
+                            (linear >> 16)) & 63];
     uint64_t lv;
 
     if (e->epoch != vm->tlb_epoch || e->tag != tag) return 1;
@@ -398,6 +395,9 @@ int vfl_mem_read(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint8
 
     r = vfl_translate(vm, v, addr, VFL_MMU_READ, &phys);
     if (r) return -2;
+    if (vfl_apic_mmio(vm, v, phys) && len <= 4 &&
+        vfl_apic_read(vm, v, phys, out, len) == 0)
+        return 0;
     if (v->mmio_cache_valid && len <= v->mmio_cache_len &&
         addr >= v->mmio_cache_addr &&
         addr - v->mmio_cache_addr <= v->mmio_cache_len - len) {
@@ -416,6 +416,9 @@ int vfl_mem_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint
 
     r = vfl_translate(vm, v, addr, VFL_MMU_WRITE, &phys);
     if (r) return -2;
+    if (vfl_apic_mmio(vm, v, phys) && len <= 4 &&
+        vfl_apic_write(vm, v, phys, in, len) == 0)
+        return 0;
     r = vfl_phys_write(vm, phys, len, in);
     if (r == 0) vfl_mark_dirty(vm, phys, len);
     return r;

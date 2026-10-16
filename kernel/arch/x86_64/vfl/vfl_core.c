@@ -1,5 +1,6 @@
 #include "vfl_priv.h"
 #include <lebirun/common.h>
+#include <lebirun/pit.h>
 #include <lebirun/vfs.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/task.h>
@@ -12,93 +13,121 @@
 static mutex_t vfl_lock;
 static int vfl_lock_ready;
 static vfl_vm_t *vfl_vms;
-static int vfl_vm_extent;
+static uint32_t vfl_next_id;
 
-static int vfl_resize_vms(int new_extent) {
-    vfl_vm_t *new_vms;
+#define VFL_DIRECT_MAX 0x40000000ULL
+#define VFL_ROUND_PAGES(x) (((uint64_t)(x) + 0xFFFULL) >> 12)
 
-    if (new_extent <= vfl_vm_extent) return 0;
-    new_vms = (vfl_vm_t *)krealloc(vfl_vms, (size_t)new_extent * sizeof(vfl_vm_t));
-    if (!new_vms) return -ENOMEM;
-    memset(&new_vms[vfl_vm_extent], 0,
-           (size_t)(new_extent - vfl_vm_extent) * sizeof(vfl_vm_t));
-    vfl_vms = new_vms;
-    vfl_vm_extent = new_extent;
-    return 0;
+static void vfl_free_slot_dirty(vfl_mem_slot_t *slot) {
+    if (!slot->dirty)
+        return;
+    vfl_pages_free(slot->dirty,
+                   VFL_ROUND_PAGES((slot->dirty_pages + 7) >> 3));
+    slot->dirty = NULL;
+    slot->dirty_pages = 0;
 }
 
-static int vfl_add_vcpu(vfl_vm_t *vm) {
-    vfl_vcpu_t *new_vcpus;
+static void vfl_free_slot_pages(vfl_mem_slot_t *slot) {
+    uint64_t npages;
 
-    if (vm->nr_vcpus < 0) return -EINVAL;
-    new_vcpus = (vfl_vcpu_t *)krealloc(vm->vcpus,
-        ((size_t)vm->nr_vcpus + 1) * sizeof(vfl_vcpu_t));
-    if (!new_vcpus) return -ENOMEM;
-    vm->vcpus = new_vcpus;
-    return 0;
-}
-
-static int vfl_resize_mem_slots(vfl_vm_t *vm, int new_extent) {
-    vfl_mem_slot_t *new_slots;
-
-    if (new_extent <= vm->mem_slot_extent) return 0;
-    new_slots = (vfl_mem_slot_t *)krealloc(
-        vm->mem_slots, (size_t)new_extent * sizeof(vfl_mem_slot_t));
-    if (!new_slots) return -ENOMEM;
-    memset(&new_slots[vm->mem_slot_extent], 0,
-           (size_t)(new_extent - vm->mem_slot_extent) * sizeof(vfl_mem_slot_t));
-    vm->mem_slots = new_slots;
-    vm->mem_slot_extent = new_extent;
-    return 0;
+    if (!slot->ram_phys)
+        return;
+    npages = (slot->size + 0xFFFULL) >> 12;
+    if (npages)
+        pfa_free_contiguous(slot->ram_phys, npages);
+    slot->ram_phys = 0;
 }
 
 static void vfl_free_slot(vfl_mem_slot_t *slot) {
-    kfree(slot->host_mem);
-    kfree(slot->dirty);
-    memset(slot, 0, sizeof(vfl_mem_slot_t));
+    if (slot->owned) {
+        if (slot->ram_phys)
+            vfl_free_slot_pages(slot);
+        else
+            kfree(slot->host_mem);
+    }
+    vfl_free_slot_dirty(slot);
+    vfl_pages_free(slot, VFL_ROUND_PAGES(sizeof(vfl_mem_slot_t)));
 }
 
-static void vfl_shrink_mem_slots(vfl_vm_t *vm) {
-    int new_extent;
-    vfl_mem_slot_t *new_slots;
+void *vfl_pages_alloc(uint64_t n) {
+    uint64_t base;
+    uint64_t i;
 
-    new_extent = vm->mem_slot_extent;
-    while (new_extent > 0 && !vm->mem_slots[new_extent - 1].in_use) {
-        new_extent--;
+    if (!n)
+        return NULL;
+    base = pfa_alloc_contiguous_below(n, VFL_DIRECT_MAX);
+    if (!base)
+        return NULL;
+    for (i = 0; i < n; i++) {
+        if (pt_ensure_phys_mapped(base + i * 0x1000ULL) < 0) {
+            pfa_free_contiguous(base, n);
+            return NULL;
+        }
     }
-    if (new_extent == vm->mem_slot_extent) return;
-    if (new_extent == 0) {
-        kfree(vm->mem_slots);
-        vm->mem_slots = NULL;
-        vm->mem_slot_extent = 0;
+    memset((void *)(base + KERNEL_VMA), 0, (size_t)(n << 12));
+    return (void *)(base + KERNEL_VMA);
+}
+
+void vfl_pages_free(void *va, uint64_t n) {
+    uint64_t base;
+
+    if (!va || !n)
         return;
-    }
-    new_slots = (vfl_mem_slot_t *)krealloc(
-        vm->mem_slots, (size_t)new_extent * sizeof(vfl_mem_slot_t));
-    if (!new_slots) return;
-    vm->mem_slots = new_slots;
-    vm->mem_slot_extent = new_extent;
+    base = (uint64_t)va - KERNEL_VMA;
+    pfa_free_contiguous(base, n);
+}
+
+static int vfl_alloc_slot_pages(uint64_t size, uint64_t *phys_out,
+                                uint8_t **host_out) {
+    uint64_t npages = (size + 0xFFFULL) >> 12;
+    uint8_t *host;
+
+    if (!npages)
+        return -1;
+    host = (uint8_t *)vfl_pages_alloc(npages);
+    if (!host)
+        return -1;
+    *phys_out = (uint64_t)host - KERNEL_VMA;
+    *host_out = host;
+    return 0;
 }
 
 vfl_vm_t *vfl_get_vm(uint32_t vm_id) {
-    if (!vfl_vms) return NULL;
-    if (vm_id >= (uint32_t)vfl_vm_extent) return NULL;
-    if (!vfl_vms[vm_id].active) return NULL;
-    return &vfl_vms[vm_id];
+    vfl_vm_t *vm;
+
+    for (vm = vfl_vms; vm; vm = vm->next)
+        if (vm->id == vm_id)
+            return vm;
+    return NULL;
 }
 
 vfl_vcpu_t *vfl_get_vcpu(uint32_t vm_id, uint32_t vcpu_id) {
     vfl_vm_t *vm = vfl_get_vm(vm_id);
+    vfl_vcpu_t *v;
 
     if (!vm) return NULL;
-    if (vcpu_id >= (uint32_t)vm->nr_vcpus) return NULL;
-    if (!vm->vcpus[vcpu_id].active) return NULL;
-    return &vm->vcpus[vcpu_id];
+    for (v = vm->vcpus; v; v = v->next)
+        if (v->id == vcpu_id)
+            return v;
+    return NULL;
+}
+
+vfl_mem_slot_t *vfl_find_slot_num(vfl_vm_t *vm, uint32_t slot) {
+    vfl_mem_slot_t *s;
+
+    for (s = vm->mem_slots; s; s = s->next)
+        if (s->slot == slot)
+            return s;
+    return NULL;
 }
 
 static void vfl_init_vcpu_state(vfl_vcpu_t *v) {
+    vfl_vcpu_t *next = v->next;
+    uint32_t id = v->id;
+
     memset(v, 0, sizeof(vfl_vcpu_t));
-    v->active = 1;
+    v->next = next;
+    v->id = id;
     v->regs.rflags = 0x2;
     v->sregs.cs.selector = 0;
     v->sregs.cs.base = 0;
@@ -111,75 +140,76 @@ static void vfl_init_vcpu_state(vfl_vcpu_t *v) {
     v->sregs.gs = v->sregs.ds;
     v->sregs.ss = v->sregs.ds;
     v->sregs.cr0 = 0x10;
+    v->sregs.cr8 = 0;
+    v->msr_pat = 0x0007040600070406ULL;
+    v->msr_apic_base = 0xFEE00900ULL;
+    v->msr_misc = (1ULL << 12);
+    v->apic_tpr = 0;
+    v->apic_spurious = 0xFF;
+    v->apic_enabled = 1;
     v->fpu.fcw = 0x37F;
     v->fpu.ftw = 0xFFFF;
     v->fpu.mxcsr = 0x1F80;
 }
 
 int vfl_create_vm(void) {
-    int i;
+    vfl_vm_t *vm = (vfl_vm_t *)vfl_pages_alloc(VFL_ROUND_PAGES(sizeof(vfl_vm_t)));
 
-    for (i = 0; i < vfl_vm_extent; i++) {
-        if (!vfl_vms[i].active) {
-            memset(&vfl_vms[i], 0, sizeof(vfl_vm_t));
-            vfl_vms[i].active = 1;
-            vfl_vms[i].id = (uint32_t)i;
-            vfl_vms[i].tlb_epoch = 1;
-            return i;
-        }
-    }
-    i = vfl_vm_extent;
-    if (vfl_resize_vms(vfl_vm_extent + 1) < 0) return -ENOMEM;
-    vfl_vms[i].active = 1;
-    vfl_vms[i].id = (uint32_t)i;
-    vfl_vms[i].tlb_epoch = 1;
-    return i;
+    if (!vm) return -ENOSPC;
+    memset(vm, 0, sizeof(vfl_vm_t));
+    vm->id = vfl_next_id++;
+    vm->tlb_epoch = 1;
+    vm->next = vfl_vms;
+    vfl_vms = vm;
+    return (int)vm->id;
 }
 
 int vfl_destroy_vm(uint32_t vm_id) {
-    int i;
-    int new_extent;
     vfl_vm_t *vm;
-    vfl_vm_t *new_vms;
+    vfl_vm_t **link;
+    vfl_vcpu_t *v;
+    vfl_mem_slot_t *s;
 
     vm = vfl_get_vm(vm_id);
     if (!vm) return -EINVAL;
+    if (vfl_vm_running(vm)) return -EBUSY;
 
-    for (i = 0; i < vm->mem_slot_extent; i++) {
-        if (vm->mem_slots[i].in_use) vfl_free_slot(&vm->mem_slots[i]);
+    while ((s = vm->mem_slots) != NULL) {
+        vm->mem_slots = s->next;
+        vfl_free_slot(s);
     }
-    kfree(vm->vcpus);
-    kfree(vm->mem_slots);
-    memset(vm, 0, sizeof(vfl_vm_t));
-    new_extent = vfl_vm_extent;
-    while (new_extent > 0 && !vfl_vms[new_extent - 1].active) new_extent--;
-    if (new_extent == 0) {
-        kfree(vfl_vms);
-        vfl_vms = NULL;
-        vfl_vm_extent = 0;
-    } else if (new_extent < vfl_vm_extent) {
-        new_vms = (vfl_vm_t *)krealloc(
-            vfl_vms, (size_t)new_extent * sizeof(vfl_vm_t));
-        if (new_vms) {
-            vfl_vms = new_vms;
-            vfl_vm_extent = new_extent;
+    while ((v = vm->vcpus) != NULL) {
+        vm->vcpus = v->next;
+        vfl_pages_free(v, VFL_ROUND_PAGES(sizeof(vfl_vcpu_t)));
+    }
+    for (link = &vfl_vms; *link; link = &(*link)->next) {
+        if (*link == vm) {
+            *link = vm->next;
+            break;
         }
     }
+    vfl_pages_free(vm, VFL_ROUND_PAGES(sizeof(vfl_vm_t)));
     return 0;
 }
 
 int vfl_create_vcpu(uint32_t vm_id) {
     vfl_vm_t *vm;
-    int idx;
+    vfl_vcpu_t *v;
 
     vm = vfl_get_vm(vm_id);
     if (!vm) return -EINVAL;
-    if (vfl_add_vcpu(vm) < 0) return -ENOMEM;
-
-    idx = vm->nr_vcpus;
-    vfl_init_vcpu_state(&vm->vcpus[idx]);
+    if (vfl_vm_running(vm)) return -EBUSY;
+    v = (vfl_vcpu_t *)vfl_pages_alloc(VFL_ROUND_PAGES(sizeof(vfl_vcpu_t)));
+    if (!v) return -ENOSPC;
+    v->id = vm->next_vcpu_id++;
+    vfl_init_vcpu_state(v);
+    v->apic_id = v->id;
+    if (v->id > 0)
+        v->halted = 1;
+    v->next = vm->vcpus;
+    vm->vcpus = v;
     vm->nr_vcpus++;
-    return idx;
+    return (int)v->id;
 }
 
 int vfl_reset_vcpu(uint32_t vm_id, uint32_t vcpu_id) {
@@ -214,6 +244,8 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
 
     if (!v || !sregs) return -EINVAL;
     memcpy(&v->sregs, sregs, sizeof(vfl_sregs_t));
+    v->sregs.cr8 &= 0xFULL;
+    v->apic_tpr = (uint32_t)(v->sregs.cr8 << 4);
     v->pending = VFL_P_NONE;
     vfl_get_vm(vm_id)->tlb_epoch++;
     return 0;
@@ -258,9 +290,22 @@ int vfl_inject_irq(uint32_t vm_id, uint32_t vcpu_id, const vfl_irq_t *irq) {
 }
 
 int vfl_msr_read(vfl_vcpu_t *v, uint32_t index, uint64_t *val) {
+    if (index >= 0x800U && index <= 0xBFFU)
+        return vfl_x2apic_read(v, index, val);
     switch (index) {
-        case 0x10: *val = v->tsc; return 0;
-        case 0x1B: *val = 0xFEE00900ULL; return 0;
+        case 0x10: *val = v->tsc + v->tsc_offset; return 0;
+        case 0x1A0: *val = v->msr_misc; return 0;
+        case 0x1B: *val = v->msr_apic_base; return 0;
+        case 0x277: *val = v->msr_pat; return 0;
+        case 0x6E0: *val = v->msr_tsc_deadline; return 0;
+        case 0x200: case 0x201: case 0x202: case 0x203:
+        case 0x204: case 0x205: case 0x206: case 0x207:
+        case 0x208: case 0x209: case 0x20A: case 0x20B:
+        case 0x20C: case 0x20D: case 0x20E: case 0x20F:
+        case 0x250: case 0x258: case 0x259: case 0x268:
+        case 0x269: case 0x26A: case 0x26B: case 0x26C:
+        case 0x26D: case 0x26E: case 0x26F:
+            *val = 0; return 0;
         case 0x174: *val = v->msr_sysenter_cs; return 0;
         case 0x175: *val = v->msr_sysenter_esp; return 0;
         case 0x176: *val = v->msr_sysenter_eip; return 0;
@@ -277,9 +322,46 @@ int vfl_msr_read(vfl_vcpu_t *v, uint32_t index, uint64_t *val) {
     }
 }
 
-int vfl_msr_write(vfl_vcpu_t *v, uint32_t index, uint64_t val) {
+int vfl_msr_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint32_t index, uint64_t val) {
+    if (index >= 0x800U && index <= 0xBFFU)
+        return vfl_x2apic_write(vm, v, index, val);
     switch (index) {
-        case 0x10: v->tsc = val; return 0;
+        case 0x10: v->tsc = val - v->tsc_offset; return 0;
+        case 0x1A0:
+            if (val & ~(1ULL << 12)) return -1;
+            v->msr_misc = val; return 0;
+        case 0x1B:
+            v->msr_apic_base = (val & 0xFFFFFFFFFFFFF000ULL) |
+                               (val & 0xC00ULL) | (v->msr_apic_base & 0x100ULL);
+            v->apic_enabled = (val & 0x800ULL) ? 1 : 0;
+            return 0;
+        case 0x277:
+            if (val & 0xF8F8F8F8F8F8F8F8ULL) return -1;
+            v->msr_pat = val; return 0;
+        case 0x6E0: {
+            uint64_t now;
+            uint64_t cur;
+
+            v->msr_tsc_deadline = val;
+            if (!val) {
+                v->tsc_armed = 0;
+                return 0;
+            }
+            cur = v->tsc + v->tsc_offset;
+            now = pit_get_uptime_us();
+            v->tsc_fire_us = now + (val > cur ? (val - cur) / 1000ULL : 0ULL);
+            v->tsc_armed = 1;
+            return 0;
+        }
+        case 0x200: case 0x201: case 0x202: case 0x203:
+        case 0x204: case 0x205: case 0x206: case 0x207:
+        case 0x208: case 0x209: case 0x20A: case 0x20B:
+        case 0x20C: case 0x20D: case 0x20E: case 0x20F:
+        case 0x250: case 0x258: case 0x259:
+            return 0;
+        case 0x268: case 0x269: case 0x26A: case 0x26B:
+        case 0x26C: case 0x26D: case 0x26E: case 0x26F:
+            return 0;
         case 0x174: v->msr_sysenter_cs = val & 0xFFFFFFFFULL; return 0;
         case 0x175: v->msr_sysenter_esp = val; return 0;
         case 0x176: v->msr_sysenter_eip = val; return 0;
@@ -303,7 +385,7 @@ int vfl_set_msr(uint32_t vm_id, uint32_t vcpu_id, const vfl_msr_t *msr) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !msr) return -EINVAL;
-    if (vfl_msr_write(v, msr->index, msr->value) < 0) return -EINVAL;
+    if (vfl_msr_write(vfl_get_vm(vm_id), v, msr->index, msr->value) < 0) return -EINVAL;
     vfl_get_vm(vm_id)->tlb_epoch++;
     return 0;
 }
@@ -321,67 +403,111 @@ int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr) {
 int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     vfl_vm_t *vm;
     vfl_mem_slot_t *slot;
-    uint8_t *host_buf;
-    int i;
+    vfl_mem_slot_t *o;
     uint64_t end;
 
     vm = vfl_get_vm(vm_id);
     if (!vm || !region) return -EINVAL;
-    if (region->slot >= (uint32_t)INT32_MAX) return -EINVAL;
-    if (region->flags & ~(uint32_t)VFL_MEM_FLAG_RWX) return -EINVAL;
+    if (vfl_vm_running(vm)) return -EBUSY;
+    if (region->flags & ~(uint32_t)(VFL_MEM_FLAG_RWX | VFL_MEM_FLAG_USER))
+        return -EINVAL;
     if (region->size != 0 && region->guest_phys + region->size < region->guest_phys)
         return -EINVAL;
 
-    if (region->slot >= (uint32_t)vm->mem_slot_extent) {
-        if (region->size == 0) return 0;
-        if (vfl_resize_mem_slots(vm, (int)region->slot + 1) < 0) return -ENOMEM;
-    }
-
-    slot = &vm->mem_slots[region->slot];
+    slot = vfl_find_slot_num(vm, region->slot);
 
     if (region->size == 0) {
-        if (slot->in_use && vm->nr_mem_slots > 0) vm->nr_mem_slots--;
+        vfl_mem_slot_t **link;
+
+        if (!slot) return 0;
+        for (link = &vm->mem_slots; *link; link = &(*link)->next) {
+            if (*link == slot) {
+                *link = slot->next;
+                break;
+            }
+        }
         vfl_free_slot(slot);
-        vfl_shrink_mem_slots(vm);
+        if (vm->nr_mem_slots > 0) vm->nr_mem_slots--;
         return 0;
     }
 
     end = region->guest_phys + region->size;
-    for (i = 0; i < vm->mem_slot_extent; i++) {
-        vfl_mem_slot_t *o;
+    for (o = vm->mem_slots; o; o = o->next) {
         uint64_t oend;
 
-        if (i == (int)region->slot) continue;
-        o = &vm->mem_slots[i];
-        if (!o->in_use) continue;
+        if (o == slot) continue;
         oend = o->guest_phys + o->size;
         if (region->guest_phys < oend && end > o->guest_phys)
             return -EINVAL;
     }
 
-    host_buf = (uint8_t *)kmalloc((size_t)region->size);
-    if (!host_buf) return -ENOMEM;
-    memset(host_buf, 0, (size_t)region->size);
+    if (!slot) {
+        slot = (vfl_mem_slot_t *)vfl_pages_alloc(
+            VFL_ROUND_PAGES(sizeof(vfl_mem_slot_t)));
+        if (!slot) return -ENOSPC;
+        slot->slot = region->slot;
+        slot->next = vm->mem_slots;
+        vm->mem_slots = slot;
+        vm->nr_mem_slots++;
+    }
 
-    if (region->host_virt) {
-        if (copy_from_user(host_buf, (const void *)(uintptr_t)region->host_virt,
-                           (size_t)region->size) < 0) {
-            kfree(host_buf);
+    if ((region->flags & VFL_MEM_FLAG_USER) && region->host_virt) {
+        uint8_t probe;
+        uint64_t last = region->host_virt + region->size - 1;
+
+        if (last < region->host_virt) return -EINVAL;
+        if (copy_from_user(&probe, (const void *)(uintptr_t)region->host_virt, 1) < 0)
             return -EFAULT;
+        if (copy_from_user(&probe, (const void *)(uintptr_t)last, 1) < 0)
+            return -EFAULT;
+        if (slot->owned) {
+            if (slot->ram_phys)
+                vfl_free_slot_pages(slot);
+            else
+                kfree(slot->host_mem);
         }
-    }
+        if (slot->size != region->size)
+            vfl_free_slot_dirty(slot);
+        slot->owned = 0;
+        slot->ram_phys = 0;
+        slot->guest_phys = region->guest_phys;
+        slot->size = region->size;
+        slot->host_mem = (uint8_t *)(uintptr_t)region->host_virt;
+    } else {
+        uint64_t new_phys = 0;
+        uint8_t *new_host = NULL;
 
-    if (slot->in_use && vm->nr_mem_slots > 0 && slot->size != region->size) {
-        kfree(slot->dirty);
-        slot->dirty = NULL;
-        slot->dirty_pages = 0;
+        if (vfl_alloc_slot_pages(region->size, &new_phys, &new_host) < 0) {
+            new_host = (uint8_t *)kmalloc((size_t)region->size);
+            if (!new_host) return -ENOMEM;
+            memset(new_host, 0, (size_t)region->size);
+        }
+        if (region->host_virt) {
+            if (copy_from_user(new_host,
+                               (const void *)(uintptr_t)region->host_virt,
+                               (size_t)region->size) < 0) {
+                if (new_phys)
+                    pfa_free_contiguous(new_phys,
+                                        (region->size + 0xFFFULL) >> 12);
+                else
+                    kfree(new_host);
+                return -EFAULT;
+            }
+        }
+        if (slot->size != region->size)
+            vfl_free_slot_dirty(slot);
+        if (slot->owned) {
+            if (slot->ram_phys)
+                vfl_free_slot_pages(slot);
+            else
+                kfree(slot->host_mem);
+        }
+        slot->owned = 1;
+        slot->ram_phys = new_phys;
+        slot->host_mem = new_host;
+        slot->guest_phys = region->guest_phys;
+        slot->size = region->size;
     }
-    kfree(slot->host_mem);
-    if (!slot->in_use) vm->nr_mem_slots++;
-    slot->in_use = 1;
-    slot->guest_phys = region->guest_phys;
-    slot->size = region->size;
-    slot->host_mem = host_buf;
     slot->flags = region->flags;
     if (slot->flags == 0)
         slot->flags = VFL_MEM_FLAG_RWX;
@@ -396,9 +522,8 @@ int vfl_get_memory(uint32_t vm_id, vfl_memory_region_t *region) {
 
     vm = vfl_get_vm(vm_id);
     if (!vm || !region) return -EINVAL;
-    if (region->slot >= (uint32_t)vm->mem_slot_extent) return -ENOENT;
-    slot = &vm->mem_slots[region->slot];
-    if (!slot->in_use) return -ENOENT;
+    slot = vfl_find_slot_num(vm, region->slot);
+    if (!slot) return -ENOENT;
     region->flags = slot->flags;
     region->guest_phys = slot->guest_phys;
     region->size = slot->size;
@@ -416,16 +541,15 @@ int vfl_get_dirty(uint32_t vm_id, vfl_dirty_t *dirty) {
     if (!dirty) return -EINVAL;
     vm = vfl_get_vm(vm_id);
     if (!vm) return -EINVAL;
-    if (dirty->slot >= (uint32_t)vm->mem_slot_extent) return -ENOENT;
-    slot = &vm->mem_slots[dirty->slot];
-    if (!slot->in_use) return -ENOENT;
+    slot = vfl_find_slot_num(vm, dirty->slot);
+    if (!slot) return -ENOENT;
     need = (slot->dirty_pages + 63) >> 6;
     if (!slot->dirty) need = 0;
     dirty->copied = need;
     if (dirty->capacity < need || !dirty->bitmap) return -EINVAL;
     if (need == 0) return 0;
-    words = (uint64_t *)kmalloc((size_t)need * 8);
-    if (!words) return -ENOMEM;
+    words = (uint64_t *)vfl_pages_alloc(VFL_ROUND_PAGES(need * 8));
+    if (!words) return -ENOSPC;
     for (i = 0; i < need; i++) {
         uint64_t w = 0;
         uint64_t k;
@@ -440,10 +564,194 @@ int vfl_get_dirty(uint32_t vm_id, vfl_dirty_t *dirty) {
     }
     memset(slot->dirty, 0, (size_t)((slot->dirty_pages + 7) >> 3));
     if (copy_to_user((void *)(uintptr_t)dirty->bitmap, words, (size_t)need * 8) < 0) {
-        kfree(words);
+        vfl_pages_free(words, VFL_ROUND_PAGES(need * 8));
         return -EFAULT;
     }
-    kfree(words);
+    vfl_pages_free(words, VFL_ROUND_PAGES(need * 8));
+    return 0;
+}
+
+static uint32_t vfl_brand_word(int i) {
+    static const char s[] = "Lebirun VFL Virtual CPU";
+    uint32_t w = 0x20202020u;
+    int k;
+
+    for (k = 0; k < 4; k++) {
+        int c = i * 4 + k;
+        uint8_t ch = c < (int)sizeof(s) - 1 ? (uint8_t)s[c] : 0x20;
+
+        w = (w & ~(0xFFu << (k * 8))) | ((uint32_t)ch << (k * 8));
+    }
+    return w;
+}
+
+void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
+               uint32_t *b, uint32_t *c, uint32_t *d) {
+    uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+
+    switch (leaf) {
+        case 0:
+            r0 = 0xD; r1 = 0x756E6547; r3 = 0x49656E69; r2 = 0x6C65746E;
+            break;
+        case 1:
+            r0 = 0x00000633U; r1 = (v->apic_id << 24);
+            r3 = (1U << 0) | (1U << 4) | (1U << 5) | (1U << 6) |
+                 (1U << 8) | (1U << 11) | (1U << 15) |
+                 (1U << 23) | (1U << 24) | (1U << 25) | (1U << 26);
+            r2 = (1U << 0) | (1U << 9) | (1U << 19) | (1U << 20) | (1U << 21) |
+                 (1U << 23) | (1U << 24) | (1U << 28) | (1U << 30);
+            break;
+        case 2:
+            r0 = 1; r1 = 0x76036301U; r2 = 0; r3 = 0x00F0B5FFU;
+            break;
+        case 7:
+            if (sub == 0) {
+                r0 = 0; r1 = (1U << 0) | (1U << 3) | (1U << 8);
+                r2 = 0; r3 = 0;
+            }
+            break;
+        case 0xB:
+            if (sub == 0) {
+                r0 = 0; r1 = 1; r2 = 0x100;
+                r3 = v->apic_id;
+            } else if (sub == 1) {
+                r0 = 0; r1 = 0; r2 = 0x201;
+                r3 = v->apic_id;
+            }
+            break;
+        case 0xD:
+            if (sub == 0) {
+                r0 = 0x440; r1 = 0x440; r2 = 0x440; r3 = 0;
+            } else if (sub == 1) {
+                r0 = 0xF; r1 = 0; r2 = 0; r3 = 0;
+            }
+            break;
+        case 0x40000000:
+            r0 = 0x40000001U; r1 = 0x4C465600U; r2 = 0x204C4656U; r3 = 0x20202020U;
+            break;
+        case 0x40000001:
+            r0 = 0; r1 = 0; r2 = 0; r3 = 0;
+            break;
+        case 0x80000000:
+            r0 = 0x80000008U; r1 = 0; r2 = 0; r3 = 0;
+            break;
+        case 0x80000001:
+            r1 = 0; r2 = (1U << 5) | (1U << 27);
+            r3 = (1U << 20) | (1U << 22) | (1U << 27) | (1U << 29);
+            break;
+        case 0x80000002: case 0x80000003: case 0x80000004: {
+            int b4 = (int)(leaf - 0x80000002) * 4;
+
+            r0 = vfl_brand_word(b4); r1 = vfl_brand_word(b4 + 1);
+            r2 = vfl_brand_word(b4 + 2); r3 = vfl_brand_word(b4 + 3);
+            break;
+        }
+        case 0x80000007:
+            r0 = 0; r1 = 0; r2 = 0; r3 = (1U << 8);
+            break;
+        case 0x80000008:
+            r0 = 0x3028; r1 = 0; r2 = 0; r3 = 0;
+            break;
+        case 0x8000001E:
+            r0 = v->apic_id; r1 = 0; r2 = 0; r3 = 0;
+            break;
+        default:
+            break;
+    }
+    if (leaf != 0 && leaf != 1 && leaf != 7 && leaf != 0xB && leaf != 0xD &&
+        leaf != 0x40000000 && leaf != 0x40000001 && leaf != 0x80000000 &&
+        leaf != 0x80000001 && (leaf < 0x80000002 || leaf > 0x80000004) &&
+        leaf != 0x80000007 && leaf != 0x80000008 && leaf != 0x8000001E &&
+        leaf != 2) {
+        r0 = 0; r1 = 0; r2 = 0; r3 = 0;
+    }
+    *a = r0; *b = r1; *c = r2; *d = r3;
+}
+
+int vfl_mov_from_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t *val) {
+    (void)vm;
+    switch (cr) {
+        case 0: *val = v->sregs.cr0; return 0;
+        case 2: *val = v->sregs.cr2; return 0;
+        case 3: *val = v->sregs.cr3; return 0;
+        case 4: *val = v->sregs.cr4; return 0;
+        case 8: *val = v->sregs.cr8 & 0xFULL; return 0;
+        default: return -1;
+    }
+}
+
+int vfl_mov_to_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t val) {
+    switch (cr) {
+        case 0:
+            if (val & ~0xE005003FULL) return -1;
+            if ((val & 1ULL) && !(v->sregs.cr0 & 1ULL))
+                v->pending = VFL_P_NONE;
+            v->sregs.cr0 = val | 0x10ULL;
+            vm->tlb_epoch++;
+            return 0;
+        case 2:
+            v->sregs.cr2 = val;
+            return 0;
+        case 3:
+            v->sregs.cr3 = val & 0x000FFFFFFFFFF000ULL;
+            vm->tlb_epoch++;
+            return 0;
+        case 4:
+            if (val & ~0x2F6E7FULL) return -1;
+            v->sregs.cr4 = val;
+            vm->tlb_epoch++;
+            return 0;
+        case 8:
+            if (val > 15) return -1;
+            v->sregs.cr8 = val;
+            v->apic_tpr = (uint32_t)(val << 4);
+            return 0;
+        default:
+            return -1;
+    }
+}
+
+int vfl_vm_running(vfl_vm_t *vm) {
+    vfl_vcpu_t *v;
+
+    for (v = vm->vcpus; v; v = v->next)
+        if (v->running)
+            return 1;
+    return 0;
+}
+
+int vfl_set_lapic(uint32_t vm_id, uint32_t vcpu_id, const vfl_lapic_t *lapic) {
+    vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
+
+    if (!v || !lapic) return -EINVAL;
+    v->apic_id = lapic->id & 0xFFU;
+    v->apic_tpr = lapic->tpr & 0xFFU;
+    v->sregs.cr8 = (v->apic_tpr >> 4) & 0xFULL;
+    v->apic_spurious = lapic->spurious;
+    v->apic_enabled = lapic->enabled ? 1 : 0;
+    v->apic_icr_lo = lapic->icr_lo;
+    v->apic_icr_hi = lapic->icr_hi;
+    v->msr_apic_base = (lapic->base & 0xFFFFFFFFFFFFF000ULL) |
+                       (v->msr_apic_base & 0x900ULL);
+    if (!v->apic_enabled)
+        v->msr_apic_base &= ~0x800ULL;
+    else
+        v->msr_apic_base |= 0x800ULL;
+    return 0;
+}
+
+int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
+    vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
+
+    if (!v || !lapic) return -EINVAL;
+    lapic->id = v->apic_id;
+    lapic->tpr = v->apic_tpr;
+    lapic->eoi = 0;
+    lapic->spurious = v->apic_spurious;
+    lapic->icr_lo = v->apic_icr_lo;
+    lapic->icr_hi = v->apic_icr_hi;
+    lapic->base = v->msr_apic_base & 0xFFFFFFFFFFFFF000ULL;
+    lapic->enabled = v->apic_enabled;
     return 0;
 }
 
@@ -459,7 +767,7 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     vfl_memory_region_t region;
     vfl_run_t run;
     vfl_vm_info_t info;
-    uint32_t value;
+    vfl_lapic_t lapic;
     int r;
 
     (void)node;
@@ -467,12 +775,6 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     if (!vfl_lock_ready) return -ENODEV;
 
     switch (request) {
-        case VFL_IOCTL_GET_API_VERSION:
-            if (!arg) return -EINVAL;
-            value = VFL_API_VERSION;
-            if (copy_to_user(arg, &value, sizeof(value)) < 0) return -EFAULT;
-            return 0;
-
         case VFL_IOCTL_CREATE_VM:
             mutex_lock(&vfl_lock);
             r = vfl_create_vm();
@@ -634,17 +936,50 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
                 return -EFAULT;
             return r;
 
-        case VFL_IOCTL_RUN:
+        case VFL_IOCTL_RUN: {
+            vfl_vcpu_t *vcpu;
+
             if (!arg) return -EINVAL;
             if (copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
             if (copy_from_user(&run, (uint8_t *)arg + 8, sizeof(run)) < 0)
                 return -EFAULT;
             mutex_lock(&vfl_lock);
+            vcpu = vfl_get_vcpu(ids[0], ids[1]);
+            if (!vcpu || vcpu->running) {
+                mutex_unlock(&vfl_lock);
+                return vcpu ? -EBUSY : -EINVAL;
+            }
+            vcpu->running = 1;
+            mutex_unlock(&vfl_lock);
             r = vfl_run(ids[0], ids[1], &run);
+            mutex_lock(&vfl_lock);
+            vcpu->running = 0;
             mutex_unlock(&vfl_lock);
             if (copy_to_user((uint8_t *)arg + 8, &run, sizeof(run)) < 0)
                 return -EFAULT;
             return r;
+        }
+
+        case VFL_IOCTL_SET_LAPIC:
+            if (!arg) return -EINVAL;
+            if (copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
+            if (copy_from_user(&lapic, (uint8_t *)arg + 8, sizeof(lapic)) < 0)
+                return -EFAULT;
+            mutex_lock(&vfl_lock);
+            r = vfl_set_lapic(ids[0], ids[1], &lapic);
+            mutex_unlock(&vfl_lock);
+            return r;
+
+        case VFL_IOCTL_GET_LAPIC:
+            if (!arg) return -EINVAL;
+            if (copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
+            mutex_lock(&vfl_lock);
+            r = vfl_get_lapic(ids[0], ids[1], &lapic);
+            mutex_unlock(&vfl_lock);
+            if (r < 0) return r;
+            if (copy_to_user((uint8_t *)arg + 8, &lapic, sizeof(lapic)) < 0)
+                return -EFAULT;
+            return 0;
 
         case VFL_IOCTL_VM_INFO:
             if (!arg) return -EINVAL;

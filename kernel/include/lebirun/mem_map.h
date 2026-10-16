@@ -120,6 +120,7 @@ void *pmm_alloc_early_pages(uint64_t num);
 void pfa_init(void);
 uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
+uint64_t pfa_alloc_contiguous_below(uint64_t num_frames, uint64_t max_phys);
 void pfa_free(uint64_t phys_addr);
 uint64_t pfa_release_multiboot_range(uint64_t phys_start, uint64_t phys_end);
 uint64_t pfa_release_cold_low_memory(uint64_t phys_end);

@@ -11,7 +11,7 @@ subcategory "Kernel Settings" {
 }
 
 subcategory "Virtualization" {
-    item type=bool name="VFL (Virtualization For Lebirun)" default=enable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
+    item type=bool name="VFL (Virtualization For Lebirun)" default=disable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
 }
 
 subcategory "Device Drivers" {

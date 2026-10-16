@@ -580,6 +580,24 @@ uint64_t pfa_alloc_contiguous(uint64_t num_frames) {
     return result;
 }
 
+uint64_t pfa_alloc_contiguous_below(uint64_t num_frames, uint64_t max_phys) {
+    uint64_t result;
+    uint64_t eflags;
+    uint64_t end;
+
+    if (num_frames == 0 || max_phys == 0) return 0;
+    end = max_phys / PAGE_SIZE;
+    if (end > total_pages_managed) end = total_pages_managed;
+    pfa_lock_acquire(&eflags);
+    if (end <= kernel_reserved_frames)
+        result = 0;
+    else
+        result = find_free_frames_range(kernel_reserved_frames, end, num_frames);
+    pfa_lock_release(eflags);
+    if (!result && scheduler_initialized) task_memory_pressure_request();
+    return result;
+}
+
 void pfa_free_contiguous(uint64_t phys_addr, uint64_t num_frames) {
     uint64_t eflags;
     uint64_t i;

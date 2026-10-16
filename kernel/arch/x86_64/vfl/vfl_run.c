@@ -69,7 +69,7 @@ static int vfl_complete(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *in, vfl_run_t *o
                 if (r == -2)
                     return vfl_mem_fault(v, out);
                 if (r == 1)
-                    return vfl_exit_mmio_write(v, out, v->pending_addr,
+                    return vfl_exit_mmio_write(vm, v, out, v->pending_addr,
                                                v->pending_src, size,
                                                (int)v->pending_adv, v->pending_mask);
                 if (r < 0)
@@ -89,7 +89,7 @@ static int vfl_complete(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *in, vfl_run_t *o
             if (r == -2)
                 return vfl_mem_fault(v, out);
             if (r == 1)
-                return vfl_exit_mmio_write(v, out, v->pending_addr, res, size,
+                return vfl_exit_mmio_write(vm, v, out, v->pending_addr, res, size,
                                            (int)v->pending_adv, v->pending_mask);
             if (r < 0)
                 return vfl_exit_exception(v, out, 13, 0);
@@ -308,6 +308,7 @@ static int vfl_try_irq(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
 
     if (!v->irq_valid) return 0;
     nmi = v->irq.type == VFL_IRQ_NMI;
+    if (!nmi && v->int_shadow) return 0;
     if (!nmi && !((v->regs.rflags >> 9) & 1ULL)) return 0;
     return vfl_deliver_irq(vm, v, run);
 }
@@ -323,15 +324,15 @@ static int vfl_run_main(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
     if (!run) return -EINVAL;
     vm = vfl_get_vm(vm_id);
     if (!vm) return -EINVAL;
-    if (vcpu_id >= (uint32_t)vm->nr_vcpus) return -EINVAL;
-    vcpu = &vm->vcpus[vcpu_id];
-    if (!vcpu->active) return -EINVAL;
+    vcpu = vfl_get_vcpu(vm_id, vcpu_id);
+    if (!vcpu) return -EINVAL;
 
     input = *run;
 
     r = vfl_complete(vm, vcpu, &input, run);
     if (r != 0) return r < 0 ? -1 : 0;
 
+    vfl_timer_poll(vm, vcpu, run);
     r = vfl_try_irq(vm, vcpu, run);
     if (r == 1) return 0;
 
@@ -343,11 +344,20 @@ static int vfl_run_main(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
 
     max_steps = 65536;
     for (steps = 0; steps < max_steps; steps++) {
+        if (steps && !(steps & 1023)) {
+            vfl_timer_poll(vm, vcpu, run);
+            r = vfl_try_irq(vm, vcpu, run);
+            if (r == 1) return 0;
+        }
         r = vfl_step(vm, vcpu, run);
         if (r != 0) return r < 0 ? -1 : 0;
     }
 
-    run->exit_reason = VFL_EXIT_INTERNAL;
+    if (vcpu->irq_valid && vcpu->irq.type == VFL_IRQ_EXTERNAL &&
+        !((vcpu->regs.rflags >> 9) & 1ULL))
+        run->exit_reason = VFL_EXIT_IRQ_WINDOW;
+    else
+        run->exit_reason = VFL_EXIT_INTERNAL;
     vcpu->last_exit = *run;
     return 0;
 }
@@ -363,7 +373,7 @@ int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
 
 int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info) {
     vfl_vm_t *vm;
-    int i;
+    vfl_mem_slot_t *s;
     uint64_t total;
 
     if (!info) return -EINVAL;
@@ -371,10 +381,8 @@ int vfl_vm_info(uint32_t vm_id, vfl_vm_info_t *info) {
     if (!vm) return -EINVAL;
 
     total = 0;
-    for (i = 0; i < vm->mem_slot_extent; i++) {
-        if (vm->mem_slots[i].in_use)
-            total += vm->mem_slots[i].size;
-    }
+    for (s = vm->mem_slots; s; s = s->next)
+        total += s->size;
 
     info->vm_id = vm_id;
     info->nr_vcpus = (uint32_t)vm->nr_vcpus;

@@ -78,11 +78,23 @@ int vfl_exit_mmio_read(vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr, int size,
     return 1;
 }
 
-int vfl_exit_mmio_write(vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr,
+int vfl_exit_mmio_write(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t addr,
                         uint64_t val, int size, int adv, uint64_t ripmask) {
     uint8_t *d = run->mmio.data;
     int i;
 
+    if (size <= 4 && vfl_apic_mmio(vm, v, addr)) {
+        uint8_t tmp[4];
+        int k;
+
+        for (k = 0; k < size; k++)
+            tmp[k] = (uint8_t)(val >> (k * 8));
+        if (vfl_apic_write(vm, v, addr, tmp, size) == 0) {
+            v->pending = VFL_P_NONE;
+            vfl_adv(v, adv, ripmask);
+            return 0;
+        }
+    }
     run->exit_reason = VFL_EXIT_MMIO;
     run->mmio.phys_addr = addr;
     for (i = 0; i < size && i < 8; i++)
@@ -437,7 +449,7 @@ int vfl_exec_rmw(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_t *ea,
 
             if (vfl_translate(vm, v, ea->addr, VFL_MMU_WRITE, &phys))
                 return vfl_mem_fault(v, run);
-            return vfl_exit_mmio_write(v, run, phys, res, size, n, ripmask);
+            return vfl_exit_mmio_write(vm, v, run, phys, res, size, n, ripmask);
         }
         if (w < 0)
             return vfl_exit_exception(v, run, 13, 0);
@@ -465,7 +477,7 @@ int vfl_exec_store(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_t *ea,
 
         if (vfl_translate(vm, v, ea->addr, VFL_MMU_WRITE, &phys))
             return vfl_mem_fault(v, run);
-        return vfl_exit_mmio_write(v, run, phys, val, size, n, ripmask);
+        return vfl_exit_mmio_write(vm, v, run, phys, val, size, n, ripmask);
     }
     if (r < 0)
         return vfl_exit_exception(v, run, 13, 0);

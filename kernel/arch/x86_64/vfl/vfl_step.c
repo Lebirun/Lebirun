@@ -5,22 +5,6 @@
 #include <string.h>
 #include <stdint.h>
 
-int vfl_host_rdrand(void);
-
-static uint32_t vfl_brand(int i) {
-    static const char s[] = "Lebirun VFL Virtual CPU";
-    uint32_t w = 0x20202020u;
-    int k;
-
-    for (k = 0; k < 4; k++) {
-        int c = i * 4 + k;
-        uint8_t ch = c < (int)sizeof(s) - 1 ? (uint8_t)s[c] : 0x20;
-
-        w = (w & ~(0xFFu << (k * 8))) | ((uint32_t)ch << (k * 8));
-    }
-    return w;
-}
-
 static int vfl_chunk_range(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t base, uint64_t k,
                            int s, int wr, uint64_t *pphys, uint8_t **phost) {
     uint64_t p0;
@@ -205,6 +189,58 @@ static int vfl_string_chunk(vfl_vm_t *vm, vfl_vcpu_t *v, int op, int rep,
     }
     return 0;
 }
+static int vfl_far_load_cs(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint16_t sel) {
+    uint64_t base;
+    uint64_t lim;
+    uint64_t idx;
+    uint8_t d[8];
+    uint64_t segbase;
+    uint64_t seglim;
+    uint8_t access;
+    int r;
+    int cpl = v->sregs.cs.selector & 3;
+    int rpl = sel & 3;
+    int dpl;
+
+    if (sel & 4) {
+        base = v->sregs.ldt.base;
+        lim = v->sregs.ldt.limit;
+    } else {
+        base = v->sregs.gdt_base;
+        lim = v->sregs.gdt_limit;
+    }
+    idx = ((uint64_t)(sel >> 3)) * 8;
+    if (idx + 7 > lim)
+        return vfl_exit_exception(v, run, 13, 0);
+    r = vfl_mem_read(vm, v, base + idx, 8, d);
+    if (r == -2) return vfl_mem_fault(v, run);
+    if (r) return vfl_memerr(v, run, r);
+    access = d[5];
+    if (!(access & 0x80))
+        return vfl_exit_exception(v, run, 11, 0);
+    if (!(access & 0x10) || !(access & 0x08))
+        return vfl_exit_exception(v, run, 13, 0);
+    dpl = (access >> 5) & 3;
+    if (access & 0x04) {
+        if (dpl > cpl)
+            return vfl_exit_exception(v, run, 13, 0);
+    } else {
+        if (rpl > cpl || dpl != cpl)
+            return vfl_exit_exception(v, run, 13, 0);
+    }
+    segbase = (uint64_t)d[2] | ((uint64_t)d[3] << 8) | ((uint64_t)d[4] << 16) |
+              ((uint64_t)d[7] << 24);
+    seglim = (uint64_t)vfl_get16(d) | ((uint64_t)(d[6] & 0x0F) << 16);
+    if (d[6] & 0x80)
+        seglim = (seglim << 12) | 0xFFFULL;
+    v->sregs.cs.selector = sel;
+    v->sregs.cs.base = segbase;
+    v->sregs.cs.limit = (uint32_t)seglim;
+    v->sregs.cs.attrib = 0x80 | (uint16_t)(dpl << 5) | 0x10 | (access & 0x0F) |
+                         ((d[6] & 0x40) ? 0x400 : 0);
+    return 0;
+}
+
 int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
     uint8_t buf[15];
     uint64_t ip;
@@ -238,6 +274,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
     int rr;
     int sr;
 
+    v->int_shadow = 0;
     lm = vfl_long_mode(v);
     prot = (v->sregs.cr0 & 1ULL) != 0;
     if (lm) ripmask = ~0ULL;
@@ -691,6 +728,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
             }
             s->selector = (uint16_t)(b & 0xFFFFULL);
             if (!(v->sregs.cr0 & 1ULL)) s->base = (uint64_t)s->selector << 4;
+            if (reg == 2) v->int_shadow = 1;
             vfl_adv(v, n, ripmask);
             return 0;
         }
@@ -963,6 +1001,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
 
         case 0xFB:
             v->regs.rflags |= (1ULL << 9);
+            v->int_shadow = 1;
             n = pos;
             vfl_adv(v, n, ripmask);
             return 0;
@@ -1171,9 +1210,31 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                 v->regs.rip = off & 0xFFFFULL;
                 return 0;
             }
-            n = pos;
-            vfl_adv(v, n, ripmask);
-            return vfl_exit_shutdown(v, run);
+            if (lm)
+                return vfl_exit_exception(v, run, 6, 0);
+            {
+                uint64_t off;
+                uint16_t sel;
+
+                if (osz == 2) {
+                    if (pos + 4 > 15) return vfl_exit_internal(v, run);
+                    off = vfl_get16(buf + pos);
+                    sel = vfl_get16(buf + pos + 2);
+                    n = pos + 4;
+                } else {
+                    if (pos + 6 > 15) return vfl_exit_internal(v, run);
+                    off = vfl_get32(buf + pos);
+                    sel = vfl_get16(buf + pos + 4);
+                    n = pos + 6;
+                }
+                if (op == 0x9A) {
+                    if (vfl_push(vm, v, run, v->sregs.cs.selector, osz)) return 1;
+                    if (vfl_push(vm, v, run, v->regs.rip + (uint64_t)n, osz)) return 1;
+                }
+                if (vfl_far_load_cs(vm, v, run, sel)) return 1;
+                v->regs.rip = off & ripmask;
+                return 0;
+            }
 
         case 0xC4:
         case 0xC5:
@@ -2149,6 +2210,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
             if (vfl_pop(vm, v, run, osz, &a)) return 1;
             s->selector = (uint16_t)(a & 0xFFFFULL);
             if (!(v->sregs.cr0 & 1ULL)) s->base = (uint64_t)s->selector << 4;
+            if (op == 0x17) v->int_shadow = 1;
             n = pos;
             vfl_adv(v, n, ripmask);
             return 0;
@@ -2185,15 +2247,49 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                 case 0x20:
                 case 0x21:
                 case 0x22:
-                case 0x23:
-                    return vfl_exit_exception(v, run, 13, 0);
+                case 0x23: {
+                    int cr;
+                    int gpr;
+                    int csz;
+
+                    if (pos >= 15) return vfl_exit_internal(v, run);
+                    m = buf[pos++];
+                    if (((m >> 6) & 3) != 3)
+                        return vfl_exit_exception(v, run, 6, 0);
+                    if ((v->sregs.cs.selector & 3) != 0)
+                        return vfl_exit_exception(v, run, 13, 0);
+                    cr = ((m >> 3) & 7) | (rex_r << 3);
+                    gpr = (m & 7) | (rex_b << 3);
+                    csz = lm ? 8 : 4;
+                    n = pos;
+                    if (op2 == 0x21 || op2 == 0x23)
+                        return vfl_exit_exception(v, run, 6, 0);
+                    if (op2 == 0x20) {
+                        uint64_t cv;
+
+                        if (cr == 1 || cr == 5 || cr == 6 || cr == 7)
+                            return vfl_exit_exception(v, run, 6, 0);
+                        if (vfl_mov_from_cr(vm, v, cr, &cv) < 0)
+                            return vfl_exit_exception(v, run, 13, 0);
+                        vfl_write_reg(v, gpr, rex, csz, cv);
+                    } else {
+                        uint64_t cv = vfl_read_reg(v, gpr, rex, csz);
+
+                        if (cr == 1 || cr == 5 || cr == 6 || cr == 7)
+                            return vfl_exit_exception(v, run, 6, 0);
+                        if (vfl_mov_to_cr(vm, v, cr, cv) < 0)
+                            return vfl_exit_exception(v, run, 13, 0);
+                    }
+                    vfl_adv(v, n, ripmask);
+                    return 0;
+                }
 
                 case 0x30: {
                     uint64_t val;
 
                     val = ((uint64_t)(v->regs.rax & 0xFFFFFFFFULL)) |
                           ((uint64_t)(v->regs.rdx & 0xFFFFFFFFULL) << 32);
-                    if (vfl_msr_write(v, (uint32_t)(v->regs.rcx & 0xFFFFFFFFULL), val) < 0)
+                    if (vfl_msr_write(vm, v, (uint32_t)(v->regs.rcx & 0xFFFFFFFFULL), val) < 0)
                         return vfl_exit_exception(v, run, 13, 0);
                     vm->tlb_epoch++;
                     n = pos;
@@ -2201,13 +2297,19 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                     return 0;
                 }
 
-                case 0x31:
+                case 0x31: {
+                    uint64_t eff = v->tsc + v->tsc_offset;
+
                     v->tsc += 1000;
-                    v->regs.rax = (v->regs.rax & ~0xFFFFFFFFULL) | (v->tsc & 0xFFFFFFFFULL);
-                    v->regs.rdx = (v->regs.rdx & ~0xFFFFFFFFULL) | ((v->tsc >> 32) & 0xFFFFFFFFULL);
+                    v->regs.rax = (v->regs.rax & ~0xFFFFFFFFULL) | (eff & 0xFFFFFFFFULL);
+                    v->regs.rdx = (v->regs.rdx & ~0xFFFFFFFFULL) | ((eff >> 32) & 0xFFFFFFFFULL);
                     n = pos;
                     vfl_adv(v, n, ripmask);
                     return 0;
+                }
+
+                case 0x33:
+                    return vfl_exit_exception(v, run, 13, 0);
 
                 case 0x32: {
                     uint64_t val = 0;
@@ -2226,51 +2328,20 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                     vfl_adv(v, n, ripmask);
                     return 0;
 
-                case 0xA2:
-                    a = v->regs.rax & 0xFFFFFFFFULL;
-                    n = pos;
-                    if (a == 0) {
-                        v->regs.rax = 1;
-                        v->regs.rbx = 0x756E6547ULL;
-                        v->regs.rdx = 0x49656E69ULL;
-                        v->regs.rcx = 0x6C65746EULL;
-                    } else if (a == 1) {
-                        v->regs.rax = 0x00000633ULL;
-                        v->regs.rbx = 0;
-                        v->regs.rdx = (1ULL << 0) | (1ULL << 4) | (1ULL << 5) | (1ULL << 6) |
-                                      (1ULL << 8) | (1ULL << 11) | (1ULL << 15) |
-                                      (1ULL << 23) | (1ULL << 24) | (1ULL << 25) | (1ULL << 26);
-                        v->regs.rcx = (1ULL << 0) | (1ULL << 9) | (1ULL << 19) | (1ULL << 20) |
-                                      (1ULL << 23) | (1ULL << 28);
-                        if (!vfl_host_rdrand())
-                            v->regs.rcx &= ~(1ULL << 30);
-                        else
-                            v->regs.rcx |= (1ULL << 30);
-                    } else if (a == 0x80000000) {
-                        v->regs.rax = 0x80000004ULL;
-                        v->regs.rbx = 0;
-                        v->regs.rcx = 0;
-                        v->regs.rdx = 0;
-                    } else if (a == 0x80000001) {
-                        v->regs.rax = 0;
-                        v->regs.rbx = 0;
-                        v->regs.rcx = (1ULL << 5);
-                        v->regs.rdx = (1ULL << 20) | (1ULL << 22) | (1ULL << 27) | (1ULL << 29);
-                    } else if (a >= 0x80000002 && a <= 0x80000004) {
-                        int b4 = (int)(a - 0x80000002) * 4;
+                case 0xA2: {
+                    uint32_t r0, r1, r2, r3;
 
-                        v->regs.rax = vfl_brand(b4);
-                        v->regs.rbx = vfl_brand(b4 + 1);
-                        v->regs.rcx = vfl_brand(b4 + 2);
-                        v->regs.rdx = vfl_brand(b4 + 3);
-                    } else {
-                        v->regs.rax = 0;
-                        v->regs.rbx = 0;
-                        v->regs.rcx = 0;
-                        v->regs.rdx = 0;
-                    }
+                    a = v->regs.rax & 0xFFFFFFFFULL;
+                    b = v->regs.rcx & 0xFFFFFFFFULL;
+                    n = pos;
+                    vfl_cpuid(v, (uint32_t)a, (uint32_t)b, &r0, &r1, &r2, &r3);
+                    v->regs.rax = (v->regs.rax & ~0xFFFFFFFFULL) | r0;
+                    v->regs.rbx = (v->regs.rbx & ~0xFFFFFFFFULL) | r1;
+                    v->regs.rcx = (v->regs.rcx & ~0xFFFFFFFFULL) | r2;
+                    v->regs.rdx = (v->regs.rdx & ~0xFFFFFFFFULL) | r3;
                     vfl_adv(v, n, ripmask);
                     return 0;
+                }
 
                 case 0xA0:
                 case 0xA1:
@@ -2899,8 +2970,30 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                             break;
                         }
                         case 2:
-                        case 3:
-                            return vfl_exit_exception(v, run, 13, 0);
+                        case 3: {
+                            uint8_t wb[10];
+                            uint64_t wbase = 0;
+                            uint64_t i;
+                            int bytes = lm ? 10 : 6;
+
+                            if ((v->sregs.cs.selector & 3) != 0)
+                                return vfl_exit_exception(v, run, 13, 0);
+                            if (ea.is_reg)
+                                return vfl_exit_exception(v, run, 6, 0);
+                            rr = vfl_mem_read(vm, v, ea.addr, (uint64_t)bytes, wb);
+                            if (rr == -2) return vfl_mem_fault(v, run);
+                            if (rr) return vfl_memerr(v, run, rr);
+                            for (i = 0; i < (uint64_t)bytes - 2; i++)
+                                wbase |= (uint64_t)wb[2 + i] << (i * 8);
+                            if (grp == 2) {
+                                v->sregs.gdt_limit = vfl_get16(wb);
+                                v->sregs.gdt_base = wbase;
+                            } else {
+                                v->sregs.idt_limit = vfl_get16(wb);
+                                v->sregs.idt_base = wbase;
+                            }
+                            break;
+                        }
                         case 4:
                             if (ea.is_reg) {
                                 vfl_write_reg(v, ea.reg, rex, 2, v->sregs.cr0 & 0xFFFFULL);
@@ -2928,6 +3021,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                         case 7:
                             if (mod != 3) {
                                 n = pos;
+                                vm->tlb_epoch++;
                                 vfl_adv(v, n, ripmask);
                                 return 0;
                             }

@@ -3,9 +3,6 @@
 
 #include <stdint.h>
 
-#define VFL_API_VERSION     4
-
-#define VFL_IOCTL_GET_API_VERSION   0xAE00
 #define VFL_IOCTL_CREATE_VM         0xAE01
 #define VFL_IOCTL_DESTROY_VM        0xAE02
 #define VFL_IOCTL_CREATE_VCPU       0xAE03
@@ -24,6 +21,8 @@
 #define VFL_IOCTL_SET_MSR           0xAE10
 #define VFL_IOCTL_GET_MSR           0xAE11
 #define VFL_IOCTL_GET_DIRTY         0xAE12
+#define VFL_IOCTL_SET_LAPIC         0xAE13
+#define VFL_IOCTL_GET_LAPIC         0xAE14
 
 #define VFL_EXIT_HLT        0
 #define VFL_EXIT_IO          1
@@ -32,11 +31,13 @@
 #define VFL_EXIT_INTERNAL    4
 #define VFL_EXIT_EXCEPTION   5
 #define VFL_EXIT_PARAVIRT    6
+#define VFL_EXIT_IRQ_WINDOW  7
 
 #define VFL_MEM_FLAG_READ   (1 << 0)
 #define VFL_MEM_FLAG_WRITE  (1 << 1)
 #define VFL_MEM_FLAG_EXEC   (1 << 2)
 #define VFL_MEM_FLAG_RWX    (VFL_MEM_FLAG_READ | VFL_MEM_FLAG_WRITE | VFL_MEM_FLAG_EXEC)
+#define VFL_MEM_FLAG_USER   (1 << 3)
 
 #define VFL_IRQ_EXTERNAL    0
 #define VFL_IRQ_NMI         2
@@ -65,6 +66,7 @@ typedef struct {
     uint16_t gdt_limit;
     uint64_t idt_base;
     uint16_t idt_limit;
+    uint64_t cr8;
 } vfl_sregs_t;
 
 typedef struct {
@@ -94,6 +96,17 @@ typedef struct {
     uint32_t reserved;
     uint64_t value;
 } vfl_msr_t;
+
+typedef struct {
+    uint32_t id;
+    uint32_t tpr;
+    uint32_t eoi;
+    uint32_t spurious;
+    uint32_t icr_lo;
+    uint32_t icr_hi;
+    uint64_t base;
+    uint32_t enabled;
+} vfl_lapic_t;
 
 typedef struct {
     uint32_t slot;
@@ -155,6 +168,8 @@ int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs);
 int vfl_set_fpu(uint32_t vm_id, uint32_t vcpu_id, const vfl_fpu_t *fpu);
 int vfl_get_fpu(uint32_t vm_id, uint32_t vcpu_id, vfl_fpu_t *fpu);
 int vfl_inject_irq(uint32_t vm_id, uint32_t vcpu_id, const vfl_irq_t *irq);
+int vfl_set_lapic(uint32_t vm_id, uint32_t vcpu_id, const vfl_lapic_t *lapic);
+int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic);
 int vfl_set_msr(uint32_t vm_id, uint32_t vcpu_id, const vfl_msr_t *msr);
 int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr);
 int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region);
