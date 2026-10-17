@@ -37,7 +37,7 @@ static int vfl_string_chunk(vfl_vm_t *vm, vfl_vcpu_t *v, int op, int rep,
     uint64_t m;
     int64_t delta;
 
-    if (!rep || cnt == 0) return 1;
+    if (!rep || cnt == 0 || (v->control.flags & VFL_CONTROL_SINGLE_STEP)) return 1;
     bl = 0x1000ULL - ((sbase + si) & 0xFFFULL);
     if (bl < (uint64_t)s) return 1;
     m = (bl + (uint64_t)s - 1) / (uint64_t)s;
@@ -282,7 +282,6 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
     else ripmask = 0xFFFFULL;
 
     ip = vfl_seg_base(v, 1) + (v->regs.rip & ripmask);
-    if (!vfl_hot_lookup(vm, v, run, ip, lm, prot)) return 0;
     fr = vfl_fetch_buf(vm, v, ip, buf, 15);
     if (fr == -2) return vfl_mem_fault(v, run);
     if (fr == 1) return vfl_exit_exception(v, run, 14, 0);
@@ -1845,9 +1844,11 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                         v->pending_addr = dst;
                         v->pending_src = src;
                         v->pending_size = s;
-                        v->pending_count = rep ? cnt : 1;
+                        v->pending_count = rep &&
+                            !(v->control.flags & VFL_CONTROL_SINGLE_STEP) ? cnt : 1;
                         v->pending_port = (uint16_t)asz;
-                        v->pending_adv = (uint64_t)n;
+                        v->pending_adv = rep && cnt > 1 &&
+                            (v->control.flags & VFL_CONTROL_SINGLE_STEP) ? 0 : (uint64_t)n;
                         v->pending_mask = ripmask;
                         return vfl_str_emit(vm, v, run);
                     }
@@ -1861,9 +1862,11 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                         v->pending_addr = dst;
                         v->pending_src = src;
                         v->pending_size = s;
-                        v->pending_count = rep ? cnt : 1;
+                        v->pending_count = rep &&
+                            !(v->control.flags & VFL_CONTROL_SINGLE_STEP) ? cnt : 1;
                         v->pending_port = (uint16_t)asz;
-                        v->pending_adv = (uint64_t)n;
+                        v->pending_adv = rep && cnt > 1 &&
+                            (v->control.flags & VFL_CONTROL_SINGLE_STEP) ? 0 : (uint64_t)n;
                         v->pending_mask = ripmask;
                         return vfl_str_emit(vm, v, run);
                     }
@@ -1904,9 +1907,11 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                         v->pending_addr = dst;
                         v->pending_src = a & vfl_mask(s);
                         v->pending_size = s;
-                        v->pending_count = rep ? cnt : 1;
+                        v->pending_count = rep &&
+                            !(v->control.flags & VFL_CONTROL_SINGLE_STEP) ? cnt : 1;
                         v->pending_port = (uint16_t)asz;
-                        v->pending_adv = (uint64_t)n;
+                        v->pending_adv = rep && cnt > 1 &&
+                            (v->control.flags & VFL_CONTROL_SINGLE_STEP) ? 0 : (uint64_t)n;
                         v->pending_mask = ripmask;
                         return vfl_str_emit(vm, v, run);
                     }
@@ -2291,7 +2296,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                           ((uint64_t)(v->regs.rdx & 0xFFFFFFFFULL) << 32);
                     if (vfl_msr_write(vm, v, (uint32_t)(v->regs.rcx & 0xFFFFFFFFULL), val) < 0)
                         return vfl_exit_exception(v, run, 13, 0);
-                    vm->tlb_epoch++;
+                    __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
                     n = pos;
                     vfl_adv(v, n, ripmask);
                     return 0;
@@ -3016,12 +3021,12 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                             if (!(a & 1ULL))
                                 v->sregs.cr0 |= 0x1ULL;
                             v->sregs.cr0 = (v->sregs.cr0 & ~0xEULL) | (a & 0xEULL);
-                            vm->tlb_epoch++;
+                            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
                             break;
                         case 7:
                             if (mod != 3) {
                                 n = pos;
-                                vm->tlb_epoch++;
+                                __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
                                 vfl_adv(v, n, ripmask);
                                 return 0;
                             }

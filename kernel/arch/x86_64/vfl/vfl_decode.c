@@ -119,6 +119,12 @@ static int vfl_parity(uint8_t b) {
 }
 
 void vfl_flag_logic(vfl_vcpu_t *v, uint64_t r, int size) {
+    if (v->lazy_enabled) {
+        v->lazy_op = 1;
+        v->lazy_size = size;
+        v->lazy_r = r;
+        return;
+    }
     v->regs.rflags &= ~((1ULL << 0) | (1ULL << 2) | (1ULL << 4) |
                         (1ULL << 6) | (1ULL << 7) | (1ULL << 11));
     if ((r & vfl_mask(size)) == 0) v->regs.rflags |= (1ULL << 6);
@@ -128,11 +134,22 @@ void vfl_flag_logic(vfl_vcpu_t *v, uint64_t r, int size) {
 
 static void vfl_flag_add(vfl_vcpu_t *v, uint64_t a, uint64_t b, uint64_t carry,
                          uint64_t r, int size) {
-    int bits = size * 8;
-    __uint128_t full = (__uint128_t)(a & vfl_mask(size)) +
-                       (__uint128_t)(b & vfl_mask(size)) + carry;
-    uint64_t m = vfl_mask(size);
+    int bits;
+    __uint128_t full;
+    uint64_t m;
 
+    if (v->lazy_enabled) {
+        v->lazy_op = 2;
+        v->lazy_size = size;
+        v->lazy_a = a;
+        v->lazy_b = b;
+        v->lazy_r = r;
+        v->lazy_carry = (int)carry;
+        return;
+    }
+    bits = size * 8;
+    m = vfl_mask(size);
+    full = (__uint128_t)(a & m) + (__uint128_t)(b & m) + carry;
     v->regs.rflags &= ~((1ULL << 0) | (1ULL << 2) | (1ULL << 4) |
                         (1ULL << 6) | (1ULL << 7) | (1ULL << 11));
     if ((full >> bits) & 1) v->regs.rflags |= (1ULL << 0);
@@ -145,13 +162,25 @@ static void vfl_flag_add(vfl_vcpu_t *v, uint64_t a, uint64_t b, uint64_t carry,
 
 void vfl_flag_sub(vfl_vcpu_t *v, uint64_t a, uint64_t b, uint64_t borrow,
                   uint64_t r, int size) {
-    int bits = size * 8;
-    __uint128_t bb = (__uint128_t)(b & vfl_mask(size)) + borrow;
-    uint64_t m = vfl_mask(size);
+    int bits;
+    __uint128_t bb;
+    uint64_t m;
 
+    if (v->lazy_enabled) {
+        v->lazy_op = 3;
+        v->lazy_size = size;
+        v->lazy_a = a;
+        v->lazy_b = b;
+        v->lazy_r = r;
+        v->lazy_carry = (int)borrow;
+        return;
+    }
+    bits = size * 8;
+    m = vfl_mask(size);
+    bb = (__uint128_t)(b & m) + borrow;
     v->regs.rflags &= ~((1ULL << 0) | (1ULL << 2) | (1ULL << 4) |
                         (1ULL << 6) | (1ULL << 7) | (1ULL << 11));
-    if ((a & m) < (uint64_t)bb) v->regs.rflags |= (1ULL << 0);
+    if ((__uint128_t)(a & m) < bb) v->regs.rflags |= (1ULL << 0);
     if ((r & m) == 0) v->regs.rflags |= (1ULL << 6);
     if (r & (1ULL << (bits - 1))) v->regs.rflags |= (1ULL << 7);
     if ((((a ^ b) & (a ^ r)) >> (bits - 1)) & 1) v->regs.rflags |= (1ULL << 11);
@@ -159,11 +188,36 @@ void vfl_flag_sub(vfl_vcpu_t *v, uint64_t a, uint64_t b, uint64_t borrow,
     if (vfl_parity((uint8_t)r)) v->regs.rflags |= (1ULL << 2);
 }
 
+void vfl_flags_sync(vfl_vcpu_t *v) {
+    int enabled;
+    int op;
+
+    op = v->lazy_op;
+    if (!op) return;
+    enabled = v->lazy_enabled;
+    v->lazy_enabled = 0;
+    v->lazy_op = 0;
+    if (op == 1)
+        vfl_flag_logic(v, v->lazy_r, v->lazy_size);
+    else if (op == 2)
+        vfl_flag_add(v, v->lazy_a, v->lazy_b, v->lazy_carry, v->lazy_r, v->lazy_size);
+    else
+        vfl_flag_sub(v, v->lazy_a, v->lazy_b, v->lazy_carry, v->lazy_r, v->lazy_size);
+    v->lazy_enabled = enabled;
+}
+
 uint64_t vfl_do_alu(vfl_vcpu_t *v, int op, uint64_t a, uint64_t b, int size) {
     uint64_t m = vfl_mask(size);
-    uint64_t cf = (v->regs.rflags >> 0) & 1ULL;
+    uint64_t cf;
     uint64_t r = 0;
+    int enabled;
 
+    enabled = v->lazy_enabled;
+    if (op == VFL_RMW_ADC || op == VFL_RMW_SBB ||
+        op == VFL_RMW_INC || op == VFL_RMW_DEC)
+        vfl_flags_sync(v);
+    if (op == VFL_RMW_INC || op == VFL_RMW_DEC) v->lazy_enabled = 0;
+    cf = v->regs.rflags & 1ULL;
     switch (op) {
         case VFL_RMW_ADD:
             r = (a + b) & m;
@@ -220,6 +274,7 @@ uint64_t vfl_do_alu(vfl_vcpu_t *v, int op, uint64_t a, uint64_t b, int size) {
         default:
             break;
     }
+    v->lazy_enabled = enabled;
     return r;
 }
 

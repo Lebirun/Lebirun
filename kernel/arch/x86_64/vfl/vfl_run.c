@@ -5,17 +5,15 @@
 #include <string.h>
 #include <stdint.h>
 
-static uint8_t vfl_host_fpu[512] __attribute__((aligned(16)));
-
-static void vfl_fpu_begin(void) {
+static void vfl_fpu_begin(uint8_t *host_fpu) {
     __asm__ volatile ("fxsave64 %0"
-                      : "=m"(*(uint8_t (*)[512])vfl_host_fpu) : : "memory");
+                      : "=m"(*(uint8_t (*)[512])host_fpu) : : "memory");
     __asm__ volatile ("fninit" ::: "memory");
 }
 
-static void vfl_fpu_end(void) {
+static void vfl_fpu_end(uint8_t *host_fpu) {
     __asm__ volatile ("fxrstor64 %0"
-                      : : "m"(*(uint8_t (*)[512])vfl_host_fpu) : "memory");
+                      : : "m"(*(uint8_t (*)[512])host_fpu) : "memory");
 }
 
 static int vfl_complete(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *in, vfl_run_t *out) {
@@ -313,61 +311,95 @@ static int vfl_try_irq(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
     return vfl_deliver_irq(vm, v, run);
 }
 
-static int vfl_run_main(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
-    vfl_vm_t *vm;
-    vfl_vcpu_t *vcpu;
+static int vfl_run_main(vfl_vm_t *vm, vfl_vcpu_t *vcpu, vfl_run_t *run) {
     vfl_run_t input;
-    int steps;
-    int max_steps;
+    uint64_t steps;
+    uint64_t budget;
+    uint64_t chunk;
+    uint64_t executed;
+    uint64_t ip;
+    uint64_t ripmask;
     int r;
-
-    if (!run) return -EINVAL;
-    vm = vfl_get_vm(vm_id);
-    if (!vm) return -EINVAL;
-    vcpu = vfl_get_vcpu(vm_id, vcpu_id);
-    if (!vcpu) return -EINVAL;
+    int pending;
 
     input = *run;
-
+    pending = vcpu->pending;
     r = vfl_complete(vm, vcpu, &input, run);
     if (r != 0) return r < 0 ? -1 : 0;
-
-    vfl_timer_poll(vm, vcpu, run);
-    r = vfl_try_irq(vm, vcpu, run);
-    if (r == 1) return 0;
-
-    if (vcpu->halted) {
-        run->exit_reason = VFL_EXIT_HLT;
-        vcpu->last_exit = *run;
+    if (pending && pending != VFL_P_MMIO_FILL && !vcpu->pending &&
+        (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP)) {
+        run->exit_reason = VFL_EXIT_DEBUG;
         return 0;
     }
-
-    max_steps = 65536;
-    for (steps = 0; steps < max_steps; steps++) {
-        if (steps && !(steps & 1023)) {
-            vfl_timer_poll(vm, vcpu, run);
-            r = vfl_try_irq(vm, vcpu, run);
-            if (r == 1) return 0;
+    budget = vcpu->control.instruction_budget;
+    if (!budget) budget = 65536;
+    steps = 0;
+    while (steps < budget) {
+        if (__atomic_exchange_n(&vcpu->stop, 0, __ATOMIC_ACQ_REL)) {
+            run->exit_reason = VFL_EXIT_INTERRUPTED;
+            return 0;
         }
-        r = vfl_step(vm, vcpu, run);
-        if (r != 0) return r < 0 ? -1 : 0;
+        if (!(steps & 1023)) vfl_timer_poll(vm, vcpu, run);
+        r = vfl_try_irq(vm, vcpu, run);
+        if (r == 1) return 0;
+        if (vcpu->halted) {
+            run->exit_reason = VFL_EXIT_HLT;
+            return 0;
+        }
+        ripmask = vfl_long_mode(vcpu) ? ~0ULL :
+                  (vcpu->sregs.cr0 & 1ULL) ? 0xFFFFFFFFULL : 0xFFFFULL;
+        ip = vfl_seg_base(vcpu, 1) + (vcpu->regs.rip & ripmask);
+        if (vfl_breakpoint(vcpu, ip)) {
+            run->exit_reason = VFL_EXIT_DEBUG;
+            return 0;
+        }
+        chunk = 1024 - (steps & 1023);
+        if (chunk > budget - steps) chunk = budget - steps;
+        if (vcpu->int_shadow || (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP)) chunk = 1;
+        r = vfl_hot_run(vm, vcpu, run, chunk, &executed);
+        steps += executed;
+        if (vcpu->stats) vcpu->stats->instructions += executed;
+        if (r) return r < 0 ? -1 : 0;
+        if (!executed) {
+            if (__atomic_load_n(&vcpu->stop, __ATOMIC_ACQUIRE)) continue;
+            r = vfl_step(vm, vcpu, run);
+            steps++;
+            if (vcpu->stats) vcpu->stats->instructions++;
+            if (r) return r < 0 ? -1 : 0;
+        }
+        if (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP) {
+            run->exit_reason = VFL_EXIT_DEBUG;
+            return 0;
+        }
     }
-
-    if (vcpu->irq_valid && vcpu->irq.type == VFL_IRQ_EXTERNAL &&
-        !((vcpu->regs.rflags >> 9) & 1ULL))
+    if (vcpu->control.flags & VFL_CONTROL_TIMESLICE)
+        run->exit_reason = VFL_EXIT_TIMESLICE;
+    else if (vcpu->irq_valid && vcpu->irq.type == VFL_IRQ_EXTERNAL &&
+             !((vcpu->regs.rflags >> 9) & 1ULL))
         run->exit_reason = VFL_EXIT_IRQ_WINDOW;
     else
         run->exit_reason = VFL_EXIT_INTERNAL;
-    vcpu->last_exit = *run;
     return 0;
 }
 
 int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
+    uint8_t host_fpu[512] __attribute__((aligned(16)));
+    vfl_vm_t *vm;
+    vfl_vcpu_t *vcpu;
     int r;
 
-    vfl_fpu_begin();
-    r = vfl_run_main(vm_id, vcpu_id, run);
-    vfl_fpu_end();
+    if (!run) return -EINVAL;
+    vm = vfl_get_vm(vm_id);
+    vcpu = vfl_get_vcpu(vm_id, vcpu_id);
+    if (!vm || !vcpu) return -EINVAL;
+    vfl_fpu_begin(host_fpu);
+    r = vfl_run_main(vm, vcpu, run);
+    vfl_flags_sync(vcpu);
+    vcpu->lazy_enabled = 0;
+    vcpu->last_exit = *run;
+    if (vcpu->stats && run->exit_reason <= VFL_EXIT_DEBUG)
+        vcpu->stats->exits[run->exit_reason]++;
+    vfl_fpu_end(host_fpu);
     return r;
 }
 

@@ -5,30 +5,9 @@
 #include <stdint.h>
 
 enum {
-    VFL_H_NOP = 1,
-    VFL_H_MOV_R_IMM,
-    VFL_H_ALU_R_IMM,
-    VFL_H_PUSH_R,
-    VFL_H_POP_R,
-    VFL_H_PUSH_IMM,
-    VFL_H_PUSHF,
-    VFL_H_POPF,
-    VFL_H_MOV_RM,
-    VFL_H_ALU_RM,
-    VFL_H_ALU_RM_IMM,
-    VFL_H_TEST_RM,
-    VFL_H_MOVZX,
-    VFL_H_LEA,
-    VFL_H_JCC,
-    VFL_H_JMP,
-    VFL_H_CALL,
-    VFL_H_RET,
-    VFL_H_LEAVE,
-    VFL_H_LOOP,
-    VFL_H_INCDEC,
-    VFL_H_FFCALL,
-    VFL_H_XCHG_AX,
-    VFL_H_MOV_RM_IMM
+    VFL_H_MODE_MASK = 3,
+    VFL_H_TRACKED = 4,
+    VFL_H_LAZY = 8
 };
 
 static void vfl_hot_ea(vfl_vcpu_t *v, vfl_hot_op_t *h, vfl_ea_t *ea) {
@@ -396,24 +375,78 @@ static int vfl_hot_mov_rm_imm(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_h
 
 int vfl_hot_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t ip,
                    int lm, int prot) {
-    vfl_hot_op_t *e = &v->hot[(ip ^ (ip >> 8)) & 63];
-    uint64_t tag = ip | ((uint64_t)lm << 62) | ((uint64_t)prot << 61);
+    vfl_hot_op_t *e;
+    vfl_tlb_t *entry;
+    vfl_mem_slot_t *slot;
+    uint8_t *host;
     uint64_t phys;
-    vfl_mem_slot_t *sl;
-    int i;
+    int safe;
 
-    (void)lm;
-    (void)prot;
-    if (e->epoch != vm->tlb_epoch || e->tag != tag || !e->fn || e->len == 0 ||
-        e->len > 15)
-        return 1;
-    if (vfl_translate(vm, v, ip, VFL_MMU_EXEC, &phys)) return 1;
-    sl = vfl_find_slot(vm, phys, e->len);
-    if (!sl || !(sl->flags & VFL_MEM_FLAG_EXEC)) return 1;
-    for (i = 0; i < e->len; i++)
-        if (sl->host_mem[phys - sl->guest_phys + (uint64_t)i] != e->bytes[i])
-            return 1;
+    e = &v->hot[(ip ^ (ip >> 8)) & 63];
+    if (e->epoch != __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE) || e->tag != ip ||
+        (e->mode & VFL_H_MODE_MASK) != (lm | (prot << 1)) || !e->fn || !e->len || e->len > 15)
+        return 2;
+    if (vfl_translate(vm, v, ip, VFL_MMU_EXEC, &phys)) return 2;
+    host = vfl_ram_ptr(vm, v, ip, phys, e->len, VFL_MMU_EXEC, &entry);
+    if (!host) {
+        slot = vfl_find_slot(vm, phys, e->len);
+        if (!slot || !(slot->flags & VFL_MEM_FLAG_EXEC)) return 2;
+        host = slot->host_mem + (phys - slot->guest_phys);
+    }
+    if (e->mode & VFL_H_TRACKED) {
+        if (e->code->phys != (phys & ~0xFFFULL) ||
+            e->generation != __atomic_load_n(&e->code->generation, __ATOMIC_ACQUIRE))
+            return 2;
+    } else if (memcmp(host, e->bytes, e->len)) {
+        return 2;
+    }
+    safe = (e->mode & VFL_H_LAZY) != 0;
+    if (!safe) vfl_flags_sync(v);
+    v->lazy_enabled = safe;
+    v->int_shadow = 0;
+    if (v->stats) v->stats->hot_hits++;
     return e->fn(vm, v, run, e);
+}
+
+int vfl_breakpoint(vfl_vcpu_t *v, uint64_t ip) {
+    uint64_t i;
+
+    if (!(v->control.flags & VFL_CONTROL_BREAKPOINT)) return 0;
+    for (i = 0; i < v->control.breakpoint_count; i++)
+        if (v->breakpoints[i] == ip) return 1;
+    return 0;
+}
+
+int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
+                uint64_t *executed) {
+    uint64_t ip;
+    uint64_t ripmask;
+    int lm;
+    int prot;
+    int r;
+
+    *executed = 0;
+    lm = vfl_long_mode(v);
+    prot = (v->sregs.cr0 & 1ULL) != 0;
+    ripmask = lm ? ~0ULL : prot ? 0xFFFFFFFFULL : 0xFFFFULL;
+    r = 0;
+    while (*executed < budget) {
+        if (__atomic_load_n(&v->stop, __ATOMIC_ACQUIRE)) break;
+        ip = vfl_seg_base(v, 1) + (v->regs.rip & ripmask);
+        if (vfl_breakpoint(v, ip)) break;
+        r = vfl_hot_lookup(vm, v, run, ip, lm, prot);
+        if (r == 2) {
+            if (v->stats) v->stats->hot_misses++;
+            r = 0;
+            break;
+        }
+        (*executed)++;
+        if (r || v->irq_valid) break;
+    }
+    vfl_flags_sync(v);
+    v->lazy_enabled = 0;
+    if (v->stats && *executed) v->stats->batches++;
+    return r;
 }
 
 static int vfl_hot_parse_ea(uint8_t *buf, int *pos, int mod, int rm, int asz,
@@ -539,8 +572,9 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
     int reg = 0;
     int rm = 0;
     int i;
+    uint64_t phys;
+    vfl_mem_slot_t *slot;
 
-    (void)v;
     (void)osz;
     (void)asz;
     for (;;) {
@@ -554,8 +588,7 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
         if (op == 0x3E) { seg = 3; pos++; continue; }
         if (op == 0x64) { seg = 4; pos++; continue; }
         if (op == 0x65) { seg = 5; pos++; continue; }
-        if (op == 0xF0) { pos++; continue; }
-        if (op == 0xF2 || op == 0xF3) { pos++; continue; }
+        if (op == 0xF0 || op == 0xF2 || op == 0xF3) return;
         if (lm && op >= 0x40 && op <= 0x4F) {
             rex = 1;
             rex_w = (op >> 3) & 1;
@@ -883,12 +916,31 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
         default:
             return;
     }
-    if (pos > 15) return;
+    if (pos > 15 || (uint64_t)pos > 0x1000ULL - (ip & 0xFFFULL)) return;
     h.len = (uint8_t)pos;
-    h.tag = ip | ((uint64_t)lm << 62) | ((uint64_t)prot << 61);
-    h.epoch = vm->tlb_epoch;
-    for (i = 0; i < pos; i++)
-        h.bytes[i] = buf[i];
+    h.tag = ip;
+    h.mode = (uint8_t)(lm | (prot << 1));
+    if (h.fn == vfl_hot_nop || h.fn == vfl_hot_mov_r_imm ||
+        h.fn == vfl_hot_xchg_ax || h.fn == vfl_hot_lea ||
+        h.fn == vfl_hot_alu_r_imm ||
+        (h.eamod == 3 && (h.fn == vfl_hot_mov_rm || h.fn == vfl_hot_alu_rm ||
+         h.fn == vfl_hot_alu_rm_imm || h.fn == vfl_hot_test_rm ||
+         h.fn == vfl_hot_movzx || h.fn == vfl_hot_incdec ||
+         h.fn == vfl_hot_mov_rm_imm)))
+        h.mode |= VFL_H_LAZY;
+    if (vfl_translate(vm, v, ip, VFL_MMU_EXEC, &phys)) return;
+    slot = vfl_find_slot(vm, phys, pos);
+    if (!slot || !(slot->flags & VFL_MEM_FLAG_EXEC)) return;
+    h.code = vfl_code_page(vm, slot, phys);
+    if (h.code) {
+        h.mode |= VFL_H_TRACKED;
+        h.generation = __atomic_load_n(&h.code->generation, __ATOMIC_ACQUIRE);
+        if (memcmp(slot->host_mem + (phys - slot->guest_phys), buf, pos)) return;
+    }
+    h.epoch = __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE);
+    if (!(h.mode & VFL_H_TRACKED))
+        for (i = 0; i < pos; i++)
+            h.bytes[i] = buf[i];
     e = &v->hot[(ip ^ (ip >> 8)) & 63];
     *e = h;
 }

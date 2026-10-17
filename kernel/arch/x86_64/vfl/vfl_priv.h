@@ -36,6 +36,12 @@
 #define VFL_MMU_WRITE 1
 #define VFL_MMU_EXEC  2
 
+typedef struct vfl_code_page {
+    struct vfl_code_page *next;
+    uint64_t phys;
+    uint64_t generation;
+} vfl_code_page_t;
+
 typedef struct vfl_mem_slot {
     struct vfl_mem_slot *next;
     uint32_t slot;
@@ -47,6 +53,7 @@ typedef struct vfl_mem_slot {
     uint32_t flags;
     uint8_t *dirty;
     uint64_t dirty_pages;
+    vfl_code_page_t *code;
 } vfl_mem_slot_t;
 
 typedef struct {
@@ -56,6 +63,9 @@ typedef struct {
     uint64_t leaf_val;
     uint8_t *leaf_host;
     uint32_t leaf_w;
+    uint8_t *host;
+    vfl_mem_slot_t *slot;
+    vfl_code_page_t *code;
 } vfl_tlb_t;
 
 struct vfl_vm;
@@ -69,8 +79,14 @@ struct vfl_hot_op {
     uint64_t epoch;
     vfl_hot_fn_t fn;
     uint8_t len;
-    uint8_t bytes[15];
-    uint8_t cls;
+    union {
+        uint8_t bytes[15];
+        struct {
+            vfl_code_page_t *code;
+            uint64_t generation;
+        };
+    };
+    uint8_t mode;
     uint8_t sub;
     uint8_t sub2;
     uint8_t reg;
@@ -92,65 +108,81 @@ struct vfl_hot_op {
 typedef struct vfl_vcpu {
     struct vfl_vcpu *next;
     uint32_t id;
-    vfl_regs_t regs;
-    vfl_sregs_t sregs;
-    vfl_fpu_t fpu;
-    vfl_run_t last_exit;
-    int halted;
-    int pending;
-    uint64_t pending_addr;
-    uint32_t pending_len;
-    int pending_reg;
-    int pending_rex;
-    int pending_size;
-    uint64_t pending_src;
-    uint32_t pending_op;
-    uint64_t pending_adv;
-    uint64_t pending_mask;
-    uint64_t pending_count;
-    uint64_t mmio_cache_addr;
-    uint64_t mmio_cache_len;
-    uint8_t mmio_cache_valid;
-    uint8_t mmio_cache_data[64];
-    vfl_hot_op_t hot[64];
-    uint16_t pending_port;
-    vfl_irq_t irq;
-    int irq_valid;
-    uint64_t msr_star;
-    uint64_t msr_lstar;
-    uint64_t msr_cstar;
-    uint64_t msr_sfmask;
-    uint64_t msr_fs_base;
-    uint64_t msr_gs_base;
-    uint64_t msr_kernel_gs_base;
-    uint64_t msr_tsc_aux;
-    uint64_t msr_sysenter_cs;
-    uint64_t msr_sysenter_esp;
-    uint64_t msr_sysenter_eip;
-    uint64_t msr_pat;
-    uint64_t msr_apic_base;
-    uint64_t msr_misc;
-    uint64_t msr_tsc_deadline;
-    uint64_t tsc;
-    uint64_t tsc_offset;
-    uint32_t apic_id;
-    uint32_t apic_tpr;
-    uint32_t apic_spurious;
-    uint32_t apic_enabled;
-    uint32_t apic_icr_lo;
-    uint32_t apic_icr_hi;
-    uint32_t tmr_lvt;
-    uint32_t tmr_init;
-    uint32_t tmr_div;
-    uint64_t tmr_fire_us;
-    int tmr_armed;
-    int tmr_periodic;
-    uint64_t tsc_fire_us;
-    int tsc_armed;
-    int int_shadow;
+    union {
+        vfl_state_t state;
+        struct {
+            vfl_regs_t regs;
+            vfl_sregs_t sregs;
+            vfl_fpu_t fpu;
+            vfl_run_t last_exit;
+            int halted;
+            int pending;
+            uint64_t pending_addr;
+            uint32_t pending_len;
+            int pending_reg;
+            int pending_rex;
+            int pending_size;
+            uint64_t pending_src;
+            uint32_t pending_op;
+            uint64_t pending_adv;
+            uint64_t pending_mask;
+            uint64_t pending_count;
+            uint64_t mmio_cache_addr;
+            uint64_t mmio_cache_len;
+            uint8_t mmio_cache_valid;
+            uint8_t mmio_cache_data[64];
+            uint16_t pending_port;
+            vfl_irq_t irq;
+            int irq_valid;
+            uint64_t msr_star;
+            uint64_t msr_lstar;
+            uint64_t msr_cstar;
+            uint64_t msr_sfmask;
+            uint64_t msr_fs_base;
+            uint64_t msr_gs_base;
+            uint64_t msr_kernel_gs_base;
+            uint64_t msr_tsc_aux;
+            uint64_t msr_sysenter_cs;
+            uint64_t msr_sysenter_esp;
+            uint64_t msr_sysenter_eip;
+            uint64_t msr_pat;
+            uint64_t msr_apic_base;
+            uint64_t msr_misc;
+            uint64_t msr_tsc_deadline;
+            uint64_t tsc;
+            uint64_t tsc_offset;
+            uint32_t apic_id;
+            uint32_t apic_tpr;
+            uint32_t apic_spurious;
+            uint32_t apic_enabled;
+            uint32_t apic_icr_lo;
+            uint32_t apic_icr_hi;
+            uint32_t tmr_lvt;
+            uint32_t tmr_init;
+            uint32_t tmr_div;
+            uint64_t tmr_fire_us;
+            int tmr_armed;
+            int tmr_periodic;
+            uint64_t tsc_fire_us;
+            int tsc_armed;
+            int int_shadow;
+            uint32_t mmu_vec;
+            uint32_t mmu_code;
+        };
+    };
     int running;
-    uint32_t mmu_vec;
-    uint32_t mmu_code;
+    int stop;
+    vfl_control_t control;
+    uint64_t *breakpoints;
+    vfl_stats_t *stats;
+    int lazy_enabled;
+    int lazy_op;
+    int lazy_size;
+    int lazy_carry;
+    uint64_t lazy_a;
+    uint64_t lazy_b;
+    uint64_t lazy_r;
+    vfl_hot_op_t hot[64];
     vfl_tlb_t tlb[64];
 } vfl_vcpu_t;
 
@@ -249,6 +281,16 @@ int vfl_exec_load_reg(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_t *ea,
                       int reg, int size, int rex, int n, uint64_t ripmask);
 
 int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run);
+int vfl_breakpoint(vfl_vcpu_t *v, uint64_t ip);
+int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
+                uint64_t *executed);
+void vfl_flags_sync(vfl_vcpu_t *v);
+vfl_code_page_t *vfl_code_page(vfl_vm_t *vm, vfl_mem_slot_t *slot, uint64_t phys);
+void vfl_code_write(vfl_mem_slot_t *slot, uint64_t phys, uint64_t len);
+void vfl_code_free(vfl_mem_slot_t *slot);
+void vfl_dirty_slot(vfl_mem_slot_t *slot, uint64_t phys, uint64_t len);
+uint8_t *vfl_ram_ptr(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t phys,
+                     uint64_t len, int access, vfl_tlb_t **entry);
 int vfl_hot_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t ip,
                    int lm, int prot);
 void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,

@@ -4,6 +4,59 @@
 #include <string.h>
 #include <stdint.h>
 
+vfl_code_page_t *vfl_code_page(vfl_vm_t *vm, vfl_mem_slot_t *slot, uint64_t phys) {
+    vfl_code_page_t *head;
+    vfl_code_page_t *page;
+    vfl_code_page_t *fresh;
+
+    if (!slot->owned) return NULL;
+    phys &= ~0xFFFULL;
+    fresh = NULL;
+    for (;;) {
+        head = __atomic_load_n(&slot->code, __ATOMIC_ACQUIRE);
+        for (page = head; page; page = page->next) {
+            if (page->phys == phys) {
+                if (fresh) kfree(fresh);
+                return page;
+            }
+        }
+        if (!fresh) {
+            fresh = kmalloc(sizeof(*fresh));
+            if (!fresh) return NULL;
+            fresh->phys = phys;
+            fresh->generation = 1;
+        }
+        fresh->next = head;
+        if (__atomic_compare_exchange_n(&slot->code, &head, fresh, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
+            return fresh;
+        }
+    }
+}
+
+void vfl_code_write(vfl_mem_slot_t *slot, uint64_t phys, uint64_t len) {
+    vfl_code_page_t *page;
+    uint64_t first;
+    uint64_t last;
+
+    if (!len) return;
+    first = phys & ~0xFFFULL;
+    last = (phys + len - 1) & ~0xFFFULL;
+    for (page = __atomic_load_n(&slot->code, __ATOMIC_ACQUIRE); page; page = page->next)
+        if (page->phys >= first && page->phys <= last)
+            __atomic_add_fetch(&page->generation, 1, __ATOMIC_RELEASE);
+}
+
+void vfl_code_free(vfl_mem_slot_t *slot) {
+    vfl_code_page_t *page;
+
+    while ((page = slot->code) != NULL) {
+        slot->code = page->next;
+        kfree(page);
+    }
+}
+
 vfl_mem_slot_t *vfl_find_slot(vfl_vm_t *vm, uint64_t addr, uint64_t len) {
     vfl_mem_slot_t *s;
 
@@ -32,33 +85,49 @@ int vfl_phys_write(vfl_vm_t *vm, uint64_t addr, uint64_t len, uint8_t *in) {
     if (!s) return 1;
     if (!(s->flags & VFL_MEM_FLAG_WRITE)) return -1;
     memcpy(s->host_mem + (addr - s->guest_phys), in, (size_t)len);
+    vfl_code_write(s, addr, len);
+    vfl_dirty_slot(s, addr, len);
     return 0;
 }
 
-void vfl_mark_dirty(vfl_vm_t *vm, uint64_t phys, uint64_t len) {
-    vfl_mem_slot_t *s;
+void vfl_dirty_slot(vfl_mem_slot_t *s, uint64_t phys, uint64_t len) {
+    uint8_t *bitmap;
+    uint8_t *expected;
+    uint64_t pages;
+    uint64_t count;
     uint64_t first;
     uint64_t last;
     uint64_t p;
 
-    if (len == 0) return;
-    s = vfl_find_slot(vm, phys, len);
-    if (!s) return;
-    if (!s->dirty) {
-        s->dirty_pages = (s->size + 0xFFFULL) >> 12;
-        if (s->dirty_pages == 0) return;
-        s->dirty = (uint8_t *)vfl_pages_alloc(
-            (((s->dirty_pages + 7) >> 3) + 0xFFFULL) >> 12);
-        if (!s->dirty) {
-            s->dirty_pages = 0;
-            return;
+    if (!len) return;
+    bitmap = __atomic_load_n(&s->dirty, __ATOMIC_ACQUIRE);
+    if (!bitmap) {
+        pages = (s->size + 0xFFFULL) >> 12;
+        count = (((pages + 7) >> 3) + 0xFFFULL) >> 12;
+        bitmap = vfl_pages_alloc(count);
+        if (!bitmap) return;
+        __atomic_store_n(&s->dirty_pages, pages, __ATOMIC_RELAXED);
+        expected = NULL;
+        if (!__atomic_compare_exchange_n(&s->dirty, &expected, bitmap, 0,
+                                          __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+            vfl_pages_free(bitmap, count);
+            bitmap = expected;
         }
     }
     first = (phys - s->guest_phys) >> 12;
     last = (phys - s->guest_phys + len - 1) >> 12;
-    if (last >= s->dirty_pages) last = s->dirty_pages - 1;
     for (p = first; p <= last; p++)
-        s->dirty[p >> 3] |= (uint8_t)(1 << (p & 7));
+        __atomic_fetch_or(&bitmap[p >> 3], (uint8_t)(1U << (p & 7)), __ATOMIC_RELAXED);
+}
+
+void vfl_mark_dirty(vfl_vm_t *vm, uint64_t phys, uint64_t len) {
+    vfl_mem_slot_t *slot;
+
+    if (!len) return;
+    slot = vfl_find_slot(vm, phys, len);
+    if (!slot) return;
+    vfl_dirty_slot(slot, phys, len);
+    vfl_code_write(slot, phys, len);
 }
 
 static int vfl_table_read(vfl_vm_t *vm, uint64_t phys, uint64_t *entry) {
@@ -134,16 +203,31 @@ static void vfl_tlb_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int acces
     vfl_tlb_t *e = &v->tlb[((linear >> 12) ^ ((uint64_t)access << 4) ^
                             (linear >> 16)) & 63];
     vfl_mem_slot_t *sl;
+    vfl_code_page_t *page;
 
-    if (leaf_w != 4 && leaf_w != 8) return;
-    sl = vfl_find_slot(vm, leaf_phys, leaf_w);
-    if (!sl) return;
-    e->epoch = vm->tlb_epoch;
+    e->host = NULL;
+    e->slot = NULL;
+    e->code = NULL;
+    e->leaf_host = NULL;
+    if (leaf_w) {
+        sl = vfl_find_slot(vm, leaf_phys, leaf_w);
+        if (!sl) return;
+        e->leaf_host = sl->host_mem + (leaf_phys - sl->guest_phys);
+    }
+    e->epoch = __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE);
     e->tag = tag;
     e->phys = phys & ~0xFFFULL;
     e->leaf_val = leaf_val;
-    e->leaf_host = sl->host_mem + (leaf_phys - sl->guest_phys);
     e->leaf_w = leaf_w;
+    sl = vfl_find_slot(vm, e->phys, 0x1000);
+    if (!sl) return;
+    e->slot = sl;
+    e->host = sl->host_mem + (e->phys - sl->guest_phys);
+    for (page = __atomic_load_n(&sl->code, __ATOMIC_ACQUIRE); page; page = page->next)
+        if (page->phys == e->phys) {
+            e->code = page;
+            break;
+        }
 }
 
 static int vfl_tlb_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int access,
@@ -154,10 +238,12 @@ static int vfl_tlb_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int acce
                             (linear >> 16)) & 63];
     uint64_t lv;
 
-    if (e->epoch != vm->tlb_epoch || e->tag != tag) return 1;
-    if (!e->leaf_host) return 1;
-    lv = e->leaf_w == 8 ? *(uint64_t *)e->leaf_host : *(uint32_t *)e->leaf_host;
-    if (lv != e->leaf_val) return 1;
+    if (e->epoch != __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE) || e->tag != tag) return 1;
+    if (e->leaf_w) {
+        if (!e->leaf_host) return 1;
+        lv = e->leaf_w == 8 ? *(uint64_t *)e->leaf_host : *(uint32_t *)e->leaf_host;
+        if (lv != e->leaf_val) return 1;
+    }
     *phys = e->phys + (linear & 0xFFFULL);
     return 0;
 }
@@ -175,11 +261,17 @@ int vfl_translate(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int access, uint
 
     v->mmu_vec = 14;
     v->mmu_code = 0;
-    if (!(v->sregs.cr0 & 1ULL) || !(v->sregs.cr0 & 0x80000000ULL)) {
-        *phys = linear;
+    if (!vfl_tlb_lookup(vm, v, linear, access, user, phys)) {
+        if (v->stats) v->stats->tlb_hits++;
         return 0;
     }
-    if (!vfl_tlb_lookup(vm, v, linear, access, user, phys)) return 0;
+    if (v->stats) v->stats->tlb_misses++;
+    if (!(v->sregs.cr0 & 1ULL) || !(v->sregs.cr0 & 0x80000000ULL)) {
+        *phys = linear;
+        vfl_tlb_fill(vm, v, linear, access, user, *phys, 0, 0, 0);
+        return 0;
+    }
+    if (v->stats) v->stats->page_walks++;
     if (lm) {
         uint64_t table = v->sregs.cr3 & 0x000FFFFFFFFFF000ULL;
         int shifts[4] = {39, 30, 21, 12};
@@ -389,7 +481,28 @@ int vfl_translate(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int access, uint
     }
 }
 
+uint8_t *vfl_ram_ptr(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t phys,
+                     uint64_t len, int access, vfl_tlb_t **entry) {
+    vfl_tlb_t *e;
+    uint64_t tag;
+    uint32_t flag;
+
+    if (len > 0x1000ULL - (addr & 0xFFFULL)) return NULL;
+    tag = (addr >> 12) | ((uint64_t)(access & 3) << 60) |
+          ((v->sregs.cs.selector & 3) == 3 ? (1ULL << 59) : 0);
+    e = &v->tlb[((addr >> 12) ^ ((uint64_t)access << 4) ^ (addr >> 16)) & 63];
+    if (e->epoch != __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE) || e->tag != tag || !e->host ||
+        e->phys != (phys & ~0xFFFULL)) return NULL;
+    flag = access == VFL_MMU_WRITE ? VFL_MEM_FLAG_WRITE :
+           access == VFL_MMU_EXEC ? VFL_MEM_FLAG_EXEC : VFL_MEM_FLAG_READ;
+    if (!(e->slot->flags & flag)) return NULL;
+    *entry = e;
+    return e->host + (addr & 0xFFFULL);
+}
+
 int vfl_mem_read(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint8_t *out) {
+    uint8_t *host;
+    vfl_tlb_t *entry;
     uint64_t phys;
     int r;
 
@@ -407,10 +520,17 @@ int vfl_mem_read(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint8
             return 0;
         }
     }
+    host = vfl_ram_ptr(vm, v, addr, phys, len, VFL_MMU_READ, &entry);
+    if (host) {
+        memcpy(out, host, (size_t)len);
+        return 0;
+    }
     return vfl_phys_read(vm, phys, len, out);
 }
 
 int vfl_mem_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint8_t *in) {
+    uint8_t *host;
+    vfl_tlb_t *entry;
     uint64_t phys;
     int r;
 
@@ -419,9 +539,15 @@ int vfl_mem_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint
     if (vfl_apic_mmio(vm, v, phys) && len <= 4 &&
         vfl_apic_write(vm, v, phys, in, len) == 0)
         return 0;
-    r = vfl_phys_write(vm, phys, len, in);
-    if (r == 0) vfl_mark_dirty(vm, phys, len);
-    return r;
+    host = vfl_ram_ptr(vm, v, addr, phys, len, VFL_MMU_WRITE, &entry);
+    if (host) {
+        memcpy(host, in, (size_t)len);
+        if (entry->code)
+            __atomic_add_fetch(&entry->code->generation, 1, __ATOMIC_RELEASE);
+        vfl_dirty_slot(entry->slot, phys, len);
+        return 0;
+    }
+    return vfl_phys_write(vm, phys, len, in);
 }
 
 int vfl_fetch_buf(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint8_t *buf, int len) {

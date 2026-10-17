@@ -46,6 +46,7 @@ static void vfl_free_slot(vfl_mem_slot_t *slot) {
             kfree(slot->host_mem);
     }
     vfl_free_slot_dirty(slot);
+    vfl_code_free(slot);
     vfl_pages_free(slot, VFL_ROUND_PAGES(sizeof(vfl_mem_slot_t)));
 }
 
@@ -180,6 +181,8 @@ int vfl_destroy_vm(uint32_t vm_id) {
     }
     while ((v = vm->vcpus) != NULL) {
         vm->vcpus = v->next;
+        if (v->stats) kfree(v->stats);
+        if (v->breakpoints) kfree(v->breakpoints);
         vfl_pages_free(v, VFL_ROUND_PAGES(sizeof(vfl_vcpu_t)));
     }
     for (link = &vfl_vms; *link; link = &(*link)->next) {
@@ -216,6 +219,9 @@ int vfl_reset_vcpu(uint32_t vm_id, uint32_t vcpu_id) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v) return -EINVAL;
+    if (v->running) return -EBUSY;
+    if (v->stats) kfree(v->stats);
+    if (v->breakpoints) kfree(v->breakpoints);
     vfl_init_vcpu_state(v);
     return 0;
 }
@@ -224,6 +230,7 @@ int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !regs) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(&v->regs, regs, sizeof(vfl_regs_t));
     v->regs.rflags |= 0x2;
     v->halted = 0;
@@ -235,6 +242,7 @@ int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !regs) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(regs, &v->regs, sizeof(vfl_regs_t));
     return 0;
 }
@@ -243,11 +251,12 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !sregs) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(&v->sregs, sregs, sizeof(vfl_sregs_t));
     v->sregs.cr8 &= 0xFULL;
     v->apic_tpr = (uint32_t)(v->sregs.cr8 << 4);
     v->pending = VFL_P_NONE;
-    vfl_get_vm(vm_id)->tlb_epoch++;
+    __atomic_add_fetch(&vfl_get_vm(vm_id)->tlb_epoch, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -255,6 +264,7 @@ int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !sregs) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(sregs, &v->sregs, sizeof(vfl_sregs_t));
     return 0;
 }
@@ -263,6 +273,7 @@ int vfl_set_fpu(uint32_t vm_id, uint32_t vcpu_id, const vfl_fpu_t *fpu) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !fpu) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(&v->fpu, fpu, sizeof(vfl_fpu_t));
     v->fpu.fcw |= 0x40;
     return 0;
@@ -272,6 +283,7 @@ int vfl_get_fpu(uint32_t vm_id, uint32_t vcpu_id, vfl_fpu_t *fpu) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !fpu) return -EINVAL;
+    if (v->running) return -EBUSY;
     memcpy(fpu, &v->fpu, sizeof(vfl_fpu_t));
     return 0;
 }
@@ -385,8 +397,9 @@ int vfl_set_msr(uint32_t vm_id, uint32_t vcpu_id, const vfl_msr_t *msr) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !msr) return -EINVAL;
+    if (v->running) return -EBUSY;
     if (vfl_msr_write(vfl_get_vm(vm_id), v, msr->index, msr->value) < 0) return -EINVAL;
-    vfl_get_vm(vm_id)->tlb_epoch++;
+    __atomic_add_fetch(&vfl_get_vm(vm_id)->tlb_epoch, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -395,6 +408,7 @@ int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr) {
     uint64_t val = 0;
 
     if (!v || !msr) return -EINVAL;
+    if (v->running) return -EBUSY;
     if (vfl_msr_read(v, msr->index, &val) < 0) return -EINVAL;
     msr->value = val;
     return 0;
@@ -415,6 +429,7 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
         return -EINVAL;
 
     slot = vfl_find_slot_num(vm, region->slot);
+    __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
 
     if (region->size == 0) {
         vfl_mem_slot_t **link;
@@ -508,11 +523,12 @@ int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
         slot->guest_phys = region->guest_phys;
         slot->size = region->size;
     }
+    vfl_code_free(slot);
     slot->flags = region->flags;
     if (slot->flags == 0)
         slot->flags = VFL_MEM_FLAG_RWX;
 
-    vm->tlb_epoch++;
+    __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -687,19 +703,19 @@ int vfl_mov_to_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t val) {
             if ((val & 1ULL) && !(v->sregs.cr0 & 1ULL))
                 v->pending = VFL_P_NONE;
             v->sregs.cr0 = val | 0x10ULL;
-            vm->tlb_epoch++;
+            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
             return 0;
         case 2:
             v->sregs.cr2 = val;
             return 0;
         case 3:
             v->sregs.cr3 = val & 0x000FFFFFFFFFF000ULL;
-            vm->tlb_epoch++;
+            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
             return 0;
         case 4:
             if (val & ~0x2F6E7FULL) return -1;
             v->sregs.cr4 = val;
-            vm->tlb_epoch++;
+            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
             return 0;
         case 8:
             if (val > 15) return -1;
@@ -724,6 +740,7 @@ int vfl_set_lapic(uint32_t vm_id, uint32_t vcpu_id, const vfl_lapic_t *lapic) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !lapic) return -EINVAL;
+    if (v->running) return -EBUSY;
     v->apic_id = lapic->id & 0xFFU;
     v->apic_tpr = lapic->tpr & 0xFFU;
     v->sregs.cr8 = (v->apic_tpr >> 4) & 0xFULL;
@@ -744,6 +761,7 @@ int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !lapic) return -EINVAL;
+    if (v->running) return -EBUSY;
     lapic->id = v->apic_id;
     lapic->tpr = v->apic_tpr;
     lapic->eoi = 0;
@@ -753,6 +771,212 @@ int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
     lapic->base = v->msr_apic_base & 0xFFFFFFFFFFFFF000ULL;
     lapic->enabled = v->apic_enabled;
     return 0;
+}
+
+static int vfl_valid_state(const vfl_state_t *state) {
+    int size;
+
+    if (state->mmio_cache_len > sizeof(state->mmio_cache_data) ||
+        state->pending_len > sizeof(state->mmio_cache_data)) return 0;
+    if (!state->pending) return 1;
+    if (state->pending_adv > 15 ||
+        (state->pending != VFL_P_MMIO_FILL && state->pending_mask != 0xFFFFULL &&
+         state->pending_mask != 0xFFFFFFFFULL && state->pending_mask != ~0ULL)) return 0;
+    size = state->pending_size;
+    switch (state->pending) {
+        case VFL_P_IO_IN_REG:
+        case VFL_P_IO_IN_MEM:
+            return size == 1 || size == 2 || size == 4;
+        case VFL_P_MMIO_REG:
+        case VFL_P_MMIO_RMW:
+        case VFL_P_MMIO_JMP:
+        case VFL_P_MMIO_CALL:
+        case VFL_P_MMIO_PUSH:
+            return (size == 1 || size == 2 || size == 4 || size == 8) &&
+                   state->pending_op <= 14;
+        case VFL_P_MMIO_XMM:
+            return size == 4 || size == 8 || size == 16 || size == 32;
+        case VFL_P_MMIO_FILL:
+            return size > 0 && size <= (int)sizeof(state->mmio_cache_data);
+        case VFL_P_MMIO_STR:
+            return (size == 1 || size == 2 || size == 4 || size == 8) &&
+                   state->pending_op <= 2 && (state->pending_port == 2 ||
+                   state->pending_port == 4 || state->pending_port == 8);
+        default:
+            return 0;
+    }
+}
+
+static int vfl_state_ioctl(unsigned long request, void *arg) {
+    uint32_t ids[2];
+    vfl_vm_t *vm;
+    vfl_vcpu_t *v;
+    vfl_state_t *state;
+    uint64_t now;
+    int r;
+
+    if (!arg || copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
+    state = kmalloc(sizeof(*state));
+    if (!state) return -ENOMEM;
+    if (request == VFL_IOCTL_SET_STATE &&
+        copy_from_user(state, (uint8_t *)arg + 8, sizeof(*state)) < 0) {
+        kfree(state);
+        return -EFAULT;
+    }
+    mutex_lock(&vfl_lock);
+    vm = vfl_get_vm(ids[0]);
+    v = vfl_get_vcpu(ids[0], ids[1]);
+    r = 0;
+    if (!v) r = -EINVAL;
+    else if (vfl_vm_running(vm)) r = -EBUSY;
+    else {
+        now = pit_get_uptime_us();
+        if (request == VFL_IOCTL_GET_STATE) {
+            *state = v->state;
+            state->tmr_remaining_us = v->tmr_armed && v->tmr_fire_us > now ?
+                                      v->tmr_fire_us - now : 0;
+            state->tsc_remaining_us = v->tsc_armed && v->tsc_fire_us > now ?
+                                      v->tsc_fire_us - now : 0;
+        } else if (!vfl_valid_state(state) || state->tmr_remaining_us > ~0ULL - now ||
+                   state->tsc_remaining_us > ~0ULL - now) {
+            r = -EINVAL;
+        } else {
+            v->state = *state;
+            v->regs.rflags |= 2;
+            v->fpu.fcw |= 0x40;
+            v->sregs.cr8 &= 15;
+            v->apic_tpr = (uint32_t)(v->sregs.cr8 << 4);
+            v->tmr_fire_us = now + state->tmr_remaining_us;
+            v->tsc_fire_us = now + state->tsc_remaining_us;
+            v->lazy_op = 0;
+            v->lazy_enabled = 0;
+            __atomic_store_n(&v->stop, 0, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
+        }
+    }
+    mutex_unlock(&vfl_lock);
+    if (!r && request == VFL_IOCTL_GET_STATE &&
+        copy_to_user((uint8_t *)arg + 8, state, sizeof(*state)) < 0) r = -EFAULT;
+    kfree(state);
+    return r;
+}
+
+static int vfl_control_ioctl(unsigned long request, void *arg) {
+    uint32_t ids[2];
+    vfl_vcpu_t *v;
+    vfl_control_t control;
+    vfl_stats_t stats;
+    vfl_stats_t *fresh;
+    uint64_t *breakpoints;
+    uint64_t bytes;
+    int r;
+
+    if (!arg || copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
+    breakpoints = NULL;
+    if (request == VFL_IOCTL_SET_CONTROL) {
+        if (copy_from_user(&control, (uint8_t *)arg + 8, sizeof(control)) < 0)
+            return -EFAULT;
+        if (control.reserved || (control.flags & ~(VFL_CONTROL_STATS | VFL_CONTROL_SINGLE_STEP |
+            VFL_CONTROL_BREAKPOINT | VFL_CONTROL_TIMESLICE))) return -EINVAL;
+        if (!(control.flags & VFL_CONTROL_BREAKPOINT)) control.breakpoint_count = 0;
+        if (control.breakpoint_count > ~0ULL / sizeof(*breakpoints)) return -EINVAL;
+        bytes = control.breakpoint_count * sizeof(*breakpoints);
+        if (bytes) {
+            breakpoints = kmalloc(bytes);
+            if (!breakpoints) return -ENOMEM;
+            if (copy_from_user(breakpoints, (void *)(uintptr_t)control.breakpoints, bytes) < 0) {
+                kfree(breakpoints);
+                return -EFAULT;
+            }
+        }
+    }
+    mutex_lock(&vfl_lock);
+    v = vfl_get_vcpu(ids[0], ids[1]);
+    r = 0;
+    if (!v) r = -EINVAL;
+    else if (request == VFL_IOCTL_INTERRUPT)
+        __atomic_store_n(&v->stop, 1, __ATOMIC_RELEASE);
+    else if (v->running) r = -EBUSY;
+    else if (request == VFL_IOCTL_SET_CONTROL) {
+        if ((control.flags & VFL_CONTROL_STATS) && !v->stats) {
+            fresh = kmalloc(sizeof(*fresh));
+            if (!fresh) r = -ENOMEM;
+            else {
+                memset(fresh, 0, sizeof(*fresh));
+                v->stats = fresh;
+            }
+        }
+        if (!r) {
+            if (!(control.flags & VFL_CONTROL_STATS) && v->stats) {
+                kfree(v->stats);
+                v->stats = NULL;
+            }
+            if (v->breakpoints) kfree(v->breakpoints);
+            v->breakpoints = breakpoints;
+            breakpoints = NULL;
+            v->control = control;
+        }
+    } else if (request == VFL_IOCTL_GET_CONTROL) control = v->control;
+    else if (request == VFL_IOCTL_GET_STATS) {
+        memset(&stats, 0, sizeof(stats));
+        if (v->stats) stats = *v->stats;
+    } else if (request == VFL_IOCTL_RESET_STATS && v->stats)
+        memset(v->stats, 0, sizeof(*v->stats));
+    mutex_unlock(&vfl_lock);
+    if (breakpoints) kfree(breakpoints);
+    if (!r && request == VFL_IOCTL_GET_CONTROL &&
+        copy_to_user((uint8_t *)arg + 8, &control, sizeof(control)) < 0) r = -EFAULT;
+    if (!r && request == VFL_IOCTL_GET_STATS &&
+        copy_to_user((uint8_t *)arg + 8, &stats, sizeof(stats)) < 0) r = -EFAULT;
+    return r;
+}
+
+static int vfl_memory_ioctl(unsigned long request, void *arg) {
+    uint32_t vm_id;
+    vfl_memory_transfer_t transfer;
+    vfl_vm_t *vm;
+    vfl_mem_slot_t *slot;
+    uint8_t *host;
+    uint64_t offset;
+    uint64_t chunk;
+    int r;
+
+    if (!arg || copy_from_user(&vm_id, arg, sizeof(vm_id)) < 0 ||
+        copy_from_user(&transfer, (uint8_t *)arg + 4, sizeof(transfer)) < 0)
+        return -EFAULT;
+    if (transfer.guest_phys + transfer.size < transfer.guest_phys ||
+        transfer.buffer + transfer.size < transfer.buffer) return -EINVAL;
+    mutex_lock(&vfl_lock);
+    vm = vfl_get_vm(vm_id);
+    r = 0;
+    if (!vm) r = -EINVAL;
+    else if (vfl_vm_running(vm)) r = -EBUSY;
+    else {
+        offset = 0;
+        while (offset < transfer.size) {
+            slot = vfl_find_slot(vm, transfer.guest_phys + offset, 1);
+            if (!slot) {
+                r = -ENOENT;
+                break;
+            }
+            chunk = slot->size - (transfer.guest_phys + offset - slot->guest_phys);
+            if (chunk > transfer.size - offset) chunk = transfer.size - offset;
+            host = slot->host_mem + (transfer.guest_phys + offset - slot->guest_phys);
+            if (request == VFL_IOCTL_READ_MEMORY)
+                r = copy_to_user((void *)(uintptr_t)(transfer.buffer + offset), host, chunk);
+            else {
+                r = copy_from_user(host, (void *)(uintptr_t)(transfer.buffer + offset), chunk);
+                vfl_mark_dirty(vm, transfer.guest_phys + offset, chunk);
+            }
+            if (r < 0) {
+                r = -EFAULT;
+                break;
+            }
+            offset += chunk;
+        }
+    }
+    mutex_unlock(&vfl_lock);
+    return r;
 }
 
 static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
@@ -775,6 +999,18 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     if (!vfl_lock_ready) return -ENODEV;
 
     switch (request) {
+        case VFL_IOCTL_SET_CONTROL:
+        case VFL_IOCTL_GET_CONTROL:
+        case VFL_IOCTL_GET_STATS:
+        case VFL_IOCTL_RESET_STATS:
+        case VFL_IOCTL_INTERRUPT:
+            return vfl_control_ioctl(request, arg);
+        case VFL_IOCTL_GET_STATE:
+        case VFL_IOCTL_SET_STATE:
+            return vfl_state_ioctl(request, arg);
+        case VFL_IOCTL_READ_MEMORY:
+        case VFL_IOCTL_WRITE_MEMORY:
+            return vfl_memory_ioctl(request, arg);
         case VFL_IOCTL_CREATE_VM:
             mutex_lock(&vfl_lock);
             r = vfl_create_vm();
