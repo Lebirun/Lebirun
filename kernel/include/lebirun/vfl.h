@@ -32,6 +32,7 @@
 #define VFL_IOCTL_SET_STATE         0xAE1B
 #define VFL_IOCTL_READ_MEMORY       0xAE1C
 #define VFL_IOCTL_WRITE_MEMORY      0xAE1D
+#define VFL_IOCTL_WAIT              0xAE1E
 
 #define VFL_EXIT_HLT        0
 #define VFL_EXIT_IO          1
@@ -45,10 +46,14 @@
 #define VFL_EXIT_INTERRUPTED 9
 #define VFL_EXIT_DEBUG       10
 
+#define VFL_INTERNAL_EMULATION 1
+#define VFL_INTERNAL_MEMORY    2
+
 #define VFL_CONTROL_STATS       (1 << 0)
 #define VFL_CONTROL_SINGLE_STEP (1 << 1)
 #define VFL_CONTROL_BREAKPOINT  (1 << 2)
 #define VFL_CONTROL_TIMESLICE   (1 << 3)
+#define VFL_CONTROL_EXCEPTIONS  (1 << 4)
 
 #define VFL_MEM_FLAG_READ   (1 << 0)
 #define VFL_MEM_FLAG_WRITE  (1 << 1)
@@ -58,6 +63,7 @@
 
 #define VFL_IRQ_EXTERNAL    0
 #define VFL_IRQ_NMI         2
+#define VFL_IRQ_EXCEPTION   3
 
 typedef struct {
     uint64_t rax, rbx, rcx, rdx;
@@ -159,7 +165,15 @@ typedef struct {
         struct {
             uint32_t vector;
             uint32_t error_code;
+            uint32_t software;
+            uint32_t instruction_length;
         } exception;
+        struct {
+            uint64_t rip;
+            uint32_t reason;
+            uint8_t bytes[15];
+            uint8_t length;
+        } internal;
         struct {
             uint64_t nr;
             uint64_t args[4];
@@ -172,6 +186,7 @@ typedef struct {
     uint32_t nr_vcpus;
     uint32_t nr_mem_slots;
     uint64_t total_mem;
+    uint64_t resident_mem;
 } vfl_vm_info_t;
 
 typedef struct {
@@ -179,6 +194,10 @@ typedef struct {
     uint64_t size;
     uint64_t buffer;
 } vfl_memory_transfer_t;
+
+typedef struct {
+    uint64_t timeout_us;
+} vfl_wait_t;
 
 typedef struct {
     uint64_t instruction_budget;
@@ -257,6 +276,11 @@ typedef struct {
     int int_shadow;
     uint32_t mmu_vec;
     uint32_t mmu_code;
+    uint32_t apic_irr[8];
+    uint32_t apic_isr[8];
+    uint32_t apic_pending;
+    int nmi_pending;
+    int nmi_blocked;
 } vfl_state_t;
 
 int vfl_create_vm(void);

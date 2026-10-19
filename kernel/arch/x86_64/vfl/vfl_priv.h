@@ -3,6 +3,7 @@
 
 #include <lebirun/vfl.h>
 #include <lebirun/vfs.h>
+#include <lebirun/mutex.h>
 #include <stdint.h>
 
 #define VFL_P_NONE          0
@@ -31,6 +32,7 @@
 #define VFL_RMW_NEG 11
 
 #define VFL_SIMD_NOTME 2
+#define VFL_IRQ_SOFTWARE 4
 
 #define VFL_MMU_READ  0
 #define VFL_MMU_WRITE 1
@@ -46,7 +48,9 @@ typedef struct vfl_mem_slot {
     struct vfl_mem_slot *next;
     uint32_t slot;
     int owned;
-    uint64_t ram_phys;
+    void *pages;
+    unsigned depth;
+    uint64_t resident_pages;
     uint64_t guest_phys;
     uint64_t size;
     uint8_t *host_mem;
@@ -79,6 +83,7 @@ struct vfl_hot_op {
     uint64_t epoch;
     vfl_hot_fn_t fn;
     uint8_t len;
+    uint8_t successor;
     union {
         uint8_t bytes[15];
         struct {
@@ -168,10 +173,16 @@ typedef struct vfl_vcpu {
             int int_shadow;
             uint32_t mmu_vec;
             uint32_t mmu_code;
+            uint32_t apic_irr[8];
+            uint32_t apic_isr[8];
+            uint32_t apic_pending;
+            int nmi_pending;
+            int nmi_blocked;
         };
     };
     int running;
     int stop;
+    int waiting;
     vfl_control_t control;
     uint64_t *breakpoints;
     vfl_stats_t *stats;
@@ -190,6 +201,7 @@ typedef struct vfl_vm {
     struct vfl_vm *next;
     uint32_t id;
     uint64_t tlb_epoch;
+    mutex_t execution_lock;
     vfl_vcpu_t *vcpus;
     int nr_vcpus;
     uint32_t next_vcpu_id;
@@ -239,6 +251,8 @@ uint64_t vfl_get_count(vfl_vcpu_t *v, int asz);
 void vfl_set_count(vfl_vcpu_t *v, int asz, uint64_t val);
 
 vfl_mem_slot_t *vfl_find_slot(vfl_vm_t *vm, uint64_t addr, uint64_t len);
+uint8_t *vfl_slot_ptr(vfl_vm_t *vm, vfl_mem_slot_t *slot, uint64_t addr, uint64_t len, int write);
+void vfl_slot_free_pages(void *pages, unsigned depth);
 int vfl_phys_read(vfl_vm_t *vm, uint64_t addr, uint64_t len, uint8_t *out);
 int vfl_phys_write(vfl_vm_t *vm, uint64_t addr, uint64_t len, uint8_t *in);
 int vfl_translate(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, int access, uint64_t *phys);
@@ -249,6 +263,7 @@ int vfl_mem_fault(vfl_vcpu_t *v, vfl_run_t *run);
 void vfl_mark_dirty(vfl_vm_t *vm, uint64_t phys, uint64_t len);
 
 int vfl_exit_exception(vfl_vcpu_t *v, vfl_run_t *run, uint32_t vec, uint32_t err);
+int vfl_exit_software(vfl_vcpu_t *v, vfl_run_t *run, uint32_t vector, int length);
 int vfl_exit_shutdown(vfl_vcpu_t *v, vfl_run_t *run);
 int vfl_exit_internal(vfl_vcpu_t *v, vfl_run_t *run);
 int vfl_exit_io_out(vfl_vcpu_t *v, vfl_run_t *run, uint16_t port, int size, uint32_t data);
@@ -315,6 +330,16 @@ int vfl_apic_mmio(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t phys);
 int vfl_ipi(vfl_vm_t *vm, vfl_vcpu_t *src, uint32_t icr_lo, uint32_t icr_hi);
 int vfl_x2apic_read(vfl_vcpu_t *v, uint32_t index, uint64_t *val);
 int vfl_x2apic_write(vfl_vm_t *vm, vfl_vcpu_t *v, uint32_t index, uint64_t val);
+int vfl_host_rdrand(void);
+int vfl_iret(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, int size);
+int vfl_system_read(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t addr, uint64_t len, uint8_t *data);
+int vfl_segment_read(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint16_t selector, vfl_segment_t *segment);
+void vfl_queue_irq(vfl_vcpu_t *v, uint8_t vector, uint8_t type);
+int vfl_irq_ready(vfl_vcpu_t *v);
+int vfl_irq_select(vfl_vcpu_t *v);
+void vfl_apic_eoi(vfl_vcpu_t *v);
+int vfl_wait_vcpu(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t timeout_us);
+int vfl_execute(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run);
 int vfl_apic_x2(vfl_vcpu_t *v);
 void vfl_timer_poll(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run);
 vfl_mem_slot_t *vfl_find_slot_num(vfl_vm_t *vm, uint32_t slot);

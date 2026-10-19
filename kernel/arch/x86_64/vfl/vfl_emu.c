@@ -9,6 +9,16 @@ int vfl_exit_exception(vfl_vcpu_t *v, vfl_run_t *run, uint32_t vec, uint32_t err
     run->exit_reason = VFL_EXIT_EXCEPTION;
     run->exception.vector = vec;
     run->exception.error_code = err;
+    run->exception.software = 0;
+    run->exception.instruction_length = 0;
+    v->last_exit = *run;
+    return 1;
+}
+
+int vfl_exit_software(vfl_vcpu_t *v, vfl_run_t *run, uint32_t vector, int length) {
+    vfl_exit_exception(v, run, vector, 0);
+    run->exception.software = 1;
+    run->exception.instruction_length = length;
     v->last_exit = *run;
     return 1;
 }
@@ -21,6 +31,7 @@ int vfl_exit_shutdown(vfl_vcpu_t *v, vfl_run_t *run) {
 
 int vfl_exit_internal(vfl_vcpu_t *v, vfl_run_t *run) {
     run->exit_reason = VFL_EXIT_INTERNAL;
+    run->internal.reason = VFL_INTERNAL_EMULATION;
     v->last_exit = *run;
     return -1;
 }
@@ -175,7 +186,8 @@ static int vfl_str_ram(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *out, uint64_t lin
         return 1;
     }
     *pphys = p0;
-    *phost = sl->host_mem + (p0 - sl->guest_phys);
+    *phost = vfl_slot_ptr(vm, sl, p0, bytes, wr);
+    if (!*phost) return -1;
     return 0;
 }
 
@@ -509,6 +521,13 @@ int vfl_exec_load_reg(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_t *ea,
 }
 
 int vfl_memerr(vfl_vcpu_t *v, vfl_run_t *run, int rr) {
+    int r;
+
+    if (rr == -3) {
+        r = vfl_exit_internal(v, run);
+        run->internal.reason = VFL_INTERNAL_MEMORY;
+        return r;
+    }
     if (rr == -2) return vfl_mem_fault(v, run);
     if (rr == 1) return vfl_exit_exception(v, run, 14, 0);
     return vfl_exit_exception(v, run, 13, 0);

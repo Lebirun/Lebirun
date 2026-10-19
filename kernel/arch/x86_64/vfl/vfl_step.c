@@ -17,7 +17,8 @@ static int vfl_chunk_range(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t base, uint64_t 
     if (wr && !(sl->flags & VFL_MEM_FLAG_WRITE)) return 1;
     if (!wr && !(sl->flags & VFL_MEM_FLAG_READ)) return 1;
     *pphys = p0;
-    *phost = sl->host_mem + (p0 - sl->guest_phys);
+    *phost = vfl_slot_ptr(vm, sl, p0, k * (uint64_t)s, wr);
+    if (!*phost) return 1;
     return 0;
 }
 
@@ -40,11 +41,11 @@ static int vfl_string_chunk(vfl_vm_t *vm, vfl_vcpu_t *v, int op, int rep,
     if (!rep || cnt == 0 || (v->control.flags & VFL_CONTROL_SINGLE_STEP)) return 1;
     bl = 0x1000ULL - ((sbase + si) & 0xFFFULL);
     if (bl < (uint64_t)s) return 1;
-    m = (bl + (uint64_t)s - 1) / (uint64_t)s;
+    m = bl / (uint64_t)s;
     if (m < k) k = m;
     bl = 0x1000ULL - ((dbase + di) & 0xFFFULL);
     if (bl < (uint64_t)s) return 1;
-    m = (bl + (uint64_t)s - 1) / (uint64_t)s;
+    m = bl / (uint64_t)s;
     if (m < k) k = m;
     if (asz == 2) {
         if (!df) {
@@ -792,7 +793,7 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
         case 0x4F:
             if (lm) return vfl_exit_internal(v, run);
             a = vfl_read_reg(v, op & 7, 0, osz);
-            if (op & 1) r = vfl_do_alu(v, VFL_RMW_DEC, a, 0, osz);
+            if (op & 8) r = vfl_do_alu(v, VFL_RMW_DEC, a, 0, osz);
             else r = vfl_do_alu(v, VFL_RMW_INC, a, 0, osz);
             vfl_write_reg(v, op & 7, 0, osz, r);
             n = pos;
@@ -2004,13 +2005,13 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
         case 0xCC:
             n = pos;
             vfl_adv(v, n, ripmask);
-            return vfl_exit_exception(v, run, 3, 0);
+            return vfl_exit_software(v, run, 3, n);
 
         case 0xCE:
             n = pos;
             vfl_adv(v, n, ripmask);
             if ((v->regs.rflags >> 11) & 1)
-                return vfl_exit_exception(v, run, 4, 0);
+                return vfl_exit_software(v, run, 4, n);
             return 0;
 
         case 0xCD:
@@ -2027,25 +2028,10 @@ int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run) {
                 v->last_exit = *run;
                 return 1;
             }
-            return vfl_exit_exception(v, run, buf[pos], 0);
+            return vfl_exit_software(v, run, buf[pos], n);
 
-        case 0xCF: {
-            uint64_t newip;
-            uint64_t newcs;
-            uint64_t newfl;
-            int w = (osz == 8) ? 8 : 4;
-
-            if (osz == 2) w = 2;
-            if (vfl_pop(vm, v, run, w, &newip)) return 1;
-            if (vfl_pop(vm, v, run, w, &newcs)) return 1;
-            if (vfl_pop(vm, v, run, w, &newfl)) return 1;
-            v->sregs.cs.selector = (uint16_t)(newcs & 0xFFFFULL);
-            if (!(v->sregs.cr0 & 1ULL))
-                v->sregs.cs.base = (uint64_t)v->sregs.cs.selector << 4;
-            v->regs.rflags = (newfl & vfl_mask(w)) | 0x2ULL;
-            v->regs.rip = (v->regs.rip & ~ripmask) | (newip & ripmask);
-            return 0;
-        }
+        case 0xCF:
+            return vfl_iret(vm, v, run, osz);
 
         case 0xF1:
             n = pos;

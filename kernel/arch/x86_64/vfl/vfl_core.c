@@ -27,24 +27,8 @@ static void vfl_free_slot_dirty(vfl_mem_slot_t *slot) {
     slot->dirty_pages = 0;
 }
 
-static void vfl_free_slot_pages(vfl_mem_slot_t *slot) {
-    uint64_t npages;
-
-    if (!slot->ram_phys)
-        return;
-    npages = (slot->size + 0xFFFULL) >> 12;
-    if (npages)
-        pfa_free_contiguous(slot->ram_phys, npages);
-    slot->ram_phys = 0;
-}
-
 static void vfl_free_slot(vfl_mem_slot_t *slot) {
-    if (slot->owned) {
-        if (slot->ram_phys)
-            vfl_free_slot_pages(slot);
-        else
-            kfree(slot->host_mem);
-    }
+    vfl_slot_free_pages(slot->pages, slot->depth);
     vfl_free_slot_dirty(slot);
     vfl_code_free(slot);
     vfl_pages_free(slot, VFL_ROUND_PAGES(sizeof(vfl_mem_slot_t)));
@@ -76,21 +60,6 @@ void vfl_pages_free(void *va, uint64_t n) {
         return;
     base = (uint64_t)va - KERNEL_VMA;
     pfa_free_contiguous(base, n);
-}
-
-static int vfl_alloc_slot_pages(uint64_t size, uint64_t *phys_out,
-                                uint8_t **host_out) {
-    uint64_t npages = (size + 0xFFFULL) >> 12;
-    uint8_t *host;
-
-    if (!npages)
-        return -1;
-    host = (uint8_t *)vfl_pages_alloc(npages);
-    if (!host)
-        return -1;
-    *phys_out = (uint64_t)host - KERNEL_VMA;
-    *host_out = host;
-    return 0;
 }
 
 vfl_vm_t *vfl_get_vm(uint32_t vm_id) {
@@ -141,12 +110,13 @@ static void vfl_init_vcpu_state(vfl_vcpu_t *v) {
     v->sregs.gs = v->sregs.ds;
     v->sregs.ss = v->sregs.ds;
     v->sregs.cr0 = 0x10;
+    v->sregs.idt_limit = 0x3FF;
     v->sregs.cr8 = 0;
     v->msr_pat = 0x0007040600070406ULL;
     v->msr_apic_base = 0xFEE00900ULL;
     v->msr_misc = (1ULL << 12);
     v->apic_tpr = 0;
-    v->apic_spurious = 0xFF;
+    v->apic_spurious = 0x1FF;
     v->apic_enabled = 1;
     v->fpu.fcw = 0x37F;
     v->fpu.ftw = 0xFFFF;
@@ -160,6 +130,7 @@ int vfl_create_vm(void) {
     memset(vm, 0, sizeof(vfl_vm_t));
     vm->id = vfl_next_id++;
     vm->tlb_epoch = 1;
+    mutex_init(&vm->execution_lock);
     vm->next = vfl_vms;
     vfl_vms = vm;
     return (int)vm->id;
@@ -219,10 +190,11 @@ int vfl_reset_vcpu(uint32_t vm_id, uint32_t vcpu_id) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     if (v->stats) kfree(v->stats);
     if (v->breakpoints) kfree(v->breakpoints);
     vfl_init_vcpu_state(v);
+    v->apic_id = v->id;
     return 0;
 }
 
@@ -230,7 +202,7 @@ int vfl_set_regs(uint32_t vm_id, uint32_t vcpu_id, const vfl_regs_t *regs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !regs) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(&v->regs, regs, sizeof(vfl_regs_t));
     v->regs.rflags |= 0x2;
     v->halted = 0;
@@ -242,7 +214,7 @@ int vfl_get_regs(uint32_t vm_id, uint32_t vcpu_id, vfl_regs_t *regs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !regs) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(regs, &v->regs, sizeof(vfl_regs_t));
     return 0;
 }
@@ -251,7 +223,7 @@ int vfl_set_sregs(uint32_t vm_id, uint32_t vcpu_id, const vfl_sregs_t *sregs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !sregs) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(&v->sregs, sregs, sizeof(vfl_sregs_t));
     v->sregs.cr8 &= 0xFULL;
     v->apic_tpr = (uint32_t)(v->sregs.cr8 << 4);
@@ -264,7 +236,7 @@ int vfl_get_sregs(uint32_t vm_id, uint32_t vcpu_id, vfl_sregs_t *sregs) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !sregs) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(sregs, &v->sregs, sizeof(vfl_sregs_t));
     return 0;
 }
@@ -273,7 +245,7 @@ int vfl_set_fpu(uint32_t vm_id, uint32_t vcpu_id, const vfl_fpu_t *fpu) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !fpu) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(&v->fpu, fpu, sizeof(vfl_fpu_t));
     v->fpu.fcw |= 0x40;
     return 0;
@@ -283,7 +255,7 @@ int vfl_get_fpu(uint32_t vm_id, uint32_t vcpu_id, vfl_fpu_t *fpu) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !fpu) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     memcpy(fpu, &v->fpu, sizeof(vfl_fpu_t));
     return 0;
 }
@@ -292,12 +264,16 @@ int vfl_inject_irq(uint32_t vm_id, uint32_t vcpu_id, const vfl_irq_t *irq) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !irq) return -EINVAL;
+    if (irq->type == VFL_IRQ_EXCEPTION) {
+        if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
+        if (irq->vector >= 32 || v->irq_valid) return -EINVAL;
+        v->irq = *irq;
+        v->irq_valid = 1;
+        return 0;
+    }
     if (irq->type != VFL_IRQ_EXTERNAL && irq->type != VFL_IRQ_NMI) return -EINVAL;
-    v->irq.vector = irq->vector;
-    v->irq.type = irq->type;
-    v->irq.has_error = irq->has_error ? 1 : 0;
-    v->irq.error_code = irq->error_code;
-    v->irq_valid = 1;
+    if (irq->has_error || (irq->type == VFL_IRQ_EXTERNAL && irq->vector < 16)) return -EINVAL;
+    vfl_queue_irq(v, irq->vector, irq->type);
     return 0;
 }
 
@@ -397,7 +373,7 @@ int vfl_set_msr(uint32_t vm_id, uint32_t vcpu_id, const vfl_msr_t *msr) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !msr) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     if (vfl_msr_write(vfl_get_vm(vm_id), v, msr->index, msr->value) < 0) return -EINVAL;
     __atomic_add_fetch(&vfl_get_vm(vm_id)->tlb_epoch, 1, __ATOMIC_RELEASE);
     return 0;
@@ -408,7 +384,7 @@ int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr) {
     uint64_t val = 0;
 
     if (!v || !msr) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     if (vfl_msr_read(v, msr->index, &val) < 0) return -EINVAL;
     msr->value = val;
     return 0;
@@ -417,117 +393,96 @@ int vfl_get_msr(uint32_t vm_id, uint32_t vcpu_id, vfl_msr_t *msr) {
 int vfl_set_memory(uint32_t vm_id, const vfl_memory_region_t *region) {
     vfl_vm_t *vm;
     vfl_mem_slot_t *slot;
-    vfl_mem_slot_t *o;
+    vfl_mem_slot_t *other;
+    vfl_mem_slot_t **link;
+    vfl_mem_slot_t fresh;
+    uint8_t *buffer;
+    uint8_t *host;
     uint64_t end;
+    uint64_t pages;
+    uint64_t offset;
+    uint64_t chunk;
+    uint8_t probe;
+    int r;
 
     vm = vfl_get_vm(vm_id);
     if (!vm || !region) return -EINVAL;
     if (vfl_vm_running(vm)) return -EBUSY;
-    if (region->flags & ~(uint32_t)(VFL_MEM_FLAG_RWX | VFL_MEM_FLAG_USER))
-        return -EINVAL;
-    if (region->size != 0 && region->guest_phys + region->size < region->guest_phys)
-        return -EINVAL;
-
+    if (region->flags & ~(uint32_t)(VFL_MEM_FLAG_RWX | VFL_MEM_FLAG_USER)) return -EINVAL;
+    end = region->guest_phys + region->size;
+    if (end < region->guest_phys) return -EINVAL;
     slot = vfl_find_slot_num(vm, region->slot);
-    __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
-
-    if (region->size == 0) {
-        vfl_mem_slot_t **link;
-
+    if (!region->size) {
         if (!slot) return 0;
-        for (link = &vm->mem_slots; *link; link = &(*link)->next) {
-            if (*link == slot) {
-                *link = slot->next;
-                break;
-            }
-        }
+        for (link = &vm->mem_slots; *link != slot; link = &(*link)->next) {}
+        *link = slot->next;
+        __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
         vfl_free_slot(slot);
-        if (vm->nr_mem_slots > 0) vm->nr_mem_slots--;
+        vm->nr_mem_slots--;
         return 0;
     }
-
-    end = region->guest_phys + region->size;
-    for (o = vm->mem_slots; o; o = o->next) {
-        uint64_t oend;
-
-        if (o == slot) continue;
-        oend = o->guest_phys + o->size;
-        if (region->guest_phys < oend && end > o->guest_phys)
-            return -EINVAL;
+    for (other = vm->mem_slots; other; other = other->next)
+        if (other != slot && region->guest_phys < other->guest_phys + other->size &&
+            end > other->guest_phys) return -EINVAL;
+    if (region->host_virt && region->size - 1 > ~0ULL - region->host_virt) return -EINVAL;
+    memset(&fresh, 0, sizeof(fresh));
+    fresh.slot = region->slot;
+    fresh.guest_phys = region->guest_phys;
+    fresh.size = region->size;
+    fresh.flags = region->flags ? region->flags : VFL_MEM_FLAG_RWX;
+    fresh.owned = !(region->flags & VFL_MEM_FLAG_USER) || !region->host_virt;
+    pages = ((region->size - 1) >> 12);
+    while (pages) {
+        fresh.depth++;
+        pages >>= 9;
     }
-
+    r = 0;
+    buffer = NULL;
+    if (!fresh.owned) {
+        fresh.host_mem = (uint8_t *)(uintptr_t)region->host_virt;
+        if (copy_from_user(&probe, fresh.host_mem, 1) < 0 ||
+            copy_from_user(&probe, fresh.host_mem + region->size - 1, 1) < 0) return -EFAULT;
+    } else if (region->host_virt) {
+        buffer = kmalloc(4096);
+        if (!buffer) return -ENOMEM;
+        for (offset = 0; offset < fresh.size; offset += chunk) {
+            chunk = fresh.size - offset;
+            if (chunk > 4096) chunk = 4096;
+            if (copy_from_user(buffer, (void *)(uintptr_t)(region->host_virt + offset), chunk) < 0) {
+                r = -EFAULT;
+                break;
+            }
+            host = vfl_slot_ptr(vm, &fresh, fresh.guest_phys + offset, chunk, 0);
+            if (!memcmp(host, buffer, chunk)) continue;
+            host = vfl_slot_ptr(vm, &fresh, fresh.guest_phys + offset, chunk, 1);
+            if (!host) {
+                r = -ENOMEM;
+                break;
+            }
+            memcpy(host, buffer, chunk);
+        }
+        kfree(buffer);
+    }
+    if (r) {
+        vfl_slot_free_pages(fresh.pages, fresh.depth);
+        return r;
+    }
     if (!slot) {
-        slot = (vfl_mem_slot_t *)vfl_pages_alloc(
-            VFL_ROUND_PAGES(sizeof(vfl_mem_slot_t)));
-        if (!slot) return -ENOSPC;
-        slot->slot = region->slot;
+        slot = vfl_pages_alloc(VFL_ROUND_PAGES(sizeof(*slot)));
+        if (!slot) {
+            vfl_slot_free_pages(fresh.pages, fresh.depth);
+            return -ENOMEM;
+        }
         slot->next = vm->mem_slots;
         vm->mem_slots = slot;
         vm->nr_mem_slots++;
-    }
-
-    if ((region->flags & VFL_MEM_FLAG_USER) && region->host_virt) {
-        uint8_t probe;
-        uint64_t last = region->host_virt + region->size - 1;
-
-        if (last < region->host_virt) return -EINVAL;
-        if (copy_from_user(&probe, (const void *)(uintptr_t)region->host_virt, 1) < 0)
-            return -EFAULT;
-        if (copy_from_user(&probe, (const void *)(uintptr_t)last, 1) < 0)
-            return -EFAULT;
-        if (slot->owned) {
-            if (slot->ram_phys)
-                vfl_free_slot_pages(slot);
-            else
-                kfree(slot->host_mem);
-        }
-        if (slot->size != region->size)
-            vfl_free_slot_dirty(slot);
-        slot->owned = 0;
-        slot->ram_phys = 0;
-        slot->guest_phys = region->guest_phys;
-        slot->size = region->size;
-        slot->host_mem = (uint8_t *)(uintptr_t)region->host_virt;
     } else {
-        uint64_t new_phys = 0;
-        uint8_t *new_host = NULL;
-
-        if (vfl_alloc_slot_pages(region->size, &new_phys, &new_host) < 0) {
-            new_host = (uint8_t *)kmalloc((size_t)region->size);
-            if (!new_host) return -ENOMEM;
-            memset(new_host, 0, (size_t)region->size);
-        }
-        if (region->host_virt) {
-            if (copy_from_user(new_host,
-                               (const void *)(uintptr_t)region->host_virt,
-                               (size_t)region->size) < 0) {
-                if (new_phys)
-                    pfa_free_contiguous(new_phys,
-                                        (region->size + 0xFFFULL) >> 12);
-                else
-                    kfree(new_host);
-                return -EFAULT;
-            }
-        }
-        if (slot->size != region->size)
-            vfl_free_slot_dirty(slot);
-        if (slot->owned) {
-            if (slot->ram_phys)
-                vfl_free_slot_pages(slot);
-            else
-                kfree(slot->host_mem);
-        }
-        slot->owned = 1;
-        slot->ram_phys = new_phys;
-        slot->host_mem = new_host;
-        slot->guest_phys = region->guest_phys;
-        slot->size = region->size;
+        vfl_slot_free_pages(slot->pages, slot->depth);
+        vfl_free_slot_dirty(slot);
+        vfl_code_free(slot);
     }
-    vfl_code_free(slot);
-    slot->flags = region->flags;
-    if (slot->flags == 0)
-        slot->flags = VFL_MEM_FLAG_RWX;
-
+    fresh.next = slot->next;
+    *slot = fresh;
     __atomic_add_fetch(&vm->tlb_epoch, 1, __ATOMIC_RELEASE);
     return 0;
 }
@@ -559,6 +514,7 @@ int vfl_get_dirty(uint32_t vm_id, vfl_dirty_t *dirty) {
     if (!vm) return -EINVAL;
     slot = vfl_find_slot_num(vm, dirty->slot);
     if (!slot) return -ENOENT;
+    if (vfl_vm_running(vm)) return -EBUSY;
     need = (slot->dirty_pages + 63) >> 6;
     if (!slot->dirty) need = 0;
     dirty->copied = need;
@@ -607,15 +563,16 @@ void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
 
     switch (leaf) {
         case 0:
-            r0 = 0xD; r1 = 0x756E6547; r3 = 0x49656E69; r2 = 0x6C65746E;
+            r0 = 0xB; r1 = 0x756E6547; r3 = 0x49656E69; r2 = 0x6C65746E;
             break;
         case 1:
             r0 = 0x00000633U; r1 = (v->apic_id << 24);
             r3 = (1U << 0) | (1U << 4) | (1U << 5) | (1U << 6) |
-                 (1U << 8) | (1U << 11) | (1U << 15) |
+                 (1U << 8) | (1U << 9) | (1U << 11) | (1U << 15) |
                  (1U << 23) | (1U << 24) | (1U << 25) | (1U << 26);
             r2 = (1U << 0) | (1U << 9) | (1U << 19) | (1U << 20) | (1U << 21) |
-                 (1U << 23) | (1U << 24) | (1U << 28) | (1U << 30);
+                 (1U << 23) | (1U << 24) | (1U << 31);
+            if (vfl_host_rdrand()) r2 |= 1U << 30;
             break;
         case 2:
             r0 = 1; r1 = 0x76036301U; r2 = 0; r3 = 0x00F0B5FFU;
@@ -635,13 +592,6 @@ void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
                 r3 = v->apic_id;
             }
             break;
-        case 0xD:
-            if (sub == 0) {
-                r0 = 0x440; r1 = 0x440; r2 = 0x440; r3 = 0;
-            } else if (sub == 1) {
-                r0 = 0xF; r1 = 0; r2 = 0; r3 = 0;
-            }
-            break;
         case 0x40000000:
             r0 = 0x40000001U; r1 = 0x4C465600U; r2 = 0x204C4656U; r3 = 0x20202020U;
             break;
@@ -653,7 +603,7 @@ void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
             break;
         case 0x80000001:
             r1 = 0; r2 = (1U << 5) | (1U << 27);
-            r3 = (1U << 20) | (1U << 22) | (1U << 27) | (1U << 29);
+            r3 = (1U << 20) | (1U << 27) | (1U << 29);
             break;
         case 0x80000002: case 0x80000003: case 0x80000004: {
             int b4 = (int)(leaf - 0x80000002) * 4;
@@ -663,7 +613,7 @@ void vfl_cpuid(vfl_vcpu_t *v, uint32_t leaf, uint32_t sub, uint32_t *a,
             break;
         }
         case 0x80000007:
-            r0 = 0; r1 = 0; r2 = 0; r3 = (1U << 8);
+            r0 = 0; r1 = 0; r2 = 0; r3 = 0;
             break;
         case 0x80000008:
             r0 = 0x3028; r1 = 0; r2 = 0; r3 = 0;
@@ -727,6 +677,28 @@ int vfl_mov_to_cr(vfl_vm_t *vm, vfl_vcpu_t *v, int cr, uint64_t val) {
     }
 }
 
+int vfl_run(uint32_t vm_id, uint32_t vcpu_id, vfl_run_t *run) {
+    vfl_vm_t *vm;
+    vfl_vcpu_t *v;
+    int r;
+
+    if (!run) return -EINVAL;
+    mutex_lock(&vfl_lock);
+    vm = vfl_get_vm(vm_id);
+    v = vfl_get_vcpu(vm_id, vcpu_id);
+    if (!v || v->running) {
+        mutex_unlock(&vfl_lock);
+        return v ? -EBUSY : -EINVAL;
+    }
+    v->running = 1;
+    mutex_unlock(&vfl_lock);
+    r = vfl_execute(vm, v, run);
+    mutex_lock(&vfl_lock);
+    v->running = 0;
+    mutex_unlock(&vfl_lock);
+    return r;
+}
+
 int vfl_vm_running(vfl_vm_t *vm) {
     vfl_vcpu_t *v;
 
@@ -740,7 +712,7 @@ int vfl_set_lapic(uint32_t vm_id, uint32_t vcpu_id, const vfl_lapic_t *lapic) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !lapic) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     v->apic_id = lapic->id & 0xFFU;
     v->apic_tpr = lapic->tpr & 0xFFU;
     v->sregs.cr8 = (v->apic_tpr >> 4) & 0xFULL;
@@ -761,7 +733,7 @@ int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
     vfl_vcpu_t *v = vfl_get_vcpu(vm_id, vcpu_id);
 
     if (!v || !lapic) return -EINVAL;
-    if (v->running) return -EBUSY;
+    if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
     lapic->id = v->apic_id;
     lapic->tpr = v->apic_tpr;
     lapic->eoi = 0;
@@ -776,6 +748,11 @@ int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
 static int vfl_valid_state(const vfl_state_t *state) {
     int size;
 
+    if (state->irq_valid &&
+        (state->irq.type != VFL_IRQ_EXTERNAL && state->irq.type != VFL_IRQ_NMI &&
+         state->irq.type != VFL_IRQ_EXCEPTION)) return 0;
+    if (state->irq_valid && state->irq.type == VFL_IRQ_EXCEPTION && state->irq.vector >= 32) return 0;
+    if (state->apic_irr[0] & 0xFFFFU) return 0;
     if (state->mmio_cache_len > sizeof(state->mmio_cache_data) ||
         state->pending_len > sizeof(state->mmio_cache_data)) return 0;
     if (!state->pending) return 1;
@@ -813,6 +790,7 @@ static int vfl_state_ioctl(unsigned long request, void *arg) {
     vfl_vcpu_t *v;
     vfl_state_t *state;
     uint64_t now;
+    unsigned i;
     int r;
 
     if (!arg || copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
@@ -842,6 +820,9 @@ static int vfl_state_ioctl(unsigned long request, void *arg) {
             r = -EINVAL;
         } else {
             v->state = *state;
+            v->apic_pending = 0;
+            for (i = 0; i < 8; i++)
+                if (v->apic_irr[i]) v->apic_pending |= 1U << i;
             v->regs.rflags |= 2;
             v->fpu.fcw |= 0x40;
             v->sregs.cr8 &= 15;
@@ -877,7 +858,7 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
         if (copy_from_user(&control, (uint8_t *)arg + 8, sizeof(control)) < 0)
             return -EFAULT;
         if (control.reserved || (control.flags & ~(VFL_CONTROL_STATS | VFL_CONTROL_SINGLE_STEP |
-            VFL_CONTROL_BREAKPOINT | VFL_CONTROL_TIMESLICE))) return -EINVAL;
+            VFL_CONTROL_BREAKPOINT | VFL_CONTROL_TIMESLICE | VFL_CONTROL_EXCEPTIONS))) return -EINVAL;
         if (!(control.flags & VFL_CONTROL_BREAKPOINT)) control.breakpoint_count = 0;
         if (control.breakpoint_count > ~0ULL / sizeof(*breakpoints)) return -EINVAL;
         bytes = control.breakpoint_count * sizeof(*breakpoints);
@@ -894,9 +875,11 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
     v = vfl_get_vcpu(ids[0], ids[1]);
     r = 0;
     if (!v) r = -EINVAL;
-    else if (request == VFL_IOCTL_INTERRUPT)
+    else if (request == VFL_IOCTL_INTERRUPT) {
         __atomic_store_n(&v->stop, 1, __ATOMIC_RELEASE);
-    else if (v->running) r = -EBUSY;
+        if (__atomic_load_n(&v->waiting, __ATOMIC_ACQUIRE)) descriptor_ready_notify();
+    }
+    else if (vfl_vm_running(vfl_get_vm(ids[0]))) r = -EBUSY;
     else if (request == VFL_IOCTL_SET_CONTROL) {
         if ((control.flags & VFL_CONTROL_STATS) && !v->stats) {
             fresh = kmalloc(sizeof(*fresh));
@@ -961,7 +944,14 @@ static int vfl_memory_ioctl(unsigned long request, void *arg) {
             }
             chunk = slot->size - (transfer.guest_phys + offset - slot->guest_phys);
             if (chunk > transfer.size - offset) chunk = transfer.size - offset;
-            host = slot->host_mem + (transfer.guest_phys + offset - slot->guest_phys);
+            if (chunk > 4096 - ((transfer.guest_phys + offset - slot->guest_phys) & 4095))
+                chunk = 4096 - ((transfer.guest_phys + offset - slot->guest_phys) & 4095);
+            host = vfl_slot_ptr(vm, slot, transfer.guest_phys + offset, chunk,
+                                request == VFL_IOCTL_WRITE_MEMORY);
+            if (!host) {
+                r = -ENOMEM;
+                break;
+            }
             if (request == VFL_IOCTL_READ_MEMORY)
                 r = copy_to_user((void *)(uintptr_t)(transfer.buffer + offset), host, chunk);
             else {
@@ -992,6 +982,7 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     vfl_run_t run;
     vfl_vm_info_t info;
     vfl_lapic_t lapic;
+    vfl_wait_t wait;
     int r;
 
     (void)node;
@@ -1172,14 +1163,18 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
                 return -EFAULT;
             return r;
 
+        case VFL_IOCTL_WAIT:
         case VFL_IOCTL_RUN: {
+            vfl_vm_t *vm;
             vfl_vcpu_t *vcpu;
 
             if (!arg) return -EINVAL;
             if (copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
-            if (copy_from_user(&run, (uint8_t *)arg + 8, sizeof(run)) < 0)
-                return -EFAULT;
+            if (request == VFL_IOCTL_WAIT) {
+                if (copy_from_user(&wait, (uint8_t *)arg + 8, sizeof(wait)) < 0) return -EFAULT;
+            } else if (copy_from_user(&run, (uint8_t *)arg + 8, sizeof(run)) < 0) return -EFAULT;
             mutex_lock(&vfl_lock);
+            vm = vfl_get_vm(ids[0]);
             vcpu = vfl_get_vcpu(ids[0], ids[1]);
             if (!vcpu || vcpu->running) {
                 mutex_unlock(&vfl_lock);
@@ -1187,10 +1182,12 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
             }
             vcpu->running = 1;
             mutex_unlock(&vfl_lock);
-            r = vfl_run(ids[0], ids[1], &run);
+            r = request == VFL_IOCTL_WAIT ? vfl_wait_vcpu(vm, vcpu, wait.timeout_us) :
+                                           vfl_execute(vm, vcpu, &run);
             mutex_lock(&vfl_lock);
             vcpu->running = 0;
             mutex_unlock(&vfl_lock);
+            if (request == VFL_IOCTL_WAIT) return r;
             if (copy_to_user((uint8_t *)arg + 8, &run, sizeof(run)) < 0)
                 return -EFAULT;
             return r;

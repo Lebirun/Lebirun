@@ -391,7 +391,8 @@ int vfl_hot_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t ip,
     if (!host) {
         slot = vfl_find_slot(vm, phys, e->len);
         if (!slot || !(slot->flags & VFL_MEM_FLAG_EXEC)) return 2;
-        host = slot->host_mem + (phys - slot->guest_phys);
+        host = vfl_slot_ptr(vm, slot, phys, e->len, 0);
+        if (!host) return 2;
     }
     if (e->mode & VFL_H_TRACKED) {
         if (e->code->phys != (phys & ~0xFFFULL) ||
@@ -424,7 +425,10 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
     int lm;
     int prot;
     int r;
+    vfl_hot_op_t *previous;
+    vfl_hot_op_t *next;
 
+    previous = NULL;
     *executed = 0;
     lm = vfl_long_mode(v);
     prot = (v->sregs.cr0 & 1ULL) != 0;
@@ -434,14 +438,31 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
         if (__atomic_load_n(&v->stop, __ATOMIC_ACQUIRE)) break;
         ip = vfl_seg_base(v, 1) + (v->regs.rip & ripmask);
         if (vfl_breakpoint(v, ip)) break;
-        r = vfl_hot_lookup(vm, v, run, ip, lm, prot);
+        next = previous ? &v->hot[previous->successor] : NULL;
+        if (next && next->tag == ip && next->fn && next->len &&
+            next->epoch == previous->epoch && next->code == previous->code &&
+            next->generation == previous->generation &&
+            (next->mode & (VFL_H_TRACKED | VFL_H_LAZY | VFL_H_MODE_MASK)) ==
+                (VFL_H_TRACKED | VFL_H_LAZY | lm | (prot << 1)) &&
+            (ip >> 12) == (previous->tag >> 12)) {
+            v->lazy_enabled = 1;
+            v->int_shadow = 0;
+            if (v->stats) v->stats->hot_hits++;
+            r = next->fn(vm, v, run, next);
+        } else {
+            r = vfl_hot_lookup(vm, v, run, ip, lm, prot);
+            next = &v->hot[(ip ^ (ip >> 8)) & 63];
+        }
+        previous = !r && (next->mode & (VFL_H_TRACKED | VFL_H_LAZY)) ==
+                         (VFL_H_TRACKED | VFL_H_LAZY) &&
+                   v->regs.rip == ((ip - vfl_seg_base(v, 1) + next->len) & ripmask) ? next : NULL;
         if (r == 2) {
             if (v->stats) v->stats->hot_misses++;
             r = 0;
             break;
         }
         (*executed)++;
-        if (r || v->irq_valid) break;
+        if (r || vfl_irq_ready(v)) break;
     }
     vfl_flags_sync(v);
     v->lazy_enabled = 0;
@@ -622,6 +643,16 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
     h.ripmask = ripmask;
     h.seg = 0;
     switch (op) {
+        case 0x40: case 0x41: case 0x42: case 0x43:
+        case 0x44: case 0x45: case 0x46: case 0x47:
+        case 0x48: case 0x49: case 0x4A: case 0x4B:
+        case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+            if (lm) return;
+            h.fn = vfl_hot_incdec;
+            h.eamod = 3;
+            h.eareg = op & 7;
+            h.sub = (op >> 3) & 1;
+            break;
         case 0x90: case 0x91: case 0x92: case 0x93:
         case 0x94: case 0x95: case 0x96: case 0x97:
             h.fn = vfl_hot_xchg_ax;
@@ -918,6 +949,7 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
     }
     if (pos > 15 || (uint64_t)pos > 0x1000ULL - (ip & 0xFFFULL)) return;
     h.len = (uint8_t)pos;
+    h.successor = (uint8_t)(((ip + pos) ^ ((ip + pos) >> 8)) & 63);
     h.tag = ip;
     h.mode = (uint8_t)(lm | (prot << 1));
     if (h.fn == vfl_hot_nop || h.fn == vfl_hot_mov_r_imm ||
@@ -935,7 +967,7 @@ void vfl_hot_fill(vfl_vm_t *vm, vfl_vcpu_t *v, uint8_t *buf, uint64_t ip,
     if (h.code) {
         h.mode |= VFL_H_TRACKED;
         h.generation = __atomic_load_n(&h.code->generation, __ATOMIC_ACQUIRE);
-        if (memcmp(slot->host_mem + (phys - slot->guest_phys), buf, pos)) return;
+        if (memcmp(vfl_slot_ptr(vm, slot, phys, pos, 0), buf, pos)) return;
     }
     h.epoch = __atomic_load_n(&vm->tlb_epoch, __ATOMIC_ACQUIRE);
     if (!(h.mode & VFL_H_TRACKED))
