@@ -751,7 +751,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     done += bytes;
                     waitq_wake_all(&p->read_waitq);
                     pipe_unlock_irqrestore(p, pipe_flags);
-                    descriptor_ready_notify();
+                    descriptor_ready_notify_key((uint64_t)(uintptr_t)p);
                 }
                 total += chunk;
                 remaining -= chunk;
@@ -987,7 +987,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             pipe_shrink_after_read(p);
             waitq_wake_all(&p->write_waitq);
             pipe_unlock_irqrestore(p, pipe_flags);
-            descriptor_ready_notify();
+            descriptor_ready_notify_key((uint64_t)(uintptr_t)p);
             if (copy_to_user((void *)buf_addr, kbuf, to_read) < 0) {
                 if (heap_buf) kfree(kbuf);
                 return -EFAULT;

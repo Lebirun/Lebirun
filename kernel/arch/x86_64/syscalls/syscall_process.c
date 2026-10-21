@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/debug.h>
 #include <lebirun/common.h>
 #include <stdarg.h>
 
@@ -47,8 +48,14 @@ static int sys_sleep(int ms, const char *unused, int unused2) {
 }
 
 static int wait_status_from_exit_code(uint64_t exit_code) {
+    int core;
+
+    if (exit_code & TASK_WAIT_STOPPED)
+        return ((int)(exit_code & 0xFF) << 8) | 0x7F;
+    core = (exit_code & TASK_WAIT_CORE) ? 0x80 : 0;
+    exit_code &= ~TASK_WAIT_CORE;
     if (exit_code >= 128 && exit_code < 192) {
-        return (int)(exit_code - 128);
+        return (int)(exit_code - 128) | core;
     }
     return (int)((exit_code & 0xFF) << 8);
 }
@@ -76,7 +83,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         if (options & WNOHANG) {
             t = task_find((pid_t)pid);
             if (!t || t->ppid != current_task->pid) return -ECHILD;
-            if (t->state != TASK_DEAD) return 0;
+            if (t->state != TASK_DEAD && !task_trace_stop_pending(t)) return 0;
         }
 
         exit_code = 0;
@@ -114,7 +121,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             r = task_join(dead, &exit_code);
             if (r != 0) return -ECHILD;
 
-            dead->waited = 1;
+            if (!(exit_code & TASK_WAIT_STOPPED)) dead->waited = 1;
             reap_dead_tasks();
 
             if (status_ptr) {
@@ -744,6 +751,7 @@ static int sys_process_vm_writev(int pid, const struct proc_vm_iovec *local,
 
 void syscalls_process_init(void) {
     mutex_init(&pidfd_lock);
+    syscall_table_set(SYSCALL_PTRACE, (void *)(task_ptrace));
     syscall_table_set(SYSCALL_GETPID, (void *)(sys_getpid));
     syscall_table_set(SYSCALL_YIELD, (void *)(sys_yield));
     syscall_table_set(SYSCALL_SLEEP, (void *)(sys_sleep));

@@ -490,6 +490,18 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
 
     mutex_unlock(&ep->lock);
     mutex_unlock(&epoll_lock);
+    descriptor_ready_notify();
+    return 0;
+}
+
+static uint64_t epoll_target_key(int fd) {
+    task_fd_t *descriptor;
+
+    descriptor = task_fd_get(current_task, fd);
+    if (descriptor && FD_TYPE_IS_PIPE(descriptor->type))
+        return (uint64_t)(uintptr_t)descriptor->private_data;
+    if (fd >= EVENTFD_BASE_FD && fd < SIGNALFD_BASE_FD)
+        return (uint64_t)fd;
     return 0;
 }
 
@@ -510,6 +522,8 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
     uint64_t ready_generation;
     uint64_t elapsed_ticks;
     uint64_t wait_ticks;
+    uint64_t *keys;
+    int key_count;
 
     events = (epoll_event_t *)(uintptr_t)events_ptr;
     if (!events || maxevents <= 0) return -EINVAL;
@@ -545,7 +559,8 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
             if (sock_events & 0x08) revents |= EPOLLERR;
             if (sock_events & 0x10) revents |= EPOLLHUP;
         } else if ((descriptor_events = event_descriptor_poll(fd)) >= 0) {
-            revents = (uint64_t)descriptor_events & wanted;
+            revents = (uint64_t)descriptor_events &
+                      (wanted | EPOLLERR | EPOLLHUP);
         } else if (epoll_target_valid(fd)) {
             if (wanted & EPOLLIN) revents |= EPOLLIN;
             if (wanted & EPOLLOUT) revents |= EPOLLOUT;
@@ -568,20 +583,49 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
                 }
             }
         }
+        keys = NULL;
+        key_count = 0;
+        if (!count && timeout != 0) {
+            for (i = 0; i < ep->fd_count; i++) {
+                if (!ep->fds[i].active) continue;
+                if (!epoll_target_key(ep->fds[i].fd)) {
+                    key_count = 0;
+                    break;
+                }
+                key_count++;
+            }
+            if (key_count) keys = kmalloc((size_t)key_count * sizeof(*keys));
+            key_count = 0;
+            if (keys) {
+                for (i = 0; i < ep->fd_count; i++) {
+                    if (ep->fds[i].active)
+                        keys[key_count++] = epoll_target_key(ep->fds[i].fd);
+                }
+            }
+        }
         mutex_unlock(&ep->lock);
         mutex_unlock(&epoll_lock);
         if (count || timeout == 0) return count;
-        if (timeout > 0 && tick_count - start_tick >= timeout_ticks)
+        if (timeout > 0 && tick_count - start_tick >= timeout_ticks) {
+            kfree(keys);
             return 0;
-        if (signal_pending_mask(current_task)) return -EINTR;
+        }
+        if (signal_pending_mask(current_task)) {
+            kfree(keys);
+            return -EINTR;
+        }
         wait_ticks = UINT64_MAX;
         if (timeout > 0) {
             elapsed_ticks = tick_count - start_tick;
-            if (elapsed_ticks >= timeout_ticks) return 0;
+            if (elapsed_ticks >= timeout_ticks) {
+                kfree(keys);
+                return 0;
+            }
             wait_ticks = timeout_ticks - elapsed_ticks;
         }
         wait_ticks = event_descriptor_wait_timeout(wait_ticks);
-        descriptor_ready_wait(ready_generation, wait_ticks);
+        descriptor_ready_wait_owned_keys(ready_generation, wait_ticks, keys,
+                                   key_count);
     }
 }
 
@@ -990,7 +1034,7 @@ static int sys_timerfd_settime(int fd, const char *flags_ptr, int new_value) {
         timerfds[index].next_tick = tick_count + initial_ticks;
     }
     mutex_unlock(&timerfd_lock);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key((uint64_t)fd);
     if (old_value && copy_to_user(old_value, &previous, sizeof(previous)) < 0)
         return -EFAULT;
     return 0;
@@ -1076,11 +1120,29 @@ int event_descriptor_poll(int fd) {
     task_fd_t *descriptor;
     vfs_node_t *node;
     int pty_endpoint;
+    pipe_t *pipe;
+    uint64_t pipe_flags;
 
     descriptor = NULL;
     if (current_task && current_task->fds && fd >= 0 &&
         fd < current_task->fds_capacity && current_task->fds[fd].in_use)
         descriptor = &current_task->fds[fd];
+    if (descriptor && FD_TYPE_IS_PIPE(descriptor->type)) {
+        pipe = descriptor->private_data;
+        if (!pipe) return EPOLLERR;
+        pipe_flags = pipe_lock_irqsave(pipe);
+        events = 0;
+        if (descriptor->type != FD_TYPE_PIPE_W) {
+            if (pipe->count) events |= EPOLLIN;
+            if (!pipe->writers) events |= EPOLLIN | EPOLLHUP;
+        }
+        if (descriptor->type != FD_TYPE_PIPE_R) {
+            if (!pipe->readers) events |= EPOLLERR;
+            else if (pipe->count < PIPE_BUF_SIZE) events |= EPOLLOUT;
+        }
+        pipe_unlock_irqrestore(pipe, pipe_flags);
+        return events;
+    }
     if (descriptor && FD_TYPE_IS_PTY(descriptor->type)) {
         pty_endpoint = (int)(uintptr_t)descriptor->private_data;
         events = pty_poll_events(pty_endpoint);
@@ -1169,7 +1231,7 @@ retry_read:
             eventfds[index].counter = 0;
         }
         mutex_unlock(&eventfd_lock);
-        descriptor_ready_notify();
+        descriptor_ready_notify_key((uint64_t)fd);
         if (copy_to_user(buffer, &value, sizeof(value)) < 0) return -EFAULT;
         return sizeof(value);
     }
@@ -1260,7 +1322,7 @@ retry_write:
     }
     eventfds[index].counter += value;
     mutex_unlock(&eventfd_lock);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key((uint64_t)fd);
     return sizeof(value);
 }
 
@@ -1371,6 +1433,7 @@ int epoll_close_fd(int fd) {
             epoll_capacity = 0;
         }
         mutex_unlock(&epoll_lock);
+        descriptor_ready_notify();
         return 0;
     }
     idx = fd - EVENTFD_BASE_FD;
@@ -1395,6 +1458,7 @@ int epoll_close_fd(int fd) {
             eventfd_capacity = 0;
         }
         mutex_unlock(&eventfd_lock);
+        descriptor_ready_notify();
         return 0;
     }
     idx = fd - TIMERFD_BASE_FD;
@@ -1419,6 +1483,7 @@ int epoll_close_fd(int fd) {
             timerfd_capacity = 0;
         }
         mutex_unlock(&timerfd_lock);
+        descriptor_ready_notify();
         return 0;
     }
     idx = fd - SIGNALFD_BASE_FD;
@@ -1443,6 +1508,7 @@ int epoll_close_fd(int fd) {
             signalfd_capacity = 0;
         }
         mutex_unlock(&signalfd_lock);
+        descriptor_ready_notify();
         return 0;
     }
     return -EBADF;

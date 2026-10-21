@@ -16,6 +16,7 @@
 #include <lebirun/pit.h>
 #include <lebirun/common.h>
 #include <lebirun/kstack.h>
+#include <lebirun/debug.h>
 
 #define IDT_ENOMEM 12
 
@@ -298,6 +299,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             sig = 0;
             switch (regs->int_no) {
                 case 0:  sig = 8;  break;
+                case 1:  sig = 5;  break;
+                case 3:  sig = 5;  break;
                 case 4:  sig = 8;  break;
                 case 5:  sig = 5;  break;
                 case 6:  sig = 4;  break;
@@ -314,7 +317,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             printf("[KERNEL] User exception %d at RIP=0x%016lX sig=%d\n",
                    regs->int_no, regs->rip, sig);
             
-            task_exit_deferred(128 + sig);
+            task_user_exception(regs, sig);
             return schedule_from_irq(regs);
         }
         
@@ -403,7 +406,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                     printf("\n");
                 }
             }
-            task_exit_deferred(139);
+            task_user_exception(regs, 11);
             return schedule_from_irq(regs);
         }
 
@@ -774,7 +777,7 @@ void KERNEL_EARLY_INIT idt_init(void)
     idt_set_gate(0,  (uintptr_t)isr0);
     idt_set_gate(1,  (uintptr_t)isr1);
     idt_set_gate_ist(2,  (uintptr_t)isr2, 2);
-    idt_set_gate(3,  (uintptr_t)isr3);
+    idt_set_gate_flags(3, (uintptr_t)isr3, 0xEE);
     idt_set_gate(4,  (uintptr_t)isr4);
     idt_set_gate(5,  (uintptr_t)isr5);
     idt_set_gate(6,  (uintptr_t)isr6);

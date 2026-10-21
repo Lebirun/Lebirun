@@ -198,6 +198,7 @@ static const uint16_t linux_syscall_map[439] = {
     LINUX_SYSCALL(20, SYSCALL_GETPID),
     LINUX_SYSCALL(23, SYSCALL_SETUID),
     LINUX_SYSCALL(24, SYSCALL_GETUID),
+    LINUX_SYSCALL(26, SYSCALL_PTRACE),
     LINUX_SYSCALL(27, SYSCALL_ALARM),
     LINUX_SYSCALL(29, SYSCALL_PAUSE),
     LINUX_SYSCALL(33, SYSCALL_ACCESS),
@@ -420,7 +421,7 @@ static int syscall_needs_expanded_stack(int num) {
     if (num >= SYSCALL_STATFS && num <= SYSCALL_NET_HTTP_POST) return 1;
     if (num == SYSCALL_PIVOT_ROOT ||
         (num >= SYSCALL_VFS_MOUNT && num <= SYSCALL_LKE_LIST)) return 1;
-    if (num == SYSCALL_VFS_READDIR2) return 1;
+    if (num == SYSCALL_VFS_READDIR2 || num == SYSCALL_PTRACE) return 1;
     if (num >= SYSCALL_SYSLOG && num <= SYSCALL_PIDFD_SEND_SIGNAL) return 1;
     return 0;
 }
@@ -499,7 +500,8 @@ void do_syscall(registers_t *regs) {
                num == SYSCALL_MMAP ||
                num == SYSCALL_MMAP2 || num == SYSCALL_MREMAP ||
                num == SYSCALL_SHMAT || num == SYSCALL_GETCWD ||
-               num == SYSCALL_DLSYM || num == SYSCALL_TIME) {
+               num == SYSCALL_DLSYM || num == SYSCALL_TIME ||
+               num == SYSCALL_PTRACE) {
         result = ((int64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))handler)(
             regs->rbx, regs->rcx, regs->rdx,
             regs->rsi, regs->rdi, regs->rbp);

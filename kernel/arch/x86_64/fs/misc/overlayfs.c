@@ -1014,7 +1014,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
     if (VFS_GET_TYPE(flags) == VFS_SOCKET)
         ret = ramfs_create_socket(path, (uint16_t)(flags & 07777));
     else
-        ret = ramfs_create_file(path, 0644);
+        ret = ramfs_create_file(path, (uint16_t)(flags & 0777));
     if (ret == RAMFS_ERR_OK || ret == RAMFS_ERR_EXIST)
         overlay_attach_upper_node(onode, parent_path);
     if (ret == 0) overlay_reset_readdir(onode);

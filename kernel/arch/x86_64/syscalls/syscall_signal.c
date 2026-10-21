@@ -1,4 +1,5 @@
 #include "syscall_defs.h"
+#include <lebirun/debug.h>
 
 #define SIGHUP    1
 #define SIGINT    2
@@ -748,12 +749,18 @@ int deliver_signal_to_task(task_t *target, int sig) {
     }
 
     if (sig == SIGCONT) {
+        if (target->state == TASK_STOPPED && task_is_traced(target)) return 0;
         if (target->state == TASK_STOPPED || target->state == TASK_BLOCKED) {
             target->state = TASK_READY;
         }
         return 0;
     }
 
+    if (!has_sigs && (task_is_traced(target) || task_rlimit_get(target, 4, 0))) {
+        sigs = ensure_task_signals(target);
+        if (!sigs) return -ENOMEM;
+        has_sigs = 1;
+    }
     if (!has_sigs) {
         switch (sig) {
             case SIGCHLD:
@@ -1032,9 +1039,11 @@ void signal_deliver_pending(registers_t *regs) {
     uint64_t previous;
     uint8_t signal_info[128];
     int queued;
+    uint64_t exit_code;
 
     if (!current_task || !regs) return;
     if (!current_task->is_user) return;
+    if (task_trace_resume(regs)) return;
 
     sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs || sigs->in_signal) return;
@@ -1054,6 +1063,7 @@ void signal_deliver_pending(registers_t *regs) {
                                           __ATOMIC_ACQ_REL);
             if (!(previous & bit)) continue;
         }
+        if (task_trace_signal(regs, sig)) return;
         act = get_signal_action(sigs, sig, &default_act);
 
         if (act->sa_handler == SIG_IGN) continue;
@@ -1067,7 +1077,9 @@ void signal_deliver_pending(registers_t *regs) {
                 case SIGCONT:
                     continue;
                 default:
-                    task_exit_deferred(128 + sig);
+                    exit_code = 128 + sig;
+                    if (task_core_dump(regs, sig)) exit_code |= TASK_WAIT_CORE;
+                    task_exit_deferred(exit_code);
                     return;
             }
         }

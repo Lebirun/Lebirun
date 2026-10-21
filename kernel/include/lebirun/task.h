@@ -319,8 +319,11 @@ void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
 uint64_t descriptor_ready_generation(void);
 void descriptor_ready_notify(void);
+void descriptor_ready_notify_key(uint64_t key);
 void descriptor_ready_notify_irq(void);
 int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks);
+int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks,
+                                const uint64_t *keys, int count);
 uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
 void task_free_user_memory(task_t* t);

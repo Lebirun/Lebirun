@@ -1,4 +1,5 @@
 #include <lebirun/task.h>
+#include <lebirun/debug.h>
 #include <lebirun/pipe.h>
 #include <lebirun/pty.h>
 #include <lebirun/registers.h>
@@ -112,6 +113,15 @@ static int task_affinity_words(void) {
     if (cpu_count <= 0) return 1;
     w = (cpu_count + 63) / 64;
     return w > 0 ? w : 1;
+}
+
+static uint64_t task_online_cpu_mask(int word) {
+    int64_t bits;
+
+    bits = (int64_t)cpu_count - (int64_t)word * 64;
+    if (bits <= 0) return 0;
+    if (bits >= 64) return UINT64_MAX;
+    return (1ULL << bits) - 1;
 }
 
 static int task_cpu_allowed(task_t *task, int cpu) {
@@ -399,6 +409,7 @@ int task_get_cpu_affinity_mask(task_t *task, uint64_t *words, int nwords) {
         else words[i] = 0xFFFFFFFFFFFFFFFFULL;
     }
     unlock_scheduler();
+    for (i = 0; i < w; i++) words[i] &= task_online_cpu_mask(i);
     for (i = w; i < nwords; i++) words[i] = 0;
     return 0;
 }
@@ -409,7 +420,7 @@ uint64_t task_get_cpu_affinity64(task_t *task) {
     lock_scheduler();
     mask = task_affinity_mask(task);
     unlock_scheduler();
-    return mask;
+    return mask & task_online_cpu_mask(0);
 }
 
 uint32_t task_get_cpu_affinity(task_t *task) {
@@ -421,7 +432,7 @@ uint32_t task_get_cpu_affinity(task_t *task) {
     if (mask == 0 && task->affinity64 == 0) mask = 0xFFFFFFFFu;
     else if (mask == 0) mask = (uint32_t)task->affinity64;
     unlock_scheduler();
-    return mask;
+    return mask & (uint32_t)task_online_cpu_mask(0);
 }
 
 int task_oom_kill_one(void) {
@@ -1062,8 +1073,32 @@ static void sleepq_insert(task_t *task) {
     *link = task;
 }
 
+typedef struct descriptor_wait_filter {
+    task_t *task;
+    const uint64_t *keys;
+    int count;
+    struct descriptor_wait_filter *next;
+} descriptor_wait_filter_t;
+
+static descriptor_wait_filter_t *descriptor_wait_filters;
+
+static void descriptor_filter_remove_locked(task_t *task) {
+    descriptor_wait_filter_t **link;
+
+    link = &descriptor_wait_filters;
+    while (*link) {
+        if ((*link)->task == task) {
+            kfree((void *)(*link)->keys);
+            *link = (*link)->next;
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
 static void task_remove_wait_locked(task_t *task) {
     if (!task) return;
+    descriptor_filter_remove_locked(task);
     if (task->in_wait_queue == TASK_WAIT_QUEUE_NORMAL &&
         task->waiting_queue) {
         waitq_remove_locked(task->waiting_queue, task);
@@ -1159,6 +1194,7 @@ static void task_wake_parent_waiter_locked(task_t *task) {
 static void task_finish_death_locked(task_t *task) {
     task_t *parent;
 
+    task_debug_exit(task);
     parent = all_tasks_head;
     while (parent) {
         if (!task_ptr_valid(parent)) break;
@@ -1214,29 +1250,31 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
         }
         d = d->wait_next;
     }
+    d = all_tasks_head;
+    while (d && task_ptr_valid(d)) {
+        if (d->ppid == parent_pid &&
+            (pgid_filter <= 0 || d->pgid == pgid_filter) &&
+            task_trace_stop_pending(d)) {
+            unlock_scheduler();
+            return d;
+        }
+        d = d->all_next;
+    }
     unlock_scheduler();
     return NULL;
 }
 
 int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
     task_t *t;
-    task_t *d;
     int found;
 
     if (!current_task) return -1;
     lock_scheduler();
 
-    d = dead_queue_head;
-    while (d && task_ptr_valid(d)) {
-        if (d->ppid == parent_pid) {
-            if (pgid_filter <= 0 || d->pgid == pgid_filter) {
-                unlock_scheduler();
-                return 1;
-            }
-        }
-        d = d->wait_next;
+    if (task_find_dead_child_of(parent_pid, pgid_filter)) {
+        unlock_scheduler();
+        return 1;
     }
-
     found = 0;
     t = all_tasks_head;
     while (t) {
@@ -1413,6 +1451,38 @@ void descriptor_ready_notify(void) {
     unlock_scheduler();
 }
 
+void descriptor_ready_notify_key(uint64_t key) {
+    descriptor_wait_filter_t *filter;
+    descriptor_wait_filter_t *next;
+    task_t *task;
+    int i;
+    int matches;
+
+    if (!key) {
+        descriptor_ready_notify();
+        return;
+    }
+    lock_scheduler();
+    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
+    filter = descriptor_wait_filters;
+    while (filter) {
+        next = filter->next;
+        task = filter->task;
+        if (task->waiting_queue == &descriptor_ready_waitq) {
+            matches = filter->count == 0;
+            for (i = 0; i < filter->count && !matches; i++)
+                matches = !filter->keys[i] || filter->keys[i] == key;
+            if (matches) {
+                task_remove_wait_locked(task);
+                sleepq_remove(task);
+                if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+            }
+        }
+        filter = next;
+    }
+    unlock_scheduler();
+}
+
 void descriptor_ready_notify_irq(void) {
     __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&descriptor_ready_irq_pending, 1, __ATOMIC_RELEASE);
@@ -1432,21 +1502,33 @@ static void descriptor_ready_try_drain_irq(void) {
     spin_unlock(&sched_lock);
 }
 
-int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
+int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks,
+                                const uint64_t *keys, int count) {
     uint64_t wake_tick;
     int changed;
+    descriptor_wait_filter_t filter;
 
-    if (!current_task) return 0;
+    if (!current_task) {
+        kfree((void *)keys);
+        return 0;
+    }
     lock_scheduler();
     if (descriptor_ready_generation() != generation) {
         unlock_scheduler();
+        kfree((void *)keys);
         return 1;
     }
     if (timeout_ticks == 0 || current_task->in_wait_queue ||
         current_task->waiting_queue) {
         unlock_scheduler();
+        kfree((void *)keys);
         return 0;
     }
+    filter.task = current_task;
+    filter.keys = keys;
+    filter.count = count;
+    filter.next = descriptor_wait_filters;
+    descriptor_wait_filters = &filter;
     current_task->wait_next = descriptor_ready_waitq.head;
     descriptor_ready_waitq.head = current_task;
     current_task->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
@@ -1473,6 +1555,10 @@ int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
     sleepq_remove(current_task);
     unlock_scheduler();
     return changed;
+}
+
+int descriptor_ready_wait(uint64_t generation, uint64_t timeout_ticks) {
+    return descriptor_ready_wait_owned_keys(generation, timeout_ticks, NULL, 0);
 }
 
 void KERNEL_INIT init_tasks(void) {
@@ -2119,40 +2205,6 @@ static uint64_t user_zero_page_get(void) {
     return existing;
 }
 
-static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
-    task_t *task;
-    uint64_t vaddr;
-    uint64_t phys;
-    int i;
-
-    if (!node) return 0;
-    phys = 0;
-    lock_scheduler();
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task)) {
-        if (task != current_task && task->is_user &&
-            task->state != TASK_DEAD &&
-            !task->resources_released && task->exec_completed == 0 &&
-            task->pml4_phys && !task_is_current_on_any_cpu(task) &&
-            task->file_maps && task->file_map_count > 0 &&
-            task->file_map_count <= task->file_map_capacity) {
-            for (i = 0; i < task->file_map_count; i++) {
-                if (!overlay_same_file(task->file_maps[i].node, node)) continue;
-                if (offset < task->file_maps[i].offset) continue;
-                if (offset >= task->file_maps[i].offset + task->file_maps[i].filesz) continue;
-                vaddr = task->file_maps[i].vaddr + (offset - task->file_maps[i].offset);
-                phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
-                if (phys) break;
-            }
-        }
-        if (phys) break;
-        task = task->all_next;
-    }
-    if (phys && pfa_ref_share(phys) != 0) phys = 0;
-    unlock_scheduler();
-    return phys;
-}
-
 void task_free_user_memory(task_t* t) {
     int freed;
 
@@ -2187,7 +2239,8 @@ static void task_release_exit_resources(task_t *t) {
     int freed;
 
     if (!t || t->resources_released) return;
-    if (task_is_current_on_any_cpu(t)) return;
+    if (task_is_current_on_any_cpu(t) || task_debug_busy(t)) return;
+    task_debug_release(t);
 
     t->syscall_frame = NULL;
 
@@ -2449,6 +2502,40 @@ int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
         task->file_maps[i].flags = flags;
     }
     return 0;
+}
+
+static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
+    task_t *task;
+    uint64_t vaddr;
+    uint64_t phys;
+    int i;
+
+    if (!node) return 0;
+    phys = 0;
+    lock_scheduler();
+    task = all_tasks_head;
+    while (task && task_ptr_valid(task)) {
+        if (task != current_task && task->is_user &&
+            task->state != TASK_DEAD &&
+            !task->resources_released && task->exec_completed == 0 &&
+            task->pml4_phys && !task_is_current_on_any_cpu(task) &&
+            task->file_maps && task->file_map_count > 0 &&
+            task->file_map_count <= task->file_map_capacity) {
+            for (i = 0; i < task->file_map_count; i++) {
+                if (!overlay_same_file(task->file_maps[i].node, node)) continue;
+                if (offset < task->file_maps[i].offset) continue;
+                if (offset >= task->file_maps[i].offset + task->file_maps[i].filesz) continue;
+                vaddr = task->file_maps[i].vaddr + (offset - task->file_maps[i].offset);
+                phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
+                if (phys) break;
+            }
+        }
+        if (phys) break;
+        task = task->all_next;
+    }
+    if (phys && pfa_ref_share(phys) != 0) phys = 0;
+    unlock_scheduler();
+    return phys;
 }
 
 int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
@@ -3494,12 +3581,12 @@ void task_kill(task_t* task, uint64_t exit_code) {
         task_exit(exit_code);
         return;
     }
-    syscall_robust_list_exit(task);
     lock_scheduler();
-    if (task->state == TASK_DEAD) {
+    if (task->state == TASK_DEAD || task_debug_defer_kill(task, exit_code)) {
         unlock_scheduler();
         return;
     }
+    syscall_robust_list_exit(task);
     task->exit_code = exit_code;
     sleepq_remove(task);
     task_remove_wait_locked(task);
@@ -3526,6 +3613,11 @@ int task_join(task_t* task, uint64_t* exit_code) {
     if (!task || task == current_task) return -1;
 
     lock_scheduler();
+    if (task_trace_stop_pending(task)) {
+        if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+        unlock_scheduler();
+        return 0;
+    }
     if (task->state == TASK_DEAD) {
         if (exit_code) *exit_code = task->exit_code;
         unlock_scheduler();
@@ -3546,7 +3638,7 @@ int task_join(task_t* task, uint64_t* exit_code) {
         schedule();
 
         lock_scheduler();
-        if (task->state == TASK_DEAD) {
+        if (task->state == TASK_DEAD || task_trace_stop_pending(task)) {
             break;
         }
         if (task_has_pending_signals()) {
@@ -3565,7 +3657,12 @@ int task_join(task_t* task, uint64_t* exit_code) {
         current_task->state = TASK_BLOCKED;
         unlock_scheduler();
     }
-    if (exit_code) *exit_code = task->exit_code;
+    if (exit_code) {
+        if (task_trace_stop_pending(task))
+            *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+        else
+            *exit_code = task->exit_code;
+    }
     if (current_task->waiting_queue) {
         waitq_remove(current_task->waiting_queue, current_task);
     }
@@ -3593,6 +3690,11 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
         if (!task || !task_ptr_valid(task) || task->ppid != parent_pid) {
             unlock_scheduler();
             return -KERR_ECHILD;
+        }
+        if (task_trace_stop_pending(task)) {
+            if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+            unlock_scheduler();
+            return 0;
         }
         if (task->state == TASK_DEAD) {
             if (exit_code) *exit_code = task->exit_code;
@@ -3638,6 +3740,12 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
             while (task && task_ptr_valid(task)) {
                 if (task->pid == pid) break;
                 task = task->all_next;
+            }
+            if (task && task_ptr_valid(task) && task->ppid == parent_pid &&
+                task_trace_stop_pending(task)) {
+                if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+                unlock_scheduler();
+                return 0;
             }
             if (task && task_ptr_valid(task) && task->ppid == parent_pid &&
                 task->state == TASK_DEAD) {
@@ -3763,7 +3871,7 @@ static int task_cpu_available(task_t *task, int cpu_id) {
     owner = task->running_cpu;
     if (owner != -1 && owner != -(cpu_id + 2)) return 0;
     if (task_is_current_on_any_cpu(task)) return 0;
-    if (!task_cpu_allowed(task, cpu_id)) return 0;
+    if (owner == -1 && !task_cpu_allowed(task, cpu_id)) return 0;
     return 1;
 }
 
@@ -3818,6 +3926,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int best_rank;
     int forced_reschedule;
     int eligible;
+    int migrate;
 
     idle_task = NULL;
     switch_to_cpu_idle = 0;
@@ -3831,6 +3940,9 @@ registers_t* schedule_from_irq(registers_t* regs) {
     if (!smp_scheduling_enabled()) return regs;
 
     prev_task = this_cpu->running_task;
+    migrate = prev_task && prev_task->state == TASK_RUNNING &&
+              (regs->cs & 3) == 3 &&
+              !task_cpu_allowed(prev_task, cpu_id);
     forced_reschedule = this_cpu->schedule_force;
     if (prev_task && prev_task->kernel_cpu_pinned &&
         prev_task->state == TASK_RUNNING && regs->int_no != 48) {
@@ -3840,7 +3952,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     forced_state_switch = prev_task &&
                           (prev_task->state == TASK_DEAD ||
                            prev_task->state == TASK_BLOCKED ||
-                           prev_task->state == TASK_STOPPED);
+                           prev_task->state == TASK_STOPPED || migrate);
 
     if (this_cpu->scheduler_lock_depth > 0) return regs;
 
@@ -3863,7 +3975,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
     dead_switch = prev_task && prev_task->state == TASK_DEAD;
     must_switch = prev_task &&
                   (dead_switch || prev_task->state == TASK_BLOCKED ||
-                   prev_task->state == TASK_STOPPED);
+                   prev_task->state == TASK_STOPPED || migrate);
+    if (migrate) prev_task->state = TASK_READY;
 
     if (prev_task && regs->int_no != 48 && prev_task->syscall_frame && !must_switch) {
         goto out_restore_cr3;
@@ -4960,6 +5073,8 @@ static int task_exec_with_args_common(
     }
 
     new_user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    if (new_user_brk < USER_DYNAMIC_LIMIT - 0x100000ULL)
+        new_user_brk += (rng_get_u32() & 0xFFULL) * PAGE_SIZE;
 
     total_pages = elf_page_count + stack_page_count;
     if (elf_page_count > UINT64_MAX - stack_page_count ||
@@ -5250,7 +5365,14 @@ static int task_exec_with_args_common(
         }
     }
 
+    lock_scheduler();
+    if (task_is_traced(current_task)) {
+        exec_euid = current_task->euid;
+        exec_egid = current_task->egid;
+    }
     creds_apply_exec_ids(current_task, exec_euid, exec_egid);
+    task_trace_exec();
+    unlock_scheduler();
     task_reset_fpu_state(current_task);
 
     return 0;
