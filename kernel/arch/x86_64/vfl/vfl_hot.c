@@ -405,10 +405,13 @@ int vfl_hot_lookup(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t ip,
     if (!safe) vfl_flags_sync(v);
     v->lazy_enabled = safe;
     v->int_shadow = 0;
+#if CONFIG_VFL_DEBUG
     if (v->stats) v->stats->hot_hits++;
+#endif
     return e->fn(vm, v, run, e);
 }
 
+#if CONFIG_VFL_DEBUG
 int vfl_breakpoint(vfl_vcpu_t *v, uint64_t ip) {
     uint64_t i;
 
@@ -417,6 +420,8 @@ int vfl_breakpoint(vfl_vcpu_t *v, uint64_t ip) {
         if (v->breakpoints[i] == ip) return 1;
     return 0;
 }
+
+#endif
 
 int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
                 uint64_t *executed) {
@@ -437,7 +442,9 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
     while (*executed < budget) {
         if (__atomic_load_n(&v->stop, __ATOMIC_ACQUIRE)) break;
         ip = vfl_seg_base(v, 1) + (v->regs.rip & ripmask);
+#if CONFIG_VFL_DEBUG
         if (vfl_breakpoint(v, ip)) break;
+#endif
         next = previous ? &v->hot[previous->successor] : NULL;
         if (next && next->tag == ip && next->fn && next->len &&
             next->epoch == previous->epoch && next->code == previous->code &&
@@ -447,7 +454,9 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
             (ip >> 12) == (previous->tag >> 12)) {
             v->lazy_enabled = 1;
             v->int_shadow = 0;
+#if CONFIG_VFL_DEBUG
             if (v->stats) v->stats->hot_hits++;
+#endif
             r = next->fn(vm, v, run, next);
         } else {
             r = vfl_hot_lookup(vm, v, run, ip, lm, prot);
@@ -457,7 +466,9 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
                          (VFL_H_TRACKED | VFL_H_LAZY) &&
                    v->regs.rip == ((ip - vfl_seg_base(v, 1) + next->len) & ripmask) ? next : NULL;
         if (r == 2) {
+#if CONFIG_VFL_DEBUG
             if (v->stats) v->stats->hot_misses++;
+#endif
             r = 0;
             break;
         }
@@ -466,7 +477,9 @@ int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
     }
     vfl_flags_sync(v);
     v->lazy_enabled = 0;
+#if CONFIG_VFL_DEBUG
     if (v->stats && *executed) v->stats->batches++;
+#endif
     return r;
 }
 

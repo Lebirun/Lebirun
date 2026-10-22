@@ -529,21 +529,29 @@ static int vfl_run_main(vfl_vm_t *vm, vfl_vcpu_t *vcpu, vfl_run_t *run) {
     uint64_t budget;
     uint64_t chunk;
     uint64_t executed;
+#if CONFIG_VFL_DEBUG
     uint64_t ip;
     uint64_t ripmask;
+#endif
     int r;
+#if CONFIG_VFL_DEBUG
     int pending;
+#endif
 
     input = *run;
+#if CONFIG_VFL_DEBUG
     pending = vcpu->pending;
+#endif
     r = vfl_complete(vm, vcpu, &input, run);
     r = vfl_handle_exception(vm, vcpu, run, r);
     if (r != 0) return r < 0 ? -1 : 0;
+#if CONFIG_VFL_DEBUG
     if (pending && pending != VFL_P_MMIO_FILL && !vcpu->pending &&
         (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP)) {
         run->exit_reason = VFL_EXIT_DEBUG;
         return 0;
     }
+#endif
     budget = vcpu->control.instruction_budget;
     if (!budget) budget = 65536;
     steps = 0;
@@ -559,6 +567,7 @@ static int vfl_run_main(vfl_vm_t *vm, vfl_vcpu_t *vcpu, vfl_run_t *run) {
             run->exit_reason = VFL_EXIT_HLT;
             return 0;
         }
+#if CONFIG_VFL_DEBUG
         ripmask = vfl_long_mode(vcpu) ? ~0ULL :
                   (vcpu->sregs.cr0 & 1ULL) ? 0xFFFFFFFFULL : 0xFFFFULL;
         ip = vfl_seg_base(vcpu, 1) + (vcpu->regs.rip & ripmask);
@@ -566,26 +575,36 @@ static int vfl_run_main(vfl_vm_t *vm, vfl_vcpu_t *vcpu, vfl_run_t *run) {
             run->exit_reason = VFL_EXIT_DEBUG;
             return 0;
         }
+#endif
         chunk = 1024 - (steps & 1023);
         if (chunk > budget - steps) chunk = budget - steps;
-        if (vcpu->int_shadow || (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP)) chunk = 1;
+        if (vcpu->int_shadow) chunk = 1;
+#if CONFIG_VFL_DEBUG
+        if (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP) chunk = 1;
+#endif
         r = vfl_hot_run(vm, vcpu, run, chunk, &executed);
         r = vfl_handle_exception(vm, vcpu, run, r);
         steps += executed;
+#if CONFIG_VFL_DEBUG
         if (vcpu->stats) vcpu->stats->instructions += executed;
+#endif
         if (r) return r < 0 ? -1 : 0;
         if (!executed) {
             if (__atomic_load_n(&vcpu->stop, __ATOMIC_ACQUIRE)) continue;
             r = vfl_step(vm, vcpu, run);
             r = vfl_handle_exception(vm, vcpu, run, r);
             steps++;
+#if CONFIG_VFL_DEBUG
             if (vcpu->stats) vcpu->stats->instructions++;
+#endif
             if (r) return r < 0 ? -1 : 0;
         }
+#if CONFIG_VFL_DEBUG
         if (vcpu->control.flags & VFL_CONTROL_SINGLE_STEP) {
             run->exit_reason = VFL_EXIT_DEBUG;
             return 0;
         }
+#endif
     }
     run->exit_reason = VFL_EXIT_TIMESLICE;
     return 0;
@@ -604,8 +623,10 @@ int vfl_execute(vfl_vm_t *vm, vfl_vcpu_t *vcpu, vfl_run_t *run) {
     vfl_flags_sync(vcpu);
     vcpu->lazy_enabled = 0;
     vcpu->last_exit = *run;
+#if CONFIG_VFL_DEBUG
     if (vcpu->stats && run->exit_reason <= VFL_EXIT_DEBUG)
         vcpu->stats->exits[run->exit_reason]++;
+#endif
     if (run->exit_reason == VFL_EXIT_INTERNAL) {
         cr2 = vcpu->sregs.cr2;
         vector = vcpu->mmu_vec;

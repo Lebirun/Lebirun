@@ -4,6 +4,7 @@
 #include <lebirun/smp.h>
 #include <sys/ptrace.h>
 
+#if CONFIG_KERNEL_PTRACE
 typedef struct task_trace {
     task_t *task;
     pid_t tracer;
@@ -41,6 +42,8 @@ static void task_trace_remove_locked(task_trace_t *trace) {
     }
 }
 
+#endif
+
 void task_debug_registers(task_t *task, registers_t *frame,
                            debug_registers_t *registers) {
     memset(registers, 0, sizeof(*registers));
@@ -70,6 +73,7 @@ void task_debug_registers(task_t *task, registers_t *frame,
     registers->es = frame->es;
 }
 
+#if CONFIG_KERNEL_PTRACE
 static int task_debug_set_registers(task_t *task, registers_t *frame,
                                      const debug_registers_t *registers) {
     if (registers->rip < PAGE_SIZE ||
@@ -589,6 +593,8 @@ out:
                -EFAULT : 0;
     return 0;
 }
+
+#endif
 
 void task_user_exception(registers_t *frame, int signal) {
     uint64_t exit_code;

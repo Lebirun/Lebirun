@@ -152,8 +152,10 @@ int vfl_destroy_vm(uint32_t vm_id) {
     }
     while ((v = vm->vcpus) != NULL) {
         vm->vcpus = v->next;
+#if CONFIG_VFL_DEBUG
         if (v->stats) kfree(v->stats);
         if (v->breakpoints) kfree(v->breakpoints);
+#endif
         vfl_pages_free(v, VFL_ROUND_PAGES(sizeof(vfl_vcpu_t)));
     }
     for (link = &vfl_vms; *link; link = &(*link)->next) {
@@ -191,8 +193,10 @@ int vfl_reset_vcpu(uint32_t vm_id, uint32_t vcpu_id) {
 
     if (!v) return -EINVAL;
     if (vfl_vm_running(vfl_get_vm(vm_id))) return -EBUSY;
+#if CONFIG_VFL_DEBUG
     if (v->stats) kfree(v->stats);
     if (v->breakpoints) kfree(v->breakpoints);
+#endif
     vfl_init_vcpu_state(v);
     v->apic_id = v->id;
     return 0;
@@ -745,6 +749,7 @@ int vfl_get_lapic(uint32_t vm_id, uint32_t vcpu_id, vfl_lapic_t *lapic) {
     return 0;
 }
 
+#if CONFIG_VFL_SNAPSHOT
 static int vfl_valid_state(const vfl_state_t *state) {
     int size;
 
@@ -842,23 +847,30 @@ static int vfl_state_ioctl(unsigned long request, void *arg) {
     return r;
 }
 
+#endif
+
 static int vfl_control_ioctl(unsigned long request, void *arg) {
     uint32_t ids[2];
     vfl_vcpu_t *v;
     vfl_control_t control;
+#if CONFIG_VFL_DEBUG
     vfl_stats_t stats;
     vfl_stats_t *fresh;
     uint64_t *breakpoints;
     uint64_t bytes;
+#endif
     int r;
 
     if (!arg || copy_from_user(ids, arg, sizeof(ids)) < 0) return -EFAULT;
+#if CONFIG_VFL_DEBUG
     breakpoints = NULL;
+#endif
     if (request == VFL_IOCTL_SET_CONTROL) {
         if (copy_from_user(&control, (uint8_t *)arg + 8, sizeof(control)) < 0)
             return -EFAULT;
         if (control.reserved || (control.flags & ~(VFL_CONTROL_STATS | VFL_CONTROL_SINGLE_STEP |
             VFL_CONTROL_BREAKPOINT | VFL_CONTROL_TIMESLICE | VFL_CONTROL_EXCEPTIONS))) return -EINVAL;
+#if CONFIG_VFL_DEBUG
         if (!(control.flags & VFL_CONTROL_BREAKPOINT)) control.breakpoint_count = 0;
         if (control.breakpoint_count > ~0ULL / sizeof(*breakpoints)) return -EINVAL;
         bytes = control.breakpoint_count * sizeof(*breakpoints);
@@ -870,6 +882,12 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
                 return -EFAULT;
             }
         }
+#else
+        if (control.flags & (VFL_CONTROL_STATS | VFL_CONTROL_SINGLE_STEP |
+                             VFL_CONTROL_BREAKPOINT)) return -EOPNOTSUPP;
+        control.breakpoints = 0;
+        control.breakpoint_count = 0;
+#endif
     }
     mutex_lock(&vfl_lock);
     v = vfl_get_vcpu(ids[0], ids[1]);
@@ -881,6 +899,7 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
     }
     else if (vfl_vm_running(vfl_get_vm(ids[0]))) r = -EBUSY;
     else if (request == VFL_IOCTL_SET_CONTROL) {
+#if CONFIG_VFL_DEBUG
         if ((control.flags & VFL_CONTROL_STATS) && !v->stats) {
             fresh = kmalloc(sizeof(*fresh));
             if (!fresh) r = -ENOMEM;
@@ -889,7 +908,9 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
                 v->stats = fresh;
             }
         }
+#endif
         if (!r) {
+#if CONFIG_VFL_DEBUG
             if (!(control.flags & VFL_CONTROL_STATS) && v->stats) {
                 kfree(v->stats);
                 v->stats = NULL;
@@ -897,23 +918,31 @@ static int vfl_control_ioctl(unsigned long request, void *arg) {
             if (v->breakpoints) kfree(v->breakpoints);
             v->breakpoints = breakpoints;
             breakpoints = NULL;
+#endif
             v->control = control;
         }
     } else if (request == VFL_IOCTL_GET_CONTROL) control = v->control;
+#if CONFIG_VFL_DEBUG
     else if (request == VFL_IOCTL_GET_STATS) {
         memset(&stats, 0, sizeof(stats));
         if (v->stats) stats = *v->stats;
     } else if (request == VFL_IOCTL_RESET_STATS && v->stats)
         memset(v->stats, 0, sizeof(*v->stats));
+#endif
     mutex_unlock(&vfl_lock);
+#if CONFIG_VFL_DEBUG
     if (breakpoints) kfree(breakpoints);
+#endif
     if (!r && request == VFL_IOCTL_GET_CONTROL &&
         copy_to_user((uint8_t *)arg + 8, &control, sizeof(control)) < 0) r = -EFAULT;
+#if CONFIG_VFL_DEBUG
     if (!r && request == VFL_IOCTL_GET_STATS &&
         copy_to_user((uint8_t *)arg + 8, &stats, sizeof(stats)) < 0) r = -EFAULT;
+#endif
     return r;
 }
 
+#if CONFIG_VFL_SNAPSHOT
 static int vfl_memory_ioctl(unsigned long request, void *arg) {
     uint32_t vm_id;
     vfl_memory_transfer_t transfer;
@@ -969,6 +998,8 @@ static int vfl_memory_ioctl(unsigned long request, void *arg) {
     return r;
 }
 
+#endif
+
 static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     uint32_t ids[2];
     uint32_t vm_id;
@@ -992,16 +1023,20 @@ static int vfl_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     switch (request) {
         case VFL_IOCTL_SET_CONTROL:
         case VFL_IOCTL_GET_CONTROL:
+#if CONFIG_VFL_DEBUG
         case VFL_IOCTL_GET_STATS:
         case VFL_IOCTL_RESET_STATS:
+#endif
         case VFL_IOCTL_INTERRUPT:
             return vfl_control_ioctl(request, arg);
+#if CONFIG_VFL_SNAPSHOT
         case VFL_IOCTL_GET_STATE:
         case VFL_IOCTL_SET_STATE:
             return vfl_state_ioctl(request, arg);
         case VFL_IOCTL_READ_MEMORY:
         case VFL_IOCTL_WRITE_MEMORY:
             return vfl_memory_ioctl(request, arg);
+#endif
         case VFL_IOCTL_CREATE_VM:
             mutex_lock(&vfl_lock);
             r = vfl_create_vm();

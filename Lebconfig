@@ -7,11 +7,14 @@ subcategory "Kernel Settings" {
         item type=bool name="FAT filesystem" default=enable id=FS_FAT alias="FS_FAT" help="Enable the FAT12/16/32 filesystem"
         item type=bool name="ISO9660 filesystem" default=enable id=FS_ISO9660 alias="FS_ISO9660" help="Enable the ISO9660 filesystem"
     }
+    item type=bool name="Process tracing (ptrace)" default=enable id=KERNEL_PTRACE alias="KERNEL_PTRACE" help="Enable ptrace process tracing and debugger support"
     item type=bool name="LKE" default=enable id=KERNEL_LKE alias="KERNEL_LKE" help="Enable Lebirun Kernel Extensions, required for LKE modules"
 }
 
 subcategory "Virtualization" {
     item type=bool name="VFL (Virtualization For Lebirun)" default=disable id=VIRT_VFL help="Enable the VFL software virtualization engine (/dev/vfl)"
+    item type=bool name="VFL debugging" default=enable id=VFL_DEBUG alias="VFL_DEBUG" depends-on=VIRT_VFL help="Enable VFL breakpoints, single-stepping and execution statistics"
+    item type=bool name="VFL snapshots" default=enable id=VFL_SNAPSHOT alias="VFL_SNAPSHOT" depends-on=VIRT_VFL help="Enable VFL full CPU state save/restore and guest memory transfers"
 }
 
 subcategory "Device Drivers" {

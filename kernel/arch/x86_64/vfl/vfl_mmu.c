@@ -333,16 +333,22 @@ static int vfl_translate_address(vfl_vm_t *vm, vfl_vcpu_t *v, uint64_t linear, i
     v->mmu_vec = 14;
     v->mmu_code = 0;
     if (!vfl_tlb_lookup(vm, v, linear, access, user, phys)) {
+#if CONFIG_VFL_DEBUG
         if (v->stats) v->stats->tlb_hits++;
+#endif
         return 0;
     }
+#if CONFIG_VFL_DEBUG
     if (v->stats) v->stats->tlb_misses++;
+#endif
     if (!(v->sregs.cr0 & 1ULL) || !(v->sregs.cr0 & 0x80000000ULL)) {
         *phys = linear;
         vfl_tlb_fill(vm, v, linear, access, user, *phys, 0, 0, 0);
         return 0;
     }
+#if CONFIG_VFL_DEBUG
     if (v->stats) v->stats->page_walks++;
+#endif
     if (lm) {
         uint64_t table = v->sregs.cr3 & 0x000FFFFFFFFFF000ULL;
         int shifts[4] = {39, 30, 21, 12};

@@ -751,7 +751,9 @@ static int sys_process_vm_writev(int pid, const struct proc_vm_iovec *local,
 
 void syscalls_process_init(void) {
     mutex_init(&pidfd_lock);
+#if CONFIG_KERNEL_PTRACE
     syscall_table_set(SYSCALL_PTRACE, (void *)(task_ptrace));
+#endif
     syscall_table_set(SYSCALL_GETPID, (void *)(sys_getpid));
     syscall_table_set(SYSCALL_YIELD, (void *)(sys_yield));
     syscall_table_set(SYSCALL_SLEEP, (void *)(sys_sleep));

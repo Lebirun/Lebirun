@@ -184,8 +184,10 @@ typedef struct vfl_vcpu {
     int stop;
     int waiting;
     vfl_control_t control;
+#if CONFIG_VFL_DEBUG
     uint64_t *breakpoints;
     vfl_stats_t *stats;
+#endif
     int lazy_enabled;
     int lazy_op;
     int lazy_size;
@@ -296,7 +298,9 @@ int vfl_exec_load_reg(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, vfl_ea_t *ea,
                       int reg, int size, int rex, int n, uint64_t ripmask);
 
 int vfl_step(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run);
+#if CONFIG_VFL_DEBUG
 int vfl_breakpoint(vfl_vcpu_t *v, uint64_t ip);
+#endif
 int vfl_hot_run(vfl_vm_t *vm, vfl_vcpu_t *v, vfl_run_t *run, uint64_t budget,
                 uint64_t *executed);
 void vfl_flags_sync(vfl_vcpu_t *v);
