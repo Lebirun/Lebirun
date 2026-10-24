@@ -97,15 +97,8 @@ static int task_scheduler_rank(task_t *task) {
 }
 
 static uint64_t task_affinity_mask(task_t *task) {
-    uint64_t m;
-    if (!task)
-        return 0;
-    m = task->affinity64;
-    if (m == 0)
-        m = ((uint64_t)task->cpu_affinity_hi << 32) | task->cpu_affinity;
-    if (m == 0)
-        m = 0xFFFFFFFFFFFFFFFFULL;
-    return m;
+    if (!task) return 0;
+    return task->affinity64;
 }
 
 static int task_affinity_words(void) {
@@ -132,44 +125,38 @@ static int task_cpu_allowed(task_t *task, int cpu) {
         m = task_affinity_mask(task);
         return (m & (1ULL << cpu)) != 0;
     }
-    if (!task->affinity_dyn) return 1;
+    if (task->affinity_nwords < 0) return 1;
     idx = (cpu >> 6) - 1;
-    if (idx < 0 || idx >= task->affinity_nwords) return 1;
+    if (idx < 0 || idx >= task->affinity_nwords) return 0;
     return (task->affinity_dyn[idx] & (1ULL << (cpu & 63))) != 0;
 }
 
-static int task_affinity_grow(task_t *task, int words) {
+static int task_affinity_copy(task_t *dst, task_t *src) {
     uint64_t *nd;
-    int have;
+    int words;
     int i;
-    if (!task || words <= 1) return 1;
-    have = task->affinity_dyn ? task->affinity_nwords : 0;
-    if (have >= words - 1) return 1;
-    nd = (uint64_t *)krealloc(task->affinity_dyn,
-        (uint64_t)(words - 1) * sizeof(uint64_t));
-    if (!nd) return 0;
-    for (i = have; i < words - 1; i++)
-        nd[i] = 0xFFFFFFFFFFFFFFFFULL;
-    task->affinity_dyn = nd;
-    task->affinity_nwords = words - 1;
-    return 1;
-}
-
-static void task_affinity_copy(task_t *dst, task_t *src) {
-    int i;
-    if (!dst || !src) return;
-    dst->cpu_affinity = src->cpu_affinity ? src->cpu_affinity : 0xFFFFFFFFu;
+    if (!dst || !src) return -1;
+    nd = NULL;
+    words = 0;
+    for (;;) {
+        lock_scheduler();
+        if (src->affinity_nwords <= words) break;
+        words = src->affinity_nwords;
+        unlock_scheduler();
+        if (nd) kfree(nd);
+        nd = (uint64_t *)kmalloc((uint64_t)words * sizeof(uint64_t));
+        if (!nd) return -1;
+    }
+    for (i = 0; i < src->affinity_nwords; i++)
+        nd[i] = src->affinity_dyn[i];
+    dst->cpu_affinity = src->cpu_affinity;
     dst->cpu_affinity_hi = src->cpu_affinity_hi;
     dst->affinity64 = src->affinity64;
-    dst->affinity_dyn = NULL;
-    dst->affinity_nwords = 0;
-    if (!src->affinity_dyn || src->affinity_nwords <= 0) return;
-    dst->affinity_dyn = (uint64_t *)kmalloc(
-        (uint64_t)src->affinity_nwords * sizeof(uint64_t));
-    if (!dst->affinity_dyn) return;
-    for (i = 0; i < src->affinity_nwords; i++)
-        dst->affinity_dyn[i] = src->affinity_dyn[i];
     dst->affinity_nwords = src->affinity_nwords;
+    dst->affinity_dyn = src->affinity_nwords > 0 ? nd : NULL;
+    unlock_scheduler();
+    if (!dst->affinity_dyn && nd) kfree(nd);
+    return 0;
 }
 
 static void task_affinity_free(task_t *task) {
@@ -322,43 +309,16 @@ static volatile int memory_pressure_pending;
 static uint64_t memory_pressure_last_tick;
 
 int task_set_cpu_affinity(task_t *task, uint32_t mask) {
-    uint64_t online;
-    uint64_t m;
-
-    if (!task) return -1;
-    if (mask == 0) return -1;
-    if (cpu_count <= 0) return -1;
-    if (cpu_count >= 64) online = 0xFFFFFFFFFFFFFFFFULL;
-    else online = (1ULL << cpu_count) - 1ULL;
-    if (online == 0) online = 0xFFFFFFFFFFFFFFFFULL;
-    m = ((uint64_t)task->cpu_affinity_hi << 32) | mask;
-    if (task->affinity64 != 0)
-        m = (task->affinity64 & ~0xFFFFFFFFULL) | mask;
-    if ((m & online) == 0) return -1;
-    lock_scheduler();
-    task->cpu_affinity = mask;
-    task->affinity64 = m;
-    unlock_scheduler();
-    return 0;
+    return task_set_cpu_affinity64(task, mask);
 }
 
 int task_set_cpu_affinity64(task_t *task, uint64_t mask) {
-    uint64_t online;
-    if (!task) return -1;
-    if (mask == 0) return -1;
-    if (cpu_count <= 0) return -1;
-    if (cpu_count >= 64) online = 0xFFFFFFFFFFFFFFFFULL;
-    else online = (1ULL << cpu_count) - 1ULL;
-    if ((mask & online) == 0) return -1;
-    lock_scheduler();
-    task->cpu_affinity = (uint32_t)mask;
-    task->cpu_affinity_hi = (uint32_t)(mask >> 32);
-    task->affinity64 = mask;
-    unlock_scheduler();
-    return 0;
+    return task_set_cpu_affinity_mask(task, &mask, 1);
 }
 
 int task_set_cpu_affinity_mask(task_t *task, const uint64_t *words, int nwords) {
+    uint64_t *nd;
+    uint64_t *old;
     int need;
     int i;
     int any;
@@ -370,27 +330,29 @@ int task_set_cpu_affinity_mask(task_t *task, const uint64_t *words, int nwords) 
     }
     if (nwords > need) nwords = need;
     any = 0;
-    for (i = 0; i < nwords * 64; i++) {
-        if (i >= cpu_count) break;
-        if (words[i >> 6] & (1ULL << (i & 63))) {
+    for (i = 0; i < nwords; i++) {
+        if (words[i] & task_online_cpu_mask(i)) {
             any = 1;
             break;
         }
     }
     if (!any) return -1;
-    if (nwords > 1 && !task_affinity_grow(task, nwords)) return -1;
+    while (nwords > 1 && words[nwords - 1] == 0) nwords--;
+    nd = NULL;
+    if (nwords > 1) {
+        nd = (uint64_t *)kmalloc((uint64_t)(nwords - 1) * sizeof(uint64_t));
+        if (!nd) return -1;
+        for (i = 1; i < nwords; i++) nd[i - 1] = words[i];
+    }
     lock_scheduler();
+    old = task->affinity_dyn;
     task->cpu_affinity = (uint32_t)words[0];
     task->cpu_affinity_hi = (uint32_t)(words[0] >> 32);
     task->affinity64 = words[0];
-    if (nwords > 1) {
-        if (!task->affinity_dyn || task->affinity_nwords < nwords - 1) {
-            unlock_scheduler();
-            return -1;
-        }
-        for (i = 1; i < nwords; i++) task->affinity_dyn[i - 1] = words[i];
-    }
+    task->affinity_dyn = nd;
+    task->affinity_nwords = nwords - 1;
     unlock_scheduler();
+    if (old) kfree(old);
     return 0;
 }
 
@@ -404,9 +366,10 @@ int task_get_cpu_affinity_mask(task_t *task, uint64_t *words, int nwords) {
     lock_scheduler();
     words[0] = task_affinity_mask(task);
     for (i = 1; i < w; i++) {
-        if (task->affinity_dyn && i - 1 < task->affinity_nwords)
+        if (task->affinity_nwords < 0) words[i] = UINT64_MAX;
+        else if (i - 1 < task->affinity_nwords)
             words[i] = task->affinity_dyn[i - 1];
-        else words[i] = 0xFFFFFFFFFFFFFFFFULL;
+        else words[i] = 0;
     }
     unlock_scheduler();
     for (i = 0; i < w; i++) words[i] &= task_online_cpu_mask(i);
@@ -428,9 +391,7 @@ uint32_t task_get_cpu_affinity(task_t *task) {
 
     if (!task) return 0;
     lock_scheduler();
-    mask = task->cpu_affinity;
-    if (mask == 0 && task->affinity64 == 0) mask = 0xFFFFFFFFu;
-    else if (mask == 0) mask = (uint32_t)task->affinity64;
+    mask = (uint32_t)task_affinity_mask(task);
     unlock_scheduler();
     return mask & (uint32_t)task_online_cpu_mask(0);
 }
@@ -1612,6 +1573,7 @@ void KERNEL_INIT init_tasks(void) {
     current_task->cpu_affinity = 0xFFFFFFFFu;
     current_task->cpu_affinity_hi = 0xFFFFFFFFu;
     current_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
+    current_task->affinity_nwords = -1;
     current_task->vruntime = 0;
     ready_queue_head = current_task;
     ready_queue_tail = current_task;
@@ -1838,6 +1800,7 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->cpu_affinity = 0xFFFFFFFFu;
     new_task->cpu_affinity_hi = 0xFFFFFFFFu;
     new_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
+    new_task->affinity_nwords = -1;
     new_task->vruntime = 0;
 
     if (user_mode) {
@@ -3942,7 +3905,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
     prev_task = this_cpu->running_task;
     migrate = prev_task && prev_task->state == TASK_RUNNING &&
               (regs->cs & 3) == 3 &&
-              !task_cpu_allowed(prev_task, cpu_id);
+              (cpu_id < 64 ?
+               !(__atomic_load_n(&prev_task->affinity64, __ATOMIC_RELAXED) &
+                 (1ULL << cpu_id)) :
+               __atomic_load_n(&prev_task->affinity_nwords, __ATOMIC_RELAXED) >= 0);
     forced_reschedule = this_cpu->schedule_force;
     if (prev_task && prev_task->kernel_cpu_pinned &&
         prev_task->state == TASK_RUNNING && regs->int_no != 48) {
@@ -3961,6 +3927,9 @@ registers_t* schedule_from_irq(registers_t* regs) {
         if (!forced_state_switch) return regs;
         spin_lock(&sched_lock);
     }
+    migrate = prev_task && prev_task->state == TASK_RUNNING &&
+              (regs->cs & 3) == 3 &&
+              !task_cpu_allowed(prev_task, cpu_id);
     descriptor_ready_drain_irq_locked();
     result = regs;
 
@@ -4809,7 +4778,11 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
         return -KERR_ENOMEM;
     }
 
-    task_affinity_copy(child, parent);
+    if (task_affinity_copy(child, parent) < 0) {
+        task_release_dead_resources(child);
+        kfree(child);
+        return -KERR_ENOMEM;
+    }
     lock_scheduler();
     child->all_next = all_tasks_head;
     all_tasks_head = child;
@@ -5520,9 +5493,21 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
         return -1;
     }
     
+    if (task_affinity_copy(new_task, current_task) < 0) {
+        task_release_file_mappings(new_task->file_maps, new_task->file_map_count);
+        task_rlimit_free(new_task);
+        task_free_signal_data(new_task);
+        kstack_free(new_task->kernel_stack_base);
+        task_free_fpu_state(new_task);
+        task_free_cwd(new_task);
+        kfree(new_task);
+        return -KERR_ENOMEM;
+    }
+
     stack_page_count = 0;
     stack_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, thread_stack_base, thread_stack_size, 0x7 | VMM_PTE_NX, &stack_page_count);
     if (!stack_pages) {
+        task_affinity_free(new_task);
         task_rlimit_free(new_task);
         task_free_signal_data(new_task);
         kstack_free(new_task->kernel_stack_base);
@@ -5610,7 +5595,6 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->regs.ds = new_task->regs.es = new_task->regs.ss = 0x23;
     new_task->regs.rflags = 0x202;
     
-    task_affinity_copy(new_task, current_task);
     lock_scheduler();
     new_task->all_next = all_tasks_head;
     all_tasks_head = new_task;

@@ -644,7 +644,7 @@ static int futex_get_key(int *uaddr, uint64_t *key) {
         (address & (sizeof(int) - 1)) != 0) return -EINVAL;
     pml4 = current_task->pml4_phys ? current_task->pml4_phys :
             current_task->cr3;
-    physical = vmm_get_phys_in_pml4(pml4, address);
+    physical = vmm_get_phys_in_pml4(pml4, address & ~(PAGE_SIZE - 1));
     if (physical == 0) return -EFAULT;
     *key = physical + (address & (PAGE_SIZE - 1));
     return 0;
@@ -698,8 +698,11 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     int comparison;
     int operation_argument;
     int comparison_argument;
-    int new_value;
     int result;
+    uint64_t saved_flags;
+    uint64_t temporary;
+    uint64_t physical;
+    uint32_t *word;
 
     op = (int)(uintptr_t)op_ptr;
     cmd = op & 127;
@@ -737,10 +740,6 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
                                       (int)(uintptr_t)timeout);
 
         case FUTEX_WAKE_OP:
-            ret = futex_get_key(uaddr2, &key2);
-            if (ret < 0) return ret;
-            if (copy_from_user(&value, uaddr2, sizeof(value)) < 0)
-                return -EFAULT;
             operation = (int)((val3 >> 28) & 0xF);
             comparison = (int)((val3 >> 24) & 0xF);
             operation_argument = (int)((val3 >> 12) & 0xFFF);
@@ -750,23 +749,45 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
                 comparison_argument |= ~0xFFF;
             if (operation & FUTEX_OP_ARG_SHIFT) {
                 operation &= ~FUTEX_OP_ARG_SHIFT;
-                if (operation_argument >= 31) return -EINVAL;
-                operation_argument = 1 << operation_argument;
+                if (operation_argument < 0 || operation_argument > 31)
+                    return -EINVAL;
+                operation_argument = (int)(1U << operation_argument);
             }
-            new_value = value;
-            if (operation == FUTEX_OP_SET)
-                new_value = operation_argument;
-            else if (operation == FUTEX_OP_ADD)
-                new_value += operation_argument;
-            else if (operation == FUTEX_OP_OR)
-                new_value |= operation_argument;
-            else if (operation == FUTEX_OP_ANDN)
-                new_value &= ~operation_argument;
-            else if (operation == FUTEX_OP_XOR)
-                new_value ^= operation_argument;
-            else return -EINVAL;
-            if (copy_to_user(uaddr2, &new_value, sizeof(new_value)) < 0)
+            if (operation > FUTEX_OP_XOR || comparison > 5)
+                return -EINVAL;
+            if ((uintptr_t)uaddr2 & (sizeof(*uaddr2) - 1))
+                return -EINVAL;
+            if (!user_access_ok(uaddr2, sizeof(*uaddr2), UACCESS_WRITE))
                 return -EFAULT;
+            pfa_lock_acquire(&saved_flags);
+            ret = futex_get_key(uaddr, &key);
+            physical = vmm_get_user_page_in_pml4(current_task->pml4_phys,
+                (uint64_t)(uintptr_t)uaddr2, 1);
+            if (ret < 0 || !physical) {
+                pfa_lock_release(saved_flags);
+                return ret < 0 ? ret : -EFAULT;
+            }
+            key2 = physical + ((uintptr_t)uaddr2 & (PAGE_SIZE - 1));
+            temporary = TEMP_SLOT(7);
+            vmm_temp_map_raw(temporary, key2 & ~(PAGE_SIZE - 1));
+            word = (uint32_t *)(temporary + (key2 & (PAGE_SIZE - 1)));
+            if (operation == FUTEX_OP_SET)
+                value = (int)__atomic_exchange_n(word,
+                    (uint32_t)operation_argument, __ATOMIC_SEQ_CST);
+            else if (operation == FUTEX_OP_ADD)
+                value = (int)__atomic_fetch_add(word,
+                    (uint32_t)operation_argument, __ATOMIC_SEQ_CST);
+            else if (operation == FUTEX_OP_OR)
+                value = (int)__atomic_fetch_or(word,
+                    (uint32_t)operation_argument, __ATOMIC_SEQ_CST);
+            else if (operation == FUTEX_OP_ANDN)
+                value = (int)__atomic_fetch_and(word,
+                    ~(uint32_t)operation_argument, __ATOMIC_SEQ_CST);
+            else
+                value = (int)__atomic_fetch_xor(word,
+                    (uint32_t)operation_argument, __ATOMIC_SEQ_CST);
+            vmm_temp_unmap_raw(temporary);
+            pfa_lock_release(saved_flags);
             result = task_futex_wake(key, val);
             compare_value = comparison_argument;
             if ((comparison == 0 && value == compare_value) ||

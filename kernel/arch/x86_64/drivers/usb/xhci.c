@@ -24,6 +24,7 @@ typedef struct {
     uint16_t version;
     uint8_t max_slots;
     uint8_t max_ports;
+    uint8_t context_size;
     uint64_t op;
     uint64_t rt;
     uint64_t dboff;
@@ -263,6 +264,7 @@ static int KERNEL_INIT xhci_setup_operational(void) {
         KERNEL_INIT_LOG("XHCI: 32-bit only controller not supported\n");
         return -1;
     }
+    g_xhci.context_size = (hcc & (1u << 2)) ? 64 : 32;
     if (xhci_take_ownership() < 0) return -1;
 
     dcbaa = xhci_alloc_dma(&dcbaa_phys);
@@ -270,8 +272,8 @@ static int KERNEL_INIT xhci_setup_operational(void) {
     g_xhci.dcbaa = dcbaa;
     g_xhci.dcbaa_phys = dcbaa_phys;
     hcs2 = mmio_read32(g_xhci.mmio_virt + XHCI_CAP_HCSP2);
-    nscratch = (uint64_t)(((hcs2 >> 27) & 0x1F) << 5) |
-               (uint64_t)((hcs2 >> 21) & 0x1F);
+    nscratch = (uint64_t)(((hcs2 >> 21) & 0x1F) << 5) |
+               (uint64_t)((hcs2 >> 27) & 0x1F);
     if (nscratch > 0) {
         arr = xhci_alloc_dma(&arr_phys);
         if (!arr) return -1;
@@ -513,7 +515,8 @@ static int KERNEL_INIT xhci_enable_slot(uint64_t *slot_out) {
 }
 
 static int KERNEL_INIT xhci_build_input_ctx(usb_dev_t *dev, uint64_t mps,
-                                            uint64_t add_mask) {    uint64_t ctx;
+                                            uint64_t add_mask) {
+    uint64_t ctx;
     uint64_t ctx_phys;
     uint32_t *p;
 
@@ -528,20 +531,22 @@ static int KERNEL_INIT xhci_build_input_ctx(usb_dev_t *dev, uint64_t mps,
     p = (uint32_t *)ctx;
     p[0] = 0;
     p[1] = (uint32_t)(add_mask & 0xFFFFFFFFULL);
-    p[8] = ((uint64_t)1 << 27);
-    p[8] |= ((uint64_t)dev->speed << 20);
-    p[9] = ((uint64_t)(dev->port + 1) << 16);
-    p[10] = 0;
-    p[11] = 0;
-    p[16] = 0;
-    p[17] = ((uint64_t)mps << 16) | (4u << 3) | (3u << 1);
-    p[18] = (uint32_t)((dev->ep0_ring_phys + dev->ep0_idx * 16) & 0xFFFFFFFFULL) |
+    p = (uint32_t *)(ctx + g_xhci.context_size);
+    p[0] = ((uint64_t)1 << 27);
+    p[0] |= ((uint64_t)dev->speed << 20);
+    p[1] = ((uint64_t)(dev->port + 1) << 16);
+    p[2] = 0;
+    p[3] = 0;
+    p = (uint32_t *)(ctx + 2 * g_xhci.context_size);
+    p[0] = 0;
+    p[1] = ((uint64_t)mps << 16) | (4u << 3) | (3u << 1);
+    p[2] = (uint32_t)((dev->ep0_ring_phys + dev->ep0_idx * 16) & 0xFFFFFFFFULL) |
             (dev->ep0_cycle & 0x1);
-    p[19] = (uint32_t)(((dev->ep0_ring_phys + dev->ep0_idx * 16) >> 32) & 0xFFFFFFFFULL);
-    p[20] = 8 | ((uint64_t)mps << 16);
-    p[21] = 0;
-    p[22] = 0;
-    p[23] = 0;
+    p[3] = (uint32_t)(((dev->ep0_ring_phys + dev->ep0_idx * 16) >> 32) & 0xFFFFFFFFULL);
+    p[4] = 8 | ((uint64_t)mps << 16);
+    p[5] = 0;
+    p[6] = 0;
+    p[7] = 0;
     return 0;
 }
 
@@ -666,6 +671,7 @@ static int KERNEL_INIT xhci_control(usb_dev_t *dev, uint8_t *setup,
 static int KERNEL_INIT xhci_get_descriptor(usb_dev_t *dev, uint64_t dtype,
                                            uint64_t dindex, uint64_t len) {
     uint8_t setup[8];
+    uint32_t *octx;
 
     setup[0] = 0x80;
     setup[1] = 6;
@@ -677,7 +683,7 @@ static int KERNEL_INIT xhci_get_descriptor(usb_dev_t *dev, uint64_t dtype,
     setup[7] = (uint8_t)((len >> 8) & 0xFF);
     memset((void *)dev->xfer, 0, PAGE_SIZE);
     if (xhci_control(dev, setup, len, 1) < 0) {
-        uint32_t *octx = (uint32_t *)(dev->outctx + 32);
+        octx = (uint32_t *)(dev->outctx + g_xhci.context_size);
         KERNEL_INIT_LOG("XHCI: FAIL slot=%u ep0 out state=%u deq=%lX\n",
                         dev->slot, (uint32_t)(octx[0] & 0x7),
                         ((uint64_t)octx[3] << 32) | (uint64_t)(octx[2] & ~0xFULL));
@@ -947,7 +953,7 @@ static int KERNEL_INIT xhci_configure_hid(usb_dev_t *dev) {
     dev->ibuf = xhci_alloc_dma(&dev->ibuf_phys);
     if (!dev->ibuf) return -1;
     dci = dev->iep;
-    base = 8 + (uint64_t)dci * 8;
+    base = (dci + 1) * (g_xhci.context_size / sizeof(uint32_t));
     if (xhci_build_input_ctx(dev, dev->mps,
                              0x1 | (1u << dci)) < 0) return -1;
     p = (uint32_t *)dev->inctx;

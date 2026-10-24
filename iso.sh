@@ -84,13 +84,13 @@ trap 'rm -rf -- "$GRUB_ISO_DIRECTORY" "$EFI_WORK_DIRECTORY"' EXIT HUP INT TERM
 cp -a "$GRUB_DIRECTORY/." "$GRUB_ISO_DIRECTORY/"
 printf '%s\n' part_msdos > "$GRUB_ISO_DIRECTORY/partmap.lst"
 
-HYBRID=0
-if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
-    cat > "$EFI_WORK_DIRECTORY/early.cfg" << EOF
+cat > "$EFI_WORK_DIRECTORY/early.cfg" << EOF
 search --set=root --file /boot/grub/grub.cfg
 set prefix=(\$root)/boot/grub
 configfile /boot/grub/grub.cfg
 EOF
+HYBRID=0
+if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
     if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/early.cfg" efi_gop normal multiboot2 iso9660 part_msdos part_gpt configfile search && \
        dd if=/dev/zero of="$EFI_WORK_DIRECTORY/efi.img" bs=1K count=1024 status=none && \
        mformat -i "$EFI_WORK_DIRECTORY/efi.img" -v EFI :: >/dev/null && \

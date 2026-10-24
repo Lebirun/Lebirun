@@ -55,7 +55,7 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 
 bool test_bit(uint64_t frame_idx);
 
-static inline void pfa_lock_acquire(uint64_t *eflags_out) {
+void pfa_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
     __asm__ volatile ("cli");
     while (__sync_lock_test_and_set(&pfa_lock, 1)) {
@@ -64,7 +64,7 @@ static inline void pfa_lock_acquire(uint64_t *eflags_out) {
     }
 }
 
-static inline void pfa_lock_release(uint64_t eflags) {
+void pfa_lock_release(uint64_t eflags) {
     __sync_lock_release(&pfa_lock);
     if (eflags & (1 << 9)) __asm__ volatile ("sti");
 }

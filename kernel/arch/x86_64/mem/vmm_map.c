@@ -137,6 +137,24 @@ uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     return result;
 }
 
+uint64_t vmm_get_user_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                                  int write) {
+    uint64_t entry;
+    uint64_t effective;
+    uint64_t required;
+    int huge;
+
+    required = VMM_PTE_PRESENT | VMM_PTE_USER;
+    if (write) required |= VMM_PTE_WRITE;
+    if (!vmm_walk_leaf(pml4_phys, virt_addr, &entry, &effective, &huge) ||
+        !(entry & VMM_PTE_PRESENT) ||
+        (effective & required) != required) return 0;
+    if (huge)
+        return (entry & 0x000FFFFFFFE00000ULL) |
+               (virt_addr & 0x1FF000ULL);
+    return entry & VMM_PHYS_MASK;
+}
+
 uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     uint64_t entry;
     uint64_t result;

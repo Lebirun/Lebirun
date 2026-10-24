@@ -118,6 +118,8 @@ void *pmm_alloc_low_page(void);
 void *pmm_alloc_mapped_page(void);
 void *pmm_alloc_early_pages(uint64_t num);
 void pfa_init(void);
+void pfa_lock_acquire(uint64_t *eflags_out);
+void pfa_lock_release(uint64_t eflags);
 uint64_t pfa_alloc(void);
 uint64_t pfa_alloc_contiguous(uint64_t num_frames);
 uint64_t pfa_alloc_contiguous_below(uint64_t num_frames, uint64_t max_phys);
@@ -231,6 +233,8 @@ int pt_reclaim_low_identity(void);
 
 int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags);
 uint64_t vmm_get_phys_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
+uint64_t vmm_get_user_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
+                                  int write);
 uint64_t vmm_get_flags_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
 int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
                              uint64_t flags);

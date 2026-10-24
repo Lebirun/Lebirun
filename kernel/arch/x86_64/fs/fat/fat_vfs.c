@@ -71,7 +71,7 @@ static vfs_node_t *fat_make_node(fat_fs_t *fs, const char *name,
     return node;
 }
 
-static int fat_flush_entry(vfs_node_t *node) {
+static int fat_flush_entry_locked(vfs_node_t *node) {
     fat_node_t *priv = (fat_node_t *)node->private_data;
     fat_entry_t entry;
     uint16_t fdate;
@@ -79,9 +79,7 @@ static int fat_flush_entry(vfs_node_t *node) {
 
     if (!priv || !priv->has_entry) return 0;
     fat_dos_time(node->mtime, &fdate, &ftime);
-    mutex_lock(&priv->fs->lock);
     if (fat_read_lba(priv->fs, priv->entry_lba, priv->fs->scratch) != 0) {
-        mutex_unlock(&priv->fs->lock);
         return -1;
     }
     memcpy(entry.raw, priv->fs->scratch + priv->entry_off, FAT_ENTRY_SIZE);
@@ -99,11 +97,20 @@ static int fat_flush_entry(vfs_node_t *node) {
     entry.raw[25] = (uint8_t)((fdate >> 8) & 0xFF);
     memcpy(priv->fs->scratch + priv->entry_off, entry.raw, FAT_ENTRY_SIZE);
     if (fat_write_lba(priv->fs, priv->entry_lba, priv->fs->scratch) != 0) {
-        mutex_unlock(&priv->fs->lock);
         return -1;
     }
-    mutex_unlock(&priv->fs->lock);
     return 0;
+}
+
+static int fat_flush_entry(vfs_node_t *node) {
+    fat_node_t *priv = (fat_node_t *)node->private_data;
+    int result;
+
+    if (!priv || !priv->has_entry) return 0;
+    mutex_lock(&priv->fs->lock);
+    result = fat_flush_entry_locked(node);
+    mutex_unlock(&priv->fs->lock);
+    return result;
 }
 
 static uint32_t fat_walk_inner(fat_fs_t *fs, uint32_t *start, uint64_t idx,
@@ -425,23 +432,27 @@ static vfs_node_t *fat_vfs_finddir(vfs_node_t *node, const char *name) {
 
 static int fat_vfs_create(vfs_node_t *parent, const char *name,
                           uint64_t flags) {
-    fat_node_t *priv = (fat_node_t *)parent->private_data;
+    fat_node_t *priv;
     fat_fs_t *fs;
     uint8_t sfn[FAT_SFN_LEN];
     uint16_t fdate;
     uint16_t ftime;
+    int result;
 
     (void)flags;
-    if (!parent || !priv || !name) return -1;
+    if (!parent || !name) return -1;
+    priv = (fat_node_t *)parent->private_data;
+    if (!priv) return -1;
     if ((parent->flags & VFS_TYPE_MASK) != VFS_DIRECTORY) return -1;
     if (fat_to_sfn(name, sfn) != 0) return -1;
     fs = priv->fs;
     fat_dos_time(ramfs_get_time(), &fdate, &ftime);
     mutex_lock(&fs->lock);
-    if (fat_dir_add(fs, priv->dir_cluster, priv->is_root, sfn, FAT_ATTR_ARCHIVE,
-                    0, fdate, ftime, NULL, NULL) != 0) {
+    result = fat_dir_add(fs, priv->dir_cluster, priv->is_root, sfn,
+                          FAT_ATTR_ARCHIVE, 0, fdate, ftime, NULL, NULL);
+    if (result != 0) {
         mutex_unlock(&fs->lock);
-        return -1;
+        return result;
     }
     parent->mtime = ramfs_get_time();
     mutex_unlock(&fs->lock);
@@ -483,7 +494,7 @@ static int fat_vfs_unlink(vfs_node_t *parent, const char *name) {
 
 static int fat_vfs_mkdir(vfs_node_t *parent, const char *name,
                          uint64_t perms) {
-    fat_node_t *priv = (fat_node_t *)parent->private_data;
+    fat_node_t *priv;
     fat_fs_t *fs;
     uint8_t sfn[FAT_SFN_LEN];
     uint32_t cluster;
@@ -492,24 +503,33 @@ static int fat_vfs_mkdir(vfs_node_t *parent, const char *name,
     uint32_t doff;
     uint16_t fdate;
     uint16_t ftime;
+    int result;
 
     (void)perms;
-    if (!parent || !priv || !name) return -1;
+    if (!parent || !name) return -1;
+    priv = (fat_node_t *)parent->private_data;
+    if (!priv) return -1;
     if ((parent->flags & VFS_TYPE_MASK) != VFS_DIRECTORY) return -1;
     if (fat_to_sfn(name, sfn) != 0) return -1;
     fs = priv->fs;
     fat_dos_time(ramfs_get_time(), &fdate, &ftime);
     mutex_lock(&fs->lock);
+    if (fat_dir_find(fs, priv->dir_cluster, priv->is_root, sfn, &dot,
+                     NULL, NULL) == 0) {
+        mutex_unlock(&fs->lock);
+        return -17;
+    }
     cluster = fat_alloc_cluster(fs, 0);
     if (cluster < 2) {
         mutex_unlock(&fs->lock);
         return -1;
     }
-    if (fat_dir_add(fs, priv->dir_cluster, priv->is_root, sfn, FAT_ATTR_DIR,
-                    cluster, fdate, ftime, NULL, NULL) != 0) {
+    result = fat_dir_add(fs, priv->dir_cluster, priv->is_root, sfn,
+                          FAT_ATTR_DIR, cluster, fdate, ftime, NULL, NULL);
+    if (result != 0) {
         fat_free_chain(fs, cluster);
         mutex_unlock(&fs->lock);
-        return -1;
+        return result;
     }
     memset(dot.raw, ' ', FAT_SFN_LEN);
     dot.raw[0] = '.';
@@ -562,21 +582,94 @@ static int fat_vfs_mkdir(vfs_node_t *parent, const char *name,
 }
 
 static int fat_vfs_truncate(vfs_node_t *node, uint64_t length) {
-    fat_node_t *priv = (fat_node_t *)node->private_data;
+    fat_node_t *priv;
     fat_fs_t *fs;
     uint64_t bpc;
     uint64_t keep;
+    uint64_t old_length;
+    uint64_t old_mtime;
+    uint64_t pos;
+    uint64_t idx;
+    uint64_t lba;
+    uint64_t take;
+    uint32_t off;
     uint32_t c;
+    uint32_t rest;
+    uint32_t first_new = 0;
+    uint32_t old_tail = 0;
 
-    if (!node || !priv) return -1;
+    if (!node) return -1;
+    priv = (fat_node_t *)node->private_data;
+    if (!priv || length > 0xFFFFFFFFULL) return -1;
     if ((node->flags & VFS_TYPE_MASK) != VFS_FILE) return -1;
     fs = priv->fs;
     bpc = (uint64_t)fs->bps * fs->spc;
     mutex_lock(&fs->lock);
     if (length >= node->length) {
+        old_length = node->length;
+        old_mtime = node->mtime;
+        pos = old_length;
+        if (pos < length) {
+            c = priv->first_cluster;
+            if (!c) {
+                c = fat_alloc_cluster_nz(fs, 0);
+                if (c < 2) goto fail;
+                priv->first_cluster = c;
+                first_new = c;
+            }
+            idx = pos / bpc;
+            while (idx) {
+                if (c < 2 || c >= fs->cluster_count + 2) goto fail;
+                rest = fat_next_cluster(fs, c);
+                if (rest >= (fs->fat_bits == 32 ? 0x0FFFFFF8 :
+                             fs->fat_bits == 16 ? 0xFFF8 : 0xFF8)) {
+                    rest = fat_alloc_cluster_nz(fs, c);
+                    if (rest < 2) goto fail;
+                    if (!first_new) {
+                        first_new = rest;
+                        old_tail = c;
+                    }
+                }
+                if (rest < 2 || rest >= fs->cluster_count + 2) goto fail;
+                c = rest;
+                idx--;
+            }
+            while (pos < length) {
+                if (c < 2 || c >= fs->cluster_count + 2) goto fail;
+                off = (uint32_t)(pos % fs->bps);
+                take = fs->bps - off;
+                if (take > length - pos) take = length - pos;
+                lba = fat_cluster_lba(fs, c) + (pos % bpc) / fs->bps;
+                if (off || take < fs->bps) {
+                    if (fat_read_lba(fs, lba, fs->scratch) != 0) goto fail;
+                }
+                memset(fs->scratch + off, 0, take);
+                if (fat_write_lba(fs, lba, fs->scratch) != 0) goto fail;
+                pos += take;
+                if (pos < length && pos % bpc == 0) {
+                    rest = fat_next_cluster(fs, c);
+                    if (rest >= (fs->fat_bits == 32 ? 0x0FFFFFF8 :
+                                 fs->fat_bits == 16 ? 0xFFF8 : 0xFF8)) {
+                        rest = fat_alloc_cluster_nz(fs, c);
+                        if (rest < 2) goto fail;
+                        if (!first_new) {
+                            first_new = rest;
+                            old_tail = c;
+                        }
+                    }
+                    if (rest < 2 || rest >= fs->cluster_count + 2) goto fail;
+                    c = rest;
+                }
+            }
+            node->mtime = ramfs_get_time();
+        }
         node->length = length;
+        if (fat_flush_entry_locked(node) != 0) {
+            node->length = old_length;
+            node->mtime = old_mtime;
+            goto fail;
+        }
         mutex_unlock(&fs->lock);
-        fat_flush_entry(node);
         return 0;
     }
     if (!length) {
@@ -595,7 +688,7 @@ static int fat_vfs_truncate(vfs_node_t *node, uint64_t length) {
         keep--;
     }
     if (c >= 2) {
-        uint32_t rest = fat_next_cluster(fs, c);
+        rest = fat_next_cluster(fs, c);
         fat_set_next(fs, c, fs->fat_bits == 32 ? 0x0FFFFFFF :
                             fs->fat_bits == 16 ? 0xFFFF : 0x0FFF);
         if (rest >= 2) fat_free_chain(fs, rest);
@@ -605,6 +698,19 @@ static int fat_vfs_truncate(vfs_node_t *node, uint64_t length) {
     mutex_unlock(&fs->lock);
     fat_flush_entry(node);
     return 0;
+fail:
+    if (first_new) {
+        if (!old_tail) {
+            priv->first_cluster = 0;
+            fat_free_chain(fs, first_new);
+        } else if (fat_set_next(fs, old_tail,
+                               fs->fat_bits == 32 ? 0x0FFFFFFF :
+                               fs->fat_bits == 16 ? 0xFFFF : 0x0FFF) == 0) {
+            fat_free_chain(fs, first_new);
+        }
+    }
+    mutex_unlock(&fs->lock);
+    return -1;
 }
 
 static int fat_vfs_rename(vfs_node_t *old_parent, const char *old_name,

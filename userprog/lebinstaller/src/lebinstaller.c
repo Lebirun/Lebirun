@@ -1351,7 +1351,8 @@ static int inst_install_efi(const char *disk_dev, const char *part_dev,
         inst_umount_partition(esp_mount);
         return -1;
     }
-    inst_clear_boot_code(disk_dev);
+    if (is_gpt || boot_mode != BOOT_BOTH)
+        inst_clear_boot_code(disk_dev);
     inst_umount_partition(esp_mount);
     return 0;
 }
@@ -1590,6 +1591,7 @@ static int inst_install_boot_bios(const char *mountpoint, const char *disk_dev, 
 static int inst_install_boot(const char *mountpoint, const char *disk_dev, const char *part_dev, int part_num)
 {
     char esp_probe[MAX_PATH];
+    int r;
 
     if (inst_is_gpt(disk_dev)) {
         if (inst_write_grub_config(mountpoint, part_dev) < 0) {
@@ -1612,8 +1614,7 @@ static int inst_install_boot(const char *mountpoint, const char *disk_dev, const
         return inst_install_efi(disk_dev, part_dev, part_num);
     }
     if (boot_mode == BOOT_BOTH) {
-        int r = inst_install_boot_bios(mountpoint, disk_dev, part_dev,
-                                       part_num);
+        r = inst_install_boot_bios(mountpoint, disk_dev, part_dev, part_num);
         if (r == 0 && inst_install_efi(disk_dev, part_dev, part_num) != 0)
             wiz_prog_log("Warning: UEFI boot files failed.");
         return r;
@@ -2623,16 +2624,22 @@ static int step_do_update(int disk_idx, int part_idx)
     if (upd_selected[UPD_GRUB_CODE]) {
         wiz_prog_update("Updating bootloader...", 96);
         wiz_prog_log("Updating GRUB boot code and modules...");
-        snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
-        vfs_mkdir(dst, 0755);
-        if (inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL) != 0)
-            goto failed;
-        if (inst_install_grub_mbr(d->devpath, p->number) < 0) {
-            inst_set_copy_error("GRUB boot code failed", boot_error);
-            goto failed;
+        if (inst_is_gpt(d->devpath)) {
+            if (inst_install_efi(d->devpath, p->devpath, p->number) != 0) {
+                inst_set_copy_error("GRUB EFI boot files failed", boot_error);
+                goto failed;
+            }
         } else {
-            wiz_prog_log("GRUB boot code updated.");
+            snprintf(dst, sizeof(dst), "%s/boot/grub/i386-pc", mountpoint);
+            vfs_mkdir(dst, 0755);
+            if (inst_copy_dir_recursive("/boot/grub/i386-pc", dst, NULL) != 0)
+                goto failed;
+            if (inst_install_grub_mbr(d->devpath, p->number) < 0) {
+                inst_set_copy_error("GRUB boot code failed", boot_error);
+                goto failed;
+            }
         }
+        wiz_prog_log("GRUB boot code updated.");
     }
 
     if (upd_selected[UPD_GRUB_CFG]) {

@@ -87,45 +87,30 @@ static uint64_t fat_table_lba(fat_fs_t *fs, uint32_t cluster, uint32_t *off) {
 uint32_t fat_next_cluster(fat_fs_t *fs, uint32_t cluster) {
     uint64_t lba;
     uint32_t off;
-    uint8_t b0;
-    uint8_t b1;
-    uint8_t b2;
-    uint8_t b3;
+    uint32_t bytes;
+    uint32_t value;
 
     if (cluster < 2 || cluster >= fs->cluster_count + 2) return 1;
     lba = fat_table_lba(fs, cluster, &off);
+    bytes = fs->fat_bits == 32 ? 4 : 2;
     if (fat_read_lba(fs, lba, fs->scratch) != 0) return 1;
-    b0 = fs->scratch[off];
-    if (off + 1 >= fs->bps) {
-        if (fat_read_lba(fs, lba + 1, fs->scratch + fs->bps) != 0) return 1;
-        b1 = fs->scratch[fs->bps];
-        b2 = fs->scratch[fs->bps + 1];
-        b3 = fs->scratch[fs->bps + 2];
-    } else if (off + 3 >= fs->bps && fs->fat_bits == 32) {
-        if (fat_read_lba(fs, lba + 1, fs->scratch + fs->bps) != 0) return 1;
-        b1 = fs->scratch[off + 1];
-        b2 = fs->scratch[fs->bps];
-        b3 = fs->scratch[fs->bps + 1];
-    } else {
-        b1 = fs->scratch[off + 1];
-        b2 = fs->scratch[off + 2];
-        b3 = fs->scratch[off + 3];
-    }
+    if (off + bytes > fs->bps &&
+        fat_read_lba(fs, lba + 1, fs->scratch + fs->bps) != 0) return 1;
     if (fs->fat_bits == 32)
-        return ((uint32_t)b0 | ((uint32_t)b1 << 8) |
-                ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24)) & 0x0FFFFFFF;
-    if (fs->fat_bits == 16)
-        return (uint32_t)b0 | ((uint32_t)b1 << 8);
-    if (cluster & 1)
-        return ((uint32_t)b0 >> 4) | ((uint32_t)b1 << 4);
-    return (uint32_t)b0 | (((uint32_t)b1 & 0x0F) << 8);
+        return fat_get32(fs->scratch + off) & 0x0FFFFFFF;
+    value = fat_get16(fs->scratch + off);
+    if (fs->fat_bits == 16) return value;
+    return cluster & 1 ? value >> 4 : value & 0x0FFF;
 }
 
 static int fat_patch_entry(fat_fs_t *fs, uint8_t *sec, uint32_t cluster,
                            uint32_t off, uint32_t value) {
+    uint32_t old;
+    uint8_t b0;
+    uint8_t b1;
+
     if (cluster < 2 || cluster >= fs->cluster_count + 2) return -1;
     if (fs->fat_bits == 32) {
-        uint32_t old;
         if (off + 4 > fs->bps) return -1;
         old = fat_get32(sec + off) & 0xF0000000;
         value = (value & 0x0FFFFFFF) | old;
@@ -138,9 +123,7 @@ static int fat_patch_entry(fat_fs_t *fs, uint8_t *sec, uint32_t cluster,
         sec[off] = (uint8_t)value;
         sec[off + 1] = (uint8_t)(value >> 8);
     } else {
-        uint8_t b0;
-        uint8_t b1;
-        if (off + 2 > fs->bps) return -1;
+        if (off + 2 > fs->bps * 2) return -1;
         b0 = sec[off];
         b1 = sec[off + 1];
         if (cluster & 1) {
@@ -158,17 +141,26 @@ static int fat_patch_entry(fat_fs_t *fs, uint8_t *sec, uint32_t cluster,
 
 int fat_set_next(fat_fs_t *fs, uint32_t cluster, uint32_t value) {
     uint64_t lba;
+    uint64_t flba;
     uint32_t off;
     uint8_t f;
+    int crossing;
 
     if (cluster < 2 || cluster >= fs->cluster_count + 2) return -1;
     lba = fat_table_lba(fs, cluster, &off);
+    crossing = fs->fat_bits == 12 && off + 2 > fs->bps;
     for (f = 0; f < fs->fats; f++) {
-        uint64_t flba = lba + (uint64_t)f * fs->fat_sectors;
+        flba = lba + (uint64_t)f * fs->fat_sectors;
         if (fat_read_lba(fs, flba, fs->scratch) != 0) return -1;
+        if (crossing &&
+            fat_read_lba(fs, flba + 1, fs->scratch + fs->bps) != 0)
+            return -1;
         if (fat_patch_entry(fs, fs->scratch, cluster, off, value) != 0)
             return -1;
         if (fat_write_lba(fs, flba, fs->scratch) != 0) return -1;
+        if (crossing &&
+            fat_write_lba(fs, flba + 1, fs->scratch + fs->bps) != 0)
+            return -1;
     }
     return 0;
 }
@@ -176,6 +168,8 @@ int fat_set_next(fat_fs_t *fs, uint32_t cluster, uint32_t value) {
 int fat_chain_append(fat_fs_t *fs, uint32_t prev, uint32_t next) {
     uint64_t lba_n;
     uint64_t lba_p;
+    uint64_t flba_n;
+    uint64_t flba_p;
     uint32_t off_n;
     uint32_t off_p;
     uint32_t eoc;
@@ -187,9 +181,18 @@ int fat_chain_append(fat_fs_t *fs, uint32_t prev, uint32_t next) {
     if (prev >= fs->cluster_count + 2) return -1;
     lba_n = fat_table_lba(fs, next, &off_n);
     lba_p = fat_table_lba(fs, prev, &off_p);
+    if (fs->fat_bits == 12 &&
+        (off_n + 2 > fs->bps || off_p + 2 > fs->bps)) {
+        if (fat_set_next(fs, next, eoc) != 0) goto fail;
+        if (fat_set_next(fs, prev, next) != 0) {
+            if (fat_set_next(fs, prev, eoc) != 0) return -1;
+            goto fail;
+        }
+        return 0;
+    }
     for (f = 0; f < fs->fats; f++) {
-        uint64_t flba_n = lba_n + (uint64_t)f * fs->fat_sectors;
-        uint64_t flba_p = lba_p + (uint64_t)f * fs->fat_sectors;
+        flba_n = lba_n + (uint64_t)f * fs->fat_sectors;
+        flba_p = lba_p + (uint64_t)f * fs->fat_sectors;
         if (flba_n == flba_p) {
             if (fat_read_lba(fs, flba_n, fs->scratch) != 0) goto fail;
             if (fat_patch_entry(fs, fs->scratch, next, off_n, eoc) != 0)
@@ -414,6 +417,8 @@ int fat_dir_add(fat_fs_t *fs, uint32_t dir_cluster, int is_root,
     uint64_t epc;
     uint64_t i;
 
+    if (fat_dir_find(fs, dir_cluster, is_root, sfn, &entry, NULL, NULL) == 0)
+        return -17;
     if (is_root && fs->fat_bits != 32) {
         for (;; idx++) {
             if (fat_dir_slot(fs, 0, 1, idx, &lba, &off) != 0) return -1;

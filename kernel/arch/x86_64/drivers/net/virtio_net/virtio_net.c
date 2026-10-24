@@ -94,8 +94,6 @@ typedef struct {
     uint64_t rx_bufs_phys;
     uint64_t rx_pages;
     uint16_t rx_posted;
-    uint8_t *tx_buf;
-    uint64_t tx_buf_phys;
     uint16_t *tx_pairs;
     uint16_t tx_pair_top;
     mac_addr_t mac;
@@ -346,12 +344,22 @@ static int setup_queue(virtio_net_dev_t *dev, virtio_queue_t *q, uint16_t idx) {
 }
 
 static void release_dev(virtio_net_dev_t *dev) {
+    uint16_t i;
+
     if (!dev) return;
-    if (dev->common) dev->common->device_status = 0;
+    if (dev->common) {
+        dev->common->device_status = 0;
+        while (dev->common->device_status)
+            __asm__ __volatile__("pause" ::: "memory");
+    }
+    if (dev->tx.desc) {
+        for (i = 0; i < dev->tx.size / 2; i++) {
+            if (dev->tx.desc[i * 2].addr) pfa_free(dev->tx.desc[i * 2].addr);
+        }
+    }
     if (dev->rx.mem_phys) pfa_free_contiguous(dev->rx.mem_phys, dev->rx.mem_pages);
     if (dev->tx.mem_phys) pfa_free_contiguous(dev->tx.mem_phys, dev->tx.mem_pages);
     if (dev->rx_bufs_phys) pfa_free_contiguous(dev->rx_bufs_phys, dev->rx_pages);
-    if (dev->tx_buf_phys) pfa_free(dev->tx_buf_phys);
     if (dev->tx_pairs) kfree(dev->tx_pairs);
     if (dev->netif) kfree(dev->netif);
     if (g_dev == dev) g_dev = NULL;
@@ -375,12 +383,17 @@ static void rx_post(virtio_net_dev_t *dev, uint16_t d) {
 
 static void tx_reap(virtio_net_dev_t *dev) {
     virtio_queue_t *q;
-    uint16_t head;
+    uint32_t head;
 
     q = &dev->tx;
     while (dev->tx.last_used != *q->used_idx) {
+        __asm__ __volatile__("lfence" ::: "memory");
         head = q->used_ring[dev->tx.last_used % q->size].id;
-        dev->tx_pairs[dev->tx_pair_top++] = (uint16_t)(head / 2);
+        if (head < (uint32_t)(q->size / 2) * 2 && !(head & 1) && q->desc[head].addr) {
+            pfa_free(q->desc[head].addr);
+            q->desc[head].addr = 0;
+            dev->tx_pairs[dev->tx_pair_top++] = (uint16_t)(head / 2);
+        }
         dev->tx.last_used++;
     }
 }
@@ -392,6 +405,8 @@ int virtio_net_send(netif_t *netif, uint8_t *data, uint64_t len) {
     uint16_t d0;
     uint16_t d1;
     uint16_t idx;
+    uint64_t buf_phys;
+    uint8_t *buf;
 
     dev = (virtio_net_dev_t *)netif->driver_data;
     if (!dev || len > ETH_FRAME_MAX) return -1;
@@ -402,16 +417,23 @@ int virtio_net_send(netif_t *netif, uint8_t *data, uint64_t len) {
         vnet_unlock(&dev->tx_lock);
         return -1;
     }
+    buf_phys = pfa_alloc();
+    if (!buf_phys || map_phys(buf_phys, 1) < 0) {
+        if (buf_phys) pfa_free(buf_phys);
+        vnet_unlock(&dev->tx_lock);
+        return -1;
+    }
+    buf = (uint8_t *)(buf_phys + KERNEL_VMA);
     pair = dev->tx_pairs[--dev->tx_pair_top];
     d0 = (uint16_t)(pair * 2);
     d1 = (uint16_t)(d0 + 1);
-    memset(dev->tx_buf, 0, VIRTIO_NET_HDR_LEN);
-    memcpy(dev->tx_buf + VIRTIO_NET_HDR_LEN, data, len);
-    q->desc[d0].addr = dev->tx_buf_phys;
+    memset(buf, 0, VIRTIO_NET_HDR_LEN);
+    memcpy(buf + VIRTIO_NET_HDR_LEN, data, len);
+    q->desc[d0].addr = buf_phys;
     q->desc[d0].len = VIRTIO_NET_HDR_LEN;
     q->desc[d0].flags = VIRTQ_DESC_F_NEXT;
     q->desc[d0].next = d1;
-    q->desc[d1].addr = dev->tx_buf_phys + VIRTIO_NET_HDR_LEN;
+    q->desc[d1].addr = buf_phys + VIRTIO_NET_HDR_LEN;
     q->desc[d1].len = (uint32_t)len;
     q->desc[d1].flags = 0;
     q->desc[d1].next = 0;
@@ -501,13 +523,6 @@ static int virtio_net_bring_up(virtio_net_dev_t *dev) {
     }
     dev->rx_bufs = (uint8_t *)(dev->rx_bufs_phys + KERNEL_VMA);
     memset(dev->rx_bufs, 0, dev->rx_pages * PAGE_SIZE);
-    dev->tx_buf_phys = pfa_alloc();
-    if (!dev->tx_buf_phys || map_phys(dev->tx_buf_phys, 1) < 0) {
-        release_dev(dev);
-        return -1;
-    }
-    dev->tx_buf = (uint8_t *)(dev->tx_buf_phys + KERNEL_VMA);
-    memset(dev->tx_buf, 0, PAGE_SIZE);
     pairs = (uint16_t)(dev->tx.size / 2);
     dev->tx_pairs = (uint16_t *)kmalloc((uint64_t)pairs * sizeof(uint16_t));
     if (!dev->tx_pairs) {
