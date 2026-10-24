@@ -263,17 +263,30 @@ static void show_motd(void)
     int fd;
     char buf[512];
     int r;
+    int i;
+    int newlines;
 
     fd = open("/etc/motd", O_RDONLY);
     if (fd < 0)
         return;
+    newlines = 2;
     for (;;) {
         r = read(fd, buf, sizeof(buf));
         if (r <= 0)
             break;
         write(1, buf, r);
+        for (i = 0; i < r; i++) {
+            if (buf[i] != '\n')
+                newlines = 0;
+            else if (newlines < 2)
+                newlines++;
+        }
     }
     close(fd);
+    while (newlines < 2) {
+        WRITE_LIT(1, "\n");
+        newlines++;
+    }
 }
 
 static int check_password(const char *password, const char *stored_hash)
