@@ -748,6 +748,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     else
                         p->write_pos += bytes;
                     p->count += bytes;
+                    p->read_sequence++;
                     done += bytes;
                     waitq_wake_all(&p->read_waitq);
                     pipe_unlock_irqrestore(p, pipe_flags);
@@ -984,6 +985,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             else
                 p->read_pos += to_read;
             p->count -= to_read;
+            p->write_sequence++;
             pipe_shrink_after_read(p);
             waitq_wake_all(&p->write_waitq);
             pipe_unlock_irqrestore(p, pipe_flags);

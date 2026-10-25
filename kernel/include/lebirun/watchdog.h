@@ -9,6 +9,7 @@
 
 void watchdog_init(void);
 void watchdog_set_init_pid(int pid);
+void watchdog_tick(void);
 void watchdog_kick(void);
 void watchdog_disable(void);
 

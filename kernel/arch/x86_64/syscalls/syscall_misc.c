@@ -931,8 +931,7 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
     uint64_t start_ns;
     uint64_t elapsed_ns;
     uint64_t remaining_ns;
-    uint64_t sleep_ticks_count;
-    extern int task_has_pending_signals(void);
+    int result;
 
     a0 = (uint64_t)arg0;
 
@@ -964,19 +963,11 @@ static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
     requested_ns = (uint64_t)req->tv_sec * 1000000000ULL +
                    (uint64_t)req->tv_nsec;
     start_ns = timekeeping_monotonic_ns();
-    if (requested_ns != 0) {
-        if (pit_freq == 0) return -EINVAL;
-        if (requested_ns >
-            (UINT64_MAX - 999999999ULL) / pit_freq)
-            sleep_ticks_count = UINT64_MAX;
-        else
-            sleep_ticks_count =
-                (requested_ns * pit_freq + 999999999ULL) / 1000000000ULL;
-        if (sleep_ticks_count == 0) sleep_ticks_count = 1;
-        sleep_ticks(sleep_ticks_count);
-    }
+    if (requested_ns > UINT64_MAX - start_ns) return -EINVAL;
+    result = task_sleep_until(start_ns + requested_ns);
+    if (result != 0 && result != -EINTR) return result;
 
-    if (task_has_pending_signals()) {
+    if (result == -EINTR) {
         if (rem) {
             elapsed_ns = timekeeping_monotonic_ns() - start_ns;
             remaining_ns = elapsed_ns < requested_ns ?

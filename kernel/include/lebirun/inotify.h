@@ -11,6 +11,7 @@ int inotify_close_fd(int fd);
 void inotify_close_range(unsigned int first, unsigned int last, int cloexec);
 void inotify_close_cloexec(pid_t pid);
 int inotify_poll_fd(int fd);
+uint64_t inotify_poll_sequence(int fd);
 void inotify_close_task(pid_t pid);
 void inotify_notify(struct vfs_node *node, uint32_t mask, const char *name);
 void inotify_invalidate_node(struct vfs_node *node);

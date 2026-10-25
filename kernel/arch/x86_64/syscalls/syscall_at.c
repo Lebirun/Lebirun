@@ -119,6 +119,17 @@ static int sys_mkdirat(int dirfd, const char *pathname, int mode) {
         kfree(dirname);
         return -ENOENT;
     }
+    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+        vfs_release(parent);
+        kfree(dirname);
+        return -EROFS;
+    }
+    result = vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (result != 0) {
+        vfs_release(parent);
+        kfree(dirname);
+        return result;
+    }
     result = vfs_mkdir(parent, dirname,
                        (uint64_t)mode & ~current_task->creation_mask);
     vfs_release(parent);
@@ -649,13 +660,13 @@ int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
     }
 
     switch (VFS_GET_TYPE(node->flags)) {
-        case VFS_DIRECTORY:   mode = S_IFDIR | (perms ? perms : 0755); break;
-        case VFS_SYMLINK:     mode = S_IFLNK | (perms ? perms : 0777); break;
-        case VFS_CHARDEVICE:  mode = S_IFCHR | (perms ? perms : 0660); break;
-        case VFS_BLOCKDEVICE: mode = S_IFBLK | (perms ? perms : 0660); break;
-        case VFS_PIPE:        mode = S_IFIFO | (perms ? perms : 0644); break;
-        case VFS_SOCKET:      mode = S_IFSOCK | (perms ? perms : 0777); break;
-        default:              mode = S_IFREG | (perms ? perms : 0644); break;
+        case VFS_DIRECTORY:   mode = S_IFDIR | perms; break;
+        case VFS_SYMLINK:     mode = S_IFLNK | perms; break;
+        case VFS_CHARDEVICE:  mode = S_IFCHR | perms; break;
+        case VFS_BLOCKDEVICE: mode = S_IFBLK | perms; break;
+        case VFS_PIPE:        mode = S_IFIFO | perms; break;
+        case VFS_SOCKET:      mode = S_IFSOCK | perms; break;
+        default:              mode = S_IFREG | perms; break;
     }
     
     st->st_mode = mode;
@@ -663,6 +674,7 @@ int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
     st->st_uid = node->uid;
     st->st_gid = node->gid;
     st->st_rdev = 0;
+    st->st_nlink = ramfs_node_link_count(node);
     st->st_size = node->length;
     st->st_blksize = 4096;
     st->st_blocks = (node->length + 511) / 512;
@@ -675,12 +687,16 @@ int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
 }
 
 int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
-    uint64_t buf_addr;
+    struct kernel_stat result;
+    int error;
 
-    buf_addr = (uint64_t)statbuf;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000)
-        return -EFAULT;
-    return vfs_stat_path(dirfd, pathname, (struct kernel_stat *)buf_addr);
+    if (!user_access_ok((void *)(uintptr_t)statbuf, sizeof(result),
+                        UACCESS_WRITE)) return -EFAULT;
+    error = vfs_stat_path(dirfd, pathname, &result);
+    if (error != 0) return error;
+    if (copy_to_user((void *)(uintptr_t)statbuf, &result,
+                     sizeof(result)) < 0) return -EFAULT;
+    return 0;
 }
 
 static int sys_utimensat(int dirfd, const char *pathname,

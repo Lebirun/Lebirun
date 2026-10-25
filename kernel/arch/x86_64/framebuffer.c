@@ -9,6 +9,7 @@
 #endif
 #include <lebirun/console.h>
 #include <lebirun/io.h>
+#include <lebirun/pit.h>
 #include <string.h>
 
 extern uint8_t unifont_glyphs_start[];
@@ -1229,20 +1230,26 @@ void fb_update_cursor(void) {
 extern void console_tick_redraw(void);
 
 void fb_tick(void) {
-    static int tick_counter = 0;
-    static int flush_counter = 0;
+    static uint64_t last_cursor_tick;
+    static uint64_t last_flush_tick;
+    uint64_t now;
+    uint64_t interval;
+    uint64_t periods;
 
-    tick_counter++;
-    if (tick_counter >= 500) {
-        tick_counter = 0;
-        cursor_visible = !cursor_visible;
+    now = pit_get_ticks();
+    interval = pit_ms_to_ticks(500);
+    if (!interval) interval = 1;
+    if (now - last_cursor_tick >= interval) {
+        periods = (now - last_cursor_tick) / interval;
+        last_cursor_tick += periods * interval;
+        if (periods & 1) cursor_visible = !cursor_visible;
         fb_update_cursor();
     }
     console_tick_redraw();
-
-    flush_counter++;
-    if (flush_counter >= 16) {
-        flush_counter = 0;
+    interval = pit_ms_to_ticks(16);
+    if (!interval) interval = 1;
+    if (now - last_flush_tick >= interval) {
+        last_flush_tick = now;
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
         virtio_gpu_flush();
 #else

@@ -342,6 +342,7 @@ typedef struct udp_socket {
     uint16_t recv_from_port;
     uint8_t has_data;
     uint64_t rx_stamp;
+    uint64_t read_sequence;
     udp_mcast_t *mcast;
     netif_t *netif;
     struct udp_socket *next;

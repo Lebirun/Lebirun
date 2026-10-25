@@ -796,7 +796,9 @@ static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask) {
 }
 
 static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
-    uint64_t perms = 0;
+    uint64_t perms;
+
+    perms = 0;
     if (node && node->mask) {
         perms = vfs_mask_to_unix_perms(node->mask);
     }
@@ -807,19 +809,19 @@ static inline uint64_t vfs_node_to_unix_mode(const vfs_node_t *node) {
 
     switch (VFS_GET_TYPE(node->flags)) {
         case VFS_DIRECTORY:
-            return S_IFDIR | (perms ? perms : 0755);
+            return S_IFDIR | perms;
         case VFS_SYMLINK:
-            return S_IFLNK | (perms ? perms : 0777);
+            return S_IFLNK | perms;
         case VFS_CHARDEVICE:
-            return S_IFCHR | (perms ? perms : 0660);
+            return S_IFCHR | perms;
         case VFS_BLOCKDEVICE:
-            return S_IFBLK | (perms ? perms : 0660);
+            return S_IFBLK | perms;
         case VFS_PIPE:
-            return S_IFIFO | (perms ? perms : 0644);
+            return S_IFIFO | perms;
         case VFS_SOCKET:
-            return S_IFSOCK | (perms ? perms : 0777);
+            return S_IFSOCK | perms;
         default:
-            return S_IFREG | (perms ? perms : 0644);
+            return S_IFREG | perms;
     }
 }
 
@@ -904,6 +906,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             st->st_nlink = 1;
             st->st_uid = node->uid;
             st->st_gid = node->gid;
+            st->st_nlink = ramfs_node_link_count(node);
             st->st_size = node->length;
             st->st_blksize = 4096;
             st->st_blocks = (node->length + 511) / 512;
@@ -1078,13 +1081,11 @@ static int sys_clock_nanosleep(int clock_id, const char *flags_ptr,
     uint64_t requested_ns;
     uint64_t now_ns;
     uint64_t sleep_ns;
-    uint64_t frequency;
-    uint64_t ticks;
+    uint64_t deadline_ns;
     uint64_t start_ns;
     uint64_t elapsed_ns;
     int flags;
     int result;
-    extern int task_has_pending_signals(void);
 
     flags = (int)(uintptr_t)flags_ptr;
     if (flags & ~1) return -EINVAL;
@@ -1094,17 +1095,17 @@ static int sys_clock_nanosleep(int clock_id, const char *flags_ptr,
                        sizeof(request)) != 0) return -EFAULT;
     result = timespec_to_ns(&request, &requested_ns);
     if (result != 0) return result;
+    if (timekeeping_get_ns(clock_id, &now_ns) != 0) return -EINVAL;
     if (flags & 1) {
         sleep_ns = requested_ns > now_ns ? requested_ns - now_ns : 0;
     } else {
         sleep_ns = requested_ns;
     }
-    frequency = pit_freq ? pit_freq : 1000;
-    if (sleep_ns > UINT64_MAX / frequency) return -EOVERFLOW;
-    ticks = (sleep_ns * frequency + 999999999ULL) / 1000000000ULL;
     start_ns = timekeeping_monotonic_ns();
-    if (ticks > 0) sleep_ticks(ticks);
-    if (!task_has_pending_signals()) return 0;
+    if (sleep_ns > UINT64_MAX - start_ns) return -EOVERFLOW;
+    deadline_ns = start_ns + sleep_ns;
+    result = task_sleep_until(deadline_ns);
+    if (result != -EINTR) return result;
     if (!(flags & 1) && remain_ptr) {
         now_ns = timekeeping_monotonic_ns();
         elapsed_ns = now_ns >= start_ns ? now_ns - start_ns : 0;

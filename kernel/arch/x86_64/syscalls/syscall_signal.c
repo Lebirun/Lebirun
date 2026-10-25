@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <lebirun/debug.h>
+#include <lebirun/kstack.h>
 
 #define SIGHUP    1
 #define SIGINT    2
@@ -89,6 +90,7 @@ typedef struct {
     uint8_t action_count;
     uint8_t action_capacity;
     sigset_k pending;
+    uint64_t pending_sequence;
     sigset_k blocked;
     signal_action_entry_t *actions;
     stack_k altstack;
@@ -367,14 +369,29 @@ void task_reset_signals_on_exec(void) {
 int task_has_pending_signals(void) {
     task_signals_t *sigs;
     unsigned long unblocked;
+    sigaction_k *act;
+    sigaction_k default_act;
+    int sig;
 
     if (!current_task) return 0;
+    if (__atomic_load_n(&current_task->exit_code, __ATOMIC_ACQUIRE) &
+        TASK_EXIT_PENDING) return 1;
     sigs = (task_signals_t *)current_task->signal_data;
     if (!sigs) return 0;
     if (sigs->owner_pid != current_task->pid) return 0;
     unblocked = __atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE) &
         ~sigs->blocked.sig[0];
-    return unblocked != 0;
+    while (unblocked) {
+        sig = __builtin_ctzl(unblocked) + 1;
+        if (task_is_traced(current_task)) return 1;
+        act = get_signal_action(sigs, sig, &default_act);
+        if (act->sa_handler != SIG_IGN &&
+                (act->sa_handler != SIG_DFL ||
+                 (sig != SIGCHLD && sig != SIGURG && sig != SIGWINCH &&
+                  sig != SIGCONT))) return 1;
+        unblocked &= unblocked - 1;
+    }
+    return 0;
 }
 
 uint64_t signal_pending_mask(task_t *task) {
@@ -386,6 +403,14 @@ uint64_t signal_pending_mask(task_t *task) {
     return __atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE);
 }
 
+uint64_t signal_pending_sequence(task_t *task) {
+    task_signals_t *sigs;
+
+    if (!task || !task->signal_data) return 0;
+    sigs = task->signal_data;
+    return __atomic_load_n(&sigs->pending_sequence, __ATOMIC_ACQUIRE);
+}
+
 uint64_t signal_blocked_mask(task_t *task) {
     task_signals_t *sigs;
 
@@ -393,6 +418,28 @@ uint64_t signal_blocked_mask(task_t *task) {
     sigs = (task_signals_t *)task->signal_data;
     if (sigs->owner_pid != task->pid) return 0;
     return sigs->blocked.sig[0];
+}
+
+int signal_set_blocked_mask(task_t *task, uint64_t mask) {
+    task_signals_t *sigs;
+
+    if (!task) return -ESRCH;
+    sigs = ensure_task_signals(task);
+    if (!sigs) return -ENOMEM;
+    mask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    sigs->blocked.sig[0] = mask;
+    return 0;
+}
+
+void signal_finish_wait_mask(uint64_t mask, int result) {
+    extern void signal_deliver_pending(registers_t *regs);
+
+    if (result == -EINTR && current_task && current_task->syscall_frame &&
+        task_has_pending_signals() && kstack_expand_syscall() == 0) {
+        current_task->syscall_frame->rax = (uint64_t)(int64_t)result;
+        signal_deliver_pending(current_task->syscall_frame);
+    }
+    signal_set_blocked_mask(current_task, mask);
 }
 
 uint32_t signal_queue_count(task_t *task) {
@@ -413,7 +460,7 @@ int signal_take_pending(task_t *task, uint64_t mask) {
     if (!task || !task->signal_data) return 0;
     sigs = (task_signals_t *)task->signal_data;
     if (sigs->owner_pid != task->pid) return 0;
-    for (signal_number = 1; signal_number < 64; signal_number++) {
+    for (signal_number = 1; signal_number < NSIG; signal_number++) {
         bit = 1ULL << (signal_number - 1);
         if (!(mask & bit)) continue;
         previous = __atomic_fetch_and(&sigs->pending.sig[0], ~bit,
@@ -728,6 +775,7 @@ int deliver_signal_to_task(task_t *target, int sig) {
     sigaction_k *act;
     sigaction_k default_act;
     int has_sigs;
+    int ignored;
 
     if (!target) return -ESRCH;
     if (target->state == TASK_DEAD) return 0;
@@ -781,11 +829,15 @@ int deliver_signal_to_task(task_t *target, int sig) {
     if (act->sa_handler == SIG_IGN) {
         return 0;
     }
+    ignored = act->sa_handler == SIG_DFL && !task_is_traced(target) &&
+        !(sigs->blocked.sig[0] & (1ULL << (sig - 1))) &&
+        (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH);
 
+    __atomic_add_fetch(&sigs->pending_sequence, 1, __ATOMIC_RELEASE);
     __atomic_fetch_or(&sigs->pending.sig[(sig - 1) / 64],
                       1UL << ((sig - 1) % 64), __ATOMIC_ACQ_REL);
 
-    if (target->state == TASK_BLOCKED) {
+    if (target->state == TASK_BLOCKED && !ignored) {
         wake_task(target);
         descriptor_ready_notify();
     }
@@ -1043,6 +1095,11 @@ void signal_deliver_pending(registers_t *regs) {
 
     if (!current_task || !regs) return;
     if (!current_task->is_user) return;
+    exit_code = __atomic_load_n(&current_task->exit_code, __ATOMIC_ACQUIRE);
+    if ((exit_code & TASK_EXIT_PENDING) && (regs->cs & 3) == 3) {
+        task_exit_deferred(exit_code & ~TASK_EXIT_PENDING);
+        return;
+    }
     if (task_trace_resume(regs)) return;
 
     sigs = (task_signals_t *)current_task->signal_data;

@@ -103,6 +103,7 @@ static inline bool serial_thr_empty(void) {
 }
 
 static volatile int serial_present = 1;
+static unsigned int serial_fifo_depth = 1;
 
 void serial_init(void) {
     outb(0x3FC, 0x1B);
@@ -117,6 +118,7 @@ void serial_init(void) {
     outb(0x3F9, 0x00);
     outb(0x3FB, 0x03);
     outb(0x3FA, 0xC7);
+    serial_fifo_depth = (inb(0x3FA) & 0xC0) == 0xC0 ? 16 : 1;
     outb(0x3FC, 0x0B);
     serial_present = 1;
 }
@@ -153,14 +155,29 @@ void serial_putchar_locked(char c) {
 
 static void serial_write_nolock(const char *buf, size_t len) {
     size_t i;
+    unsigned int available;
+    int carriage_sent;
     uint8_t ch;
 
     if (!serial_present) return;
-    for (i = 0; i < len; i++) {
-        ch = (uint8_t)buf[i];
-        if (ch == '\n')
-            serial_putc_nolock('\r');
-        serial_putc_nolock(ch);
+    i = 0;
+    carriage_sent = 0;
+    while (i < len) {
+        if (!serial_wait_thr_empty()) return;
+        available = serial_fifo_depth;
+        while (available && i < len) {
+            ch = (uint8_t)buf[i];
+            if (ch == '\n' && !carriage_sent) {
+                outb(0x3F8, '\r');
+                available--;
+                carriage_sent = 1;
+                if (!available) break;
+            }
+            outb(0x3F8, ch);
+            available--;
+            carriage_sent = 0;
+            i++;
+        }
     }
 }
 
@@ -302,6 +319,10 @@ static int klog_enqueue(uint8_t level, const char *buf, uint64_t len) {
     uint64_t offset;
 
     if (!buf || len == 0) return 0;
+    if (heap_allocator_locked() || slab_allocator_locked()) {
+        if (!(level & KLOG_CONSOLE)) serial_write_direct(buf, (size_t)len);
+        return (int)len;
+    }
 
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
@@ -572,6 +593,10 @@ int klog_printf(int level, const char *fmt, ...) {
     va_end(ap);
     if (n <= 0) return 0;
     if ((size_t)n >= sizeof(tmp)) {
+        if (heap_allocator_locked() || slab_allocator_locked()) {
+            serial_write_direct(tmp, sizeof(tmp) - 1);
+            return n;
+        }
         formatted = (char *)kmalloc((size_t)n + 1);
         if (!formatted) return -1;
         va_start(ap, fmt);

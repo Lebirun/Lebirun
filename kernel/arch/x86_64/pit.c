@@ -43,6 +43,10 @@ static uint64_t uptime_ticks = 0;
 static uint64_t last_tick = 0;
 static uint64_t us_per_tick = 10000;
 static uint64_t last_uptime_us = 0;
+static uint64_t clock_base_ns;
+static uint64_t clock_base_ticks;
+static uint64_t callback_last_tick;
+static int clock_started;
 static spinlock_t uptime_lock = { .locked = 0 };
 
 typedef void (*pit_callback_t)(uint64_t ticks);
@@ -144,6 +148,8 @@ void KERNEL_INIT pit_init(uint64_t freq) {
     pit_freq = actual_freq;
     calibrated_freq = actual_freq;
     us_per_tick = 1000000 / actual_freq;
+    clock_started = 0;
+    callback_last_tick = tick_count;
     uptime_ticks = 0;
     last_tick = tick_count;
     if (actual_freq > freq) {
@@ -173,6 +179,7 @@ void pit_set_frequency(uint64_t freq) {
     calibrated_freq = actual_freq;
     us_per_tick = 1000000 / actual_freq;
     pit_set_divisor((uint16_t)divisor);
+    clock_started = 0;
 }
 
 static void delay_ticks(uint64_t ticks) {
@@ -267,6 +274,29 @@ void delay_inMins(uint64_t mins) {
         delay(60000);
         mins--;
     }
+}
+
+void pit_advance_ticks(void) {
+    uint64_t now;
+    uint64_t elapsed;
+    uint64_t target;
+
+    if (!tsc_available()) {
+        __atomic_add_fetch(&tick_count, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    now = tsc_get_ns();
+    if (!clock_started) {
+        clock_base_ns = now;
+        clock_base_ticks = __atomic_add_fetch(&tick_count, 1, __ATOMIC_RELEASE);
+        clock_started = 1;
+        return;
+    }
+    elapsed = now - clock_base_ns;
+    target = clock_base_ticks + (elapsed / 1000000000ULL) * calibrated_freq +
+             ((elapsed % 1000000000ULL) * calibrated_freq) / 1000000000ULL;
+    if (target > tick_count)
+        __atomic_store_n(&tick_count, target, __ATOMIC_RELEASE);
 }
 
 uint64_t pit_get_ticks(void) {
@@ -415,22 +445,30 @@ void pit_process_callbacks(void) {
     pit_callback_entry_t *entry;
     pit_callback_entry_t *previous;
     pit_callback_entry_t *next;
+    uint64_t elapsed;
+    uint64_t now;
+    uint64_t remaining;
 
+    now = tick_count;
+    elapsed = now - callback_last_tick;
+    callback_last_tick = now;
     previous = NULL;
     entry = timer_callbacks;
     while (entry) {
         next = entry->next;
         if (entry->active) {
-            entry->remaining--;
-            if (entry->remaining == 0) {
+            remaining = entry->remaining;
+            if (elapsed >= remaining) {
+                entry->remaining = entry->oneshot ? 0 : entry->interval -
+                    (elapsed - remaining) % entry->interval;
                 if (entry->callback) {
                     entry->callback(tick_count);
                 }
                 if (entry->oneshot) {
                     entry->active = false;
-                } else {
-                    entry->remaining = entry->interval;
                 }
+            } else {
+                entry->remaining -= elapsed;
             }
         }
         if (!entry->active) {

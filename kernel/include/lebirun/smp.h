@@ -56,6 +56,7 @@ typedef struct cpu_info {
     uint64_t tlb_request;
     uint64_t tlb_ack;
     task_t *switching_task;
+    int wake_pending;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;
@@ -89,5 +90,6 @@ task_t *smp_current_task_safe(void);
 void smp_stop_other_cpus(void);
 
 #define IPI_TLB_FLUSH_VECTOR 49
+#define IPI_WAKE_VECTOR 50
 
 #endif

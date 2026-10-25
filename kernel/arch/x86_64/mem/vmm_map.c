@@ -268,7 +268,8 @@ int vmm_protect_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
     return 0;
 }
 
-uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+uint64_t vmm_unmap_page_in_pml4_flags(uint64_t pml4_phys, uint64_t virt_addr,
+                                    uint64_t *flags_out) {
     uint64_t pml4_idx;
     uint64_t pdpt_idx;
     uint64_t pd_idx;
@@ -284,6 +285,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
     uint64_t cur_cr3;
     uint64_t saved_flags;
 
+    if (flags_out) *flags_out = 0;
     pml4_idx = (virt_addr >> 39) & 0x1FF;
     pdpt_idx = (virt_addr >> 30) & 0x1FF;
     pd_idx = (virt_addr >> 21) & 0x1FF;
@@ -325,6 +327,7 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
         return 0;
     }
     phys = pte & VMM_PHYS_MASK;
+    if (flags_out) *flags_out = pte & 0x8000000000000FFFULL;
     table[pt_idx] = 0;
     temp_unmap_raw(temp_virt);
 
@@ -335,6 +338,10 @@ uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
     return phys;
+}
+
+uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr) {
+    return vmm_unmap_page_in_pml4_flags(pml4_phys, virt_addr, NULL);
 }
 
 void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size) {

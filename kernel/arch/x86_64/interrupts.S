@@ -74,6 +74,7 @@ isr_noerr 47
 isr_noerr 48
 
 isr_noerr 49
+isr_noerr 50
 
 .global isr128
 isr128:
@@ -154,6 +155,14 @@ isr_common_stub:
     movq 0(%rsp), %rax
     testq %rax, %rax
     jz 1f
+    testq %rdx, %rdx
+    jnz 5f
+    cmpq $128, 160(%rsp)
+    jne 5f
+    movq %cr3, %rcx
+    cmpq %rcx, %rax
+    je 1f
+5:
     movq %rax, %cr3
 1:
     testq %rdx, %rdx

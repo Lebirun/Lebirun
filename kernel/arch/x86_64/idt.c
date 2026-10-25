@@ -17,6 +17,7 @@
 #include <lebirun/common.h>
 #include <lebirun/kstack.h>
 #include <lebirun/debug.h>
+#include <lebirun/watchdog.h>
 
 #define IDT_ENOMEM 12
 
@@ -73,6 +74,7 @@ extern void isr46(void);
 extern void isr47(void);
 extern void isr48(void);
 extern void isr49(void);
+extern void isr50(void);
 extern void isr128(void);
 extern void isr255(void);
 
@@ -240,9 +242,11 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 {
     uint64_t orig_cr3;
     uint64_t kernel_cr3;
+    uint64_t previous_ticks;
     uint8_t access_type;
     uint8_t irq;
     int sig;
+    int is_bsp;
     task_t *fault_task;
     cpu_info_t *cpu_info;
 
@@ -487,6 +491,14 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             lapic_eoi();
             return regs;
         }
+        if (regs->int_no == IPI_WAKE_VECTOR) {
+            lapic_eoi();
+            if (!current_task ||
+                (current_task->id == 0 && !current_task->is_user) ||
+                task_state_requires_schedule(current_task))
+                return schedule_from_irq(regs);
+            return regs;
+        }
         if (regs->int_no == 48) {
             return schedule_from_irq(regs);
         } else if (regs->int_no == 128) {
@@ -547,11 +559,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                         }
                     }
                     __asm__ volatile ("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
-                    __asm__ volatile (
-                        "movq %%cr3, %%rax\n\t"
-                        "movq %%rax, %%cr3\n\t"
-                        ::: "rax", "memory"
-                    );
                 }
                 if (current_task) {
                     current_task->cr3 = new_cr3;
@@ -594,6 +601,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
         
         if (irq == 0) {
             cpu_info = smp_this_cpu();
+            is_bsp = cpu_info ? cpu_info->bsp : 1;
             if (current_task) {
                 if (current_task->id == 0 && !current_task->is_user) {
                     __sync_fetch_and_add(&cpu_idle_ticks, 1);
@@ -612,15 +620,19 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 if (cpu_info) cpu_info->idle_ticks++;
             }
 
-            if (smp_is_bsp()) {
-                __sync_fetch_and_add(&tick_count, 1);
+            if (is_bsp) {
+                watchdog_tick();
+                previous_ticks = tick_count;
+                pit_advance_ticks();
+            }
 
-                if ((tick_count & 0x7F) == 0) {
+            wake_sleeping_tasks_from_irq();
+
+            if (is_bsp) {
+                if ((tick_count >> 7) != (previous_ticks >> 7)) {
                     extern void task_update_cached_stats(void);
                     task_update_cached_stats();
                 }
-
-                wake_sleeping_tasks_from_irq();
 
                 extern void fb_tick(void);
                 __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
@@ -639,9 +651,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 kprint_poll(64);
 
                 pit_process_callbacks();
-
-                extern void tsc_tick_sync(void);
-                tsc_tick_sync();
+                keyboard_process_sigint();
 
                 if (kernel_cr3 && orig_cr3 != kernel_cr3) {
                     __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
@@ -826,6 +836,7 @@ void KERNEL_EARLY_INIT idt_init(void)
     idt_set_gate(47, (uintptr_t)isr47);
     idt_set_gate(48, (uintptr_t)isr48);
     idt_set_gate(49, (uintptr_t)isr49);
+    idt_set_gate(IPI_WAKE_VECTOR, (uintptr_t)isr50);
 
     idt_set_gate_flags(128, (uintptr_t)isr128, 0xEE);
 

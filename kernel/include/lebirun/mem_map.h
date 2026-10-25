@@ -152,6 +152,7 @@ uint64_t pfa_get_bitmap_kb(void);
 uint64_t pfa_get_kernel_reclaimed_pages(void);
 void pfa_set_reserved_stats(uint64_t kern_bin_kb, uint64_t bmp_kb);
 int heap_init(void);
+int heap_allocator_locked(void);
 void *kmalloc(size_t size);
 void *kmalloc_aligned(size_t size, uint64_t alignment);
 void kfree_aligned(void *ptr);
@@ -183,6 +184,7 @@ uint64_t heap_get_early_total(void);
 uint64_t heap_get_early_used(void);
 void heap_verify(void);
 void slab_init(void);
+int slab_allocator_locked(void);
 void *slab_alloc(size_t size);
 void slab_free(void *ptr, void *caller);
 void *slab_page_alloc(size_t size);
@@ -241,6 +243,8 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
 int vmm_protect_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
                               uint64_t size, uint64_t flags);
 uint64_t vmm_unmap_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr);
+uint64_t vmm_unmap_page_in_pml4_flags(uint64_t pml4_phys, uint64_t virt_addr,
+                                    uint64_t *flags_out);
 uint64_t *vmm_map_range_in_pml4_tracked(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags, uint64_t *out_count);
 void vmm_map_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags);
 void vmm_copy_to_pml4(uint64_t pml4_phys, uint64_t dest_virt, const void *src, uint64_t size);

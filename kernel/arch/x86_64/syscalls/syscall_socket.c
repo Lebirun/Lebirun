@@ -251,6 +251,8 @@ typedef struct {
     uint32_t peer_uid;
     uint32_t peer_gid;
     int peer_write_closed;
+    uint64_t read_sequence;
+    uint64_t write_sequence;
     tcp_socket_t *tcp;
     udp_socket_t *udp;
     udp_mcast_t *ip_mcast;
@@ -718,25 +720,39 @@ static void socket_release_empty_recv_buffer(socket_t *sock) {
 }
 
 static int recv_buf_write(socket_t *sock, const void *data, size_t len) {
-    size_t free;
-    size_t to_write;
-    const uint8_t *src;
+    size_t space;
+    size_t amount;
+    size_t header;
     size_t i;
+    uint64_t packet_length;
+    const uint8_t *source;
 
     socket_recv_lock(sock);
-    free = recv_buf_free(sock);
-    to_write = (len < free) ? len : free;
-    if (to_write > 0 && socket_ensure_recv_buf(sock, to_write) < 0) {
+    space = recv_buf_free(sock);
+    header = sock->type == SOCK_STREAM ? 0 : sizeof(packet_length);
+    if (header && (len > SIZE_MAX - header || len + header > space)) {
+        socket_recv_unlock(sock);
+        return -EAGAIN;
+    }
+    amount = header ? len : (len < space ? len : space);
+    if (amount + header && socket_ensure_recv_buf(sock, amount + header) < 0) {
         socket_recv_unlock(sock);
         return -ENOMEM;
     }
-    src = (const uint8_t *)data;
-    for (i = 0; i < to_write; i++) {
-        sock->recv_buf[sock->recv_tail % sock->recv_capacity] = src[i];
+    packet_length = len;
+    for (i = 0; i < header; i++) {
+        sock->recv_buf[sock->recv_tail % sock->recv_capacity] =
+            ((const uint8_t *)&packet_length)[i];
         sock->recv_tail++;
     }
+    source = data;
+    for (i = 0; i < amount; i++) {
+        sock->recv_buf[sock->recv_tail % sock->recv_capacity] = source[i];
+        sock->recv_tail++;
+    }
+    sock->read_sequence++;
     socket_recv_unlock(sock);
-    return (int)to_write;
+    return (int)amount;
 }
 
 static uint64_t socket_rcv_timeout_ms(socket_t *sock, int nonblocking,
@@ -819,32 +835,46 @@ static int socket_wait_for_data(socket_t **sock_ptr, int fd, int flags) {
     }
 }
 
-static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int peek) {
+static size_t recv_buf_read(socket_t *sock, void *data, size_t len, int flags) {
     size_t used;
-    size_t to_read;
-    uint8_t *dst;
-    uint64_t head;
+    size_t amount;
+    size_t header;
     size_t i;
+    uint8_t *destination;
+    uint64_t head;
+    uint64_t packet_length;
 
     socket_recv_lock(sock);
     used = recv_buf_used(sock);
-    to_read = (len < used) ? len : used;
-    if (to_read != 0 && (!sock->recv_buf || sock->recv_capacity == 0)) {
+    header = sock->type == SOCK_STREAM ? 0 : sizeof(packet_length);
+    if (!used || used < header || !sock->recv_buf) {
         socket_recv_unlock(sock);
         return 0;
     }
-    dst = (uint8_t *)data;
     head = sock->recv_head;
-    for (i = 0; i < to_read; i++) {
-        dst[i] = sock->recv_buf[head % sock->recv_capacity];
+    packet_length = used;
+    if (header) {
+        packet_length = 0;
+        for (i = 0; i < header; i++) {
+            ((uint8_t *)&packet_length)[i] =
+                sock->recv_buf[head % sock->recv_capacity];
+            head++;
+        }
+    }
+    amount = len < packet_length ? len : (size_t)packet_length;
+    destination = data;
+    for (i = 0; i < amount; i++) {
+        destination[i] = sock->recv_buf[head % sock->recv_capacity];
         head++;
     }
-    if (!peek) {
-        sock->recv_head = head;
+    if (!(flags & MSG_PEEK)) {
+        sock->recv_head += header ? header + packet_length : amount;
         socket_release_empty_recv_buffer(sock);
     }
+    if (!(flags & MSG_PEEK)) sock->write_sequence++;
     socket_recv_unlock(sock);
-    return to_read;
+    if (header && (flags & MSG_TRUNC)) return (size_t)packet_length;
+    return amount;
 }
 
 static int sys_socket(int domain, const char *type_ptr, int protocol) {
@@ -2277,8 +2307,9 @@ static int sys_getpeername(int sockfd, const char *addr_ptr,
     return 0;
 }
 
-static int sys_sendto(int sockfd, const char *buf_ptr, int len,
-                      int flags, uint64_t dest_addr_ptr, int addrlen) {
+static int socket_send_buffer(int sockfd, const char *buf_ptr, int len,
+                               int flags, uint64_t dest_addr_ptr, int addrlen,
+                               int kernel_buffer) {
     const void *buf;
     int ret;
     socket_t *sock;
@@ -2296,7 +2327,7 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
 
     (void)flags;
     if (len < 0) return -EINVAL;
-    if (len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_READ))
+    if (!kernel_buffer && len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_READ))
         return -EFAULT;
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
@@ -2323,7 +2354,7 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
             if (peer->in_use) {
                 ret = recv_buf_write(peer, buf, len);
                 spin_unlock(&socket_table_lock);
-                if (ret > 0) descriptor_ready_notify();
+                if (ret >= 0) descriptor_ready_notify();
                 return ret;
             }
         }
@@ -2379,12 +2410,20 @@ static int sys_sendto(int sockfd, const char *buf_ptr, int len,
     return -EOPNOTSUPP;
 }
 
+static int sys_sendto(int sockfd, const char *buffer, int length,
+                      int flags, uint64_t address, int address_length) {
+    return socket_send_buffer(sockfd, buffer, length, flags, address,
+                               address_length, 0);
+}
+
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     struct msghdr msg;
     struct cmsghdr cmsg;
     struct iovec iov;
-    ssize_t total;
-    ssize_t sent;
+    size_t total;
+    size_t offset;
+    uint8_t *buffer;
+    int result;
     socket_t *sock;
     int iov_index;
     int rights_result;
@@ -2422,25 +2461,40 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
 
     total = 0;
     for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
-        if (copy_from_user(&iov,
-                (const void *)(uintptr_t)((uint64_t)(uintptr_t)msg.msg_iov +
-                (uint64_t)iov_index * sizeof(struct iovec)), sizeof(iov)) < 0)
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
             return -EFAULT;
-        if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
+        if (iov.iov_len > INT32_MAX - total) return -EMSGSIZE;
         if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_READ))
             return -EFAULT;
-        sent = sys_sendto(sockfd, (const char *)(uintptr_t)iov.iov_base,
-                          (int)iov.iov_len, flags, 0, 0);
-        if (sent < 0) return sent;
-        total += sent;
+        total += iov.iov_len;
     }
-
-    return total;
+    if (msg.msg_iovlen == 1)
+        return sys_sendto(sockfd, iov.iov_base, (int)total, flags,
+                           (uint64_t)(uintptr_t)msg.msg_name,
+                           (int)msg.msg_namelen);
+    buffer = total ? kmalloc(total) : NULL;
+    if (total && !buffer) return -ENOMEM;
+    offset = 0;
+    for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0 ||
+            iov.iov_len > total - offset ||
+            (iov.iov_len && copy_from_user(buffer + offset, iov.iov_base,
+                                           iov.iov_len) < 0)) {
+            kfree(buffer);
+            return -EFAULT;
+        }
+        offset += iov.iov_len;
+    }
+    result = socket_send_buffer(sockfd, (const char *)buffer, (int)offset,
+                                 flags, (uint64_t)(uintptr_t)msg.msg_name,
+                                 (int)msg.msg_namelen, 1);
+    kfree(buffer);
+    return result;
 }
 
-static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
-                        int flags, uint64_t src_addr_ptr,
-                        uint64_t addrlen_ptr) {
+static int socket_receive_buffer(int sockfd, const char *buf_ptr, int len,
+                                  int flags, uint64_t src_addr_ptr,
+                                  uint64_t addrlen_ptr, int kernel_buffer) {
     void *buf;
     uint64_t timeout_ms;
     uint64_t full_dgram;
@@ -2464,7 +2518,7 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
     (void)src_addr_ptr;
     (void)addrlen_ptr;
     if (len < 0) return -EINVAL;
-    if (len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_WRITE))
+    if (!kernel_buffer && len > 0 && !user_access_ok(buf_ptr, (size_t)len, UACCESS_WRITE))
         return -EFAULT;
     
     buf = (void *)(uintptr_t)buf_ptr;
@@ -2570,7 +2624,7 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
         for (;;) {
             ret = (int)recv_buf_read(sock, (uint8_t *)buf + total,
                                      (size_t)(len - total),
-                                     flags & MSG_PEEK);
+                                     flags);
             if (ret > 0) {
                 if (flags & MSG_PEEK) {
                     spin_unlock(&socket_table_lock);
@@ -2589,18 +2643,29 @@ static int sys_recvfrom(int sockfd, const char *buf_ptr, int len,
         if (total > 0) descriptor_ready_notify();
         return total;
     }
-    ret = (int)recv_buf_read(sock, buf, len, flags & MSG_PEEK);
+    ret = (int)recv_buf_read(sock, buf, len, flags);
     spin_unlock(&socket_table_lock);
     if (ret > 0 && !(flags & MSG_PEEK)) descriptor_ready_notify();
     return ret;
+}
+
+static int sys_recvfrom(int sockfd, const char *buffer, int length,
+                        int flags, uint64_t address, uint64_t address_length) {
+    return socket_receive_buffer(sockfd, buffer, length, flags, address,
+                                  address_length, 0);
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     struct msghdr msg;
     struct cmsghdr cmsg;
     struct iovec iov;
-    ssize_t total;
-    ssize_t recvd;
+    size_t total;
+    size_t offset;
+    size_t amount;
+    size_t copied;
+    uint8_t *buffer;
+    int recvd;
+    int allocated;
     socket_t *sock;
     struct ucred credentials;
     int is_dgram;
@@ -2638,7 +2703,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
         spin_unlock(&socket_table_lock);
         return -EBADF;
     }
-    is_dgram = sock->domain == AF_INET && sock->type == SOCK_DGRAM;
+    is_dgram = sock->type != SOCK_STREAM;
     if (sock->pending_fd_count > 0) {
         nfds = sock->pending_fd_count;
         out_fds = NULL;
@@ -2733,30 +2798,50 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
 
     total = 0;
     for (iov_index = 0; iov_index < msg.msg_iovlen; iov_index++) {
-        if (copy_from_user(&iov,
-                (const void *)(uintptr_t)((uint64_t)(uintptr_t)msg.msg_iov +
-                (uint64_t)iov_index * sizeof(struct iovec)), sizeof(iov)) < 0)
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0)
             return -EFAULT;
-        if (iov.iov_len > 0x7FFFFFFFUL) return -EINVAL;
+        if (iov.iov_len > INT32_MAX - total) return -EMSGSIZE;
         if (!user_access_ok(iov.iov_base, iov.iov_len, UACCESS_WRITE))
             return -EFAULT;
-        recvd = sys_recvfrom(sockfd, (const char *)(uintptr_t)iov.iov_base,
-                             (int)iov.iov_len,
-                             flags | (is_dgram ? MSG_TRUNC : 0), 0, 0);
-        if (recvd < 0) return recvd;
-        if (is_dgram && (uint64_t)recvd > iov.iov_len) {
-            msg.msg_flags |= MSG_TRUNC;
-            total += (ssize_t)iov.iov_len;
-            break;
-        }
-        total += recvd;
-        if ((size_t)recvd < iov.iov_len) break;
+        total += iov.iov_len;
     }
-
+    allocated = msg.msg_iovlen != 1;
+    buffer = allocated ? (total ? kmalloc(total) : NULL) : iov.iov_base;
+    if (allocated && total && !buffer) return -ENOMEM;
+    recvd = socket_receive_buffer(sockfd, (const char *)buffer, (int)total,
+                                   flags | (is_dgram ? MSG_TRUNC : 0),
+                                   (uint64_t)(uintptr_t)msg.msg_name,
+                                   msg.msg_name ? (uint64_t)(uintptr_t)
+                                       &((struct msghdr *)msg_ptr)->msg_namelen : 0,
+                                   allocated);
+    if (recvd < 0) {
+        if (allocated) kfree(buffer);
+        return recvd;
+    }
+    copied = (size_t)recvd < total ? (size_t)recvd : total;
+    if ((size_t)recvd > total) msg.msg_flags |= MSG_TRUNC;
+    offset = 0;
+    for (iov_index = 0; allocated && iov_index < msg.msg_iovlen && offset < copied;
+         iov_index++) {
+        if (copy_from_user(&iov, &msg.msg_iov[iov_index], sizeof(iov)) < 0) {
+            if (allocated) kfree(buffer);
+            return -EFAULT;
+        }
+        amount = copied - offset;
+        if (amount > iov.iov_len) amount = iov.iov_len;
+        if (copy_to_user(iov.iov_base, buffer + offset, amount) < 0) {
+            if (allocated) kfree(buffer);
+            return -EFAULT;
+        }
+        offset += amount;
+    }
+    if (allocated) kfree(buffer);
+    if (msg.msg_name && copy_from_user(&msg.msg_namelen,
+            &((struct msghdr *)msg_ptr)->msg_namelen,
+            sizeof(msg.msg_namelen)) < 0) return -EFAULT;
     if (copy_to_user((void *)(uintptr_t)msg_ptr, &msg, sizeof(msg)) < 0)
         return -EFAULT;
-
-    return total;
+    return is_dgram && (flags & MSG_TRUNC) ? recvd : (int)copied;
 }
 
 static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
@@ -2809,6 +2894,29 @@ static int sys_shutdown(int sockfd, const char *how_ptr, int unused) {
     if (tcp && (how == SHUT_WR || how == SHUT_RDWR))
         tcp_disconnect(tcp, 1000);
     return 0;
+}
+
+void socket_poll_sequence(int fd, uint64_t *input, uint64_t *output) {
+    socket_t *sock;
+    socket_t *peer;
+
+    *input = 0;
+    *output = 0;
+    spin_lock(&socket_table_lock);
+    sock = get_socket(fd);
+    if (sock) {
+        *input = sock->read_sequence;
+        if (sock->tcp) {
+            *input = sock->tcp->recv_next;
+            *output = sock->tcp->send_una;
+        }
+        if (sock->udp) *input = sock->udp->read_sequence;
+        if (sock->peer_socket >= 0 && sock->peer_socket < socket_capacity) {
+            peer = &sockets[sock->peer_socket];
+            if (peer->in_use) *output = peer->write_sequence;
+        }
+    }
+    spin_unlock(&socket_table_lock);
 }
 
 int socket_poll_events(int fd) {
@@ -2917,6 +3025,7 @@ int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
     socket_t *sock;
     netif_t *netif;
     uint64_t available;
+    size_t i;
     int value;
     uint8_t ifreq[32];
 
@@ -2975,6 +3084,12 @@ int socket_ioctl(int fd, unsigned long request, uint64_t arg) {
     }
     socket_recv_lock(sock);
     available = recv_buf_used(sock);
+    if (sock->domain == AF_UNIX && sock->type != SOCK_STREAM && available) {
+        available = 0;
+        for (i = 0; i < sizeof(available); i++)
+            ((uint8_t *)&available)[i] = sock->recv_buf[
+                (sock->recv_head + i) % sock->recv_capacity];
+    }
     socket_recv_unlock(sock);
     if (sock->tcp)
         available = sock->tcp->recv_buffer_tail -

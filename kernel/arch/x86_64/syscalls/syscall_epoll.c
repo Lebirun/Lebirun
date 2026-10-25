@@ -77,6 +77,9 @@ typedef struct {
 typedef struct {
     int fd;
     uint32_t events;
+    uint32_t last_ready;
+    uint64_t last_input;
+    uint64_t last_output;
     epoll_event_t event;
     int active;
 } epoll_fd_entry_t;
@@ -95,6 +98,8 @@ typedef struct {
     int in_use;
     pid_t owner_pid;
     uint64_t counter;
+    uint64_t read_sequence;
+    uint64_t write_sequence;
     int flags;
     int semaphore;
 } eventfd_instance_t;
@@ -477,6 +482,7 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 mutex_unlock(&epoll_lock);
                 return -ENOENT;
             }
+            ep->fds[found].last_ready = 0;
             ep->fds[found].events = requested_event.events;
             ep->fds[found].event = requested_event;
             ep->fds[found].active = 1;
@@ -505,6 +511,65 @@ static uint64_t epoll_target_key(int fd) {
     return 0;
 }
 
+static void epoll_poll_sequence(int fd, uint64_t *input, uint64_t *output) {
+    task_fd_t *descriptor;
+    pipe_t *pipe;
+    vfs_node_t *node;
+    uint64_t flags;
+    int index;
+
+    extern void socket_poll_sequence(int fd, uint64_t *input, uint64_t *output);
+
+    *input = 0;
+    *output = 0;
+    if (is_socket_fd(fd)) {
+        socket_poll_sequence(fd, input, output);
+        return;
+    }
+    descriptor = task_fd_get(current_task, fd);
+    if (descriptor && FD_TYPE_IS_PIPE(descriptor->type)) {
+        pipe = descriptor->private_data;
+        if (!pipe) return;
+        flags = pipe_lock_irqsave(pipe);
+        *input = pipe->read_sequence;
+        *output = pipe->write_sequence;
+        pipe_unlock_irqrestore(pipe, flags);
+        return;
+    }
+    if (descriptor && FD_TYPE_IS_PTY(descriptor->type)) {
+        *input = pty_poll_sequence((int)(uintptr_t)descriptor->private_data);
+        return;
+    }
+    if (descriptor && descriptor->type == FD_TYPE_FILE && descriptor->node) {
+        node = descriptor->node;
+        if (strcmp(vfs_node_name(node), "event0") == 0 ||
+            strcmp(vfs_node_name(node), "event1") == 0) {
+            *input = evdev_node_sequence(node);
+            return;
+        }
+    }
+    if (inotify_is_fd(fd)) {
+        *input = inotify_poll_sequence(fd);
+        return;
+    }
+    if (fd >= SIGNALFD_BASE_FD && fd < SIGNALFD_END_FD) {
+        *input = signal_pending_sequence(current_task);
+        return;
+    }
+    index = fd - EVENTFD_BASE_FD;
+    mutex_lock(&eventfd_lock);
+    if (index >= 0 && index < eventfd_capacity && eventfds[index].in_use) {
+        *input = eventfds[index].read_sequence;
+        *output = eventfds[index].write_sequence;
+    }
+    mutex_unlock(&eventfd_lock);
+    index = fd - TIMERFD_BASE_FD;
+    mutex_lock(&timerfd_lock);
+    if (index >= 0 && index < timerfd_capacity && timerfds[index].in_use)
+        *input = timerfds[index].next_tick + timerfd_expirations(&timerfds[index], 0);
+    mutex_unlock(&timerfd_lock);
+}
+
 static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
     epoll_instance_t *ep;
     epoll_event_t *events;
@@ -524,6 +589,10 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
     uint64_t wait_ticks;
     uint64_t *keys;
     int key_count;
+    uint64_t input_sequence;
+    uint64_t output_sequence;
+    uint32_t ready;
+    uint32_t edges;
 
     events = (epoll_event_t *)(uintptr_t)events_ptr;
     if (!events || maxevents <= 0) return -EINVAL;
@@ -568,6 +637,19 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
             revents = EPOLLERR | EPOLLHUP;
         }
         
+            ready = (uint32_t)revents;
+            if (wanted & EPOLLET) {
+                epoll_poll_sequence(fd, &input_sequence, &output_sequence);
+                edges = ready & ~ep->fds[i].last_ready;
+                if (input_sequence != ep->fds[i].last_input)
+                    edges |= ready & (EPOLLIN | EPOLLPRI | EPOLLRDNORM);
+                if (output_sequence != ep->fds[i].last_output)
+                    edges |= ready & (EPOLLOUT | EPOLLWRNORM);
+                ep->fds[i].last_ready = ready;
+                ep->fds[i].last_input = input_sequence;
+                ep->fds[i].last_output = output_sequence;
+                revents = edges;
+            }
             if (revents) {
                 result_event.events = revents;
                 result_event.data = ep->fds[i].event.data;
@@ -610,7 +692,7 @@ static int sys_epoll_wait(int epfd, const char *events_ptr, int maxevents) {
             kfree(keys);
             return 0;
         }
-        if (signal_pending_mask(current_task)) {
+        if (task_has_pending_signals()) {
             kfree(keys);
             return -EINTR;
         }
@@ -1240,7 +1322,7 @@ retry_read:
             descriptor_flags = eventfds[index].flags;
             mutex_unlock(&eventfd_lock);
             if (descriptor_flags & EFD_NONBLOCK) return -EAGAIN;
-            if (signal_pending_mask(current_task)) return -EINTR;
+            if (task_has_pending_signals()) return -EINTR;
             sleep_ticks(1);
             goto retry_read;
         }
@@ -1251,6 +1333,7 @@ retry_read:
             value = eventfds[index].counter;
             eventfds[index].counter = 0;
         }
+        eventfds[index].write_sequence++;
         mutex_unlock(&eventfd_lock);
         descriptor_ready_notify_key((uint64_t)fd);
         if (copy_to_user(buffer, &value, sizeof(value)) < 0) return -EFAULT;
@@ -1273,7 +1356,7 @@ retry_read:
         mutex_unlock(&timerfd_lock);
         if (value == 0) {
             if (descriptor_flags & EFD_NONBLOCK) return -EAGAIN;
-            if (signal_pending_mask(current_task)) return -EINTR;
+            if (task_has_pending_signals()) return -EINTR;
             sleep_ticks(1);
             goto retry_read;
         }
@@ -1298,7 +1381,7 @@ retry_read:
         mutex_unlock(&signalfd_lock);
         if (signal_number == 0) {
             if (descriptor_flags & EFD_NONBLOCK) return -EAGAIN;
-            if (signal_pending_mask(current_task)) return -EINTR;
+            if (task_has_pending_signals()) return -EINTR;
             sleep_ticks(1);
             goto retry_read;
         }
@@ -1337,11 +1420,12 @@ retry_write:
         descriptor_flags = eventfds[index].flags;
         mutex_unlock(&eventfd_lock);
         if (descriptor_flags & EFD_NONBLOCK) return -EAGAIN;
-        if (signal_pending_mask(current_task)) return -EINTR;
+        if (task_has_pending_signals()) return -EINTR;
         sleep_ticks(1);
         goto retry_write;
     }
     eventfds[index].counter += value;
+    eventfds[index].read_sequence++;
     mutex_unlock(&eventfd_lock);
     descriptor_ready_notify_key((uint64_t)fd);
     return sizeof(value);

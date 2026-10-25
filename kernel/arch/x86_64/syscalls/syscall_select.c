@@ -303,9 +303,15 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
     struct kernel_timespec timeout_value;
     uint64_t milliseconds;
     int timeout_ms;
+    int result;
+    uint64_t old_mask;
+    uint64_t mask;
+    struct {
+        uint64_t address;
+        size_t size;
+    } requested;
 
     (void)exceptfds_ptr;
-    (void)sigmask_ptr;
     timeout_ms = -1;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
@@ -319,7 +325,22 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
         timeout_ms = milliseconds > 0x7FFFFFFFULL ? 0x7FFFFFFF :
                      (int)milliseconds;
     }
-    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    old_mask = signal_blocked_mask(current_task);
+    if (sigmask_ptr) {
+        if (copy_from_user(&requested, (void *)(uintptr_t)sigmask_ptr,
+                            sizeof(requested)) < 0) return -EFAULT;
+        if (requested.address) {
+            if (requested.size != sizeof(mask)) return -EINVAL;
+            if (copy_from_user(&mask, (void *)(uintptr_t)requested.address,
+                                sizeof(mask)) < 0) return -EFAULT;
+            result = signal_set_blocked_mask(current_task, mask);
+            if (result < 0) return result;
+        }
+    }
+    result = select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    if (sigmask_ptr && requested.address)
+        signal_finish_wait_mask(old_mask, result);
+    return result;
 }
 
 struct pollfd_k {
@@ -474,8 +495,12 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
 }
 
 static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
-                     uint64_t timeout_ptr) {
+                     uint64_t timeout_ptr, const uint64_t *sigmask,
+                     size_t sigset_size) {
     int timeout_ms;
+    int result;
+    uint64_t old_mask;
+    uint64_t mask;
     uint64_t ts_addr;
     struct kernel_timespec timeout;
 
@@ -490,7 +515,16 @@ static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
                            timeout.tv_nsec / 1000000);
         if (timeout_ms < 0) timeout_ms = 0;
     }
-    return sys_poll(fds_ptr, nfds_ptr, timeout_ms);
+    old_mask = signal_blocked_mask(current_task);
+    if (sigmask) {
+        if (sigset_size != sizeof(mask)) return -EINVAL;
+        if (copy_from_user(&mask, sigmask, sizeof(mask)) < 0) return -EFAULT;
+        result = signal_set_blocked_mask(current_task, mask);
+        if (result < 0) return result;
+    }
+    result = sys_poll(fds_ptr, nfds_ptr, timeout_ms);
+    if (sigmask) signal_finish_wait_mask(old_mask, result);
+    return result;
 }
 
 void syscalls_select_init(void) {

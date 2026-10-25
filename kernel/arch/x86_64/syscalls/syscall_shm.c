@@ -213,7 +213,7 @@ static int sys_shmget(int key, const char *size_ptr, int shmflg) {
 
     size = (uint64_t)(uintptr_t)size_ptr;
     mutex_lock(&shm_lock);
-    if (key != -1) {
+    if (key != 0) {
         for (i = 0; i < shm_capacity; i++) {
             if (!shm_segs[i].in_use || shm_segs[i].removed ||
                 shm_segs[i].key != key) continue;
@@ -229,7 +229,7 @@ static int sys_shmget(int key, const char *size_ptr, int shmflg) {
             return i;
         }
     }
-    if (!(shmflg & IPC_CREAT) && key != -1) {
+    if (!(shmflg & IPC_CREAT) && key != 0) {
         mutex_unlock(&shm_lock);
         return -ENOENT;
     }
@@ -309,7 +309,8 @@ static int64_t sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
     if (!readonly) flags |= VMM_PTE_WRITE;
     if (task_add_vm_area(current_task, NULL, address, segment->size, 0,
                          (uint64_t)shmid, flags,
-                         TASK_VMA_SHARED | TASK_VMA_ANONYMOUS) != 0) {
+                         TASK_VMA_SHARED | TASK_VMA_ANONYMOUS |
+                         (readonly ? 0 : TASK_VMA_MAYWRITE)) != 0) {
         for (offset = 0; offset < segment->size; offset += PAGE_SIZE) {
             vmm_unmap_page_in_pml4(current_task->pml4_phys,
                                    address + offset);

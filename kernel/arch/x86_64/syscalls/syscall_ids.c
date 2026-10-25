@@ -363,7 +363,7 @@ static int sys_getresuid(uint64_t ruid_ptr, const char *euid_ptr,
     uint64_t r_addr = (uint64_t)ruid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)euid_ptr;
     uint64_t s_addr = (uint64_t)suid_ptr;
-    uint64_t value;
+    uint32_t value;
 
     if (!current_task) return -ESRCH;
     if (r_addr) {
@@ -389,7 +389,7 @@ static int sys_getresgid(uint64_t rgid_ptr, const char *egid_ptr,
     uint64_t r_addr = (uint64_t)rgid_ptr;
     uint64_t e_addr = (uint64_t)(uintptr_t)egid_ptr;
     uint64_t s_addr = (uint64_t)sgid_ptr;
-    uint64_t value;
+    uint32_t value;
 
     if (!current_task) return -ESRCH;
     if (r_addr) {
@@ -602,7 +602,7 @@ static int sys_getsid(int pid, const char *unused1, int unused2) {
 
 static int sys_getppid(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
-    return 1;
+    return current_task ? (int)current_task->ppid : 0;
 }
 
 static int sys_getpid_impl(int unused1, const char *unused2, int unused3) {

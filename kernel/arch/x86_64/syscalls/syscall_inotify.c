@@ -33,6 +33,7 @@ typedef struct {
     inotify_queued_event_t *head;
     inotify_queued_event_t *tail;
     uint64_t queue_count;
+    uint64_t sequence;
     int overflowed;
 } inotify_instance_t;
 
@@ -140,6 +141,7 @@ static void inotify_queue(inotify_instance_t *instance, int wd, uint32_t mask,
     }
     instance->tail = event;
     instance->queue_count++;
+    instance->sequence++;
 }
 
 static int inotify_create(int flags) {
@@ -312,6 +314,17 @@ int inotify_is_fd(int fd) {
     }
     mutex_unlock(&inotify_lock);
     return result;
+}
+
+uint64_t inotify_poll_sequence(int fd) {
+    inotify_instance_t *instance;
+    uint64_t sequence;
+
+    mutex_lock(&inotify_lock);
+    instance = inotify_get(fd);
+    sequence = instance ? instance->sequence : 0;
+    mutex_unlock(&inotify_lock);
+    return sequence;
 }
 
 int inotify_poll_fd(int fd) {

@@ -10,6 +10,7 @@
 #include <lebirun/tty.h>
 #include <lebirun/task.h>
 #include <lebirun/common.h>
+#include <lebirun/pit.h>
 #include <string.h>
 
 const mac_addr_t MAC_BROADCAST = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
@@ -23,7 +24,7 @@ uint64_t net_get_ticks(void) {
 }
 
 void net_tick(void) {
-    net_ticks++;
+    net_ticks = pit_get_ticks();
 }
 
 void net_poll(void) {

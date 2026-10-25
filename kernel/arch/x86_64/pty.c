@@ -22,6 +22,8 @@ typedef struct {
     uint8_t *slave_buf;
     uint64_t slave_head;
     uint64_t slave_tail;
+    uint64_t master_sequence;
+    uint64_t slave_sequence;
     struct termios termios;
     struct winsize winsize;
     pid_t session;
@@ -495,9 +497,11 @@ static int pty_append_slave_output(pty_t *pty, uint8_t c) {
     if (needed == 2) {
         pty->slave_buf[pty->slave_tail % pty->slave_capacity] = '\r';
         pty->slave_tail++;
+        pty->slave_sequence++;
     }
     pty->slave_buf[pty->slave_tail % pty->slave_capacity] = c;
     pty->slave_tail++;
+    pty->slave_sequence++;
     return 0;
 }
 
@@ -684,6 +688,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         
         pty->master_buf[pty->master_tail % pty->master_capacity] = c;
         pty->master_tail++;
+        pty->master_sequence++;
         if ((pty->termios.c_lflag & ECHO) ||
             (c == '\n' && (pty->termios.c_lflag & ECHONL)))
             pty_echo_input(pty, c);
@@ -1154,6 +1159,21 @@ int pty_can_write(int fd) {
     }
     mutex_unlock(&pty_lock);
     return 0;
+}
+
+uint64_t pty_poll_sequence(int fd) {
+    pty_t *pty;
+    uint64_t sequence;
+
+    mutex_lock(&pty_lock);
+    pty = get_pty_by_master(fd);
+    if (pty) sequence = pty->slave_sequence;
+    else {
+        pty = get_pty_by_slave(fd);
+        sequence = pty ? pty->master_sequence : 0;
+    }
+    mutex_unlock(&pty_lock);
+    return sequence;
 }
 
 int pty_poll_events(int fd) {

@@ -187,6 +187,7 @@ void udp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             sock->recv_len = payload_len;
             sock->recv_from_ip = src;
             sock->recv_from_port = src_port;
+            sock->read_sequence++;
             sock->has_data = 1;
             sock->rx_stamp = pit_get_ticks();
             udp_lock_irqrestore(f);

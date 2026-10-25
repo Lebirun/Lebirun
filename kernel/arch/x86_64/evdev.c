@@ -118,6 +118,7 @@ static void evdev_ring_put(struct evdev_device *dev, const struct input_event *e
         if (next == dev->tail)
             return;
     }
+    __atomic_add_fetch(&dev->sequence, 1, __ATOMIC_RELEASE);
     dev->ring[dev->head] = *ev;
     dev->head = next;
 }
@@ -134,6 +135,14 @@ static int evdev_ring_get(struct evdev_device *dev, struct input_event *ev) {
 
 int evdev_has_data(struct evdev_device *dev) {
     return dev->head != dev->tail;
+}
+
+uint64_t evdev_node_sequence(vfs_node_t *node) {
+    struct evdev_device *dev;
+
+    if (!node) return 0;
+    dev = node->private_data;
+    return dev ? __atomic_load_n(&dev->sequence, __ATOMIC_ACQUIRE) : 0;
 }
 
 int evdev_node_has_data(vfs_node_t *node) {

@@ -39,6 +39,7 @@ static slab_page_t *slab_small_tail;
 static uint64_t slab_pages_allocated;
 static int slab_initialized;
 static volatile int slab_lock;
+
 static int slab_virtual_dirty;
 static volatile int slab_flush_active;
 static int slab_fresh_only;
@@ -46,6 +47,10 @@ static uint64_t slab_primary_bump = SLAB_PRIMARY_START;
 static uint64_t slab_primary_scan = SLAB_PRIMARY_START;
 static uint64_t slab_overflow_bump = SLAB_OVERFLOW_START;
 static uint64_t slab_overflow_scan = SLAB_OVERFLOW_START;
+
+int slab_allocator_locked(void) {
+    return __atomic_load_n(&slab_lock, __ATOMIC_RELAXED) != 0;
+}
 
 static inline void slab_lock_acquire(uint64_t *eflags_out) {
     uint64_t eflags;
@@ -243,13 +248,17 @@ static void slab_small_remove(slab_page_t *page) {
     page->prev = NULL;
 }
 
-static slab_page_t *slab_small_create(void) {
+static slab_page_t *slab_small_create(int *backing_failed) {
     slab_page_t *page;
     slab_block_t *block;
     uint64_t virt;
 
     virt = slab_virtual_alloc(1);
-    if (!virt || !slab_map_pages(virt, 1)) return NULL;
+    if (!virt) return NULL;
+    if (!slab_map_pages(virt, 1)) {
+        *backing_failed = 1;
+        return NULL;
+    }
     memset((void *)virt, 0, PAGE_SIZE);
     page = (slab_page_t *)virt;
     page->magic = SLAB_MAGIC;
@@ -280,7 +289,7 @@ static slab_block_t *slab_small_find(slab_page_t *page, uint32_t needed) {
     return NULL;
 }
 
-static void *slab_small_allocate(size_t size) {
+static void *slab_small_allocate(size_t size, int *backing_failed) {
     slab_page_t *page;
     slab_block_t *block;
     slab_block_t *remainder;
@@ -298,7 +307,7 @@ static void *slab_small_allocate(size_t size) {
         page = page->next;
     }
     if (!block) {
-        page = slab_small_create();
+        page = slab_small_create(backing_failed);
         if (!page) return NULL;
         block = slab_small_find(page, needed);
         if (!block) return NULL;
@@ -316,7 +325,7 @@ static void *slab_small_allocate(size_t size) {
     return (uint8_t *)block + sizeof(slab_block_t);
 }
 
-static void *slab_extent_allocate(size_t size) {
+static void *slab_extent_allocate(size_t size, int *backing_failed) {
     slab_page_t *extent;
     uint32_t *head;
     uint32_t *tail;
@@ -332,7 +341,11 @@ static void *slab_extent_allocate(size_t size) {
     pages = total / PAGE_SIZE;
     if (total % PAGE_SIZE) pages++;
     virt = slab_virtual_alloc(pages);
-    if (!virt || !slab_map_pages(virt, pages)) return NULL;
+    if (!virt) return NULL;
+    if (!slab_map_pages(virt, pages)) {
+        *backing_failed = 1;
+        return NULL;
+    }
     extent = (slab_page_t *)virt;
     memset(extent, 0, sizeof(*extent));
     extent->magic = SLAB_MAGIC;
@@ -411,15 +424,18 @@ void *slab_alloc(size_t size) {
     uint64_t eflags;
     int flush_result;
     int retry;
+    int backing_failed;
 
     if (!slab_initialized || size == 0 || size > SLAB_MAX_SIZE) return NULL;
     for (;;) {
         slab_lock_acquire(&eflags);
+        backing_failed = 0;
         if (size <= SLAB_SMALL_MAX)
-            result = slab_small_allocate(size);
+            result = slab_small_allocate(size, &backing_failed);
         else
-            result = slab_extent_allocate(size);
-        retry = !result && (slab_virtual_dirty || slab_flush_active);
+            result = slab_extent_allocate(size, &backing_failed);
+        retry = !result && !backing_failed &&
+            (slab_virtual_dirty || slab_flush_active);
         slab_lock_release(eflags);
         if (!retry) return result;
         flush_result = slab_flush_stale();
@@ -427,12 +443,12 @@ void *slab_alloc(size_t size) {
             slab_lock_acquire(&eflags);
             slab_fresh_only = 1;
             if (size <= SLAB_SMALL_MAX)
-                result = slab_small_allocate(size);
+                result = slab_small_allocate(size, &backing_failed);
             else
-                result = slab_extent_allocate(size);
+                result = slab_extent_allocate(size, &backing_failed);
             slab_fresh_only = 0;
             slab_lock_release(eflags);
-            if (result) return result;
+            return result;
         }
         smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");
@@ -457,7 +473,7 @@ void *slab_page_alloc(size_t size) {
             slab_lock_release(eflags);
             return (void *)(uintptr_t)virt;
         }
-        retry = slab_virtual_dirty || slab_flush_active;
+        retry = !virt && (slab_virtual_dirty || slab_flush_active);
         slab_lock_release(eflags);
         if (!retry) return NULL;
         flush_result = slab_flush_stale();
@@ -473,6 +489,7 @@ void *slab_page_alloc(size_t size) {
             }
             slab_fresh_only = 0;
             slab_lock_release(eflags);
+            return NULL;
         }
         smp_tlb_flush_poll();
         __asm__ volatile ("pause" ::: "memory");

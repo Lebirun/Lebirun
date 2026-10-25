@@ -8,6 +8,10 @@
 heap_t kernel_heap;
 static spinlock_t heap_lock = {0};
 
+int heap_allocator_locked(void) {
+    return __atomic_load_n(&heap_lock.locked, __ATOMIC_RELAXED) != 0;
+}
+
 static inline uint64_t heap_lock_acquire(void) {
     uint64_t eflags;
 

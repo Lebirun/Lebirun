@@ -200,17 +200,59 @@ static int remove_user_page_phys(uint64_t phys) {
 static void release_user_leaf_range(uint64_t base, uint64_t end) {
     uint64_t page_addr;
     uint64_t phys;
+    uint64_t flags;
 
     for (page_addr = base; page_addr < end; page_addr += 0x1000) {
-        phys = vmm_unmap_page_in_pml4(current_task->pml4_phys, page_addr);
+        phys = vmm_unmap_page_in_pml4_flags(current_task->pml4_phys,
+                                           page_addr, &flags);
         if (phys) {
-            if (remove_user_page_phys(phys)) {
+            if (remove_user_page_phys(phys) && !(flags & VMM_PTE_NOFREE)) {
                 pfa_cow_release(phys);
             }
         }
     }
     compact_user_pages();
     vmm_prune_user_range(current_task->pml4_phys, base, end - base);
+}
+
+static void release_untracked_pages(uint64_t base, uint64_t *pages,
+                                     uint64_t count) {
+    uint64_t i;
+
+    for (i = 0; i < count; i++) {
+        vmm_unmap_page_in_pml4(current_task->pml4_phys, base + i * PAGE_SIZE);
+        pfa_cow_release(pages[i]);
+    }
+    vmm_prune_user_range(current_task->pml4_phys, base, count * PAGE_SIZE);
+    kfree(pages);
+}
+
+static int map_user_pages(uint64_t base, uint64_t size, uint64_t flags) {
+    uint64_t *pages;
+    uint64_t *tracked;
+    uint64_t count;
+    uint64_t old_count;
+
+    count = 0;
+    pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, base,
+                                          size, flags, &count);
+    if (!pages) return -ENOMEM;
+    old_count = current_task->user_pages_count;
+    if (count > SIZE_MAX / sizeof(uint64_t) - old_count) {
+        release_untracked_pages(base, pages, count);
+        return -ENOMEM;
+    }
+    tracked = krealloc(current_task->user_pages,
+                        (old_count + count) * sizeof(*tracked));
+    if (!tracked) {
+        release_untracked_pages(base, pages, count);
+        return -ENOMEM;
+    }
+    memcpy(tracked + old_count, pages, count * sizeof(*tracked));
+    current_task->user_pages = tracked;
+    current_task->user_pages_count += count;
+    kfree(pages);
+    return 0;
 }
 
 static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
@@ -279,20 +321,17 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
         if (new_pages && page_count > 0) {
             old_count = current_task->user_pages_count;
             if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-                release_user_leaf_range(old_page_end, newbrk);
-                kfree(new_pages);
+                release_untracked_pages(old_page_end, new_pages, page_count);
                 return (int64_t)current_brk;
             }
             new_count = old_count + page_count;
             if (new_count > SIZE_MAX / sizeof(uint64_t)) {
-                release_user_leaf_range(old_page_end, newbrk);
-                kfree(new_pages);
+                release_untracked_pages(old_page_end, new_pages, page_count);
                 return (int64_t)current_brk;
             }
             expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
             if (!expanded) {
-                release_user_leaf_range(old_page_end, newbrk);
-                kfree(new_pages);
+                release_untracked_pages(old_page_end, new_pages, page_count);
                 return (int64_t)current_brk;
             }
             if (current_task->user_pages && old_count > 0) {
@@ -360,15 +399,13 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
     if (new_pages && page_count > 0) {
         old_count = current_task->user_pages_count;
         if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-            release_user_leaf_range(base, base + size);
-            kfree(new_pages);
+            release_untracked_pages(base, new_pages, page_count);
             return -ENOMEM;
         }
         new_count = old_count + page_count;
         expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
         if (!expanded) {
-            release_user_leaf_range(base, base + size);
-            kfree(new_pages);
+            release_untracked_pages(base, new_pages, page_count);
             return -ENOMEM;
         }
         if (current_task->user_pages && old_count > 0) {
@@ -427,6 +464,7 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if (flags & 0x1) pte_flags |= VMM_PTE_SHARED;
     if (fd < 0 || (flags & 0x20)) vma_map_flags |= TASK_VMA_ANONYMOUS;
     else vma_map_flags |= TASK_VMA_FILE;
+    vma_map_flags |= TASK_VMA_MAYWRITE;
     vma_node = NULL;
     vma_file_size = 0;
     vma_offset = 0;
@@ -434,6 +472,8 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if (!(flags & 0x20)) {
         tfd = task_fd_get(current_task, fd);
         if (!tfd || !tfd->in_use || !tfd->node) return -EBADF;
+        if ((tfd->flags & 0x3) == VFS_O_RDONLY)
+            vma_map_flags &= ~TASK_VMA_MAYWRITE;
         if ((prot & PROT_EXEC) &&
             (vfs_get_mount_flags_for_node((vfs_node_t *)tfd->node) &
              VFS_MS_NOEXEC)) return -EACCES;
@@ -492,7 +532,8 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
                 if (task_add_vm_area(current_task, fnode, base, size,
                                      fb_total, 0,
                                      pte_flags | VMM_PTE_NOFREE,
-                                     TASK_VMA_SHARED | TASK_VMA_DEVICE) != 0) {
+                                     TASK_VMA_SHARED | TASK_VMA_DEVICE |
+                                     (vma_map_flags & TASK_VMA_MAYWRITE)) != 0) {
                     release_user_leaf_range(base, base + size);
                     return -ENOMEM;
                 }
@@ -527,15 +568,13 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if (new_pages && page_count > 0) {
         old_count = current_task->user_pages_count;
         if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-            release_user_leaf_range(base, base + size);
-            kfree(new_pages);
+            release_untracked_pages(base, new_pages, page_count);
             return -ENOMEM;
         }
         new_count = old_count + page_count;
         expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
         if (!expanded) {
-            release_user_leaf_range(base, base + size);
-            kfree(new_pages);
+            release_untracked_pages(base, new_pages, page_count);
             return -ENOMEM;
         }
         if (current_task->user_pages && old_count > 0) {
@@ -617,6 +656,20 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     if (size < length || base >= KERNEL_VMA || base + size < base ||
             base + size > KERNEL_VMA) return -EINVAL;
     end = base + size;
+    for (i = 0; i < current_task->file_map_count; i++) {
+        area_end = current_task->file_maps[i].vaddr +
+                   current_task->file_maps[i].memsz;
+        if (end <= current_task->file_maps[i].vaddr || base >= area_end)
+            continue;
+        if ((prot & PROT_WRITE) &&
+            (current_task->file_maps[i].map_flags & TASK_VMA_SHARED)) {
+            if (!(current_task->file_maps[i].map_flags & TASK_VMA_MAYWRITE))
+                return -EACCES;
+            if (current_task->file_maps[i].node &&
+                ramfs_node_has_seal(current_task->file_maps[i].node,
+                                    0x0018u)) return -EACCES;
+        }
+    }
     if (prot & PROT_EXEC) {
         for (i = 0; i < current_task->file_map_count; i++) {
             area_end = current_task->file_maps[i].vaddr +
@@ -644,7 +697,11 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
                 current_task->pml4_phys, page);
         }
         if ((pte_flags & VMM_PTE_WRITE) &&
-            (current_flags & VMM_PTE_NOFREE) &&
+            (((current_flags & VMM_PTE_NOFREE) &&
+              !(current_flags & VMM_PTE_WRITE)) ||
+             (!(current_flags & VMM_PTE_SHARED) &&
+              pfa_ref_get(vmm_get_phys_in_pml4(current_task->pml4_phys,
+                                               page)) > 1)) &&
             !task_handle_file_write_fault(current_task, page))
             return -ENOMEM;
         if (vmm_protect_page_in_pml4(current_task->pml4_phys, page,
@@ -653,115 +710,114 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     return 0;
 }
 
-static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size, int flags, void *new_addr) {
+static void *sys_mremap(void *old_addr, size_t old_size, size_t new_size,
+                         int flags, void *new_addr) {
+    task_file_map_t original;
     uint64_t old_base;
     uint64_t old_len;
-    uint64_t old_end;
-    uint64_t base;
     uint64_t size;
-    uint64_t page_count;
-    uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t new_count;
-    uint64_t *expanded;
-    uint64_t copy_size;
-    uint64_t old_flags;
-    uint64_t additional_size;
-    uint64_t copied;
-    uint64_t chunk;
-    uint8_t copy_buffer[256];
+    uint64_t base;
+    uint64_t offset;
+    uint64_t physical;
+    uint64_t page_flags;
+    uint64_t mapped_end;
+    int index;
+    int shared_growth;
+    int i;
 
-    (void)flags;
-
-    if (!current_task) return (void *)(long)-ENOMEM;
-    if (!old_addr || new_size == 0) return (void *)(long)-EINVAL;
-    if (((uint64_t)old_addr & 0xFFFu) != 0) return (void *)(long)-EINVAL;
-
-    old_base = (uint64_t)old_addr;
-    old_len = (old_size + 0xFFF) & ~0xFFFu;
-    size = (new_size + 0xFFF) & ~0xFFFu;
-    if (old_len == 0 || size == 0 || old_len < old_size || size < new_size)
+    if (!current_task || !old_addr || !old_size || !new_size)
         return (void *)(long)-EINVAL;
-    if (old_base >= KERNEL_VMA || old_base + old_len < old_base)
+    if ((flags & ~3) || ((flags & 2) && !(flags & 1)))
         return (void *)(long)-EINVAL;
-    if (!user_range_mapped_mem(old_base, old_len))
-        return (void *)(long)-EFAULT;
-
-    if (size <= old_len) {
-        old_end = old_base + old_len;
-        if (old_base + size < old_end)
-            release_user_leaf_range(old_base + size, old_end);
+    old_base = (uint64_t)(uintptr_t)old_addr;
+    if (old_base & (PAGE_SIZE - 1)) return (void *)(long)-EINVAL;
+    old_len = align_up_u64(old_size, PAGE_SIZE);
+    size = align_up_u64(new_size, PAGE_SIZE);
+    if (!old_len || !size || old_len < old_size || size < new_size ||
+        old_base + old_len < old_base) return (void *)(long)-EINVAL;
+    index = task_isolate_vm_area(current_task, old_base, old_len);
+    if (index < 0) return (void *)(long)-EFAULT;
+    original = current_task->file_maps[index];
+    if (original.map_flags & TASK_VMA_DEVICE) return (void *)(long)-EINVAL;
+    if (!(flags & 2) && size <= old_len) {
+        if (size < old_len) {
+            current_task->file_maps[index].memsz = size;
+            if (current_task->file_maps[index].filesz > size)
+                current_task->file_maps[index].filesz = size;
+            release_user_leaf_range(old_base + size, old_base + old_len);
+        }
         return old_addr;
     }
-
-    additional_size = size - old_len;
-    if (!task_memory_allows(current_task, additional_size))
+    if (size > old_len && !task_memory_allows(current_task, size - old_len))
         return (void *)(long)-ENOMEM;
-    old_flags = vmm_get_flags_in_pml4(current_task->pml4_phys, old_base);
-    if (!(old_flags & VMM_PTE_PRESENT))
-        return (void *)(long)-EFAULT;
-    old_flags &= ~(VMM_PTE_COW | VMM_PTE_NOFREE | VMM_PTE_SHARED);
-
-    if (new_addr && ((uint64_t)new_addr & 0xFFFu) == 0) {
-        base = (uint64_t)new_addr;
-    } else {
+    base = old_base;
+    if (flags & 2) {
+        base = (uint64_t)(uintptr_t)new_addr;
+        if ((base & (PAGE_SIZE - 1)) ||
+            (base < old_base + old_len && old_base < base + size))
+            return (void *)(long)-EINVAL;
+    } else if (!user_range_free_mem(old_base + old_len, size - old_len, 0, 0)) {
+        if (!(flags & 1)) return (void *)(long)-ENOMEM;
         base = user_mmap_auto_base(current_task->mmap_next_addr, size);
         if (!base) return (void *)(long)-ENOMEM;
     }
-
-    if (base + size < base || base + size >= KERNEL_VMA) return (void *)(long)-ENOMEM;
-    if (base < old_base + old_len && old_base < base + size)
+    if (base + size < base || !user_mmap_range_valid(base, base + size - 1))
         return (void *)(long)-EINVAL;
-    if (!user_range_free_mem(base, size, old_base, old_len)) return (void *)(long)-ENOMEM;
-
-    page_count = 0;
-    new_pages = vmm_map_range_in_pml4_tracked(
-        current_task->pml4_phys, base, size, 0x7, &page_count);
-    if (!new_pages && size > 0) return (void *)(long)-ENOMEM;
-
-    if (new_pages && page_count > 0) {
-        old_count = current_task->user_pages_count;
-        new_count = old_count + page_count;
-        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
-        if (!expanded) {
-            release_user_leaf_range(base, base + size);
-            kfree(new_pages);
+    shared_growth = size > old_len &&
+                    (original.map_flags & TASK_VMA_SHARED) &&
+                    (original.map_flags & TASK_VMA_ANONYMOUS);
+    if (base != old_base) {
+        if (flags & 2) {
+            if (sys_munmap((void *)(uintptr_t)base, size) < 0 &&
+                !user_range_free_mem(base, size, 0, 0))
+                return (void *)(long)-ENOMEM;
+            for (i = 0; i < current_task->file_map_count; i++) {
+                if (current_task->file_maps[i].vaddr == old_base) {
+                    index = i;
+                    break;
+                }
+            }
+        }
+        if (!user_range_free_mem(base, size, 0, 0)) return (void *)(long)-ENOMEM;
+        if (shared_growth && map_user_pages(base + old_len, size - old_len,
+                                            original.flags) < 0)
             return (void *)(long)-ENOMEM;
+        mapped_end = old_len < size ? old_len : size;
+        for (offset = 0; offset < mapped_end; offset += PAGE_SIZE) {
+            physical = vmm_get_phys_in_pml4(current_task->pml4_phys,
+                                             old_base + offset);
+            if (!physical) continue;
+            page_flags = vmm_get_flags_in_pml4(current_task->pml4_phys,
+                                               old_base + offset);
+            if (vmm_map_page_in_pml4(current_task->pml4_phys, base + offset,
+                                     physical, page_flags) < 0) {
+                while (offset) {
+                    offset -= PAGE_SIZE;
+                    vmm_unmap_page_in_pml4(current_task->pml4_phys, base + offset);
+                }
+                vmm_prune_user_range(current_task->pml4_phys, base, mapped_end);
+                if (shared_growth)
+                    release_user_leaf_range(base + old_len, base + size);
+                return (void *)(long)-ENOMEM;
+            }
         }
-        if (current_task->user_pages && old_count > 0) {
-            memcpy(expanded, current_task->user_pages,
-                   old_count * sizeof(uint64_t));
-            kfree(current_task->user_pages);
-        }
-        memcpy(expanded + old_count, new_pages,
-               page_count * sizeof(uint64_t));
-        current_task->user_pages = expanded;
-        current_task->user_pages_count = new_count;
-        kfree(new_pages);
+        for (offset = 0; offset < mapped_end; offset += PAGE_SIZE)
+            vmm_unmap_page_in_pml4(current_task->pml4_phys, old_base + offset);
+        if (size < old_len)
+            release_user_leaf_range(old_base + size, old_base + old_len);
+        vmm_prune_user_range(current_task->pml4_phys, old_base, old_len);
     }
-
-    copy_size = old_size < new_size ? old_size : new_size;
-    copied = 0;
-    while (copied < copy_size) {
-        chunk = copy_size - copied;
-        if (chunk > sizeof(copy_buffer)) chunk = sizeof(copy_buffer);
-        vmm_read_from_pml4(current_task->pml4_phys,
-                           old_base + copied, copy_buffer, chunk);
-        vmm_copy_to_pml4(current_task->pml4_phys,
-                         base + copied, copy_buffer, chunk);
-        copied += chunk;
-    }
-    if (vmm_protect_range_in_pml4(current_task->pml4_phys, base, size,
-                                  old_flags) < 0) {
-        release_user_leaf_range(base, base + size);
+    if (base == old_base && shared_growth &&
+        map_user_pages(base + old_len, size - old_len, original.flags) < 0)
         return (void *)(long)-ENOMEM;
-    }
-
-    release_user_leaf_range(old_base, old_base + old_len);
-    if (base < current_task->mmap_next_addr)
-        current_task->mmap_next_addr = base;
-
-    return (void *)base;
+    current_task->file_maps[index].vaddr = base;
+    current_task->file_maps[index].memsz = size;
+    if (original.map_flags & TASK_VMA_FILE)
+        current_task->file_maps[index].filesz = size;
+    else if (current_task->file_maps[index].filesz > size)
+        current_task->file_maps[index].filesz = size;
+    if (base < current_task->mmap_next_addr) current_task->mmap_next_addr = base;
+    return (void *)(uintptr_t)base;
 }
 
 static int sys_madvise(void *addr, size_t length, int advice) {
@@ -835,7 +891,18 @@ static int sys_madvise(void *addr, size_t length, int advice) {
         if (covered) break;
     }
     if (covered && sys_msync(addr, length, MS_ASYNC) < 0) return -EIO;
-    release_user_leaf_range(base, end);
+    for (page = base; page < end; page += PAGE_SIZE) {
+        for (i = 0; i < current_task->file_map_count; i++) {
+            if (page < current_task->file_maps[i].vaddr ||
+                page >= current_task->file_maps[i].vaddr +
+                        current_task->file_maps[i].memsz) continue;
+            if ((current_task->file_maps[i].map_flags & TASK_VMA_SHARED) &&
+                (current_task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS))
+                break;
+            release_user_leaf_range(page, page + PAGE_SIZE);
+            break;
+        }
+    }
     return 0;
 }
 
@@ -863,8 +930,7 @@ static int sys_msync(void *addr, size_t length, int flags) {
     if (length == 0) return 0;
     end = base + length;
     if (end < base || end > KERNEL_VMA) return -ENOMEM;
-    buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
-    if (!buffer) return -ENOMEM;
+    buffer = NULL;
     matched = 0;
     for (i = 0; i < current_task->file_map_count; i++) {
         area_start = current_task->file_maps[i].vaddr;
@@ -885,6 +951,10 @@ static int sys_msync(void *addr, size_t length, int flags) {
             if (!vmm_get_phys_in_pml4(current_task->pml4_phys, position)) {
                 position += chunk;
                 continue;
+            }
+            if (!buffer) {
+                buffer = (uint8_t *)slab_page_alloc(PAGE_SIZE);
+                if (!buffer) return -ENOMEM;
             }
             vmm_read_from_pml4(current_task->pml4_phys, position,
                                buffer, chunk);

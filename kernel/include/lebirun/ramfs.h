@@ -45,6 +45,8 @@ typedef struct ramfs_node {
     uint32_t seals;
     uint8_t is_memfd;
     mutex_t lock;
+    struct ramfs_node *link_target;
+    struct ramfs_node *hardlinks;
     struct ramfs_node *parent;
     struct ramfs_node *children;
     struct ramfs_node *next_sibling;
@@ -95,6 +97,7 @@ int ramfs_get_stats(ramfs_stats_t *stats);
 vfs_node_t *ramfs_create_memfd(const char *name);
 int ramfs_node_add_seals(vfs_node_t *node, uint32_t seals);
 int ramfs_node_get_seals(vfs_node_t *node, uint32_t *out);
+uint64_t ramfs_node_link_count(vfs_node_t *node);
 int ramfs_node_has_seal(vfs_node_t *node, uint32_t seal);
 int ramfs_zero_range(vfs_node_t *node, uint64_t offset, uint64_t length);
 

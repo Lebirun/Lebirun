@@ -128,6 +128,9 @@ static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int
     uint64_t pde;
     uint64_t pt_phys_val;
     uint64_t pte;
+    uint64_t temporary;
+    uint64_t saved_flags;
+    uint64_t *leaf;
 
     if (!pml4_phys) return;
 
@@ -146,12 +149,20 @@ static void vmm_free_pml4_entries(uint64_t pml4_phys, uint64_t pml4_entries, int
                 if (!(pde & 1)) continue;
                 pt_phys_val = pde & VMM_PHYS_MASK;
 
+                __asm__ volatile ("pushfq; popq %0; cli"
+                                  : "=r"(saved_flags) :: "memory");
+                temporary = TEMP_SLOT(4);
+                temp_map_raw(temporary, pt_phys_val);
+                leaf = (uint64_t *)temporary;
                 for (l = 0; l < 512; l++) {
-                    pte = vmm_table_read(pt_phys_val, l);
+                    pte = leaf[l];
                     if ((pte & 1) && release_leaf_refs && !(pte & VMM_PTE_NOFREE)) {
                         pfa_cow_release64(pte & VMM_PHYS_MASK);
                     }
                 }
+                temp_unmap_raw(temporary);
+                if (saved_flags & (1ULL << 9))
+                    __asm__ volatile ("sti" ::: "memory");
                 pfa_free(pt_phys_val);
             }
             pfa_free(pd_phys_val);

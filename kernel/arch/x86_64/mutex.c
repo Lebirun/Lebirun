@@ -15,6 +15,7 @@ void mutex_lock(mutex_t* m) {
     extern int scheduler_initialized;
     cpu_info_t *cpu;
     task_t *task;
+    task_t *holder;
     volatile int i;
     uint64_t owner;
     uint8_t stage;
@@ -65,13 +66,6 @@ void mutex_lock(mutex_t* m) {
                 staged = 1;
             }
             lock_scheduler();
-            if (__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
-                m->owner = owner;
-                m->depth = 1;
-                unlock_scheduler();
-                if (staged) task->kernel_stage = stage;
-                return;
-            }
             if (m->owner == owner && owner != 0) {
                 m->depth++;
                 unlock_scheduler();
@@ -80,10 +74,20 @@ void mutex_lock(mutex_t* m) {
             }
             waitq_add(&m->waiters, task);
             queued = task->waiting_queue == &m->waiters;
-            if (queued) task->state = TASK_BLOCKED;
+            if (__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
+                if (queued) {
+                    waitq_remove(&m->waiters, task);
+                    task->state = TASK_RUNNING;
+                }
+                m->owner = owner;
+                m->depth = 1;
+                unlock_scheduler();
+                if (staged) task->kernel_stage = stage;
+                return;
+            }
             if (queued && m->owner) {
-                task_t *o = (task_t *)(uintptr_t)m->owner;
-                if (o && o != task && o->pi_boost < 40) o->pi_boost = 40;
+                holder = (task_t *)(uintptr_t)m->owner;
+                if (holder && holder != task && holder->pi_boost < 40) holder->pi_boost = 40;
             }
             unlock_scheduler();
             if (queued) {
@@ -136,8 +140,7 @@ void mutex_unlock(mutex_t* m) {
     m->depth = 0;
     m->owner = 0;
     if (task) task->pi_boost = 0;
-    __sync_lock_release(&m->locked);
-    lock_scheduler();
-    waitq_wake_one(&m->waiters);
-    unlock_scheduler();
+    __atomic_exchange_n(&m->locked, 0, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&m->waiters.head, __ATOMIC_ACQUIRE))
+        waitq_wake_one(&m->waiters);
 }

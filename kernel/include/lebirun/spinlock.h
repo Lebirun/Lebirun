@@ -28,7 +28,7 @@ static inline void spin_lock(spinlock_t* l) {
 }
 
 static inline int spin_trylock(spinlock_t* l) {
-    if (!l) return 0;
+    if (!l || __atomic_load_n(&l->locked, __ATOMIC_RELAXED)) return 0;
     if (__sync_lock_test_and_set(&l->locked, 1) == 0) {
         return 1;
     }

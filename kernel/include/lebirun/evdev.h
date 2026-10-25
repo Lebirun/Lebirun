@@ -172,6 +172,7 @@ struct input_absinfo {
 struct evdev_device {
     struct input_event *ring;
     uint32_t ring_capacity;
+    uint64_t sequence;
     volatile uint32_t head;
     volatile uint32_t tail;
     struct input_id id;
@@ -191,6 +192,7 @@ void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, in
 void evdev_push_sync(struct evdev_device *dev);
 int evdev_has_data(struct evdev_device *dev);
 int evdev_node_has_data(vfs_node_t *node);
+uint64_t evdev_node_sequence(vfs_node_t *node);
 void evdev_release_grabs(pid_t pid);
 
 struct evdev_device *evdev_get_kbd(void);

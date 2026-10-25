@@ -7,6 +7,7 @@
 #include <lebirun/kstack.h>
 #include <lebirun/task.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/security.h>
 #include <lebirun/vring.h>
 #include <lebirun/panic.h>
@@ -646,6 +647,9 @@ void smp_tlb_flush_poll(void) {
     uint64_t flags;
 
     if (!__atomic_load_n(&smp_percpu_irq_ready, __ATOMIC_ACQUIRE)) return;
+    cpu = smp_this_cpu();
+    if (__atomic_load_n(&cpu->tlb_request, __ATOMIC_ACQUIRE) <=
+        __atomic_load_n(&cpu->tlb_ack, __ATOMIC_RELAXED)) return;
     __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
     cpu = smp_this_cpu();
     if (__atomic_load_n(&cpu->tlb_request, __ATOMIC_ACQUIRE) >
@@ -906,6 +910,8 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     uint64_t start_ticks;
     uint64_t elapsed_ticks;
     uint64_t timer_frequency;
+    uint64_t start_ns;
+    uint64_t elapsed_ns;
     uint64_t flags;
     uint64_t spins;
 
@@ -914,6 +920,7 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
 
     lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_MASKED | 32);
     lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
+    start_ns = tsc_available() ? tsc_get_ns() : 0;
 
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags) :: "memory");
     __asm__ volatile ("sti" ::: "memory");
@@ -928,12 +935,18 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     __asm__ volatile ("cli" ::: "memory");
 
     initial = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
+    elapsed_ns = tsc_available() ? tsc_get_ns() - start_ns : 0;
     timer_frequency = pit_get_frequency();
     if (timer_frequency == 0) timer_frequency = pit_freq;
     if (timer_frequency == 0) timer_frequency = 1000;
 
-    reload = initial * timer_frequency;
-    reload /= elapsed_ticks * freq_hz;
+    if (elapsed_ns) {
+        reload = (uint64_t)(((__uint128_t)initial * 1000000000ULL) /
+                            ((__uint128_t)elapsed_ns * freq_hz));
+    } else {
+        reload = initial * timer_frequency;
+        reload /= elapsed_ticks * freq_hz;
+    }
     if (reload == 0) reload = 1;
     if (reload > 0xFFFFFFFFu) reload = 0xFFFFFFFFu;
 

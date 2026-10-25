@@ -9,15 +9,19 @@
 #include <stdbool.h>
 
 static volatile uint64_t wdt_last_kick = 0;
+static uint64_t wdt_delivered_ticks;
 static volatile uint64_t wdt_stall_strikes = 0;
 static volatile int wdt_disabled = 0;
 static volatile int wdt_init_pid = 0;
 
-extern volatile uint64_t tick_count;
 extern task_t *all_tasks_head;
 
+void watchdog_tick(void) {
+    __atomic_add_fetch(&wdt_delivered_ticks, 1, __ATOMIC_RELAXED);
+}
+
 void watchdog_kick(void) {
-    wdt_last_kick = tick_count;
+    wdt_last_kick = __atomic_load_n(&wdt_delivered_ticks, __ATOMIC_RELAXED);
 }
 
 void watchdog_disable(void) {
@@ -82,7 +86,8 @@ static void watchdog_callback(uint64_t ticks) {
 
     if (wdt_disabled) return;
 
-    elapsed = tick_count - wdt_last_kick;
+    elapsed = pit_ticks_to_ms(
+        __atomic_load_n(&wdt_delivered_ticks, __ATOMIC_RELAXED) - wdt_last_kick);
     if (elapsed <= WATCHDOG_SCHED_TIMEOUT) {
         wdt_stall_strikes = 0;
     }
@@ -103,7 +108,7 @@ static void watchdog_callback(uint64_t ticks) {
                        current_task->name[0] ? current_task->name : "(none)");
                 task_kill(current_task, 137);
             }
-            wdt_last_kick = tick_count;
+            watchdog_kick();
         } else {
             kernel_panic_msg("WATCHDOG: scheduler stall unrecoverable (%u ms, %u strikes)",
                              elapsed, wdt_stall_strikes);
@@ -128,7 +133,7 @@ void KERNEL_INIT watchdog_init(void) {
     uint64_t interval_ticks;
     int handle;
 
-    wdt_last_kick = tick_count;
+    watchdog_kick();
     wdt_stall_strikes = 0;
     wdt_init_pid = 0;
     interval_ticks = pit_ms_to_ticks(WATCHDOG_INTERVAL_MS);

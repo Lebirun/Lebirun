@@ -36,6 +36,7 @@ int pty_has_data_for_master(int fd);
 int pty_has_data_for_slave(int fd);
 int pty_can_write(int fd);
 int pty_poll_events(int fd);
+uint64_t pty_poll_sequence(int fd);
 
 void pty_init(void);
 

@@ -167,6 +167,7 @@ typedef struct {
 
 static kbd_console_t *kbd_consoles;
 static int kbd_num_consoles;
+static int sigint_dispatch_pending;
 
 static bool left_shift_pressed = false;
 static bool right_shift_pressed = false;
@@ -460,8 +461,11 @@ void keyboard_feed_ps2(uint8_t scancode) {
 
     if (ctrl_pressed && code == SCANCODE_C) {
         cur = console_is_initialized() ? console_get_current() : 0;
-        if (cur >= 0 && cur < kbd_num_consoles)
-            kbd_consoles[cur].sigint_pending = 1;
+        if (cur >= 0 && cur < kbd_num_consoles) {
+            __atomic_store_n(&kbd_consoles[cur].sigint_pending, 1,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&sigint_dispatch_pending, 1, __ATOMIC_RELEASE);
+        }
         if (cur == 0) {
             serial_write_direct("^C\n", 3);
         }
@@ -629,15 +633,18 @@ void keyboard_process_sigint(void)
     pid_t last_pid;
     pid_t next_pid;
 
+    if (!__atomic_load_n(&sigint_dispatch_pending, __ATOMIC_ACQUIRE)) return;
     if (!kbd_consoles || !tty_termios || !tty_pgrp) return;
+    if (!__atomic_exchange_n(&sigint_dispatch_pending, 0, __ATOMIC_ACQ_REL)) return;
 
     for (i = 0; i < kbd_num_consoles; i++) {
         if (i >= tty_count)
             break;
-        if (!kbd_consoles[i].sigint_pending)
+        if (!__atomic_exchange_n(&kbd_consoles[i].sigint_pending, 0,
+                                 __ATOMIC_ACQ_REL))
             continue;
-        kbd_consoles[i].sigint_pending = 0;
 
+        fg = tty_get_foreground_pgrp(i);
         if (!(tty_termios[i].c_lflag & ISIG))
             continue;
 
@@ -645,8 +652,6 @@ void keyboard_process_sigint(void)
             keyboard_flush_for(i);
             syscall_core_flush_tty_input(i);
         }
-
-        fg = tty_pgrp[i];
 
         last_pid = 0;
         for (;;) {

@@ -13,6 +13,8 @@ typedef struct pipe {
     uint64_t read_pos;
     uint64_t write_pos;
     uint64_t count;
+    uint64_t read_sequence;
+    uint64_t write_sequence;
     int readers;
     int writers;
     wait_queue_t read_waitq;

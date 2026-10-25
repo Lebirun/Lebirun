@@ -9,6 +9,7 @@ struct vfs_node;
 struct cpu_info;
 
 #define TASK_INIT_FDS 3
+#define TASK_EXIT_PENDING (1ULL << 61)
 #define USER_DYNAMIC_BASE 0x00500000u
 #define USER_DYNAMIC_LIMIT 0x3F800000u
 #define USER_STACK_FLOOR USER_DYNAMIC_LIMIT
@@ -79,6 +80,8 @@ typedef struct task_file_map_list {
 #define TASK_VMA_ANONYMOUS 0x0004u
 #define TASK_VMA_FILE      0x0008u
 #define TASK_VMA_DEVICE    0x0010u
+#define TASK_VMA_MAYWRITE  0x0020u
+#define TASK_VMA_CLEAN     0x0040u
 
 #define TASK_KERNEL_STAGE_NONE       0
 #define TASK_KERNEL_STAGE_PTY_READ   1
@@ -113,7 +116,7 @@ typedef struct task {
     uint64_t stack_size;
     uint8_t *kernel_stack_base;
     uint64_t kernel_stack_size;
-    uint64_t wake_tick;
+    uint64_t wake_deadline_ns;
     bool is_user;
     bool shares_address_space;
     uint8_t zero_reclaim_cursor[6];
@@ -298,6 +301,7 @@ void block_current(void);
 void wake_task(task_t* task);
 void task_kill(task_t* task, uint64_t exit_code);
 void sleep_ticks(uint64_t ticks);
+int task_sleep_until(uint64_t deadline_ns);
 void wake_sleeping_tasks(void);
 int wake_sleeping_tasks_from_irq(void);
 void reap_dead_tasks(void);
@@ -338,6 +342,7 @@ int task_add_vm_area(task_t *task, struct vfs_node *node, uint64_t vaddr,
                      uint64_t size, uint64_t file_size, uint64_t offset,
                      uint64_t flags, uint32_t map_flags);
 int task_unmap_vm_areas(task_t *task, uint64_t vaddr, uint64_t size);
+int task_isolate_vm_area(task_t *task, uint64_t address, uint64_t size);
 int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
                           uint64_t flags);
 int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
@@ -371,7 +376,10 @@ int task_set_nice(task_t *task, int nice_value);
 int task_set_scheduler(task_t *task, int policy, int priority);
 int task_get_scheduler(task_t *task, int *priority);
 uint64_t signal_pending_mask(task_t *task);
+uint64_t signal_pending_sequence(task_t *task);
 uint64_t signal_blocked_mask(task_t *task);
+int signal_set_blocked_mask(task_t *task, uint64_t mask);
+void signal_finish_wait_mask(uint64_t mask, int result);
 uint32_t signal_queue_count(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,

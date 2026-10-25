@@ -25,6 +25,8 @@
 #include <lebirun/evdev.h>
 #include <lebirun/mutex.h>
 #include <lebirun/seccomp.h>
+#include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -300,6 +302,8 @@ task_t* ready_queue_head = NULL;
 static task_t* ready_queue_tail = NULL;
 task_t* all_tasks_head = NULL;
 static task_t* sleep_queue_head = NULL;
+static uint64_t sleep_queue_deadline_ns = UINT64_MAX;
+static int idle_wake_pending;
 static task_t* dead_queue_head = NULL;
 static int task_ptr_valid(task_t *t);
 static void task_release_exit_resources(task_t *t);
@@ -401,13 +405,22 @@ int task_oom_kill_one(void) {
     pid_t victim_pid;
     uint64_t pages;
     uint64_t worst;
+    int pending;
 
     victim_pid = 0;
     worst = 0;
+    pending = 0;
     lock_scheduler();
     t = all_tasks_head;
     while (t && task_ptr_valid(t)) {
+        if (t->state != TASK_DEAD &&
+            __atomic_load_n(&t->exit_code, __ATOMIC_ACQUIRE) ==
+                (TASK_EXIT_PENDING | 137)) {
+            pending = 1;
+            break;
+        }
         if (t->is_user && t != task_current() && t->pid != TASK_INIT_PID &&
+            !(__atomic_load_n(&t->exit_code, __ATOMIC_ACQUIRE) & TASK_EXIT_PENDING) &&
             (t->state == TASK_READY || t->state == TASK_RUNNING ||
              t->state == TASK_BLOCKED)) {
             pages = t->user_pages_count;
@@ -419,7 +432,7 @@ int task_oom_kill_one(void) {
         t = t->all_next;
     }
     unlock_scheduler();
-    if (!victim_pid) return 0;
+    if (pending || !victim_pid) return 0;
     t = task_find(victim_pid);
     if (!t || !t->is_user || t->pid == TASK_INIT_PID) return 0;
     printf("oom: killing pid %d (%u pages)\n", victim_pid,
@@ -992,6 +1005,36 @@ static void task_error(const char *fmt, ...) {
     }
 }
 
+static void task_mark_ready_locked(task_t *task) {
+    task_t *running;
+    int owner;
+    int target;
+
+    if (!task || task->state != TASK_BLOCKED) return;
+    task->state = TASK_READY;
+    if (!smp_scheduling_enabled() || !smp_percpu_irq_ready) return;
+    owner = task->running_cpu;
+    if (owner >= -1) return;
+    target = -(owner + 2);
+    if (target >= cpu_count || !cpus[target].active ||
+        &cpus[target] == smp_this_cpu()) return;
+    running = cpus[target].running_task;
+    if (running && (running->id != 0 || running->is_user)) return;
+    __atomic_store_n(&cpus[target].wake_pending, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&idle_wake_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void task_kick_idle_cpus(void) {
+    int i;
+
+    if (!__atomic_load_n(&idle_wake_pending, __ATOMIC_ACQUIRE)) return;
+    if (!__atomic_exchange_n(&idle_wake_pending, 0, __ATOMIC_ACQ_REL)) return;
+    for (i = 0; i < cpu_count; i++) {
+        if (__atomic_exchange_n(&cpus[i].wake_pending, 0, __ATOMIC_ACQ_REL))
+            lapic_send_ipi(cpus[i].lapic_id, IPI_WAKE_VECTOR);
+    }
+}
+
 static void sleepq_remove(task_t* t) {
     task_t **ptr;
     task_t *cur;
@@ -1002,16 +1045,39 @@ static void sleepq_remove(task_t* t) {
         cur = *ptr;
         if (!task_ptr_valid(cur)) {
             *ptr = NULL;
+            __atomic_store_n(&sleep_queue_deadline_ns,
+                sleep_queue_head ? sleep_queue_head->wake_deadline_ns : UINT64_MAX,
+                __ATOMIC_RELEASE);
             return;
         }
         if (cur == t) {
             *ptr = t->sleep_next;
             t->sleep_next = NULL;
             t->in_sleep_queue = 0;
+            __atomic_store_n(&sleep_queue_deadline_ns,
+                sleep_queue_head ? sleep_queue_head->wake_deadline_ns : UINT64_MAX,
+                __ATOMIC_RELEASE);
             return;
         }
         ptr = &cur->sleep_next;
     }
+}
+
+static uint64_t sleepq_deadline_after_ticks(uint64_t ticks) {
+    uint64_t now;
+    uint64_t frequency;
+    uint64_t seconds;
+    uint64_t duration;
+    uint64_t fraction;
+
+    now = timekeeping_monotonic_ns();
+    frequency = pit_get_frequency();
+    seconds = ticks / frequency;
+    if (seconds > (UINT64_MAX - now) / 1000000000ULL) return UINT64_MAX;
+    duration = seconds * 1000000000ULL;
+    fraction = ((ticks % frequency) * 1000000000ULL + frequency - 1) / frequency;
+    if (fraction > UINT64_MAX - now - duration) return UINT64_MAX;
+    return now + duration + fraction;
 }
 
 static void sleepq_insert(task_t *task) {
@@ -1026,12 +1092,14 @@ static void sleepq_insert(task_t *task) {
             *link = NULL;
             break;
         }
-        if (current->wake_tick > task->wake_tick) break;
+        if (current->wake_deadline_ns > task->wake_deadline_ns) break;
         link = &current->sleep_next;
     }
     task->sleep_next = *link;
     task->in_sleep_queue = 1;
     *link = task;
+    __atomic_store_n(&sleep_queue_deadline_ns,
+                     sleep_queue_head->wake_deadline_ns, __ATOMIC_RELEASE);
 }
 
 typedef struct descriptor_wait_filter {
@@ -1144,7 +1212,7 @@ static void task_wake_parent_waiter_locked(task_t *task) {
         if (!task_ptr_valid(parent)) break;
         if (parent->pid == task->ppid) {
             if (parent->waiting_for_any_child && parent->state == TASK_BLOCKED) {
-                parent->state = TASK_READY;
+                task_mark_ready_locked(parent);
             }
             return;
         }
@@ -1327,7 +1395,7 @@ static void waitq_wake_all_locked(wait_queue_t *q) {
     task_t *t;
 
     while ((t = waitq_pop_locked(q))) {
-        if (t->state == TASK_BLOCKED) t->state = TASK_READY;
+        task_mark_ready_locked(t);
     }
 }
 
@@ -1344,7 +1412,7 @@ void waitq_wake_one(wait_queue_t *q) {
     if (!q) return;
     lock_scheduler();
     t = waitq_pop_locked(q);
-    if (t && t->state == TASK_BLOCKED) t->state = TASK_READY;
+    task_mark_ready_locked(t);
     unlock_scheduler();
 }
 
@@ -1436,7 +1504,7 @@ void descriptor_ready_notify_key(uint64_t key) {
             if (matches) {
                 task_remove_wait_locked(task);
                 sleepq_remove(task);
-                if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+                task_mark_ready_locked(task);
             }
         }
         filter = next;
@@ -1461,11 +1529,12 @@ static void descriptor_ready_try_drain_irq(void) {
     if (!spin_trylock(&sched_lock)) return;
     descriptor_ready_drain_irq_locked();
     spin_unlock(&sched_lock);
+    task_kick_idle_cpus();
 }
 
 int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks,
                                 const uint64_t *keys, int count) {
-    uint64_t wake_tick;
+    uint64_t wake_deadline_ns;
     int changed;
     descriptor_wait_filter_t filter;
 
@@ -1496,9 +1565,8 @@ int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks
     current_task->waiting_queue = &descriptor_ready_waitq;
     current_task->state = TASK_BLOCKED;
     if (timeout_ticks != UINT64_MAX) {
-        wake_tick = tick_count + timeout_ticks;
-        if (wake_tick < tick_count) wake_tick = UINT64_MAX;
-        current_task->wake_tick = wake_tick;
+        wake_deadline_ns = sleepq_deadline_after_ticks(timeout_ticks);
+        current_task->wake_deadline_ns = wake_deadline_ns;
         sleepq_insert(current_task);
     }
     if (descriptor_ready_generation() != generation) {
@@ -1548,7 +1616,7 @@ void KERNEL_INIT init_tasks(void) {
     current_task->kernel_stack_base = NULL;
     current_task->kernel_stack_size = 0;
 
-    current_task->wake_tick = 0;
+    current_task->wake_deadline_ns = 0;
     current_task->sleep_next = NULL;
     current_task->in_sleep_queue = 0;
     current_task->in_wait_queue = 0;
@@ -1615,6 +1683,7 @@ void unlock_scheduler(void) {
     if (cpu->scheduler_lock_depth == 0) {
         eflags = cpu->sched_saved_rflags;
         spin_unlock(&sched_lock);
+        task_kick_idle_cpus();
         if (eflags & (1 << 9)) {
             __asm__ __volatile__ ("sti" ::: "memory");
         }
@@ -1782,7 +1851,7 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->stack_size = 0;
     new_task->kernel_stack_base = kernel_stack_base;
     new_task->kernel_stack_size = KSTACK_USABLE_SIZE;
-    new_task->wake_tick = 0;
+    new_task->wake_deadline_ns = 0;
     new_task->sleep_next = NULL;
     new_task->in_sleep_queue = 0;
     new_task->in_wait_queue = 0;
@@ -1893,31 +1962,58 @@ void sleep_ticks(uint64_t ticks) {
 
     if (!current_task || ticks == 0) return;
     lock_scheduler();
-    new_wake = tick_count + ticks;
-    if (new_wake < tick_count) new_wake = UINT64_MAX;
+    new_wake = sleepq_deadline_after_ticks(ticks);
     sleepq_remove(current_task);
-    current_task->wake_tick = new_wake;
+    current_task->wake_deadline_ns = new_wake;
     current_task->state = TASK_BLOCKED;
     sleepq_insert(current_task);
     unlock_scheduler();
     schedule();
 }
 
+int task_sleep_until(uint64_t deadline_ns) {
+    if (!current_task) return -KERR_EINVAL;
+    while (timekeeping_monotonic_ns() < deadline_ns) {
+        lock_scheduler();
+        if (task_has_pending_signals()) {
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
+        if (timekeeping_monotonic_ns() >= deadline_ns) {
+            unlock_scheduler();
+            continue;
+        }
+        sleepq_remove(current_task);
+        current_task->wake_deadline_ns = deadline_ns;
+        current_task->state = TASK_BLOCKED;
+        sleepq_insert(current_task);
+        unlock_scheduler();
+        schedule();
+        if (task_has_pending_signals()) return -KERR_EINTR;
+    }
+    return 0;
+}
+
 static void wake_sleeping_tasks_locked(void) {
     task_t *t;
+    uint64_t now;
 
+    now = timekeeping_monotonic_ns();
     while (sleep_queue_head) {
         t = sleep_queue_head;
         if (!task_ptr_valid(t)) {
             sleep_queue_head = NULL;
             break;
         }
-        if (t->wake_tick > tick_count) break;
+        if (t->wake_deadline_ns > now) break;
         sleep_queue_head = t->sleep_next;
         t->sleep_next = NULL;
         t->in_sleep_queue = 0;
-        if (t->state == TASK_BLOCKED) t->state = TASK_READY;
+        task_mark_ready_locked(t);
     }
+    __atomic_store_n(&sleep_queue_deadline_ns,
+        sleep_queue_head ? sleep_queue_head->wake_deadline_ns : UINT64_MAX,
+        __ATOMIC_RELEASE);
 }
 
 void wake_sleeping_tasks(void) {
@@ -1928,10 +2024,14 @@ void wake_sleeping_tasks(void) {
 }
 
 int wake_sleeping_tasks_from_irq(void) {
-    if (!sleep_queue_head) return 1;
+    uint64_t deadline;
+
+    deadline = __atomic_load_n(&sleep_queue_deadline_ns, __ATOMIC_ACQUIRE);
+    if (deadline == UINT64_MAX || deadline > timekeeping_monotonic_ns()) return 1;
     if (!spin_trylock(&sched_lock)) return 0;
     wake_sleeping_tasks_locked();
     spin_unlock(&sched_lock);
+    task_kick_idle_cpus();
     return 1;
 }
 
@@ -1975,6 +2075,8 @@ void task_exit_deferred(uint64_t exit_code) {
         unlock_scheduler();
         return;
     }
+    if (__atomic_load_n(&task->exit_code, __ATOMIC_ACQUIRE) & TASK_EXIT_PENDING)
+        exit_code = task->exit_code & ~TASK_EXIT_PENDING;
     task->exit_code = exit_code;
     sleepq_remove(task);
     task_remove_wait_locked(task);
@@ -2257,6 +2359,7 @@ static void task_release_exit_resources(task_t *t) {
     }
     creds_release_task(t);
     task_free_cwd(t);
+    if (t->exit_code == 137) heap_reclaim_unused();
     t->resources_released = 1;
 }
 
@@ -2306,6 +2409,8 @@ int task_file_map_list_add(task_file_map_list_t *list, vfs_node_t *node,
     list->maps[idx].offset = offset - delta;
     list->maps[idx].flags = flags;
     list->maps[idx].map_flags = TASK_VMA_FILE | TASK_VMA_PRIVATE;
+    if (!(flags & VMM_PTE_WRITE)) list->maps[idx].map_flags |= TASK_VMA_CLEAN;
+    list->maps[idx].map_flags |= TASK_VMA_MAYWRITE;
     list->count++;
     return 0;
 }
@@ -2344,6 +2449,8 @@ int task_add_vm_area(task_t *task, vfs_node_t *node, uint64_t vaddr,
     area->offset = offset;
     area->flags = flags;
     area->map_flags = map_flags;
+    if (node && !(flags & VMM_PTE_WRITE))
+        area->map_flags |= TASK_VMA_CLEAN;
     if (node) vfs_open(node, 0);
     task->file_map_count++;
     return 0;
@@ -2442,6 +2549,26 @@ static int task_split_vm_area(task_t *task, int index, uint64_t address) {
     return 0;
 }
 
+int task_isolate_vm_area(task_t *task, uint64_t address, uint64_t size) {
+    uint64_t end;
+    uint64_t area_end;
+    int i;
+
+    if (!task || !size || address + size < address) return -1;
+    end = address + size;
+    for (i = 0; i < task->file_map_count; i++) {
+        area_end = task->file_maps[i].vaddr + task->file_maps[i].memsz;
+        if (address < task->file_maps[i].vaddr || end > area_end) continue;
+        if (address > task->file_maps[i].vaddr) {
+            if (task_split_vm_area(task, i, address) < 0) return -1;
+            i = task->file_map_count - 1;
+        }
+        if (task_split_vm_area(task, i, end) < 0) return -1;
+        return i;
+    }
+    return -1;
+}
+
 int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
                           uint64_t flags) {
     uint64_t end;
@@ -2462,7 +2589,10 @@ int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
         if (end > task->file_maps[i].vaddr && end < area_end) {
             if (task_split_vm_area(task, i, end) != 0) return -1;
         }
-        task->file_maps[i].flags = flags;
+        if (flags & VMM_PTE_WRITE)
+            task->file_maps[i].map_flags &= ~TASK_VMA_CLEAN;
+        task->file_maps[i].flags = flags |
+            (task->file_maps[i].flags & (VMM_PTE_SHARED | VMM_PTE_NOFREE));
     }
     return 0;
 }
@@ -2485,9 +2615,13 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
             task->file_maps && task->file_map_count > 0 &&
             task->file_map_count <= task->file_map_capacity) {
             for (i = 0; i < task->file_map_count; i++) {
+                if (!(task->file_maps[i].map_flags & TASK_VMA_CLEAN) ||
+                    (task->file_maps[i].map_flags & TASK_VMA_SHARED)) continue;
                 if (!overlay_same_file(task->file_maps[i].node, node)) continue;
                 if (offset < task->file_maps[i].offset) continue;
-                if (offset >= task->file_maps[i].offset + task->file_maps[i].filesz) continue;
+                if (offset >= task->file_maps[i].offset + task->file_maps[i].filesz ||
+                    task->file_maps[i].offset + task->file_maps[i].filesz - offset < PAGE_SIZE)
+                    continue;
                 vaddr = task->file_maps[i].vaddr + (offset - task->file_maps[i].offset);
                 phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
                 if (phys) break;
@@ -2560,9 +2694,9 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
     if (read_end > read_start) {
         read_off = task->file_maps[match].offset + (read_start - task->file_maps[match].vaddr);
         read_len = read_end - read_start;
-        share_page = read_start == page &&
-                     (!(task->file_maps[match].flags & 0x2) ||
-                      (task->file_maps[match].map_flags & TASK_VMA_SHARED));
+        share_page = read_start == page && read_len == PAGE_SIZE &&
+                     (task->file_maps[match].map_flags & TASK_VMA_CLEAN) &&
+                     !(task->file_maps[match].map_flags & TASK_VMA_SHARED);
         if (share_page) {
             phys = exec_page_find_active(task->file_maps[match].node,
                                          read_off & ~(PAGE_SIZE - 1));
@@ -3034,6 +3168,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     temp_unmap_raw((uint64_t)old_ptr);
     temp_unmap_raw((uint64_t)new_ptr);
 
+    task->file_maps[match].map_flags &= ~TASK_VMA_CLEAN;
     map_flags = task->file_maps[match].flags | 0x2ULL;
     vmm_map_page_in_pml4(task->pml4_phys, page, new_phys, map_flags);
     if (vmm_get_phys_in_pml4(task->pml4_phys, page) != new_phys) {
@@ -3420,7 +3555,7 @@ void wake_task(task_t* task) {
     lock_scheduler();
     if (task->state == TASK_BLOCKED) {
         task_remove_wait_locked(task);
-        task->state = TASK_READY;
+        task_mark_ready_locked(task);
         sleepq_remove(task);
     }
     unlock_scheduler();
@@ -3430,7 +3565,7 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
                     uint64_t timeout_ticks, uint32_t bitset) {
     int value;
     int timed_out;
-    uint64_t wake_tick;
+    uint64_t wake_deadline_ns;
 
     if (!current_task || !uaddr || key == 0) return -KERR_EFAULT;
     if (bitset == 0) return -KERR_EINVAL;
@@ -3456,9 +3591,8 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
     current_task->futex_bitset = bitset;
     current_task->state = TASK_BLOCKED;
     if (timeout_ticks != UINT64_MAX) {
-        wake_tick = tick_count + timeout_ticks;
-        if (wake_tick < tick_count) wake_tick = UINT64_MAX;
-        current_task->wake_tick = wake_tick;
+        wake_deadline_ns = sleepq_deadline_after_ticks(timeout_ticks);
+        current_task->wake_deadline_ns = wake_deadline_ns;
         sleepq_insert(current_task);
     }
     unlock_scheduler();
@@ -3496,7 +3630,7 @@ int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset) {
             (task->futex_bitset & bitset) != 0) {
             task_remove_wait_locked(task);
             sleepq_remove(task);
-            if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+            task_mark_ready_locked(task);
             woken++;
         }
         task = task->all_next;
@@ -3523,7 +3657,7 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
             if (woken < wake_count) {
                 task_remove_wait_locked(task);
                 sleepq_remove(task);
-                if (task->state == TASK_BLOCKED) task->state = TASK_READY;
+                task_mark_ready_locked(task);
                 woken++;
             } else if (requeued < requeue_count) {
                 task->waiting_queue = (wait_queue_t *)(uintptr_t)new_key;
@@ -3546,6 +3680,22 @@ void task_kill(task_t* task, uint64_t exit_code) {
     }
     lock_scheduler();
     if (task->state == TASK_DEAD || task_debug_defer_kill(task, exit_code)) {
+        unlock_scheduler();
+        return;
+    }
+    if (task->is_user &&
+        (task_is_current_on_any_cpu(task) || task->syscall_frame ||
+         task->running_cpu < -1)) {
+        if (exit_code == 137 ||
+            !(__atomic_load_n(&task->exit_code, __ATOMIC_ACQUIRE) & TASK_EXIT_PENDING))
+            __atomic_store_n(&task->exit_code, exit_code | TASK_EXIT_PENDING,
+                             __ATOMIC_RELEASE);
+        if (task->state == TASK_BLOCKED || task->state == TASK_STOPPED) {
+            task_remove_wait_locked(task);
+            sleepq_remove(task);
+            task->state = TASK_BLOCKED;
+            task_mark_ready_locked(task);
+        }
         unlock_scheduler();
         return;
     }
@@ -3922,6 +4072,16 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     if (this_cpu->scheduler_lock_depth > 0) return regs;
 
+    if (!forced_reschedule && !forced_state_switch && prev_task &&
+        prev_task->state == TASK_RUNNING && prev_task->is_user &&
+        (regs->cs & 3) == 3 && !prev_task->syscall_frame &&
+        prev_task->sched_policy != TASK_SCHED_FIFO && prev_task->time_slice > 1 &&
+        !__atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE)) {
+        prev_task->time_slice--;
+        watchdog_kick();
+        return regs;
+    }
+
     got_lock = spin_trylock(&sched_lock);
     if (!got_lock) {
         if (!forced_state_switch) return regs;
@@ -4052,7 +4212,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         }
         if (idle_task && selectable) {
             sleepq_remove(idle_task);
-            idle_task->wake_tick = 0;
+            idle_task->wake_deadline_ns = 0;
             idle_task->state = TASK_READY;
             if (!task_in_runqueue_locked(idle_task)) {
                 add_task_to_runqueue(idle_task);
@@ -4091,6 +4251,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         tss_set_rsp0(rsp0);
         result = return_frame;
         spin_unlock(&sched_lock);
+        task_kick_idle_cpus();
         return result;
     }
     if (next->fpu_state) fpu_restore_area(next->fpu_state);
@@ -4139,55 +4300,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
         this_cpu->irq_cr3 = sandboxed_cr3 ? kernel_cr3 : 0;
         return_frame->entry_cr3 = target_cr3;
         return_frame->return_cr3 = target_cr3;
-        if (target_cr3 && target_cr3 != read_cr3()) {
-            if (!sandboxed_cr3) {
-                uint64_t check_virt;
-                uint64_t *check_tbl;
-                uint64_t entry511;
-                uint64_t pdpt_phys;
-                uint64_t pdpt510;
-                uint64_t pd_phys;
-                uint64_t pd0;
-                extern uint64_t boot_pdpt_high[] __attribute__((aligned(4096)));
-                uint64_t expected;
-                check_virt = TEMP_SLOT(0);
-                expected = ((uint64_t)(uintptr_t)boot_pdpt_high & ~0xFFFULL) | 3;
-                temp_map_raw(check_virt, target_cr3);
-                check_tbl = (uint64_t *)check_virt;
-                entry511 = check_tbl[511];
-                temp_unmap_raw(check_virt);
-                if ((entry511 & 0xFFFFFFFFF000ULL) != (expected & 0xFFFFFFFFF000ULL)) {
-                    printf("SCHED: PML4[511] BAD pid=%d pml4=0x%lX got=0x%lX want=0x%lX\n",
-                           next->id, target_cr3, entry511, expected);
-                    __asm__ volatile ("cli; hlt");
-                } else {
-                    pdpt_phys = entry511 & 0xFFFFFFFFF000ULL;
-                    temp_map_raw(check_virt, pdpt_phys);
-                    check_tbl = (uint64_t *)check_virt;
-                    pdpt510 = check_tbl[510];
-                    temp_unmap_raw(check_virt);
-                    if (!(pdpt510 & 1)) {
-                        printf("SCHED: PDPT[510] NOT PRESENT pid=%d pdpt=0x%lX val=0x%lX\n",
-                               next->id, pdpt_phys, pdpt510);
-                        __asm__ volatile ("cli; hlt");
-                    } else {
-                        pd_phys = pdpt510 & 0xFFFFFFFFF000ULL;
-                        temp_map_raw(check_virt, pd_phys);
-                        check_tbl = (uint64_t *)check_virt;
-                        pd0 = check_tbl[0];
-                        temp_unmap_raw(check_virt);
-                        if (!(pd0 & 1)) {
-                            printf("SCHED: PD[0] NOT PRESENT pid=%d pd=0x%lX val=0x%lX\n",
-                                   next->id, pd_phys, pd0);
-                            __asm__ volatile ("cli; hlt");
-                        }
-                    }
-                }
-            }
-        }
     }
 
     spin_unlock(&sched_lock);
+    task_kick_idle_cpus();
     return return_frame;
 
 out_restore_cr3:
@@ -4198,6 +4314,7 @@ out_restore_cr3:
         run_deferred = 1;
     }
     spin_unlock(&sched_lock);
+    task_kick_idle_cpus();
     if (run_deferred) {
         task_deferred_work();
     }
@@ -4634,7 +4751,7 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     child->stack_size = parent->stack_size;
     child->kernel_stack_base = kernel_stack_base;
     child->kernel_stack_size = KSTACK_USABLE_SIZE;
-    child->wake_tick = 0;
+    child->wake_deadline_ns = 0;
     child->sleep_next = NULL;
     child->in_sleep_queue = 0;
     child->in_wait_queue = 0;

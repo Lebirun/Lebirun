@@ -3,6 +3,7 @@
 #include <lebirun/rtc.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
+#include <lebirun/mem_map.h>
 
 static spinlock_t timekeeping_lock;
 static int64_t realtime_offset_ns;
@@ -103,7 +104,6 @@ static uint64_t tsc_base_tsc;
 static uint64_t tsc_base_us;
 static uint64_t tsc_last_ns;
 static int tsc_ready;
-static int tsc_provisional;
 static inline uint64_t tsc_rdtsc(void)
 {
     uint32_t lo;
@@ -112,20 +112,66 @@ static inline uint64_t tsc_rdtsc(void)
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-static int tsc_has_invariant(void)
-{
+static uint64_t tsc_kvm_frequency(void) {
+    static struct {
+        uint32_t version;
+        uint32_t padding;
+        uint64_t timestamp;
+        uint64_t system_time;
+        uint32_t multiplier;
+        int8_t shift;
+        uint8_t flags;
+        uint8_t reserved[2];
+    } clock __attribute__((aligned(32)));
     uint32_t eax;
     uint32_t ebx;
     uint32_t ecx;
     uint32_t edx;
-    eax = 0x80000000u;
+    uint32_t version;
+    uint32_t multiplier;
+    uint32_t old_low;
+    uint32_t old_high;
+    int shift;
+    uint64_t address;
+    uint64_t frequency;
+
+    eax = 1;
     __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
-    if (eax < 0x80000007u)
+    if (!(ecx & (1u << 31))) return 0;
+    eax = 0x40000000u;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (ebx != 0x4b4d564bu || ecx != 0x564b4d56u || edx != 0x4du)
         return 0;
-    eax = 0x80000007u;
+    eax = 0x40000001u;
     __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
-    return (edx & (1u << 8)) != 0;
+    if (!(eax & (1u << 3))) return 0;
+    address = vmm_get_phys_in_pml4(vmm_get_kernel_cr3(),
+                                   (uint64_t)(uintptr_t)&clock & ~(PAGE_SIZE - 1));
+    if (!address) return 0;
+    address += (uintptr_t)&clock & (PAGE_SIZE - 1);
+    __asm__ volatile("rdmsr" : "=a"(old_low), "=d"(old_high) : "c"(0x4b564d01u));
+    __asm__ volatile("wrmsr" : : "c"(0x4b564d01u),
+                      "a"((uint32_t)(address | 1)), "d"((uint32_t)(address >> 32))
+                      : "memory");
+    do {
+        version = __atomic_load_n(&clock.version, __ATOMIC_ACQUIRE);
+        multiplier = __atomic_load_n(&clock.multiplier, __ATOMIC_RELAXED);
+        shift = __atomic_load_n(&clock.shift, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    } while ((version & 1) || version !=
+             __atomic_load_n(&clock.version, __ATOMIC_ACQUIRE));
+    __asm__ volatile("wrmsr" : : "c"(0x4b564d01u), "a"(old_low), "d"(old_high)
+                      : "memory");
+    if (!version || !multiplier || shift <= -64 || shift >= 64) return 0;
+    frequency = (1000000000ULL << 32) / multiplier;
+    if (shift >= 0) frequency >>= shift;
+    else {
+        if (frequency > (UINT64_MAX >> -shift)) return 0;
+        frequency <<= -shift;
+    }
+    return frequency;
 }
+
 void tsc_early_init(void)
 {
     uint64_t freq;
@@ -135,33 +181,36 @@ void tsc_early_init(void)
     uint64_t half;
     uint16_t last;
     uint16_t cur;
+    uint64_t tw0;
+    uint64_t tw1;
+    uint64_t wc;
+    uint64_t temporary;
     uint32_t maxleaf = 0;
     uint32_t leaf = 0;
-    uint32_t denom = 0;
+    uint32_t reserved = 0;
     uint32_t numer = 0;
     uint32_t crystal = 0;
     if (tsc_ready)
         return;
-    __asm__ volatile("cpuid"
-                     : "=a"(maxleaf) : "a"(leaf) : "ebx", "ecx", "edx");
-    if (maxleaf >= 0x15) {
-        leaf = 0x15;
+    tsc_freq_hz = tsc_kvm_frequency();
+    if (!tsc_freq_hz) {
         __asm__ volatile("cpuid"
-                         : "+a"(leaf), "=b"(numer), "=c"(crystal),
-                           "=d"(denom));
-        if (denom && numer && crystal >= 1000000ULL &&
-            crystal <= 1000000000ULL) {
-            tsc_freq_hz = (uint64_t)numer * crystal / denom;
-            if (tsc_freq_hz >= 100000000ULL &&
-                tsc_freq_hz <= 10000000000ULL) {
-                tsc_base_tsc = tsc_rdtsc();
-                tsc_base_us = pit_get_uptime_us();
-                tsc_ready = 1;
-                tsc_provisional = 1;
-                printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
-                return;
-            }
+                         : "=a"(maxleaf) : "a"(leaf) : "ebx", "ecx", "edx");
+        if (maxleaf >= 0x15) {
+            leaf = 0x15;
+            __asm__ volatile("cpuid"
+                             : "+a"(leaf), "=b"(numer), "=c"(crystal),
+                               "=d"(reserved));
+            if (leaf && numer && crystal)
+                tsc_freq_hz = (uint64_t)numer * crystal / leaf;
         }
+    }
+    if (tsc_freq_hz) {
+        tsc_base_tsc = tsc_rdtsc();
+        tsc_base_us = pit_get_uptime_us();
+        tsc_ready = 1;
+        printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+        return;
     }
     freq = pit_get_frequency();
     if (!freq)
@@ -170,9 +219,8 @@ void tsc_early_init(void)
     if (!half)
         return;
     for (w = 0; w < 5; w++) {
-        uint64_t tw0 = tsc_rdtsc();
-        uint64_t tw1;
-        uint64_t wc = 0;
+        tw0 = tsc_rdtsc();
+        wc = 0;
         last = pit_read_count();
         while (wc < 8) {
             cur = pit_read_count();
@@ -186,9 +234,9 @@ void tsc_early_init(void)
     for (w = 0; w < 4; w++) {
         for (v = w + 1; v < 5; v++) {
             if (samples[v] < samples[w]) {
-                uint64_t t = samples[w];
+                temporary = samples[w];
                 samples[w] = samples[v];
-                samples[v] = t;
+                samples[v] = temporary;
             }
         }
     }
@@ -198,113 +246,11 @@ void tsc_early_init(void)
     tsc_base_tsc = tsc_rdtsc();
     tsc_base_us = pit_get_uptime_us();
     tsc_ready = 1;
-    tsc_provisional = 1;
     printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
-}
-void tsc_tick_sync(void)
-{
-    static uint64_t last_tsc;
-    static uint64_t last_tick;
-    static int started;
-    uint64_t now;
-    uint64_t tk;
-    uint64_t nf;
-    uint64_t cur_ns;
-
-    if (!tsc_ready || !tsc_freq_hz) return;
-    now = tsc_rdtsc();
-    tk = pit_get_ticks();
-    if (!started) {
-        last_tsc = now;
-        last_tick = tk;
-        started = 1;
-        return;
-    }
-    if (tk - last_tick < pit_get_frequency()) return;
-    if (now <= last_tsc) {
-        last_tsc = now;
-        last_tick = tk;
-        return;
-    }
-    {
-        uint64_t dt = tk - last_tick;
-        uint64_t expect = pit_get_frequency();
-        if (!expect || dt < expect * 9 / 10 || dt > expect * 11 / 10) {
-            last_tsc = now;
-            last_tick = tk;
-            return;
-        }
-        nf = (now - last_tsc) * expect / dt;
-        last_tsc = now;
-        last_tick = tk;
-    }
-    if (nf < 100000000ULL || nf > 10000000000ULL) return;
-    {
-        static uint64_t wins[3];
-        static uint64_t nw;
-        uint64_t a;
-        uint64_t b;
-        uint64_t c;
-        uint64_t tmp;
-        wins[nw++] = nf;
-        if (nw < 3) return;
-        nw = 0;
-        a = wins[0];
-        b = wins[1];
-        c = wins[2];
-        if (a > b) {
-            tmp = a;
-            a = b;
-            b = tmp;
-        }
-        if (b > c) {
-            tmp = b;
-            b = c;
-            c = tmp;
-        }
-        if (a > b) {
-            tmp = a;
-            a = b;
-            b = tmp;
-        }
-        if (c - a > b / 50) return;
-        nf = b;
-    }
-    cur_ns = tsc_get_ns();
-    tsc_freq_hz = (tsc_freq_hz * 3 + nf) / 4;
-    tsc_base_tsc = now;
-    tsc_base_us = cur_ns / 1000;
-    tsc_provisional = 0;
 }
 void tsc_init(void)
 {
-    uint64_t t0;
-    uint64_t t1;
-    uint64_t tick0;
-    uint64_t spins;
-    if (tsc_ready && !tsc_provisional)
-        return;
-    if (!tsc_has_invariant())
-        return;
-    tick0 = pit_get_ticks();
-    t0 = tsc_rdtsc();
-    spins = 0;
-    do {
-        if (++spins > 100000000ULL)
-            return;
-        cpu_relax();
-    } while (pit_get_ticks() - tick0 < 25);
-    t1 = tsc_rdtsc();
-    if (t1 <= t0)
-        return;
-    tsc_freq_hz = (t1 - t0) * pit_get_frequency() / 25;
-    if (tsc_freq_hz < 1000000ULL)
-        return;
-    tsc_base_tsc = t1;
-    tsc_base_us = pit_get_uptime_us();
-    tsc_ready = 1;
-    tsc_provisional = 0;
-    printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
+    if (!tsc_ready) tsc_early_init();
 }
 uint64_t tsc_get_freq_hz(void)
 {

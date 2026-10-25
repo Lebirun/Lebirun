@@ -17,6 +17,7 @@ void delay_inMs(uint64_t ms);
 void delay_inSecs(uint64_t secs);
 void delay_inMins(uint64_t mins);
 
+void pit_advance_ticks(void);
 uint64_t pit_get_ticks(void);
 uint64_t pit_get_ticks64(void);
 uint16_t pit_read_count(void);
