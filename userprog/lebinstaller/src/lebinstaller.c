@@ -68,6 +68,7 @@ static char boot_error[128];
 
 static int boot_mode;
 static char boot_esp[32];
+static char install_media[MAX_PATH];
 
 static void wiz_prog_init(const char *title);
 static void wiz_prog_update(const char *msg, int pct);
@@ -1270,20 +1271,82 @@ static int inst_iso_find(const char *cddev, const char *const *parts,
                          int nparts, uint64_t *out_lba, uint64_t *out_size);
 static int inst_iso_copy(const char *cddev, uint64_t lba, uint64_t size,
                          const char *dst);
+static int inst_stage_efi(const char *dst)
+{
+    const char *efi_parts[] = { "boot", "grub", "BOOTX64.EFI" };
+    char media_mount[] = "/tmp/lebmedia.XXXXXX";
+    char name[64];
+    char dev[MAX_PATH];
+    char path[MAX_PATH];
+    struct stat st;
+    uint64_t lba;
+    uint64_t size;
+    unsigned int type;
+    unsigned int idx;
+    int fd;
+    int ret;
+    int found;
+    int pass;
+    int priority;
+
+    fd = vfs_open("/dev", 0);
+    if (fd < 0) return -1;
+    if (!mkdtemp(media_mount)) {
+        vfs_close_fd(fd);
+        return -1;
+    }
+    ret = -1;
+    for (pass = 0; pass < 3; pass++) {
+        for (idx = 0; ; idx++) {
+            if (vfs_readdir(fd, name, &type, idx) != 0) break;
+            snprintf(dev, sizeof(dev), "/dev/%s", name);
+            if (install_media[0] && strcmp(dev, install_media) != 0) continue;
+            if (strncmp(name, "sr", 2) == 0)
+                priority = 0;
+            else if (strncmp(name, "sd", 2) == 0 && !inst_is_whole_disk(name))
+                priority = 1;
+            else
+                priority = 2;
+            if (priority != pass) continue;
+            if (stat(dev, &st) != 0 || !S_ISBLK(st.st_mode)) continue;
+            if (inst_iso_find(dev, efi_parts, 3, &lba, &size) == 0) {
+                ret = inst_iso_copy(dev, lba, size, dst);
+                goto out;
+            }
+            if (leb_syscall4(LEB_SYSCALL_VFS_MOUNT, (long)dev,
+                            (long)media_mount, (long)"fat", LEB_MS_RDONLY) != 0)
+                continue;
+            snprintf(path, sizeof(path), "%s/boot/rootfs.squashfs", media_mount);
+            found = stat(path, &st) == 0 && S_ISREG(st.st_mode);
+            if (found) {
+                snprintf(path, sizeof(path), "%s/boot/grub/BOOTX64.EFI", media_mount);
+                found = stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+                if (found) ret = inst_copy_file_vfs(path, dst);
+            }
+            if (inst_umount_partition(media_mount) != 0) {
+                ret = -1;
+                goto out;
+            }
+            if (found) goto out;
+        }
+    }
+out:
+    rmdir(media_mount);
+    vfs_close_fd(fd);
+    return ret;
+}
+
 static void inst_clear_boot_code(const char *disk_dev);
 static int inst_install_efi(const char *disk_dev, const char *part_dev,
                             int part_num)
 {
     char esp_dev[MAX_PATH];
     char esp_mount[] = "/tmp/espinstall";
-    char cd_dev[MAX_PATH];
+    char efi_source[] = "/tmp/lebefi.XXXXXX";
     char dst[MAX_PATH];
     int is_gpt;
-    int i;
-    int cd_ok;
-    uint64_t efi_lba;
-    uint64_t efi_size;
-    const char *efi_parts[3];
+    int fd;
+    int ret;
 
     is_gpt = inst_is_gpt(disk_dev);
     if (boot_esp[0] != '\0') {
@@ -1298,22 +1361,16 @@ static int inst_install_efi(const char *disk_dev, const char *part_dev,
     }
 
     vfs_mkdir("/tmp", 0755);
-    cd_ok = 0;
-    for (i = 0; i < 4; i++) {
-        snprintf(cd_dev, sizeof(cd_dev), "/dev/sr%d", i);
-        efi_parts[0] = "boot";
-        efi_parts[1] = "grub";
-        efi_parts[2] = "BOOTX64.EFI";
-        if (inst_iso_find(cd_dev, efi_parts, 3, &efi_lba,
-                          &efi_size) == 0) {
-            cd_ok = 1;
-            break;
-        }
-    }
-    if (!cd_ok) {
-        snprintf(boot_error, sizeof(boot_error),
-                 "boot: install media not found");
+    fd = mkstemp(efi_source);
+    if (fd < 0) {
+        snprintf(boot_error, sizeof(boot_error), "boot: create EFI temporary file failed");
         return -1;
+    }
+    ret = -1;
+    if (close(fd) != 0 || inst_stage_efi(efi_source) != 0) {
+        snprintf(boot_error, sizeof(boot_error),
+                 "boot: could not read EFI loader from install media");
+        goto out;
     }
 
     vfs_mkdir(esp_mount, 0755);
@@ -1322,11 +1379,11 @@ static int inst_install_efi(const char *disk_dev, const char *part_dev,
         if (inst_format_fat(esp_dev) != 0) {
             snprintf(boot_error, sizeof(boot_error),
                      "boot: format ESP failed");
-            return -1;
+            goto out;
         }
         if (inst_mount_partition_as(esp_dev, esp_mount, "fat") != 0) {
             snprintf(boot_error, sizeof(boot_error), "boot: mount ESP failed");
-            return -1;
+            goto out;
         }
     }
 
@@ -1340,21 +1397,24 @@ static int inst_install_efi(const char *disk_dev, const char *part_dev,
     vfs_mkdir(dst, 0755);
 
     snprintf(dst, sizeof(dst), "%s/EFI/BOOT/BOOTX64.EFI", esp_mount);
-    if (inst_iso_copy(cd_dev, efi_lba, efi_size, dst) < 0) {
+    if (inst_copy_file_vfs(efi_source, dst) < 0) {
         snprintf(boot_error, sizeof(boot_error), "boot: copy BOOTX64.EFI failed");
         inst_umount_partition(esp_mount);
-        return -1;
+        goto out;
     }
     if (inst_write_grub_config_efi(esp_mount, part_dev, part_num,
                                    is_gpt) < 0) {
         snprintf(boot_error, sizeof(boot_error), "boot: write EFI grub.cfg failed");
         inst_umount_partition(esp_mount);
-        return -1;
+        goto out;
     }
     if (is_gpt || boot_mode != BOOT_BOTH)
         inst_clear_boot_code(disk_dev);
     inst_umount_partition(esp_mount);
-    return 0;
+    ret = 0;
+out:
+    unlink(efi_source);
+    return ret;
 }
 
 static void inst_clear_boot_code(const char *disk_dev) {
@@ -1450,7 +1510,7 @@ static int inst_iso_find(const char *cddev, const char *const *parts,
     if (sec[0] != 1 || memcmp(sec + 1, "CD001", 5) != 0) goto out;
     extent = inst_iso_le32(sec + 156 + 2);
     size = inst_iso_le32(sec + 156 + 10);
-    if (!extent || !size || size > 64 * 1024 * 1024) return -1;
+    if (!extent || !size || size > 64 * 1024 * 1024) goto out;
     for (level = 0; level < nparts; level++) {
         uint64_t off = 0;
         uint64_t seclba;
@@ -3171,6 +3231,23 @@ static int wiz_input(const char *title, const char *prompt, char *buf,
     }
 }
 
+static void wiz_install_media(void)
+{
+    char path[MAX_PATH];
+    struct stat st;
+
+    if (wiz_input("Installation media", "Device path (empty=automatic):",
+                  path, sizeof(path), 0) < 0)
+        return;
+    if (path[0] && (strncmp(path, "/dev/", 5) != 0 ||
+                    strchr(path + 5, '/') != NULL ||
+                    stat(path, &st) != 0 || !S_ISBLK(st.st_mode))) {
+        wiz_msgbox("Installation media", "Enter a block device such as /dev/sr0 or /dev/sdb1.");
+        return;
+    }
+    snprintf(install_media, sizeof(install_media), "%s", path);
+}
+
 static int wiz_rootpw(void)
 {
     char pw1[64];
@@ -3860,8 +3937,11 @@ static int run_install_page(void)
             infon = 7;
             snprintf(smbuf[0], sizeof(smbuf[0]), "Start installation");
             smitems[0] = smbuf[0];
+            snprintf(smbuf[1], sizeof(smbuf[1]), "Install media: %.48s",
+                     install_media[0] ? install_media : "Automatic");
+            smitems[1] = smbuf[1];
             draw_items = smitems;
-            nitems = 1;
+            nitems = boot_mode == BOOT_BIOS ? 1 : 2;
             break;
         default:
             nitems = 0;
@@ -4242,6 +4322,11 @@ static int run_install_page(void)
                 cur = INS_INSTALL;
                 break;
             case INS_INSTALL:
+                if (csel[cur] == 1) {
+                    wiz_install_media();
+                    need_dirty = 1;
+                    break;
+                }
             try_install:
                 if (!wiz_boot_ready(disk_idx)) {
                     wiz_msgbox("Boot", "UEFI boot needs an ESP.\nCreate one with ldiskutil first.");

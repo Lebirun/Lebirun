@@ -89,14 +89,22 @@ search --set=root --file /boot/grub/grub.cfg
 set prefix=(\$root)/boot/grub
 configfile /boot/grub/grub.cfg
 EOF
+cat > "$EFI_WORK_DIRECTORY/live.cfg" << EOF
+if search --no-floppy --set=root --file /boot/rootfs.squashfs; then
+    set prefix=(\$root)/boot/grub
+    configfile (\$root)/boot/grub/grub.cfg
+fi
+EOF
 HYBRID=0
 if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
-    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/early.cfg" efi_gop normal multiboot2 iso9660 part_msdos part_gpt configfile search && \
+    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/live.cfg" efi_gop normal multiboot2 iso9660 fat part_msdos part_gpt configfile search && \
        dd if=/dev/zero of="$EFI_WORK_DIRECTORY/efi.img" bs=1K count=1024 status=none && \
        mformat -i "$EFI_WORK_DIRECTORY/efi.img" -v EFI :: >/dev/null && \
        mmd -i "$EFI_WORK_DIRECTORY/efi.img" ::EFI ::EFI/BOOT >/dev/null && \
        mcopy -i "$EFI_WORK_DIRECTORY/efi.img" "$EFI_WORK_DIRECTORY/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI; then
         cp "$EFI_WORK_DIRECTORY/efi.img" isodir/efi.img
+        mkdir -p isodir/EFI/BOOT
+        cp "$EFI_WORK_DIRECTORY/BOOTX64.EFI" isodir/EFI/BOOT/BOOTX64.EFI
         mkdir -p isodir/boot/grub/x86_64-efi
         for _pm in part_acorn part_amiga part_bsd part_dfly part_dvh part_plan part_sun part_sunpc; do
             cp "$EFI_MODULE_DIR/$_pm.mod" isodir/boot/grub/x86_64-efi/
@@ -118,7 +126,7 @@ fi
 
 if [ "$HYBRID" -eq 1 ]; then
     GRUB_MODULES="multiboot2 biosdisk part_msdos part_gpt iso9660"
-    EXTRA_BOOT_ARGS="-eltorito-alt-boot -e efi.img -no-emul-boot"
+    EXTRA_BOOT_ARGS="-eltorito-alt-boot -e efi.img -no-emul-boot -efi-boot-part --efi-boot-image"
     cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=10
 set default=0
