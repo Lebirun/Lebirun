@@ -4,6 +4,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/io.h>
 
 static spinlock_t timekeeping_lock;
 static int64_t realtime_offset_ns;
@@ -174,16 +175,15 @@ static uint64_t tsc_kvm_frequency(void) {
 
 void tsc_early_init(void)
 {
-    uint64_t freq;
     uint64_t samples[5];
     uint64_t w;
     uint64_t v;
-    uint64_t half;
-    uint16_t last;
-    uint16_t cur;
+    uint64_t flags;
+    uint8_t speaker;
+    uint32_t polls;
+    uint16_t latch = 1193182 / 100;
     uint64_t tw0;
     uint64_t tw1;
-    uint64_t wc;
     uint64_t temporary;
     uint32_t maxleaf = 0;
     uint32_t leaf = 0;
@@ -212,25 +212,30 @@ void tsc_early_init(void)
         printf("TSC: %llu Hz\n", (unsigned long long)tsc_freq_hz);
         return;
     }
-    freq = pit_get_frequency();
-    if (!freq)
-        return;
-    half = 1193182 / freq / 2;
-    if (!half)
-        return;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    speaker = inb(0x61);
     for (w = 0; w < 5; w++) {
+        outb(0x61, speaker & ~0x03);
+        outb(0x43, 0xb0);
+        outb(0x42, latch & 0xff);
+        outb(0x42, latch >> 8);
+        if (inb(0x61) & 0x20)
+            break;
         tw0 = tsc_rdtsc();
-        wc = 0;
-        last = pit_read_count();
-        while (wc < 8) {
-            cur = pit_read_count();
-            if (cur > last && (uint64_t)(cur - last) > half)
-                wc++;
-            last = cur;
+        outb(0x61, (speaker & ~0x02) | 0x01);
+        for (polls = 0; polls < 1000000; polls++) {
+            if (inb(0x61) & 0x20)
+                break;
         }
         tw1 = tsc_rdtsc();
-        samples[w] = tw1 > tw0 ? (tw1 - tw0) * freq / 8 : 0;
+        if (polls == 1000000)
+            break;
+        samples[w] = tw1 > tw0 ? (tw1 - tw0) * 1193182 / latch : 0;
     }
+    outb(0x61, speaker);
+    __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+    if (w != 5)
+        return;
     for (w = 0; w < 4; w++) {
         for (v = w + 1; v < 5; v++) {
             if (samples[v] < samples[w]) {

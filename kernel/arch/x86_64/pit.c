@@ -338,7 +338,6 @@ uint64_t pit_get_uptime_us(void) {
     } else {
         spin_unlock(&uptime_lock);
         result = base_us + pit_get_subtick_us();
-        flags = save_flags_cli();
         spin_lock(&uptime_lock);
     }
     if (result < last_uptime_us)
