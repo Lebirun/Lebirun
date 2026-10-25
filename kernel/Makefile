@@ -192,9 +192,6 @@ lebirun.kernel: $(OBJS) $(ARCHDIR)/linker.ld $(CONFIG_FILE)
 .S.o:
 	$(MSG_AS)$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
-$(ARCHDIR)/xz/xz_crc32.o $(ARCHDIR)/xz/xz_dec_bcj.o $(ARCHDIR)/xz/xz_dec_lzma2.o $(ARCHDIR)/xz/xz_dec_stream.o: $(ARCHDIR)/xz/%.o: $(ARCHDIR)/xz/%.c
-	$(MSG_CC)$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS) -Wno-unused-parameter -Wno-sign-compare
-
 $(OBJS): Makefile $(CONFIG_FILE) $(VERSION_HEADER)
 
 $(USER_SHELL_BIN):

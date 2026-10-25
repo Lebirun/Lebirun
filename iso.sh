@@ -47,7 +47,7 @@ fi
 CURRENT_STEP=$((CURRENT_STEP + 1))
 bar_print "$(printf '\033[1;36mCopying kernel to ISO...\033[0m')"
 progress_bar "$CURRENT_STEP" "$TOTAL_STEPS" "Copying kernel to ISO"
-cp "$KERNEL_BIN" isodir/boot/lebirun.kernel
+xz --threads=1 --check=crc32 --lzma2=preset=9e,dict=1MiB -c "$KERNEL_BIN" > isodir/boot/lebirun.kernel
 
 CURRENT_STEP=$((CURRENT_STEP + 1))
 if [ -f rootfs.squashfs ]; then
@@ -97,7 +97,7 @@ fi
 EOF
 HYBRID=0
 if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
-    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/live.cfg" efi_gop normal multiboot2 iso9660 fat part_msdos part_gpt configfile search && \
+    if grub-mkimage -O x86_64-efi -d "$EFI_MODULE_DIR" -o "$EFI_WORK_DIRECTORY/BOOTX64.EFI" -p /boot/grub -c "$EFI_WORK_DIRECTORY/live.cfg" efi_gop normal xzio multiboot2 iso9660 fat part_msdos part_gpt configfile search && \
        dd if=/dev/zero of="$EFI_WORK_DIRECTORY/efi.img" bs=1K count=1024 status=none && \
        mformat -i "$EFI_WORK_DIRECTORY/efi.img" -v EFI :: >/dev/null && \
        mmd -i "$EFI_WORK_DIRECTORY/efi.img" ::EFI ::EFI/BOOT >/dev/null && \
@@ -125,7 +125,7 @@ if [ -n "$EFI_MODULE_DIR" ] && command -v grub-mkimage >/dev/null 2>&1; then
 fi
 
 if [ "$HYBRID" -eq 1 ]; then
-    GRUB_MODULES="multiboot2 biosdisk part_msdos part_gpt iso9660"
+    GRUB_MODULES="xzio multiboot2 biosdisk part_msdos part_gpt iso9660"
     EXTRA_BOOT_ARGS="-eltorito-alt-boot -e efi.img -no-emul-boot -efi-boot-part --efi-boot-image"
     cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=10
@@ -133,19 +133,21 @@ set default=0
 set gfxpayload=keep
 
 menuentry "Lebirun" {
+	insmod xzio
 	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
 	module2 /boot/rootfs.squashfs
 	boot
 }
 EOF
 else
-    GRUB_MODULES="multiboot2 biosdisk part_msdos iso9660"
+    GRUB_MODULES="xzio multiboot2 biosdisk part_msdos iso9660"
     EXTRA_BOOT_ARGS=""
     cat > isodir/boot/grub/grub.cfg << EOF
 set timeout=10
 set default=0
 
 menuentry "Lebirun" {
+	insmod xzio
 	multiboot2 /boot/lebirun.kernel $KERNEL_CMDLINE
 	module2 /boot/rootfs.squashfs
 	boot
