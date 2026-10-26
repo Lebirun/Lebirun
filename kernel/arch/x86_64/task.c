@@ -3090,11 +3090,7 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
                                      flags);
                 continue;
             }
-            if (file_backed) {
-                pfa_cow_release64(physical);
-            } else {
-                pfa_free(physical);
-            }
+            pfa_cow_release64(physical);
             reclaimed++;
         }
         if (page_index < area_pages && address < area_end)

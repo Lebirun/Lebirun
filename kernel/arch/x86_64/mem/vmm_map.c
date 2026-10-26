@@ -229,10 +229,10 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
         temp_unmap_raw(temp_virt);
         goto out;
     }
-    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_COW | VMM_PTE_NOFREE |
-                         VMM_PTE_SHARED);
+    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_NOFREE | VMM_PTE_SHARED);
     table[pt_idx] = preserved | (flags & (VMM_PTE_PRESENT | VMM_PTE_WRITE |
-                                          VMM_PTE_USER | VMM_PTE_NX));
+                                          VMM_PTE_USER | VMM_PTE_NX |
+                                          VMM_PTE_COW));
     temp_unmap_raw(temp_virt);
     result = 0;
 

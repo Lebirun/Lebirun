@@ -1,5 +1,6 @@
 #include "syscall_defs.h"
 #include <lebirun/ramfs.h>
+#include <lebirun/smp.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -642,7 +643,7 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     uint64_t page;
     uint64_t pte_flags;
     uint64_t current_flags;
-    int cow_result;
+    uint64_t page_flags;
     int i;
 
     if (!current_task) return -EINVAL;
@@ -689,24 +690,21 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
         if (!vmm_get_phys_in_pml4(current_task->pml4_phys, page)) continue;
         current_flags = vmm_get_flags_in_pml4(current_task->pml4_phys,
                                               page);
-        if (current_flags & VMM_PTE_COW) {
-            cow_result = cow_handle_fault(page,
-                                          current_task->pml4_phys);
-            if (cow_result != 1) return -ENOMEM;
-            current_flags = vmm_get_flags_in_pml4(
-                current_task->pml4_phys, page);
-        }
+        page_flags = pte_flags;
         if ((pte_flags & VMM_PTE_WRITE) &&
-            (((current_flags & VMM_PTE_NOFREE) &&
-              !(current_flags & VMM_PTE_WRITE)) ||
-             (!(current_flags & VMM_PTE_SHARED) &&
-              pfa_ref_get(vmm_get_phys_in_pml4(current_task->pml4_phys,
-                                               page)) > 1)) &&
-            !task_handle_file_write_fault(current_task, page))
-            return -ENOMEM;
+            !(current_flags & VMM_PTE_SHARED)) {
+            if (current_flags & VMM_PTE_NOFREE) {
+                page_flags &= ~VMM_PTE_WRITE;
+            } else if ((current_flags & VMM_PTE_COW) ||
+                       pfa_ref_get(vmm_get_phys_in_pml4(
+                           current_task->pml4_phys, page)) > 1) {
+                page_flags = (page_flags & ~VMM_PTE_WRITE) | VMM_PTE_COW;
+            }
+        }
         if (vmm_protect_page_in_pml4(current_task->pml4_phys, page,
-                                     pte_flags) < 0) return -ENOMEM;
+                                     page_flags) < 0) return -ENOMEM;
     }
+    if (smp_tlb_flush_all_sync() < 0) return -EAGAIN;
     return 0;
 }
 
@@ -918,7 +916,6 @@ static int sys_msync(void *addr, size_t length, int flags) {
     uint64_t file_position;
     uint64_t written;
     uint8_t *buffer;
-    int matched;
     int i;
 
     if (!current_task) return -ESRCH;
@@ -930,13 +927,12 @@ static int sys_msync(void *addr, size_t length, int flags) {
     if (length == 0) return 0;
     end = base + length;
     if (end < base || end > KERNEL_VMA) return -ENOMEM;
+    if (!user_range_covered_by_vmas(base, length)) return -ENOMEM;
     buffer = NULL;
-    matched = 0;
     for (i = 0; i < current_task->file_map_count; i++) {
         area_start = current_task->file_maps[i].vaddr;
         area_end = area_start + current_task->file_maps[i].memsz;
         if (end <= area_start || base >= area_end) continue;
-        matched = 1;
         if (!(current_task->file_maps[i].map_flags & TASK_VMA_SHARED) ||
             !(current_task->file_maps[i].map_flags & TASK_VMA_FILE) ||
             !current_task->file_maps[i].node) continue;
@@ -973,11 +969,10 @@ static int sys_msync(void *addr, size_t length, int flags) {
             slab_page_free(buffer, PAGE_SIZE);
             return -EIO;
         }
+        if ((flags & MS_INVALIDATE) && finish > start)
+            release_user_leaf_range(start, align_up_u64(finish, PAGE_SIZE));
     }
     slab_page_free(buffer, PAGE_SIZE);
-    if (!matched) return -ENOMEM;
-    if (flags & MS_INVALIDATE)
-        release_user_leaf_range(base, align_up_u64(end, PAGE_SIZE));
     return 0;
 }
 
@@ -998,15 +993,15 @@ static int sys_mincore(void *addr, size_t length, unsigned char *vec) {
             base + length > KERNEL_VMA) return -ENOMEM;
     pages = (length + 0xFFF) / 0x1000;
     if (!user_access_ok(vec, pages, UACCESS_WRITE)) return -EFAULT;
-    for (i = 0; i < pages; i++) {
-        if (!vmm_get_phys_in_pml4(current_task->pml4_phys,
-                base + i * 0x1000)) return -ENOMEM;
-    }
-    memset(values, 1, sizeof(values));
+    if (!user_range_covered_by_vmas(base, length)) return -ENOMEM;
     done = 0;
     while (done < pages) {
         chunk = pages - done;
         if (chunk > sizeof(values)) chunk = sizeof(values);
+        for (i = 0; i < chunk; i++) {
+            values[i] = (vmm_get_flags_in_pml4(current_task->pml4_phys,
+                         base + (done + i) * PAGE_SIZE) & VMM_PTE_PRESENT) ? 1 : 0;
+        }
         if (copy_to_user(vec + done, values, chunk) < 0) return -EFAULT;
         done += chunk;
     }
