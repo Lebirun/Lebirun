@@ -1471,6 +1471,21 @@ static int sys_lke_list(char *buf, int size) {
 #endif
 }
 
+static int sys_getcpu(unsigned int *cpu_ptr, unsigned int *node_ptr,
+                       void *cache) {
+    unsigned int cpu;
+    unsigned int node;
+
+    (void)cache;
+    cpu = (unsigned int)smp_processor_id();
+    node = 0;
+    if (cpu_ptr && copy_to_user(cpu_ptr, &cpu, sizeof(cpu)) < 0)
+        return -EFAULT;
+    if (node_ptr && copy_to_user(node_ptr, &node, sizeof(node)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 static int sys_sched_setaffinity(int pid, int len, const char *mask_ptr) {
     uint64_t mask64;
     uint32_t mask;
@@ -2185,6 +2200,7 @@ void syscalls_misc_init(void) {
     syscall_table_set(SYSCALL_SCHED_RR_GET_INTERVAL, (void *)(sys_sched_rr_interval));
     syscall_table_set(SYSCALL_SCHED_SETAFFINITY, (void *)(sys_sched_setaffinity));
     syscall_table_set(SYSCALL_SCHED_GETAFFINITY, (void *)(sys_sched_getaffinity));
+    syscall_table_set(SYSCALL_GETCPU, (void *)(sys_getcpu));
     syscall_table_set(SYSCALL_LKE_LOAD, (void *)(sys_lke_load));
     syscall_table_set(SYSCALL_LKE_UNLOAD, (void *)(sys_lke_unload));
     syscall_table_set(SYSCALL_LKE_LIST, (void *)(sys_lke_list));
