@@ -539,40 +539,19 @@ static ramfs_limits_t *ramfs_limits_for_mount(const char *device) {
     return lim;
 }
 
-static int ramfs_check_heap_allocation(uint64_t size) {
-    uint64_t capacity;
-    uint64_t available;
-    uint64_t pages;
-
-    if (kernel_heap.max_addr < kernel_heap.start_addr) return 0;
-    capacity = kernel_heap.max_addr - kernel_heap.start_addr;
-    if (kernel_heap.used_size > capacity) return 0;
-    available = capacity - kernel_heap.used_size;
-    if (size > available) return 0;
-    if (size > UINT64_MAX - PAGE_SIZE + 1) return 0;
-    pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    return pages <= pfa_count_free();
-}
-
-static int ramfs_capacity_for_length(uint64_t length, uint64_t *capacity) {
-    if (!capacity) return 0;
-    *capacity = length;
-    return 1;
-}
-
 static void ramfs_shrink_node_data(ramfs_node_t *node) {
-    uint64_t new_capacity;
     uint8_t *new_data;
 
-    if (!node || !node->data || node->length == 0) return;
-    if (!ramfs_capacity_for_length(node->length, &new_capacity)) return;
-    if (new_capacity >= node->data_capacity) return;
-    new_data = (uint8_t *)kmalloc(new_capacity);
-    if (!new_data) return;
-    memcpy(new_data, node->data, node->length);
-    kfree(node->data);
+    if (!node || !node->data || node->length == 0 ||
+        node->length >= node->data_capacity) return;
+    new_data = (uint8_t *)krealloc(node->data, node->length);
+    if (!new_data) {
+        memset(node->data + node->length, 0,
+               node->data_capacity - node->length);
+        return;
+    }
     node->data = new_data;
-    node->data_capacity = new_capacity;
+    node->data_capacity = node->length;
 }
 
 int ramfs_get_stats(ramfs_stats_t *stats) {
@@ -991,6 +970,7 @@ int ramfs_truncate(const char *path, uint64_t length) {
     if (length == 0) {
         if (node->data) {
             ramfs_stats.used_size -= node->data_capacity;
+            ramfs_limits_sub(node->limits, node->data_capacity, 0);
             kfree(node->data);
             node->data = NULL;
             node->data_capacity = 0;
@@ -1003,6 +983,7 @@ int ramfs_truncate(const char *path, uint64_t length) {
         if (node->backing_length > length) node->backing_length = length;
         ramfs_shrink_node_data(node);
         ramfs_stats.used_size -= old_capacity - node->data_capacity;
+        ramfs_limits_sub(node->limits, old_capacity - node->data_capacity, 0);
     } else if (length > node->length) {
         node->length = length;
     }
@@ -1223,84 +1204,69 @@ int KERNEL_INIT ramfs_set_backing(const char *path, const uint8_t *data,
     return RAMFS_ERR_OK;
 }
 
-int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t size) {
+static int ramfs_write_data_locked(ramfs_node_t *node, uint64_t offset,
+                                    const uint8_t *data, uint64_t size) {
     uint64_t needed;
     uint64_t new_cap;
     uint64_t old_capacity;
+    uint64_t backing;
+    uint64_t initialized;
     uint8_t *new_data;
+
+    needed = offset + size;
+    if (node->is_memfd &&
+        ((node->seals & RAMFS_SEAL_WRITE) ||
+         (needed > node->length && (node->seals & RAMFS_SEAL_GROW))))
+        return RAMFS_ERR_PERM;
+    old_capacity = node->data_capacity;
+    backing = 0;
+    if (!node->data && node->backing_data) {
+        backing = node->backing_length;
+        if (backing > node->length) backing = node->length;
+    }
+    new_cap = needed;
+    if (new_cap < backing) new_cap = backing;
+    if (new_cap > old_capacity) {
+        if (!ramfs_check_space(new_cap - old_capacity) ||
+            !ramfs_limits_fits(node->limits, new_cap - old_capacity, 0))
+            return RAMFS_ERR_NOSPC;
+        new_data = (uint8_t *)krealloc(node->data, new_cap);
+        if (!new_data) return RAMFS_ERR_NOMEM;
+        if (backing) memcpy(new_data, node->backing_data, backing);
+        initialized = old_capacity;
+        if (initialized < backing) initialized = backing;
+        memset(new_data + initialized, 0, new_cap - initialized);
+        node->data = new_data;
+        node->data_capacity = new_cap;
+        ramfs_stats.used_size += new_cap - old_capacity;
+        ramfs_limits_add(node->limits, new_cap - old_capacity, 0);
+        node->backing_data = NULL;
+        node->backing_length = 0;
+    }
+    memcpy(node->data + offset, data, size);
+    if (needed > node->length) node->length = needed;
+    node->mtime = ramfs_get_time();
+    return RAMFS_ERR_OK;
+}
+
+int ramfs_write(const char *path, uint64_t offset, const uint8_t *data, uint64_t size) {
     ramfs_node_t *node;
+    int result;
 
     if (!path || !data || size == 0) return RAMFS_ERR_INVAL;
     if (size > UINT64_MAX - offset) return RAMFS_ERR_INVAL;
-    
     ramfs_lock();
     node = ramfs_inode(ramfs_find_node(path));
     if (!node || node->type != RAMFS_NODE_FILE) {
         ramfs_unlock();
         return RAMFS_ERR_NOENT;
     }
-    
     ramfs_node_lock(node);
-    
-    needed = offset + size;
-    
-    old_capacity = node->data_capacity;
-    
-    if (needed > node->data_capacity) {
-        if (!ramfs_capacity_for_length(needed, &new_cap)) {
-            ramfs_sync_inode(node);
-            ramfs_node_unlock(node);
-            ramfs_unlock();
-            return RAMFS_ERR_INVAL;
-        }
-        if (!ramfs_check_space(new_cap - old_capacity)) {
-            ramfs_sync_inode(node);
-            ramfs_node_unlock(node);
-            ramfs_unlock();
-            return RAMFS_ERR_NOSPC;
-        }
-        if (!ramfs_check_heap_allocation(new_cap)) {
-            ramfs_sync_inode(node);
-            ramfs_node_unlock(node);
-            ramfs_unlock();
-            return RAMFS_ERR_NOSPC;
-        }
-        
-        new_data = (uint8_t *)kmalloc(new_cap);
-        if (!new_data) {
-            ramfs_sync_inode(node);
-            ramfs_node_unlock(node);
-            ramfs_unlock();
-            return RAMFS_ERR_NOMEM;
-        }
-        
-        memset(new_data, 0, new_cap);
-        if (node->data && node->data_capacity > 0) {
-            memcpy(new_data, node->data, node->data_capacity);
-            kfree(node->data);
-        }
-        node->data = new_data;
-        node->data_capacity = new_cap;
-        ramfs_stats.used_size += new_cap - old_capacity;
-    }
-    
-    memcpy(node->data + offset, data, size);
-    if (needed > node->length) {
-        node->length = needed;
-    }
-    
-    node->mtime = ramfs_get_time();
-    
-    if (node->vfs_node) {
-        node->vfs_node->length = node->length;
-        node->vfs_node->mtime = node->mtime;
-    }
-    
+    result = ramfs_write_data_locked(node, offset, data, size);
     ramfs_sync_inode(node);
     ramfs_node_unlock(node);
     ramfs_unlock();
-    
-    return (int)size;
+    return result == RAMFS_ERR_OK ? (int)size : result;
 }
 
 int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size) {
@@ -1330,12 +1296,17 @@ int ramfs_read(const char *path, uint64_t offset, uint8_t *buffer, uint64_t size
     avail = node->length - offset;
     to_read = (size < avail) ? size : avail;
     
-    memset(buffer, 0, to_read);
+    stored = 0;
     if (node->data && offset < node->data_capacity) {
         stored = node->data_capacity - offset;
         if (stored > to_read) stored = to_read;
         memcpy(buffer, node->data + offset, stored);
+    } else if (node->backing_data && offset < node->backing_length) {
+        stored = node->backing_length - offset;
+        if (stored > to_read) stored = to_read;
+        memcpy(buffer, node->backing_data + offset, stored);
     }
+    memset(buffer + stored, 0, to_read - stored);
     
     node->atime = ramfs_get_time();
     if (node->vfs_node) {
@@ -1399,7 +1370,7 @@ static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     avail = actual_len - offset;
     to_read = (size < avail) ? size : avail;
     
-    memset(buffer, 0, to_read);
+    stored = 0;
     if (rn->data && offset < rn->data_capacity) {
         stored = rn->data_capacity - offset;
         if (stored > to_read) stored = to_read;
@@ -1409,6 +1380,7 @@ static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size,
         if (stored > to_read) stored = to_read;
         memcpy(buffer, rn->backing_data + offset, stored);
     }
+    memset(buffer + stored, 0, to_read - stored);
     
     rn->atime = ramfs_get_time();
     node->atime = rn->atime;
@@ -1422,134 +1394,19 @@ static uint64_t ramfs_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size,
 
 static uint64_t ramfs_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ramfs_node_t *rn;
-    uint64_t needed;
-    uint64_t new_cap;
-    uint8_t *new_data;
-    uint64_t backing_to_copy;
-    uint64_t old_capacity;
-    
+    int result;
+
     if (!node || !buffer || size == 0) return 0;
     if (size > UINT64_MAX - offset) return 0;
-    
     rn = ramfs_inode((ramfs_node_t *)node->private_data);
     if (!rn || rn->type != RAMFS_NODE_FILE) return 0;
-    
     ramfs_lock();
     ramfs_node_lock(rn);
-
-    if (rn->is_memfd && (rn->seals & RAMFS_SEAL_WRITE)) {
-        ramfs_sync_inode(rn);
-        ramfs_node_unlock(rn);
-        ramfs_unlock();
-        return 0;
-    }
-    if (!rn->data && rn->backing_data && rn->backing_length > 0) {
-        backing_to_copy = rn->backing_length;
-        if (!ramfs_check_space(backing_to_copy)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        if (!ramfs_limits_fits(rn->limits, backing_to_copy, 0)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        if (!ramfs_capacity_for_length(backing_to_copy, &new_cap)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        new_data = (uint8_t *)kmalloc(new_cap);
-        if (!new_data) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        memcpy(new_data, rn->backing_data, backing_to_copy);
-        rn->data = new_data;
-        rn->data_capacity = new_cap;
-        rn->length = backing_to_copy;
-        ramfs_stats.used_size += backing_to_copy;
-        ramfs_limits_add(rn->limits, backing_to_copy, 0);
-        rn->backing_data = NULL;
-        rn->backing_length = 0;
-    }
-    
-    needed = offset + size;
-    
-    old_capacity = rn->data_capacity;
-    
-    if (needed > rn->data_capacity) {
-        if (!ramfs_capacity_for_length(needed, &new_cap)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        if (!ramfs_check_space(new_cap - old_capacity)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        if (!ramfs_limits_fits(rn->limits, new_cap - old_capacity, 0)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        if (!ramfs_check_heap_allocation(new_cap)) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        
-        new_data = (uint8_t *)kmalloc(new_cap);
-        if (!new_data) {
-            ramfs_sync_inode(rn);
-            ramfs_node_unlock(rn);
-            ramfs_unlock();
-            return 0;
-        }
-        
-        memset(new_data, 0, new_cap);
-        if (rn->data && rn->data_capacity > 0) {
-            memcpy(new_data, rn->data, rn->data_capacity);
-            kfree(rn->data);
-        }
-        rn->data = new_data;
-        rn->data_capacity = new_cap;
-        ramfs_stats.used_size += new_cap - old_capacity;
-        ramfs_limits_add(rn->limits, new_cap - old_capacity, 0);
-    }
-    
-    if (needed > rn->length && rn->is_memfd &&
-        (rn->seals & RAMFS_SEAL_GROW)) {
-        ramfs_sync_inode(rn);
-        ramfs_node_unlock(rn);
-        ramfs_unlock();
-        return 0;
-    }
-    memcpy(rn->data + offset, buffer, size);
-    if (needed > rn->length) {
-        rn->length = needed;
-        node->length = rn->length;
-    }
-    
-    rn->mtime = ramfs_get_time();
-    node->mtime = rn->mtime;
-    
+    result = ramfs_write_data_locked(rn, offset, buffer, size);
     ramfs_sync_inode(rn);
     ramfs_node_unlock(rn);
     ramfs_unlock();
-    
-    return size;
+    return result == RAMFS_ERR_OK ? size : 0;
 }
 
 static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags) {

@@ -3407,48 +3407,6 @@ static void wiz_boot_summary(int di, int gpt, char *buf, int bufsz)
         snprintf(buf, bufsz, "BIOS (MBR)");
 }
 
-static void wiz_frame_empty(int y, int x, int h, int w, const char *title)
-{
-    int i;
-    int r;
-    int tw;
-
-    if (h < 2 || w < 2)
-        return;
-    lebui_goto(y, x);
-    printf("%s+", LEBUI_CLR_BORDER);
-    for (i = 0; i < w - 2; i++)
-        putchar('-');
-    putchar('+');
-    if (title && w > 4) {
-        tw = (int)strlen(title);
-        if (tw > w - 4)
-            tw = w - 4;
-        lebui_goto(y, x + (w - tw - 2) / 2);
-        printf("%s %.*s ", LEBUI_CLR_TITLE, tw, title);
-    }
-    for (r = 1; r < h - 1; r++) {
-        lebui_goto(y + r, x);
-        printf("%s|", LEBUI_CLR_BORDER);
-        lebui_goto(y + r, x + w - 1);
-        printf("%s|", LEBUI_CLR_BORDER);
-    }
-    lebui_goto(y + h - 1, x);
-    printf("%s+", LEBUI_CLR_BORDER);
-    for (i = 0; i < w - 2; i++)
-        putchar('-');
-    putchar('+');
-    for (r = 1; r < h; r++) {
-        lebui_goto(y + r, x + w);
-        printf("%s ", LEBUI_CLR_SHADOW);
-    }
-    lebui_goto(y + h, x + 1);
-    printf("%s", LEBUI_CLR_SHADOW);
-    for (i = 0; i < w; i++)
-        putchar(' ');
-    printf("%s", LEBUI_CLR_NORMAL);
-}
-
 static int run_install_page(void)
 {
     int disk_idx = -1;
@@ -3594,10 +3552,7 @@ static int run_install_page(void)
             }
             snprintf(ctitle, sizeof(ctitle), "Step %d/%d: %s", cur + 1,
                      INS_COUNT, ins_wiz_names[cur]);
-            if (full)
-                lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
-            else
-                wiz_frame_empty(cy, cx, ch, cw, ctitle);
+            lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
         }
 
         switch (cur) {
@@ -4489,10 +4444,7 @@ static int run_update_page(void)
             }
             snprintf(ctitle, sizeof(ctitle), "Step %d/%d: %s", cur + 1,
                      UW_COUNT, uw_wiz_names[cur]);
-            if (full)
-                lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
-            else
-                wiz_frame_empty(cy, cx, ch, cw, ctitle);
+            lebui_draw_box_shadow(cy, cx, ch, cw, ctitle);
         }
 
         switch (cur) {

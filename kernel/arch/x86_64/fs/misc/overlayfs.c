@@ -352,6 +352,7 @@ static vfs_node_t *overlay_upper_node_at_path(const char *path) {
 static void overlay_attach_upper_node(overlay_node_t *onode,
                                       const char *path) {
     vfs_node_t *upper;
+    int i;
 
     if (!onode || onode->upper_node) return;
     upper = overlay_upper_node_at_path(path);
@@ -360,6 +361,10 @@ static void overlay_attach_upper_node(overlay_node_t *onode,
     if (!onode->upper_node) {
         __atomic_add_fetch(&upper->ref_count, 1, __ATOMIC_ACQ_REL);
         onode->upper_node = upper;
+        for (i = 0; i < onode->open_count; i++) {
+            vfs_open(upper, 0);
+            if (onode->lower_node) vfs_close(onode->lower_node);
+        }
     }
     mutex_unlock(&overlay_node_lock);
 }
@@ -482,7 +487,6 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
     uint64_t size;
     uint64_t read_bytes;
     int ret;
-    ramfs_node_t *new_node;
 
     lower = onode->lower_node;
     if (!lower) return -1;
@@ -494,11 +498,8 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
         ret = ramfs_create_dir(path, lower->mask);
         if (ret != 0 && ret != RAMFS_ERR_EXIST) return ret;
         
-        new_node = ramfs_find_node(path);
-        if (new_node) {
-            onode->upper_node = new_node->vfs_node;
-        }
-        return 0;
+        overlay_attach_upper_node(onode, path);
+        return onode->upper_node ? 0 : -1;
     }
     
     size = lower->length;
@@ -523,12 +524,8 @@ static int overlay_copy_up(overlay_node_t *onode, const char *path) {
         if (ret != 0 && ret != RAMFS_ERR_EXIST) return ret;
     }
     
-    new_node = ramfs_find_node(path);
-    if (new_node) {
-        onode->upper_node = new_node->vfs_node;
-    }
-    
-    return 0;
+    overlay_attach_upper_node(onode, path);
+    return onode->upper_node ? 0 : -1;
 }
 
 static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {

@@ -44,6 +44,7 @@ void udp_unregister_port_hook(const udp_port_hook_t *hook) {
 }
 
 int udp_send(netif_t *netif, ipv4_addr_t dest, uint16_t src_port, uint16_t dest_port, uint8_t *data, uint64_t len) {
+    if (!netif) return -1;
     return udp_send_from(netif, netif->ipv4, dest, src_port, dest_port, data, len, 64);
 }
 
@@ -241,48 +242,45 @@ void udp_receive6(netif_t *netif, ipv6_addr_t src, ipv6_addr_t dest, uint8_t *da
 udp_socket_t *udp_socket_create(uint16_t port) {
     udp_socket_t *sock;
     udp_socket_t *existing;
+    uint64_t flags;
     uint16_t candidate;
-    int occupied;
-
-    candidate = port;
-    do {
-        if (!candidate) {
-            candidate = udp_ephemeral_port++;
-            if (udp_ephemeral_port < 49152) udp_ephemeral_port = 49152;
-        }
-        occupied = 0;
-        {
-            uint64_t f = udp_lock_irqsave();
-            existing = udp_sockets;
-            while (existing) {
-                if (existing->local_port == candidate) {
-                    occupied = 1;
-                    break;
-                }
-                existing = existing->next;
-            }
-            udp_lock_irqrestore(f);
-        }
-        if (occupied && port) return NULL;
-        if (occupied) candidate = 0;
-    } while (occupied);
+    uint16_t first;
 
     sock = (udp_socket_t *)kmalloc(sizeof(udp_socket_t));
     if (!sock) return NULL;
-
     memset(sock, 0, sizeof(udp_socket_t));
-
-    sock->local_port = candidate;
     sock->ttl = 64;
-
     sock->netif = netif_get_default();
-    {
-        uint64_t f = udp_lock_irqsave();
-        sock->next = udp_sockets;
-        udp_sockets = sock;
-        udp_lock_irqrestore(f);
-    }
 
+    flags = udp_lock_irqsave();
+    candidate = port ? port : udp_ephemeral_port;
+    first = candidate;
+    for (;;) {
+        existing = udp_sockets;
+        while (existing && existing->local_port != candidate)
+            existing = existing->next;
+        if (!existing) break;
+        if (port) {
+            udp_lock_irqrestore(flags);
+            kfree(sock);
+            return NULL;
+        }
+        candidate++;
+        if (candidate < 49152) candidate = 49152;
+        if (candidate == first) {
+            udp_lock_irqrestore(flags);
+            kfree(sock);
+            return NULL;
+        }
+    }
+    if (!port) {
+        udp_ephemeral_port = candidate + 1;
+        if (udp_ephemeral_port < 49152) udp_ephemeral_port = 49152;
+    }
+    sock->local_port = candidate;
+    sock->next = udp_sockets;
+    udp_sockets = sock;
+    udp_lock_irqrestore(flags);
     return sock;
 }
 
@@ -328,33 +326,32 @@ int udp_socket_recv(udp_socket_t *sock, uint8_t *buffer, uint64_t len, ipv4_addr
     uint64_t timeout_ticks;
     uint64_t start;
     uint64_t copy_len;
+    uint64_t flags;
 
-    if (!sock) return -1;
-    if (!sock->has_data && timeout_ms == 0) return -1;
-
+    if (!sock || (!buffer && len)) return -1;
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();
 
-    while (!sock->has_data) {
+    for (;;) {
+        flags = udp_lock_irqsave();
+        if (sock->has_data) break;
+        udp_lock_irqrestore(flags);
+        if (timeout_ms == 0 || (timeout_ms != UINT64_MAX &&
+            pit_get_ticks() - start > timeout_ticks)) return -1;
         __asm__ volatile("sti");
         netif_poll_all();
-        if (timeout_ms != UINT64_MAX &&
-            pit_get_ticks() - start > timeout_ticks) {
-            return -1;
-        }
         schedule();
     }
 
     copy_len = sock->recv_len < len ? sock->recv_len : len;
-    memcpy(buffer, sock->recv_buffer, copy_len);
-
+    if (copy_len) memcpy(buffer, sock->recv_buffer, copy_len);
     if (from_ip) *from_ip = sock->recv_from_ip;
     if (from_port) *from_port = sock->recv_from_port;
     if (full_len) *full_len = sock->recv_len;
-
-    if (peek) return copy_len;
-    sock->has_data = 0;
-    sock->recv_len = 0;
-
+    if (!peek) {
+        sock->has_data = 0;
+        sock->recv_len = 0;
+    }
+    udp_lock_irqrestore(flags);
     return copy_len;
 }

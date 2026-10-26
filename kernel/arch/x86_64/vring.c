@@ -474,7 +474,7 @@ int klog_snapshot_range(char *buf, int offset, int count) {
     const char *src;
     uint64_t flags;
 
-    if (!buf || count <= 0) return 0;
+    if (!buf || offset < 0 || count <= 0) return 0;
     flags = klog_irqsave();
     spin_lock(&klog_persist_lock);
     src = klog_persist_buf;
@@ -488,7 +488,7 @@ int klog_snapshot_range(char *buf, int offset, int count) {
         klog_irqrestore(flags);
         return 0;
     }
-    if (offset + count > len) count = len - offset;
+    if (count > len - offset) count = len - offset;
     memcpy(buf, src + offset, count);
     spin_unlock(&klog_persist_lock);
     klog_irqrestore(flags);

@@ -575,8 +575,8 @@ static uint64_t dev_kmsg_read(vfs_node_t *node, uint64_t offset,
     if (len <= 0) return 0;
     if (offset >= (uint64_t)len) return 0;
     if (size > (uint64_t)len - offset) size = (uint64_t)len - offset;
-    klog_snapshot_range((char *)buffer, (int)offset, (int)size);
-    return size;
+    return (uint64_t)klog_snapshot_range((char *)buffer, (int)offset,
+                                         (int)size);
 }
 
 static uint64_t dev_kmsg_write(vfs_node_t *node, uint64_t offset,

@@ -413,8 +413,8 @@ static uint64_t proc_kmsg_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     if (offset >= (uint64_t)len) return 0;
     remaining = (uint64_t)len - offset;
     if (size > remaining) size = remaining;
-    klog_snapshot_range((char *)buffer, (int)offset, (int)size);
-    return size;
+    return (uint64_t)klog_snapshot_range((char *)buffer, (int)offset,
+                                         (int)size);
 }
 
 static uint64_t proc_sysrq_trigger_read(vfs_node_t *node, uint64_t offset,

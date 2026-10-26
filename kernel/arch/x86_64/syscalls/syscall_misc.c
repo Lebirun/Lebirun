@@ -1619,7 +1619,8 @@ static int sys_syslog(int type, char *buf, int len) {
     while (done < want) {
         piece = want - done;
         if (piece > (int)sizeof(chunk)) piece = sizeof(chunk);
-        klog_snapshot_range(chunk, done, piece);
+        piece = klog_snapshot_range(chunk, done, piece);
+        if (piece <= 0) break;
         if (copy_to_user(buf + done, chunk, (size_t)piece) < 0)
             return -EFAULT;
         done += piece;

@@ -414,13 +414,11 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
     mutex_lock(&ep->lock);
     
     found = -1;
-    vacant = -1;
     for (i = 0; i < ep->fd_count; i++) {
         if (ep->fds[i].fd == fd) {
             found = i;
             break;
         }
-        if (!ep->fds[i].active && vacant < 0) vacant = i;
     }
     
     switch (op) {
@@ -430,7 +428,14 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 mutex_unlock(&epoll_lock);
                 return -EEXIST;
             }
-            if (vacant < 0) {
+            if (ep->fd_count == ep->fd_capacity) {
+                if (ep->fd_count == INT32_MAX ||
+                    (uint64_t)(ep->fd_count + 1) >
+                        SIZE_MAX / sizeof(epoll_fd_entry_t)) {
+                    mutex_unlock(&ep->lock);
+                    mutex_unlock(&epoll_lock);
+                    return -ENOMEM;
+                }
                 new_cap = ep->fd_count + 1;
                 new_fds = (epoll_fd_entry_t *)krealloc(ep->fds, new_cap * sizeof(epoll_fd_entry_t));
                 if (!new_fds) {
@@ -440,9 +445,8 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
                 }
                 ep->fds = new_fds;
                 ep->fd_capacity = new_cap;
-                vacant = ep->fd_count;
-                ep->fd_count++;
             }
+            vacant = ep->fd_count++;
             memset(&ep->fds[vacant], 0, sizeof(epoll_fd_entry_t));
             ep->fds[vacant].fd = fd;
             ep->fds[vacant].events = requested_event.events;
