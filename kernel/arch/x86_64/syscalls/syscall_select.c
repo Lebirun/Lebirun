@@ -34,11 +34,11 @@ static int check_fd_readable(int fd) {
 
     if (is_socket_fd(fd)) {
         sevents = socket_poll_events(fd);
-        return (sevents & 0x01) || (sevents & 0x10) ? 1 : 0;
+        return (sevents & (0x01 | 0x08 | 0x10)) ? 1 : 0;
     }
     descriptor_events = event_descriptor_poll(fd);
     if (descriptor_events >= 0)
-        return (descriptor_events & 0x01) ? 1 : 0;
+        return (descriptor_events & (0x01 | 0x08 | 0x10)) ? 1 : 0;
 
     if (!current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) {
@@ -86,11 +86,11 @@ static int check_fd_writable(int fd) {
 
     if (is_socket_fd(fd)) {
         sevents = socket_poll_events(fd);
-        return (sevents & 0x04) ? 1 : 0;
+        return (sevents & (0x04 | 0x08)) ? 1 : 0;
     }
     descriptor_events = event_descriptor_poll(fd);
     if (descriptor_events >= 0)
-        return (descriptor_events & 0x04) ? 1 : 0;
+        return (descriptor_events & (0x04 | 0x08)) ? 1 : 0;
 
     if (!current_task->fds || fd >= current_task->fds_capacity) return 0;
     if (!current_task->fds[fd].in_use) {
@@ -115,9 +115,23 @@ static int check_fd_writable(int fd) {
     return 0;
 }
 
+static uint64_t select_timeout_ticks(uint64_t seconds, uint64_t nanoseconds) {
+    uint64_t frequency;
+    uint64_t fraction;
+    uint64_t remainder;
+
+    frequency = pit_freq;
+    fraction = nanoseconds * (frequency / 1000000000);
+    remainder = nanoseconds * (frequency % 1000000000);
+    fraction += remainder / 1000000000 + (remainder % 1000000000 != 0);
+    if (frequency && seconds > (UINT64_MAX - 1 - fraction) / frequency)
+        return UINT64_MAX - 1;
+    return seconds * frequency + fraction;
+}
+
 static int select_common(int nfds, uint64_t readfds_ptr,
                          uint64_t writefds_ptr,
-                         int timeout_ms) {
+                         uint64_t timeout_ticks) {
     uint64_t read_addr;
     uint64_t write_addr;
     fd_mask *readfds;
@@ -130,7 +144,6 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     uint64_t set_bytes;
     uint64_t word_index;
     uint64_t start_tick;
-    uint64_t timeout_ticks;
     int count;
     int fd;
     int bit;
@@ -184,9 +197,6 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     }
 
     start_tick = tick_count;
-    timeout_ticks = (timeout_ms > 0) ?
-                    (((uint64_t)timeout_ms * pit_freq + 999) / 1000) : 0;
-    if (timeout_ms > 0 && timeout_ticks == 0) timeout_ticks = 1;
 
     do {
         ready_generation = descriptor_ready_generation();
@@ -213,11 +223,11 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             }
         }
 
-        if (count > 0 || timeout_ms == 0) {
+        if (count > 0 || timeout_ticks == 0) {
             break;
         }
 
-        if (timeout_ms > 0 && (tick_count - start_tick) >= timeout_ticks) {
+        if (timeout_ticks != UINT64_MAX && (tick_count - start_tick) >= timeout_ticks) {
             break;
         }
 
@@ -225,7 +235,7 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             return -EINTR;
         }
         wait_ticks = UINT64_MAX;
-        if (timeout_ms > 0) {
+        if (timeout_ticks != UINT64_MAX) {
             elapsed_ticks = tick_count - start_tick;
             if (elapsed_ticks >= timeout_ticks) break;
             wait_ticks = timeout_ticks - elapsed_ticks;
@@ -236,7 +246,7 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             return -EINTR;
         }
 
-    } while (timeout_ms < 0 || (tick_count - start_tick) < timeout_ticks);
+    } while (timeout_ticks == UINT64_MAX || (tick_count - start_tick) < timeout_ticks);
 
     count = 0;
     for (word_index = 0; word_index < words; word_index++) {
@@ -253,16 +263,14 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         for (bit = 0; bit < (int)NFDBITS; bit++) {
             fd = (int)(word_index * NFDBITS + (uint64_t)bit);
             if (fd >= nfds) break;
-            fd_ready = 0;
             if ((read_word & (1UL << bit)) && check_fd_readable(fd)) {
                 result_read_word |= 1UL << bit;
-                fd_ready = 1;
+                if (count < 0x7FFFFFFF) count++;
             }
             if ((write_word & (1UL << bit)) && check_fd_writable(fd)) {
                 result_write_word |= 1UL << bit;
-                fd_ready = 1;
+                if (count < 0x7FFFFFFF) count++;
             }
-            if (fd_ready && count < 0x7FFFFFFF) count++;
         }
         if (readfds && copy_to_user(&readfds[word_index], &result_read_word,
                                     sizeof(result_read_word)) < 0)
@@ -279,30 +287,28 @@ static int sys_select(int nfds, uint64_t readfds_ptr,
                       uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                       uint64_t timeout_ptr, int unused) {
     struct kernel_timeval timeout_value;
-    int timeout_ms;
+    uint64_t timeout_ticks;
 
     (void)exceptfds_ptr;
     (void)unused;
-    timeout_ms = -1;
+    timeout_ticks = UINT64_MAX;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
                            (const void *)(uintptr_t)timeout_ptr,
                            sizeof(timeout_value)) < 0) return -EFAULT;
         if (timeout_value.tv_sec < 0 || timeout_value.tv_usec < 0 ||
             timeout_value.tv_usec >= 1000000) return -EINVAL;
-        timeout_ms = (int)(timeout_value.tv_sec * 1000 +
-                           timeout_value.tv_usec / 1000);
-        if (timeout_ms < 0) timeout_ms = 0;
+        timeout_ticks = select_timeout_ticks(timeout_value.tv_sec,
+                                             timeout_value.tv_usec * 1000);
     }
-    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ticks);
 }
 
 static int sys_pselect6(int nfds, uint64_t readfds_ptr,
                         uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                         uint64_t timeout_ptr, uint64_t sigmask_ptr) {
     struct kernel_timespec timeout_value;
-    uint64_t milliseconds;
-    int timeout_ms;
+    uint64_t timeout_ticks;
     int result;
     uint64_t old_mask;
     uint64_t mask;
@@ -312,18 +318,15 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
     } requested;
 
     (void)exceptfds_ptr;
-    timeout_ms = -1;
+    timeout_ticks = UINT64_MAX;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
                            (const void *)(uintptr_t)timeout_ptr,
                            sizeof(timeout_value)) < 0) return -EFAULT;
         if (timeout_value.tv_sec < 0 || timeout_value.tv_nsec < 0 ||
             timeout_value.tv_nsec >= 1000000000) return -EINVAL;
-        milliseconds = (uint64_t)timeout_value.tv_sec * 1000;
-        milliseconds += ((uint64_t)timeout_value.tv_nsec + 999999) /
-                        1000000;
-        timeout_ms = milliseconds > 0x7FFFFFFFULL ? 0x7FFFFFFF :
-                     (int)milliseconds;
+        timeout_ticks = select_timeout_ticks(timeout_value.tv_sec,
+                                             timeout_value.tv_nsec);
     }
     old_mask = signal_blocked_mask(current_task);
     if (sigmask_ptr) {
@@ -337,7 +340,7 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
             if (result < 0) return result;
         }
     }
-    result = select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    result = select_common(nfds, readfds_ptr, writefds_ptr, timeout_ticks);
     if (sigmask_ptr && requested.address)
         signal_finish_wait_mask(old_mask, result);
     return result;
@@ -360,13 +363,13 @@ struct pollfd_k {
 #define POLLWRNORM 0x0100
 #define POLLWRBAND 0x0200
 
-static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
+static int poll_common(uint64_t fds_ptr, const char *nfds_ptr,
+                       uint64_t timeout_ticks) {
     uint64_t addr;
     int nfds;
     struct pollfd_k *fds;
     struct pollfd_k value;
     uint64_t start_tick;
-    uint64_t timeout_ticks;
     int ready_count;
     int i;
     int curfd;
@@ -388,9 +391,6 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
     if (!user_access_ok(fds, (size_t)nfds * sizeof(struct pollfd_k),
                         UACCESS_READ | UACCESS_WRITE)) return -EFAULT;
     start_tick = tick_count;
-    timeout_ticks = (timeout > 0) ?
-                    (((uint64_t)timeout * pit_freq + 999) / 1000) : 0;
-    if (timeout > 0 && timeout_ticks == 0) timeout_ticks = 1;
     ready_count = 0;
 
     do {
@@ -466,11 +466,11 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
                 return -EFAULT;
         }
 
-        if (ready_count > 0 || timeout == 0) {
+        if (ready_count > 0 || timeout_ticks == 0) {
             break;
         }
 
-        if (timeout > 0 && (tick_count - start_tick) >= timeout_ticks) {
+        if (timeout_ticks != UINT64_MAX && (tick_count - start_tick) >= timeout_ticks) {
             break;
         }
 
@@ -478,7 +478,7 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
             return -EINTR;
         }
         wait_ticks = UINT64_MAX;
-        if (timeout > 0) {
+        if (timeout_ticks != UINT64_MAX) {
             elapsed_ticks = tick_count - start_tick;
             if (elapsed_ticks >= timeout_ticks) break;
             wait_ticks = timeout_ticks - elapsed_ticks;
@@ -489,15 +489,24 @@ static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
             return -EINTR;
         }
 
-    } while (timeout < 0 || (tick_count - start_tick) < timeout_ticks);
+    } while (timeout_ticks == UINT64_MAX || (tick_count - start_tick) < timeout_ticks);
 
     return ready_count;
+}
+
+static int sys_poll(uint64_t fds_ptr, const char *nfds_ptr, int timeout) {
+    uint64_t timeout_ticks;
+
+    timeout_ticks = timeout < 0 ? UINT64_MAX :
+                    select_timeout_ticks((uint64_t)timeout / 1000,
+                                         (uint64_t)(timeout % 1000) * 1000000);
+    return poll_common(fds_ptr, nfds_ptr, timeout_ticks);
 }
 
 static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
                      uint64_t timeout_ptr, const uint64_t *sigmask,
                      size_t sigset_size) {
-    int timeout_ms;
+    uint64_t timeout_ticks;
     int result;
     uint64_t old_mask;
     uint64_t mask;
@@ -505,15 +514,13 @@ static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
     struct kernel_timespec timeout;
 
     ts_addr = (uint64_t)timeout_ptr;
-    timeout_ms = -1;
+    timeout_ticks = UINT64_MAX;
     if (ts_addr) {
         if (copy_from_user(&timeout, (const void *)ts_addr,
                            sizeof(timeout)) < 0) return -EFAULT;
         if (timeout.tv_sec < 0 || timeout.tv_nsec < 0 ||
             timeout.tv_nsec >= 1000000000) return -EINVAL;
-        timeout_ms = (int)(timeout.tv_sec * 1000 +
-                           timeout.tv_nsec / 1000000);
-        if (timeout_ms < 0) timeout_ms = 0;
+        timeout_ticks = select_timeout_ticks(timeout.tv_sec, timeout.tv_nsec);
     }
     old_mask = signal_blocked_mask(current_task);
     if (sigmask) {
@@ -522,7 +529,7 @@ static int sys_ppoll(uint64_t fds_ptr, const char *nfds_ptr,
         result = signal_set_blocked_mask(current_task, mask);
         if (result < 0) return result;
     }
-    result = sys_poll(fds_ptr, nfds_ptr, timeout_ms);
+    result = poll_common(fds_ptr, nfds_ptr, timeout_ticks);
     if (sigmask) signal_finish_wait_mask(old_mask, result);
     return result;
 }
