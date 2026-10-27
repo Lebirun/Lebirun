@@ -291,61 +291,73 @@ static int dns_encode_name(const char *name, uint8_t *buffer, int buffer_size) {
     offset = 0;
     label_start = 0;
 
+    if (!name || !buffer || buffer_size < 1) return -1;
+    if (!name[0] || (name[0] == '.' && !name[1])) {
+        buffer[0] = 0;
+        return 1;
+    }
+
     for (i = 0; ; i++) {
         if (name[i] == '.' || name[i] == '\0') {
             label_len = i - label_start;
-            if (label_len > 63) return -1;
-            if (offset + 1 + label_len >= buffer_size) return -1;
+            if (label_len == 0 || label_len > 63) return -1;
+            if (offset + 1 + label_len >= buffer_size ||
+                offset + 1 + label_len >= 255) return -1;
             buffer[offset++] = label_len;
             for (j = label_start; j < i; j++) {
                 buffer[offset++] = name[j];
             }
             label_start = i + 1;
-            if (name[i] == '\0') break;
+            if (name[i] == '\0' || !name[i + 1]) break;
         }
+        if (i >= 253) return -1;
     }
-    if (offset >= buffer_size) return -1;
     buffer[offset++] = 0;
     return offset;
 }
 
 static int dns_decode_name(uint8_t *packet, uint64_t packet_len, uint64_t offset, char *name, int max_len) {
     int name_offset;
-    int jumped;
+    uint64_t next_offset;
     uint64_t jump_count;
     uint8_t len;
     uint16_t ptr;
     int i;
 
+    if (!packet || !name || max_len < 1) return -1;
+    name[0] = '\0';
     name_offset = 0;
-    jumped = 0;
+    next_offset = 0;
     jump_count = 0;
 
     while (offset < packet_len && jump_count < packet_len) {
         len = packet[offset];
         if (len == 0) {
-            offset++;
-            break;
+            name[name_offset] = '\0';
+            return (int)(next_offset ? next_offset : offset + 1);
         }
         if ((len & 0xC0) == 0xC0) {
             if (offset + 1 >= packet_len) return -1;
             ptr = ((len & 0x3F) << 8) | packet[offset + 1];
-            if (!jumped) offset += 2;
-            jumped = 1;
+            if (!next_offset) next_offset = offset + 2;
             offset = ptr;
             jump_count++;
             continue;
         }
+        if (len & 0xC0) return -1;
         offset++;
-        if (name_offset > 0 && name_offset < max_len - 1) {
+        if (len > packet_len - offset) return -1;
+        if (name_offset > 0) {
+            if (name_offset >= max_len - 1) return -1;
             name[name_offset++] = '.';
         }
-        for (i = 0; i < len && offset < packet_len && name_offset < max_len - 1; i++) {
+        if (len >= max_len - name_offset || name_offset + len > 253)
+            return -1;
+        for (i = 0; i < len; i++) {
             name[name_offset++] = packet[offset++];
         }
     }
-    name[name_offset] = '\0';
-    return jumped ? -1 : (int)offset;
+    return -1;
 }
 
 int dns_resolve(const char *hostname, ipv4_addr_t *out_ipv4) {
@@ -385,11 +397,12 @@ static int dns_resolve_timeout_locked(const char *hostname, ipv4_addr_t *out_ipv
     if (!netif) return -1;
 
     qn = 0;
-    while (hostname[qn] && qn < 255) {
+    while (qn < 255 && hostname[qn]) {
         qname[qn] = hostname[qn];
         qn++;
     }
     qname[qn] = 0;
+    if (hostname[qn]) return -1;
 
     query = (uint8_t *)kmalloc(512);
     if (!query) return -1;
@@ -592,10 +605,10 @@ static void dns_handle_packet(uint8_t *data, uint64_t len) {
     uint64_t offset;
     uint16_t qi;
     uint16_t ai;
-    uint8_t l;
     char name[256];
     int new_offset;
     uint16_t rtype;
+    uint16_t rclass;
     uint16_t rdlength;
 
     if (!data || len < sizeof(dns_header_t)) return;
@@ -616,36 +629,30 @@ static void dns_handle_packet(uint8_t *data, uint64_t len) {
     offset = sizeof(dns_header_t);
 
     for (qi = 0; qi < qdcount; qi++) {
-        while (offset < len) {
-            l = data[offset];
-            if (l == 0) { offset++; break; }
-            if ((l & 0xC0) == 0xC0) { offset += 2; break; }
-            offset += l + 1;
-        }
-        offset += 4;
+        new_offset = dns_decode_name(data, len, offset, name, sizeof(name));
+        if (new_offset < 0 || (uint64_t)new_offset + 4 > len) return;
+        offset = (uint64_t)new_offset + 4;
     }
 
     for (ai = 0; ai < ancount && offset < len; ai++) {
         new_offset = dns_decode_name(data, len, offset, name, sizeof(name));
-        if (new_offset < 0) {
-            while (offset < len) {
-                l = data[offset];
-                if (l == 0) { offset++; break; }
-                if ((l & 0xC0) == 0xC0) { offset += 2; break; }
-                offset += l + 1;
-            }
-        } else {
-            offset = new_offset;
-        }
+        if (new_offset < 0) return;
+        offset = new_offset;
 
         if (offset + 10 > len) break;
         rtype = (data[offset] << 8) | data[offset + 1];
+        rclass = (data[offset + 2] << 8) | data[offset + 3];
         pending_ttl = ((uint32_t)data[offset + 4] << 24) |
                       ((uint32_t)data[offset + 5] << 16) |
                       ((uint32_t)data[offset + 6] << 8) |
                       (uint32_t)data[offset + 7];
         rdlength = (data[offset + 8] << 8) | data[offset + 9];
         offset += 10;
+        if (rdlength > len - offset) return;
+        if (rclass != DNS_CLASS_IN) {
+            offset += rdlength;
+            continue;
+        }
 
         if (pending_qtype == DNS_TYPE_A && rtype == DNS_TYPE_A && rdlength == 4 && offset + 4 <= len) {
             pending_result.octets[0] = data[offset];
@@ -660,7 +667,9 @@ static void dns_handle_packet(uint8_t *data, uint64_t len) {
             offset + rdlength <= len) {
             if (pending_cname) {
                 pending_cname[0] = 0;
-                dns_decode_name(data, len, offset, pending_cname, 256);
+                new_offset = dns_decode_name(data, len, offset, pending_cname, 256);
+                if (new_offset < 0 || (uint64_t)new_offset != offset + rdlength)
+                    return;
                 if (pending_cname[0]) {
                     pending_cname_set = 1;
                     pending_resolved = 1;

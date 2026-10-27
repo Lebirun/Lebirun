@@ -98,7 +98,9 @@ static int icmp_send_echo(netif_t *netif, ipv4_addr_t dest, uint16_t id,
     icmp_header_t *icmp;
     int result;
 
-    if (!netif) return -1;
+    if (!netif || (!data && len != 0)) return -1;
+    if (len > ETH_MTU - sizeof(ipv4_header_t) - sizeof(icmp_header_t))
+        return -1;
 
     icmp_len = sizeof(icmp_header_t) + len;
     packet = (uint8_t *)kmalloc(icmp_len);
@@ -150,6 +152,8 @@ int ping(ipv4_addr_t target, uint64_t count, uint64_t timeout_ms) {
     uint8_t payload[56];
     int i;
     int key;
+
+    if (count == 0) return -1;
 
     netif = netif_get_default();
     if (!netif) {

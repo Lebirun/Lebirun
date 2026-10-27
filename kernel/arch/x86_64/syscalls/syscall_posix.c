@@ -568,37 +568,12 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     return newfd;
 }
 
-static int sys_pipe(uint64_t pipefd_ptr, const char *unused1, int unused2) {
-    uint64_t addr;
-    int *pipefd;
-    int rfd;
-    int wfd;
-    pipe_t *p;
+static int sys_pipe2(int *pipefd, int flags);
 
-    (void)unused1; (void)unused2;
-    if (!current_task) return -ESRCH;
-    addr = (uint64_t)pipefd_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    pipefd = (int *)addr;
-    p = (pipe_t *)kmalloc(sizeof(pipe_t));
-    if (!p) return -ENOMEM;
-    memset(p, 0, sizeof(pipe_t));
-    waitq_init(&p->read_waitq);
-    waitq_init(&p->write_waitq);
-    spinlock_init(&p->lock);
-    p->readers = 1;
-    p->writers = 1;
-    rfd = fd_alloc();
-    if (rfd < 0) { kfree(p); return -EMFILE; }
-    wfd = fd_alloc();
-    if (wfd < 0) { fd_table[rfd].in_use = 0; kfree(p); return -EMFILE; }
-    fd_table[rfd].type = FD_TYPE_PIPE_R;
-    fd_table[rfd].private_data = p;
-    fd_table[wfd].type = FD_TYPE_PIPE_W;
-    fd_table[wfd].private_data = p;
-    pipefd[0] = rfd;
-    pipefd[1] = wfd;
-    return 0;
+static int sys_pipe(uint64_t pipefd_ptr, const char *unused1, int unused2) {
+    (void)unused1;
+    (void)unused2;
+    return sys_pipe2((int *)(uintptr_t)pipefd_ptr, 0);
 }
 
 static int64_t sys_getcwd(uint64_t buf_ptr, const char *size_ptr, int unused) {
@@ -1629,7 +1604,8 @@ static int file_lock_range(vfs_node_t *node, task_fd_t *tfd,
     return *start < *end ? 0 : -EINVAL;
 }
 
-static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
+static int sys_fcntl(int fd, const char *cmd_ptr, uint64_t arg_value) {
+    int arg;
     int cmd;
     int minfd;
     int newfd;
@@ -1641,6 +1617,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
     vfs_node_t *node;
     int result;
 
+    arg = (int)arg_value;
     cmd = (int)(uintptr_t)cmd_ptr;
     if (!current_task) return -ESRCH;
     if (is_socket_fd(fd)) return socket_fcntl(fd, cmd, arg);
@@ -1679,7 +1656,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
         case F_SETLKW:
             if (fd_table[fd].type != FD_TYPE_FILE || !fd_table[fd].node)
                 return -EBADF;
-            user_addr = (uint64_t)(uint32_t)arg;
+            user_addr = arg_value;
             if (copy_from_user(&flock, (const void *)(uintptr_t)user_addr,
                                sizeof(flock)) != 0)
                 return -EFAULT;
@@ -1737,58 +1714,59 @@ static int sys_fcntl(int fd, const char *cmd_ptr, int arg) {
 }
 
 static int sys_truncate(uint64_t path_ptr, const char *len_ptr, int unused) {
-    uint64_t path_addr;
     uint64_t length;
-    const char *path;
+    char *path;
     vfs_node_t *node;
     int result;
 
     (void)unused;
-    path_addr = (uint64_t)path_ptr;
     length = (uint64_t)(uintptr_t)len_ptr;
-    
-    if (!path_addr || path_addr >= KERNEL_VMA || path_addr < 0x1000) return -1;
-    
-    path = (const char *)path_addr;
+    if (length > INT64_MAX) return -EINVAL;
+    result = posix_copy_user_string(&path,
+                                    (const char *)(uintptr_t)path_ptr,
+                                    UINT64_MAX);
+    if (result < 0) return result;
     node = vfs_namei(path);
-    if (!node) return -1;
-
-    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) { vfs_release(node); return -1; }
+    kfree(path);
+    if (!node) return -ENOENT;
+    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
+        vfs_release(node);
+        return -EISDIR;
+    }
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) {
         vfs_release(node);
         return -EROFS;
     }
-    
-    if (node->ops && node->ops->truncate) {
-        result = node->ops->truncate(node, length);
-        vfs_release(node);
-        return result;
+    result = vfs_check_perm(node, VFS_PERM_WRITE);
+    if (result == 0) {
+        if (node->ops && node->ops->truncate)
+            result = node->ops->truncate(node, length);
+        else
+            result = -EINVAL;
     }
-
     vfs_release(node);
-    return -EINVAL;
+    return result;
 }
 
 static int sys_ftruncate(int fd, const char *len_ptr, int unused) {
     uint64_t length;
+    task_fd_t *tfd;
     vfs_node_t *node;
 
     (void)unused;
     length = (uint64_t)(uintptr_t)len_ptr;
-    
+    if (length > INT64_MAX) return -EINVAL;
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
-    
-    node = (vfs_node_t *)fd_table[fd].node;
-    if (!node) return -EBADF;
-
+    if (fd < 0 || fd >= current_task->fds_capacity) return -EBADF;
+    tfd = &fd_table[fd];
+    if (!tfd->in_use || tfd->type != FD_TYPE_FILE || !tfd->node)
+        return -EBADF;
+    if ((tfd->flags & 3) == VFS_O_RDONLY) return -EBADF;
+    node = (vfs_node_t *)tfd->node;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
-    
-    if (node->ops && node->ops->truncate) {
+    if (node->ops && node->ops->truncate)
         return node->ops->truncate(node, length);
-    }
-
     return -EINVAL;
 }
 
@@ -2008,16 +1986,15 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
 }
 
 static int sys_pipe2(int *pipefd, int flags) {
-    uint64_t addr;
+    int descriptors[2];
     int rfd;
     int wfd;
     pipe_t *p;
 
     if (!current_task) return -ESRCH;
     if (flags & ~(VFS_O_CLOEXEC | VFS_O_NONBLOCK)) return -EINVAL;
-    if (!pipefd) return -EFAULT;
-    addr = (uint64_t)pipefd;
-    if (addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
+    if (!user_access_ok(pipefd, sizeof(descriptors), UACCESS_WRITE))
+        return -EFAULT;
     p = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (!p) return -ENOMEM;
     memset(p, 0, sizeof(pipe_t));
@@ -2042,8 +2019,13 @@ static int sys_pipe2(int *pipefd, int flags) {
         fd_table[rfd].flags |= VFS_O_NONBLOCK;
         fd_table[wfd].flags |= VFS_O_NONBLOCK;
     }
-    pipefd[0] = rfd;
-    pipefd[1] = wfd;
+    descriptors[0] = rfd;
+    descriptors[1] = wfd;
+    if (copy_to_user(pipefd, descriptors, sizeof(descriptors)) != 0) {
+        fd_release_entry(&fd_table[rfd]);
+        fd_release_entry(&fd_table[wfd]);
+        return -EFAULT;
+    }
     return 0;
 }
 
