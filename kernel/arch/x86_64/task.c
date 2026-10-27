@@ -1169,6 +1169,36 @@ task_t* task_find(pid_t pid) {
     return NULL;
 }
 
+static spinlock_t task_fd_array_lock = {0};
+static int task_fd_position_group_seq = 1;
+
+static void task_release_dead_resources(task_t *t);
+
+task_t* task_find_retain(pid_t pid) {
+    task_t *t;
+
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        if (!task_ptr_valid(t)) break;
+        if (t->pid == pid) {
+            t->refs++;
+            unlock_scheduler();
+            return t;
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    return NULL;
+}
+
+void task_release_ref(task_t *t) {
+    if (!t || !task_ptr_valid(t)) return;
+    lock_scheduler();
+    t->refs--;
+    unlock_scheduler();
+}
+
 int task_find_from_irq(pid_t pid, task_t **result) {
     task_t *t;
 
@@ -1860,6 +1890,7 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->join_target = NULL;
     waitq_init(&new_task->join_waiters);
     new_task->join_refs = 0;
+    new_task->refs = 0;
     new_task->exit_code = 0;
     new_task->waiting_for_any_child = 0;
     new_task->is_user = user_mode;
@@ -2338,11 +2369,13 @@ static void task_release_exit_resources(task_t *t) {
     file_locks_release_process(t->pid);
     copy_file_range_release_task(t);
     task_fd_close_all(t);
+    spin_lock(&task_fd_array_lock);
     if (t->fds) {
         kfree(t->fds);
         t->fds = NULL;
         t->fds_capacity = 0;
     }
+    spin_unlock(&task_fd_array_lock);
     task_affinity_free(t);
     task_free_signal_data(t);
     task_rlimit_free(t);
@@ -2361,6 +2394,28 @@ static void task_release_exit_resources(task_t *t) {
     task_free_cwd(t);
     if (t->exit_code == 137) heap_reclaim_unused();
     t->resources_released = 1;
+}
+
+static void task_fork_child_cleanup(task_t *child, pid_t child_pid,
+                                    uint64_t *child_user_pages,
+                                    int owns_child_pd, uint64_t child_pd,
+                                    uint8_t *kernel_stack_base) {
+    task_fd_close_all(child);
+    shm_close_task(child_pid);
+    socket_close_task(child);
+    task_free_signal_data(child);
+    if (child->fds) {
+        kfree(child->fds);
+        child->fds = NULL;
+        child->fds_capacity = 0;
+    }
+    task_clear_file_mappings(child);
+    task_free_fpu_state(child);
+    task_free_cwd(child);
+    kfree(child);
+    kstack_free(kernel_stack_base);
+    if (child_user_pages) kfree(child_user_pages);
+    if (owns_child_pd) vmm_free_pml4(child_pd);
 }
 
 static void task_release_dead_resources(task_t *t) {
@@ -3206,10 +3261,12 @@ void reap_dead_tasks(void) {
 
         current_on_cpu = task_is_current_on_any_cpu(t);
         if (current_on_cpu || t->join_refs != 0 || t->in_wait_queue ||
+            t->refs != 0 ||
             (t->ppid > 0 && !t->waited && task_find(t->ppid))) {
-            if (current_on_cpu || t->join_refs != 0 || t->in_wait_queue)
+            if (current_on_cpu || t->join_refs != 0 || t->in_wait_queue ||
+                t->refs != 0)
                 retry_needed = 1;
-            if (!current_on_cpu && t != current_task) {
+            if (!current_on_cpu && t != current_task && t->refs == 0) {
                 task_release_dead_resources(t);
             }
             t->wait_next = keep;
@@ -3228,6 +3285,14 @@ void reap_dead_tasks(void) {
         }
 
         lock_scheduler();
+        if (t->refs != 0) {
+            retry_needed = 1;
+            t->wait_next = keep;
+            keep = t;
+            t = next;
+            unlock_scheduler();
+            continue;
+        }
         pp = &all_tasks_head;
         while (*pp) {
             if (*pp == t) {
@@ -4401,8 +4466,10 @@ int task_fd_ensure_capacity(task_t *task, int min_fd) {
     new_fds = (task_fd_t *)krealloc(task->fds, new_cap * sizeof(task_fd_t));
     if (!new_fds) return -1;
     memset(&new_fds[old_cap], 0, (new_cap - old_cap) * sizeof(task_fd_t));
+    spin_lock(&task_fd_array_lock);
     task->fds = new_fds;
     task->fds_capacity = new_cap;
+    spin_unlock(&task_fd_array_lock);
     return 0;
 }
 
@@ -4432,9 +4499,11 @@ void task_fd_reclaim_unused(task_t *task) {
     new_fds = (task_fd_t *)kmalloc(new_cap * sizeof(task_fd_t));
     if (!new_fds) return;
     memcpy(new_fds, task->fds, new_cap * sizeof(task_fd_t));
+    spin_lock(&task_fd_array_lock);
     kfree(task->fds);
     task->fds = new_fds;
     task->fds_capacity = new_cap;
+    spin_unlock(&task_fd_array_lock);
 }
 
 void task_fd_free(task_t *task, int fd) {
@@ -4451,31 +4520,17 @@ task_fd_t *task_fd_get(task_t *task, int fd) {
 }
 
 void task_fd_position_share(task_fd_t *source, task_fd_t *copy) {
-    task_t *task;
     int group;
-    int i;
 
     if (!source || !copy) return;
     if (source->type != FD_TYPE_FILE || copy->type != FD_TYPE_FILE) return;
     group = source->ref_count;
     if (group <= 1) {
-        group = 0;
-        lock_scheduler();
-        task = all_tasks_head;
-        while (task && task_ptr_valid(task)) {
-            if (task->fds) {
-                for (i = 0; i < task->fds_capacity; i++) {
-                    if (&task->fds[i] != source) continue;
-                    group = (int)((((uint64_t)(uint32_t)task->pid << 10) |
-                                   (uint64_t)(uint32_t)i) & 0x7FFFFFFFULL);
-                    break;
-                }
-            }
-            if (group > 1) break;
-            task = task->all_next;
-        }
-        unlock_scheduler();
-        if (group <= 1) return;
+        spin_lock(&task_fd_array_lock);
+        task_fd_position_group_seq++;
+        if (task_fd_position_group_seq <= 1) task_fd_position_group_seq = 2;
+        group = task_fd_position_group_seq;
+        spin_unlock(&task_fd_array_lock);
         source->ref_count = group;
     }
     copy->ref_count = group;
@@ -4489,27 +4544,42 @@ uint64_t task_fd_position_get(task_fd_t *fd) {
 
 void task_fd_position_set(task_fd_t *fd, uint64_t value) {
     task_t *task;
+    task_fd_t *fds;
+    int capacity;
     int group;
     int i;
+    int retry;
 
     if (!fd) return;
     fd->offset = value;
     group = fd->ref_count;
     if (fd->type != FD_TYPE_FILE || group <= 1) return;
-    lock_scheduler();
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task)) {
-        if (task->fds) {
-            for (i = 0; i < task->fds_capacity; i++) {
-                if (!task->fds[i].in_use) continue;
-                if (task->fds[i].type != FD_TYPE_FILE) continue;
-                if (task->fds[i].ref_count != group) continue;
-                task->fds[i].offset = value;
+    spin_lock(&task_fd_array_lock);
+    retry = 1;
+    while (retry) {
+        retry = 0;
+        lock_scheduler();
+        task = all_tasks_head;
+        while (task && task_ptr_valid(task)) {
+            fds = task->fds;
+            if (fds) {
+                capacity = task->fds_capacity;
+                for (i = 0; i < capacity; i++) {
+                    if (!fds[i].in_use) continue;
+                    if (fds[i].type != FD_TYPE_FILE) continue;
+                    if (fds[i].ref_count != group) continue;
+                    fds[i].offset = value;
+                }
+                if (task->fds != fds || task->fds_capacity != capacity) {
+                    retry = 1;
+                    break;
+                }
             }
+            task = task->all_next;
         }
-        task = task->all_next;
+        unlock_scheduler();
     }
-    unlock_scheduler();
+    spin_unlock(&task_fd_array_lock);
 }
 
 void task_fd_position_add(task_fd_t *fd, uint64_t value) {
@@ -4867,33 +4937,39 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
         child->regs.saved_entry_cr3 = parent->pml4_phys;
         if (parent_tid && copy_to_user(parent_tid, &child->pid,
                                        sizeof(child->pid)) < 0) {
-            task_release_dead_resources(child);
-            kfree(child);
+            task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                    owns_child_pd, child_pd, kernel_stack_base);
             return -KERR_EFAULT;
         }
     }
 
+    if (signals_copy_task(child, parent) != 0) {
+        task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                owns_child_pd, child_pd, kernel_stack_base);
+        return -KERR_ENOMEM;
+    }
+
     if (shm_fork_task(parent->pid, child->pid) != 0) {
-        task_release_dead_resources(child);
-        kfree(child);
+        task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (seccomp_fork(parent, child) != 0) {
-        task_release_dead_resources(child);
-        kfree(child);
+        task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (vfs_mnt_ns_fork(parent, child) != 0) {
-        task_release_dead_resources(child);
-        kfree(child);
+        task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (task_affinity_copy(child, parent) < 0) {
-        task_release_dead_resources(child);
-        kfree(child);
+        task_fork_child_cleanup(child, child_pid, child_user_pages,
+                                owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
     lock_scheduler();

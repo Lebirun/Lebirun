@@ -104,6 +104,7 @@ typedef struct task {
     struct task *join_target;
     wait_queue_t join_waiters;
     int join_refs;
+    int refs;
     uint64_t exit_code;
     registers_t regs;
     uint8_t *fpu_state;
@@ -276,6 +277,8 @@ extern task_t* all_tasks_head;
 
 pid_t getpid(void);
 task_t* task_find(pid_t pid);
+task_t* task_find_retain(pid_t pid);
+void task_release_ref(task_t *t);
 int task_find_from_irq(pid_t pid, task_t **result);
 task_t* task_find_by_pml4(uint64_t pml4_phys);
 
@@ -430,6 +433,7 @@ int deliver_signal_to_task(task_t *target, int sig);
 int deliver_signal_to_pgrp(pid_t pgid, int sig);
 void signal_deliver_pending(registers_t *regs);
 void signals_init_task(struct task *task);
+int signals_copy_task(task_t *child, task_t *parent);
 int task_has_pending_signals(void);
 void task_free_signal_data(task_t *task);
 

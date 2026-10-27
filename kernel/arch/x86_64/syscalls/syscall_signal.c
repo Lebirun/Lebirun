@@ -267,6 +267,33 @@ static task_signals_t *ensure_task_signals(task_t *task) {
     return slot;
 }
 
+int signals_copy_task(task_t *child, task_t *parent) {
+    task_signals_t *source;
+    task_signals_t *copy;
+    size_t size;
+
+    source = (task_signals_t *)parent->signal_data;
+    if (!source) return 0;
+    copy = (task_signals_t *)kmalloc(sizeof(*copy));
+    if (!copy) return -ENOMEM;
+    init_signal_slot(copy, child->pid);
+    copy->blocked = source->blocked;
+    if (!child->shares_address_space) copy->altstack = source->altstack;
+    if (source->action_count) {
+        size = source->action_count * sizeof(*source->actions);
+        copy->actions = (signal_action_entry_t *)kmalloc(size);
+        if (!copy->actions) {
+            kfree(copy);
+            return -ENOMEM;
+        }
+        memcpy(copy->actions, source->actions, size);
+        copy->action_count = source->action_count;
+        copy->action_capacity = source->action_count;
+    }
+    child->signal_data = copy;
+    return 0;
+}
+
 static int dequeue_queued_signal(task_signals_t *sigs, uint64_t mask,
                                  uint8_t *info) {
     queued_signal_t **link;
@@ -739,21 +766,37 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     sig = (int)(uintptr_t)sig_ptr;
     if (sig < 1 || sig >= NSIG) return -EINVAL;
     if (!info_ptr) return -EFAULT;
-    target = task_find((pid_t)pid);
+    target = task_find_retain((pid_t)pid);
     if (!target) return -ESRCH;
+    if (target->state == TASK_DEAD) {
+        task_release_ref(target);
+        return -ESRCH;
+    }
     if (current_task && current_task->euid != 0 &&
         current_task->euid != target->uid &&
-        current_task->uid != target->uid) return -EPERM;
+        current_task->uid != target->uid) {
+        task_release_ref(target);
+        return -EPERM;
+    }
     sigs = ensure_task_signals(target);
-    if (!sigs) return -ENOMEM;
+    if (!sigs) {
+        task_release_ref(target);
+        return -ENOMEM;
+    }
     limit = task_rlimit_get(target, 11, 0);
-    if (sigs->queue_count == UINT32_MAX || sigs->queue_count >= limit)
+    if (sigs->queue_count == UINT32_MAX || sigs->queue_count >= limit) {
+        task_release_ref(target);
         return -EAGAIN;
+    }
     entry = (queued_signal_t *)kmalloc(sizeof(queued_signal_t));
-    if (!entry) return -ENOMEM;
+    if (!entry) {
+        task_release_ref(target);
+        return -ENOMEM;
+    }
     memset(entry, 0, sizeof(*entry));
     if (copy_from_user(entry->info, info_ptr, sizeof(entry->info)) < 0) {
         kfree(entry);
+        task_release_ref(target);
         return -EFAULT;
     }
     entry->signum = sig;
@@ -765,8 +808,10 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     result = deliver_signal_to_task(target, sig);
     if (result != 0) {
         dequeue_queued_signal(sigs, 1ULL << (sig - 1), NULL);
+        task_release_ref(target);
         return result;
     }
+    task_release_ref(target);
     return 0;
 }
 
@@ -799,7 +844,12 @@ int deliver_signal_to_task(task_t *target, int sig) {
     if (sig == SIGCONT) {
         if (target->state == TASK_STOPPED && task_is_traced(target)) return 0;
         if (target->state == TASK_STOPPED || target->state == TASK_BLOCKED) {
-            target->state = TASK_READY;
+            lock_scheduler();
+            if (target->state == TASK_STOPPED ||
+                target->state == TASK_BLOCKED) {
+                target->state = TASK_READY;
+            }
+            unlock_scheduler();
         }
         return 0;
     }
@@ -882,9 +932,10 @@ int deliver_signal_to_pgrp(pid_t pgid, int sig) {
         next_pid = signal_find_next_pgrp(pgid, last_pid);
         if (next_pid <= 0) break;
         last_pid = next_pid;
-        task = task_find(next_pid);
+        task = task_find_retain(next_pid);
         if (task) {
             deliver_signal_to_task(task, sig);
+            task_release_ref(task);
             sent++;
         }
     }
@@ -919,6 +970,7 @@ static pid_t signal_find_next_permitted(pid_t after, pid_t self_pid,
 int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     int sig;
     int sent;
+    int result;
     task_t *t;
     task_t *target;
     pid_t pgid;
@@ -935,11 +987,15 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
     
     if (sig == 0) {
         if (pid > 0) {
-            t = task_find((pid_t)pid);
+            t = task_find_retain((pid_t)pid);
             if (!t) return -ESRCH;
             if (current_task && current_task->uid != 0 &&
                 current_task->uid != t->uid &&
-                current_task->euid != t->uid) return -EPERM;
+                current_task->euid != t->uid) {
+                task_release_ref(t);
+                return -EPERM;
+            }
+            task_release_ref(t);
             return 0;
         }
         if (!current_task) return -ESRCH;
@@ -954,22 +1010,35 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
             next_pid = signal_find_next_pgrp(pgid, last_pid);
             if (next_pid <= 0) break;
             last_pid = next_pid;
-            t = task_find(next_pid);
-            if (t && !t->is_kernel_task &&
+            t = task_find_retain(next_pid);
+            if (!t) continue;
+            if (!t->is_kernel_task &&
                 (current_task->uid == t->uid ||
-                 current_task->euid == t->uid)) return 0;
+                 current_task->euid == t->uid)) {
+                task_release_ref(t);
+                return 0;
+            }
+            task_release_ref(t);
         }
         return -EPERM;
     }
 
     if (pid > 0) {
-        target = task_find((pid_t)pid);
+        target = task_find_retain((pid_t)pid);
         if (!target) return -ESRCH;
-        if (target->is_kernel_task) return -EPERM;
+        if (target->is_kernel_task) {
+            task_release_ref(target);
+            return -EPERM;
+        }
         if (current_task && current_task->uid != 0 &&
             current_task->uid != target->uid &&
-            current_task->euid != target->uid) return -EPERM;
-        return deliver_signal_to_task(target, sig);
+            current_task->euid != target->uid) {
+            task_release_ref(target);
+            return -EPERM;
+        }
+        result = deliver_signal_to_task(target, sig);
+        task_release_ref(target);
+        return result;
     }
 
     if (!current_task) return -ESRCH;
@@ -985,10 +1054,11 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
                                                   euid);
             if (next_pid <= 0) break;
             last_pid = next_pid;
-            t = task_find(next_pid);
+            t = task_find_retain(next_pid);
             if (t) {
-                deliver_signal_to_task(t, sig);
-                sent++;
+                result = deliver_signal_to_task(t, sig);
+                task_release_ref(t);
+                if (result == 0) sent++;
             }
         }
         return sent > 0 ? 0 : -ESRCH;
@@ -1007,14 +1077,21 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         next_pid = signal_find_next_pgrp(pgid, last_pid);
         if (next_pid <= 0) break;
         last_pid = next_pid;
-        t = task_find(next_pid);
+        t = task_find_retain(next_pid);
         if (!t) continue;
-        if (t->is_kernel_task) continue;
+        if (t->is_kernel_task) {
+            task_release_ref(t);
+            continue;
+        }
         if (current_task && current_task->uid != 0 &&
             current_task->uid != t->uid &&
-            current_task->euid != t->uid) continue;
-        deliver_signal_to_task(t, sig);
-        sent++;
+            current_task->euid != t->uid) {
+            task_release_ref(t);
+            continue;
+        }
+        result = deliver_signal_to_task(t, sig);
+        if (result == 0) sent++;
+        task_release_ref(t);
     }
     if (sent > 0) return 0;
     return signal_find_next_pgrp(pgid, 0) > 0 ? -EPERM : -ESRCH;

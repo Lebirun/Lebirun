@@ -479,7 +479,10 @@ static int syscall_core_console_write_user(const char *buf, int len) {
         }
         chunk = remaining;
         if (chunk > SYS_RW_STACK_BUF) chunk = SYS_RW_STACK_BUF;
-        memcpy(stack_buf, (const void *)(buf_addr + total), chunk);
+        if (copy_from_user(stack_buf, (const void *)(buf_addr + total),
+                           (size_t)chunk) != 0) {
+            return total ? (int)total : -EFAULT;
+        }
         if (fb && (fb->font || fb->cols) && console_is_initialized()) {
             console_write_to(con_id, (const char *)stack_buf, (size_t)chunk);
         } else {
