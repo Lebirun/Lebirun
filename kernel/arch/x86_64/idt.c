@@ -243,6 +243,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     uint64_t orig_cr3;
     uint64_t kernel_cr3;
     uint64_t previous_ticks;
+    uint64_t page_flags;
     uint8_t access_type;
     uint8_t irq;
     int sig;
@@ -356,8 +357,18 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
             
             {
-                fault_page = fault_addr & ~0xFFFu;
+                fault_page = fault_addr & ~(PAGE_SIZE - 1);
                 phys = vmm_get_phys_in_pml4(current_task->pml4_phys, fault_page);
+                if (phys != 0 && !(regs->err_code & 1)) {
+                    page_flags = vmm_get_flags_in_pml4(current_task->pml4_phys,
+                                                       fault_page);
+                    if ((page_flags & (VMM_PTE_PRESENT | VMM_PTE_USER)) ==
+                        (VMM_PTE_PRESENT | VMM_PTE_USER)) {
+                        __asm__ volatile ("invlpg (%0)" : :
+                                          "r"(fault_page) : "memory");
+                        return regs;
+                    }
+                }
                 if (phys == 0) {
                     if (task_handle_file_fault_from_interrupt(
                             current_task, fault_addr, regs->rflags)) {
@@ -443,7 +454,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 
             sc_fault_addr = fault_addr;
             if (sc_fault_addr < KERNEL_VMA) {
-                sc_fault_page = sc_fault_addr & ~0xFFFu;
+                sc_fault_page = sc_fault_addr & ~(PAGE_SIZE - 1);
                 sc_expected_pd = current_task->pml4_phys;
                 sc_actual_cr3 = regs->entry_cr3;
                 if (!sc_actual_cr3) __asm__ volatile ("mov %%cr3, %0" : "=r"(sc_actual_cr3));

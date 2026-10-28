@@ -592,6 +592,7 @@ static pid_t next_kernel_pid = -1;
 static uint32_t fpu_mxcsr_mask;
 
 static spinlock_t user_zero_page_lock = {0};
+static spinlock_t task_anon_fault_commit_lock = {0};
 static uint64_t user_zero_page_phys = 0;
 static mutex_t task_file_fault_commit_lock;
 static uint64_t task_allocate_id(void) {
@@ -2276,6 +2277,13 @@ static int task_ensure_file_map_capacity(task_t *task, int needed) {
     return result;
 }
 
+int task_reserve_vm_areas(task_t *task, int additional) {
+    if (!task || additional < 0 ||
+        task->file_map_count > INT32_MAX - additional) return -1;
+    return task_ensure_file_map_capacity(task,
+                                          task->file_map_count + additional);
+}
+
 static uint64_t user_zero_page_get(void) {
     uint64_t phys;
     uint64_t existing;
@@ -2624,6 +2632,30 @@ int task_isolate_vm_area(task_t *task, uint64_t address, uint64_t size) {
     return -1;
 }
 
+int task_advise_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
+                         uint32_t set, uint32_t clear) {
+    uint64_t end;
+    uint64_t area_end;
+    int i;
+
+    if (!task || size == 0 || vaddr + size < vaddr) return -1;
+    if (task_reserve_vm_areas(task, 2) != 0) return -1;
+    end = vaddr + size;
+    for (i = 0; i < task->file_map_count; i++) {
+        area_end = task->file_maps[i].vaddr + task->file_maps[i].memsz;
+        if (end <= task->file_maps[i].vaddr || vaddr >= area_end) continue;
+        if (vaddr > task->file_maps[i].vaddr) {
+            if (task_split_vm_area(task, i, vaddr) != 0) return -1;
+            continue;
+        }
+        if (end < area_end && task_split_vm_area(task, i, end) != 0)
+            return -1;
+        task->file_maps[i].map_flags =
+            (task->file_maps[i].map_flags & ~clear) | set;
+    }
+    return 0;
+}
+
 int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
                           uint64_t flags) {
     uint64_t end;
@@ -2844,6 +2876,9 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
     uint64_t page;
     uint64_t physical;
     uint64_t map_flags;
+    uint64_t irq_flags;
+    int mapped;
+    int result;
     int i;
 
     if (!task || fault_addr >= KERNEL_VMA) return 0;
@@ -2864,15 +2899,27 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
             if (!physical) return 0;
             map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
         }
-        if (vmm_map_page_in_pml4(task->pml4_phys, page, physical,
-                                 map_flags) != 0 ||
-            task_track_user_page(task, physical) != 0) {
-            vmm_unmap_page_in_pml4(task->pml4_phys, page);
-            if (write_fault) pfa_free(physical);
-            return 0;
+        __asm__ volatile ("pushfq; popq %0; cli"
+                          : "=r"(irq_flags) :: "memory");
+        spin_lock(&task_anon_fault_commit_lock);
+        mapped = 0;
+        result = 0;
+        if (vmm_get_phys_in_pml4(task->pml4_phys, page) != 0) {
+            result = 1;
+        } else if (vmm_map_page_in_pml4(task->pml4_phys, page, physical,
+                                        map_flags) == 0) {
+            if (task_track_user_page(task, physical) == 0) {
+                mapped = 1;
+                result = 1;
+                task->minor_faults++;
+            } else {
+                vmm_unmap_page_in_pml4(task->pml4_phys, page);
+            }
         }
-        task->minor_faults++;
-        return 1;
+        spin_unlock(&task_anon_fault_commit_lock);
+        if (irq_flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+        if (!mapped && write_fault) pfa_free(physical);
+        return result;
     }
     return 0;
 }
@@ -4699,6 +4746,10 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
     uint64_t child_pd;
     uint8_t* kernel_stack_base;
     uint64_t i;
+    uint64_t page;
+    uint64_t physical;
+    uint64_t page_flags;
+    task_file_map_t area;
     int parent_cap;
     uint8_t parent_stage;
     task_t* child;
@@ -4849,11 +4900,25 @@ pid_t __attribute__((optimize("Oz"))) task_fork(
             return -KERR_ENOMEM;
         }
     }
-    for (i = 0; i < (uint64_t)child->file_map_count; i++) {
-        child->file_maps[i] = parent->file_maps[i];
-        if (child->file_maps[i].node) {
-            vfs_open(child->file_maps[i].node, 0);
+    child->file_map_count = 0;
+    for (i = 0; i < (uint64_t)parent->file_map_count; i++) {
+        area = parent->file_maps[i];
+        if (!share_address_space &&
+            (area.map_flags & (TASK_VMA_DONTFORK | TASK_VMA_WIPEONFORK))) {
+            for (page = area.vaddr; page < area.vaddr + area.memsz;
+                 page += PAGE_SIZE) {
+                physical = vmm_unmap_page_in_pml4_flags(child_pd, page,
+                                                        &page_flags);
+                if (!physical) continue;
+                task_untrack_user_page(child, physical);
+                if (!(page_flags & VMM_PTE_NOFREE))
+                    pfa_cow_release64(physical);
+            }
+            vmm_prune_user_range(child_pd, area.vaddr, area.memsz);
+            if (area.map_flags & TASK_VMA_DONTFORK) continue;
         }
+        child->file_maps[child->file_map_count++] = area;
+        if (area.node) vfs_open(area.node, 0);
     }
     child->user_brk = parent->user_brk;
     child->user_brk_start = parent->user_brk_start;
@@ -5586,9 +5651,25 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     uint64_t *stack_ptr;
     task_t *new_task;
     uint64_t i;
+    uint64_t area_end;
 
     if (!current_task || !current_task->is_user) {
         return -1;
+    }
+    thread_stack_size = 0x2000;
+    thread_stack_base = task_align_up(current_task->user_brk, PAGE_SIZE);
+    thread_stack_top = thread_stack_base + thread_stack_size;
+    if (thread_stack_base < current_task->user_brk ||
+        thread_stack_top < thread_stack_base ||
+        thread_stack_top > USER_DYNAMIC_LIMIT - PAGE_SIZE) return -1;
+    for (i = 0; i < (uint64_t)current_task->file_map_count; i++) {
+        area_end = current_task->file_maps[i].vaddr +
+                   current_task->file_maps[i].memsz;
+        if (thread_stack_base < area_end &&
+            thread_stack_top > current_task->file_maps[i].vaddr) return -1;
+    }
+    for (i = thread_stack_base; i < thread_stack_top; i += PAGE_SIZE) {
+        if (vmm_get_phys_in_pml4(current_task->pml4_phys, i)) return -1;
     }
     
     new_task = (task_t *)kmalloc(sizeof(task_t));
@@ -5666,12 +5747,7 @@ pid_t task_create_thread_with_arg(void *(*entry)(void *), void *arg) {
     new_task->running_cpu = -1;
     new_task->creation_mask = current_task->creation_mask;
     
-    thread_stack_size = 0x2000;
-    thread_stack_base = (current_task->user_brk + 0xFFF) & ~0xFFF;
-    thread_stack_top = thread_stack_base + thread_stack_size;
-    if (thread_stack_top < thread_stack_base ||
-        thread_stack_top > USER_DYNAMIC_LIMIT - 0x1000u ||
-        !task_memory_allows(current_task, thread_stack_size) ||
+    if (!task_memory_allows(current_task, thread_stack_size) ||
         !task_stack_allows(new_task, thread_stack_size)) {
         task_rlimit_free(new_task);
         task_free_signal_data(new_task);

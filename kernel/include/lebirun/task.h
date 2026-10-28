@@ -82,6 +82,8 @@ typedef struct task_file_map_list {
 #define TASK_VMA_DEVICE    0x0010u
 #define TASK_VMA_MAYWRITE  0x0020u
 #define TASK_VMA_CLEAN     0x0040u
+#define TASK_VMA_DONTFORK  0x0080u
+#define TASK_VMA_WIPEONFORK 0x0100u
 
 #define TASK_KERNEL_STAGE_NONE       0
 #define TASK_KERNEL_STAGE_PTY_READ   1
@@ -346,6 +348,9 @@ int task_add_vm_area(task_t *task, struct vfs_node *node, uint64_t vaddr,
                      uint64_t flags, uint32_t map_flags);
 int task_unmap_vm_areas(task_t *task, uint64_t vaddr, uint64_t size);
 int task_isolate_vm_area(task_t *task, uint64_t address, uint64_t size);
+int task_reserve_vm_areas(task_t *task, int additional);
+int task_advise_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
+                         uint32_t set, uint32_t clear);
 int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
                           uint64_t flags);
 int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);

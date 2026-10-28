@@ -2158,22 +2158,39 @@ static int sys_flock(int fd, int operation) {
 
 static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
     vfs_node_t *node;
+    task_fd_t *tfd;
 
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    tfd = &fd_table[fd];
+    if (FD_TYPE_IS_PIPE(tfd->type) || FD_TYPE_IS_PTY(tfd->type) ||
+        tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT ||
+        tfd->type == FD_TYPE_STDERR) return -ESPIPE;
+    if (tfd->type != FD_TYPE_FILE ||
+        (tfd->flags & 3) == VFS_O_WRONLY) return -EBADF;
     if (!buf) return -EFAULT;
     if (offset < 0) return -EINVAL;
-    node = (vfs_node_t *)fd_table[fd].node;
+    node = (vfs_node_t *)tfd->node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     return vfs_read(node, (uint64_t)offset, count, buf);
 }
 
 static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset) {
+    vfs_node_t *node;
+    task_fd_t *tfd;
+
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    tfd = &fd_table[fd];
+    if (FD_TYPE_IS_PIPE(tfd->type) || FD_TYPE_IS_PTY(tfd->type) ||
+        tfd->type == FD_TYPE_STDIN || tfd->type == FD_TYPE_STDOUT ||
+        tfd->type == FD_TYPE_STDERR) return -ESPIPE;
+    if (tfd->type != FD_TYPE_FILE ||
+        (tfd->flags & 3) == VFS_O_RDONLY) return -EBADF;
     if (!buf) return -EFAULT;
-    vfs_node_t *node = (vfs_node_t *)fd_table[fd].node;
+    if (offset < 0) return -EINVAL;
+    node = (vfs_node_t *)tfd->node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     return vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
