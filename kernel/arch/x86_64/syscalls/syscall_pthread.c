@@ -141,7 +141,8 @@ static int sys_pthread_create(uint64_t thread_ptr,
     threads[slot].exited = 0;
     waitq_init(&threads[slot].join_waitq);
     
-    *(pid_t *)thread_addr = new_tid;
+    if (copy_to_user((void *)(uintptr_t)thread_addr, &new_tid,
+                     sizeof(new_tid)) < 0) return -EFAULT;
     
     return 0;
 }

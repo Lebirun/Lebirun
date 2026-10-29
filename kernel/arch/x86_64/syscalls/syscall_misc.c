@@ -208,8 +208,8 @@ void task_rlimit_free(task_t *task) {
 
 uint64_t task_user_memory_bytes(task_t *task) {
     if (!task) return 0;
-    if (task->user_pages_count > UINT64_MAX / PAGE_SIZE) return UINT64_MAX;
-    return task->user_pages_count * PAGE_SIZE;
+    if (task->vm->user_pages_count > UINT64_MAX / PAGE_SIZE) return UINT64_MAX;
+    return task->vm->user_pages_count * PAGE_SIZE;
 }
 
 int task_memory_allows(task_t *task, uint64_t additional_bytes) {
@@ -256,10 +256,10 @@ int task_data_allows(task_t *task, uint64_t new_brk) {
     uint64_t bytes;
     unsigned long limit;
 
-    if (!task || new_brk < task->user_brk_start) return 0;
+    if (!task || new_brk < task->vm->user_brk_start) return 0;
     limit = task_rlimit_get(task, RLIMIT_DATA, 0);
     if (limit == RLIM_INFINITY) return 1;
-    bytes = new_brk - task->user_brk_start;
+    bytes = new_brk - task->vm->user_brk_start;
     return bytes <= (uint64_t)limit;
 }
 

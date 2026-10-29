@@ -16,6 +16,9 @@ extern uint64_t boot_pd_low[] __attribute__((aligned(4096)));
 
 void pt_sync_kernel_mappings(void);
 int pt_ensure_phys_mapped(uint64_t phys_addr);
+static int pt_ensure_phys_mapped_locked(uint64_t phys_addr);
+
+#define PT_DIRECT_WINDOW_START 0x20000000ULL
 
 static spinlock_t vmm_pae_lock = {0};
 static volatile uint64_t vmm_pae_saved_eflags = 0;
@@ -179,14 +182,14 @@ static int pt_split_huge_page(uint64_t *pd, uint64_t pd_idx) {
         : : : "rax", "memory"
     );
 
-    if (pt_ensure_phys_mapped(pt_phys) < 0) return -1;
+    if (pt_ensure_phys_mapped_locked(pt_phys) < 0) return -1;
 
     pt_vmm_pt_count++;
 
     return 0;
 }
 
-int pt_ensure_phys_mapped(uint64_t phys_addr) {
+static int pt_ensure_phys_mapped_locked(uint64_t phys_addr) {
     uint64_t virt;
     uint64_t pde_idx;
     uint64_t pte_idx;
@@ -208,11 +211,14 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
 
     if (pde & 0x80) {
         if (pt_huge_mapping_matches(pde, virt, phys_addr, 3)) return 0;
+        if ((pde & 0x000FFFFFFFE00000ULL) + (virt & 0x1FF000ULL) != phys_addr)
+            return -1;
         if (pt_split_huge_page(pd, pde_idx) < 0) return -1;
         pde = pd[pde_idx];
     }
 
     if (!(pde & 1)) {
+        if (phys_addr >= PT_DIRECT_WINDOW_START) return -1;
         pt_page = pt_alloc_pt_page();
         if (!pt_page) return -1;
 
@@ -248,7 +254,7 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
             pt_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;
             pt_pd = pt_get_kernel_pd(pt_phys + KERNEL_VMA);
             if (pt_pd && !(pt_pd[pt_pde_idx] & 1)) {
-                pt_ensure_phys_mapped(pt_phys);
+                pt_ensure_phys_mapped_locked(pt_phys);
             }
         }
 
@@ -259,11 +265,43 @@ int pt_ensure_phys_mapped(uint64_t phys_addr) {
 
     pt_phys = (uint64_t)(pde & ~0xFFFULL);
     pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-    if (!(pt[pte_idx] & 1)) {
-        pt[pte_idx] = ((uint64_t)phys_addr) | 3;
-        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
-    }
+    if (pt[pte_idx] & 1)
+        return (pt[pte_idx] & 0x000FFFFFFFFFF000ULL) == phys_addr &&
+               (pt[pte_idx] & 2) ? 0 : -1;
+    if (phys_addr >= PT_DIRECT_WINDOW_START) return -1;
+    pt[pte_idx] = ((uint64_t)phys_addr) | 3;
+    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     return 0;
+}
+
+int pt_ensure_phys_mapped(uint64_t phys_addr) {
+    int result;
+
+    vmm_pae_lock_acquire();
+    result = pt_ensure_phys_mapped_locked(phys_addr);
+    vmm_pae_lock_release();
+    return result;
+}
+
+int pt_direct_map_ok(uint64_t phys_addr) {
+    uint64_t virt;
+    uint64_t pde;
+    uint64_t pte;
+    uint64_t *pd;
+
+    phys_addr &= ~(PAGE_SIZE - 1);
+    if (phys_addr >= HEAP_START - KERNEL_VMA) return 0;
+    virt = phys_addr + KERNEL_VMA;
+    pd = pt_get_kernel_pd(virt);
+    if (!pd) return 0;
+    pde = pd[(virt >> 21) & 0x1FF];
+    if ((pde & 3) != 3) return 0;
+    if (pde & 0x80)
+        return (pde & 0x000FFFFFFFE00000ULL) + (virt & 0x1FF000ULL) ==
+               phys_addr;
+    pte = ((uint64_t *)((pde & 0x000FFFFFFFFFF000ULL) + KERNEL_VMA))
+          [(virt >> 12) & 0x1FF];
+    return (pte & 3) == 3 && (pte & 0x000FFFFFFFFFF000ULL) == phys_addr;
 }
 
 void pt_sync_kernel_mappings(void) {
@@ -355,7 +393,6 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
 
     if (!(pde & 1)) {
         void *pt_page;
-        uint64_t id_pde_idx;
         uint64_t id_pte_idx;
         pt_page = pt_alloc_pt_page();
         if (!pt_page) {
@@ -371,12 +408,11 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
                         (flags & VMM_PTE_USER);
         pt_sync_kernel_mappings();
 
-        id_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;
         id_pte_idx = ((pt_phys + KERNEL_VMA) >> 12) & 0x1FF;
-        if (id_pde_idx == pt_pd_idx) {
+        if (((pt_phys + KERNEL_VMA) >> 21) == (virt_addr >> 21)) {
             pt_write_pte_raw(pt_phys, id_pte_idx, ((uint64_t)pt_phys) | 3);
         } else {
-            if (pt_ensure_phys_mapped(pt_phys) < 0) {
+            if (pt_ensure_phys_mapped_locked(pt_phys) < 0) {
                 vmm_pae_lock_release();
                 printf("vmm_map_page_pae: Failed to map page table page\n");
                 return;
@@ -397,7 +433,8 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
         }
     }
 
-    new_pte = ((uint64_t)phys_addr & ~0xFFFULL) | (flags & 0xFFF);
+    new_pte = ((uint64_t)phys_addr & 0x000FFFFFFFFFF000ULL) |
+              (flags & (0xFFFULL | VMM_PTE_NX));
     if (pt[pt_pt_idx] != new_pte) {
         pt[pt_pt_idx] = new_pte;
         __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
@@ -540,7 +577,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
 
         if (!(pde & 1)) {
             void *pt_page;
-            uint64_t id_pde_idx;
             uint64_t id_pte_idx;
             pt_page = pt_alloc_pt_page();
             if (!pt_page) {
@@ -556,12 +592,11 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
                             (flags & VMM_PTE_USER);
             pt_sync_kernel_mappings();
 
-            id_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;
             id_pte_idx = ((pt_phys + KERNEL_VMA) >> 12) & 0x1FF;
-            if (id_pde_idx == pt_pd_idx) {
+            if (((pt_phys + KERNEL_VMA) >> 21) == (v >> 21)) {
                 pt_write_pte_raw(pt_phys, id_pte_idx, ((uint64_t)pt_phys) | 3);
             } else {
-                if (pt_ensure_phys_mapped(pt_phys) < 0) {
+                if (pt_ensure_phys_mapped_locked(pt_phys) < 0) {
                     printf("vmm_map_range_alloc_pae: Failed to map page table page\n");
                     vmm_pae_lock_release();
                     return;
@@ -643,7 +678,6 @@ int heap_map_page_pae(uint64_t virt_addr) {
 
     if (!(pde & 1)) {
         void *pt_page;
-        uint64_t id_pde_idx;
         uint64_t id_pte_idx;
         pt_page = pt_alloc_pt_page();
         if (!pt_page) {
@@ -657,12 +691,11 @@ int heap_map_page_pae(uint64_t virt_addr) {
         pd[pt_pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
         pt_sync_kernel_mappings();
 
-        id_pde_idx = ((pt_phys + KERNEL_VMA) >> 21) & 0x1FF;
         id_pte_idx = ((pt_phys + KERNEL_VMA) >> 12) & 0x1FF;
-        if (id_pde_idx == pt_pd_idx) {
+        if (((pt_phys + KERNEL_VMA) >> 21) == (virt_addr >> 21)) {
             pt_write_pte_raw(pt_phys, id_pte_idx, ((uint64_t)pt_phys) | 3);
         } else {
-            if (pt_ensure_phys_mapped(pt_phys) < 0) {
+            if (pt_ensure_phys_mapped_locked(pt_phys) < 0) {
                 printf("heap_map_page_pae: Failed to map page table page\n");
                 vmm_pae_lock_release();
                 return -1;

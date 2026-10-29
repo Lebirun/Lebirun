@@ -218,9 +218,9 @@ static uint64_t proc_self_status_read(vfs_node_t *node, uint64_t offset, uint64_
             rgid = 999;
         }
         vm_kb = task_user_memory_bytes(task) / 1024;
-        rss_kb = task->user_pages_count * 4;
-        data_kb = task->user_brk > task->user_brk_start ?
-                  (task->user_brk - task->user_brk_start) / 1024 : 0;
+        rss_kb = task->vm->user_pages_count * 4;
+        data_kb = task->vm->user_brk > task->vm->user_brk_start ?
+                  (task->vm->user_brk - task->vm->user_brk_start) / 1024 : 0;
         pending = signal_pending_mask(task);
         blocked = signal_blocked_mask(task);
         signal_limit = task_rlimit_get(task, 11, 0);
@@ -307,25 +307,25 @@ static uint64_t proc_self_maps_read(vfs_node_t *node, uint64_t offset, uint64_t 
     task = procfs_get_task(node);
     
     if (task) {
-        for (i = 0; i < task->file_map_count; i++) {
-            end = task->file_maps[i].vaddr + task->file_maps[i].memsz;
+        for (i = 0; i < task->vm->file_map_count; i++) {
+            end = task->vm->file_maps[i].vaddr + task->vm->file_maps[i].memsz;
             display = "";
             path = NULL;
-            if (task->file_maps[i].node) {
-                path = vfs_get_path_alloc(task->file_maps[i].node);
+            if (task->vm->file_maps[i].node) {
+                path = vfs_get_path_alloc(task->vm->file_maps[i].node);
                 if (path) display = path;
-            } else if (task->file_maps[i].map_flags & TASK_VMA_ANONYMOUS) {
+            } else if (task->vm->file_maps[i].map_flags & TASK_VMA_ANONYMOUS) {
                 display = "[anon]";
             }
             n = snprintf(line, sizeof(line),
                 "%016lx-%016lx %c%c%c%c %08lx 00:00 %lu",
-                task->file_maps[i].vaddr, end,
-                task->file_maps[i].flags & 1 ? 'r' : '-',
-                task->file_maps[i].flags & 2 ? 'w' : '-',
-                task->file_maps[i].flags & 4 ? 'x' : '-',
-                task->file_maps[i].map_flags & TASK_VMA_SHARED ? 's' : 'p',
-                task->file_maps[i].offset,
-                task->file_maps[i].node ? task->file_maps[i].node->inode : 0);
+                task->vm->file_maps[i].vaddr, end,
+                task->vm->file_maps[i].flags & 1 ? 'r' : '-',
+                task->vm->file_maps[i].flags & 2 ? 'w' : '-',
+                task->vm->file_maps[i].flags & 4 ? 'x' : '-',
+                task->vm->file_maps[i].map_flags & TASK_VMA_SHARED ? 's' : 'p',
+                task->vm->file_maps[i].offset,
+                task->vm->file_maps[i].node ? task->vm->file_maps[i].node->inode : 0);
             if (n > 0) {
                 if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
                 proc_stream_append(&stream, line, (uint64_t)n);
@@ -338,10 +338,10 @@ static uint64_t proc_self_maps_read(vfs_node_t *node, uint64_t offset, uint64_t 
             if (path) kfree(path);
         }
     }
-    if (task && task->user_brk > task->user_brk_start) {
+    if (task && task->vm->user_brk > task->vm->user_brk_start) {
         n = snprintf(line, sizeof(line),
             "%016lx-%016lx rw-p 00000000 00:00 0 [heap]\n",
-            task->user_brk_start, task->user_brk);
+            task->vm->user_brk_start, task->vm->user_brk);
         if (n > 0) {
             if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
             proc_stream_append(&stream, line, (uint64_t)n);
@@ -913,8 +913,8 @@ static uint64_t proc_self_stat_read(vfs_node_t *node, uint64_t offset, uint64_t 
         utime_val = task->utime;
         stime_val = task->stime;
         starttime_val = task->start_tick;
-        vsize_val = task->user_pages_count * 4096;
-        rss_val = task->user_pages_count;
+        vsize_val = task->vm->user_pages_count * 4096;
+        rss_val = task->vm->user_pages_count;
         if (task->is_kernel_task && rss_val == 0) {
             vsize_val = task->kernel_stack_size;
             rss_val = task->kernel_stack_size / 4096;
@@ -955,7 +955,7 @@ static uint64_t proc_self_statm_read(vfs_node_t *node, uint64_t offset, uint64_t
     task = procfs_get_task(node);
     
     if (task) {
-        pages = task->user_pages_count;
+        pages = task->vm->user_pages_count;
         len = snprintf(buf, sizeof(buf), "%lu %lu %lu 1 0 %lu 0\n",
             pages, pages, pages / 2, pages);
     }

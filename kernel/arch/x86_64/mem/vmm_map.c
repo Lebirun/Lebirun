@@ -1,5 +1,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
+#include <lebirun/spinlock.h>
+#include <lebirun/smp.h>
 #include <string.h>
 
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
@@ -9,6 +11,42 @@ extern void pmm_zero_page_phys(uint64_t phys_addr);
 extern uint64_t pfa_alloc(void);
 
 #define VMM_PHYS_MASK 0x000FFFFFFFFFF000ULL
+
+spinlock_t vmm_user_lock = {0};
+
+extern int task_pml4_live_elsewhere(uint64_t pml4_phys);
+
+void vmm_user_tlb_sync(uint64_t pml4_phys) {
+    if (task_pml4_live_elsewhere(pml4_phys)) smp_tlb_flush_all_sync();
+}
+
+static void vmm_defer_table_free(uint64_t *head, uint64_t table_phys) {
+    temp_map_raw(TEMP_SLOT(3), table_phys);
+    *(uint64_t *)TEMP_SLOT(3) = *head;
+    temp_unmap_raw(TEMP_SLOT(3));
+    *head = table_phys;
+}
+
+static void vmm_free_deferred_tables(uint64_t pml4_phys, uint64_t head) {
+    uint64_t next;
+    uint64_t saved_flags;
+
+    if (!head) return;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(next));
+    if ((next & VMM_PHYS_MASK) == (pml4_phys & VMM_PHYS_MASK))
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(next) : "memory");
+    vmm_user_tlb_sync(pml4_phys);
+    while (head) {
+        __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+        temp_map_raw(TEMP_SLOT(3), head);
+        next = *(uint64_t *)TEMP_SLOT(3);
+        *(uint64_t *)TEMP_SLOT(3) = 0;
+        temp_unmap_raw(TEMP_SLOT(3));
+        if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+        pfa_free(head);
+        head = next;
+    }
+}
 
 static int vmm_table_empty(uint64_t table_phys) {
     uint64_t temp_virt;
@@ -191,6 +229,7 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
     result = -1;
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    spin_lock(&vmm_user_lock);
     temp_virt = TEMP_SLOT(0);
     temp_map_raw(temp_virt, pml4_phys);
     table = (uint64_t *)temp_virt;
@@ -229,7 +268,8 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
         temp_unmap_raw(temp_virt);
         goto out;
     }
-    preserved = entry & (VMM_PHYS_MASK | VMM_PTE_NOFREE | VMM_PTE_SHARED);
+    preserved = entry & ~(VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_USER |
+                          VMM_PTE_NX | VMM_PTE_COW);
     table[pt_idx] = preserved | (flags & (VMM_PTE_PRESENT | VMM_PTE_WRITE |
                                           VMM_PTE_USER | VMM_PTE_NX |
                                           VMM_PTE_COW));
@@ -237,6 +277,7 @@ int vmm_protect_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
     result = 0;
 
 out:
+    spin_unlock(&vmm_user_lock);
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
     if (result == 0) {
         __asm__ volatile ("mov %%cr3, %0" : "=r"(current_cr3));
@@ -270,72 +311,50 @@ int vmm_protect_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr,
 
 uint64_t vmm_unmap_page_in_pml4_flags(uint64_t pml4_phys, uint64_t virt_addr,
                                     uint64_t *flags_out) {
-    uint64_t pml4_idx;
-    uint64_t pdpt_idx;
-    uint64_t pd_idx;
-    uint64_t pt_idx;
+    uint64_t idx[4];
+    uint64_t table_phys;
     uint64_t temp_virt;
     uint64_t *table;
     uint64_t entry;
-    uint64_t pdpt_phys;
-    uint64_t pd_phys;
-    uint64_t pt_phys;
-    uint64_t pte;
     uint64_t phys;
     uint64_t cur_cr3;
     uint64_t saved_flags;
+    int level;
 
     if (flags_out) *flags_out = 0;
-    pml4_idx = (virt_addr >> 39) & 0x1FF;
-    pdpt_idx = (virt_addr >> 30) & 0x1FF;
-    pd_idx = (virt_addr >> 21) & 0x1FF;
-    pt_idx = (virt_addr >> 12) & 0x1FF;
+    idx[0] = (virt_addr >> 39) & 0x1FF;
+    idx[1] = (virt_addr >> 30) & 0x1FF;
+    idx[2] = (virt_addr >> 21) & 0x1FF;
+    idx[3] = (virt_addr >> 12) & 0x1FF;
+    phys = 0;
+    table_phys = pml4_phys;
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
-
-    temp_virt = TEMP_SLOT(0);
-    temp_map_raw(temp_virt, pml4_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pml4_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pdpt_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(1);
-    temp_map_raw(temp_virt, pdpt_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pdpt_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pd_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(2);
-    temp_map_raw(temp_virt, pd_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pd_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & 1)) { if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory"); return 0; }
-    pt_phys = entry & VMM_PHYS_MASK;
-
-    temp_virt = TEMP_SLOT(3);
-    temp_map_raw(temp_virt, pt_phys);
-    table = (uint64_t *)temp_virt;
-    pte = table[pt_idx];
-    if (!(pte & 1)) {
+    spin_lock(&vmm_user_lock);
+    for (level = 0; level < 4; level++) {
+        temp_virt = TEMP_SLOT(level);
+        temp_map_raw(temp_virt, table_phys);
+        table = (uint64_t *)temp_virt;
+        entry = table[idx[level]];
+        if (!(entry & 1) || (level == 2 && (entry & 0x80))) {
+            temp_unmap_raw(temp_virt);
+            break;
+        }
+        if (level == 3) {
+            phys = entry & VMM_PHYS_MASK;
+            if (flags_out) *flags_out = entry & 0x8000000000000FFFULL;
+            table[idx[level]] = 0;
+        }
         temp_unmap_raw(temp_virt);
-        if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
-        return 0;
+        table_phys = entry & VMM_PHYS_MASK;
     }
-    phys = pte & VMM_PHYS_MASK;
-    if (flags_out) *flags_out = pte & 0x8000000000000FFFULL;
-    table[pt_idx] = 0;
-    temp_unmap_raw(temp_virt);
-
+    spin_unlock(&vmm_user_lock);
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
-    if (cur_cr3 == pml4_phys) {
-        __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
+    if (phys) {
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
+        if ((cur_cr3 & VMM_PHYS_MASK) == (pml4_phys & VMM_PHYS_MASK))
+            __asm__ volatile("invlpg (%0)" : : "r"(virt_addr) : "memory");
     }
     return phys;
 }
@@ -365,9 +384,11 @@ void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size)
     uint64_t pd_phys;
     uint64_t pt_phys;
     uint64_t saved_flags;
+    uint64_t deferred;
 
     if (!pml4_phys || size == 0) return;
     if (virt_addr >= KERNEL_VMA) return;
+    deferred = 0;
 
     start = virt_addr & ~(PAGE_SIZE - 1);
     end = (virt_addr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -375,6 +396,7 @@ void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size)
     user_limit = vmm_user_pml4_limit();
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    spin_lock(&vmm_user_lock);
 
     temp_pml4 = TEMP_SLOT(0);
     temp_pdpt = TEMP_SLOT(1);
@@ -409,26 +431,28 @@ void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size)
             pt_phys = pde & VMM_PHYS_MASK;
             if (vmm_table_empty(pt_phys)) {
                 pd[pd_idx] = 0;
-                pfa_free(pt_phys);
+                vmm_defer_table_free(&deferred, pt_phys);
             }
         }
         temp_unmap_raw(temp_pd);
 
         if (vmm_table_empty(pd_phys)) {
             pdpt[pdpt_idx] = 0;
-            pfa_free(pd_phys);
+            vmm_defer_table_free(&deferred, pd_phys);
         }
         temp_unmap_raw(temp_pdpt);
 
         if (vmm_table_empty(pdpt_phys)) {
             pml4[pml4_idx] = 0;
-            pfa_free(pdpt_phys);
+            vmm_defer_table_free(&deferred, pdpt_phys);
         }
     }
 
     temp_unmap_raw(temp_pml4);
 
+    spin_unlock(&vmm_user_lock);
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    vmm_free_deferred_tables(pml4_phys, deferred);
 }
 
 uint64_t vmm_count_user_page_tables(uint64_t pml4_phys) {
@@ -616,6 +640,7 @@ int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_a
     alloc_flags = (flags & 0x7) | 1;
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    spin_lock(&vmm_user_lock);
 
     temp_pml4_virt = TEMP_SLOT(0);
     temp_map_raw(temp_pml4_virt, pml4_phys);
@@ -625,6 +650,7 @@ int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_a
         new_page = pmm_alloc_page();
         if (!new_page) {
             temp_unmap_raw(temp_pml4_virt);
+            spin_unlock(&vmm_user_lock);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
             printf("vmm_map_page_in_pml4: Failed to alloc PDPT\n");
             return -1;
@@ -648,6 +674,7 @@ int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_a
         new_page = pmm_alloc_page();
         if (!new_page) {
             temp_unmap_raw(temp_pdpt_virt);
+            spin_unlock(&vmm_user_lock);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
             vmm_prune_user_range(pml4_phys, virt_addr, PAGE_SIZE);
             printf("vmm_map_page_in_pml4: Failed to alloc PD\n");
@@ -672,6 +699,7 @@ int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_a
         new_page = pmm_alloc_page();
         if (!new_page) {
             temp_unmap_raw(temp_pd_virt);
+            spin_unlock(&vmm_user_lock);
             if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
             vmm_prune_user_range(pml4_phys, virt_addr, PAGE_SIZE);
             printf("vmm_map_page_in_pml4: Failed to alloc PT\n");
@@ -694,6 +722,7 @@ int vmm_map_page_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t phys_a
     pt[pt_idx] = (phys_addr & VMM_PHYS_MASK) | (flags & 0x8000000000000FFFULL);
     temp_unmap_raw(temp_pt_virt);
 
+    spin_unlock(&vmm_user_lock);
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cur_cr3));
@@ -820,6 +849,36 @@ uint64_t* vmm_map_range_in_pml4_tracked(uint64_t pd_phys, uint64_t virt_addr, ui
     
     if (out_count) *out_count = num_pages;
     return pages;
+}
+
+int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
+                            uint64_t size, int write) {
+    uint64_t offset;
+    uint64_t chunk;
+    uint64_t phys;
+    uint64_t saved_flags;
+    uint8_t *page;
+
+    if (addr >= KERNEL_VMA || size > KERNEL_VMA - addr) return -1;
+    offset = 0;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    spin_lock(&vmm_user_lock);
+    while (offset < size) {
+        chunk = PAGE_SIZE - ((addr + offset) & 0xFFF);
+        if (chunk > size - offset) chunk = size - offset;
+        phys = vmm_get_user_page_in_pml4(pml4_phys, (addr + offset) & ~0xFFFULL,
+                                         write);
+        if (!phys) break;
+        temp_map_raw(TEMP_SLOT(3), phys);
+        page = (uint8_t *)TEMP_SLOT(3) + ((addr + offset) & 0xFFF);
+        if (write) memcpy(page, (uint8_t *)buf + offset, chunk);
+        else memcpy((uint8_t *)buf + offset, page, chunk);
+        temp_unmap_raw(TEMP_SLOT(3));
+        offset += chunk;
+    }
+    spin_unlock(&vmm_user_lock);
+    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    return offset == size ? 0 : -1;
 }
 
 void vmm_copy_to_pml4(uint64_t pd_phys, uint64_t dest_virt, const void *src, uint64_t size) {

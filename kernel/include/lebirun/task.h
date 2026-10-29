@@ -47,6 +47,13 @@ typedef struct wait_queue {
     struct task* head;
 } wait_queue_t;
 
+typedef struct mutex {
+    int locked;
+    uint32_t depth;
+    uint64_t owner;
+    wait_queue_t waiters;
+} mutex_t;
+
 typedef struct {
     int in_use;
     int type;
@@ -84,6 +91,20 @@ typedef struct task_file_map_list {
 #define TASK_VMA_CLEAN     0x0040u
 #define TASK_VMA_DONTFORK  0x0080u
 #define TASK_VMA_WIPEONFORK 0x0100u
+#define TASK_VMA_SHM       0x0200u
+
+typedef struct task_vm {
+    int refs;
+    int file_map_count;
+    int file_map_capacity;
+    mutex_t lock;
+    uint64_t user_brk;
+    uint64_t user_brk_start;
+    uint64_t mmap_next_addr;
+    uint64_t *user_pages;
+    uint64_t user_pages_count;
+    task_file_map_t *file_maps;
+} task_vm_t;
 
 #define TASK_KERNEL_STAGE_NONE       0
 #define TASK_KERNEL_STAGE_PTY_READ   1
@@ -123,16 +144,9 @@ typedef struct task {
     bool is_user;
     bool shares_address_space;
     uint8_t zero_reclaim_cursor[6];
-    uint64_t user_brk;
-    uint64_t user_brk_start;
-    uint64_t mmap_next_addr;
+    task_vm_t *vm;
     registers_t *syscall_frame;
     uint64_t pml4_phys;
-    uint64_t *user_pages;
-    uint64_t user_pages_count;
-    task_file_map_t *file_maps;
-    int file_map_count;
-    int file_map_capacity;
     int console_id;
     int running_cpu;
     uint64_t tls_base;
@@ -337,6 +351,9 @@ uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
 void task_free_user_memory(task_t* t);
 int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys);
+void task_vm_lock(task_t *t);
+int task_vm_trylock(task_t *t);
+void task_vm_unlock(task_t *t);
 void task_file_map_list_init(task_file_map_list_t *list);
 int task_file_map_list_add(task_file_map_list_t *list, struct vfs_node *node,
                            uint64_t vaddr, uint64_t memsz, uint64_t filesz,

@@ -154,18 +154,6 @@ static int task_state_requires_schedule(task_t *task) {
     return task->state == TASK_DEAD || task->state == TASK_BLOCKED || task->state == TASK_STOPPED;
 }
 
-static int task_handle_file_fault_from_interrupt(task_t *task,
-                                                 uint64_t fault_addr,
-                                                 uint64_t saved_rflags) {
-    int result;
-
-    if (saved_rflags & (1ULL << 9))
-        __asm__ volatile ("sti" ::: "memory");
-    result = task_handle_file_page_fault(task, fault_addr);
-    __asm__ volatile ("cli" ::: "memory");
-    return result;
-}
-
 static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
                                 uint64_t fault_page) {
     uint64_t new_phys;
@@ -183,17 +171,38 @@ static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
         pfa_free(new_phys);
         return 0;
     }
-    new_user_pages = (uint64_t *)krealloc(task->user_pages,
-                     (task->user_pages_count + 1) * sizeof(uint64_t));
+    new_user_pages = (uint64_t *)krealloc(task->vm->user_pages,
+                     (task->vm->user_pages_count + 1) * sizeof(uint64_t));
     if (!new_user_pages) {
         vmm_unmap_page_in_pml4(task->pml4_phys, fault_page);
         pfa_free(new_phys);
         return 0;
     }
-    task->user_pages = new_user_pages;
-    task->user_pages[task->user_pages_count++] = new_phys;
+    task->vm->user_pages = new_user_pages;
+    task->vm->user_pages[task->vm->user_pages_count++] = new_phys;
     task->stack_size += PAGE_SIZE;
     return 1;
+}
+
+static int task_user_fault_from_interrupt(task_t *task, uint64_t fault_addr,
+                                          uint64_t saved_rflags, int write,
+                                          int present) {
+    int result;
+
+    if (saved_rflags & (1ULL << 9))
+        __asm__ volatile ("sti" ::: "memory");
+    task_vm_lock(task);
+    if (present)
+        result = cow_handle_fault(fault_addr, task->pml4_phys) == 1 ||
+                 task_handle_file_write_fault(task, fault_addr);
+    else
+        result = task_handle_file_page_fault(task, fault_addr) ||
+                 task_handle_anon_page_fault(task, fault_addr, write) ||
+                 task_map_stack_fault(task, fault_addr,
+                                      fault_addr & ~(PAGE_SIZE - 1));
+    task_vm_unlock(task);
+    __asm__ volatile ("cli" ::: "memory");
+    return result;
 }
 
 registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr) {
@@ -327,15 +336,9 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
         }
         
         if (regs->int_no == 14 && (regs->err_code & 0x7) == 0x7 && current_task && current_task->is_user) {
-            int cow_result;
-            cow_result = cow_handle_fault(fault_addr,
-                                          current_task->pml4_phys);
-            if (cow_result == 1) {
+            if (task_user_fault_from_interrupt(current_task, fault_addr,
+                                               regs->rflags, 1, 1))
                 return regs;
-            }
-            if (task_handle_file_write_fault(current_task, fault_addr)) {
-                return regs;
-            }
         }
 
         if (regs->int_no == 14 && (regs->err_code & 0x4) && current_task && current_task->is_user) {
@@ -369,23 +372,15 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                         return regs;
                     }
                 }
-                if (phys == 0) {
-                    if (task_handle_file_fault_from_interrupt(
-                            current_task, fault_addr, regs->rflags)) {
-                        return regs;
-                    }
-                    if (task_handle_anon_page_fault(current_task, fault_addr,
-                                                    (regs->err_code & 0x2) != 0)) {
-                        return regs;
-                    }
-                    if (task_map_stack_fault(current_task, fault_addr,
-                                             fault_page)) return regs;
-                }
+                if (phys == 0 &&
+                    task_user_fault_from_interrupt(current_task, fault_addr,
+                        regs->rflags, (regs->err_code & 0x2) != 0, 0))
+                    return regs;
             }
 
             printf("SEGV pid=%d cpu=%d task=%s maps=%d addr=0x%lX rip=0x%lX err=0x%lX entry_cr3=0x%lX task_cr3=0x%lX\n",
                    current_task->pid, smp_processor_id(), current_task->name,
-                   current_task->file_map_count, fault_addr, regs->rip,
+                   current_task->vm->file_map_count, fault_addr, regs->rip,
                    regs->err_code, regs->entry_cr3,
                    current_task->pml4_phys);
             printf("  RAX=0x%lX RBX=0x%lX RCX=0x%lX RDX=0x%lX\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
@@ -426,19 +421,10 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
         }
 
         if (regs->int_no == 14 && !(regs->err_code & 0x4) && (regs->err_code & 0x3) == 0x3 && current_task && current_task->is_user && current_task->syscall_frame) {
-            int sc_cow_result;
-            uint64_t sc_cow_addr;
-            sc_cow_addr = fault_addr;
-            if (sc_cow_addr < KERNEL_VMA) {
-                sc_cow_result = cow_handle_fault(sc_cow_addr,
-                                                 current_task->pml4_phys);
-                if (sc_cow_result == 1) {
-                    return regs;
-                }
-                if (task_handle_file_write_fault(current_task, sc_cow_addr)) {
-                    return regs;
-                }
-            }
+            if (fault_addr < KERNEL_VMA &&
+                task_user_fault_from_interrupt(current_task, fault_addr,
+                                               regs->rflags, 1, 1))
+                return regs;
         }
 
         if (regs->int_no == 14 && !(regs->err_code & 0x4) && current_task && current_task->is_user && current_task->syscall_frame) {
@@ -462,13 +448,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
 
                 if (sc_phys != 0 ||
-                    task_handle_file_fault_from_interrupt(
-                        current_task, sc_fault_addr, regs->rflags) ||
-                    task_handle_anon_page_fault(
-                        current_task, sc_fault_addr,
-                        (regs->err_code & 0x2) != 0) ||
-                    task_map_stack_fault(current_task, sc_fault_addr,
-                                         sc_fault_page)) {
+                    task_user_fault_from_interrupt(current_task, sc_fault_addr,
+                        regs->rflags, (regs->err_code & 0x2) != 0, 0)) {
                     if (sc_actual_cr3 != sc_expected_pd) {
                         regs->return_cr3 = sc_expected_pd;
                     } else {

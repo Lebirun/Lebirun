@@ -156,7 +156,7 @@ void syscall_core_flush_tty_input(int con_id) {
         memset(line_buffers[con_id], 0, (uint64_t)line_capacity[con_id]);
 }
 
-int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
+static int user_range_mapped_locked(uint64_t addr, uint64_t len, int empty_mapped) {
     uint64_t end;
     uint64_t p;
     uint64_t pd;
@@ -176,7 +176,7 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
         if (vmm_get_phys_in_pml4(pd, p) == 0) {
             if (!task_handle_file_page_fault(current_task, p)) {
                 if ((p >= USER_STACK_FLOOR && p < USER_STACK_TOP) ||
-                        (p >= 0x1000u && p < current_task->user_brk)) {
+                        (p >= 0x1000u && p < current_task->vm->user_brk)) {
                     phys = pfa_alloc();
                     if (!phys) return 0;
                     pmm_zero_page_phys(phys);
@@ -185,20 +185,20 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
                         pfa_free(phys);
                         return 0;
                     }
-                    if (current_task->user_pages_count >= SIZE_MAX / sizeof(uint64_t) - 1) {
+                    if (current_task->vm->user_pages_count >= SIZE_MAX / sizeof(uint64_t) - 1) {
                         vmm_unmap_page_in_pml4(pd, p);
                         pfa_free(phys);
                         return 0;
                     }
-                    new_user_pages = (uint64_t *)krealloc(current_task->user_pages, (current_task->user_pages_count + 1) * sizeof(uint64_t));
+                    new_user_pages = (uint64_t *)krealloc(current_task->vm->user_pages, (current_task->vm->user_pages_count + 1) * sizeof(uint64_t));
                     if (!new_user_pages) {
                         vmm_unmap_page_in_pml4(pd, p);
                         pfa_free(phys);
                         return 0;
                     }
-                    current_task->user_pages = new_user_pages;
-                    current_task->user_pages[current_task->user_pages_count] = phys;
-                    current_task->user_pages_count++;
+                    current_task->vm->user_pages = new_user_pages;
+                    current_task->vm->user_pages[current_task->vm->user_pages_count] = phys;
+                    current_task->vm->user_pages_count++;
                 } else {
                     return 0;
                 }
@@ -209,6 +209,16 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
         p += 0x1000ULL;
     }
     return 1;
+}
+
+int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
+    int result;
+
+    if (!current_task) return 0;
+    task_vm_lock(current_task);
+    result = user_range_mapped_locked(addr, len, empty_mapped);
+    task_vm_unlock(current_task);
+    return result;
 }
 
 int syscall_user_range_present(uint64_t addr, uint64_t len,

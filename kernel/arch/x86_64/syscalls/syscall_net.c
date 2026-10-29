@@ -84,11 +84,11 @@ static int net_user_range_free(uint64_t base, uint64_t size) {
     if (!((base >= USER_DYNAMIC_BASE && end <= USER_DYNAMIC_LIMIT) ||
           (base >= USER_HIGH_DYNAMIC_BASE &&
            end <= USER_HIGH_DYNAMIC_LIMIT))) return 0;
-    for (i = 0; i < current_task->file_map_count; i++) {
-        area_end = current_task->file_maps[i].vaddr +
-                   current_task->file_maps[i].memsz;
-        if (area_end < current_task->file_maps[i].vaddr) return 0;
-        if (base < area_end && end > current_task->file_maps[i].vaddr)
+    for (i = 0; i < current_task->vm->file_map_count; i++) {
+        area_end = current_task->vm->file_maps[i].vaddr +
+                   current_task->vm->file_maps[i].memsz;
+        if (area_end < current_task->vm->file_maps[i].vaddr) return 0;
+        if (base < area_end && end > current_task->vm->file_maps[i].vaddr)
             return 0;
     }
     for (page = base; page < end; page += PAGE_SIZE) {
@@ -926,15 +926,18 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     alloc_size = net_align_up(downloaded, 0x1000u);
     if (alloc_size == 0) alloc_size = 0x1000u;
 
-    base = net_find_user_mapping(current_task->mmap_next_addr, alloc_size);
+    task_vm_lock(current_task);
+    base = net_find_user_mapping(current_task->vm->mmap_next_addr, alloc_size);
     if (!base) {
         kfree(kbuf);
+        task_vm_unlock(current_task);
         return -1;
     }
 
     if (task_add_vm_area(current_task, NULL, base, alloc_size, 0, 0,
                          0x7, TASK_VMA_PRIVATE | TASK_VMA_ANONYMOUS) != 0) {
         kfree(kbuf);
+        task_vm_unlock(current_task);
         return -1;
     }
 
@@ -945,11 +948,12 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     if (!new_pages) {
         task_unmap_vm_areas(current_task, base, alloc_size);
         kfree(kbuf);
+        task_vm_unlock(current_task);
         return -1;
     }
 
     if (page_count > 0) {
-        old_count = current_task->user_pages_count;
+        old_count = current_task->vm->user_pages_count;
         if (page_count > UINT64_MAX - old_count ||
             old_count + page_count > UINT64_MAX / sizeof(uint64_t)) {
             for (i = 0; i < page_count; i++) {
@@ -961,6 +965,7 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
             task_unmap_vm_areas(current_task, base, alloc_size);
             kfree(new_pages);
             kfree(kbuf);
+            task_vm_unlock(current_task);
             return -1;
         }
         new_count = old_count + page_count;
@@ -975,21 +980,23 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
             task_unmap_vm_areas(current_task, base, alloc_size);
             kfree(new_pages);
             kfree(kbuf);
+            task_vm_unlock(current_task);
             return -1;
         }
-        if (current_task->user_pages && old_count > 0) {
-            memcpy(expanded, current_task->user_pages,
+        if (current_task->vm->user_pages && old_count > 0) {
+            memcpy(expanded, current_task->vm->user_pages,
                    old_count * sizeof(uint64_t));
-            kfree(current_task->user_pages);
+            kfree(current_task->vm->user_pages);
         }
         memcpy(expanded + old_count, new_pages,
                page_count * sizeof(uint64_t));
-        current_task->user_pages = expanded;
-        current_task->user_pages_count = new_count;
+        current_task->vm->user_pages = expanded;
+        current_task->vm->user_pages_count = new_count;
         kfree(new_pages);
     }
 
-    current_task->mmap_next_addr = base;
+    current_task->vm->mmap_next_addr = base;
+    task_vm_unlock(current_task);
 
     memcpy((void *)base, kbuf, downloaded);
     kfree(kbuf);

@@ -9,7 +9,8 @@
 
 #define KERNEL_VMA 0xFFFFFFFF80000000ULL
 
-#define TEMP_MAP_BASE          (KERNEL_VMA + 0x37000000ULL)
+#define TEMP_MAP_BASE          (KERNEL_VMA + 0x38000000ULL)
+#define TEMP_MAP_END           (KERNEL_VMA + 0x3C000000ULL)
 #define TEMP_MAP_PAGES_PER_CPU 8
 int smp_processor_id(void);
 #define TEMP_SLOT(n) (TEMP_MAP_BASE + ((uint64_t)smp_processor_id() * TEMP_MAP_PAGES_PER_CPU + (n)) * PAGE_SIZE)
@@ -104,6 +105,7 @@ void vmm_free_pml4(uint64_t pml4_phys);
 void vmm_set_cr3(uint64_t pml4_phys);
 uint64_t vmm_get_cr3(void);
 void vmm_prune_user_range(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size);
+void vmm_user_tlb_sync(uint64_t pml4_phys);
 uint64_t vmm_count_user_page_tables(uint64_t pml4_phys);
 uint64_t vmm_count_present_pages_in_range(uint64_t pml4_phys, uint64_t start, uint64_t end);
 
@@ -249,6 +251,8 @@ uint64_t *vmm_map_range_in_pml4_tracked(uint64_t pml4_phys, uint64_t virt_addr, 
 void vmm_map_range_in_pml4(uint64_t pml4_phys, uint64_t virt_addr, uint64_t size, uint64_t flags);
 void vmm_copy_to_pml4(uint64_t pml4_phys, uint64_t dest_virt, const void *src, uint64_t size);
 void vmm_read_from_pml4(uint64_t pml4_phys, uint64_t src_virt, void *dest, uint64_t size);
+int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
+                            uint64_t size, int write);
 
 void vmm_temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint64_t temp_virt);

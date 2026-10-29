@@ -556,51 +556,25 @@ static uint64_t proc_vm_pd(task_t *task) {
     return pd;
 }
 
-static int proc_vm_range_ok(task_t *task, uint64_t addr, size_t len) {
-    uint64_t pd;
-    uint64_t end;
-    uint64_t page;
+static int proc_vm_copy(pid_t pid, uint64_t target_pd, uint64_t addr,
+                        void *buf, size_t len, int to_remote) {
+    task_t *target;
+    int result;
 
-    if (!task || len == 0) return 0;
-    pd = proc_vm_pd(task);
-    if (!pd) return 0;
-    if (addr < 0x1000 || len > UINT64_MAX - addr) return 0;
-    end = addr + (uint64_t)len - 1;
-    if (end >= KERNEL_VMA) return 0;
-    page = addr & ~(PAGE_SIZE - 1);
-    for (;;) {
-        if (!vmm_get_phys_in_pml4(pd, page)) return 0;
-        if (page >= end) break;
-        if (page > UINT64_MAX - PAGE_SIZE) return 0;
-        page += PAGE_SIZE;
-    }
-    return 1;
-}
-
-static int proc_vm_remote_ok(task_t *task, uint64_t addr, size_t len) {
-    if (!task || len == 0) return 0;
-    if (task == current_task)
-        return syscall_user_range_mapped(addr, (uint64_t)len, 1);
-    return proc_vm_range_ok(task, addr, len);
-}
-
-static int proc_vm_copy(task_t *task, uint64_t addr, void *buf, size_t len,
-                        int to_remote) {
-    uint64_t pd;
-
-    if (task == current_task) {
+    lock_scheduler();
+    target = task_find(pid);
+    if (target == current_task) {
+        unlock_scheduler();
         if (to_remote)
             return copy_to_user((void *)(uintptr_t)addr, buf, len);
         return copy_from_user(buf, (const void *)(uintptr_t)addr, len);
     }
-    pd = proc_vm_pd(task);
-    if (!pd) return -1;
-    if (!proc_vm_range_ok(task, addr, len)) return -1;
-    if (to_remote)
-        vmm_copy_to_pml4(pd, addr, buf, (uint64_t)len);
-    else
-        vmm_read_from_pml4(pd, addr, buf, (uint64_t)len);
-    return 0;
+    result = -1;
+    if (target && target->state != TASK_DEAD && !target->resources_released &&
+        proc_vm_pd(target) == target_pd)
+        result = vmm_access_user_in_pml4(target_pd, addr, buf, len, to_remote);
+    unlock_scheduler();
+    return result;
 }
 
 static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
@@ -610,7 +584,6 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
                           int to_remote) {
     task_t *target;
     uint64_t target_pd;
-    int target_self;
     struct proc_vm_iovec liov;
     struct proc_vm_iovec riov;
     uint8_t chunk[1024];
@@ -642,7 +615,6 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
         return -EPERM;
     }
     target_pd = proc_vm_pd(target);
-    target_self = (target == current_task);
     unlock_scheduler();
     total = 0;
     li = 0;
@@ -653,77 +625,42 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
     remote_addr = 0;
     for (;;) {
         while (local_left == 0 && li < liovcnt) {
-            if (copy_from_user(&liov,
-                               &local[li],
-                               sizeof(liov)) < 0) {
+            if (copy_from_user(&liov, &local[li], sizeof(liov)) < 0)
                 return total > 0 ? (int)total : -EFAULT;
-            }
             li++;
             if (liov.len == 0) continue;
             local_addr = (uint64_t)(uintptr_t)liov.base;
             if (!syscall_user_range_mapped(local_addr,
-                                           (uint64_t)liov.len, 1)) {
+                                           (uint64_t)liov.len, 1))
                 return total > 0 ? (int)total : -EFAULT;
-            }
             local_left = liov.len;
-            break;
         }
         while (remote_left == 0 && ri < riovcnt) {
-            if (copy_from_user(&riov,
-                               &remote[ri],
-                               sizeof(riov)) < 0) {
+            if (copy_from_user(&riov, &remote[ri], sizeof(riov)) < 0)
                 return total > 0 ? (int)total : -EFAULT;
-            }
             ri++;
             if (riov.len == 0) continue;
             remote_addr = (uint64_t)(uintptr_t)riov.base;
-            lock_scheduler();
-            target = task_find((pid_t)pid);
-            if (!target || target->state == TASK_DEAD ||
-                proc_vm_pd(target) != target_pd ||
-                !proc_vm_remote_ok(target, remote_addr, riov.len)) {
-                unlock_scheduler();
+            if (remote_addr < 0x1000 || remote_addr >= KERNEL_VMA ||
+                riov.len > KERNEL_VMA - remote_addr)
                 return total > 0 ? (int)total : -EFAULT;
-            }
-            unlock_scheduler();
             remote_left = riov.len;
-            break;
         }
         if (local_left == 0 || remote_left == 0) break;
         step = local_left < remote_left ? local_left : remote_left;
         if (step > sizeof(chunk)) step = sizeof(chunk);
         if (!to_remote) {
-            lock_scheduler();
-            target = task_find((pid_t)pid);
-            if (!target || target->state == TASK_DEAD ||
-                proc_vm_pd(target) != target_pd) {
-                unlock_scheduler();
-                return total > 0 ? (int)total : -ESRCH;
-            }
-            unlock_scheduler();
-            if (proc_vm_copy(target, remote_addr, chunk, step, 0) < 0 ||
-                copy_to_user((void *)(uintptr_t)local_addr, chunk,
-                             step) < 0) {
+            if (proc_vm_copy((pid_t)pid, target_pd, remote_addr, chunk, step,
+                             0) < 0 ||
+                copy_to_user((void *)(uintptr_t)local_addr, chunk, step) < 0)
                 return total > 0 ? (int)total : -EFAULT;
-            }
         } else {
             if (copy_from_user(chunk, (const void *)(uintptr_t)local_addr,
-                               step) < 0) {
+                               step) < 0 ||
+                proc_vm_copy((pid_t)pid, target_pd, remote_addr, chunk, step,
+                             1) < 0)
                 return total > 0 ? (int)total : -EFAULT;
-            }
-            lock_scheduler();
-            target = task_find((pid_t)pid);
-            if (!target || target->state == TASK_DEAD ||
-                proc_vm_pd(target) != target_pd) {
-                unlock_scheduler();
-                return total > 0 ? (int)total : -ESRCH;
-            }
-            unlock_scheduler();
-            if (proc_vm_copy(target, remote_addr, chunk, step, 1) < 0) {
-                return total > 0 ? (int)total : -EFAULT;
-            }
         }
-        (void)target_self;
         local_addr += step;
         remote_addr += step;
         local_left -= step;

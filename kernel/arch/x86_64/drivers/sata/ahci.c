@@ -475,7 +475,7 @@ int KERNEL_INIT ahci_identify(ahci_port_t *port) {
         return -1;
     }
     
-    uint64_t buf_phys = pfa_alloc();
+    uint64_t buf_phys = (uint64_t)pmm_alloc_mapped_page();
     if (!buf_phys) {
         KERNEL_INIT_LOG("AHCI: Failed to allocate identify buffer\n");
         return -1;
@@ -1686,7 +1686,7 @@ int ahci_smart_read_data(ahci_port_t *port, smart_data_t *data) {
     if (slot < 0)
         return -1;
     
-    uint64_t buf_phys = pfa_alloc();
+    uint64_t buf_phys = (uint64_t)pmm_alloc_mapped_page();
     if (!buf_phys)
         return -1;
     

@@ -1950,10 +1950,10 @@ static int ramfs_memfd_mapped_writable(vfs_node_t *node) {
         address = (uint64_t)t;
         if (address < KERNEL_VMA) break;
         if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
-        for (i = 0; i < t->file_map_count; i++) {
-            if (t->file_maps[i].node == (struct vfs_node *)node &&
-                (t->file_maps[i].map_flags & TASK_VMA_SHARED) &&
-                (t->file_maps[i].flags & VMM_PTE_WRITE)) {
+        for (i = 0; i < t->vm->file_map_count; i++) {
+            if (t->vm->file_maps[i].node == (struct vfs_node *)node &&
+                (t->vm->file_maps[i].map_flags & TASK_VMA_SHARED) &&
+                (t->vm->file_maps[i].flags & VMM_PTE_WRITE)) {
                 unlock_scheduler();
                 return 1;
             }

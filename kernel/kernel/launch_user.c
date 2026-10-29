@@ -199,8 +199,8 @@ static task_t* KERNEL_INIT launch_user_binary_common(
     }
 
     t->pml4_phys = new_pd;
-    t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
-    t->user_brk_start = t->user_brk;
+    t->vm->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    t->vm->user_brk_start = t->vm->user_brk;
     t->console_id = console_id;
     t->stack_size = USER_STACK_SIZE;
 
@@ -234,17 +234,17 @@ static task_t* KERNEL_INIT launch_user_binary_common(
         return NULL;
     }
 
-    t->user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
-    if (t->user_pages) {
+    t->vm->user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
+    if (t->vm->user_pages) {
         if (elf_pages) {
-            memcpy(t->user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
+            memcpy(t->vm->user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
         }
         if (stack_pages) {
-            memcpy(t->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
+            memcpy(t->vm->user_pages + elf_page_count, stack_pages, stack_page_count * sizeof(uint64_t));
         }
-        t->user_pages_count = total_pages;
+        t->vm->user_pages_count = total_pages;
     } else {
-        t->user_pages_count = 0;
+        t->vm->user_pages_count = 0;
     }
 
     if (elf_pages) kfree(elf_pages);
@@ -402,8 +402,8 @@ task_t* KERNEL_INIT launch_user_path_state(const char *path, int console_id,
     }
 
     t->pml4_phys = new_pd;
-    t->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
-    t->user_brk_start = t->user_brk;
+    t->vm->user_brk = (elf_info.bss_end + 0xFFF) & ~0xFFFu;
+    t->vm->user_brk_start = t->vm->user_brk;
     t->console_id = console_id;
     t->stack_size = USER_STACK_SIZE;
     task_file_map_list_adopt(t, &file_maps);
@@ -418,8 +418,8 @@ task_t* KERNEL_INIT launch_user_path_state(const char *path, int console_id,
     frame = (registers_t *)(uintptr_t)t->regs.rsp;
     frame->rsp = initial_useresp;
 
-    t->user_pages = user_pages;
-    t->user_pages_count = total_pages;
+    t->vm->user_pages = user_pages;
+    t->vm->user_pages_count = total_pages;
 
     if (elf_pages) kfree(elf_pages);
     if (stack_pages) kfree(stack_pages);

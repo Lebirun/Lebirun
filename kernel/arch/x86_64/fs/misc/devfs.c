@@ -329,6 +329,10 @@ static uint64_t dev_fb0_write(vfs_node_t *node, uint64_t offset, uint64_t size, 
     return size;
 }
 
+int devfs_is_fb(vfs_node_t *node) {
+    return node && node->read == dev_fb0_read;
+}
+
 static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     framebuffer_t *fb;
     struct fb_var_screeninfo *var;

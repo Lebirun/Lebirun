@@ -3,25 +3,37 @@
 #include <lebirun/task.h>
 #include <string.h>
 
+static int user_page_fault_in(uint64_t address, int access) {
+    uint64_t flags;
+    int ok;
+
+    task_vm_lock(current_task);
+    flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    ok = 1;
+    if (!(flags & VMM_PTE_PRESENT)) {
+        ok = task_handle_file_page_fault(current_task, address) ||
+             task_handle_anon_page_fault(current_task, address,
+                                         (access & UACCESS_WRITE) != 0);
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    }
+    if (ok && (access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE) &&
+        (flags & VMM_PTE_COW)) {
+        ok = cow_handle_fault(address, current_task->pml4_phys) == 1;
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
+    }
+    if (ok && (access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE))
+        ok = task_handle_file_write_fault(current_task, address);
+    task_vm_unlock(current_task);
+    return ok;
+}
+
 static int user_page_access_ok(uint64_t address, int access) {
     uint64_t flags;
-    int fault_result;
 
     flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
-    if (!(flags & VMM_PTE_PRESENT)) {
-        if (!task_handle_file_page_fault(current_task, address) &&
-            !task_handle_anon_page_fault(current_task, address,
-                (access & UACCESS_WRITE) != 0)) return 0;
-        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
-    }
-    if ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE) &&
-        (flags & VMM_PTE_COW)) {
-        fault_result = cow_handle_fault(address, current_task->pml4_phys);
-        if (fault_result != 1) return 0;
-        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
-    }
-    if ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE)) {
-        if (!task_handle_file_write_fault(current_task, address)) return 0;
+    if (!(flags & VMM_PTE_PRESENT) ||
+        ((access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE))) {
+        if (!user_page_fault_in(address, access)) return 0;
         flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
     }
     if (!(flags & VMM_PTE_PRESENT) || !(flags & VMM_PTE_USER)) return 0;

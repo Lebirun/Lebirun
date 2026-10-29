@@ -22,6 +22,8 @@ typedef struct kstack_slot {
     uint16_t slot;
     uint8_t bottom_mapped;
     uint8_t syscall_bottom;
+    uint16_t map_cpu;
+    uint8_t multi_cpu;
 } kstack_slot_t;
 
 static kstack_slot_t *kstack_slots;
@@ -50,6 +52,24 @@ static uint64_t slot_bottom_addr(int slot) {
 
 static uint64_t slot_page_addr(int slot, int page_idx) {
     return KSTACK_REGION_START + (uint64_t)slot * KSTACK_SLOT_SIZE + (1 + page_idx) * PAGE_SIZE;
+}
+
+static void kstack_note_cpu(kstack_slot_t *entry) {
+    uint16_t cpu;
+
+    cpu = (uint16_t)smp_processor_id();
+    if (entry->map_cpu != cpu) {
+        entry->map_cpu = cpu;
+        entry->multi_cpu = 1;
+    }
+}
+
+static void kstack_drop_bottom(kstack_slot_t *entry, int slot, uint64_t phys,
+                               int force) {
+    vmm_unmap_page(slot_page_addr(slot, 0));
+    if (force || entry->multi_cpu) smp_tlb_flush_all_sync();
+    entry->multi_cpu = 0;
+    pfa_free(phys);
 }
 
 static int addr_to_slot(uint64_t addr) {
@@ -262,8 +282,7 @@ void kstack_reclaim_unused(void) {
             entry->page_phys[0] = 0;
             entry->bottom_mapped = 0;
             entry->syscall_bottom = 0;
-            vmm_unmap_page(slot_page_addr(slot, 0));
-            pfa_free(phys);
+            kstack_drop_bottom(entry, slot, phys, 1);
         }
         kstack_lock_release(flags);
         task = task->all_next;
@@ -396,11 +415,11 @@ int kstack_prepare_syscall(void) {
         return -1;
     }
 
+    kstack_note_cpu(entry);
     if (entry->bottom_mapped == 2 &&
         rsp >= slot_page_addr(current_slot, 1)) {
         if (entry->page_phys[0]) {
-            vmm_unmap_page(slot_page_addr(current_slot, 0));
-            pfa_free(entry->page_phys[0]);
+            kstack_drop_bottom(entry, current_slot, entry->page_phys[0], 0);
             entry->page_phys[0] = 0;
         }
         entry->bottom_mapped = 0;
@@ -496,6 +515,7 @@ void kstack_finish_syscall(void) {
     kstack_lock_acquire(&lock_flags);
     entry = kstack_find_slot_locked(slot);
     phys = 0;
+    if (entry) kstack_note_cpu(entry);
     if (slot >= 0 && entry && entry->syscall_bottom &&
         rsp >= slot_page_addr(slot, 1)) {
         phys = entry->page_phys[0];
@@ -505,10 +525,7 @@ void kstack_finish_syscall(void) {
     } else if (slot >= 0 && entry && entry->page_phys[0]) {
         entry->bottom_mapped = 2;
     }
-    if (phys) {
-        vmm_unmap_page(slot_page_addr(slot, 0));
-        pfa_free(phys);
-    }
+    if (phys) kstack_drop_bottom(entry, slot, phys, 0);
     kstack_lock_release(lock_flags);
     __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
 }

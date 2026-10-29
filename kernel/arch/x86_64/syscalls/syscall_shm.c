@@ -24,7 +24,7 @@ typedef struct {
 
 typedef struct shm_attachment {
     struct shm_attachment *next;
-    pid_t pid;
+    task_vm_t *vm;
     int shmid;
     uint64_t address;
     uint64_t size;
@@ -66,7 +66,7 @@ static int shm_permission(shm_seg_t *segment, int write_access) {
     if (current_task->euid == segment->uid) bits = segment->mode >> 6;
     else if (current_task->egid == segment->gid) bits = segment->mode >> 3;
     else bits = segment->mode;
-    return write_access ? ((bits & 2) != 0) : ((bits & 4) != 0);
+    return (bits & 4) && (!write_access || (bits & 2));
 }
 
 static void shm_free_segment(shm_seg_t *segment) {
@@ -118,13 +118,13 @@ static int shm_range_free(uint64_t address, uint64_t size) {
           (address >= USER_HIGH_DYNAMIC_BASE &&
            address + size <= USER_HIGH_DYNAMIC_LIMIT))) return 0;
     end = address + size;
-    if (address < current_task->user_brk &&
-        end > current_task->user_brk_start) return 0;
-    for (i = 0; i < current_task->file_map_count; i++) {
-        area_end = current_task->file_maps[i].vaddr +
-                   current_task->file_maps[i].memsz;
-        if (area_end < current_task->file_maps[i].vaddr) return 0;
-        if (address < area_end && end > current_task->file_maps[i].vaddr)
+    if (address < current_task->vm->user_brk &&
+        end > current_task->vm->user_brk_start) return 0;
+    for (i = 0; i < current_task->vm->file_map_count; i++) {
+        area_end = current_task->vm->file_maps[i].vaddr +
+                   current_task->vm->file_maps[i].memsz;
+        if (area_end < current_task->vm->file_maps[i].vaddr) return 0;
+        if (address < area_end && end > current_task->vm->file_maps[i].vaddr)
             return 0;
     }
     for (offset = 0; offset < size; offset += PAGE_SIZE) {
@@ -141,7 +141,7 @@ static uint64_t shm_find_address(uint64_t requested, uint64_t size) {
         address = requested & ~(PAGE_SIZE - 1);
         return shm_range_free(address, size) ? address : 0;
     }
-    address = current_task->mmap_next_addr;
+    address = current_task->vm->mmap_next_addr;
     if (address >= USER_HIGH_DYNAMIC_BASE &&
         address <= USER_HIGH_DYNAMIC_LIMIT) {
         address &= ~(PAGE_SIZE - 1);
@@ -175,7 +175,7 @@ static int shm_map_segment(shm_seg_t *segment, uint64_t address,
     uint64_t i;
 
     flags = VMM_PTE_PRESENT | VMM_PTE_USER | VMM_PTE_NX |
-            VMM_PTE_NOFREE;
+            VMM_PTE_NOFREE | VMM_PTE_SHARED;
     if (!readonly) flags |= VMM_PTE_WRITE;
     for (i = 0; i < segment->page_count; i++) {
         if (vmm_map_page_in_pml4(current_task->pml4_phys,
@@ -186,23 +186,57 @@ static int shm_map_segment(shm_seg_t *segment, uint64_t address,
                 vmm_unmap_page_in_pml4(current_task->pml4_phys,
                                        address + i * PAGE_SIZE);
             }
+            vmm_prune_user_range(current_task->pml4_phys, address,
+                                 segment->size);
             return -1;
         }
     }
     return 0;
 }
 
+static task_file_map_t *shm_attachment_area(task_vm_t *vm,
+                                            shm_attachment_t *a) {
+    task_file_map_t *area;
+    int i;
+
+    for (i = 0; i < vm->file_map_count; i++) {
+        area = &vm->file_maps[i];
+        if ((area->map_flags & TASK_VMA_SHM) && area->vaddr >= a->address &&
+            area->vaddr - a->address < a->size &&
+            area->offset == (uint64_t)a->shmid + (area->vaddr - a->address))
+            return area;
+    }
+    return NULL;
+}
+
 static void shm_unmap_attachment(shm_attachment_t *attachment) {
+    task_file_map_t *area;
+    uint64_t base;
+    uint64_t size;
     uint64_t offset;
 
     if (!attachment || !current_task) return;
-    for (offset = 0; offset < attachment->size; offset += PAGE_SIZE) {
-        vmm_unmap_page_in_pml4(current_task->pml4_phys,
-                               attachment->address + offset);
+    while ((area = shm_attachment_area(current_task->vm, attachment))) {
+        base = area->vaddr;
+        size = area->memsz;
+        for (offset = 0; offset < size; offset += PAGE_SIZE)
+            vmm_unmap_page_in_pml4(current_task->pml4_phys, base + offset);
+        vmm_user_tlb_sync(current_task->pml4_phys);
+        vmm_prune_user_range(current_task->pml4_phys, base, size);
+        if (task_unmap_vm_areas(current_task, base, size) != 0) break;
     }
-    vmm_prune_user_range(current_task->pml4_phys, attachment->address,
-                         attachment->size);
-    task_unmap_vm_areas(current_task, attachment->address, attachment->size);
+}
+
+static void shm_drop_attachment(shm_attachment_t **link) {
+    shm_attachment_t *attachment;
+    shm_seg_t *segment;
+
+    attachment = *link;
+    *link = attachment->next;
+    segment = &shm_segs[attachment->shmid];
+    if (segment->nattach > 0) segment->nattach--;
+    if (segment->removed && segment->nattach == 0) shm_free_segment(segment);
+    kfree(attachment);
 }
 
 static int sys_shmget(int key, const char *size_ptr, int shmflg) {
@@ -269,7 +303,7 @@ static int sys_shmget(int key, const char *size_ptr, int shmflg) {
     return slot;
 }
 
-static int64_t sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
+static int64_t shmat_locked(int shmid, const char *shmaddr_ptr, int shmflg) {
     uint64_t requested;
     uint64_t address;
     uint64_t flags;
@@ -305,62 +339,91 @@ static int64_t sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
         return -ENOMEM;
     }
     flags = VMM_PTE_PRESENT | VMM_PTE_USER | VMM_PTE_NX |
-            VMM_PTE_NOFREE;
+            VMM_PTE_NOFREE | VMM_PTE_SHARED;
     if (!readonly) flags |= VMM_PTE_WRITE;
     if (task_add_vm_area(current_task, NULL, address, segment->size, 0,
                          (uint64_t)shmid, flags,
-                         TASK_VMA_SHARED | TASK_VMA_ANONYMOUS |
+                         TASK_VMA_SHARED | TASK_VMA_ANONYMOUS | TASK_VMA_SHM |
                          (readonly ? 0 : TASK_VMA_MAYWRITE)) != 0) {
         for (offset = 0; offset < segment->size; offset += PAGE_SIZE) {
             vmm_unmap_page_in_pml4(current_task->pml4_phys,
                                    address + offset);
         }
+        vmm_prune_user_range(current_task->pml4_phys, address, segment->size);
         mutex_unlock(&shm_lock);
         kfree(attachment);
         return -ENOMEM;
     }
-    attachment->pid = current_task->pid;
+    attachment->vm = current_task->vm;
     attachment->shmid = shmid;
     attachment->address = address;
     attachment->size = segment->size;
     attachment->next = shm_attachments;
     shm_attachments = attachment;
     segment->nattach++;
-    current_task->mmap_next_addr = address;
+    current_task->vm->mmap_next_addr = address;
     mutex_unlock(&shm_lock);
     return (int64_t)address;
 }
 
-static int sys_shmdt(uint64_t shmaddr, const char *unused1, int unused2) {
-    uint64_t address;
+static int shmdt_locked(uint64_t shmaddr) {
     shm_attachment_t **link;
-    shm_attachment_t *attachment;
-    shm_seg_t *segment;
 
-    (void)unused1;
-    (void)unused2;
     if (!current_task) return -ESRCH;
-    address = shmaddr;
     mutex_lock(&shm_lock);
     link = &shm_attachments;
-    while (*link && ((*link)->pid != current_task->pid ||
-                     (*link)->address != address)) {
+    while (*link && ((*link)->vm != current_task->vm ||
+                     (*link)->address != shmaddr)) {
         link = &(*link)->next;
     }
     if (!*link) {
         mutex_unlock(&shm_lock);
         return -EINVAL;
     }
-    attachment = *link;
-    *link = attachment->next;
-    shm_unmap_attachment(attachment);
-    segment = &shm_segs[attachment->shmid];
-    if (segment->nattach > 0) segment->nattach--;
-    if (segment->removed && segment->nattach == 0) shm_free_segment(segment);
+    shm_unmap_attachment(*link);
+    shm_drop_attachment(link);
     shm_reclaim_storage();
     mutex_unlock(&shm_lock);
-    kfree(attachment);
     return 0;
+}
+
+static int64_t sys_shmat(int shmid, const char *shmaddr_ptr, int shmflg) {
+    int64_t result;
+
+    if (!current_task) return -ESRCH;
+    task_vm_lock(current_task);
+    result = shmat_locked(shmid, shmaddr_ptr, shmflg);
+    task_vm_unlock(current_task);
+    return result;
+}
+
+static int sys_shmdt(uint64_t shmaddr, const char *unused1, int unused2) {
+    int result;
+
+    (void)unused1;
+    (void)unused2;
+    if (!current_task) return -ESRCH;
+    task_vm_lock(current_task);
+    result = shmdt_locked(shmaddr);
+    task_vm_unlock(current_task);
+    return result;
+}
+
+void shm_prune_task(task_t *task) {
+    shm_attachment_t **link;
+
+    if (!task) return;
+    mutex_lock(&shm_lock);
+    link = &shm_attachments;
+    while (*link) {
+        if ((*link)->vm == task->vm &&
+            !shm_attachment_area(task->vm, *link))
+            shm_drop_attachment(link);
+        else
+            link = &(*link)->next;
+    }
+    shm_reclaim_storage();
+    mutex_unlock(&shm_lock);
 }
 
 static int sys_shmctl(int shmid, const char *cmd_ptr, uint64_t buf) {
@@ -445,31 +508,20 @@ static int sys_shm_unlink(uint64_t name_ptr, const char *unused1, int unused2) {
     return -ENOENT;
 }
 
-void shm_close_task(pid_t pid) {
+void shm_close_vm(task_vm_t *vm) {
     shm_attachment_t **link;
-    shm_attachment_t *attachment;
-    shm_seg_t *segment;
 
     mutex_lock(&shm_lock);
     link = &shm_attachments;
     while (*link) {
-        attachment = *link;
-        if (attachment->pid != pid) {
-            link = &attachment->next;
-            continue;
-        }
-        *link = attachment->next;
-        segment = &shm_segs[attachment->shmid];
-        if (segment->nattach > 0) segment->nattach--;
-        if (segment->removed && segment->nattach == 0)
-            shm_free_segment(segment);
-        kfree(attachment);
+        if ((*link)->vm == vm) shm_drop_attachment(link);
+        else link = &(*link)->next;
     }
     shm_reclaim_storage();
     mutex_unlock(&shm_lock);
 }
 
-int shm_fork_task(pid_t parent_pid, pid_t child_pid) {
+int shm_fork_vm(task_vm_t *parent_vm, task_vm_t *child_vm) {
     shm_attachment_t *attachment;
     shm_attachment_t *copy;
     shm_attachment_t *copies;
@@ -479,7 +531,7 @@ int shm_fork_task(pid_t parent_pid, pid_t child_pid) {
     mutex_lock(&shm_lock);
     attachment = shm_attachments;
     while (attachment) {
-        if (attachment->pid == parent_pid) {
+        if (attachment->vm == parent_vm) {
             copy = (shm_attachment_t *)kmalloc(sizeof(*copy));
             if (!copy) {
                 mutex_unlock(&shm_lock);
@@ -491,7 +543,7 @@ int shm_fork_task(pid_t parent_pid, pid_t child_pid) {
                 return -ENOMEM;
             }
             *copy = *attachment;
-            copy->pid = child_pid;
+            copy->vm = child_vm;
             copy->next = copies;
             copies = copy;
         }

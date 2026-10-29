@@ -739,6 +739,7 @@ void smp_stop_other_cpus(void) {
 }
 
 void ap_main(void);
+extern int pt_temp_prepare_cpu(int cpu);
 
 void ap_main(void) {
     uint64_t id;
@@ -848,6 +849,10 @@ void KERNEL_INIT smp_start_aps(void) {
             continue;
         }
 
+        if (pt_temp_prepare_cpu(i) != 0) {
+            KERNEL_INIT_LOG("SMP: no temp mapping slots for CPU %u\n", cpus[i].lapic_id);
+            continue;
+        }
         cpus[i].kernel_stack = kstack_alloc();
         if (!cpus[i].kernel_stack) {
             KERNEL_INIT_LOG("SMP: failed to allocate stack for CPU %u\n", cpus[i].lapic_id);

@@ -6,16 +6,13 @@
 extern uint64_t kernel_pd_phys;
 extern uint64_t kernel_pdpt_phys;
 extern void *pmm_alloc_page(void);
+extern void *pmm_alloc_mapped_page(void);
 extern void *pmm_alloc_low_page(void);
 extern void *pmm_alloc_early_page(void);
 extern uint8_t *pfa_bitmap;
 extern int pt_ensure_phys_mapped(uint64_t phys_addr);
 
-#define TEMP_MAP_PAGES 8u
-
 static uint64_t pt_temp_pt_ready = 0;
-static uint64_t *pt_temp_pt = NULL;
-static uint64_t pt_temp_pd_idx = 0;
 
 uint64_t pt_temp_pt_ready_check(void) {
     return pt_temp_pt_ready;
@@ -27,85 +24,58 @@ extern uint64_t boot_pd_high[];
 
 #define kv_pd_high ((uint64_t *)((uintptr_t)boot_pd_high + KERNEL_VMA))
 
-void pt_init_temp_mapping(void) {
-    uint64_t pd_idx;
+static uint64_t *pt_temp_table(uint64_t temp_virt) {
     uint64_t pde;
-    uint64_t *pd;
-    uint64_t *pt;
+
+    if (temp_virt < TEMP_MAP_BASE || temp_virt >= TEMP_MAP_END) return NULL;
+    pde = kv_pd_high[(temp_virt >> 21) & 0x1FF];
+    if (!(pde & 1) || (pde & 0x80)) return NULL;
+    return (uint64_t *)((pde & ~0xFFFULL) + KERNEL_VMA);
+}
+
+int pt_temp_prepare_cpu(int cpu) {
+    uint64_t virt;
     uint64_t pt_phys;
+    void *pt_page;
 
-    if (pt_temp_pt_ready) return;
-
-    pd_idx = (TEMP_MAP_BASE >> 21) & 0x1FF;
-    pd = kv_pd_high;
-    pde = pd[pd_idx];
-
-    if ((pde & 1) && !(pde & 0x80)) {
-        pt_phys = (uint64_t)(pde & ~0xFFFULL);
-        pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        pt_temp_pt = pt;
-        pt_temp_pd_idx = pd_idx;
-        pt_temp_pt_ready = 1;
-        return;
+    virt = TEMP_MAP_BASE + (uint64_t)cpu * TEMP_MAP_PAGES_PER_CPU * PAGE_SIZE;
+    if (virt >= TEMP_MAP_END) return -1;
+    if (pt_temp_table(virt)) return 0;
+    pt_page = pfa_bitmap ? pmm_alloc_mapped_page() : pmm_alloc_early_page();
+    if (!pt_page) {
+        printf("pt_temp_prepare_cpu: failed to alloc page table\n");
+        return -1;
     }
-
-    {
-        void *pt_page;
-        if (pfa_bitmap)
-            pt_page = pmm_alloc_page();
-        else
-            pt_page = pmm_alloc_early_page();
-        if (!pt_page) {
-            printf("pt_init_temp_mapping: failed to alloc page table\n");
-            return;
-        }
-        pt_phys = (uint64_t)pt_page;
-        pt = (uint64_t *)(pt_phys + KERNEL_VMA);
-        memset(pt, 0, PAGE_SIZE);
-        pt_vmm_pt_count++;
-    }
-    pd[pd_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
+    pt_phys = (uint64_t)pt_page;
+    memset((void *)(pt_phys + KERNEL_VMA), 0, PAGE_SIZE);
+    pt_vmm_pt_count++;
+    kv_pd_high[(virt >> 21) & 0x1FF] = (pt_phys & ~0xFFFULL) | 3;
     pt_sync_kernel_mappings();
+    __asm__ volatile ("mov %%cr3, %%rax\n\tmov %%rax, %%cr3" ::: "rax", "memory");
+    return 0;
+}
 
-    pt_temp_pt = pt;
-    pt_temp_pd_idx = pd_idx;
-    pt_temp_pt_ready = 1;
+void pt_init_temp_mapping(void) {
+    if (pt_temp_pt_ready) return;
+    if (pt_temp_prepare_cpu(0) == 0) pt_temp_pt_ready = 1;
 }
 
 void temp_map_raw_pae(uint64_t temp_virt, uint64_t phys_addr) {
-    uint64_t pd_idx;
-    uint64_t pt_idx;
     uint64_t *pt;
 
-    pd_idx = (temp_virt >> 21) & 0x1FF;
-    pt_idx = (temp_virt >> 12) & 0x1FF;
-
-    if (!pt_temp_pt_ready) {
-        pt_init_temp_mapping();
-    }
-    if (!pt_temp_pt_ready || pd_idx != pt_temp_pd_idx) {
-        return;
-    }
-
-    pt = pt_temp_pt;
-    pt[pt_idx] = (phys_addr & ~0xFFFULL) | 3;
+    if (!pt_temp_pt_ready) pt_init_temp_mapping();
+    pt = pt_temp_table(temp_virt);
+    if (!pt) return;
+    pt[(temp_virt >> 12) & 0x1FF] = (phys_addr & ~0xFFFULL) | 3;
     __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
 }
 
 void temp_unmap_raw_pae(uint64_t temp_virt) {
-    uint64_t pd_idx;
-    uint64_t pt_idx;
     uint64_t *pt;
 
-    pd_idx = (temp_virt >> 21) & 0x1FF;
-    pt_idx = (temp_virt >> 12) & 0x1FF;
-
-    if (!pt_temp_pt_ready || pd_idx != pt_temp_pd_idx) {
-        return;
-    }
-
-    pt = pt_temp_pt;
-    pt[pt_idx] = 0;
+    pt = pt_temp_table(temp_virt);
+    if (!pt) return;
+    pt[(temp_virt >> 12) & 0x1FF] = 0;
     __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
 }
 

@@ -103,6 +103,27 @@ void mutex_lock(mutex_t* m) {
     }
 }
 
+int mutex_trylock(mutex_t* m) {
+    cpu_info_t *cpu;
+    task_t *task;
+    uint64_t owner;
+
+    if (!m) return 0;
+    cpu = smp_this_cpu();
+    task = cpu ? cpu->running_task : current_task;
+    owner = (uint64_t)(uintptr_t)task;
+    if (__sync_bool_compare_and_swap(&m->locked, 0, 1)) {
+        m->owner = owner;
+        m->depth = 1;
+        return 1;
+    }
+    if (owner && m->owner == owner) {
+        m->depth++;
+        return 1;
+    }
+    return 0;
+}
+
 void mutex_unlock(mutex_t* m) {
     extern int scheduler_initialized;
     cpu_info_t *cpu;

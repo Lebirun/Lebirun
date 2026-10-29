@@ -9,6 +9,7 @@ extern uint64_t total_pages_managed;
 extern uint64_t kernel_reserved_frames;
 extern int scheduler_initialized;
 extern void task_memory_pressure_request(void);
+extern int pt_direct_map_ok(uint64_t phys_addr);
 
 uint8_t *pfa_bitmap = 0;
 static uint32_t pfa_inline_directory[PFA_INLINE_DIRECTORY_ENTRIES];
@@ -43,6 +44,8 @@ static int low_exhausted = 0;
 static uint64_t low_page_limit = 0x00400000;
 static uint64_t cold_low_start_frame = 0;
 static uint64_t cold_low_end_frame = 0;
+static uint64_t kernel_reclaim_lo = 0;
+static uint64_t kernel_reclaim_hi = 0;
 
 extern mem_region_t *memory_map;
 extern uint64_t num_regions;
@@ -175,7 +178,7 @@ static bool bitmap_test_raw(uint64_t frame_idx) {
     return (leaf[bit_idx / 8] & (1u << (bit_idx % 8))) != 0;
 }
 
-static int bitmap_leaf_candidate(uint64_t exclude_start,
+static int bitmap_leaf_candidate(uint64_t chunk, uint64_t exclude_start,
                                  uint64_t exclude_end, uint64_t *frame_out) {
     uint64_t start;
     uint64_t end;
@@ -187,7 +190,10 @@ static int bitmap_leaf_candidate(uint64_t exclude_start,
     for (frame = start; frame < end; frame++) {
         if (frame >= exclude_start && frame < exclude_end) continue;
         if (!frame_is_usable(frame) || frame_is_reserved(frame)) continue;
+        if (frame / PFA_SPARSE_CHUNK_FRAMES != chunk && !bitmap_get_leaf(frame))
+            continue;
         if (bitmap_test_raw(frame)) continue;
+        if (!pt_direct_map_ok(frame * PAGE_SIZE)) continue;
         *frame_out = frame;
         return 0;
     }
@@ -206,7 +212,8 @@ static int bitmap_ensure_leaf(uint64_t frame_idx, uint64_t exclude_start,
     if (!pfa_bitmap || frame_idx >= bitmap_entries_used) return -1;
     chunk = frame_idx / PFA_SPARSE_CHUNK_FRAMES;
     if (bitmap_directory_get(chunk) != 0) return 0;
-    if (bitmap_leaf_candidate(exclude_start, exclude_end, &leaf_frame) != 0)
+    if (bitmap_leaf_candidate(chunk, exclude_start, exclude_end,
+                              &leaf_frame) != 0)
         return -1;
     leaf_phys = leaf_frame * PAGE_SIZE;
     leaf = (uint8_t *)(leaf_phys + KERNEL_VMA);
@@ -385,6 +392,10 @@ static uint64_t find_free_frames(uint64_t num) {
         result = find_free_frames_range(cold_low_start_frame,
                                         cold_low_end_frame, num);
     }
+    if (!result && kernel_reclaim_hi > kernel_reclaim_lo) {
+        result = find_free_frames_range(kernel_reclaim_lo,
+                                        kernel_reclaim_hi, num);
+    }
 
     pfa_lock_release(eflags);
     return result;
@@ -398,10 +409,11 @@ uint64_t pfa_alloc(void) {
     return result;
 }
 
+static uint64_t refht_release(uint64_t phys_addr, int cow, int *free_page);
+
 void pfa_free(uint64_t phys_addr) {
     uint64_t idx;
     uint64_t eflags;
-    uint64_t cur_ref;
 
     if (phys_addr % PAGE_SIZE != 0) {
         return;
@@ -412,20 +424,13 @@ void pfa_free(uint64_t phys_addr) {
         return;
     }
     if (idx < kernel_reserved_frames &&
-        (idx < cold_low_start_frame || idx >= cold_low_end_frame)) {
+        (idx < cold_low_start_frame || idx >= cold_low_end_frame) &&
+        (idx < kernel_reclaim_lo || idx >= kernel_reclaim_hi)) {
         return;
     }
     if (!frame_is_usable(idx) || frame_is_reserved(idx)) return;
-    if ((uint64_t)idx < pfa_refcount_entries) {
-        cur_ref = pfa_ref_get((uint64_t)(idx * PAGE_SIZE));
-        if (cur_ref > 1) {
-            pfa_ref_dec((uint64_t)(idx * PAGE_SIZE));
-            return;
-        }
-        if (cur_ref == 1) {
-            pfa_ref_dec((uint64_t)(idx * PAGE_SIZE));
-        }
-    }
+    if ((uint64_t)idx < pfa_refcount_entries &&
+        refht_release(phys_addr, 0, NULL) > 0) return;
 
     pfa_lock_acquire(&eflags);
     if (test_bit(idx)) {
@@ -547,6 +552,11 @@ static void pfa_reclaim_kernel_range_internal(uint64_t phys_start,
         if (test_bit(f)) {
             clear_bit(f);
             count++;
+            if (f < kernel_reserved_frames) {
+                if (kernel_reclaim_hi == 0 || f < kernel_reclaim_lo)
+                    kernel_reclaim_lo = f;
+                if (f >= kernel_reclaim_hi) kernel_reclaim_hi = f + 1;
+            }
         }
     }
     __sync_fetch_and_add(&pfa_cached_free, count);
@@ -571,28 +581,44 @@ void pfa_reclaim_kernel_range_quiet(uint64_t phys_start, uint64_t phys_end) {
     pfa_reclaim_kernel_range_internal(phys_start, phys_end, 0);
 }
 
-uint64_t pfa_alloc_contiguous(uint64_t num_frames) {
+static uint64_t find_direct_frames(uint64_t end, uint64_t num) {
+    uint64_t start;
     uint64_t result;
+    uint64_t saved_hint;
+    uint64_t bad;
+    uint64_t i;
 
-    if (num_frames == 0) return 0;
-    result = find_free_frames(num_frames);
-    if (!result && scheduler_initialized) task_memory_pressure_request();
+    if (end > 0x40000000ULL / PAGE_SIZE) end = 0x40000000ULL / PAGE_SIZE;
+    if (end > total_pages_managed) end = total_pages_managed;
+    saved_hint = last_alloc_hint;
+    start = kernel_reserved_frames;
+    result = 0;
+    while (start < end) {
+        result = find_free_frames_range(start, end, num);
+        if (!result) break;
+        for (bad = 0; bad < num &&
+             pt_direct_map_ok(result + bad * PAGE_SIZE); bad++) ;
+        if (bad == num) break;
+        for (i = 0; i < num; i++) clear_bit(result / PAGE_SIZE + i);
+        __sync_fetch_and_add(&pfa_cached_free, num);
+        start = result / PAGE_SIZE + bad + 1;
+        result = 0;
+    }
+    last_alloc_hint = saved_hint;
     return result;
+}
+
+uint64_t pfa_alloc_contiguous(uint64_t num_frames) {
+    return pfa_alloc_contiguous_below(num_frames, 0x40000000ULL);
 }
 
 uint64_t pfa_alloc_contiguous_below(uint64_t num_frames, uint64_t max_phys) {
     uint64_t result;
     uint64_t eflags;
-    uint64_t end;
 
     if (num_frames == 0 || max_phys == 0) return 0;
-    end = max_phys / PAGE_SIZE;
-    if (end > total_pages_managed) end = total_pages_managed;
     pfa_lock_acquire(&eflags);
-    if (end <= kernel_reserved_frames)
-        result = 0;
-    else
-        result = find_free_frames_range(kernel_reserved_frames, end, num_frames);
+    result = find_direct_frames(max_phys / PAGE_SIZE, num_frames);
     pfa_lock_release(eflags);
     if (!result && scheduler_initialized) task_memory_pressure_request();
     return result;
@@ -737,20 +763,13 @@ void *pmm_alloc_pages(uint64_t num) {
 }
 
 void *pmm_alloc_mapped_page(void) {
-    extern uint64_t boot_pml4[];
-    extern void pt_init_temp_mapping(void);
-    extern uint64_t pt_temp_pt_ready_check(void);
     uint64_t eflags;
     uint64_t start;
     uint64_t end;
     uint64_t phys;
     uint64_t saved_hint;
-    uint64_t pml4_phys;
     int cold;
 
-    if (!pt_temp_pt_ready_check()) pt_init_temp_mapping();
-    if (!pt_temp_pt_ready_check()) return NULL;
-    pml4_phys = (uint64_t)(uintptr_t)boot_pml4;
     pfa_lock_acquire(&eflags);
     saved_hint = last_alloc_hint;
     start = kernel_reserved_frames;
@@ -767,9 +786,7 @@ void *pmm_alloc_mapped_page(void) {
             cold = 1;
             continue;
         }
-        if (vmm_get_phys_in_pml4(pml4_phys, phys + KERNEL_VMA) == phys &&
-            (vmm_get_flags_in_pml4(pml4_phys, phys + KERNEL_VMA) &
-             VMM_PTE_WRITE)) break;
+        if (pt_direct_map_ok(phys)) break;
         clear_bit(phys / PAGE_SIZE);
         __sync_fetch_and_add(&pfa_cached_free, 1);
         start = phys / PAGE_SIZE + 1;
@@ -807,6 +824,10 @@ void *pmm_alloc_low_page(void) {
                 in_region = 1;
                 idx_alloc = (uint64_t)(try_addr / PAGE_SIZE);
                 if (idx_alloc < total_pages_managed && !test_bit(idx_alloc)) {
+                    if (bitmap_prepare_range(idx_alloc, 1) != 0) {
+                        pfa_lock_release(eflags);
+                        return NULL;
+                    }
                     low_bump = try_addr + PAGE_SIZE;
                     set_bit(idx_alloc);
                     __sync_fetch_and_sub(&pfa_cached_free, 1);

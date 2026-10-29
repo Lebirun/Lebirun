@@ -111,6 +111,7 @@ static void *early_kmalloc(size_t size) {
         }
         early_heap_current = chunk;
         early_heap_total += pages * PAGE_SIZE;
+        if (chunk->size < size) return NULL;
         target = chunk;
     }
     ptr = (uint8_t *)target + sizeof(early_heap_chunk_t) + target->used;
@@ -769,6 +770,8 @@ void heap_reclaim_unused(void) {
     }
     if (trim_block && trim_remove)
         demand_decommit_batch_stage(&batch, trim_start, trim_end);
+    if (!trim_block && batch.reserved_end < kernel_heap.end_addr)
+        batch.reserved_end = kernel_heap.end_addr;
     result = demand_decommit_batch_flush(&batch);
     block = kernel_heap.free_list;
     while (block) {
