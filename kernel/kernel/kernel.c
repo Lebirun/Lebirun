@@ -55,6 +55,7 @@ extern uint32_t multiboot_magic;
 extern uint64_t multiboot_ptr;
 
 mutex_t print_lock;
+static int kernel_live_fs_used;
 
 extern task_t* current_task;
 
@@ -133,6 +134,8 @@ static void kernel_reclaim_runtime_memory(void) {
     extern uint8_t _kernel_boot_stack_end[];
     extern uint8_t _kernel_multiboot_start[];
     extern uint8_t _kernel_multiboot_end[];
+    extern uint8_t _kernel_live_text_start[];
+    extern uint8_t _kernel_live_text_end[];
     extern int syscall_core_fallback_reclaimable(void);
     uint64_t multiboot_start;
     uint64_t multiboot_end;
@@ -149,6 +152,9 @@ static void kernel_reclaim_runtime_memory(void) {
     if (reclaim_optional)
         kernel_unmap_virtual_memory(_kernel_init_optional_start,
                                     _kernel_init_optional_end);
+    if (!kernel_live_fs_used)
+        kernel_unmap_virtual_memory(_kernel_live_text_start,
+                                    _kernel_live_text_end);
     kernel_unmap_virtual_memory(_kernel_boot_stack_start,
                                 _kernel_boot_stack_end);
     for (address = multiboot_start; address < multiboot_end;
@@ -161,6 +167,9 @@ static void kernel_reclaim_runtime_memory(void) {
     if (reclaim_optional)
         kernel_release_virtual_memory(_kernel_init_optional_start,
                                       _kernel_init_optional_end, 1);
+    if (!kernel_live_fs_used)
+        kernel_release_virtual_memory(_kernel_live_text_start,
+                                      _kernel_live_text_end, 1);
     kernel_release_virtual_memory(_kernel_boot_stack_start,
                                   _kernel_boot_stack_end, 0);
     pfa_reclaim_kernel_range_quiet(multiboot_start, multiboot_end);
@@ -311,6 +320,7 @@ static void KERNEL_INIT kernel_boot(void) {
     ahci_done = 0;
     devs_registered = 0;
     if (mod_count > 0) {
+        kernel_live_fs_used = 1;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
              tag->type != MULTIBOOT2_TAG_END;
              tag = multiboot2_next_tag(tag)) {

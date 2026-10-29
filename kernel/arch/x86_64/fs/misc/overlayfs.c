@@ -28,7 +28,7 @@ static mutex_t overlay_node_lock;
 static void overlay_try_free_node(overlay_node_t *onode);
 static uint64_t overlay_vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 
-static vfs_node_t *overlay_backing_node(vfs_node_t *node) {
+KERNEL_RESIDENT static vfs_node_t *overlay_backing_node(vfs_node_t *node) {
     overlay_node_t *onode;
 
     if (!node) return NULL;
@@ -38,11 +38,11 @@ static vfs_node_t *overlay_backing_node(vfs_node_t *node) {
     return onode->upper_node ? onode->upper_node : onode->lower_node;
 }
 
-vfs_node_t *overlay_get_backing_node(vfs_node_t *node) {
+KERNEL_RESIDENT vfs_node_t *overlay_get_backing_node(vfs_node_t *node) {
     return overlay_backing_node(node);
 }
 
-int overlay_same_file(vfs_node_t *first, vfs_node_t *second) {
+KERNEL_RESIDENT int overlay_same_file(vfs_node_t *first, vfs_node_t *second) {
     vfs_node_t *first_backing;
     vfs_node_t *second_backing;
 
@@ -143,7 +143,7 @@ static int ov_cache_ensure_space(void) {
     return 0;
 }
 
-void overlay_flush_cache(void) {
+KERNEL_RESIDENT void overlay_flush_cache(void) {
     uint64_t i;
     overlay_node_t *onode;
 
@@ -164,7 +164,7 @@ void overlay_flush_cache(void) {
     mutex_unlock(&overlay_node_lock);
 }
 
-void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
+KERNEL_RESIDENT void overlay_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes) {
     uint64_t i;
     uint64_t total;
 
@@ -1221,7 +1221,7 @@ rename_free_paths:
     return ret;
 }
 
-static vfs_node_t *overlay_vfs_do_mount(const char *device, const char *mountpoint) {
+KERNEL_RESIDENT static vfs_node_t *overlay_vfs_do_mount(const char *device, const char *mountpoint) {
     (void)device;
     (void)mountpoint;
     

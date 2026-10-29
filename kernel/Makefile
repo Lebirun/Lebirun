@@ -108,6 +108,13 @@ lib/string.o
 
 $(KERNEL_SENSITIVE_OBJS): CFLAGS += -Oz
 
+KERNEL_LIVE_OBJS=\
+$(ARCHDIR)/fs/squashfs.o \
+$(ARCHDIR)/fs/misc/overlayfs.o \
+$(ARCHDIR)/xz/xz.o
+
+$(KERNEL_LIVE_OBJS): CFLAGS += -fno-lto -fno-ipa-icf
+
 USER_SHELL_BIN=$(ARCHDIR)/user_shell.bin
 USER_SHELL_OBJ=$(ARCHDIR)/user_shell_bin.o
 CRTBEGIN:=$(shell $(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=crtbegin.o)

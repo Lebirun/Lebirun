@@ -66,7 +66,17 @@ SECTIONS
         _kernel_init_optional_end = .;
     } :init_data
 
+    .live.text ALIGN(4K) : AT(ADDR(.live.text) - KERNEL_VMA) {
+        _kernel_live_text_start = .;
+        *fs/squashfs.o(.text .text.*)
+        *fs/misc/overlayfs.o(.text .text.*)
+        *xz/xz.o(.text .text.*)
+        . = ALIGN(4K);
+        _kernel_live_text_end = .;
+    } :runtime_text
+
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VMA) {
+        *(.resident.text)
         *(.text .text.*)
         _kernel_text_end = .;
     } :runtime_text

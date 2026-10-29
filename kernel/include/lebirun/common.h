@@ -10,6 +10,7 @@
 #define KERNEL_INIT __attribute__((section(".init.text")))
 #define KERNEL_INIT_RODATA __attribute__((section(".init.rodata")))
 #define KERNEL_INIT_BSS __attribute__((section(".init.bss")))
+#define KERNEL_RESIDENT __attribute__((section(".resident.text")))
 #define KERNEL_INIT_OPTIONAL_BSS \
     __attribute__((section(".init.optional.bss")))
 #define KERNEL_INIT_STRING(value) \

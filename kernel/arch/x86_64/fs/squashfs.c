@@ -173,7 +173,7 @@ static void sqfs_cache_ensure(void) {
     }
 }
 
-void squashfs_flush_cache(void) {
+KERNEL_RESIDENT void squashfs_flush_cache(void) {
     uint64_t i;
     squashfs_vfs_node_t *snode;
     uint8_t *cached_data;
@@ -226,7 +226,7 @@ void KERNEL_INIT squashfs_set_access_blocked(int blocked) {
     sqfs_access_blocked = blocked ? 1 : 0;
 }
 
-void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, uint64_t *data_bytes) {
+KERNEL_RESIDENT void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, uint64_t *data_bytes) {
     uint64_t i;
     uint64_t data;
     squashfs_vfs_node_t *snode;
@@ -251,7 +251,7 @@ void squashfs_cache_stats(uint64_t *nodes, uint64_t *capacity, uint64_t *bytes, 
     if (data_bytes) *data_bytes = data;
 }
 
-void squashfs_decomp_stats(uint64_t *failures, uint64_t *oversize, uint64_t *padded) {
+KERNEL_RESIDENT void squashfs_decomp_stats(uint64_t *failures, uint64_t *oversize, uint64_t *padded) {
     if (failures) *failures = sqfs_decomp_failures;
     if (oversize) *oversize = sqfs_decomp_oversize;
     if (padded) *padded = sqfs_decomp_padded;
@@ -1317,12 +1317,12 @@ static uint64_t squashfs_vfs_read(vfs_node_t *node, uint64_t offset,
     return result;
 }
 
-uint64_t squashfs_transfer_window_size(vfs_node_t *node) {
+KERNEL_RESIDENT uint64_t squashfs_transfer_window_size(vfs_node_t *node) {
     if (!node || node->read != squashfs_vfs_read) return 0;
     return squashfs_ctx.block_size;
 }
 
-uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
+KERNEL_RESIDENT uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
                                  uint64_t size, uint8_t *buffer,
                                  uint64_t capacity) {
     uint64_t result;
@@ -1344,7 +1344,7 @@ uint64_t squashfs_transfer_read(vfs_node_t *node, uint64_t offset,
     return result;
 }
 
-uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
+KERNEL_RESIDENT uint64_t squashfs_transfer_read_view(vfs_node_t *node, uint64_t offset,
                                       uint64_t size,
                                       squashfs_transfer_cache_t *cache,
                                       uint8_t **view) {
@@ -1725,7 +1725,7 @@ static vfs_node_t *squashfs_vfs_finddir(vfs_node_t *node, const char *name) {
     return result;
 }
 
-static vfs_node_t *squashfs_vfs_do_mount(const char *device, const char *mountpoint) {
+KERNEL_RESIDENT static vfs_node_t *squashfs_vfs_do_mount(const char *device, const char *mountpoint) {
     (void)device;
     (void)mountpoint;
     
@@ -1808,7 +1808,7 @@ void KERNEL_INIT squashfs_init(uint64_t mod_start, uint64_t mod_end) {
     KERNEL_INIT_LOG("SQUASHFS: Initialized successfully\n");
 }
 
-uint64_t squashfs_get_module_pages(void) {
+KERNEL_RESIDENT uint64_t squashfs_get_module_pages(void) {
     return squashfs_module_pages;
 }
 
@@ -1821,7 +1821,7 @@ void KERNEL_INIT squashfs_vfs_register(void) {
     vfs_register_fs(&squashfs_fs_type);
 }
 
-squashfs_context_t *squashfs_get_context(void) {
+KERNEL_RESIDENT squashfs_context_t *squashfs_get_context(void) {
     if (!squashfs_initialized) {
         return NULL;
     }
