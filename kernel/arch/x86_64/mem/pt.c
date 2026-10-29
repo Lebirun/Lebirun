@@ -304,7 +304,48 @@ int pt_direct_map_ok(uint64_t phys_addr) {
     return (pte & 3) == 3 && (pte & 0x000FFFFFFFFFF000ULL) == phys_addr;
 }
 
+void *pt_direct_ptr(uint64_t phys_addr) {
+    if (phys_addr >= PT_DIRECT_WINDOW_START || !pt_direct_map_ok(phys_addr))
+        return NULL;
+    return (void *)((phys_addr & ~(PAGE_SIZE - 1)) + KERNEL_VMA);
+}
+
 void pt_sync_kernel_mappings(void) {
+}
+
+int pt_kernel_walk_leaf(uint64_t pml4_phys, uint64_t virt_addr,
+                        uint64_t *entry_out, uint64_t *effective_out,
+                        int *huge_out) {
+    uint64_t *table;
+    uint64_t entry;
+    uint64_t effective;
+    int shift;
+    int huge;
+
+    if ((pml4_phys & ~0xFFFULL) != (uint64_t)(uintptr_t)boot_pml4 ||
+        virt_addr < KERNEL_VMA) return -1;
+    effective = VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_USER;
+    table = kv_pml4;
+    huge = 0;
+    for (shift = 39; shift >= 12; shift -= 9) {
+        entry = table[(virt_addr >> shift) & 0x1FF];
+        if (!(entry & VMM_PTE_PRESENT)) {
+            if (shift != 12) return 0;
+            break;
+        }
+        if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
+        if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
+        if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+        if (shift == 21 && (entry & 0x80)) {
+            huge = 1;
+            break;
+        }
+        table = (uint64_t *)((entry & 0x000FFFFFFFFFF000ULL) + KERNEL_VMA);
+    }
+    *entry_out = entry;
+    if (effective_out) *effective_out = effective;
+    if (huge_out) *huge_out = huge;
+    return 1;
 }
 
 static uint64_t *pt_get_pd_for_pdpt(uint64_t virt_addr) {

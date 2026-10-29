@@ -15,6 +15,10 @@ extern uint64_t pfa_alloc(void);
 spinlock_t vmm_user_lock = {0};
 
 extern int task_pml4_live_elsewhere(uint64_t pml4_phys);
+extern int pt_kernel_walk_leaf(uint64_t pml4_phys, uint64_t virt_addr,
+                               uint64_t *entry_out, uint64_t *effective_out,
+                               int *huge_out);
+extern void *pt_direct_ptr(uint64_t phys_addr);
 
 void vmm_user_tlb_sync(uint64_t pml4_phys) {
     if (task_pml4_live_elsewhere(pml4_phys)) smp_tlb_flush_all_sync();
@@ -79,78 +83,59 @@ static uint64_t get_page_phys_in_pd(uint64_t pd_phys, uint64_t virt_addr) {
     return result;
 }
 
+static void *vmm_phys_map(uint64_t phys, uint64_t slot) {
+    void *direct;
+
+    direct = pt_direct_ptr(phys);
+    if (direct) return direct;
+    temp_map_raw(slot, phys);
+    return (void *)slot;
+}
+
+static void vmm_phys_unmap(void *view, uint64_t slot) {
+    if ((uint64_t)view == slot) temp_unmap_raw(slot);
+}
+
 static int vmm_walk_leaf(uint64_t pml4_phys, uint64_t virt_addr,
                          uint64_t *entry_out, uint64_t *effective_out,
                          int *huge_out) {
-    uint64_t pml4_idx;
-    uint64_t pdpt_idx;
-    uint64_t pd_idx;
-    uint64_t pt_idx;
-    uint64_t temp_virt;
     uint64_t *table;
     uint64_t entry;
     uint64_t table_phys;
     uint64_t saved_flags;
     uint64_t effective;
+    int shift;
+    int huge;
     int result;
 
-    pml4_idx = (virt_addr >> 39) & 0x1FF;
-    pdpt_idx = (virt_addr >> 30) & 0x1FF;
-    pd_idx = (virt_addr >> 21) & 0x1FF;
-    pt_idx = (virt_addr >> 12) & 0x1FF;
+    result = pt_kernel_walk_leaf(pml4_phys, virt_addr, entry_out,
+                                 effective_out, huge_out);
+    if (result >= 0) return result;
     effective = VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_USER;
+    table_phys = pml4_phys & VMM_PHYS_MASK;
+    huge = 0;
     result = 0;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
-    temp_virt = TEMP_SLOT(0);
-    temp_map_raw(temp_virt, pml4_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pml4_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & VMM_PTE_PRESENT)) goto out;
-    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
-    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
-    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
-    table_phys = entry & VMM_PHYS_MASK;
-    temp_virt = TEMP_SLOT(1);
-    temp_map_raw(temp_virt, table_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pdpt_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & VMM_PTE_PRESENT)) goto out;
-    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
-    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
-    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
-    table_phys = entry & VMM_PHYS_MASK;
-    temp_virt = TEMP_SLOT(2);
-    temp_map_raw(temp_virt, table_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pd_idx];
-    temp_unmap_raw(temp_virt);
-    if (!(entry & VMM_PTE_PRESENT)) goto out;
-    if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
-    if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
-    if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
-    if (entry & 0x80) {
-        *entry_out = entry;
-        if (effective_out) *effective_out = effective;
-        if (huge_out) *huge_out = 1;
-        result = 1;
-        goto out;
-    }
-    table_phys = entry & VMM_PHYS_MASK;
-    temp_virt = TEMP_SLOT(3);
-    temp_map_raw(temp_virt, table_phys);
-    table = (uint64_t *)temp_virt;
-    entry = table[pt_idx];
-    temp_unmap_raw(temp_virt);
-    if (entry & VMM_PTE_PRESENT) {
+    for (shift = 39; shift >= 12; shift -= 9) {
+        table = (uint64_t *)vmm_phys_map(table_phys, TEMP_SLOT(0));
+        entry = table[(virt_addr >> shift) & 0x1FF];
+        vmm_phys_unmap(table, TEMP_SLOT(0));
+        if (!(entry & VMM_PTE_PRESENT)) {
+            if (shift != 12) goto out;
+            break;
+        }
         if (!(entry & VMM_PTE_WRITE)) effective &= ~VMM_PTE_WRITE;
         if (!(entry & VMM_PTE_USER)) effective &= ~VMM_PTE_USER;
         if (entry & VMM_PTE_NX) effective |= VMM_PTE_NX;
+        if (shift == 21 && (entry & 0x80)) {
+            huge = 1;
+            break;
+        }
+        table_phys = entry & VMM_PHYS_MASK;
     }
     *entry_out = entry;
     if (effective_out) *effective_out = effective;
-    if (huge_out) *huge_out = 0;
+    if (huge_out) *huge_out = huge;
     result = 1;
 out:
     if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
@@ -858,6 +843,7 @@ int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
     uint64_t phys;
     uint64_t saved_flags;
     uint8_t *page;
+    void *view;
 
     if (addr >= KERNEL_VMA || size > KERNEL_VMA - addr) return -1;
     offset = 0;
@@ -869,11 +855,11 @@ int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
         phys = vmm_get_user_page_in_pml4(pml4_phys, (addr + offset) & ~0xFFFULL,
                                          write);
         if (!phys) break;
-        temp_map_raw(TEMP_SLOT(3), phys);
-        page = (uint8_t *)TEMP_SLOT(3) + ((addr + offset) & 0xFFF);
+        view = vmm_phys_map(phys, TEMP_SLOT(3));
+        page = (uint8_t *)view + ((addr + offset) & 0xFFF);
         if (write) memcpy(page, (uint8_t *)buf + offset, chunk);
         else memcpy((uint8_t *)buf + offset, page, chunk);
-        temp_unmap_raw(TEMP_SLOT(3));
+        vmm_phys_unmap(view, TEMP_SLOT(3));
         offset += chunk;
     }
     spin_unlock(&vmm_user_lock);
@@ -885,6 +871,7 @@ void vmm_copy_to_pml4(uint64_t pd_phys, uint64_t dest_virt, const void *src, uin
     const uint8_t *s = (const uint8_t *)src;
     uint64_t offset = 0;
     uint64_t saved_flags;
+    void *view;
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
 
@@ -901,9 +888,9 @@ void vmm_copy_to_pml4(uint64_t pd_phys, uint64_t dest_virt, const void *src, uin
             return;
         }
 
-        temp_map_raw(TEMP_SLOT(3), page_phys);
-        memcpy((void *)(TEMP_SLOT(3) + page_offset), s + offset, chunk);
-        temp_unmap_raw(TEMP_SLOT(3));
+        view = vmm_phys_map(page_phys, TEMP_SLOT(3));
+        memcpy((uint8_t *)view + page_offset, s + offset, chunk);
+        vmm_phys_unmap(view, TEMP_SLOT(3));
 
         offset += chunk;
     }
@@ -915,6 +902,7 @@ void vmm_read_from_pml4(uint64_t pd_phys, uint64_t src_virt, void *dest, uint64_
     uint8_t *d = (uint8_t *)dest;
     uint64_t offset = 0;
     uint64_t saved_flags;
+    void *view;
 
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
 
@@ -930,9 +918,9 @@ void vmm_read_from_pml4(uint64_t pd_phys, uint64_t src_virt, void *dest, uint64_
             return;
         }
 
-        temp_map_raw(TEMP_SLOT(3), page_phys);
-        memcpy(d + offset, (void *)(TEMP_SLOT(3) + page_offset), chunk);
-        temp_unmap_raw(TEMP_SLOT(3));
+        view = vmm_phys_map(page_phys, TEMP_SLOT(3));
+        memcpy(d + offset, (uint8_t *)view + page_offset, chunk);
+        vmm_phys_unmap(view, TEMP_SLOT(3));
 
         offset += chunk;
     }

@@ -62,12 +62,15 @@ void pt_init_temp_mapping(void) {
 
 void temp_map_raw_pae(uint64_t temp_virt, uint64_t phys_addr) {
     uint64_t *pt;
+    uint64_t old;
 
     if (!pt_temp_pt_ready) pt_init_temp_mapping();
     pt = pt_temp_table(temp_virt);
     if (!pt) return;
+    old = pt[(temp_virt >> 12) & 0x1FF];
     pt[(temp_virt >> 12) & 0x1FF] = (phys_addr & ~0xFFFULL) | 3;
-    __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
+    if (old & 1)
+        __asm__ volatile("invlpg (%0)" : : "r"(temp_virt) : "memory");
 }
 
 void temp_unmap_raw_pae(uint64_t temp_virt) {

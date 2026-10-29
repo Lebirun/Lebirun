@@ -18,7 +18,6 @@ extern void kfree(void *ptr);
 
 typedef struct kstack_slot {
     uint64_t page_phys[KSTACK_USABLE_PAGES];
-    struct kstack_slot *next;
     uint16_t slot;
     uint8_t bottom_mapped;
     uint8_t syscall_bottom;
@@ -26,7 +25,8 @@ typedef struct kstack_slot {
     uint8_t multi_cpu;
 } kstack_slot_t;
 
-static kstack_slot_t *kstack_slots;
+static kstack_slot_t **kstack_table;
+static uint64_t kstack_table_size;
 static int kstack_initialized = 0;
 static spinlock_t kstack_lock = {0};
 
@@ -80,16 +80,38 @@ static int addr_to_slot(uint64_t addr) {
 }
 
 static kstack_slot_t *kstack_find_slot_locked(int slot) {
-    kstack_slot_t *entry;
+    if (slot < 0 || (uint64_t)slot >= kstack_table_size) return NULL;
+    return kstack_table[slot];
+}
 
-    entry = kstack_slots;
-    while (entry && entry->slot < slot) entry = entry->next;
-    if (entry && entry->slot == slot) return entry;
-    return NULL;
+static int kstack_table_grow(void) {
+    kstack_slot_t **table;
+    kstack_slot_t **old;
+    uint64_t size;
+    uint64_t flags;
+
+    size = kstack_table_size ? kstack_table_size * 2 : 16;
+    if (size > KSTACK_SLOT_COUNT) size = KSTACK_SLOT_COUNT;
+    if (size <= kstack_table_size) return -1;
+    table = (kstack_slot_t **)kcalloc(size, sizeof(*table));
+    if (!table) return -1;
+    kstack_lock_acquire(&flags);
+    old = table;
+    if (kstack_table_size < size) {
+        if (kstack_table)
+            memcpy(table, kstack_table, kstack_table_size * sizeof(*table));
+        old = kstack_table;
+        kstack_table = table;
+        kstack_table_size = size;
+    }
+    kstack_lock_release(flags);
+    kfree(old);
+    return 0;
 }
 
 void KERNEL_INIT kstack_init(void) {
-    kstack_slots = NULL;
+    kstack_table = NULL;
+    kstack_table_size = 0;
     spinlock_init(&kstack_lock);
     kstack_initialized = 1;
 }
@@ -101,8 +123,6 @@ uint8_t *kstack_alloc(void) {
     uint64_t page_virt;
     uint64_t base_virt;
     kstack_slot_t *entry;
-    kstack_slot_t *current;
-    kstack_slot_t *previous;
     uint64_t flags;
 
     if (!kstack_initialized) return NULL;
@@ -111,25 +131,19 @@ uint8_t *kstack_alloc(void) {
     if (!entry) return NULL;
     memset(entry, 0, sizeof(kstack_slot_t));
 
-    kstack_lock_acquire(&flags);
-    slot = 0;
-    previous = NULL;
-    current = kstack_slots;
-    while (current && current->slot == slot) {
-        slot++;
-        previous = current;
-        current = current->next;
-    }
-    if ((uint64_t)slot >= KSTACK_SLOT_COUNT) {
+    for (;;) {
+        kstack_lock_acquire(&flags);
+        for (slot = 0; (uint64_t)slot < kstack_table_size &&
+                       kstack_table[slot]; slot++) ;
+        if ((uint64_t)slot < kstack_table_size) break;
         kstack_lock_release(flags);
-        kfree(entry);
-        return NULL;
+        if (kstack_table_grow() < 0) {
+            kfree(entry);
+            return NULL;
+        }
     }
-
     entry->slot = (uint16_t)slot;
-    entry->next = current;
-    if (previous) previous->next = entry;
-    else kstack_slots = entry;
+    kstack_table[slot] = entry;
     kstack_lock_release(flags);
 
     p = KSTACK_USABLE_PAGES - 1;
@@ -146,16 +160,7 @@ uint8_t *kstack_alloc(void) {
     }
     if (!phys) {
         kstack_lock_acquire(&flags);
-        previous = NULL;
-        current = kstack_slots;
-        while (current && current != entry) {
-            previous = current;
-            current = current->next;
-        }
-        if (current) {
-            if (previous) previous->next = current->next;
-            else kstack_slots = current->next;
-        }
+        if (kstack_table[slot] == entry) kstack_table[slot] = NULL;
         kstack_lock_release(flags);
         kfree(entry);
         return NULL;
@@ -179,7 +184,6 @@ void kstack_free(uint8_t *base) {
     int p;
     uint64_t expected_base;
     kstack_slot_t *entry;
-    kstack_slot_t *previous;
     uint64_t flags;
 
     if (!kstack_initialized || !base) return;
@@ -188,13 +192,8 @@ void kstack_free(uint8_t *base) {
     if (slot < 0) return;
 
     kstack_lock_acquire(&flags);
-    previous = NULL;
-    entry = kstack_slots;
-    while (entry && entry->slot < slot) {
-        previous = entry;
-        entry = entry->next;
-    }
-    if (!entry || entry->slot != slot) {
+    entry = kstack_find_slot_locked(slot);
+    if (!entry) {
         kstack_lock_release(flags);
         return;
     }
@@ -211,8 +210,7 @@ void kstack_free(uint8_t *base) {
             pfa_free(entry->page_phys[p]);
         }
     }
-    if (previous) previous->next = entry->next;
-    else kstack_slots = entry->next;
+    kstack_table[slot] = NULL;
     kstack_lock_release(flags);
 
     kfree(entry);
@@ -295,18 +293,19 @@ void kstack_memory_stats(uint64_t *slots, uint64_t *pages) {
     uint64_t slot_count;
     uint64_t page_count;
     uint64_t flags;
+    uint64_t s;
     int i;
 
     slot_count = 0;
     page_count = 0;
     kstack_lock_acquire(&flags);
-    entry = kstack_slots;
-    while (entry) {
+    for (s = 0; s < kstack_table_size; s++) {
+        entry = kstack_table[s];
+        if (!entry) continue;
         slot_count++;
         for (i = 0; i < KSTACK_USABLE_PAGES; i++) {
             if (entry->page_phys[i]) page_count++;
         }
-        entry = entry->next;
     }
     kstack_lock_release(flags);
     if (slots) *slots = slot_count;

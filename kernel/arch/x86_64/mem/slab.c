@@ -23,7 +23,8 @@ typedef struct slab_page {
     uint16_t pages;
     uint16_t live_count;
     uint8_t kind;
-    uint8_t reserved[3];
+    uint8_t reserved;
+    uint16_t max_free;
 } slab_page_t;
 
 typedef struct {
@@ -36,6 +37,7 @@ typedef struct {
 
 static slab_page_t *slab_small_pages;
 static slab_page_t *slab_small_tail;
+static slab_page_t *slab_small_spare;
 static uint64_t slab_pages_allocated;
 static int slab_initialized;
 static volatile int slab_lock;
@@ -204,12 +206,21 @@ static void slab_unmap_pages(uint64_t virt, uint64_t pages) {
     slab_virtual_dirty = 1;
 }
 
+static void slab_small_remove(slab_page_t *page);
+
 int slab_flush_stale(void) {
     uint64_t eflags;
     int result;
 
     if (__sync_lock_test_and_set(&slab_flush_active, 1)) return 1;
     slab_lock_acquire(&eflags);
+    if (slab_small_spare) {
+        slab_small_remove(slab_small_spare);
+        slab_small_spare->magic = 0;
+        slab_unmap_pages((uint64_t)slab_small_spare, 1);
+        slab_pages_allocated--;
+        slab_small_spare = NULL;
+    }
     if (!slab_virtual_dirty) {
         slab_lock_release(eflags);
         __sync_lock_release(&slab_flush_active);
@@ -267,6 +278,7 @@ static slab_page_t *slab_small_create(int *backing_failed) {
     block = (slab_block_t *)(virt + sizeof(slab_page_t));
     block->span = PAGE_SIZE - sizeof(slab_page_t);
     block->requested = 0;
+    page->max_free = block->span;
     slab_small_add(page);
     slab_pages_allocated++;
     return page;
@@ -289,6 +301,8 @@ static slab_block_t *slab_small_find(slab_page_t *page, uint32_t needed) {
     return NULL;
 }
 
+static void slab_small_coalesce(slab_page_t *page);
+
 static void *slab_small_allocate(size_t size, int *backing_failed) {
     slab_page_t *page;
     slab_block_t *block;
@@ -302,7 +316,7 @@ static void *slab_small_allocate(size_t size, int *backing_failed) {
     page = slab_small_pages;
     block = NULL;
     while (page) {
-        block = slab_small_find(page, needed);
+        block = page->max_free >= needed ? slab_small_find(page, needed) : NULL;
         if (block) break;
         page = page->next;
     }
@@ -322,6 +336,8 @@ static void *slab_small_allocate(size_t size, int *backing_failed) {
     block->requested = (uint32_t)size;
     page->live_count++;
     page->payload_size += size;
+    if (page == slab_small_spare) slab_small_spare = NULL;
+    slab_small_coalesce(page);
     return (uint8_t *)block + sizeof(slab_block_t);
 }
 
@@ -389,19 +405,23 @@ static void slab_small_coalesce(slab_page_t *page) {
 
     address = (uint64_t)page + sizeof(slab_page_t);
     end = (uint64_t)page + PAGE_SIZE;
+    page->max_free = 0;
     while (address + sizeof(slab_block_t) <= end) {
         block = (slab_block_t *)address;
         if (block->span < sizeof(slab_block_t) ||
             block->span > end - address) return;
         next_address = address + block->span;
-        if (next_address >= end) return;
-        next = (slab_block_t *)next_address;
-        if (next->span < sizeof(slab_block_t) ||
-            next->span > end - next_address) return;
-        if (!block->requested && !next->requested) {
-            block->span += next->span;
-            continue;
+        if (next_address < end) {
+            next = (slab_block_t *)next_address;
+            if (next->span < sizeof(slab_block_t) ||
+                next->span > end - next_address) return;
+            if (!block->requested && !next->requested) {
+                block->span += next->span;
+                continue;
+            }
         }
+        if (!block->requested && block->span > page->max_free)
+            page->max_free = block->span;
         address = next_address;
     }
 }
@@ -409,6 +429,7 @@ static void slab_small_coalesce(slab_page_t *page) {
 void KERNEL_EARLY_INIT slab_init(void) {
     slab_small_pages = NULL;
     slab_small_tail = NULL;
+    slab_small_spare = NULL;
     slab_pages_allocated = 0;
     slab_lock = 0;
     slab_virtual_dirty = 0;
@@ -592,6 +613,16 @@ void slab_free(void *ptr, void *caller) {
     block->requested = 0;
     page->live_count--;
     page->payload_size -= size;
+    if (page->live_count == 0 && !slab_small_spare) {
+        block = (slab_block_t *)(page_address + sizeof(slab_page_t));
+        block->span = PAGE_SIZE - sizeof(slab_page_t);
+        block->requested = 0;
+        page->payload_size = 0;
+        page->max_free = block->span;
+        slab_small_spare = page;
+        slab_lock_release(eflags);
+        return;
+    }
     if (page->live_count == 0) {
         slab_small_remove(page);
         page->magic = 0;

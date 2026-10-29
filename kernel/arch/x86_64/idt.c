@@ -249,8 +249,6 @@ registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr
 
 registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 {
-    uint64_t orig_cr3;
-    uint64_t kernel_cr3;
     uint64_t previous_ticks;
     uint64_t page_flags;
     uint8_t access_type;
@@ -260,6 +258,14 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     task_t *fault_task;
     cpu_info_t *cpu_info;
 
+    if (regs->int_no >= 32 && smp_percpu_irq_ready) {
+        cpu_info = smp_this_cpu();
+        previous_ticks = smp_tick_restart(cpu_info);
+        if (previous_ticks) {
+            __sync_fetch_and_add(&cpu_idle_ticks, previous_ticks);
+            cpu_info->idle_ticks += previous_ticks;
+        }
+    }
     if (regs->int_no >= 32 && regs->int_no != IPI_TLB_FLUSH_VECTOR)
         smp_tlb_flush_poll();
     if (regs->int_no < 32) {
@@ -627,12 +633,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 }
 
                 extern void fb_tick(void);
-                __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-                kernel_cr3 = vmm_get_kernel_cr3();
-                if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                    __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
-                }
-
                 fb_tick();
                 extern void net_tick(void);
 #if CONFIG_DRIVER_NET
@@ -644,10 +644,6 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 
                 pit_process_callbacks();
                 keyboard_process_sigint();
-
-                if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                    __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
-                }
             }
 
             regs = schedule_from_irq(regs);
@@ -662,30 +658,16 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                     regs = schedule_from_irq(regs);
                 }
             }
+            if (!is_bsp && cpu_info && !cpu_info->running_task)
+                task_cpu_tick_stop();
         } else if (irq == 1) {
-            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            kernel_cr3 = vmm_get_kernel_cr3();
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
-            }
             keyboard_handler(regs);
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
-            }
             keyboard_process_sigint();
             if (task_state_requires_schedule(current_task)) {
                 regs = schedule_from_irq(regs);
             }
         } else if (irq_handlers && irq < irq_handler_capacity && irq_handlers[irq]) {
-            __asm__ volatile ("mov %%cr3, %0" : "=r"(orig_cr3));
-            kernel_cr3 = vmm_get_kernel_cr3();
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(kernel_cr3) : "memory");
-            }
             irq_handlers[irq](regs);
-            if (kernel_cr3 && orig_cr3 != kernel_cr3) {
-                __asm__ volatile ("mov %0, %%cr3" : : "r"(orig_cr3) : "memory");
-            }
         }
     }
 

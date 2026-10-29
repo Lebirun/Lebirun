@@ -406,6 +406,18 @@ void KERNEL_INIT lapic_init(void) {
     lapic_write(LAPIC_REG_EOI, 0);
 }
 
+void smp_tick_stop(void) {
+    lapic_write(LAPIC_REG_TIMER_ICR, 0);
+}
+
+uint64_t smp_tick_restart(cpu_info_t *cpu) {
+    if (!cpu || !__atomic_load_n(&cpu->tick_stopped, __ATOMIC_ACQUIRE))
+        return 0;
+    __atomic_store_n(&cpu->tick_stopped, 0, __ATOMIC_RELEASE);
+    lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
+    return tick_count - cpu->tick_stop_tick;
+}
+
 void lapic_eoi(void) {
     if (lapic_base) {
         lapic_write(LAPIC_REG_EOI, 0);

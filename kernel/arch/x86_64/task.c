@@ -1058,6 +1058,22 @@ static void task_error(const char *fmt, ...) {
     }
 }
 
+static void task_kick_stopped_cpu_locked(task_t *task) {
+    int i;
+
+    if (!cpus || !smp_percpu_irq_ready) return;
+    for (i = 0; i < cpu_count; i++) {
+        if (!cpus[i].active ||
+            !__atomic_load_n(&cpus[i].tick_stopped, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&cpus[i].wake_pending, __ATOMIC_ACQUIRE))
+            continue;
+        if (task && !task_cpu_allowed(task, i)) continue;
+        __atomic_store_n(&cpus[i].wake_pending, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&idle_wake_pending, 1, __ATOMIC_RELEASE);
+        return;
+    }
+}
+
 static void task_mark_ready_locked(task_t *task) {
     task_t *running;
     int owner;
@@ -1067,6 +1083,7 @@ static void task_mark_ready_locked(task_t *task) {
     task->state = TASK_READY;
     if (!smp_scheduling_enabled() || !smp_percpu_irq_ready) return;
     owner = task->running_cpu;
+    if (owner == -1) task_kick_stopped_cpu_locked(task);
     if (owner >= -1) return;
     target = -(owner + 2);
     if (target >= cpu_count || !cpus[target].active ||
@@ -4228,6 +4245,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     int forced_reschedule;
     int eligible;
     int migrate;
+    int spare;
 
     idle_task = NULL;
     switch_to_cpu_idle = 0;
@@ -4331,6 +4349,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     candidate_frame = NULL;
     candidate = NULL;
     best_rank = -1;
+    spare = 0;
     {
         uint64_t best_vruntime = 0;
         int have_vruntime = 0;
@@ -4339,14 +4358,16 @@ registers_t* schedule_from_irq(registers_t* regs) {
                    !next->resources_released &&
                    task_cpu_available(next, cpu_id) &&
                    (this_cpu->bsp || next->id != 0 || next->is_user);
-        selectable = 0;
-        if (eligible && task_irq_return_frame(next, &candidate_frame))
-            selectable = 1;
-        if (selectable) {
+        if (next->state == TASK_READY && next != prev_task &&
+            next->running_cpu == -1 && !next->resources_released &&
+            (next->id != 0 || next->is_user))
+            spare++;
+        if (eligible) {
             rank = task_scheduler_rank(next);
-            if (!candidate || rank > best_rank ||
-                (rank == best_rank && next->sched_policy == TASK_SCHED_OTHER &&
-                 (!have_vruntime || next->vruntime < best_vruntime))) {
+            if ((!candidate || rank > best_rank ||
+                 (rank == best_rank && next->sched_policy == TASK_SCHED_OTHER &&
+                  (!have_vruntime || next->vruntime < best_vruntime))) &&
+                task_irq_return_frame(next, &candidate_frame)) {
                 candidate = next;
                 return_frame = candidate_frame;
                 best_rank = rank;
@@ -4363,6 +4384,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     }
     }
     next = candidate;
+    if (spare > (next ? 1 : 0)) task_kick_stopped_cpu_locked(NULL);
     if (next && next->sched_policy == TASK_SCHED_OTHER) {
         uint64_t weight = 1024;
         int nice = next->nice_value;
@@ -4456,7 +4478,10 @@ registers_t* schedule_from_irq(registers_t* regs) {
 
     if (!this_cpu->switching_task)
         __atomic_store_n(&this_cpu->switching_task, prev_task, __ATOMIC_RELEASE);
-    if (prev_task && prev_task->state == TASK_RUNNING) prev_task->state = TASK_READY;
+    if (prev_task && prev_task->state == TASK_RUNNING) {
+        prev_task->state = TASK_READY;
+        task_kick_stopped_cpu_locked(prev_task);
+    }
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
     next->state = TASK_RUNNING;
     task_set_current(next);
@@ -4507,6 +4532,37 @@ out_restore_cr3:
         task_deferred_work();
     }
     return result;
+}
+
+void task_cpu_tick_stop(void) {
+    cpu_info_t *cpu;
+    task_t *t;
+    int cpu_id;
+    int work;
+
+    cpu = smp_this_cpu();
+    if (!cpus || !cpu || cpu->bsp || cpu->running_task ||
+        cpu->scheduler_lock_depth || !smp_scheduling_enabled() ||
+        !smp_percpu_irq_ready)
+        return;
+    cpu_id = (int)(cpu - cpus);
+    cpu->tick_stop_tick = tick_count;
+    __atomic_store_n(&cpu->tick_stopped, 1, __ATOMIC_SEQ_CST);
+    spin_lock(&sched_lock);
+    work = 0;
+    t = ready_queue_head;
+    while (t && !work) {
+        work = t->state == TASK_READY && !t->resources_released &&
+               (t->id != 0 || t->is_user) && task_cpu_available(t, cpu_id);
+        t = t->next;
+        if (t == ready_queue_head) break;
+    }
+    spin_unlock(&sched_lock);
+    if (work) {
+        __atomic_store_n(&cpu->tick_stopped, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    smp_tick_stop();
 }
 
 void set_syscall_frame(registers_t *frame) {

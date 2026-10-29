@@ -1078,6 +1078,14 @@ static uint64_t proc_self_io_read(vfs_node_t *node, uint64_t offset, uint64_t si
     return size;
 }
 
+static uint64_t proc_cpu_stopped_ticks(cpu_info_t *cpu) {
+    uint64_t start;
+
+    if (!__atomic_load_n(&cpu->tick_stopped, __ATOMIC_ACQUIRE)) return 0;
+    start = cpu->tick_stop_tick;
+    return tick_count > start ? tick_count - start : 0;
+}
+
 static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     char *buf;
     size_t capacity;
@@ -1105,6 +1113,8 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     user_t = cpu_user_ticks;
     sys_t = cpu_system_ticks;
     idle_t = cpu_idle_ticks;
+    for (i = 0; cpus && i < cpu_count; i++)
+        idle_t += proc_cpu_stopped_ticks(&cpus[i]);
     
     running = 0;
     blocked = 0;
@@ -1137,7 +1147,7 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
             "cpu%d %lu 0 %lu %lu 0 0 0 0 0 0\n", i,
             cpus ? cpus[i].user_ticks : 0,
             cpus ? cpus[i].system_ticks : 0,
-            cpus ? cpus[i].idle_ticks : 0);
+            cpus ? cpus[i].idle_ticks + proc_cpu_stopped_ticks(&cpus[i]) : 0);
         if (written < 0) break;
         len += written;
     }

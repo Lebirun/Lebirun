@@ -415,6 +415,7 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
                        int requeue_count);
 
 void set_syscall_frame(registers_t *frame);
+void task_cpu_tick_stop(void);
 void clear_syscall_frame(void);
 
 void task_init_fds(task_t *task);

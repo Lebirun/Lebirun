@@ -57,6 +57,8 @@ typedef struct cpu_info {
     uint64_t tlb_ack;
     task_t *switching_task;
     int wake_pending;
+    int tick_stopped;
+    uint64_t tick_stop_tick;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;
@@ -78,6 +80,8 @@ void smp_start_aps(void);
 int smp_processor_id(void);
 void lapic_timer_init(uint64_t freq_hz);
 void lapic_mask_timer(void);
+void smp_tick_stop(void);
+uint64_t smp_tick_restart(cpu_info_t *cpu);
 cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);
 void smp_tlb_flush_all(void);

@@ -157,8 +157,8 @@ isr_common_stub:
     jz 1f
     testq %rdx, %rdx
     jnz 5f
-    cmpq $128, 160(%rsp)
-    jne 5f
+    cmpq $14, 160(%rsp)
+    je 5f
     movq %cr3, %rcx
     cmpq %rcx, %rax
     je 1f
