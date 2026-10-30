@@ -5029,6 +5029,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     child->exit_code = 0;
     child->is_user = true;
     child->shares_address_space = false;
+    child->sighand_private = false;
     child->syscall_frame = NULL;
     child->pml4_phys = child_pd;
     child->maxrss_kb = child_user_pages_count * 4ULL;
@@ -5146,6 +5147,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         child->pml4_phys = parent->pml4_phys;
         child->cr3 = parent->cr3;
         child->shares_address_space = true;
+        child->sighand_private = share_address_space == 2;
         child->tls_base = tls_base;
         child->clear_child_tid = child_tid;
         child_frame->rsp = child_stack;
@@ -5161,6 +5163,8 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
                                     owns_child_pd, child_pd, kernel_stack_base);
             return -KERR_EFAULT;
         }
+    } else if (child_stack) {
+        child_frame->rsp = child_stack;
     }
 
     if (signals_copy_task(child, parent) != 0) {
@@ -5713,6 +5717,7 @@ static int task_exec_with_args_common(
         kfree(old_vm);
     }
     current_task->shares_address_space = false;
+    current_task->sighand_private = false;
 
     current_task->tls_base = 0;
     current_task->tls_limit = 0;

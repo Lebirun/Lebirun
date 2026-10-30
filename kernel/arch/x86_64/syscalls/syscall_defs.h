@@ -494,6 +494,7 @@ int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
 #define SYSCALL_MEMFD_CREATE 356
 #define SYSCALL_PTRACE 357
 #define SYSCALL_GETCPU 358
+#define SYSCALL_RMDIR 359
 
 #define NR_SYSCALLS 300
 

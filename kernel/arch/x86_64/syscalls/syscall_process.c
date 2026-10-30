@@ -281,7 +281,8 @@ static int sys_clone(int flags, const char *child_stack, int ptid,
     (void)unused;
     regs = current_task ? current_task->syscall_frame : NULL;
     if (!regs) return -EAGAIN;
-    share_address_space = (flags & 0x00000100) != 0;
+    share_address_space = !(flags & 0x00000100) ? 0 :
+                          (flags & 0x00000800) ? 1 : 2;
     if (share_address_space &&
         (!child_stack || (uint64_t)(uintptr_t)child_stack < 0x1000 ||
          (uint64_t)(uintptr_t)child_stack >= KERNEL_VMA)) return -EFAULT;
@@ -326,7 +327,8 @@ static int sys_clone3(uint64_t uargs_addr, uint64_t usize, uint64_t unused2,
         return -EINVAL;
     regs = current_task ? current_task->syscall_frame : NULL;
     if (!regs) return -EAGAIN;
-    share_address_space = (args.flags & 0x00000100u) != 0;
+    share_address_space = !(args.flags & 0x00000100u) ? 0 :
+                          (args.flags & 0x00000800u) ? 1 : 2;
     stack_top = 0;
     if (share_address_space) {
         if (!args.stack || !args.stack_size) return -EINVAL;

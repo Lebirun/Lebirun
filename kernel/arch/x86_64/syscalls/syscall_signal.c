@@ -75,6 +75,23 @@ typedef struct {
 } sigaction_k;
 
 typedef struct {
+    uint64_t uc_flags;
+    uint64_t uc_link;
+    stack_k uc_stack;
+    uint64_t gregs[23];
+    uint64_t fpregs;
+    uint64_t reserved[8];
+    sigset_k uc_sigmask;
+    unsigned long sigmask_pad[15];
+} ucontext_k;
+
+enum {
+    UC_R8, UC_R9, UC_R10, UC_R11, UC_R12, UC_R13, UC_R14, UC_R15,
+    UC_RDI, UC_RSI, UC_RBP, UC_RBX, UC_RDX, UC_RAX, UC_RCX, UC_RSP,
+    UC_RIP, UC_EFL
+};
+
+typedef struct {
     int signum;
     sigaction_k action;
 } signal_action_entry_t;
@@ -498,6 +515,48 @@ int signal_take_pending(task_t *task, uint64_t mask) {
     return 0;
 }
 
+static pid_t signal_find_next_thread(task_vm_t *vm, pid_t after) {
+    task_t *t;
+    uint64_t address;
+    pid_t result;
+
+    result = 0;
+    lock_scheduler();
+    t = all_tasks_head;
+    while (t) {
+        address = (uint64_t)t;
+        if (address < KERNEL_VMA) break;
+        if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
+        if (t->vm == vm && t->is_user && !t->sighand_private &&
+            t->state != TASK_DEAD &&
+            t->pid > after && (result == 0 || t->pid < result)) {
+            result = t->pid;
+        }
+        t = t->all_next;
+    }
+    unlock_scheduler();
+    return result;
+}
+
+static void signal_share_action(int signum, sigaction_k *act) {
+    task_t *t;
+    task_signals_t *slot;
+    pid_t last;
+    pid_t next;
+
+    if (!current_task->vm || current_task->sighand_private) return;
+    last = 0;
+    while ((next = signal_find_next_thread(current_task->vm, last)) > 0) {
+        last = next;
+        if (next == current_task->pid) continue;
+        t = task_find_retain(next);
+        if (!t) continue;
+        slot = ensure_task_signals(t);
+        if (slot) set_signal_action(slot, signum, act);
+        task_release_ref(t);
+    }
+}
+
 static int sys_rt_sigaction(int signum, const char *act_ptr,
                             uint64_t oldact_ptr) {
     task_signals_t *sigs;
@@ -528,6 +587,7 @@ static int sys_rt_sigaction(int signum, const char *act_ptr,
         if (local_act.sa_handler == SIG_DFL && local_act.sa_flags == 0 &&
             local_act.sa_restorer == NULL && local_act.sa_mask[0] == 0 &&
             local_act.sa_mask[1] == 0 && (!sigs || sigs->owner_pid != current_task->pid)) {
+            signal_share_action(signum, &local_act);
             return 0;
         }
         if (!sigs || sigs->owner_pid != current_task->pid) {
@@ -535,6 +595,7 @@ static int sys_rt_sigaction(int signum, const char *act_ptr,
             if (!sigs) return -ESRCH;
         }
         if (set_signal_action(sigs, signum, &local_act) != 0) return -ESRCH;
+        signal_share_action(signum, &local_act);
     }
 
     return 0;
@@ -619,6 +680,7 @@ static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
     task_signals_t *sigs;
     uint64_t addr;
     sigset_k old_mask;
+    sigset_k mask;
 
     (void)sigsetsize_ptr; (void)unused;
     
@@ -627,27 +689,23 @@ static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
     
     addr = (uint64_t)mask_ptr;
     if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
+    if (copy_from_user(&mask, (void *)addr, sizeof(mask)) != 0)
+        return -EFAULT;
     
-    memcpy(&old_mask, &sigs->blocked, sizeof(sigset_k));
-    
-    memcpy(&sigs->blocked, (void *)addr, sizeof(sigset_k));
-    sigs->blocked.sig[0] &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
-    
-    schedule();
-    
-    memcpy(&sigs->blocked, &old_mask, sizeof(sigset_k));
+    old_mask = sigs->blocked;
+    signal_set_blocked_mask(current_task, mask.sig[0]);
+    task_sleep_until(UINT64_MAX);
+    signal_finish_wait_mask(old_mask.sig[0], -EINTR);
     
     return -EINTR;
 }
 
-static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
+static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
+                                int unused3) {
     task_signals_t *sigs;
     registers_t *regs;
-    uint64_t frame_addr;
-    uint64_t *frame;
-    uint64_t saved_rip;
-    uint64_t saved_rsp;
-    uint64_t saved_rflags;
+    ucontext_k *uc;
+    uint64_t *g;
 
     (void)unused1; (void)unused2; (void)unused3;
 
@@ -659,41 +717,39 @@ static int sys_rt_sigreturn(int unused1, const char *unused2, int unused3) {
     regs = current_task ? current_task->syscall_frame : NULL;
     if (!regs) return 0;
 
-    frame_addr = regs->rsp;
-    if (!signal_user_range_mapped(frame_addr, 18 * sizeof(uint64_t)))
+    if (!signal_user_range_mapped(regs->rsp, sizeof(ucontext_k)))
         return -EFAULT;
 
-    frame = (uint64_t *)frame_addr;
-    saved_rip = frame[7];
-    saved_rsp = frame[9];
-    if (saved_rip < 0x1000 || saved_rip >= KERNEL_VMA ||
-        saved_rsp < 0x1000 || saved_rsp >= KERNEL_VMA)
+    uc = (ucontext_k *)regs->rsp;
+    g = uc->gregs;
+    if (g[UC_RIP] < 0x1000 || g[UC_RIP] >= KERNEL_VMA ||
+        g[UC_RSP] < 0x1000 || g[UC_RSP] >= KERNEL_VMA)
         return -EFAULT;
-    saved_rflags = (frame[8] & 0x0000000000254FD5ULL) | 0x202ULL;
 
-    regs->rax    = frame[0];
-    regs->rcx    = frame[1];
-    regs->rdx    = frame[2];
-    regs->rbx    = frame[3];
-    regs->rbp    = frame[4];
-    regs->rsi    = frame[5];
-    regs->rdi    = frame[6];
-    regs->rip    = saved_rip;
-    regs->rflags = saved_rflags;
-    regs->rsp    = saved_rsp;
-    regs->r8     = frame[10];
-    regs->r9     = frame[11];
-    regs->r10    = frame[12];
-    regs->r11    = frame[13];
-    regs->r12    = frame[14];
-    regs->r13    = frame[15];
-    regs->r14    = frame[16];
-    regs->r15    = frame[17];
+    regs->rax    = g[UC_RAX];
+    regs->rcx    = g[UC_RCX];
+    regs->rdx    = g[UC_RDX];
+    regs->rbx    = g[UC_RBX];
+    regs->rbp    = g[UC_RBP];
+    regs->rsi    = g[UC_RSI];
+    regs->rdi    = g[UC_RDI];
+    regs->rip    = g[UC_RIP];
+    regs->rflags = (g[UC_EFL] & 0x0000000000254FD5ULL) | 0x202ULL;
+    regs->rsp    = g[UC_RSP];
+    regs->r8     = g[UC_R8];
+    regs->r9     = g[UC_R9];
+    regs->r10    = g[UC_R10];
+    regs->r11    = g[UC_R11];
+    regs->r12    = g[UC_R12];
+    regs->r13    = g[UC_R13];
+    regs->r14    = g[UC_R14];
+    regs->r15    = g[UC_R15];
+    signal_set_blocked_mask(current_task, uc->uc_sigmask.sig[0]);
 
-    return (int)regs->rax;
+    return (int64_t)regs->rax;
 }
 
-static int sys_sigreturn(int unused1, const char *unused2, int unused3) {
+static int64_t sys_sigreturn(int unused1, const char *unused2, int unused3) {
     return sys_rt_sigreturn(unused1, unused2, unused3);
 }
 
@@ -1145,7 +1201,7 @@ static int sys_sigaltstack(uint64_t ss_ptr, const char *old_ss_ptr,
 static int sys_pause(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
     
-    schedule();
+    task_sleep_until(UINT64_MAX);
     
     return -EINTR;
 }
@@ -1162,7 +1218,8 @@ void signal_deliver_pending(registers_t *regs) {
     sigaction_k *act;
     sigaction_k default_act;
     uint64_t sp;
-    uint64_t *frame;
+    ucontext_k *uc;
+    uint64_t *g;
     uint64_t info_address;
     uint64_t bit;
     uint64_t previous;
@@ -1218,18 +1275,17 @@ void signal_deliver_pending(registers_t *regs) {
             }
         }
 
-        sp = regs->rsp;
+        sp = regs->rsp - 128;
         info_address = 0;
         if (act->sa_flags & SA_SIGINFO) {
             sp -= sizeof(signal_info);
             info_address = sp;
         }
-        sp -= 18 * 8;
+        sp -= sizeof(ucontext_k);
         sp &= ~0xFu;
 
-        if (sp < 0x1000 || sp >= KERNEL_VMA ||
-            !signal_user_range_mapped(sp,
-                regs->rsp - sp)) {
+        if (sp < 0x1008 || sp >= KERNEL_VMA ||
+            !signal_user_range_mapped(sp - 8, regs->rsp - sp + 8)) {
             task_exit_deferred(128 + sig);
             return;
         }
@@ -1238,25 +1294,28 @@ void signal_deliver_pending(registers_t *regs) {
             memcpy((void *)(uintptr_t)info_address, signal_info,
                    sizeof(signal_info));
 
-        frame = (uint64_t *)sp;
-        frame[0] = regs->rax;
-        frame[1] = regs->rcx;
-        frame[2] = regs->rdx;
-        frame[3] = regs->rbx;
-        frame[4] = regs->rbp;
-        frame[5] = regs->rsi;
-        frame[6] = regs->rdi;
-        frame[7] = regs->rip;
-        frame[8] = regs->rflags;
-        frame[9] = regs->rsp;
-        frame[10] = regs->r8;
-        frame[11] = regs->r9;
-        frame[12] = regs->r10;
-        frame[13] = regs->r11;
-        frame[14] = regs->r12;
-        frame[15] = regs->r13;
-        frame[16] = regs->r14;
-        frame[17] = regs->r15;
+        uc = (ucontext_k *)sp;
+        memset(uc, 0, sizeof(*uc));
+        g = uc->gregs;
+        g[UC_R8] = regs->r8;
+        g[UC_R9] = regs->r9;
+        g[UC_R10] = regs->r10;
+        g[UC_R11] = regs->r11;
+        g[UC_R12] = regs->r12;
+        g[UC_R13] = regs->r13;
+        g[UC_R14] = regs->r14;
+        g[UC_R15] = regs->r15;
+        g[UC_RDI] = regs->rdi;
+        g[UC_RSI] = regs->rsi;
+        g[UC_RBP] = regs->rbp;
+        g[UC_RBX] = regs->rbx;
+        g[UC_RDX] = regs->rdx;
+        g[UC_RAX] = regs->rax;
+        g[UC_RCX] = regs->rcx;
+        g[UC_RSP] = regs->rsp;
+        g[UC_RIP] = regs->rip;
+        g[UC_EFL] = regs->rflags;
+        uc->uc_sigmask = sigs->blocked;
 
         sp -= 8;
         if (act->sa_restorer) {
@@ -1268,7 +1327,7 @@ void signal_deliver_pending(registers_t *regs) {
         regs->rdi = (uint64_t)sig;
         if (act->sa_flags & SA_SIGINFO) {
             regs->rsi = info_address;
-            regs->rdx = 0;
+            regs->rdx = (uint64_t)(uintptr_t)uc;
         }
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
         regs->rsp = sp;

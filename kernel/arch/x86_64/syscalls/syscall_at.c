@@ -278,6 +278,11 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     return r;
 }
 
+static int sys_rmdir(const char *pathname, const char *unused1, int unused2) {
+    (void)unused1; (void)unused2;
+    return sys_unlinkat(AT_FDCWD, pathname, AT_REMOVEDIR);
+}
+
 int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
                      const char *newpath_arg) {
     char *old_path;
@@ -902,6 +907,7 @@ void syscalls_at_init(void) {
     syscall_table_set(SYSCALL_MKNODAT, (void *)(sys_mknodat));
     syscall_table_set(SYSCALL_FCHOWNAT, (void *)(sys_fchownat));
     syscall_table_set(SYSCALL_UNLINKAT, (void *)(sys_unlinkat));
+    syscall_table_set(SYSCALL_RMDIR, (void *)(sys_rmdir));
     syscall_table_set(SYSCALL_RENAMEAT, (void *)(syscall_renameat));
     syscall_table_set(SYSCALL_LINKAT, (void *)(syscall_linkat));
     syscall_table_set(SYSCALL_SYMLINKAT, (void *)(syscall_symlinkat));

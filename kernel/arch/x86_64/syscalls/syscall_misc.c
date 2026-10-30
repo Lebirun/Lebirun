@@ -920,7 +920,8 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     return 0;
 }
 
-static int sys_nanosleep(int arg0, int arg1, int arg2, int arg3) {
+static int sys_nanosleep(uint64_t arg0, uint64_t arg1, uint64_t arg2,
+                         uint64_t arg3) {
     const struct kernel_timespec *req;
     struct kernel_timespec *rem;
     struct kernel_timespec ts64;

@@ -137,6 +137,7 @@ typedef struct task {
     int8_t nice_value;
     uint8_t sched_policy;
     uint8_t sched_priority;
+    bool sighand_private;
     uint64_t stack_size;
     uint8_t *kernel_stack_base;
     uint64_t kernel_stack_size;
