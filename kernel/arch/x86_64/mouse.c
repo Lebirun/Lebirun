@@ -68,31 +68,38 @@ static int mouse_reserve_ring(uint32_t additional) {
     return 1;
 }
 
-static void KERNEL_INIT ps2_wait_input(void) {
+static int KERNEL_INIT ps2_wait_input(void) {
     int timeout = 100000;
     while (timeout--) {
         if ((inb(PS2_STATUS_PORT) & 0x02) == 0)
-            return;
+            return 0;
     }
+    return -1;
 }
 
-static void KERNEL_INIT ps2_wait_output(void) {
+static int KERNEL_INIT ps2_wait_output(void) {
     int timeout = 100000;
     while (timeout--) {
         if (inb(PS2_STATUS_PORT) & 0x01)
-            return;
+            return 0;
     }
+    return -1;
 }
 
-static void KERNEL_INIT ps2_mouse_write(uint8_t data) {
-    ps2_wait_input();
-    outb(PS2_CMD_PORT, 0xD4);
-    ps2_wait_input();
+static void KERNEL_INIT ps2_ctl(uint8_t cmd) {
+    if (ps2_wait_input() == 0) outb(PS2_CMD_PORT, cmd);
+}
+
+static void KERNEL_INIT ps2_write_config(uint8_t config) {
+    ps2_ctl(0x60);
+    if (ps2_wait_input() == 0) outb(PS2_DATA_PORT, config);
+}
+
+static int KERNEL_INIT ps2_mouse_cmd(uint8_t data) {
+    ps2_ctl(0xD4);
+    if (ps2_wait_input() < 0) return -1;
     outb(PS2_DATA_PORT, data);
-}
-
-static uint8_t KERNEL_INIT ps2_mouse_read(void) {
-    ps2_wait_output();
+    if (ps2_wait_output() < 0) return -1;
     return inb(PS2_DATA_PORT);
 }
 
@@ -130,7 +137,7 @@ void mouse_handler(registers_t *regs) {
     (void)regs;
 
     status = inb(PS2_STATUS_PORT);
-    if (!(status & 0x20))
+    if ((status & 0x21) != 0x21)
         return;
 
     data = inb(PS2_DATA_PORT);
@@ -213,6 +220,7 @@ uint32_t mouse_get_packet_size(void) {
 }
 
 void KERNEL_INIT mouse_init(void) {
+    uint64_t flags;
     uint8_t config;
     uint8_t device_id;
 
@@ -223,48 +231,39 @@ void KERNEL_INIT mouse_init(void) {
     mouse_cycle = 0;
     mouse_packet_size = 3;
 
-    ps2_wait_input();
-    outb(PS2_CMD_PORT, 0xA8);
-
-    ps2_wait_input();
-    outb(PS2_CMD_PORT, 0x20);
-    ps2_wait_output();
-    config = inb(PS2_DATA_PORT);
+    flags = mouse_irqsave();
+    if (inb(PS2_STATUS_PORT) == 0xFF) {
+        mouse_irqrestore(flags);
+        return;
+    }
+    ps2_ctl(0xA8);
+    config = 0x47;
+    ps2_ctl(0x20);
+    if (ps2_wait_output() == 0)
+        config = inb(PS2_DATA_PORT);
     config |= 0x02;
     config &= ~0x20;
-    ps2_wait_input();
-    outb(PS2_CMD_PORT, 0x60);
-    ps2_wait_input();
-    outb(PS2_DATA_PORT, config);
+    ps2_write_config(config);
 
-    ps2_mouse_write(0xFF);
-    ps2_mouse_read();
-    ps2_mouse_read();
-    ps2_mouse_read();
-
-    ps2_mouse_write(0xF6);
-    ps2_mouse_read();
-
-    ps2_mouse_write(0xF3);
-    ps2_mouse_read();
-    ps2_mouse_write(200);
-    ps2_mouse_read();
-    ps2_mouse_write(0xF3);
-    ps2_mouse_read();
-    ps2_mouse_write(100);
-    ps2_mouse_read();
-    ps2_mouse_write(0xF3);
-    ps2_mouse_read();
-    ps2_mouse_write(80);
-    ps2_mouse_read();
-    ps2_mouse_write(0xF2);
-    ps2_mouse_read();
-    device_id = ps2_mouse_read();
-    if (device_id == 3 || device_id == 4)
-        mouse_packet_size = 4;
-
-    ps2_mouse_write(0xF4);
-    ps2_mouse_read();
+    if (ps2_mouse_cmd(0xF6) < 0) {
+        ps2_ctl(0xA7);
+        ps2_write_config((uint8_t)((config & ~0x02) | 0x20));
+        mouse_irqrestore(flags);
+        return;
+    }
+    ps2_mouse_cmd(0xF3);
+    ps2_mouse_cmd(200);
+    ps2_mouse_cmd(0xF3);
+    ps2_mouse_cmd(100);
+    ps2_mouse_cmd(0xF3);
+    ps2_mouse_cmd(80);
+    if (ps2_mouse_cmd(0xF2) == 0xFA && ps2_wait_output() == 0) {
+        device_id = inb(PS2_DATA_PORT);
+        if (device_id == 3 || device_id == 4)
+            mouse_packet_size = 4;
+    }
+    ps2_mouse_cmd(0xF4);
+    mouse_irqrestore(flags);
 
     irq_register_handler(MOUSE_IRQ, mouse_handler);
     irq_unmask(2);

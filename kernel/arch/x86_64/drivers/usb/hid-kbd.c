@@ -43,6 +43,7 @@ static const uint16_t hid_to_ps2[98] = {
 };
 
 static void hid_feed(uint8_t code, uint8_t ext, uint8_t release) {
+    hid_last_ns = hid_now_ns();
     if (ext) keyboard_feed_ps2(0xE0);
     keyboard_feed_ps2(release ? (uint8_t)(code | 0x80) : code);
 }
@@ -74,7 +75,6 @@ void usb_hid_kbd_report(usb_hid_kbd_state_t *st, uint8_t *r) {
 
     if (r[2] == 0x01 && r[3] == 0x01 && r[4] == 0x01 &&
         r[5] == 0x01 && r[6] == 0x01 && r[7] == 0x01) return;
-    hid_last_ns = hid_now_ns();
     changed = (uint8_t)(r[0] ^ st->mods);
     for (i = 0; i < 8; i++) {
         if (changed & (1u << i))

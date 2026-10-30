@@ -643,6 +643,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 kprint_poll(64);
 
                 pit_process_callbacks();
+                keyboard_poll();
                 keyboard_process_sigint();
             }
 

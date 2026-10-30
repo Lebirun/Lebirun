@@ -1,6 +1,9 @@
 #include <lebirun/io.h>
 #include <lebirun/tty.h>
 #include <lebirun/keyboard.h>
+#if CONFIG_DRIVER_PS2_MOUSE
+#include <lebirun/mouse.h>
+#endif
 #if CONFIG_DRIVER_USB_HID_KBD
 #include <lebirun/drivers/usb/hid.h>
 #endif
@@ -167,6 +170,8 @@ typedef struct {
 
 static kbd_console_t *kbd_consoles;
 static int kbd_num_consoles;
+static int kbd_ps2_present;
+static int kbd_irq_state;
 static int sigint_dispatch_pending;
 
 static bool left_shift_pressed = false;
@@ -504,14 +509,39 @@ wake:
 }
 
 void keyboard_handler(registers_t* regs) {
-    (void)regs;
-    {
-        uint8_t sc = inb(0x60);
-#if CONFIG_DRIVER_USB_HID_KBD
-        if (usb_hid_kbd_recent()) return;
-#endif
-        keyboard_feed_ps2(sc);
+    uint8_t status;
+    uint8_t sc;
+
+    status = inb(0x64);
+    if (!(status & 0x01)) return;
+    if (regs && !kbd_irq_state) kbd_irq_state = 1;
+#if CONFIG_DRIVER_PS2_MOUSE
+    if (status & 0x20) {
+        mouse_handler(regs);
+        return;
     }
+#endif
+    sc = inb(0x60);
+#if CONFIG_DRIVER_USB_HID_KBD
+    if (usb_hid_kbd_recent()) return;
+#endif
+    keyboard_feed_ps2(sc);
+}
+
+void keyboard_poll(void) {
+    static int stuck;
+    uint8_t status;
+
+    if (!kbd_ps2_present || kbd_irq_state > 0) return;
+    status = inb(0x64);
+    if (status == 0xFF || !(status & 0x01)) {
+        stuck = 0;
+        return;
+    }
+    if (!kbd_irq_state && !stuck++) return;
+    stuck = 0;
+    kbd_irq_state = -1;
+    keyboard_handler(NULL);
 }
 
 static int KERNEL_INIT kbd_wait_input(void) {
@@ -541,33 +571,53 @@ static void KERNEL_INIT kbd_drain_output(void) {
     }
 }
 
+static void KERNEL_INIT kbd_ctl(uint8_t cmd) {
+    if (kbd_wait_input() == 0) outb(0x64, cmd);
+}
+
+static uint8_t KERNEL_INIT kbd_send(uint8_t data) {
+    if (kbd_wait_input() < 0) return 0;
+    outb(0x60, data);
+    if (kbd_wait_output() < 0) return 0;
+    return inb(0x60);
+}
+
 void KERNEL_INIT keyboard_init(void) {
+    uint64_t flags;
     uint8_t cmd;
     uint8_t master_mask;
 
-    kbd_drain_output();
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    kbd_ps2_present = inb(0x64) != 0xFF;
+    if (kbd_ps2_present) {
+        kbd_ctl(0xAD);
+        kbd_ctl(0xA7);
+        kbd_drain_output();
 
-    cmd = 0x47;
-    if (kbd_wait_input() == 0) {
-        outb(0x64, 0x20);
+        cmd = 0x47;
+        kbd_ctl(0x20);
         if (kbd_wait_output() == 0)
             cmd = inb(0x60);
-    }
-    cmd |= 0x01;
-    cmd &= ~0x10;
-    if (kbd_wait_input() == 0) {
-        outb(0x64, 0x60);
+        cmd |= 0x40;
+        cmd &= ~0x13;
+        kbd_ctl(0x60);
         if (kbd_wait_input() == 0)
             outb(0x60, cmd);
-    }
 
-    if (kbd_wait_input() == 0) {
-        outb(0x60, 0xF4);
-        if (kbd_wait_output() == 0)
-            inb(0x60);
-    }
+        kbd_ctl(0xAE);
+        if (kbd_send(0xF5)) {
+            if (kbd_send(0xF0) == 0xFA)
+                kbd_send(0x02);
+            kbd_send(0xF4);
+        }
+        kbd_drain_output();
 
-    kbd_drain_output();
+        kbd_ctl(0x60);
+        if (kbd_wait_input() == 0)
+            outb(0x60, cmd | 0x01);
+        kbd_drain_output();
+    }
+    if (flags & (1ULL << 9)) __asm__ volatile("sti" ::: "memory");
 
     kbd_num_consoles = console_get_count();
     if (kbd_num_consoles <= 0) kbd_num_consoles = 1;
