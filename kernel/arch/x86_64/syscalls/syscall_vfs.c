@@ -240,6 +240,7 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
     int perm_ret;
     uint64_t pipe_flags;
     uint64_t mount_flags;
+    int created;
 
     if (!path) return -EFAULT;
     if (!current_task) {
@@ -255,6 +256,7 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
         }
     }
     node = vfs_namei(path);
+    created = 0;
 
     if (node && (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
         vfs_release(node);
@@ -265,7 +267,7 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
     if (!node && (flags & VFS_O_CREAT)) {
         create_mode = (uint64_t)(mode & 0777);
         create_mode &= ~current_task->creation_mask;
-        if (flags & VFS_O_EXCL) create_mode |= VFS_O_EXCL;
+        if (flags & VFS_O_EXCL) create_mode |= VFS_CREATE_EXCL;
 
         split_path = (char *)kmalloc(strlen(path) + 1);
         if (!split_path) {
@@ -292,12 +294,20 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
             kfree(path);
             return -EROFS;
         }
+        perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+        if (perm_ret < 0) {
+            vfs_release(parent);
+            kfree(split_path);
+            kfree(path);
+            return perm_ret;
+        }
 
         ret = vfs_create(parent, filename, create_mode);
         vfs_release(parent);
         kfree(split_path);
         if (ret == 0) {
             node = vfs_namei(path);
+            created = 1;
         } else if (!(flags & VFS_O_EXCL)) {
             node = vfs_namei(path);
             if (!node) {
@@ -316,6 +326,17 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
         return -ENOENT;
     }
 
+    if ((flags & VFS_O_DIRECTORY) &&
+        VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) {
+        vfs_release(node);
+        return -ENOTDIR;
+    }
+    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY &&
+        ((flags & 0x3) != VFS_O_RDONLY || (flags & VFS_O_TRUNC))) {
+        vfs_release(node);
+        return -EISDIR;
+    }
+
     mount_flags = vfs_get_mount_flags_for_node(node);
     if (((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR) ||
          (flags & VFS_O_TRUNC)) &&
@@ -330,12 +351,13 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
         return -EACCES;
     }
 
-    want = VFS_PERM_READ;
+    want = (flags & 0x3) == VFS_O_WRONLY ? 0 : VFS_PERM_READ;
     if ((flags & VFS_O_WRONLY) || (flags & VFS_O_RDWR))
         want |= VFS_PERM_WRITE;
     if (flags & VFS_O_TRUNC)
         want |= VFS_PERM_WRITE;
-    perm_ret = vfs_check_perm(node, want);
+    perm_ret = created && node->uid == current_task->euid ? 0 :
+               vfs_check_perm(node, want);
     if (perm_ret < 0) {
         vfs_release(node);
         return perm_ret;
@@ -517,7 +539,7 @@ static int sys_close_range(unsigned int first, const char *last_ptr,
     if (flags & 4u) {
         for (fd = (int)first; fd <= (int)last; fd++) {
             if (current_task->fds[fd].in_use)
-                current_task->fds[fd].flags |= 1u;
+                current_task->fds[fd].flags |= VFS_O_CLOEXEC;
         }
         return 0;
     }
@@ -758,7 +780,7 @@ static int sys_vfs_unlink(uint64_t path_ptr, const char *unused1, int unused2) {
         kfree(path);
         return -EROFS;
     }
-    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    perm_ret = vfs_dir_write_check(parent, filename);
     if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_unlink_checked(parent, filename, 0);
     vfs_release(parent);
@@ -1091,7 +1113,7 @@ static int sys_memfd_create(const char *name_ptr, const char *flags_ptr,
     current_task->fds[fd].node = node;
     current_task->fds[fd].offset = 0;
     current_task->fds[fd].flags = (uint64_t)VFS_O_RDWR |
-        (flags & 0x0001 ? 1 : 0);
+        (flags & 0x0001 ? VFS_O_CLOEXEC : 0);
     return fd;
 }
 

@@ -2051,33 +2051,53 @@ static int sys_seccomp(int op, int flags, const void *prog) {
     return seccomp_install(current_task, prog);
 }
 
-static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
+static int splice_copy(int fd_in, int64_t *off_in, int fd_out,
+                       int64_t *off_out, size_t len, int advance_in) {
     task_fd_t *a;
     task_fd_t *b;
-    int fd_out = (int)(uintptr_t)fd_out_ptr;
     vfs_node_t *na;
     vfs_node_t *nb;
     uint8_t buf[4096];
+    int64_t off;
     uint64_t in_pos;
     uint64_t out_pos;
     uint64_t total;
     uint64_t want;
     uint64_t got;
     uint64_t put;
-    if (!current_task || len <= 0) return -EINVAL;
+
+    if (!current_task) return -ESRCH;
+    if (len == 0) return 0;
+    if (len > INT32_MAX) len = INT32_MAX;
     if (fd_in < 0 || fd_in >= current_task->fds_capacity) return -EBADF;
     if (fd_out < 0 || fd_out >= current_task->fds_capacity) return -EBADF;
     a = &current_task->fds[fd_in];
     b = &current_task->fds[fd_out];
     if (!a->in_use || !b->in_use) return -EBADF;
-    if (!a->node || !b->node) return -EBADF;
+    if (a->type != FD_TYPE_FILE || b->type != FD_TYPE_FILE ||
+        !a->node || !b->node) return -EBADF;
+    if ((a->flags & 3) == VFS_O_WRONLY || (b->flags & 3) == VFS_O_RDONLY)
+        return -EBADF;
     na = (vfs_node_t *)a->node;
     nb = (vfs_node_t *)b->node;
-    in_pos = a->offset;
-    out_pos = b->offset;
+    if (VFS_GET_TYPE(na->flags) == VFS_DIRECTORY ||
+        VFS_GET_TYPE(nb->flags) == VFS_DIRECTORY) return -EISDIR;
+    if (vfs_get_mount_flags_for_node(nb) & VFS_MS_RDONLY) return -EROFS;
+    in_pos = task_fd_position_get(a);
+    if (off_in) {
+        if (copy_from_user(&off, off_in, sizeof(off)) < 0) return -EFAULT;
+        if (off < 0) return -EINVAL;
+        in_pos = (uint64_t)off;
+    }
+    out_pos = b->flags & VFS_O_APPEND ? nb->length : task_fd_position_get(b);
+    if (off_out) {
+        if (copy_from_user(&off, off_out, sizeof(off)) < 0) return -EFAULT;
+        if (off < 0) return -EINVAL;
+        out_pos = (uint64_t)off;
+    }
     total = 0;
-    while (total < (uint64_t)len) {
-        want = (uint64_t)len - total;
+    while (total < len) {
+        want = len - total;
         if (want > sizeof(buf)) want = sizeof(buf);
         got = vfs_read(na, in_pos + total, want, buf);
         if (got > want) got = want;
@@ -2091,53 +2111,30 @@ static int sys_splice(int fd_in, const char *fd_out_ptr, int len) {
         total += put;
         if (put < got) break;
     }
-    a->offset += total;
-    b->offset += total;
+    if (off_in) {
+        off = (int64_t)(in_pos + total);
+        if (copy_to_user(off_in, &off, sizeof(off)) < 0) return -EFAULT;
+    } else if (advance_in) {
+        task_fd_position_set(a, in_pos + total);
+    }
+    if (off_out) {
+        off = (int64_t)(out_pos + total);
+        if (copy_to_user(off_out, &off, sizeof(off)) < 0) return -EFAULT;
+    } else {
+        task_fd_position_set(b, out_pos + total);
+    }
     return (int)total;
 }
 
-static int sys_tee(int fd_in, const char *fd_out_ptr, int len) {
-    task_fd_t *a;
-    task_fd_t *b;
-    int fd_out = (int)(uintptr_t)fd_out_ptr;
-    vfs_node_t *na;
-    vfs_node_t *nb;
-    uint8_t buf[4096];
-    uint64_t in_pos;
-    uint64_t out_pos;
-    uint64_t total;
-    uint64_t want;
-    uint64_t got;
-    uint64_t put;
-    if (!current_task || len <= 0) return -EINVAL;
-    if (fd_in < 0 || fd_in >= current_task->fds_capacity) return -EBADF;
-    if (fd_out < 0 || fd_out >= current_task->fds_capacity) return -EBADF;
-    a = &current_task->fds[fd_in];
-    b = &current_task->fds[fd_out];
-    if (!a->in_use || !b->in_use) return -EBADF;
-    if (!a->node || !b->node) return -EBADF;
-    na = (vfs_node_t *)a->node;
-    nb = (vfs_node_t *)b->node;
-    in_pos = a->offset;
-    out_pos = b->offset;
-    total = 0;
-    while (total < (uint64_t)len) {
-        want = (uint64_t)len - total;
-        if (want > sizeof(buf)) want = sizeof(buf);
-        got = vfs_read(na, in_pos + total, want, buf);
-        if (got > want) got = want;
-        if (got == 0) break;
-        put = vfs_write(nb, out_pos + total, got, buf);
-        if (put > got) put = got;
-        if (put == 0) {
-            if (total > 0) break;
-            return -EIO;
-        }
-        total += put;
-        if (put < got) break;
-    }
-    b->offset += total;
-    return (int)total;
+static int sys_splice(int fd_in, int64_t *off_in, int fd_out,
+                      int64_t *off_out, size_t len, unsigned int flags) {
+    (void)flags;
+    return splice_copy(fd_in, off_in, fd_out, off_out, len, 1);
+}
+
+static int sys_tee(int fd_in, int fd_out, size_t len, unsigned int flags) {
+    (void)flags;
+    return splice_copy(fd_in, NULL, fd_out, NULL, len, 0);
 }
 
 static int sys_vring_path_rule(int minor, const char *range_ptr, int perms) {
@@ -2211,7 +2208,6 @@ void syscalls_misc_init(void) {
     syscall_table_set(SYSCALL_TIMER_GETTIME, (void *)(sys_timer_gettime));
     syscall_table_set(SYSCALL_TIMER_GETOVERRUN, (void *)(sys_timer_getoverrun));
     syscall_table_set(SYSCALL_SPLICE, (void *)(sys_splice));
-    syscall_table_set(SYSCALL_VMSPLICE, (void *)(sys_splice));
     syscall_table_set(SYSCALL_TEE, (void *)(sys_tee));
     syscall_table_set(SYSCALL_MQ_OPEN, (void *)(sys_mq_open));
     syscall_table_set(SYSCALL_MQ_SEND, (void *)(sys_mq_send));

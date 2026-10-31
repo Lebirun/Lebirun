@@ -362,15 +362,17 @@ static int ioctl_fcntl_basic_compat(int fd, int cmd, int arg) {
 
     switch (cmd) {
         case 1: 
-            return (current_task->fds[fd].flags & 1) ? 1 : 0;
+            return (current_task->fds[fd].flags & VFS_O_CLOEXEC) ? 1 : 0;
         case 2: 
-            if (arg & 1) current_task->fds[fd].flags |= 1;
-            else current_task->fds[fd].flags &= ~1u;
+            if (arg & 1) current_task->fds[fd].flags |= VFS_O_CLOEXEC;
+            else current_task->fds[fd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
             return 0;
         case 3: 
-            return (int)(current_task->fds[fd].flags & ~1u);
+            return (int)(current_task->fds[fd].flags & ~(uint64_t)VFS_O_CLOEXEC);
         case 4: 
-            current_task->fds[fd].flags = (current_task->fds[fd].flags & 1) | ((uint64_t)arg & ~1u);
+            current_task->fds[fd].flags = (current_task->fds[fd].flags &
+                ~(uint64_t)(VFS_O_APPEND | VFS_O_NONBLOCK)) |
+                ((uint64_t)arg & (VFS_O_APPEND | VFS_O_NONBLOCK));
             return 0;
         default:
             return -EINVAL;

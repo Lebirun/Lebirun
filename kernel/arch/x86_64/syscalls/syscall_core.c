@@ -700,7 +700,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     if (p->readers <= 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
                         if (heap_buf) kfree(kbuf);
-                        if (total > 0) return (int)total;
+                        if (total > 0 || done > 0) return (int)(total + done);
                         return -EPIPE;
                     }
                     if (chunk - done > UINT64_MAX - p->count) {
@@ -738,7 +738,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         schedule();
                         if (syscall_core_interrupted()) {
                             if (heap_buf) kfree(kbuf);
-                            if (total > 0) return (int)total;
+                            if (total > 0 || done > 0) return (int)(total + done);
                             return -EINTR;
                         }
                         pipe_flags = pipe_lock_irqsave(p);

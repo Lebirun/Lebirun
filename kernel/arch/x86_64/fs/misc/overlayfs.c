@@ -1008,7 +1008,7 @@ static int overlay_vfs_create(vfs_node_t *parent, const char *name, uint64_t fla
 
     overlay_ensure_upper_dirs(path);
     
-    if (VFS_GET_TYPE(flags) == VFS_SOCKET)
+    if (flags & VFS_CREATE_SOCKET)
         ret = ramfs_create_socket(path, (uint16_t)(flags & 07777));
     else
         ret = ramfs_create_file(path, (uint16_t)(flags & 0777));

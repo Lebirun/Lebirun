@@ -1813,7 +1813,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
     
     existing = ramfs_find_child(prn, name);
     
-    if (existing && (flags & VFS_O_EXCL)) {
+    if (existing && (flags & VFS_CREATE_EXCL)) {
         ramfs_node_unlock(prn);
         ramfs_unlock();
         return RAMFS_ERR_EXIST;
@@ -1844,7 +1844,7 @@ static int ramfs_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags
         ramfs_unlock();
         return RAMFS_ERR_NOMEM;
     }
-    if (VFS_GET_TYPE(flags) == VFS_SOCKET)
+    if (flags & VFS_CREATE_SOCKET)
         node->type = RAMFS_NODE_SOCKET;
     else
         node->type = RAMFS_NODE_FILE;

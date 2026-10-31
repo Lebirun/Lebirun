@@ -811,6 +811,11 @@ static int sys_rt_sigtimedwait(const sigset_k *set_ptr, void *info_ptr,
     return signum;
 }
 
+static int signal_permitted(uint64_t uid, uint64_t euid, task_t *t) {
+    return euid == 0 || uid == t->uid || uid == t->suid ||
+           euid == t->uid || euid == t->suid;
+}
+
 static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     task_t *target;
     task_signals_t *sigs;
@@ -828,9 +833,8 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
         task_release_ref(target);
         return -ESRCH;
     }
-    if (current_task && current_task->euid != 0 &&
-        current_task->euid != target->uid &&
-        current_task->uid != target->uid) {
+    if (current_task &&
+        !signal_permitted(current_task->uid, current_task->euid, target)) {
         task_release_ref(target);
         return -EPERM;
     }
@@ -1013,7 +1017,7 @@ static pid_t signal_find_next_permitted(pid_t after, pid_t self_pid,
         if ((address & 0xFFFF0000u) == 0xFEFE0000u) break;
         if (t->is_user && t->pid != self_pid && t->pid != 1 &&
             t->pid > after &&
-            (uid == 0 || uid == t->uid || euid == t->uid) &&
+            signal_permitted(uid, euid, t) &&
             (result == 0 || t->pid < result)) {
             result = t->pid;
         }
@@ -1045,9 +1049,8 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         if (pid > 0) {
             t = task_find_retain((pid_t)pid);
             if (!t) return -ESRCH;
-            if (current_task && current_task->uid != 0 &&
-                current_task->uid != t->uid &&
-                current_task->euid != t->uid) {
+            if (current_task &&
+                !signal_permitted(current_task->uid, current_task->euid, t)) {
                 task_release_ref(t);
                 return -EPERM;
             }
@@ -1060,7 +1063,7 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
         else pgid = (pid_t)(-pid);
         next_pid = signal_find_next_pgrp(pgid, 0);
         if (next_pid <= 0) return -ESRCH;
-        if (current_task->uid == 0) return 0;
+        if (current_task->euid == 0) return 0;
         last_pid = 0;
         for (;;) {
             next_pid = signal_find_next_pgrp(pgid, last_pid);
@@ -1069,8 +1072,7 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
             t = task_find_retain(next_pid);
             if (!t) continue;
             if (!t->is_kernel_task &&
-                (current_task->uid == t->uid ||
-                 current_task->euid == t->uid)) {
+                signal_permitted(current_task->uid, current_task->euid, t)) {
                 task_release_ref(t);
                 return 0;
             }
@@ -1086,9 +1088,8 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
             task_release_ref(target);
             return -EPERM;
         }
-        if (current_task && current_task->uid != 0 &&
-            current_task->uid != target->uid &&
-            current_task->euid != target->uid) {
+        if (current_task &&
+            !signal_permitted(current_task->uid, current_task->euid, target)) {
             task_release_ref(target);
             return -EPERM;
         }
@@ -1139,9 +1140,8 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
             task_release_ref(t);
             continue;
         }
-        if (current_task && current_task->uid != 0 &&
-            current_task->uid != t->uid &&
-            current_task->euid != t->uid) {
+        if (current_task &&
+            !signal_permitted(current_task->uid, current_task->euid, t)) {
             task_release_ref(t);
             continue;
         }

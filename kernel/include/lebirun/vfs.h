@@ -31,6 +31,9 @@
 #define VFS_O_DIRECTORY 0x10000
 #define VFS_O_CLOEXEC   0x80000
 
+#define VFS_CREATE_EXCL   (1ULL << 32)
+#define VFS_CREATE_SOCKET (1ULL << 33)
+
 #define VFS_SEEK_SET    0
 #define VFS_SEEK_CUR    1
 #define VFS_SEEK_END    2

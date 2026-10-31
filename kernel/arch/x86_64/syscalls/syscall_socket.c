@@ -587,7 +587,7 @@ void socket_close_cloexec(task_t *task) {
     spin_lock(&socket_table_lock);
     for (i = 3; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use || task->fds[i].type != FD_TYPE_SOCKET ||
-            !(task->fds[i].flags & 1))
+            !(task->fds[i].flags & VFS_O_CLOEXEC))
             continue;
         idx = socket_fd_index(task, i);
         memset(&task->fds[i], 0, sizeof(task_fd_t));
@@ -916,7 +916,7 @@ static int sys_socket(int domain, const char *type_ptr, int protocol) {
     sockets[idx].protocol = protocol;
     sockets[idx].state = SOCKSTATE_CLOSED;
     sockets[idx].nonblocking = (flags & SOCK_NONBLOCK) ? 1 : 0;
-    fd_flags = (flags & SOCK_CLOEXEC ? 1 : 0) |
+    fd_flags = (flags & SOCK_CLOEXEC ? VFS_O_CLOEXEC : 0) |
                (flags & SOCK_NONBLOCK ? 0x800 : 0);
     fd = socket_fd_alloc(idx, fd_flags);
     if (fd < 0) {
@@ -985,7 +985,7 @@ static int sys_socketpair(int domain, const char *type_ptr, int protocol,
     sockets[idx2].peer_uid = current_task ? current_task->euid : 0;
     sockets[idx2].peer_gid = current_task ? current_task->egid : 0;
     
-    fd_flags = (flags & SOCK_CLOEXEC ? 1 : 0) |
+    fd_flags = (flags & SOCK_CLOEXEC ? VFS_O_CLOEXEC : 0) |
                (flags & SOCK_NONBLOCK ? 0x800 : 0);
     sv_values[0] = socket_fd_alloc(idx1, fd_flags);
     if (sv_values[0] < 0) {
@@ -1094,7 +1094,7 @@ static int socket_create_path_node(const char *path) {
     if (!parent) return -ENOENT;
     result = vfs_mknod(parent, name, S_IFSOCK | 0777);
     if (result < 0)
-        result = vfs_create(parent, name, VFS_SOCKET | 0777);
+        result = vfs_create(parent, name, VFS_CREATE_SOCKET | 0777);
     vfs_release(parent);
     if (result < 0) return -EACCES;
     return 0;
@@ -1811,9 +1811,9 @@ static int sys_accept4(int sockfd, const char *addr_ptr,
         else
             descriptor->flags &= ~0x800UL;
         if (flags & SOCK_CLOEXEC)
-            descriptor->flags |= 1;
+            descriptor->flags |= VFS_O_CLOEXEC;
         else
-            descriptor->flags &= ~1UL;
+            descriptor->flags &= ~(uint64_t)VFS_O_CLOEXEC;
     }
     spin_unlock(&socket_table_lock);
     return fd;
@@ -3337,7 +3337,7 @@ void socket_close_range(unsigned int first, unsigned int last, int cloexec) {
         fd = (unsigned int)i;
         if (fd < first || fd > last) continue;
         if (cloexec) {
-            current_task->fds[i].flags |= 1;
+            current_task->fds[i].flags |= VFS_O_CLOEXEC;
         } else {
             idx = socket_fd_index(current_task, i);
             memset(&current_task->fds[i], 0, sizeof(task_fd_t));
@@ -3373,28 +3373,29 @@ int socket_fcntl(int fd, int cmd, int arg) {
     result = 0;
     switch (cmd) {
         case SOCKET_F_DUPFD:
-            result = socket_fd_alloc_from(idx, descriptor->flags & ~1UL,
-                                          arg);
+            result = socket_fd_alloc_from(idx, (int)(descriptor->flags &
+                                          ~(uint64_t)VFS_O_CLOEXEC), arg);
             break;
         case SOCKET_F_DUPFD_CLOEXEC:
-            result = socket_fd_alloc_from(idx, descriptor->flags | 1, arg);
+            result = socket_fd_alloc_from(idx, (int)(descriptor->flags |
+                                          VFS_O_CLOEXEC), arg);
             break;
         case SOCKET_F_GETFD:
-            result = descriptor->flags & 1 ? 1 : 0;
+            result = descriptor->flags & VFS_O_CLOEXEC ? 1 : 0;
             break;
         case SOCKET_F_SETFD:
             if (arg & 1)
-                descriptor->flags |= 1;
+                descriptor->flags |= VFS_O_CLOEXEC;
             else
-                descriptor->flags &= ~1UL;
+                descriptor->flags &= ~(uint64_t)VFS_O_CLOEXEC;
             break;
         case SOCKET_F_GETFL:
-            result = sock->nonblocking ? 0x800 : 0;
+            result = VFS_O_RDWR | (sock->nonblocking ? 0x800 : 0);
             break;
         case SOCKET_F_SETFL:
             sock->nonblocking = (arg & 0x800) ? 1 : 0;
-            descriptor->flags = (descriptor->flags & 1) |
-                                ((uint64_t)arg & ~1UL);
+            descriptor->flags = (descriptor->flags & VFS_O_CLOEXEC) |
+                                ((uint64_t)arg & ~(uint64_t)VFS_O_CLOEXEC);
             break;
         default:
             result = -EINVAL;

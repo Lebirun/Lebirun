@@ -8,6 +8,7 @@
 #define AT_REMOVEDIR        0x200
 #define AT_SYMLINK_FOLLOW   0x400
 #define AT_EACCESS          0x200
+#define AT_NO_AUTOMOUNT     0x800
 #define AT_EMPTY_PATH       0x1000
 #define RENAME_NOREPLACE    1
 #define RENAME_EXCHANGE     2
@@ -90,6 +91,37 @@ static int split_at_path_alloc(const char *path, char **parent_out,
     return 0;
 }
 
+int vfs_dir_write_check(vfs_node_t *dir, const char *name) {
+    vfs_node_t *target;
+    int r;
+
+    r = vfs_check_perm(dir, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (r < 0 || !(dir->mask & 01000) || current_task->euid == 0 ||
+        current_task->euid == dir->uid)
+        return r;
+    target = vfs_finddir(dir, name);
+    if (!target) return 0;
+    r = target->uid == current_task->euid ? 0 : -EPERM;
+    vfs_release(target);
+    return r;
+}
+
+static int at_path_write_check(const char *path) {
+    char *parent_path;
+    char *name;
+    vfs_node_t *parent;
+    int r;
+
+    r = split_at_path_alloc(path, &parent_path, &name);
+    if (r != 0) return r;
+    parent = vfs_namei(parent_path);
+    kfree(parent_path);
+    r = parent ? vfs_dir_write_check(parent, name) : -ENOENT;
+    if (parent) vfs_release(parent);
+    kfree(name);
+    return r;
+}
+
 static int sys_openat(int dirfd, const char *pathname, int flags, int mode) {
     char *path;
 
@@ -170,6 +202,12 @@ static int sys_mknodat(int dirfd, const char *pathname, int mode,
         kfree(name);
         return -EROFS;
     }
+    result = vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (result != 0) {
+        vfs_release(parent);
+        kfree(name);
+        return result;
+    }
     type = mode & S_IFMT;
     if (type == 0 || type == S_IFREG) {
         result = vfs_create(parent, name,
@@ -233,9 +271,6 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
     char *parent_path;
     char *filename;
     int r;
-    uint64_t pmode;
-    int pshift;
-    int pallowed;
     vfs_node_t *parent;
 
     if (flags & ~AT_REMOVEDIR) return -EINVAL;
@@ -256,20 +291,12 @@ static int sys_unlinkat(int dirfd, const char *pathname, int flags) {
         return -ENOENT;
     }
 
-    if (current_task->euid != 0) {
-        pmode = parent->mask;
-        if (current_task->euid == parent->uid)
-            pshift = 6;
-        else if (current_task->egid == parent->gid)
-            pshift = 3;
-        else
-            pshift = 0;
-        pallowed = (int)((pmode >> pshift) & 7);
-        if (!(pallowed & VFS_PERM_WRITE)) {
-            vfs_release(parent);
-            kfree(filename);
-            return -EACCES;
-        }
+    r = vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY ? -EROFS :
+        vfs_dir_write_check(parent, filename);
+    if (r < 0) {
+        vfs_release(parent);
+        kfree(filename);
+        return r;
     }
 
     r = vfs_unlink_checked(parent, filename, (flags & AT_REMOVEDIR) != 0);
@@ -317,6 +344,14 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
         kfree(old_path);
         kfree(new_path);
         return -ENOENT;
+    }
+    r = at_path_write_check(old_path);
+    if (r == 0) r = at_path_write_check(new_path);
+    if (r < 0) {
+        vfs_release(old_node);
+        kfree(old_path);
+        kfree(new_path);
+        return r;
     }
 
     old_parent = old_node->parent;
@@ -409,12 +444,14 @@ int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,
         kfree(new_path);
         return -ENOENT;
     }
-    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+    result = vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY ? -EROFS :
+             vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (result < 0) {
         vfs_release(parent);
         kfree(name);
         kfree(old_path);
         kfree(new_path);
-        return -EROFS;
+        return result;
     }
     old_node = vfs_namei(old_path);
     if (!old_node) {
@@ -483,12 +520,14 @@ int syscall_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
         kfree(target);
         return -ENOENT;
     }
-    if (vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY) {
+    ret = vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY ? -EROFS :
+          vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (ret < 0) {
         vfs_release(parent);
         kfree(name);
         kfree(link_path);
         kfree(target);
-        return -EROFS;
+        return ret;
     }
     if (parent->ops && parent->ops->symlink) {
         ret = parent->ops->symlink(parent, name, target);
@@ -589,16 +628,12 @@ static int sys_fchmodat(int dirfd, const char *pathname, int mode) {
     return 0;
 }
 
-static int sys_faccessat(int dirfd, const char *pathname, int mode) {
+int syscall_faccessat(int dirfd, const char *pathname, int mode) {
     char *path;
     vfs_node_t *node;
-    uint64_t uid;
-    uint64_t gid;
-    uint64_t fmode;
-    int shift;
-    int allowed;
-    int want;
+    int result;
 
+    if (mode & ~7) return -EINVAL;
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
     if (!current_task) {
@@ -610,41 +645,32 @@ static int sys_faccessat(int dirfd, const char *pathname, int mode) {
     kfree(path);
     if (!node) return -ENOENT;
 
-    if (mode == 0) { vfs_release(node); return 0; }
-
-    uid = current_task->euid;
-    gid = current_task->egid;
-    if (uid == 0) { vfs_release(node); return 0; }
-
-    fmode = node->mask;
-    if (uid == node->uid)
-        shift = 6;
-    else if (gid == node->gid)
-        shift = 3;
+    if ((mode & 2) && (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY))
+        result = -EROFS;
+    else if (current_task->euid == 0)
+        result = (mode & 1) && VFS_GET_TYPE(node->flags) != VFS_DIRECTORY &&
+                 !(node->mask & 0111) ? -EACCES : 0;
     else
-        shift = 0;
-
-    allowed = (int)((fmode >> shift) & 7);
-    want = 0;
-    if (mode & 4) want |= VFS_PERM_READ;
-    if (mode & 2) want |= VFS_PERM_WRITE;
-    if (mode & 1) want |= VFS_PERM_EXEC;
+        result = vfs_check_perm(node, mode);
     vfs_release(node);
-    if ((allowed & want) == want) return 0;
-    return -EACCES;
+    return result;
 }
 
-int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
+int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st,
+                  int flags) {
     char *path;
     vfs_node_t *node;
     uint64_t perms;
     uint64_t mode;
 
     if (!st) return -EFAULT;
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH))
+        return -EINVAL;
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
 
-    node = vfs_namei(path);
+    node = flags & AT_SYMLINK_NOFOLLOW ? vfs_namei_nofollow(path) :
+           vfs_namei(path);
     kfree(path);
     if (!node) return -ENOENT;
 
@@ -691,13 +717,14 @@ int vfs_stat_path(int dirfd, const char *pathname, struct kernel_stat *st) {
     return 0;
 }
 
-int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf) {
+int syscall_fstatat(int dirfd, const char *pathname, uint64_t statbuf,
+                    int flags) {
     struct kernel_stat result;
     int error;
 
     if (!user_access_ok((void *)(uintptr_t)statbuf, sizeof(result),
                         UACCESS_WRITE)) return -EFAULT;
-    error = vfs_stat_path(dirfd, pathname, &result);
+    error = vfs_stat_path(dirfd, pathname, &result, flags);
     if (error != 0) return error;
     if (copy_to_user((void *)(uintptr_t)statbuf, &result,
                      sizeof(result)) < 0) return -EFAULT;
@@ -913,7 +940,7 @@ void syscalls_at_init(void) {
     syscall_table_set(SYSCALL_SYMLINKAT, (void *)(syscall_symlinkat));
     syscall_table_set(SYSCALL_READLINKAT, (void *)(syscall_readlinkat));
     syscall_table_set(SYSCALL_FCHMODAT, (void *)(sys_fchmodat));
-    syscall_table_set(SYSCALL_FACCESSAT, (void *)(sys_faccessat));
+    syscall_table_set(SYSCALL_FACCESSAT, (void *)(syscall_faccessat));
     syscall_table_set(SYSCALL_FSTATAT, (void *)(syscall_fstatat));
     syscall_table_set(SYSCALL_UTIMENSAT, (void *)(sys_utimensat));
     syscall_table_set(SYSCALL_RENAMEAT2, (void *)(sys_renameat2));

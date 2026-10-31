@@ -4830,7 +4830,7 @@ void task_fd_close_cloexec(task_t *task) {
     for (i = 3; i < task->fds_capacity; i++) {
         tfd = &task->fds[i];
         if (!tfd->in_use) continue;
-        if (!(tfd->flags & 1)) continue;
+        if (!(tfd->flags & VFS_O_CLOEXEC)) continue;
         if (FD_TYPE_IS_PIPE(tfd->type)) {
             p = (pipe_t *)tfd->private_data;
             if (p) {
@@ -4852,7 +4852,7 @@ void task_fd_close_cloexec(task_t *task) {
                     if (task->fds[j].type == FD_TYPE_FILE &&
                         task->fds[j].node == tfd->node &&
                         task->fds[j].ref_count == tfd->ref_count &&
-                        !(task->fds[j].flags & 1)) {
+                        !(task->fds[j].flags & VFS_O_CLOEXEC)) {
                         release_flock = 0;
                         break;
                     }

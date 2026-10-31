@@ -33,6 +33,7 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped);
 int syscall_user_range_present(uint64_t addr, uint64_t len,
                                int empty_mapped, int fallback_pd);
 int vfs_check_perm(vfs_node_t *node, int want);
+int vfs_dir_write_check(vfs_node_t *dir, const char *name);
 int syscall_vfs_open_resolved(char *path, int flags, int mode);
 int ramfs_err_to_errno(int r);
 int syscall_fd_read(int fd, char *buf, int len);
@@ -44,7 +45,9 @@ int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,
 int syscall_symlinkat(uint64_t target, const char *dirfd, uint64_t linkpath);
 int syscall_readlinkat(int dirfd, const char *path, uint64_t buffer,
                        uint64_t size);
-int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf);
+int syscall_fstatat(int dirfd, const char *path, uint64_t statbuf,
+                    int flags);
+int syscall_faccessat(int dirfd, const char *path, int mode);
 
 #define EPERM    1
 #define ENOENT   2
@@ -524,7 +527,8 @@ struct kernel_sigaction {
     unsigned long sa_mask;
 };
 
-int vfs_stat_path(int dirfd, const char *path, struct kernel_stat *st);
+int vfs_stat_path(int dirfd, const char *path, struct kernel_stat *st,
+                  int flags);
 
 #define S_IFMT  00170000
 #define S_IFSOCK 0140000

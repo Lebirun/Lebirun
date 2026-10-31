@@ -143,7 +143,7 @@ static vfs_node_t *core_create(task_t *task) {
         vfs_release(parent);
         return NULL;
     }
-    if (vfs_create(parent, name, 0600 | VFS_O_EXCL) != 0) {
+    if (vfs_create(parent, name, 0600 | VFS_CREATE_EXCL) != 0) {
         vfs_release(parent);
         return NULL;
     }

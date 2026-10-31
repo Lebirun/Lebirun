@@ -537,7 +537,7 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     if (newfd < 0) return -EMFILE;
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
-    fd_table[newfd].flags &= ~1;
+    fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
     fd_retain_entry(&fd_table[newfd]);
     task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
@@ -562,7 +562,7 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     }
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
-    fd_table[newfd].flags &= ~1;
+    fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
     fd_retain_entry(&fd_table[newfd]);
     task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
@@ -615,6 +615,8 @@ static int sys_chdir(uint64_t path_ptr, const char *unused1, int unused2) {
     if (!node) { kfree(path); return -ENOENT; }
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) { vfs_release(node); kfree(path); return -ENOTDIR; }
     if (!current_task) { vfs_release(node); kfree(path); return -EFAULT; }
+    ret = vfs_check_perm(node, VFS_PERM_EXEC);
+    if (ret < 0) { vfs_release(node); kfree(path); return ret; }
     resolved = vfs_get_path_alloc(node);
     ret = task_set_cwd(current_task, resolved ? resolved : path);
     if (resolved) kfree(resolved);
@@ -724,39 +726,10 @@ static int sys_pivot_root(const char *new_root_arg, const char *put_old_arg,
     return result == 0 ? 0 : -ENOMEM;
 }
 
-static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask);
-
 static int sys_access(uint64_t path_ptr, const char *mode_ptr, int unused) {
-    uint64_t addr;
-    int mode;
-    char *path;
-    vfs_node_t *node;
-    uint64_t perms;
-    int ret;
-
     (void)unused;
-    addr = (uint64_t)path_ptr;
-    mode = (int)(uintptr_t)mode_ptr;
-    if (mode & ~7) return -EINVAL;
-    ret = posix_copy_user_string(&path, (const char *)addr, UINT64_MAX);
-    if (ret < 0) return ret;
-    node = vfs_namei(path);
-    kfree(path);
-    if (!node) return -ENOENT;
-    if (mode == 0) { vfs_release(node); return 0; }
-    if (current_task && current_task->uid == 0) { vfs_release(node); return 0; }
-    perms = vfs_mask_to_unix_perms(node->mask);
-    if (!perms) {
-        if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY)
-            perms = 0755;
-        else
-            perms = 0644;
-    }
-    if ((mode & 4) && !(perms & 0444)) { vfs_release(node); return -EACCES; }
-    if ((mode & 2) && !(perms & 0222)) { vfs_release(node); return -EACCES; }
-    if ((mode & 1) && !(perms & 0111)) { vfs_release(node); return -EACCES; }
-    vfs_release(node);
-    return 0;
+    return syscall_faccessat(POSIX_AT_FDCWD, (const char *)(uintptr_t)path_ptr,
+                             (int)(uintptr_t)mode_ptr);
 }
 
 static inline uint64_t vfs_mask_to_unix_perms(uint64_t mask) {
@@ -804,7 +777,7 @@ static int sys_stat(uint64_t path_ptr, const char *buf_ptr, int unused) {
     (void)unused;
     return syscall_fstatat(POSIX_AT_FDCWD,
                            (const char *)(uintptr_t)path_ptr,
-                           (uint64_t)(uintptr_t)buf_ptr);
+                           (uint64_t)(uintptr_t)buf_ptr, 0);
 }
 static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     uint64_t buf_addr;
@@ -1632,24 +1605,27 @@ static int sys_fcntl(int fd, const char *cmd_ptr, uint64_t arg_value) {
             memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
             fd_table[newfd].ref_count = 1;
             if (cmd == F_DUPFD_CLOEXEC)
-                fd_table[newfd].flags |= 1;
+                fd_table[newfd].flags |= VFS_O_CLOEXEC;
             else
-                fd_table[newfd].flags &= ~1;
+                fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
             fd_retain_entry(&fd_table[newfd]);
             task_fd_position_share(&fd_table[fd], &fd_table[newfd]);
             return newfd;
         case F_GETFD:
-            return (fd_table[fd].flags & 1) ? 1 : 0;
+            return (fd_table[fd].flags & VFS_O_CLOEXEC) ? 1 : 0;
         case F_SETFD:
             if (arg & 1)
-                fd_table[fd].flags |= 1;
+                fd_table[fd].flags |= VFS_O_CLOEXEC;
             else
-                fd_table[fd].flags &= ~1;
+                fd_table[fd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
             return 0;
         case F_GETFL:
-            return fd_table[fd].flags & ~1;
+            return (int)(fd_table[fd].flags & ~(uint64_t)(VFS_O_CLOEXEC |
+                VFS_O_CREAT | VFS_O_EXCL | VFS_O_NOCTTY | VFS_O_TRUNC));
         case F_SETFL:
-            fd_table[fd].flags = (fd_table[fd].flags & 1) | (arg & ~1);
+            fd_table[fd].flags = (fd_table[fd].flags &
+                ~(uint64_t)(VFS_O_APPEND | VFS_O_NONBLOCK)) |
+                ((uint64_t)arg & (VFS_O_APPEND | VFS_O_NONBLOCK));
             return 0;
         case F_GETLK:
         case F_SETLK:
@@ -1977,9 +1953,9 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     memcpy(&fd_table[newfd], &fd_table[oldfd], sizeof(task_fd_t));
     fd_table[newfd].ref_count = 1;
     if (flags & VFS_O_CLOEXEC)
-        fd_table[newfd].flags |= 1;
+        fd_table[newfd].flags |= VFS_O_CLOEXEC;
     else
-        fd_table[newfd].flags &= ~1;
+        fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
     fd_retain_entry(&fd_table[newfd]);
     task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
@@ -2012,8 +1988,8 @@ static int sys_pipe2(int *pipefd, int flags) {
     fd_table[wfd].type = FD_TYPE_PIPE_W;
     fd_table[wfd].private_data = p;
     if (flags & VFS_O_CLOEXEC) {
-        fd_table[rfd].flags |= 1;
-        fd_table[wfd].flags |= 1;
+        fd_table[rfd].flags |= VFS_O_CLOEXEC;
+        fd_table[wfd].flags |= VFS_O_CLOEXEC;
     }
     if (flags & VFS_O_NONBLOCK) {
         fd_table[rfd].flags |= VFS_O_NONBLOCK;
@@ -2035,7 +2011,7 @@ static int sys_fchdir(int fd) {
     int result;
 
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) != VFS_DIRECTORY) return -ENOTDIR;
@@ -2050,7 +2026,7 @@ static int sys_fchmod(int fd, int mode) {
     vfs_node_t *node;
 
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
 
@@ -2069,7 +2045,7 @@ static int sys_fchown(int fd, int uid, int gid) {
     vfs_node_t *node;
 
     if (!current_task) return -ESRCH;
-    if (fd < 3 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
+    if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
     node = (vfs_node_t *)fd_table[fd].node;
     if (!node) return -EBADF;
 
@@ -2173,6 +2149,13 @@ static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
     node = (vfs_node_t *)tfd->node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
+    if (count > INT32_MAX) count = INT32_MAX;
+    if (node->length > 0) {
+        if ((uint64_t)offset >= node->length) return 0;
+        if (count > node->length - (uint64_t)offset)
+            count = node->length - (uint64_t)offset;
+    }
+    if (!user_access_ok(buf, count, UACCESS_WRITE)) return -EFAULT;
     return vfs_read(node, (uint64_t)offset, count, buf);
 }
 
@@ -2193,6 +2176,8 @@ static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset)
     node = (vfs_node_t *)tfd->node;
     if (!node) return -EBADF;
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
+    if (count > INT32_MAX) count = INT32_MAX;
+    if (!user_access_ok(buf, count, UACCESS_READ)) return -EFAULT;
     return vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
 }
 
@@ -2604,8 +2589,7 @@ static int sys_statx(int dirfd, const char *path, int flags,
 
     (void)mask;
     if (!path || !buf) return -EFAULT;
-    if (flags != 0) return -EINVAL;
-    error = vfs_stat_path(dirfd, path, &kst);
+    error = vfs_stat_path(dirfd, path, &kst, flags & ~0x6000);
     if (error < 0) return error;
     memset(&out, 0, sizeof(out));
     out.stx_mask = 0x7FFu;
