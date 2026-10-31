@@ -88,6 +88,32 @@ static void tcp_retx_queue_free(tcp_socket_t *sock) {
     sock->retx_head = NULL;
     sock->retx_tail = NULL;
     sock->retx_count = 0;
+    while ((seg = sock->ooo_head)) {
+        sock->ooo_head = seg->next;
+        kfree(seg->data);
+        kfree(seg);
+    }
+}
+
+static uint16_t tcp_rcv_wnd(tcp_socket_t *sock) {
+    uint64_t used;
+
+    used = sock->recv_buffer_size ? (sock->recv_buffer_tail + sock->recv_buffer_size -
+                                     sock->recv_buffer_head) % sock->recv_buffer_size : 0;
+    return used >= TCP_WINDOW_SIZE ? 0 : (uint16_t)(TCP_WINDOW_SIZE - used);
+}
+
+static uint16_t tcp_opt_mss(uint8_t *opt, uint64_t len) {
+    uint64_t i;
+
+    i = 0;
+    while (i < len && opt[i]) {
+        if (opt[i] == 1) { i++; continue; }
+        if (i + 1 >= len || opt[i + 1] < 2 || i + opt[i + 1] > len) break;
+        if (opt[i] == 2 && opt[i + 1] == 4) return (uint16_t)((opt[i + 2] << 8) | opt[i + 3]);
+        i += opt[i + 1];
+    }
+    return 536;
 }
 
 void KERNEL_INIT tcp_init(void) {
@@ -130,27 +156,19 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
     uint8_t *packet;
     tcp_header_t *tcp;
     int result;
-    uint64_t used;
-    uint64_t free_space;
+    uint16_t mss;
 
     if (!sock || !sock->netif) return -1;
 
-    header_len = 20;
+    header_len = (flags & TCP_FLAG_SYN) ? 24 : 20;
     if (len > 65535 - header_len) return -1;
     tcp_len = header_len + len;
     packet = (uint8_t *)kmalloc(tcp_len);
     if (!packet) return -1;
 
-    if (sock->recv_buffer_size > 0) {
+    {
         uint64_t f = tcp_lock_irqsave();
-        if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
-            used = sock->recv_buffer_tail - sock->recv_buffer_head;
-        } else {
-            used = sock->recv_buffer_size - sock->recv_buffer_head + sock->recv_buffer_tail;
-        }
-        free_space = sock->recv_buffer_size - 1 - used;
-        if (free_space > 65535) free_space = 65535;
-        sock->recv_window = (uint16_t)free_space;
+        sock->recv_window = tcp_rcv_wnd(sock);
         tcp_lock_irqrestore(f);
     }
 
@@ -164,6 +182,15 @@ static int tcp_send_segment(tcp_socket_t *sock, uint8_t flags, uint8_t *data, ui
     tcp->window = htons(sock->recv_window);
     tcp->checksum = 0;
     tcp->urgent = 0;
+
+    if (flags & TCP_FLAG_SYN) {
+        mss = TCP_MSS;
+        if (sock->netif->mtu > 40 && sock->netif->mtu - 40 < mss) mss = (uint16_t)(sock->netif->mtu - 40);
+        packet[20] = 2;
+        packet[21] = 4;
+        packet[22] = (uint8_t)(mss >> 8);
+        packet[23] = (uint8_t)mss;
+    }
 
     if (data && len > 0) {
         memcpy(packet + header_len, data, len);
@@ -347,6 +374,7 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
     uint64_t to_copy;
     uint64_t copied;
     uint16_t old_window;
+    uint16_t new_window;
     uint64_t f;
 
     if (!sock) return -1;
@@ -409,11 +437,11 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
         kfree(sock->recv_buffer);
         sock->recv_buffer = NULL;
         sock->recv_buffer_size = 0;
-        sock->recv_window = TCP_WINDOW_SIZE;
     }
+    new_window = tcp_rcv_wnd(sock);
     tcp_lock_irqrestore(f);
 
-    if ((old_window < 4096 || sock->recv_buffer == NULL) &&
+    if (old_window < TCP_WINDOW_SIZE / 2 && new_window >= old_window + TCP_MSS &&
         sock->state == TCP_STATE_ESTABLISHED) {
         tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
     }
@@ -500,6 +528,68 @@ static void tcp_grow_recv_buffer(tcp_socket_t *sock, uint64_t required) {
     sock->recv_buffer_size = new_size;
     sock->recv_buffer_head = 0;
     sock->recv_buffer_tail = used;
+}
+
+static uint64_t tcp_rx_append(tcp_socket_t *sock, uint8_t *data, uint64_t len) {
+    uint64_t f;
+    uint64_t used;
+    uint64_t n;
+    uint64_t first;
+
+    f = tcp_lock_irqsave();
+    used = sock->recv_buffer_size ? (sock->recv_buffer_tail + sock->recv_buffer_size -
+                                     sock->recv_buffer_head) % sock->recv_buffer_size : 0;
+    if (sock->recv_buffer_size < used + len + 1)
+        tcp_grow_recv_buffer(sock, used + len + 1);
+    n = sock->recv_buffer_size > used + 1 ? sock->recv_buffer_size - 1 - used : 0;
+    if (n > len) n = len;
+    if (n) {
+        first = sock->recv_buffer_size - sock->recv_buffer_tail;
+        if (first > n) first = n;
+        memcpy(sock->recv_buffer + sock->recv_buffer_tail, data, first);
+        memcpy(sock->recv_buffer, data + first, n - first);
+        sock->recv_buffer_tail = (sock->recv_buffer_tail + n) % sock->recv_buffer_size;
+        sock->recv_next += (uint32_t)n;
+    }
+    tcp_lock_irqrestore(f);
+    return n;
+}
+
+static void tcp_ooo_add(tcp_socket_t *sock, uint32_t seq, uint8_t *data, uint64_t len) {
+    tcp_retx_seg_t **pp;
+    tcp_retx_seg_t *seg;
+
+    if (seq - sock->recv_next >= TCP_WINDOW_SIZE) return;
+    pp = &sock->ooo_head;
+    while (*pp && (int32_t)((*pp)->seq - seq) < 0) pp = &(*pp)->next;
+    if (*pp && (*pp)->seq == seq && (*pp)->len >= len) return;
+    seg = (tcp_retx_seg_t *)kmalloc(sizeof(tcp_retx_seg_t));
+    if (!seg) return;
+    seg->data = (uint8_t *)kmalloc(len);
+    if (!seg->data) {
+        kfree(seg);
+        return;
+    }
+    memcpy(seg->data, data, len);
+    seg->seq = seq;
+    seg->len = len;
+    seg->next = *pp;
+    *pp = seg;
+}
+
+static void tcp_ooo_drain(tcp_socket_t *sock) {
+    tcp_retx_seg_t *seg;
+    uint32_t off;
+
+    while ((seg = sock->ooo_head) && (int32_t)(seg->seq - sock->recv_next) <= 0) {
+        off = sock->recv_next - seg->seq;
+        if (off < seg->len &&
+            tcp_rx_append(sock, seg->data + off, seg->len - off) < seg->len - off)
+            break;
+        sock->ooo_head = seg->next;
+        kfree(seg->data);
+        kfree(seg);
+    }
 }
 
 static tcp_listener_t *tcp_find_listener(uint16_t port) {
@@ -644,9 +734,8 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     uint8_t *payload;
     uint64_t payload_len;
     tcp_socket_t *sock;
-    uint64_t avail;
-    uint64_t used;
-    uint64_t next;
+    int32_t diff;
+    uint16_t mss;
 
     (void)dest;
     if (!netif || !data || len < sizeof(tcp_header_t)) return;
@@ -693,6 +782,8 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         server->recv_next = seq + 1;
         server->send_next = tcp_isn++;
         server->send_window = ntohs(tcp->window);
+        mss = tcp_opt_mss(data + 20, header_len - 20);
+        if (mss >= 64 && mss < server->mss) server->mss = mss;
         server->state = TCP_STATE_SYN_RCVD;
         server->ka_last = pit_get_ticks();
         if (tcp_send_segment(server, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0) < 0) {
@@ -715,6 +806,8 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK)) {
                 sock->recv_next = seq + 1;
                 sock->send_una = ack;
+                mss = tcp_opt_mss(data + 20, header_len - 20);
+                if (mss >= 64 && mss < sock->mss) sock->mss = mss;
                 sock->state = TCP_STATE_ESTABLISHED;
                 sock->ka_last = pit_get_ticks();
                 sock->ka_probes = 0;
@@ -759,61 +852,27 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
                 tcp_retx_queue_ack(sock, ack);
             }
             if (payload_len > 0) {
-                if (seq != sock->recv_next) {
-                    if (seq + payload_len <= sock->recv_next) {
-                        tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                        break;
-                    }
-                    if (seq < sock->recv_next) {
-                        payload += (sock->recv_next - seq);
-                        payload_len -= (sock->recv_next - seq);
-                        seq = sock->recv_next;
-                    } else {
-                        tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                        break;
-                    }
+                diff = (int32_t)(seq - sock->recv_next);
+                if (diff > 0) {
+                    tcp_ooo_add(sock, seq, payload, payload_len);
+                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                    break;
                 }
-                {
-                    uint64_t f = tcp_lock_irqsave();
-                    if (!sock->recv_buffer) {
-                        tcp_grow_recv_buffer(sock, payload_len + 1);
-                        if (!sock->recv_buffer) {
-                            tcp_lock_irqrestore(f);
-                            tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                            break;
-                        }
-                    }
-                    if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
-                        used = sock->recv_buffer_tail - sock->recv_buffer_head;
-                    } else {
-                        used = sock->recv_buffer_size - sock->recv_buffer_head + sock->recv_buffer_tail;
-                    }
-                    avail = sock->recv_buffer_size - 1 - used;
-                    if (avail < payload_len &&
-                        payload_len <= UINT64_MAX - used - 1) {
-                        tcp_grow_recv_buffer(sock, used + payload_len + 1);
-                        if (sock->recv_buffer_tail >= sock->recv_buffer_head) {
-                            used = sock->recv_buffer_tail - sock->recv_buffer_head;
-                        } else {
-                            used = sock->recv_buffer_size - sock->recv_buffer_head + sock->recv_buffer_tail;
-                        }
-                        avail = sock->recv_buffer_size - 1 - used;
-                    }
-                    next = payload_len <= avail ? payload_len : avail;
-                    avail = sock->recv_buffer_size - sock->recv_buffer_tail;
-                    if (avail > next)
-                        avail = next;
-                    memcpy(sock->recv_buffer + sock->recv_buffer_tail, payload,
-                           avail);
-                    memcpy(sock->recv_buffer, payload + avail, next - avail);
-                    sock->recv_buffer_tail =
-                        (sock->recv_buffer_tail + next) % sock->recv_buffer_size;
-                    sock->recv_next = seq + payload_len;
-                    tcp_lock_irqrestore(f);
+                if ((uint64_t)-(int64_t)diff >= payload_len) {
+                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                    break;
                 }
+                payload += -(int64_t)diff;
+                payload_len -= -(int64_t)diff;
+                seq = sock->recv_next;
+                if (tcp_rx_append(sock, payload, payload_len) == payload_len)
+                    tcp_ooo_drain(sock);
+            } else if (seq != sock->recv_next && !(flags & TCP_FLAG_FIN)) {
+                tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                break;
             }
             if (flags & TCP_FLAG_FIN) {
-                if (payload_len == 0 && seq != sock->recv_next) {
+                if (seq + payload_len != sock->recv_next) {
                     tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
                     break;
                 }

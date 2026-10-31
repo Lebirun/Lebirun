@@ -24,6 +24,9 @@ struct tls_conn {
     uint8_t *stash;
     uint64_t stash_len;
     uint64_t stash_cap;
+    uint8_t rec_hdr[5];
+    uint8_t *rec_buf;
+    uint64_t rec_got;
     uint8_t hs_key_tx[16];
     uint8_t hs_key_rx[16];
     uint8_t hs_iv_tx[12];
@@ -44,7 +47,7 @@ int lebtls_transcript_append(tls_conn_t *conn, const uint8_t *data, uint64_t len
 void lebtls_conn_free(tls_conn_t *conn);
 
 int lebtls_rec_send(tcp_socket_t *tcp, uint8_t type, const uint8_t *data, uint64_t len);
-int lebtls_rec_recv(tcp_socket_t *tcp, uint8_t *type_out, uint8_t **data_out,
+int lebtls_rec_recv(tls_conn_t *conn, uint8_t *type_out, uint8_t **data_out,
                     uint64_t *len_out, uint64_t timeout_ms);
 
 int lebtls_hkdf_extract(const uint8_t *salt, size_t salt_len,

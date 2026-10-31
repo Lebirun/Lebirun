@@ -29,6 +29,8 @@ void lebtls_conn_free(tls_conn_t *conn) {
         memset(conn->stash, 0, conn->stash_len);
         kfree(conn->stash);
     }
+    if (conn->rec_buf)
+        kfree(conn->rec_buf);
     if (conn->host)
         kfree(conn->host);
     __sync_fetch_and_sub(&lebtls_active_conns, 1);
@@ -153,7 +155,7 @@ static int lebtls_recv(tls_conn_t *conn, uint8_t *buf, uint64_t len, uint64_t ti
         uint64_t pt_len;
         uint8_t inner;
 
-        r = lebtls_rec_recv(conn->tcp, &type, &rec, &rec_len, timeout_ms);
+        r = lebtls_rec_recv(conn, &type, &rec, &rec_len, timeout_ms);
         if (r < 0)
             return -1;
         if (r == 0)

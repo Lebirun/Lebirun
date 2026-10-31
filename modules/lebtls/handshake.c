@@ -454,7 +454,7 @@ int lebtls_handshake(tls_conn_t *conn) {
         goto fail;
     hs_free(&hello);
 
-    r = lebtls_rec_recv(conn->tcp, &type, &rec, &rec_len, 15000);
+    r = lebtls_rec_recv(conn, &type, &rec, &rec_len, 15000);
     if (r <= 0)
         goto fail;
     if (type != LEBTLS_RT_HANDSHAKE) {
@@ -555,7 +555,7 @@ int lebtls_handshake(tls_conn_t *conn) {
         rounds++;
         if (task_has_pending_signals())
             goto fail;
-        r = lebtls_rec_recv(conn->tcp, &type, &rec, &rec_len, 15000);
+        r = lebtls_rec_recv(conn, &type, &rec, &rec_len, 15000);
         if (r < 0)
             goto fail;
         if (r == 0) {

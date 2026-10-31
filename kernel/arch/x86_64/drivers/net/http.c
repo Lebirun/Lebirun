@@ -344,7 +344,8 @@ static int http_finish_response(uint8_t *recv_buf, uint64_t total_recv,
         return -1;
     }
 
-    if (http_parse_response(recv_buf, total_recv, response) < 0) {
+    if (http_parse_response(recv_buf, total_recv, response) < 0 ||
+        (!response->chunked && response->body_len < response->content_length)) {
         kfree(recv_buf);
         return -1;
     }
@@ -425,7 +426,7 @@ static int __attribute__((noinline, noclone)) http_receive_headers(
     parsed = (http_response_t *)kmalloc(sizeof(*parsed));
     if (!parsed) return 0;
     memset(parsed, 0, sizeof(*parsed));
-    result = 0;
+    result = 2;
     if (http_parse_response(*buffer, total, parsed) == 0 &&
         parsed->content_length > 0) {
         result = 1;
@@ -474,6 +475,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     int sig_ret;
     uint64_t expected_total;
     int receive_error;
+    int headers_done;
 
     if (!response) return -1;
 
@@ -565,6 +567,7 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
     start = net_get_ticks();
     expected_total = 0;
     receive_error = 0;
+    headers_done = 0;
 
     for (;;) {
         if (task_has_pending_signals()) {
@@ -597,11 +600,13 @@ int http_get_ip_tls(ipv4_addr_t ip, uint16_t port, const char *host, const char 
                 return -4;
             }
 
-            if (expected_total == 0 &&
-                http_receive_headers(&recv_buf, total_recv, &buf_cap,
-                                     &expected_total) < 0) {
-                receive_error = 1;
-                break;
+            if (!headers_done) {
+                headers_done = http_receive_headers(&recv_buf, total_recv, &buf_cap,
+                                                    &expected_total);
+                if (headers_done < 0) {
+                    receive_error = 1;
+                    break;
+                }
             }
 
             if (expected_total > 0 && total_recv >= expected_total) break;
@@ -1119,6 +1124,7 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
     buf_cap = HTTP_RECV_BUF_INIT;
     expected_total = 0;
     receive_error = 0;
+    header_result = 0;
 
     for (;;) {
         if (task_has_pending_signals()) break;
@@ -1133,13 +1139,14 @@ int http_post_ip(ipv4_addr_t ip, uint16_t port, const char *host, const char *pa
             total_recv += n;
             start = net_get_ticks();
 
-            header_result = http_receive_headers(&recv_buf, total_recv,
-                                                   &buf_cap, &expected_total);
+            if (!header_result)
+                header_result = http_receive_headers(&recv_buf, total_recv,
+                                                     &buf_cap, &expected_total);
             if (header_result < 0) {
                 receive_error = 1;
                 break;
             }
-            if (header_result > 0 && total_recv >= expected_total) break;
+            if (header_result == 1 && total_recv >= expected_total) break;
             if (sock->state == TCP_STATE_CLOSE_WAIT ||
                 sock->state == TCP_STATE_CLOSED) {
                 break;

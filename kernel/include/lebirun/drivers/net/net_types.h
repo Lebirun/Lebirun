@@ -318,6 +318,7 @@ typedef struct tcp_socket {
     tcp_retx_seg_t *retx_head;
     tcp_retx_seg_t *retx_tail;
     uint32_t retx_count;
+    tcp_retx_seg_t *ooo_head;
     uint64_t fin_send_time;
     uint8_t fin_retries;
     uint8_t ttl;
