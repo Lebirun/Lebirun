@@ -36,7 +36,6 @@ typedef struct {
     uint64_t mem;
     uint64_t *prp;
     uint64_t max_bytes;
-    nvme_queue_t aq;
     nvme_queue_t ioq;
     mutex_t lock;
 } nvme_ctrl_t;
@@ -209,9 +208,9 @@ static const blkdev_ops_t nvme_ops = {
     nvme_read, nvme_write, NULL, nvme_flush
 };
 
-static int KERNEL_INIT nvme_admin(nvme_ctrl_t *c, uint32_t opc, uint32_t nsid,
-                                  uint64_t phys, uint32_t cdw10,
-                                  uint32_t cdw11) {
+static int KERNEL_INIT nvme_admin(nvme_queue_t *aq, uint32_t opc,
+                                  uint32_t nsid, uint64_t phys,
+                                  uint32_t cdw10, uint32_t cdw11) {
     uint32_t cmd[16];
 
     memset(cmd, 0, sizeof(cmd));
@@ -221,7 +220,7 @@ static int KERNEL_INIT nvme_admin(nvme_ctrl_t *c, uint32_t opc, uint32_t nsid,
     cmd[7] = (uint32_t)(phys >> 32);
     cmd[10] = cdw10;
     cmd[11] = cdw11;
-    return nvme_cmd(&c->aq, cmd, 5000);
+    return nvme_cmd(aq, cmd, 5000);
 }
 
 static int KERNEL_INIT nvme_wait_ready(nvme_ctrl_t *c, uint32_t want,
@@ -279,13 +278,14 @@ static int KERNEL_INIT nvme_add_ns(nvme_ctrl_t *c, uint32_t nsid,
 }
 
 static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
+    nvme_queue_t aq;
     nvme_ctrl_t *c;
     uint64_t bar;
     uint64_t cap;
     uint64_t stride;
     uint64_t pages;
     uint64_t timeout;
-    uint64_t idp;
+    uint64_t tmp;
     uint64_t i;
     uint32_t *list;
     uint32_t nn;
@@ -304,6 +304,7 @@ static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
              nvme_pci(bus, slot, func, 0x04, 0, 0) | 0x406);
     c = (nvme_ctrl_t *)kcalloc(1, sizeof(*c));
     if (!c) return;
+    tmp = 0;
     c->regs = nvme_virt_next;
     vmm_map_page(c->regs, bar, VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_PCD);
     pages = 1;
@@ -319,65 +320,66 @@ static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
     }
     nvme_wr(c, NVME_CC, nvme_rd(c, NVME_CC) & ~1U);
     if (nvme_wait_ready(c, 0, timeout) < 0) goto unmap;
-    c->mem = pfa_alloc_contiguous(4);
-    idp = pfa_alloc_contiguous(2);
-    if (!c->mem || !idp) goto free;
-    memset((void *)(c->mem + KERNEL_VMA), 0, 4 * PAGE_SIZE);
+    c->mem = pfa_alloc_contiguous(2);
+    tmp = pfa_alloc_contiguous(4);
+    if (!c->mem || !tmp) goto free;
+    memset((void *)(c->mem + KERNEL_VMA), 0, 2 * PAGE_SIZE);
+    memset((void *)(tmp + KERNEL_VMA), 0, 2 * PAGE_SIZE);
     c->prp = (uint64_t *)(c->mem + KERNEL_VMA + NVME_PRP_OFF);
-    nvme_queue_init(&c->aq, c->mem + KERNEL_VMA,
-                    c->mem + KERNEL_VMA + PAGE_SIZE, c->regs + 0x1000);
-    nvme_queue_init(&c->ioq, c->mem + KERNEL_VMA + 2 * PAGE_SIZE,
-                    c->mem + KERNEL_VMA + 3 * PAGE_SIZE,
+    memset(&aq, 0, sizeof(aq));
+    nvme_queue_init(&aq, tmp + KERNEL_VMA, tmp + KERNEL_VMA + PAGE_SIZE,
+                    c->regs + 0x1000);
+    nvme_queue_init(&c->ioq, c->mem + KERNEL_VMA,
+                    c->mem + KERNEL_VMA + PAGE_SIZE,
                     c->regs + 0x1000 + 2 * stride);
-    c->aq.cq_db = (volatile uint32_t *)(c->regs + 0x1000 + stride);
+    aq.cq_db = (volatile uint32_t *)(c->regs + 0x1000 + stride);
     c->ioq.cq_db = (volatile uint32_t *)(c->regs + 0x1000 + 3 * stride);
     mutex_init(&c->lock);
     nvme_wr(c, NVME_AQA, ((NVME_QD - 1) << 16) | (NVME_QD - 1));
-    nvme_wr64(c, NVME_ASQ, c->mem);
-    nvme_wr64(c, NVME_ACQ, c->mem + PAGE_SIZE);
+    nvme_wr64(c, NVME_ASQ, tmp);
+    nvme_wr64(c, NVME_ACQ, tmp + PAGE_SIZE);
     nvme_wr(c, NVME_CC, 1 | (6 << 16) | (4 << 20));
     if (nvme_wait_ready(c, 1, timeout) < 0) goto disable;
-    id = (uint8_t *)(idp + KERNEL_VMA);
+    id = (uint8_t *)(tmp + KERNEL_VMA + 2 * PAGE_SIZE);
     list = (uint32_t *)(id + PAGE_SIZE);
-    if (nvme_admin(c, 0x06, 0, idp, 1, 0) < 0) goto disable;
+    if (nvme_admin(&aq, 0x06, 0, tmp + 2 * PAGE_SIZE, 1, 0) < 0) goto disable;
     mdts = id[77];
     memcpy(&nn, id + 516, sizeof(nn));
     c->max_bytes = mdts && mdts < 8 ? PAGE_SIZE << mdts : 256 * PAGE_SIZE;
-    if (nvme_admin(c, 0x05, 0, c->mem + 3 * PAGE_SIZE,
+    if (nvme_admin(&aq, 0x05, 0, c->mem + PAGE_SIZE,
                    ((NVME_QD - 1) << 16) | 1, 1) < 0 ||
-        nvme_admin(c, 0x01, 0, c->mem + 2 * PAGE_SIZE,
+        nvme_admin(&aq, 0x01, 0, c->mem,
                    ((NVME_QD - 1) << 16) | 1, (1 << 16) | 1) < 0)
         goto disable;
     found = 0;
     if (nvme_rd(c, NVME_VS) >= 0x10100 &&
-        nvme_admin(c, 0x06, 0, idp + PAGE_SIZE, 2, 0) == 0) {
+        nvme_admin(&aq, 0x06, 0, tmp + 3 * PAGE_SIZE, 2, 0) == 0) {
         for (i = 0; i < PAGE_SIZE / 4 && list[i]; i++) {
-            if (nvme_admin(c, 0x06, list[i], idp, 0, 0) == 0 &&
+            if (nvme_admin(&aq, 0x06, list[i], tmp + 2 * PAGE_SIZE, 0, 0) == 0 &&
                 nvme_add_ns(c, list[i], id) == 0)
                 found++;
         }
     } else {
         for (nsid = 1; nsid && nsid <= nn; nsid++) {
-            if (nvme_admin(c, 0x06, nsid, idp, 0, 0) == 0 &&
+            if (nvme_admin(&aq, 0x06, nsid, tmp + 2 * PAGE_SIZE, 0, 0) == 0 &&
                 nvme_add_ns(c, nsid, id) == 0)
                 found++;
         }
     }
-    pfa_free_contiguous(idp, 2);
     if (found) {
+        pfa_free_contiguous(tmp, 4);
         KERNEL_INIT_LOG("NVMe: Controller %u at PCI %u:%u.%u, %d namespace(s)\n",
                         nvme_count, bus, slot, func, found);
         nvme_count++;
         nvme_virt_next += pages * PAGE_SIZE;
         return;
     }
-    idp = 0;
 disable:
     nvme_wr(c, NVME_CC, nvme_rd(c, NVME_CC) & ~1U);
     nvme_wait_ready(c, 0, timeout);
 free:
-    if (c->mem) pfa_free_contiguous(c->mem, 4);
-    if (idp) pfa_free_contiguous(idp, 2);
+    if (c->mem) pfa_free_contiguous(c->mem, 2);
+    if (tmp) pfa_free_contiguous(tmp, 4);
 unmap:
     for (i = 0; i < pages; i++)
         vmm_unmap_page(c->regs + i * PAGE_SIZE);
