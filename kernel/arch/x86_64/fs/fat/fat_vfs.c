@@ -3,7 +3,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/vfs.h>
 #include <lebirun/ramfs.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 
 typedef struct {
     fat_fs_t *fs;
@@ -803,7 +803,7 @@ static vfs_node_t *fat_do_mount(const char *device, const char *mountpoint) {   
         vfs_release(dev_node);
         return NULL;
     }
-    if (fat_mount_fs(fs, ahci_get_port((uint32_t)dev_node->inode),
+    if (fat_mount_fs(fs, dev_node->inode,
                      devfs_get_partition_start(dev_node)) != 0) {
         kfree(fs);
         vfs_release(dev_node);

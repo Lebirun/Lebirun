@@ -2,6 +2,15 @@
 #define XHCI_H
 
 #include <stdint.h>
+#include <lebirun/common.h>
+
+#if CONFIG_DRIVER_USB_HOTPLUG
+#define USB_HOTPLUG_TEXT
+#define USB_LOG(...) printf(__VA_ARGS__)
+#else
+#define USB_HOTPLUG_TEXT KERNEL_INIT
+#define USB_LOG KERNEL_INIT_LOG
+#endif
 
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
@@ -56,6 +65,17 @@
 #define XHCI_LEGSUP_BIOS_OWNED (1u << 16)
 #define XHCI_LEGSUP_OS_OWNED   (1u << 24)
 
+typedef struct usb_dev usb_dev_t;
+
 int xhci_init(void);
+void xhci_delay(uint64_t ms);
+int usb_ctrl(usb_dev_t *dev, uint8_t type, uint8_t req, uint16_t value,
+             uint16_t index);
+int usb_clear_halt(usb_dev_t *dev, uint32_t pipe);
+int usb_bulk_submit(usb_dev_t *dev, uint32_t pipe, void *buf, uint32_t len);
+int usb_bulk_wait(usb_dev_t *dev, uint32_t pipe, uint64_t ms);
+void *usb_storage_attach(usb_dev_t *dev, uint8_t iface, int uas,
+                         uint8_t maxlun);
+void usb_storage_detach(void *storage);
 
 #endif

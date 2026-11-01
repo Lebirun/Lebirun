@@ -37,6 +37,7 @@ uint64_t pit_us_to_ticks(uint64_t us);
 
 int pit_register_callback(pit_callback_t callback, uint64_t interval_ticks, bool oneshot);
 void pit_unregister_callback(int handle);
+void pit_set_callback_interval(int handle, uint64_t interval_ticks);
 void pit_process_callbacks(void);
 
 void speaker_play(uint64_t freq);

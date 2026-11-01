@@ -1,5 +1,5 @@
 #include <lebirun/partition.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/mem_map.h>
 #include <string.h>
 #include <stdio.h>
@@ -128,7 +128,7 @@ const char *partition_type_name(uint8_t mbr_type) {
 }
 
 int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint8_t *buf;
     mbr_t *mbr;
     mbr_partition_entry_t primary[MBR_PARTITION_COUNT];
@@ -145,15 +145,15 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
     int i;
     int count;
 
-    port = ahci_get_port(port_index);
-    if (!port)
+    dev = blkdev_get(port_index);
+    if (!dev)
         return -1;
 
     buf = (uint8_t *)kmalloc(512);
     if (!buf)
         return -1;
 
-    if (ahci_read_sectors(port, 0, 1, buf) != 0) {
+    if (blkdev_read(dev, 0, 1, buf) != 0) {
         kfree(buf);
         return -1;
     }
@@ -185,7 +185,7 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
             visited.capacity = sizeof(visited.inline_lbas) /
                                sizeof(visited.inline_lbas[0]);
             while (ebr_lba) {
-                if (ebr_lba >= port->sector_count) break;
+                if (ebr_lba >= dev->sectors) break;
                 visit_result = ebr_visit_add(&visited, ebr_lba);
                 if (visit_result != 0) {
                     if (visit_result < 0) {
@@ -197,7 +197,7 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
                     }
                     break;
                 }
-                if (ahci_read_sectors(port, ebr_lba, 1, buf) != 0) break;
+                if (blkdev_read(dev, ebr_lba, 1, buf) != 0) break;
                 mbr = (mbr_t *)buf;
                 if (mbr->signature != MBR_SIGNATURE) break;
                 logical = &mbr->partitions[0];
@@ -208,9 +208,9 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
                     if ((uint64_t)logical->lba_start <=
                         UINT64_MAX - ebr_lba) {
                         logical_start = ebr_lba + logical->lba_start;
-                        if (logical_start < port->sector_count &&
+                        if (logical_start < dev->sectors &&
                             (uint64_t)logical->sector_count <=
-                            port->sector_count - logical_start) {
+                            dev->sectors - logical_start) {
                             if (partition_add_mbr_entry(
                                     table, &count, port_index,
                                     logical_number, logical_start,
@@ -241,9 +241,9 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
             continue;
         }
 
-        if ((uint64_t)pe->lba_start >= port->sector_count ||
+        if ((uint64_t)pe->lba_start >= dev->sectors ||
             (uint64_t)pe->sector_count >
-            port->sector_count - (uint64_t)pe->lba_start)
+            dev->sectors - (uint64_t)pe->lba_start)
             continue;
         if (partition_add_mbr_entry(table, &count, port_index, i + 1,
                                     pe->lba_start, pe->sector_count,
@@ -260,7 +260,7 @@ int partition_scan_mbr(uint64_t port_index, partition_table_t *table) {
 }
 
 int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint8_t *buf;
     gpt_header_t *hdr;
     uint64_t entry_lba;
@@ -276,15 +276,15 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
     uint64_t i;
     int count;
 
-    port = ahci_get_port(port_index);
-    if (!port)
+    dev = blkdev_get(port_index);
+    if (!dev)
         return -1;
 
     buf = (uint8_t *)kmalloc(512);
     if (!buf)
         return -1;
 
-    if (ahci_read_sectors(port, GPT_HEADER_LBA, 1, buf) != 0) {
+    if (blkdev_read(dev, GPT_HEADER_LBA, 1, buf) != 0) {
         kfree(buf);
         return -1;
     }
@@ -319,8 +319,8 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
     sectors_needed = (entries_size + 511) / 512;
     if (sectors_needed > UINT64_MAX / 512)
         return -1;
-    if (entry_lba > port->sector_count ||
-        sectors_needed > port->sector_count - entry_lba)
+    if (entry_lba > dev->sectors ||
+        sectors_needed > dev->sectors - entry_lba)
         return -1;
     table->is_gpt = 1;
     count = 0;
@@ -333,7 +333,7 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
         entry_sector_offset = entry_offset % 512;
         entry_sectors = (entry_sector_offset +
                          sizeof(gpt_partition_entry_t) + 511) / 512;
-        if (ahci_read_sectors(port, entry_lba + entry_sector,
+        if (blkdev_read(dev, entry_lba + entry_sector,
                               entry_sectors, entry_buf) != 0) {
             partition_table_free(table);
             return -1;
@@ -372,7 +372,7 @@ int partition_scan_gpt(uint64_t port_index, partition_table_t *table) {
 }
 
 int partition_scan(uint64_t port_index, partition_table_t *table) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint8_t *buf;
     mbr_t *mbr;
 
@@ -382,8 +382,8 @@ int partition_scan(uint64_t port_index, partition_table_t *table) {
     table->is_gpt = 0;
     table->parts = NULL;
 
-    port = ahci_get_port(port_index);
-    if (!port) {
+    dev = blkdev_get(port_index);
+    if (!dev) {
         return -1;
     }
 
@@ -392,7 +392,7 @@ int partition_scan(uint64_t port_index, partition_table_t *table) {
         return -1;
     }
 
-    if (ahci_read_sectors(port, 0, 1, buf) != 0) {
+    if (blkdev_read(dev, 0, 1, buf) != 0) {
         kfree(buf);
         return -1;
     }

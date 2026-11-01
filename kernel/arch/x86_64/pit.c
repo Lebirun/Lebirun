@@ -478,6 +478,18 @@ void pit_unregister_callback(int handle) {
     restore_flags(flags);
 }
 
+void pit_set_callback_interval(int handle, uint64_t interval_ticks) {
+    pit_callback_entry_t *entry;
+
+    if (handle <= 0 || interval_ticks == 0) return;
+    for (entry = timer_callbacks; entry; entry = entry->next) {
+        if (entry->handle != handle) continue;
+        entry->interval = interval_ticks;
+        if (entry->remaining > interval_ticks) entry->remaining = interval_ticks;
+        return;
+    }
+}
+
 void pit_process_callbacks(void) {
     pit_callback_entry_t *entry;
     pit_callback_entry_t *previous;

@@ -8,7 +8,7 @@
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
 #include <lebirun/initrd.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/partition.h>
 #include <lebirun/mouse.h>
 #include <lebirun/framebuffer.h>
@@ -16,11 +16,10 @@
 #include <lebirun/evdev.h>
 #include <lebirun/rng.h>
 #include <lebirun/vring.h>
+#include <lebirun/mutex.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#define DEVFS_INITIAL_BLOCKDEVS 1
 
 typedef struct {
     vfs_node_t node;
@@ -32,9 +31,10 @@ typedef struct {
     int is_cdrom;
 } devfs_blockdev_t;
 
-static devfs_blockdev_t *devfs_blockdevs;
+static devfs_blockdev_t **devfs_blockdevs;
 static int devfs_blockdev_count;
 static int devfs_blockdev_capacity;
+static mutex_t devfs_blk_lock;
 
 static int dev_initrd_registered;
 
@@ -93,30 +93,6 @@ static vfs_node_t *devfs_nodes[DEVFS_NODE_COUNT];
 
 static void devfs_open(vfs_node_t *node, uint64_t flags);
 static void devfs_close(vfs_node_t *node);
-
-static int devfs_grow_blockdevs(void) {
-    int new_cap;
-    int i;
-    devfs_blockdev_t *new_blockdevs;
-
-    if (devfs_blockdev_capacity > INT32_MAX / 2) return -1;
-    new_cap = devfs_blockdev_capacity ?
-              devfs_blockdev_capacity * 2 : DEVFS_INITIAL_BLOCKDEVS;
-    if (new_cap <= devfs_blockdev_capacity) return -1;
-    if ((uint64_t)new_cap > UINT64_MAX / sizeof(devfs_blockdev_t)) return -1;
-    new_blockdevs = (devfs_blockdev_t *)krealloc(devfs_blockdevs, new_cap * sizeof(devfs_blockdev_t));
-    if (!new_blockdevs) return -1;
-    for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (new_blockdevs[i].in_use)
-            new_blockdevs[i].node.private_data = &new_blockdevs[i];
-    }
-    for (i = devfs_blockdev_capacity; i < new_cap; i++) {
-        memset(&new_blockdevs[i], 0, sizeof(devfs_blockdev_t));
-    }
-    devfs_blockdevs = new_blockdevs;
-    devfs_blockdev_capacity = new_cap;
-    return 0;
-}
 
 static dirent_t devfs_boot_dirent;
 
@@ -394,7 +370,7 @@ static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
 
 static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     devfs_blockdev_t *bdev;
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     uint64_t abs_lba;
     uint64_t sector_count;
@@ -406,8 +382,8 @@ static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t si
     if (!bdev)
         return 0;
 
-    port = ahci_get_port(bdev->port_index);
-    if (!port)
+    dev = blkdev_get(bdev->port_index);
+    if (!dev)
         return 0;
 
     lba = offset / 512;
@@ -431,7 +407,7 @@ static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t si
     if (!tmp)
         return 0;
 
-    if (ahci_read_sectors(port, abs_lba, sector_count, tmp) != 0) {
+    if (blkdev_read(dev, abs_lba, sector_count, tmp) != 0) {
         kfree(tmp);
         return 0;
     }
@@ -444,7 +420,7 @@ static uint64_t dev_blockdev_read(vfs_node_t *node, uint64_t offset, uint64_t si
 
 static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     devfs_blockdev_t *bdev;
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     uint64_t abs_lba;
     uint64_t sector_count;
@@ -456,8 +432,8 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
     if (!bdev)
         return 0;
 
-    port = ahci_get_port(bdev->port_index);
-    if (!port)
+    dev = blkdev_get(bdev->port_index);
+    if (!dev)
         return 0;
 
     lba = offset / 512;
@@ -478,7 +454,7 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
     }
 
     if (skip == 0 && (size % 512) == 0 && sector_count <= 128) {
-        wr_ret = ahci_write_sectors(port, abs_lba, sector_count, buffer);
+        wr_ret = blkdev_write(dev, abs_lba, sector_count, buffer);
         if (wr_ret != 0)
             return 0;
         return size;
@@ -489,7 +465,7 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
         return 0;
 
     if (skip != 0 || (size % 512) != 0) {
-        if (ahci_read_sectors(port, abs_lba, sector_count, tmp) != 0) {
+        if (blkdev_read(dev, abs_lba, sector_count, tmp) != 0) {
             kfree(tmp);
             return 0;
         }
@@ -497,7 +473,7 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
 
     memcpy(tmp + skip, buffer, size);
 
-    wr_ret = ahci_write_sectors(port, abs_lba, sector_count, tmp);
+    wr_ret = blkdev_write(dev, abs_lba, sector_count, tmp);
     if (wr_ret != 0) {
         kfree(tmp);
         return 0;
@@ -509,7 +485,7 @@ static uint64_t dev_blockdev_write(vfs_node_t *node, uint64_t offset, uint64_t s
 
 static uint64_t dev_cdrom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     devfs_blockdev_t *bdev;
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     uint64_t sector_count;
     uint8_t *tmp;
@@ -520,23 +496,22 @@ static uint64_t dev_cdrom_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     if (!bdev)
         return 0;
 
-    port = ahci_get_port(bdev->port_index);
-    if (!port)
+    dev = blkdev_get(bdev->port_index);
+    if (!dev)
         return 0;
 
-    lba = offset / ATAPI_SECTOR_SIZE;
-    skip = offset % ATAPI_SECTOR_SIZE;
-    if (size > 1024 * 1024 || skip >= ATAPI_SECTOR_SIZE) return 0;
-    if (skip > UINT64_MAX - size) return 0;
-    if (skip + size > UINT64_MAX - (ATAPI_SECTOR_SIZE - 1)) return 0;
-    sector_count = (skip + size + ATAPI_SECTOR_SIZE - 1) / ATAPI_SECTOR_SIZE;
+    lba = offset / dev->block_size;
+    skip = offset % dev->block_size;
+    if (size > 1024 * 1024) return 0;
+    if (skip + size > UINT64_MAX - (dev->block_size - 1)) return 0;
+    sector_count = (skip + size + dev->block_size - 1) / dev->block_size;
     if (sector_count == 0 || sector_count > 512) return 0;
 
-    tmp = (uint8_t *)kmalloc(sector_count * ATAPI_SECTOR_SIZE);
+    tmp = (uint8_t *)kmalloc(sector_count * dev->block_size);
     if (!tmp)
         return 0;
 
-    if (ahci_atapi_read(port, lba, sector_count, tmp) != 0) {
+    if (dev->ops->read(dev, lba, sector_count, tmp) != 0) {
         kfree(tmp);
         return 0;
     }
@@ -801,21 +776,22 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
     index -= (uint64_t)dev_tty_count;
     if (index < (uint64_t)devfs_blockdev_count) {
         count = 0;
+        d = NULL;
+        mutex_lock(&devfs_blk_lock);
         for (i = 0; i < devfs_blockdev_capacity; i++) {
-            if (devfs_blockdevs[i].in_use) {
-                if (count == (int)index) {
-                    d = devfs_alloc_dirent();
-                    if (!d) return NULL;
-                    if (vfs_dirent_set_name(
-                            d, vfs_node_name(&devfs_blockdevs[i].node)) != 0)
-                        return NULL;
-                    d->inode = 100 + i;
-                    d->type = VFS_BLOCKDEVICE;
-                    return d;
-                }
-                count++;
+            if (!devfs_blockdevs[i]->in_use || count++ != (int)index) continue;
+            d = devfs_alloc_dirent();
+            if (d && vfs_dirent_set_name(
+                    d, vfs_node_name(&devfs_blockdevs[i]->node)) != 0)
+                d = NULL;
+            if (d) {
+                d->inode = 100 + i;
+                d->type = VFS_BLOCKDEVICE;
             }
+            break;
         }
+        mutex_unlock(&devfs_blk_lock);
+        if (i < devfs_blockdev_capacity) return d;
     }
 
     index -= (uint64_t)devfs_blockdev_count;
@@ -859,11 +835,14 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
         return devfs_get_tty_node(idx);
     }
     
+    mutex_lock(&devfs_blk_lock);
     for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (devfs_blockdevs[i].in_use &&
-            strcmp(vfs_node_name(&devfs_blockdevs[i].node), name) == 0)
-            return &devfs_blockdevs[i].node;
+        if (devfs_blockdevs[i]->in_use &&
+            strcmp(vfs_node_name(&devfs_blockdevs[i]->node), name) == 0)
+            break;
     }
+    mutex_unlock(&devfs_blk_lock);
+    if (i < devfs_blockdev_capacity) return &devfs_blockdevs[i]->node;
 
     if (dev_initrd_registered && strcmp(name, "initrd") == 0) {
         root = initrd_get_vfs_root();
@@ -906,6 +885,7 @@ void KERNEL_INIT devfs_init(void) {
 
     devfs_blockdev_capacity = 0;
     devfs_blockdevs = NULL;
+    mutex_init(&devfs_blk_lock);
     for (i = 0; i < DEVFS_NODE_COUNT; i++) {
         devfs_nodes[i] = NULL;
     }
@@ -961,182 +941,93 @@ void KERNEL_INIT devfs_init(void) {
     vfs_register_fs(fs_type);
 }
 
-int KERNEL_INIT devfs_register_blockdev(const char *name,
-                                        uint64_t port_index) {
+static devfs_blockdev_t *devfs_blockdev_add(const char *name, uint64_t index,
+                                            uint64_t start, uint64_t sectors,
+                                            int kind) {
+    devfs_blockdev_t **list;
+    devfs_blockdev_t *b;
     int i;
-    int slot;
-    size_t len;
-    ahci_port_t *port;
 
-    slot = -1;
-    for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (!devfs_blockdevs[i].in_use) {
-            slot = i;
-            break;
+    b = NULL;
+    mutex_lock(&devfs_blk_lock);
+    for (i = 0; i < devfs_blockdev_capacity && !b; i++) {
+        if (!devfs_blockdevs[i]->in_use &&
+            devfs_blockdevs[i]->node.ref_count <= 1)
+            b = devfs_blockdevs[i];
+    }
+    if (!b) {
+        list = (devfs_blockdev_t **)krealloc(devfs_blockdevs,
+            (uint64_t)(devfs_blockdev_capacity + 1) * sizeof(*list));
+        if (list) devfs_blockdevs = list;
+        b = list ? (devfs_blockdev_t *)kcalloc(1, sizeof(*b)) : NULL;
+        if (b) devfs_blockdevs[devfs_blockdev_capacity++] = b;
+    }
+    if (b) {
+        vfs_node_release_name(&b->node);
+        memset(b, 0, sizeof(*b));
+        b->port_index = index;
+        b->start_lba = start;
+        b->sector_count = sectors;
+        b->is_partition = kind == 2;
+        b->is_cdrom = kind == 1;
+        b->node.flags = VFS_BLOCKDEVICE;
+        b->node.mask = kind == 1 ? 0440 : 0660;
+        b->node.inode = index;
+        b->node.length = sectors * 512;
+        b->node.read = kind == 1 ? dev_cdrom_read : dev_blockdev_read;
+        b->node.write = kind == 1 ? dev_cdrom_write : dev_blockdev_write;
+        b->node.open = devfs_open;
+        b->node.close = devfs_close;
+        b->node.parent = &devfs_root;
+        b->node.ref_count = 1;
+        b->node.private_data = b;
+        if (vfs_node_set_name(&b->node, name) == 0) {
+            b->in_use = 1;
+            devfs_blockdev_count++;
+        } else {
+            b = NULL;
         }
     }
-
-    if (slot < 0) {
-        if (devfs_grow_blockdevs() < 0)
-            return -1;
-        for (i = 0; i < devfs_blockdev_capacity; i++) {
-            if (!devfs_blockdevs[i].in_use) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0)
-            return -1;
-    }
-
-    memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
-    devfs_blockdevs[slot].in_use = 1;
-    devfs_blockdevs[slot].port_index = port_index;
-    devfs_blockdevs[slot].start_lba = 0;
-    devfs_blockdevs[slot].is_partition = 0;
-
-    port = ahci_get_port(port_index);
-    if (port && port->sector_count > 0) {
-        devfs_blockdevs[slot].sector_count = port->sector_count;
-        devfs_blockdevs[slot].node.length = (uint64_t)(port->sector_count * 512);
-    } else {
-        devfs_blockdevs[slot].sector_count = 0;
-    }
-
-    devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
-    devfs_blockdevs[slot].node.mask = 0660;
-    devfs_blockdevs[slot].node.uid = 0;
-    devfs_blockdevs[slot].node.gid = 0;
-    devfs_blockdevs[slot].node.inode = port_index;
-    devfs_blockdevs[slot].node.read = dev_blockdev_read;
-    devfs_blockdevs[slot].node.write = dev_blockdev_write;
-    devfs_blockdevs[slot].node.open = devfs_open;
-    devfs_blockdevs[slot].node.close = devfs_close;
-    devfs_blockdevs[slot].node.parent = &devfs_root;
-    devfs_blockdevs[slot].node.ref_count = 1;
-    devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
-    len = strlen(name);
-    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
-        devfs_blockdevs[slot].in_use = 0;
-        return -1;
-    }
-
-    devfs_blockdev_count++;
-    return 0;
+    mutex_unlock(&devfs_blk_lock);
+    return b;
 }
 
-int KERNEL_INIT devfs_register_cdrom(const char *name,
-                                     uint64_t port_index) {
-    int i;
-    int slot;
-    size_t len;
+int BLKDEV_HOTPLUG devfs_register_blockdev(const char *name,
+                                           uint64_t port_index) {
+    blkdev_t *dev = blkdev_get(port_index);
 
-    slot = -1;
-    for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (!devfs_blockdevs[i].in_use) {
-            slot = i;
-            break;
-        }
-    }
+    return devfs_blockdev_add(name, port_index, 0, dev ? dev->sectors : 0,
+                              0) ? 0 : -1;
+}
 
-    if (slot < 0) {
-        if (devfs_grow_blockdevs() < 0)
-            return -1;
-        for (i = 0; i < devfs_blockdev_capacity; i++) {
-            if (!devfs_blockdevs[i].in_use) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0)
-            return -1;
-    }
-
-    memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
-    devfs_blockdevs[slot].in_use = 1;
-    devfs_blockdevs[slot].port_index = port_index;
-    devfs_blockdevs[slot].start_lba = 0;
-    devfs_blockdevs[slot].is_partition = 0;
-    devfs_blockdevs[slot].is_cdrom = 1;
-    devfs_blockdevs[slot].sector_count = 0;
-
-    devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
-    devfs_blockdevs[slot].node.mask = 0440;
-    devfs_blockdevs[slot].node.uid = 0;
-    devfs_blockdevs[slot].node.gid = 0;
-    devfs_blockdevs[slot].node.inode = port_index;
-    devfs_blockdevs[slot].node.read = dev_cdrom_read;
-    devfs_blockdevs[slot].node.write = dev_cdrom_write;
-    devfs_blockdevs[slot].node.open = devfs_open;
-    devfs_blockdevs[slot].node.close = devfs_close;
-    devfs_blockdevs[slot].node.parent = &devfs_root;
-    devfs_blockdevs[slot].node.ref_count = 1;
-    devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
-    len = strlen(name);
-    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
-        devfs_blockdevs[slot].in_use = 0;
-        return -1;
-    }
-
-    devfs_blockdev_count++;
-    return 0;
+int BLKDEV_HOTPLUG devfs_register_cdrom(const char *name,
+                                        uint64_t port_index) {
+    return devfs_blockdev_add(name, port_index, 0, 0, 1) ? 0 : -1;
 }
 
 int devfs_register_partition(const char *name, uint64_t port_index,
                              uint64_t start_lba, uint64_t sector_count) {
+    return devfs_blockdev_add(name, port_index, start_lba, sector_count,
+                              2) ? 0 : -1;
+}
+
+static void devfs_drop_blkdevs(uint64_t port_index, int partitions_only) {
     int i;
-    int slot;
-    size_t len;
 
-    slot = -1;
+    mutex_lock(&devfs_blk_lock);
     for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (!devfs_blockdevs[i].in_use) {
-            slot = i;
-            break;
+        if (devfs_blockdevs[i]->in_use &&
+            devfs_blockdevs[i]->port_index == port_index &&
+            (!partitions_only || devfs_blockdevs[i]->is_partition)) {
+            devfs_blockdevs[i]->in_use = 0;
+            devfs_blockdev_count--;
         }
     }
+    mutex_unlock(&devfs_blk_lock);
+}
 
-    if (slot < 0) {
-        if (devfs_grow_blockdevs() < 0)
-            return -1;
-        for (i = 0; i < devfs_blockdev_capacity; i++) {
-            if (!devfs_blockdevs[i].in_use) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0)
-            return -1;
-    }
-
-    memset(&devfs_blockdevs[slot], 0, sizeof(devfs_blockdev_t));
-    devfs_blockdevs[slot].in_use = 1;
-    devfs_blockdevs[slot].port_index = port_index;
-    devfs_blockdevs[slot].start_lba = start_lba;
-    devfs_blockdevs[slot].sector_count = sector_count;
-    devfs_blockdevs[slot].is_partition = 1;
-
-    devfs_blockdevs[slot].node.flags = VFS_BLOCKDEVICE;
-    devfs_blockdevs[slot].node.mask = 0660;
-    devfs_blockdevs[slot].node.uid = 0;
-    devfs_blockdevs[slot].node.gid = 0;
-    devfs_blockdevs[slot].node.inode = port_index;
-    devfs_blockdevs[slot].node.length = (uint64_t)(sector_count * 512);
-    devfs_blockdevs[slot].node.read = dev_blockdev_read;
-    devfs_blockdevs[slot].node.write = dev_blockdev_write;
-    devfs_blockdevs[slot].node.open = devfs_open;
-    devfs_blockdevs[slot].node.close = devfs_close;
-    devfs_blockdevs[slot].node.parent = &devfs_root;
-    devfs_blockdevs[slot].node.ref_count = 1;
-    devfs_blockdevs[slot].node.private_data = &devfs_blockdevs[slot];
-    len = strlen(name);
-    if (vfs_node_set_name_n(&devfs_blockdevs[slot].node, name, len) != 0) {
-        devfs_blockdevs[slot].in_use = 0;
-        return -1;
-    }
-
-    devfs_blockdev_count++;
-    return 0;
+void devfs_remove_blkdevs(uint64_t port_index) {
+    devfs_drop_blkdevs(port_index, 0);
 }
 
 uint64_t devfs_get_partition_start(vfs_node_t *node) {
@@ -1159,38 +1050,75 @@ int devfs_is_partition(vfs_node_t *node) {
     return bdev->is_partition;
 }
 
+static void devfs_part_name(char *out, size_t size, const char *disk,
+                            int number) {
+    size_t len = strlen(disk);
+
+    snprintf(out, size, "%s%s%d", disk,
+             len && disk[len - 1] >= '0' && disk[len - 1] <= '9' ? "p" : "",
+             number);
+}
+
+void BLKDEV_HOTPLUG devfs_add_blkdevs(void) {
+    static uint64_t next;
+    partition_table_t ptable;
+    char partname[24];
+    blkdev_t *dev;
+    int pk;
+
+    for (; next < blkdev_count(); next++) {
+        dev = blkdev_get(next);
+        if (!dev) continue;
+        if (dev->type == BLKDEV_CDROM) {
+            if (devfs_register_cdrom(dev->name, next) == 0)
+                BLKDEV_LOG("BLK: Registered /dev/%s\n", dev->name);
+            continue;
+        }
+        if (devfs_register_blockdev(dev->name, next) != 0) continue;
+        BLKDEV_LOG("BLK: Registered /dev/%s (%llu sectors)\n", dev->name,
+                   (unsigned long long)dev->sectors);
+        if (partition_scan(next, &ptable) == 0 && ptable.count > 0) {
+            BLKDEV_LOG("PART: Found %d partition(s) on /dev/%s (%s)\n",
+                       ptable.count, dev->name, ptable.is_gpt ? "GPT" : "MBR");
+            for (pk = 0; pk < ptable.count; pk++) {
+                devfs_part_name(partname, sizeof(partname), dev->name,
+                                ptable.parts[pk].part_number);
+                devfs_register_partition(partname, next,
+                                         ptable.parts[pk].start_lba,
+                                         ptable.parts[pk].sector_count);
+                BLKDEV_LOG("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
+                           partname,
+                           (unsigned long long)ptable.parts[pk].start_lba,
+                           (unsigned long long)ptable.parts[pk].sector_count);
+            }
+        }
+        partition_table_free(&ptable);
+    }
+}
+
 int devfs_rescan_partitions(const char *devname) {
     int i;
     int pk;
     int found;
-    int drive_slot;
-    char partname[16];
+    char partname[24];
     uint64_t port_index;
     partition_table_t ptable;
 
-    found = 0;
     port_index = 0;
-    drive_slot = -1;
+    mutex_lock(&devfs_blk_lock);
     for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (devfs_blockdevs[i].in_use && !devfs_blockdevs[i].is_partition &&
-            strcmp(vfs_node_name(&devfs_blockdevs[i].node), devname) == 0) {
-            port_index = devfs_blockdevs[i].port_index;
-            drive_slot = i;
-            found = 1;
+        if (devfs_blockdevs[i]->in_use && !devfs_blockdevs[i]->is_partition &&
+            strcmp(vfs_node_name(&devfs_blockdevs[i]->node), devname) == 0) {
+            port_index = devfs_blockdevs[i]->port_index;
             break;
         }
     }
-
+    found = i < devfs_blockdev_capacity;
+    mutex_unlock(&devfs_blk_lock);
     if (!found)
         return -1;
 
-    for (i = 0; i < devfs_blockdev_capacity; i++) {
-        if (devfs_blockdevs[i].in_use && devfs_blockdevs[i].is_partition &&
-            devfs_blockdevs[i].port_index == port_index) {
-            devfs_blockdevs[i].in_use = 0;
-            devfs_blockdev_count--;
-        }
-    }
+    devfs_drop_blkdevs(port_index, 1);
 
     if (partition_scan(port_index, &ptable) != 0 || ptable.count <= 0) {
         partition_table_free(&ptable);
@@ -1198,9 +1126,8 @@ int devfs_rescan_partitions(const char *devname) {
     }
 
     for (pk = 0; pk < ptable.count; pk++) {
-        snprintf(partname, sizeof(partname), "%s%d",
-                 vfs_node_name(&devfs_blockdevs[drive_slot].node),
-                 ptable.parts[pk].part_number);
+        devfs_part_name(partname, sizeof(partname), devname,
+                        ptable.parts[pk].part_number);
         devfs_register_partition(partname, port_index,
                                  ptable.parts[pk].start_lba,
                                  ptable.parts[pk].sector_count);

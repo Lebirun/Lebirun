@@ -8,10 +8,26 @@
 #include <lebirun/drivers/usb/hid.h>
 #include <lebirun/pit.h>
 #include <lebirun/smp.h>
+#include <lebirun/spinlock.h>
+#include <lebirun/mutex.h>
+#include <lebirun/blkdev.h>
+#include <lebirun/devfs.h>
 #include <lebirun/timekeeping.h>
 
 #define XHCI_MMIO_VIRT (KERNEL_VMA + 0x37200000ULL)
 #define XHCI_MMIO_PAGES 4u
+#define XHCI_RING_TRBS 252u
+#define XHCI_STREAM_OFF 0xFC0u
+
+#if CONFIG_DRIVER_USB_STORAGE || CONFIG_DRIVER_USB_HOTPLUG
+#define XHCI_RUNTIME
+#else
+#define XHCI_RUNTIME KERNEL_INIT
+#endif
+#define XHCI_ENUM USB_HOTPLUG_TEXT
+#define XHCI_PORTSC_KEEP 0x0E00C200u
+#define XHCI_PORTSC_CHANGES 0x00FE0000u
+#define XHCI_PORTSC_CSC (1u << 17)
 
 typedef struct {
     uint8_t pci_bus;
@@ -41,6 +57,12 @@ typedef struct {
     uint64_t xfer_phys;
     uint64_t inctx;
     uint64_t inctx_phys;
+    uint64_t cmd_pend;
+    uint64_t cmd_slot;
+    volatile uint8_t cmd_busy;
+    uint8_t cmd_code;
+    uint8_t running;
+    uint64_t port_chg[4];
 } xhci_t;
 
 static xhci_t g_xhci;
@@ -95,30 +117,41 @@ static inline void mmio_write64(uint64_t addr, uint64_t value) {
 static uint64_t *g_dma_phys;
 static uint64_t g_dma_count;
 
-static uint64_t KERNEL_INIT xhci_alloc_dma(uint64_t *phys_out) {
+static uint64_t XHCI_ENUM xhci_page(uint64_t **pages, uint64_t *count,
+                                    uint64_t *phys_out) {
     uint64_t *list;
     uint64_t phys;
 
-    list = (uint64_t *)krealloc(g_dma_phys,
-                                (g_dma_count + 1) * sizeof(uint64_t));
+    list = (uint64_t *)krealloc(*pages, (*count + 1) * sizeof(uint64_t));
     if (!list) return 0;
-    g_dma_phys = list;
+    *pages = list;
     phys = (uint64_t)pmm_alloc_mapped_page();
     if (!phys) return 0;
     memset((void *)(phys + KERNEL_VMA), 0, PAGE_SIZE);
-    g_dma_phys[g_dma_count++] = phys;
+    list[(*count)++] = phys;
     if (phys_out) *phys_out = phys;
     return phys + KERNEL_VMA;
 }
 
-static void KERNEL_INIT xhci_free_dma(uint64_t mark) {
-    while (g_dma_count > mark)
-        pfa_free(g_dma_phys[--g_dma_count]);
+static uint64_t KERNEL_INIT xhci_alloc_dma(uint64_t *phys_out) {
+    return xhci_page(&g_dma_phys, &g_dma_count, phys_out);
 }
 
-static void KERNEL_INIT xhci_delay(uint64_t ms) {
+static void XHCI_ENUM xhci_free_pages(uint64_t *pages, uint64_t count) {
+    while (count)
+        pfa_free(pages[--count]);
+    kfree(pages);
+}
+
+void XHCI_ENUM xhci_delay(uint64_t ms) {
+    extern int scheduler_initialized;
     uint64_t end;
 
+    __asm__ volatile ("pushf; pop %0" : "=r"(end) : : "memory");
+    if (scheduler_initialized && current_task && (end & 0x200)) {
+        sleep_ms(ms);
+        return;
+    }
     if (tsc_available()) {
         end = tsc_get_ns() + ms * 1000000ULL;
         while (tsc_get_ns() < end)
@@ -381,6 +414,13 @@ static void KERNEL_INIT xhci_scan_ports(void) {
     uint64_t i;
 
     op = g_xhci.mmio_virt + g_xhci.caplength;
+    for (n = 0; CONFIG_DRIVER_USB_HOTPLUG && n < g_xhci.max_ports; n++) {
+        sc_addr = op + XHCI_OP_PORTSC + n * XHCI_PORTSC_STRIDE;
+        sc = mmio_read32(sc_addr);
+        if (!(sc & XHCI_PORTSC_PP))
+            mmio_write32(sc_addr, (sc & XHCI_PORTSC_KEEP) | XHCI_PORTSC_PP);
+    }
+    if (CONFIG_DRIVER_USB_HOTPLUG) xhci_delay(20);
     for (n = 0; n < g_xhci.max_ports; n++) {
         sc_addr = op + XHCI_OP_PORTSC + n * XHCI_PORTSC_STRIDE;
         sc = mmio_read32(sc_addr);
@@ -410,7 +450,27 @@ static void KERNEL_INIT xhci_scan_ports(void) {
     }
 }
 
-typedef struct usb_dev {
+typedef struct xhci_ring {
+    struct xhci_ring *next;
+    uint64_t virt;
+    uint64_t phys;
+    uint64_t lo;
+    uint64_t hi;
+    uint16_t idx;
+    uint16_t mps;
+    uint8_t cycle;
+    uint8_t slot;
+    uint8_t dci;
+    uint8_t addr;
+    uint8_t burst;
+    uint8_t stream;
+    uint8_t ival;
+    uint8_t notify;
+    volatile uint8_t busy;
+    volatile uint8_t code;
+} xhci_ring_t;
+
+struct usb_dev {
     struct usb_dev *next;
     uint8_t slot;
     uint8_t port;
@@ -426,10 +486,18 @@ typedef struct usb_dev {
     uint16_t pid;
     uint8_t dev_class;
     uint16_t mps;
-    uint64_t ep0_ring;
-    uint64_t ep0_ring_phys;
-    uint64_t ep0_idx;
-    uint8_t ep0_cycle;
+    xhci_ring_t ep0;
+    xhci_ring_t *rings;
+    uint64_t *pages;
+    uint64_t npages;
+    void *storage;
+    uint8_t nrings;
+    uint8_t hub_armed;
+    uint8_t hub_pass;
+    uint8_t hub_errors;
+    volatile uint8_t gone;
+    volatile uint8_t hid_done;
+    volatile uint8_t hid_code;
     uint64_t outctx;
     uint64_t outctx_phys;
     uint8_t has_hid;
@@ -452,9 +520,23 @@ typedef struct usb_dev {
     uint16_t abs_y_off;
     uint8_t abs_y_len;
     uint32_t abs_max;
-} usb_dev_t;
+};
 
 static usb_dev_t *usb_devs;
+static xhci_ring_t *xhci_pending;
+static spinlock_t xhci_lock;
+static mutex_t xhci_cmd_lock;
+#if CONFIG_DRIVER_USB_HOTPLUG
+static task_t *xhci_hp_task;
+static int xhci_hp_cb;
+static volatile int xhci_hp_pending;
+static volatile int xhci_hp_kick;
+
+static void xhci_hp_notify(void) {
+    xhci_hp_pending = 1;
+    xhci_hp_kick = 1;
+}
+#endif
 
 static void xhci_doorbell(uint64_t slot, uint32_t value) {
     __asm__ volatile ("sfence" ::: "memory");
@@ -487,35 +569,103 @@ static void xhci_erdp_update(void) {
                  (g_xhci.er_seg_phys + g_xhci.erdq * 16) | 0x8);
 }
 
-static int KERNEL_INIT xhci_wait_cmd_complete(uint64_t cmd_phys,
-                                              uint64_t *slot_out) {
-    uint64_t i;
+static uint64_t XHCI_RUNTIME xhci_lock_irq(void) {
+    uint64_t flags;
+
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(flags) : : "memory");
+    spin_lock(&xhci_lock);
+    return flags;
+}
+
+static void XHCI_RUNTIME xhci_unlock_irq(uint64_t flags) {
+    spin_unlock(&xhci_lock);
+    if (flags & 0x200) __asm__ volatile ("sti" ::: "memory");
+}
+
+static void xhci_unlink(xhci_ring_t *r) {
+    xhci_ring_t **pp;
+
+    for (pp = &xhci_pending; *pp; pp = &(*pp)->next) {
+        if (*pp == r) {
+            *pp = r->next;
+            break;
+        }
+    }
+    r->busy = 0;
+}
+
+static void xhci_events(void) {
     uint64_t type;
     uint64_t code;
     uint64_t ptr;
     uint64_t slot;
+    xhci_ring_t *r;
+    usb_dev_t *dev;
 
-    for (i = 0; i < 10000000; i++) {
-        while (xhci_next_event(&type, &code, &ptr, &slot)) {
-            xhci_erdp_update();
-            if (type == 33 && ptr == cmd_phys) {
-                if (slot_out) *slot_out = slot;
-                if (code != 1) {
-                    KERNEL_INIT_LOG("XHCI: Command failed, code %u\n",
-                                    (uint32_t)code);
-                    return -1;
-                }
-                return 0;
+    while (xhci_next_event(&type, &code, &ptr, &slot)) {
+        smp_tlb_flush_poll();
+        if (type == 33) {
+            if (g_xhci.cmd_busy && ptr == g_xhci.cmd_pend) {
+                g_xhci.cmd_code = (uint8_t)code;
+                g_xhci.cmd_slot = slot;
+                g_xhci.cmd_busy = 0;
             }
+            continue;
         }
-        __asm__ volatile ("pause");
+#if CONFIG_DRIVER_USB_HOTPLUG
+        if (type == 34 && (ptr >> 24) & 0xFF) {
+            ptr = ((ptr >> 24) & 0xFF) - 1;
+            g_xhci.port_chg[ptr / 64] |= 1ULL << (ptr % 64);
+            xhci_hp_notify();
+            continue;
+        }
+#endif
+        if (type != 32 || !ptr) continue;
+        for (r = xhci_pending; r && (ptr < r->lo || ptr > r->hi); r = r->next);
+        if (r) {
+            r->code = (uint8_t)code;
+            xhci_unlink(r);
+#if CONFIG_DRIVER_USB_HOTPLUG
+            if (r->notify) xhci_hp_notify();
+#endif
+            continue;
+        }
+        for (dev = usb_devs; dev; dev = dev->next) {
+            if (ptr != dev->ipend) continue;
+            dev->ipend = 0;
+            dev->hid_code = (uint8_t)code;
+            dev->hid_done = 1;
+            break;
+        }
     }
-    KERNEL_INIT_LOG("XHCI: Command timeout\n");
-    return -1;
+    xhci_erdp_update();
 }
 
-static uint64_t KERNEL_INIT xhci_cmd_submit(uint64_t lo, uint64_t hi,
-                                            uint64_t status, uint64_t ctrl) {
+static int XHCI_RUNTIME xhci_wait_busy(volatile uint8_t *busy,
+                                       uint64_t ms) {
+    extern int scheduler_initialized;
+    uint64_t end;
+    uint64_t spins;
+    uint64_t flags;
+
+    end = tsc_available() ? tsc_get_ns() + ms * 1000000ULL : 0;
+    for (spins = 0;; spins++) {
+        flags = xhci_lock_irq();
+        xhci_events();
+        xhci_unlock_irq(flags);
+        if (!*busy) return 0;
+        if (end ? tsc_get_ns() >= end : spins >= ms * 20000) return -1;
+        if (spins >= 16384 && !(spins & 1023) && scheduler_initialized &&
+            current_task && (flags & 0x200))
+            schedule();
+        else
+            __asm__ volatile ("pause");
+    }
+}
+
+static uint64_t XHCI_RUNTIME xhci_cmd_submit(uint64_t lo, uint64_t hi,
+                                             uint64_t status,
+                                             uint64_t ctrl) {
     uint32_t *trb;
     uint64_t phys;
 
@@ -537,16 +687,136 @@ static uint64_t KERNEL_INIT xhci_cmd_submit(uint64_t lo, uint64_t hi,
     return phys;
 }
 
-static int KERNEL_INIT xhci_enable_slot(uint64_t *slot_out) {
-    uint64_t phys;
+static int XHCI_RUNTIME xhci_command(uint64_t lo, uint64_t status,
+                                     uint64_t ctrl, uint64_t *slot_out) {
+    uint64_t flags;
+    int ret;
 
-    phys = xhci_cmd_submit(0, 0, 0, (9u << 10));
-    if (!phys) return -1;
-    return xhci_wait_cmd_complete(phys, slot_out);
+    mutex_lock(&xhci_cmd_lock);
+    flags = xhci_lock_irq();
+    g_xhci.cmd_busy = 1;
+    g_xhci.cmd_pend = xhci_cmd_submit(lo, lo >> 32, status, ctrl);
+    xhci_unlock_irq(flags);
+    ret = xhci_wait_busy(&g_xhci.cmd_busy, 1000);
+    g_xhci.cmd_busy = 0;
+    if (ret < 0) {
+        printf("XHCI: Command timeout\n");
+    } else if (g_xhci.cmd_code != 1) {
+        printf("XHCI: Command failed, code %u\n", g_xhci.cmd_code);
+        ret = -1;
+    } else if (slot_out) {
+        *slot_out = g_xhci.cmd_slot;
+    }
+    mutex_unlock(&xhci_cmd_lock);
+    return ret;
 }
 
-static void KERNEL_INIT xhci_build_input_ctx(usb_dev_t *dev, uint64_t mps,
-                                             uint64_t add_mask) {
+static void XHCI_RUNTIME xhci_ring_room(xhci_ring_t *r, uint32_t n) {
+    uint32_t *trb;
+
+    if (r->idx + n < XHCI_RING_TRBS) return;
+    trb = (uint32_t *)(r->virt + (uint64_t)r->idx * 16);
+    trb[0] = (uint32_t)r->phys;
+    trb[1] = (uint32_t)(r->phys >> 32);
+    trb[2] = 0;
+    trb[3] = (XHCI_TRB_TYPE_LINK << 10) | XHCI_LINK_TC | r->cycle;
+    r->cycle ^= 1;
+    r->idx = 0;
+}
+
+static uint64_t XHCI_RUNTIME xhci_ring_put(xhci_ring_t *r, uint64_t ptr,
+                                           uint32_t status, uint32_t ctrl) {
+    uint32_t *trb = (uint32_t *)(r->virt + (uint64_t)r->idx * 16);
+
+    trb[0] = (uint32_t)ptr;
+    trb[1] = (uint32_t)(ptr >> 32);
+    trb[2] = status;
+    __asm__ volatile ("" ::: "memory");
+    trb[3] = ctrl | r->cycle;
+    return r->phys + (uint64_t)r->idx++ * 16;
+}
+
+static void XHCI_RUNTIME xhci_ring_go(xhci_ring_t *r, uint64_t lo,
+                                      uint64_t hi) {
+    r->lo = lo;
+    r->hi = hi;
+    r->code = 0;
+    r->busy = 1;
+    r->next = xhci_pending;
+    xhci_pending = r;
+    xhci_doorbell(r->slot, r->dci | ((uint32_t)r->stream << 16));
+}
+
+static uint8_t XHCI_RUNTIME xhci_ring_wait(xhci_ring_t *r, uint64_t ms) {
+    uint64_t flags;
+
+    if (xhci_wait_busy(&r->busy, ms) == 0) return r->code;
+    flags = xhci_lock_irq();
+    xhci_unlink(r);
+    xhci_unlock_irq(flags);
+    return 0;
+}
+
+static void XHCI_RUNTIME xhci_fill_ep(uint32_t *p, xhci_ring_t *r) {
+    uint64_t deq = r->phys + (uint64_t)r->idx * 16;
+    uint64_t *sa = (uint64_t *)(r->virt + XHCI_STREAM_OFF);
+
+    memset(p, 0, 32);
+    p[1] = ((uint32_t)r->mps << 16) | ((uint32_t)r->burst << 8) |
+           (((r->addr & 0x80 ? 4u : 0u) + (r->ival ? 3u : 2u)) << 3) |
+           (3u << 1);
+    if (r->stream) {
+        sa[2] = deq | r->cycle | (1u << 1);
+        sa[3] = 0;
+        deq = r->phys + XHCI_STREAM_OFF;
+        p[0] = (1u << 10) | (1u << 15);
+    } else {
+        deq |= r->cycle;
+    }
+    if (r->ival) p[0] |= (uint32_t)(r->ival - 1) << 16;
+    p[2] = (uint32_t)deq;
+    p[3] = (uint32_t)(deq >> 32);
+    p[4] = r->ival ? (uint32_t)r->mps | ((uint32_t)r->mps << 16) : 3072;
+}
+
+static int XHCI_RUNTIME xhci_ep_reinit(usb_dev_t *dev, xhci_ring_t *r) {
+    uint64_t csz = g_xhci.context_size;
+    uint64_t ids = ((uint64_t)dev->slot << 24) | ((uint64_t)r->dci << 16);
+    uint32_t state;
+    uint32_t *in;
+    uint64_t phys;
+    int ret;
+
+    if (dev->gone) return -1;
+    state = *(volatile uint32_t *)(dev->outctx + r->dci * csz) & 7;
+    if (state == 2) {
+        if (xhci_command(0, 0, (14u << 10) | ids, 0) < 0) return -1;
+        return xhci_command((r->phys + (uint64_t)r->idx * 16) | r->cycle |
+                            (r->stream ? 2u : 0u),
+                            (uint64_t)r->stream << 16, (16u << 10) | ids, 0);
+    }
+    if (r->dci == 1) return 0;
+    if (state == 1 && xhci_command(0, 0, (15u << 10) | ids, 0) < 0)
+        return -1;
+    phys = (uint64_t)pmm_alloc_mapped_page();
+    if (!phys) return -1;
+    in = (uint32_t *)(phys + KERNEL_VMA);
+    memset(in, 0, PAGE_SIZE);
+    in[0] = 1u << r->dci;
+    in[1] = (1u << r->dci) | 1u;
+    memcpy(in + csz / 4, (void *)dev->outctx, csz);
+    xhci_fill_ep(in + (r->dci + 1) * csz / 4, r);
+    ret = xhci_command(phys, 0, (12u << 10) | ((uint64_t)dev->slot << 24), 0);
+    pfa_free(phys);
+    return ret;
+}
+
+static int XHCI_ENUM xhci_enable_slot(uint64_t *slot_out) {
+    return xhci_command(0, 0, 9u << 10, slot_out);
+}
+
+static void XHCI_ENUM xhci_build_input_ctx(usb_dev_t *dev, uint64_t mps,
+                                           uint64_t add_mask) {
     uint64_t ctx;
     uint32_t *p;
 
@@ -565,142 +835,79 @@ static void KERNEL_INIT xhci_build_input_ctx(usb_dev_t *dev, uint64_t mps,
     p = (uint32_t *)(ctx + 2 * g_xhci.context_size);
     p[0] = 0;
     p[1] = ((uint64_t)mps << 16) | (4u << 3) | (3u << 1);
-    p[2] = (uint32_t)((dev->ep0_ring_phys + dev->ep0_idx * 16) & 0xFFFFFFFFULL) |
-            (dev->ep0_cycle & 0x1);
-    p[3] = (uint32_t)(((dev->ep0_ring_phys + dev->ep0_idx * 16) >> 32) & 0xFFFFFFFFULL);
+    p[2] = (uint32_t)((dev->ep0.phys + dev->ep0.idx * 16) & 0xFFFFFFFFULL) |
+            (dev->ep0.cycle & 0x1);
+    p[3] = (uint32_t)(((dev->ep0.phys + dev->ep0.idx * 16) >> 32) & 0xFFFFFFFFULL);
     p[4] = 8 | ((uint64_t)mps << 16);
     p[5] = 0;
     p[6] = 0;
     p[7] = 0;
 }
 
-static int KERNEL_INIT xhci_address_device(usb_dev_t *dev) {
-    uint64_t phys;
+static int XHCI_ENUM xhci_address_device(usb_dev_t *dev) {
     uint64_t *dcbaa;
 
-    dev->ep0_ring = xhci_alloc_dma(&dev->ep0_ring_phys);
-    if (!dev->ep0_ring) return -1;
-    dev->ep0_idx = 0;
-    dev->ep0_cycle = 1;
-    dev->outctx = xhci_alloc_dma(&dev->outctx_phys);
+    dev->ep0.virt = xhci_page(&dev->pages, &dev->npages, &dev->ep0.phys);
+    if (!dev->ep0.virt) return -1;
+    dev->ep0.idx = 0;
+    dev->ep0.cycle = 1;
+    dev->ep0.slot = dev->slot;
+    dev->ep0.dci = 1;
+    dev->outctx = xhci_page(&dev->pages, &dev->npages, &dev->outctx_phys);
     if (!dev->outctx) return -1;
     dcbaa = (uint64_t *)g_xhci.dcbaa;
     dcbaa[dev->slot] = dev->outctx_phys;
     xhci_build_input_ctx(dev, dev->mps, 0x3);
-    phys = xhci_cmd_submit(g_xhci.inctx_phys, 0, 0,
-                           (11u << 10) | ((uint64_t)dev->slot << 24));
-    if (!phys) return -1;
-    return xhci_wait_cmd_complete(phys, 0);
+    return xhci_command(g_xhci.inctx_phys, 0,
+                        (11u << 10) | ((uint64_t)dev->slot << 24), 0);
 }
 
-static int KERNEL_INIT xhci_evaluate_mps(usb_dev_t *dev, uint64_t mps) {
-    uint64_t phys;
-
+static int XHCI_ENUM xhci_evaluate_mps(usb_dev_t *dev, uint64_t mps) {
     xhci_build_input_ctx(dev, mps, 0x3);
-    phys = xhci_cmd_submit(g_xhci.inctx_phys, 0, 0,
-                           (13u << 10) | ((uint64_t)dev->slot << 24));
-    if (!phys) return -1;
-    if (xhci_wait_cmd_complete(phys, 0) < 0) return -1;
+    if (xhci_command(g_xhci.inctx_phys, 0,
+                     (13u << 10) | ((uint64_t)dev->slot << 24), 0) < 0)
+        return -1;
     dev->mps = (uint16_t)mps;
     return 0;
 }
 
-static int KERNEL_INIT xhci_wait_xfer(uint64_t status_phys,
-                                      uint64_t setup_phys,
-                                      uint64_t data_phys) {
-    uint64_t i;
-    uint64_t type;
-    uint64_t code;
-    uint64_t ptr;
-    uint64_t slot;
-    uint64_t rt;
-    uint32_t iman;
+static int XHCI_RUNTIME xhci_control(usb_dev_t *dev, uint8_t *setup,
+                                     uint64_t len, uint64_t dir_in) {
+    xhci_ring_t *r = &dev->ep0;
+    uint64_t flags;
+    uint64_t pkt;
+    uint64_t lo;
+    uint64_t hi;
+    uint8_t code;
 
-    rt = g_xhci.rt + XHCI_RT_IR_SET_SIZE;
-    mmio_write32(rt + XHCI_RT_IMAN, 0x1);
-    for (i = 0; i < 10000000; i++) {
-        while (xhci_next_event(&type, &code, &ptr, &slot)) {
-            xhci_erdp_update();
-            if (type == 32 && (ptr == status_phys || ptr == setup_phys ||
-                               ptr == data_phys)) {
-                if (code != 1) {
-                    KERNEL_INIT_LOG("XHCI: Transfer failed, code %u\n",
-                                    (uint32_t)code);
-                    return -1;
-                }
-                return 0;
-            }
-        }
-        __asm__ volatile ("pause");
+    memcpy(&pkt, setup, sizeof(pkt));
+    flags = xhci_lock_irq();
+    if (dev->gone) {
+        xhci_unlock_irq(flags);
+        return -1;
     }
-    iman = mmio_read32(rt + XHCI_RT_IMAN);
-    {
-        uint64_t op2 = g_xhci.mmio_virt + g_xhci.caplength;
-        uint32_t usbsts = mmio_read32(op2 + XHCI_OP_USBSTS);
-        KERNEL_INIT_LOG("XHCI: Transfer timeout (IP=%u HCE=%u HCH=%u)\n",
-                        (uint32_t)(iman & 0x1),
-                        (uint32_t)((usbsts >> 12) & 0x1),
-                        (uint32_t)(usbsts & 0x1));
-    }
+    xhci_ring_room(r, 3);
+    lo = xhci_ring_put(r, pkt, 8, (2u << 10) | (1u << 6) | (1u << 4) |
+                       (uint32_t)((len ? (dir_in ? 3u : 2u) : 0u) << 16));
+    if (len)
+        xhci_ring_put(r, g_xhci.xfer_phys, (uint32_t)(len & 0x1FFFFULL),
+                      (3u << 10) | (1u << 4) | (dir_in ? 1u << 16 : 0u));
+    hi = xhci_ring_put(r, 0, 0, (4u << 10) | (1u << 5) |
+                       (!len || !dir_in ? 1u << 16 : 0u));
+    xhci_ring_go(r, lo, hi);
+    xhci_unlock_irq(flags);
+    code = xhci_ring_wait(r, 2000);
+    if (code == 1) return 0;
+    if (dev->gone) return -1;
+    if (code) printf("XHCI: Transfer failed, code %u\n", code);
+    else printf("XHCI: Transfer timeout\n");
+    if (code == 6) xhci_ep_reinit(dev, r);
     return -1;
 }
 
-static int KERNEL_INIT xhci_control(usb_dev_t *dev, uint8_t *setup,
-                                    uint64_t len, uint64_t dir_in) {
-    uint32_t *trb;
-    uint64_t setup_phys;
-    uint64_t data_phys;
-    uint64_t status_phys;
-    uint64_t ntrb;
-    uint32_t ctrl;
-
-    if (dev->ep0_idx + 3 >= 255) {
-        trb = (uint32_t *)(dev->ep0_ring + dev->ep0_idx * 16);
-        trb[0] = (uint32_t)(dev->ep0_ring_phys & 0xFFFFFFFFULL);
-        trb[1] = (uint32_t)((dev->ep0_ring_phys >> 32) & 0xFFFFFFFFULL);
-        trb[2] = 0;
-        trb[3] = (6u << 10) | (1u << 1) | (dev->ep0_cycle & 0x1);
-        dev->ep0_cycle ^= 0x1;
-        dev->ep0_idx = 0;
-    }
-    setup_phys = dev->ep0_ring_phys + dev->ep0_idx * 16;
-    trb = (uint32_t *)(dev->ep0_ring + dev->ep0_idx * 16);
-    for (ntrb = 0; ntrb < 8; ntrb++)
-        ((uint8_t *)trb)[ntrb] = setup[ntrb];
-    ctrl = (uint32_t)(dev->ep0_cycle & 0x1) | (2u << 10) | (1u << 6) |
-           (1u << 4) | (uint32_t)(((len ? (dir_in ? 3u : 2u) : 0u)) << 16);
-    trb[2] = 8;
-    trb[3] = ctrl;
-    dev->ep0_idx++;
-
-    data_phys = 0;
-    if (len) {
-        data_phys = dev->ep0_ring_phys + dev->ep0_idx * 16;
-        trb = (uint32_t *)(dev->ep0_ring + dev->ep0_idx * 16);
-        trb[0] = (uint32_t)(g_xhci.xfer_phys & 0xFFFFFFFFULL);
-        trb[1] = (uint32_t)((g_xhci.xfer_phys >> 32) & 0xFFFFFFFFULL);
-        trb[2] = (uint32_t)(len & 0x1FFFFULL);
-        trb[3] = (uint32_t)(dev->ep0_cycle & 0x1) | (3u << 10) | (1u << 4) |
-                 (uint32_t)((dir_in ? 1u : 0u) << 16);
-        dev->ep0_idx++;
-    }
-
-    status_phys = dev->ep0_ring_phys + dev->ep0_idx * 16;
-    trb = (uint32_t *)(dev->ep0_ring + dev->ep0_idx * 16);
-    trb[0] = 0;
-    trb[1] = 0;
-    trb[2] = 0;
-    trb[3] = (uint32_t)(dev->ep0_cycle & 0x1) | (4u << 10) | (1u << 5) |
-             (uint32_t)((!len || !dir_in ? 1u : 0u) << 16);
-    dev->ep0_idx++;
-
-    xhci_doorbell(dev->slot, 1);
-    return xhci_wait_xfer(status_phys, setup_phys, data_phys);
-}
-
-static int KERNEL_INIT xhci_request(usb_dev_t *dev, uint8_t type,
-                                    uint8_t req, uint16_t value,
-                                    uint16_t index, uint16_t len) {
+static int XHCI_ENUM xhci_request(usb_dev_t *dev, uint8_t type,
+                                  uint8_t req, uint16_t value,
+                                  uint16_t index, uint16_t len) {
     uint8_t setup[8];
 
     setup[0] = type;
@@ -715,25 +922,25 @@ static int KERNEL_INIT xhci_request(usb_dev_t *dev, uint8_t type,
     return xhci_control(dev, setup, len, type & 0x80);
 }
 
-static int KERNEL_INIT xhci_get_descriptor(usb_dev_t *dev, uint64_t dtype,
-                                           uint64_t dindex, uint64_t len) {
+static int XHCI_ENUM xhci_get_descriptor(usb_dev_t *dev, uint64_t dtype,
+                                         uint64_t dindex, uint64_t len) {
     uint32_t *octx;
 
     if (xhci_request(dev, 0x80, 6, (uint16_t)((dtype << 8) | dindex), 0,
                      (uint16_t)len) < 0) {
         octx = (uint32_t *)(dev->outctx + g_xhci.context_size);
-        KERNEL_INIT_LOG("XHCI: FAIL slot=%u ep0 out state=%u deq=%lX\n",
-                        dev->slot, (uint32_t)(octx[0] & 0x7),
-                        ((uint64_t)octx[3] << 32) | (uint64_t)(octx[2] & ~0xFULL));
+        USB_LOG("XHCI: FAIL slot=%u ep0 out state=%u deq=%lX\n",
+                dev->slot, (uint32_t)(octx[0] & 0x7),
+                ((uint64_t)octx[3] << 32) | (uint64_t)(octx[2] & ~0xFULL));
         return -1;
     }
     return 0;
 }
 
-static int KERNEL_INIT xhci_hid_parse_abs(uint8_t *d, uint64_t len,
-                                           uint16_t *x_off, uint8_t *x_len,
-                                           uint16_t *y_off, uint8_t *y_len,
-                                           uint32_t *max) {
+static int XHCI_ENUM xhci_hid_parse_abs(uint8_t *d, uint64_t len,
+                                        uint16_t *x_off, uint8_t *x_len,
+                                        uint16_t *y_off, uint8_t *y_len,
+                                        uint32_t *max) {
     uint64_t pos;
     uint64_t bit;
     uint32_t page;
@@ -895,8 +1102,8 @@ static int KERNEL_INIT xhci_hid_parse_abs(uint8_t *d, uint64_t len,
     return 0;
 }
 
-static int KERNEL_INIT xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
-                                       uint64_t total) {
+static int XHCI_ENUM xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
+                                    uint64_t total) {
     uint64_t off;
     uint8_t iface = 0;
     uint8_t proto = 0;
@@ -936,9 +1143,9 @@ static int KERNEL_INIT xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
                 dev->iep = (uint8_t)(((addr & 0xF) * 2) + 1);
                 dev->iep_mps = cfg[off + 4];
                 dev->iep_interval = cfg[off + 6];
-                KERNEL_INIT_LOG("USB: Port %u: HID iface=%u proto=%u ep=%u mps=%u interval=%u\n",
-                                dev->port, iface, proto, dev->iep,
-                                dev->iep_mps, dev->iep_interval);
+                USB_LOG("USB: Port %u: HID iface=%u proto=%u ep=%u mps=%u interval=%u\n",
+                        dev->port, iface, proto, dev->iep,
+                        dev->iep_mps, dev->iep_interval);
                 return 1;
             }
             candidate = 0;
@@ -948,30 +1155,31 @@ static int KERNEL_INIT xhci_parse_hid(usb_dev_t *dev, uint8_t *cfg,
     return 0;
 }
 
-static int KERNEL_INIT xhci_configure_hid(usb_dev_t *dev) {
-    uint64_t phys;
+static uint32_t XHCI_ENUM xhci_interval(uint8_t speed, uint8_t interval) {
+    uint32_t ival;
+
+    if (speed >= 3) return interval ? (interval > 16 ? 15 : interval - 1u) : 0;
+    for (ival = 3; ival < 10 && (2u << ival) <= interval * 8u; ival++);
+    return ival;
+}
+
+static int XHCI_ENUM xhci_configure_hid(usb_dev_t *dev) {
     uint32_t *p;
     uint64_t dci;
     uint64_t base;
     uint32_t ival;
 
-    dev->iring = xhci_alloc_dma(&dev->iring_phys);
+    dev->iring = xhci_page(&dev->pages, &dev->npages, &dev->iring_phys);
     if (!dev->iring) return -1;
     dev->iidx = 0;
     dev->icycle = 1;
-    dev->ibuf = xhci_alloc_dma(&dev->ibuf_phys);
+    dev->ibuf = xhci_page(&dev->pages, &dev->npages, &dev->ibuf_phys);
     if (!dev->ibuf) return -1;
     dci = dev->iep;
     base = (dci + 1) * (g_xhci.context_size / sizeof(uint32_t));
     xhci_build_input_ctx(dev, dev->mps, 0x1 | (1u << dci));
     p = (uint32_t *)g_xhci.inctx;
-    if (dev->speed >= 3) {
-        ival = dev->iep_interval ? dev->iep_interval - 1u : 0;
-        if (ival > 15) ival = 15;
-    } else {
-        for (ival = 3; ival < 10 && (2u << ival) <= dev->iep_interval * 8u;
-             ival++);
-    }
+    ival = xhci_interval(dev->speed, dev->iep_interval);
     p[base + 0] = ival << 16;
     p[base + 1] = ((uint64_t)dev->iep_mps << 16) | (7u << 3) | (3u << 1);
     p[base + 2] = (uint32_t)(dev->iring_phys & 0xFFFFFFFFULL) | 0x1;
@@ -980,50 +1188,75 @@ static int KERNEL_INIT xhci_configure_hid(usb_dev_t *dev) {
     p[base + 5] = 0;
     p[base + 6] = 0;
     p[base + 7] = 0;
-    phys = xhci_cmd_submit(g_xhci.inctx_phys, 0, 0,
-                           (12u << 10) | ((uint64_t)dev->slot << 24));
-    if (!phys) return -1;
-    if (xhci_wait_cmd_complete(phys, 0) < 0) {
-        KERNEL_INIT_LOG("USB: Port %u: configure endpoint %u failed\n",
-                        dev->port, dev->iep);
+    if (xhci_command(g_xhci.inctx_phys, 0,
+                     (12u << 10) | ((uint64_t)dev->slot << 24), 0) < 0) {
+        USB_LOG("USB: Port %u: configure endpoint %u failed\n",
+                dev->port, dev->iep);
         return -1;
     }
-    KERNEL_INIT_LOG("USB: Port %u: endpoint %u configured\n",
-                    dev->port, dev->iep);
+    USB_LOG("USB: Port %u: endpoint %u configured\n",
+            dev->port, dev->iep);
     return 0;
 }
 
-static int KERNEL_INIT xhci_setup_hub(usb_dev_t *dev) {
+static int XHCI_ENUM xhci_setup_hub(usb_dev_t *dev, uint8_t *cfg,
+                                    uint64_t total) {
     uint8_t *d = (uint8_t *)g_xhci.xfer;
-    uint64_t phys;
+    uint32_t mask = 0x1;
     uint64_t pgood;
+    uint64_t off;
+    xhci_ring_t ep;
     uint8_t n;
 
+    memset(&ep, 0, sizeof(ep));
+    for (off = 0; CONFIG_DRIVER_USB_HOTPLUG && off + 7 <= total &&
+         cfg[off] >= 2; off += cfg[off]) {
+        if (cfg[off + 1] == 5 && cfg[off] >= 7 && (cfg[off + 3] & 3) == 3 &&
+            (cfg[off + 2] & 0x80)) {
+            ep.addr = cfg[off + 2];
+            ep.mps = (uint16_t)((cfg[off + 4] | (cfg[off + 5] << 8)) & 0x7FF);
+            ep.ival = (uint8_t)(xhci_interval(dev->speed, cfg[off + 6]) + 1);
+            break;
+        }
+    }
     if (xhci_request(dev, 0xA0, 6, dev->speed >= 4 ? 0x2A00 : 0x2900, 0,
                      dev->speed >= 4 ? 12 : 9) < 0) return -1;
     dev->is_hub = 1;
     dev->nports = d[2];
     dev->ttt = dev->speed == 3 ? (d[3] >> 5) & 3 : 0;
     pgood = (uint64_t)d[5] * 2;
-    xhci_build_input_ctx(dev, dev->mps, 0x1);
-    phys = xhci_cmd_submit(g_xhci.inctx_phys, 0, 0,
-                           (12u << 10) | ((uint64_t)dev->slot << 24));
-    if (!phys || xhci_wait_cmd_complete(phys, 0) < 0) return -1;
+    if (ep.mps && (dev->rings = (xhci_ring_t *)kcalloc(1, sizeof(ep)))) {
+        ep.virt = xhci_page(&dev->pages, &dev->npages, &ep.phys);
+        ep.cycle = 1;
+        ep.slot = dev->slot;
+        ep.dci = (uint8_t)((ep.addr & 0xF) * 2 + 1);
+        ep.notify = 1;
+        *dev->rings = ep;
+        dev->nrings = ep.virt ? 1 : 0;
+    }
+    if (dev->nrings) mask |= 1u << ep.dci;
+    xhci_build_input_ctx(dev, dev->mps, mask);
+    if (dev->nrings)
+        xhci_fill_ep((uint32_t *)(g_xhci.inctx + (ep.dci + 1) *
+                                  g_xhci.context_size), dev->rings);
+    if (xhci_command(g_xhci.inctx_phys, 0,
+                     (12u << 10) | ((uint64_t)dev->slot << 24), 0) < 0)
+        return -1;
     if (dev->speed >= 4 && xhci_request(dev, 0x20, 12, dev->depth, 0, 0) < 0)
         return -1;
     for (n = 1; n <= dev->nports && n <= 15; n++)
         xhci_request(dev, 0x23, 3, 8, n, 0);
     xhci_delay(pgood + 100);
-    KERNEL_INIT_LOG("USB: Port %u: hub route=0x%05X with %u ports\n",
-                    dev->port, dev->route, dev->nports);
+    USB_LOG("USB: Port %u: hub route=0x%05X with %u ports\n",
+            dev->port, dev->route, dev->nports);
     return 0;
 }
 
-static int KERNEL_INIT xhci_enumerate_dev(uint8_t port, uint8_t speed,
-                                          uint32_t route, uint8_t depth,
-                                          uint8_t tt_slot, uint8_t tt_port);
+static int XHCI_ENUM xhci_enumerate_dev(uint8_t port, uint8_t speed,
+                                        uint32_t route, uint8_t depth,
+                                        uint8_t tt_slot, uint8_t tt_port);
 
-static void KERNEL_INIT xhci_hub_port(usb_dev_t *hub, uint8_t n) {
+static int XHCI_ENUM xhci_hub_port(usb_dev_t *hub, uint8_t n) {
     uint8_t *st = (uint8_t *)g_xhci.xfer;
     uint16_t status;
     uint8_t speed;
@@ -1031,20 +1264,20 @@ static void KERNEL_INIT xhci_hub_port(usb_dev_t *hub, uint8_t n) {
     uint8_t tt_port;
     uint64_t i;
 
-    if (xhci_request(hub, 0xA3, 0, 0, n, 4) < 0 || !(st[0] & 1)) return;
-    if (xhci_request(hub, 0x23, 3, 4, n, 0) < 0) return;
+    if (xhci_request(hub, 0xA3, 0, 0, n, 4) < 0 || !(st[0] & 1)) return -1;
+    if (xhci_request(hub, 0x23, 3, 4, n, 0) < 0) return -1;
     for (i = 0; i < 50; i++) {
         xhci_delay(10);
-        if (xhci_request(hub, 0xA3, 0, 0, n, 4) < 0) return;
+        if (xhci_request(hub, 0xA3, 0, 0, n, 4) < 0) return -1;
         if ((st[2] & 0x10) && !(st[0] & 0x10)) break;
     }
     status = (uint16_t)(st[0] | (st[1] << 8));
     xhci_request(hub, 0x23, 1, 20, n, 0);
     xhci_request(hub, 0x23, 1, 16, n, 0);
     if ((status & 3) != 3) {
-        KERNEL_INIT_LOG("USB: Hub route=0x%05X port %u: reset failed\n",
-                        hub->route, n);
-        return;
+        USB_LOG("USB: Hub route=0x%05X port %u: reset failed\n",
+                hub->route, n);
+        return -1;
     }
     xhci_delay(10);
     if (hub->speed >= 4) speed = 4;
@@ -1057,28 +1290,241 @@ static void KERNEL_INIT xhci_hub_port(usb_dev_t *hub, uint8_t n) {
         tt_slot = hub->slot;
         tt_port = n;
     }
-    xhci_enumerate_dev(hub->port, speed,
-                       hub->route | ((uint32_t)n << (4 * hub->depth)),
-                       (uint8_t)(hub->depth + 1), tt_slot, tt_port);
+    return xhci_enumerate_dev(hub->port, speed,
+                              hub->route | ((uint32_t)n << (4 * hub->depth)),
+                              (uint8_t)(hub->depth + 1), tt_slot, tt_port);
 }
 
-static void KERNEL_INIT xhci_drop_dev(usb_dev_t *dev, uint64_t mark) {
-    uint64_t phys;
-
-    phys = xhci_cmd_submit(0, 0, 0, (10u << 10) | ((uint64_t)dev->slot << 24));
-    if (phys && xhci_wait_cmd_complete(phys, 0) == 0) {
+static void XHCI_ENUM xhci_drop_dev(usb_dev_t *dev) {
+    if (xhci_command(0, 0, (10u << 10) | ((uint64_t)dev->slot << 24), 0) == 0) {
         ((uint64_t *)g_xhci.dcbaa)[dev->slot] = 0;
-        xhci_free_dma(mark);
+        xhci_free_pages(dev->pages, dev->npages);
+    } else {
+        kfree(dev->pages);
     }
+    kfree(dev->rings);
     kfree(dev);
 }
 
-static int KERNEL_INIT xhci_enumerate_dev(uint8_t port, uint8_t speed,
-                                          uint32_t route, uint8_t depth,
-                                          uint8_t tt_slot, uint8_t tt_port) {
+static void XHCI_ENUM xhci_dev_start(usb_dev_t *dev);
+
+static void XHCI_ENUM xhci_add_dev(usb_dev_t *dev) {
+    uint64_t flags;
+
+    flags = xhci_lock_irq();
+    dev->next = usb_devs;
+    usb_devs = dev;
+    xhci_unlock_irq(flags);
+    if (g_xhci.running) xhci_dev_start(dev);
+}
+
+static int XHCI_RUNTIME xhci_ring_submit(usb_dev_t *dev, xhci_ring_t *r,
+                                         void *buf, uint32_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    uint64_t flags;
+    uint64_t seg;
+    uint64_t done;
+    uint64_t packets;
+    uint64_t lo;
+    uint64_t hi;
+    uint32_t td;
+    uint32_t n;
+
+    n = len / PAGE_SIZE + 2;
+    if (!len || r->busy || n >= XHCI_RING_TRBS) return -1;
+    for (done = 0; done < len; done += seg) {
+        seg = PAGE_SIZE - ((uint64_t)(uintptr_t)(p + done) & (PAGE_SIZE - 1));
+        if (seg > len - done) seg = len - done;
+        if (!blkdev_phys(p + done)) return -1;
+    }
+    packets = (len + r->mps - 1) / r->mps;
+    lo = 0;
+    hi = 0;
+    flags = xhci_lock_irq();
+    if (dev->gone) {
+        xhci_unlock_irq(flags);
+        return -1;
+    }
+    xhci_ring_room(r, n);
+    for (done = 0; done < len; done += seg) {
+        seg = PAGE_SIZE - ((uint64_t)(uintptr_t)(p + done) & (PAGE_SIZE - 1));
+        if (seg > len - done) seg = len - done;
+        td = done + seg < len ? (uint32_t)(packets - (done + seg) / r->mps) : 0;
+        if (td > 31) td = 31;
+        hi = xhci_ring_put(r, blkdev_phys(p + done), (uint32_t)seg | (td << 17),
+                           (1u << 10) | (r->addr & 0x80 ? 1u << 2 : 0u) |
+                           (done + seg < len ? 1u << 4 : 1u << 5));
+        if (!done) lo = hi;
+    }
+    xhci_ring_go(r, lo, hi);
+    xhci_unlock_irq(flags);
+    return 0;
+}
+
+#if CONFIG_DRIVER_USB_STORAGE || CONFIG_DRIVER_USB_HOTPLUG
+static int XHCI_RUNTIME xhci_clear_halt(usb_dev_t *dev, xhci_ring_t *r) {
+    uint8_t setup[8] = { 0x02, 0x01, 0, 0, 0, 0, 0, 0 };
+    uint64_t flags;
+    int ret;
+
+    if (dev->gone) return -1;
+    flags = xhci_lock_irq();
+    xhci_unlink(r);
+    xhci_unlock_irq(flags);
+    setup[4] = r->addr;
+    ret = xhci_ep_reinit(dev, r);
+    return xhci_control(dev, setup, 0, 0) < 0 ? -1 : ret;
+}
+#endif
+
+#if CONFIG_DRIVER_USB_STORAGE
+int usb_ctrl(usb_dev_t *dev, uint8_t type, uint8_t req, uint16_t value,
+             uint16_t index) {
+    uint8_t setup[8] = {
+        type, req, (uint8_t)value, (uint8_t)(value >> 8),
+        (uint8_t)index, (uint8_t)(index >> 8), 0, 0
+    };
+
+    return xhci_control(dev, setup, 0, 0);
+}
+
+int usb_clear_halt(usb_dev_t *dev, uint32_t pipe) {
+    if (pipe >= dev->nrings) return -1;
+    return xhci_clear_halt(dev, &dev->rings[pipe]);
+}
+
+int usb_bulk_submit(usb_dev_t *dev, uint32_t pipe, void *buf, uint32_t len) {
+    if (pipe >= dev->nrings) return -1;
+    return xhci_ring_submit(dev, &dev->rings[pipe], buf, len);
+}
+
+int usb_bulk_wait(usb_dev_t *dev, uint32_t pipe, uint64_t ms) {
+    uint8_t code;
+
+    if (pipe >= dev->nrings) return -1;
+    code = xhci_ring_wait(&dev->rings[pipe], ms);
+    if (code == 1 || code == 13) return 0;
+    if (dev->gone) return -1;
+    usb_clear_halt(dev, pipe);
+    return code == 6 ? 1 : -1;
+}
+
+static int XHCI_ENUM xhci_parse_msc(uint8_t *cfg, uint64_t total,
+                                    uint8_t proto, xhci_ring_t *eps,
+                                    uint8_t *iface, uint8_t *alt) {
+    xhci_ring_t cur;
+    xhci_ring_t *last;
+    uint64_t off;
+    uint8_t len;
+    uint8_t type;
+    uint8_t want;
+    uint8_t have;
+    uint8_t match;
+
+    want = proto == 0x50 ? 3 : 15;
+    have = 0;
+    match = 0;
+    last = NULL;
+    for (off = 0; off + 2 <= total; off += len) {
+        len = cfg[off];
+        type = cfg[off + 1];
+        if (len < 2 || off + len > total) break;
+        if (type == 4 && len >= 9) {
+            if (have == want) break;
+            match = cfg[off + 5] == 8 && cfg[off + 7] == proto;
+            have = 0;
+            last = NULL;
+            *iface = cfg[off + 2];
+            *alt = cfg[off + 3];
+        } else if (match && type == 5 && len >= 7) {
+            last = NULL;
+            if ((cfg[off + 3] & 3) != 2) continue;
+            memset(&cur, 0, sizeof(cur));
+            cur.addr = cfg[off + 2];
+            cur.mps = (uint16_t)((cfg[off + 4] | (cfg[off + 5] << 8)) & 0x7FF);
+            last = &cur;
+            if (proto == 0x50) {
+                last = &eps[cur.addr & 0x80 ? 0 : 1];
+                *last = cur;
+                have |= cur.addr & 0x80 ? 1 : 2;
+            }
+        } else if (match && type == 0x30 && len >= 6 && last) {
+            last->burst = cfg[off + 2];
+            last->stream = cfg[off + 3] & 0x1F;
+        } else if (match && type == 0x24 && len >= 4 && last == &cur &&
+                   cfg[off + 2] >= 1 && cfg[off + 2] <= 4) {
+            eps[cfg[off + 2] - 1] = cur;
+            have |= (uint8_t)(1u << (cfg[off + 2] - 1));
+        }
+    }
+    return have == want;
+}
+
+static int XHCI_ENUM xhci_msc(usb_dev_t *dev, uint8_t *cfg, uint64_t total,
+                              uint8_t cfg_value) {
+    xhci_ring_t eps[4];
+    xhci_ring_t *r;
+    uint32_t mask;
+    uint8_t iface;
+    uint8_t alt;
+    uint8_t maxlun;
+    uint8_t i;
+    int uas;
+    int streams;
+
+    memset(eps, 0, sizeof(eps));
+    uas = 0;
+    if (!xhci_parse_msc(cfg, total, 0x50, eps, &iface, &alt)) {
+        memset(eps, 0, sizeof(eps));
+        if (!xhci_parse_msc(cfg, total, 0x62, eps, &iface, &alt)) return 1;
+        uas = 1;
+    }
+    streams = uas && dev->speed >= 4;
+    if (streams &&
+        !((mmio_read32(g_xhci.mmio_virt + XHCI_CAP_HCCP1) >> 12) & 0xF))
+        return -1;
+    dev->nrings = uas ? 4 : 2;
+    dev->rings = (xhci_ring_t *)kcalloc(dev->nrings, sizeof(*r));
+    if (!dev->rings) return -1;
+    mask = 1;
+    for (i = 0; i < dev->nrings; i++) {
+        r = &dev->rings[i];
+        *r = eps[i];
+        if (!r->mps || (streams && i && !r->stream)) return -1;
+        r->stream = (uint8_t)(streams && i);
+        r->virt = xhci_page(&dev->pages, &dev->npages, &r->phys);
+        if (!r->virt) return -1;
+        r->cycle = 1;
+        r->slot = dev->slot;
+        r->dci = (uint8_t)((r->addr & 0xF) * 2 + (r->addr >> 7));
+        mask |= 1u << r->dci;
+    }
+    xhci_build_input_ctx(dev, dev->mps, mask);
+    for (i = 0; i < dev->nrings; i++)
+        xhci_fill_ep((uint32_t *)(g_xhci.inctx + (dev->rings[i].dci + 1) *
+                                  g_xhci.context_size), &dev->rings[i]);
+    if (xhci_command(g_xhci.inctx_phys, 0,
+                     (12u << 10) | ((uint64_t)dev->slot << 24), 0) < 0 ||
+        xhci_request(dev, 0x00, 9, cfg_value, 0, 0) < 0 ||
+        (alt && xhci_request(dev, 0x01, 11, alt, iface, 0) < 0))
+        return -1;
+    maxlun = 0;
+    if (!uas && xhci_request(dev, 0xA1, 0xFE, 0, iface, 1) == 0)
+        maxlun = ((uint8_t *)g_xhci.xfer)[0] & 0xF;
+    USB_LOG("USB: Port %u: mass storage iface=%u %s\n", dev->port,
+            iface, uas ? "UAS" : "BOT");
+    dev->storage = usb_storage_attach(dev, iface, uas + streams, maxlun);
+    if (!dev->storage) return -1;
+    xhci_add_dev(dev);
+    return 0;
+}
+#endif
+
+static int XHCI_ENUM xhci_enumerate_dev(uint8_t port, uint8_t speed,
+                                        uint32_t route, uint8_t depth,
+                                        uint8_t tt_slot, uint8_t tt_port) {
     usb_dev_t *dev;
     uint8_t *desc = (uint8_t *)g_xhci.xfer;
-    uint64_t mark = g_dma_count;
     uint64_t slot;
     uint64_t mps;
     uint64_t total;
@@ -1099,7 +1545,7 @@ static int KERNEL_INIT xhci_enumerate_dev(uint8_t port, uint8_t speed,
     dev->mps = speed >= 4 ? 512 : speed == 3 ? 64 : 8;
     if (xhci_address_device(dev) < 0) goto drop;
     if (xhci_get_descriptor(dev, 1, 0, 0) < 0) {
-        KERNEL_INIT_LOG("USB: Port %u: zero-length probe failed\n", port);
+        USB_LOG("USB: Port %u: zero-length probe failed\n", port);
     }
     if (xhci_get_descriptor(dev, 1, 0, 8) < 0) goto drop;
     mps = speed >= 4 ? 1u << (desc[7] & 0xF) : desc[7];
@@ -1113,8 +1559,8 @@ static int KERNEL_INIT xhci_enumerate_dev(uint8_t port, uint8_t speed,
     total = (uint64_t)desc[2] | ((uint64_t)desc[3] << 8);
     if (total < 9 || total > PAGE_SIZE) goto drop;
     cfg_value = desc[5];
-    KERNEL_INIT_LOG("USB: Port %u: VID=0x%04X PID=0x%04X class=%u interfaces=%u\n",
-                    port, dev->vid, dev->pid, dev->dev_class, desc[4]);
+    USB_LOG("USB: Port %u: VID=0x%04X PID=0x%04X class=%u interfaces=%u\n",
+            port, dev->vid, dev->pid, dev->dev_class, desc[4]);
     if (xhci_get_descriptor(dev, 2, 0, total) < 0) goto drop;
     if (dev->dev_class != 9)
         xhci_parse_hid(dev, desc, total);
@@ -1142,41 +1588,55 @@ static int KERNEL_INIT xhci_enumerate_dev(uint8_t port, uint8_t speed,
                     dev->abs_y_off = yo;
                     dev->abs_y_len = yl;
                     dev->abs_max = m;
-                    KERNEL_INIT_LOG("USB: Port %u: HID absolute axes xoff=%u xlen=%u yoff=%u ylen=%u max=%u\n",
-                                    dev->port, xo, xl, yo, yl, m);
+                    USB_LOG("USB: Port %u: HID absolute axes xoff=%u xlen=%u yoff=%u ylen=%u max=%u\n",
+                            dev->port, xo, xl, yo, yl, m);
                 }
             }
         }
     }
     if (dev->has_hid && dev->proto == 0 && !dev->has_abs) {
-        KERNEL_INIT_LOG("USB: Port %u: unsupported HID device, ignoring\n",
-                        port);
+        USB_LOG("USB: Port %u: unsupported HID device, ignoring\n",
+                port);
         goto drop;
     }
+#if CONFIG_DRIVER_USB_STORAGE
+    if (!dev->has_hid && dev->dev_class != 9) {
+        int msc = xhci_msc(dev, desc, total, (uint8_t)cfg_value);
+
+        if (msc == 0) return 0;
+        if (msc < 0) goto drop;
+    }
+#endif
     if (dev->has_hid && xhci_configure_hid(dev) < 0) goto drop;
     if (xhci_request(dev, 0x00, 9, (uint16_t)cfg_value, 0, 0) < 0) goto drop;
     if (dev->has_hid) {
         if ((!dev->has_abs &&
              xhci_request(dev, 0x21, 0x0B, 0, dev->iface, 0) < 0) ||
             xhci_request(dev, 0x21, 0x0A, 0, dev->iface, 0) < 0) {
-            KERNEL_INIT_LOG("USB: Port %u: HID boot setup failed\n", port);
+            USB_LOG("USB: Port %u: HID boot setup failed\n", port);
             goto drop;
         }
-        dev->next = usb_devs;
-        usb_devs = dev;
+        xhci_add_dev(dev);
         return 0;
     }
-    if (dev->dev_class == 9 && depth < 5 && xhci_setup_hub(dev) == 0) {
-        total = g_dma_count;
+    if (dev->dev_class == 9 && depth < 5 &&
+        xhci_setup_hub(dev, desc, total) == 0) {
+        mps = 0;
         for (n = 1; n <= dev->nports && n <= 15; n++)
-            xhci_hub_port(dev, n);
-        if (g_dma_count != total) {
+            mps += xhci_hub_port(dev, n) == 0;
+        if (CONFIG_DRIVER_USB_HOTPLUG) {
+            xhci_add_dev(dev);
+            return 0;
+        }
+        if (mps) {
+            kfree(dev->pages);
+            kfree(dev->rings);
             kfree(dev);
             return 0;
         }
     }
 drop:
-    xhci_drop_dev(dev, mark);
+    xhci_drop_dev(dev);
     return -1;
 }
 
@@ -1251,29 +1711,236 @@ static void xhci_hid_queue(usb_dev_t *dev) {
 }
 
 static void xhci_hid_poll(uint64_t ticks) {
-    uint64_t type;
-    uint64_t code;
-    uint64_t ptr;
-    uint64_t slot;
     usb_dev_t *dev;
 
     (void)ticks;
-    while (xhci_next_event(&type, &code, &ptr, &slot)) {
+    if (spin_trylock(&xhci_lock)) {
+        xhci_events();
         smp_tlb_flush_poll();
-        if (type != 32 || !ptr) continue;
         for (dev = usb_devs; dev; dev = dev->next) {
-            if (ptr != dev->ipend) continue;
-            dev->ipend = 0;
-            if (code == 1 || code == 13)
+            if (!dev->hid_done) continue;
+            dev->hid_done = 0;
+            if (dev->hid_code == 1 || dev->hid_code == 13)
                 xhci_hid_report(dev);
             xhci_hid_queue(dev);
-            break;
         }
+        xhci_hid_repeat();
+        spin_unlock(&xhci_lock);
     }
-    xhci_erdp_update();
-    smp_tlb_flush_poll();
-    xhci_hid_repeat();
+#if CONFIG_DRIVER_USB_HOTPLUG
+    if (xhci_hp_kick && xhci_hp_task) {
+        xhci_hp_kick = 0;
+        wake_task(xhci_hp_task);
+    }
+#endif
 }
+
+#if CONFIG_DRIVER_USB_HOTPLUG
+static void xhci_hid_rate(void) {
+    usb_dev_t *dev;
+
+    for (dev = usb_devs; dev && !dev->has_hid; dev = dev->next);
+    pit_set_callback_interval(xhci_hp_cb, dev ? 1 : pit_freq / 5 + 1);
+}
+#endif
+
+static void XHCI_ENUM xhci_dev_start(usb_dev_t *dev) {
+    uint64_t flags;
+
+    if (dev->has_hid) {
+        flags = xhci_lock_irq();
+        xhci_hid_queue(dev);
+        xhci_unlock_irq(flags);
+    }
+    if (dev->is_hub && dev->nrings)
+        dev->hub_armed = xhci_ring_submit(dev, dev->rings,
+            (void *)(dev->rings->virt + XHCI_STREAM_OFF),
+            (uint32_t)(dev->nports + 8) / 8) == 0;
+#if CONFIG_DRIVER_USB_HOTPLUG
+    if (g_xhci.running) xhci_hid_rate();
+#endif
+}
+
+#if CONFIG_DRIVER_USB_HOTPLUG
+static void xhci_remove(usb_dev_t *dev) {
+    static uint8_t zero[8];
+    usb_dev_t **pp;
+    uint64_t flags;
+    uint32_t i;
+
+    flags = xhci_lock_irq();
+    dev->gone = 1;
+    for (pp = &usb_devs; *pp && *pp != dev; pp = &(*pp)->next);
+    if (*pp) *pp = dev->next;
+    dev->ep0.code = 0;
+    xhci_unlink(&dev->ep0);
+    for (i = 0; i < dev->nrings; i++) {
+        dev->rings[i].code = 0;
+        xhci_unlink(&dev->rings[i]);
+    }
+#if CONFIG_DRIVER_USB_HID_KBD
+    if (dev->has_hid && dev->proto == 1)
+        usb_hid_kbd_report(&dev->hid_kbd, zero);
+#endif
+#if CONFIG_DRIVER_USB_HID_MOUSE
+    if (dev->has_hid && dev->proto != 1 && !dev->has_abs)
+        usb_hid_mouse_report(zero, dev->iep_mps);
+#endif
+    xhci_unlock_irq(flags);
+#if CONFIG_DRIVER_USB_STORAGE
+    if (dev->storage) usb_storage_detach(dev->storage);
+#endif
+    printf("USB: Port %u: device %04X:%04X removed\n", dev->port, dev->vid,
+           dev->pid);
+    xhci_drop_dev(dev);
+    xhci_hid_rate();
+}
+
+static void xhci_remove_route(uint8_t port, uint32_t route, uint8_t depth) {
+    uint32_t mask = depth ? (1u << (4 * depth)) - 1 : 0;
+    usb_dev_t *dev;
+    usb_dev_t *pick;
+
+    for (;;) {
+        pick = NULL;
+        for (dev = usb_devs; dev; dev = dev->next) {
+            if (dev->port == port && dev->depth >= depth &&
+                (dev->route & mask) == route &&
+                (!pick || dev->depth > pick->depth))
+                pick = dev;
+        }
+        if (!pick) return;
+        xhci_remove(pick);
+    }
+}
+
+static void xhci_root_port(uint8_t n) {
+    uint64_t addr;
+    uint32_t sc;
+    uint32_t i;
+
+    addr = g_xhci.mmio_virt + g_xhci.caplength + XHCI_OP_PORTSC +
+           (uint64_t)n * XHCI_PORTSC_STRIDE;
+    sc = mmio_read32(addr);
+    mmio_write32(addr, (sc & XHCI_PORTSC_KEEP) | (sc & XHCI_PORTSC_CHANGES));
+    if (!(sc & XHCI_PORTSC_CSC)) return;
+    xhci_remove_route(n, 0, 0);
+    if (!(sc & XHCI_PORTSC_CCS)) return;
+    xhci_delay(100);
+    sc = mmio_read32(addr);
+    if (!(sc & XHCI_PORTSC_CCS)) return;
+    mmio_write32(addr, (sc & XHCI_PORTSC_KEEP) | XHCI_PORTSC_PR);
+    for (i = 0; i < 500 && !(sc & XHCI_PORTSC_PRC); i++) {
+        xhci_delay(1);
+        sc = mmio_read32(addr);
+    }
+    mmio_write32(addr, (sc & XHCI_PORTSC_KEEP) | (sc & XHCI_PORTSC_CHANGES));
+    if (!(sc & XHCI_PORTSC_PED)) return;
+    xhci_delay(10);
+    xhci_enumerate_dev(n, (uint8_t)((sc >> XHCI_PORTSC_SPEED_SHIFT) &
+                                    XHCI_PORTSC_SPEED_MASK), 0, 0, 0, 0);
+}
+
+static void xhci_hub_change(usb_dev_t *hub, uint8_t n) {
+    uint8_t *st = (uint8_t *)g_xhci.xfer;
+    uint16_t status;
+    uint16_t change;
+    uint8_t b;
+
+    if (xhci_request(hub, 0xA3, 0, 0, n, 4) < 0) return;
+    status = (uint16_t)(st[0] | (st[1] << 8));
+    change = (uint16_t)(st[2] | (st[3] << 8));
+    for (b = 0; b < 8; b++) {
+        if (change & (1u << b))
+            xhci_request(hub, 0x23, 1, b < 5 ? 16 + b : b == 5 ? 29 : 19 + b,
+                         n, 0);
+    }
+    if (!(change & 1)) return;
+    xhci_remove_route(hub->port, hub->route | ((uint32_t)n << (4 * hub->depth)),
+                      (uint8_t)(hub->depth + 1));
+    if (!(status & 1)) return;
+    xhci_delay(100);
+    xhci_hub_port(hub, n);
+}
+
+static void xhci_hub_event(usb_dev_t *hub) {
+    xhci_ring_t *r = hub->rings;
+    uint8_t *bits = (uint8_t *)(r->virt + XHCI_STREAM_OFF);
+    uint32_t map;
+    uint8_t n;
+
+    hub->hub_armed = 0;
+    if (r->code == 1 || r->code == 13) {
+        hub->hub_errors = 0;
+        map = (uint32_t)bits[0] | ((uint32_t)bits[1] << 8);
+        for (n = 1; n <= hub->nports && n <= 15; n++) {
+            if (map & (1u << n)) xhci_hub_change(hub, n);
+        }
+    } else if (++hub->hub_errors >= 3 || xhci_clear_halt(hub, r) < 0) {
+        return;
+    }
+    xhci_dev_start(hub);
+}
+
+static void xhci_hotplug_work(void) {
+    static uint8_t pass;
+    uint64_t chg[4];
+    uint64_t flags;
+    usb_dev_t *dev;
+    uint32_t n;
+
+    flags = xhci_lock_irq();
+    memcpy(chg, g_xhci.port_chg, sizeof(chg));
+    memset(g_xhci.port_chg, 0, sizeof(chg));
+    xhci_unlock_irq(flags);
+    g_xhci.xfer_phys = (uint64_t)pmm_alloc_mapped_page();
+    g_xhci.inctx_phys = (uint64_t)pmm_alloc_mapped_page();
+    if (g_xhci.xfer_phys && g_xhci.inctx_phys) {
+        g_xhci.xfer = g_xhci.xfer_phys + KERNEL_VMA;
+        g_xhci.inctx = g_xhci.inctx_phys + KERNEL_VMA;
+        memset((void *)g_xhci.inctx, 0, PAGE_SIZE);
+        for (n = 0; n < g_xhci.max_ports; n++) {
+            if (chg[n / 64] & (1ULL << (n % 64))) xhci_root_port((uint8_t)n);
+        }
+        pass++;
+        for (;;) {
+            for (dev = usb_devs; dev; dev = dev->next) {
+                if (dev->is_hub && dev->hub_armed && !dev->rings->busy &&
+                    dev->hub_pass != pass)
+                    break;
+            }
+            if (!dev) break;
+            dev->hub_pass = pass;
+            xhci_hub_event(dev);
+        }
+    } else {
+        flags = xhci_lock_irq();
+        for (n = 0; n < 4; n++) g_xhci.port_chg[n] |= chg[n];
+        xhci_unlock_irq(flags);
+    }
+    if (g_xhci.xfer_phys) pfa_free(g_xhci.xfer_phys);
+    if (g_xhci.inctx_phys) pfa_free(g_xhci.inctx_phys);
+    g_xhci.xfer_phys = 0;
+    g_xhci.inctx_phys = 0;
+    g_xhci.xfer = 0;
+    g_xhci.inctx = 0;
+#if CONFIG_DRIVER_USB_STORAGE
+    devfs_add_blkdevs();
+#endif
+}
+
+static void xhci_hotplug_thread(void) {
+    for (;;) {
+        lock_scheduler();
+        if (!xhci_hp_pending) current_task->state = TASK_BLOCKED;
+        unlock_scheduler();
+        smp_this_cpu()->schedule_force = 1;
+        schedule();
+        if (__atomic_exchange_n(&xhci_hp_pending, 0, __ATOMIC_ACQ_REL))
+            xhci_hotplug_work();
+    }
+}
+#endif
 
 static void KERNEL_INIT xhci_enumerate(void) {
     uint64_t n;
@@ -1288,8 +1955,11 @@ int KERNEL_INIT xhci_init(void) {
     uint32_t hcs1;
     uint32_t cmd;
     usb_dev_t *dev;
+    int hid;
 
     memset(&g_xhci, 0, sizeof(g_xhci));
+    spinlock_init(&xhci_lock);
+    mutex_init(&xhci_cmd_lock);
     if (xhci_probe() < 0) return -1;
 
     for (i = 0; i < XHCI_MMIO_PAGES; i++) {
@@ -1331,21 +2001,43 @@ int KERNEL_INIT xhci_init(void) {
     if (xhci_setup_operational() < 0) return -1;
     xhci_scan_ports();
     xhci_enumerate();
-    if (!usb_devs) {
+    if (!usb_devs && !CONFIG_DRIVER_USB_HOTPLUG) {
         cmd = mmio_read32(op + XHCI_OP_USBCMD);
         mmio_write32(op + XHCI_OP_USBCMD, cmd & ~XHCI_USBCMD_RS);
         xhci_wait(op + XHCI_OP_USBSTS, XHCI_USBSTS_HALTED,
                   XHCI_USBSTS_HALTED);
-        xhci_free_dma(0);
-    } else {
-        pfa_free(g_xhci.xfer_phys);
-        pfa_free(g_xhci.inctx_phys);
+        xhci_free_pages(g_dma_phys, g_dma_count);
+        g_dma_phys = NULL;
         g_dma_count = 0;
-        for (dev = usb_devs; dev; dev = dev->next)
-            xhci_hid_queue(dev);
-        pit_register_callback(xhci_hid_poll, 1, false);
+        return 0;
     }
+    pfa_free(g_xhci.xfer_phys);
+    pfa_free(g_xhci.inctx_phys);
+    g_xhci.xfer_phys = 0;
+    g_xhci.inctx_phys = 0;
+    g_xhci.xfer = 0;
+    g_xhci.inctx = 0;
     kfree(g_dma_phys);
     g_dma_phys = NULL;
+    g_dma_count = 0;
+    g_xhci.running = 1;
+    hid = 0;
+    for (dev = usb_devs; dev; dev = dev->next) {
+        xhci_dev_start(dev);
+        hid |= dev->has_hid;
+    }
+#if CONFIG_DRIVER_USB_HOTPLUG
+    xhci_hp_cb = pit_register_callback(xhci_hid_poll,
+                                       hid ? 1 : pit_freq / 5 + 1, false);
+    xhci_hp_task = create_kernel_task(xhci_hotplug_thread, TASK_BLOCKED);
+    if (xhci_hp_task) {
+        strcpy(xhci_hp_task->name, "usb-hotplug");
+        lock_scheduler();
+        add_task_to_runqueue(xhci_hp_task);
+        unlock_scheduler();
+    }
+#else
+    if (hid) pit_register_callback(xhci_hid_poll, 1, false);
+#endif
     return 0;
 }

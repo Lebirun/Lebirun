@@ -1097,6 +1097,42 @@ void ahci_debug_info(void) {
     }
 }
 
+static int ahci_blk_read(blkdev_t *dev, uint64_t lba, uint64_t count,
+                         void *buf) {
+    return ahci_read_sectors((ahci_port_t *)dev->priv, lba, count, buf);
+}
+
+static int ahci_blk_write(blkdev_t *dev, uint64_t lba, uint64_t count,
+                          const void *buf) {
+    return ahci_write_sectors((ahci_port_t *)dev->priv, lba, count, buf);
+}
+
+static int ahci_blk_writev(blkdev_t *dev, uint64_t lba, uint64_t sectors,
+                           const void *const *bufs, uint32_t count,
+                           uint64_t bytes) {
+    return ahci_write_sectorsv((ahci_port_t *)dev->priv, lba, sectors, bufs,
+                               count, bytes);
+}
+
+static int ahci_blk_flush(blkdev_t *dev) {
+    return ahci_flush((ahci_port_t *)dev->priv);
+}
+
+static int ahci_blk_atapi_read(blkdev_t *dev, uint64_t lba, uint64_t count,
+                               void *buf) {
+    if (count > UINT32_MAX) return -1;
+    return ahci_atapi_read((ahci_port_t *)dev->priv, lba, (uint32_t)count,
+                           buf);
+}
+
+static const blkdev_ops_t ahci_disk_ops = {
+    ahci_blk_read, ahci_blk_write, ahci_blk_writev, ahci_blk_flush
+};
+
+static const blkdev_ops_t ahci_cdrom_ops = {
+    ahci_blk_atapi_read, NULL, NULL, NULL
+};
+
 int KERNEL_INIT ahci_init(void) {
     static int probed KERNEL_INIT_BSS;
     uint64_t abar_phys;
@@ -1223,6 +1259,16 @@ int KERNEL_INIT ahci_init(void) {
         g_ahci_controller.num_ports++;
         if (port->type == AHCI_DEV_SATA) {
             ahci_identify(port);
+        }
+        if (port->type == AHCI_DEV_SATA || port->type == AHCI_DEV_SATAPI) {
+            int cd = port->type == AHCI_DEV_SATAPI;
+
+            port->blk.ops = cd ? &ahci_cdrom_ops : &ahci_disk_ops;
+            port->blk.priv = port;
+            port->blk.sectors = port->sector_count;
+            port->blk.block_size = cd ? ATAPI_SECTOR_SIZE : AHCI_SECTOR_SIZE;
+            port->blk.type = cd ? BLKDEV_CDROM : BLKDEV_DISK;
+            blkdev_register(&port->blk);
         }
     }
 

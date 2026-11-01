@@ -13,6 +13,8 @@ uint64_t devfs_get_partition_start(vfs_node_t *node);
 int devfs_is_fb(vfs_node_t *node);
 int devfs_is_partition(vfs_node_t *node);
 int devfs_rescan_partitions(const char *devname);
+void devfs_add_blkdevs(void);
+void devfs_remove_blkdevs(uint64_t port_index);
 void devfs_register_initrd(void);
 
 #endif

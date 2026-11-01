@@ -2,7 +2,7 @@
 #define FAT_H
 
 #include <stdint.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/mutex.h>
 
 #define FAT_ATTR_READONLY  0x01
@@ -17,7 +17,7 @@
 #define FAT_SFN_LEN        11
 
 typedef struct {
-    ahci_port_t *port;
+    uint64_t dev;
     uint64_t part_lba;
     uint32_t bps;
     uint8_t spc;
@@ -39,7 +39,7 @@ typedef struct {
     uint8_t raw[FAT_ENTRY_SIZE];
 } fat_entry_t;
 
-int fat_mount_fs(fat_fs_t *fs, ahci_port_t *port, uint64_t part_lba);
+int fat_mount_fs(fat_fs_t *fs, uint64_t dev, uint64_t part_lba);
 void fat_unmount_fs(fat_fs_t *fs);
 uint32_t fat_next_cluster(fat_fs_t *fs, uint32_t cluster);
 int fat_set_next(fat_fs_t *fs, uint32_t cluster, uint32_t value);

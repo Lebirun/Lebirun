@@ -1,6 +1,6 @@
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/common.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/idt.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
@@ -21,11 +21,11 @@ static ext4_fs_t *ext4_mounts_head = NULL;
 static mutex_t ext4_mounts_lock;
 
 static int ext4_flush_device(ext4_fs_t *fs) {
-    ahci_port_t *port;
+    blkdev_t *dev;
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) return -1;
-    return ahci_flush(port);
+    dev = blkdev_get(fs->port_index);
+    if (!dev) return -1;
+    return blkdev_flush(dev);
 }
 
 static int ext4_recover_orphans(ext4_fs_t *fs) {
@@ -1214,7 +1214,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     vfs_node_t *dev_node;
     uint32_t port_idx;
     uint64_t part_start;
-    ahci_port_t *port;
+    blkdev_t *dev;
     ext4_fs_t *fs;
     vfs_node_t *root;
 
@@ -1237,9 +1237,9 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
         part_start = devfs_get_partition_start(dev_node);
     }
 
-    port = ahci_get_port(port_idx);
-    if (!port) {
-        printf("EXT4: No AHCI port available\n");
+    dev = blkdev_get(port_idx);
+    if (!dev) {
+        printf("EXT4: No block device available\n");
         return NULL;
     }
 
@@ -1336,7 +1336,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     ext4_mount_list_remove_locked(fs);
     mutex_lock(&fs->lock);
 
-    if (ext4_sync(fs) != 0) {
+    if (ext4_sync(fs) != 0 && blkdev_get(fs->port_index)) {
         ext4_mount_list_add_locked(fs);
         mutex_unlock(&fs->lock);
         mutex_unlock(&ext4_mounts_lock);
@@ -1344,7 +1344,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
     }
     ext4_flush_cache(fs);
 
-    if (ext4_mark_clean(fs) != 0) {
+    if (ext4_mark_clean(fs) != 0 && blkdev_get(fs->port_index)) {
         ext4_mount_list_add_locked(fs);
         mutex_unlock(&fs->lock);
         mutex_unlock(&ext4_mounts_lock);
@@ -1404,13 +1404,13 @@ static int ext4_vfs_sync(vfs_node_t *node, int data_only) {
 }
 
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     ext4_fs_t *fs;
     vfs_node_t *root;
 
     (void)mountpoint;
-    port = ahci_get_port(port_index);
-    if (!port) {
+    dev = blkdev_get(port_index);
+    if (!dev) {
         return NULL;
     }
 
@@ -1476,7 +1476,7 @@ int ext4_unmount(ext4_fs_t *fs) {
     ext4_mount_list_remove_locked(fs);
     mutex_lock(&fs->lock);
 
-    if (ext4_sync(fs) != 0) {
+    if (ext4_sync(fs) != 0 && blkdev_get(fs->port_index)) {
         ext4_mount_list_add_locked(fs);
         mutex_unlock(&fs->lock);
         mutex_unlock(&ext4_mounts_lock);
@@ -1484,7 +1484,7 @@ int ext4_unmount(ext4_fs_t *fs) {
     }
     ext4_flush_cache(fs);
 
-    if (ext4_mark_clean(fs) != 0) {
+    if (ext4_mark_clean(fs) != 0 && blkdev_get(fs->port_index)) {
         ext4_mount_list_add_locked(fs);
         mutex_unlock(&fs->lock);
         mutex_unlock(&ext4_mounts_lock);

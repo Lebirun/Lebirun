@@ -1,5 +1,5 @@
 #include <lebirun/fs/ext4/ext4.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <string.h>
@@ -127,17 +127,17 @@ retry:
 }
 
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
     lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
-    if (ahci_read_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
+    if (blkdev_read(dev, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
     }
 
@@ -146,7 +146,7 @@ int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer) {
 
 int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
                      void *buffer) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     uint64_t sectors;
     int idx;
@@ -160,8 +160,8 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
         return ext4_read_block(fs, block, buffer);
     }
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
@@ -186,7 +186,7 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
     }
 
     lba = fs->partition_start_lba + block * fs->sectors_per_block;
-    if (ahci_read_sectors(port, lba, sectors, buffer) != 0) {
+    if (blkdev_read(dev, lba, sectors, buffer) != 0) {
         return -1;
     }
 
@@ -204,18 +204,18 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
 }
 
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     int idx;
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
     lba = fs->partition_start_lba + block * fs->sectors_per_block;
     
-    if (ahci_write_sectors(port, lba, fs->sectors_per_block, buffer) != 0) {
+    if (blkdev_write(dev, lba, fs->sectors_per_block, buffer) != 0) {
         return -1;
     }
 
@@ -231,7 +231,7 @@ int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
 }
 
 int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint64_t lba;
     uint64_t sectors;
     int idx;
@@ -245,8 +245,8 @@ int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void 
         return ext4_write_block(fs, block, buffer);
     }
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
@@ -262,7 +262,7 @@ int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void 
     }
     if ((uint64_t)count - 1 > UINT64_MAX - block) return -1;
     lba = fs->partition_start_lba + block * fs->sectors_per_block;
-    if (ahci_write_sectors(port, lba, sectors, buffer) != 0) {
+    if (blkdev_write(dev, lba, sectors, buffer) != 0) {
         return -1;
     }
 
@@ -495,7 +495,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
     int max_run;
     int run_len;
     uint32_t *dirty_idx;
-    ahci_port_t *port;
+    blkdev_t *dev;
     const void *vectors[8];
     uint64_t base_lba;
     uint64_t total_sectors;
@@ -536,7 +536,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
 
     ext4_sort_dirty_indices(fs, dirty_idx, dirty_count);
 
-    port = ahci_get_port(fs->port_index);
+    dev = blkdev_get(fs->port_index);
     max_run = 8;
 
     i = 0;
@@ -551,7 +551,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
             }
         }
 
-        if (run_len == 1 || !port) {
+        if (run_len == 1 || !dev) {
             if (ext4_write_block(fs, fs->block_cache[dirty_idx[i]].block_num,
                                  fs->block_cache[dirty_idx[i]].data) != 0) {
                 errors++;
@@ -570,7 +570,7 @@ int ext4_sync_blocks(ext4_fs_t *fs) {
             vectors[j] = fs->block_cache[dirty_idx[i + j]].data;
         }
 
-        if (ahci_write_sectorsv(port, base_lba, total_sectors, vectors,
+        if (blkdev_writev(dev, base_lba, total_sectors, vectors,
                                 (uint32_t)run_len, fs->block_size) != 0) {
             errors++;
         } else {

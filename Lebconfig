@@ -20,6 +20,8 @@ subcategory "Virtualization" {
 subcategory "Device Drivers" {
     subcategory "Storage" {
         item type=bool name="AHCI SATA" default=enable id=DRIVER_AHCI alias="DRIVER_AHCI" help="Enable the AHCI SATA storage driver"
+        item type=bool name="NVMe" default=enable id=DRIVER_NVME alias="DRIVER_NVME" help="Enable the NVMe storage driver"
+        item type=bool name="USB Mass Storage" default=enable id=DRIVER_USB_STORAGE alias="DRIVER_USB_STORAGE" depends-on=DRIVER_XHCI help="Enable the USB Mass Storage driver (Bulk-Only and UAS)"
     }
     subcategory "Graphics" {
         item type=bool name="Virtio VGA" default=enable id=DRIVER_VIRTIO_VGA alias="DRIVER_VIRTIO_VGA" help="Enable the VGA-compatible virtio GPU PCI frontend"
@@ -39,6 +41,7 @@ subcategory "Device Drivers" {
     }
     subcategory "USB" {
         item type=bool name="xHCI USB" default=enable id=DRIVER_XHCI alias="DRIVER_XHCI" help="Enable the xHCI USB host controller driver"
+        item type=bool name="USB Hotplug" default=enable id=DRIVER_USB_HOTPLUG alias="DRIVER_USB_HOTPLUG" depends-on=DRIVER_XHCI help="Detect USB devices plugged in or removed after boot"
     }
     subcategory "I2C" {
         item type=bool name="DesignWare I2C" default=enable id=DRIVER_DW_I2C alias="DRIVER_DW_I2C" help="Enable the DesignWare I2C controller driver (Intel LPSS, AMD)"

@@ -5,7 +5,7 @@
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/ramfs.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/inotify.h>
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/overlayfs.h>
@@ -409,7 +409,7 @@ static const char *vfs_detect_fs(const char *device) {
     uint16_t ext_magic;
     extern uint64_t devfs_get_partition_start(vfs_node_t *node);
     vfs_node_t *dev_node;
-    ahci_port_t *port;
+    blkdev_t *dev;
 
 
     if (!device || device[0] == '\0')
@@ -424,15 +424,15 @@ static const char *vfs_detect_fs(const char *device) {
     port_idx = dev_node->inode;
     part_start = devfs_get_partition_start(dev_node);
 
-    port = ahci_get_port(port_idx);
-    if (!port)
+    dev = blkdev_get(port_idx);
+    if (!dev)
         return NULL;
 
     buf = (uint8_t *)slab_page_alloc(PAGE_SIZE);
     if (!buf)
         return NULL;
 
-    if (ahci_read_sectors(port, part_start, 8, buf) != 0) {
+    if (blkdev_read(dev, part_start, 8, buf) != 0) {
         slab_page_free(buf, PAGE_SIZE);
         return NULL;
     }

@@ -17,8 +17,8 @@ int fat_read_lba(fat_fs_t *fs, uint64_t lba, uint8_t *buf) {
 
     sectors = (fs->bps + 511) / 512;
     for (i = 0; i < sectors; i++) {
-        if (ahci_read_sectors(fs->port, fs->part_lba + lba * sectors + i,
-                              1, buf + i * 512) != 0) return -1;
+        if (blkdev_read(blkdev_get(fs->dev), fs->part_lba + lba * sectors + i,
+                        1, buf + i * 512) != 0) return -1;
     }
     return 0;
 }
@@ -29,8 +29,8 @@ int fat_read_lba_range(fat_fs_t *fs, uint64_t lba, uint64_t count,
 
     if (!count) return 0;
     sectors = (fs->bps + 511) / 512;
-    return ahci_read_sectors(fs->port, fs->part_lba + lba * sectors,
-                             count * sectors, buf);
+    return blkdev_read(blkdev_get(fs->dev), fs->part_lba + lba * sectors,
+                       count * sectors, buf);
 }
 
 int fat_write_lba(fat_fs_t *fs, uint64_t lba, const uint8_t *buf) {
@@ -39,8 +39,8 @@ int fat_write_lba(fat_fs_t *fs, uint64_t lba, const uint8_t *buf) {
 
     sectors = (fs->bps + 511) / 512;
     for (i = 0; i < sectors; i++) {
-        if (ahci_write_sectors(fs->port, fs->part_lba + lba * sectors + i,
-                               1, buf + i * 512) != 0) return -1;
+        if (blkdev_write(blkdev_get(fs->dev), fs->part_lba + lba * sectors + i,
+                         1, buf + i * 512) != 0) return -1;
     }
     return 0;
 }
@@ -51,8 +51,8 @@ int fat_write_lba_range(fat_fs_t *fs, uint64_t lba, uint64_t count,
 
     if (!count) return 0;
     sectors = (fs->bps + 511) / 512;
-    return ahci_write_sectors(fs->port, fs->part_lba + lba * sectors,
-                              count * sectors, buf);
+    return blkdev_write(blkdev_get(fs->dev), fs->part_lba + lba * sectors,
+                        count * sectors, buf);
 }
 
 uint64_t fat_cluster_lba(fat_fs_t *fs, uint32_t cluster) {
@@ -471,7 +471,7 @@ found:
     return 0;
 }
 
-int fat_mount_fs(fat_fs_t *fs, ahci_port_t *port, uint64_t part_lba) {
+int fat_mount_fs(fat_fs_t *fs, uint64_t dev, uint64_t part_lba) {
     uint8_t *boot;
     uint32_t bps;
     uint32_t fat_sz;
@@ -479,11 +479,11 @@ int fat_mount_fs(fat_fs_t *fs, ahci_port_t *port, uint64_t part_lba) {
     uint32_t root_entries;
 
     memset(fs, 0, sizeof(*fs));
-    fs->port = port;
+    fs->dev = dev;
     fs->part_lba = part_lba;
     boot = (uint8_t *)kmalloc(4096);
     if (!boot) return -1;
-    if (ahci_read_sectors(port, part_lba, 1, boot) != 0) {
+    if (blkdev_read(blkdev_get(dev), part_lba, 1, boot) != 0) {
         kfree(boot);
         return -1;
     }

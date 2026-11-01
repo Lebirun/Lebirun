@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <lebirun/mutex.h>
+#include <lebirun/blkdev.h>
 
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
@@ -367,6 +368,7 @@ typedef struct ahci_port {
     uint64_t dma_buf_phys;
     uint64_t dma_buf_virt;
     uint64_t dma_buf_pages;
+    blkdev_t blk;
 } ahci_port_t;
 
 typedef struct {

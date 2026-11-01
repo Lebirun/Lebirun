@@ -24,14 +24,15 @@
 #include <lebirun/console.h>
 #include <lebirun/vfs.h>
 #include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/drivers/nvme/nvme.h>
 #include <lebirun/drivers/usb/xhci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/drivers/i2c/i2c-hid.h>
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
 #include <lebirun/drivers/fb/virtio_gpu.h>
 #endif
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/fs/fat.h>
-#include <lebirun/partition.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/tls.h>
 #include <lebirun/vring.h>
@@ -60,16 +61,29 @@ static int kernel_live_fs_used;
 
 extern task_t* current_task;
 
+static void KERNEL_INIT kernel_storage_init(void) {
 #if CONFIG_DRIVER_AHCI
-static void KERNEL_INIT ahci_blockdev_name(char *name, size_t size, int index) {
-    if (index < 26) {
-        snprintf(name, size, "sd%c", 'a' + index);
-    } else {
-        snprintf(name, size, "sd%c%c", 'a' + index / 26 - 1,
-                 'a' + index % 26);
-    }
-}
+    ahci_init();
 #endif
+#if CONFIG_DRIVER_NVME
+    nvme_init();
+#endif
+}
+
+static void KERNEL_INIT kernel_add_disks(int *fs_ready, int force) {
+    if (!blkdev_count() && !force) return;
+    if (!*fs_ready) {
+#if CONFIG_FS_EXT4
+        ext4_init();
+        ext4_vfs_register();
+#endif
+#if CONFIG_FS_FAT
+        fat_vfs_register();
+#endif
+        *fs_ready = 1;
+    }
+    devfs_add_blkdevs();
+}
 
 static void KERNEL_INIT kernel_reclaim_memory(
     uint8_t *section_start, uint8_t *section_end, int flush_cpus,
@@ -220,22 +234,13 @@ static void KERNEL_INIT kernel_boot(void) {
     vfs_node_t *squashfs_root;
     vfs_node_t *ramfs_upper;
     vfs_node_t *initrd_root;
-    ahci_port_t *port;
-    int j;
-    int sr_idx;
-    uint32_t pi;
-    char devname[8];
-    char partname[16];
-    partition_table_t ptable;
-    int pk;
     task_t *init_task;
     squashfs_context_t *sqctx;
     const char *root_dev;
 #if CONFIG_FS_EXT4
     vfs_node_t *ext4_root;
 #endif
-    int ahci_done;
-    int devs_registered;
+    int fs_ready;
     int mem_map_relocated;
     struct multiboot2_tag_module *tag_mod_initrd;
 
@@ -318,8 +323,7 @@ static void KERNEL_INIT kernel_boot(void) {
     for (pg = mb_page; pg < mb_end_page; pg += 0x1000)
         vmm_map_page(pg + KERNEL_VMA, pg, 0x003);
 
-    ahci_done = 0;
-    devs_registered = 0;
+    fs_ready = 0;
     if (mod_count > 0) {
         kernel_live_fs_used = 1;
         for (tag = multiboot2_first_tag((void *)(mb_phys + KERNEL_VMA));
@@ -468,10 +472,7 @@ static void KERNEL_INIT kernel_boot(void) {
             KERNEL_INIT_LOG("BOOT: Exported /boot/rootfs.squashfs (%u bytes, zero-copy)\n", sqctx->size);
         }
 
-#if CONFIG_DRIVER_AHCI
-        if (ahci_init() == 0)
-            ahci_done = 1;
-#endif
+        kernel_storage_init();
 
 #if CONFIG_KERNEL_LKE
         if (cmdline_get_lke())
@@ -520,54 +521,9 @@ static void KERNEL_INIT kernel_boot(void) {
             fat_vfs_register();
 #endif
 
-            ahci_done = 0;
-#if CONFIG_DRIVER_AHCI
-            if (ahci_init() == 0) {
-                ahci_done = 1;
-                KERNEL_INIT_LOG("AHCI SATA driver initialized successfully\n");
-
-                j = 0;
-                sr_idx = 0;
-                for (pi = 0; pi < AHCI_PORT_COUNT; pi++) {
-                    port = ahci_get_port(pi);
-                    if (port && port->type == AHCI_DEV_SATA) {
-                        ahci_blockdev_name(devname, sizeof(devname), j);
-                        devfs_register_blockdev(devname, pi);
-                        KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
-
-                        if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
-                            KERNEL_INIT_LOG("PART: Found %d partition(s) on /dev/%s (%s)\n",
-                                   ptable.count, devname,
-                                   ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
-                                                   KERNEL_INIT_STRING("MBR"));
-                            for (pk = 0; pk < ptable.count; pk++) {
-                                snprintf(partname, sizeof(partname), "%s%d", devname,
-                                         ptable.parts[pk].part_number);
-                                devfs_register_partition(partname, pi,
-                                                         ptable.parts[pk].start_lba,
-                                                         ptable.parts[pk].sector_count);
-                                KERNEL_INIT_LOG("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
-                                       partname,
-                                       (unsigned long long)ptable.parts[pk].start_lba,
-                                       (unsigned long long)ptable.parts[pk].sector_count);
-                            }
-                        }
-                        partition_table_free(&ptable);
-                        j++;
-                    } else if (port && port->type == AHCI_DEV_SATAPI) {
-                        snprintf(devname, sizeof(devname), "sr%d", sr_idx);
-                        devfs_register_cdrom(devname, pi);
-                        KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
-                        sr_idx++;
-                    }
-                }
-                devs_registered = 1;
-            } else {
-                KERNEL_INIT_LOG("AHCI SATA driver not available\n");
-            }
-#else
-            KERNEL_INIT_LOG("AHCI SATA driver disabled\n");
-#endif
+            fs_ready = 1;
+            kernel_storage_init();
+            devfs_add_blkdevs();
 
 #if CONFIG_FS_ISO9660
             iso9660_vfs_register();
@@ -575,7 +531,7 @@ static void KERNEL_INIT kernel_boot(void) {
 
 #if CONFIG_FS_EXT4
             ext4_root = NULL;
-            if (ahci_done) {
+            if (blkdev_count()) {
                 mount_ret = vfs_mount(root_dev, KERNEL_INIT_STRING("/mnt"),
                                       KERNEL_INIT_STRING("ext4"));
                 if (mount_ret == 0) {
@@ -683,62 +639,12 @@ static void KERNEL_INIT kernel_boot(void) {
 #endif
     syscall_init();
 
-#if CONFIG_DRIVER_AHCI
-    if (!ahci_done && ahci_init() == 0) {
-        ahci_done = 1;
-    } else if (!ahci_done) {
-        KERNEL_INIT_LOG("AHCI SATA driver not available (no controller found)\n");
-    }
-#endif
-
-    if (ahci_done && !devs_registered) {
-#if CONFIG_FS_EXT4
-        ext4_init();
-        ext4_vfs_register();
-#endif
-#if CONFIG_FS_FAT
-        fat_vfs_register();
-#endif
-
-        j = 0;
-        sr_idx = 0;
-        for (pi = 0; pi < AHCI_PORT_COUNT; pi++) {
-            port = ahci_get_port(pi);
-            if (port && port->type == AHCI_DEV_SATA) {
-                ahci_blockdev_name(devname, sizeof(devname), j);
-                devfs_register_blockdev(devname, pi);
-                KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u)\n", devname, pi);
-
-                if (partition_scan(pi, &ptable) == 0 && ptable.count > 0) {
-                    KERNEL_INIT_LOG("PART: Found %d partition(s) on /dev/%s (%s)\n",
-                           ptable.count, devname,
-                           ptable.is_gpt ? KERNEL_INIT_STRING("GPT") :
-                                           KERNEL_INIT_STRING("MBR"));
-                    for (pk = 0; pk < ptable.count; pk++) {
-                        snprintf(partname, sizeof(partname), "%s%d", devname,
-                                 ptable.parts[pk].part_number);
-                        devfs_register_partition(partname, pi,
-                                                 ptable.parts[pk].start_lba,
-                                                 ptable.parts[pk].sector_count);
-                        KERNEL_INIT_LOG("PART: Registered /dev/%s (start=%llu, sectors=%llu)\n",
-                               partname,
-                               (unsigned long long)ptable.parts[pk].start_lba,
-                               (unsigned long long)ptable.parts[pk].sector_count);
-                    }
-                }
-                partition_table_free(&ptable);
-                j++;
-            } else if (port && port->type == AHCI_DEV_SATAPI) {
-                snprintf(devname, sizeof(devname), "sr%d", sr_idx);
-                devfs_register_cdrom(devname, pi);
-                KERNEL_INIT_LOG("AHCI: Registered /dev/%s (port %u, SATAPI)\n", devname, pi);
-                sr_idx++;
-            }
-        }
-    }
+    kernel_storage_init();
+    kernel_add_disks(&fs_ready, 0);
 
 #if CONFIG_DRIVER_XHCI
-    xhci_init();
+    kernel_add_disks(&fs_ready, xhci_init() == 0 &&
+                     CONFIG_DRIVER_USB_HOTPLUG && CONFIG_DRIVER_USB_STORAGE);
 #endif
 
 #if CONFIG_DRIVER_I2C_HID

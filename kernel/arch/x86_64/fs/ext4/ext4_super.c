@@ -1,15 +1,15 @@
 #include <lebirun/fs/ext4/ext4.h>
-#include <lebirun/drivers/sata/ahci.h>
+#include <lebirun/blkdev.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
 #include <string.h>
 
 int ext4_read_superblock(ext4_fs_t *fs) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint8_t *buffer;
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
@@ -18,7 +18,7 @@ int ext4_read_superblock(ext4_fs_t *fs) {
         return -1;
     }
 
-    if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
+    if (blkdev_read(dev, fs->partition_start_lba, 8, buffer) != 0) {
         slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
@@ -72,11 +72,11 @@ int ext4_read_superblock(ext4_fs_t *fs) {
 }
 
 int ext4_write_superblock(ext4_fs_t *fs) {
-    ahci_port_t *port;
+    blkdev_t *dev;
     uint8_t *buffer;
 
-    port = ahci_get_port(fs->port_index);
-    if (!port) {
+    dev = blkdev_get(fs->port_index);
+    if (!dev) {
         return -1;
     }
 
@@ -86,14 +86,14 @@ int ext4_write_superblock(ext4_fs_t *fs) {
     }
 
     memset(buffer, 0, 4096);
-    if (ahci_read_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
+    if (blkdev_read(dev, fs->partition_start_lba, 8, buffer) != 0) {
         slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
 
     memcpy(buffer + EXT4_SUPERBLOCK_OFFSET, &fs->sb, sizeof(ext4_superblock_t));
 
-    if (ahci_write_sectors(port, fs->partition_start_lba, 8, buffer) != 0) {
+    if (blkdev_write(dev, fs->partition_start_lba, 8, buffer) != 0) {
         slab_page_free(buffer, PAGE_SIZE);
         return -1;
     }
