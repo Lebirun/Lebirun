@@ -6,6 +6,7 @@
 #include <lebirun/io.h>
 #include <lebirun/pit.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/hpet.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/mem_map.h>
 
@@ -319,6 +320,8 @@ uint64_t pit_get_uptime_us(void) {
 
     if (tsc_available())
         return tsc_get_ns() / 1000;
+    if (hpet_available())
+        return hpet_get_ns() / 1000;
     flags = save_flags_cli();
     spin_lock(&uptime_lock);
     current = tick_count;

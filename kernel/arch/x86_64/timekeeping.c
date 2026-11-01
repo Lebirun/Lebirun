@@ -1,6 +1,7 @@
 #include <lebirun/timekeeping.h>
 #include <lebirun/pit.h>
 #include <lebirun/rtc.h>
+#include <lebirun/hpet.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
@@ -204,6 +205,16 @@ void tsc_early_init(void)
             if (leaf && numer && crystal)
                 tsc_freq_hz = (uint64_t)numer * crystal / leaf;
         }
+    }
+    if (!tsc_freq_hz && hpet_available()) {
+        __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+        w = hpet_get_ns();
+        tw0 = tsc_rdtsc();
+        while ((v = hpet_get_ns()) - w < 20000000ULL)
+            __asm__ volatile("pause");
+        tw1 = tsc_rdtsc();
+        __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
+        tsc_freq_hz = (tw1 - tw0) * 1000000000ULL / (v - w);
     }
     if (tsc_freq_hz) {
         tsc_base_tsc = tsc_rdtsc();

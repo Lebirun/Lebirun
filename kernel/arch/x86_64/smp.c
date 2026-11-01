@@ -12,6 +12,7 @@
 #include <lebirun/vring.h>
 #include <lebirun/panic.h>
 #include <lebirun/power.h>
+#include <lebirun/hpet.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -340,6 +341,8 @@ static int KERNEL_INIT find_madt_in(uint64_t sdt_phys, uint64_t step) {
             found = 1;
         } else if (memcmp(sig, "FACP", 4) == 0) {
             power_acpi_init(table_phys);
+        } else if (memcmp(sig, "HPET", 4) == 0) {
+            hpet_init(table_phys);
         }
     }
     return found;

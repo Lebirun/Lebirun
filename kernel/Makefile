@@ -64,6 +64,7 @@ $(ARCHDIR)/gdt.o \
 $(ARCHDIR)/pit.o \
 $(ARCHDIR)/rtc.o \
 $(ARCHDIR)/timekeeping.o \
+$(ARCHDIR)/hpet.o \
 $(ARCHDIR)/mutex.o \
 $(ARCHDIR)/keyboard.o \
 $(ARCHDIR)/mouse.o \
