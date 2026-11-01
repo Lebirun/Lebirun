@@ -11,6 +11,7 @@
 #include <lebirun/security.h>
 #include <lebirun/vring.h>
 #include <lebirun/panic.h>
+#include <lebirun/power.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -143,7 +144,7 @@ static uint32_t KERNEL_INIT ioapic_read(uint32_t reg) {
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 extern void temp_unmap_raw(uint64_t temp_virt);
 
-static void KERNEL_INIT acpi_read_phys(uint64_t phys_addr, void *buf, uint64_t len) {
+void KERNEL_INIT acpi_read_phys(uint64_t phys_addr, void *buf, uint64_t len) {
     uint64_t page_base;
     uint64_t offset;
     uint64_t chunk;
@@ -320,24 +321,28 @@ static int KERNEL_INIT find_madt_in(uint64_t sdt_phys, uint64_t step) {
     uint64_t sdt_len;
     int num_entries;
     int i;
+    int found;
     uint64_t table_phys;
     uint8_t sig[4];
 
     sdt_len = acpi_read32(sdt_phys + 4);
     if (sdt_len < 36 || sdt_len > 0x100000) return 0;
     num_entries = (int)((sdt_len - 36) / step);
+    found = 0;
     for (i = 0; i < num_entries; i++) {
         if (step == 4)
             table_phys = acpi_read32(sdt_phys + 36 + (uint64_t)i * 4);
         else
             table_phys = acpi_read64(sdt_phys + 36 + (uint64_t)i * 8);
         acpi_read_phys(table_phys, sig, 4);
-        if (memcmp(sig, "APIC", 4) == 0) {
+        if (!found && memcmp(sig, "APIC", 4) == 0) {
             parse_madt_phys(table_phys);
-            return 1;
+            found = 1;
+        } else if (memcmp(sig, "FACP", 4) == 0) {
+            power_acpi_init(table_phys);
         }
     }
-    return 0;
+    return found;
 }
 
 static void KERNEL_INIT find_acpi_tables(void) {
