@@ -324,6 +324,26 @@ static uint8_t *KERNEL_INIT mb_rsdp_copy(void) {
     return early_acpi_rsdp;
 }
 
+static uint64_t acpi_sdt_phys KERNEL_INIT_BSS;
+static uint64_t acpi_sdt_step KERNEL_INIT_BSS;
+
+uint64_t KERNEL_INIT acpi_find_table(const char *sig, uint64_t index) {
+    uint64_t len;
+    uint64_t i;
+    uint64_t phys;
+    uint8_t s[4];
+
+    if (!acpi_sdt_phys) return 0;
+    len = acpi_read32(acpi_sdt_phys + 4);
+    for (i = 36; i + acpi_sdt_step <= len; i += acpi_sdt_step) {
+        phys = acpi_sdt_step == 4 ? acpi_read32(acpi_sdt_phys + i)
+                                  : acpi_read64(acpi_sdt_phys + i);
+        acpi_read_phys(phys, s, 4);
+        if (memcmp(s, sig, 4) == 0 && index-- == 0) return phys;
+    }
+    return 0;
+}
+
 static int KERNEL_INIT find_madt_in(uint64_t sdt_phys, uint64_t step) {
     uint64_t sdt_len;
     int num_entries;
@@ -334,6 +354,8 @@ static int KERNEL_INIT find_madt_in(uint64_t sdt_phys, uint64_t step) {
 
     sdt_len = acpi_read32(sdt_phys + 4);
     if (sdt_len < 36 || sdt_len > 0x100000) return 0;
+    acpi_sdt_phys = sdt_phys;
+    acpi_sdt_step = step;
     num_entries = (int)((sdt_len - 36) / step);
     found = 0;
     for (i = 0; i < num_entries; i++) {
@@ -361,6 +383,7 @@ static void KERNEL_INIT find_acpi_tables(void) {
     uint64_t rsdt_phys;
     uint64_t xsdt_phys;
 
+    acpi_sdt_phys = 0;
     copy = mb_rsdp_copy();
     rsdp = copy ? copy : find_rsdp();
     if (!rsdp) {

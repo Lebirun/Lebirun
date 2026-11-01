@@ -25,6 +25,7 @@
 #include <lebirun/vfs.h>
 #include <lebirun/drivers/sata/ahci.h>
 #include <lebirun/drivers/usb/xhci.h>
+#include <lebirun/drivers/i2c/i2c-hid.h>
 #if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
 #include <lebirun/drivers/fb/virtio_gpu.h>
 #endif
@@ -738,6 +739,10 @@ static void KERNEL_INIT kernel_boot(void) {
 
 #if CONFIG_DRIVER_XHCI
     xhci_init();
+#endif
+
+#if CONFIG_DRIVER_I2C_HID
+    i2c_hid_init();
 #endif
 
 #if CONFIG_DRIVER_NET

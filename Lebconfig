@@ -33,9 +33,15 @@ subcategory "Device Drivers" {
             item type=bool name="USB HID Keyboard" default=enable id=DRIVER_USB_HID_KBD alias="DRIVER_USB_HID_KBD" depends-on=DRIVER_XHCI help="Enable the USB HID keyboard driver"
             item type=bool name="USB HID Mouse" default=enable id=DRIVER_USB_HID_MOUSE alias="DRIVER_USB_HID_MOUSE" depends-on=DRIVER_XHCI help="Enable the USB HID mouse driver"
         }
+        subcategory "I2C" {
+            item type=bool name="I2C HID Touchpad and Mouse" default=enable id=DRIVER_I2C_HID alias="DRIVER_I2C_HID" depends-on=DRIVER_DW_I2C help="Enable the I2C HID driver for touchpads and mice"
+        }
     }
     subcategory "USB" {
         item type=bool name="xHCI USB" default=enable id=DRIVER_XHCI alias="DRIVER_XHCI" help="Enable the xHCI USB host controller driver"
+    }
+    subcategory "I2C" {
+        item type=bool name="DesignWare I2C" default=enable id=DRIVER_DW_I2C alias="DRIVER_DW_I2C" help="Enable the DesignWare I2C controller driver (Intel LPSS, AMD)"
     }
     subcategory "Networking" {
         item type=bool name="Network Stack" default=enable id=DRIVER_NET alias="DRIVER_NET" help="Enable the kernel network stack"
