@@ -6,6 +6,7 @@
 #include <lebirun/spinlock.h>
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/hpet.h>
 #include <lebirun/creds.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/overlayfs.h>
@@ -1012,8 +1013,7 @@ static int sys_clock_getres(int clock_id, const char *tp_ptr, int unused) {
     (void)unused;
     if (timekeeping_get_ns(clock_id, &resolution) != 0) return -EINVAL;
     if (!tp_ptr) return 0;
-    resolution = pit_freq ? (1000000000ULL + pit_freq - 1) / pit_freq :
-                 1000000ULL;
+    resolution = tsc_available() || hpet_available() ? 1 : 1000;
     value.tv_sec = (long)(resolution / 1000000000ULL);
     value.tv_nsec = (long)(resolution % 1000000000ULL);
     if (copy_to_user((void *)tp_ptr, &value, sizeof(value)) != 0)

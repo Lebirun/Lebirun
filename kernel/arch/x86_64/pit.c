@@ -9,6 +9,8 @@
 #include <lebirun/hpet.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/framebuffer.h>
+#include <lebirun/keyboard.h>
 
 #define PIT_BASE_FREQ       1193182
 #define PIT_CHANNEL0_DATA   0x40
@@ -281,6 +283,7 @@ void pit_advance_ticks(void) {
     uint64_t now;
     uint64_t elapsed;
     uint64_t target;
+    uint64_t old;
 
     if (!tsc_available()) {
         __atomic_add_fetch(&tick_count, 1, __ATOMIC_RELEASE);
@@ -296,8 +299,40 @@ void pit_advance_ticks(void) {
     elapsed = now - clock_base_ns;
     target = clock_base_ticks + (elapsed / 1000000000ULL) * calibrated_freq +
              ((elapsed % 1000000000ULL) * calibrated_freq) / 1000000000ULL;
-    if (target > tick_count)
-        __atomic_store_n(&tick_count, target, __ATOMIC_RELEASE);
+    old = __atomic_load_n(&tick_count, __ATOMIC_ACQUIRE);
+    while (target > old &&
+           !__atomic_compare_exchange_n(&tick_count, &old, target, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+        ;
+}
+
+void KERNEL_INIT pit_stop(void) {
+    uint64_t flags = save_flags_cli();
+    outb(PIT_COMMAND, PIT_CMD_ONESHOT);
+    outb(PIT_CHANNEL0_DATA, 0);
+    outb(PIT_CHANNEL0_DATA, 0);
+    current_divisor = 0;
+    restore_flags(flags);
+}
+
+uint64_t pit_idle_deadline_ns(void) {
+    extern uint64_t task_timer_next_tick(void);
+    pit_callback_entry_t *entry;
+    uint64_t next;
+    uint64_t tick;
+
+    if (keyboard_polling()) return 0;
+    next = task_timer_next_tick();
+    if (!next) next = UINT64_MAX;
+    for (entry = timer_callbacks; entry; entry = entry->next) {
+        if (entry->active && callback_last_tick + entry->remaining < next)
+            next = callback_last_tick + entry->remaining;
+    }
+    tick = fb_next_tick();
+    if (tick < next) next = tick;
+    if (!clock_started || next <= clock_base_ticks) return 0;
+    return clock_base_ns + (uint64_t)((__uint128_t)(next - clock_base_ticks) *
+                                      1000000000ULL / calibrated_freq);
 }
 
 uint64_t pit_get_ticks(void) {

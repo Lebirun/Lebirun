@@ -1099,6 +1099,10 @@ static void console_redraw_step(uint64_t max_rows) {
     if (row_attrs != row_attrs_inline) kfree(row_attrs);
 }
 
+int console_redraw_busy(void) {
+    return console_redraw_pending;
+}
+
 void console_tick_redraw(void) {
     uint64_t flags;
 

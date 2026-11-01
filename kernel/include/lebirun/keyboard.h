@@ -46,6 +46,7 @@ void keyboard_unregister_observer(void);
 int keyboard_get_modifier_state(void);
 void keyboard_process_sigint(void);
 void keyboard_poll(void);
+int keyboard_polling(void);
 void sysrq_handle_key(char c, int from_irq);
 
 #endif

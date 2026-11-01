@@ -600,6 +600,14 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
         if (irq == 0) {
             cpu_info = smp_this_cpu();
             is_bsp = cpu_info ? cpu_info->bsp : 1;
+            if (is_bsp && !smp_tick_due()) {
+                wake_sleeping_tasks_from_irq();
+                if (!current_task ||
+                    (current_task->id == 0 && !current_task->is_user))
+                    regs = schedule_from_irq(regs);
+                smp_tick_rearm();
+                return regs;
+            }
             if (current_task) {
                 if (current_task->id == 0 && !current_task->is_user) {
                     __sync_fetch_and_add(&cpu_idle_ticks, 1);
@@ -622,6 +630,13 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 watchdog_tick();
                 previous_ticks = tick_count;
                 pit_advance_ticks();
+                if (tick_count - previous_ticks > 1 && (!current_task ||
+                    (current_task->id == 0 && !current_task->is_user))) {
+                    __sync_fetch_and_add(&cpu_idle_ticks,
+                                         tick_count - previous_ticks - 1);
+                    if (cpu_info)
+                        cpu_info->idle_ticks += tick_count - previous_ticks - 1;
+                }
             }
 
             wake_sleeping_tasks_from_irq();
@@ -661,6 +676,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
             if (!is_bsp && cpu_info && !cpu_info->running_task)
                 task_cpu_tick_stop();
+            if (is_bsp) smp_tick_rearm();
         } else if (irq == 1) {
             keyboard_handler(regs);
             keyboard_process_sigint();

@@ -81,6 +81,7 @@ int console_getcursor(int console_num, int *x, int *y);
 void console_redraw_current(void);
 void console_force_redraw(void);
 void console_tick_redraw(void);
+int console_redraw_busy(void);
 void console_clamp_cursors(uint64_t max_cols, uint64_t max_rows);
 void console_rewrap_all(uint64_t old_cols, uint64_t new_cols, uint64_t new_rows);
 void console_tick(void);

@@ -2,6 +2,7 @@
 #include <lebirun/keyboard.h>
 #include <lebirun/mouse.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/vring.h>
@@ -32,9 +33,6 @@ static int evdev_grab_allowed(struct evdev_device *dev) {
     owner = task_find(dev->grab_pid);
     return owner && owner->pml4_phys == current_task->pml4_phys;
 }
-
-extern volatile uint64_t tick_count;
-extern uint64_t pit_freq;
 
 static const uint16_t scancode_to_evdev[128] = {
     KEY_RESERVED,  KEY_ESC,       KEY_1,         KEY_2,
@@ -159,10 +157,10 @@ int evdev_node_has_data(vfs_node_t *node) {
 
 void evdev_push_event(struct evdev_device *dev, uint16_t type, uint16_t code, int32_t value) {
     struct input_event ev;
-    uint64_t ticks;
-    ticks = tick_count;
-    ev.tv_sec = ticks / pit_freq;
-    ev.tv_usec = ((ticks % pit_freq) * 1000000) / pit_freq;
+    uint64_t now;
+    now = timekeeping_monotonic_ns();
+    ev.tv_sec = now / 1000000000ULL;
+    ev.tv_usec = (now % 1000000000ULL) / 1000;
     ev.type = type;
     ev.code = code;
     ev.value = value;

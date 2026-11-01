@@ -1229,9 +1229,22 @@ void fb_update_cursor(void) {
 
 extern void console_tick_redraw(void);
 
+static uint64_t last_cursor_tick;
+static uint64_t last_flush_tick;
+
+uint64_t fb_next_tick(void) {
+    uint64_t next;
+
+    if (console_redraw_busy()) return 0;
+    next = last_cursor_tick + pit_ms_to_ticks(500);
+#if CONFIG_DRIVER_VIRTIO_VGA || CONFIG_DRIVER_VIRTIO_GPU_PCI
+    if (virtio_gpu_dirty() && last_flush_tick + pit_ms_to_ticks(16) < next)
+        next = last_flush_tick + pit_ms_to_ticks(16);
+#endif
+    return next;
+}
+
 void fb_tick(void) {
-    static uint64_t last_cursor_tick;
-    static uint64_t last_flush_tick;
     uint64_t now;
     uint64_t interval;
     uint64_t periods;

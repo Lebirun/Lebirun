@@ -669,7 +669,8 @@ static void KERNEL_INIT kernel_boot(void) {
 
     if (lapic_base) {
         lapic_timer_init(1000);
-        lapic_mask_timer();
+        ioapic_mask_irq(0);
+        pit_stop();
     }
 
     rng_init();
@@ -812,7 +813,9 @@ static void kernel_idle_loop(void) {
         watchdog_kick();
         task_deferred_work();
         console_process_pending();
-        asm volatile ("hlt");
+        asm volatile ("cli");
+        smp_tick_idle();
+        asm volatile ("sti; hlt");
     }
 }
 

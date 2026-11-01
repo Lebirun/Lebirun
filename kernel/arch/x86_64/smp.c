@@ -29,6 +29,12 @@
 volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
 uint32_t lapic_timer_reload = 0;
+static int lapic_oneshot;
+static uint64_t lapic_tick_ns;
+static uint64_t bsp_lapic_id;
+static uint64_t bsp_tick_ns;
+static uint64_t bsp_armed_ns;
+static int bsp_stretched;
 
 static cpu_info_t cpu_bootstrap[4];
 cpu_info_t *cpus = cpu_bootstrap;
@@ -418,11 +424,113 @@ void smp_tick_stop(void) {
     lapic_write(LAPIC_REG_TIMER_ICR, 0);
 }
 
+static int smp_aps_idle(void) {
+    int i;
+
+    for (i = 0; i < cpu_count; i++) {
+        if (cpus[i].active && !cpus[i].bsp &&
+            !__atomic_load_n(&cpus[i].tick_stopped, __ATOMIC_SEQ_CST))
+            return 0;
+    }
+    return 1;
+}
+
+void smp_tick_rearm(void) {
+    uint64_t deadline;
+    uint64_t now;
+    uint64_t count;
+
+    if (!lapic_oneshot) return;
+    deadline = task_next_wake_ns();
+    if (bsp_tick_ns < deadline) deadline = bsp_tick_ns;
+    now = timekeeping_monotonic_ns();
+    count = deadline > now ? (uint64_t)((__uint128_t)(deadline - now) *
+                                        lapic_timer_reload / lapic_tick_ns) : 1;
+    if (!count) count = 1;
+    if (count > 0xFFFFFFFFu) count = 0xFFFFFFFFu;
+    __atomic_store_n(&bsp_armed_ns, deadline, __ATOMIC_RELEASE);
+    lapic_write(LAPIC_REG_TIMER_ICR, (uint32_t)count);
+}
+
+int smp_tick_due(void) {
+    uint64_t now;
+
+    if (!lapic_oneshot) return 1;
+    now = timekeeping_monotonic_ns();
+    if (now + lapic_tick_ns / 8 < bsp_tick_ns) return 0;
+    __atomic_store_n(&bsp_stretched, 0, __ATOMIC_SEQ_CST);
+    bsp_tick_ns += lapic_tick_ns;
+    if (bsp_tick_ns <= now) bsp_tick_ns = now + lapic_tick_ns;
+    return 1;
+}
+
+void smp_tick_resume(void) {
+    if (!__atomic_load_n(&bsp_stretched, __ATOMIC_SEQ_CST)) return;
+    __atomic_store_n(&bsp_stretched, 0, __ATOMIC_SEQ_CST);
+    pit_advance_ticks();
+    bsp_tick_ns = timekeeping_monotonic_ns() + lapic_tick_ns;
+    smp_tick_rearm();
+}
+
+void smp_tick_idle(void) {
+    uint64_t next;
+
+    if (!lapic_oneshot) return;
+    if (!smp_aps_idle() ||
+        task_cpu_has_work((int)(smp_this_cpu() - cpus))) {
+        smp_tick_resume();
+        return;
+    }
+    next = pit_idle_deadline_ns();
+    if (next <= bsp_tick_ns) {
+        smp_tick_resume();
+        return;
+    }
+    __atomic_store_n(&bsp_stretched, 1, __ATOMIC_SEQ_CST);
+    if (!smp_aps_idle()) {
+        smp_tick_resume();
+        return;
+    }
+    bsp_tick_ns = next;
+    smp_tick_rearm();
+}
+
+void smp_tick_deadline(uint64_t deadline) {
+    cpu_info_t *cpu;
+    uint64_t flags;
+
+    if (!lapic_oneshot ||
+        deadline >= __atomic_load_n(&bsp_armed_ns, __ATOMIC_ACQUIRE))
+        return;
+    cpu = smp_this_cpu();
+    if (cpu && !cpu->bsp) {
+        lapic_send_ipi(bsp_lapic_id, IPI_WAKE_VECTOR);
+        return;
+    }
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    smp_tick_rearm();
+    if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");
+}
+
 uint64_t smp_tick_restart(cpu_info_t *cpu) {
+    if (cpu && cpu->bsp) {
+        if (__atomic_load_n(&bsp_stretched, __ATOMIC_SEQ_CST) &&
+            !smp_aps_idle())
+            smp_tick_resume();
+        else if (lapic_oneshot && task_next_wake_ns() <
+                 __atomic_load_n(&bsp_armed_ns, __ATOMIC_ACQUIRE))
+            smp_tick_rearm();
+        return 0;
+    }
     if (!cpu || !__atomic_load_n(&cpu->tick_stopped, __ATOMIC_ACQUIRE))
         return 0;
-    __atomic_store_n(&cpu->tick_stopped, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&cpu->tick_stopped, 0, __ATOMIC_SEQ_CST);
     lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
+    if (lapic_oneshot) {
+        pit_advance_ticks();
+        if (__atomic_load_n(&bsp_stretched, __ATOMIC_SEQ_CST))
+            lapic_send_ipi(bsp_lapic_id, IPI_WAKE_VECTOR);
+    }
     return tick_count - cpu->tick_stop_tick;
 }
 
@@ -505,11 +613,6 @@ void KERNEL_INIT ioapic_route_irq(uint8_t irq, uint8_t vector,
     ioapic_write(reg, redtbl_lo);
 }
 
-
-void KERNEL_INIT lapic_mask_timer(void) {
-    if (!lapic_base) return;
-    lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_MASKED);
-}
 
 void KERNEL_INIT ioapic_mask_irq(uint8_t irq) {    uint64_t reg;
     uint64_t lo;
@@ -975,10 +1078,18 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     if (reload == 0) reload = 1;
     if (reload > 0xFFFFFFFFu) reload = 0xFFFFFFFFu;
 
-    lapic_write(LAPIC_REG_TIMER,
-                LAPIC_TIMER_PERIODIC | 32);
     lapic_timer_reload = (uint32_t)reload;
-    lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
+    if (tsc_available()) {
+        lapic_tick_ns = 1000000000ULL / freq_hz;
+        bsp_lapic_id = lapic_get_id();
+        lapic_write(LAPIC_REG_TIMER, 32);
+        bsp_tick_ns = timekeeping_monotonic_ns() + lapic_tick_ns;
+        lapic_oneshot = 1;
+        smp_tick_rearm();
+    } else {
+        lapic_write(LAPIC_REG_TIMER, LAPIC_TIMER_PERIODIC | 32);
+        lapic_write(LAPIC_REG_TIMER_ICR, lapic_timer_reload);
+    }
 
     if (flags & (1u << 9))
         __asm__ volatile ("sti" ::: "memory");

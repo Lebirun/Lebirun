@@ -836,19 +836,22 @@ static int sys_getitimer(int which, struct itimerval_k *curr_value) {
     return 0;
 }
 
+static uint64_t posix_timers_check(task_t *t, uint64_t now);
+
+uint64_t task_timer_next_tick(void) {
+    return timer_earliest_tick;
+}
+
 void task_timer_check(void) {
     task_t *t;
     task_timer_data_t *timers;
     uint64_t now;
     uint64_t next;
     uint64_t address;
+    uint64_t posix;
     int i;
-    extern void posix_timers_check_tick(uint64_t now);
 
-    if (!timer_earliest_tick) {
-        posix_timers_check_tick(tick_count);
-        return;
-    }
+    if (!timer_earliest_tick) return;
     now = tick_count;
     if (now < timer_earliest_tick) return;
     next = 0;
@@ -892,11 +895,12 @@ void task_timer_check(void) {
                 t->timer_data = NULL;
             }
         }
+        posix = posix_timers_check(t, now);
+        if (posix && (!next || posix < next)) next = posix;
         t = t->all_next;
     }
     timer_earliest_recompute(next);
     unlock_scheduler();
-    posix_timers_check_tick(now);
 }
 
 static int sys_alarm(int seconds, const char *unused1, int unused2) {
@@ -1755,11 +1759,14 @@ static int sys_timer_settime(int id, const char *ms_ptr, int interval_ms) {
         t->overrun = 0;
         return 0;
     }
+    lock_scheduler();
     t->expiry = pit_get_ticks() + pit_ms_to_ticks(ms);
     if (!t->expiry) t->expiry = 1;
     t->interval = pit_ms_to_ticks((uint64_t)(interval_ms < 0 ? 0 : interval_ms));
     t->overrun = 0;
     if (t->signo == 0) t->signo = 14;
+    timer_earliest_update(t->expiry);
+    unlock_scheduler();
     return 0;
 }
 
@@ -1812,38 +1819,31 @@ static int sys_timer_getoverrun(int id, const char *unused2, int unused3) {
     return (int)v;
 }
 
-void posix_timers_check_tick(uint64_t now) {
-    task_t *t;
+static uint64_t posix_timers_check(task_t *t, uint64_t now) {
     task_ext_t *e;
     posix_timer_node_t *n;
-    lock_scheduler();
-    t = all_tasks_head;
-    while (t) {
-        if ((uint64_t)t < KERNEL_VMA) break;
-        e = task_ext_get(t, 0);
-        if (e && e->posix_timers) {
-            n = (posix_timer_node_t *)e->posix_timers;
-            while (n) {
-                if (n->expiry && now >= n->expiry) {
-                    if (n->interval) {
-                        uint64_t missed = (now - n->expiry) / n->interval;
-                        n->overrun += missed + 1;
-                        if (n->overrun > 99) n->overrun = 99;
-                        n->expiry += (missed + 1) * n->interval;
-                        if (n->expiry <= now || !n->expiry)
-                            n->expiry = now + n->interval;
-                    } else {
-                        n->expiry = 0;
-                        n->overrun++;
-                    }
-                    deliver_signal_to_task(t, n->signo ? n->signo : 14);
-                }
-                n = n->next;
+    uint64_t next;
+
+    next = 0;
+    e = task_ext_get(t, 0);
+    for (n = e ? (posix_timer_node_t *)e->posix_timers : NULL; n; n = n->next) {
+        if (n->expiry && now >= n->expiry) {
+            if (n->interval) {
+                uint64_t missed = (now - n->expiry) / n->interval;
+                n->overrun += missed + 1;
+                if (n->overrun > 99) n->overrun = 99;
+                n->expiry += (missed + 1) * n->interval;
+                if (n->expiry <= now || !n->expiry)
+                    n->expiry = now + n->interval;
+            } else {
+                n->expiry = 0;
+                n->overrun++;
             }
+            deliver_signal_to_task(t, n->signo ? n->signo : 14);
         }
-        t = t->all_next;
+        if (n->expiry && (!next || n->expiry < next)) next = n->expiry;
     }
-    unlock_scheduler();
+    return next;
 }
 
 static int sys_timer_delete(int id, const char *unused2, int unused3) {

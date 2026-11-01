@@ -11,5 +11,6 @@ int virtio_gpu_is_available(void);
 int virtio_gpu_set_mode(uint64_t width, uint64_t height, uint64_t *framebuffer_phys);
 void virtio_gpu_mark_dirty(uint64_t x, uint64_t y, uint64_t width, uint64_t height);
 void virtio_gpu_flush(void);
+int virtio_gpu_dirty(void);
 
 #endif

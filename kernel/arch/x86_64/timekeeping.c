@@ -104,6 +104,7 @@ int timekeeping_set_realtime_ns(uint64_t value) {
 static uint64_t tsc_freq_hz;
 static uint64_t tsc_base_tsc;
 static uint64_t tsc_base_us;
+static uint64_t tsc_mult;
 static uint64_t tsc_last_ns;
 static int tsc_ready;
 static inline uint64_t tsc_rdtsc(void)
@@ -217,6 +218,7 @@ void tsc_early_init(void)
         tsc_freq_hz = (tw1 - tw0) * 1000000000ULL / (v - w);
     }
     if (tsc_freq_hz) {
+        tsc_mult = (1000000000ULL << 32) / tsc_freq_hz;
         tsc_base_tsc = tsc_rdtsc();
         tsc_base_us = pit_get_uptime_us();
         tsc_ready = 1;
@@ -259,6 +261,7 @@ void tsc_early_init(void)
     if (!samples[2] || samples[2] < 1000000ULL)
         return;
     tsc_freq_hz = samples[2];
+    tsc_mult = (1000000000ULL << 32) / tsc_freq_hz;
     tsc_base_tsc = tsc_rdtsc();
     tsc_base_us = pit_get_uptime_us();
     tsc_ready = 1;
@@ -286,8 +289,8 @@ uint64_t tsc_get_ns(void)
         return 0;
     now = tsc_rdtsc();
     delta = now >= tsc_base_tsc ? now - tsc_base_tsc : 0;
-    result = tsc_base_us * 1000ULL + delta / tsc_freq_hz * 1000000000ULL +
-             (delta % tsc_freq_hz) * 1000000000ULL / tsc_freq_hz;
+    result = tsc_base_us * 1000ULL +
+             (uint64_t)(((__uint128_t)delta * tsc_mult) >> 32);
     last = __atomic_load_n(&tsc_last_ns, __ATOMIC_ACQUIRE);
     if (result <= last)
         return last;

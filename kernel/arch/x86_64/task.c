@@ -1170,6 +1170,11 @@ static void sleepq_insert(task_t *task) {
     *link = task;
     __atomic_store_n(&sleep_queue_deadline_ns,
                      sleep_queue_head->wake_deadline_ns, __ATOMIC_RELEASE);
+    if (sleep_queue_head == task) smp_tick_deadline(task->wake_deadline_ns);
+}
+
+uint64_t task_next_wake_ns(void) {
+    return __atomic_load_n(&sleep_queue_deadline_ns, __ATOMIC_ACQUIRE);
 }
 
 typedef struct descriptor_wait_filter {
@@ -4485,6 +4490,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
     next->state = TASK_RUNNING;
     task_set_current(next);
+    if (this_cpu->bsp && (next->id != 0 || next->is_user))
+        smp_tick_resume();
 
     if (next->is_user && ((return_frame->cs & 0x3) == 0x3)) {
         return_frame->ds = return_frame->es = 0x23;
@@ -4534,9 +4541,31 @@ out_restore_cr3:
     return result;
 }
 
+static int task_cpu_has_work_locked(int cpu_id) {
+    task_t *t;
+
+    t = ready_queue_head;
+    while (t) {
+        if (t->state == TASK_READY && !t->resources_released &&
+            (t->id != 0 || t->is_user) && task_cpu_available(t, cpu_id))
+            return 1;
+        t = t->next;
+        if (t == ready_queue_head) break;
+    }
+    return 0;
+}
+
+int task_cpu_has_work(int cpu_id) {
+    int work;
+
+    if (!spin_trylock(&sched_lock)) return 1;
+    work = task_cpu_has_work_locked(cpu_id);
+    spin_unlock(&sched_lock);
+    return work;
+}
+
 void task_cpu_tick_stop(void) {
     cpu_info_t *cpu;
-    task_t *t;
     int cpu_id;
     int work;
 
@@ -4549,14 +4578,7 @@ void task_cpu_tick_stop(void) {
     cpu->tick_stop_tick = tick_count;
     __atomic_store_n(&cpu->tick_stopped, 1, __ATOMIC_SEQ_CST);
     spin_lock(&sched_lock);
-    work = 0;
-    t = ready_queue_head;
-    while (t && !work) {
-        work = t->state == TASK_READY && !t->resources_released &&
-               (t->id != 0 || t->is_user) && task_cpu_available(t, cpu_id);
-        t = t->next;
-        if (t == ready_queue_head) break;
-    }
+    work = task_cpu_has_work_locked(cpu_id);
     spin_unlock(&sched_lock);
     if (work) {
         __atomic_store_n(&cpu->tick_stopped, 0, __ATOMIC_RELEASE);

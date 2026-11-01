@@ -544,6 +544,10 @@ void keyboard_poll(void) {
     keyboard_handler(NULL);
 }
 
+int keyboard_polling(void) {
+    return kbd_ps2_present && kbd_irq_state < 0;
+}
+
 static int KERNEL_INIT kbd_wait_input(void) {
     int timeout = 100000;
     while (timeout--) {

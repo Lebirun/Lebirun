@@ -700,6 +700,10 @@ void virtio_gpu_mark_dirty(uint64_t x, uint64_t y, uint64_t width, uint64_t heig
     gpu_lock_release(&gpu.dirty_lock, lock_flags);
 }
 
+int virtio_gpu_dirty(void) {
+    return gpu.active && gpu.dirty_valid;
+}
+
 void virtio_gpu_flush(void) {
     virtio_gpu_transfer_to_host_2d_t transfer;
     virtio_gpu_resource_flush_t flush;
