@@ -33,6 +33,7 @@
 #endif
 #include <lebirun/fs/ext4/ext4.h>
 #include <lebirun/fs/fat.h>
+#include <lebirun/fs/exfat.h>
 #include <lebirun/drivers/net/net.h>
 #include <lebirun/drivers/net/tls.h>
 #include <lebirun/vring.h>
@@ -79,6 +80,9 @@ static void KERNEL_INIT kernel_add_disks(int *fs_ready, int force) {
 #endif
 #if CONFIG_FS_FAT
         fat_vfs_register();
+#endif
+#if CONFIG_FS_EXFAT
+        exfat_vfs_register();
 #endif
         *fs_ready = 1;
     }
@@ -519,6 +523,9 @@ static void KERNEL_INIT kernel_boot(void) {
 #endif
 #if CONFIG_FS_FAT
             fat_vfs_register();
+#endif
+#if CONFIG_FS_EXFAT
+            exfat_vfs_register();
 #endif
 
             fs_ready = 1;

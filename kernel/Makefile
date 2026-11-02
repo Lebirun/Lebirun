@@ -158,6 +158,7 @@ $(UNIFONT_OBJ) \
 kernel/kernel.o \
 kernel/launch_user.o \
 lib/string.o \
+lib/fsname.o \
 crypto/sha256.o \
 crypto/sha512.o \
 crypto/hmac.o \

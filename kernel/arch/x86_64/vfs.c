@@ -442,6 +442,10 @@ static const char *vfs_detect_fs(const char *device) {
         slab_page_free(buf, PAGE_SIZE);
         return "ext4";
     }
+    if (!memcmp(buf + 3, "EXFAT   ", 8)) {
+        slab_page_free(buf, PAGE_SIZE);
+        return "exfat";
+    }
 
     slab_page_free(buf, PAGE_SIZE);
     return NULL;

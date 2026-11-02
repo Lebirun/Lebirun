@@ -321,6 +321,7 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
     vfs_node_t *old_node;
     vfs_node_t *old_parent;
     vfs_node_t *new_parent;
+    vfs_node_t *held;
     int r;
 
     if (!oldpath || !newpath_arg) return -EFAULT;
@@ -338,6 +339,12 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
         kfree(new_path);
         return 0;
     }
+    r = (int)strlen(old_path);
+    if (strncmp(new_path, old_path, (size_t)r) == 0 && new_path[r] == '/') {
+        kfree(old_path);
+        kfree(new_path);
+        return -EINVAL;
+    }
 
     old_node = vfs_namei(old_path);
     if (!old_node) {
@@ -354,15 +361,6 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
         return r;
     }
 
-    old_parent = old_node->parent;
-    if (!old_parent || !old_parent->ops || !old_parent->ops->rename) {
-        r = ramfs_rename(old_path, new_path) ? -ENOENT : 0;
-        vfs_release(old_node);
-        kfree(old_path);
-        kfree(new_path);
-        return r;
-    }
-
     r = split_at_path_alloc(old_path, &old_parent_path, &old_name);
     if (r != 0) {
         vfs_release(old_node);
@@ -370,9 +368,22 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
         kfree(new_path);
         return r;
     }
+    old_parent = old_node->parent;
+    held = old_parent ? NULL : vfs_namei(old_parent_path);
+    if (held) old_parent = held;
     kfree(old_parent_path);
+    if (!old_parent || !old_parent->ops || !old_parent->ops->rename) {
+        r = ramfs_rename(old_path, new_path) ? -ENOENT : 0;
+        vfs_release(held);
+        vfs_release(old_node);
+        kfree(old_name);
+        kfree(old_path);
+        kfree(new_path);
+        return r;
+    }
     r = split_at_path_alloc(new_path, &new_parent_path, &new_name);
     if (r != 0) {
+        vfs_release(held);
         vfs_release(old_node);
         kfree(old_name);
         kfree(old_path);
@@ -383,6 +394,7 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
     new_parent = vfs_namei(new_parent_path);
     kfree(new_parent_path);
     if (!new_parent) {
+        vfs_release(held);
         vfs_release(old_node);
         kfree(old_name);
         kfree(new_name);
@@ -393,6 +405,7 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
     if ((vfs_get_mount_flags_for_node(old_parent) & VFS_MS_RDONLY) ||
         (vfs_get_mount_flags_for_node(new_parent) & VFS_MS_RDONLY)) {
         vfs_release(new_parent);
+        vfs_release(held);
         vfs_release(old_node);
         kfree(old_name);
         kfree(new_name);
@@ -402,6 +415,7 @@ int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
     }
 
     r = vfs_rename(old_parent, old_name, new_parent, new_name);
+    vfs_release(held);
     vfs_release(old_node);
     vfs_release(new_parent);
     kfree(old_name);

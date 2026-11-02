@@ -134,11 +134,19 @@ int vfs_dirent_set_name(dirent_t *entry, const char *name);
 int vfs_dirent_set_name_n(dirent_t *entry, const char *name, size_t length);
 void vfs_dirent_release_name(dirent_t *entry);
 
+typedef struct {
+    uint64_t type;
+    uint64_t bsize;
+    uint64_t blocks;
+    uint64_t bfree;
+} vfs_statfs_t;
+
 typedef struct vfs_fs_type {
     const char *name;
     vfs_node_t *(*mount)(const char *device, const char *mountpoint);
     int (*unmount)(vfs_node_t *mountpoint);
     int (*sync)(vfs_node_t *node, int data_only);
+    int (*statfs)(vfs_node_t *root, vfs_statfs_t *st);
     struct vfs_fs_type *next;
 } vfs_fs_type_t;
 

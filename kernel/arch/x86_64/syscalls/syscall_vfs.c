@@ -850,6 +850,20 @@ static void fill_statfs_for_path(const char *path, struct statfs_kernel *buf) {
 
     fsname = (best && best->fs_type && best->fs_type->name) ? best->fs_type->name : "";
 
+    if (best && best->fs_type && best->fs_type->statfs) {
+        vfs_statfs_t st;
+
+        if (best->fs_type->statfs(best->root, &st) == 0) {
+            buf->f_type = st.type;
+            buf->f_bsize = st.bsize;
+            buf->f_frsize = st.bsize;
+            buf->f_blocks = st.blocks;
+            buf->f_bfree = st.bfree;
+            buf->f_bavail = st.bfree;
+            return;
+        }
+    }
+
     if (!fsname[0] && path && path[0] == '/') {
         root = vfs_get_root();
         if (root && root->private_data && ext4_get_stats(NULL, NULL, NULL) == 0) {
