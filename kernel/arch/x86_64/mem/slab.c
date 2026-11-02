@@ -460,7 +460,7 @@ void *slab_alloc(size_t size) {
         slab_lock_release(eflags);
         if (!retry) return result;
         flush_result = slab_flush_stale();
-        if (flush_result < 0) {
+        if (flush_result != 0) {
             slab_lock_acquire(&eflags);
             slab_fresh_only = 1;
             if (size <= SLAB_SMALL_MAX)
@@ -498,7 +498,7 @@ void *slab_page_alloc(size_t size) {
         slab_lock_release(eflags);
         if (!retry) return NULL;
         flush_result = slab_flush_stale();
-        if (flush_result < 0) {
+        if (flush_result != 0) {
             slab_lock_acquire(&eflags);
             slab_fresh_only = 1;
             virt = slab_virtual_alloc(pages);

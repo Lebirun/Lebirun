@@ -2,6 +2,7 @@
 #define _LEBIRUN_WATCHDOG_H
 
 #include <stdint.h>
+#include <lebirun/registers.h>
 
 #define WATCHDOG_INTERVAL_MS    1000
 #define WATCHDOG_SCHED_TIMEOUT  3000
@@ -9,7 +10,7 @@
 
 void watchdog_init(void);
 void watchdog_set_init_pid(int pid);
-void watchdog_tick(void);
+void watchdog_tick(registers_t *regs);
 void watchdog_kick(void);
 void watchdog_disable(void);
 

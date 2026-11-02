@@ -627,7 +627,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             }
 
             if (is_bsp) {
-                watchdog_tick();
+                watchdog_tick(regs);
                 previous_ticks = tick_count;
                 pit_advance_ticks();
                 if (tick_count - previous_ticks > 1 && (!current_task ||
