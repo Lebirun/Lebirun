@@ -15,6 +15,7 @@
 #define VFS_DYNAMIC     0x10
 #define VFS_EMBEDDED    0x20
 #define VFS_NAME_DYNAMIC 0x40
+#define VFS_USER_READ   0x80
 
 #define VFS_TYPE_MASK   0x07
 #define VFS_GET_TYPE(flags) ((flags) & VFS_TYPE_MASK)
@@ -81,6 +82,8 @@ typedef int (*rename_type_t)(struct vfs_node *old_parent, const char *old_name, 
 typedef int (*chmod_type_t)(struct vfs_node *, uint64_t mode);
 typedef int (*chown_type_t)(struct vfs_node *, uint64_t uid, uint64_t gid);
 typedef int (*ioctl_type_t)(struct vfs_node *, unsigned long request, void *arg);
+typedef int (*set_times_type_t)(struct vfs_node *, uint64_t atime,
+                                uint64_t mtime, uint64_t ctime);
 
 typedef struct vfs_node_ops {
     create_type_t create;
@@ -92,6 +95,7 @@ typedef struct vfs_node_ops {
     chmod_type_t chmod;
     chown_type_t chown;
     readdir_next_type_t readdir_next;
+    set_times_type_t set_times;
 } vfs_node_ops_t;
 
 typedef struct vfs_node {
@@ -144,6 +148,8 @@ typedef struct {
 typedef struct vfs_fs_type {
     const char *name;
     vfs_node_t *(*mount)(const char *device, const char *mountpoint);
+    vfs_node_t *(*mount_data)(const char *device, const char *mountpoint,
+                              const char *data);
     int (*unmount)(vfs_node_t *mountpoint);
     int (*sync)(vfs_node_t *node, int data_only);
     int (*statfs)(vfs_node_t *root, vfs_statfs_t *st);
@@ -180,7 +186,7 @@ int vfs_unregister_fs(const char *name);
 vfs_fs_type_t *vfs_find_fs(const char *name);
 
 int vfs_mount(const char *device, const char *mountpoint, const char *fs_type);
-int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags);
+int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags, const char *data);
 int vfs_unmount(const char *mountpoint);
 int vfs_remove_mount(const char *mountpoint);
 

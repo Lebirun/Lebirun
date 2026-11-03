@@ -1047,7 +1047,8 @@ static int sys_fstatfs(int fd, const char *size_ptr, uint64_t buf_ptr_int) {
 }
 
 static int sys_vfs_mount_user(uint64_t source_ptr, const char *target_ptr,
-                              uint64_t fstype_ptr, int flags_val) {
+                              uint64_t fstype_ptr, int flags_val,
+                              uint64_t data_ptr) {
     uint64_t src_addr;
     uint64_t tgt_addr;
     uint64_t fs_addr;
@@ -1055,7 +1056,9 @@ static int sys_vfs_mount_user(uint64_t source_ptr, const char *target_ptr,
     const char *source;
     const char *target;
     const char *fstype;
+    char *data;
     vfs_node_t *mp_check;
+    int ret;
 
     src_addr = (uint64_t)source_ptr;
     tgt_addr = (uint64_t)(uintptr_t)target_ptr;
@@ -1079,7 +1082,12 @@ static int sys_vfs_mount_user(uint64_t source_ptr, const char *target_ptr,
         return -ENOENT;
     vfs_release(mp_check);
 
-    return vfs_mount_flags(source, target, fstype, mnt_flags);
+    data = NULL;
+    if (data_ptr >= 0x1000 && data_ptr < KERNEL_VMA)
+        data = copy_string_from_user_alloc((const char *)data_ptr);
+    ret = vfs_mount_flags(source, target, fstype, mnt_flags, data);
+    kfree(data);
+    return ret;
 }
 
 static int sys_vfs_umount_user(uint64_t target_ptr, const char *unused1,

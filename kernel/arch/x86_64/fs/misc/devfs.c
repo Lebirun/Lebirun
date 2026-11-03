@@ -4,6 +4,9 @@
 #if CONFIG_VIRT_VFL
 #include <lebirun/vfl.h>
 #endif
+#if CONFIG_FS_FUSE
+#include <lebirun/fs/fuse.h>
+#endif
 #include <lebirun/mem_map.h>
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
@@ -745,6 +748,9 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
 #if CONFIG_VIRT_VFL
     base_count++;
 #endif
+#if CONFIG_FS_FUSE
+    base_count++;
+#endif
     if (index < base_count) {
         d = devfs_alloc_dirent();
         if (!d) return NULL;
@@ -754,6 +760,11 @@ static dirent_t *devfs_readdir(vfs_node_t *node, uint64_t index) {
         } else if (index == DEVFS_NODE_COUNT) {
             entry_name = "input";
             d->type = VFS_DIRECTORY;
+#if CONFIG_FS_FUSE
+        } else if (index == DEVFS_NODE_COUNT + 1) {
+            entry_name = "fuse";
+            d->type = VFS_CHARDEVICE;
+#endif
         } else {
             entry_name = "vfl";
             d->type = VFS_CHARDEVICE;
@@ -821,6 +832,13 @@ static vfs_node_t *devfs_finddir(vfs_node_t *node, const char *name) {
     if (strcmp(name, "input") == 0) return evdev_get_input_dir();
 #if CONFIG_VIRT_VFL
     if (strcmp(name, "vfl") == 0) return vfl_get_devfs_node();
+#endif
+#if CONFIG_FS_FUSE
+    if (strcmp(name, "fuse") == 0) {
+        root = fuse_dev_node();
+        if (root) root->parent = &devfs_root;
+        return root;
+    }
 #endif
     
     if (name[0] == 't' && name[1] == 't' && name[2] == 'y' &&

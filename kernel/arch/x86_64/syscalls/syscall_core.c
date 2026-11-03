@@ -787,6 +787,10 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     return -EFAULT;
                 }
                 bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
+                if ((int64_t)bytes < 0 && (int64_t)bytes >= -4095) {
+                    if (heap_buf) kfree(kbuf);
+                    return total ? (int)total : (int)(int64_t)bytes;
+                }
                 if (bytes == 0) {
                     if (heap_buf) kfree(kbuf);
                     if (total > 0) return (int)total;
@@ -908,6 +912,15 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 }
             }
         }
+    }
+
+    if (tfd && tfd->type == FD_TYPE_FILE && tfd->node &&
+        (((vfs_node_t *)tfd->node)->flags & VFS_USER_READ)) {
+        bytes = vfs_read((vfs_node_t *)tfd->node, task_fd_position_get(tfd),
+                         (uint64_t)len, (uint8_t *)buf);
+        if ((int64_t)bytes < 0) return (int)(int64_t)bytes;
+        task_fd_position_add(tfd, bytes);
+        return (int)bytes;
     }
 
     work_size = (uint64_t)len;

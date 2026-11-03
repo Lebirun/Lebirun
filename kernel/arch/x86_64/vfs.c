@@ -451,7 +451,7 @@ static const char *vfs_detect_fs(const char *device) {
     return NULL;
 }
 
-int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags) {
+int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_type, uint64_t flags, const char *data) {
     int slot;
     int i;
     const char *end;
@@ -473,7 +473,7 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     ns = vfs_task_ns();
     for (i = 0; i < ns->capacity; i++) {
         if (ns->mounts[i].in_use) {
-            if (device && device[0] != '\0' && strcmp(ns->mounts[i].device, device) == 0) {
+            if (device && device[0] == '/' && strcmp(ns->mounts[i].device, device) == 0) {
                 printf("VFS: %s is already mounted on %s\n", device, ns->mounts[i].path);
                 return -1;
             }
@@ -496,16 +496,18 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
         fs_type = detected_fs;
     }
     
+    if (strncmp(fs_type, "fuse.", 5) == 0) fs_type = "fuse";
+
     fs = vfs_find_fs(fs_type);
     if (!fs || !vfs_fs_type_valid(fs)) {
         return -1;
     }
     
-    if (!fs->mount) {
+    if (!fs->mount && !fs->mount_data) {
         return -1;
     }
     
-    if ((uintptr_t)fs->mount < 0x1000) {
+    if (fs->mount && (uintptr_t)fs->mount < 0x1000) {
         return -1;
     }
     
@@ -537,7 +539,8 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
         return -1;
     }
     
-    root = fs->mount(device, mountpoint);
+    root = fs->mount_data ? fs->mount_data(device, mountpoint, data) :
+                            fs->mount(device, mountpoint);
     if (!root) {
         vfs_mount_clear_strings(&ns->mounts[slot]);
         return -1;
@@ -614,7 +617,7 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
 }
 
 int vfs_mount(const char *device, const char *mountpoint, const char *fs_type) {
-    return vfs_mount_flags(device, mountpoint, fs_type, 0);
+    return vfs_mount_flags(device, mountpoint, fs_type, 0, NULL);
 }
 
 int vfs_unmount(const char *mountpoint) {
@@ -1879,6 +1882,8 @@ int vfs_set_times(vfs_node_t *node, uint64_t atime, uint64_t mtime,
     vfs_mount_t *mount;
 
     if (!node) return -1;
+    if (node->ops && node->ops->set_times)
+        return node->ops->set_times(node, atime, mtime, ctime);
     mount = vfs_get_mount_for_node(node);
     if (!mount || !mount->fs_type || !mount->fs_type->name) return -1;
     if (strcmp(mount->fs_type->name, "ramfs") == 0 ||
