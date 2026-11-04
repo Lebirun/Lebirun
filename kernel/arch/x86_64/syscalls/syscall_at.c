@@ -761,11 +761,11 @@ static int sys_utimensat(int dirfd, const char *pathname,
 
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     if (!current_task) return -ESRCH;
-    if (!pathname ||
+    if (pathname &&
         !syscall_user_range_mapped((uint64_t)(uintptr_t)pathname, 1, 0))
         return -EFAULT;
     node = NULL;
-    empty_path = 0;
+    empty_path = !pathname;
     if (pathname && (flags & AT_EMPTY_PATH)) {
         char first;
         if (copy_from_user(&first, pathname, 1) != 0) return -EFAULT;

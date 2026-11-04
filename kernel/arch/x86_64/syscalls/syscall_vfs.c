@@ -392,10 +392,13 @@ int syscall_vfs_open_resolved(char *path, int flags, int mode) {    uint64_t cre
         while (!(flags & VFS_O_NONBLOCK) &&
                ((pipe_type == FD_TYPE_PIPE_R && pipe->writers == 0) ||
                 (pipe_type == FD_TYPE_PIPE_W && pipe->readers == 0))) {
+            lock_scheduler();
             if (pipe_type == FD_TYPE_PIPE_R)
                 waitq_add(&pipe->read_waitq, current_task);
             else
                 waitq_add(&pipe->write_waitq, current_task);
+            if (task_has_pending_signals()) wake_task(current_task);
+            unlock_scheduler();
             pipe_unlock_irqrestore(pipe, pipe_flags);
             schedule();
             if (task_has_pending_signals()) {
@@ -544,7 +547,7 @@ static int sys_close_range(unsigned int first, const char *last_ptr,
         return 0;
     }
     for (fd = (int)last; fd >= (int)first; fd--) {
-        if (current_task->fds[fd].in_use)
+        if (fd < current_task->fds_capacity && current_task->fds[fd].in_use)
             sys_vfs_close(fd, NULL, 0);
     }
     return 0;
@@ -709,7 +712,7 @@ static int sys_vfs_create(uint64_t path_ptr, const char *perms_ptr, int unused) 
         kfree(path);
         return -EROFS;
     }
-    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
     if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_create(parent, filename, perms);
     vfs_release(parent);
@@ -746,7 +749,7 @@ static int sys_vfs_mkdir(uint64_t path_ptr, const char *perms_ptr, int unused) {
         kfree(path);
         return -EROFS;
     }
-    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE);
+    perm_ret = vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
     if (perm_ret < 0) { vfs_release(parent); kfree(path); return perm_ret; }
     r = vfs_mkdir(parent, dirname, perms);
     vfs_release(parent);
