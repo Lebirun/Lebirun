@@ -15,11 +15,9 @@ static int sys_fb_setcolors(int fg, const char *bg_ptr, int unused) {
 
 static int sys_fb_getinfo(uint64_t info_ptr, const char *unused1, int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = info_ptr;
-    if (info_addr >= KERNEL_VMA || info_addr < 0x1000) return -EFAULT;
-
     framebuffer_t *fb = fb_get();
-    uint32_t *info = (uint32_t *)info_addr;
+    uint32_t info[8];
+
     info[0] = (uint32_t)fb->width;
     info[1] = (uint32_t)fb->height;
     info[2] = (uint32_t)fb->bpp;
@@ -28,7 +26,8 @@ static int sys_fb_getinfo(uint64_t info_ptr, const char *unused1, int unused2) {
     info[5] = (uint32_t)fb->cursor_y;
     info[6] = fb->font ? (uint32_t)fb->font->width : 8;
     info[7] = (uint32_t)fb->cols;
-    return 0;
+    return copy_to_user((void *)(uintptr_t)info_ptr, info, sizeof(info)) < 0 ?
+           -EFAULT : 0;
 }
 
 static int sys_fb_clear(int unused1, const char *unused2, int unused3) {
@@ -69,13 +68,7 @@ static int sys_fb_set_mode(int width, const char *height_ptr, int refresh_rate) 
 static int sys_fb_get_detailed_info(uint64_t info_ptr, const char *unused1,
                                     int unused2) {
     (void)unused1; (void)unused2;
-    uint64_t info_addr = info_ptr;
-    
-    if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {
-        return -EFAULT;
-    }
-    
-    uint32_t *info = (uint32_t *)info_addr;
+    uint32_t info[4];
     uint64_t width, height, bpp, refresh_rate;
     
     int result = fb_get_info(&width, &height, &bpp, &refresh_rate);
@@ -88,31 +81,26 @@ static int sys_fb_get_detailed_info(uint64_t info_ptr, const char *unused1,
     info[2] = (uint32_t)bpp;
     info[3] = (uint32_t)refresh_rate;
     
-    return 0;
+    return copy_to_user((void *)(uintptr_t)info_ptr, info, sizeof(info)) < 0 ?
+           -EFAULT : 0;
 }
 
 static int sys_fb_get_caps(uint64_t info_ptr, const char *words_ptr,
                            int unused2) {
-    uint64_t info_addr;
     uint64_t words;
-    uint32_t *out;
+    uint32_t out[16];
     uint64_t buffer[16];
     uint64_t i;
     uint64_t copy_count;
     int ret;
 
     (void)unused2;
-    info_addr = info_ptr;
     words = (uint64_t)(uintptr_t)words_ptr;
 
-    if (info_addr >= KERNEL_VMA || info_addr < 0x1000) {
-        return -EFAULT;
-    }
     if (words < 16) {
         return -EINVAL;
     }
 
-    out = (uint32_t *)info_addr;
     copy_count = words;
     if (copy_count > 16) {
         copy_count = 16;
@@ -126,7 +114,8 @@ static int sys_fb_get_caps(uint64_t info_ptr, const char *words_ptr,
     for (i = 0; i < copy_count; i++) {
         out[i] = (uint32_t)buffer[i];
     }
-    return 0;
+    return copy_to_user((void *)(uintptr_t)info_ptr, out,
+                        copy_count * sizeof(out[0])) < 0 ? -EFAULT : 0;
 }
 
 void syscalls_fb_init(void) {

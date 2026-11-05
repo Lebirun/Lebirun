@@ -781,8 +781,8 @@ static int sys_stat(uint64_t path_ptr, const char *buf_ptr, int unused) {
                            (uint64_t)(uintptr_t)buf_ptr, 0);
 }
 static int sys_fstat(int fd, const char *buf_ptr, int unused) {
-    uint64_t buf_addr;
-    struct kernel_stat *st;
+    struct kernel_stat kst;
+    struct kernel_stat *st = &kst;
     int pty_fd;
     vfs_node_t *node;
     uint64_t node_address;
@@ -790,9 +790,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     (void)unused;
     if (!current_task) return -ESRCH;
     if (fd < 0 || fd >= current_task->fds_capacity || !fd_table[fd].in_use) return -EBADF;
-    buf_addr = (uint64_t)(uintptr_t)buf_ptr;
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
-    st = (struct kernel_stat *)buf_addr;
+    if (!buf_ptr) return -EFAULT;
     memset(st, 0, sizeof(struct kernel_stat));
     
     if (fd >= 0 && fd <= 2) {
@@ -800,7 +798,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
         st->st_rdev = 0x8801;
         st->st_blksize = 1024;
         st->st_nlink = 1;
-        return 0;
+        goto done;
     }
     
     if (fd >= 0 && fd < current_task->fds_capacity && fd_table[fd].in_use) {
@@ -820,7 +818,7 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             }
             st->st_blksize = 4096;
             st->st_nlink = 1;
-            return 0;
+            goto done;
         }
         
         if (FD_TYPE_IS_PTY(fd_table[fd].type)) {
@@ -830,14 +828,14 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             st->st_rdev = 0x8801;
             st->st_blksize = 1024;
             st->st_nlink = 1;
-            return 0;
+            goto done;
         }
 
         if (fd_table[fd].type == FD_TYPE_SOCKET) {
             st->st_mode = S_IFSOCK | 0600;
             st->st_blksize = 4096;
             st->st_nlink = 1;
-            return 0;
+            goto done;
         }
         
         node = (vfs_node_t *)fd_table[fd].node;
@@ -862,11 +860,13 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
             st->st_atim.tv_sec = node->atime;
             st->st_mtim.tv_sec = node->mtime;
             st->st_ctim.tv_sec = node->ctime;
-            return 0;
+            goto done;
         }
     }
     
     return -EBADF;
+done:
+    return copy_to_user((void *)buf_ptr, st, sizeof(*st)) < 0 ? -EFAULT : 0;
 }
 
 static int64_t sys_lseek_new(int fd, const char *offset_ptr, int whence) {
@@ -1814,8 +1814,8 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
     uint64_t next_offset;
     size_t name_len;
     size_t reclen;
-    struct linux_dirent *de;
-    int i;
+    size_t hdr;
+    struct linux_dirent de;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
@@ -1879,24 +1879,28 @@ static int sys_getdents(int fd, const char *dirp_ptr, int count) {
             break;
         }
 
-        de = (struct linux_dirent *)(buf + written);
-        de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
-        de->d_off = next_offset;
-        de->d_reclen = (unsigned short)reclen;
+        de.d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
+        de.d_off = next_offset;
+        de.d_reclen = (unsigned short)reclen;
 
-        if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
-        else if (local_copy.type == VFS_FILE) de->d_type = 8;
-        else if (local_copy.type == VFS_SYMLINK) de->d_type = 10;
-        else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
-        else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
-        else if (local_copy.type == VFS_PIPE) de->d_type = 1;
-        else if (local_copy.type == VFS_SOCKET) de->d_type = 12;
-        else de->d_type = 0;
+        if (local_copy.type == VFS_DIRECTORY) de.d_type = 4;
+        else if (local_copy.type == VFS_FILE) de.d_type = 8;
+        else if (local_copy.type == VFS_SYMLINK) de.d_type = 10;
+        else if (local_copy.type == VFS_CHARDEVICE) de.d_type = 2;
+        else if (local_copy.type == VFS_BLOCKDEVICE) de.d_type = 6;
+        else if (local_copy.type == VFS_PIPE) de.d_type = 1;
+        else if (local_copy.type == VFS_SOCKET) de.d_type = 12;
+        else de.d_type = 0;
 
-        for (i = 0; i < (int)name_len; i++) {
-            de->d_name[i] = entry_name[i];
+        hdr = offsetof(struct linux_dirent, d_name);
+        if (copy_to_user(buf + written, &de, hdr) < 0 ||
+            copy_to_user(buf + written + hdr, entry_name, name_len) < 0 ||
+            clear_user(buf + written + hdr + name_len,
+                       reclen - hdr - name_len) < 0) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : -EFAULT;
         }
-        de->d_name[name_len] = '\0';
         vfs_dirent_release_name(&local_copy);
 
         written += (int)reclen;
@@ -2442,8 +2446,8 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
     uint64_t next_offset;
     size_t name_len;
     size_t reclen;
-    struct linux_dirent64 *de;
-    int i;
+    size_t hdr;
+    struct linux_dirent64 de;
     task_fd_t *tfd;
     vfs_node_t *node;
     dirent_t local_copy;
@@ -2507,24 +2511,28 @@ static int sys_getdents64(int fd, void *dirp, unsigned int count) {
             break;
         }
         
-        de = (struct linux_dirent64 *)(buf + written);
-        de->d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
-        de->d_off = next_offset;
-        de->d_reclen = (unsigned short)reclen;
+        de.d_ino = local_copy.inode ? local_copy.inode : dir_offset + 1;
+        de.d_off = next_offset;
+        de.d_reclen = (unsigned short)reclen;
         
-        if (local_copy.type == VFS_DIRECTORY) de->d_type = 4;
-        else if (local_copy.type == VFS_FILE) de->d_type = 8;
-        else if (local_copy.type == VFS_SYMLINK) de->d_type = 10;
-        else if (local_copy.type == VFS_CHARDEVICE) de->d_type = 2;
-        else if (local_copy.type == VFS_BLOCKDEVICE) de->d_type = 6;
-        else if (local_copy.type == VFS_PIPE) de->d_type = 1;
-        else if (local_copy.type == VFS_SOCKET) de->d_type = 12;
-        else de->d_type = 0;
+        if (local_copy.type == VFS_DIRECTORY) de.d_type = 4;
+        else if (local_copy.type == VFS_FILE) de.d_type = 8;
+        else if (local_copy.type == VFS_SYMLINK) de.d_type = 10;
+        else if (local_copy.type == VFS_CHARDEVICE) de.d_type = 2;
+        else if (local_copy.type == VFS_BLOCKDEVICE) de.d_type = 6;
+        else if (local_copy.type == VFS_PIPE) de.d_type = 1;
+        else if (local_copy.type == VFS_SOCKET) de.d_type = 12;
+        else de.d_type = 0;
         
-        for (i = 0; i < (int)name_len; i++) {
-            de->d_name[i] = entry_name[i];
+        hdr = offsetof(struct linux_dirent64, d_name);
+        if (copy_to_user(buf + written, &de, hdr) < 0 ||
+            copy_to_user(buf + written + hdr, entry_name, name_len) < 0 ||
+            clear_user(buf + written + hdr + name_len,
+                       reclen - hdr - name_len) < 0) {
+            vfs_dirent_release_name(&local_copy);
+            task_fd_position_set(tfd, dir_offset);
+            return written ? written : -EFAULT;
         }
-        de->d_name[name_len] = '\0';
         vfs_dirent_release_name(&local_copy);
         
         written += (int)reclen;

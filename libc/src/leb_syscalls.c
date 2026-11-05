@@ -15,8 +15,12 @@ int initrd_count(void)
 
 int initrd_stat(int index, char *name, unsigned int *length)
 {
-    return (int)leb_syscall3(LEB_SYSCALL_INITRD_STAT, index, (long)name,
-        (long)length);
+    uint64_t len = 0;
+    int r = (int)leb_syscall3(LEB_SYSCALL_INITRD_STAT, index, (long)name,
+        length ? (long)&len : 0);
+
+    if (length && r == 0) *length = (unsigned int)len;
+    return r;
 }
 
 int initrd_read(int index, void *buf, unsigned int maxlen)

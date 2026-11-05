@@ -452,10 +452,13 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 if (!sc_actual_cr3) __asm__ volatile ("mov %%cr3, %0" : "=r"(sc_actual_cr3));
 
                 sc_phys = vmm_get_phys_in_pml4(sc_expected_pd, sc_fault_page);
-
-                if (sc_phys != 0 ||
-                    task_user_fault_from_interrupt(current_task, sc_fault_addr,
-                        regs->rflags, (regs->err_code & 0x2) != 0, 0)) {
+                if ((sc_phys != 0 &&
+                     ((regs->err_code & 0x3) != 0x3 ||
+                      (vmm_get_flags_in_pml4(sc_expected_pd, sc_fault_page) &
+                       VMM_PTE_WRITE))) ||
+                    (sc_phys == 0 &&
+                     task_user_fault_from_interrupt(current_task, sc_fault_addr,
+                        regs->rflags, (regs->err_code & 0x2) != 0, 0))) {
                     if (sc_actual_cr3 != sc_expected_pd) {
                         regs->return_cr3 = sc_expected_pd;
                     } else {

@@ -1467,7 +1467,7 @@ static int sys_lke_list(char *buf, int size) {
 #if CONFIG_KERNEL_LKE
     if (size < 0) return -EINVAL;
     if (!buf) return size == 0 ? lke_list(NULL, 0) : -EFAULT;
-    if ((uint64_t)buf >= KERNEL_VMA || (uint64_t)buf < 0x1000) return -EFAULT;
+    if (!user_access_ok(buf, (size_t)size, UACCESS_WRITE)) return -EFAULT;
     return lke_list(buf, size);
 #else
     (void)buf;

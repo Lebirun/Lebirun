@@ -20,6 +20,7 @@
 #include <lebirun/rng.h>
 #include <lebirun/vring.h>
 #include <lebirun/mutex.h>
+#include <lebirun/uaccess.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -314,9 +315,8 @@ int devfs_is_fb(vfs_node_t *node) {
 
 static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     framebuffer_t *fb;
-    struct fb_var_screeninfo *var;
-    struct fb_fix_screeninfo *fix;
-    uint32_t expected_bpp;
+    struct fb_var_screeninfo var;
+    struct fb_fix_screeninfo fix;
 
     (void)node;
     fb = fb_get();
@@ -325,42 +325,38 @@ static int dev_fb0_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
 
     switch (request) {
     case FBIOGET_VSCREENINFO:
-        var = (struct fb_var_screeninfo *)arg;
-        memset(var, 0, sizeof(*var));
-        var->xres = (uint32_t)fb->width;
-        var->yres = (uint32_t)fb->height;
-        var->xres_virtual = (uint32_t)fb->width;
-        var->yres_virtual = (uint32_t)fb->height;
-        var->bits_per_pixel = (uint32_t)fb->bpp;
-        var->red.offset = 16;
-        var->red.length = 8;
-        var->green.offset = 8;
-        var->green.length = 8;
-        var->blue.offset = 0;
-        var->blue.length = 8;
-        var->transp.offset = 24;
-        var->transp.length = 8;
-        return 0;
+        memset(&var, 0, sizeof(var));
+        var.xres = (uint32_t)fb->width;
+        var.yres = (uint32_t)fb->height;
+        var.xres_virtual = (uint32_t)fb->width;
+        var.yres_virtual = (uint32_t)fb->height;
+        var.bits_per_pixel = (uint32_t)fb->bpp;
+        var.red.offset = 16;
+        var.red.length = 8;
+        var.green.offset = 8;
+        var.green.length = 8;
+        var.blue.offset = 0;
+        var.blue.length = 8;
+        var.transp.offset = 24;
+        var.transp.length = 8;
+        return copy_to_user(arg, &var, sizeof(var)) < 0 ? -14 : 0;
     case FBIOGET_FSCREENINFO:
-        fix = (struct fb_fix_screeninfo *)arg;
-        memset(fix, 0, sizeof(*fix));
-        strcpy(fix->id, "lebfb");
-        fix->smem_start = fb->phys_addr;
-        fix->smem_len = (uint32_t)(fb->pitch * fb->height);
-        fix->type = FB_TYPE_PACKED_PIXELS;
-        fix->visual = FB_VISUAL_TRUECOLOR;
-        fix->line_length = (uint32_t)fb->pitch;
-        return 0;
+        memset(&fix, 0, sizeof(fix));
+        strcpy(fix.id, "lebfb");
+        fix.smem_start = fb->phys_addr;
+        fix.smem_len = (uint32_t)(fb->pitch * fb->height);
+        fix.type = FB_TYPE_PACKED_PIXELS;
+        fix.visual = FB_VISUAL_TRUECOLOR;
+        fix.line_length = (uint32_t)fb->pitch;
+        return copy_to_user(arg, &fix, sizeof(fix)) < 0 ? -14 : 0;
     case FBIOPUT_VSCREENINFO:
-        var = (struct fb_var_screeninfo *)arg;
-        if (!var) return -14;
-        expected_bpp = (uint32_t)fb->bpp;
-        if (var->xres != (uint32_t)fb->width ||
-            var->yres != (uint32_t)fb->height ||
-            var->xres_virtual != (uint32_t)fb->width ||
-            var->yres_virtual != (uint32_t)fb->height ||
-            var->xoffset != 0 || var->yoffset != 0 ||
-            var->bits_per_pixel != expected_bpp)
+        if (!arg || copy_from_user(&var, arg, sizeof(var)) < 0) return -14;
+        if (var.xres != (uint32_t)fb->width ||
+            var.yres != (uint32_t)fb->height ||
+            var.xres_virtual != (uint32_t)fb->width ||
+            var.yres_virtual != (uint32_t)fb->height ||
+            var.xoffset != 0 || var.yoffset != 0 ||
+            var.bits_per_pixel != (uint32_t)fb->bpp)
             return -22;
         return 0;
     case FBIOGETCMAP:
