@@ -576,21 +576,15 @@ int syscall_symlinkat(uint64_t target_ptr, const char *newdirfd_ptr,
 int syscall_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
                        uint64_t buf_size) {
     char *path;
-    uint64_t buf_addr;
+    uint8_t *kbuf;
     uint64_t n;
     vfs_node_t *node;
 
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
-    buf_addr = (uint64_t)buf_ptr;
     if (buf_size == 0) {
         kfree(path);
         return 0;
-    }
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000 ||
-        !syscall_user_range_mapped(buf_addr, buf_size, 0)) {
-        kfree(path);
-        return -EFAULT;
     }
     node = vfs_namei_nofollow(path);
     kfree(path);
@@ -602,8 +596,17 @@ int syscall_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
 
     n = node->length;
     if (n > buf_size) n = buf_size;
-    n = vfs_read(node, 0, n, (uint8_t *)(uintptr_t)buf_addr);
+    if (!(kbuf = (uint8_t *)kmalloc(n ? n : 1))) {
+        vfs_release(node);
+        return -ENOMEM;
+    }
+    n = vfs_read(node, 0, n, kbuf);
     vfs_release(node);
+    if (n && copy_to_user((void *)(uintptr_t)buf_ptr, kbuf, n) < 0) {
+        kfree(kbuf);
+        return -EFAULT;
+    }
+    kfree(kbuf);
     return (int)n;
 }
 

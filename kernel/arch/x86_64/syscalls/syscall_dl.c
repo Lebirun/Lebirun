@@ -457,31 +457,23 @@ static int sys_dlclose(int handle, const char *unused1, int unused2) {
 }
 
 static int sys_dlerror(uint64_t buf_ptr, const char *size_ptr, int unused) {
-    uint64_t buf_addr;
     uint64_t size;
-    char *buf;
+    char nul = '\0';
     int len;
 
     (void)unused;
     init_dl();
-    buf_addr = (uint64_t)buf_ptr;
     size = (uint64_t)(uintptr_t)size_ptr;
     
-    if (!buf_addr || buf_addr >= KERNEL_VMA || buf_addr < 0x1000) {
-        return 0;
-    }
-    
-    if (size == 0 || !dl_error_msg || dl_error_msg[0] == '\0') {
+    if (!buf_ptr || size == 0 || !dl_error_msg || dl_error_msg[0] == '\0') {
         return 0;
     }
 
-    buf = (char *)buf_addr;
     len = 0;
-    while (dl_error_msg[len] && (uint64_t)len < size - 1) {
-        buf[len] = dl_error_msg[len];
-        len++;
-    }
-    buf[len] = '\0';
+    while (dl_error_msg[len] && (uint64_t)len < size - 1) len++;
+    if (copy_to_user((void *)(uintptr_t)buf_ptr, dl_error_msg, (size_t)len) < 0 ||
+        copy_to_user((void *)(uintptr_t)(buf_ptr + (uint64_t)len), &nul, 1) < 0)
+        return -EFAULT;
     
     dl_clear_error();
     

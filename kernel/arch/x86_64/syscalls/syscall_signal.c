@@ -579,11 +579,13 @@ static int sys_rt_sigaction(int signum, const char *act_ptr,
         old_action = &default_act;
         if (sigs && sigs->owner_pid == current_task->pid)
             old_action = get_signal_action(sigs, signum, &default_act);
-        memcpy((void *)old_addr, old_action, sizeof(sigaction_k));
+        if (copy_to_user((void *)old_addr, old_action, sizeof(sigaction_k)) < 0)
+            return -EFAULT;
     }
 
     if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000) {
-        memcpy(&local_act, (void *)act_addr, sizeof(sigaction_k));
+        if (copy_from_user(&local_act, (void *)act_addr, sizeof(sigaction_k)) < 0)
+            return -EFAULT;
         if (local_act.sa_handler == SIG_DFL && local_act.sa_flags == 0 &&
             local_act.sa_restorer == NULL && local_act.sa_mask[0] == 0 &&
             local_act.sa_mask[1] == 0 && (!sigs || sigs->owner_pid != current_task->pid)) {
@@ -615,15 +617,16 @@ static int sys_rt_sigprocmask(int how, const char *set_ptr,
     memset(&empty_set, 0, sizeof(empty_set));
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        if (sigs && sigs->owner_pid == current_task->pid) {
-            memcpy((void *)old_addr, &sigs->blocked, sizeof(sigset_k));
-        } else {
-            memcpy((void *)old_addr, &empty_set, sizeof(sigset_k));
-        }
+        if (copy_to_user((void *)old_addr,
+                         sigs && sigs->owner_pid == current_task->pid ?
+                         &sigs->blocked : &empty_set, sizeof(sigset_k)) < 0)
+            return -EFAULT;
     }
 
     if (set_addr && set_addr < KERNEL_VMA && set_addr >= 0x1000) {
-        memcpy(&local_set, (const void *)set_addr, sizeof(sigset_k));
+        if (copy_from_user(&local_set, (const void *)set_addr,
+                           sizeof(sigset_k)) < 0)
+            return -EFAULT;
 
         local_set.sig[0] &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
 
@@ -671,8 +674,8 @@ static int sys_rt_sigpending(uint64_t set_ptr, const char *sigsetsize_ptr,
         pending_set.sig[0] = __atomic_load_n(&sigs->pending.sig[0],
                                              __ATOMIC_ACQUIRE);
     }
-    memcpy((void *)addr, &pending_set, sizeof(sigset_k));
-    return 0;
+    return copy_to_user((void *)addr, &pending_set, sizeof(sigset_k)) < 0 ?
+           -EFAULT : 0;
 }
 
 static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
@@ -1179,12 +1182,11 @@ static int sys_sigaltstack(uint64_t ss_ptr, const char *old_ss_ptr,
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        if (sigs && sigs->owner_pid == current_task->pid) {
-            memcpy((void *)old_addr, &sigs->altstack, sizeof(stack_k));
-        } else {
-            memset(&empty_stack, 0, sizeof(empty_stack));
-            memcpy((void *)old_addr, &empty_stack, sizeof(stack_k));
-        }
+        memset(&empty_stack, 0, sizeof(empty_stack));
+        if (copy_to_user((void *)old_addr,
+                         sigs && sigs->owner_pid == current_task->pid ?
+                         &sigs->altstack : &empty_stack, sizeof(stack_k)) < 0)
+            return -EFAULT;
     }
 
     if (new_addr && new_addr < KERNEL_VMA && new_addr >= 0x1000) {
@@ -1192,7 +1194,9 @@ static int sys_sigaltstack(uint64_t ss_ptr, const char *old_ss_ptr,
             sigs = get_task_signals();
             if (!sigs) return -ESRCH;
         }
-        memcpy(&sigs->altstack, (void *)new_addr, sizeof(stack_k));
+        if (copy_from_user(&sigs->altstack, (void *)new_addr,
+                           sizeof(stack_k)) < 0)
+            return -EFAULT;
     }
 
     return 0;

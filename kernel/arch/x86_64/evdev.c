@@ -6,6 +6,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/vring.h>
+#include <lebirun/uaccess.h>
 #include <string.h>
 
 static struct evdev_device evdev_kbd;
@@ -343,12 +344,11 @@ static uint16_t evdev_extended_key(uint8_t scancode) {
 
 int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
     struct evdev_device *dev;
-    struct input_id *id_out;
-    int *ver;
-    unsigned long base;
-    unsigned long ev_type;
+    struct input_absinfo abs;
+    const void *src;
     unsigned long len;
     unsigned long copylen;
+    int ver = 0x010001;
     int grab;
 
     dev = (struct evdev_device *)node->private_data;
@@ -357,16 +357,12 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
 
     if (request == EVIOCGVERSION) {
         if (!arg) return -14;
-        ver = (int *)arg;
-        *ver = 0x010001;
-        return 0;
+        return copy_to_user(arg, &ver, sizeof(ver)) < 0 ? -14 : 0;
     }
 
     if (request == EVIOCGID) {
         if (!arg) return -14;
-        id_out = (struct input_id *)arg;
-        *id_out = dev->id;
-        return 0;
+        return copy_to_user(arg, &dev->id, sizeof(dev->id)) < 0 ? -14 : 0;
     }
 
     if (request == EVIOCGRAB) {
@@ -382,80 +378,61 @@ int evdev_ioctl(vfs_node_t *node, unsigned long request, void *arg) {
         return 0;
     }
 
-    base = request & 0xE000FFFF;
+    len = (request >> 16) & 0x1FFF;
 
-    if (base == EVIOCGNAME_BASE) {
-        len = (request >> 16) & 0x1FFF;
+    if ((request & 0xE000FFFF) == EVIOCGNAME_BASE) {
         if (!arg || len == 0) return -22;
         copylen = strlen(dev->name);
         if (copylen >= len)
             copylen = len - 1;
-        memcpy(arg, dev->name, copylen);
-        ((char *)arg)[copylen] = '\0';
+        if (copy_to_user(arg, dev->name, copylen) < 0 ||
+            clear_user((char *)arg + copylen, 1) < 0)
+            return -14;
         return (int)copylen;
     }
 
-    if (base == EVIOCGPROP_BASE) {
-        len = (request >> 16) & 0x1FFF;
-        if (!arg && len) return -14;
+    src = NULL;
+    copylen = 0;
+    if ((request & 0xE000FFFF) == EVIOCGPROP_BASE) {
+        src = dev->prop_bits;
         copylen = sizeof(dev->prop_bits);
-        if (copylen > len)
-            copylen = len;
-        memcpy(arg, dev->prop_bits, copylen);
-        return 0;
-    }
-
-    if (base == EVIOCGKEY_BASE) {
-        len = (request >> 16) & 0x1FFF;
-        if (!arg && len) return -14;
+    } else if ((request & 0xE000FFFF) == EVIOCGKEY_BASE) {
+        src = dev->key_state;
         copylen = sizeof(dev->key_state);
-        if (copylen > len)
-            copylen = len;
-        memcpy(arg, dev->key_state, copylen);
-        return 0;
-    }
-
-    if ((request & 0xFF) >= 0x20 && (request & 0xFF) <= 0x3F) {
-        ev_type = (request & 0xFF) - 0x20;
-        len = (request >> 16) & 0x1FFF;
-        if (!arg && len) return -14;
-        switch (ev_type) {
+    } else if ((request & 0xFF) >= 0x20 && (request & 0xFF) <= 0x3F) {
+        switch ((request & 0xFF) - 0x20) {
         case 0:
+            src = dev->ev_bits;
             copylen = sizeof(dev->ev_bits);
-            if (copylen > len) copylen = len;
-            memcpy(arg, dev->ev_bits, copylen);
-            return 0;
+            break;
         case EV_KEY:
+            src = dev->key_bits;
             copylen = sizeof(dev->key_bits);
-            if (copylen > len) copylen = len;
-            memcpy(arg, dev->key_bits, copylen);
-            return 0;
+            break;
         case EV_REL:
+            src = dev->rel_bits;
             copylen = sizeof(dev->rel_bits);
-            if (copylen > len) copylen = len;
-            memcpy(arg, dev->rel_bits, copylen);
-            return 0;
+            break;
         case EV_ABS:
+            src = dev->abs_bits;
             copylen = sizeof(dev->abs_bits);
-            if (copylen > len) copylen = len;
-            memcpy(arg, dev->abs_bits, copylen);
-            return 0;
+            break;
         default:
-            if (len > 0) memset(arg, 0, len);
-            return 0;
+            if (!arg && len) return -14;
+            return clear_user(arg, len) < 0 ? -14 : 0;
         }
-    }
-
-    if ((request & 0xFF) >= 0x40 && (request & 0xFF) <= 0x7F) {
+    } else if ((request & 0xFF) >= 0x40 && (request & 0xFF) <= 0x7F) {
         if (!arg) return -14;
-        memset(arg, 0, sizeof(struct input_absinfo));
-        if (dev && (request & 0xFF) - 0x40 < 2)
-            memcpy(arg, &dev->abs_info[(request & 0xFF) - 0x40],
-                   sizeof(struct input_absinfo));
-        return 0;
+        memset(&abs, 0, sizeof(abs));
+        if ((request & 0xFF) - 0x40 < 2)
+            abs = dev->abs_info[(request & 0xFF) - 0x40];
+        return copy_to_user(arg, &abs, sizeof(abs)) < 0 ? -14 : 0;
+    } else {
+        return -22;
     }
-
-    return -22;
+    if (!arg && len) return -14;
+    if (copylen > len) copylen = len;
+    return copy_to_user(arg, src, copylen) < 0 ? -14 : 0;
 }
 
 static dirent_t *evdev_input_readdir(vfs_node_t *node, uint64_t index) {

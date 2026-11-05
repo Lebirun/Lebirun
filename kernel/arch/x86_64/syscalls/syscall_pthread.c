@@ -29,6 +29,7 @@ typedef struct {
 } mutexattr_t;
 
 typedef struct {
+    int in_use;
     int locked;
     pid_t owner;
     int type;
@@ -39,6 +40,7 @@ typedef struct {
 typedef struct {
     wait_queue_t waitq;
     int signaled;
+    int in_use;
 } pthread_cond_internal_t;
 
 #define MUTEX_INIT_COUNT 1
@@ -90,6 +92,13 @@ static int cond_grow(void) {
     }
     conds = new_arr;
     cond_capacity = new_cap;
+    return 0;
+}
+
+static int pthread_slot(uint64_t addr, int *slot) {
+    if (!addr || copy_from_user(slot, (const void *)(uintptr_t)addr,
+                                sizeof(*slot)) < 0)
+        return -EFAULT;
     return 0;
 }
 
@@ -200,9 +209,9 @@ static int sys_pthread_join(int thread, const char *retval_ptr, int unused) {
     
     if (retval_ptr) {
         addr = (uint64_t)(uintptr_t)retval_ptr;
-        if (addr && addr < KERNEL_VMA && addr >= 0x1000) {
-            *(void **)addr = threads[slot].retval;
-        }
+        if (copy_to_user((void *)(uintptr_t)addr, &threads[slot].retval,
+                         sizeof(void *)) < 0)
+            return -EFAULT;
     }
     
     threads[slot].in_use = 0;
@@ -241,11 +250,11 @@ static int sys_pthread_mutex_init(uint64_t mutex_ptr, const char *attr_ptr,
     (void)attr_ptr; (void)unused;
     init_pthread();
     addr = (uint64_t)mutex_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
+    if (!addr) return -EFAULT;
 
     slot = -1;
     for (i = 0; i < mutex_capacity; i++) {
-        if (!mutexes[i].locked && mutexes[i].owner == 0) {
+        if (!mutexes[i].in_use) {
             slot = i;
             break;
         }
@@ -255,13 +264,14 @@ static int sys_pthread_mutex_init(uint64_t mutex_ptr, const char *attr_ptr,
         slot = mutex_capacity / 2;
     }
     
+    if (copy_to_user((void *)(uintptr_t)addr, &slot, sizeof(slot)) < 0)
+        return -EFAULT;
+    mutexes[slot].in_use = 1;
     mutexes[slot].locked = 0;
     mutexes[slot].owner = 0;
     mutexes[slot].type = 0;
     mutexes[slot].recursive_count = 0;
     waitq_init(&mutexes[slot].waitq);
-    
-    *(int *)addr = slot;
     return 0;
 }
 
@@ -272,14 +282,13 @@ static int sys_pthread_mutex_destroy(uint64_t mutex_ptr, const char *unused1,
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)mutex_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
     
     if (mutexes[slot].locked) return -EBUSY;
     
     mutexes[slot].owner = 0;
+    mutexes[slot].in_use = 0;
     return 0;
 }
 
@@ -293,9 +302,7 @@ static int sys_pthread_mutex_lock(uint64_t mutex_ptr, const char *unused1,
     init_pthread();
     
     addr = (uint64_t)mutex_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-    
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
     
     me = current_task ? current_task->pid : 0;
@@ -324,9 +331,7 @@ static int sys_pthread_mutex_trylock(uint64_t mutex_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     init_pthread();
     addr = (uint64_t)mutex_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
 
     me = current_task ? current_task->pid : 0;
@@ -354,9 +359,7 @@ static int sys_pthread_mutex_unlock(uint64_t mutex_ptr, const char *unused1,
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)mutex_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
 
     me = current_task ? current_task->pid : 0;
@@ -384,11 +387,11 @@ static int sys_pthread_cond_init(uint64_t cond_ptr, const char *attr_ptr,
     (void)attr_ptr; (void)unused;
     init_pthread();
     addr = (uint64_t)cond_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
+    if (!addr) return -EFAULT;
 
     slot = -1;
     for (i = 0; i < cond_capacity; i++) {
-        if (!conds[i].signaled) {
+        if (!conds[i].in_use) {
             slot = i;
             break;
         }
@@ -398,10 +401,11 @@ static int sys_pthread_cond_init(uint64_t cond_ptr, const char *attr_ptr,
         slot = cond_capacity / 2;
     }
     
+    if (copy_to_user((void *)(uintptr_t)addr, &slot, sizeof(slot)) < 0)
+        return -EFAULT;
     waitq_init(&conds[slot].waitq);
     conds[slot].signaled = 0;
-    
-    *(int *)addr = slot;
+    conds[slot].in_use = 1;
     return 0;
 }
 
@@ -412,11 +416,10 @@ static int sys_pthread_cond_destroy(uint64_t cond_ptr, const char *unused1,
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= cond_capacity) return -EINVAL;
     
+    conds[slot].in_use = 0;
     return 0;
 }
 
@@ -433,11 +436,9 @@ static int sys_pthread_cond_wait(uint64_t cond_ptr, const char *mutex_ptr,
     cond_addr = (uint64_t)cond_ptr;
     mutex_addr = (uint64_t)(uintptr_t)mutex_ptr;
     
-    if (!cond_addr || cond_addr >= KERNEL_VMA || cond_addr < 0x1000) return -EFAULT;
-    if (!mutex_addr || mutex_addr >= KERNEL_VMA || mutex_addr < 0x1000) return -EFAULT;
-    
-    cond_slot = *(int *)cond_addr;
-    mutex_slot = *(int *)mutex_addr;
+    if (pthread_slot(cond_addr, &cond_slot) < 0 ||
+        pthread_slot(mutex_addr, &mutex_slot) < 0)
+        return -EFAULT;
     
     if (cond_slot < 0 || cond_slot >= cond_capacity) return -EINVAL;
     if (mutex_slot < 0 || mutex_slot >= mutex_capacity) return -EINVAL;
@@ -458,9 +459,7 @@ static int sys_pthread_cond_signal(uint64_t cond_ptr, const char *unused1,
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= cond_capacity) return -EINVAL;
     
     waitq_wake_one(&conds[slot].waitq);
@@ -474,9 +473,7 @@ static int sys_pthread_cond_broadcast(uint64_t cond_ptr, const char *unused1,
 
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
-    if (!addr || addr >= KERNEL_VMA || addr < 0x1000) return -EFAULT;
-
-    slot = *(int *)addr;
+    if (pthread_slot(addr, &slot) < 0) return -EFAULT;
     if (slot < 0 || slot >= cond_capacity) return -EINVAL;
     
     waitq_wake_all(&conds[slot].waitq);

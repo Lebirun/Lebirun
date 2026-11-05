@@ -217,6 +217,11 @@ static void f_abort(f_conn_t *c) {
     }
     while ((w = c->wr)) {
         c->wr = w->next;
+        if ((r = w->r)) {
+            r->err = -107;
+            r->got = 0;
+            f_done(c, r);
+        }
         kfree(w);
     }
     waitq_wake_all(&c->rq);
@@ -395,9 +400,12 @@ static uint64_t f_dev_write(vfs_node_t *v, uint64_t off, uint64_t len,
             }
             w->left = w->h.len - (uint32_t)sizeof(f_out_t);
             w->off = 0;
-            for (r = c->sent; r && r->in.unique != w->h.unique; r = r->next);
-            if ((w->r = r))
+            for (rp = &c->sent; *rp && (*rp)->in.unique != w->h.unique;
+                 rp = &(*rp)->next);
+            if ((w->r = r = *rp)) {
+                *rp = r->next;
                 r->err = w->h.error > 0 || w->h.error < -4095 ? -5 : w->h.error;
+            }
         } else {
             k = F_MIN(w->left, len - i);
             if ((r = w->r) && r->out && w->off < r->cap)
@@ -409,8 +417,6 @@ static uint64_t f_dev_write(vfs_node_t *v, uint64_t off, uint64_t len,
         }
         if (w->hn == sizeof(f_out_t) && !w->left) {
             if ((r = w->r)) {
-                for (rp = &c->sent; *rp != r; rp = &(*rp)->next);
-                *rp = r->next;
                 r->got = F_MIN(w->off, r->cap);
                 f_done(c, r);
             }
