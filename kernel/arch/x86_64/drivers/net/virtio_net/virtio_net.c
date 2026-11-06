@@ -6,6 +6,7 @@
 #include <lebirun/idt.h>
 #include <lebirun/task.h>
 #include <lebirun/tty.h>
+#include <lebirun/lke.h>
 #include <string.h>
 
 #define VIRTIO_PCI_CAP_COMMON 1
@@ -620,3 +621,25 @@ int virtio_net_init_at(uint8_t bus, uint8_t slot, uint8_t func) {
     dev->irq = (uint8_t)(pci_read32(bus, slot, func, 0x3C) & 0xFF);
     return virtio_net_bring_up(dev);
 }
+
+static const uint16_t virtio_net_devices[] = {
+    VIRTIO_NET_DEV_MODERN, VIRTIO_NET_DEV_LEGACY, 0
+};
+
+net_driver_t virtio_net_driver = {
+    .vendor = VIRTIO_NET_VENDOR_ID,
+    .devices = virtio_net_devices,
+    .init_at = virtio_net_init_at,
+};
+
+#ifndef __is_kernel
+static int virtio_net_module_init(void) {
+    return net_register_driver(&virtio_net_driver);
+}
+
+module_init(virtio_net_module_init);
+LKE_NAME("virtio_net");
+LKE_DESC("Virtio Net paravirtual network driver");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

@@ -7,6 +7,7 @@
 #include <lebirun/idt.h>
 #include <lebirun/task.h>
 #include <lebirun/tty.h>
+#include <lebirun/lke.h>
 #include <string.h>
 
 static e1000_device_t *g_e1000_dev;
@@ -694,3 +695,25 @@ int e1000_init_at(uint8_t bus, uint8_t slot, uint8_t func) {
 
     return e1000_bring_up(dev);
 }
+
+static const uint16_t e1000_devices[] = {
+    E1000_DEVICE_82540EM, E1000_DEVICE_82545EM, E1000_DEVICE_82574L, 0
+};
+
+net_driver_t e1000_driver = {
+    .vendor = E1000_VENDOR_ID,
+    .devices = e1000_devices,
+    .init_at = e1000_init_at,
+};
+
+#ifndef __is_kernel
+static int e1000_module_init(void) {
+    return net_register_driver(&e1000_driver);
+}
+
+module_init(e1000_module_init);
+LKE_NAME("e1000");
+LKE_DESC("Intel E1000 network driver");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

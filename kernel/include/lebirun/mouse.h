@@ -21,5 +21,6 @@ void mouse_inject_packet(uint8_t buttons, int8_t dx, int8_t dy, int8_t z,
 int mouse_has_data(void);
 int mouse_read(uint8_t *buf, uint32_t count);
 uint32_t mouse_get_packet_size(void);
+extern int (*mouse_usb_recent)(void);
 
 #endif

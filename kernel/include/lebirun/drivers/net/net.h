@@ -20,5 +20,6 @@ void net_ensure_hw(void);
 void net_poll(void);
 void net_tick(void);
 uint64_t net_get_ticks(void);
+int net_register_driver(net_driver_t *drv);
 
 #endif

@@ -13,6 +13,7 @@
 #include <lebirun/blkdev.h>
 #include <lebirun/devfs.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/lke.h>
 
 #define XHCI_MMIO_VIRT (KERNEL_VMA + 0x37200000ULL)
 #define XHCI_MMIO_PAGES 4u
@@ -984,6 +985,7 @@ static int XHCI_ENUM xhci_hid_parse_abs(uint8_t *d, uint64_t len,
     yl = 0;
     have_x = 0;
     have_y = 0;
+    xo_lmin = xo_lmax = yo_lmin = yo_lmax = 0;
     while (pos < len) {
         uint8_t b;
         uint64_t nb;
@@ -2009,7 +2011,7 @@ int KERNEL_INIT xhci_init(void) {
         xhci_free_pages(g_dma_phys, g_dma_count);
         g_dma_phys = NULL;
         g_dma_count = 0;
-        return 0;
+        return -1;
     }
     pfa_free(g_xhci.xfer_phys);
     pfa_free(g_xhci.inctx_phys);
@@ -2041,3 +2043,11 @@ int KERNEL_INIT xhci_init(void) {
 #endif
     return 0;
 }
+
+#ifndef __is_kernel
+module_init(xhci_init);
+LKE_NAME("xhci");
+LKE_DESC("xHCI USB host controller and USB device drivers");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

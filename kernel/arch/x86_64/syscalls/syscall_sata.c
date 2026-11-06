@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/creds.h>
 
+#if CONFIG_DRIVER_AHCI
 static int sys_sata_test(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
     if (!current_task || !creds_has_capability(current_task, 21))
@@ -62,6 +63,7 @@ static int sys_sata_irq(int enable, const char *unused2, int unused3) {
     }
     return 0;
 }
+#endif
 
 static int sys_blockdev_rescan(uint64_t devname_ptr, const char *unused2,
                                int unused3) {
@@ -79,9 +81,11 @@ static int sys_blockdev_rescan(uint64_t devname_ptr, const char *unused2,
 }
 
 void syscalls_sata_init(void) {
+#if CONFIG_DRIVER_AHCI
     syscall_table_set(SYSCALL_SATA_TEST, (void *)(sys_sata_test));
     syscall_table_set(SYSCALL_SATA_INFO, (void *)(sys_sata_info));
     syscall_table_set(SYSCALL_SATA_SMART, (void *)(sys_sata_smart));
     syscall_table_set(SYSCALL_SATA_IRQ, (void *)(sys_sata_irq));
+#endif
     syscall_table_set(SYSCALL_BLOCKDEV_RESCAN, (void *)(sys_blockdev_rescan));
 }

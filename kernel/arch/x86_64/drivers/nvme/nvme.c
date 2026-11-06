@@ -4,6 +4,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/mutex.h>
 #include <lebirun/timekeeping.h>
+#include <lebirun/lke.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -414,3 +415,11 @@ int KERNEL_INIT nvme_init(void) {
     }
     return nvme_count ? 0 : -1;
 }
+
+#ifndef __is_kernel
+module_init(nvme_init);
+LKE_NAME("nvme");
+LKE_DESC("NVMe storage driver");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

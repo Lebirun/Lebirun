@@ -17,6 +17,19 @@
 #include <lebirun/rtc.h>
 #include <lebirun/drivers/net/udp.h>
 #include <lebirun/common.h>
+#if CONFIG_DRIVER_MODULES
+#include <lebirun/acpi.h>
+#include <lebirun/blkdev.h>
+#include <lebirun/devfs.h>
+#include <lebirun/evdev.h>
+#include <lebirun/framebuffer.h>
+#include <lebirun/idt.h>
+#include <lebirun/keyboard.h>
+#include <lebirun/mouse.h>
+#include <lebirun/mutex.h>
+#include <lebirun/smp.h>
+#include <lebirun/timekeeping.h>
+#endif
 #include "syscalls/syscall_defs.h"
 #include <string.h>
 
@@ -26,9 +39,6 @@
 
 static lke_module_t *modules;
 static size_t lke_count;
-
-static lke_ksym_t *ksym_table;
-static int ksym_count = 0;
 
 int lke_register_syscall(int num, void *fn) {
     size_t i;
@@ -96,94 +106,86 @@ void lke_unregister_syscall(int num, void *fn) {
     }
 }
 
-void KERNEL_INIT lke_register_symbol(const char *name, void *addr) {
-    lke_ksym_t *new_tab;
+#define KSYM(sym) { #sym, (const void *)&sym }
 
-    if (ksym_count == INT32_MAX) return;
-    new_tab = (lke_ksym_t *)krealloc(
-        ksym_table, ((size_t)ksym_count + 1) * sizeof(lke_ksym_t));
-    if (!new_tab) return;
-    ksym_table = new_tab;
-    ksym_table[ksym_count].name = name;
-    ksym_table[ksym_count].addr = (uint64_t)addr;
-    ksym_count++;
-}
+#if CONFIG_DRIVER_MODULES
+extern int scheduler_initialized;
+#endif
 
-static uint64_t ksym_lookup(const char *name) {
-    int i;
-    for (i = 0; i < ksym_count; i++) {
-        if (strcmp(ksym_table[i].name, name) == 0)
-            return ksym_table[i].addr;
+static const lke_ksym_t ksyms[] = {
+    KSYM(kmalloc), KSYM(kmalloc_aligned), KSYM(kfree), KSYM(krealloc),
+    KSYM(printf), KSYM(snprintf), KSYM(memcpy), KSYM(memset),
+    KSYM(memcmp), KSYM(memmove), KSYM(strcmp), KSYM(strlen),
+    KSYM(strncpy), KSYM(vfs_namei), KSYM(vfs_read), KSYM(vfs_write),
+    KSYM(vfs_release), KSYM(copy_from_user), KSYM(copy_to_user),
+    KSYM(pit_get_ticks64), KSYM(pit_get_uptime_ms), KSYM(pit_get_ticks),
+    KSYM(pit_ms_to_ticks), KSYM(rtc_get_time), KSYM(rng_get_u64),
+    KSYM(sha256_hash), KSYM(hmac_sha256), KSYM(sha384_hash),
+    KSYM(crypto_constant_compare), KSYM(vmm_get_phys_in_pml4),
+    KSYM(task_current), KSYM(schedule), KSYM(task_has_pending_signals),
+    KSYM(lke_register_syscall), KSYM(lke_unregister_syscall),
+#if CONFIG_DRIVER_NET
+    KSYM(netif_get_default), KSYM(netif_poll_all), KSYM(ipv4_is_local),
+    KSYM(udp_send), KSYM(udp_send6), KSYM(udp_register_port_hook),
+    KSYM(udp_unregister_port_hook), KSYM(dns_resolve_timeout),
+    KSYM(dns_resolve6), KSYM(net_get_ticks), KSYM(tcp_socket_create),
+    KSYM(tcp_socket_close), KSYM(tcp_connect), KSYM(tcp_send),
+    KSYM(tcp_recv), KSYM(tcp_disconnect), KSYM(tls_register_provider),
+    KSYM(tls_unregister_provider), KSYM(tls_get_provider),
+#endif
+#if CONFIG_DRIVER_MODULES
+    KSYM(kcalloc), KSYM(strcpy), KSYM(pfa_alloc), KSYM(pfa_free),
+    KSYM(pfa_alloc_contiguous), KSYM(pfa_free_contiguous),
+    KSYM(pmm_alloc_mapped_page), KSYM(pt_ensure_phys_mapped),
+    KSYM(vmm_map_page), KSYM(vmm_unmap_page), KSYM(vmm_get_kernel_cr3),
+    KSYM(mutex_init), KSYM(mutex_lock), KSYM(mutex_unlock),
+    KSYM(lock_scheduler), KSYM(unlock_scheduler), KSYM(add_task_to_runqueue),
+    KSYM(create_kernel_task), KSYM(wake_task), KSYM(sleep_ms),
+    KSYM(scheduler_initialized), KSYM(descriptor_ready_notify_irq),
+    KSYM(smp_this_cpu), KSYM(smp_tlb_flush_poll), KSYM(tick_count),
+    KSYM(pit_freq), KSYM(pit_register_callback),
+    KSYM(pit_set_callback_interval), KSYM(tsc_available), KSYM(tsc_get_ns),
+    KSYM(timekeeping_monotonic_ns), KSYM(irq_register_handler),
+    KSYM(irq_unregister_handler), KSYM(irq_mask), KSYM(irq_unmask),
+    KSYM(acpi_find_table), KSYM(acpi_read_phys), KSYM(blkdev_register),
+    KSYM(blkdev_unregister), KSYM(blkdev_phys), KSYM(devfs_add_blkdevs),
+    KSYM(devfs_remove_blkdevs), KSYM(keyboard_feed_ps2),
+    KSYM(keyboard_usb_recent), KSYM(mouse_inject_packet),
+    KSYM(mouse_get_packet_size), KSYM(mouse_usb_recent), KSYM(evdev_get_mouse),
+    KSYM(evdev_mouse_set_abs), KSYM(evdev_push_event), KSYM(evdev_push_sync),
+    KSYM(fb_get),
+#if CONFIG_DRIVER_NET
+    KSYM(net_register_driver), KSYM(netif_alloc), KSYM(netif_register),
+    KSYM(netif_set_default), KSYM(netif_find), KSYM(eth_receive),
+#endif
+#endif
+};
+
+static int lke_enabled;
+static int lke_booted;
+
+static const void *ksym_lookup(const char *name) {
+    extern uint8_t _kernel_init_start[];
+    extern uint8_t _kernel_init_end[];
+    const uint8_t *addr;
+    size_t i;
+
+    for (i = 0; i < sizeof(ksyms) / sizeof(ksyms[0]); i++) {
+        if (strcmp(ksyms[i].name, name) != 0) continue;
+        addr = (const uint8_t *)ksyms[i].addr;
+        if (lke_booted && addr >= _kernel_init_start && addr < _kernel_init_end)
+            return NULL;
+        return addr;
     }
-    return 0;
+    return NULL;
 }
 
 void KERNEL_INIT lke_init(void) {
-    modules = NULL;
-    lke_count = 0;
-    ksym_table = NULL;
-    ksym_count = 0;
+    lke_enabled = 1;
+}
 
-    lke_register_symbol("kmalloc", kmalloc);
-    lke_register_symbol("kmalloc_aligned", kmalloc_aligned);
-    lke_register_symbol("kfree", kfree);
-    lke_register_symbol("printf", printf);
-    lke_register_symbol("memcpy", memcpy);
-    lke_register_symbol("memset", memset);
-    lke_register_symbol("memcmp", memcmp);
-    lke_register_symbol("strcmp", strcmp);
-    lke_register_symbol("strlen", strlen);
-    lke_register_symbol("strncpy", strncpy);
-    lke_register_symbol("snprintf", snprintf);
-    lke_register_symbol("vfs_namei", vfs_namei);
-    lke_register_symbol("vfs_read", vfs_read);
-    lke_register_symbol("vfs_write", vfs_write);
-    lke_register_symbol("vfs_release", vfs_release);
-    lke_register_symbol("copy_from_user", copy_from_user);
-    lke_register_symbol("copy_to_user", copy_to_user);
-    lke_register_symbol("pit_get_ticks64", pit_get_ticks64);
-    lke_register_symbol("pit_get_uptime_ms", pit_get_uptime_ms);
-    lke_register_symbol("pit_get_ticks", pit_get_ticks);
-    lke_register_symbol("pit_ms_to_ticks", pit_ms_to_ticks);
-    lke_register_symbol("rtc_get_time", rtc_get_time);
-    lke_register_symbol("rng_get_u64", rng_get_u64);
-    lke_register_symbol("sha256_hash", sha256_hash);
-    lke_register_symbol("hmac_sha256", hmac_sha256);
-    lke_register_symbol("sha384_hash", sha384_hash);
-    lke_register_symbol("crypto_constant_compare", crypto_constant_compare);
-#if CONFIG_DRIVER_NET
-    lke_register_symbol("netif_get_default", netif_get_default);
-    lke_register_symbol("netif_poll_all", netif_poll_all);
-    lke_register_symbol("ipv4_is_local", ipv4_is_local);
-    lke_register_symbol("udp_send", udp_send);
-    lke_register_symbol("udp_send6", udp_send6);
-    lke_register_symbol("udp_register_port_hook", udp_register_port_hook);
-    lke_register_symbol("udp_unregister_port_hook", udp_unregister_port_hook);
-    lke_register_symbol("dns_resolve_timeout", dns_resolve_timeout);
-    lke_register_symbol("dns_resolve6", dns_resolve6);
-#endif
-    lke_register_symbol("vmm_get_phys_in_pml4", vmm_get_phys_in_pml4);
-    lke_register_symbol("task_current", task_current);
-    lke_register_symbol("schedule", schedule);
-#if CONFIG_DRIVER_NET
-    lke_register_symbol("net_get_ticks", net_get_ticks);
-    lke_register_symbol("tcp_socket_create", tcp_socket_create);
-    lke_register_symbol("tcp_socket_close", tcp_socket_close);
-    lke_register_symbol("tcp_connect", tcp_connect);
-    lke_register_symbol("tcp_send", tcp_send);
-    lke_register_symbol("tcp_recv", tcp_recv);
-    lke_register_symbol("tcp_disconnect", tcp_disconnect);
-#endif
-    lke_register_symbol("krealloc", krealloc);
-    lke_register_symbol("memmove", memmove);
-    lke_register_symbol("task_has_pending_signals", task_has_pending_signals);
-#if CONFIG_DRIVER_NET
-    lke_register_symbol("tls_register_provider", tls_register_provider);
-    lke_register_symbol("tls_unregister_provider", tls_unregister_provider);
-    lke_register_symbol("tls_get_provider", tls_get_provider);
-#endif
-    lke_register_symbol("lke_register_syscall", lke_register_syscall);
-    lke_register_symbol("lke_unregister_syscall", lke_unregister_syscall);
+void lke_boot_done(void) {
+    lke_booted = 1;
 }
 
 static lke_module_t *lke_new_slot(void) {
@@ -296,45 +298,58 @@ static int lke_add_ok(uint64_t a, uint64_t b, uint64_t *out) {
     return 1;
 }
 
+static int lke_is_init_section(const uint8_t *data, uint64_t data_size,
+                               const Elf64_Ehdr *ehdr,
+                               const Elf64_Shdr *sh) {
+    const Elf64_Shdr *names;
+
+    if (ehdr->e_shstrndx >= ehdr->e_shnum) return 0;
+    names = (const Elf64_Shdr *)(data + ehdr->e_shoff) + ehdr->e_shstrndx;
+    if (!lke_range_ok(names->sh_offset, names->sh_size, data_size) ||
+        sh->sh_name >= names->sh_size || names->sh_size - sh->sh_name < 6)
+        return 0;
+    return memcmp(data + names->sh_offset + sh->sh_name, ".init.", 6) == 0;
+}
+
 int lke_load(const char *path) {
     vfs_node_t *node;
     uint64_t data_size;
     uint8_t *data;
     const Elf64_Ehdr *ehdr;
     const Elf64_Shdr *shdr;
-    uint64_t i;
-    uint64_t total_alloc;
-    uint8_t *mem;
-    uint64_t *sec_offsets;
-    uint64_t offset;
     const Elf64_Shdr *sh;
     const Elf64_Shdr *rela_sh;
-    uint64_t j;
-    const Elf64_Rela *rela;
-    uint64_t sym_idx;
-    uint64_t rtype;
     const Elf64_Shdr *symtab_sh;
+    const Elf64_Shdr *strtab_sh;
+    const Elf64_Rela *rela;
     const Elf64_Sym *sym;
     const char *strtab;
+    const char *sym_name;
+    const char *bname;
+    uint64_t *sec_offsets;
+    uint64_t size[2];
+    uint64_t off[2];
+    uint64_t pages[2];
+    uint8_t *mem[2];
+    uint64_t data_pages;
+    uint64_t sym_count;
+    uint64_t i;
+    uint64_t j;
     uint64_t S;
     uint64_t A;
     uint64_t P;
+    uint64_t rtype;
     uint8_t *target;
     lke_module_t *mod;
-    const char *bname;
     char *mod_name;
     size_t mod_name_len;
     int (*init_fn)(void);
     void (*cleanup_fn)(void);
-    const Elf64_Shdr *strtab_sh;
-    uint64_t symtab_idx;
-    uint64_t strtab_idx;
-    const char *sym_name;
-    int found_init;
-    uint64_t data_pages;
-    uint64_t mem_pages;
+    int pass;
+    int r;
+    int rc;
 
-    if (!path) return -1;
+    if (!path || !lke_enabled) return -1;
 
     bname = basename_of(path);
     mod_name_len = lke_name_length(bname);
@@ -346,8 +361,6 @@ int lke_load(const char *path) {
     data_size = node->length;
     if (data_size < sizeof(Elf64_Ehdr)) { vfs_release(node); return -4; }
 
-    data_pages = 0;
-    mem_pages = 0;
     data = (uint8_t *)lke_alloc_pages(data_size, &data_pages);
     if (!data) { vfs_release(node); return -5; }
 
@@ -358,184 +371,111 @@ int lke_load(const char *path) {
     }
     vfs_release(node);
 
+    sec_offsets = NULL;
+    mem[0] = mem[1] = NULL;
+    pages[0] = pages[1] = 0;
+    size[0] = size[1] = 0;
+    rc = -7;
     ehdr = (const Elf64_Ehdr *)data;
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
-        ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3) {
-        lke_free_pages(data, data_pages);
-        return -7;
-    }
-    if (ehdr->e_type != ET_REL) {
-        lke_free_pages(data, data_pages);
-        return -8;
-    }
-    if (ehdr->e_machine != EM_X86_64) {
-        lke_free_pages(data, data_pages);
-        return -9;
-    }
-
-    if (ehdr->e_shoff + (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > data_size) {
-        lke_free_pages(data, data_pages);
-        return -7;
-    }
+        ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3)
+        goto fail;
+    rc = -8;
+    if (ehdr->e_type != ET_REL) goto fail;
+    rc = -9;
+    if (ehdr->e_machine != EM_X86_64) goto fail;
+    rc = -7;
+    if (ehdr->e_shoff + (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > data_size)
+        goto fail;
 
     shdr = (const Elf64_Shdr *)(data + ehdr->e_shoff);
-
-    total_alloc = 0;
-    for (i = 0; i < ehdr->e_shnum; i++) {
-        sh = &shdr[i];
-        if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) &&
-            (sh->sh_flags & 0x2)) {
-            if (sh->sh_addralign > 1) {
-                uint64_t mask;
-                uint64_t aligned;
-
-                if ((sh->sh_addralign & (sh->sh_addralign - 1)) != 0) {
-                    lke_free_pages(data, data_pages);
-                    return -10;
-                }
-                mask = sh->sh_addralign - 1;
-                if (mask > UINT64_MAX - total_alloc) {
-                    lke_free_pages(data, data_pages);
-                    return -10;
-                }
-                aligned = (total_alloc + mask) & ~mask;
-                if (aligned < total_alloc) {
-                    lke_free_pages(data, data_pages);
-                    return -10;
-                }
-                total_alloc = aligned;
-            }
-            if (!lke_add_ok(total_alloc, sh->sh_size, &total_alloc)) {
-                lke_free_pages(data, data_pages);
-                return -10;
-            }
-        }
-    }
-
-    if (total_alloc == 0) {
-        lke_free_pages(data, data_pages);
-        return -10;
-    }
-
-    mem = (uint8_t *)lke_alloc_pages(total_alloc, &mem_pages);
-    if (!mem) {
-        lke_free_pages(data, data_pages);
-        return -11;
-    }
-
+    rc = -12;
     sec_offsets = (uint64_t *)kmalloc(ehdr->e_shnum * sizeof(uint64_t));
-    if (!sec_offsets) {
-        lke_free_pages(mem, mem_pages);
-        lke_free_pages(data, data_pages);
-        return -12;
-    }
+    if (!sec_offsets) goto fail;
     memset(sec_offsets, 0, ehdr->e_shnum * sizeof(uint64_t));
 
-    offset = 0;
-    for (i = 0; i < ehdr->e_shnum; i++) {
-        sh = &shdr[i];
-        if ((sh->sh_type == SHT_PROGBITS || sh->sh_type == SHT_NOBITS) &&
-            (sh->sh_flags & 0x2)) {
+    for (pass = 0; pass < 2; pass++) {
+        off[0] = off[1] = 0;
+        for (i = 0; i < ehdr->e_shnum; i++) {
+            sh = &shdr[i];
+            if ((sh->sh_type != SHT_PROGBITS && sh->sh_type != SHT_NOBITS) ||
+                !(sh->sh_flags & 0x2))
+                continue;
+            r = lke_is_init_section(data, data_size, ehdr, sh);
+            rc = -10;
             if (sh->sh_addralign > 1) {
                 uint64_t mask = sh->sh_addralign - 1;
-                offset = (offset + mask) & ~mask;
+
+                if ((sh->sh_addralign & mask) != 0 ||
+                    mask > UINT64_MAX - off[r])
+                    goto fail;
+                off[r] = (off[r] + mask) & ~mask;
             }
-            sec_offsets[i] = (uint64_t)(mem + offset) - 0;
-            if (sh->sh_type == SHT_PROGBITS && sh->sh_size > 0) {
-                if (!lke_range_ok(sh->sh_offset, sh->sh_size,
-                                  data_size)) {
-                    kfree(sec_offsets);
-                    lke_free_pages(mem, mem_pages);
-                    lke_free_pages(data, data_pages);
-                    return -7;
+            if (pass) {
+                sec_offsets[i] = (uint64_t)(uintptr_t)(mem[r] + off[r]);
+                if (sh->sh_type == SHT_PROGBITS && sh->sh_size > 0) {
+                    rc = -7;
+                    if (!lke_range_ok(sh->sh_offset, sh->sh_size, data_size))
+                        goto fail;
+                    memcpy(mem[r] + off[r], data + sh->sh_offset, sh->sh_size);
                 }
-                memcpy(mem + offset, data + sh->sh_offset, sh->sh_size);
             }
-            offset += sh->sh_size;
+            if (!lke_add_ok(off[r], sh->sh_size, &off[r])) goto fail;
+        }
+        if (pass) break;
+        size[0] = off[0];
+        size[1] = off[1];
+        rc = -10;
+        if (size[0] == 0) goto fail;
+        rc = -11;
+        mem[0] = (uint8_t *)lke_alloc_pages(size[0], &pages[0]);
+        if (!mem[0]) goto fail;
+        if (size[1]) {
+            mem[1] = (uint8_t *)lke_alloc_pages(size[1], &pages[1]);
+            if (!mem[1]) goto fail;
         }
     }
 
-    symtab_idx = 0;
-    strtab_idx = 0;
+    rc = -13;
+    symtab_sh = NULL;
     for (i = 0; i < ehdr->e_shnum; i++) {
         if (shdr[i].sh_type == SHT_SYMTAB) {
-            if (shdr[i].sh_link >= ehdr->e_shnum) {
-                kfree(sec_offsets);
-                lke_free_pages(mem, mem_pages);
-                lke_free_pages(data, data_pages);
-                return -13;
-            }
-            symtab_idx = i;
-            strtab_idx = shdr[i].sh_link;
+            symtab_sh = &shdr[i];
             break;
         }
     }
-
-    if (symtab_idx == 0) {
-        kfree(sec_offsets);
-        lke_free_pages(mem, mem_pages);
-        lke_free_pages(data, data_pages);
-        return -13;
-    }
-
-    symtab_sh = &shdr[symtab_idx];
-    strtab_sh = &shdr[strtab_idx];
-    if (!lke_range_ok(symtab_sh->sh_offset, symtab_sh->sh_size,
-                      data_size) ||
-        !lke_range_ok(strtab_sh->sh_offset, strtab_sh->sh_size,
-                      data_size)) {
-        kfree(sec_offsets);
-        lke_free_pages(mem, mem_pages);
-        lke_free_pages(data, data_pages);
-        return -13;
-    }
+    if (!symtab_sh || symtab_sh->sh_link >= ehdr->e_shnum) goto fail;
+    strtab_sh = &shdr[symtab_sh->sh_link];
+    if (!lke_range_ok(symtab_sh->sh_offset, symtab_sh->sh_size, data_size) ||
+        !lke_range_ok(strtab_sh->sh_offset, strtab_sh->sh_size, data_size))
+        goto fail;
     strtab = (const char *)(data + strtab_sh->sh_offset);
+    sym_count = symtab_sh->sh_size / sizeof(Elf64_Sym);
 
     for (i = 0; i < ehdr->e_shnum; i++) {
         rela_sh = &shdr[i];
         if (rela_sh->sh_type != SHT_RELA) continue;
         if (rela_sh->sh_info >= ehdr->e_shnum) continue;
         if (sec_offsets[rela_sh->sh_info] == 0) continue;
-        if (!lke_range_ok(rela_sh->sh_offset, rela_sh->sh_size,
-                          data_size)) {
-            kfree(sec_offsets);
-            lke_free_pages(mem, mem_pages);
-            lke_free_pages(data, data_pages);
-            return -7;
-        }
+        rc = -7;
+        if (!lke_range_ok(rela_sh->sh_offset, rela_sh->sh_size, data_size))
+            goto fail;
 
         for (j = 0; j < rela_sh->sh_size / sizeof(Elf64_Rela); j++) {
-            uint64_t sym_count;
-
             rela = (const Elf64_Rela *)(data + rela_sh->sh_offset + j * sizeof(Elf64_Rela));
-            sym_idx = ELF64_R_SYM(rela->r_info);
-            rtype = ELF64_R_TYPE(rela->r_info);
-
-            sym_count = symtab_sh->sh_size / sizeof(Elf64_Sym);
-            if (sym_idx >= sym_count) {
-                kfree(sec_offsets);
-                lke_free_pages(mem, mem_pages);
-                lke_free_pages(data, data_pages);
-                return -14;
-            }
-            sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset + sym_idx * sizeof(Elf64_Sym));
-            if (sym->st_name >= strtab_sh->sh_size) {
-                kfree(sec_offsets);
-                lke_free_pages(mem, mem_pages);
-                lke_free_pages(data, data_pages);
-                return -14;
-            }
+            rc = -14;
+            if (ELF64_R_SYM(rela->r_info) >= sym_count) goto fail;
+            sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset) +
+                  ELF64_R_SYM(rela->r_info);
+            if (sym->st_name >= strtab_sh->sh_size) goto fail;
             sym_name = strtab + sym->st_name;
 
             S = 0;
             if (sym->st_shndx == 0 && sym->st_name != 0) {
-                S = ksym_lookup(sym_name);
+                S = (uint64_t)(uintptr_t)ksym_lookup(sym_name);
                 if (S == 0) {
                     printf("LKE: unresolved symbol: %s\n", sym_name);
-                    kfree(sec_offsets);
-                    lke_free_pages(mem, mem_pages);
-                    lke_free_pages(data, data_pages);
-                    return -14;
+                    goto fail;
                 }
             } else if (sym->st_shndx != 0 && sym->st_shndx < ehdr->e_shnum) {
                 S = sec_offsets[sym->st_shndx] + sym->st_value;
@@ -544,6 +484,7 @@ int lke_load(const char *path) {
             A = (uint64_t)rela->r_addend;
             P = sec_offsets[rela_sh->sh_info] + rela->r_offset;
             target = (uint8_t *)P;
+            rtype = ELF64_R_TYPE(rela->r_info);
 
             if (rtype == R_X86_64_64) {
                 *(uint64_t *)target = S + A;
@@ -554,19 +495,16 @@ int lke_load(const char *path) {
             } else if (rtype == R_X86_64_32S) {
                 *(int32_t *)target = (int32_t)(S + A);
             } else {
-                kfree(sec_offsets);
-                lke_free_pages(mem, mem_pages);
-                lke_free_pages(data, data_pages);
-                return -15;
+                rc = -15;
+                goto fail;
             }
         }
     }
 
-    found_init = 0;
     init_fn = NULL;
     cleanup_fn = NULL;
-    for (i = 0; i < symtab_sh->sh_size / sizeof(Elf64_Sym); i++) {
-        sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset + i * sizeof(Elf64_Sym));
+    for (i = 0; i < sym_count; i++) {
+        sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset) + i;
         if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL) continue;
         if (ELF64_ST_TYPE(sym->st_info) != STT_FUNC) continue;
         if (sym->st_shndx == 0 || sym->st_shndx >= ehdr->e_shnum) continue;
@@ -575,43 +513,37 @@ int lke_load(const char *path) {
         if (strcmp(sym_name, "lke_module_init") == 0) {
             init_fn = (int (*)(void))(
                 sec_offsets[sym->st_shndx] + sym->st_value);
-            found_init = 1;
         } else if (strcmp(sym_name, "lke_module_cleanup") == 0) {
             cleanup_fn = (void (*)(void))(
                 sec_offsets[sym->st_shndx] + sym->st_value);
         }
     }
 
-    kfree(sec_offsets);
-    lke_free_pages(data, data_pages);
-
-    if (!found_init) {
-        lke_free_pages(mem, mem_pages);
-        return -16;
-    }
-
+    rc = -16;
+    if (!init_fn) goto fail;
+    rc = -2;
     mod_name = (char *)kmalloc(mod_name_len + 1);
-    if (!mod_name) {
-        lke_free_pages(mem, mem_pages);
-        return -2;
-    }
+    if (!mod_name) goto fail;
     memcpy(mod_name, bname, mod_name_len);
     mod_name[mod_name_len] = '\0';
 
     mod = lke_new_slot();
     if (!mod) {
         kfree(mod_name);
-        lke_free_pages(mem, mem_pages);
-        return -2;
+        goto fail;
     }
-    memset(mod, 0, sizeof(lke_module_t));
+    kfree(sec_offsets);
+    lke_free_pages(data, data_pages);
+
     mod->name = mod_name;
-    mod->text_base = mem;
-    mod->text_pages = mem_pages;
+    mod->text_base = mem[0];
+    mod->text_pages = pages[0];
     mod->cleanup = cleanup_fn;
 
     lke_count++;
-    if (init_fn() != 0) {
+    rc = init_fn();
+    lke_free_pages(mem[1], pages[1]);
+    if (rc != 0) {
         int k;
 
         lke_count--;
@@ -625,14 +557,22 @@ int lke_load(const char *path) {
         }
         kfree(mod->owned_syscalls);
         kfree(mod->name);
-        lke_free_pages(mem, mem_pages);
+        lke_free_pages(mem[0], pages[0]);
         memset(mod, 0, sizeof(lke_module_t));
         lke_shrink_registry();
         return -17;
     }
 
-    printf("LKE: loaded '%s' (%llu bytes)\n", mod->name, (unsigned long long)total_alloc);
+    printf("LKE: loaded '%s' (%llu bytes)\n", mod->name,
+           (unsigned long long)size[0]);
     return 0;
+
+fail:
+    kfree(sec_offsets);
+    lke_free_pages(mem[1], pages[1]);
+    lke_free_pages(mem[0], pages[0]);
+    lke_free_pages(data, data_pages);
+    return rc;
 }
 
 int lke_unload(const char *name) {
@@ -644,10 +584,8 @@ int lke_unload(const char *name) {
     mod = lke_find_by_name(name);
     if (!mod) return -2;
     idx = (size_t)(mod - modules);
-    if (mod->owned_count > 0) return -16;
-    if (mod->cleanup) {
-        mod->cleanup();
-    }
+    if (mod->owned_count > 0 || !mod->cleanup) return -16;
+    mod->cleanup();
 
     if (mod->text_base) {
         lke_free_pages(mod->text_base, mod->text_pages);

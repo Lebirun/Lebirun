@@ -10,6 +10,7 @@
 #include <lebirun/timekeeping.h>
 #include <lebirun/drivers/i2c/dw-i2c.h>
 #include <lebirun/drivers/i2c/i2c-hid.h>
+#include <lebirun/lke.h>
 
 #define TLC_POINTER       0x00010001u
 #define TLC_MOUSE         0x00010002u
@@ -711,7 +712,7 @@ static void KERNEL_INIT i2c_hid_scan(i2c_hid_cands_t *l) {
     }
 }
 
-void KERNEL_INIT i2c_hid_init(void) {
+int KERNEL_INIT i2c_hid_init(void) {
     static const uint8_t fallback[] KERNEL_INIT_RODATA = {
         0x2C, 0x15, 0x10, 0x2A, 0x20, 0x38
     };
@@ -721,7 +722,7 @@ void KERNEL_INIT i2c_hid_init(void) {
     i2c_hid_cands_t l;
     uint32_t i;
 
-    if (!dw_i2c_init()) return;
+    if (!dw_i2c_init()) return -1;
     memset(&l, 0, sizeof(l));
     acpi_scan_devices(ids, i2c_hid_acpi_res, &l);
     i2c_hid_scan(&l);
@@ -734,7 +735,16 @@ void KERNEL_INIT i2c_hid_init(void) {
     kfree(l.fast);
     if (!i2c_hid_devs) {
         dw_i2c_release();
-        return;
+        return -1;
     }
     pit_register_callback(i2c_hid_poll, 1, false);
+    return 0;
 }
+
+#ifndef __is_kernel
+module_init(i2c_hid_init);
+LKE_NAME("i2c");
+LKE_DESC("DesignWare I2C and I2C HID drivers");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

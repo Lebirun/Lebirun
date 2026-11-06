@@ -20,7 +20,7 @@ typedef struct lke_module {
 
 typedef struct lke_ksym {
     const char *name;
-    uint64_t addr;
+    const void *addr;
 } lke_ksym_t;
 
 #ifdef __is_kernel
@@ -29,7 +29,7 @@ int lke_load(const char *path);
 int lke_unload(const char *name);
 int lke_list(char *buf, int size);
 void lke_autoload(void);
-void lke_register_symbol(const char *name, void *addr);
+void lke_boot_done(void);
 int lke_register_syscall(int num, void *fn);
 void lke_unregister_syscall(int num, void *fn);
 #else

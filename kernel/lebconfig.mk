@@ -1,27 +1,50 @@
 CONFIG_FILE := $(if $(wildcard ../.config),../.config,../.config.default)
 
-define read_bool
-$(if $(filter y yes 1 true enable enabled,$(shell if [ -f "$(CONFIG_FILE)" ] && grep -q '^$(1)=' "$(CONFIG_FILE)" 2>/dev/null; then grep '^$(1)=' "$(CONFIG_FILE)" 2>/dev/null | tail -n 1 | cut -d= -f2; elif [ -f "../.config.default" ]; then grep '^$(1)=' "../.config.default" 2>/dev/null | tail -n 1 | cut -d= -f2; fi)),1,0)
+define read_value
+$(strip $(subst ",,$(shell if [ -f "$(CONFIG_FILE)" ] && grep -q '^$(1)=' "$(CONFIG_FILE)" 2>/dev/null; then grep '^$(1)=' "$(CONFIG_FILE)" 2>/dev/null | tail -n 1 | cut -d= -f2; elif [ -f "../.config.default" ]; then grep '^$(1)=' "../.config.default" 2>/dev/null | tail -n 1 | cut -d= -f2; fi)))
 endef
 
+define read_bool
+$(if $(filter y yes 1 true enable enabled,$(call read_value,$(1))),1,0)
+endef
+
+define read_tristate
+$(if $(filter m module,$(call read_value,$(1))),$(if $(filter 1,$(CONFIG_KERNEL_LKE)),m,y),$(if $(filter 1,$(call read_bool,$(1))),y,n))
+endef
+
+CONFIG_KERNEL_LKE := $(call read_bool,KERNEL_LKE)
 CONFIG_VIRT_VFL := $(call read_bool,VIRT_VFL)
 CONFIG_VFL_DEBUG := $(if $(filter 1,$(CONFIG_VIRT_VFL)),$(call read_bool,VFL_DEBUG),0)
 CONFIG_VFL_SNAPSHOT := $(if $(filter 1,$(CONFIG_VIRT_VFL)),$(call read_bool,VFL_SNAPSHOT),0)
 CONFIG_KERNEL_PTRACE := $(call read_bool,KERNEL_PTRACE)
-CONFIG_DRIVER_AHCI := $(call read_bool,DRIVER_AHCI)
-CONFIG_DRIVER_NVME := $(call read_bool,DRIVER_NVME)
+DRIVER_AHCI := $(call read_tristate,DRIVER_AHCI)
+DRIVER_NVME := $(call read_tristate,DRIVER_NVME)
+DRIVER_XHCI := $(call read_tristate,DRIVER_XHCI)
+DRIVER_DW_I2C := $(call read_tristate,DRIVER_DW_I2C)
+DRIVER_NET := $(call read_bool,DRIVER_NET)
+DRIVER_NET_E1000 := $(if $(filter 1,$(DRIVER_NET)),$(call read_tristate,DRIVER_NET_E1000),n)
+DRIVER_NET_VIRTIO := $(if $(filter 1,$(DRIVER_NET)),$(call read_tristate,DRIVER_NET_VIRTIO),n)
+CONFIG_DRIVER_AHCI := $(if $(filter y,$(DRIVER_AHCI)),1,0)
+CONFIG_DRIVER_AHCI_MODULE := $(if $(filter m,$(DRIVER_AHCI)),1,0)
+CONFIG_DRIVER_NVME := $(if $(filter y,$(DRIVER_NVME)),1,0)
+CONFIG_DRIVER_NVME_MODULE := $(if $(filter m,$(DRIVER_NVME)),1,0)
 CONFIG_DRIVER_PS2_KEYBOARD := $(call read_bool,DRIVER_PS2_KEYBOARD)
 CONFIG_DRIVER_PS2_MOUSE := $(call read_bool,DRIVER_PS2_MOUSE)
-CONFIG_DRIVER_NET := $(call read_bool,DRIVER_NET)
-CONFIG_DRIVER_NET_E1000 := $(call read_bool,DRIVER_NET_E1000)
-CONFIG_DRIVER_NET_VIRTIO := $(call read_bool,DRIVER_NET_VIRTIO)
-CONFIG_DRIVER_XHCI := $(call read_bool,DRIVER_XHCI)
-CONFIG_DRIVER_USB_HID_KBD := $(call read_bool,DRIVER_USB_HID_KBD)
-CONFIG_DRIVER_USB_HID_MOUSE := $(call read_bool,DRIVER_USB_HID_MOUSE)
-CONFIG_DRIVER_USB_HOTPLUG := $(if $(filter 1,$(CONFIG_DRIVER_XHCI)),$(call read_bool,DRIVER_USB_HOTPLUG),0)
-CONFIG_DRIVER_USB_STORAGE := $(if $(filter 1,$(CONFIG_DRIVER_XHCI)),$(call read_bool,DRIVER_USB_STORAGE),0)
-CONFIG_DRIVER_DW_I2C := $(call read_bool,DRIVER_DW_I2C)
-CONFIG_DRIVER_I2C_HID := $(if $(filter 1,$(CONFIG_DRIVER_DW_I2C)),$(call read_bool,DRIVER_I2C_HID),0)
+CONFIG_DRIVER_NET := $(DRIVER_NET)
+CONFIG_DRIVER_NET_E1000 := $(if $(filter y,$(DRIVER_NET_E1000)),1,0)
+CONFIG_DRIVER_NET_E1000_MODULE := $(if $(filter m,$(DRIVER_NET_E1000)),1,0)
+CONFIG_DRIVER_NET_VIRTIO := $(if $(filter y,$(DRIVER_NET_VIRTIO)),1,0)
+CONFIG_DRIVER_NET_VIRTIO_MODULE := $(if $(filter m,$(DRIVER_NET_VIRTIO)),1,0)
+CONFIG_DRIVER_XHCI := $(if $(filter y,$(DRIVER_XHCI)),1,0)
+CONFIG_DRIVER_XHCI_MODULE := $(if $(filter m,$(DRIVER_XHCI)),1,0)
+CONFIG_DRIVER_USB_HID_KBD := $(if $(filter y m,$(DRIVER_XHCI)),$(call read_bool,DRIVER_USB_HID_KBD),0)
+CONFIG_DRIVER_USB_HID_MOUSE := $(if $(filter y m,$(DRIVER_XHCI)),$(call read_bool,DRIVER_USB_HID_MOUSE),0)
+CONFIG_DRIVER_USB_HOTPLUG := $(if $(filter y m,$(DRIVER_XHCI)),$(call read_bool,DRIVER_USB_HOTPLUG),0)
+CONFIG_DRIVER_USB_STORAGE := $(if $(filter y m,$(DRIVER_XHCI)),$(call read_bool,DRIVER_USB_STORAGE),0)
+CONFIG_DRIVER_DW_I2C := $(if $(filter y,$(DRIVER_DW_I2C)),1,0)
+CONFIG_DRIVER_DW_I2C_MODULE := $(if $(filter m,$(DRIVER_DW_I2C)),1,0)
+CONFIG_DRIVER_I2C_HID := $(if $(filter y m,$(DRIVER_DW_I2C)),$(call read_bool,DRIVER_I2C_HID),0)
+CONFIG_DRIVER_MODULES := $(if $(filter m,$(DRIVER_AHCI) $(DRIVER_NVME) $(DRIVER_XHCI) $(DRIVER_DW_I2C) $(DRIVER_NET_E1000) $(DRIVER_NET_VIRTIO)),1,0)
 CONFIG_DRIVER_VIRTIO_VGA := $(call read_bool,DRIVER_VIRTIO_VGA)
 CONFIG_DRIVER_VIRTIO_GPU_PCI := $(call read_bool,DRIVER_VIRTIO_GPU_PCI)
 CONFIG_DRIVER_VGA := $(call read_bool,DRIVER_VGA)
@@ -31,7 +54,6 @@ CONFIG_FS_FAT := $(call read_bool,FS_FAT)
 CONFIG_FS_EXFAT := $(call read_bool,FS_EXFAT)
 CONFIG_FS_FUSE := $(call read_bool,FS_FUSE)
 CONFIG_FS_ISO9660 := $(call read_bool,FS_ISO9660)
-CONFIG_KERNEL_LKE := $(call read_bool,KERNEL_LKE)
 
 CPPFLAGS:=$(CPPFLAGS) \
 	-DCONFIG_VIRT_VFL=$(CONFIG_VIRT_VFL) \
@@ -39,22 +61,29 @@ CPPFLAGS:=$(CPPFLAGS) \
 	-DCONFIG_VFL_SNAPSHOT=$(CONFIG_VFL_SNAPSHOT) \
 	-DCONFIG_KERNEL_PTRACE=$(CONFIG_KERNEL_PTRACE) \
 	-DCONFIG_DRIVER_AHCI=$(CONFIG_DRIVER_AHCI) \
+	-DCONFIG_DRIVER_AHCI_MODULE=$(CONFIG_DRIVER_AHCI_MODULE) \
 	-DCONFIG_DRIVER_NVME=$(CONFIG_DRIVER_NVME) \
+	-DCONFIG_DRIVER_NVME_MODULE=$(CONFIG_DRIVER_NVME_MODULE) \
 	-DCONFIG_DRIVER_PS2_KEYBOARD=$(CONFIG_DRIVER_PS2_KEYBOARD) \
 	-DCONFIG_DRIVER_PS2_MOUSE=$(CONFIG_DRIVER_PS2_MOUSE) \
 	-DCONFIG_DRIVER_NET=$(CONFIG_DRIVER_NET) \
 	-DCONFIG_DRIVER_NET_E1000=$(CONFIG_DRIVER_NET_E1000) \
+	-DCONFIG_DRIVER_NET_E1000_MODULE=$(CONFIG_DRIVER_NET_E1000_MODULE) \
 	-DCONFIG_DRIVER_NET_VIRTIO=$(CONFIG_DRIVER_NET_VIRTIO) \
+	-DCONFIG_DRIVER_NET_VIRTIO_MODULE=$(CONFIG_DRIVER_NET_VIRTIO_MODULE) \
 	-DCONFIG_DRIVER_XHCI=$(CONFIG_DRIVER_XHCI) \
+	-DCONFIG_DRIVER_XHCI_MODULE=$(CONFIG_DRIVER_XHCI_MODULE) \
 	-DCONFIG_DRIVER_USB_HID_KBD=$(CONFIG_DRIVER_USB_HID_KBD) \
 	-DCONFIG_DRIVER_USB_HID_MOUSE=$(CONFIG_DRIVER_USB_HID_MOUSE) \
 	-DCONFIG_DRIVER_USB_STORAGE=$(CONFIG_DRIVER_USB_STORAGE) \
 	-DCONFIG_DRIVER_USB_HOTPLUG=$(CONFIG_DRIVER_USB_HOTPLUG) \
 	-DCONFIG_DRIVER_DW_I2C=$(CONFIG_DRIVER_DW_I2C) \
+	-DCONFIG_DRIVER_DW_I2C_MODULE=$(CONFIG_DRIVER_DW_I2C_MODULE) \
 	-DCONFIG_DRIVER_I2C_HID=$(CONFIG_DRIVER_I2C_HID) \
 	-DCONFIG_DRIVER_VIRTIO_VGA=$(CONFIG_DRIVER_VIRTIO_VGA) \
 	-DCONFIG_DRIVER_VIRTIO_GPU_PCI=$(CONFIG_DRIVER_VIRTIO_GPU_PCI) \
 	-DCONFIG_DRIVER_VGA=$(CONFIG_DRIVER_VGA) \
+	-DCONFIG_DRIVER_MODULES=$(CONFIG_DRIVER_MODULES) \
 	-DCONFIG_MODULE_IPV67=$(CONFIG_MODULE_IPV67) \
 	-DCONFIG_FS_EXT4=$(CONFIG_FS_EXT4) \
 	-DCONFIG_FS_FAT=$(CONFIG_FS_FAT) \
