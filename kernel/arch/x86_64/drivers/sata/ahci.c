@@ -5,6 +5,7 @@
 #include <lebirun/tty.h>
 #include <lebirun/idt.h>
 #include <lebirun/pit.h>
+#include <lebirun/lke.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -1802,3 +1803,11 @@ void ahci_smart_print(smart_data_t *data) {
                (unsigned long long)raw_val);
     }
 }
+
+#ifndef __is_kernel
+module_init(ahci_init);
+LKE_NAME("ahci");
+LKE_DESC("AHCI SATA storage driver");
+LKE_LICENSE("GPLv2");
+LKE_VERSION_STR("1.0.0");
+#endif

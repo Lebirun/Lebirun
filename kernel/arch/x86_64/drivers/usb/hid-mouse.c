@@ -32,6 +32,7 @@ void usb_hid_mouse_report(uint8_t *r, uint64_t mps) {
     int8_t z;
 
     hid_mouse_last_ns = hid_mouse_now_ns();
+    mouse_usb_recent = usb_hid_mouse_recent;
     buttons = (uint8_t)(r[0] & 0x07);
     dx = (int8_t)r[1];
     dy = (int8_t)(0 - (int)(int8_t)r[2]);
@@ -90,6 +91,7 @@ void usb_hid_mouse_abs_report(uint8_t *r, uint16_t x_off, uint8_t x_len,
 
     if (!r || !x_len || !y_len || x_len > 32 || y_len > 32 || !max) return;
     hid_mouse_last_ns = hid_mouse_now_ns();
+    mouse_usb_recent = usb_hid_mouse_recent;
     dev = evdev_get_mouse();
     if (!dev) return;
     evdev_mouse_set_abs((int32_t)max);

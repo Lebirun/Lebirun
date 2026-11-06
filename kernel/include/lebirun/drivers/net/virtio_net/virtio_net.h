@@ -14,4 +14,6 @@ int virtio_net_send(netif_t *netif, uint8_t *data, uint64_t len);
 int virtio_net_poll(netif_t *netif);
 void virtio_net_irq_handler(void *regs);
 
+extern net_driver_t virtio_net_driver;
+
 #endif

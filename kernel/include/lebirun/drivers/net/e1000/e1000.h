@@ -187,4 +187,6 @@ void e1000_print_status(e1000_device_t *dev);
 e1000_device_t *e1000_get_device(void);
 uint64_t e1000_get_allocated_pages(void);
 
+extern net_driver_t e1000_driver;
+
 #endif

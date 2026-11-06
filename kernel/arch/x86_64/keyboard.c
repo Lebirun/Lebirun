@@ -4,9 +4,6 @@
 #if CONFIG_DRIVER_PS2_MOUSE
 #include <lebirun/mouse.h>
 #endif
-#if CONFIG_DRIVER_USB_HID_KBD
-#include <lebirun/drivers/usb/hid.h>
-#endif
 #include <lebirun/task.h>
 #include <lebirun/console.h>
 #include <lebirun/cmdline.h>
@@ -182,6 +179,7 @@ static bool caps_lock = false;
 static bool e0_prefix = false;
 
 static keyboard_observer_t kbd_observer = NULL;
+int (*keyboard_usb_recent)(void);
 
 extern void serial_write_direct(const char *buf, size_t len);
 
@@ -534,9 +532,7 @@ void keyboard_handler(registers_t* regs) {
     }
 #endif
     sc = inb(0x60);
-#if CONFIG_DRIVER_USB_HID_KBD
-    if (usb_hid_kbd_recent()) return;
-#endif
+    if (keyboard_usb_recent && keyboard_usb_recent()) return;
     keyboard_feed_ps2(sc);
 }
 

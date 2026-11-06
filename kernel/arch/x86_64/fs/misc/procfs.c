@@ -1703,7 +1703,9 @@ static uint64_t proc_memdetail_read(vfs_node_t *node, uint64_t offset,
     snapshot.heap_used = kernel_heap.used_size;
     snapshot.heap_total = kernel_heap.total_size;
     snapshot.slab_pages = slab_get_total_pages();
+#if CONFIG_DRIVER_AHCI
     snapshot.ahci_pages = ahci_get_allocated_pages();
+#endif
     snapshot.sqfs_module_pages = squashfs_get_module_pages();
     snapshot.pt_pt_pages = pt_vmm_pt_count;
     snapshot.pt_heap_pt = pt_get_heap_pt_count();

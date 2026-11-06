@@ -414,6 +414,16 @@ static inline int ipv6_eq(ipv6_addr_t a, ipv6_addr_t b) {
 #define IPV4_ZERO IPV4_ADDR(0,0,0,0)
 #define IPV4_BROADCAST IPV4_ADDR(255,255,255,255)
 
+typedef struct net_driver {
+    uint16_t vendor;
+    const uint16_t *devices;
+    int (*init_at)(uint8_t bus, uint8_t slot, uint8_t func);
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t func;
+    struct net_driver *next;
+} net_driver_t;
+
 extern const mac_addr_t MAC_BROADCAST;
 extern const mac_addr_t MAC_ZERO;
 extern const ipv6_addr_t IPV6_ZERO;

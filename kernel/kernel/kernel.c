@@ -47,6 +47,7 @@
 #include <lebirun/watchdog.h>
 #include <lebirun/multiboot2.h>
 #include <lebirun/security.h>
+#include <lebirun/lke.h>
 #include "launch_user.h"
 
 extern uint64_t boot_pml4[512] __attribute__((aligned(4096)));
@@ -71,6 +72,19 @@ static void KERNEL_INIT kernel_storage_init(void) {
     nvme_init();
 #endif
 }
+
+#if CONFIG_KERNEL_LKE
+static void KERNEL_INIT kernel_lke_autoload(void) {
+#if CONFIG_DRIVER_AHCI_MODULE
+    lke_load(KERNEL_INIT_STRING(LKE_DIR "/ahci.lke"));
+#endif
+#if CONFIG_DRIVER_NVME_MODULE
+    lke_load(KERNEL_INIT_STRING(LKE_DIR "/nvme.lke"));
+#endif
+    if (cmdline_get_lke())
+        lke_autoload();
+}
+#endif
 
 static void KERNEL_INIT kernel_add_disks(int *fs_ready, int force) {
     if (!blkdev_count() && !force) return;
@@ -162,6 +176,9 @@ static void kernel_reclaim_runtime_memory(void) {
     uint64_t address;
     int reclaim_optional;
 
+#if CONFIG_KERNEL_LKE
+    lke_boot_done();
+#endif
     reclaim_optional = klog_early_storage_reclaimable() &&
                        syscall_core_fallback_reclaimable() &&
                        console_fallback_reclaimable();
@@ -483,8 +500,7 @@ static void KERNEL_INIT kernel_boot(void) {
         kernel_storage_init();
 
 #if CONFIG_KERNEL_LKE
-        if (cmdline_get_lke())
-            lke_autoload();
+        kernel_lke_autoload();
 #endif
     } else {
         root_dev = cmdline_get_root();
@@ -612,8 +628,7 @@ static void KERNEL_INIT kernel_boot(void) {
             if (mount_ret != 0)
                 KERNEL_INIT_LOG("BOOT: failed to mount tmpfs on /dev/shm\n");
 #if CONFIG_KERNEL_LKE
-            if (cmdline_get_lke())
-                lke_autoload();
+            kernel_lke_autoload();
 #endif
         } else {
             KERNEL_INIT_LOG("No multiboot modules present (mod_count=%u)\n", mod_count);
@@ -659,14 +674,26 @@ static void KERNEL_INIT kernel_boot(void) {
 #if CONFIG_DRIVER_XHCI
     kernel_add_disks(&fs_ready, xhci_init() == 0 &&
                      CONFIG_DRIVER_USB_HOTPLUG && CONFIG_DRIVER_USB_STORAGE);
+#elif CONFIG_DRIVER_XHCI_MODULE
+    kernel_add_disks(&fs_ready,
+                     lke_load(KERNEL_INIT_STRING(LKE_DIR "/xhci.lke")) == 0 &&
+                     CONFIG_DRIVER_USB_HOTPLUG && CONFIG_DRIVER_USB_STORAGE);
 #endif
 
-#if CONFIG_DRIVER_I2C_HID
+#if CONFIG_DRIVER_I2C_HID && CONFIG_DRIVER_DW_I2C
     i2c_hid_init();
+#elif CONFIG_DRIVER_I2C_HID
+    lke_load(KERNEL_INIT_STRING(LKE_DIR "/i2c.lke"));
 #endif
 
 #if CONFIG_DRIVER_NET
     net_init();
+#if CONFIG_DRIVER_NET_VIRTIO_MODULE
+    lke_load(KERNEL_INIT_STRING(LKE_DIR "/virtio_net.lke"));
+#endif
+#if CONFIG_DRIVER_NET_E1000_MODULE
+    lke_load(KERNEL_INIT_STRING(LKE_DIR "/e1000.lke"));
+#endif
 #else
     KERNEL_INIT_LOG("NET: Network stack disabled\n");
 #endif

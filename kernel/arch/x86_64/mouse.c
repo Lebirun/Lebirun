@@ -1,9 +1,6 @@
 #include <lebirun/io.h>
 #include <lebirun/mouse.h>
 #include <lebirun/idt.h>
-#if CONFIG_DRIVER_USB_HID_MOUSE
-#include <lebirun/drivers/usb/hid.h>
-#endif
 #include <lebirun/task.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/spinlock.h>
@@ -24,6 +21,7 @@ static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
 static uint32_t ring_capacity;
 static spinlock_t mouse_lock = {0};
+int (*mouse_usb_recent)(void);
 
 static uint64_t mouse_irqsave(void) {
     uint64_t flags;
@@ -142,9 +140,7 @@ void mouse_handler(registers_t *regs) {
 
     data = inb(PS2_DATA_PORT);
 
-#if CONFIG_DRIVER_USB_HID_MOUSE
-    if (usb_hid_mouse_recent()) return;
-#endif
+    if (mouse_usb_recent && mouse_usb_recent()) return;
 
     complete = 0;
     switch (mouse_cycle) {

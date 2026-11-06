@@ -44,6 +44,7 @@ static const uint16_t hid_to_ps2[98] = {
 
 static void hid_feed(uint8_t code, uint8_t ext, uint8_t release) {
     hid_last_ns = hid_now_ns();
+    keyboard_usb_recent = usb_hid_kbd_recent;
     if (ext) keyboard_feed_ps2(0xE0);
     keyboard_feed_ps2(release ? (uint8_t)(code | 0x80) : code);
 }

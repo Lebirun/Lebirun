@@ -30,6 +30,7 @@ typedef void (*keyboard_observer_t)(struct keyboard_event event);
 
 void keyboard_handler(registers_t* regs); 
 void keyboard_feed_ps2(uint8_t scancode);
+extern int (*keyboard_usb_recent)(void);
 void keyboard_init(void);
 
 int keyboard_has_data(void);
