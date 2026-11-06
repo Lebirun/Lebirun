@@ -1,7 +1,10 @@
 #include "syscall_defs.h"
+#include <lebirun/creds.h>
 
 static int sys_sata_test(int unused1, const char *unused2, int unused3) {
     (void)unused1; (void)unused2; (void)unused3;
+    if (!current_task || !creds_has_capability(current_task, 21))
+        return -EPERM;
     return ahci_test_rw();
 }
 
@@ -50,6 +53,8 @@ static int sys_sata_smart(int port_num, const char *unused2, int unused3) {
 
 static int sys_sata_irq(int enable, const char *unused2, int unused3) {
     (void)unused2; (void)unused3;
+    if (!current_task || !creds_has_capability(current_task, 21))
+        return -EPERM;
     if (enable) {
         ahci_enable_interrupts();
     } else {
@@ -60,8 +65,17 @@ static int sys_sata_irq(int enable, const char *unused2, int unused3) {
 
 static int sys_blockdev_rescan(uint64_t devname_ptr, const char *unused2,
                                int unused3) {
+    char *devname;
+    int result;
+
     (void)unused2; (void)unused3;
-    return devfs_rescan_partitions((const char *)(uintptr_t)devname_ptr);
+    if (!current_task || !creds_has_capability(current_task, 21))
+        return -EPERM;
+    devname = copy_string_from_user_alloc((const char *)(uintptr_t)devname_ptr);
+    if (!devname) return -EFAULT;
+    result = devfs_rescan_partitions(devname);
+    kfree(devname);
+    return result;
 }
 
 void syscalls_sata_init(void) {

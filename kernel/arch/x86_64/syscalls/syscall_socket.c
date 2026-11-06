@@ -150,6 +150,24 @@ struct sockaddr_in6 {
     uint32_t sin6_scope_id;
 };
 
+typedef struct {
+    union {
+        struct sockaddr_un un;
+        struct sockaddr_in in;
+        struct sockaddr_in6 in6;
+    } u;
+    char nul;
+} socket_addr_copy_t;
+
+static int socket_copy_addr(socket_addr_copy_t *sa, const char *addr_ptr,
+                            int addrlen) {
+    memset(sa, 0, sizeof(*sa));
+    if (!addr_ptr || addrlen <= 0) return 0;
+    return copy_from_user(&sa->u, addr_ptr,
+                          (size_t)addrlen < sizeof(sa->u) ?
+                          (size_t)addrlen : sizeof(sa->u)) < 0 ? -EFAULT : 0;
+}
+
 struct iovec {
     void *iov_base;
     size_t iov_len;
@@ -1054,7 +1072,7 @@ static int socket_set_sun_path_abs(socket_t *sock, const char *raw, size_t raw_l
     new_path = (char *)kmalloc(n + 2);
     if (!new_path) return -ENOMEM;
     new_path[0] = '@';
-    memcpy(new_path + 1, raw + 1, n - 1);
+    memcpy(new_path + 1, raw + 3, n - 1);
     new_path[n] = '\0';
     kfree(sock->sun_path);
     sock->sun_path = new_path;
@@ -1092,6 +1110,12 @@ static int socket_create_path_node(const char *path) {
     }
     parent = vfs_namei(parent_path);
     if (!parent) return -ENOENT;
+    result = vfs_get_mount_flags_for_node(parent) & VFS_MS_RDONLY ? -EROFS :
+             vfs_check_perm(parent, VFS_PERM_WRITE | VFS_PERM_EXEC);
+    if (result < 0) {
+        vfs_release(parent);
+        return result;
+    }
     result = vfs_mknod(parent, name, S_IFSOCK | 0777);
     if (result < 0)
         result = vfs_create(parent, name, VFS_CREATE_SOCKET | 0777);
@@ -1129,11 +1153,13 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     struct sockaddr_in *addr;
     struct sockaddr_in6 *addr6;
     struct sockaddr_un *uaddr;
+    socket_addr_copy_t sa;
     socket_t *sock;
     int path_result;
     int result;
 
-    result = 0;
+    result = socket_copy_addr(&sa, addr_ptr, addrlen);
+    if (result < 0) return result;
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
     if (!sock) {
@@ -1147,7 +1173,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     }
     
     if (sock->domain == AF_UNIX) {
-        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        uaddr = addr_ptr ? &sa.u.un : NULL;
         if (!uaddr || addrlen < 3) {
             result = -EINVAL;
             goto out;
@@ -1183,7 +1209,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
     }
     
     if (sock->domain == AF_INET6) {
-        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
+        addr6 = addr_ptr ? &sa.u.in6 : NULL;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
             result = -EINVAL;
             goto out;
@@ -1196,7 +1222,7 @@ static int sys_bind(int sockfd, const char *addr_ptr, int addrlen) {
         goto out;
     }
 
-    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = addr_ptr ? &sa.u.in : NULL;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         result = -EINVAL;
         goto out;
@@ -1240,7 +1266,15 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     tcp_socket_t *tcp;
     uint16_t remote_port;
     pid_t listener_pid;
+    socket_addr_copy_t sa;
+    char abs_name[UNIX_PATH_MAX + 1];
+    const char *upath;
+    vfs_node_t *node;
+    uint32_t mapped_addr;
+    size_t n;
 
+    i = socket_copy_addr(&sa, addr_ptr, addrlen);
+    if (i < 0) return i;
     spin_lock(&socket_table_lock);
     sock = get_socket(sockfd);
     if (!sock) {
@@ -1260,14 +1294,31 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     }
     
     if (sock->domain == AF_UNIX) {
-        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
+        uaddr = addr_ptr ? &sa.u.un : NULL;
         if (!uaddr || addrlen < 3) {
             spin_unlock(&socket_table_lock);
             return -EINVAL;
         }
         spin_unlock(&socket_table_lock);
-        if (!socket_path_node_exists(uaddr->sun_path))
-            return -ECONNREFUSED;
+        upath = uaddr->sun_path;
+        if (!upath[0]) {
+            n = (size_t)addrlen > UNIX_PATH_MAX + 2 ? UNIX_PATH_MAX :
+                (size_t)addrlen - 2;
+            if (n >= UNIX_PATH_MAX) n = UNIX_PATH_MAX - 1;
+            abs_name[0] = '@';
+            memcpy(abs_name + 1, upath + 1, n - 1);
+            abs_name[n] = '\0';
+            upath = abs_name;
+        } else {
+            node = vfs_namei(upath);
+            if (!node || VFS_GET_TYPE(node->flags) != VFS_SOCKET) {
+                vfs_release(node);
+                return -ECONNREFUSED;
+            }
+            i = vfs_check_perm(node, VFS_PERM_WRITE);
+            vfs_release(node);
+            if (i < 0) return i;
+        }
         spin_lock(&socket_table_lock);
         sock = get_socket(sockfd);
         if (!sock || sock->state == SOCKSTATE_CONNECTED ||
@@ -1275,7 +1326,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
             spin_unlock(&socket_table_lock);
             return -ECONNREFUSED;
         }
-        listener_idx = find_unix_listener(uaddr->sun_path);
+        listener_idx = find_unix_listener(upath);
         if (listener_idx < 0) {
             spin_unlock(&socket_table_lock);
             return -ECONNREFUSED;
@@ -1332,13 +1383,13 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         sockets[peer_idx].peer_pid = sock->owner_pid;
         sockets[peer_idx].peer_uid = current_task ? current_task->euid : 0;
         sockets[peer_idx].peer_gid = current_task ? current_task->egid : 0;
-        if (socket_set_sun_path(&sockets[peer_idx], uaddr->sun_path) < 0) {
+        if (socket_set_sun_path(&sockets[peer_idx], upath) < 0) {
             free_socket(peer_idx, 0);
             socket_reclaim_storage();
             spin_unlock(&socket_table_lock);
             return -ENOMEM;
         }
-        if (socket_set_sun_path(sock, uaddr->sun_path) < 0) {
+        if (socket_set_sun_path(sock, upath) < 0) {
             free_socket(peer_idx, 0);
             socket_reclaim_storage();
             spin_unlock(&socket_table_lock);
@@ -1372,7 +1423,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
     }
     if (sock->domain == AF_INET6) {
         uint8_t *b;
-        addr6 = (struct sockaddr_in6 *)(uintptr_t)addr_ptr;
+        addr6 = addr_ptr ? &sa.u.in6 : NULL;
         if (!addr6 || addrlen < (int)sizeof(struct sockaddr_in6)) {
             spin_unlock(&socket_table_lock);
             return -EINVAL;
@@ -1382,71 +1433,17 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
             return -EAFNOSUPPORT;
         }
         b = addr6->sin6_addr.s6_addr;
-        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
-            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
-            b[8] == 0 && b[9] == 0 && b[10] == 0xFF && b[11] == 0xFF &&
-            !sock->ipv6_v6only) {
-            uint32_t v4 = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
-                          ((uint32_t)b[14] << 8) | b[15];
-            sock->remote_addr = v4;
-            sock->remote_port = ntohs(addr6->sin6_port);
-            if (sock->state == SOCKSTATE_CLOSED && sock->type != SOCK_DGRAM) {
-                sock->local_port = alloc_ephemeral_port();
-            }
-            if (sock->type == SOCK_DGRAM) {
-                if (!sock->udp) {
-                    sock->udp = udp_socket_create(sock->local_port);
-                    if (!sock->udp) {
-                        spin_unlock(&socket_table_lock);
-                        return -EADDRINUSE;
-                    }
-                    sock->local_port = sock->udp->local_port;
-                }
-                sock->state = SOCKSTATE_CONNECTED;
-                spin_unlock(&socket_table_lock);
-                return 0;
-            }
-            sock->tcp = tcp_socket_create();
-            if (!sock->tcp) {
-                spin_unlock(&socket_table_lock);
-                return -ENOMEM;
-            }
-            sock->tcp->ttl = (uint8_t)sock->ip_ttl;
-            sock->tcp->keepalive = (uint8_t)(sock->so_keepalive ? 1 : 0);
-            sock->tcp->cork = (uint8_t)(sock->tcp_cork ? 1 : 0);
-            sock->tcp->fastopen = (uint8_t)(sock->tcp_fastopen ? 1 : 0);
-            sock->tcp->user_timeout = (uint64_t)sock->tcp_user_timeout;
-            if (sock->nonblocking) {
-                tcp_socket_t *tcpv6 = sock->tcp;
-                uint16_t rport = sock->remote_port;
-                uint32_t rv4 = v4;
-                spin_unlock(&socket_table_lock);
-                if (tcp_connect_start(tcpv6,
-                                      socket_ipv4_from_addr(rv4),
-                                      rport) < 0) {
-                    return -ECONNREFUSED;
-                }
-                sock->state = SOCKSTATE_CONNECTING;
-                return -EINPROGRESS;
-            }
-            {
-                tcp_socket_t *tcpv6 = sock->tcp;
-                uint16_t rport = sock->remote_port;
-                uint32_t rv4 = v4;
-                spin_unlock(&socket_table_lock);
-                if (tcp_connect(tcpv6, socket_ipv4_from_addr(rv4),
-                                rport, 10000) < 0) {
-                    return -ECONNREFUSED;
-                }
-                sock->state = SOCKSTATE_CONNECTED;
-                return 0;
-            }
+        if (b[0] || b[1] || b[2] || b[3] || b[4] || b[5] || b[6] || b[7] ||
+            b[8] || b[9] || b[10] != 0xFF || b[11] != 0xFF ||
+            sock->ipv6_v6only) {
+            spin_unlock(&socket_table_lock);
+            return -EOPNOTSUPP;
         }
-        spin_unlock(&socket_table_lock);
-        return -EOPNOTSUPP;
+        memcpy(&mapped_addr, b + 12, sizeof(mapped_addr));
+        sa.u.in.sin_addr.s_addr = mapped_addr;
     }
 
-    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
+    addr = addr_ptr ? &sa.u.in : NULL;
     if (!addr || addrlen < (int)sizeof(struct sockaddr_in)) {
         spin_unlock(&socket_table_lock);
         return -EINVAL;
@@ -1590,6 +1587,18 @@ static int sys_listen(int sockfd, const char *backlog_ptr, int unused) {
     return 0;
 }
 
+static void socket_put_accept_addr(const char *addr_ptr, uint64_t addrlen_ptr,
+                                   const void *addr, socklen_t size) {
+    socklen_t len;
+
+    if (!addr_ptr || !addrlen_ptr ||
+        copy_from_user(&len, (const void *)(uintptr_t)addrlen_ptr,
+                       sizeof(len)) < 0) return;
+    if (copy_to_user((void *)(uintptr_t)addr_ptr, addr,
+                     len < size ? len : size) < 0) return;
+    copy_to_user((void *)(uintptr_t)addrlen_ptr, &size, sizeof(size));
+}
+
 static int sys_accept(int sockfd, const char *addr_ptr,
                       uint64_t addrlen_ptr) {
     int idx;
@@ -1598,9 +1607,8 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     int conn_idx;
     int accepted_fd;
     int fd_flags;
-    struct sockaddr_in *addr;
-    struct sockaddr_un *uaddr;
-    socklen_t *user_addrlen;
+    struct sockaddr_in addr;
+    uint16_t family;
     pending_conn_t *conn;
     socket_t *sock;
     tcp_socket_t *accepted_tcp;
@@ -1667,14 +1675,10 @@ static int sys_accept(int sockfd, const char *addr_ptr,
         conn->valid = 0;
         sock->backlog_count--;
         spin_unlock(&socket_table_lock);
-        uaddr = (struct sockaddr_un *)(uintptr_t)addr_ptr;
-        user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-        if (uaddr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_un)) {
-            uaddr->sun_family = AF_UNIX;
-            memset(uaddr->sun_path, 0, UNIX_PATH_MAX);
-            *user_addrlen = sizeof(uint16_t);
-        }
-        
+        family = AF_UNIX;
+        socket_put_accept_addr(addr_ptr, addrlen_ptr, &family,
+                               sizeof(family));
+
         return accepted_fd;
     }
     
@@ -1719,15 +1723,11 @@ static int sys_accept(int sockfd, const char *addr_ptr,
         remote_addr = sockets[idx].remote_addr;
         spin_unlock(&socket_table_lock);
 
-        addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-        user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-
-        if (addr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_in)) {
-            addr->sin_family = AF_INET;
-            addr->sin_port = htons(remote_port);
-            addr->sin_addr.s_addr = remote_addr;
-            *user_addrlen = sizeof(struct sockaddr_in);
-        }
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(remote_port);
+        addr.sin_addr.s_addr = remote_addr;
+        socket_put_accept_addr(addr_ptr, addrlen_ptr, &addr, sizeof(addr));
 
         return accepted_fd;
     }
@@ -1779,15 +1779,11 @@ static int sys_accept(int sockfd, const char *addr_ptr,
     remote_addr = sockets[idx].remote_addr;
     spin_unlock(&socket_table_lock);
 
-    addr = (struct sockaddr_in *)(uintptr_t)addr_ptr;
-    user_addrlen = (socklen_t *)(uintptr_t)addrlen_ptr;
-    
-    if (addr && user_addrlen && *user_addrlen >= sizeof(struct sockaddr_in)) {
-        addr->sin_family = AF_INET;
-        addr->sin_port = htons(remote_port);
-        addr->sin_addr.s_addr = remote_addr;
-        *user_addrlen = sizeof(struct sockaddr_in);
-    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(remote_port);
+    addr.sin_addr.s_addr = remote_addr;
+    socket_put_accept_addr(addr_ptr, addrlen_ptr, &addr, sizeof(addr));
     
     return accepted_fd;
 }

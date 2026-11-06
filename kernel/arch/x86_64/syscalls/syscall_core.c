@@ -774,6 +774,10 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
             return (int)total;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
+            if ((tfd->flags & 3) == VFS_O_RDONLY) {
+                if (heap_buf) kfree(kbuf);
+                return -EBADF;
+            }
             node = (vfs_node_t *)tfd->node;
             if (tfd->flags & VFS_O_APPEND) {
                 task_fd_position_set(tfd, node->length);
@@ -915,6 +919,8 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     }
 
     if (tfd && tfd->type == FD_TYPE_FILE && tfd->node &&
+        (tfd->flags & 3) == VFS_O_WRONLY) return -EBADF;
+    if (tfd && tfd->type == FD_TYPE_FILE && tfd->node &&
         (((vfs_node_t *)tfd->node)->flags & VFS_USER_READ)) {
         bytes = vfs_read((vfs_node_t *)tfd->node, task_fd_position_get(tfd),
                          (uint64_t)len, (uint8_t *)buf);
@@ -1049,7 +1055,11 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
                 bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
-                if (bytes > chunk) bytes = chunk;
+                if ((int64_t)bytes < 0 && !total) {
+                    if (heap_buf) kfree(kbuf);
+                    return (int)(int64_t)bytes;
+                }
+                if (bytes > chunk) bytes = 0;
                 if (bytes == 0) break;
                 if (copy_to_user((void *)(buf_addr + total), kbuf, bytes) < 0) {
                     if (heap_buf) kfree(kbuf);
@@ -1380,6 +1390,7 @@ canonical_ready:
                                 deliver_signal_to_pgrp((pid_t)fg, 2);
                             return total > 0 ? total : -EINTR;
                         }
+                        if ((t->c_lflag & ISIG) && c == 0x1A) continue;
                         if (t->c_iflag & ISTRIP) c &= 0x7F;
                         if ((t->c_iflag & IGNCR) && c == '\r') continue;
                         if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';

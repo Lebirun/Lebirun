@@ -119,6 +119,8 @@ static void sync_creds_to_task(task_creds_t *creds) {
         creds->cap_effective = 0;
         creds->cap_permitted = 0;
     }
+    if (creds->euid != old_euid) creds->fsuid = creds->euid;
+    if (creds->egid != current_task->egid) creds->fsgid = creds->egid;
     current_task->uid   = creds->uid;
     current_task->euid  = creds->euid;
     current_task->suid  = creds->suid;
@@ -135,6 +137,7 @@ static void sync_creds_to_task(task_creds_t *creds) {
 
 void creds_apply_exec_ids(struct task *task, uint64_t euid, uint64_t egid) {
     task_creds_t *creds;
+    int changed;
 
     if (!task) return;
     creds = (task_creds_t *)task->creds_data;
@@ -142,6 +145,9 @@ void creds_apply_exec_ids(struct task *task, uint64_t euid, uint64_t egid) {
         euid = task->euid;
         egid = task->egid;
     }
+    changed = euid != task->euid || egid != task->egid;
+    if (!creds && changed && task == current_task) creds = get_task_creds();
+    if (creds) creds->dumpable = !changed;
     task->euid = euid;
     task->suid = euid;
     task->fsuid = euid;
@@ -176,10 +182,12 @@ static int sys_setuid(int uid, const char *unused1, int unused2) {
             current_task->uid = (uint64_t)uid;
             current_task->euid = (uint64_t)uid;
             current_task->suid = (uint64_t)uid;
+            current_task->fsuid = (uint64_t)uid;
             return 0;
         }
         if ((uint64_t)uid == current_task->uid || (uint64_t)uid == current_task->suid) {
             current_task->euid = (uint64_t)uid;
+            current_task->fsuid = (uint64_t)uid;
             return 0;
         }
         return -EPERM;
@@ -208,10 +216,12 @@ static int sys_setgid(int gid, const char *unused1, int unused2) {
             current_task->gid = (uint64_t)gid;
             current_task->egid = (uint64_t)gid;
             current_task->sgid = (uint64_t)gid;
+            current_task->fsgid = (uint64_t)gid;
             return 0;
         }
         if ((uint64_t)gid == current_task->gid || (uint64_t)gid == current_task->sgid) {
             current_task->egid = (uint64_t)gid;
+            current_task->fsgid = (uint64_t)gid;
             return 0;
         }
         return -EPERM;
@@ -238,6 +248,7 @@ static int sys_seteuid(int euid, const char *unused1, int unused2) {
     if (!creds) {
         if (current_task->euid == 0 || (uint64_t)euid == current_task->uid || (uint64_t)euid == current_task->suid) {
             current_task->euid = (uint64_t)euid;
+            current_task->fsuid = (uint64_t)euid;
             return 0;
         }
         return -EPERM;
@@ -259,6 +270,7 @@ static int sys_setegid(int egid, const char *unused1, int unused2) {
     if (!creds) {
         if (current_task->euid == 0 || (uint64_t)egid == current_task->gid || (uint64_t)egid == current_task->sgid) {
             current_task->egid = (uint64_t)egid;
+            current_task->fsgid = (uint64_t)egid;
             return 0;
         }
         return -EPERM;

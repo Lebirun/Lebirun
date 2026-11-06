@@ -2,6 +2,7 @@
 #include <lebirun/power.h>
 #include <lebirun/panic.h>
 #include <lebirun/watchdog.h>
+#include <lebirun/creds.h>
 #include <string.h>
 
 #define PANIC_CMD_CUSTOM  0
@@ -13,6 +14,8 @@ static int sys_reboot(int cmd, const char *unused1, int unused2) {
     (void)unused1;
     (void)unused2;
 
+    if (!current_task || !creds_has_capability(current_task, 22))
+        return -EPERM;
     watchdog_disable();
     if (cmd == POWER_CMD_SHUTDOWN) {
         power_shutdown();
@@ -25,17 +28,17 @@ static int sys_reboot(int cmd, const char *unused1, int unused2) {
 
 static int sys_panic(int cmd, const char *user_msg, int unused) {
     char safe_msg[128];
-    int i;
+    char *copy;
 
     (void)unused;
 
+    if (!current_task || !creds_has_capability(current_task, 22))
+        return -EPERM;
     safe_msg[0] = '\0';
-    if (user_msg) {
-        for (i = 0; i < 127; i++) {
-            safe_msg[i] = user_msg[i];
-            if (safe_msg[i] == '\0') break;
-        }
-        safe_msg[127] = '\0';
+    if (user_msg && (copy = copy_string_from_user_alloc(user_msg))) {
+        strncpy(safe_msg, copy, sizeof(safe_msg) - 1);
+        safe_msg[sizeof(safe_msg) - 1] = '\0';
+        kfree(copy);
     }
 
     switch (cmd) {

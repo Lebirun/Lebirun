@@ -1164,7 +1164,8 @@ static int sys_execve(uint64_t path_ptr, const char *argv_ptr,
         return -EACCES;
     }
     vfs_open(node, 0);
-    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) {
+    if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY ||
+        ((node->mask & ~7ULL) && vfs_check_perm(node, VFS_PERM_EXEC) < 0)) {
         vfs_close(node);
         posix_free_string_array(envp, envc);
         posix_free_string_array(argv, argc);
@@ -2058,7 +2059,8 @@ static int sys_fchown(int fd, int uid, int gid) {
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) return -EROFS;
 
     if (node->ops && node->ops->chown) {
-        return node->ops->chown(node, uid, gid);
+        return node->ops->chown(node, uid == -1 ? node->uid : (uint32_t)uid,
+                                gid == -1 ? node->gid : (uint32_t)gid);
     }
     if (uid != -1) node->uid = uid;
     if (gid != -1) node->gid = gid;

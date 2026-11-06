@@ -231,11 +231,15 @@ static int sys_mknodat(int dirfd, const char *pathname, int mode,
     return ramfs_err_to_errno(result);
 }
 
-static int sys_fchownat(int dirfd, const char *pathname, int owner) {
+static int sys_fchownat(int dirfd, const char *pathname, int owner,
+                        int group, int flags) {
     char *path;
     vfs_node_t *node;
+    uint64_t uid;
+    uint64_t gid;
     int result;
 
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     path = resolve_at_path_alloc(dirfd, pathname);
     if (!path) return -EFAULT;
     if (!current_task) {
@@ -248,7 +252,8 @@ static int sys_fchownat(int dirfd, const char *pathname, int owner) {
         return -EPERM;
     }
 
-    node = vfs_namei(path);
+    node = flags & AT_SYMLINK_NOFOLLOW ? vfs_namei_nofollow(path) :
+           vfs_namei(path);
     kfree(path);
     if (!node) return -ENOENT;
     if (vfs_get_mount_flags_for_node(node) & VFS_MS_RDONLY) {
@@ -256,12 +261,15 @@ static int sys_fchownat(int dirfd, const char *pathname, int owner) {
         return -EROFS;
     }
 
+    uid = owner == -1 ? node->uid : (uint64_t)(uint32_t)owner;
+    gid = group == -1 ? node->gid : (uint64_t)(uint32_t)group;
     if (node->ops && node->ops->chown) {
-        result = node->ops->chown(node, (uint64_t)owner, node->gid);
+        result = node->ops->chown(node, uid, gid);
         vfs_release(node);
         return result;
     }
-    if (owner != -1) node->uid = (uint64_t)owner;
+    node->uid = uid;
+    node->gid = gid;
     vfs_release(node);
     return 0;
 }
@@ -578,6 +586,7 @@ int syscall_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
     char *path;
     uint8_t *kbuf;
     uint64_t n;
+    uint64_t got;
     vfs_node_t *node;
 
     path = resolve_at_path_alloc(dirfd, pathname);
@@ -600,8 +609,13 @@ int syscall_readlinkat(int dirfd, const char *pathname, uint64_t buf_ptr,
         vfs_release(node);
         return -ENOMEM;
     }
-    n = vfs_read(node, 0, n, kbuf);
+    got = vfs_read(node, 0, n, kbuf);
     vfs_release(node);
+    if (got > n) {
+        kfree(kbuf);
+        return -EIO;
+    }
+    n = got;
     if (n && copy_to_user((void *)(uintptr_t)buf_ptr, kbuf, n) < 0) {
         kfree(kbuf);
         return -EFAULT;
@@ -915,6 +929,15 @@ static int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd,
             if (old_parent) vfs_release(old_parent);
             if (new_parent) vfs_release(new_parent);
             result = -ENOENT;
+            goto exchange_free_names;
+        }
+        result = (vfs_get_mount_flags_for_node(old_parent) |
+                  vfs_get_mount_flags_for_node(new_parent)) & VFS_MS_RDONLY ?
+                 -EROFS : vfs_dir_write_check(old_parent, old_name);
+        if (result == 0) result = vfs_dir_write_check(new_parent, new_name);
+        if (result != 0) {
+            vfs_release(old_parent);
+            vfs_release(new_parent);
             goto exchange_free_names;
         }
         result = vfs_exchange(old_parent, old_name, new_parent, new_name);
