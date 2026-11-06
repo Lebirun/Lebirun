@@ -1388,7 +1388,7 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
     while (d && task_ptr_valid(d)) {
         if (d->ppid == parent_pid &&
             (pgid_filter <= 0 || d->pgid == pgid_filter) &&
-            task_trace_stop_pending(d)) {
+            task_stop_pending(d)) {
             unlock_scheduler();
             return d;
         }
@@ -1396,6 +1396,78 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
     }
     unlock_scheduler();
     return NULL;
+}
+
+int task_stop_pending(task_t *task) {
+    if (!task) return 0;
+    if (task_trace_stop_pending(task)) return 1;
+    if (!current_task || task->ppid != current_task->pid) return 0;
+    return (task->job_event == 1 && task->state == TASK_STOPPED &&
+            (current_task->wait_options & 2)) ||
+           (task->job_event == 2 && (current_task->wait_options & 8));
+}
+
+uint64_t task_take_stop(task_t *task) {
+    int event;
+
+    if (task_trace_stop_pending(task))
+        return TASK_WAIT_STOPPED | task_trace_take_stop(task);
+    event = task->job_event;
+    task->job_event = 0;
+    if (event == 2) return TASK_WAIT_CONTINUED;
+    return TASK_WAIT_STOPPED | task->job_stop_signal;
+}
+
+void task_job_stop(int sig) {
+    if (!current_task) return;
+    lock_scheduler();
+    current_task->job_stop_signal = (uint8_t)sig;
+    current_task->job_event = 1;
+    current_task->state = TASK_STOPPED;
+    waitq_wake_all(&current_task->join_waiters);
+    task_wake_parent_waiter_locked(current_task);
+    unlock_scheduler();
+}
+
+int task_job_continue(task_t *task) {
+    int stopped;
+
+    if (!task) return 0;
+    lock_scheduler();
+    stopped = task->job_stop_signal != 0;
+    if (stopped) {
+        task->job_stop_signal = 0;
+        task->job_event = 2;
+        if (task->state == TASK_STOPPED) {
+            task->state = TASK_BLOCKED;
+            task_mark_ready_locked(task);
+        }
+        waitq_wake_all(&task->join_waiters);
+        task_wake_parent_waiter_locked(task);
+    }
+    unlock_scheduler();
+    return stopped;
+}
+
+int task_pgrp_orphaned(pid_t pgid) {
+    task_t *t;
+    task_t *p;
+    int orphaned;
+
+    orphaned = 1;
+    lock_scheduler();
+    for (t = all_tasks_head; t && task_ptr_valid(t) && orphaned;
+         t = t->all_next) {
+        if (t->pgid != pgid || t->state == TASK_DEAD) continue;
+        for (p = all_tasks_head; p && task_ptr_valid(p); p = p->all_next) {
+            if (p->pid != t->ppid) continue;
+            if (p->state != TASK_DEAD && p->pgid != pgid && p->sid == t->sid)
+                orphaned = 0;
+            break;
+        }
+    }
+    unlock_scheduler();
+    return orphaned;
 }
 
 int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
@@ -3460,6 +3532,7 @@ void reap_dead_tasks(void) {
             knext = k->wait_next;
             k->wait_next = dead_queue_head;
             dead_queue_head = k;
+            task_wake_parent_waiter_locked(k);
             k = knext;
         }
         unlock_scheduler();
@@ -3936,8 +4009,8 @@ int task_join(task_t* task, uint64_t* exit_code) {
     if (!task || task == current_task) return -1;
 
     lock_scheduler();
-    if (task_trace_stop_pending(task)) {
-        if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+    if (task_stop_pending(task)) {
+        if (exit_code) *exit_code = task_take_stop(task);
         unlock_scheduler();
         return 0;
     }
@@ -3961,7 +4034,7 @@ int task_join(task_t* task, uint64_t* exit_code) {
         schedule();
 
         lock_scheduler();
-        if (task->state == TASK_DEAD || task_trace_stop_pending(task)) {
+        if (task->state == TASK_DEAD || task_stop_pending(task)) {
             break;
         }
         if (task_has_pending_signals()) {
@@ -3981,8 +4054,8 @@ int task_join(task_t* task, uint64_t* exit_code) {
         unlock_scheduler();
     }
     if (exit_code) {
-        if (task_trace_stop_pending(task))
-            *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+        if (task_stop_pending(task))
+            *exit_code = task_take_stop(task);
         else
             *exit_code = task->exit_code;
     }
@@ -4014,8 +4087,8 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
             unlock_scheduler();
             return -KERR_ECHILD;
         }
-        if (task_trace_stop_pending(task)) {
-            if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+        if (task_stop_pending(task)) {
+            if (exit_code) *exit_code = task_take_stop(task);
             unlock_scheduler();
             return 0;
         }
@@ -4065,8 +4138,8 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
                 task = task->all_next;
             }
             if (task && task_ptr_valid(task) && task->ppid == parent_pid &&
-                task_trace_stop_pending(task)) {
-                if (exit_code) *exit_code = TASK_WAIT_STOPPED | task_trace_take_stop(task);
+                task_stop_pending(task)) {
+                if (exit_code) *exit_code = task_take_stop(task);
                 unlock_scheduler();
                 return 0;
             }

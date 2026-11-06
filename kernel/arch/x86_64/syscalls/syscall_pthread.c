@@ -283,7 +283,8 @@ static int sys_pthread_mutex_destroy(uint64_t mutex_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     addr = (uint64_t)mutex_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
+    if (slot < 0 || slot >= mutex_capacity || !mutexes[slot].in_use)
+        return -EINVAL;
     
     if (mutexes[slot].locked) return -EBUSY;
     
@@ -303,7 +304,8 @@ static int sys_pthread_mutex_lock(uint64_t mutex_ptr, const char *unused1,
     
     addr = (uint64_t)mutex_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
+    if (slot < 0 || slot >= mutex_capacity || !mutexes[slot].in_use)
+        return -EINVAL;
     
     me = current_task ? current_task->pid : 0;
     
@@ -332,7 +334,8 @@ static int sys_pthread_mutex_trylock(uint64_t mutex_ptr, const char *unused1,
     init_pthread();
     addr = (uint64_t)mutex_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
+    if (slot < 0 || slot >= mutex_capacity || !mutexes[slot].in_use)
+        return -EINVAL;
 
     me = current_task ? current_task->pid : 0;
     
@@ -360,7 +363,8 @@ static int sys_pthread_mutex_unlock(uint64_t mutex_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     addr = (uint64_t)mutex_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= mutex_capacity) return -EINVAL;
+    if (slot < 0 || slot >= mutex_capacity || !mutexes[slot].in_use)
+        return -EINVAL;
 
     me = current_task ? current_task->pid : 0;
     
@@ -417,7 +421,8 @@ static int sys_pthread_cond_destroy(uint64_t cond_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= cond_capacity) return -EINVAL;
+    if (slot < 0 || slot >= cond_capacity || !conds[slot].in_use)
+        return -EINVAL;
     
     conds[slot].in_use = 0;
     return 0;
@@ -440,10 +445,12 @@ static int sys_pthread_cond_wait(uint64_t cond_ptr, const char *mutex_ptr,
         pthread_slot(mutex_addr, &mutex_slot) < 0)
         return -EFAULT;
     
-    if (cond_slot < 0 || cond_slot >= cond_capacity) return -EINVAL;
-    if (mutex_slot < 0 || mutex_slot >= mutex_capacity) return -EINVAL;
+    if (cond_slot < 0 || cond_slot >= cond_capacity ||
+        !conds[cond_slot].in_use) return -EINVAL;
+    if (mutex_slot < 0 || mutex_slot >= mutex_capacity ||
+        !mutexes[mutex_slot].in_use) return -EINVAL;
     
-    sys_pthread_mutex_unlock(mutex_addr, NULL, 0);
+    if (sys_pthread_mutex_unlock(mutex_addr, NULL, 0) != 0) return -EPERM;
     
     waitq_wait(&conds[cond_slot].waitq);
     
@@ -460,7 +467,8 @@ static int sys_pthread_cond_signal(uint64_t cond_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= cond_capacity) return -EINVAL;
+    if (slot < 0 || slot >= cond_capacity || !conds[slot].in_use)
+        return -EINVAL;
     
     waitq_wake_one(&conds[slot].waitq);
     return 0;
@@ -474,7 +482,8 @@ static int sys_pthread_cond_broadcast(uint64_t cond_ptr, const char *unused1,
     (void)unused1; (void)unused2;
     addr = (uint64_t)cond_ptr;
     if (pthread_slot(addr, &slot) < 0) return -EFAULT;
-    if (slot < 0 || slot >= cond_capacity) return -EINVAL;
+    if (slot < 0 || slot >= cond_capacity || !conds[slot].in_use)
+        return -EINVAL;
     
     waitq_wake_all(&conds[slot].waitq);
     return 0;

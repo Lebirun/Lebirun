@@ -130,7 +130,7 @@ static uint64_t select_timeout_ticks(uint64_t seconds, uint64_t nanoseconds) {
 }
 
 static int select_common(int nfds, uint64_t readfds_ptr,
-                         uint64_t writefds_ptr,
+                         uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                          uint64_t timeout_ticks) {
     uint64_t read_addr;
     uint64_t write_addr;
@@ -278,6 +278,11 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         if (writefds && copy_to_user(&writefds[word_index], &result_write_word,
                                      sizeof(result_write_word)) < 0)
             return -EFAULT;
+        result_read_word = 0;
+        if (exceptfds_ptr &&
+            copy_to_user((fd_mask *)exceptfds_ptr + word_index,
+                         &result_read_word, sizeof(result_read_word)) < 0)
+            return -EFAULT;
     }
 
     return count;
@@ -289,7 +294,6 @@ static int sys_select(int nfds, uint64_t readfds_ptr,
     struct kernel_timeval timeout_value;
     uint64_t timeout_ticks;
 
-    (void)exceptfds_ptr;
     (void)unused;
     timeout_ticks = UINT64_MAX;
     if (timeout_ptr) {
@@ -301,7 +305,8 @@ static int sys_select(int nfds, uint64_t readfds_ptr,
         timeout_ticks = select_timeout_ticks(timeout_value.tv_sec,
                                              timeout_value.tv_usec * 1000);
     }
-    return select_common(nfds, readfds_ptr, writefds_ptr, timeout_ticks);
+    return select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,
+                         timeout_ticks);
 }
 
 static int sys_pselect6(int nfds, uint64_t readfds_ptr,
@@ -317,7 +322,6 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
         size_t size;
     } requested;
 
-    (void)exceptfds_ptr;
     timeout_ticks = UINT64_MAX;
     if (timeout_ptr) {
         if (copy_from_user(&timeout_value,
@@ -340,7 +344,8 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
             if (result < 0) return result;
         }
     }
-    result = select_common(nfds, readfds_ptr, writefds_ptr, timeout_ticks);
+    result = select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,
+                           timeout_ticks);
     if (sigmask_ptr && requested.address)
         signal_finish_wait_mask(old_mask, result);
     return result;

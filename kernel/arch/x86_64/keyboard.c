@@ -208,6 +208,7 @@ void keyboard_unregister_observer(void) {
 #define SCANCODE_LSHIFT 0x2A
 #define SCANCODE_RSHIFT 0x36
 #define SCANCODE_C      0x2E
+#define SCANCODE_Z      0x2C
 
 static const char qwerty_lowercase[128] = {
     0,   27,  '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
@@ -464,10 +465,21 @@ void keyboard_feed_ps2(uint8_t scancode) {
         goto wake;
     }
 
+    if (ctrl_pressed && code == SCANCODE_Z) {
+        cur = console_is_initialized() ? console_get_current() : 0;
+        if (cur >= 0 && cur < kbd_num_consoles) {
+            __atomic_store_n(&kbd_consoles[cur].sigint_pending, 20,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&sigint_dispatch_pending, 1, __ATOMIC_RELEASE);
+        }
+        buffer_put(0x1A);
+        goto wake;
+    }
+
     if (ctrl_pressed && code == SCANCODE_C) {
         cur = console_is_initialized() ? console_get_current() : 0;
         if (cur >= 0 && cur < kbd_num_consoles) {
-            __atomic_store_n(&kbd_consoles[cur].sigint_pending, 1,
+            __atomic_store_n(&kbd_consoles[cur].sigint_pending, 2,
                              __ATOMIC_RELEASE);
             __atomic_store_n(&sigint_dispatch_pending, 1, __ATOMIC_RELEASE);
         }
@@ -683,6 +695,7 @@ void keyboard_process_sigint(void)
     extern void syscall_core_flush_tty_input(int con_id);
     int i;
     int fg;
+    int sig;
     task_t *target;
     pid_t last_pid;
     pid_t next_pid;
@@ -694,8 +707,9 @@ void keyboard_process_sigint(void)
     for (i = 0; i < kbd_num_consoles; i++) {
         if (i >= tty_count)
             break;
-        if (!__atomic_exchange_n(&kbd_consoles[i].sigint_pending, 0,
-                                 __ATOMIC_ACQ_REL))
+        sig = __atomic_exchange_n(&kbd_consoles[i].sigint_pending, 0,
+                                  __ATOMIC_ACQ_REL);
+        if (!sig)
             continue;
 
         fg = tty_get_foreground_pgrp(i);
@@ -715,7 +729,7 @@ void keyboard_process_sigint(void)
             last_pid = next_pid;
             target = task_find(next_pid);
             if (target && target->is_user && target->state != TASK_DEAD) {
-                deliver_signal_to_task(target, 2);
+                deliver_signal_to_task(target, sig);
             }
         }
     }

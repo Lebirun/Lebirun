@@ -668,12 +668,12 @@ static int sys_vfs_stat(int fd, const char *size_ptr, uint64_t type_ptr) {
     size = node->length;
     flags = node->flags;
     
-    if (size_addr && size_addr < KERNEL_VMA && size_addr >= 0x1000) {
-        *(uint64_t*)size_addr = size;
-    }
-    if (type_addr && type_addr < KERNEL_VMA && type_addr >= 0x1000) {
-        *(uint64_t*)type_addr = flags;
-    }
+    if (size_addr && size_addr < KERNEL_VMA && size_addr >= 0x1000 &&
+        copy_to_user((void *)size_addr, &size, sizeof(size)) < 0)
+        return -EFAULT;
+    if (type_addr && type_addr < KERNEL_VMA && type_addr >= 0x1000 &&
+        copy_to_user((void *)type_addr, &flags, sizeof(flags)) < 0)
+        return -EFAULT;
     return 0;
 }
 
@@ -970,7 +970,7 @@ static int sys_statfs(uint64_t path_ptr, const char *size_ptr,
     uint64_t buf_addr;
     uint64_t arg2_addr;
     char *path;
-    struct statfs_kernel *buf;
+    struct statfs_kernel buf;
 
     path_addr = (uint64_t)path_ptr;
     size = (int)(uintptr_t)size_ptr;
@@ -994,19 +994,17 @@ static int sys_statfs(uint64_t path_ptr, const char *size_ptr,
 
     path = resolve_cwd_path_alloc((const char *)path_addr);
     if (!path) return -EFAULT;
-    buf = (struct statfs_kernel *)buf_addr;
-
-    fill_statfs_for_path(path, buf);
+    fill_statfs_for_path(path, &buf);
     kfree(path);
-
-    return 0;
+    return copy_to_user((void *)buf_addr, &buf, sizeof(buf)) < 0 ?
+           -EFAULT : 0;
 }
 
 static int sys_fstatfs(int fd, const char *size_ptr, uint64_t buf_ptr_int) {
     int size;
     uint64_t buf_addr;
     uint64_t arg2_addr;
-    struct statfs_kernel *buf;
+    struct statfs_kernel buf;
     task_fd_t *tfd;
     vfs_node_t *node;
     vfs_mount_t *mount;
@@ -1042,71 +1040,61 @@ static int sys_fstatfs(int fd, const char *size_ptr, uint64_t buf_ptr_int) {
         !tfd->node) return -EBADF;
     node = (vfs_node_t *)tfd->node;
     mount = vfs_get_mount_for_node(node);
-    if (!mount || !mount->path) return -EINVAL;
-    buf = (struct statfs_kernel *)buf_addr;
-    fill_statfs_for_path(mount->path, buf);
-
-    return 0;
+    fill_statfs_for_path(mount && mount->path ? mount->path : "/", &buf);
+    return copy_to_user((void *)buf_addr, &buf, sizeof(buf)) < 0 ?
+           -EFAULT : 0;
 }
 
 static int sys_vfs_mount_user(uint64_t source_ptr, const char *target_ptr,
                               uint64_t fstype_ptr, int flags_val,
                               uint64_t data_ptr) {
-    uint64_t src_addr;
-    uint64_t tgt_addr;
-    uint64_t fs_addr;
-    uint64_t mnt_flags;
-    const char *source;
-    const char *target;
-    const char *fstype;
+    char *source;
+    char *target;
+    char *fstype;
     char *data;
     vfs_node_t *mp_check;
     int ret;
 
-    src_addr = (uint64_t)source_ptr;
-    tgt_addr = (uint64_t)(uintptr_t)target_ptr;
-    fs_addr = (uint64_t)fstype_ptr;
-    mnt_flags = (uint64_t)flags_val;
-
-    if (tgt_addr >= KERNEL_VMA || tgt_addr < 0x1000) return -EFAULT;
-    if (fs_addr >= KERNEL_VMA || fs_addr < 0x1000) return -EFAULT;
-
     if (!current_task) return -ESRCH;
     if (!creds_has_capability(current_task, 21)) return -EPERM;
-
-    source = NULL;
-    if (src_addr != 0 && src_addr < KERNEL_VMA && src_addr >= 0x1000)
-        source = (const char *)src_addr;
-    target = (const char *)tgt_addr;
-    fstype = (const char *)fs_addr;
-
+    target = copy_string_from_user_alloc(target_ptr);
+    fstype = copy_string_from_user_alloc((const char *)(uintptr_t)fstype_ptr);
+    source = source_ptr ?
+             copy_string_from_user_alloc((const char *)(uintptr_t)source_ptr) :
+             NULL;
+    data = data_ptr ?
+           copy_string_from_user_alloc((const char *)(uintptr_t)data_ptr) :
+           NULL;
+    ret = -EFAULT;
+    if (!target || !fstype || (source_ptr && !source) ||
+        (data_ptr && !data)) goto out;
     mp_check = vfs_namei(target);
-    if (!mp_check)
-        return -ENOENT;
+    ret = -ENOENT;
+    if (!mp_check) goto out;
     vfs_release(mp_check);
-
-    data = NULL;
-    if (data_ptr >= 0x1000 && data_ptr < KERNEL_VMA)
-        data = copy_string_from_user_alloc((const char *)data_ptr);
-    ret = vfs_mount_flags(source, target, fstype, mnt_flags, data);
+    ret = vfs_mount_flags(source, target, fstype, (uint64_t)flags_val, data);
+out:
+    kfree(source);
+    kfree(target);
+    kfree(fstype);
     kfree(data);
     return ret;
 }
 
 static int sys_vfs_umount_user(uint64_t target_ptr, const char *unused1,
                                int unused2) {
-    uint64_t tgt_addr;
-    const char *target;
+    char *target;
+    int ret;
 
     (void)unused1;
     (void)unused2;
-    tgt_addr = (uint64_t)target_ptr;
-    if (tgt_addr >= KERNEL_VMA || tgt_addr < 0x1000) return -EFAULT;
     if (!current_task) return -ESRCH;
     if (!creds_has_capability(current_task, 21)) return -EPERM;
-
-    target = (const char *)tgt_addr;
-    return vfs_unmount(target);
+    target = copy_string_from_user_alloc((const char *)(uintptr_t)target_ptr);
+    if (!target) return -EFAULT;
+    ret = vfs_unmount(target);
+    kfree(target);
+    return ret;
 }
 
 static int sys_memfd_create(const char *name_ptr, const char *flags_ptr,

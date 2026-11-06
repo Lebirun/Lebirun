@@ -919,7 +919,7 @@ static int sys_alarm(int seconds, const char *unused1, int unused2) {
     }
     
     if (old_alarm > tick_count) {
-        return (old_alarm - tick_count) / pit_freq;
+        return (old_alarm - tick_count + pit_freq - 1) / pit_freq;
     }
     return 0;
 }
@@ -1041,7 +1041,8 @@ static int sys_chown(const char *pathname, int owner, int group) {
 
     if (node->ops && node->ops->chown) {
         int r;
-        r = node->ops->chown(node, owner, group);
+        r = node->ops->chown(node, owner == -1 ? node->uid : (uint32_t)owner,
+                             group == -1 ? node->gid : (uint32_t)group);
         vfs_release(node);
         return r;
     }

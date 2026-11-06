@@ -5,6 +5,7 @@
 
 #define TASK_WAIT_STOPPED (1ULL << 63)
 #define TASK_WAIT_CORE (1ULL << 62)
+#define TASK_WAIT_CONTINUED (1ULL << 60)
 
 typedef struct debug_registers {
     uint64_t r15, r14, r13, r12, rbp, rbx, r11, r10, r9, r8;

@@ -576,6 +576,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     pty_t *pty;
     uint8_t *released;
     int signal_number;
+    int sig;
     pid_t signal_pgrp;
 
     signal_number = 0;
@@ -612,47 +613,15 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
         }
 
         if (pty->termios.c_lflag & ISIG) {
-            if (pty_cc_matches(pty, VINTR, c)) {
-                signal_number = 2;
+            sig = pty_cc_matches(pty, VINTR, c) ? 2 :
+                  pty_cc_matches(pty, VQUIT, c) ? 3 :
+                  pty_cc_matches(pty, VSUSP, c) ? 20 : 0;
+            if (sig) {
+                signal_number = sig;
                 signal_pgrp = pty->pgrp;
-                released = pty_detach_empty_buffer(&pty->master_buf,
-                                                   &pty->master_capacity,
-                                                   &pty->master_head,
-                                                   &pty->master_tail);
-                mutex_unlock(&pty_lock);
-                kfree(released);
-                if (signal_pgrp > 0)
-                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
-                descriptor_ready_notify();
-                return to_write;
-            }
-            if (pty_cc_matches(pty, VQUIT, c)) {
-                signal_number = 3;
-                signal_pgrp = pty->pgrp;
-                released = pty_detach_empty_buffer(&pty->master_buf,
-                                                   &pty->master_capacity,
-                                                   &pty->master_head,
-                                                   &pty->master_tail);
-                mutex_unlock(&pty_lock);
-                kfree(released);
-                if (signal_pgrp > 0)
-                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
-                descriptor_ready_notify();
-                return to_write;
-            }
-            if (pty_cc_matches(pty, VSUSP, c)) {
-                signal_number = 20;
-                signal_pgrp = pty->pgrp;
-                released = pty_detach_empty_buffer(&pty->master_buf,
-                                                   &pty->master_capacity,
-                                                   &pty->master_head,
-                                                   &pty->master_tail);
-                mutex_unlock(&pty_lock);
-                kfree(released);
-                if (signal_pgrp > 0)
-                    deliver_signal_to_pgrp(signal_pgrp, signal_number);
-                descriptor_ready_notify();
-                return to_write;
+                if (!(pty->termios.c_lflag & NOFLSH))
+                    pty->master_tail = pty->master_head;
+                continue;
             }
         }
 
@@ -700,6 +669,8 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     
     mutex_unlock(&pty_lock);
     kfree(released);
+    if (signal_number && signal_pgrp > 0)
+        deliver_signal_to_pgrp(signal_pgrp, signal_number);
     descriptor_ready_notify();
     return to_write;
 }
@@ -925,6 +896,10 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             *(int *)arg = (int)readable;
             break;
         case TIOCSPGRP:
+            if (arg && *(pid_t *)arg <= 0) {
+                mutex_unlock(&pty_lock);
+                return -22;
+            }
             if (arg && pty->pgrp != *(pid_t *)arg) {
                 pty->pgrp = *(pid_t *)arg;
                 changed = 1;
@@ -934,6 +909,13 @@ int pty_ioctl(int fd, unsigned long request, void *arg) {
             if (arg) *(pid_t *)arg = pty->session;
             break;
         case TIOCSCTTY:
+            if (pty->session != 0 &&
+                pty->session != (current_task->sid ? current_task->sid :
+                                 current_task->pid) &&
+                current_task->euid != 0) {
+                mutex_unlock(&pty_lock);
+                return -1;
+            }
             if (pty->session != (current_task->sid ? current_task->sid :
                                 current_task->pid) ||
                 pty->pgrp != (current_task->pgid ? current_task->pgid :

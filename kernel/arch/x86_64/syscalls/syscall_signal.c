@@ -53,6 +53,13 @@
 #define SA_RESETHAND 0x80000000
 #define SA_RESTORER  0x04000000
 
+#define SIGNAL_STOP_MASK ((1ULL << (SIGSTOP - 1)) | (1ULL << (SIGTSTP - 1)) | \
+                          (1ULL << (SIGTTIN - 1)) | (1ULL << (SIGTTOU - 1)))
+
+#define SS_ONSTACK  1
+#define SS_DISABLE  2
+#define MINSIGSTKSZ 2048
+
 #define SIG_BLOCK   0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
@@ -111,7 +118,6 @@ typedef struct {
     sigset_k blocked;
     signal_action_entry_t *actions;
     stack_k altstack;
-    int in_signal;
     queued_signal_t *queue_head;
     queued_signal_t *queue_tail;
     uint32_t queue_count;
@@ -382,10 +388,7 @@ void task_reset_signals_on_exec(void) {
         return;
     }
 
-    __atomic_store_n(&sigs->pending.sig[0], 0, __ATOMIC_RELEASE);
-    sigs->blocked.sig[0] = 0;
-    sigs->in_signal = 0;
-    free_signal_queue(sigs);
+    memset(&sigs->altstack, 0, sizeof(sigs->altstack));
 
     default_signal_action(&default_act);
     for (i = sigs->action_count - 1; i >= 0; i--) {
@@ -403,8 +406,9 @@ void task_reset_signals_on_exec(void) {
         entry->action.sa_mask[0] = 0;
         entry->action.sa_mask[1] = 0;
     }
-    if (sigs->action_count == 0 && sigs->altstack.ss_sp == NULL &&
-        sigs->altstack.ss_flags == 0 && sigs->altstack.ss_size == 0) {
+    if (sigs->action_count == 0 && sigs->blocked.sig[0] == 0 &&
+        !sigs->queue_head &&
+        !__atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE)) {
         kfree(sigs);
         current_task->signal_data = NULL;
     }
@@ -477,11 +481,22 @@ int signal_set_blocked_mask(task_t *task, uint64_t mask) {
 
 void signal_finish_wait_mask(uint64_t mask, int result) {
     extern void signal_deliver_pending(registers_t *regs);
+    registers_t *frame;
+    uint64_t wait_mask;
+    uint64_t rip;
 
-    if (result == -EINTR && current_task && current_task->syscall_frame &&
-        task_has_pending_signals() && kstack_expand_syscall() == 0) {
-        current_task->syscall_frame->rax = (uint64_t)(int64_t)result;
-        signal_deliver_pending(current_task->syscall_frame);
+    frame = current_task ? current_task->syscall_frame : NULL;
+    if (result == -EINTR && frame && task_has_pending_signals() &&
+        kstack_expand_syscall() == 0) {
+        frame->rax = (uint64_t)(int64_t)result;
+        wait_mask = signal_blocked_mask(current_task);
+        rip = frame->rip;
+        signal_deliver_pending(frame);
+        if (frame->rip != rip) {
+            ((ucontext_k *)(uintptr_t)(frame->rsp + 8))->uc_sigmask.sig[0] =
+                mask;
+            mask |= signal_blocked_mask(current_task) & ~wait_mask;
+        }
     }
     signal_set_blocked_mask(current_task, mask);
 }
@@ -574,6 +589,9 @@ static int sys_rt_sigaction(int signum, const char *act_ptr,
 
     default_signal_action(&default_act);
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000 &&
+        copy_from_user(&local_act, (void *)act_addr, sizeof(sigaction_k)) < 0)
+        return -EFAULT;
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
         old_action = &default_act;
@@ -584,8 +602,6 @@ static int sys_rt_sigaction(int signum, const char *act_ptr,
     }
 
     if (act_addr && act_addr < KERNEL_VMA && act_addr >= 0x1000) {
-        if (copy_from_user(&local_act, (void *)act_addr, sizeof(sigaction_k)) < 0)
-            return -EFAULT;
         if (local_act.sa_handler == SIG_DFL && local_act.sa_flags == 0 &&
             local_act.sa_restorer == NULL && local_act.sa_mask[0] == 0 &&
             local_act.sa_mask[1] == 0 && (!sigs || sigs->owner_pid != current_task->pid)) {
@@ -705,17 +721,11 @@ static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
 
 static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
                                 int unused3) {
-    task_signals_t *sigs;
     registers_t *regs;
     ucontext_k *uc;
     uint64_t *g;
 
     (void)unused1; (void)unused2; (void)unused3;
-
-    sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
-    if (sigs && sigs->owner_pid == current_task->pid) {
-        sigs->in_signal = 0;
-    }
 
     regs = current_task ? current_task->syscall_frame : NULL;
     if (!regs) return 0;
@@ -869,13 +879,29 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     sigs->queue_tail = entry;
     sigs->queue_count++;
     result = deliver_signal_to_task(target, sig);
-    if (result != 0) {
+    if (result != 0 ||
+        !(signal_pending_mask(target) & (1ULL << (sig - 1)))) {
         dequeue_queued_signal(sigs, 1ULL << (sig - 1), NULL);
         task_release_ref(target);
         return result;
     }
     task_release_ref(target);
     return 0;
+}
+
+static void signal_notify_parent_job(task_t *child) {
+    task_t *parent;
+    task_signals_t *psigs;
+    sigaction_k default_act;
+
+    parent = task_find_retain(child->ppid);
+    if (!parent) return;
+    psigs = (task_signals_t *)parent->signal_data;
+    if (!psigs || psigs->owner_pid != parent->pid ||
+        !(get_signal_action(psigs, SIGCHLD, &default_act)->sa_flags &
+          SA_NOCLDSTOP))
+        deliver_signal_to_task(parent, SIGCHLD);
+    task_release_ref(parent);
 }
 
 int deliver_signal_to_task(task_t *target, int sig) {
@@ -906,15 +932,21 @@ int deliver_signal_to_task(task_t *target, int sig) {
 
     if (sig == SIGCONT) {
         if (target->state == TASK_STOPPED && task_is_traced(target)) return 0;
-        if (target->state == TASK_STOPPED || target->state == TASK_BLOCKED) {
-            lock_scheduler();
-            if (target->state == TASK_STOPPED ||
-                target->state == TASK_BLOCKED) {
-                target->state = TASK_READY;
-            }
-            unlock_scheduler();
+        if (has_sigs)
+            __atomic_fetch_and(&sigs->pending.sig[0], ~SIGNAL_STOP_MASK,
+                               __ATOMIC_ACQ_REL);
+        if (task_job_continue(target)) signal_notify_parent_job(target);
+        if (!has_sigs) return 0;
+    }
+    if ((1ULL << (sig - 1)) & SIGNAL_STOP_MASK) {
+        if (has_sigs)
+            __atomic_fetch_and(&sigs->pending.sig[0],
+                               ~(1ULL << (SIGCONT - 1)), __ATOMIC_ACQ_REL);
+        if (!has_sigs) {
+            sigs = ensure_task_signals(target);
+            if (!sigs) return -ENOMEM;
+            has_sigs = 1;
         }
-        return 0;
     }
 
     if (!has_sigs && (task_is_traced(target) || task_rlimit_get(target, 4, 0))) {
@@ -944,7 +976,8 @@ int deliver_signal_to_task(task_t *target, int sig) {
     }
     ignored = act->sa_handler == SIG_DFL && !task_is_traced(target) &&
         !(sigs->blocked.sig[0] & (1ULL << (sig - 1))) &&
-        (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH);
+        (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH ||
+         sig == SIGCONT);
 
     __atomic_add_fetch(&sigs->pending_sequence, 1, __ATOMIC_RELEASE);
     __atomic_fetch_or(&sigs->pending.sig[(sig - 1) / 64],
@@ -1168,35 +1201,62 @@ static int sys_tkill(int tid, const char *sig_ptr, int unused) {
     return sys_kill_impl(tid, sig_ptr, unused);
 }
 
+static int signal_altstack_usable(task_signals_t *sigs) {
+    return sigs && sigs->altstack.ss_sp && sigs->altstack.ss_size &&
+           !(sigs->altstack.ss_flags & SS_DISABLE);
+}
+
+static int signal_on_altstack(task_signals_t *sigs, uint64_t sp) {
+    uint64_t base;
+
+    if (!signal_altstack_usable(sigs)) return 0;
+    base = (uint64_t)(uintptr_t)sigs->altstack.ss_sp;
+    return sp > base && sp - base <= sigs->altstack.ss_size;
+}
+
 static int sys_sigaltstack(uint64_t ss_ptr, const char *old_ss_ptr,
                            int unused) {
     task_signals_t *sigs;
     uint64_t old_addr;
     uint64_t new_addr;
-    stack_k empty_stack;
+    uint64_t sp;
+    stack_k old_stack;
+    stack_k new_stack;
 
     (void)unused;
 
     old_addr = (uint64_t)(uintptr_t)old_ss_ptr;
     new_addr = (uint64_t)ss_ptr;
     sigs = (current_task ? (task_signals_t *)current_task->signal_data : NULL);
+    if (sigs && sigs->owner_pid != current_task->pid) sigs = NULL;
+    sp = current_task && current_task->syscall_frame ?
+         current_task->syscall_frame->rsp : 0;
+
+    if (new_addr && new_addr < KERNEL_VMA && new_addr >= 0x1000 &&
+        copy_from_user(&new_stack, (void *)new_addr, sizeof(stack_k)) < 0)
+        return -EFAULT;
 
     if (old_addr && old_addr < KERNEL_VMA && old_addr >= 0x1000) {
-        memset(&empty_stack, 0, sizeof(empty_stack));
-        if (copy_to_user((void *)old_addr,
-                         sigs && sigs->owner_pid == current_task->pid ?
-                         &sigs->altstack : &empty_stack, sizeof(stack_k)) < 0)
+        memset(&old_stack, 0, sizeof(old_stack));
+        if (signal_altstack_usable(sigs)) old_stack = sigs->altstack;
+        else old_stack.ss_flags = SS_DISABLE;
+        if (signal_on_altstack(sigs, sp)) old_stack.ss_flags = SS_ONSTACK;
+        if (copy_to_user((void *)old_addr, &old_stack, sizeof(stack_k)) < 0)
             return -EFAULT;
     }
 
     if (new_addr && new_addr < KERNEL_VMA && new_addr >= 0x1000) {
-        if (!sigs || sigs->owner_pid != current_task->pid) {
+        if (signal_on_altstack(sigs, sp)) return -EPERM;
+        if (new_stack.ss_flags & ~SS_DISABLE) return -EINVAL;
+        if (new_stack.ss_flags & SS_DISABLE)
+            memset(&new_stack, 0, sizeof(new_stack));
+        else if (new_stack.ss_size < MINSIGSTKSZ)
+            return -ENOMEM;
+        if (!sigs) {
             sigs = get_task_signals();
             if (!sigs) return -ESRCH;
         }
-        if (copy_from_user(&sigs->altstack, (void *)new_addr,
-                           sizeof(stack_k)) < 0)
-            return -EFAULT;
+        sigs->altstack = new_stack;
     }
 
     return 0;
@@ -1210,18 +1270,13 @@ static int sys_pause(int unused1, const char *unused2, int unused3) {
     return -EINTR;
 }
 
-static int sys_alarm(int seconds, const char *unused1, int unused2) {
-    (void)unused1; (void)unused2;
-    (void)seconds;
-    return 0;
-}
-
 void signal_deliver_pending(registers_t *regs) {
     task_signals_t *sigs;
     int sig;
     sigaction_k *act;
     sigaction_k default_act;
     uint64_t sp;
+    uint64_t frame_top;
     ucontext_k *uc;
     uint64_t *g;
     uint64_t info_address;
@@ -1241,7 +1296,7 @@ void signal_deliver_pending(registers_t *regs) {
     if (task_trace_resume(regs)) return;
 
     sigs = (task_signals_t *)current_task->signal_data;
-    if (!sigs || sigs->in_signal) return;
+    if (!sigs) return;
     if (sigs->owner_pid != current_task->pid) return;
 
     for (sig = 1; sig < NSIG; sig++) {
@@ -1271,6 +1326,18 @@ void signal_deliver_pending(registers_t *regs) {
                     continue;
                 case SIGCONT:
                     continue;
+                case SIGTSTP:
+                case SIGTTIN:
+                case SIGTTOU:
+                    if (task_pgrp_orphaned(current_task->pgid ?
+                                           current_task->pgid :
+                                           current_task->pid))
+                        continue;
+                    __attribute__((fallthrough));
+                case SIGSTOP:
+                    task_job_stop(sig);
+                    signal_notify_parent_job(current_task);
+                    return;
                 default:
                     exit_code = 128 + sig;
                     if (task_core_dump(regs, sig)) exit_code |= TASK_WAIT_CORE;
@@ -1280,6 +1347,11 @@ void signal_deliver_pending(registers_t *regs) {
         }
 
         sp = regs->rsp - 128;
+        if ((act->sa_flags & SA_ONSTACK) && signal_altstack_usable(sigs) &&
+            !signal_on_altstack(sigs, regs->rsp))
+            sp = (uint64_t)(uintptr_t)sigs->altstack.ss_sp +
+                 sigs->altstack.ss_size;
+        frame_top = sp;
         info_address = 0;
         if (act->sa_flags & SA_SIGINFO) {
             sp -= sizeof(signal_info);
@@ -1289,7 +1361,7 @@ void signal_deliver_pending(registers_t *regs) {
         sp &= ~0xFu;
 
         if (sp < 0x1008 || sp >= KERNEL_VMA ||
-            !signal_user_range_mapped(sp - 8, regs->rsp - sp + 8)) {
+            !signal_user_range_mapped(sp - 8, frame_top - sp + 8)) {
             task_exit_deferred(128 + sig);
             return;
         }
@@ -1320,6 +1392,7 @@ void signal_deliver_pending(registers_t *regs) {
         g[UC_RIP] = regs->rip;
         g[UC_EFL] = regs->rflags;
         uc->uc_sigmask = sigs->blocked;
+        uc->uc_stack = sigs->altstack;
 
         sp -= 8;
         if (act->sa_restorer) {
@@ -1336,7 +1409,9 @@ void signal_deliver_pending(registers_t *regs) {
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
         regs->rsp = sp;
 
-        sigs->in_signal = 1;
+        signal_set_blocked_mask(current_task, sigs->blocked.sig[0] |
+            act->sa_mask[0] | ((uint64_t)act->sa_mask[1] << 32) |
+            ((act->sa_flags & SA_NODEFER) ? 0 : bit));
 
         if (act->sa_flags & SA_RESETHAND) {
             default_signal_action(&default_act);
@@ -1375,6 +1450,5 @@ void syscalls_signal_init(void) {
     syscall_table_set(SYSCALL_TKILL, (void *)(sys_tkill));
     syscall_table_set(SYSCALL_SIGALTSTACK, (void *)(sys_sigaltstack));
     syscall_table_set(SYSCALL_PAUSE, (void *)(sys_pause));
-    syscall_table_set(SYSCALL_ALARM, (void *)(sys_alarm));
     syscall_table_set(SYSCALL_SIGRETURN, (void *)(sys_sigreturn));
 }

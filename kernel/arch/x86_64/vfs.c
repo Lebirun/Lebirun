@@ -20,6 +20,7 @@ extern void kstack_reclaim_unused(void);
 extern void heap_reclaim_unused(void);
 extern void pfa_ref_gc(void);
 extern void copy_file_range_release_mount(vfs_node_t *root);
+extern int vfs_check_perm(vfs_node_t *node, int want);
 
 static vfs_node_t *vfs_root = NULL;
 static vfs_fs_type_t *registered_fs = NULL;
@@ -1538,7 +1539,10 @@ static vfs_node_t *vfs_namei_once_dynamic(const char *in_path,
         rest_non_slash = rest_raw;
         while (*rest_non_slash == '/') rest_non_slash++;
         has_more = *rest_non_slash != '\0';
-        next = vfs_finddir(node, component);
+        next = !current_task || !current_task->is_user ||
+               !(node->mask & ~7ULL) ||
+               vfs_check_perm(node, VFS_PERM_EXEC) == 0 ?
+               vfs_finddir(node, component) : NULL;
         if (!next) {
             kfree(component);
             if (node_is_transient) vfs_release(node);

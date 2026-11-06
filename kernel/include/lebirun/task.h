@@ -175,6 +175,9 @@ typedef struct task {
     pid_t sid;
     pid_t ppid;
     int waiting_for_any_child;
+    uint8_t job_stop_signal;
+    uint8_t job_event;
+    uint8_t wait_options;
 
     void *signal_data;
     void *creds_data;
@@ -303,6 +306,11 @@ int task_has_child_of(pid_t parent_pid, pid_t pgid_filter);
 task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter);
 int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter);
 void task_finish_wait_any_child(void);
+int task_stop_pending(task_t *task);
+uint64_t task_take_stop(task_t *task);
+void task_job_stop(int sig);
+int task_job_continue(task_t *task);
+int task_pgrp_orphaned(pid_t pgid);
 
 void init_tasks(void);
 task_t* create_task(void (*entry)(void), task_state_t initial_state, bool user_mode);

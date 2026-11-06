@@ -489,6 +489,7 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if (!(flags & 0x20)) {
         tfd = task_fd_get(current_task, fd);
         if (!tfd || !tfd->in_use || !tfd->node) return -EBADF;
+        if (tfd->type != FD_TYPE_FILE) return -ENODEV;
         if ((tfd->flags & 0x3) == VFS_O_WRONLY) return -EACCES;
         if (VFS_GET_TYPE(((vfs_node_t *)tfd->node)->flags) == VFS_DIRECTORY)
             return -ENODEV;

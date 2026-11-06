@@ -1,6 +1,7 @@
 #include "syscall_defs.h"
 #include <lebirun/debug.h>
 #include <lebirun/common.h>
+#include <lebirun/creds.h>
 #include <stdarg.h>
 
 #define WNOHANG   1
@@ -50,6 +51,7 @@ static int sys_sleep(int ms, const char *unused, int unused2) {
 static int wait_status_from_exit_code(uint64_t exit_code) {
     int core;
 
+    if (exit_code & TASK_WAIT_CONTINUED) return 0xFFFF;
     if (exit_code & TASK_WAIT_STOPPED)
         return ((int)(exit_code & 0xFF) << 8) | 0x7F;
     core = (exit_code & TASK_WAIT_CORE) ? 0x80 : 0;
@@ -60,18 +62,18 @@ static int wait_status_from_exit_code(uint64_t exit_code) {
     return (int)((exit_code & 0xFF) << 8);
 }
 
-static int sys_waitpid(int pid, const char *status_ptr, int options) {
+static int wait_child(int pid, uint64_t *exit_out, int options) {
     extern int task_has_pending_signals(void);
     pid_t pgid_filter;
     task_t* t;
     task_t *dead;
     pid_t dead_pid;
     uint64_t exit_code;
-    int status;
     int r;
     int wait_state;
 
     if (!current_task) return -ESRCH;
+    current_task->wait_options = (uint8_t)(options & (WUNTRACED | WCONTINUED));
 
     pgid_filter = 0;
     if (pid == 0) {
@@ -83,7 +85,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         if (options & WNOHANG) {
             t = task_find((pid_t)pid);
             if (!t || t->ppid != current_task->pid) return -ECHILD;
-            if (t->state != TASK_DEAD && !task_trace_stop_pending(t)) return 0;
+            if (t->state != TASK_DEAD && !task_stop_pending(t)) return 0;
         }
 
         exit_code = 0;
@@ -92,12 +94,7 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
         if (r != 0) return -ECHILD;
 
         reap_dead_tasks();
-
-        if (status_ptr) {
-            status = wait_status_from_exit_code(exit_code);
-            if (copy_to_user((void *)(uintptr_t)status_ptr, &status,
-                             sizeof(int)) < 0) return -EFAULT;
-        }
+        *exit_out = exit_code;
         return (int)pid;
     }
 
@@ -121,14 +118,10 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
             r = task_join(dead, &exit_code);
             if (r != 0) return -ECHILD;
 
-            if (!(exit_code & TASK_WAIT_STOPPED)) dead->waited = 1;
+            if (!(exit_code & (TASK_WAIT_STOPPED | TASK_WAIT_CONTINUED)))
+                dead->waited = 1;
             reap_dead_tasks();
-
-            if (status_ptr) {
-                status = wait_status_from_exit_code(exit_code);
-                if (copy_to_user((void *)(uintptr_t)status_ptr, &status,
-                                 sizeof(int)) < 0) return -EFAULT;
-            }
+            *exit_out = exit_code;
             return (int)dead_pid;
         }
 
@@ -155,6 +148,21 @@ static int sys_waitpid(int pid, const char *status_ptr, int options) {
     }
 }
 
+static int sys_waitpid(int pid, const char *status_ptr, int options) {
+    uint64_t exit_code;
+    int status;
+    int r;
+
+    exit_code = 0;
+    r = wait_child(pid, &exit_code, options);
+    if (r > 0 && status_ptr) {
+        status = wait_status_from_exit_code(exit_code);
+        if (copy_to_user((void *)(uintptr_t)status_ptr, &status,
+                         sizeof(int)) < 0) return -EFAULT;
+    }
+    return r;
+}
+
 static int sys_wait4(int pid, const char *status_ptr, int options) {
     return sys_waitpid(pid, status_ptr, options);
 }
@@ -163,49 +171,60 @@ struct siginfo_k {
     int si_signo;
     int si_errno;
     int si_code;
-    int _pad[29];
+    int _pad0;
+    int si_pid;
+    int si_uid;
+    int si_status;
+    int _pad[25];
 };
 
-static int sys_waitid(int idtype, const char *id_ptr, int infop) {
+static int sys_waitid(int idtype, const char *id_ptr, uint64_t infop,
+                      int options) {
     int id;
-    uint64_t info_addr;
-    pid_t target_pid;
-    uint64_t exit_code;
+    int pid;
     int r;
+    uint64_t exit_code;
     struct siginfo_k local_info;
 
     id = (int)(uintptr_t)id_ptr;
-    info_addr = (uint64_t)infop;
-    target_pid = -1;
-    
+    if (!(options & (2 | 4 | 8))) return -EINVAL;
     if (idtype == P_PID) {
-        target_pid = (pid_t)id;
+        if (id <= 0) return -EINVAL;
+        pid = id;
     } else if (idtype == P_ALL) {
-        target_pid = -1;
+        pid = -1;
     } else if (idtype == P_PGID) {
-        target_pid = -1;
+        if (id < 0) return -EINVAL;
+        pid = id ? -id : 0;
     } else {
         return -EINVAL;
     }
-    
-    if (target_pid > 0) {
-        exit_code = 0;
-        r = task_wait_child_pid(target_pid, current_task->pid, &exit_code);
-        if (r == -EINTR) return -EINTR;
-        if (r != 0) return -ECHILD;
-        reap_dead_tasks();
-
-        if (info_addr) {
-            memset(&local_info, 0, sizeof(local_info));
-            local_info.si_signo = 17;
+    exit_code = 0;
+    r = wait_child(pid, &exit_code, options & (WNOHANG | WUNTRACED | WCONTINUED));
+    if (r < 0) return r;
+    memset(&local_info, 0, sizeof(local_info));
+    if (r > 0) {
+        local_info.si_signo = 17;
+        local_info.si_pid = r;
+        if (exit_code & TASK_WAIT_CONTINUED) {
+            local_info.si_code = 6;
+            local_info.si_status = 18;
+        } else if (exit_code & TASK_WAIT_STOPPED) {
+            local_info.si_code = 5;
+            local_info.si_status = (int)(exit_code & 0xFF);
+        } else if ((exit_code & ~TASK_WAIT_CORE) >= 128 &&
+                   (exit_code & ~TASK_WAIT_CORE) < 192) {
+            local_info.si_code = (exit_code & TASK_WAIT_CORE) ? 3 : 2;
+            local_info.si_status =
+                (int)((exit_code & ~TASK_WAIT_CORE) - 128);
+        } else {
             local_info.si_code = 1;
-            if (copy_to_user((void *)(uintptr_t)info_addr, &local_info,
-                             sizeof(local_info)) < 0) return -EFAULT;
+            local_info.si_status = (int)(exit_code & 0xFF);
         }
-        return 0;
     }
-    
-    return -ECHILD;
+    if (infop && copy_to_user((void *)(uintptr_t)infop, &local_info,
+                              sizeof(local_info)) < 0) return -EFAULT;
+    return 0;
 }
 
 static int sys_kill(int pid, const char *sig_arg, int unused) {
@@ -610,9 +629,14 @@ static int sys_process_vm(int pid, const struct proc_vm_iovec *local,
         unlock_scheduler();
         return -ESRCH;
     }
-    if (target != current_task && current_task->euid != 0 &&
-        current_task->euid != target->euid &&
-        current_task->uid != target->euid) {
+    if (target != current_task && !creds_has_capability(current_task, 19) &&
+        (current_task->uid != target->uid ||
+         current_task->uid != target->euid ||
+         current_task->uid != target->suid ||
+         current_task->gid != target->gid ||
+         current_task->gid != target->egid ||
+         current_task->gid != target->sgid ||
+         !creds_get_dumpable(target))) {
         unlock_scheduler();
         return -EPERM;
     }
