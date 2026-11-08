@@ -161,7 +161,6 @@ static int user_range_mapped_locked(uint64_t addr, uint64_t len, int empty_mappe
     uint64_t p;
     uint64_t pd;
     uint64_t phys;
-    uint64_t *new_user_pages;
 
     if (len == 0) return empty_mapped;
     if (!current_task) return 0;
@@ -185,19 +184,6 @@ static int user_range_mapped_locked(uint64_t addr, uint64_t len, int empty_mappe
                         pfa_free(phys);
                         return 0;
                     }
-                    if (current_task->vm->user_pages_count >= SIZE_MAX / sizeof(uint64_t) - 1) {
-                        vmm_unmap_page_in_pml4(pd, p);
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    new_user_pages = (uint64_t *)krealloc(current_task->vm->user_pages, (current_task->vm->user_pages_count + 1) * sizeof(uint64_t));
-                    if (!new_user_pages) {
-                        vmm_unmap_page_in_pml4(pd, p);
-                        pfa_free(phys);
-                        return 0;
-                    }
-                    current_task->vm->user_pages = new_user_pages;
-                    current_task->vm->user_pages[current_task->vm->user_pages_count] = phys;
                     current_task->vm->user_pages_count++;
                 } else {
                     return 0;

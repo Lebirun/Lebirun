@@ -483,10 +483,6 @@ static void KERNEL_INIT kernel_boot(void) {
             vfs_block_squashfs_access();
         }
 
-        if (!use_squashfs) {
-            ramfs_internalize_all();
-        }
-
         sqctx = squashfs_get_context();
         if (sqctx && sqctx->base && sqctx->size > 0) {
             ramfs_create_dir(KERNEL_INIT_STRING("/boot"), 0755);

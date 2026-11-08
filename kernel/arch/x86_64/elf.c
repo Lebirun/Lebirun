@@ -10,10 +10,11 @@
 #define ELF_STREAM_CHUNK_SIZE 512
 #define ELF_USER_END 0x0000800000000000ULL
 
-static int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data,
-                               uint64_t size, elf_info_t *info,
-                               uint64_t **out_pages, uint64_t *out_page_count,
-                               int allow_interp);
+static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
+                                    task_file_map_list_t *file_maps,
+                                    elf_info_t *info, uint64_t **out_pages,
+                                    uint64_t *out_page_count, int allow_interp,
+                                    uint64_t avoid_lo, uint64_t avoid_hi);
 
 static int elf_read_exact(vfs_node_t *node, uint64_t offset, uint64_t size,
                           void *buffer);
@@ -98,14 +99,10 @@ static int elf_interp_path_from_node(vfs_node_t *node, const Elf64_Phdr *phdr,
 
 static int elf_load_interp_mapped(uint64_t pd_phys, const char *path,
                                   uint64_t app_lo, uint64_t app_hi,
+                                  task_file_map_list_t *file_maps,
                                   elf_info_t *interp_out,
                                   uint64_t **pages_io, uint64_t *count_io) {
     vfs_node_t *node;
-    uint64_t len;
-    uint64_t off;
-    uint64_t chunk;
-    uint64_t got;
-    uint8_t *buf;
     elf_info_t iinfo;
     uint64_t *ipages;
     uint64_t icount;
@@ -117,34 +114,11 @@ static int elf_load_interp_mapped(uint64_t pd_phys, const char *path,
     node = vfs_namei(path);
     if (!node) return -13;
     vfs_open(node, 0);
-    buf = NULL;
     ipages = NULL;
     icount = 0;
     memset(&iinfo, 0, sizeof(iinfo));
-    len = node->length;
-    if (len < sizeof(Elf64_Ehdr)) {
-        ret = -13;
-        goto fail;
-    }
-    buf = (uint8_t *)kmalloc(len);
-    if (!buf) {
-        ret = -12;
-        goto fail;
-    }
-    off = 0;
-    while (off < len) {
-        chunk = len - off;
-        if (chunk > 0x10000u) chunk = 0x10000u;
-        got = vfs_read(node, off, chunk, buf + off);
-        if (got == 0 || got > chunk) {
-            ret = -13;
-            goto fail;
-        }
-        off += got;
-    }
-    ret = elf_load_to_pd_impl(pd_phys, buf, len, &iinfo, &ipages, &icount, 0);
-    kfree(buf);
-    buf = NULL;
+    ret = elf_load_node_to_pd_impl(pd_phys, node, file_maps, &iinfo, &ipages,
+                                   &icount, 0, app_lo, app_hi);
     if (ret != 0) {
         ret = (ret == -10 || ret == -12) ? -12 : -13;
         goto fail;
@@ -181,17 +155,36 @@ fail_overlap:
     ret = -13;
 fail:
     if (ipages) kfree(ipages);
-    if (buf) kfree(buf);
     vfs_close(node);
     vfs_release(node);
     return ret;
 }
 
-static uint64_t elf_random_pie_base(void) {
+static uint64_t elf_random_pie_base(const Elf64_Phdr *phdr, uint16_t phnum,
+                                    uint64_t avoid_lo, uint64_t avoid_hi) {
     uint64_t slot;
+    uint64_t base;
+    uint64_t lo;
+    uint64_t hi;
+    uint16_t i;
+    int tries;
 
+    lo = UINT64_MAX;
+    hi = 0;
+    for (i = 0; i < phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD || !phdr[i].p_memsz) continue;
+        if (phdr[i].p_vaddr < lo) lo = phdr[i].p_vaddr;
+        if (phdr[i].p_vaddr + phdr[i].p_memsz > hi)
+            hi = phdr[i].p_vaddr + phdr[i].p_memsz;
+    }
     slot = rng_get_u64() & 0x3FULL;
-    return 0x01000000ULL + slot * 0x200000ULL;
+    base = 0x01000000ULL + slot * 0x200000ULL;
+    if (lo >= hi || avoid_lo >= avoid_hi) return base;
+    for (tries = 0; tries < 64; tries++) {
+        base = 0x01000000ULL + ((slot + tries) & 0x3FULL) * 0x200000ULL;
+        if (base + hi <= avoid_lo || avoid_hi <= base + lo) return base;
+    }
+    return base;
 }
 
 static int elf_vaddr_file_offset(const Elf64_Phdr *phdr, uint16_t phnum,
@@ -356,7 +349,7 @@ static uint64_t count_loadable_pages(const uint8_t *data) {
     return total_pages;
 }
 
-int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count, int allow_interp) {
+static int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t size, elf_info_t *info, uint64_t **out_pages, uint64_t *out_page_count, int allow_interp) {
     int valid;
     const Elf64_Ehdr *ehdr;
     const Elf64_Phdr *phdr;
@@ -393,7 +386,7 @@ int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t size, el
     phdr = (const Elf64_Phdr *)(data + ehdr->e_phoff);
 
     is_pie = (ehdr->e_type == ET_DYN) ? 1 : 0;
-    pie_base = is_pie ? elf_random_pie_base() : 0;
+    pie_base = is_pie ? elf_random_pie_base(phdr, ehdr->e_phnum, 0, 0) : 0;
     if (elf_check_phdrs(phdr, ehdr->e_phnum, pie_base, size) != 0) {
         return -11;
     }
@@ -463,7 +456,11 @@ int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t size, el
             }
 
             pmm_zero_page_phys(phys);
-            vmm_map_page_in_pml4(pd_phys, page_vaddr, phys, flags);
+            if (vmm_map_page_in_pml4(pd_phys, page_vaddr, phys, flags) < 0) {
+                pfa_free(phys);
+                if (page_list) kfree(page_list);
+                return -12;
+            }
 
             if (page_list && page_index < estimated_pages) {
                 page_list[page_index++] = phys;
@@ -550,7 +547,7 @@ int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t size, el
             memset(&interp_info, 0, sizeof(interp_info));
             interp_ret = elf_load_interp_mapped(pd_phys, interp_path,
                                                 info->load_base,
-                                                info->bss_end,
+                                                info->bss_end, NULL,
                                                 &interp_info, &page_list,
                                                 &page_index);
             if (interp_ret != 0) {
@@ -605,10 +602,11 @@ static int elf_read_exact(vfs_node_t *node, uint64_t offset, uint64_t size, void
     return 0;
 }
 
-int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
+static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
                          task_file_map_list_t *file_maps, elf_info_t *info,
                          uint64_t **out_pages, uint64_t *out_page_count,
-                         int allow_interp) {
+                         int allow_interp, uint64_t avoid_lo,
+                         uint64_t avoid_hi) {
     Elf64_Ehdr ehdr;
     Elf64_Phdr *phdr;
     uint64_t phdr_size;
@@ -632,7 +630,9 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
     uint64_t copied;
     uint64_t chunk;
     uint8_t tmp[ELF_STREAM_CHUNK_SIZE];
+    uint16_t j;
     int is_pie;
+    int lazy;
     int ret;
     Elf64_Dyn dyn;
     Elf64_Rela rel;
@@ -647,10 +647,6 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
     uint64_t tmp_size;
 
     if (!pd_phys || !node || !info) {
-        return -1;
-    }
-    if (file_maps &&
-        (file_maps->maps || file_maps->count || file_maps->capacity)) {
         return -1;
     }
     if (node->length < sizeof(Elf64_Ehdr)) {
@@ -702,7 +698,8 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
     }
 
     is_pie = (ehdr.e_type == ET_DYN) ? 1 : 0;
-    pie_base = is_pie ? elf_random_pie_base() : 0;
+    pie_base = is_pie ? elf_random_pie_base(phdr, ehdr.e_phnum, avoid_lo,
+                                            avoid_hi) : 0;
     if (elf_check_phdrs(phdr, ehdr.e_phnum, pie_base, node->length) != 0) {
         kfree(phdr);
         return -11;
@@ -767,7 +764,7 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
                 memset(&interp_info, 0, sizeof(interp_info));
                 interp_ret = elf_load_interp_mapped(
                     pd_phys, interp_path, info->load_base, info->bss_end,
-                    &interp_info, &ipages, &icount);
+                    file_maps, &interp_info, &ipages, &icount);
                 if (interp_ret != 0) {
                     kfree(phdr);
                     return interp_ret;
@@ -839,6 +836,27 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
         vaddr_end = (vaddr + memsz + 0xFFF) & ~0xFFFu;
         segment_pages = (vaddr_end - vaddr_start) / PAGE_SIZE;
 
+        lazy = 0;
+        if (file_maps && !(phdr[i].p_flags & PF_W)) {
+            for (j = 0; j < ehdr.e_phnum; j++) {
+                if (j == i || phdr[j].p_type != PT_LOAD ||
+                    !phdr[j].p_memsz) continue;
+                if (((phdr[j].p_vaddr + pie_base) & ~0xFFFULL) < vaddr_end &&
+                    vaddr_start < ((phdr[j].p_vaddr + pie_base +
+                                    phdr[j].p_memsz + 0xFFF) & ~0xFFFULL))
+                    break;
+            }
+            lazy = j == ehdr.e_phnum;
+        }
+        if (lazy) {
+            if (task_file_map_list_add(file_maps, node, vaddr, memsz, filesz,
+                                       offset, flags & ~VMM_PTE_NX) != 0) {
+                ret = -10;
+                break;
+            }
+            segment_pages = 0;
+        }
+
         for (page = 0; page < segment_pages; page++) {
             page_vaddr = vaddr_start + page * PAGE_SIZE;
             existing_phys = vmm_get_phys_in_pml4(pd_phys, page_vaddr);
@@ -851,7 +869,11 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
                 break;
             }
             pmm_zero_page_phys(phys);
-            vmm_map_page_in_pml4(pd_phys, page_vaddr, phys, flags);
+            if (vmm_map_page_in_pml4(pd_phys, page_vaddr, phys, flags) < 0) {
+                pfa_free(phys);
+                ret = -12;
+                break;
+            }
             if (page_list && page_index < estimated_pages) {
                 page_list[page_index++] = phys;
             }
@@ -860,7 +882,7 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
             break;
         }
 
-        copied = 0;
+        copied = lazy ? filesz : 0;
         while (copied < filesz) {
             chunk = filesz - copied;
             if (chunk > tmp_size) {
@@ -923,18 +945,27 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
             rela_file_off <= node->length &&
             rela_sz <= node->length - rela_file_off) {
             rel_cnt = rela_sz / sizeof(Elf64_Rela);
-            for (ri = 0; ri < rel_cnt; ri++) {
+            for (ri = 0; ri < rel_cnt; ri += chunk) {
+                chunk = rel_cnt - ri;
+                if (chunk > tmp_size / sizeof(Elf64_Rela))
+                    chunk = tmp_size / sizeof(Elf64_Rela);
                 if (elf_read_exact(node,
                                    rela_file_off + ri * sizeof(Elf64_Rela),
-                                   sizeof(rel), &rel) != 0) {
+                                   chunk * sizeof(Elf64_Rela), tmp) != 0) {
                     ret = -11;
                     break;
                 }
-                rtype = ELF64_R_TYPE(rel.r_info);
-                if (rtype == R_X86_64_RELATIVE &&
-                    elf_reloc_ok(info->load_base, info->bss_end, pie_base,
-                                 rel.r_offset)) {
+                for (page = 0; page < chunk; page++) {
+                    memcpy(&rel, tmp + page * sizeof(rel), sizeof(rel));
+                    rtype = ELF64_R_TYPE(rel.r_info);
                     raddr = pie_base + rel.r_offset;
+                    if (rtype != R_X86_64_RELATIVE ||
+                        !elf_reloc_ok(info->load_base, info->bss_end,
+                                      pie_base, rel.r_offset) ||
+                        !vmm_get_phys_in_pml4(pd_phys, raddr & ~0xFFFULL) ||
+                        !vmm_get_phys_in_pml4(pd_phys,
+                                              (raddr + 7) & ~0xFFFULL))
+                        continue;
                     rval = pie_base + rel.r_addend;
                     vmm_copy_to_pml4(pd_phys, raddr, &rval, sizeof(uint64_t));
                 }
@@ -955,7 +986,7 @@ int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
             memset(&interp_info, 0, sizeof(interp_info));
             interp_ret = elf_load_interp_mapped(pd_phys, interp_path,
                                                 info->load_base,
-                                                info->bss_end,
+                                                info->bss_end, file_maps,
                                                 &interp_info, &page_list,
                                                 &page_index);
             if (interp_ret != 0) {
@@ -990,7 +1021,7 @@ int elf_load_node_to_pd(uint64_t pd_phys, vfs_node_t *node,
                         task_file_map_list_t *file_maps, elf_info_t *info,
                         uint64_t **out_pages, uint64_t *out_page_count) {
     return elf_load_node_to_pd_impl(pd_phys, node, file_maps, info, out_pages,
-                                    out_page_count, 1);
+                                    out_page_count, 1, 0, 0);
 }
 
 static int strcmp_local(const char *s1, const char *s2) {

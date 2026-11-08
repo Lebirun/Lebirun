@@ -157,7 +157,6 @@ static int task_state_requires_schedule(task_t *task) {
 static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
                                 uint64_t fault_page) {
     uint64_t new_phys;
-    uint64_t *new_user_pages;
 
     if (fault_addr < USER_STACK_FLOOR || fault_addr >= USER_STACK_TOP) return 0;
     if (!task_memory_allows(task, PAGE_SIZE) ||
@@ -171,15 +170,7 @@ static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
         pfa_free(new_phys);
         return 0;
     }
-    new_user_pages = (uint64_t *)krealloc(task->vm->user_pages,
-                     (task->vm->user_pages_count + 1) * sizeof(uint64_t));
-    if (!new_user_pages) {
-        vmm_unmap_page_in_pml4(task->pml4_phys, fault_page);
-        pfa_free(new_phys);
-        return 0;
-    }
-    task->vm->user_pages = new_user_pages;
-    task->vm->user_pages[task->vm->user_pages_count++] = new_phys;
+    task->vm->user_pages_count++;
     task->stack_size += PAGE_SIZE;
     return 1;
 }
@@ -568,10 +559,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 regs->return_cr3 = new_cr3;
                 
                 exec_cleanup_enqueue(current_task->exec_old_pml4,
-                                     current_task->exec_old_pages,
                                      current_task->exec_old_pages_count);
                 
-                current_task->exec_old_pages = NULL;
                 current_task->exec_old_pages_count = 0;
                 current_task->exec_old_pml4 = 0;
                 current_task->exec_completed = 0;

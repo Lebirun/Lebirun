@@ -349,25 +349,26 @@ int lke_load(const char *path) {
     int r;
     int rc;
 
-    if (!path || !lke_enabled) return -1;
+    if (!path) return -22;
+    if (!lke_enabled) return -38;
 
     bname = basename_of(path);
     mod_name_len = lke_name_length(bname);
     if (lke_find_by_name_slice(bname, mod_name_len)) return -17;
 
     node = vfs_namei(path);
-    if (!node) return -3;
+    if (!node) return -2;
 
     data_size = node->length;
-    if (data_size < sizeof(Elf64_Ehdr)) { vfs_release(node); return -4; }
+    if (data_size < sizeof(Elf64_Ehdr)) { vfs_release(node); return -8; }
 
     data = (uint8_t *)lke_alloc_pages(data_size, &data_pages);
-    if (!data) { vfs_release(node); return -5; }
+    if (!data) { vfs_release(node); return -12; }
 
     if ((uint64_t)vfs_read(node, 0, data_size, data) != data_size) {
         vfs_release(node);
         lke_free_pages(data, data_pages);
-        return -6;
+        return -5;
     }
     vfs_release(node);
 
@@ -375,17 +376,15 @@ int lke_load(const char *path) {
     mem[0] = mem[1] = NULL;
     pages[0] = pages[1] = 0;
     size[0] = size[1] = 0;
-    rc = -7;
+    rc = -8;
     ehdr = (const Elf64_Ehdr *)data;
     if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
         ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3)
         goto fail;
-    rc = -8;
     if (ehdr->e_type != ET_REL) goto fail;
-    rc = -9;
     if (ehdr->e_machine != EM_X86_64) goto fail;
-    rc = -7;
-    if (ehdr->e_shoff + (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > data_size)
+    if (ehdr->e_shoff > data_size ||
+        (uint64_t)ehdr->e_shnum * sizeof(Elf64_Shdr) > data_size - ehdr->e_shoff)
         goto fail;
 
     shdr = (const Elf64_Shdr *)(data + ehdr->e_shoff);
@@ -402,7 +401,7 @@ int lke_load(const char *path) {
                 !(sh->sh_flags & 0x2))
                 continue;
             r = lke_is_init_section(data, data_size, ehdr, sh);
-            rc = -10;
+            rc = -8;
             if (sh->sh_addralign > 1) {
                 uint64_t mask = sh->sh_addralign - 1;
 
@@ -414,7 +413,6 @@ int lke_load(const char *path) {
             if (pass) {
                 sec_offsets[i] = (uint64_t)(uintptr_t)(mem[r] + off[r]);
                 if (sh->sh_type == SHT_PROGBITS && sh->sh_size > 0) {
-                    rc = -7;
                     if (!lke_range_ok(sh->sh_offset, sh->sh_size, data_size))
                         goto fail;
                     memcpy(mem[r] + off[r], data + sh->sh_offset, sh->sh_size);
@@ -425,9 +423,9 @@ int lke_load(const char *path) {
         if (pass) break;
         size[0] = off[0];
         size[1] = off[1];
-        rc = -10;
+        rc = -8;
         if (size[0] == 0) goto fail;
-        rc = -11;
+        rc = -12;
         mem[0] = (uint8_t *)lke_alloc_pages(size[0], &pages[0]);
         if (!mem[0]) goto fail;
         if (size[1]) {
@@ -436,7 +434,7 @@ int lke_load(const char *path) {
         }
     }
 
-    rc = -13;
+    rc = -8;
     symtab_sh = NULL;
     for (i = 0; i < ehdr->e_shnum; i++) {
         if (shdr[i].sh_type == SHT_SYMTAB) {
@@ -457,13 +455,11 @@ int lke_load(const char *path) {
         if (rela_sh->sh_type != SHT_RELA) continue;
         if (rela_sh->sh_info >= ehdr->e_shnum) continue;
         if (sec_offsets[rela_sh->sh_info] == 0) continue;
-        rc = -7;
         if (!lke_range_ok(rela_sh->sh_offset, rela_sh->sh_size, data_size))
             goto fail;
 
         for (j = 0; j < rela_sh->sh_size / sizeof(Elf64_Rela); j++) {
             rela = (const Elf64_Rela *)(data + rela_sh->sh_offset + j * sizeof(Elf64_Rela));
-            rc = -14;
             if (ELF64_R_SYM(rela->r_info) >= sym_count) goto fail;
             sym = (const Elf64_Sym *)(data + symtab_sh->sh_offset) +
                   ELF64_R_SYM(rela->r_info);
@@ -495,7 +491,6 @@ int lke_load(const char *path) {
             } else if (rtype == R_X86_64_32S) {
                 *(int32_t *)target = (int32_t)(S + A);
             } else {
-                rc = -15;
                 goto fail;
             }
         }
@@ -519,9 +514,8 @@ int lke_load(const char *path) {
         }
     }
 
-    rc = -16;
     if (!init_fn) goto fail;
-    rc = -2;
+    rc = -12;
     mod_name = (char *)kmalloc(mod_name_len + 1);
     if (!mod_name) goto fail;
     memcpy(mod_name, bname, mod_name_len);
@@ -560,7 +554,7 @@ int lke_load(const char *path) {
         lke_free_pages(mem[0], pages[0]);
         memset(mod, 0, sizeof(lke_module_t));
         lke_shrink_registry();
-        return -17;
+        return rc < 0 ? rc : -5;
     }
 
     printf("LKE: loaded '%s' (%llu bytes)\n", mod->name,
@@ -579,7 +573,7 @@ int lke_unload(const char *name) {
     size_t idx;
     lke_module_t *mod;
 
-    if (!name) return -1;
+    if (!name) return -22;
 
     mod = lke_find_by_name(name);
     if (!mod) return -2;

@@ -1442,10 +1442,15 @@ static int sys_ptsname(int fd, char *buf, int buflen) {
 
 static int sys_lke_load(const char *pathname) {
 #if CONFIG_KERNEL_LKE
-    if (!pathname) return -EFAULT;
-    if ((uint64_t)pathname >= KERNEL_VMA || (uint64_t)pathname < 0x1000) return -EFAULT;
+    char *path;
+    int ret;
+
     if (!current_task || current_task->uid != 0) return -EPERM;
-    return lke_load(pathname);
+    path = copy_string_from_user_alloc(pathname);
+    if (!path) return -EFAULT;
+    ret = lke_load(path);
+    kfree(path);
+    return ret;
 #else
     (void)pathname;
     return -ENOSYS;
@@ -1454,10 +1459,15 @@ static int sys_lke_load(const char *pathname) {
 
 static int sys_lke_unload(const char *name) {
 #if CONFIG_KERNEL_LKE
-    if (!name) return -EFAULT;
-    if ((uint64_t)name >= KERNEL_VMA || (uint64_t)name < 0x1000) return -EFAULT;
+    char *kname;
+    int ret;
+
     if (!current_task || current_task->uid != 0) return -EPERM;
-    return lke_unload(name);
+    kname = copy_string_from_user_alloc(name);
+    if (!kname) return -EFAULT;
+    ret = lke_unload(kname);
+    kfree(kname);
+    return ret;
 #else
     (void)name;
     return -ENOSYS;

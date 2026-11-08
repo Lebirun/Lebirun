@@ -101,7 +101,6 @@ typedef struct task_vm {
     uint64_t user_brk;
     uint64_t user_brk_start;
     uint64_t mmap_next_addr;
-    uint64_t *user_pages;
     uint64_t user_pages_count;
     task_file_map_t *file_maps;
 } task_vm_t;
@@ -216,15 +215,12 @@ typedef struct task {
     int resources_released;
 
     uint64_t exec_old_pml4;
-    uint64_t *exec_old_pages;
     uint64_t exec_old_pages_count;
     struct vfs_node *vfs_lookup_node;
 
     void *timer_data;
     void *limits_data;
     uint64_t alarm_tick;
-    uint32_t cpu_affinity;
-    uint32_t cpu_affinity_hi;
     uint64_t affinity64;
     uint64_t *affinity_dyn;
     int affinity_nwords;
@@ -359,7 +355,6 @@ int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks
 uint64_t event_descriptor_wait_timeout(uint64_t timeout_ticks);
 
 void task_free_user_memory(task_t* t);
-int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys);
 void task_vm_lock(task_t *t);
 int task_vm_trylock(task_t *t);
 void task_vm_unlock(task_t *t);
@@ -471,7 +466,7 @@ int signals_copy_task(task_t *child, task_t *parent);
 int task_has_pending_signals(void);
 void task_free_signal_data(task_t *task);
 
-void exec_cleanup_enqueue(uint64_t pml4, uint64_t *pages, uint64_t count);
+void exec_cleanup_enqueue(uint64_t pml4, uint64_t count);
 void exec_cleanup_drain(void);
 void task_reclaim_exited_now(void);
 int task_set_cpu_affinity(task_t *task, uint32_t mask);

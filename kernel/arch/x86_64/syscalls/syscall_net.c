@@ -858,10 +858,6 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
     uint64_t base;
     uint64_t page_count;
     uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t new_count;
-    uint64_t *expanded;
-    uint64_t i;
     http_get_alloc_req_t req;
 
     (void)unused1; (void)unused2;
@@ -952,48 +948,8 @@ static int sys_net_http_get_alloc(uint64_t req_ptr, const char *unused1,
         return -1;
     }
 
-    if (page_count > 0) {
-        old_count = current_task->vm->user_pages_count;
-        if (page_count > UINT64_MAX - old_count ||
-            old_count + page_count > UINT64_MAX / sizeof(uint64_t)) {
-            for (i = 0; i < page_count; i++) {
-                vmm_unmap_page_in_pml4(current_task->pml4_phys,
-                                       base + i * PAGE_SIZE);
-                pfa_free(new_pages[i]);
-            }
-            vmm_prune_user_range(current_task->pml4_phys, base, alloc_size);
-            task_unmap_vm_areas(current_task, base, alloc_size);
-            kfree(new_pages);
-            kfree(kbuf);
-            task_vm_unlock(current_task);
-            return -1;
-        }
-        new_count = old_count + page_count;
-        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
-        if (!expanded) {
-            for (i = 0; i < page_count; i++) {
-                vmm_unmap_page_in_pml4(current_task->pml4_phys,
-                                       base + i * PAGE_SIZE);
-                pfa_free(new_pages[i]);
-            }
-            vmm_prune_user_range(current_task->pml4_phys, base, alloc_size);
-            task_unmap_vm_areas(current_task, base, alloc_size);
-            kfree(new_pages);
-            kfree(kbuf);
-            task_vm_unlock(current_task);
-            return -1;
-        }
-        if (current_task->vm->user_pages && old_count > 0) {
-            memcpy(expanded, current_task->vm->user_pages,
-                   old_count * sizeof(uint64_t));
-            kfree(current_task->vm->user_pages);
-        }
-        memcpy(expanded + old_count, new_pages,
-               page_count * sizeof(uint64_t));
-        current_task->vm->user_pages = expanded;
-        current_task->vm->user_pages_count = new_count;
-        kfree(new_pages);
-    }
+    current_task->vm->user_pages_count += page_count;
+    kfree(new_pages);
 
     current_task->vm->mmap_next_addr = base;
     task_vm_unlock(current_task);

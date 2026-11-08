@@ -378,13 +378,6 @@ static int task_debug_memory(task_trace_t *trace, uint64_t address,
                 result = -ENOMEM;
                 break;
             }
-            if (task_replace_user_page(task, original, physical) != 0) {
-                vmm_map_page_in_pml4(task->pml4_phys, page, original, flags);
-                pfa_free(physical);
-                unlock_scheduler();
-                result = -ENOMEM;
-                break;
-            }
             if (!(flags & VMM_PTE_NOFREE)) pfa_cow_release64(original);
         } else {
             vmm_read_from_pml4(task->pml4_phys, address + copied,
