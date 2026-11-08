@@ -64,28 +64,26 @@ static void rng_cpuid(uint32_t leaf, uint32_t *a, uint32_t *b, uint32_t *c, uint
     __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(0));
 }
 
-static int rng_cpu_has_rdseed(void)
+static int rng_cpu_has(int feature)
 {
+    static int features = -1;
     uint32_t a;
     uint32_t b;
     uint32_t c;
     uint32_t d;
+    int found;
 
-    rng_cpuid(0, &a, &b, &c, &d);
-    if (a < 7) return 0;
-    rng_cpuid(7, &a, &b, &c, &d);
-    return (b & (1U << 18)) != 0;
-}
-
-static int rng_cpu_has_rdrand(void)
-{
-    uint32_t a;
-    uint32_t b;
-    uint32_t c;
-    uint32_t d;
-
-    rng_cpuid(1, &a, &b, &c, &d);
-    return (c & (1U << 30)) != 0;
+    if (features < 0) {
+        rng_cpuid(1, &a, &b, &c, &d);
+        found = (c & (1U << 30)) ? 1 : 0;
+        rng_cpuid(0, &a, &b, &c, &d);
+        if (a >= 7) {
+            rng_cpuid(7, &a, &b, &c, &d);
+            if (b & (1U << 18)) found |= 2;
+        }
+        features = found;
+    }
+    return (features & feature) != 0;
 }
 
 static int rng_rdseed64(uint64_t *out)
@@ -94,7 +92,7 @@ static int rng_rdseed64(uint64_t *out)
     uint64_t value;
     int i;
 
-    if (!rng_cpu_has_rdseed()) return 0;
+    if (!rng_cpu_has(2)) return 0;
     for (i = 0; i < 32; i++) {
         __asm__ volatile("rdseed %0; setc %1" : "=r"(value), "=qm"(ok));
         if (ok) {
@@ -111,7 +109,7 @@ static int rng_rdrand64(uint64_t *out)
     uint64_t value;
     int i;
 
-    if (!rng_cpu_has_rdrand()) return 0;
+    if (!rng_cpu_has(1)) return 0;
     for (i = 0; i < 10; i++) {
         __asm__ volatile("rdrand %0; setc %1" : "=r"(value), "=qm"(ok));
         if (ok) {
