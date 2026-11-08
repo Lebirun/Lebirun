@@ -53,10 +53,21 @@ static uint64_t slot_page_addr(int slot, int page_idx) {
     return KSTACK_REGION_START + (uint64_t)slot * KSTACK_SLOT_SIZE + (1 + page_idx) * PAGE_SIZE;
 }
 
-static void kstack_drop_bottom(int slot, uint64_t phys) {
-    vmm_unmap_page(slot_page_addr(slot, 0));
-    smp_tlb_flush_all_sync();
-    pfa_free(phys);
+static void kstack_drop_bottom(kstack_slot_t *entry, int slot) {
+    uint64_t phys;
+
+    phys = entry->page_phys[0];
+    if (phys) {
+        vmm_unmap_page(slot_page_addr(slot, 0));
+        if (smp_tlb_flush_all_sync() < 0) {
+            vmm_map_page(slot_page_addr(slot, 0), phys, 0x003 | VMM_PTE_NX);
+            return;
+        }
+        pfa_free(phys);
+    }
+    entry->page_phys[0] = 0;
+    entry->bottom_mapped = 0;
+    entry->syscall_bottom = 0;
 }
 
 static int addr_to_slot(uint64_t addr) {
@@ -192,14 +203,17 @@ void kstack_free(uint8_t *base) {
     }
 
     for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
-        if (entry->page_phys[p]) {
+        if (entry->page_phys[p])
             vmm_unmap_page(slot_page_addr(slot, p));
-            pfa_free(entry->page_phys[p]);
-        }
     }
     kstack_table[slot] = NULL;
     kstack_lock_release(flags);
 
+    if (smp_tlb_flush_all_sync() == 0) {
+        for (p = 0; p < KSTACK_USABLE_PAGES; p++) {
+            if (entry->page_phys[p]) pfa_free(entry->page_phys[p]);
+        }
+    }
     kfree(entry);
 }
 
@@ -212,7 +226,6 @@ void kstack_reclaim_unused(void) {
     uint64_t top;
     uint64_t rsp;
     uint64_t frame_address;
-    uint64_t phys;
     uint64_t flags;
     int slot;
     int cpu;
@@ -262,13 +275,7 @@ void kstack_reclaim_unused(void) {
         }
         kstack_lock_acquire(&flags);
         entry = kstack_find_slot_locked(slot);
-        if (entry && entry->page_phys[0]) {
-            phys = entry->page_phys[0];
-            entry->page_phys[0] = 0;
-            entry->bottom_mapped = 0;
-            entry->syscall_bottom = 0;
-            kstack_drop_bottom(slot, phys);
-        }
+        if (entry && entry->page_phys[0]) kstack_drop_bottom(entry, slot);
         kstack_lock_release(flags);
         task = task->all_next;
     }
@@ -403,12 +410,7 @@ int kstack_prepare_syscall(void) {
 
     if (entry->bottom_mapped == 2 &&
         rsp >= slot_page_addr(current_slot, 1)) {
-        if (entry->page_phys[0]) {
-            kstack_drop_bottom(current_slot, entry->page_phys[0]);
-            entry->page_phys[0] = 0;
-        }
-        entry->bottom_mapped = 0;
-        entry->syscall_bottom = 0;
+        kstack_drop_bottom(entry, current_slot);
     } else if (entry->bottom_mapped == 2) {
         entry->bottom_mapped = 1;
     }
@@ -489,7 +491,6 @@ out:
 void kstack_finish_syscall(void) {
     uint64_t flags;
     uint64_t rsp;
-    uint64_t phys;
     int slot;
     kstack_slot_t *entry;
     uint64_t lock_flags;
@@ -499,17 +500,12 @@ void kstack_finish_syscall(void) {
     slot = addr_to_slot(rsp);
     kstack_lock_acquire(&lock_flags);
     entry = kstack_find_slot_locked(slot);
-    phys = 0;
     if (slot >= 0 && entry && entry->syscall_bottom &&
         rsp >= slot_page_addr(slot, 1)) {
-        phys = entry->page_phys[0];
-        entry->page_phys[0] = 0;
-        entry->bottom_mapped = 0;
-        entry->syscall_bottom = 0;
+        kstack_drop_bottom(entry, slot);
     } else if (slot >= 0 && entry && entry->page_phys[0]) {
         entry->bottom_mapped = 2;
     }
-    if (phys) kstack_drop_bottom(slot, phys);
     kstack_lock_release(lock_flags);
     __asm__ volatile ("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
 }

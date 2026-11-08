@@ -654,6 +654,8 @@ size_t slab_alloc_size(void *ptr) {
     slab_page_t *page;
     slab_block_t *block;
     uint64_t address;
+    uint64_t eflags;
+    size_t size;
 
     if (!ptr || !slab_initialized) return 0;
     address = (uint64_t)ptr & ~(PAGE_SIZE - 1);
@@ -666,9 +668,11 @@ size_t slab_alloc_size(void *ptr) {
         return page->payload_size;
     }
     if (page->kind != SLAB_KIND_SMALL) return 0;
+    slab_lock_acquire(&eflags);
     block = slab_small_block_for_ptr(page, ptr);
-    if (!block || !block->requested) return 0;
-    return block->requested;
+    size = block ? block->requested : 0;
+    slab_lock_release(eflags);
+    return size;
 }
 
 int slab_resize(void *ptr, size_t new_size) {

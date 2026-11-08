@@ -70,7 +70,7 @@ extern void copy_file_range_release_task(void *owner);
 #define TASK_SIGCHLD 17
 #define MEMORY_PRESSURE_REQUESTED 1
 
-_Static_assert(sizeof(task_t) == 936, "task size changed");
+_Static_assert(sizeof(task_t) == 920, "task size changed");
 
 #define SCHED_DEFAULT_TIMESLICE 3
 #define TASK_SCHED_OTHER 0
@@ -151,8 +151,6 @@ static int task_affinity_copy(task_t *dst, task_t *src) {
     }
     for (i = 0; i < src->affinity_nwords; i++)
         nd[i] = src->affinity_dyn[i];
-    dst->cpu_affinity = src->cpu_affinity;
-    dst->cpu_affinity_hi = src->cpu_affinity_hi;
     dst->affinity64 = src->affinity64;
     dst->affinity_nwords = src->affinity_nwords;
     dst->affinity_dyn = src->affinity_nwords > 0 ? nd : NULL;
@@ -350,8 +348,6 @@ int task_set_cpu_affinity_mask(task_t *task, const uint64_t *words, int nwords) 
     }
     lock_scheduler();
     old = task->affinity_dyn;
-    task->cpu_affinity = (uint32_t)words[0];
-    task->cpu_affinity_hi = (uint32_t)(words[0] >> 32);
     task->affinity64 = words[0];
     task->affinity_dyn = nd;
     task->affinity_nwords = nwords - 1;
@@ -765,7 +761,6 @@ static void task_write_fs_base(uint64_t base) {
 
 typedef struct exec_cleanup_entry {
     uint64_t old_pd;
-    uint64_t *old_pages;
     uint64_t old_pages_count;
     struct exec_cleanup_entry *next;
 } exec_cleanup_entry_t;
@@ -908,19 +903,15 @@ static int task_free_exec_old_pml4_if_unowned(task_t *owner, uint64_t pd) {
     return 1;
 }
 
-void exec_cleanup_enqueue(uint64_t pd, uint64_t *pages, uint64_t count) {
+void exec_cleanup_enqueue(uint64_t pd, uint64_t count) {
     exec_cleanup_entry_t *entry;
 
     entry = (exec_cleanup_entry_t *)kmalloc(sizeof(exec_cleanup_entry_t));
     if (!entry) {
-        if (pages) {
-            kfree(pages);
-        }
         task_free_pml4_if_unowned(NULL, pd);
         return;
     }
     entry->old_pd = pd;
-    entry->old_pages = pages;
     entry->old_pages_count = count;
     entry->next = NULL;
 
@@ -932,7 +923,6 @@ void exec_cleanup_enqueue(uint64_t pd, uint64_t *pages, uint64_t count) {
 }
 
 void exec_cleanup_drain(void) {
-    uint64_t *pages;
     uint64_t pd;
     int freed;
     exec_cleanup_entry_t *entry;
@@ -948,15 +938,9 @@ void exec_cleanup_drain(void) {
         if (!exec_cleanup_head) exec_cleanup_tail = NULL;
         exec_cleanup_lock_release();
 
-        pages = entry->old_pages;
         pd = entry->old_pd;
-        if (pages) {
-            kfree(pages);
-        }
         freed = task_free_pml4_if_unowned(NULL, pd);
         if (!freed) {
-            entry->old_pages = NULL;
-            entry->old_pages_count = 0;
             entry->next = NULL;
             exec_cleanup_lock_acquire();
             if (exec_cleanup_tail) exec_cleanup_tail->next = entry;
@@ -971,17 +955,14 @@ void exec_cleanup_drain(void) {
 
 static void task_discard_exec_old(task_t *t) {
     uint64_t pd;
-    uint64_t *pages;
     uint64_t count;
 
     if (!t || !t->exec_old_pml4) return;
     pd = t->exec_old_pml4;
-    pages = t->exec_old_pages;
     count = t->exec_old_pages_count;
     t->exec_old_pml4 = 0;
-    t->exec_old_pages = NULL;
     t->exec_old_pages_count = 0;
-    exec_cleanup_enqueue(pd, pages, count);
+    exec_cleanup_enqueue(pd, count);
 }
 
 static uint64_t task_stack_pages(task_t *task) {
@@ -1816,8 +1797,6 @@ void KERNEL_INIT init_tasks(void) {
     current_task->regs.ds = current_task->regs.es = 0x10;
     current_task->vring_minor = 0;
     current_task->is_kernel_task = false;
-    current_task->cpu_affinity = 0xFFFFFFFFu;
-    current_task->cpu_affinity_hi = 0xFFFFFFFFu;
     current_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
     current_task->affinity_nwords = -1;
     current_task->vruntime = 0;
@@ -1839,6 +1818,13 @@ void KERNEL_INIT init_tasks(void) {
     scheduler_initialized = 1;
 }
 
+static inline void sched_lock_acquire(void) {
+    while (!spin_trylock(&sched_lock)) {
+        smp_tlb_flush_poll();
+        cpu_relax();
+    }
+}
+
 void lock_scheduler(void) {
     uint64_t eflags;
     cpu_info_t *cpu;
@@ -1846,7 +1832,7 @@ void lock_scheduler(void) {
     __asm__ __volatile__ ("pushf; pop %0; cli" : "=r"(eflags) :: "memory");
     cpu = smp_this_cpu();
     if (cpu->scheduler_lock_depth == 0) {
-        spin_lock(&sched_lock);
+        sched_lock_acquire();
         cpu->sched_saved_rflags = eflags;
     }
     cpu->scheduler_lock_depth++;
@@ -2053,8 +2039,6 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
     new_task->syscall_frame = NULL;
     new_task->vring_minor = 0;
     new_task->is_kernel_task = false;
-    new_task->cpu_affinity = 0xFFFFFFFFu;
-    new_task->cpu_affinity_hi = 0xFFFFFFFFu;
     new_task->affinity64 = 0xFFFFFFFFFFFFFFFFULL;
     new_task->affinity_nwords = -1;
     new_task->vruntime = 0;
@@ -2360,36 +2344,16 @@ static void task_release_file_mappings(task_file_map_t *maps, int count) {
 
 static void task_exec_abort_vm(task_t *t, task_vm_t *old_vm) {
     task_clear_file_mappings(t);
-    if (t->vm->user_pages) kfree(t->vm->user_pages);
     kfree(t->vm);
     t->vm = old_vm;
 }
 
 int task_track_user_page(task_t *task, uint64_t phys) {
-    uint64_t *new_user_pages;
-
     if (!task || !phys) return -1;
-    new_user_pages = (uint64_t *)krealloc(task->vm->user_pages, (task->vm->user_pages_count + 1) * sizeof(uint64_t));
-    if (!new_user_pages) return -1;
-    task->vm->user_pages = new_user_pages;
-    task->vm->user_pages[task->vm->user_pages_count] = phys;
     task->vm->user_pages_count++;
     if (task->maxrss_kb < task->vm->user_pages_count * 4ULL)
         task->maxrss_kb = task->vm->user_pages_count * 4ULL;
     return 0;
-}
-
-int task_replace_user_page(task_t *task, uint64_t old_phys, uint64_t new_phys) {
-    uint64_t i;
-
-    if (!task || !new_phys) return -1;
-    for (i = 0; i < task->vm->user_pages_count; i++) {
-        if (task->vm->user_pages[i] == old_phys) {
-            task->vm->user_pages[i] = new_phys;
-            return 0;
-        }
-    }
-    return task_track_user_page(task, new_phys);
 }
 
 static int task_ensure_file_map_list_capacity(task_file_map_list_t *list,
@@ -2478,8 +2442,6 @@ void task_free_user_memory(task_t* t) {
         pfa_ref_gc();
     }
 
-    if (vm->user_pages) kfree(vm->user_pages);
-    vm->user_pages = NULL;
     vm->user_pages_count = 0;
     if (vm != &task_vm_none) {
         shm_close_vm(vm);
@@ -2499,21 +2461,10 @@ static void task_release_exit_resources(task_t *t) {
 
     if (t->exec_old_pml4) {
         freed = task_free_exec_old_pml4_if_unowned(t, t->exec_old_pml4);
-        if (freed) {
-            t->exec_old_pml4 = 0;
-            if (t->exec_old_pages) {
-                kfree(t->exec_old_pages);
-                t->exec_old_pages = NULL;
-                t->exec_old_pages_count = 0;
-            }
-        } else {
-            return;
-        }
-    } else if (t->exec_old_pages) {
-        kfree(t->exec_old_pages);
-        t->exec_old_pages = NULL;
-        t->exec_old_pages_count = 0;
+        if (!freed) return;
+        t->exec_old_pml4 = 0;
     }
+    t->exec_old_pages_count = 0;
     task_free_user_memory(t);
     if (t->pml4_phys) return;
     t->cr3 = 0;
@@ -2563,7 +2514,6 @@ static void task_vm_abandon(task_t *t) {
 }
 
 static void task_fork_child_cleanup(task_t *child,
-                                    uint64_t *child_user_pages,
                                     int owns_child_pd, uint64_t child_pd,
                                     uint8_t *kernel_stack_base) {
     task_fd_close_all(child);
@@ -2585,7 +2535,6 @@ static void task_fork_child_cleanup(task_t *child,
     task_free_cwd(child);
     kfree(child);
     kstack_free(kernel_stack_base);
-    if (child_user_pages) kfree(child_user_pages);
     if (owns_child_pd) vmm_free_pml4(child_pd);
 }
 
@@ -3091,15 +3040,8 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
 }
 
 void task_untrack_user_page(task_t *task, uint64_t physical) {
-    uint64_t i;
-
-    if (!task || !task->vm->user_pages) return;
-    for (i = 0; i < task->vm->user_pages_count; i++) {
-        if (task->vm->user_pages[i] != physical) continue;
-        task->vm->user_pages[i] = task->vm->user_pages[task->vm->user_pages_count - 1];
+    if (task && physical && task->vm->user_pages_count)
         task->vm->user_pages_count--;
-        return;
-    }
 }
 
 static int task_pml4_has_multiple_users(task_t *owner) {
@@ -3356,11 +3298,6 @@ uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages) {
                                      flags);
                 continue;
             }
-            if (task_replace_user_page(task, physical, shared_zero) != 0) {
-                vmm_map_page_in_pml4(task->pml4_phys, address, physical,
-                                     flags);
-                continue;
-            }
             pfa_cow_release64(physical);
             reclaimed++;
         }
@@ -3399,7 +3336,6 @@ uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages) {
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     uint64_t page;
     uint64_t old_phys;
-    uint64_t old_flags;
     uint64_t new_phys;
     uint64_t map_flags;
     uint8_t *old_ptr;
@@ -3424,7 +3360,6 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
 
     old_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
     if (!old_phys) return 0;
-    old_flags = vmm_get_flags_in_pml4(task->pml4_phys, page);
 
     new_phys = pfa_alloc();
     if (!new_phys) return 0;
@@ -3445,11 +3380,6 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
         return 0;
     }
 
-    if (task_replace_user_page(task, old_phys, new_phys) != 0) {
-        vmm_map_page_in_pml4(task->pml4_phys, page, old_phys, old_flags);
-        pfa_free(new_phys);
-        return 0;
-    }
     if (old_phys != user_zero_page_phys) {
         pfa_cow_release64(old_phys);
     }
@@ -3556,16 +3486,12 @@ static void task_reclaim_stale_exec_now(void) {
     task_t *owner;
     task_t *scan;
     uint64_t pd;
-    uint64_t *pages;
-    uint64_t count;
     int found;
     int freed;
 
     do {
         owner = NULL;
         pd = 0;
-        pages = NULL;
-        count = 0;
         found = 0;
 
         lock_scheduler();
@@ -3592,10 +3518,7 @@ static void task_reclaim_stale_exec_now(void) {
                     if (!task_ptr_valid(scan)) break;
                     if (scan == owner) {
                         if (scan->exec_old_pml4 == pd) {
-                            pages = scan->exec_old_pages;
-                            count = scan->exec_old_pages_count;
                             scan->exec_old_pml4 = 0;
-                            scan->exec_old_pages = NULL;
                             scan->exec_old_pages_count = 0;
                         }
                         break;
@@ -3603,8 +3526,6 @@ static void task_reclaim_stale_exec_now(void) {
                     scan = scan->all_next;
                 }
                 unlock_scheduler();
-                (void)count;
-                if (pages) kfree(pages);
             } else {
                 found = 0;
             }
@@ -3684,9 +3605,6 @@ void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pm
         if (t->fds && t->fds_capacity > 0)
             stats->task_fd_bytes += (uint64_t)t->fds_capacity *
                                     sizeof(task_fd_t);
-        if (t->vm->user_pages && t->vm->user_pages_count > 0)
-            stats->task_page_array_bytes += t->vm->user_pages_count *
-                                            sizeof(uint64_t);
         if (t->vm->file_maps && t->vm->file_map_capacity > 0)
             stats->task_file_map_bytes += (uint64_t)t->vm->file_map_capacity *
                                           sizeof(task_file_map_t);
@@ -4369,7 +4287,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     got_lock = spin_trylock(&sched_lock);
     if (!got_lock) {
         if (!forced_state_switch) return regs;
-        spin_lock(&sched_lock);
+        sched_lock_acquire();
     }
     migrate = prev_task && prev_task->state == TASK_RUNNING &&
               (regs->cs & 3) == 3 &&
@@ -4650,7 +4568,7 @@ void task_cpu_tick_stop(void) {
     cpu_id = (int)(cpu - cpus);
     cpu->tick_stop_tick = tick_count;
     __atomic_store_n(&cpu->tick_stopped, 1, __ATOMIC_SEQ_CST);
-    spin_lock(&sched_lock);
+    sched_lock_acquire();
     work = task_cpu_has_work_locked(cpu_id);
     spin_unlock(&sched_lock);
     if (work) {
@@ -4972,7 +4890,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
                 registers_t *parent_regs, int share_address_space,
                 uint64_t child_stack, uint64_t tls_base,
                 int *parent_tid, int *child_tid) {
-    uint64_t *child_user_pages;
     uint64_t child_user_pages_count;
     uint64_t child_pd;
     uint8_t* kernel_stack_base;
@@ -5002,7 +4919,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         parent_frame.rip < 0x1000 || parent_frame.rip >= KERNEL_VMA) {
         return -1;
     }
-    child_user_pages = NULL;
     child_user_pages_count = 0;
     owns_child_pd = !share_address_space;
     if (share_address_space) {
@@ -5010,7 +4926,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     } else {
         parent_stage = parent->kernel_stage;
         parent->kernel_stage = TASK_KERNEL_STAGE_FORK;
-        child_pd = vmm_clone_pml4(parent->pml4_phys, &child_user_pages,
+        child_pd = vmm_clone_pml4(parent->pml4_phys,
                                   &child_user_pages_count, &clone_error);
         parent->kernel_stage = parent_stage;
         if (!child_pd) {
@@ -5026,9 +4942,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         printf("task_fork: allocation failed\n");
         if (child) kfree(child);
         if (kernel_stack_base) kstack_free(kernel_stack_base);
-        if (child_user_pages) {
-            kfree(child_user_pages);
-        }
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -1;
     }
@@ -5038,7 +4951,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     if (!child->vm) {
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages) kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
@@ -5046,7 +4958,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         task_vm_abandon(child);
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages) kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
@@ -5056,7 +4967,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         task_vm_abandon(child);
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages) kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -1;
     }
@@ -5075,7 +4985,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         task_vm_abandon(child);
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages) kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
@@ -5088,7 +4997,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         task_vm_abandon(child);
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages) kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
@@ -5129,12 +5037,10 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     child->pml4_phys = child_pd;
     child->maxrss_kb = child_user_pages_count * 4ULL;
     if (!share_address_space) {
-        child->vm->user_pages = child_user_pages;
         child->vm->user_pages_count = child_user_pages_count;
         if (parent->vm->file_map_count > 0 &&
             task_ensure_file_map_capacity(child,
                                           parent->vm->file_map_count) != 0) {
-            child->vm->user_pages = NULL;
             child->vm->user_pages_count = 0;
             task_free_fpu_state(child);
             task_free_cwd(child);
@@ -5144,7 +5050,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
             task_vm_abandon(child);
             kfree(child);
             kstack_free(kernel_stack_base);
-            if (child_user_pages) kfree(child_user_pages);
             vmm_free_pml4(child_pd);
             return -KERR_ENOMEM;
         }
@@ -5166,7 +5071,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
             child->vm->file_maps[child->vm->file_map_count++] = area;
             if (area.node) vfs_open(area.node, 0);
         }
-        child_user_pages = child->vm->user_pages;
         child->vm->user_brk = parent->vm->user_brk;
         child->vm->user_brk_start = parent->vm->user_brk_start;
         child->vm->mmap_next_addr = parent->vm->mmap_next_addr;
@@ -5189,8 +5093,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         task_vm_abandon(child);
         kfree(child);
         kstack_free(kernel_stack_base);
-        if (child_user_pages)
-            kfree(child_user_pages);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
     }
@@ -5254,7 +5156,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         child->regs.saved_entry_cr3 = parent->pml4_phys;
         if (parent_tid && copy_to_user(parent_tid, &child->pid,
                                        sizeof(child->pid)) < 0) {
-            task_fork_child_cleanup(child, child_user_pages,
+            task_fork_child_cleanup(child,
                                     owns_child_pd, child_pd, kernel_stack_base);
             return -KERR_EFAULT;
         }
@@ -5263,31 +5165,31 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     }
 
     if (signals_copy_task(child, parent) != 0) {
-        task_fork_child_cleanup(child, child_user_pages,
+        task_fork_child_cleanup(child,
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (!share_address_space && shm_fork_vm(parent->vm, child->vm) != 0) {
-        task_fork_child_cleanup(child, child_user_pages,
+        task_fork_child_cleanup(child,
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (seccomp_fork(parent, child) != 0) {
-        task_fork_child_cleanup(child, child_user_pages,
+        task_fork_child_cleanup(child,
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (vfs_mnt_ns_fork(parent, child) != 0) {
-        task_fork_child_cleanup(child, child_user_pages,
+        task_fork_child_cleanup(child,
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
 
     if (task_affinity_copy(child, parent) < 0) {
-        task_fork_child_cleanup(child, child_user_pages,
+        task_fork_child_cleanup(child,
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
@@ -5375,7 +5277,6 @@ static int task_exec_with_args_common(
     int envp_table_index;
     task_vm_t *old_vm;
     int load_errno;
-    uint64_t *new_user_pages;
     uint64_t new_user_brk;
     uint64_t exec_euid;
     uint64_t exec_egid;
@@ -5575,22 +5476,6 @@ static int task_exec_with_args_common(
         return -KERR_ENOMEM;
     }
 
-    new_user_pages = (uint64_t *)kmalloc(total_pages * sizeof(uint64_t));
-    if (!new_user_pages) {
-        task_exec_abort_vm(current_task, old_vm);
-        kfree(elf_pages);
-        kfree(stack_pages);
-        task_free_owned_exec_args(argc, k_argv, envc, k_envp);
-        vmm_free_pml4(new_pd);
-        task_set_exec_state(current_task, 0);
-        return -KERR_ENOMEM;
-    }
-    if (elf_page_count > 0 && elf_pages) {
-        memcpy(new_user_pages, elf_pages, elf_page_count * sizeof(uint64_t));
-    }
-    memcpy(new_user_pages + elf_page_count, stack_pages,
-           stack_page_count * sizeof(uint64_t));
-
     kfree(elf_pages);
     kfree(stack_pages);
 
@@ -5610,7 +5495,6 @@ static int task_exec_with_args_common(
     }
     if (!tbl_buf) {
         task_exec_abort_vm(current_task, old_vm);
-        kfree(new_user_pages);
         vmm_free_pml4(new_pd);
         task_free_owned_exec_args(argc, k_argv, envc, k_envp);
         task_set_exec_state(current_task, 0);
@@ -5714,7 +5598,6 @@ static int task_exec_with_args_common(
                                                elf_info.entry_point;
     if (!use_node && !vmm_get_phys_in_pml4(new_pd, entry_to_use & ~0xFFFULL)) {
         task_exec_abort_vm(current_task, old_vm);
-        kfree(new_user_pages);
         vmm_free_pml4(new_pd);
         task_free_owned_exec_args(argc, k_argv, envc, k_envp);
         task_set_exec_state(current_task, 0);
@@ -5769,7 +5652,6 @@ static int task_exec_with_args_common(
         task_reset_signals_on_exec();
     }
 
-    current_task->vm->user_pages = new_user_pages;
     current_task->vm->user_pages_count = total_pages;
     current_task->vm->user_brk = new_user_brk;
     current_task->vm->user_brk_start = new_user_brk;
@@ -5807,7 +5689,6 @@ static int task_exec_with_args_common(
         task_release_file_mappings(old_vm->file_maps, old_vm->file_map_count);
         shm_close_vm(old_vm);
         current_task->exec_old_pml4 = old_pd;
-        current_task->exec_old_pages = old_vm->user_pages;
         current_task->exec_old_pages_count = old_vm->user_pages_count;
         kfree(old_vm);
     }
@@ -5939,19 +5820,8 @@ static pid_t task_create_thread_locked(void *(*entry)(void *), void *arg) {
     stack_page_count = 0;
     stack_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, thread_stack_base, thread_stack_size, 0x7 | VMM_PTE_NX, &stack_page_count);
     if (!stack_pages) goto fail;
-    for (i = 0; i < stack_page_count; i++) {
-        if (task_track_user_page(current_task, stack_pages[i]) != 0) {
-            while (i-- > 0) task_untrack_user_page(current_task, stack_pages[i]);
-            for (i = 0; i < stack_page_count; i++)
-                vmm_unmap_page_in_pml4(current_task->pml4_phys,
-                                       thread_stack_base + i * PAGE_SIZE);
-            vmm_prune_user_range(current_task->pml4_phys, thread_stack_base,
-                                 thread_stack_size);
-            for (i = 0; i < stack_page_count; i++) pfa_free(stack_pages[i]);
-            kfree(stack_pages);
-            goto fail;
-        }
-    }
+    for (i = 0; i < stack_page_count; i++)
+        task_track_user_page(current_task, stack_pages[i]);
     kfree(stack_pages);
     new_task->stack_size = thread_stack_size;
     

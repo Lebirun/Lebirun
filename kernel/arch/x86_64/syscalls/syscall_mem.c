@@ -166,47 +166,6 @@ static int user_range_free_mem(uint64_t addr, uint64_t size, uint64_t allow_base
     return user_range_free_pages(addr, size, allow_base, allow_size);
 }
 
-static void compact_user_pages(void) {
-    uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t i;
-    uint64_t dst;
-
-    if (!current_task || !current_task->vm->user_pages) return;
-    old_count = current_task->vm->user_pages_count;
-    dst = 0;
-    for (i = 0; i < old_count; i++) {
-        if (current_task->vm->user_pages[i] != 0) {
-            current_task->vm->user_pages[dst++] = current_task->vm->user_pages[i];
-        }
-    }
-    current_task->vm->user_pages_count = dst;
-    if (dst == old_count) return;
-    if (dst == 0) {
-        kfree(current_task->vm->user_pages);
-        current_task->vm->user_pages = NULL;
-        return;
-    }
-    new_pages = (uint64_t *)kmalloc(dst * sizeof(uint64_t));
-    if (!new_pages) return;
-    memcpy(new_pages, current_task->vm->user_pages, dst * sizeof(uint64_t));
-    kfree(current_task->vm->user_pages);
-    current_task->vm->user_pages = new_pages;
-}
-
-static int remove_user_page_phys(uint64_t phys) {
-    uint64_t i;
-
-    if (!current_task || !current_task->vm->user_pages) return 0;
-    for (i = 0; i < current_task->vm->user_pages_count; i++) {
-        if (current_task->vm->user_pages[i] == phys) {
-            current_task->vm->user_pages[i] = 0;
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static void release_user_leaf_range(uint64_t base, uint64_t end) {
     uint64_t batch[64];
     uint64_t page_addr;
@@ -219,53 +178,28 @@ static void release_user_leaf_range(uint64_t base, uint64_t end) {
     for (page_addr = base; page_addr < end; page_addr += 0x1000) {
         phys = vmm_unmap_page_in_pml4_flags(current_task->pml4_phys,
                                            page_addr, &flags);
-        if (phys && remove_user_page_phys(phys) && !(flags & VMM_PTE_NOFREE))
-            batch[count++] = phys;
+        if (phys) {
+            if (current_task->vm->user_pages_count)
+                current_task->vm->user_pages_count--;
+            if (!(flags & VMM_PTE_NOFREE)) batch[count++] = phys;
+        }
         if (count == 64 || (count && page_addr + 0x1000 >= end)) {
             vmm_user_tlb_sync(current_task->pml4_phys);
             for (i = 0; i < count; i++) pfa_cow_release(batch[i]);
             count = 0;
         }
     }
-    compact_user_pages();
     vmm_prune_user_range(current_task->pml4_phys, base, end - base);
-}
-
-static void release_untracked_pages(uint64_t base, uint64_t *pages,
-                                     uint64_t count) {
-    uint64_t i;
-
-    for (i = 0; i < count; i++)
-        vmm_unmap_page_in_pml4(current_task->pml4_phys, base + i * PAGE_SIZE);
-    vmm_user_tlb_sync(current_task->pml4_phys);
-    for (i = 0; i < count; i++) pfa_cow_release(pages[i]);
-    vmm_prune_user_range(current_task->pml4_phys, base, count * PAGE_SIZE);
-    kfree(pages);
 }
 
 static int map_user_pages(uint64_t base, uint64_t size, uint64_t flags) {
     uint64_t *pages;
-    uint64_t *tracked;
     uint64_t count;
-    uint64_t old_count;
 
     count = 0;
     pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, base,
                                           size, flags, &count);
     if (!pages) return -ENOMEM;
-    old_count = current_task->vm->user_pages_count;
-    if (count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-        release_untracked_pages(base, pages, count);
-        return -ENOMEM;
-    }
-    tracked = krealloc(current_task->vm->user_pages,
-                        (old_count + count) * sizeof(*tracked));
-    if (!tracked) {
-        release_untracked_pages(base, pages, count);
-        return -ENOMEM;
-    }
-    memcpy(tracked + old_count, pages, count * sizeof(*tracked));
-    current_task->vm->user_pages = tracked;
     current_task->vm->user_pages_count += count;
     kfree(pages);
     return 0;
@@ -279,9 +213,6 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
     uint64_t shrink_page_end;
     uint64_t page_count;
     uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t new_count;
-    uint64_t *expanded;
 
     (void)unused; (void)unused2;
     
@@ -335,31 +266,8 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
             return (int64_t)current_brk;
         }
         
-        if (new_pages && page_count > 0) {
-            old_count = current_task->vm->user_pages_count;
-            if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-                release_untracked_pages(old_page_end, new_pages, page_count);
-                return (int64_t)current_brk;
-            }
-            new_count = old_count + page_count;
-            if (new_count > SIZE_MAX / sizeof(uint64_t)) {
-                release_untracked_pages(old_page_end, new_pages, page_count);
-                return (int64_t)current_brk;
-            }
-            expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
-            if (!expanded) {
-                release_untracked_pages(old_page_end, new_pages, page_count);
-                return (int64_t)current_brk;
-            }
-            if (current_task->vm->user_pages && old_count > 0) {
-                memcpy(expanded, current_task->vm->user_pages,
-                       old_count * sizeof(uint64_t));
-                kfree(current_task->vm->user_pages);
-            }
-            memcpy(expanded + old_count, new_pages,
-                   page_count * sizeof(uint64_t));
-            current_task->vm->user_pages = expanded;
-            current_task->vm->user_pages_count = new_count;
+        if (new_pages) {
+            current_task->vm->user_pages_count += page_count;
             kfree(new_pages);
         }
     }
@@ -374,9 +282,6 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
     uint64_t base;
     uint64_t page_count;
     uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t new_count;
-    uint64_t *expanded;
     registers_t *r;
 
     (void)a2; (void)a3;
@@ -413,27 +318,8 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
         return -ENOMEM;
     }
 
-    if (new_pages && page_count > 0) {
-        old_count = current_task->vm->user_pages_count;
-        if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-            release_untracked_pages(base, new_pages, page_count);
-            return -ENOMEM;
-        }
-        new_count = old_count + page_count;
-        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
-        if (!expanded) {
-            release_untracked_pages(base, new_pages, page_count);
-            return -ENOMEM;
-        }
-        if (current_task->vm->user_pages && old_count > 0) {
-            memcpy(expanded, current_task->vm->user_pages,
-                   old_count * sizeof(uint64_t));
-            kfree(current_task->vm->user_pages);
-        }
-        memcpy(expanded + old_count, new_pages,
-               page_count * sizeof(uint64_t));
-        current_task->vm->user_pages = expanded;
-        current_task->vm->user_pages_count = new_count;
+    if (new_pages) {
+        current_task->vm->user_pages_count += page_count;
         kfree(new_pages);
     }
 
@@ -452,9 +338,6 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     uint64_t base;
     uint64_t page_count;
     uint64_t *new_pages;
-    uint64_t old_count;
-    uint64_t new_count;
-    uint64_t *expanded;
     vfs_node_t *fnode;
     uint64_t file_off;
     framebuffer_t *fb_dev;
@@ -590,27 +473,8 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
         if (!new_pages) return -ENOMEM;
     }
 
-    if (new_pages && page_count > 0) {
-        old_count = current_task->vm->user_pages_count;
-        if (page_count > SIZE_MAX / sizeof(uint64_t) - old_count) {
-            release_untracked_pages(base, new_pages, page_count);
-            return -ENOMEM;
-        }
-        new_count = old_count + page_count;
-        expanded = (uint64_t *)kmalloc(new_count * sizeof(uint64_t));
-        if (!expanded) {
-            release_untracked_pages(base, new_pages, page_count);
-            return -ENOMEM;
-        }
-        if (current_task->vm->user_pages && old_count > 0) {
-            memcpy(expanded, current_task->vm->user_pages,
-                   old_count * sizeof(uint64_t));
-            kfree(current_task->vm->user_pages);
-        }
-        memcpy(expanded + old_count, new_pages,
-               page_count * sizeof(uint64_t));
-        current_task->vm->user_pages = expanded;
-        current_task->vm->user_pages_count = new_count;
+    if (new_pages) {
+        current_task->vm->user_pages_count += page_count;
         kfree(new_pages);
     }
 

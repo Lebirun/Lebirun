@@ -700,7 +700,7 @@ int ramfs_create_symlink(const char *path, const char *target) {
     node->next_sibling = parent->children;
     parent->children = node;
     parent->mtime = ramfs_get_time();
-    ramfs_stats.used_size += node->length;
+    ramfs_stats.used_size += node->data_capacity;
     ramfs_stats.file_count++;
 
     ramfs_node_unlock(parent);
@@ -716,11 +716,14 @@ int ramfs_create_socket(const char *path, uint16_t permissions) {
 
     result = ramfs_create_file(path, permissions);
     if (result != RAMFS_ERR_OK) return result;
+    ramfs_lock();
     node = ramfs_find_node(path);
-    if (!node) return RAMFS_ERR_NOENT;
-    node->type = RAMFS_NODE_SOCKET;
-    if (node->vfs_node) node->vfs_node->flags = VFS_SOCKET;
-    return RAMFS_ERR_OK;
+    if (node) {
+        node->type = RAMFS_NODE_SOCKET;
+        if (node->vfs_node) node->vfs_node->flags = VFS_SOCKET;
+    }
+    ramfs_unlock();
+    return node ? RAMFS_ERR_OK : RAMFS_ERR_NOENT;
 }
 
 int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
@@ -777,8 +780,8 @@ int ramfs_create_symlink_node(vfs_node_t *parent, const char *name,
     node->next_sibling = prn->children;
     prn->children = node;
     prn->mtime = ramfs_get_time();
-    ramfs_stats.used_size += node->length;
-    ramfs_limits_add(prn->limits, node->length, 1);
+    ramfs_stats.used_size += node->data_capacity;
+    ramfs_limits_add(prn->limits, node->data_capacity, 1);
     ramfs_stats.file_count++;
     ramfs_unlock();
     return RAMFS_ERR_OK;
@@ -1226,6 +1229,11 @@ static int ramfs_write_data_locked(ramfs_node_t *node, uint64_t offset,
     }
     new_cap = needed;
     if (new_cap < backing) new_cap = backing;
+    if (new_cap > old_capacity && needed > node->length &&
+        old_capacity / 2 > new_cap - old_capacity &&
+        ramfs_check_space(old_capacity / 2) &&
+        ramfs_limits_fits(node->limits, old_capacity / 2, 0))
+        new_cap = old_capacity + old_capacity / 2;
     if (new_cap > old_capacity) {
         if (!ramfs_check_space(new_cap - old_capacity) ||
             !ramfs_limits_fits(node->limits, new_cap - old_capacity, 0))
@@ -1443,13 +1451,24 @@ static void ramfs_vfs_open(vfs_node_t *node, uint64_t flags) {
 
 static void ramfs_vfs_close(vfs_node_t *node) {
     ramfs_node_t *entry;
+    ramfs_node_t *rn;
+    uint64_t old_capacity;
 
     if (!node) return;
     ramfs_lock();
     entry = (ramfs_node_t *)node->private_data;
     if (entry && (node->flags & VFS_EMBEDDED) &&
-        __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE) == 0)
+        __atomic_load_n(&node->ref_count, __ATOMIC_ACQUIRE) == 0) {
         ramfs_destroy_entry_locked(entry);
+    } else if ((rn = ramfs_inode(entry)) && rn->type == RAMFS_NODE_FILE &&
+               rn->data && rn->length < rn->data_capacity) {
+        ramfs_node_lock(rn);
+        old_capacity = rn->data_capacity;
+        ramfs_shrink_node_data(rn);
+        ramfs_stats.used_size -= old_capacity - rn->data_capacity;
+        ramfs_limits_sub(rn->limits, old_capacity - rn->data_capacity, 0);
+        ramfs_node_unlock(rn);
+    }
     ramfs_unlock();
 }
 
@@ -2021,7 +2040,8 @@ int ramfs_zero_range(vfs_node_t *node, uint64_t offset, uint64_t length) {
     end = offset + length;
     if (end > rn->length) end = rn->length;
     if (rn->data) {
-        memset(rn->data + offset, 0, end - offset);
+        if (end > rn->data_capacity) end = rn->data_capacity;
+        if (offset < end) memset(rn->data + offset, 0, end - offset);
     } else if (rn->backing_data && rn->backing_length > offset) {
         memset(zeros, 0, sizeof(zeros));
         ramfs_sync_inode(rn);
@@ -2383,33 +2403,3 @@ void KERNEL_INIT devpts_vfs_register(void) {
     vfs_register_fs(&devpts_fs_type);
 }
 
-static void KERNEL_INIT ramfs_internalize_node(ramfs_node_t *node) {
-    uint8_t *copy;
-    ramfs_node_t *child;
-
-    if (!node) return;
-
-    if (node->backing_data && node->backing_length > 0 && !node->data) {
-        copy = (uint8_t *)kmalloc(node->backing_length);
-        if (copy) {
-            memcpy(copy, node->backing_data, node->backing_length);
-            node->data = copy;
-            node->data_capacity = node->backing_length;
-            node->backing_data = NULL;
-            node->backing_length = 0;
-        }
-    }
-
-    child = node->children;
-    while (child) {
-        ramfs_internalize_node(child);
-        child = child->next_sibling;
-    }
-}
-
-void KERNEL_INIT ramfs_internalize_all(void) {
-    if (!ramfs_root) return;
-    ramfs_lock();
-    ramfs_internalize_node(ramfs_root);
-    ramfs_unlock();
-}

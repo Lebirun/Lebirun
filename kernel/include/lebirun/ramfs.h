@@ -103,6 +103,5 @@ int ramfs_zero_range(vfs_node_t *node, uint64_t offset, uint64_t length);
 
 uint64_t ramfs_get_time(void);
 
-void ramfs_internalize_all(void);
 
 #endif
