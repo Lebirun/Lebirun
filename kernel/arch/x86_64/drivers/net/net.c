@@ -11,6 +11,7 @@
 #include <lebirun/task.h>
 #include <lebirun/common.h>
 #include <lebirun/pit.h>
+#include <lebirun/pci.h>
 #include <string.h>
 
 const mac_addr_t MAC_BROADCAST = {{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
@@ -57,28 +58,21 @@ static void net_hw_lock_acquire(void) {
 int net_register_driver(net_driver_t *drv) {
     net_driver_t **p;
     const uint16_t *d;
-    uint16_t b;
-    uint8_t s;
-    uint8_t f;
+    uint32_t i;
+    uint32_t bdf;
     uint32_t id;
 
-    for (b = 0; b < 256; b++) {
-        for (s = 0; s < 32; s++) {
-            for (f = 0; f < 8; f++) {
-                id = net_pci_read32((uint8_t)b, s, f, 0);
-                if ((id & 0xFFFF) == drv->vendor) {
-                    for (d = drv->devices; *d && *d != id >> 16; d++);
-                    if (*d) goto found;
-                }
-                if (f == 0 && id == 0xFFFFFFFFU) break;
-            }
-        }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        id = net_pci_read32(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf), 0);
+        if ((id & 0xFFFF) != drv->vendor) continue;
+        for (d = drv->devices; *d && *d != id >> 16; d++);
+        if (*d) goto found;
     }
     return -1;
 found:
-    drv->bus = (uint8_t)b;
-    drv->slot = s;
-    drv->func = f;
+    drv->bus = PCI_BUS(bdf);
+    drv->slot = PCI_SLOT(bdf);
+    drv->func = PCI_FUNC(bdf);
     drv->next = NULL;
     net_hw_lock_acquire();
     for (p = &net_drivers; *p; p = &(*p)->next);

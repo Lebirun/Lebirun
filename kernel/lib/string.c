@@ -10,6 +10,8 @@
 
 extern void terminal_putchar(char c);
 
+typedef uint64_t __attribute__((may_alias, aligned(1))) string_word_t;
+
 void* memset(void* bufptr, int value, size_t size) {
 	unsigned char *buf;
 	unsigned char byte_val;
@@ -74,6 +76,12 @@ void* memmove(void* dstptr, const void* srcptr, size_t size) {
 
 	dst += size;
 	src += size;
+	while (size >= 8) {
+		dst -= 8;
+		src -= 8;
+		size -= 8;
+		*(string_word_t *)dst = *(const string_word_t *)src;
+	}
 	while (size--) *--dst = *--src;
 	return dstptr;
 }
@@ -86,7 +94,11 @@ int memcmp(const void* aptr, const void* bptr, size_t size) {
 	if (!aptr || !bptr) return (aptr == bptr) ? 0 : (aptr ? 1 : -1);
 	a = (const unsigned char*) aptr;
 	b = (const unsigned char*) bptr;
-	for (i = 0; i < size; i++) {
+	i = 0;
+	while (size - i >= 8 &&
+	       *(const string_word_t *)(a + i) == *(const string_word_t *)(b + i))
+		i += 8;
+	for (; i < size; i++) {
 		if (a[i] != b[i]) return (int)a[i] - (int)b[i];
 	}
 	return 0;

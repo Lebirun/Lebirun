@@ -3,6 +3,7 @@
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/io.h>
+#include <lebirun/pci.h>
 #include <lebirun/tty.h>
 #include <lebirun/console.h>
 #include <string.h>
@@ -294,7 +295,9 @@ static volatile uint8_t *KERNEL_INIT map_capability(uint8_t bar,
 }
 
 static int KERNEL_INIT find_device(void) {
-    uint16_t bus;
+    uint32_t i;
+    uint32_t bdf;
+    uint8_t bus;
     uint8_t slot;
     uint8_t function;
     uint32_t id;
@@ -303,34 +306,32 @@ static int KERNEL_INIT find_device(void) {
     uint8_t subclass;
     int permitted;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (function = 0; function < 8; function++) {
-                id = pci_read32((uint8_t)bus, slot, function, 0);
-                if ((id & 0xFFFF) == PCI_VENDOR_VIRTIO &&
-                    (id >> 16) == PCI_DEVICE_GPU_MODERN) {
-                    class_code = pci_read32((uint8_t)bus, slot, function, 0x08);
-                    base_class = (uint8_t)(class_code >> 24);
-                    subclass = (uint8_t)(class_code >> 16);
-                    permitted = 0;
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        bus = PCI_BUS(bdf);
+        slot = PCI_SLOT(bdf);
+        function = PCI_FUNC(bdf);
+        id = pci_read32(bus, slot, function, 0);
+        if ((id & 0xFFFF) != PCI_VENDOR_VIRTIO ||
+            (id >> 16) != PCI_DEVICE_GPU_MODERN)
+            continue;
+        class_code = pci_read32(bus, slot, function, 0x08);
+        base_class = (uint8_t)(class_code >> 24);
+        subclass = (uint8_t)(class_code >> 16);
+        permitted = 0;
 #if CONFIG_DRIVER_VIRTIO_VGA
-                    if (base_class == PCI_CLASS_DISPLAY && subclass == PCI_SUBCLASS_VGA)
-                        permitted = 1;
+        if (base_class == PCI_CLASS_DISPLAY && subclass == PCI_SUBCLASS_VGA)
+            permitted = 1;
 #endif
 #if CONFIG_DRIVER_VIRTIO_GPU_PCI
-                    if (base_class == PCI_CLASS_DISPLAY && subclass == PCI_SUBCLASS_OTHER_DISPLAY)
-                        permitted = 1;
+        if (base_class == PCI_CLASS_DISPLAY && subclass == PCI_SUBCLASS_OTHER_DISPLAY)
+            permitted = 1;
 #endif
-                    if (permitted) {
-                        gpu.bus = (uint8_t)bus;
-                        gpu.slot = slot;
-                        gpu.function = function;
-                        gpu.vga_compatible = subclass == PCI_SUBCLASS_VGA;
-                        return 0;
-                    }
-                }
-                if (function == 0 && id == 0xFFFFFFFFU) break;
-            }
+        if (permitted) {
+            gpu.bus = bus;
+            gpu.slot = slot;
+            gpu.function = function;
+            gpu.vga_compatible = subclass == PCI_SUBCLASS_VGA;
+            return 0;
         }
     }
     return -1;

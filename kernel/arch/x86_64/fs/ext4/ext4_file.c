@@ -19,10 +19,6 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
     uint32_t max_run_blocks;
     uint32_t run_blocks;
     uint32_t run_bytes;
-    uint64_t ra_logical;
-    uint64_t ra_phys;
-    uint64_t ra_expect;
-    uint32_t ra_blocks;
     uint8_t *block;
     uint8_t *inline_data;
 
@@ -85,30 +81,11 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
                     }
                     run_blocks++;
                 }
-                if (run_blocks > 1) {
-                    run_bytes = run_blocks * fs->block_size;
-                    if (ext4_read_blocks(fs, phys_block, run_blocks,
-                                         buffer + bytes_read) == 0) {
-                        bytes_read += run_bytes;
-                        ra_blocks = 0;
-                        ra_expect = phys_block + run_blocks;
-                        while (ra_blocks < run_blocks) {
-                            ra_logical = block_num + run_blocks + ra_blocks;
-                            if (ra_logical > (file_size - 1) / fs->block_size)
-                                break;
-                            ra_phys = ext4_inode_get_block(fs, &ic->inode,
-                                                           ra_logical);
-                            if (ra_phys == 0 || ra_phys != ra_expect)
-                                break;
-                            block = ext4_get_block(fs, ra_phys);
-                            if (!block)
-                                break;
-                            ext4_release_block(fs, ra_phys);
-                            ra_expect++;
-                            ra_blocks++;
-                        }
-                        continue;
-                    }
+                run_bytes = run_blocks * fs->block_size;
+                if (ext4_read_blocks(fs, phys_block, run_blocks,
+                                     buffer + bytes_read) == 0) {
+                    bytes_read += run_bytes;
+                    continue;
                 }
             }
             block = ext4_get_block(fs, phys_block);

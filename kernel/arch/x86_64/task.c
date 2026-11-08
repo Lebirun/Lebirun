@@ -2907,7 +2907,6 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
                 task->kernel_cpu_pinned = pinned;
                 return 0;
             }
-            pmm_zero_page_phys(phys);
             stage = task->kernel_stage;
             task->kernel_stage = TASK_KERNEL_STAGE_FILE_FAULT;
             read_actual = vfs_read_phys_page(task->vm->file_maps[match].node,

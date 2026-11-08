@@ -82,6 +82,20 @@ static int find_free_inode_cache(ext4_fs_t *fs) {
     return -1;
 }
 
+static int ext4_inode_table(ext4_fs_t *fs, uint32_t group, uint64_t *table) {
+    ext4_group_desc_t desc;
+
+    if (!fs->itable_block || fs->itable_group != group) {
+        if (ext4_read_group_desc_internal(fs, group, &desc) != 0) return -1;
+        fs->itable_block = desc.bg_inode_table_lo;
+        if (fs->is_64bit)
+            fs->itable_block |= (uint64_t)desc.bg_inode_table_hi << 32;
+        fs->itable_group = group;
+    }
+    *table = fs->itable_block;
+    return 0;
+}
+
 int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     uint32_t group;
     uint32_t index;
@@ -90,7 +104,6 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     uint32_t inode_offset;
     size_t copy_size;
     uint8_t *block;
-    ext4_group_desc_t desc;
 
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
@@ -99,11 +112,7 @@ int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     group = (ino - 1) / fs->sb.s_inodes_per_group;
     index = (ino - 1) % fs->sb.s_inodes_per_group;
 
-    if (ext4_read_group_desc_internal(fs, group, &desc) != 0) return -1;
-    inode_table = desc.bg_inode_table_lo;
-    if (fs->is_64bit) {
-        inode_table |= ((uint64_t)desc.bg_inode_table_hi << 32);
-    }
+    if (ext4_inode_table(fs, group, &inode_table) != 0) return -1;
 
     inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
     inode_offset = (index * fs->inode_size) % fs->block_size;
@@ -130,7 +139,6 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     uint32_t inode_offset;
     size_t copy_size;
     uint8_t *block;
-    ext4_group_desc_t desc;
 
     if (ino == 0 || ino > fs->total_inodes) {
         return -1;
@@ -139,11 +147,7 @@ int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode) {
     group = (ino - 1) / fs->sb.s_inodes_per_group;
     index = (ino - 1) % fs->sb.s_inodes_per_group;
 
-    if (ext4_read_group_desc_internal(fs, group, &desc) != 0) return -1;
-    inode_table = desc.bg_inode_table_lo;
-    if (fs->is_64bit) {
-        inode_table |= ((uint64_t)desc.bg_inode_table_hi << 32);
-    }
+    if (ext4_inode_table(fs, group, &inode_table) != 0) return -1;
 
     inode_block = inode_table + (index * fs->inode_size) / fs->block_size;
     inode_offset = (index * fs->inode_size) % fs->block_size;

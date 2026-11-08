@@ -156,10 +156,6 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
         return -1;
     }
 
-    if (count == 1) {
-        return ext4_read_block(fs, block, buffer);
-    }
-
     dev = blkdev_get(fs->port_index);
     if (!dev) {
         return -1;
@@ -179,8 +175,12 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
 
     for (i = 0; i < count; i++) {
         idx = find_cache_entry(fs, block + i);
-        if (idx >= 0 && fs->block_cache[idx].data &&
-            fs->block_cache[idx].dirty) {
+        if (idx >= 0 && count == 1) {
+            memcpy(buffer, fs->block_cache[idx].data, fs->block_size);
+            fs->block_cache[idx].last_access = ++fs->cache_tick;
+            return 0;
+        }
+        if (idx >= 0 && fs->block_cache[idx].dirty) {
             return -1;
         }
     }

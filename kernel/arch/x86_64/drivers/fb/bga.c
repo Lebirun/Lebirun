@@ -1,5 +1,6 @@
 #include <lebirun/drivers/fb/bga.h>
 #include <lebirun/common.h>
+#include <lebirun/pci.h>
 #include <stdint.h>
 
 static inline void outl(uint16_t port, uint32_t value) {
@@ -106,48 +107,23 @@ static uint32_t bga_pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t of
 }
 
 uint64_t KERNEL_INIT bga_get_lfb_base(void) {
-    uint16_t bus;
-    uint8_t slot;
-    uint8_t func;
-    uint32_t id;
-    uint32_t class_reg;
-    uint32_t hdr;
+    uint32_t i;
+    uint32_t bdf;
     uint32_t bar;
     uint16_t vendor;
-    uint8_t bar_id;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (func = 0; func < 8; func++) {
-                id = bga_pci_read((uint8_t)bus, slot, func, 0x00);
-                if ((id & 0xFFFF) == 0xFFFF) {
-                    if (func == 0) break;
-                    continue;
-                }
-                class_reg = bga_pci_read((uint8_t)bus, slot, func, 0x08);
-                if ((uint16_t)(class_reg >> 16) != PCI_VGA_CLASS) {
-                    if (func == 0) {
-                        hdr = bga_pci_read((uint8_t)bus, slot, func, 0x0C);
-                        if (!((hdr >> 16) & 0x80)) break;
-                    }
-                    continue;
-                }
-                vendor = (uint16_t)(id & 0xFFFF);
-                if (vendor == PCI_VENDOR_VIRTIO || vendor == PCI_VENDOR_CIRRUS) {
-                    if (func == 0) {
-                        hdr = bga_pci_read((uint8_t)bus, slot, func, 0x0C);
-                        if (!((hdr >> 16) & 0x80)) break;
-                    }
-                    continue;
-                }
-                bar_id = (vendor == PCI_VENDOR_VMWARE) ? 1 : 0;
-                bar = bga_pci_read((uint8_t)bus, slot, func,
-                                   (uint8_t)(0x10 + bar_id * 4));
-                if (bar & 0x1) return 0;
-                if (!(bar & 0xFFFFFFF0u)) return 0;
-                return (uint64_t)(bar & 0xFFFFFFF0u);
-            }
-        }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        if ((uint16_t)(bga_pci_read(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf),
+                                    0x08) >> 16) != PCI_VGA_CLASS)
+            continue;
+        vendor = (uint16_t)bga_pci_read(PCI_BUS(bdf), PCI_SLOT(bdf),
+                                        PCI_FUNC(bdf), 0x00);
+        if (vendor == PCI_VENDOR_VIRTIO || vendor == PCI_VENDOR_CIRRUS)
+            continue;
+        bar = bga_pci_read(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf),
+                           vendor == PCI_VENDOR_VMWARE ? 0x14 : 0x10);
+        if (bar & 0x1) return 0;
+        return (uint64_t)(bar & 0xFFFFFFF0u);
     }
     return 0;
 }

@@ -5,6 +5,7 @@
 #include <lebirun/mutex.h>
 #include <lebirun/timekeeping.h>
 #include <lebirun/lke.h>
+#include <lebirun/pci.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -389,29 +390,15 @@ unmap:
 
 int KERNEL_INIT nvme_init(void) {
     static int probed KERNEL_INIT_BSS;
-    uint32_t id;
-    uint32_t cls;
-    uint16_t bus;
-    uint8_t slot;
-    uint8_t func;
-    uint8_t funcs;
+    uint32_t i;
+    uint32_t bdf;
 
     if (probed) return nvme_count ? 0 : -1;
     probed = 1;
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            if ((nvme_pci((uint8_t)bus, slot, 0, 0, 0, 0) & 0xFFFF) == 0xFFFF)
-                continue;
-            funcs = (nvme_pci((uint8_t)bus, slot, 0, 0x0C, 0, 0) >> 16) & 0x80 ?
-                    8 : 1;
-            for (func = 0; func < funcs; func++) {
-                id = nvme_pci((uint8_t)bus, slot, func, 0, 0, 0);
-                if ((id & 0xFFFF) == 0xFFFF) continue;
-                cls = nvme_pci((uint8_t)bus, slot, func, 0x08, 0, 0) >> 8;
-                if (cls == 0x010802)
-                    nvme_probe((uint8_t)bus, slot, func);
-            }
-        }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        if (nvme_pci(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf), 0x08, 0, 0) >> 8 ==
+            0x010802)
+            nvme_probe(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf));
     }
     return nvme_count ? 0 : -1;
 }
