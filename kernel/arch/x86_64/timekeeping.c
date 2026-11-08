@@ -177,7 +177,7 @@ static uint64_t tsc_kvm_frequency(void) {
 
 void tsc_early_init(void)
 {
-    uint64_t samples[5];
+    uint64_t samples[3];
     uint64_t w;
     uint64_t v;
     uint64_t flags;
@@ -227,7 +227,7 @@ void tsc_early_init(void)
     }
     __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     speaker = inb(0x61);
-    for (w = 0; w < 5; w++) {
+    for (w = 0; w < 3; w++) {
         outb(0x61, speaker & ~0x03);
         outb(0x43, 0xb0);
         outb(0x42, latch & 0xff);
@@ -247,10 +247,10 @@ void tsc_early_init(void)
     }
     outb(0x61, speaker);
     __asm__ volatile("pushq %0; popfq" : : "r"(flags) : "memory", "cc");
-    if (w != 5)
+    if (w != 3)
         return;
-    for (w = 0; w < 4; w++) {
-        for (v = w + 1; v < 5; v++) {
+    for (w = 0; w < 2; w++) {
+        for (v = w + 1; v < 3; v++) {
             if (samples[v] < samples[w]) {
                 temporary = samples[w];
                 samples[w] = samples[v];
@@ -258,9 +258,9 @@ void tsc_early_init(void)
             }
         }
     }
-    if (!samples[2] || samples[2] < 1000000ULL)
+    if (!samples[1] || samples[1] < 1000000ULL)
         return;
-    tsc_freq_hz = samples[2];
+    tsc_freq_hz = samples[1];
     tsc_mult = (1000000000ULL << 32) / tsc_freq_hz;
     tsc_base_tsc = tsc_rdtsc();
     tsc_base_us = pit_get_uptime_us();

@@ -2798,6 +2798,7 @@ int task_protect_vm_areas(task_t *task, uint64_t vaddr, uint64_t size,
 
 static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     task_t *task;
+    task_file_map_t *map;
     uint64_t vaddr;
     uint64_t phys;
     int i;
@@ -2805,29 +2806,28 @@ static uint64_t exec_page_find_active(vfs_node_t *node, uint64_t offset) {
     if (!node) return 0;
     phys = 0;
     lock_scheduler();
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task)) {
-        if (task != current_task && task->is_user &&
-            task->state != TASK_DEAD &&
-            !task->resources_released && task->exec_completed == 0 &&
-            task->pml4_phys && !task_is_current_on_any_cpu(task) &&
-            task->vm->file_maps && task->vm->file_map_count > 0 &&
-            task->vm->file_map_count <= task->vm->file_map_capacity) {
-            for (i = 0; i < task->vm->file_map_count; i++) {
-                if (!(task->vm->file_maps[i].map_flags & TASK_VMA_CLEAN) ||
-                    (task->vm->file_maps[i].map_flags & TASK_VMA_SHARED)) continue;
-                if (!overlay_same_file(task->vm->file_maps[i].node, node)) continue;
-                if (offset < task->vm->file_maps[i].offset) continue;
-                if (offset >= task->vm->file_maps[i].offset + task->vm->file_maps[i].filesz ||
-                    task->vm->file_maps[i].offset + task->vm->file_maps[i].filesz - offset < PAGE_SIZE)
-                    continue;
-                vaddr = task->vm->file_maps[i].vaddr + (offset - task->vm->file_maps[i].offset);
-                phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
-                if (phys) break;
-            }
+    for (task = all_tasks_head; task && task_ptr_valid(task) && !phys;
+         task = task->all_next) {
+        if (task == current_task || !task->is_user ||
+            task->state == TASK_DEAD || task->resources_released ||
+            task->exec_completed != 0 || !task->pml4_phys ||
+            !task->vm->file_maps || task->vm->file_map_count <= 0 ||
+            task->vm->file_map_count > task->vm->file_map_capacity)
+            continue;
+        for (i = 0; i < task->vm->file_map_count; i++) {
+            map = &task->vm->file_maps[i];
+            if (!(map->map_flags & TASK_VMA_CLEAN) ||
+                (map->map_flags & TASK_VMA_SHARED)) continue;
+            if (offset < map->offset ||
+                offset >= map->offset + map->filesz ||
+                map->offset + map->filesz - offset < PAGE_SIZE)
+                continue;
+            if (!overlay_same_file(map->node, node)) continue;
+            if (task_is_current_on_any_cpu(task)) break;
+            vaddr = map->vaddr + (offset - map->offset);
+            phys = vmm_get_phys_in_pml4(task->pml4_phys, vaddr);
+            if (phys) break;
         }
-        if (phys) break;
-        task = task->all_next;
     }
     if (phys && pfa_ref_share(phys) != 0) phys = 0;
     unlock_scheduler();

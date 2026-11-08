@@ -38,6 +38,7 @@ typedef struct {
 static slab_page_t *slab_small_pages;
 static slab_page_t *slab_small_tail;
 static slab_page_t *slab_small_spare;
+static slab_page_t *slab_small_hints[8];
 static uint64_t slab_pages_allocated;
 static int slab_initialized;
 static volatile int slab_lock;
@@ -236,17 +237,39 @@ int slab_flush_stale(void) {
     return result;
 }
 
+static void slab_small_hint(slab_page_t *page) {
+    uint32_t c;
+
+    for (c = 0; c < 8 && (16u << c) <= page->max_free; c++) {
+        if (!slab_small_hints[c] || page < slab_small_hints[c])
+            slab_small_hints[c] = page;
+    }
+}
+
 static void slab_small_add(slab_page_t *page) {
-    page->prev = slab_small_tail;
-    page->next = NULL;
-    if (slab_small_tail)
-        slab_small_tail->next = page;
+    slab_page_t *after;
+
+    after = slab_small_tail;
+    while (after && after > page) after = after->prev;
+    page->prev = after;
+    page->next = after ? after->next : slab_small_pages;
+    if (page->next)
+        page->next->prev = page;
+    else
+        slab_small_tail = page;
+    if (after)
+        after->next = page;
     else
         slab_small_pages = page;
-    slab_small_tail = page;
+    slab_small_hint(page);
 }
 
 static void slab_small_remove(slab_page_t *page) {
+    uint32_t c;
+
+    for (c = 0; c < 8; c++) {
+        if (slab_small_hints[c] == page) slab_small_hints[c] = page->next;
+    }
     if (page->prev)
         page->prev->next = page->next;
     else
@@ -305,21 +328,28 @@ static void slab_small_coalesce(slab_page_t *page);
 
 static void *slab_small_allocate(size_t size, int *backing_failed) {
     slab_page_t *page;
+    slab_page_t *first;
     slab_block_t *block;
     slab_block_t *remainder;
     uint32_t payload;
     uint32_t needed;
     uint32_t remaining;
+    uint32_t c;
 
     payload = ((uint32_t)size + 7u) & ~7u;
     needed = payload + sizeof(slab_block_t);
-    page = slab_small_pages;
+    c = 27u - (uint32_t)__builtin_clz(needed);
+    if (c > 7) c = 7;
+    first = NULL;
     block = NULL;
-    while (page) {
-        block = page->max_free >= needed ? slab_small_find(page, needed) : NULL;
-        if (block) break;
-        page = page->next;
+    for (page = slab_small_hints[c]; page; page = page->next) {
+        if (page->max_free < (16u << c)) continue;
+        if (!first) first = page;
+        if (page->max_free >= needed &&
+            (block = slab_small_find(page, needed)))
+            break;
     }
+    slab_small_hints[c] = first;
     if (!block) {
         page = slab_small_create(backing_failed);
         if (!page) return NULL;
@@ -429,6 +459,7 @@ static void slab_small_coalesce(slab_page_t *page) {
 void KERNEL_EARLY_INIT slab_init(void) {
     slab_small_pages = NULL;
     slab_small_tail = NULL;
+    memset(slab_small_hints, 0, sizeof(slab_small_hints));
     slab_small_spare = NULL;
     slab_pages_allocated = 0;
     slab_lock = 0;
@@ -619,6 +650,7 @@ void slab_free(void *ptr, void *caller) {
         block->requested = 0;
         page->payload_size = 0;
         page->max_free = block->span;
+        slab_small_hint(page);
         slab_small_spare = page;
         slab_lock_release(eflags);
         return;
@@ -632,6 +664,7 @@ void slab_free(void *ptr, void *caller) {
         return;
     }
     slab_small_coalesce(page);
+    slab_small_hint(page);
     slab_lock_release(eflags);
 }
 
@@ -728,6 +761,7 @@ int slab_resize(void *ptr, size_t new_size) {
         block->requested = (uint32_t)new_size;
         page->payload_size = page->payload_size - old_size + new_size;
         slab_small_coalesce(page);
+        slab_small_hint(page);
         slab_lock_release(eflags);
         return 1;
     }
