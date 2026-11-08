@@ -1076,8 +1076,12 @@ void KERNEL_INIT lapic_timer_init(uint64_t freq_hz) {
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags) :: "memory");
     __asm__ volatile ("sti" ::: "memory");
     start_ticks = pit_get_ticks();
+    elapsed_ticks = 10;
     spins = 0;
-    do {
+    if (start_ns) {
+        while (tsc_get_ns() - start_ns < 2000000ULL)
+            __asm__ volatile ("pause");
+    } else do {
         __asm__ volatile ("hlt" ::: "memory");
         elapsed_ticks = pit_get_ticks() - start_ticks;
         if (++spins > 1000000000ULL)

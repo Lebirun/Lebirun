@@ -699,21 +699,32 @@ uint64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buf
 
 uint64_t vfs_read_phys_page(vfs_node_t *node, uint64_t offset, uint64_t size,
                             uint64_t phys_addr, uint64_t phys_offset) {
+    extern void *pt_direct_ptr(uint64_t phys_addr);
     uint64_t scratch_phys;
     uint64_t result;
-    uint8_t *scratch;
+    uint8_t *page;
 
     if (!node || !phys_addr) return 0;
     if (phys_offset > PAGE_SIZE || size > PAGE_SIZE - phys_offset) return 0;
     if (size == 0) return 0;
-    scratch_phys = (uint64_t)pmm_alloc_mapped_page();
-    if (!scratch_phys) return 0;
-    scratch = (uint8_t *)(uintptr_t)(scratch_phys + KERNEL_VMA);
-    result = vfs_read(node, offset, size, scratch);
+    scratch_phys = 0;
+    page = (uint8_t *)pt_direct_ptr(phys_addr);
+    if (!page) {
+        scratch_phys = (uint64_t)pmm_alloc_mapped_page();
+        if (!scratch_phys) {
+            pmm_zero_page_phys(phys_addr);
+            return 0;
+        }
+        page = (uint8_t *)(uintptr_t)(scratch_phys + KERNEL_VMA);
+    }
+    result = vfs_read(node, offset, size, page + phys_offset);
     if (result > size) result = 0;
-    if (result != 0)
-        pmm_copy_to_page_phys(phys_addr, phys_offset, scratch, result);
-    pfa_free(scratch_phys);
+    memset(page, 0, phys_offset);
+    memset(page + phys_offset + result, 0, PAGE_SIZE - phys_offset - result);
+    if (scratch_phys) {
+        pmm_copy_to_page_phys(phys_addr, 0, page, PAGE_SIZE);
+        pfa_free(scratch_phys);
+    }
     return result;
 }
 

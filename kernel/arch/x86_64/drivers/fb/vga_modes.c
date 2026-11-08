@@ -1,6 +1,7 @@
 #include <lebirun/drivers/fb/vga_modes.h>
 #include <lebirun/common.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/pci.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -64,49 +65,20 @@ static uint8_t vga_crtc_read(uint8_t index) {
 }
 
 static int pci_find_cirrus(void) {
-    uint16_t bus;
-    uint8_t slot;
-    uint8_t func;
+    uint32_t i;
+    uint32_t bdf;
     uint64_t id_reg;
-    uint64_t class_reg;
-    uint16_t vendor;
-    uint16_t device;
-    uint16_t class_code;
-    uint64_t hdr;
-    uint64_t bar0;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (func = 0; func < 8; func++) {
-                id_reg = pci_read32((uint8_t)bus, slot, func, 0x00);
-                vendor = (uint16_t)(id_reg & 0xFFFF);
-                if (vendor == 0xFFFF) {
-                    if (func == 0) break;
-                    continue;
-                }
-                device = (uint16_t)(id_reg >> 16);
-                class_reg = pci_read32((uint8_t)bus, slot, func, 0x08);
-                class_code = (uint16_t)(class_reg >> 16);
-
-                if (class_code != PCI_VGA_CLASS) {
-                    if (func == 0) {
-                        hdr = pci_read32((uint8_t)bus, slot, func, 0x0C);
-                        if (!((hdr >> 16) & 0x80)) break;
-                    }
-                    continue;
-                }
-
-                if (vendor == PCI_VENDOR_CIRRUS && device == PCI_DEVICE_5446) {
-                    bar0 = pci_read32((uint8_t)bus, slot, func, 0x10);
-                    cirrus_fb_base = bar0 & 0xFFFFFFF0u;
-                    return 1;
-                }
-
-                if (func == 0) {
-                    hdr = pci_read32((uint8_t)bus, slot, func, 0x0C);
-                    if (!((hdr >> 16) & 0x80)) break;
-                }
-            }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        if ((uint16_t)(pci_read32(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf),
+                                  0x08) >> 16) != PCI_VGA_CLASS)
+            continue;
+        id_reg = pci_read32(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf), 0x00);
+        if ((uint16_t)id_reg == PCI_VENDOR_CIRRUS &&
+            (uint16_t)(id_reg >> 16) == PCI_DEVICE_5446) {
+            cirrus_fb_base = pci_read32(PCI_BUS(bdf), PCI_SLOT(bdf),
+                                        PCI_FUNC(bdf), 0x10) & 0xFFFFFFF0u;
+            return 1;
         }
     }
     return 0;

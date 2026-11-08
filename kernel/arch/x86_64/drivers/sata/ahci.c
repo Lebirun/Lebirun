@@ -6,6 +6,7 @@
 #include <lebirun/idt.h>
 #include <lebirun/pit.h>
 #include <lebirun/lke.h>
+#include <lebirun/pci.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -333,71 +334,45 @@ static int ahci_wait_cmd(ahci_port_t *port, int slot, uint64_t timeout_ms) {
 }
 
 int KERNEL_INIT ahci_probe(void) {
-    uint16_t bus;
+    uint32_t i;
+    uint32_t bdf;
+    uint8_t bus;
     uint8_t slot;
     uint8_t func;
-    uint8_t max_func;
     uint64_t vendor_device;
-    uint16_t vendor;
-    uint16_t device_id;
     uint64_t class_info;
-    uint8_t base_class;
-    uint8_t sub_class;
-    uint8_t prog_if;
-    uint64_t header_type;
     uint64_t cmd;
 
     KERNEL_INIT_LOG("AHCI: Probing PCI bus for AHCI controllers...\n");
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            vendor_device = pci_read_config(bus, slot, 0, 0x00);
-            vendor = vendor_device & 0xFFFF;
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        bus = PCI_BUS(bdf);
+        slot = PCI_SLOT(bdf);
+        func = PCI_FUNC(bdf);
+        class_info = pci_read_config(bus, slot, func, 0x08);
+        if (((class_info >> 24) & 0xFF) != PCI_CLASS_STORAGE ||
+            ((class_info >> 16) & 0xFF) != PCI_SUBCLASS_SATA ||
+            ((class_info >> 8) & 0xFF) != PCI_PROGIF_AHCI)
+            continue;
 
-            if (vendor == 0xFFFF)
-                continue;
+        vendor_device = pci_read_config(bus, slot, func, 0x00);
+        KERNEL_INIT_LOG("AHCI: Found controller at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
+                        bus, slot, func, (unsigned)(vendor_device & 0xFFFF),
+                        (unsigned)((vendor_device >> 16) & 0xFFFF));
 
-            header_type = pci_read_config(bus, slot, 0, 0x0C);
-            max_func = ((header_type >> 16) & 0x80) ? 8 : 1;
+        g_ahci_controller.pci_bus = bus;
+        g_ahci_controller.pci_slot = slot;
+        g_ahci_controller.pci_func = func;
 
-            for (func = 0; func < max_func; func++) {
-                if (func > 0) {
-                    vendor_device = pci_read_config(bus, slot, func, 0x00);
-                    vendor = vendor_device & 0xFFFF;
+        g_ahci_controller.abar = pci_read_config(bus, slot, func, 0x24) & 0xFFFFFFF0;
+        KERNEL_INIT_LOG("AHCI: ABAR = 0x%016lX\n",
+                        g_ahci_controller.abar);
 
-                    if (vendor == 0xFFFF)
-                        continue;
-                }
+        cmd = pci_read_config(bus, slot, func, 0x04);
+        cmd |= (1 << 1) | (1 << 2);
+        pci_write_config(bus, slot, func, 0x04, cmd);
 
-                class_info = pci_read_config(bus, slot, func, 0x08);
-                base_class = (class_info >> 24) & 0xFF;
-                sub_class = (class_info >> 16) & 0xFF;
-                prog_if = (class_info >> 8) & 0xFF;
-
-                if (base_class == PCI_CLASS_STORAGE &&
-                    sub_class == PCI_SUBCLASS_SATA &&
-                    prog_if == PCI_PROGIF_AHCI) {
-
-                    device_id = (vendor_device >> 16) & 0xFFFF;
-                    KERNEL_INIT_LOG("AHCI: Found controller at PCI %u:%u.%u (VID: 0x%04X, DID: 0x%04X)\n",
-                                    bus, slot, func, vendor, device_id);
-
-                    g_ahci_controller.pci_bus = bus;
-                    g_ahci_controller.pci_slot = slot;
-                    g_ahci_controller.pci_func = func;
-
-                    g_ahci_controller.abar = pci_read_config(bus, slot, func, 0x24) & 0xFFFFFFF0;
-                    KERNEL_INIT_LOG("AHCI: ABAR = 0x%016lX\n",
-                                    g_ahci_controller.abar);
-
-                    cmd = pci_read_config(bus, slot, func, 0x04);
-                    cmd |= (1 << 1) | (1 << 2);
-                    pci_write_config(bus, slot, func, 0x04, cmd);
-
-                    return 0;
-                }
-            }
-        }
+        return 0;
     }
 
     KERNEL_INIT_LOG("AHCI: No AHCI controller found\n");

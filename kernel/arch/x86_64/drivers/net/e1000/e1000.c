@@ -8,6 +8,7 @@
 #include <lebirun/task.h>
 #include <lebirun/tty.h>
 #include <lebirun/lke.h>
+#include <lebirun/pci.h>
 #include <string.h>
 
 static e1000_device_t *g_e1000_dev;
@@ -518,21 +519,16 @@ static int e1000_use_device(e1000_device_t *dev, uint8_t bus, uint8_t slot,
 }
 
 static int e1000_probe_device(e1000_device_t *dev) {
-    uint16_t bus;
-    uint8_t slot;
-    uint8_t func;
-    uint32_t vendor_device;
+    uint32_t i;
+    uint32_t bdf;
 
     printf("E1000: Probing PCI bus...\n");
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (func = 0; func < 8; func++) {
-                vendor_device = pci_read_config(bus, slot, func, 0x00);
-                if (e1000_use_device(dev, (uint8_t)bus, slot, func, vendor_device) == 0)
-                    return 0;
-            }
-        }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        if (e1000_use_device(dev, PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf),
+                             pci_read_config(PCI_BUS(bdf), PCI_SLOT(bdf),
+                                             PCI_FUNC(bdf), 0x00)) == 0)
+            return 0;
     }
 
     printf("E1000: No supported device found\n");

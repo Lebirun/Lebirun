@@ -7,6 +7,7 @@
 #include <lebirun/task.h>
 #include <lebirun/tty.h>
 #include <lebirun/lke.h>
+#include <lebirun/pci.h>
 #include <string.h>
 
 #define VIRTIO_PCI_CAP_COMMON 1
@@ -180,25 +181,19 @@ static void vnet_notify(virtio_net_dev_t *dev, virtio_queue_t *q) {
 }
 
 static int find_device(virtio_net_dev_t *dev) {
-    uint16_t bus;
-    uint8_t slot;
-    uint8_t func;
+    uint32_t i;
+    uint32_t bdf;
     uint32_t id;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            for (func = 0; func < 8; func++) {
-                id = pci_read32((uint8_t)bus, slot, func, 0);
-                if ((id & 0xFFFF) == VIRTIO_NET_VENDOR_ID &&
-                    ((id >> 16) == VIRTIO_NET_DEV_MODERN || (id >> 16) == VIRTIO_NET_DEV_LEGACY)) {
-                    dev->bus = (uint8_t)bus;
-                    dev->slot = slot;
-                    dev->func = func;
-                    dev->irq = (uint8_t)(pci_read32((uint8_t)bus, slot, func, 0x3C) & 0xFF);
-                    return 0;
-                }
-                if (func == 0 && id == 0xFFFFFFFFU) break;
-            }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        id = pci_read32(PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf), 0);
+        if ((id & 0xFFFF) == VIRTIO_NET_VENDOR_ID &&
+            ((id >> 16) == VIRTIO_NET_DEV_MODERN || (id >> 16) == VIRTIO_NET_DEV_LEGACY)) {
+            dev->bus = PCI_BUS(bdf);
+            dev->slot = PCI_SLOT(bdf);
+            dev->func = PCI_FUNC(bdf);
+            dev->irq = (uint8_t)(pci_read32(dev->bus, dev->slot, dev->func, 0x3C) & 0xFF);
+            return 0;
         }
     }
     return -1;

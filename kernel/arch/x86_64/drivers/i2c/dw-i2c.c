@@ -6,6 +6,7 @@
 #include <lebirun/acpi.h>
 #include <lebirun/timekeeping.h>
 #include <lebirun/drivers/i2c/dw-i2c.h>
+#include <lebirun/pci.h>
 
 #define DW_I2C_VIRT (KERNEL_VMA + 0x37300000ULL)
 
@@ -315,27 +316,15 @@ uint32_t KERNEL_INIT dw_i2c_init(void) {
         KERNEL_INIT_STRING("AMDI0510"), NULL
     };
     uint32_t priv;
-    uint32_t bus;
-    uint32_t slot;
-    uint32_t func;
-    uint32_t funcs;
+    uint32_t i;
     uint32_t bdf;
     uint32_t v;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            bdf = (bus << 8) | (slot << 3);
-            if ((pci_rd(bdf, 0x00) & 0xFFFF) == 0xFFFF) continue;
-            funcs = (pci_rd(bdf, 0x0C) >> 16) & 0x80 ? 8 : 1;
-            for (func = 0; func < funcs; func++) {
-                v = pci_rd(bdf | func, 0x00);
-                if ((v & 0xFFFF) != 0x8086) continue;
-                v = pci_rd(bdf | func, 0x08) >> 16;
-                if (v == 0x1180 || v == 0x0C80)
-                    dw_pci(bdf | func, v == 0x1180 &&
-                                       ((1u << slot) & 0x2E10000u));
-            }
-        }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        if ((pci_rd(bdf, 0x00) & 0xFFFF) != 0x8086) continue;
+        v = pci_rd(bdf, 0x08) >> 16;
+        if (v == 0x1180 || v == 0x0C80)
+            dw_pci(bdf, v == 0x1180 && ((1u << PCI_SLOT(bdf)) & 0x2E10000u));
     }
     priv = 0x800;
     acpi_scan_devices(intel, dw_acpi_res, &priv);

@@ -50,6 +50,8 @@ typedef struct ext4_fs {
     ext4_inode_cache_t *inode_cache;
     uint32_t inode_cache_count;
     uint32_t inode_cache_capacity;
+    uint32_t itable_group;
+    uint64_t itable_block;
     mutex_t lock;
     uint32_t cache_tick;
     uint32_t alloc_last_group;

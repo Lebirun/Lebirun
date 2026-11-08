@@ -14,6 +14,7 @@
 #include <lebirun/devfs.h>
 #include <lebirun/timekeeping.h>
 #include <lebirun/lke.h>
+#include <lebirun/pci.h>
 
 #define XHCI_MMIO_VIRT (KERNEL_VMA + 0x37200000ULL)
 #define XHCI_MMIO_PAGES 4u
@@ -164,56 +165,42 @@ void XHCI_ENUM xhci_delay(uint64_t ms) {
 }
 
 static int KERNEL_INIT xhci_probe(void) {
-    uint64_t bus;
-    uint64_t slot;
-    uint64_t func;
-    uint64_t funcs;
-    uint64_t vd;
-    uint64_t hdr;
+    uint32_t i;
+    uint32_t bdf;
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t func;
     uint64_t cls;
     uint64_t bar0;
     uint64_t bar1;
     uint64_t cmd;
 
-    for (bus = 0; bus < 256; bus++) {
-        for (slot = 0; slot < 32; slot++) {
-            vd = pci_read_config((uint8_t)bus, (uint8_t)slot, 0, 0x00);
-            if ((vd & 0xFFFF) == 0xFFFF) continue;
-            hdr = pci_read_config((uint8_t)bus, (uint8_t)slot, 0, 0x0C);
-            funcs = ((hdr >> 16) & 0x80) ? 8 : 1;
-            for (func = 0; func < funcs; func++) {
-                vd = pci_read_config((uint8_t)bus, (uint8_t)slot,
-                                     (uint8_t)func, 0x00);
-                if ((vd & 0xFFFF) == 0xFFFF) continue;
-                cls = pci_read_config((uint8_t)bus, (uint8_t)slot,
-                                      (uint8_t)func, 0x08);
-                if (((cls >> 24) & 0xFF) != PCI_CLASS_SERIAL_BUS) continue;
-                if (((cls >> 16) & 0xFF) != PCI_SUBCLASS_USB) continue;
-                if (((cls >> 8) & 0xFF) != PCI_PROGIF_XHCI) continue;
-                g_xhci.pci_bus = (uint8_t)bus;
-                g_xhci.pci_slot = (uint8_t)slot;
-                g_xhci.pci_func = (uint8_t)func;
-                KERNEL_INIT_LOG("XHCI: Found USB3 controller at PCI %u:%u.%u\n",
-                                bus, slot, func);
-                bar0 = pci_read_config((uint8_t)bus, (uint8_t)slot,
-                                       (uint8_t)func, 0x10);
-                if (bar0 & 0x1) return -1;
-                if (((bar0 >> 1) & 0x3) == 0x2) {
-                    bar1 = pci_read_config((uint8_t)bus, (uint8_t)slot,
-                                           (uint8_t)func, 0x14);
-                    g_xhci.mmio_phys = (bar1 << 32) | (bar0 & ~0xFULL);
-                } else {
-                    g_xhci.mmio_phys = bar0 & ~0xFULL;
-                }
-                if (!g_xhci.mmio_phys) return -1;
-                cmd = pci_read_config((uint8_t)bus, (uint8_t)slot,
-                                      (uint8_t)func, 0x04);
-                cmd |= (1 << 1) | (1 << 2);
-                pci_write_config((uint8_t)bus, (uint8_t)slot,
-                                 (uint8_t)func, 0x04, cmd);
-                return 0;
-            }
+    for (i = 0; pci_get(i, &bdf) == 0; i++) {
+        bus = PCI_BUS(bdf);
+        slot = PCI_SLOT(bdf);
+        func = PCI_FUNC(bdf);
+        cls = pci_read_config(bus, slot, func, 0x08);
+        if (((cls >> 24) & 0xFF) != PCI_CLASS_SERIAL_BUS) continue;
+        if (((cls >> 16) & 0xFF) != PCI_SUBCLASS_USB) continue;
+        if (((cls >> 8) & 0xFF) != PCI_PROGIF_XHCI) continue;
+        g_xhci.pci_bus = bus;
+        g_xhci.pci_slot = slot;
+        g_xhci.pci_func = func;
+        KERNEL_INIT_LOG("XHCI: Found USB3 controller at PCI %u:%u.%u\n",
+                        bus, slot, func);
+        bar0 = pci_read_config(bus, slot, func, 0x10);
+        if (bar0 & 0x1) return -1;
+        if (((bar0 >> 1) & 0x3) == 0x2) {
+            bar1 = pci_read_config(bus, slot, func, 0x14);
+            g_xhci.mmio_phys = (bar1 << 32) | (bar0 & ~0xFULL);
+        } else {
+            g_xhci.mmio_phys = bar0 & ~0xFULL;
         }
+        if (!g_xhci.mmio_phys) return -1;
+        cmd = pci_read_config(bus, slot, func, 0x04);
+        cmd |= (1 << 1) | (1 << 2);
+        pci_write_config(bus, slot, func, 0x04, cmd);
+        return 0;
     }
     return -1;
 }
