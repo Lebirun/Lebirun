@@ -2,6 +2,7 @@
 #include <lebirun/crypto.h>
 #include <lebirun/spinlock.h>
 #include <lebirun/pit.h>
+#include <lebirun/timekeeping.h>
 #include <lebirun/rtc.h>
 #include <lebirun/io.h>
 #include <lebirun/common.h>
@@ -29,6 +30,7 @@ typedef struct {
     uint32_t pool_index;
     uint32_t reseed_counter;
     uint32_t generation_counter;
+    uint64_t last_reseed_ns;
     uint8_t output_buf[RNG_OUTPUT_BUF_SIZE];
     size_t output_pos;
     spinlock_t lock;
@@ -418,6 +420,7 @@ static void rng_do_reseed(void)
     chacha20_init(&g_rng->chacha, seed_material, seed_material + 32);
 
     g_rng->reseed_counter++;
+    g_rng->last_reseed_ns = timekeeping_monotonic_ns();
     g_rng->output_pos = RNG_OUTPUT_BUF_SIZE;
 
     memset(seed_material, 0, sizeof(seed_material));
@@ -433,7 +436,9 @@ static void rng_fill_buffer(void)
     g_rng->output_pos = 0;
     g_rng->generation_counter += RNG_OUTPUT_BUF_SIZE;
 
-    if (g_rng->generation_counter >= RNG_RESEED_THRESHOLD) {
+    if (g_rng->generation_counter >= RNG_RESEED_THRESHOLD ||
+        timekeeping_monotonic_ns() - g_rng->last_reseed_ns >=
+            RNG_RESEED_INTERVAL_NS) {
         g_rng->generation_counter = 0;
         rng_do_reseed();
     }
