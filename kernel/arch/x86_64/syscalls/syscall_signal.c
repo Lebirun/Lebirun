@@ -1408,6 +1408,7 @@ void signal_deliver_pending(registers_t *regs) {
         }
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
         regs->rsp = sp;
+        regs->rflags &= ~0x400ULL;
 
         signal_set_blocked_mask(current_task, sigs->blocked.sig[0] |
             act->sa_mask[0] | ((uint64_t)act->sa_mask[1] << 32) |

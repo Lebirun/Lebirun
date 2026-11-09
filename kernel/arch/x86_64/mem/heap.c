@@ -941,12 +941,9 @@ void kfree(void *ptr) {
     uint64_t eflags;
 
     if (!ptr) return;
-    if (is_early_heap_ptr(ptr)) return;
     caller = __builtin_return_address(0);
-    if (slab_owns(ptr)) {
-        slab_free(ptr, caller);
-        return;
-    }
+    if (slab_free(ptr, caller)) return;
+    if (is_early_heap_ptr(ptr)) return;
     eflags = heap_lock_acquire();
     kfree_internal(ptr, caller);
     heap_lock_release(eflags);
