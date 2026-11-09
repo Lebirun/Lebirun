@@ -65,24 +65,40 @@ int user_access_ok(const void *ptr, size_t size, int access) {
     return 1;
 }
 
-int copy_from_user(void *dest, const void *src, size_t size) {
-    if (!dest && size != 0) return -1;
-    if (!user_access_ok(src, size, UACCESS_READ)) return -1;
-    if (size != 0) {
-        vmm_read_from_pml4(current_task->pml4_phys,
-                           (uint64_t)(uintptr_t)src, dest, size);
+static int user_copy(uint64_t address, void *buf, size_t size, int access) {
+    uint8_t *kbuf;
+    uint64_t chunk;
+    int write;
+
+    if (!current_task || !current_task->is_user) return -1;
+    if (size == 0) return 0;
+    if (!buf || address < PAGE_SIZE || address >= KERNEL_VMA ||
+        (uint64_t)size - 1 >= KERNEL_VMA - address) return -1;
+    kbuf = (uint8_t *)buf;
+    write = (access & UACCESS_WRITE) != 0;
+    while (size != 0) {
+        chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+        if (chunk > size) chunk = size;
+        if (vmm_copy_user_page(current_task->pml4_phys, address, kbuf,
+                               chunk, write) < 0 &&
+            (!user_page_access_ok(address & ~(PAGE_SIZE - 1), access) ||
+             vmm_copy_user_page(current_task->pml4_phys, address, kbuf,
+                                chunk, write) < 0))
+            return -1;
+        address += chunk;
+        kbuf += chunk;
+        size -= chunk;
     }
     return 0;
 }
 
+int copy_from_user(void *dest, const void *src, size_t size) {
+    return user_copy((uint64_t)(uintptr_t)src, dest, size, UACCESS_READ);
+}
+
 int copy_to_user(void *dest, const void *src, size_t size) {
-    if (!src && size != 0) return -1;
-    if (!user_access_ok(dest, size, UACCESS_WRITE)) return -1;
-    if (size != 0) {
-        vmm_copy_to_pml4(current_task->pml4_phys,
-                         (uint64_t)(uintptr_t)dest, src, size);
-    }
-    return 0;
+    return user_copy((uint64_t)(uintptr_t)dest, (void *)src, size,
+                     UACCESS_WRITE);
 }
 
 int clear_user(void *dest, size_t size) {

@@ -188,7 +188,7 @@ void heap_verify(void);
 void slab_init(void);
 int slab_allocator_locked(void);
 void *slab_alloc(size_t size);
-void slab_free(void *ptr, void *caller);
+int slab_free(void *ptr, void *caller);
 void *slab_page_alloc(size_t size);
 void slab_page_free(void *ptr, size_t size);
 int slab_owns(void *ptr);
@@ -253,6 +253,8 @@ void vmm_copy_to_pml4(uint64_t pml4_phys, uint64_t dest_virt, const void *src, u
 void vmm_read_from_pml4(uint64_t pml4_phys, uint64_t src_virt, void *dest, uint64_t size);
 int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
                             uint64_t size, int write);
+int vmm_copy_user_page(uint64_t pml4_phys, uint64_t addr, void *buf,
+                       uint64_t size, int write);
 
 void vmm_temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint64_t temp_virt);

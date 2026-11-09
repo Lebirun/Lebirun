@@ -588,7 +588,7 @@ void slab_page_free(void *ptr, size_t size) {
     slab_lock_release(eflags);
 }
 
-void slab_free(void *ptr, void *caller) {
+int slab_free(void *ptr, void *caller) {
     slab_page_t *page;
     slab_block_t *block;
     uint64_t page_address;
@@ -598,22 +598,22 @@ void slab_free(void *ptr, void *caller) {
     uint32_t *head;
     uint32_t *tail;
 
-    if (!ptr || !slab_initialized) return;
+    if (!ptr || !slab_initialized) return 0;
     page_address = (uint64_t)ptr & ~(PAGE_SIZE - 1);
     if (!slab_region_contains(page_address, SLAB_PRIMARY_START,
                               SLAB_PRIMARY_SIZE) &&
         !slab_region_contains(page_address, SLAB_OVERFLOW_START,
-                              SLAB_OVERFLOW_SIZE)) return;
-    if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_address)) return;
+                              SLAB_OVERFLOW_SIZE)) return 0;
+    if (!vmm_get_phys_in_pml4(vmm_get_kernel_cr3(), page_address)) return 0;
     page = (slab_page_t *)page_address;
-    if (page->magic != SLAB_MAGIC) return;
+    if (page->magic != SLAB_MAGIC) return 0;
     slab_lock_acquire(&eflags);
     if (page->kind == SLAB_KIND_EXTENT) {
         if ((uint8_t *)page + sizeof(*page) + SLAB_EXTENT_HEAD_SIZE !=
                 (uint8_t *)ptr ||
             page->live_count != 1 || page->pages == 0) {
             slab_lock_release(eflags);
-            return;
+            return 1;
         }
         size = page->payload_size;
         head = (uint32_t *)((uint8_t *)page + sizeof(*page));
@@ -622,23 +622,23 @@ void slab_free(void *ptr, void *caller) {
             printf("slab_free: extent corruption ptr=%p caller=%p\n",
                    ptr, caller);
             slab_lock_release(eflags);
-            return;
+            return 1;
         }
         pages = page->pages;
         page->magic = 0;
         slab_pages_allocated -= pages;
         slab_unmap_pages(page_address, pages);
         slab_lock_release(eflags);
-        return;
+        return 1;
     }
     if (page->kind != SLAB_KIND_SMALL) {
         slab_lock_release(eflags);
-        return;
+        return 1;
     }
     block = slab_small_block_for_ptr(page, ptr);
     if (!block || !block->requested) {
         slab_lock_release(eflags);
-        return;
+        return 1;
     }
     size = block->requested;
     block->requested = 0;
@@ -653,7 +653,7 @@ void slab_free(void *ptr, void *caller) {
         slab_small_hint(page);
         slab_small_spare = page;
         slab_lock_release(eflags);
-        return;
+        return 1;
     }
     if (page->live_count == 0) {
         slab_small_remove(page);
@@ -661,11 +661,12 @@ void slab_free(void *ptr, void *caller) {
         slab_pages_allocated--;
         slab_unmap_pages(page_address, 1);
         slab_lock_release(eflags);
-        return;
+        return 1;
     }
     slab_small_coalesce(page);
     slab_small_hint(page);
     slab_lock_release(eflags);
+    return 1;
 }
 
 int slab_owns(void *ptr) {

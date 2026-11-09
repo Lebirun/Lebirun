@@ -742,6 +742,9 @@ static int sys_madvise(void *addr, size_t length, int advice) {
     uint64_t size;
     uint64_t end;
     uint64_t page;
+    uint64_t start;
+    uint64_t stop;
+    task_file_map_t *map;
     task_ext_t *e;
     uint32_t set;
     uint32_t clear;
@@ -833,17 +836,15 @@ static int sys_madvise(void *addr, size_t length, int advice) {
     if (advice != MADV_DONTNEED && advice != MADV_FREE)
         return 0;
     if (sync_user_range(addr, length, MS_ASYNC, 0) < 0) return -EIO;
-    for (page = base; page < end; page += PAGE_SIZE) {
-        for (i = 0; i < current_task->vm->file_map_count; i++) {
-            if (page < current_task->vm->file_maps[i].vaddr ||
-                page >= current_task->vm->file_maps[i].vaddr +
-                        current_task->vm->file_maps[i].memsz) continue;
-            if ((current_task->vm->file_maps[i].map_flags & TASK_VMA_SHARED) &&
-                (current_task->vm->file_maps[i].map_flags & TASK_VMA_ANONYMOUS))
-                break;
-            release_user_leaf_range(page, page + PAGE_SIZE);
-            break;
-        }
+    for (i = 0; i < current_task->vm->file_map_count; i++) {
+        map = &current_task->vm->file_maps[i];
+        start = align_up_u64(map->vaddr, PAGE_SIZE);
+        stop = align_up_u64(map->vaddr + map->memsz, PAGE_SIZE);
+        if ((map->map_flags & TASK_VMA_SHARED) &&
+            (map->map_flags & TASK_VMA_ANONYMOUS)) continue;
+        if (start < base) start = base;
+        if (stop > end) stop = end;
+        if (start < stop) release_user_leaf_range(start, stop);
     }
     return 0;
 }

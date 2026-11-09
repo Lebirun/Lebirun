@@ -29,8 +29,8 @@
 #define VIRTQ_DESC_F_WRITE 2
 
 #define VIRTIO_NET_HDR_LEN 12
-#define VIRTIO_NET_RX_POSTED 64
-#define VIRTIO_NET_RX_STRIDE 2048
+#define VIRTIO_NET_QUEUE_SIZE 64
+#define VIRTIO_NET_RX_STRIDE 1536
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
@@ -313,6 +313,10 @@ static int setup_queue(virtio_net_dev_t *dev, virtio_queue_t *q, uint16_t idx) {
     dev->common->queue_select = idx;
     __asm__ __volatile__("mfence" ::: "memory");
     q->size = dev->common->queue_size;
+    if (q->size > VIRTIO_NET_QUEUE_SIZE) {
+        dev->common->queue_size = VIRTIO_NET_QUEUE_SIZE;
+        q->size = dev->common->queue_size;
+    }
     if (q->size < 2) return -1;
     desc_size = (uint64_t)q->size * sizeof(virtq_desc_t);
     avail_off = (desc_size + 1) & ~1ULL;
@@ -509,7 +513,7 @@ static int virtio_net_bring_up(virtio_net_dev_t *dev) {
         release_dev(dev);
         return -1;
     }
-    dev->rx_posted = dev->rx.size < VIRTIO_NET_RX_POSTED ? dev->rx.size : VIRTIO_NET_RX_POSTED;
+    dev->rx_posted = dev->rx.size < VIRTIO_NET_QUEUE_SIZE ? dev->rx.size : VIRTIO_NET_QUEUE_SIZE;
     n = (uint64_t)dev->rx_posted * VIRTIO_NET_RX_STRIDE;
     dev->rx_pages = (n + PAGE_SIZE - 1) / PAGE_SIZE;
     dev->rx_bufs_phys = pfa_alloc_contiguous(dev->rx_pages);
