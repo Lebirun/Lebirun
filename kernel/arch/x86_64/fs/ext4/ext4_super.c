@@ -66,7 +66,14 @@ int ext4_read_superblock(ext4_fs_t *fs) {
     } else {
         fs->desc_size = 32;
     }
+    if (fs->desc_size < 32 || fs->desc_size > fs->block_size ||
+        (fs->desc_size & (fs->desc_size - 1)))
+        return -1;
     fs->use_extents = (fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0;
+    ext4_csum_init(fs);
+    fs->read_only = (fs->sb.s_feature_incompat & ~EXT4_RW_INCOMPAT) ||
+                    (fs->sb.s_feature_ro_compat & ~EXT4_RW_RO_COMPAT) ||
+                    (fs->metadata_csum && fs->sb.s_checksum_type != 1);
 
     return 0;
 }
@@ -91,6 +98,7 @@ int ext4_write_superblock(ext4_fs_t *fs) {
         return -1;
     }
 
+    ext4_super_csum(fs);
     memcpy(buffer + EXT4_SUPERBLOCK_OFFSET, &fs->sb, sizeof(ext4_superblock_t));
 
     if (blkdev_write(dev, fs->partition_start_lba, 8, buffer) != 0) {

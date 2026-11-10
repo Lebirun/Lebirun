@@ -72,6 +72,16 @@ static int ext4_prepare_rw_mount(ext4_fs_t *fs) {
         if (ext4_journal_replay(fs) != 0) return -1;
         if (ext4_sync_blocks(fs) != 0) return -1;
         if (ext4_flush_device(fs) != 0) return -1;
+        ext4_drop_block_cache(fs);
+        fs->itable_block = 0;
+        if (ext4_read_superblock(fs) != 0) return -1;
+        fs->sb.s_feature_incompat &= ~EXT4_FEATURE_INCOMPAT_RECOVER;
+        if (ext4_write_superblock(fs) != 0) return -1;
+        if (ext4_flush_device(fs) != 0) return -1;
+    }
+    if (fs->read_only) {
+        printf("EXT4: unsupported features, mounting read-only\n");
+        return 0;
     }
     if (needs_recovery || fs->sb.s_last_orphan != 0) {
         if (ext4_recover_orphans(fs) != 0) {
@@ -89,6 +99,7 @@ static int ext4_prepare_rw_mount(ext4_fs_t *fs) {
 }
 
 static int ext4_mark_clean(ext4_fs_t *fs) {
+    if (fs->read_only) return 0;
     fs->sb.s_state |= EXT4_VALID_FS;
     fs->sb.s_state &= (uint16_t)~EXT4_ERROR_FS;
     fs->sb.s_feature_incompat &= ~EXT4_FEATURE_INCOMPAT_RECOVER;
@@ -354,8 +365,8 @@ static void ext4_vfs_cache_insert(ext4_fs_t *fs, uint32_t ino, vfs_node_t *node)
     ext4_fs_t *old_fs;
     ext4_vfs_private_t *old_priv;
     vfs_node_t *old_node;
+    ext4_inode_cache_t *ic;
     int i;
-    int k;
 
     if (ext4_vfs_cache_count >= ext4_vfs_cache_capacity &&
         ext4_vfs_cache_grow() < 0 &&
@@ -384,9 +395,9 @@ static void ext4_vfs_cache_insert(ext4_fs_t *fs, uint32_t ino, vfs_node_t *node)
                 ext4_release_parent_pin(old_node);
                 ext4_vfs_node_unlink(old_fs, old_node);
                 if (old_fs) {
-                    for (k = 0; k < (int)old_fs->inode_cache_count; k++) {
-                        if (old_fs->inode_cache[k].vfs_node == old_node)
-                            old_fs->inode_cache[k].vfs_node = NULL;
+                    for (ic = old_fs->inode_cache; ic; ic = ic->next) {
+                        if (ic->vfs_node == old_node)
+                            ic->vfs_node = NULL;
                     }
                 }
                 if (old_priv) kfree(old_priv);
@@ -433,7 +444,7 @@ static void ext4_vfs_cache_remove_fs(ext4_fs_t *fs) {
 
 static int ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     ext4_vfs_private_t *priv;
-    int i;
+    ext4_inode_cache_t *ic;
 
     if (!fs || !node) return -1;
     if (node == fs->root_node) return -1;
@@ -447,10 +458,9 @@ static int ext4_detach_vfs_node(ext4_fs_t *fs, vfs_node_t *node) {
     ext4_release_parent_pin(node);
     ext4_vfs_cache_remove(node);
     ext4_vfs_node_unlink(fs, node);
-    for (i = 0; i < (int)fs->inode_cache_count; i++) {
-        if (fs->inode_cache[i].vfs_node == node) {
-            fs->inode_cache[i].vfs_node = NULL;
-        }
+    for (ic = fs->inode_cache; ic; ic = ic->next) {
+        if (ic->vfs_node == node)
+            ic->vfs_node = NULL;
     }
     if (priv) kfree(priv);
     node->private_data = NULL;
@@ -462,13 +472,12 @@ static void ext4_free_vfs_nodes(ext4_fs_t *fs) {
     ext4_vfs_private_t *priv;
     vfs_node_t *n;
     vfs_node_t *next;
-    int i;
+    ext4_inode_cache_t *ic;
 
     if (!fs) return;
 
-    for (i = 0; i < (int)fs->inode_cache_count; i++) {
-        fs->inode_cache[i].vfs_node = NULL;
-    }
+    for (ic = fs->inode_cache; ic; ic = ic->next)
+        ic->vfs_node = NULL;
 
     ext4_vfs_cache_remove_fs(fs);
 
@@ -514,6 +523,7 @@ static int ext4_vfs_unlink(vfs_node_t *parent, const char *name);
 static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms);
 static int ext4_vfs_truncate(vfs_node_t *node, uint64_t length);
 static int ext4_vfs_sync(vfs_node_t *node, int data_only);
+static uint64_t ext4_vfs_mount_flags(vfs_node_t *root);
 static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
                            vfs_node_t *new_parent, const char *new_name);
 
@@ -644,6 +654,7 @@ static uint64_t ext4_vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size,
     }
 
     priv = (ext4_vfs_private_t *)node->private_data;
+    if (priv->fs->read_only) return 0;
     mutex_lock(&priv->fs->lock);
     written = ext4_file_write(priv->fs, priv->ino, offset, size, buffer);
 
@@ -671,6 +682,7 @@ uint64_t ext4_transfer_write(vfs_node_t *node, uint64_t offset,
     if (!node->private_data || !buffer)
         return 0;
     priv = (ext4_vfs_private_t *)node->private_data;
+    if (priv->fs->read_only) return 0;
     mutex_lock(&priv->fs->lock);
     written = ext4_file_write_workspace(priv->fs, priv->ino,
                                         offset, size,
@@ -887,6 +899,7 @@ static int ext4_vfs_create(vfs_node_t *parent, const char *name, uint64_t flags)
     }
 
     priv = (ext4_vfs_private_t *)parent->private_data;
+    if (priv->fs->read_only) return -1;
 
     mode = EXT4_S_IFREG | (flags & 0777);
     if ((flags & 0777) == 0) {
@@ -949,6 +962,10 @@ int ext4_vfs_symlink_node(const char *target, const char *linkpath, uint64_t fla
 
     priv = (ext4_vfs_private_t *)parent->private_data;
     ret = -1;
+    if (priv->fs->read_only) {
+        vfs_release(parent);
+        return -1;
+    }
     mutex_lock(&priv->fs->lock);
     ino = ext4_create_file(priv->fs, priv->ino, name, EXT4_S_IFLNK | 0777);
     if (ino >= 0) {
@@ -995,7 +1012,7 @@ int ext4_vfs_link_node(const char *oldpath, const char *newpath) {
     }
     source_priv = (ext4_vfs_private_t *)source->private_data;
     parent_priv = (ext4_vfs_private_t *)parent->private_data;
-    if (source_priv->fs != parent_priv->fs) {
+    if (source_priv->fs != parent_priv->fs || source_priv->fs->read_only) {
         vfs_release(parent);
         vfs_release(source);
         return -1;
@@ -1024,6 +1041,7 @@ static int ext4_vfs_unlink(vfs_node_t *parent, const char *name) {
     }
 
     priv = (ext4_vfs_private_t *)parent->private_data;
+    if (priv->fs->read_only) return -1;
     mutex_lock(&priv->fs->lock);
     victim = NULL;
     if (ext4_dir_lookup(priv->fs, priv->ino, name, &ino) == 0)
@@ -1042,6 +1060,7 @@ static int ext4_vfs_truncate(vfs_node_t *node, uint64_t length) {
     if (!node || !node->private_data) return -1;
     if (VFS_GET_TYPE(node->flags) != VFS_FILE) return -1;
     priv = (ext4_vfs_private_t *)node->private_data;
+    if (priv->fs->read_only) return -1;
     mutex_lock(&priv->fs->lock);
     ret = ext4_file_truncate(priv->fs, priv->ino, length);
     if (ret == 0) {
@@ -1073,7 +1092,7 @@ static int ext4_vfs_rename(vfs_node_t *old_parent, const char *old_name,
     old_priv = (ext4_vfs_private_t *)old_parent->private_data;
     new_priv = (ext4_vfs_private_t *)new_parent->private_data;
 
-    if (old_priv->fs != new_priv->fs) {
+    if (old_priv->fs != new_priv->fs || old_priv->fs->read_only) {
         return -1;
     }
 
@@ -1108,6 +1127,7 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
 
     priv = (ext4_vfs_private_t *)parent->private_data;
     fs = priv->fs;
+    if (fs->read_only) return -1;
 
     mutex_lock(&fs->lock);
 
@@ -1182,9 +1202,12 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
 
     free_entry = (ext4_dir_entry_t *)(dir_block + 24);
     free_entry->inode = 0;
-    free_entry->rec_len = fs->block_size - 24;
+    free_entry->rec_len = fs->block_size - 24 -
+                          (fs->metadata_csum ? EXT4_DIR_TAIL_SIZE : 0);
     free_entry->name_len = 0;
     free_entry->file_type = 0;
+    ext4_dir_set_tail(fs, dir_block);
+    ext4_dir_csum(fs, (uint32_t)new_ino, &ic->inode, dir_block);
 
     ext4_write_block(fs, new_block, dir_block);
     kfree(dir_block);
@@ -1254,8 +1277,6 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     fs->partition_start_lba = part_start;
     mutex_init(&fs->lock);
 
-    fs->inode_cache_capacity = 0;
-    fs->inode_cache_count = 0;
     fs->inode_cache = NULL;
 
     fs->block_cache_count = 0;
@@ -1264,7 +1285,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     if (ext4_read_superblock(fs) != 0) {
         printf("EXT4: Failed to read superblock\n");
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1272,7 +1293,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     if (ext4_validate_superblock(&fs->sb) != 0) {
         printf("EXT4: Invalid superblock\n");
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1282,7 +1303,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     if (ext4_prepare_rw_mount(fs) != 0) {
         printf("EXT4: Filesystem recovery failed\n");
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1291,7 +1312,7 @@ static vfs_node_t *ext4_do_mount(const char *device, const char *mountpoint) {
     if (!root) {
         printf("EXT4: Failed to create root node\n");
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1357,9 +1378,7 @@ static int ext4_do_unmount(vfs_node_t *mountpoint) {
         ext4_drop_block_cache(fs);
     }
 
-    if (fs->inode_cache) {
-        kfree(fs->inode_cache);
-    }
+    ext4_drop_inode_cache(fs);
 
     mutex_unlock(&fs->lock);
     mutex_unlock(&ext4_mounts_lock);
@@ -1394,6 +1413,7 @@ void KERNEL_INIT ext4_vfs_register(void) {
     ext4_fs_type.mount = ext4_do_mount;
     ext4_fs_type.unmount = ext4_do_unmount;
     ext4_fs_type.sync = ext4_vfs_sync;
+    ext4_fs_type.mount_flags = ext4_vfs_mount_flags;
     ext4_fs_type.next = NULL;
 
     vfs_register_fs(&ext4_fs_type);
@@ -1401,6 +1421,13 @@ void KERNEL_INIT ext4_vfs_register(void) {
 
 static int ext4_vfs_sync(vfs_node_t *node, int data_only) {
     return ext4_sync_node(node, data_only);
+}
+
+static uint64_t ext4_vfs_mount_flags(vfs_node_t *root) {
+    ext4_vfs_private_t *priv;
+
+    priv = root ? (ext4_vfs_private_t *)root->private_data : NULL;
+    return priv && priv->fs->read_only ? VFS_MS_RDONLY : 0;
 }
 
 ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
@@ -1423,8 +1450,6 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     fs->port_index = port_index;
     mutex_init(&fs->lock);
 
-    fs->inode_cache_capacity = 0;
-    fs->inode_cache_count = 0;
     fs->inode_cache = NULL;
 
     fs->block_cache_count = 0;
@@ -1432,21 +1457,21 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
 
     if (ext4_read_superblock(fs) != 0) {
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
 
     if (ext4_validate_superblock(&fs->sb) != 0) {
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
 
     if (ext4_prepare_rw_mount(fs) != 0) {
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1454,7 +1479,7 @@ ext4_fs_t *ext4_mount_disk(uint32_t port_index, const char *mountpoint) {
     root = ext4_create_vfs_node(fs, EXT4_ROOT_INO, "/");
     if (!root) {
         ext4_drop_block_cache(fs);
-        kfree(fs->inode_cache);
+        ext4_drop_inode_cache(fs);
         kfree(fs);
         return NULL;
     }
@@ -1497,9 +1522,7 @@ int ext4_unmount(ext4_fs_t *fs) {
         ext4_drop_block_cache(fs);
     }
 
-    if (fs->inode_cache) {
-        kfree(fs->inode_cache);
-    }
+    ext4_drop_inode_cache(fs);
 
     mutex_unlock(&fs->lock);
     mutex_unlock(&ext4_mounts_lock);
@@ -1595,6 +1618,7 @@ int ext4_set_times_node(vfs_node_t *node, uint64_t atime, uint64_t mtime,
 
     if (!node || !node->private_data) return -1;
     priv = (ext4_vfs_private_t *)node->private_data;
+    if (priv->fs->read_only) return -1;
     mutex_lock(&priv->fs->lock);
     ic = ext4_get_inode(priv->fs, priv->ino);
     if (!ic) {
@@ -1623,6 +1647,7 @@ int ext4_mknod_node(vfs_node_t *parent, const char *name, uint64_t mode) {
     if (inode_type != EXT4_S_IFIFO && inode_type != EXT4_S_IFSOCK)
         return -1;
     priv = (ext4_vfs_private_t *)parent->private_data;
+    if (priv->fs->read_only) return -1;
     mutex_lock(&priv->fs->lock);
     result = ext4_create_file(priv->fs, priv->ino, name,
                               (uint16_t)(inode_type | (mode & 07777)));
@@ -1644,7 +1669,7 @@ int ext4_exchange_nodes(vfs_node_t *old_parent, const char *old_name,
         !old_parent->private_data || !new_parent->private_data) return -1;
     old_priv = (ext4_vfs_private_t *)old_parent->private_data;
     new_priv = (ext4_vfs_private_t *)new_parent->private_data;
-    if (old_priv->fs != new_priv->fs) return -1;
+    if (old_priv->fs != new_priv->fs || old_priv->fs->read_only) return -1;
     mutex_lock(&old_priv->fs->lock);
     attempt = 0;
     for (;;) {

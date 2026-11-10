@@ -1257,9 +1257,8 @@ overlay_context_t *KERNEL_INIT overlayfs_create(vfs_node_t *lower_root,
         return NULL;
     }
     
-    overlay_ctx.lower[0].root = lower_root;
-    overlay_ctx.lower[0].writable = 0;
-    overlay_ctx.lower_count = 1;
+    overlay_ctx.lower.root = lower_root;
+    overlay_ctx.lower.writable = 0;
     
     overlay_ctx.upper.root = upper_root;
     overlay_ctx.upper.writable = 1;

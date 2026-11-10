@@ -43,7 +43,6 @@
 #define VFS_PERM_WRITE  0x02
 #define VFS_PERM_EXEC   0x01
 
-#define VFS_MAX_PATH    256
 #define VFS_MAX_NAME    64
 #define VFS_NODE_INLINE_NAME 16
 #define VFS_READDIR_END 1
@@ -153,6 +152,7 @@ typedef struct vfs_fs_type {
     int (*unmount)(vfs_node_t *mountpoint);
     int (*sync)(vfs_node_t *node, int data_only);
     int (*statfs)(vfs_node_t *root, vfs_statfs_t *st);
+    uint64_t (*mount_flags)(vfs_node_t *root);
     struct vfs_fs_type *next;
 } vfs_fs_type_t;
 

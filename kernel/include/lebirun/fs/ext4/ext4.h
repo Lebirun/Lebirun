@@ -9,7 +9,6 @@
 
 #define EXT4_MAX_BLOCK_SIZE     65536
 #define EXT4_MIN_BLOCK_SIZE     1024
-#define EXT4_INODE_CACHE_INIT   4
 
 struct ext4_fs;
 
@@ -21,13 +20,14 @@ typedef struct {
     uint32_t last_access;
 } ext4_block_cache_entry_t;
 
-typedef struct {
+typedef struct ext4_inode_cache {
     uint32_t ino;
     ext4_inode_t inode;
     bool dirty;
     uint32_t ref_count;
     struct ext4_fs *fs;
     vfs_node_t *vfs_node;
+    struct ext4_inode_cache *next;
 } ext4_inode_cache_t;
 
 typedef struct ext4_fs {
@@ -44,12 +44,14 @@ typedef struct ext4_fs {
     uint64_t total_inodes;
     bool use_extents;
     bool is_64bit;
+    bool metadata_csum;
+    bool gdt_csum;
+    bool read_only;
+    uint32_t csum_seed;
     uint32_t desc_size;
     ext4_block_cache_entry_t *block_cache;
     uint32_t block_cache_count;
     ext4_inode_cache_t *inode_cache;
-    uint32_t inode_cache_count;
-    uint32_t inode_cache_capacity;
     uint32_t itable_group;
     uint64_t itable_block;
     mutex_t lock;
@@ -66,6 +68,7 @@ int ext4_read_superblock(ext4_fs_t *fs);
 int ext4_write_superblock(ext4_fs_t *fs);
 int ext4_sync_inodes(ext4_fs_t *fs);
 void ext4_reclaim_inodes(ext4_fs_t *fs);
+void ext4_drop_inode_cache(ext4_fs_t *fs);
 int ext4_validate_superblock(ext4_superblock_t *sb);
 void ext4_print_superblock(ext4_superblock_t *sb);
 
@@ -82,6 +85,8 @@ int ext4_reclaim_clean_blocks(ext4_fs_t *fs, uint32_t max_blocks);
 void ext4_compact_block_cache(ext4_fs_t *fs);
 void ext4_drop_block_cache(ext4_fs_t *fs);
 int ext4_sync_blocks(ext4_fs_t *fs);
+int ext4_read_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc);
+int ext4_write_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc);
 int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint);
 uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
                               uint32_t max_count, uint64_t *first_block);
@@ -96,6 +101,17 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino);
 uint64_t ext4_inode_get_size(ext4_inode_t *inode);
 void ext4_inode_set_size(ext4_inode_t *inode, uint64_t size);
 uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block);
+int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block, uint64_t phys_block);
+
+void ext4_csum_init(ext4_fs_t *fs);
+void ext4_super_csum(ext4_fs_t *fs);
+void ext4_desc_csum(ext4_fs_t *fs, uint32_t group, uint8_t *raw);
+void ext4_inode_csum(ext4_fs_t *fs, uint32_t ino, uint8_t *raw);
+void ext4_bitmap_csum(ext4_fs_t *fs, ext4_group_desc_t *desc, const uint8_t *bitmap, int inode);
+uint32_t ext4_dir_tail_size(ext4_fs_t *fs, const uint8_t *block);
+void ext4_dir_set_tail(ext4_fs_t *fs, uint8_t *block);
+void ext4_dir_csum(ext4_fs_t *fs, uint32_t ino, const ext4_inode_t *dir, uint8_t *block);
+uint32_t ext4_jsb_csum(const uint8_t *jsb);
 
 int ext4_dir_lookup(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t *result_ino);
 int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t ino, uint8_t file_type);

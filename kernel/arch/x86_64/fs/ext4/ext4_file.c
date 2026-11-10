@@ -104,7 +104,7 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
     return bytes_read;
 }
 
-static int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block, uint64_t phys_block) {
+int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block, uint64_t phys_block) {
     uint32_t ptrs_per_block;
     uint8_t *ind_block;
     uint32_t *ptrs;
@@ -791,6 +791,44 @@ int ext4_link_file(ext4_fs_t *fs, uint32_t ino, uint32_t parent_ino,
     return 0;
 }
 
+static void ext4_reparent_dir(ext4_fs_t *fs, uint32_t ino,
+                              uint32_t old_parent, uint32_t new_parent) {
+    ext4_inode_cache_t *ic;
+    ext4_dir_entry_t *dotdot;
+    uint64_t phys;
+    uint8_t *block;
+
+    ic = ext4_get_inode(fs, ino);
+    if (!ic) return;
+    phys = ext4_inode_get_block(fs, &ic->inode, 0);
+    block = phys ? ext4_get_block(fs, phys) : NULL;
+    if (block) {
+        dotdot = (ext4_dir_entry_t *)(block + ((ext4_dir_entry_t *)block)->rec_len);
+        if ((uint8_t *)dotdot + 12 <= block + fs->block_size &&
+            dotdot->name_len == 2 && dotdot->name[0] == '.' &&
+            dotdot->name[1] == '.' && dotdot->inode == old_parent) {
+            dotdot->inode = new_parent;
+            ext4_dir_csum(fs, ino, &ic->inode, block);
+            ext4_mark_block_dirty(fs, phys);
+        }
+        ext4_release_block(fs, phys);
+    }
+    ext4_release_inode(ic);
+    ic = ext4_get_inode(fs, old_parent);
+    if (ic) {
+        if (ic->inode.i_links_count > 2) ic->inode.i_links_count--;
+        ext4_mark_inode_dirty(ic);
+        ext4_release_inode(ic);
+    }
+    ic = ext4_get_inode(fs, new_parent);
+    if (ic) {
+        if (ic->inode.i_links_count > 1 && ic->inode.i_links_count < 65000)
+            ic->inode.i_links_count++;
+        ext4_mark_inode_dirty(ic);
+        ext4_release_inode(ic);
+    }
+}
+
 int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_name,
                      uint32_t new_parent_ino, const char *new_name) {
     uint32_t ino;
@@ -830,5 +868,7 @@ int ext4_rename_file(ext4_fs_t *fs, uint32_t old_parent_ino, const char *old_nam
         ext4_dir_remove_entry(fs, new_parent_ino, new_name);
         return -1;
     }
+    if (file_type == EXT4_FT_DIR && old_parent_ino != new_parent_ino)
+        ext4_reparent_dir(fs, ino, old_parent_ino, new_parent_ino);
     return 0;
 }

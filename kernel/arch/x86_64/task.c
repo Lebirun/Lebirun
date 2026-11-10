@@ -675,21 +675,54 @@ static uint64_t task_initial_stack_size(int argc, char **argv, int envc, char **
     return size;
 }
 
+static uint64_t fpu_xcr0;
+static uint32_t fpu_state_size = FPU_STATE_SIZE;
+
+void KERNEL_INIT fpu_cpu_init(void) {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint64_t cr4;
+    uint64_t xcr0;
+
+    eax = 1;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (!(ecx & (1u << 26)) || !(ecx & (1u << 28))) return;
+    eax = 0xD;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    xcr0 = eax & 7u;
+    if (xcr0 != 7u) return;
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4 | (1ULL << 18)) : "memory");
+    __asm__ volatile ("xsetbv" : : "a"((uint32_t)xcr0), "d"(0u), "c"(0u) : "memory");
+    eax = 0xD;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (!fpu_xcr0 && ebx > FPU_STATE_SIZE) {
+        fpu_state_size = ebx;
+        fpu_xcr0 = xcr0;
+    }
+}
+
 static inline void fpu_save_area(uint8_t *area) {
     if (!area) return;
-    __asm__ volatile ("fxsave64 %0" : "=m"(*(uint8_t (*)[FPU_STATE_SIZE])area) : : "memory");
+    if (fpu_xcr0)
+        __asm__ volatile ("xsave64 (%0)" : : "r"(area), "a"(~0u), "d"(~0u) : "memory");
+    else
+        __asm__ volatile ("fxsave64 (%0)" : : "r"(area) : "memory");
 }
 
 static inline void fpu_restore_area(uint8_t *area) {
     uint32_t mxcsr;
 
     if (area) {
-        __asm__ volatile (
-            "fxrstor64 %0"
-            :
-            : "m"(*(uint8_t (*)[FPU_STATE_SIZE])area)
-            : "memory"
-        );
+        if (fpu_xcr0)
+            __asm__ volatile ("xrstor64 (%0)" : : "r"(area), "a"(~0u), "d"(~0u) : "memory");
+        else
+            __asm__ volatile ("fxrstor64 (%0)" : : "r"(area) : "memory");
         return;
     }
     mxcsr = 0x1F80;
@@ -705,9 +738,14 @@ static void fpu_init_default_state(void) {
     mxcsr = 0x1F80;
     __asm__ volatile ("fninit" ::: "memory");
     __asm__ volatile ("ldmxcsr %0" : : "m"(mxcsr) : "memory");
-    fpu_save_area(state);
+    __asm__ volatile ("fxsave64 (%0)" : : "r"(state) : "memory");
     memcpy(&fpu_mxcsr_mask, state + 28, sizeof(fpu_mxcsr_mask));
     if (fpu_mxcsr_mask == 0) fpu_mxcsr_mask = 0x0000FFBF;
+}
+
+void task_fpu_legacy_updated(task_t *task) {
+    if (task && task->fpu_state && fpu_xcr0)
+        task->fpu_state[FPU_STATE_SIZE] |= 3;
 }
 
 static void fpu_initialize_area(uint8_t *state) {
@@ -716,12 +754,13 @@ static void fpu_initialize_area(uint8_t *state) {
 
     if (!state) return;
     fpu_init_default_state();
-    memset(state, 0, FPU_STATE_SIZE);
+    memset(state, 0, fpu_state_size);
     control_word = 0x037F;
     mxcsr = 0x1F80;
     memcpy(state, &control_word, sizeof(control_word));
     memcpy(state + 24, &mxcsr, sizeof(mxcsr));
     memcpy(state + 28, &fpu_mxcsr_mask, sizeof(fpu_mxcsr_mask));
+    if (fpu_xcr0) state[FPU_STATE_SIZE] = 3;
 }
 
 static int task_init_fpu_state(task_t *task) {
@@ -729,7 +768,7 @@ static int task_init_fpu_state(task_t *task) {
 
     if (!task) return -1;
     fpu_init_default_state();
-    state = (uint8_t *)kmalloc_aligned(FPU_STATE_SIZE, 16);
+    state = (uint8_t *)kmalloc_aligned(fpu_state_size, 64);
     if (!state) return -1;
     fpu_initialize_area(state);
     task->fpu_state = state;
@@ -3600,7 +3639,7 @@ void task_get_memory_stats_for_pml4(task_mem_stats_t *stats, uint64_t current_pm
     while (t && task_ptr_valid(t)) {
         stats->task_count++;
         stats->task_struct_bytes += sizeof(task_t);
-        if (t->fpu_state) stats->task_fpu_bytes += FPU_STATE_SIZE;
+        if (t->fpu_state) stats->task_fpu_bytes += fpu_state_size;
         if (t->fds && t->fds_capacity > 0)
             stats->task_fd_bytes += (uint64_t)t->fds_capacity *
                                     sizeof(task_fd_t);
@@ -4971,7 +5010,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     }
     if (parent->fpu_state) {
         fpu_save_area(parent->fpu_state);
-        memcpy(child->fpu_state, parent->fpu_state, FPU_STATE_SIZE);
+        memcpy(child->fpu_state, parent->fpu_state, fpu_state_size);
     }
 
     child->id = task_allocate_id();

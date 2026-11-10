@@ -292,8 +292,8 @@ typedef struct tcp_socket {
     uint32_t send_next;
     uint32_t send_una;
     uint32_t recv_next;
-    uint16_t send_window;
-    uint16_t recv_window;
+    uint32_t send_window;
+    uint32_t recv_window;
     uint8_t cork;
     uint8_t fastopen;
     uint32_t fastopen_cookie;
@@ -309,6 +309,9 @@ typedef struct tcp_socket {
     uint64_t recv_buffer_head;
     uint64_t recv_buffer_tail;
     uint64_t retransmit_timeout;
+    uint32_t srtt;
+    uint32_t rttvar;
+    uint8_t dupacks;
     uint64_t last_ack_time;
     uint8_t keepalive;
     uint8_t ka_probes;

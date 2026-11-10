@@ -327,6 +327,8 @@ int ext4_journal_replay(ext4_fs_t *fs) {
     }
     journal_put_be32(superblock + 28, 0);
     journal_put_be32(superblock + 24, sequence);
+    if (info.has_csum)
+        journal_put_be32(superblock + 0xFC, ext4_jsb_csum(superblock));
     if (journal_write(fs, &journal_inode, 0, superblock) != 0) goto done;
     fs->sb.s_feature_incompat &= ~EXT4_FEATURE_INCOMPAT_RECOVER;
     fs->super_dirty = true;
