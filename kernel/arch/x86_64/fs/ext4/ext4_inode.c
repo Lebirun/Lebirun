@@ -449,6 +449,7 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
     uint8_t *bitmap;
     ext4_group_desc_t desc;
     ext4_inode_t new_inode;
+    ext4_extent_header_t *root;
     uint32_t now;
     int uninit_bg;
 
@@ -501,6 +502,14 @@ int ext4_alloc_inode(ext4_fs_t *fs, uint16_t mode) {
             memset(&new_inode, 0, sizeof(ext4_inode_t));
             new_inode.i_mode = mode;
             new_inode.i_links_count = 1;
+            if (fs->use_extents && ((mode & 0xF000) == EXT4_S_IFREG ||
+                                    (mode & 0xF000) == EXT4_S_IFDIR)) {
+                root = (ext4_extent_header_t *)new_inode.i_block;
+                new_inode.i_flags = EXT4_INODE_FLAG_EXTENTS;
+                root->eh_magic = EXT4_EXTENT_MAGIC;
+                root->eh_max = (sizeof(new_inode.i_block) - sizeof(*root)) /
+                               sizeof(ext4_extent_t);
+            }
             if (fs->inode_size > EXT4_GOOD_OLD_INODE_SIZE) {
                 count = fs->sb.s_want_extra_isize ? fs->sb.s_want_extra_isize :
                         sizeof(ext4_inode_t) - EXT4_GOOD_OLD_INODE_SIZE;

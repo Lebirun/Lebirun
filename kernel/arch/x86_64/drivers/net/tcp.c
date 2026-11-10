@@ -494,12 +494,8 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
     uint64_t f;
 
     if (!sock) return -1;
-    if (sock->state != TCP_STATE_ESTABLISHED &&
-        sock->state != TCP_STATE_FIN_WAIT1 &&
-        sock->state != TCP_STATE_FIN_WAIT2 &&
-        sock->state != TCP_STATE_CLOSE_WAIT) {
+    if (sock->state < TCP_STATE_ESTABLISHED && sock->recv_buffer_head == sock->recv_buffer_tail)
         return -1;
-    }
 
     timeout_ticks = pit_ms_to_ticks(timeout_ms);
     start = pit_get_ticks();
@@ -514,8 +510,9 @@ int tcp_recv(tcp_socket_t *sock, uint8_t *buffer, uint64_t len, uint64_t timeout
         if (pit_get_ticks() - start > timeout_ticks) {
             return 0;
         }
-        if (sock->state == TCP_STATE_CLOSE_WAIT ||
-            sock->state == TCP_STATE_CLOSED) {
+        if (sock->state != TCP_STATE_ESTABLISHED &&
+            sock->state != TCP_STATE_FIN_WAIT1 &&
+            sock->state != TCP_STATE_FIN_WAIT2) {
             break;
         }
         schedule();
@@ -853,6 +850,42 @@ static void tcp_drop_server_socket(tcp_socket_t *sock) {
     tcp_socket_close(sock);
 }
 
+static int tcp_rx_data(tcp_socket_t *sock, uint32_t seq, uint8_t flags,
+                       uint8_t *payload, uint64_t payload_len) {
+    int32_t diff;
+
+    if (payload_len > 0) {
+        diff = (int32_t)(seq - sock->recv_next);
+        if (diff > 0) {
+            tcp_ooo_add(sock, seq, payload, payload_len);
+            tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+            return 0;
+        }
+        if ((uint64_t)-(int64_t)diff >= payload_len) {
+            tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+            return 0;
+        }
+        payload += -(int64_t)diff;
+        payload_len -= -(int64_t)diff;
+        seq = sock->recv_next;
+        if (tcp_rx_append(sock, payload, payload_len) == payload_len)
+            tcp_ooo_drain(sock);
+    } else if (seq != sock->recv_next && !(flags & TCP_FLAG_FIN)) {
+        tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+        return 0;
+    }
+    if (flags & TCP_FLAG_FIN) {
+        if (seq + payload_len != sock->recv_next) {
+            tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+            return 0;
+        }
+        sock->recv_next += 1;
+    }
+    if (payload_len > 0 || (flags & TCP_FLAG_FIN))
+        tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+    return (flags & TCP_FLAG_FIN) != 0;
+}
+
 void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *data, uint64_t len) {
     tcp_header_t *tcp;
     uint16_t src_port;
@@ -865,8 +898,8 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
     uint8_t *payload;
     uint64_t payload_len;
     tcp_socket_t *sock;
-    int32_t diff;
     uint32_t window;
+    int fin_acked;
 
     (void)dest;
     if (!netif || !data || len < sizeof(tcp_header_t)) return;
@@ -974,81 +1007,46 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
             break;
 
         case TCP_STATE_ESTABLISHED:
+        case TCP_STATE_FIN_WAIT1:
+        case TCP_STATE_FIN_WAIT2:
+        case TCP_STATE_CLOSING:
             if (flags & TCP_FLAG_RST) {
                 sock->state = TCP_STATE_CLOSED;
                 tcp_retx_queue_free(sock);
                 break;
             }
+            fin_acked = 0;
             if (flags & TCP_FLAG_ACK) {
                 sock->last_ack_time = pit_get_ticks();
                 sock->ka_last = sock->last_ack_time;
                 sock->ka_probes = 0;
                 tcp_ack(sock, ack, window, payload_len);
+                fin_acked = sock->state != TCP_STATE_ESTABLISHED &&
+                            ack == sock->send_next;
             }
-            if (payload_len > 0) {
-                diff = (int32_t)(seq - sock->recv_next);
-                if (diff > 0) {
-                    tcp_ooo_add(sock, seq, payload, payload_len);
-                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                    break;
-                }
-                if ((uint64_t)-(int64_t)diff >= payload_len) {
-                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                    break;
-                }
-                payload += -(int64_t)diff;
-                payload_len -= -(int64_t)diff;
-                seq = sock->recv_next;
-                if (tcp_rx_append(sock, payload, payload_len) == payload_len)
-                    tcp_ooo_drain(sock);
-            } else if (seq != sock->recv_next && !(flags & TCP_FLAG_FIN)) {
-                tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                break;
-            }
-            if (flags & TCP_FLAG_FIN) {
-                if (seq + payload_len != sock->recv_next) {
-                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                    break;
-                }
-                sock->recv_next += 1;
-                sock->state = TCP_STATE_CLOSE_WAIT;
-            }
-            if (payload_len > 0 || (flags & TCP_FLAG_FIN))
-                tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-            break;
-
-        case TCP_STATE_FIN_WAIT1:
-            if (flags & TCP_FLAG_RST) {
-                sock->state = TCP_STATE_CLOSED;
-                tcp_retx_queue_free(sock);
-                break;
-            }
-            if (flags & TCP_FLAG_ACK) {
-                tcp_ack(sock, ack, window, payload_len);
-                if (ack != sock->send_next) break;
-                if (flags & TCP_FLAG_FIN) {
-                    sock->recv_next = seq + 1;
+            if (sock->state == TCP_STATE_CLOSING) {
+                if (fin_acked) {
                     sock->state = TCP_STATE_TIME_WAIT;
                     sock->tw_enter = pit_get_ticks();
-                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-                } else {
-                    sock->state = TCP_STATE_FIN_WAIT2;
                 }
+                break;
+            }
+            if (sock->state == TCP_STATE_FIN_WAIT1 && fin_acked)
+                sock->state = TCP_STATE_FIN_WAIT2;
+            if (!tcp_rx_data(sock, seq, flags, payload, payload_len)) break;
+            if (sock->state == TCP_STATE_ESTABLISHED) {
+                sock->state = TCP_STATE_CLOSE_WAIT;
+            } else if (sock->state == TCP_STATE_FIN_WAIT1) {
+                sock->state = TCP_STATE_CLOSING;
+            } else {
+                sock->state = TCP_STATE_TIME_WAIT;
+                sock->tw_enter = pit_get_ticks();
             }
             break;
 
-        case TCP_STATE_FIN_WAIT2:
-            if (flags & TCP_FLAG_RST) {
-                sock->state = TCP_STATE_CLOSED;
-                tcp_retx_queue_free(sock);
-                break;
-            }
-            if (flags & TCP_FLAG_FIN) {
-                sock->recv_next = seq + 1;
-                sock->state = TCP_STATE_TIME_WAIT;
-                sock->tw_enter = pit_get_ticks();
+        case TCP_STATE_TIME_WAIT:
+            if (flags & TCP_FLAG_FIN)
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
-            }
             break;
 
         case TCP_STATE_CLOSE_WAIT:
@@ -1142,6 +1140,7 @@ void tcp_tick(void) {
         if ((sock->state == TCP_STATE_ESTABLISHED ||
              sock->state == TCP_STATE_FIN_WAIT1 ||
              sock->state == TCP_STATE_CLOSE_WAIT ||
+             sock->state == TCP_STATE_CLOSING ||
              sock->state == TCP_STATE_LAST_ACK) && sock->retx_head) {
             seg = sock->retx_head;
             timeout_ticks = tcp_backoff(sock, seg->retries);
@@ -1167,6 +1166,7 @@ void tcp_tick(void) {
             }
         }
         if ((sock->state == TCP_STATE_FIN_WAIT1 ||
+             sock->state == TCP_STATE_CLOSING ||
              sock->state == TCP_STATE_LAST_ACK) && !sock->retx_head &&
             now - sock->fin_send_time > tcp_backoff(sock, sock->fin_retries)) {
             if ((sock->user_timeout &&

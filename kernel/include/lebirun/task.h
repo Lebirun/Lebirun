@@ -287,6 +287,9 @@ task_t *task_current(void);
 void task_set_current(task_t *task);
 void fpu_cpu_init(void);
 void task_fpu_legacy_updated(task_t *task);
+uint32_t task_fpu_frame_size(task_t *task);
+void task_fpu_signal_save(task_t *task, void *dst);
+int task_fpu_signal_restore(task_t *task, const uint8_t *src);
 void task_prepare_cpu_idle(struct cpu_info *cpu);
 #define current_task task_current()
 extern task_t* ready_queue_head;
