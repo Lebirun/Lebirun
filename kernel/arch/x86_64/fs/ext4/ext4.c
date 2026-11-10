@@ -8,7 +8,6 @@
 
 extern void ext4_flush_cache(ext4_fs_t *fs);
 extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
-extern int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino);
 extern int ext4_create_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name, uint16_t mode);
 extern int ext4_unlink_file(ext4_fs_t *fs, uint32_t parent_ino, const char *name);
 extern int ext4_link_file(ext4_fs_t *fs, uint32_t ino, uint32_t parent_ino,
@@ -1161,16 +1160,14 @@ static int ext4_vfs_mkdir(vfs_node_t *parent, const char *name, uint64_t perms) 
         mutex_unlock(&fs->lock);
         return -1;
     }
-    if ((uint64_t)new_block > UINT32_MAX) {
+    if (ext4_inode_set_block(fs, ic, 0, (uint64_t)new_block) != 0) {
         ext4_free_block(fs, (uint64_t)new_block);
         ext4_release_inode(ic);
         ext4_free_inode(fs, new_ino);
         mutex_unlock(&fs->lock);
         return -1;
     }
-
-    ic->inode.i_block[0] = (uint32_t)new_block;
-    ic->inode.i_blocks_lo = fs->sectors_per_block;
+    ext4_inode_add_blocks(fs, &ic->inode, 1);
     ext4_inode_set_size(&ic->inode, fs->block_size);
     ic->inode.i_links_count = 2;
 

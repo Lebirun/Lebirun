@@ -137,6 +137,19 @@ void ext4_dir_csum(ext4_fs_t *fs, uint32_t ino, const ext4_inode_t *dir,
     memcpy(block + size + 8, &crc, 4);
 }
 
+void ext4_extent_csum(ext4_fs_t *fs, uint32_t ino, const ext4_inode_t *inode,
+                      uint8_t *block) {
+    uint32_t off;
+    uint32_t crc;
+
+    if (!fs->metadata_csum) return;
+    off = sizeof(ext4_extent_header_t) +
+          ((ext4_extent_header_t *)block)->eh_max * sizeof(ext4_extent_t);
+    if (off + 4 > fs->block_size) return;
+    crc = crc32c(inode_seed(fs, ino, inode->i_generation), block, off);
+    memcpy(block + off, &crc, 4);
+}
+
 uint32_t ext4_jsb_csum(const uint8_t *jsb) {
     static const uint8_t zero[4];
 

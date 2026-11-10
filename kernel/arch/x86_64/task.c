@@ -775,6 +775,43 @@ static int task_init_fpu_state(task_t *task) {
     return 0;
 }
 
+uint32_t task_fpu_frame_size(task_t *task) {
+    return task && task->fpu_state ? fpu_state_size : 0;
+}
+
+void task_fpu_signal_save(task_t *task, void *dst) {
+    uint64_t flags;
+
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(flags) :: "memory");
+    fpu_save_area(task->fpu_state);
+    if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");
+    memcpy(dst, task->fpu_state, fpu_state_size);
+    __asm__ volatile ("cli" ::: "memory");
+    fpu_initialize_area(task->fpu_state);
+    fpu_restore_area(task->fpu_state);
+    if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");
+}
+
+int task_fpu_signal_restore(task_t *task, const uint8_t *src) {
+    uint64_t flags;
+    uint64_t header[3];
+    uint32_t mxcsr;
+    int ok;
+
+    memcpy(&mxcsr, src + 24, sizeof(mxcsr));
+    ok = !(mxcsr & ~fpu_mxcsr_mask);
+    if (ok && fpu_xcr0) {
+        memcpy(header, src + FPU_STATE_SIZE, sizeof(header));
+        ok = !(header[0] & ~fpu_xcr0) && !header[1] && !header[2];
+    }
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(flags) :: "memory");
+    if (ok) memcpy(task->fpu_state, src, fpu_state_size);
+    else fpu_initialize_area(task->fpu_state);
+    fpu_restore_area(task->fpu_state);
+    if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");
+    return ok ? 0 : -1;
+}
+
 static void task_free_fpu_state(task_t *task) {
     if (!task || !task->fpu_state) return;
     kfree_aligned(task->fpu_state);

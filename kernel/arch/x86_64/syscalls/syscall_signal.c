@@ -724,6 +724,8 @@ static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
     registers_t *regs;
     ucontext_k *uc;
     uint64_t *g;
+    uint8_t *fpu;
+    uint32_t fpu_size;
 
     (void)unused1; (void)unused2; (void)unused3;
 
@@ -758,6 +760,14 @@ static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
     regs->r14    = g[UC_R14];
     regs->r15    = g[UC_R15];
     signal_set_blocked_mask(current_task, uc->uc_sigmask.sig[0]);
+    fpu_size = task_fpu_frame_size(current_task);
+    if (uc->fpregs && fpu_size &&
+        signal_user_range_mapped(uc->fpregs, fpu_size) &&
+        (fpu = (uint8_t *)kmalloc(fpu_size))) {
+        memcpy(fpu, (const void *)(uintptr_t)uc->fpregs, fpu_size);
+        task_fpu_signal_restore(current_task, fpu);
+        kfree(fpu);
+    }
 
     return (int64_t)regs->rax;
 }
@@ -1277,6 +1287,8 @@ void signal_deliver_pending(registers_t *regs) {
     sigaction_k default_act;
     uint64_t sp;
     uint64_t frame_top;
+    uint64_t fpu_address;
+    uint32_t fpu_size;
     ucontext_k *uc;
     uint64_t *g;
     uint64_t info_address;
@@ -1352,6 +1364,12 @@ void signal_deliver_pending(registers_t *regs) {
             sp = (uint64_t)(uintptr_t)sigs->altstack.ss_sp +
                  sigs->altstack.ss_size;
         frame_top = sp;
+        fpu_size = task_fpu_frame_size(current_task);
+        fpu_address = 0;
+        if (fpu_size) {
+            sp = (sp - fpu_size) & ~63ULL;
+            fpu_address = sp;
+        }
         info_address = 0;
         if (act->sa_flags & SA_SIGINFO) {
             sp -= sizeof(signal_info);
@@ -1393,6 +1411,10 @@ void signal_deliver_pending(registers_t *regs) {
         g[UC_EFL] = regs->rflags;
         uc->uc_sigmask = sigs->blocked;
         uc->uc_stack = sigs->altstack;
+        if (fpu_address) {
+            task_fpu_signal_save(current_task, (void *)(uintptr_t)fpu_address);
+            uc->fpregs = fpu_address;
+        }
 
         sp -= 8;
         if (act->sa_restorer) {

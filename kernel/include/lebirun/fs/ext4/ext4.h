@@ -91,6 +91,7 @@ int64_t ext4_alloc_block(ext4_fs_t *fs, uint64_t hint);
 uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
                               uint32_t max_count, uint64_t *first_block);
 int ext4_free_block(ext4_fs_t *fs, uint64_t block);
+int ext4_free_blocks(ext4_fs_t *fs, uint64_t block, uint64_t count);
 
 int ext4_read_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode);
 int ext4_write_inode(ext4_fs_t *fs, uint32_t ino, ext4_inode_t *inode);
@@ -101,7 +102,11 @@ int ext4_free_inode(ext4_fs_t *fs, uint32_t ino);
 uint64_t ext4_inode_get_size(ext4_inode_t *inode);
 void ext4_inode_set_size(ext4_inode_t *inode, uint64_t size);
 uint64_t ext4_inode_get_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block);
-int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_t *inode, uint64_t logical_block, uint64_t phys_block);
+int ext4_inode_set_block(ext4_fs_t *fs, ext4_inode_cache_t *ic, uint64_t logical_block, uint64_t phys_block);
+void ext4_inode_add_blocks(ext4_fs_t *fs, ext4_inode_t *inode, int64_t blocks);
+int ext4_ext_map(ext4_fs_t *fs, ext4_inode_cache_t *ic, uint64_t logical, uint64_t phys);
+int ext4_ext_truncate(ext4_fs_t *fs, ext4_inode_cache_t *ic, uint64_t size);
+int ext4_truncate_inode(ext4_fs_t *fs, ext4_inode_cache_t *ic, uint64_t size);
 
 void ext4_csum_init(ext4_fs_t *fs);
 void ext4_super_csum(ext4_fs_t *fs);
@@ -110,6 +115,7 @@ void ext4_inode_csum(ext4_fs_t *fs, uint32_t ino, uint8_t *raw);
 void ext4_bitmap_csum(ext4_fs_t *fs, ext4_group_desc_t *desc, const uint8_t *bitmap, int inode);
 uint32_t ext4_dir_tail_size(ext4_fs_t *fs, const uint8_t *block);
 void ext4_dir_set_tail(ext4_fs_t *fs, uint8_t *block);
+void ext4_extent_csum(ext4_fs_t *fs, uint32_t ino, const ext4_inode_t *inode, uint8_t *block);
 void ext4_dir_csum(ext4_fs_t *fs, uint32_t ino, const ext4_inode_t *dir, uint8_t *block);
 uint32_t ext4_jsb_csum(const uint8_t *jsb);
 
@@ -117,6 +123,7 @@ int ext4_dir_lookup(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t 
 int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32_t ino, uint8_t file_type);
 int ext4_dir_remove_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name);
 int ext4_dir_iterate(ext4_fs_t *fs, uint32_t dir_ino, int (*callback)(ext4_dir_entry_t *, void *), void *ctx);
+int ext4_dir_is_empty(ext4_fs_t *fs, uint32_t dir_ino);
 int ext4_dir_get_entry(ext4_fs_t *fs, uint32_t dir_ino, uint32_t index, ext4_dir_entry_t *entry);
 
 uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t size, uint8_t *buffer);

@@ -343,7 +343,7 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
 
     block_num = dir_size / fs->block_size;
     if (ext4_write_block(fs, new_block, new_block_data) != 0 ||
-        ext4_inode_set_block(fs, &ic->inode, block_num, (uint64_t)new_block) != 0) {
+        ext4_inode_set_block(fs, ic, block_num, (uint64_t)new_block) != 0) {
         kfree(new_block_data);
         ext4_free_block(fs, new_block);
         ext4_release_inode(ic);
@@ -352,7 +352,7 @@ int ext4_dir_add_entry(ext4_fs_t *fs, uint32_t dir_ino, const char *name, uint32
     kfree(new_block_data);
 
     ext4_inode_set_size(&ic->inode, (block_num + 1) * fs->block_size);
-    ic->inode.i_blocks_lo += fs->sectors_per_block;
+    ext4_inode_add_blocks(fs, &ic->inode, 1);
     ext4_mark_inode_dirty(ic);
     ext4_release_inode(ic);
 
