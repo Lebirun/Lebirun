@@ -907,6 +907,7 @@ void ap_main(void) {
                     cpus[cpu_idx].kernel_stack);
     }
     x86_security_enable();
+    fpu_cpu_init();
     smp_init_idle_poll_control();
 
     if (cpu_idx >= 0)

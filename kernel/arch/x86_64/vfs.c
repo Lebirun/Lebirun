@@ -559,7 +559,7 @@ int vfs_mount_flags(const char *device, const char *mountpoint, const char *fs_t
     }
 
     ns->mounts[slot].in_use = 1;
-    ns->mounts[slot].flags = flags;
+    ns->mounts[slot].flags = flags | (fs->mount_flags ? fs->mount_flags(root) : 0);
     ns->mounts[slot].root = root;
     ns->mounts[slot].fs_type = fs;
     

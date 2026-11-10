@@ -45,54 +45,57 @@ static int elf_reloc_ok(uint64_t lo, uint64_t hi, uint64_t bias,
     return bias + off >= lo && bias + off <= hi - sizeof(uint64_t);
 }
 
+static int elf_interp_ok(char **out, uint64_t len) {
+    uint64_t j;
+
+    for (j = 0; j < len && (*out)[j]; j++);
+    if (j < len && (*out)[0] == '/') return 1;
+    kfree(*out);
+    *out = NULL;
+    return -1;
+}
+
 static int elf_interp_path_from_mem(const Elf64_Phdr *phdr, uint16_t phnum,
                                     const uint8_t *data, uint64_t size,
-                                    char *out) {
+                                    char **out) {
     uint16_t i;
     uint64_t off;
     uint64_t len;
-    uint64_t j;
 
-	for (i = 0; i < phnum; i++) {
-		if (phdr[i].p_type != PT_INTERP) continue;
-		off = phdr[i].p_offset;
-		len = phdr[i].p_filesz;
-		if (len == 0) return 0;
-		if (len > VFS_MAX_PATH) return -1;
+    *out = NULL;
+    for (i = 0; i < phnum; i++) {
+        if (phdr[i].p_type != PT_INTERP) continue;
+        off = phdr[i].p_offset;
+        len = phdr[i].p_filesz;
+        if (len == 0) return 0;
         if (off > size || len > size - off) return -1;
-        for (j = 0; j < len; j++) {
-            out[j] = (char)data[off + j];
-            if (out[j] == '\0') break;
-        }
-        if (j == len) return -1;
-        if (out[0] != '/') return -1;
-        return 1;
+        *out = (char *)kmalloc(len);
+        if (!*out) return -1;
+        memcpy(*out, data + off, len);
+        return elf_interp_ok(out, len);
     }
     return 0;
 }
 
 static int elf_interp_path_from_node(vfs_node_t *node, const Elf64_Phdr *phdr,
-                                     uint16_t phnum, char *out) {
+                                     uint16_t phnum, char **out) {
     uint16_t i;
     uint64_t off;
     uint64_t len;
-    uint64_t j;
 
-    if (!node || !phdr || !out) return -1;
-	for (i = 0; i < phnum; i++) {
-		if (phdr[i].p_type != PT_INTERP) continue;
-		off = phdr[i].p_offset;
-		len = phdr[i].p_filesz;
-		if (len == 0) return 0;
-		if (len > VFS_MAX_PATH) return -1;
+    *out = NULL;
+    if (!node || !phdr) return -1;
+    for (i = 0; i < phnum; i++) {
+        if (phdr[i].p_type != PT_INTERP) continue;
+        off = phdr[i].p_offset;
+        len = phdr[i].p_filesz;
+        if (len == 0) return 0;
         if (off > node->length || len > node->length - off) return -1;
-        if (elf_read_exact(node, off, len, (uint8_t *)out) != 0) return -1;
-        for (j = 0; j < len; j++) {
-            if (out[j] == '\0') break;
-        }
-        if (j == len) return -1;
-        if (out[0] != '/') return -1;
-        return 1;
+        *out = (char *)kmalloc(len);
+        if (!*out) return -1;
+        if (elf_read_exact(node, off, len, (uint8_t *)*out) != 0)
+            (*out)[0] = 0;
+        return elf_interp_ok(out, len);
     }
     return 0;
 }
@@ -533,9 +536,9 @@ static int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t s
     }
 
     if (allow_interp) {
-        char interp_path[VFS_MAX_PATH + 1];
+        char *interp_path;
         int has_interp = elf_interp_path_from_mem(phdr, ehdr->e_phnum, data,
-                                                  size, interp_path);
+                                                  size, &interp_path);
         if (has_interp < 0) {
             if (page_list) kfree(page_list);
             return -13;
@@ -550,6 +553,7 @@ static int elf_load_to_pd_impl(uint64_t pd_phys, const uint8_t *data, uint64_t s
                                                 info->bss_end, NULL,
                                                 &interp_info, &page_list,
                                                 &page_index);
+            kfree(interp_path);
             if (interp_ret != 0) {
                 if (page_list) kfree(page_list);
                 return interp_ret;
@@ -747,10 +751,10 @@ static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
             info->phnum = 0;
         }
         if (allow_interp) {
-            char interp_path[VFS_MAX_PATH + 1];
+            char *interp_path;
             int has_interp = elf_interp_path_from_node(node, phdr,
                                                        ehdr.e_phnum,
-                                                       interp_path);
+                                                       &interp_path);
             if (has_interp < 0) {
                 kfree(phdr);
                 return -13;
@@ -765,6 +769,7 @@ static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
                 interp_ret = elf_load_interp_mapped(
                     pd_phys, interp_path, info->load_base, info->bss_end,
                     file_maps, &interp_info, &ipages, &icount);
+                kfree(interp_path);
                 if (interp_ret != 0) {
                     kfree(phdr);
                     return interp_ret;
@@ -974,9 +979,9 @@ static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
     }
 
     if (ret == 0 && allow_interp) {
-        char interp_path[VFS_MAX_PATH + 1];
+        char *interp_path;
         int has_interp = elf_interp_path_from_node(node, phdr, ehdr.e_phnum,
-                                                   interp_path);
+                                                   &interp_path);
         if (has_interp < 0) {
             ret = -13;
         } else if (has_interp > 0) {
@@ -989,6 +994,7 @@ static int elf_load_node_to_pd_impl(uint64_t pd_phys, vfs_node_t *node,
                                                 info->bss_end, file_maps,
                                                 &interp_info, &page_list,
                                                 &page_index);
+            kfree(interp_path);
             if (interp_ret != 0) {
                 ret = interp_ret;
             } else {

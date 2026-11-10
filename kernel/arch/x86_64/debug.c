@@ -535,6 +535,7 @@ retry:
                 break;
             }
             memcpy(task->fpu_state, fpregs, sizeof(fpregs));
+            task_fpu_legacy_updated(task);
             break;
         case PTRACE_CONT:
         case PTRACE_SINGLESTEP:

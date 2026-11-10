@@ -15,6 +15,12 @@ typedef struct {
     uint16_t len;
     uint64_t filter;
 } bpf_fprog_t;
+typedef struct seccomp_filter {
+    struct seccomp_filter *prev;
+    uint32_t refs;
+    uint32_t len;
+    bpf_insn_t insns[];
+} seccomp_filter_t;
 #define BPF_LD 0x00
 #define BPF_LDX 0x01
 #define BPF_ST 0x02
@@ -59,8 +65,6 @@ typedef struct {
 #define SECCOMP_RET_ERRNO 0x00050000u
 #define SECCOMP_RET_MASK 0x0000ffffu
 #define AUDIT_ARCH_X86_64 0xc000003eu
-#define SECCOMP_BPF_MAX_LEN 512
-#define SECCOMP_BPF_MAX_STEPS 4096
 static uint32_t bpf_load_word(uint32_t nr, uint32_t arch, uint64_t ip,
                               uint64_t *args, uint32_t k) {
     if (k == 0) return (uint32_t)nr;
@@ -78,7 +82,7 @@ static int bpf_check_program(bpf_insn_t *prog, uint64_t len) {
     uint16_t code;
     uint16_t cls;
     uint32_t target;
-    if (!prog || len == 0 || len > SECCOMP_BPF_MAX_LEN) return -1;
+    if (!prog || len == 0) return -1;
     for (pc = 0; pc < len; pc++) {
         code = prog[pc].code;
         cls = code & 0x07;
@@ -152,12 +156,10 @@ static uint32_t bpf_run(bpf_insn_t *prog, uint64_t len, uint32_t nr,
     uint32_t a = 0;
     uint32_t x = 0;
     uint64_t pc = 0;
-    uint64_t steps = 0;
     uint64_t i;
     for (i = 0; i < 16; i++) mem[i] = 0;
     while (pc < len) {
         uint16_t code;
-        if (++steps > SECCOMP_BPF_MAX_STEPS) return SECCOMP_RET_KILL;
         code = prog[pc].code;
         switch (code & 0x07) {
         case BPF_LD:
@@ -238,57 +240,70 @@ static uint32_t bpf_run(bpf_insn_t *prog, uint64_t len, uint32_t nr,
     }
     return SECCOMP_RET_KILL;
 }
+static void seccomp_put(seccomp_filter_t *f) {
+    seccomp_filter_t *prev;
+
+    while (f && __atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        prev = f->prev;
+        kfree(f);
+        f = prev;
+    }
+}
 int seccomp_install(task_t *task, const void *uprog) {
     bpf_fprog_t fprog;
-    bpf_insn_t *insns;
+    seccomp_filter_t *f;
     task_ext_t *e;
     if (!task || !uprog) return -22;
     if ((uint64_t)(uintptr_t)uprog < 0x1000 ||
         (uint64_t)(uintptr_t)uprog >= KERNEL_VMA) return -14;
     if (copy_from_user(&fprog, uprog, sizeof(fprog)) != 0) return -14;
-    if (fprog.len == 0 || fprog.len > SECCOMP_BPF_MAX_LEN) return -22;
+    if (fprog.len == 0) return -22;
     if (fprog.filter == 0) return -14;
-    insns = (bpf_insn_t *)kmalloc((uint64_t)fprog.len * sizeof(bpf_insn_t));
-    if (!insns) return -12;
-    if (copy_from_user(insns, (const void *)(uintptr_t)fprog.filter,
+    f = (seccomp_filter_t *)kmalloc(sizeof(*f) +
+                                    (uint64_t)fprog.len * sizeof(bpf_insn_t));
+    if (!f) return -12;
+    if (copy_from_user(f->insns, (const void *)(uintptr_t)fprog.filter,
                        (uint64_t)fprog.len * sizeof(bpf_insn_t)) != 0) {
-        kfree(insns);
+        kfree(f);
         return -14;
     }
-    if (bpf_check_program(insns, fprog.len) != 0) {
-        kfree(insns);
+    if (bpf_check_program(f->insns, fprog.len) != 0) {
+        kfree(f);
         return -22;
     }
     e = task_ext_get(task, 1);
     if (!e) {
-        kfree(insns);
+        kfree(f);
         return -12;
     }
-    if (e->seccomp_filter) kfree(e->seccomp_filter);
-    e->seccomp_filter = insns;
-    e->seccomp_filter_len = fprog.len;
+    f->len = fprog.len;
+    f->refs = 1;
+    f->prev = (seccomp_filter_t *)e->seccomp_filter;
+    e->seccomp_filter = f;
     return 0;
 }
 int64_t seccomp_check(task_t *task, int nr, uint64_t ip, uint64_t a0,
                           uint64_t a1, uint64_t a2, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
     task_ext_t *e;
-    bpf_insn_t *prog;
-    uint64_t len;
+    seccomp_filter_t *f;
     uint64_t args[6];
     uint32_t ret;
+    uint32_t r;
     if (!task) return 0;
     e = task_ext_get(task, 0);
-    if (!e || !e->seccomp_filter || !e->seccomp_filter_len) return 0;
-    prog = (bpf_insn_t *)e->seccomp_filter;
-    len = e->seccomp_filter_len;
+    if (!e || !e->seccomp_filter) return 0;
     args[0] = a0;
     args[1] = a1;
     args[2] = a2;
     args[3] = a3;
     args[4] = a4;
     args[5] = a5;
-    ret = bpf_run(prog, len, (uint32_t)nr, AUDIT_ARCH_X86_64, ip, args);
+    ret = SECCOMP_RET_ALLOW;
+    for (f = (seccomp_filter_t *)e->seccomp_filter; f; f = f->prev) {
+        r = bpf_run(f->insns, f->len, (uint32_t)nr, AUDIT_ARCH_X86_64, ip, args);
+        if ((int32_t)(r & 0xffff0000u) < (int32_t)(ret & 0xffff0000u)) ret = r;
+    }
     if ((ret & 0x7fff0000u) == SECCOMP_RET_ALLOW) return 0;
     if ((ret & 0x7fff0000u) == SECCOMP_RET_ERRNO) {
         int err = (int)(ret & SECCOMP_RET_MASK);
@@ -301,18 +316,15 @@ int64_t seccomp_check(task_t *task, int nr, uint64_t ip, uint64_t a0,
 int seccomp_fork(task_t *parent, task_t *child) {
     task_ext_t *pe;
     task_ext_t *ce;
-    bpf_insn_t *copy;
+    seccomp_filter_t *f;
     if (!parent || !child) return -22;
     pe = task_ext_get(parent, 0);
-    if (!pe || !pe->seccomp_filter || !pe->seccomp_filter_len) return 0;
+    if (!pe || !pe->seccomp_filter) return 0;
     ce = task_ext_get(child, 1);
     if (!ce) return -12;
-    copy = (bpf_insn_t *)kmalloc(pe->seccomp_filter_len * sizeof(bpf_insn_t));
-    if (!copy) return -12;
-    memcpy(copy, pe->seccomp_filter,
-           pe->seccomp_filter_len * sizeof(bpf_insn_t));
-    ce->seccomp_filter = copy;
-    ce->seccomp_filter_len = pe->seccomp_filter_len;
+    f = (seccomp_filter_t *)pe->seccomp_filter;
+    __atomic_add_fetch(&f->refs, 1, __ATOMIC_ACQ_REL);
+    ce->seccomp_filter = f;
     return 0;
 }
 void seccomp_release_task(task_t *task) {
@@ -320,9 +332,6 @@ void seccomp_release_task(task_t *task) {
     if (!task) return;
     e = task_ext_get(task, 0);
     if (!e) return;
-    if (e->seccomp_filter) {
-        kfree(e->seccomp_filter);
-        e->seccomp_filter = NULL;
-        e->seccomp_filter_len = 0;
-    }
+    seccomp_put((seccomp_filter_t *)e->seccomp_filter);
+    e->seccomp_filter = NULL;
 }

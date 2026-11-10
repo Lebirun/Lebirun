@@ -242,7 +242,6 @@ typedef struct task_ext {
     uint64_t cgroup_anon_kb;
     uint64_t readahead_pages;
     void *seccomp_filter;
-    uint64_t seccomp_filter_len;
     void *posix_timers;
     void *ofd_locks;
     void *mq_data;
@@ -286,6 +285,8 @@ typedef struct {
 
 task_t *task_current(void);
 void task_set_current(task_t *task);
+void fpu_cpu_init(void);
+void task_fpu_legacy_updated(task_t *task);
 void task_prepare_cpu_idle(struct cpu_info *cpu);
 #define current_task task_current()
 extern task_t* ready_queue_head;

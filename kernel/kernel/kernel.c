@@ -269,6 +269,7 @@ static void KERNEL_INIT kernel_boot(void) {
     gdt_init();
     idt_init();
     x86_security_enable();
+    fpu_cpu_init();
 
     terminal_initialize();
 

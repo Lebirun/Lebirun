@@ -605,45 +605,149 @@ void ext4_flush_cache(ext4_fs_t *fs) {
     ext4_drop_block_cache(fs);
 }
 
-static int ext4_read_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+static int ext4_group_has_super(ext4_fs_t *fs, uint64_t group) {
+    uint64_t n;
+    uint32_t p;
+
+    if (group == 0) return 1;
+    if (fs->sb.s_feature_compat & EXT4_FEATURE_COMPAT_SPARSE_SUPER2)
+        return group == fs->sb.s_backup_bgs[0] || group == fs->sb.s_backup_bgs[1];
+    if (group == 1 ||
+        !(fs->sb.s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER))
+        return 1;
+    if (!(group & 1)) return 0;
+    for (p = 3; p <= 7; p += 2) {
+        for (n = p; n < group; n *= p);
+        if (n == group) return 1;
+    }
+    return 0;
+}
+
+static uint64_t ext4_group_first_block(ext4_fs_t *fs, uint64_t group) {
+    return fs->first_data_block + group * fs->sb.s_blocks_per_group;
+}
+
+static int ext4_desc_location(ext4_fs_t *fs, uint64_t group,
+                              uint64_t *block, uint32_t *offset) {
+    uint64_t per_block;
+    uint64_t meta;
+
+    if (group >= fs->groups_count) return -1;
+    per_block = fs->block_size / fs->desc_size;
+    meta = group / per_block;
+    *offset = (uint32_t)((group % per_block) * fs->desc_size);
+    if (!(fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) ||
+        meta < fs->sb.s_first_meta_bg) {
+        *block = fs->first_data_block + 1 + meta;
+        return 0;
+    }
+    meta *= per_block;
+    *block = ext4_group_first_block(fs, meta) + ext4_group_has_super(fs, meta);
+    if (fs->block_size == 1024 && fs->first_data_block == 0 && meta == 0)
+        (*block)++;
+    return 0;
+}
+
+int ext4_read_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
     uint64_t desc_block;
     uint32_t desc_offset;
     uint8_t *block;
 
-    if (group > UINT64_MAX / fs->desc_size) return -1;
-    desc_block = fs->first_data_block + 1 +
-                 (group * fs->desc_size) / fs->block_size;
-    desc_offset = (group * fs->desc_size) % fs->block_size;
+    if (ext4_desc_location(fs, group, &desc_block, &desc_offset) != 0) return -1;
     block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
 
-    memcpy(desc, block + desc_offset, sizeof(ext4_group_desc_t));
+    memset(desc, 0, sizeof(*desc));
+    memcpy(desc, block + desc_offset,
+           fs->desc_size < sizeof(*desc) ? fs->desc_size : sizeof(*desc));
     ext4_release_block(fs, desc_block);
 
     return 0;
 }
 
-static int ext4_write_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
+int ext4_write_group_desc(ext4_fs_t *fs, uint64_t group, ext4_group_desc_t *desc) {
     uint64_t desc_block;
     uint32_t desc_offset;
     uint8_t *block;
 
-    if (group > UINT64_MAX / fs->desc_size) return -1;
-    desc_block = fs->first_data_block + 1 +
-                 (group * fs->desc_size) / fs->block_size;
-    desc_offset = (group * fs->desc_size) % fs->block_size;
+    if (ext4_desc_location(fs, group, &desc_block, &desc_offset) != 0) return -1;
     block = ext4_get_block(fs, desc_block);
     if (!block) {
         return -1;
     }
 
-    memcpy(block + desc_offset, desc, sizeof(ext4_group_desc_t));
+    memcpy(block + desc_offset, desc,
+           fs->desc_size < sizeof(*desc) ? fs->desc_size : sizeof(*desc));
+    ext4_desc_csum(fs, (uint32_t)group, block + desc_offset);
     ext4_mark_block_dirty(fs, desc_block);
     ext4_release_block(fs, desc_block);
 
     return 0;
+}
+
+static uint32_t ext4_group_blocks(ext4_fs_t *fs, uint64_t group) {
+    uint32_t count;
+
+    if (group != fs->groups_count - 1) return fs->sb.s_blocks_per_group;
+    count = (uint32_t)((fs->total_blocks - fs->first_data_block) %
+                       fs->sb.s_blocks_per_group);
+    return count ? count : fs->sb.s_blocks_per_group;
+}
+
+static void ext4_bitmap_mark(ext4_fs_t *fs, uint8_t *bitmap, uint64_t group,
+                             uint64_t block, uint64_t count) {
+    uint64_t first;
+    uint64_t end;
+
+    first = ext4_group_first_block(fs, group);
+    end = first + ext4_group_blocks(fs, group);
+    for (; count; count--, block++) {
+        if (block >= first && block < end)
+            bitmap[(block - first) / 8] |= (uint8_t)(1u << ((block - first) % 8));
+    }
+}
+
+static void ext4_init_block_bitmap(ext4_fs_t *fs, uint64_t group,
+                                   ext4_group_desc_t *desc, uint8_t *bitmap) {
+    uint64_t per_block;
+    uint64_t index;
+    uint64_t meta;
+    uint64_t base;
+    uint64_t itable_blocks;
+    uint32_t bit;
+
+    memset(bitmap, 0, fs->block_size);
+    per_block = fs->block_size / fs->desc_size;
+    base = ext4_group_has_super(fs, group);
+    if (!(fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG) ||
+        group < (uint64_t)fs->sb.s_first_meta_bg * per_block) {
+        if (base) {
+            if (fs->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_META_BG)
+                base += fs->sb.s_first_meta_bg;
+            else
+                base += (fs->groups_count + per_block - 1) / per_block;
+            base += fs->sb.s_reserved_gdt_blocks;
+        }
+    } else {
+        meta = group / per_block * per_block;
+        index = group - meta;
+        if (index == 0 || index == 1 || index == per_block - 1) base++;
+    }
+    ext4_bitmap_mark(fs, bitmap, group, ext4_group_first_block(fs, group), base);
+    itable_blocks = ((uint64_t)fs->sb.s_inodes_per_group * fs->inode_size +
+                     fs->block_size - 1) / fs->block_size;
+    ext4_bitmap_mark(fs, bitmap, group, desc->bg_block_bitmap_lo |
+                     (fs->is_64bit ? (uint64_t)desc->bg_block_bitmap_hi << 32 : 0), 1);
+    ext4_bitmap_mark(fs, bitmap, group, desc->bg_inode_bitmap_lo |
+                     (fs->is_64bit ? (uint64_t)desc->bg_inode_bitmap_hi << 32 : 0), 1);
+    ext4_bitmap_mark(fs, bitmap, group, desc->bg_inode_table_lo |
+                     (fs->is_64bit ? (uint64_t)desc->bg_inode_table_hi << 32 : 0),
+                     itable_blocks);
+    for (bit = ext4_group_blocks(fs, group); bit < fs->block_size * 8; bit++)
+        bitmap[bit / 8] |= (uint8_t)(1u << (bit % 8));
+    desc->bg_flags &= (uint16_t)~EXT4_BG_BLOCK_UNINIT;
 }
 
 uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
@@ -706,13 +810,15 @@ uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
         if (!bitmap) {
             continue;
         }
-
-        blocks_in_group = fs->sb.s_blocks_per_group;
-        if (group == fs->groups_count - 1) {
-            blocks_in_group = (fs->total_blocks - fs->first_data_block) %
-                              fs->sb.s_blocks_per_group;
-            if (blocks_in_group == 0) blocks_in_group = fs->sb.s_blocks_per_group;
+        if ((fs->metadata_csum || fs->gdt_csum) &&
+            (desc.bg_flags & EXT4_BG_BLOCK_UNINIT)) {
+            ext4_init_block_bitmap(fs, group, &desc, bitmap);
+            ext4_mark_block_dirty(fs, bitmap_block);
+            ext4_bitmap_csum(fs, &desc, bitmap, 0);
+            ext4_write_group_desc(fs, group, &desc);
         }
+
+        blocks_in_group = ext4_group_blocks(fs, group);
 
         if (group != start_group || start_bit >= blocks_in_group) {
             start_bit = 0;
@@ -747,6 +853,7 @@ uint32_t ext4_alloc_block_run(ext4_fs_t *fs, uint64_t hint,
                         bitmap[run_bit / 8] |=
                             (uint8_t)(1u << (run_bit % 8));
                     ext4_mark_block_dirty(fs, bitmap_block);
+                    ext4_bitmap_csum(fs, &desc, bitmap, 0);
                     ext4_release_block(fs, bitmap_block);
 
                     ext4_set_group_free_blocks(fs, &desc,
@@ -830,12 +937,14 @@ int ext4_free_block(ext4_fs_t *fs, uint64_t block) {
         ext4_release_block(fs, bitmap_block);
         return -1;
     }
+    bitmap[byte_idx] &= ~(1 << bit_idx);
+    ext4_bitmap_csum(fs, &desc, bitmap, 0);
     ext4_set_group_free_blocks(fs, &desc, free_blocks + 1);
     if (ext4_write_group_desc(fs, group, &desc) != 0) {
+        bitmap[byte_idx] |= (uint8_t)(1 << bit_idx);
         ext4_release_block(fs, bitmap_block);
         return -1;
     }
-    bitmap[byte_idx] &= ~(1 << bit_idx);
     ext4_mark_block_dirty(fs, bitmap_block);
     ext4_release_block(fs, bitmap_block);
 

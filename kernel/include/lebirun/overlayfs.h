@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <lebirun/vfs.h>
 
-#define OVERLAY_MAX_LAYERS   4
 #define OVERLAY_WHITEOUT_PREFIX ".wh."
 
 typedef struct overlay_layer {
@@ -14,8 +13,7 @@ typedef struct overlay_layer {
 } overlay_layer_t;
 
 typedef struct overlay_context {
-    overlay_layer_t lower[OVERLAY_MAX_LAYERS - 1];
-    int lower_count;
+    overlay_layer_t lower;
     overlay_layer_t upper;
     vfs_node_t *merged_root;
 } overlay_context_t;
