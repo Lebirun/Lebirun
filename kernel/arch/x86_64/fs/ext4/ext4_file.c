@@ -27,6 +27,8 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
     uint32_t run_bytes;
     uint8_t *block;
     uint8_t *inline_data;
+    uint32_t i;
+    int result;
 
     if (!buffer || size == 0) {
         return 0;
@@ -88,9 +90,14 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
                     run_blocks++;
                 }
                 run_bytes = run_blocks * fs->block_size;
-                if (ext4_read_blocks(fs, phys_block, run_blocks,
-                                     buffer + bytes_read) == 0) {
-                    bytes_read += run_bytes;
+                result = ext4_read_blocks_unlocked(fs, phys_block, run_blocks,
+                                                   buffer + bytes_read);
+                if (result >= 0) {
+                    if (ic->ino != ino) break;
+                    for (i = 0; result > 0 && i < run_blocks; i++)
+                        if (ext4_inode_get_block(fs, &ic->inode, block_num + i) !=
+                            phys_block + i) break;
+                    if (result == 0 || i == run_blocks) bytes_read += run_bytes;
                     continue;
                 }
             }

@@ -114,7 +114,7 @@ extern int scheduler_initialized;
 #endif
 
 static const lke_ksym_t ksyms[] = {
-    KSYM(kmalloc), KSYM(kmalloc_aligned), KSYM(kfree), KSYM(krealloc),
+    KSYM(kmalloc), KSYM(kmalloc_aligned), KSYM(kfree_aligned), KSYM(kfree), KSYM(krealloc),
     KSYM(printf), KSYM(snprintf), KSYM(memcpy), KSYM(memset),
     KSYM(memcmp), KSYM(memmove), KSYM(strcmp), KSYM(strlen),
     KSYM(strncpy), KSYM(vfs_namei), KSYM(vfs_read), KSYM(vfs_write),
