@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <lebirun/mutex.h>
+#include <lebirun/spinlock.h>
 #include <lebirun/blkdev.h>
 
 #define PCI_CONFIG_ADDRESS  0xCF8
@@ -122,6 +122,8 @@
 
 #define ATA_CMD_READ_DMA_EX     0x25
 #define ATA_CMD_WRITE_DMA_EX    0x35
+#define ATA_CMD_READ_FPDMA      0x60
+#define ATA_CMD_WRITE_FPDMA     0x61
 #define ATA_CMD_IDENTIFY        0xEC
 #define ATA_CMD_FLUSH           0xE7
 #define ATA_CMD_FLUSH_EXT       0xEA
@@ -154,10 +156,7 @@
 #define AHCI_SECTOR_SIZE    512
 #define AHCI_PORT_COUNT     32
 #define AHCI_CMD_LIST_SIZE  1024
-#define AHCI_CMD_SLOTS      2
 #define AHCI_FIS_SIZE       256
-#define AHCI_CMD_TABLE_SIZE 384
-#define AHCI_PRDT_ENTRIES   16
 
 typedef struct {
     uint8_t fis_type;
@@ -292,7 +291,7 @@ typedef struct {
     uint8_t cfis[64];
     uint8_t acmd[16];
     uint8_t reserved[48];
-    hba_prdt_entry_t prdt[AHCI_PRDT_ENTRIES];
+    hba_prdt_entry_t prdt[];
 } __attribute__((packed)) hba_cmd_table_t;
 
 typedef enum {
@@ -304,14 +303,6 @@ typedef enum {
 } ahci_dev_type_t;
 
 typedef enum {
-    AHCI_CMD_STATE_FREE,
-    AHCI_CMD_STATE_PENDING,
-    AHCI_CMD_STATE_ACTIVE,
-    AHCI_CMD_STATE_COMPLETE,
-    AHCI_CMD_STATE_ERROR,
-} ahci_cmd_state_t;
-
-typedef enum {
     AHCI_ERR_NONE = 0,
     AHCI_ERR_TIMEOUT,
     AHCI_ERR_TASKFILE,
@@ -321,53 +312,39 @@ typedef enum {
     AHCI_ERR_RESET_FAIL,
 } ahci_error_t;
 
-struct ahci_port;
-
-typedef void (*ahci_callback_t)(struct ahci_port *port, int slot, int status, void *context);
-
-typedef struct {
-    ahci_cmd_state_t state;
-    uint8_t command;
-    uint64_t lba;
-    uint64_t count;
-    void *buffer;
-    uint64_t buf_phys;
-    uint64_t buf_pages;
-    ahci_callback_t callback;
-    void *callback_ctx;
-    volatile int result;
-    volatile bool completed;
-} ahci_cmd_request_t;
-
 typedef struct ahci_port {
     bool present;
+    bool ncq;
+    bool resetting;
+    bool nonq_busy;
     ahci_dev_type_t type;
     uint64_t port_num;
     uint64_t hba_base;
     uint64_t port_base;
     hba_cmd_header_t *cmd_list;
     hba_fis_t *fis;
-    hba_cmd_table_t *cmd_table;
+    hba_cmd_table_t *reserve;
     uint64_t cmd_list_phys;
     uint64_t fis_phys;
-    uint64_t cmd_table_phys;
+    uint64_t reserve_phys;
+    uint32_t reserve_cap;
+    volatile uint32_t reserve_busy;
     uint64_t sector_count;
     char model[41];
     char serial[21];
-    
-    volatile uint64_t cmd_issued;
-    volatile uint64_t cmd_running;
-    mutex_t io_lock;
-    ahci_cmd_request_t requests[AHCI_CMD_SLOTS];
-    
+
+    spinlock_t lock;
+    uint32_t tag_mask;
+    uint32_t busy;
+    uint32_t nonq_waiting;
+    volatile uint64_t gen;
+    volatile uint32_t irq_is;
+
     volatile uint64_t error_count;
     volatile ahci_error_t last_error;
     volatile uint64_t last_serr;
     volatile uint64_t last_tfd;
     bool use_irq;
-    uint64_t dma_buf_phys;
-    uint64_t dma_buf_virt;
-    uint64_t dma_buf_pages;
     blkdev_t blk;
 } ahci_port_t;
 
@@ -434,8 +411,6 @@ ahci_port_t *ahci_get_port(uint64_t index);
 uint64_t ahci_get_allocated_pages(void);
 void ahci_debug_info(void);
 int ahci_test_rw(void);
-
-void ahci_poll_completion(ahci_port_t *port);
 
 int ahci_port_reset(ahci_port_t *port);
 int ahci_port_recover(ahci_port_t *port);

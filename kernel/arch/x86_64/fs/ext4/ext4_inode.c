@@ -20,7 +20,6 @@ static void ext4_invalidate_inode_cache(ext4_fs_t *fs, uint32_t ino) {
     ic = find_inode_cache(fs, ino);
     if (!ic) return;
     ic->ino = 0;
-    ic->ref_count = 0;
     ic->dirty = false;
     ic->vfs_node = NULL;
 }

@@ -58,6 +58,7 @@ typedef struct ext4_fs {
     uint32_t cache_tick;
     uint32_t alloc_last_group;
     uint32_t alloc_last_bit;
+    uint64_t free_gen;
     bool super_dirty;
     vfs_node_t *root_node;
     vfs_node_t *vfs_nodes;
@@ -75,6 +76,8 @@ void ext4_print_superblock(ext4_superblock_t *sb);
 int ext4_read_block(ext4_fs_t *fs, uint64_t block, void *buffer);
 int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
                      void *buffer);
+int ext4_read_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                              void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);

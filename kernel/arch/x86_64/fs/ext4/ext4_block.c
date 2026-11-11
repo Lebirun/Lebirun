@@ -203,6 +203,42 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
     return 0;
 }
 
+int ext4_read_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                              void *buffer) {
+    blkdev_t *dev;
+    uint64_t gen;
+    uint32_t i;
+    int idx;
+    int result;
+
+    dev = blkdev_get(fs->port_index);
+    if (!dev || count == 0 ||
+        (uint64_t)count > UINT64_MAX / fs->sectors_per_block ||
+        block > (UINT64_MAX - fs->partition_start_lba) / fs->sectors_per_block)
+        return -1;
+    for (i = 0; i < count; i++) {
+        idx = find_cache_entry(fs, block + i);
+        if (idx >= 0 && fs->block_cache[idx].dirty) return -1;
+    }
+    gen = fs->free_gen;
+    mutex_unlock(&fs->lock);
+    result = blkdev_read(dev, fs->partition_start_lba + block * fs->sectors_per_block,
+                         (uint64_t)count * fs->sectors_per_block, buffer);
+    mutex_lock(&fs->lock);
+    if (result != 0) return -1;
+    for (i = 0; i < count; i++) {
+        idx = find_cache_entry(fs, block + i);
+        if (idx < 0) continue;
+        if (fs->block_cache[idx].dirty)
+            memcpy((uint8_t *)buffer + (uint64_t)i * fs->block_size,
+                   fs->block_cache[idx].data, fs->block_size);
+        else
+            memcpy(fs->block_cache[idx].data,
+                   (uint8_t *)buffer + (uint64_t)i * fs->block_size, fs->block_size);
+    }
+    return fs->free_gen != gen;
+}
+
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
     blkdev_t *dev;
     uint64_t lba;
@@ -931,6 +967,7 @@ int ext4_free_blocks(ext4_fs_t *fs, uint64_t block, uint64_t count) {
         super_free = ext4_super_free_blocks(fs);
         ext4_set_super_free_blocks(fs, super_free + n);
         fs->super_dirty = true;
+        fs->free_gen++;
         block += n;
         count -= n;
     }
