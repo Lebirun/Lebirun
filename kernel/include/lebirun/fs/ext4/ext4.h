@@ -20,6 +20,13 @@ typedef struct {
     uint32_t last_access;
 } ext4_block_cache_entry_t;
 
+typedef struct ext4_io {
+    uint64_t start;
+    uint64_t count;
+    volatile int done;
+    struct ext4_io *next;
+} ext4_io_t;
+
 typedef struct ext4_inode_cache {
     uint32_t ino;
     ext4_inode_t inode;
@@ -59,6 +66,7 @@ typedef struct ext4_fs {
     uint32_t alloc_last_group;
     uint32_t alloc_last_bit;
     uint64_t free_gen;
+    ext4_io_t *io_inflight;
     bool super_dirty;
     vfs_node_t *root_node;
     vfs_node_t *vfs_nodes;
@@ -78,6 +86,8 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
                      void *buffer);
 int ext4_read_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
                               void *buffer);
+int ext4_write_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                               const void *buffer);
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer);
 int ext4_write_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count, const void *buffer);
 uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block);

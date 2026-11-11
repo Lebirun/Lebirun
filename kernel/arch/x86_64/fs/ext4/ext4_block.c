@@ -2,6 +2,7 @@
 #include <lebirun/blkdev.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/tty.h>
+#include <lebirun/task.h>
 #include <string.h>
 
 static uint32_t ext4_group_free_blocks(ext4_fs_t *fs,
@@ -46,6 +47,19 @@ static int find_cache_entry(ext4_fs_t *fs, uint64_t block) {
         }
     }
     return -1;
+}
+
+static void ext4_io_wait(ext4_fs_t *fs, uint64_t start, uint64_t count) {
+    ext4_io_t *io;
+
+    for (;;) {
+        for (io = fs->io_inflight; io; io = io->next)
+            if (!__atomic_load_n(&io->done, __ATOMIC_ACQUIRE) &&
+                io->start < start + count && start < io->start + io->count)
+                break;
+        if (!io) return;
+        schedule();
+    }
 }
 
 static uint8_t *ext4_alloc_cache_data(ext4_fs_t *fs) {
@@ -173,6 +187,7 @@ int ext4_read_blocks(ext4_fs_t *fs, uint64_t block, uint32_t count,
     }
     if ((uint64_t)count - 1 > UINT64_MAX - block) return -1;
 
+    ext4_io_wait(fs, block, count);
     for (i = 0; i < count; i++) {
         idx = find_cache_entry(fs, block + i);
         if (idx >= 0 && count == 1) {
@@ -220,6 +235,7 @@ int ext4_read_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
         idx = find_cache_entry(fs, block + i);
         if (idx >= 0 && fs->block_cache[idx].dirty) return -1;
     }
+    ext4_io_wait(fs, block, count);
     gen = fs->free_gen;
     mutex_unlock(&fs->lock);
     result = blkdev_read(dev, fs->partition_start_lba + block * fs->sectors_per_block,
@@ -228,15 +244,43 @@ int ext4_read_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
     if (result != 0) return -1;
     for (i = 0; i < count; i++) {
         idx = find_cache_entry(fs, block + i);
-        if (idx < 0) continue;
-        if (fs->block_cache[idx].dirty)
+        if (idx >= 0 && fs->block_cache[idx].dirty)
             memcpy((uint8_t *)buffer + (uint64_t)i * fs->block_size,
                    fs->block_cache[idx].data, fs->block_size);
-        else
-            memcpy(fs->block_cache[idx].data,
-                   (uint8_t *)buffer + (uint64_t)i * fs->block_size, fs->block_size);
     }
     return fs->free_gen != gen;
+}
+
+int ext4_write_blocks_unlocked(ext4_fs_t *fs, uint64_t block, uint32_t count,
+                               const void *buffer) {
+    blkdev_t *dev;
+    ext4_io_t io;
+    ext4_io_t **link;
+    uint32_t i;
+    int result;
+
+    dev = blkdev_get(fs->port_index);
+    if (!dev || count == 0 ||
+        (uint64_t)count > UINT64_MAX / fs->sectors_per_block ||
+        block > (UINT64_MAX - fs->partition_start_lba) / fs->sectors_per_block)
+        return -1;
+    for (i = 0; i < count; i++)
+        if (find_cache_entry(fs, block + i) >= 0)
+            return ext4_write_blocks(fs, block, count, buffer);
+    ext4_io_wait(fs, block, count);
+    io.start = block;
+    io.count = count;
+    io.done = 0;
+    io.next = fs->io_inflight;
+    fs->io_inflight = &io;
+    mutex_unlock(&fs->lock);
+    result = blkdev_write(dev, fs->partition_start_lba + block * fs->sectors_per_block,
+                          (uint64_t)count * fs->sectors_per_block, buffer);
+    __atomic_store_n(&io.done, 1, __ATOMIC_RELEASE);
+    mutex_lock(&fs->lock);
+    for (link = &fs->io_inflight; *link != &io; link = &(*link)->next);
+    *link = io.next;
+    return result ? -1 : 0;
 }
 
 int ext4_write_block(ext4_fs_t *fs, uint64_t block, const void *buffer) {
@@ -328,6 +372,7 @@ uint8_t *ext4_get_block(ext4_fs_t *fs, uint64_t block) {
         return fs->block_cache[idx].data;
     }
 
+    ext4_io_wait(fs, block, 1);
     idx = find_free_cache_entry(fs);
     if (idx < 0) {
         return NULL;
@@ -382,6 +427,7 @@ uint8_t *ext4_get_block_overwrite(ext4_fs_t *fs, uint64_t block) {
         return fs->block_cache[idx].data;
     }
 
+    ext4_io_wait(fs, block, 1);
     idx = find_free_cache_entry(fs);
     if (idx < 0) {
         return NULL;
@@ -941,6 +987,7 @@ int ext4_free_blocks(ext4_fs_t *fs, uint64_t block, uint64_t count) {
     if (block < fs->first_data_block || block >= fs->total_blocks ||
         count > fs->total_blocks - block)
         return -1;
+    ext4_io_wait(fs, block, count);
     while (count) {
         group = (block - fs->first_data_block) / fs->sb.s_blocks_per_group;
         bit = (block - fs->first_data_block) % fs->sb.s_blocks_per_group;

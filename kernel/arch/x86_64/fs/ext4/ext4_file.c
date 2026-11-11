@@ -7,6 +7,8 @@
 extern void ext4_mark_block_dirty(ext4_fs_t *fs, uint64_t block);
 extern void ext4_mark_inode_dirty(ext4_inode_cache_t *ic);
 
+#define EXT4_RUN_SECTORS 65536u
+
 static int ext4_no_data_blocks(ext4_fs_t *fs, ext4_inode_t *inode) {
     return !(inode->i_flags & EXT4_INODE_FLAG_EXTENTS) && !inode->i_blocks_high &&
            inode->i_blocks_lo == ((inode->i_file_acl_lo || inode->i_file_acl_high) ?
@@ -76,7 +78,7 @@ uint64_t ext4_file_read(ext4_fs_t *fs, uint32_t ino, uint64_t offset, uint64_t s
             memset(buffer + bytes_read, 0, to_read);
         } else {
             if (block_off == 0 && to_read == fs->block_size) {
-                max_run_blocks = 256 / fs->sectors_per_block;
+                max_run_blocks = EXT4_RUN_SECTORS / fs->sectors_per_block;
                 if (max_run_blocks == 0) max_run_blocks = 1;
                 run_blocks = 1;
                 while (run_blocks < max_run_blocks &&
@@ -193,7 +195,6 @@ uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
     uint32_t run_blocks;
     uint32_t run_bytes;
     uint64_t next_phys_block;
-    int64_t next_new_block;
     uint32_t allocated_blocks;
     uint32_t requested_blocks;
     uint32_t set_index;
@@ -252,7 +253,7 @@ uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
 
         if (phys_block == 0 && block_off == 0 &&
             to_write == fs->block_size) {
-            max_run_blocks = 256 / fs->sectors_per_block;
+            max_run_blocks = EXT4_RUN_SECTORS / fs->sectors_per_block;
             if (max_run_blocks == 0) max_run_blocks = 1;
             requested_blocks = (size - bytes_written) / fs->block_size;
             if (requested_blocks > max_run_blocks)
@@ -277,8 +278,8 @@ uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
             }
             if (run_blocks == 0) break;
             run_bytes = run_blocks * fs->block_size;
-            if (ext4_write_blocks(fs, allocated_first, run_blocks,
-                    buffer + bytes_written) != 0)
+            if (ext4_write_blocks_unlocked(fs, allocated_first, run_blocks,
+                    buffer + bytes_written) != 0 || ic->ino != ino)
                 break;
             bytes_written += run_bytes;
             continue;
@@ -301,32 +302,21 @@ uint64_t ext4_file_write_workspace(ext4_fs_t *fs, uint32_t ino,
         }
 
         if (block_off == 0 && to_write == fs->block_size) {
-            max_run_blocks = 256 / fs->sectors_per_block;
+            max_run_blocks = EXT4_RUN_SECTORS / fs->sectors_per_block;
             if (max_run_blocks == 0) max_run_blocks = 1;
             run_blocks = 1;
             while (run_blocks < max_run_blocks &&
                    bytes_written + (run_blocks + 1) * fs->block_size <= size) {
                 next_phys_block = ext4_inode_get_block(fs, &ic->inode, block_num + run_blocks);
-                if (next_phys_block == 0) {
-                    next_new_block = ext4_alloc_block(fs,
-                        phys_block + run_blocks - 1);
-                    if (next_new_block < 0) {
-                        break;
-                    }
-                    if (ext4_inode_set_block(fs, ic, block_num + run_blocks, next_new_block) != 0) {
-                        ext4_free_block(fs, next_new_block);
-                        break;
-                    }
-                    ext4_inode_add_blocks(fs, &ic->inode, 1);
-                    next_phys_block = (uint64_t)next_new_block;
-                }
                 if (next_phys_block != phys_block + run_blocks) {
                     break;
                 }
                 run_blocks++;
             }
             run_bytes = run_blocks * fs->block_size;
-            if (ext4_write_blocks(fs, phys_block, run_blocks, buffer + bytes_written) != 0) {
+            if (ext4_write_blocks_unlocked(fs, phys_block, run_blocks,
+                                           buffer + bytes_written) != 0 ||
+                ic->ino != ino) {
                 break;
             }
             bytes_written += run_bytes;
