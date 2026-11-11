@@ -27,7 +27,7 @@ static int *line_last_cr;
 static int *line_capacity;
 
 #define SYS_RW_STACK_BUF 512
-#define SYS_RW_HEAP_LIMIT 65536
+#define SYS_RW_HEAP_MIN 65536
 static char ***history;
 static int *history_count;
 static int *history_browse;
@@ -36,6 +36,22 @@ static int *history_saved_len;
 
 static int *esc_state;
 static int *esc_len;
+
+static uint8_t *sys_rw_buffer(task_fd_t *tfd, uint64_t *size) {
+    uint64_t max;
+    uint8_t *buf;
+
+    max = SYS_RW_HEAP_MIN;
+    if (tfd && tfd->type == FD_TYPE_FILE &&
+        pfa_count_free() / 64 * PAGE_SIZE > max)
+        max = pfa_count_free() / 64 * PAGE_SIZE;
+    if (*size > max) *size = max;
+    for (;;) {
+        buf = (uint8_t *)kmalloc(*size);
+        if (buf || *size <= SYS_RW_HEAP_MIN) return buf;
+        *size /= 2;
+    }
+}
 
 static int syscall_core_interrupted(void) {
     return task_has_pending_signals();
@@ -628,12 +644,11 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     }
 
     work_size = (uint64_t)len;
-    if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
     heap_buf = 0;
     if (work_size <= SYS_RW_STACK_BUF) {
         kbuf = stack_buf;
     } else {
-        kbuf = (uint8_t *)kmalloc(work_size);
+        kbuf = sys_rw_buffer(tfd, &work_size);
         if (!kbuf) return -ENOMEM;
         heap_buf = 1;
     }
@@ -916,12 +931,11 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     }
 
     work_size = (uint64_t)len;
-    if (work_size > SYS_RW_HEAP_LIMIT) work_size = SYS_RW_HEAP_LIMIT;
     heap_buf = 0;
     if (work_size <= SYS_RW_STACK_BUF) {
         kbuf = stack_buf;
     } else {
-        kbuf = (uint8_t *)kmalloc(work_size);
+        kbuf = sys_rw_buffer(tfd, &work_size);
         if (!kbuf) return -ENOMEM;
         heap_buf = 1;
     }

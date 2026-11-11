@@ -2202,6 +2202,7 @@ static int sys_copy_file_range(int fd_in, uint64_t off_in_ptr, int fd_out,
     uint64_t limit;
     uint64_t window_size;
     uint64_t window_pages;
+    uint64_t min_pages;
     uint64_t window_phys;
     uint8_t *window;
     uint8_t *view;
@@ -2290,9 +2291,18 @@ static int sys_copy_file_range(int fd_in, uint64_t off_in_ptr, int fd_out,
         scratch = session->cache->scratch;
         scratch_capacity = session->cache->scratch_capacity;
     } else {
-        window_pages = (window_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        window_phys = pfa_alloc_contiguous(window_pages);
+        min_pages = (window_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        window_pages = (limit + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (window_pages > pfa_count_free() / 64)
+            window_pages = pfa_count_free() / 64;
+        if (window_pages < min_pages) window_pages = min_pages;
+        while (!(window_phys = pfa_alloc_contiguous(window_pages)) &&
+               window_pages > min_pages) {
+            window_pages /= 2;
+            if (window_pages < min_pages) window_pages = min_pages;
+        }
         if (!window_phys) return -ENOMEM;
+        window_size = window_pages * PAGE_SIZE;
         window = (uint8_t *)(uintptr_t)(window_phys + KERNEL_VMA);
     }
     total = 0;
