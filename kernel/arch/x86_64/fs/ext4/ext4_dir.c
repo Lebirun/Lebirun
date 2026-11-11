@@ -189,7 +189,7 @@ static int ext4_dir_add_to_block(ext4_fs_t *fs, ext4_inode_cache_t *ic,
         }
         actual_len = ((sizeof(ext4_dir_entry_t) - EXT4_NAME_LEN +
                        entry->name_len + 3) / 4) * 4;
-        if (actual_len > entry->rec_len) {
+        if (entry->inode && actual_len > entry->rec_len) {
             ext4_release_block(fs, phys_block);
             return -1;
         }
@@ -199,6 +199,8 @@ static int ext4_dir_add_to_block(ext4_fs_t *fs, ext4_inode_cache_t *ic,
             old_rec_len = entry->rec_len;
             if (old_rec_len >= needed_len + 12) {
                 entry->rec_len = old_rec_len - needed_len;
+                entry->name_len = 0;
+                entry->file_type = 0;
                 new_entry = (ext4_dir_entry_t *)(block + block_off +
                                                   entry->rec_len);
                 new_entry->rec_len = needed_len;
