@@ -8,6 +8,7 @@ static int sys_crypto(uint64_t req_ptr, int unused1, int unused2, int unused3,
     struct crypto_request r;
     uint8_t hash[64];
     size_t n;
+    int ret;
 
     (void)unused1;
     (void)unused2;
@@ -27,36 +28,35 @@ static int sys_crypto(uint64_t req_ptr, int unused1, int unused2, int unused3,
 
     switch (r.operation) {
     case CRYPTO_OP_SHA256:
-        n = 32;
-        if (r.output_len < n) return -EINVAL;
-        sha256_hash(r.input, r.input_len, hash);
-        break;
-
-    case CRYPTO_OP_SHA512:
-        n = 64;
-        if (r.output_len < n) return -EINVAL;
-        sha512_hash(r.input, r.input_len, hash);
-        break;
-
     case CRYPTO_OP_HMAC_SHA256:
         n = 32;
-        if (r.output_len < n) return -EINVAL;
-        hmac_sha256(r.key, r.key_len, r.input, r.input_len, hash);
         break;
-
+    case CRYPTO_OP_SHA512:
     case CRYPTO_OP_HMAC_SHA512:
         n = 64;
-        if (r.output_len < n) return -EINVAL;
-        hmac_sha512(r.key, r.key_len, r.input, r.input_len, hash);
         break;
-
     case CRYPTO_OP_COMPARE:
         if (r.input_len != r.key_len) return -EINVAL;
-        return crypto_constant_compare(r.input, r.key, r.input_len);
-
+        n = 0;
+        break;
     default:
         return -ENOSYS;
     }
+    if (r.output_len < n) return -EINVAL;
+    ret = 0;
+    user_access_begin();
+    if (r.operation == CRYPTO_OP_SHA256)
+        sha256_hash(r.input, r.input_len, hash);
+    else if (r.operation == CRYPTO_OP_SHA512)
+        sha512_hash(r.input, r.input_len, hash);
+    else if (r.operation == CRYPTO_OP_HMAC_SHA256)
+        hmac_sha256(r.key, r.key_len, r.input, r.input_len, hash);
+    else if (r.operation == CRYPTO_OP_HMAC_SHA512)
+        hmac_sha512(r.key, r.key_len, r.input, r.input_len, hash);
+    else
+        ret = crypto_constant_compare(r.input, r.key, r.input_len);
+    user_access_end();
+    if (!n) return ret;
     return copy_to_user(r.output, hash, n) < 0 ? -EFAULT : 0;
 }
 

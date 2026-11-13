@@ -25,7 +25,6 @@
 #include <stdio.h>
 
 extern task_t *current_task;
-extern task_t *ready_queue_head;
 extern void sysfs_reclaim_unused(void);
 
 static vfs_node_t procfs_root;
@@ -1105,7 +1104,6 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     uint64_t idle_t;
     uint64_t running;
     task_t *t;
-    task_t *start;
     extern volatile uint64_t task_context_switches;
     
     (void)node;
@@ -1118,16 +1116,13 @@ static uint64_t proc_stat_read(vfs_node_t *node, uint64_t offset, uint64_t size,
     
     running = 0;
     blocked = 0;
-    start = ready_queue_head;
-    t = start;
-    if (t) {
-        do {
-            if (t->state == TASK_RUNNING || t->state == TASK_READY)
-                running++;
-            if (t->state == TASK_BLOCKED) blocked++;
-            t = t->next;
-        } while (t && t != start);
+    lock_scheduler();
+    for (t = all_tasks_head; t; t = t->all_next) {
+        if (t->state == TASK_RUNNING || t->state == TASK_READY)
+            running++;
+        if (t->state == TASK_BLOCKED) blocked++;
     }
+    unlock_scheduler();
     if (running == 0) running = 1;
     
     if (cached_btime == 0)

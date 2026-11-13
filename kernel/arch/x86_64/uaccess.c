@@ -54,14 +54,13 @@ int user_access_ok(const void *ptr, size_t size, int access) {
     end = start + (uint64_t)size - 1;
     if (end >= KERNEL_VMA) return 0;
     page = start & ~(PAGE_SIZE - 1);
-    if (page == (end & ~(PAGE_SIZE - 1)))
-        return user_page_access_ok(page, access);
     end &= ~(PAGE_SIZE - 1);
     for (;;) {
         if (!user_page_access_ok(page, access)) return 0;
         if (page == end) break;
         page += PAGE_SIZE;
     }
+    user_access_begin();
     return 1;
 }
 

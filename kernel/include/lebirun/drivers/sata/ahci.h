@@ -1,6 +1,7 @@
 #ifndef AHCI_H
 #define AHCI_H
 
+#include <lebirun/task.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <lebirun/spinlock.h>
@@ -345,6 +346,7 @@ typedef struct ahci_port {
     volatile uint64_t last_serr;
     volatile uint64_t last_tfd;
     bool use_irq;
+    wait_queue_t wq;
     blkdev_t blk;
 } ahci_port_t;
 

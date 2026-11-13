@@ -16,5 +16,7 @@ void irq_register_handler(uint8_t irq, irq_handler_t handler);
 void irq_unregister_handler(uint8_t irq);
 void irq_unmask(uint8_t irq);
 void irq_mask(uint8_t irq);
+int irq_alloc_vector(void (*handler)(void *), void *arg);
+void irq_free_vector(int vector);
 
 #endif

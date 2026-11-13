@@ -5,6 +5,7 @@
 
 void kernel_panic(const char *reason, registers_t *regs);
 void kernel_panic_msg(const char *fmt, ...);
+void stack_guard_init(void);
 void kernel_panic_custom(const char *category, const char *fmt, ...);
 int kernel_panic_active(void);
 

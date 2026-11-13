@@ -2408,8 +2408,13 @@ static int socket_send_buffer(int sockfd, const char *buf_ptr, int len,
 
 static int sys_sendto(int sockfd, const char *buffer, int length,
                       int flags, uint64_t address, int address_length) {
-    return socket_send_buffer(sockfd, buffer, length, flags, address,
-                               address_length, 0);
+    int ret;
+
+    user_access_begin();
+    ret = socket_send_buffer(sockfd, buffer, length, flags, address,
+                             address_length, 0);
+    user_access_end();
+    return ret;
 }
 
 static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -2647,8 +2652,13 @@ static int socket_receive_buffer(int sockfd, const char *buf_ptr, int len,
 
 static int sys_recvfrom(int sockfd, const char *buffer, int length,
                         int flags, uint64_t address, uint64_t address_length) {
-    return socket_receive_buffer(sockfd, buffer, length, flags, address,
-                                  address_length, 0);
+    int ret;
+
+    user_access_begin();
+    ret = socket_receive_buffer(sockfd, buffer, length, flags, address,
+                                address_length, 0);
+    user_access_end();
+    return ret;
 }
 
 static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
@@ -2804,12 +2814,14 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
     allocated = msg.msg_iovlen != 1;
     buffer = allocated ? (total ? kmalloc(total) : NULL) : iov.iov_base;
     if (allocated && total && !buffer) return -ENOMEM;
+    user_access_begin();
     recvd = socket_receive_buffer(sockfd, (const char *)buffer, (int)total,
                                    flags | (is_dgram ? MSG_TRUNC : 0),
                                    (uint64_t)(uintptr_t)msg.msg_name,
                                    msg.msg_name ? (uint64_t)(uintptr_t)
                                        &((struct msghdr *)msg_ptr)->msg_namelen : 0,
                                    allocated);
+    user_access_end();
     if (recvd < 0) {
         if (allocated) kfree(buffer);
         return recvd;
