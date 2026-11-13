@@ -292,7 +292,6 @@ void task_fpu_signal_save(task_t *task, void *dst);
 int task_fpu_signal_restore(task_t *task, const uint8_t *src);
 void task_prepare_cpu_idle(struct cpu_info *cpu);
 #define current_task task_current()
-extern task_t* ready_queue_head;
 extern task_t* all_tasks_head;
 
 pid_t getpid(void);
@@ -349,6 +348,8 @@ void waitq_wake_all(wait_queue_t* q);
 void waitq_wake_one(wait_queue_t* q);
 void waitq_wait(wait_queue_t* q);
 void waitq_remove(wait_queue_t* q, task_t* t);
+int waitq_wait_cond(wait_queue_t *q, int (*cond)(void *), void *arg,
+                    uint64_t deadline_ns);
 uint64_t descriptor_ready_generation(void);
 void descriptor_ready_notify(void);
 void descriptor_ready_notify_key(uint64_t key);

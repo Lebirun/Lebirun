@@ -280,6 +280,7 @@ typedef struct tcp_retx_seg {
     uint32_t seq;
     uint64_t send_time;
     uint32_t retries;
+    uint8_t sacked;
     struct tcp_retx_seg *next;
 } tcp_retx_seg_t;
 
@@ -303,6 +304,8 @@ typedef struct tcp_socket {
     uint16_t mss;
     uint32_t cwnd;
     uint32_t ssthresh;
+    uint32_t recover;
+    uint8_t in_recovery;
     uint64_t user_timeout;
     uint8_t *recv_buffer;
     uint64_t recv_buffer_size;

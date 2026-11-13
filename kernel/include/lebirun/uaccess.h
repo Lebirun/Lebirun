@@ -7,6 +7,16 @@
 #define UACCESS_READ 1
 #define UACCESS_WRITE 2
 
+extern int smap_enabled;
+
+static inline void user_access_begin(void) {
+    if (smap_enabled) __asm__ volatile ("stac" ::: "memory", "cc");
+}
+
+static inline void user_access_end(void) {
+    if (smap_enabled) __asm__ volatile ("clac" ::: "memory", "cc");
+}
+
 int user_access_ok(const void *ptr, size_t size, int access);
 int copy_from_user(void *dest, const void *src, size_t size);
 int copy_to_user(void *dest, const void *src, size_t size);

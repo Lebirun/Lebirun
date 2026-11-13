@@ -59,6 +59,8 @@ typedef struct cpu_info {
     int wake_pending;
     int tick_stopped;
     uint64_t tick_stop_tick;
+    task_t *rq_head;
+    task_t *rq_tail;
 } cpu_info_t;
 
 extern volatile uint32_t *lapic_base;
@@ -85,6 +87,7 @@ int smp_tick_due(void);
 void smp_tick_rearm(void);
 void smp_tick_resume(void);
 void smp_tick_idle(void);
+void smp_cpu_idle(void);
 void smp_tick_deadline(uint64_t deadline);
 cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);

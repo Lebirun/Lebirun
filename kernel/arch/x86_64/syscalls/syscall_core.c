@@ -220,6 +220,7 @@ int syscall_user_range_mapped(uint64_t addr, uint64_t len, int empty_mapped) {
     task_vm_lock(current_task);
     result = user_range_mapped_locked(addr, len, empty_mapped);
     task_vm_unlock(current_task);
+    if (result) user_access_begin();
     return result;
 }
 
@@ -242,9 +243,11 @@ int syscall_user_range_present(uint64_t addr, uint64_t len,
     last = end & ~0xFFFULL;
     for (;;) {
         if (!vmm_get_phys_in_pml4(pd, page)) return 0;
-        if (page == last) return 1;
+        if (page == last) break;
         page += PAGE_SIZE;
     }
+    user_access_begin();
+    return 1;
 }
 
 static void serial_write_move_back(int n) {

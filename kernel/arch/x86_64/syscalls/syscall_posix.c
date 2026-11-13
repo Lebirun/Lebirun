@@ -2162,7 +2162,10 @@ static int sys_pread64(int fd, void *buf, size_t count, long long offset) {
             count = node->length - (uint64_t)offset;
     }
     if (!user_access_ok(buf, count, UACCESS_WRITE)) return -EFAULT;
-    return vfs_read(node, (uint64_t)offset, count, buf);
+    user_access_begin();
+    count = vfs_read(node, (uint64_t)offset, count, buf);
+    user_access_end();
+    return (int)count;
 }
 
 static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset) {
@@ -2184,7 +2187,10 @@ static int sys_pwrite64(int fd, const void *buf, size_t count, long long offset)
     if (VFS_GET_TYPE(node->flags) == VFS_DIRECTORY) return -EISDIR;
     if (count > INT32_MAX) count = INT32_MAX;
     if (!user_access_ok(buf, count, UACCESS_READ)) return -EFAULT;
-    return vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
+    user_access_begin();
+    count = vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
+    user_access_end();
+    return (int)count;
 }
 
 static int sys_copy_file_range(int fd_in, uint64_t off_in_ptr, int fd_out,

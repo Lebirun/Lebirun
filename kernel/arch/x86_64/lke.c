@@ -154,7 +154,10 @@ static const lke_ksym_t ksyms[] = {
     KSYM(keyboard_usb_recent), KSYM(mouse_inject_packet),
     KSYM(mouse_get_packet_size), KSYM(mouse_usb_recent), KSYM(evdev_get_mouse),
     KSYM(evdev_mouse_set_abs), KSYM(evdev_push_event), KSYM(evdev_push_sync),
-    KSYM(fb_get), KSYM(pci_get),
+    KSYM(fb_get), KSYM(pci_get), KSYM(pci_msi_enable), KSYM(pci_msix_table),
+    KSYM(pci_msix_set), KSYM(pci_msix_enable), KSYM(irq_alloc_vector),
+    KSYM(irq_free_vector), KSYM(waitq_init), KSYM(waitq_wake_all),
+    KSYM(waitq_wait_cond),
 #if CONFIG_DRIVER_NET
     KSYM(net_register_driver), KSYM(netif_alloc), KSYM(netif_register),
     KSYM(netif_set_default), KSYM(netif_find), KSYM(eth_receive),

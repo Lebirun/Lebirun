@@ -76,6 +76,166 @@ isr_noerr 48
 isr_noerr 49
 isr_noerr 50
 
+isr_noerr 51
+isr_noerr 52
+isr_noerr 53
+isr_noerr 54
+isr_noerr 55
+isr_noerr 56
+isr_noerr 57
+isr_noerr 58
+isr_noerr 59
+isr_noerr 60
+isr_noerr 61
+isr_noerr 62
+isr_noerr 63
+isr_noerr 64
+isr_noerr 65
+isr_noerr 66
+isr_noerr 67
+isr_noerr 68
+isr_noerr 69
+isr_noerr 70
+isr_noerr 71
+isr_noerr 72
+isr_noerr 73
+isr_noerr 74
+isr_noerr 75
+isr_noerr 76
+isr_noerr 77
+isr_noerr 78
+isr_noerr 79
+isr_noerr 80
+isr_noerr 81
+isr_noerr 82
+isr_noerr 83
+isr_noerr 84
+isr_noerr 85
+isr_noerr 86
+isr_noerr 87
+isr_noerr 88
+isr_noerr 89
+isr_noerr 90
+isr_noerr 91
+isr_noerr 92
+isr_noerr 93
+isr_noerr 94
+isr_noerr 95
+isr_noerr 96
+isr_noerr 97
+isr_noerr 98
+isr_noerr 99
+isr_noerr 100
+isr_noerr 101
+isr_noerr 102
+isr_noerr 103
+isr_noerr 104
+isr_noerr 105
+isr_noerr 106
+isr_noerr 107
+isr_noerr 108
+isr_noerr 109
+isr_noerr 110
+isr_noerr 111
+isr_noerr 112
+isr_noerr 113
+isr_noerr 114
+isr_noerr 115
+isr_noerr 116
+isr_noerr 117
+isr_noerr 118
+isr_noerr 119
+isr_noerr 120
+isr_noerr 121
+isr_noerr 122
+isr_noerr 123
+isr_noerr 124
+isr_noerr 125
+isr_noerr 126
+isr_noerr 127
+
+.section .rodata
+.global isr_msi_table
+isr_msi_table:
+    .quad isr51
+    .quad isr52
+    .quad isr53
+    .quad isr54
+    .quad isr55
+    .quad isr56
+    .quad isr57
+    .quad isr58
+    .quad isr59
+    .quad isr60
+    .quad isr61
+    .quad isr62
+    .quad isr63
+    .quad isr64
+    .quad isr65
+    .quad isr66
+    .quad isr67
+    .quad isr68
+    .quad isr69
+    .quad isr70
+    .quad isr71
+    .quad isr72
+    .quad isr73
+    .quad isr74
+    .quad isr75
+    .quad isr76
+    .quad isr77
+    .quad isr78
+    .quad isr79
+    .quad isr80
+    .quad isr81
+    .quad isr82
+    .quad isr83
+    .quad isr84
+    .quad isr85
+    .quad isr86
+    .quad isr87
+    .quad isr88
+    .quad isr89
+    .quad isr90
+    .quad isr91
+    .quad isr92
+    .quad isr93
+    .quad isr94
+    .quad isr95
+    .quad isr96
+    .quad isr97
+    .quad isr98
+    .quad isr99
+    .quad isr100
+    .quad isr101
+    .quad isr102
+    .quad isr103
+    .quad isr104
+    .quad isr105
+    .quad isr106
+    .quad isr107
+    .quad isr108
+    .quad isr109
+    .quad isr110
+    .quad isr111
+    .quad isr112
+    .quad isr113
+    .quad isr114
+    .quad isr115
+    .quad isr116
+    .quad isr117
+    .quad isr118
+    .quad isr119
+    .quad isr120
+    .quad isr121
+    .quad isr122
+    .quad isr123
+    .quad isr124
+    .quad isr125
+    .quad isr126
+    .quad isr127
+.section .text
+
 .global isr128
 isr128:
     cli
@@ -132,6 +292,10 @@ isr_common_stub:
     movw %ax, %es
 
     cld
+    cmpl $0, smap_enabled(%rip)
+    je 6f
+    clac
+6:
     movq %rsp, %r12
     xorq %r13, %r13
     cmpq $14, 160(%r12)

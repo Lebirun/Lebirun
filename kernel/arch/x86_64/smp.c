@@ -35,8 +35,9 @@ static uint64_t bsp_lapic_id;
 static uint64_t bsp_tick_ns;
 static uint64_t bsp_armed_ns;
 static int bsp_stretched;
+static int mwait_hint = -1;
 
-static cpu_info_t cpu_bootstrap[4];
+static cpu_info_t cpu_bootstrap[1];
 cpu_info_t *cpus = cpu_bootstrap;
 int cpu_count = 0;
 volatile int cpus_booted = 0;
@@ -441,6 +442,57 @@ void KERNEL_INIT lapic_init(void) {
     lapic_write(LAPIC_REG_ESR, 0);
     lapic_write(LAPIC_REG_ESR, 0);
     lapic_write(LAPIC_REG_EOI, 0);
+}
+
+static void KERNEL_INIT smp_idle_init(void) {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint32_t states;
+    int arat;
+    int c;
+
+    eax = 0;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (eax < 6) return;
+    eax = 1;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    if (!(ecx & (1u << 3))) return;
+    eax = 6;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    arat = (eax & (1u << 2)) != 0;
+    eax = 5;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    states = (ecx & 1u) ? edx : 0;
+    mwait_hint = 0;
+    for (c = arat ? 7 : 1; c >= 1; c--) {
+        if ((states >> (c * 4)) & 0xF) {
+            mwait_hint = ((c - 1) << 4) | (((states >> (c * 4)) & 0xF) - 1);
+            break;
+        }
+    }
+}
+
+void smp_cpu_idle(void) {
+    cpu_info_t *cpu;
+
+    __asm__ volatile ("cli" ::: "memory");
+    if (mwait_hint < 0) {
+        __asm__ volatile ("sti; hlt" ::: "memory");
+        return;
+    }
+    cpu = smp_this_cpu();
+    __asm__ volatile ("monitor" :: "a"(&cpu->wake_pending), "c"(0), "d"(0));
+    if (__atomic_load_n(&cpu->wake_pending, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("sti" ::: "memory");
+        return;
+    }
+    __asm__ volatile ("sti; mwait" :: "a"(mwait_hint), "c"(0) : "memory");
 }
 
 void smp_tick_stop(void) {
@@ -950,9 +1002,7 @@ void ap_main(void) {
     lapic_write(LAPIC_REG_TPR, 0);
     __asm__ volatile ("sti" ::: "memory");
 
-    for (;;) {
-        __asm__ volatile ("hlt");
-    }
+    for (;;) smp_cpu_idle();
 }
 
 void KERNEL_INIT smp_start_aps(void) {
@@ -1153,6 +1203,7 @@ void KERNEL_INIT smp_init(void) {
         KERNEL_INIT_LOG("SMP: KVM idle halt polling disabled for this guest\n");
 
     lapic_init();
+    smp_idle_init();
 
     bsp_apic_id = lapic_get_id();
     found = 0;

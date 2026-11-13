@@ -212,7 +212,7 @@ static void kernel_reclaim_runtime_memory(void) {
     pfa_reclaim_kernel_range_quiet(multiboot_start, multiboot_end);
 }
 
-static void KERNEL_INIT kernel_boot(void) {
+static void __attribute__((noinline, no_stack_protector)) KERNEL_INIT kernel_boot(void) {
     uint64_t mb_phys;
     uint64_t mb_page;
     struct multiboot2_tag *tag;
@@ -266,6 +266,7 @@ static void KERNEL_INIT kernel_boot(void) {
     int mem_map_relocated;
     struct multiboot2_tag_module *tag_mod_initrd;
 
+    stack_guard_init();
     gdt_init();
     idt_init();
     x86_security_enable();
@@ -764,7 +765,7 @@ static void kernel_idle_loop(void) {
         console_process_pending();
         asm volatile ("cli");
         smp_tick_idle();
-        asm volatile ("sti; hlt");
+        smp_cpu_idle();
     }
 }
 

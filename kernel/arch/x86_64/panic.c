@@ -13,6 +13,36 @@
 
 static volatile int in_panic = 0;
 
+uintptr_t __stack_chk_guard __attribute__((used, externally_visible)) =
+    0x2F8DD7A5C3E1B400ULL;
+
+void __attribute__((noreturn, used, externally_visible)) __stack_chk_fail(void) {
+    kernel_panic_msg("STACK SMASHING DETECTED caller=0x%016lX",
+                     (uint64_t)__builtin_return_address(0));
+    for (;;) __asm__ volatile ("cli; hlt");
+}
+
+void __attribute__((no_stack_protector)) KERNEL_INIT stack_guard_init(void) {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+    uint64_t value;
+    uint8_t ok;
+    int i;
+
+    eax = 1;
+    ecx = 0;
+    __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    value = 0;
+    ok = 0;
+    for (i = 0; (ecx & (1u << 30)) && !ok && i < 16; i++)
+        __asm__ volatile ("rdrand %0; setc %1" : "=r"(value), "=qm"(ok));
+    __asm__ volatile ("rdtsc" : "=a"(eax), "=d"(edx));
+    value ^= (((uint64_t)edx << 32) | eax) * 0x9E3779B97F4A7C15ULL;
+    __stack_chk_guard = (__stack_chk_guard ^ value) & ~0xFFULL;
+}
+
 int kernel_panic_active(void) {
     return in_panic != 0;
 }

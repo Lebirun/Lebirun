@@ -2,6 +2,8 @@
 #include <lebirun/common.h>
 #include <stdint.h>
 
+int smap_enabled;
+
 void KERNEL_INIT x86_security_enable(void) {
     uint32_t eax;
     uint32_t ebx;
@@ -59,6 +61,11 @@ void KERNEL_INIT x86_security_enable(void) {
     new_cr4 = cr4;
     if (ebx & (1U << 7)) new_cr4 |= 1ULL << 20;
     if (ecx & (1U << 2)) new_cr4 |= 1ULL << 11;
+    if (ebx & (1U << 20)) {
+        __asm__ volatile ("clac" ::: "memory", "cc");
+        new_cr4 |= 1ULL << 21;
+        smap_enabled = 1;
+    }
     if (new_cr4 != cr4)
         __asm__ volatile ("mov %0, %%cr4" : : "r"(new_cr4) : "memory");
 }

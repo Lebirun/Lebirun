@@ -7,6 +7,7 @@
 #include <lebirun/pit.h>
 #include <lebirun/lke.h>
 #include <lebirun/pci.h>
+#include <lebirun/timekeeping.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -450,6 +451,25 @@ static void ahci_reset_port(ahci_port_t *port, uint64_t gen) {
     ahci_unlock(port, flags);
 }
 
+typedef struct {
+    ahci_port_t *port;
+    uint64_t gen;
+    uint32_t bit;
+    int ncq;
+} ahci_wait_t;
+
+static int ahci_wait_done(void *arg) {
+    ahci_wait_t *w;
+    uint64_t pending;
+
+    w = (ahci_wait_t *)arg;
+    pending = ahci_port_read(w->port, AHCI_PxCI);
+    if (w->ncq) pending |= ahci_port_read(w->port, AHCI_PxSACT);
+    return !(pending & w->bit) || w->port->gen != w->gen ||
+           ((ahci_port_read(w->port, AHCI_PxIS) | w->port->irq_is) &
+            AHCI_PxIS_FATAL);
+}
+
 static int ahci_wait_tag(ahci_port_t *port, int tag, int ncq, uint64_t gen,
                          uint64_t timeout_ms) {
     uint64_t start;
@@ -457,7 +477,14 @@ static int ahci_wait_tag(ahci_port_t *port, int tag, int ncq, uint64_t gen,
     uint64_t spins;
     uint64_t pending;
     uint64_t is;
+    uint64_t deadline;
+    ahci_wait_t w;
 
+    w.port = port;
+    w.gen = gen;
+    w.bit = 1u << tag;
+    w.ncq = ncq;
+    deadline = timekeeping_monotonic_ns() + timeout_ms * 1000000ULL;
     start = tick_count;
     timeout_ticks = pit_freq ? (timeout_ms * pit_freq + 999) / 1000 : 0;
     for (spins = 0;; spins++) {
@@ -473,7 +500,9 @@ static int ahci_wait_tag(ahci_port_t *port, int tag, int ncq, uint64_t gen,
             ahci_reset_port(port, gen);
             return -1;
         }
-        ahci_yield(spins);
+        if (!port->use_irq ||
+            waitq_wait_cond(&port->wq, ahci_wait_done, &w, deadline) < 0)
+            ahci_yield(spins);
     }
 }
 
@@ -947,6 +976,8 @@ static const blkdev_ops_t ahci_cdrom_ops = {
     ahci_blk_atapi_read, NULL, NULL, NULL
 };
 
+static void ahci_msi_init(void);
+
 int KERNEL_INIT ahci_init(void) {
     static int probed KERNEL_INIT_BSS;
     uint64_t abar_phys;
@@ -1093,6 +1124,7 @@ int KERNEL_INIT ahci_init(void) {
     }
     
     g_ahci_controller.initialized = true;
+    if (g_ahci_controller.num_ports) ahci_msi_init();
     
     KERNEL_INIT_LOG("AHCI: Initialization complete. %u ports active.\n",
                     g_ahci_controller.num_ports);
@@ -1244,8 +1276,43 @@ void ahci_irq_handler(void *regs) {
         if (port_is & AHCI_PxIS_FATAL)
             __atomic_or_fetch(&port->irq_is, (uint32_t)(port_is & AHCI_PxIS_FATAL),
                               __ATOMIC_ACQ_REL);
+        waitq_wake_all(&port->wq);
     }
     ahci_hba_write(g_ahci_controller.abar_virt, AHCI_IS, is);
+}
+
+static void ahci_msi_irq(void *arg) {
+    (void)arg;
+    ahci_irq_handler(NULL);
+}
+
+static void KERNEL_INIT ahci_msi_init(void) {
+    ahci_port_t *port;
+    uint32_t bdf;
+    uint64_t i;
+    int vector;
+
+    bdf = (uint32_t)g_ahci_controller.pci_bus << 8 |
+          (uint32_t)g_ahci_controller.pci_slot << 3 |
+          (uint32_t)g_ahci_controller.pci_func;
+    vector = irq_alloc_vector(ahci_msi_irq, NULL);
+    if (vector < 0) return;
+    if (pci_msi_enable(bdf, (uint8_t)vector) != 0) {
+        irq_free_vector(vector);
+        return;
+    }
+    for (i = 0; i < AHCI_PORT_COUNT; i++) {
+        port = ahci_port_slot(i);
+        if (!port || !port->present) continue;
+        ahci_port_write(port, AHCI_PxIS, 0xFFFFFFFF);
+        ahci_port_write(port, AHCI_PxIE, AHCI_PxIS_DHRS | AHCI_PxIS_PSS |
+                        AHCI_PxIS_DSS | AHCI_PxIS_SDBS | AHCI_PxIS_FATAL);
+        port->use_irq = true;
+    }
+    ahci_hba_write(g_ahci_controller.abar_virt, AHCI_IS, 0xFFFFFFFF);
+    ahci_hba_write(g_ahci_controller.abar_virt, AHCI_GHC,
+                   ahci_hba_read(g_ahci_controller.abar_virt, AHCI_GHC) |
+                   AHCI_GHC_IE);
 }
 
 

@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <lebirun/uaccess.h>
 #include <lebirun/tty.h>
 #include <lebirun/keyboard.h>
 #include <lebirun/console.h>
@@ -104,6 +105,47 @@ void irq_register_handler(uint8_t irq, irq_handler_t handler) {
     if (irq_ensure_handlers((int)irq + 1) == 0) {
         irq_handlers[irq] = handler;
     }
+}
+
+#define IRQ_DYN_BASE 51
+#define IRQ_DYN_END 128
+
+typedef struct {
+    void (*handler)(void *);
+    void *arg;
+} irq_dyn_t;
+
+extern const uint64_t isr_msi_table[];
+static irq_dyn_t *irq_dyn;
+static int irq_dyn_count;
+
+int irq_alloc_vector(void (*handler)(void *), void *arg) {
+    irq_dyn_t *grown;
+    uint64_t flags;
+    int i;
+
+    if (!handler) return -1;
+    __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    for (i = 0; i < irq_dyn_count && irq_dyn[i].handler; i++) ;
+    if (i == irq_dyn_count && i < IRQ_DYN_END - IRQ_DYN_BASE) {
+        grown = (irq_dyn_t *)krealloc(irq_dyn, (size_t)(i + 1) * sizeof(*grown));
+        if (grown) {
+            irq_dyn = grown;
+            irq_dyn_count = i + 1;
+        }
+    }
+    if (i < irq_dyn_count) {
+        irq_dyn[i].arg = arg;
+        __atomic_store_n(&irq_dyn[i].handler, handler, __ATOMIC_RELEASE);
+    }
+    if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+    return i < irq_dyn_count ? IRQ_DYN_BASE + i : -1;
+}
+
+void irq_free_vector(int vector) {
+    if (vector >= IRQ_DYN_BASE && vector - IRQ_DYN_BASE < irq_dyn_count)
+        __atomic_store_n(&irq_dyn[vector - IRQ_DYN_BASE].handler, NULL,
+                         __ATOMIC_RELEASE);
 }
 
 void irq_unregister_handler(uint8_t irq) {
@@ -238,6 +280,30 @@ registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr
     return (registers_t *)destination;
 }
 
+static int smap_fixup(registers_t *regs, uint64_t fault_addr) {
+    static uint64_t last_rip;
+    uint64_t cr3;
+    uint64_t flags;
+
+    if (!smap_enabled || (regs->err_code & 0x1D) != 0x1 || (regs->cs & 3) ||
+        fault_addr >= KERNEL_VMA || (regs->rflags & (1ULL << 18)))
+        return 0;
+    cr3 = regs->entry_cr3;
+    if (!cr3) __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    flags = vmm_get_flags_in_pml4(cr3 & ~0xFFFULL, fault_addr & ~(PAGE_SIZE - 1));
+    if ((flags & (VMM_PTE_PRESENT | VMM_PTE_USER)) !=
+        (VMM_PTE_PRESENT | VMM_PTE_USER) ||
+        ((regs->err_code & 2) && !(flags & VMM_PTE_WRITE)))
+        return 0;
+    if (regs->rip != last_rip) {
+        last_rip = regs->rip;
+        printf("smap: kernel access to 0x%lX at rip=0x%lX\n", fault_addr,
+               regs->rip);
+    }
+    regs->rflags |= 1ULL << 18;
+    return 1;
+}
+
 registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 {
     uint64_t previous_ticks;
@@ -248,6 +314,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     int is_bsp;
     task_t *fault_task;
     cpu_info_t *cpu_info;
+    irq_dyn_t dyn;
 
     if (regs->int_no >= 32 && smp_percpu_irq_ready) {
         cpu_info = smp_this_cpu();
@@ -260,6 +327,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     if (regs->int_no >= 32 && regs->int_no != IPI_TLB_FLUSH_VECTOR)
         smp_tlb_flush_poll();
     if (regs->int_no < 32) {
+        if (regs->int_no == 14 && smap_fixup(regs, fault_addr)) return regs;
         if (regs->int_no == 14) {
             access_type = 0;
             if (regs->err_code & 0x2) access_type |= VRING_PERM_WRITE;
@@ -325,8 +393,23 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 case 19: sig = 8;  break;
                 default: sig = 6;  break;
             }
-            printf("[KERNEL] User exception %d at RIP=0x%016lX sig=%d\n",
-                   regs->int_no, regs->rip, sig);
+            {
+                uint8_t code[8];
+                uint64_t cr3;
+
+                cr3 = regs->entry_cr3;
+                if (!cr3) __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+                memset(code, 0, sizeof(code));
+                vmm_read_from_pml4(cr3 & ~0xFFFULL, regs->rip, code,
+                                   sizeof(code));
+                printf("[KERNEL] User exception %d at RIP=0x%016lX sig=%d pid=%d cpu=%d err=0x%lX cr3=0x%lX pml4=0x%lX phys=0x%lX code=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                       regs->int_no, regs->rip, sig, current_task->pid,
+                       smp_processor_id(), regs->err_code, cr3,
+                       current_task->pml4_phys,
+                       vmm_get_phys_in_pml4(cr3 & ~0xFFFULL, regs->rip),
+                       code[0], code[1], code[2], code[3], code[4], code[5],
+                       code[6], code[7]);
+            }
             
             task_user_exception(regs, sig);
             return schedule_from_irq(regs);
@@ -508,6 +591,7 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
                 }
                 do_syscall(regs);
                 __asm__ volatile ("cli" ::: "memory");
+                user_access_end();
                 kstack_finish_syscall();
             } else {
                 regs->rax = -IDT_ENOMEM;
@@ -675,6 +759,14 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             if (task_state_requires_schedule(current_task)) {
                 regs = schedule_from_irq(regs);
             }
+        } else if (regs->int_no >= IRQ_DYN_BASE &&
+                   regs->int_no - IRQ_DYN_BASE < (uint64_t)irq_dyn_count) {
+            dyn = irq_dyn[regs->int_no - IRQ_DYN_BASE];
+            if (dyn.handler) dyn.handler(dyn.arg);
+            if (!current_task ||
+                (current_task->id == 0 && !current_task->is_user) ||
+                task_state_requires_schedule(current_task))
+                return schedule_from_irq(regs);
         } else if (irq_handlers && irq < irq_handler_capacity && irq_handlers[irq]) {
             irq_handlers[irq](regs);
         }
@@ -820,6 +912,8 @@ void KERNEL_EARLY_INIT idt_init(void)
     idt_set_gate(48, (uintptr_t)isr48);
     idt_set_gate(49, (uintptr_t)isr49);
     idt_set_gate(IPI_WAKE_VECTOR, (uintptr_t)isr50);
+    for (i = IRQ_DYN_BASE; i < IRQ_DYN_END; i++)
+        idt_set_gate((uint8_t)i, isr_msi_table[i - IRQ_DYN_BASE]);
 
     idt_set_gate_flags(128, (uintptr_t)isr128, 0xEE);
 

@@ -1,5 +1,6 @@
 #include <lebirun/pci.h>
 #include <lebirun/mem_map.h>
+#include <lebirun/smp.h>
 
 static uint16_t *pci_bdfs;
 static uint32_t pci_total;
@@ -7,10 +8,90 @@ static uint32_t pci_total;
 static uint32_t pci_read(uint32_t bdf, uint8_t off) {
     uint32_t v;
 
-    __asm__ volatile ("outl %0, %1" : : "a"(0x80000000u | bdf << 8 | off),
+    __asm__ volatile ("outl %0, %1" : : "a"(0x80000000u | bdf << 8 | (off & 0xFC)),
                       "Nd"((uint16_t)0xCF8));
     __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"((uint16_t)0xCFC));
     return v;
+}
+
+uint32_t pci_cfg_read(uint32_t bdf, uint8_t off) {
+    return pci_read(bdf, off);
+}
+
+void pci_cfg_write(uint32_t bdf, uint8_t off, uint32_t value) {
+    __asm__ volatile ("outl %0, %1" : : "a"(0x80000000u | bdf << 8 | (off & 0xFC)),
+                      "Nd"((uint16_t)0xCF8));
+    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"((uint16_t)0xCFC));
+}
+
+uint8_t pci_find_cap(uint32_t bdf, uint8_t id) {
+    uint8_t off;
+    int hops;
+
+    if (!(pci_read(bdf, 0x04) & 0x100000)) return 0;
+    off = (uint8_t)(pci_read(bdf, 0x34) & 0xFC);
+    for (hops = 0; off && hops < 48; hops++) {
+        if ((pci_read(bdf, off) & 0xFF) == id) return off;
+        off = (uint8_t)((pci_read(bdf, off) >> 8) & 0xFC);
+    }
+    return 0;
+}
+
+static uint32_t pci_msi_address(void) {
+    int i;
+
+    for (i = 0; i < cpu_count; i++)
+        if (cpus[i].bsp) return 0xFEE00000u | (uint32_t)cpus[i].lapic_id << 12;
+    return 0xFEE00000u;
+}
+
+int pci_msi_enable(uint32_t bdf, uint8_t vector) {
+    uint32_t ctrl;
+    uint8_t cap;
+
+    cap = pci_find_cap(bdf, 0x05);
+    if (!cap) return -1;
+    ctrl = pci_read(bdf, cap);
+    pci_cfg_write(bdf, cap + 4, pci_msi_address());
+    if (ctrl & (1u << 23)) {
+        pci_cfg_write(bdf, cap + 8, 0);
+        pci_cfg_write(bdf, cap + 12, vector);
+    } else {
+        pci_cfg_write(bdf, cap + 8, vector);
+    }
+    pci_cfg_write(bdf, cap, (ctrl & ~(7u << 20)) | (1u << 16));
+    pci_cfg_write(bdf, 0x04, pci_read(bdf, 0x04) | 0x400);
+    return 0;
+}
+
+int pci_msix_table(uint32_t bdf, uint8_t *bir, uint32_t *offset) {
+    uint32_t table;
+    uint8_t cap;
+
+    cap = pci_find_cap(bdf, 0x11);
+    if (!cap) return -1;
+    table = pci_read(bdf, cap + 4);
+    *bir = (uint8_t)(table & 7);
+    *offset = table & ~7u;
+    return (int)((pci_read(bdf, cap) >> 16) & 0x7FF) + 1;
+}
+
+void pci_msix_set(volatile uint32_t *table, uint32_t entry, uint8_t vector) {
+    table += entry * 4;
+    table[3] = 1;
+    table[0] = pci_msi_address();
+    table[1] = 0;
+    table[2] = vector;
+    table[3] = 0;
+}
+
+void pci_msix_enable(uint32_t bdf) {
+    uint8_t cap;
+
+    cap = pci_find_cap(bdf, 0x11);
+    if (!cap) return;
+    pci_cfg_write(bdf, 0x04, pci_read(bdf, 0x04) | 0x400);
+    pci_cfg_write(bdf, cap, (pci_read(bdf, cap) & ~(1u << 30)) | (1u << 31));
 }
 
 static void pci_scan(void) {

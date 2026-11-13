@@ -6,6 +6,8 @@
 #include <lebirun/timekeeping.h>
 #include <lebirun/lke.h>
 #include <lebirun/pci.h>
+#include <lebirun/idt.h>
+#include <lebirun/task.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -31,6 +33,7 @@ typedef struct {
     uint16_t head;
     uint16_t cid;
     uint8_t phase;
+    wait_queue_t *wq;
 } nvme_queue_t;
 
 typedef struct {
@@ -40,6 +43,8 @@ typedef struct {
     uint64_t max_bytes;
     nvme_queue_t ioq;
     mutex_t lock;
+    wait_queue_t wq;
+    int vector;
 } nvme_ctrl_t;
 
 typedef struct {
@@ -92,6 +97,17 @@ static int nvme_expired(uint64_t end, uint64_t spins, uint64_t ms) {
     return 0;
 }
 
+static int nvme_cq_ready(void *arg) {
+    nvme_queue_t *q;
+
+    q = (nvme_queue_t *)arg;
+    return ((q->cq[(uint64_t)q->head * 4 + 3] >> 16) & 1) == q->phase;
+}
+
+static void nvme_irq(void *arg) {
+    waitq_wake_all((wait_queue_t *)arg);
+}
+
 static int nvme_cmd(nvme_queue_t *q, uint32_t *cmd, uint64_t ms) {
     volatile uint32_t *cqe;
     uint64_t end;
@@ -99,6 +115,8 @@ static int nvme_cmd(nvme_queue_t *q, uint32_t *cmd, uint64_t ms) {
     uint16_t cid;
     uint16_t got;
     uint32_t status;
+    uint64_t deadline;
+    int waited;
 
     cid = q->cid++;
     cmd[0] = (cmd[0] & 0xFFFF) | ((uint32_t)cid << 16);
@@ -107,10 +125,13 @@ static int nvme_cmd(nvme_queue_t *q, uint32_t *cmd, uint64_t ms) {
     __asm__ volatile ("sfence" ::: "memory");
     *q->sq_db = q->tail;
     end = tsc_available() ? tsc_get_ns() + ms * 1000000ULL : 0;
+    deadline = timekeeping_monotonic_ns() + ms * 1000000ULL;
     for (spins = 0;; spins++) {
         cqe = q->cq + (uint64_t)q->head * 4;
         if (((cqe[3] >> 16) & 1) != q->phase) {
-            if (nvme_expired(end, spins, ms)) return -1;
+            waited = q->wq ? waitq_wait_cond(q->wq, nvme_cq_ready, q, deadline) : -1;
+            if (waited == 0) return -1;
+            if (waited < 0 && nvme_expired(end, spins, ms)) return -1;
             continue;
         }
         got = (uint16_t)cqe[3];
@@ -279,6 +300,32 @@ static int KERNEL_INIT nvme_add_ns(nvme_ctrl_t *c, uint32_t nsid,
     return 0;
 }
 
+static int KERNEL_INIT nvme_irq_setup(nvme_ctrl_t *c, uint32_t bdf,
+                                     uint64_t bar, uint64_t *pages) {
+    uint32_t offset;
+    uint8_t bir;
+    int vector;
+
+    vector = irq_alloc_vector(nvme_irq, &c->wq);
+    if (vector < 0) return -1;
+    if (pci_msix_table(bdf, &bir, &offset) > 0) {
+        if (bir) goto fail;
+        for (; *pages * PAGE_SIZE < offset + 16; (*pages)++) {
+            if (c->regs + (*pages + 1) * PAGE_SIZE > NVME_VIRT_END) goto fail;
+            vmm_map_page(c->regs + *pages * PAGE_SIZE, bar + *pages * PAGE_SIZE,
+                         VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_PCD);
+        }
+        pci_msix_set((volatile uint32_t *)(c->regs + offset), 0,
+                     (uint8_t)vector);
+        pci_msix_enable(bdf);
+        return vector;
+    }
+    if (pci_msi_enable(bdf, (uint8_t)vector) == 0) return vector;
+fail:
+    irq_free_vector(vector);
+    return -1;
+}
+
 static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
     nvme_queue_t aq;
     nvme_ctrl_t *c;
@@ -306,6 +353,7 @@ static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
              nvme_pci(bus, slot, func, 0x04, 0, 0) | 0x406);
     c = (nvme_ctrl_t *)kcalloc(1, sizeof(*c));
     if (!c) return;
+    c->vector = -1;
     tmp = 0;
     c->regs = nvme_virt_next;
     vmm_map_page(c->regs, bar, VMM_PTE_PRESENT | VMM_PTE_WRITE | VMM_PTE_PCD);
@@ -348,11 +396,15 @@ static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
     mdts = id[77];
     memcpy(&nn, id + 516, sizeof(nn));
     c->max_bytes = mdts && mdts < 8 ? PAGE_SIZE << mdts : 256 * PAGE_SIZE;
+    waitq_init(&c->wq);
+    c->vector = nvme_irq_setup(c, (uint32_t)bus << 8 | (uint32_t)slot << 3 | func,
+                               bar, &pages);
     if (nvme_admin(&aq, 0x05, 0, c->mem + PAGE_SIZE,
-                   ((NVME_QD - 1) << 16) | 1, 1) < 0 ||
+                   ((NVME_QD - 1) << 16) | 1, c->vector >= 0 ? 3 : 1) < 0 ||
         nvme_admin(&aq, 0x01, 0, c->mem,
                    ((NVME_QD - 1) << 16) | 1, (1 << 16) | 1) < 0)
         goto disable;
+    if (c->vector >= 0) c->ioq.wq = &c->wq;
     found = 0;
     if (nvme_rd(c, NVME_VS) >= 0x10100 &&
         nvme_admin(&aq, 0x06, 0, tmp + 3 * PAGE_SIZE, 2, 0) == 0) {
@@ -379,6 +431,7 @@ static void KERNEL_INIT nvme_probe(uint8_t bus, uint8_t slot, uint8_t func) {
 disable:
     nvme_wr(c, NVME_CC, nvme_rd(c, NVME_CC) & ~1U);
     nvme_wait_ready(c, 0, timeout);
+    if (c->vector >= 0) irq_free_vector(c->vector);
 free:
     if (c->mem) pfa_free_contiguous(c->mem, 2);
     if (tmp) pfa_free_contiguous(tmp, 4);

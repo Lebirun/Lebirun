@@ -1479,7 +1479,10 @@ static int sys_lke_list(char *buf, int size) {
     if (size < 0) return -EINVAL;
     if (!buf) return size == 0 ? lke_list(NULL, 0) : -EFAULT;
     if (!user_access_ok(buf, (size_t)size, UACCESS_WRITE)) return -EFAULT;
-    return lke_list(buf, size);
+    user_access_begin();
+    size = lke_list(buf, size);
+    user_access_end();
+    return size;
 #else
     (void)buf;
     (void)size;
