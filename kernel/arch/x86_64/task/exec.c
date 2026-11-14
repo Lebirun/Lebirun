@@ -688,7 +688,8 @@ static int task_exec_with_args_common(
 
     entry_to_use = elf_info.interp_entry ? elf_info.interp_entry :
                                                elf_info.entry_point;
-    if (!use_node && !vmm_get_phys_in_pml4(new_pd, entry_to_use & ~0xFFFULL)) {
+    if (entry_to_use >= 0x0000800000000000ULL ||
+        (!use_node && !vmm_get_phys_in_pml4(new_pd, entry_to_use & ~0xFFFULL))) {
         task_exec_abort_vm(current_task, old_vm);
         vmm_free_pml4(new_pd);
         task_free_owned_exec_args(argc, k_argv, envc, k_envp);

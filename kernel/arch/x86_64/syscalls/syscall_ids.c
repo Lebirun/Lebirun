@@ -588,17 +588,21 @@ static int sys_getpgrp(int unused1, const char *unused2, int unused3) {
 
 static int sys_setsid(int unused1, const char *unused2, int unused3) {
     task_creds_t *creds;
+    task_t *scan;
     pid_t pid;
 
     (void)unused1; (void)unused2; (void)unused3;
     if (!current_task) return -ESRCH;
     pid = current_task->pid;
-    creds = (task_creds_t *)current_task->creds_data;
-    if (creds) {
-        if (creds->pgid == pid) return -EPERM;
-    } else if (current_task->pgid == pid) {
-        return -EPERM;
+    lock_scheduler();
+    for (scan = all_tasks_head; scan; scan = scan->all_next) {
+        if (scan->pgid == pid) {
+            unlock_scheduler();
+            return -EPERM;
+        }
     }
+    unlock_scheduler();
+    creds = (task_creds_t *)current_task->creds_data;
     if (creds) {
         creds->sid = pid;
         creds->pgid = pid;
@@ -883,12 +887,19 @@ static int sys_capget(cap_header_t *header, cap_data_t *data) {
     uint64_t permitted;
     uint64_t inheritable;
 
-    if (!header || !data || !current_task) return -EFAULT;
+    if (!header || !current_task) return -EFAULT;
     if (copy_from_user(&local_header, header, sizeof(local_header)) != 0)
         return -EFAULT;
-    if (local_header.version != CAP_VERSION_3) return -EINVAL;
+    if (local_header.version != CAP_VERSION_3) {
+        local_header.version = CAP_VERSION_3;
+        if (copy_to_user(header, &local_header, sizeof(local_header)) != 0)
+            return -EFAULT;
+        return data ? -EINVAL : 0;
+    }
+    if (local_header.pid < 0) return -EINVAL;
     if (local_header.pid != 0 && local_header.pid != current_task->pid)
         return -EPERM;
+    if (!data) return 0;
     creds = (task_creds_t *)current_task->creds_data;
     effective = creds ? creds->cap_effective :
                 (current_task->euid == 0 ? CAP_FULL_SET : 0);
@@ -916,11 +927,17 @@ static int sys_capset(cap_header_t *header, const cap_data_t *data) {
     uint64_t inheritable;
     uint64_t old_permitted;
 
-    if (!header || !data || !current_task) return -EFAULT;
-    if (copy_from_user(&local_header, header, sizeof(local_header)) != 0 ||
-        copy_from_user(local_data, data, sizeof(local_data)) != 0)
+    if (!header || !current_task) return -EFAULT;
+    if (copy_from_user(&local_header, header, sizeof(local_header)) != 0)
         return -EFAULT;
-    if (local_header.version != CAP_VERSION_3) return -EINVAL;
+    if (local_header.version != CAP_VERSION_3) {
+        local_header.version = CAP_VERSION_3;
+        if (copy_to_user(header, &local_header, sizeof(local_header)) != 0)
+            return -EFAULT;
+        return -EINVAL;
+    }
+    if (!data || copy_from_user(local_data, data, sizeof(local_data)) != 0)
+        return -EFAULT;
     if (local_header.pid != 0 && local_header.pid != current_task->pid)
         return -EPERM;
     effective = local_data[0].effective |

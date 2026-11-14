@@ -51,6 +51,7 @@ int task_fd_alloc(task_t *task) {
 
 int task_fd_ensure_capacity(task_t *task, int min_fd) {
     task_fd_t *new_fds;
+    task_fd_t *old_fds;
     unsigned long limit;
     int old_cap;
     int new_cap;
@@ -72,18 +73,22 @@ int task_fd_ensure_capacity(task_t *task, int min_fd) {
             new_cap *= 2;
         if ((unsigned long)new_cap > limit) new_cap = (int)limit;
     }
-    new_fds = (task_fd_t *)krealloc(task->fds, new_cap * sizeof(task_fd_t));
+    new_fds = (task_fd_t *)kmalloc(new_cap * sizeof(task_fd_t));
     if (!new_fds) return -1;
     memset(&new_fds[old_cap], 0, (new_cap - old_cap) * sizeof(task_fd_t));
     spin_lock(&task_fd_array_lock);
+    old_fds = task->fds;
+    memcpy(new_fds, old_fds, old_cap * sizeof(task_fd_t));
     task->fds = new_fds;
     task->fds_capacity = new_cap;
     spin_unlock(&task_fd_array_lock);
+    kfree(old_fds);
     return 0;
 }
 
 void task_fd_reclaim_unused(task_t *task) {
     task_fd_t *new_fds;
+    task_fd_t *old_fds;
     int new_cap;
     int rounded_cap;
     int i;
@@ -107,12 +112,13 @@ void task_fd_reclaim_unused(task_t *task) {
     if (new_cap >= task->fds_capacity) return;
     new_fds = (task_fd_t *)kmalloc(new_cap * sizeof(task_fd_t));
     if (!new_fds) return;
-    memcpy(new_fds, task->fds, new_cap * sizeof(task_fd_t));
     spin_lock(&task_fd_array_lock);
-    kfree(task->fds);
+    old_fds = task->fds;
+    memcpy(new_fds, old_fds, new_cap * sizeof(task_fd_t));
     task->fds = new_fds;
     task->fds_capacity = new_cap;
     spin_unlock(&task_fd_array_lock);
+    kfree(old_fds);
 }
 
 void task_fd_free(task_t *task, int fd) {

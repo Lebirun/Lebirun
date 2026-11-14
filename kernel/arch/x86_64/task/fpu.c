@@ -106,14 +106,19 @@ uint32_t task_fpu_frame_size(task_t *task) {
     return task && task->fpu_state ? fpu_state_size : 0;
 }
 
-void task_fpu_signal_save(task_t *task, void *dst) {
+const void *task_fpu_signal_save(task_t *task) {
     uint64_t flags;
 
     __asm__ volatile ("pushf; pop %0; cli" : "=r"(flags) :: "memory");
     fpu_save_area(task->fpu_state);
     if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");
-    memcpy(dst, task->fpu_state, fpu_state_size);
-    __asm__ volatile ("cli" ::: "memory");
+    return task->fpu_state;
+}
+
+void task_fpu_signal_reset(task_t *task) {
+    uint64_t flags;
+
+    __asm__ volatile ("pushf; pop %0; cli" : "=r"(flags) :: "memory");
     fpu_initialize_area(task->fpu_state);
     fpu_restore_area(task->fpu_state);
     if (flags & (1u << 9)) __asm__ volatile ("sti" ::: "memory");

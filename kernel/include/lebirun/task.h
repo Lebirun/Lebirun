@@ -288,7 +288,8 @@ void task_set_current(task_t *task);
 void fpu_cpu_init(void);
 void task_fpu_legacy_updated(task_t *task);
 uint32_t task_fpu_frame_size(task_t *task);
-void task_fpu_signal_save(task_t *task, void *dst);
+const void *task_fpu_signal_save(task_t *task);
+void task_fpu_signal_reset(task_t *task);
 int task_fpu_signal_restore(task_t *task, const uint8_t *src);
 void task_prepare_cpu_idle(struct cpu_info *cpu);
 #define current_task task_current()
@@ -383,6 +384,9 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
 int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
                                 int write_fault);
+int task_user_fault_from_interrupt(task_t *task, uint64_t fault_addr,
+                                   uint64_t saved_rflags, int write,
+                                   int present);
 uint64_t task_reclaim_zero_anon(task_t *task, uint64_t max_pages);
 uint64_t task_reclaim_inactive_zero_anon(uint64_t max_pages);
 uint64_t task_reclaim_blocked_file_exec(uint64_t max_pages);
@@ -416,10 +420,12 @@ int signal_set_blocked_mask(task_t *task, uint64_t mask);
 void signal_finish_wait_mask(uint64_t mask, int result);
 uint32_t signal_queue_count(task_t *task);
 int signal_take_pending(task_t *task, uint64_t mask);
+uint64_t task_futex_key(task_t *task, const int *uaddr, int private_futex);
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
                     uint64_t timeout_ticks, uint32_t bitset);
 int task_futex_wake(uint64_t key, int count);
 int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset);
+int task_futex_wake_in(task_t *task, const int *uaddr, int count);
 int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
                        int requeue_count);
 

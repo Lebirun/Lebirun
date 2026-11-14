@@ -719,21 +719,15 @@ static int sys_epoll_pwait(int epfd, const char *events_ptr, int maxevents) {
     return sys_epoll_wait(epfd, events_ptr, maxevents);
 }
 
-static int futex_get_key(int *uaddr, uint64_t *key) {
+static int futex_get_key(int *uaddr, int private_futex, uint64_t *key) {
     uint64_t address;
-    uint64_t pml4;
-    uint64_t physical;
 
     if (!current_task || !uaddr || !key) return -EFAULT;
     address = (uint64_t)(uintptr_t)uaddr;
     if (address < 0x1000 || address >= KERNEL_VMA ||
         (address & (sizeof(int) - 1)) != 0) return -EINVAL;
-    pml4 = current_task->pml4_phys ? current_task->pml4_phys :
-            current_task->cr3;
-    physical = vmm_get_phys_in_pml4(pml4, address & ~(PAGE_SIZE - 1));
-    if (physical == 0) return -EFAULT;
-    *key = physical + (address & (PAGE_SIZE - 1));
-    return 0;
+    *key = task_futex_key(current_task, uaddr, private_futex);
+    return *key ? 0 : -EFAULT;
 }
 
 static int futex_timeout_ticks(const event_timespec_t *user_timeout,
@@ -775,6 +769,7 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     int cmd;
     int ret;
     int realtime;
+    int private_futex;
     uint64_t key;
     uint64_t key2;
     uint64_t timeout_ticks;
@@ -795,7 +790,8 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
     if (op & ~(127 | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
         return -EINVAL;
     realtime = (op & FUTEX_CLOCK_REALTIME) != 0;
-    ret = futex_get_key(uaddr, &key);
+    private_futex = (op & FUTEX_PRIVATE_FLAG) != 0;
+    ret = futex_get_key(uaddr, private_futex, &key);
     if (ret < 0) return ret;
 
     switch (cmd) {
@@ -811,13 +807,13 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
             return task_futex_wake(key, val);
 
         case FUTEX_REQUEUE:
-            ret = futex_get_key(uaddr2, &key2);
+            ret = futex_get_key(uaddr2, private_futex, &key2);
             if (ret < 0) return ret;
             return task_futex_requeue(key, key2, val,
                                       (int)(uintptr_t)timeout);
 
         case FUTEX_CMP_REQUEUE:
-            ret = futex_get_key(uaddr2, &key2);
+            ret = futex_get_key(uaddr2, private_futex, &key2);
             if (ret < 0) return ret;
             if (copy_from_user(&value, uaddr, sizeof(value)) < 0)
                 return -EFAULT;
@@ -845,18 +841,19 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
                 return -EINVAL;
             if (!user_access_ok(uaddr2, sizeof(*uaddr2), UACCESS_WRITE))
                 return -EFAULT;
+            ret = futex_get_key(uaddr2, private_futex, &key2);
+            if (ret < 0) return ret;
             pfa_lock_acquire(&saved_flags);
-            ret = futex_get_key(uaddr, &key);
             physical = vmm_get_user_page_in_pml4(current_task->pml4_phys,
                 (uint64_t)(uintptr_t)uaddr2, 1);
-            if (ret < 0 || !physical) {
+            if (!physical) {
                 pfa_lock_release(saved_flags);
-                return ret < 0 ? ret : -EFAULT;
+                return -EFAULT;
             }
-            key2 = physical + ((uintptr_t)uaddr2 & (PAGE_SIZE - 1));
             temporary = TEMP_SLOT(7);
-            vmm_temp_map_raw(temporary, key2 & ~(PAGE_SIZE - 1));
-            word = (uint32_t *)(temporary + (key2 & (PAGE_SIZE - 1)));
+            vmm_temp_map_raw(temporary, physical);
+            word = (uint32_t *)(temporary + ((uintptr_t)uaddr2 &
+                                             (PAGE_SIZE - 1)));
             if (operation == FUTEX_OP_SET)
                 value = (int)__atomic_exchange_n(word,
                     (uint32_t)operation_argument, __ATOMIC_SEQ_CST);
@@ -1027,9 +1024,6 @@ static void robust_mark_owner_dead(task_t *task, void *entry, long offset,
     int *futex_word;
     int value;
     int replacement;
-    uint64_t key;
-    uint64_t address;
-    uint64_t physical;
 
     if (!entry) return;
     futex_word = (int *)((uint8_t *)entry + offset);
@@ -1040,12 +1034,7 @@ static void robust_mark_owner_dead(task_t *task, void *entry, long offset,
     if (robust_task_write(task, futex_word, &replacement,
                           sizeof(replacement)) < 0)
         return;
-    address = (uint64_t)(uintptr_t)futex_word;
-    physical = vmm_get_phys_in_pml4(task->pml4_phys, address);
-    if (physical) {
-        key = physical + (address & (PAGE_SIZE - 1));
-        task_futex_wake(key, 1);
-    }
+    task_futex_wake_in(task, futex_word, 1);
 }
 
 void syscall_robust_list_exit(task_t *task) {

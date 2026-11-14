@@ -217,9 +217,9 @@ static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
     return 1;
 }
 
-static int task_user_fault_from_interrupt(task_t *task, uint64_t fault_addr,
-                                          uint64_t saved_rflags, int write,
-                                          int present) {
+int task_user_fault_from_interrupt(task_t *task, uint64_t fault_addr,
+                                   uint64_t saved_rflags, int write,
+                                   int present) {
     int result;
 
     if (saved_rflags & (1ULL << 9))
@@ -605,9 +605,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
 
             if (did_exec) {
                 
-                if (regs->rsp < 0x1000 || regs->rsp >= KERNEL_VMA) {
-                    __asm__ volatile ("cli; hlt");
-                }
+                if (regs->rsp < 0x1000 || regs->rsp >= 0x0000800000000000ULL)
+                    task_exit_deferred(139);
                 
                 old_cr3 = 0;
                 __asm__ volatile ("mov %%cr3, %0" : "=r"(old_cr3));

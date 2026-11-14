@@ -26,8 +26,6 @@
 #define SIGTTOU   22
 #define SIGURG    23
 
-#define signal_user_range_mapped(addr, size) \
-    syscall_user_range_present((addr), (size), 0, 1)
 #define SIGXCPU   24
 #define SIGXFSZ   25
 #define SIGVTALRM 26
@@ -493,8 +491,9 @@ void signal_finish_wait_mask(uint64_t mask, int result) {
         rip = frame->rip;
         signal_deliver_pending(frame);
         if (frame->rip != rip) {
-            ((ucontext_k *)(uintptr_t)(frame->rsp + 8))->uc_sigmask.sig[0] =
-                mask;
+            copy_to_user((void *)(uintptr_t)(frame->rsp + 8 +
+                         offsetof(ucontext_k, uc_sigmask)), &mask,
+                         sizeof(mask));
             mask |= signal_blocked_mask(current_task) & ~wait_mask;
         }
     }
@@ -722,7 +721,7 @@ static int sys_rt_sigsuspend(uint64_t mask_ptr, const char *sigsetsize_ptr,
 static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
                                 int unused3) {
     registers_t *regs;
-    ucontext_k *uc;
+    ucontext_k uc;
     uint64_t *g;
     uint8_t *fpu;
     uint32_t fpu_size;
@@ -732,13 +731,12 @@ static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
     regs = current_task ? current_task->syscall_frame : NULL;
     if (!regs) return 0;
 
-    if (!signal_user_range_mapped(regs->rsp, sizeof(ucontext_k)))
+    if (copy_from_user(&uc, (const void *)(uintptr_t)regs->rsp,
+                       sizeof(uc)) < 0)
         return -EFAULT;
-
-    uc = (ucontext_k *)regs->rsp;
-    g = uc->gregs;
-    if (g[UC_RIP] < 0x1000 || g[UC_RIP] >= KERNEL_VMA ||
-        g[UC_RSP] < 0x1000 || g[UC_RSP] >= KERNEL_VMA)
+    g = uc.gregs;
+    if (g[UC_RIP] < 0x1000 || g[UC_RIP] >= 0x0000800000000000ULL ||
+        g[UC_RSP] < 0x1000 || g[UC_RSP] >= 0x0000800000000000ULL)
         return -EFAULT;
 
     regs->rax    = g[UC_RAX];
@@ -759,13 +757,12 @@ static int64_t sys_rt_sigreturn(int unused1, const char *unused2,
     regs->r13    = g[UC_R13];
     regs->r14    = g[UC_R14];
     regs->r15    = g[UC_R15];
-    signal_set_blocked_mask(current_task, uc->uc_sigmask.sig[0]);
+    signal_set_blocked_mask(current_task, uc.uc_sigmask.sig[0]);
     fpu_size = task_fpu_frame_size(current_task);
-    if (uc->fpregs && fpu_size &&
-        signal_user_range_mapped(uc->fpregs, fpu_size) &&
-        (fpu = (uint8_t *)kmalloc(fpu_size))) {
-        memcpy(fpu, (const void *)(uintptr_t)uc->fpregs, fpu_size);
-        task_fpu_signal_restore(current_task, fpu);
+    if (uc.fpregs && fpu_size && (fpu = (uint8_t *)kmalloc(fpu_size))) {
+        if (copy_from_user(fpu, (const void *)(uintptr_t)uc.fpregs,
+                           fpu_size) == 0)
+            task_fpu_signal_restore(current_task, fpu);
         kfree(fpu);
     }
 
@@ -845,6 +842,7 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
     queued_signal_t *entry;
     unsigned long limit;
     int sig;
+    int code;
     int result;
 
     sig = (int)(uintptr_t)sig_ptr;
@@ -856,8 +854,8 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
         task_release_ref(target);
         return -ESRCH;
     }
-    if (current_task &&
-        !signal_permitted(current_task->uid, current_task->euid, target)) {
+    if (target->is_kernel_task || (current_task &&
+        !signal_permitted(current_task->uid, current_task->euid, target))) {
         task_release_ref(target);
         return -EPERM;
     }
@@ -881,6 +879,12 @@ static int sys_rt_sigqueueinfo(int pid, const char *sig_ptr, void *info_ptr) {
         kfree(entry);
         task_release_ref(target);
         return -EFAULT;
+    }
+    memcpy(&code, entry->info + 8, sizeof(code));
+    if ((code >= 0 || code == -6) && target != current_task) {
+        kfree(entry);
+        task_release_ref(target);
+        return -EPERM;
     }
     entry->signum = sig;
     memcpy(entry->info, &sig, sizeof(sig));
@@ -1202,12 +1206,13 @@ int sys_kill_impl(int pid, const char *sig_ptr, int unused) {
 static int sys_tgkill(int tgid, const char *tid_ptr, int sig) {
     int tid;
 
-    (void)tgid;
     tid = (int)(uintptr_t)tid_ptr;
+    if (tgid <= 0 || tid <= 0) return -EINVAL;
     return sys_kill_impl(tid, (const char *)(uintptr_t)sig, 0);
 }
 
 static int sys_tkill(int tid, const char *sig_ptr, int unused) {
+    if (tid <= 0) return -EINVAL;
     return sys_kill_impl(tid, sig_ptr, unused);
 }
 
@@ -1280,6 +1285,108 @@ static int sys_pause(int unused1, const char *unused2, int unused3) {
     return -EINTR;
 }
 
+static int signal_on_task_stack(void) {
+    uint64_t sp;
+    uint64_t base;
+
+    sp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+    base = (uint64_t)(uintptr_t)current_task->kernel_stack_base;
+    return base && sp >= base && sp - base < current_task->kernel_stack_size;
+}
+
+static int signal_frame_writable(registers_t *regs, uint64_t start,
+                                 uint64_t size) {
+    uint64_t page;
+    uint64_t last;
+    uint64_t flags;
+    uint64_t rflags;
+    int can_fault;
+    int tries;
+    int ok;
+
+    page = start & ~(PAGE_SIZE - 1);
+    last = (start + size - 1) & ~(PAGE_SIZE - 1);
+    can_fault = -1;
+    tries = 0;
+    for (;;) {
+        flags = vmm_get_flags_in_pml4(current_task->pml4_phys, page);
+        if ((flags & (VMM_PTE_PRESENT | VMM_PTE_USER | VMM_PTE_WRITE)) !=
+            (VMM_PTE_PRESENT | VMM_PTE_USER | VMM_PTE_WRITE)) {
+            if (tries++ == 2 || ((flags & VMM_PTE_PRESENT) &&
+                                 !(flags & VMM_PTE_USER))) return -1;
+            if (can_fault < 0)
+                can_fault = signal_on_task_stack() &&
+                            kstack_expand_syscall() == 0;
+            if (!can_fault) return 0;
+            __asm__ volatile ("pushf; pop %0" : "=r"(rflags) :: "memory");
+            ok = task_user_fault_from_interrupt(current_task, page,
+                                                regs->rflags, 1,
+                                                (flags & VMM_PTE_PRESENT) != 0);
+            if (rflags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+            if (!ok) return -1;
+            continue;
+        }
+        if (page == last) return 1;
+        page += PAGE_SIZE;
+        tries = 0;
+    }
+}
+
+static int signal_write_user(uint64_t address, const void *data,
+                             uint64_t size) {
+    const uint8_t *src;
+    uint64_t chunk;
+
+    src = (const uint8_t *)data;
+    while (size) {
+        chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+        if (chunk > size) chunk = size;
+        if (vmm_copy_user_page(current_task->pml4_phys, address,
+                               (void *)src, chunk, 1) < 0) return -1;
+        address += chunk;
+        src += chunk;
+        size -= chunk;
+    }
+    return 0;
+}
+
+static int signal_has_handler(sigaction_k *act) {
+    return act->sa_handler != SIG_IGN && act->sa_handler != SIG_DFL;
+}
+
+static uint64_t signal_frame_layout(registers_t *regs, task_signals_t *sigs,
+                                    sigaction_k *act, uint64_t *frame_top,
+                                    uint64_t *fpu_address,
+                                    uint64_t *info_address) {
+    uint64_t sp;
+    uint32_t fpu_size;
+
+    sp = regs->rsp - 128;
+    if ((act->sa_flags & SA_ONSTACK) && signal_altstack_usable(sigs) &&
+        !signal_on_altstack(sigs, regs->rsp))
+        sp = (uint64_t)(uintptr_t)sigs->altstack.ss_sp +
+             sigs->altstack.ss_size;
+    *frame_top = sp;
+    fpu_size = task_fpu_frame_size(current_task);
+    *fpu_address = 0;
+    if (fpu_size) {
+        sp = (sp - fpu_size) & ~63ULL;
+        *fpu_address = sp;
+    }
+    *info_address = 0;
+    if (act->sa_flags & SA_SIGINFO) {
+        sp -= 128;
+        *info_address = sp;
+    }
+    sp -= sizeof(ucontext_k);
+    sp &= ~0xFULL;
+    if (sp < 0x1008 || *frame_top > 0x0000800000000000ULL ||
+        sp >= *frame_top ||
+        (uint64_t)(uintptr_t)act->sa_handler >= 0x0000800000000000ULL)
+        return 0;
+    return sp;
+}
+
 void signal_deliver_pending(registers_t *regs) {
     task_signals_t *sigs;
     int sig;
@@ -1288,10 +1395,10 @@ void signal_deliver_pending(registers_t *regs) {
     uint64_t sp;
     uint64_t frame_top;
     uint64_t fpu_address;
-    uint32_t fpu_size;
-    ucontext_k *uc;
-    uint64_t *g;
     uint64_t info_address;
+    uint64_t restorer;
+    ucontext_k uc;
+    uint64_t *g;
     uint64_t bit;
     uint64_t previous;
     uint8_t signal_info[128];
@@ -1316,6 +1423,15 @@ void signal_deliver_pending(registers_t *regs) {
         if (!(__atomic_load_n(&sigs->pending.sig[0], __ATOMIC_ACQUIRE) & bit))
             continue;
         if (sigs->blocked.sig[0] & bit) continue;
+
+        act = get_signal_action(sigs, sig, &default_act);
+        if (signal_has_handler(act)) {
+            sp = signal_frame_layout(regs, sigs, act, &frame_top,
+                                     &fpu_address, &info_address);
+            if (sp && signal_frame_writable(regs, sp - 8,
+                                            frame_top - sp + 8) == 0)
+                return;
+        }
 
         memset(signal_info, 0, sizeof(signal_info));
         memcpy(signal_info, &sig, sizeof(sig));
@@ -1358,39 +1474,10 @@ void signal_deliver_pending(registers_t *regs) {
             }
         }
 
-        sp = regs->rsp - 128;
-        if ((act->sa_flags & SA_ONSTACK) && signal_altstack_usable(sigs) &&
-            !signal_on_altstack(sigs, regs->rsp))
-            sp = (uint64_t)(uintptr_t)sigs->altstack.ss_sp +
-                 sigs->altstack.ss_size;
-        frame_top = sp;
-        fpu_size = task_fpu_frame_size(current_task);
-        fpu_address = 0;
-        if (fpu_size) {
-            sp = (sp - fpu_size) & ~63ULL;
-            fpu_address = sp;
-        }
-        info_address = 0;
-        if (act->sa_flags & SA_SIGINFO) {
-            sp -= sizeof(signal_info);
-            info_address = sp;
-        }
-        sp -= sizeof(ucontext_k);
-        sp &= ~0xFu;
-
-        if (sp < 0x1008 || sp >= KERNEL_VMA ||
-            !signal_user_range_mapped(sp - 8, frame_top - sp + 8)) {
-            task_exit_deferred(128 + sig);
-            return;
-        }
-
-        if (info_address)
-            memcpy((void *)(uintptr_t)info_address, signal_info,
-                   sizeof(signal_info));
-
-        uc = (ucontext_k *)sp;
-        memset(uc, 0, sizeof(*uc));
-        g = uc->gregs;
+        sp = signal_frame_layout(regs, sigs, act, &frame_top, &fpu_address,
+                                 &info_address);
+        memset(&uc, 0, sizeof(uc));
+        g = uc.gregs;
         g[UC_R8] = regs->r8;
         g[UC_R9] = regs->r9;
         g[UC_R10] = regs->r10;
@@ -1409,27 +1496,31 @@ void signal_deliver_pending(registers_t *regs) {
         g[UC_RSP] = regs->rsp;
         g[UC_RIP] = regs->rip;
         g[UC_EFL] = regs->rflags;
-        uc->uc_sigmask = sigs->blocked;
-        uc->uc_stack = sigs->altstack;
-        if (fpu_address) {
-            task_fpu_signal_save(current_task, (void *)(uintptr_t)fpu_address);
-            uc->fpregs = fpu_address;
-        }
+        uc.uc_sigmask = sigs->blocked;
+        uc.uc_stack = sigs->altstack;
+        uc.fpregs = fpu_address;
+        restorer = (uint64_t)(uintptr_t)act->sa_restorer;
 
-        sp -= 8;
-        if (act->sa_restorer) {
-            *(uint64_t *)sp = (uint64_t)(uintptr_t)act->sa_restorer;
-        } else {
-            *(uint64_t *)sp = 0;
+        if (!sp ||
+            (info_address && signal_write_user(info_address, signal_info,
+                                               sizeof(signal_info)) < 0) ||
+            signal_write_user(sp, &uc, sizeof(uc)) < 0 ||
+            (fpu_address && signal_write_user(fpu_address,
+                task_fpu_signal_save(current_task),
+                task_fpu_frame_size(current_task)) < 0) ||
+            signal_write_user(sp - 8, &restorer, sizeof(restorer)) < 0) {
+            task_exit_deferred(128 + sig);
+            return;
         }
+        if (fpu_address) task_fpu_signal_reset(current_task);
 
         regs->rdi = (uint64_t)sig;
         if (act->sa_flags & SA_SIGINFO) {
             regs->rsi = info_address;
-            regs->rdx = (uint64_t)(uintptr_t)uc;
+            regs->rdx = sp;
         }
         regs->rip = (uint64_t)(uintptr_t)act->sa_handler;
-        regs->rsp = sp;
+        regs->rsp = sp - 8;
         regs->rflags &= ~0x400ULL;
 
         signal_set_blocked_mask(current_task, sigs->blocked.sig[0] |

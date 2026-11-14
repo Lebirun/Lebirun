@@ -523,9 +523,8 @@ void do_syscall(registers_t *regs) {
         regs->rax = result;
     } else {
         __asm__ volatile ("" ::: "memory");
-        if (regs->rip < 0x1000 || regs->rip >= KERNEL_VMA) {
-            __asm__ volatile ("cli; hlt");
-        }
+        if (regs->rip < 0x1000 || regs->rip >= 0x0000800000000000ULL)
+            task_exit_deferred(139);
     }
 
     if ((int)regs->rax < 0) {

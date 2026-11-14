@@ -220,26 +220,19 @@ void task_exit_deferred(uint64_t exit_code) {
     cpu_info_t *cpu;
     task_t *task;
     task_t *parent;
-    uint64_t clear_address;
-    uint64_t clear_physical;
-    uint64_t clear_key;
+    int *clear_address;
     int clear_value;
 
     cpu = smp_this_cpu();
     task = cpu ? cpu->running_task : current_task;
     if (!task) return;
     if (task->clear_child_tid) {
-        clear_address = (uint64_t)(uintptr_t)task->clear_child_tid;
-        clear_physical = vmm_get_phys_in_pml4(task->pml4_phys,
-                                              clear_address);
+        clear_address = task->clear_child_tid;
         clear_value = 0;
-        copy_to_user(task->clear_child_tid, &clear_value,
-                     sizeof(clear_value));
         task->clear_child_tid = NULL;
-        if (clear_physical) {
-            clear_key = clear_physical + (clear_address & (PAGE_SIZE - 1));
-            task_futex_wake(clear_key, 1);
-        }
+        if (copy_to_user(clear_address, &clear_value,
+                         sizeof(clear_value)) == 0)
+            task_futex_wake_in(task, clear_address, 1);
     }
     syscall_robust_list_exit(task);
     console_release_graphics_owner(task->pid);
