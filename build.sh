@@ -316,6 +316,7 @@ if [ -d "root" ]; then
     {
       [ -f root/bin/lebu ] && printf '%s\n' root/bin/lebu
       [ -f root/bin/sudo ] && printf '%s\n' root/bin/sudo
+      [ -f root/bin/su ] && printf '%s\n' root/bin/su
       find root/bin root/sbin -maxdepth 1 -type l 2>/dev/null
     } | sed 's#^root##' | grep -v '^/bin/sh$' | sort
   )
@@ -342,6 +343,7 @@ if [ -d "root" ]; then
   [ ! -d root/var/tmp ] || chmod 1777 root/var/tmp
   [ ! -f root/etc/shadow ] || chmod 0600 root/etc/shadow
   [ ! -f root/bin/sudo ] || chmod 4755 root/bin/sudo
+  [ ! -f root/bin/su ] || chmod 4755 root/bin/su
   CURRENT_STEP=$((CURRENT_STEP + 1))
   if [ ! -f "rootfs.squashfs" ] || [ build.sh -nt rootfs.squashfs ] || [ -n "$(find root -newer rootfs.squashfs 2>/dev/null | head -1)" ]; then
     bar_print "$(printf '\033[1;36mBuilding SquashFS rootfs...\033[0m')"
