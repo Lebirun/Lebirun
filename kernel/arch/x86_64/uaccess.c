@@ -167,13 +167,25 @@ char *copy_string_from_user_alloc(const char *src) {
     uint64_t address;
     size_t maximum;
     size_t length;
+    size_t chunk;
     char *copy;
+    char buf[256];
 
     if (!src) return NULL;
     address = (uint64_t)(uintptr_t)src;
     if (address < 0x1000 || address >= KERNEL_VMA) return NULL;
     maximum = (size_t)(KERNEL_VMA - address);
     if (maximum > 65536) maximum = 65536;
+    chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+    if (chunk > sizeof(buf)) chunk = sizeof(buf);
+    if (chunk > maximum) chunk = maximum;
+    if (copy_from_user(buf, src, chunk) < 0) return NULL;
+    for (length = 0; length < chunk; length++) {
+        if (buf[length] != '\0') continue;
+        copy = (char *)kmalloc(length + 1);
+        if (copy) memcpy(copy, buf, length + 1);
+        return copy;
+    }
     if (strnlen_user(src, maximum, &length) < 0) return NULL;
     if (length == SIZE_MAX) return NULL;
     copy = (char *)kmalloc(length + 1);

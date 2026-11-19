@@ -47,10 +47,16 @@ static uint8_t *sys_rw_buffer(task_fd_t *tfd, uint64_t *size) {
         max = pfa_count_free() / 64 * PAGE_SIZE;
     if (*size > max) *size = max;
     for (;;) {
-        buf = (uint8_t *)kmalloc(*size);
+        buf = *size >= PAGE_SIZE ? (uint8_t *)slab_page_alloc(*size) :
+                                   (uint8_t *)kmalloc(*size);
         if (buf || *size <= SYS_RW_HEAP_MIN) return buf;
         *size /= 2;
     }
+}
+
+static void sys_rw_free(uint8_t *buf, uint64_t size) {
+    if (size >= PAGE_SIZE) slab_page_free(buf, size);
+    else kfree(buf);
 }
 
 static int syscall_core_interrupted(void) {
@@ -664,13 +670,13 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
             chunk = remaining;
             if (chunk > work_size) chunk = work_size;
             if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 if (total > 0) return (int)total;
                 return -EFAULT;
             }
             result = socket_write(fd, kbuf, (int)chunk);
             if (result <= 0) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 if (total > 0) return (int)total;
                 if (result == 0) return -EIO;
                 return result;
@@ -679,7 +685,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
             remaining -= (uint64_t)result;
             if ((uint64_t)result < chunk) break;
         }
-        if (heap_buf) kfree(kbuf);
+        if (heap_buf) sys_rw_free(kbuf, work_size);
         return (int)total;
     }
 
@@ -687,14 +693,14 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
         if (tfd->type == FD_TYPE_PIPE_W || tfd->type == FD_TYPE_PIPE_RW) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return -EBADF;
             }
             while (remaining > 0) {
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
                 if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     if (total > 0) return (int)total;
                     return -EFAULT;
                 }
@@ -703,13 +709,13 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     pipe_flags = pipe_lock_irqsave(p);
                     if (p->readers <= 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
-                        if (heap_buf) kfree(kbuf);
+                        if (heap_buf) sys_rw_free(kbuf, work_size);
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -EPIPE;
                     }
                     if (chunk - done > UINT64_MAX - p->count) {
                         pipe_unlock_irqrestore(p, pipe_flags);
-                        if (heap_buf) kfree(kbuf);
+                        if (heap_buf) sys_rw_free(kbuf, work_size);
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -ENOMEM;
                     }
@@ -717,20 +723,20 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     if (bytes > p->buf_size &&
                         pipe_resize_buffer(p, bytes) < 0 && p->buf_size == 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
-                        if (heap_buf) kfree(kbuf);
+                        if (heap_buf) sys_rw_free(kbuf, work_size);
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -ENOMEM;
                     }
                     if (!p->buffer || p->buf_size == 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
-                        if (heap_buf) kfree(kbuf);
+                        if (heap_buf) sys_rw_free(kbuf, work_size);
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -EIO;
                     }
                     while (p->count == p->buf_size) {
                         if (tfd->flags & VFS_O_NONBLOCK) {
                             pipe_unlock_irqrestore(p, pipe_flags);
-                            if (heap_buf) kfree(kbuf);
+                            if (heap_buf) sys_rw_free(kbuf, work_size);
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EAGAIN;
                         }
@@ -741,14 +747,14 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         pipe_unlock_irqrestore(p, pipe_flags);
                         schedule();
                         if (syscall_core_interrupted()) {
-                            if (heap_buf) kfree(kbuf);
+                            if (heap_buf) sys_rw_free(kbuf, work_size);
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EINTR;
                         }
                         pipe_flags = pipe_lock_irqsave(p);
                         if (p->readers <= 0) {
                             pipe_unlock_irqrestore(p, pipe_flags);
-                            if (heap_buf) kfree(kbuf);
+                            if (heap_buf) sys_rw_free(kbuf, work_size);
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EPIPE;
                         }
@@ -774,12 +780,12 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                 total += chunk;
                 remaining -= chunk;
             }
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return (int)total;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             if ((tfd->flags & 3) == VFS_O_RDONLY) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return -EBADF;
             }
             node = (vfs_node_t *)tfd->node;
@@ -790,17 +796,17 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                 chunk = remaining;
                 if (chunk > work_size) chunk = work_size;
                 if (copy_from_user(kbuf, (const void *)(buf_addr + total), chunk) < 0) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     if (total > 0) return (int)total;
                     return -EFAULT;
                 }
                 bytes = vfs_write(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if ((int64_t)bytes < 0 && (int64_t)bytes >= -4095) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return total ? (int)total : (int)(int64_t)bytes;
                 }
                 if (bytes == 0) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     if (total > 0) return (int)total;
                     return -EIO;
                 }
@@ -809,16 +815,16 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                 if (bytes < chunk) break;
             }
             task_fd_position_add(tfd, total);
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return (int)total;
         }
         if (tfd->type != FD_TYPE_STDOUT && tfd->type != FD_TYPE_STDERR) {
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return -EBADF;
         }
     }
 
-    if (heap_buf) kfree(kbuf);
+    if (heap_buf) sys_rw_free(kbuf, work_size);
     return -EBADF;
 }
 
@@ -935,12 +941,14 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
 
     work_size = (uint64_t)len;
     heap_buf = 0;
-    if (work_size <= SYS_RW_STACK_BUF) {
-        kbuf = stack_buf;
-    } else {
+    kbuf = stack_buf;
+    if (work_size > SYS_RW_STACK_BUF &&
+        (is_socket_fd(fd) || (tfd && tfd->type == FD_TYPE_FILE && tfd->node))) {
         kbuf = sys_rw_buffer(tfd, &work_size);
         if (!kbuf) return -ENOMEM;
         heap_buf = 1;
+    } else if (work_size > SYS_RW_STACK_BUF) {
+        work_size = SYS_RW_STACK_BUF;
     }
     total = 0;
     remaining = (uint64_t)len;
@@ -951,12 +959,12 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             if (chunk > work_size) chunk = work_size;
             result = socket_read(fd, kbuf, (int)chunk);
             if (result <= 0) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 if (total > 0) return (int)total;
                 return result;
             }
             if (copy_to_user((void *)(buf_addr + total), kbuf, (uint64_t)result) < 0) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 if (total > 0) return (int)total;
                 return -EFAULT;
             }
@@ -964,7 +972,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             remaining -= (uint64_t)result;
             if ((uint64_t)result < chunk) break;
         }
-        if (heap_buf) kfree(kbuf);
+        if (heap_buf) sys_rw_free(kbuf, work_size);
         return (int)total;
     }
 
@@ -972,19 +980,20 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
         if (tfd->type == FD_TYPE_PIPE_R || tfd->type == FD_TYPE_PIPE_RW) {
             p = (pipe_t *)tfd->private_data;
             if (!p) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return -EBADF;
             }
             pipe_flags = pipe_lock_irqsave(p);
+pipe_wait:
             while (p->count == 0) {
                 if (p->writers <= 0) {
                     pipe_unlock_irqrestore(p, pipe_flags);
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return 0;
                 }
                 if (tfd->flags & VFS_O_NONBLOCK) {
                     pipe_unlock_irqrestore(p, pipe_flags);
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return -EAGAIN;
                 }
                 lock_scheduler();
@@ -994,7 +1003,7 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 pipe_unlock_irqrestore(p, pipe_flags);
                 schedule();
                 if (syscall_core_interrupted()) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return -EINTR;
                 }
                 pipe_flags = pipe_lock_irqsave(p);
@@ -1004,8 +1013,17 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 p->read_pos = 0;
                 p->write_pos = 0;
                 pipe_unlock_irqrestore(p, pipe_flags);
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return -EIO;
+            }
+            if (!heap_buf && (uint64_t)len > work_size && p->count > work_size) {
+                work_size = p->count < (uint64_t)len ? p->count : (uint64_t)len;
+                pipe_unlock_irqrestore(p, pipe_flags);
+                kbuf = sys_rw_buffer(tfd, &work_size);
+                if (!kbuf) return -ENOMEM;
+                heap_buf = 1;
+                pipe_flags = pipe_lock_irqsave(p);
+                goto pipe_wait;
             }
             avail = p->count;
             to_read = (uint64_t)len;
@@ -1026,21 +1044,21 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             pipe_unlock_irqrestore(p, pipe_flags);
             descriptor_ready_notify_key((uint64_t)(uintptr_t)p);
             if (copy_to_user((void *)buf_addr, kbuf, to_read) < 0) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return -EFAULT;
             }
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return (int)to_read;
         }
         if (tfd->type == FD_TYPE_FILE && tfd->node) {
             node = (vfs_node_t *)tfd->node;
             if (task_fd_position_is_eof(tfd)) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return 0;
             }
             if (node->length > 0 &&
                 task_fd_position_get(tfd) >= node->length) {
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return 0;
             }
             if ((tfd->flags & VFS_O_NONBLOCK) &&
@@ -1048,10 +1066,10 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                  strcmp(vfs_node_name(node), "event1") == 0)) {
                 bytes = evdev_read_nonblocking(node, work_size, kbuf);
                 if (bytes > 0 && copy_to_user((void *)buf_addr, kbuf, bytes) < 0) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return -EFAULT;
                 }
-                if (heap_buf) kfree(kbuf);
+                if (heap_buf) sys_rw_free(kbuf, work_size);
                 return bytes > 0 ? (int)bytes : -EAGAIN;
             }
             while (remaining > 0) {
@@ -1059,13 +1077,13 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
                 if (chunk > work_size) chunk = work_size;
                 bytes = vfs_read(node, task_fd_position_get(tfd) + total, chunk, kbuf);
                 if ((int64_t)bytes < 0 && !total) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     return (int)(int64_t)bytes;
                 }
                 if (bytes > chunk) bytes = 0;
                 if (bytes == 0) break;
                 if (copy_to_user((void *)(buf_addr + total), kbuf, bytes) < 0) {
-                    if (heap_buf) kfree(kbuf);
+                    if (heap_buf) sys_rw_free(kbuf, work_size);
                     if (total > 0) return (int)total;
                     return -EFAULT;
                 }
@@ -1076,16 +1094,16 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
             task_fd_position_add(tfd, total);
             if (node->length == 0 && total < (uint64_t)len)
                 task_fd_position_mark_eof(tfd);
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return (int)total;
         }
         if (tfd->type != FD_TYPE_STDIN) {
-            if (heap_buf) kfree(kbuf);
+            if (heap_buf) sys_rw_free(kbuf, work_size);
             return -EBADF;
         }
     }
 
-    if (heap_buf) kfree(kbuf);
+    if (heap_buf) sys_rw_free(kbuf, work_size);
 
     if (fd == 0) {
         int con_id = current_task ? current_task->console_id : console_get_current();

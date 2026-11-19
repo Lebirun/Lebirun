@@ -62,12 +62,16 @@ extern void temp_unmap_raw(uint64_t temp_virt);
 
 bool test_bit(uint64_t frame_idx);
 
+typedef uint64_t __attribute__((may_alias)) pfa_word_t;
+
 void pfa_lock_acquire(uint64_t *eflags_out) {
     __asm__ volatile ("pushf; pop %0" : "=r"(*eflags_out));
     __asm__ volatile ("cli");
     while (__sync_lock_test_and_set(&pfa_lock, 1)) {
-        smp_tlb_flush_poll();
-        __asm__ volatile ("pause" ::: "memory");
+        do {
+            smp_tlb_flush_poll();
+            __asm__ volatile ("pause" ::: "memory");
+        } while (pfa_lock);
     }
 }
 
@@ -280,6 +284,49 @@ bool test_bit(uint64_t frame_idx) {
     return bitmap_test_raw(frame_idx);
 }
 
+static uint64_t leaf_find_free(const uint8_t *leaf, uint64_t from,
+                               uint64_t to) {
+    const pfa_word_t *words;
+    uint64_t base;
+    uint64_t bit;
+    uint64_t end;
+    uint64_t w;
+
+    words = (const pfa_word_t *)leaf;
+    base = from - from % PFA_SPARSE_CHUNK_FRAMES;
+    bit = from - base;
+    end = to - base;
+    while (bit < end) {
+        w = ~words[bit / 64] & (~0ULL << (bit % 64));
+        if (w) {
+            bit = (bit & ~63ULL) + (uint64_t)__builtin_ctzll(w);
+            return bit < end ? base + bit : to;
+        }
+        bit = (bit | 63) + 1;
+    }
+    return to;
+}
+
+static uint64_t frame_usable_span(uint64_t frame, uint64_t to,
+                                  uint64_t *end_out) {
+    uint64_t next;
+    uint64_t start;
+    uint64_t end;
+    uint64_t i;
+
+    next = to;
+    for (i = 0; i < num_regions; i++) {
+        start = (memory_map[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
+        end = (memory_map[i].base + memory_map[i].length) / PAGE_SIZE;
+        if (frame >= start && frame < end) {
+            *end_out = end;
+            return frame;
+        }
+        if (start > frame && start < next) next = start;
+    }
+    return next;
+}
+
 static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
                                         uint64_t num) {
     uint64_t frame_idx;
@@ -289,28 +336,36 @@ static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
     uint64_t region_end;
     uint64_t region_phys_end;
     uint64_t chunk_end;
-    uint64_t bit_idx;
-    uint64_t byte_base;
-    uint64_t available;
+    uint64_t next;
     uint64_t j;
     uint64_t run;
     uint64_t run_start;
     uint8_t *leaf;
-    uint8_t used;
-    uint8_t free_bits;
 
     if (to <= from || num == 0) return 0;
     if (num != 1) {
         run = 0;
         run_start = from;
-        for (frame_idx = from; frame_idx < to; frame_idx++) {
-            if (test_bit(frame_idx)) {
+        region_end = from;
+        frame_idx = from;
+        while (frame_idx < to) {
+            if (frame_idx >= region_end) {
+                next = frame_usable_span(frame_idx, to, &region_end);
+                if (next != frame_idx) {
+                    run = 0;
+                    frame_idx = next;
+                    continue;
+                }
+            }
+            if (frame_idx >= bitmap_entries_used ||
+                bitmap_test_raw(frame_idx)) {
                 run = 0;
-                run_start = frame_idx + 1;
+                frame_idx++;
                 continue;
             }
             if (run == 0) run_start = frame_idx;
             run++;
+            frame_idx++;
             if (run < num) continue;
             if (bitmap_prepare_range(run_start, num) != 0) return 0;
             for (j = 0; j < num; j++) set_bit(run_start + j);
@@ -334,28 +389,18 @@ static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
         frame_end = region_end < to ? region_end : to;
         if (frame_end <= frame_idx) continue;
         while (frame_idx < frame_end) {
-            bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
-            chunk_end = frame_idx +
-                        (PFA_SPARSE_CHUNK_FRAMES - bit_idx);
+            chunk_end = frame_idx + (PFA_SPARSE_CHUNK_FRAMES -
+                                     frame_idx % PFA_SPARSE_CHUNK_FRAMES);
             if (chunk_end > frame_end) chunk_end = frame_end;
             leaf = bitmap_get_leaf(frame_idx);
             if (!leaf) {
                 run_start = frame_idx;
             } else {
-                bit_idx = frame_idx % PFA_SPARSE_CHUNK_FRAMES;
-                byte_base = frame_idx - (bit_idx & 7);
-                used = leaf[bit_idx / 8];
-                used |= (uint8_t)((1u << (bit_idx & 7)) - 1u);
-                available = chunk_end - byte_base;
-                if (available < 8)
-                    used |= (uint8_t)(0xFFu << available);
-                free_bits = (uint8_t)~used;
-                if (!free_bits) {
-                    frame_idx = byte_base + 8;
+                run_start = leaf_find_free(leaf, frame_idx, chunk_end);
+                if (run_start >= chunk_end) {
+                    frame_idx = chunk_end;
                     continue;
                 }
-                run_start = byte_base +
-                            (uint64_t)__builtin_ctz((unsigned)free_bits);
             }
             if (bitmap_prepare_range(run_start, 1) != 0) return 0;
             set_bit(run_start);
@@ -953,8 +998,10 @@ static void refht_lock_acquire(uint64_t *eflags_out) {
 
     __asm__ volatile("pushf; pop %0; cli" : "=r"(ef));
     while (__sync_lock_test_and_set(&refht_lock_val, 1)) {
-        smp_tlb_flush_poll();
-        __asm__ volatile("pause");
+        do {
+            smp_tlb_flush_poll();
+            __asm__ volatile("pause" ::: "memory");
+        } while (refht_lock_val);
     }
     *eflags_out = ef;
 }
@@ -1143,7 +1190,8 @@ static uint64_t refht_release(uint64_t phys_addr, int cow, int *free_page) {
     int remove;
 
     if (free_page) *free_page = 0;
-    if (!refht_initialized) {
+    if (!refht_initialized ||
+        !__atomic_load_n(&refht_active_node_count, __ATOMIC_ACQUIRE)) {
         if (free_page && cow) *free_page = 1;
         return 0;
     }
