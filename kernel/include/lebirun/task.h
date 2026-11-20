@@ -319,7 +319,6 @@ task_t* create_kernel_task(void (*entry)(void), task_state_t initial_state);
 void schedule(void);
 registers_t* schedule_from_irq(registers_t* regs);
 extern void save_context(void);
-extern void switch_to(task_t* next);
 void lock_scheduler(void);
 void unlock_scheduler(void);
 void add_task_to_runqueue(task_t* new_task);
@@ -427,7 +426,7 @@ int task_futex_wake(uint64_t key, int count);
 int task_futex_wake_bitset(uint64_t key, int count, uint32_t bitset);
 int task_futex_wake_in(task_t *task, const int *uaddr, int count);
 int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
-                       int requeue_count);
+                       int requeue_count, const int *cmp_uaddr, int expected);
 
 void set_syscall_frame(registers_t *frame);
 void task_cpu_tick_stop(void);

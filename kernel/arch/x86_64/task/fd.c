@@ -28,7 +28,7 @@ int task_fd_alloc(task_t *task) {
     int ret;
 
     if (!task || !task->fds) return -1;
-    for (i = 3; i < task->fds_capacity; i++) {
+    for (i = 0; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use) {
             memset(&task->fds[i], 0, sizeof(task_fd_t));
             task->fds[i].in_use = 1;
@@ -38,7 +38,7 @@ int task_fd_alloc(task_t *task) {
     }
     ret = task_fd_ensure_capacity(task, task->fds_capacity);
     if (ret != 0) return -1;
-    for (i = 3; i < task->fds_capacity; i++) {
+    for (i = 0; i < task->fds_capacity; i++) {
         if (!task->fds[i].in_use) {
             memset(&task->fds[i], 0, sizeof(task_fd_t));
             task->fds[i].in_use = 1;

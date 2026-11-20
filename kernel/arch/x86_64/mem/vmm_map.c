@@ -887,6 +887,22 @@ int vmm_copy_user_page(uint64_t pml4_phys, uint64_t addr, void *buf,
     return phys ? 0 : -1;
 }
 
+int vmm_clear_user_page(uint64_t pml4_phys, uint64_t addr, uint64_t size) {
+    uint64_t phys;
+    uint64_t saved_flags;
+    void *view;
+
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(saved_flags) :: "memory");
+    phys = vmm_get_user_page_in_pml4(pml4_phys, addr & ~0xFFFULL, 1);
+    if (phys) {
+        view = vmm_phys_map(phys, TEMP_SLOT(3));
+        memset((uint8_t *)view + (addr & 0xFFF), 0, size);
+        vmm_phys_unmap(view, TEMP_SLOT(3));
+    }
+    if (saved_flags & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
+    return phys ? 0 : -1;
+}
+
 void vmm_copy_to_pml4(uint64_t pd_phys, uint64_t dest_virt, const void *src, uint64_t size) {
     const uint8_t *s = (const uint8_t *)src;
     uint64_t offset = 0;

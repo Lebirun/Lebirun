@@ -101,20 +101,18 @@ int copy_to_user(void *dest, const void *src, size_t size) {
 }
 
 int clear_user(void *dest, size_t size) {
-    uint8_t zeroes[64];
     uint64_t address;
-    size_t chunk;
-    size_t remaining;
+    uint64_t chunk;
 
     if (!user_access_ok(dest, size, UACCESS_WRITE)) return -1;
-    memset(zeroes, 0, sizeof(zeroes));
     address = (uint64_t)(uintptr_t)dest;
-    remaining = size;
-    while (remaining != 0) {
-        chunk = remaining < sizeof(zeroes) ? remaining : sizeof(zeroes);
-        vmm_copy_to_pml4(current_task->pml4_phys, address, zeroes, chunk);
+    while (size != 0) {
+        chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+        if (chunk > size) chunk = size;
+        if (vmm_clear_user_page(current_task->pml4_phys, address, chunk) < 0)
+            return -1;
         address += chunk;
-        remaining -= chunk;
+        size -= chunk;
     }
     return 0;
 }

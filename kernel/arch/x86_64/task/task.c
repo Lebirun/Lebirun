@@ -500,12 +500,14 @@ void task_set_vring(task_t *task, uint8_t vring_minor) {
 static int cached_proc_count = 1;
 
 void task_update_cached_stats(void) {
+    task_t *t;
     int count;
-    int i;
 
+    if (!spin_trylock(&sched_lock)) return;
     count = 0;
-    for (i = 0; i < cpu_count; i++)
-        count += (int)cpus[i].nr_running;
+    for (t = all_tasks_head; t && task_ptr_valid(t); t = t->all_next)
+        if (t->state != TASK_DEAD) count++;
+    spin_unlock(&sched_lock);
     if (count < 1) count = 1;
     cached_proc_count = count;
 }

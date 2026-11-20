@@ -24,30 +24,73 @@ uint64_t task_futex_key(task_t *task, const int *uaddr, int private_futex) {
     return physical ? physical + (address & (PAGE_SIZE - 1)) : 0;
 }
 
+static task_t *futex_buckets[16];
+
+static task_t **futex_bucket(uint64_t key) {
+    key ^= key >> 29;
+    key *= 0x9E3779B97F4A7C15ULL;
+    return &futex_buckets[key >> 60];
+}
+
+static void futex_append_locked(task_t *task, uint64_t key) {
+    task_t **link;
+
+    link = futex_bucket(key);
+    while (*link) link = &(*link)->wait_next;
+    task->wait_next = NULL;
+    task->waiting_queue = (wait_queue_t *)(uintptr_t)key;
+    task->in_wait_queue = TASK_WAIT_QUEUE_FUTEX;
+    *link = task;
+}
+
+void futex_unlink_locked(task_t *task) {
+    task_t **link;
+
+    link = futex_bucket((uint64_t)(uintptr_t)task->waiting_queue);
+    while (*link && *link != task) link = &(*link)->wait_next;
+    if (*link) *link = task->wait_next;
+    task->wait_next = NULL;
+    task->in_wait_queue = 0;
+    task->waiting_queue = NULL;
+}
+
 static int futex_key_match(task_t *task, uint64_t key, task_vm_t *vm) {
-    return task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX &&
-           (uint64_t)(uintptr_t)task->waiting_queue == key &&
+    return (uint64_t)(uintptr_t)task->waiting_queue == key &&
            (!(key & FUTEX_KEY_PRIVATE) || task->vm == vm);
+}
+
+static void futex_wake_locked(task_t **link, task_t *task) {
+    *link = task->wait_next;
+    task->wait_next = NULL;
+    task->in_wait_queue = 0;
+    task->waiting_queue = NULL;
+    task->futex_bitset = 0;
+    sleepq_remove(task);
+    task_mark_ready_locked(task);
+}
+
+static int futex_read_locked(const int *uaddr, int *value) {
+    for (;;) {
+        if (copy_from_user(value, uaddr, sizeof(*value)) < 0)
+            return -KERR_EFAULT;
+        lock_scheduler();
+        if (vmm_copy_user_page(current_task->pml4_phys,
+                               (uint64_t)(uintptr_t)uaddr, value,
+                               sizeof(*value), 0) == 0) return 0;
+        unlock_scheduler();
+    }
 }
 
 int task_futex_wait(uint64_t key, const int *uaddr, int expected,
                     uint64_t timeout_ticks, uint32_t bitset) {
     int value;
     int timed_out;
+    int woken;
     uint64_t wake_deadline_ns;
 
     if (!current_task || !uaddr || key == 0) return -KERR_EFAULT;
     if (bitset == 0) return -KERR_EINVAL;
-    for (;;) {
-        if (copy_from_user(&value, uaddr, sizeof(value)) < 0)
-            return -KERR_EFAULT;
-        if (value != expected) return -KERR_EAGAIN;
-        lock_scheduler();
-        if (vmm_copy_user_page(current_task->pml4_phys,
-                               (uint64_t)(uintptr_t)uaddr, &value,
-                               sizeof(value), 0) == 0) break;
-        unlock_scheduler();
-    }
+    if (futex_read_locked(uaddr, &value) < 0) return -KERR_EFAULT;
     if (value != expected) {
         unlock_scheduler();
         return -KERR_EAGAIN;
@@ -60,8 +103,7 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
         unlock_scheduler();
         return -KERR_EAGAIN;
     }
-    current_task->waiting_queue = (wait_queue_t *)(uintptr_t)key;
-    current_task->in_wait_queue = TASK_WAIT_QUEUE_FUTEX;
+    futex_append_locked(current_task, key);
     current_task->futex_bitset = bitset;
     current_task->state = TASK_BLOCKED;
     if (timeout_ticks != UINT64_MAX) {
@@ -74,10 +116,12 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
 
     lock_scheduler();
     timed_out = current_task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX;
+    woken = !timed_out && current_task->futex_bitset == 0;
     task_remove_wait_locked(current_task);
     current_task->futex_bitset = 0;
     sleepq_remove(current_task);
     unlock_scheduler();
+    if (woken) return 0;
     if (task_has_pending_signals()) return -KERR_EINTR;
     if (timed_out) return -KERR_ETIMEDOUT;
     return 0;
@@ -85,6 +129,7 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
 
 static int futex_wake(task_vm_t *vm, uint64_t key, int count,
                       uint32_t bitset) {
+    task_t **link;
     task_t *task;
     int woken;
 
@@ -94,16 +139,15 @@ static int futex_wake(task_vm_t *vm, uint64_t key, int count,
     if (count == 0) return 0;
     woken = 0;
     lock_scheduler();
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task) && woken < count) {
+    link = futex_bucket(key);
+    while ((task = *link) && woken < count) {
         if (futex_key_match(task, key, vm) &&
             (task->futex_bitset & bitset) != 0) {
-            task_remove_wait_locked(task);
-            sleepq_remove(task);
-            task_mark_ready_locked(task);
+            futex_wake_locked(link, task);
             woken++;
+        } else {
+            link = &task->wait_next;
         }
-        task = task->all_next;
     }
     unlock_scheduler();
     return woken;
@@ -125,9 +169,13 @@ int task_futex_wake_in(task_t *task, const int *uaddr, int count) {
 }
 
 int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
-                       int requeue_count) {
+                       int requeue_count, const int *cmp_uaddr, int expected) {
+    task_t **link;
     task_t *task;
+    task_t *moved;
+    task_t **moved_tail;
     task_vm_t *vm;
+    int value;
     int woken;
     int requeued;
 
@@ -136,21 +184,35 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
     vm = current_task->vm;
     woken = 0;
     requeued = 0;
-    lock_scheduler();
-    task = all_tasks_head;
-    while (task && task_ptr_valid(task)) {
-        if (futex_key_match(task, old_key, vm)) {
-            if (woken < wake_count) {
-                task_remove_wait_locked(task);
-                sleepq_remove(task);
-                task_mark_ready_locked(task);
-                woken++;
-            } else if (requeued < requeue_count) {
-                task->waiting_queue = (wait_queue_t *)(uintptr_t)new_key;
-                requeued++;
-            }
+    moved = NULL;
+    moved_tail = &moved;
+    if (cmp_uaddr) {
+        if (futex_read_locked(cmp_uaddr, &value) < 0) return -KERR_EFAULT;
+        if (value != expected) {
+            unlock_scheduler();
+            return -KERR_EAGAIN;
         }
-        task = task->all_next;
+    } else {
+        lock_scheduler();
+    }
+    link = futex_bucket(old_key);
+    while ((task = *link) && (woken < wake_count || requeued < requeue_count)) {
+        if (!futex_key_match(task, old_key, vm)) {
+            link = &task->wait_next;
+        } else if (woken < wake_count) {
+            futex_wake_locked(link, task);
+            woken++;
+        } else {
+            *link = task->wait_next;
+            task->wait_next = NULL;
+            *moved_tail = task;
+            moved_tail = &task->wait_next;
+            requeued++;
+        }
+    }
+    while ((task = moved)) {
+        moved = task->wait_next;
+        futex_append_locked(task, new_key);
     }
     unlock_scheduler();
     return woken + requeued;

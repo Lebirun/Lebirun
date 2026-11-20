@@ -8,7 +8,7 @@ void sleepq_remove(task_t* t) {
     task_t **ptr;
     task_t *cur;
 
-    if (!t) return;
+    if (!t || !t->in_sleep_queue) return;
     ptr = &sleep_queue_head;
     while (*ptr) {
         cur = *ptr;
@@ -106,9 +106,7 @@ void task_remove_wait_locked(task_t *task) {
         task->waiting_queue) {
         waitq_remove_locked(task->waiting_queue, task);
     } else if (task->in_wait_queue == TASK_WAIT_QUEUE_FUTEX) {
-        task->in_wait_queue = 0;
-        task->waiting_queue = NULL;
-        task->wait_next = NULL;
+        futex_unlink_locked(task);
     }
 }
 

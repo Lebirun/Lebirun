@@ -357,15 +357,23 @@ static uint64_t find_free_frames_bitmap(uint64_t from, uint64_t to,
                     continue;
                 }
             }
-            if (frame_idx >= bitmap_entries_used ||
-                bitmap_test_raw(frame_idx)) {
+            if (frame_idx >= bitmap_entries_used) return 0;
+            chunk_end = frame_idx - frame_idx % PFA_SPARSE_CHUNK_FRAMES +
+                        PFA_SPARSE_CHUNK_FRAMES;
+            if (chunk_end > region_end) chunk_end = region_end;
+            if (chunk_end > to) chunk_end = to;
+            if (chunk_end > bitmap_entries_used) chunk_end = bitmap_entries_used;
+            leaf = bitmap_get_leaf(frame_idx);
+            if (leaf && bitmap_test_raw(frame_idx)) {
                 run = 0;
-                frame_idx++;
+                frame_idx = leaf_find_free(leaf, frame_idx, chunk_end);
                 continue;
             }
             if (run == 0) run_start = frame_idx;
-            run++;
-            frame_idx++;
+            next = leaf ? 1 : chunk_end - frame_idx;
+            if (next > num - run) next = num - run;
+            run += next;
+            frame_idx += next;
             if (run < num) continue;
             if (bitmap_prepare_range(run_start, num) != 0) return 0;
             for (j = 0; j < num; j++) set_bit(run_start + j);

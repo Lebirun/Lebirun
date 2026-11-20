@@ -81,7 +81,6 @@ extern void copy_file_range_release_task(void *owner);
 extern int cpu_count;
 extern volatile uint64_t tick_count;
 extern volatile uint64_t task_context_switches;
-extern void switch_to_asm(uint64_t* old_rsp, uint64_t new_rsp);
 extern void posix_timers_release_task(task_t *task);
 extern void task_timer_check(void);
 
@@ -121,6 +120,7 @@ void sleepq_remove(task_t* t);
 uint64_t sleepq_deadline_after_ticks(uint64_t ticks);
 void sleepq_insert(task_t *task);
 void task_remove_wait_locked(task_t *task);
+void futex_unlink_locked(task_t *task);
 void descriptor_ready_drain_irq_locked(void);
 void descriptor_ready_try_drain_irq(void);
 void task_vm_abandon(task_t *t);

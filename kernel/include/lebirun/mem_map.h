@@ -255,6 +255,7 @@ int vmm_access_user_in_pml4(uint64_t pml4_phys, uint64_t addr, void *buf,
                             uint64_t size, int write);
 int vmm_copy_user_page(uint64_t pml4_phys, uint64_t addr, void *buf,
                        uint64_t size, int write);
+int vmm_clear_user_page(uint64_t pml4_phys, uint64_t addr, uint64_t size);
 
 void vmm_temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
 void vmm_temp_unmap_raw(uint64_t temp_virt);

@@ -1,6 +1,7 @@
 #include "task_priv.h"
 
 static void task_rq_rebalance_locked(task_t *task);
+static void task_rq_insert_locked(task_t *task, int cpu);
 
 int task_timeslice_for_nice(int nice_value) {
     int slice;
@@ -353,8 +354,11 @@ void task_mark_ready_locked(task_t *task) {
 
     if (!task || task->state != TASK_BLOCKED) return;
     task->state = TASK_READY;
-    if (!smp_scheduling_enabled() || !smp_percpu_irq_ready) return;
     owner = task->running_cpu;
+    if (!task->next && cpus)
+        task_rq_insert_locked(task, owner < -1 && -(owner + 2) < cpu_count ?
+                              -(owner + 2) : task_pick_cpu(task));
+    if (!smp_scheduling_enabled() || !smp_percpu_irq_ready) return;
     if (owner == -1) task_kick_stopped_cpu_locked(task);
     if (owner >= -1) return;
     target = -(owner + 2);
@@ -480,6 +484,8 @@ static void task_rq_rebalance_locked(task_t *task) {
 static task_t *task_find_idle_locked(void) {
     task_t *t;
 
+    t = bootstrap_task;
+    if (t && t->id == 0 && !t->is_user && !t->resources_released) return t;
     t = all_tasks_head;
     while (t) {
         if (!task_ptr_valid(t)) break;
@@ -487,39 +493,6 @@ static task_t *task_find_idle_locked(void) {
         t = t->all_next;
     }
     return NULL;
-}
-
-void switch_to(task_t* next) {
-    uint64_t rsp0;
-    task_t *prev;
-
-    if (next == current_task) return;
-
-    prev = current_task;
-    task_set_current(next);
-    prev->state = TASK_READY;
-    next->state = TASK_RUNNING;
-
-    if (next->kernel_stack_base && next->kernel_stack_size) {
-        rsp0 = (uint64_t)next->kernel_stack_base + next->kernel_stack_size;
-        tss_set_rsp0(rsp0);
-    }
-
-    if (next->regs.rsp != 0 && 
-        !((next->regs.rsp >= KERNEL_VMA && next->regs.rsp < HEAP_START) ||
-          (next->regs.rsp >= HEAP_START && next->regs.rsp < kernel_heap.max_addr) ||
-          kstack_is_in_region(next->regs.rsp))) {
-        printf("Switch guard: bad rsp 0x%016lX for task %d\n", next->regs.rsp, next->id);
-        return;
-    }
-
-    prev->cr3 = read_cr3();
-    if (prev->fpu_state) fpu_save_area(prev->fpu_state);
-    if (next->fpu_state) fpu_restore_area(next->fpu_state);
-
-    switch_to_asm(&prev->regs.rsp, next->regs.rsp);
-
-    next->cr3 = read_cr3();
 }
 
 void schedule(void) {
@@ -932,6 +905,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         if (!this_cpu->switching_task)
             __atomic_store_n(&this_cpu->switching_task, prev_task, __ATOMIC_RELEASE);
         task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
+        if (prev_task && prev_task->state == TASK_BLOCKED)
+            remove_task_from_runqueue(prev_task);
         task_rq_rebalance_locked(prev_task);
         this_cpu->running_task = NULL;
         this_cpu->irq_cr3 = 0;
@@ -963,6 +938,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         task_kick_stopped_cpu_locked(prev_task);
     }
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
+    if (prev_task && prev_task != next && prev_task->state == TASK_BLOCKED)
+        remove_task_from_runqueue(prev_task);
     task_rq_rebalance_locked(prev_task);
     next->state = TASK_RUNNING;
     task_set_current(next);

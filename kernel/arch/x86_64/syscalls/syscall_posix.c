@@ -793,7 +793,9 @@ static int sys_fstat(int fd, const char *buf_ptr, int unused) {
     if (!buf_ptr) return -EFAULT;
     memset(st, 0, sizeof(struct kernel_stat));
     
-    if (fd >= 0 && fd <= 2) {
+    if (fd_table[fd].type == FD_TYPE_STDIN ||
+        fd_table[fd].type == FD_TYPE_STDOUT ||
+        fd_table[fd].type == FD_TYPE_STDERR) {
         st->st_mode = S_IFCHR | 0620;
         st->st_rdev = 0x8801;
         st->st_blksize = 1024;

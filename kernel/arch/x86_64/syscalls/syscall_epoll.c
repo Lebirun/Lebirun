@@ -810,16 +810,14 @@ static int sys_futex(int *uaddr, const char *op_ptr, int val,
             ret = futex_get_key(uaddr2, private_futex, &key2);
             if (ret < 0) return ret;
             return task_futex_requeue(key, key2, val,
-                                      (int)(uintptr_t)timeout);
+                                      (int)(uintptr_t)timeout, NULL, 0);
 
         case FUTEX_CMP_REQUEUE:
             ret = futex_get_key(uaddr2, private_futex, &key2);
             if (ret < 0) return ret;
-            if (copy_from_user(&value, uaddr, sizeof(value)) < 0)
-                return -EFAULT;
-            if (value != (int)val3) return -EAGAIN;
             return task_futex_requeue(key, key2, val,
-                                      (int)(uintptr_t)timeout);
+                                      (int)(uintptr_t)timeout, uaddr,
+                                      (int)val3);
 
         case FUTEX_WAKE_OP:
             operation = (int)((val3 >> 28) & 0xF);
