@@ -496,33 +496,8 @@ static void fd_retain_entry(task_fd_t *tfd) {
 }
 
 static int fd_alloc_from(int start) {
-    int capacity;
-    int i;
-    int ret;
-
     if (!current_task) return -1;
-    if (start < 0) start = 0;
-    capacity = current_task->fds_capacity;
-    for (i = start; i < capacity; i++) {
-        if (!fd_table[i].in_use) {
-            memset(&fd_table[i], 0, sizeof(task_fd_t));
-            fd_table[i].in_use = 1;
-            fd_table[i].ref_count = 1;
-            return i;
-        }
-    }
-    ret = task_fd_ensure_capacity(current_task, start >= capacity ? start : capacity);
-    if (ret != 0) return -1;
-    capacity = current_task->fds_capacity;
-    for (i = start; i < capacity; i++) {
-        if (!fd_table[i].in_use) {
-            memset(&fd_table[i], 0, sizeof(task_fd_t));
-            fd_table[i].in_use = 1;
-            fd_table[i].ref_count = 1;
-            return i;
-        }
-    }
-    return -1;
+    return task_fd_alloc(current_task, start < 0 ? 0 : start);
 }
 
 static int fd_alloc(void) {

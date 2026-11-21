@@ -738,6 +738,7 @@ static int task_exec_with_args_common(
     regs->err_code = 0;
     regs->rip = final_entry;
 
+    task_fd_unshare(current_task);
     task_fd_close_cloexec(current_task);
 
     {

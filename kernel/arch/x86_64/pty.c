@@ -286,7 +286,7 @@ static int pty_open_task_alias(const char *path, int flags) {
     } else {
         return PTY_OPEN_FALLBACK;
     }
-    fd = task_fd_alloc(current_task);
+    fd = task_fd_alloc(current_task, 0);
     if (fd < 0) {
         if (descriptor_type == FD_TYPE_PTY_MASTER)
             pty_close_master(endpoint);
@@ -363,7 +363,7 @@ int pty_open_path(const char *path, int flags) {
         return -1;
     }
     if (endpoint < 0) return -1;
-    fd = task_fd_alloc(current_task);
+    fd = task_fd_alloc(current_task, 0);
     if (fd < 0) {
         if (descriptor_type == FD_TYPE_PTY_MASTER)
             pty_close_master(endpoint);

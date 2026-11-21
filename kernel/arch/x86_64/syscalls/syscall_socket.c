@@ -312,35 +312,13 @@ static int socket_fd_index(task_t *task, int fd) {
 static int socket_fd_alloc_from(int idx, int flags, int start) {
     task_fd_t *descriptor;
     int fd;
-    int i;
 
     if (!current_task || start < 0 || idx < 0 || idx >= socket_capacity ||
         !sockets[idx].in_use)
         return -EMFILE;
-    fd = -1;
-    for (i = start; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) {
-            fd = i;
-            break;
-        }
-    }
-    if (fd < 0) {
-        if (task_fd_ensure_capacity(current_task,
-                                    start >= current_task->fds_capacity ?
-                                    start : current_task->fds_capacity) != 0)
-            return -EMFILE;
-        for (i = start; i < current_task->fds_capacity; i++) {
-            if (!current_task->fds[i].in_use) {
-                fd = i;
-                break;
-            }
-        }
-    }
+    fd = task_fd_alloc(current_task, start);
     if (fd < 0) return -EMFILE;
     descriptor = &current_task->fds[fd];
-    memset(descriptor, 0, sizeof(*descriptor));
-    descriptor->in_use = 1;
-    descriptor->ref_count = 1;
     descriptor->type = FD_TYPE_SOCKET;
     descriptor->flags = (uint64_t)flags;
     descriptor->private_data = (void *)(uintptr_t)(idx + 1);
@@ -2733,7 +2711,7 @@ static int sys_recvmsg(int sockfd, const char *msg_ptr, int flags) {
             cmsg.cmsg_level = SOL_SOCKET;
             cmsg.cmsg_type = SCM_RIGHTS;
             for (i = 0; i < nfds; i++) {
-                newfd = task_fd_alloc(current_task);
+                newfd = task_fd_alloc(current_task, 0);
                 if (newfd < 0) {
                     out_fds[i] = -1;
                     socket_release_pending_fd(&sock->pending_fds[i]);

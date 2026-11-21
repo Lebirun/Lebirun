@@ -305,7 +305,8 @@ static int sys_clone(int flags, const char *child_stack, int ptid,
     if (share_address_space &&
         (!child_stack || (uint64_t)(uintptr_t)child_stack < 0x1000 ||
          (uint64_t)(uintptr_t)child_stack >= KERNEL_VMA)) return -EFAULT;
-    return (int)task_fork(regs, share_address_space,
+    return (int)task_fork(regs, share_address_space |
+                          ((flags & 0x00000400) ? 4 : 0),
                           (uint64_t)(uintptr_t)child_stack, tls_base,
                           (int *)(uintptr_t)ptid, child_tid);
 }
@@ -363,7 +364,8 @@ static int sys_clone3(uint64_t uargs_addr, uint64_t usize, uint64_t unused2,
     if ((args.flags & 0x01000000u) &&
         (args.child_tid < 0x1000 || args.child_tid >= KERNEL_VMA))
         return -EFAULT;
-    return (int)task_fork(regs, share_address_space, stack_top,
+    return (int)task_fork(regs, share_address_space |
+                          ((args.flags & 0x00000400u) ? 4 : 0), stack_top,
                           (args.flags & 0x00080000u) ? args.tls : 0,
                           (args.flags & 0x00100000u) ?
                               (int *)(uintptr_t)args.parent_tid : NULL,

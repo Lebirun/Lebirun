@@ -126,33 +126,13 @@ int vfs_check_perm(vfs_node_t *node, int want) {
 }
 
 static int task_fd_alloc_from(int start) {
-    int i;
-    int ret;
+    int fd;
 
     if (!current_task || !current_task->fds) return -ESRCH;
-    if (start < 0) start = 0;
-    for (i = start; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) {
-            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-            current_task->fds[i].in_use = 1;
-            current_task->fds[i].ref_count = 1;
-            current_task->fds[i].type = FD_TYPE_FILE;
-            return i;
-        }
-    }
-    ret = task_fd_ensure_capacity(
-        current_task, start >= current_task->fds_capacity ?
-        start : current_task->fds_capacity);
-    if (ret != 0) return -EMFILE;
-    for (i = start; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) break;
-    }
-    if (i >= current_task->fds_capacity) return -EMFILE;
-    memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-    current_task->fds[i].in_use = 1;
-    current_task->fds[i].ref_count = 1;
-    current_task->fds[i].type = FD_TYPE_FILE;
-    return i;
+    fd = task_fd_alloc(current_task, start < 0 ? 0 : start);
+    if (fd < 0) return -EMFILE;
+    current_task->fds[fd].type = FD_TYPE_FILE;
+    return fd;
 }
 
 static char *resolve_cwd_path_alloc(const char *pathname) {

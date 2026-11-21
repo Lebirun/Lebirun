@@ -6,11 +6,7 @@ static void task_fork_child_cleanup(task_t *child,
     task_fd_close_all(child);
     socket_close_task(child);
     task_free_signal_data(child);
-    if (child->fds) {
-        kfree(child->fds);
-        child->fds = NULL;
-        child->fds_capacity = 0;
-    }
+    task_fd_free_table(child);
     task_vm_abandon(child);
     creds_release_task(child);
     task_rlimit_free(child);
@@ -37,17 +33,18 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     uint64_t physical;
     uint64_t page_flags;
     task_file_map_t area;
-    int parent_cap;
     uint8_t parent_stage;
     task_t* child;
     task_t* parent;
     registers_t *child_frame;
     registers_t parent_frame;
-    pipe_t *child_pipe;
     int owns_child_pd;
     int clone_error;
+    int share_files;
     pid_t child_pid;
 
+    share_files = share_address_space & 4;
+    share_address_space &= 3;
     parent = current_task;
     if (!parent || !parent->is_user || !parent_regs) {
         printf("task_fork: can only fork user tasks\n");
@@ -219,10 +216,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     child->tls_limit = parent->tls_limit;
     child->waiting_for_any_child = 0;
     memcpy(child->name, parent->name, sizeof(child->name));
-    parent_cap = parent->fds_capacity;
-    if (parent_cap < TASK_INIT_FDS) parent_cap = TASK_INIT_FDS;
-    child->fds = (task_fd_t *)kmalloc(parent_cap * sizeof(task_fd_t));
-    if (!child->fds) {
+    if (!share_files && task_fd_copy(child, parent) != 0) {
         task_free_fpu_state(child);
         task_free_cwd(child);
         creds_release_task(child);
@@ -233,29 +227,6 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         kstack_free(kernel_stack_base);
         if (owns_child_pd) vmm_free_pml4(child_pd);
         return -KERR_ENOMEM;
-    }
-    child->fds_capacity = parent_cap;
-    memset(child->fds, 0, parent_cap * sizeof(task_fd_t));
-    if (parent->fds && parent->fds_capacity > 0)
-        memcpy(child->fds, parent->fds, parent->fds_capacity * sizeof(task_fd_t));
-    for (i = 0; i < (uint64_t)child->fds_capacity; i++) {
-        if (child->fds[i].in_use && child->fds[i].ref_count > 0) {
-            child->fds[i].ref_count = parent->fds[i].ref_count;
-        }
-        if (child->fds[i].in_use && child->fds[i].type == FD_TYPE_FILE && child->fds[i].node) {
-            task_fd_position_share(&parent->fds[i], &child->fds[i]);
-            vfs_open((vfs_node_t *)child->fds[i].node, 0);
-        }
-        if (child->fds[i].in_use && FD_TYPE_IS_PTY(child->fds[i].type)) {
-            pty_retain_endpoint((int)(uintptr_t)child->fds[i].private_data);
-        }
-        if (child->fds[i].in_use && FD_TYPE_IS_PIPE(child->fds[i].type) && child->fds[i].private_data) {
-            child_pipe = (pipe_t *)child->fds[i].private_data;
-            pipe_retain_reference(child_pipe, child->fds[i].type);
-        }
-        if (child->fds[i].in_use && child->fds[i].type == FD_TYPE_SOCKET) {
-            socket_retain_task_fd(&child->fds[i]);
-        }
     }
     child->envp = NULL;
     child->envc = 0;
@@ -331,11 +302,16 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
                                 owns_child_pd, child_pd, kernel_stack_base);
         return -KERR_ENOMEM;
     }
+    if (share_files) {
+        spin_lock(&task_fd_array_lock);
+        task_fd_share(child, parent);
+    }
     lock_scheduler();
     child->all_next = all_tasks_head;
     all_tasks_head = child;
     add_task_to_runqueue(child);
     unlock_scheduler();
+    if (share_files) spin_unlock(&task_fd_array_lock);
 
     return child_pid;
 }
@@ -507,11 +483,14 @@ static pid_t task_create_thread_locked(void *(*entry)(void *), void *arg) {
     new_task->regs.ds = new_task->regs.es = new_task->regs.ss = 0x23;
     new_task->regs.rflags = 0x202;
     
+    spin_lock(&task_fd_array_lock);
+    task_fd_share(new_task, current_task);
     lock_scheduler();
     new_task->all_next = all_tasks_head;
     all_tasks_head = new_task;
     add_task_to_runqueue(new_task);
     unlock_scheduler();
+    spin_unlock(&task_fd_array_lock);
     
     return new_task->pid;
 

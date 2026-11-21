@@ -303,36 +303,12 @@ void tty_vt_release_owner(pid_t pid) {
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     pipe_t *p;
     int newfd;
-    int ret;
-    int i;
 
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
     if (minfd < 0) minfd = 0;
 
-    newfd = -1;
-    for (i = minfd; i < current_task->fds_capacity; i++) {
-        if (!current_task->fds[i].in_use) {
-            newfd = i;
-            memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-            current_task->fds[i].in_use = 1;
-            current_task->fds[i].ref_count = 1;
-            break;
-        }
-    }
-    if (newfd < 0) {
-        ret = task_fd_ensure_capacity(current_task, minfd >= current_task->fds_capacity ? minfd : current_task->fds_capacity);
-        if (ret != 0) return -EMFILE;
-        for (i = minfd; i < current_task->fds_capacity; i++) {
-            if (!current_task->fds[i].in_use) {
-                newfd = i;
-                memset(&current_task->fds[i], 0, sizeof(task_fd_t));
-                current_task->fds[i].in_use = 1;
-                current_task->fds[i].ref_count = 1;
-                break;
-            }
-        }
-    }
+    newfd = task_fd_alloc(current_task, minfd);
     if (newfd < 0) return -EMFILE;
 
     memcpy(&current_task->fds[newfd], &current_task->fds[oldfd], sizeof(task_fd_t));

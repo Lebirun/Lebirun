@@ -320,17 +320,12 @@ static void task_release_exit_resources(task_t *t) {
     t->regs.return_cr3 = 0;
     t->regs.saved_entry_cr3 = 0;
     event_descriptors_close_task(t->pid);
+    task_fd_detach(t);
     socket_close_task(t);
     file_locks_release_process(t->pid);
     copy_file_range_release_task(t);
     task_fd_close_all(t);
-    spin_lock(&task_fd_array_lock);
-    if (t->fds) {
-        kfree(t->fds);
-        t->fds = NULL;
-        t->fds_capacity = 0;
-    }
-    spin_unlock(&task_fd_array_lock);
+    task_fd_free_table(t);
     task_affinity_free(t);
     task_free_signal_data(t);
     task_rlimit_free(t);

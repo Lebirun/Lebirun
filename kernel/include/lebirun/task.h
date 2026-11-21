@@ -435,7 +435,7 @@ uint64_t task_next_wake_ns(void);
 void clear_syscall_frame(void);
 
 void task_init_fds(task_t *task);
-int task_fd_alloc(task_t *task);
+int task_fd_alloc(task_t *task, int start);
 int task_fd_ensure_capacity(task_t *task, int min_fd);
 void task_fd_reclaim_unused(task_t *task);
 void task_fd_free(task_t *task, int fd);
