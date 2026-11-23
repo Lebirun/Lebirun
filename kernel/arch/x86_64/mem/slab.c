@@ -335,6 +335,7 @@ static void *slab_small_allocate(size_t size, int *backing_failed) {
     uint32_t needed;
     uint32_t remaining;
     uint32_t c;
+    int largest;
 
     payload = ((uint32_t)size + 7u) & ~7u;
     needed = payload + sizeof(slab_block_t);
@@ -357,6 +358,7 @@ static void *slab_small_allocate(size_t size, int *backing_failed) {
         if (!block) return NULL;
     }
     remaining = block->span - needed;
+    largest = block->span >= page->max_free;
     if (remaining >= sizeof(slab_block_t) + 8) {
         remainder = (slab_block_t *)((uint8_t *)block + needed);
         remainder->span = remaining;
@@ -367,7 +369,7 @@ static void *slab_small_allocate(size_t size, int *backing_failed) {
     page->live_count++;
     page->payload_size += size;
     if (page == slab_small_spare) slab_small_spare = NULL;
-    slab_small_coalesce(page);
+    if (largest) slab_small_coalesce(page);
     return (uint8_t *)block + sizeof(slab_block_t);
 }
 

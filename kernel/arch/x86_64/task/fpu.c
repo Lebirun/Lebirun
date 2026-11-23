@@ -3,6 +3,7 @@
 static uint32_t fpu_mxcsr_mask;
 
 static uint64_t fpu_xcr0;
+static int fpu_xsaveopt;
 uint32_t fpu_state_size = FPU_STATE_SIZE;
 
 void KERNEL_INIT fpu_cpu_init(void) {
@@ -31,12 +32,18 @@ void KERNEL_INIT fpu_cpu_init(void) {
     if (!fpu_xcr0 && ebx > FPU_STATE_SIZE) {
         fpu_state_size = ebx;
         fpu_xcr0 = xcr0;
+        eax = 0xD;
+        ecx = 1;
+        __asm__ volatile ("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+        fpu_xsaveopt = eax & 1u;
     }
 }
 
 void fpu_save_area(uint8_t *area) {
     if (!area) return;
-    if (fpu_xcr0)
+    if (fpu_xsaveopt)
+        __asm__ volatile ("xsaveopt64 (%0)" : : "r"(area), "a"(~0u), "d"(~0u) : "memory");
+    else if (fpu_xcr0)
         __asm__ volatile ("xsave64 (%0)" : : "r"(area), "a"(~0u), "d"(~0u) : "memory");
     else
         __asm__ volatile ("fxsave64 (%0)" : : "r"(area) : "memory");

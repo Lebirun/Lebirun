@@ -899,7 +899,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         goto out_restore_cr3;
     }
 
-    if (prev_task && !dead_switch && prev_task->fpu_state)
+    if (prev_task && !dead_switch && prev_task->fpu_state && next != prev_task)
         fpu_save_area(prev_task->fpu_state);
     if (switch_to_cpu_idle) {
         if (!this_cpu->switching_task)
@@ -919,7 +919,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         task_kick_idle_cpus();
         return result;
     }
-    if (next->fpu_state) fpu_restore_area(next->fpu_state);
+    if (next->fpu_state && next != prev_task) fpu_restore_area(next->fpu_state);
 
     if (next != prev_task) {
         task_context_switches++;

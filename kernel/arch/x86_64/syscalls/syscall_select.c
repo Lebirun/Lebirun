@@ -132,8 +132,8 @@ static uint64_t select_timeout_ticks(uint64_t seconds, uint64_t nanoseconds) {
 static int select_common(int nfds, uint64_t readfds_ptr,
                          uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                          uint64_t timeout_ticks) {
-    uint64_t read_addr;
-    uint64_t write_addr;
+    fd_mask stack_sets[32];
+    fd_mask *sets;
     fd_mask *readfds;
     fd_mask *writefds;
     fd_mask read_word;
@@ -153,34 +153,31 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     uint64_t elapsed_ticks;
     uint64_t wait_ticks;
 
-    read_addr = (uint64_t)readfds_ptr;
-    write_addr = (uint64_t)writefds_ptr;
-    readfds = NULL;
-    writefds = NULL;
+    readfds = (fd_mask *)readfds_ptr;
+    writefds = (fd_mask *)writefds_ptr;
     if (nfds < 0) return -EINVAL;
 
     words = FD_WORDS(nfds);
     set_bytes = words * sizeof(fd_mask);
-    if (read_addr) {
-        readfds = (fd_mask *)read_addr;
-        if (!user_access_ok(readfds, set_bytes,
-                            UACCESS_READ | UACCESS_WRITE)) return -EFAULT;
-    }
-    if (write_addr) {
-        writefds = (fd_mask *)write_addr;
-        if (!user_access_ok(writefds, set_bytes,
-                            UACCESS_READ | UACCESS_WRITE)) return -EFAULT;
-    }
+    if (readfds && !user_access_ok(readfds, set_bytes,
+                                   UACCESS_READ | UACCESS_WRITE))
+        return -EFAULT;
+    if (writefds && !user_access_ok(writefds, set_bytes,
+                                    UACCESS_READ | UACCESS_WRITE))
+        return -EFAULT;
+
+    sets = words * 2 <= sizeof(stack_sets) / sizeof(stack_sets[0]) ?
+           stack_sets : (fd_mask *)kmalloc(set_bytes * 2);
+    if (!sets) return -ENOMEM;
+    memset(sets, 0, set_bytes * 2);
+    count = -EFAULT;
+    if ((readfds && copy_from_user(sets, readfds, set_bytes) < 0) ||
+        (writefds && copy_from_user(sets + words, writefds, set_bytes) < 0))
+        goto out;
 
     for (word_index = 0; word_index < words; word_index++) {
-        read_word = 0;
-        write_word = 0;
-        if (readfds && copy_from_user(&read_word, &readfds[word_index],
-                                      sizeof(read_word)) < 0)
-            return -EFAULT;
-        if (writefds && copy_from_user(&write_word, &writefds[word_index],
-                                       sizeof(write_word)) < 0)
-            return -EFAULT;
+        read_word = sets[word_index];
+        write_word = sets[words + word_index];
         for (bit = 0; bit < (int)NFDBITS; bit++) {
             fd = (int)(word_index * NFDBITS + (uint64_t)bit);
             if (fd >= nfds) break;
@@ -191,8 +188,10 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             if (descriptor_events >= 0) continue;
             if (!current_task || !current_task->fds ||
                     fd >= current_task->fds_capacity ||
-                    !current_task->fds[fd].in_use)
-                return -EBADF;
+                    !current_task->fds[fd].in_use) {
+                count = -EBADF;
+                goto out;
+            }
         }
     }
 
@@ -203,14 +202,8 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         count = 0;
 
         for (word_index = 0; word_index < words; word_index++) {
-            read_word = 0;
-            write_word = 0;
-            if (readfds && copy_from_user(&read_word,
-                    &readfds[word_index], sizeof(read_word)) < 0)
-                return -EFAULT;
-            if (writefds && copy_from_user(&write_word,
-                    &writefds[word_index], sizeof(write_word)) < 0)
-                return -EFAULT;
+            read_word = sets[word_index];
+            write_word = sets[words + word_index];
             for (bit = 0; bit < (int)NFDBITS; bit++) {
                 fd = (int)(word_index * NFDBITS + (uint64_t)bit);
                 if (fd >= nfds) break;
@@ -232,7 +225,8 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         }
 
         if (select_interrupted()) {
-            return -EINTR;
+            count = -EINTR;
+            goto out;
         }
         wait_ticks = UINT64_MAX;
         if (timeout_ticks != UINT64_MAX) {
@@ -243,23 +237,18 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         wait_ticks = event_descriptor_wait_timeout(wait_ticks);
         descriptor_ready_wait(ready_generation, wait_ticks);
         if (select_interrupted()) {
-            return -EINTR;
+            count = -EINTR;
+            goto out;
         }
 
     } while (timeout_ticks == UINT64_MAX || (tick_count - start_tick) < timeout_ticks);
 
     count = 0;
     for (word_index = 0; word_index < words; word_index++) {
-        read_word = 0;
-        write_word = 0;
+        read_word = sets[word_index];
+        write_word = sets[words + word_index];
         result_read_word = 0;
         result_write_word = 0;
-        if (readfds && copy_from_user(&read_word, &readfds[word_index],
-                                      sizeof(read_word)) < 0)
-            return -EFAULT;
-        if (writefds && copy_from_user(&write_word, &writefds[word_index],
-                                       sizeof(write_word)) < 0)
-            return -EFAULT;
         for (bit = 0; bit < (int)NFDBITS; bit++) {
             fd = (int)(word_index * NFDBITS + (uint64_t)bit);
             if (fd >= nfds) break;
@@ -272,19 +261,17 @@ static int select_common(int nfds, uint64_t readfds_ptr,
                 if (count < 0x7FFFFFFF) count++;
             }
         }
-        if (readfds && copy_to_user(&readfds[word_index], &result_read_word,
-                                    sizeof(result_read_word)) < 0)
-            return -EFAULT;
-        if (writefds && copy_to_user(&writefds[word_index], &result_write_word,
-                                     sizeof(result_write_word)) < 0)
-            return -EFAULT;
-        result_read_word = 0;
-        if (exceptfds_ptr &&
-            copy_to_user((fd_mask *)exceptfds_ptr + word_index,
-                         &result_read_word, sizeof(result_read_word)) < 0)
-            return -EFAULT;
+        sets[word_index] = result_read_word;
+        sets[words + word_index] = result_write_word;
     }
+    if ((readfds && copy_to_user(readfds, sets, set_bytes) < 0) ||
+        (writefds && copy_to_user(writefds, sets + words, set_bytes) < 0) ||
+        (exceptfds_ptr && set_bytes &&
+         clear_user((void *)exceptfds_ptr, set_bytes) < 0))
+        count = -EFAULT;
 
+out:
+    if (sets != stack_sets) kfree(sets);
     return count;
 }
 
@@ -373,10 +360,13 @@ static int poll_common(uint64_t fds_ptr, const char *nfds_ptr,
     uint64_t addr;
     int nfds;
     struct pollfd_k *fds;
+    struct pollfd_k chunk[32];
     struct pollfd_k value;
     uint64_t start_tick;
     int ready_count;
     int i;
+    int j;
+    int n;
     int curfd;
     int sevents;
     int descriptor_events;
@@ -402,72 +392,73 @@ static int poll_common(uint64_t fds_ptr, const char *nfds_ptr,
         ready_generation = descriptor_ready_generation();
         ready_count = 0;
 
-        for (i = 0; i < nfds; i++) {
-            if (copy_from_user(&value, &fds[i], sizeof(value)) < 0)
+        for (i = 0; i < nfds; i += n) {
+            n = nfds - i < 32 ? nfds - i : 32;
+            if (copy_from_user(chunk, &fds[i], (size_t)n * sizeof(value)) < 0)
                 return -EFAULT;
-            value.revents = 0;
-            curfd = value.fd;
+            for (j = 0; j < n; j++) {
+                value = chunk[j];
+                value.revents = 0;
+                curfd = value.fd;
 
-            if (curfd < 0) {
-                if (copy_to_user(&fds[i], &value, sizeof(value)) < 0)
-                    return -EFAULT;
-                continue;
-            }
+                if (curfd < 0) {
+                    chunk[j] = value;
+                    continue;
+                }
 
-            if (is_socket_fd(curfd)) {
-                sevents = socket_poll_events(curfd);
-                if ((value.events & (POLLIN | POLLRDNORM)) && (sevents & 0x01)) {
-                    value.revents |= value.events & (POLLIN | POLLRDNORM);
+                if (is_socket_fd(curfd)) {
+                    sevents = socket_poll_events(curfd);
+                    if ((value.events & (POLLIN | POLLRDNORM)) && (sevents & 0x01)) {
+                        value.revents |= value.events & (POLLIN | POLLRDNORM);
+                    }
+                    if ((value.events & (POLLOUT | POLLWRNORM)) && (sevents & 0x04)) {
+                        value.revents |= value.events & (POLLOUT | POLLWRNORM);
+                    }
+                    if (sevents & 0x08) value.revents |= POLLERR;
+                    if (sevents & 0x10) value.revents |= POLLHUP;
+                    if (value.revents) ready_count++;
+                    chunk[j] = value;
+                    continue;
                 }
-                if ((value.events & (POLLOUT | POLLWRNORM)) && (sevents & 0x04)) {
-                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
+
+                descriptor_events = event_descriptor_poll(curfd);
+                if (descriptor_events >= 0) {
+                    if ((value.events & (POLLIN | POLLRDNORM)) &&
+                        (descriptor_events & POLLIN))
+                        value.revents |= value.events & (POLLIN | POLLRDNORM);
+                    if ((value.events & (POLLOUT | POLLWRNORM)) &&
+                        (descriptor_events & POLLOUT))
+                        value.revents |= value.events & (POLLOUT | POLLWRNORM);
+                    if (descriptor_events & POLLERR) value.revents |= POLLERR;
+                    if (descriptor_events & POLLHUP) value.revents |= POLLHUP;
+                    if (value.revents) ready_count++;
+                    chunk[j] = value;
+                    continue;
                 }
-                if (sevents & 0x08) value.revents |= POLLERR;
-                if (sevents & 0x10) value.revents |= POLLHUP;
+
+                if (!current_task->fds || curfd >= current_task->fds_capacity ||
+                        !current_task->fds[curfd].in_use) {
+                    value.revents = POLLNVAL;
+                    ready_count++;
+                    chunk[j] = value;
+                    continue;
+                }
+
+                if (value.events & (POLLIN | POLLRDNORM)) {
+                    if (check_fd_readable(curfd)) {
+                        value.revents |= value.events & (POLLIN | POLLRDNORM);
+                    }
+                }
+
+                if (value.events & (POLLOUT | POLLWRNORM)) {
+                    if (check_fd_writable(curfd)) {
+                        value.revents |= value.events & (POLLOUT | POLLWRNORM);
+                    }
+                }
                 if (value.revents) ready_count++;
-                if (copy_to_user(&fds[i], &value, sizeof(value)) < 0)
-                    return -EFAULT;
-                continue;
+                chunk[j] = value;
             }
-
-            descriptor_events = event_descriptor_poll(curfd);
-            if (descriptor_events >= 0) {
-                if ((value.events & (POLLIN | POLLRDNORM)) &&
-                    (descriptor_events & POLLIN))
-                    value.revents |= value.events & (POLLIN | POLLRDNORM);
-                if ((value.events & (POLLOUT | POLLWRNORM)) &&
-                    (descriptor_events & POLLOUT))
-                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
-                if (descriptor_events & POLLERR) value.revents |= POLLERR;
-                if (descriptor_events & POLLHUP) value.revents |= POLLHUP;
-                if (value.revents) ready_count++;
-                if (copy_to_user(&fds[i], &value, sizeof(value)) < 0)
-                    return -EFAULT;
-                continue;
-            }
-
-            if (!current_task->fds || curfd >= current_task->fds_capacity ||
-                    !current_task->fds[curfd].in_use) {
-                value.revents = POLLNVAL;
-                ready_count++;
-                if (copy_to_user(&fds[i], &value, sizeof(value)) < 0)
-                    return -EFAULT;
-                continue;
-            }
-
-            if (value.events & (POLLIN | POLLRDNORM)) {
-                if (check_fd_readable(curfd)) {
-                    value.revents |= value.events & (POLLIN | POLLRDNORM);
-                }
-            }
-
-            if (value.events & (POLLOUT | POLLWRNORM)) {
-                if (check_fd_writable(curfd)) {
-                    value.revents |= value.events & (POLLOUT | POLLWRNORM);
-                }
-            }
-            if (value.revents) ready_count++;
-            if (copy_to_user(&fds[i], &value, sizeof(value)) < 0)
+            if (copy_to_user(&fds[i], chunk, (size_t)n * sizeof(value)) < 0)
                 return -EFAULT;
         }
 

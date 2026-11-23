@@ -129,11 +129,6 @@ static uint64_t *pt_ensure_kernel_pd(uint64_t virt_addr) {
     pd_phys = (uint64_t)page;
     memset((void *)(pd_phys + KERNEL_VMA), 0, PAGE_SIZE);
     kv_pdpt_high[pdpt_idx] = (pd_phys & ~0xFFFULL) | 3;
-    __asm__ volatile(
-        "mov %%cr3, %%rax\n\t"
-        "mov %%rax, %%cr3\n\t"
-        : : : "rax", "memory"
-    );
     return (uint64_t *)(pd_phys + KERNEL_VMA);
 }
 
@@ -242,11 +237,6 @@ static int pt_ensure_phys_mapped_locked(uint64_t phys_addr) {
 
         pd[pde_idx] = ((uint64_t)pt_phys & ~0xFFFULL) | 3;
         pt_sync_kernel_mappings();
-        __asm__ volatile(
-            "mov %%cr3, %%rax\n\t"
-            "mov %%rax, %%cr3\n\t"
-            : : : "rax", "memory"
-        );
 
         if (!pt_self_mapped) {
             uint64_t pt_pde_idx;
@@ -459,11 +449,6 @@ void vmm_map_page_pae(uint64_t virt_addr, uint64_t phys_addr, uint64_t flags) {
                 return;
             }
         }
-        __asm__ volatile(
-            "mov %%cr3, %%rax\n\t"
-            "mov %%rax, %%cr3\n\t"
-            : : : "rax", "memory"
-        );
         pt = (uint64_t *)(pt_phys + KERNEL_VMA);
         pt_vmm_pt_count++;
     } else {
@@ -643,11 +628,6 @@ void vmm_map_range_alloc_pae(uint64_t virt_addr, uint64_t size, uint64_t flags) 
                     return;
                 }
             }
-            __asm__ volatile(
-                "mov %%cr3, %%rax\n\t"
-                "mov %%rax, %%cr3\n\t"
-                : : : "rax", "memory"
-            );
             pt = (uint64_t *)(pt_phys + KERNEL_VMA);
             pt_vmm_pt_count++;
         } else {

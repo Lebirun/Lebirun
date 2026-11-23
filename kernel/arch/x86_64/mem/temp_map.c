@@ -51,7 +51,6 @@ int pt_temp_prepare_cpu(int cpu) {
     pt_vmm_pt_count++;
     kv_pd_high[(virt >> 21) & 0x1FF] = (pt_phys & ~0xFFFULL) | 3;
     pt_sync_kernel_mappings();
-    __asm__ volatile ("mov %%cr3, %%rax\n\tmov %%rax, %%cr3" ::: "rax", "memory");
     return 0;
 }
 
