@@ -1232,7 +1232,8 @@ int event_descriptor_poll(int fd) {
         }
         if (descriptor->type != FD_TYPE_PIPE_R) {
             if (!pipe->readers) events |= EPOLLERR;
-            else if (pipe->count < PIPE_BUF_SIZE) events |= EPOLLOUT;
+            else if (PIPE_CAPACITY - pipe->count >= PIPE_BUF_SIZE)
+                events |= EPOLLOUT;
         }
         pipe_unlock_irqrestore(pipe, pipe_flags);
         return events;

@@ -383,6 +383,8 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr);
 int task_handle_file_write_fault(task_t *task, uint64_t fault_addr);
 int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
                                 int write_fault);
+int task_map_stack_fault(task_t *task, uint64_t fault_addr,
+                         uint64_t fault_page);
 int task_user_fault_from_interrupt(task_t *task, uint64_t fault_addr,
                                    uint64_t saved_rflags, int write,
                                    int present);

@@ -557,6 +557,8 @@ static int pipe_resize_buffer(pipe_t *pipe, uint64_t required) {
     if (required > pipe->buf_size && pipe->buf_size <= SIZE_MAX / 2 &&
         capacity < pipe->buf_size * 2)
         capacity = pipe->buf_size * 2;
+    if (capacity > PIPE_CAPACITY && required <= PIPE_CAPACITY)
+        capacity = PIPE_CAPACITY;
     new_buffer = (uint8_t *)kmalloc(capacity);
     if (!new_buffer) return -ENOMEM;
     if (pipe->count) {
@@ -602,7 +604,6 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (is_epoll_special_fd(fd))
         return event_descriptor_write(fd, buf, len);
 
@@ -713,13 +714,9 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -EPIPE;
                     }
-                    if (chunk - done > UINT64_MAX - p->count) {
-                        pipe_unlock_irqrestore(p, pipe_flags);
-                        if (heap_buf) sys_rw_free(kbuf, work_size);
-                        if (total > 0 || done > 0) return (int)(total + done);
-                        return -ENOMEM;
-                    }
-                    bytes = p->count + chunk - done;
+                    bytes = chunk - done;
+                    bytes = bytes > PIPE_CAPACITY - p->count ? PIPE_CAPACITY :
+                            p->count + bytes;
                     if (bytes > p->buf_size &&
                         pipe_resize_buffer(p, bytes) < 0 && p->buf_size == 0) {
                         pipe_unlock_irqrestore(p, pipe_flags);
@@ -733,7 +730,9 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         if (total > 0 || done > 0) return (int)(total + done);
                         return -EIO;
                     }
-                    while (p->count == p->buf_size) {
+                    space = p->buf_size - p->count;
+                    if (space == 0 || ((uint64_t)len <= PIPE_BUF_SIZE &&
+                                       space < (uint64_t)len && p->count)) {
                         if (tfd->flags & VFS_O_NONBLOCK) {
                             pipe_unlock_irqrestore(p, pipe_flags);
                             if (heap_buf) sys_rw_free(kbuf, work_size);
@@ -751,15 +750,8 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                             if (total > 0 || done > 0) return (int)(total + done);
                             return -EINTR;
                         }
-                        pipe_flags = pipe_lock_irqsave(p);
-                        if (p->readers <= 0) {
-                            pipe_unlock_irqrestore(p, pipe_flags);
-                            if (heap_buf) sys_rw_free(kbuf, work_size);
-                            if (total > 0 || done > 0) return (int)(total + done);
-                            return -EPIPE;
-                        }
+                        continue;
                     }
-                    space = p->buf_size - p->count;
                     bytes = chunk - done;
                     if (bytes > space) bytes = space;
                     first = p->buf_size - p->write_pos;
@@ -873,7 +865,6 @@ static int __attribute__((optimize("Oz"))) sys_read_impl(
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -EFAULT;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -EFAULT;
-    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
     if (is_epoll_special_fd(fd))
         return event_descriptor_read(fd, buf, len);
 
@@ -1374,7 +1365,8 @@ pipe_wait:
 canonical_ready:
             to_copy = line_len[con_id];
             if (to_copy > len) to_copy = len;
-            memcpy((void*)buf_addr, line_buffers[con_id], to_copy);
+            if (copy_to_user((void *)buf_addr, line_buffers[con_id],
+                             to_copy) < 0) return -EFAULT;
 
             if (to_copy < line_len[con_id]) {
                 memmove(line_buffers[con_id], line_buffers[con_id] + to_copy,
@@ -1416,7 +1408,8 @@ canonical_ready:
                         if ((t->c_iflag & IGNCR) && c == '\r') continue;
                         if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
                         else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
-                        ((char *)buf_addr)[total] = c;
+                        if (copy_to_user((char *)buf_addr + total, &c, 1) < 0)
+                            return total > 0 ? total : -EFAULT;
                         total++;
                     }
                 }
@@ -1462,7 +1455,6 @@ static int sys_read_nb(int fd, char *buf, int len) {
     buf_addr = (uint64_t)buf;
     if (buf_addr >= KERNEL_VMA || buf_addr < 0x1000) return -1;
     if (buf_addr + (uint64_t)len < buf_addr || buf_addr + (uint64_t)len >= KERNEL_VMA) return -1;
-    if (!syscall_user_range_mapped(buf_addr, (uint64_t)len, 1)) return -EFAULT;
 
     tfd = NULL;
     if (current_task && current_task->fds && fd >= 0 &&
@@ -1474,7 +1466,8 @@ static int sys_read_nb(int fd, char *buf, int len) {
             strcmp(vfs_node_name(node), "event1") == 0) {
             if (len > SYS_RW_STACK_BUF) len = SYS_RW_STACK_BUF;
             bytes = evdev_read_nonblocking(node, (uint64_t)len, stack_buf);
-            if (bytes > 0) memcpy((void *)buf_addr, stack_buf, bytes);
+            if (bytes > 0 && copy_to_user((void *)buf_addr, stack_buf, bytes) < 0)
+                return -EFAULT;
             return (int)bytes;
         }
     }
@@ -1497,8 +1490,7 @@ static int sys_read_nb(int fd, char *buf, int len) {
             if ((t->c_iflag & IGNCR) && c == '\r') return 0;
             if ((t->c_iflag & ICRNL) && c == '\r') c = '\n';
             else if ((t->c_iflag & INLCR) && c == '\n') c = '\r';
-            memcpy((void*)buf_addr, &c, 1);
-            return 1;
+            return copy_to_user((void *)buf_addr, &c, 1) < 0 ? -EFAULT : 1;
         }
         return 0;
     }
@@ -1580,8 +1572,6 @@ static int sys_writev(int fd, const char *iov_ptr, int iovcnt) {
         if (base >= KERNEL_VMA || base < 0x1000)
             return total > 0 ? total : -EFAULT;
         if (base + len < base || base + len >= KERNEL_VMA)
-            return total > 0 ? total : -EFAULT;
-        if (!syscall_user_range_mapped(base, len, 1))
             return total > 0 ? total : -EFAULT;
         if (len > (uint64_t)(0x7FFFFFFF - total))
             len = (uint64_t)(0x7FFFFFFF - total);

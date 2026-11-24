@@ -129,12 +129,6 @@ static uint64_t net_find_user_mapping(uint64_t cursor, uint64_t size) {
     return 0;
 }
 
-static uint64_t get_user_pd(void) {
-    if (!current_task) return 0;
-    if (current_task->cr3) return current_task->cr3;
-    return current_task->pml4_phys;
-}
-
 static int user_range_ok(uint64_t addr, uint64_t size) {
     uint64_t end;
     if (size == 0) return 0;
@@ -149,66 +143,37 @@ static int user_range_ok(uint64_t addr, uint64_t size) {
     syscall_user_range_present((addr), (size), 0, 1)
 
 static int copy_user_string(char *dst, uint64_t dst_size, const char *src_user) {
-    uint64_t addr;
-    uint64_t pd;
     uint64_t i;
-    uint64_t cur;
-    char c;
 
     if (!dst || dst_size == 0) return -1;
     dst[0] = '\0';
     if (!src_user) return -1;
-    addr = (uint64_t)(uintptr_t)src_user;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return -1;
-    pd = get_user_pd();
-    if (!pd) return -1;
-
-    i = 0;
-    while (i + 1 < dst_size) {
-        cur = addr + i;
-        if (cur >= KERNEL_VMA || cur < addr) return -1;
-        if (vmm_get_phys_in_pml4(pd, cur & ~0xFFFu) == 0) return -1;
-        c = *(const char *)cur;
-        dst[i++] = c;
-        if (c == '\0') return 0;
+    for (i = 0; i + 1 < dst_size; i++) {
+        if (copy_from_user(&dst[i], src_user + i, 1) < 0) return -1;
+        if (!dst[i]) return 0;
     }
     dst[dst_size - 1] = '\0';
     return -1;
 }
 
 static int copy_user_string_alloc(char **out, const char *src_user) {
-    uint64_t addr;
-    uint64_t pd;
     uint64_t length;
-    uint64_t current;
-    uint64_t page_end;
-    char *copy;
+    char c;
 
     if (!out || !src_user) return -1;
     *out = NULL;
-    addr = (uint64_t)(uintptr_t)src_user;
-    if (addr < 0x1000 || addr >= KERNEL_VMA) return -1;
-    pd = get_user_pd();
-    if (!pd) return -1;
-    length = 0;
-    for (;;) {
-        current = addr + length;
-        if (current < addr || current >= KERNEL_VMA) return -1;
-        if (vmm_get_phys_in_pml4(pd, current & ~0xFFFu) == 0) return -1;
-        page_end = (current | 0xFFFu) + 1;
-        while (current < page_end && current < KERNEL_VMA) {
-            if (*(const char *)(uintptr_t)current == '\0') {
-                if (length == SIZE_MAX) return -1;
-                copy = (char *)kmalloc((size_t)length + 1);
-                if (!copy) return -1;
-                memcpy(copy, src_user, (size_t)length + 1);
-                *out = copy;
-                return 0;
-            }
-            current++;
-            length++;
-        }
+    for (length = 0;; length++) {
+        if (copy_from_user(&c, src_user + length, 1) < 0) return -1;
+        if (!c) break;
     }
+    *out = (char *)kmalloc((size_t)length + 1);
+    if (!*out) return -1;
+    if (copy_from_user(*out, src_user, (size_t)length + 1) < 0) {
+        kfree(*out);
+        *out = NULL;
+        return -1;
+    }
+    return 0;
 }
 
 static void klog(const char *fmt, ...) {

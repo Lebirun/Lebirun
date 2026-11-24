@@ -1,4 +1,5 @@
 #include <lebirun/initrd.h>
+#include <lebirun/uaccess.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/common.h>
 #include <lebirun/vfs.h>
@@ -469,7 +470,7 @@ int initrd_read(int fd, void *buf, uint64_t count) {
     avail = f->length - off;
     to_read = (count < avail) ? count : avail;
 
-    memcpy(buf, f->data + off, to_read);
+    if (copy_to_user(buf, f->data + off, to_read) < 0) return -1;
     fd_table[fd].offset += to_read;
 
     return (int)to_read;

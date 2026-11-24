@@ -481,6 +481,19 @@ static void task_rq_rebalance_locked(task_t *task) {
         task_rq_move_locked(task, task_pick_cpu(task));
 }
 
+static void task_charge_vruntime(task_t *task) {
+    uint64_t weight;
+    int nice;
+
+    nice = task->nice_value;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+    weight = 1024;
+    if (nice > 0) weight = 1024 / (1 + (uint64_t)nice);
+    else if (nice < 0) weight = 1024 + (uint64_t)(-nice) * 64;
+    task->vruntime += 1024 * 1000 / weight;
+}
+
 static task_t *task_find_idle_locked(void) {
     task_t *t;
 
@@ -764,6 +777,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
         prev_task->sched_policy != TASK_SCHED_FIFO && prev_task->time_slice > 1 &&
         !__atomic_load_n(&task_deferred_pending, __ATOMIC_ACQUIRE)) {
         prev_task->time_slice--;
+        task_charge_vruntime(prev_task);
         watchdog_kick();
         return regs;
     }
@@ -809,6 +823,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
     if (prev_task && !this_cpu->schedule_force && !must_switch && !is_idle &&
         prev_task->sched_policy != TASK_SCHED_FIFO) {
         if (prev_task->time_slice > 0) prev_task->time_slice--;
+        if (prev_task->sched_policy == TASK_SCHED_OTHER)
+            task_charge_vruntime(prev_task);
         if (prev_task->time_slice != 0) {
             goto out_restore_cr3;
         }
@@ -840,13 +856,7 @@ registers_t* schedule_from_irq(registers_t* regs) {
     next = candidate;
     if (spare > (next ? 1 : 0)) task_kick_stopped_cpu_locked(NULL);
     if (next && next->sched_policy == TASK_SCHED_OTHER) {
-        uint64_t weight = 1024;
-        int nice = next->nice_value;
-        if (nice < -20) nice = -20;
-        if (nice > 19) nice = 19;
-        if (nice > 0) weight = 1024 / (1 + (uint64_t)nice);
-        else if (nice < 0) weight = 1024 + (uint64_t)(-nice) * 64;
-        next->vruntime += 1024 * 1000 / (weight ? weight : 1);
+        task_charge_vruntime(next);
         if (next->vruntime > this_cpu->vruntime_min)
             this_cpu->vruntime_min = next->vruntime;
     }

@@ -54,7 +54,6 @@ static uint64_t kernel_reclaim_hi = 0;
 extern mem_region_t *memory_map;
 extern uint64_t num_regions;
 extern uint64_t bump_current;
-extern uint64_t active_region;
 extern uint64_t low_bump;
 
 extern void temp_map_raw(uint64_t temp_virt, uint64_t phys_addr);
@@ -757,57 +756,7 @@ void KERNEL_INIT pfa_set_reserved_stats(uint64_t kern_bin_kb,
 }
 
 void *pmm_alloc_page(void) {
-    uint64_t eflags;
-    uint64_t i;
-    uint64_t region_end;
-    uint64_t alloc_start;
-    uint64_t idx_alloc;
-    uint64_t scan_end;
-
-    if (num_regions == 0) return NULL;
-
-    pfa_lock_acquire(&eflags);
-
-    for (i = active_region; i < num_regions; i++) {
-        region_end = memory_map[i].base + memory_map[i].length;
-
-
-
-        if (bump_current < memory_map[i].base) {
-            bump_current = memory_map[i].base + 0x1000;
-        }
-
-        bump_current = (bump_current + 0xFFF) & ~0xFFF;
-
-        if (bump_current + 4096 <= region_end) {
-            active_region = i;
-            idx_alloc = (uint64_t)(bump_current / PAGE_SIZE);
-            scan_end = (uint64_t)(region_end / PAGE_SIZE);
-            if (scan_end > total_pages_managed) scan_end = total_pages_managed;
-
-
-            alloc_start = find_free_frames_range(idx_alloc, scan_end, 1);
-            if (alloc_start) {
-                bump_current = alloc_start + PAGE_SIZE;
-                pfa_lock_release(eflags);
-                return (void *)(uint64_t)alloc_start;
-            }
-
-            bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
-            continue;
-        }
-
-        bump_current = (i + 1 < num_regions) ? memory_map[i+1].base : 0;
-    }
-
-    pfa_lock_release(eflags);
-
-    idx_alloc = find_free_frames(1);
-    if (idx_alloc) {
-        return (void *)idx_alloc;
-    }
-
-    return NULL;
+    return (void *)find_free_frames(1);
 }
 
 void *pmm_alloc_pages(uint64_t num) {

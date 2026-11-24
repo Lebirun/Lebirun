@@ -229,9 +229,11 @@ int heap_validate_ptr(void *ptr) {
     return heap_check_canaries(ptr);
 }
 
+#ifdef DEBUG
 static void poison_memory(void *ptr, size_t size, uint8_t pattern) {
     memset(ptr, pattern, size);
 }
+#endif
 
 static heap_block_t *find_best_fit(size_t size, uint64_t *placement_out) {
     heap_block_t *best;
@@ -926,9 +928,12 @@ static void kfree_internal(void *ptr, void *caller) {
     
     if (block->flags & KMALLOC_SECURE) {
         memset(ptr, 0, block->alloc_size);
-    } else if (!(block->flags & KMALLOC_NO_POISON)) {
+    }
+#ifdef DEBUG
+    else if (!(block->flags & KMALLOC_NO_POISON)) {
         poison_memory(ptr, block->alloc_size, HEAP_POISON_FREED);
     }
+#endif
 
     block->is_free = 1;
     kernel_heap.used_size -= block->size + sizeof(heap_block_t);

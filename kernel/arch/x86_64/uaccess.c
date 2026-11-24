@@ -13,7 +13,9 @@ static int user_page_fault_in(uint64_t address, int access) {
     if (!(flags & VMM_PTE_PRESENT)) {
         ok = task_handle_file_page_fault(current_task, address) ||
              task_handle_anon_page_fault(current_task, address,
-                                         (access & UACCESS_WRITE) != 0);
+                                         (access & UACCESS_WRITE) != 0) ||
+             task_map_stack_fault(current_task, address,
+                                  address & ~(PAGE_SIZE - 1));
         flags = vmm_get_flags_in_pml4(current_task->pml4_phys, address);
     }
     if (ok && (access & UACCESS_WRITE) && !(flags & VMM_PTE_WRITE) &&

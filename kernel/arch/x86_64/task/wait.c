@@ -115,12 +115,20 @@ void waitq_init(wait_queue_t* q) {
     q->head = NULL;
 }
 
+static void waitq_append_locked(wait_queue_t *q, task_t *t) {
+    task_t **link;
+
+    link = &q->head;
+    while (*link && task_ptr_valid(*link)) link = &(*link)->wait_next;
+    t->wait_next = NULL;
+    *link = t;
+}
+
 void waitq_add(wait_queue_t* q, task_t* t) {
     if (!q || !t) return;
     lock_scheduler();
     if (!t->in_wait_queue && !t->waiting_queue && t->state != TASK_DEAD) {
-        t->wait_next = q->head;
-        q->head = t;
+        waitq_append_locked(q, t);
         t->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
         t->waiting_queue = q;
         t->state = TASK_BLOCKED;
@@ -243,11 +251,16 @@ uint64_t descriptor_ready_generation(void) {
     return __atomic_load_n(&descriptor_ready_sequence, __ATOMIC_ACQUIRE);
 }
 
+static int descriptor_ready_bump(void) {
+    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_SEQ_CST);
+    return __atomic_load_n(&descriptor_ready_waitq.head, __ATOMIC_SEQ_CST) != NULL;
+}
+
 void descriptor_ready_notify(void) {
+    if (!descriptor_ready_bump()) return;
     lock_scheduler();
     __atomic_store_n(&descriptor_ready_irq_pending, 0, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
-    waitq_wake_all(&descriptor_ready_waitq);
+    waitq_wake_all_locked(&descriptor_ready_waitq);
     unlock_scheduler();
 }
 
@@ -262,8 +275,8 @@ void descriptor_ready_notify_key(uint64_t key) {
         descriptor_ready_notify();
         return;
     }
+    if (!descriptor_ready_bump()) return;
     lock_scheduler();
-    __atomic_add_fetch(&descriptor_ready_sequence, 1, __ATOMIC_RELEASE);
     filter = descriptor_wait_filters;
     while (filter) {
         next = filter->next;
@@ -331,7 +344,7 @@ int descriptor_ready_wait_owned_keys(uint64_t generation, uint64_t timeout_ticks
     filter.next = descriptor_wait_filters;
     descriptor_wait_filters = &filter;
     current_task->wait_next = descriptor_ready_waitq.head;
-    descriptor_ready_waitq.head = current_task;
+    __atomic_store_n(&descriptor_ready_waitq.head, current_task, __ATOMIC_SEQ_CST);
     current_task->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
     current_task->waiting_queue = &descriptor_ready_waitq;
     current_task->state = TASK_BLOCKED;
@@ -377,8 +390,7 @@ int waitq_wait_cond(wait_queue_t *q, int (*cond)(void *), void *arg,
             unlock_scheduler();
             return done;
         }
-        task->wait_next = q->head;
-        q->head = task;
+        waitq_append_locked(q, task);
         task->in_wait_queue = TASK_WAIT_QUEUE_NORMAL;
         task->waiting_queue = q;
         task->state = TASK_BLOCKED;

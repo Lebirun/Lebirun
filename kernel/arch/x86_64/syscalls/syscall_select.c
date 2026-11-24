@@ -105,7 +105,7 @@ static int check_fd_writable(int fd) {
         pipe = (pipe_t *)current_task->fds[fd].private_data;
         if (!pipe) return 0;
         pipe_flags = pipe_lock_irqsave(pipe);
-        writable = pipe->readers <= 0 || pipe->count < UINT64_MAX;
+        writable = pipe->readers <= 0 || PIPE_CAPACITY - pipe->count >= PIPE_BUF_SIZE;
         pipe_unlock_irqrestore(pipe, pipe_flags);
         return writable;
     }

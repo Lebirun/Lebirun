@@ -196,8 +196,8 @@ static int task_state_requires_schedule(task_t *task) {
     return task->state == TASK_DEAD || task->state == TASK_BLOCKED || task->state == TASK_STOPPED;
 }
 
-static int task_map_stack_fault(task_t *task, uint64_t fault_addr,
-                                uint64_t fault_page) {
+int task_map_stack_fault(task_t *task, uint64_t fault_addr,
+                         uint64_t fault_page) {
     uint64_t new_phys;
 
     if (fault_addr < USER_STACK_FLOOR || fault_addr >= USER_STACK_TOP) return 0;
@@ -281,7 +281,6 @@ registers_t *interrupt_prepare_page_fault(registers_t *regs, uint64_t fault_addr
 }
 
 static int smap_fixup(registers_t *regs, uint64_t fault_addr) {
-    static uint64_t last_rip;
     uint64_t cr3;
     uint64_t flags;
 
@@ -295,11 +294,6 @@ static int smap_fixup(registers_t *regs, uint64_t fault_addr) {
         (VMM_PTE_PRESENT | VMM_PTE_USER) ||
         ((regs->err_code & 2) && !(flags & VMM_PTE_WRITE)))
         return 0;
-    if (regs->rip != last_rip) {
-        last_rip = regs->rip;
-        printf("smap: kernel access to 0x%lX at rip=0x%lX\n", fault_addr,
-               regs->rip);
-    }
     regs->rflags |= 1ULL << 18;
     return 1;
 }

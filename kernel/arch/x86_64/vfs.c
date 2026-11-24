@@ -1322,15 +1322,7 @@ static void vfs_normalize_path(char *path) {
         while (*src && *src != '/') src++;
         comp_len = src - comp_start;
 
-        if (comp_len == 1 && comp_start[0] == '.') {
-            continue;
-        } else if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
-            if (dst > path + 1) {
-                while (dst > path + 1 && dst[-1] != '/') dst--;
-                if (dst > path + 1) dst--;
-            }
-            continue;
-        }
+        if (comp_len == 1 && comp_start[0] == '.') continue;
 
         if (dst > path + 1) *dst++ = '/';
         while (comp_len--) *dst++ = *comp_start++;
@@ -1448,7 +1440,7 @@ static vfs_node_t *vfs_namei_once_dynamic(const char *in_path,
     vfs_mount_t *mount;
     vfs_node_t *node;
     vfs_node_t *next;
-    vfs_node_t *parent;
+    size_t root_len;
 
     if (!in_path || !redirect || !did_redirect) return NULL;
     *redirect = NULL;
@@ -1527,23 +1519,27 @@ static vfs_node_t *vfs_namei_once_dynamic(const char *in_path,
             continue;
         }
         if (strcmp(component, "..") == 0) {
-            if (node->parent) {
-                parent = node->parent;
-                if (node_is_transient) vfs_release(node);
-                node = parent;
-                node_is_transient = 0;
-                if (strcmp(prefix, "/") != 0) {
-                    last = strrchr(prefix, '/');
-                    if (last == prefix) {
-                        prefix[1] = '\0';
-                        plen = 1;
-                    } else if (last) {
-                        *last = '\0';
-                        plen = (size_t)(last - prefix);
-                    }
-                }
+            root_len = current_task && current_task->is_user &&
+                       current_task->root ? strlen(current_task->root) : 0;
+            while (root_len > 1 && current_task->root[root_len - 1] == '/')
+                root_len--;
+            if (plen <= 1 || (root_len > 1 && plen <= root_len)) continue;
+            last = strrchr(prefix, '/');
+            plen = last && last != prefix ? (size_t)(last - prefix) : 1;
+            newpath = (char *)kmalloc(plen + strlen(remaining) + 1);
+            if (newpath) {
+                memcpy(newpath, prefix, plen);
+                strcpy(newpath + plen, remaining);
+                vfs_normalize_path(newpath);
             }
-            continue;
+            kfree(component);
+            if (node_is_transient) vfs_release(node);
+            kfree(prefix);
+            kfree(resolved);
+            if (!newpath) return NULL;
+            *redirect = newpath;
+            *did_redirect = 2;
+            return NULL;
         }
 
         rest_raw = remaining;
@@ -1609,56 +1605,32 @@ static vfs_node_t *vfs_namei_once_dynamic(const char *in_path,
     return node;
 }
 
-static void vfs_free_redirects(char **redirects, size_t count) {
-    size_t i;
-
-    for (i = 0; i < count; i++) kfree(redirects[i]);
-    kfree(redirects);
-}
+#define VFS_SYMLOOP_MAX 40
 
 static vfs_node_t *vfs_namei_internal(const char *path, int follow_final) {
     char *redirect;
-    char **redirects;
-    char **grown;
-    const char *current;
+    char *current;
     vfs_node_t *result;
-    size_t count;
-    size_t i;
+    int links;
     int did_redirect;
 
     if (!path) return NULL;
-    redirects = NULL;
-    count = 0;
-    current = path;
+    current = NULL;
+    links = 0;
     for (;;) {
         redirect = NULL;
-        result = vfs_namei_once_dynamic(current, follow_final, count != 0,
-                                        &redirect, &did_redirect);
+        result = vfs_namei_once_dynamic(current ? current : path, follow_final,
+                                        current != NULL, &redirect,
+                                        &did_redirect);
+        kfree(current);
         if (!did_redirect) {
-            if (redirect) kfree(redirect);
-            vfs_free_redirects(redirects, count);
+            kfree(redirect);
             return result;
         }
-        for (i = 0; i < count; i++) {
-            if (strcmp(redirects[i], redirect) == 0) {
-                vfs_free_redirects(redirects, count);
-                kfree(redirect);
-                return NULL;
-            }
-        }
-        if (count == SIZE_MAX / sizeof(char *)) {
+        if (did_redirect == 1 && ++links > VFS_SYMLOOP_MAX) {
             kfree(redirect);
-            vfs_free_redirects(redirects, count);
             return NULL;
         }
-        grown = (char **)krealloc(redirects, (count + 1) * sizeof(char *));
-        if (!grown) {
-            kfree(redirect);
-            vfs_free_redirects(redirects, count);
-            return NULL;
-        }
-        redirects = grown;
-        redirects[count++] = redirect;
         current = redirect;
     }
 }

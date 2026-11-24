@@ -11,7 +11,6 @@ extern uint64_t total_pages_managed;
 extern mem_region_t *memory_map;
 extern uint64_t num_regions;
 extern uint64_t bump_current;
-extern uint64_t active_region;
 extern uint64_t low_bump;
 
 reserved_region_t reserved_regions[1];
@@ -234,18 +233,15 @@ void KERNEL_EARLY_INIT init_mem_map(uint64_t mb_magic, uint64_t mb_ptr) {
 
 
         bump_current = kernel_end_phys;
-        active_region = 0;
 
         {
             uint64_t i;
             for (i = 0; i < num_regions; i++) {
                 uint64_t region_end = memory_map[i].base + memory_map[i].length;
-                if (bump_current >= memory_map[i].base && bump_current < region_end) {
-                    active_region = i;
+                if (bump_current >= memory_map[i].base && bump_current < region_end)
                     break;
-                } else if (bump_current < memory_map[i].base) {
+                if (bump_current < memory_map[i].base) {
                     bump_current = memory_map[i].base;
-                    active_region = i;
                     break;
                 }
             }

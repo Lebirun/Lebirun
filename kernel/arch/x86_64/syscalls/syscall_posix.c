@@ -2407,8 +2407,6 @@ static int sys_readv(int fd, const struct iovec *iov, int iovcnt) {
             return total > 0 ? total : -EFAULT;
         if (base + len < base || base + len >= KERNEL_VMA)
             return total > 0 ? total : -EFAULT;
-        if (!posix_user_range_mapped(base, len))
-            return total > 0 ? total : -EFAULT;
         if (len > (uint64_t)(0x7FFFFFFF - total))
             len = (uint64_t)(0x7FFFFFFF - total);
         if (len == 0) return total;

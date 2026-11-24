@@ -6,6 +6,8 @@
 #include <lebirun/pit.h>
 #include <lebirun/task.h>
 #include <lebirun/spinlock.h>
+#include <lebirun/rng.h>
+#include <lebirun/timekeeping.h>
 #include <string.h>
 
 typedef struct tcp_timewait {
@@ -36,7 +38,24 @@ static void tcp_lock_irqrestore(uint64_t f) {
     if (f & (1 << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 static uint16_t tcp_ephemeral_port = 49152;
-static uint32_t tcp_isn = 0;
+static uint64_t tcp_isn_key[2];
+
+static uint32_t tcp_new_isn(ipv4_addr_t lip, uint16_t lport,
+                            ipv4_addr_t rip, uint16_t rport) {
+    uint64_t h;
+    uint32_t a;
+    uint32_t b;
+
+    while (!tcp_isn_key[0] && !tcp_isn_key[1]) rng_fill(tcp_isn_key, sizeof(tcp_isn_key));
+    memcpy(&a, lip.octets, 4);
+    memcpy(&b, rip.octets, 4);
+    h = tcp_isn_key[0] ^ ((uint64_t)a << 32 | b);
+    h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    h ^= tcp_isn_key[1] ^ ((uint64_t)lport << 16 | rport);
+    h = (h ^ (h >> 27)) * 0x94D049BB133111EBULL;
+    h ^= h >> 31;
+    return (uint32_t)h + (uint32_t)(timekeeping_monotonic_ns() >> 12);
+}
 
 #define TCP_RETX_TIMEOUT_MS 1000
 #define TCP_RTO_MIN_MS 200
@@ -312,7 +331,6 @@ static uint64_t tcp_sack_opts(tcp_socket_t *sock, uint8_t *opt) {
 void KERNEL_INIT tcp_init(void) {
     tcp_sockets = NULL;
     tcp_ephemeral_port = 49152;
-    tcp_isn = pit_get_ticks() * 2654435761u;
 }
 
 static uint16_t tcp_alloc_port(void) {
@@ -569,8 +587,8 @@ int tcp_connect_start(tcp_socket_t *sock, ipv4_addr_t dest, uint16_t port) {
     sock->remote_ip = dest;
     sock->remote_port = port;
     sock->local_ip = sock->netif->ipv4;
-    sock->send_next = tcp_isn;
-    tcp_isn += pit_get_ticks() + 64000;
+    sock->send_next = tcp_new_isn(sock->local_ip, sock->local_port,
+                                  dest, port);
     sock->send_una = sock->send_next;
     sock->recover = sock->send_next;
     sock->recv_next = 0;
@@ -1126,13 +1144,15 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         tcp_listener_t *listener;
         tcp_socket_t *server;
         tcp_timewait_t *tw;
+        uint32_t isn;
 
+        isn = tcp_new_isn(dest, dest_port, src, src_port);
         tw = tcp_timewait_find(dest_port, src, src_port);
         if (tw) {
             if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == TCP_FLAG_SYN &&
                 SEQ_GT(seq, tw->recv_next)) {
-                if (!SEQ_GT(tcp_isn, tw->send_next))
-                    tcp_isn = tw->send_next + 64000;
+                if (!SEQ_GT(isn, tw->send_next))
+                    isn = tw->send_next + 64000;
                 tcp_timewait_drop(tw);
             } else {
                 if (!(flags & TCP_FLAG_RST) &&
@@ -1156,7 +1176,7 @@ void tcp_receive(netif_t *netif, ipv4_addr_t src, ipv4_addr_t dest, uint8_t *dat
         server->remote_ip = src;
         server->remote_port = src_port;
         server->recv_next = seq + 1;
-        server->send_next = tcp_isn++;
+        server->send_next = isn;
         server->send_una = server->send_next;
         server->recover = server->send_next;
         server->send_window = ntohs(tcp->window);

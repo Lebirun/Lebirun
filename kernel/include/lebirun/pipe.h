@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define PIPE_BUF_SIZE 4096
+#define PIPE_CAPACITY 65536
 
 typedef struct pipe {
     uint8_t *buffer;
