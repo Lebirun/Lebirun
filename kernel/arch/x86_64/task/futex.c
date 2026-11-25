@@ -25,30 +25,50 @@ uint64_t task_futex_key(task_t *task, const int *uaddr, int private_futex) {
 }
 
 static task_t *futex_buckets[16];
+static task_t *futex_tails[16];
 
-static task_t **futex_bucket(uint64_t key) {
+static int futex_bucket(uint64_t key) {
     key ^= key >> 29;
     key *= 0x9E3779B97F4A7C15ULL;
-    return &futex_buckets[key >> 60];
+    return key >> 60;
 }
 
 static void futex_append_locked(task_t *task, uint64_t key) {
-    task_t **link;
+    int b;
 
-    link = futex_bucket(key);
-    while (*link) link = &(*link)->wait_next;
+    b = futex_bucket(key);
     task->wait_next = NULL;
     task->waiting_queue = (wait_queue_t *)(uintptr_t)key;
     task->in_wait_queue = TASK_WAIT_QUEUE_FUTEX;
-    *link = task;
+    if (futex_tails[b]) futex_tails[b]->wait_next = task;
+    else futex_buckets[b] = task;
+    futex_tails[b] = task;
+}
+
+static void futex_detach_locked(int b, task_t **link, task_t *prev) {
+    task_t *task;
+
+    task = *link;
+    *link = task->wait_next;
+    if (futex_tails[b] == task) futex_tails[b] = prev;
+    task->wait_next = NULL;
+    task->in_wait_queue = 0;
+    task->waiting_queue = NULL;
 }
 
 void futex_unlink_locked(task_t *task) {
     task_t **link;
+    task_t *prev;
+    int b;
 
-    link = futex_bucket((uint64_t)(uintptr_t)task->waiting_queue);
-    while (*link && *link != task) link = &(*link)->wait_next;
-    if (*link) *link = task->wait_next;
+    b = futex_bucket((uint64_t)(uintptr_t)task->waiting_queue);
+    link = &futex_buckets[b];
+    prev = NULL;
+    while (*link && *link != task) {
+        prev = *link;
+        link = &prev->wait_next;
+    }
+    if (*link) futex_detach_locked(b, link, prev);
     task->wait_next = NULL;
     task->in_wait_queue = 0;
     task->waiting_queue = NULL;
@@ -59,11 +79,11 @@ static int futex_key_match(task_t *task, uint64_t key, task_vm_t *vm) {
            (!(key & FUTEX_KEY_PRIVATE) || task->vm == vm);
 }
 
-static void futex_wake_locked(task_t **link, task_t *task) {
-    *link = task->wait_next;
-    task->wait_next = NULL;
-    task->in_wait_queue = 0;
-    task->waiting_queue = NULL;
+static void futex_wake_locked(int b, task_t **link, task_t *prev) {
+    task_t *task;
+
+    task = *link;
+    futex_detach_locked(b, link, prev);
     task->futex_bitset = 0;
     sleepq_remove(task);
     task_mark_ready_locked(task);
@@ -106,6 +126,14 @@ int task_futex_wait(uint64_t key, const int *uaddr, int expected,
     futex_append_locked(current_task, key);
     current_task->futex_bitset = bitset;
     current_task->state = TASK_BLOCKED;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (task_has_pending_signals()) {
+        task_remove_wait_locked(current_task);
+        current_task->futex_bitset = 0;
+        current_task->state = TASK_RUNNING;
+        unlock_scheduler();
+        return -KERR_EINTR;
+    }
     if (timeout_ticks != UINT64_MAX) {
         wake_deadline_ns = sleepq_deadline_after_ticks(timeout_ticks);
         current_task->wake_deadline_ns = wake_deadline_ns;
@@ -131,21 +159,26 @@ static int futex_wake(task_vm_t *vm, uint64_t key, int count,
                       uint32_t bitset) {
     task_t **link;
     task_t *task;
+    task_t *prev;
     int woken;
+    int b;
 
     if (key == 0) return -KERR_EFAULT;
     if (bitset == 0) return -KERR_EINVAL;
     if (count < 0) return -KERR_EINVAL;
     if (count == 0) return 0;
     woken = 0;
+    prev = NULL;
     lock_scheduler();
-    link = futex_bucket(key);
+    b = futex_bucket(key);
+    link = &futex_buckets[b];
     while ((task = *link) && woken < count) {
         if (futex_key_match(task, key, vm) &&
             (task->futex_bitset & bitset) != 0) {
-            futex_wake_locked(link, task);
+            futex_wake_locked(b, link, prev);
             woken++;
         } else {
+            prev = task;
             link = &task->wait_next;
         }
     }
@@ -172,12 +205,14 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
                        int requeue_count, const int *cmp_uaddr, int expected) {
     task_t **link;
     task_t *task;
+    task_t *prev;
     task_t *moved;
     task_t **moved_tail;
     task_vm_t *vm;
     int value;
     int woken;
     int requeued;
+    int b;
 
     if (!old_key || !new_key || !current_task) return -KERR_EFAULT;
     if (wake_count < 0 || requeue_count < 0) return -KERR_EINVAL;
@@ -195,16 +230,18 @@ int task_futex_requeue(uint64_t old_key, uint64_t new_key, int wake_count,
     } else {
         lock_scheduler();
     }
-    link = futex_bucket(old_key);
+    b = futex_bucket(old_key);
+    link = &futex_buckets[b];
+    prev = NULL;
     while ((task = *link) && (woken < wake_count || requeued < requeue_count)) {
         if (!futex_key_match(task, old_key, vm)) {
+            prev = task;
             link = &task->wait_next;
         } else if (woken < wake_count) {
-            futex_wake_locked(link, task);
+            futex_wake_locked(b, link, prev);
             woken++;
         } else {
-            *link = task->wait_next;
-            task->wait_next = NULL;
+            futex_detach_locked(b, link, prev);
             *moved_tail = task;
             moved_tail = &task->wait_next;
             requeued++;

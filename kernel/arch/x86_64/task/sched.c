@@ -425,10 +425,13 @@ static void task_rq_insert_locked(task_t *task, int cpu) {
         task->vruntime = c->vruntime_min;
     if (c->rq_head) {
         c->rq_tail->next = task;
+        task->rq_prev = c->rq_tail;
         task->next = c->rq_head;
+        c->rq_head->rq_prev = task;
     } else {
         c->rq_head = task;
         task->next = task;
+        task->rq_prev = task;
     }
     c->rq_tail = task;
     c->nr_running++;
@@ -446,21 +449,18 @@ void remove_task_from_runqueue(task_t* task) {
 
     if (!task || !task->next) return;
     c = &cpus[task->preferred_cpu];
-    prev = c->rq_tail;
-    if (!prev) return;
-    while (prev->next != task) {
-        prev = prev->next;
-        if (prev == c->rq_tail) return;
-    }
+    prev = task->rq_prev;
     if (prev == task) {
         c->rq_head = NULL;
         c->rq_tail = NULL;
     } else {
         prev->next = task->next;
+        task->next->rq_prev = prev;
         if (c->rq_head == task) c->rq_head = task->next;
         if (c->rq_tail == task) c->rq_tail = prev;
     }
     task->next = NULL;
+    task->rq_prev = NULL;
     if (c->nr_running) c->nr_running--;
 }
 
@@ -915,7 +915,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         if (!this_cpu->switching_task)
             __atomic_store_n(&this_cpu->switching_task, prev_task, __ATOMIC_RELEASE);
         task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
-        if (prev_task && prev_task->state == TASK_BLOCKED)
+        if (prev_task && (prev_task->state == TASK_BLOCKED ||
+                          prev_task->state == TASK_STOPPED))
             remove_task_from_runqueue(prev_task);
         task_rq_rebalance_locked(prev_task);
         this_cpu->running_task = NULL;
@@ -948,7 +949,8 @@ registers_t* schedule_from_irq(registers_t* regs) {
         task_kick_stopped_cpu_locked(prev_task);
     }
     task_release_from_cpu(prev_task, regs, cpu_id, must_switch);
-    if (prev_task && prev_task != next && prev_task->state == TASK_BLOCKED)
+    if (prev_task && prev_task != next &&
+        (prev_task->state == TASK_BLOCKED || prev_task->state == TASK_STOPPED))
         remove_task_from_runqueue(prev_task);
     task_rq_rebalance_locked(prev_task);
     next->state = TASK_RUNNING;

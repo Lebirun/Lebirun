@@ -765,7 +765,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                     p->count += bytes;
                     p->read_sequence++;
                     done += bytes;
-                    waitq_wake_all(&p->read_waitq);
+                    if (p->read_waitq.head) waitq_wake_all(&p->read_waitq);
                     pipe_unlock_irqrestore(p, pipe_flags);
                     descriptor_ready_notify_key((uint64_t)(uintptr_t)p);
                 }
@@ -1031,7 +1031,7 @@ pipe_wait:
             p->count -= to_read;
             p->write_sequence++;
             pipe_shrink_after_read(p);
-            waitq_wake_all(&p->write_waitq);
+            if (p->write_waitq.head) waitq_wake_all(&p->write_waitq);
             pipe_unlock_irqrestore(p, pipe_flags);
             descriptor_ready_notify_key((uint64_t)(uintptr_t)p);
             if (copy_to_user((void *)buf_addr, kbuf, to_read) < 0) {

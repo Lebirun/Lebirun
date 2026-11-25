@@ -97,6 +97,7 @@ typedef struct task_vm {
     int refs;
     int file_map_count;
     int file_map_capacity;
+    int protnone;
     mutex_t lock;
     uint64_t user_brk;
     uint64_t user_brk_start;
@@ -117,7 +118,9 @@ typedef struct task {
     pid_t pid;
     task_state_t state;
     struct task *next;
+    struct task *rq_prev;
     struct task *all_next;
+    struct task *all_prev;
     struct task *sleep_next;
     int in_sleep_queue;
     int in_wait_queue;
@@ -177,6 +180,7 @@ typedef struct task {
     uint8_t job_stop_signal;
     uint8_t job_event;
     uint8_t wait_options;
+    uint8_t thread;
 
     void *signal_data;
     void *creds_data;

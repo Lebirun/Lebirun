@@ -321,6 +321,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
     if (regs->int_no >= 32 && regs->int_no != IPI_TLB_FLUSH_VECTOR)
         smp_tlb_flush_poll();
     if (regs->int_no < 32) {
+        if (regs->int_no == 14 && !(regs->cs & 3) && fault_addr < KERNEL_VMA &&
+            uaccess_fixup(&regs->rip)) return regs;
         if (regs->int_no == 14 && smap_fixup(regs, fault_addr)) return regs;
         if (regs->int_no == 14) {
             access_type = 0;

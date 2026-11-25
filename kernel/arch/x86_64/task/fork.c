@@ -41,9 +41,11 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     int owns_child_pd;
     int clone_error;
     int share_files;
+    int thread;
     pid_t child_pid;
 
     share_files = share_address_space & 4;
+    thread = (share_address_space & 8) != 0;
     share_address_space &= 3;
     parent = current_task;
     if (!parent || !parent->is_user || !parent_regs) {
@@ -209,6 +211,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         child->vm->user_brk = parent->vm->user_brk;
         child->vm->user_brk_start = parent->vm->user_brk_start;
         child->vm->mmap_next_addr = parent->vm->mmap_next_addr;
+        child->vm->protnone = parent->vm->protnone;
     }
     child->console_id = parent->console_id;
     child->running_cpu = -1;
@@ -253,6 +256,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         child->pml4_phys = parent->pml4_phys;
         child->cr3 = parent->cr3;
         child->shares_address_space = true;
+        child->thread = thread;
         child->sighand_private = share_address_space == 2;
         child->tls_base = tls_base;
         child->clear_child_tid = child_tid;
@@ -308,6 +312,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
     }
     lock_scheduler();
     child->all_next = all_tasks_head;
+    if (all_tasks_head) all_tasks_head->all_prev = child;
     all_tasks_head = child;
     add_task_to_runqueue(child);
     unlock_scheduler();
@@ -487,6 +492,7 @@ static pid_t task_create_thread_locked(void *(*entry)(void *), void *arg) {
     task_fd_share(new_task, current_task);
     lock_scheduler();
     new_task->all_next = all_tasks_head;
+    if (all_tasks_head) all_tasks_head->all_prev = new_task;
     all_tasks_head = new_task;
     add_task_to_runqueue(new_task);
     unlock_scheduler();

@@ -283,7 +283,8 @@ void task_debug_exit(task_t *task) {
         }
         if (trace->task->state == TASK_STOPPED) {
             if (trace->frame) trace->frame->rflags &= ~0x100ULL;
-            trace->task->state = TASK_READY;
+            trace->task->state = TASK_BLOCKED;
+            wake_task(trace->task);
         }
         __atomic_store_n(link, trace->next, __ATOMIC_RELEASE);
         kfree(trace);
@@ -552,7 +553,8 @@ retry:
                 task_trace_remove_locked(trace);
                 if (data) deliver_signal_to_task(task, (int)data);
             }
-            task->state = TASK_READY;
+            task->state = TASK_BLOCKED;
+            wake_task(task);
             break;
         case PTRACE_KILL:
             task_kill(task, 137);

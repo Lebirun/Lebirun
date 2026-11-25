@@ -140,6 +140,7 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     fd_mask write_word;
     fd_mask result_read_word;
     fd_mask result_write_word;
+    fd_mask mask;
     uint64_t words;
     uint64_t set_bytes;
     uint64_t word_index;
@@ -178,11 +179,9 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     for (word_index = 0; word_index < words; word_index++) {
         read_word = sets[word_index];
         write_word = sets[words + word_index];
-        for (bit = 0; bit < (int)NFDBITS; bit++) {
-            fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+        for (mask = read_word | write_word; mask; mask &= mask - 1) {
+            fd = (int)(word_index * NFDBITS) + __builtin_ctzl(mask);
             if (fd >= nfds) break;
-            if (!(read_word & (1UL << bit)) &&
-                !(write_word & (1UL << bit))) continue;
             if (is_socket_fd(fd)) continue;
             descriptor_events = event_descriptor_poll(fd);
             if (descriptor_events >= 0) continue;
@@ -204,8 +203,9 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         for (word_index = 0; word_index < words; word_index++) {
             read_word = sets[word_index];
             write_word = sets[words + word_index];
-            for (bit = 0; bit < (int)NFDBITS; bit++) {
-                fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+            for (mask = read_word | write_word; mask; mask &= mask - 1) {
+                bit = __builtin_ctzl(mask);
+                fd = (int)(word_index * NFDBITS) + bit;
                 if (fd >= nfds) break;
                 fd_ready = 0;
                 if ((read_word & (1UL << bit)) &&
@@ -249,8 +249,9 @@ static int select_common(int nfds, uint64_t readfds_ptr,
         write_word = sets[words + word_index];
         result_read_word = 0;
         result_write_word = 0;
-        for (bit = 0; bit < (int)NFDBITS; bit++) {
-            fd = (int)(word_index * NFDBITS + (uint64_t)bit);
+        for (mask = read_word | write_word; mask; mask &= mask - 1) {
+            bit = __builtin_ctzl(mask);
+            fd = (int)(word_index * NFDBITS) + bit;
             if (fd >= nfds) break;
             if ((read_word & (1UL << bit)) && check_fd_readable(fd)) {
                 result_read_word |= 1UL << bit;

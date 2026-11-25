@@ -357,6 +357,7 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if ((prot & (PROT_WRITE | PROT_EXEC)) ==
         (PROT_WRITE | PROT_EXEC)) return -EACCES;
     pte_flags = mmap_pte_flags(prot);
+    if (prot == PROT_NONE) current_task->vm->protnone = 1;
     if ((flags & 0x3) != 0x1 && (flags & 0x3) != 0x2) return -EINVAL;
     if (!(flags & 0x20) && fd < 0) return -EBADF;
     if (!(flags & 0x20) && pgoffset < 0) return -EINVAL;
@@ -574,6 +575,7 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     }
     if (!user_range_covered_by_vmas(base, size)) return -ENOMEM;
     pte_flags = mmap_pte_flags(prot);
+    if (prot == PROT_NONE) current_task->vm->protnone = 1;
     if (task_protect_vm_areas(current_task, base, size, pte_flags) != 0)
         return -ENOMEM;
     for (page = base; page < end; page += PAGE_SIZE) {

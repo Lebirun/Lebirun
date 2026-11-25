@@ -427,17 +427,19 @@ int task_sleep_until(uint64_t deadline_ns) {
     if (!current_task) return -KERR_EINVAL;
     while (timekeeping_monotonic_ns() < deadline_ns) {
         lock_scheduler();
-        if (task_has_pending_signals()) {
-            unlock_scheduler();
-            return -KERR_EINTR;
-        }
         if (timekeeping_monotonic_ns() >= deadline_ns) {
             unlock_scheduler();
             continue;
         }
+        current_task->state = TASK_BLOCKED;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (task_has_pending_signals()) {
+            current_task->state = TASK_RUNNING;
+            unlock_scheduler();
+            return -KERR_EINTR;
+        }
         sleepq_remove(current_task);
         current_task->wake_deadline_ns = deadline_ns;
-        current_task->state = TASK_BLOCKED;
         sleepq_insert(current_task);
         unlock_scheduler();
         schedule();

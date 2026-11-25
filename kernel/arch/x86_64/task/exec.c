@@ -787,6 +787,7 @@ static int task_exec_with_args_common(
         kfree(old_vm);
     }
     current_task->shares_address_space = false;
+    current_task->thread = 0;
     current_task->sighand_private = false;
 
     current_task->tls_base = 0;

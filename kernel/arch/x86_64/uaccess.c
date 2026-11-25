@@ -1,6 +1,7 @@
 #include <lebirun/uaccess.h>
 #include <lebirun/mem_map.h>
 #include <lebirun/task.h>
+#include <lebirun/common.h>
 #include <string.h>
 
 static int user_page_fault_in(uint64_t address, int access) {
@@ -66,57 +67,115 @@ int user_access_ok(const void *ptr, size_t size, int access) {
     return 1;
 }
 
+size_t uaccess_copy(void *dest, const void *src, size_t size);
+size_t uaccess_zero(void *dest, size_t size);
+extern char uaccess_copy_insn[];
+extern char uaccess_zero_insn[];
+
+__asm__ (
+    ".pushsection .text\n"
+    ".globl uaccess_copy\n"
+    ".type uaccess_copy, @function\n"
+    "uaccess_copy:\n"
+    "    movq %rdx, %rcx\n"
+    ".globl uaccess_copy_insn\n"
+    "uaccess_copy_insn:\n"
+    "    rep movsb\n"
+    "    movq %rcx, %rax\n"
+    "    ret\n"
+    ".globl uaccess_zero\n"
+    ".type uaccess_zero, @function\n"
+    "uaccess_zero:\n"
+    "    movq %rsi, %rcx\n"
+    "    xorl %eax, %eax\n"
+    ".globl uaccess_zero_insn\n"
+    "uaccess_zero_insn:\n"
+    "    rep stosb\n"
+    "    movq %rcx, %rax\n"
+    "    ret\n"
+    ".popsection\n"
+);
+
+int uaccess_fixup(uint64_t *rip) {
+    if (*rip != (uint64_t)uaccess_copy_insn &&
+        *rip != (uint64_t)uaccess_zero_insn) return 0;
+    *rip += 2;
+    return 1;
+}
+
+static size_t user_copy_fast(uint64_t address, uint8_t *kbuf, size_t size,
+                             int write) {
+    uint64_t rflags;
+    size_t left;
+
+    if (address + size > 0x0000800000000000ULL ||
+        __atomic_load_n(&current_task->vm->protnone, __ATOMIC_RELAXED) ||
+        ((read_cr3() ^ current_task->pml4_phys) & ~0xFFFULL))
+        return size;
+    __asm__ volatile ("pushfq; popq %0" : "=r"(rflags));
+    user_access_begin();
+    if (!kbuf)
+        left = uaccess_zero((void *)(uintptr_t)address, size);
+    else if (write)
+        left = uaccess_copy((void *)(uintptr_t)address, kbuf, size);
+    else
+        left = uaccess_copy(kbuf, (const void *)(uintptr_t)address, size);
+    if (!(rflags & (1ULL << 18))) user_access_end();
+    return left;
+}
+
+static int user_copy_page(uint64_t address, uint8_t *kbuf, uint64_t size,
+                          int write) {
+    if (!kbuf)
+        return vmm_clear_user_page(current_task->pml4_phys, address, size);
+    return vmm_copy_user_page(current_task->pml4_phys, address, kbuf, size,
+                              write);
+}
+
 static int user_copy(uint64_t address, void *buf, size_t size, int access) {
     uint8_t *kbuf;
     uint64_t chunk;
+    size_t left;
     int write;
 
     if (!current_task || !current_task->is_user) return -1;
     if (size == 0) return 0;
-    if (!buf || address < PAGE_SIZE || address >= KERNEL_VMA ||
+    if (address < PAGE_SIZE || address >= KERNEL_VMA ||
         (uint64_t)size - 1 >= KERNEL_VMA - address) return -1;
     kbuf = (uint8_t *)buf;
     write = (access & UACCESS_WRITE) != 0;
     while (size != 0) {
+        left = user_copy_fast(address, kbuf, size, write);
+        address += size - left;
+        if (kbuf) kbuf += size - left;
+        size = left;
+        if (size == 0) break;
         chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
         if (chunk > size) chunk = size;
-        if (vmm_copy_user_page(current_task->pml4_phys, address, kbuf,
-                               chunk, write) < 0 &&
+        if (user_copy_page(address, kbuf, chunk, write) < 0 &&
             (!user_page_access_ok(address & ~(PAGE_SIZE - 1), access) ||
-             vmm_copy_user_page(current_task->pml4_phys, address, kbuf,
-                                chunk, write) < 0))
+             user_copy_page(address, kbuf, chunk, write) < 0))
             return -1;
         address += chunk;
-        kbuf += chunk;
+        if (kbuf) kbuf += chunk;
         size -= chunk;
     }
     return 0;
 }
 
 int copy_from_user(void *dest, const void *src, size_t size) {
+    if (!dest) return -1;
     return user_copy((uint64_t)(uintptr_t)src, dest, size, UACCESS_READ);
 }
 
 int copy_to_user(void *dest, const void *src, size_t size) {
+    if (!src) return -1;
     return user_copy((uint64_t)(uintptr_t)dest, (void *)src, size,
                      UACCESS_WRITE);
 }
 
 int clear_user(void *dest, size_t size) {
-    uint64_t address;
-    uint64_t chunk;
-
-    if (!user_access_ok(dest, size, UACCESS_WRITE)) return -1;
-    address = (uint64_t)(uintptr_t)dest;
-    while (size != 0) {
-        chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1));
-        if (chunk > size) chunk = size;
-        if (vmm_clear_user_page(current_task->pml4_phys, address, chunk) < 0)
-            return -1;
-        address += chunk;
-        size -= chunk;
-    }
-    return 0;
+    return user_copy((uint64_t)(uintptr_t)dest, NULL, size, UACCESS_WRITE);
 }
 
 int strnlen_user(const char *src, size_t max_size, size_t *length) {

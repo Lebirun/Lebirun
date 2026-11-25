@@ -23,7 +23,8 @@ static void task_finish_death_locked(task_t *task) {
     task_t *parent;
 
     task_debug_exit(task);
-    parent = all_tasks_head;
+    if (task->thread) task->waited = 1;
+    parent = task->thread ? NULL : all_tasks_head;
     while (parent) {
         if (!task_ptr_valid(parent)) break;
         if (parent->pid == task->ppid) {
@@ -33,12 +34,13 @@ static void task_finish_death_locked(task_t *task) {
                 parent->child_maxrss_kb = task->maxrss_kb;
             if (parent->child_maxrss_kb < task->child_maxrss_kb)
                 parent->child_maxrss_kb = task->child_maxrss_kb;
+            if (parent->waiting_for_any_child && parent->state == TASK_BLOCKED)
+                task_mark_ready_locked(parent);
             break;
         }
         parent = parent->all_next;
     }
     waitq_wake_all(&task->join_waiters);
-    task_wake_parent_waiter_locked(task);
 }
 
 int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
@@ -51,7 +53,8 @@ int task_has_child_of(pid_t parent_pid, pid_t pgid_filter) {
     t = all_tasks_head;
     while (t) {
         if (!task_ptr_valid(t)) break;
-        if (t->ppid == parent_pid) {
+        if (t->ppid == parent_pid && !t->thread &&
+            !(t->state == TASK_DEAD && t->waited)) {
             if (pgid_filter <= 0 || t->pgid == pgid_filter) {
                 found = 1;
                 break;
@@ -70,7 +73,7 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
     lock_scheduler();
     d = dead_queue_head;
     while (d && task_ptr_valid(d)) {
-        if (d->ppid == parent_pid) {
+        if (d->ppid == parent_pid && !d->waited) {
             if (pgid_filter <= 0 || d->pgid == pgid_filter) {
                 unlock_scheduler();
                 return d;
@@ -80,7 +83,7 @@ task_t* task_find_dead_child_of(pid_t parent_pid, pid_t pgid_filter) {
     }
     d = all_tasks_head;
     while (d && task_ptr_valid(d)) {
-        if (d->ppid == parent_pid &&
+        if (d->ppid == parent_pid && !d->thread &&
             (pgid_filter <= 0 || d->pgid == pgid_filter) &&
             task_stop_pending(d)) {
             unlock_scheduler();
@@ -179,7 +182,8 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
     t = all_tasks_head;
     while (t) {
         if (!task_ptr_valid(t)) break;
-        if (t->ppid == parent_pid) {
+        if (t->ppid == parent_pid && !t->thread &&
+            !(t->state == TASK_DEAD && t->waited)) {
             if (pgid_filter <= 0 || t->pgid == pgid_filter) {
                 found = 1;
                 break;
@@ -197,6 +201,8 @@ int task_prepare_wait_any_child(pid_t parent_pid, pid_t pgid_filter) {
     current_task->join_target = t;
     current_task->waiting_for_any_child = 1;
     current_task->state = TASK_BLOCKED;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (task_has_pending_signals()) current_task->state = TASK_RUNNING;
     unlock_scheduler();
     return 0;
 }
@@ -260,7 +266,7 @@ void task_exit_deferred(uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
-    parent = task_find(task->ppid);
+    parent = task->thread ? NULL : task_find(task->ppid);
     if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
     reap_request();
 }
@@ -371,7 +377,6 @@ static void task_release_dead_resources(task_t *t) {
 
 void reap_dead_tasks(void) {
     task_t *t;
-    task_t **pp;
     task_t *keep = NULL;
     task_t *next;
     task_t *k;
@@ -424,14 +429,9 @@ void reap_dead_tasks(void) {
             unlock_scheduler();
             continue;
         }
-        pp = &all_tasks_head;
-        while (*pp) {
-            if (*pp == t) {
-                *pp = t->all_next;
-                break;
-            }
-            pp = &(*pp)->all_next;
-        }
+        if (t->all_prev) t->all_prev->all_next = t->all_next;
+        else if (all_tasks_head == t) all_tasks_head = t->all_next;
+        if (t->all_next) t->all_next->all_prev = t->all_prev;
         unlock_scheduler();
 
         kfree(t);
@@ -445,7 +445,7 @@ void reap_dead_tasks(void) {
             knext = k->wait_next;
             k->wait_next = dead_queue_head;
             dead_queue_head = k;
-            task_wake_parent_waiter_locked(k);
+            if (!k->waited) task_wake_parent_waiter_locked(k);
             k = knext;
         }
         unlock_scheduler();
@@ -575,7 +575,7 @@ void task_kill(task_t* task, uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
-    parent = task_find(task->ppid);
+    parent = task->thread ? NULL : task_find(task->ppid);
     if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
     reap_request();
 }
@@ -605,6 +605,8 @@ int task_join(task_t* task, uint64_t* exit_code) {
     current_task->join_target = task;
     waitq_add(&task->join_waiters, current_task);
     current_task->state = TASK_BLOCKED;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (task_has_pending_signals()) current_task->state = TASK_RUNNING;
     unlock_scheduler();
 
     for (;;) {
@@ -628,6 +630,8 @@ int task_join(task_t* task, uint64_t* exit_code) {
             return -KERR_EINTR;
         }
         current_task->state = TASK_BLOCKED;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (task_has_pending_signals()) current_task->state = TASK_RUNNING;
         unlock_scheduler();
     }
     if (exit_code) {
@@ -660,7 +664,8 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
             if (task->pid == pid) break;
             task = task->all_next;
         }
-        if (!task || !task_ptr_valid(task) || task->ppid != parent_pid) {
+        if (!task || !task_ptr_valid(task) || task->ppid != parent_pid ||
+            task->thread || (task->state == TASK_DEAD && task->waited)) {
             unlock_scheduler();
             return -KERR_ECHILD;
         }
@@ -693,6 +698,8 @@ int task_wait_child_pid(pid_t pid, pid_t parent_pid, uint64_t *exit_code) {
             return -KERR_EINTR;
         }
         current_task->state = TASK_BLOCKED;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (task_has_pending_signals()) current_task->state = TASK_RUNNING;
         unlock_scheduler();
 
         schedule();

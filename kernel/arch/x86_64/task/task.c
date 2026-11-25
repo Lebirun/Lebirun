@@ -1,6 +1,6 @@
 #include "task_priv.h"
 
-_Static_assert(sizeof(task_t) == 920, "task size changed");
+_Static_assert(sizeof(task_t) == 936, "task size changed");
 
 task_ext_t *task_ext_get(task_t *task, int create) {
     task_ext_t *e;
@@ -234,6 +234,7 @@ void KERNEL_INIT init_tasks(void) {
     current_task->running_cpu = 0;
     current_task->cr3 = read_cr3();
     current_task->next = current_task;
+    current_task->rq_prev = current_task;
     current_task->time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->base_time_slice = SCHED_DEFAULT_TIMESLICE;
     current_task->nice_value = 0;
@@ -454,6 +455,7 @@ task_t* KERNEL_INIT create_task_with_cr3(void (*entry)(void),
 
     lock_scheduler();
     new_task->all_next = all_tasks_head;
+    if (all_tasks_head) all_tasks_head->all_prev = new_task;
     all_tasks_head = new_task;
     unlock_scheduler();
 
