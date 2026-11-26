@@ -138,7 +138,7 @@ static pid_t __attribute__((optimize("Oz"))) task_fork_locked(
         return -KERR_ENOMEM;
     }
 
-    child->ppid = parent->pid;
+    child->ppid = parent->thread ? parent->ppid : parent->pid;
     child->pgid = parent->pgid ? parent->pgid : parent->pid;
     child->sid = parent->sid ? parent->sid : parent->pid;
     child->creation_mask = parent->creation_mask;

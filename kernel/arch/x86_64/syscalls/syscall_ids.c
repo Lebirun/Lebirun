@@ -629,8 +629,17 @@ static int sys_getsid(int pid, const char *unused1, int unused2) {
 }
 
 static int sys_getppid(int unused1, const char *unused2, int unused3) {
+    task_t *leader;
+    pid_t ppid;
+
     (void)unused1; (void)unused2; (void)unused3;
-    return current_task ? (int)current_task->ppid : 0;
+    if (!current_task) return 0;
+    if (!current_task->thread) return (int)current_task->ppid;
+    lock_scheduler();
+    leader = task_find(current_task->ppid);
+    ppid = leader ? leader->ppid : current_task->ppid;
+    unlock_scheduler();
+    return (int)ppid;
 }
 
 static int sys_getpid_impl(int unused1, const char *unused2, int unused3) {

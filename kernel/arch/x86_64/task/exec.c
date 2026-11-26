@@ -368,6 +368,7 @@ static int task_exec_with_args_common(
     int argv_table_index;
     int envp_table_index;
     task_vm_t *old_vm;
+    task_t *leader;
     int load_errno;
     uint64_t new_user_brk;
     uint64_t exec_euid;
@@ -787,6 +788,12 @@ static int task_exec_with_args_common(
         kfree(old_vm);
     }
     current_task->shares_address_space = false;
+    if (current_task->thread) {
+        lock_scheduler();
+        leader = task_find(current_task->ppid);
+        if (leader) current_task->ppid = leader->ppid;
+        unlock_scheduler();
+    }
     current_task->thread = 0;
     current_task->sighand_private = false;
 

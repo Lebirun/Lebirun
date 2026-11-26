@@ -106,7 +106,8 @@ int task_handle_file_page_fault(task_t *task, uint64_t fault_addr) {
             break;
         }
     }
-    if (match >= task->vm->file_map_count) return 0;
+    if (match >= task->vm->file_map_count ||
+        !(task->vm->file_maps[match].flags & VMM_PTE_USER)) return 0;
     pinned = task->kernel_cpu_pinned;
     task->kernel_cpu_pinned = 1;
     memory_allowed = task_memory_allows(task, PAGE_SIZE);
@@ -236,40 +237,49 @@ int task_handle_anon_page_fault(task_t *task, uint64_t fault_addr,
         if (!(area->map_flags & TASK_VMA_ANONYMOUS) ||
             (area->map_flags & TASK_VMA_SHARED)) continue;
         if (page < area->vaddr || page >= area->vaddr + area->memsz) continue;
+        break;
+    }
+    if (i < task->vm->file_map_count) {
+        if (!(area->flags & VMM_PTE_USER)) return 0;
         if (write_fault && !(area->flags & VMM_PTE_WRITE)) return 0;
         map_flags = area->flags;
-        if (write_fault) {
-            physical = pfa_alloc();
-            if (!physical) return 0;
-            pmm_zero_page_phys(physical);
-        } else {
-            physical = user_zero_page_get();
-            if (!physical) return 0;
-            map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
-        }
-        __asm__ volatile ("pushfq; popq %0; cli"
-                          : "=r"(irq_flags) :: "memory");
-        spin_lock(&task_anon_fault_commit_lock);
-        mapped = 0;
-        result = 0;
-        if (vmm_get_phys_in_pml4(task->pml4_phys, page) != 0) {
-            result = 1;
-        } else if (vmm_map_page_in_pml4(task->pml4_phys, page, physical,
-                                        map_flags) == 0) {
-            if (task_track_user_page(task, physical) == 0) {
-                mapped = 1;
-                result = 1;
-                task->minor_faults++;
-            } else {
-                vmm_unmap_page_in_pml4(task->pml4_phys, page);
-            }
-        }
-        spin_unlock(&task_anon_fault_commit_lock);
-        if (irq_flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
-        if (!mapped && write_fault) pfa_free(physical);
-        return result;
+    } else if (task->is_user && page >= task->vm->user_brk_start &&
+               page < task->vm->user_brk) {
+        map_flags = 0x7 | VMM_PTE_NX;
+        write_fault = 1;
+    } else {
+        return 0;
     }
-    return 0;
+    if (write_fault) {
+        physical = pfa_alloc();
+        if (!physical) return 0;
+        pmm_zero_page_phys(physical);
+    } else {
+        physical = user_zero_page_get();
+        if (!physical) return 0;
+        map_flags = (map_flags & ~0x2ULL) | VMM_PTE_NOFREE;
+    }
+    __asm__ volatile ("pushfq; popq %0; cli"
+                      : "=r"(irq_flags) :: "memory");
+    spin_lock(&task_anon_fault_commit_lock);
+    mapped = 0;
+    result = 0;
+    if (vmm_get_phys_in_pml4(task->pml4_phys, page) != 0) {
+        result = 1;
+    } else if (vmm_map_page_in_pml4(task->pml4_phys, page, physical,
+                                    map_flags) == 0) {
+        if (task_track_user_page(task, physical) == 0) {
+            mapped = 1;
+            result = 1;
+            task->minor_faults++;
+        } else {
+            vmm_unmap_page_in_pml4(task->pml4_phys, page);
+        }
+    }
+    spin_unlock(&task_anon_fault_commit_lock);
+    if (irq_flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+    if (!mapped && write_fault) pfa_free(physical);
+    return result;
 }
 
 void task_untrack_user_page(task_t *task, uint64_t physical) {
@@ -282,6 +292,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
     uint64_t old_phys;
     uint64_t new_phys;
     uint64_t map_flags;
+    uint64_t irq_flags;
     uint8_t *old_ptr;
     uint8_t *new_ptr;
     int match;
@@ -304,17 +315,26 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
 
     old_phys = vmm_get_phys_in_pml4(task->pml4_phys, page);
     if (!old_phys) return 0;
+    if (vmm_get_flags_in_pml4(task->pml4_phys, page) & VMM_PTE_WRITE)
+        return 1;
 
     new_phys = pfa_alloc();
     if (!new_phys) return 0;
 
-    old_ptr = (uint8_t *)TEMP_SLOT(6);
-    new_ptr = (uint8_t *)TEMP_SLOT(7);
-    temp_map_raw((uint64_t)old_ptr, old_phys);
-    temp_map_raw((uint64_t)new_ptr, new_phys);
-    memcpy(new_ptr, old_ptr, PAGE_SIZE);
-    temp_unmap_raw((uint64_t)old_ptr);
-    temp_unmap_raw((uint64_t)new_ptr);
+    if (old_phys == user_zero_page_phys) {
+        pmm_zero_page_phys(new_phys);
+    } else {
+        __asm__ volatile ("pushfq; popq %0; cli"
+                          : "=r"(irq_flags) :: "memory");
+        old_ptr = (uint8_t *)TEMP_SLOT(6);
+        new_ptr = (uint8_t *)TEMP_SLOT(7);
+        temp_map_raw((uint64_t)old_ptr, old_phys);
+        temp_map_raw((uint64_t)new_ptr, new_phys);
+        memcpy(new_ptr, old_ptr, PAGE_SIZE);
+        temp_unmap_raw((uint64_t)old_ptr);
+        temp_unmap_raw((uint64_t)new_ptr);
+        if (irq_flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
+    }
 
     task->vm->file_maps[match].map_flags &= ~TASK_VMA_CLEAN;
     map_flags = task->vm->file_maps[match].flags | 0x2ULL;
@@ -323,6 +343,7 @@ int task_handle_file_write_fault(task_t *task, uint64_t fault_addr) {
         pfa_free(new_phys);
         return 0;
     }
+    vmm_user_tlb_sync(task->pml4_phys);
 
     if (old_phys != user_zero_page_phys) {
         pfa_cow_release64(old_phys);

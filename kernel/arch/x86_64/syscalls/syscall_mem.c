@@ -79,6 +79,10 @@ static int user_range_free_pages(uint64_t addr, uint64_t size,
             area_end <= allow_end) continue;
         return 0;
     }
+    if (addr < align_up_u64(current_task->vm->user_brk, PAGE_SIZE) &&
+        range_end > current_task->vm->user_brk_start &&
+        !(allow_size != 0 && addr >= allow_base && range_end <= allow_end))
+        return 0;
     page = addr & ~(PAGE_SIZE - 1u);
     last = end & ~(PAGE_SIZE - 1u);
     for (;;) {
@@ -211,8 +215,6 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
     uint64_t newbrk;
     uint64_t old_page_end;
     uint64_t shrink_page_end;
-    uint64_t page_count;
-    uint64_t *new_pages;
 
     (void)unused; (void)unused2;
     
@@ -257,19 +259,6 @@ static int64_t sys_brk(uint64_t addr, const char *unused, int unused2) {
         if (!task_memory_allows(current_task, newbrk - old_page_end)) {
             return (int64_t)current_brk;
         }
-        page_count = 0;
-        new_pages = vmm_map_range_in_pml4_tracked(
-            current_task->pml4_phys, old_page_end, newbrk - old_page_end,
-            0x7 | VMM_PTE_NX, &page_count);
-        
-        if (!new_pages && (newbrk > old_page_end)) {
-            return (int64_t)current_brk;
-        }
-        
-        if (new_pages) {
-            current_task->vm->user_pages_count += page_count;
-            kfree(new_pages);
-        }
     }
     
     current_task->vm->user_brk = requested;
@@ -280,8 +269,6 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
     uint64_t length;
     uint64_t size;
     uint64_t base;
-    uint64_t page_count;
-    uint64_t *new_pages;
     registers_t *r;
 
     (void)a2; (void)a3;
@@ -308,20 +295,6 @@ static int64_t sys_mmap(int a1, const char *a2, int a3) {
     if (base + size < base || base + size >= KERNEL_VMA) return -EINVAL;
     if (!user_range_free_mem(base, size, 0, 0)) return -EINVAL;
     current_task->vm->mmap_next_addr = base;
-
-    page_count = 0;
-    new_pages = vmm_map_range_in_pml4_tracked(current_task->pml4_phys, base,
-                                               size, 0x7 | VMM_PTE_NX,
-                                               &page_count);
-
-    if (!new_pages && size > 0) {
-        return -ENOMEM;
-    }
-
-    if (new_pages) {
-        current_task->vm->user_pages_count += page_count;
-        kfree(new_pages);
-    }
 
     if (task_add_vm_area(current_task, NULL, base, size, 0, 0,
                          0x7 | VMM_PTE_NX,
@@ -357,7 +330,6 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     if ((prot & (PROT_WRITE | PROT_EXEC)) ==
         (PROT_WRITE | PROT_EXEC)) return -EACCES;
     pte_flags = mmap_pte_flags(prot);
-    if (prot == PROT_NONE) current_task->vm->protnone = 1;
     if ((flags & 0x3) != 0x1 && (flags & 0x3) != 0x2) return -EINVAL;
     if (!(flags & 0x20) && fd < 0) return -EBADF;
     if (!(flags & 0x20) && pgoffset < 0) return -EINVAL;
@@ -417,6 +389,8 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
     } else if (!user_range_free_mem(base, size, 0, 0)) {
         return -EINVAL;
     }
+    if (prot == PROT_NONE && ((flags & 0x1) || !(flags & 0x20)))
+        current_task->vm->protnone = 1;
 
     if (fd >= 0) {
         if (tfd && tfd->in_use && tfd->node) {
@@ -463,11 +437,11 @@ static int64_t sys_mmap2(void *addr, size_t length, int prot, int flags, int fd,
 
     page_count = 0;
     new_pages = NULL;
-    if (!vma_node)
+    if (!vma_node && (flags & 0x1))
         new_pages = vmm_map_range_in_pml4_tracked(
             current_task->pml4_phys, base, size, pte_flags, &page_count);
 
-    if (!vma_node && !new_pages && size > 0) {
+    if (!vma_node && (flags & 0x1) && !new_pages) {
         task_memory_pressure_reclaim_now();
         new_pages = vmm_map_range_in_pml4_tracked(
             current_task->pml4_phys, base, size, pte_flags, &page_count);
@@ -575,11 +549,11 @@ static int sys_mprotect(void *addr, size_t length, int prot) {
     }
     if (!user_range_covered_by_vmas(base, size)) return -ENOMEM;
     pte_flags = mmap_pte_flags(prot);
-    if (prot == PROT_NONE) current_task->vm->protnone = 1;
     if (task_protect_vm_areas(current_task, base, size, pte_flags) != 0)
         return -ENOMEM;
     for (page = base; page < end; page += PAGE_SIZE) {
         if (!vmm_get_phys_in_pml4(current_task->pml4_phys, page)) continue;
+        if (prot == PROT_NONE) current_task->vm->protnone = 1;
         current_flags = vmm_get_flags_in_pml4(current_task->pml4_phys,
                                               page);
         page_flags = pte_flags;

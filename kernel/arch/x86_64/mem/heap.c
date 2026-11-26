@@ -767,7 +767,6 @@ void *kmalloc(size_t size) {
 void heap_reclaim_unused(void) {
     demand_decommit_batch_t batch;
     uint64_t eflags;
-    uint64_t region_start;
     uint64_t region_end;
     uint64_t first_page;
     uint64_t last_page;
@@ -791,35 +790,24 @@ void heap_reclaim_unused(void) {
     trim_prev = trim_block ? trim_block->prev : NULL;
     trim_end = kernel_heap.end_addr;
     if (trim_block && trim_remove) heap_free_unlink(trim_block);
-    block = kernel_heap.free_list;
-    while (block) {
-        if (block->is_free) {
-            region_start = (uint64_t)block + sizeof(heap_block_t);
-            region_end = region_start + block->size;
-            first_page = ((uint64_t)block + HEAP_KEEP + PAGE_SIZE - 1) &
-                         ~(PAGE_SIZE - 1);
-            last_page = region_end & ~(PAGE_SIZE - 1);
-            demand_decommit_batch_stage(&batch, first_page, last_page);
-        }
-        block = block->next;
+    for (block = heap_free_head; block; block = HEAP_LINKS(block)->next) {
+        region_end = (uint64_t)block + sizeof(heap_block_t) + block->size;
+        first_page = ((uint64_t)block + HEAP_KEEP + PAGE_SIZE - 1) &
+                     ~(PAGE_SIZE - 1);
+        last_page = region_end & ~(PAGE_SIZE - 1);
+        demand_decommit_batch_stage(&batch, first_page, last_page);
     }
     if (trim_block && trim_remove)
         demand_decommit_batch_stage(&batch, trim_start, trim_end);
     if (!trim_block && batch.reserved_end < kernel_heap.end_addr)
         batch.reserved_end = kernel_heap.end_addr;
     result = demand_decommit_batch_flush(&batch);
-    block = kernel_heap.free_list;
-    while (block) {
-        if (trim_remove && block == trim_block) break;
-        if (block->is_free) {
-            region_start = (uint64_t)block + sizeof(heap_block_t);
-            region_end = region_start + block->size;
-            first_page = ((uint64_t)block + HEAP_KEEP + PAGE_SIZE - 1) &
-                         ~(PAGE_SIZE - 1);
-            last_page = region_end & ~(PAGE_SIZE - 1);
-            demand_decommit_batch_finish(&batch, first_page, last_page);
-        }
-        block = block->next;
+    for (block = heap_free_head; block; block = HEAP_LINKS(block)->next) {
+        region_end = (uint64_t)block + sizeof(heap_block_t) + block->size;
+        first_page = ((uint64_t)block + HEAP_KEEP + PAGE_SIZE - 1) &
+                     ~(PAGE_SIZE - 1);
+        last_page = region_end & ~(PAGE_SIZE - 1);
+        demand_decommit_batch_finish(&batch, first_page, last_page);
     }
     if (trim_block && trim_remove)
         demand_decommit_batch_finish(&batch, trim_start, trim_end);

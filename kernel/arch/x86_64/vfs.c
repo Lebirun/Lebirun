@@ -1523,13 +1523,25 @@ static vfs_node_t *vfs_namei_once_dynamic(const char *in_path,
                        current_task->root ? strlen(current_task->root) : 0;
             while (root_len > 1 && current_task->root[root_len - 1] == '/')
                 root_len--;
-            if (plen <= 1 || (root_len > 1 && plen <= root_len)) continue;
-            last = strrchr(prefix, '/');
-            plen = last && last != prefix ? (size_t)(last - prefix) : 1;
-            newpath = (char *)kmalloc(plen + strlen(remaining) + 1);
+            for (;;) {
+                if (plen > 1 && (root_len <= 1 || plen > root_len)) {
+                    last = strrchr(prefix, '/');
+                    plen = last && last != prefix ?
+                           (size_t)(last - prefix) : 1;
+                    prefix[plen] = '\0';
+                }
+                while (*remaining == '/' || (remaining[0] == '.' &&
+                       (remaining[1] == '/' || remaining[1] == '\0')))
+                    remaining++;
+                if (remaining[0] != '.' || remaining[1] != '.' ||
+                    (remaining[2] != '/' && remaining[2] != '\0')) break;
+                remaining += 2;
+            }
+            newpath = (char *)kmalloc(plen + strlen(remaining) + 2);
             if (newpath) {
                 memcpy(newpath, prefix, plen);
-                strcpy(newpath + plen, remaining);
+                newpath[plen] = '/';
+                strcpy(newpath + plen + 1, remaining);
                 vfs_normalize_path(newpath);
             }
             kfree(component);
