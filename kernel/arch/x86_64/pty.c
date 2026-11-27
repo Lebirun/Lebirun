@@ -9,6 +9,7 @@
 #include <string.h>
 
 #define PTY_INIT_COUNT 1
+#define PTY_KEY(i) (0x5054590000000000ULL | (uint64_t)(i))
 typedef struct {
     int in_use;
     int master_refs;
@@ -563,7 +564,7 @@ ssize_t pty_master_read(int fd, void *buf, size_t count) {
     
     mutex_unlock(&pty_lock);
     kfree(released);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key(PTY_KEY(fd - pty_base_master));
     return to_read;
 }
 
@@ -671,7 +672,7 @@ ssize_t pty_master_write(int fd, const void *buf, size_t count) {
     kfree(released);
     if (signal_number && signal_pgrp > 0)
         deliver_signal_to_pgrp(signal_pgrp, signal_number);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key(PTY_KEY(fd - pty_base_master));
     return to_write;
 }
 
@@ -772,7 +773,7 @@ ssize_t pty_slave_read(int fd, void *buf, size_t count) {
     
     mutex_unlock(&pty_lock);
     kfree(released);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key(PTY_KEY(fd - pty_base_slave));
     return read_count;
 }
 
@@ -818,7 +819,7 @@ ssize_t pty_slave_write(int fd, const void *buf, size_t count) {
     }
 
     mutex_unlock(&pty_lock);
-    descriptor_ready_notify();
+    descriptor_ready_notify_key(PTY_KEY(fd - pty_base_slave));
     return consumed;
 }
 
@@ -1141,6 +1142,16 @@ int pty_can_write(int fd) {
     }
     mutex_unlock(&pty_lock);
     return 0;
+}
+
+uint64_t pty_poll_key(int fd) {
+    uint64_t key;
+
+    mutex_lock(&pty_lock);
+    key = get_pty_by_master(fd) ? PTY_KEY(fd - pty_base_master) :
+          get_pty_by_slave(fd) ? PTY_KEY(fd - pty_base_slave) : 0;
+    mutex_unlock(&pty_lock);
+    return key;
 }
 
 uint64_t pty_poll_sequence(int fd) {

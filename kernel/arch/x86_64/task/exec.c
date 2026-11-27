@@ -123,24 +123,28 @@ int task_pml4_is_current_on_any_cpu(uint64_t pml4_phys) {
     return 0;
 }
 
-int task_pml4_live_elsewhere(uint64_t pml4_phys) {
+int task_pml4_live_on(int cpu, uint64_t pml4_phys) {
     task_t *running;
+
+    pml4_phys &= ~0xFFFULL;
+    running = cpus[cpu].running_task;
+    if (running && ((running->pml4_phys & ~0xFFFULL) == pml4_phys ||
+                    (running->cr3 & ~0xFFFULL) == pml4_phys))
+        return 1;
+    running = __atomic_load_n(&cpus[cpu].switching_task, __ATOMIC_ACQUIRE);
+    return running && ((running->pml4_phys & ~0xFFFULL) == pml4_phys ||
+                       (running->cr3 & ~0xFFFULL) == pml4_phys);
+}
+
+int task_pml4_live_elsewhere(uint64_t pml4_phys) {
     int self;
     int i;
 
     if (!pml4_phys) return 0;
-    pml4_phys &= ~0xFFFULL;
     self = smp_processor_id();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     for (i = 0; i < cpu_count; i++) {
-        if (i == self || !cpus[i].active) continue;
-        running = cpus[i].running_task;
-        if (running && ((running->pml4_phys & ~0xFFFULL) == pml4_phys ||
-                        (running->cr3 & ~0xFFFULL) == pml4_phys))
-            return 1;
-        running = __atomic_load_n(&cpus[i].switching_task, __ATOMIC_ACQUIRE);
-        if (running && ((running->pml4_phys & ~0xFFFULL) == pml4_phys ||
-                        (running->cr3 & ~0xFFFULL) == pml4_phys))
+        if (i != self && cpus[i].active && task_pml4_live_on(i, pml4_phys))
             return 1;
     }
     return 0;

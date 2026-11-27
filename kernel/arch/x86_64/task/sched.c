@@ -360,12 +360,17 @@ void task_mark_ready_locked(task_t *task) {
                               -(owner + 2) : task_pick_cpu(task));
     if (!smp_scheduling_enabled() || !smp_percpu_irq_ready) return;
     if (owner == -1) task_kick_stopped_cpu_locked(task);
-    if (owner >= -1) return;
-    target = -(owner + 2);
+    if (owner >= 0) return;
+    target = owner == -1 ? task->preferred_cpu : -(owner + 2);
     if (target >= cpu_count || !cpus[target].active ||
         &cpus[target] == smp_this_cpu()) return;
     running = cpus[target].running_task;
-    if (running && (running->id != 0 || running->is_user)) return;
+    if (running && (running->id != 0 || running->is_user)) {
+        if (!running->is_user || running->sched_policy != TASK_SCHED_OTHER ||
+            task->sched_policy != TASK_SCHED_OTHER ||
+            task->vruntime + 1000 >= running->vruntime) return;
+        cpus[target].schedule_force = 1;
+    }
     __atomic_store_n(&cpus[target].wake_pending, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&idle_wake_pending, 1, __ATOMIC_RELEASE);
 }
@@ -482,16 +487,18 @@ static void task_rq_rebalance_locked(task_t *task) {
 }
 
 static void task_charge_vruntime(task_t *task) {
-    uint64_t weight;
+    static const uint32_t weights[40] = {
+        88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
+        9548, 7620, 6100, 4904, 3906, 3121, 2501, 1991, 1586, 1277,
+        1024, 820, 655, 526, 423, 335, 272, 215, 172, 137,
+        110, 87, 70, 56, 45, 36, 29, 23, 18, 15
+    };
     int nice;
 
     nice = task->nice_value;
     if (nice < -20) nice = -20;
     if (nice > 19) nice = 19;
-    weight = 1024;
-    if (nice > 0) weight = 1024 / (1 + (uint64_t)nice);
-    else if (nice < 0) weight = 1024 + (uint64_t)(-nice) * 64;
-    task->vruntime += 1024 * 1000 / weight;
+    task->vruntime += 1024 * 1000 / weights[nice + 20];
 }
 
 static task_t *task_find_idle_locked(void) {

@@ -16,6 +16,7 @@ extern int is_socket_fd(int fd);
 extern int socket_poll_events(int fd);
 extern int task_has_pending_signals(void);
 extern int event_descriptor_poll(int fd);
+extern uint64_t epoll_target_key(int fd);
 
 static int select_interrupted(void) {
     return task_has_pending_signals();
@@ -129,6 +130,70 @@ static uint64_t select_timeout_ticks(uint64_t seconds, uint64_t nanoseconds) {
     return seconds * frequency + fraction;
 }
 
+struct pollfd_k {
+    int fd;
+    short events;
+    short revents;
+};
+
+static uint64_t *select_keys(fd_mask *sets, uint64_t words, int nfds,
+                             int *count) {
+    uint64_t *keys;
+    uint64_t word_index;
+    fd_mask mask;
+    int fd;
+    int n;
+
+    n = 0;
+    for (word_index = 0; word_index < words; word_index++)
+        n += __builtin_popcountl(sets[word_index] | sets[words + word_index]);
+    *count = 0;
+    keys = n ? (uint64_t *)kmalloc((size_t)n * sizeof(*keys)) : NULL;
+    for (word_index = 0; keys && word_index < words; word_index++) {
+        mask = sets[word_index] | sets[words + word_index];
+        for (; mask; mask &= mask - 1) {
+            fd = (int)(word_index * NFDBITS) + __builtin_ctzl(mask);
+            if (fd >= nfds) break;
+            if (!(keys[*count] = epoll_target_key(fd))) {
+                kfree(keys);
+                keys = NULL;
+                break;
+            }
+            (*count)++;
+        }
+    }
+    if (!keys || !*count) {
+        kfree(keys);
+        *count = 0;
+        return NULL;
+    }
+    return keys;
+}
+
+static uint64_t *poll_keys(const struct pollfd_k *fds, int nfds, int *count) {
+    struct pollfd_k value;
+    uint64_t *keys;
+    int i;
+
+    *count = 0;
+    keys = nfds ? (uint64_t *)kmalloc((size_t)nfds * sizeof(*keys)) : NULL;
+    for (i = 0; keys && i < nfds; i++) {
+        if (copy_from_user(&value, &fds[i], sizeof(value)) < 0 ||
+            (value.fd >= 0 && !(keys[*count] = epoll_target_key(value.fd)))) {
+            kfree(keys);
+            keys = NULL;
+            break;
+        }
+        if (value.fd >= 0) (*count)++;
+    }
+    if (!keys || !*count) {
+        kfree(keys);
+        *count = 0;
+        return NULL;
+    }
+    return keys;
+}
+
 static int select_common(int nfds, uint64_t readfds_ptr,
                          uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                          uint64_t timeout_ticks) {
@@ -153,6 +218,8 @@ static int select_common(int nfds, uint64_t readfds_ptr,
     uint64_t ready_generation;
     uint64_t elapsed_ticks;
     uint64_t wait_ticks;
+    uint64_t *keys;
+    int key_count;
 
     readfds = (fd_mask *)readfds_ptr;
     writefds = (fd_mask *)writefds_ptr;
@@ -235,7 +302,9 @@ static int select_common(int nfds, uint64_t readfds_ptr,
             wait_ticks = timeout_ticks - elapsed_ticks;
         }
         wait_ticks = event_descriptor_wait_timeout(wait_ticks);
-        descriptor_ready_wait(ready_generation, wait_ticks);
+        keys = select_keys(sets, words, nfds, &key_count);
+        descriptor_ready_wait_owned_keys(ready_generation, wait_ticks, keys,
+                                         key_count);
         if (select_interrupted()) {
             count = -EINTR;
             goto out;
@@ -339,11 +408,6 @@ static int sys_pselect6(int nfds, uint64_t readfds_ptr,
     return result;
 }
 
-struct pollfd_k {
-    int fd;
-    short events;
-    short revents;
-};
 
 #define POLLIN     0x0001
 #define POLLPRI    0x0002
@@ -374,6 +438,8 @@ static int poll_common(uint64_t fds_ptr, const char *nfds_ptr,
     uint64_t ready_generation;
     uint64_t elapsed_ticks;
     uint64_t wait_ticks;
+    uint64_t *keys;
+    int key_count;
 
     addr = (uint64_t)fds_ptr;
     nfds = (int)(uintptr_t)nfds_ptr;
@@ -481,7 +547,9 @@ static int poll_common(uint64_t fds_ptr, const char *nfds_ptr,
             wait_ticks = timeout_ticks - elapsed_ticks;
         }
         wait_ticks = event_descriptor_wait_timeout(wait_ticks);
-        descriptor_ready_wait(ready_generation, wait_ticks);
+        keys = poll_keys(fds, nfds, &key_count);
+        descriptor_ready_wait_owned_keys(ready_generation, wait_ticks, keys,
+                                         key_count);
         if (select_interrupted()) {
             return -EINTR;
         }

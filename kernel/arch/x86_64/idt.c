@@ -566,7 +566,8 @@ registers_t* interrupt_handler(registers_t* regs, uint64_t fault_addr)
             lapic_eoi();
             if (!current_task ||
                 (current_task->id == 0 && !current_task->is_user) ||
-                task_state_requires_schedule(current_task))
+                task_state_requires_schedule(current_task) ||
+                smp_this_cpu()->schedule_force)
                 return schedule_from_irq(regs);
             return regs;
         }

@@ -93,6 +93,7 @@ cpu_info_t *smp_this_cpu(void);
 int smp_is_bsp(void);
 void smp_tlb_flush_all(void);
 int smp_tlb_flush_all_sync(void);
+int smp_tlb_flush_sync(uint64_t pml4);
 void smp_tlb_flush_ack(void);
 void smp_tlb_flush_poll(void);
 void smp_enable_scheduling(void);

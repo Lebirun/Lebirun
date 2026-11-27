@@ -432,7 +432,7 @@ static int sys_vfs_open(uint64_t path_ptr, uint64_t flags_arg,
     return syscall_vfs_open_resolved(path, (int)flags_arg, (int)mode_arg);
 }
 
-static int sys_vfs_close(int fd, const char *unused1, int unused2) {
+static int vfs_close_fd(int fd) {
     task_fd_t *tfd;
     pipe_t *p;
     vfs_node_t *node;
@@ -442,7 +442,6 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     int endpoint;
     int pty_type;
 
-    (void)unused1; (void)unused2;
     if (is_socket_fd(fd)) return socket_close_fd(fd);
     if (is_epoll_special_fd(fd)) return epoll_close_fd(fd);
     if (pidfd_is_fd(fd)) return pidfd_close_fd(fd);
@@ -505,16 +504,30 @@ static int sys_vfs_close(int fd, const char *unused1, int unused2) {
     return 0;
 }
 
+static int sys_vfs_close(int fd, const char *unused1, int unused2) {
+    int locked;
+    int ret;
+
+    (void)unused1; (void)unused2;
+    locked = task_fd_lock(current_task);
+    ret = vfs_close_fd(fd);
+    task_fd_unlock(locked);
+    return ret;
+}
+
 static int sys_close_range(unsigned int first, const char *last_ptr,
                            unsigned int flags) {
     unsigned int last;
     int fd;
+    int locked;
 
     if (!current_task) return -ESRCH;
     if (flags & ~4u) return -EINVAL;
     last = (unsigned int)(uintptr_t)last_ptr;
     if (first > last) return -EINVAL;
+    locked = task_fd_lock(current_task);
     socket_close_range(first, last, (flags & 4u) != 0);
+    task_fd_unlock(locked);
     event_descriptors_close_range(first, last, (flags & 4u) != 0);
     if (first >= (unsigned int)current_task->fds_capacity) return 0;
     if (last >= (unsigned int)current_task->fds_capacity)

@@ -12,13 +12,6 @@ void sleepq_remove(task_t* t) {
     ptr = &sleep_queue_head;
     while (*ptr) {
         cur = *ptr;
-        if (!task_ptr_valid(cur)) {
-            *ptr = NULL;
-            __atomic_store_n(&sleep_queue_deadline_ns,
-                sleep_queue_head ? sleep_queue_head->wake_deadline_ns : UINT64_MAX,
-                __ATOMIC_RELEASE);
-            return;
-        }
         if (cur == t) {
             *ptr = t->sleep_next;
             t->sleep_next = NULL;
@@ -57,10 +50,6 @@ void sleepq_insert(task_t *task) {
     link = &sleep_queue_head;
     while (*link) {
         current = *link;
-        if (!task_ptr_valid(current)) {
-            *link = NULL;
-            break;
-        }
         if (current->wake_deadline_ns > task->wake_deadline_ns) break;
         link = &current->sleep_next;
     }
@@ -119,7 +108,7 @@ static void waitq_append_locked(wait_queue_t *q, task_t *t) {
     task_t **link;
 
     link = &q->head;
-    while (*link && task_ptr_valid(*link)) link = &(*link)->wait_next;
+    while (*link) link = &(*link)->wait_next;
     t->wait_next = NULL;
     *link = t;
 }
@@ -142,10 +131,6 @@ static task_t* waitq_pop_locked(wait_queue_t* q) {
     if (!q || !q->head) return NULL;
     t = q->head;
     while (t) {
-        if (!task_ptr_valid(t)) {
-            q->head = NULL;
-            return NULL;
-        }
         if (t->state != TASK_DEAD) break;
         q->head = t->wait_next;
         t->wait_next = NULL;
@@ -153,7 +138,7 @@ static task_t* waitq_pop_locked(wait_queue_t* q) {
         t->waiting_queue = NULL;
         t = q->head;
     }
-    if (!t || !task_ptr_valid(t)) return NULL;
+    if (!t) return NULL;
     q->head = t->wait_next;
     t->wait_next = NULL;
     t->in_wait_queue = 0;
@@ -190,7 +175,8 @@ void waitq_wake_one(wait_queue_t *q) {
 
     if (!q) return;
     lock_scheduler();
-    t = waitq_pop_locked(q);
+    do t = waitq_pop_locked(q);
+    while (t && t->state != TASK_BLOCKED);
     task_mark_ready_locked(t);
     unlock_scheduler();
 }
@@ -206,10 +192,6 @@ static void waitq_remove_locked(wait_queue_t* q, task_t* t) {
     task_t *cur;
 
     if (!q || !t || !q->head) return;
-    if (!task_ptr_valid(q->head)) {
-        q->head = NULL;
-        return;
-    }
     if (q->head == t) {
         q->head = t->wait_next;
         t->wait_next = NULL;
@@ -220,10 +202,6 @@ static void waitq_remove_locked(wait_queue_t* q, task_t* t) {
     prev = q->head;
     cur = prev->wait_next;
     while (cur) {
-        if (!task_ptr_valid(cur)) {
-            prev->wait_next = NULL;
-            return;
-        }
         if (cur == t) {
             prev->wait_next = cur->wait_next;
             cur->wait_next = NULL;
@@ -455,10 +433,6 @@ static void wake_sleeping_tasks_locked(void) {
     now = timekeeping_monotonic_ns();
     while (sleep_queue_head) {
         t = sleep_queue_head;
-        if (!task_ptr_valid(t)) {
-            sleep_queue_head = NULL;
-            break;
-        }
         if (t->wake_deadline_ns > now) break;
         sleep_queue_head = t->sleep_next;
         t->sleep_next = NULL;

@@ -14,6 +14,7 @@ typedef struct {
 
 spinlock_t task_fd_array_lock = {0};
 static spinlock_t fd_pos_lock = {0};
+static mutex_t fd_shared_lock;
 static fd_pos_t *fd_pos;
 static int fd_pos_count;
 static int fd_pos_capacity;
@@ -83,17 +84,32 @@ void task_init_fds(task_t *task) {
     task->fds[2].ref_count = 1;
 }
 
+int task_fd_lock(task_t *task) {
+    if (!task || !task->fds || fd_head(task->fds)->refs <= 1) return 0;
+    mutex_lock(&fd_shared_lock);
+    return 1;
+}
+
+void task_fd_unlock(int locked) {
+    if (locked) mutex_unlock(&fd_shared_lock);
+}
+
 static task_fd_t *fd_table_dup(task_t *parent, int *cap_out) {
     task_fd_t *fds;
     task_fd_t *src;
+    int locked;
     int cap;
     int count;
     int i;
 
+    locked = task_fd_lock(parent);
     cap = parent->fds_capacity;
     if (cap < TASK_INIT_FDS) cap = TASK_INIT_FDS;
     fds = fd_table_alloc(cap);
-    if (!fds) return NULL;
+    if (!fds) {
+        task_fd_unlock(locked);
+        return NULL;
+    }
     spin_lock(&task_fd_array_lock);
     src = parent->fds;
     count = src ? parent->fds_capacity : 0;
@@ -112,6 +128,7 @@ static task_fd_t *fd_table_dup(task_t *parent, int *cap_out) {
             pipe_retain_reference((pipe_t *)fds[i].private_data, fds[i].type);
         if (fds[i].type == FD_TYPE_SOCKET) socket_retain_task_fd(&fds[i]);
     }
+    task_fd_unlock(locked);
     *cap_out = cap;
     return fds;
 }

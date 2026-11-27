@@ -1388,7 +1388,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
         sock->peer_pid = listener_pid;
         sock->state = SOCKSTATE_CONNECTED;
         spin_unlock(&socket_table_lock);
-        listener_task = task_find(listener_pid);
+        listener_task = task_find_retain(listener_pid);
         spin_lock(&socket_table_lock);
         sock = get_socket(sockfd);
         if (sock && sock->peer_socket == peer_idx) {
@@ -1396,6 +1396,7 @@ static int sys_connect(int sockfd, const char *addr_ptr, int addrlen) {
             sock->peer_gid = listener_task ? listener_task->egid : 0;
         }
         spin_unlock(&socket_table_lock);
+        task_release_ref(listener_task);
         descriptor_ready_notify();
         return 0;
     }
@@ -2392,6 +2393,8 @@ static int sys_sendto(int sockfd, const char *buffer, int length,
     ret = socket_send_buffer(sockfd, buffer, length, flags, address,
                              address_length, 0);
     user_access_end();
+    if (ret == -EPIPE && !(flags & MSG_NOSIGNAL))
+        deliver_signal_to_task(current_task, 13);
     return ret;
 }
 
@@ -2406,6 +2409,7 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
     socket_t *sock;
     int iov_index;
     int rights_result;
+    int locked;
 
     if (!is_socket_fd(sockfd)) return -EBADF;
     if (!msg_ptr || copy_from_user(&msg, msg_ptr, sizeof(msg)) < 0)
@@ -2426,14 +2430,13 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
         if (copy_from_user(&cmsg, msg.msg_control, sizeof(cmsg)) < 0)
             return -EFAULT;
         if (cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS) {
+            locked = task_fd_lock(current_task);
             spin_lock(&socket_table_lock);
             sock = get_socket(sockfd);
-            if (!sock) {
-                spin_unlock(&socket_table_lock);
-                return -EBADF;
-            }
-            rights_result = socket_send_rights(sock, &msg, &cmsg);
+            rights_result = sock ? socket_send_rights(sock, &msg, &cmsg) :
+                            -EBADF;
             spin_unlock(&socket_table_lock);
+            task_fd_unlock(locked);
             if (rights_result < 0) return rights_result;
         }
     }
@@ -2468,6 +2471,8 @@ static int sys_sendmsg(int sockfd, const char *msg_ptr, int flags) {
                                  flags, (uint64_t)(uintptr_t)msg.msg_name,
                                  (int)msg.msg_namelen, 1);
     kfree(buffer);
+    if (result == -EPIPE && !(flags & MSG_NOSIGNAL))
+        deliver_signal_to_task(current_task, 13);
     return result;
 }
 

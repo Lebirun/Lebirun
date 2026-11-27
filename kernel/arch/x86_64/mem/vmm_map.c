@@ -21,7 +21,7 @@ extern int pt_kernel_walk_leaf(uint64_t pml4_phys, uint64_t virt_addr,
 extern void *pt_direct_ptr(uint64_t phys_addr);
 
 void vmm_user_tlb_sync(uint64_t pml4_phys) {
-    if (task_pml4_live_elsewhere(pml4_phys)) smp_tlb_flush_all_sync();
+    if (task_pml4_live_elsewhere(pml4_phys)) smp_tlb_flush_sync(pml4_phys);
 }
 
 static void vmm_defer_table_free(uint64_t *head, uint64_t table_phys) {

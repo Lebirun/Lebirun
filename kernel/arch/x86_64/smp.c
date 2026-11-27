@@ -24,7 +24,6 @@
 
 #define RSDP_SIG "RSD PTR "
 #define SMP_IPI_WAIT_SPINS 262144ULL
-#define SMP_TLB_FLUSH_ROUNDS 4
 
 volatile uint32_t *lapic_base = NULL;
 volatile uint32_t *ioapic_base = NULL;
@@ -856,22 +855,31 @@ void smp_tlb_flush_poll(void) {
     if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
 }
 
-static int smp_tlb_flush_complete(int initiator, uint64_t generation) {
+extern int task_pml4_live_on(int cpu, uint64_t pml4_phys);
+
+static int smp_tlb_target(int i, int initiator, uint64_t pml4) {
+    return i != initiator && cpus[i].active &&
+           (!pml4 || task_pml4_live_on(i, pml4));
+}
+
+static int smp_tlb_flush_complete(int initiator, uint64_t generation,
+                                  uint64_t pml4) {
     int i;
 
     for (i = 0; i < cpu_count; i++) {
-        if (i == initiator || !cpus[i].active) continue;
+        if (!smp_tlb_target(i, initiator, pml4)) continue;
         if (__atomic_load_n(&cpus[i].tlb_ack, __ATOMIC_ACQUIRE) < generation)
             return 0;
     }
     return 1;
 }
 
-static void smp_tlb_flush_send_missing(int initiator, uint64_t generation) {
+static void smp_tlb_flush_send_missing(int initiator, uint64_t generation,
+                                       uint64_t pml4) {
     int i;
 
     for (i = 0; i < cpu_count; i++) {
-        if (i == initiator || !cpus[i].active) continue;
+        if (!smp_tlb_target(i, initiator, pml4)) continue;
         if (__atomic_load_n(&cpus[i].tlb_ack, __ATOMIC_ACQUIRE) >= generation)
             continue;
         lapic_send_ipi(cpus[i].lapic_id, IPI_TLB_FLUSH_VECTOR);
@@ -879,14 +887,16 @@ static void smp_tlb_flush_send_missing(int initiator, uint64_t generation) {
 }
 
 int smp_tlb_flush_all_sync(void) {
+    return smp_tlb_flush_sync(0);
+}
+
+int smp_tlb_flush_sync(uint64_t pml4) {
     uint64_t wait;
     uint64_t flags;
     uint64_t generation;
     uint64_t requested;
     int initiator;
     int i;
-    int round;
-    int result;
 
     if (!lapic_base || cpu_count <= 1) return 0;
     __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
@@ -894,7 +904,7 @@ int smp_tlb_flush_all_sync(void) {
     generation = __atomic_add_fetch(&smp_tlb_flush_generation, 1,
                                      __ATOMIC_SEQ_CST);
     for (i = 0; i < cpu_count; i++) {
-        if (!cpus[i].active) continue;
+        if (i != initiator && !smp_tlb_target(i, initiator, pml4)) continue;
         requested = __atomic_load_n(&cpus[i].tlb_request, __ATOMIC_ACQUIRE);
         while (requested < generation &&
                !__atomic_compare_exchange_n(&cpus[i].tlb_request,
@@ -903,25 +913,19 @@ int smp_tlb_flush_all_sync(void) {
             smp_tlb_flush_poll();
     }
     smp_tlb_flush_poll();
-    smp_tlb_flush_send_missing(initiator, generation);
-    result = -1;
-    for (round = 0; round < SMP_TLB_FLUSH_ROUNDS; round++) {
-        wait = SMP_IPI_WAIT_SPINS;
-        while (wait > 0) {
+    smp_tlb_flush_send_missing(initiator, generation, pml4);
+    for (;;) {
+        for (wait = SMP_IPI_WAIT_SPINS; wait > 0; wait--) {
             smp_tlb_flush_poll();
-            if (smp_tlb_flush_complete(initiator, generation)) {
-                result = 0;
-                break;
-            }
+            if (smp_tlb_flush_complete(initiator, generation, pml4)) break;
             __asm__ volatile ("pause" ::: "memory");
-            wait--;
         }
-        if (result == 0) break;
-        smp_tlb_flush_send_missing(initiator, generation);
+        if (wait) break;
+        smp_tlb_flush_send_missing(initiator, generation, pml4);
     }
     smp_tlb_flush_poll();
     if (flags & (1ULL << 9)) __asm__ volatile ("sti" ::: "memory");
-    return result;
+    return 0;
 }
 
 void smp_stop_other_cpus(void) {

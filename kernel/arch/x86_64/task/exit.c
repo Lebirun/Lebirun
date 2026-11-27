@@ -266,8 +266,11 @@ void task_exit_deferred(uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
-    parent = task->thread ? NULL : task_find(task->ppid);
-    if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
+    parent = task->thread ? NULL : task_find_retain(task->ppid);
+    if (parent) {
+        deliver_signal_to_task(parent, TASK_SIGCHLD);
+        task_release_ref(parent);
+    }
     reap_request();
 }
 
@@ -575,8 +578,11 @@ void task_kill(task_t* task, uint64_t exit_code) {
     dead_queue_head = task;
     task_finish_death_locked(task);
     unlock_scheduler();
-    parent = task->thread ? NULL : task_find(task->ppid);
-    if (parent) deliver_signal_to_task(parent, TASK_SIGCHLD);
+    parent = task->thread ? NULL : task_find_retain(task->ppid);
+    if (parent) {
+        deliver_signal_to_task(parent, TASK_SIGCHLD);
+        task_release_ref(parent);
+    }
     reap_request();
 }
 

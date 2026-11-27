@@ -504,9 +504,9 @@ static int fd_alloc(void) {
     return fd_alloc_from(0);
 }
 
-static int sys_dup(int oldfd, const char *unused1, int unused2) {
+static int fd_dup(int oldfd) {
     int newfd;
-    (void)unused1; (void)unused2;
+
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     newfd = fd_alloc();
@@ -519,12 +519,9 @@ static int sys_dup(int oldfd, const char *unused1, int unused2) {
     return newfd;
 }
 
-static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
-    int newfd;
+static int fd_dup2(int oldfd, int newfd) {
     int ret;
 
-    (void)unused;
-    newfd = (int)(uintptr_t)newfd_ptr;
     if (!current_task) return -ESRCH;
     if (oldfd < 0 || oldfd >= current_task->fds_capacity || !fd_table[oldfd].in_use) return -EBADF;
     if (newfd < 0) return -EBADF;
@@ -542,6 +539,28 @@ static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
     fd_retain_entry(&fd_table[newfd]);
     task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
+}
+
+static int sys_dup(int oldfd, const char *unused1, int unused2) {
+    int locked;
+    int ret;
+
+    (void)unused1; (void)unused2;
+    locked = task_fd_lock(current_task);
+    ret = fd_dup(oldfd);
+    task_fd_unlock(locked);
+    return ret;
+}
+
+static int sys_dup2(int oldfd, const char *newfd_ptr, int unused) {
+    int locked;
+    int ret;
+
+    (void)unused;
+    locked = task_fd_lock(current_task);
+    ret = fd_dup2(oldfd, (int)(uintptr_t)newfd_ptr);
+    task_fd_unlock(locked);
+    return ret;
 }
 
 static int sys_pipe2(int *pipefd, int flags);
@@ -1567,6 +1586,7 @@ static int sys_fcntl(int fd, const char *cmd_ptr, uint64_t arg_value) {
     file_lock_record_t *conflict;
     vfs_node_t *node;
     int result;
+    int locked;
 
     arg = (int)arg_value;
     cmd = (int)(uintptr_t)cmd_ptr;
@@ -1578,16 +1598,20 @@ static int sys_fcntl(int fd, const char *cmd_ptr, uint64_t arg_value) {
         case F_DUPFD_CLOEXEC:
             minfd = arg;
             if (minfd < 0) return -EINVAL;
-            newfd = fd_alloc_from(minfd);
-            if (newfd < 0) return -EMFILE;
-            memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
-            fd_table[newfd].ref_count = 1;
-            if (cmd == F_DUPFD_CLOEXEC)
-                fd_table[newfd].flags |= VFS_O_CLOEXEC;
-            else
-                fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
-            fd_retain_entry(&fd_table[newfd]);
-            task_fd_position_share(&fd_table[fd], &fd_table[newfd]);
+            locked = task_fd_lock(current_task);
+            if (!fd_table[fd].in_use) newfd = -EBADF;
+            else if ((newfd = fd_alloc_from(minfd)) < 0) newfd = -EMFILE;
+            if (newfd >= 0) {
+                memcpy(&fd_table[newfd], &fd_table[fd], sizeof(task_fd_t));
+                fd_table[newfd].ref_count = 1;
+                if (cmd == F_DUPFD_CLOEXEC)
+                    fd_table[newfd].flags |= VFS_O_CLOEXEC;
+                else
+                    fd_table[newfd].flags &= ~(uint64_t)VFS_O_CLOEXEC;
+                fd_retain_entry(&fd_table[newfd]);
+                task_fd_position_share(&fd_table[fd], &fd_table[newfd]);
+            }
+            task_fd_unlock(locked);
             return newfd;
         case F_GETFD:
             return (fd_table[fd].flags & VFS_O_CLOEXEC) ? 1 : 0;
@@ -1917,7 +1941,7 @@ static int sys_readlink(uint64_t path_ptr, const char *buf_ptr,
         (const char *)(uintptr_t)path_ptr,
         (uint64_t)(uintptr_t)buf_ptr, (uint64_t)bufsiz);
 }
-static int sys_dup3(int oldfd, int newfd, int flags) {
+static int fd_dup3(int oldfd, int newfd, int flags) {
     int ret;
 
     if (!current_task) return -ESRCH;
@@ -1941,6 +1965,16 @@ static int sys_dup3(int oldfd, int newfd, int flags) {
     fd_retain_entry(&fd_table[newfd]);
     task_fd_position_share(&fd_table[oldfd], &fd_table[newfd]);
     return newfd;
+}
+
+static int sys_dup3(int oldfd, int newfd, int flags) {
+    int locked;
+    int ret;
+
+    locked = task_fd_lock(current_task);
+    ret = fd_dup3(oldfd, newfd, flags);
+    task_fd_unlock(locked);
+    return ret;
 }
 
 static int sys_pipe2(int *pipefd, int flags) {

@@ -36,8 +36,8 @@ int vfs_check_perm(vfs_node_t *node, int want);
 int vfs_dir_write_check(vfs_node_t *dir, const char *name);
 int syscall_vfs_open_resolved(char *path, int flags, int mode);
 int ramfs_err_to_errno(int r);
-int syscall_fd_read(int fd, char *buf, int len);
-int syscall_fd_write(int fd, const char *buf, int len);
+int syscall_fd_read(int fd, char *buf, uint64_t len);
+int syscall_fd_write(int fd, const char *buf, uint64_t len);
 int syscall_renameat(int olddirfd, const char *oldpath, int newdirfd,
                      const char *newpath);
 int syscall_linkat(int olddirfd, const char *oldpath, int newdirfd,

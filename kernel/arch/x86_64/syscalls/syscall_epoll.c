@@ -504,12 +504,14 @@ static int sys_epoll_ctl(int epfd, const char *op_ptr, int fd) {
     return 0;
 }
 
-static uint64_t epoll_target_key(int fd) {
+uint64_t epoll_target_key(int fd) {
     task_fd_t *descriptor;
 
     descriptor = task_fd_get(current_task, fd);
     if (descriptor && FD_TYPE_IS_PIPE(descriptor->type))
         return (uint64_t)(uintptr_t)descriptor->private_data;
+    if (descriptor && FD_TYPE_IS_PTY(descriptor->type))
+        return pty_poll_key((int)(uintptr_t)descriptor->private_data);
     if (fd >= EVENTFD_BASE_FD && fd < SIGNALFD_BASE_FD)
         return (uint64_t)fd;
     return 0;
@@ -955,18 +957,17 @@ static int sys_get_robust_list(int pid, void **head_ptr, size_t *length_ptr) {
     task_t *task;
     void *head;
     size_t length;
+    int denied;
 
     if (!head_ptr || !length_ptr) return -EFAULT;
-    if (pid == 0) {
-        task = current_task;
-    } else {
-        task = task_find((pid_t)pid);
-    }
+    task = pid ? task_find_retain((pid_t)pid) : current_task;
     if (!task) return -ESRCH;
-    if (task != current_task && current_task && current_task->euid != 0 &&
-        current_task->euid != task->euid) return -EPERM;
     head = task->robust_list;
     length = task->robust_list_len;
+    denied = task != current_task && current_task && current_task->euid != 0 &&
+             current_task->euid != task->euid;
+    if (pid) task_release_ref(task);
+    if (denied) return -EPERM;
     if (copy_to_user(head_ptr, &head, sizeof(head)) < 0) return -EFAULT;
     if (copy_to_user(length_ptr, &length, sizeof(length)) < 0) return -EFAULT;
     return 0;

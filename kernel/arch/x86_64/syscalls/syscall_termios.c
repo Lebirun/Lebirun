@@ -303,13 +303,18 @@ void tty_vt_release_owner(pid_t pid) {
 static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
     pipe_t *p;
     int newfd;
+    int locked;
 
     if (!current_task) return -ESRCH;
-    if (oldfd < 0 || oldfd >= current_task->fds_capacity || !current_task->fds[oldfd].in_use) return -EBADF;
     if (minfd < 0) minfd = 0;
-
-    newfd = task_fd_alloc(current_task, minfd);
-    if (newfd < 0) return -EMFILE;
+    locked = task_fd_lock(current_task);
+    if (oldfd < 0 || oldfd >= current_task->fds_capacity ||
+        !current_task->fds[oldfd].in_use) newfd = -EBADF;
+    else if ((newfd = task_fd_alloc(current_task, minfd)) < 0) newfd = -EMFILE;
+    if (newfd < 0) {
+        task_fd_unlock(locked);
+        return newfd;
+    }
 
     memcpy(&current_task->fds[newfd], &current_task->fds[oldfd], sizeof(task_fd_t));
     current_task->fds[newfd].ref_count = 1;
@@ -327,6 +332,7 @@ static int ioctl_fcntl_dupfd_compat(int oldfd, int cmd, int minfd) {
         p = (pipe_t *)current_task->fds[oldfd].private_data;
         pipe_retain_reference(p, current_task->fds[oldfd].type);
     }
+    task_fd_unlock(locked);
 
     (void)cmd;
     return newfd;

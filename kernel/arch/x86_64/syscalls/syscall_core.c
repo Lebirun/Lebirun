@@ -680,6 +680,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                 if (heap_buf) sys_rw_free(kbuf, work_size);
                 if (total > 0) return (int)total;
                 if (result == 0) return -EIO;
+                if (result == -EPIPE) deliver_signal_to_task(current_task, 13);
                 return result;
             }
             total += (uint64_t)result;
@@ -712,6 +713,7 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
                         pipe_unlock_irqrestore(p, pipe_flags);
                         if (heap_buf) sys_rw_free(kbuf, work_size);
                         if (total > 0 || done > 0) return (int)(total + done);
+                        deliver_signal_to_task(current_task, 13);
                         return -EPIPE;
                     }
                     bytes = chunk - done;
@@ -820,11 +822,11 @@ static int __attribute__((optimize("Oz"))) sys_write_impl(
     return -EBADF;
 }
 
-int syscall_fd_write(int fd, const char *buf, int len) {
+int syscall_fd_write(int fd, const char *buf, uint64_t len) {
     task_fd_t *descriptor;
     int result;
 
-    result = sys_write_impl(fd, buf, len);
+    result = sys_write_impl(fd, buf, len > 0x7FFFF000 ? 0x7FFFF000 : (int)len);
     if (!current_task) return result;
     current_task->write_calls++;
     if (result <= 0) return result;
@@ -1421,11 +1423,11 @@ canonical_ready:
     return initrd_read(fd, (void *)buf_addr, (uint64_t)len);
 }
 
-int syscall_fd_read(int fd, char *buf, int len) {
+int syscall_fd_read(int fd, char *buf, uint64_t len) {
     task_fd_t *descriptor;
     int result;
 
-    result = sys_read_impl(fd, buf, len);
+    result = sys_read_impl(fd, buf, len > 0x7FFFF000 ? 0x7FFFF000 : (int)len);
     if (!current_task) return result;
     current_task->read_calls++;
     if (result <= 0) return result;
